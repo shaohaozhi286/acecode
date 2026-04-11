@@ -2,11 +2,17 @@
 ░█▀█░█▀▀░█▀▀░
 ░█▀█░█░░░█▀▀░
 ░▀░▀░▀▀▀░▀▀▀░
+```
+[![Stars](https://img.shields.io/github/stars/shaohaozhi286/acecode?style=flat-square)](https://github.com/shaohaozhi286/acecode/stargazers)
+[![Forks](https://img.shields.io/github/forks/shaohaozhi286/acecode?style=flat-square)](https://github.com/shaohaozhi286/acecode/network/members)
+[![Issues](https://img.shields.io/github/issues/shaohaozhi286/acecode?style=flat-square)](https://github.com/shaohaozhi286/acecode/issues)
+[![Last Commit](https://img.shields.io/github/last-commit/shaohaozhi286/acecode?style=flat-square)](https://github.com/shaohaozhi286/acecode/commits)
 
 English | [中文](README_CN.md)
 
 A terminal-based AI coding agent built with C++17. It provides an interactive TUI (Terminal UI) powered by [FTXUI](https://github.com/ArthurSonzogni/FTXUI), supporting tool-use workflows through OpenAI-compatible APIs or GitHub Copilot.
 
+![ACE Code](https://2017studio.oss-cn-beijing.aliyuncs.com/acecode.jpg)
 ## Features
 
 - **Interactive TUI** -- FTXUI-based terminal interface with streaming responses, input history, and mouse support

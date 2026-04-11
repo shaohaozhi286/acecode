@@ -2,11 +2,16 @@
 ░█▀█░█▀▀░█▀▀░
 ░█▀█░█░░░█▀▀░
 ░▀░▀░▀▀▀░▀▀▀░
-
+```
+[![Stars](https://img.shields.io/github/stars/shaohaozhi286/acecode?style=flat-square)](https://github.com/shaohaozhi286/acecode/stargazers)
+[![Forks](https://img.shields.io/github/forks/shaohaozhi286/acecode?style=flat-square)](https://github.com/shaohaozhi286/acecode/network/members)
+[![Issues](https://img.shields.io/github/issues/shaohaozhi286/acecode?style=flat-square)](https://github.com/shaohaozhi286/acecode/issues)
+[![Last Commit](https://img.shields.io/github/last-commit/shaohaozhi286/acecode?style=flat-square)](https://github.com/shaohaozhi286/acecode/commits)
 [English](README.md) | 中文
 
 基于 C++17 的终端 AI 编程助手。通过 [FTXUI](https://github.com/ArthurSonzogni/FTXUI) 提供交互式 TUI 界面，支持 OpenAI 兼容 API 和 GitHub Copilot 的tool-use。
 
+![ACE Code](https://2017studio.oss-cn-beijing.aliyuncs.com/acecode.jpg)
 ## 特性
 
 - **交互式 TUI** -- 基于 FTXUI 的终端界面，支持流式响应、输入历史和鼠标操作
