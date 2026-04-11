@@ -39,6 +39,7 @@ add_executable(acecode
     src/tool/mtime_tracker.cpp
     src/prompt/system_prompt.cpp
     src/agent_loop.cpp
+    src/commands/configure.cpp
 )
 
 target_include_directories(acecode PRIVATE 

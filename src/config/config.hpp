@@ -25,6 +25,10 @@ struct AppConfig {
 // Creates default config if missing.
 AppConfig load_config();
 
+// Save config to ~/.acecode/config.json.
+// Creates directory if missing, overwrites existing file.
+void save_config(const AppConfig& cfg);
+
 // Get the path to ~/.acecode/ directory
 std::string get_acecode_dir();
 

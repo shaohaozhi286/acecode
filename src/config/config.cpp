@@ -105,4 +105,25 @@ AppConfig load_config() {
     return cfg;
 }
 
+void save_config(const AppConfig& cfg) {
+    std::string acecode_dir = get_acecode_dir();
+    std::string config_path = (fs::path(acecode_dir) / "config.json").string();
+
+    if (!fs::exists(acecode_dir)) {
+        fs::create_directories(acecode_dir);
+    }
+
+    nlohmann::json j;
+    j["provider"] = cfg.provider;
+    j["openai"]["base_url"] = cfg.openai.base_url;
+    j["openai"]["api_key"] = cfg.openai.api_key;
+    j["openai"]["model"] = cfg.openai.model;
+    j["copilot"]["model"] = cfg.copilot.model;
+
+    std::ofstream ofs(config_path);
+    if (ofs.is_open()) {
+        ofs << j.dump(2) << std::endl;
+    }
+}
+
 } // namespace acecode

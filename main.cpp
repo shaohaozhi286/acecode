@@ -44,6 +44,7 @@
 #include "utils/logger.hpp"
 #include "permissions.hpp"
 #include "agent_loop.hpp"
+#include "commands/configure.hpp"
 
 using namespace ftxui;
 using namespace acecode;
@@ -322,11 +323,20 @@ int main(int argc, char* argv[]) {
 
     // ---- Parse CLI arguments ----
     bool dangerous_mode = false;
+    bool run_configure_cmd = false;
     for (int i = 1; i < argc; ++i) {
         std::string arg(argv[i]);
         if (arg == "-dangerous" || arg == "--dangerous") {
             dangerous_mode = true;
+        } else if (arg == "configure") {
+            run_configure_cmd = true;
         }
+    }
+
+    // ---- Handle configure subcommand (before TUI setup) ----
+    if (run_configure_cmd) {
+        AppConfig config = load_config();
+        return run_configure(config);
     }
 
     // ---- Ensure cursor is restored on exit ----
