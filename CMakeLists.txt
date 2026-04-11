@@ -10,6 +10,13 @@ if(MSVC)
     add_compile_options(/utf-8)
 endif()
 
+# Generate version header from CMake project version
+configure_file(
+    ${CMAKE_SOURCE_DIR}/src/version.hpp.in
+    ${CMAKE_BINARY_DIR}/generated/version.hpp
+    @ONLY
+)
+
 find_package(cpr CONFIG REQUIRED)
 find_package(ftxui CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
@@ -23,10 +30,21 @@ add_executable(acecode
     src/auth/github_auth.cpp
     src/tool/tool_executor.cpp
     src/tool/bash_tool.cpp
+    src/tool/file_read_tool.cpp
+    src/tool/file_write_tool.cpp
+    src/tool/file_edit_tool.cpp
+    src/tool/grep_tool.cpp
+    src/tool/glob_tool.cpp
+    src/tool/diff_utils.cpp
+    src/tool/mtime_tracker.cpp
+    src/prompt/system_prompt.cpp
     src/agent_loop.cpp
 )
 
-target_include_directories(acecode PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_include_directories(acecode PRIVATE 
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_BINARY_DIR}/generated
+)
 
 target_link_libraries(acecode PRIVATE 
     cpr::cpr 

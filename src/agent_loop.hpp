@@ -7,6 +7,7 @@
 #include <string>
 #include <functional>
 #include <mutex>
+#include <atomic>
 
 namespace acecode {
 
@@ -20,19 +21,29 @@ struct AgentCallbacks {
 
     // Called to request user confirmation for a tool call.
     // Returns true if user approves, false if denied.
-    // tool_name and arguments are provided for display.
     std::function<bool(const std::string& tool_name, const std::string& arguments)> on_tool_confirm;
+
+    // Called for each streaming delta token (real-time TUI update)
+    std::function<void(const std::string& token)> on_delta;
 };
 
 class AgentLoop {
 public:
-    AgentLoop(LlmProvider& provider, ToolExecutor& tools, AgentCallbacks callbacks);
+    AgentLoop(LlmProvider& provider, ToolExecutor& tools, AgentCallbacks callbacks,
+              const std::string& cwd);
+
+    void set_callbacks(AgentCallbacks cb);
 
     // Submit a user message and run the agent loop until a final text response.
     // This runs synchronously and should be called from a background thread.
     void submit(const std::string& user_message);
 
-    // Get the full conversation history
+    // Abort the current inference. Safe to call from any thread.
+    void abort();
+
+    // Legacy cancel alias
+    void cancel() { abort(); }
+
     const std::vector<ChatMessage>& messages() const { return messages_; }
 
 private:
@@ -40,6 +51,8 @@ private:
     ToolExecutor& tools_;
     AgentCallbacks callbacks_;
     std::vector<ChatMessage> messages_;
+    std::atomic<bool> abort_requested_{false};
+    std::string cwd_;
 };
 
 } // namespace acecode

@@ -1,0 +1,6 @@
+#pragma once
+
+#define ACECODE_VERSION_MAJOR @acecode_VERSION_MAJOR@
+#define ACECODE_VERSION_MINOR @acecode_VERSION_MINOR@
+#define ACECODE_VERSION_PATCH @acecode_VERSION_PATCH@
+#define ACECODE_VERSION "@acecode_VERSION@"

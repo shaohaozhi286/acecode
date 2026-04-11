@@ -2,6 +2,8 @@
 
 #include <string>
 #include <vector>
+#include <functional>
+#include <atomic>
 #include <nlohmann/json.hpp>
 
 namespace acecode {
@@ -37,6 +39,18 @@ struct ToolDef {
     nlohmann::json parameters; // JSON Schema object
 };
 
+// Streaming event types for chat_stream()
+enum class StreamEventType { Delta, ToolCall, Done, Error };
+
+struct StreamEvent {
+    StreamEventType type;
+    std::string content;        // Delta: token fragment
+    ToolCall tool_call;         // ToolCall: complete tool call
+    std::string error;          // Error: description
+};
+
+using StreamCallback = std::function<void(const StreamEvent&)>;
+
 class LlmProvider {
 public:
     virtual ~LlmProvider() = default;
@@ -46,11 +60,17 @@ public:
         const std::vector<ToolDef>& tools
     ) = 0;
 
+    // Streaming chat: invokes callback for each event. abort_flag can cancel the request.
+    virtual void chat_stream(
+        const std::vector<ChatMessage>& messages,
+        const std::vector<ToolDef>& tools,
+        const StreamCallback& callback,
+        std::atomic<bool>* abort_flag = nullptr
+    ) = 0;
+
     virtual std::string name() const = 0;
     virtual bool is_authenticated() = 0;
 
-    // Provider-specific authentication. Returns true on success.
-    // For providers that don't need auth, this is a no-op returning true.
     virtual bool authenticate() { return true; }
 };
 

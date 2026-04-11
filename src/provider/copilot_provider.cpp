@@ -1,6 +1,8 @@
 #include "copilot_provider.hpp"
+#include "utils/logger.hpp"
 #include <cpr/cpr.h>
 #include <ctime>
+#include <map>
 
 namespace acecode {
 
@@ -58,12 +60,15 @@ bool CopilotProvider::ensure_copilot_token() {
     if (!copilot_token_.token.empty()) {
         int64_t now = static_cast<int64_t>(std::time(nullptr));
         if (now < copilot_token_.expires_at - 60) { // 60s margin
+            LOG_DEBUG("Copilot token still valid, expires_at=" + std::to_string(copilot_token_.expires_at));
             return true;
         }
     }
 
+    LOG_INFO("Exchanging copilot token...");
     // Exchange for a new copilot token
     copilot_token_ = exchange_copilot_token(github_token_);
+    LOG_INFO("Copilot token exchange result: " + std::string(copilot_token_.token.empty() ? "FAILED" : "OK"));
     return !copilot_token_.token.empty();
 }
 
@@ -133,6 +138,35 @@ ChatResponse CopilotProvider::chat(
         resp.finish_reason = "error";
         return resp;
     }
+}
+
+void CopilotProvider::chat_stream(
+    const std::vector<ChatMessage>& messages,
+    const std::vector<ToolDef>& tools,
+    const StreamCallback& callback,
+    std::atomic<bool>* abort_flag
+) {
+    LOG_INFO("CopilotProvider::chat_stream messages=" + std::to_string(messages.size()) + " tools=" + std::to_string(tools.size()));
+    if (!ensure_copilot_token()) {
+        LOG_ERROR("Copilot token unavailable for streaming");
+        StreamEvent evt;
+        evt.type = StreamEventType::Error;
+        evt.error = "Copilot session token unavailable. Re-authenticate.";
+        callback(evt);
+        return;
+    }
+
+    nlohmann::json body = build_request_body(messages, tools, true);
+
+    std::map<std::string, std::string> extra_headers = {
+        {"Authorization", "Bearer " + copilot_token_.token},
+        {"Editor-Version", "acecode/0.1.0"},
+        {"Editor-Plugin-Version", "acecode/0.1.0"},
+        {"Copilot-Integration-Id", "vscode-chat"},
+        {"Openai-Intent", "conversation-panel"}
+    };
+
+    parse_sse_stream(COPILOT_CHAT_URL, body, extra_headers, callback, abort_flag);
 }
 
 } // namespace acecode

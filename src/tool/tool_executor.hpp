@@ -34,6 +34,9 @@ public:
     // Check if a tool is registered
     bool has_tool(const std::string& name) const;
 
+    // Generate a formatted description of all registered tools for system prompt
+    std::string generate_tools_prompt() const;
+
     // Format a tool result into a ChatMessage suitable for the messages array
     static ChatMessage format_tool_result(const std::string& tool_call_id, const ToolResult& result);
 

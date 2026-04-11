@@ -1,8 +1,11 @@
 #include "tool_executor.hpp"
+#include "utils/logger.hpp"
+#include <sstream>
 
 namespace acecode {
 
 void ToolExecutor::register_tool(const ToolImpl& tool) {
+    LOG_INFO("Registering tool: " + tool.definition.name);
     tools_[tool.definition.name] = tool;
 }
 
@@ -17,13 +20,28 @@ std::vector<ToolDef> ToolExecutor::get_tool_definitions() const {
 ToolResult ToolExecutor::execute(const std::string& tool_name, const std::string& arguments_json) const {
     auto it = tools_.find(tool_name);
     if (it == tools_.end()) {
+        LOG_ERROR("execute: unknown tool '" + tool_name + "'");
         return ToolResult{"[Error] Unknown tool: " + tool_name, false};
     }
-    return it->second.execute(arguments_json);
+    LOG_DEBUG("execute: " + tool_name + " args=" + log_truncate(arguments_json, 300));
+    auto result = it->second.execute(arguments_json);
+    LOG_DEBUG("execute result: success=" + std::string(result.success ? "true" : "false") + " len=" + std::to_string(result.output.size()));
+    return result;
 }
 
 bool ToolExecutor::has_tool(const std::string& name) const {
     return tools_.find(name) != tools_.end();
+}
+
+std::string ToolExecutor::generate_tools_prompt() const {
+    std::ostringstream oss;
+    for (const auto& [name, impl] : tools_) {
+        oss << "## " << impl.definition.name << "\n"
+            << "Description: " << impl.definition.description << "\n"
+            << "Parameters:\n```json\n"
+            << impl.definition.parameters.dump(2) << "\n```\n\n";
+    }
+    return oss.str();
 }
 
 ChatMessage ToolExecutor::format_tool_result(const std::string& tool_call_id, const ToolResult& result) {

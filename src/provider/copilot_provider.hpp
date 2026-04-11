@@ -16,6 +16,13 @@ public:
         const std::vector<ToolDef>& tools
     ) override;
 
+    void chat_stream(
+        const std::vector<ChatMessage>& messages,
+        const std::vector<ToolDef>& tools,
+        const StreamCallback& callback,
+        std::atomic<bool>* abort_flag = nullptr
+    ) override;
+
     std::string name() const override { return "copilot"; }
     bool is_authenticated() override;
     bool authenticate() override;
