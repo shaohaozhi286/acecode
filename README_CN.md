@@ -30,22 +30,59 @@
 
 - CMake >= 3.20
 - C++17 编译器（MSVC 2019+、GCC 9+、Clang 10+）
-- [vcpkg](https://github.com/microsoft/vcpkg)，需安装以下依赖：
-  - `cpr` -- HTTP 客户端
-  - `ftxui` -- 终端 UI 库
-  - `nlohmann-json` -- JSON 库
+- Git
+- [vcpkg](https://github.com/microsoft/vcpkg)
 
 ## 构建
 
 ```bash
-# 配置（根据实际情况调整 vcpkg 路径）
-cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE=<vcpkg-root>/scripts/buildsystems/vcpkg.cmake
+# 拉取本地 overlay port 所依赖的 FTXUI 子模块
+git submodule update --init --recursive
+
+# 为目标 triplet 安装依赖
+<vcpkg-root>/vcpkg install \
+  cpr \
+  nlohmann-json \
+  ftxui \
+  --triplet <triplet> \
+  --overlay-ports=$PWD/ports
+
+# 配置（根据实际情况调整 vcpkg 路径和 triplet）
+cmake -S . -B build -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_TOOLCHAIN_FILE=<vcpkg-root>/scripts/buildsystems/vcpkg.cmake \
+  -DVCPKG_TARGET_TRIPLET=<triplet> \
+  -DVCPKG_OVERLAY_PORTS=$PWD/ports
 
 # 编译
 cmake --build build --config Release
 ```
 
-可执行文件输出到 `build/Release/acecode`（Debug 构建则在 `build/Debug/acecode`）。
+常用 triplet：
+
+- `x64-linux`
+- `arm64-linux`
+- `x64-windows`
+- `x64-osx`
+- `arm64-osx`
+
+使用 Ninja 单配置生成器时，可执行文件输出到 `build/acecode`；如果使用多配置生成器，则输出到 `build/<config>/`。
+
+## GitHub Actions 打包
+
+仓库已包含 `.github/workflows/package.yml`，会自动构建并上传以下平台产物：
+
+- Linux x64
+- Linux arm64
+- Windows x64
+- macOS x64
+- macOS arm64
+
+你可以在 **Actions > package > Run workflow** 手动触发，也可以在 Pull Request、推送到 `main` 或打 `v*` 版本标签时自动运行。
+
+### Windows 注意事项
+
+Windows 下 `cpr` 依赖的 libcurl 版本必须 **>= 8.14** 才能正确处理 TLS 证书。CMake 构建时会自动检测，如果版本过低会提前报错。请确保你的 vcpkg 仓库足够新。
 
 ## 配置
 

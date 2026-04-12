@@ -1,0 +1,139 @@
+name: package
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - master
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-package:
+    name: ${{ matrix.id }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: linux-x64
+            os: ubuntu-24.04
+            triplet: x64-linux
+            executable: acecode
+            archive_extension: tar.gz
+          - id: linux-arm64
+            os: ubuntu-24.04-arm
+            triplet: arm64-linux
+            executable: acecode
+            archive_extension: tar.gz
+          - id: windows-x64
+            os: windows-2022
+            triplet: x64-windows
+            executable: acecode.exe
+            archive_extension: zip
+            msvc_arch: amd64
+          - id: macos-x64
+            os: macos-13
+            triplet: x64-osx
+            executable: acecode
+            archive_extension: tar.gz
+          - id: macos-arm64
+            os: macos-14
+            triplet: arm64-osx
+            executable: acecode
+            archive_extension: tar.gz
+
+    env:
+      VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure MSVC
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.msvc_arch }}
+
+      - name: Bootstrap vcpkg (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          git clone --depth 1 https://github.com/microsoft/vcpkg.git "$VCPKG_ROOT"
+          "$VCPKG_ROOT/bootstrap-vcpkg.sh"
+
+      - name: Bootstrap vcpkg (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/microsoft/vcpkg.git $env:VCPKG_ROOT
+          & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat"
+
+      - name: Install dependencies (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          "$VCPKG_ROOT/vcpkg" install \
+            cpr \
+            nlohmann-json \
+            ftxui \
+            --triplet "${{ matrix.triplet }}" \
+            --overlay-ports="$GITHUB_WORKSPACE/ports"
+
+      - name: Install dependencies (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & "$env:VCPKG_ROOT\vcpkg.exe" install `
+            cpr `
+            nlohmann-json `
+            ftxui `
+            --triplet "${{ matrix.triplet }}" `
+            "--overlay-ports=$env:GITHUB_WORKSPACE\ports"
+
+      - name: Configure
+        shell: bash
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_TARGET_TRIPLET="${{ matrix.triplet }}" \
+            -DVCPKG_OVERLAY_PORTS="$GITHUB_WORKSPACE/ports"
+
+      - name: Build
+        shell: bash
+        run: cmake --build build --config Release
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          package_dir="dist/acecode-${{ matrix.id }}"
+          mkdir -p "$package_dir"
+          cp "build/${{ matrix.executable }}" "$package_dir/"
+          cp README.md README_CN.md "$package_dir/"
+          tar -C dist -czf "acecode-${{ matrix.id }}.tar.gz" "acecode-${{ matrix.id }}"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $packageDir = "dist/acecode-${{ matrix.id }}"
+          New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
+          Copy-Item "build/${{ matrix.executable }}" "$packageDir/"
+          Copy-Item "README.md","README_CN.md" "$packageDir/"
+          Compress-Archive -Path "$packageDir/*" -DestinationPath "acecode-${{ matrix.id }}.zip" -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: acecode-${{ matrix.id }}
+          path: acecode-${{ matrix.id }}.${{ matrix.archive_extension }}
+          if-no-files-found: error

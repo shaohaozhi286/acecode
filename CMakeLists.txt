@@ -21,6 +21,20 @@ find_package(cpr CONFIG REQUIRED)
 find_package(ftxui CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 
+# cpr ships with libcurl; on Windows libcurl >= 8.14 is required for proper
+# certificate handling.  Detect the version through the CURL::libcurl target
+# that vcpkg exposes and fail early with a clear message.
+if(WIN32)
+    find_package(CURL CONFIG QUIET)
+    if(CURL_FOUND AND DEFINED CURL_VERSION_STRING)
+        if(CURL_VERSION_STRING VERSION_LESS "8.14.0")
+            message(FATAL_ERROR
+                "libcurl >= 8.14.0 is required on Windows (found ${CURL_VERSION_STRING}). "
+                "Please update your vcpkg checkout so that the curl port is >= 8.14.0.")
+        endif()
+    endif()
+endif()
+
 file(GLOB_RECURSE ACECODE_SOURCE_FILES CONFIGURE_DEPENDS
     ${CMAKE_SOURCE_DIR}/src/*.cpp
 )
