@@ -62,7 +62,7 @@ cmake --build build --config Release
 
 - `x64-linux`
 - `arm64-linux`
-- `x86-windows`
+- `x64-windows`
 - `x64-osx`
 - `arm64-osx`
 
@@ -74,11 +74,15 @@ cmake --build build --config Release
 
 - Linux x64
 - Linux arm64
-- Windows x86
+- Windows x64
 - macOS x64
 - macOS arm64
 
 你可以在 **Actions > package > Run workflow** 手动触发，也可以在 Pull Request、推送到 `main` 或打 `v*` 版本标签时自动运行。
+
+### Windows 注意事项
+
+Windows 下 `cpr` 依赖的 libcurl 版本必须 **>= 8.14** 才能正确处理 TLS 证书。CMake 构建时会自动检测，如果版本过低会提前报错。请确保你的 vcpkg 仓库足够新。
 
 ## 配置
 

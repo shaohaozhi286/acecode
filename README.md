@@ -63,7 +63,7 @@ Common triplets:
 
 - `x64-linux`
 - `arm64-linux`
-- `x86-windows`
+- `x64-windows`
 - `x64-osx`
 - `arm64-osx`
 
@@ -75,11 +75,15 @@ The repository includes `.github/workflows/package.yml`, which builds and upload
 
 - Linux x64
 - Linux arm64
-- Windows x86
+- Windows x64
 - macOS x64
 - macOS arm64
 
 You can trigger it manually with **Actions > package > Run workflow**, or let it run automatically on pull requests, pushes to `main`, and version tags (`v*`).
+
+### Windows note
+
+On Windows, `cpr` depends on libcurl which must be **>= 8.14** for proper TLS certificate handling. The CMake build will fail early if it detects an older version. Make sure your vcpkg checkout is recent enough.
 
 ## Configuration
 

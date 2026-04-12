@@ -30,12 +30,12 @@ jobs:
             triplet: arm64-linux
             executable: acecode
             archive_extension: tar.gz
-          - id: windows-x86
+          - id: windows-x64
             os: windows-2022
-            triplet: x86-windows
+            triplet: x64-windows
             executable: acecode.exe
             archive_extension: zip
-            msvc_arch: x86
+            msvc_arch: amd64
           - id: macos-x64
             os: macos-13
             triplet: x64-osx
@@ -56,7 +56,7 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Configure MSVC for x86
+      - name: Configure MSVC
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
         with:
