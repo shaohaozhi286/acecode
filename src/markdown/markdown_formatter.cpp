@@ -6,9 +6,13 @@
 #include <algorithm>
 #include <cstdlib>
 
+#include <array>
+#include <string_view>
+
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/dom/table.hpp>
 #include <ftxui/dom/flexbox_config.hpp>
+#include <ftxui/screen/string.hpp>
 
 using namespace ftxui;
 
@@ -219,8 +223,36 @@ static bool is_space_char(char c) {
     return c == ' ' || c == '\t';
 }
 
+static bool is_space_glyph(const std::string& g) {
+    return g == " " || g == "\t";
+}
+
+static bool is_narrow_glyph(const std::string& g) {
+    return ftxui::string_width(g) == 1;
+}
+
+static bool is_opening_cjk_punct(const std::string& g) {
+    static constexpr std::array<std::string_view, 8> kOpening = {
+        "\xEF\xBC\x88", "\xE3\x80\x8A", "\xE3\x80\x8C", "\xE3\x80\x90",
+        "\xE2\x80\x98", "\xE2\x80\x9C", "\xE3\x80\x88", "\xE3\x80\x8E"
+    };
+    for (const auto& c : kOpening) { if (g == c) return true; }
+    return false;
+}
+
+static bool is_closing_cjk_punct(const std::string& g) {
+    static constexpr std::array<std::string_view, 15> kClosing = {
+        "\xEF\xBC\x8C", "\xE3\x80\x82", "\xEF\xBC\x81", "\xEF\xBC\x9F",
+        "\xEF\xBC\x9B", "\xEF\xBC\x9A", "\xE3\x80\x81", "\xEF\xBC\x89",
+        "\xE3\x80\x8B", "\xE3\x80\x8D", "\xE3\x80\x91", "\xE2\x80\x99",
+        "\xE2\x80\x9D", "\xE3\x80\x89", "\xE3\x80\x8F"
+    };
+    for (const auto& c : kClosing) { if (g == c) return true; }
+    return false;
+}
+
 // Split styled runs into word-level Elements for flexbox paragraph wrapping.
-// This replicates FTXUI's paragraph() Split behavior but with per-word styling.
+// CJK-aware: each wide glyph becomes its own token so flexbox can wrap.
 static Elements styled_words(const std::vector<StyledRun>& runs) {
     Elements words;
 
@@ -229,40 +261,79 @@ static Elements styled_words(const std::vector<StyledRun>& runs) {
             continue;
         }
 
-        size_t pos = 0;
-        while (pos < run.text.size()) {
-            // Skip leading spaces — but attach them to the PREVIOUS word
-            if (is_space_char(run.text[pos])) {
-                // Ensure previous word has trailing space for flexbox spacing
+        auto glyphs = ftxui::Utf8ToGlyphs(run.text);
+        std::string ascii_run;
+        std::string pending_prefix;  // opening CJK punctuation to attach
+
+        auto flush_ascii = [&]() {
+            if (ascii_run.empty()) return;
+            std::string token = std::move(ascii_run);
+            ascii_run.clear();
+            if (!pending_prefix.empty()) {
+                token = std::move(pending_prefix) + token;
+                pending_prefix.clear();
+            }
+            words.push_back(apply_style(std::move(token), run.style));
+        };
+
+        for (const auto& g : glyphs) {
+            if (g.empty()) continue;
+
+            if (is_space_glyph(g)) {
+                flush_ascii();
+                // Attach trailing space to previous word
                 if (!words.empty()) {
-                    // Previous word already has trailing space from its own run,
-                    // but if not, we need to output a space element
-                }
-                while (pos < run.text.size() && is_space_char(run.text[pos])) {
-                    pos++;
-                }
-                // Insert a space separator between runs
-                if (pos < run.text.size() && !words.empty()) {
+                    // Insert a space element for flexbox gap
                     words.push_back(text(" "));
                 }
                 continue;
             }
 
-            // Find next word
-            size_t word_start = pos;
-            while (pos < run.text.size() && !is_space_char(run.text[pos])) {
-                pos++;
+            if (is_opening_cjk_punct(g)) {
+                flush_ascii();
+                pending_prefix += g;
+                continue;
             }
 
-            if (pos > word_start) {
-                std::string word = run.text.substr(word_start, pos - word_start);
-                // Consume trailing space and attach to word (for flexbox wrapping)
-                if (pos < run.text.size() && is_space_char(run.text[pos])) {
-                    word += ' ';
-                    pos++;
+            if (is_closing_cjk_punct(g)) {
+                flush_ascii();
+                if (!words.empty()) {
+                    // Append closing punct to previous token by replacing it
+                    // We create a new combined element instead
+                    // Simpler: emit as own token (flexbox will keep it adjacent)
+                    words.push_back(apply_style(g, run.style));
+                } else if (!pending_prefix.empty()) {
+                    pending_prefix += g;
+                } else {
+                    words.push_back(apply_style(g, run.style));
                 }
-                words.push_back(apply_style(word, run.style));
+                continue;
             }
+
+            if (is_narrow_glyph(g)) {
+                ascii_run += g;
+                continue;
+            }
+
+            // Wide (CJK) glyph — flush ascii, emit as own token
+            flush_ascii();
+            std::string token = g;
+            if (!pending_prefix.empty()) {
+                token = std::move(pending_prefix) + token;
+                pending_prefix.clear();
+            }
+            words.push_back(apply_style(std::move(token), run.style));
+        }
+
+        flush_ascii();
+        if (!pending_prefix.empty()) {
+            if (!words.empty()) {
+                // Orphan opening punct — attach to previous
+                words.push_back(apply_style(std::move(pending_prefix), run.style));
+            } else {
+                words.push_back(apply_style(std::move(pending_prefix), run.style));
+            }
+            pending_prefix.clear();
         }
     }
 

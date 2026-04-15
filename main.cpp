@@ -1160,7 +1160,7 @@ int main(int argc, char* argv[]) {
             if (msg.role == "user") {
                 auto line = hbox({
                     text(" > ") | bold | color(Color::Blue),
-                    paragraph(msg.content) | color(Color::White),
+                    paragraph(msg.content) | color(Color::White) | flex,
                 });
                 if (focused_message) {
                     line = line | focus;
@@ -1191,7 +1191,7 @@ int main(int argc, char* argv[]) {
             } else if (msg.role == "tool_call") {
                 auto line = hbox({
                     text("   -> ") | color(Color::Magenta),
-                    paragraph(msg.content) | color(Color::MagentaLight) | dim,
+                    paragraph(msg.content) | color(Color::MagentaLight) | dim | flex,
                 });
                 if (focused_message) {
                     line = line | focus;
@@ -1200,7 +1200,7 @@ int main(int argc, char* argv[]) {
             } else if (msg.role == "tool_result") {
                 auto line = hbox({
                     text("   <- ") | color(Color::GrayDark),
-                    paragraph(msg.content) | color(Color::GrayLight) | dim,
+                    paragraph(msg.content) | color(Color::GrayLight) | dim | flex,
                 });
                 if (focused_message) {
                     line = line | focus;
@@ -1209,7 +1209,7 @@ int main(int argc, char* argv[]) {
             } else if (msg.role == "system") {
                 auto line = hbox({
                     text(" i ") | bold | color(Color::Yellow),
-                    paragraph(msg.content) | color(Color::Yellow),
+                    paragraph(msg.content) | color(Color::Yellow) | flex,
                 });
                 if (focused_message) {
                     line = line | focus;
@@ -1218,7 +1218,7 @@ int main(int argc, char* argv[]) {
             } else if (msg.role == "error") {
                 auto line = hbox({
                     text(" ! ") | bold | color(Color::Red),
-                    paragraph(msg.content) | color(Color::RedLight),
+                    paragraph(msg.content) | color(Color::RedLight) | flex,
                 });
                 if (focused_message) {
                     line = line | focus;
@@ -1300,12 +1300,12 @@ int main(int argc, char* argv[]) {
                 text("lways / ") | color(Color::MagentaLight),
                 text("n") | bold | color(Color::Red),
                 text("o: ") | color(Color::MagentaLight),
-                input_with_esc->Render(),
+                input_with_esc->Render() | flex,
             });
         } else {
             Elements prompt_parts;
             prompt_parts.push_back(text(" > ") | bold | color(Color::Cyan));
-            prompt_parts.push_back(input_with_esc->Render());
+            prompt_parts.push_back(input_with_esc->Render() | flex);
             if (!state.pending_queue.empty()) {
                 prompt_parts.push_back(
                     text(" [" + std::to_string(state.pending_queue.size()) + " queued]") | dim | color(Color::GrayDark));
