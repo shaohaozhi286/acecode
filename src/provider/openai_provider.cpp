@@ -144,6 +144,15 @@ ChatResponse OpenAiCompatProvider::chat(
             resp.usage.prompt_tokens = u.value("prompt_tokens", 0);
             resp.usage.completion_tokens = u.value("completion_tokens", 0);
             resp.usage.total_tokens = u.value("total_tokens", 0);
+            if (u.contains("prompt_tokens_details") && u["prompt_tokens_details"].is_object()) {
+                const auto& d = u["prompt_tokens_details"];
+                resp.usage.cache_read_tokens = d.value("cached_tokens", 0);
+                resp.usage.cache_write_tokens = d.value("cache_write_tokens", 0);
+            }
+            if (u.contains("completion_tokens_details") && u["completion_tokens_details"].is_object()) {
+                const auto& d = u["completion_tokens_details"];
+                resp.usage.reasoning_tokens = d.value("reasoning_tokens", 0);
+            }
             resp.usage.has_data = true;
         }
         return resp;
@@ -254,6 +263,15 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
                     accumulated.usage.prompt_tokens = u.value("prompt_tokens", 0);
                     accumulated.usage.completion_tokens = u.value("completion_tokens", 0);
                     accumulated.usage.total_tokens = u.value("total_tokens", 0);
+                    if (u.contains("prompt_tokens_details") && u["prompt_tokens_details"].is_object()) {
+                        const auto& d = u["prompt_tokens_details"];
+                        accumulated.usage.cache_read_tokens = d.value("cached_tokens", 0);
+                        accumulated.usage.cache_write_tokens = d.value("cache_write_tokens", 0);
+                    }
+                    if (u.contains("completion_tokens_details") && u["completion_tokens_details"].is_object()) {
+                        const auto& d = u["completion_tokens_details"];
+                        accumulated.usage.reasoning_tokens = d.value("reasoning_tokens", 0);
+                    }
                     accumulated.usage.has_data = true;
                 }
 

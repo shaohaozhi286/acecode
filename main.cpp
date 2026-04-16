@@ -820,7 +820,7 @@ int main(int argc, char* argv[]) {
     AutoCompactTrackingState compact_tracking;
 
     callbacks.on_auto_compact = [&state, &clamp_chat_focus, &screen, &agent_loop, &provider,
-                                  &compact_tracking, &config]() -> bool {
+                                  &compact_tracking, &config, &token_tracker]() -> bool {
         // Circuit breaker: stop after consecutive failures
         if (compact_tracking.consecutive_failures >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES) {
             LOG_WARN("Auto-compact circuit breaker tripped (" +
@@ -856,7 +856,7 @@ int main(int argc, char* argv[]) {
                 screen.PostEvent(Event::Custom);
 
                 // Check if micro-compact was sufficient
-                if (!should_auto_compact(agent_loop.messages(), config.context_window)) {
+                if (!should_auto_compact(agent_loop.messages(), config.context_window, token_tracker.last_prompt_tokens())) {
                     return true;
                 }
             }

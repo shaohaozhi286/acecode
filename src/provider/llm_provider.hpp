@@ -37,6 +37,9 @@ struct TokenUsage {
     int prompt_tokens = 0;
     int completion_tokens = 0;
     int total_tokens = 0;
+    int cache_read_tokens = 0;   // from prompt_tokens_details.cached_tokens
+    int cache_write_tokens = 0;  // from prompt_tokens_details.cache_write_tokens
+    int reasoning_tokens = 0;    // from completion_tokens_details.reasoning_tokens
     bool has_data = false; // true if server returned usage info
 };
 

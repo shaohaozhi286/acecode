@@ -103,8 +103,10 @@ int get_effective_context_window(int context_window);
 // Calculate auto-compact threshold
 int get_auto_compact_threshold(int context_window);
 
-// Check if auto-compact should trigger using precise threshold
-bool should_auto_compact(const std::vector<ChatMessage>& messages, int context_window);
+// Check if auto-compact should trigger.
+// When last_api_prompt_tokens > 0 (from API response), uses that directly.
+// Otherwise falls back to estimate_message_tokens() heuristic.
+bool should_auto_compact(const std::vector<ChatMessage>& messages, int context_window, int last_api_prompt_tokens = 0);
 
 // Calculate token warning state
 TokenWarningState calculate_token_warning_state(int estimated_tokens, int context_window);

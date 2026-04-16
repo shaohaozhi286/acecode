@@ -93,6 +93,7 @@ private:
     PermissionManager& permissions_;
     PathValidator path_validator_;
     int context_window_ = 128000;
+    std::atomic<int> last_api_prompt_tokens_{0}; // from most recent API response
     SessionManager* session_manager_ = nullptr;
 
     // Worker thread and task queue

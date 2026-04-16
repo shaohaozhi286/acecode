@@ -103,8 +103,8 @@ void AgentLoop::run_agent(const std::string& user_message) {
             break;
         }
 
-        // Auto-compact check: if estimated tokens exceed threshold
-        if (should_auto_compact(messages_, context_window_)) {
+        // Auto-compact check: prefer API-reported token count, fallback to estimate
+        if (should_auto_compact(messages_, context_window_, last_api_prompt_tokens_.load())) {
             LOG_INFO("Auto-compact triggered: estimated tokens exceed threshold (context_window=" + std::to_string(context_window_) + ")");
             if (callbacks_.on_auto_compact) {
                 callbacks_.on_auto_compact();
@@ -149,6 +149,7 @@ void AgentLoop::run_agent(const std::string& user_message) {
             case StreamEventType::Done:
                 break;
             case StreamEventType::Usage:
+                last_api_prompt_tokens_.store(evt.usage.prompt_tokens);
                 if (callbacks_.on_usage) {
                     callbacks_.on_usage(evt.usage);
                 }
@@ -196,6 +197,8 @@ void AgentLoop::run_agent(const std::string& user_message) {
             estimated_usage.completion_tokens = estimate_message_tokens({estimated_response});
             estimated_usage.total_tokens = estimated_usage.prompt_tokens + estimated_usage.completion_tokens;
             estimated_usage.has_data = false;
+            // Note: don't set last_api_prompt_tokens_ here — keep it 0 so
+            // should_auto_compact knows this is an estimate, not API data.
             callbacks_.on_usage(estimated_usage);
         }
 

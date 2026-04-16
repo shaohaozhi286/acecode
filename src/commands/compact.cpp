@@ -180,11 +180,16 @@ int get_auto_compact_threshold(int context_window) {
     return std::max(0, threshold);
 }
 
-bool should_auto_compact(const std::vector<ChatMessage>& messages, int context_window) {
+bool should_auto_compact(const std::vector<ChatMessage>& messages, int context_window, int last_api_prompt_tokens) {
+    int threshold = get_auto_compact_threshold(context_window);
+    // Prefer API-reported prompt_tokens when available (accurate)
+    if (last_api_prompt_tokens > 0) {
+        return last_api_prompt_tokens > threshold;
+    }
+    // Fallback: estimate from message content (chars/4 heuristic)
     auto [start, count] = get_messages_after_compact_boundary(messages);
     std::vector<ChatMessage> active(messages.begin() + start, messages.begin() + start + count);
     int estimated = estimate_message_tokens(active);
-    int threshold = get_auto_compact_threshold(context_window);
     return estimated > threshold;
 }
 
