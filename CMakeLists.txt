@@ -84,11 +84,21 @@ target_include_directories(acecode PRIVATE
     ${CMAKE_BINARY_DIR}/generated
 )
 
+# cpp-mcp: only build the library, skip examples and tests
+set(MCP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(BUILD_MCP_EXAMPLES OFF CACHE BOOL "" FORCE)
+add_subdirectory(external/cpp-mcp EXCLUDE_FROM_ALL)
+
+target_include_directories(acecode PRIVATE 
+    ${CMAKE_SOURCE_DIR}/external/cpp-mcp/include
+)
+
 target_link_libraries(acecode PRIVATE 
     cpr::cpr 
     ftxui::screen 
     ftxui::dom 
     ftxui::component
     nlohmann_json::nlohmann_json
+    mcp
 )
 

@@ -1,3 +1,6 @@
 [submodule "external/ftxui"]
 	path = external/ftxui
 	url = https://github.com/shaohaozhi286/FTXUI.git
+[submodule "external/cpp-mcp"]
+	path = external/cpp-mcp
+	url = https://github.com/shaohaozhi286/cpp-mcp.git
