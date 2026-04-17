@@ -18,6 +18,14 @@ std::vector<ToolDef> ToolExecutor::get_tool_definitions() const {
     return defs;
 }
 
+std::vector<ToolDef> ToolExecutor::get_tool_definitions_by_source(ToolSource source) const {
+    std::vector<ToolDef> defs;
+    for (const auto& [name, impl] : tools_) {
+        if (impl.source == source) defs.push_back(impl.definition);
+    }
+    return defs;
+}
+
 ToolResult ToolExecutor::execute(const std::string& tool_name, const std::string& arguments_json) const {
     auto it = tools_.find(tool_name);
     if (it == tools_.end()) {

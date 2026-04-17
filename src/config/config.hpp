@@ -1,6 +1,8 @@
 #pragma once
 
+#include <map>
 #include <string>
+#include <vector>
 #include <nlohmann/json.hpp>
 
 namespace acecode {
@@ -15,12 +17,19 @@ struct CopilotConfig {
     std::string model = "gpt-4o";
 };
 
+struct McpServerConfig {
+    std::string command;                         // required: executable to launch
+    std::vector<std::string> args;               // optional: CLI arguments
+    std::map<std::string, std::string> env;      // optional: environment variables
+};
+
 struct AppConfig {
     std::string provider = "copilot"; // "copilot" or "openai"
     OpenAiConfig openai;
     CopilotConfig copilot;
     int context_window = 128000; // model context window size in tokens
     int max_sessions = 50;       // max saved sessions per project
+    std::map<std::string, McpServerConfig> mcp_servers; // MCP stdio servers (optional)
 };
 
 // Load config from ~/.acecode/config.json, with env var overrides.

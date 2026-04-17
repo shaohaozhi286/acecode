@@ -15,11 +15,19 @@ struct ToolResult {
     bool success = true;
 };
 
+// Origin of a registered tool. MCP tools are grouped separately in the system
+// prompt so the LLM can distinguish internal versus external capabilities.
+enum class ToolSource {
+    Builtin = 0,
+    Mcp = 1,
+};
+
 // A registered tool implementation
 struct ToolImpl {
     ToolDef definition;
     std::function<ToolResult(const std::string& arguments_json)> execute;
     bool is_read_only = false; // Read-only tools are auto-approved without user confirmation
+    ToolSource source = ToolSource::Builtin;
 };
 
 class ToolExecutor {
@@ -28,6 +36,9 @@ public:
 
     // Get all tool definitions for inclusion in API requests
     std::vector<ToolDef> get_tool_definitions() const;
+
+    // Get tool definitions filtered by source (built-in vs MCP).
+    std::vector<ToolDef> get_tool_definitions_by_source(ToolSource source) const;
 
     // Execute a tool call and return the result
     ToolResult execute(const std::string& tool_name, const std::string& arguments_json) const;

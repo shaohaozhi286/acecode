@@ -1,5 +1,7 @@
 #include "config.hpp"
 
+#include "../utils/logger.hpp"
+
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -85,6 +87,36 @@ AppConfig load_config() {
             if (j.contains("max_sessions") && j["max_sessions"].is_number_integer()) {
                 cfg.max_sessions = j["max_sessions"].get<int>();
             }
+            if (j.contains("mcp_servers") && j["mcp_servers"].is_object()) {
+                for (auto it = j["mcp_servers"].begin(); it != j["mcp_servers"].end(); ++it) {
+                    const std::string& server_name = it.key();
+                    const auto& sj = it.value();
+                    if (!sj.is_object()) {
+                        LOG_WARN("[config] mcp_servers['" + server_name + "'] is not an object, skipping");
+                        continue;
+                    }
+                    if (!sj.contains("command") || !sj["command"].is_string() ||
+                        sj["command"].get<std::string>().empty()) {
+                        LOG_WARN("[config] mcp_servers['" + server_name + "'] missing required 'command', skipping");
+                        continue;
+                    }
+                    McpServerConfig mcfg;
+                    mcfg.command = sj["command"].get<std::string>();
+                    if (sj.contains("args") && sj["args"].is_array()) {
+                        for (const auto& a : sj["args"]) {
+                            if (a.is_string()) mcfg.args.push_back(a.get<std::string>());
+                        }
+                    }
+                    if (sj.contains("env") && sj["env"].is_object()) {
+                        for (auto eit = sj["env"].begin(); eit != sj["env"].end(); ++eit) {
+                            if (eit.value().is_string()) {
+                                mcfg.env[eit.key()] = eit.value().get<std::string>();
+                            }
+                        }
+                    }
+                    cfg.mcp_servers[server_name] = std::move(mcfg);
+                }
+            }
         } catch (const nlohmann::json::parse_error& e) {
             std::cerr << "[config] Warning: Failed to parse config.json: " << e.what() << std::endl;
         }
@@ -127,6 +159,24 @@ void save_config(const AppConfig& cfg) {
     j["copilot"]["model"] = cfg.copilot.model;
     j["context_window"] = cfg.context_window;
     j["max_sessions"] = cfg.max_sessions;
+
+    if (!cfg.mcp_servers.empty()) {
+        nlohmann::json mj = nlohmann::json::object();
+        for (const auto& [name, srv] : cfg.mcp_servers) {
+            nlohmann::json sj;
+            sj["command"] = srv.command;
+            if (!srv.args.empty()) {
+                sj["args"] = srv.args;
+            }
+            if (!srv.env.empty()) {
+                nlohmann::json ej = nlohmann::json::object();
+                for (const auto& [k, v] : srv.env) ej[k] = v;
+                sj["env"] = ej;
+            }
+            mj[name] = sj;
+        }
+        j["mcp_servers"] = mj;
+    }
 
     std::ofstream ofs(config_path);
     if (ofs.is_open()) {

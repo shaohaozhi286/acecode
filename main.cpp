@@ -44,6 +44,7 @@
 #include "tool/file_edit_tool.hpp"
 #include "tool/grep_tool.hpp"
 #include "tool/glob_tool.hpp"
+#include "tool/mcp_manager.hpp"
 #include "utils/logger.hpp"
 #include "permissions.hpp"
 #include "agent_loop.hpp"
@@ -593,6 +594,21 @@ int main(int argc, char* argv[]) {
     tools.register_tool(create_grep_tool());
     tools.register_tool(create_glob_tool());
 
+    // ---- MCP servers ----
+    McpManager mcp_manager;
+    {
+        const size_t configured = config.mcp_servers.size();
+        if (configured > 0) {
+            mcp_manager.connect_all(config);
+            mcp_manager.register_tools(tools);
+            const size_t connected = mcp_manager.connected_server_count();
+            const size_t tool_count = mcp_manager.discovered_tool_count();
+            LOG_INFO("[mcp] Connected " + std::to_string(connected) + "/" +
+                     std::to_string(configured) + " servers, registered " +
+                     std::to_string(tool_count) + " tools");
+        }
+    }
+
     // ---- TUI state ----
     TuiState state;
     state.status_line = "[" + provider->name() + "] model: " +
@@ -606,6 +622,13 @@ int main(int argc, char* argv[]) {
     if (dangerous_mode) {
         state.conversation.push_back({"system",
             "[DANGEROUS MODE] All permission checks are bypassed. Use with caution!", false});
+    }
+
+    if (mcp_manager.connected_server_count() > 0) {
+        state.conversation.push_back({"system",
+            "[MCP] Connected " + std::to_string(mcp_manager.connected_server_count()) +
+            " server(s), registered " + std::to_string(mcp_manager.discovered_tool_count()) +
+            " external tool(s).", false});
     }
 
     // Animation tick for Thinking... indicator
@@ -1550,6 +1573,10 @@ int main(int argc, char* argv[]) {
         }
     }
     agent_loop.shutdown();
+
+    // Tear down MCP child processes after the agent worker has stopped, so no
+    // in-flight tool calls can race with the clients being destroyed.
+    mcp_manager.shutdown();
 
     // Abort and join any in-progress compact thread
     state.compact_abort_requested.store(true);
