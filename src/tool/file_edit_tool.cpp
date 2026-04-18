@@ -2,56 +2,52 @@
 #include "mtime_tracker.hpp"
 #include "diff_utils.hpp"
 #include "utils/logger.hpp"
+#include "utils/tool_args_parser.hpp"
+#include "utils/tool_errors.hpp"
+#include "utils/file_operations.hpp"
 #include <nlohmann/json.hpp>
-#include <fstream>
-#include <sstream>
 #include <filesystem>
 
 namespace acecode {
 
 static ToolResult execute_file_edit(const std::string& arguments_json) {
-    std::string file_path;
-    std::string old_string;
-    std::string new_string;
-
-    try {
-        auto args = nlohmann::json::parse(arguments_json);
-        file_path = args.value("file_path", "");
-        old_string = args.value("old_string", "");
-        new_string = args.value("new_string", "");
-    } catch (...) {
-        return ToolResult{"[Error] Failed to parse tool arguments.", false};
+    // Parse arguments
+    ToolArgsParser parser(arguments_json);
+    if (parser.has_error()) {
+        return ToolResult{parser.error(), false};
     }
+
+    std::string file_path = parser.get_or<std::string>("file_path", "");
+    std::string old_string = parser.get_or<std::string>("old_string", "");
+    std::string new_string = parser.get_or<std::string>("new_string", "");
 
     if (file_path.empty()) {
-        return ToolResult{"[Error] No file_path provided.", false};
+        return ToolResult{ToolErrors::missing_parameter("file_path"), false};
     }
     if (old_string.empty()) {
-        return ToolResult{"[Error] old_string cannot be empty.", false};
+        return ToolResult{ToolErrors::empty_parameter("old_string"), false};
     }
 
     LOG_DEBUG("file_edit: path=" + file_path + " old_len=" + std::to_string(old_string.size()) + " new_len=" + std::to_string(new_string.size()));
 
-    if (!std::filesystem::exists(file_path)) {
-        return ToolResult{"[Error] File not found: " + file_path +
-            ". Use file_write to create a new file.", false};
+    // Check file exists
+    auto exists_check = FileOperations::check_file_exists(file_path);
+    if (!exists_check.success) {
+        return ToolResult{exists_check.output + ". Use file_write to create a new file.", false};
     }
 
     // Mtime conflict check
-    if (MtimeTracker::instance().was_externally_modified(file_path)) {
-        return ToolResult{"[Error] File was modified externally since it was last read. "
-            "Re-read the file before editing: " + file_path, false};
+    auto conflict_check = FileOperations::check_mtime_conflict(file_path);
+    if (!conflict_check.success) {
+        return conflict_check;
     }
 
     // Read file
-    std::ifstream ifs(file_path, std::ios::binary);
-    if (!ifs.is_open()) {
-        return ToolResult{"[Error] Cannot open file: " + file_path, false};
+    std::string content;
+    std::string error;
+    if (!FileOperations::read_content(file_path, content, error)) {
+        return ToolResult{error, false};
     }
-    std::ostringstream oss;
-    oss << ifs.rdbuf();
-    std::string content = oss.str();
-    ifs.close();
 
     // Find all occurrences
     size_t count = 0;
@@ -64,15 +60,11 @@ static ToolResult execute_file_edit(const std::string& arguments_json) {
     }
 
     if (count == 0) {
-        return ToolResult{"[Error] old_string not found in " + file_path +
-            ". Re-read the file and make sure to use the exact string, "
-            "including whitespace and indentation.", false};
+        return ToolResult{ToolErrors::string_not_found(file_path), false};
     }
 
     if (count > 1) {
-        return ToolResult{"[Error] old_string found " + std::to_string(count) +
-            " times in " + file_path + ". Include more surrounding lines "
-            "to uniquely identify the target location.", false};
+        return ToolResult{ToolErrors::string_not_unique(count, file_path), false};
     }
 
     // Apply edit
@@ -80,12 +72,9 @@ static ToolResult execute_file_edit(const std::string& arguments_json) {
     content.replace(found_pos, old_string.size(), new_string);
 
     // Write back
-    std::ofstream ofs(file_path, std::ios::binary | std::ios::trunc);
-    if (!ofs.is_open()) {
-        return ToolResult{"[Error] Cannot write to file: " + file_path, false};
+    if (!FileOperations::write_content(file_path, content, error)) {
+        return ToolResult{error, false};
     }
-    ofs << content;
-    ofs.close();
 
     // Update mtime tracker
     MtimeTracker::instance().record_write(file_path);

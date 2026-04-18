@@ -2,27 +2,26 @@
 #include "mtime_tracker.hpp"
 #include "diff_utils.hpp"
 #include "utils/logger.hpp"
+#include "utils/tool_args_parser.hpp"
+#include "utils/tool_errors.hpp"
+#include "utils/file_operations.hpp"
 #include <nlohmann/json.hpp>
-#include <fstream>
-#include <sstream>
 #include <filesystem>
 
 namespace acecode {
 
 static ToolResult execute_file_write(const std::string& arguments_json) {
-    std::string file_path;
-    std::string content;
-
-    try {
-        auto args = nlohmann::json::parse(arguments_json);
-        file_path = args.value("file_path", "");
-        content = args.value("content", "");
-    } catch (...) {
-        return ToolResult{"[Error] Failed to parse tool arguments.", false};
+    // Parse arguments
+    ToolArgsParser parser(arguments_json);
+    if (parser.has_error()) {
+        return ToolResult{parser.error(), false};
     }
 
+    std::string file_path = parser.get_or<std::string>("file_path", "");
+    std::string content = parser.get_or<std::string>("content", "");
+
     if (file_path.empty()) {
-        return ToolResult{"[Error] No file_path provided.", false};
+        return ToolResult{ToolErrors::missing_parameter("file_path"), false};
     }
 
     LOG_DEBUG("file_write: path=" + file_path + " content_len=" + std::to_string(content.size()));
@@ -31,36 +30,24 @@ static ToolResult execute_file_write(const std::string& arguments_json) {
 
     // Mtime conflict check for existing files
     if (file_exists) {
-        if (MtimeTracker::instance().was_externally_modified(file_path)) {
-            return ToolResult{"[Error] File was modified externally since it was last read. "
-                "Re-read the file before writing to avoid data loss: " + file_path, false};
+        auto conflict_check = FileOperations::check_mtime_conflict(file_path);
+        if (!conflict_check.success) {
+            return conflict_check;
         }
     }
 
     // Read old content for diff (if overwriting)
     std::string old_content;
+    std::string error;
     if (file_exists) {
-        std::ifstream ifs(file_path, std::ios::binary);
-        if (ifs.is_open()) {
-            std::ostringstream oss;
-            oss << ifs.rdbuf();
-            old_content = oss.str();
-        }
-    }
-
-    // Create parent directories if needed
-    auto parent = std::filesystem::path(file_path).parent_path();
-    if (!parent.empty() && !std::filesystem::exists(parent)) {
-        std::filesystem::create_directories(parent);
+        FileOperations::read_content(file_path, old_content, error);
+        // Ignore read errors here, we'll still try to write
     }
 
     // Write content
-    std::ofstream ofs(file_path, std::ios::binary | std::ios::trunc);
-    if (!ofs.is_open()) {
-        return ToolResult{"[Error] Cannot open file for writing: " + file_path, false};
+    if (!FileOperations::write_content(file_path, content, error)) {
+        return ToolResult{error, false};
     }
-    ofs << content;
-    ofs.close();
 
     // Update mtime tracker
     MtimeTracker::instance().record_write(file_path);
