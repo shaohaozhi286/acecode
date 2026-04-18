@@ -89,8 +89,11 @@ set(MCP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(BUILD_MCP_EXAMPLES OFF CACHE BOOL "" FORCE)
 add_subdirectory(external/cpp-mcp EXCLUDE_FROM_ALL)
 
-target_include_directories(acecode PRIVATE 
+target_include_directories(acecode PRIVATE
     ${CMAKE_SOURCE_DIR}/external/cpp-mcp/include
+    # mcp_sse_client.h transitively includes httplib.h from common/; this path
+    # is scoped to acecode's TUs so it only affects mcp_manager.cpp in practice.
+    ${CMAKE_SOURCE_DIR}/external/cpp-mcp/common
 )
 
 target_link_libraries(acecode PRIVATE 

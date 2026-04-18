@@ -1,4 +1,5 @@
 #include "system_prompt.hpp"
+#include "../skills/skill_registry.hpp"
 #include <sstream>
 #include <filesystem>
 
@@ -62,7 +63,8 @@ static std::string generate_tools_prompt(const ToolExecutor& tools) {
     return oss.str();
 }
 
-std::string build_system_prompt(const ToolExecutor& tools, const std::string& cwd) {
+std::string build_system_prompt(const ToolExecutor& tools, const std::string& cwd,
+                                const SkillRegistry* skills) {
     std::ostringstream oss;
 
     oss << "You are an interactive agent called acecode that helps users with "
@@ -112,7 +114,24 @@ std::string build_system_prompt(const ToolExecutor& tools, const std::string& cw
         << "- CWD: " << cwd << "\n"
         << "- Shell: " << get_default_shell() << "\n\n";
 
+    oss << "# User Shell Mode\n\n"
+        << "- The user can run shell commands themselves by typing `!<cmd>` in the prompt. "
+        << "These commands are executed directly and their output is appended to the conversation "
+        << "as a `<bash-input>` / `<bash-stdout>` / `<bash-stderr>` / `<bash-exit-code>` block under the `user` role.\n"
+        << "- When you see such a block, treat it as a result the user has already obtained. Do NOT re-run the same command; use the output to answer or plan the next step.\n\n";
+
     oss << generate_tools_prompt(tools);
+
+    if (skills) {
+        auto available = skills->list();
+        if (!available.empty()) {
+            oss << "# Skills\n\n"
+                << "User-installed skills are available. Use the `skills_list` tool to "
+                << "discover them (name, description, category) and the `skill_view` tool "
+                << "to load a skill's full instructions before acting on a matching task. "
+                << "A skill may also be invoked directly by the user via `/<skill-name>`.\n\n";
+        }
+    }
 
     return oss.str();
 }

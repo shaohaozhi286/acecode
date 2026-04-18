@@ -10,11 +10,35 @@
 #include <utility>
 #include <vector>
 
-// Forward-declare cpp-mcp's stdio_client so mcp headers don't leak into
-// wider compilation units. The full definition is only needed inside the .cpp.
-namespace mcp { class stdio_client; }
+// Forward-declare the cpp-mcp client classes so mcp headers don't leak into
+// wider compilation units. The full definitions are only needed inside the .cpp.
+namespace mcp {
+    class client;
+    class stdio_client;
+    class sse_client;
+}
 
 namespace acecode {
+
+// Runtime state of an MCP server tracked by McpManager.
+enum class McpServerState {
+    Connected = 0, // child process running, tools registered
+    Disabled  = 1, // user-stopped via /mcp disable; tools unregistered
+    Failed    = 2, // last connect/reconnect attempt failed
+};
+
+// Lightweight summary of one MCP server, returned by list_servers() for the
+// /mcp command.
+struct McpServerInfo {
+    std::string name;
+    McpServerState state;
+    size_t tool_count;
+    // Human-readable transport tag: "stdio", "sse" or "http".
+    std::string transport;
+    // For stdio: joined "command args..." as configured.
+    // For sse/http: "<url><sse_endpoint>".
+    std::string command_line;
+};
 
 // McpManager owns the lifetime of every configured MCP stdio server, discovers
 // the tools they expose, and bridges tool invocations back to the acecode
@@ -49,19 +73,45 @@ public:
     std::vector<ToolDef> get_tool_definitions() const;
 
     // Count of successfully connected servers.
-    size_t connected_server_count() const { return servers_.size(); }
+    size_t connected_server_count() const;
 
     // Count of tools discovered across all servers.
     size_t discovered_tool_count() const { return discovered_tools_.size(); }
 
+    // Runtime control surface for /mcp slash command. All take a ToolExecutor
+    // ref because changes need to propagate to the registered tool set.
+    // Each returns true on a state-changing success.
+
+    // Stop the named server's child process and unregister its tools.
+    bool disable(const std::string& name, ToolExecutor& executor);
+
+    // Reconnect a previously-disabled or failed server (no-op if Connected).
+    bool enable(const std::string& name, ToolExecutor& executor);
+
+    // Force a teardown + reconnect, regardless of current state.
+    bool reconnect(const std::string& name, ToolExecutor& executor);
+
+    // Snapshot of all known servers in registration order.
+    std::vector<McpServerInfo> list_servers() const;
+
+    // Tools grouped by server (preserves discovery order). Servers without
+    // any registered tools (Disabled / Failed / empty) appear with an empty
+    // vector so callers can render a status line for them.
+    std::vector<std::pair<std::string, std::vector<ToolDef>>> list_tools_by_server() const;
+
+    // Whether the named server is recorded in the manager.
+    bool has_server(const std::string& name) const;
+
+    // Names of every recorded server (for diagnostic output).
+    std::vector<std::string> server_names() const;
+
 private:
     struct ServerEntry {
         std::string name;
-        std::shared_ptr<mcp::stdio_client> client;
-        int pid = -1;           // POSIX: actual pid; Windows: same field holds pid (handle tracked separately)
-#ifdef _WIN32
-        void* process_handle = nullptr; // Windows HANDLE; kept opaque to avoid leaking windows.h
-#endif
+        McpServerConfig cfg;                 // remembered so reconnect needs only the name
+        std::string command_line;            // human-readable locator (command line or url)
+        std::shared_ptr<mcp::client> client; // stdio_client or sse_client via base interface
+        McpServerState state = McpServerState::Failed;
     };
 
     struct DiscoveredTool {
@@ -81,8 +131,16 @@ private:
                       const std::string& tool_name,
                       const std::string& arguments_json);
 
-    // Force-kill a single server's subprocess. No-op if the process is gone.
-    static void kill_server(ServerEntry& entry);
+    // Locate an entry by name. Returns nullptr if missing. Caller must hold mu_.
+    ServerEntry* find_entry_locked(const std::string& name);
+
+    // Tear down a single server: stop child, drop tools from discovered_tools_,
+    // unregister them from executor. Caller must hold mu_.
+    void teardown_locked(ServerEntry& entry, ToolExecutor& executor);
+
+    // Connect & register tools for a single entry. Sets entry.state. Returns
+    // true on success. Caller must hold mu_.
+    bool connect_entry_locked(ServerEntry& entry, ToolExecutor& executor);
 
     mutable std::mutex mu_;
     std::vector<ServerEntry> servers_;

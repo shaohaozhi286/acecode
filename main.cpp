@@ -45,6 +45,10 @@
 #include "tool/grep_tool.hpp"
 #include "tool/glob_tool.hpp"
 #include "tool/mcp_manager.hpp"
+#include "tool/skills_tool.hpp"
+#include "tool/skill_view_tool.hpp"
+#include "skills/skill_registry.hpp"
+#include "skills/skill_commands.hpp"
 #include "utils/logger.hpp"
 #include "permissions.hpp"
 #include "agent_loop.hpp"
@@ -56,6 +60,7 @@
 #include "utils/token_tracker.hpp"
 #include "markdown/markdown_formatter.hpp"
 #include "session/session_manager.hpp"
+#include "tui/slash_dropdown.hpp"
 
 using namespace ftxui;
 using namespace acecode;
@@ -594,6 +599,28 @@ int main(int argc, char* argv[]) {
     tools.register_tool(create_grep_tool());
     tools.register_tool(create_glob_tool());
 
+    // ---- Skill registry ----
+    SkillRegistry skill_registry;
+    {
+        std::vector<std::filesystem::path> roots;
+        std::string default_skills_dir = expand_path("~/.acecode/skills");
+        std::error_code ec;
+        if (!std::filesystem::exists(default_skills_dir, ec)) {
+            std::filesystem::create_directories(default_skills_dir, ec);
+        }
+        roots.emplace_back(default_skills_dir);
+        for (const auto& raw : config.skills.external_dirs) {
+            std::string expanded = expand_path(raw);
+            if (!expanded.empty()) roots.emplace_back(expanded);
+        }
+        skill_registry.set_scan_roots(std::move(roots));
+        skill_registry.set_disabled(std::unordered_set<std::string>(
+            config.skills.disabled.begin(), config.skills.disabled.end()));
+        skill_registry.scan();
+    }
+    tools.register_tool(create_skills_list_tool(skill_registry));
+    tools.register_tool(create_skill_view_tool(skill_registry));
+
     // ---- MCP servers ----
     McpManager mcp_manager;
     {
@@ -838,6 +865,7 @@ int main(int argc, char* argv[]) {
 
     AgentLoop agent_loop(*provider, tools, callbacks, working_dir, permissions);
     agent_loop.set_context_window(config.context_window);
+    agent_loop.set_skill_registry(&skill_registry);
 
     // Auto-compact tracking state for circuit breaker
     AutoCompactTrackingState compact_tracking;
@@ -946,7 +974,24 @@ int main(int argc, char* argv[]) {
         }
         if (!target_id.empty()) {
             auto messages = session_manager.resume_session(target_id);
-            for (const auto& msg : messages) {
+            for (size_t i = 0; i < messages.size(); ++i) {
+                const auto& msg = messages[i];
+
+                // Recognise persisted shell-mode pairs: a user message starting
+                // with '!' directly followed by a tool_result. Render both in
+                // the chat view, but inject a single XML-tagged user turn into
+                // the agent context so the LLM sees the expected structure.
+                bool is_shell_user = (msg.role == "user" && !msg.content.empty() && msg.content[0] == '!');
+                bool next_is_result = (i + 1 < messages.size() && messages[i + 1].role == "tool_result");
+                if (is_shell_user && next_is_result) {
+                    state.conversation.push_back({msg.role, msg.content, false});
+                    state.conversation.push_back({messages[i + 1].role, messages[i + 1].content, true});
+                    std::string cmd = msg.content.substr(1);
+                    agent_loop.inject_shell_turn(cmd, messages[i + 1].content, "", 0);
+                    ++i;
+                    continue;
+                }
+
                 agent_loop.push_message(msg);
                 bool is_tool = (msg.role == "tool");
                 state.conversation.push_back({msg.role, msg.content, is_tool});
@@ -961,6 +1006,13 @@ int main(int argc, char* argv[]) {
     // Slash command registry
     CommandRegistry cmd_registry;
     register_builtin_commands(cmd_registry);
+    {
+        auto keys = register_skill_commands_tracked(cmd_registry, skill_registry);
+        if (!keys.empty()) {
+            LOG_INFO("[skills] Registered " + std::to_string(keys.size()) +
+                     " skill slash command(s)");
+        }
+    }
 
     // Now that agent_loop exists, update on_busy_changed to drain pending queue
     callbacks.on_busy_changed = [&state, &clamp_chat_focus, &agent_loop, &screen](bool busy) {
@@ -1015,7 +1067,7 @@ int main(int argc, char* argv[]) {
     });
 
     // Wrap with CatchEvent to handle all keyboard input
-    auto input_with_esc = CatchEvent(input_renderer, [&state, &screen, &clamp_chat_focus, &auth_done, &cmd_registry, &agent_loop, &provider, &config, &token_tracker, &permissions, &session_manager, &scroll_chat, &chat_box](Event event) {
+    auto input_with_esc = CatchEvent(input_renderer, [&state, &screen, &clamp_chat_focus, &auth_done, &cmd_registry, &agent_loop, &provider, &config, &token_tracker, &permissions, &session_manager, &scroll_chat, &chat_box, &mcp_manager, &tools, &skill_registry](Event event) {
         if (event == Event::CtrlC) {
             // If compaction is in progress, Ctrl+C cancels it instead of exiting
             {
@@ -1053,6 +1105,53 @@ int main(int argc, char* argv[]) {
                 screen.PostEvent(Event::Custom);
             }
             return true;
+        }
+
+        // Slash-command dropdown guard: when the dropdown is open, intercept
+        // the navigation/commit keys before any other overlay or input-history
+        // handler gets them.
+        {
+            std::unique_lock<std::mutex> lk(state.mu);
+            if (state.slash_dropdown_active && !state.slash_dropdown_items.empty()) {
+                auto commit_selection = [&]() {
+                    const auto& item = state.slash_dropdown_items[state.slash_dropdown_selected];
+                    state.input_text = "/" + item.name + " ";
+                    state.slash_dropdown_active = false;
+                    state.slash_dropdown_items.clear();
+                    state.slash_dropdown_selected = 0;
+                    state.slash_dropdown_total_matches = 0;
+                    state.slash_dropdown_dismissed_for_input = false;
+                };
+                const int n = static_cast<int>(state.slash_dropdown_items.size());
+                if (event == Event::ArrowUp ||
+                    event == Event::Special(std::string(1, '\x10'))) { // Ctrl+P
+                    state.slash_dropdown_selected =
+                        (state.slash_dropdown_selected - 1 + n) % n;
+                    screen.PostEvent(Event::Custom);
+                    return true;
+                }
+                if (event == Event::ArrowDown ||
+                    event == Event::Special(std::string(1, '\x0E'))) { // Ctrl+N
+                    state.slash_dropdown_selected =
+                        (state.slash_dropdown_selected + 1) % n;
+                    screen.PostEvent(Event::Custom);
+                    return true;
+                }
+                if (event == Event::Return || event == Event::Tab) {
+                    commit_selection();
+                    screen.PostEvent(Event::Custom);
+                    return true;
+                }
+                if (event == Event::Escape) {
+                    state.slash_dropdown_active = false;
+                    state.slash_dropdown_items.clear();
+                    state.slash_dropdown_selected = 0;
+                    state.slash_dropdown_total_matches = 0;
+                    state.slash_dropdown_dismissed_for_input = true;
+                    screen.PostEvent(Event::Custom);
+                    return true;
+                }
+            }
         }
 
         // Enter → submit message
@@ -1100,6 +1199,24 @@ int main(int argc, char* argv[]) {
 
             std::string prompt = state.input_text;
             state.input_text.clear();
+            refresh_slash_dropdown(state, cmd_registry);
+
+            // Shell input mode: dispatch directly to BashTool via agent worker.
+            // Skips slash-command parsing and LLM round-trip.
+            if (state.input_mode == InputMode::Shell) {
+                std::string shell_cmd = prompt;
+                state.input_history.push_back(prepend_mode_prefix(shell_cmd, InputMode::Shell));
+                state.history_index = -1;
+                state.input_mode = InputMode::Normal;
+
+                state.conversation.push_back({"user", "!" + shell_cmd, false});
+                state.chat_follow_tail = true;
+                clamp_chat_focus();
+                state.current_thinking_phrase = "Running shell";
+                state.is_waiting = true;
+                agent_loop.submit_shell(shell_cmd);
+                return true;
+            }
 
             // Record history
             state.input_history.push_back(prompt);
@@ -1112,7 +1229,11 @@ int main(int argc, char* argv[]) {
                     permissions,
                     [&screen]() { screen.Exit(); },
                     &session_manager,
-                    [&screen]() { screen.PostEvent(Event::Custom); }
+                    [&screen]() { screen.PostEvent(Event::Custom); },
+                    &mcp_manager,
+                    &tools,
+                    &skill_registry,
+                    &cmd_registry
                 };
                 lk.unlock();
                 bool handled = cmd_registry.dispatch(prompt, cmd_ctx);
@@ -1195,6 +1316,14 @@ int main(int argc, char* argv[]) {
                 state.confirm_cv.notify_one();
                 return true;
             }
+            // Shell mode: Escape exits and clears the buffer. Takes precedence
+            // over `is_waiting` abort so typing Esc in shell mode never fires
+            // an unintended cancel on a pending agent turn.
+            if (state.input_mode == InputMode::Shell) {
+                state.input_mode = InputMode::Normal;
+                state.input_text.clear();
+                return true;
+            }
             if (state.is_waiting) {
                 agent_loop.cancel();
                 return true;
@@ -1241,12 +1370,15 @@ int main(int argc, char* argv[]) {
             }
             if (state.input_history.empty()) return true;
             if (state.history_index == -1) {
-                state.saved_input = state.input_text;
+                state.saved_input = prepend_mode_prefix(state.input_text, state.input_mode);
                 state.history_index = (int)state.input_history.size() - 1;
             } else if (state.history_index > 0) {
                 state.history_index--;
             }
-            state.input_text = state.input_history[state.history_index];
+            auto [hist_mode, hist_text] = parse_mode_prefix(state.input_history[state.history_index]);
+            state.input_mode = hist_mode;
+            state.input_text = hist_text;
+            refresh_slash_dropdown(state, cmd_registry);
             return true;
         }
         if (event == Event::ArrowDown) {
@@ -1259,24 +1391,36 @@ int main(int argc, char* argv[]) {
             if (state.history_index == -1) return true;
             if (state.history_index < (int)state.input_history.size() - 1) {
                 state.history_index++;
-                state.input_text = state.input_history[state.history_index];
+                auto [hist_mode, hist_text] = parse_mode_prefix(state.input_history[state.history_index]);
+                state.input_mode = hist_mode;
+                state.input_text = hist_text;
             } else {
                 state.history_index = -1;
-                state.input_text = state.saved_input;
+                auto [saved_mode, saved_text] = parse_mode_prefix(state.saved_input);
+                state.input_mode = saved_mode;
+                state.input_text = saved_text;
             }
+            refresh_slash_dropdown(state, cmd_registry);
             return true;
         }
         // Backspace: remove last UTF-8 character
         if (event == Event::Backspace) {
             std::lock_guard<std::mutex> lk(state.mu);
-            if (!state.input_text.empty()) {
-                size_t pos = state.input_text.size() - 1;
-                // Walk back over UTF-8 continuation bytes (10xxxxxx)
-                while (pos > 0 && (static_cast<unsigned char>(state.input_text[pos]) & 0xC0) == 0x80) {
-                    pos--;
+            if (state.input_text.empty()) {
+                // On empty buffer, Backspace exits Shell mode back to Normal.
+                if (state.input_mode == InputMode::Shell) {
+                    state.input_mode = InputMode::Normal;
                 }
-                state.input_text.erase(pos);
+                refresh_slash_dropdown(state, cmd_registry);
+                return true;
             }
+            size_t pos = state.input_text.size() - 1;
+            // Walk back over UTF-8 continuation bytes (10xxxxxx)
+            while (pos > 0 && (static_cast<unsigned char>(state.input_text[pos]) & 0xC0) == 0x80) {
+                pos--;
+            }
+            state.input_text.erase(pos);
+            refresh_slash_dropdown(state, cmd_registry);
             return true;
         }
         // Printable character input
@@ -1301,9 +1445,19 @@ int main(int argc, char* argv[]) {
                 }
                 return true;
             }
+            // Shell-mode trigger: `!` on an empty Normal buffer switches mode
+            // without being inserted. Subsequent `!` characters are literal.
+            if (state.input_mode == InputMode::Normal &&
+                state.input_text.empty() &&
+                event.character() == "!") {
+                state.input_mode = InputMode::Shell;
+                state.history_index = -1;
+                return true;
+            }
             state.input_text += event.character();
             // Reset history browsing on new input
             state.history_index = -1;
+            refresh_slash_dropdown(state, cmd_registry);
             return true;
         }
         return false;
@@ -1488,6 +1642,7 @@ int main(int argc, char* argv[]) {
             picker_rows.push_back(text(""));
             resume_picker_element = vbox(std::move(picker_rows)) | border | color(Color::Cyan);
         }
+        Element slash_dropdown_element = render_slash_dropdown(state);
         if (state.confirm_pending) {
             prompt_line = hbox({
                 text(" [" + state.confirm_tool_name + "] ") | bold | color(Color::Magenta),
@@ -1501,7 +1656,11 @@ int main(int argc, char* argv[]) {
             });
         } else {
             Elements prompt_parts;
-            prompt_parts.push_back(text(" > ") | bold | color(Color::Cyan));
+            if (state.input_mode == InputMode::Shell) {
+                prompt_parts.push_back(text(" ! ") | bold | color(Color::Red));
+            } else {
+                prompt_parts.push_back(text(" > ") | bold | color(Color::Cyan));
+            }
             prompt_parts.push_back(input_with_esc->Render() | flex);
             if (!state.pending_queue.empty()) {
                 prompt_parts.push_back(
@@ -1545,16 +1704,21 @@ int main(int argc, char* argv[]) {
         // to position the IME window. The Win32 IME APIs (ImmSetComposition
         // Window) don't work under ConPTY.
 
+        Color outer_border_color = (state.input_mode == InputMode::Shell)
+            ? Color::Red
+            : Color::GrayLight;
+
         return vbox({
             header,
             separatorHeavy() | color(Color::GrayDark),
             message_view,
             resume_picker_element,
+            slash_dropdown_element,
             thinking_element,
             separatorLight() | color(Color::GrayDark),
             prompt_line,
             bottom_bar,
-        }) | borderRounded | color(Color::GrayLight);
+        }) | borderRounded | color(outer_border_color);
     });
 
     screen.Loop(renderer);

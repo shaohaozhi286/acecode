@@ -7,6 +7,7 @@
 #include <future>
 #include <algorithm>
 #include <thread>
+#include <sstream>
 
 namespace acecode {
 
@@ -48,7 +49,7 @@ void AgentLoop::set_callbacks(AgentCallbacks cb) {
 
 void AgentLoop::worker_main() {
     while (true) {
-        std::string task;
+        WorkerTask task;
         {
             std::unique_lock<std::mutex> lk(queue_mu_);
             queue_cv_.wait(lk, [this] {
@@ -58,16 +59,46 @@ void AgentLoop::worker_main() {
             task = std::move(task_queue_.front());
             task_queue_.pop();
         }
-        run_agent(task);
+        switch (task.kind) {
+        case WorkerTask::Kind::Chat:
+            run_agent(task.payload);
+            break;
+        case WorkerTask::Kind::Shell:
+            run_shell(task.payload);
+            break;
+        }
     }
 }
 
 void AgentLoop::submit(const std::string& user_message) {
     {
         std::lock_guard<std::mutex> lk(queue_mu_);
-        task_queue_.push(user_message);
+        task_queue_.push(WorkerTask{WorkerTask::Kind::Chat, user_message});
     }
     queue_cv_.notify_one();
+}
+
+void AgentLoop::submit_shell(std::string command) {
+    {
+        std::lock_guard<std::mutex> lk(queue_mu_);
+        task_queue_.push(WorkerTask{WorkerTask::Kind::Shell, std::move(command)});
+    }
+    queue_cv_.notify_one();
+}
+
+void AgentLoop::inject_shell_turn(const std::string& cmd,
+                                  const std::string& stdout_text,
+                                  const std::string& stderr_text,
+                                  int exit_code) {
+    ChatMessage msg;
+    msg.role = "user";
+    std::ostringstream oss;
+    oss << "<bash-input>" << cmd << "</bash-input>\n"
+        << "<bash-stdout>" << stdout_text << "</bash-stdout>\n"
+        << "<bash-stderr>" << stderr_text << "</bash-stderr>\n"
+        << "<bash-exit-code>" << exit_code << "</bash-exit-code>";
+    msg.content = oss.str();
+    messages_.push_back(std::move(msg));
 }
 
 void AgentLoop::run_agent(const std::string& user_message) {
@@ -112,7 +143,7 @@ void AgentLoop::run_agent(const std::string& user_message) {
         }
 
         // Build system prompt each turn (dynamic: includes current tools and CWD)
-        std::string system_prompt = build_system_prompt(tools_, cwd_);
+        std::string system_prompt = build_system_prompt(tools_, cwd_, skill_registry_);
         LOG_DEBUG("System prompt length: " + std::to_string(system_prompt.size()));
 
         // Prepare messages with system prompt at front, filtering out meta messages
@@ -432,6 +463,63 @@ void AgentLoop::run_agent(const std::string& user_message) {
 
         // Loop back to call the provider again with the tool results
     }
+
+    if (callbacks_.on_busy_changed) {
+        callbacks_.on_busy_changed(false);
+    }
+}
+
+void AgentLoop::run_shell(const std::string& command) {
+    abort_requested_ = false;
+
+    LOG_WARN("user_initiated_shell: " + log_truncate(command, 200));
+
+    if (callbacks_.on_busy_changed) {
+        callbacks_.on_busy_changed(true);
+    }
+
+    // Surface the invocation in the TUI using the usual tool_call styling so
+    // the user sees a clear "-> bash command" line followed by its result.
+    nlohmann::json args = {{"command", command}};
+    std::string args_json = args.dump();
+    if (callbacks_.on_message) {
+        callbacks_.on_message("tool_call", "[Tool: bash] " + args_json, true);
+    }
+
+    ToolResult result{"[Error] bash tool not registered", false};
+    if (tools_.has_tool("bash")) {
+        try {
+            result = tools_.execute("bash", args_json);
+        } catch (const std::exception& e) {
+            LOG_ERROR(std::string("shell exec exception: ") + e.what());
+            result = ToolResult{std::string("[Error] ") + e.what(), false};
+        }
+    } else {
+        LOG_WARN("Shell mode invoked but `bash` tool is not registered");
+    }
+
+    if (callbacks_.on_message) {
+        callbacks_.on_message("tool_result", result.output, true);
+    }
+
+    // Persist the two display-side messages so --resume can rehydrate both the
+    // chat view and (via the recovery pass in main.cpp) the LLM messages_.
+    if (session_manager_) {
+        ChatMessage user_msg;
+        user_msg.role = "user";
+        user_msg.content = "!" + command;
+        session_manager_->on_message(user_msg);
+
+        ChatMessage tool_msg;
+        tool_msg.role = "tool_result";
+        tool_msg.content = result.output;
+        session_manager_->on_message(tool_msg);
+    }
+
+    // Inject into LLM context for subsequent turns. BashTool currently merges
+    // stdout+stderr into `result.output`, so we report it as stdout and leave
+    // stderr empty; exit code derives from `success`.
+    inject_shell_turn(command, result.output, "", result.success ? 0 : 1);
 
     if (callbacks_.on_busy_changed) {
         callbacks_.on_busy_changed(false);

@@ -7,6 +7,13 @@ void CommandRegistry::register_command(const SlashCommand& cmd) {
     commands_[cmd.name] = cmd;
 }
 
+bool CommandRegistry::unregister_command(const std::string& name) {
+    auto it = commands_.find(name);
+    if (it == commands_.end()) return false;
+    commands_.erase(it);
+    return true;
+}
+
 bool CommandRegistry::dispatch(const std::string& input, CommandContext& ctx) {
     if (input.empty() || input[0] != '/') return false;
 

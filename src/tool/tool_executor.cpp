@@ -10,6 +10,14 @@ void ToolExecutor::register_tool(const ToolImpl& tool) {
     tools_[tool.definition.name] = tool;
 }
 
+bool ToolExecutor::unregister_tool(const std::string& name) {
+    auto it = tools_.find(name);
+    if (it == tools_.end()) return false;
+    LOG_INFO("Unregistering tool: " + name);
+    tools_.erase(it);
+    return true;
+}
+
 std::vector<ToolDef> ToolExecutor::get_tool_definitions() const {
     std::vector<ToolDef> defs;
     for (const auto& [name, impl] : tools_) {

@@ -34,6 +34,9 @@ class ToolExecutor {
 public:
     void register_tool(const ToolImpl& tool);
 
+    // Remove a tool by name. Returns true if the tool existed and was removed.
+    bool unregister_tool(const std::string& name);
+
     // Get all tool definitions for inclusion in API requests
     std::vector<ToolDef> get_tool_definitions() const;
 

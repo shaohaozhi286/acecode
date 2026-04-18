@@ -18,6 +18,8 @@
 
 namespace acecode {
 
+class SkillRegistry;
+
 // Callbacks for the TUI to observe agent loop events
 struct AgentCallbacks {
     // Called when a new message is added to the conversation
@@ -53,6 +55,22 @@ public:
     // The internal worker thread will process it.
     void submit(const std::string& user_message);
 
+    // Submit a user-initiated shell command triggered by `!` mode. Non-blocking:
+    // enqueues on the same worker so it serialises with LLM turns. The worker
+    // invokes BashTool directly (no LLM round-trip), emits tool_call + tool_result
+    // UI messages via callbacks, and appends a `<bash-input>/<bash-stdout>/...`
+    // user-role entry to messages_ for the next LLM turn.
+    void submit_shell(std::string command);
+
+    // Append a single user-role entry to messages_ representing an already-run
+    // shell command and its captured output. Used both by the shell worker
+    // branch and by --resume to rehydrate LLM context from persisted session
+    // messages (`!cmd` user + tool_result pair).
+    void inject_shell_turn(const std::string& cmd,
+                           const std::string& stdout_text,
+                           const std::string& stderr_text,
+                           int exit_code);
+
     // Abort the current inference. Safe to call from any thread.
     void abort();
 
@@ -80,9 +98,18 @@ public:
 
     void set_session_manager(SessionManager* sm) { session_manager_ = sm; }
 
+    void set_skill_registry(const SkillRegistry* sr) { skill_registry_ = sr; }
+
 private:
     void worker_main();
     void run_agent(const std::string& user_message);
+    void run_shell(const std::string& command);
+
+    struct WorkerTask {
+        enum class Kind { Chat, Shell };
+        Kind kind = Kind::Chat;
+        std::string payload;
+    };
 
     LlmProvider& provider_;
     ToolExecutor& tools_;
@@ -95,12 +122,13 @@ private:
     int context_window_ = 128000;
     std::atomic<int> last_api_prompt_tokens_{0}; // from most recent API response
     SessionManager* session_manager_ = nullptr;
+    const SkillRegistry* skill_registry_ = nullptr;
 
     // Worker thread and task queue
     std::thread worker_thread_;
     std::mutex queue_mu_;
     std::condition_variable queue_cv_;
-    std::queue<std::string> task_queue_;
+    std::queue<WorkerTask> task_queue_;
     bool shutdown_requested_ = false;
 };
 

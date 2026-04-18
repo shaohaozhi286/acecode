@@ -72,7 +72,9 @@ User input → TUI event handler → `AgentLoop` → `LlmProvider::chat_stream()
 
 - **`src/commands/`**: `CommandRegistry` dispatches slash commands (`/help`, `/clear`, `/model`, `/compact`, `/micro-compact`, `/configure`, `/session`). Each command receives a `CommandContext` with full app state.
 
-- **`src/tui_state.hpp`**: Central shared state for the TUI — message list, input buffer, thinking animation flags, tool-confirmation overlays, session picker.
+- **`src/tui/slash_dropdown.{hpp,cpp}`**: Autocomplete dropdown shown above the input while the buffer starts with `/` and contains no whitespace. `refresh_slash_dropdown()` is called under `TuiState::mu` after every edit to `input_text` (character input, backspace, history recall, submit-clear); it reads the unified `CommandRegistry` (built-ins + skills), ranks by prefix > substring(name) > substring(description), caps at 8 items + "+N more" footer, and preserves the selected command name across filter updates. The event handler in `main.cpp` intercepts `↑/↓/Ctrl+P/Ctrl+N` (cyclic move), `Return/Tab` (commit = replace buffer with `/<name> `, no submit), and `Esc` (close + set `dismissed_for_input` until the buffer leaves command position). Suppressed while the resume picker or tool-confirmation dialog is active.
+
+- **`src/tui_state.hpp`**: Central shared state for the TUI — message list, input buffer, thinking animation flags, tool-confirmation overlays, session picker, slash-command dropdown.
 
 - **`src/prompt/system_prompt.hpp`**: Builds the dynamic system prompt from working directory info and the tool registry's auto-generated descriptions.
 
@@ -81,6 +83,8 @@ User input → TUI event handler → `AgentLoop` → `LlmProvider::chat_stream()
 - **`src/utils/`**: `logger.hpp` (file log to `acecode.log`), `token_tracker.hpp` (cumulative cost), `path_validator.hpp` (prevents escaping project root), `encoding.hpp` (UTF-8 helpers), `uuid.hpp` (session IDs).
 
 - **`src/auth/github_auth.hpp`**: GitHub device-flow OAuth — generates user code, polls, persists token.
+
+- **`src/skills/`**: User-authored `SKILL.md` documents discovered from `~/.acecode/skills/<category>/<name>/SKILL.md` (plus any `skills.external_dirs` in config). `SkillRegistry` scans at startup, reads only YAML frontmatter for the index, and lazily loads the body when invoked. Each skill is registered as a `/<skill-name>` slash command; the `skills_list` and `skill_view` tools expose the same set to the LLM for progressive-disclosure discovery. Disabled names in `config.skills.disabled` are skipped. `/skills reload` rescans disk.
 
 ### Threading Model
 
@@ -100,9 +104,35 @@ Callbacks from these threads post events back into the FTXUI `ScreenInteractive`
   "openai": { "base_url": "http://localhost:1234/v1", "api_key": "", "model": "local-model" },
   "copilot": { "model": "gpt-4o" },
   "context_window": 128000,
-  "max_sessions": 50
+  "max_sessions": 50,
+  "skills": {
+    "disabled": [],
+    "external_dirs": []
+  },
+  "mcp_servers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/expose"]
+    },
+    "remote-sse": {
+      "transport": "sse",
+      "url": "https://mcp.example.com",
+      "sse_endpoint": "/sse",
+      "auth_token": "sk-...",
+      "headers": { "X-Team": "acecode" },
+      "timeout_seconds": 30,
+      "validate_certificates": true
+    },
+    "remote-http": {
+      "transport": "http",
+      "url": "https://mcp-streamable.example.com",
+      "sse_endpoint": "/mcp"
+    }
+  }
 }
 ```
+
+`mcp_servers` entries without a `transport` field are treated as `stdio` for backward compatibility. `sse` uses the legacy `/sse` + `/message` two-endpoint protocol; `http` uses the 2025-03-26 Streamable HTTP single-endpoint protocol (default path `/mcp`). They map to distinct client implementations inside `cpp-mcp`.
 
 ## CI / Release
 

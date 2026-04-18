@@ -1,6 +1,10 @@
 #include "builtin_commands.hpp"
 #include "compact.hpp"
 #include "../provider/model_context_resolver.hpp"
+#include "../tool/mcp_manager.hpp"
+#include "../tool/tool_executor.hpp"
+#include "../skills/skill_registry.hpp"
+#include "../skills/skill_commands.hpp"
 #include <mutex>
 #include <sstream>
 #include <iomanip>
@@ -19,7 +23,17 @@ static void cmd_help(CommandContext& ctx, const std::string& /*args*/) {
         << "  /config   - Show current configuration\n"
         << "  /cost     - Show token usage and estimated cost\n"
         << "  /resume   - Resume a previous session\n"
+        << "  /mcp      - Manage MCP servers\n"
+        << "  /skills   - List, invoke, or reload installed skills\n"
         << "  /exit     - Exit acecode";
+
+    if (ctx.skills) {
+        size_t n = ctx.skills->list().size();
+        if (n > 0) {
+            oss << "\n\n" << n << " skill" << (n == 1 ? "" : "s")
+                << " installed. Type /skills for the full list, or /skills help for usage.";
+        }
+    }
     ctx.state.conversation.push_back({"system", oss.str(), false});
     ctx.state.chat_follow_tail = true;
 }
@@ -137,10 +151,276 @@ static void cmd_compact(CommandContext& ctx, const std::string& /*args*/) {
     });
 }
 
+static const char* mcp_state_label(McpServerState s) {
+    switch (s) {
+        case McpServerState::Connected: return "connected";
+        case McpServerState::Disabled:  return "disabled";
+        case McpServerState::Failed:    return "failed";
+    }
+    return "unknown";
+}
+
+static void mcp_push(CommandContext& ctx, const std::string& msg) {
+    ctx.state.conversation.push_back({"system", msg, false});
+    ctx.state.chat_follow_tail = true;
+}
+
+static std::string mcp_known_servers(const McpManager& mgr) {
+    auto names = mgr.server_names();
+    if (names.empty()) return "(none)";
+    std::ostringstream oss;
+    for (size_t i = 0; i < names.size(); ++i) {
+        if (i) oss << ", ";
+        oss << names[i];
+    }
+    return oss.str();
+}
+
+static void cmd_mcp(CommandContext& ctx, const std::string& args) {
+    std::lock_guard<std::mutex> lk(ctx.state.mu);
+
+    if (!ctx.mcp_manager || !ctx.tools) {
+        mcp_push(ctx, "MCP manager is not available in this session.");
+        return;
+    }
+    McpManager& mgr = *ctx.mcp_manager;
+    ToolExecutor& tools = *ctx.tools;
+
+    // Parse: first token is subcommand, remainder is name.
+    std::string trimmed = args;
+    while (!trimmed.empty() && std::isspace(static_cast<unsigned char>(trimmed.front()))) {
+        trimmed.erase(trimmed.begin());
+    }
+    while (!trimmed.empty() && std::isspace(static_cast<unsigned char>(trimmed.back()))) {
+        trimmed.pop_back();
+    }
+
+    std::string sub, name;
+    if (!trimmed.empty()) {
+        auto sp = trimmed.find(' ');
+        if (sp == std::string::npos) {
+            sub = trimmed;
+        } else {
+            sub = trimmed.substr(0, sp);
+            name = trimmed.substr(sp + 1);
+            while (!name.empty() && std::isspace(static_cast<unsigned char>(name.front()))) {
+                name.erase(name.begin());
+            }
+        }
+    }
+
+    // Default view: list servers with state summary.
+    if (sub.empty()) {
+        auto servers = mgr.list_servers();
+        if (servers.empty()) {
+            mcp_push(ctx, "No MCP servers configured.");
+            return;
+        }
+        std::ostringstream oss;
+        oss << "MCP servers:";
+        for (const auto& s : servers) {
+            oss << "\n  " << s.name
+                << "  [" << mcp_state_label(s.state) << "]"
+                << "  [" << s.transport << "]"
+                << "  tools=" << s.tool_count
+                << "  at=" << s.command_line;
+        }
+        mcp_push(ctx, oss.str());
+        return;
+    }
+
+    if (sub == "help") {
+        std::ostringstream oss;
+        oss << "/mcp usage:\n"
+            << "  /mcp                    - List servers and status\n"
+            << "  /mcp list               - List tools grouped by server\n"
+            << "  /mcp enable <name>      - Connect a disabled or failed server\n"
+            << "  /mcp disable <name>     - Stop a server and unregister its tools\n"
+            << "  /mcp reconnect <name>   - Force a teardown + reconnect\n"
+            << "  /mcp help               - Show this help";
+        mcp_push(ctx, oss.str());
+        return;
+    }
+
+    if (sub == "list") {
+        auto grouped = mgr.list_tools_by_server();
+        if (grouped.empty()) {
+            mcp_push(ctx, "No MCP servers configured.");
+            return;
+        }
+        auto servers = mgr.list_servers();
+        std::map<std::string, McpServerState> state_map;
+        for (const auto& s : servers) state_map[s.name] = s.state;
+
+        std::ostringstream oss;
+        oss << "MCP tools:";
+        for (const auto& [server, defs] : grouped) {
+            auto it = state_map.find(server);
+            const char* label = (it != state_map.end()) ? mcp_state_label(it->second) : "unknown";
+            oss << "\n  " << server << "  [" << label << "]";
+            if (defs.empty()) {
+                oss << "\n    (no tools registered)";
+            } else {
+                for (const auto& d : defs) {
+                    oss << "\n    - " << d.name;
+                    if (!d.description.empty()) {
+                        std::string desc = d.description;
+                        if (desc.size() > 80) desc = desc.substr(0, 77) + "...";
+                        oss << "  " << desc;
+                    }
+                }
+            }
+        }
+        mcp_push(ctx, oss.str());
+        return;
+    }
+
+    if (sub == "disable" || sub == "enable" || sub == "reconnect") {
+        if (name.empty()) {
+            mcp_push(ctx, "Usage: /mcp " + sub + " <server-name>");
+            return;
+        }
+        if (!mgr.has_server(name)) {
+            mcp_push(ctx, "Unknown MCP server '" + name + "'. Known: " + mcp_known_servers(mgr));
+            return;
+        }
+
+        bool changed = false;
+        if (sub == "disable") {
+            changed = mgr.disable(name, tools);
+            if (changed) {
+                mcp_push(ctx, "Disabled MCP server '" + name + "'.");
+            } else {
+                mcp_push(ctx, "MCP server '" + name + "' is already disabled.");
+            }
+        } else if (sub == "enable") {
+            changed = mgr.enable(name, tools);
+            if (changed) {
+                mcp_push(ctx, "Enabled MCP server '" + name + "'.");
+            } else {
+                // Distinguish already-connected vs failed.
+                auto servers = mgr.list_servers();
+                for (const auto& s : servers) {
+                    if (s.name == name) {
+                        if (s.state == McpServerState::Connected) {
+                            mcp_push(ctx, "MCP server '" + name + "' is already connected.");
+                        } else {
+                            mcp_push(ctx, "Failed to enable MCP server '" + name + "'. Check logs for details.");
+                        }
+                        return;
+                    }
+                }
+            }
+        } else { // reconnect
+            changed = mgr.reconnect(name, tools);
+            if (changed) {
+                mcp_push(ctx, "Reconnected MCP server '" + name + "'.");
+            } else {
+                mcp_push(ctx, "Failed to reconnect MCP server '" + name + "'. Check logs for details.");
+            }
+        }
+        return;
+    }
+
+    mcp_push(ctx, "Unknown /mcp subcommand '" + sub + "'. Try /mcp help.");
+}
+
 static void cmd_exit(CommandContext& ctx, const std::string& /*args*/) {
     if (ctx.request_exit) {
         ctx.request_exit();
     }
+}
+
+static void cmd_skills(CommandContext& ctx, const std::string& args) {
+    if (!ctx.skills) {
+        std::lock_guard<std::mutex> lk(ctx.state.mu);
+        ctx.state.conversation.push_back({"system",
+            "Skill system is not available in this session.", false});
+        ctx.state.chat_follow_tail = true;
+        return;
+    }
+
+    // Trim args.
+    std::string trimmed = args;
+    while (!trimmed.empty() && std::isspace(static_cast<unsigned char>(trimmed.front()))) {
+        trimmed.erase(trimmed.begin());
+    }
+    while (!trimmed.empty() && std::isspace(static_cast<unsigned char>(trimmed.back()))) {
+        trimmed.pop_back();
+    }
+
+    std::string sub = trimmed;
+    {
+        auto sp = trimmed.find(' ');
+        if (sp != std::string::npos) sub = trimmed.substr(0, sp);
+    }
+
+    if (sub == "help") {
+        std::lock_guard<std::mutex> lk(ctx.state.mu);
+        std::ostringstream oss;
+        oss << "/skills usage:\n"
+            << "  /skills              - List installed skills\n"
+            << "  /skills list         - Same as /skills\n"
+            << "  /skills reload       - Rescan skill directories and refresh commands\n"
+            << "  /skills help         - Show this help\n"
+            << "\n"
+            << "To invoke a skill, type /<skill-name> [optional args].";
+        ctx.state.conversation.push_back({"system", oss.str(), false});
+        ctx.state.chat_follow_tail = true;
+        return;
+    }
+
+    if (sub == "reload") {
+        size_t before = ctx.skills->list().size();
+        size_t after = before;
+        if (ctx.command_registry) {
+            after = reload_skill_commands(*ctx.command_registry, *ctx.skills);
+        } else {
+            ctx.skills->reload();
+            after = ctx.skills->list().size();
+        }
+        std::lock_guard<std::mutex> lk(ctx.state.mu);
+        std::ostringstream oss;
+        oss << "Reloaded skills: " << after << " registered (was " << before << ").";
+        if (!ctx.command_registry) {
+            oss << "\n(Command registry not available — /<skill> bindings are only refreshed on restart.)";
+        }
+        ctx.state.conversation.push_back({"system", oss.str(), false});
+        ctx.state.chat_follow_tail = true;
+        return;
+    }
+
+    // Default + "list": render full skill table.
+    auto skills = ctx.skills->list();
+    std::lock_guard<std::mutex> lk(ctx.state.mu);
+    std::ostringstream oss;
+    if (skills.empty()) {
+        oss << "No skills installed. Add a SKILL.md under ~/.acecode/skills/<category>/<name>/ and rerun `/skills reload` (then restart to pick up new /<name> commands).";
+    } else {
+        oss << "Installed skills (" << skills.size() << "):";
+        std::string last_cat;
+        for (const auto& s : skills) {
+            if (s.category != last_cat) {
+                oss << "\n";
+                if (!s.category.empty()) {
+                    oss << "  [" << s.category << "]\n";
+                } else {
+                    oss << "  [uncategorized]\n";
+                }
+                last_cat = s.category;
+            }
+            oss << "    /" << s.command_key;
+            if (s.command_key != s.name) oss << "  (name: " << s.name << ")";
+            if (!s.description.empty()) {
+                std::string desc = s.description;
+                if (desc.size() > 120) desc = desc.substr(0, 117) + "...";
+                oss << "\n        " << desc;
+            }
+            oss << "\n";
+        }
+    }
+    ctx.state.conversation.push_back({"system", oss.str(), false});
+    ctx.state.chat_follow_tail = true;
 }
 
 static void do_resume_session(CommandContext& ctx, const std::string& session_id,
@@ -252,6 +532,8 @@ void register_builtin_commands(CommandRegistry& registry) {
     registry.register_command({"cost", "Show token usage and estimated cost", cmd_cost});
     registry.register_command({"compact", "Compress conversation history", cmd_compact});
     registry.register_command({"resume", "Resume a previous session", cmd_resume});
+    registry.register_command({"mcp", "Manage MCP servers", cmd_mcp});
+    registry.register_command({"skills", "List, invoke, or reload installed skills", cmd_skills});
     registry.register_command({"exit", "Exit acecode", cmd_exit});
 }
 

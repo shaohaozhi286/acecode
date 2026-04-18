@@ -14,6 +14,11 @@
 
 namespace acecode {
 
+class McpManager;
+class ToolExecutor;
+class SkillRegistry;
+class CommandRegistry;
+
 struct CommandContext {
     TuiState& state;
     AgentLoop& agent_loop;
@@ -24,6 +29,10 @@ struct CommandContext {
     std::function<void()> request_exit;
     SessionManager* session_manager = nullptr;
     std::function<void()> post_event;  // post a TUI refresh event from any thread
+    McpManager* mcp_manager = nullptr; // runtime MCP control surface (optional)
+    ToolExecutor* tools = nullptr;     // tool registry for /mcp enable/disable
+    SkillRegistry* skills = nullptr;   // skill registry for /skills and /<skill-name> commands
+    CommandRegistry* command_registry = nullptr; // self-reference for /skills reload
 };
 
 struct SlashCommand {
@@ -35,6 +44,14 @@ struct SlashCommand {
 class CommandRegistry {
 public:
     void register_command(const SlashCommand& cmd);
+
+    // Remove a single command by name. Returns true when it existed.
+    bool unregister_command(const std::string& name);
+
+    // Check whether a command is registered.
+    bool has_command(const std::string& name) const {
+        return commands_.find(name) != commands_.end();
+    }
 
     // Dispatch a slash command string (e.g., "/help" or "/model gpt-4").
     // Returns true if a command was found and executed, false if unknown.
