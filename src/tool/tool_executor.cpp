@@ -35,13 +35,18 @@ std::vector<ToolDef> ToolExecutor::get_tool_definitions_by_source(ToolSource sou
 }
 
 ToolResult ToolExecutor::execute(const std::string& tool_name, const std::string& arguments_json) const {
+    return execute(tool_name, arguments_json, ToolContext{});
+}
+
+ToolResult ToolExecutor::execute(const std::string& tool_name, const std::string& arguments_json,
+                                 const ToolContext& ctx) const {
     auto it = tools_.find(tool_name);
     if (it == tools_.end()) {
         LOG_ERROR("execute: unknown tool '" + tool_name + "'");
         return ToolResult{"[Error] Unknown tool: " + tool_name, false};
     }
     LOG_DEBUG("execute: " + tool_name + " args=" + log_truncate(arguments_json, 300));
-    auto result = it->second.execute(arguments_json);
+    auto result = it->second.execute(arguments_json, ctx);
     LOG_DEBUG("execute result: success=" + std::string(result.success ? "true" : "false") + " len=" + std::to_string(result.output.size()));
     return result;
 }

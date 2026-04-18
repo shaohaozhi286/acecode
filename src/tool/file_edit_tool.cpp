@@ -10,7 +10,7 @@
 
 namespace acecode {
 
-static ToolResult execute_file_edit(const std::string& arguments_json) {
+static ToolResult execute_file_edit(const std::string& arguments_json, const ToolContext& /*ctx*/) {
     // Parse arguments
     ToolArgsParser parser(arguments_json);
     if (parser.has_error()) {

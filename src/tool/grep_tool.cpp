@@ -26,7 +26,7 @@ static bool filename_matches(const std::string& filename, const std::string& pat
     return filename == pattern;
 }
 
-static ToolResult execute_grep(const std::string& arguments_json) {
+static ToolResult execute_grep(const std::string& arguments_json, const ToolContext& /*ctx*/) {
     std::string pattern;
     std::string include_pattern;
     std::string search_path;

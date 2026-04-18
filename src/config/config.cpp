@@ -53,6 +53,39 @@ std::string expand_path(const std::string& raw) {
     return result;
 }
 
+std::vector<std::string> get_project_dirs_up_to_home(const std::string& cwd) {
+    std::vector<std::string> dirs;
+    if (cwd.empty()) return dirs;
+
+    std::error_code ec;
+    fs::path abs = fs::weakly_canonical(fs::path(cwd), ec);
+    if (ec || abs.empty()) abs = fs::path(cwd);
+
+    fs::path home_path;
+#ifdef _WIN32
+    const char* home_env = std::getenv("USERPROFILE");
+#else
+    const char* home_env = std::getenv("HOME");
+#endif
+    if (home_env && *home_env) {
+        std::error_code hec;
+        home_path = fs::weakly_canonical(fs::path(home_env), hec);
+        if (hec) home_path = fs::path(home_env);
+    }
+
+    // Walk up from cwd; stop at/above HOME (the user-global root is added
+    // separately) or once we hit a filesystem root. Deepest first.
+    fs::path cur = abs;
+    while (true) {
+        if (!home_path.empty() && cur == home_path) break;
+        dirs.push_back(cur.string());
+        fs::path parent = cur.parent_path();
+        if (parent == cur) break;
+        cur = parent;
+    }
+    return dirs;
+}
+
 std::string get_acecode_dir() {
     std::string home;
 #ifdef _WIN32

@@ -1,10 +1,15 @@
 #include "bash_tool.hpp"
 #include "utils/logger.hpp"
 #include "utils/encoding.hpp"
+#include "utils/stream_processing.hpp"
 #include <nlohmann/json.hpp>
 #include <string>
+#include <vector>
+#include <deque>
 #include <chrono>
 #include <filesystem>
+#include <thread>
+#include <atomic>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -14,6 +19,7 @@
 #include <sys/wait.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <errno.h>
 #endif
 
 namespace acecode {
@@ -21,16 +27,40 @@ namespace acecode {
 static constexpr int DEFAULT_TIMEOUT_MS = 120000;    // 2 minutes
 static constexpr size_t MAX_OUTPUT_SIZE = 100 * 1024; // 100KB
 
-static ToolResult execute_bash(const std::string& arguments_json) {
+// Normalize Windows CRLF to LF before feeding the line state machine, so the
+// \r does not clobber `current_line` mid-way through a proper newline.
+#ifdef _WIN32
+static std::string normalize_crlf(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '\r' && i + 1 < s.size() && s[i + 1] == '\n') {
+            out += '\n';
+            i++;
+        } else {
+            out += s[i];
+        }
+    }
+    return out;
+}
+#endif
+
+static ToolResult execute_bash(const std::string& arguments_json, const ToolContext& ctx) {
     std::string command;
     int timeout_ms = DEFAULT_TIMEOUT_MS;
     std::string cwd;
+    std::vector<std::string> stdin_inputs;
 
     try {
         auto args = nlohmann::json::parse(arguments_json);
         command = args.value("command", "");
         timeout_ms = args.value("timeout_ms", DEFAULT_TIMEOUT_MS);
         cwd = args.value("cwd", "");
+        if (args.contains("stdin_inputs") && args["stdin_inputs"].is_array()) {
+            for (const auto& el : args["stdin_inputs"]) {
+                if (el.is_string()) stdin_inputs.push_back(el.get<std::string>());
+            }
+        }
     } catch (...) {
         return ToolResult{"[Error] Failed to parse tool arguments.", false};
     }
@@ -39,15 +69,44 @@ static ToolResult execute_bash(const std::string& arguments_json) {
         return ToolResult{"[Error] No command provided.", false};
     }
 
-    LOG_INFO("bash: cmd=" + log_truncate(command, 200) + " cwd=" + cwd + " timeout=" + std::to_string(timeout_ms));
+    LOG_INFO("bash: cmd=" + log_truncate(command, 200) + " cwd=" + cwd +
+             " timeout=" + std::to_string(timeout_ms) +
+             " stdin_inputs=" + std::to_string(stdin_inputs.size()));
 
-    // Validate cwd if provided
     if (!cwd.empty() && !std::filesystem::is_directory(cwd)) {
         return ToolResult{"[Error] Working directory does not exist: " + cwd, false};
     }
 
+    // Shared streaming state across both OS branches.
+    std::string full_output;
+    std::string current_line;
+    std::string utf8_pending;
+    std::deque<std::string> tail_lines;
+    int total_lines = 0;
+
+    auto process_raw = [&](const char* data, size_t len) {
+        if (len == 0) return;
+        utf8_pending.append(data, len);
+        size_t safe_end = utf8_safe_boundary(utf8_pending);
+        std::string safe_part = utf8_pending.substr(0, safe_end);
+        utf8_pending.erase(0, safe_end);
 #ifdef _WIN32
-    // Windows: CreateProcess for timeout support
+        safe_part = normalize_crlf(safe_part);
+#endif
+        std::string clean = strip_ansi(safe_part);
+        full_output += clean;
+        feed_line_state(clean, current_line, tail_lines, total_lines);
+        if (ctx.stream && !clean.empty()) ctx.stream(clean);
+    };
+
+    bool aborted = false;
+    bool timed_out = false;
+
+#ifdef _WIN32
+    // stdin_inputs not implemented on Windows in this release; it's accepted
+    // but silently ignored (see proposal — deferred to future MCP work).
+    (void)stdin_inputs;
+
     SECURITY_ATTRIBUTES sa;
     sa.nLength = sizeof(sa);
     sa.bInheritHandle = TRUE;
@@ -87,13 +146,8 @@ static ToolResult execute_bash(const std::string& arguments_json) {
         return ToolResult{"[Error] Failed to execute command.", false};
     }
 
-    // Read output while waiting
-    std::string output;
     char buffer[4096];
     DWORD bytes_read;
-
-    // Set pipe to non-blocking for timeout checking
-    DWORD wait_result = WAIT_TIMEOUT;
     auto start = std::chrono::steady_clock::now();
 
     while (true) {
@@ -101,16 +155,29 @@ static ToolResult execute_bash(const std::string& arguments_json) {
         PeekNamedPipe(hReadPipe, nullptr, 0, nullptr, &avail, nullptr);
         if (avail > 0) {
             if (ReadFile(hReadPipe, buffer, sizeof(buffer), &bytes_read, nullptr) && bytes_read > 0) {
-                output.append(buffer, bytes_read);
+                process_raw(buffer, bytes_read);
             }
         }
 
-        wait_result = WaitForSingleObject(pi.hProcess, 0);
+        DWORD wait_result = WaitForSingleObject(pi.hProcess, 0);
         if (wait_result == WAIT_OBJECT_0) {
-            // Process finished - read remaining output
+            // Process finished - drain remaining output
             while (ReadFile(hReadPipe, buffer, sizeof(buffer), &bytes_read, nullptr) && bytes_read > 0) {
-                output.append(buffer, bytes_read);
+                process_raw(buffer, bytes_read);
             }
+            break;
+        }
+
+        // Abort check
+        if (ctx.abort_flag && ctx.abort_flag->load()) {
+            TerminateProcess(pi.hProcess, 1);
+            WaitForSingleObject(pi.hProcess, 1000);
+            while (PeekNamedPipe(hReadPipe, nullptr, 0, nullptr, &avail, nullptr) && avail > 0) {
+                if (ReadFile(hReadPipe, buffer, sizeof(buffer), &bytes_read, nullptr) && bytes_read > 0) {
+                    process_raw(buffer, bytes_read);
+                } else break;
+            }
+            aborted = true;
             break;
         }
 
@@ -119,26 +186,13 @@ static ToolResult execute_bash(const std::string& arguments_json) {
         if (elapsed >= timeout_ms) {
             TerminateProcess(pi.hProcess, 1);
             WaitForSingleObject(pi.hProcess, 1000);
-            // Read remaining output
             while (PeekNamedPipe(hReadPipe, nullptr, 0, nullptr, &avail, nullptr) && avail > 0) {
                 if (ReadFile(hReadPipe, buffer, sizeof(buffer), &bytes_read, nullptr) && bytes_read > 0) {
-                    output.append(buffer, bytes_read);
-                } else {
-                    break;
-                }
+                    process_raw(buffer, bytes_read);
+                } else break;
             }
-            CloseHandle(pi.hProcess);
-            CloseHandle(pi.hThread);
-            CloseHandle(hReadPipe);
-
-            // Truncate if needed
-            if (output.size() > MAX_OUTPUT_SIZE) {
-                output = "[Output truncated, showing last 100KB]\n" +
-                    output.substr(output.size() - MAX_OUTPUT_SIZE);
-            }
-            output = ensure_utf8(output);
-            return ToolResult{output + "\n[Error] Command timed out after " +
-                std::to_string(timeout_ms / 1000) + " seconds.", false};
+            timed_out = true;
+            break;
         }
 
         Sleep(10);
@@ -152,16 +206,25 @@ static ToolResult execute_bash(const std::string& arguments_json) {
     CloseHandle(hReadPipe);
 
 #else
-    // POSIX: fork/exec with timeout
+    // POSIX: fork/exec with streaming, stdin injection, and abort support.
     int pipefd[2];
     if (pipe(pipefd) == -1) {
         return ToolResult{"[Error] Failed to create pipe.", false};
     }
 
+    // stdin pipe (read by child, written by parent). Always created so the
+    // child has a well-defined stdin; if stdin_inputs is empty we close the
+    // write end immediately so the child sees EOF.
+    int stdin_pipefd[2];
+    if (pipe(stdin_pipefd) == -1) {
+        close(pipefd[0]); close(pipefd[1]);
+        return ToolResult{"[Error] Failed to create stdin pipe.", false};
+    }
+
     pid_t pid = fork();
     if (pid == -1) {
-        close(pipefd[0]);
-        close(pipefd[1]);
+        close(pipefd[0]); close(pipefd[1]);
+        close(stdin_pipefd[0]); close(stdin_pipefd[1]);
         return ToolResult{"[Error] Failed to fork.", false};
     }
 
@@ -171,6 +234,13 @@ static ToolResult execute_bash(const std::string& arguments_json) {
         dup2(pipefd[1], STDOUT_FILENO);
         dup2(pipefd[1], STDERR_FILENO);
         close(pipefd[1]);
+
+        close(stdin_pipefd[1]);
+        dup2(stdin_pipefd[0], STDIN_FILENO);
+        close(stdin_pipefd[0]);
+
+        // New process group so parent can signal the whole tree
+        setpgid(0, 0);
 
         if (!cwd.empty()) {
             if (chdir(cwd.c_str()) != 0) {
@@ -184,28 +254,70 @@ static ToolResult execute_bash(const std::string& arguments_json) {
 
     // Parent
     close(pipefd[1]);
-    std::string output;
+    close(stdin_pipefd[0]);
+
+    // stdin writer thread (only if we have inputs to send)
+    std::thread stdin_writer;
+    if (!stdin_inputs.empty()) {
+        int write_fd = stdin_pipefd[1];
+        stdin_writer = std::thread([write_fd, inputs = stdin_inputs]() {
+            for (const auto& line : inputs) {
+                std::string data = line + "\n";
+                const char* p = data.c_str();
+                size_t remaining = data.size();
+                while (remaining > 0) {
+                    ssize_t n = write(write_fd, p, remaining);
+                    if (n < 0) {
+                        if (errno == EINTR) continue;
+                        return; // pipe closed (child exited) or other error
+                    }
+                    p += n;
+                    remaining -= n;
+                }
+            }
+            close(write_fd);
+        });
+    } else {
+        // No inputs: close immediately so child sees EOF on stdin
+        close(stdin_pipefd[1]);
+    }
+
     char buffer[4096];
     ssize_t n;
     auto start = std::chrono::steady_clock::now();
 
-    // Set read end non-blocking
     int flags = fcntl(pipefd[0], F_GETFL, 0);
     fcntl(pipefd[0], F_SETFL, flags | O_NONBLOCK);
 
-    bool timed_out = false;
     int status = 0;
     while (true) {
         n = read(pipefd[0], buffer, sizeof(buffer));
         if (n > 0) {
-            output.append(buffer, n);
+            process_raw(buffer, n);
         }
 
         int wr = waitpid(pid, &status, WNOHANG);
         if (wr == pid) {
-            // Process finished - drain remaining output
             while ((n = read(pipefd[0], buffer, sizeof(buffer))) > 0) {
-                output.append(buffer, n);
+                process_raw(buffer, n);
+            }
+            break;
+        }
+
+        if (ctx.abort_flag && ctx.abort_flag->load()) {
+            kill(-pid, SIGTERM);
+            // Give it up to 500ms to exit gracefully
+            for (int i = 0; i < 50; ++i) {
+                if (waitpid(pid, &status, WNOHANG) == pid) { aborted = true; break; }
+                usleep(10000);
+            }
+            if (!aborted) {
+                kill(-pid, SIGKILL);
+                waitpid(pid, &status, 0);
+                aborted = true;
+            }
+            while ((n = read(pipefd[0], buffer, sizeof(buffer))) > 0) {
+                process_raw(buffer, n);
             }
             break;
         }
@@ -213,9 +325,12 @@ static ToolResult execute_bash(const std::string& arguments_json) {
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - start).count();
         if (elapsed >= timeout_ms) {
-            kill(pid, SIGKILL);
+            kill(-pid, SIGKILL);
             waitpid(pid, &status, 0);
             timed_out = true;
+            while ((n = read(pipefd[0], buffer, sizeof(buffer))) > 0) {
+                process_raw(buffer, n);
+            }
             break;
         }
 
@@ -223,40 +338,58 @@ static ToolResult execute_bash(const std::string& arguments_json) {
     }
 
     close(pipefd[0]);
-    int exit_code = WEXITSTATUS(status);
-
-    if (timed_out) {
-        if (output.size() > MAX_OUTPUT_SIZE) {
-            output = "[Output truncated, showing last 100KB]\n" +
-                output.substr(output.size() - MAX_OUTPUT_SIZE);
-        }
-        output = ensure_utf8(output);
-        return ToolResult{output + "\n[Error] Command timed out after " +
-            std::to_string(timeout_ms / 1000) + " seconds.", false};
+    // If writer thread still running, close the write end to make it exit
+    // (the child is dead; further writes would EPIPE).
+    if (stdin_writer.joinable()) {
+        // Not safe to close twice — the thread itself closes after finishing.
+        stdin_writer.join();
     }
+
+    int exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 #endif
 
-    // Truncate output if too large
-    if (output.size() > MAX_OUTPUT_SIZE) {
-        output = "[Output truncated, showing last 100KB]\n" +
-            output.substr(output.size() - MAX_OUTPUT_SIZE);
+    // Flush any trailing partial line into full_output and tail_lines so it's
+    // visible even without a trailing newline.
+    if (!current_line.empty()) {
+        full_output += current_line;
+        tail_lines.push_back(current_line);
+        while (tail_lines.size() > 5) tail_lines.pop_front();
+        current_line.clear();
     }
 
-    if (output.empty()) {
-        output = "(no output)";
+    // Truncate to cap before returning
+    if (full_output.size() > MAX_OUTPUT_SIZE) {
+        full_output = "[Output truncated, showing last 100KB]\n" +
+            full_output.substr(full_output.size() - MAX_OUTPUT_SIZE);
     }
 
-    // Ensure output is valid UTF-8 (Windows cmd outputs in system codepage like GBK)
-    output = ensure_utf8(output);
+    full_output = ensure_utf8(full_output);
 
-    return ToolResult{output, exit_code == 0};
+    if (aborted) {
+        if (full_output.empty() || full_output.back() != '\n') full_output += "\n";
+        full_output += "[Aborted]";
+        return ToolResult{full_output, false};
+    }
+    if (timed_out) {
+        return ToolResult{full_output + "\n[Error] Command timed out after " +
+            std::to_string(timeout_ms / 1000) + " seconds.", false};
+    }
+
+    if (full_output.empty()) {
+        full_output = "(no output)";
+    }
+
+    return ToolResult{full_output, exit_code == 0};
 }
 
 ToolImpl create_bash_tool() {
     ToolDef def;
     def.name = "bash";
     def.description = "Execute a shell command and return its output. "
-                      "Use this to run commands, check files, install packages, etc.";
+                      "Use this to run commands, check files, install packages, etc. "
+                      "For programs that prompt for input (e.g. 'apt install' confirming, "
+                      "'npm login' asking for credentials), pass stdin_inputs with the "
+                      "answers to pipe into the command's stdin in order.";
     def.parameters = nlohmann::json({
         {"type", "object"},
         {"properties", {
@@ -271,6 +404,14 @@ ToolImpl create_bash_tool() {
             {"cwd", {
                 {"type", "string"},
                 {"description", "Working directory for the command (default: agent CWD)"}
+            }},
+            {"stdin_inputs", {
+                {"type", "array"},
+                {"items", {{"type", "string"}}},
+                {"description", "Optional: lines to feed to the command's stdin in order, "
+                                "each followed by a newline. Use for programs that prompt "
+                                "interactively, e.g. [\"y\"] for an 'apt install' confirmation. "
+                                "On Windows this parameter is currently accepted but ignored."}
             }}
         }},
         {"required", nlohmann::json::array({"command"})}

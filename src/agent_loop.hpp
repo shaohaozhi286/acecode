@@ -41,6 +41,23 @@ struct AgentCallbacks {
     // Called when auto-compact is needed (estimated tokens exceed threshold)
     // Returns true if compaction was performed successfully
     std::function<bool()> on_auto_compact;
+
+    // Called just before a tool begins executing. `command_preview` is a short
+    // human-readable summary (e.g. the first 60 chars of a bash command).
+    std::function<void(const std::string& tool_name,
+                       const std::string& command_preview)> on_tool_progress_start;
+
+    // Called from the tool's streaming thread with each cleaned chunk.
+    // `tail_snapshot` is the last-5-lines sliding window; `current_partial` is
+    // the in-progress line (not yet terminated by \n).
+    std::function<void(const std::vector<std::string>& tail_snapshot,
+                       const std::string& current_partial,
+                       size_t total_bytes,
+                       int total_lines)> on_tool_progress_update;
+
+    // Called after the tool returns (or throws). Guaranteed via RAII to fire
+    // once for every on_tool_progress_start.
+    std::function<void()> on_tool_progress_end;
 };
 
 class AgentLoop {

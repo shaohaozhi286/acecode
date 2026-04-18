@@ -51,7 +51,7 @@ ToolImpl create_skill_view_tool(SkillRegistry& registry) {
         {"required", nlohmann::json::array({"name"})}
     });
 
-    auto execute = [&registry](const std::string& arguments_json) -> ToolResult {
+    auto execute = [&registry](const std::string& arguments_json, const ToolContext& /*ctx*/) -> ToolResult {
         std::string name;
         std::string file_path;
         try {

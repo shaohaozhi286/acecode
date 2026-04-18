@@ -26,7 +26,7 @@ ToolImpl create_skills_list_tool(SkillRegistry& registry) {
         {"required", nlohmann::json::array()}
     });
 
-    auto execute = [&registry](const std::string& arguments_json) -> ToolResult {
+    auto execute = [&registry](const std::string& arguments_json, const ToolContext& /*ctx*/) -> ToolResult {
         std::string category;
         try {
             if (!arguments_json.empty()) {

@@ -84,7 +84,7 @@ static bool glob_match(const std::string& pattern, const std::string& path) {
     return match_parts(0, 0);
 }
 
-static ToolResult execute_glob(const std::string& arguments_json) {
+static ToolResult execute_glob(const std::string& arguments_json, const ToolContext& /*ctx*/) {
     std::string pattern;
     std::string search_path;
 

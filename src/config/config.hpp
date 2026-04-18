@@ -60,6 +60,13 @@ struct AppConfig {
 // form; missing env vars are left as-is (per hermes convention).
 std::string expand_path(const std::string& raw);
 
+// Collect project-level directories from cwd up to (but not including) the
+// user's home directory. Returned deepest-first so cwd-level skills take
+// precedence over ancestor-level skills when scanned in order. HOME itself is
+// excluded because the user-global skills root (`~/.acecode/skills`) is
+// registered separately.
+std::vector<std::string> get_project_dirs_up_to_home(const std::string& cwd);
+
 // Load config from ~/.acecode/config.json, with env var overrides.
 // Creates default config if missing.
 AppConfig load_config();

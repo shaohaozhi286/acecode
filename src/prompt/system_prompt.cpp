@@ -126,10 +126,21 @@ std::string build_system_prompt(const ToolExecutor& tools, const std::string& cw
         auto available = skills->list();
         if (!available.empty()) {
             oss << "# Skills\n\n"
-                << "User-installed skills are available. Use the `skills_list` tool to "
-                << "discover them (name, description, category) and the `skill_view` tool "
-                << "to load a skill's full instructions before acting on a matching task. "
-                << "A skill may also be invoked directly by the user via `/<skill-name>`.\n\n";
+                << "Execute a skill within the main conversation.\n\n"
+                << "When users ask you to perform tasks, check if any of the available skills match. "
+                << "Skills provide specialized capabilities and domain knowledge.\n\n"
+                << "When users reference a \"slash command\" or \"/<something>\" (e.g., \"/commit\", \"/review-pr\"), they are referring to a skill.\n\n"
+                << "How to discover and invoke:\n"
+                << "- Call `skills_list` to enumerate installed skills (name, description, category only — minimal tokens).\n"
+                << "- Call `skill_view(name=\"<name>\")` to load the full SKILL.md body before acting on a matching task.\n"
+                << "- Use `skill_view(name=\"<name>\", file_path=\"<relative>\")` to load supporting files (references/, templates/, scripts/, assets/) listed in the skill body.\n\n"
+                << "Important:\n"
+                << "- Available skills are listed via `skills_list`; additional skill content may appear in system-reminder messages during the conversation.\n"
+                << "- When a skill matches the user's request, this is a BLOCKING REQUIREMENT: load the skill before generating any other response about the task.\n"
+                << "- NEVER mention a skill by name without actually loading it via `skill_view`.\n"
+                << "- Do not invoke a skill whose content is already active in the current turn — if you see a `[SYSTEM: The user has invoked the \"<name>\" skill ...]` block, the skill has ALREADY been loaded; follow its instructions directly instead of calling `skill_view` again.\n"
+                << "- Do not use these tools for built-in CLI commands (like /help, /clear, /model, /compact).\n\n"
+                << "Skills can also be triggered directly by the user via `/<skill-name>` in the TUI, in which case the skill body is injected as a system-reminder at the start of your next turn.\n\n";
         }
     }
 

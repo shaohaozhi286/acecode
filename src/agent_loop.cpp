@@ -1,6 +1,7 @@
 #include "agent_loop.hpp"
 #include "prompt/system_prompt.hpp"
 #include "utils/logger.hpp"
+#include "utils/stream_processing.hpp"
 #include "commands/compact.hpp"
 #include <nlohmann/json.hpp>
 #include <mutex>
@@ -8,6 +9,7 @@
 #include <algorithm>
 #include <thread>
 #include <sstream>
+#include <deque>
 
 namespace acecode {
 
@@ -299,10 +301,12 @@ void AgentLoop::run_agent(const std::string& user_message) {
             } catch (...) {}
         };
 
-        // Helper: execute a single tool (for both parallel and serial use)
+        // Helper: execute a single tool (for both parallel and serial use).
+        // If `tool_ctx` is provided, streaming/abort hooks are forwarded to the tool.
         auto execute_single_tool = [this](const std::string& tool_name,
                                           const std::string& tool_args,
-                                          const std::string& ctx_path) -> ToolResult {
+                                          const std::string& ctx_path,
+                                          const ToolContext& tool_ctx = ToolContext{}) -> ToolResult {
             // Path safety validation (for file tools, not bash)
             if (!ctx_path.empty() && tool_name != "bash") {
                 std::string path_error = path_validator_.validate(ctx_path);
@@ -316,7 +320,7 @@ void AgentLoop::run_agent(const std::string& user_message) {
             if (tools_.has_tool(tool_name)) {
                 LOG_DEBUG("Executing tool: " + tool_name);
                 try {
-                    ToolResult result = tools_.execute(tool_name, tool_args);
+                    ToolResult result = tools_.execute(tool_name, tool_args, tool_ctx);
                     LOG_INFO("Tool result: success=" + std::string(result.success ? "true" : "false") +
                              " output=" + log_truncate(result.output, 300));
                     return result;
@@ -438,7 +442,54 @@ void AgentLoop::run_agent(const std::string& user_message) {
 
             std::string exec_path, exec_cmd;
             extract_context(tc, exec_path, exec_cmd);
-            results[entry.original_index] = execute_single_tool(tc.function_name, tc.function_arguments, exec_path);
+
+            // Build command preview: for bash use the command string, else tool name + primary arg.
+            std::string cmd_preview;
+            if (!exec_cmd.empty()) cmd_preview = exec_cmd;
+            else if (!exec_path.empty()) cmd_preview = exec_path;
+            else cmd_preview = tc.function_name;
+            if (cmd_preview.size() > 60) cmd_preview = cmd_preview.substr(0, 57) + "...";
+
+            // Shared progress state for this one tool call.
+            // Accessed from the streaming callback which runs on the bash_tool's
+            // polling loop (same worker thread), so no extra synchronisation
+            // beyond the mutable lambda capture.
+            struct ProgressState {
+                std::string current_line;
+                std::deque<std::string> tail_lines;
+                int total_lines = 0;
+                size_t total_bytes = 0;
+            };
+            auto prog = std::make_shared<ProgressState>();
+
+            ToolContext tool_ctx;
+            tool_ctx.abort_flag = &abort_requested_;
+            if (callbacks_.on_tool_progress_update) {
+                auto update_cb = callbacks_.on_tool_progress_update;
+                tool_ctx.stream = [prog, update_cb](const std::string& chunk) {
+                    feed_line_state(chunk, prog->current_line, prog->tail_lines, prog->total_lines);
+                    prog->total_bytes += chunk.size();
+                    std::vector<std::string> snapshot(prog->tail_lines.begin(), prog->tail_lines.end());
+                    update_cb(snapshot, prog->current_line, prog->total_bytes, prog->total_lines);
+                };
+            } else {
+                // Even without a TUI update callback, pass abort_flag through.
+                tool_ctx.stream = nullptr;
+            }
+
+            // RAII guard: ensures on_tool_progress_end fires on any exit path.
+            struct ProgressGuard {
+                std::function<void()> end_cb;
+                ~ProgressGuard() { if (end_cb) end_cb(); }
+            };
+            ProgressGuard guard;
+            if (callbacks_.on_tool_progress_start) {
+                callbacks_.on_tool_progress_start(tc.function_name, cmd_preview);
+                guard.end_cb = callbacks_.on_tool_progress_end;
+            }
+
+            results[entry.original_index] = execute_single_tool(
+                tc.function_name, tc.function_arguments, exec_path, tool_ctx);
             result_ready[entry.original_index] = true;
 
             if (callbacks_.on_message) {
@@ -488,8 +539,42 @@ void AgentLoop::run_shell(const std::string& command) {
 
     ToolResult result{"[Error] bash tool not registered", false};
     if (tools_.has_tool("bash")) {
+        // Same progress plumbing as the agent-driven bash path.
+        std::string cmd_preview = command;
+        if (cmd_preview.size() > 60) cmd_preview = cmd_preview.substr(0, 57) + "...";
+
+        struct ProgressState {
+            std::string current_line;
+            std::deque<std::string> tail_lines;
+            int total_lines = 0;
+            size_t total_bytes = 0;
+        };
+        auto prog = std::make_shared<ProgressState>();
+
+        ToolContext tool_ctx;
+        tool_ctx.abort_flag = &abort_requested_;
+        if (callbacks_.on_tool_progress_update) {
+            auto update_cb = callbacks_.on_tool_progress_update;
+            tool_ctx.stream = [prog, update_cb](const std::string& chunk) {
+                feed_line_state(chunk, prog->current_line, prog->tail_lines, prog->total_lines);
+                prog->total_bytes += chunk.size();
+                std::vector<std::string> snapshot(prog->tail_lines.begin(), prog->tail_lines.end());
+                update_cb(snapshot, prog->current_line, prog->total_bytes, prog->total_lines);
+            };
+        }
+
+        struct ProgressGuard {
+            std::function<void()> end_cb;
+            ~ProgressGuard() { if (end_cb) end_cb(); }
+        };
+        ProgressGuard guard;
+        if (callbacks_.on_tool_progress_start) {
+            callbacks_.on_tool_progress_start("bash", cmd_preview);
+            guard.end_cb = callbacks_.on_tool_progress_end;
+        }
+
         try {
-            result = tools_.execute("bash", args_json);
+            result = tools_.execute("bash", args_json, tool_ctx);
         } catch (const std::exception& e) {
             LOG_ERROR(std::string("shell exec exception: ") + e.what());
             result = ToolResult{std::string("[Error] ") + e.what(), false};

@@ -61,6 +61,10 @@
 #include "markdown/markdown_formatter.hpp"
 #include "session/session_manager.hpp"
 #include "tui/slash_dropdown.hpp"
+#include "tui/tool_progress.hpp"
+#include "utils/base64.hpp"
+
+#include <cstdio>
 
 using namespace ftxui;
 using namespace acecode;
@@ -225,22 +229,59 @@ std::vector<std::string> tokenize_wrapped_input(const std::string& text) {
     return tokens;
 }
 
-Element render_wrapped_input_text(const std::string& input_value) {
-    auto tokens = tokenize_wrapped_input(input_value);
-    if (tokens.empty()) {
-        return ftxui::text(" ") | focusCursorBlock;
+Element render_wrapped_input_text(const std::string& input_value, size_t cursor_bytes) {
+    if (cursor_bytes > input_value.size()) cursor_bytes = input_value.size();
+
+    // Split input into head/cursor_glyph/tail so the caret block can be drawn
+    // over the glyph under the caret (or a space when the caret sits at end).
+    std::string head = input_value.substr(0, cursor_bytes);
+    std::string cursor_glyph;
+    std::string tail;
+    if (cursor_bytes < input_value.size()) {
+        size_t next = cursor_bytes + 1;
+        while (next < input_value.size() &&
+               (static_cast<unsigned char>(input_value[next]) & 0xC0) == 0x80) {
+            next++;
+        }
+        cursor_glyph = input_value.substr(cursor_bytes, next - cursor_bytes);
+        tail = input_value.substr(next);
+    }
+
+    auto tokens_head = tokenize_wrapped_input(head);
+    auto tokens_tail = tokenize_wrapped_input(tail);
+
+    auto cursor_elem = ftxui::text(cursor_glyph.empty() ? std::string(" ") : cursor_glyph)
+                       | focusCursorBlock;
+
+    if (tokens_head.empty() && tokens_tail.empty()) {
+        return cursor_elem;
     }
 
     Elements parts;
-    parts.reserve(tokens.size());
-    for (size_t index = 0; index + 1 < tokens.size(); ++index) {
-        parts.push_back(ftxui::text(std::move(tokens[index])));
+    parts.reserve(tokens_head.size() + tokens_tail.size() + 1);
+
+    // Emit all but the last head token as standalone flex items.
+    for (size_t i = 0; i + 1 < tokens_head.size(); ++i) {
+        parts.push_back(ftxui::text(std::move(tokens_head[i])));
     }
 
-    parts.push_back(hbox({
-        ftxui::text(std::move(tokens.back())),
-        ftxui::text(" ") | focusCursorBlock,
-    }));
+    // Fuse (last_head_token, cursor_elem, first_tail_token) into one hbox so
+    // the caret never lands at a natural wrap boundary.
+    Elements compound;
+    if (!tokens_head.empty()) {
+        compound.push_back(ftxui::text(std::move(tokens_head.back())));
+    }
+    compound.push_back(cursor_elem);
+    size_t tail_start = 0;
+    if (!tokens_tail.empty()) {
+        compound.push_back(ftxui::text(std::move(tokens_tail[0])));
+        tail_start = 1;
+    }
+    parts.push_back(hbox(std::move(compound)));
+
+    for (size_t i = tail_start; i < tokens_tail.size(); ++i) {
+        parts.push_back(ftxui::text(std::move(tokens_tail[i])));
+    }
 
     static const auto config = FlexboxConfig().SetGap(0, 0);
     return flexbox(std::move(parts), config);
@@ -600,19 +641,31 @@ int main(int argc, char* argv[]) {
     tools.register_tool(create_glob_tool());
 
     // ---- Skill registry ----
+    // Discovery mirrors claudecodehaha's ordering so project-level skills can
+    // override same-name global skills (SkillRegistry is first-wins by name):
+    //   1) project walk  — <cwd...>/.acecode/skills, deepest first, up to (not including) HOME
+    //   2) external dirs — config.skills.external_dirs (absolute or ~-expanded)
+    //   3) user global   — ~/.acecode/skills (auto-created)
     SkillRegistry skill_registry;
     {
         std::vector<std::filesystem::path> roots;
-        std::string default_skills_dir = expand_path("~/.acecode/skills");
         std::error_code ec;
-        if (!std::filesystem::exists(default_skills_dir, ec)) {
-            std::filesystem::create_directories(default_skills_dir, ec);
+
+        for (const auto& dir : get_project_dirs_up_to_home(get_cwd())) {
+            roots.emplace_back(std::filesystem::path(dir) / ".acecode" / "skills");
         }
-        roots.emplace_back(default_skills_dir);
+
         for (const auto& raw : config.skills.external_dirs) {
             std::string expanded = expand_path(raw);
             if (!expanded.empty()) roots.emplace_back(expanded);
         }
+
+        std::string default_skills_dir = expand_path("~/.acecode/skills");
+        if (!std::filesystem::exists(default_skills_dir, ec)) {
+            std::filesystem::create_directories(default_skills_dir, ec);
+        }
+        roots.emplace_back(default_skills_dir);
+
         skill_registry.set_scan_roots(std::move(roots));
         skill_registry.set_disabled(std::unordered_set<std::string>(
             config.skills.disabled.begin(), config.skills.disabled.end()));
@@ -663,8 +716,12 @@ int main(int argc, char* argv[]) {
     Box chat_box;
 
     auto screen = ScreenInteractive::TerminalOutput();
-    screen.TrackMouse(false);
     screen.ForceHandleCtrlC(false);
+    // mouse-selection-copy: register a no-op SelectionChange callback so
+    // FTXUI enables live selection tracking. The right-click branch in the
+    // CatchEvent handler reads screen.GetSelection() on demand; we don't
+    // need per-change work here yet. Future: hook "auto-clear on new drag".
+    screen.SelectionChange([]{});
 
     auto clamp_chat_focus = [&state]() {
         if (state.conversation.empty()) {
@@ -833,6 +890,7 @@ int main(int argc, char* argv[]) {
             state.conversation.push_back({"assistant", "", false});
         }
         state.conversation.back().content += token;
+        state.streaming_output_chars += token.size();
         clamp_chat_focus();
         screen.PostEvent(Event::Custom);
     };
@@ -840,6 +898,7 @@ int main(int argc, char* argv[]) {
         token_tracker.record(usage);
         std::lock_guard<std::mutex> lk(state.mu);
         state.token_status = token_tracker.format_status(config.context_window);
+        state.last_completion_tokens_authoritative = usage.completion_tokens;
         screen.PostEvent(Event::Custom);
     };
     callbacks.on_auto_compact = [&state, &clamp_chat_focus, &screen]() -> bool {
@@ -1014,11 +1073,59 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // --- Tool progress callbacks (streaming-tool-progress change) ---
+    callbacks.on_tool_progress_start = [&state, &screen](
+        const std::string& tool_name, const std::string& cmd_preview) {
+        {
+            std::lock_guard<std::mutex> lk(state.mu);
+            state.tool_running = true;
+            state.tool_progress = {};
+            state.tool_progress.tool_name = tool_name;
+            state.tool_progress.command_preview = cmd_preview;
+            state.tool_progress.start_time = std::chrono::steady_clock::now();
+            state.last_tool_post_event_time = std::chrono::steady_clock::now();
+        }
+        screen.PostEvent(Event::Custom);
+    };
+
+    callbacks.on_tool_progress_update = [&state, &screen](
+        const std::vector<std::string>& tail_snapshot,
+        const std::string& current_partial,
+        size_t total_bytes, int total_lines) {
+        bool should_post = false;
+        {
+            std::lock_guard<std::mutex> lk(state.mu);
+            state.tool_progress.tail_lines = tail_snapshot;
+            state.tool_progress.current_partial = current_partial;
+            state.tool_progress.total_bytes = total_bytes;
+            state.tool_progress.total_lines = total_lines;
+            auto now = std::chrono::steady_clock::now();
+            if (now - state.last_tool_post_event_time > std::chrono::milliseconds(150)) {
+                state.last_tool_post_event_time = now;
+                should_post = true;
+            }
+        }
+        if (should_post) screen.PostEvent(Event::Custom);
+    };
+
+    callbacks.on_tool_progress_end = [&state, &screen]() {
+        {
+            std::lock_guard<std::mutex> lk(state.mu);
+            state.tool_running = false;
+            state.tool_progress = {};
+        }
+        // Unconditional PostEvent so the live element disappears immediately.
+        screen.PostEvent(Event::Custom);
+    };
+
     // Now that agent_loop exists, update on_busy_changed to drain pending queue
     callbacks.on_busy_changed = [&state, &clamp_chat_focus, &agent_loop, &screen](bool busy) {
         std::lock_guard<std::mutex> lk(state.mu);
         if (busy && !state.is_waiting) {
             state.current_thinking_phrase = get_random_thinking_phrase(is_user_chinese(state));
+            state.thinking_start_time = std::chrono::steady_clock::now();
+            state.streaming_output_chars = 0;
+            state.last_completion_tokens_authoritative = 0;
         }
         state.is_waiting = busy;
         if (!busy && !state.pending_queue.empty()) {
@@ -1028,6 +1135,9 @@ int main(int argc, char* argv[]) {
             state.chat_follow_tail = true;
             clamp_chat_focus();
             state.current_thinking_phrase = get_random_thinking_phrase(is_user_chinese(state));
+            state.thinking_start_time = std::chrono::steady_clock::now();
+            state.streaming_output_chars = 0;
+            state.last_completion_tokens_authoritative = 0;
             state.is_waiting = true;
             agent_loop.submit(next_prompt);
         }
@@ -1041,7 +1151,24 @@ int main(int argc, char* argv[]) {
         while (running) {
             std::this_thread::sleep_for(std::chrono::milliseconds(300));
             anim_tick++;
-            if (state.is_waiting) {
+            // mouse-selection-copy: clear the "Copied N bytes" confirmation
+            // ~2 s after the copy fired. Run before the post-event gate so we
+            // always get a final render when the deadline passes.
+            bool needs_post = false;
+            {
+                std::lock_guard<std::mutex> lk(state.mu);
+                if (state.status_line_clear_at.time_since_epoch().count() != 0 &&
+                    std::chrono::steady_clock::now() >= state.status_line_clear_at) {
+                    state.status_line = state.status_line_saved;
+                    state.status_line_saved.clear();
+                    state.status_line_clear_at = {};
+                    needs_post = true;
+                }
+            }
+            // Drive re-render while waiting on LLM OR while a tool is running
+            // (so the tool-timer chip in the status bar updates every second),
+            // or when we just cleared a pending status confirmation.
+            if (needs_post || state.is_waiting || state.tool_running) {
                 screen.PostEvent(Event::Custom);
             }
         }
@@ -1057,13 +1184,15 @@ int main(int argc, char* argv[]) {
     // component_active=false and cursor_shape=Hidden).
     auto input_renderer = Renderer([&state](bool) {
         std::string display_text = state.input_text;
+        size_t cursor = state.input_cursor;
+        if (cursor > display_text.size()) cursor = display_text.size();
         if (display_text.empty()) {
             return hbox({
                 text(" ") | focusCursorBar,
                 text("Type your prompt here...") | dim | color(Color::GrayDark),
             });
         }
-        return render_wrapped_input_text(display_text);
+        return render_wrapped_input_text(display_text, cursor);
     });
 
     // Wrap with CatchEvent to handle all keyboard input
@@ -1116,6 +1245,7 @@ int main(int argc, char* argv[]) {
                 auto commit_selection = [&]() {
                     const auto& item = state.slash_dropdown_items[state.slash_dropdown_selected];
                     state.input_text = "/" + item.name + " ";
+                    state.input_cursor = state.input_text.size();
                     state.slash_dropdown_active = false;
                     state.slash_dropdown_items.clear();
                     state.slash_dropdown_selected = 0;
@@ -1168,6 +1298,7 @@ int main(int argc, char* argv[]) {
                     state.resume_items.clear();
                     state.resume_callback = nullptr;
                     state.input_text.clear();
+                    state.input_cursor = 0;
                     if (cb) cb(sid);
                     clamp_chat_focus();
                 }
@@ -1179,6 +1310,7 @@ int main(int argc, char* argv[]) {
             if (state.confirm_pending) {
                 std::string answer = state.input_text;
                 state.input_text.clear();
+                state.input_cursor = 0;
                 if (!answer.empty() && (answer[0] == 'y' || answer[0] == 'Y')) {
                     state.confirm_result = PermissionResult::Allow;
                 } else if (!answer.empty() && (answer[0] == 'a' || answer[0] == 'A')) {
@@ -1199,6 +1331,7 @@ int main(int argc, char* argv[]) {
 
             std::string prompt = state.input_text;
             state.input_text.clear();
+            state.input_cursor = 0;
             refresh_slash_dropdown(state, cmd_registry);
 
             // Shell input mode: dispatch directly to BashTool via agent worker.
@@ -1302,6 +1435,7 @@ int main(int argc, char* argv[]) {
                 state.resume_items.clear();
                 state.resume_callback = nullptr;
                 state.input_text.clear();
+                state.input_cursor = 0;
                 state.conversation.push_back({"system", "Resume cancelled.", false});
                 state.chat_follow_tail = true;
                 clamp_chat_focus();
@@ -1311,6 +1445,7 @@ int main(int argc, char* argv[]) {
             if (state.confirm_pending) {
                 // Escape during confirm → deny
                 state.input_text.clear();
+                state.input_cursor = 0;
                 state.confirm_result = PermissionResult::Deny;
                 state.confirm_pending = false;
                 state.confirm_cv.notify_one();
@@ -1322,6 +1457,7 @@ int main(int argc, char* argv[]) {
             if (state.input_mode == InputMode::Shell) {
                 state.input_mode = InputMode::Normal;
                 state.input_text.clear();
+                state.input_cursor = 0;
                 return true;
             }
             if (state.is_waiting) {
@@ -1343,20 +1479,54 @@ int main(int argc, char* argv[]) {
             return true;
         }
         if (event.is_mouse()) {
-            std::lock_guard<std::mutex> lk(state.mu);
             auto& mouse = event.mouse();
+
+            // mouse-selection-copy: right-click-press copies the current
+            // FTXUI selection to the terminal clipboard via OSC 52. Runs
+            // anywhere inside the TUI (not gated by chat_box) so users can
+            // right-click wherever feels natural. Silent no-op when the
+            // selection is empty.
+            if (mouse.button == Mouse::Right && mouse.motion == Mouse::Pressed) {
+                std::string sel = screen.GetSelection();
+                if (sel.empty()) {
+                    return false;
+                }
+                std::string seq = "\x1b]52;c;" + base64_encode(sel) + "\x1b\\";
+                std::fwrite(seq.data(), 1, seq.size(), stdout);
+                std::fflush(stdout);
+                LOG_INFO("Copied " + std::to_string(sel.size()) +
+                         " bytes to clipboard via OSC 52");
+                {
+                    std::lock_guard<std::mutex> lk(state.mu);
+                    // sel.size() is a byte count, not a codepoint count — the
+                    // number shown matches what OSC 52 actually transports.
+                    std::string msg = "Copied " + std::to_string(sel.size()) +
+                                      " bytes to clipboard";
+                    // Snapshot the prior status so we can restore it on clear.
+                    if (state.status_line_clear_at.time_since_epoch().count() == 0) {
+                        state.status_line_saved = state.status_line;
+                    }
+                    state.status_line = msg;
+                    state.status_line_clear_at =
+                        std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+                }
+                screen.PostEvent(Event::Custom);
+                return true;
+            }
+
+            std::lock_guard<std::mutex> lk(state.mu);
             if (!chat_box.Contain(mouse.x, mouse.y)) {
                 return false;
             }
 
             if (mouse.button == Mouse::WheelUp) {
-                if (scroll_chat(-3)) {
+                if (scroll_chat(-1)) {
                     screen.PostEvent(Event::Custom);
                 }
                 return true;
             }
             if (mouse.button == Mouse::WheelDown) {
-                if (scroll_chat(3)) {
+                if (scroll_chat(1)) {
                     screen.PostEvent(Event::Custom);
                 }
                 return true;
@@ -1378,6 +1548,7 @@ int main(int argc, char* argv[]) {
             auto [hist_mode, hist_text] = parse_mode_prefix(state.input_history[state.history_index]);
             state.input_mode = hist_mode;
             state.input_text = hist_text;
+            state.input_cursor = state.input_text.size();
             refresh_slash_dropdown(state, cmd_registry);
             return true;
         }
@@ -1400,26 +1571,91 @@ int main(int argc, char* argv[]) {
                 state.input_mode = saved_mode;
                 state.input_text = saved_text;
             }
+            state.input_cursor = state.input_text.size();
             refresh_slash_dropdown(state, cmd_registry);
             return true;
         }
-        // Backspace: remove last UTF-8 character
+        // ArrowLeft / ArrowRight: move caret one UTF-8 glyph.
+        if (event == Event::ArrowLeft) {
+            std::lock_guard<std::mutex> lk(state.mu);
+            if (state.resume_picker_active) return true;
+            if (state.input_cursor > state.input_text.size()) {
+                state.input_cursor = state.input_text.size();
+            }
+            if (state.input_cursor == 0) return true;
+            size_t pos = state.input_cursor - 1;
+            while (pos > 0 && (static_cast<unsigned char>(state.input_text[pos]) & 0xC0) == 0x80) {
+                pos--;
+            }
+            state.input_cursor = pos;
+            return true;
+        }
+        if (event == Event::ArrowRight) {
+            std::lock_guard<std::mutex> lk(state.mu);
+            if (state.resume_picker_active) return true;
+            if (state.input_cursor >= state.input_text.size()) {
+                state.input_cursor = state.input_text.size();
+                return true;
+            }
+            size_t pos = state.input_cursor + 1;
+            while (pos < state.input_text.size() &&
+                   (static_cast<unsigned char>(state.input_text[pos]) & 0xC0) == 0x80) {
+                pos++;
+            }
+            state.input_cursor = pos;
+            return true;
+        }
+        if (event == Event::Home) {
+            std::lock_guard<std::mutex> lk(state.mu);
+            state.input_cursor = 0;
+            return true;
+        }
+        if (event == Event::End) {
+            std::lock_guard<std::mutex> lk(state.mu);
+            state.input_cursor = state.input_text.size();
+            return true;
+        }
+        // Delete: remove UTF-8 glyph at the caret (to the right)
+        if (event == Event::Delete) {
+            std::lock_guard<std::mutex> lk(state.mu);
+            if (state.input_cursor > state.input_text.size()) {
+                state.input_cursor = state.input_text.size();
+            }
+            if (state.input_cursor >= state.input_text.size()) return true;
+            size_t next = state.input_cursor + 1;
+            while (next < state.input_text.size() &&
+                   (static_cast<unsigned char>(state.input_text[next]) & 0xC0) == 0x80) {
+                next++;
+            }
+            state.input_text.erase(state.input_cursor, next - state.input_cursor);
+            refresh_slash_dropdown(state, cmd_registry);
+            return true;
+        }
+        // Backspace: remove UTF-8 glyph preceding the caret
         if (event == Event::Backspace) {
             std::lock_guard<std::mutex> lk(state.mu);
+            if (state.input_cursor > state.input_text.size()) {
+                state.input_cursor = state.input_text.size();
+            }
             if (state.input_text.empty()) {
                 // On empty buffer, Backspace exits Shell mode back to Normal.
                 if (state.input_mode == InputMode::Shell) {
                     state.input_mode = InputMode::Normal;
                 }
+                state.input_cursor = 0;
                 refresh_slash_dropdown(state, cmd_registry);
                 return true;
             }
-            size_t pos = state.input_text.size() - 1;
+            if (state.input_cursor == 0) {
+                return true;
+            }
+            size_t pos = state.input_cursor - 1;
             // Walk back over UTF-8 continuation bytes (10xxxxxx)
             while (pos > 0 && (static_cast<unsigned char>(state.input_text[pos]) & 0xC0) == 0x80) {
                 pos--;
             }
-            state.input_text.erase(pos);
+            state.input_text.erase(pos, state.input_cursor - pos);
+            state.input_cursor = pos;
             refresh_slash_dropdown(state, cmd_registry);
             return true;
         }
@@ -1438,6 +1674,7 @@ int main(int argc, char* argv[]) {
                         state.resume_items.clear();
                         state.resume_callback = nullptr;
                         state.input_text.clear();
+                        state.input_cursor = 0;
                         if (cb) cb(sid);
                         clamp_chat_focus();
                         screen.PostEvent(Event::Custom);
@@ -1454,7 +1691,12 @@ int main(int argc, char* argv[]) {
                 state.history_index = -1;
                 return true;
             }
-            state.input_text += event.character();
+            const std::string ch = event.character();
+            if (state.input_cursor > state.input_text.size()) {
+                state.input_cursor = state.input_text.size();
+            }
+            state.input_text.insert(state.input_cursor, ch);
+            state.input_cursor += ch.size();
             // Reset history browsing on new input
             state.history_index = -1;
             refresh_slash_dropdown(state, cmd_registry);
@@ -1535,9 +1777,32 @@ int main(int argc, char* argv[]) {
                 }
                 message_elements.push_back(line | focus_decorator);
             } else if (msg.role == "tool_result") {
+                // Fold long tool output to at most 10 lines + summary footer.
+                // Session persistence still stores the full content.
+                const int MAX_TOOL_LINES = 10;
+                std::string display_content = msg.content;
+                int line_count = 0;
+                for (char c : msg.content) if (c == '\n') line_count++;
+                if (msg.content.empty() || msg.content.back() != '\n') line_count++;
+
+                if (line_count > MAX_TOOL_LINES) {
+                    size_t cut = 0;
+                    int seen = 0;
+                    while (cut < msg.content.size() && seen < MAX_TOOL_LINES) {
+                        if (msg.content[cut] == '\n') seen++;
+                        cut++;
+                    }
+                    display_content = msg.content.substr(0, cut);
+                    if (!display_content.empty() && display_content.back() == '\n') {
+                        display_content.pop_back();
+                    }
+                    int hidden = line_count - MAX_TOOL_LINES;
+                    display_content += "\n... (" + std::to_string(hidden) + " more lines)";
+                }
+
                 auto line = hbox({
                     text("   <- ") | color(Color::GrayDark),
-                    paragraph(msg.content) | color(Color::GrayLight) | dim | flex,
+                    paragraph(display_content) | color(Color::GrayLight) | dim | flex,
                 });
                 if (focused_message) {
                     line = line | focus;
@@ -1565,11 +1830,22 @@ int main(int argc, char* argv[]) {
             message_elements.push_back(text(""));
         }
 
-        auto message_view = vbox(std::move(message_elements)) | vscroll_indicator | yframe | reflect(chat_box) | flex;
+        auto message_view = vbox(std::move(message_elements))
+            | vscroll_indicator | yframe | reflect(chat_box) | flex
+            // mouse-selection-copy: visual feedback for drag-selection. The
+            // decorator lives on the message_view so selection can span
+            // multiple messages.
+            | selectionBackgroundColor(Color::Blue)
+            | selectionForegroundColor(Color::White);
 
-        // -- Thinking indicator --
+        // -- Thinking indicator / tool progress --
+        // Priority: if a tool is streaming output, show the live tool-progress
+        // element instead of the thinking animation (the tool is the more
+        // specific "in-progress" signal).
         Element thinking_element = text("");
-        if (state.is_waiting) {
+        if (state.tool_running) {
+            thinking_element = render_tool_progress(state);
+        } else if (state.is_waiting) {
             int tick = anim_tick.load();
             int dot_count = (tick % 3) + 1; // 1, 2, 3 dots cycling
 
@@ -1674,11 +1950,21 @@ int main(int argc, char* argv[]) {
         Element token_el = state.token_status.empty()
             ? text("")
             : text("  " + state.token_status + "  ") | dim | color(Color::CyanLight);
+        // Tool timer chip — persistent even when the main progress element is
+        // obscured by overlays or scrolled out of view. Thinking-timer chip
+        // shows elapsed time + live output-token estimate while the agent is
+        // waiting on the LLM. The two are mutually exclusive (thinking chip
+        // returns empty when tool_running is true), so they occupy the same
+        // slot in the bottom bar.
+        Element tool_timer_el = render_tool_timer_chip(state);
+        Element thinking_timer_el = render_thinking_timer_chip(state);
         Element bottom_bar;
         if (dangerous_mode) {
             bottom_bar = hbox({
                 text("  [DANGEROUS MODE]") | bold | color(Color::Red),
                 filler(),
+                thinking_timer_el,
+                tool_timer_el,
                 token_el,
                 text(perm_mode_str + "  ") | dim | color(Color::GrayDark),
             });
@@ -1686,6 +1972,8 @@ int main(int argc, char* argv[]) {
             bottom_bar = hbox({
                 text("  esc to interrupt") | dim | color(Color::GrayDark),
                 filler(),
+                thinking_timer_el,
+                tool_timer_el,
                 token_el,
                 text(perm_mode_str + "  ") | dim | color(Color::GrayDark),
             });
@@ -1693,6 +1981,7 @@ int main(int argc, char* argv[]) {
             bottom_bar = hbox({
                 text("  ctrl+p: cycle permission mode") | dim | color(Color::GrayDark),
                 filler(),
+                tool_timer_el,
                 token_el,
                 text(perm_mode_str + "  ") | dim | color(Color::GrayDark),
             });

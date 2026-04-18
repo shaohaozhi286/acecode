@@ -255,7 +255,7 @@ bool McpManager::connect_entry_locked(ServerEntry& entry, ToolExecutor& executor
         impl.source = ToolSource::Mcp;
         const std::string server_name = dt.server_name;
         const std::string tool_name = dt.original_tool_name;
-        impl.execute = [this, server_name, tool_name](const std::string& args_json) {
+        impl.execute = [this, server_name, tool_name](const std::string& args_json, const ToolContext& /*ctx*/) {
             return invoke(server_name, tool_name, args_json);
         };
         executor.register_tool(impl);
