@@ -34,7 +34,11 @@ Output binary: `build/acecode` (Ninja) or `build/<config>/acecode` (multi-config
 
 **Note:** On Windows, libcurl >= 8.14 is required for TLS support. A custom FTXUI overlay port lives in `/ports/ftxui/`.
 
-**No unit test infrastructure exists** — validation is manual/integration through the TUI.
+**Unit tests:** configure with `-DBUILD_TESTING=ON` (default ON) and run
+```
+cmake --build build --target acecode_unit_tests && ctest --test-dir build --output-on-failure
+```
+Tests live under `tests/`, mirror the `src/` layout, and file names end in `_test.cpp` (e.g. `src/utils/terminal_title.cpp` → `tests/utils/terminal_title_test.cpp`). `tests/CMakeLists.txt` globs `*_test.cpp` automatically — no CMake edit needed to add a new file. The test binary links against the `acecode_testable` OBJECT library, which holds every `src/*.cpp` **except** `src/tui/` and `src/markdown/` (they pull FTXUI and are exempted from unit testing). `main.cpp` is always excluded. Integration of TUI renders and `AgentLoop`/provider HTTP paths stays manual for now.
 
 ## Running
 

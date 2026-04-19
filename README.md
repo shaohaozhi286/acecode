@@ -153,7 +153,7 @@ cd acecode
 
 # 2. Install dependencies via vcpkg using the local overlay ports
 <vcpkg-root>/vcpkg install \
-  cpr nlohmann-json ftxui \
+  cpr nlohmann-json ftxui gtest \
   --triplet <triplet> \
   --overlay-ports=$PWD/ports
 
@@ -179,6 +179,22 @@ On Windows, `cpr` depends on libcurl, which must be **>= 8.14** for proper TLS c
 ### CI / packaging
 
 `.github/workflows/package.yml` builds and uploads artifacts for Linux x64/arm64, Windows x64, and macOS x64/arm64. It runs on PRs, pushes to `main`, version tags (`v*`), and via **Actions > package > Run workflow**.
+
+`.github/workflows/test.yml` runs the gtest unit suite on Ubuntu x64 for every PR.
+
+## Testing
+
+```bash
+cmake -S . -B build -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_TOOLCHAIN_FILE=<vcpkg-root>/scripts/buildsystems/vcpkg.cmake \
+  -DVCPKG_TARGET_TRIPLET=<triplet> \
+  -DBUILD_TESTING=ON
+cmake --build build --target acecode_unit_tests
+ctest --test-dir build --output-on-failure
+```
+
+Tests live under `tests/`, mirror the `src/` layout, and file names end in `_test.cpp`. The `tests/CMakeLists.txt` globs `*_test.cpp` automatically; to add a test for `src/foo/bar.cpp`, drop `tests/foo/bar_test.cpp`. TUI rendering code (`src/tui/*`, `src/markdown/*`, `main.cpp`) is exempted.
 
 ---
 

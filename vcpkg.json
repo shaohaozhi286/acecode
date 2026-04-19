@@ -5,6 +5,7 @@
     "cpr",
     "crow",
     "ftxui",
+    "gtest",
     "nlohmann-json"
   ]
 }

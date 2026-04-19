@@ -1,0 +1,44 @@
+name: test
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - master
+
+jobs:
+  unit-tests:
+    name: unit-tests (linux-x64)
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build tools
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build
+
+      - name: Run vcpkg
+        uses: lukka/run-vcpkg@v11
+
+      - name: Configure
+        shell: bash
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_TARGET_TRIPLET=x64-linux \
+            -DBUILD_TESTING=ON
+
+      - name: Build test binary
+        shell: bash
+        run: cmake --build build --target acecode_unit_tests
+
+      - name: Run ctest
+        shell: bash
+        run: ctest --test-dir build --output-on-failure

@@ -70,11 +70,12 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
             -DVCPKG_TARGET_TRIPLET="${{ matrix.triplet }}" \
+            -DBUILD_TESTING=OFF \
             ${{ matrix.cmake_extra_args }}
 
       - name: Build
         shell: bash
-        run: cmake --build build --config Release
+        run: cmake --build build --config Release --target acecode
 
       - name: Extract debug symbols (Linux)
         if: runner.os == 'Linux'

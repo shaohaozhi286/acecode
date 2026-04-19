@@ -9,6 +9,11 @@ endif()
 
 project(acecode VERSION 0.1.2 LANGUAGES C CXX)
 
+# CTest integration: defines BUILD_TESTING (default ON). Release packaging can
+# disable it with -DBUILD_TESTING=OFF to skip the test binary and the gtest
+# lookup that `tests/` performs.
+include(CTest)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -57,29 +62,69 @@ if(WIN32)
     endif()
 endif()
 
-file(GLOB_RECURSE ACECODE_SOURCE_FILES CONFIGURE_DEPENDS
+# cpp-mcp: only build the library, skip examples and tests
+set(MCP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(BUILD_MCP_EXAMPLES OFF CACHE BOOL "" FORCE)
+add_subdirectory(external/cpp-mcp EXCLUDE_FROM_ALL)
+
+# Gather all sources under src/ once, then split them into:
+#   - ACECODE_TESTABLE_SOURCES: headless logic that unit tests can link against
+#   - ACECODE_TUI_SOURCES     : FTXUI-coupled code (src/tui, src/markdown)
+# main.cpp always stays out of acecode_testable so tests never drag in the
+# full TUI entry point.
+file(GLOB_RECURSE ACECODE_ALL_SOURCES CONFIGURE_DEPENDS
     ${CMAKE_SOURCE_DIR}/src/*.cpp
 )
-
 file(GLOB_RECURSE ACECODE_HEADER_FILES CONFIGURE_DEPENDS
     ${CMAKE_SOURCE_DIR}/src/*.hpp
     ${CMAKE_SOURCE_DIR}/src/*.h
 )
 
-set(ACECODE_PROJECT_FILES
-    ${CMAKE_SOURCE_DIR}/main.cpp
-    ${ACECODE_SOURCE_FILES}
+set(ACECODE_TESTABLE_SOURCES ${ACECODE_ALL_SOURCES})
+list(FILTER ACECODE_TESTABLE_SOURCES EXCLUDE REGEX "/src/(tui|markdown)/")
+set(ACECODE_TUI_SOURCES ${ACECODE_ALL_SOURCES})
+list(FILTER ACECODE_TUI_SOURCES INCLUDE REGEX "/src/(tui|markdown)/")
+
+# Shared OBJECT library: one compile per source, consumed by both acecode
+# (production binary) and acecode_unit_tests (test binary). PUBLIC link deps
+# propagate to consumers so they get the right include dirs + libraries.
+add_library(acecode_testable OBJECT
+    ${ACECODE_TESTABLE_SOURCES}
     ${ACECODE_HEADER_FILES}
-    ${CMAKE_SOURCE_DIR}/src/version.hpp.in
     ${CMAKE_BINARY_DIR}/generated/version.hpp
 )
+target_include_directories(acecode_testable PUBLIC
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_BINARY_DIR}/generated
+    ${CMAKE_SOURCE_DIR}/external/cpp-mcp/include
+    ${CMAKE_SOURCE_DIR}/external/cpp-mcp/common
+)
+target_link_libraries(acecode_testable PUBLIC
+    cpr::cpr
+    nlohmann_json::nlohmann_json
+    mcp
+)
+if(Crow_FOUND)
+    target_link_libraries(acecode_testable PUBLIC Crow::Crow)
+endif()
+if(WIN32)
+    target_link_libraries(acecode_testable PUBLIC bcrypt advapi32)
+endif()
 
-add_executable(acecode)
-target_sources(acecode PRIVATE ${ACECODE_PROJECT_FILES})
+add_executable(acecode
+    ${CMAKE_SOURCE_DIR}/main.cpp
+    ${ACECODE_TUI_SOURCES}
+)
+target_link_libraries(acecode PRIVATE
+    acecode_testable
+    ftxui::screen
+    ftxui::dom
+    ftxui::component
+)
 
 source_group(TREE ${CMAKE_SOURCE_DIR} FILES
     ${CMAKE_SOURCE_DIR}/main.cpp
-    ${ACECODE_SOURCE_FILES}
+    ${ACECODE_ALL_SOURCES}
     ${ACECODE_HEADER_FILES}
     ${CMAKE_SOURCE_DIR}/src/version.hpp.in
 )
@@ -88,39 +133,6 @@ source_group("generated" FILES
     ${CMAKE_BINARY_DIR}/generated/version.hpp
 )
 
-target_include_directories(acecode PRIVATE 
-    ${CMAKE_SOURCE_DIR}/src
-    ${CMAKE_BINARY_DIR}/generated
-)
-
-# cpp-mcp: only build the library, skip examples and tests
-set(MCP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(BUILD_MCP_EXAMPLES OFF CACHE BOOL "" FORCE)
-add_subdirectory(external/cpp-mcp EXCLUDE_FROM_ALL)
-
-target_include_directories(acecode PRIVATE
-    ${CMAKE_SOURCE_DIR}/external/cpp-mcp/include
-    # mcp_sse_client.h transitively includes httplib.h from common/; this path
-    # is scoped to acecode's TUs so it only affects mcp_manager.cpp in practice.
-    ${CMAKE_SOURCE_DIR}/external/cpp-mcp/common
-)
-
-target_link_libraries(acecode PRIVATE
-    cpr::cpr
-    ftxui::screen
-    ftxui::dom
-    ftxui::component
-    nlohmann_json::nlohmann_json
-    mcp
-)
-
-if(Crow_FOUND)
-    target_link_libraries(acecode PRIVATE Crow::Crow)
+if(BUILD_TESTING)
+    add_subdirectory(tests)
 endif()
-
-# Windows-only system libraries used by the daemon process abstraction:
-# bcrypt for token RNG, advapi32 for ACL APIs in atomic_file.
-if(WIN32)
-    target_link_libraries(acecode PRIVATE bcrypt advapi32)
-endif()
-
