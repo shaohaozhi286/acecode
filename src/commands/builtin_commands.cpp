@@ -21,7 +21,7 @@ static void cmd_help(CommandContext& ctx, const std::string& /*args*/) {
         << "  /compact  - Compress conversation history\n"
         << "  /model    - Show or switch current model\n"
         << "  /config   - Show current configuration\n"
-        << "  /cost     - Show token usage and estimated cost\n"
+        << "  /tokens   - Show session token usage\n"
         << "  /resume   - Resume a previous session\n"
         << "  /mcp      - Manage MCP servers\n"
         << "  /skills   - List, invoke, or reload installed skills\n"
@@ -87,16 +87,13 @@ static void cmd_config(CommandContext& ctx, const std::string& /*args*/) {
     ctx.state.chat_follow_tail = true;
 }
 
-static void cmd_cost(CommandContext& ctx, const std::string& /*args*/) {
+static void cmd_tokens(CommandContext& ctx, const std::string& /*args*/) {
     std::lock_guard<std::mutex> lk(ctx.state.mu);
     std::ostringstream oss;
     oss << "Session token usage:\n"
         << "  prompt:     " << TokenTracker::format_tokens(ctx.token_tracker.prompt_tokens()) << "\n"
         << "  completion: " << TokenTracker::format_tokens(ctx.token_tracker.completion_tokens()) << "\n"
-        << "  total:      " << TokenTracker::format_tokens(ctx.token_tracker.total_tokens()) << "\n";
-    oss << std::fixed;
-    oss.precision(4);
-    oss << "  est. cost:  ~$" << ctx.token_tracker.estimated_cost();
+        << "  total:      " << TokenTracker::format_tokens(ctx.token_tracker.total_tokens());
     ctx.state.conversation.push_back({"system", oss.str(), false});
     ctx.state.chat_follow_tail = true;
 }
@@ -529,7 +526,7 @@ void register_builtin_commands(CommandRegistry& registry) {
     registry.register_command({"clear", "Clear conversation history", cmd_clear});
     registry.register_command({"model", "Show or switch current model", cmd_model});
     registry.register_command({"config", "Show current configuration", cmd_config});
-    registry.register_command({"cost", "Show token usage and estimated cost", cmd_cost});
+    registry.register_command({"tokens", "Show session token usage", cmd_tokens});
     registry.register_command({"compact", "Compress conversation history", cmd_compact});
     registry.register_command({"resume", "Resume a previous session", cmd_resume});
     registry.register_command({"mcp", "Manage MCP servers", cmd_mcp});

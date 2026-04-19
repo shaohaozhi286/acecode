@@ -78,7 +78,7 @@ The agent will plan, call tools (asking for confirmation on writes/exec), and st
 | `/clear`    | Clear conversation history                   |
 | `/model`    | Show or switch the current model             |
 | `/config`   | Show the current configuration               |
-| `/cost`     | Show token usage and estimated cost          |
+| `/tokens`   | Show session token usage                     |
 | `/compact`  | Compress conversation history to save tokens |
 | `/resume`   | Open the session picker to resume a session  |
 | `/exit`     | Quit ACECode                                 |

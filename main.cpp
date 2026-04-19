@@ -1605,13 +1605,33 @@ int main(int argc, char* argv[]) {
             state.input_cursor = pos;
             return true;
         }
-        if (event == Event::Home) {
+        // Home / End: jump caret to start/end of the input buffer.
+        // FTXUI only maps `ESC [ H` and `ESC [ F` (plus the `ESC O H/F` DECCKM
+        // variants) to Event::Home / Event::End. Several terminals emit VT220-
+        // style `ESC [ 1 ~` / `ESC [ 4 ~` or rxvt-style `ESC [ 7 ~` / `ESC [ 8 ~`
+        // instead — those arrive as raw Special events, so match them here.
+        // Ctrl+A / Ctrl+E are also honoured as the readline-style fallback.
+        auto is_home_event = [](const Event& e) {
+            return e == Event::Home
+                || e == Event::Special("\x1B[1~")
+                || e == Event::Special("\x1B[7~")
+                || e == Event::Special(std::string(1, '\x01')); // Ctrl+A
+        };
+        auto is_end_event = [](const Event& e) {
+            return e == Event::End
+                || e == Event::Special("\x1B[4~")
+                || e == Event::Special("\x1B[8~")
+                || e == Event::Special(std::string(1, '\x05')); // Ctrl+E
+        };
+        if (is_home_event(event)) {
             std::lock_guard<std::mutex> lk(state.mu);
+            if (state.resume_picker_active) return true;
             state.input_cursor = 0;
             return true;
         }
-        if (event == Event::End) {
+        if (is_end_event(event)) {
             std::lock_guard<std::mutex> lk(state.mu);
+            if (state.resume_picker_active) return true;
             state.input_cursor = state.input_text.size();
             return true;
         }

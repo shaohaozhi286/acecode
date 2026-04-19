@@ -16,7 +16,11 @@ namespace {
 std::string truncate_description(const std::string& desc, size_t max_len = 80) {
     if (desc.size() <= max_len) return desc;
     if (max_len <= 3) return desc.substr(0, max_len);
-    return desc.substr(0, max_len - 3) + "...";
+    size_t cut = max_len - 3;
+    // Walk back until we land on a UTF-8 lead byte (not a continuation byte 10xxxxxx).
+    while (cut > 0 && (static_cast<unsigned char>(desc[cut]) & 0xC0) == 0x80)
+        --cut;
+    return desc.substr(0, cut) + "...";
 }
 
 } // namespace

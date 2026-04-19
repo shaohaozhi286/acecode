@@ -1,7 +1,6 @@
 #include "token_tracker.hpp"
 #include <sstream>
 #include <iomanip>
-#include <cmath>
 
 namespace acecode {
 
@@ -89,16 +88,7 @@ std::string TokenTracker::format_tokens(int count) {
 std::string TokenTracker::format_status(int context_window) const {
     std::lock_guard<std::mutex> lk(mu_);
     // Display current context occupancy (last prompt tokens), not cumulative total
-    std::string tokens_str = format_tokens(last_prompt_tokens_) + "/" + format_tokens(context_window);
-    double cost = (session_prompt_tokens_ * kInputPricePerMillion + session_completion_tokens_ * kOutputPricePerMillion) / 1000000.0;
-    std::ostringstream oss;
-    oss << tokens_str << "  ~$" << std::fixed << std::setprecision(2) << cost;
-    return oss.str();
-}
-
-double TokenTracker::estimated_cost() const {
-    std::lock_guard<std::mutex> lk(mu_);
-    return (session_prompt_tokens_ * kInputPricePerMillion + session_completion_tokens_ * kOutputPricePerMillion) / 1000000.0;
+    return format_tokens(last_prompt_tokens_) + "/" + format_tokens(context_window);
 }
 
 } // namespace acecode

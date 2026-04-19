@@ -155,7 +155,11 @@ ftxui::Element render_slash_dropdown(const TuiState& state) {
         } else {
             std::string desc = item.description;
             if (desc.size() > 60) {
-                desc = desc.substr(0, 59) + "\xE2\x80\xA6"; // ellipsis
+                size_t cut = 59;
+                // Walk back to UTF-8 character boundary.
+                while (cut > 0 && (static_cast<unsigned char>(desc[cut]) & 0xC0) == 0x80)
+                    --cut;
+                desc = desc.substr(0, cut) + "\xE2\x80\xA6"; // ellipsis
             }
             row = hbox({
                 text("  /" + item.name + "  "),

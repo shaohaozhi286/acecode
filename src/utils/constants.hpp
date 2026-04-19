@@ -6,10 +6,6 @@ namespace constants {
 // Token estimation
 constexpr int CHARS_PER_TOKEN = 4;
 
-// Token costs (per 1M tokens)
-constexpr double TOKEN_COST_INPUT_1M = 15.0;
-constexpr double TOKEN_COST_OUTPUT_1M = 60.0;
-
 // File size limits
 constexpr size_t MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 

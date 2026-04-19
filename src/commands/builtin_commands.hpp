@@ -4,7 +4,7 @@
 
 namespace acecode {
 
-// Register all builtin slash commands (/help, /clear, /model, /config, /cost, /compact, /exit)
+// Register all builtin slash commands (/help, /clear, /model, /config, /tokens, /compact, /exit)
 void register_builtin_commands(CommandRegistry& registry);
 
 } // namespace acecode
