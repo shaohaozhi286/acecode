@@ -40,6 +40,14 @@ public:
 
     bool has_active_session() const;
 
+    // Set the in-memory title for the current session. Persisted to .meta.json
+    // on the next update_meta() (every 5 messages, or finalize). Pass empty
+    // string to clear.
+    void set_session_title(std::string title);
+
+    // Return the current in-memory title (empty when unset).
+    std::string current_title() const;
+
 private:
     void ensure_created();  // Lazy creation of session files on first message
     void update_meta();     // Write current metadata to disk
@@ -60,6 +68,7 @@ private:
     int message_count_ = 0;
     std::string last_user_summary_;
     std::string created_at_;
+    std::string pending_title_;
 
     mutable std::mutex mu_;
 };

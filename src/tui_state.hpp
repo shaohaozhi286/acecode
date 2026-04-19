@@ -147,6 +147,12 @@ struct TuiState {
     std::chrono::steady_clock::time_point status_line_clear_at{};
     std::string status_line_saved;
 
+    // /title command (window-title capability). Mirror of SessionManager's
+    // pending_title_ kept here so the TUI can echo the current title without
+    // grabbing the session manager's lock from the render path. Kept in sync
+    // by the /title command handler and the resume restore path.
+    std::string current_session_title;
+
     std::mutex mu;
 };
 

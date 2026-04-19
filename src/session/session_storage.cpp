@@ -121,6 +121,9 @@ void SessionStorage::write_meta(const std::string& meta_path, const SessionMeta&
     j["summary"] = meta.summary;
     j["provider"] = meta.provider;
     j["model"] = meta.model;
+    if (!meta.title.empty()) {
+        j["title"] = meta.title;
+    }
 
     std::ofstream ofs(meta_path);
     if (ofs.is_open()) {
@@ -143,6 +146,7 @@ SessionMeta SessionStorage::read_meta(const std::string& meta_path) {
         if (j.contains("summary"))       meta.summary       = j["summary"].get<std::string>();
         if (j.contains("provider"))      meta.provider      = j["provider"].get<std::string>();
         if (j.contains("model"))         meta.model         = j["model"].get<std::string>();
+        meta.title = j.value("title", std::string{});
     } catch (...) {
         // Return empty meta on parse failure
     }

@@ -15,6 +15,7 @@ struct SessionMeta {
     std::string summary;
     std::string provider;
     std::string model;
+    std::string title;  // optional user-set window title; empty = unset
 };
 
 class SessionStorage {

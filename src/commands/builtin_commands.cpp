@@ -5,6 +5,8 @@
 #include "../tool/tool_executor.hpp"
 #include "../skills/skill_registry.hpp"
 #include "../skills/skill_commands.hpp"
+#include "../session/session_manager.hpp"
+#include "../utils/terminal_title.hpp"
 #include <mutex>
 #include <sstream>
 #include <iomanip>
@@ -25,6 +27,7 @@ static void cmd_help(CommandContext& ctx, const std::string& /*args*/) {
         << "  /resume   - Resume a previous session\n"
         << "  /mcp      - Manage MCP servers\n"
         << "  /skills   - List, invoke, or reload installed skills\n"
+        << "  /title    - Set or show the window title for this session\n"
         << "  /exit     - Exit acecode";
 
     if (ctx.skills) {
@@ -46,6 +49,10 @@ static void cmd_clear(CommandContext& ctx, const std::string& /*args*/) {
     ctx.state.token_status.clear();
     if (ctx.session_manager) {
         ctx.session_manager->end_current_session();
+    }
+    if (!ctx.state.current_session_title.empty()) {
+        ctx.state.current_session_title.clear();
+        clear_terminal_title();
     }
     ctx.state.conversation.push_back({"system", "Conversation cleared.", false});
     ctx.state.chat_follow_tail = true;
@@ -322,6 +329,73 @@ static void cmd_mcp(CommandContext& ctx, const std::string& args) {
     mcp_push(ctx, "Unknown /mcp subcommand '" + sub + "'. Try /mcp help.");
 }
 
+static void cmd_title(CommandContext& ctx, const std::string& args) {
+    // Trim leading/trailing whitespace.
+    std::string text = args;
+    while (!text.empty() && std::isspace(static_cast<unsigned char>(text.front()))) {
+        text.erase(text.begin());
+    }
+    while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back()))) {
+        text.pop_back();
+    }
+
+    std::lock_guard<std::mutex> lk(ctx.state.mu);
+
+    // No args: echo current title.
+    if (text.empty()) {
+        if (ctx.state.current_session_title.empty()) {
+            ctx.state.conversation.push_back({"system",
+                "No title set. Use /title <text> to set one.", false});
+        } else {
+            ctx.state.conversation.push_back({"system",
+                "Current title: " + ctx.state.current_session_title, false});
+        }
+        ctx.state.chat_follow_tail = true;
+        return;
+    }
+
+    // Clear: literal `clear` or quoted empty string.
+    if (text == "clear" || text == "\"\"") {
+        ctx.state.current_session_title.clear();
+        clear_terminal_title();
+        if (ctx.session_manager) {
+            ctx.session_manager->set_session_title("");
+        }
+        ctx.state.status_line = "Title cleared";
+        ctx.state.conversation.push_back({"system", "Title cleared.", false});
+        ctx.state.chat_follow_tail = true;
+        return;
+    }
+
+    // Strip surrounding double quotes if user wrapped the value.
+    if (text.size() >= 2 && text.front() == '"' && text.back() == '"') {
+        text = text.substr(1, text.size() - 2);
+    }
+
+    std::string err;
+    if (!sanitize_title(text, err)) {
+        ctx.state.conversation.push_back({"system",
+            "Title contains invalid control characters.", false});
+        ctx.state.chat_follow_tail = true;
+        return;
+    }
+
+    set_terminal_title(text);
+    ctx.state.current_session_title = text;
+
+    std::string status = "Title set: " + text;
+    if (err == "truncated") status += " (truncated to 256 bytes)";
+    ctx.state.status_line = status;
+
+    if (ctx.session_manager) {
+        ctx.session_manager->set_session_title(text);
+        ctx.state.conversation.push_back({"system", status, false});
+    } else {
+        ctx.state.conversation.push_back({"system", status + " (not persisted)", false});
+    }
+    ctx.state.chat_follow_tail = true;
+}
+
 static void cmd_exit(CommandContext& ctx, const std::string& /*args*/) {
     if (ctx.request_exit) {
         ctx.request_exit();
@@ -446,6 +520,13 @@ static void do_resume_session(CommandContext& ctx, const std::string& session_id
     oss << "Resumed session " << session_id << " (" << messages.size() << " messages)";
     ctx.state.conversation.push_back({"system", oss.str(), false});
     ctx.state.chat_follow_tail = true;
+
+    if (target && !target->title.empty()) {
+        set_terminal_title(target->title);
+        ctx.state.current_session_title = target->title;
+    } else {
+        ctx.state.current_session_title.clear();
+    }
 }
 
 static void cmd_resume(CommandContext& ctx, const std::string& args) {
@@ -518,6 +599,17 @@ static void cmd_resume(CommandContext& ctx, const std::string& args) {
         oss << "Resumed session " << sid << " (" << messages.size() << " messages)";
         state.conversation.push_back({"system", oss.str(), false});
         state.chat_follow_tail = true;
+
+        std::string restored_title;
+        for (const auto& s : captured_sessions) {
+            if (s.id == sid) { restored_title = s.title; break; }
+        }
+        if (!restored_title.empty()) {
+            set_terminal_title(restored_title);
+            state.current_session_title = restored_title;
+        } else {
+            state.current_session_title.clear();
+        }
     };
 }
 
@@ -531,6 +623,7 @@ void register_builtin_commands(CommandRegistry& registry) {
     registry.register_command({"resume", "Resume a previous session", cmd_resume});
     registry.register_command({"mcp", "Manage MCP servers", cmd_mcp});
     registry.register_command({"skills", "List, invoke, or reload installed skills", cmd_skills});
+    registry.register_command({"title", "Set or show the window title for this session", cmd_title});
     registry.register_command({"exit", "Exit acecode", cmd_exit});
 }
 

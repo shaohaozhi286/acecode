@@ -63,6 +63,8 @@
 #include "tui/slash_dropdown.hpp"
 #include "tui/tool_progress.hpp"
 #include "utils/base64.hpp"
+#include "utils/terminal_title.hpp"
+#include "session/session_storage.hpp"
 
 #include <cstdio>
 
@@ -319,6 +321,10 @@ static void finalize_session_atexit() {
                       << " saved. Resume with: acecode --resume " << sid << std::endl;
         }
     }
+    // Best-effort: hand the window title back to the parent shell. Not
+    // strictly async-signal-safe but consistent with the existing finalize
+    // path which already uses iostreams.
+    clear_terminal_title();
 }
 
 #ifdef _WIN32
@@ -1025,11 +1031,18 @@ int main(int argc, char* argv[]) {
     // ---- Handle --resume ----
     if (resume_latest || !resume_session_id.empty()) {
         std::string target_id = resume_session_id;
+        std::string resumed_title;
         if (resume_latest) {
             auto sessions = session_manager.list_sessions();
             if (!sessions.empty()) {
                 target_id = sessions.front().id;
+                resumed_title = sessions.front().title;
             }
+        } else if (!target_id.empty()) {
+            // Look up meta directly so we get the title without listing all sessions.
+            auto project_dir = SessionStorage::get_project_dir(working_dir);
+            auto meta = SessionStorage::read_meta(SessionStorage::meta_path(project_dir, target_id));
+            resumed_title = meta.title;
         }
         if (!target_id.empty()) {
             auto messages = session_manager.resume_session(target_id);
@@ -1057,6 +1070,10 @@ int main(int argc, char* argv[]) {
             }
             state.conversation.push_back({"system",
                 "Resumed session " + target_id + " (" + std::to_string(messages.size()) + " messages)", false});
+            if (!resumed_title.empty()) {
+                set_terminal_title(resumed_title);
+                state.current_session_title = resumed_title;
+            }
         } else {
             state.conversation.push_back({"system", "No previous sessions found to resume.", false});
         }

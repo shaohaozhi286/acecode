@@ -72,6 +72,7 @@ void SessionManager::start_session(const std::string& cwd, const std::string& pr
     message_count_ = 0;
     last_user_summary_.clear();
     created_at_.clear();
+    pending_title_.clear();
 }
 
 void SessionManager::ensure_created() {
@@ -100,6 +101,7 @@ void SessionManager::ensure_created() {
     meta.message_count = 0;
     meta.provider = provider_name_;
     meta.model = model_name_;
+    meta.title = pending_title_;
     SessionStorage::write_meta(meta_path_str_, meta);
 }
 
@@ -157,6 +159,7 @@ std::vector<ChatMessage> SessionManager::resume_session(const std::string& sessi
         auto meta = SessionStorage::read_meta(resume_meta);
         created_at_ = meta.created_at;
         last_user_summary_ = meta.summary;
+        pending_title_ = meta.title;
     }
 
     message_count_ = static_cast<int>(messages.size());
@@ -178,6 +181,7 @@ void SessionManager::end_current_session() {
     message_count_ = 0;
     last_user_summary_.clear();
     created_at_.clear();
+    pending_title_.clear();
     // Keep started_=true, cwd_, provider_name_, model_name_, project_dir_
 }
 
@@ -227,7 +231,21 @@ void SessionManager::update_meta() {
     meta.summary = last_user_summary_;
     meta.provider = provider_name_;
     meta.model = model_name_;
+    meta.title = pending_title_;
     SessionStorage::write_meta(meta_path_str_, meta);
+}
+
+void SessionManager::set_session_title(std::string title) {
+    std::lock_guard<std::mutex> lk(mu_);
+    pending_title_ = std::move(title);
+    if (created_) {
+        update_meta();
+    }
+}
+
+std::string SessionManager::current_title() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return pending_title_;
 }
 
 std::string SessionManager::extract_summary(const std::string& content) const {
