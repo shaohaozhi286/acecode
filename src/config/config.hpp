@@ -46,6 +46,22 @@ struct SkillsConfig {
     std::vector<std::string> external_dirs;  // extra directories to scan (supports ~ and ${ENV})
 };
 
+struct DaemonConfig {
+    bool auto_start_on_double_click = false;
+    std::string service_name = "ACECodeDaemon";
+    int heartbeat_interval_ms = 2000;
+    int heartbeat_timeout_ms = 15000;
+};
+
+struct WebConfig {
+    bool enabled = true;
+    std::string bind = "127.0.0.1";
+    int port = 26419;
+    // Empty = serve embedded assets; non-empty = serve from this filesystem path
+    // (development mode for the front-end change).
+    std::string static_dir;
+};
+
 struct AppConfig {
     std::string provider = "copilot"; // "copilot" or "openai"
     OpenAiConfig openai;
@@ -54,6 +70,8 @@ struct AppConfig {
     int max_sessions = 50;       // max saved sessions per project
     std::map<std::string, McpServerConfig> mcp_servers; // MCP stdio servers (optional)
     SkillsConfig skills;                         // skill system configuration (optional)
+    DaemonConfig daemon;                         // daemon process supervision settings
+    WebConfig web;                               // HTTP/WebSocket server settings
 };
 
 // Expand ~ and ${ENV} style variables in a path string. Returns the expanded
@@ -77,5 +95,17 @@ void save_config(const AppConfig& cfg);
 
 // Get the path to ~/.acecode/ directory
 std::string get_acecode_dir();
+
+// Get the path to ~/.acecode/run/ (creates it if missing on first call site —
+// callers are responsible for filesystem::create_directories when needed).
+std::string get_run_dir();
+
+// Get the path to ~/.acecode/logs/ (callers handle create_directories).
+std::string get_logs_dir();
+
+// Validate runtime-affecting config values. Returns an empty vector on success;
+// otherwise each entry is a human-readable error message. Daemon mode callers
+// should abort on non-empty result.
+std::vector<std::string> validate_config(const AppConfig& cfg);
 
 } // namespace acecode

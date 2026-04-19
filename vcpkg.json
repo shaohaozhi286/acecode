@@ -3,6 +3,7 @@
   "version-semver": "0.1.1",
   "dependencies": [
     "cpr",
+    "crow",
     "ftxui",
     "nlohmann-json"
   ]

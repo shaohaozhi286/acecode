@@ -34,6 +34,15 @@ find_package(cpr CONFIG REQUIRED)
 find_package(ftxui CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 
+# Crow is the HTTP/WebSocket server used by `acecode daemon`. Wired up as
+# QUIET in M1 so existing builds keep working before users re-run vcpkg
+# install; M2 introduces the first translation unit that consumes Crow and
+# will flip this to REQUIRED.
+find_package(Crow CONFIG QUIET)
+if(NOT Crow_FOUND)
+    message(STATUS "Crow not found yet; run `vcpkg install` to pick it up before M2.")
+endif()
+
 # cpr ships with libcurl; on Windows libcurl >= 8.14 is required for proper
 # certificate handling.  Detect the version through the CURL::libcurl target
 # that vcpkg exposes and fail early with a clear message.
@@ -96,12 +105,22 @@ target_include_directories(acecode PRIVATE
     ${CMAKE_SOURCE_DIR}/external/cpp-mcp/common
 )
 
-target_link_libraries(acecode PRIVATE 
-    cpr::cpr 
-    ftxui::screen 
-    ftxui::dom 
+target_link_libraries(acecode PRIVATE
+    cpr::cpr
+    ftxui::screen
+    ftxui::dom
     ftxui::component
     nlohmann_json::nlohmann_json
     mcp
 )
+
+if(Crow_FOUND)
+    target_link_libraries(acecode PRIVATE Crow::Crow)
+endif()
+
+# Windows-only system libraries used by the daemon process abstraction:
+# bcrypt for token RNG, advapi32 for ACL APIs in atomic_file.
+if(WIN32)
+    target_link_libraries(acecode PRIVATE bcrypt advapi32)
+endif()
 

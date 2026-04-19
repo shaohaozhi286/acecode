@@ -20,5 +20,22 @@ constexpr int DEFAULT_BASH_TIMEOUT_MS = 120000; // 2 minutes
 // Compact thresholds
 constexpr int MINIMUM_TOKENS_TO_COMPACT = 200;
 
+// Daemon / web defaults
+constexpr int DEFAULT_WEB_PORT = 26419;
+constexpr int DEFAULT_HEARTBEAT_INTERVAL_MS = 2000;
+constexpr int DEFAULT_HEARTBEAT_TIMEOUT_MS = 15000;
+constexpr int TOKEN_BYTES = 32; // raw bytes; url-safe base64 encodes to ~43 chars
+
+// Subdirectories under ~/.acecode/
+inline constexpr const char* SUBDIR_RUN  = "run";
+inline constexpr const char* SUBDIR_LOGS = "logs";
+
+// Runtime files inside ~/.acecode/run/
+inline constexpr const char* RUN_FILE_PID       = "daemon.pid";
+inline constexpr const char* RUN_FILE_PORT      = "daemon.port";
+inline constexpr const char* RUN_FILE_GUID      = "daemon.guid";
+inline constexpr const char* RUN_FILE_HEARTBEAT = "heartbeat";
+inline constexpr const char* RUN_FILE_TOKEN     = "token";
+
 } // namespace constants
 } // namespace acecode

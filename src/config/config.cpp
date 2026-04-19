@@ -1,5 +1,6 @@
 #include "config.hpp"
 
+#include "../utils/constants.hpp"
 #include "../utils/logger.hpp"
 
 #include <cstdlib>
@@ -105,6 +106,34 @@ std::string get_acecode_dir() {
     return (fs::path(home) / ".acecode").string();
 }
 
+std::string get_run_dir() {
+    return (fs::path(get_acecode_dir()) / constants::SUBDIR_RUN).string();
+}
+
+std::string get_logs_dir() {
+    return (fs::path(get_acecode_dir()) / constants::SUBDIR_LOGS).string();
+}
+
+std::vector<std::string> validate_config(const AppConfig& cfg) {
+    std::vector<std::string> errors;
+    if (cfg.web.port < 1 || cfg.web.port > 65535) {
+        errors.push_back("web.port out of range (1-65535): " + std::to_string(cfg.web.port));
+    }
+    if (cfg.web.bind.empty()) {
+        errors.push_back("web.bind is empty; expected an IP address (e.g. 127.0.0.1)");
+    }
+    if (cfg.daemon.heartbeat_interval_ms <= 0) {
+        errors.push_back("daemon.heartbeat_interval_ms must be > 0");
+    }
+    if (cfg.daemon.heartbeat_timeout_ms <= cfg.daemon.heartbeat_interval_ms) {
+        errors.push_back("daemon.heartbeat_timeout_ms must be > daemon.heartbeat_interval_ms");
+    }
+    if (cfg.daemon.service_name.empty()) {
+        errors.push_back("daemon.service_name is empty");
+    }
+    return errors;
+}
+
 static void write_default_config(const std::string& config_path) {
     nlohmann::json j;
     j["provider"] = "copilot";
@@ -174,6 +203,30 @@ AppConfig load_config() {
                         if (v.is_string()) cfg.skills.external_dirs.push_back(v.get<std::string>());
                     }
                 }
+            }
+            if (j.contains("daemon") && j["daemon"].is_object()) {
+                const auto& dj = j["daemon"];
+                if (dj.contains("auto_start_on_double_click") && dj["auto_start_on_double_click"].is_boolean())
+                    cfg.daemon.auto_start_on_double_click = dj["auto_start_on_double_click"].get<bool>();
+                if (dj.contains("service_name") && dj["service_name"].is_string())
+                    cfg.daemon.service_name = dj["service_name"].get<std::string>();
+                if (dj.contains("heartbeat_interval_ms") && dj["heartbeat_interval_ms"].is_number_integer())
+                    cfg.daemon.heartbeat_interval_ms = dj["heartbeat_interval_ms"].get<int>();
+                if (dj.contains("heartbeat_timeout_ms") && dj["heartbeat_timeout_ms"].is_number_integer())
+                    cfg.daemon.heartbeat_timeout_ms = dj["heartbeat_timeout_ms"].get<int>();
+            }
+            if (j.contains("web") && j["web"].is_object()) {
+                const auto& wj = j["web"];
+                if (wj.contains("enabled") && wj["enabled"].is_boolean())
+                    cfg.web.enabled = wj["enabled"].get<bool>();
+                if (wj.contains("bind") && wj["bind"].is_string())
+                    cfg.web.bind = wj["bind"].get<std::string>();
+                if (wj.contains("port") && wj["port"].is_number_integer())
+                    cfg.web.port = wj["port"].get<int>();
+                // static_dir is intentionally optional. null/missing -> embedded assets;
+                // string -> filesystem path. Empty string is treated the same as null.
+                if (wj.contains("static_dir") && wj["static_dir"].is_string())
+                    cfg.web.static_dir = wj["static_dir"].get<std::string>();
             }
             if (j.contains("mcp_servers") && j["mcp_servers"].is_object()) {
                 for (auto it = j["mcp_servers"].begin(); it != j["mcp_servers"].end(); ++it) {
@@ -308,6 +361,35 @@ void save_config(const AppConfig& cfg) {
         if (!cfg.skills.disabled.empty()) sj["disabled"] = cfg.skills.disabled;
         if (!cfg.skills.external_dirs.empty()) sj["external_dirs"] = cfg.skills.external_dirs;
         j["skills"] = sj;
+    }
+
+    {
+        // Persist daemon and web sections so users discover the available
+        // tunables; emit only fields that diverge from defaults to keep
+        // the file readable.
+        DaemonConfig dd;
+        nlohmann::json dj = nlohmann::json::object();
+        if (cfg.daemon.auto_start_on_double_click != dd.auto_start_on_double_click)
+            dj["auto_start_on_double_click"] = cfg.daemon.auto_start_on_double_click;
+        if (cfg.daemon.service_name != dd.service_name)
+            dj["service_name"] = cfg.daemon.service_name;
+        if (cfg.daemon.heartbeat_interval_ms != dd.heartbeat_interval_ms)
+            dj["heartbeat_interval_ms"] = cfg.daemon.heartbeat_interval_ms;
+        if (cfg.daemon.heartbeat_timeout_ms != dd.heartbeat_timeout_ms)
+            dj["heartbeat_timeout_ms"] = cfg.daemon.heartbeat_timeout_ms;
+        if (!dj.empty()) j["daemon"] = dj;
+
+        WebConfig wd;
+        nlohmann::json wj = nlohmann::json::object();
+        if (cfg.web.enabled != wd.enabled)
+            wj["enabled"] = cfg.web.enabled;
+        if (cfg.web.bind != wd.bind)
+            wj["bind"] = cfg.web.bind;
+        if (cfg.web.port != wd.port)
+            wj["port"] = cfg.web.port;
+        if (!cfg.web.static_dir.empty())
+            wj["static_dir"] = cfg.web.static_dir;
+        if (!wj.empty()) j["web"] = wj;
     }
 
     if (!cfg.mcp_servers.empty()) {
