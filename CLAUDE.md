@@ -66,7 +66,8 @@ User input → TUI event handler → `AgentLoop` → `LlmProvider::chat_stream()
 - **`src/provider/`**: Abstract `LlmProvider` interface with two implementations:
   - `OpenAiCompatProvider` — generic OpenAI-compatible REST+SSE client
   - `CopilotProvider` — GitHub Copilot with device-flow OAuth and background token refresh
-  - `ModelContextResolver` — maps model names to context window sizes
+  - `ModelContextResolver` — maps model names to context window sizes by consulting the bundled models.dev registry; respects `cfg.openai.models_dev_provider_id` as an explicit hint so proxy base URLs still match the right provider entry.
+  - `models_dev_paths` / `models_dev_registry` — locate `<seed>/api.json` (env `ACECODE_MODELS_DEV_DIR` → `<exe_dir>/../share/acecode/models_dev` → `/usr/share/acecode/models_dev`) and load it once at startup into a shared `nlohmann::json`. Network refresh (`https://models.dev/api.json`) is opt-in via `config.models_dev.allow_network` or `/models refresh --network` and never written to disk. The seed is shipped from `assets/models_dev/`; CMake `install` copies it to `<prefix>/share/acecode/models_dev/`.
 
 - **`src/tool/`**: `ToolExecutor` registry + six built-in tools: `bash_tool`, `file_read_tool`, `file_write_tool`, `file_edit_tool`, `grep_tool`, `glob_tool`. Each tool carries a JSON schema for its parameters and a `ToolResult` return type. Tool `execute` functions take `(args_json, const ToolContext&)` — the context carries an optional `stream(chunk)` callback and a pointer to `AgentLoop::abort_requested_`. `bash_tool` uses both: its polling loop pushes cleaned output chunks (UTF-8-boundary-safe, ANSI-stripped, `\r`-normalised via `src/utils/stream_processing.hpp`) through `ctx.stream`, and polls `ctx.abort_flag` every 10ms so Esc kills the subprocess within ~1s. `bash_tool` also accepts an optional `stdin_inputs: string[]` parameter: on POSIX it opens a stdin pipe and writes each entry with a trailing `\n` via a dedicated thread (for interactive commands like `apt install` confirmations); on Windows the parameter is accepted but silently ignored pending future work.
 
@@ -74,7 +75,7 @@ User input → TUI event handler → `AgentLoop` → `LlmProvider::chat_stream()
 
 - **`src/session/`**: `SessionManager` persists conversation history as JSONL (one JSON object per line) plus a metadata sidecar. Sessions are lazily created on the first message.
 
-- **`src/commands/`**: `CommandRegistry` dispatches slash commands (`/help`, `/clear`, `/model`, `/compact`, `/micro-compact`, `/configure`, `/session`). Each command receives a `CommandContext` with full app state.
+- **`src/commands/`**: `CommandRegistry` dispatches slash commands (`/help`, `/clear`, `/model`, `/models`, `/compact`, `/micro-compact`, `/configure`, `/session`). Each command receives a `CommandContext` with full app state. `/models` (info / refresh [--network] / lookup) inspects the bundled models.dev registry. `acecode configure` consumes the registry through `src/utils/models_dev_catalog.{hpp,cpp}`: the wizard's first menu now lists `Copilot (GitHub)` / `Browse models.dev catalog (N providers)` / `Custom OpenAI compatible`. Catalog browsing supports `/<query>` substring filtering and 30-per-page navigation (`n`/`p`/`q`), and the selected provider auto-fills `base_url` and probes `provider.env` for an existing API key. Selecting from the catalog persists `cfg.openai.models_dev_provider_id` so the resolver can keep reporting the right context window even after the user repoints `base_url`.
 
 - **`src/tui/tool_progress.{hpp,cpp}`**: Live tool-progress renderer. While `state.tool_running` is true, `render_tool_progress()` replaces the thinking animation with a 5-line-tail + status-line block (tool name, command preview, last 5 output lines, `+N more lines`, elapsed seconds, cumulative bytes). `render_tool_timer_chip()` is a compact `◑ bash  23s` chip slotted into the bottom status bar so the timer stays visible even when overlays cover the main progress element. Data is pushed by `AgentLoop` via `on_tool_progress_start/update/end` callbacks; `main.cpp` throttles re-renders to ≥150 ms between updates. The same file also exposes `render_thinking_timer_chip()`, a `○ Thinking  14s  ~82 tok` chip shown in the bottom bar while the agent is waiting on the LLM (`state.is_waiting && !tool_running`). The token segment appears only after `SHOW_TOKENS_AFTER_MS` (3000 ms) and prefers `state.last_completion_tokens_authoritative` (exact, from `on_usage`) over a `state.streaming_output_chars / 4` estimate (tilde-prefixed). The existing `anim_thread` 300 ms tick drives refresh while waiting; the chip disappears on `on_busy_changed(false)`.
 
@@ -113,13 +114,23 @@ FTXUI mouse tracking is enabled by default (`main.cpp:703`, no explicit `TrackMo
 ```json
 {
   "provider": "copilot",
-  "openai": { "base_url": "http://localhost:1234/v1", "api_key": "", "model": "local-model" },
+  "openai": {
+    "base_url": "http://localhost:1234/v1",
+    "api_key": "",
+    "model": "local-model",
+    "models_dev_provider_id": "openrouter"
+  },
   "copilot": { "model": "gpt-4o" },
   "context_window": 128000,
   "max_sessions": 50,
   "skills": {
     "disabled": [],
     "external_dirs": []
+  },
+  "models_dev": {
+    "allow_network": false,
+    "user_override_path": null,
+    "refresh_on_command_only": true
   },
   "mcp_servers": {
     "filesystem": {

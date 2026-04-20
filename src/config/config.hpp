@@ -1,6 +1,7 @@
 #pragma once
 
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 #include <nlohmann/json.hpp>
@@ -11,6 +12,10 @@ struct OpenAiConfig {
     std::string base_url = "http://localhost:1234/v1";
     std::string api_key;
     std::string model = "local-model";
+    // Optional provider id from the bundled models.dev registry (e.g. "anthropic",
+    // "openrouter"). Lets resolve_model_context_window() and other catalog-aware
+    // call sites pick the correct provider entry even when base_url is a proxy.
+    std::optional<std::string> models_dev_provider_id;
 };
 
 struct CopilotConfig {
@@ -62,6 +67,12 @@ struct WebConfig {
     std::string static_dir;
 };
 
+struct ModelsDevConfig {
+    bool allow_network = false;                          // permit any HTTP request to models.dev
+    std::optional<std::string> user_override_path;       // local api.json that beats the bundled snapshot
+    bool refresh_on_command_only = true;                 // suppress all startup-time network refresh
+};
+
 struct AppConfig {
     std::string provider = "copilot"; // "copilot" or "openai"
     OpenAiConfig openai;
@@ -72,6 +83,7 @@ struct AppConfig {
     SkillsConfig skills;                         // skill system configuration (optional)
     DaemonConfig daemon;                         // daemon process supervision settings
     WebConfig web;                               // HTTP/WebSocket server settings
+    ModelsDevConfig models_dev;                  // bundled models.dev registry behaviour
 };
 
 // Expand ~ and ${ENV} style variables in a path string. Returns the expanded

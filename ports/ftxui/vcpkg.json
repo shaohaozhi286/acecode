@@ -1,8 +1,8 @@
 {
   "name": "ftxui",
   "version-semver": "6.1.9",
-  "port-version": 1,
-  "description": "C++ Functional Terminal User Interface (shaohaozhi286 fork)",
+  "port-version": 3,
+  "description": "C++ Functional Terminal User Interface (shaohaozhi286 fork; adds ShiftSelection API for drag-autoscroll — see external/ftxui/ACECODE_PATCHES.md)",
   "homepage": "https://github.com/shaohaozhi286/FTXUI",
   "license": "MIT",
   "supports": "!uwp",

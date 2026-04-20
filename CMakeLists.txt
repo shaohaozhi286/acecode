@@ -136,3 +136,20 @@ source_group("generated" FILES
 if(BUILD_TESTING)
     add_subdirectory(tests)
 endif()
+
+# Bundled models.dev snapshot. Installed alongside the executable so
+# find_models_dev_dir() can resolve <exe_dir>/../share/acecode/models_dev.
+if(EXISTS ${CMAKE_SOURCE_DIR}/assets/models_dev/api.json)
+    install(FILES
+        ${CMAKE_SOURCE_DIR}/assets/models_dev/api.json
+        DESTINATION share/acecode/models_dev
+    )
+    if(EXISTS ${CMAKE_SOURCE_DIR}/assets/models_dev/MANIFEST.json)
+        install(FILES ${CMAKE_SOURCE_DIR}/assets/models_dev/MANIFEST.json
+            DESTINATION share/acecode/models_dev)
+    endif()
+    if(EXISTS ${CMAKE_SOURCE_DIR}/assets/models_dev/LICENSE)
+        install(FILES ${CMAKE_SOURCE_DIR}/assets/models_dev/LICENSE
+            DESTINATION share/acecode/models_dev)
+    endif()
+endif()

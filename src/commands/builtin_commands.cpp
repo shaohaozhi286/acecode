@@ -1,5 +1,6 @@
 #include "builtin_commands.hpp"
 #include "compact.hpp"
+#include "models_command.hpp"
 #include "../provider/model_context_resolver.hpp"
 #include "../tool/mcp_manager.hpp"
 #include "../tool/tool_executor.hpp"
@@ -27,6 +28,7 @@ static void cmd_help(CommandContext& ctx, const std::string& /*args*/) {
         << "  /resume   - Resume a previous session\n"
         << "  /mcp      - Manage MCP servers\n"
         << "  /skills   - List, invoke, or reload installed skills\n"
+        << "  /models   - Inspect bundled models.dev registry\n"
         << "  /title    - Set or show the window title for this session\n"
         << "  /exit     - Exit acecode";
 
@@ -625,6 +627,7 @@ void register_builtin_commands(CommandRegistry& registry) {
     registry.register_command({"skills", "List, invoke, or reload installed skills", cmd_skills});
     registry.register_command({"title", "Set or show the window title for this session", cmd_title});
     registry.register_command({"exit", "Exit acecode", cmd_exit});
+    register_models_command(registry);
 }
 
 } // namespace acecode

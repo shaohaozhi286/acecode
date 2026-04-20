@@ -8,6 +8,8 @@ add_executable(acecode_unit_tests ${ACECODE_TEST_SOURCES})
 
 target_link_libraries(acecode_unit_tests PRIVATE
     acecode_testable
+    ftxui::screen
+    ftxui::dom
     GTest::gtest
     GTest::gtest_main
 )

@@ -12,6 +12,7 @@
 #include <sstream>
 #include <string_view>
 #include <random>
+#include <filesystem>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -37,6 +38,7 @@
 #include "provider/provider_factory.hpp"
 #include "provider/copilot_provider.hpp"
 #include "provider/model_context_resolver.hpp"
+#include "provider/models_dev_registry.hpp"
 #include "tool/tool_executor.hpp"
 #include "tool/bash_tool.hpp"
 #include "tool/file_read_tool.hpp"
@@ -569,6 +571,7 @@ int main(int argc, char* argv[]) {
     // ---- Parse CLI arguments ----
     bool dangerous_mode = false;
     bool run_configure_cmd = false;
+    bool validate_models_registry_cmd = false;
     bool resume_latest = false;
     std::string resume_session_id;
     for (int i = 1; i < argc; ++i) {
@@ -577,6 +580,8 @@ int main(int argc, char* argv[]) {
             dangerous_mode = true;
         } else if (arg == "configure") {
             run_configure_cmd = true;
+        } else if (arg == "--validate-models-registry") {
+            validate_models_registry_cmd = true;
         } else if (arg == "--resume") {
             if (i + 1 < argc && argv[i + 1][0] != '-') {
                 resume_session_id = argv[++i];
@@ -586,10 +591,55 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // ---- Capture executable directory for seed lookup ----
+    std::string argv0_dir;
+    if (argc > 0 && argv[0]) {
+        std::error_code ec;
+        std::filesystem::path exe(argv[0]);
+        std::filesystem::path abs = std::filesystem::weakly_canonical(exe, ec);
+        if (!ec) argv0_dir = abs.parent_path().string();
+        else argv0_dir = exe.parent_path().string();
+    }
+
     // ---- Handle configure subcommand (before TUI setup) ----
     if (run_configure_cmd) {
         AppConfig config = load_config();
+        initialize_registry(config, argv0_dir);
         return run_configure(config);
+    }
+
+    // ---- Handle --validate-models-registry (CI helper) ----
+    if (validate_models_registry_cmd) {
+        AppConfig config = load_config();
+        initialize_registry(config, argv0_dir);
+        const auto& src = current_registry_source();
+        auto registry = current_registry();
+        if (!registry || registry->empty()) {
+            std::cerr << "models.dev registry not found or empty\n";
+            return 1;
+        }
+        size_t actual_models = 0;
+        for (auto it = registry->begin(); it != registry->end(); ++it) {
+            if (!it->is_object()) continue;
+            auto m = it->find("models");
+            if (m == it->end()) continue;
+            if (m->is_object()) actual_models += m->size();
+            else if (m->is_array()) actual_models += m->size();
+        }
+        std::cout << "models.dev registry OK: " << registry->size() << " providers, "
+                  << actual_models << " models, source=" << src.path_or_url << "\n";
+        if (src.manifest && src.manifest->is_object()) {
+            const auto& m = *src.manifest;
+            if (m.contains("model_count") && m["model_count"].is_number_integer()) {
+                size_t expected = static_cast<size_t>(m["model_count"].get<int>());
+                if (expected != actual_models) {
+                    std::cerr << "MANIFEST.json model_count=" << expected
+                              << " disagrees with actual " << actual_models << "\n";
+                    return 1;
+                }
+            }
+        }
+        return 0;
     }
 
     // ---- Ensure cursor is restored on exit ----
@@ -627,6 +677,14 @@ int main(int argc, char* argv[]) {
 
     // ---- Load config ----
     AppConfig config = load_config();
+
+    // ---- Load bundled models.dev registry (offline-first) ----
+    initialize_registry(config, argv0_dir);
+    if (config.models_dev.allow_network && !config.models_dev.refresh_on_command_only) {
+        std::thread([] {
+            refresh_registry_from_network();
+        }).detach();
+    }
 
     // ---- Create provider ----
     auto provider = create_provider(config);
@@ -721,6 +779,16 @@ int main(int argc, char* argv[]) {
     std::atomic<int> anim_tick{0};
     Box chat_box;
 
+    // drag-autoscroll: 每帧渲染时由 reflect 回填每条消息的屏幕 box,
+    // 下一帧 (事件线程 / anim_thread) 读这里算每条消息的行数,供
+    // scroll_chat_by_lines 做按行粒度的平滑滚动. Renderer 重新构建 element
+    // 树时先把上一帧的高度同步到 message_line_counts, 再把 boxes 清零.
+    // 读写发生在 (a) 事件线程 Renderer callback (b) anim_thread 通过
+    // state.mu 保护下的 scroll_chat_by_lines, 不显式加锁 — 与现有 state
+    // 读取路径保持一致的 "PostEvent happens-before" 模型.
+    std::vector<Box> message_boxes;
+    std::vector<int> message_line_counts;
+
     auto screen = ScreenInteractive::TerminalOutput();
     screen.ForceHandleCtrlC(false);
     // mouse-selection-copy: register a no-op SelectionChange callback so
@@ -774,7 +842,51 @@ int main(int argc, char* argv[]) {
 
         state.chat_focus_index = next;
         state.chat_follow_tail = (next == last);
+        state.chat_line_offset = 0;  // 按消息粒度滚动时重置行内偏移
         return next != current;
+    };
+
+    // drag-autoscroll: 按行粒度的细滚动. 现有滚轮/键盘继续走 scroll_chat (按消息).
+    // 实现:在 chat_focus_index + chat_line_offset 维护"焦点行"的位置, 穿越
+    // 当前消息的行数边界时进位到相邻消息. 返回实际滚了几行, 供调用方调用
+    // screen.ShiftSelection(0, -actual) 补偿 FTXUI 屏幕坐标选区.
+    // 注意: 本 lambda 必须在持有 state.mu 的上下文中调用.
+    auto scroll_chat_by_lines = [&state, &message_line_counts](int delta_lines) -> int {
+        if (state.conversation.empty()) return 0;
+        int last_msg = static_cast<int>(state.conversation.size()) - 1;
+        if (state.chat_focus_index < 0) {
+            state.chat_focus_index = last_msg;
+        }
+
+        auto lines_of = [&](int idx) -> int {
+            if (idx < 0 || idx >= static_cast<int>(message_line_counts.size())) return 1;
+            int h = message_line_counts[idx];
+            return h > 0 ? h : 1;
+        };
+
+        int actual = 0;
+        while (delta_lines != 0) {
+            int dir = delta_lines > 0 ? 1 : -1;
+            int cur = state.chat_focus_index;
+            int cur_lines = lines_of(cur);
+            int next_offset = state.chat_line_offset + dir;
+            if (next_offset < 0) {
+                if (cur <= 0) break;  // 已到最顶
+                state.chat_focus_index = cur - 1;
+                state.chat_line_offset = lines_of(cur - 1) - 1;
+            } else if (next_offset >= cur_lines) {
+                if (cur >= last_msg) break;  // 已到最底
+                state.chat_focus_index = cur + 1;
+                state.chat_line_offset = 0;
+            } else {
+                state.chat_line_offset = next_offset;
+            }
+            actual += dir;
+            delta_lines -= dir;
+        }
+        // 拖动滚动后不自动跟尾巴, 让用户保持在他拖到的位置
+        state.chat_follow_tail = false;
+        return actual;
     };
 
     // ---- Copilot auth flow (background thread) ----
@@ -1164,9 +1276,17 @@ int main(int argc, char* argv[]) {
 
     // ---- Animation ticker thread ----
     std::atomic<bool> running{true};
-    std::thread anim_thread([&running, &anim_tick, &state, &screen] {
+    std::thread anim_thread([&running, &anim_tick, &state, &screen, &scroll_chat_by_lines] {
         while (running) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            // drag-autoscroll: 拖动到边界期间提速到 50ms 唤醒, 其他时间保持 300ms.
+            // 每次唤醒前读最新 phase, 避免拖动开始后还得等一个完整的 300ms.
+            bool fast_tick = false;
+            {
+                std::lock_guard<std::mutex> lk(state.mu);
+                fast_tick = (state.drag_phase == drag_scroll::Phase::ScrollingUp ||
+                             state.drag_phase == drag_scroll::Phase::ScrollingDown);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(fast_tick ? 50 : 300));
             anim_tick++;
             // mouse-selection-copy: clear the "Copied N bytes" confirmation
             // ~2 s after the copy fired. Run before the post-event gate so we
@@ -1180,6 +1300,25 @@ int main(int argc, char* argv[]) {
                     state.status_line_saved.clear();
                     state.status_line_clear_at = {};
                     needs_post = true;
+                }
+
+                // drag-autoscroll: 时间门到点就滚一行, 把 ShiftSelection 的补偿请求
+                // 累加到 pending_shift_dy, 由事件线程 CatchEvent 的入口消费 — 避免
+                // anim_thread 直接改 FTXUI selection_data_ 与 HandleSelection 撞车.
+                if (state.drag_phase == drag_scroll::Phase::ScrollingUp ||
+                    state.drag_phase == drag_scroll::Phase::ScrollingDown) {
+                    auto now = std::chrono::steady_clock::now();
+                    if (drag_scroll::should_tick(now, state.last_drag_scroll_at,
+                                                  std::chrono::milliseconds(60))) {
+                        int dy = (state.drag_phase == drag_scroll::Phase::ScrollingUp) ? -1 : 1;
+                        int actual = scroll_chat_by_lines(dy);
+                        if (actual != 0) {
+                            // scroll_chat_by_lines(+1) 让 focus 下移一行 → 屏幕内容
+                            // 相对上移 actual 行 → 原 anchor 文本屏幕坐标应 -actual.
+                            state.pending_shift_dy += -actual;
+                            needs_post = true;
+                        }
+                    }
                 }
             }
             // Drive re-render while waiting on LLM OR while a tool is running
@@ -1214,6 +1353,20 @@ int main(int argc, char* argv[]) {
 
     // Wrap with CatchEvent to handle all keyboard input
     auto input_with_esc = CatchEvent(input_renderer, [&state, &screen, &clamp_chat_focus, &auth_done, &cmd_registry, &agent_loop, &provider, &config, &token_tracker, &permissions, &session_manager, &scroll_chat, &chat_box, &mcp_manager, &tools, &skill_registry](Event event) {
+        // drag-autoscroll: 事件线程入口处消费 anim_thread 攒下的 selection 偏移
+        // 补偿. 所有对 FTXUI selection_data_ 的写都发生在这条路径上, 跟
+        // HandleSelection 串行 — 避免跨线程数据竞争. 不 return, 让事件继续正常处理.
+        {
+            int dy = 0;
+            {
+                std::lock_guard<std::mutex> lk(state.mu);
+                dy = state.pending_shift_dy;
+                state.pending_shift_dy = 0;
+            }
+            if (dy != 0) {
+                screen.ShiftSelection(0, dy);
+            }
+        }
         if (event == Event::CtrlC) {
             // If compaction is in progress, Ctrl+C cancels it instead of exiting
             {
@@ -1446,6 +1599,15 @@ int main(int argc, char* argv[]) {
         }
         if (event == Event::Escape) {
             std::lock_guard<std::mutex> lk(state.mu);
+            // drag-autoscroll: Esc 中止任何进行中的拖动自动滚动. 选区本身由
+            // 下游 FTXUI 通过 `handled=true` 情况下的 HandleSelection 清空
+            // (如果之前有选择). 我们只负责把自己的状态机拉回 Idle.
+            if (state.drag_left_pressed ||
+                state.drag_phase != drag_scroll::Phase::Idle) {
+                state.drag_left_pressed = false;
+                state.drag_phase = drag_scroll::Phase::Idle;
+                state.last_drag_scroll_at = {};
+            }
             // Escape during resume picker → cancel
             if (state.resume_picker_active) {
                 state.resume_picker_active = false;
@@ -1531,20 +1693,76 @@ int main(int argc, char* argv[]) {
                 return true;
             }
 
+            // drag-autoscroll: 跟踪左键按下/拖动/释放, 驱动 anim_thread 在用户
+            // 把鼠标拖到 chat_box 顶部/底部时自动滚动并补偿 selection 坐标.
+            // 不 return true, 让事件继续流向 FTXUI 的 HandleSelection 走原本的
+            // 选区更新. Release/Moved 不做 chat_box.Contain 限制, 因为用户常常
+            // 会把鼠标拖到窗口外松开, 此时我们仍要把状态机拉回 Idle.
+            if (mouse.button == Mouse::Left) {
+                if (mouse.motion == Mouse::Pressed) {
+                    if (chat_box.Contain(mouse.x, mouse.y)) {
+                        std::lock_guard<std::mutex> lk(state.mu);
+                        state.drag_left_pressed = true;
+                        state.last_mouse_x = mouse.x;
+                        state.last_mouse_y = mouse.y;
+                        state.drag_phase = drag_scroll::Phase::Dragging;
+                        state.last_drag_scroll_at = {};
+                    }
+                } else if (mouse.motion == Mouse::Released) {
+                    std::lock_guard<std::mutex> lk(state.mu);
+                    state.drag_left_pressed = false;
+                    state.drag_phase = drag_scroll::Phase::Idle;
+                    state.last_drag_scroll_at = {};
+                }
+            }
+            // 终端在拖动期间发 Moved 事件, button 字段通常是 None 而不是 Left.
+            // 我们靠自己维护的 drag_left_pressed 判断是否处于拖动中.
+            if (mouse.motion == Mouse::Moved) {
+                std::lock_guard<std::mutex> lk(state.mu);
+                if (state.drag_left_pressed) {
+                    state.last_mouse_x = mouse.x;
+                    state.last_mouse_y = mouse.y;
+                    auto new_phase = drag_scroll::classify(
+                        mouse.y, chat_box.y_min, chat_box.y_max, true,
+                        drag_scroll::Config{});
+                    bool phase_changed = (new_phase != state.drag_phase);
+                    state.drag_phase = new_phase;
+                    // 进入滚动阶段时立即 PostEvent, 让 anim_thread 尽快转到
+                    // 50ms 间隔 + 跑第一次 tick. 不 PostEvent 也会在下个 300ms
+                    // 唤醒读到新 phase, 但那个延迟体感很差.
+                    if (phase_changed &&
+                        (new_phase == drag_scroll::Phase::ScrollingUp ||
+                         new_phase == drag_scroll::Phase::ScrollingDown)) {
+                        screen.PostEvent(Event::Custom);
+                    }
+                }
+            }
+
             std::lock_guard<std::mutex> lk(state.mu);
             if (!chat_box.Contain(mouse.x, mouse.y)) {
                 return false;
             }
 
+            // 每 2 次滚轮触发 1 次消息跳转，降低灵敏度。方向切换时重置累加器。
+            static int wheel_accum = 0;
+            constexpr int WHEEL_STEP = 2;
             if (mouse.button == Mouse::WheelUp) {
-                if (scroll_chat(-1)) {
-                    screen.PostEvent(Event::Custom);
+                if (wheel_accum > 0) wheel_accum = 0;
+                if (--wheel_accum <= -WHEEL_STEP) {
+                    wheel_accum = 0;
+                    if (scroll_chat(-1)) {
+                        screen.PostEvent(Event::Custom);
+                    }
                 }
                 return true;
             }
             if (mouse.button == Mouse::WheelDown) {
-                if (scroll_chat(1)) {
-                    screen.PostEvent(Event::Custom);
+                if (wheel_accum < 0) wheel_accum = 0;
+                if (++wheel_accum >= WHEEL_STEP) {
+                    wheel_accum = 0;
+                    if (scroll_chat(1)) {
+                        screen.PostEvent(Event::Custom);
+                    }
                 }
                 return true;
             }
@@ -1742,8 +1960,27 @@ int main(int argc, char* argv[]) {
         return false;
     });
 
-    auto renderer = Renderer(input_with_esc, [&state, &version_str, &cwd_display, &chat_box, &anim_tick, &input_with_esc, &permissions, dangerous_mode] {
+    auto renderer = Renderer(input_with_esc, [&state, &version_str, &cwd_display, &chat_box, &message_boxes, &message_line_counts, &anim_tick, &input_with_esc, &permissions, dangerous_mode] {
         std::lock_guard<std::mutex> lk(state.mu);
+
+        // drag-autoscroll: 把上一帧 reflect 回填的 box 高度同步到行数表,
+        // 供 scroll_chat_by_lines 做按行滚动. 再把 boxes 清零, 这样如果某条
+        // 消息本帧因为 yframe 裁剪不被 reflect, line_counts 也能稳定下来.
+        size_t n_msgs = state.conversation.size();
+        message_line_counts.resize(n_msgs);
+        for (size_t i = 0; i < n_msgs; ++i) {
+            if (i < message_boxes.size()) {
+                int h = message_boxes[i].y_max - message_boxes[i].y_min + 1;
+                if (h > 0) {
+                    message_line_counts[i] = h;
+                } else if (message_line_counts[i] <= 0) {
+                    message_line_counts[i] = 1;
+                }
+            } else if (message_line_counts[i] <= 0) {
+                message_line_counts[i] = 1;
+            }
+        }
+        message_boxes.assign(n_msgs, Box{});
 
         // -- Logo --
         auto logo = vbox({
@@ -1765,13 +2002,32 @@ int main(int argc, char* argv[]) {
         }) | bgcolor(Color::RGB(0, 30, 45));
 
         // -- Messages --
+        // drag-autoscroll: 每条消息渲染时 reflect 到 message_boxes[i], 下一帧
+        // Renderer 开头用这些 box 的高度更新 message_line_counts (按行滚动需要).
         Elements message_elements;
         for (size_t i = 0; i < state.conversation.size(); ++i) {
             const auto& msg = state.conversation[i];
             bool focused_message = static_cast<int>(i) == state.chat_focus_index;
-            Decorator focus_decorator = focused_message
-                ? focusPositionRelative(0.0f, state.chat_follow_tail ? 1.0f : 0.0f)
-                : nothing;
+            Decorator focus_decorator = nothing;
+            if (focused_message) {
+                // drag-autoscroll: 在焦点消息内用 chat_line_offset/total_lines 的
+                // 比例定位到具体某一行. 按行滚动时 ratio 线性变化, yframe 会相应
+                // 上下滑动 viewport. total_lines 从上一帧 reflect 回填 (没有数据时
+                // fallback 为 1, ratio=0, 行为等同未拖动状态).
+                int total_lines = (i < message_line_counts.size() &&
+                                   message_line_counts[i] > 0)
+                    ? message_line_counts[i] : 1;
+                float ratio = 0.0f;
+                if (state.chat_follow_tail) {
+                    ratio = 1.0f;
+                } else if (total_lines > 1) {
+                    ratio = static_cast<float>(state.chat_line_offset) /
+                            static_cast<float>(total_lines - 1);
+                }
+                if (ratio < 0.0f) ratio = 0.0f;
+                if (ratio > 1.0f) ratio = 1.0f;
+                focus_decorator = focusPositionRelative(0.0f, ratio);
+            }
 
             if (msg.role == "user") {
                 auto line = hbox({
@@ -1781,7 +2037,7 @@ int main(int argc, char* argv[]) {
                 if (focused_message) {
                     line = line | focus;
                 }
-                message_elements.push_back(line | focus_decorator);
+                message_elements.push_back(line | focus_decorator | reflect(message_boxes[i]));
             } else if (msg.role == "assistant") {
                 // Render with Markdown formatting
                 Element md_content;
@@ -1803,7 +2059,7 @@ int main(int argc, char* argv[]) {
                 if (focused_message) {
                     line = line | focus;
                 }
-                message_elements.push_back(line | focus_decorator);
+                message_elements.push_back(line | focus_decorator | reflect(message_boxes[i]));
             } else if (msg.role == "tool_call") {
                 auto line = hbox({
                     text("   -> ") | color(Color::Magenta),
@@ -1812,7 +2068,7 @@ int main(int argc, char* argv[]) {
                 if (focused_message) {
                     line = line | focus;
                 }
-                message_elements.push_back(line | focus_decorator);
+                message_elements.push_back(line | focus_decorator | reflect(message_boxes[i]));
             } else if (msg.role == "tool_result") {
                 // Fold long tool output to at most 10 lines + summary footer.
                 // Session persistence still stores the full content.
@@ -1844,7 +2100,7 @@ int main(int argc, char* argv[]) {
                 if (focused_message) {
                     line = line | focus;
                 }
-                message_elements.push_back(line | focus_decorator);
+                message_elements.push_back(line | focus_decorator | reflect(message_boxes[i]));
             } else if (msg.role == "system") {
                 auto line = hbox({
                     text(" i ") | bold | color(Color::Yellow),
@@ -1853,7 +2109,7 @@ int main(int argc, char* argv[]) {
                 if (focused_message) {
                     line = line | focus;
                 }
-                message_elements.push_back(line | focus_decorator);
+                message_elements.push_back(line | focus_decorator | reflect(message_boxes[i]));
             } else if (msg.role == "error") {
                 auto line = hbox({
                     text(" ! ") | bold | color(Color::Red),
@@ -1862,7 +2118,7 @@ int main(int argc, char* argv[]) {
                 if (focused_message) {
                     line = line | focus;
                 }
-                message_elements.push_back(line | focus_decorator);
+                message_elements.push_back(line | focus_decorator | reflect(message_boxes[i]));
             }
             message_elements.push_back(text(""));
         }

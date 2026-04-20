@@ -1,6 +1,7 @@
 #pragma once
 
 #include "permissions.hpp"
+#include "utils/drag_scroll.hpp"
 
 #include <string>
 #include <vector>
@@ -104,6 +105,24 @@ struct TuiState {
     bool chat_follow_tail = true;
     bool ctrl_c_armed = false;
     std::chrono::steady_clock::time_point last_ctrl_c_time{};
+
+    // drag-autoscroll: 鼠标拖到 chat_box 顶部/底部时自动滚动并补偿 selection,
+    // 让选区跟着内容走 (而不是被 FTXUI 的屏幕坐标钉死在固定位置)。
+    //   drag_left_pressed       — 自己维护,因为终端在 Moved 事件中通常不带 button
+    //   last_mouse_x/y          — 最近一次 motion 的屏幕坐标,anim_thread 用来分类
+    //   drag_phase              — 当前阶段,由 drag_scroll::classify() 决定
+    //   last_drag_scroll_at     — 时间门,控制按行滚动的节奏 (60ms/行)
+    //   chat_line_offset        — 在 chat_focus_index 这条消息内的额外行偏移
+    //                              用于按行滚动 (现有按消息粒度滚动不动它)
+    //   pending_shift_dy        — anim_thread → 事件线程的请求,
+    //                              事件线程消费时调用 screen.ShiftSelection(0, dy)
+    bool drag_left_pressed = false;
+    int last_mouse_x = -1;
+    int last_mouse_y = -1;
+    drag_scroll::Phase drag_phase = drag_scroll::Phase::Idle;
+    std::chrono::steady_clock::time_point last_drag_scroll_at{};
+    int chat_line_offset = 0;
+    int pending_shift_dy = 0;
 
     // Async compact state
     bool is_compacting = false;                       // protected by mu

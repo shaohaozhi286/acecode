@@ -1,0 +1,8 @@
+{
+  "upstream_remote": "https://models.dev/api.json",
+  "content_sha256": "1641212fc9e13e9d9b68571405b9e022637debd035f8226d559fe6604167379a",
+  "generated_at": "2026-04-19T15:52:35Z",
+  "provider_count": 114,
+  "model_count": 4216,
+  "acecode_sync_script_version": 2
+}

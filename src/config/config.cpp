@@ -179,6 +179,11 @@ AppConfig load_config() {
                     cfg.openai.api_key = oj["api_key"].get<std::string>();
                 if (oj.contains("model") && oj["model"].is_string())
                     cfg.openai.model = oj["model"].get<std::string>();
+                if (oj.contains("models_dev_provider_id") &&
+                    oj["models_dev_provider_id"].is_string()) {
+                    cfg.openai.models_dev_provider_id =
+                        oj["models_dev_provider_id"].get<std::string>();
+                }
             }
             if (j.contains("copilot") && j["copilot"].is_object()) {
                 auto& cj = j["copilot"];
@@ -227,6 +232,17 @@ AppConfig load_config() {
                 // string -> filesystem path. Empty string is treated the same as null.
                 if (wj.contains("static_dir") && wj["static_dir"].is_string())
                     cfg.web.static_dir = wj["static_dir"].get<std::string>();
+            }
+            if (j.contains("models_dev") && j["models_dev"].is_object()) {
+                const auto& mj = j["models_dev"];
+                if (mj.contains("allow_network") && mj["allow_network"].is_boolean())
+                    cfg.models_dev.allow_network = mj["allow_network"].get<bool>();
+                if (mj.contains("refresh_on_command_only") && mj["refresh_on_command_only"].is_boolean())
+                    cfg.models_dev.refresh_on_command_only = mj["refresh_on_command_only"].get<bool>();
+                if (mj.contains("user_override_path") && mj["user_override_path"].is_string()) {
+                    std::string p = mj["user_override_path"].get<std::string>();
+                    if (!p.empty()) cfg.models_dev.user_override_path = p;
+                }
             }
             if (j.contains("mcp_servers") && j["mcp_servers"].is_object()) {
                 for (auto it = j["mcp_servers"].begin(); it != j["mcp_servers"].end(); ++it) {
@@ -352,6 +368,10 @@ void save_config(const AppConfig& cfg) {
     j["openai"]["base_url"] = cfg.openai.base_url;
     j["openai"]["api_key"] = cfg.openai.api_key;
     j["openai"]["model"] = cfg.openai.model;
+    if (cfg.openai.models_dev_provider_id.has_value() &&
+        !cfg.openai.models_dev_provider_id->empty()) {
+        j["openai"]["models_dev_provider_id"] = *cfg.openai.models_dev_provider_id;
+    }
     j["copilot"]["model"] = cfg.copilot.model;
     j["context_window"] = cfg.context_window;
     j["max_sessions"] = cfg.max_sessions;
@@ -390,6 +410,17 @@ void save_config(const AppConfig& cfg) {
         if (!cfg.web.static_dir.empty())
             wj["static_dir"] = cfg.web.static_dir;
         if (!wj.empty()) j["web"] = wj;
+
+        ModelsDevConfig md;
+        nlohmann::json mdj = nlohmann::json::object();
+        if (cfg.models_dev.allow_network != md.allow_network)
+            mdj["allow_network"] = cfg.models_dev.allow_network;
+        if (cfg.models_dev.refresh_on_command_only != md.refresh_on_command_only)
+            mdj["refresh_on_command_only"] = cfg.models_dev.refresh_on_command_only;
+        if (cfg.models_dev.user_override_path.has_value() &&
+            !cfg.models_dev.user_override_path->empty())
+            mdj["user_override_path"] = *cfg.models_dev.user_override_path;
+        if (!mdj.empty()) j["models_dev"] = mdj;
     }
 
     if (!cfg.mcp_servers.empty()) {

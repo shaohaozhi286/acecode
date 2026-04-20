@@ -1,6 +1,7 @@
 #include "model_context_resolver.hpp"
 
 #include "../utils/logger.hpp"
+#include "models_dev_registry.hpp"
 
 #include <cpr/cpr.h>
 #include <cpr/ssl_options.h>
@@ -15,8 +16,6 @@
 
 namespace acecode {
 namespace {
-
-constexpr const char* kModelsDevUrl = "https://models.dev/api.json";
 
 std::string to_lower_copy(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
@@ -136,52 +135,19 @@ const nlohmann::json* find_model_entry(const nlohmann::json& models, const std::
     return nullptr;
 }
 
-const nlohmann::json& models_dev_cache() {
-    static std::mutex mutex;
-    static nlohmann::json cached = nlohmann::json::object();
-    static bool loaded = false;
-
-    std::lock_guard<std::mutex> lock(mutex);
-    if (loaded) {
-        return cached;
-    }
-
-    loaded = true;
-
-    cpr::Response response = cpr::Get(
-        cpr::Url{kModelsDevUrl},
-        cpr::Ssl(cpr::ssl::NoRevoke{true}),
-        cpr::Timeout{20000}
-    );
-
-    if (response.status_code != 200) {
-        LOG_WARN("models.dev fetch failed, status=" + std::to_string(response.status_code));
-        return cached;
-    }
-
-    try {
-        cached = nlohmann::json::parse(response.text);
-    } catch (const std::exception& ex) {
-        LOG_WARN(std::string("models.dev parse failed: ") + ex.what());
-        cached = nlohmann::json::object();
-    }
-
-    return cached;
-}
-
 int lookup_models_dev_context(const std::string& provider_id, const std::string& model) {
     if (provider_id.empty() || model.empty()) {
         return 0;
     }
 
-    const auto& cache = models_dev_cache();
-    auto provider_it = cache.find(provider_id);
-    if (provider_it == cache.end() || !provider_it->is_object()) {
-        return 0;
-    }
+    auto registry = current_registry();
+    if (!registry) return 0;
 
-    auto models_it = provider_it->find("models");
-    if (models_it == provider_it->end()) {
+    const nlohmann::json* provider = find_provider_entry(*registry, provider_id);
+    if (!provider) return 0;
+
+    auto models_it = provider->find("models");
+    if (models_it == provider->end()) {
         return 0;
     }
 
@@ -249,6 +215,12 @@ int fetch_models_endpoint_context(const std::string& base_url,
 }
 
 std::string detect_models_dev_provider(const AppConfig& config, const std::string& provider_name) {
+    // Explicit hint from configure wizard / catalog selection wins over heuristics.
+    if (config.openai.models_dev_provider_id.has_value() &&
+        !config.openai.models_dev_provider_id->empty()) {
+        return *config.openai.models_dev_provider_id;
+    }
+
     const std::string normalized_provider = to_lower_copy(provider_name.empty() ? config.provider : provider_name);
     if (normalized_provider == "copilot") {
         return "github-copilot";
@@ -259,6 +231,13 @@ std::string detect_models_dev_provider(const AppConfig& config, const std::strin
         if (base_url.find("api.openai.com") != std::string::npos) {
             return "openai";
         }
+    }
+
+    // The provider_name argument is also accepted as a direct models.dev id
+    // (e.g. "anthropic", "openrouter") so callers can short-circuit detection.
+    if (!normalized_provider.empty() && normalized_provider != "openai" &&
+        normalized_provider != "copilot") {
+        return normalized_provider;
     }
 
     return "";
