@@ -135,7 +135,9 @@ ftxui::Element render_thinking_timer_chip(const TuiState& state) {
     Elements parts;
     // Yellow arc glyph to mirror the tool chip's visual weight.
     parts.push_back(text("  \xE2\x97\x8B ") | color(Color::Yellow));
-    parts.push_back(text(state.current_thinking_phrase) | bold | color(Color::Yellow));
+    // 底部 chip 强制统一显示 "Thinking"，和聊天区的轮换短语解耦——聊天动画
+    // 仍然读 state.current_thinking_phrase，底部 chip 只认这个静态字面量。
+    parts.push_back(text("Thinking") | bold | color(Color::Yellow));
     parts.push_back(text(timer_segment) | dim | color(Color::CyanLight));
     if (!token_segment.empty()) {
         parts.push_back(text(token_segment) | dim | color(Color::CyanLight));

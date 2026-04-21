@@ -66,6 +66,12 @@ std::vector<std::string> register_skill_commands(CommandRegistry& cmd_registry,
                     ctx.state.pending_queue.push_back(message);
                     return;
                 }
+                // 新一轮等待：提前把计时/计数字段重置，否则 on_busy_changed 会因为
+                // is_waiting 已为 true 跳过它的重置块，thinking_start_time 停在 0
+                // 会让底部 chip 秒数巨大。
+                ctx.state.thinking_start_time = std::chrono::steady_clock::now();
+                ctx.state.streaming_output_chars = 0;
+                ctx.state.last_completion_tokens_authoritative = 0;
                 ctx.state.is_waiting = true;
             }
 

@@ -3,10 +3,12 @@
 #include "permissions.hpp"
 #include "utils/drag_scroll.hpp"
 #include "tool/tool_executor.hpp"
+#include "tool/ask_user_question_tool.hpp"
 
 #include <string>
 #include <vector>
 #include <deque>
+#include <map>
 #include <mutex>
 #include <condition_variable>
 #include <chrono>
@@ -88,6 +90,34 @@ struct TuiState {
     std::string confirm_tool_args;
     PermissionResult confirm_result = PermissionResult::Deny;
     std::condition_variable confirm_cv;
+
+    // AskUserQuestion overlay state(add-ask-user-question-tool 能力)。
+    // 与 confirm_pending 互斥:同一时间至多一个阻塞型工具在跑,因此二者
+    // 不可能同时为 true。渲染层的优先级仍然写成 `ask > confirm`,作为
+    // 显式护栏,键盘事件则在 confirm 分支之前先被 ask 分支拦截。
+    //   ask_pending          — 工具线程翻起 true,TUI 完成回答 / Esc 后翻回 false
+    //   ask_payload_json     — 原始参数 JSON,便于日志 / 调试
+    //   ask_questions        — parse 后的题目列表,TUI 直接按此渲染
+    //   ask_question_order   — question 文本的原始顺序,format_ask_answers 使用
+    //   ask_result_answers   — question 文本 → answer 字符串(multi-select 已 join)
+    //   ask_result_ok        — 提交成功时 true;Esc / shutdown 为 false
+    //   ask_cv               — 工具线程 wait,事件线程 notify
+    // 下面是 overlay 内部的 navigation 状态,仅在 ask_pending=true 期间有效:
+    //   ask_current_question — 当前正在作答的题目下标
+    //   ask_option_focus     — 当前题目的焦点选项下标([options.size()] 表示 "Other")
+    //   ask_multi_selected   — 当前题目多选勾选标记(大小等于该题 options 数)
+    //   ask_other_input_active — true 时输入框为 "Other" 自定义文本模式
+    bool ask_pending = false;
+    std::string ask_payload_json;
+    std::vector<AskQuestion> ask_questions;
+    std::vector<std::string> ask_question_order;
+    std::map<std::string, std::string> ask_result_answers;
+    bool ask_result_ok = false;
+    std::condition_variable ask_cv;
+    int ask_current_question = 0;
+    int ask_option_focus = 0;
+    std::vector<bool> ask_multi_selected;
+    bool ask_other_input_active = false;
 
     // Resume session picker state
     struct ResumeItem {

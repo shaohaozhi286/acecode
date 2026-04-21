@@ -52,6 +52,7 @@
 #include "tool/skill_view_tool.hpp"
 #include "tool/memory_read_tool.hpp"
 #include "tool/memory_write_tool.hpp"
+#include "tool/ask_user_question_tool.hpp"
 #include "skills/skill_registry.hpp"
 #include "skills/skill_commands.hpp"
 #include "memory/memory_paths.hpp"
@@ -860,6 +861,10 @@ int main(int argc, char* argv[]) {
     // need per-change work here yet. Future: hook "auto-clear on new drag".
     screen.SelectionChange([]{});
 
+    // AskUserQuestion 依赖 TuiState + ScreenInteractive 才能发起阻塞 overlay,
+    // 所以和其它无依赖的内置工具分开、等 `state` / `screen` 就绪之后再注册。
+    tools.register_tool(create_ask_user_question_tool(state, screen));
+
     auto clamp_chat_focus = [&state]() {
         if (state.conversation.empty()) {
             state.chat_focus_index = -1;
@@ -962,6 +967,12 @@ int main(int argc, char* argv[]) {
             {
                 std::lock_guard<std::mutex> lk(state.mu);
                 state.current_thinking_phrase = get_random_thinking_phrase(is_user_chinese(state));
+                // 新一轮等待：计时/计数字段必须和 is_waiting 一起重置，否则
+                // on_busy_changed 的 `busy && !is_waiting` 护栏会把这段跳过，
+                // thinking_start_time 会停在 time_point{} 原点，底部秒数会巨大。
+                state.thinking_start_time = std::chrono::steady_clock::now();
+                state.streaming_output_chars = 0;
+                state.last_completion_tokens_authoritative = 0;
                 state.is_waiting = true;
                 state.conversation.push_back({"system", "Authenticating with GitHub Copilot...", false});
             }
@@ -1041,6 +1052,9 @@ int main(int argc, char* argv[]) {
         std::lock_guard<std::mutex> lk(state.mu);
         if (busy && !state.is_waiting) {
             state.current_thinking_phrase = get_random_thinking_phrase(is_user_chinese(state));
+            state.thinking_start_time = std::chrono::steady_clock::now();
+            state.streaming_output_chars = 0;
+            state.last_completion_tokens_authoritative = 0;
         }
         state.is_waiting = busy;
         screen.PostEvent(Event::Custom);
@@ -1445,7 +1459,7 @@ int main(int argc, char* argv[]) {
     });
 
     // Wrap with CatchEvent to handle all keyboard input
-    auto input_with_esc = CatchEvent(input_renderer, [&state, &screen, &clamp_chat_focus, &auth_done, &cmd_registry, &agent_loop, &provider, &config, &token_tracker, &permissions, &session_manager, &scroll_chat, &chat_box, &mcp_manager, &tools, &skill_registry, &memory_registry](Event event) {
+    auto input_with_esc = CatchEvent(input_renderer, [&state, &screen, &clamp_chat_focus, &auth_done, &cmd_registry, &agent_loop, &provider, &config, &token_tracker, &permissions, &session_manager, &scroll_chat, &chat_box, &mcp_manager, &tools, &skill_registry, &memory_registry, &working_dir](Event event) {
         // drag-autoscroll: 事件线程入口处消费 anim_thread 攒下的 selection 偏移
         // 补偿. 所有对 FTXUI selection_data_ 的写都发生在这条路径上, 跟
         // HandleSelection 串行 — 避免跨线程数据竞争. 不 return, 让事件继续正常处理.
@@ -1497,6 +1511,141 @@ int main(int argc, char* argv[]) {
                 screen.PostEvent(Event::Custom);
             }
             return true;
+        }
+
+        // AskUserQuestion overlay guard:active 时抢占键盘,所有非导航键被吞掉,
+        // 不透传到输入框。优先级高于 confirm、slash-dropdown、Return/Esc 等分支。
+        // "Other" 自定义文本态下让字符输入 / Backspace 继续走默认路径,只拦截
+        // Return / Escape / 方向键。
+        {
+            std::unique_lock<std::mutex> lk(state.mu);
+            if (state.ask_pending) {
+                auto& q = state.ask_questions[state.ask_current_question];
+                const int option_count = static_cast<int>(q.options.size());
+                const int total_rows = option_count + 1; // + "Other..."
+
+                // Esc —— 整体拒绝。
+                if (event == Event::Escape) {
+                    if (state.ask_other_input_active) {
+                        // 先退出 Other 文本模式,保留用户之前的选择。
+                        state.ask_other_input_active = false;
+                        state.input_text.clear();
+                        state.input_cursor = 0;
+                    } else {
+                        state.ask_result_ok = false;
+                        state.ask_pending = false;
+                        state.ask_cv.notify_one();
+                    }
+                    screen.PostEvent(Event::Custom);
+                    return true;
+                }
+
+                if (state.ask_other_input_active) {
+                    if (event == Event::Return) {
+                        std::string answer = state.input_text;
+                        state.input_text.clear();
+                        state.input_cursor = 0;
+                        state.ask_other_input_active = false;
+                        state.ask_result_answers[q.question] = answer;
+
+                        // 推进到下一题或提交。
+                        state.ask_current_question++;
+                        if (state.ask_current_question >=
+                            static_cast<int>(state.ask_questions.size())) {
+                            state.ask_result_ok = true;
+                            state.ask_pending = false;
+                            state.ask_cv.notify_one();
+                        } else {
+                            state.ask_option_focus = 0;
+                            state.ask_multi_selected.assign(
+                                state.ask_questions[state.ask_current_question]
+                                    .options.size(), false);
+                        }
+                        screen.PostEvent(Event::Custom);
+                        return true;
+                    }
+                    // 其它按键(字符 / Backspace / 方向键移动光标)放行给输入框。
+                    return false;
+                }
+
+                // 方向键 / j k 上下移动焦点。
+                if (event == Event::ArrowUp ||
+                    event == Event::Character('k')) {
+                    state.ask_option_focus =
+                        (state.ask_option_focus - 1 + total_rows) % total_rows;
+                    screen.PostEvent(Event::Custom);
+                    return true;
+                }
+                if (event == Event::ArrowDown ||
+                    event == Event::Character('j')) {
+                    state.ask_option_focus =
+                        (state.ask_option_focus + 1) % total_rows;
+                    screen.PostEvent(Event::Custom);
+                    return true;
+                }
+
+                // Space —— 仅 multi-select 下对当前焦点项切换勾选;焦点落在
+                // "Other..." 行时 Space 不作响应(Other 需要 Enter 进入文本态)。
+                if (event == Event::Character(' ')) {
+                    if (q.multi_select && state.ask_option_focus < option_count) {
+                        if (static_cast<int>(state.ask_multi_selected.size()) <=
+                            state.ask_option_focus) {
+                            state.ask_multi_selected.resize(option_count, false);
+                        }
+                        state.ask_multi_selected[state.ask_option_focus] =
+                            !state.ask_multi_selected[state.ask_option_focus];
+                        screen.PostEvent(Event::Custom);
+                    }
+                    return true;
+                }
+
+                // Enter —— 提交当前题目。
+                if (event == Event::Return) {
+                    // 焦点在 "Other..." 行:进入自定义文本输入态。
+                    if (state.ask_option_focus == option_count) {
+                        state.ask_other_input_active = true;
+                        state.input_text.clear();
+                        state.input_cursor = 0;
+                        screen.PostEvent(Event::Custom);
+                        return true;
+                    }
+
+                    std::string answer;
+                    if (q.multi_select) {
+                        for (int i = 0; i < option_count; ++i) {
+                            if (i < static_cast<int>(state.ask_multi_selected.size()) &&
+                                state.ask_multi_selected[i]) {
+                                if (!answer.empty()) answer += ", ";
+                                answer += q.options[i].label;
+                            }
+                        }
+                        // 允许空选 —— 上游 schema 没强制,把空字符串交回给模型。
+                    } else {
+                        answer = q.options[state.ask_option_focus].label;
+                    }
+                    state.ask_result_answers[q.question] = answer;
+
+                    // 推进或提交。
+                    state.ask_current_question++;
+                    if (state.ask_current_question >=
+                        static_cast<int>(state.ask_questions.size())) {
+                        state.ask_result_ok = true;
+                        state.ask_pending = false;
+                        state.ask_cv.notify_one();
+                    } else {
+                        state.ask_option_focus = 0;
+                        state.ask_multi_selected.assign(
+                            state.ask_questions[state.ask_current_question]
+                                .options.size(), false);
+                    }
+                    screen.PostEvent(Event::Custom);
+                    return true;
+                }
+
+                // 其它键一律吞掉 —— 不让字符进入 input_text(避免破坏下一次
+                // "Other" 文本模式的初始状态)。
+                return true;
+            }
         }
 
         // Slash-command dropdown guard: when the dropdown is open, intercept
@@ -1628,6 +1777,9 @@ int main(int argc, char* argv[]) {
                 state.chat_follow_tail = true;
                 clamp_chat_focus();
                 state.current_thinking_phrase = "Running shell";
+                state.thinking_start_time = std::chrono::steady_clock::now();
+                state.streaming_output_chars = 0;
+                state.last_completion_tokens_authoritative = 0;
                 state.is_waiting = true;
                 agent_loop.submit_shell(shell_cmd);
                 return true;
@@ -1673,6 +1825,9 @@ int main(int argc, char* argv[]) {
                 state.chat_follow_tail = true;
                 clamp_chat_focus();
                 state.current_thinking_phrase = get_random_thinking_phrase(is_user_chinese(state));
+                state.thinking_start_time = std::chrono::steady_clock::now();
+                state.streaming_output_chars = 0;
+                state.last_completion_tokens_authoritative = 0;
                 state.is_waiting = true;
                 agent_loop.submit(prompt);
             }
@@ -2493,7 +2648,88 @@ int main(int argc, char* argv[]) {
             resume_picker_element = vbox(std::move(picker_rows)) | border | color(Color::Cyan);
         }
         Element slash_dropdown_element = render_slash_dropdown(state);
-        if (state.confirm_pending) {
+
+        // AskUserQuestion overlay —— 和 confirm_pending 互斥,在渲染层面
+        // 显式让 ask 优先(事件层在 confirm 分支之前也已经拦截,这里只是
+        // 作为显式护栏)。
+        Element ask_overlay_element = text("");
+        if (state.ask_pending && !state.ask_questions.empty() &&
+            state.ask_current_question >= 0 &&
+            state.ask_current_question <
+                static_cast<int>(state.ask_questions.size())) {
+            const auto& q = state.ask_questions[state.ask_current_question];
+            Elements rows;
+            std::string header_line = " Question " +
+                std::to_string(state.ask_current_question + 1) + "/" +
+                std::to_string(state.ask_questions.size()) +
+                "  [" + q.header + "]";
+            rows.push_back(text(header_line) | bold | color(Color::Cyan));
+            rows.push_back(text(" " + q.question) | color(Color::White));
+            rows.push_back(text(""));
+
+            int option_count = static_cast<int>(q.options.size());
+            int total_rows = option_count + 1; // +1 for "Other..."
+            for (int i = 0; i < total_rows; ++i) {
+                bool is_other = (i == option_count);
+                bool focused = (i == state.ask_option_focus);
+                std::string marker;
+                if (q.multi_select) {
+                    bool checked = !is_other && i < static_cast<int>(state.ask_multi_selected.size()) &&
+                                   state.ask_multi_selected[i];
+                    marker = checked ? "[x] " : "[ ] ";
+                } else {
+                    // 单选时焦点位置用实心圆点;其它位置留空圆点。
+                    marker = focused ? "(\xE2\x97\x8F) " : "( ) ";
+                }
+                std::string prefix = focused ? " \xE2\x96\xB8 " : "   ";
+                std::string body;
+                if (is_other) {
+                    body = "Other...";
+                } else {
+                    body = q.options[i].label;
+                    if (!q.options[i].description.empty()) {
+                        body += "  ";
+                        body += q.options[i].description;
+                    }
+                }
+                auto row = text(prefix + marker + body);
+                if (focused) {
+                    row = row | bold | color(Color::White) | bgcolor(Color::RGB(0, 60, 100));
+                } else {
+                    row = row | color(Color::GrayLight);
+                }
+                rows.push_back(row);
+            }
+            rows.push_back(text(""));
+
+            std::string hint = q.multi_select
+                ? " \xE2\x86\x91\xE2\x86\x93 move   Space toggle   Enter submit   Esc cancel"
+                : " \xE2\x86\x91\xE2\x86\x93 move   Enter select   Esc cancel";
+            rows.push_back(text(hint) | dim | color(Color::GrayDark));
+
+            if (state.ask_other_input_active) {
+                rows.push_back(text(""));
+                rows.push_back(text(" Custom answer (Enter to submit, Esc to back out):")
+                               | color(Color::Yellow));
+            }
+            ask_overlay_element = vbox(std::move(rows)) | border | color(Color::Cyan);
+        }
+
+        if (state.ask_pending) {
+            // ask active 时:把输入框留给 Other 自定义文本态使用;其它状态下
+            // 显示静态提示,吞掉字符输入(CatchEvent 不透传非导航键)。
+            if (state.ask_other_input_active) {
+                prompt_line = hbox({
+                    text(" ? ") | bold | color(Color::Yellow),
+                    input_with_esc->Render() | flex,
+                });
+            } else {
+                prompt_line = hbox({
+                    text(" ? answering: ") | bold | color(Color::Yellow),
+                    text("use arrows + Enter (Esc to cancel)") | dim | color(Color::GrayDark),
+                });
+            }
+        } else if (state.confirm_pending) {
             prompt_line = hbox({
                 text(" [" + state.confirm_tool_name + "] ") | bold | color(Color::Magenta),
                 text("y") | bold | color(Color::Green),
@@ -2576,6 +2812,7 @@ int main(int argc, char* argv[]) {
             separatorHeavy() | color(Color::GrayDark),
             message_view,
             resume_picker_element,
+            ask_overlay_element,
             slash_dropdown_element,
             thinking_element,
             separatorLight() | color(Color::GrayDark),
@@ -2588,7 +2825,7 @@ int main(int argc, char* argv[]) {
 
     running = false;
 
-    // Graceful shutdown: abort agent, unblock confirm_cv, then join worker
+    // Graceful shutdown: abort agent, unblock confirm_cv / ask_cv, then join worker
     agent_aborting = true;
     agent_loop.abort();
     {
@@ -2597,6 +2834,13 @@ int main(int argc, char* argv[]) {
             state.confirm_pending = false;
             state.confirm_result = PermissionResult::Deny;
             state.confirm_cv.notify_one();
+        }
+        if (state.ask_pending) {
+            // AskUserQuestion 工具线程也在 wait,通知它醒来走拒绝分支。
+            // agent_loop.abort() 已经置 abort_flag,工具的 wait 谓词因此成立。
+            state.ask_pending = false;
+            state.ask_result_ok = false;
+            state.ask_cv.notify_one();
         }
     }
     agent_loop.shutdown();
