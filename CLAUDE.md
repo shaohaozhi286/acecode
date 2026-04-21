@@ -91,7 +91,11 @@ User input → TUI event handler → `AgentLoop` → `LlmProvider::chat_stream()
 
 - **`src/auth/github_auth.hpp`**: GitHub device-flow OAuth — generates user code, polls, persists token.
 
-- **`src/skills/`**: User-authored `SKILL.md` documents discovered from `~/.acecode/skills/<category>/<name>/SKILL.md` (plus any `skills.external_dirs` in config). `SkillRegistry` scans at startup, reads only YAML frontmatter for the index, and lazily loads the body when invoked. Each skill is registered as a `/<skill-name>` slash command; the `skills_list` and `skill_view` tools expose the same set to the LLM for progressive-disclosure discovery. Disabled names in `config.skills.disabled` are skipped. `/skills reload` rescans disk.
+- **`src/skills/`**: User-authored `SKILL.md` documents discovered from built-in `.acecode/skills` and compatible `.agent/skills` roots (plus any `skills.external_dirs` in config). `SkillRegistry` scans at startup, reads only YAML frontmatter for the index, and lazily loads the body when invoked. Each skill is registered as a `/<skill-name>` slash command; the `skills_list` and `skill_view` tools expose the same set to the LLM for progressive-disclosure discovery. Disabled names in `config.skills.disabled` are skipped. `/skills reload` rescans disk.
+
+- **`src/memory/`**: Cross-session persistent user memory under `~/.acecode/memory/`. `MemoryRegistry` scans `<name>.md` entry files at startup (each with `name`/`description`/`type` YAML frontmatter, where `type ∈ {user, feedback, project, reference}`), caches them in memory with a mutex, and rewrites `MEMORY.md` (the index) on every `upsert` / `remove`. Entry writes are atomic (temp file + rename). Two LLM-facing tools ship: `memory_read` (no args → full index + entries list; `{type}` → filtered; `{name}` → full body) and `memory_write` (name-sanitized, path-locked to the memory dir so even Yolo mode can't escape). The `PermissionManager` auto-approves `memory_write` in every non-Yolo mode because the tool hard-locks its target path. User-facing commands `/memory list|view|edit|forget|reload` (and `/init` for generating an `ACECODE.md` skeleton) are registered alongside other builtins.
+
+- **`src/project_instructions/`**: Loads `ACECODE.md` / `AGENT.md` / `CLAUDE.md` from the user's directory hierarchy into the system prompt every turn. `load_project_instructions(cwd, cfg)` first checks `~/.acecode/` (global layer), then walks from HOME down to `cwd` (outer-first), picking at most one file per directory based on `cfg.filenames` priority (default `["ACECODE.md", "AGENT.md", "CLAUDE.md"]`). Toggle switches `cfg.read_agent_md` / `cfg.read_claude_md` remove their corresponding name from the effective list at runtime (`ACECODE.md` has no toggle — it's native). Per-file (`max_bytes`), aggregate (`max_total_bytes`), and walk-depth (`max_depth`) caps guard against runaway prompts; truncation is explicit and logged. `build_system_prompt` injects the merged body as a `# Project Instructions` section after tool descriptions, with a framing sentence telling the LLM these are user-authored conventions, not system-level overrides.
 
 ### Threading Model
 
@@ -126,6 +130,19 @@ FTXUI mouse tracking is enabled by default (`main.cpp:703`, no explicit `TrackMo
   "skills": {
     "disabled": [],
     "external_dirs": []
+  },
+  "memory": {
+    "enabled": true,
+    "max_index_bytes": 32768
+  },
+  "project_instructions": {
+    "enabled": true,
+    "max_depth": 8,
+    "max_bytes": 262144,
+    "max_total_bytes": 1048576,
+    "filenames": ["ACECODE.md", "AGENT.md", "CLAUDE.md"],
+    "read_agent_md": true,
+    "read_claude_md": true
   },
   "models_dev": {
     "allow_network": false,

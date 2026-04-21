@@ -19,6 +19,9 @@
 namespace acecode {
 
 class SkillRegistry;
+class MemoryRegistry;
+struct MemoryConfig;
+struct ProjectInstructionsConfig;
 
 // Callbacks for the TUI to observe agent loop events
 struct AgentCallbacks {
@@ -116,6 +119,11 @@ public:
     void set_session_manager(SessionManager* sm) { session_manager_ = sm; }
 
     void set_skill_registry(const SkillRegistry* sr) { skill_registry_ = sr; }
+    void set_memory_registry(const MemoryRegistry* mr) { memory_registry_ = mr; }
+    void set_memory_config(const MemoryConfig* cfg) { memory_cfg_ = cfg; }
+    void set_project_instructions_config(const ProjectInstructionsConfig* cfg) {
+        project_instructions_cfg_ = cfg;
+    }
 
 private:
     void worker_main();
@@ -140,6 +148,9 @@ private:
     std::atomic<int> last_api_prompt_tokens_{0}; // from most recent API response
     SessionManager* session_manager_ = nullptr;
     const SkillRegistry* skill_registry_ = nullptr;
+    const MemoryRegistry* memory_registry_ = nullptr;
+    const MemoryConfig* memory_cfg_ = nullptr;
+    const ProjectInstructionsConfig* project_instructions_cfg_ = nullptr;
 
     // Worker thread and task queue
     std::thread worker_thread_;

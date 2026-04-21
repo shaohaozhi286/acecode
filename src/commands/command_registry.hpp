@@ -17,6 +17,7 @@ namespace acecode {
 class McpManager;
 class ToolExecutor;
 class SkillRegistry;
+class MemoryRegistry;
 class CommandRegistry;
 
 struct CommandContext {
@@ -32,6 +33,7 @@ struct CommandContext {
     McpManager* mcp_manager = nullptr; // runtime MCP control surface (optional)
     ToolExecutor* tools = nullptr;     // tool registry for /mcp enable/disable
     SkillRegistry* skills = nullptr;   // skill registry for /skills and /<skill-name> commands
+    MemoryRegistry* memory = nullptr;  // memory registry for /memory commands
     CommandRegistry* command_registry = nullptr; // self-reference for /skills reload
 };
 

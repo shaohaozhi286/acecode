@@ -60,7 +60,7 @@ ToolImpl create_skills_list_tool(SkillRegistry& registry) {
         out["categories"] = cats_arr;
         if (skills.empty()) {
             out["message"] = category.empty()
-                ? "No skills installed. Add SKILL.md files under ~/.acecode/skills/."
+                ? "No skills installed. Add SKILL.md files under ~/.acecode/skills/ or ~/.agent/skills/."
                 : ("No skills in category '" + category + "'.");
         } else {
             out["hint"] = "Use skill_view(name=...) to load the full content of a skill.";

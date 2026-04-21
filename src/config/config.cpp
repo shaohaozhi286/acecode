@@ -131,6 +131,28 @@ std::vector<std::string> validate_config(const AppConfig& cfg) {
     if (cfg.daemon.service_name.empty()) {
         errors.push_back("daemon.service_name is empty");
     }
+    if (cfg.memory.max_index_bytes == 0) {
+        errors.push_back("memory.max_index_bytes must be > 0");
+    }
+    if (cfg.project_instructions.max_depth < 1) {
+        errors.push_back("project_instructions.max_depth must be >= 1");
+    }
+    if (cfg.project_instructions.max_bytes == 0) {
+        errors.push_back("project_instructions.max_bytes must be > 0");
+    }
+    if (cfg.project_instructions.max_total_bytes < cfg.project_instructions.max_bytes) {
+        errors.push_back("project_instructions.max_total_bytes must be >= max_bytes");
+    }
+    for (const auto& fn : cfg.project_instructions.filenames) {
+        if (fn.empty()) {
+            errors.push_back("project_instructions.filenames contains empty entry");
+            break;
+        }
+        if (fn.find('/') != std::string::npos || fn.find('\\') != std::string::npos) {
+            errors.push_back("project_instructions.filenames entry must not contain path separator: " + fn);
+            break;
+        }
+    }
     return errors;
 }
 
@@ -208,6 +230,48 @@ AppConfig load_config() {
                         if (v.is_string()) cfg.skills.external_dirs.push_back(v.get<std::string>());
                     }
                 }
+            }
+            if (j.contains("memory") && j["memory"].is_object()) {
+                const auto& mj = j["memory"];
+                if (mj.contains("enabled") && mj["enabled"].is_boolean())
+                    cfg.memory.enabled = mj["enabled"].get<bool>();
+                if (mj.contains("max_index_bytes") && mj["max_index_bytes"].is_number_integer()) {
+                    long long v = mj["max_index_bytes"].get<long long>();
+                    if (v > 0) cfg.memory.max_index_bytes = static_cast<std::size_t>(v);
+                }
+            }
+            if (j.contains("project_instructions") && j["project_instructions"].is_object()) {
+                const auto& pj = j["project_instructions"];
+                if (pj.contains("enabled") && pj["enabled"].is_boolean())
+                    cfg.project_instructions.enabled = pj["enabled"].get<bool>();
+                if (pj.contains("max_depth") && pj["max_depth"].is_number_integer()) {
+                    int v = pj["max_depth"].get<int>();
+                    if (v > 0) cfg.project_instructions.max_depth = v;
+                }
+                if (pj.contains("max_bytes") && pj["max_bytes"].is_number_integer()) {
+                    long long v = pj["max_bytes"].get<long long>();
+                    if (v > 0) cfg.project_instructions.max_bytes = static_cast<std::size_t>(v);
+                }
+                if (pj.contains("max_total_bytes") && pj["max_total_bytes"].is_number_integer()) {
+                    long long v = pj["max_total_bytes"].get<long long>();
+                    if (v > 0) cfg.project_instructions.max_total_bytes = static_cast<std::size_t>(v);
+                }
+                if (pj.contains("filenames") && pj["filenames"].is_array()) {
+                    std::vector<std::string> fns;
+                    for (const auto& v : pj["filenames"]) {
+                        if (v.is_string()) {
+                            std::string s = v.get<std::string>();
+                            if (!s.empty()) fns.push_back(std::move(s));
+                        }
+                    }
+                    // Empty array -> keep the struct's default list so ACECODE.md
+                    // / AGENT.md / CLAUDE.md still work out of the box.
+                    if (!fns.empty()) cfg.project_instructions.filenames = std::move(fns);
+                }
+                if (pj.contains("read_agent_md") && pj["read_agent_md"].is_boolean())
+                    cfg.project_instructions.read_agent_md = pj["read_agent_md"].get<bool>();
+                if (pj.contains("read_claude_md") && pj["read_claude_md"].is_boolean())
+                    cfg.project_instructions.read_claude_md = pj["read_claude_md"].get<bool>();
             }
             if (j.contains("daemon") && j["daemon"].is_object()) {
                 const auto& dj = j["daemon"];
@@ -410,6 +474,32 @@ void save_config(const AppConfig& cfg) {
         if (!cfg.web.static_dir.empty())
             wj["static_dir"] = cfg.web.static_dir;
         if (!wj.empty()) j["web"] = wj;
+
+        MemoryConfig mem_d;
+        nlohmann::json memj = nlohmann::json::object();
+        if (cfg.memory.enabled != mem_d.enabled)
+            memj["enabled"] = cfg.memory.enabled;
+        if (cfg.memory.max_index_bytes != mem_d.max_index_bytes)
+            memj["max_index_bytes"] = cfg.memory.max_index_bytes;
+        if (!memj.empty()) j["memory"] = memj;
+
+        ProjectInstructionsConfig pi_d;
+        nlohmann::json pij = nlohmann::json::object();
+        if (cfg.project_instructions.enabled != pi_d.enabled)
+            pij["enabled"] = cfg.project_instructions.enabled;
+        if (cfg.project_instructions.max_depth != pi_d.max_depth)
+            pij["max_depth"] = cfg.project_instructions.max_depth;
+        if (cfg.project_instructions.max_bytes != pi_d.max_bytes)
+            pij["max_bytes"] = cfg.project_instructions.max_bytes;
+        if (cfg.project_instructions.max_total_bytes != pi_d.max_total_bytes)
+            pij["max_total_bytes"] = cfg.project_instructions.max_total_bytes;
+        if (cfg.project_instructions.filenames != pi_d.filenames)
+            pij["filenames"] = cfg.project_instructions.filenames;
+        if (cfg.project_instructions.read_agent_md != pi_d.read_agent_md)
+            pij["read_agent_md"] = cfg.project_instructions.read_agent_md;
+        if (cfg.project_instructions.read_claude_md != pi_d.read_claude_md)
+            pij["read_claude_md"] = cfg.project_instructions.read_claude_md;
+        if (!pij.empty()) j["project_instructions"] = pij;
 
         ModelsDevConfig md;
         nlohmann::json mdj = nlohmann::json::object();

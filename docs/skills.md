@@ -4,10 +4,10 @@ Skills are user-authored instruction documents that extend acecode with domain w
 
 ## Directory layout
 
-Skills live under `~/.acecode/skills/`. The recommended layout is:
+Skills live under built-in roots `~/.acecode/skills/` and compatible `~/.agent/skills/`. The recommended layout is:
 
 ```
-~/.acecode/skills/
+~/.acecode/skills/ or ~/.agent/skills/
   <category>/
     <skill-name>/
       SKILL.md            # required — frontmatter + body

@@ -49,8 +49,12 @@
 #include "tool/mcp_manager.hpp"
 #include "tool/skills_tool.hpp"
 #include "tool/skill_view_tool.hpp"
+#include "tool/memory_read_tool.hpp"
+#include "tool/memory_write_tool.hpp"
 #include "skills/skill_registry.hpp"
 #include "skills/skill_commands.hpp"
+#include "memory/memory_paths.hpp"
+#include "memory/memory_registry.hpp"
 #include "utils/logger.hpp"
 #include "permissions.hpp"
 #include "agent_loop.hpp"
@@ -705,11 +709,13 @@ int main(int argc, char* argv[]) {
     tools.register_tool(create_glob_tool());
 
     // ---- Skill registry ----
-    // Discovery mirrors claudecodehaha's ordering so project-level skills can
-    // override same-name global skills (SkillRegistry is first-wins by name):
+    // Discovery order keeps more specific roots ahead of compatibility/global
+    // roots because SkillRegistry is first-wins by skill name:
     //   1) project walk  — <cwd...>/.acecode/skills, deepest first, up to (not including) HOME
-    //   2) external dirs — config.skills.external_dirs (absolute or ~-expanded)
+    //   2) project walk  — <cwd...>/.agent/skills, deepest first, up to (not including) HOME
     //   3) user global   — ~/.acecode/skills (auto-created)
+    //   4) user global   — ~/.agent/skills (compatibility root; left as-is if missing)
+    //   5) external dirs — config.skills.external_dirs (absolute or ~-expanded)
     SkillRegistry skill_registry;
     {
         std::vector<std::filesystem::path> roots;
@@ -718,17 +724,23 @@ int main(int argc, char* argv[]) {
         for (const auto& dir : get_project_dirs_up_to_home(get_cwd())) {
             roots.emplace_back(std::filesystem::path(dir) / ".acecode" / "skills");
         }
+        for (const auto& dir : get_project_dirs_up_to_home(get_cwd())) {
+            roots.emplace_back(std::filesystem::path(dir) / ".agent" / "skills");
+        }
+
+        std::string default_acecode_skills_dir = expand_path("~/.acecode/skills");
+        if (!std::filesystem::exists(default_acecode_skills_dir, ec)) {
+            std::filesystem::create_directories(default_acecode_skills_dir, ec);
+        }
+        roots.emplace_back(default_acecode_skills_dir);
+
+        std::string default_agent_skills_dir = expand_path("~/.agent/skills");
+        roots.emplace_back(default_agent_skills_dir);
 
         for (const auto& raw : config.skills.external_dirs) {
             std::string expanded = expand_path(raw);
             if (!expanded.empty()) roots.emplace_back(expanded);
         }
-
-        std::string default_skills_dir = expand_path("~/.acecode/skills");
-        if (!std::filesystem::exists(default_skills_dir, ec)) {
-            std::filesystem::create_directories(default_skills_dir, ec);
-        }
-        roots.emplace_back(default_skills_dir);
 
         skill_registry.set_scan_roots(std::move(roots));
         skill_registry.set_disabled(std::unordered_set<std::string>(
@@ -737,6 +749,26 @@ int main(int argc, char* argv[]) {
     }
     tools.register_tool(create_skills_list_tool(skill_registry));
     tools.register_tool(create_skill_view_tool(skill_registry));
+
+    // ---- Memory registry ----
+    // Auto-create ~/.acecode/memory/ if missing; failure disables the memory
+    // system for this session without rewriting the user's config.json.
+    MemoryRegistry memory_registry;
+    MemoryConfig runtime_memory_cfg = config.memory;
+    {
+        std::error_code mkec;
+        std::filesystem::create_directories(get_memory_dir(), mkec);
+        if (mkec) {
+            LOG_ERROR("[memory] failed to create " + get_memory_dir().generic_string() +
+                      ": " + mkec.message() + " — memory will be disabled this session");
+            runtime_memory_cfg.enabled = false;
+        } else if (runtime_memory_cfg.enabled) {
+            memory_registry.scan();
+        }
+    }
+    tools.register_tool(create_memory_read_tool(memory_registry,
+                                                runtime_memory_cfg.max_index_bytes));
+    tools.register_tool(create_memory_write_tool(memory_registry));
 
     // ---- MCP servers ----
     McpManager mcp_manager;
@@ -1043,6 +1075,9 @@ int main(int argc, char* argv[]) {
     AgentLoop agent_loop(*provider, tools, callbacks, working_dir, permissions);
     agent_loop.set_context_window(config.context_window);
     agent_loop.set_skill_registry(&skill_registry);
+    agent_loop.set_memory_registry(&memory_registry);
+    agent_loop.set_memory_config(&runtime_memory_cfg);
+    agent_loop.set_project_instructions_config(&config.project_instructions);
 
     // Auto-compact tracking state for circuit breaker
     AutoCompactTrackingState compact_tracking;
@@ -1352,7 +1387,7 @@ int main(int argc, char* argv[]) {
     });
 
     // Wrap with CatchEvent to handle all keyboard input
-    auto input_with_esc = CatchEvent(input_renderer, [&state, &screen, &clamp_chat_focus, &auth_done, &cmd_registry, &agent_loop, &provider, &config, &token_tracker, &permissions, &session_manager, &scroll_chat, &chat_box, &mcp_manager, &tools, &skill_registry](Event event) {
+    auto input_with_esc = CatchEvent(input_renderer, [&state, &screen, &clamp_chat_focus, &auth_done, &cmd_registry, &agent_loop, &provider, &config, &token_tracker, &permissions, &session_manager, &scroll_chat, &chat_box, &mcp_manager, &tools, &skill_registry, &memory_registry](Event event) {
         // drag-autoscroll: 事件线程入口处消费 anim_thread 攒下的 selection 偏移
         // 补偿. 所有对 FTXUI selection_data_ 的写都发生在这条路径上, 跟
         // HandleSelection 串行 — 避免跨线程数据竞争. 不 return, 让事件继续正常处理.
@@ -1536,6 +1571,7 @@ int main(int argc, char* argv[]) {
                     &mcp_manager,
                     &tools,
                     &skill_registry,
+                    &memory_registry,
                     &cmd_registry
                 };
                 lk.unlock();

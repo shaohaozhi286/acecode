@@ -1,4 +1,7 @@
 #include "system_prompt.hpp"
+#include "../config/config.hpp"
+#include "../memory/memory_registry.hpp"
+#include "../project_instructions/instructions_loader.hpp"
 #include "../skills/skill_registry.hpp"
 #include <sstream>
 #include <filesystem>
@@ -64,7 +67,10 @@ static std::string generate_tools_prompt(const ToolExecutor& tools) {
 }
 
 std::string build_system_prompt(const ToolExecutor& tools, const std::string& cwd,
-                                const SkillRegistry* skills) {
+                                const SkillRegistry* skills,
+                                const MemoryRegistry* memory,
+                                const MemoryConfig* memory_cfg,
+                                const ProjectInstructionsConfig* project_instructions_cfg) {
     std::ostringstream oss;
 
     oss << "You are an interactive agent called acecode that helps users with "
@@ -121,6 +127,40 @@ std::string build_system_prompt(const ToolExecutor& tools, const std::string& cw
         << "- When you see such a block, treat it as a result the user has already obtained. Do NOT re-run the same command; use the output to answer or plan the next step.\n\n";
 
     oss << generate_tools_prompt(tools);
+
+    // # User Memory — only emitted when enabled and MEMORY.md is non-empty.
+    if (memory && memory_cfg && memory_cfg->enabled) {
+        std::string idx = memory->read_index_raw(memory_cfg->max_index_bytes);
+        if (!idx.empty()) {
+            oss << "# User Memory\n\n"
+                << "The following is your persistent memory index (MEMORY.md). "
+                << "It lists what memory files exist under ~/.acecode/memory/. "
+                << "Use memory_read to load any specific entry's body when relevant, "
+                << "and memory_write to persist new facts you learn during the session.\n\n"
+                << idx;
+            if (idx.empty() || idx.back() != '\n') oss << "\n";
+            oss << "\n";
+        }
+    }
+
+    // # Project Instructions — only emitted when files were actually found.
+    if (project_instructions_cfg && project_instructions_cfg->enabled) {
+        MergedInstructions merged = load_project_instructions(cwd, *project_instructions_cfg);
+        if (!merged.merged_body.empty()) {
+            oss << "# Project Instructions\n\n"
+                << kProjectInstructionsFraming << "\n\n";
+            if (!merged.sources.empty()) {
+                oss << "Sources:";
+                for (const auto& s : merged.sources) {
+                    oss << " " << s.generic_string() << ";";
+                }
+                oss << "\n\n";
+            }
+            oss << merged.merged_body;
+            if (merged.merged_body.empty() || merged.merged_body.back() != '\n') oss << "\n";
+            oss << "\n";
+        }
+    }
 
     if (skills) {
         auto available = skills->list();

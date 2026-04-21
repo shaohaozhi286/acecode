@@ -145,7 +145,9 @@ void AgentLoop::run_agent(const std::string& user_message) {
         }
 
         // Build system prompt each turn (dynamic: includes current tools and CWD)
-        std::string system_prompt = build_system_prompt(tools_, cwd_, skill_registry_);
+        std::string system_prompt = build_system_prompt(
+            tools_, cwd_, skill_registry_, memory_registry_,
+            memory_cfg_, project_instructions_cfg_);
         LOG_DEBUG("System prompt length: " + std::to_string(system_prompt.size()));
 
         // Prepare messages with system prompt at front, filtering out meta messages

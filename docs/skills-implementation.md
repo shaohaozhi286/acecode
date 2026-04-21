@@ -37,10 +37,12 @@
 | # | 来源 | 路径 |
 |---|------|------|
 | 1 | 项目 walk（deepest first） | 从 `cwd` 一路向上到（但不含）HOME，每层的 `<dir>/.acecode/skills/` |
-| 2 | 用户外部配置 | `config.skills.external_dirs` 里每一项（支持 `~` / `${VAR}` 展开） |
+| 2 | 项目 walk（deepest first） | 从 `cwd` 一路向上到（但不含）HOME，每层的 `<dir>/.agent/skills/` |
 | 3 | 用户全局 | `~/.acecode/skills/`（不存在时自动创建） |
+| 4 | 用户全局兼容 | `~/.agent/skills/`（兼容根，缺失时不会自动创建） |
+| 5 | 用户外部配置 | `config.skills.external_dirs` 里每一项（支持 `~` / `${VAR}` 展开） |
 
-项目 walk 的收集由 `get_project_dirs_up_to_home(cwd)` 实现（`src/config/config.cpp`）：以 cwd 为起点逐级向上，遇到 HOME 或文件系统根则停止，HOME 本身**不包含**（它已由第 3 项覆盖）。
+项目 walk 的收集由 `get_project_dirs_up_to_home(cwd)` 实现（`src/config/config.cpp`）：以 cwd 为起点逐级向上，遇到 HOME 或文件系统根则停止，HOME 本身**不包含**（用户级根由第 3/4 项覆盖）。
 
 ---
 
@@ -217,7 +219,7 @@ struct SkillMetadata {
 ```
 
 - `disabled`：按 `SkillMetadata.name` 精确匹配（不是 `command_key`）。
-- `external_dirs`：直接作为扫描根追加，**不**自动拼 `.acecode/skills/` 后缀（与项目 walk 的"自动拼后缀"行为区分开来），便于指向任意目录结构。
+- `external_dirs`：直接作为扫描根追加，**不**自动拼 `.acecode/skills/` 或 `.agent/skills/` 后缀（与项目 walk 的"自动拼后缀"行为区分开来），便于指向任意目录结构。
 
 ---
 
@@ -244,7 +246,7 @@ struct SkillMetadata {
 ```
 启动
  ├─ main.cpp 组装 roots：
- │    项目 walk (cwd→…→<home以下>) / external_dirs / ~/.acecode/skills
+ │    项目 walk .acecode/skills / 项目 walk .agent/skills / ~/.acecode/skills / ~/.agent/skills / external_dirs
  ├─ SkillRegistry.scan() → 读 frontmatter → 去重 → SkillMetadata[]
  ├─ register_skill_commands_tracked() → CommandRegistry 注册 /<key>
  ├─ ToolExecutor 注册 skills_list / skill_view

@@ -1,0 +1,42 @@
+# Project Overview
+
+<!-- Tell acecode what this project is and who uses it. Two or three sentences is plenty. -->
+This is an example project. Replace this paragraph with a short description that helps
+acecode understand the project's purpose so it can frame its answers accordingly.
+
+# Build Instructions
+
+<!-- Commands acecode can use to build, run, and test the project. -->
+```bash
+# Build
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+
+# Test
+cmake --build build --target unit_tests
+ctest --test-dir build --output-on-failure
+```
+
+# Architecture
+
+<!-- Top-level modules, data flow, external services. Keep under 300 lines so this file
+     stays cheap to inject into the system prompt every turn. -->
+- `src/` — production code
+- `tests/` — unit tests (globbed automatically by `tests/CMakeLists.txt`)
+- `docs/` — contributor docs
+
+# Conventions
+
+<!-- Coding style, PR conventions, anything agent-facing that isn't obvious from the code. -->
+- Use `Edit` / `Read` tools over `bash cat`/`sed`.
+- Commit messages: imperative mood, present tense, ≤70-char subject.
+- When touching tests: every TEST body gets a Chinese comment explaining the scenario.
+
+<!--
+Tip: acecode reads ACECODE.md, AGENT.md, and CLAUDE.md in priority order and only picks
+one per directory. You can drop a matching file in subdirectories for module-specific
+overrides (outer-first in the merged prompt, so inner directories can tighten outer rules).
+
+Toggle read_agent_md / read_claude_md in ~/.acecode/config.json if you want to ignore
+one of the legacy names.
+-->

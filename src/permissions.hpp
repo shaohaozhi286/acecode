@@ -84,6 +84,12 @@ public:
         // Read-only tools are always auto-allowed
         if (is_read_only) return true;
 
+        // memory_write is auto-allowed in every non-Yolo mode because its
+        // tool implementation hard-locks the target path to
+        // ~/.acecode/memory/ and rejects anything else — the PermissionManager
+        // doesn't need to prompt on top of that.
+        if (tool_name == "memory_write") return true;
+
         // Session-level always-allow for this tool
         {
             std::lock_guard<std::mutex> lk(mu_);

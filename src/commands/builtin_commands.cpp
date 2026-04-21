@@ -1,5 +1,7 @@
 #include "builtin_commands.hpp"
 #include "compact.hpp"
+#include "init_command.hpp"
+#include "memory_command.hpp"
 #include "models_command.hpp"
 #include "../provider/model_context_resolver.hpp"
 #include "../tool/mcp_manager.hpp"
@@ -28,6 +30,8 @@ static void cmd_help(CommandContext& ctx, const std::string& /*args*/) {
         << "  /resume   - Resume a previous session\n"
         << "  /mcp      - Manage MCP servers\n"
         << "  /skills   - List, invoke, or reload installed skills\n"
+        << "  /memory   - List, view, edit, forget, or reload persistent user memory\n"
+        << "  /init     - Generate an ACECODE.md skeleton in the current directory\n"
         << "  /models   - Inspect bundled models.dev registry\n"
         << "  /title    - Set or show the window title for this session\n"
         << "  /exit     - Exit acecode";
@@ -437,6 +441,7 @@ static void cmd_skills(CommandContext& ctx, const std::string& args) {
             << "  /skills reload       - Rescan skill directories and refresh commands\n"
             << "  /skills help         - Show this help\n"
             << "\n"
+            << "Built-in skill roots include project/home .acecode/skills and compatible .agent/skills directories.\n"
             << "To invoke a skill, type /<skill-name> [optional args].";
         ctx.state.conversation.push_back({"system", oss.str(), false});
         ctx.state.chat_follow_tail = true;
@@ -468,7 +473,7 @@ static void cmd_skills(CommandContext& ctx, const std::string& args) {
     std::lock_guard<std::mutex> lk(ctx.state.mu);
     std::ostringstream oss;
     if (skills.empty()) {
-        oss << "No skills installed. Add a SKILL.md under ~/.acecode/skills/<category>/<name>/ and rerun `/skills reload` (then restart to pick up new /<name> commands).";
+        oss << "No skills installed. Add a SKILL.md under ~/.acecode/skills/<category>/<name>/ or ~/.agent/skills/<category>/<name>/ and rerun `/skills reload` (then restart to pick up new /<name> commands).";
     } else {
         oss << "Installed skills (" << skills.size() << "):";
         std::string last_cat;
@@ -625,6 +630,8 @@ void register_builtin_commands(CommandRegistry& registry) {
     registry.register_command({"resume", "Resume a previous session", cmd_resume});
     registry.register_command({"mcp", "Manage MCP servers", cmd_mcp});
     registry.register_command({"skills", "List, invoke, or reload installed skills", cmd_skills});
+    register_memory_command(registry);
+    register_init_command(registry);
     registry.register_command({"title", "Set or show the window title for this session", cmd_title});
     registry.register_command({"exit", "Exit acecode", cmd_exit});
     register_models_command(registry);

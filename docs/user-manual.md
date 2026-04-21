@@ -325,7 +325,7 @@ Skills 是用户自定义的工作流指令，存储为 Markdown 文件，acecod
 ### 技能存放位置
 
 ```
-~/.acecode/skills/
+~/.acecode/skills/ 或 ~/.agent/skills/
   <category>/
     <skill-name>/
       SKILL.md          # 必须 — 包含 YAML frontmatter 和指令正文
@@ -353,7 +353,7 @@ Skills 是用户自定义的工作流指令，存储为 Markdown 文件，acecod
 
 ### 创建技能
 
-在 `~/.acecode/skills/<category>/<name>/SKILL.md` 中创建文件：
+在 `~/.acecode/skills/<category>/<name>/SKILL.md` 或 `~/.agent/skills/<category>/<name>/SKILL.md` 中创建文件：
 
 ```markdown
 ---

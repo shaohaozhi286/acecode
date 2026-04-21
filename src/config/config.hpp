@@ -51,6 +51,27 @@ struct SkillsConfig {
     std::vector<std::string> external_dirs;  // extra directories to scan (supports ~ and ${ENV})
 };
 
+struct MemoryConfig {
+    bool enabled = true;
+    // Hard cap on MEMORY.md size for system-prompt injection. Oversized indexes
+    // are truncated in-memory with a marker; the on-disk file is untouched.
+    std::size_t max_index_bytes = 32 * 1024;
+};
+
+struct ProjectInstructionsConfig {
+    bool enabled = true;
+    int max_depth = 8;                         // max dirs walked from cwd towards HOME
+    std::size_t max_bytes = 256 * 1024;        // per-file cap
+    std::size_t max_total_bytes = 1024 * 1024; // aggregate cap for merged text
+    // Priority order. Each directory contributes at most the first filename that
+    // exists. ACECODE.md is native; AGENT.md and CLAUDE.md are compat.
+    std::vector<std::string> filenames = {"ACECODE.md", "AGENT.md", "CLAUDE.md"};
+    // Per-filename gates. Setting either to false removes that name from the
+    // effective search list at runtime (overriding its presence in filenames).
+    bool read_agent_md = true;
+    bool read_claude_md = true;
+};
+
 struct DaemonConfig {
     bool auto_start_on_double_click = false;
     std::string service_name = "ACECodeDaemon";
@@ -81,6 +102,8 @@ struct AppConfig {
     int max_sessions = 50;       // max saved sessions per project
     std::map<std::string, McpServerConfig> mcp_servers; // MCP stdio servers (optional)
     SkillsConfig skills;                         // skill system configuration (optional)
+    MemoryConfig memory;                         // persistent user memory settings
+    ProjectInstructionsConfig project_instructions; // ACECODE.md / AGENT.md / CLAUDE.md loader
     DaemonConfig daemon;                         // daemon process supervision settings
     WebConfig web;                               // HTTP/WebSocket server settings
     ModelsDevConfig models_dev;                  // bundled models.dev registry behaviour
