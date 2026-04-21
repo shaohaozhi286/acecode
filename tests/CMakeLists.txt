@@ -10,6 +10,7 @@ target_link_libraries(acecode_unit_tests PRIVATE
     acecode_testable
     ftxui::screen
     ftxui::dom
+    ftxui::component
     GTest::gtest
     GTest::gtest_main
 )

@@ -384,6 +384,15 @@ void AgentLoop::run_agent(const std::string& user_message) {
                     if (callbacks_.on_message) {
                         callbacks_.on_message("tool_result", results[idx].output, true);
                     }
+                    if (callbacks_.on_tool_result) {
+                        const auto& tc = *read_entries[i + j].tc;
+                        ChatMessage call_msg;
+                        call_msg.role = "tool_call";
+                        call_msg.content = "[Tool: " + tc.function_name + "] " + tc.function_arguments;
+                        call_msg.display_override =
+                            ToolExecutor::build_tool_call_preview(tc.function_name, tc.function_arguments);
+                        callbacks_.on_tool_result(call_msg, tc.function_name, results[idx]);
+                    }
                 }
 
                 i = batch_end;
@@ -407,6 +416,16 @@ void AgentLoop::run_agent(const std::string& user_message) {
 
             bool auto_allow = permissions_.should_auto_allow(tc.function_name, false, ctx_path, ctx_command);
 
+            auto emit_tool_result_callback = [&](size_t idx) {
+                if (!callbacks_.on_tool_result) return;
+                ChatMessage call_msg;
+                call_msg.role = "tool_call";
+                call_msg.content = "[Tool: " + tc.function_name + "] " + tc.function_arguments;
+                call_msg.display_override =
+                    ToolExecutor::build_tool_call_preview(tc.function_name, tc.function_arguments);
+                callbacks_.on_tool_result(call_msg, tc.function_name, results[idx]);
+            };
+
             // Path safety validation
             if (!ctx_path.empty() && tc.function_name != "bash") {
                 std::string path_error = path_validator_.validate(ctx_path);
@@ -417,6 +436,7 @@ void AgentLoop::run_agent(const std::string& user_message) {
                     if (callbacks_.on_message) {
                         callbacks_.on_message("tool_result", results[entry.original_index].output, true);
                     }
+                    emit_tool_result_callback(entry.original_index);
                     continue;
                 }
 
@@ -435,6 +455,7 @@ void AgentLoop::run_agent(const std::string& user_message) {
                     if (callbacks_.on_message) {
                         callbacks_.on_message("tool_result", "[User denied tool execution]", true);
                     }
+                    emit_tool_result_callback(entry.original_index);
                     continue;
                 }
                 if (perm == PermissionResult::AlwaysAllow) {
@@ -497,6 +518,7 @@ void AgentLoop::run_agent(const std::string& user_message) {
             if (callbacks_.on_message) {
                 callbacks_.on_message("tool_result", results[entry.original_index].output, true);
             }
+            emit_tool_result_callback(entry.original_index);
         }
 
         // Phase 3: Record all results in original order
@@ -587,6 +609,14 @@ void AgentLoop::run_shell(const std::string& command) {
 
     if (callbacks_.on_message) {
         callbacks_.on_message("tool_result", result.output, true);
+    }
+    if (callbacks_.on_tool_result) {
+        ChatMessage call_msg;
+        call_msg.role = "tool_call";
+        call_msg.content = "[Tool: bash] " + args_json;
+        call_msg.display_override =
+            ToolExecutor::build_tool_call_preview("bash", args_json);
+        callbacks_.on_tool_result(call_msg, "bash", result);
     }
 
     // Persist the two display-side messages so --resume can rehydrate both the

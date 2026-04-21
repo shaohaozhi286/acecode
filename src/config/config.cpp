@@ -308,6 +308,15 @@ AppConfig load_config() {
                     if (!p.empty()) cfg.models_dev.user_override_path = p;
                 }
             }
+            if (j.contains("input_history") && j["input_history"].is_object()) {
+                const auto& ihj = j["input_history"];
+                if (ihj.contains("enabled") && ihj["enabled"].is_boolean())
+                    cfg.input_history.enabled = ihj["enabled"].get<bool>();
+                if (ihj.contains("max_entries") && ihj["max_entries"].is_number_integer()) {
+                    int v = ihj["max_entries"].get<int>();
+                    if (v > 0) cfg.input_history.max_entries = v;
+                }
+            }
             if (j.contains("mcp_servers") && j["mcp_servers"].is_object()) {
                 for (auto it = j["mcp_servers"].begin(); it != j["mcp_servers"].end(); ++it) {
                     const std::string& server_name = it.key();
@@ -511,6 +520,14 @@ void save_config(const AppConfig& cfg) {
             !cfg.models_dev.user_override_path->empty())
             mdj["user_override_path"] = *cfg.models_dev.user_override_path;
         if (!mdj.empty()) j["models_dev"] = mdj;
+
+        InputHistoryConfig ih_d;
+        nlohmann::json ihj = nlohmann::json::object();
+        if (cfg.input_history.enabled != ih_d.enabled)
+            ihj["enabled"] = cfg.input_history.enabled;
+        if (cfg.input_history.max_entries != ih_d.max_entries)
+            ihj["max_entries"] = cfg.input_history.max_entries;
+        if (!ihj.empty()) j["input_history"] = ihj;
     }
 
     if (!cfg.mcp_servers.empty()) {

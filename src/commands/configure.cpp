@@ -1,5 +1,6 @@
 #include "configure.hpp"
 #include "configure_catalog.hpp"
+#include "configure_picker.hpp"
 #include "config/config.hpp"
 #include "auth/github_auth.hpp"
 #include "utils/logger.hpp"
@@ -142,7 +143,6 @@ static void configure_copilot(AppConfig& cfg) {
     }
 
     if (!choice_ids.empty()) {
-        labels.push_back("<Custom model id...>");
         int default_idx = 0;
         for (size_t i = 0; i < choice_ids.size(); ++i) {
             if (choice_ids[i] == cfg.copilot.model) {
@@ -150,11 +150,38 @@ static void configure_copilot(AppConfig& cfg) {
                 break;
             }
         }
-        int choice = read_choice("Select model:", labels, default_idx);
-        if (choice == static_cast<int>(choice_ids.size())) {
+
+        std::vector<PickerItem> items;
+        items.reserve(choice_ids.size());
+        for (size_t i = 0; i < choice_ids.size(); ++i) {
+            PickerItem it;
+            it.label = choice_ids[i];
+            // labels[i] already starts with the id; strip it so the helper
+            // renders id as the bold label and only the metadata as secondary.
+            if (labels[i].rfind(choice_ids[i], 0) == 0) {
+                std::string rest = labels[i].substr(choice_ids[i].size());
+                while (!rest.empty() && rest.front() == ' ') rest.erase(rest.begin());
+                it.secondary = rest;
+            } else {
+                it.secondary = labels[i];
+            }
+            items.push_back(std::move(it));
+        }
+
+        PickerOptions opts;
+        opts.title = "Select a Copilot model";
+        opts.page_size = 30;
+        opts.allow_custom = true;
+        opts.default_index = static_cast<size_t>(default_idx);
+
+        PickerResult r = run_ftxui_picker(items, opts);
+        if (r.cancelled) {
+            std::cout << "Model selection cancelled — keeping: "
+                      << cfg.copilot.model << "\n";
+        } else if (r.custom) {
             cfg.copilot.model = read_line("Custom model id", cfg.copilot.model);
         } else {
-            cfg.copilot.model = choice_ids[choice];
+            cfg.copilot.model = choice_ids[r.index];
         }
     } else {
         std::cerr << "Warning: Could not fetch model list from Copilot API and no catalog entry available." << std::endl;

@@ -1,6 +1,7 @@
 #include "file_write_tool.hpp"
 #include "mtime_tracker.hpp"
 #include "diff_utils.hpp"
+#include "tool_icons.hpp"
 #include "utils/logger.hpp"
 #include "utils/tool_args_parser.hpp"
 #include "utils/tool_errors.hpp"
@@ -53,12 +54,42 @@ static ToolResult execute_file_write(const std::string& arguments_json, const To
     MtimeTracker::instance().record_write(file_path);
 
     if (!file_exists) {
-        return ToolResult{"Created file: " + file_path, true};
+        // Summary for a fresh file: count lines of new content as additions.
+        int new_lines = 0;
+        for (char c : content) if (c == '\n') ++new_lines;
+        if (!content.empty() && content.back() != '\n') ++new_lines;
+
+        ToolSummary summary;
+        summary.verb = "Created";
+        summary.object = file_path;
+        summary.metrics.emplace_back("+", std::to_string(new_lines));
+        summary.icon = tool_icon("file_write");
+
+        // 新文件:走 "空 → 新内容" 路径得到全 Added 的 hunk,给 TUI 用。
+        auto structured = generate_structured_diff("", content, file_path);
+
+        ToolResult r{"Created file: " + file_path, true};
+        r.summary = std::move(summary);
+        r.hunks = std::move(structured);
+        return r;
     }
 
-    // Generate diff for overwrite
-    std::string diff = generate_unified_diff(old_content, content, file_path);
-    return ToolResult{"Updated file: " + file_path + "\n\n" + diff, true};
+    // 覆写场景:结构化 + 文本 diff 同源产出。
+    DiffStats stats;
+    std::string diff = generate_unified_diff(old_content, content, file_path, stats);
+    auto structured = generate_structured_diff(old_content, content, file_path);
+
+    ToolSummary summary;
+    summary.verb = "Wrote";
+    summary.object = file_path;
+    summary.metrics.emplace_back("+", std::to_string(stats.additions));
+    summary.metrics.emplace_back("-", std::to_string(stats.deletions));
+    summary.icon = tool_icon("file_write");
+
+    ToolResult r{"Updated file: " + file_path + "\n\n" + diff, true};
+    r.summary = std::move(summary);
+    r.hunks = std::move(structured);
+    return r;
 }
 
 ToolImpl create_file_write_tool() {

@@ -7,6 +7,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <cctype>
 #include <algorithm>
 #include <array>
 #include <sstream>
@@ -66,11 +67,13 @@
 #include "utils/token_tracker.hpp"
 #include "markdown/markdown_formatter.hpp"
 #include "session/session_manager.hpp"
+#include "tui/diff_view.hpp"
 #include "tui/slash_dropdown.hpp"
 #include "tui/tool_progress.hpp"
 #include "utils/base64.hpp"
 #include "utils/terminal_title.hpp"
 #include "session/session_storage.hpp"
+#include "history/input_history_store.hpp"
 
 #include <cstdio>
 
@@ -123,6 +126,18 @@ static std::string get_random_thinking_phrase(bool is_zh) {
     static thread_local std::mt19937 gen(rd());
     std::uniform_int_distribution<> dis(0, 49);
     return is_zh ? ZH_THINKING_PHRASES[dis(gen)] : EN_THINKING_PHRASES[dis(gen)];
+}
+
+// A ToolSummary whose metrics contain `exit`, `aborted`, or `timeout` indicates
+// a failure; used by the tool_result renderer to pick colour and decide whether
+// to show the inline error tail.
+static bool is_success_summary(const acecode::ToolSummary& s) {
+    for (const auto& kv : s.metrics) {
+        if (kv.first == "exit" && kv.second != "0") return false;
+        if (kv.first == "aborted" && kv.second == "true") return false;
+        if (kv.first == "timeout" && kv.second == "true") return false;
+    }
+    return true;
 }
 
 
@@ -790,6 +805,22 @@ int main(int argc, char* argv[]) {
     state.status_line = "[" + provider->name() + "] model: " +
         (config.provider == "copilot" ? config.copilot.model : config.openai.model);
 
+    // Restore per-working-directory input history. Independent of session files so
+    // /clear, resume, or deleting a session never blows away the ↑/↓ queue.
+    // 关闭开关时退化为纯内存历史（旧行为）。
+    if (config.input_history.enabled) {
+        std::string ih_path = InputHistoryStore::file_path(
+            SessionStorage::get_project_dir(working_dir));
+        state.input_history = InputHistoryStore::load(ih_path);
+        // 若历史文件条数超过当前上限（用户把 max_entries 调小），保留最近 N 条。
+        int cap = config.input_history.max_entries;
+        if (cap > 0 && (int)state.input_history.size() > cap) {
+            state.input_history.erase(
+                state.input_history.begin(),
+                state.input_history.begin() + (state.input_history.size() - (size_t)cap));
+        }
+    }
+
     // Version and working directory strings for TUI header
     std::string version_str = "acecode v" ACECODE_VERSION;
     std::string cwd_display = working_dir;
@@ -1042,6 +1073,33 @@ int main(int argc, char* argv[]) {
         state.conversation.back().content += token;
         state.streaming_output_chars += token.size();
         clamp_chat_focus();
+        screen.PostEvent(Event::Custom);
+    };
+    // Attach summary/display_override to the two most-recent TUI messages
+    // (the trailing tool_call row and tool_result row that on_message just
+    // appended) so the renderer can switch to the single-line summary mode.
+    callbacks.on_tool_result = [&state, &screen](const ChatMessage& call_msg,
+                                                 const std::string& /*tool_name*/,
+                                                 const ToolResult& result) {
+        std::lock_guard<std::mutex> lk(state.mu);
+        // Walk the tail backwards: most recent tool_result gets `summary` +
+        // `hunks`, the nearest preceding tool_call gets `display_override`.
+        // Both were just pushed by `on_message` on the agent worker thread.
+        for (auto it = state.conversation.rbegin(); it != state.conversation.rend(); ++it) {
+            if (it->role == "tool_result" && !it->summary.has_value()) {
+                it->summary = result.summary;
+                it->hunks = result.hunks;
+                break;
+            }
+        }
+        if (!call_msg.display_override.empty()) {
+            for (auto it = state.conversation.rbegin(); it != state.conversation.rend(); ++it) {
+                if (it->role == "tool_call" && it->display_override.empty()) {
+                    it->display_override = call_msg.display_override;
+                    break;
+                }
+            }
+        }
         screen.PostEvent(Event::Custom);
     };
     callbacks.on_usage = [&token_tracker, &state, &config, &screen](const TokenUsage& usage) {
@@ -1539,11 +1597,30 @@ int main(int argc, char* argv[]) {
             state.input_cursor = 0;
             refresh_slash_dropdown(state, cmd_registry);
 
+            // 统一入口：内存 push + 磁盘 append。空白 / 相邻重复被抑制，保持磁盘与内存
+            // 行为一致；磁盘持久化受 config.input_history.enabled 控制。
+            auto record_history = [&state, &config, &working_dir](const std::string& entry) {
+                auto is_all_space = [](const std::string& s) {
+                    for (unsigned char c : s) {
+                        if (!std::isspace(c)) return false;
+                    }
+                    return true;
+                };
+                if (entry.empty() || is_all_space(entry)) return;
+                if (!state.input_history.empty() && state.input_history.back() == entry) return;
+                state.input_history.push_back(entry);
+                if (config.input_history.enabled) {
+                    std::string path = InputHistoryStore::file_path(
+                        SessionStorage::get_project_dir(working_dir));
+                    InputHistoryStore::append(path, entry, config.input_history.max_entries);
+                }
+            };
+
             // Shell input mode: dispatch directly to BashTool via agent worker.
             // Skips slash-command parsing and LLM round-trip.
             if (state.input_mode == InputMode::Shell) {
                 std::string shell_cmd = prompt;
-                state.input_history.push_back(prepend_mode_prefix(shell_cmd, InputMode::Shell));
+                record_history(prepend_mode_prefix(shell_cmd, InputMode::Shell));
                 state.history_index = -1;
                 state.input_mode = InputMode::Normal;
 
@@ -1557,7 +1634,7 @@ int main(int argc, char* argv[]) {
             }
 
             // Record history
-            state.input_history.push_back(prompt);
+            record_history(prompt);
             state.history_index = -1;
 
             // Slash command interception
@@ -1900,6 +1977,23 @@ int main(int argc, char* argv[]) {
             state.input_cursor = 0;
             return true;
         }
+        // Ctrl+E contextual expand: when a summarized tool_result is focused
+        // in the chat view, toggle its expanded state. Falls through to the
+        // readline-style "move to end of line" when no chat message is focused.
+        if (event == Event::Special(std::string(1, '\x05'))) {
+            std::lock_guard<std::mutex> lk(state.mu);
+            if (state.chat_focus_index >= 0 &&
+                state.chat_focus_index < static_cast<int>(state.conversation.size())) {
+                auto& msg = state.conversation[state.chat_focus_index];
+                if (msg.role == "tool_result" &&
+                    (msg.summary.has_value() || msg.hunks.has_value())) {
+                    msg.expanded = !msg.expanded;
+                    screen.PostEvent(Event::Custom);
+                    return true;
+                }
+            }
+            // Fall through to end-of-line if nothing to toggle.
+        }
         if (is_end_event(event)) {
             std::lock_guard<std::mutex> lk(state.mu);
             if (state.resume_picker_active) return true;
@@ -2097,46 +2191,197 @@ int main(int argc, char* argv[]) {
                 }
                 message_elements.push_back(line | focus_decorator | reflect(message_boxes[i]));
             } else if (msg.role == "tool_call") {
+                // Prefer the compact one-line preview (→ bash  npm install) when
+                // agent_loop supplied one; fall back to the legacy full-JSON row.
+                std::string display_text;
+                if (!msg.display_override.empty()) {
+                    display_text = "\xE2\x86\x92 " + msg.display_override; // "→ "
+                } else {
+                    display_text = msg.content;
+                }
                 auto line = hbox({
                     text("   -> ") | color(Color::Magenta),
-                    paragraph(msg.content) | color(Color::MagentaLight) | dim | flex,
+                    paragraph(display_text) | color(Color::MagentaLight) | dim | flex,
                 });
                 if (focused_message) {
                     line = line | focus;
                 }
                 message_elements.push_back(line | focus_decorator | reflect(message_boxes[i]));
             } else if (msg.role == "tool_result") {
-                // Fold long tool output to at most 10 lines + summary footer.
-                // Session persistence still stores the full content.
-                const int MAX_TOOL_LINES = 10;
-                std::string display_content = msg.content;
-                int line_count = 0;
-                for (char c : msg.content) if (c == '\n') line_count++;
-                if (msg.content.empty() || msg.content.back() != '\n') line_count++;
-
-                if (line_count > MAX_TOOL_LINES) {
-                    size_t cut = 0;
-                    int seen = 0;
-                    while (cut < msg.content.size() && seen < MAX_TOOL_LINES) {
-                        if (msg.content[cut] == '\n') seen++;
-                        cut++;
+                // 新优先级:有结构化 hunks → 走彩色 diff 视图(summary + 色带);
+                // 其次 summary(无 hunks)→ 单行摘要;都没有 → 灰色 fold。
+                const bool use_diff = msg.hunks.has_value();
+                const bool use_summary = msg.summary.has_value() && !msg.expanded && !use_diff;
+                if (use_diff) {
+                    // ---- Diff 视图:summary 行 + 彩色 diff 块 ----
+                    Elements rows;
+                    if (msg.summary.has_value()) {
+                        const auto& s = *msg.summary;
+                        Color row_color = msg.content.find("[Error]") == 0 || !is_success_summary(s)
+                            ? Color::RedLight
+                            : Color::GreenLight;
+                        std::string metric_str;
+                        for (const auto& kv : s.metrics) {
+                            std::string seg;
+                            if (kv.first == "+") seg = "+" + kv.second;
+                            else if (kv.first == "-") seg = "-" + kv.second;
+                            else seg = kv.first + "=" + kv.second;
+                            if (!metric_str.empty()) metric_str += " \xC2\xB7 ";
+                            metric_str += seg;
+                        }
+                        std::string summary_line = s.icon + " " + s.verb + " \xC2\xB7 " + s.object;
+                        if (!metric_str.empty()) summary_line += " \xC2\xB7 " + metric_str;
+                        rows.push_back(hbox({
+                            text("   <- ") | color(Color::GrayDark),
+                            text(summary_line) | color(row_color) | flex,
+                        }));
+                    } else {
+                        rows.push_back(hbox({
+                            text("   <- ") | color(Color::GrayDark),
+                            text("diff") | color(Color::GrayLight) | flex,
+                        }));
                     }
-                    display_content = msg.content.substr(0, cut);
-                    if (!display_content.empty() && display_content.back() == '\n') {
-                        display_content.pop_back();
-                    }
-                    int hidden = line_count - MAX_TOOL_LINES;
-                    display_content += "\n... (" + std::to_string(hidden) + " more lines)";
-                }
 
-                auto line = hbox({
-                    text("   <- ") | color(Color::GrayDark),
-                    paragraph(display_content) | color(Color::GrayLight) | dim | flex,
-                });
-                if (focused_message) {
-                    line = line | focus;
+                    // 失败态:把前 3 行 stderr dim 显示在 summary 之下(保留既有行为)。
+                    if (msg.summary.has_value() && !is_success_summary(*msg.summary) &&
+                        !msg.content.empty()) {
+                        int shown = 0;
+                        size_t pos = 0;
+                        while (pos < msg.content.size() && shown < 3) {
+                            size_t nl = msg.content.find('\n', pos);
+                            std::string line = (nl == std::string::npos)
+                                ? msg.content.substr(pos)
+                                : msg.content.substr(pos, nl - pos);
+                            rows.push_back(hbox({
+                                text("      ") | color(Color::GrayDark),
+                                text(line) | color(Color::GrayLight) | dim | flex,
+                            }));
+                            if (nl == std::string::npos) break;
+                            pos = nl + 1;
+                            ++shown;
+                        }
+                    }
+
+                    // Diff 视图:缩进 6 列,宽度由 chat_box 推导。
+                    DiffViewOptions opts;
+                    opts.width = std::max(20, chat_box.x_max - chat_box.x_min - 6);
+                    opts.expanded = msg.expanded;
+                    opts.max_hunks = 3;
+                    opts.max_lines_per_hunk = 20;
+                    Element diff_el = render_diff_view(*msg.hunks, opts);
+                    rows.push_back(hbox({
+                        text("      ") | color(Color::GrayDark),
+                        diff_el | flex,
+                    }));
+
+                    auto block = vbox(std::move(rows));
+                    if (focused_message) {
+                        block = block | focus;
+                    }
+                    message_elements.push_back(block | focus_decorator | reflect(message_boxes[i]));
+                } else if (use_summary) {
+                    // ---- Summary row: single line, icon + verb + object + metrics ----
+                    const auto& s = *msg.summary;
+                    Color row_color = msg.content.find("[Error]") == 0 || !is_success_summary(s)
+                        ? Color::RedLight
+                        : Color::GreenLight;
+
+                    // Build metric tail: " · k=v · k=v" but drop k for
+                    // "time"/"bytes"/"lines"/"size" since the value is self-describing.
+                    std::string metric_str;
+                    for (const auto& kv : s.metrics) {
+                        std::string seg;
+                        if (kv.first == "time" || kv.first == "bytes" ||
+                            kv.first == "size" || kv.first == "lines") {
+                            seg = kv.second + (kv.first == "lines" ? " lines" : "");
+                        } else if (kv.first == "+") {
+                            seg = "+" + kv.second;
+                        } else if (kv.first == "-") {
+                            seg = "-" + kv.second;
+                        } else if (kv.first == "exit") {
+                            seg = "exit " + kv.second;
+                        } else if (kv.first == "truncated" && kv.second == "true") {
+                            seg = "truncated";
+                        } else if (kv.first == "aborted" && kv.second == "true") {
+                            seg = "aborted";
+                        } else if (kv.first == "timeout" && kv.second == "true") {
+                            seg = "timeout";
+                        } else if (kv.first == "hint") {
+                            seg = "hint:" + kv.second;
+                        } else {
+                            seg = kv.first + "=" + kv.second;
+                        }
+                        if (!metric_str.empty()) metric_str += " \xC2\xB7 "; // " · "
+                        metric_str += seg;
+                    }
+
+                    std::string summary_line = s.icon + " " + s.verb + " \xC2\xB7 " + s.object;
+                    if (!metric_str.empty()) summary_line += " \xC2\xB7 " + metric_str;
+
+                    Elements rows;
+                    rows.push_back(hbox({
+                        text("   <- ") | color(Color::GrayDark),
+                        text(summary_line) | color(row_color) | flex,
+                    }));
+
+                    // Failed tool: render the first 3 lines of output dimmed
+                    // below the summary so the error is visible without expand.
+                    if (!is_success_summary(s) && !msg.content.empty()) {
+                        int shown = 0;
+                        size_t pos = 0;
+                        while (pos < msg.content.size() && shown < 3) {
+                            size_t nl = msg.content.find('\n', pos);
+                            std::string line = (nl == std::string::npos)
+                                ? msg.content.substr(pos)
+                                : msg.content.substr(pos, nl - pos);
+                            rows.push_back(hbox({
+                                text("      ") | color(Color::GrayDark),
+                                text(line) | color(Color::GrayLight) | dim | flex,
+                            }));
+                            if (nl == std::string::npos) break;
+                            pos = nl + 1;
+                            ++shown;
+                        }
+                    }
+
+                    auto block = vbox(std::move(rows));
+                    if (focused_message) {
+                        block = block | focus;
+                    }
+                    message_elements.push_back(block | focus_decorator | reflect(message_boxes[i]));
+                } else {
+                    // ---- Legacy fold path (also used when user pressed Ctrl+E
+                    // to expand, and the 10-line cap acts as a secondary safety) ----
+                    const int MAX_TOOL_LINES = 10;
+                    std::string display_content = msg.content;
+                    int line_count = 0;
+                    for (char c : msg.content) if (c == '\n') line_count++;
+                    if (msg.content.empty() || msg.content.back() != '\n') line_count++;
+
+                    if (line_count > MAX_TOOL_LINES) {
+                        size_t cut = 0;
+                        int seen = 0;
+                        while (cut < msg.content.size() && seen < MAX_TOOL_LINES) {
+                            if (msg.content[cut] == '\n') seen++;
+                            cut++;
+                        }
+                        display_content = msg.content.substr(0, cut);
+                        if (!display_content.empty() && display_content.back() == '\n') {
+                            display_content.pop_back();
+                        }
+                        int hidden = line_count - MAX_TOOL_LINES;
+                        display_content += "\n... (" + std::to_string(hidden) + " more lines)";
+                    }
+
+                    auto line = hbox({
+                        text("   <- ") | color(Color::GrayDark),
+                        paragraph(display_content) | color(Color::GrayLight) | dim | flex,
+                    });
+                    if (focused_message) {
+                        line = line | focus;
+                    }
+                    message_elements.push_back(line | focus_decorator | reflect(message_boxes[i]));
                 }
-                message_elements.push_back(line | focus_decorator | reflect(message_boxes[i]));
             } else if (msg.role == "system") {
                 auto line = hbox({
                     text(" i ") | bold | color(Color::Yellow),

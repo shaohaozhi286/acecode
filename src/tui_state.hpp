@@ -2,6 +2,7 @@
 
 #include "permissions.hpp"
 #include "utils/drag_scroll.hpp"
+#include "tool/tool_executor.hpp"
 
 #include <string>
 #include <vector>
@@ -12,6 +13,7 @@
 #include <functional>
 #include <atomic>
 #include <thread>
+#include <optional>
 
 namespace acecode {
 
@@ -44,6 +46,18 @@ struct TuiState {
         std::string role;
         std::string content;
         bool is_tool = false;
+        // Runtime-only fields for summary-style tool_result rendering. Set by
+        // on_tool_result for new tool executions; absent for legacy/resumed
+        // messages (TUI then falls back to the 10-line fold path).
+        std::optional<ToolSummary> summary;
+        bool expanded = false;            // toggled by Ctrl+E on the focused row
+        // Runtime-only compact preview for tool_call rows (mirrors
+        // ChatMessage::display_override).
+        std::string display_override;
+        // Runtime-only 结构化 diff,由 file_edit/file_write 的 ToolResult 填充。
+        // 非空时 TUI 走彩色 diff 视图;为空(老会话或非编辑类工具)走灰色 fold 路径。
+        // 同样不写入 session JSONL。
+        std::optional<std::vector<DiffHunk>> hunks;
     };
 
     std::vector<Message> conversation;

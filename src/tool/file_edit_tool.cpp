@@ -1,6 +1,7 @@
 #include "file_edit_tool.hpp"
 #include "mtime_tracker.hpp"
 #include "diff_utils.hpp"
+#include "tool_icons.hpp"
 #include "utils/logger.hpp"
 #include "utils/tool_args_parser.hpp"
 #include "utils/tool_errors.hpp"
@@ -79,9 +80,22 @@ static ToolResult execute_file_edit(const std::string& arguments_json, const Too
     // Update mtime tracker
     MtimeTracker::instance().record_write(file_path);
 
-    // Generate diff
-    std::string diff = generate_unified_diff(old_content, content, file_path);
-    return ToolResult{"Edited " + file_path + "\n\n" + diff, true};
+    // 同时产出结构化 hunk + 文本 diff,保证 TUI 彩色渲染和 LLM 下一轮阅读同源。
+    DiffStats stats;
+    std::string diff = generate_unified_diff(old_content, content, file_path, stats);
+    auto structured = generate_structured_diff(old_content, content, file_path);
+
+    ToolSummary summary;
+    summary.verb = "Edited";
+    summary.object = file_path;
+    summary.metrics.emplace_back("+", std::to_string(stats.additions));
+    summary.metrics.emplace_back("-", std::to_string(stats.deletions));
+    summary.icon = tool_icon("file_edit");
+
+    ToolResult r{"Edited " + file_path + "\n\n" + diff, true};
+    r.summary = std::move(summary);
+    r.hunks = std::move(structured);
+    return r;
 }
 
 ToolImpl create_file_edit_tool() {

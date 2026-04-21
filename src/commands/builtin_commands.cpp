@@ -1,5 +1,6 @@
 #include "builtin_commands.hpp"
 #include "compact.hpp"
+#include "history_command.hpp"
 #include "init_command.hpp"
 #include "memory_command.hpp"
 #include "models_command.hpp"
@@ -32,6 +33,7 @@ static void cmd_help(CommandContext& ctx, const std::string& /*args*/) {
         << "  /skills   - List, invoke, or reload installed skills\n"
         << "  /memory   - List, view, edit, forget, or reload persistent user memory\n"
         << "  /init     - Generate an ACECODE.md skeleton in the current directory\n"
+        << "  /history  - List or clear the per-working-directory input history\n"
         << "  /models   - Inspect bundled models.dev registry\n"
         << "  /title    - Set or show the window title for this session\n"
         << "  /exit     - Exit acecode";
@@ -632,6 +634,7 @@ void register_builtin_commands(CommandRegistry& registry) {
     registry.register_command({"skills", "List, invoke, or reload installed skills", cmd_skills});
     register_memory_command(registry);
     register_init_command(registry);
+    register_history_command(registry);
     registry.register_command({"title", "Set or show the window title for this session", cmd_title});
     registry.register_command({"exit", "Exit acecode", cmd_exit});
     register_models_command(registry);

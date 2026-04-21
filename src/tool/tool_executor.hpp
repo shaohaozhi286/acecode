@@ -1,19 +1,38 @@
 #pragma once
 
 #include "../provider/llm_provider.hpp"
+#include "diff_utils.hpp"
 
 #include <string>
 #include <vector>
 #include <map>
 #include <functional>
 #include <atomic>
+#include <optional>
+#include <utility>
 
 namespace acecode {
+
+// Structured summary used by the TUI to render a single-line tool-result row
+// (icon + verb + object + dot-separated metrics). Unset on tools that have not
+// opted in; the TUI then falls back to the legacy 10-line fold path.
+struct ToolSummary {
+    std::string verb;     // "Ran" / "Read" / "Wrote" / "Created" / "Edited" ...
+    std::string object;   // file path or command preview
+    std::vector<std::pair<std::string, std::string>> metrics; // ordered
+    std::string icon;     // short glyph (may be Unicode or ASCII fallback)
+};
 
 // Result of a tool execution
 struct ToolResult {
     std::string output;
     bool success = true;
+    std::optional<ToolSummary> summary; // populated by tools that opt in
+    // 结构化 diff hunk。file_edit / file_write 在产生 unified diff 文本的同时
+    // 填充这个字段;TUI 用它做彩色带行号 gutter 的渲染。
+    // 运行时字段 —— 不写入 session JSONL(由 session_serializer 的 allowlist
+    // 天然挡住;新加字段时如果不加进白名单就不会被序列化)。
+    std::optional<std::vector<DiffHunk>> hunks;
 };
 
 // Runtime context passed into a tool invocation. Optional: if left
@@ -84,6 +103,13 @@ public:
 
     // Format an assistant message that includes tool calls (from the API response)
     static ChatMessage format_assistant_tool_calls(const ChatResponse& response);
+
+    // Build a compact one-line preview for a tool_call row. For bash takes the
+    // command's first 60 chars; for file_read/file_write/file_edit takes the
+    // file_path (tail-truncated to 40 chars); other tools return an empty
+    // string so the TUI falls back to the legacy `[Tool: X] {JSON}` format.
+    static std::string build_tool_call_preview(const std::string& tool_name,
+                                               const std::string& arguments_json);
 
 private:
     std::map<std::string, ToolImpl> tools_;

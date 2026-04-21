@@ -1,4 +1,5 @@
 #include "bash_tool.hpp"
+#include "tool_icons.hpp"
 #include "utils/logger.hpp"
 #include "utils/encoding.hpp"
 #include "utils/stream_processing.hpp"
@@ -69,12 +70,36 @@ static ToolResult execute_bash(const std::string& arguments_json, const ToolCont
         return ToolResult{"[Error] No command provided.", false};
     }
 
+    auto t_start = std::chrono::steady_clock::now();
+    auto make_summary = [&](const std::string& cmd, long long duration_ms,
+                            size_t total_bytes_out, int exit_code,
+                            bool is_success, bool was_truncated,
+                            bool was_aborted, bool was_timed_out) {
+        ToolSummary s;
+        s.verb = "Ran";
+        std::string preview = cmd;
+        if (preview.size() > 60) preview = preview.substr(0, 57) + "...";
+        s.object = preview;
+        s.metrics.emplace_back("time", format_duration_compact(duration_ms));
+        s.metrics.emplace_back("bytes", format_bytes_compact(total_bytes_out));
+        if (!is_success && exit_code != 0) {
+            s.metrics.emplace_back("exit", std::to_string(exit_code));
+        }
+        if (was_truncated) s.metrics.emplace_back("truncated", "true");
+        if (was_aborted) s.metrics.emplace_back("aborted", "true");
+        if (was_timed_out) s.metrics.emplace_back("timeout", "true");
+        s.icon = tool_icon("bash");
+        return s;
+    };
+
     LOG_INFO("bash: cmd=" + log_truncate(command, 200) + " cwd=" + cwd +
              " timeout=" + std::to_string(timeout_ms) +
              " stdin_inputs=" + std::to_string(stdin_inputs.size()));
 
     if (!cwd.empty() && !std::filesystem::is_directory(cwd)) {
-        return ToolResult{"[Error] Working directory does not exist: " + cwd, false};
+        ToolResult r{"[Error] Working directory does not exist: " + cwd, false};
+        r.summary = make_summary(command, 0, 0, -1, false, false, false, false);
+        return r;
     }
 
     // Shared streaming state across both OS branches.
@@ -357,29 +382,57 @@ static ToolResult execute_bash(const std::string& arguments_json, const ToolCont
         current_line.clear();
     }
 
-    // Truncate to cap before returning
+    const size_t raw_bytes = full_output.size();
+
+    // Head+tail truncation: keep first 40% and last 60% of MAX_OUTPUT_SIZE,
+    // joined by a one-line marker reporting the omitted byte count. This
+    // preserves early context (e.g. build args, cwd, path) which a pure
+    // tail-only policy loses.
+    bool was_truncated = false;
     if (full_output.size() > MAX_OUTPUT_SIZE) {
-        full_output = "[Output truncated, showing last 100KB]\n" +
-            full_output.substr(full_output.size() - MAX_OUTPUT_SIZE);
+        const size_t head_cap = static_cast<size_t>(MAX_OUTPUT_SIZE * 0.4);
+        const size_t tail_cap = MAX_OUTPUT_SIZE - head_cap; // ~60%
+        const size_t omitted = full_output.size() - head_cap - tail_cap;
+        std::string head = full_output.substr(0, head_cap);
+        std::string tail = full_output.substr(full_output.size() - tail_cap);
+        // Ensure the marker sits on its own line.
+        if (!head.empty() && head.back() != '\n') head += "\n";
+        full_output = head + "[... " + std::to_string(omitted) + " bytes omitted ...]\n" + tail;
+        was_truncated = true;
     }
 
     full_output = ensure_utf8(full_output);
 
+    auto t_end = std::chrono::steady_clock::now();
+    long long duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        t_end - t_start).count();
+
     if (aborted) {
         if (full_output.empty() || full_output.back() != '\n') full_output += "\n";
         full_output += "[Aborted]";
-        return ToolResult{full_output, false};
+        ToolResult r{full_output, false};
+        r.summary = make_summary(command, duration_ms, raw_bytes, -1, false,
+                                 was_truncated, true, false);
+        return r;
     }
     if (timed_out) {
-        return ToolResult{full_output + "\n[Error] Command timed out after " +
+        ToolResult r{full_output + "\n[Error] Command timed out after " +
             std::to_string(timeout_ms / 1000) + " seconds.", false};
+        r.summary = make_summary(command, duration_ms, raw_bytes, -1, false,
+                                 was_truncated, false, true);
+        return r;
     }
 
     if (full_output.empty()) {
         full_output = "(no output)";
     }
 
-    return ToolResult{full_output, exit_code == 0};
+    bool is_ok = (exit_code == 0);
+    ToolResult r{full_output, is_ok};
+    r.summary = make_summary(command, duration_ms, raw_bytes,
+                             static_cast<int>(exit_code), is_ok,
+                             was_truncated, false, false);
+    return r;
 }
 
 ToolImpl create_bash_tool() {

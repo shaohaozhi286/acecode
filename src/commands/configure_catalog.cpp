@@ -1,5 +1,6 @@
 #include "configure_catalog.hpp"
 
+#include "configure_picker.hpp"
 #include "../utils/terminal_input.hpp"
 
 #include <algorithm>
@@ -37,32 +38,17 @@ std::string env_get_ci(const std::string& name) {
 
 constexpr size_t kPageSize = 30;
 
-void print_provider_page(const std::vector<const ProviderEntry*>& providers,
-                         size_t page) {
-    size_t pages = (providers.size() + kPageSize - 1) / kPageSize;
-    if (pages == 0) pages = 1;
-    size_t begin = page * kPageSize;
-    size_t end = std::min(providers.size(), begin + kPageSize);
-    std::cout << "\nProviders (" << (begin + 1) << "-" << end << " of "
-              << providers.size() << ", page " << (page + 1) << "/" << pages << "):\n";
-    for (size_t i = begin; i < end; ++i) {
-        std::cout << "  " << (i + 1) << ". " << format_provider_row(*providers[i]) << "\n";
+// Strip the leading label segment from the full row string produced by
+// format_{provider,model}_row so the picker can render id as the bold label
+// and the remainder as dimmed secondary metadata without duplication.
+std::string strip_label_prefix(const std::string& full, const std::string& label) {
+    if (full.rfind(label, 0) == 0) {
+        std::string rest = full.substr(label.size());
+        // format_*_row separates label from metadata with two spaces.
+        while (!rest.empty() && rest.front() == ' ') rest.erase(rest.begin());
+        return rest;
     }
-    std::cout << "Commands: <number> select, /<query> filter, n/p next/prev page, q quit\n";
-}
-
-void print_model_page(const std::vector<const ModelEntry*>& models, size_t page) {
-    size_t pages = (models.size() + kPageSize - 1) / kPageSize;
-    if (pages == 0) pages = 1;
-    size_t begin = page * kPageSize;
-    size_t end = std::min(models.size(), begin + kPageSize);
-    std::cout << "\nModels (" << (begin + 1) << "-" << end << " of "
-              << models.size() << ", page " << (page + 1) << "/" << pages << "):\n";
-    std::cout << "  0. <Custom model id...>\n";
-    for (size_t i = begin; i < end; ++i) {
-        std::cout << "  " << (i + 1) << ". " << format_model_row(*models[i]) << "\n";
-    }
-    std::cout << "Commands: <number> select (0 = custom), /<query> filter, n/p next/prev page, q quit\n";
+    return full;
 }
 
 } // namespace
@@ -157,52 +143,26 @@ const ProviderEntry* run_provider_picker(
         std::cout << "No openai-compatible providers available in catalog.\n";
         return nullptr;
     }
-    std::vector<const ProviderEntry*> providers = providers_in;
-    std::string query;
-    size_t page = 0;
 
-    while (true) {
-        size_t pages = (providers.size() + kPageSize - 1) / kPageSize;
-        if (pages == 0) pages = 1;
-        if (page >= pages) page = pages - 1;
-        print_provider_page(providers, page);
-        std::cout << "> " << std::flush;
-
-        std::string input;
-        if (!std::getline(std::cin, input)) return nullptr;
-        // Trim
-        while (!input.empty() && std::isspace(static_cast<unsigned char>(input.back()))) input.pop_back();
-        size_t lead = 0;
-        while (lead < input.size() && std::isspace(static_cast<unsigned char>(input[lead]))) ++lead;
-        input.erase(0, lead);
-
-        if (input.empty()) continue;
-        if (input == "q" || input == "Q") return nullptr;
-        if (input == "n" || input == "N") {
-            if (page + 1 < pages) ++page;
-            continue;
-        }
-        if (input == "p" || input == "P") {
-            if (page > 0) --page;
-            continue;
-        }
-        if (input.front() == '/') {
-            query = input.substr(1);
-            providers = filter_providers(providers_in, query);
-            page = 0;
-            if (providers.empty()) {
-                std::cout << "No matches for '" << query << "'. Type / to clear filter.\n";
-            }
-            continue;
-        }
-        try {
-            int n = std::stoi(input);
-            if (n >= 1 && n <= static_cast<int>(providers.size())) {
-                return providers[n - 1];
-            }
-        } catch (...) {}
-        std::cout << "Unrecognised input.\n";
+    std::vector<PickerItem> items;
+    items.reserve(providers_in.size());
+    for (const ProviderEntry* p : providers_in) {
+        std::string full = format_provider_row(*p);
+        PickerItem it;
+        it.label = p->id;
+        it.secondary = strip_label_prefix(full, p->id);
+        items.push_back(std::move(it));
     }
+
+    PickerOptions opts;
+    opts.title = "Select a provider";
+    opts.page_size = kPageSize;
+    opts.allow_custom = false;
+
+    PickerResult r = run_ftxui_picker(items, opts);
+    if (r.cancelled) return nullptr;
+    if (r.index >= providers_in.size()) return nullptr;
+    return providers_in[r.index];
 }
 
 ModelPickerResult run_model_picker(const ProviderEntry& provider,
@@ -213,12 +173,9 @@ ModelPickerResult run_model_picker(const ProviderEntry& provider,
     all_models.reserve(provider.models.size());
     for (const auto& m : provider.models) all_models.push_back(&m);
 
-    std::vector<const ModelEntry*> models = all_models;
-    std::string query;
-    size_t page = 0;
-
     if (all_models.empty()) {
-        std::cout << "Provider '" << provider.id << "' has no catalog models. Falling back to custom input.\n";
+        std::cout << "Provider '" << provider.id
+                  << "' has no catalog models. Falling back to custom input.\n";
         std::string id = read_line("Model id", default_model_id);
         result.custom = true;
         result.model_id = id;
@@ -226,72 +183,51 @@ ModelPickerResult run_model_picker(const ProviderEntry& provider,
         return result;
     }
 
+    std::vector<PickerItem> items;
+    items.reserve(all_models.size());
+    for (const ModelEntry* m : all_models) {
+        std::string full = format_model_row(*m);
+        PickerItem it;
+        it.label = m->id;
+        it.secondary = strip_label_prefix(full, m->id);
+        items.push_back(std::move(it));
+    }
+
+    PickerOptions opts;
+    opts.title = "Select a model for " + provider.id;
+    if (!default_model_id.empty()) {
+        opts.title += "  (current: " + default_model_id + ")";
+    }
+    opts.page_size = kPageSize;
+    opts.allow_custom = true;
     if (!default_model_id.empty()) {
         for (size_t i = 0; i < all_models.size(); ++i) {
             if (all_models[i]->id == default_model_id) {
-                page = i / kPageSize;
+                opts.default_index = i;
                 break;
             }
         }
     }
 
-    while (true) {
-        size_t pages = (models.size() + kPageSize - 1) / kPageSize;
-        if (pages == 0) pages = 1;
-        if (page >= pages) page = pages - 1;
-        print_model_page(models, page);
-        if (!default_model_id.empty()) {
-            std::cout << "(current: " << default_model_id << ")\n";
-        }
-        std::cout << "> " << std::flush;
-
-        std::string input;
-        if (!std::getline(std::cin, input)) {
-            result.cancelled = true;
-            return result;
-        }
-        while (!input.empty() && std::isspace(static_cast<unsigned char>(input.back()))) input.pop_back();
-        size_t lead = 0;
-        while (lead < input.size() && std::isspace(static_cast<unsigned char>(input[lead]))) ++lead;
-        input.erase(0, lead);
-
-        if (input.empty()) continue;
-        if (input == "q" || input == "Q") {
-            result.cancelled = true;
-            return result;
-        }
-        if (input == "n" || input == "N") {
-            if (page + 1 < pages) ++page;
-            continue;
-        }
-        if (input == "p" || input == "P") {
-            if (page > 0) --page;
-            continue;
-        }
-        if (input.front() == '/') {
-            query = input.substr(1);
-            models = filter_models(all_models, query);
-            page = 0;
-            if (models.empty()) std::cout << "No matches.\n";
-            continue;
-        }
-        try {
-            int n = std::stoi(input);
-            if (n == 0) {
-                std::string id = read_line("Custom model id", default_model_id);
-                result.custom = true;
-                result.model_id = id;
-                result.cancelled = id.empty();
-                return result;
-            }
-            if (n >= 1 && n <= static_cast<int>(models.size())) {
-                result.selected = models[n - 1];
-                result.model_id = models[n - 1]->id;
-                return result;
-            }
-        } catch (...) {}
-        std::cout << "Unrecognised input.\n";
+    PickerResult r = run_ftxui_picker(items, opts);
+    if (r.cancelled) {
+        result.cancelled = true;
+        return result;
     }
+    if (r.custom) {
+        std::string id = read_line("Custom model id", default_model_id);
+        result.custom = true;
+        result.model_id = id;
+        result.cancelled = id.empty();
+        return result;
+    }
+    if (r.index >= all_models.size()) {
+        result.cancelled = true;
+        return result;
+    }
+    result.selected = all_models[r.index];
+    result.model_id = all_models[r.index]->id;
+    return result;
 }
 
 bool configure_openai_via_catalog(AppConfig& cfg) {

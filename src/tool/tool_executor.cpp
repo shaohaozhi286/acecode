@@ -1,6 +1,7 @@
 #include "tool_executor.hpp"
 #include "utils/logger.hpp"
 #include "utils/encoding.hpp"
+#include <nlohmann/json.hpp>
 #include <sstream>
 
 namespace acecode {
@@ -77,6 +78,31 @@ ChatMessage ToolExecutor::format_tool_result(const std::string& tool_call_id, co
     msg.content = ensure_utf8(result.output);
     msg.tool_call_id = tool_call_id;
     return msg;
+}
+
+std::string ToolExecutor::build_tool_call_preview(const std::string& tool_name,
+                                                  const std::string& arguments_json) {
+    try {
+        auto j = nlohmann::json::parse(arguments_json);
+        if (tool_name == "bash") {
+            if (j.contains("command") && j["command"].is_string()) {
+                std::string cmd = j["command"].get<std::string>();
+                if (cmd.size() > 60) cmd = cmd.substr(0, 57) + "...";
+                return tool_name + "  " + cmd;
+            }
+        } else if (tool_name == "file_read" || tool_name == "file_write" ||
+                   tool_name == "file_edit") {
+            if (j.contains("file_path") && j["file_path"].is_string()) {
+                std::string p = j["file_path"].get<std::string>();
+                // Tail-truncate long paths so the filename stays visible.
+                if (p.size() > 40) p = "..." + p.substr(p.size() - 37);
+                return tool_name + "  " + p;
+            }
+        }
+    } catch (...) {
+        // fall through to empty preview → TUI legacy render
+    }
+    return {};
 }
 
 ChatMessage ToolExecutor::format_assistant_tool_calls(const ChatResponse& response) {

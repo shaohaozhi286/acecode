@@ -25,6 +25,11 @@ struct ChatMessage {
     bool is_meta = false;                // meta-message (boundary etc.), not sent to API
     bool is_compact_summary = false;     // marks this message as a compact summary
     nlohmann::json metadata;             // extended metadata (compact stats etc.)
+
+    // Runtime-only compact preview for TUI rendering of tool_call rows. Not
+    // serialized to session JSONL. When empty, the TUI falls back to the
+    // legacy `[Tool: X] {JSON}` format.
+    std::string display_override;
 };
 
 struct ToolCall {

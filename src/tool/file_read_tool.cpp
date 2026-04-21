@@ -1,5 +1,6 @@
 #include "file_read_tool.hpp"
 #include "mtime_tracker.hpp"
+#include "tool_icons.hpp"
 #include "utils/logger.hpp"
 #include "utils/tool_args_parser.hpp"
 #include "utils/tool_errors.hpp"
@@ -7,6 +8,8 @@
 #include <nlohmann/json.hpp>
 
 namespace acecode {
+
+static constexpr size_t FILE_READ_LARGE_HINT_THRESHOLD = 200 * 1024; // 200 KB
 
 static ToolResult execute_file_read(const std::string& arguments_json, const ToolContext& /*ctx*/) {
     // Parse arguments
@@ -56,7 +59,36 @@ static ToolResult execute_file_read(const std::string& arguments_json, const Too
         }
     }
 
-    return ToolResult{content, true};
+    // Large-file hint: only when the caller asked for the whole file (both
+    // range bounds omitted) and the payload exceeds 200 KB. Appended as a
+    // trailing hint line so the LLM sees the suggestion in-band, and tagged
+    // on the summary so the TUI can mark the row.
+    bool hint_added = false;
+    const bool range_specified = (start_line > 0 && end_line > 0);
+    if (!range_specified && content.size() > FILE_READ_LARGE_HINT_THRESHOLD) {
+        const size_t kb = content.size() / 1024;
+        if (!content.empty() && content.back() != '\n') content += "\n";
+        content += "[hint: file is large (" + std::to_string(kb) +
+                   "KB). Consider using start_line / end_line to narrow the read next time.]";
+        hint_added = true;
+    }
+
+    // Count lines for summary metric.
+    int line_count = 0;
+    for (char c : content) if (c == '\n') ++line_count;
+    if (!content.empty() && content.back() != '\n') ++line_count;
+
+    ToolSummary summary;
+    summary.verb = "Read";
+    summary.object = file_path;
+    summary.metrics.emplace_back("lines", std::to_string(line_count));
+    summary.metrics.emplace_back("size", format_bytes_compact(content.size()));
+    if (hint_added) summary.metrics.emplace_back("hint", "large_file");
+    summary.icon = tool_icon("file_read");
+
+    ToolResult r{content, true};
+    r.summary = std::move(summary);
+    return r;
 }
 
 ToolImpl create_file_read_tool() {

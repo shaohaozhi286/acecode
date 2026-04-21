@@ -28,6 +28,15 @@ struct AgentCallbacks {
     // Called when a new message is added to the conversation
     std::function<void(const std::string& role, const std::string& content, bool is_tool)> on_message;
 
+    // Called after each tool execution with the structured ToolResult so the
+    // TUI can render a summary row. Fires in addition to on_message (not in
+    // place of it) so consumers that only care about the text stream continue
+    // to work unchanged. Receives the tool_call message too so the TUI can
+    // correlate summaries with their call rows.
+    std::function<void(const ChatMessage& call_msg,
+                       const std::string& tool_name,
+                       const ToolResult& result)> on_tool_result;
+
     // Called when the agent starts/stops processing
     std::function<void(bool busy)> on_busy_changed;
 

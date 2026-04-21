@@ -94,6 +94,11 @@ struct ModelsDevConfig {
     bool refresh_on_command_only = true;                 // suppress all startup-time network refresh
 };
 
+struct InputHistoryConfig {
+    bool enabled = true;        // disable to fall back to pure in-memory history
+    int max_entries = 10;       // hard cap on persisted entries per working directory
+};
+
 struct AppConfig {
     std::string provider = "copilot"; // "copilot" or "openai"
     OpenAiConfig openai;
@@ -107,6 +112,7 @@ struct AppConfig {
     DaemonConfig daemon;                         // daemon process supervision settings
     WebConfig web;                               // HTTP/WebSocket server settings
     ModelsDevConfig models_dev;                  // bundled models.dev registry behaviour
+    InputHistoryConfig input_history;            // per-cwd persistent ↑/↓ history
 };
 
 // Expand ~ and ${ENV} style variables in a path string. Returns the expanded
