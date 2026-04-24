@@ -13,9 +13,10 @@
 
 namespace acecode {
 
-AgentLoop::AgentLoop(LlmProvider& provider, ToolExecutor& tools, AgentCallbacks callbacks,
-                     const std::string& cwd, PermissionManager& permissions)
-    : provider_(provider)
+AgentLoop::AgentLoop(ProviderAccessor provider_accessor, ToolExecutor& tools,
+                     AgentCallbacks callbacks, const std::string& cwd,
+                     PermissionManager& permissions)
+    : provider_accessor_(std::move(provider_accessor))
     , tools_(tools)
     , callbacks_(std::move(callbacks))
     , cwd_(cwd)
@@ -198,8 +199,19 @@ void AgentLoop::run_agent(const std::string& user_message) {
         };
 
         LOG_INFO("Calling chat_stream with " + std::to_string(messages_with_system.size()) + " messages");
+        // 每轮 turn 开始时拿一份 provider 快照 —— main.cpp 此时可能正在替换 provider,
+        // 但我们这一轮拿到的 shared_ptr 会让老 provider 活到本轮跑完(design D4)。
+        std::shared_ptr<LlmProvider> provider_snapshot;
+        if (provider_accessor_) provider_snapshot = provider_accessor_();
+        if (!provider_snapshot) {
+            LOG_ERROR("provider_accessor returned null; aborting turn");
+            if (callbacks_.on_message) {
+                callbacks_.on_message("error", "[Error] provider unavailable", false);
+            }
+            break;
+        }
         try {
-            provider_.chat_stream(messages_with_system, tool_defs, stream_callback, &abort_requested_);
+            provider_snapshot->chat_stream(messages_with_system, tool_defs, stream_callback, &abort_requested_);
             LOG_INFO("chat_stream returned. content_len=" + std::to_string(accumulated.content.size()) + " tool_calls=" + std::to_string(accumulated.tool_calls.size()));
         } catch (const std::exception& e) {
             LOG_ERROR(std::string("chat_stream exception: ") + e.what());

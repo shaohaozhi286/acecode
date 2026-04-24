@@ -317,6 +317,30 @@ AppConfig load_config() {
                     if (v > 0) cfg.input_history.max_entries = v;
                 }
             }
+            // --- model profiles (openspec/changes/model-profiles) ---
+            // 缺失视为未设 —— load_config 继续成功,运行时走 legacy 兜底 entry。
+            if (j.contains("saved_models")) {
+                std::string err;
+                auto parsed = parse_saved_models(j["saved_models"], err);
+                if (!parsed.has_value()) {
+                    std::cerr << "[config] fatal: " << err << std::endl;
+                    LOG_ERROR(std::string("[config] saved_models parse failure: ") + err);
+                    std::exit(1);
+                }
+                cfg.saved_models = std::move(*parsed);
+            }
+            if (j.contains("default_model_name") && j["default_model_name"].is_string()) {
+                cfg.default_model_name = j["default_model_name"].get<std::string>();
+            }
+            if (!cfg.saved_models.empty() || !cfg.default_model_name.empty()) {
+                std::string err;
+                if (!validate_saved_models(cfg.saved_models, cfg.default_model_name, err)) {
+                    std::cerr << "[config] fatal: " << err << std::endl;
+                    LOG_ERROR(std::string("[config] saved_models validation failure: ") + err);
+                    std::exit(1);
+                }
+            }
+
             if (j.contains("mcp_servers") && j["mcp_servers"].is_object()) {
                 for (auto it = j["mcp_servers"].begin(); it != j["mcp_servers"].end(); ++it) {
                     const std::string& server_name = it.key();
@@ -528,6 +552,28 @@ void save_config(const AppConfig& cfg) {
         if (cfg.input_history.max_entries != ih_d.max_entries)
             ihj["max_entries"] = cfg.input_history.max_entries;
         if (!ihj.empty()) j["input_history"] = ihj;
+    }
+
+    // --- model profiles ---
+    // 仅在非空时写,保持对既有 config.json 的 diff 干净。
+    if (!cfg.saved_models.empty()) {
+        nlohmann::json arr = nlohmann::json::array();
+        for (const auto& e : cfg.saved_models) {
+            nlohmann::json ej = nlohmann::json::object();
+            ej["name"] = e.name;
+            ej["provider"] = e.provider;
+            ej["model"] = e.model;
+            if (!e.base_url.empty()) ej["base_url"] = e.base_url;
+            if (!e.api_key.empty()) ej["api_key"] = e.api_key;
+            if (e.models_dev_provider_id.has_value() && !e.models_dev_provider_id->empty()) {
+                ej["models_dev_provider_id"] = *e.models_dev_provider_id;
+            }
+            arr.push_back(std::move(ej));
+        }
+        j["saved_models"] = std::move(arr);
+    }
+    if (!cfg.default_model_name.empty()) {
+        j["default_model_name"] = cfg.default_model_name;
     }
 
     if (!cfg.mcp_servers.empty()) {

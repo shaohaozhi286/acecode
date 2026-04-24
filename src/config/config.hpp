@@ -1,5 +1,7 @@
 #pragma once
 
+#include "saved_models.hpp"
+
 #include <map>
 #include <optional>
 #include <string>
@@ -113,6 +115,12 @@ struct AppConfig {
     WebConfig web;                               // HTTP/WebSocket server settings
     ModelsDevConfig models_dev;                  // bundled models.dev registry behaviour
     InputHistoryConfig input_history;            // per-cwd persistent ↑/↓ history
+
+    // --- model profiles (openspec/changes/model-profiles) ---
+    // 用户维护的命名模型列表。为空时 legacy 字段作为兜底 entry "(legacy)"。
+    std::vector<ModelProfile> saved_models;
+    // 指向 saved_models 中一个 entry 的 name;空字符串 = 未设定 = 走 legacy 兜底。
+    std::string default_model_name;
 };
 
 // Expand ~ and ${ENV} style variables in a path string. Returns the expanded

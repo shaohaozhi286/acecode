@@ -7,6 +7,8 @@
 #include "../utils/token_tracker.hpp"
 #include "../session/session_manager.hpp"
 
+#include <memory>
+#include <mutex>
 #include <string>
 #include <map>
 #include <vector>
@@ -23,7 +25,15 @@ class CommandRegistry;
 struct CommandContext {
     TuiState& state;
     AgentLoop& agent_loop;
+    // Snapshot of the current provider for read-only operations within the
+    // command. The shared_ptr keeps the instance alive across the command body
+    // even if main.cpp swaps `provider` mid-call. For commands that need to
+    // *swap* the provider (e.g. /model), use `provider_handle` + `provider_mu`.
     LlmProvider& provider;
+    // Live handle into main.cpp's `std::shared_ptr<LlmProvider> provider`.
+    // Required by /model so it can call swap_provider_if_needed under lock.
+    std::shared_ptr<LlmProvider>* provider_handle = nullptr;
+    std::mutex* provider_mu = nullptr;
     AppConfig& config;
     TokenTracker& token_tracker;
     PermissionManager& permissions;
@@ -35,6 +45,7 @@ struct CommandContext {
     SkillRegistry* skills = nullptr;   // skill registry for /skills and /<skill-name> commands
     MemoryRegistry* memory = nullptr;  // memory registry for /memory commands
     CommandRegistry* command_registry = nullptr; // self-reference for /skills reload
+    std::string cwd;                   // working directory for cwd-scoped operations
 };
 
 struct SlashCommand {

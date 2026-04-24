@@ -40,6 +40,9 @@
 #include "provider/copilot_provider.hpp"
 #include "provider/model_context_resolver.hpp"
 #include "provider/models_dev_registry.hpp"
+#include "provider/model_resolver.hpp"
+#include "provider/cwd_model_override.hpp"
+#include "provider/provider_swap.hpp"
 #include "tool/tool_executor.hpp"
 #include "tool/bash_tool.hpp"
 #include "tool/file_read_tool.hpp"
@@ -53,6 +56,7 @@
 #include "tool/memory_read_tool.hpp"
 #include "tool/memory_write_tool.hpp"
 #include "tool/ask_user_question_tool.hpp"
+#include "tool/ask_overlay_input.hpp"
 #include "skills/skill_registry.hpp"
 #include "skills/skill_commands.hpp"
 #include "memory/memory_paths.hpp"
@@ -706,8 +710,17 @@ int main(int argc, char* argv[]) {
         }).detach();
     }
 
-    // ---- Create provider ----
-    auto provider = create_provider(config);
+    // ---- Resolve effective model + create provider ----
+    // 三级回退:default → cwd override → session meta(resume 路径在后面单独应用)。
+    // 启动时这里只看前两级;resume 的 meta 应用延到下面读到 meta 之后。
+    auto cwd_override = load_cwd_model_override(working_dir);
+    ModelProfile effective_entry = resolve_effective_model(config, cwd_override, std::nullopt);
+    std::shared_ptr<LlmProvider> provider = create_provider_from_entry(effective_entry);
+    std::mutex provider_mu;  // 保护 provider 替换操作(design D4)
+    auto provider_accessor = [&provider, &provider_mu]() -> std::shared_ptr<LlmProvider> {
+        std::lock_guard<std::mutex> lk(provider_mu);
+        return provider;
+    };
     config.context_window = resolve_model_context_window(
         config,
         provider->name(),
@@ -1144,7 +1157,7 @@ int main(int argc, char* argv[]) {
     permissions.add_rule({"file_edit", ".git/**", "", RuleAction::Deny, 100});
     permissions.add_rule({"bash", "", "rm -rf /", RuleAction::Deny, 100});
 
-    AgentLoop agent_loop(*provider, tools, callbacks, working_dir, permissions);
+    AgentLoop agent_loop(provider_accessor, tools, callbacks, working_dir, permissions);
     agent_loop.set_context_window(config.context_window);
     agent_loop.set_skill_registry(&skill_registry);
     agent_loop.set_memory_registry(&memory_registry);
@@ -1264,6 +1277,25 @@ int main(int argc, char* argv[]) {
             resumed_title = meta.title;
         }
         if (!target_id.empty()) {
+            // 把 session meta 喂给 resolver,让 resume 真正还原 provider+model。
+            // resolve_effective_model 会优先用 (meta.provider, meta.model) 从
+            // saved_models 找匹配 entry;找不到则构造 ad-hoc entry,name 以
+            // "(session:..." 开头,触发我们后面的系统消息提示。
+            SessionMeta resumed_meta = session_manager.load_session_meta(target_id);
+            if (!resumed_meta.provider.empty() && !resumed_meta.model.empty()) {
+                ModelProfile resumed_entry = resolve_effective_model(
+                    config, cwd_override, std::optional<SessionMeta>{resumed_meta});
+                swap_provider_if_needed(provider, provider_mu, resumed_entry, config);
+                session_manager.set_active_provider(provider->name(), provider->model());
+                if (resumed_entry.name.rfind("(session:", 0) == 0) {
+                    state.conversation.push_back({"system",
+                        "⚠ Resumed with ad-hoc model entry (session recorded " +
+                        resumed_meta.provider + "/" + resumed_meta.model +
+                        ", not in saved_models). Use /model --default <name> to pick a permanent one.",
+                        false});
+                }
+            }
+
             auto messages = session_manager.resume_session(target_id);
             for (size_t i = 0; i < messages.size(); ++i) {
                 const auto& msg = messages[i];
@@ -1459,7 +1491,7 @@ int main(int argc, char* argv[]) {
     });
 
     // Wrap with CatchEvent to handle all keyboard input
-    auto input_with_esc = CatchEvent(input_renderer, [&state, &screen, &clamp_chat_focus, &auth_done, &cmd_registry, &agent_loop, &provider, &config, &token_tracker, &permissions, &session_manager, &scroll_chat, &chat_box, &mcp_manager, &tools, &skill_registry, &memory_registry, &working_dir](Event event) {
+    auto input_with_esc = CatchEvent(input_renderer, [&state, &screen, &clamp_chat_focus, &auth_done, &cmd_registry, &agent_loop, &provider, &provider_mu, &config, &token_tracker, &permissions, &session_manager, &scroll_chat, &chat_box, &mcp_manager, &tools, &skill_registry, &memory_registry, &working_dir](Event event) {
         // drag-autoscroll: 事件线程入口处消费 anim_thread 攒下的 selection 偏移
         // 补偿. 所有对 FTXUI selection_data_ 的写都发生在这条路径上, 跟
         // HandleSelection 串行 — 避免跨线程数据竞争. 不 return, 让事件继续正常处理.
@@ -1564,8 +1596,18 @@ int main(int argc, char* argv[]) {
                         screen.PostEvent(Event::Custom);
                         return true;
                     }
-                    // 其它按键(字符 / Backspace / 方向键移动光标)放行给输入框。
-                    return false;
+                    // Other 输入态:委托 try_handle_ask_other_input 内联处理字符 /
+                    // Backspace / Delete / 方向键 / Home / End。helper 返回 true
+                    // 表示真的改了 state,我们才 PostEvent 请求重绘 —— Custom /
+                    // Mouse 等未识别事件返回 false,**不能** PostEvent,否则
+                    // "Custom → swallow → PostEvent(Custom)" 会形成事件自回环
+                    // 把事件循环打爆(表现为 TUI 卡死)。无论哪种情况都 return
+                    // true 消耗事件,防止透传到下游 shell-mode / slash-dropdown
+                    // / Ctrl+E tool_result-expand 等 handler。
+                    if (acecode::try_handle_ask_other_input(state, event)) {
+                        screen.PostEvent(Event::Custom);
+                    }
+                    return true;
                 }
 
                 // 方向键 / j k 上下移动焦点。
@@ -1792,7 +1834,8 @@ int main(int argc, char* argv[]) {
             // Slash command interception
             if (!prompt.empty() && prompt[0] == '/') {
                 CommandContext cmd_ctx{
-                    state, agent_loop, *provider, config, token_tracker,
+                    state, agent_loop, *provider, &provider, &provider_mu,
+                    config, token_tracker,
                     permissions,
                     [&screen]() { screen.Exit(); },
                     &session_manager,
@@ -1801,7 +1844,8 @@ int main(int argc, char* argv[]) {
                     &tools,
                     &skill_registry,
                     &memory_registry,
-                    &cmd_registry
+                    &cmd_registry,
+                    working_dir
                 };
                 lk.unlock();
                 bool handled = cmd_registry.dispatch(prompt, cmd_ctx);

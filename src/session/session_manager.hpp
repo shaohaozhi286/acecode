@@ -26,6 +26,17 @@ public:
     // Reopens the JSONL file for continued append.
     std::vector<ChatMessage> resume_session(const std::string& session_id);
 
+    // Read the SessionMeta for a previously persisted session by ID, without
+    // mutating any in-memory state. Returns empty SessionMeta (id == "") when
+    // the meta file is missing. Used by main.cpp's resume path so it can apply
+    // the persisted provider/model to the runtime LlmProvider before the
+    // session is re-activated. (openspec model-profiles task 6.1.)
+    SessionMeta load_session_meta(const std::string& session_id) const;
+
+    // After main.cpp swaps the provider, call this so subsequent meta updates
+    // record the new provider/model name. Pure setter; thread-safe.
+    void set_active_provider(const std::string& provider, const std::string& model);
+
     // End current session (mark it done) so next on_message starts a new one.
     void end_current_session();
 

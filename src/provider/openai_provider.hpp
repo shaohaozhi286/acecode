@@ -28,6 +28,14 @@ public:
     std::string model() const override { return model_; }
     void set_model(const std::string& m) override { model_ = m; }
 
+    // 运行时切换同-provider 的 entry 时,base_url / api_key 可能也变了。
+    // 调用方假定在持 provider_mu 锁内调用 —— 不再加内部锁。
+    // 对应 openspec/changes/model-profiles 任务 4.4 与 design.md D4。
+    void reconfigure(const std::string& base_url, const std::string& api_key) {
+        base_url_ = base_url;
+        api_key_ = api_key;
+    }
+
 protected:
     // Build the request JSON body (reusable by CopilotProvider)
     nlohmann::json build_request_body(

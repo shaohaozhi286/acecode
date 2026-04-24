@@ -156,6 +156,21 @@ FTXUI mouse tracking is enabled by default (`main.cpp:703`, no explicit `TrackMo
     "enabled": true,
     "max_entries": 10
   },
+  "saved_models": [
+    {
+      "name": "local-lm",
+      "provider": "openai",
+      "base_url": "http://localhost:1234/v1",
+      "api_key": "x",
+      "model": "llama-3"
+    },
+    {
+      "name": "copilot-fast",
+      "provider": "copilot",
+      "model": "gpt-4o"
+    }
+  ],
+  "default_model_name": "copilot-fast",
   "mcp_servers": {
     "filesystem": {
       "command": "npx",
@@ -180,6 +195,29 @@ FTXUI mouse tracking is enabled by default (`main.cpp:703`, no explicit `TrackMo
 ```
 
 `mcp_servers` entries without a `transport` field are treated as `stdio` for backward compatibility. `sse` uses the legacy `/sse` + `/message` two-endpoint protocol; `http` uses the 2025-03-26 Streamable HTTP single-endpoint protocol (default path `/mcp`). They map to distinct client implementations inside `cpp-mcp`.
+
+`saved_models` is a named registry of model entries (one provider + model + auth per row). `default_model_name` is a pointer into that array. Both fields are optional and default to empty; when empty, ACECode falls back to the legacy `provider` / `openai.*` / `copilot.*` fields at startup, so existing config.json files continue to work unchanged. Each `ModelEntry` requires `name` (non-empty, MUST NOT start with `(` — that prefix is reserved for ACECode-synthesized names like `"(legacy)"` and `"(session:<id>)"`), `provider` (`"openai"` or `"copilot"`), and `model`. `openai` entries additionally require non-empty `base_url` and `api_key`; `models_dev_provider_id` is optional. `load_config` rejects the file (prints to stderr + exits) on duplicate names, reserved prefixes, missing required fields, or a `default_model_name` that doesn't match any entry.
+
+### Model profile resolution
+
+At startup (and on every `--resume` / `/resume`), ACECode computes the effective `ModelEntry` via a three-layer resolver in `src/provider/model_resolver.cpp`:
+
+1. `cfg.default_model_name` (if non-empty and found in `saved_models`)
+2. `<cwd_hash>/model_override.json` `{"model_name": "..."}` (if present; `src/provider/cwd_model_override.cpp`)
+3. Resumed `SessionMeta.provider` + `SessionMeta.model` (`--resume` only) — matched to `saved_models` by `(provider, model)` tuple, not by name. No match ⇒ build an ad-hoc entry with `name = "(session:<id_prefix>)"`, borrowing `base_url`/`api_key` from `cfg.openai` (best-effort), and append a one-line `⚠ Resumed with ad-hoc model entry …` system message to the conversation.
+
+Empty / unresolved at every layer falls back to `synth_legacy_entry(cfg)` whose `name == "(legacy)"` — the picker always lists this row so users never lose access to their legacy config.
+
+The `LlmProvider` itself is held in `main.cpp` as a `std::shared_ptr<LlmProvider>` protected by `std::mutex provider_mu`. `AgentLoop` receives a `ProviderAccessor` lambda that locks the mutex and copies the current `shared_ptr` — each worker turn takes a snapshot at the start so an in-flight `chat_stream` cannot dangle when the main thread swaps providers. `src/provider/provider_swap.cpp::swap_provider_if_needed` does the actual replace: same-provider entries reuse the instance (`set_model` + `OpenAiCompatProvider::reconfigure(base_url, api_key)`); cross-provider swaps destroy the old instance and call `create_provider_from_entry(entry)`; the context window is recomputed via `resolve_model_context_window` at the end.
+
+### `/model` command — four modes
+
+- `/model` — text-mode picker listing `saved_models` + the `(legacy)` fallback, marks the current effective row with `*`. (FTXUI overlay integration is follow-up work; the slash command runs on the main thread while `screen.Loop()` is blocking, so a proper overlay needs a picker state machine similar to the resume picker.)
+- `/model <name>` — in-memory switch (no disk write), accepts any `saved_models` name or the reserved `(legacy)`.
+- `/model --cwd <name>` — switch **and** persist to `~/.acecode/projects/<cwd_hash>/model_override.json`.
+- `/model --default <name>` — switch **and** persist to `config.json`'s `default_model_name`.
+
+Unknown name ⇒ error message `Unknown model name: <x>. Run /model to pick from available.`, no state change. All three persisting flags call `swap_provider_if_needed` under `provider_mu` and recompute `context_window`.
 
 ## CI / Release
 

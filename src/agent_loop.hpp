@@ -74,8 +74,15 @@ struct AgentCallbacks {
 
 class AgentLoop {
 public:
-    AgentLoop(LlmProvider& provider, ToolExecutor& tools, AgentCallbacks callbacks,
-              const std::string& cwd, PermissionManager& permissions);
+    // provider_accessor: 每轮 turn 开始时调用,返回当前有效的 provider 的
+    // shared_ptr 快照。调用方负责在该函数内部加锁保护 main.cpp 的 provider
+    // 替换(见 design D4 / 任务 4.6)。这样 worker 即使跨 turn 持有 snapshot
+    // 也不会悬空,下一轮再拿最新的。
+    using ProviderAccessor = std::function<std::shared_ptr<LlmProvider>()>;
+
+    AgentLoop(ProviderAccessor provider_accessor, ToolExecutor& tools,
+              AgentCallbacks callbacks, const std::string& cwd,
+              PermissionManager& permissions);
     ~AgentLoop();
 
     void set_callbacks(AgentCallbacks cb);
@@ -145,7 +152,7 @@ private:
         std::string payload;
     };
 
-    LlmProvider& provider_;
+    ProviderAccessor provider_accessor_;
     ToolExecutor& tools_;
     AgentCallbacks callbacks_;
     std::vector<ChatMessage> messages_;

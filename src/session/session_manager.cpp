@@ -167,6 +167,24 @@ std::vector<ChatMessage> SessionManager::resume_session(const std::string& sessi
     return messages;
 }
 
+SessionMeta SessionManager::load_session_meta(const std::string& session_id) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (project_dir_.empty()) return {};
+    std::string p = SessionStorage::meta_path(project_dir_, session_id);
+    if (!fs::exists(p)) return {};
+    return SessionStorage::read_meta(p);
+}
+
+void SessionManager::set_active_provider(const std::string& provider,
+                                         const std::string& model) {
+    std::lock_guard<std::mutex> lk(mu_);
+    provider_name_ = provider;
+    model_name_ = model;
+    if (created_) {
+        update_meta();
+    }
+}
+
 void SessionManager::end_current_session() {
     std::lock_guard<std::mutex> lk(mu_);
     if (created_ && !finalized_) {
