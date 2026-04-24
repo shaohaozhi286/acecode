@@ -25,9 +25,22 @@ nlohmann::json OpenAiCompatProvider::build_request_body(
         body["stream_options"] = {{"include_usage", true}};
     }
 
-    // Build messages array
+    // Build messages array.
+    // 最后一道防御:OpenAI/Ark 严格要求 role ∈ {system,user,assistant,tool}。
+    // 任何非法 role(例如历史遗留的 UI-only `tool_result`)在此直接丢弃并 warn,
+    // 防止 resume/压缩/旧 session 等路径意外污染 messages_ 时把整个请求打挂。
     nlohmann::json msgs_json = nlohmann::json::array();
+    int dropped_invalid_role = 0;
     for (const auto& msg : messages) {
+        const bool valid_role = (msg.role == "system" || msg.role == "user" ||
+                                 msg.role == "assistant" || msg.role == "tool");
+        if (!valid_role) {
+            ++dropped_invalid_role;
+            LOG_WARN("build_request_body: dropping message with invalid role='" +
+                     msg.role + "' content=" + log_truncate(msg.content, 200));
+            continue;
+        }
+
         nlohmann::json m;
         m["role"] = msg.role;
 
@@ -47,6 +60,10 @@ nlohmann::json OpenAiCompatProvider::build_request_body(
         }
 
         msgs_json.push_back(m);
+    }
+    if (dropped_invalid_role > 0) {
+        LOG_WARN("build_request_body: total " + std::to_string(dropped_invalid_role) +
+                 " message(s) dropped due to invalid role");
     }
     body["messages"] = msgs_json;
 
@@ -176,6 +193,10 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
     ChatResponse accumulated;
     accumulated.finish_reason = "stop";
     std::string sse_buffer;
+    // 非 200 响应时 cpr 的 r.text 会是空的(因为 WriteCallback 已消费了 body),
+    // 所以并行累积一份原始字节,仅用于错误诊断。16 KB 足够容纳绝大多数 JSON 报错。
+    std::string raw_body_capture;
+    constexpr size_t kRawBodyCaptureLimit = 16 * 1024;
 
     LOG_INFO("parse_sse_stream url=" + url);
     LOG_DEBUG("Request body: " + log_truncate(body.dump(), 500));
@@ -197,6 +218,12 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
     auto write_cb = cpr::WriteCallback{[&](const std::string_view data, intptr_t) -> bool {
         if (abort_flag && abort_flag->load()) {
             return false; // cancel request
+        }
+
+        if (raw_body_capture.size() < kRawBodyCaptureLimit) {
+            size_t remain = kRawBodyCaptureLimit - raw_body_capture.size();
+            size_t take = (remain < data.size()) ? remain : data.size();
+            raw_body_capture.append(data.data(), take);
         }
 
         sse_buffer += std::string(data);
@@ -376,10 +403,11 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
     }
 
     if (r.status_code != 0 && r.status_code != 200) {
-        LOG_ERROR("SSE HTTP error: " + std::to_string(r.status_code) + " body=" + log_truncate(r.text, 500));
+        const std::string& err_body = r.text.empty() ? raw_body_capture : r.text;
+        LOG_ERROR("SSE HTTP error: " + std::to_string(r.status_code) + " body=" + log_truncate(err_body, 2000));
         StreamEvent evt;
         evt.type = StreamEventType::Error;
-        evt.error = "HTTP " + std::to_string(r.status_code) + ": " + r.text;
+        evt.error = "HTTP " + std::to_string(r.status_code) + ": " + err_body;
         callback(evt);
     }
 

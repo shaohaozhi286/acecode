@@ -1315,8 +1315,17 @@ int main(int argc, char* argv[]) {
                     continue;
                 }
 
-                agent_loop.push_message(msg);
+                // 白名单:只有 OpenAI 规范承认的 role 才推入 agent_loop.messages_ 发给 LLM。
+                // session JSONL 里可能混入 UI-only 伪角色(目前只有 `tool_result` 一种,来自
+                // `!cmd` shell 模式的展示记录),成对的 `!user + tool_result` 已在上方分支通过
+                // inject_shell_turn 注入规范消息;其余非法 role 的消息只进聊天视图,否则方舟等
+                // 严格后端会以 `InvalidParameter: messages.role` 拒绝整个请求。
                 bool is_tool = (msg.role == "tool");
+                bool is_llm_role = (msg.role == "user" || msg.role == "assistant" ||
+                                    msg.role == "system" || msg.role == "tool");
+                if (is_llm_role) {
+                    agent_loop.push_message(msg);
+                }
                 state.conversation.push_back({msg.role, msg.content, is_tool});
             }
             state.conversation.push_back({"system",
