@@ -317,6 +317,27 @@ AppConfig load_config() {
                     if (v > 0) cfg.input_history.max_entries = v;
                 }
             }
+            if (j.contains("agent_loop") && j["agent_loop"].is_object()) {
+                const auto& alj = j["agent_loop"];
+                // max_iterations ∈ [1, 10000]. Clamp + warn on out-of-range so a
+                // broken config value never leaves the loop unbounded.
+                if (alj.contains("max_iterations") && alj["max_iterations"].is_number_integer()) {
+                    int v = alj["max_iterations"].get<int>();
+                    if (v < 1) {
+                        LOG_WARN("[config] agent_loop.max_iterations=" + std::to_string(v) +
+                                 " is out of range (min 1); clamping to 1");
+                        v = 1;
+                    } else if (v > 10000) {
+                        LOG_WARN("[config] agent_loop.max_iterations=" + std::to_string(v) +
+                                 " is out of range (max 10000); clamping to 10000");
+                        v = 10000;
+                    }
+                    cfg.agent_loop.max_iterations = v;
+                }
+                // Legacy keys (auto_continue, max_consecutive_empty_iterations)
+                // from the just-rolled-back agentic-loop-terminator change are
+                // silently ignored — see align-loop-with-hermes.
+            }
             // --- model profiles (openspec/changes/model-profiles) ---
             // 缺失视为未设 —— load_config 继续成功,运行时走 legacy 兜底 entry。
             if (j.contains("saved_models")) {
@@ -552,6 +573,12 @@ void save_config(const AppConfig& cfg) {
         if (cfg.input_history.max_entries != ih_d.max_entries)
             ihj["max_entries"] = cfg.input_history.max_entries;
         if (!ihj.empty()) j["input_history"] = ihj;
+
+        AgentLoopConfig al_d;
+        nlohmann::json alj = nlohmann::json::object();
+        if (cfg.agent_loop.max_iterations != al_d.max_iterations)
+            alj["max_iterations"] = cfg.agent_loop.max_iterations;
+        if (!alj.empty()) j["agent_loop"] = alj;
     }
 
     // --- model profiles ---

@@ -151,3 +151,18 @@ TEST_F(SystemPromptTest, ProjectInstructionsDisabledByCfg) {
         /*memory=*/nullptr, /*memcfg=*/nullptr, &pcfg);
     EXPECT_EQ(out.find("# Project Instructions"), std::string::npos);
 }
+
+// 场景:prompt 必须包含 "# Task completion protocol" 段 + 工具名,
+// 并且明确 AskUserQuestion 不是"交还控制权"的工具。
+TEST_F(SystemPromptTest, TaskCompletionProtocolAppears) {
+    acecode::ToolExecutor tools;
+    std::string out = acecode::build_system_prompt(tools, temp_home.string());
+    EXPECT_NE(out.find("# Task completion protocol"), std::string::npos);
+    EXPECT_NE(out.find("task_complete"), std::string::npos);
+    EXPECT_NE(out.find("AskUserQuestion"), std::string::npos);
+    // 反对 "should I proceed?" 类 prose 问题
+    EXPECT_NE(out.find("Should I proceed"), std::string::npos);
+    // 必须说清 AskUserQuestion 不是终止器,是辅助决策工具
+    EXPECT_NE(out.find("NOT a way to hand control back"),
+              std::string::npos);
+}

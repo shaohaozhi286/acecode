@@ -59,6 +59,14 @@ nlohmann::json OpenAiCompatProvider::build_request_body(
             m["content"] = msg.content;
         }
 
+        // Echo reasoning_content back on assistant messages only. DeepSeek
+        // thinking-mode rejects the next request with HTTP 400 if the previous
+        // turn produced reasoning_content and we don't include it here.
+        // Other OpenAI-compatible servers ignore unknown fields.
+        if (msg.role == "assistant" && !msg.reasoning_content.empty()) {
+            m["reasoning_content"] = msg.reasoning_content;
+        }
+
         msgs_json.push_back(m);
     }
     if (dropped_invalid_role > 0) {
@@ -100,6 +108,14 @@ ChatResponse OpenAiCompatProvider::parse_response(const nlohmann::json& j) {
 
     if (message.contains("content") && !message["content"].is_null()) {
         resp.content = message["content"].get<std::string>();
+    }
+
+    // Reasoning-mode chain-of-thought. DeepSeek primary name is
+    // `reasoning_content`; OpenRouter/Qwen alias is `reasoning`.
+    if (message.contains("reasoning_content") && message["reasoning_content"].is_string()) {
+        resp.reasoning_content = message["reasoning_content"].get<std::string>();
+    } else if (message.contains("reasoning") && message["reasoning"].is_string()) {
+        resp.reasoning_content = message["reasoning"].get<std::string>();
     }
 
     if (message.contains("tool_calls") && message["tool_calls"].is_array()) {
@@ -311,6 +327,25 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
 
                 if (!choice.contains("delta")) continue;
                 const auto& delta = choice["delta"];
+
+                // Reasoning chain-of-thought delta. DeepSeek primary name is
+                // `reasoning_content`; OpenRouter/Qwen alias is `reasoning`.
+                // If both are present in the same chunk we prefer
+                // reasoning_content (consistent with non-streaming parse).
+                std::string reasoning_token;
+                if (delta.contains("reasoning_content") && delta["reasoning_content"].is_string()) {
+                    reasoning_token = delta["reasoning_content"].get<std::string>();
+                } else if (delta.contains("reasoning") && delta["reasoning"].is_string()) {
+                    reasoning_token = delta["reasoning"].get<std::string>();
+                }
+                if (!reasoning_token.empty()) {
+                    accumulated.reasoning_content += reasoning_token;
+
+                    StreamEvent evt;
+                    evt.type = StreamEventType::ReasoningDelta;
+                    evt.content = reasoning_token;
+                    callback(evt);
+                }
 
                 // Text content delta
                 if (delta.contains("content") && !delta["content"].is_null()) {

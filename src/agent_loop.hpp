@@ -6,6 +6,7 @@
 #include "utils/path_validator.hpp"
 #include "utils/token_tracker.hpp"
 #include "session/session_manager.hpp"
+#include "config/config.hpp"
 
 #include <vector>
 #include <string>
@@ -132,6 +133,11 @@ public:
 
     void set_context_window(int cw) { context_window_ = cw; }
 
+    // Install / update the agent-loop termination policy. Called once from
+    // main.cpp at startup (and could be called again if config reloads).
+    // A fresh-default AgentLoopConfig is used when this setter is never called.
+    void set_agent_loop_config(AgentLoopConfig cfg) { loop_cfg_ = cfg; }
+
     void set_session_manager(SessionManager* sm) { session_manager_ = sm; }
 
     void set_skill_registry(const SkillRegistry* sr) { skill_registry_ = sr; }
@@ -161,6 +167,9 @@ private:
     PermissionManager& permissions_;
     PathValidator path_validator_;
     int context_window_ = 128000;
+    // agent_loop termination policy. Fresh defaults (50 / 3) until set_agent_loop_config
+    // is called from main.cpp — gives tests / embedders a sane behavior out of the box.
+    AgentLoopConfig loop_cfg_;
     std::atomic<int> last_api_prompt_tokens_{0}; // from most recent API response
     SessionManager* session_manager_ = nullptr;
     const SkillRegistry* skill_registry_ = nullptr;

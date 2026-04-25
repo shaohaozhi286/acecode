@@ -128,6 +128,26 @@ std::string build_system_prompt(const ToolExecutor& tools, const std::string& cw
 
     oss << generate_tools_prompt(tools);
 
+    // Task completion protocol — soft guidance, hermes-aligned.
+    // See openspec/changes/align-loop-with-hermes.
+    oss << "# Task completion protocol\n\n"
+        << "- When the user gives you a multi-step task, do all the steps in one go. "
+        << "Do NOT pause midway with prose like \"Would you like me to continue?\" or "
+        << "\"Should I proceed?\" — the user already said yes by giving you the task. "
+        << "Just complete the task and report what you did.\n"
+        << "- A text reply ends your turn. There is no automatic continuation; if you "
+        << "stop writing, the user has to type the next message. So make sure your "
+        << "reply is the final answer or the natural end of the task.\n"
+        << "- Optionally, at the end of a multi-step task, you may call `task_complete` "
+        << "with a short summary. This is NOT required — a plain text reply works too. "
+        << "Calling it just renders a compact \"Done: <summary>\" row in the UI.\n"
+        << "- `AskUserQuestion` is a tool for multi-choice decisions mid-task "
+        << "(e.g. \"which library should I use: A, B, or C?\"). The user's selection "
+        << "comes back to you as a tool result and you continue working — it is NOT "
+        << "a way to hand control back to the user. Use it only when you need a "
+        << "concrete choice to proceed, not for \"should I keep going?\".\n\n";
+
+
     // # User Memory — only emitted when enabled and MEMORY.md is non-empty.
     if (memory && memory_cfg && memory_cfg->enabled) {
         std::string idx = memory->read_index_raw(memory_cfg->max_index_bytes);

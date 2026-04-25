@@ -101,6 +101,27 @@ struct InputHistoryConfig {
     int max_entries = 10;       // hard cap on persisted entries per working directory
 };
 
+// agent_loop.* control AgentLoop's safety bounds. See
+// openspec/changes/align-loop-with-hermes for the termination protocol.
+//
+// A text-only assistant reply (zero tool calls) ends the loop. This matches
+// hermes-agent (`run_agent.py:9823`) and claudecodehaha. ACECode models
+// (GPT / Copilot / local LMs) sometimes hedge mid-task with "Would you like
+// me to continue?" — when they do, the loop ends and the user manually
+// re-prompts (e.g. "继续"). Earlier auto-continue / nudge machinery was
+// removed for being more disruptive than helpful (chit-chat regressions,
+// model-give-up risk; see hermes-agent #7915).
+//
+// `task_complete` remains an OPTIONAL explicit terminator: the model can
+// call it with a `summary` to render a compact "Done: <summary>" row. It is
+// not required — a plain text reply also ends the loop cleanly.
+//
+// `AskUserQuestion` is NEVER a terminator (its tool_result feeds back to
+// the model and the loop continues, exactly like any other tool).
+struct AgentLoopConfig {
+    int max_iterations = 50; // hard cap on total LLM turns per run()
+};
+
 struct AppConfig {
     std::string provider = "copilot"; // "copilot" or "openai"
     OpenAiConfig openai;
@@ -115,6 +136,7 @@ struct AppConfig {
     WebConfig web;                               // HTTP/WebSocket server settings
     ModelsDevConfig models_dev;                  // bundled models.dev registry behaviour
     InputHistoryConfig input_history;            // per-cwd persistent ↑/↓ history
+    AgentLoopConfig agent_loop;                  // agent-loop termination tunables
 
     // --- model profiles (openspec/changes/model-profiles) ---
     // 用户维护的命名模型列表。为空时 legacy 字段作为兜底 entry "(legacy)"。

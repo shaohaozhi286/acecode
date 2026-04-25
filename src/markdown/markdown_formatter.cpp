@@ -643,46 +643,46 @@ Element format_markdown(const std::string& raw_text, const FormatOptions& opts) 
     auto tokens = lex(normalized);
 
     // Debug: log token types
-    {
-        std::string token_summary = "MD lex: " + std::to_string(tokens.size()) + " blocks [";
-        for (size_t i = 0; i < tokens.size() && i < 10; i++) {
-            if (i > 0) token_summary += ", ";
-            switch (tokens[i].type) {
-                case TokenType::Heading:   token_summary += "H" + std::to_string(tokens[i].depth); break;
-                case TokenType::Paragraph: token_summary += "P"; break;
-                case TokenType::Code:      token_summary += "Code"; break;
-                case TokenType::List:      token_summary += "List"; break;
-                case TokenType::Table:     token_summary += "Table"; break;
-                case TokenType::Blockquote:token_summary += "BQ"; break;
-                case TokenType::Space:     token_summary += "Sp"; break;
-                case TokenType::Hr:        token_summary += "Hr"; break;
-                default:                   token_summary += "?"; break;
-            }
-        }
-        if (tokens.size() > 10) token_summary += "...";
-        token_summary += "]";
+    // {
+    //     std::string token_summary = "MD lex: " + std::to_string(tokens.size()) + " blocks [";
+    //     for (size_t i = 0; i < tokens.size() && i < 10; i++) {
+    //         if (i > 0) token_summary += ", ";
+    //         switch (tokens[i].type) {
+    //             case TokenType::Heading:   token_summary += "H" + std::to_string(tokens[i].depth); break;
+    //             case TokenType::Paragraph: token_summary += "P"; break;
+    //             case TokenType::Code:      token_summary += "Code"; break;
+    //             case TokenType::List:      token_summary += "List"; break;
+    //             case TokenType::Table:     token_summary += "Table"; break;
+    //             case TokenType::Blockquote:token_summary += "BQ"; break;
+    //             case TokenType::Space:     token_summary += "Sp"; break;
+    //             case TokenType::Hr:        token_summary += "Hr"; break;
+    //             default:                   token_summary += "?"; break;
+    //         }
+    //     }
+    //     if (tokens.size() > 10) token_summary += "...";
+    //     token_summary += "]";
 
-        // Also log inline token info for first Paragraph
-        for (const auto& t : tokens) {
-            if (t.type == TokenType::Paragraph && !t.children.empty()) {
-                token_summary += " para_inline=" + std::to_string(t.children.size()) + "[";
-                for (size_t j = 0; j < t.children.size() && j < 8; j++) {
-                    if (j > 0) token_summary += ",";
-                    switch (t.children[j].type) {
-                        case TokenType::Text:    token_summary += "T"; break;
-                        case TokenType::Strong:  token_summary += "**"; break;
-                        case TokenType::Em:      token_summary += "*"; break;
-                        case TokenType::CodeSpan:token_summary += "`"; break;
-                        case TokenType::Link:    token_summary += "Lnk"; break;
-                        default:                 token_summary += "?"; break;
-                    }
-                }
-                token_summary += "]";
-                break;
-            }
-        }
-        LOG_DEBUG(token_summary);
-    }
+    //     // Also log inline token info for first Paragraph
+    //     for (const auto& t : tokens) {
+    //         if (t.type == TokenType::Paragraph && !t.children.empty()) {
+    //             token_summary += " para_inline=" + std::to_string(t.children.size()) + "[";
+    //             for (size_t j = 0; j < t.children.size() && j < 8; j++) {
+    //                 if (j > 0) token_summary += ",";
+    //                 switch (t.children[j].type) {
+    //                     case TokenType::Text:    token_summary += "T"; break;
+    //                     case TokenType::Strong:  token_summary += "**"; break;
+    //                     case TokenType::Em:      token_summary += "*"; break;
+    //                     case TokenType::CodeSpan:token_summary += "`"; break;
+    //                     case TokenType::Link:    token_summary += "Lnk"; break;
+    //                     default:                 token_summary += "?"; break;
+    //                 }
+    //             }
+    //             token_summary += "]";
+    //             break;
+    //         }
+    //     }
+    //     LOG_DEBUG(token_summary);
+    // }
 
     // Step 4: Format tokens
     FormatContext ctx;

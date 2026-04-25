@@ -123,11 +123,22 @@ void AgentLoop::run_agent(const std::string& user_message) {
     auto tool_defs = tools_.get_tool_definitions();
     LOG_DEBUG("Registered tools: " + std::to_string(tool_defs.size()));
 
-    // Agent loop: keep calling the provider until we get a pure text response
-    int turn = 0;
-    while (true) {
-        ++turn;
-        LOG_INFO("--- Agent loop turn " + std::to_string(turn) + ", messages: " + std::to_string(messages_.size()));
+    // Agent loop termination protocol (see openspec/changes/align-loop-with-hermes):
+    //   - terminator_fired = true → model called task_complete ⇒ exit
+    //   - text-only reply (zero tool calls) ⇒ exit (matches hermes-agent /
+    //     claudecodehaha; the user re-prompts manually if the model hedged)
+    //   - total_iterations ≥ max → hard cap ⇒ emit system message and exit
+    //   - abort_requested_ ⇒ exit immediately, [Interrupted] system message
+    int total_iterations = 0;
+    bool terminator_fired = false;
+    std::string terminator_reason;
+
+    const int max_iter = loop_cfg_.max_iterations;
+
+    while (!abort_requested_ && !terminator_fired && total_iterations < max_iter) {
+        ++total_iterations;
+        LOG_INFO("--- Agent loop turn " + std::to_string(total_iterations) +
+                 ", messages: " + std::to_string(messages_.size()));
 
         if (abort_requested_) {
             LOG_WARN("Abort requested, breaking loop");
@@ -175,6 +186,15 @@ void AgentLoop::run_agent(const std::string& user_message) {
                 if (callbacks_.on_delta) {
                     callbacks_.on_delta(evt.content);
                 }
+                break;
+            case StreamEventType::ReasoningDelta:
+                {
+                    std::lock_guard<std::mutex> lk(resp_mu);
+                    accumulated.reasoning_content += evt.content;
+                }
+                // Future TUI hook (e.g. a "Thinking..." panel) can subscribe
+                // here. Today we only accumulate so format_assistant_tool_calls
+                // and the empty-turn branch can echo it back to DeepSeek.
                 break;
             case StreamEventType::ToolCall:
                 {
@@ -239,6 +259,7 @@ void AgentLoop::run_agent(const std::string& user_message) {
             } else {
                 estimated_response.role = "assistant";
                 estimated_response.content = accumulated.content;
+                estimated_response.reasoning_content = accumulated.reasoning_content;
             }
 
             estimated_usage.completion_tokens = estimate_message_tokens({estimated_response});
@@ -250,11 +271,17 @@ void AgentLoop::run_agent(const std::string& user_message) {
         }
 
         if (!accumulated.has_tool_calls()) {
-            // Pure text response -- conversation turn is done
-            LOG_INFO("Pure text response, ending loop. content: " + log_truncate(accumulated.content, 300));
+            // Empty turn: no tool calls → end the loop. This matches
+            // hermes-agent (run_agent.py:9823) and claudecodehaha. When a
+            // non-Claude model hedges with "Would you like me to continue?",
+            // the loop ends and the user re-prompts manually.
+            LOG_INFO("Text-only response; ending loop. content: " + log_truncate(accumulated.content, 300));
             ChatMessage assistant_msg;
             assistant_msg.role = "assistant";
             assistant_msg.content = accumulated.content;
+            // Echo reasoning back on the next turn so DeepSeek thinking-mode
+            // doesn't 400. Empty for non-reasoning models — no-op.
+            assistant_msg.reasoning_content = accumulated.reasoning_content;
             messages_.push_back(assistant_msg);
             if (session_manager_) session_manager_->on_message(assistant_msg);
 
@@ -548,7 +575,38 @@ void AgentLoop::run_agent(const std::string& user_message) {
             if (session_manager_) session_manager_->on_message(tool_msg);
         }
 
-        // Loop back to call the provider again with the tool results
+        // Terminator detection. The ONLY terminator tool is task_complete.
+        // AskUserQuestion is NOT a terminator — it is a regular tool: the
+        // model asks a multi-choice question, the user's selection is fed
+        // back to the model as a tool_result, and the loop continues on the
+        // next turn (the model then acts on the answer, often calling more
+        // tools). Treating AskUserQuestion as a terminator would mean "every
+        // time the model asks a clarifying question, abandon the task",
+        // which is wrong.
+        for (size_t i = 0; i < accumulated.tool_calls.size(); ++i) {
+            const auto& tc = accumulated.tool_calls[i];
+            if (tc.function_name == "task_complete" && result_ready[i] && results[i].success) {
+                terminator_fired = true;
+                terminator_reason = "task_complete";
+                LOG_INFO("Terminator fired: task_complete");
+                break;
+            }
+        }
+
+        // Loop back to call the provider again with the tool results (unless
+        // terminator_fired or the outer while-condition bails us out).
+    }
+
+    // Post-loop reason emission. The abort and consecutive-empty branches emit
+    // their own messages inside the loop; only the max_iterations branch lands
+    // here with work still conceptually pending.
+    if (!abort_requested_ && !terminator_fired && total_iterations >= max_iter) {
+        std::string stop_msg = "Agent loop stopped: reached max_iterations (" +
+                               std::to_string(max_iter) + ")";
+        LOG_WARN(stop_msg);
+        if (callbacks_.on_message) {
+            callbacks_.on_message("system", stop_msg, false);
+        }
     }
 
     if (callbacks_.on_busy_changed) {

@@ -18,6 +18,7 @@ inline std::string tool_icon(const std::string& tool_id) {
         if (tool_id == "file_read") return "R";
         if (tool_id == "file_write") return "W";
         if (tool_id == "file_edit") return "E";
+        if (tool_id == "task_complete") return "D"; // Done
         return "*";
     }
     // Default: Unicode glyphs. Kept simple (single-codepoint arrows / glyph)
@@ -26,6 +27,7 @@ inline std::string tool_icon(const std::string& tool_id) {
     if (tool_id == "file_read") return "\xE2\x86\x92";  // "→" (read)
     if (tool_id == "file_write") return "\xE2\x9C\x8D"; // "✍" (write)
     if (tool_id == "file_edit") return "\xE2\x9C\x8E";  // "✎" (edit)
+    if (tool_id == "task_complete") return "\xE2\x9C\x93"; // "✓" (done)
     return "*";
 }
 

@@ -19,6 +19,13 @@ std::string serialize_message(const ChatMessage& msg) {
         j["tool_call_id"] = msg.tool_call_id;
     }
 
+    // Reasoning chain-of-thought from DeepSeek thinking mode et al. Persisted
+    // so --resume can echo it back on the next turn (otherwise the next API
+    // call after resume would 400 with "must be passed back to the API").
+    if (!msg.reasoning_content.empty()) {
+        j["reasoning_content"] = msg.reasoning_content;
+    }
+
     // Compact pipeline metadata fields (omit when default)
     if (!msg.uuid.empty()) {
         j["uuid"] = msg.uuid;
@@ -61,6 +68,11 @@ ChatMessage deserialize_message(const std::string& line) {
 
     if (j.contains("tool_call_id") && j["tool_call_id"].is_string()) {
         msg.tool_call_id = j["tool_call_id"].get<std::string>();
+    }
+
+    // Optional — absent on every JSONL line written before this change.
+    if (j.contains("reasoning_content") && j["reasoning_content"].is_string()) {
+        msg.reasoning_content = j["reasoning_content"].get<std::string>();
     }
 
     // Compact pipeline metadata fields (graceful defaults for legacy JSONL)

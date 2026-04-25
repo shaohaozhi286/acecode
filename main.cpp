@@ -50,6 +50,7 @@
 #include "tool/file_edit_tool.hpp"
 #include "tool/grep_tool.hpp"
 #include "tool/glob_tool.hpp"
+#include "tool/task_complete_tool.hpp"
 #include "tool/mcp_manager.hpp"
 #include "tool/skills_tool.hpp"
 #include "tool/skill_view_tool.hpp"
@@ -74,6 +75,7 @@
 #include "session/session_manager.hpp"
 #include "tui/diff_view.hpp"
 #include "tui/slash_dropdown.hpp"
+#include "tui/thick_vscroll_bar.hpp"
 #include "tui/tool_progress.hpp"
 #include "utils/base64.hpp"
 #include "utils/terminal_title.hpp"
@@ -736,6 +738,7 @@ int main(int argc, char* argv[]) {
     tools.register_tool(create_file_edit_tool());
     tools.register_tool(create_grep_tool());
     tools.register_tool(create_glob_tool());
+    tools.register_tool(create_task_complete_tool());
 
     // ---- Skill registry ----
     // Discovery order keeps more specific roots ahead of compatibility/global
@@ -839,10 +842,14 @@ int main(int argc, char* argv[]) {
     std::string version_str = "acecode v" ACECODE_VERSION;
     std::string cwd_display = working_dir;
 
-    // If dangerous mode, show startup warning
+    // If dangerous mode, show startup warning. Note: -dangerous skips permission
+    // confirmations but does NOT suppress AskUserQuestion overlays (those are a
+    // legitimate LLM-driven request for input).
     if (dangerous_mode) {
         state.conversation.push_back({"system",
-            "[DANGEROUS MODE] All permission checks are bypassed. Use with caution!", false});
+            "[DANGEROUS MODE] All permission checks are bypassed. Use with caution! "
+            "(AskUserQuestion overlays are still shown when the model needs input.)",
+            false});
     }
 
     if (mcp_manager.connected_server_count() > 0) {
@@ -855,6 +862,10 @@ int main(int argc, char* argv[]) {
     // Animation tick for Thinking... indicator
     std::atomic<int> anim_tick{0};
     Box chat_box;
+    // draggable-thick-scrollbar: track box for the thick scroll indicator —
+    // populated by acecode::tui::thick_vscroll_bar each Render so the mouse
+    // handler can hit-test "click on scrollbar" vs "click in chat content".
+    Box scrollbar_box;
 
     // drag-autoscroll: 每帧渲染时由 reflect 回填每条消息的屏幕 box,
     // 下一帧 (事件线程 / anim_thread) 读这里算每条消息的行数,供
@@ -1159,6 +1170,7 @@ int main(int argc, char* argv[]) {
 
     AgentLoop agent_loop(provider_accessor, tools, callbacks, working_dir, permissions);
     agent_loop.set_context_window(config.context_window);
+    agent_loop.set_agent_loop_config(config.agent_loop);
     agent_loop.set_skill_registry(&skill_registry);
     agent_loop.set_memory_registry(&memory_registry);
     agent_loop.set_memory_config(&runtime_memory_cfg);
@@ -1409,7 +1421,13 @@ int main(int argc, char* argv[]) {
             std::string next_prompt = state.pending_queue.front();
             state.pending_queue.erase(state.pending_queue.begin());
             state.conversation.push_back({"user", next_prompt, false});
-            state.chat_follow_tail = true;
+            // draggable-thick-scrollbar: 用户主动拖滚动条时不要被 worker 线程
+            // 强行拽回尾巴 —— 让用户看着自己挑的位置,直到他自己释放鼠标。
+            // 拖到底的情况由 clamp_chat_focus 内部 (idx == last) 分支自然恢复。
+            if (state.drag_scrollbar_phase ==
+                TuiState::DragScrollbarPhase::Idle) {
+                state.chat_follow_tail = true;
+            }
             clamp_chat_focus();
             state.current_thinking_phrase = get_random_thinking_phrase(is_user_chinese(state));
             state.thinking_start_time = std::chrono::steady_clock::now();
@@ -1500,7 +1518,7 @@ int main(int argc, char* argv[]) {
     });
 
     // Wrap with CatchEvent to handle all keyboard input
-    auto input_with_esc = CatchEvent(input_renderer, [&state, &screen, &clamp_chat_focus, &auth_done, &cmd_registry, &agent_loop, &provider, &provider_mu, &config, &token_tracker, &permissions, &session_manager, &scroll_chat, &chat_box, &mcp_manager, &tools, &skill_registry, &memory_registry, &working_dir](Event event) {
+    auto input_with_esc = CatchEvent(input_renderer, [&state, &screen, &clamp_chat_focus, &auth_done, &cmd_registry, &agent_loop, &provider, &provider_mu, &config, &token_tracker, &permissions, &session_manager, &scroll_chat, &chat_box, &scrollbar_box, &message_line_counts, &mcp_manager, &tools, &skill_registry, &memory_registry, &working_dir](Event event) {
         // drag-autoscroll: 事件线程入口处消费 anim_thread 攒下的 selection 偏移
         // 补偿. 所有对 FTXUI selection_data_ 的写都发生在这条路径上, 跟
         // HandleSelection 串行 — 避免跨线程数据竞争. 不 return, 让事件继续正常处理.
@@ -2014,6 +2032,36 @@ int main(int argc, char* argv[]) {
                 return true;
             }
 
+            // draggable-thick-scrollbar: 左键 Pressed 落在滚动条列时,优先
+            // 进入"拖滚动条"分支,跳过下面的 drag-select 启动。两态互斥 ——
+            // 一次按下不会同时开始选区拖拽和滚动条拖拽。
+            if (mouse.button == Mouse::Left && mouse.motion == Mouse::Pressed &&
+                scrollbar_box.Contain(mouse.x, mouse.y)) {
+                std::lock_guard<std::mutex> lk(state.mu);
+                // 快照 message_line_counts —— 流式输出追加新行时,拖动期间的
+                // y → line 映射继续按按下瞬间的几何走,不被指针下扯走。
+                state.drag_scrollbar_snapshot = message_line_counts;
+                state.drag_scrollbar_phase = TuiState::DragScrollbarPhase::Dragging;
+                // 一旦用户主动操纵滚动条,就视为离开尾巴跟随;松手时不自动恢复。
+                state.chat_follow_tail = false;
+                int track_height = scrollbar_box.y_max - scrollbar_box.y_min + 1;
+                auto [idx, off] = acecode::tui::y_to_focus(
+                    mouse.y, scrollbar_box.y_min, track_height,
+                    state.drag_scrollbar_snapshot);
+                if (idx >= 0) {
+                    state.chat_focus_index = idx;
+                    state.chat_line_offset = off;
+                    int last_msg = static_cast<int>(state.conversation.size()) - 1;
+                    if (idx == last_msg) {
+                        // 拖到底自然恢复 follow_tail —— 与 scroll_chat 的
+                        // (next == last) 路径保持一致。
+                        state.chat_follow_tail = true;
+                    }
+                }
+                screen.PostEvent(Event::Custom);
+                return true;
+            }
+
             // drag-autoscroll: 跟踪左键按下/拖动/释放, 驱动 anim_thread 在用户
             // 把鼠标拖到 chat_box 顶部/底部时自动滚动并补偿 selection 坐标.
             // 不 return true, 让事件继续流向 FTXUI 的 HandleSelection 走原本的
@@ -2021,7 +2069,10 @@ int main(int argc, char* argv[]) {
             // 会把鼠标拖到窗口外松开, 此时我们仍要把状态机拉回 Idle.
             if (mouse.button == Mouse::Left) {
                 if (mouse.motion == Mouse::Pressed) {
-                    if (chat_box.Contain(mouse.x, mouse.y)) {
+                    // draggable-thick-scrollbar: 落在滚动条列上的 Pressed 已经
+                    // 在上一个分支被吞掉,这里只剩内容区的左键按下 → 启动选区拖拽。
+                    if (chat_box.Contain(mouse.x, mouse.y) &&
+                        !scrollbar_box.Contain(mouse.x, mouse.y)) {
                         std::lock_guard<std::mutex> lk(state.mu);
                         state.drag_left_pressed = true;
                         state.last_mouse_x = mouse.x;
@@ -2034,12 +2085,38 @@ int main(int argc, char* argv[]) {
                     state.drag_left_pressed = false;
                     state.drag_phase = drag_scroll::Phase::Idle;
                     state.last_drag_scroll_at = {};
+                    // draggable-thick-scrollbar: 任何左键 Released 都把滚动条
+                    // 拖拽态拉回 Idle,即使释放点已经离开滚动条列(用户经常
+                    // 拖出窗口外松开)。chat_follow_tail 不在这里恢复 —— 用户
+                    // 显式滚到了非尾位置,只在拖到底时由 Pressed 分支重新开启。
+                    state.drag_scrollbar_phase = TuiState::DragScrollbarPhase::Idle;
+                    state.drag_scrollbar_snapshot.clear();
                 }
             }
             // 终端在拖动期间发 Moved 事件, button 字段通常是 None 而不是 Left.
             // 我们靠自己维护的 drag_left_pressed 判断是否处于拖动中.
             if (mouse.motion == Mouse::Moved) {
                 std::lock_guard<std::mutex> lk(state.mu);
+                // draggable-thick-scrollbar: 滚动条拖拽优先级高于 drag-select
+                // —— 两态互斥,Pressed 分支保证只可能进一态。直接 early return,
+                // 不让下面的 drag-autoscroll 分类运行,避免拖滚动条时选区被误激活。
+                if (state.drag_scrollbar_phase ==
+                    TuiState::DragScrollbarPhase::Dragging) {
+                    int track_height =
+                        scrollbar_box.y_max - scrollbar_box.y_min + 1;
+                    auto [idx, off] = acecode::tui::y_to_focus(
+                        mouse.y, scrollbar_box.y_min, track_height,
+                        state.drag_scrollbar_snapshot);
+                    if (idx >= 0) {
+                        state.chat_focus_index = idx;
+                        state.chat_line_offset = off;
+                        int last_msg =
+                            static_cast<int>(state.conversation.size()) - 1;
+                        state.chat_follow_tail = (idx == last_msg);
+                    }
+                    screen.PostEvent(Event::Custom);
+                    return true;
+                }
                 if (state.drag_left_pressed) {
                     state.last_mouse_x = mouse.x;
                     state.last_mouse_y = mouse.y;
@@ -2298,7 +2375,7 @@ int main(int argc, char* argv[]) {
         return false;
     });
 
-    auto renderer = Renderer(input_with_esc, [&state, &version_str, &cwd_display, &chat_box, &message_boxes, &message_line_counts, &anim_tick, &input_with_esc, &permissions, dangerous_mode] {
+    auto renderer = Renderer(input_with_esc, [&state, &version_str, &cwd_display, &chat_box, &scrollbar_box, &message_boxes, &message_line_counts, &anim_tick, &input_with_esc, &permissions, dangerous_mode] {
         std::lock_guard<std::mutex> lk(state.mu);
 
         // drag-autoscroll: 把上一帧 reflect 回填的 box 高度同步到行数表,
@@ -2612,8 +2689,16 @@ int main(int argc, char* argv[]) {
             message_elements.push_back(text(""));
         }
 
-        auto message_view = vbox(std::move(message_elements))
-            | vscroll_indicator | yframe | reflect(chat_box) | flex
+        // draggable-thick-scrollbar: replace the 1-column vscroll_indicator
+        // with a 2-column draggable scrollbar that publishes its track box
+        // for hit-testing. The | yframe | reflect(chat_box) | flex chain stays
+        // as-is so the existing focus_decorator-driven scroll model continues
+        // to work; the new decorator only widens and instruments the rail.
+        auto message_view = acecode::tui::thick_vscroll_bar(
+                                vbox(std::move(message_elements)),
+                                /*width=*/2,
+                                scrollbar_box)
+            | yframe | reflect(chat_box) | flex
             // mouse-selection-copy: visual feedback for drag-selection. The
             // decorator lives on the message_view so selection can span
             // multiple messages.

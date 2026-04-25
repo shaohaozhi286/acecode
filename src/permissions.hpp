@@ -90,6 +90,13 @@ public:
         // doesn't need to prompt on top of that.
         if (tool_name == "memory_write") return true;
 
+        // task_complete is a zero-side-effect terminator signal. Even though
+        // its ToolImpl already sets is_read_only=true (so the read-only branch
+        // above would catch it), we also name-match here so future refactors
+        // that toggle that flag can't accidentally turn task_complete into a
+        // tool that prompts the user mid-loop.
+        if (tool_name == "task_complete") return true;
+
         // Session-level always-allow for this tool
         {
             std::lock_guard<std::mutex> lk(mu_);

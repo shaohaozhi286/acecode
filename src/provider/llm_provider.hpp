@@ -18,6 +18,13 @@ struct ChatMessage {
     // For tool result messages
     std::string tool_call_id;
 
+    // Chain-of-thought emitted by reasoning-mode LLMs (DeepSeek thinking,
+    // Qwen, Moonshot, OpenRouter, …). DeepSeek requires the previous turn's
+    // reasoning_content to be echoed back on assistant messages — see
+    // openspec/changes/support-deepseek-reasoning. Empty for non-reasoning
+    // models; never set on user / system / tool messages.
+    std::string reasoning_content;
+
     // Metadata fields for compact pipeline
     std::string uuid;                    // unique identifier (for boundary tracking)
     std::string subtype;                 // "compact_boundary" | "microcompact_boundary" | ""
@@ -50,6 +57,7 @@ struct TokenUsage {
 
 struct ChatResponse {
     std::string content;               // text reply (empty if tool_calls present)
+    std::string reasoning_content;     // chain-of-thought (DeepSeek thinking etc.)
     std::vector<ToolCall> tool_calls;  // empty if pure text reply
     std::string finish_reason;         // "stop", "tool_calls", etc.
     TokenUsage usage;
@@ -64,7 +72,10 @@ struct ToolDef {
 };
 
 // Streaming event types for chat_stream()
-enum class StreamEventType { Delta, ToolCall, Done, Error, Usage };
+//   ReasoningDelta — chain-of-thought fragment from a reasoning-mode model.
+//   Callbacks are free to ignore it; today the agent loop drops it silently
+//   and a future TUI panel can subscribe.
+enum class StreamEventType { Delta, ToolCall, Done, Error, Usage, ReasoningDelta };
 
 struct StreamEvent {
     StreamEventType type;

@@ -109,6 +109,8 @@ ChatMessage ToolExecutor::format_assistant_tool_calls(const ChatResponse& respon
     ChatMessage msg;
     msg.role = "assistant";
     msg.content = response.content;
+    // Carry reasoning_content forward so the next API call can echo it back.
+    msg.reasoning_content = response.reasoning_content;
 
     nlohmann::json tc_array = nlohmann::json::array();
     for (const auto& tc : response.tool_calls) {

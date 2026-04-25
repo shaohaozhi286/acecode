@@ -168,6 +168,18 @@ struct TuiState {
     int chat_line_offset = 0;
     int pending_shift_dy = 0;
 
+    // draggable-thick-scrollbar:鼠标在加粗滚动条列上按下/拖动时进入此态,
+    // 与上面的 drag_left_pressed (drag-select) 互斥 —— 一次按下要么开始
+    // 选区拖拽要么开始滚动条拖拽,绝不同时。
+    //   drag_scrollbar_phase    — Idle = 未在拖滚动条;Dragging = 正在拖
+    //   drag_scrollbar_snapshot — 按下瞬间快照 message_line_counts,拖动期间
+    //                              的 y → (focus_index, line_offset) 映射全
+    //                              用这份快照,这样流式输出追加新消息时拇指
+    //                              不会被指针下扯走
+    enum class DragScrollbarPhase { Idle, Dragging };
+    DragScrollbarPhase drag_scrollbar_phase = DragScrollbarPhase::Idle;
+    std::vector<int> drag_scrollbar_snapshot;
+
     // Async compact state
     bool is_compacting = false;                       // protected by mu
     std::atomic<bool> compact_abort_requested{false};  // cross-thread abort signal
