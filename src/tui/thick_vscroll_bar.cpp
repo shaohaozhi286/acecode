@@ -87,11 +87,12 @@ class ThickVScrollBar : public ftxui::Node {
             2 * (stencil.y_min - box_.y_min) * size_outter / size_inner;
 
         const bool ascii = ascii_icons_enabled();
-        // 默认 Unicode 字形:rail = │ (U+2502),thumb 整格 = █ (U+2588),
-        // 半格(子格精度边界)= ╹ / ╻ (U+2579 / U+257B),与上游 vscroll_indicator
-        // 的边缘半块字形一致。
-        const char* rail_glyph = ascii ? "|" : "\xE2\x94\x82";
-        const char* thumb_full = ascii ? "#" : "\xE2\x96\x88";
+        // 视觉与上游 vscroll_indicator 完全对齐:thumb 整格 = ┃ (U+2503
+        // BOX DRAWINGS HEAVY VERTICAL),半格(子格精度边界)= ╹ / ╻
+        // (U+2579 / U+257B)。以前我们试过 width=2 + █ 实块拼出"粗条",
+        // 但和外层 borderRounded 的 │ 边框视觉冲突;现在保留上游观感,
+        // 只通过 out_track_box 暴露同一列的命中盒供鼠标层使用。
+        const char* thumb_full = ascii ? "|" : "\xE2\x94\x83";
         const char* thumb_top_half = ascii ? "^" : "\xE2\x95\xB9";
         const char* thumb_bot_half = ascii ? "v" : "\xE2\x95\xBB";
         const char* empty_glyph = " ";
@@ -106,18 +107,11 @@ class ThickVScrollBar : public ftxui::Node {
                 up ? (down ? thumb_full : thumb_top_half)
                    : (down ? thumb_bot_half : empty_glyph);
 
-            // 左侧 rail 列:始终画灰色细竖线;最右一列画拇指。中间列(如果
-            // width >= 3)留空保持视觉简洁,目前我们只用 width=2 不会进入这分支。
+            // 全部 width 列都画相同的字符:thumb 范围内是块字形,其余留空。
+            // 两列同时填实块给出"粗条"的视觉重量,无须额外 rail。
             for (int x = x_left; x <= x_right; ++x) {
                 auto& cell = screen.CellAt(x, y);
-                if (x == x_right) {
-                    cell.character = thumb_char;
-                    // 拇指用默认前景色,保持与文字同色,不在拖动时切换 —— v1
-                    // 暂不做"按下高亮",留给后续手动验证再决定。
-                } else {
-                    cell.character = rail_glyph;
-                    cell.foreground_color = ftxui::Color::GrayDark;
-                }
+                cell.character = thumb_char;
             }
         }
     }

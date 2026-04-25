@@ -2689,14 +2689,15 @@ int main(int argc, char* argv[]) {
             message_elements.push_back(text(""));
         }
 
-        // draggable-thick-scrollbar: replace the 1-column vscroll_indicator
-        // with a 2-column draggable scrollbar that publishes its track box
-        // for hit-testing. The | yframe | reflect(chat_box) | flex chain stays
-        // as-is so the existing focus_decorator-driven scroll model continues
-        // to work; the new decorator only widens and instruments the rail.
+        // draggable-thick-scrollbar: visually identical to FTXUI's stock
+        // vscroll_indicator (1 column, ┃╹╻ glyphs) — the decorator's only
+        // job is to publish its column extent into scrollbar_box so the
+        // mouse handler can hit-test a click as "scrollbar drag" instead
+        // of "text selection". The | yframe | reflect(chat_box) | flex
+        // chain is unchanged from upstream usage.
         auto message_view = acecode::tui::thick_vscroll_bar(
                                 vbox(std::move(message_elements)),
-                                /*width=*/2,
+                                /*width=*/1,
                                 scrollbar_box)
             | yframe | reflect(chat_box) | flex
             // mouse-selection-copy: visual feedback for drag-selection. The
