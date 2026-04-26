@@ -32,6 +32,16 @@ AgentLoop::~AgentLoop() {
     shutdown();
 }
 
+void AgentLoop::dispatch_message(const std::string& role,
+                                  const std::string& content,
+                                  bool is_tool) {
+    if (callbacks_.on_message) {
+        callbacks_.on_message(role, content, is_tool);
+    }
+    events_.emit(SessionEventKind::Message,
+        nlohmann::json{{"role", role}, {"content", content}, {"is_tool", is_tool}});
+}
+
 void AgentLoop::abort() {
     abort_requested_ = true;
 }
@@ -125,6 +135,7 @@ void AgentLoop::run_agent(const std::string& user_message) {
     if (callbacks_.on_busy_changed) {
         callbacks_.on_busy_changed(true);
     }
+    events_.emit(SessionEventKind::BusyChanged, nlohmann::json{{"busy", true}});
 
     auto tool_defs = tools_.get_tool_definitions();
     LOG_DEBUG("Registered tools: " + std::to_string(tool_defs.size()));
@@ -148,9 +159,7 @@ void AgentLoop::run_agent(const std::string& user_message) {
 
         if (abort_requested_) {
             LOG_WARN("Abort requested, breaking loop");
-            if (callbacks_.on_message) {
-                callbacks_.on_message("system", "[Interrupted]", false);
-            }
+            dispatch_message("system", "[Interrupted]", false);
             break;
         }
 
@@ -192,6 +201,7 @@ void AgentLoop::run_agent(const std::string& user_message) {
                 if (callbacks_.on_delta) {
                     callbacks_.on_delta(evt.content);
                 }
+                events_.emit(SessionEventKind::Token, nlohmann::json{{"text", evt.content}});
                 break;
             case StreamEventType::ReasoningDelta:
                 {
@@ -201,6 +211,7 @@ void AgentLoop::run_agent(const std::string& user_message) {
                 // Future TUI hook (e.g. a "Thinking..." panel) can subscribe
                 // here. Today we only accumulate so format_assistant_tool_calls
                 // and the empty-turn branch can echo it back to DeepSeek.
+                events_.emit(SessionEventKind::Reasoning, nlohmann::json{{"text", evt.content}});
                 break;
             case StreamEventType::ToolCall:
                 {
@@ -215,11 +226,15 @@ void AgentLoop::run_agent(const std::string& user_message) {
                 if (callbacks_.on_usage) {
                     callbacks_.on_usage(evt.usage);
                 }
+                events_.emit(SessionEventKind::Usage, nlohmann::json{
+                    {"prompt_tokens", evt.usage.prompt_tokens},
+                    {"completion_tokens", evt.usage.completion_tokens},
+                    {"total_tokens", evt.usage.total_tokens},
+                    {"has_data", evt.usage.has_data},
+                });
                 break;
             case StreamEventType::Error:
-                if (callbacks_.on_message) {
-                    callbacks_.on_message("error", "[Error] " + evt.error, false);
-                }
+                dispatch_message("error", "[Error] " + evt.error, false);
                 break;
             }
         };
@@ -231,9 +246,7 @@ void AgentLoop::run_agent(const std::string& user_message) {
         if (provider_accessor_) provider_snapshot = provider_accessor_();
         if (!provider_snapshot) {
             LOG_ERROR("provider_accessor returned null; aborting turn");
-            if (callbacks_.on_message) {
-                callbacks_.on_message("error", "[Error] provider unavailable", false);
-            }
+            dispatch_message("error", "[Error] provider unavailable", false);
             break;
         }
         try {
@@ -241,16 +254,12 @@ void AgentLoop::run_agent(const std::string& user_message) {
             LOG_INFO("chat_stream returned. content_len=" + std::to_string(accumulated.content.size()) + " tool_calls=" + std::to_string(accumulated.tool_calls.size()));
         } catch (const std::exception& e) {
             LOG_ERROR(std::string("chat_stream exception: ") + e.what());
-            if (callbacks_.on_message) {
-                callbacks_.on_message("error", std::string("[Error] ") + e.what(), false);
-            }
+            dispatch_message("error", std::string("[Error] ") + e.what(), false);
             break;
         }
 
         if (abort_requested_) {
-            if (callbacks_.on_message) {
-                callbacks_.on_message("system", "[Interrupted]", false);
-            }
+            dispatch_message("system", "[Interrupted]", false);
             break;
         }
 
@@ -291,9 +300,7 @@ void AgentLoop::run_agent(const std::string& user_message) {
             messages_.push_back(assistant_msg);
             if (session_manager_) session_manager_->on_message(assistant_msg);
 
-            if (callbacks_.on_message) {
-                callbacks_.on_message("assistant", accumulated.content, false);
-            }
+            dispatch_message("assistant", accumulated.content, false);
             break;
         }
 
@@ -385,10 +392,8 @@ void AgentLoop::run_agent(const std::string& user_message) {
         if (!read_entries.empty() && !abort_requested_) {
             // Notify TUI about all read-only tool calls
             for (const auto& entry : read_entries) {
-                if (callbacks_.on_message) {
-                    callbacks_.on_message("tool_call",
+                dispatch_message("tool_call",
                         "[Tool: " + entry.tc->function_name + "] " + entry.tc->function_arguments, true);
-                }
             }
 
             unsigned int max_concurrency = std::min(
@@ -426,9 +431,7 @@ void AgentLoop::run_agent(const std::string& user_message) {
                     result_ready[idx] = true;
 
                     // Report result to TUI
-                    if (callbacks_.on_message) {
-                        callbacks_.on_message("tool_result", results[idx].output, true);
-                    }
+                    dispatch_message("tool_result", results[idx].output, true);
                     if (callbacks_.on_tool_result) {
                         const auto& tc = *read_entries[i + j].tc;
                         ChatMessage call_msg;
@@ -451,10 +454,8 @@ void AgentLoop::run_agent(const std::string& user_message) {
             const auto& tc = *entry.tc;
             LOG_INFO("Tool call (write): " + tc.function_name + " id=" + tc.id);
 
-            if (callbacks_.on_message) {
-                callbacks_.on_message("tool_call",
+            dispatch_message("tool_call",
                     "[Tool: " + tc.function_name + "] " + tc.function_arguments, true);
-            }
 
             std::string ctx_path, ctx_command;
             extract_context(tc, ctx_path, ctx_command);
@@ -478,9 +479,7 @@ void AgentLoop::run_agent(const std::string& user_message) {
                     LOG_WARN("Path validation failed: " + path_error);
                     results[entry.original_index] = ToolResult{"[Error] " + path_error, false};
                     result_ready[entry.original_index] = true;
-                    if (callbacks_.on_message) {
-                        callbacks_.on_message("tool_result", results[entry.original_index].output, true);
-                    }
+                    dispatch_message("tool_result", results[entry.original_index].output, true);
                     emit_tool_result_callback(entry.original_index);
                     continue;
                 }
@@ -492,14 +491,16 @@ void AgentLoop::run_agent(const std::string& user_message) {
                 }
             }
 
-            if (!auto_allow && callbacks_.on_tool_confirm) {
-                PermissionResult perm = callbacks_.on_tool_confirm(tc.function_name, tc.function_arguments);
+            if (!auto_allow && (prompter_ || callbacks_.on_tool_confirm)) {
+                // Section 7.6: 优先走 prompter_(daemon 异步路径);未注入时
+                // 回落到 callbacks_.on_tool_confirm(TUI 同步路径)。
+                PermissionResult perm = prompter_
+                    ? prompter_->prompt(tc.function_name, tc.function_arguments, &abort_requested_)
+                    : callbacks_.on_tool_confirm(tc.function_name, tc.function_arguments);
                 if (perm == PermissionResult::Deny) {
                     results[entry.original_index] = ToolResult{"[User denied tool execution]", false};
                     result_ready[entry.original_index] = true;
-                    if (callbacks_.on_message) {
-                        callbacks_.on_message("tool_result", "[User denied tool execution]", true);
-                    }
+                    dispatch_message("tool_result", "[User denied tool execution]", true);
                     emit_tool_result_callback(entry.original_index);
                     continue;
                 }
@@ -567,9 +568,7 @@ void AgentLoop::run_agent(const std::string& user_message) {
                 tc.function_name, tc.function_arguments, exec_path, tool_ctx);
             result_ready[entry.original_index] = true;
 
-            if (callbacks_.on_message) {
-                callbacks_.on_message("tool_result", results[entry.original_index].output, true);
-            }
+            dispatch_message("tool_result", results[entry.original_index].output, true);
             emit_tool_result_callback(entry.original_index);
         }
 
@@ -626,14 +625,14 @@ void AgentLoop::run_agent(const std::string& user_message) {
         std::string stop_msg = "Agent loop stopped: reached max_iterations (" +
                                std::to_string(max_iter) + ")";
         LOG_WARN(stop_msg);
-        if (callbacks_.on_message) {
-            callbacks_.on_message("system", stop_msg, false);
-        }
+        dispatch_message("system", stop_msg, false);
     }
 
     if (callbacks_.on_busy_changed) {
         callbacks_.on_busy_changed(false);
     }
+    events_.emit(SessionEventKind::BusyChanged, nlohmann::json{{"busy", false}});
+    events_.emit(SessionEventKind::Done, nlohmann::json::object());
 }
 
 void AgentLoop::run_shell(const std::string& command) {
@@ -649,9 +648,7 @@ void AgentLoop::run_shell(const std::string& command) {
     // the user sees a clear "-> bash command" line followed by its result.
     nlohmann::json args = {{"command", command}};
     std::string args_json = args.dump();
-    if (callbacks_.on_message) {
-        callbacks_.on_message("tool_call", "[Tool: bash] " + args_json, true);
-    }
+    dispatch_message("tool_call", "[Tool: bash] " + args_json, true);
 
     ToolResult result{"[Error] bash tool not registered", false};
     if (tools_.has_tool("bash")) {
@@ -699,9 +696,7 @@ void AgentLoop::run_shell(const std::string& command) {
         LOG_WARN("Shell mode invoked but `bash` tool is not registered");
     }
 
-    if (callbacks_.on_message) {
-        callbacks_.on_message("tool_result", result.output, true);
-    }
+    dispatch_message("tool_result", result.output, true);
     if (callbacks_.on_tool_result) {
         ChatMessage call_msg;
         call_msg.role = "tool_call";
@@ -742,6 +737,8 @@ void AgentLoop::run_shell(const std::string& command) {
     if (callbacks_.on_busy_changed) {
         callbacks_.on_busy_changed(false);
     }
+    events_.emit(SessionEventKind::BusyChanged, nlohmann::json{{"busy", false}});
+    events_.emit(SessionEventKind::Done, nlohmann::json::object());
 }
 
 } // namespace acecode

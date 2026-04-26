@@ -6,6 +6,8 @@
 #include "utils/path_validator.hpp"
 #include "utils/token_tracker.hpp"
 #include "session/session_manager.hpp"
+#include "session/event_dispatcher.hpp"
+#include "session/permission_prompter.hpp"
 #include "config/config.hpp"
 
 #include <vector>
@@ -147,10 +149,31 @@ public:
         project_instructions_cfg_ = cfg;
     }
 
+    // ---- 事件流(Section 7 SessionClient)----
+    // 老的 AgentCallbacks 路径**完全不动**:TUI 仍然用 callbacks。
+    // SessionClient 走 events_,daemon HTTP/WebSocket handler 在 subscribe 上
+    // 拿事件流。两者并行,不互相影响。
+    EventDispatcher& events() { return events_; }
+
+    // 注入异步 PermissionPrompter(daemon 模式)。不调用此 setter 时,AgentLoop
+    // 默认走 callbacks_.on_tool_confirm 同步路径(TUI 模式)。线程安全要求:
+    // 不在 worker 跑工具时调用 — 通常 SessionRegistry 创建 AgentLoop 后立刻
+    // 调,然后才 submit 第一条消息。
+    void set_permission_prompter(std::unique_ptr<PermissionPrompter> p) {
+        prompter_ = std::move(p);
+    }
+
 private:
     void worker_main();
     void run_agent(const std::string& user_message);
     void run_shell(const std::string& command);
+
+    // Section 7: 同时调老 on_message callback(若 TUI 挂了)和新事件流
+    // (events_)。所有 on_message 触发点都该走这个 helper,确保 daemon
+    // 模式下没装 callbacks 也能拿到事件。
+    void dispatch_message(const std::string& role,
+                           const std::string& content,
+                           bool is_tool);
 
     struct WorkerTask {
         enum class Kind { Chat, Shell };
@@ -183,6 +206,15 @@ private:
     std::condition_variable queue_cv_;
     std::queue<WorkerTask> task_queue_;
     bool shutdown_requested_ = false;
+
+    // Section 7: 事件分发器。EventDispatcher 自己内部加锁,所以这里不需要
+    // 额外的同步;emit 由 worker_main 线程调用,subscribe/unsubscribe 由
+    // HTTP handler 线程并发调用。
+    EventDispatcher events_;
+
+    // Section 7.6: PermissionPrompter。null 时走 callbacks_.on_tool_confirm
+    // 老路径(TUI);非 null 时(daemon 模式)走 prompter_->prompt。
+    std::unique_ptr<PermissionPrompter> prompter_;
 };
 
 } // namespace acecode

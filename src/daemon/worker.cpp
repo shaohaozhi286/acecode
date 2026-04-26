@@ -4,14 +4,32 @@
 #include "heartbeat.hpp"
 #include "platform.hpp"
 #include "runtime_files.hpp"
+#include "../provider/cwd_model_override.hpp"
+#include "../provider/model_resolver.hpp"
+#include "../provider/provider_factory.hpp"
+#include "../session/local_session_client.hpp"
+#include "../session/session_registry.hpp"
+#include "../skills/skill_registry.hpp"
+#include "../tool/bash_tool.hpp"
+#include "../tool/file_read_tool.hpp"
+#include "../tool/file_write_tool.hpp"
+#include "../tool/file_edit_tool.hpp"
+#include "../tool/grep_tool.hpp"
+#include "../tool/glob_tool.hpp"
+#include "../tool/task_complete_tool.hpp"
+#include "../tool/tool_executor.hpp"
 #include "../utils/logger.hpp"
 #include "../utils/token.hpp"
+#include "../web/auth.hpp"
+#include "../web/server.hpp"
 
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <csignal>
+#include <filesystem>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <thread>
@@ -95,10 +113,14 @@ std::string validate_can_start(const WorkerOptions& opts) {
 }
 
 int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
-    // 启动前安全校验
-    if (cfg.web.bind != "127.0.0.1" && cfg.web.bind != "::1" && opts.dangerous) {
-        std::cerr << "dangerous mode is loopback-only (web.bind="
-                  << cfg.web.bind << ")\n";
+    // 启动前硬安全校验(spec 11.3)。token 还没生成,这里先做 dangerous 检查;
+    // 非 loopback 缺 token 的检查放在 token 生成后,因为我们生成 token = 总是
+    // 满足。但若用户后续传入外部配置开关禁用 token,应在那里失败。当前 v1
+    // 总是生成 token → 非 loopback 也通过 preflight。
+    auto preflight_dangerous_only = acecode::web::preflight_bind_check(
+        cfg.web.bind, /*server_token=*/"placeholder", opts.dangerous);
+    if (!preflight_dangerous_only.empty()) {
+        std::cerr << preflight_dangerous_only << "\n";
         return 2;
     }
 
@@ -141,19 +163,93 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
 
     install_term_handlers();
 
-    // TODO(Section 9): 这里启动 Crow HTTP/WebSocket server。
-    // 现阶段只是阻塞等终止信号 — 让 daemon start/stop/status 端到端可用。
-    {
+    // ----- 装配 daemon-side 的 Provider / Tools / SessionRegistry -----
+    // 这一段重现了 main.cpp 在 TUI 路径下的初始化,但缩到 daemon 必要项:
+    //   - LlmProvider (与 TUI 等价的三层解析)
+    //   - 7 个内置工具 + skills / memory 工具暂留(配置上 v1 daemon 不暴露
+    //     skill/memory 命令行入口,工具由 LLM 通过 tool_calls 间接调用 — 留
+    //     给后续 change 加 SkillRegistry / MemoryRegistry 真接入)
+    //   - PermissionManager (template,SessionRegistry 给每个 session 复制 mode)
+    //   - SessionRegistry + LocalSessionClient
+    //   - WebServer (HTTP + WebSocket)
+    std::string cwd = std::filesystem::current_path().string();
+
+    AppConfig cfg_mut = cfg; // /api/mcp PUT 需要 mutable
+
+    auto cwd_override = acecode::load_cwd_model_override(cwd);
+    auto effective_entry = acecode::resolve_effective_model(cfg_mut, cwd_override, std::nullopt);
+    auto provider = acecode::create_provider_from_entry(effective_entry);
+    if (!provider) {
+        LOG_ERROR("[daemon] failed to create LLM provider — daemon will start but new sessions cannot run agent loop until provider is configured");
+    }
+    std::mutex provider_mu;
+    auto provider_accessor =
+        [&provider, &provider_mu]() -> std::shared_ptr<acecode::LlmProvider> {
+            std::lock_guard<std::mutex> lk(provider_mu);
+            return provider;
+        };
+
+    acecode::ToolExecutor tools;
+    tools.register_tool(acecode::create_bash_tool());
+    tools.register_tool(acecode::create_file_read_tool());
+    tools.register_tool(acecode::create_file_write_tool());
+    tools.register_tool(acecode::create_file_edit_tool());
+    tools.register_tool(acecode::create_grep_tool());
+    tools.register_tool(acecode::create_glob_tool());
+    tools.register_tool(acecode::create_task_complete_tool());
+
+    acecode::SkillRegistry skill_registry; // 不 scan,v1 daemon 不暴露 skills
+    acecode::PermissionManager template_perm;
+    if (opts.dangerous) template_perm.set_dangerous(true);
+
+    acecode::SessionRegistryDeps reg_deps;
+    reg_deps.provider_accessor    = provider_accessor;
+    reg_deps.tools                = &tools;
+    reg_deps.cwd                  = cwd;
+    reg_deps.config               = &cfg_mut;
+    reg_deps.skill_registry       = &skill_registry;
+    reg_deps.memory_registry      = nullptr;
+    reg_deps.memory_cfg           = nullptr;
+    reg_deps.project_instructions_cfg = nullptr;
+    reg_deps.template_permissions = &template_perm;
+
+    acecode::SessionRegistry registry(std::move(reg_deps));
+    acecode::LocalSessionClient client(registry);
+
+    acecode::web::WebServerDeps web_deps;
+    web_deps.web_cfg            = &cfg.web;
+    web_deps.daemon_cfg         = &cfg.daemon;
+    web_deps.app_config         = &cfg_mut;
+    web_deps.cwd                = cwd;
+    web_deps.token              = token;
+    web_deps.guid               = guid;
+    web_deps.pid                = pid;
+    web_deps.start_time_unix_ms = now_unix_ms();
+    web_deps.session_client     = &client;
+    web_deps.session_registry   = &registry;
+    web_deps.skill_registry     = &skill_registry;
+    web_deps.dangerous          = opts.dangerous;
+
+    acecode::web::WebServer server(std::move(web_deps));
+
+    // 信号 / 终止 → 主循环退出。Crow app.run() 阻塞跑;另起个观察线程在
+    // term 信号时调 server.stop() 让 Crow 退出。这样我们就在主线程上 join。
+    std::thread watcher([&server] {
         std::unique_lock<std::mutex> lk(g_term_mu);
         g_term_cv.wait(lk, [] { return g_term_requested.load(); });
-    }
+        server.stop();
+    });
+
+    int rc = server.run();
+    request_terminate(); // 唤醒 watcher(防 server 自然退出但信号还没来)
+    if (watcher.joinable()) watcher.join();
 
     LOG_INFO("[daemon] worker shutting down");
     if (opts.foreground) std::cerr << "[daemon] shutting down\n";
 
     heartbeat.stop();
     cleanup_runtime_files();
-    return 0;
+    return rc;
 }
 
 } // namespace acecode::daemon
