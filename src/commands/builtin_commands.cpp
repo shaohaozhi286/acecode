@@ -15,6 +15,7 @@
 #include "../skills/skill_registry.hpp"
 #include "../skills/skill_commands.hpp"
 #include "../session/session_manager.hpp"
+#include "../session/session_resume_restore.hpp"
 #include "../utils/terminal_title.hpp"
 #include <algorithm>
 #include <mutex>
@@ -681,14 +682,10 @@ static void do_resume_session(CommandContext& ctx, const std::string& session_id
 
     auto messages = ctx.session_manager->resume_session(session_id);
     ctx.agent_loop.clear_messages();
-    for (const auto& msg : messages) {
-        ctx.agent_loop.push_message(msg);
-    }
     ctx.state.conversation.clear();
-    for (const auto& msg : messages) {
-        bool is_tool = (msg.role == "tool");
-        ctx.state.conversation.push_back({msg.role, msg.content, is_tool});
-    }
+    ToolExecutor fallback_tools;
+    const ToolExecutor& replay_tools = ctx.tools ? *ctx.tools : fallback_tools;
+    append_resumed_session_messages(messages, ctx.state, ctx.agent_loop, replay_tools);
     std::ostringstream oss;
     oss << "Resumed session " << session_id << " (" << messages.size() << " messages)";
     ctx.state.conversation.push_back({"system", oss.str(), false});
@@ -760,9 +757,10 @@ static void cmd_resume(CommandContext& ctx, const std::string& args) {
     auto* provider_handle = ctx.provider_handle;
     auto* provider_mu = ctx.provider_mu;
     auto* config = &ctx.config;
+    auto* tools = ctx.tools;
     std::string cwd = ctx.cwd;
     ctx.state.resume_callback = [&state = ctx.state, sm, al,
-                                 provider_handle, provider_mu, config, cwd,
+                                 provider_handle, provider_mu, config, tools, cwd,
                                  captured_sessions](const std::string& sid) {
         // resume 前应用 provider+model(任务 6.3)。和 do_resume_session 同源。
         const SessionMeta* target = nullptr;
@@ -788,14 +786,10 @@ static void cmd_resume(CommandContext& ctx, const std::string& args) {
 
         auto messages = sm->resume_session(sid);
         al->clear_messages();
-        for (const auto& msg : messages) {
-            al->push_message(msg);
-        }
         state.conversation.clear();
-        for (const auto& msg : messages) {
-            bool is_tool = (msg.role == "tool");
-            state.conversation.push_back({msg.role, msg.content, is_tool});
-        }
+        ToolExecutor fallback_tools;
+        const ToolExecutor& replay_tools = tools ? *tools : fallback_tools;
+        append_resumed_session_messages(messages, state, *al, replay_tools);
         std::ostringstream oss;
         oss << "Resumed session " << sid << " (" << messages.size() << " messages)";
         state.conversation.push_back({"system", oss.str(), false});

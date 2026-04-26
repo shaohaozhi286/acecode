@@ -3,6 +3,7 @@
 #include "utils/logger.hpp"
 #include "utils/stream_processing.hpp"
 #include "commands/compact.hpp"
+#include "session/tool_metadata_codec.hpp"
 #include <nlohmann/json.hpp>
 #include <mutex>
 #include <future>
@@ -566,10 +567,19 @@ void AgentLoop::run_agent(const std::string& user_message) {
             ChatMessage tool_msg;
             if (result_ready[i]) {
                 tool_msg = ToolExecutor::format_tool_result(tc.id, results[i]);
+                // restore-tool-calls-on-resume: 注入视觉字段到 metadata,
+                // 让 --resume 能彩色还原 diff 与摘要(老 session 没有这两个键 → fold 降级)。
+                if (results[i].summary.has_value()) {
+                    tool_msg.metadata["tool_summary"] = encode_tool_summary(*results[i].summary);
+                }
+                if (results[i].hunks.has_value()) {
+                    tool_msg.metadata["tool_hunks"] = encode_tool_hunks(*results[i].hunks);
+                }
             } else {
                 // Tool was skipped (abort)
                 tool_msg = ToolExecutor::format_tool_result(tc.id,
                     ToolResult{"[Interrupted]", false});
+                // 中断分支不带 summary/hunks,自然不写 metadata。
             }
             messages_.push_back(tool_msg);
             if (session_manager_) session_manager_->on_message(tool_msg);
@@ -700,6 +710,15 @@ void AgentLoop::run_shell(const std::string& command) {
         ChatMessage tool_msg;
         tool_msg.role = "tool_result";
         tool_msg.content = result.output;
+        // restore-tool-calls-on-resume: 一致性起见也写 metadata。当前 shell-mode
+        // 的 resume 走 inject_shell_turn 配对识别,这里写的 metadata 不会被
+        // replay_session_messages 读到;但留着不会有副作用,且未来若改路径自动受益。
+        if (result.summary.has_value()) {
+            tool_msg.metadata["tool_summary"] = encode_tool_summary(*result.summary);
+        }
+        if (result.hunks.has_value()) {
+            tool_msg.metadata["tool_hunks"] = encode_tool_hunks(*result.hunks);
+        }
         session_manager_->on_message(tool_msg);
     }
 

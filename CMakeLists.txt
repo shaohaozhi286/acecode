@@ -85,6 +85,15 @@ list(FILTER ACECODE_TESTABLE_SOURCES EXCLUDE REGEX "/src/(tui|markdown)/")
 set(ACECODE_TUI_SOURCES ${ACECODE_ALL_SOURCES})
 list(FILTER ACECODE_TUI_SOURCES INCLUDE REGEX "/src/(tui|markdown)/")
 
+# Most TUI files depend on FTXUI and stay out of acecode_testable. This helper
+# is pure string logic used by main.cpp and unit tests, so compile it once in
+# acecode_testable and remove it from the TUI-only source group.
+set(ACECODE_TESTABLE_TUI_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/tui/text_truncation.cpp
+)
+list(APPEND ACECODE_TESTABLE_SOURCES ${ACECODE_TESTABLE_TUI_SOURCES})
+list(REMOVE_ITEM ACECODE_TUI_SOURCES ${ACECODE_TESTABLE_TUI_SOURCES})
+
 # Shared OBJECT library: one compile per source, consumed by both acecode
 # (production binary) and acecode_unit_tests (test binary). PUBLIC link deps
 # propagate to consumers so they get the right include dirs + libraries.

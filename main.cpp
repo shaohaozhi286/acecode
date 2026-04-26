@@ -74,8 +74,10 @@
 #include "utils/token_tracker.hpp"
 #include "markdown/markdown_formatter.hpp"
 #include "session/session_manager.hpp"
+#include "session/session_resume_restore.hpp"
 #include "tui/diff_view.hpp"
 #include "tui/slash_dropdown.hpp"
+#include "tui/text_truncation.hpp"
 #include "tui/thick_vscroll_bar.hpp"
 #include "tui/tool_progress.hpp"
 #include "utils/base64.hpp"
@@ -146,6 +148,34 @@ static bool is_success_summary(const acecode::ToolSummary& s) {
         if (kv.first == "timeout" && kv.second == "true") return false;
     }
     return true;
+}
+
+static std::string renderable_tool_summary_line(const acecode::ToolSummary& s,
+                                                const std::string& metric_str,
+                                                int max_visual_width) {
+    const std::string prefix = s.icon + " " + s.verb + " \xC2\xB7 ";
+    const std::string suffix = metric_str.empty()
+        ? std::string()
+        : " \xC2\xB7 " + metric_str;
+    return acecode::tui::truncate_middle_segment(
+        prefix, s.object, suffix, max_visual_width);
+}
+
+static Element render_tool_result_lines_preserving_breaks(
+    const std::string& display_content) {
+    Elements lines;
+    size_t pos = 0;
+    while (pos <= display_content.size()) {
+        const size_t nl = display_content.find('\n', pos);
+        const std::string line = (nl == std::string::npos)
+            ? display_content.substr(pos)
+            : display_content.substr(pos, nl - pos);
+        Element line_el = line.empty() ? text(" ") : paragraph(line);
+        lines.push_back(line_el | color(Color::GrayLight) | dim);
+        if (nl == std::string::npos) break;
+        pos = nl + 1;
+    }
+    return vbox(std::move(lines));
 }
 
 
@@ -1349,37 +1379,7 @@ int main(int argc, char* argv[]) {
             }
 
             auto messages = session_manager.resume_session(target_id);
-            for (size_t i = 0; i < messages.size(); ++i) {
-                const auto& msg = messages[i];
-
-                // Recognise persisted shell-mode pairs: a user message starting
-                // with '!' directly followed by a tool_result. Render both in
-                // the chat view, but inject a single XML-tagged user turn into
-                // the agent context so the LLM sees the expected structure.
-                bool is_shell_user = (msg.role == "user" && !msg.content.empty() && msg.content[0] == '!');
-                bool next_is_result = (i + 1 < messages.size() && messages[i + 1].role == "tool_result");
-                if (is_shell_user && next_is_result) {
-                    state.conversation.push_back({msg.role, msg.content, false});
-                    state.conversation.push_back({messages[i + 1].role, messages[i + 1].content, true});
-                    std::string cmd = msg.content.substr(1);
-                    agent_loop.inject_shell_turn(cmd, messages[i + 1].content, "", 0);
-                    ++i;
-                    continue;
-                }
-
-                // 白名单:只有 OpenAI 规范承认的 role 才推入 agent_loop.messages_ 发给 LLM。
-                // session JSONL 里可能混入 UI-only 伪角色(目前只有 `tool_result` 一种,来自
-                // `!cmd` shell 模式的展示记录),成对的 `!user + tool_result` 已在上方分支通过
-                // inject_shell_turn 注入规范消息;其余非法 role 的消息只进聊天视图,否则方舟等
-                // 严格后端会以 `InvalidParameter: messages.role` 拒绝整个请求。
-                bool is_tool = (msg.role == "tool");
-                bool is_llm_role = (msg.role == "user" || msg.role == "assistant" ||
-                                    msg.role == "system" || msg.role == "tool");
-                if (is_llm_role) {
-                    agent_loop.push_message(msg);
-                }
-                state.conversation.push_back({msg.role, msg.content, is_tool});
-            }
+            acecode::append_resumed_session_messages(messages, state, agent_loop, tools);
             state.conversation.push_back({"system",
                 "Resumed session " + target_id + " (" + std::to_string(messages.size()) + " messages)", false});
             if (!resumed_title.empty()) {
@@ -2554,8 +2554,10 @@ int main(int argc, char* argv[]) {
                             if (!metric_str.empty()) metric_str += " \xC2\xB7 ";
                             metric_str += seg;
                         }
-                        std::string summary_line = s.icon + " " + s.verb + " \xC2\xB7 " + s.object;
-                        if (!metric_str.empty()) summary_line += " \xC2\xB7 " + metric_str;
+                        const int summary_width = std::max(
+                            20, chat_box.x_max - chat_box.x_min - 6);
+                        std::string summary_line = renderable_tool_summary_line(
+                            s, metric_str, summary_width);
                         rows.push_back(hbox({
                             text("   <- ") | color(Color::GrayDark),
                             text(summary_line) | color(row_color) | flex,
@@ -2579,7 +2581,7 @@ int main(int argc, char* argv[]) {
                                 : msg.content.substr(pos, nl - pos);
                             rows.push_back(hbox({
                                 text("      ") | color(Color::GrayDark),
-                                text(line) | color(Color::GrayLight) | dim | flex,
+                                paragraph(line) | color(Color::GrayLight) | dim | flex,
                             }));
                             if (nl == std::string::npos) break;
                             pos = nl + 1;
@@ -2640,8 +2642,10 @@ int main(int argc, char* argv[]) {
                         metric_str += seg;
                     }
 
-                    std::string summary_line = s.icon + " " + s.verb + " \xC2\xB7 " + s.object;
-                    if (!metric_str.empty()) summary_line += " \xC2\xB7 " + metric_str;
+                    const int summary_width = std::max(
+                        20, chat_box.x_max - chat_box.x_min - 6);
+                    std::string summary_line = renderable_tool_summary_line(
+                        s, metric_str, summary_width);
 
                     Elements rows;
                     rows.push_back(hbox({
@@ -2661,7 +2665,7 @@ int main(int argc, char* argv[]) {
                                 : msg.content.substr(pos, nl - pos);
                             rows.push_back(hbox({
                                 text("      ") | color(Color::GrayDark),
-                                text(line) | color(Color::GrayLight) | dim | flex,
+                                paragraph(line) | color(Color::GrayLight) | dim | flex,
                             }));
                             if (nl == std::string::npos) break;
                             pos = nl + 1;
@@ -2700,7 +2704,7 @@ int main(int argc, char* argv[]) {
 
                     auto line = hbox({
                         text("   <- ") | color(Color::GrayDark),
-                        paragraph(display_content) | color(Color::GrayLight) | dim | flex,
+                        render_tool_result_lines_preserving_breaks(display_content) | flex,
                     });
                     if (focused_message) {
                         line = line | focus;
