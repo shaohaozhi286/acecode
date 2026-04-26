@@ -1,5 +1,6 @@
 #pragma once
 
+#include "file_checkpoint_store.hpp"
 #include "session_storage.hpp"
 #include "../provider/llm_provider.hpp"
 
@@ -18,6 +19,15 @@ public:
     // Called for each message produced during conversation.
     // Appends to JSONL and periodically updates metadata.
     void on_message(const ChatMessage& msg);
+
+    // File checkpoint integration for /rewind. begin_user_turn_checkpoint()
+    // creates the per-user snapshot; track_file_write_before() updates that
+    // snapshot immediately before a write tool mutates a file.
+    void begin_user_turn_checkpoint(const std::string& user_message_uuid);
+    void track_file_write_before(const std::string& file_path);
+    bool file_checkpoint_can_restore(const std::string& user_message_uuid) const;
+    FileCheckpointDiffStats file_checkpoint_diff_stats(const std::string& user_message_uuid) const;
+    FileCheckpointRestoreResult rewind_files_to_checkpoint(const std::string& user_message_uuid) const;
 
     // Finalize current session: flush and write final metadata. Safe to call multiple times.
     void finalize();
@@ -39,6 +49,11 @@ public:
 
     // End current session (mark it done) so next on_message starts a new one.
     void end_current_session();
+
+    // Fork the active session into a fresh session id containing retained_prefix
+    // plus retained checkpoint metadata. The previous full transcript remains
+    // untouched on disk.
+    std::string fork_active_session(const std::vector<ChatMessage>& retained_prefix);
 
     // Cleanup old sessions beyond max_sessions limit.
     void cleanup_old_sessions(int max_sessions);
@@ -80,6 +95,7 @@ private:
     std::string last_user_summary_;
     std::string created_at_;
     std::string pending_title_;
+    FileCheckpointStore checkpoint_store_;
 
     mutable std::mutex mu_;
 };

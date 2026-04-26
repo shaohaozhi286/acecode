@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 
 #include "session/session_replay.hpp"
+#include "session/file_checkpoint_store.hpp"
 #include "session/tool_metadata_codec.hpp"
 #include "tool/tool_executor.hpp"
 #include "tool/diff_utils.hpp"
@@ -370,4 +371,23 @@ TEST(SessionReplay, UnknownRolePassthrough) {
     EXPECT_EQ(out[1].role, "tool_result");
     EXPECT_EQ(out[1].content, "shell output");
     EXPECT_TRUE(out[1].is_tool);
+}
+
+TEST(SessionReplay, FileCheckpointMetaMessagesAreHidden) {
+    acecode::FileCheckpointSnapshot snapshot;
+    snapshot.uuid = "snapshot";
+    snapshot.message_uuid = "user";
+    snapshot.timestamp = "2026-04-26T00:00:00Z";
+    ChatMessage checkpoint = acecode::FileCheckpointStore::encode_snapshot_message(snapshot);
+
+    ChatMessage user;
+    user.role = "user";
+    user.content = "visible";
+
+    ToolExecutor tools;
+    auto out = replay_session_messages({checkpoint, user}, tools);
+
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_EQ(out[0].role, "user");
+    EXPECT_EQ(out[0].content, "visible");
 }

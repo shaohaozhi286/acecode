@@ -16,6 +16,7 @@
 #include "../skills/skill_commands.hpp"
 #include "../session/session_manager.hpp"
 #include "../session/session_resume_restore.hpp"
+#include "../session/session_rewind.hpp"
 #include "../utils/terminal_title.hpp"
 #include <algorithm>
 #include <mutex>
@@ -36,6 +37,7 @@ static void cmd_help(CommandContext& ctx, const std::string& /*args*/) {
         << "  /config   - Show current configuration\n"
         << "  /tokens   - Show session token usage\n"
         << "  /resume   - Resume a previous session\n"
+        << "  /rewind   - Rewind to a previous user turn\n"
         << "  /mcp      - Manage MCP servers\n"
         << "  /skills   - List, invoke, or reload installed skills\n"
         << "  /memory   - List, view, edit, forget, or reload persistent user memory\n"
@@ -808,6 +810,197 @@ static void cmd_resume(CommandContext& ctx, const std::string& args) {
     };
 }
 
+namespace {
+
+constexpr int kMaxRewindItems = 20;
+
+void clear_rewind_picker(TuiState& state) {
+    state.rewind_picker_active = false;
+    state.rewind_mode_active = false;
+    state.rewind_items.clear();
+    state.rewind_selected = 0;
+    state.rewind_modes.clear();
+    state.rewind_mode_selected = 0;
+    state.rewind_callback = nullptr;
+}
+
+std::string format_code_restore_result(const FileCheckpointRestoreResult& result) {
+    std::ostringstream oss;
+    if (result.files_changed.empty()) {
+        oss << "Code rewind: no tracked file changes needed.";
+    } else {
+        oss << "Code rewind restored " << result.files_changed.size()
+            << " file" << (result.files_changed.size() == 1 ? "" : "s") << ".";
+    }
+    if (!result.errors.empty()) {
+        oss << "\nErrors:";
+        for (const auto& err : result.errors) {
+            oss << "\n  - " << err;
+        }
+    }
+    return oss.str();
+}
+
+std::string format_conversation_rewind_status(const TuiState::RewindItem& item,
+                                              const std::string& new_session_id) {
+    std::ostringstream oss;
+    oss << "Conversation rewound to: " << item.preview;
+    if (!new_session_id.empty()) {
+        oss << "\nNew session: " << new_session_id
+            << "\nOriginal full session remains available in /resume.";
+    }
+    return oss.str();
+}
+
+} // namespace
+
+static void cmd_rewind(CommandContext& ctx, const std::string& /*args*/) {
+    std::lock_guard<std::mutex> lk(ctx.state.mu);
+
+    if (!ctx.session_manager) {
+        ctx.state.conversation.push_back({"system", "Session persistence is not available.", false});
+        ctx.state.chat_follow_tail = true;
+        return;
+    }
+
+    if (ctx.state.is_waiting || ctx.state.tool_running || ctx.state.confirm_pending ||
+        ctx.state.ask_pending || ctx.state.is_compacting) {
+        ctx.state.conversation.push_back({"system",
+            "Rewind is unavailable while an agent turn, tool, confirmation, question, or compaction is active.",
+            false});
+        ctx.state.chat_follow_tail = true;
+        return;
+    }
+
+    auto targets = collect_rewind_targets(ctx.agent_loop.messages());
+    if (targets.empty()) {
+        ctx.state.conversation.push_back({"system", "No user turns are available to rewind.", false});
+        ctx.state.chat_follow_tail = true;
+        return;
+    }
+
+    clear_rewind_picker(ctx.state);
+    const int max_show = std::min(static_cast<int>(targets.size()), kMaxRewindItems);
+    ctx.state.rewind_items.reserve(max_show);
+
+    for (int shown = 0; shown < max_show; ++shown) {
+        const auto& target = targets[targets.size() - 1 - static_cast<size_t>(shown)];
+
+        TuiState::RewindItem item;
+        item.message_index = target.message_index;
+        item.message_uuid = target.message_uuid;
+        item.preview = target.preview;
+        item.has_stable_uuid = target.has_stable_uuid;
+        item.can_restore_code =
+            item.has_stable_uuid &&
+            ctx.session_manager->file_checkpoint_can_restore(item.message_uuid);
+
+        if (item.can_restore_code) {
+            auto stats = ctx.session_manager->file_checkpoint_diff_stats(item.message_uuid);
+            item.changed_files = static_cast<int>(stats.files_changed.size());
+            item.insertions = stats.insertions;
+            item.deletions = stats.deletions;
+        }
+
+        std::ostringstream line;
+        line << "[" << (shown + 1) << "] " << item.preview;
+        if (item.can_restore_code) {
+            line << "  code: " << item.changed_files << " file"
+                 << (item.changed_files == 1 ? "" : "s")
+                 << " +" << item.insertions << " -" << item.deletions;
+        } else if (!item.has_stable_uuid) {
+            line << "  conversation only (legacy)";
+        } else {
+            line << "  conversation only";
+        }
+        item.display = line.str();
+        ctx.state.rewind_items.push_back(std::move(item));
+    }
+
+    auto* sm = ctx.session_manager;
+    auto* al = &ctx.agent_loop;
+    auto* tools = ctx.tools;
+    auto* token_tracker = &ctx.token_tracker;
+    ctx.state.rewind_callback =
+        [&state = ctx.state, sm, al, tools, token_tracker](
+            TuiState::RewindItem item,
+            TuiState::RewindRestoreMode mode) {
+            // Caller holds state.mu, matching the /resume picker callback.
+            if (mode == TuiState::RewindRestoreMode::NeverMind) {
+                state.conversation.push_back({"system", "Rewind cancelled.", false});
+                state.chat_follow_tail = true;
+                return;
+            }
+
+            const bool wants_code =
+                mode == TuiState::RewindRestoreMode::CodeOnly ||
+                mode == TuiState::RewindRestoreMode::CodeAndConversation;
+            const bool wants_conversation =
+                mode == TuiState::RewindRestoreMode::ConversationOnly ||
+                mode == TuiState::RewindRestoreMode::CodeAndConversation;
+
+            std::string code_status;
+            if (wants_code) {
+                if (!item.can_restore_code || item.message_uuid.empty()) {
+                    code_status = "Code rewind is not available for this turn.";
+                } else {
+                    code_status = format_code_restore_result(
+                        sm->rewind_files_to_checkpoint(item.message_uuid));
+                }
+            }
+
+            if (wants_conversation) {
+                auto messages = al->messages();
+                if (item.message_index >= messages.size()) {
+                    state.conversation.push_back({"system",
+                        "Rewind failed: selected message is no longer available.", false});
+                    state.chat_follow_tail = true;
+                    return;
+                }
+
+                std::string prefill = rewind_prefill_text(messages[item.message_index]);
+                auto retained = retained_prefix_before_index(messages, item.message_index);
+                std::string new_session_id = sm->fork_active_session(retained);
+
+                al->clear_messages();
+                state.conversation.clear();
+                ToolExecutor fallback_tools;
+                const ToolExecutor& replay_tools = tools ? *tools : fallback_tools;
+                append_resumed_session_messages(retained, state, *al, replay_tools);
+
+                if (!code_status.empty()) {
+                    state.conversation.push_back({"system", code_status, false});
+                }
+                state.conversation.push_back({
+                    "system",
+                    format_conversation_rewind_status(item, new_session_id),
+                    false});
+
+                state.input_mode = InputMode::Normal;
+                state.input_text = std::move(prefill);
+                state.input_cursor = state.input_text.size();
+                state.history_index = -1;
+                state.pending_queue.clear();
+                state.token_status.clear();
+                token_tracker->reset();
+                state.chat_follow_tail = true;
+                state.chat_focus_index = static_cast<int>(state.conversation.size()) - 1;
+                state.chat_line_offset = 0;
+                return;
+            }
+
+            if (!code_status.empty()) {
+                state.conversation.push_back({"system", code_status, false});
+                state.chat_follow_tail = true;
+            }
+        };
+
+    ctx.state.rewind_selected = 0;
+    ctx.state.rewind_mode_selected = 0;
+    ctx.state.rewind_picker_active = true;
+    ctx.state.rewind_mode_active = false;
+}
+
 void register_builtin_commands(CommandRegistry& registry) {
     registry.register_command({"help", "Show available commands", cmd_help});
     registry.register_command({"clear", "Clear conversation history", cmd_clear});
@@ -816,6 +1009,8 @@ void register_builtin_commands(CommandRegistry& registry) {
     registry.register_command({"tokens", "Show session token usage", cmd_tokens});
     registry.register_command({"compact", "Compress conversation history", cmd_compact});
     registry.register_command({"resume", "Resume a previous session", cmd_resume});
+    registry.register_command({"rewind", "Rewind to a previous user turn", cmd_rewind});
+    registry.register_command({"checkpoint", "Alias for /rewind", cmd_rewind});
     registry.register_command({"mcp", "Manage MCP servers", cmd_mcp});
     registry.register_command({"skills", "List, invoke, or reload installed skills", cmd_skills});
     register_memory_command(registry);

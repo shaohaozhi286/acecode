@@ -7,11 +7,12 @@
 #include "utils/tool_errors.hpp"
 #include "utils/file_operations.hpp"
 #include <nlohmann/json.hpp>
+#include <exception>
 #include <filesystem>
 
 namespace acecode {
 
-static ToolResult execute_file_write(const std::string& arguments_json, const ToolContext& /*ctx*/) {
+static ToolResult execute_file_write(const std::string& arguments_json, const ToolContext& ctx) {
     // Parse arguments
     ToolArgsParser parser(arguments_json);
     if (parser.has_error()) {
@@ -43,6 +44,16 @@ static ToolResult execute_file_write(const std::string& arguments_json, const To
     if (file_exists) {
         FileOperations::read_content(file_path, old_content, error);
         // Ignore read errors here, we'll still try to write
+    }
+
+    if (ctx.track_file_write_before) {
+        try {
+            ctx.track_file_write_before(file_path);
+        } catch (const std::exception& e) {
+            LOG_WARN(std::string("file_write checkpoint hook failed: ") + e.what());
+        } catch (...) {
+            LOG_WARN("file_write checkpoint hook failed with unknown error");
+        }
     }
 
     // Write content

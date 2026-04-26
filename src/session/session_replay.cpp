@@ -2,6 +2,7 @@
 
 #include "session_replay.hpp"
 
+#include "session_rewind.hpp"
 #include "tool_metadata_codec.hpp"
 #include "../tool/tool_executor.hpp"
 
@@ -42,6 +43,10 @@ std::vector<TuiState::Message> replay_session_messages(
     out.reserve(messages.size());
 
     for (const auto& msg : messages) {
+        if (is_file_checkpoint_message(msg)) {
+            continue;
+        }
+
         if (msg.role == "user" || msg.role == "system") {
             // 规范角色,文本承载所有信息,直接推入。
             out.push_back({msg.role, msg.content, /*is_tool=*/false});

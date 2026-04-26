@@ -1757,6 +1757,163 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        // Rewind picker guard: target selection first, optional restore-mode
+        // selection second. This owns navigation while active.
+        {
+            std::unique_lock<std::mutex> lk(state.mu);
+            if (state.rewind_picker_active) {
+                auto clear_picker = [&]() {
+                    state.rewind_picker_active = false;
+                    state.rewind_mode_active = false;
+                    state.rewind_items.clear();
+                    state.rewind_selected = 0;
+                    state.rewind_modes.clear();
+                    state.rewind_mode_selected = 0;
+                    state.rewind_callback = nullptr;
+                };
+                auto populate_modes = [&](const TuiState::RewindItem& item) {
+                    state.rewind_modes.clear();
+                    if (item.can_restore_code) {
+                        state.rewind_modes.push_back({
+                            TuiState::RewindRestoreMode::CodeAndConversation,
+                            "Code and conversation",
+                            "Restore tracked files, fork the conversation, and prefill the selected prompt."
+                        });
+                        state.rewind_modes.push_back({
+                            TuiState::RewindRestoreMode::ConversationOnly,
+                            "Conversation only",
+                            "Fork the conversation and prefill the selected prompt."
+                        });
+                        state.rewind_modes.push_back({
+                            TuiState::RewindRestoreMode::CodeOnly,
+                            "Code only",
+                            "Restore tracked files without changing the conversation."
+                        });
+                    } else {
+                        state.rewind_modes.push_back({
+                            TuiState::RewindRestoreMode::ConversationOnly,
+                            "Conversation only",
+                            "Fork the conversation and prefill the selected prompt."
+                        });
+                    }
+                    state.rewind_modes.push_back({
+                        TuiState::RewindRestoreMode::NeverMind,
+                        "Never mind",
+                        "Cancel rewind."
+                    });
+                    state.rewind_mode_selected = 0;
+                };
+                auto commit_mode = [&](TuiState::RewindRestoreMode mode) {
+                    if (state.rewind_selected < 0 ||
+                        state.rewind_selected >= static_cast<int>(state.rewind_items.size())) {
+                        clear_picker();
+                        screen.PostEvent(Event::Custom);
+                        return;
+                    }
+                    auto item = state.rewind_items[state.rewind_selected];
+                    auto cb = state.rewind_callback;
+                    state.rewind_picker_active = false;
+                    state.rewind_mode_active = false;
+                    state.rewind_items.clear();
+                    state.rewind_selected = 0;
+                    state.rewind_modes.clear();
+                    state.rewind_mode_selected = 0;
+                    state.rewind_callback = nullptr;
+                    state.input_text.clear();
+                    state.input_cursor = 0;
+                    if (cb) cb(std::move(item), mode);
+                    clamp_chat_focus();
+                    screen.PostEvent(Event::Custom);
+                };
+
+                if (event == Event::Escape) {
+                    if (state.rewind_mode_active) {
+                        state.rewind_mode_active = false;
+                        state.rewind_modes.clear();
+                        state.rewind_mode_selected = 0;
+                    } else {
+                        clear_picker();
+                        state.conversation.push_back({"system", "Rewind cancelled.", false});
+                        state.chat_follow_tail = true;
+                        clamp_chat_focus();
+                    }
+                    screen.PostEvent(Event::Custom);
+                    return true;
+                }
+
+                const bool move_up =
+                    event == Event::ArrowUp || event == Event::Character('k');
+                const bool move_down =
+                    event == Event::ArrowDown || event == Event::Character('j');
+                if (move_up || move_down) {
+                    int* selected = state.rewind_mode_active
+                        ? &state.rewind_mode_selected
+                        : &state.rewind_selected;
+                    int count = state.rewind_mode_active
+                        ? static_cast<int>(state.rewind_modes.size())
+                        : static_cast<int>(state.rewind_items.size());
+                    if (count > 0) {
+                        if (move_up) {
+                            *selected = (*selected - 1 + count) % count;
+                        } else {
+                            *selected = (*selected + 1) % count;
+                        }
+                    }
+                    screen.PostEvent(Event::Custom);
+                    return true;
+                }
+
+                auto activate_current_target = [&]() {
+                    if (state.rewind_selected < 0 ||
+                        state.rewind_selected >= static_cast<int>(state.rewind_items.size())) {
+                        return;
+                    }
+                    const auto& item = state.rewind_items[state.rewind_selected];
+                    if (item.can_restore_code) {
+                        populate_modes(item);
+                        state.rewind_mode_active = true;
+                    } else {
+                        commit_mode(TuiState::RewindRestoreMode::ConversationOnly);
+                    }
+                };
+
+                if (event == Event::Return) {
+                    if (state.rewind_mode_active) {
+                        if (state.rewind_mode_selected >= 0 &&
+                            state.rewind_mode_selected < static_cast<int>(state.rewind_modes.size())) {
+                            auto mode = state.rewind_modes[state.rewind_mode_selected].mode;
+                            commit_mode(mode);
+                        }
+                    } else {
+                        activate_current_target();
+                    }
+                    screen.PostEvent(Event::Custom);
+                    return true;
+                }
+
+                if (event.is_character()) {
+                    std::string ch = event.character();
+                    if (!ch.empty() && ch[0] >= '1' && ch[0] <= '9') {
+                        int idx = ch[0] - '1';
+                        if (state.rewind_mode_active) {
+                            if (idx < static_cast<int>(state.rewind_modes.size())) {
+                                state.rewind_mode_selected = idx;
+                                auto mode = state.rewind_modes[idx].mode;
+                                commit_mode(mode);
+                            }
+                        } else if (idx < static_cast<int>(state.rewind_items.size())) {
+                            state.rewind_selected = idx;
+                            activate_current_target();
+                        }
+                        screen.PostEvent(Event::Custom);
+                    }
+                    return true;
+                }
+
+                return true;
+            }
+        }
+
         // Slash-command dropdown guard: when the dropdown is open, intercept
         // the navigation/commit keys before any other overlay or input-history
         // handler gets them.
@@ -2833,6 +2990,54 @@ int main(int argc, char* argv[]) {
             picker_rows.push_back(text(""));
             resume_picker_element = vbox(std::move(picker_rows)) | border | color(Color::Cyan);
         }
+        Element rewind_picker_element = text("");
+        if (state.rewind_picker_active && !state.rewind_items.empty()) {
+            Elements picker_rows;
+            if (state.rewind_mode_active) {
+                const int selected =
+                    std::clamp(state.rewind_selected, 0,
+                               static_cast<int>(state.rewind_items.size()) - 1);
+                const auto& item = state.rewind_items[selected];
+                picker_rows.push_back(
+                    text(" Rewind mode (Up/Down to select, Enter to confirm, Esc to go back, or type 1-9):")
+                    | bold | color(Color::Cyan));
+                picker_rows.push_back(text(" Target: " + item.preview) | color(Color::GrayLight));
+                picker_rows.push_back(text(" Code rewind only covers ACECode file_edit/file_write changes; manual edits, shell commands, MCP tools, git operations, and external side effects are not tracked.")
+                                      | color(Color::Yellow));
+                picker_rows.push_back(text(""));
+                for (int i = 0; i < static_cast<int>(state.rewind_modes.size()); ++i) {
+                    bool selected_mode = (i == state.rewind_mode_selected);
+                    const auto& mode = state.rewind_modes[i];
+                    auto row = hbox({
+                        text("  [" + std::to_string(i + 1) + "] " + mode.label + "  "),
+                        text(mode.description) | color(Color::GrayLight),
+                    });
+                    if (selected_mode) {
+                        row = row | bold | color(Color::White) | bgcolor(Color::RGB(0, 80, 120));
+                    } else {
+                        row = row | color(Color::GrayLight);
+                    }
+                    picker_rows.push_back(row);
+                }
+            } else {
+                picker_rows.push_back(
+                    text(" Rewind to a user turn (Up/Down to select, Enter to confirm, Esc to cancel, or type 1-9):")
+                    | bold | color(Color::Cyan));
+                picker_rows.push_back(text(""));
+                for (int i = 0; i < static_cast<int>(state.rewind_items.size()); ++i) {
+                    bool selected = (i == state.rewind_selected);
+                    auto row = text("  " + state.rewind_items[i].display);
+                    if (selected) {
+                        row = row | bold | color(Color::White) | bgcolor(Color::RGB(0, 80, 120));
+                    } else {
+                        row = row | color(Color::GrayLight);
+                    }
+                    picker_rows.push_back(row);
+                }
+            }
+            picker_rows.push_back(text(""));
+            rewind_picker_element = vbox(std::move(picker_rows)) | border | color(Color::Cyan);
+        }
         Element slash_dropdown_element = render_slash_dropdown(state);
 
         // AskUserQuestion overlay —— 和 confirm_pending 互斥,在渲染层面
@@ -2998,6 +3203,7 @@ int main(int argc, char* argv[]) {
             separatorHeavy() | color(Color::GrayDark),
             message_view,
             resume_picker_element,
+            rewind_picker_element,
             ask_overlay_element,
             slash_dropdown_element,
             thinking_element,

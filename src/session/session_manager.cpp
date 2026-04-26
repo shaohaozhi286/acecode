@@ -1,10 +1,12 @@
 #include "session_manager.hpp"
 #include "session_serializer.hpp"
+#include "session_rewind.hpp"
 #include "../utils/logger.hpp"
 
 #include <filesystem>
 #include <algorithm>
 #include <regex>
+#include <set>
 #include <sstream>
 
 namespace {
@@ -76,6 +78,8 @@ void SessionManager::start_session(const std::string& cwd, const std::string& pr
     last_user_summary_.clear();
     created_at_.clear();
     pending_title_.clear();
+    checkpoint_store_.reset();
+    checkpoint_store_.set_session(project_dir_, "");
 }
 
 void SessionManager::ensure_created() {
@@ -94,6 +98,7 @@ void SessionManager::ensure_created() {
     created_at_ = SessionStorage::now_iso8601();
     created_ = true;
     finalized_ = false;
+    checkpoint_store_.set_session(project_dir_, session_id_);
 
     // Write initial metadata
     SessionMeta meta;
@@ -127,6 +132,46 @@ void SessionManager::on_message(const ChatMessage& msg) {
     if (message_count_ % 5 == 0) {
         update_meta();
     }
+}
+
+void SessionManager::begin_user_turn_checkpoint(const std::string& user_message_uuid) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!started_ || user_message_uuid.empty()) return;
+    ensure_created();
+
+    FileCheckpointSnapshot snapshot = checkpoint_store_.make_snapshot(user_message_uuid);
+    SessionStorage::append_message(jsonl_path_, FileCheckpointStore::encode_snapshot_message(snapshot));
+    message_count_++;
+    if (message_count_ % 5 == 0) update_meta();
+}
+
+void SessionManager::track_file_write_before(const std::string& file_path) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!started_ || file_path.empty()) return;
+    ensure_created();
+
+    auto snapshot = checkpoint_store_.track_before_write(file_path);
+    if (!snapshot.has_value()) return;
+    SessionStorage::append_message(jsonl_path_, FileCheckpointStore::encode_snapshot_message(*snapshot));
+    message_count_++;
+    if (message_count_ % 5 == 0) update_meta();
+}
+
+bool SessionManager::file_checkpoint_can_restore(const std::string& user_message_uuid) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return checkpoint_store_.can_restore(user_message_uuid);
+}
+
+FileCheckpointDiffStats SessionManager::file_checkpoint_diff_stats(
+    const std::string& user_message_uuid) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return checkpoint_store_.diff_stats(user_message_uuid);
+}
+
+FileCheckpointRestoreResult SessionManager::rewind_files_to_checkpoint(
+    const std::string& user_message_uuid) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return checkpoint_store_.rewind_to(user_message_uuid);
 }
 
 void SessionManager::finalize() {
@@ -163,6 +208,7 @@ std::vector<ChatMessage> SessionManager::resume_session(const std::string& sessi
     meta_path_str_ = SessionStorage::meta_path(project_dir_, session_id);
     created_ = true;
     finalized_ = false;
+    checkpoint_store_.load_from_messages(project_dir_, session_id_, messages);
 
     // 从原 meta 恢复历史信息(title / summary / created_at)
     if (fs::exists(chosen.meta_path)) {
@@ -221,7 +267,56 @@ void SessionManager::end_current_session() {
     last_user_summary_.clear();
     created_at_.clear();
     pending_title_.clear();
+    checkpoint_store_.reset();
+    checkpoint_store_.set_session(project_dir_, "");
     // Keep started_=true, cwd_, provider_name_, model_name_, project_dir_
+}
+
+std::string SessionManager::fork_active_session(const std::vector<ChatMessage>& retained_prefix) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!started_) return {};
+    ensure_created();
+
+    std::set<std::string> retained_user_uuids;
+    for (const auto& msg : retained_prefix) {
+        if (msg.role == "user" && !msg.uuid.empty()) {
+            retained_user_uuids.insert(msg.uuid);
+        }
+    }
+
+    const std::string new_session_id = SessionStorage::generate_session_id();
+    auto checkpoint_meta = checkpoint_store_.fork_to_session(new_session_id, retained_user_uuids);
+
+    session_id_ = new_session_id;
+    jsonl_path_ = SessionStorage::session_path(project_dir_, session_id_);
+    meta_path_str_ = SessionStorage::meta_path(project_dir_, session_id_);
+    created_at_ = SessionStorage::now_iso8601();
+    created_ = true;
+    finalized_ = false;
+    message_count_ = 0;
+    last_user_summary_.clear();
+
+    for (auto it = retained_prefix.rbegin(); it != retained_prefix.rend(); ++it) {
+        if (it->role == "user" && !it->content.empty()) {
+            last_user_summary_ = extract_summary(it->content);
+            break;
+        }
+    }
+
+    fs::create_directories(project_dir_);
+    update_meta();
+
+    for (const auto& msg : retained_prefix) {
+        if (is_file_checkpoint_message(msg)) continue;
+        SessionStorage::append_message(jsonl_path_, msg);
+        message_count_++;
+    }
+    for (const auto& msg : checkpoint_meta) {
+        SessionStorage::append_message(jsonl_path_, msg);
+        message_count_++;
+    }
+    update_meta();
+    return session_id_;
 }
 
 void SessionManager::cleanup_old_sessions(int max_sessions) {
@@ -242,6 +337,7 @@ void SessionManager::cleanup_old_sessions(int max_sessions) {
             fs::remove(c.jsonl_path, ec);
             fs::remove(c.meta_path, ec);
         }
+        FileCheckpointStore::remove_session_backups(project_dir_, id);
     }
 }
 

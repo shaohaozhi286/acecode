@@ -129,6 +129,38 @@ struct TuiState {
     int resume_selected = 0; // currently highlighted index
     std::function<void(const std::string& session_id)> resume_callback;
 
+    // Rewind picker state. Target selection and restore-mode selection are
+    // separate phases so Esc can step back from modes before cancelling.
+    enum class RewindRestoreMode {
+        CodeAndConversation,
+        ConversationOnly,
+        CodeOnly,
+        NeverMind,
+    };
+    struct RewindItem {
+        size_t message_index = 0;
+        std::string message_uuid;
+        std::string preview;
+        bool has_stable_uuid = false;
+        bool can_restore_code = false;
+        int changed_files = 0;
+        int insertions = 0;
+        int deletions = 0;
+        std::string display;
+    };
+    struct RewindModeItem {
+        RewindRestoreMode mode = RewindRestoreMode::ConversationOnly;
+        std::string label;
+        std::string description;
+    };
+    bool rewind_picker_active = false;
+    bool rewind_mode_active = false;
+    std::vector<RewindItem> rewind_items;
+    int rewind_selected = 0;
+    std::vector<RewindModeItem> rewind_modes;
+    int rewind_mode_selected = 0;
+    std::function<void(RewindItem, RewindRestoreMode)> rewind_callback;
+
     // Slash-command dropdown state. Set by refresh_slash_dropdown() after every
     // input_text change. active becomes true when input starts with `/`, has no
     // whitespace, no other overlay is in the way, and the dismissed flag is

@@ -48,6 +48,10 @@ struct ToolContext {
     // loops must check this every iteration and terminate their subprocess /
     // work when it becomes true.
     const std::atomic<bool>* abort_flag = nullptr;
+    // Optional file-checkpoint hook used by write tools. Tools call this after
+    // validation succeeds and immediately before mutating a file so /rewind can
+    // restore the pre-write state.
+    std::function<void(const std::string& path)> track_file_write_before;
 };
 
 // Origin of a registered tool. MCP tools are grouped separately in the system

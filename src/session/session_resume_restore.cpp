@@ -1,6 +1,7 @@
 #include "session_resume_restore.hpp"
 
 #include "session_replay.hpp"
+#include "session_rewind.hpp"
 #include "../agent_loop.hpp"
 #include "../tool/tool_executor.hpp"
 #include "../tui_state.hpp"
@@ -32,6 +33,9 @@ void append_resumed_session_messages(const std::vector<ChatMessage>& messages,
 
     for (size_t i = 0; i < messages.size(); ++i) {
         const auto& msg = messages[i];
+        if (is_file_checkpoint_message(msg)) {
+            continue;
+        }
 
         // Shell mode persists a UI-only pair: user content starts with '!'
         // followed by a `tool_result` pseudo-role. The TUI should show the pair

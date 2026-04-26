@@ -7,11 +7,12 @@
 #include "utils/tool_errors.hpp"
 #include "utils/file_operations.hpp"
 #include <nlohmann/json.hpp>
+#include <exception>
 #include <filesystem>
 
 namespace acecode {
 
-static ToolResult execute_file_edit(const std::string& arguments_json, const ToolContext& /*ctx*/) {
+static ToolResult execute_file_edit(const std::string& arguments_json, const ToolContext& ctx) {
     // Parse arguments
     ToolArgsParser parser(arguments_json);
     if (parser.has_error()) {
@@ -71,6 +72,16 @@ static ToolResult execute_file_edit(const std::string& arguments_json, const Too
     // Apply edit
     std::string old_content = content;
     content.replace(found_pos, old_string.size(), new_string);
+
+    if (ctx.track_file_write_before) {
+        try {
+            ctx.track_file_write_before(file_path);
+        } catch (const std::exception& e) {
+            LOG_WARN(std::string("file_edit checkpoint hook failed: ") + e.what());
+        } catch (...) {
+            LOG_WARN("file_edit checkpoint hook failed with unknown error");
+        }
+    }
 
     // Write back
     if (!FileOperations::write_content(file_path, content, error)) {

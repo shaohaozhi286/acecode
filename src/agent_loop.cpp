@@ -4,6 +4,7 @@
 #include "utils/stream_processing.hpp"
 #include "commands/compact.hpp"
 #include "session/tool_metadata_codec.hpp"
+#include "session/session_rewind.hpp"
 #include <nlohmann/json.hpp>
 #include <mutex>
 #include <future>
@@ -114,8 +115,12 @@ void AgentLoop::run_agent(const std::string& user_message) {
     ChatMessage user_msg;
     user_msg.role = "user";
     user_msg.content = user_message;
+    ensure_user_message_identity(user_msg);
     messages_.push_back(user_msg);
-    if (session_manager_) session_manager_->on_message(user_msg);
+    if (session_manager_) {
+        session_manager_->on_message(user_msg);
+        session_manager_->begin_user_turn_checkpoint(user_msg.uuid);
+    }
 
     if (callbacks_.on_busy_changed) {
         callbacks_.on_busy_changed(true);
@@ -527,6 +532,13 @@ void AgentLoop::run_agent(const std::string& user_message) {
 
             ToolContext tool_ctx;
             tool_ctx.abort_flag = &abort_requested_;
+            if (session_manager_) {
+                tool_ctx.track_file_write_before = [this](const std::string& path) {
+                    if (session_manager_) {
+                        session_manager_->track_file_write_before(path);
+                    }
+                };
+            }
             if (callbacks_.on_tool_progress_update) {
                 auto update_cb = callbacks_.on_tool_progress_update;
                 tool_ctx.stream = [prog, update_cb](const std::string& chunk) {
