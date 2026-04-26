@@ -1,6 +1,7 @@
 #include "session_storage.hpp"
 #include "session_serializer.hpp"
 #include "../config/config.hpp"
+#include "../daemon/platform.hpp"
 
 #include <nlohmann/json.hpp>
 #include <filesystem>
@@ -12,6 +13,8 @@
 #include <ctime>
 #include <iomanip>
 #include <functional>
+#include <regex>
+#include <unordered_map>
 
 namespace fs = std::filesystem;
 
@@ -153,39 +156,131 @@ SessionMeta SessionStorage::read_meta(const std::string& meta_path) {
     return meta;
 }
 
+// 文件名匹配:
+//   group 1 = session_id (YYYYMMDD-HHMMSS-XXXX)
+//   group 3 = pid (纯数字,可选;不存在表示旧格式)
+// XXXX 是 4 个 hex 字符,可能含 a-f,所以 id 内部不会被误识别为 pid 段。
+static const std::regex& session_filename_regex() {
+    static const std::regex re(
+        R"(^(\d{8}-\d{6}-[0-9a-f]{4})(-(\d+))?\.jsonl$)");
+    return re;
+}
+
+static const std::regex& meta_filename_regex() {
+    static const std::regex re(
+        R"(^(\d{8}-\d{6}-[0-9a-f]{4})(-(\d+))?\.meta\.json$)");
+    return re;
+}
+
+// 返回一个单调比较意义上的 mtime(单位是 file_clock tick;不是 unix epoch
+// 也不需要是)。我们只用它做候选文件之间的排序,绝对时间没意义。失败返回 0。
+static std::int64_t file_mtime_epoch(const fs::path& p) {
+    std::error_code ec;
+    auto ftime = fs::last_write_time(p, ec);
+    if (ec) return 0;
+    return static_cast<std::int64_t>(ftime.time_since_epoch().count());
+}
+
+std::vector<SessionStorage::SessionFileCandidate>
+SessionStorage::find_session_files(const std::string& project_dir,
+                                    const std::string& session_id) {
+    std::vector<SessionFileCandidate> result;
+    if (!fs::exists(project_dir) || !fs::is_directory(project_dir)) {
+        return result;
+    }
+
+    const auto& re = session_filename_regex();
+    for (const auto& entry : fs::directory_iterator(project_dir)) {
+        if (!entry.is_regular_file()) continue;
+        std::string fname = entry.path().filename().string();
+        std::smatch m;
+        if (!std::regex_match(fname, m, re)) continue;
+        if (m[1].str() != session_id) continue;
+
+        SessionFileCandidate c;
+        c.jsonl_path = entry.path().string();
+        c.pid = m[3].matched ? std::stoi(m[3].str()) : 0;
+        c.meta_path = SessionStorage::meta_path(project_dir, session_id, c.pid);
+        c.mtime = file_mtime_epoch(entry.path());
+        result.push_back(std::move(c));
+    }
+
+    std::sort(result.begin(), result.end(),
+        [](const SessionFileCandidate& a, const SessionFileCandidate& b) {
+            return a.mtime > b.mtime;
+        });
+    return result;
+}
+
 std::vector<SessionMeta> SessionStorage::list_sessions(const std::string& project_dir) {
     std::vector<SessionMeta> sessions;
     if (!fs::exists(project_dir) || !fs::is_directory(project_dir)) {
         return sessions;
     }
 
+    // 同一 session_id 可能有多份 pid 后缀的 meta(daemon + TUI 各跑一份)。
+    // 按 id 分组,每个 id 只保留 mtime 最新那份。
+    struct Entry {
+        SessionMeta meta;
+        std::int64_t mtime = 0;
+    };
+    std::unordered_map<std::string, Entry> by_id;
+
+    const auto& re = meta_filename_regex();
     for (const auto& entry : fs::directory_iterator(project_dir)) {
         if (!entry.is_regular_file()) continue;
-        std::string filename = entry.path().filename().string();
-        // Look for *.meta.json files
-        if (filename.size() > 10 && filename.substr(filename.size() - 10) == ".meta.json") {
-            SessionMeta meta = read_meta(entry.path().string());
-            if (!meta.id.empty()) {
-                sessions.push_back(meta);
-            }
+        std::string fname = entry.path().filename().string();
+        std::smatch m;
+        if (!std::regex_match(fname, m, re)) continue;
+        std::string id = m[1].str();
+
+        SessionMeta meta = read_meta(entry.path().string());
+        if (meta.id.empty()) continue;
+        std::int64_t mtime = file_mtime_epoch(entry.path());
+
+        auto it = by_id.find(id);
+        if (it == by_id.end() || mtime > it->second.mtime) {
+            by_id[id] = Entry{std::move(meta), mtime};
         }
     }
 
-    // Sort by updated_at descending (most recent first)
+    sessions.reserve(by_id.size());
+    for (auto& [_, e] : by_id) sessions.push_back(std::move(e.meta));
+
     std::sort(sessions.begin(), sessions.end(),
         [](const SessionMeta& a, const SessionMeta& b) {
             return a.updated_at > b.updated_at;
         });
-
     return sessions;
 }
 
-std::string SessionStorage::session_path(const std::string& project_dir, const std::string& session_id) {
-    return (fs::path(project_dir) / (session_id + ".jsonl")).string();
+static std::string make_path_with_pid(const std::string& project_dir,
+                                       const std::string& session_id,
+                                       const std::string& suffix,
+                                       int pid) {
+    if (pid < 0) {
+        // 默认: 用本进程 pid
+        pid = static_cast<int>(acecode::daemon::current_pid());
+    }
+    std::string fname = session_id;
+    if (pid > 0) {
+        fname += '-';
+        fname += std::to_string(pid);
+    }
+    fname += suffix;
+    return (fs::path(project_dir) / fname).string();
 }
 
-std::string SessionStorage::meta_path(const std::string& project_dir, const std::string& session_id) {
-    return (fs::path(project_dir) / (session_id + ".meta.json")).string();
+std::string SessionStorage::session_path(const std::string& project_dir,
+                                          const std::string& session_id,
+                                          int pid) {
+    return make_path_with_pid(project_dir, session_id, ".jsonl", pid);
+}
+
+std::string SessionStorage::meta_path(const std::string& project_dir,
+                                       const std::string& session_id,
+                                       int pid) {
+    return make_path_with_pid(project_dir, session_id, ".meta.json", pid);
 }
 
 std::string SessionStorage::now_iso8601() {

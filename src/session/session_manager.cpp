@@ -1,8 +1,11 @@
 #include "session_manager.hpp"
 #include "session_serializer.hpp"
+#include "../utils/logger.hpp"
 
 #include <filesystem>
 #include <algorithm>
+#include <regex>
+#include <sstream>
 
 namespace {
 
@@ -136,27 +139,34 @@ void SessionManager::finalize() {
 std::vector<ChatMessage> SessionManager::resume_session(const std::string& session_id) {
     std::lock_guard<std::mutex> lk(mu_);
 
-    // Read the meta to find which project dir it's in
-    // We look in the current project_dir (already set via start_session)
-    std::string resume_jsonl = SessionStorage::session_path(project_dir_, session_id);
-    std::string resume_meta = SessionStorage::meta_path(project_dir_, session_id);
-
-    if (!fs::exists(resume_jsonl)) {
+    // 同一 session_id 在磁盘上可能存在多份候选(daemon 一份、TUI 一份、旧无 pid 一份)。
+    // v1 策略: 默认选 mtime 最近的一份;若有多份候选,记日志便于事后追溯。
+    // TODO: TUI 候选选择 UI(spec 8.3 的"列候选+让用户选")暂留 HTTP 默认行为兜底。
+    auto candidates = SessionStorage::find_session_files(project_dir_, session_id);
+    if (candidates.empty()) {
         return {};
     }
+    if (candidates.size() > 1) {
+        std::ostringstream oss;
+        oss << "[session] resume " << session_id << " found "
+            << candidates.size() << " candidates, picking newest by mtime: "
+            << fs::path(candidates.front().jsonl_path).filename().string();
+        LOG_INFO(oss.str());
+    }
+    const auto& chosen = candidates.front();
+    auto messages = SessionStorage::load_messages(chosen.jsonl_path);
 
-    auto messages = SessionStorage::load_messages(resume_jsonl);
-
-    // Re-activate this session
+    // 关键: resume 后续追加 MUST 写到带本进程 pid 的新文件,不修改原文件。
+    // 即使 chosen.pid 与本进程相同,也走 default(-1)以保持单一职责。
     session_id_ = session_id;
-    jsonl_path_ = resume_jsonl;
-    meta_path_str_ = resume_meta;
+    jsonl_path_ = SessionStorage::session_path(project_dir_, session_id);
+    meta_path_str_ = SessionStorage::meta_path(project_dir_, session_id);
     created_ = true;
     finalized_ = false;
 
-    // Restore state from meta
-    if (fs::exists(resume_meta)) {
-        auto meta = SessionStorage::read_meta(resume_meta);
+    // 从原 meta 恢复历史信息(title / summary / created_at)
+    if (fs::exists(chosen.meta_path)) {
+        auto meta = SessionStorage::read_meta(chosen.meta_path);
         created_at_ = meta.created_at;
         last_user_summary_ = meta.summary;
         pending_title_ = meta.title;
@@ -164,15 +174,26 @@ std::vector<ChatMessage> SessionManager::resume_session(const std::string& sessi
 
     message_count_ = static_cast<int>(messages.size());
 
+    // 把已有消息的快照写入新文件(否则 resume 后新文件只含 resume 之后追加的消息,
+    // 下次再 resume 看到的是个截断版)。原文件保持只读不动。
+    for (const auto& m : messages) {
+        SessionStorage::append_message(jsonl_path_, m);
+    }
+    // 立即写一份 meta,免得 update_meta 等到第 5 条才落盘。
+    update_meta();
+
     return messages;
 }
 
 SessionMeta SessionManager::load_session_meta(const std::string& session_id) const {
     std::lock_guard<std::mutex> lk(mu_);
     if (project_dir_.empty()) return {};
-    std::string p = SessionStorage::meta_path(project_dir_, session_id);
-    if (!fs::exists(p)) return {};
-    return SessionStorage::read_meta(p);
+    // 多 pid 候选: 取 mtime 最新那份的 meta。
+    auto candidates = SessionStorage::find_session_files(project_dir_, session_id);
+    if (candidates.empty()) return {};
+    const auto& chosen = candidates.front();
+    if (!fs::exists(chosen.meta_path)) return {};
+    return SessionStorage::read_meta(chosen.meta_path);
 }
 
 void SessionManager::set_active_provider(const std::string& provider,
@@ -210,13 +231,17 @@ void SessionManager::cleanup_old_sessions(int max_sessions) {
     auto sessions = SessionStorage::list_sessions(project_dir_);
     if (static_cast<int>(sessions.size()) <= max_sessions) return;
 
-    // Sessions are sorted newest-first; remove from the tail
+    // Sessions are sorted newest-first; remove from the tail.
+    // 同一 session_id 在磁盘上可能有多份 pid 后缀文件(daemon + TUI),
+    // 一律全部清理 + 配对的 meta。
     for (size_t i = static_cast<size_t>(max_sessions); i < sessions.size(); ++i) {
-        std::string jsonl = SessionStorage::session_path(project_dir_, sessions[i].id);
-        std::string meta = SessionStorage::meta_path(project_dir_, sessions[i].id);
+        const std::string& id = sessions[i].id;
+        auto candidates = SessionStorage::find_session_files(project_dir_, id);
         std::error_code ec;
-        fs::remove(jsonl, ec);
-        fs::remove(meta, ec);
+        for (const auto& c : candidates) {
+            fs::remove(c.jsonl_path, ec);
+            fs::remove(c.meta_path, ec);
+        }
     }
 }
 

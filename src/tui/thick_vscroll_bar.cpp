@@ -66,7 +66,8 @@ class ThickVScrollBar : public ftxui::Node {
         const int x_left = stencil.x_max - width_ + 1;
 
         // 永远先回填 track_box,无论可不可滚动 —— 调用方靠 Contain(x,y) 决定
-        // 落点是不是滚动条,可滚性由 y_to_focus 自己处理。
+        // 落点是不是滚动条,可滚性由 y_to_focus 自己处理。命中盒覆盖全部
+        // width_ 列,即使有几列纯空白(它们就是给鼠标的命中扩展区)。
         if (out_track_box_) {
             out_track_box_->x_min = x_left;
             out_track_box_->x_max = x_right;
@@ -74,17 +75,30 @@ class ThickVScrollBar : public ftxui::Node {
             out_track_box_->y_max = stencil.y_max;
         }
 
-        // 内容能完全装下时不画拇指,留两列空白 —— 与上游 vscroll_indicator 行为一致。
+        // 内容能完全装下时不画拇指,留所有列空白 —— 与上游 vscroll_indicator 行为一致。
         if (size_inner <= 0 || size_outter >= size_inner) {
             return;
         }
 
+        // 最小 thumb 高度 6(2x 子格 = 3 整格)。上游 std::max(size, 1) 在
+        // 长会话(几千行)时会把 thumb 缩到一个半格,鼠标根本点不到。重新
+        // 推导 start_y 让 thumb 在 [track_top, track_bottom] 区间按 scroll
+        // 比例移动,而不是按上游"thumb_size 隐含可移动空间"的耦合公式 ——
+        // 那种写法跟 min-clamp 一起会让 thumb 在底部探出轨道。
+        const int track_2x = 2 * size_outter;
+        const int min_thumb_2x = std::min(6, track_2x);
         int size = 2 * size_outter * size_outter / size_inner;
-        size = std::max(size, 1);
+        size = std::max(size, min_thumb_2x);
+        if (size > track_2x) size = track_2x;
 
-        const int start_y =
-            2 * stencil.y_min +
-            2 * (stencil.y_min - box_.y_min) * size_outter / size_inner;
+        const int scroll_range_2x = track_2x - size;
+        const int scroll_offset_inner = stencil.y_min - box_.y_min;
+        const int max_scroll_inner = size_inner - size_outter;
+        int start_y = 2 * stencil.y_min;
+        if (max_scroll_inner > 0 && scroll_range_2x > 0) {
+            start_y +=
+                scroll_range_2x * scroll_offset_inner / max_scroll_inner;
+        }
 
         const bool ascii = ascii_icons_enabled();
         // 视觉与上游 vscroll_indicator 完全对齐:thumb 整格 = ┃ (U+2503
@@ -107,11 +121,11 @@ class ThickVScrollBar : public ftxui::Node {
                 up ? (down ? thumb_full : thumb_top_half)
                    : (down ? thumb_bot_half : empty_glyph);
 
-            // 全部 width 列都画相同的字符:thumb 范围内是块字形,其余留空。
-            // 两列同时填实块给出"粗条"的视觉重量,无须额外 rail。
+            // 只在最右一列画 thumb 字形(与上游 vscroll_indicator 看起来
+            // 完全一样);其余 width-1 列留空,作为隐形横向命中扩展。
             for (int x = x_left; x <= x_right; ++x) {
                 auto& cell = screen.CellAt(x, y);
-                cell.character = thumb_char;
+                cell.character = (x == x_right) ? thumb_char : empty_glyph;
             }
         }
     }

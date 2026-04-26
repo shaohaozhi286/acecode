@@ -106,6 +106,11 @@ target_link_libraries(acecode_testable PUBLIC
 )
 if(Crow_FOUND)
     target_link_libraries(acecode_testable PUBLIC Crow::Crow)
+    # Crow 默认走 standalone asio，但只在它自己的 socket_adaptors.h 里 #define
+    # ASIO_STANDALONE。如果某个 TU 先 include <asio.hpp> 再 include <crow.h>，
+    # asio 头会先被以 boost-fallback 模式编译，触发 boost/asio.hpp not found。
+    # PUBLIC 显式定义消除 include 顺序依赖。
+    target_compile_definitions(acecode_testable PUBLIC ASIO_STANDALONE)
 endif()
 if(WIN32)
     target_link_libraries(acecode_testable PUBLIC bcrypt advapi32)

@@ -44,13 +44,35 @@ public:
     static SessionMeta read_meta(const std::string& meta_path);
 
     // List all sessions in a project directory, sorted by updated_at descending.
+    // 同一 session_id 在磁盘上可能存在多个 pid 后缀文件（daemon + TUI 并发场景）；
+    // 此函数按 id 去重，每个 id 只返回 mtime 最新那份对应的 SessionMeta。
     static std::vector<SessionMeta> list_sessions(const std::string& project_dir);
 
-    // Get the JSONL file path for a session: <project_dir>/<session_id>.jsonl
-    static std::string session_path(const std::string& project_dir, const std::string& session_id);
+    // 一份 session 文件的候选记录，用于 resume 时做"多 pid 文件取最新"决策。
+    struct SessionFileCandidate {
+        std::string jsonl_path;
+        std::string meta_path;
+        int pid = 0;            // 0 = 旧格式无 pid 后缀
+        std::int64_t mtime = 0; // file_clock::now epoch seconds，用于排序
+    };
 
-    // Get the meta file path for a session: <project_dir>/<session_id>.meta.json
-    static std::string meta_path(const std::string& project_dir, const std::string& session_id);
+    // 在 project_dir 下查找所有匹配 `<session_id>(-<pid>)?.jsonl` 的文件。
+    // 返回结果按 mtime 降序（最近的在前）。空表示该 id 在磁盘上不存在。
+    static std::vector<SessionFileCandidate> find_session_files(
+        const std::string& project_dir, const std::string& session_id);
+
+    // Get the JSONL file path for a session.
+    // pid == -1（默认）→ 自动用本进程 pid，结果 `<dir>/<id>-<pid>.jsonl`
+    // pid == 0          → 旧格式，无 pid 后缀，结果 `<dir>/<id>.jsonl`（兼容读取用）
+    // pid >  0          → 显式指定，结果 `<dir>/<id>-<pid>.jsonl`
+    static std::string session_path(const std::string& project_dir,
+                                    const std::string& session_id,
+                                    int pid = -1);
+
+    // Get the meta file path for a session. pid 语义同 session_path。
+    static std::string meta_path(const std::string& project_dir,
+                                 const std::string& session_id,
+                                 int pid = -1);
 
     // Get current time as ISO 8601 string (UTC)
     static std::string now_iso8601();

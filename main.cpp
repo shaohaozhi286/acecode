@@ -66,6 +66,7 @@
 #include "permissions.hpp"
 #include "agent_loop.hpp"
 #include "commands/configure.hpp"
+#include "daemon/cli.hpp"
 #include "commands/command_registry.hpp"
 #include "commands/builtin_commands.hpp"
 #include "commands/compact.hpp"
@@ -592,6 +593,45 @@ int main(int argc, char* argv[]) {
     // SECURITY: Prevent Windows from executing commands from current directory.
     // Without this, a malicious exe placed in cwd could hijack system commands.
     SetEnvironmentVariableA("NoDefaultCurrentDirectoryInExePath", "1");
+#endif
+
+    // ---- Top-level subcommand dispatch ----
+    // `acecode daemon ...` 完全脱离 TUI,在第一时间分流出去。所有其它路径继续走
+    // 下面的 TUI argv 解析。Service 子命令(Section 6)预留同样的位置。
+    if (argc >= 2 && std::string(argv[1]) == "daemon") {
+        std::vector<std::string> tokens;
+        for (int i = 2; i < argc; ++i) tokens.emplace_back(argv[i]);
+        std::string exe_path = (argc > 0 && argv[0]) ? std::string(argv[0]) : "";
+        return acecode::daemon::cli::run(tokens, exe_path);
+    }
+
+    // 5.6: ServiceMain detection — SCM 启动时 argv 含 --service-main 标记。
+    // 实现留给 Section 6;现在只给清晰错误,避免被 SCM 静默 stuck。
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--service-main") {
+            std::cerr << "acecode: --service-main path is not implemented yet "
+                         "(planned for openspec add-web-daemon Section 6).\n"
+                         "Use `acecode daemon start` for now.\n";
+            return 64;
+        }
+    }
+
+    // 5.7: 双击启动检测(Windows)。无参数 + 控制台只挂着自己一个进程
+    // (GetConsoleProcessList 返回 1)= 双击;此时按 daemon.auto_start_on_double_click
+    // 决定走 TUI 还是 daemon detach。
+#ifdef _WIN32
+    if (argc == 1) {
+        AppConfig cfg_probe = load_config();
+        if (cfg_probe.daemon.auto_start_on_double_click) {
+            DWORD procs[2] = {0, 0};
+            DWORD n = ::GetConsoleProcessList(procs, 2);
+            if (n == 1) {
+                std::vector<std::string> tokens = {"start"};
+                std::string exe_path = argv[0] ? std::string(argv[0]) : "";
+                return acecode::daemon::cli::run(tokens, exe_path);
+            }
+        }
+    }
 #endif
 
     // ---- Parse CLI arguments ----
@@ -1283,9 +1323,9 @@ int main(int argc, char* argv[]) {
                 resumed_title = sessions.front().title;
             }
         } else if (!target_id.empty()) {
-            // Look up meta directly so we get the title without listing all sessions.
-            auto project_dir = SessionStorage::get_project_dir(working_dir);
-            auto meta = SessionStorage::read_meta(SessionStorage::meta_path(project_dir, target_id));
+            // 通过 SessionManager 走多 pid 候选挑最新的 meta(daemon + TUI 并发场景),
+            // 避免按本进程 pid 拼路径而读不到别的进程或老格式留下的文件。
+            auto meta = session_manager.load_session_meta(target_id);
             resumed_title = meta.title;
         }
         if (!target_id.empty()) {
@@ -2689,15 +2729,18 @@ int main(int argc, char* argv[]) {
             message_elements.push_back(text(""));
         }
 
-        // draggable-thick-scrollbar: visually identical to FTXUI's stock
-        // vscroll_indicator (1 column, ┃╹╻ glyphs) — the decorator's only
-        // job is to publish its column extent into scrollbar_box so the
-        // mouse handler can hit-test a click as "scrollbar drag" instead
-        // of "text selection". The | yframe | reflect(chat_box) | flex
-        // chain is unchanged from upstream usage.
+        // draggable-thick-scrollbar: thumb glyph identical to upstream
+        // vscroll_indicator (┃╹╻),painted only in the rightmost reserved
+        // column. We reserve 3 columns total so the *invisible* hit zone
+        // is wider than 1 cell — the leftmost 2 reserved columns render
+        // as whitespace but scrollbar_box.Contain() still matches them,
+        // making mouse aim much easier without changing the visual rail
+        // position. The decorator also enforces a minimum thumb height
+        // (3 cells) so long sessions don't shrink the click target to a
+        // single half-block.
         auto message_view = acecode::tui::thick_vscroll_bar(
                                 vbox(std::move(message_elements)),
-                                /*width=*/1,
+                                /*width=*/3,
                                 scrollbar_box)
             | yframe | reflect(chat_box) | flex
             // mouse-selection-copy: visual feedback for drag-selection. The
