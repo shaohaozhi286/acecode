@@ -736,10 +736,11 @@ static void cmd_resume(CommandContext& ctx, const std::string& args) {
         return;
     }
 
-    // Build picker items
-    int max_show = std::min(static_cast<int>(sessions.size()), 20);
+    // Build picker items. SessionManager::list_sessions() already truncates
+    // to config.max_sessions, so render every entry it returned — viewport
+    // scrolling in the TUI handles the case where the list does not fit.
     ctx.state.resume_items.clear();
-    for (int i = 0; i < max_show; ++i) {
+    for (size_t i = 0; i < sessions.size(); ++i) {
         const auto& s = sessions[i];
         std::ostringstream line;
         line << "[" << (i + 1) << "] " << s.updated_at
@@ -750,6 +751,7 @@ static void cmd_resume(CommandContext& ctx, const std::string& args) {
         ctx.state.resume_items.push_back({s.id, line.str()});
     }
     ctx.state.resume_selected = 0;
+    ctx.state.resume_view_offset = 0;
     ctx.state.resume_picker_active = true;
 
     // Capture session list for callback
@@ -812,13 +814,12 @@ static void cmd_resume(CommandContext& ctx, const std::string& args) {
 
 namespace {
 
-constexpr int kMaxRewindItems = 20;
-
 void clear_rewind_picker(TuiState& state) {
     state.rewind_picker_active = false;
     state.rewind_mode_active = false;
     state.rewind_items.clear();
     state.rewind_selected = 0;
+    state.rewind_view_offset = 0;
     state.rewind_modes.clear();
     state.rewind_mode_selected = 0;
     state.rewind_callback = nullptr;
@@ -880,11 +881,12 @@ static void cmd_rewind(CommandContext& ctx, const std::string& /*args*/) {
     }
 
     clear_rewind_picker(ctx.state);
-    const int max_show = std::min(static_cast<int>(targets.size()), kMaxRewindItems);
-    ctx.state.rewind_items.reserve(max_show);
+    // Show every collected user turn — viewport scrolling in the TUI handles
+    // long lists, so no per-call cap is needed.
+    ctx.state.rewind_items.reserve(targets.size());
 
-    for (int shown = 0; shown < max_show; ++shown) {
-        const auto& target = targets[targets.size() - 1 - static_cast<size_t>(shown)];
+    for (size_t shown = 0; shown < targets.size(); ++shown) {
+        const auto& target = targets[targets.size() - 1 - shown];
 
         TuiState::RewindItem item;
         item.message_index = target.message_index;

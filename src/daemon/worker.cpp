@@ -46,6 +46,8 @@ namespace acecode::daemon {
 namespace {
 
 // 终止信号 → 唤醒主循环退出。POSIX 与 Windows 各有一套。
+// 文件级而非 anon-namespace,因为 ServiceMain 的 SCM 控制 handler 也要触发它
+// (经 worker.hpp 暴露的 request_worker_termination)。
 std::mutex              g_term_mu;
 std::condition_variable g_term_cv;
 std::atomic<bool>       g_term_requested{false};
@@ -113,6 +115,12 @@ std::string validate_can_start(const WorkerOptions& opts) {
 }
 
 int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
+    // daemon 模式日志切换(spec 12.1-12.3): 写到 ~/.acecode/logs/daemon-{date}.log,
+    // 跨午夜自动滚动文件;foreground=true 时同时镜像到 stderr。必须放在 preflight
+    // 之前,否则启动期校验失败时不会留下任何日志记录。
+    Logger::instance().init_with_rotation(get_logs_dir(), "daemon", opts.foreground);
+    Logger::instance().set_level(LogLevel::Dbg);
+
     // 启动前硬安全校验(spec 11.3)。token 还没生成,这里先做 dangerous 检查;
     // 非 loopback 缺 token 的检查放在 token 生成后,因为我们生成 token = 总是
     // 满足。但若用户后续传入外部配置开关禁用 token,应在那里失败。当前 v1
@@ -220,6 +228,8 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     web_deps.web_cfg            = &cfg.web;
     web_deps.daemon_cfg         = &cfg.daemon;
     web_deps.app_config         = &cfg_mut;
+    web_deps.config_path        =
+        (std::filesystem::path(acecode::get_acecode_dir()) / "config.json").string();
     web_deps.cwd                = cwd;
     web_deps.token              = token;
     web_deps.guid               = guid;
@@ -250,6 +260,10 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     heartbeat.stop();
     cleanup_runtime_files();
     return rc;
+}
+
+void request_worker_termination() {
+    request_terminate();
 }
 
 } // namespace acecode::daemon

@@ -1,5 +1,6 @@
 #include "slash_dropdown.hpp"
 #include "../commands/command_registry.hpp"
+#include "picker_scroll.hpp"
 
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/terminal.hpp>
@@ -12,7 +13,6 @@ namespace acecode {
 
 namespace {
 
-constexpr int kMaxItems = 8;
 constexpr int kNarrowTerminalColumns = 40;
 
 bool contains_whitespace(const std::string& s) {
@@ -48,6 +48,7 @@ void refresh_slash_dropdown(TuiState& state, const CommandRegistry& reg) {
         state.slash_dropdown_active = false;
         state.slash_dropdown_items.clear();
         state.slash_dropdown_selected = 0;
+        state.slash_dropdown_view_offset = 0;
         state.slash_dropdown_total_matches = 0;
         return;
     }
@@ -58,6 +59,7 @@ void refresh_slash_dropdown(TuiState& state, const CommandRegistry& reg) {
         state.slash_dropdown_active = false;
         state.slash_dropdown_items.clear();
         state.slash_dropdown_selected = 0;
+        state.slash_dropdown_view_offset = 0;
         state.slash_dropdown_total_matches = 0;
         return;
     }
@@ -66,6 +68,7 @@ void refresh_slash_dropdown(TuiState& state, const CommandRegistry& reg) {
         state.slash_dropdown_active = false;
         state.slash_dropdown_items.clear();
         state.slash_dropdown_selected = 0;
+        state.slash_dropdown_view_offset = 0;
         state.slash_dropdown_total_matches = 0;
         return;
     }
@@ -98,6 +101,7 @@ void refresh_slash_dropdown(TuiState& state, const CommandRegistry& reg) {
         state.slash_dropdown_active = false;
         state.slash_dropdown_items.clear();
         state.slash_dropdown_selected = 0;
+        state.slash_dropdown_view_offset = 0;
         return;
     }
 
@@ -112,11 +116,9 @@ void refresh_slash_dropdown(TuiState& state, const CommandRegistry& reg) {
             state.slash_dropdown_items[state.slash_dropdown_selected].name;
     }
 
-    // Truncate to kMaxItems for display.
-    if (static_cast<int>(scored.size()) > kMaxItems) {
-        scored.resize(kMaxItems);
-    }
-
+    // Keep the full ranked list — viewport scrolling in the renderer handles
+    // overflow, so the user can reach commands beyond the first kSlashDropdownVisibleRows
+    // via Arrow / PgUp / PgDn / Home / End instead of needing to refine the filter.
     state.slash_dropdown_items.clear();
     state.slash_dropdown_items.reserve(scored.size());
     for (auto& s : scored) {
@@ -134,6 +136,10 @@ void refresh_slash_dropdown(TuiState& state, const CommandRegistry& reg) {
         }
     }
     state.slash_dropdown_selected = new_selected;
+    state.slash_dropdown_view_offset = acecode::tui::scroll_to_keep_visible(
+        state.slash_dropdown_selected, state.slash_dropdown_view_offset,
+        acecode::tui::kSlashDropdownVisibleRows,
+        static_cast<int>(state.slash_dropdown_items.size()));
     state.slash_dropdown_active = true;
 }
 
@@ -146,8 +152,20 @@ ftxui::Element render_slash_dropdown(const TuiState& state) {
     const int term_cols = Terminal::Size().dimx;
     const bool narrow = term_cols > 0 && term_cols < kNarrowTerminalColumns;
 
+    const int total = static_cast<int>(state.slash_dropdown_items.size());
+    const int visible = std::min(acecode::tui::kSlashDropdownVisibleRows, total);
+    const int offset = std::clamp(state.slash_dropdown_view_offset, 0,
+                                  std::max(0, total - visible));
+    const int items_above = offset;
+    const int items_below = std::max(0, total - offset - visible);
+
     Elements rows;
-    for (int i = 0; i < static_cast<int>(state.slash_dropdown_items.size()); ++i) {
+    if (items_above > 0) {
+        rows.push_back(
+            text("  \xE2\x86\x91 " + std::to_string(items_above) + " more above")
+            | dim | color(Color::GrayDark));
+    }
+    for (int i = offset; i < offset + visible; ++i) {
         const auto& item = state.slash_dropdown_items[i];
         const bool selected = (i == state.slash_dropdown_selected);
         Element row;
@@ -175,13 +193,9 @@ ftxui::Element render_slash_dropdown(const TuiState& state) {
         }
         rows.push_back(row);
     }
-
-    const int extra =
-        state.slash_dropdown_total_matches -
-        static_cast<int>(state.slash_dropdown_items.size());
-    if (extra > 0) {
+    if (items_below > 0) {
         rows.push_back(
-            text("  (+" + std::to_string(extra) + " more)")
+            text("  \xE2\x86\x93 " + std::to_string(items_below) + " more below")
             | dim | color(Color::GrayDark));
     }
 

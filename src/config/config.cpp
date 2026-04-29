@@ -2,6 +2,7 @@
 
 #include "../utils/constants.hpp"
 #include "../utils/logger.hpp"
+#include "../utils/paths.hpp"
 
 #include <cstdlib>
 #include <fstream>
@@ -88,22 +89,9 @@ std::vector<std::string> get_project_dirs_up_to_home(const std::string& cwd) {
 }
 
 std::string get_acecode_dir() {
-    std::string home;
-#ifdef _WIN32
-    const char* userprofile = std::getenv("USERPROFILE");
-    if (userprofile) {
-        home = userprofile;
-    }
-#else
-    const char* home_env = std::getenv("HOME");
-    if (home_env) {
-        home = home_env;
-    }
-#endif
-    if (home.empty()) {
-        home = ".";
-    }
-    return (fs::path(home) / ".acecode").string();
+    // 数据目录路径解析全部委托给 paths.cpp,RunMode 决定 User vs Service 根目录
+    // (Decision 8)。User 模式行为与历史一致 — TUI / standalone daemon 不受影响。
+    return resolve_data_dir(get_run_mode());
 }
 
 std::string get_run_dir() {
@@ -473,14 +461,9 @@ AppConfig load_config() {
     return cfg;
 }
 
-void save_config(const AppConfig& cfg) {
-    std::string acecode_dir = get_acecode_dir();
-    std::string config_path = (fs::path(acecode_dir) / "config.json").string();
+namespace {
 
-    if (!fs::exists(acecode_dir)) {
-        fs::create_directories(acecode_dir);
-    }
-
+nlohmann::json build_config_json(const AppConfig& cfg) {
     nlohmann::json j;
     j["provider"] = cfg.provider;
     j["openai"]["base_url"] = cfg.openai.base_url;
@@ -648,7 +631,34 @@ void save_config(const AppConfig& cfg) {
         j["mcp_servers"] = mj;
     }
 
+    return j;
+}
+
+} // namespace
+
+void save_config(const AppConfig& cfg) {
+    std::string acecode_dir = get_acecode_dir();
+    std::string config_path = (fs::path(acecode_dir) / "config.json").string();
+
+    if (!fs::exists(acecode_dir)) {
+        fs::create_directories(acecode_dir);
+    }
+
+    auto j = build_config_json(cfg);
     std::ofstream ofs(config_path);
+    if (ofs.is_open()) {
+        ofs << j.dump(2) << std::endl;
+    }
+}
+
+void save_config(const AppConfig& cfg, const std::string& explicit_path) {
+    fs::path p(explicit_path);
+    if (p.has_parent_path() && !fs::exists(p.parent_path())) {
+        fs::create_directories(p.parent_path());
+    }
+
+    auto j = build_config_json(cfg);
+    std::ofstream ofs(p);
     if (ofs.is_open()) {
         ofs << j.dump(2) << std::endl;
     }

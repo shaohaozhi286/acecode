@@ -84,7 +84,7 @@ struct DaemonConfig {
 struct WebConfig {
     bool enabled = true;
     std::string bind = "127.0.0.1";
-    int port = 26419;
+    int port = 28080;
     // Empty = serve embedded assets; non-empty = serve from this filesystem path
     // (development mode for the front-end change).
     std::string static_dir;
@@ -163,6 +163,11 @@ AppConfig load_config();
 // Save config to ~/.acecode/config.json.
 // Creates directory if missing, overwrites existing file.
 void save_config(const AppConfig& cfg);
+
+// Save config to an explicit file path. Creates parent directory if missing.
+// Used by daemon/test code paths that must NOT touch the user's real config —
+// e.g. PUT /api/mcp under WebServerFixture writes to a per-test temp file.
+void save_config(const AppConfig& cfg, const std::string& explicit_path);
 
 // Get the path to ~/.acecode/ directory
 std::string get_acecode_dir();

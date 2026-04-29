@@ -26,7 +26,9 @@
 #include <atomic>
 #include <chrono>
 #include <cpr/cpr.h>
+#include <filesystem>
 #include <nlohmann/json.hpp>
+#include <random>
 #include <thread>
 
 using namespace std::chrono_literals;
@@ -56,6 +58,7 @@ struct WebServerFixture {
 
     std::thread server_thread;
     int port = 0;
+    std::filesystem::path tmp_dir;
 
     WebServerFixture() {
         port = pick_test_port();
@@ -63,6 +66,14 @@ struct WebServerFixture {
         web_cfg.port = port;
         cfg.web = web_cfg;
         cfg.daemon = daemon_cfg;
+
+        // PUT /api/mcp 走 save_config 落盘 — 必须指向临时目录,否则
+        // 会覆盖真实的 ~/.acecode/config.json(历史 bug,曾把测试用的
+        // /usr/bin/python3 -m myserver MCP server 写进用户配置)。
+        std::random_device rd;
+        tmp_dir = std::filesystem::temp_directory_path() /
+                  ("acecode_web_test_" + std::to_string(rd()));
+        std::filesystem::create_directories(tmp_dir);
 
         acecode::SessionRegistryDeps deps;
         deps.provider_accessor = [] { return std::shared_ptr<acecode::LlmProvider>{}; };
@@ -77,6 +88,7 @@ struct WebServerFixture {
         wdeps.web_cfg = &cfg.web;
         wdeps.daemon_cfg = &cfg.daemon;
         wdeps.app_config = &cfg;
+        wdeps.config_path = (tmp_dir / "config.json").string();
         wdeps.cwd = "/tmp/web_server_smoke_test";
         wdeps.token = "smoke-token";
         wdeps.guid = "test-guid-aaaa-bbbb";
@@ -106,6 +118,8 @@ struct WebServerFixture {
     ~WebServerFixture() {
         if (server) server->stop();
         if (server_thread.joinable()) server_thread.join();
+        std::error_code ec;
+        std::filesystem::remove_all(tmp_dir, ec);
     }
 
     std::string url(const std::string& path) {

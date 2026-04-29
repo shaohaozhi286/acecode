@@ -67,6 +67,9 @@
 #include "agent_loop.hpp"
 #include "commands/configure.hpp"
 #include "daemon/cli.hpp"
+#ifdef _WIN32
+#  include "daemon/service_win.hpp"
+#endif
 #include "commands/command_registry.hpp"
 #include "commands/builtin_commands.hpp"
 #include "commands/compact.hpp"
@@ -76,6 +79,7 @@
 #include "session/session_manager.hpp"
 #include "session/session_resume_restore.hpp"
 #include "tui/diff_view.hpp"
+#include "tui/picker_scroll.hpp"
 #include "tui/slash_dropdown.hpp"
 #include "tui/text_truncation.hpp"
 #include "tui/thick_vscroll_bar.hpp"
@@ -627,7 +631,7 @@ int main(int argc, char* argv[]) {
 
     // ---- Top-level subcommand dispatch ----
     // `acecode daemon ...` 完全脱离 TUI,在第一时间分流出去。所有其它路径继续走
-    // 下面的 TUI argv 解析。Service 子命令(Section 6)预留同样的位置。
+    // 下面的 TUI argv 解析。
     if (argc >= 2 && std::string(argv[1]) == "daemon") {
         std::vector<std::string> tokens;
         for (int i = 2; i < argc; ++i) tokens.emplace_back(argv[i]);
@@ -635,14 +639,32 @@ int main(int argc, char* argv[]) {
         return acecode::daemon::cli::run(tokens, exe_path);
     }
 
-    // 5.6: ServiceMain detection — SCM 启动时 argv 含 --service-main 标记。
-    // 实现留给 Section 6;现在只给清晰错误,避免被 SCM 静默 stuck。
+    // `acecode service ...` — Windows Service 包装(spec design.md Decision 8)。
+    // Linux/macOS 暂不支持原生 service install,提示走 systemd / launchd。
+    if (argc >= 2 && std::string(argv[1]) == "service") {
+#ifdef _WIN32
+        std::vector<std::string> tokens;
+        for (int i = 2; i < argc; ++i) tokens.emplace_back(argv[i]);
+        std::string exe_path = (argc > 0 && argv[0]) ? std::string(argv[0]) : "";
+        return acecode::daemon::service_win::run_cli(tokens, exe_path);
+#else
+        std::cerr << "acecode: native `service` subcommand is Windows-only;\n"
+                     "         on Linux/macOS use `acecode daemon --foreground`\n"
+                     "         under systemd / launchd (see README for sample units).\n";
+        return 65;
+#endif
+    }
+
+    // ServiceMain detection — SCM 启动时 argv 含 --service-main 标记;转入
+    // StartServiceCtrlDispatcher 阻塞等 SCM 调度。Windows-only;非 Windows 给清晰错误。
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--service-main") {
-            std::cerr << "acecode: --service-main path is not implemented yet "
-                         "(planned for openspec add-web-daemon Section 6).\n"
-                         "Use `acecode daemon start` for now.\n";
+#ifdef _WIN32
+            return acecode::daemon::service_win::run_service_main_dispatcher();
+#else
+            std::cerr << "--service-main is Windows-only\n";
             return 64;
+#endif
         }
     }
 
@@ -1767,6 +1789,7 @@ int main(int argc, char* argv[]) {
                     state.rewind_mode_active = false;
                     state.rewind_items.clear();
                     state.rewind_selected = 0;
+                    state.rewind_view_offset = 0;
                     state.rewind_modes.clear();
                     state.rewind_mode_selected = 0;
                     state.rewind_callback = nullptr;
@@ -1816,6 +1839,7 @@ int main(int argc, char* argv[]) {
                     state.rewind_mode_active = false;
                     state.rewind_items.clear();
                     state.rewind_selected = 0;
+                    state.rewind_view_offset = 0;
                     state.rewind_modes.clear();
                     state.rewind_mode_selected = 0;
                     state.rewind_callback = nullptr;
@@ -1859,7 +1883,37 @@ int main(int argc, char* argv[]) {
                             *selected = (*selected + 1) % count;
                         }
                     }
+                    if (!state.rewind_mode_active) {
+                        state.rewind_view_offset = acecode::tui::scroll_to_keep_visible(
+                            state.rewind_selected, state.rewind_view_offset,
+                            acecode::tui::kRewindPickerVisibleRows,
+                            static_cast<int>(state.rewind_items.size()));
+                    }
                     screen.PostEvent(Event::Custom);
+                    return true;
+                }
+
+                // PgUp/PgDn/Home/End: only the items list (not the 4-row mode
+                // list) needs viewport navigation.
+                if (!state.rewind_mode_active &&
+                    (event == Event::PageUp || event == Event::PageDown ||
+                     event == Event::Home || event == Event::End)) {
+                    const int total = static_cast<int>(state.rewind_items.size());
+                    if (total > 0) {
+                        const int step = acecode::tui::kRewindPickerVisibleRows;
+                        if (event == Event::PageUp) {
+                            state.rewind_selected = std::max(0, state.rewind_selected - step);
+                        } else if (event == Event::PageDown) {
+                            state.rewind_selected = std::min(total - 1, state.rewind_selected + step);
+                        } else if (event == Event::Home) {
+                            state.rewind_selected = 0;
+                        } else {  // End
+                            state.rewind_selected = total - 1;
+                        }
+                        state.rewind_view_offset = acecode::tui::scroll_to_keep_visible(
+                            state.rewind_selected, state.rewind_view_offset, step, total);
+                        screen.PostEvent(Event::Custom);
+                    }
                     return true;
                 }
 
@@ -1927,14 +1981,23 @@ int main(int argc, char* argv[]) {
                     state.slash_dropdown_active = false;
                     state.slash_dropdown_items.clear();
                     state.slash_dropdown_selected = 0;
+                    state.slash_dropdown_view_offset = 0;
                     state.slash_dropdown_total_matches = 0;
                     state.slash_dropdown_dismissed_for_input = false;
                 };
                 const int n = static_cast<int>(state.slash_dropdown_items.size());
+                auto follow_view = [&]() {
+                    state.slash_dropdown_view_offset =
+                        acecode::tui::scroll_to_keep_visible(
+                            state.slash_dropdown_selected,
+                            state.slash_dropdown_view_offset,
+                            acecode::tui::kSlashDropdownVisibleRows, n);
+                };
                 if (event == Event::ArrowUp ||
                     event == Event::Special(std::string(1, '\x10'))) { // Ctrl+P
                     state.slash_dropdown_selected =
                         (state.slash_dropdown_selected - 1 + n) % n;
+                    follow_view();
                     screen.PostEvent(Event::Custom);
                     return true;
                 }
@@ -1942,6 +2005,25 @@ int main(int argc, char* argv[]) {
                     event == Event::Special(std::string(1, '\x0E'))) { // Ctrl+N
                     state.slash_dropdown_selected =
                         (state.slash_dropdown_selected + 1) % n;
+                    follow_view();
+                    screen.PostEvent(Event::Custom);
+                    return true;
+                }
+                if (event == Event::PageUp || event == Event::PageDown ||
+                    event == Event::Home || event == Event::End) {
+                    const int step = acecode::tui::kSlashDropdownVisibleRows;
+                    if (event == Event::PageUp) {
+                        state.slash_dropdown_selected =
+                            std::max(0, state.slash_dropdown_selected - step);
+                    } else if (event == Event::PageDown) {
+                        state.slash_dropdown_selected =
+                            std::min(n - 1, state.slash_dropdown_selected + step);
+                    } else if (event == Event::Home) {
+                        state.slash_dropdown_selected = 0;
+                    } else {  // End
+                        state.slash_dropdown_selected = n - 1;
+                    }
+                    follow_view();
                     screen.PostEvent(Event::Custom);
                     return true;
                 }
@@ -1954,6 +2036,7 @@ int main(int argc, char* argv[]) {
                     state.slash_dropdown_active = false;
                     state.slash_dropdown_items.clear();
                     state.slash_dropdown_selected = 0;
+                    state.slash_dropdown_view_offset = 0;
                     state.slash_dropdown_total_matches = 0;
                     state.slash_dropdown_dismissed_for_input = true;
                     screen.PostEvent(Event::Custom);
@@ -1974,6 +2057,7 @@ int main(int argc, char* argv[]) {
                     auto cb = state.resume_callback;
                     state.resume_picker_active = false;
                     state.resume_items.clear();
+                    state.resume_view_offset = 0;
                     state.resume_callback = nullptr;
                     state.input_text.clear();
                     state.input_cursor = 0;
@@ -2101,6 +2185,32 @@ int main(int argc, char* argv[]) {
             }
             return true;
         }
+        // /resume picker viewport navigation: PgUp/PgDn jump a full window,
+        // Home/End jump to first/last item. Must short-circuit before chat
+        // scroll handlers so the picker absorbs these keys exclusively.
+        if (event == Event::PageUp || event == Event::PageDown ||
+            event == Event::Home || event == Event::End) {
+            std::lock_guard<std::mutex> lk(state.mu);
+            if (state.resume_picker_active) {
+                const int total = static_cast<int>(state.resume_items.size());
+                if (total > 0) {
+                    const int step = acecode::tui::kResumePickerVisibleRows;
+                    if (event == Event::PageUp) {
+                        state.resume_selected = std::max(0, state.resume_selected - step);
+                    } else if (event == Event::PageDown) {
+                        state.resume_selected = std::min(total - 1, state.resume_selected + step);
+                    } else if (event == Event::Home) {
+                        state.resume_selected = 0;
+                    } else {  // End
+                        state.resume_selected = total - 1;
+                    }
+                    state.resume_view_offset = acecode::tui::scroll_to_keep_visible(
+                        state.resume_selected, state.resume_view_offset, step, total);
+                    screen.PostEvent(Event::Custom);
+                }
+                return true;
+            }
+        }
         if (event == Event::PageUp) {
             std::lock_guard<std::mutex> lk(state.mu);
             if (scroll_chat(-5)) {
@@ -2148,6 +2258,7 @@ int main(int argc, char* argv[]) {
             if (state.resume_picker_active) {
                 state.resume_picker_active = false;
                 state.resume_items.clear();
+                state.resume_view_offset = 0;
                 state.resume_callback = nullptr;
                 state.input_text.clear();
                 state.input_cursor = 0;
@@ -2366,6 +2477,11 @@ int main(int argc, char* argv[]) {
             std::lock_guard<std::mutex> lk(state.mu);
             if (state.resume_picker_active) {
                 if (state.resume_selected > 0) state.resume_selected--;
+                state.resume_view_offset = acecode::tui::scroll_to_keep_visible(
+                    state.resume_selected, state.resume_view_offset,
+                    acecode::tui::kResumePickerVisibleRows,
+                    static_cast<int>(state.resume_items.size()));
+                screen.PostEvent(Event::Custom);
                 return true;
             }
             if (state.input_history.empty()) return true;
@@ -2387,6 +2503,11 @@ int main(int argc, char* argv[]) {
             if (state.resume_picker_active) {
                 if (state.resume_selected < static_cast<int>(state.resume_items.size()) - 1)
                     state.resume_selected++;
+                state.resume_view_offset = acecode::tui::scroll_to_keep_visible(
+                    state.resume_selected, state.resume_view_offset,
+                    acecode::tui::kResumePickerVisibleRows,
+                    static_cast<int>(state.resume_items.size()));
+                screen.PostEvent(Event::Custom);
                 return true;
             }
             if (state.history_index == -1) return true;
@@ -2539,6 +2660,7 @@ int main(int argc, char* argv[]) {
                         auto cb = state.resume_callback;
                         state.resume_picker_active = false;
                         state.resume_items.clear();
+                        state.resume_view_offset = 0;
                         state.resume_callback = nullptr;
                         state.input_text.clear();
                         state.input_cursor = 0;
@@ -2974,10 +3096,27 @@ int main(int argc, char* argv[]) {
         if (state.resume_picker_active && !state.resume_items.empty()) {
             Elements picker_rows;
             picker_rows.push_back(
-                text(" Resume a session (Up/Down to select, Enter to confirm, Esc to cancel, or type 1-9):")
+                text(" Resume a session (Up/Down/PgUp/PgDn/Home/End to navigate, Enter to confirm, Esc to cancel, 1-9 jump):")
                 | bold | color(Color::Cyan));
             picker_rows.push_back(text(""));
-            for (int i = 0; i < static_cast<int>(state.resume_items.size()); ++i) {
+
+            const int total = static_cast<int>(state.resume_items.size());
+            const int visible = std::min(acecode::tui::kResumePickerVisibleRows, total);
+            int offset = std::clamp(state.resume_view_offset, 0,
+                                    std::max(0, total - visible));
+            const int items_above = offset;
+            const int items_below = std::max(0, total - offset - visible);
+
+            // Top overflow indicator (always reserves a row to keep height stable).
+            if (items_above > 0) {
+                picker_rows.push_back(
+                    text("  \xE2\x86\x91 " + std::to_string(items_above) + " more above")
+                    | dim | color(Color::GrayLight));
+            } else {
+                picker_rows.push_back(text(""));
+            }
+
+            for (int i = offset; i < offset + visible; ++i) {
                 bool selected = (i == state.resume_selected);
                 auto row = text("  " + state.resume_items[i].display);
                 if (selected) {
@@ -2987,6 +3126,16 @@ int main(int argc, char* argv[]) {
                 }
                 picker_rows.push_back(row);
             }
+
+            // Bottom overflow indicator (also reserves a row).
+            if (items_below > 0) {
+                picker_rows.push_back(
+                    text("  \xE2\x86\x93 " + std::to_string(items_below) + " more below")
+                    | dim | color(Color::GrayLight));
+            } else {
+                picker_rows.push_back(text(""));
+            }
+
             picker_rows.push_back(text(""));
             resume_picker_element = vbox(std::move(picker_rows)) | border | color(Color::Cyan);
         }
@@ -3021,10 +3170,26 @@ int main(int argc, char* argv[]) {
                 }
             } else {
                 picker_rows.push_back(
-                    text(" Rewind to a user turn (Up/Down to select, Enter to confirm, Esc to cancel, or type 1-9):")
+                    text(" Rewind to a user turn (Up/Down/PgUp/PgDn/Home/End to navigate, Enter to confirm, Esc to cancel, 1-9 jump):")
                     | bold | color(Color::Cyan));
                 picker_rows.push_back(text(""));
-                for (int i = 0; i < static_cast<int>(state.rewind_items.size()); ++i) {
+
+                const int total = static_cast<int>(state.rewind_items.size());
+                const int visible = std::min(acecode::tui::kRewindPickerVisibleRows, total);
+                int offset = std::clamp(state.rewind_view_offset, 0,
+                                        std::max(0, total - visible));
+                const int items_above = offset;
+                const int items_below = std::max(0, total - offset - visible);
+
+                if (items_above > 0) {
+                    picker_rows.push_back(
+                        text("  \xE2\x86\x91 " + std::to_string(items_above) + " more above")
+                        | dim | color(Color::GrayLight));
+                } else {
+                    picker_rows.push_back(text(""));
+                }
+
+                for (int i = offset; i < offset + visible; ++i) {
                     bool selected = (i == state.rewind_selected);
                     auto row = text("  " + state.rewind_items[i].display);
                     if (selected) {
@@ -3033,6 +3198,14 @@ int main(int argc, char* argv[]) {
                         row = row | color(Color::GrayLight);
                     }
                     picker_rows.push_back(row);
+                }
+
+                if (items_below > 0) {
+                    picker_rows.push_back(
+                        text("  \xE2\x86\x93 " + std::to_string(items_below) + " more below")
+                        | dim | color(Color::GrayLight));
+                } else {
+                    picker_rows.push_back(text(""));
                 }
             }
             picker_rows.push_back(text(""));

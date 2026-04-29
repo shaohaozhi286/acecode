@@ -394,7 +394,11 @@ struct WebServer::Impl {
                     new_servers.emplace(it.key(), std::move(cfg));
                 }
                 deps.app_config->mcp_servers = std::move(new_servers);
-                save_config(*deps.app_config);
+                if (!deps.config_path.empty()) {
+                    save_config(*deps.app_config, deps.config_path);
+                } else {
+                    save_config(*deps.app_config);
+                }
                 crow::response r(200);
                 r.body = R"({"saved":true,"reload_required":true})";
                 r.add_header("Content-Type", "application/json");
@@ -610,7 +614,14 @@ int WebServer::run() {
             .multithreaded()
             .run();
     } catch (const std::exception& e) {
+        // Crow 在 bind 失败时抛 asio 异常,message 里通常含 "address already in
+        // use" 之类。打两条日志: 一条原始错误,一条用户视角的处理建议(端口占用
+        // 是最常见的失败原因)。daemon 不 retry / 不 fallback — fail-fast 退出
+        // 让用户主动改 web.port 或 kill 占用端口的进程。
         LOG_ERROR(std::string("[web] server crashed: ") + e.what());
+        LOG_ERROR("[web] port " + std::to_string(cfg.port) +
+                  " may be in use — change web.port in config.json or stop "
+                  "the conflicting process; daemon will not retry");
         return 3;
     }
     return 0;

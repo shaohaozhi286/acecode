@@ -124,6 +124,112 @@ Config file: `~/.acecode/config.json` (created automatically on first run, or vi
 
 Sessions are stored under `.acecode/projects/<cwd_hash>/` per-project.
 
+### Daemon mode (HTTP / WebSocket server)
+
+ACECode can run as a background daemon exposing the agent loop over HTTP and
+WebSocket — useful for the upcoming web UI, CI integrations, or running
+ACECode on a headless box you SSH into.
+
+Three ways to start it (pick one):
+
+```bash
+# 1. Foreground — log to stderr, blocks the terminal (development / debugging)
+./acecode daemon --foreground
+
+# 2. Detached — POSIX double-fork / Windows DETACHED_PROCESS, runs in background
+./acecode daemon start
+./acecode daemon status        # {pid, port, guid, last_heartbeat_age_ms}
+./acecode daemon stop          # graceful SIGTERM + 10 s timeout
+
+# 3. Windows Service — registers with SCM, starts before login screen at boot
+#    (Windows only; requires elevated PowerShell for install/uninstall)
+./acecode service install
+./acecode service start
+./acecode service status
+./acecode service stop
+./acecode service uninstall
+```
+
+**Default endpoint**: `http://127.0.0.1:28080` (`web.bind` / `web.port` in
+config). Bind failure (port in use) is fail-fast — the daemon does NOT
+retry or pick a different port; change `web.port` in `config.json` or
+free the port.
+
+**Authentication**: a 32-byte URL-safe base64 token is generated on every
+start and written to `<data_dir>/run/token` with restricted permissions
+(POSIX `0600` / Windows owner-only DACL). Loopback clients can skip the
+token; non-loopback clients must pass `X-ACECode-Token: <token>` header
+or `?token=<token>` query.
+
+**Data directory**:
+- TUI / `acecode daemon ...` modes use `~/.acecode/`
+- `acecode service ...` mode uses `%PROGRAMDATA%\acecode\` (Windows) /
+  `/Library/Application Support/acecode/` (macOS) /
+  `/var/lib/acecode/` (Linux)
+- The two roots are independent — service-mode daemon and TUI do **not**
+  share sessions / config / memory in v1
+
+**Quick health check**:
+```bash
+TOKEN=$(cat ~/.acecode/run/token)        # or %PROGRAMDATA%\acecode\run\token in service mode
+curl -sH "X-ACECode-Token: $TOKEN" http://127.0.0.1:28080/api/health | jq
+```
+
+Full HTTP / WebSocket protocol reference: [`docs/daemon-api.md`](docs/daemon-api.md).
+
+#### Linux: sample systemd unit
+
+`acecode service install` is Windows-only. On Linux, run the daemon under
+systemd. Save as `/etc/systemd/system/acecode.service`:
+
+```ini
+[Unit]
+Description=ACECode Background Agent
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/acecode daemon --foreground
+Restart=on-failure
+RestartSec=5
+# Run as your normal user; daemon will use ~/.acecode for that user.
+User=youruser
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Then: `sudo systemctl daemon-reload && sudo systemctl enable --now acecode`.
+
+#### macOS: sample launchd plist
+
+Save as `~/Library/LaunchAgents/dev.acecode.daemon.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.acecode.daemon</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/acecode</string>
+    <string>daemon</string>
+    <string>--foreground</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/tmp/acecode.out.log</string>
+  <key>StandardErrorPath</key><string>/tmp/acecode.err.log</string>
+</dict>
+</plist>
+```
+
+Then: `launchctl load ~/Library/LaunchAgents/dev.acecode.daemon.plist`.
+
 ### Tips
 
 - Run ACECode from your project root — paths are validated against this directory.

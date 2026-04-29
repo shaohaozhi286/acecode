@@ -127,6 +127,7 @@ struct TuiState {
     bool resume_picker_active = false;
     std::vector<ResumeItem> resume_items;
     int resume_selected = 0; // currently highlighted index
+    int resume_view_offset = 0; // top index of the visible viewport window
     std::function<void(const std::string& session_id)> resume_callback;
 
     // Rewind picker state. Target selection and restore-mode selection are
@@ -157,6 +158,7 @@ struct TuiState {
     bool rewind_mode_active = false;
     std::vector<RewindItem> rewind_items;
     int rewind_selected = 0;
+    int rewind_view_offset = 0; // top index of the visible viewport for the items list
     std::vector<RewindModeItem> rewind_modes;
     int rewind_mode_selected = 0;
     std::function<void(RewindItem, RewindRestoreMode)> rewind_callback;
@@ -174,7 +176,8 @@ struct TuiState {
     bool slash_dropdown_active = false;
     std::vector<SlashDropdownItem> slash_dropdown_items;
     int slash_dropdown_selected = 0;
-    int slash_dropdown_total_matches = 0; // full match count before truncation, for "+N more"
+    int slash_dropdown_view_offset = 0; // top index of the visible viewport
+    int slash_dropdown_total_matches = 0; // full match count, equals items.size()
     bool slash_dropdown_dismissed_for_input = false;
 
     int chat_focus_index = -1;
