@@ -4,6 +4,7 @@
 #include "../utils/logger.hpp"
 #include "../utils/paths.hpp"
 
+#include <atomic>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -12,6 +13,12 @@
 namespace fs = std::filesystem;
 
 namespace acecode {
+
+namespace {
+
+std::atomic<bool> g_acecode_home_created_by_process{false};
+
+} // namespace
 
 std::string expand_path(const std::string& raw) {
     if (raw.empty()) return raw;
@@ -165,8 +172,12 @@ AppConfig load_config() {
     std::string config_path = (fs::path(acecode_dir) / "config.json").string();
 
     // Create directory and default config if missing
-    if (!fs::exists(acecode_dir)) {
+    std::error_code home_ec;
+    bool home_exists = fs::exists(acecode_dir, home_ec);
+    if (home_ec) home_exists = false;
+    if (!home_exists) {
         fs::create_directories(acecode_dir);
+        g_acecode_home_created_by_process.store(true);
     }
     if (!fs::exists(config_path)) {
         write_default_config(config_path);
@@ -509,6 +520,18 @@ AppConfig load_config() {
     }
 
     return cfg;
+}
+
+bool was_acecode_home_created_by_process() {
+    return g_acecode_home_created_by_process.load();
+}
+
+bool consume_acecode_home_created_by_process() {
+    return g_acecode_home_created_by_process.exchange(false);
+}
+
+void reset_acecode_home_created_flag_for_test() {
+    g_acecode_home_created_by_process.store(false);
 }
 
 namespace {

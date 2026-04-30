@@ -56,8 +56,12 @@ class AceChat extends HTMLElement {
 
   async loadHistory() {
     if (!this.cwd) return;
-    try { this.history = await api.getHistory(this.cwd, 200); }
-    catch { this.history = []; }
+    try {
+      const r = await api.getHistory(this.cwd, 200);
+      this.history = Array.isArray(r) ? r : [];
+    } catch {
+      this.history = [];
+    }
   }
 
   async selectSession(id) {
@@ -115,6 +119,7 @@ class AceChat extends HTMLElement {
     if (!text.trim() || !this.sessionId) return;
     connection.sendUserInput(text);
     api.appendHistory(text).catch(e => console.warn('history append', e));
+    if (!Array.isArray(this.history)) this.history = [];
     this.history.push(text);
     this.histPtr = -1;
     this.input.value = '';

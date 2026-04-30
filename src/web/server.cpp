@@ -150,71 +150,80 @@ struct WebServer::Impl {
     }
 
     void register_static() {
-        // 路由分层:
-        //   - 显式 CROW_ROUTE("/static/<string>")             → 一层文件(app.js / style.css)
-        //   - 显式 CROW_ROUTE("/static/<string>/<string>")    → 两层文件(components/ace-app.js)
-        //   - 显式 CROW_ROUTE("/static/<string>/<string>/<string>") → 三层(vendor/bootstrap/fonts/x.woff2)
-        //   - CROW_CATCHALL_ROUTE                             → /、SPA 路径 fallback 到 index.html
-        // 注: Crow 1.3.2 对 "/static/*" 这一前缀的请求不会 fallthrough 到 catchall —
-        // 必须用显式 segment route 才能命中。<string> 在 Crow 里只匹配单 segment,
-        // 不含 "/",所以要按层数列举(我们前端最深 web/vendor/bootstrap/fonts/x.woff2,
-        // 即 4 段;含前缀 5 段)。<path> 模板在 1.3.2 上会破坏 server bind。
-        // 不走 require_auth(index.html / static 资源必须无 token 加载,否则
+        // 静态资源直接按文件实际路径服务,不加 /static/ 前缀:
+        //   /app.js                                  → web/app.js
+        //   /components/ace-chat.js                  → web/components/ace-chat.js
+        //   /vendor/bootstrap/fonts/x.woff2          → web/vendor/bootstrap/fonts/x.woff2
+        // lookup miss 的请求 fallback 到 index.html 供 SPA 路由(/sessions/<id> 等)。
+        // /api/*、/ws/* 由前面 explicit route 处理;若误进来直接 404。
+        //
+        // Crow 1.3.2 quirk: <path> 模板会破坏 server bind,catchall 对深路径也不
+        // fallthrough。<string> 单段匹配可靠,所以按层数列举(前端最深 4 段:
+        // vendor/bootstrap/fonts/x.woff2),catchall 兜底处理 / 与未匹配 path。
+        // 不走 require_auth(index.html / 资源必须无 token 加载,否则
         // 前端 token-prompt 自身都进不去)。
-        auto serve_static = [this](const crow::request& req, const std::string& rel) -> crow::response {
-            if (!assets) return crow::response(503);
-            std::string path = rel;
-            auto qpos = path.find('?');
-            if (qpos != std::string::npos) path.resize(qpos);
-            auto r = assets->lookup(path);
-            if (!r.has_value()) return crow::response(404);
-            crow::response resp(200);
-            resp.body.assign(reinterpret_cast<const char*>(r->data), r->size);
-            resp.add_header("Content-Type", r->content_type);
-            if (req.url_params.get("v")) {
-                resp.add_header("Cache-Control", "public, max-age=31536000, immutable");
-            } else {
-                resp.add_header("Cache-Control", "no-cache");
-            }
-            return resp;
-        };
-
-        CROW_ROUTE(app, "/static/<string>")
-        ([serve_static](const crow::request& req, std::string a) {
-            return serve_static(req, a);
-        });
-        CROW_ROUTE(app, "/static/<string>/<string>")
-        ([serve_static](const crow::request& req, std::string a, std::string b) {
-            return serve_static(req, a + "/" + b);
-        });
-        CROW_ROUTE(app, "/static/<string>/<string>/<string>")
-        ([serve_static](const crow::request& req, std::string a, std::string b, std::string c) {
-            return serve_static(req, a + "/" + b + "/" + c);
-        });
-        CROW_ROUTE(app, "/static/<string>/<string>/<string>/<string>")
-        ([serve_static](const crow::request& req, std::string a, std::string b, std::string c, std::string d) {
-            return serve_static(req, a + "/" + b + "/" + c + "/" + d);
-        });
-
-        // /、SPA 路径 fallback 到 index.html
-        CROW_CATCHALL_ROUTE(app)
-        ([this](const crow::request& req) -> crow::response {
-            std::string url_str(req.url);
-            if (url_str.rfind("/api/", 0) == 0 || url_str.rfind("/ws/", 0) == 0) {
+        auto serve_path = [this](const crow::request& req, const std::string& full_url) -> crow::response {
+            // /api/*、/ws/* 没匹配到 explicit route 时直接 404,不 fallback 到 SPA。
+            if (full_url.rfind("/api/", 0) == 0 || full_url == "/api"
+             || full_url.rfind("/ws/",  0) == 0 || full_url == "/ws") {
                 return crow::response(404);
             }
             if (!assets) return crow::response(503);
-            auto r = assets->lookup("index.html");
-            if (!r.has_value()) {
+
+            std::string path = (!full_url.empty() && full_url[0] == '/') ? full_url.substr(1) : full_url;
+            auto qpos = path.find('?');
+            if (qpos != std::string::npos) path.resize(qpos);
+
+            if (!path.empty()) {
+                auto r = assets->lookup(path);
+                if (r.has_value()) {
+                    crow::response resp(200);
+                    resp.body.assign(reinterpret_cast<const char*>(r->data), r->size);
+                    resp.add_header("Content-Type", r->content_type);
+                    if (req.url_params.get("v")) {
+                        resp.add_header("Cache-Control", "public, max-age=31536000, immutable");
+                    } else {
+                        resp.add_header("Cache-Control", "no-cache");
+                    }
+                    return resp;
+                }
+            }
+
+            // SPA fallback: 任何不存在的资源都返回 index.html(让前端 hash 路由处理)
+            auto idx = assets->lookup("index.html");
+            if (!idx.has_value()) {
                 crow::response resp(503);
                 resp.body = "index.html missing — front-end not bundled";
                 return resp;
             }
             crow::response resp(200);
-            resp.body.assign(reinterpret_cast<const char*>(r->data), r->size);
-            resp.add_header("Content-Type", r->content_type);
+            resp.body.assign(reinterpret_cast<const char*>(idx->data), idx->size);
+            resp.add_header("Content-Type", idx->content_type);
             resp.add_header("Cache-Control", "no-cache");
             return resp;
+        };
+
+        CROW_ROUTE(app, "/<string>")
+        ([serve_path](const crow::request& req, std::string a) {
+            return serve_path(req, "/" + a);
+        });
+        CROW_ROUTE(app, "/<string>/<string>")
+        ([serve_path](const crow::request& req, std::string a, std::string b) {
+            return serve_path(req, "/" + a + "/" + b);
+        });
+        CROW_ROUTE(app, "/<string>/<string>/<string>")
+        ([serve_path](const crow::request& req, std::string a, std::string b, std::string c) {
+            return serve_path(req, "/" + a + "/" + b + "/" + c);
+        });
+        CROW_ROUTE(app, "/<string>/<string>/<string>/<string>")
+        ([serve_path](const crow::request& req, std::string a, std::string b, std::string c, std::string d) {
+            return serve_path(req, "/" + a + "/" + b + "/" + c + "/" + d);
+        });
+
+        // /、未列举层数的请求兜底
+        CROW_CATCHALL_ROUTE(app)
+        ([serve_path](const crow::request& req) {
+            return serve_path(req, std::string(req.url));
         });
     }
 

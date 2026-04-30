@@ -20,7 +20,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # MSVC: static runtime (MT/MTd), UTF-8, PDB in Release
 if(MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-    add_compile_options(/utf-8 /Zi)
+    add_compile_options(/utf-8 /Zi /FS)
     add_link_options(
         /DEBUG
         "$<$<NOT:$<CONFIG:Debug>>:/OPT:REF>"
@@ -178,4 +178,12 @@ if(EXISTS ${CMAKE_SOURCE_DIR}/assets/models_dev/api.json)
         install(FILES ${CMAKE_SOURCE_DIR}/assets/models_dev/LICENSE
             DESTINATION share/acecode/models_dev)
     endif()
+endif()
+
+# Default first-run skill seed bundle. Installed alongside the executable so
+# find_default_skill_seed_dir() can resolve <exe_dir>/../share/acecode/seed/skills.
+if(EXISTS ${CMAKE_SOURCE_DIR}/assets/seed/skills)
+    install(DIRECTORY ${CMAKE_SOURCE_DIR}/assets/seed/
+        DESTINATION share/acecode/seed
+    )
 endif()

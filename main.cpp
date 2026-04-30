@@ -61,6 +61,7 @@
 #include "tool/ask_overlay_input.hpp"
 #include "skills/skill_registry.hpp"
 #include "skills/skill_commands.hpp"
+#include "skills/default_skill_seeder.hpp"
 #include "memory/memory_paths.hpp"
 #include "memory/memory_registry.hpp"
 #include "utils/logger.hpp"
@@ -368,6 +369,39 @@ static std::string get_cwd() {
     if (getcwd(buf, sizeof(buf))) return std::string(buf);
 #endif
     return ".";
+}
+
+static std::string get_executable_dir_from_argv(int argc, char* argv[]) {
+    if (argc <= 0 || !argv[0]) return "";
+    std::error_code ec;
+    std::filesystem::path exe(argv[0]);
+    std::filesystem::path abs = std::filesystem::weakly_canonical(exe, ec);
+    if (!ec) return abs.parent_path().string();
+    return exe.parent_path().string();
+}
+
+static void seed_default_skills_if_first_initialization(const std::string& argv0_dir) {
+    bool first_initialization = acecode::consume_acecode_home_created_by_process();
+    auto result = acecode::install_default_global_skills_on_first_initialization(
+        std::filesystem::path(acecode::get_acecode_dir()),
+        argv0_dir,
+        first_initialization);
+    if (!result.attempted) return;
+
+    size_t installed = 0;
+    size_t skipped = 0;
+    size_t errors = 0;
+    for (const auto& outcome : result.outcomes) {
+        if (outcome.result == "installed") ++installed;
+        else if (outcome.result == "skipped") ++skipped;
+        else ++errors;
+    }
+    if (!result.error.empty()) {
+        LOG_WARN("[skills] Default skill seeding issue: " + result.error);
+    }
+    LOG_INFO("[skills] Default skill seeding attempted: installed=" +
+             std::to_string(installed) + " skipped=" + std::to_string(skipped) +
+             " errors=" + std::to_string(errors));
 }
 
 // ---- Reset terminal cursor visibility on exit ----
@@ -723,6 +757,8 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    std::string argv0_dir = get_executable_dir_from_argv(argc, argv);
+
     // 5.7: 双击启动检测(Windows)。无参数 + 控制台只挂着自己一个进程
     // (GetConsoleProcessList 返回 1)= 双击;此时按 daemon.auto_start_on_double_click
     // 决定走 TUI 还是 daemon detach。
@@ -767,19 +803,10 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // ---- Capture executable directory for seed lookup ----
-    std::string argv0_dir;
-    if (argc > 0 && argv[0]) {
-        std::error_code ec;
-        std::filesystem::path exe(argv[0]);
-        std::filesystem::path abs = std::filesystem::weakly_canonical(exe, ec);
-        if (!ec) argv0_dir = abs.parent_path().string();
-        else argv0_dir = exe.parent_path().string();
-    }
-
     // ---- Handle configure subcommand (before TUI setup) ----
     if (run_configure_cmd) {
         AppConfig config = load_config();
+        seed_default_skills_if_first_initialization(argv0_dir);
         initialize_registry(config, argv0_dir);
         return run_configure(config);
     }
@@ -787,6 +814,7 @@ int main(int argc, char* argv[]) {
     // ---- Handle --validate-models-registry (CI helper) ----
     if (validate_models_registry_cmd) {
         AppConfig config = load_config();
+        seed_default_skills_if_first_initialization(argv0_dir);
         initialize_registry(config, argv0_dir);
         const auto& src = current_registry_source();
         auto registry = current_registry();
@@ -853,6 +881,7 @@ int main(int argc, char* argv[]) {
 
     // ---- Load config ----
     AppConfig config = load_config();
+    seed_default_skills_if_first_initialization(argv0_dir);
 
     // ---- Init proxy resolver ----
     // 必须在任何 cpr 调用之前完成(下面 initialize_registry 可能触发 models.dev
@@ -932,7 +961,8 @@ int main(int argc, char* argv[]) {
             roots.emplace_back(std::filesystem::path(dir) / ".agent" / "skills");
         }
 
-        std::string default_acecode_skills_dir = expand_path("~/.acecode/skills");
+        std::string default_acecode_skills_dir =
+            (std::filesystem::path(get_acecode_dir()) / "skills").string();
         if (!std::filesystem::exists(default_acecode_skills_dir, ec)) {
             std::filesystem::create_directories(default_acecode_skills_dir, ec);
         }

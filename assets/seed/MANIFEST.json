@@ -1,0 +1,36 @@
+{
+  "bundle_version": "2026-04-30.1",
+  "description": "Default ACECode global skill seed bundle installed on first ACECode initialization.",
+  "skills": [
+    {
+      "name": "find-skills",
+      "source_id": "claude-code-haha:find-skills@76d21ddf33ef7927294cdc019b83b6d263a19ac6",
+      "relative_path": "skill-management/find-skills",
+      "skill_md_sha256": "165c66b27815e0fe59a16ec6e53948736fe955b2d8e8b55d543883b4cfd0b448"
+    },
+    {
+      "name": "skill-installer",
+      "source_id": "codex-system:skill-installer@2026-04-30",
+      "relative_path": "skill-management/skill-installer",
+      "skill_md_sha256": "1f1bced6c7e4c683feda4306de95415e71088e0986f50b43ba7b30d6eb37ee9f"
+    },
+    {
+      "name": "skill-creator",
+      "source_id": "codex-system:skill-creator@2026-04-30",
+      "relative_path": "skill-management/skill-creator",
+      "skill_md_sha256": "6bc94b4ffe167db6c7a9777ac63e8bcac05924e73de455c06de6b5d91d53cc47"
+    },
+    {
+      "name": "native-mcp",
+      "source_id": "hermes-agent:mcp/native-mcp@4eecaf06e48834e105cbd989ae0bae5a2a618c1d",
+      "relative_path": "mcp/native-mcp",
+      "skill_md_sha256": "83a93c4fe6903c32bdf624ed43ed4e6482f51d81b88391b69ed7347519179483"
+    },
+    {
+      "name": "mcporter",
+      "source_id": "hermes-agent:mcp/mcporter@4eecaf06e48834e105cbd989ae0bae5a2a618c1d",
+      "relative_path": "mcp/mcporter",
+      "skill_md_sha256": "5cceb4559103e63ba9bed156192d13f61b5d62b0774cde22339b435aa3f763ce"
+    }
+  ]
+}

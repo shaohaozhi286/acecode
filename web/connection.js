@@ -36,21 +36,31 @@ export class AceConnection extends EventTarget {
 
   _open() {
     if (!this.sessionId) return;
+    // 旧 ws 还活着的话先关掉,避免遗留连接继续接收 server 推送 → 同一事件被
+    // 重复 dispatch。reconnect 风暴的根源就是这个。
+    if (this.ws) {
+      try { this.ws.onopen = this.ws.onmessage = this.ws.onclose = this.ws.onerror = null; } catch {}
+      try { this.ws.close(); } catch {}
+    }
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const token = getToken();
     const tokenQs = token ? `?token=${encodeURIComponent(token)}` : '';
     const url = `${proto}//${location.host}/ws/sessions/${encodeURIComponent(this.sessionId)}${tokenQs}`;
-    this.ws = new WebSocket(url);
-    this.ws.onopen = () => {
+    const ws = new WebSocket(url);  // 用 local 变量 capture,onopen/onmessage 后续都 reference 它
+    this.ws = ws;
+    ws.onopen = () => {
+      if (this.ws !== ws) return;  // 已经被新 _open 替换 → 这条 onopen 是旧 ws 的,忽略
       this.attempts = 0;
       this.dispatchEvent(new Event('open'));
-      // hello + since 补齐
-      this.ws.send(JSON.stringify({
-        type: 'hello',
-        payload: { session_id: this.sessionId, since: this.lastSeq }
-      }));
+      try {
+        ws.send(JSON.stringify({
+          type: 'hello',
+          payload: { session_id: this.sessionId, since: this.lastSeq }
+        }));
+      } catch {}
     };
-    this.ws.onmessage = (e) => {
+    ws.onmessage = (e) => {
+      if (this.ws !== ws) return;  // 旧 ws 残留事件,丢弃
       let msg;
       try { msg = JSON.parse(e.data); } catch { return; }
       if (typeof msg.seq === 'number' && msg.seq > this.lastSeq) {
@@ -61,13 +71,15 @@ export class AceConnection extends EventTarget {
     };
     const reconnect = () => {
       if (this.closing || !this.sessionId) return;
+      if (this.ws !== ws) return;  // 不是当前 ws 触发的 close,不再重连
+      this.ws = null;
       const delay = Math.min(MAX_BACKOFF_MS, 1000 * Math.pow(2, this.attempts++));
       this.dispatchEvent(new CustomEvent('disconnect', { detail: { delay } }));
       setTimeout(() => this._open(), delay);
     };
-    this.ws.onclose = reconnect;
-    this.ws.onerror = () => {
-      try { this.ws.close(); } catch {}
+    ws.onclose = reconnect;
+    ws.onerror = () => {
+      try { ws.close(); } catch {}
     };
   }
 

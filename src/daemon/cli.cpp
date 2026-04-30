@@ -4,6 +4,7 @@
 #include "runtime_files.hpp"
 #include "worker.hpp"
 #include "../config/config.hpp"
+#include "../skills/default_skill_seeder.hpp"
 #include "../utils/logger.hpp"
 
 #include <chrono>
@@ -34,6 +35,26 @@ void print_help(std::ostream& os) {
 // 简单 starts_with(C++17 没有 string::starts_with)
 bool starts_with(const std::string& s, const std::string& p) {
     return s.size() >= p.size() && s.compare(0, p.size(), p) == 0;
+}
+
+std::string executable_dir_from_path(const std::string& exe_path) {
+    if (exe_path.empty()) return "";
+    std::error_code ec;
+    fs::path abs = fs::weakly_canonical(fs::path(exe_path), ec);
+    if (!ec) return abs.parent_path().string();
+    return fs::path(exe_path).parent_path().string();
+}
+
+void seed_default_skills_if_first_initialization(const std::string& exe_path) {
+    bool first_initialization = acecode::consume_acecode_home_created_by_process();
+    auto result = acecode::install_default_global_skills_on_first_initialization(
+        fs::path(acecode::get_acecode_dir()),
+        executable_dir_from_path(exe_path),
+        first_initialization);
+    if (!result.attempted) return;
+    if (!result.error.empty()) {
+        LOG_WARN("[skills] Default skill seeding issue: " + result.error);
+    }
 }
 
 } // namespace
@@ -72,8 +93,9 @@ Args parse(const std::vector<std::string>& tokens) {
     return a;
 }
 
-static int do_foreground(const Args& a) {
+static int do_foreground(const Args& a, const std::string& exe_path) {
     AppConfig cfg = load_config();
+    seed_default_skills_if_first_initialization(exe_path);
     auto errs = validate_config(cfg);
     if (!errs.empty()) {
         for (const auto& e : errs) std::cerr << "config error: " << e << "\n";
@@ -180,7 +202,7 @@ int run(const std::vector<std::string>& tokens, const std::string& exe_path) {
         return 12;
     }
 
-    if (a.sub == "foreground") return do_foreground(a);
+    if (a.sub == "foreground") return do_foreground(a, exe);
     if (a.sub == "start")      return do_start(a, exe);
     if (a.sub == "stop")       return do_stop();
     if (a.sub == "status")     return do_status();

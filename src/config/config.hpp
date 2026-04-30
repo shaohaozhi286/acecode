@@ -194,6 +194,13 @@ std::vector<std::string> get_project_dirs_up_to_home(const std::string& cwd);
 // Creates default config if missing.
 AppConfig load_config();
 
+// True after load_config() created the ACECode home directory during this
+// process. consume_acecode_home_created_by_process() returns that value and
+// clears it so first-initialization hooks run once.
+bool was_acecode_home_created_by_process();
+bool consume_acecode_home_created_by_process();
+void reset_acecode_home_created_flag_for_test();
+
 // Save config to ~/.acecode/config.json.
 // Creates directory if missing, overwrites existing file.
 void save_config(const AppConfig& cfg);
