@@ -36,6 +36,7 @@ enum class SessionEventKind {
     ToolUpdate,        // payload: {"tool":"...", "tail":[...], "partial":"...", "total_lines":N, "total_bytes":N}
     ToolEnd,           // payload: {"tool":"...", "result_summary": {...}, "ok": bool}
     PermissionRequest, // payload: {"request_id":"...", "tool":"...", "args": {...}}
+    QuestionRequest,   // payload: {"request_id":"...", "questions":[...]} (AskUserQuestion 工具)
     Usage,             // payload: {"input": N, "output": N, ...}
     BusyChanged,       // payload: {"busy": bool}
     Done,              // payload: {} —— 一轮 agent loop 结束
@@ -91,6 +92,12 @@ struct SessionInfo {
     bool        active = false;   // 是否在 SessionRegistry 内存活
 };
 
+// ----- AskUserQuestion 回应(client→server) -----
+
+// 注: 完整的结构体定义在 ask_user_question_prompter.hpp。这里 fwd 声明,
+// 让 SessionClient 接口不强依赖 prompter 头(它属于 daemon 实现细节)。
+struct AskUserQuestionResponse;
+
 // ----- 主接口 -----
 
 class SessionClient {
@@ -128,6 +135,12 @@ public:
     virtual void respond_permission(const std::string& session_id,
                                      const PermissionDecision& decision) = 0;
 
+    // 回应一个之前推送的 question_request(AskUserQuestion 工具)。线程安全。
+    // 未知 request_id / 已超时的请求 = no-op。
+    virtual void respond_question(const std::string& session_id,
+                                    const std::string& request_id,
+                                    const AskUserQuestionResponse& response) = 0;
+
     // 请求中止当前轮(不销毁 session)。
     virtual void abort(const std::string& session_id) = 0;
 };
@@ -143,6 +156,7 @@ inline const char* to_string(SessionEventKind k) {
         case SessionEventKind::ToolUpdate:        return "tool_update";
         case SessionEventKind::ToolEnd:           return "tool_end";
         case SessionEventKind::PermissionRequest: return "permission_request";
+        case SessionEventKind::QuestionRequest:   return "question_request";
         case SessionEventKind::Usage:             return "usage";
         case SessionEventKind::BusyChanged:       return "busy_changed";
         case SessionEventKind::Done:              return "done";

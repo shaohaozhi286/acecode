@@ -24,6 +24,7 @@
 #include <string>
 
 namespace acecode {
+class LlmProvider;
 class SessionClient;
 class SessionRegistry;
 class SkillRegistry;
@@ -46,7 +47,13 @@ struct WebServerDeps {
     std::int64_t               start_time_unix_ms = 0;
     SessionClient*             session_client = nullptr;
     SessionRegistry*           session_registry = nullptr;
-    const SkillRegistry*       skill_registry = nullptr;
+    // 非 const:PUT /api/skills/:name 要写 cfg.skills.disabled 后调 set_disabled + reload。
+    SkillRegistry*             skill_registry = nullptr;
+    // POST /api/sessions/:id/model 用 — 通过 swap_provider_if_needed 改写
+    // worker.cpp 持有的 provider 句柄。两个指针一起为空时,模型切换端点
+    // 返回 503(daemon 没拿到 provider state,通常是测试 fixture 略过了)。
+    std::shared_ptr<LlmProvider>* provider = nullptr;
+    std::mutex*                    provider_mu = nullptr;
     bool                       dangerous = false;
 };
 

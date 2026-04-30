@@ -1,6 +1,7 @@
 #include "models_dev_registry.hpp"
 #include "models_dev_paths.hpp"
 
+#include "../network/proxy_resolver.hpp"
 #include "../utils/logger.hpp"
 
 #include <algorithm>
@@ -148,9 +149,12 @@ void reload_registry_from_disk(const AppConfig& cfg, const std::string& argv0_di
 }
 
 bool refresh_registry_from_network() {
+    auto proxy_opts = network::proxy_options_for(kModelsDevUrl);
     cpr::Response r = cpr::Get(
         cpr::Url{kModelsDevUrl},
-        cpr::Ssl(cpr::ssl::NoRevoke{true}),
+        network::build_ssl_options(proxy_opts),
+        proxy_opts.proxies,
+        proxy_opts.auth,
         cpr::Timeout{20000}
     );
     if (r.status_code != 200) {

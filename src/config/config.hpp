@@ -122,6 +122,38 @@ struct AgentLoopConfig {
     int max_iterations = 50; // hard cap on total LLM turns per run()
 };
 
+// TUI 渲染策略。绕开 Win10 < 1809 的 conhost / Cmder/ConEmu 在密集 cursor-up
+// 序列下产生的画面跳动 —— 详细背景见
+// openspec/changes/add-legacy-terminal-fallback/。
+//
+//   "auto"   = 默认。根据 detect_terminal_capabilities() 的结果决定:
+//              检测到 Windows Terminal → TerminalOutput;
+//              检测到 Cmder/ConEmu 或 legacy conhost → AltScreen;
+//              其它 / POSIX → TerminalOutput(等价历史行为)。
+//   "always" = 始终走 alt-screen(\033[?1049h)。
+//   "never"  = 始终走 TerminalOutput。
+//
+// 非法值会在 load_config 中被规范化为 "auto" 并 LOG_WARN。
+struct TuiConfig {
+    std::string alt_screen_mode = "auto";
+};
+
+// Network / HTTP client tuning. Drives the system-proxy integration —
+// see openspec/changes/respect-system-proxy. proxy_mode is the only field
+// callers SHOULD branch on at runtime; the rest are passively consumed by
+// network::ProxyResolver.
+struct NetworkConfig {
+    // "auto"   = Windows: WinHTTP-IE → registry → env → direct;
+    //            POSIX: env (HTTPS_PROXY/HTTP_PROXY/ALL_PROXY/NO_PROXY).
+    // "off"    = force direct, ignore all sources.
+    // "manual" = use proxy_url verbatim.
+    std::string proxy_mode = "auto";
+    std::string proxy_url;        // required when proxy_mode == "manual"
+    std::string proxy_no_proxy;   // comma-separated; merged with env NO_PROXY
+    std::string proxy_ca_bundle;  // PEM path; trusts MITM certs (Fiddler/Charles)
+    bool proxy_insecure_skip_verify = false; // 调试逃生口,开启时启动横幅 + LOG_WARN
+};
+
 struct AppConfig {
     std::string provider = "copilot"; // "copilot" or "openai"
     OpenAiConfig openai;
@@ -137,6 +169,8 @@ struct AppConfig {
     ModelsDevConfig models_dev;                  // bundled models.dev registry behaviour
     InputHistoryConfig input_history;            // per-cwd persistent ↑/↓ history
     AgentLoopConfig agent_loop;                  // agent-loop termination tunables
+    NetworkConfig network;                       // proxy / TLS / abort-debug knobs
+    TuiConfig tui;                               // 终端渲染策略(legacy fallback 等)
 
     // --- model profiles (openspec/changes/model-profiles) ---
     // 用户维护的命名模型列表。为空时 legacy 字段作为兜底 entry "(legacy)"。

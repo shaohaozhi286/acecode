@@ -3,6 +3,7 @@
 #include "configure_picker.hpp"
 #include "config/config.hpp"
 #include "auth/github_auth.hpp"
+#include "network/proxy_resolver.hpp"
 #include "utils/logger.hpp"
 #include "utils/models_dev_catalog.hpp"
 #include "utils/terminal_input.hpp"
@@ -75,8 +76,11 @@ static void configure_copilot(AppConfig& cfg) {
 
     std::vector<std::string> model_ids;
     if (!ct.token.empty()) {
+        static const std::string kCopilotModelsUrl =
+            "https://api.githubcopilot.com/models";
+        auto proxy_opts = network::proxy_options_for(kCopilotModelsUrl);
         cpr::Response r = cpr::Get(
-            cpr::Url{"https://api.githubcopilot.com/models"},
+            cpr::Url{kCopilotModelsUrl},
             cpr::Header{
                 {"Authorization", "Bearer " + ct.token},
                 {"Editor-Version", "acecode/0.1.0"},
@@ -84,7 +88,9 @@ static void configure_copilot(AppConfig& cfg) {
                 {"Copilot-Integration-Id", "vscode-chat"},
                 {"Openai-Intent", "conversation-panel"}
             },
-            cpr::Ssl(cpr::ssl::NoRevoke{true}),
+            network::build_ssl_options(proxy_opts),
+            proxy_opts.proxies,
+            proxy_opts.auth,
             cpr::Timeout{10000}
         );
 
@@ -210,10 +216,14 @@ static void configure_openai(AppConfig& cfg) {
             headers["Authorization"] = "Bearer " + cfg.openai.api_key;
         }
 
+        const std::string models_url = cfg.openai.base_url + "/models";
+        auto proxy_opts = network::proxy_options_for(models_url);
         auto r = cpr::Get(
-            cpr::Url{cfg.openai.base_url + "/models"},
+            cpr::Url{models_url},
             headers,
-            cpr::Ssl(cpr::ssl::NoRevoke{true}),
+            network::build_ssl_options(proxy_opts),
+            proxy_opts.proxies,
+            proxy_opts.auth,
             cpr::Timeout{10000}
         );
 

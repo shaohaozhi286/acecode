@@ -1,5 +1,6 @@
 #include "github_auth.hpp"
 #include "../config/config.hpp"
+#include "../network/proxy_resolver.hpp"
 
 #include <cpr/cpr.h>
 #include <cpr/ssl_options.h>
@@ -20,8 +21,10 @@ namespace acecode {
 static const std::string GITHUB_CLIENT_ID = "Iv1.b507a08c87ecfe98";
 
 DeviceCodeResponse request_device_code() {
+    static const std::string kDeviceCodeUrl = "https://github.com/login/device/code";
+    auto proxy_opts = network::proxy_options_for(kDeviceCodeUrl);
     cpr::Response r = cpr::Post(
-        cpr::Url{"https://github.com/login/device/code"},
+        cpr::Url{kDeviceCodeUrl},
         cpr::Header{
             {"Accept", "application/json"},
             {"Content-Type", "application/json"}
@@ -30,7 +33,9 @@ DeviceCodeResponse request_device_code() {
             {"client_id", GITHUB_CLIENT_ID},
             {"scope", "read:user"}
         }).dump()},
-        cpr::Ssl(cpr::ssl::NoRevoke{true}),
+        network::build_ssl_options(proxy_opts),
+        proxy_opts.proxies,
+        proxy_opts.auth,
         cpr::Timeout{30000}
     );
 
@@ -74,8 +79,11 @@ std::string poll_for_access_token(
 
         std::this_thread::sleep_for(std::chrono::seconds(poll_interval));
 
+        static const std::string kAccessTokenUrl =
+            "https://github.com/login/oauth/access_token";
+        auto proxy_opts = network::proxy_options_for(kAccessTokenUrl);
         cpr::Response r = cpr::Post(
-            cpr::Url{"https://github.com/login/oauth/access_token"},
+            cpr::Url{kAccessTokenUrl},
             cpr::Header{
                 {"Accept", "application/json"},
                 {"Content-Type", "application/json"}
@@ -85,7 +93,9 @@ std::string poll_for_access_token(
                 {"device_code", device_code},
                 {"grant_type", "urn:ietf:params:oauth:grant-type:device_code"}
             }).dump()},
-            cpr::Ssl(cpr::ssl::NoRevoke{true}),
+            network::build_ssl_options(proxy_opts),
+            proxy_opts.proxies,
+            proxy_opts.auth,
             cpr::Timeout{30000}
         );
 
@@ -123,14 +133,19 @@ std::string poll_for_access_token(
 }
 
 CopilotToken exchange_copilot_token(const std::string& github_token) {
+    static const std::string kCopilotTokenUrl =
+        "https://api.github.com/copilot_internal/v2/token";
+    auto proxy_opts = network::proxy_options_for(kCopilotTokenUrl);
     cpr::Response r = cpr::Get(
-        cpr::Url{"https://api.github.com/copilot_internal/v2/token"},
+        cpr::Url{kCopilotTokenUrl},
         cpr::Header{
             {"Authorization", "token " + github_token},
             {"Accept", "application/json"},
             {"User-Agent", "acecode/0.1.0"}
         },
-        cpr::Ssl(cpr::ssl::NoRevoke{true}),
+        network::build_ssl_options(proxy_opts),
+        proxy_opts.proxies,
+        proxy_opts.auth,
         cpr::Timeout{30000}
     );
 

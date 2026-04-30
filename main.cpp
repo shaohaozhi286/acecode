@@ -36,6 +36,7 @@
 
 #include "version.hpp"
 #include "config/config.hpp"
+#include "network/proxy_resolver.hpp"
 #include "provider/provider_factory.hpp"
 #include "provider/copilot_provider.hpp"
 #include "provider/model_context_resolver.hpp"
@@ -80,6 +81,9 @@
 #include "session/session_resume_restore.hpp"
 #include "tui/diff_view.hpp"
 #include "tui/picker_scroll.hpp"
+#include "tui/render_mode_factory.hpp"
+#include "utils/terminal_capability.hpp"
+#include "utils/state_file.hpp"
 #include "tui/slash_dropdown.hpp"
 #include "tui/text_truncation.hpp"
 #include "tui/thick_vscroll_bar.hpp"
@@ -375,6 +379,12 @@ static void reset_cursor() {
 // ---- Session finalization on exit ----
 static SessionManager* g_session_manager = nullptr;
 
+// Active FTXUI screen, used by signal / console-ctrl handlers to trigger a
+// graceful Loop exit. Must be cleared before ScreenInteractive is destroyed
+// so handlers can't dereference a dead object.
+// App::Exit() is thread-safe (posts a task internally — see app.cpp:1063).
+static std::atomic<ftxui::ScreenInteractive*> g_active_screen{nullptr};
+
 static void finalize_session_atexit() {
     if (g_session_manager) {
         g_session_manager->finalize();
@@ -392,15 +402,60 @@ static void finalize_session_atexit() {
 
 #ifdef _WIN32
 static BOOL WINAPI console_ctrl_handler(DWORD ctrl_type) {
-    if (ctrl_type == CTRL_C_EVENT || ctrl_type == CTRL_CLOSE_EVENT ||
-        ctrl_type == CTRL_BREAK_EVENT) {
+    // Normal Ctrl+C is handled through stdin once ENABLE_PROCESSED_INPUT is
+    // cleared after FTXUI installs its terminal mode. This handler remains as
+    // a fallback for hosts that still deliver CTRL_C_EVENT, and for
+    // Ctrl+Break/close events where graceful shutdown is more important than
+    // prompting.
+    auto* s = g_active_screen.load(std::memory_order_acquire);
+    if (ctrl_type == CTRL_C_EVENT) {
+        if (s) {
+            s->PostEvent(ftxui::Event::CtrlC);
+            return TRUE;
+        }
         finalize_session_atexit();
+        return FALSE;
     }
-    return FALSE; // Let default handler proceed
+    if (ctrl_type == CTRL_BREAK_EVENT || ctrl_type == CTRL_CLOSE_EVENT) {
+        // Break / 关窗:明确退出意图,直接走 FTXUI 优雅退出 —— Loop 返回后
+        // ScreenInteractive 析构跑 on_exit_functions,把 alt-screen /
+        // mouse tracking / Windows console mode 还原回去。返回 FALSE 会让
+        // 默认 handler TerminateProcess(),终端会留在 mouse-tracking 开
+        // 的状态,父 shell 收到鼠标事件原样喷成乱码字节。
+        if (s) {
+            s->Exit();
+            return TRUE;
+        }
+        finalize_session_atexit();
+        return FALSE;
+    }
+    return FALSE;
+}
+
+static void prepare_windows_ctrl_c_handling_after_ftxui_install() {
+    auto stdin_handle = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD in_mode = 0;
+    if (stdin_handle != INVALID_HANDLE_VALUE &&
+        GetConsoleMode(stdin_handle, &in_mode)) {
+        // FTXUI preserves ENABLE_PROCESSED_INPUT from the original console
+        // mode. When it stays enabled, Windows turns Ctrl+C into a console
+        // control event instead of a stdin byte, and FTXUI's SIGINT handler can
+        // exit before our Event::CtrlC branch gets a chance to show the prompt.
+        SetConsoleMode(stdin_handle, in_mode & ~ENABLE_PROCESSED_INPUT);
+    }
+
+    // Re-register after FTXUI's Loop/PreMain installs its own signal handling
+    // so this handler gets first chance at CTRL_BREAK_EVENT / CTRL_CLOSE_EVENT
+    // and any CTRL_C_EVENT fallback.
+    SetConsoleCtrlHandler(console_ctrl_handler, FALSE);
+    SetConsoleCtrlHandler(console_ctrl_handler, TRUE);
 }
 #else
 #include <csignal>
 static void signal_handler(int /*sig*/) {
+    // FTXUI overrides SIGINT/SIGTERM during Loop() (app.cpp:575) so this only
+    // fires before Loop starts or after it returns — terminal isn't in the
+    // raw/alt-screen state yet, so _exit is safe.
     finalize_session_atexit();
     _exit(1);
 }
@@ -691,6 +746,7 @@ int main(int argc, char* argv[]) {
     bool run_configure_cmd = false;
     bool validate_models_registry_cmd = false;
     bool resume_latest = false;
+    bool force_alt_screen = false;  // --alt-screen / -alt-screen 强制 fallback
     std::string resume_session_id;
     for (int i = 1; i < argc; ++i) {
         std::string arg(argv[i]);
@@ -700,6 +756,8 @@ int main(int argc, char* argv[]) {
             run_configure_cmd = true;
         } else if (arg == "--validate-models-registry") {
             validate_models_registry_cmd = true;
+        } else if (arg == "-alt-screen" || arg == "--alt-screen") {
+            force_alt_screen = true;
         } else if (arg == "--resume") {
             if (i + 1 < argc && argv[i + 1][0] != '-') {
                 resume_session_id = argv[++i];
@@ -795,6 +853,28 @@ int main(int argc, char* argv[]) {
 
     // ---- Load config ----
     AppConfig config = load_config();
+
+    // ---- Init proxy resolver ----
+    // 必须在任何 cpr 调用之前完成(下面 initialize_registry 可能触发 models.dev
+    // 拉取)。失败也不应阻塞启动 —— ProxyResolver 内部所有探测都是 soft-fail。
+    network::proxy_resolver().init(config.network);
+    {
+        auto resolved = network::proxy_resolver().effective("https://example.com");
+        std::string url_disp = resolved.url.empty()
+                                  ? std::string("direct")
+                                  : network::redact_credentials(resolved.url);
+        std::string banner = "Proxy: " + url_disp + " (" + resolved.source + ")";
+        if (config.network.proxy_insecure_skip_verify) {
+            // ANSI red bold — TUI 还没起来,直接打 stderr 让用户立刻看见。
+            banner += "  \x1b[1;31m[INSECURE: TLS verification disabled]\x1b[0m";
+            LOG_WARN("[proxy] insecure_skip_verify is enabled — TLS chain validation off");
+        }
+        std::cerr << banner << std::endl;
+        LOG_INFO(std::string("[proxy] effective=") +
+                 (resolved.url.empty() ? "direct" : network::redact_credentials(resolved.url)) +
+                 " source=" + resolved.source +
+                 " mode=" + config.network.proxy_mode);
+    }
 
     // ---- Load bundled models.dev registry (offline-first) ----
     initialize_registry(config, argv0_dir);
@@ -969,7 +1049,35 @@ int main(int argc, char* argv[]) {
     std::vector<Box> message_boxes;
     std::vector<int> message_line_counts;
 
-    auto screen = ScreenInteractive::TerminalOutput();
+    // 终端能力探测 + render mode 决策(add-legacy-terminal-fallback)。
+    // CLI --alt-screen / -alt-screen 把 effective alt_screen_mode 临时强制为
+    // "always",优先级高于 config.json,只影响本次启动,不写回。
+    auto term_caps = acecode::detect_terminal_capabilities();
+    if (force_alt_screen) {
+        config.tui.alt_screen_mode = "always";
+    }
+    auto render_mode = acecode::tui::decide_render_mode(config.tui, term_caps);
+
+    // 一次性提示:仅在自动探测命中并切换到 alt-screen 时显示一次。
+    // CLI 强制 / config "always" / config "never" / 现代终端都不触发。
+    bool show_legacy_hint =
+        render_mode == acecode::tui::ScreenRenderMode::AltScreen &&
+        !force_alt_screen &&
+        config.tui.alt_screen_mode == "auto" &&
+        !term_caps.source_label.empty() &&
+        !acecode::read_state_flag("legacy_terminal_hint_shown");
+    if (show_legacy_hint) {
+        std::string hint = "提示: 检测到 " + term_caps.source_label +
+            ",已启用全屏渲染避免画面跳动。可在 ~/.acecode/config.json 设置 "
+            "\"tui\": {\"alt_screen_mode\": \"never\"} 关闭。";
+        state.conversation.push_back({"system", hint, false});
+        acecode::write_state_flag("legacy_terminal_hint_shown", true);
+    }
+
+    auto screen = acecode::tui::make_screen_interactive(render_mode);
+    // Publish for the Windows console-ctrl handler so Ctrl+C can trigger a
+    // graceful Loop exit instead of letting the default handler kill us.
+    g_active_screen.store(&screen, std::memory_order_release);
     screen.ForceHandleCtrlC(false);
     // mouse-selection-copy: register a no-op SelectionChange callback so
     // FTXUI enables live selection tracking. The right-click branch in the
@@ -1596,7 +1704,8 @@ int main(int argc, char* argv[]) {
             }
         }
         if (event == Event::CtrlC) {
-            // If compaction is in progress, Ctrl+C cancels it instead of exiting
+            // If an operation is active, Ctrl+C behaves like Escape: cancel the
+            // current work instead of entering the exit-confirm prompt.
             {
                 std::lock_guard<std::mutex> lk(state.mu);
                 if (state.is_compacting) {
@@ -1607,31 +1716,49 @@ int main(int argc, char* argv[]) {
                     screen.PostEvent(Event::Custom);
                     return true;
                 }
-            }
-
-            constexpr auto kCtrlCExitWindow = std::chrono::milliseconds(1200);
-
-            bool should_exit = false;
-            {
-                std::lock_guard<std::mutex> lk(state.mu);
-                auto now = std::chrono::steady_clock::now();
-                if (state.ctrl_c_armed && (now - state.last_ctrl_c_time) <= kCtrlCExitWindow) {
-                    should_exit = true;
-                } else {
-                    state.ctrl_c_armed = true;
-                    state.last_ctrl_c_time = now;
-                    state.conversation.push_back({"system", "Press Ctrl+C again within 1.2s to exit.", false});
-                    state.chat_follow_tail = true;
-                    clamp_chat_focus();
+                if (state.ask_pending || state.confirm_pending ||
+                    state.is_waiting || state.tool_running) {
+                    screen.PostEvent(Event::Escape);
+                    return true;
+                }
+                // 已经在确认态再按一次 Ctrl+C —— 不视为确认,保持等用户按 y。
+                if (!state.exit_confirm_pending) {
+                    state.exit_confirm_pending = true;
                 }
             }
-
-            if (should_exit) {
-                screen.Exit();
-            } else {
-                screen.PostEvent(Event::Custom);
-            }
+            screen.PostEvent(Event::Custom);
             return true;
+        }
+
+        // Ctrl+C 退出确认 overlay:state.exit_confirm_pending=true 时拦截
+        // 字符键 / Esc / Enter,'y'/'Y' 退出,其它都视为取消。鼠标 / resize
+        // / custom 事件不拦截,否则 UI 卡死。Ctrl+C 已在上面单独处理。
+        if (state.exit_confirm_pending) {
+            const bool is_char = event.is_character();
+            const bool is_cancel = (event == Event::Escape || event == Event::Return);
+            if (is_char || is_cancel) {
+                bool yes = false;
+                if (is_char) {
+                    const std::string& c = event.character();
+                    yes = (c == "y" || c == "Y");
+                }
+                {
+                    std::lock_guard<std::mutex> lk(state.mu);
+                    state.exit_confirm_pending = false;
+                    if (!yes) {
+                        state.conversation.push_back({"system", "Exit cancelled.", false});
+                        state.chat_follow_tail = true;
+                        clamp_chat_focus();
+                    }
+                }
+                if (yes) {
+                    screen.Exit();
+                } else {
+                    screen.PostEvent(Event::Custom);
+                }
+                return true;
+            }
+            // 非字符且非 Esc/Enter:不拦截(让鼠标 / 方向键等正常处理)。
         }
 
         // AskUserQuestion overlay guard:active 时抢占键盘,所有非导航键被吞掉,
@@ -2286,7 +2413,7 @@ int main(int argc, char* argv[]) {
                 state.input_cursor = 0;
                 return true;
             }
-            if (state.is_waiting) {
+            if (state.is_waiting || state.tool_running) {
                 agent_loop.cancel();
                 return true;
             }
@@ -2811,6 +2938,19 @@ int main(int argc, char* argv[]) {
                     line = line | focus;
                 }
                 message_elements.push_back(line | focus_decorator | reflect(message_boxes[i]));
+            } else if (msg.role == "user_shell_output") {
+                // 用户主动 `!cmd` 的输出 —— 全量显示,无截断、无摘要、无 fold。
+                // 用户自己输入的命令就是想看完整输出,任何折叠都不符合预期。
+                // 这与 LLM 工具结果(role="tool_result")形成对照:LLM 调用的
+                // 工具结果走摘要/diff/fold 三优先级,有 Ctrl+E 展开机制。
+                auto line = hbox({
+                    text("   <- ") | color(Color::GrayDark),
+                    render_tool_result_lines_preserving_breaks(msg.content) | flex,
+                });
+                if (focused_message) {
+                    line = line | focus;
+                }
+                message_elements.push_back(line | focus_decorator | reflect(message_boxes[i]));
             } else if (msg.role == "tool_result") {
                 // 新优先级:有结构化 hunks → 走彩色 diff 视图(summary + 色带);
                 // 其次 summary(无 hunks)→ 单行摘要;都没有 → 灰色 fold。
@@ -3279,7 +3419,17 @@ int main(int argc, char* argv[]) {
             ask_overlay_element = vbox(std::move(rows)) | border | color(Color::Cyan);
         }
 
-        if (state.ask_pending) {
+        if (state.exit_confirm_pending) {
+            // 优先级最高:Ctrl+C 退出确认 overlay 可在任何其他状态(ask /
+            // confirm / 普通输入)上叠加显示。事件拦截分支也放在最早。
+            prompt_line = hbox({
+                text(" Exit acecode? ") | bold | color(Color::Yellow),
+                text("y") | bold | color(Color::Green),
+                text(" / ") | color(Color::YellowLight),
+                text("N") | bold | color(Color::Red),
+                text(" (any other key cancels)") | dim | color(Color::GrayDark),
+            });
+        } else if (state.ask_pending) {
             // ask active 时:把输入框留给 Other 自定义文本态使用;其它状态下
             // 显示静态提示,吞掉字符输入(CatchEvent 不透传非导航键)。
             if (state.ask_other_input_active) {
@@ -3342,9 +3492,9 @@ int main(int argc, char* argv[]) {
                 token_el,
                 text(perm_mode_str + "  ") | dim | color(Color::GrayDark),
             });
-        } else if (state.is_waiting) {
+        } else if (state.is_waiting || state.tool_running) {
             bottom_bar = hbox({
-                text("  esc to interrupt") | dim | color(Color::GrayDark),
+                text("  esc / ctrl+c to interrupt") | dim | color(Color::GrayDark),
                 filler(),
                 thinking_timer_el,
                 tool_timer_el,
@@ -3386,7 +3536,20 @@ int main(int argc, char* argv[]) {
         }) | borderRounded | color(outer_border_color);
     });
 
+#ifdef _WIN32
+    // FTXUI applies its console mode inside Loop()/PreMain, so queue this
+    // adjustment as the first loop task. From then on Ctrl+C arrives as
+    // Event::CtrlC instead of being consumed by the Windows console layer.
+    screen.Post(prepare_windows_ctrl_c_handling_after_ftxui_install);
+#endif
     screen.Loop(renderer);
+
+    // Stop the ctrl handler from poking at `screen` once Loop returns; the
+    // ScreenInteractive will be destroyed at end of scope.
+    g_active_screen.store(nullptr, std::memory_order_release);
+#ifdef _WIN32
+    SetConsoleCtrlHandler(console_ctrl_handler, FALSE);
+#endif
 
     running = false;
 

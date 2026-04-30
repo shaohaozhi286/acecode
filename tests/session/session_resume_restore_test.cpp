@@ -85,6 +85,48 @@ TEST(SessionResumeRestore, RestoresCanonicalToolCallsForTuiAndAgentContext) {
     EXPECT_EQ(h.loop_.messages()[2].role, "tool");
 }
 
+// 用户主动 `!cmd` 落盘的形态:`!cmd`(role=user) + tool_result 伪角色配对。
+// resume 后必须把 tool_result 翻译为 user_shell_output —— 这样 main.cpp 的
+// 渲染端走全量分支,与实时 `!cmd` 行为一致(用户输入的命令一定要看完整输出)。
+// 同时 LLM 上下文走 inject_shell_turn 注入规范结构,user_shell_output 不能进
+// agent_loop.messages_(它是 UI-only)。
+TEST(SessionResumeRestore, ShellModePairTranslatesToUserShellOutput) {
+    ResumeRestoreHarness h;
+
+    acecode::ChatMessage shell_user;
+    shell_user.role = "user";
+    shell_user.content = "!ls -la";  // ! 前缀触发 shell-mode 配对识别
+
+    acecode::ChatMessage shell_result;
+    shell_result.role = "tool_result";  // 伪角色,落盘时由 run_shell 写入
+    shell_result.content = "total 4\n.\n..\nfoo.txt\nbar.txt";
+
+    acecode::append_resumed_session_messages({shell_user, shell_result},
+                                             h.state,
+                                             h.loop_,
+                                             h.tools_);
+
+    // chat 视图:shell_user 行 + user_shell_output 行(role 翻译过)。
+    ASSERT_EQ(h.state.conversation.size(), 2u);
+    EXPECT_EQ(h.state.conversation[0].role, "user");
+    EXPECT_EQ(h.state.conversation[0].content, "!ls -la");
+
+    EXPECT_EQ(h.state.conversation[1].role, "user_shell_output")
+        << "shell-mode 配对的 tool_result 必须翻译为 user_shell_output,"
+           "渲染端才能走全量分支不折叠";
+    EXPECT_TRUE(h.state.conversation[1].is_tool);
+    EXPECT_EQ(h.state.conversation[1].content,
+              "total 4\n.\n..\nfoo.txt\nbar.txt");
+    // 不能填 summary —— user_shell_output 渲染分支不读这个字段,填了无意义。
+    EXPECT_FALSE(h.state.conversation[1].summary.has_value());
+
+    // LLM 上下文:inject_shell_turn 注入了一条 user 规范消息,而不是 push
+    // 原始的 shell_user / shell_result 两条。验证 messages_ 末尾是 inject 的。
+    ASSERT_EQ(h.loop_.messages().size(), 1u);
+    EXPECT_EQ(h.loop_.messages()[0].role, "user");
+    EXPECT_NE(h.loop_.messages()[0].content.find("ls -la"), std::string::npos);
+}
+
 TEST(SessionResumeRestore, DoesNotPushStandalonePseudoToolResultToProviderHistory) {
     ResumeRestoreHarness h;
 

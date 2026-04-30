@@ -48,9 +48,14 @@ void append_resumed_session_messages(const std::vector<ChatMessage>& messages,
         if (is_shell_user && next_is_result) {
             flush_replay();
             state.conversation.push_back({msg.role, msg.content, false});
-            state.conversation.push_back({messages[i + 1].role,
-                                          messages[i + 1].content,
-                                          true});
+            // 把落盘的 "tool_result"(伪角色)翻译为运行时使用的
+            // "user_shell_output",让 resume 后的 chat 视图与实时 `!cmd` 行为
+            // 一致——全量显示用户主动跑的命令输出,不走 fold/summary 路径。
+            TuiState::Message shell_row;
+            shell_row.role = "user_shell_output";
+            shell_row.content = messages[i + 1].content;
+            shell_row.is_tool = true;
+            state.conversation.push_back(std::move(shell_row));
             agent_loop.inject_shell_turn(msg.content.substr(1),
                                          messages[i + 1].content,
                                          "",

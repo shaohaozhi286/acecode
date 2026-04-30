@@ -185,6 +185,12 @@ struct TuiState {
     bool ctrl_c_armed = false;
     std::chrono::steady_clock::time_point last_ctrl_c_time{};
 
+    // Ctrl+C 退出确认 overlay。Ctrl+C(stdin Event::CtrlC 或 Windows
+    // console_ctrl_handler 转发的 PostEvent)进入时翻起,事件 handler
+    // 在最前面拦截 'y'/'Y' = 退出,其它字符键 / Esc / Enter = 取消。
+    // 非字符事件(mouse / resize / custom)不拦截,否则 UI 卡住。
+    bool exit_confirm_pending = false;
+
     // drag-autoscroll: 鼠标拖到 chat_box 顶部/底部时自动滚动并补偿 selection,
     // 让选区跟着内容走 (而不是被 FTXUI 的屏幕坐标钉死在固定位置)。
     //   drag_left_pressed       — 自己维护,因为终端在 Moved 事件中通常不带 button

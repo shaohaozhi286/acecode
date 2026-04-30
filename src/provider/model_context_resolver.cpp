@@ -1,5 +1,6 @@
 #include "model_context_resolver.hpp"
 
+#include "../network/proxy_resolver.hpp"
 #include "../utils/logger.hpp"
 #include "models_dev_registry.hpp"
 
@@ -177,10 +178,13 @@ int fetch_models_endpoint_context(const std::string& base_url,
         headers["Authorization"] = "Bearer " + api_key;
     }
 
+    auto proxy_opts = network::proxy_options_for(url);
     cpr::Response response = cpr::Get(
         cpr::Url{url},
         headers,
-        cpr::Ssl(cpr::ssl::NoRevoke{true}),
+        network::build_ssl_options(proxy_opts),
+        proxy_opts.proxies,
+        proxy_opts.auth,
         cpr::Timeout{15000}
     );
 

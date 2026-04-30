@@ -5,7 +5,9 @@
 #include "commands/compact.hpp"
 #include "session/tool_metadata_codec.hpp"
 #include "session/session_rewind.hpp"
+#include "web/tool_event_payload.hpp"
 #include <nlohmann/json.hpp>
+#include <chrono>
 #include <mutex>
 #include <future>
 #include <algorithm>
@@ -519,6 +521,27 @@ void AgentLoop::run_agent(const std::string& user_message) {
             else cmd_preview = tc.function_name;
             if (cmd_preview.size() > 60) cmd_preview = cmd_preview.substr(0, 57) + "...";
 
+            // 提前算 display_override(对齐 TUI: bash → "bash  cmd",file_* → "file_*  path",
+            // 其他工具返回空 → 浏览器侧 fallback 到 tool 名 + 参数预览)。
+            std::string display_override =
+                ToolExecutor::build_tool_call_preview(tc.function_name, tc.function_arguments);
+            bool is_task_complete = (tc.function_name == "task_complete");
+
+            // 工具计时(供 ToolEnd.elapsed_seconds 与 ToolUpdate 实时秒数)
+            auto tool_start_tp = std::chrono::steady_clock::now();
+
+            // §1.2.2: 推 ToolStart 事件给 daemon 路径。TUI 路径不依赖此事件
+            // (它走 callbacks_.on_tool_progress_start),所以两路并行不冲突。
+            {
+                nlohmann::json args_payload;
+                try { args_payload = nlohmann::json::parse(tc.function_arguments); }
+                catch (...) { args_payload = tc.function_arguments; }
+                events_.emit(SessionEventKind::ToolStart,
+                    web::build_tool_start_payload(tc.function_name, args_payload,
+                                                    cmd_preview, display_override,
+                                                    is_task_complete));
+            }
+
             // Shared progress state for this one tool call.
             // Accessed from the streaming callback which runs on the bash_tool's
             // polling loop (same worker thread), so no extra synchronisation
@@ -540,18 +563,55 @@ void AgentLoop::run_agent(const std::string& user_message) {
                     }
                 };
             }
-            if (callbacks_.on_tool_progress_update) {
-                auto update_cb = callbacks_.on_tool_progress_update;
-                tool_ctx.stream = [prog, update_cb](const std::string& chunk) {
-                    feed_line_state(chunk, prog->current_line, prog->tail_lines, prog->total_lines);
-                    prog->total_bytes += chunk.size();
-                    std::vector<std::string> snapshot(prog->tail_lines.begin(), prog->tail_lines.end());
-                    update_cb(snapshot, prog->current_line, prog->total_bytes, prog->total_lines);
-                };
-            } else {
-                // Even without a TUI update callback, pass abort_flag through.
-                tool_ctx.stream = nullptr;
+
+            // §1.1.3: 把 ask_user_question prompter 包成 ctx 回调。daemon 工厂版
+            // AskUserQuestion 工具(create_ask_user_question_tool_async)读这个回调;
+            // TUI 工厂版完全忽略它,继续走 TuiState overlay 流程。
+            if (ask_prompter_) {
+                AskUserQuestionPrompter* p = ask_prompter_;
+                std::atomic<bool>* abort_flag_ptr = &abort_requested_;
+                tool_ctx.ask_user_questions =
+                    [p, abort_flag_ptr](const nlohmann::json& questions_payload) -> nlohmann::json {
+                        AskUserQuestionResponse resp = p->prompt(questions_payload, abort_flag_ptr);
+                        nlohmann::json out;
+                        out["cancelled"] = resp.cancelled;
+                        nlohmann::json arr = nlohmann::json::array();
+                        for (const auto& a : resp.answers) {
+                            nlohmann::json item;
+                            item["question_id"] = a.question_id;
+                            item["selected"]    = a.selected;
+                            item["custom_text"] = a.custom_text;
+                            arr.push_back(std::move(item));
+                        }
+                        out["answers"] = std::move(arr);
+                        return out;
+                    };
             }
+
+            // §1.2.3: stream 回调同时驱动 TUI 进度回调 + 推 ToolUpdate 事件。
+            // current_partial = current_line(未完整 line),tail_lines = 最近 5 行(由
+            // feed_line_state 维护)。elapsed_seconds 实时算。
+            auto stream_update_cb = callbacks_.on_tool_progress_update;
+            EventDispatcher* events_ptr = &events_;
+            std::string tool_name_copy = tc.function_name;
+            tool_ctx.stream = [prog, stream_update_cb, events_ptr, tool_start_tp,
+                                tool_name_copy](const std::string& chunk) {
+                feed_line_state(chunk, prog->current_line, prog->tail_lines, prog->total_lines);
+                prog->total_bytes += chunk.size();
+                std::vector<std::string> snapshot(prog->tail_lines.begin(), prog->tail_lines.end());
+                if (stream_update_cb) {
+                    stream_update_cb(snapshot, prog->current_line, prog->total_bytes, prog->total_lines);
+                }
+                auto elapsed_ms =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - tool_start_tp).count();
+                events_ptr->emit(SessionEventKind::ToolUpdate,
+                    web::build_tool_update_payload(tool_name_copy, snapshot,
+                                                     prog->current_line,
+                                                     prog->total_lines,
+                                                     prog->total_bytes,
+                                                     elapsed_ms / 1000.0));
+            };
 
             // RAII guard: ensures on_tool_progress_end fires on any exit path.
             struct ProgressGuard {
@@ -567,6 +627,26 @@ void AgentLoop::run_agent(const std::string& user_message) {
             results[entry.original_index] = execute_single_tool(
                 tc.function_name, tc.function_arguments, exec_path, tool_ctx);
             result_ready[entry.original_index] = true;
+
+            // §1.2.4: 推 ToolEnd 事件。summary 来自 ToolResult::summary(opt-in 工具
+            // 才填);失败时 output 字段携带前 20 行 stderr 供前端 dim 显示。
+            {
+                const ToolResult& r = results[entry.original_index];
+                auto elapsed_ms =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - tool_start_tp).count();
+                std::string snippet;
+                if (!r.success) {
+                    int lines = 0;
+                    for (char c : r.output) {
+                        snippet.push_back(c);
+                        if (c == '\n' && ++lines >= 20) break;
+                    }
+                }
+                events_.emit(SessionEventKind::ToolEnd,
+                    web::build_tool_end_payload(tc.function_name, r,
+                                                  elapsed_ms / 1000.0, snippet));
+            }
 
             dispatch_message("tool_result", results[entry.original_index].output, true);
             emit_tool_result_callback(entry.original_index);
@@ -696,18 +776,20 @@ void AgentLoop::run_shell(const std::string& command) {
         LOG_WARN("Shell mode invoked but `bash` tool is not registered");
     }
 
-    dispatch_message("tool_result", result.output, true);
-    if (callbacks_.on_tool_result) {
-        ChatMessage call_msg;
-        call_msg.role = "tool_call";
-        call_msg.content = "[Tool: bash] " + args_json;
-        call_msg.display_override =
-            ToolExecutor::build_tool_call_preview("bash", args_json);
-        callbacks_.on_tool_result(call_msg, "bash", result);
-    }
+    // 用户主动 `!cmd` 的输出必须**全量显示**(不折叠、不摘要、不截断)—— 用户
+    // 自己输入命令就是为了看完整结果,LLM 工具结果的"摘要 + Ctrl+E 展开"语义
+    // 在这里不适用。所以使用一个独立的 TUI 伪角色 `user_shell_output`,渲染分支
+    // 走全量路径,与 `tool_result`(LLM 工具结果)区分开。
+    // 同样不调 callbacks_.on_tool_result —— 它会把 ToolResult.summary 回填到
+    // TuiState::Message,导致渲染走 summary 单行;这正是要避免的。
+    dispatch_message("user_shell_output", result.output, true);
 
     // Persist the two display-side messages so --resume can rehydrate both the
     // chat view and (via the recovery pass in main.cpp) the LLM messages_.
+    // 落盘的 role 仍然是 "tool_result"(伪角色) —— resume 时由 main.cpp
+    // 的 shell-mode 配对识别(`is_shell_user && next_is_result`)把它翻译为
+    // "user_shell_output"。不写 metadata.tool_summary/tool_hunks,因为
+    // user_shell_output 渲染分支不读这些字段,写了也是死字段。
     if (session_manager_) {
         ChatMessage user_msg;
         user_msg.role = "user";
@@ -717,15 +799,6 @@ void AgentLoop::run_shell(const std::string& command) {
         ChatMessage tool_msg;
         tool_msg.role = "tool_result";
         tool_msg.content = result.output;
-        // restore-tool-calls-on-resume: 一致性起见也写 metadata。当前 shell-mode
-        // 的 resume 走 inject_shell_turn 配对识别,这里写的 metadata 不会被
-        // replay_session_messages 读到;但留着不会有副作用,且未来若改路径自动受益。
-        if (result.summary.has_value()) {
-            tool_msg.metadata["tool_summary"] = encode_tool_summary(*result.summary);
-        }
-        if (result.hunks.has_value()) {
-            tool_msg.metadata["tool_hunks"] = encode_tool_hunks(*result.hunks);
-        }
         session_manager_->on_message(tool_msg);
     }
 

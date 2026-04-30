@@ -10,6 +10,7 @@
 #include "../session/local_session_client.hpp"
 #include "../session/session_registry.hpp"
 #include "../skills/skill_registry.hpp"
+#include "../tool/ask_user_question_tool.hpp"
 #include "../tool/bash_tool.hpp"
 #include "../tool/file_read_tool.hpp"
 #include "../tool/file_write_tool.hpp"
@@ -18,6 +19,7 @@
 #include "../tool/glob_tool.hpp"
 #include "../tool/task_complete_tool.hpp"
 #include "../tool/tool_executor.hpp"
+#include "../network/proxy_resolver.hpp"
 #include "../utils/logger.hpp"
 #include "../utils/token.hpp"
 #include "../web/auth.hpp"
@@ -138,6 +140,26 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
         return 3;
     }
 
+    // 代理解析器初始化 —— 必须在第一个 cpr 调用前完成。daemon 路径无 TUI,
+    // 横幅写到日志(LOG_INFO),insecure 仍走 LOG_WARN(高优先级)。
+    network::proxy_resolver().init(cfg.network);
+    {
+        auto resolved = network::proxy_resolver().effective("https://example.com");
+        std::ostringstream oss;
+        oss << "[proxy] effective="
+            << (resolved.url.empty() ? "direct" : network::redact_credentials(resolved.url))
+            << " source=" << resolved.source
+            << " mode=" << cfg.network.proxy_mode;
+        LOG_INFO(oss.str());
+        if (opts.foreground) std::cerr << oss.str() << "\n";
+        if (cfg.network.proxy_insecure_skip_verify) {
+            LOG_WARN("[proxy] insecure_skip_verify is enabled — TLS chain validation off");
+            if (opts.foreground) {
+                std::cerr << "[proxy] WARNING: TLS verification disabled for proxied requests\n";
+            }
+        }
+    }
+
     ensure_run_dir();
 
     // GUID: supervised 用 launcher 派的;standalone 自己生成。
@@ -205,6 +227,9 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     tools.register_tool(acecode::create_grep_tool());
     tools.register_tool(acecode::create_glob_tool());
     tools.register_tool(acecode::create_task_complete_tool());
+    // daemon 用 async 版本(走 ToolContext::ask_user_questions → AskUserQuestionPrompter
+    // → WS question_request)。TUI 工厂版需要 TuiState/ScreenInteractive,这里没有。
+    tools.register_tool(acecode::create_ask_user_question_tool_async());
 
     acecode::SkillRegistry skill_registry; // 不 scan,v1 daemon 不暴露 skills
     acecode::PermissionManager template_perm;
@@ -238,6 +263,8 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     web_deps.session_client     = &client;
     web_deps.session_registry   = &registry;
     web_deps.skill_registry     = &skill_registry;
+    web_deps.provider           = &provider;
+    web_deps.provider_mu        = &provider_mu;
     web_deps.dangerous          = opts.dangerous;
 
     acecode::web::WebServer server(std::move(web_deps));

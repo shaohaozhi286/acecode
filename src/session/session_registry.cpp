@@ -64,6 +64,12 @@ std::string SessionRegistry::create(const SessionOptions& opts) {
     entry->prompter = prompter.get();
     entry->loop->set_permission_prompter(std::move(prompter));
 
+    // AskUserQuestionPrompter: 异步 — 触发 QuestionRequest 事件,等浏览器
+    // question_answer 回流。AgentLoop 在每次工具执行时把 prompter 包成
+    // ToolContext::ask_user_questions 回调注入(set_ask_question_prompter)。
+    entry->ask_prompter = std::make_unique<AskUserQuestionPrompter>(entry->loop->events());
+    entry->loop->set_ask_question_prompter(entry->ask_prompter.get());
+
     // 可选 auto_start: 立刻 submit initial_user_message
     if (opts.auto_start && !opts.initial_user_message.empty()) {
         entry->loop->submit(opts.initial_user_message);

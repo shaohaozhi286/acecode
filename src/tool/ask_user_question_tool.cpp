@@ -356,4 +356,194 @@ ToolImpl create_ask_user_question_tool(TuiState& state,
     return impl;
 }
 
+namespace {
+
+// 构造 daemon 工厂会用到的同一份 ToolDef。复用 create_ask_user_question_tool
+// 那段拼装太长 —— 把 def 抽出来共享。
+ToolDef build_ask_user_question_def() {
+    ToolDef def;
+    def.name = "AskUserQuestion";
+    def.description = kToolDescription;
+
+    nlohmann::json option_schema = {
+        {"type", "object"},
+        {"required", nlohmann::json::array({"label", "description"})},
+        {"properties", {
+            {"label", {
+                {"type", "string"},
+                {"description",
+                 "Short (1-5 word) label shown to the user as the selectable choice."}
+            }},
+            {"description", {
+                {"type", "string"},
+                {"description",
+                 "Explanation of what this option means or what will happen if chosen."}
+            }},
+            {"preview", {
+                {"type", "string"},
+                {"description",
+                 "Optional preview content. Accepted for SDK-schema parity."}
+            }}
+        }}
+    };
+
+    nlohmann::json question_schema = {
+        {"type", "object"},
+        {"required", nlohmann::json::array({"question", "header", "options"})},
+        {"properties", {
+            {"question", {
+                {"type", "string"},
+                {"description",
+                 "The complete question. Should be clear, specific and end with '?'."}
+            }},
+            {"header", {
+                {"type", "string"},
+                {"description",
+                 "Very short chip label (max 12 characters)."}
+            }},
+            {"options", {
+                {"type", "array"},
+                {"minItems", kMinOptions},
+                {"maxItems", kMaxOptions},
+                {"items", option_schema},
+                {"description",
+                 "2-4 mutually exclusive choices. Do NOT include an 'Other' option — "
+                 "the UI appends one automatically."}
+            }},
+            {"multiSelect", {
+                {"type", "boolean"},
+                {"default", false},
+                {"description", "Set true to allow the user to pick multiple options."}
+            }}
+        }}
+    };
+
+    def.parameters = {
+        {"type", "object"},
+        {"required", nlohmann::json::array({"questions"})},
+        {"properties", {
+            {"questions", {
+                {"type", "array"},
+                {"minItems", kMinQuestions},
+                {"maxItems", kMaxQuestions},
+                {"items", question_schema},
+                {"description",
+                 "1-4 questions to ask the user. Question texts must be unique."}
+            }}
+        }}
+    };
+    return def;
+}
+
+// 把已 validate 的 question 列表转成 prompter 用的 questions_payload(给前端渲染)。
+// 字段名与 design.md / spec.md 的 WS 协议对齐:每个 question 携带 id(用 question
+// 文本作为 id,与 TUI 行为同步) / text / options[{label,value}] / multiSelect。
+nlohmann::json questions_to_payload(const std::vector<AskQuestion>& qs) {
+    nlohmann::json arr = nlohmann::json::array();
+    for (const auto& q : qs) {
+        nlohmann::json options = nlohmann::json::array();
+        for (const auto& o : q.options) {
+            options.push_back({
+                {"label", o.label},
+                {"value", o.label}, // value=label,前端 v1 不区分两者
+                {"description", o.description},
+            });
+        }
+        arr.push_back({
+            {"id",          q.question},
+            {"text",        q.question},
+            {"header",      q.header},
+            {"options",     options},
+            {"multiSelect", q.multi_select},
+        });
+    }
+    return arr;
+}
+
+// 把 ctx.ask_user_questions 回来的 JSON 转成 std::map<question, answer_text>,
+// 按 ", " 拼合 multiSelect。供 format_ask_answers 使用。
+std::map<std::string, std::string>
+parse_async_response(const nlohmann::json& resp_json) {
+    std::map<std::string, std::string> answers;
+    if (!resp_json.is_object()) return answers;
+    if (!resp_json.contains("answers") || !resp_json["answers"].is_array()) return answers;
+    for (const auto& a : resp_json["answers"]) {
+        if (!a.is_object()) continue;
+        std::string qid = a.value("question_id", std::string{});
+        if (qid.empty()) continue;
+
+        // selected 与 custom_text 都可能存在 —— 拼合
+        std::vector<std::string> parts;
+        if (a.contains("selected") && a["selected"].is_array()) {
+            for (const auto& s : a["selected"]) {
+                if (s.is_string()) parts.push_back(s.get<std::string>());
+            }
+        }
+        if (a.contains("custom_text") && a["custom_text"].is_string()) {
+            std::string ct = a["custom_text"].get<std::string>();
+            if (!ct.empty()) parts.push_back(ct);
+        }
+
+        std::string joined;
+        for (std::size_t i = 0; i < parts.size(); ++i) {
+            if (i) joined += ", ";
+            joined += parts[i];
+        }
+        answers[qid] = joined;
+    }
+    return answers;
+}
+
+} // namespace
+
+ToolImpl create_ask_user_question_tool_async() {
+    auto execute = [](const std::string& arguments_json,
+                       const ToolContext& ctx) -> ToolResult {
+        std::string err;
+        auto parsed = validate_ask_user_question_args(arguments_json, err);
+        if (!parsed.has_value()) {
+            return ToolResult{err, false};
+        }
+
+        // ctx.ask_user_questions 为空 → daemon 没装 prompter,工具不可用。
+        // 直接拒绝 + 让 LLM 知道(避免无限挂起)。
+        if (!ctx.ask_user_questions) {
+            return ToolResult{
+                "[Error] AskUserQuestion is not supported by this session "
+                "(no UI channel connected).",
+                false};
+        }
+
+        // abort 已触发 = 不发问,直接 reject
+        if (ctx.abort_flag && ctx.abort_flag->load()) {
+            return make_rejected_ask_result();
+        }
+
+        std::vector<std::string> question_order;
+        question_order.reserve(parsed->size());
+        for (const auto& q : *parsed) question_order.push_back(q.question);
+
+        nlohmann::json payload = questions_to_payload(*parsed);
+        nlohmann::json resp = ctx.ask_user_questions(payload);
+
+        bool cancelled = resp.value("cancelled", false);
+        if (cancelled) {
+            return make_rejected_ask_result();
+        }
+
+        auto answers = parse_async_response(resp);
+        ToolResult r;
+        r.success = true;
+        r.output  = format_ask_answers(question_order, answers);
+        return r;
+    };
+
+    ToolImpl impl;
+    impl.definition   = build_ask_user_question_def();
+    impl.execute      = execute;
+    impl.is_read_only = true;
+    impl.source       = ToolSource::Builtin;
+    return impl;
+}
+
 } // namespace acecode

@@ -8,6 +8,7 @@
 #include "session/session_manager.hpp"
 #include "session/event_dispatcher.hpp"
 #include "session/permission_prompter.hpp"
+#include "session/ask_user_question_prompter.hpp"
 #include "config/config.hpp"
 
 #include <vector>
@@ -163,6 +164,13 @@ public:
         prompter_ = std::move(p);
     }
 
+    // 注入异步 AskUserQuestionPrompter(daemon 模式)。raw 指针;生命周期由
+    // 调用方(典型是 SessionEntry)保证。AgentLoop 在每次工具调用前把它包成
+    // ToolContext::ask_user_questions 回调注入。
+    void set_ask_question_prompter(AskUserQuestionPrompter* p) {
+        ask_prompter_ = p;
+    }
+
 private:
     void worker_main();
     void run_agent(const std::string& user_message);
@@ -215,6 +223,11 @@ private:
     // Section 7.6: PermissionPrompter。null 时走 callbacks_.on_tool_confirm
     // 老路径(TUI);非 null 时(daemon 模式)走 prompter_->prompt。
     std::unique_ptr<PermissionPrompter> prompter_;
+
+    // AskUserQuestionPrompter: daemon 模式下走 WS。raw 指针,生命周期由
+    // SessionEntry 持有。null 时 ToolContext::ask_user_questions 不注入,
+    // 此时 AskUserQuestion 工具(daemon 工厂版)会返回 rejected。
+    AskUserQuestionPrompter* ask_prompter_ = nullptr;
 };
 
 } // namespace acecode

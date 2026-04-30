@@ -1,5 +1,6 @@
 #include "copilot_provider.hpp"
 #include "utils/logger.hpp"
+#include "network/proxy_resolver.hpp"
 #include <cpr/cpr.h>
 #include <cpr/ssl_options.h>
 #include <ctime>
@@ -95,11 +96,14 @@ ChatResponse CopilotProvider::chat(
         {"Openai-Intent", "conversation-panel"}
     };
 
+    auto proxy_opts = network::proxy_options_for(COPILOT_CHAT_URL);
     cpr::Response r = cpr::Post(
         cpr::Url{COPILOT_CHAT_URL},
         headers,
         cpr::Body{body.dump()},
-        cpr::Ssl(cpr::ssl::NoRevoke{true}),
+        network::build_ssl_options(proxy_opts),
+        proxy_opts.proxies,
+        proxy_opts.auth,
         cpr::Timeout{120000}
     );
 
@@ -115,11 +119,14 @@ ChatResponse CopilotProvider::chat(
         copilot_token_ = {};
         if (ensure_copilot_token()) {
             headers["Authorization"] = "Bearer " + copilot_token_.token;
+            auto proxy_opts2 = network::proxy_options_for(COPILOT_CHAT_URL);
             r = cpr::Post(
                 cpr::Url{COPILOT_CHAT_URL},
                 headers,
                 cpr::Body{body.dump()},
-                cpr::Ssl(cpr::ssl::NoRevoke{true}),
+                network::build_ssl_options(proxy_opts2),
+                proxy_opts2.proxies,
+                proxy_opts2.auth,
                 cpr::Timeout{120000}
             );
         }

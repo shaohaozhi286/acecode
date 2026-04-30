@@ -305,6 +305,56 @@ AppConfig load_config() {
                     if (v > 0) cfg.input_history.max_entries = v;
                 }
             }
+            if (j.contains("network") && j["network"].is_object()) {
+                const auto& nj = j["network"];
+                if (nj.contains("proxy_mode") && nj["proxy_mode"].is_string()) {
+                    std::string m = nj["proxy_mode"].get<std::string>();
+                    if (m != "auto" && m != "off" && m != "manual") {
+                        std::cerr << "[config] fatal: network.proxy_mode='" << m
+                                  << "' invalid; expected one of: auto, off, manual" << std::endl;
+                        LOG_ERROR("[config] network.proxy_mode invalid: " + m);
+                        std::exit(1);
+                    }
+                    cfg.network.proxy_mode = std::move(m);
+                }
+                if (nj.contains("proxy_url") && nj["proxy_url"].is_string())
+                    cfg.network.proxy_url = nj["proxy_url"].get<std::string>();
+                if (nj.contains("proxy_no_proxy") && nj["proxy_no_proxy"].is_string())
+                    cfg.network.proxy_no_proxy = nj["proxy_no_proxy"].get<std::string>();
+                if (nj.contains("proxy_ca_bundle") && nj["proxy_ca_bundle"].is_string())
+                    cfg.network.proxy_ca_bundle = nj["proxy_ca_bundle"].get<std::string>();
+                if (nj.contains("proxy_insecure_skip_verify") &&
+                    nj["proxy_insecure_skip_verify"].is_boolean())
+                    cfg.network.proxy_insecure_skip_verify =
+                        nj["proxy_insecure_skip_verify"].get<bool>();
+
+                if (cfg.network.proxy_mode == "manual" && cfg.network.proxy_url.empty()) {
+                    std::cerr << "[config] fatal: network.proxy_mode='manual' requires "
+                              << "non-empty network.proxy_url" << std::endl;
+                    LOG_ERROR("[config] manual proxy_mode missing proxy_url");
+                    std::exit(1);
+                }
+            }
+            // TUI 渲染策略段。不存在时保持 TuiConfig 默认值(alt_screen_mode="auto")。
+            // 非对象类型 + 非法字符串值都规范化到 "auto",启动不阻断。
+            if (j.contains("tui")) {
+                if (!j["tui"].is_object()) {
+                    LOG_WARN("[config] 'tui' must be an object, ignoring");
+                } else {
+                    const auto& tj = j["tui"];
+                    if (tj.contains("alt_screen_mode") && tj["alt_screen_mode"].is_string()) {
+                        std::string m = tj["alt_screen_mode"].get<std::string>();
+                        if (m == "auto" || m == "always" || m == "never") {
+                            cfg.tui.alt_screen_mode = std::move(m);
+                        } else {
+                            LOG_WARN("[config] invalid tui.alt_screen_mode value '" + m +
+                                     "', falling back to 'auto'");
+                            cfg.tui.alt_screen_mode = "auto";
+                        }
+                    }
+                }
+            }
+
             if (j.contains("agent_loop") && j["agent_loop"].is_object()) {
                 const auto& alj = j["agent_loop"];
                 // max_iterations ∈ [1, 10000]. Clamp + warn on out-of-range so a
@@ -562,6 +612,26 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
         if (cfg.agent_loop.max_iterations != al_d.max_iterations)
             alj["max_iterations"] = cfg.agent_loop.max_iterations;
         if (!alj.empty()) j["agent_loop"] = alj;
+
+        TuiConfig tui_d;
+        nlohmann::json tj = nlohmann::json::object();
+        if (cfg.tui.alt_screen_mode != tui_d.alt_screen_mode)
+            tj["alt_screen_mode"] = cfg.tui.alt_screen_mode;
+        if (!tj.empty()) j["tui"] = tj;
+
+        NetworkConfig net_d;
+        nlohmann::json nj = nlohmann::json::object();
+        if (cfg.network.proxy_mode != net_d.proxy_mode)
+            nj["proxy_mode"] = cfg.network.proxy_mode;
+        if (cfg.network.proxy_url != net_d.proxy_url)
+            nj["proxy_url"] = cfg.network.proxy_url;
+        if (cfg.network.proxy_no_proxy != net_d.proxy_no_proxy)
+            nj["proxy_no_proxy"] = cfg.network.proxy_no_proxy;
+        if (cfg.network.proxy_ca_bundle != net_d.proxy_ca_bundle)
+            nj["proxy_ca_bundle"] = cfg.network.proxy_ca_bundle;
+        if (cfg.network.proxy_insecure_skip_verify != net_d.proxy_insecure_skip_verify)
+            nj["proxy_insecure_skip_verify"] = cfg.network.proxy_insecure_skip_verify;
+        if (!nj.empty()) j["network"] = nj;
     }
 
     // --- model profiles ---

@@ -52,4 +52,11 @@ ToolResult make_rejected_ask_result();
 ToolImpl create_ask_user_question_tool(TuiState& state,
                                         ftxui::ScreenInteractive& screen);
 
+// daemon 路径用的工厂。execute() 不碰 TuiState/ScreenInteractive,完全靠
+// `ToolContext::ask_user_questions` 异步通道(典型实现: 走 WS question_request
+// → 浏览器 modal → question_answer 回流)。ctx.ask_user_questions 为空时
+// 直接返回 make_rejected_ask_result()(daemon 没装 prompter = AskUserQuestion
+// 在该会话不可用)。
+ToolImpl create_ask_user_question_tool_async();
+
 } // namespace acecode

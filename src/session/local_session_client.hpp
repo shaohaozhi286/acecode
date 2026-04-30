@@ -28,6 +28,9 @@ public:
     void send_input(const std::string& session_id, const std::string& text) override;
     void respond_permission(const std::string& session_id,
                               const PermissionDecision& decision) override;
+    void respond_question(const std::string& session_id,
+                            const std::string& request_id,
+                            const AskUserQuestionResponse& response) override;
     void abort(const std::string& session_id) override;
 
 private:

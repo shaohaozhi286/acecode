@@ -20,6 +20,7 @@
 #include "../permissions.hpp"
 #include "../provider/llm_provider.hpp"
 #include "../tool/tool_executor.hpp"
+#include "ask_user_question_prompter.hpp"
 #include "permission_prompter.hpp"
 #include "session_client.hpp"
 #include "session_manager.hpp"
@@ -44,6 +45,10 @@ struct SessionEntry {
     std::unique_ptr<PermissionManager>  perm;
     std::unique_ptr<AgentLoop>           loop;
     AsyncPrompter*                       prompter = nullptr; // owned by loop after move
+    // AskUserQuestionPrompter 不被 AgentLoop 持有(AgentLoop 只装 PermissionPrompter),
+    // 由 SessionEntry 直接持有 + 通过 ToolContext::ask_question_prompter 注入到
+    // 每次工具调用的 ctx。生命周期 = SessionEntry。
+    std::unique_ptr<AskUserQuestionPrompter> ask_prompter;
 };
 
 // SessionRegistryDeps: 构造 SessionRegistry 时一次性传入的"全局共享物"。

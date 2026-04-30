@@ -35,6 +35,17 @@ configure_file(
     @ONLY
 )
 
+# Embed web/ assets into acecode_testable. Generates a single .cpp with byte
+# arrays + a name → span lookup map. Re-runs on every cmake re-configure when
+# files in web/ change (CONFIGURE_DEPENDS in the cmake function).
+include(${CMAKE_SOURCE_DIR}/cmake/acecode_embed_assets.cmake)
+acecode_compute_build_version(ACECODE_BUILD_VERSION)
+acecode_generate_embedded_assets(
+    ${CMAKE_SOURCE_DIR}/web
+    ${CMAKE_BINARY_DIR}/generated/static_assets_data.cpp
+    ${ACECODE_BUILD_VERSION}
+)
+
 find_package(cpr CONFIG REQUIRED)
 find_package(ftxui CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
@@ -101,6 +112,7 @@ add_library(acecode_testable OBJECT
     ${ACECODE_TESTABLE_SOURCES}
     ${ACECODE_HEADER_FILES}
     ${CMAKE_BINARY_DIR}/generated/version.hpp
+    ${CMAKE_BINARY_DIR}/generated/static_assets_data.cpp
 )
 target_include_directories(acecode_testable PUBLIC
     ${CMAKE_SOURCE_DIR}/src
@@ -122,7 +134,7 @@ if(Crow_FOUND)
     target_compile_definitions(acecode_testable PUBLIC ASIO_STANDALONE)
 endif()
 if(WIN32)
-    target_link_libraries(acecode_testable PUBLIC bcrypt advapi32)
+    target_link_libraries(acecode_testable PUBLIC bcrypt advapi32 winhttp)
 endif()
 
 add_executable(acecode

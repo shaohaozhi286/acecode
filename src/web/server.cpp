@@ -1,7 +1,11 @@
 #include "server.hpp"
 
 #include "auth.hpp"
+#include "static_assets.hpp"
 #include "../config/config.hpp"
+#include "../provider/llm_provider.hpp"
+#include "../provider/provider_swap.hpp"
+#include "../session/ask_user_question_prompter.hpp"
 #include "../session/local_session_client.hpp"
 #include "../session/session_client.hpp"
 #include "../session/session_registry.hpp"
@@ -10,6 +14,9 @@
 #include "../skills/skill_registry.hpp"
 #include "../skills/skill_metadata.hpp"
 #include "../utils/logger.hpp"
+#include "handlers/history_handler.hpp"
+#include "handlers/models_handler.hpp"
+#include "handlers/skills_handler.hpp"
 #include "version.hpp"
 
 // Crow 头一定在 ASIO_STANDALONE PUBLIC 定义之后才 include。CMakeLists.txt 已
@@ -91,6 +98,10 @@ struct WebServer::Impl {
     WebServerDeps              deps;
     crow::SimpleApp            app;
 
+    // 静态资源 source(EmbeddedAssetSource / FileSystemAssetSource),按
+    // web.static_dir 路径在 register_routes 前实例化。
+    std::unique_ptr<AssetSource> assets;
+
     // ws 注册表: 把 listener / state 与 connection 绑定,断开时清理。
     std::mutex                                                      ws_mu;
     std::unordered_map<crow::websocket::connection*, std::unique_ptr<WsConnState>> ws_connections;
@@ -130,9 +141,128 @@ struct WebServer::Impl {
     void register_routes() {
         register_health();
         register_sessions();
+        register_models();
+        register_history();
         register_skills();
         register_mcp();
         register_websocket();
+        register_static();
+    }
+
+    void register_static() {
+        // 路由分层:
+        //   - 显式 CROW_ROUTE("/static/<string>")             → 一层文件(app.js / style.css)
+        //   - 显式 CROW_ROUTE("/static/<string>/<string>")    → 两层文件(components/ace-app.js)
+        //   - 显式 CROW_ROUTE("/static/<string>/<string>/<string>") → 三层(vendor/bootstrap/fonts/x.woff2)
+        //   - CROW_CATCHALL_ROUTE                             → /、SPA 路径 fallback 到 index.html
+        // 注: Crow 1.3.2 对 "/static/*" 这一前缀的请求不会 fallthrough 到 catchall —
+        // 必须用显式 segment route 才能命中。<string> 在 Crow 里只匹配单 segment,
+        // 不含 "/",所以要按层数列举(我们前端最深 web/vendor/bootstrap/fonts/x.woff2,
+        // 即 4 段;含前缀 5 段)。<path> 模板在 1.3.2 上会破坏 server bind。
+        // 不走 require_auth(index.html / static 资源必须无 token 加载,否则
+        // 前端 token-prompt 自身都进不去)。
+        auto serve_static = [this](const crow::request& req, const std::string& rel) -> crow::response {
+            if (!assets) return crow::response(503);
+            std::string path = rel;
+            auto qpos = path.find('?');
+            if (qpos != std::string::npos) path.resize(qpos);
+            auto r = assets->lookup(path);
+            if (!r.has_value()) return crow::response(404);
+            crow::response resp(200);
+            resp.body.assign(reinterpret_cast<const char*>(r->data), r->size);
+            resp.add_header("Content-Type", r->content_type);
+            if (req.url_params.get("v")) {
+                resp.add_header("Cache-Control", "public, max-age=31536000, immutable");
+            } else {
+                resp.add_header("Cache-Control", "no-cache");
+            }
+            return resp;
+        };
+
+        CROW_ROUTE(app, "/static/<string>")
+        ([serve_static](const crow::request& req, std::string a) {
+            return serve_static(req, a);
+        });
+        CROW_ROUTE(app, "/static/<string>/<string>")
+        ([serve_static](const crow::request& req, std::string a, std::string b) {
+            return serve_static(req, a + "/" + b);
+        });
+        CROW_ROUTE(app, "/static/<string>/<string>/<string>")
+        ([serve_static](const crow::request& req, std::string a, std::string b, std::string c) {
+            return serve_static(req, a + "/" + b + "/" + c);
+        });
+        CROW_ROUTE(app, "/static/<string>/<string>/<string>/<string>")
+        ([serve_static](const crow::request& req, std::string a, std::string b, std::string c, std::string d) {
+            return serve_static(req, a + "/" + b + "/" + c + "/" + d);
+        });
+
+        // /、SPA 路径 fallback 到 index.html
+        CROW_CATCHALL_ROUTE(app)
+        ([this](const crow::request& req) -> crow::response {
+            std::string url_str(req.url);
+            if (url_str.rfind("/api/", 0) == 0 || url_str.rfind("/ws/", 0) == 0) {
+                return crow::response(404);
+            }
+            if (!assets) return crow::response(503);
+            auto r = assets->lookup("index.html");
+            if (!r.has_value()) {
+                crow::response resp(503);
+                resp.body = "index.html missing — front-end not bundled";
+                return resp;
+            }
+            crow::response resp(200);
+            resp.body.assign(reinterpret_cast<const char*>(r->data), r->size);
+            resp.add_header("Content-Type", r->content_type);
+            resp.add_header("Cache-Control", "no-cache");
+            return resp;
+        });
+    }
+
+    void register_history() {
+        // GET /api/history?cwd=<cwd>&max=N: 拉 per-cwd 历史(与 TUI 共享同一份文件)
+        CROW_ROUTE(app, "/api/history").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.app_config) return crow::response(503);
+
+            std::string cwd;
+            if (auto c = req.url_params.get("cwd")) cwd = c;
+            if (cwd.empty()) {
+                crow::response r(400);
+                r.body = R"({"error":"cwd parameter required"})";
+                r.add_header("Content-Type", "application/json");
+                return r;
+            }
+            int max = 0;
+            if (auto m = req.url_params.get("max")) {
+                try { max = std::stoi(m); } catch (...) { max = 0; }
+            }
+            auto arr = load_history(cwd, max, deps.app_config->input_history);
+            crow::response r(arr.dump());
+            r.add_header("Content-Type", "application/json");
+            return r;
+        });
+
+        // POST /api/history body {text}: 追加。enabled=false 静默丢弃。
+        // 用 daemon 自己的 cwd(deps.cwd)。
+        CROW_ROUTE(app, "/api/history").methods(crow::HTTPMethod::POST)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.app_config) return crow::response(503);
+
+            std::string text;
+            try {
+                auto j = json::parse(req.body);
+                text = j.value("text", std::string{});
+            } catch (const std::exception& e) {
+                crow::response r(400);
+                r.body = json{{"error", std::string("bad json: ") + e.what()}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return r;
+            }
+            append_history(deps.cwd, text, deps.app_config->input_history);
+            return crow::response(204);
+        });
     }
 
     void register_health() {
@@ -301,6 +431,79 @@ struct WebServer::Impl {
         });
     }
 
+    void register_models() {
+        // GET /api/models: 返回 saved_models + 合成 (legacy) 行
+        CROW_ROUTE(app, "/api/models").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.app_config) return crow::response(503);
+            auto arr = list_models(*deps.app_config);
+            crow::response r(arr.dump());
+            r.add_header("Content-Type", "application/json");
+            return r;
+        });
+
+        // POST /api/sessions/:id/model body {name}: 切当前 effective model
+        CROW_ROUTE(app, "/api/sessions/<string>/model").methods(crow::HTTPMethod::POST)
+        ([this](const crow::request& req, const std::string& sid) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.app_config) return crow::response(503);
+            if (!deps.session_registry) return crow::response(503);
+            if (!deps.provider || !deps.provider_mu) {
+                crow::response r(503);
+                r.body = R"({"error":"provider state unavailable"})";
+                r.add_header("Content-Type", "application/json");
+                return r;
+            }
+
+            // 校验 session 存在
+            if (!deps.session_registry->lookup(sid)) {
+                crow::response r(404);
+                r.body = R"({"error":"session not found"})";
+                r.add_header("Content-Type", "application/json");
+                return r;
+            }
+
+            std::string name;
+            try {
+                auto j = json::parse(req.body);
+                name = j.value("name", std::string{});
+            } catch (const std::exception& e) {
+                crow::response r(400);
+                r.body = json{{"error", std::string("bad json: ") + e.what()}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return r;
+            }
+            if (name.empty()) {
+                crow::response r(400);
+                r.body = R"({"error":"name required"})";
+                r.add_header("Content-Type", "application/json");
+                return r;
+            }
+
+            auto entry = find_model_by_name(*deps.app_config, name);
+            if (!entry.has_value()) {
+                crow::response r(400);
+                r.body = json{{"error", "Unknown model name: " + name}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return r;
+            }
+
+            // 真正切换。注: v1 切的是 daemon 全局 provider,所有 session 共享一个
+            // provider —— 切完后所有 session 下一轮 turn 都会用新模型。文档要明示。
+            swap_provider_if_needed(*deps.provider, *deps.provider_mu,
+                                      *entry, *deps.app_config);
+
+            crow::response r(200);
+            r.body = json{
+                {"name",            entry->name},
+                {"context_window",  deps.app_config->context_window},
+            }.dump();
+            r.add_header("Content-Type", "application/json");
+            return r;
+        });
+    }
+
     void register_skills() {
         // GET /api/skills: spec 9.7
         CROW_ROUTE(app, "/api/skills").methods(crow::HTTPMethod::GET)
@@ -317,9 +520,72 @@ struct WebServer::Impl {
                     o["enabled"]     = true; // disabled 已经在 list 里被过滤
                     arr.push_back(std::move(o));
                 }
+                // 同时把 cfg.skills.disabled 中的条目也列出(状态=false),让前端
+                // 看见所有可切换的 skill。
+                if (deps.app_config) {
+                    for (const auto& name : deps.app_config->skills.disabled) {
+                        json o;
+                        o["name"]        = name;
+                        o["command_key"] = name;
+                        o["description"] = "";
+                        o["category"]    = "";
+                        o["enabled"]     = false;
+                        arr.push_back(std::move(o));
+                    }
+                }
             }
             crow::response r(arr.dump());
             r.add_header("Content-Type", "application/json");
+            return r;
+        });
+
+        // PUT /api/skills/<name> body {enabled: bool}: 切启停
+        CROW_ROUTE(app, "/api/skills/<string>").methods(crow::HTTPMethod::PUT)
+        ([this](const crow::request& req, const std::string& name) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.app_config || !deps.skill_registry) return crow::response(503);
+
+            bool enabled;
+            try {
+                auto j = json::parse(req.body);
+                if (!j.contains("enabled") || !j["enabled"].is_boolean()) {
+                    crow::response r(400);
+                    r.body = R"({"error":"enabled (boolean) required"})";
+                    r.add_header("Content-Type", "application/json");
+                    return r;
+                }
+                enabled = j["enabled"].get<bool>();
+            } catch (const std::exception& e) {
+                crow::response r(400);
+                r.body = json{{"error", std::string("bad json: ") + e.what()}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return r;
+            }
+
+            auto result = set_skill_enabled(name, enabled,
+                                              *deps.app_config,
+                                              *deps.skill_registry,
+                                              deps.config_path);
+            crow::response r(result.http_status);
+            r.body = result.body.dump();
+            r.add_header("Content-Type", "application/json");
+            return r;
+        });
+
+        // GET /api/skills/<name>/body: 返回 SKILL.md 全文(含 frontmatter)
+        CROW_ROUTE(app, "/api/skills/<string>/body").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req, const std::string& name) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.skill_registry) return crow::response(503);
+            auto body = get_skill_body(name, *deps.skill_registry);
+            if (!body.has_value()) {
+                crow::response r(404);
+                r.body = R"({"error":"skill not found"})";
+                r.add_header("Content-Type", "application/json");
+                return r;
+            }
+            crow::response r(*body);
+            r.add_header("Content-Type", "text/markdown; charset=utf-8");
             return r;
         });
     }
@@ -556,6 +822,35 @@ struct WebServer::Impl {
             if (deps.session_client) deps.session_client->abort(state->session_id);
             return;
         }
+        if (type == "question_answer") {
+            // Payload 形态参见 spec web-daemon/spec.md "AskUserQuestion 双向异步交互":
+            //   { request_id, cancelled?, answers:[{question_id, selected:[...], custom_text?}] }
+            auto rid = payload.value("request_id", std::string{});
+            if (rid.empty()) {
+                conn.send_text(R"({"type":"error","payload":{"reason":"bad question_answer"}})");
+                return;
+            }
+            AskUserQuestionResponse resp;
+            resp.cancelled = payload.value("cancelled", false);
+            if (!resp.cancelled && payload.contains("answers") && payload["answers"].is_array()) {
+                for (const auto& a : payload["answers"]) {
+                    if (!a.is_object()) continue;
+                    AskUserQuestionAnswer ans;
+                    ans.question_id = a.value("question_id", std::string{});
+                    if (a.contains("selected") && a["selected"].is_array()) {
+                        for (const auto& s : a["selected"]) {
+                            if (s.is_string()) ans.selected.push_back(s.get<std::string>());
+                        }
+                    }
+                    ans.custom_text = a.value("custom_text", std::string{});
+                    resp.answers.push_back(std::move(ans));
+                }
+            }
+            if (deps.session_client) {
+                deps.session_client->respond_question(state->session_id, rid, resp);
+            }
+            return;
+        }
         if (type == "ping") {
             conn.send_text(R"({"type":"pong"})");
             return;
@@ -588,6 +883,15 @@ struct WebServer::Impl {
 // =====================================================================
 WebServer::WebServer(WebServerDeps deps)
     : impl_(std::make_unique<Impl>(std::move(deps))) {
+    // make_asset_source 在 web.static_dir 不存在时抛 — 这里 catch 一次,
+    // 让 worker.cpp::run() 通过 "assets 为空" 的 503 返回路径感知问题(虽然
+    // 对生产用户来说更早 fail-fast 也行,但 v1 选择延迟到 run() 起 server)。
+    try {
+        std::string dir = impl_->deps.web_cfg ? impl_->deps.web_cfg->static_dir : std::string{};
+        impl_->assets = make_asset_source(dir);
+    } catch (const std::exception& e) {
+        LOG_ERROR(std::string("[web] failed to init asset source: ") + e.what());
+    }
     impl_->register_routes();
 }
 

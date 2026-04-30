@@ -3,6 +3,8 @@
 #include "../provider/llm_provider.hpp"
 #include "diff_utils.hpp"
 
+#include <nlohmann/json.hpp>
+
 #include <string>
 #include <vector>
 #include <map>
@@ -52,6 +54,18 @@ struct ToolContext {
     // validation succeeds and immediately before mutating a file so /rewind can
     // restore the pre-write state.
     std::function<void(const std::string& path)> track_file_write_before;
+
+    // Optional async channel for AskUserQuestion. Daemon path injects an impl
+    // backed by AskUserQuestionPrompter; TUI path keeps it null and registers
+    // the TUI-flavored AskUserQuestion factory which talks to TuiState directly.
+    //
+    // Wire format (nlohmann::json) — kept loose so this header doesn't pull
+    // in session/ headers:
+    //   in  questions_payload: array of {id, text, options:[{label, value}], multiSelect}
+    //   out: { cancelled: bool,
+    //          answers: [ { question_id, selected: [str], custom_text: str } ] }
+    // Empty function = AskUserQuestion tool returns the rejected ToolResult.
+    std::function<nlohmann::json(const nlohmann::json& questions_payload)> ask_user_questions;
 };
 
 // Origin of a registered tool. MCP tools are grouped separately in the system

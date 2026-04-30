@@ -1,5 +1,6 @@
 #include "local_session_client.hpp"
 
+#include "ask_user_question_prompter.hpp"
 #include "session_storage.hpp"
 #include "../utils/logger.hpp"
 
@@ -51,6 +52,17 @@ void LocalSessionClient::respond_permission(const std::string& session_id,
         return;
     }
     entry->prompter->notify_decision(decision.request_id, decision.choice);
+}
+
+void LocalSessionClient::respond_question(const std::string& session_id,
+                                              const std::string& request_id,
+                                              const AskUserQuestionResponse& response) {
+    SessionEntry* entry = registry_.lookup(session_id);
+    if (!entry || !entry->ask_prompter) {
+        LOG_WARN("[client] respond_question on unknown session " + session_id);
+        return;
+    }
+    entry->ask_prompter->notify_response(request_id, response);
 }
 
 void LocalSessionClient::abort(const std::string& session_id) {

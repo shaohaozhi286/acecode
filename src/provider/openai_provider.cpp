@@ -1,5 +1,6 @@
 #include "openai_provider.hpp"
 #include "utils/logger.hpp"
+#include "network/proxy_resolver.hpp"
 #include <cpr/cpr.h>
 #include <cpr/ssl_options.h>
 #include <stdexcept>
@@ -146,11 +147,14 @@ ChatResponse OpenAiCompatProvider::chat(
         headers["Authorization"] = "Bearer " + api_key_;
     }
 
+    auto proxy_opts = network::proxy_options_for(url);
     cpr::Response r = cpr::Post(
         cpr::Url{url},
         headers,
         cpr::Body{body.dump()},
-        cpr::Ssl(cpr::ssl::NoRevoke{true}),
+        network::build_ssl_options(proxy_opts),
+        proxy_opts.proxies,
+        proxy_opts.auth,
         cpr::Timeout{120000} // 2 minutes timeout for LLM responses
     );
 
@@ -259,9 +263,18 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
                 if (!line.empty() && line.back() == '\r') {
                     line.pop_back();
                 }
-                if (line.rfind("data: ", 0) == 0) {
+                // SSE 规范(HTML5 EventSource)允许 "data:" 后的单个前导空格可选 ——
+                // OpenAI / DeepSeek 等主流服务发 "data: {...}",但部分自建网关
+                // (例如平安 wizard-ai 的 minimax 系)发 "data:{...}" 不带空格,
+                // 必须两者都接受,否则 chunk 全被静默丢弃,表现为"消息发出去无返回"。
+                static constexpr std::string_view kDataPrefix = "data:";
+                if (line.compare(0, kDataPrefix.size(), kDataPrefix) == 0) {
+                    size_t value_start = kDataPrefix.size();
+                    if (value_start < line.size() && line[value_start] == ' ') {
+                        ++value_start;
+                    }
                     if (!event_data.empty()) event_data += "\n";
-                    event_data += line.substr(6);
+                    event_data += line.substr(value_start);
                 }
             }
 
@@ -413,11 +426,14 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
         }
     };
 
+    auto proxy_opts = network::proxy_options_for(url);
     cpr::Response r = cpr::Post(
         cpr::Url{url},
         headers,
         cpr::Body{body.dump()},
-        cpr::Ssl(cpr::ssl::NoRevoke{true}),
+        network::build_ssl_options(proxy_opts),
+        proxy_opts.proxies,
+        proxy_opts.auth,
         cpr::Timeout{180000},
         write_cb,
         progress_cb
