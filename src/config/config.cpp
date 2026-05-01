@@ -407,6 +407,11 @@ AppConfig load_config() {
                             cfg.tui.alt_screen_mode = "auto";
                         }
                     }
+                    if (tj.contains("page_keys_single_line") &&
+                        tj["page_keys_single_line"].is_boolean()) {
+                        cfg.tui.page_keys_single_line =
+                            tj["page_keys_single_line"].get<bool>();
+                    }
                 }
             }
 
@@ -684,6 +689,8 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
         nlohmann::json tj = nlohmann::json::object();
         if (cfg.tui.alt_screen_mode != tui_d.alt_screen_mode)
             tj["alt_screen_mode"] = cfg.tui.alt_screen_mode;
+        if (cfg.tui.page_keys_single_line != tui_d.page_keys_single_line)
+            tj["page_keys_single_line"] = cfg.tui.page_keys_single_line;
         if (!tj.empty()) j["tui"] = tj;
 
         NetworkConfig net_d;

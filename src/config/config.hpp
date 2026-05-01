@@ -136,6 +136,10 @@ struct AgentLoopConfig {
 // 非法值会在 load_config 中被规范化为 "auto" 并 LOG_WARN。
 struct TuiConfig {
     std::string alt_screen_mode = "auto";
+    // 把 PgUp / PgDn 当成单行滚动 (等同 Alt+↑/↓). 部分终端 (老 conhost / Cmder /
+    // 某些远程 SSH 客户端) 吞掉 Alt+方向键序列, 用户拿不到 Alt+Arrow; 打开此开关后
+    // PgUp / PgDn 也走 scroll_chat_by_lines(±1), 牺牲掉它们原本"翻一页"的语义.
+    bool page_keys_single_line = false;
 };
 
 // Network / HTTP client tuning. Drives the system-proxy integration —

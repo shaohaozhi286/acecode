@@ -2481,8 +2481,11 @@ int main(int argc, char* argv[]) {
         }
         if (event == Event::PageUp) {
             std::lock_guard<std::mutex> lk(state.mu);
-            int height = chat_box.y_max - chat_box.y_min + 1;
-            int step = height > 3 ? height - 2 : 1;  // 留 2 行重叠
+            // /page-step on 开关:把 PgUp 当作单行滚动,等同 Alt+↑.
+            // 适用于吞掉 Alt+方向键序列的终端 (老 conhost / Cmder / 部分 SSH 客户端).
+            int step = config.tui.page_keys_single_line
+                ? 1
+                : std::max(1, (chat_box.y_max - chat_box.y_min + 1) - 2);  // 视口高度 -2 留重叠
             if (scroll_chat_by_lines(-step) != 0) {
                 screen.PostEvent(Event::Custom);
             }
@@ -2490,9 +2493,33 @@ int main(int argc, char* argv[]) {
         }
         if (event == Event::PageDown) {
             std::lock_guard<std::mutex> lk(state.mu);
-            int height = chat_box.y_max - chat_box.y_min + 1;
-            int step = height > 3 ? height - 2 : 1;
+            int step = config.tui.page_keys_single_line
+                ? 1
+                : std::max(1, (chat_box.y_max - chat_box.y_min + 1) - 2);
             if (scroll_chat_by_lines(step) != 0) {
+                screen.PostEvent(Event::Custom);
+            }
+            return true;
+        }
+        // Alt+Up / Alt+Down: 按单行滚动聊天视图. 与 ArrowUp/Down 的"按消息历史
+        // 导航"区分开 —— 这里走 scroll_chat_by_lines(±1), 跨消息边界时由 lambda
+        // 自行进位 chat_focus_index + chat_line_offset. 序列 `\x1B[1;3A`/`B` 是
+        // xterm modifyOtherKeys 标准, Windows Terminal / Alacritty / iTerm2 /
+        // kitty / Konsole / GNOME Terminal 都走这一编码. 上面 overlay 守卫会
+        // 提前 return, 这里不再重复 ask/confirm/rewind/slash 检查; 仅 resume
+        // picker 没有"全局吞键"逻辑, 单独让位.
+        if (event == Event::Special("\x1B[1;3A")) {
+            std::lock_guard<std::mutex> lk(state.mu);
+            if (state.resume_picker_active) return true;
+            if (scroll_chat_by_lines(-1) != 0) {
+                screen.PostEvent(Event::Custom);
+            }
+            return true;
+        }
+        if (event == Event::Special("\x1B[1;3B")) {
+            std::lock_guard<std::mutex> lk(state.mu);
+            if (state.resume_picker_active) return true;
+            if (scroll_chat_by_lines(1) != 0) {
                 screen.PostEvent(Event::Custom);
             }
             return true;

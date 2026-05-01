@@ -387,7 +387,12 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
                         // 拼成 `{...}{...}` 两份 JSON 头尾相接,parse 必失败,UI 显示
                         // "Failed to parse tool arguments"。
                         // 检测:同一 index 上 incoming id 与已记录 id 相同 → 这条 chunk
-                        // 是全量帧,arguments 用替换语义。
+                        // *可能是* 全量帧,但还需校验 incoming_args 是 acc.arguments 的
+                        // 前缀超集才用替换语义 —— 否则 (a) 空确认帧会擦掉已累积的参数
+                        // (实测 monotoo.shop 网关上 web_search/bash 全部失败:
+                        // "Web search failed: invalid JSON arguments: ... empty input"),
+                        // (b) 某些网关重发 id 但 arguments 仍是 delta 片段,替换会只剩
+                        // 最后一帧的尾段。
                         const bool is_full_snapshot_resend =
                             has_id && !acc.id.empty() && acc.id == incoming_id;
 
@@ -401,9 +406,22 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
                             }
                             if (fn.contains("arguments") && !fn["arguments"].is_null()) {
                                 std::string incoming_args = fn["arguments"].get<std::string>();
-                                if (is_full_snapshot_resend) {
+                                if (incoming_args.empty()) {
+                                    // 空确认帧:无论 is_full_snapshot_resend 真假,都不要
+                                    // 用 "" 覆盖或追加 —— 这是导致 monotoo.shop 上空 args
+                                    // bug 的直接原因。保持已累积的值不变。
+                                } else if (is_full_snapshot_resend &&
+                                           incoming_args.size() >= acc.arguments.size() &&
+                                           incoming_args.compare(0, acc.arguments.size(),
+                                                                 acc.arguments) == 0) {
+                                    // 真正的全量快照:incoming 必然包含已累积的所有内容
+                                    // 作为前缀。GLM 风格逐帧增长的快照流满足此条件,
+                                    // 此时用替换语义合并,避免 `{...}{...}` 头尾相接。
                                     acc.arguments = incoming_args;
                                 } else {
+                                    // 标准 OpenAI 增量(无 id 的后续帧),或者带 id 但
+                                    // arguments 不是前缀超集的"伪快照" delta 流 —— 一律
+                                    // 追加,把碎片还原成完整 JSON。
                                     acc.arguments += incoming_args;
                                 }
                             }

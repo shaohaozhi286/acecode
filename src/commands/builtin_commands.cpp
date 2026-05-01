@@ -555,6 +555,56 @@ static void cmd_title(CommandContext& ctx, const std::string& args) {
     ctx.state.chat_follow_tail = true;
 }
 
+// /page-step: 切换 PgUp / PgDn 是否按单行滚动. 兜底给吞 Alt+方向键的终端.
+//   /page-step              — 显示当前状态
+//   /page-step on|single    — 改为单行
+//   /page-step off|page     — 恢复按视口整页
+//   /page-step toggle       — 翻转
+// 改动会持久化写回 config.json (tui.page_keys_single_line).
+static void cmd_page_step(CommandContext& ctx, const std::string& args) {
+    std::string a = trim(args);
+    std::transform(a.begin(), a.end(), a.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+
+    bool& flag = ctx.config.tui.page_keys_single_line;
+    bool desired = flag;
+    bool changed = false;
+    std::string err;
+
+    if (a.empty()) {
+        // 仅显示状态.
+    } else if (a == "on" || a == "single" || a == "line") {
+        desired = true;
+    } else if (a == "off" || a == "page" || a == "default") {
+        desired = false;
+    } else if (a == "toggle") {
+        desired = !flag;
+    } else {
+        err = "Usage: /page-step [on|off|toggle]";
+    }
+
+    std::lock_guard<std::mutex> lk(ctx.state.mu);
+    if (!err.empty()) {
+        ctx.state.conversation.push_back({"system", err, false});
+        ctx.state.chat_follow_tail = true;
+        return;
+    }
+
+    if (desired != flag) {
+        flag = desired;
+        changed = true;
+        save_config(ctx.config);
+    }
+
+    std::string mode = flag ? "single-line" : "page";
+    std::ostringstream oss;
+    oss << "PgUp/PgDn mode: " << mode;
+    if (changed) oss << " (saved to config.json)";
+    if (!flag) oss << " — Alt+↑/↓ still scroll one line at a time.";
+    ctx.state.conversation.push_back({"system", oss.str(), false});
+    ctx.state.chat_follow_tail = true;
+}
+
 static void cmd_exit(CommandContext& ctx, const std::string& /*args*/) {
     if (ctx.request_exit) {
         ctx.request_exit();
@@ -1024,6 +1074,7 @@ void register_builtin_commands(CommandRegistry& registry) {
     register_proxy_command(registry);
     register_websearch_command(registry);
     registry.register_command({"title", "Set or show the window title for this session", cmd_title});
+    registry.register_command({"page-step", "Toggle single-line PgUp/PgDn scrolling (for terminals that swallow Alt+Arrow)", cmd_page_step});
     registry.register_command({"exit", "Exit acecode", cmd_exit});
     register_models_command(registry);
 }

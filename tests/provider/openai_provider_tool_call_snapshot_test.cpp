@@ -199,6 +199,179 @@ TEST(OpenAiProviderToolCallSnapshotTest, StandardOpenAiIncrementalDeltaStillConc
     EXPECT_EQ(col.error_events, 0);
 }
 
+// 用例 X1:`monotoo.shop` 风格 —— 完整 tool_call 帧之后跟一个 *相同 id +
+// arguments=""* 的"确认帧"。早期实现把所有同 id 的后续帧都当作全量快照重发,
+// 用空字符串覆盖了已累积的完整参数,导致 ToolExecutor 拿到空 args:
+//   `Web search failed: invalid JSON arguments: [json.exception.parse_error.101]
+//    parse error at line 1, column 1: attempting to parse an empty input`
+// 修复:incoming_args 为空时,无论是否被判为全量重发,都跳过(不覆盖、不追加),
+// 已累积的 arguments 保持原样;finish_reason flush 时仍能拿到完整 JSON。
+TEST(OpenAiProviderToolCallSnapshotTest, EmptyArgsConfirmationFrameDoesNotEraseAccumulated) {
+    const std::string full_args = R"({"query":"latest news today","limit":5})";
+
+    LocalHttpServer server([&](httplib::Server& s) {
+        s.Post("/chat/completions", [&](const httplib::Request&, httplib::Response& res) {
+            std::string body;
+            // 第 1 帧:完整 tool_call(id + name + 完整 arguments JSON)。
+            {
+                nlohmann::json j;
+                nlohmann::json choice;
+                choice["index"] = 0;
+                choice["delta"]["tool_calls"] = nlohmann::json::array();
+                nlohmann::json tc;
+                tc["id"] = "call_zzz";
+                tc["type"] = "function";
+                tc["index"] = 0;
+                tc["function"]["name"] = "web_search";
+                tc["function"]["arguments"] = full_args;
+                choice["delta"]["tool_calls"].push_back(tc);
+                j["choices"].push_back(choice);
+                body += "data: " + j.dump() + "\n\n";
+            }
+            // 第 2 帧:同 id,但 arguments="" —— 实测 monotoo.shop 网关在工具调用
+            // 完成后会发一个这样的"心跳/确认帧"。修复前会用 "" 把第 1 帧累积的
+            // 完整 JSON 直接抹平。
+            {
+                nlohmann::json j;
+                nlohmann::json choice;
+                choice["index"] = 0;
+                choice["delta"]["tool_calls"] = nlohmann::json::array();
+                nlohmann::json tc;
+                tc["id"] = "call_zzz";
+                tc["index"] = 0;
+                tc["function"]["arguments"] = "";
+                choice["delta"]["tool_calls"].push_back(tc);
+                j["choices"].push_back(choice);
+                body += "data: " + j.dump() + "\n\n";
+            }
+            body += "data: {\"choices\":[{\"delta\":{},\"index\":0,\"finish_reason\":\"tool_calls\"}]}\n\n";
+            body += "data: [DONE]\n\n";
+            res.set_content(body, "text/event-stream");
+            res.status = 200;
+        });
+    });
+
+    OpenAiCompatProvider provider(
+        "http://127.0.0.1:" + std::to_string(server.port), "", "test-model");
+
+    ChatMessage user_msg;
+    user_msg.role = "user";
+    user_msg.content = "search news";
+    std::vector<ChatMessage> messages = {user_msg};
+    std::vector<ToolDef> tools;
+
+    StreamCollector col;
+    std::atomic<bool> abort_flag{false};
+    provider.chat_stream(messages, tools, col.callback(), &abort_flag);
+
+    ASSERT_EQ(col.tool_calls.size(), 1u);
+    EXPECT_EQ(col.tool_calls[0].id, "call_zzz");
+    EXPECT_EQ(col.tool_calls[0].function_name, "web_search");
+    // 关键:空确认帧不能擦除已累积的完整 arguments。
+    EXPECT_EQ(col.tool_calls[0].function_arguments, full_args);
+    auto parsed = nlohmann::json::parse(col.tool_calls[0].function_arguments,
+                                         nullptr, false);
+    ASSERT_FALSE(parsed.is_discarded());
+    EXPECT_EQ(parsed.value("query", ""), "latest news today");
+    EXPECT_EQ(parsed.value("limit", 0), 5);
+    EXPECT_EQ(col.error_events, 0);
+}
+
+// 用例 X2:伪快照 —— 网关每一帧都重发相同 id,但 arguments 是 *增量片段*
+// 而非全量快照(既不是 OpenAI 标准的"后续帧无 id",也不是 GLM 的"全量快照")。
+// 此时若一律按 id 相同视为快照替换,只剩最后一帧的尾段,JSON 残缺。
+// 修复:仅当 incoming_args 包含 acc.arguments 作为前缀(真正的快照增长)
+// 才用替换;否则按 delta 追加,还原完整 JSON。
+TEST(OpenAiProviderToolCallSnapshotTest, RepeatedIdWithDeltaArgumentsAppendsInsteadOfReplacing) {
+    LocalHttpServer server([](httplib::Server& s) {
+        s.Post("/chat/completions", [](const httplib::Request&, httplib::Response& res) {
+            std::string body;
+            // 第 1 帧:id + name + arguments 起始片段 `{"command":"l`
+            body += "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{"
+                    "\"id\":\"call_d\",\"type\":\"function\",\"index\":0,"
+                    "\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"command\\\":\\\"l\"}}"
+                    "]},\"index\":0}]}\n\n";
+            // 第 2 帧:同 id,arguments 是接续片段 `s -la"}` —— 不是前缀超集。
+            // 修复前会被识别为快照,acc.arguments 直接被替换成 `s -la"}`,丢掉前缀。
+            body += "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{"
+                    "\"id\":\"call_d\",\"type\":\"function\",\"index\":0,"
+                    "\"function\":{\"arguments\":\"s -la\\\"}\"}}"
+                    "]},\"index\":0}]}\n\n";
+            body += "data: {\"choices\":[{\"delta\":{},\"index\":0,\"finish_reason\":\"tool_calls\"}]}\n\n";
+            body += "data: [DONE]\n\n";
+            res.set_content(body, "text/event-stream");
+            res.status = 200;
+        });
+    });
+
+    OpenAiCompatProvider provider(
+        "http://127.0.0.1:" + std::to_string(server.port), "", "test-model");
+
+    ChatMessage user_msg;
+    user_msg.role = "user";
+    user_msg.content = "ls";
+    std::vector<ChatMessage> messages = {user_msg};
+    std::vector<ToolDef> tools;
+
+    StreamCollector col;
+    std::atomic<bool> abort_flag{false};
+    provider.chat_stream(messages, tools, col.callback(), &abort_flag);
+
+    ASSERT_EQ(col.tool_calls.size(), 1u);
+    EXPECT_EQ(col.tool_calls[0].id, "call_d");
+    EXPECT_EQ(col.tool_calls[0].function_name, "bash");
+    // 关键:两段 delta 必须按拼接还原成完整 JSON,而不是只剩第 2 帧的尾段。
+    EXPECT_EQ(col.tool_calls[0].function_arguments, R"({"command":"ls -la"})");
+    auto parsed = nlohmann::json::parse(col.tool_calls[0].function_arguments,
+                                         nullptr, false);
+    ASSERT_FALSE(parsed.is_discarded());
+    EXPECT_EQ(parsed.value("command", ""), "ls -la");
+    EXPECT_EQ(col.error_events, 0);
+}
+
+// 用例 X3:GLM 风格逐帧增长的快照(不是固定的相同字符串重发,而是每一帧都更长)。
+// 这是最接近真实 GLM 抓包形态的快照流:第 1 帧 `{"a"`,第 2 帧 `{"a":"b"}`。
+// 必须仍走快照替换路径(因为后帧是前帧的前缀超集),最终只取最长的那份。
+TEST(OpenAiProviderToolCallSnapshotTest, MonotonicGrowingSnapshotsStillReplaceCorrectly) {
+    LocalHttpServer server([](httplib::Server& s) {
+        s.Post("/chat/completions", [](const httplib::Request&, httplib::Response& res) {
+            std::string body;
+            // 第 1 帧:id + name + 部分快照 `{"a"`
+            body += "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{"
+                    "\"id\":\"call_g\",\"type\":\"function\",\"index\":0,"
+                    "\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"a\\\"\"}}"
+                    "]},\"index\":0}]}\n\n";
+            // 第 2 帧:同 id,完整快照 `{"a":"b"}` —— 是第 1 帧的前缀超集。
+            body += "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{"
+                    "\"id\":\"call_g\",\"type\":\"function\",\"index\":0,"
+                    "\"function\":{\"arguments\":\"{\\\"a\\\":\\\"b\\\"}\"}}"
+                    "]},\"index\":0}]}\n\n";
+            body += "data: {\"choices\":[{\"delta\":{},\"index\":0,\"finish_reason\":\"tool_calls\"}]}\n\n";
+            body += "data: [DONE]\n\n";
+            res.set_content(body, "text/event-stream");
+            res.status = 200;
+        });
+    });
+
+    OpenAiCompatProvider provider(
+        "http://127.0.0.1:" + std::to_string(server.port), "", "test-model");
+
+    ChatMessage user_msg;
+    user_msg.role = "user";
+    user_msg.content = "x";
+    std::vector<ChatMessage> messages = {user_msg};
+    std::vector<ToolDef> tools;
+
+    StreamCollector col;
+    std::atomic<bool> abort_flag{false};
+    provider.chat_stream(messages, tools, col.callback(), &abort_flag);
+
+    ASSERT_EQ(col.tool_calls.size(), 1u);
+    // 关键:不应该被拼成 `{"a"{"a":"b"}`,也不应只剩第 1 帧片段。
+    EXPECT_EQ(col.tool_calls[0].function_arguments, R"({"a":"b"})");
+    EXPECT_EQ(col.error_events, 0);
+}
+
 // 用例 3:两个 tool_call 并发(不同 index)。GLM 风格也可能在同一帧/不同帧
 // 同时携带多个 tool_call 全量快照,各自的 index 必须独立累积/替换,不能因
 // 全量替换语义而互相污染。
