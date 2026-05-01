@@ -265,7 +265,7 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
                 }
                 // SSE 规范(HTML5 EventSource)允许 "data:" 后的单个前导空格可选 ——
                 // OpenAI / DeepSeek 等主流服务发 "data: {...}",但部分自建网关
-                // (例如平安 wizard-ai 的 minimax 系)发 "data:{...}" 不带空格,
+                // 发 "data:{...}" 不带空格,
                 // 必须两者都接受,否则 chunk 全被静默丢弃,表现为"消息发出去无返回"。
                 static constexpr std::string_view kDataPrefix = "data:";
                 if (line.compare(0, kDataPrefix.size(), kDataPrefix) == 0) {
@@ -377,8 +377,22 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
                         int index = tc_delta.value("index", 0);
                         auto& acc = pending_tools[index];
 
-                        if (tc_delta.contains("id") && !tc_delta["id"].is_null()) {
-                            acc.id = tc_delta["id"].get<std::string>();
+                        const bool has_id = tc_delta.contains("id") && !tc_delta["id"].is_null();
+                        std::string incoming_id = has_id ? tc_delta["id"].get<std::string>() : std::string();
+
+                        // 部分非标 OpenAI 兼容服务(实测 GLM-5.1-FP8 走某些公司 wizard-ai 网关)
+                        // 在每一帧 SSE 里都重发 *相同的* tool_call id 和 *完整的*
+                        // arguments JSON(全量快照,不是增量)。OpenAI 标准是首帧带
+                        // id+name、后续帧仅带 arguments 增量。若一律 append,GLM 流会被
+                        // 拼成 `{...}{...}` 两份 JSON 头尾相接,parse 必失败,UI 显示
+                        // "Failed to parse tool arguments"。
+                        // 检测:同一 index 上 incoming id 与已记录 id 相同 → 这条 chunk
+                        // 是全量帧,arguments 用替换语义。
+                        const bool is_full_snapshot_resend =
+                            has_id && !acc.id.empty() && acc.id == incoming_id;
+
+                        if (has_id) {
+                            acc.id = incoming_id;
                         }
                         if (tc_delta.contains("function")) {
                             const auto& fn = tc_delta["function"];
@@ -386,7 +400,12 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
                                 acc.name = fn["name"].get<std::string>();
                             }
                             if (fn.contains("arguments") && !fn["arguments"].is_null()) {
-                                acc.arguments += fn["arguments"].get<std::string>();
+                                std::string incoming_args = fn["arguments"].get<std::string>();
+                                if (is_full_snapshot_resend) {
+                                    acc.arguments = incoming_args;
+                                } else {
+                                    acc.arguments += incoming_args;
+                                }
                             }
                         }
                     }

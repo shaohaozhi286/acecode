@@ -2,7 +2,7 @@
 //
 // 背景：HTML5 EventSource 规范(SSE)允许 "data:" 字段名后的单个前导空格可选,
 //   即 "data: foo" 与 "data:foo" 都是合法的。OpenAI / DeepSeek 等主流服务
-//   按惯例使用前者,但有些自建网关 —— 例如平安 wizard-ai 的 minimax 系
+//   按惯例使用前者,但有些自建网关 —— 例如某些公司 wizard-ai 的 minimax 系
 //   (实际抓包样本: data:{"created":...,"model":"minimax-m2.5",...} ) ——
 //   发的是无空格前缀。早期实现严格匹配 "data: " 会把整条流当作空响应丢弃,
 //   表现为用户感知到的"消息发出去后立即终止、无任何返回",但 fiddler
@@ -60,7 +60,7 @@ struct LocalHttpServer {
 
 // 用例 1:无空格 "data:{...}" 前缀的 SSE 流,delta.content 必须能累积出来。
 //
-// 这是平安 wizard-ai 的实际抓包形态。修复前所有 chunk 会被静默丢弃,
+// 目前抓包形态。修复前所有 chunk 会被静默丢弃,
 // aggregated_content 为空、Done 事件不触发,表现为"无响应直接终止"。
 TEST(OpenAiProviderSsePrefixTest, SseAcceptsNoSpaceDataPrefix) {
     LocalHttpServer server([](httplib::Server& s) {

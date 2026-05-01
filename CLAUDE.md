@@ -59,7 +59,7 @@ User input → TUI event handler → `AgentLoop` → `LlmProvider::chat_stream()
 
 - **`src/provider/`** — `LlmProvider` interface with `OpenAiCompatProvider` (OpenAI-compatible REST+SSE; supports DeepSeek/Qwen/OpenRouter reasoning via `delta.reasoning_content` and echoes it back on assistant messages — see `openspec/changes/support-deepseek-reasoning`) and `CopilotProvider` (GitHub device-flow OAuth). `ModelContextResolver` + `models_dev_registry` consult a bundled `models.dev/api.json` snapshot at `<exe_dir>/../share/acecode/models_dev/`; network refresh is opt-in via `config.models_dev.allow_network` or `/models refresh --network`.
 
-- **`src/tool/`** — `ToolExecutor` registry with seven built-ins: `bash_tool`, `file_read_tool`, `file_write_tool`, `file_edit_tool`, `grep_tool`, `glob_tool`, `AskUserQuestion`. `ToolResult` carries an optional `summary: ToolSummary` for the green/red one-line success/failure row; tools without `summary` fall back to the legacy 10-line fold. `bash_tool` streams cleaned output via `ctx.stream`, polls `ctx.abort_flag` every 10ms, head+tail-truncates output above 100KB, and accepts `stdin_inputs: string[]` (POSIX only).
+- **`src/tool/`** — `ToolExecutor` registry with built-ins: `bash_tool`, `file_read_tool`, `file_write_tool`, `file_edit_tool`, `grep_tool`, `glob_tool`, `AskUserQuestion`, plus `web_search` (registered only when `cfg.web_search.enabled` is true; see `src/tool/web_search/`). `ToolResult` carries an optional `summary: ToolSummary` for the green/red one-line success/failure row; tools without `summary` fall back to the legacy 10-line fold. `bash_tool` streams cleaned output via `ctx.stream`, polls `ctx.abort_flag` every 10ms, head+tail-truncates output above 100KB, and accepts `stdin_inputs: string[]` (POSIX only).
 
 - **`src/permissions.hpp`** — `PermissionManager` with three modes (`Default`, `AcceptEdits`, `Yolo`). Read-only tools auto-approve; write/exec prompts unless glob rules match.
 
@@ -183,6 +183,20 @@ Both `main.cpp` and `daemon/worker.cpp` call `proxy_resolver().init(cfg.network)
 
 **Behavior change:** Windows users upgrading get `proxy_mode = "auto"` by default, which means ACECode now follows the system proxy. To keep the old direct-only behavior: `{"network":{"proxy_mode":"off"}}`.
 
+### Web Search
+
+`src/tool/web_search/` 提供 LLM 可调的 `web_search(query, limit)` 工具,默认零配置:启动时 HEAD 探一次 `duckduckgo.com`(2s 超时,过 ProxyResolver),通 → 选 DuckDuckGo backend(海外/挂梯子)、不通 → 选 必应中国 backend(国内裸连)。探测结果缓存到 `~/.acecode/state.json` 的 `web_search.region_detected`,永不自动过期。
+
+两个 backend 都是 HTML 爬取,零外部 API key。`backend_router.cpp::search_with_fallback` 在当前 backend 出 Network 错误时自动试对侧并切 active(同时更新缓存的 region 推断),Parse / RateLimited / Disabled 直接返回不 fallback。`HttpFetchFn` / `RegionProbeFn` 注入式设计让 unit test 不打真实网络。
+
+`/websearch` slash command:
+- `/websearch` — 显示 Active backend / Config backend / Region (+ detected_at) / Registered
+- `/websearch refresh` — 失效缓存 + 立即重测,输出 before/after
+- `/websearch use <name>` — 本会话临时切(只接受 `duckduckgo` / `bing_cn`,`bochaai` / `tavily` 是后续 PR 占位)
+- `/websearch reset` — 回到 cfg + 缓存推导的 backend
+
+`config.web_search` 可选字段:`enabled`(默认 true)、`backend`(`auto` / `duckduckgo` / `bing_cn` / `bochaai` / `tavily`,后两个本期未实现)、`api_key`(future)、`max_results`(1..10,默认 5)、`timeout_ms`(1000..30000,默认 8000)。`enabled = false` 时工具完全不注册到 ToolExecutor,LLM 看不到。Bing CN 的 `bing.com/ck/a?u=a1<base64>` 跳转链会自动 base64 解码到真实 URL,decode 失败或非 http(s) 静默回退到原 href。Daemon 与 TUI 共享同一份 state.json 缓存。
+
 ### Config Schema
 
 `~/.acecode/config.json`:
@@ -229,6 +243,13 @@ Both `main.cpp` and `daemon/worker.cpp` call `proxy_resolver().init(cfg.network)
     "proxy_no_proxy": "",
     "proxy_ca_bundle": "",
     "proxy_insecure_skip_verify": false
+  },
+  "web_search": {
+    "enabled": true,
+    "backend": "auto",
+    "api_key": "",
+    "max_results": 5,
+    "timeout_ms": 8000
   },
   "tui": { "alt_screen_mode": "auto" },
   "saved_models": [

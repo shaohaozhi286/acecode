@@ -5,6 +5,7 @@
 #include "memory_command.hpp"
 #include "models_command.hpp"
 #include "proxy_command.hpp"
+#include "websearch_command.hpp"
 #include "../config/config.hpp"
 #include "../config/saved_models.hpp"
 #include "../provider/model_context_resolver.hpp"
@@ -1021,6 +1022,7 @@ void register_builtin_commands(CommandRegistry& registry) {
     register_init_command(registry);
     register_history_command(registry);
     register_proxy_command(registry);
+    register_websearch_command(registry);
     registry.register_command({"title", "Set or show the window title for this session", cmd_title});
     registry.register_command({"exit", "Exit acecode", cmd_exit});
     register_models_command(registry);

@@ -59,11 +59,16 @@
 #include "tool/memory_write_tool.hpp"
 #include "tool/ask_user_question_tool.hpp"
 #include "tool/ask_overlay_input.hpp"
+#include "tui/confirm_question.hpp"
 #include "skills/skill_registry.hpp"
 #include "skills/skill_commands.hpp"
 #include "skills/default_skill_seeder.hpp"
 #include "memory/memory_paths.hpp"
 #include "memory/memory_registry.hpp"
+#include "tool/web_search/runtime.hpp"
+#include "tool/web_search/backend_router.hpp"
+#include "tool/web_search/region_detector.hpp"
+#include "tool/web_search/web_search_tool.hpp"
 #include "utils/logger.hpp"
 #include "permissions.hpp"
 #include "agent_loop.hpp"
@@ -81,6 +86,7 @@
 #include "session/session_manager.hpp"
 #include "session/session_resume_restore.hpp"
 #include "tui/diff_view.hpp"
+#include "tui/paste_handler.hpp"
 #include "tui/picker_scroll.hpp"
 #include "tui/render_mode_factory.hpp"
 #include "utils/terminal_capability.hpp"
@@ -931,6 +937,25 @@ int main(int argc, char* argv[]) {
         config.context_window
     );
 
+    // ---- Init web search runtime ----
+    // Backend router + region detector 单例,异步探测一次后写缓存。失败 / 已有
+    // 缓存都不阻塞启动。enabled=false 时仍 init,但下面 register 阶段不挂工具。
+    web_search::init(config.web_search);
+    web_search::register_default_backends(web_search::runtime().router(),
+                                           config.web_search);
+    {
+        // 启动时先用缓存 region(若有)即时 resolve;无缓存先按 Unknown 走悲观,
+        // 再起 detached 线程做实际 HEAD 探测,完成后再 resolve 一次。
+        Region cached = web_search::runtime().detector().cached_region();
+        web_search::runtime().router().resolve_active(cached);
+        if (cached == Region::Unknown) {
+            std::thread([]{
+                auto r = web_search::runtime().detector().detect_now();
+                web_search::runtime().router().resolve_active(r);
+            }).detach();
+        }
+    }
+
     // ---- Setup tools ----
     ToolExecutor tools;
     tools.register_tool(create_bash_tool());
@@ -940,6 +965,10 @@ int main(int argc, char* argv[]) {
     tools.register_tool(create_grep_tool());
     tools.register_tool(create_glob_tool());
     tools.register_tool(create_task_complete_tool());
+    if (config.web_search.enabled) {
+        tools.register_tool(web_search::create_web_search_tool(
+            web_search::runtime().router(), web_search::runtime().cfg()));
+    }
 
     // ---- Skill registry ----
     // Discovery order keeps more specific roots ahead of compatibility/global
@@ -1143,32 +1172,7 @@ int main(int argc, char* argv[]) {
         }
     };
 
-    auto scroll_chat = [&state](int delta) -> bool {
-        if (state.conversation.empty()) {
-            return false;
-        }
-
-        int last = static_cast<int>(state.conversation.size()) - 1;
-        int current = state.chat_follow_tail ? last : state.chat_focus_index;
-        if (current < 0) {
-            current = last;
-        }
-
-        int next = current + delta;
-        if (next < 0) {
-            next = 0;
-        }
-        if (next > last) {
-            next = last;
-        }
-
-        state.chat_focus_index = next;
-        state.chat_follow_tail = (next == last);
-        state.chat_line_offset = 0;  // 按消息粒度滚动时重置行内偏移
-        return next != current;
-    };
-
-    // drag-autoscroll: 按行粒度的细滚动. 现有滚轮/键盘继续走 scroll_chat (按消息).
+    // 按行粒度滚动: 鼠标滚轮 / PgUp / PgDn / 拖到边界 auto-scroll 全部走它.
     // 实现:在 chat_focus_index + chat_line_offset 维护"焦点行"的位置, 穿越
     // 当前消息的行数边界时进位到相邻消息. 返回实际滚了几行, 供调用方调用
     // screen.ShiftSelection(0, -actual) 补偿 FTXUI 屏幕坐标选区.
@@ -1206,8 +1210,11 @@ int main(int argc, char* argv[]) {
             actual += dir;
             delta_lines -= dir;
         }
-        // 拖动滚动后不自动跟尾巴, 让用户保持在他拖到的位置
-        state.chat_follow_tail = false;
+        // 到达最后一条消息的最末行就重新 follow_tail —— 适用于鼠标滚轮 / PgDn /
+        // 拖到底三种场景:用户主动滚到底就期望新内容自动跟进。其他位置保持手动锁定。
+        int last_lines = lines_of(last_msg);
+        state.chat_follow_tail = (state.chat_focus_index == last_msg &&
+                                  state.chat_line_offset >= last_lines - 1);
         return actual;
     };
 
@@ -1319,6 +1326,9 @@ int main(int argc, char* argv[]) {
             state.confirm_pending = true;
             state.confirm_tool_name = tool_name;
             state.confirm_tool_args = args;
+            // 每次新确认都把焦点复位到 "No",避免上一次留下的焦点泄漏到下一次,
+            // 同时安全的默认是 Deny —— 用户随手 Enter 不会误授权。
+            state.confirm_focus = 2;
         }
         screen.PostEvent(Event::Custom);
 
@@ -1717,8 +1727,29 @@ int main(int argc, char* argv[]) {
         return render_wrapped_input_text(display_text, cursor);
     });
 
+    // 把已归一化的 paste 文本插入到 state.input_cursor。短文本 inline，超阈值
+    // 或多行折叠为 [Pasted text #N (+M lines)] 并把原文存到 pasted_texts。
+    // 调用前必须持有 state.mu。
+    auto insert_pasted_text_at_cursor = [&state](const std::string& normalized) {
+        if (state.input_cursor > state.input_text.size()) {
+            state.input_cursor = state.input_text.size();
+        }
+        std::string to_insert;
+        if (acecode::tui::should_fold_to_placeholder(normalized)) {
+            const int id = state.next_paste_id++;
+            state.pasted_texts[id] = normalized;
+            const int n = acecode::tui::count_newlines(normalized);
+            to_insert = acecode::tui::format_placeholder(id, n);
+        } else {
+            to_insert = normalized;
+        }
+        state.input_text.insert(state.input_cursor, to_insert);
+        state.input_cursor += to_insert.size();
+        state.history_index = -1;
+    };
+
     // Wrap with CatchEvent to handle all keyboard input
-    auto input_with_esc = CatchEvent(input_renderer, [&state, &screen, &clamp_chat_focus, &auth_done, &cmd_registry, &agent_loop, &provider, &provider_mu, &config, &token_tracker, &permissions, &session_manager, &scroll_chat, &chat_box, &scrollbar_box, &message_line_counts, &mcp_manager, &tools, &skill_registry, &memory_registry, &working_dir](Event event) {
+    auto input_with_esc = CatchEvent(input_renderer, [&state, &screen, &clamp_chat_focus, &auth_done, &cmd_registry, &agent_loop, &provider, &provider_mu, &config, &token_tracker, &permissions, &session_manager, &scroll_chat_by_lines, &chat_box, &scrollbar_box, &message_line_counts, &mcp_manager, &tools, &skill_registry, &memory_registry, &working_dir, &insert_pasted_text_at_cursor](Event event) {
         // drag-autoscroll: 事件线程入口处消费 anim_thread 攒下的 selection 偏移
         // 补偿. 所有对 FTXUI selection_data_ 的写都发生在这条路径上, 跟
         // HandleSelection 串行 — 避免跨线程数据竞争. 不 return, 让事件继续正常处理.
@@ -1731,6 +1762,26 @@ int main(int argc, char* argv[]) {
             }
             if (dy != 0) {
                 screen.ShiftSelection(0, dy);
+            }
+        }
+        // 多行粘贴折叠（fix-multiline-paste-input change）：把所有事件先喂进
+        // bracketed paste 状态机。begin marker 进入 in-paste，期间所有事件
+        // （含 Return / Tab / 字符 / 内嵌 CSI bytes）都聚合到 buffer 而不下发到
+        // 正常 Return / 字符 / 删除 / 方向键 handler；end marker 触发 normalize
+        // 后或 inline 插入或折叠成 [Pasted text #N +M lines]。空 paste 直接返回。
+        {
+            std::unique_lock<std::mutex> lk(state.mu);
+            acecode::tui::PasteFeedResult pr = event.is_character()
+                ? state.paste_accumulator.feed_character(event.character())
+                : state.paste_accumulator.feed_special(event.input());
+            if (pr.just_completed && !pr.completed_text.empty()) {
+                insert_pasted_text_at_cursor(pr.completed_text);
+                refresh_slash_dropdown(state, cmd_registry);
+                lk.unlock();
+                screen.PostEvent(Event::Custom);
+            }
+            if (pr.consume) {
+                return true;
             }
         }
         if (event == Event::CtrlC) {
@@ -1807,7 +1858,7 @@ int main(int argc, char* argv[]) {
                     if (state.ask_other_input_active) {
                         // 先退出 Other 文本模式,保留用户之前的选择。
                         state.ask_other_input_active = false;
-                        state.input_text.clear();
+                        state.input_text.clear(); state.pasted_texts.clear();
                         state.input_cursor = 0;
                     } else {
                         state.ask_result_ok = false;
@@ -1821,7 +1872,7 @@ int main(int argc, char* argv[]) {
                 if (state.ask_other_input_active) {
                     if (event == Event::Return) {
                         std::string answer = state.input_text;
-                        state.input_text.clear();
+                        state.input_text.clear(); state.pasted_texts.clear();
                         state.input_cursor = 0;
                         state.ask_other_input_active = false;
                         state.ask_result_answers[q.question] = answer;
@@ -1892,7 +1943,7 @@ int main(int argc, char* argv[]) {
                     // 焦点在 "Other..." 行:进入自定义文本输入态。
                     if (state.ask_option_focus == option_count) {
                         state.ask_other_input_active = true;
-                        state.input_text.clear();
+                        state.input_text.clear(); state.pasted_texts.clear();
                         state.input_cursor = 0;
                         screen.PostEvent(Event::Custom);
                         return true;
@@ -1933,6 +1984,66 @@ int main(int argc, char* argv[]) {
                 // 其它键一律吞掉 —— 不让字符进入 input_text(避免破坏下一次
                 // "Other" 文本模式的初始状态)。
                 return true;
+            }
+        }
+
+        // Tool-confirmation overlay guard。confirm_pending=true 时键盘归 overlay
+        // 所有 —— 上下方向移焦点 / 1-3 数字直选 / Enter 提交 / Shift+Tab 直选
+        // option2 / Esc → Deny。其他键(字符 / Backspace / Tab 等)一律吞掉,
+        // 防止误打字符串去到 input_text。优先级仅次于 ask_pending(二者互斥)。
+        {
+            std::unique_lock<std::mutex> lk(state.mu);
+            if (state.confirm_pending) {
+                auto submit = [&](PermissionResult r) {
+                    state.input_text.clear(); state.pasted_texts.clear();
+                    state.input_cursor = 0;
+                    state.confirm_result = r;
+                    state.confirm_pending = false;
+                    state.confirm_cv.notify_one();
+                    screen.PostEvent(Event::Custom);
+                };
+
+                if (event == Event::Escape) {
+                    submit(PermissionResult::Deny);
+                    return true;
+                }
+                if (event == Event::ArrowUp) {
+                    state.confirm_focus = (state.confirm_focus + 2) % 3;
+                    screen.PostEvent(Event::Custom);
+                    return true;
+                }
+                if (event == Event::ArrowDown) {
+                    state.confirm_focus = (state.confirm_focus + 1) % 3;
+                    screen.PostEvent(Event::Custom);
+                    return true;
+                }
+                if (event == Event::TabReverse) {
+                    // Shift+Tab 直选 option2(AlwaysAllow),与 overlay 文案中
+                    // "(shift+tab)" 提示一致。
+                    submit(PermissionResult::AlwaysAllow);
+                    return true;
+                }
+                if (event == Event::Return) {
+                    int f = std::clamp(state.confirm_focus, 0, 2);
+                    PermissionResult r = (f == 0) ? PermissionResult::Allow
+                                       : (f == 1) ? PermissionResult::AlwaysAllow
+                                                  : PermissionResult::Deny;
+                    submit(r);
+                    return true;
+                }
+                if (event.is_character()) {
+                    const std::string& c = event.character();
+                    if (c == "1") { submit(PermissionResult::Allow);       return true; }
+                    if (c == "2") { submit(PermissionResult::AlwaysAllow); return true; }
+                    if (c == "3") { submit(PermissionResult::Deny);        return true; }
+                    // y/n 兼容老用户的肌肉记忆;也保留 'a' = always。
+                    if (c == "y" || c == "Y") { submit(PermissionResult::Allow);       return true; }
+                    if (c == "n" || c == "N") { submit(PermissionResult::Deny);        return true; }
+                    if (c == "a" || c == "A") { submit(PermissionResult::AlwaysAllow); return true; }
+                    // 其它字符吞掉,不让进入 input_text。
+                    return true;
+                }
+                // 鼠标 / resize / custom 事件不拦截,让默认 handler 处理。
             }
         }
 
@@ -2000,7 +2111,7 @@ int main(int argc, char* argv[]) {
                     state.rewind_modes.clear();
                     state.rewind_mode_selected = 0;
                     state.rewind_callback = nullptr;
-                    state.input_text.clear();
+                    state.input_text.clear(); state.pasted_texts.clear();
                     state.input_cursor = 0;
                     if (cb) cb(std::move(item), mode);
                     clamp_chat_focus();
@@ -2216,7 +2327,7 @@ int main(int argc, char* argv[]) {
                     state.resume_items.clear();
                     state.resume_view_offset = 0;
                     state.resume_callback = nullptr;
-                    state.input_text.clear();
+                    state.input_text.clear(); state.pasted_texts.clear();
                     state.input_cursor = 0;
                     if (cb) cb(sid);
                     clamp_chat_focus();
@@ -2225,22 +2336,8 @@ int main(int argc, char* argv[]) {
                 return true;
             }
 
-            // Handle tool confirmation: y=allow, a=always allow, n/other=deny
-            if (state.confirm_pending) {
-                std::string answer = state.input_text;
-                state.input_text.clear();
-                state.input_cursor = 0;
-                if (!answer.empty() && (answer[0] == 'y' || answer[0] == 'Y')) {
-                    state.confirm_result = PermissionResult::Allow;
-                } else if (!answer.empty() && (answer[0] == 'a' || answer[0] == 'A')) {
-                    state.confirm_result = PermissionResult::AlwaysAllow;
-                } else {
-                    state.confirm_result = PermissionResult::Deny;
-                }
-                state.confirm_pending = false;
-                state.confirm_cv.notify_one();
-                return true;
-            }
+            // confirm_pending 现在由上面的 confirm overlay handler 单独拦截
+            // (Enter 直接走那条路径),这里不会再被 confirm 触发。
 
             if (state.input_text.empty()) return true;
             if (!auth_done) return true;
@@ -2248,8 +2345,17 @@ int main(int argc, char* argv[]) {
             // Block message submission during compaction
             if (state.is_compacting) return true;
 
-            std::string prompt = state.input_text;
-            state.input_text.clear();
+            // 多行粘贴折叠（fix-multiline-paste-input change）：把已知 [Pasted text #N]
+            // 占位符替换回 pasted_texts 中存的全文，得到 expanded_prompt 喂给 agent_loop
+            // / 斜杠命令 / pending 队列 / input_history / 对话气泡。提交后清空 input_text
+            // 与 pasted_texts；next_paste_id 不复位（display 用计数，跨提交单调递增
+            // 即可，避免极端情况下与 input_history 中残留占位符同号撞 ID）。
+            //
+            // 用户反馈：提交后对话气泡也显示展开版原文，而非紧凑占位符——所以这里
+            // 没有保留单独的 `visible_prompt`，提交即一并展开上屏。
+            const std::string expanded_prompt = acecode::tui::expand_placeholders(
+                state.input_text, state.pasted_texts);
+            state.input_text.clear(); state.pasted_texts.clear();
             state.input_cursor = 0;
             refresh_slash_dropdown(state, cmd_registry);
 
@@ -2275,11 +2381,12 @@ int main(int argc, char* argv[]) {
             // Shell input mode: dispatch directly to BashTool via agent worker.
             // Skips slash-command parsing and LLM round-trip.
             if (state.input_mode == InputMode::Shell) {
-                std::string shell_cmd = prompt;
+                const std::string shell_cmd = expanded_prompt;
                 record_history(prepend_mode_prefix(shell_cmd, InputMode::Shell));
                 state.history_index = -1;
                 state.input_mode = InputMode::Normal;
 
+                // 提交后对话气泡显示展开后的原文（用户反馈：上屏不要看到 [] 占位符）。
                 state.conversation.push_back({"user", "!" + shell_cmd, false});
                 state.chat_follow_tail = true;
                 clamp_chat_focus();
@@ -2292,12 +2399,14 @@ int main(int argc, char* argv[]) {
                 return true;
             }
 
-            // Record history
-            record_history(prompt);
+            // Record history（用 expanded_prompt：上箭头取回原文，再次提交不会发出
+            // 字面 [Pasted text #N] —— 因为本会话提交后 store 已经清空，未展开的
+            // 字面占位符在下次 submit 时也会按 unknown id 保留，丢失原文。）
+            record_history(expanded_prompt);
             state.history_index = -1;
 
-            // Slash command interception
-            if (!prompt.empty() && prompt[0] == '/') {
+            // Slash command interception（用 expanded_prompt 派发：spec 4.3）。
+            if (!expanded_prompt.empty() && expanded_prompt[0] == '/') {
                 CommandContext cmd_ctx{
                     state, agent_loop, *provider, &provider, &provider_mu,
                     config, token_tracker,
@@ -2313,7 +2422,7 @@ int main(int argc, char* argv[]) {
                     working_dir
                 };
                 lk.unlock();
-                bool handled = cmd_registry.dispatch(prompt, cmd_ctx);
+                bool handled = cmd_registry.dispatch(expanded_prompt, cmd_ctx);
                 if (handled) {
                     lk.lock();
                     clamp_chat_focus();
@@ -2325,12 +2434,14 @@ int main(int argc, char* argv[]) {
             }
 
             if (state.is_waiting) {
-                state.pending_queue.push_back(prompt);
-                state.conversation.push_back({"user", prompt, false});
+                // 队列保存展开版（spec 4.5）；提交后气泡显示展开版（用户反馈：
+                // 上屏不要看到 [] 占位符）。
+                state.pending_queue.push_back(expanded_prompt);
+                state.conversation.push_back({"user", expanded_prompt, false});
                 state.chat_follow_tail = true;
                 clamp_chat_focus();
             } else {
-                state.conversation.push_back({"user", prompt, false});
+                state.conversation.push_back({"user", expanded_prompt, false});
                 state.chat_follow_tail = true;
                 clamp_chat_focus();
                 state.current_thinking_phrase = get_random_thinking_phrase(is_user_chinese(state));
@@ -2338,7 +2449,7 @@ int main(int argc, char* argv[]) {
                 state.streaming_output_chars = 0;
                 state.last_completion_tokens_authoritative = 0;
                 state.is_waiting = true;
-                agent_loop.submit(prompt);
+                agent_loop.submit(expanded_prompt);
             }
             return true;
         }
@@ -2370,14 +2481,18 @@ int main(int argc, char* argv[]) {
         }
         if (event == Event::PageUp) {
             std::lock_guard<std::mutex> lk(state.mu);
-            if (scroll_chat(-5)) {
+            int height = chat_box.y_max - chat_box.y_min + 1;
+            int step = height > 3 ? height - 2 : 1;  // 留 2 行重叠
+            if (scroll_chat_by_lines(-step) != 0) {
                 screen.PostEvent(Event::Custom);
             }
             return true;
         }
         if (event == Event::PageDown) {
             std::lock_guard<std::mutex> lk(state.mu);
-            if (scroll_chat(5)) {
+            int height = chat_box.y_max - chat_box.y_min + 1;
+            int step = height > 3 ? height - 2 : 1;
+            if (scroll_chat_by_lines(step) != 0) {
                 screen.PostEvent(Event::Custom);
             }
             return true;
@@ -2417,7 +2532,7 @@ int main(int argc, char* argv[]) {
                 state.resume_items.clear();
                 state.resume_view_offset = 0;
                 state.resume_callback = nullptr;
-                state.input_text.clear();
+                state.input_text.clear(); state.pasted_texts.clear();
                 state.input_cursor = 0;
                 state.conversation.push_back({"system", "Resume cancelled.", false});
                 state.chat_follow_tail = true;
@@ -2425,21 +2540,15 @@ int main(int argc, char* argv[]) {
                 screen.PostEvent(Event::Custom);
                 return true;
             }
-            if (state.confirm_pending) {
-                // Escape during confirm → deny
-                state.input_text.clear();
-                state.input_cursor = 0;
-                state.confirm_result = PermissionResult::Deny;
-                state.confirm_pending = false;
-                state.confirm_cv.notify_one();
-                return true;
-            }
+            // confirm_pending 的 Esc → Deny 已由上面的 confirm overlay handler
+            // 拦截,这里不再重复处理。
+
             // Shell mode: Escape exits and clears the buffer. Takes precedence
             // over `is_waiting` abort so typing Esc in shell mode never fires
             // an unintended cancel on a pending agent turn.
             if (state.input_mode == InputMode::Shell) {
                 state.input_mode = InputMode::Normal;
-                state.input_text.clear();
+                state.input_text.clear(); state.pasted_texts.clear();
                 state.input_cursor = 0;
                 return true;
             }
@@ -2606,26 +2715,17 @@ int main(int argc, char* argv[]) {
                 return false;
             }
 
-            // 每 2 次滚轮触发 1 次消息跳转，降低灵敏度。方向切换时重置累加器。
-            static int wheel_accum = 0;
-            constexpr int WHEEL_STEP = 2;
+            // 鼠标滚轮按行滚动 (3 行/notch, Win 默认值), 长消息不再被一格掠过。
+            constexpr int WHEEL_LINES = 3;
             if (mouse.button == Mouse::WheelUp) {
-                if (wheel_accum > 0) wheel_accum = 0;
-                if (--wheel_accum <= -WHEEL_STEP) {
-                    wheel_accum = 0;
-                    if (scroll_chat(-1)) {
-                        screen.PostEvent(Event::Custom);
-                    }
+                if (scroll_chat_by_lines(-WHEEL_LINES) != 0) {
+                    screen.PostEvent(Event::Custom);
                 }
                 return true;
             }
             if (mouse.button == Mouse::WheelDown) {
-                if (wheel_accum < 0) wheel_accum = 0;
-                if (++wheel_accum >= WHEEL_STEP) {
-                    wheel_accum = 0;
-                    if (scroll_chat(1)) {
-                        screen.PostEvent(Event::Custom);
-                    }
+                if (scroll_chat_by_lines(WHEEL_LINES) != 0) {
+                    screen.PostEvent(Event::Custom);
                 }
                 return true;
             }
@@ -2652,6 +2752,8 @@ int main(int argc, char* argv[]) {
             state.input_mode = hist_mode;
             state.input_text = hist_text;
             state.input_cursor = state.input_text.size();
+            // 历史覆盖输入：清掉本会话旧粘贴留下的孤儿 pasted_texts（spec 3.7）。
+            acecode::tui::prune_unreferenced(state.pasted_texts, state.input_text);
             refresh_slash_dropdown(state, cmd_registry);
             return true;
         }
@@ -2680,6 +2782,8 @@ int main(int argc, char* argv[]) {
                 state.input_text = saved_text;
             }
             state.input_cursor = state.input_text.size();
+            // 历史覆盖输入：清掉本会话旧粘贴留下的孤儿 pasted_texts（spec 3.7）。
+            acecode::tui::prune_unreferenced(state.pasted_texts, state.input_text);
             refresh_slash_dropdown(state, cmd_registry);
             return true;
         }
@@ -2691,6 +2795,12 @@ int main(int argc, char* argv[]) {
                 state.input_cursor = state.input_text.size();
             }
             if (state.input_cursor == 0) return true;
+            // 已知 [Pasted text #N] 占位符整体跨越（atomic span）。
+            if (auto span = acecode::tui::placeholder_ending_at(
+                    state.input_text, state.pasted_texts, state.input_cursor)) {
+                state.input_cursor = span->begin;
+                return true;
+            }
             size_t pos = state.input_cursor - 1;
             while (pos > 0 && (static_cast<unsigned char>(state.input_text[pos]) & 0xC0) == 0x80) {
                 pos--;
@@ -2703,6 +2813,12 @@ int main(int argc, char* argv[]) {
             if (state.resume_picker_active) return true;
             if (state.input_cursor >= state.input_text.size()) {
                 state.input_cursor = state.input_text.size();
+                return true;
+            }
+            // 已知 [Pasted text #N] 占位符整体跨越（atomic span）。
+            if (auto span = acecode::tui::placeholder_starting_at(
+                    state.input_text, state.pasted_texts, state.input_cursor)) {
+                state.input_cursor = span->end;
                 return true;
             }
             size_t pos = state.input_cursor + 1;
@@ -2767,6 +2883,15 @@ int main(int argc, char* argv[]) {
                 state.input_cursor = state.input_text.size();
             }
             if (state.input_cursor >= state.input_text.size()) return true;
+            // 已知 [Pasted text #N] 占位符整体删除：连同 store 条目一起回收。
+            if (auto span = acecode::tui::placeholder_starting_at(
+                    state.input_text, state.pasted_texts, state.input_cursor)) {
+                state.pasted_texts.erase(span->paste_id);
+                state.input_text.erase(span->begin, span->end - span->begin);
+                // input_cursor 保持在 span->begin（即 input_cursor 不变）
+                refresh_slash_dropdown(state, cmd_registry);
+                return true;
+            }
             size_t next = state.input_cursor + 1;
             while (next < state.input_text.size() &&
                    (static_cast<unsigned char>(state.input_text[next]) & 0xC0) == 0x80) {
@@ -2794,6 +2919,15 @@ int main(int argc, char* argv[]) {
             if (state.input_cursor == 0) {
                 return true;
             }
+            // 已知 [Pasted text #N] 占位符整体删除：连同 store 条目一起回收。
+            if (auto span = acecode::tui::placeholder_ending_at(
+                    state.input_text, state.pasted_texts, state.input_cursor)) {
+                state.pasted_texts.erase(span->paste_id);
+                state.input_text.erase(span->begin, span->end - span->begin);
+                state.input_cursor = span->begin;
+                refresh_slash_dropdown(state, cmd_registry);
+                return true;
+            }
             size_t pos = state.input_cursor - 1;
             // Walk back over UTF-8 continuation bytes (10xxxxxx)
             while (pos > 0 && (static_cast<unsigned char>(state.input_text[pos]) & 0xC0) == 0x80) {
@@ -2819,7 +2953,7 @@ int main(int argc, char* argv[]) {
                         state.resume_items.clear();
                         state.resume_view_offset = 0;
                         state.resume_callback = nullptr;
-                        state.input_text.clear();
+                        state.input_text.clear(); state.pasted_texts.clear();
                         state.input_cursor = 0;
                         if (cb) cb(sid);
                         clamp_chat_focus();
@@ -2851,7 +2985,7 @@ int main(int argc, char* argv[]) {
         return false;
     });
 
-    auto renderer = Renderer(input_with_esc, [&state, &version_str, &cwd_display, &chat_box, &scrollbar_box, &message_boxes, &message_line_counts, &anim_tick, &input_with_esc, &permissions, dangerous_mode] {
+    auto renderer = Renderer(input_with_esc, [&state, &screen, &version_str, &cwd_display, &chat_box, &scrollbar_box, &message_boxes, &message_line_counts, &anim_tick, &input_with_esc, &permissions, dangerous_mode] {
         std::lock_guard<std::mutex> lk(state.mu);
 
         // drag-autoscroll: 把上一帧 reflect 回填的 box 高度同步到行数表,
@@ -2871,6 +3005,38 @@ int main(int argc, char* argv[]) {
                 message_line_counts[i] = 1;
             }
         }
+
+        // selection-anchor-compensation: 在清空 boxes 之前,先用上一帧 reflect 的
+        // box.y_min 检测 anchor 漂移。focus_index 和 line_offset 都没变(用户没动
+        // 滚轮 / PgUp / 拖滚动条)而 y_min 变了 —— 这种纯 layout 漂移期间如果用户
+        // 在拖选,FTXUI 的 selection_data_ 钉在物理屏幕坐标会错位,这里调
+        // ShiftSelection 把锚点跟随移到新位置。ShiftSelection 内部会在没有 active
+        // selection 时 early return,这里无条件调用是安全的。
+        {
+            int cur_focus = state.chat_focus_index;
+            int cur_offset = state.chat_line_offset;
+            int cur_y = (cur_focus >= 0 && cur_focus < (int)message_boxes.size())
+                ? message_boxes[cur_focus].y_min : 0;
+            bool focus_unchanged = (cur_focus == state.last_focus_index &&
+                                     cur_offset == state.last_chat_line_offset);
+            // last_focus_box_y 的 sentinel 是 -999999 (从未拍过),用 > -1000000
+            // 判断"已有有效快照"。cur_y 在 reflect 没回填时是 0(default Box),
+            // 也跳过补偿——避免被裁出 viewport 的 anchor 触发假阳性 dy。
+            if (focus_unchanged && cur_y > 0 &&
+                state.last_focus_box_y > -1000000 &&
+                cur_y != state.last_focus_box_y) {
+                int dy = cur_y - state.last_focus_box_y;
+                screen.ShiftSelection(0, dy);
+            }
+            // 仅在拿到有效 reflect 数据时更新快照,否则保留上次的;这样 anchor
+            // 短暂被裁出 viewport 再回到可见区时,差值仍是相对最近一次可见位置。
+            if (cur_y > 0) {
+                state.last_focus_box_y = cur_y;
+            }
+            state.last_focus_index = cur_focus;
+            state.last_chat_line_offset = cur_offset;
+        }
+
         message_boxes.assign(n_msgs, Box{});
 
         // -- Logo --
@@ -3449,6 +3615,62 @@ int main(int argc, char* argv[]) {
             ask_overlay_element = vbox(std::move(rows)) | border | color(Color::Cyan);
         }
 
+        // Tool confirmation overlay —— 取代旧的单行 "y/a/n" 提示。
+        // 三个固定选项:
+        //   0  Yes
+        //   1  Yes, allow all edits during this session (shift+tab)
+        //   2  No
+        // ↑↓ 移焦点,Enter 提交焦点项,1/2/3 数字键直选,Shift+Tab 直接选第二项,
+        // Esc → Deny。事件分支在 CatchEvent 中,渲染层只是把状态画出来。
+        Element confirm_overlay_element = text("");
+        if (state.confirm_pending) {
+            Elements rows;
+            std::string title = acecode::tui::build_confirm_question(
+                state.confirm_tool_name, state.confirm_tool_args);
+            // build_confirm_question 可能返回多行(bash 把 command 附在第二行),
+            // 按 \n 拆开逐行 push,首行加粗。
+            bool first = true;
+            size_t pos = 0;
+            while (pos <= title.size()) {
+                size_t nl = title.find('\n', pos);
+                std::string line = (nl == std::string::npos)
+                    ? title.substr(pos)
+                    : title.substr(pos, nl - pos);
+                if (first) {
+                    rows.push_back(text(" " + line) | bold | color(Color::Yellow));
+                    first = false;
+                } else {
+                    rows.push_back(text(line) | color(Color::GrayLight));
+                }
+                if (nl == std::string::npos) break;
+                pos = nl + 1;
+            }
+            rows.push_back(text(""));
+
+            const std::array<std::string, 3> labels = {
+                "1. Yes",
+                "2. Yes, allow all edits during this session (shift+tab)",
+                "3. No",
+            };
+            const int focus = std::clamp(state.confirm_focus, 0, 2);
+            for (int i = 0; i < 3; ++i) {
+                bool focused = (i == focus);
+                std::string prefix = focused ? " \xE2\x9D\xAF " : "   ";
+                auto row = text(prefix + labels[i]);
+                if (focused) {
+                    row = row | bold | color(Color::White) | bgcolor(Color::RGB(0, 60, 100));
+                } else {
+                    row = row | color(Color::GrayLight);
+                }
+                rows.push_back(row);
+            }
+            rows.push_back(text(""));
+            rows.push_back(
+                text(" \xE2\x86\x91\xE2\x86\x93 move   Enter select   1/2/3 jump   Esc deny")
+                | dim | color(Color::GrayDark));
+            confirm_overlay_element = vbox(std::move(rows)) | border | color(Color::Yellow);
+        }
+
         if (state.exit_confirm_pending) {
             // 优先级最高:Ctrl+C 退出确认 overlay 可在任何其他状态(ask /
             // confirm / 普通输入)上叠加显示。事件拦截分支也放在最早。
@@ -3474,15 +3696,14 @@ int main(int argc, char* argv[]) {
                 });
             }
         } else if (state.confirm_pending) {
+            // overlay 已经把选项画在 message_view 之上,prompt_line 仅作静态
+            // 提示并吞掉字符输入(CatchEvent 中 confirm overlay handler 拦截非
+            // 导航键,这里的 hbox 不渲染 input_with_esc 是为了让光标不在输入
+            // 框里闪、误导用户去打字)。
             prompt_line = hbox({
                 text(" [" + state.confirm_tool_name + "] ") | bold | color(Color::Magenta),
-                text("y") | bold | color(Color::Green),
-                text("es / ") | color(Color::MagentaLight),
-                text("a") | bold | color(Color::Cyan),
-                text("lways / ") | color(Color::MagentaLight),
-                text("n") | bold | color(Color::Red),
-                text("o: ") | color(Color::MagentaLight),
-                input_with_esc->Render() | flex,
+                text("awaiting confirmation \xE2\x80\x94 use \xE2\x86\x91\xE2\x86\x93 + Enter (Esc to deny)")
+                    | dim | color(Color::GrayDark),
             });
         } else {
             Elements prompt_parts;
@@ -3558,6 +3779,7 @@ int main(int argc, char* argv[]) {
             resume_picker_element,
             rewind_picker_element,
             ask_overlay_element,
+            confirm_overlay_element,
             slash_dropdown_element,
             thinking_element,
             separatorLight() | color(Color::GrayDark),
@@ -3572,7 +3794,18 @@ int main(int argc, char* argv[]) {
     // Event::CtrlC instead of being consumed by the Windows console layer.
     screen.Post(prepare_windows_ctrl_c_handling_after_ftxui_install);
 #endif
+    // Enable bracketed paste so the terminal frames pasted text with
+    // ESC[200~ … ESC[201~. FTXUI exposes those markers as Event::Special, and
+    // the paste accumulator in the CatchEvent body intercepts them before
+    // normal Return / character handlers run — preventing pasted newlines
+    // from accidentally submitting partial prompts. The escape sequence is
+    // a private mode setting; it's harmless on terminals that don't support
+    // it (they ignore unknown DECSET codes).
+    std::cout << acecode::tui::kBracketedPasteEnableSeq << std::flush;
     screen.Loop(renderer);
+    // Restore the terminal so subsequent shell prompts on the same session
+    // don't see ESC[200~/201~ wrappers around future pastes.
+    std::cout << acecode::tui::kBracketedPasteDisableSeq << std::flush;
 
     // Stop the ctrl handler from poking at `screen` once Loop returns; the
     // ScreenInteractive will be destroyed at end of scope.

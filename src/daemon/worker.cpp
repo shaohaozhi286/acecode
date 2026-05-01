@@ -19,6 +19,10 @@
 #include "../tool/glob_tool.hpp"
 #include "../tool/task_complete_tool.hpp"
 #include "../tool/tool_executor.hpp"
+#include "../tool/web_search/runtime.hpp"
+#include "../tool/web_search/backend_router.hpp"
+#include "../tool/web_search/region_detector.hpp"
+#include "../tool/web_search/web_search_tool.hpp"
 #include "../network/proxy_resolver.hpp"
 #include "../utils/logger.hpp"
 #include "../utils/token.hpp"
@@ -219,6 +223,22 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
             return provider;
         };
 
+    // ---- Init web search runtime (daemon path) ----
+    // 与 TUI 共用同一份 state.json 的 region 缓存,所以两侧探测结果互通。
+    acecode::web_search::init(cfg.web_search);
+    acecode::web_search::register_default_backends(
+        acecode::web_search::runtime().router(), cfg.web_search);
+    {
+        auto cached = acecode::web_search::runtime().detector().cached_region();
+        acecode::web_search::runtime().router().resolve_active(cached);
+        if (cached == acecode::web_search::Region::Unknown) {
+            std::thread([]{
+                auto r = acecode::web_search::runtime().detector().detect_now();
+                acecode::web_search::runtime().router().resolve_active(r);
+            }).detach();
+        }
+    }
+
     acecode::ToolExecutor tools;
     tools.register_tool(acecode::create_bash_tool());
     tools.register_tool(acecode::create_file_read_tool());
@@ -227,6 +247,11 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     tools.register_tool(acecode::create_grep_tool());
     tools.register_tool(acecode::create_glob_tool());
     tools.register_tool(acecode::create_task_complete_tool());
+    if (cfg.web_search.enabled) {
+        tools.register_tool(acecode::web_search::create_web_search_tool(
+            acecode::web_search::runtime().router(),
+            acecode::web_search::runtime().cfg()));
+    }
     // daemon 用 async 版本(走 ToolContext::ask_user_questions → AskUserQuestionPrompter
     // → WS question_request)。TUI 工厂版需要 TuiState/ScreenInteractive,这里没有。
     tools.register_tool(acecode::create_ask_user_question_tool_async());

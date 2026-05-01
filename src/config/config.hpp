@@ -142,6 +142,20 @@ struct TuiConfig {
 // see openspec/changes/respect-system-proxy. proxy_mode is the only field
 // callers SHOULD branch on at runtime; the rest are passively consumed by
 // network::ProxyResolver.
+// Web search tool tunables. See openspec/changes/add-web-search-tool/.
+// `backend = "auto"` 走启动时探测的 region 决定(global → duckduckgo,cn →
+// bing_cn);显式名字直接使用并跳过探测(但运行时 fallback 仍生效)。
+// `bochaai` / `tavily` 为后续 API backend 占位,本期未实现 — 命中时启动
+// LOG_WARN 并回退到 auto。
+struct WebSearchConfig {
+    bool enabled = true;
+    // "auto" | "duckduckgo" | "bing_cn" | "bochaai" | "tavily"
+    std::string backend = "auto";
+    std::string api_key;        // 给将来 API backend 用,本期不读
+    int max_results = 5;        // 工具入参 limit 上限(min(limit, max_results, 10))
+    int timeout_ms = 8000;      // 单次 backend HTTP 请求超时
+};
+
 struct NetworkConfig {
     // "auto"   = Windows: WinHTTP-IE → registry → env → direct;
     //            POSIX: env (HTTPS_PROXY/HTTP_PROXY/ALL_PROXY/NO_PROXY).
@@ -170,6 +184,7 @@ struct AppConfig {
     InputHistoryConfig input_history;            // per-cwd persistent ↑/↓ history
     AgentLoopConfig agent_loop;                  // agent-loop termination tunables
     NetworkConfig network;                       // proxy / TLS / abort-debug knobs
+    WebSearchConfig web_search;                  // 联网搜索工具配置(参见 add-web-search-tool)
     TuiConfig tui;                               // 终端渲染策略(legacy fallback 等)
 
     // --- model profiles (openspec/changes/model-profiles) ---

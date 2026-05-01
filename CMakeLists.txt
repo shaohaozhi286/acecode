@@ -96,11 +96,13 @@ list(FILTER ACECODE_TESTABLE_SOURCES EXCLUDE REGEX "/src/(tui|markdown)/")
 set(ACECODE_TUI_SOURCES ${ACECODE_ALL_SOURCES})
 list(FILTER ACECODE_TUI_SOURCES INCLUDE REGEX "/src/(tui|markdown)/")
 
-# Most TUI files depend on FTXUI and stay out of acecode_testable. This helper
-# is pure string logic used by main.cpp and unit tests, so compile it once in
-# acecode_testable and remove it from the TUI-only source group.
+# Most TUI files depend on FTXUI and stay out of acecode_testable. These helpers
+# are pure string logic used by main.cpp and unit tests, so compile them once
+# in acecode_testable and remove them from the TUI-only source group.
 set(ACECODE_TESTABLE_TUI_SOURCES
     ${CMAKE_SOURCE_DIR}/src/tui/text_truncation.cpp
+    ${CMAKE_SOURCE_DIR}/src/tui/paste_handler.cpp
+    ${CMAKE_SOURCE_DIR}/src/tui/confirm_question.cpp
 )
 list(APPEND ACECODE_TESTABLE_SOURCES ${ACECODE_TESTABLE_TUI_SOURCES})
 list(REMOVE_ITEM ACECODE_TUI_SOURCES ${ACECODE_TESTABLE_TUI_SOURCES})

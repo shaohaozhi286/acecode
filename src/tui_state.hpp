@@ -1,6 +1,7 @@
 #pragma once
 
 #include "permissions.hpp"
+#include "tui/paste_handler.hpp"
 #include "utils/drag_scroll.hpp"
 #include "tool/tool_executor.hpp"
 #include "tool/ask_user_question_tool.hpp"
@@ -71,6 +72,20 @@ struct TuiState {
     // reset to 0 or size() accordingly.
     size_t input_cursor = 0;
     InputMode input_mode = InputMode::Normal;
+
+    // 多行粘贴折叠（fix-multiline-paste-input change）。bracketed paste 状态机
+    // 拦截 ESC[200~ … ESC[201~ 之间的所有 prompt 事件（含 Return / Tab），归一化
+    // 后或 inline 插入 input_text，或折叠成 [Pasted text #N +M lines] 占位符。
+    //   pasted_texts      — 占位符 id → 完整原文。submit 时 expand_placeholders
+    //                       把占位符替换回原文喂给 agent；input_text 被清空 /
+    //                       覆盖 / 提交时调用 prune_unreferenced 清孤儿。
+    //   next_paste_id     — 单调自增计数（per-process，提交后复位回 1）。
+    //   paste_accumulator — 状态机本身，in_paste() 期间所有 prompt 事件都不下
+    //                       发到正常 Return / 字符 / Backspace / 方向键 handler。
+    std::map<int, std::string> pasted_texts;
+    int next_paste_id = 1;
+    acecode::tui::PasteAccumulator paste_accumulator;
+
     bool is_waiting = false;
     std::string current_thinking_phrase = "Thinking";
     std::string status_line; // for auth/provider status
@@ -84,11 +99,19 @@ struct TuiState {
     // Pending message queue
     std::vector<std::string> pending_queue;
 
-    // Tool confirmation state
+    // Tool confirmation state.
+    //   confirm_focus —— overlay 当前焦点的选项下标:
+    //     0 = "Yes"        (Allow,仅本次)
+    //     1 = "Yes, allow all edits during this session (shift+tab)"
+    //                        (AlwaysAllow,本 session 内同名工具自动通过)
+    //     2 = "No"         (Deny,默认聚焦在最安全的拒绝行)
+    //   每次 on_tool_confirm 翻起 confirm_pending 时 main.cpp 把它复位为 2,
+    //   避免上一次的焦点泄漏到下一次确认。
     bool confirm_pending = false;
     std::string confirm_tool_name;
     std::string confirm_tool_args;
     PermissionResult confirm_result = PermissionResult::Deny;
+    int confirm_focus = 2;
     std::condition_variable confirm_cv;
 
     // AskUserQuestion overlay state(add-ask-user-question-tool 能力)。
@@ -208,6 +231,18 @@ struct TuiState {
     std::chrono::steady_clock::time_point last_drag_scroll_at{};
     int chat_line_offset = 0;
     int pending_shift_dy = 0;
+
+    // selection-anchor-compensation:每帧 Renderer 开头比较 chat_focus_index 对应
+    // 消息的 box.y_min 与上一帧快照的差异,若 focus_index/line_offset 都没变(用户
+    // 没主动滚动)而 y 仍然漂移,说明 layout 自身在动 —— 比如 /resume 后第一帧
+    // paragraph width 测不准、第二帧才把 vbox 总高度拉到正确值导致 yframe 滚动;
+    // 流式新 token 把 follow-tail 锚点上推。这种漂移期间用户拖选,FTXUI 的
+    // selection_data_ 仍按屏幕物理坐标钉死,会显示成 "鼠标按下时指 A 字符,松开
+    // 时框住的是 B 字符" 的错位。检测到漂移就 screen.ShiftSelection(0, dy) 把
+    // selection 锚点同方向移走,与 drag-autoscroll 的补偿语义一致。
+    int last_focus_index = -1;
+    int last_focus_box_y = -999999;  // sentinel: 还没拍快照
+    int last_chat_line_offset = 0;
 
     // draggable-thick-scrollbar:鼠标在加粗滚动条列上按下/拖动时进入此态,
     // 与上面的 drag_left_pressed (drag-select) 互斥 —— 一次按下要么开始

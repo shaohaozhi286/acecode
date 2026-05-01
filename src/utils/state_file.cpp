@@ -95,4 +95,78 @@ void set_state_file_path_for_test(const std::string& path) {
     test_path_override() = path;
 }
 
+namespace {
+
+// 写入任意 JSON value,保留其它 key,原子写。供 web_search 缓存等结构化写入复用。
+void write_state_value(const std::string& key, const nlohmann::json& value) {
+    bool corrupted = false;
+    auto j = load_state_or_empty(&corrupted);
+    if (corrupted) {
+        LOG_WARN("[state_file] state.json corrupted, rewriting");
+    }
+    j[key] = value;
+
+    std::string p = state_file_path();
+    std::error_code ec;
+    fs::create_directories(fs::path(p).parent_path(), ec);
+
+    if (!atomic_write_file(p, j.dump(2))) {
+        LOG_WARN("[state_file] failed to write " + p);
+    }
+}
+
+void erase_state_key(const std::string& key) {
+    bool corrupted = false;
+    auto j = load_state_or_empty(&corrupted);
+    if (corrupted) {
+        LOG_WARN("[state_file] state.json corrupted, rewriting");
+    }
+    if (!j.contains(key)) return; // 没有可删的就别动文件,避免无谓 I/O
+    j.erase(key);
+
+    std::string p = state_file_path();
+    std::error_code ec;
+    fs::create_directories(fs::path(p).parent_path(), ec);
+
+    if (!atomic_write_file(p, j.dump(2))) {
+        LOG_WARN("[state_file] failed to write " + p);
+    }
+}
+
+} // namespace
+
+std::optional<WebSearchRegionCache> read_web_search_region_cache() {
+    auto j = load_state_or_empty();
+    if (!j.contains("web_search") || !j["web_search"].is_object()) return std::nullopt;
+    const auto& wsj = j["web_search"];
+    if (!wsj.contains("region_detected") || !wsj["region_detected"].is_string()) {
+        return std::nullopt;
+    }
+    std::string region = wsj["region_detected"].get<std::string>();
+    if (region != "global" && region != "cn") return std::nullopt;
+    WebSearchRegionCache c;
+    c.region = std::move(region);
+    if (wsj.contains("region_detected_at_ms") &&
+        wsj["region_detected_at_ms"].is_number_integer()) {
+        c.detected_at_ms = wsj["region_detected_at_ms"].get<long long>();
+    }
+    return c;
+}
+
+void write_web_search_region_cache(const WebSearchRegionCache& cache) {
+    if (cache.region != "global" && cache.region != "cn") {
+        LOG_WARN("[state_file] refusing to write web_search region '" +
+                 cache.region + "' (must be global or cn)");
+        return;
+    }
+    nlohmann::json wsj = nlohmann::json::object();
+    wsj["region_detected"] = cache.region;
+    wsj["region_detected_at_ms"] = cache.detected_at_ms;
+    write_state_value("web_search", wsj);
+}
+
+void clear_web_search_region_cache() {
+    erase_state_key("web_search");
+}
+
 } // namespace acecode

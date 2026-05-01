@@ -20,7 +20,7 @@ namespace acecode {
 
 namespace {
 
-constexpr const char* kSeedBundleVersion = "2026-04-30.1";
+constexpr const char* kSeedBundleVersion = "2026-05-01.1";
 constexpr const char* kSeedStateFile = ".seed_skills_state.json";
 
 bool seed_dir_has_all_skills(const fs::path& dir) {
@@ -186,6 +186,9 @@ const std::vector<DefaultSkillSeed>& default_skill_seeds() {
         {"mcporter",
          "hermes-agent:mcp/mcporter@4eecaf06e48834e105cbd989ae0bae5a2a618c1d",
          fs::path("mcp") / "mcporter"},
+        {"acecode-usage",
+         "acecode:acecode-usage@2026-05-01",
+         fs::path("acecode") / "acecode-usage"},
     };
     return seeds;
 }

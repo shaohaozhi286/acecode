@@ -91,7 +91,7 @@ TEST_F(DefaultSkillSeederTest, InstallsAllDefaultSeedsIntoGlobalSkillRoot) {
     }
 
     auto state = nlohmann::json::parse(read_file(acecode::default_skill_seed_state_path(home)));
-    EXPECT_EQ(state["bundle_version"], "2026-04-30.1");
+    EXPECT_EQ(state["bundle_version"], "2026-05-01.1");
     ASSERT_TRUE(state["skills"].is_array());
     EXPECT_EQ(state["skills"].size(), acecode::default_skill_seeds().size());
 }
@@ -153,6 +153,22 @@ TEST_F(DefaultSkillSeederTest, AgentRootDiscoveryAndPrecedenceSurviveSeeding) {
     auto agent_only = registry.find("agent-only");
     ASSERT_TRUE(agent_only.has_value());
     EXPECT_EQ(agent_only->description, "agent compatible skill");
+}
+
+// 场景:确认 acecode-usage 这个内置使用说明 skill 已经注册到 seed bundle,
+// 并且 relative_path 指向 assets/seed/skills/acecode/acecode-usage/。
+// 一旦目录或注册名被误改,本用例会立刻失败,提醒升级 bundle_version。
+TEST(DefaultSkillSeedRegistryTest, AcecodeUsageSkillIsRegisteredInSeedBundle) {
+    bool found = false;
+    for (const auto& seed : acecode::default_skill_seeds()) {
+        if (seed.name == "acecode-usage") {
+            found = true;
+            EXPECT_EQ(seed.relative_path.generic_string(), "acecode/acecode-usage");
+            EXPECT_NE(seed.source_id.find("acecode:acecode-usage"), std::string::npos);
+            break;
+        }
+    }
+    EXPECT_TRUE(found) << "acecode-usage seed must stay registered in default_skill_seeds()";
 }
 
 } // namespace
