@@ -946,9 +946,9 @@ int main(int argc, char* argv[]) {
     {
         // 启动时先用缓存 region(若有)即时 resolve;无缓存先按 Unknown 走悲观,
         // 再起 detached 线程做实际 HEAD 探测,完成后再 resolve 一次。
-        Region cached = web_search::runtime().detector().cached_region();
+        web_search::Region cached = web_search::runtime().detector().cached_region();
         web_search::runtime().router().resolve_active(cached);
-        if (cached == Region::Unknown) {
+        if (cached == web_search::Region::Unknown) {
             std::thread([]{
                 auto r = web_search::runtime().detector().detect_now();
                 web_search::runtime().router().resolve_active(r);
