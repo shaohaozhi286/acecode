@@ -5,6 +5,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { clsx } from '../lib/format.js';
+import { VsIcon } from './Icon.jsx';
 
 const MODES = [
   { id: 'default',     label: '默认',          hint: '写/执行操作前确认',                  color: 'ok'     },
@@ -38,7 +39,7 @@ export function StatusBar({ model = '—', turns = 0, branch = '' }) {
         >
           <span className={clsx('w-1.5 h-1.5 rounded-full', dotCls)} />
           <span>{cur.label}</span>
-          <span className="text-[9px] opacity-70">▾</span>
+          <VsIcon name="glyphDown" size={9} className="opacity-70" />
         </button>
         {open && (
           <div className="absolute bottom-full left-0 mb-1 bg-surface border border-border rounded-md ace-shadow-lg p-1 min-w-[220px] z-50">

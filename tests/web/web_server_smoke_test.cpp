@@ -17,12 +17,15 @@
 #include <gtest/gtest.h>
 
 #include "permissions.hpp"
+#include "desktop/workspace_registry.hpp"
+#include "provider/cwd_model_override.hpp"
 #include "session/local_session_client.hpp"
 #include "session/session_manager.hpp"
 #include "session/session_registry.hpp"
 #include "session/session_storage.hpp"
 #include "skills/skill_registry.hpp"
 #include "tool/tool_executor.hpp"
+#include "utils/cwd_hash.hpp"
 #include "web/server.hpp"
 
 #include <algorithm>
@@ -55,6 +58,7 @@ struct WebServerFixture {
     acecode::AppConfig cfg;
     acecode::WebConfig web_cfg;
     acecode::DaemonConfig daemon_cfg;
+    std::unique_ptr<acecode::desktop::WorkspaceRegistry> workspace_registry;
 
     std::unique_ptr<acecode::SessionRegistry> registry;
     std::unique_ptr<acecode::LocalSessionClient> client;
@@ -64,6 +68,7 @@ struct WebServerFixture {
     int port = 0;
     std::filesystem::path tmp_dir;
     std::filesystem::path cwd_dir;
+    std::filesystem::path projects_dir;
     std::string cwd;
     std::string project_dir;
 
@@ -83,7 +88,12 @@ struct WebServerFixture {
         std::filesystem::create_directories(tmp_dir);
         cwd_dir = tmp_dir / "cwd";
         std::filesystem::create_directories(cwd_dir);
+        projects_dir = tmp_dir / "projects";
+        std::filesystem::create_directories(projects_dir);
         cwd = cwd_dir.string();
+        acecode::desktop::ensure_workspace_metadata(projects_dir.string(), cwd);
+        workspace_registry = std::make_unique<acecode::desktop::WorkspaceRegistry>();
+        workspace_registry->scan(projects_dir.string());
         project_dir = acecode::SessionStorage::get_project_dir(cwd);
         std::filesystem::remove_all(project_dir);
 
@@ -110,6 +120,8 @@ struct WebServerFixture {
                 std::chrono::system_clock::now().time_since_epoch()).count();
         wdeps.session_client = client.get();
         wdeps.session_registry = registry.get();
+        wdeps.projects_dir = projects_dir.string();
+        wdeps.workspace_registry = workspace_registry.get();
         wdeps.skill_registry = &skill_registry;
         wdeps.dangerous = false;
 
@@ -137,6 +149,13 @@ struct WebServerFixture {
 
     std::string url(const std::string& path) {
         return "http://127.0.0.1:" + std::to_string(port) + path;
+    }
+};
+
+struct CwdModelOverrideCleanup {
+    std::string cwd;
+    ~CwdModelOverrideCleanup() {
+        if (!cwd.empty()) acecode::remove_cwd_model_override(cwd);
     }
 };
 
@@ -247,6 +266,85 @@ TEST(WebServerHttp, CreateSessionThenListShowsActive) {
     }
     EXPECT_TRUE(found) << "新建的 session 必须出现在列表中";
     EXPECT_EQ(occurrences, 1) << "active 与 disk meta 必须合并为同一条";
+}
+
+// 场景: 共享 daemon 暴露 workspace registry,每个 workspace 有独立 session
+// lifecycle endpoint。创建/列表响应必须携带 workspace_hash/cwd。
+TEST(WebServerHttp, WorkspaceScopedSessionLifecycle) {
+    WebServerFixture fx;
+    const std::string default_hash = acecode::compute_cwd_hash(fx.cwd);
+
+    auto get_ws = cpr::Get(cpr::Url{fx.url("/api/workspaces")});
+    ASSERT_EQ(get_ws.status_code, 200) << get_ws.text;
+    auto ws_list = json::parse(get_ws.text);
+    ASSERT_TRUE(ws_list.is_array());
+    ASSERT_FALSE(ws_list.empty());
+    EXPECT_EQ(ws_list[0]["hash"], default_hash);
+    EXPECT_EQ(ws_list[0]["cwd"], fx.cwd);
+
+    auto other_cwd_path = fx.tmp_dir / "other-cwd";
+    std::filesystem::create_directories(other_cwd_path);
+    const std::string other_cwd = other_cwd_path.string();
+    const std::string other_hash = acecode::compute_cwd_hash(other_cwd);
+    auto post_ws = cpr::Post(cpr::Url{fx.url("/api/workspaces")},
+                             cpr::Header{{"Content-Type", "application/json"}},
+                             cpr::Body{json{{"cwd", other_cwd}}.dump()});
+    ASSERT_EQ(post_ws.status_code, 201) << post_ws.text;
+    auto ws = json::parse(post_ws.text);
+    EXPECT_EQ(ws["hash"], other_hash);
+    EXPECT_EQ(ws["cwd"], other_cwd);
+
+    auto create = cpr::Post(cpr::Url{fx.url("/api/workspaces/" + other_hash + "/sessions")},
+                            cpr::Header{{"Content-Type", "application/json"}},
+                            cpr::Body{R"({})"});
+    ASSERT_EQ(create.status_code, 201) << create.text;
+    auto created = json::parse(create.text);
+    ASSERT_TRUE(created.contains("session_id"));
+    EXPECT_EQ(created["workspace_hash"], other_hash);
+    EXPECT_EQ(created["cwd"], other_cwd);
+
+    auto list = cpr::Get(cpr::Url{fx.url("/api/workspaces/" + other_hash + "/sessions")});
+    ASSERT_EQ(list.status_code, 200) << list.text;
+    auto sessions = json::parse(list.text);
+    ASSERT_TRUE(sessions.is_array());
+    ASSERT_EQ(sessions.size(), 1u);
+    EXPECT_EQ(sessions[0]["id"], created["session_id"]);
+    EXPECT_EQ(sessions[0]["workspace_hash"], other_hash);
+    EXPECT_EQ(sessions[0]["cwd"], other_cwd);
+}
+
+// 场景: workspace-scoped create 未显式传 model 时,应从该 workspace cwd 的
+// model_override.json 解析 model_name,不能使用 daemon cwd 的 override。
+TEST(WebServerHttp, WorkspaceCreateUsesWorkspaceCwdModelOverride) {
+    WebServerFixture fx;
+
+    auto other_cwd_path = fx.tmp_dir / "model-override-cwd";
+    std::filesystem::create_directories(other_cwd_path);
+    const std::string other_cwd = other_cwd_path.string();
+    const std::string other_hash = acecode::compute_cwd_hash(other_cwd);
+
+    acecode::save_cwd_model_override(other_cwd, "workspace-model");
+    CwdModelOverrideCleanup cleanup{other_cwd};
+
+    auto post_ws = cpr::Post(cpr::Url{fx.url("/api/workspaces")},
+                             cpr::Header{{"Content-Type", "application/json"}},
+                             cpr::Body{json{{"cwd", other_cwd}}.dump()});
+    ASSERT_EQ(post_ws.status_code, 201) << post_ws.text;
+
+    auto create = cpr::Post(cpr::Url{fx.url("/api/workspaces/" + other_hash + "/sessions")},
+                            cpr::Header{{"Content-Type", "application/json"}},
+                            cpr::Body{R"({})"});
+    ASSERT_EQ(create.status_code, 201) << create.text;
+    auto created = json::parse(create.text);
+
+    auto list = cpr::Get(cpr::Url{fx.url("/api/workspaces/" + other_hash + "/sessions")});
+    ASSERT_EQ(list.status_code, 200) << list.text;
+    auto sessions = json::parse(list.text);
+    ASSERT_TRUE(sessions.is_array());
+    ASSERT_EQ(sessions.size(), 1u);
+    EXPECT_EQ(sessions[0]["id"], created["session_id"]);
+    EXPECT_EQ(sessions[0]["workspace_hash"], other_hash);
+    EXPECT_EQ(sessions[0]["model"], "workspace-model");
 }
 
 // 场景: DELETE /api/sessions/:id 返回 204,之后 GET 看不到该 id active=true(spec 9.5)。

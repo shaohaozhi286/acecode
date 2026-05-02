@@ -17,6 +17,7 @@
 #include "session/session_registry.hpp"
 #include "session/session_storage.hpp"
 #include "tool/tool_executor.hpp"
+#include "utils/cwd_hash.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -40,6 +41,7 @@ using acecode::SessionRegistry;
 using acecode::SessionRegistryDeps;
 using acecode::SessionStorage;
 using acecode::ToolExecutor;
+using acecode::compute_cwd_hash;
 
 namespace {
 
@@ -164,6 +166,123 @@ TEST(SessionRegistry, CreatedIdMatchesSessionManagerDiskId) {
     std::filesystem::remove_all(cwd);
 }
 
+// 场景: 共享 daemon 下 create 可为非 daemon cwd 的 workspace 创建 session,
+// SessionManager / AgentLoop / list_active 都必须使用该 workspace cwd。
+TEST(SessionRegistry, CreateUsesWorkspaceCwdFromOptions) {
+    auto daemon_cwd = temp_cwd("daemon_cwd");
+    auto workspace_cwd = temp_cwd("workspace_cwd");
+    auto daemon_project_dir = SessionStorage::get_project_dir(daemon_cwd.string());
+    auto workspace_project_dir = SessionStorage::get_project_dir(workspace_cwd.string());
+    std::filesystem::remove_all(daemon_project_dir);
+    std::filesystem::remove_all(workspace_project_dir);
+
+    ToolExecutor tools;
+    PermissionManager permissions;
+    SessionRegistryDeps deps;
+    deps.provider_accessor = [] { return std::shared_ptr<acecode::LlmProvider>{}; };
+    deps.tools = &tools;
+    deps.cwd = daemon_cwd.string();
+    deps.template_permissions = &permissions;
+    SessionRegistry registry(std::move(deps));
+
+    SessionOptions opts;
+    opts.cwd = workspace_cwd.string();
+    opts.workspace_hash = compute_cwd_hash(opts.cwd);
+    auto id = registry.create(opts);
+    auto* entry = registry.lookup(id);
+    ASSERT_NE(entry, nullptr);
+    EXPECT_EQ(entry->cwd, opts.cwd);
+    EXPECT_EQ(entry->workspace_hash, opts.workspace_hash);
+    ASSERT_NE(entry->loop, nullptr);
+    EXPECT_EQ(entry->loop->cwd(), opts.cwd);
+
+    acecode::ChatMessage msg;
+    msg.role = "user";
+    msg.content = "workspace scoped";
+    entry->sm->on_message(msg);
+
+    EXPECT_FALSE(SessionStorage::list_sessions(workspace_project_dir).empty());
+    EXPECT_TRUE(SessionStorage::list_sessions(daemon_project_dir).empty());
+
+    auto active = registry.list_active();
+    ASSERT_EQ(active.size(), 1u);
+    EXPECT_EQ(active[0].cwd, opts.cwd);
+    EXPECT_EQ(active[0].workspace_hash, opts.workspace_hash);
+
+    std::filesystem::remove_all(daemon_project_dir);
+    std::filesystem::remove_all(workspace_project_dir);
+    std::filesystem::remove_all(daemon_cwd);
+    std::filesystem::remove_all(workspace_cwd);
+}
+
+// 场景: 同一个共享 daemon registry 可以同时持有不同 workspace 的 active
+// session,且每个 AgentLoop / SessionManager 都保持各自 cwd。
+TEST(SessionRegistry, CreateTwoWorkspaceSessionsKeepSeparateCwds) {
+    auto daemon_cwd = temp_cwd("daemon_multi_cwd");
+    auto workspace_a = temp_cwd("workspace_a_cwd");
+    auto workspace_b = temp_cwd("workspace_b_cwd");
+    auto project_a = SessionStorage::get_project_dir(workspace_a.string());
+    auto project_b = SessionStorage::get_project_dir(workspace_b.string());
+    std::filesystem::remove_all(project_a);
+    std::filesystem::remove_all(project_b);
+
+    ToolExecutor tools;
+    PermissionManager permissions;
+    SessionRegistryDeps deps;
+    deps.provider_accessor = [] { return std::shared_ptr<acecode::LlmProvider>{}; };
+    deps.tools = &tools;
+    deps.cwd = daemon_cwd.string();
+    deps.template_permissions = &permissions;
+    SessionRegistry registry(std::move(deps));
+
+    SessionOptions a_opts;
+    a_opts.cwd = workspace_a.string();
+    a_opts.workspace_hash = compute_cwd_hash(a_opts.cwd);
+    SessionOptions b_opts;
+    b_opts.cwd = workspace_b.string();
+    b_opts.workspace_hash = compute_cwd_hash(b_opts.cwd);
+
+    auto a_id = registry.create(a_opts);
+    auto b_id = registry.create(b_opts);
+    ASSERT_NE(a_id, b_id);
+
+    auto* a = registry.lookup(a_id);
+    auto* b = registry.lookup(b_id);
+    ASSERT_NE(a, nullptr);
+    ASSERT_NE(b, nullptr);
+    EXPECT_EQ(a->cwd, a_opts.cwd);
+    EXPECT_EQ(b->cwd, b_opts.cwd);
+    ASSERT_NE(a->loop, nullptr);
+    ASSERT_NE(b->loop, nullptr);
+    EXPECT_EQ(a->loop->cwd(), a_opts.cwd);
+    EXPECT_EQ(b->loop->cwd(), b_opts.cwd);
+
+    auto active = registry.list_active();
+    ASSERT_EQ(active.size(), 2u);
+    bool saw_a = false;
+    bool saw_b = false;
+    for (const auto& info : active) {
+        if (info.id == a_id) {
+            saw_a = true;
+            EXPECT_EQ(info.cwd, a_opts.cwd);
+            EXPECT_EQ(info.workspace_hash, a_opts.workspace_hash);
+        }
+        if (info.id == b_id) {
+            saw_b = true;
+            EXPECT_EQ(info.cwd, b_opts.cwd);
+            EXPECT_EQ(info.workspace_hash, b_opts.workspace_hash);
+        }
+    }
+    EXPECT_TRUE(saw_a);
+    EXPECT_TRUE(saw_b);
+
+    std::filesystem::remove_all(project_a);
+    std::filesystem::remove_all(project_b);
+    std::filesystem::remove_all(daemon_cwd);
+    std::filesystem::remove_all(workspace_a);
+    std::filesystem::remove_all(workspace_b);
+}
+
 // 场景: daemon resume inactive disk session 后,registry 里出现同 id entry,
 // AgentLoop 的 provider-facing history 也恢复,后续 user_input 能接着上下文聊。
 TEST(SessionRegistry, ResumeDiskSessionRestoresLoopHistory) {
@@ -203,6 +322,55 @@ TEST(SessionRegistry, ResumeDiskSessionRestoresLoopHistory) {
 
     std::filesystem::remove_all(project_dir);
     std::filesystem::remove_all(cwd);
+}
+
+// 场景: 共享 daemon 从指定 workspace storage 恢复 session,不能从 daemon cwd
+// 的 storage 查找。
+TEST(SessionRegistry, ResumeUsesWorkspaceCwdFromOptions) {
+    auto daemon_cwd = temp_cwd("resume_daemon");
+    auto workspace_cwd = temp_cwd("resume_workspace");
+    auto daemon_project_dir = SessionStorage::get_project_dir(daemon_cwd.string());
+    auto workspace_project_dir = SessionStorage::get_project_dir(workspace_cwd.string());
+    std::filesystem::remove_all(daemon_project_dir);
+    std::filesystem::remove_all(workspace_project_dir);
+    const std::string id = "20260502-111213-beef";
+
+    {
+        acecode::SessionManager sm;
+        sm.start_session(workspace_cwd.string(), "test-provider", "test-model", id);
+        acecode::ChatMessage msg;
+        msg.role = "user";
+        msg.content = "from workspace";
+        sm.on_message(msg);
+        sm.finalize();
+    }
+
+    ToolExecutor tools;
+    PermissionManager permissions;
+    SessionRegistryDeps deps;
+    deps.provider_accessor = [] { return std::shared_ptr<acecode::LlmProvider>{}; };
+    deps.tools = &tools;
+    deps.cwd = daemon_cwd.string();
+    deps.template_permissions = &permissions;
+    SessionRegistry registry(std::move(deps));
+
+    EXPECT_FALSE(registry.resume(id)) << "未传 workspace 时不应从 daemon cwd 找到其它 workspace 的 session";
+
+    SessionOptions opts;
+    opts.cwd = workspace_cwd.string();
+    opts.workspace_hash = compute_cwd_hash(opts.cwd);
+    ASSERT_TRUE(registry.resume(id, opts));
+    auto* entry = registry.lookup(id);
+    ASSERT_NE(entry, nullptr);
+    ASSERT_NE(entry->loop, nullptr);
+    ASSERT_EQ(entry->loop->messages().size(), 1u);
+    EXPECT_EQ(entry->loop->messages()[0].content, "from workspace");
+    EXPECT_EQ(entry->cwd, opts.cwd);
+
+    std::filesystem::remove_all(daemon_project_dir);
+    std::filesystem::remove_all(workspace_project_dir);
+    std::filesystem::remove_all(daemon_cwd);
+    std::filesystem::remove_all(workspace_cwd);
 }
 
 // 场景: LocalSessionClient::subscribe 必须把 listener 真正接到对应 AgentLoop

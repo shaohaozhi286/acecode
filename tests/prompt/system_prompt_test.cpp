@@ -166,3 +166,16 @@ TEST_F(SystemPromptTest, TaskCompletionProtocolAppears) {
     EXPECT_NE(out.find("NOT a way to hand control back"),
               std::string::npos);
 }
+
+// 场景:acecode 以软件工程为主能力,但不应把"非代码"当作拒绝理由
+TEST_F(SystemPromptTest, GeneralNonCodeRequestsAreAllowed) {
+    acecode::ToolExecutor tools;
+    std::string out = acecode::build_system_prompt(tools, temp_home.string());
+
+    EXPECT_NE(out.find("primary product capability"), std::string::npos);
+    EXPECT_NE(out.find("not a restriction"), std::string::npos);
+    EXPECT_NE(out.find("not about code"), std::string::npos);
+    EXPECT_NE(out.find("not tied to the current project"), std::string::npos);
+    EXPECT_NE(out.find("non-code help"), std::string::npos);
+    EXPECT_NE(out.find("forcing them into a codebase frame"), std::string::npos);
+}

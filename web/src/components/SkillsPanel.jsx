@@ -7,6 +7,7 @@ import { api } from '../lib/api.js';
 import { SlideOver, Toggle } from './Modal.jsx';
 import { toast } from './Toast.jsx';
 import { clsx } from '../lib/format.js';
+import { VsIcon } from './Icon.jsx';
 
 export function SkillsPanel({ onClose }) {
   const [skills, setSkills] = useState([]);
@@ -59,12 +60,15 @@ export function SkillsPanel({ onClose }) {
       {({ close }) => (
         <>
           <div className="h-11 px-4 flex items-center bg-surface-alt border-b border-border shrink-0">
-            <span className="flex-1 text-[14px] font-semibold">🧩 Skills</span>
+            <span className="flex-1 text-[14px] font-semibold flex items-center gap-2">
+              <VsIcon name="extension" size={16} />
+              <span>Skills</span>
+            </span>
             <button
               type="button"
               onClick={close}
-              className="w-7 h-7 rounded text-fg-mute hover:text-fg hover:bg-surface-hi text-[16px] transition"
-            >✕</button>
+              className="w-7 h-7 rounded text-fg-mute hover:text-fg hover:bg-surface-hi text-[16px] transition flex items-center justify-center"
+            ><VsIcon name="close" size={13} /></button>
           </div>
           <input
             type="text"

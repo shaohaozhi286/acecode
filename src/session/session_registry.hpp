@@ -41,6 +41,10 @@ class MemoryRegistry;
 // worker thread,再销毁 prompter,再销毁 SessionManager)。
 struct SessionEntry {
     std::string id;
+    std::string cwd;
+    std::string workspace_hash;
+    std::string provider;
+    std::string model;
     std::unique_ptr<SessionManager>     sm;
     std::unique_ptr<PermissionManager>  perm;
     std::unique_ptr<AgentLoop>           loop;
@@ -84,7 +88,7 @@ public:
     // 从磁盘历史恢复 session 到 daemon 内存 registry。若 id 已 active,直接
     // 返回 true;若磁盘没有该 id,返回 false。同一 daemon 不允许同 id 双上下文,
     // Desktop 多上下文由多个 daemon + 不同 pid 隔离。
-    bool resume(const std::string& id);
+    bool resume(const std::string& id, const SessionOptions& opts = {});
 
     // 找一个 entry。返回 nullptr 表示不存在。返回 raw 指针由调用者立刻使用,
     // **不要存储**(随时可能被 destroy)。线程安全:加锁拷贝 raw 指针,但

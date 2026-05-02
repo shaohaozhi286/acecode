@@ -1,7 +1,7 @@
 // HTTP 客户端封装:自动带 X-ACECode-Token,JSON 编解码,错误抛 ApiError。
 //
-// 多 workspace 模型: setBase({port, token}) 切到不同 daemon;不调时用 location.host
-// 与 getToken()(浏览器单 workspace 路径完全不变)。
+// 共享 daemon 模型: workspace 是 API/session 数据,不是 daemon 端口归属。
+// setBase({port, token}) 仍保留给 standalone/desktop bootstrap 与兼容场景。
 
 import { getToken } from './auth.js';
 
@@ -63,9 +63,14 @@ async function request(method, path, body, base) {
 export function createApi(base = null) {
   return {
     health:           ()             => request('GET',    '/api/health', undefined, base),
+    listWorkspaces:   ()             => request('GET',    '/api/workspaces', undefined, base),
+    registerWorkspace:(cwd)          => request('POST',   '/api/workspaces', {cwd}, base),
     listSessions:     ()             => request('GET',    '/api/sessions', undefined, base),
     createSession:    (opts={})      => request('POST',   '/api/sessions', opts, base),
     resumeSession:    (id)           => request('POST',   `/api/sessions/${encodeURIComponent(id)}/resume`, {}, base),
+    listWorkspaceSessions:  (hash)        => request('GET',  `/api/workspaces/${encodeURIComponent(hash)}/sessions`, undefined, base),
+    createWorkspaceSession: (hash, opts={}) => request('POST', `/api/workspaces/${encodeURIComponent(hash)}/sessions`, opts, base),
+    resumeWorkspaceSession: (hash, id)    => request('POST', `/api/workspaces/${encodeURIComponent(hash)}/sessions/${encodeURIComponent(id)}/resume`, {}, base),
     destroySession:   (id)           => request('DELETE', `/api/sessions/${encodeURIComponent(id)}`, undefined, base),
     sendInput:        (id, text)     => request('POST',   `/api/sessions/${encodeURIComponent(id)}/messages`, {text}, base),
     getMessages:      (id, since=0)  => request('GET',    `/api/sessions/${encodeURIComponent(id)}/messages?since=${since}`, undefined, base),

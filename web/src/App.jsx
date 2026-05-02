@@ -24,7 +24,7 @@ import { Toaster, toast } from './components/Toast.jsx';
 function newSessionRefFrom(ref, sessionId) {
   const next = { sessionId };
   if (!ref || typeof ref !== 'object') return next;
-  for (const key of ['workspaceHash', 'contextId', 'port', 'token']) {
+  for (const key of ['workspaceHash', 'contextId', 'port', 'token', 'cwd']) {
     if (ref[key] != null) next[key] = ref[key];
   }
   return next;
@@ -96,10 +96,12 @@ export function App() {
 
   const createNewSession = useCallback(async () => {
     try {
-      const r = await api.createSession({});
+      const r = activeRef?.workspaceHash
+        ? await api.createWorkspaceSession(activeRef.workspaceHash, {})
+        : await api.createSession({});
       const id = r && (r.session_id || r.id);
       if (!id) return;
-      setActiveRef(newSessionRefFrom(activeRef, id));
+      setActiveRef({ ...newSessionRefFrom(activeRef, id), workspaceHash: r.workspace_hash || activeRef?.workspaceHash, cwd: r.cwd || activeRef?.cwd });
       if (view !== 'single') switchView('single');
     } catch (e) {
       toast({ kind: 'err', text: '新建会话失败:' + (e.message || '') });
@@ -151,8 +153,8 @@ export function App() {
               health={health}
             />
           )}
-          {view === 'grid4' && <Grid4View onExpand={setExpanded} />}
-          {view === 'grid9' && <Grid9View onExpand={setExpanded} />}
+          {view === 'grid4' && <Grid4View activeRef={activeRef} onExpand={setExpanded} />}
+          {view === 'grid9' && <Grid9View activeRef={activeRef} onExpand={setExpanded} />}
         </div>
 
         {expanded && (

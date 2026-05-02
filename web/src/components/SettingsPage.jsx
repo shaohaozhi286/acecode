@@ -6,6 +6,7 @@ import { useEffect, useState } from 'react';
 import { useTheme } from '../theme.jsx';
 import { Toggle } from './Modal.jsx';
 import { clsx } from '../lib/format.js';
+import { VsIcon } from './Icon.jsx';
 
 const NAV = ['常规', '外观', '配置', '个性化', 'MCP 服务器', '模型', '环境', '项目指令', '已归档对话', '使用情况'];
 
@@ -28,8 +29,8 @@ export function SettingsPage({ onClose, health }) {
         <button
           type="button"
           onClick={close}
-          className="px-3 h-7 rounded-md text-fg-2 text-[13px] hover:bg-surface-hi transition"
-        >← 返回</button>
+          className="px-3 h-7 rounded-md text-fg-2 text-[13px] hover:bg-surface-hi transition flex items-center gap-1.5"
+        ><VsIcon name="back" size={13} />返回</button>
         <span className="flex-1 text-center text-[15px] font-semibold">设置</span>
         <div className="w-16" />
       </div>

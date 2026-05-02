@@ -1,10 +1,11 @@
 // 输入框:textarea 自动撑高(最多 8 行) + Enter 发 / Shift+Enter 换行 +
-// ↑/↓ 在首行/末行翻 history。
+// 上下键在首行/末行翻 history。
 //
 // 提交按钮在右侧悬浮(只在有内容时变蓝),空内容时灰色不可点。
 
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import { clsx } from '../lib/format.js';
+import { VsIcon } from './Icon.jsx';
 
 const MAX_ROWS = 8;
 const LINE_HEIGHT = 20; // 与 leading-[20px] 对齐
@@ -90,10 +91,11 @@ export const InputBar = forwardRef(function InputBar({
             <button
               type="button"
               onClick={onAbort}
-              className="px-2 h-7 rounded-md text-[11px] text-danger border border-danger/40 hover:bg-danger-bg transition"
+              className="px-2 h-7 rounded-md text-[11px] text-danger border border-danger/40 hover:bg-danger-bg transition flex items-center gap-1"
               title="中断当前任务"
             >
-              ⏹ 中断
+              <VsIcon name="stop" size={12} mono={false} />
+              <span>中断</span>
             </button>
           )}
           <button
@@ -108,14 +110,12 @@ export const InputBar = forwardRef(function InputBar({
             )}
             title="发送 (Enter)"
           >
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M7 11V3M3 7l4-4 4 4" />
-            </svg>
+            <VsIcon name="send" size={14} mono={false} className={hasText && !disabled ? 'ace-icon-on-accent' : ''} />
           </button>
         </div>
       </div>
       <div className="mt-1 px-1 text-[10px] text-fg-mute flex justify-between">
-        <span>Enter 发送 · Shift+Enter 换行 · ↑/↓ 历史</span>
+        <span>Enter 发送 · Shift+Enter 换行 · 上下键历史</span>
         {value.startsWith('/') && (
           <span className="text-accent">/ 命令模式</span>
         )}

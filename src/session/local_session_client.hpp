@@ -19,7 +19,7 @@ public:
     explicit LocalSessionClient(SessionRegistry& registry) : registry_(registry) {}
 
     std::string create_session(const SessionOptions& opts) override;
-    bool resume_session(const std::string& id) override;
+    bool resume_session(const std::string& id, const SessionOptions& opts = {}) override;
     std::vector<SessionInfo> list_sessions() override;
     void destroy_session(const std::string& id) override;
     SubscriptionId subscribe(const std::string& session_id,

@@ -26,7 +26,7 @@ static bool filename_matches(const std::string& filename, const std::string& pat
     return filename == pattern;
 }
 
-static ToolResult execute_grep(const std::string& arguments_json, const ToolContext& /*ctx*/) {
+static ToolResult execute_grep(const std::string& arguments_json, const ToolContext& ctx) {
     std::string pattern;
     std::string include_pattern;
     std::string search_path;
@@ -45,7 +45,7 @@ static ToolResult execute_grep(const std::string& arguments_json, const ToolCont
     }
 
     if (search_path.empty()) {
-        search_path = std::filesystem::current_path().string();
+        search_path = ctx.cwd.empty() ? std::filesystem::current_path().string() : ctx.cwd;
     }
 
     if (!std::filesystem::is_directory(search_path)) {

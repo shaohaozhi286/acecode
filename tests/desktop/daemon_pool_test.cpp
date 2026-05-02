@@ -1,5 +1,5 @@
-// 覆盖 src/desktop/daemon_pool.cpp。pool 是 desktop 多 workspace 模型的核心 —
-// 同 hash 并发 race / 不同 hash 并发隔离 / stop_all best-effort,任何一项跑偏
+// 覆盖 src/desktop/daemon_pool.cpp。pool 是 desktop daemon slot 管理核心 —
+// 同 slot 并发 race / 不同 slot 隔离 / stop_all best-effort,任何一项跑偏
 // 用户都能在 sidebar 上看到不该有的状态。这里用 mock supervisor 注入,不起
 // 真实 acecode.exe 子进程(那是手动 smoke 才覆盖)。
 
@@ -137,6 +137,37 @@ TEST(DaemonPool, SameHashConcurrentSpawnsOnce) {
         EXPECT_EQ(r.port, port0);
         EXPECT_EQ(r.token, token0);
     }
+}
+
+// 场景: shared desktop daemon 使用固定 hash/context 作为进程 slot。即使用户
+// 切换到不同 workspace cwd 或恢复不同对话,只要 hash/context 仍是共享值,
+// DaemonPool 就必须复用同一个 supervisor,不能再派生第二个 daemon。
+TEST(DaemonPool, SharedSlotDifferentWorkspaceCwdsSpawnOnce) {
+    auto state = std::make_shared<MockSupervisor::SharedState>();
+    DaemonPool pool;
+    pool.set_supervisor_factory_for_test([&] {
+        return std::unique_ptr<IDaemonSupervisor>(new MockSupervisor(state));
+    });
+
+    auto a = make_request("__shared_daemon__", "/tmp/workspace-a");
+    a.context_id = "default";
+    a.run_dir = "/run/desktop-shared";
+    auto b = make_request("__shared_daemon__", "/tmp/workspace-b");
+    b.context_id = "default";
+    b.run_dir = "/run/desktop-shared";
+
+    auto ra = pool.activate(a);
+    auto rb = pool.activate(b);
+    EXPECT_TRUE(ra.ok) << ra.error;
+    EXPECT_TRUE(rb.ok) << rb.error;
+    EXPECT_EQ(state->spawn_calls.load(), 1);
+    EXPECT_EQ(ra.port, rb.port);
+    EXPECT_EQ(ra.token, rb.token);
+    EXPECT_EQ(pool.lookup("__shared_daemon__", "default").state, DaemonState::Running);
+
+    std::lock_guard<std::mutex> lk(state->mu);
+    ASSERT_EQ(state->run_dirs.size(), 1u);
+    EXPECT_EQ(state->run_dirs[0], "/run/desktop-shared");
 }
 
 // 场景: 不同 hash 并发 activate 各自独立 spawn(不串行化),工厂被调 N 次

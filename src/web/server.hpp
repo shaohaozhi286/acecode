@@ -30,6 +30,10 @@ class SessionRegistry;
 class SkillRegistry;
 } // namespace acecode
 
+namespace acecode::desktop {
+class WorkspaceRegistry;
+} // namespace acecode::desktop
+
 namespace acecode::web {
 
 struct WebServerDeps {
@@ -41,12 +45,14 @@ struct WebServerDeps {
     // 否则 PUT /api/mcp 会污染真实用户配置(历史 bug,见 web_server_smoke_test)。
     std::string                config_path;
     std::string                cwd;
+    std::string                projects_dir;
     std::string                token;                  // 启动期生成,空 = 不强制 (loopback only)
     std::string                guid;
     std::int64_t               pid = 0;
     std::int64_t               start_time_unix_ms = 0;
     SessionClient*             session_client = nullptr;
     SessionRegistry*           session_registry = nullptr;
+    acecode::desktop::WorkspaceRegistry* workspace_registry = nullptr;
     // 非 const:PUT /api/skills/:name 要写 cfg.skills.disabled 后调 set_disabled + reload。
     SkillRegistry*             skill_registry = nullptr;
     // POST /api/sessions/:id/model 用 — 通过 swap_provider_if_needed 改写

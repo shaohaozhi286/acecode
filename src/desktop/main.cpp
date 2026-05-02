@@ -1,4 +1,4 @@
-// acecode-desktop: WebView 壳 + N daemon 进程池(每 workspace 一个 daemon)。
+// acecode-desktop: WebView 壳 + 共享 daemon(所有 workspace/session 复用一个 daemon)。
 //
 // 启动流程:
 //   1. 扫 .acecode/projects/*  → WorkspaceRegistry
@@ -11,7 +11,7 @@
 //   6. WebHost.run() 阻塞直到窗口关闭
 //   7. quit: pool.stop_all() + 写 last_active_workspace_hash
 //
-// daemon 端零代码改动 — 每个 daemon 仍只服务自己进程的 current_path。
+// daemon 端通过 workspace-aware API 在同一进程内服务多个 workspace。
 
 #include "daemon_pool.hpp"
 #include "folder_picker.hpp"
@@ -48,6 +48,9 @@
 namespace fs = std::filesystem;
 
 namespace {
+
+constexpr const char* kSharedDaemonSlotHash = "__shared_daemon__";
+constexpr const char* kSharedDaemonContextId = "default";
 
 #ifdef _WIN32
 std::string desktop_exe_dir() {
@@ -119,6 +122,31 @@ std::string current_cwd() {
     return p.string();
 }
 
+void log_legacy_workspace_run_dirs(const std::string& proj_dir) {
+    std::error_code ec;
+    if (!fs::is_directory(proj_dir, ec) || ec) return;
+    int count = 0;
+    for (const auto& project_entry : fs::directory_iterator(proj_dir, ec)) {
+        if (ec) break;
+        if (!project_entry.is_directory(ec) || ec) continue;
+        fs::path run_dir = project_entry.path() / "run";
+        if (!fs::is_directory(run_dir, ec) || ec) continue;
+        for (const auto& run_entry : fs::directory_iterator(run_dir, ec)) {
+            if (ec) break;
+            if (!run_entry.is_directory(ec) || ec) continue;
+            ++count;
+            if (count <= 8) {
+                LOG_WARN("[desktop] legacy workspace run dir ignored by shared daemon: " +
+                         run_entry.path().string());
+            }
+        }
+    }
+    if (count > 8) {
+        LOG_WARN("[desktop] legacy workspace run dirs ignored by shared daemon: " +
+                 std::to_string(count) + " total");
+    }
+}
+
 // JSON 工具:把 daemon_state 枚举转成前端用的字符串
 const char* state_string(acecode::desktop::DaemonState s) {
     switch (s) {
@@ -148,10 +176,13 @@ std::string short_random_hex() {
 
 bool post_resume_to_daemon(int port, const std::string& token,
                            const std::string& session_id,
+                           const std::string& workspace_hash,
                            std::string& error) {
+    std::string path = workspace_hash.empty()
+        ? "/api/sessions/" + session_id + "/resume"
+        : "/api/workspaces/" + workspace_hash + "/sessions/" + session_id + "/resume";
     auto r = cpr::Post(
-        cpr::Url{"http://127.0.0.1:" + std::to_string(port) +
-                 "/api/sessions/" + session_id + "/resume"},
+        cpr::Url{"http://127.0.0.1:" + std::to_string(port) + path},
         cpr::Header{{"X-ACECode-Token", token},
                     {"Content-Type", "application/json"}},
         cpr::Body{"{}"},
@@ -159,6 +190,24 @@ bool post_resume_to_daemon(int port, const std::string& token,
     if (r.status_code >= 200 && r.status_code < 300) return true;
     std::ostringstream oss;
     oss << "resume endpoint failed status=" << r.status_code;
+    if (!r.text.empty()) oss << " body=" << r.text;
+    if (r.error.code != cpr::ErrorCode::OK) oss << " error=" << r.error.message;
+    error = oss.str();
+    return false;
+}
+
+bool post_workspace_to_daemon(int port, const std::string& token,
+                              const std::string& cwd,
+                              std::string& error) {
+    auto r = cpr::Post(
+        cpr::Url{"http://127.0.0.1:" + std::to_string(port) + "/api/workspaces"},
+        cpr::Header{{"X-ACECode-Token", token},
+                    {"Content-Type", "application/json"}},
+        cpr::Body{nlohmann::json{{"cwd", cwd}}.dump()},
+        cpr::Timeout{5000});
+    if (r.status_code >= 200 && r.status_code < 300) return true;
+    std::ostringstream oss;
+    oss << "workspace endpoint failed status=" << r.status_code;
     if (!r.text.empty()) oss << " body=" << r.text;
     if (r.error.code != cpr::ErrorCode::OK) oss << " error=" << r.error.message;
     error = oss.str();
@@ -204,6 +253,7 @@ int main(int, char**) {
     // 1. 扫已有 workspace
     WorkspaceRegistry registry;
     registry.scan(proj_dir);
+    log_legacy_workspace_run_dirs(proj_dir);
 
     // 2. 决定 active workspace
     std::string last_active = acecode::read_last_active_workspace_hash();
@@ -284,7 +334,7 @@ int main(int, char**) {
         std::string cur;
         { std::lock_guard<std::mutex> lk(active_mu); cur = active_hash_dynamic; }
         for (auto& m : entries) {
-            auto snap = pool.lookup(m.hash);
+            auto snap = pool.lookup(kSharedDaemonSlotHash, kSharedDaemonContextId);
             nlohmann::json o;
             o["hash"] = m.hash;
             o["cwd"] = m.cwd;
@@ -308,20 +358,25 @@ int main(int, char**) {
             return {{"error", "unknown workspace hash"}};
         }
         ActivateRequest req;
-        req.hash = m->hash;
+        req.hash = kSharedDaemonSlotHash;
         req.cwd = m->cwd;
         req.daemon_exe_path = daemon_exe;
         req.static_dir = dev_web_dir;
-        // per-workspace runtime files —避免每个 workspace 的 daemon 互相覆盖
-        // ~/.acecode/run/{heartbeat,pid,port,token,daemon.guid}。
-        req.context_id = "default";
-        req.run_dir = (fs::path(proj_dir) / m->hash / "run" / req.context_id).string();
+        // Shared desktop daemon: one process hosts all registered workspaces.
+        // Keep runtime files isolated from standalone daemon runs, but do not
+        // create per-workspace or per-resume run dirs.
+        req.context_id = kSharedDaemonContextId;
+        req.run_dir = (fs::path(acecode::get_acecode_dir()) / "run" / "desktop-shared").string();
         auto r = pool.activate(req);
         if (!r.ok) {
             return {{"error", r.error}};
         }
+        std::string workspace_error;
+        if (!post_workspace_to_daemon(r.port, r.token, m->cwd, workspace_error)) {
+            return {{"error", workspace_error}};
+        }
         { std::lock_guard<std::mutex> lk(active_mu); active_hash_dynamic = m->hash; }
-        return {{"port", r.port}, {"token", r.token}};
+        return {{"port", r.port}, {"token", r.token}, {"workspace_hash", m->hash}, {"cwd", m->cwd}};
     };
     host.bind("aceDesktop_activateWorkspace", [&](const std::string& req) -> std::string {
         // webview 给的 args 是 JSON array,如 ["abc123"]
@@ -350,23 +405,30 @@ int main(int, char**) {
             if (!m) return nlohmann::json{{"error", "unknown workspace hash"}}.dump();
 
             ActivateRequest areq;
-            areq.hash = m->hash;
-            areq.context_id = "resume-" + session_id + "-" + short_random_hex();
+            areq.hash = kSharedDaemonSlotHash;
+            areq.context_id = kSharedDaemonContextId;
             areq.cwd = m->cwd;
             areq.daemon_exe_path = daemon_exe;
             areq.static_dir = dev_web_dir;
-            areq.run_dir = (fs::path(proj_dir) / m->hash / "run" / areq.context_id).string();
+            areq.run_dir = (fs::path(acecode::get_acecode_dir()) / "run" / "desktop-shared").string();
             auto ar = pool.activate(areq);
             if (!ar.ok) return nlohmann::json{{"error", ar.error}}.dump();
 
+            std::string workspace_error;
+            if (!post_workspace_to_daemon(ar.port, ar.token, m->cwd, workspace_error)) {
+                return nlohmann::json{{"error", workspace_error}}.dump();
+            }
+
             std::string resume_error;
-            if (!post_resume_to_daemon(ar.port, ar.token, session_id, resume_error)) {
+            if (!post_resume_to_daemon(ar.port, ar.token, session_id, m->hash, resume_error)) {
                 return nlohmann::json{{"error", resume_error}}.dump();
             }
             return nlohmann::json{
                 {"context_id", areq.context_id},
                 {"port", ar.port},
                 {"token", ar.token},
+                {"workspace_hash", m->hash},
+                {"cwd", m->cwd},
                 {"session_id", session_id},
             }.dump();
         } catch (const std::exception& e) {
@@ -413,12 +475,12 @@ int main(int, char**) {
         auto m = registry.get(active_hash);
         if (m) {
             ActivateRequest req;
-            req.hash = m->hash;
+            req.hash = kSharedDaemonSlotHash;
             req.cwd = m->cwd;
             req.daemon_exe_path = daemon_exe;
             req.static_dir = dev_web_dir;
-            req.context_id = "default";
-            req.run_dir = (fs::path(proj_dir) / m->hash / "run" / req.context_id).string();
+            req.context_id = kSharedDaemonContextId;
+            req.run_dir = (fs::path(acecode::get_acecode_dir()) / "run" / "desktop-shared").string();
             auto r = pool.activate(req);
             if (r.ok) {
                 url = build_loopback_url(r.port, r.token);

@@ -42,6 +42,11 @@ struct ToolResult {
 // Populated by AgentLoop before each tool call so the tool can push
 // interim output to the TUI and react to Esc-driven aborts.
 struct ToolContext {
+    // Session workspace cwd. Tools that support a default working directory
+    // should prefer this over the daemon process cwd when their own arguments
+    // omit a cwd/path.
+    std::string cwd;
+
     // Called zero or more times with non-empty cleaned chunks (ANSI stripped,
     // UTF-8 boundary safe, carriage-return overwrites resolved). Only bash_tool
     // uses this currently — other tools return their output atomically.

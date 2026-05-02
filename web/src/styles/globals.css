@@ -116,6 +116,22 @@ body {
 .ace-shadow    { box-shadow: var(--ace-shadow); }
 .ace-shadow-lg { box-shadow: var(--ace-shadow-lg); }
 
+/* Visual Studio Image Library icons */
+.ace-icon {
+  display: inline-block;
+  object-fit: contain;
+  flex-shrink: 0;
+  vertical-align: -0.125em;
+}
+[data-theme="dark"] .ace-icon[data-monochrome="true"] {
+  filter: invert(1) brightness(1.25);
+  opacity: 0.9;
+}
+.ace-icon-on-accent {
+  filter: brightness(0) invert(1) !important;
+  opacity: 1 !important;
+}
+
 /* 流式光标 (assistant 消息追加 token 时显示) */
 .ace-cursor::after {
   content: "";

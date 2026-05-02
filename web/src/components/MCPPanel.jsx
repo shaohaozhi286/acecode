@@ -6,6 +6,7 @@ import { api } from '../lib/api.js';
 import { SlideOver } from './Modal.jsx';
 import { toast } from './Toast.jsx';
 import { clsx } from '../lib/format.js';
+import { VsIcon } from './Icon.jsx';
 
 export function MCPPanel({ onClose }) {
   const [text,    setText]    = useState('');
@@ -52,12 +53,15 @@ export function MCPPanel({ onClose }) {
       {({ close }) => (
         <>
           <div className="h-11 px-4 flex items-center bg-surface-alt border-b border-border shrink-0">
-            <span className="flex-1 text-[14px] font-semibold">🔌 MCP Servers</span>
+            <span className="flex-1 text-[14px] font-semibold flex items-center gap-2">
+              <VsIcon name="mcp" size={16} />
+              <span>MCP Servers</span>
+            </span>
             <button
               type="button"
               onClick={close}
-              className="w-7 h-7 rounded text-fg-mute hover:text-fg hover:bg-surface-hi text-[16px] transition"
-            >✕</button>
+              className="w-7 h-7 rounded text-fg-mute hover:text-fg hover:bg-surface-hi text-[16px] transition flex items-center justify-center"
+            ><VsIcon name="close" size={13} /></button>
           </div>
           <div className="flex-1 flex flex-col p-3 gap-2 overflow-hidden">
             <div className="text-[11px] text-fg-mute">配置 JSON(直接编辑 mcp_servers 部分)</div>

@@ -3,6 +3,7 @@
 #include "session_rewind.hpp"
 #include "session_storage.hpp"
 #include "../utils/logger.hpp"
+#include "../utils/cwd_hash.hpp"
 
 #include <filesystem>
 #include <utility>
@@ -28,6 +29,18 @@ current_provider_model(const SessionRegistryDeps& deps,
     return {"daemon", fallback_model.empty() ? "default" : fallback_model};
 }
 
+SessionOptions with_resolved_workspace(const SessionRegistryDeps& deps,
+                                       const SessionOptions& in) {
+    SessionOptions out = in;
+    if (out.cwd.empty()) {
+        out.cwd = deps.cwd;
+    }
+    if (out.workspace_hash.empty() && !out.cwd.empty()) {
+        out.workspace_hash = compute_cwd_hash(out.cwd);
+    }
+    return out;
+}
+
 } // namespace
 
 SessionRegistry::SessionRegistry(SessionRegistryDeps deps)
@@ -41,9 +54,10 @@ SessionRegistry::~SessionRegistry() {
 
 std::string SessionRegistry::create(const SessionOptions& opts) {
     std::string id = SessionStorage::generate_session_id();
+    SessionOptions resolved = with_resolved_workspace(deps_, opts);
 
-    auto [provider, model] = current_provider_model(deps_, opts.model_name);
-    auto entry = make_entry_locked(id, opts, provider, model);
+    auto [provider, model] = current_provider_model(deps_, resolved.model_name);
+    auto entry = make_entry_locked(id, resolved, provider, model);
     {
         std::lock_guard<std::mutex> lk(mu_);
         entries_.emplace(id, std::move(entry));
@@ -59,10 +73,16 @@ SessionRegistry::make_entry_locked(const std::string& id,
                                    const std::string& model) {
     auto entry = std::make_unique<SessionEntry>();
     entry->id = id;
+    entry->cwd = opts.cwd.empty() ? deps_.cwd : opts.cwd;
+    entry->workspace_hash = opts.workspace_hash.empty()
+        ? compute_cwd_hash(entry->cwd)
+        : opts.workspace_hash;
+    entry->provider = provider;
+    entry->model = model;
 
     // SessionManager
     entry->sm = std::make_unique<SessionManager>();
-    entry->sm->start_session(deps_.cwd, provider, model, id);
+    entry->sm->start_session(entry->cwd, provider, model, id);
 
     // PermissionManager: 复制 mode + dangerous flag,rules 由调用方在初始化
     // template_permissions 时设好。session_allowed_ 不复制,各 session 独立。
@@ -80,7 +100,7 @@ SessionRegistry::make_entry_locked(const std::string& id,
         deps_.provider_accessor,
         *deps_.tools,
         std::move(empty_cb),
-        deps_.cwd,
+        entry->cwd,
         *entry->perm);
 
     if (deps_.config) {
@@ -143,8 +163,9 @@ void SessionRegistry::restore_loop_history(
     }
 }
 
-bool SessionRegistry::resume(const std::string& id) {
+bool SessionRegistry::resume(const std::string& id, const SessionOptions& opts) {
     if (id.empty()) return false;
+    SessionOptions resolved = with_resolved_workspace(deps_, opts);
 
     std::lock_guard<std::mutex> lk(mu_);
     if (entries_.find(id) != entries_.end()) {
@@ -153,7 +174,7 @@ bool SessionRegistry::resume(const std::string& id) {
 
     SessionManager meta_reader;
     auto [provider, model] = current_provider_model(deps_, "");
-    meta_reader.start_session(deps_.cwd, provider, model);
+    meta_reader.start_session(resolved.cwd, provider, model);
     SessionMeta meta = meta_reader.load_session_meta(id);
 
     if (meta.id.empty()) {
@@ -162,9 +183,11 @@ bool SessionRegistry::resume(const std::string& id) {
     if (!meta.provider.empty()) provider = meta.provider;
     if (!meta.model.empty()) model = meta.model;
 
-    SessionOptions opts;
-    opts.model_name = model;
-    auto entry = make_entry_locked(id, opts, provider, model);
+    SessionOptions entry_opts;
+    entry_opts.cwd = resolved.cwd;
+    entry_opts.workspace_hash = resolved.workspace_hash;
+    entry_opts.model_name = model;
+    auto entry = make_entry_locked(id, entry_opts, provider, model);
     auto messages = entry->sm->resume_session(id);
     restore_loop_history(*entry, messages);
 
@@ -202,6 +225,8 @@ std::vector<SessionInfo> SessionRegistry::list_active() const {
     for (const auto& [id, entry] : entries_) {
         SessionInfo info;
         info.id = id;
+        info.cwd = entry->cwd;
+        info.workspace_hash = entry->workspace_hash;
         info.active = true;
         if (entry->loop) info.busy = entry->loop->is_busy();
         if (entry->sm) {
@@ -210,6 +235,8 @@ std::vector<SessionInfo> SessionRegistry::list_active() const {
             // v1 不读磁盘(list_active 是热路径),只填 id + active + title。
             info.title = entry->sm->current_title();
         }
+        info.provider = entry->provider;
+        info.model = entry->model;
         out.push_back(std::move(info));
     }
     return out;

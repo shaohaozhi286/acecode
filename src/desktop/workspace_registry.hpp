@@ -70,4 +70,8 @@ bool ensure_workspace_metadata(const std::string& projects_dir, const std::strin
 //   3. 否则字面常量 "workspace"
 std::string default_workspace_name(const std::string& cwd);
 
+// 校验 workspace hash 是否与 cwd 的规范化 hash 一致。hash 为空或 cwd 为空
+// 视为不一致;用于共享 daemon 的 workspace-scoped API 入参防错。
+bool workspace_hash_matches_cwd(const std::string& hash, const std::string& cwd);
+
 } // namespace acecode::desktop

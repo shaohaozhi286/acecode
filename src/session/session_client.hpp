@@ -66,6 +66,12 @@ struct PermissionDecision {
 // ----- Session 创建参数 -----
 
 struct SessionOptions {
+    // Workspace execution context. Empty cwd = use the daemon compatibility
+    // workspace. workspace_hash is optional when cwd is provided and will be
+    // derived from cwd by the registry.
+    std::string cwd;
+    std::string workspace_hash;
+
     // 可选 model override(对应 saved_models.name 或 "(legacy)")。
     // 留空 = 用 daemon 启动时的 default。
     std::string model_name;
@@ -82,6 +88,8 @@ struct SessionOptions {
 
 struct SessionInfo {
     std::string id;
+    std::string cwd;
+    std::string workspace_hash;
     std::string created_at;       // ISO 8601
     std::string updated_at;
     std::string summary;          // 最后一条 user 消息的截断
@@ -114,7 +122,7 @@ public:
 
     // 从当前 cwd 的磁盘历史恢复一个 session 到内存 registry。若该 id 已经
     // active,直接返回 true,不在同一 daemon 内创建第二份同 id 上下文。
-    virtual bool resume_session(const std::string& id) = 0;
+    virtual bool resume_session(const std::string& id, const SessionOptions& opts = {}) = 0;
 
     // 列出当前 daemon 内的 session(内存活跃 + 磁盘历史合并去重)。
     virtual std::vector<SessionInfo> list_sessions() = 0;

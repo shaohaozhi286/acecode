@@ -10,8 +10,8 @@ std::string LocalSessionClient::create_session(const SessionOptions& opts) {
     return registry_.create(opts);
 }
 
-bool LocalSessionClient::resume_session(const std::string& id) {
-    return registry_.resume(id);
+bool LocalSessionClient::resume_session(const std::string& id, const SessionOptions& opts) {
+    return registry_.resume(id, opts);
 }
 
 std::vector<SessionInfo> LocalSessionClient::list_sessions() {

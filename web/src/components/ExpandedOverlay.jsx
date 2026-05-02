@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react';
 import { ChatView } from './ChatView.jsx';
 import { clsx } from '../lib/format.js';
 import { sessionDisplayTitle } from '../lib/sessionTitle.js';
+import { VsIcon } from './Icon.jsx';
 
 export function ExpandedOverlay({ session, onClose }) {
   const [show, setShow] = useState(false);
@@ -40,8 +41,8 @@ export function ExpandedOverlay({ session, onClose }) {
           <button
             type="button"
             onClick={close}
-            className="w-6 h-6 rounded border border-border bg-surface-alt text-fg-mute hover:text-fg hover:bg-surface-hi transition"
-          >✕</button>
+            className="w-6 h-6 rounded border border-border bg-surface-alt text-fg-mute hover:text-fg hover:bg-surface-hi transition flex items-center justify-center"
+          ><VsIcon name="close" size={12} /></button>
         </div>
         <div className="flex-1 flex overflow-hidden">
           <ChatView

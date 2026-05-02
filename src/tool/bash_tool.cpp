@@ -70,6 +70,10 @@ static ToolResult execute_bash(const std::string& arguments_json, const ToolCont
         return ToolResult{"[Error] No command provided.", false};
     }
 
+    if (cwd.empty() && !ctx.cwd.empty()) {
+        cwd = ctx.cwd;
+    }
+
     auto t_start = std::chrono::steady_clock::now();
     auto make_summary = [&](const std::string& cmd, long long duration_ms,
                             size_t total_bytes_out, int exit_code,

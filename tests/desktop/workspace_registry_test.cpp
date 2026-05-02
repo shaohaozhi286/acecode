@@ -22,6 +22,7 @@ using acecode::desktop::WorkspaceMeta;
 using acecode::desktop::WorkspaceRegistry;
 using acecode::desktop::default_workspace_name;
 using acecode::desktop::ensure_workspace_metadata;
+using acecode::desktop::workspace_hash_matches_cwd;
 
 namespace {
 
@@ -202,6 +203,14 @@ TEST(WorkspaceRegistry, RegisterNewCreatesEntryAndFile) {
 
     // list 包含新条目
     EXPECT_EQ(r.list().size(), 1u);
+}
+
+TEST(WorkspaceRegistry, WorkspaceHashMatchesCwd) {
+    const std::string cwd = "/home/u/hash-me";
+    EXPECT_TRUE(workspace_hash_matches_cwd(compute_cwd_hash(cwd), cwd));
+    EXPECT_FALSE(workspace_hash_matches_cwd("deadbeefdeadbeef", cwd));
+    EXPECT_FALSE(workspace_hash_matches_cwd("", cwd));
+    EXPECT_FALSE(workspace_hash_matches_cwd(compute_cwd_hash(cwd), ""));
 }
 
 // 场景: TUI/daemon 启动时只应补缺失 workspace.json,不能覆盖用户重命名。

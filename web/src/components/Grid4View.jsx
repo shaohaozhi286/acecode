@@ -1,23 +1,26 @@
-// 4 宫格视图:取当前 daemon 最多 4 条 sessions 显示。
+// 4 宫格视图:取当前 workspace 最多 4 条 sessions 显示。
 
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api.js';
 import { MiniSession } from './MiniSession.jsx';
 
-export function Grid4View({ onExpand }) {
+export function Grid4View({ activeRef, onExpand }) {
   const [sessions, setSessions] = useState([]);
 
   useEffect(() => {
     let off = false;
     const tick = () => {
-      api.listSessions()
+      const req = activeRef?.workspaceHash
+        ? api.listWorkspaceSessions(activeRef.workspaceHash)
+        : api.listSessions();
+      req
         .then((list) => { if (!off) setSessions(Array.isArray(list) ? list.slice(0, 4) : []); })
         .catch(() => {});
     };
     tick();
     const t = setInterval(tick, 3000);
     return () => { off = true; clearInterval(t); };
-  }, []);
+  }, [activeRef?.workspaceHash]);
 
   return (
     <div className="flex-1 overflow-hidden bg-bg p-1.5 grid grid-cols-2 grid-rows-2 gap-1.5">

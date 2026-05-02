@@ -267,9 +267,11 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     //   - SessionRegistry + LocalSessionClient
     //   - WebServer (HTTP + WebSocket)
     std::string cwd = std::filesystem::current_path().string();
-    acecode::desktop::ensure_workspace_metadata(
-        (std::filesystem::path(acecode::get_acecode_dir()) / "projects").string(),
-        cwd);
+    std::string projects_dir =
+        (std::filesystem::path(acecode::get_acecode_dir()) / "projects").string();
+    acecode::desktop::ensure_workspace_metadata(projects_dir, cwd);
+    acecode::desktop::WorkspaceRegistry workspace_registry;
+    workspace_registry.scan(projects_dir);
 
     // cfg_mut 已在前面创建(承接 port_override),这里只继续使用,不再重复声明。
     auto cwd_override = acecode::load_cwd_model_override(cwd);
@@ -348,12 +350,14 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     web_deps.config_path        =
         (std::filesystem::path(acecode::get_acecode_dir()) / "config.json").string();
     web_deps.cwd                = cwd;
+    web_deps.projects_dir       = projects_dir;
     web_deps.token              = token;
     web_deps.guid               = guid;
     web_deps.pid                = pid;
     web_deps.start_time_unix_ms = now_unix_ms();
     web_deps.session_client     = &client;
     web_deps.session_registry   = &registry;
+    web_deps.workspace_registry = &workspace_registry;
     web_deps.skill_registry     = &skill_registry;
     web_deps.provider           = &provider;
     web_deps.provider_mu        = &provider_mu;

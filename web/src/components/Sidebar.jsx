@@ -1,18 +1,18 @@
 // Sidebar(200px):workspace 分组 → session list,底部 Skills/MCP tab。
 //
 // 数据源:
-//   - 当 window.aceDesktop_listWorkspaces 存在(desktop 多 workspace 模式),
-//     调它拿 workspaces;切换走整页 navigate(跨 loopback 端口 fetch 受 CORS 拦截)
-//   - 否则走 api.listSessions() 拿当前 daemon 的 sessions,做单 workspace 显示
+//   - 优先走共享 daemon 的 /api/workspaces + workspace-scoped sessions。
+//   - Desktop bridge 只作为启动/注册 shared daemon 的 fallback。
 //
 // 收起态(view !== 'single')→ width 0,sidebar 整个折叠让出主区。
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api.js';
 import { connection } from '../lib/connection.js';
 import { relativeTime, clsx } from '../lib/format.js';
 import { sessionDisplayTitle } from '../lib/sessionTitle.js';
 import { toast } from './Toast.jsx';
+import { VsIcon } from './Icon.jsx';
 
 function hasDesktopBridge() {
   return typeof window.aceDesktop_listWorkspaces === 'function';
@@ -74,13 +74,15 @@ function WorkspaceGroup({ ws, expanded, onToggle, sessions, activeId, onSelect, 
     <div className={clsx('my-px', ws.active && 'rounded-md')}>
       <div
         className={clsx(
-          'flex items-center gap-2 mx-1.5 px-2.5 py-[6px] rounded-md text-[12px] cursor-pointer transition',
+          'group flex items-center gap-2 mx-1.5 px-2.5 py-[6px] rounded-md text-[12px] cursor-pointer transition',
           ws.active ? 'bg-accent-bg text-fg' : 'text-fg hover:bg-surface-hi',
         )}
         onClick={() => (ws.active ? onToggle(ws.hash) : onActivate(ws))}
       >
-        <span className="text-[10px] w-3 shrink-0 text-fg-mute">{expanded ? '▾' : '▸'}</span>
-        <span className="text-[13px] shrink-0">📁</span>
+        <span className="w-3 shrink-0 flex items-center justify-center opacity-70">
+          <VsIcon name={expanded ? 'expandDown' : 'expandRight'} size={10} />
+        </span>
+        <VsIcon name="folder" size={14} />
         {editing ? (
           <input
             autoFocus
@@ -103,7 +105,7 @@ function WorkspaceGroup({ ws, expanded, onToggle, sessions, activeId, onSelect, 
           onClick={(e) => { e.stopPropagation(); setEditing(true); }}
           className="text-[11px] text-fg-mute hover:text-fg opacity-0 group-hover:opacity-100 transition px-1"
           title="重命名"
-        >✎</button>
+        ><VsIcon name="edit" size={12} /></button>
       </div>
       {expanded && (
         <div className="my-1">
@@ -125,38 +127,70 @@ export function Sidebar({ activeId, onSelect, collapsed, onOpenSkills, onOpenMcp
   const [workspaces,  setWorkspaces]  = useState([]);
   const [sessions,    setSessions]    = useState([]);
   const [expanded,    setExpanded]    = useState(new Set());
+  const [activeWorkspaceHash, setActiveWorkspaceHash] = useState('');
+  const refreshingRef = useRef(false);
 
   const refresh = useCallback(async () => {
-    if (hasDesktopBridge()) {
-      try {
-        const list = parseDesktopResult(await window.aceDesktop_listWorkspaces());
-        const arr = Array.isArray(list) ? list : [];
-        setWorkspaces(arr);
-        setExpanded((prev) => {
-          const next = new Set(prev);
-          for (const w of arr) if (w.active) next.add(w.hash);
-          return next;
-        });
-      } catch {
-        setWorkspaces([]);
-      }
-    } else {
-      setWorkspaces([{ hash: '__local__', cwd: '', name: '当前会话',
-                       daemon_state: 'running', active: true }]);
-      setExpanded((prev) => new Set(prev).add('__local__'));
-    }
+    if (refreshingRef.current) return;
+    refreshingRef.current = true;
     try {
-      const list = await api.listSessions();
-      const arr = Array.isArray(list) ? list : [];
-      setSessions(arr);
-      arr.filter((s) => s.active && s.id).forEach((s) => connection.subscribe(s.id));
+      let workspaceArr = [];
+      try {
+        const list = await api.listWorkspaces();
+        workspaceArr = Array.isArray(list)
+          ? list.map((w) => ({ ...w, daemon_state: w.daemon_state || 'running' }))
+          : [];
+      } catch {
+        workspaceArr = [];
+      }
+
+      if (workspaceArr.length === 0 && hasDesktopBridge()) {
+        try {
+          const list = parseDesktopResult(await window.aceDesktop_listWorkspaces());
+          workspaceArr = Array.isArray(list) ? list : [];
+        } catch {
+          workspaceArr = [];
+        }
+      }
+
+      if (workspaceArr.length === 0) {
+        workspaceArr = [{ hash: '__local__', cwd: '', name: '当前会话',
+                          daemon_state: 'running', active: true }];
+      }
+
+      const chosen = activeWorkspaceHash || workspaceArr.find((w) => w.active)?.hash || workspaceArr[0]?.hash || '';
+      const withActive = workspaceArr.map((w) => ({ ...w, active: w.hash === chosen }));
+      setActiveWorkspaceHash(chosen);
+      setWorkspaces(withActive);
+      setExpanded((prev) => {
+        const next = new Set(prev);
+        for (const w of withActive) if (w.active) next.add(w.hash);
+        return next;
+      });
+
+      try {
+        const visibleWorkspaces = withActive.filter((w) => w.active || w.hash === '__local__');
+        const perWorkspace = await Promise.all(visibleWorkspaces.map(async (w) => {
+          if (w.hash === '__local__') {
+            const list = await api.listSessions();
+            return (Array.isArray(list) ? list : []).map((s) => ({ ...s, workspace_hash: s.workspace_hash || w.hash, cwd: s.cwd || w.cwd }));
+          }
+          const list = await api.listWorkspaceSessions(w.hash);
+          return (Array.isArray(list) ? list : []).map((s) => ({ ...s, workspace_hash: s.workspace_hash || w.hash, cwd: s.cwd || w.cwd }));
+        }));
+        const arr = perWorkspace.flat();
+        setSessions(arr);
+        arr.filter((s) => s.active && s.id).forEach((s) => connection.subscribe(s.id));
+      }
+      catch { /* 鉴权失败不致命 */ }
+    } finally {
+      refreshingRef.current = false;
     }
-    catch { /* 鉴权失败不致命 */ }
-  }, []);
+  }, [activeWorkspaceHash]);
 
   useEffect(() => {
     refresh();
-    const t = setInterval(() => refresh().catch(() => {}), 2000);
+    const t = setInterval(() => refresh().catch(() => {}), 5000);
     return () => clearInterval(t);
   }, [refresh]);
 
@@ -169,54 +203,67 @@ export function Sidebar({ activeId, onSelect, collapsed, onOpenSkills, onOpenMcp
   };
 
   const onActivate = async (ws) => {
+    setActiveWorkspaceHash(ws.hash);
+    setExpanded((prev) => new Set(prev).add(ws.hash));
     if (!hasDesktopBridge()) return;
     try {
       const r = parseDesktopResult(await window.aceDesktop_activateWorkspace(ws.hash));
       if (r.error) { toast({ kind: 'err', text: '切换失败:' + r.error }); return; }
-      // 整页 navigate(跨 loopback 端口 fetch 受 CORS 拦截)
-      location.href = `http://127.0.0.1:${r.port}/?token=${encodeURIComponent(r.token)}`;
+      const currentPort = Number(location.port || (location.protocol === 'https:' ? 443 : 80));
+      if (r.port && Number(r.port) !== currentPort) {
+        location.href = `http://127.0.0.1:${r.port}/?token=${encodeURIComponent(r.token)}`;
+      } else {
+        refresh().catch(() => {});
+      }
     } catch (e) { toast({ kind: 'err', text: '切换异常:' + (e.message || '') }); }
   };
 
   const selectSession = async (ws, session) => {
     if (!session?.id) return;
     if (!session.active) {
-      if (hasDesktopBridge() && ws?.hash) {
-        try {
-          const r = parseDesktopResult(await window.aceDesktop_resumeSession(ws.hash, session.id));
-          if (r.error) { toast({ kind: 'err', text: '恢复失败:' + r.error }); return; }
-          onSelect?.({
-            workspaceHash: ws.hash,
-            contextId: r.context_id,
-            sessionId: r.session_id || session.id,
-            port: r.port,
-            token: r.token,
-            title: session.title,
-            summary: session.summary,
-            message_count: session.message_count,
-            created_at: session.created_at,
-            updated_at: session.updated_at,
-          });
-          return;
-        } catch (e) {
-          toast({ kind: 'err', text: '恢复异常:' + (e.message || '') });
+      try {
+        if (ws?.hash && ws.hash !== '__local__') {
+          await api.resumeWorkspaceSession(ws.hash, session.id);
+        } else {
+          await api.resumeSession(session.id);
+        }
+        refresh().catch(() => {});
+      } catch (e) {
+        if (hasDesktopBridge() && ws?.hash) {
+          try {
+            const r = parseDesktopResult(await window.aceDesktop_resumeSession(ws.hash, session.id));
+            if (r.error) { toast({ kind: 'err', text: '恢复失败:' + r.error }); return; }
+            onSelect?.({
+              workspaceHash: r.workspace_hash || ws.hash,
+              contextId: r.context_id,
+              sessionId: r.session_id || session.id,
+              port: r.port,
+              token: r.token,
+              cwd: r.cwd || ws.cwd,
+              title: session.title,
+              summary: session.summary,
+              message_count: session.message_count,
+              created_at: session.created_at,
+              updated_at: session.updated_at,
+            });
+            return;
+          } catch (inner) {
+            toast({ kind: 'err', text: '恢复异常:' + (inner.message || '') });
+            return;
+          }
+        } else {
+          toast({ kind: 'err', text: '恢复失败:' + (e.message || '') });
           return;
         }
       }
-      try {
-        await api.resumeSession(session.id);
-        refresh().catch(() => {});
-      } catch (e) {
-        toast({ kind: 'err', text: '恢复失败:' + (e.message || '') });
-        return;
-      }
     }
     onSelect?.({
-      workspaceHash: ws?.hash,
+      workspaceHash: session.workspace_hash || ws?.hash,
       contextId: 'default',
       sessionId: session.id,
       port: ws?.port,
       token: ws?.token,
+      cwd: session.cwd || ws?.cwd,
       title: session.title,
       summary: session.summary,
       message_count: session.message_count,
@@ -241,6 +288,7 @@ export function Sidebar({ activeId, onSelect, collapsed, onOpenSkills, onOpenMcp
       const ws = parseDesktopResult(await window.aceDesktop_addWorkspace());
       if (ws == null) return;
       if (!ws || !ws.hash) return;
+      try { await api.registerWorkspace(ws.cwd); } catch { /* daemon 可能已入册;忽略 */ }
       onActivate(ws);
     } catch (e) {
       toast({ kind: 'err', text: '添加项目失败:' + (e.message || '') });
@@ -264,11 +312,11 @@ export function Sidebar({ activeId, onSelect, collapsed, onOpenSkills, onOpenMcp
               onClick={onAddWorkspace}
               className="w-5 h-5 rounded text-fg-mute hover:text-fg hover:bg-surface-hi text-[14px] leading-none flex items-center justify-center"
               title="添加项目"
-            >+</button>
+            ><VsIcon name="add" size={12} /></button>
           </div>
           <div className="flex-1 overflow-y-auto pb-2">
             {workspaces.map((ws) => {
-              const items = ws.active ? sessions : [];
+              const items = sessions.filter((s) => s.workspace_hash ? s.workspace_hash === ws.hash : !!ws.active);
               return (
                 <WorkspaceGroup
                   key={ws.hash}
@@ -308,19 +356,20 @@ export function Sidebar({ activeId, onSelect, collapsed, onOpenSkills, onOpenMcp
       </div>
       <div className="border-t border-border px-2.5 py-2 flex gap-1">
         {[
-          { key: 'sessions', label: '会话' },
-          { key: 'skills',   label: 'Skills' },
-          { key: 'mcp',      label: 'MCP' },
+          { key: 'sessions', label: '会话', icon: 'document' },
+          { key: 'skills',   label: 'Skills', icon: 'extension' },
+          { key: 'mcp',      label: 'MCP', icon: 'mcp' },
         ].map((t) => (
           <button
             key={t.key}
             type="button"
             onClick={() => setPane(t.key)}
             className={clsx(
-              'flex-1 py-[5px] text-[11px] rounded transition',
+              'flex-1 py-[5px] text-[11px] rounded transition flex items-center justify-center gap-1',
               pane === t.key ? 'text-accent' : 'text-fg-mute hover:text-fg hover:bg-surface-hi',
             )}
           >
+            <VsIcon name={t.icon} size={18} />
             {t.label}
           </button>
         ))}

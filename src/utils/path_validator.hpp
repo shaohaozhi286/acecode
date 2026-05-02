@@ -25,13 +25,13 @@ public:
 
         std::string resolved;
         try {
-            resolved = normalize(std::filesystem::weakly_canonical(path).string());
+            resolved = normalize(std::filesystem::weakly_canonical(resolve_input_path(path)).string());
         } catch (...) {
-            resolved = normalize(path);
+            resolved = normalize(resolve_input_path(path).string());
         }
 
         // CWD boundary check
-        if (!starts_with_ci(resolved, working_dir_)) {
+        if (!is_inside_working_dir(resolved)) {
             return "Path outside working directory: " + path +
                    " (resolved: " + resolved + ", cwd: " + working_dir_ + ")";
         }
@@ -45,9 +45,9 @@ public:
 
         std::string resolved;
         try {
-            resolved = normalize(std::filesystem::weakly_canonical(path).string());
+            resolved = normalize(std::filesystem::weakly_canonical(resolve_input_path(path)).string());
         } catch (...) {
-            resolved = normalize(path);
+            resolved = normalize(resolve_input_path(path).string());
         }
 
         // Check filename against dangerous files list
@@ -99,6 +99,21 @@ private:
         auto pos = path.rfind('/');
         if (pos != std::string::npos) return path.substr(pos + 1);
         return path;
+    }
+
+    std::filesystem::path resolve_input_path(const std::string& path) const {
+        std::filesystem::path p(path);
+        if (p.is_relative() && !working_dir_.empty()) {
+            return std::filesystem::path(working_dir_) / p;
+        }
+        return p;
+    }
+
+    bool is_inside_working_dir(const std::string& resolved) const {
+        if (!starts_with_ci(resolved, working_dir_)) return false;
+        if (resolved.size() == working_dir_.size()) return true;
+        char next = resolved[working_dir_.size()];
+        return next == '/' || next == '\\';
     }
 
     static bool ends_with_ci(const std::string& str, const std::string& suffix) {

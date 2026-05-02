@@ -84,7 +84,7 @@ static bool glob_match(const std::string& pattern, const std::string& path) {
     return match_parts(0, 0);
 }
 
-static ToolResult execute_glob(const std::string& arguments_json, const ToolContext& /*ctx*/) {
+static ToolResult execute_glob(const std::string& arguments_json, const ToolContext& ctx) {
     std::string pattern;
     std::string search_path;
 
@@ -101,7 +101,7 @@ static ToolResult execute_glob(const std::string& arguments_json, const ToolCont
     }
 
     if (search_path.empty()) {
-        search_path = std::filesystem::current_path().string();
+        search_path = ctx.cwd.empty() ? std::filesystem::current_path().string() : ctx.cwd;
     }
 
     if (!std::filesystem::is_directory(search_path)) {

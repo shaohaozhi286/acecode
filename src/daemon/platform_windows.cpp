@@ -73,8 +73,22 @@ pid_t_compat spawn_detached(const std::vector<std::string>& argv) {
     std::vector<char> cmd_buf(cmdline.begin(), cmdline.end());
     cmd_buf.push_back('\0');
 
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+    HANDLE nul = ::CreateFileA("NUL", GENERIC_READ | GENERIC_WRITE,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
+                               OPEN_EXISTING, 0, nullptr);
+    if (nul == INVALID_HANDLE_VALUE) nul = nullptr;
+
     STARTUPINFOA si{};
     si.cb = sizeof(si);
+    if (nul) {
+        si.dwFlags |= STARTF_USESTDHANDLES;
+        si.hStdInput  = nul;
+        si.hStdOutput = nul;
+        si.hStdError  = nul;
+    }
     PROCESS_INFORMATION pi{};
 
     DWORD flags = DETACHED_PROCESS | CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP;
@@ -83,12 +97,13 @@ pid_t_compat spawn_detached(const std::vector<std::string>& argv) {
         cmd_buf.data(),   // mutable command line
         nullptr,          // process security
         nullptr,          // thread security
-        FALSE,            // do not inherit handles
+        nul ? TRUE : FALSE, // inherit NUL std handles when available
         flags,
         nullptr,          // inherit environment
         nullptr,          // inherit cwd
         &si,
         &pi);
+    if (nul) ::CloseHandle(nul);
     if (!ok) {
         DWORD err = ::GetLastError();
         LOG_ERROR("[daemon] CreateProcess failed, GLE=" + std::to_string(err));

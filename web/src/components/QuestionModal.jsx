@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react';
 import { connection } from '../lib/connection.js';
 import { Modal } from './Modal.jsx';
 import { clsx } from '../lib/format.js';
+import { VsIcon } from './Icon.jsx';
 
 export function QuestionModal({ request, onResolve }) {
   const questions = request.questions || [];
@@ -61,7 +62,7 @@ export function QuestionModal({ request, onResolve }) {
       {({ close }) => (
         <>
           <div className="px-4.5 py-3 bg-accent-bg/50 border-b border-border flex items-center gap-2">
-            <span className="text-base">❓</span>
+            <VsIcon name="help" size={16} mono={false} />
             <h3 className="text-[14px] font-semibold">需要回答</h3>
           </div>
           <div className="px-4.5 py-4 max-h-[60vh] overflow-y-auto flex flex-col gap-4">

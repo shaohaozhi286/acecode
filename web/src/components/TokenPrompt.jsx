@@ -2,6 +2,7 @@
 // 出错信息走 inline 红字,不弹 toast(此时还没有 root toast)。
 
 import { useState } from 'react';
+import { VsIcon } from './Icon.jsx';
 
 export function TokenPrompt({ onSubmit }) {
   const [value, setValue] = useState('');
@@ -28,7 +29,7 @@ export function TokenPrompt({ onSubmit }) {
         className="w-full max-w-md bg-surface border border-border rounded-xl p-6 ace-shadow-lg"
       >
         <div className="flex items-center gap-2 mb-1">
-          <span className="text-base">🔒</span>
+          <VsIcon name="lock" size={16} />
           <h2 className="text-base font-semibold">需要访问令牌</h2>
         </div>
         <p className="text-fg-2 text-xs mb-4 leading-relaxed">

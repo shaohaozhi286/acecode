@@ -237,4 +237,9 @@ bool WorkspaceRegistry::set_name(const std::string& projects_dir,
     return true;
 }
 
+bool workspace_hash_matches_cwd(const std::string& hash, const std::string& cwd) {
+    if (hash.empty() || cwd.empty()) return false;
+    return hash == compute_cwd_hash(cwd);
+}
+
 } // namespace acecode::desktop

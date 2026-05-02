@@ -1,30 +1,35 @@
-// 9 宫格视图:最多 8 条会话 + 1 个"新建"格,空位填充"空闲"。
+// 9 宫格视图:当前 workspace 最多 8 条会话 + 1 个"新建"格,空位填充"空闲"。
 
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api.js';
 import { MiniSession } from './MiniSession.jsx';
 import { toast } from './Toast.jsx';
 
-export function Grid9View({ onExpand }) {
+export function Grid9View({ activeRef, onExpand }) {
   const [sessions, setSessions] = useState([]);
 
   useEffect(() => {
     let off = false;
     const tick = () => {
-      api.listSessions()
+      const req = activeRef?.workspaceHash
+        ? api.listWorkspaceSessions(activeRef.workspaceHash)
+        : api.listSessions();
+      req
         .then((list) => { if (!off) setSessions(Array.isArray(list) ? list.slice(0, 8) : []); })
         .catch(() => {});
     };
     tick();
     const t = setInterval(tick, 3000);
     return () => { off = true; clearInterval(t); };
-  }, []);
+  }, [activeRef?.workspaceHash]);
 
   const slotsAfter = Math.max(0, 8 - sessions.length); // 留 1 格给"+ 新建"
 
   const newSession = async () => {
     try {
-      const r = await api.createSession({});
+      const r = activeRef?.workspaceHash
+        ? await api.createWorkspaceSession(activeRef.workspaceHash, {})
+        : await api.createSession({});
       const id = r && (r.session_id || r.id);
       if (id) toast({ kind: 'ok', text: '已新建会话:' + id });
     } catch (e) {

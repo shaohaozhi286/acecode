@@ -3,6 +3,8 @@
 #include "auth.hpp"
 #include "static_assets.hpp"
 #include "../config/config.hpp"
+#include "../desktop/workspace_registry.hpp"
+#include "../provider/cwd_model_override.hpp"
 #include "../provider/llm_provider.hpp"
 #include "../provider/provider_swap.hpp"
 #include "../session/ask_user_question_prompter.hpp"
@@ -15,6 +17,7 @@
 #include "../skills/skill_registry.hpp"
 #include "../skills/skill_metadata.hpp"
 #include "../utils/logger.hpp"
+#include "../utils/cwd_hash.hpp"
 #include "handlers/history_handler.hpp"
 #include "handlers/models_handler.hpp"
 #include "handlers/skills_handler.hpp"
@@ -28,6 +31,7 @@
 #include <atomic>
 #include <chrono>
 #include <cctype>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -70,7 +74,9 @@ json chat_message_to_json(const ChatMessage& m) {
 
 // SessionEvent → 上行 WS 消息(也用于 /messages 回放)。
 json session_event_to_json(const SessionEvent& evt,
-                           const std::string& session_id = {}) {
+                           const std::string& session_id = {},
+                           const std::string& workspace_hash = {},
+                           const std::string& cwd = {}) {
     json msg;
     msg["type"]         = to_string(evt.kind);
     msg["seq"]          = evt.seq;
@@ -80,6 +86,17 @@ json session_event_to_json(const SessionEvent& evt,
         msg["session_id"] = session_id;
         if (msg["payload"].is_object() && !msg["payload"].contains("session_id")) {
             msg["payload"]["session_id"] = session_id;
+        }
+    }
+    if (!workspace_hash.empty()) {
+        msg["workspace_hash"] = workspace_hash;
+        if (msg["payload"].is_object() && !msg["payload"].contains("workspace_hash")) {
+            msg["payload"]["workspace_hash"] = workspace_hash;
+        }
+    }
+    if (!cwd.empty()) {
+        if (msg["payload"].is_object() && !msg["payload"].contains("cwd")) {
+            msg["payload"]["cwd"] = cwd;
         }
     }
     return msg;
@@ -282,11 +299,157 @@ struct WebServer::Impl {
         return r;
     }
 
+    std::string projects_dir() const {
+        if (!deps.projects_dir.empty()) return deps.projects_dir;
+        return (std::filesystem::path(get_acecode_dir()) / "projects").string();
+    }
+
+    acecode::desktop::WorkspaceMeta compatibility_workspace() const {
+        acecode::desktop::WorkspaceMeta m;
+        m.cwd = deps.cwd;
+        m.hash = compute_cwd_hash(deps.cwd);
+        m.name = acecode::desktop::default_workspace_name(deps.cwd);
+        return m;
+    }
+
+    std::optional<acecode::desktop::WorkspaceMeta> resolve_workspace(const std::string& hash) const {
+        if (deps.workspace_registry) {
+            if (auto m = deps.workspace_registry->get(hash)) {
+                return m;
+            }
+        }
+        auto compat = compatibility_workspace();
+        if (hash == compat.hash) return compat;
+        return std::nullopt;
+    }
+
+    json workspace_to_json(const acecode::desktop::WorkspaceMeta& m) const {
+        json o;
+        o["hash"] = m.hash;
+        o["cwd"] = m.cwd;
+        o["name"] = m.name;
+        std::error_code ec;
+        o["available"] = !m.cwd.empty() && std::filesystem::is_directory(m.cwd, ec) && !ec;
+        return o;
+    }
+
+    json session_info_to_json(const SessionInfo& s, const SessionMeta* m) const {
+        json o;
+        o["id"]            = s.id;
+        o["active"]        = true;
+        o["status"]        = s.busy ? "running" : "idle";
+        o["workspace_hash"] = !s.workspace_hash.empty() ? s.workspace_hash : (m ? compute_cwd_hash(m->cwd) : "");
+        o["cwd"]           = !s.cwd.empty() ? s.cwd : (m ? m->cwd : "");
+        o["title"]         = !s.title.empty() ? s.title : (m ? m->title : "");
+        o["summary"]       = !s.summary.empty() ? s.summary : (m ? m->summary : "");
+        o["created_at"]    = !s.created_at.empty() ? s.created_at : (m ? m->created_at : "");
+        o["updated_at"]    = !s.updated_at.empty() ? s.updated_at : (m ? m->updated_at : "");
+        o["provider"]      = !s.provider.empty() ? s.provider : (m ? m->provider : "");
+        o["model"]         = !s.model.empty() ? s.model : (m ? m->model : "");
+        o["message_count"] = s.message_count > 0 ? s.message_count : (m ? m->message_count : 0);
+        return o;
+    }
+
+    json session_meta_to_json(const SessionMeta& m, const std::string& workspace_hash) const {
+        json o;
+        o["id"]             = m.id;
+        o["active"]         = false;
+        o["status"]         = "idle";
+        o["workspace_hash"] = workspace_hash;
+        o["cwd"]            = m.cwd;
+        o["title"]          = m.title;
+        o["summary"]        = m.summary;
+        o["created_at"]     = m.created_at;
+        o["updated_at"]     = m.updated_at;
+        o["provider"]       = m.provider;
+        o["model"]          = m.model;
+        o["message_count"]  = m.message_count;
+        return o;
+    }
+
+    json sessions_for_workspace(const acecode::desktop::WorkspaceMeta& ws) const {
+        std::vector<SessionInfo> active;
+        if (deps.session_client) active = deps.session_client->list_sessions();
+
+        auto project_dir = SessionStorage::get_project_dir(ws.cwd);
+        auto disk = SessionStorage::list_sessions(project_dir);
+
+        std::unordered_map<std::string, SessionMeta> disk_by_id;
+        for (const auto& m : disk) {
+            disk_by_id[m.id] = m;
+        }
+
+        std::unordered_set<std::string> seen;
+        json arr = json::array();
+        for (const auto& s : active) {
+            if (s.workspace_hash != ws.hash) continue;
+            seen.insert(s.id);
+            auto meta_it = disk_by_id.find(s.id);
+            const SessionMeta* m = meta_it == disk_by_id.end() ? nullptr : &meta_it->second;
+            arr.push_back(session_info_to_json(s, m));
+        }
+        for (const auto& m : disk) {
+            if (seen.count(m.id)) continue;
+            arr.push_back(session_meta_to_json(m, ws.hash));
+        }
+        return arr;
+    }
+
+    std::optional<crow::response> parse_session_options(
+        const crow::request& req,
+        const acecode::desktop::WorkspaceMeta& ws,
+        SessionOptions& opts) {
+        opts.cwd = ws.cwd;
+        opts.workspace_hash = ws.hash;
+        if (req.body.empty()) return std::nullopt;
+        try {
+            auto j = json::parse(req.body);
+            if (j.contains("model") && j["model"].is_string())
+                opts.model_name = j["model"].get<std::string>();
+            if (j.contains("initial_user_message") && j["initial_user_message"].is_string())
+                opts.initial_user_message = j["initial_user_message"].get<std::string>();
+            if (j.contains("auto_start") && j["auto_start"].is_boolean())
+                opts.auto_start = j["auto_start"].get<bool>();
+        } catch (const std::exception& e) {
+            crow::response r(400);
+            r.body = json{{"error", std::string("bad json: ") + e.what()}}.dump();
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        }
+        return std::nullopt;
+    }
+
+    void apply_workspace_model_override(
+        const acecode::desktop::WorkspaceMeta& ws,
+        SessionOptions& opts) {
+        if (opts.model_name.empty()) {
+            if (auto cwd_override = load_cwd_model_override(ws.cwd)) {
+                opts.model_name = *cwd_override;
+                LOG_INFO("[web] cwd model override resolved hash=" + ws.hash +
+                         " model=" + opts.model_name);
+            }
+        }
+        if (opts.model_name.empty()) return;
+
+        if (!deps.app_config || !deps.provider || !deps.provider_mu) return;
+        auto entry = find_model_by_name(*deps.app_config, opts.model_name);
+        if (!entry.has_value()) {
+            LOG_WARN("[web] model override ignored for hash=" + ws.hash +
+                     ": unknown model " + opts.model_name);
+            return;
+        }
+        // Provider remains daemon-global for now; resolving here keeps cwd
+        // overrides tied to the workspace cwd that requested session creation.
+        swap_provider_if_needed(*deps.provider, *deps.provider_mu,
+                                *entry, *deps.app_config);
+    }
+
     // -----------------------------------------------------------------
     // 路由注册
     // -----------------------------------------------------------------
     void register_routes() {
         register_health();
+        register_workspaces();
         register_sessions();
         register_models();
         register_history();
@@ -294,6 +457,149 @@ struct WebServer::Impl {
         register_mcp();
         register_websocket();
         register_static();
+    }
+
+    void register_workspaces() {
+        CROW_ROUTE(app, "/api/workspaces").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
+        CROW_ROUTE(app, "/api/workspaces/<string>/sessions").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req, const std::string&) {
+            return cors_preflight(req);
+        });
+        CROW_ROUTE(app, "/api/workspaces/<string>/sessions/<string>/resume").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req, const std::string&, const std::string&) {
+            return cors_preflight(req);
+        });
+
+        CROW_ROUTE(app, "/api/workspaces").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            json arr = json::array();
+            std::unordered_set<std::string> seen;
+            if (deps.workspace_registry) {
+                for (const auto& m : deps.workspace_registry->list()) {
+                    arr.push_back(workspace_to_json(m));
+                    seen.insert(m.hash);
+                }
+            }
+            auto compat = compatibility_workspace();
+            if (!compat.hash.empty() && !seen.count(compat.hash)) {
+                arr.push_back(workspace_to_json(compat));
+            }
+            crow::response r(arr.dump());
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        });
+
+        CROW_ROUTE(app, "/api/workspaces").methods(crow::HTTPMethod::POST)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.workspace_registry) {
+                crow::response r(503);
+                r.body = R"({"error":"workspace registry unavailable"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            std::string cwd;
+            try {
+                auto j = json::parse(req.body);
+                cwd = j.value("cwd", std::string{});
+            } catch (const std::exception& e) {
+                crow::response r(400);
+                r.body = json{{"error", std::string("bad json: ") + e.what()}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            if (cwd.empty()) {
+                crow::response r(400);
+                r.body = R"({"error":"cwd required"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            auto m = deps.workspace_registry->register_new(projects_dir(), cwd);
+            LOG_INFO("[web] workspace registered hash=" + m.hash + " cwd=" + m.cwd);
+            crow::response r(201);
+            r.body = workspace_to_json(m).dump();
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        });
+
+        CROW_ROUTE(app, "/api/workspaces/<string>/sessions").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req, const std::string& hash) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            auto ws = resolve_workspace(hash);
+            if (!ws.has_value()) {
+                crow::response r(404);
+                r.body = R"({"error":"workspace not found"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            auto arr = sessions_for_workspace(*ws);
+            crow::response r(arr.dump());
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        });
+
+        CROW_ROUTE(app, "/api/workspaces/<string>/sessions").methods(crow::HTTPMethod::POST)
+        ([this](const crow::request& req, const std::string& hash) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.session_client) {
+                crow::response r(503);
+                r.body = R"({"error":"session client unavailable"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            auto ws = resolve_workspace(hash);
+            if (!ws.has_value()) {
+                crow::response r(404);
+                r.body = R"({"error":"workspace not found"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            SessionOptions opts;
+            if (auto err = parse_session_options(req, *ws, opts)) return std::move(*err);
+            apply_workspace_model_override(*ws, opts);
+            auto id = deps.session_client->create_session(opts);
+            LOG_INFO("[web] workspace session created hash=" + ws->hash + " id=" + id);
+            crow::response r(201);
+            r.body = json{{"session_id", id}, {"id", id}, {"workspace_hash", ws->hash}, {"cwd", ws->cwd}}.dump();
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        });
+
+        CROW_ROUTE(app, "/api/workspaces/<string>/sessions/<string>/resume").methods(crow::HTTPMethod::POST)
+        ([this](const crow::request& req, const std::string& hash, const std::string& id) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.session_client) {
+                crow::response r(503);
+                r.body = R"({"error":"session client unavailable"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            auto ws = resolve_workspace(hash);
+            if (!ws.has_value()) {
+                crow::response r(404);
+                r.body = R"({"error":"workspace not found"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            SessionOptions opts;
+            opts.cwd = ws->cwd;
+            opts.workspace_hash = ws->hash;
+            if (!deps.session_client->resume_session(id, opts)) {
+                crow::response r(404);
+                r.body = R"({"error":"session not found"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            LOG_INFO("[web] workspace session resumed hash=" + ws->hash + " id=" + id);
+            crow::response r(200);
+            r.body = json{{"session_id", id}, {"id", id}, {"active", true}, {"workspace_hash", ws->hash}, {"cwd", ws->cwd}}.dump();
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        });
     }
 
     void register_static() {
@@ -476,55 +782,8 @@ struct WebServer::Impl {
         CROW_ROUTE(app, "/api/sessions").methods(crow::HTTPMethod::GET)
         ([this](const crow::request& req) {
             if (auto rej = require_auth(req)) return std::move(*rej);
-
-            // 内存活跃
-            std::vector<SessionInfo> active;
-            if (deps.session_client) active = deps.session_client->list_sessions();
-
-            // 磁盘历史
-            auto project_dir = SessionStorage::get_project_dir(deps.cwd);
-            auto disk = SessionStorage::list_sessions(project_dir);
-
-            std::unordered_map<std::string, SessionMeta> disk_by_id;
-            for (const auto& m : disk) {
-                disk_by_id[m.id] = m;
-            }
-
-            // 合并去重: active 优先,但用磁盘 meta 补齐摘要/模型/计数。
-            std::unordered_set<std::string> seen;
-            json arr = json::array();
-            for (const auto& s : active) {
-                seen.insert(s.id);
-                auto meta_it = disk_by_id.find(s.id);
-                const SessionMeta* m = meta_it == disk_by_id.end() ? nullptr : &meta_it->second;
-                json o;
-                o["id"]            = s.id;
-                o["active"]        = true;
-                o["status"]        = s.busy ? "running" : "idle";
-                o["title"]         = !s.title.empty() ? s.title : (m ? m->title : "");
-                o["summary"]       = !s.summary.empty() ? s.summary : (m ? m->summary : "");
-                o["created_at"]    = !s.created_at.empty() ? s.created_at : (m ? m->created_at : "");
-                o["updated_at"]    = !s.updated_at.empty() ? s.updated_at : (m ? m->updated_at : "");
-                o["provider"]      = !s.provider.empty() ? s.provider : (m ? m->provider : "");
-                o["model"]         = !s.model.empty() ? s.model : (m ? m->model : "");
-                o["message_count"] = s.message_count > 0 ? s.message_count : (m ? m->message_count : 0);
-                arr.push_back(std::move(o));
-            }
-            for (const auto& m : disk) {
-                if (seen.count(m.id)) continue;
-                json o;
-                o["id"]            = m.id;
-                o["active"]        = false;
-                o["status"]        = "idle";
-                o["title"]         = m.title;
-                o["summary"]       = m.summary;
-                o["created_at"]    = m.created_at;
-                o["updated_at"]    = m.updated_at;
-                o["provider"]      = m.provider;
-                o["model"]         = m.model;
-                o["message_count"] = m.message_count;
-                arr.push_back(std::move(o));
-            }
+            LOG_INFO("[web] compatibility /api/sessions list for cwd=" + deps.cwd);
+            auto arr = sessions_for_workspace(compatibility_workspace());
             crow::response r(arr.dump());
             r.add_header("Content-Type", "application/json");
             return with_cors(req, std::move(r));
@@ -541,27 +800,15 @@ struct WebServer::Impl {
                 return with_cors(req, std::move(r));
             }
 
+            auto ws = compatibility_workspace();
             SessionOptions opts;
-            if (!req.body.empty()) {
-                try {
-                    auto j = json::parse(req.body);
-                    if (j.contains("model") && j["model"].is_string())
-                        opts.model_name = j["model"].get<std::string>();
-                    if (j.contains("initial_user_message") && j["initial_user_message"].is_string())
-                        opts.initial_user_message = j["initial_user_message"].get<std::string>();
-                    if (j.contains("auto_start") && j["auto_start"].is_boolean())
-                        opts.auto_start = j["auto_start"].get<bool>();
-                } catch (const std::exception& e) {
-                    crow::response r(400);
-                    r.body = json{{"error", std::string("bad json: ") + e.what()}}.dump();
-                    r.add_header("Content-Type", "application/json");
-                    return with_cors(req, std::move(r));
-                }
-            }
+            if (auto err = parse_session_options(req, ws, opts)) return std::move(*err);
+            apply_workspace_model_override(ws, opts);
 
             auto id = deps.session_client->create_session(opts);
+            LOG_INFO("[web] compatibility /api/sessions create id=" + id + " cwd=" + ws.cwd);
             crow::response r(201);
-            r.body = json{{"session_id", id}, {"id", id}}.dump();
+            r.body = json{{"session_id", id}, {"id", id}, {"workspace_hash", ws.hash}, {"cwd", ws.cwd}}.dump();
             r.add_header("Content-Type", "application/json");
             return with_cors(req, std::move(r));
         });
@@ -576,14 +823,18 @@ struct WebServer::Impl {
                 r.add_header("Content-Type", "application/json");
                 return with_cors(req, std::move(r));
             }
-            if (!deps.session_client->resume_session(id)) {
+            auto ws = compatibility_workspace();
+            SessionOptions opts;
+            opts.cwd = ws.cwd;
+            opts.workspace_hash = ws.hash;
+            if (!deps.session_client->resume_session(id, opts)) {
                 crow::response r(404);
                 r.body = R"({"error":"session not found"})";
                 r.add_header("Content-Type", "application/json");
                 return with_cors(req, std::move(r));
             }
             crow::response r(200);
-            r.body = json{{"session_id", id}, {"id", id}, {"active", true}}.dump();
+            r.body = json{{"session_id", id}, {"id", id}, {"active", true}, {"workspace_hash", ws.hash}, {"cwd", ws.cwd}}.dump();
             r.add_header("Content-Type", "application/json");
             return with_cors(req, std::move(r));
         });
@@ -615,10 +866,18 @@ struct WebServer::Impl {
             // unsubscribe。因为 EventDispatcher 的 replay 是同步的,subscribe
             // 返回前已 push 完所有补帧。
             json arr = json::array();
+            std::string workspace_hash;
+            std::string session_cwd;
+            if (deps.session_registry) {
+                if (auto* entry = deps.session_registry->lookup(id)) {
+                    workspace_hash = entry->workspace_hash;
+                    session_cwd = entry->cwd;
+                }
+            }
             if (deps.session_client) {
                 auto sub = deps.session_client->subscribe(id,
-                    [&arr](const SessionEvent& e) {
-                        arr.push_back(session_event_to_json(e));
+                    [&arr, &id, &workspace_hash, &session_cwd](const SessionEvent& e) {
+                        arr.push_back(session_event_to_json(e, id, workspace_hash, session_cwd));
                     },
                     since);
                 if (sub != 0) deps.session_client->unsubscribe(id, sub);
@@ -1050,10 +1309,19 @@ struct WebServer::Impl {
                 return;
             }
             if (state->subscriptions.find(sid) != state->subscriptions.end()) {
+                std::string workspace_hash;
+                std::string session_cwd;
+                if (deps.session_registry) {
+                    if (auto* entry = deps.session_registry->lookup(sid)) {
+                        workspace_hash = entry->workspace_hash;
+                        session_cwd = entry->cwd;
+                    }
+                }
                 json ack;
                 ack["type"]       = type == "hello" ? "hello_ack" : "subscribe_ack";
                 ack["session_id"] = sid;
-                ack["payload"]    = json{{"session_id", sid}};
+                if (!workspace_hash.empty()) ack["workspace_hash"] = workspace_hash;
+                ack["payload"]    = json{{"session_id", sid}, {"workspace_hash", workspace_hash}, {"cwd", session_cwd}};
                 conn.send_text(ack.dump());
                 return;
             }
@@ -1062,10 +1330,18 @@ struct WebServer::Impl {
             // 加锁,Crow 保证线程安全。conn 引用在 onclose 之前都有效。
             crow::websocket::connection* conn_ptr = &conn;
             std::string sid_copy = sid;
+            std::string workspace_hash;
+            std::string session_cwd;
+            if (deps.session_registry) {
+                if (auto* entry = deps.session_registry->lookup(sid)) {
+                    workspace_hash = entry->workspace_hash;
+                    session_cwd = entry->cwd;
+                }
+            }
             auto sub = deps.session_client->subscribe(sid,
-                [conn_ptr, sid_copy](const SessionEvent& evt) {
+                [conn_ptr, sid_copy, workspace_hash, session_cwd](const SessionEvent& evt) {
                     try {
-                        conn_ptr->send_text(session_event_to_json(evt, sid_copy).dump());
+                        conn_ptr->send_text(session_event_to_json(evt, sid_copy, workspace_hash, session_cwd).dump());
                     } catch (...) {
                         // 连接断 / 关 → send 抛,忽略(onclose 会清理)
                     }
@@ -1080,7 +1356,8 @@ struct WebServer::Impl {
             json ack;
             ack["type"]       = type == "hello" ? "hello_ack" : "subscribe_ack";
             ack["session_id"] = sid;
-            ack["payload"]    = json{{"session_id", sid}};
+            if (!workspace_hash.empty()) ack["workspace_hash"] = workspace_hash;
+            ack["payload"]    = json{{"session_id", sid}, {"workspace_hash", workspace_hash}, {"cwd", session_cwd}};
             conn.send_text(ack.dump());
             return;
         }

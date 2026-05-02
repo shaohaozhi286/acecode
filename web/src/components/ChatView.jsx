@@ -17,6 +17,7 @@ import { StatusBar } from './StatusBar.jsx';
 import { toast } from './Toast.jsx';
 import { clsx } from '../lib/format.js';
 import { sessionDisplayTitle, titleFromMessages } from '../lib/sessionTitle.js';
+import { VsIcon } from './Icon.jsx';
 
 // 列表项 id 生成 — 进度模式下要稳定,所以以 tool 名 + 起始 seq 当 key
 let _idSeq = 0;
@@ -33,7 +34,7 @@ function normalizeSessionRef(sessionRef, sessionId) {
 function newSessionRefFrom(ref, sessionId) {
   const next = { sessionId };
   if (!ref || typeof ref !== 'object') return next;
-  for (const key of ['workspaceHash', 'contextId', 'port', 'token']) {
+  for (const key of ['workspaceHash', 'contextId', 'port', 'token', 'cwd']) {
     if (ref[key] != null) next[key] = ref[key];
   }
   return next;
@@ -42,7 +43,7 @@ function newSessionRefFrom(ref, sessionId) {
 export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onPermissionRequest, onQuestionRequest }) {
   const ref = useMemo(() => normalizeSessionRef(sessionRef, sessionId), [sessionRef, sessionId]);
   const sid = ref?.sessionId || ref?.id || '';
-  const api = useMemo(() => createApi(ref), [ref?.port, ref?.token]);
+  const api = useMemo(() => createApi(ref), [ref?.port, ref?.token, ref?.workspaceHash]);
   const [items,    setItems]    = useState([]);
   const [busy,     setBusy]     = useState(false);
   const [turns,    setTurns]    = useState(0);
@@ -60,20 +61,26 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
 
   // 拉 history(per-cwd)
   useEffect(() => {
-    const cwd = health?.cwd || '';
+    const cwd = ref?.cwd || health?.cwd || '';
     if (!cwd) return;
     api.getHistory(cwd, 200)
       .then((r) => setHistory(Array.isArray(r) ? r : []))
       .catch(() => {});
-  }, [health, api]);
+  }, [health, api, ref?.cwd]);
 
   // 监听 desktop "新对话" 事件
   useEffect(() => {
     const handler = async () => {
       try {
-        const r = await api.createSession({});
+        const r = ref?.workspaceHash
+          ? await api.createWorkspaceSession(ref.workspaceHash, {})
+          : await api.createSession({});
         const id = r && (r.session_id || r.id);
-        if (id) onSessionPromoted?.(newSessionRefFrom(ref, id));
+        if (id) onSessionPromoted?.({
+          ...newSessionRefFrom(ref, id),
+          workspaceHash: r.workspace_hash || ref?.workspaceHash,
+          cwd: r.cwd || ref?.cwd,
+        });
       } catch (e) {
         toast({ kind: 'err', text: '新建会话失败:' + (e.message || '') });
       }
@@ -263,10 +270,15 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
   const submit = useCallback((text) => {
     if (!sid) {
       // 自动新建会话并让 daemon 直接接管首条消息。
-      api.createSession({ initial_user_message: text, auto_start: true }).then((r) => {
+      const create = ref?.workspaceHash
+        ? api.createWorkspaceSession(ref.workspaceHash, { initial_user_message: text, auto_start: true })
+        : api.createSession({ initial_user_message: text, auto_start: true });
+      create.then((r) => {
         const id = r && (r.session_id || r.id);
         if (id) {
           const next = newSessionRefFrom(ref, id);
+          next.workspaceHash = r.workspace_hash || ref?.workspaceHash;
+          next.cwd = r.cwd || ref?.cwd;
           next.title = text;
           onSessionPromoted?.(next);
           api.appendHistory(text).catch(() => {});
@@ -309,19 +321,20 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
           <button
             type="button"
             onClick={() => window.dispatchEvent(new CustomEvent('ace:new-session'))}
-            className="px-4 h-9 rounded-md bg-accent text-white text-sm font-medium hover:opacity-90 transition"
+            className="px-4 h-9 rounded-md bg-accent text-white text-sm font-medium hover:opacity-90 transition inline-flex items-center gap-1.5"
           >
-            + 新建会话
+            <VsIcon name="add" size={14} mono={false} className="ace-icon-on-accent" />
+            <span>新建会话</span>
           </button>
           <div className="mt-8 grid grid-cols-2 gap-3 max-w-lg w-full">
             {[
-              { icon: '📝', title: '编辑代码', desc: '让 Agent 帮你重构、修 bug、加测试' },
-              { icon: '🔍', title: '探索代码库', desc: '问"这个函数在哪里被调用"' },
-              { icon: '⚙️', title: '运行命令', desc: 'bash / npm / git 等,Agent 会逐步确认' },
-              { icon: '🧠', title: '使用 Skills', desc: '预定义工作流,从侧边栏开启' },
+              { icon: 'edit', title: '编辑代码', desc: '让 Agent 帮你重构、修 bug、加测试' },
+              { icon: 'searchSparkle', title: '探索代码库', desc: '问"这个函数在哪里被调用"' },
+              { icon: 'run', title: '运行命令', desc: 'bash / npm / git 等,Agent 会逐步确认' },
+              { icon: 'lightbulb', title: '使用 Skills', desc: '预定义工作流,从侧边栏开启' },
             ].map((c, i) => (
               <div key={i} className="text-left bg-surface border border-border-soft rounded-lg p-3">
-                <div className="text-xl mb-1">{c.icon}</div>
+                <VsIcon name={c.icon} size={22} className="mb-1" />
                 <div className="text-[13px] font-semibold mb-0.5">{c.title}</div>
                 <div className="text-[11px] text-fg-mute leading-relaxed">{c.desc}</div>
               </div>

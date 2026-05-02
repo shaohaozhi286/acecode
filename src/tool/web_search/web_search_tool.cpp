@@ -45,7 +45,7 @@ std::string error_kind_str(SearchError::Kind k) {
 ToolSummary make_success_summary(const std::string& query,
                                   const SearchResponse& resp) {
     ToolSummary s;
-    s.icon = "\xF0\x9F\x94\x8D"; // 🔍
+    s.icon = "S"; // Search
     s.verb = "web_search";
     std::string q = query;
     if (q.size() > 40) q = q.substr(0, 37) + "...";
@@ -58,7 +58,7 @@ ToolSummary make_success_summary(const std::string& query,
 
 ToolSummary make_error_summary(const std::string& query, const SearchError& err) {
     ToolSummary s;
-    s.icon = "\xE2\x9C\x97"; // ✗
+    s.icon = "!";
     s.verb = "web_search";
     std::string q = query;
     if (q.size() > 40) q = q.substr(0, 37) + "...";

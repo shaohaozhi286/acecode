@@ -36,6 +36,7 @@ protected:
     fs::path tmp_dir_;
 
     void SetUp() override {
+        acecode::Logger::instance().set_level(acecode::LogLevel::Dbg);
         // 给每个测试唯一的临时目录,避免单例 Logger 在测试间相互踩
         tmp_dir_ = fs::temp_directory_path() /
                    ("acecode_logger_test_" +
@@ -50,6 +51,7 @@ protected:
         // 测试收尾必须清空 logger 单例的 clock 注入 + 把句柄指到一个一次性
         // 文件,免得下一个 TEST 的 init 路径还拿着旧 ofs
         acecode::Logger::instance().set_clock_for_test({});
+        acecode::Logger::instance().set_level(acecode::LogLevel::Dbg);
         acecode::Logger::instance().init((tmp_dir_ / "tearcleaner.log").string());
 
         std::error_code ec;

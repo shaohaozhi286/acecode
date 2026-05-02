@@ -728,7 +728,7 @@ static void do_resume_session(CommandContext& ctx, const std::string& session_id
             ctx.provider_handle->get()->name(), ctx.provider_handle->get()->model());
         if (resumed_entry.name.rfind("(session:", 0) == 0) {
             ctx.state.conversation.push_back({"system",
-                "⚠ Resumed with ad-hoc model entry (session recorded " +
+                "Warning: Resumed with ad-hoc model entry (session recorded " +
                 target->provider + "/" + target->model +
                 ", not in saved_models). Use /model --default <name> to pick a permanent one.",
                 false});
@@ -834,7 +834,7 @@ static void cmd_resume(CommandContext& ctx, const std::string& args) {
                 provider_handle->get()->name(), provider_handle->get()->model());
             if (resumed_entry.name.rfind("(session:", 0) == 0) {
                 state.conversation.push_back({"system",
-                    "⚠ Resumed with ad-hoc model entry (session recorded " +
+                    "Warning: Resumed with ad-hoc model entry (session recorded " +
                     target->provider + "/" + target->model +
                     ", not in saved_models). Use /model --default <name> to pick a permanent one.",
                     false});

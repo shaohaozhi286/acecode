@@ -21,13 +21,13 @@ inline std::string tool_icon(const std::string& tool_id) {
         if (tool_id == "task_complete") return "D"; // Done
         return "*";
     }
-    // Default: Unicode glyphs. Kept simple (single-codepoint arrows / glyph)
+    // Default: Unicode glyphs. Kept simple (single-codepoint arrows / glyphs)
     // rather than full emoji, so they render at single width in most terminals.
     if (tool_id == "bash") return "$";              // shell prompt glyph
-    if (tool_id == "file_read") return "\xE2\x86\x92";  // "→" (read)
-    if (tool_id == "file_write") return "\xE2\x9C\x8D"; // "✍" (write)
-    if (tool_id == "file_edit") return "\xE2\x9C\x8E";  // "✎" (edit)
-    if (tool_id == "task_complete") return "\xE2\x9C\x93"; // "✓" (done)
+    if (tool_id == "file_read") return "\xE2\x86\x92";  // right arrow (read)
+    if (tool_id == "file_write") return "\xE2\x9C\x8D"; // writing hand (write)
+    if (tool_id == "file_edit") return "\xE2\x9C\x8E";  // lower-right pencil (edit)
+    if (tool_id == "task_complete") return "\xE2\x9C\x93"; // check mark (done)
     return "*";
 }
 

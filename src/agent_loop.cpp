@@ -351,8 +351,6 @@ void AgentLoop::run_agent(const std::string& user_message) {
                     ctx_path = args_json["file_path"].get<std::string>();
                 } else if (args_json.contains("path") && args_json["path"].is_string()) {
                     ctx_path = args_json["path"].get<std::string>();
-                } else if (args_json.contains("pattern") && args_json["pattern"].is_string()) {
-                    ctx_path = args_json["pattern"].get<std::string>();
                 }
                 if (args_json.contains("command") && args_json["command"].is_string()) {
                     ctx_command = args_json["command"].get<std::string>();
@@ -420,9 +418,12 @@ void AgentLoop::run_agent(const std::string& user_message) {
                     std::string t_path;
                     std::string t_cmd;
                     extract_context(*entry.tc, t_path, t_cmd);
+                    ToolContext t_ctx;
+                    t_ctx.cwd = cwd_;
+                    t_ctx.abort_flag = &abort_requested_;
                     futures.push_back(std::async(std::launch::async,
-                        [&execute_single_tool, t_name, t_args, t_path]() {
-                            return execute_single_tool(t_name, t_args, t_path);
+                        [&execute_single_tool, t_name, t_args, t_path, t_ctx]() {
+                            return execute_single_tool(t_name, t_args, t_path, t_ctx);
                         }));
                 }
 
@@ -558,6 +559,7 @@ void AgentLoop::run_agent(const std::string& user_message) {
             auto prog = std::make_shared<ProgressState>();
 
             ToolContext tool_ctx;
+            tool_ctx.cwd = cwd_;
             tool_ctx.abort_flag = &abort_requested_;
             if (session_manager_) {
                 tool_ctx.track_file_write_before = [this](const std::string& path) {
@@ -750,6 +752,7 @@ void AgentLoop::run_shell(const std::string& command) {
         auto prog = std::make_shared<ProgressState>();
 
         ToolContext tool_ctx;
+        tool_ctx.cwd = cwd_;
         tool_ctx.abort_flag = &abort_requested_;
         if (callbacks_.on_tool_progress_update) {
             auto update_cb = callbacks_.on_tool_progress_update;

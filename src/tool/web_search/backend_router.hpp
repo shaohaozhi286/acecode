@@ -20,7 +20,7 @@
 
 namespace acecode::web_search {
 
-// notify 用于把"⚠ Switched to bing_cn"等信息回传给上层(TUI / 工具流)。
+// notify 用于把"Warning: Switched to bing_cn"等信息回传给上层(TUI / 工具流)。
 // notify 可以为空(测试 / daemon 不关心可以传 nullptr)。
 using NotifyFn = std::function<void(const std::string& yellow_message)>;
 

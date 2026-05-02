@@ -7,6 +7,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { createApi } from '../lib/api.js';
 import { clsx } from '../lib/format.js';
 import { sessionDisplayTitle } from '../lib/sessionTitle.js';
+import { VsIcon } from './Icon.jsx';
 
 function statusColor(s) {
   if (s === 'running') return 'bg-ok shadow-[0_0_6px_var(--ace-ok)]';
@@ -107,7 +108,7 @@ export function MiniSession({ session, compact, onClick }) {
           <span className={clsx(
             'rounded-full bg-accent text-white flex items-center justify-center',
             compact ? 'w-3.5 h-3.5 text-[8px]' : 'w-4 h-4 text-[10px]',
-          )}>↑</span>
+          )}><VsIcon name="send" size={compact ? 10 : 12} mono={false} className="ace-icon-on-accent" /></span>
         </div>
       </div>
       <div className={clsx('px-1.5 py-px text-fg-mute border-t border-border shrink-0', compact ? 'text-[7px]' : 'text-[8px]')}>
