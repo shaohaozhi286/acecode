@@ -49,4 +49,10 @@ void write_web_search_region_cache(const WebSearchRegionCache& cache);
 // 删除 web_search 缓存(/websearch refresh 用)。其它 key 保留。
 void clear_web_search_region_cache();
 
+// desktop multi-workspace: 上次活跃 workspace 的 cwd_hash。
+// 读: 文件不存在 / 字段缺失 / 类型不符 → 空字符串。永不抛异常。
+// 写: 原子写,保留其他 key;失败只 LOG_WARN 不阻断。
+std::string read_last_active_workspace_hash();
+void write_last_active_workspace_hash(const std::string& hash);
+
 } // namespace acecode

@@ -169,4 +169,15 @@ void clear_web_search_region_cache() {
     erase_state_key("web_search");
 }
 
+std::string read_last_active_workspace_hash() {
+    auto j = load_state_or_empty();
+    if (!j.contains("last_active_workspace_hash")) return "";
+    if (!j["last_active_workspace_hash"].is_string()) return "";
+    return j["last_active_workspace_hash"].get<std::string>();
+}
+
+void write_last_active_workspace_hash(const std::string& hash) {
+    write_state_value("last_active_workspace_hash", hash);
+}
+
 } // namespace acecode

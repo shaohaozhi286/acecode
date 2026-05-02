@@ -92,6 +92,47 @@ void install_term_handlers() {
 #endif
 }
 
+bool apply_cwd_override(const std::string& raw, bool foreground) {
+    if (raw.empty()) return true;
+
+    namespace fs = std::filesystem;
+
+    fs::path requested = fs::path(acecode::expand_path(raw));
+    std::error_code ec;
+    fs::path effective = requested.is_absolute()
+        ? requested
+        : fs::absolute(requested, ec);
+    if (ec) effective = requested;
+
+    auto canonical = fs::weakly_canonical(effective, ec);
+    if (!ec && !canonical.empty()) {
+        effective = canonical;
+    }
+
+    std::error_code dir_ec;
+    if (!fs::exists(effective, dir_ec) || !fs::is_directory(effective, dir_ec)) {
+        std::string msg = "[daemon] --cwd path is not a directory: " + effective.string();
+        LOG_ERROR(msg);
+        if (foreground) std::cerr << msg << "\n";
+        return false;
+    }
+
+    fs::current_path(effective, dir_ec);
+    if (dir_ec) {
+        std::string msg = "[daemon] failed to switch --cwd to " + effective.string()
+            + ": " + dir_ec.message();
+        LOG_ERROR(msg);
+        if (foreground) std::cerr << msg << "\n";
+        return false;
+    }
+
+    std::string msg = "[daemon] cwd=" + fs::current_path().string()
+        + " (from --cwd=" + raw + ")";
+    LOG_INFO(msg);
+    if (foreground) std::cerr << msg << "\n";
+    return true;
+}
+
 } // namespace
 
 std::string validate_can_start(const WorkerOptions& opts) {
@@ -126,6 +167,10 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     // 之前,否则启动期校验失败时不会留下任何日志记录。
     Logger::instance().init_with_rotation(get_logs_dir(), "daemon", opts.foreground);
     Logger::instance().set_level(LogLevel::Dbg);
+
+    if (!apply_cwd_override(opts.cwd_override, opts.foreground)) {
+        return 13;
+    }
 
     // 启动前硬安全校验(spec 11.3)。token 还没生成,这里先做 dangerous 检查;
     // 非 loopback 缺 token 的检查放在 token 生成后,因为我们生成 token = 总是
@@ -170,12 +215,25 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     std::string guid = opts.supervised ? opts.guid : generate_daemon_guid();
     std::int64_t pid = current_pid();
 
-    // 写运行时产物。顺序: guid → pid → port → token,失败立刻退出。
-    if (!write_guid_file(guid))           { std::cerr << "write guid failed\n"; return 4; }
-    if (!write_pid_file(pid))             { std::cerr << "write pid failed\n"; return 4; }
-    if (!write_port_file(cfg.web.port))   { std::cerr << "write port failed\n"; return 4; }
+    // 整个 daemon 路径只用 cfg_mut 一份本地可变副本: /api/mcp PUT 要写、
+    // desktop 父进程注入的 port_override 也要写。原本只服务前者,现在两用合一,
+    // 后续所有引用都从 cfg_mut 取(原代码部分位置仍引用 const cfg,见底部 web_deps)。
+    AppConfig cfg_mut = cfg;
+    if (opts.port_override > 0) {
+        cfg_mut.web.port = opts.port_override;
+    }
+    if (!opts.static_dir_override.empty()) {
+        cfg_mut.web.static_dir = opts.static_dir_override;
+    }
 
-    auto token = acecode::generate_auth_token();
+    // 写运行时产物。顺序: guid → pid → port → token,失败立刻退出。
+    if (!write_guid_file(guid))                 { std::cerr << "write guid failed\n"; return 4; }
+    if (!write_pid_file(pid))                   { std::cerr << "write pid failed\n"; return 4; }
+    if (!write_port_file(cfg_mut.web.port))     { std::cerr << "write port failed\n"; return 4; }
+
+    std::string token = !opts.token_override.empty()
+        ? opts.token_override
+        : acecode::generate_auth_token();
     if (token.empty() || !write_token(token)) {
         std::cerr << "write token failed\n";
         return 4;
@@ -185,7 +243,7 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
         std::ostringstream oss;
         oss << "[daemon] worker started pid=" << pid
             << " guid=" << guid
-            << " bind=" << cfg.web.bind << ":" << cfg.web.port
+            << " bind=" << cfg_mut.web.bind << ":" << cfg_mut.web.port
             << (opts.supervised ? " mode=supervised" : " mode=standalone");
         LOG_INFO(oss.str());
         if (opts.foreground) std::cerr << oss.str() << "\n";
@@ -208,8 +266,7 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     //   - WebServer (HTTP + WebSocket)
     std::string cwd = std::filesystem::current_path().string();
 
-    AppConfig cfg_mut = cfg; // /api/mcp PUT 需要 mutable
-
+    // cfg_mut 已在前面创建(承接 port_override),这里只继续使用,不再重复声明。
     auto cwd_override = acecode::load_cwd_model_override(cwd);
     auto effective_entry = acecode::resolve_effective_model(cfg_mut, cwd_override, std::nullopt);
     auto provider = acecode::create_provider_from_entry(effective_entry);
@@ -275,8 +332,8 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     acecode::LocalSessionClient client(registry);
 
     acecode::web::WebServerDeps web_deps;
-    web_deps.web_cfg            = &cfg.web;
-    web_deps.daemon_cfg         = &cfg.daemon;
+    web_deps.web_cfg            = &cfg_mut.web;   // 含 port_override 后的 effective port
+    web_deps.daemon_cfg         = &cfg_mut.daemon;
     web_deps.app_config         = &cfg_mut;
     web_deps.config_path        =
         (std::filesystem::path(acecode::get_acecode_dir()) / "config.json").string();

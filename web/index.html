@@ -1,23 +1,21 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>ACECode</title>
-<link rel="stylesheet" href="/vendor/bootstrap/bootstrap.min.css?v=__VERSION__" />
-<link rel="stylesheet" href="/vendor/bootstrap/bootstrap-icons.css?v=__VERSION__" />
-<link rel="stylesheet" href="/style.css?v=__VERSION__" />
-</head>
-<body>
-<noscript>
-  <div style="padding:2em;font-family:sans-serif">
-    本应用需要 JavaScript。请使用支持 ES Modules 与 Custom Elements 的现代浏览器
-    (Chrome 100+ / Firefox 100+ / Safari 16+ / Edge 100+)。
-  </div>
-</noscript>
-<script>window.AceBus = window.AceBus || new EventTarget();</script>
-<script src="/vendor/bootstrap/bootstrap.bundle.min.js?v=__VERSION__"></script>
-<ace-app></ace-app>
-<script type="module" src="/app.js?v=__VERSION__"></script>
-</body>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#f5f5f2" />
+    <title>ACECode</title>
+    <!-- daemon 在嵌入时会做模板替换 ?v=__VERSION__ → git short hash;dev 模式下保留为字面 -->
+    <script>window.__ACECODE_VERSION__ = "__VERSION__";</script>
+  </head>
+  <body>
+    <noscript>
+      <div style="padding:2em;font-family:sans-serif">
+        本应用需要 JavaScript。请使用支持 ES Modules 的现代浏览器
+        (Chrome 100+ / Firefox 100+ / Safari 16+ / Edge 100+)。
+      </div>
+    </noscript>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
 </html>

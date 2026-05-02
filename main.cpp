@@ -14,6 +14,8 @@
 #include <string_view>
 #include <random>
 #include <filesystem>
+#include <optional>
+#include <unordered_set>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -714,7 +716,19 @@ static void update_ime_composition_window(const std::string& input_text,
 #include "tui_state.hpp"
 using acecode::TuiState;
 
-int main(int argc, char* argv[]) {
+struct CliOptions {
+    bool dangerous_mode = false;
+    bool run_configure_cmd = false;
+    bool validate_models_registry_cmd = false;
+    bool resume_latest = false;
+    bool force_alt_screen = false;
+    std::string resume_session_id;
+};
+
+static int run_interactive_app(const CliOptions& cli,
+                               const std::string& argv0_dir);
+
+static void configure_process_environment() {
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);
@@ -723,25 +737,31 @@ int main(int argc, char* argv[]) {
     // Without this, a malicious exe placed in cwd could hijack system commands.
     SetEnvironmentVariableA("NoDefaultCurrentDirectoryInExePath", "1");
 #endif
+}
 
-    // ---- Top-level subcommand dispatch ----
-    // `acecode daemon ...` 完全脱离 TUI,在第一时间分流出去。所有其它路径继续走
-    // 下面的 TUI argv 解析。
+static std::vector<std::string> argv_tail(int argc, char* argv[], int start) {
+    std::vector<std::string> tokens;
+    for (int i = start; i < argc; ++i) {
+        tokens.emplace_back(argv[i]);
+    }
+    return tokens;
+}
+
+static std::string executable_path_from_argv(int argc, char* argv[]) {
+    return (argc > 0 && argv[0]) ? std::string(argv[0]) : std::string();
+}
+
+static std::optional<int> dispatch_non_tui_command(int argc, char* argv[]) {
+    const std::string exe_path = executable_path_from_argv(argc, argv);
+
     if (argc >= 2 && std::string(argv[1]) == "daemon") {
-        std::vector<std::string> tokens;
-        for (int i = 2; i < argc; ++i) tokens.emplace_back(argv[i]);
-        std::string exe_path = (argc > 0 && argv[0]) ? std::string(argv[0]) : "";
-        return acecode::daemon::cli::run(tokens, exe_path);
+        return acecode::daemon::cli::run(argv_tail(argc, argv, 2), exe_path);
     }
 
-    // `acecode service ...` — Windows Service 包装(spec design.md Decision 8)。
-    // Linux/macOS 暂不支持原生 service install,提示走 systemd / launchd。
     if (argc >= 2 && std::string(argv[1]) == "service") {
 #ifdef _WIN32
-        std::vector<std::string> tokens;
-        for (int i = 2; i < argc; ++i) tokens.emplace_back(argv[i]);
-        std::string exe_path = (argc > 0 && argv[0]) ? std::string(argv[0]) : "";
-        return acecode::daemon::service_win::run_cli(tokens, exe_path);
+        return acecode::daemon::service_win::run_cli(argv_tail(argc, argv, 2),
+                                                     exe_path);
 #else
         std::cerr << "acecode: native `service` subcommand is Windows-only;\n"
                      "         on Linux/macOS use `acecode daemon --foreground`\n"
@@ -750,8 +770,6 @@ int main(int argc, char* argv[]) {
 #endif
     }
 
-    // ServiceMain detection — SCM 启动时 argv 含 --service-main 标记;转入
-    // StartServiceCtrlDispatcher 阻塞等 SCM 调度。Windows-only;非 Windows 给清晰错误。
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--service-main") {
 #ifdef _WIN32
@@ -763,11 +781,6 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    std::string argv0_dir = get_executable_dir_from_argv(argc, argv);
-
-    // 5.7: 双击启动检测(Windows)。无参数 + 控制台只挂着自己一个进程
-    // (GetConsoleProcessList 返回 1)= 双击;此时按 daemon.auto_start_on_double_click
-    // 决定走 TUI 还是 daemon detach。
 #ifdef _WIN32
     if (argc == 1) {
         AppConfig cfg_probe = load_config();
@@ -776,86 +789,91 @@ int main(int argc, char* argv[]) {
             DWORD n = ::GetConsoleProcessList(procs, 2);
             if (n == 1) {
                 std::vector<std::string> tokens = {"start"};
-                std::string exe_path = argv[0] ? std::string(argv[0]) : "";
                 return acecode::daemon::cli::run(tokens, exe_path);
             }
         }
     }
 #endif
 
-    // ---- Parse CLI arguments ----
-    bool dangerous_mode = false;
-    bool run_configure_cmd = false;
-    bool validate_models_registry_cmd = false;
-    bool resume_latest = false;
-    bool force_alt_screen = false;  // --alt-screen / -alt-screen 强制 fallback
-    std::string resume_session_id;
+    return std::nullopt;
+}
+
+static CliOptions parse_cli_options(int argc, char* argv[]) {
+    CliOptions cli;
     for (int i = 1; i < argc; ++i) {
         std::string arg(argv[i]);
         if (arg == "-dangerous" || arg == "--dangerous") {
-            dangerous_mode = true;
+            cli.dangerous_mode = true;
         } else if (arg == "configure") {
-            run_configure_cmd = true;
+            cli.run_configure_cmd = true;
         } else if (arg == "--validate-models-registry") {
-            validate_models_registry_cmd = true;
+            cli.validate_models_registry_cmd = true;
         } else if (arg == "-alt-screen" || arg == "--alt-screen") {
-            force_alt_screen = true;
+            cli.force_alt_screen = true;
         } else if (arg == "--resume") {
             if (i + 1 < argc && argv[i + 1][0] != '-') {
-                resume_session_id = argv[++i];
+                cli.resume_session_id = argv[++i];
             } else {
-                resume_latest = true;
+                cli.resume_latest = true;
             }
         }
     }
+    return cli;
+}
 
-    // ---- Handle configure subcommand (before TUI setup) ----
-    if (run_configure_cmd) {
+static int validate_models_registry_command(const std::string& argv0_dir) {
+    AppConfig config = load_config();
+    seed_default_skills_if_first_initialization(argv0_dir);
+    initialize_registry(config, argv0_dir);
+    const auto& src = current_registry_source();
+    auto registry = current_registry();
+    if (!registry || registry->empty()) {
+        std::cerr << "models.dev registry not found or empty\n";
+        return 1;
+    }
+    size_t actual_models = 0;
+    for (auto it = registry->begin(); it != registry->end(); ++it) {
+        if (!it->is_object()) continue;
+        auto m = it->find("models");
+        if (m == it->end()) continue;
+        if (m->is_object()) actual_models += m->size();
+        else if (m->is_array()) actual_models += m->size();
+    }
+    std::cout << "models.dev registry OK: " << registry->size() << " providers, "
+              << actual_models << " models, source=" << src.path_or_url << "\n";
+    if (src.manifest && src.manifest->is_object()) {
+        const auto& m = *src.manifest;
+        if (m.contains("model_count") && m["model_count"].is_number_integer()) {
+            size_t expected = static_cast<size_t>(m["model_count"].get<int>());
+            if (expected != actual_models) {
+                std::cerr << "MANIFEST.json model_count=" << expected
+                          << " disagrees with actual " << actual_models << "\n";
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+static std::optional<int> run_pre_tui_command(const CliOptions& cli,
+                                              const std::string& argv0_dir) {
+    if (cli.run_configure_cmd) {
         AppConfig config = load_config();
         seed_default_skills_if_first_initialization(argv0_dir);
         initialize_registry(config, argv0_dir);
         return run_configure(config);
     }
 
-    // ---- Handle --validate-models-registry (CI helper) ----
-    if (validate_models_registry_cmd) {
-        AppConfig config = load_config();
-        seed_default_skills_if_first_initialization(argv0_dir);
-        initialize_registry(config, argv0_dir);
-        const auto& src = current_registry_source();
-        auto registry = current_registry();
-        if (!registry || registry->empty()) {
-            std::cerr << "models.dev registry not found or empty\n";
-            return 1;
-        }
-        size_t actual_models = 0;
-        for (auto it = registry->begin(); it != registry->end(); ++it) {
-            if (!it->is_object()) continue;
-            auto m = it->find("models");
-            if (m == it->end()) continue;
-            if (m->is_object()) actual_models += m->size();
-            else if (m->is_array()) actual_models += m->size();
-        }
-        std::cout << "models.dev registry OK: " << registry->size() << " providers, "
-                  << actual_models << " models, source=" << src.path_or_url << "\n";
-        if (src.manifest && src.manifest->is_object()) {
-            const auto& m = *src.manifest;
-            if (m.contains("model_count") && m["model_count"].is_number_integer()) {
-                size_t expected = static_cast<size_t>(m["model_count"].get<int>());
-                if (expected != actual_models) {
-                    std::cerr << "MANIFEST.json model_count=" << expected
-                              << " disagrees with actual " << actual_models << "\n";
-                    return 1;
-                }
-            }
-        }
-        return 0;
+    if (cli.validate_models_registry_cmd) {
+        return validate_models_registry_command(argv0_dir);
     }
 
-    // ---- Ensure cursor is restored on exit ----
+    return std::nullopt;
+}
+
+static bool ensure_interactive_terminal() {
     std::atexit(reset_cursor);
 
-    // ---- Check stdin/stdout are TTYs (interactive terminal) ----
 #ifdef _WIN32
     bool stdin_is_tty = _isatty(_fileno(stdin));
     bool stdout_is_tty = _isatty(_fileno(stdout));
@@ -866,58 +884,387 @@ int main(int argc, char* argv[]) {
     if (!stdin_is_tty || !stdout_is_tty) {
         std::cerr << "Error: acecode requires an interactive terminal (stdin and stdout must be a TTY).\n"
                   << "If piping input/output, please run acecode directly in a terminal instead.\n";
-        return 1;
+        return false;
     }
+    return true;
+}
 
-    // ---- Set terminal title ----
+static void set_startup_terminal_title() {
 #ifdef _WIN32
     SetConsoleTitleA("acecode v" ACECODE_VERSION);
 #else
     // xterm-compatible title escape sequence
     std::cout << "\033]0;acecode v" ACECODE_VERSION "\007" << std::flush;
 #endif
+}
 
-    // ---- Record working directory ----
-    std::string working_dir = get_cwd();
-
-    // ---- Init logger ----
+static void initialize_logger_for_working_dir(const std::string& working_dir) {
     Logger::instance().init(working_dir + "/acecode.log");
     Logger::instance().set_level(LogLevel::Dbg);
     LOG_INFO("=== acecode started, cwd=" + working_dir + " ===");
+}
 
-    // ---- Load config ----
-    AppConfig config = load_config();
-    seed_default_skills_if_first_initialization(argv0_dir);
-
-    // ---- Init proxy resolver ----
+static void initialize_proxy_runtime(const AppConfig& config) {
     // 必须在任何 cpr 调用之前完成(下面 initialize_registry 可能触发 models.dev
     // 拉取)。失败也不应阻塞启动 —— ProxyResolver 内部所有探测都是 soft-fail。
     network::proxy_resolver().init(config.network);
-    {
-        auto resolved = network::proxy_resolver().effective("https://example.com");
-        std::string url_disp = resolved.url.empty()
-                                  ? std::string("direct")
-                                  : network::redact_credentials(resolved.url);
-        std::string banner = "Proxy: " + url_disp + " (" + resolved.source + ")";
-        if (config.network.proxy_insecure_skip_verify) {
-            // ANSI red bold — TUI 还没起来,直接打 stderr 让用户立刻看见。
-            banner += "  \x1b[1;31m[INSECURE: TLS verification disabled]\x1b[0m";
-            LOG_WARN("[proxy] insecure_skip_verify is enabled — TLS chain validation off");
-        }
-        std::cerr << banner << std::endl;
-        LOG_INFO(std::string("[proxy] effective=") +
-                 (resolved.url.empty() ? "direct" : network::redact_credentials(resolved.url)) +
-                 " source=" + resolved.source +
-                 " mode=" + config.network.proxy_mode);
+    auto resolved = network::proxy_resolver().effective("https://example.com");
+    std::string url_disp = resolved.url.empty()
+                              ? std::string("direct")
+                              : network::redact_credentials(resolved.url);
+    std::string banner = "Proxy: " + url_disp + " (" + resolved.source + ")";
+    if (config.network.proxy_insecure_skip_verify) {
+        // ANSI red bold — TUI 还没起来,直接打 stderr 让用户立刻看见。
+        banner += "  \x1b[1;31m[INSECURE: TLS verification disabled]\x1b[0m";
+        LOG_WARN("[proxy] insecure_skip_verify is enabled — TLS chain validation off");
     }
+    std::cerr << banner << std::endl;
+    LOG_INFO(std::string("[proxy] effective=") +
+             (resolved.url.empty() ? "direct" : network::redact_credentials(resolved.url)) +
+             " source=" + resolved.source +
+             " mode=" + config.network.proxy_mode);
+}
 
-    // ---- Load bundled models.dev registry (offline-first) ----
+static void initialize_models_registry_runtime(const AppConfig& config,
+                                               const std::string& argv0_dir) {
     initialize_registry(config, argv0_dir);
     if (config.models_dev.allow_network && !config.models_dev.refresh_on_command_only) {
         std::thread([] {
             refresh_registry_from_network();
         }).detach();
     }
+}
+
+static void initialize_web_search_runtime(const AppConfig& config) {
+    // Backend router + region detector 单例,异步探测一次后写缓存。失败 / 已有
+    // 缓存都不阻塞启动。enabled=false 时仍 init,但下面 register 阶段不挂工具。
+    web_search::init(config.web_search);
+    web_search::register_default_backends(web_search::runtime().router(),
+                                           config.web_search);
+
+    // 启动时先用缓存 region(若有)即时 resolve;无缓存先按 Unknown 走悲观,
+    // 再起 detached 线程做实际 HEAD 探测,完成后再 resolve 一次。
+    web_search::Region cached = web_search::runtime().detector().cached_region();
+    web_search::runtime().router().resolve_active(cached);
+    if (cached == web_search::Region::Unknown) {
+        std::thread([]{
+            auto r = web_search::runtime().detector().detect_now();
+            web_search::runtime().router().resolve_active(r);
+        }).detach();
+    }
+}
+
+static void register_builtin_tools(ToolExecutor& tools, const AppConfig& config) {
+    tools.register_tool(create_bash_tool());
+    tools.register_tool(create_file_read_tool());
+    tools.register_tool(create_file_write_tool());
+    tools.register_tool(create_file_edit_tool());
+    tools.register_tool(create_grep_tool());
+    tools.register_tool(create_glob_tool());
+    tools.register_tool(create_task_complete_tool());
+    if (config.web_search.enabled) {
+        tools.register_tool(web_search::create_web_search_tool(
+            web_search::runtime().router(), web_search::runtime().cfg()));
+    }
+}
+
+static void initialize_skill_registry(SkillRegistry& skill_registry,
+                                      const AppConfig& config,
+                                      const std::string& working_dir) {
+    // Discovery order keeps more specific roots ahead of compatibility/global
+    // roots because SkillRegistry is first-wins by skill name:
+    //   1) project walk  — <cwd...>/.acecode/skills, deepest first, up to HOME
+    //   2) project walk  — <cwd...>/.agent/skills, deepest first, up to HOME
+    //   3) user global   — ~/.acecode/skills (auto-created)
+    //   4) user global   — ~/.agent/skills (compatibility root)
+    //   5) external dirs — config.skills.external_dirs
+    std::vector<std::filesystem::path> roots;
+    std::error_code ec;
+
+    for (const auto& dir : get_project_dirs_up_to_home(working_dir)) {
+        roots.emplace_back(std::filesystem::path(dir) / ".acecode" / "skills");
+    }
+    for (const auto& dir : get_project_dirs_up_to_home(working_dir)) {
+        roots.emplace_back(std::filesystem::path(dir) / ".agent" / "skills");
+    }
+
+    std::string default_acecode_skills_dir =
+        (std::filesystem::path(get_acecode_dir()) / "skills").string();
+    if (!std::filesystem::exists(default_acecode_skills_dir, ec)) {
+        std::filesystem::create_directories(default_acecode_skills_dir, ec);
+    }
+    roots.emplace_back(default_acecode_skills_dir);
+
+    std::string default_agent_skills_dir = expand_path("~/.agent/skills");
+    roots.emplace_back(default_agent_skills_dir);
+
+    for (const auto& raw : config.skills.external_dirs) {
+        std::string expanded = expand_path(raw);
+        if (!expanded.empty()) roots.emplace_back(expanded);
+    }
+
+    skill_registry.set_scan_roots(std::move(roots));
+    skill_registry.set_disabled(std::unordered_set<std::string>(
+        config.skills.disabled.begin(), config.skills.disabled.end()));
+    skill_registry.scan();
+}
+
+static MemoryConfig initialize_memory_registry(MemoryRegistry& memory_registry,
+                                               const AppConfig& config) {
+    // Auto-create ~/.acecode/memory/ if missing; failure disables the memory
+    // system for this session without rewriting the user's config.json.
+    MemoryConfig runtime_memory_cfg = config.memory;
+    std::error_code mkec;
+    std::filesystem::create_directories(get_memory_dir(), mkec);
+    if (mkec) {
+        LOG_ERROR("[memory] failed to create " + get_memory_dir().generic_string() +
+                  ": " + mkec.message() + " — memory will be disabled this session");
+        runtime_memory_cfg.enabled = false;
+    } else if (runtime_memory_cfg.enabled) {
+        memory_registry.scan();
+    }
+    return runtime_memory_cfg;
+}
+
+static void initialize_mcp_servers(McpManager& mcp_manager,
+                                   ToolExecutor& tools,
+                                   const AppConfig& config) {
+    const size_t configured = config.mcp_servers.size();
+    if (configured == 0) {
+        return;
+    }
+
+    mcp_manager.connect_all(config);
+    mcp_manager.register_tools(tools);
+    const size_t connected = mcp_manager.connected_server_count();
+    const size_t tool_count = mcp_manager.discovered_tool_count();
+    LOG_INFO("[mcp] Connected " + std::to_string(connected) + "/" +
+             std::to_string(configured) + " servers, registered " +
+             std::to_string(tool_count) + " tools");
+}
+
+static void restore_input_history(TuiState& state,
+                                  const AppConfig& config,
+                                  const std::string& working_dir) {
+    // Restore per-working-directory input history. Independent of session files so
+    // /clear, resume, or deleting a session never blows away the Up/Down queue.
+    // 关闭开关时退化为纯内存历史（旧行为）。
+    if (!config.input_history.enabled) {
+        return;
+    }
+
+    std::string ih_path = InputHistoryStore::file_path(
+        SessionStorage::get_project_dir(working_dir));
+    state.input_history = InputHistoryStore::load(ih_path);
+    // 若历史文件条数超过当前上限（用户把 max_entries 调小），保留最近 N 条。
+    int cap = config.input_history.max_entries;
+    if (cap > 0 && static_cast<int>(state.input_history.size()) > cap) {
+        state.input_history.erase(
+            state.input_history.begin(),
+            state.input_history.begin() +
+                (state.input_history.size() - static_cast<size_t>(cap)));
+    }
+}
+
+static void add_startup_messages(TuiState& state,
+                                 bool dangerous_mode,
+                                 const McpManager& mcp_manager) {
+    // If dangerous mode, show startup warning. Note: -dangerous skips permission
+    // confirmations but does NOT suppress AskUserQuestion overlays (those are a
+    // legitimate LLM-driven request for input).
+    if (dangerous_mode) {
+        state.conversation.push_back({"system",
+            "[DANGEROUS MODE] All permission checks are bypassed. Use with caution! "
+            "(AskUserQuestion overlays are still shown when the model needs input.)",
+            false});
+    }
+
+    if (mcp_manager.connected_server_count() > 0) {
+        state.conversation.push_back({"system",
+            "[MCP] Connected " + std::to_string(mcp_manager.connected_server_count()) +
+            " server(s), registered " + std::to_string(mcp_manager.discovered_tool_count()) +
+            " external tool(s).", false});
+    }
+}
+
+static void maybe_add_legacy_terminal_hint(
+    TuiState& state,
+    const AppConfig& config,
+    const acecode::TerminalCapabilities& term_caps,
+    acecode::tui::ScreenRenderMode render_mode,
+    bool force_alt_screen) {
+    // 一次性提示:仅在自动探测命中并切换到 alt-screen 时显示一次。
+    // CLI 强制 / config "always" / config "never" / 现代终端都不触发。
+    bool show_legacy_hint =
+        render_mode == acecode::tui::ScreenRenderMode::AltScreen &&
+        !force_alt_screen &&
+        config.tui.alt_screen_mode == "auto" &&
+        !term_caps.source_label.empty() &&
+        !acecode::read_state_flag("legacy_terminal_hint_shown");
+    if (show_legacy_hint) {
+        std::string hint = "提示: 检测到 " + term_caps.source_label +
+            ",已启用全屏渲染避免画面跳动。可在 ~/.acecode/config.json 设置 "
+            "\"tui\": {\"alt_screen_mode\": \"never\"} 关闭。";
+        state.conversation.push_back({"system", hint, false});
+        acecode::write_state_flag("legacy_terminal_hint_shown", true);
+    }
+}
+
+static void configure_permissions(PermissionManager& permissions,
+                                  bool dangerous_mode) {
+    if (dangerous_mode) {
+        permissions.set_dangerous(true);
+        permissions.set_mode(PermissionMode::Yolo);
+    }
+
+    // Register built-in safety rules (deny writes to sensitive files/dirs)
+    permissions.add_rule({"file_write", "*.env", "", RuleAction::Deny, 100});
+    permissions.add_rule({"file_edit", "*.env", "", RuleAction::Deny, 100});
+    permissions.add_rule({"file_write", ".git/**", "", RuleAction::Deny, 100});
+    permissions.add_rule({"file_edit", ".git/**", "", RuleAction::Deny, 100});
+    permissions.add_rule({"bash", "", "rm -rf /", RuleAction::Deny, 100});
+}
+
+static void register_slash_commands(CommandRegistry& cmd_registry,
+                                    SkillRegistry& skill_registry) {
+    register_builtin_commands(cmd_registry);
+    auto keys = register_skill_commands_tracked(cmd_registry, skill_registry);
+    if (!keys.empty()) {
+        LOG_INFO("[skills] Registered " + std::to_string(keys.size()) +
+                 " skill slash command(s)");
+    }
+}
+
+static void run_tui_loop(ftxui::ScreenInteractive& screen,
+                         const ftxui::Component& renderer) {
+#ifdef _WIN32
+    // FTXUI applies its console mode inside Loop()/PreMain, so queue this
+    // adjustment as the first loop task. From then on Ctrl+C arrives as
+    // Event::CtrlC instead of being consumed by the Windows console layer.
+    screen.Post(prepare_windows_ctrl_c_handling_after_ftxui_install);
+#endif
+    // Enable bracketed paste so the terminal frames pasted text with
+    // ESC[200~ … ESC[201~. FTXUI exposes those markers as Event::Special, and
+    // the paste accumulator in the CatchEvent body intercepts them before
+    // normal Return / character handlers run — preventing pasted newlines
+    // from accidentally submitting partial prompts.
+    std::cout << acecode::tui::kBracketedPasteEnableSeq << std::flush;
+    screen.Loop(renderer);
+    std::cout << acecode::tui::kBracketedPasteDisableSeq << std::flush;
+}
+
+static void shutdown_after_tui_loop(TuiState& state,
+                                    AgentLoop& agent_loop,
+                                    McpManager& mcp_manager,
+                                    std::atomic<bool>& running,
+                                    std::atomic<bool>& agent_aborting,
+                                    std::thread& anim_thread,
+                                    std::thread& auth_thread,
+                                    SessionManager& session_manager,
+                                    const AppConfig& config) {
+    g_active_screen.store(nullptr, std::memory_order_release);
+#ifdef _WIN32
+    SetConsoleCtrlHandler(console_ctrl_handler, FALSE);
+#endif
+
+    running = false;
+
+    // Graceful shutdown: abort agent, unblock confirm_cv / ask_cv, then join worker
+    agent_aborting = true;
+    agent_loop.abort();
+    {
+        std::lock_guard<std::mutex> lk(state.mu);
+        if (state.confirm_pending) {
+            state.confirm_pending = false;
+            state.confirm_result = PermissionResult::Deny;
+            state.confirm_cv.notify_one();
+        }
+        if (state.ask_pending) {
+            // AskUserQuestion 工具线程也在 wait,通知它醒来走拒绝分支。
+            // agent_loop.abort() 已经置 abort_flag,工具的 wait 谓词因此成立。
+            state.ask_pending = false;
+            state.ask_result_ok = false;
+            state.ask_cv.notify_one();
+        }
+    }
+    agent_loop.shutdown();
+
+    // Tear down MCP child processes after the agent worker has stopped, so no
+    // in-flight tool calls can race with the clients being destroyed.
+    mcp_manager.shutdown();
+
+    // Abort and join any in-progress compact thread
+    state.compact_abort_requested.store(true);
+    if (state.compact_thread.joinable()) {
+        state.compact_thread.join();
+    }
+
+    if (anim_thread.joinable()) {
+        anim_thread.join();
+    }
+
+    if (auth_thread.joinable()) {
+        auth_thread.join();
+    }
+
+    // Finalize session before exit
+    session_manager.finalize();
+    session_manager.cleanup_old_sessions(config.max_sessions);
+
+    // Print session ID so user knows how to resume
+    auto exit_sid = session_manager.current_session_id();
+    g_session_manager = nullptr;
+    if (!exit_sid.empty()) {
+        std::cerr << "\nacecode: session " << exit_sid
+                  << " saved. Resume with: acecode --resume " << exit_sid << std::endl;
+    }
+}
+
+int main(int argc, char* argv[]) {
+    configure_process_environment();
+
+    if (auto exit_code = dispatch_non_tui_command(argc, argv)) {
+        return *exit_code;
+    }
+
+    std::string argv0_dir = get_executable_dir_from_argv(argc, argv);
+    CliOptions cli = parse_cli_options(argc, argv);
+
+    if (auto exit_code = run_pre_tui_command(cli, argv0_dir)) {
+        return *exit_code;
+    }
+
+    return run_interactive_app(cli, argv0_dir);
+}
+
+static int run_interactive_app(const CliOptions& cli,
+                               const std::string& argv0_dir) {
+    const bool dangerous_mode = cli.dangerous_mode;
+    const bool resume_latest = cli.resume_latest;
+    const bool force_alt_screen = cli.force_alt_screen;
+    const std::string resume_session_id = cli.resume_session_id;
+
+    if (!ensure_interactive_terminal()) {
+        return 1;
+    }
+
+    set_startup_terminal_title();
+
+    // ---- Record working directory ----
+    std::string working_dir = get_cwd();
+
+    // ---- Init logger ----
+    initialize_logger_for_working_dir(working_dir);
+
+    // ---- Load config ----
+    AppConfig config = load_config();
+    seed_default_skills_if_first_initialization(argv0_dir);
+
+    // ---- Init proxy resolver ----
+    initialize_proxy_runtime(config);
+
+    // ---- Load bundled models.dev registry (offline-first) ----
+    initialize_models_registry_runtime(config, argv0_dir);
 
     // ---- Resolve effective model + create provider ----
     // 三级回退:default → cwd override → session meta(resume 路径在后面单独应用)。
@@ -938,157 +1285,41 @@ int main(int argc, char* argv[]) {
     );
 
     // ---- Init web search runtime ----
-    // Backend router + region detector 单例,异步探测一次后写缓存。失败 / 已有
-    // 缓存都不阻塞启动。enabled=false 时仍 init,但下面 register 阶段不挂工具。
-    web_search::init(config.web_search);
-    web_search::register_default_backends(web_search::runtime().router(),
-                                           config.web_search);
-    {
-        // 启动时先用缓存 region(若有)即时 resolve;无缓存先按 Unknown 走悲观,
-        // 再起 detached 线程做实际 HEAD 探测,完成后再 resolve 一次。
-        web_search::Region cached = web_search::runtime().detector().cached_region();
-        web_search::runtime().router().resolve_active(cached);
-        if (cached == web_search::Region::Unknown) {
-            std::thread([]{
-                auto r = web_search::runtime().detector().detect_now();
-                web_search::runtime().router().resolve_active(r);
-            }).detach();
-        }
-    }
+    initialize_web_search_runtime(config);
 
     // ---- Setup tools ----
     ToolExecutor tools;
-    tools.register_tool(create_bash_tool());
-    tools.register_tool(create_file_read_tool());
-    tools.register_tool(create_file_write_tool());
-    tools.register_tool(create_file_edit_tool());
-    tools.register_tool(create_grep_tool());
-    tools.register_tool(create_glob_tool());
-    tools.register_tool(create_task_complete_tool());
-    if (config.web_search.enabled) {
-        tools.register_tool(web_search::create_web_search_tool(
-            web_search::runtime().router(), web_search::runtime().cfg()));
-    }
+    register_builtin_tools(tools, config);
 
     // ---- Skill registry ----
-    // Discovery order keeps more specific roots ahead of compatibility/global
-    // roots because SkillRegistry is first-wins by skill name:
-    //   1) project walk  — <cwd...>/.acecode/skills, deepest first, up to (not including) HOME
-    //   2) project walk  — <cwd...>/.agent/skills, deepest first, up to (not including) HOME
-    //   3) user global   — ~/.acecode/skills (auto-created)
-    //   4) user global   — ~/.agent/skills (compatibility root; left as-is if missing)
-    //   5) external dirs — config.skills.external_dirs (absolute or ~-expanded)
     SkillRegistry skill_registry;
-    {
-        std::vector<std::filesystem::path> roots;
-        std::error_code ec;
-
-        for (const auto& dir : get_project_dirs_up_to_home(get_cwd())) {
-            roots.emplace_back(std::filesystem::path(dir) / ".acecode" / "skills");
-        }
-        for (const auto& dir : get_project_dirs_up_to_home(get_cwd())) {
-            roots.emplace_back(std::filesystem::path(dir) / ".agent" / "skills");
-        }
-
-        std::string default_acecode_skills_dir =
-            (std::filesystem::path(get_acecode_dir()) / "skills").string();
-        if (!std::filesystem::exists(default_acecode_skills_dir, ec)) {
-            std::filesystem::create_directories(default_acecode_skills_dir, ec);
-        }
-        roots.emplace_back(default_acecode_skills_dir);
-
-        std::string default_agent_skills_dir = expand_path("~/.agent/skills");
-        roots.emplace_back(default_agent_skills_dir);
-
-        for (const auto& raw : config.skills.external_dirs) {
-            std::string expanded = expand_path(raw);
-            if (!expanded.empty()) roots.emplace_back(expanded);
-        }
-
-        skill_registry.set_scan_roots(std::move(roots));
-        skill_registry.set_disabled(std::unordered_set<std::string>(
-            config.skills.disabled.begin(), config.skills.disabled.end()));
-        skill_registry.scan();
-    }
+    initialize_skill_registry(skill_registry, config, working_dir);
     tools.register_tool(create_skills_list_tool(skill_registry));
     tools.register_tool(create_skill_view_tool(skill_registry));
 
     // ---- Memory registry ----
-    // Auto-create ~/.acecode/memory/ if missing; failure disables the memory
-    // system for this session without rewriting the user's config.json.
     MemoryRegistry memory_registry;
-    MemoryConfig runtime_memory_cfg = config.memory;
-    {
-        std::error_code mkec;
-        std::filesystem::create_directories(get_memory_dir(), mkec);
-        if (mkec) {
-            LOG_ERROR("[memory] failed to create " + get_memory_dir().generic_string() +
-                      ": " + mkec.message() + " — memory will be disabled this session");
-            runtime_memory_cfg.enabled = false;
-        } else if (runtime_memory_cfg.enabled) {
-            memory_registry.scan();
-        }
-    }
+    MemoryConfig runtime_memory_cfg = initialize_memory_registry(memory_registry, config);
     tools.register_tool(create_memory_read_tool(memory_registry,
                                                 runtime_memory_cfg.max_index_bytes));
     tools.register_tool(create_memory_write_tool(memory_registry));
 
     // ---- MCP servers ----
     McpManager mcp_manager;
-    {
-        const size_t configured = config.mcp_servers.size();
-        if (configured > 0) {
-            mcp_manager.connect_all(config);
-            mcp_manager.register_tools(tools);
-            const size_t connected = mcp_manager.connected_server_count();
-            const size_t tool_count = mcp_manager.discovered_tool_count();
-            LOG_INFO("[mcp] Connected " + std::to_string(connected) + "/" +
-                     std::to_string(configured) + " servers, registered " +
-                     std::to_string(tool_count) + " tools");
-        }
-    }
+    initialize_mcp_servers(mcp_manager, tools, config);
 
     // ---- TUI state ----
     TuiState state;
     state.status_line = "[" + provider->name() + "] model: " +
         (config.provider == "copilot" ? config.copilot.model : config.openai.model);
 
-    // Restore per-working-directory input history. Independent of session files so
-    // /clear, resume, or deleting a session never blows away the ↑/↓ queue.
-    // 关闭开关时退化为纯内存历史（旧行为）。
-    if (config.input_history.enabled) {
-        std::string ih_path = InputHistoryStore::file_path(
-            SessionStorage::get_project_dir(working_dir));
-        state.input_history = InputHistoryStore::load(ih_path);
-        // 若历史文件条数超过当前上限（用户把 max_entries 调小），保留最近 N 条。
-        int cap = config.input_history.max_entries;
-        if (cap > 0 && (int)state.input_history.size() > cap) {
-            state.input_history.erase(
-                state.input_history.begin(),
-                state.input_history.begin() + (state.input_history.size() - (size_t)cap));
-        }
-    }
+    restore_input_history(state, config, working_dir);
 
     // Version and working directory strings for TUI header
     std::string version_str = "acecode v" ACECODE_VERSION;
     std::string cwd_display = working_dir;
 
-    // If dangerous mode, show startup warning. Note: -dangerous skips permission
-    // confirmations but does NOT suppress AskUserQuestion overlays (those are a
-    // legitimate LLM-driven request for input).
-    if (dangerous_mode) {
-        state.conversation.push_back({"system",
-            "[DANGEROUS MODE] All permission checks are bypassed. Use with caution! "
-            "(AskUserQuestion overlays are still shown when the model needs input.)",
-            false});
-    }
-
-    if (mcp_manager.connected_server_count() > 0) {
-        state.conversation.push_back({"system",
-            "[MCP] Connected " + std::to_string(mcp_manager.connected_server_count()) +
-            " server(s), registered " + std::to_string(mcp_manager.discovered_tool_count()) +
-            " external tool(s).", false});
-    }
+    add_startup_messages(state, dangerous_mode, mcp_manager);
 
     // Animation tick for Thinking... indicator
     std::atomic<int> anim_tick{0};
@@ -1117,21 +1348,8 @@ int main(int argc, char* argv[]) {
     }
     auto render_mode = acecode::tui::decide_render_mode(config.tui, term_caps);
 
-    // 一次性提示:仅在自动探测命中并切换到 alt-screen 时显示一次。
-    // CLI 强制 / config "always" / config "never" / 现代终端都不触发。
-    bool show_legacy_hint =
-        render_mode == acecode::tui::ScreenRenderMode::AltScreen &&
-        !force_alt_screen &&
-        config.tui.alt_screen_mode == "auto" &&
-        !term_caps.source_label.empty() &&
-        !acecode::read_state_flag("legacy_terminal_hint_shown");
-    if (show_legacy_hint) {
-        std::string hint = "提示: 检测到 " + term_caps.source_label +
-            ",已启用全屏渲染避免画面跳动。可在 ~/.acecode/config.json 设置 "
-            "\"tui\": {\"alt_screen_mode\": \"never\"} 关闭。";
-        state.conversation.push_back({"system", hint, false});
-        acecode::write_state_flag("legacy_terminal_hint_shown", true);
-    }
+    maybe_add_legacy_terminal_hint(state, config, term_caps, render_mode,
+                                   force_alt_screen);
 
     auto screen = acecode::tui::make_screen_interactive(render_mode);
     // Publish for the Windows console-ctrl handler so Ctrl+C can trigger a
@@ -1396,17 +1614,7 @@ int main(int argc, char* argv[]) {
     };
 
     PermissionManager permissions;
-    if (dangerous_mode) {
-        permissions.set_dangerous(true);
-        permissions.set_mode(PermissionMode::Yolo);
-    }
-
-    // Register built-in safety rules (deny writes to sensitive files/dirs)
-    permissions.add_rule({"file_write", "*.env", "", RuleAction::Deny, 100});
-    permissions.add_rule({"file_edit", "*.env", "", RuleAction::Deny, 100});
-    permissions.add_rule({"file_write", ".git/**", "", RuleAction::Deny, 100});
-    permissions.add_rule({"file_edit", ".git/**", "", RuleAction::Deny, 100});
-    permissions.add_rule({"bash", "", "rm -rf /", RuleAction::Deny, 100});
+    configure_permissions(permissions, dangerous_mode);
 
     AgentLoop agent_loop(provider_accessor, tools, callbacks, working_dir, permissions);
     agent_loop.set_context_window(config.context_window);
@@ -1563,14 +1771,7 @@ int main(int argc, char* argv[]) {
 
     // Slash command registry
     CommandRegistry cmd_registry;
-    register_builtin_commands(cmd_registry);
-    {
-        auto keys = register_skill_commands_tracked(cmd_registry, skill_registry);
-        if (!keys.empty()) {
-            LOG_INFO("[skills] Registered " + std::to_string(keys.size()) +
-                     " skill slash command(s)");
-        }
-    }
+    register_slash_commands(cmd_registry, skill_registry);
 
     // --- Tool progress callbacks (streaming-tool-progress change) ---
     callbacks.on_tool_progress_start = [&state, &screen](
@@ -3815,83 +4016,10 @@ int main(int argc, char* argv[]) {
         }) | borderRounded | color(outer_border_color);
     });
 
-#ifdef _WIN32
-    // FTXUI applies its console mode inside Loop()/PreMain, so queue this
-    // adjustment as the first loop task. From then on Ctrl+C arrives as
-    // Event::CtrlC instead of being consumed by the Windows console layer.
-    screen.Post(prepare_windows_ctrl_c_handling_after_ftxui_install);
-#endif
-    // Enable bracketed paste so the terminal frames pasted text with
-    // ESC[200~ … ESC[201~. FTXUI exposes those markers as Event::Special, and
-    // the paste accumulator in the CatchEvent body intercepts them before
-    // normal Return / character handlers run — preventing pasted newlines
-    // from accidentally submitting partial prompts. The escape sequence is
-    // a private mode setting; it's harmless on terminals that don't support
-    // it (they ignore unknown DECSET codes).
-    std::cout << acecode::tui::kBracketedPasteEnableSeq << std::flush;
-    screen.Loop(renderer);
-    // Restore the terminal so subsequent shell prompts on the same session
-    // don't see ESC[200~/201~ wrappers around future pastes.
-    std::cout << acecode::tui::kBracketedPasteDisableSeq << std::flush;
-
-    // Stop the ctrl handler from poking at `screen` once Loop returns; the
-    // ScreenInteractive will be destroyed at end of scope.
-    g_active_screen.store(nullptr, std::memory_order_release);
-#ifdef _WIN32
-    SetConsoleCtrlHandler(console_ctrl_handler, FALSE);
-#endif
-
-    running = false;
-
-    // Graceful shutdown: abort agent, unblock confirm_cv / ask_cv, then join worker
-    agent_aborting = true;
-    agent_loop.abort();
-    {
-        std::lock_guard<std::mutex> lk(state.mu);
-        if (state.confirm_pending) {
-            state.confirm_pending = false;
-            state.confirm_result = PermissionResult::Deny;
-            state.confirm_cv.notify_one();
-        }
-        if (state.ask_pending) {
-            // AskUserQuestion 工具线程也在 wait,通知它醒来走拒绝分支。
-            // agent_loop.abort() 已经置 abort_flag,工具的 wait 谓词因此成立。
-            state.ask_pending = false;
-            state.ask_result_ok = false;
-            state.ask_cv.notify_one();
-        }
-    }
-    agent_loop.shutdown();
-
-    // Tear down MCP child processes after the agent worker has stopped, so no
-    // in-flight tool calls can race with the clients being destroyed.
-    mcp_manager.shutdown();
-
-    // Abort and join any in-progress compact thread
-    state.compact_abort_requested.store(true);
-    if (state.compact_thread.joinable()) {
-        state.compact_thread.join();
-    }
-
-    if (anim_thread.joinable()) {
-        anim_thread.join();
-    }
-
-    if (auth_thread.joinable()) {
-        auth_thread.join();
-    }
-
-    // Finalize session before exit
-    session_manager.finalize();
-    session_manager.cleanup_old_sessions(config.max_sessions);
-
-    // Print session ID so user knows how to resume
-    auto exit_sid = session_manager.current_session_id();
-    g_session_manager = nullptr;
-    if (!exit_sid.empty()) {
-        std::cerr << "\nacecode: session " << exit_sid
-                  << " saved. Resume with: acecode --resume " << exit_sid << std::endl;
-    }
+    run_tui_loop(screen, renderer);
+    shutdown_after_tui_loop(state, agent_loop, mcp_manager, running,
+                            agent_aborting, anim_thread, auth_thread,
+                            session_manager, config);
 
     return 0;
 }

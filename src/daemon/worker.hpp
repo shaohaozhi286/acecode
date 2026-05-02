@@ -24,6 +24,10 @@ struct WorkerOptions {
     std::string guid;               // supervised 时必填,standalone 时留空(自动生成)
     bool        foreground = false; // 仅影响日志(stderr 同时输出)。spec 12.3
     bool        dangerous  = false; // 透传 -dangerous,worker 启动期校验
+    int         port_override = 0;  // > 0 时覆盖 cfg.web.port(desktop 父进程预选空闲端口后传入)
+    std::string token_override;     // 非空时覆盖自动生成 token(desktop 预生成,前端无需 poll token 文件)
+    std::string static_dir_override; // 非空时覆盖 cfg.web.static_dir(desktop dev 模式注入仓库 web/ 路径)
+    std::string cwd_override;       // 非空时先切到该目录,让 session/history/tools 使用指定 workspace
 };
 
 // 主入口。返回进程退出码: 0 成功正常退出,非 0 启动失败 / 异常。

@@ -2,6 +2,7 @@
 #include "session_serializer.hpp"
 #include "../config/config.hpp"
 #include "../daemon/platform.hpp"
+#include "../utils/cwd_hash.hpp"
 
 #include <nlohmann/json.hpp>
 #include <filesystem>
@@ -20,36 +21,10 @@ namespace fs = std::filesystem;
 
 namespace acecode {
 
-// Simple FNV-1a 64-bit hash (no external dependency needed)
-static uint64_t fnv1a_64(const std::string& data) {
-    uint64_t hash = 14695981039346656037ULL;
-    for (unsigned char c : data) {
-        hash ^= c;
-        hash *= 1099511628211ULL;
-    }
-    return hash;
-}
-
 std::string SessionStorage::compute_project_hash(const std::string& cwd) {
-    // Normalize: forward slashes, lowercase
-    std::string normalized = cwd;
-    for (auto& c : normalized) {
-        if (c == '\\') c = '/';
-    }
-    // Lowercase for case-insensitive filesystems (Windows)
-    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
-        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-
-    // Remove trailing slash
-    while (normalized.size() > 1 && normalized.back() == '/') {
-        normalized.pop_back();
-    }
-
-    uint64_t hash = fnv1a_64(normalized);
-
-    std::ostringstream oss;
-    oss << std::hex << std::setfill('0') << std::setw(16) << hash;
-    return oss.str();
+    // 委托到 utils/cwd_hash.cpp 的共享实现 — desktop 的 WorkspaceRegistry 与
+    // daemon 的 SessionStorage 必须用同一份算法,否则同一目录两边算出不同 hash。
+    return acecode::compute_cwd_hash(cwd);
 }
 
 std::string SessionStorage::generate_session_id() {

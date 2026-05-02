@@ -17,6 +17,10 @@ struct Args {
     bool dangerous = false;     // 透传给 worker
     bool supervised = false;    // --supervised 标记(launcher 派 worker 用)
     std::string guid;           // --guid=<G>(配合 --supervised)
+    int port_override = 0;      // --port=<N> 覆盖 cfg.web.port,0 = 不覆盖。desktop 子进程用。
+    std::string token_override; // --token=<T> 覆盖自动生成的 token。desktop 子进程用,让父进程预知 token。
+    std::string static_dir_override; // --static-dir=<path> 覆盖 cfg.web.static_dir。desktop dev 模式注入仓库 web/ 目录。
+    std::string cwd_override;   // --cwd=<path> 覆盖 daemon 工作目录,用于从任意目录调试指定 workspace。
     std::string error;          // 解析错误,非空时打印 + 非零退出
 };
 

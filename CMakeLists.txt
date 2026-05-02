@@ -35,13 +35,37 @@ configure_file(
     @ONLY
 )
 
+if(WIN32)
+    enable_language(RC)
+    set(ACECODE_ICON_PATH "${CMAKE_SOURCE_DIR}/assets/windows/acecode.ico")
+    configure_file(
+        ${CMAKE_SOURCE_DIR}/assets/windows/acecode.rc.in
+        ${CMAKE_BINARY_DIR}/generated/acecode.rc
+        @ONLY
+    )
+    set(ACECODE_WINDOWS_RESOURCES ${CMAKE_BINARY_DIR}/generated/acecode.rc)
+endif()
+
 # Embed web/ assets into acecode_testable. Generates a single .cpp with byte
 # arrays + a name → span lookup map. Re-runs on every cmake re-configure when
-# files in web/ change (CONFIGURE_DEPENDS in the cmake function).
+# files in web/dist/ change (CONFIGURE_DEPENDS in the cmake function).
+#
+# web/ is now a Vite + React + Tailwind project; the runtime assets are the
+# `web/dist/` build artifact, NOT the JSX source. If `web/dist/` is missing
+# the embed function emits an empty asset map (daemon will 404 the SPA but
+# keep the API working) — devs need to run `pnpm install && pnpm build`
+# inside web/ once before configuring cmake. CI/release flow runs the same
+# command before invoking cmake.
 include(${CMAKE_SOURCE_DIR}/cmake/acecode_embed_assets.cmake)
 acecode_compute_build_version(ACECODE_BUILD_VERSION)
+set(ACECODE_WEB_DIST "${CMAKE_SOURCE_DIR}/web/dist")
+if(NOT EXISTS "${ACECODE_WEB_DIST}")
+    message(WARNING
+        "[acecode] web/dist/ not found — front-end will not be embedded. "
+        "Run `pnpm install && pnpm build` inside web/ before re-configuring.")
+endif()
 acecode_generate_embedded_assets(
-    ${CMAKE_SOURCE_DIR}/web
+    ${ACECODE_WEB_DIST}
     ${CMAKE_BINARY_DIR}/generated/static_assets_data.cpp
     ${ACECODE_BUILD_VERSION}
 )
@@ -96,6 +120,17 @@ list(FILTER ACECODE_TESTABLE_SOURCES EXCLUDE REGEX "/src/(tui|markdown)/")
 set(ACECODE_TUI_SOURCES ${ACECODE_ALL_SOURCES})
 list(FILTER ACECODE_TUI_SOURCES INCLUDE REGEX "/src/(tui|markdown)/")
 
+# desktop 二进制专属(main.cpp / web_host.cpp 用 webview/webview)从 testable
+# 里剔除。desktop/url_builder.cpp 和 desktop/daemon_supervisor.cpp 是纯逻辑或
+# 系统调用,留在 testable 里给 acecode_unit_tests 用。
+set(ACECODE_DESKTOP_BINARY_ONLY_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/desktop/main.cpp
+    ${CMAKE_SOURCE_DIR}/src/desktop/web_host.cpp
+)
+foreach(_f IN LISTS ACECODE_DESKTOP_BINARY_ONLY_SOURCES)
+    list(REMOVE_ITEM ACECODE_TESTABLE_SOURCES ${_f})
+endforeach()
+
 # Most TUI files depend on FTXUI and stay out of acecode_testable. These helpers
 # are pure string logic used by main.cpp and unit tests, so compile them once
 # in acecode_testable and remove them from the TUI-only source group.
@@ -136,12 +171,15 @@ if(Crow_FOUND)
     target_compile_definitions(acecode_testable PUBLIC ASIO_STANDALONE)
 endif()
 if(WIN32)
-    target_link_libraries(acecode_testable PUBLIC bcrypt advapi32 winhttp)
+    # ws2_32: src/desktop/daemon_supervisor.cpp 用 winsock 探测端口连通性。
+    # ole32/shell32: src/desktop/folder_picker_win.cpp 的 COM + IFileOpenDialog。
+    target_link_libraries(acecode_testable PUBLIC bcrypt advapi32 winhttp ws2_32 ole32 shell32)
 endif()
 
 add_executable(acecode
     ${CMAKE_SOURCE_DIR}/main.cpp
     ${ACECODE_TUI_SOURCES}
+    ${ACECODE_WINDOWS_RESOURCES}
 )
 target_link_libraries(acecode PRIVATE
     acecode_testable
@@ -159,11 +197,16 @@ source_group(TREE ${CMAKE_SOURCE_DIR} FILES
 
 source_group("generated" FILES
     ${CMAKE_BINARY_DIR}/generated/version.hpp
+    ${ACECODE_WINDOWS_RESOURCES}
 )
 
 if(BUILD_TESTING)
     add_subdirectory(tests)
 endif()
+
+# desktop shell 子目标(opt-in,默认 OFF)。include 后只有当 ACECODE_BUILD_DESKTOP=ON
+# 才会真添加 acecode-desktop 这个 target,否则文件本身做无操作 return。
+include(${CMAKE_SOURCE_DIR}/cmake/acecode_desktop.cmake)
 
 # Bundled models.dev snapshot. Installed alongside the executable so
 # find_models_dev_dir() can resolve <exe_dir>/../share/acecode/models_dev.

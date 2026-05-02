@@ -28,6 +28,9 @@ void print_help(std::ostream& os) {
        << "  --foreground           run worker in current console (debug mode)\n"
        << "\n"
        << "Options (advanced):\n"
+       << "  --cwd=<PATH>           run worker as if started from PATH\n"
+       << "  --port=<N>             override web.port for this worker\n"
+       << "  --static-dir=<PATH>    serve front-end assets from PATH\n"
        << "  --supervised --guid=G  launcher-internal: launched by Service supervisor\n"
        << "  -dangerous             skip permission checks (loopback bind only)\n";
 }
@@ -61,7 +64,8 @@ void seed_default_skills_if_first_initialization(const std::string& exe_path) {
 
 Args parse(const std::vector<std::string>& tokens) {
     Args a;
-    for (const auto& t : tokens) {
+    for (std::size_t i = 0; i < tokens.size(); ++i) {
+        const auto& t = tokens[i];
         if (t == "start" || t == "stop" || t == "status") {
             if (!a.sub.empty()) {
                 a.error = "multiple subcommands specified: " + a.sub + " and " + t;
@@ -78,6 +82,47 @@ Args parse(const std::vector<std::string>& tokens) {
             a.supervised = true;
         } else if (starts_with(t, "--guid=")) {
             a.guid = t.substr(7);
+        } else if (starts_with(t, "--port=")) {
+            // desktop 父进程预选空闲端口后通过 --port=N 注入。0 视为非法(直接走配置文件)。
+            std::string v = t.substr(7);
+            try {
+                int p = std::stoi(v);
+                if (p <= 0 || p > 65535) {
+                    a.error = "--port=<N> out of range (1..65535): " + v;
+                    return a;
+                }
+                a.port_override = p;
+            } catch (...) {
+                a.error = "--port=<N> not an integer: " + v;
+                return a;
+            }
+        } else if (starts_with(t, "--token=")) {
+            // desktop 父进程预生成 token,父子两端不必跨进程读 token 文件。
+            a.token_override = t.substr(8);
+            if (a.token_override.empty()) {
+                a.error = "--token=<T> empty value";
+                return a;
+            }
+        } else if (starts_with(t, "--static-dir=")) {
+            // dev 模式: desktop 探测到仓库 web/ 后通过这个 flag 让 daemon 走
+            // FileSystemAssetSource(每次请求重读),改 web/ 文件 + F5 即生效。
+            a.static_dir_override = t.substr(13);
+            if (a.static_dir_override.empty()) {
+                a.error = "--static-dir=<path> empty value";
+                return a;
+            }
+        } else if (starts_with(t, "--cwd=")) {
+            a.cwd_override = t.substr(6);
+            if (a.cwd_override.empty()) {
+                a.error = "--cwd=<path> empty value";
+                return a;
+            }
+        } else if (t == "--cwd") {
+            if (i + 1 >= tokens.size() || tokens[i + 1].empty()) {
+                a.error = "--cwd requires a path";
+                return a;
+            }
+            a.cwd_override = tokens[++i];
         } else if (t == "-dangerous") {
             a.dangerous = true;
         } else if (t == "--help" || t == "-h") {
@@ -102,10 +147,14 @@ static int do_foreground(const Args& a, const std::string& exe_path) {
         return 5;
     }
     WorkerOptions opts;
-    opts.foreground = true;
-    opts.supervised = a.supervised;
-    opts.guid       = a.guid;
-    opts.dangerous  = a.dangerous;
+    opts.foreground          = true;
+    opts.supervised          = a.supervised;
+    opts.guid                = a.guid;
+    opts.dangerous           = a.dangerous;
+    opts.port_override       = a.port_override;
+    opts.token_override      = a.token_override;
+    opts.static_dir_override = a.static_dir_override;
+    opts.cwd_override        = a.cwd_override;
     return run_worker(opts, cfg);
 }
 
@@ -120,6 +169,18 @@ static int do_start(const Args& a, const std::string& exe_path) {
 
     // 派生自身的 detached 副本: <exe> daemon --foreground
     std::vector<std::string> argv = {exe_path, "daemon", "--foreground"};
+    if (a.port_override > 0) {
+        argv.push_back("--port=" + std::to_string(a.port_override));
+    }
+    if (!a.token_override.empty()) {
+        argv.push_back("--token=" + a.token_override);
+    }
+    if (!a.static_dir_override.empty()) {
+        argv.push_back("--static-dir=" + a.static_dir_override);
+    }
+    if (!a.cwd_override.empty()) {
+        argv.push_back("--cwd=" + a.cwd_override);
+    }
     if (a.dangerous) argv.push_back("-dangerous");
 
     auto child = spawn_detached(argv);

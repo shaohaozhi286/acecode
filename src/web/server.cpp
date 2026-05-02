@@ -203,6 +203,15 @@ struct WebServer::Impl {
             return resp;
         };
 
+        // 显式 / 路由 — 不能让 / 走 CATCHALL,因为 Crow 1.3.2 master 在 catchall
+        // 处理后会污染同 keep-alive 连接的下个请求(残留 connection 小写 header,
+        // 下一个响应回 Content-Length:0、丢 Content-Type)。复现:同 socket
+        // GET / 然后 GET /api/health → 第二个回空。绕过办法是把 / 拦在 catchall
+        // 之前,走 explicit handler,catchall 仅用作未知深路径兜底。
+        CROW_ROUTE(app, "/")
+        ([serve_path](const crow::request& req) {
+            return serve_path(req, "/");
+        });
         CROW_ROUTE(app, "/<string>")
         ([serve_path](const crow::request& req, std::string a) {
             return serve_path(req, "/" + a);
@@ -220,7 +229,7 @@ struct WebServer::Impl {
             return serve_path(req, "/" + a + "/" + b + "/" + c + "/" + d);
         });
 
-        // /、未列举层数的请求兜底
+        // 未列举层数的兜底(>4 段)。/ 由上面 explicit 路由处理。
         CROW_CATCHALL_ROUTE(app)
         ([serve_path](const crow::request& req) {
             return serve_path(req, std::string(req.url));

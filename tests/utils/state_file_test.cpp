@@ -103,3 +103,24 @@ TEST_F(StateFileTest, EmptyFileTreatedAsEmptyState) {
     acecode::write_state_flag("legacy_terminal_hint_shown", true);
     EXPECT_TRUE(acecode::read_state_flag("legacy_terminal_hint_shown"));
 }
+
+// 场景:last_active_workspace_hash 序列化往返 — desktop 多 workspace 模型靠这条
+// 跨启动持久化"上次活跃 workspace"。
+TEST_F(StateFileTest, LastActiveWorkspaceHashRoundTrip) {
+    EXPECT_EQ(acecode::read_last_active_workspace_hash(), ""); // 初始空
+    acecode::write_last_active_workspace_hash("abc1234567890def");
+    EXPECT_EQ(acecode::read_last_active_workspace_hash(), "abc1234567890def");
+    // 覆盖写
+    acecode::write_last_active_workspace_hash("ffffffffffffffff");
+    EXPECT_EQ(acecode::read_last_active_workspace_hash(), "ffffffffffffffff");
+    // 共存其他 key 不互相覆盖
+    acecode::write_state_flag("some_flag", true);
+    EXPECT_EQ(acecode::read_last_active_workspace_hash(), "ffffffffffffffff");
+    EXPECT_TRUE(acecode::read_state_flag("some_flag"));
+}
+
+// 场景:last_active_workspace_hash 字段类型不对(数字)→ read 返回空字符串而不是抛
+TEST_F(StateFileTest, LastActiveWrongTypeReadsEmpty) {
+    write_raw(path_, R"({"last_active_workspace_hash": 12345})");
+    EXPECT_EQ(acecode::read_last_active_workspace_hash(), "");
+}

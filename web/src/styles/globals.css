@@ -1,0 +1,185 @@
+/* Tailwind v4 entry — CSS-first 配置,无 tailwind.config.js
+ *
+ * 主题策略:CSS variables 驱动,light/dark 切换只换 var() 值,Tailwind 类名不变。
+ * `@theme inline` 把变量暴露给 Tailwind 的 utility 生成器,因此 `bg-bg` /
+ * `text-fg` / `border-border` / `bg-accent` 等都可用。
+ */
+
+@import "tailwindcss";
+
+/* dark 模式由 [data-theme="dark"] 触发,而非 prefers-color-scheme */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+@theme inline {
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: "SF Mono", "Cascadia Code", "Fira Code", Menlo, Consolas, monospace;
+
+  --color-bg:           var(--ace-bg);
+  --color-surface:      var(--ace-surface);
+  --color-surface-alt:  var(--ace-surface-alt);
+  --color-surface-hi:   var(--ace-surface-hi);
+  --color-border:       var(--ace-border);
+  --color-border-soft:  var(--ace-border-soft);
+  --color-fg:           var(--ace-fg);
+  --color-fg-2:         var(--ace-fg-2);
+  --color-fg-mute:      var(--ace-fg-mute);
+  --color-accent:       var(--ace-accent);
+  --color-accent-bg:    var(--ace-accent-bg);
+  --color-accent-soft:  var(--ace-accent-soft);
+  --color-ok:           var(--ace-ok);
+  --color-ok-bg:        var(--ace-ok-bg);
+  --color-ok-border:    var(--ace-ok-border);
+  --color-warn:         var(--ace-warn);
+  --color-warn-bg:      var(--ace-warn-bg);
+  --color-danger:       var(--ace-danger);
+  --color-danger-bg:    var(--ace-danger-bg);
+  --color-code-bg:      var(--ace-code-bg);
+  --color-code-fg:      var(--ace-code-fg);
+  --color-code-line:    var(--ace-code-line);
+}
+
+:root {
+  --ace-bg:           #f5f5f2;
+  --ace-surface:      #ffffff;
+  --ace-surface-alt:  #fafaf8;
+  --ace-surface-hi:   #f0efeb;
+  --ace-border:       #e2e2de;
+  --ace-border-soft:  #ebebeb;
+  --ace-fg:           #1a1a1a;
+  --ace-fg-2:         #6b6b6b;
+  --ace-fg-mute:      #999999;
+  --ace-accent:       #2563eb;
+  --ace-accent-bg:    #eff6ff;
+  --ace-accent-soft:  #dbeafe;
+  --ace-ok:           #16a34a;
+  --ace-ok-bg:        #f0fdf4;
+  --ace-ok-border:    #bbf7d0;
+  --ace-warn:         #ea580c;
+  --ace-warn-bg:      #fff7ed;
+  --ace-danger:       #dc2626;
+  --ace-danger-bg:    #fef2f2;
+  --ace-code-bg:      #1e1e2e;
+  --ace-code-fg:      #cdd6f4;
+  --ace-code-line:    #6272a4;
+  --ace-shadow:       0 1px 3px rgba(0,0,0,.06);
+  --ace-shadow-lg:    0 4px 12px rgba(0,0,0,.08);
+}
+
+[data-theme="dark"] {
+  --ace-bg:           #0f0f0f;
+  --ace-surface:      #1a1a1a;
+  --ace-surface-alt:  #222222;
+  --ace-surface-hi:   #2a2a2a;
+  --ace-border:       #333333;
+  --ace-border-soft:  #2a2a2a;
+  --ace-fg:           #e4e4e4;
+  --ace-fg-2:         #999999;
+  --ace-fg-mute:      #666666;
+  --ace-accent:       #3b82f6;
+  --ace-accent-bg:    #172554;
+  --ace-accent-soft:  #1e3a5f;
+  --ace-ok:           #22c55e;
+  --ace-ok-bg:        #052e16;
+  --ace-ok-border:    #14532d;
+  --ace-warn:         #f97316;
+  --ace-warn-bg:      #431407;
+  --ace-danger:       #ef4444;
+  --ace-danger-bg:    #450a0a;
+  --ace-code-bg:      #111111;
+  --ace-code-fg:      #cdd6f4;
+  --ace-code-line:    #555555;
+  --ace-shadow:       0 1px 3px rgba(0,0,0,.3);
+  --ace-shadow-lg:    0 4px 12px rgba(0,0,0,.4);
+
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; padding: 0; }
+
+body {
+  font-family: var(--font-sans);
+  background: var(--ace-bg);
+  color: var(--ace-fg);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* ── Custom thin scrollbar ── */
+::-webkit-scrollbar       { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(150,150,150,.3); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(150,150,150,.5); }
+
+/* 阴影 utility:Tailwind v4 的 shadow-* 需要 inline 表达式,这里用 CSS 变量更灵活 */
+.ace-shadow    { box-shadow: var(--ace-shadow); }
+.ace-shadow-lg { box-shadow: var(--ace-shadow-lg); }
+
+/* 流式光标 (assistant 消息追加 token 时显示) */
+.ace-cursor::after {
+  content: "";
+  display: inline-block;
+  width: 0.55em;
+  height: 1em;
+  vertical-align: -0.15em;
+  margin-left: 1px;
+  background: var(--ace-accent);
+  animation: ace-blink 1.05s steps(2, end) infinite;
+}
+@keyframes ace-blink { 0%, 50% { opacity: 1; } 51%, 100% { opacity: 0; } }
+
+/* Spinner & dots */
+@keyframes ace-pulse {
+  0%, 100% { opacity: 0.3; transform: scale(0.85); }
+  50%      { opacity: 1;   transform: scale(1); }
+}
+@keyframes ace-spin { to { transform: rotate(360deg); } }
+.ace-spinner {
+  display: inline-block; width: 1em; height: 1em;
+  border: 2px solid color-mix(in oklab, var(--ace-fg-mute) 40%, transparent);
+  border-top-color: var(--ace-accent);
+  border-radius: 50%;
+  animation: ace-spin .8s linear infinite;
+  vertical-align: -0.125em;
+}
+
+/* 代码块 / inline code (在 markdown 渲染里用 .ace-md class 套作用域) */
+.ace-md pre {
+  background: var(--ace-code-bg);
+  color: var(--ace-code-fg);
+  padding: 10px 12px;
+  border-radius: 6px;
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.55;
+  margin: 6px 0;
+}
+.ace-md code {
+  background: var(--ace-surface-hi);
+  color: var(--ace-fg);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+.ace-md pre code {
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  font-size: inherit;
+}
+.ace-md p  { margin: 4px 0; }
+.ace-md ul,
+.ace-md ol { margin: 4px 0; padding-left: 22px; }
+.ace-md li { margin: 2px 0; }
+.ace-md a  { color: var(--ace-accent); text-decoration: underline; text-underline-offset: 2px; }
+.ace-md strong { font-weight: 600; }
+.ace-md em     { font-style: italic; }
+.ace-md hr     { border: 0; border-top: 1px solid var(--ace-border); margin: 8px 0; }
+
+/* 主题切换全局过渡(只过渡颜色相关属性,避免影响动画) */
+:where(html, body, *) {
+  transition: background-color .25s ease, border-color .25s ease, color .2s ease;
+}
