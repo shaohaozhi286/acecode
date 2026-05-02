@@ -69,20 +69,27 @@ json chat_message_to_json(const ChatMessage& m) {
 }
 
 // SessionEvent → 上行 WS 消息(也用于 /messages 回放)。
-json session_event_to_json(const SessionEvent& evt) {
+json session_event_to_json(const SessionEvent& evt,
+                           const std::string& session_id = {}) {
     json msg;
     msg["type"]         = to_string(evt.kind);
     msg["seq"]          = evt.seq;
     msg["timestamp_ms"] = evt.timestamp_ms;
     msg["payload"]      = evt.payload;
+    if (!session_id.empty()) {
+        msg["session_id"] = session_id;
+        if (msg["payload"].is_object() && !msg["payload"].contains("session_id")) {
+            msg["payload"]["session_id"] = session_id;
+        }
+    }
     return msg;
 }
 
-// per-WS-connection 状态:订阅 id + session_id + abort 标志。Crow 的
-// connection.userdata() 存原始指针,生命周期由 ws_connections_ map 管理。
+// per-WS-connection 状态:一个 WebSocket 可同时订阅多个 session。session_id
+// 保留为 legacy primary session,兼容老的 hello/user_input/abort 消息。
 struct WsConnState {
-    std::string                       session_id;
-    SessionClient::SubscriptionId     sub_id = 0;
+    std::string session_id;
+    std::unordered_map<std::string, SessionClient::SubscriptionId> subscriptions;
 };
 
 // 把 client_ip / 401 reason 写日志(避免每个路由都重复)。
@@ -493,7 +500,7 @@ struct WebServer::Impl {
                 json o;
                 o["id"]            = s.id;
                 o["active"]        = true;
-                o["status"]        = "running";
+                o["status"]        = s.busy ? "running" : "idle";
                 o["title"]         = !s.title.empty() ? s.title : (m ? m->title : "");
                 o["summary"]       = !s.summary.empty() ? s.summary : (m ? m->summary : "");
                 o["created_at"]    = !s.created_at.empty() ? s.created_at : (m ? m->created_at : "");
@@ -653,6 +660,49 @@ struct WebServer::Impl {
             }
 
             crow::response r(arr.dump());
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        });
+
+        // POST /api/sessions/:id/messages: 向 daemon 入队用户输入。WebSocket
+        // 只负责观察事件流,这样切换会话/关闭当前连接不会中断后台 AgentLoop。
+        CROW_ROUTE(app, "/api/sessions/<string>/messages").methods(crow::HTTPMethod::POST)
+        ([this](const crow::request& req, const std::string& id) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.session_client) {
+                crow::response r(503);
+                r.body = R"({"error":"session client unavailable"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            std::string text;
+            try {
+                auto j = json::parse(req.body);
+                if (j.contains("text") && j["text"].is_string()) {
+                    text = j["text"].get<std::string>();
+                }
+            } catch (const std::exception& e) {
+                crow::response r(400);
+                r.body = json{{"error", std::string("bad json: ") + e.what()}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            if (text.empty()) {
+                crow::response r(400);
+                r.body = R"({"error":"text required"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            if (!deps.session_client->send_input(id, text)) {
+                crow::response r(404);
+                r.body = R"({"error":"unknown session"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            crow::response r(202);
+            r.body = R"({"queued":true})";
             r.add_header("Content-Type", "application/json");
             return with_cors(req, std::move(r));
         });
@@ -990,27 +1040,32 @@ struct WebServer::Impl {
             return;
         }
 
-        // hello: { type:"hello", payload:{ session_id:"...", since: 0 } }
-        // 浏览器端在 onopen 后立刻发 hello 完成 session 绑定 + 订阅事件流。
-        if (type == "hello") {
-            if (!state->session_id.empty()) {
-                conn.send_text(R"({"type":"error","payload":{"reason":"already bound"}})");
-                return;
-            }
+        // hello/subscribe: { type, payload:{ session_id:"...", since: 0 } }
+        // hello 是 legacy 单会话绑定;subscribe 可在同一 WS 上多次调用。
+        if (type == "hello" || type == "subscribe") {
             auto sid = payload.value("session_id", std::string{});
             std::uint64_t since = payload.value("since", static_cast<std::uint64_t>(0));
             if (sid.empty() || !deps.session_client) {
                 conn.send_text(R"({"type":"error","payload":{"reason":"missing session_id"}})");
                 return;
             }
+            if (state->subscriptions.find(sid) != state->subscriptions.end()) {
+                json ack;
+                ack["type"]       = type == "hello" ? "hello_ack" : "subscribe_ack";
+                ack["session_id"] = sid;
+                ack["payload"]    = json{{"session_id", sid}};
+                conn.send_text(ack.dump());
+                return;
+            }
             // 订阅事件流。回调里 send_text 把事件推到浏览器。
             // 注意: callback 跑在 AgentLoop worker 线程,conn.send_text 内部
             // 加锁,Crow 保证线程安全。conn 引用在 onclose 之前都有效。
             crow::websocket::connection* conn_ptr = &conn;
+            std::string sid_copy = sid;
             auto sub = deps.session_client->subscribe(sid,
-                [conn_ptr](const SessionEvent& evt) {
+                [conn_ptr, sid_copy](const SessionEvent& evt) {
                     try {
-                        conn_ptr->send_text(session_event_to_json(evt).dump());
+                        conn_ptr->send_text(session_event_to_json(evt, sid_copy).dump());
                     } catch (...) {
                         // 连接断 / 关 → send 抛,忽略(onclose 会清理)
                     }
@@ -1020,27 +1075,71 @@ struct WebServer::Impl {
                 conn.send_text(R"({"type":"error","payload":{"reason":"unknown session"}})");
                 return;
             }
-            state->session_id = sid;
-            state->sub_id     = sub;
+            if (state->session_id.empty()) state->session_id = sid;
+            state->subscriptions[sid] = sub;
             json ack;
-            ack["type"]    = "hello_ack";
-            ack["payload"] = json{{"session_id", sid}};
+            ack["type"]       = type == "hello" ? "hello_ack" : "subscribe_ack";
+            ack["session_id"] = sid;
+            ack["payload"]    = json{{"session_id", sid}};
+            conn.send_text(ack.dump());
+            return;
+        }
+
+        if (type == "unsubscribe") {
+            auto sid = payload.value("session_id", std::string{});
+            if (sid.empty()) {
+                conn.send_text(R"({"type":"error","payload":{"reason":"missing session_id"}})");
+                return;
+            }
+            auto it = state->subscriptions.find(sid);
+            if (it != state->subscriptions.end()) {
+                if (deps.session_client) deps.session_client->unsubscribe(sid, it->second);
+                state->subscriptions.erase(it);
+                if (state->session_id == sid) {
+                    state->session_id = state->subscriptions.empty()
+                        ? std::string{}
+                        : state->subscriptions.begin()->first;
+                }
+            }
+            json ack;
+            ack["type"]       = "unsubscribe_ack";
+            ack["session_id"] = sid;
+            ack["payload"]    = json{{"session_id", sid}};
             conn.send_text(ack.dump());
             return;
         }
 
         // 没绑 session 不允许其它操作
-        if (state->session_id.empty()) {
+        if (state->subscriptions.empty()) {
             conn.send_text(R"({"type":"error","payload":{"reason":"send hello first"}})");
             return;
         }
 
+        auto target_session_id = [&]() -> std::string {
+            auto sid = payload.value("session_id", std::string{});
+            if (!sid.empty()) return sid;
+            if (!state->session_id.empty()) return state->session_id;
+            return state->subscriptions.size() == 1 ? state->subscriptions.begin()->first : std::string{};
+        };
+
         if (type == "user_input") {
             auto text = payload.value("text", std::string{});
-            if (deps.session_client) deps.session_client->send_input(state->session_id, text);
+            auto sid = target_session_id();
+            if (sid.empty()) {
+                conn.send_text(R"({"type":"error","payload":{"reason":"missing session_id"}})");
+                return;
+            }
+            if (deps.session_client && !deps.session_client->send_input(sid, text)) {
+                conn.send_text(R"({"type":"error","payload":{"reason":"unknown session"}})");
+            }
             return;
         }
         if (type == "decision") {
+            auto sid = target_session_id();
+            if (sid.empty()) {
+                conn.send_text(R"({"type":"error","payload":{"reason":"missing session_id"}})");
+                return;
+            }
             auto rid = payload.value("request_id", std::string{});
             auto choice_str = payload.value("choice", std::string{"deny"});
             auto choice_opt = parse_permission_choice(choice_str);
@@ -1051,14 +1150,24 @@ struct WebServer::Impl {
             PermissionDecision dec;
             dec.request_id = rid;
             dec.choice     = *choice_opt;
-            if (deps.session_client) deps.session_client->respond_permission(state->session_id, dec);
+            if (deps.session_client) deps.session_client->respond_permission(sid, dec);
             return;
         }
         if (type == "abort") {
-            if (deps.session_client) deps.session_client->abort(state->session_id);
+            auto sid = target_session_id();
+            if (sid.empty()) {
+                conn.send_text(R"({"type":"error","payload":{"reason":"missing session_id"}})");
+                return;
+            }
+            if (deps.session_client) deps.session_client->abort(sid);
             return;
         }
         if (type == "question_answer") {
+            auto sid = target_session_id();
+            if (sid.empty()) {
+                conn.send_text(R"({"type":"error","payload":{"reason":"missing session_id"}})");
+                return;
+            }
             // Payload 形态参见 spec web-daemon/spec.md "AskUserQuestion 双向异步交互":
             //   { request_id, cancelled?, answers:[{question_id, selected:[...], custom_text?}] }
             auto rid = payload.value("request_id", std::string{});
@@ -1083,7 +1192,7 @@ struct WebServer::Impl {
                 }
             }
             if (deps.session_client) {
-                deps.session_client->respond_question(state->session_id, rid, resp);
+                deps.session_client->respond_question(sid, rid, resp);
             }
             return;
         }
@@ -1106,9 +1215,10 @@ struct WebServer::Impl {
                 ws_connections.erase(it);
             }
         }
-        if (state && !state->session_id.empty() && state->sub_id != 0
-            && deps.session_client) {
-            deps.session_client->unsubscribe(state->session_id, state->sub_id);
+        if (state && deps.session_client) {
+            for (const auto& [sid, sub] : state->subscriptions) {
+                deps.session_client->unsubscribe(sid, sub);
+            }
         }
         LOG_INFO("[ws] connection closed: " + reason);
     }

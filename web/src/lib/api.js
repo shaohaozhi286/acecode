@@ -67,6 +67,7 @@ export function createApi(base = null) {
     createSession:    (opts={})      => request('POST',   '/api/sessions', opts, base),
     resumeSession:    (id)           => request('POST',   `/api/sessions/${encodeURIComponent(id)}/resume`, {}, base),
     destroySession:   (id)           => request('DELETE', `/api/sessions/${encodeURIComponent(id)}`, undefined, base),
+    sendInput:        (id, text)     => request('POST',   `/api/sessions/${encodeURIComponent(id)}/messages`, {text}, base),
     getMessages:      (id, since=0)  => request('GET',    `/api/sessions/${encodeURIComponent(id)}/messages?since=${since}`, undefined, base),
     listSkills:       ()             => request('GET',    '/api/skills', undefined, base),
     setSkillEnabled:  (name, en)     => request('PUT',    `/api/skills/${encodeURIComponent(name)}`, {enabled: en}, base),

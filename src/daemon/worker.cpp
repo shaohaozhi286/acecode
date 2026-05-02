@@ -6,6 +6,7 @@
 #include "platform.hpp"
 #include "runtime_files.hpp"
 #include "../provider/cwd_model_override.hpp"
+#include "../provider/copilot_provider.hpp"
 #include "../provider/model_resolver.hpp"
 #include "../provider/provider_factory.hpp"
 #include "../session/local_session_client.hpp"
@@ -276,6 +277,11 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     auto provider = acecode::create_provider_from_entry(effective_entry);
     if (!provider) {
         LOG_ERROR("[daemon] failed to create LLM provider — daemon will start but new sessions cannot run agent loop until provider is configured");
+    } else if (effective_entry.provider == "copilot") {
+        auto copilot = std::dynamic_pointer_cast<acecode::CopilotProvider>(provider);
+        if (copilot && !copilot->try_silent_auth()) {
+            LOG_WARN("[daemon] Copilot silent auth failed; run `acecode configure` to re-authenticate before using Copilot in Web UI");
+        }
     }
     std::mutex provider_mu;
     auto provider_accessor =

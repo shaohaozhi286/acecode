@@ -203,6 +203,7 @@ std::vector<SessionInfo> SessionRegistry::list_active() const {
         SessionInfo info;
         info.id = id;
         info.active = true;
+        if (entry->loop) info.busy = entry->loop->is_busy();
         if (entry->sm) {
             // SessionManager 没有公开的 created_at / updated_at 接口,从 meta
             // 拿:这里**可选**调 load_session_meta 走磁盘读,有 IO 成本。

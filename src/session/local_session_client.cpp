@@ -39,13 +39,14 @@ void LocalSessionClient::unsubscribe(const std::string& session_id, Subscription
     entry->loop->events().unsubscribe(sub);
 }
 
-void LocalSessionClient::send_input(const std::string& session_id, const std::string& text) {
+bool LocalSessionClient::send_input(const std::string& session_id, const std::string& text) {
     SessionEntry* entry = registry_.lookup(session_id);
     if (!entry || !entry->loop) {
         LOG_WARN("[client] send_input on unknown session " + session_id);
-        return;
+        return false;
     }
     entry->loop->submit(text);
+    return true;
 }
 
 void LocalSessionClient::respond_permission(const std::string& session_id,

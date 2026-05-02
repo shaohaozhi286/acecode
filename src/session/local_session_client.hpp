@@ -26,7 +26,7 @@ public:
                               EventListener on_event,
                               std::uint64_t since_seq = 0) override;
     void unsubscribe(const std::string& session_id, SubscriptionId sub) override;
-    void send_input(const std::string& session_id, const std::string& text) override;
+    bool send_input(const std::string& session_id, const std::string& text) override;
     void respond_permission(const std::string& session_id,
                               const PermissionDecision& decision) override;
     void respond_question(const std::string& session_id,

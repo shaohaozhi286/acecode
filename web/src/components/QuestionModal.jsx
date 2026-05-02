@@ -34,7 +34,7 @@ export function QuestionModal({ request, onResolve }) {
     answers.every((a) => a.selected.length > 0 || a.custom.trim().length > 0);
 
   const cancel = (close) => {
-    connection.sendQuestionAnswer({ request_id: request.request_id, cancelled: true });
+    connection.sendQuestionAnswer({ request_id: request.request_id, session_id: request.session_id, cancelled: true });
     close();
     setTimeout(() => onResolve?.(), 220);
   };
@@ -43,6 +43,7 @@ export function QuestionModal({ request, onResolve }) {
     if (!ok) return;
     const payload = {
       request_id: request.request_id,
+      session_id: request.session_id,
       answers: questions.map((q, i) => {
         const a = answers[i];
         const out = { question_id: q.id || q.question || '', selected: a.selected };

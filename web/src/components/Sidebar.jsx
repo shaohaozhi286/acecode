@@ -9,12 +9,23 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../lib/api.js';
+import { connection } from '../lib/connection.js';
 import { relativeTime, clsx } from '../lib/format.js';
 import { sessionDisplayTitle } from '../lib/sessionTitle.js';
 import { toast } from './Toast.jsx';
 
 function hasDesktopBridge() {
   return typeof window.aceDesktop_listWorkspaces === 'function';
+}
+
+function parseDesktopResult(value) {
+  // webview/webview 会把 native binding 返回的 JSON value 先解析成 JS 值；
+  // 但开发调试 shim 可能仍返回原始字符串。两种形态都兼容。
+  if (value == null) return value;
+  if (typeof value !== 'string') return value;
+  const text = value.trim();
+  if (!text || text === 'null') return null;
+  return JSON.parse(text);
 }
 
 function statusDot(state) {
@@ -118,7 +129,7 @@ export function Sidebar({ activeId, onSelect, collapsed, onOpenSkills, onOpenMcp
   const refresh = useCallback(async () => {
     if (hasDesktopBridge()) {
       try {
-        const list = JSON.parse(await window.aceDesktop_listWorkspaces());
+        const list = parseDesktopResult(await window.aceDesktop_listWorkspaces());
         const arr = Array.isArray(list) ? list : [];
         setWorkspaces(arr);
         setExpanded((prev) => {
@@ -134,7 +145,12 @@ export function Sidebar({ activeId, onSelect, collapsed, onOpenSkills, onOpenMcp
                        daemon_state: 'running', active: true }]);
       setExpanded((prev) => new Set(prev).add('__local__'));
     }
-    try { setSessions(await api.listSessions()); }
+    try {
+      const list = await api.listSessions();
+      const arr = Array.isArray(list) ? list : [];
+      setSessions(arr);
+      arr.filter((s) => s.active && s.id).forEach((s) => connection.subscribe(s.id));
+    }
     catch { /* 鉴权失败不致命 */ }
   }, []);
 
@@ -155,7 +171,7 @@ export function Sidebar({ activeId, onSelect, collapsed, onOpenSkills, onOpenMcp
   const onActivate = async (ws) => {
     if (!hasDesktopBridge()) return;
     try {
-      const r = JSON.parse(await window.aceDesktop_activateWorkspace(ws.hash));
+      const r = parseDesktopResult(await window.aceDesktop_activateWorkspace(ws.hash));
       if (r.error) { toast({ kind: 'err', text: '切换失败:' + r.error }); return; }
       // 整页 navigate(跨 loopback 端口 fetch 受 CORS 拦截)
       location.href = `http://127.0.0.1:${r.port}/?token=${encodeURIComponent(r.token)}`;
@@ -167,7 +183,7 @@ export function Sidebar({ activeId, onSelect, collapsed, onOpenSkills, onOpenMcp
     if (!session.active) {
       if (hasDesktopBridge() && ws?.hash) {
         try {
-          const r = JSON.parse(await window.aceDesktop_resumeSession(ws.hash, session.id));
+          const r = parseDesktopResult(await window.aceDesktop_resumeSession(ws.hash, session.id));
           if (r.error) { toast({ kind: 'err', text: '恢复失败:' + r.error }); return; }
           onSelect?.({
             workspaceHash: ws.hash,
@@ -211,7 +227,7 @@ export function Sidebar({ activeId, onSelect, collapsed, onOpenSkills, onOpenMcp
 
   const onRename = async (hash, name) => {
     if (!hasDesktopBridge()) throw new Error('not in desktop mode');
-    const r = JSON.parse(await window.aceDesktop_renameWorkspace(hash, name));
+    const r = parseDesktopResult(await window.aceDesktop_renameWorkspace(hash, name));
     if (!r.ok) throw new Error(r.error || 'rename failed');
     refresh();
   };
@@ -222,12 +238,13 @@ export function Sidebar({ activeId, onSelect, collapsed, onOpenSkills, onOpenMcp
       return;
     }
     try {
-      const raw = await window.aceDesktop_addWorkspace();
-      if (raw === 'null' || raw == null) return;
-      const ws = JSON.parse(raw);
+      const ws = parseDesktopResult(await window.aceDesktop_addWorkspace());
+      if (ws == null) return;
       if (!ws || !ws.hash) return;
       onActivate(ws);
-    } catch {}
+    } catch (e) {
+      toast({ kind: 'err', text: '添加项目失败:' + (e.message || '') });
+    }
   };
 
   return (

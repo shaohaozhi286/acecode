@@ -304,6 +304,40 @@ TEST(WebServerHttp, GetMessagesWithSinceReturnsArrayOnly) {
     EXPECT_TRUE(j.is_array());
 }
 
+// 场景:POST /api/sessions/:id/messages 只负责把输入交给 daemon 的
+// AgentLoop 入队,不依赖当前 WebSocket 连接是否还绑定该会话。
+TEST(WebServerHttp, PostMessageQueuesInputInDaemonSession) {
+    WebServerFixture fx;
+    auto post = cpr::Post(cpr::Url{fx.url("/api/sessions")},
+                          cpr::Header{{"Content-Type", "application/json"}},
+                          cpr::Body{R"({})"});
+    ASSERT_EQ(post.status_code, 201);
+    auto sid = json::parse(post.text)["session_id"].get<std::string>();
+
+    auto queued = cpr::Post(cpr::Url{fx.url("/api/sessions/" + sid + "/messages")},
+                            cpr::Header{{"Content-Type", "application/json"}},
+                            cpr::Body{R"({"text":"hello from http submit"})"});
+    ASSERT_EQ(queued.status_code, 202) << queued.text;
+    EXPECT_TRUE(json::parse(queued.text)["queued"].get<bool>());
+
+    bool found = false;
+    auto deadline = std::chrono::steady_clock::now() + 2s;
+    while (std::chrono::steady_clock::now() < deadline && !found) {
+        auto r = cpr::Get(cpr::Url{fx.url("/api/sessions/" + sid + "/messages")});
+        ASSERT_EQ(r.status_code, 200) << r.text;
+        auto j = json::parse(r.text);
+        for (const auto& m : j["messages"]) {
+            if (m.value("role", "") == "user" &&
+                m.value("content", "") == "hello from http submit") {
+                found = true;
+                break;
+            }
+        }
+        if (!found) std::this_thread::sleep_for(20ms);
+    }
+    EXPECT_TRUE(found) << "HTTP submit should be owned by daemon session";
+}
+
 // 场景: inactive 磁盘历史不在 registry 内存里时,GET messages 也应能返回
 // ChatMessage 历史,让 Web 点击历史会话前可预览/补齐。
 TEST(WebServerHttp, GetMessagesForInactiveDiskSessionReturnsHistory) {

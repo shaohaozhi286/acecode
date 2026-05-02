@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api, ApiError } from './lib/api.js';
 import { setToken } from './lib/auth.js';
+import { connection } from './lib/connection.js';
 import { TopBar } from './components/TopBar.jsx';
 import { Sidebar } from './components/Sidebar.jsx';
 import { ChatView } from './components/ChatView.jsx';
@@ -20,6 +21,15 @@ import { MCPPanel } from './components/MCPPanel.jsx';
 import { SettingsPage } from './components/SettingsPage.jsx';
 import { Toaster, toast } from './components/Toast.jsx';
 
+function newSessionRefFrom(ref, sessionId) {
+  const next = { sessionId };
+  if (!ref || typeof ref !== 'object') return next;
+  for (const key of ['workspaceHash', 'contextId', 'port', 'token']) {
+    if (ref[key] != null) next[key] = ref[key];
+  }
+  return next;
+}
+
 export function App() {
   const [authState, setAuthState] = useState('checking'); // 'checking' | 'ok' | 'need-token'
   const [health,    setHealth]    = useState(null);
@@ -31,8 +41,8 @@ export function App() {
   const [showSkills,   setShowSkills]   = useState(false);
   const [showMcp,      setShowMcp]      = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const [permReq,      setPermReq]      = useState(null);
-  const [questionReq,  setQuestionReq]  = useState(null);
+  const [permReqs,     setPermReqs]     = useState([]);
+  const [questionReqs, setQuestionReqs] = useState([]);
 
   const probe = useCallback(async () => {
     try {
@@ -51,6 +61,24 @@ export function App() {
 
   useEffect(() => { probe(); }, [probe]);
 
+  useEffect(() => {
+    const pushUnique = (setter, payload) => {
+      if (!payload?.request_id) return;
+      setter((prev) => prev.some((x) => x.request_id === payload.request_id)
+        ? prev
+        : [...prev, payload]);
+    };
+    const handler = (e) => {
+      const msg = e.detail || {};
+      const payload = { ...(msg.payload || {}) };
+      if (msg.session_id && !payload.session_id) payload.session_id = msg.session_id;
+      if (msg.type === 'permission_request') pushUnique(setPermReqs, payload);
+      if (msg.type === 'question_request') pushUnique(setQuestionReqs, payload);
+    };
+    connection.addEventListener('message', handler);
+    return () => connection.removeEventListener('message', handler);
+  }, []);
+
   const onSubmitToken = useCallback(async (token) => {
     setToken(token);
     await probe();
@@ -66,6 +94,18 @@ export function App() {
     }, 140);
   }, [view]);
 
+  const createNewSession = useCallback(async () => {
+    try {
+      const r = await api.createSession({});
+      const id = r && (r.session_id || r.id);
+      if (!id) return;
+      setActiveRef(newSessionRefFrom(activeRef, id));
+      if (view !== 'single') switchView('single');
+    } catch (e) {
+      toast({ kind: 'err', text: '新建会话失败:' + (e.message || '') });
+    }
+  }, [activeRef, switchView, view]);
+
   if (authState === 'checking') {
     return (
       <div className="h-full flex items-center justify-center text-fg-mute text-sm">
@@ -79,6 +119,8 @@ export function App() {
 
   const activeId = activeRef?.sessionId || activeRef?.id || '';
   const sidebarCollapsed = view !== 'single';
+  const permReq = permReqs[0] || null;
+  const questionReq = questionReqs[0] || null;
 
   return (
     <div className="h-full w-full flex flex-col bg-bg text-fg font-sans">
@@ -86,7 +128,7 @@ export function App() {
         view={view}
         onViewChange={switchView}
         onSettings={() => setShowSettings(true)}
-        onNewSession={() => window.dispatchEvent(new CustomEvent('ace:new-session'))}
+        onNewSession={createNewSession}
       />
       <div className="flex-1 flex overflow-hidden relative min-h-0">
         <Sidebar
@@ -107,8 +149,6 @@ export function App() {
               sessionRef={activeRef}
               onSessionPromoted={setActiveRef}
               health={health}
-              onPermissionRequest={setPermReq}
-              onQuestionRequest={setQuestionReq}
             />
           )}
           {view === 'grid4' && <Grid4View onExpand={setExpanded} />}
@@ -124,13 +164,13 @@ export function App() {
         {permReq      && (
           <PermissionModal
             request={permReq}
-            onResolve={() => setPermReq(null)}
+            onResolve={() => setPermReqs((prev) => prev.slice(1))}
           />
         )}
         {questionReq  && (
           <QuestionModal
             request={questionReq}
-            onResolve={() => setQuestionReq(null)}
+            onResolve={() => setQuestionReqs((prev) => prev.slice(1))}
           />
         )}
       </div>

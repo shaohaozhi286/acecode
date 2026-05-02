@@ -1,4 +1,4 @@
-// 主聊天视图:头部(会话名 + 状态 badge + ModelPicker + abort)+ 消息流 +
+// 主聊天视图:头部(会话名 + 状态 badge)+ 消息流 +
 // InputBar + StatusBar。
 //
 // 消息流是 items 数组,每个 item 形如:
@@ -9,12 +9,11 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createApi } from '../lib/api.js';
-import { AceConnection } from '../lib/connection.js';
+import { connection } from '../lib/connection.js';
 import { Message } from './Message.jsx';
 import { ToolBlock } from './ToolBlock.jsx';
 import { InputBar } from './InputBar.jsx';
 import { StatusBar } from './StatusBar.jsx';
-import { ModelPicker } from './ModelPicker.jsx';
 import { toast } from './Toast.jsx';
 import { clsx } from '../lib/format.js';
 import { sessionDisplayTitle, titleFromMessages } from '../lib/sessionTitle.js';
@@ -22,6 +21,7 @@ import { sessionDisplayTitle, titleFromMessages } from '../lib/sessionTitle.js';
 // 列表项 id 生成 — 进度模式下要稳定,所以以 tool 名 + 起始 seq 当 key
 let _idSeq = 0;
 function nextId() { return ++_idSeq; }
+function messageKey(role, content) { return `${role || ''}\u0000${content || ''}`; }
 
 function normalizeSessionRef(sessionRef, sessionId) {
   if (sessionRef && typeof sessionRef === 'object') return sessionRef;
@@ -30,16 +30,23 @@ function normalizeSessionRef(sessionRef, sessionId) {
   return null;
 }
 
+function newSessionRefFrom(ref, sessionId) {
+  const next = { sessionId };
+  if (!ref || typeof ref !== 'object') return next;
+  for (const key of ['workspaceHash', 'contextId', 'port', 'token']) {
+    if (ref[key] != null) next[key] = ref[key];
+  }
+  return next;
+}
+
 export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onPermissionRequest, onQuestionRequest }) {
   const ref = useMemo(() => normalizeSessionRef(sessionRef, sessionId), [sessionRef, sessionId]);
   const sid = ref?.sessionId || ref?.id || '';
   const api = useMemo(() => createApi(ref), [ref?.port, ref?.token]);
-  const connection = useMemo(() => new AceConnection(), []);
   const [items,    setItems]    = useState([]);
   const [busy,     setBusy]     = useState(false);
   const [turns,    setTurns]    = useState(0);
   const [history,  setHistory]  = useState([]);
-  const [model,    setModel]    = useState('—');
   const [title,    setTitle]    = useState('');
   const scrollRef = useRef(null);
   const toolMap   = useRef(new Map()); // tool name → item.id (本地数组里的 ID)
@@ -66,7 +73,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
       try {
         const r = await api.createSession({});
         const id = r && (r.session_id || r.id);
-        if (id) onSessionPromoted?.({ ...(ref || {}), sessionId: id });
+        if (id) onSessionPromoted?.(newSessionRefFrom(ref, id));
       } catch (e) {
         toast({ kind: 'err', text: '新建会话失败:' + (e.message || '') });
       }
@@ -79,10 +86,10 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
   useEffect(() => {
     setItems([]); toolMap.current.clear(); streamingId.current = null;
     setBusy(false); setTurns(0);
-    if (!sid) { connection.unbind(); return; }
+    if (!sid) return;
     connection.reconfigure({ port: ref?.port || '', token: ref?.token || '' });
     setTitle(sessionDisplayTitle(ref, sid));
-    connection.bind(sid);
+    connection.subscribe(sid);
 
     let off = false;
     api.getMessages(sid, 0).then((data) => {
@@ -91,17 +98,40 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
       const initialItems = msgs.map((m) => ({
         kind: 'msg', id: nextId(), role: m.role, content: m.content || '', ts: m.ts || Date.now(),
       }));
+      const seenMessages = new Set(msgs.map((m) => messageKey(m.role, m.content || '')));
       const restoredTitle = titleFromMessages(msgs);
       if (restoredTitle) setTitle(restoredTitle);
       setItems(initialItems);
       // 把残留事件回放
-      (data.events || []).forEach((ev) => onWsMessage(ev));
+      let pendingStreamEvents = [];
+      const flushPendingStreamEvents = () => {
+        pendingStreamEvents.forEach((ev) => onWsMessage(ev));
+        pendingStreamEvents = [];
+      };
+      (data.events || []).forEach((ev) => {
+        if (ev?.type === 'token' || ev?.type === 'reasoning') {
+          pendingStreamEvents.push(ev);
+          return;
+        }
+        if (ev?.type === 'message') {
+          const p = ev.payload || {};
+          const key = messageKey(p.role || 'system', p.content || '');
+          if (seenMessages.has(key)) {
+            pendingStreamEvents = [];
+            return;
+          }
+          seenMessages.add(key);
+        }
+        flushPendingStreamEvents();
+        onWsMessage(ev);
+      });
+      flushPendingStreamEvents();
     }).catch((e) => {
       toast({ kind: 'err', text: '加载会话失败:' + (e.message || '') });
     });
-    return () => { off = true; connection.unbind(); };
+    return () => { off = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sid, ref?.port, ref?.token, api, connection]);
+  }, [sid, ref?.port, ref?.token, api]);
 
   const onWsMessage = useCallback((msg) => {
     const t = msg.type;
@@ -110,6 +140,14 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
       let next = prev;
       switch (t) {
         case 'message':
+          if ((p.role || 'system') === 'assistant' && streamingId.current != null) {
+            const currentStreamingId = streamingId.current;
+            streamingId.current = null;
+            next = prev.map((x) => x.id === currentStreamingId
+              ? { ...x, role: 'assistant', content: p.content || x.content || '', ts: Date.now(), streaming: false }
+              : x);
+            break;
+          }
           streamingId.current = null;
           next = [...prev, {
             kind: 'msg', id: nextId(), role: p.role || 'system',
@@ -200,45 +238,54 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
           toast({ kind: 'err', text: '错误:' + (p.reason || '') });
           break;
         case 'permission_request':
-          onPermissionRequest?.(p);
+          onPermissionRequest?.({ ...p, session_id: p.session_id || sid });
           break;
         case 'question_request':
-          onQuestionRequest?.(p);
+          onQuestionRequest?.({ ...p, session_id: p.session_id || sid });
           break;
         default: break;
       }
       return next;
     });
-  }, [onPermissionRequest, onQuestionRequest]);
+  }, [onPermissionRequest, onQuestionRequest, sid]);
 
   // ws 事件订阅
   useEffect(() => {
-    const handler = (e) => onWsMessage(e.detail);
+    const handler = (e) => {
+      const msg = e.detail || {};
+      if (msg.session_id && msg.session_id !== sid) return;
+      onWsMessage(msg);
+    };
     connection.addEventListener('message', handler);
     return () => connection.removeEventListener('message', handler);
-  }, [onWsMessage]);
+  }, [onWsMessage, sid]);
 
   const submit = useCallback((text) => {
     if (!sid) {
-      // 自动新建一个会话
-      api.createSession({}).then((r) => {
+      // 自动新建会话并让 daemon 直接接管首条消息。
+      api.createSession({ initial_user_message: text, auto_start: true }).then((r) => {
         const id = r && (r.session_id || r.id);
         if (id) {
-          onSessionPromoted?.({ ...(ref || {}), sessionId: id });
-          // 等下一帧让 sessionId 写回 + bind 完成 — 先不发,提示用户再发
-          toast({ kind: 'info', text: '会话已创建,请重发消息' });
+          const next = newSessionRefFrom(ref, id);
+          next.title = text;
+          onSessionPromoted?.(next);
+          api.appendHistory(text).catch(() => {});
+          setHistory((h) => [...h, text]);
         }
       }).catch((e) => toast({ kind: 'err', text: '新建会话失败:' + (e.message || '') }));
       return;
     }
-    connection.sendUserInput(text);
+    api.sendInput(sid, text).catch((e) => {
+      toast({ kind: 'err', text: '发送失败:' + (e.message || '') });
+      setBusy(false);
+    });
     api.appendHistory(text).catch(() => {});
     setHistory((h) => [...h, text]);
     if (!ref?.title) setTitle(text);
-    setItems((prev) => [...prev, { kind: 'msg', id: nextId(), role: 'user', content: text, ts: Date.now() }]);
-  }, [sid, api, connection, ref, onSessionPromoted]);
+    setBusy(true);
+  }, [sid, api, ref, onSessionPromoted]);
 
-  const abort = useCallback(() => connection.sendAbort(), []);
+  const abort = useCallback(() => connection.sendAbort(sid), [sid]);
 
   const status = useMemo(() => {
     if (!sid) return null;
@@ -306,9 +353,6 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
             {status === 'running' ? '运行中' : '空闲'}
           </span>
         </div>
-        <div className="flex items-center gap-2">
-          <ModelPicker sessionId={sid} apiClient={api} />
-        </div>
       </div>
 
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-3.5 py-3 flex flex-col gap-3">
@@ -338,7 +382,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
         onSubmit={submit}
         onAbort={abort}
       />
-      <StatusBar model={model} turns={turns} branch={health?.branch || ''} />
+      <StatusBar model="—" turns={turns} branch={health?.branch || ''} />
     </div>
   );
 }

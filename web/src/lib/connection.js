@@ -16,31 +16,49 @@ export class AceConnection extends EventTarget {
     super();
     this.ws = null;
     this.sessionId = '';
+    this.sessions = new Map();
     this.attempts = 0;
-    this.lastSeq = 0;
     this.closing = false;
     this._host = '';   // 留空 → 用 location.host(单 workspace 默认)
     this._token = '';
   }
 
   reconfigure({ port, token }) {
-    if (port !== undefined) this._host = port ? `127.0.0.1:${port}` : '';
-    if (token != null) this._token = token;
-    if (this.sessionId) this._open();
+    const nextHost = port !== undefined ? (port ? `127.0.0.1:${port}` : '') : this._host;
+    const nextToken = token != null ? token : this._token;
+    const changed = nextHost !== this._host || nextToken !== this._token;
+    this._host = nextHost;
+    this._token = nextToken;
+    if (changed && this.sessions.size) this._reopen();
   }
 
   bind(sessionId) {
-    this.unbind();
+    this.subscribe(sessionId);
+  }
+
+  subscribe(sessionId) {
+    if (!sessionId) return;
     this.sessionId = sessionId;
-    this.lastSeq = parseInt(sessionStorage.getItem(`ace-seq-${sessionId}`) || '0', 10) || 0;
-    this._open();
+    if (!this.sessions.has(sessionId)) {
+      const lastSeq = parseInt(sessionStorage.getItem(`ace-seq-${sessionId}`) || '0', 10) || 0;
+      this.sessions.set(sessionId, { lastSeq });
+    }
+    if (!this.ws || this.ws.readyState === WebSocket.CLOSED) this._open();
+    else if (this.ws.readyState === WebSocket.OPEN) this._sendSubscribe(sessionId);
+  }
+
+  unsubscribe(sessionId) {
+    if (!sessionId || !this.sessions.has(sessionId)) return;
+    this._send({ type: 'unsubscribe', payload: { session_id: sessionId } });
+    this.sessions.delete(sessionId);
+    if (this.sessionId === sessionId) this.sessionId = this.sessions.keys().next().value || '';
+    if (this.sessions.size === 0) this._closeSocket('client no sessions');
   }
 
   unbind() {
+    this.sessions.clear();
     if (this.ws) {
-      this.closing = true;
-      closeWs(this.ws, 'client unbind');
-      this.ws = null;
+      this._closeSocket('client unbind');
     }
     this.sessionId = '';
     this.attempts = 0;
@@ -50,8 +68,31 @@ export class AceConnection extends EventTarget {
   _activeHost()  { return this._host  || location.host; }
   _activeToken() { return this._token || getToken() || ''; }
 
+  _closeSocket(reason) {
+    if (!this.ws) return;
+    this.closing = true;
+    try { this.ws.onopen = this.ws.onmessage = this.ws.onclose = this.ws.onerror = null; } catch {}
+    closeWs(this.ws, reason);
+    this.ws = null;
+    this.closing = false;
+  }
+
+  _reopen() {
+    this._closeSocket('client reconfigure');
+    this._open();
+  }
+
+  _sendSubscribe(sessionId) {
+    const state = this.sessions.get(sessionId);
+    if (!state) return;
+    this._send({
+      type: 'subscribe',
+      payload: { session_id: sessionId, since: state.lastSeq || 0 },
+    });
+  }
+
   _open() {
-    if (!this.sessionId) return;
+    if (this.sessions.size === 0) return;
     if (this.ws) {
       try { this.ws.onopen = this.ws.onmessage = this.ws.onclose = this.ws.onerror = null; } catch {}
       closeWs(this.ws, 'client rebind');
@@ -60,32 +101,33 @@ export class AceConnection extends EventTarget {
     const token   = this._activeToken();
     const tokenQs = token ? `?token=${encodeURIComponent(token)}` : '';
     const host    = this._activeHost();
-    const url     = `${proto}//${host}/ws/sessions/${encodeURIComponent(this.sessionId)}${tokenQs}`;
+    const url     = `${proto}//${host}/ws/sessions/_multiplex${tokenQs}`;
     const ws = new WebSocket(url);
     this.ws = ws;
     ws.onopen = () => {
       if (this.ws !== ws) return;
       this.attempts = 0;
       this.dispatchEvent(new Event('open'));
-      try {
-        ws.send(JSON.stringify({
-          type: 'hello',
-          payload: { session_id: this.sessionId, since: this.lastSeq },
-        }));
-      } catch {}
+      for (const sessionId of this.sessions.keys()) this._sendSubscribe(sessionId);
     };
     ws.onmessage = (e) => {
       if (this.ws !== ws) return;
       let msg;
       try { msg = JSON.parse(e.data); } catch { return; }
-      if (typeof msg.seq === 'number' && msg.seq > this.lastSeq) {
-        this.lastSeq = msg.seq;
-        sessionStorage.setItem(`ace-seq-${this.sessionId}`, String(this.lastSeq));
+      const sid = msg.session_id || msg.payload?.session_id || this.sessionId || '';
+      if (sid) msg.session_id = sid;
+      if (sid && typeof msg.seq === 'number') {
+        const state = this.sessions.get(sid) || { lastSeq: 0 };
+        if (msg.seq > state.lastSeq) {
+          state.lastSeq = msg.seq;
+          this.sessions.set(sid, state);
+          sessionStorage.setItem(`ace-seq-${sid}`, String(state.lastSeq));
+        }
       }
       this.dispatchEvent(new CustomEvent('message', { detail: msg }));
     };
     const reconnect = () => {
-      if (this.closing || !this.sessionId) return;
+      if (this.closing || this.sessions.size === 0) return;
       if (this.ws !== ws) return;
       this.ws = null;
       const delay = Math.min(MAX_BACKOFF_MS, 1000 * Math.pow(2, this.attempts++));
@@ -96,10 +138,10 @@ export class AceConnection extends EventTarget {
     ws.onerror = () => closeWs(ws, 'client error');
   }
 
-  sendUserInput(text)              { this._send({ type: 'user_input', payload: { text } }); }
-  sendDecision(request_id, choice) { this._send({ type: 'decision',   payload: { request_id, choice } }); }
+  sendUserInput(text, sessionId=this.sessionId) { this._send({ type: 'user_input', payload: { session_id: sessionId, text } }); }
+  sendDecision(request_id, choice, sessionId=this.sessionId) { this._send({ type: 'decision', payload: { session_id: sessionId, request_id, choice } }); }
   sendQuestionAnswer(payload)      { this._send({ type: 'question_answer', payload }); }
-  sendAbort()                      { this._send({ type: 'abort' }); }
+  sendAbort(sessionId=this.sessionId) { this._send({ type: 'abort', payload: { session_id: sessionId } }); }
   ping()                           { this._send({ type: 'ping' }); }
 
   _send(msg) {

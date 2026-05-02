@@ -6,7 +6,7 @@ import { Modal } from './Modal.jsx';
 
 export function PermissionModal({ request, onResolve }) {
   const respond = (choice, close) => {
-    connection.sendDecision(request.request_id, choice);
+    connection.sendDecision(request.request_id, choice, request.session_id);
     close();
     setTimeout(() => onResolve?.(), 220);
   };

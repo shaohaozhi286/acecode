@@ -120,6 +120,9 @@ public:
     // Returns true if abort has been requested. Useful for confirm callbacks.
     bool is_aborting() const { return abort_requested_.load(); }
 
+    // Returns true while the worker is processing a submitted turn.
+    bool is_busy() const { return busy_.load(); }
+
     // Legacy cancel alias
     void cancel() { abort(); }
 
@@ -194,6 +197,7 @@ private:
     AgentCallbacks callbacks_;
     std::vector<ChatMessage> messages_;
     std::atomic<bool> abort_requested_{false};
+    std::atomic<bool> busy_{false};
     std::string cwd_;
     PermissionManager& permissions_;
     PathValidator path_validator_;

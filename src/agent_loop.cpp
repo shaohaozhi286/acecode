@@ -120,6 +120,7 @@ void AgentLoop::inject_shell_turn(const std::string& cmd,
 
 void AgentLoop::run_agent(const std::string& user_message) {
     abort_requested_ = false;
+    busy_ = true;
 
     LOG_INFO("=== submit() user_message: " + log_truncate(user_message, 200));
 
@@ -133,6 +134,8 @@ void AgentLoop::run_agent(const std::string& user_message) {
         session_manager_->on_message(user_msg);
         session_manager_->begin_user_turn_checkpoint(user_msg.uuid);
     }
+    events_.emit(SessionEventKind::Message,
+        nlohmann::json{{"role", "user"}, {"content", user_message}, {"is_tool", false}});
 
     if (callbacks_.on_busy_changed) {
         callbacks_.on_busy_changed(true);
@@ -711,12 +714,14 @@ void AgentLoop::run_agent(const std::string& user_message) {
     if (callbacks_.on_busy_changed) {
         callbacks_.on_busy_changed(false);
     }
+    busy_ = false;
     events_.emit(SessionEventKind::BusyChanged, nlohmann::json{{"busy", false}});
     events_.emit(SessionEventKind::Done, nlohmann::json::object());
 }
 
 void AgentLoop::run_shell(const std::string& command) {
     abort_requested_ = false;
+    busy_ = true;
 
     LOG_WARN("user_initiated_shell: " + log_truncate(command, 200));
 
@@ -810,6 +815,7 @@ void AgentLoop::run_shell(const std::string& command) {
     if (callbacks_.on_busy_changed) {
         callbacks_.on_busy_changed(false);
     }
+    busy_ = false;
     events_.emit(SessionEventKind::BusyChanged, nlohmann::json{{"busy", false}});
     events_.emit(SessionEventKind::Done, nlohmann::json::object());
 }

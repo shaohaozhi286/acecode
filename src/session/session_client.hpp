@@ -90,6 +90,7 @@ struct SessionInfo {
     std::string title;
     int         message_count = 0;
     bool        active = false;   // 是否在 SessionRegistry 内存活
+    bool        busy = false;     // 是否正在处理当前轮
 };
 
 // ----- AskUserQuestion 回应(client→server) -----
@@ -132,7 +133,8 @@ public:
     virtual void unsubscribe(const std::string& session_id, SubscriptionId sub) = 0;
 
     // 发送一条用户输入。非阻塞,内部入队到 AgentLoop worker。
-    virtual void send_input(const std::string& session_id, const std::string& text) = 0;
+    // 返回 false 表示 session 不在当前 registry 中。
+    virtual bool send_input(const std::string& session_id, const std::string& text) = 0;
 
     // 回应一个之前推送的 permission_request。线程安全。
     // 未知 request_id / 已超时的请求 = no-op。
