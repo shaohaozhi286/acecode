@@ -6,6 +6,7 @@
 #include "../config/config.hpp"
 #include "../skills/default_skill_seeder.hpp"
 #include "../utils/logger.hpp"
+#include "../utils/paths.hpp"
 
 #include <chrono>
 #include <filesystem>
@@ -31,6 +32,7 @@ void print_help(std::ostream& os) {
        << "  --cwd=<PATH>           run worker as if started from PATH\n"
        << "  --port=<N>             override web.port for this worker\n"
        << "  --static-dir=<PATH>    serve front-end assets from PATH\n"
+       << "  --run-dir=<PATH>       isolate runtime files (heartbeat/pid/port/token) to PATH\n"
        << "  --supervised --guid=G  launcher-internal: launched by Service supervisor\n"
        << "  -dangerous             skip permission checks (loopback bind only)\n";
 }
@@ -123,6 +125,18 @@ Args parse(const std::vector<std::string>& tokens) {
                 return a;
             }
             a.cwd_override = tokens[++i];
+        } else if (starts_with(t, "--run-dir=")) {
+            a.run_dir_override = t.substr(10);
+            if (a.run_dir_override.empty()) {
+                a.error = "--run-dir=<path> empty value";
+                return a;
+            }
+        } else if (t == "--run-dir") {
+            if (i + 1 >= tokens.size() || tokens[i + 1].empty()) {
+                a.error = "--run-dir requires a path";
+                return a;
+            }
+            a.run_dir_override = tokens[++i];
         } else if (t == "-dangerous") {
             a.dangerous = true;
         } else if (t == "--help" || t == "-h") {
@@ -139,6 +153,13 @@ Args parse(const std::vector<std::string>& tokens) {
 }
 
 static int do_foreground(const Args& a, const std::string& exe_path) {
+    // run_dir override 必须在 load_config / validate_can_start / runtime_files
+    // 任何路径解析之前 set,否则 daemon 仍会读写默认 ~/.acecode/run/。config 的
+    // 路径仍走默认 — 我们只隔离 run/,sessions / memory / config 仍共享。
+    if (!a.run_dir_override.empty()) {
+        acecode::set_run_dir_override(a.run_dir_override);
+    }
+
     AppConfig cfg = load_config();
     seed_default_skills_if_first_initialization(exe_path);
     auto errs = validate_config(cfg);
@@ -159,6 +180,10 @@ static int do_foreground(const Args& a, const std::string& exe_path) {
 }
 
 static int do_start(const Args& a, const std::string& exe_path) {
+    if (!a.run_dir_override.empty()) {
+        acecode::set_run_dir_override(a.run_dir_override);
+    }
+
     // 检查是否已有 daemon 在跑
     auto existing_pid = read_pid_file();
     if (existing_pid.has_value() && is_pid_alive(*existing_pid)) {
@@ -180,6 +205,9 @@ static int do_start(const Args& a, const std::string& exe_path) {
     }
     if (!a.cwd_override.empty()) {
         argv.push_back("--cwd=" + a.cwd_override);
+    }
+    if (!a.run_dir_override.empty()) {
+        argv.push_back("--run-dir=" + a.run_dir_override);
     }
     if (a.dangerous) argv.push_back("-dangerous");
 

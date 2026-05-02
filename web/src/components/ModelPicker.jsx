@@ -4,18 +4,18 @@ import { useEffect, useState } from 'react';
 import { api } from '../lib/api.js';
 import { toast } from './Toast.jsx';
 
-export function ModelPicker({ sessionId }) {
+export function ModelPicker({ sessionId, apiClient = api }) {
   const [models, setModels] = useState([]);
   const [value,  setValue]  = useState('');
   const [busy,   setBusy]   = useState(false);
 
   useEffect(() => {
     let off = false;
-    api.listModels()
+    apiClient.listModels()
       .then((list) => { if (!off) setModels(Array.isArray(list) ? list : []); })
       .catch(() => {});
     return () => { off = true; };
-  }, []);
+  }, [apiClient]);
 
   const onChange = async (e) => {
     if (!sessionId) { e.preventDefault(); return; }
@@ -23,7 +23,7 @@ export function ModelPicker({ sessionId }) {
     const prev = value;
     setValue(next); setBusy(true);
     try {
-      await api.switchModel(sessionId, next);
+      await apiClient.switchModel(sessionId, next);
       toast({ kind: 'ok', text: '已切换至 ' + next });
     } catch (err) {
       setValue(prev);

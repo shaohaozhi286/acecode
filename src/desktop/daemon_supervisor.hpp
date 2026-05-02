@@ -26,6 +26,7 @@ struct SpawnRequest {
     bool        dangerous = false; // 透传 -dangerous(MVP 阶段一般不开)
     std::string cwd;               // 子进程启动时的 current_path。空 = 继承父进程当前目录
     std::string static_dir;        // 非空时通过 --static-dir=<path> 注入,daemon 走 FileSystem 资源(dev 模式)
+    std::string run_dir;           // 非空时通过 --run-dir=<path> 注入,daemon 把 runtime files (heartbeat/pid/port/token/GUID 锁) 写到这里。多 workspace 必填,避免共享 ~/.acecode/run/。
 };
 
 struct SpawnResult {

@@ -114,6 +114,39 @@ TEST(SessionStorage, EmptyTitleIsOmittedOnWrite) {
         << "empty title should be omitted from the serialized JSON; got: " << content;
 }
 
+// 场景:早期/异常退出的 meta 可能还停在 message_count=0 且 summary 空,
+// 但 jsonl 已经有用户消息。list_sessions 需要从 jsonl 补齐,否则 Web 左侧
+// 会把说过话的会话显示成裸 session id。
+TEST(SessionStorage, ListSessionsBackfillsSummaryAndCountFromJsonl) {
+    auto dir = make_unique_tmp_dir("backfill");
+    const std::string sid = "20260502-101144-61ab";
+
+    SessionMeta meta;
+    meta.id = sid;
+    meta.cwd = dir.string();
+    meta.created_at = "2026-05-02T10:11:44Z";
+    meta.updated_at = "2026-05-02T10:11:45Z";
+    meta.provider = "copilot";
+    meta.model = "claude";
+    meta.message_count = 0;
+    SessionStorage::write_meta(SessionStorage::meta_path(dir.string(), sid, 123), meta);
+
+    acecode::ChatMessage user;
+    user.role = "user";
+    user.content = "帮我看一下 websocket 错误";
+    SessionStorage::append_message(SessionStorage::session_path(dir.string(), sid, 123), user);
+
+    acecode::ChatMessage assistant;
+    assistant.role = "assistant";
+    SessionStorage::append_message(SessionStorage::session_path(dir.string(), sid, 123), assistant);
+
+    auto sessions = SessionStorage::list_sessions(dir.string());
+    ASSERT_EQ(sessions.size(), 1u);
+    EXPECT_EQ(sessions[0].id, sid);
+    EXPECT_EQ(sessions[0].summary, user.content);
+    EXPECT_EQ(sessions[0].message_count, 1);
+}
+
 // 场景:同一 cwd 多次调用必须返回完全一致的 16 字符 hex,不同 cwd 必须
 // 返回不同 hash。这是 ~/.acecode/projects/<hash>/ 目录隔离的根本保证。
 TEST(SessionStorage, ComputeProjectHashStable) {

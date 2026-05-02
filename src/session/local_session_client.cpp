@@ -10,6 +10,10 @@ std::string LocalSessionClient::create_session(const SessionOptions& opts) {
     return registry_.create(opts);
 }
 
+bool LocalSessionClient::resume_session(const std::string& id) {
+    return registry_.resume(id);
+}
+
 std::vector<SessionInfo> LocalSessionClient::list_sessions() {
     // v1 简化: 只返回内存活跃的。磁盘历史由 HTTP /api/sessions 单独的
     // SessionStorage::list_sessions 路径合并(后续 Section 9)。

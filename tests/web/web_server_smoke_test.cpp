@@ -18,14 +18,18 @@
 
 #include "permissions.hpp"
 #include "session/local_session_client.hpp"
+#include "session/session_manager.hpp"
 #include "session/session_registry.hpp"
+#include "session/session_storage.hpp"
 #include "skills/skill_registry.hpp"
 #include "tool/tool_executor.hpp"
 #include "web/server.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cpr/cpr.h>
+#include <cctype>
 #include <filesystem>
 #include <nlohmann/json.hpp>
 #include <random>
@@ -38,9 +42,9 @@ namespace {
 
 // 找一个未被占用的端口。简化做法: 用 cpr 试连 0(让 OS 分配)不可行 —
 // Crow bind 时要显式数字。这里用一个随机偏移的端口,失败重试几次。
-// 为避免和真 daemon 冲突,从 36000 起。
+// 为避免和真 daemon/desktop 默认端口冲突,从高位端口起。
 int pick_test_port() {
-    static std::atomic<int> next{36000};
+    static std::atomic<int> next{46000};
     return next.fetch_add(7);
 }
 
@@ -59,6 +63,9 @@ struct WebServerFixture {
     std::thread server_thread;
     int port = 0;
     std::filesystem::path tmp_dir;
+    std::filesystem::path cwd_dir;
+    std::string cwd;
+    std::string project_dir;
 
     WebServerFixture() {
         port = pick_test_port();
@@ -74,11 +81,16 @@ struct WebServerFixture {
         tmp_dir = std::filesystem::temp_directory_path() /
                   ("acecode_web_test_" + std::to_string(rd()));
         std::filesystem::create_directories(tmp_dir);
+        cwd_dir = tmp_dir / "cwd";
+        std::filesystem::create_directories(cwd_dir);
+        cwd = cwd_dir.string();
+        project_dir = acecode::SessionStorage::get_project_dir(cwd);
+        std::filesystem::remove_all(project_dir);
 
         acecode::SessionRegistryDeps deps;
         deps.provider_accessor = [] { return std::shared_ptr<acecode::LlmProvider>{}; };
         deps.tools = &tools;
-        deps.cwd = "/tmp/web_server_smoke_test";
+        deps.cwd = cwd;
         deps.config = &cfg;
         deps.template_permissions = &template_perm;
         registry = std::make_unique<acecode::SessionRegistry>(std::move(deps));
@@ -89,7 +101,7 @@ struct WebServerFixture {
         wdeps.daemon_cfg = &cfg.daemon;
         wdeps.app_config = &cfg;
         wdeps.config_path = (tmp_dir / "config.json").string();
-        wdeps.cwd = "/tmp/web_server_smoke_test";
+        wdeps.cwd = cwd;
         wdeps.token = "smoke-token";
         wdeps.guid = "test-guid-aaaa-bbbb";
         wdeps.pid = 12345;
@@ -119,6 +131,7 @@ struct WebServerFixture {
         if (server) server->stop();
         if (server_thread.joinable()) server_thread.join();
         std::error_code ec;
+        std::filesystem::remove_all(project_dir, ec);
         std::filesystem::remove_all(tmp_dir, ec);
     }
 
@@ -126,6 +139,21 @@ struct WebServerFixture {
         return "http://127.0.0.1:" + std::to_string(port) + path;
     }
 };
+
+std::string lower_ascii(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return s;
+}
+
+std::string response_header(const cpr::Response& r, const std::string& name) {
+    auto want = lower_ascii(name);
+    for (const auto& [k, v] : r.header) {
+        if (lower_ascii(k) == want) return v;
+    }
+    return {};
+}
 
 } // namespace
 
@@ -147,6 +175,42 @@ TEST(WebServerHttp, HealthEndpointReturnsBasicMetadata) {
     EXPECT_EQ(j["port"], fx.port);
 }
 
+// 场景: 跨端口 Web/Desktop fetch 只接受 loopback Origin,且不能因为 remote_ip
+// 是 loopback 就绕过 token。preflight 本身不带 token,实际请求必须带。
+TEST(WebServerHttp, CorsCrossOriginLoopbackRequiresToken) {
+    WebServerFixture fx;
+    const std::string origin = "http://localhost:5173";
+
+    auto no_token = cpr::Get(cpr::Url{fx.url("/api/sessions")},
+                             cpr::Header{{"Origin", origin}});
+    EXPECT_EQ(no_token.status_code, 401);
+    EXPECT_EQ(response_header(no_token, "Access-Control-Allow-Origin"), origin);
+
+    auto with_token = cpr::Get(cpr::Url{fx.url("/api/sessions")},
+                               cpr::Header{{"Origin", origin},
+                                           {"X-ACECode-Token", "smoke-token"}});
+    EXPECT_EQ(with_token.status_code, 200);
+    EXPECT_EQ(response_header(with_token, "Access-Control-Allow-Origin"), origin);
+
+    auto bad_origin = cpr::Get(cpr::Url{fx.url("/api/sessions")},
+                               cpr::Header{{"Origin", "http://example.com"},
+                                           {"X-ACECode-Token", "smoke-token"}});
+    EXPECT_EQ(bad_origin.status_code, 401);
+    EXPECT_EQ(response_header(bad_origin, "Access-Control-Allow-Origin"), "");
+}
+
+// 场景:127.0.0.1 与 localhost 是同一个 loopback daemon 的常见混用方式。
+// 同端口 alias 不应被当成跨 daemon fetch/WS,否则无 token 的本机 standalone
+// 页面会被误拒。
+TEST(WebServerHttp, LoopbackAliasSamePortDoesNotRequireToken) {
+    WebServerFixture fx;
+    const std::string origin = "http://127.0.0.1:" + std::to_string(fx.port);
+    auto r = cpr::Get(cpr::Url{"http://localhost:" + std::to_string(fx.port) + "/api/sessions"},
+                      cpr::Header{{"Origin", origin}});
+    EXPECT_EQ(r.status_code, 200) << r.text;
+    EXPECT_EQ(response_header(r, "Access-Control-Allow-Origin"), origin);
+}
+
 // 场景: POST /api/sessions 返回 201 + {session_id};立刻 GET /api/sessions
 // 应包含这一条 active=true(spec 9.3 + 9.4)。
 TEST(WebServerHttp, CreateSessionThenListShowsActive) {
@@ -158,18 +222,31 @@ TEST(WebServerHttp, CreateSessionThenListShowsActive) {
     auto created = json::parse(post.text);
     auto sid = created["session_id"].get<std::string>();
     EXPECT_FALSE(sid.empty());
+    EXPECT_EQ(created["id"], sid);
+
+    auto* entry = fx.registry->lookup(sid);
+    ASSERT_NE(entry, nullptr);
+    acecode::ChatMessage msg;
+    msg.role = "user";
+    msg.content = "hello from web";
+    entry->sm->on_message(msg);
+    entry->sm->finalize();
 
     auto list = cpr::Get(cpr::Url{fx.url("/api/sessions")});
     ASSERT_EQ(list.status_code, 200);
     auto arr = json::parse(list.text);
     bool found = false;
+    int occurrences = 0;
     for (const auto& s : arr) {
         if (s["id"] == sid) {
+            occurrences++;
             EXPECT_TRUE(s["active"].get<bool>());
+            EXPECT_EQ(s["message_count"], 1);
             found = true;
         }
     }
     EXPECT_TRUE(found) << "新建的 session 必须出现在列表中";
+    EXPECT_EQ(occurrences, 1) << "active 与 disk meta 必须合并为同一条";
 }
 
 // 场景: DELETE /api/sessions/:id 返回 204,之后 GET 看不到该 id active=true(spec 9.5)。
@@ -225,6 +302,65 @@ TEST(WebServerHttp, GetMessagesWithSinceReturnsArrayOnly) {
     ASSERT_EQ(r.status_code, 200);
     auto j = json::parse(r.text);
     EXPECT_TRUE(j.is_array());
+}
+
+// 场景: inactive 磁盘历史不在 registry 内存里时,GET messages 也应能返回
+// ChatMessage 历史,让 Web 点击历史会话前可预览/补齐。
+TEST(WebServerHttp, GetMessagesForInactiveDiskSessionReturnsHistory) {
+    WebServerFixture fx;
+    const std::string sid = "20260502-010203-abcd";
+    acecode::ChatMessage msg;
+    msg.role = "user";
+    msg.content = "old disk prompt";
+    std::filesystem::create_directories(fx.project_dir);
+    acecode::SessionStorage::append_message(
+        acecode::SessionStorage::session_path(fx.project_dir, sid, 0), msg);
+    acecode::SessionMeta meta;
+    meta.id = sid;
+    meta.cwd = fx.cwd;
+    meta.created_at = "2026-05-02T01:02:03Z";
+    meta.updated_at = meta.created_at;
+    meta.message_count = 1;
+    acecode::SessionStorage::write_meta(
+        acecode::SessionStorage::meta_path(fx.project_dir, sid, 0), meta);
+
+    auto r = cpr::Get(cpr::Url{fx.url("/api/sessions/" + sid + "/messages")});
+    ASSERT_EQ(r.status_code, 200) << r.text;
+    auto j = json::parse(r.text);
+    ASSERT_TRUE(j.contains("messages"));
+    ASSERT_EQ(j["messages"].size(), 1u);
+    EXPECT_EQ(j["messages"][0]["content"], "old disk prompt");
+}
+
+// 场景: POST /api/sessions/:id/resume 把 inactive 磁盘历史恢复进 registry,
+// 之后 list_sessions 应标记 active=true。
+TEST(WebServerHttp, ResumeDiskSessionActivatesIt) {
+    WebServerFixture fx;
+    const std::string sid = "20260502-010204-abcd";
+    acecode::SessionManager sm;
+    sm.start_session(fx.cwd, "test-provider", "test-model", sid);
+    acecode::ChatMessage msg;
+    msg.role = "user";
+    msg.content = "resume me";
+    sm.on_message(msg);
+    sm.finalize();
+
+    auto post = cpr::Post(cpr::Url{fx.url("/api/sessions/" + sid + "/resume")},
+                          cpr::Header{{"Content-Type", "application/json"}},
+                          cpr::Body{R"({})"});
+    ASSERT_EQ(post.status_code, 200) << post.text;
+
+    auto list = cpr::Get(cpr::Url{fx.url("/api/sessions")});
+    ASSERT_EQ(list.status_code, 200);
+    auto arr = json::parse(list.text);
+    bool found = false;
+    for (const auto& s : arr) {
+        if (s["id"] == sid) {
+            found = true;
+            EXPECT_TRUE(s["active"].get<bool>());
+        }
+    }
+    EXPECT_TRUE(found);
 }
 
 // 场景: /api/skills 在 daemon 模式不 scan skills,返回空数组(spec 9.7)。

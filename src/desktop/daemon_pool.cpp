@@ -8,9 +8,15 @@ DaemonPool::~DaemonPool() {
     // 不主动 stop_all — 让调用方控制(quit 时显式调,析构时机可能在异常路径上)。
 }
 
-DaemonPool::Slot* DaemonPool::get_or_create_slot(const std::string& hash) {
+std::string DaemonPool::slot_key(const std::string& hash, const std::string& context_id) {
+    return hash + "\n" + (context_id.empty() ? "default" : context_id);
+}
+
+DaemonPool::Slot* DaemonPool::get_or_create_slot(const std::string& hash,
+                                                 const std::string& context_id) {
     std::lock_guard<std::mutex> lk(main_mu_);
-    auto it = slots_.find(hash);
+    const std::string key = slot_key(hash, context_id);
+    auto it = slots_.find(key);
     if (it != slots_.end()) return it->second.get();
     auto slot = std::make_unique<Slot>();
     if (factory_) {
@@ -19,7 +25,7 @@ DaemonPool::Slot* DaemonPool::get_or_create_slot(const std::string& hash) {
         slot->sup = std::make_unique<DaemonSupervisor>();
     }
     Slot* raw = slot.get();
-    slots_.emplace(hash, std::move(slot));
+    slots_.emplace(key, std::move(slot));
     return raw;
 }
 
@@ -31,7 +37,8 @@ ActivateResult DaemonPool::activate(const ActivateRequest& req,
         return r;
     }
 
-    Slot* slot = get_or_create_slot(req.hash);
+    const std::string context_id = req.context_id.empty() ? "default" : req.context_id;
+    Slot* slot = get_or_create_slot(req.hash, context_id);
 
     // per-Slot 锁: 把"读 state / 等 cv / 触发 spawn"串成线性。
     std::unique_lock<std::mutex> sl(slot->mu);
@@ -89,6 +96,7 @@ ActivateResult DaemonPool::activate(const ActivateRequest& req,
         sreq.dangerous = req.dangerous;
         sreq.cwd = req.cwd;            // CreateProcess 用 lpCurrentDirectory 直接落地
         sreq.static_dir = req.static_dir;
+        sreq.run_dir = req.run_dir;
         auto sr = slot->sup->spawn(sreq);
         if (!sr.ok) {
             err = sr.error;
@@ -114,14 +122,16 @@ ActivateResult DaemonPool::activate(const ActivateRequest& req,
         // 失败的 supervisor 可能持有半启动的子进程 — 显式 stop 释放 Job。
         if (slot->sup) slot->sup->stop();
         r.error = err;
-        LOG_WARN("[daemon_pool] spawn failed for hash=" + req.hash + ": " + err);
+        LOG_WARN("[daemon_pool] spawn failed for hash=" + req.hash +
+                 " context=" + context_id + ": " + err);
     }
     return r;
 }
 
-DaemonPool::Snapshot DaemonPool::lookup(const std::string& hash) const {
+DaemonPool::Snapshot DaemonPool::lookup(const std::string& hash,
+                                        const std::string& context_id) const {
     std::lock_guard<std::mutex> lk(main_mu_);
-    auto it = slots_.find(hash);
+    auto it = slots_.find(slot_key(hash, context_id));
     if (it == slots_.end()) return {};
     Slot* s = it->second.get();
     std::lock_guard<std::mutex> sl(s->mu);

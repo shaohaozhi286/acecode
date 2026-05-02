@@ -43,8 +43,13 @@ set(ACECODE_DESKTOP_SOURCES
 )
 
 # Windows 上,acecode-desktop 用 WIN32 子系统(无 console 黑窗)。
+# 同时挂上顶层 CMakeLists.txt 生成的 acecode.rc(已在 ACECODE_WINDOWS_RESOURCES 里),
+# 让 acecode-desktop.exe 在资源管理器/任务栏使用与 acecode.exe 相同的图标。
 if(WIN32)
-    add_executable(acecode-desktop WIN32 ${ACECODE_DESKTOP_SOURCES})
+    add_executable(acecode-desktop WIN32
+        ${ACECODE_DESKTOP_SOURCES}
+        ${ACECODE_WINDOWS_RESOURCES}
+    )
 else()
     add_executable(acecode-desktop ${ACECODE_DESKTOP_SOURCES})
 endif()

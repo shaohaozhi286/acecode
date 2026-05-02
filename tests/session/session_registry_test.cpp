@@ -15,10 +15,13 @@
 #include "permissions.hpp"
 #include "session/local_session_client.hpp"
 #include "session/session_registry.hpp"
+#include "session/session_storage.hpp"
 #include "tool/tool_executor.hpp"
 
 #include <atomic>
 #include <chrono>
+#include <filesystem>
+#include <random>
 #include <thread>
 
 using namespace std::chrono_literals;
@@ -35,6 +38,7 @@ using acecode::SessionInfo;
 using acecode::SessionOptions;
 using acecode::SessionRegistry;
 using acecode::SessionRegistryDeps;
+using acecode::SessionStorage;
 using acecode::ToolExecutor;
 
 namespace {
@@ -59,6 +63,14 @@ struct TestFixture {
         return d;
     }
 };
+
+std::filesystem::path temp_cwd(const std::string& hint) {
+    auto dir = std::filesystem::temp_directory_path() /
+        ("acecode_registry_" + hint + "_" + std::to_string(std::random_device{}()));
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    return dir;
+}
 
 } // namespace
 
@@ -115,6 +127,82 @@ TEST(SessionRegistry, ListActiveReflectsCurrentSessions) {
     EXPECT_EQ(after.size(), 1u);
     EXPECT_EQ(after[0].id, b);
     fx.registry.destroy(b);
+}
+
+// 场景: registry 返回给 HTTP/Web 的 id 必须就是 SessionManager 首次落盘使用
+// 的 session id。否则 Web 列表会出现 active registry id + disk id 两条记录。
+TEST(SessionRegistry, CreatedIdMatchesSessionManagerDiskId) {
+    auto cwd = temp_cwd("id_match");
+    auto project_dir = SessionStorage::get_project_dir(cwd.string());
+    std::filesystem::remove_all(project_dir);
+
+    ToolExecutor tools;
+    PermissionManager permissions;
+    SessionRegistryDeps deps;
+    deps.provider_accessor = [] { return std::shared_ptr<acecode::LlmProvider>{}; };
+    deps.tools = &tools;
+    deps.cwd = cwd.string();
+    deps.template_permissions = &permissions;
+    SessionRegistry registry(std::move(deps));
+
+    auto id = registry.create(SessionOptions{});
+    auto* entry = registry.lookup(id);
+    ASSERT_NE(entry, nullptr);
+    ASSERT_NE(entry->sm, nullptr);
+
+    acecode::ChatMessage msg;
+    msg.role = "user";
+    msg.content = "hello";
+    entry->sm->on_message(msg);
+
+    EXPECT_EQ(entry->sm->current_session_id(), id);
+    auto sessions = SessionStorage::list_sessions(project_dir);
+    ASSERT_EQ(sessions.size(), 1u);
+    EXPECT_EQ(sessions[0].id, id);
+
+    std::filesystem::remove_all(project_dir);
+    std::filesystem::remove_all(cwd);
+}
+
+// 场景: daemon resume inactive disk session 后,registry 里出现同 id entry,
+// AgentLoop 的 provider-facing history 也恢复,后续 user_input 能接着上下文聊。
+TEST(SessionRegistry, ResumeDiskSessionRestoresLoopHistory) {
+    auto cwd = temp_cwd("resume");
+    auto project_dir = SessionStorage::get_project_dir(cwd.string());
+    std::filesystem::remove_all(project_dir);
+    const std::string id = "20260502-010203-abcd";
+
+    {
+        acecode::SessionManager sm;
+        sm.start_session(cwd.string(), "test-provider", "test-model", id);
+        acecode::ChatMessage msg;
+        msg.role = "user";
+        msg.content = "remember me";
+        sm.on_message(msg);
+        sm.finalize();
+    }
+
+    ToolExecutor tools;
+    PermissionManager permissions;
+    SessionRegistryDeps deps;
+    deps.provider_accessor = [] { return std::shared_ptr<acecode::LlmProvider>{}; };
+    deps.tools = &tools;
+    deps.cwd = cwd.string();
+    deps.template_permissions = &permissions;
+    SessionRegistry registry(std::move(deps));
+
+    ASSERT_TRUE(registry.resume(id));
+    auto* entry = registry.lookup(id);
+    ASSERT_NE(entry, nullptr);
+    ASSERT_NE(entry->loop, nullptr);
+    ASSERT_EQ(entry->loop->messages().size(), 1u);
+    EXPECT_EQ(entry->loop->messages()[0].content, "remember me");
+
+    EXPECT_TRUE(registry.resume(id)) << "同 daemon 同 id 二次 resume 应复用 active entry";
+    EXPECT_EQ(registry.size(), 1u);
+
+    std::filesystem::remove_all(project_dir);
+    std::filesystem::remove_all(cwd);
 }
 
 // 场景: LocalSessionClient::subscribe 必须把 listener 真正接到对应 AgentLoop

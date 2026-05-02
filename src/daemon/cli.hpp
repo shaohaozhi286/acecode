@@ -21,6 +21,7 @@ struct Args {
     std::string token_override; // --token=<T> 覆盖自动生成的 token。desktop 子进程用,让父进程预知 token。
     std::string static_dir_override; // --static-dir=<path> 覆盖 cfg.web.static_dir。desktop dev 模式注入仓库 web/ 目录。
     std::string cwd_override;   // --cwd=<path> 覆盖 daemon 工作目录,用于从任意目录调试指定 workspace。
+    std::string run_dir_override; // --run-dir=<path> 把 daemon runtime files (heartbeat/pid/port/token/GUID 锁) 切到非默认目录。desktop 多 workspace 用 ~/.acecode/projects/<hash>/run/。
     std::string error;          // 解析错误,非空时打印 + 非零退出
 };
 

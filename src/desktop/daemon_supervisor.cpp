@@ -118,6 +118,9 @@ SpawnResult DaemonSupervisor::spawn(const SpawnRequest& req) {
         // ASCII 路径 OK;有空格不破。
         cmd << " --static-dir=\"" << req.static_dir << '"';
     }
+    if (!req.run_dir.empty()) {
+        cmd << " --run-dir=\"" << req.run_dir << '"';
+    }
 
     std::string cmdline_a = cmd.str();
     std::wstring cmdline_w(cmdline_a.begin(), cmdline_a.end()); // ASCII-only,直接转

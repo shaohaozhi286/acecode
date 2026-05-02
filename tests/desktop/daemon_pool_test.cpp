@@ -10,7 +10,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <mutex>
 #include <thread>
+#include <vector>
 
 using acecode::desktop::ActivateRequest;
 using acecode::desktop::ActivateResult;
@@ -35,11 +37,17 @@ public:
         std::chrono::milliseconds spawn_delay{0};
         // wait_until_ready 中的延迟,确保等待者真的会进 cv.wait 分支。
         std::chrono::milliseconds wait_delay{0};
+        std::mutex mu;
+        std::vector<std::string> run_dirs;
     };
     explicit MockSupervisor(std::shared_ptr<SharedState> s) : state_(std::move(s)) {}
 
-    SpawnResult spawn(const SpawnRequest&) override {
+    SpawnResult spawn(const SpawnRequest& req) override {
         state_->spawn_calls.fetch_add(1);
+        {
+            std::lock_guard<std::mutex> lk(state_->mu);
+            state_->run_dirs.push_back(req.run_dir);
+        }
         if (state_->spawn_delay.count() > 0) {
             std::this_thread::sleep_for(state_->spawn_delay);
         }
@@ -150,6 +158,39 @@ TEST(DaemonPool, DifferentHashesIndependent) {
 
     EXPECT_EQ(state->spawn_calls.load(), kHashes);
     EXPECT_EQ(pool.snapshot_all().size(), static_cast<size_t>(kHashes));
+}
+
+// 场景: 同一 workspace hash 的不同 context_id 必须是两个独立 daemon slot。
+// Desktop 同 cwd 多 resume 就靠这个把 runtime files / pid / provider 状态隔开。
+TEST(DaemonPool, SameHashDifferentContextsSpawnIndependently) {
+    auto state = std::make_shared<MockSupervisor::SharedState>();
+    DaemonPool pool;
+    pool.set_supervisor_factory_for_test([&] {
+        return std::unique_ptr<IDaemonSupervisor>(new MockSupervisor(state));
+    });
+
+    auto a = make_request("h-shared");
+    a.context_id = "default";
+    a.run_dir = "/run/default";
+    auto b = make_request("h-shared");
+    b.context_id = "resume-20260502-010203-abcd-1234abcd";
+    b.run_dir = "/run/resume";
+
+    auto ra = pool.activate(a);
+    auto rb = pool.activate(b);
+    EXPECT_TRUE(ra.ok) << ra.error;
+    EXPECT_TRUE(rb.ok) << rb.error;
+    EXPECT_EQ(state->spawn_calls.load(), 2);
+    EXPECT_NE(ra.port, rb.port);
+    EXPECT_NE(ra.token, rb.token);
+
+    EXPECT_EQ(pool.lookup("h-shared", "default").state, DaemonState::Running);
+    EXPECT_EQ(pool.lookup("h-shared", b.context_id).state, DaemonState::Running);
+    {
+        std::lock_guard<std::mutex> lk(state->mu);
+        ASSERT_EQ(state->run_dirs.size(), 2u);
+        EXPECT_NE(state->run_dirs[0], state->run_dirs[1]);
+    }
 }
 
 // 场景: spawn 失败 → state 变 Failed,error 透传给 caller;再 activate 直接返回缓存错误

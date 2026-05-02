@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstdlib>
 #include <filesystem>
+#include <mutex>
 #include <string>
 
 namespace acecode {
@@ -15,6 +16,11 @@ namespace {
 // SCM 线程调,而 get_run_mode 在 worker 线程读 — 不加保护理论上算 data race。
 std::atomic<RunMode> g_mode{RunMode::User};
 std::atomic<bool>    g_set_once{false};
+
+// run_dir override:string 不能 atomic,加 mutex。daemon 启动早期 set 一次,
+// 之后所有 get_run_dir() 调都读这个值;频率不高,锁开销可忽略。
+std::mutex  g_run_dir_mu;
+std::string g_run_dir_override;
 
 } // namespace
 
@@ -72,6 +78,16 @@ std::string resolve_data_dir(RunMode mode) {
 #endif
 }
 
+void set_run_dir_override(const std::string& path) {
+    std::lock_guard<std::mutex> lk(g_run_dir_mu);
+    g_run_dir_override = path;
+}
+
+std::string get_run_dir_override() {
+    std::lock_guard<std::mutex> lk(g_run_dir_mu);
+    return g_run_dir_override;
+}
+
 RunMode override_run_mode_for_test(RunMode mode) {
     RunMode prev = g_mode.load();
     g_mode.store(mode);
@@ -81,6 +97,10 @@ RunMode override_run_mode_for_test(RunMode mode) {
 void reset_run_mode_for_test() {
     g_mode.store(RunMode::User);
     g_set_once.store(false);
+    {
+        std::lock_guard<std::mutex> lk(g_run_dir_mu);
+        g_run_dir_override.clear();
+    }
 }
 
 } // namespace acecode

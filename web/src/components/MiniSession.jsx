@@ -3,9 +3,10 @@
 // v1 不连 ws,只展示静态摘要(取最近一条消息的前 80 字);后续可加 lazy WS bind
 // 让活动会话有实时打字预览。
 
-import { useEffect, useState } from 'react';
-import { api } from '../lib/api.js';
+import { useEffect, useMemo, useState } from 'react';
+import { createApi } from '../lib/api.js';
 import { clsx } from '../lib/format.js';
+import { sessionDisplayTitle } from '../lib/sessionTitle.js';
 
 function statusColor(s) {
   if (s === 'running') return 'bg-ok shadow-[0_0_6px_var(--ace-ok)]';
@@ -20,6 +21,7 @@ function statusLabel(s) {
 
 export function MiniSession({ session, compact, onClick }) {
   const [preview, setPreview] = useState([]);
+  const api = useMemo(() => createApi(session), [session.port, session.token]);
 
   useEffect(() => {
     let off = false;
@@ -32,7 +34,7 @@ export function MiniSession({ session, compact, onClick }) {
       })
       .catch(() => {});
     return () => { off = true; };
-  }, [session.id]);
+  }, [session.id, api]);
 
   const active = session.status === 'running';
 
@@ -52,7 +54,7 @@ export function MiniSession({ session, compact, onClick }) {
       )}>
         <span className={clsx('rounded-full shrink-0', compact ? 'w-1.5 h-1.5' : 'w-[7px] h-[7px]', statusColor(session.status))} />
         <span className={clsx('flex-1 truncate font-semibold text-fg', compact ? 'text-[10px]' : 'text-[11px]')}>
-          {session.title || session.id}
+          {sessionDisplayTitle(session, session.id)}
         </span>
         <span className={clsx(compact ? 'text-[8px]' : 'text-[9px]', active ? 'text-ok' : 'text-fg-mute')}>
           {statusLabel(session.status)}

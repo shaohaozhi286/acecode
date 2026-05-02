@@ -102,6 +102,10 @@ std::string get_acecode_dir() {
 }
 
 std::string get_run_dir() {
+    // desktop 多 workspace 模式下 daemon 启动时会调 set_run_dir_override,
+    // 把 run/ 切到 per-workspace 路径(避免共享 ~/.acecode/run/ 互相覆盖锁文件)。
+    auto override_path = get_run_dir_override();
+    if (!override_path.empty()) return override_path;
     return (fs::path(get_acecode_dir()) / constants::SUBDIR_RUN).string();
 }
 

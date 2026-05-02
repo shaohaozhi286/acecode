@@ -30,8 +30,11 @@
 #include <atomic>
 #include <filesystem>
 #include <mutex>
+#include <random>
+#include <sstream>
 #include <string>
 
+#include <cpr/cpr.h>
 #ifdef _WIN32
 #  ifndef WIN32_LEAN_AND_MEAN
 #    define WIN32_LEAN_AND_MEAN
@@ -52,8 +55,7 @@ std::string desktop_exe_dir() {
     DWORD n = ::GetModuleFileNameW(nullptr, buf, MAX_PATH);
     if (n == 0 || n == MAX_PATH) return "";
     std::wstring wpath(buf, n);
-    std::string path(wpath.begin(), wpath.end()); // ASCII path 兜底
-    return fs::path(path).parent_path().string();
+    return fs::path(wpath).parent_path().string();
 }
 
 void show_error(const std::string& msg) {
@@ -74,14 +76,17 @@ std::string locate_daemon_exe() {
 #endif
 }
 
-// dev 模式: 探测到仓库 web/ 目录(含 index.html)→ 让 daemon 走 FileSystemAssetSource,
-// 改 web/ 文件 + F5 即生效,无需重 build acecode 二进制。
+// dev 模式: 探到仓库 web/dist/ (Vite build 产物) → 让 daemon 走
+// FileSystemAssetSource,`pnpm build` 后 F5 即生效,无需重 build acecode。
+//
+// **必须是 web/dist/ 不是 web/** — web/ 是 Vite 源码(index.html 里写
+// <script src="/src/main.jsx">),daemon 不会 transpile JSX,加载会挂。
 //
 // 探测顺序:
-//   1. 环境变量 ACECODE_DEV_WEB_DIR(显式指定,绝对路径)
-//   2. 自动猜:从 desktop exe 向上 1-4 层找 "web/index.html"
-//      build/Release/acecode-desktop.exe → ../web,../../web,../../../web,../../../../web
-// 找不到返回空字符串(走默认 embedded asset 路径)。
+//   1. 环境变量 ACECODE_DEV_WEB_DIR(显式指定绝对路径,信用户判断)
+//   2. 自动猜:从 desktop exe 向上 1-5 层找 "web/dist/index.html"
+//      build/Release/acecode-desktop.exe → ../web/dist, ../../web/dist, ...
+// 找不到返回空字符串 → daemon 走 embedded(cmake 已把 web/dist 嵌进二进制)。
 std::string detect_dev_web_dir() {
 #ifdef _WIN32
     if (const char* env = std::getenv("ACECODE_DEV_WEB_DIR"); env && *env) {
@@ -92,7 +97,7 @@ std::string detect_dev_web_dir() {
     if (dir.empty()) return "";
     fs::path cur = fs::path(dir);
     for (int i = 0; i < 5; ++i) {
-        fs::path candidate = cur / "web";
+        fs::path candidate = cur / "web" / "dist";
         if (fs::exists(candidate / "index.html")) return candidate.string();
         if (!cur.has_parent_path()) break;
         cur = cur.parent_path();
@@ -129,6 +134,36 @@ const char* state_string(acecode::desktop::DaemonState s) {
 // (前端 ace-app 启动时会通过 aceDesktop_listWorkspaces 拿到空列表自动渲染)。
 // 这里的 about:blank URL 让 webview 不报错(没 daemon 起的话就没 http URL 可载)。
 const char* onboarding_url() { return "about:blank"; }
+
+std::string short_random_hex() {
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<int> dist(0, 15);
+    std::string out;
+    out.reserve(8);
+    for (int i = 0; i < 8; ++i) out.push_back(kHex[dist(gen)]);
+    return out;
+}
+
+bool post_resume_to_daemon(int port, const std::string& token,
+                           const std::string& session_id,
+                           std::string& error) {
+    auto r = cpr::Post(
+        cpr::Url{"http://127.0.0.1:" + std::to_string(port) +
+                 "/api/sessions/" + session_id + "/resume"},
+        cpr::Header{{"X-ACECode-Token", token},
+                    {"Content-Type", "application/json"}},
+        cpr::Body{"{}"},
+        cpr::Timeout{5000});
+    if (r.status_code >= 200 && r.status_code < 300) return true;
+    std::ostringstream oss;
+    oss << "resume endpoint failed status=" << r.status_code;
+    if (!r.text.empty()) oss << " body=" << r.text;
+    if (r.error.code != cpr::ErrorCode::OK) oss << " error=" << r.error.message;
+    error = oss.str();
+    return false;
+}
 
 } // namespace
 
@@ -277,6 +312,10 @@ int main(int, char**) {
         req.cwd = m->cwd;
         req.daemon_exe_path = daemon_exe;
         req.static_dir = dev_web_dir;
+        // per-workspace runtime files —避免每个 workspace 的 daemon 互相覆盖
+        // ~/.acecode/run/{heartbeat,pid,port,token,daemon.guid}。
+        req.context_id = "default";
+        req.run_dir = (fs::path(proj_dir) / m->hash / "run" / req.context_id).string();
         auto r = pool.activate(req);
         if (!r.ok) {
             return {{"error", r.error}};
@@ -292,6 +331,44 @@ int main(int, char**) {
                 return nlohmann::json{{"error", "missing hash arg"}}.dump();
             }
             return activate_fn(arr[0].get<std::string>()).dump();
+        } catch (const std::exception& e) {
+            return nlohmann::json{{"error", std::string("parse: ") + e.what()}}.dump();
+        }
+    });
+
+    // bridge: resumeSession(hash, session_id)
+    host.bind("aceDesktop_resumeSession", [&](const std::string& req) -> std::string {
+        try {
+            auto arr = nlohmann::json::parse(req);
+            if (!arr.is_array() || arr.size() < 2 ||
+                !arr[0].is_string() || !arr[1].is_string()) {
+                return nlohmann::json{{"error", "expect [hash, session_id]"}}.dump();
+            }
+            std::string hash = arr[0].get<std::string>();
+            std::string session_id = arr[1].get<std::string>();
+            auto m = registry.get(hash);
+            if (!m) return nlohmann::json{{"error", "unknown workspace hash"}}.dump();
+
+            ActivateRequest areq;
+            areq.hash = m->hash;
+            areq.context_id = "resume-" + session_id + "-" + short_random_hex();
+            areq.cwd = m->cwd;
+            areq.daemon_exe_path = daemon_exe;
+            areq.static_dir = dev_web_dir;
+            areq.run_dir = (fs::path(proj_dir) / m->hash / "run" / areq.context_id).string();
+            auto ar = pool.activate(areq);
+            if (!ar.ok) return nlohmann::json{{"error", ar.error}}.dump();
+
+            std::string resume_error;
+            if (!post_resume_to_daemon(ar.port, ar.token, session_id, resume_error)) {
+                return nlohmann::json{{"error", resume_error}}.dump();
+            }
+            return nlohmann::json{
+                {"context_id", areq.context_id},
+                {"port", ar.port},
+                {"token", ar.token},
+                {"session_id", session_id},
+            }.dump();
         } catch (const std::exception& e) {
             return nlohmann::json{{"error", std::string("parse: ") + e.what()}}.dump();
         }
@@ -340,6 +417,8 @@ int main(int, char**) {
             req.cwd = m->cwd;
             req.daemon_exe_path = daemon_exe;
             req.static_dir = dev_web_dir;
+            req.context_id = "default";
+            req.run_dir = (fs::path(proj_dir) / m->hash / "run" / req.context_id).string();
             auto r = pool.activate(req);
             if (r.ok) {
                 url = build_loopback_url(r.port, r.token);

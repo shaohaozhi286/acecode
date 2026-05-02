@@ -4,6 +4,7 @@
 import { useEffect, useState } from 'react';
 import { ChatView } from './ChatView.jsx';
 import { clsx } from '../lib/format.js';
+import { sessionDisplayTitle } from '../lib/sessionTitle.js';
 
 export function ExpandedOverlay({ session, onClose }) {
   const [show, setShow] = useState(false);
@@ -27,7 +28,7 @@ export function ExpandedOverlay({ session, onClose }) {
       >
         <div className="h-9 px-3.5 flex items-center gap-2 bg-accent-bg border-b border-border shrink-0">
           <span className="flex-1 text-[13px] font-semibold text-accent truncate">
-            {session.title || session.id}
+            {sessionDisplayTitle(session, session.id)}
           </span>
           <button
             type="button"
@@ -44,7 +45,18 @@ export function ExpandedOverlay({ session, onClose }) {
         </div>
         <div className="flex-1 flex overflow-hidden">
           <ChatView
-            sessionId={session.id}
+            sessionRef={{
+              sessionId: session.sessionId || session.id,
+              port: session.port,
+              token: session.token,
+              contextId: session.contextId,
+              workspaceHash: session.workspaceHash,
+              title: session.title,
+              summary: session.summary,
+              message_count: session.message_count,
+              created_at: session.created_at,
+              updated_at: session.updated_at,
+            }}
             onSessionPromoted={() => {}}
             health={null}
             onPermissionRequest={() => {}}

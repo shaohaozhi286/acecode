@@ -10,6 +10,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../lib/api.js';
 import { relativeTime, clsx } from '../lib/format.js';
+import { sessionDisplayTitle } from '../lib/sessionTitle.js';
 import { toast } from './Toast.jsx';
 
 function hasDesktopBridge() {
@@ -28,7 +29,7 @@ function SessionRow({ s, active, onSelect }) {
   return (
     <a
       href="#"
-      onClick={(e) => { e.preventDefault(); onSelect(s.id); }}
+      onClick={(e) => { e.preventDefault(); onSelect(s); }}
       className={clsx(
         'flex items-center gap-2 mx-1.5 my-px px-2 py-[5px] pl-[22px] rounded-md text-[12px] transition cursor-pointer',
         active
@@ -37,7 +38,7 @@ function SessionRow({ s, active, onSelect }) {
       )}
     >
       <span className={clsx('w-1.5 h-1.5 rounded-full shrink-0', statusDot(s.status))} />
-      <span className="flex-1 truncate">{s.title || s.name || s.id}</span>
+      <span className="flex-1 truncate">{sessionDisplayTitle(s, s.name || s.id)}</span>
       <span className="text-[10px] text-fg-mute shrink-0">{relativeTime(s.updated_at || s.created_at)}</span>
     </a>
   );
@@ -161,6 +162,53 @@ export function Sidebar({ activeId, onSelect, collapsed, onOpenSkills, onOpenMcp
     } catch (e) { toast({ kind: 'err', text: '切换异常:' + (e.message || '') }); }
   };
 
+  const selectSession = async (ws, session) => {
+    if (!session?.id) return;
+    if (!session.active) {
+      if (hasDesktopBridge() && ws?.hash) {
+        try {
+          const r = JSON.parse(await window.aceDesktop_resumeSession(ws.hash, session.id));
+          if (r.error) { toast({ kind: 'err', text: '恢复失败:' + r.error }); return; }
+          onSelect?.({
+            workspaceHash: ws.hash,
+            contextId: r.context_id,
+            sessionId: r.session_id || session.id,
+            port: r.port,
+            token: r.token,
+            title: session.title,
+            summary: session.summary,
+            message_count: session.message_count,
+            created_at: session.created_at,
+            updated_at: session.updated_at,
+          });
+          return;
+        } catch (e) {
+          toast({ kind: 'err', text: '恢复异常:' + (e.message || '') });
+          return;
+        }
+      }
+      try {
+        await api.resumeSession(session.id);
+        refresh().catch(() => {});
+      } catch (e) {
+        toast({ kind: 'err', text: '恢复失败:' + (e.message || '') });
+        return;
+      }
+    }
+    onSelect?.({
+      workspaceHash: ws?.hash,
+      contextId: 'default',
+      sessionId: session.id,
+      port: ws?.port,
+      token: ws?.token,
+      title: session.title,
+      summary: session.summary,
+      message_count: session.message_count,
+      created_at: session.created_at,
+      updated_at: session.updated_at,
+    });
+  };
+
   const onRename = async (hash, name) => {
     if (!hasDesktopBridge()) throw new Error('not in desktop mode');
     const r = JSON.parse(await window.aceDesktop_renameWorkspace(hash, name));
@@ -212,7 +260,7 @@ export function Sidebar({ activeId, onSelect, collapsed, onOpenSkills, onOpenMcp
                   onToggle={onToggle}
                   sessions={items}
                   activeId={activeId}
-                  onSelect={onSelect}
+                  onSelect={(session) => selectSession(ws, session)}
                   onRename={onRename}
                   onActivate={onActivate}
                 />

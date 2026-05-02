@@ -36,10 +36,12 @@ enum class DaemonState {
 
 struct ActivateRequest {
     std::string hash;             // cwd_hash
+    std::string context_id = "default"; // 同一 cwd 下的 daemon 上下文(default / resume-...)
     std::string cwd;              // 启 daemon 时设给子进程的 current_path
     std::string daemon_exe_path;  // 同目录的 acecode.exe(由调用方解析)
     bool        dangerous = false;
     std::string static_dir;       // 非空 → daemon 走 FileSystem 静态资源(dev 热重载)
+    std::string run_dir;          // 非空 → daemon 把 runtime files 写到这里(per-workspace 隔离 GUID 锁 / heartbeat / port / token)
 };
 
 struct ActivateResult {
@@ -70,7 +72,8 @@ public:
         std::string token;
         std::string error; // state=Failed 时填
     };
-    Snapshot lookup(const std::string& hash) const;
+    Snapshot lookup(const std::string& hash,
+                    const std::string& context_id = "default") const;
 
     // 列出所有 slot 状态 — 给前端 listWorkspaces 用。
     std::vector<std::pair<std::string, Snapshot>> snapshot_all() const;
@@ -96,7 +99,8 @@ private:
         std::condition_variable cv;
     };
 
-    Slot* get_or_create_slot(const std::string& hash);
+    static std::string slot_key(const std::string& hash, const std::string& context_id);
+    Slot* get_or_create_slot(const std::string& hash, const std::string& context_id);
 
     mutable std::mutex main_mu_;
     std::unordered_map<std::string, std::unique_ptr<Slot>> slots_;

@@ -62,13 +62,16 @@ namespace fs = std::filesystem;
 
 namespace acecode {
 
-void SessionManager::start_session(const std::string& cwd, const std::string& provider, const std::string& model) {
+void SessionManager::start_session(const std::string& cwd,
+                                   const std::string& provider,
+                                   const std::string& model,
+                                   const std::string& preset_session_id) {
     std::lock_guard<std::mutex> lk(mu_);
     cwd_ = cwd;
     provider_name_ = provider;
     model_name_ = model;
     project_dir_ = SessionStorage::get_project_dir(cwd);
-    session_id_.clear();
+    session_id_ = preset_session_id;
     jsonl_path_.clear();
     meta_path_str_.clear();
     started_ = true;
@@ -79,7 +82,7 @@ void SessionManager::start_session(const std::string& cwd, const std::string& pr
     created_at_.clear();
     pending_title_.clear();
     checkpoint_store_.reset();
-    checkpoint_store_.set_session(project_dir_, "");
+    checkpoint_store_.set_session(project_dir_, session_id_);
 }
 
 void SessionManager::ensure_created() {
@@ -92,7 +95,9 @@ void SessionManager::ensure_created() {
         fs::create_directories(project_dir_);
     }
 
-    session_id_ = SessionStorage::generate_session_id();
+    if (session_id_.empty()) {
+        session_id_ = SessionStorage::generate_session_id();
+    }
     jsonl_path_ = SessionStorage::session_path(project_dir_, session_id_);
     meta_path_str_ = SessionStorage::meta_path(project_dir_, session_id_);
     created_at_ = SessionStorage::now_iso8601();
@@ -128,10 +133,7 @@ void SessionManager::on_message(const ChatMessage& msg) {
         last_user_summary_ = extract_summary(msg.content);
     }
 
-    // Update meta every 5 messages
-    if (message_count_ % 5 == 0) {
-        update_meta();
-    }
+    update_meta();
 }
 
 void SessionManager::begin_user_turn_checkpoint(const std::string& user_message_uuid) {
@@ -142,7 +144,7 @@ void SessionManager::begin_user_turn_checkpoint(const std::string& user_message_
     FileCheckpointSnapshot snapshot = checkpoint_store_.make_snapshot(user_message_uuid);
     SessionStorage::append_message(jsonl_path_, FileCheckpointStore::encode_snapshot_message(snapshot));
     message_count_++;
-    if (message_count_ % 5 == 0) update_meta();
+    update_meta();
 }
 
 void SessionManager::track_file_write_before(const std::string& file_path) {
@@ -154,7 +156,7 @@ void SessionManager::track_file_write_before(const std::string& file_path) {
     if (!snapshot.has_value()) return;
     SessionStorage::append_message(jsonl_path_, FileCheckpointStore::encode_snapshot_message(*snapshot));
     message_count_++;
-    if (message_count_ % 5 == 0) update_meta();
+    update_meta();
 }
 
 bool SessionManager::file_checkpoint_can_restore(const std::string& user_message_uuid) const {

@@ -25,7 +25,7 @@ export function App() {
   const [health,    setHealth]    = useState(null);
 
   const [view,         setView]         = useState('single');
-  const [activeId,     setActiveId]     = useState('');
+  const [activeRef,    setActiveRef]    = useState(null);
   const [transition,   setTransition]   = useState(false);
   const [expanded,     setExpanded]     = useState(null);
   const [showSkills,   setShowSkills]   = useState(false);
@@ -77,6 +77,7 @@ export function App() {
     return <TokenPrompt onSubmit={onSubmitToken} />;
   }
 
+  const activeId = activeRef?.sessionId || activeRef?.id || '';
   const sidebarCollapsed = view !== 'single';
 
   return (
@@ -90,7 +91,7 @@ export function App() {
       <div className="flex-1 flex overflow-hidden relative min-h-0">
         <Sidebar
           activeId={activeId}
-          onSelect={setActiveId}
+          onSelect={setActiveRef}
           collapsed={sidebarCollapsed}
           onOpenSkills={() => setShowSkills(true)}
           onOpenMcp={() => setShowMcp(true)}
@@ -103,8 +104,8 @@ export function App() {
         >
           {view === 'single' && (
             <ChatView
-              sessionId={activeId}
-              onSessionPromoted={setActiveId}
+              sessionRef={activeRef}
+              onSessionPromoted={setActiveRef}
               health={health}
               onPermissionRequest={setPermReq}
               onQuestionRequest={setQuestionReq}

@@ -14,7 +14,10 @@ namespace acecode {
 class SessionManager {
 public:
     // Prepare a new session (lazy: files created on first message)
-    void start_session(const std::string& cwd, const std::string& provider, const std::string& model);
+    void start_session(const std::string& cwd,
+                       const std::string& provider,
+                       const std::string& model,
+                       const std::string& preset_session_id = "");
 
     // Called for each message produced during conversation.
     // Appends to JSONL and periodically updates metadata.

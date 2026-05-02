@@ -8,8 +8,8 @@
 // 没有 sessionId 时显示欢迎屏(空态:logo + 新建按钮 + slash 命令提示)。
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api } from '../lib/api.js';
-import { connection } from '../lib/connection.js';
+import { createApi } from '../lib/api.js';
+import { AceConnection } from '../lib/connection.js';
 import { Message } from './Message.jsx';
 import { ToolBlock } from './ToolBlock.jsx';
 import { InputBar } from './InputBar.jsx';
@@ -17,12 +17,24 @@ import { StatusBar } from './StatusBar.jsx';
 import { ModelPicker } from './ModelPicker.jsx';
 import { toast } from './Toast.jsx';
 import { clsx } from '../lib/format.js';
+import { sessionDisplayTitle, titleFromMessages } from '../lib/sessionTitle.js';
 
 // 列表项 id 生成 — 进度模式下要稳定,所以以 tool 名 + 起始 seq 当 key
 let _idSeq = 0;
 function nextId() { return ++_idSeq; }
 
-export function ChatView({ sessionId, onSessionPromoted, health, onPermissionRequest, onQuestionRequest }) {
+function normalizeSessionRef(sessionRef, sessionId) {
+  if (sessionRef && typeof sessionRef === 'object') return sessionRef;
+  if (typeof sessionRef === 'string' && sessionRef) return { sessionId: sessionRef };
+  if (sessionId) return { sessionId };
+  return null;
+}
+
+export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onPermissionRequest, onQuestionRequest }) {
+  const ref = useMemo(() => normalizeSessionRef(sessionRef, sessionId), [sessionRef, sessionId]);
+  const sid = ref?.sessionId || ref?.id || '';
+  const api = useMemo(() => createApi(ref), [ref?.port, ref?.token]);
+  const connection = useMemo(() => new AceConnection(), []);
   const [items,    setItems]    = useState([]);
   const [busy,     setBusy]     = useState(false);
   const [turns,    setTurns]    = useState(0);
@@ -46,37 +58,41 @@ export function ChatView({ sessionId, onSessionPromoted, health, onPermissionReq
     api.getHistory(cwd, 200)
       .then((r) => setHistory(Array.isArray(r) ? r : []))
       .catch(() => {});
-  }, [health]);
+  }, [health, api]);
 
   // 监听 desktop "新对话" 事件
   useEffect(() => {
     const handler = async () => {
       try {
         const r = await api.createSession({});
-        if (r && r.id) onSessionPromoted?.(r.id);
+        const id = r && (r.session_id || r.id);
+        if (id) onSessionPromoted?.({ ...(ref || {}), sessionId: id });
       } catch (e) {
         toast({ kind: 'err', text: '新建会话失败:' + (e.message || '') });
       }
     };
     window.addEventListener('ace:new-session', handler);
     return () => window.removeEventListener('ace:new-session', handler);
-  }, [onSessionPromoted]);
+  }, [api, onSessionPromoted, ref]);
 
   // 切 sessionId 后:重置状态 + 拉历史 + bind ws
   useEffect(() => {
     setItems([]); toolMap.current.clear(); streamingId.current = null;
     setBusy(false); setTurns(0);
-    if (!sessionId) { connection.unbind(); return; }
-    setTitle(sessionId);
-    connection.bind(sessionId);
+    if (!sid) { connection.unbind(); return; }
+    connection.reconfigure({ port: ref?.port || '', token: ref?.token || '' });
+    setTitle(sessionDisplayTitle(ref, sid));
+    connection.bind(sid);
 
     let off = false;
-    api.getMessages(sessionId, 0).then((data) => {
+    api.getMessages(sid, 0).then((data) => {
       if (off || !data) return;
       const msgs = data.messages || [];
       const initialItems = msgs.map((m) => ({
         kind: 'msg', id: nextId(), role: m.role, content: m.content || '', ts: m.ts || Date.now(),
       }));
+      const restoredTitle = titleFromMessages(msgs);
+      if (restoredTitle) setTitle(restoredTitle);
       setItems(initialItems);
       // 把残留事件回放
       (data.events || []).forEach((ev) => onWsMessage(ev));
@@ -85,7 +101,7 @@ export function ChatView({ sessionId, onSessionPromoted, health, onPermissionReq
     });
     return () => { off = true; connection.unbind(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId]);
+  }, [sid, ref?.port, ref?.token, api, connection]);
 
   const onWsMessage = useCallback((msg) => {
     const t = msg.type;
@@ -203,11 +219,12 @@ export function ChatView({ sessionId, onSessionPromoted, health, onPermissionReq
   }, [onWsMessage]);
 
   const submit = useCallback((text) => {
-    if (!sessionId) {
+    if (!sid) {
       // 自动新建一个会话
       api.createSession({}).then((r) => {
-        if (r && r.id) {
-          onSessionPromoted?.(r.id);
+        const id = r && (r.session_id || r.id);
+        if (id) {
+          onSessionPromoted?.({ ...(ref || {}), sessionId: id });
           // 等下一帧让 sessionId 写回 + bind 完成 — 先不发,提示用户再发
           toast({ kind: 'info', text: '会话已创建,请重发消息' });
         }
@@ -217,25 +234,26 @@ export function ChatView({ sessionId, onSessionPromoted, health, onPermissionReq
     connection.sendUserInput(text);
     api.appendHistory(text).catch(() => {});
     setHistory((h) => [...h, text]);
+    if (!ref?.title) setTitle(text);
     setItems((prev) => [...prev, { kind: 'msg', id: nextId(), role: 'user', content: text, ts: Date.now() }]);
-  }, [sessionId, onSessionPromoted]);
+  }, [sid, api, connection, ref, onSessionPromoted]);
 
   const abort = useCallback(() => connection.sendAbort(), []);
 
   const status = useMemo(() => {
-    if (!sessionId) return null;
+    if (!sid) return null;
     return busy ? 'running' : 'idle';
-  }, [sessionId, busy]);
+  }, [sid, busy]);
 
   // 空态:没选会话
-  if (!sessionId) {
+  if (!sid) {
     return (
       <div className="flex-1 flex flex-col">
         <div className="h-9 px-3 flex items-center bg-surface border-b border-border shrink-0">
           <span className="text-fg-mute text-[12px]">未选择会话</span>
         </div>
         <div className="flex-1 flex flex-col items-center justify-center text-center p-8">
-          <div className="text-5xl mb-4">⚡</div>
+          <img src="/acecode-logo.png" alt="ACECode" width="64" height="64" className="mb-4 select-none" draggable="false" />
           <h2 className="text-lg font-semibold mb-2">开始一个新对话</h2>
           <p className="text-fg-2 text-sm max-w-md leading-relaxed mb-6">
             ACECode 是终端 AI 编码代理 — 让 Agent 帮你读写文件、执行命令、调用工具。
@@ -289,7 +307,7 @@ export function ChatView({ sessionId, onSessionPromoted, health, onPermissionReq
           </span>
         </div>
         <div className="flex items-center gap-2">
-          <ModelPicker sessionId={sessionId} />
+          <ModelPicker sessionId={sid} apiClient={api} />
         </div>
       </div>
 

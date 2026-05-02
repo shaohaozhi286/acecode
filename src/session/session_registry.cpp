@@ -1,11 +1,34 @@
 #include "session_registry.hpp"
 
+#include "session_rewind.hpp"
 #include "session_storage.hpp"
 #include "../utils/logger.hpp"
 
+#include <filesystem>
 #include <utility>
 
 namespace acecode {
+
+namespace {
+
+bool is_llm_role(const std::string& role) {
+    return role == "user" || role == "assistant" ||
+           role == "system" || role == "tool";
+}
+
+std::pair<std::string, std::string>
+current_provider_model(const SessionRegistryDeps& deps,
+                       const std::string& fallback_model) {
+    if (deps.provider_accessor) {
+        auto provider = deps.provider_accessor();
+        if (provider) {
+            return {provider->name(), provider->model()};
+        }
+    }
+    return {"daemon", fallback_model.empty() ? "default" : fallback_model};
+}
+
+} // namespace
 
 SessionRegistry::SessionRegistry(SessionRegistryDeps deps)
     : deps_(std::move(deps)) {}
@@ -17,18 +40,29 @@ SessionRegistry::~SessionRegistry() {
 }
 
 std::string SessionRegistry::create(const SessionOptions& opts) {
-    // 用 SessionStorage 的 id 生成器 — 与 jsonl 文件名格式一致,后续 list
-    // 合并磁盘历史时不会冲突。
     std::string id = SessionStorage::generate_session_id();
 
+    auto [provider, model] = current_provider_model(deps_, opts.model_name);
+    auto entry = make_entry_locked(id, opts, provider, model);
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        entries_.emplace(id, std::move(entry));
+    }
+    LOG_INFO("[registry] created session " + id);
+    return id;
+}
+
+std::unique_ptr<SessionEntry>
+SessionRegistry::make_entry_locked(const std::string& id,
+                                   const SessionOptions& opts,
+                                   const std::string& provider,
+                                   const std::string& model) {
     auto entry = std::make_unique<SessionEntry>();
     entry->id = id;
 
     // SessionManager
     entry->sm = std::make_unique<SessionManager>();
-    entry->sm->start_session(deps_.cwd,
-                              "daemon",  // provider/model 占位 — 后续 swap
-                              opts.model_name.empty() ? "default" : opts.model_name);
+    entry->sm->start_session(deps_.cwd, provider, model, id);
 
     // PermissionManager: 复制 mode + dangerous flag,rules 由调用方在初始化
     // template_permissions 时设好。session_allowed_ 不复制,各 session 独立。
@@ -75,12 +109,68 @@ std::string SessionRegistry::create(const SessionOptions& opts) {
         entry->loop->submit(opts.initial_user_message);
     }
 
-    {
-        std::lock_guard<std::mutex> lk(mu_);
-        entries_.emplace(id, std::move(entry));
+    return entry;
+}
+
+void SessionRegistry::restore_loop_history(
+    SessionEntry& entry,
+    const std::vector<ChatMessage>& messages) const {
+    if (!entry.loop) return;
+    entry.loop->clear_messages();
+
+    for (std::size_t i = 0; i < messages.size(); ++i) {
+        const auto& msg = messages[i];
+        if (is_file_checkpoint_message(msg)) {
+            continue;
+        }
+
+        const bool is_shell_user =
+            (msg.role == "user" && !msg.content.empty() && msg.content[0] == '!');
+        const bool next_is_result =
+            (i + 1 < messages.size() && messages[i + 1].role == "tool_result");
+        if (is_shell_user && next_is_result) {
+            entry.loop->inject_shell_turn(msg.content.substr(1),
+                                          messages[i + 1].content,
+                                          "",
+                                          0);
+            ++i;
+            continue;
+        }
+
+        if (is_llm_role(msg.role)) {
+            entry.loop->push_message(msg);
+        }
     }
-    LOG_INFO("[registry] created session " + id);
-    return id;
+}
+
+bool SessionRegistry::resume(const std::string& id) {
+    if (id.empty()) return false;
+
+    std::lock_guard<std::mutex> lk(mu_);
+    if (entries_.find(id) != entries_.end()) {
+        return true;
+    }
+
+    SessionManager meta_reader;
+    auto [provider, model] = current_provider_model(deps_, "");
+    meta_reader.start_session(deps_.cwd, provider, model);
+    SessionMeta meta = meta_reader.load_session_meta(id);
+
+    if (meta.id.empty()) {
+        return false;
+    }
+    if (!meta.provider.empty()) provider = meta.provider;
+    if (!meta.model.empty()) model = meta.model;
+
+    SessionOptions opts;
+    opts.model_name = model;
+    auto entry = make_entry_locked(id, opts, provider, model);
+    auto messages = entry->sm->resume_session(id);
+    restore_loop_history(*entry, messages);
+
+    entries_.emplace(id, std::move(entry));
+    LOG_INFO("[registry] resumed session " + id);
+    return true;
 }
 
 SessionEntry* SessionRegistry::lookup(const std::string& id) {

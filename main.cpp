@@ -101,6 +101,7 @@
 #include "utils/terminal_title.hpp"
 #include "session/session_storage.hpp"
 #include "history/input_history_store.hpp"
+#include "desktop/workspace_registry.hpp"
 
 #include <cstdio>
 
@@ -1255,6 +1256,10 @@ static int run_interactive_app(const CliOptions& cli,
 
     // ---- Init logger ----
     initialize_logger_for_working_dir(working_dir);
+
+    acecode::desktop::ensure_workspace_metadata(
+        (std::filesystem::path(get_acecode_dir()) / "projects").string(),
+        working_dir);
 
     // ---- Load config ----
     AppConfig config = load_config();

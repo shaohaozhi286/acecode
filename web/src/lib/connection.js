@@ -4,6 +4,12 @@
 import { getToken } from './auth.js';
 
 const MAX_BACKOFF_MS = 30_000;
+const NORMAL_CLOSE = 1000;
+
+function closeWs(ws, reason = 'client closing') {
+  if (!ws) return;
+  try { ws.close(NORMAL_CLOSE, reason); } catch {}
+}
 
 export class AceConnection extends EventTarget {
   constructor() {
@@ -18,7 +24,7 @@ export class AceConnection extends EventTarget {
   }
 
   reconfigure({ port, token }) {
-    if (port) this._host = `127.0.0.1:${port}`;
+    if (port !== undefined) this._host = port ? `127.0.0.1:${port}` : '';
     if (token != null) this._token = token;
     if (this.sessionId) this._open();
   }
@@ -33,7 +39,7 @@ export class AceConnection extends EventTarget {
   unbind() {
     if (this.ws) {
       this.closing = true;
-      try { this.ws.close(); } catch {}
+      closeWs(this.ws, 'client unbind');
       this.ws = null;
     }
     this.sessionId = '';
@@ -48,7 +54,7 @@ export class AceConnection extends EventTarget {
     if (!this.sessionId) return;
     if (this.ws) {
       try { this.ws.onopen = this.ws.onmessage = this.ws.onclose = this.ws.onerror = null; } catch {}
-      try { this.ws.close(); } catch {}
+      closeWs(this.ws, 'client rebind');
     }
     const proto   = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const token   = this._activeToken();
@@ -87,7 +93,7 @@ export class AceConnection extends EventTarget {
       setTimeout(() => this._open(), delay);
     };
     ws.onclose = reconnect;
-    ws.onerror = () => { try { ws.close(); } catch {} };
+    ws.onerror = () => closeWs(ws, 'client error');
   }
 
   sendUserInput(text)              { this._send({ type: 'user_input', payload: { text } }); }

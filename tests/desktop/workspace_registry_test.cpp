@@ -5,6 +5,7 @@
 #include <gtest/gtest.h>
 
 #include "desktop/workspace_registry.hpp"
+#include "session/session_storage.hpp"
 #include "utils/cwd_hash.hpp"
 
 #include <nlohmann/json.hpp>
@@ -20,6 +21,7 @@ using acecode::compute_cwd_hash;
 using acecode::desktop::WorkspaceMeta;
 using acecode::desktop::WorkspaceRegistry;
 using acecode::desktop::default_workspace_name;
+using acecode::desktop::ensure_workspace_metadata;
 
 namespace {
 
@@ -130,6 +132,33 @@ TEST(WorkspaceRegistry, ScanSkipsOrphanDir) {
     EXPECT_TRUE(r.list().empty());
 }
 
+// 场景: 历史 projects/<hash> 只有 session meta、没有 workspace.json 时,
+// desktop scan 应从 meta.cwd 回填 workspace.json 并入册。
+TEST(WorkspaceRegistry, ScanBackfillsMissingWorkspaceJsonFromSessionMeta) {
+    TmpProjectsDir tmp;
+    const std::string cwd = "/home/u/old-project";
+    const std::string hash = compute_cwd_hash(cwd);
+    fs::create_directories(fs::path(tmp.path()) / hash);
+
+    acecode::SessionMeta meta;
+    meta.id = "20260502-010203-abcd";
+    meta.cwd = cwd;
+    meta.created_at = "2026-05-02T01:02:03Z";
+    meta.updated_at = meta.created_at;
+    acecode::SessionStorage::write_meta(
+        (fs::path(tmp.path()) / hash / (meta.id + ".meta.json")).string(),
+        meta);
+
+    WorkspaceRegistry r;
+    r.scan(tmp.path());
+    auto v = r.list();
+    ASSERT_EQ(v.size(), 1u);
+    EXPECT_EQ(v[0].hash, hash);
+    EXPECT_EQ(v[0].cwd, cwd);
+    EXPECT_EQ(v[0].name, "old-project");
+    EXPECT_TRUE(fs::exists(fs::path(tmp.path()) / hash / "workspace.json"));
+}
+
 // 场景: 损坏 JSON workspace.json 走 fallback — 不入册,且不删除原文件
 TEST(WorkspaceRegistry, ScanCorruptedJsonGracefullySkips) {
     TmpProjectsDir tmp;
@@ -173,6 +202,22 @@ TEST(WorkspaceRegistry, RegisterNewCreatesEntryAndFile) {
 
     // list 包含新条目
     EXPECT_EQ(r.list().size(), 1u);
+}
+
+// 场景: TUI/daemon 启动时只应补缺失 workspace.json,不能覆盖用户重命名。
+TEST(WorkspaceRegistry, EnsureWorkspaceMetadataDoesNotOverwriteExistingName) {
+    TmpProjectsDir tmp;
+    const std::string cwd = "/home/u/keep-name";
+    const std::string hash = compute_cwd_hash(cwd);
+    seed_workspace_json(tmp.path(), hash, cwd, "custom-name");
+
+    EXPECT_TRUE(ensure_workspace_metadata(tmp.path(), cwd));
+
+    WorkspaceRegistry r;
+    r.scan(tmp.path());
+    auto v = r.list();
+    ASSERT_EQ(v.size(), 1u);
+    EXPECT_EQ(v[0].name, "custom-name");
 }
 
 // 场景: register_new 第二次同 cwd → 返回已有 meta,不重写文件

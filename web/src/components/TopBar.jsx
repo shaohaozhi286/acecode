@@ -32,7 +32,7 @@ export function TopBar({ view, onViewChange, onSettings, onNewSession }) {
   return (
     <div className="h-11 px-3 flex items-center gap-2 bg-surface border-b border-border relative z-10 shrink-0">
       <div className="flex items-center gap-1.5 select-none mr-1">
-        <span className="text-[18px] leading-none">⚡</span>
+        <img src="/acecode-logo.png" alt="" width="20" height="20" className="block" draggable="false" />
         <span className="text-[15px] font-bold tracking-tight">ACECode</span>
       </div>
 

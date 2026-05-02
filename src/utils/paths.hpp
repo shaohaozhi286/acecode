@@ -37,6 +37,22 @@ RunMode get_run_mode();
 //         | Service : /var/lib/acecode
 std::string resolve_data_dir(RunMode mode);
 
+// 进程级 run/ 目录覆盖。非空时 config::get_run_dir() 直接返回这个,而不再
+// 用 <data_dir>/run/ 默认。
+//
+// 用途: desktop 多 workspace 模式下,每个 workspace 的 daemon 必须有独立的
+// runtime files (heartbeat / pid / port / token / GUID lock),否则第一个 daemon
+// 启动后 validate_can_start 会拒绝其它 workspace 的 daemon。daemon 的 cli
+// 解析到 --run-dir=<path> 时在 worker 启动早期调本函数,把 run/ 切到
+// ~/.acecode/projects/<workspace_hash>/run/。
+//
+// config / sessions / memory / logs 等其它子目录仍走 <data_dir>(共享),只
+// 隔离 run/ — 这是修复孤儿 daemon 互锁问题的最小必要面。
+//
+// 空字符串 = 清除 override。线程安全(内部加锁)。
+void set_run_dir_override(const std::string& path);
+std::string get_run_dir_override();
+
 // === 测试专用 helper(只在测试代码用,生产路径不应调) ===
 
 // 直接覆盖当前 RunMode,绕过 once-only 保护;返回原值方便 test fixture 还原。

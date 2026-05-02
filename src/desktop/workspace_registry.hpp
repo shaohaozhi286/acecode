@@ -9,9 +9,8 @@
 // name 可由用户行内重命名;缺失或损坏时回退到 fs::path(cwd).filename()(再不济
 // 用 root_name 与字面常量"workspace")。
 //
-// scan() 只在 workspace.json 可读 / cwd 字段存在时入册。完全无 cwd 线索的孤儿
-// 目录(老 SessionManager 写过 sessions 但没 workspace.json)不入册,避免 sidebar
-// 出现"未知" workspace。后续 task 13.3 会做 backfill。
+// scan() 优先读取 workspace.json;缺失时会尝试从同目录下的 session meta
+// 反推 cwd 并回填 workspace.json。完全无 cwd 线索的孤儿目录仍不入册。
 //
 // 所有操作线程安全,内部用 std::mutex 保护 entries_。所有写盘走 atomic_write
 // (.tmp + rename),失败时内存 cache 回滚。
@@ -60,6 +59,10 @@ private:
     mutable std::mutex mu_;
     std::unordered_map<std::string, WorkspaceMeta> entries_;
 };
+
+// 确保某 cwd 的 workspace.json 存在。若文件已存在,不读取也不覆盖,避免
+// TUI/daemon 启动把用户在 Desktop 里改过的 name 冲掉。
+bool ensure_workspace_metadata(const std::string& projects_dir, const std::string& cwd);
 
 // 默认命名策略 — 暴露为公共符号便于直接单测。
 //   1. fs::path(cwd).filename() 非空 → 用它

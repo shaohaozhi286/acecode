@@ -3,6 +3,7 @@
 #include "../utils/atomic_file.hpp"
 #include "../utils/cwd_hash.hpp"
 #include "../utils/logger.hpp"
+#include "../session/session_storage.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -56,6 +57,34 @@ std::optional<WorkspaceMeta> read_workspace_json(const std::string& projects_dir
                  + p + ": " + e.what());
         return std::nullopt;
     }
+}
+
+std::optional<WorkspaceMeta> infer_workspace_from_session_meta(
+    const std::string& projects_dir,
+    const std::string& hash) {
+    fs::path dir = fs::path(projects_dir) / hash;
+    std::error_code ec;
+    if (!fs::exists(dir, ec) || !fs::is_directory(dir, ec)) return std::nullopt;
+
+    for (auto it = fs::directory_iterator(dir, ec);
+         !ec && it != fs::directory_iterator();
+         it.increment(ec)) {
+        if (ec) break;
+        if (!it->is_regular_file(ec)) continue;
+        std::string name = it->path().filename().string();
+        if (name.size() < 10 || name.rfind(".meta.json") != name.size() - 10) {
+            continue;
+        }
+        auto meta = SessionStorage::read_meta(it->path().string());
+        if (meta.cwd.empty()) continue;
+
+        WorkspaceMeta m;
+        m.hash = hash;
+        m.cwd = meta.cwd;
+        m.name = default_workspace_name(meta.cwd);
+        return m;
+    }
+    return std::nullopt;
 }
 
 bool write_workspace_json(const std::string& projects_dir, const WorkspaceMeta& m) {
@@ -112,7 +141,17 @@ void WorkspaceRegistry::scan(const std::string& projects_dir) {
         if (hash.size() < 4) continue;
 
         auto m = read_workspace_json(projects_dir, hash);
-        if (!m) continue; // 无 workspace.json / 损坏 — 不入册(等 backfill 再说)
+        if (!m) {
+            auto path = workspace_json_path(projects_dir, hash);
+            if (fs::exists(path, ec)) {
+                continue; // 损坏/缺关键字段:不覆盖用户文件
+            }
+            m = infer_workspace_from_session_meta(projects_dir, hash);
+            if (m) {
+                write_workspace_json(projects_dir, *m); // best-effort backfill
+            }
+        }
+        if (!m) continue;
         entries_[hash] = std::move(*m);
     }
 }
@@ -157,6 +196,22 @@ WorkspaceMeta WorkspaceRegistry::register_new(const std::string& projects_dir,
         entries_[hash] = m;
     }
     return m;
+}
+
+bool ensure_workspace_metadata(const std::string& projects_dir, const std::string& cwd) {
+    if (cwd.empty()) return false;
+
+    WorkspaceMeta m;
+    m.hash = compute_cwd_hash(cwd);
+    m.cwd = cwd;
+    m.name = default_workspace_name(cwd);
+
+    std::string p = workspace_json_path(projects_dir, m.hash);
+    std::error_code ec;
+    if (fs::exists(p, ec) && !ec) {
+        return true;
+    }
+    return write_workspace_json(projects_dir, m);
 }
 
 bool WorkspaceRegistry::set_name(const std::string& projects_dir,

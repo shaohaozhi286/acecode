@@ -25,7 +25,8 @@ export function Grid9View({ onExpand }) {
   const newSession = async () => {
     try {
       const r = await api.createSession({});
-      if (r && r.id) toast({ kind: 'ok', text: '已新建会话:' + r.id });
+      const id = r && (r.session_id || r.id);
+      if (id) toast({ kind: 'ok', text: '已新建会话:' + id });
     } catch (e) {
       toast({ kind: 'err', text: '新建失败:' + (e.message || '') });
     }

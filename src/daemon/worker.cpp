@@ -1,5 +1,6 @@
 #include "worker.hpp"
 
+#include "../desktop/workspace_registry.hpp"
 #include "guid.hpp"
 #include "heartbeat.hpp"
 #include "platform.hpp"
@@ -265,6 +266,9 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     //   - SessionRegistry + LocalSessionClient
     //   - WebServer (HTTP + WebSocket)
     std::string cwd = std::filesystem::current_path().string();
+    acecode::desktop::ensure_workspace_metadata(
+        (std::filesystem::path(acecode::get_acecode_dir()) / "projects").string(),
+        cwd);
 
     // cfg_mut 已在前面创建(承接 port_override),这里只继续使用,不再重复声明。
     auto cwd_override = acecode::load_cwd_model_override(cwd);

@@ -21,17 +21,30 @@ export function setBase({ port, token }) {
   if (token != null) _baseToken = token;
 }
 
-function fullUrl(path) {
-  return _baseOrigin ? _baseOrigin + path : path;
+function baseOrigin(base) {
+  if (!base) return _baseOrigin;
+  if (base.origin) return base.origin;
+  if (base.port) return `${location.protocol}//127.0.0.1:${base.port}`;
+  return _baseOrigin;
 }
 
-async function request(method, path, body) {
+function baseToken(base) {
+  if (base && base.token != null) return base.token;
+  return _baseToken || getToken() || '';
+}
+
+function fullUrl(path, base) {
+  const origin = baseOrigin(base);
+  return origin ? origin + path : path;
+}
+
+async function request(method, path, body, base) {
   const headers = {};
-  const token = _baseToken || getToken() || '';
+  const token = baseToken(base);
   if (token) headers['X-ACECode-Token'] = token;
   if (body !== undefined) headers['Content-Type'] = 'application/json';
 
-  const resp = await fetch(fullUrl(path), {
+  const resp = await fetch(fullUrl(path, base), {
     method,
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -47,20 +60,25 @@ async function request(method, path, body) {
   return parsed;
 }
 
-export const api = {
-  health:           ()             => request('GET',    '/api/health'),
-  listSessions:     ()             => request('GET',    '/api/sessions'),
-  createSession:    (opts={})      => request('POST',   '/api/sessions', opts),
-  destroySession:   (id)           => request('DELETE', `/api/sessions/${encodeURIComponent(id)}`),
-  getMessages:      (id, since=0)  => request('GET',    `/api/sessions/${encodeURIComponent(id)}/messages?since=${since}`),
-  listSkills:       ()             => request('GET',    '/api/skills'),
-  setSkillEnabled:  (name, en)     => request('PUT',    `/api/skills/${encodeURIComponent(name)}`, {enabled: en}),
-  getSkillBody:     (name)         => request('GET',    `/api/skills/${encodeURIComponent(name)}/body`),
-  getMcp:           ()             => request('GET',    '/api/mcp'),
-  putMcp:           (cfg)          => request('PUT',    '/api/mcp', cfg),
-  reloadMcp:        ()             => request('POST',   '/api/mcp/reload'),
-  listModels:       ()             => request('GET',    '/api/models'),
-  switchModel:      (sid, name)    => request('POST',   `/api/sessions/${encodeURIComponent(sid)}/model`, {name}),
-  getHistory:       (cwd, max=100) => request('GET',    `/api/history?cwd=${encodeURIComponent(cwd)}&max=${max}`),
-  appendHistory:    (text)         => request('POST',   '/api/history', {text}),
-};
+export function createApi(base = null) {
+  return {
+    health:           ()             => request('GET',    '/api/health', undefined, base),
+    listSessions:     ()             => request('GET',    '/api/sessions', undefined, base),
+    createSession:    (opts={})      => request('POST',   '/api/sessions', opts, base),
+    resumeSession:    (id)           => request('POST',   `/api/sessions/${encodeURIComponent(id)}/resume`, {}, base),
+    destroySession:   (id)           => request('DELETE', `/api/sessions/${encodeURIComponent(id)}`, undefined, base),
+    getMessages:      (id, since=0)  => request('GET',    `/api/sessions/${encodeURIComponent(id)}/messages?since=${since}`, undefined, base),
+    listSkills:       ()             => request('GET',    '/api/skills', undefined, base),
+    setSkillEnabled:  (name, en)     => request('PUT',    `/api/skills/${encodeURIComponent(name)}`, {enabled: en}, base),
+    getSkillBody:     (name)         => request('GET',    `/api/skills/${encodeURIComponent(name)}/body`, undefined, base),
+    getMcp:           ()             => request('GET',    '/api/mcp', undefined, base),
+    putMcp:           (cfg)          => request('PUT',    '/api/mcp', cfg, base),
+    reloadMcp:        ()             => request('POST',   '/api/mcp/reload', undefined, base),
+    listModels:       ()             => request('GET',    '/api/models', undefined, base),
+    switchModel:      (sid, name)    => request('POST',   `/api/sessions/${encodeURIComponent(sid)}/model`, {name}, base),
+    getHistory:       (cwd, max=100) => request('GET',    `/api/history?cwd=${encodeURIComponent(cwd)}&max=${max}`, undefined, base),
+    appendHistory:    (text)         => request('POST',   '/api/history', {text}, base),
+  };
+}
+
+export const api = createApi();

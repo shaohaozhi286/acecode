@@ -76,15 +76,15 @@ public:
     SessionRegistry(const SessionRegistry&) = delete;
     SessionRegistry& operator=(const SessionRegistry&) = delete;
 
-    // 创建新 session。返回 session_id(SessionManager 实际生成时机是 lazy,
-    // 第一条消息时落盘;为了 HTTP 立刻能 subscribe,这里**主动**触发 ensure
-    // session_id 的生成 —— 通过给 SessionManager 注入一条空 user 消息?不,
-    // 改用 SessionManager::start_session 之后立刻调一个新增的 ensure_id 接口)。
-    // v1 简化: create_session 调 start_session;真正的 ensure 留 lazy,客户端
-    // 拿到 session_id 是 SessionRegistry 自己生成的 UUID(暂作为 entry key),
-    // 与 jsonl 里的 SessionStorage::generate_session_id 是两个东西。第二轮
-    // 重构再统一。当前 v1 直接复用 SessionStorage::generate_session_id。
+    // 创建新 session。返回的 id 会预分配给 SessionManager,所以后续首次落盘
+    // 使用同一个 `<session-id>-<pid>.jsonl`,不会出现 registry id 与磁盘 id
+    // 分裂。
     std::string create(const SessionOptions& opts);
+
+    // 从磁盘历史恢复 session 到 daemon 内存 registry。若 id 已 active,直接
+    // 返回 true;若磁盘没有该 id,返回 false。同一 daemon 不允许同 id 双上下文,
+    // Desktop 多上下文由多个 daemon + 不同 pid 隔离。
+    bool resume(const std::string& id);
 
     // 找一个 entry。返回 nullptr 表示不存在。返回 raw 指针由调用者立刻使用,
     // **不要存储**(随时可能被 destroy)。线程安全:加锁拷贝 raw 指针,但
@@ -102,6 +102,13 @@ public:
     std::size_t size() const;
 
 private:
+    std::unique_ptr<SessionEntry> make_entry_locked(const std::string& id,
+                                                     const SessionOptions& opts,
+                                                     const std::string& provider,
+                                                     const std::string& model);
+    void restore_loop_history(SessionEntry& entry,
+                              const std::vector<ChatMessage>& messages) const;
+
     SessionRegistryDeps                                          deps_;
     mutable std::mutex                                            mu_;
     std::unordered_map<std::string, std::unique_ptr<SessionEntry>> entries_;

@@ -20,7 +20,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # MSVC: static runtime (MT/MTd), UTF-8, PDB in Release
 if(MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-    add_compile_options(/utf-8 /Zi /FS)
+    add_compile_options(/utf-8 /Zi /FS /bigobj)
     add_link_options(
         /DEBUG
         "$<$<NOT:$<CONFIG:Debug>>:/OPT:REF>"

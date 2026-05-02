@@ -111,6 +111,10 @@ public:
     // 注册 + AgentLoop 起线程。
     virtual std::string create_session(const SessionOptions& opts) = 0;
 
+    // 从当前 cwd 的磁盘历史恢复一个 session 到内存 registry。若该 id 已经
+    // active,直接返回 true,不在同一 daemon 内创建第二份同 id 上下文。
+    virtual bool resume_session(const std::string& id) = 0;
+
     // 列出当前 daemon 内的 session(内存活跃 + 磁盘历史合并去重)。
     virtual std::vector<SessionInfo> list_sessions() = 0;
 

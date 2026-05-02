@@ -9,6 +9,7 @@
 #include "../session/local_session_client.hpp"
 #include "../session/session_client.hpp"
 #include "../session/session_registry.hpp"
+#include "../session/session_rewind.hpp"
 #include "../session/session_serializer.hpp"
 #include "../session/session_storage.hpp"
 #include "../skills/skill_registry.hpp"
@@ -23,10 +24,13 @@
 // 给 acecode_testable 加 PUBLIC 的 ASIO_STANDALONE,所以这里直接 include 即可。
 #include <crow.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cctype>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -89,6 +93,109 @@ void log_unauthorized(const std::string& path,
              + " client_ip=" + client_ip);
 }
 
+bool is_loopback_origin(const std::string& origin) {
+    return origin.rfind("http://127.0.0.1:", 0) == 0 ||
+           origin.rfind("http://localhost:", 0) == 0 ||
+           origin.rfind("http://[::1]:", 0) == 0 ||
+           origin.rfind("https://127.0.0.1:", 0) == 0 ||
+           origin.rfind("https://localhost:", 0) == 0 ||
+           origin.rfind("https://[::1]:", 0) == 0;
+}
+
+std::string ascii_lower(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return s;
+}
+
+struct OriginParts {
+    std::string scheme;
+    std::string host;
+    std::string port;
+};
+
+OriginParts split_host_port(std::string hostport) {
+    OriginParts out;
+    hostport = ascii_lower(std::move(hostport));
+    if (!hostport.empty() && hostport.front() == '[') {
+        auto end = hostport.find(']');
+        if (end != std::string::npos) {
+            out.host = hostport.substr(1, end - 1);
+            if (end + 1 < hostport.size() && hostport[end + 1] == ':') {
+                out.port = hostport.substr(end + 2);
+            }
+            return out;
+        }
+    }
+
+    auto colon = hostport.rfind(':');
+    if (colon != std::string::npos &&
+        hostport.find(':') == colon) {
+        out.host = hostport.substr(0, colon);
+        out.port = hostport.substr(colon + 1);
+    } else {
+        out.host = hostport;
+    }
+    return out;
+}
+
+OriginParts parse_origin(const std::string& origin) {
+    OriginParts out;
+    auto scheme_pos = origin.find("://");
+    if (scheme_pos == std::string::npos) return out;
+    out.scheme = ascii_lower(origin.substr(0, scheme_pos));
+    auto rest = origin.substr(scheme_pos + 3);
+    auto slash = rest.find('/');
+    if (slash != std::string::npos) rest = rest.substr(0, slash);
+    OriginParts hp = split_host_port(rest);
+    out.host = std::move(hp.host);
+    out.port = std::move(hp.port);
+    if (out.port.empty()) {
+        if (out.scheme == "http") out.port = "80";
+        else if (out.scheme == "https") out.port = "443";
+    }
+    return out;
+}
+
+bool is_loopback_host(const std::string& host) {
+    auto h = ascii_lower(host);
+    return h == "localhost" || h == "::1" ||
+           h == "127.0.0.1" ||
+           (h.size() > 4 && h.substr(0, 4) == "127.");
+}
+
+bool is_same_request_origin(const crow::request& req,
+                            const std::string& origin) {
+    auto host = req.get_header_value("Host");
+    if (host.empty()) return false;
+    if (origin == ("http://" + host) || origin == ("https://" + host)) {
+        return true;
+    }
+
+    // Treat loopback aliases on the same port as same request origin. This
+    // keeps http://127.0.0.1:36000 and ws://localhost:36000 from becoming a
+    // false "cross-origin" hop that requires a Desktop token.
+    auto o = parse_origin(origin);
+    auto h = split_host_port(host);
+    if (h.port.empty()) h.port = (o.scheme == "https") ? "443" : "80";
+    return !o.host.empty() && !h.host.empty() &&
+           o.port == h.port &&
+           is_loopback_host(o.host) &&
+           is_loopback_host(h.host);
+}
+
+AuthResult check_explicit_token(std::string_view server_token,
+                                std::string_view header_token,
+                                std::string_view query_token) {
+    if (header_token.empty() && query_token.empty()) return AuthResult::NoToken;
+    if (!server_token.empty() &&
+        (header_token == server_token || query_token == server_token)) {
+        return AuthResult::Allowed;
+    }
+    return AuthResult::BadToken;
+}
+
 } // namespace
 
 // =====================================================================
@@ -111,6 +218,20 @@ struct WebServer::Impl {
     // -----------------------------------------------------------------
     // 鉴权 helper
     // -----------------------------------------------------------------
+    AuthResult auth_result_for_request(const crow::request& req,
+                                       const std::string& header_token,
+                                       const std::string& query_token) const {
+        // Cross-origin browser access is only for local Desktop/Web multi-daemon
+        // hops. Same-origin browser requests keep the existing loopback behavior.
+        auto origin = req.get_header_value("Origin");
+        if (!origin.empty() && !is_same_request_origin(req, origin)) {
+            if (!is_loopback_origin(origin)) return AuthResult::BadToken;
+            return check_explicit_token(deps.token, header_token, query_token);
+        }
+        return check_request_auth(req.remote_ip_address, deps.token,
+                                  header_token, query_token);
+    }
+
     // 返回 nullopt = 通过;返回 response = 拒绝(调用方 return 这个值)。
     std::optional<crow::response> require_auth(const crow::request& req) {
         std::string header_token;
@@ -120,10 +241,7 @@ struct WebServer::Impl {
         auto qt = req.url_params.get("token");
         if (qt) query_token = qt;
 
-        auto result = check_request_auth(req.remote_ip_address,
-                                          deps.token,
-                                          header_token,
-                                          query_token);
+        auto result = auth_result_for_request(req, header_token, query_token);
         if (result == AuthResult::Allowed) return std::nullopt;
 
         const char* reason = (result == AuthResult::NoToken)
@@ -132,7 +250,29 @@ struct WebServer::Impl {
         crow::response resp(401);
         resp.add_header("Content-Type", "application/json");
         resp.body = json{{"error", reason}}.dump();
+        add_cors(req, resp);
         return resp;
+    }
+
+    void add_cors(const crow::request& req, crow::response& resp) {
+        std::string origin = req.get_header_value("Origin");
+        if (origin.empty() || !is_loopback_origin(origin)) return;
+        resp.add_header("Access-Control-Allow-Origin", origin);
+        resp.add_header("Vary", "Origin");
+        resp.add_header("Access-Control-Allow-Credentials", "false");
+        resp.add_header("Access-Control-Allow-Headers", "Content-Type, X-ACECode-Token");
+        resp.add_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+    }
+
+    crow::response with_cors(const crow::request& req, crow::response resp) {
+        add_cors(req, resp);
+        return resp;
+    }
+
+    crow::response cors_preflight(const crow::request& req) {
+        crow::response r(204);
+        add_cors(req, r);
+        return r;
     }
 
     // -----------------------------------------------------------------
@@ -237,6 +377,11 @@ struct WebServer::Impl {
     }
 
     void register_history() {
+        CROW_ROUTE(app, "/api/history").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
+
         // GET /api/history?cwd=<cwd>&max=N: 拉 per-cwd 历史(与 TUI 共享同一份文件)
         CROW_ROUTE(app, "/api/history").methods(crow::HTTPMethod::GET)
         ([this](const crow::request& req) {
@@ -249,7 +394,7 @@ struct WebServer::Impl {
                 crow::response r(400);
                 r.body = R"({"error":"cwd parameter required"})";
                 r.add_header("Content-Type", "application/json");
-                return r;
+                return with_cors(req, std::move(r));
             }
             int max = 0;
             if (auto m = req.url_params.get("max")) {
@@ -258,7 +403,7 @@ struct WebServer::Impl {
             auto arr = load_history(cwd, max, deps.app_config->input_history);
             crow::response r(arr.dump());
             r.add_header("Content-Type", "application/json");
-            return r;
+            return with_cors(req, std::move(r));
         });
 
         // POST /api/history body {text}: 追加。enabled=false 静默丢弃。
@@ -276,10 +421,10 @@ struct WebServer::Impl {
                 crow::response r(400);
                 r.body = json{{"error", std::string("bad json: ") + e.what()}}.dump();
                 r.add_header("Content-Type", "application/json");
-                return r;
+                return with_cors(req, std::move(r));
             }
             append_history(deps.cwd, text, deps.app_config->input_history);
-            return crow::response(204);
+            return with_cors(req, crow::response(204));
         });
     }
 
@@ -303,6 +448,23 @@ struct WebServer::Impl {
     }
 
     void register_sessions() {
+        CROW_ROUTE(app, "/api/sessions").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
+        CROW_ROUTE(app, "/api/sessions/<string>").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req, const std::string&) {
+            return cors_preflight(req);
+        });
+        CROW_ROUTE(app, "/api/sessions/<string>/messages").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req, const std::string&) {
+            return cors_preflight(req);
+        });
+        CROW_ROUTE(app, "/api/sessions/<string>/resume").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req, const std::string&) {
+            return cors_preflight(req);
+        });
+
         // GET /api/sessions: 内存活跃 + 磁盘历史合并去重。spec 9.3
         CROW_ROUTE(app, "/api/sessions").methods(crow::HTTPMethod::GET)
         ([this](const crow::request& req) {
@@ -316,21 +478,29 @@ struct WebServer::Impl {
             auto project_dir = SessionStorage::get_project_dir(deps.cwd);
             auto disk = SessionStorage::list_sessions(project_dir);
 
-            // 合并去重: id 集合
+            std::unordered_map<std::string, SessionMeta> disk_by_id;
+            for (const auto& m : disk) {
+                disk_by_id[m.id] = m;
+            }
+
+            // 合并去重: active 优先,但用磁盘 meta 补齐摘要/模型/计数。
             std::unordered_set<std::string> seen;
             json arr = json::array();
             for (const auto& s : active) {
                 seen.insert(s.id);
+                auto meta_it = disk_by_id.find(s.id);
+                const SessionMeta* m = meta_it == disk_by_id.end() ? nullptr : &meta_it->second;
                 json o;
                 o["id"]            = s.id;
                 o["active"]        = true;
-                o["title"]         = s.title;
-                o["summary"]       = s.summary;
-                o["created_at"]    = s.created_at;
-                o["updated_at"]    = s.updated_at;
-                o["provider"]      = s.provider;
-                o["model"]         = s.model;
-                o["message_count"] = s.message_count;
+                o["status"]        = "running";
+                o["title"]         = !s.title.empty() ? s.title : (m ? m->title : "");
+                o["summary"]       = !s.summary.empty() ? s.summary : (m ? m->summary : "");
+                o["created_at"]    = !s.created_at.empty() ? s.created_at : (m ? m->created_at : "");
+                o["updated_at"]    = !s.updated_at.empty() ? s.updated_at : (m ? m->updated_at : "");
+                o["provider"]      = !s.provider.empty() ? s.provider : (m ? m->provider : "");
+                o["model"]         = !s.model.empty() ? s.model : (m ? m->model : "");
+                o["message_count"] = s.message_count > 0 ? s.message_count : (m ? m->message_count : 0);
                 arr.push_back(std::move(o));
             }
             for (const auto& m : disk) {
@@ -338,6 +508,7 @@ struct WebServer::Impl {
                 json o;
                 o["id"]            = m.id;
                 o["active"]        = false;
+                o["status"]        = "idle";
                 o["title"]         = m.title;
                 o["summary"]       = m.summary;
                 o["created_at"]    = m.created_at;
@@ -349,7 +520,7 @@ struct WebServer::Impl {
             }
             crow::response r(arr.dump());
             r.add_header("Content-Type", "application/json");
-            return r;
+            return with_cors(req, std::move(r));
         });
 
         // POST /api/sessions: 新建 session,返回 {session_id}。spec 9.4
@@ -360,7 +531,7 @@ struct WebServer::Impl {
                 crow::response r(503);
                 r.body = R"({"error":"session client unavailable"})";
                 r.add_header("Content-Type", "application/json");
-                return r;
+                return with_cors(req, std::move(r));
             }
 
             SessionOptions opts;
@@ -377,15 +548,37 @@ struct WebServer::Impl {
                     crow::response r(400);
                     r.body = json{{"error", std::string("bad json: ") + e.what()}}.dump();
                     r.add_header("Content-Type", "application/json");
-                    return r;
+                    return with_cors(req, std::move(r));
                 }
             }
 
             auto id = deps.session_client->create_session(opts);
             crow::response r(201);
-            r.body = json{{"session_id", id}}.dump();
+            r.body = json{{"session_id", id}, {"id", id}}.dump();
             r.add_header("Content-Type", "application/json");
-            return r;
+            return with_cors(req, std::move(r));
+        });
+
+        // POST /api/sessions/:id/resume: 把磁盘历史恢复进当前 daemon。
+        CROW_ROUTE(app, "/api/sessions/<string>/resume").methods(crow::HTTPMethod::POST)
+        ([this](const crow::request& req, const std::string& id) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.session_client) {
+                crow::response r(503);
+                r.body = R"({"error":"session client unavailable"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            if (!deps.session_client->resume_session(id)) {
+                crow::response r(404);
+                r.body = R"({"error":"session not found"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            crow::response r(200);
+            r.body = json{{"session_id", id}, {"id", id}, {"active", true}}.dump();
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
         });
 
         // DELETE /api/sessions/:id: 销毁。spec 9.5
@@ -397,7 +590,7 @@ struct WebServer::Impl {
                 return crow::response(503);
             }
             deps.session_client->destroy_session(id);
-            return crow::response(204);
+            return with_cors(req, crow::response(204));
         });
 
         // GET /api/sessions/:id/messages?since=N: 拉历史 + 缓存事件。spec 9.6
@@ -438,18 +631,43 @@ struct WebServer::Impl {
                         wrapper["messages"] = std::move(msgs);
                         crow::response r(wrapper.dump());
                         r.add_header("Content-Type", "application/json");
-                        return r;
+                        return with_cors(req, std::move(r));
                     }
+                }
+
+                auto project_dir = SessionStorage::get_project_dir(deps.cwd);
+                auto candidates = SessionStorage::find_session_files(project_dir, id);
+                if (!candidates.empty()) {
+                    json msgs = json::array();
+                    for (const auto& m : SessionStorage::load_messages(candidates.front().jsonl_path)) {
+                        if (is_file_checkpoint_message(m)) continue;
+                        msgs.push_back(chat_message_to_json(m));
+                    }
+                    json wrapper;
+                    wrapper["events"]   = std::move(arr);
+                    wrapper["messages"] = std::move(msgs);
+                    crow::response r(wrapper.dump());
+                    r.add_header("Content-Type", "application/json");
+                    return with_cors(req, std::move(r));
                 }
             }
 
             crow::response r(arr.dump());
             r.add_header("Content-Type", "application/json");
-            return r;
+            return with_cors(req, std::move(r));
         });
     }
 
     void register_models() {
+        CROW_ROUTE(app, "/api/models").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
+        CROW_ROUTE(app, "/api/sessions/<string>/model").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req, const std::string&) {
+            return cors_preflight(req);
+        });
+
         // GET /api/models: 返回 saved_models + 合成 (legacy) 行
         CROW_ROUTE(app, "/api/models").methods(crow::HTTPMethod::GET)
         ([this](const crow::request& req) {
@@ -458,7 +676,7 @@ struct WebServer::Impl {
             auto arr = list_models(*deps.app_config);
             crow::response r(arr.dump());
             r.add_header("Content-Type", "application/json");
-            return r;
+            return with_cors(req, std::move(r));
         });
 
         // POST /api/sessions/:id/model body {name}: 切当前 effective model
@@ -471,7 +689,7 @@ struct WebServer::Impl {
                 crow::response r(503);
                 r.body = R"({"error":"provider state unavailable"})";
                 r.add_header("Content-Type", "application/json");
-                return r;
+                return with_cors(req, std::move(r));
             }
 
             // 校验 session 存在
@@ -479,7 +697,7 @@ struct WebServer::Impl {
                 crow::response r(404);
                 r.body = R"({"error":"session not found"})";
                 r.add_header("Content-Type", "application/json");
-                return r;
+                return with_cors(req, std::move(r));
             }
 
             std::string name;
@@ -490,13 +708,13 @@ struct WebServer::Impl {
                 crow::response r(400);
                 r.body = json{{"error", std::string("bad json: ") + e.what()}}.dump();
                 r.add_header("Content-Type", "application/json");
-                return r;
+                return with_cors(req, std::move(r));
             }
             if (name.empty()) {
                 crow::response r(400);
                 r.body = R"({"error":"name required"})";
                 r.add_header("Content-Type", "application/json");
-                return r;
+                return with_cors(req, std::move(r));
             }
 
             auto entry = find_model_by_name(*deps.app_config, name);
@@ -504,7 +722,7 @@ struct WebServer::Impl {
                 crow::response r(400);
                 r.body = json{{"error", "Unknown model name: " + name}}.dump();
                 r.add_header("Content-Type", "application/json");
-                return r;
+                return with_cors(req, std::move(r));
             }
 
             // 真正切换。注: v1 切的是 daemon 全局 provider,所有 session 共享一个
@@ -518,7 +736,7 @@ struct WebServer::Impl {
                 {"context_window",  deps.app_config->context_window},
             }.dump();
             r.add_header("Content-Type", "application/json");
-            return r;
+            return with_cors(req, std::move(r));
         });
     }
 
@@ -716,15 +934,15 @@ struct WebServer::Impl {
         CROW_WEBSOCKET_ROUTE(app, "/ws/sessions/<string>")
             .onaccept([this](const crow::request& req, void**) -> bool {
                 // 鉴权: ?token=xxx 或 X-ACECode-Token (普通浏览器 WS 没法
-                // 设 header,所以 query 是主路径)。loopback 同样跳过。
+                // 设 header,所以 query 是主路径)。跨 origin 的 Desktop/Web
+                // 多 daemon 连接即便来自 loopback 也必须带 token。
                 std::string header_token;
                 auto h = req.get_header_value("X-ACECode-Token");
                 if (!h.empty()) header_token = h;
                 std::string query_token;
                 if (auto t = req.url_params.get("token")) query_token = t;
 
-                auto r = check_request_auth(req.remote_ip_address, deps.token,
-                                              header_token, query_token);
+                auto r = auth_result_for_request(req, header_token, query_token);
                 if (r != AuthResult::Allowed) {
                     log_unauthorized(req.url, req.remote_ip_address,
                                        r == AuthResult::NoToken ? "ws no token" : "ws bad token");

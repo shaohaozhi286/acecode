@@ -156,6 +156,62 @@ static std::int64_t file_mtime_epoch(const fs::path& p) {
     return static_cast<std::int64_t>(ftime.time_since_epoch().count());
 }
 
+size_t utf8_safe_prefix_length_storage(const std::string& text, size_t max_bytes) {
+    if (text.size() <= max_bytes) return text.size();
+    size_t i = max_bytes;
+    while (i > 0 && (static_cast<unsigned char>(text[i]) & 0xC0) == 0x80) {
+        --i;
+    }
+    return i;
+}
+
+std::string extract_storage_summary(const std::string& content) {
+    constexpr size_t max_summary_bytes = 80;
+    constexpr size_t min_word_break_bytes = 60;
+    if (content.size() <= max_summary_bytes) return content;
+
+    const size_t safe_limit = utf8_safe_prefix_length_storage(content, max_summary_bytes);
+    if (safe_limit == 0) return "...";
+    size_t cut = safe_limit;
+    while (cut > min_word_break_bytes && content[cut - 1] != ' ') {
+        --cut;
+    }
+    if (cut <= min_word_break_bytes) cut = safe_limit;
+    return content.substr(0, cut) + "...";
+}
+
+bool is_visible_history_message(const ChatMessage& msg) {
+    if (msg.is_meta || msg.is_compact_summary) return false;
+    if (!msg.content.empty()) return true;
+    if (!msg.tool_calls.is_null() && !msg.tool_calls.empty()) return true;
+    return false;
+}
+
+void enrich_meta_from_messages(const std::string& project_dir,
+                               const std::string& session_id,
+                               int pid,
+                               SessionMeta& meta) {
+    if (meta.message_count > 0 && !meta.summary.empty()) return;
+
+    const auto path = SessionStorage::session_path(project_dir, session_id, pid);
+    auto messages = SessionStorage::load_messages(path);
+    if (messages.empty()) return;
+
+    int visible_count = 0;
+    std::string latest_user;
+    for (const auto& msg : messages) {
+        if (!is_visible_history_message(msg)) continue;
+        ++visible_count;
+        if (msg.role == "user" && !msg.content.empty()) {
+            latest_user = msg.content;
+        }
+    }
+    if (meta.message_count <= 0) meta.message_count = visible_count;
+    if (meta.summary.empty() && !latest_user.empty()) {
+        meta.summary = extract_storage_summary(latest_user);
+    }
+}
+
 std::vector<SessionStorage::SessionFileCandidate>
 SessionStorage::find_session_files(const std::string& project_dir,
                                     const std::string& session_id) {
@@ -208,9 +264,11 @@ std::vector<SessionMeta> SessionStorage::list_sessions(const std::string& projec
         std::smatch m;
         if (!std::regex_match(fname, m, re)) continue;
         std::string id = m[1].str();
+        int pid = m[3].matched ? std::stoi(m[3].str()) : 0;
 
         SessionMeta meta = read_meta(entry.path().string());
         if (meta.id.empty()) continue;
+        enrich_meta_from_messages(project_dir, id, pid, meta);
         std::int64_t mtime = file_mtime_epoch(entry.path());
 
         auto it = by_id.find(id);
