@@ -6,7 +6,7 @@
   "description": "ACECode daemon web UI (React + Vite + Tailwind v4)",
   "scripts": {
     "dev": "vite",
-    "test": "node src/lib/questionPicker.test.js",
+    "test": "node src/lib/runTests.js",
     "build": "vite build",
     "preview": "vite preview"
   },

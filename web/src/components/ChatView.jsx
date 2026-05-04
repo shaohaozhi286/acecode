@@ -14,10 +14,12 @@ import { Message } from './Message.jsx';
 import { ToolBlock } from './ToolBlock.jsx';
 import { InputBar } from './InputBar.jsx';
 import { QuestionPicker } from './QuestionPicker.jsx';
+import { StickyUserContext } from './StickyUserContext.jsx';
 import { SidePanel } from './SidePanel.jsx';
 import { StatusBar } from './StatusBar.jsx';
 import { toast } from './Toast.jsx';
 import { clsx } from '../lib/format.js';
+import { findStickyUserContext, sameStickyUserContext } from '../lib/stickyUserContext.js';
 import { sessionDisplayTitle, titleFromMessages } from '../lib/sessionTitle.js';
 import { VsIcon } from './Icon.jsx';
 
@@ -25,6 +27,19 @@ import { VsIcon } from './Icon.jsx';
 let _idSeq = 0;
 function nextId() { return ++_idSeq; }
 function messageKey(role, content) { return `${role || ''}\u0000${content || ''}`; }
+
+function collectRowMetrics(container) {
+  if (!container) return [];
+  const containerRect = container.getBoundingClientRect();
+  return Array.from(container.querySelectorAll('[data-chat-row="true"]')).map((node) => {
+    const rect = node.getBoundingClientRect();
+    return {
+      id: node.getAttribute('data-chat-item-id') || '',
+      top: rect.top - containerRect.top + container.scrollTop,
+      bottom: rect.bottom - containerRect.top + container.scrollTop,
+    };
+  });
+}
 
 function normalizeSessionRef(sessionRef, sessionId) {
   if (sessionRef && typeof sessionRef === 'object') return sessionRef;
@@ -57,6 +72,35 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
   const sidePanelResizeActiveRef = useRef(false);
   const toolMap   = useRef(new Map()); // tool name → item.id (本地数组里的 ID)
   const streamingId = useRef(null);
+  const itemsRef = useRef(items);
+  const stickyRafRef = useRef(0);
+  const [stickyUserContext, setStickyUserContext] = useState(null);
+
+  const measureStickyContext = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) {
+      setStickyUserContext(null);
+      return;
+    }
+    const nextContext = findStickyUserContext({
+      items: itemsRef.current,
+      rowMetrics: collectRowMetrics(el),
+      scrollTop: el.scrollTop,
+      clientHeight: el.clientHeight,
+      scrollHeight: el.scrollHeight,
+    });
+    setStickyUserContext((prev) => (
+      sameStickyUserContext(prev, nextContext) ? prev : nextContext
+    ));
+  }, []);
+
+  const scheduleStickyMeasure = useCallback(() => {
+    if (stickyRafRef.current) return;
+    stickyRafRef.current = requestAnimationFrame(() => {
+      stickyRafRef.current = 0;
+      measureStickyContext();
+    });
+  }, [measureStickyContext]);
 
   // 自动滚到底
   useEffect(() => {
@@ -68,6 +112,50 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
     const id = requestAnimationFrame(() => inputRef.current?.focus());
     return () => cancelAnimationFrame(id);
   }, [sid]);
+
+  useEffect(() => {
+    itemsRef.current = items;
+    scheduleStickyMeasure();
+  }, [items, scheduleStickyMeasure]);
+
+  useEffect(() => {
+    setStickyUserContext(null);
+    scheduleStickyMeasure();
+  }, [sid, scheduleStickyMeasure]);
+
+  useEffect(() => () => {
+    if (stickyRafRef.current) {
+      cancelAnimationFrame(stickyRafRef.current);
+      stickyRafRef.current = 0;
+    }
+  }, []);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return undefined;
+
+    const onResize = () => scheduleStickyMeasure();
+    window.addEventListener('resize', onResize);
+
+    let mutationObserver = null;
+    if (typeof MutationObserver !== 'undefined') {
+      mutationObserver = new MutationObserver(scheduleStickyMeasure);
+      mutationObserver.observe(el, { childList: true, subtree: true, characterData: true });
+    }
+
+    let resizeObserver = null;
+    if (typeof ResizeObserver !== 'undefined') {
+      resizeObserver = new ResizeObserver(scheduleStickyMeasure);
+      resizeObserver.observe(el);
+    }
+
+    scheduleStickyMeasure();
+    return () => {
+      window.removeEventListener('resize', onResize);
+      mutationObserver?.disconnect();
+      resizeObserver?.disconnect();
+    };
+  }, [sid, scheduleStickyMeasure]);
 
   // 拉 history(per-cwd)
   useEffect(() => {
@@ -485,30 +573,50 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
         </div>
       </div>
 
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-3.5 py-3 flex flex-col gap-3">
-        {items.map((it) => {
-          if (it.kind === 'tool')          return <ToolBlock key={it.id} entry={it.tool} />;
-          return <Message
-                    key={it.id} role={it.role} content={it.content} ts={it.ts}
-                    streaming={it.streaming}
-                    messageId={it.messageId}
-                    onFork={forkAndSwitch}
-                 />;
-        })}
-        {busy && streamingId.current == null && (
-          <div className="flex gap-2 max-w-[85%]">
-            <div className="w-6 h-6 rounded-full bg-ok text-white text-[11px] font-bold flex items-center justify-center mt-[2px]">A</div>
-            <div className="flex gap-1 py-2 px-3">
-              {[0,1,2].map((i) => (
-                <span
-                  key={i}
-                  className="w-1.5 h-1.5 rounded-full bg-fg-mute"
-                  style={{ animation: `ace-pulse 1.2s ease-in-out ${i * 0.2}s infinite` }}
+      <div className="relative flex-1 min-h-0">
+        <div
+          ref={scrollRef}
+          onScroll={scheduleStickyMeasure}
+          className="h-full overflow-y-auto px-3.5 py-3 flex flex-col gap-3"
+        >
+          {items.map((it) => (
+            <div
+              key={it.id}
+              className="ace-chat-row flex flex-col"
+              data-chat-row="true"
+              data-chat-item-id={String(it.id)}
+              data-chat-kind={it.kind || ''}
+              data-chat-role={it.kind === 'msg' ? (it.role || '') : (it.kind || '')}
+              data-chat-user-message={it.kind === 'msg' && it.role === 'user' ? 'true' : undefined}
+            >
+              {it.kind === 'tool' ? (
+                <ToolBlock entry={it.tool} />
+              ) : (
+                <Message
+                  role={it.role} content={it.content} ts={it.ts}
+                  streaming={it.streaming}
+                  messageId={it.messageId}
+                  onFork={forkAndSwitch}
                 />
-              ))}
+              )}
             </div>
-          </div>
-        )}
+          ))}
+          {busy && streamingId.current == null && (
+            <div className="flex gap-2 max-w-[85%]">
+              <div className="w-6 h-6 rounded-full bg-ok text-white text-[11px] font-bold flex items-center justify-center mt-[2px]">A</div>
+              <div className="flex gap-1 py-2 px-3">
+                {[0,1,2].map((i) => (
+                  <span
+                    key={i}
+                    className="w-1.5 h-1.5 rounded-full bg-fg-mute"
+                    style={{ animation: `ace-pulse 1.2s ease-in-out ${i * 0.2}s infinite` }}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+        <StickyUserContext context={stickyUserContext} />
       </div>
 
       {questionForView && (

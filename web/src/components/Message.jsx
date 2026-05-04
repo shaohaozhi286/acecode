@@ -2,7 +2,7 @@
 // assistant 走 markdown-it 渲染(见 lib/markdown.js)。
 //
 // hover actions(codex 风格):每条 user / assistant 消息悬停时浮出
-// 右上角的复制 + 分叉按钮。复制走 navigator.clipboard.writeText;分叉
+// 消息底部同侧的复制 + 分叉按钮(左消息在左下角,右消息在右下角)。复制走 navigator.clipboard.writeText;分叉
 // 调上层 onFork(messageId) — disabled 当 messageId 缺失。
 
 import { memo } from 'react';
@@ -29,7 +29,7 @@ function HoverActions({ messageId, getCopyText, onFork }) {
     onFork?.(messageId);
   };
   return (
-    <div className="ace-msg-actions absolute top-1 right-1 flex gap-0.5">
+    <div className="ace-msg-actions flex gap-0.5">
       <button type="button" onClick={handleCopy} title="复制">
         <VsIcon name="copy" size={17} />
       </button>
@@ -47,16 +47,18 @@ function HoverActions({ messageId, getCopyText, onFork }) {
 
 function UserBubble({ content, ts, messageId, onFork }) {
   return (
-    <div className="self-end max-w-[70%] flex flex-col items-end gap-0.5">
-      <div className="group relative px-3.5 py-2 pr-10 rounded-[14px] rounded-br-[4px] bg-accent-bg border border-accent-soft text-fg text-[13px] leading-[1.5] whitespace-pre-wrap break-words">
+    <div className="self-end max-w-[70%] flex flex-col items-end gap-0.5 group">
+      <div className="px-3.5 py-2 rounded-[14px] rounded-br-[4px] bg-accent-bg border border-accent-soft text-fg text-[13px] leading-[1.5] whitespace-pre-wrap break-words">
         {content}
+      </div>
+      <div className="min-h-6 flex items-center justify-end gap-1 mr-1">
+        {ts != null && <span className="text-[10px] text-fg-mute">{relativeTime(ts)}</span>}
         <HoverActions
           messageId={messageId}
           getCopyText={() => content}
           onFork={onFork}
         />
       </div>
-      {ts != null && <span className="text-[10px] text-fg-mute mr-1">{relativeTime(ts)}</span>}
     </div>
   );
 }
@@ -69,7 +71,6 @@ function AssistantBubble({ content, ts, streaming, messageId, onFork }) {
       <div className="flex-1 min-w-0 flex flex-col gap-1">
         <div className="text-[12px] font-semibold text-fg flex items-center gap-1.5">
           ACECode
-          {ts != null && <span className="text-[10px] text-fg-mute font-normal">{relativeTime(ts)}</span>}
         </div>
         <div
           className={clsx(
@@ -78,14 +79,17 @@ function AssistantBubble({ content, ts, streaming, messageId, onFork }) {
           )}
           dangerouslySetInnerHTML={html}
         />
+        <div className="min-h-6 flex items-center gap-1">
+          {!streaming && (
+            <HoverActions
+              messageId={messageId}
+              getCopyText={() => content || ''}
+              onFork={onFork}
+            />
+          )}
+          {ts != null && <span className="text-[10px] text-fg-mute font-normal">{relativeTime(ts)}</span>}
+        </div>
       </div>
-      {!streaming && (
-        <HoverActions
-          messageId={messageId}
-          getCopyText={() => content || ''}
-          onFork={onFork}
-        />
-      )}
     </div>
   );
 }
