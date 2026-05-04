@@ -1,5 +1,6 @@
 #include "daemon_supervisor.hpp"
 
+#include "../utils/encoding.hpp"
 #include "../utils/token.hpp"
 
 #include <chrono>
@@ -55,6 +56,50 @@ struct WsaInit {
     }
 };
 WsaInit g_wsa_init;
+
+// Quote one argv element per the Windows command-line parsing rules. Even
+// though CreateProcessW has a Unicode API, it still takes argv as one mutable
+// command-line buffer.
+std::wstring quote_arg_w(const std::wstring& s) {
+    bool need_quotes = s.empty() || s.find_first_of(L" \t\"") != std::wstring::npos;
+    if (!need_quotes) return s;
+
+    std::wstring out;
+    out.reserve(s.size() + 2);
+    out.push_back(L'"');
+    int backslashes = 0;
+    for (wchar_t c : s) {
+        if (c == L'\\') {
+            ++backslashes;
+        } else if (c == L'"') {
+            for (int i = 0; i < backslashes * 2 + 1; ++i) out.push_back(L'\\');
+            out.push_back(L'"');
+            backslashes = 0;
+        } else {
+            for (int i = 0; i < backslashes; ++i) out.push_back(L'\\');
+            backslashes = 0;
+            out.push_back(c);
+        }
+    }
+    for (int i = 0; i < backslashes * 2; ++i) out.push_back(L'\\');
+    out.push_back(L'"');
+    return out;
+}
+
+std::wstring build_command_line_w(const std::vector<std::wstring>& argv) {
+    std::wostringstream oss;
+    for (size_t i = 0; i < argv.size(); ++i) {
+        if (i) oss << L' ';
+        oss << quote_arg_w(argv[i]);
+    }
+    return oss.str();
+}
+
+std::string windows_error_suffix(DWORD err) {
+    std::ostringstream oss;
+    oss << " (gle=" << err << ")";
+    return oss.str();
+}
 #endif
 
 } // namespace
@@ -89,6 +134,34 @@ SpawnResult DaemonSupervisor::spawn(const SpawnRequest& req) {
         return r;
     }
 
+    std::wstring exe_w = acecode::utf8_to_wide(req.daemon_exe_path);
+    if (exe_w.empty()) {
+        r.error = "daemon_exe_path cannot be converted to UTF-16";
+        return r;
+    }
+
+    std::wstring cwd_w;
+    LPCWSTR cwd_arg = nullptr;
+    if (!req.cwd.empty()) {
+        cwd_w = acecode::utf8_to_wide(req.cwd);
+        if (cwd_w.empty()) {
+            r.error = "cwd cannot be converted to UTF-16: " + req.cwd;
+            return r;
+        }
+        DWORD attrs = ::GetFileAttributesW(cwd_w.c_str());
+        if (attrs == INVALID_FILE_ATTRIBUTES) {
+            DWORD err = ::GetLastError();
+            r.error = "working directory is not accessible: " + req.cwd
+                + windows_error_suffix(err);
+            return r;
+        }
+        if ((attrs & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+            r.error = "working directory is not a directory: " + req.cwd;
+            return r;
+        }
+        cwd_arg = cwd_w.c_str();
+    }
+
     // 1) Job Object: KILL_ON_JOB_CLOSE 让父进程死时子进程跟着死。
     impl_->job = ::CreateJobObjectW(nullptr, nullptr);
     if (!impl_->job) {
@@ -106,24 +179,35 @@ SpawnResult DaemonSupervisor::spawn(const SpawnRequest& req) {
     }
 
     // 2) 拼命令行: "exe" daemon --foreground --port=N --token=T [-dangerous]
-    //    路径加引号防带空格;其它 token 是 ASCII / 数字,无需转义。
-    std::ostringstream cmd;
-    cmd << '"' << req.daemon_exe_path << '"'
-        << " daemon --foreground"
-        << " --port=" << req.port
-        << " --token=" << req.token;
-    if (req.dangerous) cmd << " -dangerous";
+    //    路径按 UTF-8/ACP → UTF-16 转换后再 quote,避免中文目录被按字节 widening。
+    std::vector<std::wstring> argv;
+    argv.push_back(exe_w);
+    argv.push_back(L"daemon");
+    argv.push_back(L"--foreground");
+    argv.push_back(L"--port=" + std::to_wstring(req.port));
+    argv.push_back(L"--token=" + acecode::utf8_to_wide(req.token));
+    if (req.dangerous) argv.push_back(L"-dangerous");
     if (!req.static_dir.empty()) {
-        // 路径含空格时整体引号包起 — daemon CLI 解析按 token 分,空格会切断 value。
-        // ASCII 路径 OK;有空格不破。
-        cmd << " --static-dir=\"" << req.static_dir << '"';
+        std::wstring static_dir_w = acecode::utf8_to_wide(req.static_dir);
+        if (static_dir_w.empty()) {
+            r.error = "static_dir cannot be converted to UTF-16: " + req.static_dir;
+            ::CloseHandle(impl_->job);
+            impl_->job = nullptr;
+            return r;
+        }
+        argv.push_back(L"--static-dir=" + static_dir_w);
     }
     if (!req.run_dir.empty()) {
-        cmd << " --run-dir=\"" << req.run_dir << '"';
+        std::wstring run_dir_w = acecode::utf8_to_wide(req.run_dir);
+        if (run_dir_w.empty()) {
+            r.error = "run_dir cannot be converted to UTF-16: " + req.run_dir;
+            ::CloseHandle(impl_->job);
+            impl_->job = nullptr;
+            return r;
+        }
+        argv.push_back(L"--run-dir=" + run_dir_w);
     }
-
-    std::string cmdline_a = cmd.str();
-    std::wstring cmdline_w(cmdline_a.begin(), cmdline_a.end()); // ASCII-only,直接转
+    std::wstring cmdline_w = build_command_line_w(argv);
 
     // 把 stdout/stderr 重定向到 NUL。desktop 父进程是 WIN32 子系统(无 console),
     // 子进程默认继承 invalid 的 std handle,daemon 端 Logger.mirror_stderr=true 与
@@ -155,24 +239,17 @@ SpawnResult DaemonSupervisor::spawn(const SpawnRequest& req) {
     //   走这条路稳妥)。
     DWORD flags = CREATE_NO_WINDOW | CREATE_SUSPENDED;
 
-    // 第一参数 nullptr = 让 Windows 解析 lpCommandLine 第一个 token 为 exe。
-    // lpCommandLine 必须是可写 buffer。
+    // lpApplicationName 显式传 exe_w,避免带空格/非 ASCII 路径时依赖系统从
+    // lpCommandLine 重新解析。lpCommandLine 仍需可写 buffer 供子进程拿 argv。
     std::vector<wchar_t> cmd_buf(cmdline_w.begin(), cmdline_w.end());
     cmd_buf.push_back(L'\0');
 
     // lpCurrentDirectory: 让子进程在指定 cwd 启动。daemon 用 current_path()
     // 决定 session 存储目录 / project_instructions 起点等,所以这是 multi-workspace
     // 模型里关键的隔离点 — 不靠父进程改自身 cwd 的 hack。
-    std::wstring cwd_w;
-    LPCWSTR cwd_arg = nullptr;
-    if (!req.cwd.empty()) {
-        cwd_w.assign(req.cwd.begin(), req.cwd.end()); // ASCII 路径 OK
-        cwd_arg = cwd_w.c_str();
-    }
-
     // bInheritHandles=TRUE 让 nul handle 真正传给子进程(STARTF_USESTDHANDLES 必需)
     BOOL ok = ::CreateProcessW(
-        nullptr,
+        exe_w.c_str(),
         cmd_buf.data(),
         nullptr, nullptr,
         nul ? TRUE : FALSE, flags,

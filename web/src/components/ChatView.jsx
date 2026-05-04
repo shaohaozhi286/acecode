@@ -13,6 +13,7 @@ import { connection } from '../lib/connection.js';
 import { Message } from './Message.jsx';
 import { ToolBlock } from './ToolBlock.jsx';
 import { InputBar } from './InputBar.jsx';
+import { SidePanel } from './SidePanel.jsx';
 import { StatusBar } from './StatusBar.jsx';
 import { toast } from './Toast.jsx';
 import { clsx } from '../lib/format.js';
@@ -40,7 +41,7 @@ function newSessionRefFrom(ref, sessionId) {
   return next;
 }
 
-export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onPermissionRequest, onQuestionRequest }) {
+export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onPermissionRequest, onQuestionRequest, showSidePanel = false, sidePanelWidth = 280, onSidePanelResize }) {
   const ref = useMemo(() => normalizeSessionRef(sessionRef, sessionId), [sessionRef, sessionId]);
   const sid = ref?.sessionId || ref?.id || '';
   const api = useMemo(() => createApi(ref), [ref?.port, ref?.token, ref?.workspaceHash]);
@@ -50,6 +51,8 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
   const [history,  setHistory]  = useState([]);
   const [title,    setTitle]    = useState('');
   const scrollRef = useRef(null);
+  const layoutRef = useRef(null);
+  const sidePanelResizeActiveRef = useRef(false);
   const toolMap   = useRef(new Map()); // tool name → item.id (本地数组里的 ID)
   const streamingId = useRef(null);
 
@@ -103,7 +106,10 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
       if (off || !data) return;
       const msgs = data.messages || [];
       const initialItems = msgs.map((m) => ({
-        kind: 'msg', id: nextId(), role: m.role, content: m.content || '', ts: m.ts || Date.now(),
+        kind: 'msg', id: nextId(),
+        messageId: m.id || '',  // 后端稳定 ID(user uuid / 其它 sha1),fork 用
+        role: m.role, content: m.content || '',
+        ts: m.ts || Date.now(),
       }));
       const seenMessages = new Set(msgs.map((m) => messageKey(m.role, m.content || '')));
       const restoredTitle = titleFromMessages(msgs);
@@ -151,13 +157,18 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
             const currentStreamingId = streamingId.current;
             streamingId.current = null;
             next = prev.map((x) => x.id === currentStreamingId
-              ? { ...x, role: 'assistant', content: p.content || x.content || '', ts: Date.now(), streaming: false }
+              ? { ...x, role: 'assistant',
+                  content: p.content || x.content || '',
+                  messageId: p.id || x.messageId || '',
+                  ts: Date.now(), streaming: false }
               : x);
             break;
           }
           streamingId.current = null;
           next = [...prev, {
-            kind: 'msg', id: nextId(), role: p.role || 'system',
+            kind: 'msg', id: nextId(),
+            messageId: p.id || '',
+            role: p.role || 'system',
             content: p.content || '', ts: Date.now(),
           }];
           break;
@@ -180,10 +191,13 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
             isTaskComplete: !!p.is_task_complete,
             isDone: false,
             success: null,
+            tool: p.tool || '',
+            displayOverride: p.display_override || '',
             title: p.display_override || p.command_preview || `${p.tool || ''}  ${JSON.stringify(p.args || {})}`,
             tailLines: [], currentPartial: '', totalLines: 0, totalBytes: 0, elapsed: 0,
             summary: p.is_task_complete ? { object: (p.args && p.args.summary) || '完成' } : null,
             output: '',
+            hunks: [],
           };
           next = [...prev, { kind: 'tool', id, tool }];
           break;
@@ -216,6 +230,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
               success: !!p.success,
               summary: p.summary || x.tool.summary,
               output: p.output || '',
+              hunks: Array.isArray(p.hunks) ? p.hunks : [],
             }};
           });
           break;
@@ -299,10 +314,83 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
 
   const abort = useCallback(() => connection.sendAbort(sid), [sid]);
 
+  const startSidePanelResize = useCallback((event) => {
+    if (!showSidePanel || !sid || !onSidePanelResize) return;
+    if (event.button != null && event.button !== 0) return;
+    if (sidePanelResizeActiveRef.current) return;
+    sidePanelResizeActiveRef.current = true;
+    event.preventDefault();
+    const contentWidth = layoutRef.current?.getBoundingClientRect().width || 0;
+    const startX = event.clientX;
+    const startWidth = sidePanelWidth;
+    document.body.classList.add('ace-resizing');
+    if (event.pointerId != null) event.currentTarget.setPointerCapture?.(event.pointerId);
+
+    const onMove = (moveEvent) => {
+      onSidePanelResize(startWidth + startX - moveEvent.clientX, contentWidth);
+    };
+    const onStop = () => {
+      sidePanelResizeActiveRef.current = false;
+      document.body.classList.remove('ace-resizing');
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onStop);
+      window.removeEventListener('pointercancel', onStop);
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onStop);
+    };
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onStop, { once: true });
+    window.addEventListener('pointercancel', onStop, { once: true });
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onStop, { once: true });
+  }, [onSidePanelResize, showSidePanel, sid, sidePanelWidth]);
+
+  const onSidePanelHandleKeyDown = useCallback((event) => {
+    if (!onSidePanelResize) return;
+    const step = event.shiftKey ? 32 : 12;
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+      event.preventDefault();
+      const delta = event.key === 'ArrowLeft' ? step : -step;
+      const contentWidth = layoutRef.current?.getBoundingClientRect().width || 0;
+      onSidePanelResize(sidePanelWidth + delta, contentWidth);
+    }
+  }, [onSidePanelResize, sidePanelWidth]);
+
+  // fork: 调后端 POST /api/sessions/:id/fork,成功后切到新 session(同 ref)。
+  // 失败弹 toast 不打断当前 session。新 session 不会自动启 turn,
+  // 用户在新 session 自己输入消息才开始。
+  const forkAndSwitch = useCallback(async (messageId) => {
+    if (!sid || !messageId) return;
+    try {
+      const r = await api.forkSession(sid, messageId, '');
+      if (!r || !r.session_id) {
+        toast({ kind: 'err', text: '分叉失败:无 session_id' });
+        return;
+      }
+      onSessionPromoted?.({
+        ...newSessionRefFrom(ref, r.session_id),
+        title: r.title,
+      });
+      toast({ kind: 'ok', text: '已分叉到 ' + (r.title || r.session_id) });
+    } catch (e) {
+      toast({ kind: 'err', text: '分叉失败:' + (e?.message || '') });
+    }
+  }, [sid, api, ref, onSessionPromoted]);
+
   const status = useMemo(() => {
     if (!sid) return null;
     return busy ? 'running' : 'idle';
   }, [sid, busy]);
+
+  // SidePanel 「变更」tab 的数据源:把 items 里 tool 项的 hunks 抽成消息格式。
+  // 必须放在 early return 之前,否则空态/有 session 之间 hooks 数量不一致 → React #310。
+  const sidePanelMessages = useMemo(() => {
+    if (!showSidePanel) return [];
+    return items
+      .filter((it) => it.kind === 'tool' && Array.isArray(it.tool?.hunks) && it.tool.hunks.length > 0)
+      .map((it) => ({ hunks: it.tool.hunks }));
+  }, [items, showSidePanel]);
 
   // 空态:没选会话
   if (!sid) {
@@ -351,8 +439,11 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
     );
   }
 
+  const sidePanelCwd = ref?.cwd || health?.cwd || '';
+
   return (
-    <div className="flex-1 flex flex-col min-w-0">
+    <div ref={layoutRef} className="flex-1 flex min-w-0 ace-chat-layout">
+      <div className="flex-1 flex flex-col min-w-0">
       <div className="h-9 px-3 flex items-center justify-between bg-surface border-b border-border shrink-0 gap-2">
         <div className="flex items-center gap-2 min-w-0">
           <span className="text-[13px] font-semibold text-fg truncate">{title}</span>
@@ -371,7 +462,12 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-3.5 py-3 flex flex-col gap-3">
         {items.map((it) => {
           if (it.kind === 'tool')          return <ToolBlock key={it.id} entry={it.tool} />;
-          return <Message key={it.id} role={it.role} content={it.content} ts={it.ts} streaming={it.streaming} />;
+          return <Message
+                    key={it.id} role={it.role} content={it.content} ts={it.ts}
+                    streaming={it.streaming}
+                    messageId={it.messageId}
+                    onFork={forkAndSwitch}
+                 />;
         })}
         {busy && streamingId.current == null && (
           <div className="flex gap-2 max-w-[85%]">
@@ -396,6 +492,29 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
         onAbort={abort}
       />
       <StatusBar model="—" turns={turns} branch={health?.branch || ''} />
+      </div>
+      {showSidePanel && sid && (
+        <>
+          <div
+            role="separator"
+            aria-label="调整右侧栏宽度"
+            aria-orientation="vertical"
+            tabIndex={0}
+            className="ace-resize-handle ace-resize-handle-right"
+            onPointerDown={startSidePanelResize}
+            onMouseDown={startSidePanelResize}
+            onKeyDown={onSidePanelHandleKeyDown}
+            title="拖动调整右侧栏宽度"
+          />
+          <SidePanel
+            sessionRef={ref}
+            sessionId={sid}
+            cwd={sidePanelCwd}
+            messages={sidePanelMessages}
+            width={sidePanelWidth}
+          />
+        </>
+      )}
     </div>
   );
 }

@@ -12,6 +12,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <string>
 
 namespace fs = std::filesystem;
@@ -112,6 +113,31 @@ TEST(SessionStorage, EmptyTitleIsOmittedOnWrite) {
                          std::istreambuf_iterator<char>());
     EXPECT_EQ(content.find("\"title\""), std::string::npos)
         << "empty title should be omitted from the serialized JSON; got: " << content;
+}
+
+// 场景:desktop visibility 是 project-level workspace.json marker,不是
+// 单个 session .meta.json 字段。TUI/SessionStorage 写 meta 时不能把项目暴露给 Desktop。
+TEST(SessionStorage, WriteMetaDoesNotSerializeDesktopVisible) {
+    auto dir = make_unique_tmp_dir("desktop-visible");
+    auto meta_path = (dir / "desktop-visible.meta.json").string();
+
+    SessionMeta in;
+    in.id = "desktop-visible";
+    in.cwd = "/home/shao/tui-only";
+    in.summary = "tui-only session";
+
+    SessionStorage::write_meta(meta_path, in);
+
+    std::ifstream ifs(meta_path);
+    std::string content((std::istreambuf_iterator<char>(ifs)),
+                         std::istreambuf_iterator<char>());
+    EXPECT_EQ(content.find("desktop_visible"), std::string::npos)
+        << "session meta must not carry desktop visibility marker; got: " << content;
+
+    SessionMeta out;
+    ASSERT_NO_THROW(out = SessionStorage::read_meta(meta_path));
+    EXPECT_EQ(out.id, in.id);
+    EXPECT_EQ(out.cwd, in.cwd);
 }
 
 // 场景:早期/异常退出的 meta 可能还停在 message_count=0 且 summary 空,

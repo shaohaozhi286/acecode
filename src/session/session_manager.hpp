@@ -55,8 +55,26 @@ public:
 
     // Fork the active session into a fresh session id containing retained_prefix
     // plus retained checkpoint metadata. The previous full transcript remains
-    // untouched on disk.
+    // untouched on disk. Used by /rewind (TUI) and POST /api/sessions/:id/fork
+    // (web; with title/forked_from/fork_message_id non-empty).
+    //
+    // 这个版本会把 manager 切到新 session,后续 on_message 写新 jsonl;
+    // 老文件保持只读。
     std::string fork_active_session(const std::vector<ChatMessage>& retained_prefix);
+
+    // 写一个全新 session 到磁盘(JSONL + meta),不动当前 active session 状态。
+    // 用于 web POST /api/sessions/:id/fork:fork 操作完成后,源 session 仍然
+    // 是 manager 的 active session,新 session 是磁盘上独立文件,后续由调用方
+    // 通过 SessionRegistry 装载 + 注册另一个 SessionManager。
+    //
+    // 失败(IO 异常)时会清理半个文件,返回空字符串。
+    // file_checkpoint 元消息(is_meta + subtype="file_checkpoint")自动过滤,
+    // 新 session 不继承 checkpoint(spec 的明确决定)。
+    std::string fork_session_to_new_id(
+        const std::vector<ChatMessage>& retained_prefix,
+        const std::string& title,
+        const std::string& forked_from_id,
+        const std::string& fork_message_id);
 
     // Cleanup old sessions beyond max_sessions limit.
     void cleanup_old_sessions(int max_sessions);

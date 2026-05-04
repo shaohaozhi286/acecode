@@ -1,5 +1,7 @@
 #include "cwd_hash.hpp"
 
+#include "encoding.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
@@ -54,7 +56,8 @@ std::string wide_to_utf8(const std::wstring& w) {
 }
 
 std::optional<std::string> final_path_identity(const std::string& path) {
-    std::wstring wpath = std::filesystem::path(path).wstring();
+    std::wstring wpath = acecode::utf8_to_wide(path);
+    if (wpath.empty()) return std::nullopt;
     HANDLE h = ::CreateFileW(
         wpath.c_str(),
         0,
@@ -99,22 +102,23 @@ std::string normalize_cwd_for_hash(const std::string& cwd) {
     std::string normalized = cwd;
     if (!normalized.empty()) {
         std::error_code ec;
+#ifdef _WIN32
+        if (auto final_path = final_path_identity(normalized)) {
+            normalized = *final_path;
+        } else {
+#endif
         fs::path p(normalized);
         // Only canonicalize existing paths. Non-existing synthetic test paths
         // keep their historical string identity.
         if (fs::exists(p, ec)) {
-#ifdef _WIN32
-            if (auto final_path = final_path_identity(normalized)) {
-                normalized = *final_path;
-            } else
-#endif
-            {
             auto canonical = fs::weakly_canonical(p, ec);
             if (!ec && !canonical.empty()) {
                 normalized = canonical.string();
             }
-            }
         }
+#ifdef _WIN32
+        }
+#endif
     }
 
     // 1. 反斜杠 → 正斜杠(跨平台一致)

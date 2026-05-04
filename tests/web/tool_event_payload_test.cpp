@@ -145,3 +145,41 @@ TEST(ToolEventPayload, ToolEndSuccessWithoutSummaryFallback) {
     EXPECT_EQ(p["success"], true);
     EXPECT_FALSE(p.contains("summary"));
 }
+
+// 场景: ToolResult.hunks 无值 → payload.hunks 总是空数组(不省略也不 null)。
+// 前端契约: 永远是 array,前端写 if (hunks.length) 不必先 contains 检查。
+TEST(ToolEventPayload, ToolEndAlwaysIncludesHunksField) {
+    ToolResult r;
+    r.success = true;
+    auto p = build_tool_end_payload("bash", r, 0.0, "");
+    ASSERT_TRUE(p.contains("hunks"));
+    EXPECT_TRUE(p["hunks"].is_array());
+    EXPECT_EQ(p["hunks"].size(), 0u);
+}
+
+// 场景: ToolResult.hunks 有值 → 通过 encode_tool_hunks 序列化进 payload.hunks。
+// file_edit 的 diff 着色靠这个字段;一旦丢字段,Web 上 file_edit 退化到纯文本。
+TEST(ToolEventPayload, ToolEndCarriesHunksFromResult) {
+    ToolResult r;
+    r.success = true;
+
+    acecode::DiffHunk h;
+    h.old_start = 1; h.old_count = 1; h.new_start = 1; h.new_count = 1;
+    acecode::DiffLine rm;
+    rm.kind = acecode::DiffLineKind::Removed;
+    rm.text = "old line";
+    acecode::DiffLine ad;
+    ad.kind = acecode::DiffLineKind::Added;
+    ad.text = "new line";
+    h.lines = {rm, ad};
+    r.hunks = std::vector<acecode::DiffHunk>{h};
+
+    auto p = build_tool_end_payload("file_edit", r, 0.05, "");
+    ASSERT_TRUE(p["hunks"].is_array());
+    ASSERT_EQ(p["hunks"].size(), 1u);
+    EXPECT_EQ(p["hunks"][0]["old_start"], 1);
+    ASSERT_TRUE(p["hunks"][0]["lines"].is_array());
+    EXPECT_EQ(p["hunks"][0]["lines"].size(), 2u);
+    EXPECT_EQ(p["hunks"][0]["lines"][0]["kind"], "removed");
+    EXPECT_EQ(p["hunks"][0]["lines"][1]["kind"], "added");
+}

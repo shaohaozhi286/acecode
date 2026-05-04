@@ -39,6 +39,7 @@ FetchContent_MakeAvailable(webview)
 # daemon_supervisor / folder_picker_win)都在 acecode_testable 里,这里不重复列。
 set(ACECODE_DESKTOP_SOURCES
     ${CMAKE_SOURCE_DIR}/src/desktop/main.cpp
+    ${CMAKE_SOURCE_DIR}/src/desktop/splash_screen.cpp
     ${CMAKE_SOURCE_DIR}/src/desktop/web_host.cpp
 )
 
@@ -76,7 +77,7 @@ target_link_libraries(acecode-desktop PRIVATE
 # folder_picker_win.cpp 在 acecode_testable 里,所以这里不必单独 link;但为了让
 # acecode_unit_tests 也能链通,再在 acecode_testable 一侧添加(见根 CMakeLists)。
 if(WIN32)
-    target_link_libraries(acecode-desktop PRIVATE ole32 shell32)
+    target_link_libraries(acecode-desktop PRIVATE ole32 shell32 user32 gdi32)
 endif()
 
 if(MSVC)

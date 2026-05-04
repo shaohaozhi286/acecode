@@ -3,7 +3,6 @@
 #include "../utils/atomic_file.hpp"
 #include "../utils/cwd_hash.hpp"
 #include "../utils/logger.hpp"
-#include "../session/session_storage.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -41,8 +40,14 @@ std::optional<WorkspaceMeta> read_workspace_json(const std::string& projects_dir
 
     try {
         auto j = nlohmann::json::parse(contents);
-        if (!j.is_object()) return std::nullopt;
-        if (!j.contains("cwd") || !j["cwd"].is_string()) return std::nullopt;
+        if (!j.is_object()) {
+            LOG_WARN("[workspace_registry] workspace.json is not an object at " + p);
+            return std::nullopt;
+        }
+        if (!j.contains("cwd") || !j["cwd"].is_string()) {
+            LOG_WARN("[workspace_registry] workspace.json missing cwd at " + p);
+            return std::nullopt;
+        }
 
         WorkspaceMeta m;
         m.hash = hash;
@@ -51,40 +56,15 @@ std::optional<WorkspaceMeta> read_workspace_json(const std::string& projects_dir
             m.name = j["name"].get<std::string>();
         }
         if (m.name.empty()) m.name = default_workspace_name(m.cwd);
+        if (j.contains("desktop_visible") && j["desktop_visible"].is_boolean()) {
+            m.desktop_visible = j["desktop_visible"].get<bool>();
+        }
         return m;
     } catch (const std::exception& e) {
         LOG_WARN(std::string("[workspace_registry] workspace.json parse failed at ")
                  + p + ": " + e.what());
         return std::nullopt;
     }
-}
-
-std::optional<WorkspaceMeta> infer_workspace_from_session_meta(
-    const std::string& projects_dir,
-    const std::string& hash) {
-    fs::path dir = fs::path(projects_dir) / hash;
-    std::error_code ec;
-    if (!fs::exists(dir, ec) || !fs::is_directory(dir, ec)) return std::nullopt;
-
-    for (auto it = fs::directory_iterator(dir, ec);
-         !ec && it != fs::directory_iterator();
-         it.increment(ec)) {
-        if (ec) break;
-        if (!it->is_regular_file(ec)) continue;
-        std::string name = it->path().filename().string();
-        if (name.size() < 10 || name.rfind(".meta.json") != name.size() - 10) {
-            continue;
-        }
-        auto meta = SessionStorage::read_meta(it->path().string());
-        if (meta.cwd.empty()) continue;
-
-        WorkspaceMeta m;
-        m.hash = hash;
-        m.cwd = meta.cwd;
-        m.name = default_workspace_name(meta.cwd);
-        return m;
-    }
-    return std::nullopt;
 }
 
 bool write_workspace_json(const std::string& projects_dir, const WorkspaceMeta& m) {
@@ -100,24 +80,28 @@ bool write_workspace_json(const std::string& projects_dir, const WorkspaceMeta& 
     nlohmann::json j;
     j["cwd"] = m.cwd;
     j["name"] = m.name;
+    j["desktop_visible"] = m.desktop_visible;
     return atomic_write_file(p, j.dump(2));
 }
 
 } // namespace
 
 std::string default_workspace_name(const std::string& cwd) {
-    // path("foo/").filename() 在 C++17 是空 — 先去尾斜杠避免误判。
+    // path("foo/").filename() 在 C++17 是空；Windows 上
+    // fs::path(std::string) 还会按本地窄编码解释 UTF-8。这里用纯字符串切
+    // basename,既避开尾斜杠,也保留中文等 UTF-8 名称不被转码。
     std::string clean = cwd;
     while (clean.size() > 1 && (clean.back() == '/' || clean.back() == '\\')) {
         clean.pop_back();
     }
-    fs::path p(clean);
 
-    std::string base = p.filename().string();
+    const size_t slash = clean.find_last_of("/\\");
+    std::string base = slash == std::string::npos ? clean : clean.substr(slash + 1);
     if (!base.empty()) return base;
 
-    std::string root = p.root_name().string();
-    if (!root.empty()) return root;
+    if (clean.size() >= 2 && clean[1] == ':') {
+        return clean.substr(0, 2);
+    }
 
     return "workspace";
 }
@@ -141,17 +125,8 @@ void WorkspaceRegistry::scan(const std::string& projects_dir) {
         if (hash.size() < 4) continue;
 
         auto m = read_workspace_json(projects_dir, hash);
-        if (!m) {
-            auto path = workspace_json_path(projects_dir, hash);
-            if (fs::exists(path, ec)) {
-                continue; // 损坏/缺关键字段:不覆盖用户文件
-            }
-            m = infer_workspace_from_session_meta(projects_dir, hash);
-            if (m) {
-                write_workspace_json(projects_dir, *m); // best-effort backfill
-            }
-        }
         if (!m) continue;
+        if (!m->desktop_visible) continue;
         entries_[hash] = std::move(*m);
     }
 }
@@ -184,6 +159,7 @@ WorkspaceMeta WorkspaceRegistry::register_new(const std::string& projects_dir,
     m.hash = hash;
     m.cwd = cwd;
     m.name = default_workspace_name(cwd);
+    m.desktop_visible = true;
 
     if (!write_workspace_json(projects_dir, m)) {
         // 写盘失败 — 仍把 meta 入册以便用户当前会话能用,但下次启动 scan 会缺失。
@@ -205,6 +181,7 @@ bool ensure_workspace_metadata(const std::string& projects_dir, const std::strin
     m.hash = compute_cwd_hash(cwd);
     m.cwd = cwd;
     m.name = default_workspace_name(cwd);
+    m.desktop_visible = false;
 
     std::string p = workspace_json_path(projects_dir, m.hash);
     std::error_code ec;

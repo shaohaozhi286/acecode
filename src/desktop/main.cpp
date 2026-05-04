@@ -7,7 +7,7 @@
 //   4. 注册 webview JS bridge: aceDesktop_listWorkspaces / activateWorkspace /
 //      renameWorkspace / addWorkspace
 //   5. 若 active workspace 存在 → DaemonPool::activate → 拼 URL → navigate
-//      若不存在 → navigate 到 about:blank,sidebar 渲染只显示 "+ 添加项目"
+//      若不存在 → 仍启动 shared daemon 只用于承载前端,sidebar 渲染为空列表 + "+ 添加项目"
 //   6. WebHost.run() 阻塞直到窗口关闭
 //   7. quit: pool.stop_all() + 写 last_active_workspace_hash
 //
@@ -16,12 +16,14 @@
 #include "daemon_pool.hpp"
 #include "folder_picker.hpp"
 #include "pick_active.hpp"
+#include "splash_screen.hpp"
 #include "url_builder.hpp"
 #include "web_host.hpp"
 #include "workspace_registry.hpp"
 
 #include "../config/config.hpp"
 #include "../utils/cwd_hash.hpp"
+#include "../utils/encoding.hpp"
 #include "../utils/logger.hpp"
 #include "../utils/state_file.hpp"
 
@@ -58,21 +60,37 @@ std::string desktop_exe_dir() {
     DWORD n = ::GetModuleFileNameW(nullptr, buf, MAX_PATH);
     if (n == 0 || n == MAX_PATH) return "";
     std::wstring wpath(buf, n);
-    return fs::path(wpath).parent_path().string();
+    return acecode::wide_to_utf8(fs::path(wpath).parent_path().wstring());
 }
 
 void show_error(const std::string& msg) {
-    std::wstring w(msg.begin(), msg.end());
+    std::wstring w = acecode::utf8_to_wide(msg);
     ::MessageBoxW(nullptr, w.c_str(), L"ACECode Desktop", MB_ICONERROR | MB_OK);
 }
 #endif
+
+fs::path path_from_utf8(const std::string& path) {
+#ifdef _WIN32
+    return fs::u8path(path);
+#else
+    return fs::path(path);
+#endif
+}
+
+std::string path_to_utf8(const fs::path& path) {
+#ifdef _WIN32
+    return path.u8string();
+#else
+    return path.string();
+#endif
+}
 
 std::string locate_daemon_exe() {
 #ifdef _WIN32
     auto dir = desktop_exe_dir();
     if (dir.empty()) return "";
-    fs::path p = fs::path(dir) / "acecode.exe";
-    if (fs::exists(p)) return p.string();
+    fs::path p = path_from_utf8(dir) / "acecode.exe";
+    if (fs::exists(p)) return path_to_utf8(p);
     return "";
 #else
     return "";
@@ -98,10 +116,10 @@ std::string detect_dev_web_dir() {
     }
     auto dir = desktop_exe_dir();
     if (dir.empty()) return "";
-    fs::path cur = fs::path(dir);
+    fs::path cur = path_from_utf8(dir);
     for (int i = 0; i < 5; ++i) {
         fs::path candidate = cur / "web" / "dist";
-        if (fs::exists(candidate / "index.html")) return candidate.string();
+        if (fs::exists(candidate / "index.html")) return path_to_utf8(candidate);
         if (!cur.has_parent_path()) break;
         cur = cur.parent_path();
     }
@@ -119,7 +137,37 @@ std::string current_cwd() {
     std::error_code ec;
     auto p = fs::current_path(ec);
     if (ec) return "";
-    return p.string();
+    return path_to_utf8(p);
+}
+
+bool is_existing_directory(const std::string& path) {
+    if (path.empty()) return false;
+#ifdef _WIN32
+    std::wstring wide = acecode::utf8_to_wide(path);
+    if (wide.empty()) return false;
+    DWORD attrs = ::GetFileAttributesW(wide.c_str());
+    return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+#else
+    std::error_code ec;
+    return fs::is_directory(path, ec) && !ec;
+#endif
+}
+
+std::string daemon_exe_parent_dir(const std::string& daemon_exe) {
+    if (daemon_exe.empty()) return "";
+    fs::path p = path_from_utf8(daemon_exe).parent_path();
+    if (p.empty()) return "";
+    return path_to_utf8(p);
+}
+
+std::string choose_launch_cwd(const std::string& preferred,
+                              const std::string& proc_cwd,
+                              const std::string& daemon_exe) {
+    if (is_existing_directory(preferred)) return preferred;
+    if (is_existing_directory(proc_cwd)) return proc_cwd;
+    std::string exe_dir = daemon_exe_parent_dir(daemon_exe);
+    if (is_existing_directory(exe_dir)) return exe_dir;
+    return "";
 }
 
 void log_legacy_workspace_run_dirs(const std::string& proj_dir) {
@@ -158,9 +206,8 @@ const char* state_string(acecode::desktop::DaemonState s) {
     return "stopped";
 }
 
-// onboarding splash:registry 全空时显示。极简,只是引导用户点 "添加项目"
-// (前端 ace-app 启动时会通过 aceDesktop_listWorkspaces 拿到空列表自动渲染)。
-// 这里的 about:blank URL 让 webview 不报错(没 daemon 起的话就没 http URL 可载)。
+// onboarding fallback:正常情况下即使 registry 为空也会启动 shared daemon 来
+// 承载前端。只有 daemon 启动失败时才落到 about:blank。
 const char* onboarding_url() { return "about:blank"; }
 
 std::string short_random_hex() {
@@ -230,8 +277,12 @@ int main(int, char**) {
     acecode::Logger::instance().set_level(acecode::LogLevel::Dbg);
     LOG_INFO("[desktop] starting acecode-desktop");
 
+    SplashScreen splash;
+    splash.show();
+
     std::string daemon_exe = locate_daemon_exe();
     if (daemon_exe.empty()) {
+        splash.close();
 #ifdef _WIN32
         show_error("Cannot locate acecode.exe next to acecode-desktop.exe.\n"
                    "Place both binaries in the same directory.");
@@ -260,21 +311,124 @@ int main(int, char**) {
     std::string proc_cwd = current_cwd();
     std::string active_hash = pick_active(last_active, proc_cwd, registry);
 
-    // 没有任何已知 workspace 时:把 process cwd 注册成默认 workspace,这样
-    // 用户首次安装能直接看到 sidebar 上有一个"当前项目"。
-    if (active_hash.empty() && !proc_cwd.empty()) {
-        auto m = registry.register_new(proj_dir, proc_cwd);
-        active_hash = m.hash;
+    if (!active_hash.empty()) {
+        auto active_meta = registry.get(active_hash);
+        if (active_meta && !is_existing_directory(active_meta->cwd)) {
+            LOG_WARN("[desktop] active workspace cwd unavailable, falling back: hash=" +
+                     active_meta->hash + " cwd=" + active_meta->cwd);
+            active_hash.clear();
+            for (const auto& candidate : registry.list()) {
+                if (is_existing_directory(candidate.cwd)) {
+                    active_hash = candidate.hash;
+                    LOG_INFO("[desktop] selected fallback workspace hash=" + active_hash +
+                             " cwd=" + candidate.cwd);
+                    break;
+                }
+            }
+        }
     }
 
-    // 3. pool + bridge
+    // 没有任何显式可见 workspace 时保持 onboarding。不要把 process cwd 自动
+    // 注册进 Desktop,否则首次打开会重新暴露 TUI 里用过的历史目录。
+
+    // 3. pool 准备 + 提前 activate daemon(在创建窗口前)
+    //
+    // 启动闪屏修复:webview 库在自建窗口路径里会硬编码 ShowWindow(SW_SHOW)
+    // + 默认 640×480。这里改走 WebHost 自建父窗口路径,先在屏幕外渲染。
+    //
+    // 当前做法:
+    //   a) 把 daemon activate 提到 WebHost 构造之前 — 窗口出现时 URL 就绪
+    //   b) WebView2 parent 不 hide,只是在屏幕外可见,避免 hidden controller
+    //      暂停渲染,同时用户只能看到透明 icon。
     DaemonPool pool;
     std::mutex active_mu;
     std::string active_hash_dynamic = active_hash; // 后续切 workspace 时更新
 
-    WebHost host(/*debug=*/true);
+    std::string url = onboarding_url();
+    if (!active_hash.empty()) {
+        auto m = registry.get(active_hash);
+        if (m) {
+            const bool workspace_available = is_existing_directory(m->cwd);
+            std::string launch_cwd = choose_launch_cwd(m->cwd, proc_cwd, daemon_exe);
+            if (launch_cwd.empty()) {
+                LOG_ERROR("[desktop] no usable cwd available to start daemon");
+            } else if (!workspace_available) {
+                LOG_WARN("[desktop] starting shared daemon from fallback cwd=" + launch_cwd +
+                         " because workspace cwd is unavailable: " + m->cwd);
+            }
+
+            ActivateRequest req;
+            req.hash = kSharedDaemonSlotHash;
+            req.cwd = launch_cwd;
+            req.daemon_exe_path = daemon_exe;
+            req.static_dir = dev_web_dir;
+            req.context_id = kSharedDaemonContextId;
+            req.run_dir = (fs::path(acecode::get_acecode_dir()) / "run" / "desktop-shared").string();
+            ActivateResult r;
+            if (launch_cwd.empty()) {
+                r.error = "no usable working directory for daemon";
+            } else {
+                r = pool.activate(req);
+            }
+            if (r.ok) {
+                std::string werr;
+                if (workspace_available && !post_workspace_to_daemon(r.port, r.token, m->cwd, werr)) {
+                    LOG_ERROR("[desktop] post_workspace failed during startup: " + werr);
+                }
+                url = build_loopback_url(r.port, r.token);
+            } else {
+#ifdef _WIN32
+                show_error("Failed to start daemon for workspace '" + m->name + "':\n" + r.error);
+#endif
+                // 不致命退出 — 仍打开 onboarding,用户可重试 / 切其它 workspace
+            }
+        }
+    } else if (!proc_cwd.empty()) {
+        // 没有显式可见 workspace 时仍要启动 shared daemon 来 serve Web UI。
+        // 关键点:这里只启动 daemon,不 POST /api/workspaces,也不 register_new。
+        // daemon worker 的 ensure_workspace_metadata 会写 desktop_visible=false,
+        // 所以前端拿到的 workspace 列表仍为空,只显示"添加项目"入口。
+        std::string launch_cwd = choose_launch_cwd(proc_cwd, proc_cwd, daemon_exe);
+        ActivateRequest req;
+        req.hash = kSharedDaemonSlotHash;
+        req.cwd = launch_cwd;
+        req.daemon_exe_path = daemon_exe;
+        req.static_dir = dev_web_dir;
+        req.context_id = kSharedDaemonContextId;
+        req.run_dir = (fs::path(acecode::get_acecode_dir()) / "run" / "desktop-shared").string();
+        ActivateResult r;
+        if (launch_cwd.empty()) {
+            r.error = "no usable working directory for daemon";
+        } else {
+            r = pool.activate(req);
+        }
+        if (r.ok) {
+            url = build_loopback_url(r.port, r.token);
+        } else {
+            LOG_ERROR("[desktop] failed to start onboarding daemon: " + r.error);
+        }
+    }
+
+    // 注意:这里不再用全屏 splash 盖主窗口。WebHost 会用自建 Win32
+    // 父窗口在屏幕外保持可见状态完成 WebView2 渲染,页面 ready 后再移回
+    // 当前屏幕中央。这样用户启动时只看到透明 icon,不会看到白屏。
+    WebHost host(/*debug=*/true, WebHost::StartupWindowMode::OffscreenUntilReady);
     host.set_title("ACECode");
     host.set_size(1280, 820);
+
+    std::atomic<bool> page_ready_notified{false};
+    auto close_splash_once = [&] {
+        bool expected = false;
+        if (!page_ready_notified.compare_exchange_strong(expected, true)) return;
+        splash.close();
+        host.set_visible(true);
+    };
+
+    // 前端首屏完成后关闭 Win32 透明 logo splash,再把屏幕外的主窗口移回前台。
+    host.bind("aceDesktop_pageReady", [&](const std::string& /*req*/) -> std::string {
+        close_splash_once();
+        return nlohmann::json{{"ok", true}}.dump();
+    });
 
     // bridge: 前端 console.error/warn + window.onerror + unhandledrejection 转发
     // 到 desktop 日志(~/.acecode/logs/desktop-<date>.log)。
@@ -299,6 +453,28 @@ int main(int, char**) {
     // 显式调 aceDesktop_logFromWeb('info', ...))。
     host.init_script(R"JS(
     (function () {
+      var notifyReady = function () {
+        try {
+          if (window.__aceDesktopReadySent) return;
+          window.__aceDesktopReadySent = true;
+          var send = function () {
+            try {
+              if (window.aceDesktop_pageReady) {
+                Promise.resolve(window.aceDesktop_pageReady()).catch(function () {});
+              }
+            } catch (e) {}
+          };
+          requestAnimationFrame(function () {
+            requestAnimationFrame(function () { setTimeout(send, 40); });
+          });
+        } catch (e) {}
+      };
+      if (document.readyState === 'complete' || document.readyState === 'interactive') {
+        notifyReady();
+      } else {
+        window.addEventListener('DOMContentLoaded', notifyReady, { once: true });
+        window.addEventListener('load', notifyReady, { once: true });
+      }
       if (!window.aceDesktop_logFromWeb) return;
       var send = function (level, args) {
         try {
@@ -339,6 +515,7 @@ int main(int, char**) {
             o["hash"] = m.hash;
             o["cwd"] = m.cwd;
             o["name"] = m.name;
+            o["available"] = is_existing_directory(m.cwd);
             o["daemon_state"] = state_string(snap.state);
             o["active"] = (m.hash == cur);
             if (snap.state == DaemonState::Running) {
@@ -357,9 +534,12 @@ int main(int, char**) {
         if (!m) {
             return {{"error", "unknown workspace hash"}};
         }
+        if (!is_existing_directory(m->cwd)) {
+            return {{"error", "workspace path is not available: " + m->cwd}};
+        }
         ActivateRequest req;
         req.hash = kSharedDaemonSlotHash;
-        req.cwd = m->cwd;
+        req.cwd = choose_launch_cwd(m->cwd, proc_cwd, daemon_exe);
         req.daemon_exe_path = daemon_exe;
         req.static_dir = dev_web_dir;
         // Shared desktop daemon: one process hosts all registered workspaces.
@@ -403,11 +583,14 @@ int main(int, char**) {
             std::string session_id = arr[1].get<std::string>();
             auto m = registry.get(hash);
             if (!m) return nlohmann::json{{"error", "unknown workspace hash"}}.dump();
+            if (!is_existing_directory(m->cwd)) {
+                return nlohmann::json{{"error", "workspace path is not available: " + m->cwd}}.dump();
+            }
 
             ActivateRequest areq;
             areq.hash = kSharedDaemonSlotHash;
             areq.context_id = kSharedDaemonContextId;
-            areq.cwd = m->cwd;
+            areq.cwd = choose_launch_cwd(m->cwd, proc_cwd, daemon_exe);
             areq.daemon_exe_path = daemon_exe;
             areq.static_dir = dev_web_dir;
             areq.run_dir = (fs::path(acecode::get_acecode_dir()) / "run" / "desktop-shared").string();
@@ -469,30 +652,11 @@ int main(int, char**) {
         return o.dump();
     });
 
-    // 4. spawn active workspace 的 daemon → navigate WebView
-    std::string url = onboarding_url();
-    if (!active_hash.empty()) {
-        auto m = registry.get(active_hash);
-        if (m) {
-            ActivateRequest req;
-            req.hash = kSharedDaemonSlotHash;
-            req.cwd = m->cwd;
-            req.daemon_exe_path = daemon_exe;
-            req.static_dir = dev_web_dir;
-            req.context_id = kSharedDaemonContextId;
-            req.run_dir = (fs::path(acecode::get_acecode_dir()) / "run" / "desktop-shared").string();
-            auto r = pool.activate(req);
-            if (r.ok) {
-                url = build_loopback_url(r.port, r.token);
-            } else {
-#ifdef _WIN32
-                show_error("Failed to start daemon for workspace '" + m->name + "':\n" + r.error);
-#endif
-                // 不致命退出 — 仍打开 onboarding,用户可重试 / 切其它 workspace
-            }
-        }
-    }
+    // 4. navigate(URL 在第 3 步已就绪)
     host.navigate(url);
+    if (url == onboarding_url()) {
+        close_splash_once();
+    }
 
     // 5. 阻塞主循环
     host.run();

@@ -3,7 +3,7 @@
 // 视觉对齐设计稿方向 C:顶部 44px TopBar + 200px Sidebar + 主区(单会话/4宫格/9宫格)
 // + 22px StatusBar。所有面板/弹框作为 overlay 渲染在主区之上。
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, ApiError } from './lib/api.js';
 import { setToken } from './lib/auth.js';
 import { connection } from './lib/connection.js';
@@ -30,6 +30,31 @@ function newSessionRefFrom(ref, sessionId) {
   return next;
 }
 
+const SINGLE_LAYOUT_STORAGE_KEY = 'acecode.singleLayoutWidths.v1';
+const DEFAULT_SINGLE_LAYOUT = { sidebar: 200, sidePanel: 280 };
+const MIN_SIDEBAR_WIDTH = 160;
+const MAX_SIDEBAR_WIDTH = 360;
+const MIN_SIDE_PANEL_WIDTH = 240;
+const MAX_SIDE_PANEL_WIDTH = 560;
+const MIN_CHAT_WIDTH = 360;
+
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function readSingleLayoutWidths() {
+  try {
+    const raw = window.localStorage.getItem(SINGLE_LAYOUT_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    return {
+      sidebar: clamp(Number(parsed?.sidebar) || DEFAULT_SINGLE_LAYOUT.sidebar, MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH),
+      sidePanel: clamp(Number(parsed?.sidePanel) || DEFAULT_SINGLE_LAYOUT.sidePanel, MIN_SIDE_PANEL_WIDTH, MAX_SIDE_PANEL_WIDTH),
+    };
+  } catch {
+    return DEFAULT_SINGLE_LAYOUT;
+  }
+}
+
 export function App() {
   const [authState, setAuthState] = useState('checking'); // 'checking' | 'ok' | 'need-token'
   const [health,    setHealth]    = useState(null);
@@ -43,6 +68,14 @@ export function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [permReqs,     setPermReqs]     = useState([]);
   const [questionReqs, setQuestionReqs] = useState([]);
+  const [singleLayout, setSingleLayout] = useState(readSingleLayoutWidths);
+  const singleShellRef = useRef(null);
+  const sidebarResizeActiveRef = useRef(false);
+
+  useEffect(() => {
+    try { window.localStorage.setItem(SINGLE_LAYOUT_STORAGE_KEY, JSON.stringify(singleLayout)); }
+    catch { /* ignore storage failures */ }
+  }, [singleLayout]);
 
   const probe = useCallback(async () => {
     try {
@@ -108,6 +141,71 @@ export function App() {
     }
   }, [activeRef, switchView, view]);
 
+  const setSidebarWidth = useCallback((nextWidth, shellWidth = 0) => {
+    const sidePanelVisible = !!(activeRef?.sessionId || activeRef?.id);
+    setSingleLayout((prev) => {
+      const sidePanelReserve = sidePanelVisible ? prev.sidePanel : 0;
+      const maxByShell = shellWidth > 0
+        ? Math.max(MIN_SIDEBAR_WIDTH, shellWidth - sidePanelReserve - MIN_CHAT_WIDTH)
+        : MAX_SIDEBAR_WIDTH;
+      const sidebar = clamp(Math.round(nextWidth), MIN_SIDEBAR_WIDTH, Math.min(MAX_SIDEBAR_WIDTH, maxByShell));
+      return sidebar === prev.sidebar ? prev : { ...prev, sidebar };
+    });
+  }, [activeRef?.id, activeRef?.sessionId]);
+
+  const setSidePanelWidth = useCallback((nextWidth, contentWidth = 0) => {
+    setSingleLayout((prev) => {
+      const maxByContent = contentWidth > 0
+        ? Math.max(MIN_SIDE_PANEL_WIDTH, contentWidth - MIN_CHAT_WIDTH)
+        : MAX_SIDE_PANEL_WIDTH;
+      const sidePanel = clamp(Math.round(nextWidth), MIN_SIDE_PANEL_WIDTH, Math.min(MAX_SIDE_PANEL_WIDTH, maxByContent));
+      return sidePanel === prev.sidePanel ? prev : { ...prev, sidePanel };
+    });
+  }, []);
+
+  const startSidebarResize = useCallback((event) => {
+    if (view !== 'single') return;
+    if (event.button != null && event.button !== 0) return;
+    if (sidebarResizeActiveRef.current) return;
+    sidebarResizeActiveRef.current = true;
+    event.preventDefault();
+    const shellWidth = singleShellRef.current?.getBoundingClientRect().width || 0;
+    const startX = event.clientX;
+    const startWidth = singleLayout.sidebar;
+    document.body.classList.add('ace-resizing');
+    if (event.pointerId != null) event.currentTarget.setPointerCapture?.(event.pointerId);
+
+    const onMove = (moveEvent) => {
+      setSidebarWidth(startWidth + moveEvent.clientX - startX, shellWidth);
+    };
+    const onStop = () => {
+      sidebarResizeActiveRef.current = false;
+      document.body.classList.remove('ace-resizing');
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onStop);
+      window.removeEventListener('pointercancel', onStop);
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onStop);
+    };
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onStop, { once: true });
+    window.addEventListener('pointercancel', onStop, { once: true });
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onStop, { once: true });
+  }, [setSidebarWidth, singleLayout.sidebar, view]);
+
+  const onSidebarHandleKeyDown = useCallback((event) => {
+    if (view !== 'single') return;
+    const step = event.shiftKey ? 32 : 12;
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+      event.preventDefault();
+      const delta = event.key === 'ArrowRight' ? step : -step;
+      const shellWidth = singleShellRef.current?.getBoundingClientRect().width || 0;
+      setSidebarWidth(singleLayout.sidebar + delta, shellWidth);
+    }
+  }, [setSidebarWidth, singleLayout.sidebar, view]);
+
   if (authState === 'checking') {
     return (
       <div className="h-full flex items-center justify-center text-fg-mute text-sm">
@@ -132,14 +230,28 @@ export function App() {
         onSettings={() => setShowSettings(true)}
         onNewSession={createNewSession}
       />
-      <div className="flex-1 flex overflow-hidden relative min-h-0">
+      <div ref={singleShellRef} className="flex-1 flex overflow-hidden relative min-h-0 ace-single-shell">
         <Sidebar
           activeId={activeId}
           onSelect={setActiveRef}
           collapsed={sidebarCollapsed}
+          width={singleLayout.sidebar}
           onOpenSkills={() => setShowSkills(true)}
           onOpenMcp={() => setShowMcp(true)}
         />
+        {view === 'single' && (
+          <div
+            role="separator"
+            aria-label="调整左侧栏宽度"
+            aria-orientation="vertical"
+            tabIndex={0}
+            className="ace-resize-handle ace-resize-handle-left"
+            onPointerDown={startSidebarResize}
+            onMouseDown={startSidebarResize}
+            onKeyDown={onSidebarHandleKeyDown}
+            title="拖动调整左侧栏宽度"
+          />
+        )}
         <div
           className={[
             'flex-1 flex overflow-hidden transition-all duration-200',
@@ -151,6 +263,9 @@ export function App() {
               sessionRef={activeRef}
               onSessionPromoted={setActiveRef}
               health={health}
+              showSidePanel
+              sidePanelWidth={singleLayout.sidePanel}
+              onSidePanelResize={setSidePanelWidth}
             />
           )}
           {view === 'grid4' && <Grid4View activeRef={activeRef} onExpand={setExpanded} />}

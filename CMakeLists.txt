@@ -7,7 +7,7 @@ if(CMAKE_HOST_WIN32 AND DEFINED CMAKE_TOOLCHAIN_FILE AND CMAKE_TOOLCHAIN_FILE MA
     set(VCPKG_TARGET_TRIPLET "x64-windows-static" CACHE STRING "Vcpkg target triplet" FORCE)
 endif()
 
-project(acecode VERSION 0.1.2 LANGUAGES C CXX)
+project(acecode VERSION 0.1.4 LANGUAGES C CXX)
 
 # CTest integration: defines BUILD_TESTING (default ON). Release packaging can
 # disable it with -DBUILD_TESTING=OFF to skip the test binary and the gtest
@@ -21,6 +21,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 if(MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     add_compile_options(/utf-8 /Zi /FS /bigobj)
+    # /MP: 单 project 内多个 .cpp 并行编(默认关闭,串行)。Ninja 不需要也会
+    # 忽略;只对 MSBuild / VS IDE 生成器有意义。不传数字 = 用全部核心,VS 里
+    # 也可在命令行覆盖:cmake --build ... -- /p:CL_MPCount=28
+    add_compile_options(/MP)
     add_link_options(
         /DEBUG
         "$<$<NOT:$<CONFIG:Debug>>:/OPT:REF>"
@@ -72,6 +76,7 @@ acecode_generate_embedded_assets(
 
 find_package(cpr CONFIG REQUIRED)
 find_package(ftxui CONFIG REQUIRED)
+find_package(libzip CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 
 # Crow is the HTTP/WebSocket server used by `acecode daemon`. Wired up as
@@ -125,6 +130,7 @@ list(FILTER ACECODE_TUI_SOURCES INCLUDE REGEX "/src/(tui|markdown)/")
 # 系统调用,留在 testable 里给 acecode_unit_tests 用。
 set(ACECODE_DESKTOP_BINARY_ONLY_SOURCES
     ${CMAKE_SOURCE_DIR}/src/desktop/main.cpp
+    ${CMAKE_SOURCE_DIR}/src/desktop/splash_screen.cpp
     ${CMAKE_SOURCE_DIR}/src/desktop/web_host.cpp
 )
 foreach(_f IN LISTS ACECODE_DESKTOP_BINARY_ONLY_SOURCES)
@@ -159,6 +165,7 @@ target_include_directories(acecode_testable PUBLIC
 )
 target_link_libraries(acecode_testable PUBLIC
     cpr::cpr
+    libzip::zip
     nlohmann_json::nlohmann_json
     mcp
 )

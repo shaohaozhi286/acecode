@@ -102,6 +102,13 @@ void SessionStorage::write_meta(const std::string& meta_path, const SessionMeta&
     if (!meta.title.empty()) {
         j["title"] = meta.title;
     }
+    // fork 元数据:空字符串时省略,保持老 meta 文件 byte-byte 不变。
+    if (!meta.forked_from.empty()) {
+        j["forked_from"] = meta.forked_from;
+    }
+    if (!meta.fork_message_id.empty()) {
+        j["fork_message_id"] = meta.fork_message_id;
+    }
 
     std::ofstream ofs(meta_path);
     if (ofs.is_open()) {
@@ -124,7 +131,9 @@ SessionMeta SessionStorage::read_meta(const std::string& meta_path) {
         if (j.contains("summary"))       meta.summary       = j["summary"].get<std::string>();
         if (j.contains("provider"))      meta.provider      = j["provider"].get<std::string>();
         if (j.contains("model"))         meta.model         = j["model"].get<std::string>();
-        meta.title = j.value("title", std::string{});
+        meta.title           = j.value("title",           std::string{});
+        meta.forked_from     = j.value("forked_from",     std::string{});
+        meta.fork_message_id = j.value("fork_message_id", std::string{});
     } catch (...) {
         // Return empty meta on parse failure
     }

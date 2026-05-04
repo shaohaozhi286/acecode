@@ -34,6 +34,7 @@
 #include <cpr/cpr.h>
 #include <cctype>
 #include <filesystem>
+#include <fstream>
 #include <nlohmann/json.hpp>
 #include <random>
 #include <thread>
@@ -72,7 +73,7 @@ struct WebServerFixture {
     std::string cwd;
     std::string project_dir;
 
-    WebServerFixture() {
+    explicit WebServerFixture(bool register_default_workspace = true) {
         port = pick_test_port();
         web_cfg.bind = "127.0.0.1";
         web_cfg.port = port;
@@ -91,8 +92,12 @@ struct WebServerFixture {
         projects_dir = tmp_dir / "projects";
         std::filesystem::create_directories(projects_dir);
         cwd = cwd_dir.string();
-        acecode::desktop::ensure_workspace_metadata(projects_dir.string(), cwd);
         workspace_registry = std::make_unique<acecode::desktop::WorkspaceRegistry>();
+        if (register_default_workspace) {
+            workspace_registry->register_new(projects_dir.string(), cwd);
+        } else {
+            acecode::desktop::ensure_workspace_metadata(projects_dir.string(), cwd);
+        }
         workspace_registry->scan(projects_dir.string());
         project_dir = acecode::SessionStorage::get_project_dir(cwd);
         std::filesystem::remove_all(project_dir);
@@ -156,6 +161,14 @@ struct CwdModelOverrideCleanup {
     std::string cwd;
     ~CwdModelOverrideCleanup() {
         if (!cwd.empty()) acecode::remove_cwd_model_override(cwd);
+    }
+};
+
+struct RemoveTreeOnExit {
+    std::filesystem::path path;
+    ~RemoveTreeOnExit() {
+        std::error_code ec;
+        if (!path.empty()) std::filesystem::remove_all(path, ec);
     }
 };
 
@@ -311,6 +324,142 @@ TEST(WebServerHttp, WorkspaceScopedSessionLifecycle) {
     EXPECT_EQ(sessions[0]["id"], created["session_id"]);
     EXPECT_EQ(sessions[0]["workspace_hash"], other_hash);
     EXPECT_EQ(sessions[0]["cwd"], other_cwd);
+}
+
+// 场景: registry 里留着一个已删除/不可访问的 workspace 时,列表仍可返回,
+// 但不允许继续创建新会话,避免工具后续在坏 cwd 上才爆。
+TEST(WebServerHttp, UnavailableWorkspaceRejectsSessionCreate) {
+    WebServerFixture fx;
+
+    auto missing_cwd_path = fx.tmp_dir / "missing-cwd";
+    const std::string missing_cwd = missing_cwd_path.string();
+    const std::string missing_hash = acecode::compute_cwd_hash(missing_cwd);
+
+    auto post_ws = cpr::Post(cpr::Url{fx.url("/api/workspaces")},
+                             cpr::Header{{"Content-Type", "application/json"}},
+                             cpr::Body{json{{"cwd", missing_cwd}}.dump()});
+    ASSERT_EQ(post_ws.status_code, 201) << post_ws.text;
+    auto ws = json::parse(post_ws.text);
+    EXPECT_EQ(ws["hash"], missing_hash);
+    EXPECT_FALSE(ws.value("available", true));
+
+    auto create = cpr::Post(cpr::Url{fx.url("/api/workspaces/" + missing_hash + "/sessions")},
+                            cpr::Header{{"Content-Type", "application/json"}},
+                            cpr::Body{R"({})"});
+    ASSERT_EQ(create.status_code, 409) << create.text;
+    auto err = json::parse(create.text);
+    EXPECT_EQ(err["error"], "workspace path unavailable");
+}
+
+// 场景: Desktop 共享 daemon 切换到另一个已注册 workspace 后,文件树 API
+// 必须允许浏览该 workspace cwd,不能继续只把 daemon 启动 cwd 当白名单。
+TEST(WebServerHttp, FilesEndpointAllowsRegisteredWorkspaceCwd) {
+    WebServerFixture fx;
+
+    auto other_cwd_path = fx.tmp_dir / "files-cwd";
+    auto src_dir = other_cwd_path / "src";
+    std::filesystem::create_directories(src_dir);
+    {
+        std::ofstream ofs(src_dir / "main.txt");
+        ofs << "hello from registered workspace";
+    }
+    const std::string other_cwd = other_cwd_path.string();
+
+    auto post_ws = cpr::Post(cpr::Url{fx.url("/api/workspaces")},
+                             cpr::Header{{"Content-Type", "application/json"}},
+                             cpr::Body{json{{"cwd", other_cwd}}.dump()});
+    ASSERT_EQ(post_ws.status_code, 201) << post_ws.text;
+
+    auto root = cpr::Get(cpr::Url{fx.url("/api/files")},
+                         cpr::Parameters{{"cwd", other_cwd}, {"path", ""}});
+    ASSERT_EQ(root.status_code, 200) << root.text;
+    auto root_entries = json::parse(root.text);
+    bool saw_src = false;
+    for (const auto& e : root_entries) {
+        if (e.value("name", "") == "src" && e.value("kind", "") == "dir") {
+            saw_src = true;
+        }
+    }
+    EXPECT_TRUE(saw_src);
+
+    auto nested = cpr::Get(cpr::Url{fx.url("/api/files")},
+                           cpr::Parameters{{"cwd", other_cwd}, {"path", "src"}});
+    ASSERT_EQ(nested.status_code, 200) << nested.text;
+    auto nested_entries = json::parse(nested.text);
+    ASSERT_EQ(nested_entries.size(), 1u);
+    EXPECT_EQ(nested_entries[0]["name"], "main.txt");
+    EXPECT_EQ(nested_entries[0]["path"], "src/main.txt");
+
+    auto content = cpr::Get(cpr::Url{fx.url("/api/files/content")},
+                            cpr::Parameters{{"cwd", other_cwd}, {"path", "src/main.txt"}});
+    ASSERT_EQ(content.status_code, 200) << content.text;
+    EXPECT_EQ(content.text, "hello from registered workspace");
+}
+
+// 场景: shared daemon 为 desktop onboarding 启动时,当前 cwd 只有 hidden
+// workspace marker。它可以服务普通 /api/sessions,但不能出现在 /api/workspaces。
+TEST(WebServerHttp, HiddenDefaultWorkspaceNotListedOrResolved) {
+    WebServerFixture fx(/*register_default_workspace=*/false);
+    const std::string hidden_hash = acecode::compute_cwd_hash(fx.cwd);
+
+    auto get_ws = cpr::Get(cpr::Url{fx.url("/api/workspaces")});
+    ASSERT_EQ(get_ws.status_code, 200) << get_ws.text;
+    auto ws_list = json::parse(get_ws.text);
+    ASSERT_TRUE(ws_list.is_array());
+    EXPECT_TRUE(ws_list.empty());
+
+    auto scoped = cpr::Get(cpr::Url{fx.url("/api/workspaces/" + hidden_hash + "/sessions")});
+    EXPECT_EQ(scoped.status_code, 404) << scoped.text;
+
+    auto local_sessions = cpr::Get(cpr::Url{fx.url("/api/sessions")});
+    EXPECT_EQ(local_sessions.status_code, 200) << local_sessions.text;
+}
+
+// 场景: hidden workspace hash 不能通过 workspace-scoped endpoint 被直接访问;
+// 手动注册后,同一个 cwd 的旧 TUI sessions 会被列出来。
+TEST(WebServerHttp, HiddenWorkspaceRejectedUntilRegisteredThenListsExistingSession) {
+    WebServerFixture fx;
+
+    auto legacy_cwd_path = fx.tmp_dir / "legacy-tui-cwd";
+    std::filesystem::create_directories(legacy_cwd_path);
+    const std::string legacy_cwd = legacy_cwd_path.string();
+    const std::string legacy_hash = acecode::compute_cwd_hash(legacy_cwd);
+
+    ASSERT_TRUE(acecode::desktop::ensure_workspace_metadata(fx.projects_dir.string(), legacy_cwd));
+    auto hidden = cpr::Get(cpr::Url{fx.url("/api/workspaces/" + legacy_hash + "/sessions")});
+    ASSERT_EQ(hidden.status_code, 404) << hidden.text;
+
+    const auto legacy_project_dir = std::filesystem::path(acecode::SessionStorage::get_project_dir(legacy_cwd));
+    RemoveTreeOnExit cleanup{legacy_project_dir};
+    std::filesystem::remove_all(legacy_project_dir);
+    std::filesystem::create_directories(legacy_project_dir);
+
+    acecode::SessionMeta meta;
+    meta.id = "20260503-010203-abcd";
+    meta.cwd = legacy_cwd;
+    meta.created_at = "2026-05-03T01:02:03Z";
+    meta.updated_at = "2026-05-03T01:03:03Z";
+    meta.summary = "old tui chat";
+    meta.message_count = 4;
+    acecode::SessionStorage::write_meta(
+        acecode::SessionStorage::meta_path(legacy_project_dir.string(), meta.id, 0),
+        meta);
+
+    auto post_ws = cpr::Post(cpr::Url{fx.url("/api/workspaces")},
+                             cpr::Header{{"Content-Type", "application/json"}},
+                             cpr::Body{json{{"cwd", legacy_cwd}}.dump()});
+    ASSERT_EQ(post_ws.status_code, 201) << post_ws.text;
+    auto ws = json::parse(post_ws.text);
+    EXPECT_EQ(ws["hash"], legacy_hash);
+
+    auto list = cpr::Get(cpr::Url{fx.url("/api/workspaces/" + legacy_hash + "/sessions")});
+    ASSERT_EQ(list.status_code, 200) << list.text;
+    auto sessions = json::parse(list.text);
+    ASSERT_TRUE(sessions.is_array());
+    ASSERT_EQ(sessions.size(), 1u);
+    EXPECT_EQ(sessions[0]["id"], meta.id);
+    EXPECT_EQ(sessions[0]["summary"], meta.summary);
+    EXPECT_EQ(sessions[0]["workspace_hash"], legacy_hash);
 }
 
 // 场景: workspace-scoped create 未显式传 model 时,应从该 workspace cwd 的

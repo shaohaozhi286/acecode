@@ -5,6 +5,7 @@
 #include "../utils/paths.hpp"
 
 #include <atomic>
+#include <cctype>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -17,6 +18,18 @@ namespace acecode {
 namespace {
 
 std::atomic<bool> g_acecode_home_created_by_process{false};
+
+std::string trim_ascii_copy(const std::string& s) {
+    size_t first = 0;
+    while (first < s.size() && std::isspace(static_cast<unsigned char>(s[first]))) {
+        ++first;
+    }
+    size_t last = s.size();
+    while (last > first && std::isspace(static_cast<unsigned char>(s[last - 1]))) {
+        --last;
+    }
+    return s.substr(first, last - first);
+}
 
 } // namespace
 
@@ -95,6 +108,19 @@ std::vector<std::string> get_project_dirs_up_to_home(const std::string& cwd) {
     return dirs;
 }
 
+std::string normalize_upgrade_base_url(std::string raw) {
+    raw = trim_ascii_copy(raw);
+    if (!raw.empty() && raw.back() != '/') {
+        raw.push_back('/');
+    }
+    return raw;
+}
+
+bool is_valid_upgrade_base_url(const std::string& raw) {
+    const std::string url = normalize_upgrade_base_url(raw);
+    return url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0;
+}
+
 std::string get_acecode_dir() {
     // 数据目录路径解析全部委托给 paths.cpp,RunMode 决定 User vs Service 根目录
     // (Decision 8)。User 模式行为与历史一致 — TUI / standalone daemon 不受影响。
@@ -141,6 +167,13 @@ std::vector<std::string> validate_config(const AppConfig& cfg) {
     }
     if (cfg.project_instructions.max_total_bytes < cfg.project_instructions.max_bytes) {
         errors.push_back("project_instructions.max_total_bytes must be >= max_bytes");
+    }
+    if (!is_valid_upgrade_base_url(cfg.upgrade.base_url)) {
+        errors.push_back("upgrade.base_url must be a non-empty http or https URL");
+    }
+    if (cfg.upgrade.timeout_ms < 1000 || cfg.upgrade.timeout_ms > 120000) {
+        errors.push_back("upgrade.timeout_ms out of range (1000-120000): " +
+                         std::to_string(cfg.upgrade.timeout_ms));
     }
     for (const auto& fn : cfg.project_instructions.filenames) {
         if (fn.empty()) {
@@ -318,6 +351,20 @@ AppConfig load_config() {
                 if (ihj.contains("max_entries") && ihj["max_entries"].is_number_integer()) {
                     int v = ihj["max_entries"].get<int>();
                     if (v > 0) cfg.input_history.max_entries = v;
+                }
+            }
+            if (j.contains("upgrade")) {
+                if (!j["upgrade"].is_object()) {
+                    LOG_WARN("[config] 'upgrade' must be an object, ignoring");
+                } else {
+                    const auto& uj = j["upgrade"];
+                    if (uj.contains("base_url") && uj["base_url"].is_string()) {
+                        cfg.upgrade.base_url =
+                            normalize_upgrade_base_url(uj["base_url"].get<std::string>());
+                    }
+                    if (uj.contains("timeout_ms") && uj["timeout_ms"].is_number_integer()) {
+                        cfg.upgrade.timeout_ms = uj["timeout_ms"].get<int>();
+                    }
                 }
             }
             if (j.contains("network") && j["network"].is_object()) {
@@ -571,6 +618,9 @@ AppConfig load_config() {
             cfg.copilot.model = env;
         }
     }
+    if (const char* env = std::getenv("ACECODE_UPGRADE_BASE_URL")) {
+        cfg.upgrade.base_url = normalize_upgrade_base_url(env);
+    }
 
     return cfg;
 }
@@ -724,6 +774,14 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
         if (cfg.web_search.timeout_ms != ws_d.timeout_ms)
             wsj["timeout_ms"] = cfg.web_search.timeout_ms;
         if (!wsj.empty()) j["web_search"] = wsj;
+
+        UpgradeConfig up_d;
+        nlohmann::json upj = nlohmann::json::object();
+        if (normalize_upgrade_base_url(cfg.upgrade.base_url) != up_d.base_url)
+            upj["base_url"] = normalize_upgrade_base_url(cfg.upgrade.base_url);
+        if (cfg.upgrade.timeout_ms != up_d.timeout_ms)
+            upj["timeout_ms"] = cfg.upgrade.timeout_ms;
+        if (!upj.empty()) j["upgrade"] = upj;
     }
 
     // --- model profiles ---

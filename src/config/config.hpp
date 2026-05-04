@@ -160,6 +160,11 @@ struct WebSearchConfig {
     int timeout_ms = 8000;      // 单次 backend HTTP 请求超时
 };
 
+struct UpgradeConfig {
+    std::string base_url = "http://2017studio.imwork.net:82/aupdate/";
+    int timeout_ms = 30000;
+};
+
 struct NetworkConfig {
     // "auto"   = Windows: WinHTTP-IE → registry → env → direct;
     //            POSIX: env (HTTPS_PROXY/HTTP_PROXY/ALL_PROXY/NO_PROXY).
@@ -189,6 +194,7 @@ struct AppConfig {
     AgentLoopConfig agent_loop;                  // agent-loop termination tunables
     NetworkConfig network;                       // proxy / TLS / abort-debug knobs
     WebSearchConfig web_search;                  // 联网搜索工具配置(参见 add-web-search-tool)
+    UpgradeConfig upgrade;                       // explicit self-upgrade command config
     TuiConfig tui;                               // 终端渲染策略(legacy fallback 等)
 
     // --- model profiles (openspec/changes/model-profiles) ---
@@ -208,6 +214,13 @@ std::string expand_path(const std::string& raw);
 // excluded because the user-global skills root (`~/.acecode/skills`) is
 // registered separately.
 std::vector<std::string> get_project_dirs_up_to_home(const std::string& cwd);
+
+// Normalize upgrade.base_url by trimming surrounding whitespace and adding a
+// trailing slash when non-empty.
+std::string normalize_upgrade_base_url(std::string raw);
+
+// Returns true for non-empty http/https URLs after normalization.
+bool is_valid_upgrade_base_url(const std::string& raw);
 
 // Load config from ~/.acecode/config.json, with env var overrides.
 // Creates default config if missing.

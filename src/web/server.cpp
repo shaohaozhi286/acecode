@@ -18,9 +18,12 @@
 #include "../skills/skill_metadata.hpp"
 #include "../utils/logger.hpp"
 #include "../utils/cwd_hash.hpp"
+#include "handlers/files_handler.hpp"
+#include "handlers/fork_handler.hpp"
 #include "handlers/history_handler.hpp"
 #include "handlers/models_handler.hpp"
 #include "handlers/skills_handler.hpp"
+#include "message_payload.hpp"
 #include "version.hpp"
 
 // Crow 头一定在 ASIO_STANDALONE PUBLIC 定义之后才 include。CMakeLists.txt 已
@@ -61,15 +64,20 @@ std::int64_t now_unix_ms() {
         system_clock::now().time_since_epoch()).count();
 }
 
-// 把 ChatMessage 序列化成网络可传 JSON。复用 session_serializer 的输出格式
-// (canonical OpenAI-flavored)。HTTP /api/sessions/:id/messages 用。
+bool cwd_is_directory(const std::string& cwd) {
+    if (cwd.empty()) return false;
+    std::error_code ec;
+#ifdef _WIN32
+    return std::filesystem::is_directory(std::filesystem::u8path(cwd), ec) && !ec;
+#else
+    return std::filesystem::is_directory(cwd, ec) && !ec;
+#endif
+}
+
+// 把 ChatMessage 序列化成网络可传 JSON。复用 web/message_payload.cpp 的纯函数,
+// 顶层带稳定 id 字段(user 走持久 UUID,其它角色 lazy sha1)。
 json chat_message_to_json(const ChatMessage& m) {
-    // serialize_message 返回一行 JSONL,我们解回 json 对象再返回。
-    try {
-        return json::parse(serialize_message(m));
-    } catch (...) {
-        return json{{"role", m.role}, {"content", m.content}};
-    }
+    return chat_message_to_payload_json(m);
 }
 
 // SessionEvent → 上行 WS 消息(也用于 /messages 回放)。
@@ -317,10 +325,29 @@ struct WebServer::Impl {
             if (auto m = deps.workspace_registry->get(hash)) {
                 return m;
             }
+            return std::nullopt;
         }
         auto compat = compatibility_workspace();
         if (hash == compat.hash) return compat;
         return std::nullopt;
+    }
+
+    std::vector<std::string> allowed_file_cwds() const {
+        std::vector<std::string> out;
+        std::unordered_set<std::string> seen;
+        auto add = [&](const std::string& cwd) {
+            if (cwd.empty() || seen.count(cwd)) return;
+            seen.insert(cwd);
+            out.push_back(cwd);
+        };
+
+        add(deps.cwd);
+        if (deps.workspace_registry) {
+            for (const auto& m : deps.workspace_registry->list()) {
+                add(m.cwd);
+            }
+        }
+        return out;
     }
 
     json workspace_to_json(const acecode::desktop::WorkspaceMeta& m) const {
@@ -328,8 +355,7 @@ struct WebServer::Impl {
         o["hash"] = m.hash;
         o["cwd"] = m.cwd;
         o["name"] = m.name;
-        std::error_code ec;
-        o["available"] = !m.cwd.empty() && std::filesystem::is_directory(m.cwd, ec) && !ec;
+        o["available"] = cwd_is_directory(m.cwd);
         return o;
     }
 
@@ -453,6 +479,7 @@ struct WebServer::Impl {
         register_sessions();
         register_models();
         register_history();
+        register_files();
         register_skills();
         register_mcp();
         register_websocket();
@@ -485,7 +512,7 @@ struct WebServer::Impl {
                 }
             }
             auto compat = compatibility_workspace();
-            if (!compat.hash.empty() && !seen.count(compat.hash)) {
+            if (!deps.workspace_registry && !compat.hash.empty() && !seen.count(compat.hash)) {
                 arr.push_back(workspace_to_json(compat));
             }
             crow::response r(arr.dump());
@@ -558,6 +585,12 @@ struct WebServer::Impl {
                 r.add_header("Content-Type", "application/json");
                 return with_cors(req, std::move(r));
             }
+            if (!cwd_is_directory(ws->cwd)) {
+                crow::response r(409);
+                r.body = json{{"error", "workspace path unavailable"}, {"cwd", ws->cwd}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
             SessionOptions opts;
             if (auto err = parse_session_options(req, *ws, opts)) return std::move(*err);
             apply_workspace_model_override(*ws, opts);
@@ -582,6 +615,12 @@ struct WebServer::Impl {
             if (!ws.has_value()) {
                 crow::response r(404);
                 r.body = R"({"error":"workspace not found"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            if (!cwd_is_directory(ws->cwd)) {
+                crow::response r(409);
+                r.body = json{{"error", "workspace path unavailable"}, {"cwd", ws->cwd}}.dump();
                 r.add_header("Content-Type", "application/json");
                 return with_cors(req, std::move(r));
             }
@@ -741,6 +780,148 @@ struct WebServer::Impl {
         });
     }
 
+    // SidePanel "文件" / "预览" tab 的后端。共享 daemon 下,文件浏览允许
+    // daemon cwd + registry 中显式注册的 desktop workspace cwd。未显式注册
+    // 的 hidden TUI cwd 不会出现在 registry list 里,仍不会被 Desktop 浏览。
+    void register_files() {
+        CROW_ROUTE(app, "/api/files").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
+        CROW_ROUTE(app, "/api/files/content").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
+
+        // 把 FileError 序列化为 (status_code, json) — 共用给两个端点。
+        // err.message 透出到 body.detail 便于浏览器 network tab 排查;不会泄露
+        // 系统路径以外的敏感信息(全是 caller 自己传的 cwd/path)。
+        auto error_response = [this](const crow::request& req,
+                                      const FileError& err) -> crow::response {
+            crow::response r;
+            r.add_header("Content-Type", "application/json");
+            json body;
+            switch (err.kind) {
+                case FileErrorKind::UnknownWorkspace:
+                    r.code = 400;
+                    body["error"] = "unknown workspace";
+                    break;
+                case FileErrorKind::PathOutsideWorkspace:
+                    r.code = 400;
+                    body["error"] = "path outside workspace";
+                    break;
+                case FileErrorKind::NotFound:
+                    r.code = 404;
+                    body["error"] = "not found";
+                    break;
+                case FileErrorKind::TooLarge:
+                    r.code = 415;
+                    body["error"] = "file too large";
+                    body["size"]  = err.size;
+                    break;
+                case FileErrorKind::Binary:
+                    r.code = 415;
+                    body["error"] = "binary";
+                    break;
+                case FileErrorKind::IoError:
+                default:
+                    r.code = 500;
+                    body["error"] = "io error";
+                    break;
+            }
+            if (!err.message.empty()) body["detail"] = err.message;
+            r.body = body.dump();
+            return with_cors(req, std::move(r));
+        };
+
+        // GET /api/files?cwd=<abs>&path=<rel>&show_hidden=<0|1>
+        CROW_ROUTE(app, "/api/files").methods(crow::HTTPMethod::GET)
+        ([this, error_response](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+
+            std::string cwd_q;
+            std::string path_q;
+            bool show_hidden = false;
+            if (auto c = req.url_params.get("cwd"))         cwd_q = c;
+            if (auto p = req.url_params.get("path"))        path_q = p;
+            if (auto s = req.url_params.get("show_hidden")) {
+                std::string v = s;
+                show_hidden = (v == "1" || v == "true");
+            }
+            if (cwd_q.empty()) {
+                crow::response r(400);
+                r.body = R"({"error":"cwd parameter required"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            auto allowed_cwds = allowed_file_cwds();
+            auto validated = validate_path_within(cwd_q, path_q, allowed_cwds);
+            if (std::holds_alternative<FileError>(validated)) {
+                return error_response(req, std::get<FileError>(validated));
+            }
+            auto abs_target = std::get<std::filesystem::path>(validated);
+            auto abs_cwd_v = validate_path_within(cwd_q, "", allowed_cwds);
+            // abs_cwd_v 不可能失败(同样的 cwd 才到这一步);保险起见 fallback
+            std::filesystem::path abs_cwd =
+                std::holds_alternative<std::filesystem::path>(abs_cwd_v)
+                    ? std::get<std::filesystem::path>(abs_cwd_v)
+                    : std::filesystem::path(cwd_q);
+
+            auto listed = list_directory(abs_target, abs_cwd, show_hidden);
+            if (std::holds_alternative<FileError>(listed)) {
+                return error_response(req, std::get<FileError>(listed));
+            }
+            auto& entries = std::get<std::vector<FileEntry>>(listed);
+            json arr = json::array();
+            for (const auto& e : entries) {
+                json item;
+                item["name"] = e.name;
+                item["path"] = e.path;
+                item["kind"] = e.kind;
+                if (e.size.has_value())        item["size"]        = *e.size;
+                if (e.modified_ms.has_value()) item["modified_ms"] = *e.modified_ms;
+                arr.push_back(std::move(item));
+            }
+            crow::response r(arr.dump());
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        });
+
+        // GET /api/files/content?cwd=<abs>&path=<rel>
+        CROW_ROUTE(app, "/api/files/content").methods(crow::HTTPMethod::GET)
+        ([this, error_response](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+
+            std::string cwd_q;
+            std::string path_q;
+            if (auto c = req.url_params.get("cwd"))  cwd_q  = c;
+            if (auto p = req.url_params.get("path")) path_q = p;
+            if (cwd_q.empty() || path_q.empty()) {
+                crow::response r(400);
+                r.body = R"({"error":"cwd and path parameters required"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            auto allowed_cwds = allowed_file_cwds();
+            auto validated = validate_path_within(cwd_q, path_q, allowed_cwds);
+            if (std::holds_alternative<FileError>(validated)) {
+                return error_response(req, std::get<FileError>(validated));
+            }
+            auto abs_file = std::get<std::filesystem::path>(validated);
+
+            auto content = read_file_content(abs_file);
+            if (std::holds_alternative<FileError>(content)) {
+                return error_response(req, std::get<FileError>(content));
+            }
+            crow::response r(std::get<std::string>(content));
+            r.add_header("Content-Type", "text/plain; charset=utf-8");
+            r.add_header("Cache-Control", "no-cache");
+            return with_cors(req, std::move(r));
+        });
+    }
+
     void register_health() {
         // GET /api/health: spec 9.2
         // 不强制 token (loopback / 远程都返回,为了让前端在加载时探活)。
@@ -774,6 +955,10 @@ struct WebServer::Impl {
             return cors_preflight(req);
         });
         CROW_ROUTE(app, "/api/sessions/<string>/resume").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req, const std::string&) {
+            return cors_preflight(req);
+        });
+        CROW_ROUTE(app, "/api/sessions/<string>/fork").methods(crow::HTTPMethod::Options)
         ([this](const crow::request& req, const std::string&) {
             return cors_preflight(req);
         });
@@ -962,6 +1147,117 @@ struct WebServer::Impl {
 
             crow::response r(202);
             r.body = R"({"queued":true})";
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        });
+
+        // POST /api/sessions/:id/fork: 把 source session 截止到 at_message_id
+        // (含此条)的前缀复制到一个新 session id,新 session 立即可用但不
+        // 自动启动 turn。源 session 保持不动。
+        // body: {at_message_id: string, title?: string}
+        // 200: {session_id, title, forked_from, fork_message_id}
+        // 400: at_message_id missing / message_not_found
+        // 404: source session 不在 SessionRegistry
+        // 500: IO 异常(已自动清理半个文件)
+        CROW_ROUTE(app, "/api/sessions/<string>/fork").methods(crow::HTTPMethod::POST)
+        ([this](const crow::request& req, const std::string& id) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+
+            std::string at_message_id;
+            std::string explicit_title;
+            try {
+                auto j = json::parse(req.body);
+                if (j.contains("at_message_id") && j["at_message_id"].is_string()) {
+                    at_message_id = j["at_message_id"].get<std::string>();
+                }
+                if (j.contains("title") && j["title"].is_string()) {
+                    explicit_title = j["title"].get<std::string>();
+                }
+            } catch (const std::exception& e) {
+                crow::response r(400);
+                r.body = json{{"error", std::string("bad json: ") + e.what()}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            if (at_message_id.empty()) {
+                crow::response r(400);
+                r.body = R"({"error":"at_message_id required"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            if (!deps.session_registry) {
+                crow::response r(503);
+                r.body = R"({"error":"session registry unavailable"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            auto* entry = deps.session_registry->lookup(id);
+            if (!entry || !entry->loop || !entry->sm) {
+                crow::response r(404);
+                r.body = R"({"error":"unknown session"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            // 拷一份 messages(后续算 prefix 不动 entry->loop 内部)
+            auto messages = entry->loop->messages();
+
+            auto idx = find_message_index_by_id(messages, at_message_id);
+            if (!idx.has_value()) {
+                crow::response r(400);
+                r.body = R"({"error":"message_not_found"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            // 含被点击的那条:retained = msgs[0..idx]
+            auto retained = retained_prefix_before_index(messages, *idx + 1);
+
+            // 组 source meta + sibling 列表用于命名规则
+            auto source_meta = entry->sm->load_session_meta(id);
+            if (source_meta.id.empty()) source_meta.id = id;
+            if (source_meta.title.empty()) {
+                // 内存里 title 可能比磁盘新(刚改还没 update_meta)
+                source_meta.title = entry->sm->current_title();
+            }
+            std::string project_dir = SessionStorage::get_project_dir(entry->cwd);
+            auto siblings = SessionStorage::list_sessions(project_dir);
+
+            std::string title = compute_fork_title(source_meta, siblings, explicit_title);
+
+            // 写新 session 文件(IO 异常 fork_session_to_new_id 内部已清理)
+            std::string new_id;
+            try {
+                new_id = entry->sm->fork_session_to_new_id(retained, title, id, at_message_id);
+            } catch (const std::exception& e) {
+                LOG_ERROR("[web] fork " + id + " threw: " + e.what());
+                crow::response r(500);
+                r.body = json{{"error", std::string("fork failed: ") + e.what()}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            if (new_id.empty()) {
+                crow::response r(500);
+                r.body = R"({"error":"fork failed"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            // 把新 session 装进 registry — 走 resume 路径(磁盘 → 内存)。
+            // resume 不会自动启动 turn,符合 spec "不自动启动 turn"。
+            if (!deps.session_registry->resume(new_id, {})) {
+                LOG_WARN("[web] fork: new session " + new_id +
+                         " written to disk but registry resume failed");
+            }
+
+            json resp;
+            resp["session_id"]      = new_id;
+            resp["title"]           = title;
+            resp["forked_from"]     = id;
+            resp["fork_message_id"] = at_message_id;
+            crow::response r(resp.dump());
             r.add_header("Content-Type", "application/json");
             return with_cors(req, std::move(r));
         });

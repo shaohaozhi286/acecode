@@ -5,6 +5,7 @@
 #include "commands/compact.hpp"
 #include "session/tool_metadata_codec.hpp"
 #include "session/session_rewind.hpp"
+#include "web/message_payload.hpp"
 #include "web/tool_event_payload.hpp"
 #include <nlohmann/json.hpp>
 #include <chrono>
@@ -40,8 +41,17 @@ void AgentLoop::dispatch_message(const std::string& role,
     if (callbacks_.on_message) {
         callbacks_.on_message(role, content, is_tool);
     }
+    // Web 协议给每条 message 带稳定 id:user 走持久 uuid(走另一路径
+    // 直接 emit,见 run_agent),其它角色 lazy sha1(role + " " + content
+    // + " " + timestamp)。这里 timestamp 默认空字符串,跟磁盘上 JSONL
+    // 重读时算出来的 ID 保持一致(JSONL 里 assistant 消息也没 timestamp)。
+    ChatMessage tmp;
+    tmp.role    = role;
+    tmp.content = content;
     events_.emit(SessionEventKind::Message,
-        nlohmann::json{{"role", role}, {"content", content}, {"is_tool", is_tool}});
+        nlohmann::json{
+            {"role", role}, {"content", content}, {"is_tool", is_tool},
+            {"id", web::compute_message_id(tmp)}});
 }
 
 void AgentLoop::abort() {
@@ -135,7 +145,8 @@ void AgentLoop::run_agent(const std::string& user_message) {
         session_manager_->begin_user_turn_checkpoint(user_msg.uuid);
     }
     events_.emit(SessionEventKind::Message,
-        nlohmann::json{{"role", "user"}, {"content", user_message}, {"is_tool", false}});
+        nlohmann::json{{"role", "user"}, {"content", user_message},
+                       {"is_tool", false}, {"id", user_msg.uuid}});
 
     if (callbacks_.on_busy_changed) {
         callbacks_.on_busy_changed(true);
@@ -421,6 +432,35 @@ void AgentLoop::run_agent(const std::string& user_message) {
                     ToolContext t_ctx;
                     t_ctx.cwd = cwd_;
                     t_ctx.abort_flag = &abort_requested_;
+                    if (session_manager_) {
+                        t_ctx.track_file_write_before = [this](const std::string& path) {
+                            if (session_manager_) {
+                                session_manager_->track_file_write_before(path);
+                            }
+                        };
+                    }
+                    // AskUserQuestion 工具(read-only)走这条并行路径,需要这个回调
+                    // 才能把 questions 推给前端;漏注入会让 daemon 工厂版直接 fail-fast。
+                    if (ask_prompter_) {
+                        AskUserQuestionPrompter* p = ask_prompter_;
+                        std::atomic<bool>* abort_flag_ptr = &abort_requested_;
+                        t_ctx.ask_user_questions =
+                            [p, abort_flag_ptr](const nlohmann::json& questions_payload) -> nlohmann::json {
+                                AskUserQuestionResponse resp = p->prompt(questions_payload, abort_flag_ptr);
+                                nlohmann::json out;
+                                out["cancelled"] = resp.cancelled;
+                                nlohmann::json arr = nlohmann::json::array();
+                                for (const auto& a : resp.answers) {
+                                    nlohmann::json item;
+                                    item["question_id"] = a.question_id;
+                                    item["selected"]    = a.selected;
+                                    item["custom_text"] = a.custom_text;
+                                    arr.push_back(std::move(item));
+                                }
+                                out["answers"] = std::move(arr);
+                                return out;
+                            };
+                    }
                     futures.push_back(std::async(std::launch::async,
                         [&execute_single_tool, t_name, t_args, t_path, t_ctx]() {
                             return execute_single_tool(t_name, t_args, t_path, t_ctx);

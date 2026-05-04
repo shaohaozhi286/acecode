@@ -16,6 +16,12 @@ struct SessionMeta {
     std::string provider;
     std::string model;
     std::string title;  // optional user-set window title; empty = unset
+
+    // Web fork 相关元数据(openspec session-fork capability)。
+    // 空字符串 = 这个 session 不是从其它 session 分叉出来的。
+    // 老 meta 文件没有这两个字段时读出来就是空,序列化时也省略。
+    std::string forked_from;       // 源 session id
+    std::string fork_message_id;   // 在源 session 哪条消息上分叉(含此条)
 };
 
 class SessionStorage {

@@ -79,6 +79,9 @@
 #ifdef _WIN32
 #  include "daemon/service_win.hpp"
 #endif
+#include "upgrade/apply.hpp"
+#include "upgrade/manifest.hpp"
+#include "upgrade/upgrade.hpp"
 #include "commands/command_registry.hpp"
 #include "commands/builtin_commands.hpp"
 #include "commands/compact.hpp"
@@ -754,6 +757,19 @@ static std::string executable_path_from_argv(int argc, char* argv[]) {
 
 static std::optional<int> dispatch_non_tui_command(int argc, char* argv[]) {
     const std::string exe_path = executable_path_from_argv(argc, argv);
+
+    if (argc >= 2 && (std::string(argv[1]) == "upgrade" ||
+                      std::string(argv[1]) == "update")) {
+        AppConfig config = load_config();
+        return acecode::upgrade::run_upgrade_command(
+            config, exe_path, ACECODE_VERSION, std::cout, std::cerr);
+    }
+
+    if (argc >= 2 && std::string(argv[1]) == "--apply-update") {
+        return acecode::upgrade::run_apply_update_command(
+            argv_tail(argc, argv, 2), std::cout, std::cerr,
+            acecode::upgrade::current_target());
+    }
 
     if (argc >= 2 && std::string(argv[1]) == "daemon") {
         return acecode::daemon::cli::run(argv_tail(argc, argv, 2), exe_path);

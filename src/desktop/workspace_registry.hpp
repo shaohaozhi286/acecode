@@ -4,13 +4,13 @@
 // 落地为 .acecode/projects/<cwd_hash>/workspace.json。
 //
 // 文件格式:
-//   { "cwd": "<absolute-path>", "name": "<display-name>" }
+//   { "cwd": "<absolute-path>", "name": "<display-name>", "desktop_visible": true|false }
 //
 // name 可由用户行内重命名;缺失或损坏时回退到 fs::path(cwd).filename()(再不济
 // 用 root_name 与字面常量"workspace")。
 //
-// scan() 优先读取 workspace.json;缺失时会尝试从同目录下的 session meta
-// 反推 cwd 并回填 workspace.json。完全无 cwd 线索的孤儿目录仍不入册。
+// scan() 只读取 desktop_visible=true 的 workspace.json。缺失 marker 的老 TUI
+// history 与显式 desktop_visible=false 的目录都不会出现在 Desktop startup 列表。
 //
 // 所有操作线程安全,内部用 std::mutex 保护 entries_。所有写盘走 atomic_write
 // (.tmp + rename),失败时内存 cache 回滚。
@@ -27,13 +27,15 @@ struct WorkspaceMeta {
     std::string hash; // 16 位 hex,= compute_cwd_hash(cwd)
     std::string cwd;  // 绝对路径,正斜杠规范化前的原始字符串
     std::string name; // 显示名;用户未指定时 = default_workspace_name(cwd)
+    bool desktop_visible = false; // true = Desktop startup may list this workspace
 };
 
 class WorkspaceRegistry {
 public:
     WorkspaceRegistry() = default;
 
-    // 扫 projects_dir 下所有子目录,把可读 + 含 cwd 字段的 workspace.json 入册。
+    // 扫 projects_dir 下所有子目录,把可读 + 含 cwd 字段 + desktop_visible=true
+    // 的 workspace.json 入册。
     // 重复调用会清空再重扫(MVP 不做增量)。
     void scan(const std::string& projects_dir);
 
@@ -45,7 +47,8 @@ public:
 
     // 给一个 cwd 注册 workspace:
     //   - 已存在(hash 已知)→ 返回已有 meta,不动磁盘
-    //   - 新 → 建目录 + 写 workspace.json(name = default),入册,返回新 meta
+    //   - 新 → 建目录 + 写 workspace.json(name = default,desktop_visible=true),
+    //     入册,返回新 meta
     // projects_dir 不会被扫(scan 是一次性);此处用调用方传入的根目录定位写入位置。
     WorkspaceMeta register_new(const std::string& projects_dir, const std::string& cwd);
 
@@ -60,8 +63,9 @@ private:
     std::unordered_map<std::string, WorkspaceMeta> entries_;
 };
 
-// 确保某 cwd 的 workspace.json 存在。若文件已存在,不读取也不覆盖,避免
-// TUI/daemon 启动把用户在 Desktop 里改过的 name 冲掉。
+// 确保某 cwd 的 workspace.json 存在,但不把它暴露给 Desktop startup。若文件
+// 已存在,不读取也不覆盖,避免 TUI/daemon 启动把用户在 Desktop 里改过的 name
+// 或 desktop_visible marker 冲掉。
 bool ensure_workspace_metadata(const std::string& projects_dir, const std::string& cwd);
 
 // 默认命名策略 — 暴露为公共符号便于直接单测。

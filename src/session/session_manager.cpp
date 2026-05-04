@@ -321,6 +321,68 @@ std::string SessionManager::fork_active_session(const std::vector<ChatMessage>& 
     return session_id_;
 }
 
+std::string SessionManager::fork_session_to_new_id(
+    const std::vector<ChatMessage>& retained_prefix,
+    const std::string& title,
+    const std::string& forked_from_id,
+    const std::string& fork_message_id) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!started_) return {};
+
+    // ensure project_dir 存在 — 即使当前 manager 还没 ensure_created
+    // (理论上 web fork 调用前 manager 已经 active,但保险)。
+    if (project_dir_.empty()) {
+        project_dir_ = SessionStorage::get_project_dir(cwd_);
+    }
+    std::error_code ec;
+    fs::create_directories(project_dir_, ec);
+    if (ec) return {};
+
+    const std::string new_session_id = SessionStorage::generate_session_id();
+    const std::string new_jsonl = SessionStorage::session_path(project_dir_, new_session_id);
+    const std::string new_meta  = SessionStorage::meta_path(project_dir_, new_session_id);
+
+    // 写新 jsonl(过滤 file_checkpoint 元消息;新 session 不继承 checkpoints)
+    int count = 0;
+    std::string last_user_summary;
+    bool io_error = false;
+    try {
+        for (const auto& msg : retained_prefix) {
+            if (is_file_checkpoint_message(msg)) continue;
+            SessionStorage::append_message(new_jsonl, msg);
+            count++;
+            if (msg.role == "user" && !msg.content.empty()) {
+                last_user_summary = extract_summary(msg.content);
+            }
+        }
+    } catch (...) {
+        io_error = true;
+    }
+
+    if (io_error) {
+        fs::remove(new_jsonl, ec);
+        return {};
+    }
+
+    // 写新 meta:cwd / provider / model 从当前继承;forked_from / fork_message_id
+    // / title 由 caller 决定。
+    SessionMeta meta;
+    meta.id              = new_session_id;
+    meta.cwd             = cwd_;
+    meta.created_at      = SessionStorage::now_iso8601();
+    meta.updated_at      = meta.created_at;
+    meta.message_count   = count;
+    meta.summary         = last_user_summary;
+    meta.provider        = provider_name_;
+    meta.model           = model_name_;
+    meta.title           = title;
+    meta.forked_from     = forked_from_id;
+    meta.fork_message_id = fork_message_id;
+    SessionStorage::write_meta(new_meta, meta);
+
+    return new_session_id;
+}
+
 void SessionManager::cleanup_old_sessions(int max_sessions) {
     std::lock_guard<std::mutex> lk(mu_);
     if (project_dir_.empty()) return;

@@ -17,8 +17,14 @@ namespace acecode::desktop {
 
 class WebHost {
 public:
+    enum class StartupWindowMode {
+        DefaultVisible,
+        OffscreenUntilReady,
+    };
+
     // debug=true 时启用 WebView2 DevTools(F12 / 右键检查可用)。MVP 默认 true。
-    explicit WebHost(bool debug = true);
+    explicit WebHost(bool debug = true,
+                     StartupWindowMode startup_mode = StartupWindowMode::DefaultVisible);
     ~WebHost();
 
     WebHost(const WebHost&) = delete;
@@ -27,6 +33,10 @@ public:
     void set_title(const std::string& title);
     void set_size(int width, int height);
     void navigate(const std::string& url);
+
+    // 显示/隐藏 native 窗口。注意:启动路径不要用 hide-before-navigate。
+    // WebView2 controller 在 hidden parent 下可能暂停渲染,导致页面一直空白。
+    void set_visible(bool visible);
 
     // 注入一段 JS 在每次 navigate 前执行(`window.__ACECODE_INITIAL_*` 之类常量
     // 在这里塞)。在 navigate 之前调。

@@ -7,9 +7,14 @@
 #include <gtest/gtest.h>
 
 #include "session/session_serializer.hpp"
+#include "session/session_storage.hpp"
 #include "provider/llm_provider.hpp"
 
 #include <nlohmann/json.hpp>
+
+#include <filesystem>
+#include <fstream>
+#include <sstream>
 
 using acecode::ChatMessage;
 using acecode::serialize_message;
@@ -169,4 +174,95 @@ TEST(SessionSerializer, EmptyContentIsOmitted) {
         << "empty content must be omitted; got: " << line;
     EXPECT_FALSE(j.contains("tool_calls"))
         << "empty tool_calls must be omitted; got: " << line;
+}
+
+// 场景:SessionMeta 含 forked_from / fork_message_id 时,write_meta + read_meta
+// roundtrip 后两字段值不变。这是 web fork 持久化的契约。
+TEST(SessionSerializer, SessionMetaForkFieldsRoundtrip) {
+    namespace fs = std::filesystem;
+    auto tmp = fs::temp_directory_path() / "acecode_meta_fork_test.meta.json";
+    fs::remove(tmp);
+
+    acecode::SessionMeta in;
+    in.id = "20260503-100000-aaaa";
+    in.cwd = "/proj/foo";
+    in.created_at = "2026-05-03T10:00:00Z";
+    in.updated_at = "2026-05-03T10:01:00Z";
+    in.message_count = 5;
+    in.summary = "测试 fork";
+    in.provider = "copilot";
+    in.model = "gpt-4o";
+    in.title = "分叉1:重构 auth";
+    in.forked_from = "20260503-095500-bbbb";
+    in.fork_message_id = "u-abc-123";
+
+    acecode::SessionStorage::write_meta(tmp.string(), in);
+    auto out = acecode::SessionStorage::read_meta(tmp.string());
+    EXPECT_EQ(out.id, in.id);
+    EXPECT_EQ(out.title, in.title);
+    EXPECT_EQ(out.forked_from, in.forked_from);
+    EXPECT_EQ(out.fork_message_id, in.fork_message_id);
+
+    fs::remove(tmp);
+}
+
+// 场景:老 meta 文件不含 forked_from / fork_message_id 字段 → read_meta
+// 出来这两字段为空(向后兼容)。
+TEST(SessionSerializer, SessionMetaLegacyFileMissingForkFields) {
+    namespace fs = std::filesystem;
+    auto tmp = fs::temp_directory_path() / "acecode_meta_legacy_test.meta.json";
+    {
+        std::ofstream ofs(tmp);
+        ofs << R"({
+            "id": "20260101-100000-cccc",
+            "cwd": "/proj/old",
+            "created_at": "2026-01-01T10:00:00Z",
+            "updated_at": "2026-01-01T10:00:00Z",
+            "message_count": 1,
+            "summary": "old session",
+            "provider": "openai",
+            "model": "gpt-4",
+            "title": "old"
+        })";
+    }
+    auto out = acecode::SessionStorage::read_meta(tmp.string());
+    EXPECT_EQ(out.id, "20260101-100000-cccc");
+    EXPECT_EQ(out.title, "old");
+    EXPECT_TRUE(out.forked_from.empty());
+    EXPECT_TRUE(out.fork_message_id.empty());
+
+    fs::remove(tmp);
+}
+
+// 场景:写一个 forked_from / fork_message_id 都为空的 meta(普通新 session
+// 没分叉)→ JSON 里**不应该**出现这两个键(不无谓膨胀)。
+TEST(SessionSerializer, SessionMetaEmptyForkFieldsOmitted) {
+    namespace fs = std::filesystem;
+    auto tmp = fs::temp_directory_path() / "acecode_meta_empty_fork_test.meta.json";
+    fs::remove(tmp);
+
+    acecode::SessionMeta in;
+    in.id = "20260503-100000-eeee";
+    in.cwd = "/proj";
+    in.created_at = "2026-05-03T10:00:00Z";
+    in.updated_at = in.created_at;
+    in.message_count = 0;
+    in.provider = "openai";
+    in.model = "gpt-4";
+    // forked_from / fork_message_id 故意留空
+
+    acecode::SessionStorage::write_meta(tmp.string(), in);
+
+    nlohmann::json j;
+    {
+        std::ifstream ifs(tmp);
+        std::stringstream ss;
+        ss << ifs.rdbuf();
+        j = nlohmann::json::parse(ss.str());
+    }
+    EXPECT_FALSE(j.contains("forked_from"));
+    EXPECT_FALSE(j.contains("fork_message_id"));
+
+    std::error_code ec;
+    fs::remove(tmp, ec);
 }

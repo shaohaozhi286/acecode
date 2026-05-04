@@ -3,10 +3,15 @@
 //   - summary 模式: tool_end 后,绿/红 chip(icon · verb · object · metrics)
 //   - 失败折叠: success=false 时 summary 行下显示前 3 行 stderr,可展开看完整 output
 // 用户点 chip 可切换"展开/收起"。task_complete 用 Done: <summary> 渲染。
+//
+// hunks 字段(file_edit / file_write):展开区走 diff2html 渲染,而不是
+// 纯 <pre>{output}</pre>。bash 工具的展开区头部加 `$ <command>` prompt 行。
 
-import { memo, useState } from 'react';
+import { memo, useMemo, useState } from 'react';
 import { clsx, formatBytes, formatElapsed } from '../lib/format.js';
+import { hunksToUnifiedDiff } from '../lib/diff.js';
 import { ToolSummaryIcon, VsIcon } from './Icon.jsx';
+import * as Diff2Html from 'diff2html';
 
 function MetricList({ metrics }) {
   if (!metrics || !metrics.length) return null;
@@ -30,6 +35,8 @@ export const ToolBlock = memo(function ToolBlock({ entry }) {
     isDone = false,
     success = null,
     title = '',
+    tool = '',
+    displayOverride = '',
     tailLines = [],
     currentPartial = '',
     totalLines = 0,
@@ -37,7 +44,26 @@ export const ToolBlock = memo(function ToolBlock({ entry }) {
     elapsed = 0,
     summary = null,
     output = '',
+    hunks = [],
   } = entry || {};
+
+  // diff2html 渲染:先把 hunks 转 unified diff,再交给 diff2html。空 hunks 时
+  // 不构造,避免每次 render 浪费。
+  const diffHtml = useMemo(() => {
+    if (!Array.isArray(hunks) || hunks.length === 0) return '';
+    const file = (summary && summary.object) || displayOverride || 'change';
+    const unified = hunksToUnifiedDiff(hunks, file);
+    if (!unified) return '';
+    try {
+      return Diff2Html.html(unified, {
+        drawFileList: false,
+        outputFormat: 'line-by-line',
+        matching: 'lines',
+      });
+    } catch {
+      return '';
+    }
+  }, [hunks, summary, displayOverride]);
 
   if (isTaskComplete) {
     const text = (summary && summary.object) || '完成';
@@ -78,10 +104,24 @@ export const ToolBlock = memo(function ToolBlock({ entry }) {
             {output.split('\n').slice(0, 3).join('\n')}
           </div>
         )}
-        {expanded && output && (
-          <pre className="m-0 px-3 pb-2 pt-1 text-[11px] text-fg-2 whitespace-pre-wrap break-all max-h-[280px] overflow-y-auto">
-            {output}
-          </pre>
+        {expanded && (
+          <div className="px-3 pb-2 pt-1">
+            {tool === 'bash' && displayOverride && (
+              <div className="text-[11px] text-fg-mute font-mono opacity-70 mb-1">
+                $ {displayOverride}
+              </div>
+            )}
+            {diffHtml ? (
+              <div
+                className="ace-diff"
+                dangerouslySetInnerHTML={{ __html: diffHtml }}
+              />
+            ) : output ? (
+              <pre className="m-0 text-[11px] text-fg-2 whitespace-pre-wrap break-all max-h-[280px] overflow-y-auto">
+                {output}
+              </pre>
+            ) : null}
+          </div>
         )}
       </div>
     );

@@ -84,6 +84,44 @@ export function createApi(base = null) {
     switchModel:      (sid, name)    => request('POST',   `/api/sessions/${encodeURIComponent(sid)}/model`, {name}, base),
     getHistory:       (cwd, max=100) => request('GET',    `/api/history?cwd=${encodeURIComponent(cwd)}&max=${max}`, undefined, base),
     appendHistory:    (text)         => request('POST',   '/api/history', {text}, base),
+    forkSession:      (sid, atMessageId, title) =>
+      request('POST', `/api/sessions/${encodeURIComponent(sid)}/fork`,
+              { at_message_id: atMessageId, title: title || '' }, base),
+
+    // SidePanel "文件" tab — 列指定目录的直接子项(不递归)。
+    // path='' 列 cwd 根本身。showHidden=true 透出 dot 文件,但 noise 黑名单
+    // (.git/node_modules/dist/build/__pycache__/.venv/venv/target/.next/.cache)
+    // 始终过滤,不受 showHidden 影响。
+    listFiles: (cwd, path, showHidden = false) => {
+      const qs = `?cwd=${encodeURIComponent(cwd)}&path=${encodeURIComponent(path || '')}`
+                 + (showHidden ? '&show_hidden=1' : '');
+      return request('GET', '/api/files' + qs, undefined, base);
+    },
+
+    // SidePanel "预览" tab — 读单文件原文。返回 string(text body),不是 JSON,
+    // 所以走自己的 fetch + r.text() 而非通用 request()。失败抛 ApiError(同 request 风格)。
+    // 415 body 形如 {error:"file too large", size:N},供前端提示用户。
+    readFile: async (cwd, path) => {
+      const qs = `?cwd=${encodeURIComponent(cwd)}&path=${encodeURIComponent(path)}`;
+      const headers = {};
+      const token = baseToken(base);
+      if (token) headers['X-ACECode-Token'] = token;
+      const resp = await fetch(fullUrl('/api/files/content' + qs, base), {
+        method: 'GET',
+        headers,
+      });
+      if (!resp.ok) {
+        let parsed = null;
+        const ctype = resp.headers.get('Content-Type') || '';
+        if (ctype.includes('application/json')) {
+          parsed = await resp.json().catch(() => null);
+        } else {
+          parsed = await resp.text().catch(() => '');
+        }
+        throw new ApiError(resp.status, parsed);
+      }
+      return resp.text();
+    },
   };
 }
 

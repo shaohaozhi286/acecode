@@ -199,3 +199,230 @@ body {
 :where(html, body, *) {
   transition: background-color .25s ease, border-color .25s ease, color .2s ease;
 }
+
+/* highlight.js 主题:代码块背景在 light/dark 两种模式下都是深色(--ace-code-bg),
+ * 所以统一选用 github-dark 的 token 配色;暗色模式由下面 [data-theme="dark"] 的
+ * dracula override 接管。 */
+@import 'highlight.js/styles/github-dark.css';
+
+[data-theme="dark"] .hljs {
+  /* 暗色主题 — 直接 inline 重写,避免再 import 一份 css 增加 bundle */
+  background: var(--ace-code-bg) !important;
+  color:      var(--ace-code-fg) !important;
+}
+[data-theme="dark"] .hljs-comment,
+[data-theme="dark"] .hljs-quote        { color: #6272a4; font-style: italic; }
+[data-theme="dark"] .hljs-keyword,
+[data-theme="dark"] .hljs-selector-tag,
+[data-theme="dark"] .hljs-section,
+[data-theme="dark"] .hljs-name         { color: #ff79c6; }
+[data-theme="dark"] .hljs-string,
+[data-theme="dark"] .hljs-template-variable,
+[data-theme="dark"] .hljs-attr         { color: #f1fa8c; }
+[data-theme="dark"] .hljs-number,
+[data-theme="dark"] .hljs-literal,
+[data-theme="dark"] .hljs-symbol       { color: #bd93f9; }
+[data-theme="dark"] .hljs-title,
+[data-theme="dark"] .hljs-built_in,
+[data-theme="dark"] .hljs-class .hljs-title { color: #50fa7b; }
+[data-theme="dark"] .hljs-variable,
+[data-theme="dark"] .hljs-tag          { color: #8be9fd; }
+[data-theme="dark"] .hljs-meta         { color: #ff79c6; }
+[data-theme="dark"] .hljs-deletion     { color: #ff5555; background: rgba(255,85,85,.1); }
+[data-theme="dark"] .hljs-addition     { color: #50fa7b; background: rgba(80,250,123,.1); }
+
+/* hljs 的 background 在 ace-md pre 已经控制,统一覆盖避免双背景闪烁 */
+.ace-md pre.hljs,
+.ace-md pre code.hljs { background: var(--ace-code-bg); }
+
+/* GFM 表格 */
+.ace-md table {
+  border-collapse: collapse;
+  margin: 6px 0;
+  font-size: 12px;
+}
+.ace-md th, .ace-md td {
+  border: 1px solid var(--ace-border);
+  padding: 4px 8px;
+}
+.ace-md th { background: var(--ace-surface-hi); font-weight: 600; }
+
+/* GFM 任务清单(markdown-it-task-lists 默认渲染 li.task-list-item) */
+.ace-md li.task-list-item { list-style: none; margin-left: -22px; }
+.ace-md li.task-list-item > input[type="checkbox"] {
+  margin-right: 6px;
+  vertical-align: -0.1em;
+}
+
+.ace-md blockquote {
+  margin: 6px 0;
+  padding-left: 10px;
+  border-left: 3px solid var(--ace-border);
+  color: var(--ace-fg-2);
+}
+.ace-md h1 { font-size: 1.3em; font-weight: 700; margin: 10px 0 6px; }
+.ace-md h2 { font-size: 1.2em; font-weight: 700; margin: 9px 0 5px; }
+.ace-md h3 { font-size: 1.1em; font-weight: 600; margin: 8px 0 4px; }
+.ace-md h4, .ace-md h5, .ace-md h6 { font-size: 1em; font-weight: 600; margin: 6px 0 3px; }
+
+/* diff2html 渲染 — 用我们的 ok/danger 调色 */
+@import 'diff2html/bundles/css/diff2html.min.css';
+
+.ace-diff {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  margin-top: 6px;
+}
+.ace-diff .d2h-file-header {
+  background: var(--ace-surface-hi);
+  color: var(--ace-fg);
+  border-color: var(--ace-border);
+  padding: 4px 8px;
+}
+.ace-diff .d2h-code-line-prefix,
+.ace-diff .d2h-code-line-ctn,
+.ace-diff .d2h-code-side-line {
+  font-family: var(--font-mono);
+}
+.ace-diff .d2h-ins  { background: var(--ace-ok-bg);     color: var(--ace-ok); }
+.ace-diff .d2h-del  { background: var(--ace-danger-bg); color: var(--ace-danger); }
+.ace-diff .d2h-info { background: var(--ace-surface-alt); color: var(--ace-fg-mute); }
+
+/* hover actions on chat messages (复制 / 分叉) */
+.ace-msg-actions {
+  opacity: 0;
+  transition: opacity .15s ease;
+}
+.group:hover > .ace-msg-actions { opacity: 1; }
+.ace-msg-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  color: var(--ace-fg-mute);
+  background: transparent;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: all .15s ease;
+}
+.ace-msg-actions button:hover:not(:disabled) {
+  background: var(--ace-surface-hi);
+  color: var(--ace-fg);
+  border-color: var(--ace-border);
+}
+.ace-msg-actions button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Single view column resize handles */
+.ace-resize-handle {
+  position: relative;
+  flex: 0 0 7px;
+  width: 7px;
+  cursor: col-resize;
+  touch-action: none;
+  background: transparent;
+  z-index: 5;
+}
+.ace-resize-handle::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 1px;
+  background: var(--ace-accent);
+  opacity: 0;
+  transition: opacity .12s ease;
+}
+.ace-resize-handle:hover::before,
+.ace-resize-handle:focus-visible::before { opacity: 1; }
+.ace-resize-handle:focus-visible {
+  outline: 1px solid var(--ace-accent);
+  outline-offset: -2px;
+}
+.ace-resizing,
+.ace-resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+.ace-resizing .ace-sidebar { transition: none !important; }
+
+/* SidePanel — single 视图右侧工作区面板(文件 / 变更 / 预览) */
+.ace-side-panel {
+  width: 280px;
+  min-width: 280px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--ace-surface-alt);
+  border-left: 1px solid var(--ace-border);
+  overflow: hidden;
+}
+.ace-side-tabs {
+  display: flex;
+  height: 28px;
+  background: var(--ace-surface-hi);
+  border-bottom: 1px solid var(--ace-border);
+  flex-shrink: 0;
+}
+.ace-side-tab {
+  flex: 1;
+  border: none;
+  background: transparent;
+  color: var(--ace-fg-mute);
+  font-size: 11px;
+  font-weight: 400;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: color .15s ease, border-color .15s ease;
+}
+.ace-side-tab:hover { color: var(--ace-fg); }
+.ace-side-tab[aria-selected="true"] {
+  color: var(--ace-accent);
+  font-weight: 600;
+  border-bottom-color: var(--ace-accent);
+}
+
+/* 空态 — tab 内无数据时的居中提示 */
+.ace-empty-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 24px 16px;
+  color: var(--ace-fg-mute);
+  font-size: 12px;
+  gap: 4px;
+}
+
+/* 文件树 — 等宽行 */
+.ace-file-tree {
+  font-family: var(--font-mono);
+}
+.ace-file-row {
+  border: none;
+  background: transparent;
+}
+.ace-file-row:hover { background: var(--ace-surface-hi); }
+
+/* 预览区 — hljs pre 撑满 */
+.ace-preview pre {
+  margin: 0;
+  padding: 8px 10px;
+  background: var(--ace-code-bg);
+  color: var(--ace-code-fg);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre;
+  overflow: auto;
+  min-height: 100%;
+}
+.ace-preview code { font-family: inherit; }
+

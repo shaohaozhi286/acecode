@@ -1,4 +1,5 @@
 #include "tool_event_payload.hpp"
+#include "../session/tool_metadata_codec.hpp"
 
 namespace acecode::web {
 
@@ -61,6 +62,13 @@ nlohmann::json build_tool_end_payload(
     }
     if (!result.success && !output_snippet.empty()) {
         p["output"] = output_snippet;
+    }
+    // hunks 字段总是存在(空数组而不是省略),便于前端写"if (p.hunks.length)"
+    // 而不必先 contains 判断。前端 file_edit / file_write 走 diff2html 渲染。
+    if (result.hunks.has_value()) {
+        p["hunks"] = encode_tool_hunks(*result.hunks);
+    } else {
+        p["hunks"] = nlohmann::json::array();
     }
     return p;
 }

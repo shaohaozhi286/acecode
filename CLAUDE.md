@@ -139,32 +139,45 @@ CLI `--alt-screen` / `-alt-screen` forces alt-screen for this launch (no config 
 
 ### Web UI: 前端目录
 
+栈是 **React 18 + Vite 5 + Tailwind v4**(*不是* 原生 Web Components,旧版 CLAUDE.md 描述已过时)。`vite-plugin-singlefile` 把所有 JS/CSS 内联到单个 `dist/index.html`,然后被嵌入资源管线吃掉。`pnpm install && pnpm build` 是必经一步(CI 与本地都跑)。
+
 ```
 web/
-├── index.html              ← 入口,模板替换 `?v=__VERSION__` → git short hash
-├── style.css / app.js / api.js / auth.js / connection.js
-├── components/             ← 11 个原生 Web Components(Custom Elements,light DOM)
-│   ├── ace-app, ace-token-prompt, ace-sidebar, ace-chat, ace-message,
-│   ├── ace-tool-block, ace-permission-modal, ace-question-modal,
-│   ├── ace-skills-panel, ace-mcp-editor, ace-model-picker
-└── vendor/bootstrap/       ← Bootstrap 5.3.x 预编译 CSS/JS(手工 vendor,见 README.md)
+├── index.html / vite.config.js / package.json
+├── src/
+│   ├── App.jsx / main.jsx / theme.jsx
+│   ├── components/         ← 22 个 React 组件(ChatView/Sidebar/Message/ToolBlock/SidePanel/...)
+│   ├── lib/                ← api / connection / markdown / format / sessionTitle / auth / diff / lang / sessionChanges
+│   └── styles/globals.css  ← Tailwind v4 entry + 自定义 CSS variables(亮/暗双主题)
+├── public/vs-icons/        ← 单色 SVG 图标库
+└── pnpm-lock.yaml
 ```
 
-不引入 npm / 任何 JS 构建工具:浏览器原生 ES modules(`<script type="module">`)+ Custom Elements。markdown 渲染 v1 不做(用 textContent + pre-wrap 防 XSS)。
+依赖:`react@18` + `markdown-it@14`(GFM 表格/任务清单/嵌套 list)+ `markdown-it-task-lists` + `highlight.js@11`(core + 12 种语言:c/cpp/js/ts/python/bash/json/diff/markdown/rust/go/yaml,语言别名 js→javascript 等在 `lib/markdown.js` 内 normalize)+ `diff2html@3`(line-by-line 模式渲染 file_edit/file_write 的 hunks)。bundle 体积 ~461KB(gzip ~156KB),嵌入二进制约 +600KB。
 
-### Web UI: HTTP / WS 协议增量(对应 add-web-chat-ui change)
+`lib/markdown.js` 收紧 URL scheme 白名单(只放 `http(s)` / `mailto:` / `/` / `./` / `../` / `#`),关闭 raw HTML(`html: false`),外链自动 `target=_blank rel=noreferrer`。`renderMarkdown(src) -> string` 签名稳定。
 
-本 change 在 `add-web-daemon` 的 14 条 Requirement 之上扩了 9 项:
+### Web UI: HTTP / WS 协议增量
+
+`add-web-chat-ui` change 在 `add-web-daemon` 的 14 条 Requirement 之上扩 9 项;`enhance-webui-chat-rendering` 又扩 1 个端点 + 协议字段;`add-webui-side-panel` 加 2 个文件浏览端点:
 
 | 端点 / 消息 | 用途 |
 |---|---|
 | WS `question_request` / `question_answer` | AskUserQuestion 工具的双向异步通道(`AskUserQuestionPrompter` + 5min 超时 + abort_flag 50ms 轮询,模式同 `AsyncPrompter`) |
-| `tool_start` / `tool_update` / `tool_end` payload 字段扩充 | `display_override`(`ToolExecutor::build_tool_call_preview`) / `is_task_complete` / `tail_lines:[5 lines]` / `current_partial` / `total_lines` / `total_bytes` / `elapsed_seconds` / `summary{icon,verb,object,metrics}` / `success` / `output`(失败前 N 行) — 实现:`src/web/tool_event_payload.{hpp,cpp}` 把序列化收口 |
+| `tool_start` / `tool_update` / `tool_end` payload 字段扩充 | `display_override`(`ToolExecutor::build_tool_call_preview`) / `is_task_complete` / `tail_lines:[5 lines]` / `current_partial` / `total_lines` / `total_bytes` / `elapsed_seconds` / `summary{icon,verb,object,metrics}` / `success` / `output`(失败前 N 行) / `hunks[]`(file_edit/file_write 的 diff,前端走 diff2html 渲染) — 实现:`src/web/tool_event_payload.{hpp,cpp}` 把序列化收口 |
+| `message` payload(WS + REST `GET /api/sessions/:id/messages`) 扩 `id` 字段 | user 消息走持久化 UUID(`ensure_user_message_identity`);assistant/system/tool 走 lazy `sha1(role + " " + content + " " + timestamp)` 小写 hex(实现:`src/web/message_payload.{hpp,cpp}` + `src/utils/sha1.hpp`)。前端用这个 id 做 fork |
+| `POST /api/sessions/:id/fork` body `{at_message_id, title?}` → `{session_id, title, forked_from, fork_message_id}` | 把 source session 截止到 at_message_id(含此条)的前缀复制到新 session;源不动;新 session 不自动启 turn。命名 `分叉<N>:<原标题>`(N=同源 sibling+1,原标题截 50 codepoint)。继承 cwd/provider/model,**不**继承 file_checkpoints。实现:`src/web/handlers/fork_handler.{hpp,cpp}`(纯函数 compute_fork_title + find_message_index_by_id) + `SessionManager::fork_session_to_new_id` |
 | `GET /api/models` / `POST /api/sessions/:id/model` | 模型下拉:`saved_models` + 合成 `(legacy)` 行;v1 切的是 daemon 全局 provider(所有 session 共享一个),由 `swap_provider_if_needed` 实施 |
 | `GET /api/history?cwd=&max=` / `POST /api/history` | per-cwd 输入历史,与 TUI 共享同一份 `<cwd_hash>/input_history.jsonl`,经 `InputHistoryStore::append` atomic rename |
 | `PUT /api/skills/:name` body `{enabled}` / `GET /api/skills/:name/body` | 启停切换 + 查看 SKILL.md;PUT 写 `cfg.skills.disabled` 数组并 `save_config` + `SkillRegistry::reload` |
+| `GET /api/files?cwd=&path=&show_hidden=` → `[{name,path,kind,size?,modified_ms?}]` | SidePanel 文件 tab 的 lazy 文件树。`cwd` 必须 ∈ `{deps.cwd}` 白名单;`path` 走 `weakly_canonical(cwd/path)` + prefix 检查防越权。硬编码 noise 黑名单(.git/node_modules/dist/build/__pycache__/.venv/venv/target/.next/.cache)始终过滤。隐藏文件(dot 开头)默认过滤,`show_hidden=1` 透出 |
+| `GET /api/files/content?cwd=&path=` → `text/plain; charset=utf-8` body | SidePanel 预览 tab 读文件原文。> 5MB → 415 `{error:"file too large",size:N}`;前 512 字节出现 `\0` → 415 `{error:"binary"}`;不存在 → 404。实现:`src/web/handlers/files_handler.{hpp,cpp}`(纯函数,17 个 unit test 覆盖路径越权 / 噪音过滤 / 排序 / 二进制嗅探) |
 
-handler 实现在 `src/web/handlers/{models,history,skills}_handler.{hpp,cpp}`(纯函数,有 unit test),路由注册在 `src/web/server.cpp`。`/static/<...>` + `/` + SPA fallback 用 `CROW_CATCHALL_ROUTE` 一举处理(Crow 1.3.2 的 `<path>` 模板路由有兼容性问题)。
+`SessionMeta` 增加 `forked_from` / `fork_message_id` 字段(空时省略,老 meta 文件向后兼容)。Web 上每条消息 hover 浮出 `[复制] [分叉]` actions(codex 风格);分叉成功后立刻切到新 session(同 sidebar)。
+
+handler 实现在 `src/web/handlers/{fork,models,history,skills,files}_handler.{hpp,cpp}`(纯函数,有 unit test),路由注册在 `src/web/server.cpp`。`/static/<...>` + `/` + SPA fallback 用 `CROW_CATCHALL_ROUTE` 一举处理(Crow 1.3.2 的 `<path>` 模板路由有兼容性问题)。
+
+**SidePanel 「变更」tab limitation**:前端纯聚合 messages 中 `tool_end.hunks`,只能反映 `file_edit` / `file_write` 工具的改动。用户授权 agent 用 `bash sed`/`awk`/`git checkout` 改的文件抓不到 — 后续 follow-up 思路:让 `bash_tool` 在执行前后 diff 一遍 cwd 把 hunks 倒灌回 `ToolResult.metadata.tool_hunks`(待评估 git/non-git 区分)。
 
 ### Desktop shell + multi-workspace
 

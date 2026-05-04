@@ -128,7 +128,7 @@ function WorkspaceGroup({ ws, expanded, onToggle, sessions, activeId, onSelect, 
   );
 }
 
-export function Sidebar({ activeId, onSelect, collapsed, onOpenSkills, onOpenMcp }) {
+export function Sidebar({ activeId, onSelect, collapsed, width = 200, onOpenSkills, onOpenMcp }) {
   const [pane,        setPane]        = useState('sessions'); // 'sessions' | 'skills' | 'mcp'
   const [workspaces,  setWorkspaces]  = useState([]);
   const [sessions,    setSessions]    = useState([]);
@@ -159,7 +159,7 @@ export function Sidebar({ activeId, onSelect, collapsed, onOpenSkills, onOpenMcp
         }
       }
 
-      if (workspaceArr.length === 0) {
+      if (workspaceArr.length === 0 && !hasDesktopBridge()) {
         workspaceArr = [{ hash: '__local__', cwd: '', name: '当前会话',
                           daemon_state: 'running', active: true }];
       }
@@ -351,10 +351,11 @@ export function Sidebar({ activeId, onSelect, collapsed, onOpenSkills, onOpenMcp
   return (
     <aside
       className={[
-        'bg-surface-alt border-r border-border flex flex-col font-sans shrink-0 overflow-hidden',
+        'ace-sidebar bg-surface-alt border-r border-border flex flex-col font-sans shrink-0 overflow-hidden',
         'transition-[width,min-width] duration-250',
-        collapsed ? 'w-0 min-w-0' : 'w-[200px] min-w-[200px]',
+        collapsed ? 'w-0 min-w-0' : '',
       ].join(' ')}
+      style={collapsed ? undefined : { width, minWidth: width }}
     >
       <div className="flex-1 flex flex-col min-h-0">
         <div className={clsx('flex-1 flex flex-col min-h-0', pane !== 'sessions' && 'hidden')}>
