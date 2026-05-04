@@ -1,7 +1,7 @@
 // 点击宫格里的 MiniSession 后展开为完整会话覆盖层。
 // 接住整个主区,内嵌一个简化版 ChatView(直接重用 ChatView 组件,有 sessionId 即可)。
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { ChatView } from './ChatView.jsx';
 import { clsx } from '../lib/format.js';
 import { sessionDisplayTitle } from '../lib/sessionTitle.js';
@@ -10,7 +10,20 @@ import { VsIcon } from './Icon.jsx';
 export function ExpandedOverlay({ session, onClose }) {
   const [show, setShow] = useState(false);
   useEffect(() => { requestAnimationFrame(() => setShow(true)); }, []);
-  const close = () => { setShow(false); setTimeout(onClose, 240); };
+  const close = useCallback(() => {
+    setShow(false);
+    setTimeout(onClose, 240);
+  }, [onClose]);
+
+  useEffect(() => {
+    const onKeyDown = (event) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      close();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [close]);
 
   return (
     <div

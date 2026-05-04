@@ -15,7 +15,6 @@ import { Grid9View } from './components/Grid9View.jsx';
 import { ExpandedOverlay } from './components/ExpandedOverlay.jsx';
 import { TokenPrompt } from './components/TokenPrompt.jsx';
 import { PermissionModal } from './components/PermissionModal.jsx';
-import { QuestionModal } from './components/QuestionModal.jsx';
 import { SkillsPanel } from './components/SkillsPanel.jsx';
 import { MCPPanel } from './components/MCPPanel.jsx';
 import { SettingsPage } from './components/SettingsPage.jsx';
@@ -220,7 +219,16 @@ export function App() {
   const activeId = activeRef?.sessionId || activeRef?.id || '';
   const sidebarCollapsed = view !== 'single';
   const permReq = permReqs[0] || null;
-  const questionReq = questionReqs[0] || null;
+  const visibleQuestionReq = !permReq
+    ? questionReqs.find((req) => {
+        const reqSid = req?.session_id || '';
+        return !reqSid || (activeId && reqSid === activeId);
+      }) || null
+    : null;
+  const resolveVisibleQuestion = () => {
+    if (!visibleQuestionReq?.request_id) return;
+    setQuestionReqs((prev) => prev.filter((req) => req.request_id !== visibleQuestionReq.request_id));
+  };
 
   return (
     <div className="h-full w-full flex flex-col bg-bg text-fg font-sans">
@@ -266,6 +274,8 @@ export function App() {
               showSidePanel
               sidePanelWidth={singleLayout.sidePanel}
               onSidePanelResize={setSidePanelWidth}
+              questionRequest={visibleQuestionReq}
+              onQuestionResolve={resolveVisibleQuestion}
             />
           )}
           {view === 'grid4' && <Grid4View activeRef={activeRef} onExpand={setExpanded} />}
@@ -282,12 +292,6 @@ export function App() {
           <PermissionModal
             request={permReq}
             onResolve={() => setPermReqs((prev) => prev.slice(1))}
-          />
-        )}
-        {questionReq  && (
-          <QuestionModal
-            request={questionReq}
-            onResolve={() => setQuestionReqs((prev) => prev.slice(1))}
           />
         )}
       </div>

@@ -95,7 +95,13 @@ std::string default_workspace_name(const std::string& cwd) {
         clean.pop_back();
     }
 
-    const size_t slash = clean.find_last_of("/\\");
+    size_t slash = std::string::npos;
+    for (size_t i = clean.size(); i > 0; --i) {
+        if (clean[i - 1] == '/' || clean[i - 1] == '\\') {
+            slash = i - 1;
+            break;
+        }
+    }
     std::string base = slash == std::string::npos ? clean : clean.substr(slash + 1);
     if (!base.empty()) return base;
 

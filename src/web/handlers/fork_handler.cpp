@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <unordered_set>
 
 namespace acecode::web {
 
@@ -38,6 +39,22 @@ bool is_blank(const std::string& s) {
     return true;
 }
 
+std::string strip_existing_fork_prefix(const std::string& title) {
+    constexpr const char* kPrefix = "分叉";
+    constexpr std::size_t kPrefixLen = 6; // UTF-8 bytes for "分叉".
+    if (title.rfind(kPrefix, 0) != 0) return title;
+
+    std::size_t i = kPrefixLen;
+    std::size_t first_digit = i;
+    while (i < title.size() && title[i] >= '0' && title[i] <= '9') {
+        ++i;
+    }
+    if (i == first_digit || i >= title.size() || title[i] != ':') {
+        return title;
+    }
+    return title.substr(i + 1);
+}
+
 } // namespace
 
 std::string compute_fork_title(const SessionMeta& source_meta,
@@ -55,16 +72,26 @@ std::string compute_fork_title(const SessionMeta& source_meta,
             ++sibling_count;
         }
     }
-    int n = sibling_count + 1;
 
     // source title 选择:title > summary > 空(此时 source_text 留空,
     // 标题就是 `分叉N:`)
     std::string source_text = source_meta.title;
     if (source_text.empty()) source_text = source_meta.summary;
+    source_text = strip_existing_fork_prefix(source_text);
 
     constexpr std::size_t kMaxSourceCodepoints = 50;
     std::string truncated = truncate_utf8(source_text, kMaxSourceCodepoints);
 
+    std::unordered_set<std::string> existing_titles;
+    existing_titles.reserve(sibling_metas.size());
+    for (const auto& m : sibling_metas) {
+        if (!m.title.empty()) existing_titles.insert(m.title);
+    }
+
+    int n = sibling_count + 1;
+    while (existing_titles.count("分叉" + std::to_string(n) + ":" + truncated)) {
+        ++n;
+    }
     return "分叉" + std::to_string(n) + ":" + truncated;
 }
 

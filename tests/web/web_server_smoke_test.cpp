@@ -326,6 +326,70 @@ TEST(WebServerHttp, WorkspaceScopedSessionLifecycle) {
     EXPECT_EQ(sessions[0]["cwd"], other_cwd);
 }
 
+// 场景:desktop bridge 直接改 workspace.json 后,daemon 的 /api/workspaces
+// 需要重新扫描磁盘,否则左侧项目名会被旧的 daemon 内存值覆盖。
+TEST(WebServerHttp, WorkspaceListRefreshesExternalRename) {
+    WebServerFixture fx;
+    const std::string hash = acecode::compute_cwd_hash(fx.cwd);
+
+    acecode::desktop::WorkspaceRegistry external;
+    external.scan(fx.projects_dir.string());
+    ASSERT_TRUE(external.set_name(fx.projects_dir.string(), hash, "renamed-from-desktop"));
+
+    auto get_ws = cpr::Get(cpr::Url{fx.url("/api/workspaces")});
+    ASSERT_EQ(get_ws.status_code, 200) << get_ws.text;
+    auto ws_list = json::parse(get_ws.text);
+    ASSERT_TRUE(ws_list.is_array());
+    ASSERT_FALSE(ws_list.empty());
+    EXPECT_EQ(ws_list[0]["hash"], hash);
+    EXPECT_EQ(ws_list[0]["name"], "renamed-from-desktop");
+}
+
+// 场景:在非 daemon 启动 cwd 的 workspace 里 fork,新 session 必须用源
+// workspace cwd 装回 registry；否则前端切到新 fork 时 WS 会报 unknown session。
+TEST(WebServerHttp, ForkWorkspaceSessionResumesInSourceWorkspace) {
+    WebServerFixture fx;
+
+    auto other_cwd_path = fx.tmp_dir / "fork-cwd";
+    std::filesystem::create_directories(other_cwd_path);
+    const std::string other_cwd = other_cwd_path.string();
+    const std::string other_hash = acecode::compute_cwd_hash(other_cwd);
+
+    auto post_ws = cpr::Post(cpr::Url{fx.url("/api/workspaces")},
+                             cpr::Header{{"Content-Type", "application/json"}},
+                             cpr::Body{json{{"cwd", other_cwd}}.dump()});
+    ASSERT_EQ(post_ws.status_code, 201) << post_ws.text;
+
+    auto create = cpr::Post(cpr::Url{fx.url("/api/workspaces/" + other_hash + "/sessions")},
+                            cpr::Header{{"Content-Type", "application/json"}},
+                            cpr::Body{R"({})"});
+    ASSERT_EQ(create.status_code, 201) << create.text;
+    const std::string sid = json::parse(create.text)["session_id"].get<std::string>();
+
+    auto* entry = fx.registry->lookup(sid);
+    ASSERT_NE(entry, nullptr);
+    acecode::ChatMessage msg;
+    msg.role = "user";
+    msg.content = "fork from workspace";
+    msg.uuid = "u-workspace-fork";
+    entry->loop->push_message(msg);
+    entry->sm->on_message(msg);
+
+    auto fork = cpr::Post(cpr::Url{fx.url("/api/sessions/" + sid + "/fork")},
+                          cpr::Header{{"Content-Type", "application/json"}},
+                          cpr::Body{json{{"at_message_id", "u-workspace-fork"}}.dump()});
+    ASSERT_EQ(fork.status_code, 200) << fork.text;
+    auto body = json::parse(fork.text);
+    const std::string new_id = body["session_id"].get<std::string>();
+    EXPECT_EQ(body["workspace_hash"], other_hash);
+    EXPECT_EQ(body["cwd"], other_cwd);
+
+    auto* forked = fx.registry->lookup(new_id);
+    ASSERT_NE(forked, nullptr);
+    EXPECT_EQ(forked->workspace_hash, other_hash);
+    EXPECT_EQ(forked->cwd, other_cwd);
+}
+
 // 场景: registry 里留着一个已删除/不可访问的 workspace 时,列表仍可返回,
 // 但不允许继续创建新会话,避免工具后续在坏 cwd 上才爆。
 TEST(WebServerHttp, UnavailableWorkspaceRejectsSessionCreate) {

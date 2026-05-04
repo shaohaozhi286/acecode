@@ -12,7 +12,8 @@ import { VsIcon } from './Icon.jsx';
 import { toast } from './Toast.jsx';
 
 function HoverActions({ messageId, getCopyText, onFork }) {
-  const handleCopy = async () => {
+  const handleCopy = async (event) => {
+    event.stopPropagation();
     try {
       const text = getCopyText();
       if (!navigator.clipboard) throw new Error('clipboard unavailable');
@@ -22,14 +23,15 @@ function HoverActions({ messageId, getCopyText, onFork }) {
       toast({ kind: 'err', text: '复制失败:' + (e?.message || '') });
     }
   };
-  const handleFork = () => {
+  const handleFork = (event) => {
+    event.stopPropagation();
     if (!messageId) return;
     onFork?.(messageId);
   };
   return (
     <div className="ace-msg-actions absolute top-1 right-1 flex gap-0.5">
       <button type="button" onClick={handleCopy} title="复制">
-        <VsIcon name="copy" size={13} />
+        <VsIcon name="copy" size={17} />
       </button>
       <button
         type="button"
@@ -37,7 +39,7 @@ function HoverActions({ messageId, getCopyText, onFork }) {
         disabled={!messageId}
         title={messageId ? '分叉到新会话' : '此消息不可分叉(无 ID)'}
       >
-        <VsIcon name="fork" size={13} />
+        <VsIcon name="fork" size={17} />
       </button>
     </div>
   );

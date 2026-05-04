@@ -59,6 +59,10 @@ function WorkspaceGroup({ ws, expanded, onToggle, sessions, activeId, onSelect, 
   const [editing, setEditing] = useState(false);
   const [draft,   setDraft]   = useState(ws.name);
 
+  useEffect(() => {
+    if (!editing) setDraft(ws.name);
+  }, [editing, ws.name]);
+
   const commit = async () => {
     setEditing(false);
     const name = draft.trim();
@@ -282,7 +286,8 @@ export function Sidebar({ activeId, onSelect, collapsed, width = 200, onOpenSkil
     if (!hasDesktopBridge()) throw new Error('not in desktop mode');
     const r = parseDesktopResult(await window.aceDesktop_renameWorkspace(hash, name));
     if (!r.ok) throw new Error(r.error || 'rename failed');
-    refresh();
+    setWorkspaces((prev) => prev.map((w) => w.hash === hash ? { ...w, name } : w));
+    await refresh(hash);
   };
 
   const createSessionInWorkspace = async (ws) => {

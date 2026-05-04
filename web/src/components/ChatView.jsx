@@ -13,6 +13,7 @@ import { connection } from '../lib/connection.js';
 import { Message } from './Message.jsx';
 import { ToolBlock } from './ToolBlock.jsx';
 import { InputBar } from './InputBar.jsx';
+import { QuestionPicker } from './QuestionPicker.jsx';
 import { SidePanel } from './SidePanel.jsx';
 import { StatusBar } from './StatusBar.jsx';
 import { toast } from './Toast.jsx';
@@ -41,7 +42,7 @@ function newSessionRefFrom(ref, sessionId) {
   return next;
 }
 
-export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onPermissionRequest, onQuestionRequest, showSidePanel = false, sidePanelWidth = 280, onSidePanelResize }) {
+export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onPermissionRequest, onQuestionRequest, questionRequest, onQuestionResolve, showSidePanel = false, sidePanelWidth = 280, onSidePanelResize }) {
   const ref = useMemo(() => normalizeSessionRef(sessionRef, sessionId), [sessionRef, sessionId]);
   const sid = ref?.sessionId || ref?.id || '';
   const api = useMemo(() => createApi(ref), [ref?.port, ref?.token, ref?.workspaceHash]);
@@ -51,6 +52,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
   const [history,  setHistory]  = useState([]);
   const [title,    setTitle]    = useState('');
   const scrollRef = useRef(null);
+  const inputRef = useRef(null);
   const layoutRef = useRef(null);
   const sidePanelResizeActiveRef = useRef(false);
   const toolMap   = useRef(new Map()); // tool name → item.id (本地数组里的 ID)
@@ -61,6 +63,11 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [items, busy]);
+
+  useEffect(() => {
+    const id = requestAnimationFrame(() => inputRef.current?.focus());
+    return () => cancelAnimationFrame(id);
+  }, [sid]);
 
   // 拉 history(per-cwd)
   useEffect(() => {
@@ -371,6 +378,8 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
       onSessionPromoted?.({
         ...newSessionRefFrom(ref, r.session_id),
         title: r.title,
+        workspaceHash: r.workspace_hash || ref?.workspaceHash,
+        cwd: r.cwd || ref?.cwd,
       });
       toast({ kind: 'ok', text: '已分叉到 ' + (r.title || r.session_id) });
     } catch (e) {
@@ -391,6 +400,18 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
       .filter((it) => it.kind === 'tool' && Array.isArray(it.tool?.hunks) && it.tool.hunks.length > 0)
       .map((it) => ({ hunks: it.tool.hunks }));
   }, [items, showSidePanel]);
+
+  const questionForView = useMemo(() => {
+    if (!questionRequest) return null;
+    const reqSid = questionRequest.session_id || '';
+    if (reqSid && (!sid || reqSid !== sid)) return null;
+    return questionRequest;
+  }, [questionRequest, sid]);
+
+  const resolveQuestion = useCallback(() => {
+    onQuestionResolve?.();
+    requestAnimationFrame(() => inputRef.current?.focus());
+  }, [onQuestionResolve]);
 
   // 空态:没选会话
   if (!sid) {
@@ -429,9 +450,14 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
             ))}
           </div>
         </div>
+        {questionForView && (
+          <QuestionPicker request={questionForView} onResolve={resolveQuestion} />
+        )}
         <InputBar
+          ref={inputRef}
           history={history}
           onSubmit={submit}
+          disabled={!!questionForView}
           placeholder="输入消息开始新会话…"
         />
         <StatusBar model="—" turns={0} branch={health?.branch || ''} />
@@ -485,11 +511,18 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
         )}
       </div>
 
+      {questionForView && (
+        <QuestionPicker request={questionForView} onResolve={resolveQuestion} />
+      )}
+
       <InputBar
+        ref={inputRef}
         busy={busy}
         history={history}
         onSubmit={submit}
         onAbort={abort}
+        disabled={!!questionForView}
+        placeholder={questionForView ? '请先回答上方问题…' : undefined}
       />
       <StatusBar model="—" turns={turns} branch={health?.branch || ''} />
       </div>

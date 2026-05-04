@@ -98,7 +98,14 @@ public:
 
         // Extract just the filename from path
         std::string fname(file);
-        auto sep = fname.find_last_of("/\\");
+        std::string::size_type sep = std::string::npos;
+        for (std::string::size_type i = fname.size(); i > 0; --i) {
+            char ch = fname[i - 1];
+            if (ch == '/' || ch == '\\') {
+                sep = i - 1;
+                break;
+            }
+        }
         if (sep != std::string::npos) fname = fname.substr(sep + 1);
 
         std::ostringstream line_oss;

@@ -506,6 +506,7 @@ struct WebServer::Impl {
             json arr = json::array();
             std::unordered_set<std::string> seen;
             if (deps.workspace_registry) {
+                deps.workspace_registry->scan(projects_dir());
                 for (const auto& m : deps.workspace_registry->list()) {
                     arr.push_back(workspace_to_json(m));
                     seen.insert(m.hash);
@@ -1247,7 +1248,10 @@ struct WebServer::Impl {
 
             // 把新 session 装进 registry — 走 resume 路径(磁盘 → 内存)。
             // resume 不会自动启动 turn,符合 spec "不自动启动 turn"。
-            if (!deps.session_registry->resume(new_id, {})) {
+            SessionOptions resume_opts;
+            resume_opts.cwd = entry->cwd;
+            resume_opts.workspace_hash = entry->workspace_hash;
+            if (!deps.session_registry->resume(new_id, resume_opts)) {
                 LOG_WARN("[web] fork: new session " + new_id +
                          " written to disk but registry resume failed");
             }
@@ -1257,6 +1261,8 @@ struct WebServer::Impl {
             resp["title"]           = title;
             resp["forked_from"]     = id;
             resp["fork_message_id"] = at_message_id;
+            resp["workspace_hash"]   = entry->workspace_hash;
+            resp["cwd"]              = entry->cwd;
             crow::response r(resp.dump());
             r.add_header("Content-Type", "application/json");
             return with_cors(req, std::move(r));

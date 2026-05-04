@@ -59,6 +59,22 @@ TEST(ForkHandler, OnlyOwnSiblingsCounted) {
     EXPECT_EQ(title, "分叉3:T");  // 2 个我的 sibling + 1 = 3
 }
 
+// 场景:当前 source 是一个已有 fork("分叉1:T")时,新 fork 不应嵌套成
+// "分叉1:分叉1:T",而是复用原始标题并避开已有 title → "分叉2:T"。
+TEST(ForkHandler, ForkOfForkStripsExistingForkPrefixAndAvoidsCollision) {
+    SessionMeta src = make_meta("F1", "分叉1:T", "", "S");
+    auto title = compute_fork_title(src, {src}, "");
+    EXPECT_EQ(title, "分叉2:T");
+}
+
+// 场景:即便 forked_from 不属于当前 source,只要默认标题会撞名,也要递增。
+TEST(ForkHandler, TitleCollisionIncrementsEvenForOtherSource) {
+    SessionMeta src = make_meta("S", "T");
+    SessionMeta other = make_meta("OF1", "分叉1:T", "", "OTHER_SRC");
+    auto title = compute_fork_title(src, {src, other}, "");
+    EXPECT_EQ(title, "分叉2:T");
+}
+
 // 场景:source 没 title 时降级到 summary。
 TEST(ForkHandler, FallsBackToSummaryWhenTitleEmpty) {
     SessionMeta src = make_meta("S", "", "user 的第一条消息");

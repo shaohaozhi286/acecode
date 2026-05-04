@@ -60,6 +60,14 @@ std::mutex              g_term_mu;
 std::condition_variable g_term_cv;
 std::atomic<bool>       g_term_requested{false};
 
+std::string path_to_utf8(const std::filesystem::path& p) {
+#ifdef _WIN32
+    return p.u8string();
+#else
+    return p.string();
+#endif
+}
+
 void request_terminate() {
     g_term_requested.store(true);
     g_term_cv.notify_all();
@@ -113,7 +121,7 @@ bool apply_cwd_override(const std::string& raw, bool foreground) {
 
     std::error_code dir_ec;
     if (!fs::exists(effective, dir_ec) || !fs::is_directory(effective, dir_ec)) {
-        std::string msg = "[daemon] --cwd path is not a directory: " + effective.string();
+        std::string msg = "[daemon] --cwd path is not a directory: " + path_to_utf8(effective);
         LOG_ERROR(msg);
         if (foreground) std::cerr << msg << "\n";
         return false;
@@ -121,14 +129,14 @@ bool apply_cwd_override(const std::string& raw, bool foreground) {
 
     fs::current_path(effective, dir_ec);
     if (dir_ec) {
-        std::string msg = "[daemon] failed to switch --cwd to " + effective.string()
+        std::string msg = "[daemon] failed to switch --cwd to " + path_to_utf8(effective)
             + ": " + dir_ec.message();
         LOG_ERROR(msg);
         if (foreground) std::cerr << msg << "\n";
         return false;
     }
 
-    std::string msg = "[daemon] cwd=" + fs::current_path().string()
+    std::string msg = "[daemon] cwd=" + path_to_utf8(fs::current_path())
         + " (from --cwd=" + raw + ")";
     LOG_INFO(msg);
     if (foreground) std::cerr << msg << "\n";
@@ -266,7 +274,7 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     //   - PermissionManager (template,SessionRegistry 给每个 session 复制 mode)
     //   - SessionRegistry + LocalSessionClient
     //   - WebServer (HTTP + WebSocket)
-    std::string cwd = std::filesystem::current_path().string();
+    std::string cwd = path_to_utf8(std::filesystem::current_path());
     std::string projects_dir =
         (std::filesystem::path(acecode::get_acecode_dir()) / "projects").string();
     acecode::desktop::ensure_workspace_metadata(projects_dir, cwd);
