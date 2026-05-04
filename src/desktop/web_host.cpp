@@ -267,6 +267,23 @@ void WebHost::eval(const std::string& js) {
         w_ptr->eval(js_copy);
     });
 }
+bool WebHost::open_dev_tools() {
+#ifdef _WIN32
+    auto controller_result = impl_->w->browser_controller();
+    if (!controller_result.ok()) return false;
+    auto* controller = static_cast<ICoreWebView2Controller*>(controller_result.value());
+    if (!controller) return false;
+
+    ICoreWebView2* webview = nullptr;
+    HRESULT hr = controller->get_CoreWebView2(&webview);
+    if (FAILED(hr) || !webview) return false;
+    hr = webview->OpenDevToolsWindow();
+    webview->Release();
+    return SUCCEEDED(hr);
+#else
+    return false;
+#endif
+}
 void WebHost::bind(const std::string& name, SyncHandler fn) {
     impl_->w->bind(name, [fn](const std::string& req) -> std::string {
         return fn(req);

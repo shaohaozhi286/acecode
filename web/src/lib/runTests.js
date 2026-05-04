@@ -1,2 +1,11 @@
 import './questionPicker.test.js';
 import './stickyUserContext.test.js';
+import './desktopContextMenu.test.js';
+import './sessionStatus.test.js';
+import './codeBlockCopy.test.js';
+import './inputBarState.test.js';
+import './chatInputQueue.test.js';
+import './sessionSubscription.test.js';
+import './sessionTranscript.test.js';
+import './pinnedSessions.test.js';
+import './usePreference.test.js';

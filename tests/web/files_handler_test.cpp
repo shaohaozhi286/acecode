@@ -160,6 +160,32 @@ TEST(FilesHandler, ListDirectoryAlwaysFiltersNoiseDirs) {
     EXPECT_EQ(entries[0].kind, "dir");
 }
 
+// 场景:目录软连接 / mklink 目录不展示,避免前端点击后解析到 workspace 外报 400。
+TEST(FilesHandler, ListDirectorySkipsSymlinkDirectories) {
+    TempDir tmp;
+    TempDir target;
+    fs::create_directories(tmp.path / "real_dir");
+    fs::create_directories(target.path / "linked_target");
+
+    std::error_code ec;
+    fs::create_directory_symlink(target.path / "linked_target", tmp.path / "linked_dir", ec);
+    if (ec) {
+        GTEST_SKIP() << "directory symlink unsupported in this environment: " << ec.message();
+    }
+
+    auto result = list_directory(tmp.path, tmp.path, /*show_hidden=*/true);
+    ASSERT_TRUE(std::holds_alternative<std::vector<FileEntry>>(result));
+    auto& entries = std::get<std::vector<FileEntry>>(result);
+    bool saw_real = false;
+    bool saw_link = false;
+    for (auto& e : entries) {
+        if (e.name == "real_dir") saw_real = true;
+        if (e.name == "linked_dir") saw_link = true;
+    }
+    EXPECT_TRUE(saw_real);
+    EXPECT_FALSE(saw_link);
+}
+
 // 场景:排序 — 目录优先,然后 name 字典序。
 TEST(FilesHandler, ListDirectorySortsDirFirst) {
     TempDir tmp;

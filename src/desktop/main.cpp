@@ -15,6 +15,7 @@
 
 #include "daemon_pool.hpp"
 #include "folder_picker.hpp"
+#include "open_in_explorer.hpp"
 #include "pick_active.hpp"
 #include "splash_screen.hpp"
 #include "url_builder.hpp"
@@ -35,6 +36,7 @@
 #include <random>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #include <cpr/cpr.h>
 #ifdef _WIN32
@@ -209,6 +211,14 @@ const char* state_string(acecode::desktop::DaemonState s) {
 // onboarding fallback:正常情况下即使 registry 为空也会启动 shared daemon 来
 // 承载前端。只有 daemon 启动失败时才落到 about:blank。
 const char* onboarding_url() { return "about:blank"; }
+
+bool is_desktop_debug_mode() {
+#ifndef NDEBUG
+    return true;
+#else
+    return false;
+#endif
+}
 
 std::string short_random_hex() {
     static constexpr char kHex[] = "0123456789abcdef";
@@ -412,7 +422,8 @@ int main(int, char**) {
     // 注意:这里不再用全屏 splash 盖主窗口。WebHost 会用自建 Win32
     // 父窗口在屏幕外保持可见状态完成 WebView2 渲染,页面 ready 后再移回
     // 当前屏幕中央。这样用户启动时只看到透明 icon,不会看到白屏。
-    WebHost host(/*debug=*/true, WebHost::StartupWindowMode::OffscreenUntilReady);
+    const bool desktop_debug = is_desktop_debug_mode();
+    WebHost host(/*debug=*/desktop_debug, WebHost::StartupWindowMode::OffscreenUntilReady);
     host.set_title("ACECode");
     host.set_size(1280, 820);
 
@@ -448,10 +459,41 @@ int main(int, char**) {
         return "null";
     });
 
+    host.bind("aceDesktop_openDevTools", [&](const std::string& /*req*/) -> std::string {
+        if (!desktop_debug) return nlohmann::json{{"ok", false}, {"error", "debug only"}}.dump();
+        return nlohmann::json{{"ok", host.open_dev_tools()}}.dump();
+    });
+
+    host.bind("aceDesktop_openInExplorer", [&](const std::string& req) -> std::string {
+        try {
+            auto arr = nlohmann::json::parse(req);
+            if (!arr.is_array() || arr.empty() || !arr[0].is_string()) {
+                return nlohmann::json{{"ok", false}, {"error", "expect [path]"}}.dump();
+            }
+            std::vector<std::string> roots;
+            for (const auto& m : registry.list()) {
+                if (!m.cwd.empty()) roots.push_back(m.cwd);
+            }
+            if (roots.empty()) {
+                return nlohmann::json{{"ok", false}, {"error", "no registered workspaces"}}.dump();
+            }
+            auto result = acecode::desktop::open_directory_in_file_manager(
+                arr[0].get<std::string>(), roots);
+            if (!result.ok) {
+                return nlohmann::json{{"ok", false}, {"error", result.error}}.dump();
+            }
+            return nlohmann::json{{"ok", true}}.dump();
+        } catch (const std::exception& e) {
+            return nlohmann::json{{"ok", false}, {"error", std::string("parse: ") + e.what()}}.dump();
+        }
+    });
+
     // navigate 前注入 JS: hook console + window 错误事件 → 全部转发回 native。
     // 故意不 hook console.log / console.info,避免噪音(可在前端代码里需要时
     // 显式调 aceDesktop_logFromWeb('info', ...))。
-    host.init_script(R"JS(
+    host.init_script(std::string("window.__ACECODE_DESKTOP_SHELL__=true;\n") +
+                                     "window.__ACECODE_DESKTOP_DEBUG__=" +
+                                     (desktop_debug ? "true" : "false") + ";\n" + R"JS(
     (function () {
       var notifyReady = function () {
         try {

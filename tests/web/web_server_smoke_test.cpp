@@ -274,6 +274,11 @@ TEST(WebServerHttp, CreateSessionThenListShowsActive) {
             occurrences++;
             EXPECT_TRUE(s["active"].get<bool>());
             EXPECT_EQ(s["message_count"], 1);
+            EXPECT_EQ(s["attention_state"], "read");
+            EXPECT_EQ(s["read_state"], "read");
+            EXPECT_TRUE(s.contains("status_cursor"));
+            EXPECT_TRUE(s.contains("read_cursor"));
+            EXPECT_TRUE(s.contains("update_cursor"));
             found = true;
         }
     }
@@ -458,6 +463,35 @@ TEST(WebServerHttp, FilesEndpointAllowsRegisteredWorkspaceCwd) {
                             cpr::Parameters{{"cwd", other_cwd}, {"path", "src/main.txt"}});
     ASSERT_EQ(content.status_code, 200) << content.text;
     EXPECT_EQ(content.text, "hello from registered workspace");
+}
+
+// 场景:workspace pinned-sessions API 持久化有序 session id,并过滤不存在 id。
+TEST(WebServerHttp, WorkspacePinnedSessionsPersistAndPruneIds) {
+    WebServerFixture fx;
+    const std::string hash = acecode::compute_cwd_hash(fx.cwd);
+
+    auto create = cpr::Post(cpr::Url{fx.url("/api/workspaces/" + hash + "/sessions")},
+                            cpr::Header{{"Content-Type", "application/json"}},
+                            cpr::Body{R"({})"});
+    ASSERT_EQ(create.status_code, 201) << create.text;
+    const auto created = json::parse(create.text);
+    const std::string session_id = created.value("session_id", std::string{});
+    ASSERT_FALSE(session_id.empty());
+
+    auto put = cpr::Put(cpr::Url{fx.url("/api/workspaces/" + hash + "/pinned-sessions")},
+                        cpr::Header{{"Content-Type", "application/json"}},
+                        cpr::Body{json{{"session_ids", json::array({"missing", session_id, session_id})}}.dump()});
+    ASSERT_EQ(put.status_code, 200) << put.text;
+    auto put_body = json::parse(put.text);
+    ASSERT_TRUE(put_body["session_ids"].is_array());
+    ASSERT_EQ(put_body["session_ids"].size(), 1u);
+    EXPECT_EQ(put_body["session_ids"][0], session_id);
+
+    auto get = cpr::Get(cpr::Url{fx.url("/api/workspaces/" + hash + "/pinned-sessions")});
+    ASSERT_EQ(get.status_code, 200) << get.text;
+    auto get_body = json::parse(get.text);
+    ASSERT_EQ(get_body["session_ids"].size(), 1u);
+    EXPECT_EQ(get_body["session_ids"][0], session_id);
 }
 
 // 场景: shared daemon 为 desktop onboarding 启动时,当前 cwd 只有 hidden

@@ -11,16 +11,56 @@ function closeWs(ws, reason = 'client closing') {
   try { ws.close(NORMAL_CLOSE, reason); } catch {}
 }
 
+export function createSessionSubscriptionManager({ subscribe, unsubscribe } = {}) {
+  const refs = new Map();
+  return {
+    retain(sessionId) {
+      if (!sessionId) return 0;
+      const current = refs.get(sessionId) || 0;
+      const next = current + 1;
+      refs.set(sessionId, next);
+      if (current === 0) subscribe?.(sessionId);
+      return next;
+    },
+    release(sessionId) {
+      if (!sessionId) return 0;
+      const current = refs.get(sessionId) || 0;
+      if (current <= 1) {
+        refs.delete(sessionId);
+        if (current === 1) unsubscribe?.(sessionId);
+        return 0;
+      }
+      const next = current - 1;
+      refs.set(sessionId, next);
+      return next;
+    },
+    count(sessionId) {
+      return refs.get(sessionId) || 0;
+    },
+    snapshot() {
+      return new Map(refs);
+    },
+    clear() {
+      refs.clear();
+    },
+  };
+}
+
 export class AceConnection extends EventTarget {
   constructor() {
     super();
     this.ws = null;
     this.sessionId = '';
     this.sessions = new Map();
+    this.statusWorkspaces = new Set();
     this.attempts = 0;
     this.closing = false;
     this._host = '';   // 留空 → 用 location.host(单 workspace 默认)
     this._token = '';
+    this.sessionRefs = createSessionSubscriptionManager({
+      subscribe: (sessionId) => this.subscribe(sessionId),
+      unsubscribe: (sessionId) => this.unsubscribe(sessionId),
+    });
   }
 
   reconfigure({ port, token }) {
@@ -29,11 +69,19 @@ export class AceConnection extends EventTarget {
     const changed = nextHost !== this._host || nextToken !== this._token;
     this._host = nextHost;
     this._token = nextToken;
-    if (changed && this.sessions.size) this._reopen();
+    if (changed && (this.sessions.size || this.statusWorkspaces.size)) this._reopen();
   }
 
   bind(sessionId) {
     this.subscribe(sessionId);
+  }
+
+  retainSession(sessionId) {
+    return this.sessionRefs.retain(sessionId);
+  }
+
+  releaseSession(sessionId) {
+    return this.sessionRefs.release(sessionId);
   }
 
   subscribe(sessionId) {
@@ -52,11 +100,27 @@ export class AceConnection extends EventTarget {
     this._send({ type: 'unsubscribe', payload: { session_id: sessionId } });
     this.sessions.delete(sessionId);
     if (this.sessionId === sessionId) this.sessionId = this.sessions.keys().next().value || '';
-    if (this.sessions.size === 0) this._closeSocket('client no sessions');
+    if (this.sessions.size === 0 && this.statusWorkspaces.size === 0) this._closeSocket('client no sessions');
+  }
+
+  subscribeWorkspaceStatus(workspaceHash) {
+    if (!workspaceHash) return;
+    this.statusWorkspaces.add(workspaceHash);
+    if (!this.ws || this.ws.readyState === WebSocket.CLOSED) this._open();
+    else if (this.ws.readyState === WebSocket.OPEN) this._sendStatusSubscribe(workspaceHash);
+  }
+
+  unsubscribeWorkspaceStatus(workspaceHash) {
+    if (!workspaceHash || !this.statusWorkspaces.has(workspaceHash)) return;
+    this._send({ type: 'status_unsubscribe', payload: { workspace_hash: workspaceHash } });
+    this.statusWorkspaces.delete(workspaceHash);
+    if (this.sessions.size === 0 && this.statusWorkspaces.size === 0) this._closeSocket('client no status scopes');
   }
 
   unbind() {
     this.sessions.clear();
+    this.statusWorkspaces.clear();
+    this.sessionRefs.clear();
     if (this.ws) {
       this._closeSocket('client unbind');
     }
@@ -91,8 +155,15 @@ export class AceConnection extends EventTarget {
     });
   }
 
+  _sendStatusSubscribe(workspaceHash) {
+    this._send({
+      type: 'status_subscribe',
+      payload: { workspace_hash: workspaceHash },
+    });
+  }
+
   _open() {
-    if (this.sessions.size === 0) return;
+    if (this.sessions.size === 0 && this.statusWorkspaces.size === 0) return;
     if (this.ws) {
       try { this.ws.onopen = this.ws.onmessage = this.ws.onclose = this.ws.onerror = null; } catch {}
       closeWs(this.ws, 'client rebind');
@@ -109,6 +180,7 @@ export class AceConnection extends EventTarget {
       this.attempts = 0;
       this.dispatchEvent(new Event('open'));
       for (const sessionId of this.sessions.keys()) this._sendSubscribe(sessionId);
+      for (const workspaceHash of this.statusWorkspaces.keys()) this._sendStatusSubscribe(workspaceHash);
     };
     ws.onmessage = (e) => {
       if (this.ws !== ws) return;
@@ -127,7 +199,7 @@ export class AceConnection extends EventTarget {
       this.dispatchEvent(new CustomEvent('message', { detail: msg }));
     };
     const reconnect = () => {
-      if (this.closing || this.sessions.size === 0) return;
+      if (this.closing || (this.sessions.size === 0 && this.statusWorkspaces.size === 0)) return;
       if (this.ws !== ws) return;
       this.ws = null;
       const delay = Math.min(MAX_BACKOFF_MS, 1000 * Math.pow(2, this.attempts++));
@@ -142,6 +214,13 @@ export class AceConnection extends EventTarget {
   sendDecision(request_id, choice, sessionId=this.sessionId) { this._send({ type: 'decision', payload: { session_id: sessionId, request_id, choice } }); }
   sendQuestionAnswer(payload)      { this._send({ type: 'question_answer', payload }); }
   sendAbort(sessionId=this.sessionId) { this._send({ type: 'abort', payload: { session_id: sessionId } }); }
+  markSessionRead({ sessionId=this.sessionId, workspaceHash='', cursor=0 } = {}) {
+    if (!sessionId) return;
+    this._send({
+      type: 'mark_session_read',
+      payload: { session_id: sessionId, workspace_hash: workspaceHash || '', cursor: cursor || 0 },
+    });
+  }
   ping()                           { this._send({ type: 'ping' }); }
 
   _send(msg) {

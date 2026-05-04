@@ -10,6 +10,7 @@
 import { memo, useMemo, useState } from 'react';
 import { clsx, formatBytes, formatElapsed } from '../lib/format.js';
 import { hunksToUnifiedDiff } from '../lib/diff.js';
+import { CopyableCodeFrame } from './CopyableCodeFrame.jsx';
 import { ToolSummaryIcon, VsIcon } from './Icon.jsx';
 import * as Diff2Html from 'diff2html';
 
@@ -117,9 +118,9 @@ export const ToolBlock = memo(function ToolBlock({ entry }) {
                 dangerouslySetInnerHTML={{ __html: diffHtml }}
               />
             ) : output ? (
-              <pre className="m-0 text-[11px] text-fg-2 whitespace-pre-wrap break-all max-h-[280px] overflow-y-auto">
-                {output}
-              </pre>
+              <CopyableCodeFrame text={output}>
+                <pre className="m-0 text-[11px] text-fg-2 whitespace-pre-wrap break-all max-h-[280px] overflow-y-auto" data-code-copy-source="true">{output}</pre>
+              </CopyableCodeFrame>
             ) : null}
           </div>
         )}
@@ -139,9 +140,9 @@ export const ToolBlock = memo(function ToolBlock({ entry }) {
       >
         <div className="font-medium truncate">{title}</div>
         {output && (
-          <pre className="m-0 mt-1 text-[11px] text-fg-2 whitespace-pre-wrap break-all max-h-[200px] overflow-y-auto">
-            {output}
-          </pre>
+          <CopyableCodeFrame text={output} className="mt-1">
+            <pre className="m-0 text-[11px] text-fg-2 whitespace-pre-wrap break-all max-h-[200px] overflow-y-auto" data-code-copy-source="true">{output}</pre>
+          </CopyableCodeFrame>
         )}
       </div>
     );
@@ -164,9 +165,9 @@ export const ToolBlock = memo(function ToolBlock({ entry }) {
         <div className="text-fg-mute text-[10px] mt-1">... +{hidden} 行已折叠</div>
       )}
       {tailLines.length > 0 && (
-        <pre className="m-0 mt-1 text-fg-2 whitespace-pre-wrap break-all max-h-[100px] overflow-hidden">
-          {tailLines.join('\n')}
-        </pre>
+        <CopyableCodeFrame text={tailLines.join('\n')} className="mt-1">
+          <pre className="m-0 text-fg-2 whitespace-pre-wrap break-all max-h-[100px] overflow-hidden" data-code-copy-source="true">{tailLines.join('\n')}</pre>
+        </CopyableCodeFrame>
       )}
       {currentPartial && (
         <div className="text-fg-mute opacity-70 truncate">{currentPartial}</div>

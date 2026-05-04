@@ -16,6 +16,8 @@
 // 噪音目录硬编码黑名单(NOISE_DIRS),始终过滤,与 show_hidden 无关。
 // 隐藏文件(以 . 开头)默认过滤,show_hidden=true 时透出 — 但 NOISE_DIRS 黑名单
 // 优先级更高(.git 永远不出)。
+// 符号链接 / Windows reparse point 目录默认不展示,避免点击后解析到 workspace 外
+// 而在前端表现为 400 错误。
 //
 // 5MB 上限 / 二进制嗅探的具体阈值在 .cpp 里以 constexpr 定义。
 
@@ -72,6 +74,7 @@ validate_path_within(const std::string& cwd,
 //   - 默认过滤名称以 `.` 开头的项(show_hidden=true 时透出)
 //   - 始终过滤名称在 NOISE_DIRS 内的项(.git / node_modules / dist / build /
 //     __pycache__ / .venv / venv / target / .next / .cache),不受 show_hidden 影响
+//   - 始终过滤符号链接 / Windows reparse point 目录,不递归跟随软连接
 //   - 排序:kind=dir 优先,然后按 name 字典序(case-sensitive)
 //   - FileEntry::path 用 cwd 的相对路径(forward-slash 归一,跨平台)
 std::variant<std::vector<FileEntry>, FileError>

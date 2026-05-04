@@ -8,6 +8,16 @@
 #include <fstream>
 #include <system_error>
 
+#ifdef _WIN32
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  include <windows.h>
+#endif
+
 namespace acecode::web {
 
 namespace fs = std::filesystem;
@@ -49,6 +59,31 @@ bool is_noise_dir(const std::string& name) {
 
 bool is_hidden(const std::string& name) {
     return !name.empty() && name.front() == '.';
+}
+
+#ifdef _WIN32
+bool is_windows_reparse_directory(const fs::path& path) {
+    const DWORD attrs = ::GetFileAttributesW(path.c_str());
+    if (attrs == INVALID_FILE_ATTRIBUTES) return false;
+    return (attrs & FILE_ATTRIBUTE_REPARSE_POINT) &&
+           (attrs & FILE_ATTRIBUTE_DIRECTORY);
+}
+#endif
+
+bool is_linked_directory(const fs::directory_entry& entry) {
+    const auto& path = entry.path();
+#ifdef _WIN32
+    // Windows 的 mklink /J junction 不一定被 std::filesystem 归类为 symlink,
+    // 但文件属性会带 REPARSE_POINT + DIRECTORY。统一跳过这类目录。
+    if (is_windows_reparse_directory(path)) return true;
+#endif
+
+    std::error_code ec;
+    auto st = entry.symlink_status(ec);
+    if (ec || !fs::is_symlink(st)) return false;
+
+    std::error_code dir_ec;
+    return fs::is_directory(path, dir_ec) && !dir_ec;
 }
 
 // 把 fs::path 归一成 forward-slash 字符串(跨平台,前端拼 URL 用)。
@@ -142,6 +177,9 @@ list_directory(const fs::path& abs_dir,
         if (is_noise_dir(name)) continue;
         // 隐藏文件按 show_hidden 决定
         if (!show_hidden && is_hidden(name)) continue;
+        // 软连接目录不展示。否则点击后 validate_path_within 会解析到真实目标,
+        // 若目标在 workspace 外就会返回 400,体验上像文件树坏了。
+        if (is_linked_directory(*it)) continue;
 
         FileEntry e;
         e.name = name;

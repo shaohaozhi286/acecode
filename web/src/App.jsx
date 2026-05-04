@@ -7,6 +7,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, ApiError } from './lib/api.js';
 import { setToken } from './lib/auth.js';
 import { connection } from './lib/connection.js';
+import { usePreference } from './lib/usePreference.js';
 import { TopBar } from './components/TopBar.jsx';
 import { Sidebar } from './components/Sidebar.jsx';
 import { ChatView } from './components/ChatView.jsx';
@@ -18,6 +19,7 @@ import { PermissionModal } from './components/PermissionModal.jsx';
 import { SkillsPanel } from './components/SkillsPanel.jsx';
 import { MCPPanel } from './components/MCPPanel.jsx';
 import { SettingsPage } from './components/SettingsPage.jsx';
+import { DesktopContextMenu } from './components/DesktopContextMenu.jsx';
 import { Toaster, toast } from './components/Toast.jsx';
 
 function newSessionRefFrom(ref, sessionId) {
@@ -37,28 +39,30 @@ const MIN_SIDE_PANEL_WIDTH = 240;
 const MAX_SIDE_PANEL_WIDTH = 560;
 const MIN_CHAT_WIDTH = 360;
 
+const UI_PREFS_STORAGE_KEY = 'acecode.uiPrefs.v1';
+const DEFAULT_UI_PREFS = { view: 'single', sidePanelCollapsed: false };
+const ALLOWED_VIEWS = new Set(['single', 'grid4', 'grid9']);
+
 function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
 }
 
-function readSingleLayoutWidths() {
-  try {
-    const raw = window.localStorage.getItem(SINGLE_LAYOUT_STORAGE_KEY);
-    const parsed = raw ? JSON.parse(raw) : null;
-    return {
-      sidebar: clamp(Number(parsed?.sidebar) || DEFAULT_SINGLE_LAYOUT.sidebar, MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH),
-      sidePanel: clamp(Number(parsed?.sidePanel) || DEFAULT_SINGLE_LAYOUT.sidePanel, MIN_SIDE_PANEL_WIDTH, MAX_SIDE_PANEL_WIDTH),
-    };
-  } catch {
-    return DEFAULT_SINGLE_LAYOUT;
-  }
+function validateLayoutWidths(v) {
+  return v && typeof v === 'object'
+    && typeof v.sidebar === 'number' && Number.isFinite(v.sidebar)
+    && typeof v.sidePanel === 'number' && Number.isFinite(v.sidePanel);
+}
+
+function validateUiPrefs(v) {
+  return v && typeof v === 'object'
+    && ALLOWED_VIEWS.has(v.view)
+    && typeof v.sidePanelCollapsed === 'boolean';
 }
 
 export function App() {
   const [authState, setAuthState] = useState('checking'); // 'checking' | 'ok' | 'need-token'
   const [health,    setHealth]    = useState(null);
 
-  const [view,         setView]         = useState('single');
   const [activeRef,    setActiveRef]    = useState(null);
   const [transition,   setTransition]   = useState(false);
   const [expanded,     setExpanded]     = useState(null);
@@ -67,14 +71,14 @@ export function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [permReqs,     setPermReqs]     = useState([]);
   const [questionReqs, setQuestionReqs] = useState([]);
-  const [singleLayout, setSingleLayout] = useState(readSingleLayoutWidths);
+  const [singleLayout, setSingleLayout] = usePreference(
+    SINGLE_LAYOUT_STORAGE_KEY, DEFAULT_SINGLE_LAYOUT, validateLayoutWidths);
+  const [uiPrefs, setUiPrefs] = usePreference(
+    UI_PREFS_STORAGE_KEY, DEFAULT_UI_PREFS, validateUiPrefs);
+  const view = uiPrefs.view;
+  const sidePanelCollapsed = uiPrefs.sidePanelCollapsed;
   const singleShellRef = useRef(null);
   const sidebarResizeActiveRef = useRef(false);
-
-  useEffect(() => {
-    try { window.localStorage.setItem(SINGLE_LAYOUT_STORAGE_KEY, JSON.stringify(singleLayout)); }
-    catch { /* ignore storage failures */ }
-  }, [singleLayout]);
 
   const probe = useCallback(async () => {
     try {
@@ -120,11 +124,15 @@ export function App() {
     if (next === view) return;
     setTransition(true);
     setTimeout(() => {
-      setView(next);
+      setUiPrefs({ view: next });
       setExpanded(null);
       setTimeout(() => setTransition(false), 220);
     }, 140);
-  }, [view]);
+  }, [view, setUiPrefs]);
+
+  const toggleSidePanel = useCallback(() => {
+    setUiPrefs((prev) => ({ ...prev, sidePanelCollapsed: !prev.sidePanelCollapsed }));
+  }, [setUiPrefs]);
 
   const createNewSession = useCallback(async () => {
     try {
@@ -141,7 +149,7 @@ export function App() {
   }, [activeRef, switchView, view]);
 
   const setSidebarWidth = useCallback((nextWidth, shellWidth = 0) => {
-    const sidePanelVisible = !!(activeRef?.sessionId || activeRef?.id);
+    const sidePanelVisible = !!(activeRef?.sessionId || activeRef?.id) && !sidePanelCollapsed;
     setSingleLayout((prev) => {
       const sidePanelReserve = sidePanelVisible ? prev.sidePanel : 0;
       const maxByShell = shellWidth > 0
@@ -150,7 +158,7 @@ export function App() {
       const sidebar = clamp(Math.round(nextWidth), MIN_SIDEBAR_WIDTH, Math.min(MAX_SIDEBAR_WIDTH, maxByShell));
       return sidebar === prev.sidebar ? prev : { ...prev, sidebar };
     });
-  }, [activeRef?.id, activeRef?.sessionId]);
+  }, [activeRef?.id, activeRef?.sessionId, sidePanelCollapsed, setSingleLayout]);
 
   const setSidePanelWidth = useCallback((nextWidth, contentWidth = 0) => {
     setSingleLayout((prev) => {
@@ -160,7 +168,7 @@ export function App() {
       const sidePanel = clamp(Math.round(nextWidth), MIN_SIDE_PANEL_WIDTH, Math.min(MAX_SIDE_PANEL_WIDTH, maxByContent));
       return sidePanel === prev.sidePanel ? prev : { ...prev, sidePanel };
     });
-  }, []);
+  }, [setSingleLayout]);
 
   const startSidebarResize = useCallback((event) => {
     if (view !== 'single') return;
@@ -207,13 +215,23 @@ export function App() {
 
   if (authState === 'checking') {
     return (
-      <div className="h-full flex items-center justify-center text-fg-mute text-sm">
-        <span className="ace-spinner mr-2" /> 连接 daemon…
-      </div>
+      <>
+        <div className="h-full flex items-center justify-center text-fg-mute text-sm">
+          <span className="ace-spinner mr-2" /> 连接 daemon…
+        </div>
+        <DesktopContextMenu />
+        <Toaster />
+      </>
     );
   }
   if (authState === 'need-token') {
-    return <TokenPrompt onSubmit={onSubmitToken} />;
+    return (
+      <>
+        <TokenPrompt onSubmit={onSubmitToken} />
+        <DesktopContextMenu />
+        <Toaster />
+      </>
+    );
   }
 
   const activeId = activeRef?.sessionId || activeRef?.id || '';
@@ -274,6 +292,8 @@ export function App() {
               showSidePanel
               sidePanelWidth={singleLayout.sidePanel}
               onSidePanelResize={setSidePanelWidth}
+              sidePanelCollapsed={sidePanelCollapsed}
+              onToggleSidePanel={toggleSidePanel}
               questionRequest={visibleQuestionReq}
               onQuestionResolve={resolveVisibleQuestion}
             />
@@ -295,6 +315,7 @@ export function App() {
           />
         )}
       </div>
+      <DesktopContextMenu />
       <Toaster />
     </div>
   );

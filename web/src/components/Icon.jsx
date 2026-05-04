@@ -27,6 +27,7 @@ const ICONS = {
   mcp: 'MCP',
   ok: 'StatusOK',
   openFile: 'OpenFile',
+  pin: 'Pin',
   run: 'Run',
   running: 'StatusRunning',
   save: 'Save',

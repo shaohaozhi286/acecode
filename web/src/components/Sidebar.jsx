@@ -9,8 +9,25 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api.js';
 import { connection } from '../lib/connection.js';
+import { SESSION_PIN_TOGGLE_EVENT } from '../lib/desktopContextMenu.js';
 import { relativeTime, clsx } from '../lib/format.js';
+import {
+  filterPinnedSessions,
+  normalizePinnedIds,
+  pinSessionId,
+  pinnedSessionsForList,
+  unpinSessionId,
+} from '../lib/pinnedSessions.js';
 import { sessionDisplayTitle } from '../lib/sessionTitle.js';
+import {
+  applyStatusSnapshot,
+  applyStatusUpdate,
+  mergeSessionStatus,
+  mergeSessionsWithStatus,
+  optimisticReadStatus,
+  statusCursor,
+  workspaceHasUnread,
+} from '../lib/sessionStatus.js';
 import { toast } from './Toast.jsx';
 import { VsIcon } from './Icon.jsx';
 
@@ -28,36 +45,73 @@ function parseDesktopResult(value) {
   return JSON.parse(text);
 }
 
-function statusDot(state) {
-  if (state === 'running')   return 'bg-ok shadow-[0_0_4px_var(--ace-ok)]';
-  if (state === 'starting')  return 'bg-warn shadow-[0_0_4px_var(--ace-warn)]';
-  if (state === 'failed')    return 'bg-danger shadow-[0_0_4px_var(--ace-danger)]';
-  if (state === 'waiting')   return 'bg-warn';
-  return 'bg-fg-mute';
+function attentionMeta(state) {
+  if (state === 'in_progress') return { label: '进行中', dot: 'bg-accent shadow-[0_0_4px_var(--ace-accent)]', text: 'text-accent' };
+  if (state === 'unread') return { label: '未读', dot: 'bg-ok shadow-[0_0_4px_var(--ace-ok)]', text: 'text-ok' };
+  return { label: '已读', dot: 'bg-fg-mute/45', text: 'text-fg-mute' };
 }
 
-function SessionRow({ s, active, onSelect }) {
+function daemonHealthMeta(state) {
+  if (state === 'failed') return { label: '失败', className: 'border-danger/40 text-danger bg-danger/10' };
+  if (state === 'starting' || state === 'waiting') return { label: '启动', className: 'border-warn/40 text-warn bg-warn/10' };
+  if (state === 'running') return { label: '运行', className: 'border-border text-fg-mute bg-surface-hi' };
+  return { label: '停止', className: 'border-border text-fg-mute bg-surface' };
+}
+
+function SessionRow({ s, active, pinned = false, onSelect, onTogglePin }) {
+  const attention = s.attention_state || s.read_state || 'read';
+  const meta = attentionMeta(attention);
+  const workspaceHash = s.workspace_hash || s.workspaceHash || '';
   return (
-    <a
-      href="#"
-      onClick={(e) => { e.preventDefault(); onSelect(s); }}
+    <div
+      data-desktop-session-id={s.id || undefined}
+      data-desktop-session-workspace={workspaceHash || undefined}
+      data-desktop-session-pinned={pinned ? 'true' : 'false'}
       className={clsx(
-        'flex items-center gap-2 mx-1.5 my-px px-2 py-[5px] pl-[22px] rounded-md text-[12px] transition cursor-pointer',
+        'group flex items-center gap-1 mx-1.5 my-px pl-1 pr-2 rounded-md text-[12px] transition',
         active
           ? 'bg-accent-soft/50 text-accent'
           : 'text-fg hover:bg-surface-hi',
+        attention === 'unread' && !active && 'font-semibold',
       )}
     >
-      <span className={clsx('w-1.5 h-1.5 rounded-full shrink-0', statusDot(s.status))} />
-      <span className="flex-1 truncate">{sessionDisplayTitle(s, s.name || s.id)}</span>
-      <span className="text-[10px] text-fg-mute shrink-0">{relativeTime(s.updated_at || s.created_at)}</span>
-    </a>
+      <button
+        type="button"
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          onTogglePin?.(s, !pinned);
+        }}
+        className={clsx(
+          'ace-session-pin-btn w-5 h-6 rounded flex items-center justify-center shrink-0 transition',
+          pinned
+            ? 'opacity-100 text-accent'
+            : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 text-fg-mute hover:text-accent',
+        )}
+        title={pinned ? '取消置顶' : '置顶'}
+        aria-label={pinned ? '取消置顶' : '置顶'}
+      >
+        <VsIcon name="pin" size={12} />
+      </button>
+      <button
+        type="button"
+        onClick={(e) => { e.preventDefault(); onSelect(s); }}
+        className="flex flex-1 items-center gap-2 min-w-0 py-[5px] bg-transparent text-left cursor-pointer"
+      >
+        <span className={clsx('w-1.5 h-1.5 rounded-full shrink-0', meta.dot)} title={meta.label} />
+        <span className="flex-1 truncate">{sessionDisplayTitle(s, s.name || s.id)}</span>
+        <span className={clsx('text-[10px] shrink-0', meta.text)}>{meta.label}</span>
+        <span className="text-[10px] text-fg-mute shrink-0">{relativeTime(s.updated_at || s.created_at)}</span>
+      </button>
+    </div>
   );
 }
 
-function WorkspaceGroup({ ws, expanded, onToggle, sessions, activeId, onSelect, onRename, onActivate, onNewSession }) {
+function WorkspaceGroup({ ws, expanded, onToggle, sessions, activeId, onSelect, onRename, onActivate, onNewSession, onTogglePin }) {
   const [editing, setEditing] = useState(false);
   const [draft,   setDraft]   = useState(ws.name);
+  const hasUnread = workspaceHasUnread(sessions);
+  const daemon = daemonHealthMeta(ws.daemon_state || 'stopped');
 
   useEffect(() => {
     if (!editing) setDraft(ws.name);
@@ -77,6 +131,8 @@ function WorkspaceGroup({ ws, expanded, onToggle, sessions, activeId, onSelect, 
   return (
     <div className={clsx('my-px', ws.active && 'rounded-md')}>
       <div
+        data-desktop-open-in-explorer-kind="workspace"
+        data-desktop-open-in-explorer-path={ws.cwd || undefined}
         className={clsx(
           'group flex items-center gap-2 mx-1.5 px-2.5 py-[6px] rounded-md text-[12px] cursor-pointer transition',
           ws.active ? 'bg-accent-bg text-fg' : 'text-fg hover:bg-surface-hi',
@@ -109,7 +165,11 @@ function WorkspaceGroup({ ws, expanded, onToggle, sessions, activeId, onSelect, 
           className="w-5 h-5 rounded text-fg-mute hover:text-accent hover:bg-surface-hi flex items-center justify-center shrink-0 transition"
           title="新增会话"
         ><VsIcon name="editWindow" size={13} /></button>
-        <span className={clsx('w-1.5 h-1.5 rounded-full shrink-0', statusDot(ws.daemon_state))} title={ws.daemon_state || 'stopped'} />
+        {hasUnread && <span className="w-1.5 h-1.5 rounded-full shrink-0 bg-ok shadow-[0_0_4px_var(--ace-ok)]" title="有未读会话" />}
+        <span
+          className={clsx('px-1.5 py-px rounded border text-[9px] leading-none shrink-0', daemon.className)}
+          title={`daemon: ${ws.daemon_state || 'stopped'}`}
+        >{daemon.label}</span>
         <button
           type="button"
           onClick={(e) => { e.stopPropagation(); setEditing(true); }}
@@ -123,7 +183,7 @@ function WorkspaceGroup({ ws, expanded, onToggle, sessions, activeId, onSelect, 
             <div className="mx-1.5 ml-[22px] px-2 py-[3px] text-[11px] text-fg-mute italic">暂无对话</div>
           ) : (
             sessions.map((s) => (
-              <SessionRow key={s.id} s={s} active={s.id === activeId} onSelect={onSelect} />
+              <SessionRow key={s.id} s={s} active={s.id === activeId} onSelect={onSelect} onTogglePin={onTogglePin} />
             ))
           )}
         </div>
@@ -136,9 +196,90 @@ export function Sidebar({ activeId, onSelect, collapsed, width = 200, onOpenSkil
   const [pane,        setPane]        = useState('sessions'); // 'sessions' | 'skills' | 'mcp'
   const [workspaces,  setWorkspaces]  = useState([]);
   const [sessions,    setSessions]    = useState([]);
+  const [statusBySession, setStatusBySession] = useState(() => new Map());
+  const [pinnedByWorkspace, setPinnedByWorkspace] = useState(() => new Map());
   const [expanded,    setExpanded]    = useState(new Set());
   const [activeWorkspaceHash, setActiveWorkspaceHash] = useState('');
   const refreshingRef = useRef(false);
+  const expandedRef = useRef(new Set());
+  const pinnedByWorkspaceRef = useRef(new Map());
+  const retainedSessionIdsRef = useRef(new Set());
+
+  const updateExpanded = useCallback((updater) => {
+    setExpanded((prev) => {
+      const next = typeof updater === 'function' ? updater(prev) : updater;
+      expandedRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const syncRetainedSessionIds = useCallback((ids) => {
+    const next = new Set(Array.from(ids || []).filter(Boolean));
+    const prev = retainedSessionIdsRef.current;
+    for (const sessionId of prev) {
+      if (!next.has(sessionId)) connection.releaseSession(sessionId);
+    }
+    for (const sessionId of next) {
+      if (!prev.has(sessionId)) connection.retainSession(sessionId);
+    }
+    retainedSessionIdsRef.current = next;
+  }, []);
+
+  useEffect(() => () => {
+    syncRetainedSessionIds([]);
+  }, [syncRetainedSessionIds]);
+
+  const setPinnedMap = useCallback((updater) => {
+    setPinnedByWorkspace((prev) => {
+      const rawNext = typeof updater === 'function' ? updater(prev) : updater;
+      const next = rawNext instanceof Map ? new Map(rawNext) : new Map(Object.entries(rawNext || {}));
+      pinnedByWorkspaceRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const setPinnedWorkspaceIds = useCallback((workspaceHash, ids) => {
+    if (!workspaceHash) return;
+    const normalized = normalizePinnedIds(ids);
+    setPinnedMap((prev) => {
+      const next = new Map(prev);
+      if (normalized.length) next.set(workspaceHash, normalized);
+      else next.delete(workspaceHash);
+      return next;
+    });
+  }, [setPinnedMap]);
+
+  const togglePinnedSession = useCallback(async (session, nextPinned) => {
+    const id = session?.id || session?.sessionId || session?.session_id || '';
+    const workspaceHash = session?.workspace_hash || session?.workspaceHash || activeWorkspaceHash || '';
+    if (!id || !workspaceHash) return;
+
+    const previous = normalizePinnedIds(pinnedByWorkspaceRef.current.get(workspaceHash) || []);
+    const shouldPin = typeof nextPinned === 'boolean' ? nextPinned : !previous.includes(id);
+    const next = shouldPin ? pinSessionId(previous, id) : unpinSessionId(previous, id);
+    setPinnedWorkspaceIds(workspaceHash, next);
+
+    try {
+      const saved = await api.setPinnedSessions(workspaceHash, next);
+      setPinnedWorkspaceIds(workspaceHash, normalizePinnedIds(saved?.session_ids || next));
+      toast({ kind: 'ok', text: shouldPin ? '已置顶' : '已取消置顶' });
+    } catch (e) {
+      setPinnedWorkspaceIds(workspaceHash, previous);
+      toast({ kind: 'err', text: (shouldPin ? '置顶失败:' : '取消置顶失败:') + (e.message || '') });
+    }
+  }, [activeWorkspaceHash, setPinnedWorkspaceIds]);
+
+  useEffect(() => {
+    const handler = (event) => {
+      const detail = event.detail || {};
+      togglePinnedSession({
+        id: detail.sessionId,
+        workspace_hash: detail.workspaceHash,
+      }, detail.pinned);
+    };
+    window.addEventListener(SESSION_PIN_TOGGLE_EVENT, handler);
+    return () => window.removeEventListener(SESSION_PIN_TOGGLE_EVENT, handler);
+  }, [togglePinnedSession]);
 
   const refresh = useCallback(async (preferredHash = activeWorkspaceHash) => {
     if (refreshingRef.current) return;
@@ -170,16 +311,40 @@ export function Sidebar({ activeId, onSelect, collapsed, width = 200, onOpenSkil
 
       const chosen = preferredHash || workspaceArr.find((w) => w.active)?.hash || workspaceArr[0]?.hash || '';
       const withActive = workspaceArr.map((w) => ({ ...w, active: w.hash === chosen }));
+      const expandedHashes = new Set(expandedRef.current);
+      if (chosen) expandedHashes.add(chosen);
       setActiveWorkspaceHash(chosen);
       setWorkspaces(withActive);
-      setExpanded((prev) => {
+
+      const pinnedPairs = await Promise.all(withActive.map(async (w) => {
+        if (!w.hash) return [w.hash, []];
+        try {
+          const state = await api.getPinnedSessions(w.hash);
+          return [w.hash, normalizePinnedIds(state?.session_ids || [])];
+        } catch {
+          return [w.hash, normalizePinnedIds(pinnedByWorkspaceRef.current.get(w.hash) || [])];
+        }
+      }));
+      const nextPinnedMap = new Map();
+      for (const [hash, ids] of pinnedPairs) {
+        if (hash && ids.length) nextPinnedMap.set(hash, ids);
+      }
+      setPinnedMap(nextPinnedMap);
+      const pinnedWorkspaceHashes = new Set(Array.from(nextPinnedMap.entries())
+        .filter(([, ids]) => ids.length > 0)
+        .map(([hash]) => hash));
+
+      updateExpanded((prev) => {
         const next = new Set(prev);
         for (const w of withActive) if (w.active) next.add(w.hash);
         return next;
       });
+      withActive
+        .filter((w) => w.active || w.hash === '__local__' || expandedHashes.has(w.hash) || pinnedWorkspaceHashes.has(w.hash))
+        .forEach((w) => connection.subscribeWorkspaceStatus(w.hash));
 
       try {
-        const visibleWorkspaces = withActive.filter((w) => w.active || w.hash === '__local__');
+        const visibleWorkspaces = withActive.filter((w) => w.active || w.hash === '__local__' || expandedHashes.has(w.hash) || pinnedWorkspaceHashes.has(w.hash));
         const perWorkspace = await Promise.all(visibleWorkspaces.map(async (w) => {
           if (w.hash === '__local__') {
             const list = await api.listSessions();
@@ -190,13 +355,19 @@ export function Sidebar({ activeId, onSelect, collapsed, width = 200, onOpenSkil
         }));
         const arr = perWorkspace.flat();
         setSessions(arr);
-        arr.filter((s) => s.active && s.id).forEach((s) => connection.subscribe(s.id));
+        setStatusBySession((prev) => arr.reduce((map, s) => applyStatusUpdate(map, {
+          ...s,
+          session_id: s.id,
+          state: s.attention_state || s.read_state,
+          cursor: s.status_cursor,
+        }), prev));
+        syncRetainedSessionIds(arr.filter((s) => s.active && s.id).map((s) => s.id));
       }
       catch { /* 鉴权失败不致命 */ }
     } finally {
       refreshingRef.current = false;
     }
-  }, [activeWorkspaceHash]);
+  }, [activeWorkspaceHash, setPinnedMap, syncRetainedSessionIds, updateExpanded]);
 
   useEffect(() => {
     refresh();
@@ -204,8 +375,42 @@ export function Sidebar({ activeId, onSelect, collapsed, width = 200, onOpenSkil
     return () => clearInterval(t);
   }, [refresh]);
 
+  useEffect(() => {
+    const handler = (e) => {
+      const msg = e.detail || {};
+      if (msg.type === 'session_status_snapshot') {
+        setStatusBySession((prev) => applyStatusSnapshot(prev, msg.payload || {}));
+      } else if (msg.type === 'session_status' || msg.type === 'mark_session_read_ack') {
+        setStatusBySession((prev) => applyStatusUpdate(prev, msg.payload || {}));
+      }
+    };
+    connection.addEventListener('message', handler);
+    return () => connection.removeEventListener('message', handler);
+  }, []);
+
+  const markSessionRead = useCallback((session) => {
+    if (!session?.id) return;
+    const merged = mergeSessionStatus(session, statusBySession);
+    const cursor = statusCursor(merged);
+    connection.markSessionRead({
+      sessionId: merged.id,
+      workspaceHash: merged.workspace_hash || '',
+      cursor,
+    });
+    const optimistic = optimisticReadStatus(merged);
+    if (optimistic) setStatusBySession((prev) => applyStatusUpdate(prev, optimistic));
+  }, [statusBySession]);
+
+  useEffect(() => {
+    if (!activeId) return;
+    const session = sessions.find((s) => s.id === activeId);
+    if (!session) return;
+    const merged = mergeSessionStatus(session, statusBySession);
+    if (merged.attention_state === 'unread') markSessionRead(merged);
+  }, [activeId, sessions, statusBySession, markSessionRead]);
+
   const onToggle = (hash) => {
-    setExpanded((prev) => {
+    updateExpanded((prev) => {
       const next = new Set(prev);
       next.has(hash) ? next.delete(hash) : next.add(hash);
       return next;
@@ -214,7 +419,7 @@ export function Sidebar({ activeId, onSelect, collapsed, width = 200, onOpenSkil
 
   const onActivate = async (ws) => {
     setActiveWorkspaceHash(ws.hash);
-    setExpanded((prev) => new Set(prev).add(ws.hash));
+    updateExpanded((prev) => new Set(prev).add(ws.hash));
     if (!hasDesktopBridge()) return;
     try {
       const r = parseDesktopResult(await window.aceDesktop_activateWorkspace(ws.hash));
@@ -243,6 +448,12 @@ export function Sidebar({ activeId, onSelect, collapsed, width = 200, onOpenSkil
           try {
             const r = parseDesktopResult(await window.aceDesktop_resumeSession(ws.hash, session.id));
             if (r.error) { toast({ kind: 'err', text: '恢复失败:' + r.error }); return; }
+            markSessionRead({
+              ...session,
+              id: r.session_id || session.id,
+              workspace_hash: r.workspace_hash || ws.hash,
+              cwd: r.cwd || ws.cwd,
+            });
             onSelect?.({
               workspaceHash: r.workspace_hash || ws.hash,
               contextId: r.context_id,
@@ -267,6 +478,7 @@ export function Sidebar({ activeId, onSelect, collapsed, width = 200, onOpenSkil
         }
       }
     }
+    markSessionRead(session);
     onSelect?.({
       workspaceHash: session.workspace_hash || ws?.hash,
       contextId: 'default',
@@ -307,6 +519,8 @@ export function Sidebar({ activeId, onSelect, collapsed, width = 200, onOpenSkil
         id,
         active: true,
         status: r.status || 'idle',
+        attention_state: r.attention_state || 'read',
+        read_state: r.read_state || 'read',
         workspace_hash: workspaceHash,
         cwd,
         created_at: r.created_at || now,
@@ -314,10 +528,13 @@ export function Sidebar({ activeId, onSelect, collapsed, width = 200, onOpenSkil
       };
 
       setActiveWorkspaceHash(workspaceHash);
-      setExpanded((prev) => new Set(prev).add(workspaceHash));
+      updateExpanded((prev) => new Set(prev).add(workspaceHash));
       setWorkspaces((prev) => prev.map((item) => ({ ...item, active: item.hash === workspaceHash })));
       setSessions((prev) => [nextSession, ...prev.filter((item) => item.id !== id)]);
-      connection.subscribe(id);
+      setStatusBySession((prev) => applyStatusUpdate(prev, { ...nextSession, session_id: id, state: 'read' }));
+      connection.subscribeWorkspaceStatus(workspaceHash);
+      syncRetainedSessionIds(new Set([...retainedSessionIdsRef.current, id]));
+      markSessionRead(nextSession);
       onSelect?.({
         workspaceHash,
         contextId: 'default',
@@ -353,6 +570,18 @@ export function Sidebar({ activeId, onSelect, collapsed, width = 200, onOpenSkil
     }
   };
 
+  const renderedSessions = mergeSessionsWithStatus(sessions, statusBySession);
+  const pinnedSessions = pinnedSessionsForList(renderedSessions, pinnedByWorkspace);
+  const workspaceForSession = (session) => {
+    const hash = session.workspace_hash || session.workspaceHash || '';
+    return workspaces.find((w) => w.hash === hash) || {
+      hash,
+      cwd: session.cwd || '',
+      name: hash || 'workspace',
+      daemon_state: 'running',
+    };
+  };
+
   return (
     <aside
       className={[
@@ -374,8 +603,28 @@ export function Sidebar({ activeId, onSelect, collapsed, width = 200, onOpenSkil
             ><VsIcon name="folderAdd" size={15} /></button>
           </div>
           <div className="flex-1 overflow-y-auto pb-2">
+            {pinnedSessions.length > 0 && (
+              <div className="mb-2">
+                <div className="px-4 pt-1 pb-1 text-[10px] font-semibold uppercase tracking-wider text-fg-mute">置顶</div>
+                <div className="my-1">
+                  {pinnedSessions.map((s) => (
+                    <SessionRow
+                      key={`pinned-${s.workspace_hash || ''}-${s.id}`}
+                      s={s}
+                      pinned
+                      active={s.id === activeId}
+                      onSelect={(session) => selectSession(workspaceForSession(session), session)}
+                      onTogglePin={togglePinnedSession}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
             {workspaces.map((ws) => {
-              const items = sessions.filter((s) => s.workspace_hash ? s.workspace_hash === ws.hash : !!ws.active);
+              const items = filterPinnedSessions(
+                renderedSessions.filter((s) => s.workspace_hash ? s.workspace_hash === ws.hash : !!ws.active),
+                pinnedByWorkspace,
+              );
               return (
                 <WorkspaceGroup
                   key={ws.hash}
@@ -388,6 +637,7 @@ export function Sidebar({ activeId, onSelect, collapsed, width = 200, onOpenSkil
                   onRename={onRename}
                   onActivate={onActivate}
                   onNewSession={createSessionInWorkspace}
+                  onTogglePin={togglePinnedSession}
                 />
               );
             })}

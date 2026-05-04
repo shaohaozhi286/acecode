@@ -22,7 +22,9 @@ import { ApiError, createApi } from '../lib/api.js';
 import { aggregateHunksFromMessages } from '../lib/sessionChanges.js';
 import { hunksToUnifiedDiff } from '../lib/diff.js';
 import { langForFile } from '../lib/lang.js';
+import { joinWorkspacePath } from '../lib/desktopContextMenu.js';
 import { clsx, formatBytes } from '../lib/format.js';
+import { CopyableCodeFrame } from './CopyableCodeFrame.jsx';
 import { VsIcon } from './Icon.jsx';
 
 const TABS = [
@@ -108,10 +110,13 @@ function FileTree({ api, cwd, expandedDirs, setExpandedDirs, treeCache, setTreeC
       const isDir = e.kind === 'dir';
       const isOpen = isDir && expandedDirs.has(e.path);
       const isActive = !isDir && selectedPath === e.path;
+      const explorerPath = isDir ? joinWorkspacePath(cwd, e.path) : '';
       return (
         <div key={e.path}>
           <button
             type="button"
+            data-desktop-open-in-explorer-kind={isDir ? 'directory' : undefined}
+            data-desktop-open-in-explorer-path={explorerPath || undefined}
             className={clsx(
               'ace-file-row w-full flex items-center gap-1 text-left text-[12px] font-mono py-[3px] pr-2',
               'hover:bg-surface-hi cursor-pointer',
@@ -290,10 +295,12 @@ function PreviewPanel({ api, cwd, path }) {
       <div className="px-2 py-1 text-[10px] text-fg-mute font-mono border-b border-border truncate" title={path}>
         {path} · {formatBytes(state.text.length)}{lang ? ` · ${lang}` : ''}
       </div>
-      <div
-        className="flex-1 overflow-auto text-[11px] ace-preview"
-        dangerouslySetInnerHTML={{ __html: html }}
-      />
+      <CopyableCodeFrame text={state.text} className="flex-1 min-h-0 ace-side-preview-code">
+        <div
+          className="h-full overflow-auto text-[11px] ace-preview"
+          dangerouslySetInnerHTML={{ __html: html }}
+        />
+      </CopyableCodeFrame>
     </div>
   );
 }
@@ -301,7 +308,7 @@ function PreviewPanel({ api, cwd, path }) {
 // ────────────────────────────────────────────────────────────
 // 主组件
 // ────────────────────────────────────────────────────────────
-export function SidePanel({ sessionRef, sessionId, cwd, messages, width = 280 }) {
+export function SidePanel({ sessionRef, sessionId, cwd, messages, width = 280, collapsed = false, onToggleCollapse }) {
   const api = useMemo(() => createApi(sessionRef || null), [sessionRef?.port, sessionRef?.token, sessionRef?.workspaceHash]);
 
   const [activeTab,    setActiveTab]    = useState('files');
@@ -329,20 +336,36 @@ export function SidePanel({ sessionRef, sessionId, cwd, messages, width = 280 })
   }, []);
 
   return (
-    <div className="ace-side-panel" style={{ width, minWidth: width }}>
+    // 宽度由父级 wrapper(.ace-side-panel-shell)控制,这里 100% 占满。width prop
+    // 仍接收用于 wrapper 同步(ChatView 把同一值给 wrapper inline style)。
+    <div className="ace-side-panel" style={{ width: '100%', minWidth: 0 }}>
       <div className="ace-side-tabs">
-        {TABS.map((t) => (
+        <div className="ace-side-tabs-list">
+          {TABS.map((t) => (
+            <button
+              key={t.key}
+              type="button"
+              role="tab"
+              aria-selected={activeTab === t.key}
+              className="ace-side-tab"
+              onClick={() => setActiveTab(t.key)}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+        {onToggleCollapse && (
           <button
-            key={t.key}
             type="button"
-            role="tab"
-            aria-selected={activeTab === t.key}
-            className="ace-side-tab"
-            onClick={() => setActiveTab(t.key)}
+            onClick={onToggleCollapse}
+            className="ace-side-panel-collapse-btn"
+            title={collapsed ? '展开右侧面板' : '收起右侧面板'}
+            aria-label={collapsed ? '展开右侧面板' : '收起右侧面板'}
+            aria-expanded={!collapsed}
           >
-            {t.label}
+            <VsIcon name="expandRight" size={14} />
           </button>
-        ))}
+        )}
       </div>
 
       <div className="flex-1 flex flex-col overflow-hidden">

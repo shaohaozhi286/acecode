@@ -69,25 +69,48 @@ function escapeHtml(s) {
     .replace(/'/g, '&#39;');
 }
 
+function highlightCode(str, lang) {
+  const norm = normalizeLang(lang);
+  if (norm && hljs.getLanguage(norm)) {
+    try {
+      return {
+        lang: norm,
+        html: hljs.highlight(str, { language: norm, ignoreIllegals: true }).value,
+      };
+    } catch { /* fall through to plain */ }
+  }
+  return { lang: norm && hljs.getLanguage(norm) ? norm : '', html: escapeHtml(str) };
+}
+
 const md = new MarkdownIt({
   html: false,        // 禁 raw HTML(XSS 防御)
   linkify: true,      // 自动链接化裸 URL
   breaks: false,      // 单换行不变 <br>(GFM 行为可选,我们走标准)
   typographer: false, // 不做 smart quotes
   highlight(str, lang) {
-    const norm = normalizeLang(lang);
-    if (norm && hljs.getLanguage(norm)) {
-      try {
-        const out = hljs.highlight(str, { language: norm, ignoreIllegals: true }).value;
-        return `<pre class="hljs"><code class="hljs language-${escapeHtml(norm)}">${out}</code></pre>`;
-      } catch { /* fall through to plain */ }
+    const highlighted = highlightCode(str, lang);
+    if (highlighted.lang) {
+      return `<pre class="hljs"><code class="hljs language-${escapeHtml(highlighted.lang)}">${highlighted.html}</code></pre>`;
     }
-    // 无语言或不识别 → escape-only,不带 language-* class
-    return `<pre><code>${escapeHtml(str)}</code></pre>`;
+    return `<pre><code>${highlighted.html}</code></pre>`;
   },
 });
 
 md.use(taskLists, { enabled: false, label: false });
+
+md.renderer.rules.fence = (tokens, idx) => {
+  const token = tokens[idx];
+  const info = String(token.info || '').trim();
+  const lang = info ? info.split(/\s+/g)[0] : '';
+  const highlighted = highlightCode(token.content, lang);
+  const preClass = highlighted.lang ? ' class="hljs"' : '';
+  const codeClass = highlighted.lang ? ` class="hljs language-${escapeHtml(highlighted.lang)}"` : '';
+  const langAttr = highlighted.lang ? ` data-code-lang="${escapeHtml(highlighted.lang)}"` : '';
+  return `<div class="ace-copyable-code" data-code-copy-frame="true"${langAttr}>`
+    + `<button type="button" class="ace-code-copy-btn" data-code-copy-button="true" title="复制代码" aria-label="复制代码"></button>`
+    + `<pre${preClass}><code${codeClass} data-code-copy-source="true">${highlighted.html}</code></pre>`
+    + `</div>\n`;
+};
 
 // URL scheme 白名单。markdown-it 的 validateLink 默认放过 javascript: + data:,
 // 我们收紧:只允许 http/https/mailto 或相对路径(/, ./, ../, #)。

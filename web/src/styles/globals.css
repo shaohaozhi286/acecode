@@ -116,6 +116,37 @@ body {
 .ace-shadow    { box-shadow: var(--ace-shadow); }
 .ace-shadow-lg { box-shadow: var(--ace-shadow-lg); }
 
+/* Desktop shell 自定义右键菜单:屏蔽 WebView 默认菜单后只暴露受控操作。 */
+.ace-desktop-context-menu {
+  position: fixed;
+  z-index: 10000;
+  width: 176px;
+  padding: 4px;
+  border: 1px solid var(--ace-border);
+  border-radius: 8px;
+  background: var(--ace-surface);
+  box-shadow: var(--ace-shadow-lg);
+  color: var(--ace-fg);
+}
+.ace-desktop-context-menu-item {
+  display: block;
+  width: 100%;
+  height: 30px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  font: inherit;
+  cursor: default;
+}
+.ace-desktop-context-menu-item:hover,
+.ace-desktop-context-menu-item:focus-visible {
+  outline: none;
+  background: var(--ace-surface-hi);
+}
+
 /* Visual Studio Image Library icons */
 .ace-icon {
   display: inline-block;
@@ -171,6 +202,75 @@ body {
   font-size: 12px;
   line-height: 1.55;
   margin: 6px 0;
+}
+.ace-copyable-code {
+  position: relative;
+}
+.ace-md .ace-copyable-code {
+  margin: 6px 0;
+}
+.ace-md .ace-copyable-code pre {
+  margin: 0;
+}
+.ace-copyable-code > pre,
+.ace-copyable-code .ace-preview pre {
+  padding-right: 46px;
+}
+.ace-system-copy-frame > [data-code-copy-source="true"] {
+  padding-right: 46px;
+}
+.ace-code-copy-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 24px;
+  padding: 0;
+  border-radius: 5px;
+  border: 1px solid color-mix(in oklab, var(--ace-border) 76%, transparent);
+  background: color-mix(in oklab, var(--ace-surface) 88%, transparent);
+  color: var(--ace-fg-2);
+  box-shadow: var(--ace-shadow-sm);
+  cursor: pointer;
+  opacity: 0.7;
+  transition: opacity .15s ease, background-color .15s ease, border-color .15s ease, color .15s ease;
+}
+.ace-code-copy-btn:empty::before {
+  content: "";
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid currentColor;
+  border-radius: 2px;
+  box-shadow: -3px -3px 0 -1px var(--ace-surface), -3px -3px 0 0 currentColor;
+}
+.ace-copyable-code:hover .ace-code-copy-btn,
+.ace-code-copy-btn:focus-visible {
+  opacity: 1;
+}
+.ace-code-copy-btn:hover,
+.ace-code-copy-btn:focus-visible {
+  background: var(--ace-surface-hi);
+  border-color: var(--ace-accent-soft);
+  color: var(--ace-fg);
+}
+.ace-code-copy-btn .ace-icon {
+  opacity: 0.72;
+}
+.ace-code-copy-btn:hover .ace-icon,
+.ace-code-copy-btn:focus-visible .ace-icon {
+  opacity: 0.95;
+}
+[data-theme="dark"] .ace-code-copy-btn {
+  background: color-mix(in oklab, var(--ace-surface-hi) 86%, transparent);
+  border-color: color-mix(in oklab, var(--ace-border) 82%, transparent);
+  color: var(--ace-fg);
+}
+[data-theme="dark"] .ace-code-copy-btn .ace-icon[data-monochrome="true"] {
+  filter: invert(1) brightness(0.88);
 }
 .ace-md code {
   background: var(--ace-surface-hi);
@@ -423,10 +523,23 @@ body {
 .ace-resizing .ace-sidebar { transition: none !important; }
 
 /* SidePanel — single 视图右侧工作区面板(文件 / 变更 / 预览) */
+/* shell 包 SidePanel,接收 inline width 控制实际占位,折叠时宽度归 0 + 透明
+   过渡。SidePanel 自己 width:100% 跟随 shell。这种"shell 控制宽度"的分层让
+   折叠动画发生在 shell 上,不卸载 SidePanel,保留内部 tab/cache/preview 状态。 */
+.ace-side-panel-shell {
+  flex: 0 0 auto;
+  display: flex;
+  overflow: hidden;
+  transition: width 200ms ease, opacity 200ms ease;
+}
+.ace-side-panel-shell[data-collapsed="true"] {
+  opacity: 0;
+  pointer-events: none;
+}
+.ace-resizing .ace-side-panel-shell { transition: none !important; }
+
 .ace-side-panel {
-  width: 280px;
-  min-width: 280px;
-  flex-shrink: 0;
+  flex: 1;
   display: flex;
   flex-direction: column;
   background: var(--ace-surface-alt);
@@ -435,10 +548,16 @@ body {
 }
 .ace-side-tabs {
   display: flex;
+  align-items: stretch;
   height: 28px;
   background: var(--ace-surface-hi);
   border-bottom: 1px solid var(--ace-border);
   flex-shrink: 0;
+}
+.ace-side-tabs-list {
+  flex: 1;
+  display: flex;
+  min-width: 0;
 }
 .ace-side-tab {
   flex: 1;
@@ -456,6 +575,53 @@ body {
   color: var(--ace-accent);
   font-weight: 600;
   border-bottom-color: var(--ace-accent);
+}
+
+/* tab 行右端的折叠按钮,vsCode 风格的 splitter icon */
+.ace-side-panel-collapse-btn {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--ace-fg-mute);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: color .15s ease, background .15s ease;
+}
+.ace-side-panel-collapse-btn:hover {
+  color: var(--ace-fg);
+  background: var(--ace-surface-alt);
+}
+.ace-side-panel-collapse-btn:focus-visible {
+  outline: 2px solid var(--ace-accent);
+  outline-offset: -2px;
+}
+
+/* 折叠态时 chat header 行内显示的展开按钮(对齐 codex 视觉) */
+.ace-side-panel-expand-fab {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--ace-fg-mute);
+  cursor: pointer;
+  flex-shrink: 0;
+  border-radius: 4px;
+  transition: color .15s ease, background .15s ease;
+}
+.ace-side-panel-expand-fab:hover {
+  color: var(--ace-fg);
+  background: var(--ace-surface-hi);
+}
+.ace-side-panel-expand-fab:focus-visible {
+  outline: 2px solid var(--ace-accent);
+  outline-offset: -2px;
 }
 
 /* 空态 — tab 内无数据时的居中提示 */
@@ -483,6 +649,41 @@ body {
 .ace-file-row:hover { background: var(--ace-surface-hi); }
 
 /* 预览区 — hljs pre 撑满 */
+.ace-side-preview-code {
+  display: flex;
+  min-width: 0;
+  background: var(--ace-code-bg);
+  overflow: hidden;
+}
+.ace-side-preview-code .ace-preview {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  overflow: auto;
+  background: var(--ace-code-bg);
+  scrollbar-color: color-mix(in oklab, var(--ace-fg-mute) 38%, transparent) var(--ace-code-bg);
+}
+.ace-side-preview-code .ace-preview::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+.ace-side-preview-code .ace-preview::-webkit-scrollbar-track {
+  background: var(--ace-code-bg);
+}
+.ace-side-preview-code .ace-preview::-webkit-scrollbar-thumb {
+  background: color-mix(in oklab, var(--ace-fg-mute) 35%, transparent);
+  border: 2px solid var(--ace-code-bg);
+  border-radius: 999px;
+}
+.ace-side-preview-code .ace-preview::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in oklab, var(--ace-fg-mute) 55%, transparent);
+}
+.ace-side-preview-code .ace-code-copy-btn {
+  top: 8px;
+  right: 10px;
+  background: color-mix(in oklab, var(--ace-code-bg) 82%, var(--ace-surface));
+  border-color: color-mix(in oklab, var(--ace-code-fg) 14%, transparent);
+}
 .ace-preview pre {
   margin: 0;
   padding: 8px 10px;
@@ -494,5 +695,11 @@ body {
   white-space: pre;
   overflow: auto;
   min-height: 100%;
+}
+.ace-side-preview-code .ace-preview pre {
+  width: max-content;
+  min-width: 100%;
+  box-sizing: border-box;
+  overflow: visible;
 }
 .ace-preview code { font-family: inherit; }

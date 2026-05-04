@@ -7,7 +7,7 @@
 //
 // 没有 sessionId 时显示欢迎屏(空态:logo + 新建按钮 + slash 命令提示)。
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createApi } from '../lib/api.js';
 import { connection } from '../lib/connection.js';
 import { Message } from './Message.jsx';
@@ -19,14 +19,27 @@ import { SidePanel } from './SidePanel.jsx';
 import { StatusBar } from './StatusBar.jsx';
 import { toast } from './Toast.jsx';
 import { clsx } from '../lib/format.js';
+import {
+  buildQueuedMessageItems,
+  cancelQueuedInput,
+  completeQueuedInputForMessage,
+  createChatInputQueueState,
+  enqueueQueuedInput,
+  hasSendingQueuedInput,
+  markQueuedInputFailed,
+  markQueuedInputSending,
+  nextQueuedInput,
+  retryQueuedInput,
+} from '../lib/chatInputQueue.js';
 import { findStickyUserContext, sameStickyUserContext } from '../lib/stickyUserContext.js';
-import { sessionDisplayTitle, titleFromMessages } from '../lib/sessionTitle.js';
+import { useSessionTranscript } from '../lib/sessionTranscript.js';
 import { VsIcon } from './Icon.jsx';
 
-// 列表项 id 生成 — 进度模式下要稳定,所以以 tool 名 + 起始 seq 当 key
-let _idSeq = 0;
-function nextId() { return ++_idSeq; }
-function messageKey(role, content) { return `${role || ''}\u0000${content || ''}`; }
+function isEditableElement(el) {
+  if (!el || el === document.body || el === document.documentElement) return false;
+  const tag = String(el.tagName || '').toLowerCase();
+  return tag === 'input' || tag === 'textarea' || tag === 'select' || !!el.isContentEditable;
+}
 
 function collectRowMetrics(container) {
   if (!container) return [];
@@ -57,24 +70,46 @@ function newSessionRefFrom(ref, sessionId) {
   return next;
 }
 
-export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onPermissionRequest, onQuestionRequest, questionRequest, onQuestionResolve, showSidePanel = false, sidePanelWidth = 280, onSidePanelResize }) {
+export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onPermissionRequest, onQuestionRequest, questionRequest, onQuestionResolve, showSidePanel = false, sidePanelWidth = 280, onSidePanelResize, sidePanelCollapsed = false, onToggleSidePanel }) {
   const ref = useMemo(() => normalizeSessionRef(sessionRef, sessionId), [sessionRef, sessionId]);
   const sid = ref?.sessionId || ref?.id || '';
+  const sidRef = useRef(sid);
   const api = useMemo(() => createApi(ref), [ref?.port, ref?.token, ref?.workspaceHash]);
-  const [items,    setItems]    = useState([]);
-  const [busy,     setBusy]     = useState(false);
-  const [turns,    setTurns]    = useState(0);
+  const transcript = useSessionTranscript(ref, {
+    live: true,
+    onPermissionRequest,
+    onQuestionRequest,
+    onError: (reason) => toast({
+      kind: 'err',
+      text: String(reason || '').startsWith('加载会话失败:')
+        ? String(reason || '')
+        : '错误:' + (reason || ''),
+    }),
+  });
+  const { items, busy, turns, title, status: transcriptStatus, streamingId, applyEvent, setTitle: setTranscriptTitle } = transcript;
   const [history,  setHistory]  = useState([]);
-  const [title,    setTitle]    = useState('');
   const scrollRef = useRef(null);
   const inputRef = useRef(null);
   const layoutRef = useRef(null);
   const sidePanelResizeActiveRef = useRef(false);
-  const toolMap   = useRef(new Map()); // tool name → item.id (本地数组里的 ID)
-  const streamingId = useRef(null);
-  const itemsRef = useRef(items);
+  const [queueState, setQueueState] = useState(() => createChatInputQueueState());
+  const queueStateRef = useRef(queueState);
+  const drainRef = useRef(false);
+  const visibleQueuedItems = useMemo(() => buildQueuedMessageItems(queueState, sid), [queueState, sid]);
+  const renderedItems = useMemo(() => [...items, ...visibleQueuedItems], [items, visibleQueuedItems]);
+  const itemsRef = useRef(renderedItems);
   const stickyRafRef = useRef(0);
   const [stickyUserContext, setStickyUserContext] = useState(null);
+
+  useEffect(() => { sidRef.current = sid; }, [sid]);
+  useEffect(() => { queueStateRef.current = queueState; }, [queueState]);
+
+  const updateQueueState = useCallback((updater) => {
+    const base = queueStateRef.current;
+    const next = typeof updater === 'function' ? updater(base) : updater;
+    queueStateRef.current = next;
+    setQueueState(next);
+  }, []);
 
   const measureStickyContext = useCallback(() => {
     const el = scrollRef.current;
@@ -95,28 +130,58 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
   }, []);
 
   const scheduleStickyMeasure = useCallback(() => {
-    if (stickyRafRef.current) return;
+    if (stickyRafRef.current) cancelAnimationFrame(stickyRafRef.current);
     stickyRafRef.current = requestAnimationFrame(() => {
       stickyRafRef.current = 0;
       measureStickyContext();
     });
   }, [measureStickyContext]);
 
+  const focusChatInput = useCallback((force = false) => {
+    if (questionRequest) return;
+    if (!force && isEditableElement(document.activeElement)) return;
+    inputRef.current?.focus();
+  }, [questionRequest]);
+
   // 自动滚到底
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [items, busy]);
+  }, [renderedItems, busy]);
 
   useEffect(() => {
-    const id = requestAnimationFrame(() => inputRef.current?.focus());
-    return () => cancelAnimationFrame(id);
-  }, [sid]);
+    let timer = 0;
+    const id = requestAnimationFrame(() => {
+      focusChatInput(true);
+      timer = window.setTimeout(() => focusChatInput(true), 80);
+    });
+    return () => {
+      cancelAnimationFrame(id);
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [sid, focusChatInput]);
 
   useEffect(() => {
-    itemsRef.current = items;
+    const focusIfCurrentWindow = () => {
+      requestAnimationFrame(() => focusChatInput(false));
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') focusIfCurrentWindow();
+    };
+    window.addEventListener('focus', focusIfCurrentWindow);
+    window.addEventListener('pageshow', focusIfCurrentWindow);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      window.removeEventListener('focus', focusIfCurrentWindow);
+      window.removeEventListener('pageshow', focusIfCurrentWindow);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [focusChatInput]);
+
+  useLayoutEffect(() => {
+    itemsRef.current = renderedItems;
     scheduleStickyMeasure();
-  }, [items, scheduleStickyMeasure]);
+  }, [renderedItems, scheduleStickyMeasure]);
 
   useEffect(() => {
     setStickyUserContext(null);
@@ -187,195 +252,25 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
     return () => window.removeEventListener('ace:new-session', handler);
   }, [api, onSessionPromoted, ref]);
 
-  // 切 sessionId 后:重置状态 + 拉历史 + bind ws
-  useEffect(() => {
-    setItems([]); toolMap.current.clear(); streamingId.current = null;
-    setBusy(false); setTurns(0);
+  const recordInputHistory = useCallback((text) => {
+    api.appendHistory(text).catch(() => {});
+    setHistory((h) => [...h, text]);
+  }, [api]);
+
+  const enqueueInput = useCallback((text) => {
     if (!sid) return;
-    connection.reconfigure({ port: ref?.port || '', token: ref?.token || '' });
-    setTitle(sessionDisplayTitle(ref, sid));
-    connection.subscribe(sid);
+    updateQueueState((prev) => enqueueQueuedInput(prev, { sessionId: sid, text }));
+    recordInputHistory(text);
+    if (!ref?.title) setTranscriptTitle(text);
+  }, [recordInputHistory, ref?.title, setTranscriptTitle, sid, updateQueueState]);
 
-    let off = false;
-    api.getMessages(sid, 0).then((data) => {
-      if (off || !data) return;
-      const msgs = data.messages || [];
-      const initialItems = msgs.map((m) => ({
-        kind: 'msg', id: nextId(),
-        messageId: m.id || '',  // 后端稳定 ID(user uuid / 其它 sha1),fork 用
-        role: m.role, content: m.content || '',
-        ts: m.ts || Date.now(),
-      }));
-      const seenMessages = new Set(msgs.map((m) => messageKey(m.role, m.content || '')));
-      const restoredTitle = titleFromMessages(msgs);
-      if (restoredTitle) setTitle(restoredTitle);
-      setItems(initialItems);
-      // 把残留事件回放
-      let pendingStreamEvents = [];
-      const flushPendingStreamEvents = () => {
-        pendingStreamEvents.forEach((ev) => onWsMessage(ev));
-        pendingStreamEvents = [];
-      };
-      (data.events || []).forEach((ev) => {
-        if (ev?.type === 'token' || ev?.type === 'reasoning') {
-          pendingStreamEvents.push(ev);
-          return;
-        }
-        if (ev?.type === 'message') {
-          const p = ev.payload || {};
-          const key = messageKey(p.role || 'system', p.content || '');
-          if (seenMessages.has(key)) {
-            pendingStreamEvents = [];
-            return;
-          }
-          seenMessages.add(key);
-        }
-        flushPendingStreamEvents();
-        onWsMessage(ev);
-      });
-      flushPendingStreamEvents();
-    }).catch((e) => {
-      toast({ kind: 'err', text: '加载会话失败:' + (e.message || '') });
-    });
-    return () => { off = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sid, ref?.port, ref?.token, api]);
+  const cancelQueued = useCallback((queuedId) => {
+    updateQueueState((prev) => cancelQueuedInput(prev, queuedId));
+  }, [updateQueueState]);
 
-  const onWsMessage = useCallback((msg) => {
-    const t = msg.type;
-    const p = msg.payload || {};
-    setItems((prev) => {
-      let next = prev;
-      switch (t) {
-        case 'message':
-          if ((p.role || 'system') === 'assistant' && streamingId.current != null) {
-            const currentStreamingId = streamingId.current;
-            streamingId.current = null;
-            next = prev.map((x) => x.id === currentStreamingId
-              ? { ...x, role: 'assistant',
-                  content: p.content || x.content || '',
-                  messageId: p.id || x.messageId || '',
-                  ts: Date.now(), streaming: false }
-              : x);
-            break;
-          }
-          streamingId.current = null;
-          next = [...prev, {
-            kind: 'msg', id: nextId(),
-            messageId: p.id || '',
-            role: p.role || 'system',
-            content: p.content || '', ts: Date.now(),
-          }];
-          break;
-        case 'token': {
-          if (streamingId.current == null) {
-            const id = nextId();
-            streamingId.current = id;
-            next = [...prev, { kind: 'msg', id, role: 'assistant', content: p.text || '', ts: Date.now(), streaming: true }];
-          } else {
-            next = prev.map((x) =>
-              x.id === streamingId.current ? { ...x, content: (x.content || '') + (p.text || '') } : x);
-          }
-          break;
-        }
-        case 'tool_start': {
-          streamingId.current = null;
-          const id = nextId();
-          toolMap.current.set(p.tool || '_anon', id);
-          const tool = {
-            isTaskComplete: !!p.is_task_complete,
-            isDone: false,
-            success: null,
-            tool: p.tool || '',
-            displayOverride: p.display_override || '',
-            title: p.display_override || p.command_preview || `${p.tool || ''}  ${JSON.stringify(p.args || {})}`,
-            tailLines: [], currentPartial: '', totalLines: 0, totalBytes: 0, elapsed: 0,
-            summary: p.is_task_complete ? { object: (p.args && p.args.summary) || '完成' } : null,
-            output: '',
-            hunks: [],
-          };
-          next = [...prev, { kind: 'tool', id, tool }];
-          break;
-        }
-        case 'tool_update': {
-          const id = toolMap.current.get(p.tool || '_anon');
-          if (!id) break;
-          next = prev.map((x) => {
-            if (x.id !== id || x.kind !== 'tool') return x;
-            return { ...x, tool: {
-              ...x.tool,
-              tailLines: p.tail_lines || x.tool.tailLines,
-              currentPartial: p.current_partial || '',
-              totalLines: p.total_lines || x.tool.totalLines,
-              totalBytes: p.total_bytes || x.tool.totalBytes,
-              elapsed: p.elapsed_seconds || x.tool.elapsed,
-            }};
-          });
-          break;
-        }
-        case 'tool_end': {
-          const id = toolMap.current.get(p.tool || '_anon');
-          toolMap.current.delete(p.tool || '_anon');
-          if (!id) break;
-          next = prev.map((x) => {
-            if (x.id !== id || x.kind !== 'tool') return x;
-            return { ...x, tool: {
-              ...x.tool,
-              isDone: true,
-              success: !!p.success,
-              summary: p.summary || x.tool.summary,
-              output: p.output || '',
-              hunks: Array.isArray(p.hunks) ? p.hunks : [],
-            }};
-          });
-          break;
-        }
-        case 'busy_changed':
-          setBusy(!!p.busy);
-          if (!p.busy) {
-            setTurns((n) => n + 1);
-            // 完成 streaming 标记移除
-            if (streamingId.current != null) {
-              const sid = streamingId.current;
-              streamingId.current = null;
-              next = prev.map((x) => x.id === sid ? { ...x, streaming: false } : x);
-            }
-          }
-          break;
-        case 'done':
-          setBusy(false);
-          if (streamingId.current != null) {
-            const sid = streamingId.current;
-            streamingId.current = null;
-            next = prev.map((x) => x.id === sid ? { ...x, streaming: false } : x);
-          }
-          break;
-        case 'error':
-          setBusy(false);
-          toast({ kind: 'err', text: '错误:' + (p.reason || '') });
-          break;
-        case 'permission_request':
-          onPermissionRequest?.({ ...p, session_id: p.session_id || sid });
-          break;
-        case 'question_request':
-          onQuestionRequest?.({ ...p, session_id: p.session_id || sid });
-          break;
-        default: break;
-      }
-      return next;
-    });
-  }, [onPermissionRequest, onQuestionRequest, sid]);
-
-  // ws 事件订阅
-  useEffect(() => {
-    const handler = (e) => {
-      const msg = e.detail || {};
-      if (msg.session_id && msg.session_id !== sid) return;
-      onWsMessage(msg);
-    };
-    connection.addEventListener('message', handler);
-    return () => connection.removeEventListener('message', handler);
-  }, [onWsMessage, sid]);
+  const retryQueued = useCallback((queuedId) => {
+    updateQueueState((prev) => retryQueuedInput(prev, queuedId));
+  }, [updateQueueState]);
 
   const submit = useCallback((text) => {
     if (!sid) {
@@ -391,21 +286,76 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
           next.cwd = r.cwd || ref?.cwd;
           next.title = text;
           onSessionPromoted?.(next);
-          api.appendHistory(text).catch(() => {});
-          setHistory((h) => [...h, text]);
+          recordInputHistory(text);
         }
       }).catch((e) => toast({ kind: 'err', text: '新建会话失败:' + (e.message || '') }));
       return;
     }
+    if (busy) {
+      enqueueInput(text);
+      return;
+    }
     api.sendInput(sid, text).catch((e) => {
       toast({ kind: 'err', text: '发送失败:' + (e.message || '') });
-      setBusy(false);
+      applyEvent({ type: 'busy_changed', payload: { busy: false } }, { emitEffects: false });
     });
-    api.appendHistory(text).catch(() => {});
-    setHistory((h) => [...h, text]);
-    if (!ref?.title) setTitle(text);
-    setBusy(true);
-  }, [sid, api, ref, onSessionPromoted]);
+    recordInputHistory(text);
+    if (!ref?.title) setTranscriptTitle(text);
+    applyEvent({ type: 'busy_changed', payload: { busy: true } }, { emitEffects: false });
+  }, [sid, busy, api, ref, onSessionPromoted, recordInputHistory, enqueueInput, applyEvent, setTranscriptTitle]);
+
+  const drainQueuedInput = useCallback(() => {
+    const targetSid = sidRef.current;
+    if (!targetSid || busy || drainRef.current) return;
+    const queuedItem = nextQueuedInput(queueStateRef.current, targetSid);
+    if (!queuedItem) return;
+
+    drainRef.current = true;
+    updateQueueState((prev) => markQueuedInputSending(prev, queuedItem.queued.id));
+    api.sendInput(targetSid, queuedItem.content)
+      .then(() => {
+        if (sidRef.current === targetSid) {
+          applyEvent({ type: 'busy_changed', payload: { busy: true } }, { emitEffects: false });
+        }
+      })
+      .catch((e) => {
+        const message = e?.message || '发送失败';
+        updateQueueState((prev) => markQueuedInputFailed(prev, queuedItem.queued.id, message));
+        toast({ kind: 'err', text: '排队发送失败:' + message });
+      })
+      .finally(() => {
+        drainRef.current = false;
+      });
+  }, [api, applyEvent, busy, updateQueueState]);
+
+  const prevBusyRef = useRef(busy);
+  useEffect(() => {
+    const wasBusy = prevBusyRef.current;
+    prevBusyRef.current = busy;
+    if (!sid || busy) return;
+    if (wasBusy || !hasSendingQueuedInput(queueState, sid)) {
+      drainQueuedInput();
+    }
+  }, [busy, drainQueuedInput, queueState, sid]);
+
+  useEffect(() => {
+    if (!sid || items.length === 0) return;
+    let nextState = queueStateRef.current;
+    let changed = false;
+    for (const item of items) {
+      if (item.kind !== 'msg' || item.role !== 'user') continue;
+      const candidate = completeQueuedInputForMessage(nextState, {
+        sessionId: sid,
+        content: item.content || '',
+        ts: item.ts,
+      });
+      if (candidate !== nextState) {
+        nextState = candidate;
+        changed = true;
+      }
+    }
+    if (changed) updateQueueState(nextState);
+  }, [items, sid, updateQueueState]);
 
   const abort = useCallback(() => connection.sendAbort(sid), [sid]);
 
@@ -477,8 +427,8 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
 
   const status = useMemo(() => {
     if (!sid) return null;
-    return busy ? 'running' : 'idle';
-  }, [sid, busy]);
+    return busy || transcriptStatus === 'running' ? 'running' : 'idle';
+  }, [sid, busy, transcriptStatus]);
 
   // SidePanel 「变更」tab 的数据源:把 items 里 tool 项的 hunks 抽成消息格式。
   // 必须放在 early return 之前,否则空态/有 session 之间 hooks 数量不一致 → React #310。
@@ -555,9 +505,11 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
 
   const sidePanelCwd = ref?.cwd || health?.cwd || '';
 
+  const sidePanelMounted = showSidePanel && !!sid;
+
   return (
     <div ref={layoutRef} className="flex-1 flex min-w-0 ace-chat-layout">
-      <div className="flex-1 flex flex-col min-w-0">
+      <div className="flex-1 flex flex-col min-w-0 relative">
       <div className="h-9 px-3 flex items-center justify-between bg-surface border-b border-border shrink-0 gap-2">
         <div className="flex items-center gap-2 min-w-0">
           <span className="text-[13px] font-semibold text-fg truncate">{title}</span>
@@ -571,6 +523,17 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
             {status === 'running' ? '运行中' : '空闲'}
           </span>
         </div>
+        {sidePanelMounted && sidePanelCollapsed && onToggleSidePanel && (
+          <button
+            type="button"
+            onClick={onToggleSidePanel}
+            className="ace-side-panel-expand-fab"
+            title="展开右侧面板"
+            aria-label="展开右侧面板"
+          >
+            <VsIcon name="expandRight" size={14} />
+          </button>
+        )}
       </div>
 
       <div className="relative flex-1 min-h-0">
@@ -579,7 +542,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
           onScroll={scheduleStickyMeasure}
           className="h-full overflow-y-auto px-3.5 py-3 flex flex-col gap-3"
         >
-          {items.map((it) => (
+          {renderedItems.map((it) => (
             <div
               key={it.id}
               className="ace-chat-row flex flex-col"
@@ -587,6 +550,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
               data-chat-item-id={String(it.id)}
               data-chat-kind={it.kind || ''}
               data-chat-role={it.kind === 'msg' ? (it.role || '') : (it.kind || '')}
+              data-chat-queued-state={it.queued?.state || undefined}
               data-chat-user-message={it.kind === 'msg' && it.role === 'user' ? 'true' : undefined}
             >
               {it.kind === 'tool' ? (
@@ -596,12 +560,15 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
                   role={it.role} content={it.content} ts={it.ts}
                   streaming={it.streaming}
                   messageId={it.messageId}
+                  queued={it.queued}
+                  onCancelQueued={cancelQueued}
+                  onRetryQueued={retryQueued}
                   onFork={forkAndSwitch}
                 />
               )}
             </div>
           ))}
-          {busy && streamingId.current == null && (
+          {busy && streamingId == null && (
             <div className="flex gap-2 max-w-[85%]">
               <div className="w-6 h-6 rounded-full bg-ok text-white text-[11px] font-bold flex items-center justify-center mt-[2px]">A</div>
               <div className="flex gap-1 py-2 px-3">
@@ -634,26 +601,36 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
       />
       <StatusBar model="—" turns={turns} branch={health?.branch || ''} />
       </div>
-      {showSidePanel && sid && (
+      {sidePanelMounted && (
         <>
+          {!sidePanelCollapsed && (
+            <div
+              role="separator"
+              aria-label="调整右侧栏宽度"
+              aria-orientation="vertical"
+              tabIndex={0}
+              className="ace-resize-handle ace-resize-handle-right"
+              onPointerDown={startSidePanelResize}
+              onMouseDown={startSidePanelResize}
+              onKeyDown={onSidePanelHandleKeyDown}
+              title="拖动调整右侧栏宽度"
+            />
+          )}
           <div
-            role="separator"
-            aria-label="调整右侧栏宽度"
-            aria-orientation="vertical"
-            tabIndex={0}
-            className="ace-resize-handle ace-resize-handle-right"
-            onPointerDown={startSidePanelResize}
-            onMouseDown={startSidePanelResize}
-            onKeyDown={onSidePanelHandleKeyDown}
-            title="拖动调整右侧栏宽度"
-          />
-          <SidePanel
-            sessionRef={ref}
-            sessionId={sid}
-            cwd={sidePanelCwd}
-            messages={sidePanelMessages}
-            width={sidePanelWidth}
-          />
+            className="ace-side-panel-shell"
+            data-collapsed={sidePanelCollapsed ? 'true' : 'false'}
+            style={{ width: sidePanelCollapsed ? 0 : sidePanelWidth }}
+          >
+            <SidePanel
+              sessionRef={ref}
+              sessionId={sid}
+              cwd={sidePanelCwd}
+              messages={sidePanelMessages}
+              width={sidePanelWidth}
+              collapsed={sidePanelCollapsed}
+              onToggleCollapse={onToggleSidePanel}
+            />
+          </div>
         </>
       )}
     </div>

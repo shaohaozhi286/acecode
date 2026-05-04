@@ -5,6 +5,7 @@
 
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import { clsx } from '../lib/format.js';
+import { getInputBarActionState } from '../lib/inputBarState.js';
 import { VsIcon } from './Icon.jsx';
 
 const MAX_ROWS = 8;
@@ -70,7 +71,8 @@ export const InputBar = forwardRef(function InputBar({
     }
   };
 
-  const hasText = value.trim().length > 0;
+  const actionState = getInputBarActionState({ value, disabled, busy });
+  const hasText = actionState.hasText;
 
   return (
     <div className="border-t border-border px-2.5 py-2 bg-surface shrink-0">
@@ -98,24 +100,42 @@ export const InputBar = forwardRef(function InputBar({
               <span>中断</span>
             </button>
           )}
-          <button
-            type="button"
-            onClick={submit}
-            disabled={!hasText || disabled}
-            className={clsx(
-              'w-7 h-7 rounded-full flex items-center justify-center transition',
-              hasText && !disabled
-                ? 'bg-accent text-white hover:opacity-90'
-                : 'bg-surface-hi text-fg-mute cursor-default',
-            )}
-            title="发送 (Enter)"
-          >
-            <VsIcon name="send" size={14} mono={false} className={hasText && !disabled ? 'ace-icon-on-accent' : ''} />
-          </button>
+          {busy ? (
+            <button
+              type="button"
+              onClick={submit}
+              disabled={!actionState.canSubmit}
+              className={clsx(
+                'px-2 h-7 rounded-md text-[11px] transition flex items-center gap-1',
+                actionState.canSubmit
+                  ? 'bg-accent text-white hover:opacity-90'
+                  : 'bg-surface-hi text-fg-mute cursor-default',
+              )}
+              title={actionState.submitTitle}
+            >
+              <VsIcon name="send" size={12} mono={false} className={actionState.canSubmit ? 'ace-icon-on-accent' : ''} />
+              <span>{actionState.submitLabel}</span>
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={submit}
+              disabled={!actionState.canSubmit}
+              className={clsx(
+                'w-7 h-7 rounded-full flex items-center justify-center transition',
+                actionState.canSubmit
+                  ? 'bg-accent text-white hover:opacity-90'
+                  : 'bg-surface-hi text-fg-mute cursor-default',
+              )}
+              title={actionState.submitTitle}
+            >
+              <VsIcon name="send" size={14} mono={false} className={actionState.canSubmit ? 'ace-icon-on-accent' : ''} />
+            </button>
+          )}
         </div>
       </div>
       <div className="mt-1 px-1 text-[10px] text-fg-mute flex justify-between">
-        <span>Enter 发送 · Shift+Enter 换行 · 上下键历史</span>
+        <span>{actionState.helperText}</span>
         {value.startsWith('/') && (
           <span className="text-accent">/ 命令模式</span>
         )}

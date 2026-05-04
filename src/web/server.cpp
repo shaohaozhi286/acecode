@@ -9,6 +9,7 @@
 #include "../provider/provider_swap.hpp"
 #include "../session/ask_user_question_prompter.hpp"
 #include "../session/local_session_client.hpp"
+#include "../session/session_attention.hpp"
 #include "../session/session_client.hpp"
 #include "../session/session_registry.hpp"
 #include "../session/session_rewind.hpp"
@@ -22,6 +23,7 @@
 #include "handlers/fork_handler.hpp"
 #include "handlers/history_handler.hpp"
 #include "handlers/models_handler.hpp"
+#include "handlers/pinned_sessions_handler.hpp"
 #include "handlers/skills_handler.hpp"
 #include "message_payload.hpp"
 #include "version.hpp"
@@ -35,6 +37,7 @@
 #include <chrono>
 #include <cctype>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -115,6 +118,8 @@ json session_event_to_json(const SessionEvent& evt,
 struct WsConnState {
     std::string session_id;
     std::unordered_map<std::string, SessionClient::SubscriptionId> subscriptions;
+    std::unordered_set<std::string> status_workspaces;
+    std::unordered_set<std::string> status_sessions;
 };
 
 // 把 client_ip / 401 reason 写日志(避免每个路由都重复)。
@@ -245,6 +250,11 @@ struct WebServer::Impl {
     std::mutex                                                      ws_mu;
     std::unordered_map<crow::websocket::connection*, std::unique_ptr<WsConnState>> ws_connections;
 
+    mutable std::mutex attention_mu;
+    mutable std::unordered_set<std::string> loaded_attention_workspaces;
+    mutable std::unordered_map<std::string, std::string> attention_workspace_cwds;
+    mutable std::unordered_map<std::string, std::unordered_map<std::string, SessionAttentionRecord>> attention_by_workspace;
+
     explicit Impl(WebServerDeps d) : deps(std::move(d)) {}
 
     // -----------------------------------------------------------------
@@ -321,6 +331,7 @@ struct WebServer::Impl {
     }
 
     std::optional<acecode::desktop::WorkspaceMeta> resolve_workspace(const std::string& hash) const {
+        if (hash == "__local__") return compatibility_workspace();
         if (deps.workspace_registry) {
             if (auto m = deps.workspace_registry->get(hash)) {
                 return m;
@@ -373,6 +384,8 @@ struct WebServer::Impl {
         o["provider"]      = !s.provider.empty() ? s.provider : (m ? m->provider : "");
         o["model"]         = !s.model.empty() ? s.model : (m ? m->model : "");
         o["message_count"] = s.message_count > 0 ? s.message_count : (m ? m->message_count : 0);
+        append_attention_fields(o, s.id, o.value("workspace_hash", std::string{}),
+                                o.value("cwd", std::string{}), s.busy);
         return o;
     }
 
@@ -390,6 +403,7 @@ struct WebServer::Impl {
         o["provider"]       = m.provider;
         o["model"]          = m.model;
         o["message_count"]  = m.message_count;
+        append_attention_fields(o, m.id, workspace_hash, m.cwd, false);
         return o;
     }
 
@@ -419,6 +433,283 @@ struct WebServer::Impl {
             arr.push_back(session_meta_to_json(m, ws.hash));
         }
         return arr;
+    }
+
+    std::filesystem::path pinned_sessions_path_for_cwd(const std::string& cwd) const {
+        return std::filesystem::path(SessionStorage::get_project_dir(cwd)) /
+               "pinned_sessions.json";
+    }
+
+    std::vector<std::string> session_ids_for_workspace(
+        const acecode::desktop::WorkspaceMeta& ws) const {
+        std::vector<std::string> out;
+        std::unordered_set<std::string> seen;
+        auto add = [&](const std::string& id) {
+            if (id.empty() || seen.count(id)) return;
+            seen.insert(id);
+            out.push_back(id);
+        };
+
+        if (deps.session_client) {
+            for (const auto& s : deps.session_client->list_sessions()) {
+                const bool same_workspace = s.workspace_hash == ws.hash ||
+                    (s.workspace_hash.empty() && s.cwd == ws.cwd);
+                if (same_workspace) add(s.id);
+            }
+        }
+
+        auto project_dir = SessionStorage::get_project_dir(ws.cwd);
+        for (const auto& m : SessionStorage::list_sessions(project_dir)) {
+            add(m.id);
+        }
+        return out;
+    }
+
+    json pinned_sessions_to_json(const acecode::desktop::WorkspaceMeta& ws,
+                                 const std::vector<std::string>& session_ids) const {
+        return json{{"workspace_hash", ws.hash}, {"cwd", ws.cwd}, {"session_ids", session_ids}};
+    }
+
+    std::string attention_store_path_for_cwd(const std::string& cwd) const {
+        return (std::filesystem::path(SessionStorage::get_project_dir(cwd)) /
+                "session_read_state.json").string();
+    }
+
+    void load_attention_workspace_locked(const std::string& workspace_hash,
+                                         const std::string& cwd) const {
+        if (workspace_hash.empty()) return;
+        attention_workspace_cwds[workspace_hash] = cwd;
+        if (loaded_attention_workspaces.count(workspace_hash)) return;
+        loaded_attention_workspaces.insert(workspace_hash);
+
+        std::ifstream in(attention_store_path_for_cwd(cwd));
+        if (!in) return;
+        try {
+            json root = json::parse(in, nullptr, true, true);
+            if (!root.contains("sessions") || !root["sessions"].is_object()) return;
+            const auto& sessions = root["sessions"];
+            auto& records = attention_by_workspace[workspace_hash];
+            for (auto it = sessions.begin(); it != sessions.end(); ++it) {
+                if (!it.value().is_object()) continue;
+                SessionAttentionRecord r;
+                r.read_cursor = it.value().value("read_cursor", static_cast<std::uint64_t>(0));
+                r.update_cursor = it.value().value("update_cursor", static_cast<std::uint64_t>(0));
+                r.updated_at_ms = it.value().value("updated_at_ms", static_cast<std::int64_t>(0));
+                records[it.key()] = r;
+            }
+        } catch (const std::exception& e) {
+            LOG_WARN(std::string("[web] failed to load session read state: ") + e.what());
+        }
+    }
+
+    void save_attention_workspace_locked(const std::string& workspace_hash) const {
+        auto cwd_it = attention_workspace_cwds.find(workspace_hash);
+        if (cwd_it == attention_workspace_cwds.end() || cwd_it->second.empty()) return;
+
+        json root;
+        root["version"] = 1;
+        root["sessions"] = json::object();
+        const auto records_it = attention_by_workspace.find(workspace_hash);
+        if (records_it != attention_by_workspace.end()) {
+            for (const auto& [sid, record] : records_it->second) {
+                root["sessions"][sid] = json{
+                    {"read_cursor", record.read_cursor},
+                    {"update_cursor", record.update_cursor},
+                    {"updated_at_ms", record.updated_at_ms},
+                };
+            }
+        }
+
+        const auto path = std::filesystem::path(attention_store_path_for_cwd(cwd_it->second));
+        std::error_code ec;
+        std::filesystem::create_directories(path.parent_path(), ec);
+        const auto tmp = path.string() + ".tmp";
+        {
+            std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+            if (!out) return;
+            out << root.dump(2);
+            out << '\n';
+        }
+        std::filesystem::rename(tmp, path, ec);
+        if (ec) {
+            std::filesystem::remove(path, ec);
+            ec.clear();
+            std::filesystem::rename(tmp, path, ec);
+        }
+        if (ec) {
+            LOG_WARN("[web] failed to save session read state: " + ec.message());
+        }
+    }
+
+    SessionAttentionRecord attention_record_for_session(const std::string& workspace_hash,
+                                                        const std::string& cwd,
+                                                        const std::string& session_id,
+                                                        bool busy) const {
+        std::lock_guard<std::mutex> lk(attention_mu);
+        load_attention_workspace_locked(workspace_hash, cwd);
+        auto record = attention_by_workspace[workspace_hash][session_id];
+        record.busy = busy;
+        return record;
+    }
+
+    json attention_payload_for_record(const std::string& session_id,
+                                      const std::string& workspace_hash,
+                                      const std::string& cwd,
+                                      const SessionAttentionRecord& record) const {
+        const auto state = session_attention_state_for(record);
+        json payload;
+        payload["session_id"] = session_id;
+        payload["workspace_hash"] = workspace_hash;
+        if (!cwd.empty()) payload["cwd"] = cwd;
+        payload["state"] = to_string(state);
+        payload["attention_state"] = to_string(state);
+        payload["read_state"] = to_string(state);
+        payload["busy"] = record.busy;
+        payload["cursor"] = record.update_cursor;
+        payload["update_cursor"] = record.update_cursor;
+        payload["read_cursor"] = record.read_cursor;
+        payload["timestamp_ms"] = record.updated_at_ms > 0 ? record.updated_at_ms : now_unix_ms();
+        return payload;
+    }
+
+    void append_attention_fields(json& o,
+                                 const std::string& session_id,
+                                 const std::string& workspace_hash,
+                                 const std::string& cwd,
+                                 bool busy) const {
+        auto record = attention_record_for_session(workspace_hash, cwd, session_id, busy);
+        auto payload = attention_payload_for_record(session_id, workspace_hash, cwd, record);
+        o["attention_state"] = payload["attention_state"];
+        o["read_state"] = payload["read_state"];
+        o["busy"] = payload["busy"];
+        o["status_cursor"] = payload["cursor"];
+        o["update_cursor"] = payload["update_cursor"];
+        o["read_cursor"] = payload["read_cursor"];
+    }
+
+    std::optional<acecode::desktop::WorkspaceMeta> resolve_session_workspace(
+        const std::string& session_id,
+        const std::string& workspace_hash_hint = {}) const {
+        if (!session_id.empty() && deps.session_registry) {
+            if (auto* entry = deps.session_registry->lookup(session_id)) {
+                acecode::desktop::WorkspaceMeta ws;
+                ws.hash = !entry->workspace_hash.empty() ? entry->workspace_hash : compute_cwd_hash(entry->cwd);
+                ws.cwd = entry->cwd;
+                ws.name = acecode::desktop::default_workspace_name(entry->cwd);
+                return ws;
+            }
+        }
+        if (!workspace_hash_hint.empty()) {
+            if (auto ws = resolve_workspace(workspace_hash_hint)) return ws;
+        }
+        return compatibility_workspace();
+    }
+
+    void broadcast_session_status(const json& payload) {
+        json msg;
+        msg["type"] = "session_status";
+        msg["timestamp_ms"] = now_unix_ms();
+        msg["session_id"] = payload.value("session_id", std::string{});
+        msg["workspace_hash"] = payload.value("workspace_hash", std::string{});
+        msg["payload"] = payload;
+        const auto text = msg.dump();
+
+        std::lock_guard<std::mutex> lk(ws_mu);
+        for (const auto& [conn, state] : ws_connections) {
+            if (!state) continue;
+            const auto workspace_hash = payload.value("workspace_hash", std::string{});
+            const auto session_id = payload.value("session_id", std::string{});
+            const bool wants_workspace = !workspace_hash.empty() && state->status_workspaces.count(workspace_hash);
+            const bool wants_session = !session_id.empty() && state->status_sessions.count(session_id);
+            if (!wants_workspace && !wants_session) continue;
+            try { conn->send_text(text); } catch (...) {}
+        }
+    }
+
+    void note_session_event_for_attention(const std::string& session_id,
+                                          const std::string& workspace_hash,
+                                          const std::string& cwd,
+                                          const SessionEvent& evt) {
+        if (session_id.empty() || workspace_hash.empty()) return;
+        json payload;
+        bool changed = false;
+        {
+            std::lock_guard<std::mutex> lk(attention_mu);
+            load_attention_workspace_locked(workspace_hash, cwd);
+            auto& record = attention_by_workspace[workspace_hash][session_id];
+            const auto before_state = session_attention_state_for(record);
+            const auto before_record = record;
+            const auto cursor = evt.timestamp_ms > 0
+                ? static_cast<std::uint64_t>(evt.timestamp_ms)
+                : evt.seq;
+            record = apply_session_attention_event(record, evt.kind, evt.payload, cursor, evt.timestamp_ms);
+            const auto after_state = session_attention_state_for(record);
+            changed = before_state != after_state || before_record.busy != record.busy;
+            if (record.read_cursor != before_record.read_cursor ||
+                record.update_cursor != before_record.update_cursor ||
+                record.updated_at_ms != before_record.updated_at_ms ||
+                record.busy != before_record.busy) {
+                save_attention_workspace_locked(workspace_hash);
+            }
+            if (changed) payload = attention_payload_for_record(session_id, workspace_hash, cwd, record);
+        }
+        if (changed) broadcast_session_status(payload);
+    }
+
+    json mark_session_read_status(const std::string& session_id,
+                                  const std::string& workspace_hash,
+                                  const std::string& cwd,
+                                  std::uint64_t cursor) {
+        json payload;
+        bool changed = false;
+        bool current_busy = false;
+        if (deps.session_registry) {
+            if (auto* entry = deps.session_registry->lookup(session_id)) {
+                current_busy = entry->loop && entry->loop->is_busy();
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lk(attention_mu);
+            load_attention_workspace_locked(workspace_hash, cwd);
+            auto& record = attention_by_workspace[workspace_hash][session_id];
+            record.busy = current_busy;
+            const auto before_state = session_attention_state_for(record);
+            const auto before_record = record;
+            record = mark_session_attention_read(record, cursor, now_unix_ms());
+            const auto after_state = session_attention_state_for(record);
+            changed = before_state != after_state || before_record.read_cursor != record.read_cursor;
+            if (changed || before_record.updated_at_ms != record.updated_at_ms) {
+                save_attention_workspace_locked(workspace_hash);
+            }
+            payload = attention_payload_for_record(session_id, workspace_hash, cwd, record);
+        }
+        if (changed) broadcast_session_status(payload);
+        return payload;
+    }
+
+    void send_status_snapshot(crow::websocket::connection& conn,
+                              const acecode::desktop::WorkspaceMeta& ws) {
+        json sessions = json::array();
+        for (const auto& s : sessions_for_workspace(ws)) {
+            json item;
+            item["session_id"] = s.value("id", std::string{});
+            item["workspace_hash"] = s.value("workspace_hash", ws.hash);
+            item["cwd"] = s.value("cwd", ws.cwd);
+            item["state"] = s.value("attention_state", std::string("read"));
+            item["attention_state"] = item["state"];
+            item["read_state"] = s.value("read_state", item["state"].get<std::string>());
+            item["busy"] = s.value("busy", false);
+            item["cursor"] = s.value("status_cursor", static_cast<std::uint64_t>(0));
+            item["update_cursor"] = s.value("update_cursor", static_cast<std::uint64_t>(0));
+            item["read_cursor"] = s.value("read_cursor", static_cast<std::uint64_t>(0));
+            sessions.push_back(std::move(item));
+        }
+        json msg;
+        msg["type"] = "session_status_snapshot";
+        msg["timestamp_ms"] = now_unix_ms();
+        msg["workspace_hash"] = ws.hash;
+        msg["payload"] = json{{"workspace_hash", ws.hash}, {"sessions", sessions}};
+        conn.send_text(msg.dump());
     }
 
     std::optional<crow::response> parse_session_options(
@@ -476,6 +767,7 @@ struct WebServer::Impl {
     void register_routes() {
         register_health();
         register_workspaces();
+        register_pinned_sessions();
         register_sessions();
         register_models();
         register_history();
@@ -778,6 +1070,85 @@ struct WebServer::Impl {
             }
             append_history(deps.cwd, text, deps.app_config->input_history);
             return with_cors(req, crow::response(204));
+        });
+    }
+
+    void register_pinned_sessions() {
+        CROW_ROUTE(app, "/api/workspaces/<string>/pinned-sessions").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req, const std::string&) {
+            return cors_preflight(req);
+        });
+
+        CROW_ROUTE(app, "/api/workspaces/<string>/pinned-sessions").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req, const std::string& hash) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            auto ws = resolve_workspace(hash);
+            if (!ws.has_value()) {
+                crow::response r(404);
+                r.body = R"({"error":"workspace not found"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            const auto path = pinned_sessions_path_for_cwd(ws->cwd);
+            auto state = read_pinned_sessions_state(path);
+            const auto pruned = prune_pinned_session_ids(
+                state.session_ids, session_ids_for_workspace(*ws));
+            if (pruned != state.session_ids) {
+                std::string ignored;
+                write_pinned_sessions_state(path, PinnedSessionsState{pruned}, &ignored);
+            }
+
+            crow::response r(pinned_sessions_to_json(*ws, pruned).dump());
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        });
+
+        CROW_ROUTE(app, "/api/workspaces/<string>/pinned-sessions").methods(crow::HTTPMethod::PUT)
+        ([this](const crow::request& req, const std::string& hash) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            auto ws = resolve_workspace(hash);
+            if (!ws.has_value()) {
+                crow::response r(404);
+                r.body = R"({"error":"workspace not found"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            std::vector<std::string> ids;
+            try {
+                auto body = json::parse(req.body.empty() ? "{}" : req.body);
+                if (!body.contains("session_ids") || !body["session_ids"].is_array()) {
+                    crow::response r(400);
+                    r.body = R"({"error":"session_ids array required"})";
+                    r.add_header("Content-Type", "application/json");
+                    return with_cors(req, std::move(r));
+                }
+                for (const auto& item : body["session_ids"]) {
+                    if (item.is_string()) ids.push_back(item.get<std::string>());
+                }
+            } catch (const std::exception& e) {
+                crow::response r(400);
+                r.body = json{{"error", std::string("bad json: ") + e.what()}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            const auto next = prune_pinned_session_ids(
+                normalize_pinned_session_ids(ids), session_ids_for_workspace(*ws));
+            std::string error;
+            if (!write_pinned_sessions_state(pinned_sessions_path_for_cwd(ws->cwd),
+                                             PinnedSessionsState{next}, &error)) {
+                crow::response r(500);
+                r.body = json{{"error", "failed to write pinned sessions"},
+                              {"detail", error}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            crow::response r(pinned_sessions_to_json(*ws, next).dump());
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
         });
     }
 
@@ -1601,6 +1972,62 @@ struct WebServer::Impl {
             return;
         }
 
+        if (type == "status_subscribe") {
+            auto workspace_hash = payload.value("workspace_hash", std::string{});
+            auto sid = payload.value("session_id", std::string{});
+            if (workspace_hash.empty() && !sid.empty()) {
+                if (auto ws = resolve_session_workspace(sid)) workspace_hash = ws->hash;
+            }
+            if (workspace_hash.empty()) {
+                conn.send_text(R"({"type":"error","payload":{"reason":"missing workspace_hash"}})");
+                return;
+            }
+            auto ws = resolve_workspace(workspace_hash);
+            if (!ws.has_value()) {
+                conn.send_text(R"({"type":"error","payload":{"reason":"unknown workspace"}})");
+                return;
+            }
+            state->status_workspaces.insert(ws->hash);
+            send_status_snapshot(conn, *ws);
+            return;
+        }
+
+        if (type == "status_unsubscribe") {
+            auto workspace_hash = payload.value("workspace_hash", std::string{});
+            if (!workspace_hash.empty()) {
+                if (auto ws = resolve_workspace(workspace_hash)) state->status_workspaces.erase(ws->hash);
+                state->status_workspaces.erase(workspace_hash);
+            }
+            json ack;
+            ack["type"] = "status_unsubscribe_ack";
+            ack["payload"] = json{{"workspace_hash", workspace_hash}};
+            conn.send_text(ack.dump());
+            return;
+        }
+
+        if (type == "mark_session_read") {
+            auto sid = payload.value("session_id", std::string{});
+            if (sid.empty()) {
+                conn.send_text(R"({"type":"error","payload":{"reason":"missing session_id"}})");
+                return;
+            }
+            auto workspace_hash = payload.value("workspace_hash", std::string{});
+            auto ws = resolve_session_workspace(sid, workspace_hash);
+            if (!ws.has_value()) {
+                conn.send_text(R"({"type":"error","payload":{"reason":"unknown workspace"}})");
+                return;
+            }
+            const std::uint64_t cursor = payload.value("cursor", static_cast<std::uint64_t>(0));
+            auto status = mark_session_read_status(sid, ws->hash, ws->cwd, cursor);
+            json ack;
+            ack["type"] = "mark_session_read_ack";
+            ack["session_id"] = sid;
+            ack["workspace_hash"] = ws->hash;
+            ack["payload"] = status;
+            conn.send_text(ack.dump());
+            return;
+        }
+
         // hello/subscribe: { type, payload:{ session_id:"...", since: 0 } }
         // hello 是 legacy 单会话绑定;subscribe 可在同一 WS 上多次调用。
         if (type == "hello" || type == "subscribe") {
@@ -1641,12 +2068,13 @@ struct WebServer::Impl {
                 }
             }
             auto sub = deps.session_client->subscribe(sid,
-                [conn_ptr, sid_copy, workspace_hash, session_cwd](const SessionEvent& evt) {
+                [this, conn_ptr, sid_copy, workspace_hash, session_cwd](const SessionEvent& evt) {
                     try {
                         conn_ptr->send_text(session_event_to_json(evt, sid_copy, workspace_hash, session_cwd).dump());
                     } catch (...) {
                         // 连接断 / 关 → send 抛,忽略(onclose 会清理)
                     }
+                    note_session_event_for_attention(sid_copy, workspace_hash, session_cwd, evt);
                 },
                 since);
             if (sub == 0) {

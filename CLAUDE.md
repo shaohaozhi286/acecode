@@ -147,7 +147,7 @@ web/
 ├── src/
 │   ├── App.jsx / main.jsx / theme.jsx
 │   ├── components/         ← 22 个 React 组件(ChatView/Sidebar/Message/ToolBlock/SidePanel/...)
-│   ├── lib/                ← api / connection / markdown / format / sessionTitle / auth / diff / lang / sessionChanges
+│   ├── lib/                ← api / connection / markdown / format / sessionTitle / auth / diff / lang / sessionChanges / usePreference
 │   └── styles/globals.css  ← Tailwind v4 entry + 自定义 CSS variables(亮/暗双主题)
 ├── public/vs-icons/        ← 单色 SVG 图标库
 └── pnpm-lock.yaml
@@ -156,6 +156,10 @@ web/
 依赖:`react@18` + `markdown-it@14`(GFM 表格/任务清单/嵌套 list)+ `markdown-it-task-lists` + `highlight.js@11`(core + 12 种语言:c/cpp/js/ts/python/bash/json/diff/markdown/rust/go/yaml,语言别名 js→javascript 等在 `lib/markdown.js` 内 normalize)+ `diff2html@3`(line-by-line 模式渲染 file_edit/file_write 的 hunks)。bundle 体积 ~461KB(gzip ~156KB),嵌入二进制约 +600KB。
 
 `lib/markdown.js` 收紧 URL scheme 白名单(只放 `http(s)` / `mailto:` / `/` / `./` / `../` / `#`),关闭 raw HTML(`html: false`),外链自动 `target=_blank rel=noreferrer`。`renderMarkdown(src) -> string` 签名稳定。
+
+`lib/usePreference.js` 是 UI 偏好读写的统一入口(`usePreference(key, defaults, validator?)` 返回 `[value, setValue]`,setter 接受 partial 浅合并 / 函数式更新,localStorage 写失败静默吞)。当前订阅:`ace.theme`(由 `theme.jsx::ThemeProvider`)、`acecode.singleLayoutWidths.v1`(由 `App.jsx`,`{sidebar, sidePanel}` 像素宽)、`acecode.uiPrefs.v1`(由 `App.jsx`,`{view: 'single'|'grid4'|'grid9', sidePanelCollapsed: boolean}` — view 模式与 SidePanel 折叠态跨刷新持久化)。同一 key 在整个 App 内只允许一个 hook 实例订阅,避免多 useState 之间互覆盖。
+
+SidePanel 折叠 UI:`ChatView` 把 `SidePanel` 包到 `<div class="ace-side-panel-shell" style={{width: collapsed ? 0 : sidePanelWidth}} data-collapsed={...}>`,折叠态宽度归 0 + opacity 过渡 200ms,SidePanel 仍 mount(tab/cache/preview 内部 state 保留)。SidePanel tab 行右端有 `.ace-side-panel-collapse-btn`(展开态),折叠态时 ChatView 顶部 header 内显示 `.ace-side-panel-expand-fab` 让用户重新展开。
 
 ### Web UI: HTTP / WS 协议增量
 

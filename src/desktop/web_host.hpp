@@ -45,6 +45,9 @@ public:
     // 当 webview run 中时,在主线程上 eval 一段 JS。线程安全(底层 webview_dispatch)。
     void eval(const std::string& js);
 
+    // debug 模式下打开 WebView 开发者工具。非 WebView2 平台返回 false。
+    bool open_dev_tools();
+
     // 注册同步 binding。fn 接到的是 JSON array 字符串(JS 端调时传的实参打包),
     // 返回的字符串必须是合法 JSON value(对象/数组/字符串字面/数字/null)。
     using SyncHandler = std::function<std::string(const std::string& args_json)>;
