@@ -55,7 +55,7 @@ function SessionRow({ s, active, onSelect }) {
   );
 }
 
-function WorkspaceGroup({ ws, expanded, onToggle, sessions, activeId, onSelect, onRename, onActivate }) {
+function WorkspaceGroup({ ws, expanded, onToggle, sessions, activeId, onSelect, onRename, onActivate, onNewSession }) {
   const [editing, setEditing] = useState(false);
   const [draft,   setDraft]   = useState(ws.name);
 
@@ -99,6 +99,12 @@ function WorkspaceGroup({ ws, expanded, onToggle, sessions, activeId, onSelect, 
         ) : (
           <span className="flex-1 truncate font-medium">{ws.name || ws.hash}</span>
         )}
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onNewSession(ws); }}
+          className="w-5 h-5 rounded text-fg-mute hover:text-accent hover:bg-surface-hi flex items-center justify-center shrink-0 transition"
+          title="新增会话"
+        ><VsIcon name="editWindow" size={13} /></button>
         <span className={clsx('w-1.5 h-1.5 rounded-full shrink-0', statusDot(ws.daemon_state))} title={ws.daemon_state || 'stopped'} />
         <button
           type="button"
@@ -130,7 +136,7 @@ export function Sidebar({ activeId, onSelect, collapsed, onOpenSkills, onOpenMcp
   const [activeWorkspaceHash, setActiveWorkspaceHash] = useState('');
   const refreshingRef = useRef(false);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (preferredHash = activeWorkspaceHash) => {
     if (refreshingRef.current) return;
     refreshingRef.current = true;
     try {
@@ -158,7 +164,7 @@ export function Sidebar({ activeId, onSelect, collapsed, onOpenSkills, onOpenMcp
                           daemon_state: 'running', active: true }];
       }
 
-      const chosen = activeWorkspaceHash || workspaceArr.find((w) => w.active)?.hash || workspaceArr[0]?.hash || '';
+      const chosen = preferredHash || workspaceArr.find((w) => w.active)?.hash || workspaceArr[0]?.hash || '';
       const withActive = workspaceArr.map((w) => ({ ...w, active: w.hash === chosen }));
       setActiveWorkspaceHash(chosen);
       setWorkspaces(withActive);
@@ -213,7 +219,7 @@ export function Sidebar({ activeId, onSelect, collapsed, onOpenSkills, onOpenMcp
       if (r.port && Number(r.port) !== currentPort) {
         location.href = `http://127.0.0.1:${r.port}/?token=${encodeURIComponent(r.token)}`;
       } else {
-        refresh().catch(() => {});
+        refresh(ws.hash).catch(() => {});
       }
     } catch (e) { toast({ kind: 'err', text: '切换异常:' + (e.message || '') }); }
   };
@@ -279,6 +285,53 @@ export function Sidebar({ activeId, onSelect, collapsed, onOpenSkills, onOpenMcp
     refresh();
   };
 
+  const createSessionInWorkspace = async (ws) => {
+    if (!ws?.hash) return;
+    try {
+      const r = ws.hash === '__local__'
+        ? await api.createSession({})
+        : await api.createWorkspaceSession(ws.hash, {});
+      const id = r && (r.session_id || r.id);
+      if (!id) return;
+
+      const workspaceHash = r.workspace_hash || ws.hash;
+      const cwd = r.cwd || ws.cwd;
+      const now = new Date().toISOString();
+      const nextSession = {
+        ...r,
+        id,
+        active: true,
+        status: r.status || 'idle',
+        workspace_hash: workspaceHash,
+        cwd,
+        created_at: r.created_at || now,
+        updated_at: r.updated_at || now,
+      };
+
+      setActiveWorkspaceHash(workspaceHash);
+      setExpanded((prev) => new Set(prev).add(workspaceHash));
+      setWorkspaces((prev) => prev.map((item) => ({ ...item, active: item.hash === workspaceHash })));
+      setSessions((prev) => [nextSession, ...prev.filter((item) => item.id !== id)]);
+      connection.subscribe(id);
+      onSelect?.({
+        workspaceHash,
+        contextId: 'default',
+        sessionId: id,
+        port: ws.port,
+        token: ws.token,
+        cwd,
+        title: r.title,
+        summary: r.summary,
+        message_count: r.message_count,
+        created_at: r.created_at,
+        updated_at: r.updated_at,
+      });
+      refresh(workspaceHash).catch(() => {});
+    } catch (e) {
+      toast({ kind: 'err', text: '新增会话失败:' + (e.message || '') });
+    }
+  };
+
   const onAddWorkspace = async () => {
     if (!hasDesktopBridge()) {
       toast({ kind: 'info', text: '需在 desktop shell 中使用' });
@@ -312,7 +365,7 @@ export function Sidebar({ activeId, onSelect, collapsed, onOpenSkills, onOpenMcp
               onClick={onAddWorkspace}
               className="w-5 h-5 rounded text-fg-mute hover:text-fg hover:bg-surface-hi text-[14px] leading-none flex items-center justify-center"
               title="添加项目"
-            ><VsIcon name="add" size={12} /></button>
+            ><VsIcon name="folderAdd" size={15} /></button>
           </div>
           <div className="flex-1 overflow-y-auto pb-2">
             {workspaces.map((ws) => {
@@ -328,6 +381,7 @@ export function Sidebar({ activeId, onSelect, collapsed, onOpenSkills, onOpenMcp
                   onSelect={(session) => selectSession(ws, session)}
                   onRename={onRename}
                   onActivate={onActivate}
+                  onNewSession={createSessionInWorkspace}
                 />
               );
             })}

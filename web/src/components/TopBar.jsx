@@ -38,7 +38,7 @@ export function TopBar({ view, onViewChange, onSettings, onNewSession }) {
       </div>
 
       <QuickBtn title="新对话" onClick={onNewSession}>
-        <VsIcon name="add" size={14} />
+        <VsIcon name="editWindow" size={16} />
       </QuickBtn>
       <QuickBtn title="搜索" onClick={() => toast({ kind: 'info', text: '搜索功能开发中' })}>
         <VsIcon name="search" size={14} />
