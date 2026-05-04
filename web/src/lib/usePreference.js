@@ -2,7 +2,7 @@
 //
 // 用法:
 //   const [prefs, setPrefs] = usePreference('acecode.uiPrefs.v1',
-//     { view: 'single', sidePanelCollapsed: false }, validateUiPrefs);
+//     { view: 'single', sidePanelCollapsed: false, sidebarCollapsed: false }, validateUiPrefs);
 //   setPrefs({ view: 'grid4' });            // partial 浅合并
 //   setPrefs(p => ({ ...p, sidePanelCollapsed: !p.sidePanelCollapsed }));
 //

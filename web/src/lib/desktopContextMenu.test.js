@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import {
   buildDesktopContextMenuItems,
   clampContextMenuPosition,
+  contextMenuOpenDelay,
   DESKTOP_CONTEXT_ACTIONS,
+  CONTEXT_MENU_REOPEN_DELAY_MS,
   OPEN_IN_EXPLORER_TARGET_SELECTOR,
   SESSION_PIN_TARGET_SELECTOR,
   joinWorkspacePath,
@@ -127,4 +129,10 @@ test('菜单位置保持在视口内', () => {
     viewportWidth: 400,
     viewportHeight: 300,
   }), { left: 274, top: 214 });
+});
+
+test('已有右键菜单时重开前短暂隐藏', () => {
+  assert.equal(contextMenuOpenDelay(), 0);
+  assert.equal(contextMenuOpenDelay({ hasVisibleMenu: true }), CONTEXT_MENU_REOPEN_DELAY_MS);
+  assert.equal(contextMenuOpenDelay({ hasPendingMenu: true }), CONTEXT_MENU_REOPEN_DELAY_MS);
 });

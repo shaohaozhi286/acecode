@@ -1,4 +1,4 @@
-// TopBar:logo + 快捷工具(新对话/搜索/···) + 中央 single/grid4/grid9 pill + 主题切换 + 设置
+// TopBar:logo + 快捷工具(项目栏收缩/新对话/搜索/···) + 中央 single/grid4/grid9 pill + 主题切换 + 设置
 //
 // 设计稿方向 C 的中央 pill 直接接在这里;占位按钮(搜索/···)留 hover 反馈但 onClick
 // 暂为 toast 提醒"待开发",避免点了"无反应"。
@@ -27,7 +27,7 @@ function QuickBtn({ title, onClick, children }) {
   );
 }
 
-export function TopBar({ view, onViewChange, onSettings, onNewSession }) {
+export function TopBar({ view, onViewChange, onSettings, onNewSession, sidebarCollapsed = false, onToggleSidebar }) {
   const { theme, toggle } = useTheme();
 
   return (
@@ -37,6 +37,13 @@ export function TopBar({ view, onViewChange, onSettings, onNewSession }) {
         <span className="text-[15px] font-bold tracking-tight">ACECode</span>
       </div>
 
+      <QuickBtn title={sidebarCollapsed ? '展开项目栏' : '收起项目栏'} onClick={onToggleSidebar}>
+        <VsIcon
+          name="expandRight"
+          size={15}
+          className={clsx('transition-transform', !sidebarCollapsed && 'rotate-180')}
+        />
+      </QuickBtn>
       <QuickBtn title="新对话" onClick={onNewSession}>
         <VsIcon name="editWindow" size={16} />
       </QuickBtn>

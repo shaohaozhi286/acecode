@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   buildDesktopContextMenuItems,
   clampContextMenuPosition,
+  contextMenuOpenDelay,
   DESKTOP_CONTEXT_ACTIONS,
   SESSION_PIN_TOGGLE_EVENT,
   openInExplorerTargetFromElement,
@@ -197,10 +198,45 @@ async function runAction(action, target, rememberedText = '', openTarget = null,
 }
 
 export function DesktopContextMenu() {
-  const [menu, setMenu] = useState(null);
+  const [menu, setMenuState] = useState(null);
+  const menuRef = useRef(null);
+  const reopenTimerRef = useRef(0);
   const targetRef = useRef(null);
   const lastSelectionRef = useRef({ target: null, text: '' });
   const desktop = useMemo(() => isDesktopShell(), []);
+
+  const setMenu = useCallback((nextMenu) => {
+    menuRef.current = nextMenu;
+    setMenuState(nextMenu);
+  }, []);
+
+  const clearReopenTimer = useCallback(() => {
+    if (!reopenTimerRef.current) return;
+    window.clearTimeout(reopenTimerRef.current);
+    reopenTimerRef.current = 0;
+  }, []);
+
+  const close = useCallback(() => {
+    clearReopenTimer();
+    setMenu(null);
+  }, [clearReopenTimer, setMenu]);
+
+  const openWithSwitchGap = useCallback((nextMenu) => {
+    const delay = contextMenuOpenDelay({
+      hasVisibleMenu: !!menuRef.current,
+      hasPendingMenu: !!reopenTimerRef.current,
+    });
+    clearReopenTimer();
+    if (delay <= 0) {
+      setMenu(nextMenu);
+      return;
+    }
+    setMenu(null);
+    reopenTimerRef.current = window.setTimeout(() => {
+      reopenTimerRef.current = 0;
+      setMenu(nextMenu);
+    }, delay);
+  }, [clearReopenTimer, setMenu]);
 
   useEffect(() => {
     if (!desktop) return undefined;
@@ -210,7 +246,6 @@ export function DesktopContextMenu() {
       const text = selectedTextForTarget(target);
       if (text) lastSelectionRef.current = { target: editableElementFrom(target) || target, text };
     };
-    const close = () => setMenu(null);
     const closeFromPointer = (event) => {
       if (event.target instanceof Element && event.target.closest('.ace-desktop-context-menu')) return;
       close();
@@ -246,7 +281,7 @@ export function DesktopContextMenu() {
         viewportWidth: window.innerWidth,
         viewportHeight: window.innerHeight,
       });
-      setMenu({ ...pos, items, selectedText, openTarget, sessionPinTarget });
+      openWithSwitchGap({ ...pos, items, selectedText, openTarget, sessionPinTarget });
     };
     const onKeyDown = (event) => {
       if (event.key === 'Escape') close();
@@ -269,8 +304,9 @@ export function DesktopContextMenu() {
       document.removeEventListener('keydown', onKeyDown, true);
       window.removeEventListener('blur', close);
       window.removeEventListener('resize', close);
+      clearReopenTimer();
     };
-  }, [desktop]);
+  }, [clearReopenTimer, close, desktop, openWithSwitchGap]);
 
   if (!desktop || !menu) return null;
 
@@ -293,7 +329,7 @@ export function DesktopContextMenu() {
             const selectedText = menu.selectedText || '';
             const openTarget = menu.openTarget || null;
             const sessionPinTarget = menu.sessionPinTarget || null;
-            setMenu(null);
+            close();
             await runAction(action, target, selectedText, openTarget, sessionPinTarget);
           }}
         >

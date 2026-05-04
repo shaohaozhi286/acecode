@@ -40,7 +40,7 @@ const MAX_SIDE_PANEL_WIDTH = 560;
 const MIN_CHAT_WIDTH = 360;
 
 const UI_PREFS_STORAGE_KEY = 'acecode.uiPrefs.v1';
-const DEFAULT_UI_PREFS = { view: 'single', sidePanelCollapsed: false };
+const DEFAULT_UI_PREFS = { view: 'single', sidePanelCollapsed: false, sidebarCollapsed: false };
 const ALLOWED_VIEWS = new Set(['single', 'grid4', 'grid9']);
 
 function clamp(value, min, max) {
@@ -56,7 +56,8 @@ function validateLayoutWidths(v) {
 function validateUiPrefs(v) {
   return v && typeof v === 'object'
     && ALLOWED_VIEWS.has(v.view)
-    && typeof v.sidePanelCollapsed === 'boolean';
+    && typeof v.sidePanelCollapsed === 'boolean'
+    && (v.sidebarCollapsed == null || typeof v.sidebarCollapsed === 'boolean');
 }
 
 export function App() {
@@ -77,6 +78,7 @@ export function App() {
     UI_PREFS_STORAGE_KEY, DEFAULT_UI_PREFS, validateUiPrefs);
   const view = uiPrefs.view;
   const sidePanelCollapsed = uiPrefs.sidePanelCollapsed;
+  const projectSidebarCollapsed = !!uiPrefs.sidebarCollapsed;
   const singleShellRef = useRef(null);
   const sidebarResizeActiveRef = useRef(false);
 
@@ -133,6 +135,14 @@ export function App() {
   const toggleSidePanel = useCallback(() => {
     setUiPrefs((prev) => ({ ...prev, sidePanelCollapsed: !prev.sidePanelCollapsed }));
   }, [setUiPrefs]);
+
+  const toggleProjectSidebar = useCallback(() => {
+    setUiPrefs((prev) => ({
+      ...prev,
+      sidebarCollapsed: view === 'single' ? !prev.sidebarCollapsed : false,
+    }));
+    if (view !== 'single') switchView('single');
+  }, [setUiPrefs, switchView, view]);
 
   const createNewSession = useCallback(async () => {
     try {
@@ -235,7 +245,7 @@ export function App() {
   }
 
   const activeId = activeRef?.sessionId || activeRef?.id || '';
-  const sidebarCollapsed = view !== 'single';
+  const sidebarCollapsed = view !== 'single' || projectSidebarCollapsed;
   const permReq = permReqs[0] || null;
   const visibleQuestionReq = !permReq
     ? questionReqs.find((req) => {
@@ -255,6 +265,8 @@ export function App() {
         onViewChange={switchView}
         onSettings={() => setShowSettings(true)}
         onNewSession={createNewSession}
+        sidebarCollapsed={sidebarCollapsed}
+        onToggleSidebar={toggleProjectSidebar}
       />
       <div ref={singleShellRef} className="flex-1 flex overflow-hidden relative min-h-0 ace-single-shell">
         <Sidebar
@@ -265,7 +277,7 @@ export function App() {
           onOpenSkills={() => setShowSkills(true)}
           onOpenMcp={() => setShowMcp(true)}
         />
-        {view === 'single' && (
+        {view === 'single' && !projectSidebarCollapsed && (
           <div
             role="separator"
             aria-label="调整左侧栏宽度"
