@@ -17,7 +17,8 @@ public:
     void start_session(const std::string& cwd,
                        const std::string& provider,
                        const std::string& model,
-                       const std::string& preset_session_id = "");
+                       const std::string& preset_session_id = "",
+                       const std::string& model_preset = "");
 
     // Called for each message produced during conversation.
     // Appends to JSONL and periodically updates metadata.
@@ -49,6 +50,9 @@ public:
     // After main.cpp swaps the provider, call this so subsequent meta updates
     // record the new provider/model name. Pure setter; thread-safe.
     void set_active_provider(const std::string& provider, const std::string& model);
+    void set_active_provider(const std::string& provider,
+                             const std::string& model,
+                             const std::string& model_preset);
 
     // End current session (mark it done) so next on_message starts a new one.
     void end_current_session();
@@ -103,6 +107,7 @@ private:
     std::string cwd_;
     std::string provider_name_;
     std::string model_name_;
+    std::string model_preset_;
     std::string project_dir_;
     std::string session_id_;
     std::string jsonl_path_;

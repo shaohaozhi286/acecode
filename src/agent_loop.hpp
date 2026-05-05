@@ -95,6 +95,13 @@ public:
     // The internal worker thread will process it.
     void submit(const std::string& user_message);
 
+    // Submit with separate "LLM prompt" vs "UI display" texts. `prompt` is what
+    // the model sees in `messages_` (and persisted JSONL);`display_text` is
+    // recorded in `user_msg.metadata.display_text` so UI can show the original
+    // user input even though the model sees an expanded form (e.g. daemon-side
+    // skill command expansion). Empty `display_text` falls back to `prompt`.
+    void submit(const std::string& prompt, const std::string& display_text);
+
     // Submit a user-initiated shell command triggered by `!` mode. Non-blocking:
     // enqueues on the same worker so it serialises with LLM turns. The worker
     // invokes BashTool directly (no LLM round-trip), emits tool_call + tool_result
@@ -177,6 +184,10 @@ public:
 private:
     void worker_main();
     void run_agent(const std::string& user_message);
+    // Variant that records `display_text` into the user message's metadata.display_text
+    // so UI can show the original input while the LLM sees an expanded `prompt`.
+    // When `display_text` is empty, behaves identically to run_agent(prompt).
+    void run_agent_with_display(const std::string& prompt, const std::string& display_text);
     void run_shell(const std::string& command);
 
     // Section 7: 同时调老 on_message callback(若 TUI 挂了)和新事件流
@@ -190,6 +201,10 @@ private:
         enum class Kind { Chat, Shell };
         Kind kind = Kind::Chat;
         std::string payload;
+        // 仅 Chat 用:UI 渲染时希望显示的"原文",而 payload(发给 LLM)可能
+        // 是被 daemon expander 展开过的字符串(skill 调用提示等)。空 = UI 与
+        // LLM 看到同一份(payload)。
+        std::string display_text;
     };
 
     ProviderAccessor provider_accessor_;

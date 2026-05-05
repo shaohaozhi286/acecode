@@ -101,7 +101,7 @@ body {
   font-family: var(--font-sans);
   background: var(--ace-bg);
   color: var(--ace-fg);
-  font-size: 13px;
+  font-size: 14px;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
@@ -115,6 +115,51 @@ body {
 /* 阴影 utility:Tailwind v4 的 shadow-* 需要 inline 表达式,这里用 CSS 变量更灵活 */
 .ace-shadow    { box-shadow: var(--ace-shadow); }
 .ace-shadow-lg { box-shadow: var(--ace-shadow-lg); }
+
+/* Desktop frameless window chrome */
+.ace-desktop-frameless-topbar {
+  user-select: none;
+}
+.ace-window-controls {
+  display: flex;
+  align-self: stretch;
+  align-items: center;
+  gap: 1px;
+  margin-left: 4px;
+}
+.ace-window-control {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 30px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ace-fg-2);
+  cursor: default;
+  transition: background-color .12s ease, color .12s ease;
+}
+.ace-window-control:hover,
+.ace-window-control:focus-visible {
+  outline: none;
+  background: var(--ace-surface-hi);
+  color: var(--ace-fg);
+}
+.ace-window-control-close:hover,
+.ace-window-control-close:focus-visible {
+  background: #e81123;
+  color: #fff;
+}
+.ace-window-control svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.55;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
 
 /* Desktop shell 自定义右键菜单:屏蔽 WebView 默认菜单后只暴露受控操作。 */
 .ace-desktop-context-menu {
@@ -163,18 +208,7 @@ body {
   opacity: 1 !important;
 }
 
-/* 流式光标 (assistant 消息追加 token 时显示) */
-.ace-cursor::after {
-  content: "";
-  display: inline-block;
-  width: 0.55em;
-  height: 1em;
-  vertical-align: -0.15em;
-  margin-left: 1px;
-  background: var(--ace-accent);
-  animation: ace-blink 1.05s steps(2, end) infinite;
-}
-@keyframes ace-blink { 0%, 50% { opacity: 1; } 51%, 100% { opacity: 0; } }
+/* 流式光标已移除 — ChatView header 的"运行中" chip 已经表达 streaming 状态。 */
 
 /* Spinner & dots */
 @keyframes ace-pulse {
@@ -250,7 +284,7 @@ body {
   border-radius: 9999px;
   background: color-mix(in oklab, var(--ace-surface) 78%, transparent);
   color: var(--ace-fg-2);
-  font-size: 12px;
+  font-size: 13px;
   transition: all 0.2s ease;
 }
 .ace-home-project-row:hover {
@@ -290,7 +324,7 @@ body {
   border-radius: 6px;
   overflow-x: auto;
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.55;
   margin: 6px 0;
 }
@@ -310,7 +344,24 @@ body {
 .ace-system-copy-frame > [data-code-copy-source="true"] {
   padding-right: 46px;
 }
-.ace-code-copy-btn {
+.ace-code-actions {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.ace-code-actions .ace-code-copy-btn,
+.ace-code-actions .ace-code-action-btn {
+  position: static;
+  top: auto;
+  right: auto;
+  z-index: auto;
+}
+.ace-code-copy-btn,
+.ace-code-action-btn {
   position: absolute;
   top: 6px;
   right: 6px;
@@ -331,28 +382,47 @@ body {
   transition: opacity .15s ease, background-color .15s ease, border-color .15s ease, color .15s ease;
 }
 .ace-copyable-code:hover .ace-code-copy-btn,
-.ace-code-copy-btn:focus-visible {
+.ace-copyable-code:hover .ace-code-action-btn,
+.ace-code-copy-btn:focus-visible,
+.ace-code-action-btn:focus-visible {
   opacity: 1;
 }
 .ace-code-copy-btn:hover,
-.ace-code-copy-btn:focus-visible {
+.ace-code-action-btn:hover,
+.ace-code-copy-btn:focus-visible,
+.ace-code-action-btn:focus-visible {
   background: var(--ace-surface-hi);
   border-color: var(--ace-accent-soft);
   color: var(--ace-fg);
 }
-.ace-code-copy-btn .ace-icon {
+.ace-code-copy-btn .ace-icon,
+.ace-code-action-btn .ace-icon {
   opacity: 0.72;
 }
 .ace-code-copy-btn:hover .ace-icon,
-.ace-code-copy-btn:focus-visible .ace-icon {
+.ace-code-action-btn:hover .ace-icon,
+.ace-code-copy-btn:focus-visible .ace-icon,
+.ace-code-action-btn:focus-visible .ace-icon {
   opacity: 0.95;
+}
+.ace-code-wrap-btn.is-active {
+  opacity: 1;
+  background: color-mix(in oklab, var(--ace-accent) 14%, var(--ace-surface));
+  border-color: color-mix(in oklab, var(--ace-accent) 55%, transparent);
+  color: var(--ace-accent);
 }
 [data-theme="dark"] .ace-code-copy-btn {
   background: color-mix(in oklab, var(--ace-surface-hi) 86%, transparent);
   border-color: color-mix(in oklab, var(--ace-border) 82%, transparent);
   color: var(--ace-fg);
 }
-[data-theme="dark"] .ace-code-copy-btn .ace-icon[data-monochrome="true"] {
+[data-theme="dark"] .ace-code-action-btn {
+  background: color-mix(in oklab, var(--ace-surface-hi) 86%, transparent);
+  border-color: color-mix(in oklab, var(--ace-border) 82%, transparent);
+  color: var(--ace-fg);
+}
+[data-theme="dark"] .ace-code-copy-btn .ace-icon[data-monochrome="true"],
+[data-theme="dark"] .ace-code-action-btn .ace-icon[data-monochrome="true"] {
   filter: invert(1) brightness(0.88);
 }
 .ace-md code {
@@ -422,7 +492,7 @@ body {
 .ace-md table {
   border-collapse: collapse;
   margin: 6px 0;
-  font-size: 12px;
+  font-size: 13px;
 }
 .ace-md th, .ace-md td {
   border: 1px solid var(--ace-border);
@@ -453,7 +523,7 @@ body {
 
 .ace-diff {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12px;
   margin-top: 6px;
 }
 .ace-diff .d2h-file-header {
@@ -548,7 +618,7 @@ body {
   gap: 4px;
   margin-bottom: 2px;
   color: var(--ace-fg-mute);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
 }
 .ace-sticky-user-context-label .ace-icon {
@@ -560,7 +630,7 @@ body {
   text-align: left;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.55;
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -571,14 +641,27 @@ body {
   border-color: color-mix(in oklab, var(--ace-accent-soft) 70%, var(--ace-border) 30%);
 }
 
-/* Single view column resize handles */
+/* SlashDropdown 命令 chip:首段命令名以 accent 色背景高亮显示。
+   关键约束:overlay 与 textarea 的字符度量必须 1:1 对齐,不能有任何 padding/
+   margin/font-weight 差异,否则会双层错位重叠(像两个 /init 写在一起)。
+   做法:overlay 全文 color:transparent,chip span 也保持 transparent —
+   只暴露 background-color 让 textarea 真实文字直接画在彩色背景上。 */
+.ace-slash-chip {
+  display: inline;
+  background: color-mix(in oklab, var(--ace-accent) 22%, transparent);
+  border-radius: 3px;
+  /* 故意不写 color / padding / margin / font-weight,继承 overlay 的 color:transparent */
+}
+
+/* Single view column resize handles
+   Zero-width in layout so adjacent panels touch with no visible seam.
+   ::before provides a 7px-wide hit zone straddling the boundary;
+   ::after is the hover/focus 1px accent line. */
 .ace-resize-handle {
   position: relative;
-  flex: 0 0 7px;
-  width: 7px;
-  cursor: col-resize;
-  touch-action: none;
-  background: transparent;
+  flex: 0 0 0;
+  width: 0;
+  align-self: stretch;
   z-index: 5;
 }
 .ace-resize-handle::before {
@@ -586,18 +669,27 @@ body {
   position: absolute;
   top: 0;
   bottom: 0;
-  left: 3px;
+  left: -3px;
+  width: 7px;
+  cursor: col-resize;
+  touch-action: none;
+}
+.ace-resize-handle::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -1px;
   width: 1px;
   background: var(--ace-accent);
   opacity: 0;
   transition: opacity .12s ease;
+  pointer-events: none;
 }
-.ace-resize-handle:hover::before,
-.ace-resize-handle:focus-visible::before { opacity: 1; }
-.ace-resize-handle:focus-visible {
-  outline: 1px solid var(--ace-accent);
-  outline-offset: -2px;
-}
+.ace-resize-handle:hover::after,
+.ace-resize-handle:focus-visible::after { opacity: 1; }
+.ace-resize-handle:focus-visible { outline: none; }
+.ace-resize-handle:focus-visible::after { width: 2px; left: -1px; }
 .ace-resizing,
 .ace-resizing * {
   cursor: col-resize !important;
@@ -632,7 +724,7 @@ body {
 .ace-side-tabs {
   display: flex;
   align-items: stretch;
-  height: 28px;
+  height: 32px;
   background: var(--ace-surface-hi);
   border-bottom: 1px solid var(--ace-border);
   flex-shrink: 0;
@@ -647,7 +739,7 @@ body {
   border: none;
   background: transparent;
   color: var(--ace-fg-mute);
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 400;
   cursor: pointer;
   border-bottom: 2px solid transparent;
@@ -663,7 +755,7 @@ body {
 /* tab 行右端的折叠按钮,vsCode 风格的 splitter icon */
 .ace-side-panel-collapse-btn {
   width: 28px;
-  height: 28px;
+  height: 32px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -717,7 +809,7 @@ body {
   text-align: center;
   padding: 24px 16px;
   color: var(--ace-fg-mute);
-  font-size: 12px;
+  font-size: 13px;
   gap: 4px;
 }
 
@@ -761,11 +853,19 @@ body {
 .ace-side-preview-code .ace-preview::-webkit-scrollbar-thumb:hover {
   background: color-mix(in oklab, var(--ace-fg-mute) 55%, transparent);
 }
-.ace-side-preview-code .ace-code-copy-btn {
+.ace-side-preview-code .ace-code-actions {
   top: 8px;
   right: 10px;
+}
+.ace-side-preview-code .ace-code-copy-btn,
+.ace-side-preview-code .ace-code-action-btn {
   background: color-mix(in oklab, var(--ace-code-bg) 82%, var(--ace-surface));
   border-color: color-mix(in oklab, var(--ace-code-fg) 14%, transparent);
+}
+.ace-side-preview-code .ace-code-wrap-btn.is-active {
+  background: color-mix(in oklab, var(--ace-accent) 18%, var(--ace-code-bg));
+  border-color: color-mix(in oklab, var(--ace-accent) 68%, transparent);
+  color: var(--ace-accent);
 }
 .ace-preview pre {
   margin: 0;
@@ -773,7 +873,7 @@ body {
   background: var(--ace-code-bg);
   color: var(--ace-code-fg);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 13px;
   line-height: 1.55;
   white-space: pre;
   overflow: auto;
@@ -784,5 +884,48 @@ body {
   min-width: 100%;
   box-sizing: border-box;
   overflow: visible;
+  padding-right: 78px;
 }
-.ace-preview code { font-family: inherit; }
+.ace-side-preview-code[data-wrap="false"] .ace-preview pre {
+  white-space: pre;
+  width: max-content;
+}
+.ace-side-preview-code[data-wrap="true"] .ace-preview {
+  overflow-x: hidden;
+}
+.ace-side-preview-code[data-wrap="true"] .ace-preview pre {
+  width: auto;
+  max-width: 100%;
+  min-width: 100%;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.ace-preview code {
+  font-family: inherit;
+  white-space: inherit;
+  overflow-wrap: inherit;
+  word-break: inherit;
+}
+
+/* Queue card list (above InputBar): 排队中的待发送消息卡片栈。
+ * 卡片左侧 3px 的状态指示条用 absolute 定位,颜色由 utility class 提供
+ * (bg-fg-mute/60 / bg-danger),与亮/暗主题自动联动。 */
+.ace-queue-card-indicator {
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 3px;
+  border-top-left-radius: 6px;
+  border-bottom-left-radius: 6px;
+}
+
+/* App typography scale — align desktop readability with Codex-like UI. */
+.text-\[10px\] { font-size: 11px !important; }
+.text-\[11px\] { font-size: 12px !important; }
+.text-\[12px\] { font-size: 13px !important; }
+.text-\[13px\] { font-size: 14px !important; }
+.text-\[14px\] { font-size: 15px !important; }
+.text-xs { font-size: 13px !important; line-height: 1.45 !important; }
+.text-sm { font-size: 14px !important; line-height: 1.5 !important; }

@@ -42,6 +42,11 @@ set(ACECODE_DESKTOP_SOURCES
     ${CMAKE_SOURCE_DIR}/src/desktop/splash_screen.cpp
     ${CMAKE_SOURCE_DIR}/src/desktop/web_host.cpp
 )
+# 注:notifications_win.cpp / tray_icon_win.cpp 是纯 Win32 调用(Shell_NotifyIcon
+# / RegisterClassEx 等),不依赖 webview/webview,所以走 acecode_testable 路径
+# (根 CMakeLists.txt 的 ACECODE_ALL_SOURCES GLOB 会拾取),acecode-desktop 通过
+# target_link_libraries 继承。这样 acecode_unit_tests 也能跑相关纯逻辑测试。
+# 设计:openspec/changes/add-desktop-attention-notifications。
 
 # Windows 上,acecode-desktop 用 WIN32 子系统(无 console 黑窗)。
 # 同时挂上顶层 CMakeLists.txt 生成的 acecode.rc(已在 ACECODE_WINDOWS_RESOURCES 里),

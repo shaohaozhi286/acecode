@@ -4,9 +4,7 @@
 #include "static_assets.hpp"
 #include "../config/config.hpp"
 #include "../desktop/workspace_registry.hpp"
-#include "../provider/cwd_model_override.hpp"
 #include "../provider/llm_provider.hpp"
-#include "../provider/provider_swap.hpp"
 #include "../session/ask_user_question_prompter.hpp"
 #include "../session/local_session_client.hpp"
 #include "../session/session_attention.hpp"
@@ -24,7 +22,10 @@
 #include "handlers/history_handler.hpp"
 #include "handlers/models_handler.hpp"
 #include "handlers/pinned_sessions_handler.hpp"
+#include "handlers/commands_handler.hpp"
+#include "handlers/skill_command_expander.hpp"
 #include "handlers/skills_handler.hpp"
+#include "../skills/skill_init.hpp"
 #include "message_payload.hpp"
 #include "version.hpp"
 
@@ -383,6 +384,11 @@ struct WebServer::Impl {
         o["updated_at"]    = !s.updated_at.empty() ? s.updated_at : (m ? m->updated_at : "");
         o["provider"]      = !s.provider.empty() ? s.provider : (m ? m->provider : "");
         o["model"]         = !s.model.empty() ? s.model : (m ? m->model : "");
+        o["model_name"]    = !s.model_name.empty() ? s.model_name : (m ? m->model_preset : "");
+        o["model_preset"]  = o["model_name"];
+        o["context_window"] = s.context_window;
+        o["model_is_legacy"] = s.model_is_legacy ||
+                               o.value("model_name", std::string{}) == "(legacy)";
         o["message_count"] = s.message_count > 0 ? s.message_count : (m ? m->message_count : 0);
         append_attention_fields(o, s.id, o.value("workspace_hash", std::string{}),
                                 o.value("cwd", std::string{}), s.busy);
@@ -402,6 +408,9 @@ struct WebServer::Impl {
         o["updated_at"]     = m.updated_at;
         o["provider"]       = m.provider;
         o["model"]          = m.model;
+        o["model_name"]     = m.model_preset;
+        o["model_preset"]   = m.model_preset;
+        o["model_is_legacy"] = m.model_preset == "(legacy)";
         o["message_count"]  = m.message_count;
         append_attention_fields(o, m.id, workspace_hash, m.cwd, false);
         return o;
@@ -723,6 +732,8 @@ struct WebServer::Impl {
             auto j = json::parse(req.body);
             if (j.contains("model") && j["model"].is_string())
                 opts.model_name = j["model"].get<std::string>();
+            if (j.contains("name") && j["name"].is_string())
+                opts.model_name = j["name"].get<std::string>();
             if (j.contains("initial_user_message") && j["initial_user_message"].is_string())
                 opts.initial_user_message = j["initial_user_message"].get<std::string>();
             if (j.contains("auto_start") && j["auto_start"].is_boolean())
@@ -736,29 +747,47 @@ struct WebServer::Impl {
         return std::nullopt;
     }
 
-    void apply_workspace_model_override(
-        const acecode::desktop::WorkspaceMeta& ws,
-        SessionOptions& opts) {
-        if (opts.model_name.empty()) {
-            if (auto cwd_override = load_cwd_model_override(ws.cwd)) {
-                opts.model_name = *cwd_override;
-                LOG_INFO("[web] cwd model override resolved hash=" + ws.hash +
-                         " model=" + opts.model_name);
+    std::optional<SessionModelState> current_model_state_for_session(
+        const std::string& session_id,
+        const std::string& workspace_hash_hint = {}) const {
+        if (session_id.empty() || !deps.session_registry) return std::nullopt;
+
+        if (auto active = deps.session_registry->current_model_state(session_id)) {
+            return active;
+        }
+
+        std::vector<acecode::desktop::WorkspaceMeta> workspaces;
+        if (!workspace_hash_hint.empty()) {
+            if (auto ws = resolve_workspace(workspace_hash_hint)) {
+                workspaces.push_back(*ws);
+            } else {
+                return std::nullopt;
+            }
+        } else {
+            workspaces.push_back(compatibility_workspace());
+            if (deps.workspace_registry) {
+                deps.workspace_registry->scan(projects_dir());
+                for (const auto& ws : deps.workspace_registry->list()) {
+                    if (std::none_of(workspaces.begin(), workspaces.end(),
+                        [&](const auto& existing) { return existing.hash == ws.hash; })) {
+                        workspaces.push_back(ws);
+                    }
+                }
             }
         }
-        if (opts.model_name.empty()) return;
 
-        if (!deps.app_config || !deps.provider || !deps.provider_mu) return;
-        auto entry = find_model_by_name(*deps.app_config, opts.model_name);
-        if (!entry.has_value()) {
-            LOG_WARN("[web] model override ignored for hash=" + ws.hash +
-                     ": unknown model " + opts.model_name);
-            return;
+        for (const auto& ws : workspaces) {
+            auto project_dir = SessionStorage::get_project_dir(ws.cwd);
+            auto candidates = SessionStorage::find_session_files(project_dir, session_id);
+            if (candidates.empty()) continue;
+            if (candidates.front().meta_path.empty()) continue;
+            auto meta = SessionStorage::read_meta(candidates.front().meta_path);
+            if (meta.id.empty()) continue;
+            if (auto state = deps.session_registry->model_state_from_meta(meta)) {
+                return state;
+            }
         }
-        // Provider remains daemon-global for now; resolving here keeps cwd
-        // overrides tied to the workspace cwd that requested session creation.
-        swap_provider_if_needed(*deps.provider, *deps.provider_mu,
-                                *entry, *deps.app_config);
+        return std::nullopt;
     }
 
     // -----------------------------------------------------------------
@@ -773,6 +802,7 @@ struct WebServer::Impl {
         register_history();
         register_files();
         register_skills();
+        register_commands();
         register_mcp();
         register_websocket();
         register_static();
@@ -886,7 +916,6 @@ struct WebServer::Impl {
             }
             SessionOptions opts;
             if (auto err = parse_session_options(req, *ws, opts)) return std::move(*err);
-            apply_workspace_model_override(*ws, opts);
             auto id = deps.session_client->create_session(opts);
             LOG_INFO("[web] workspace session created hash=" + ws->hash + " id=" + id);
             crow::response r(201);
@@ -1307,6 +1336,18 @@ struct WebServer::Impl {
             j["version"]         = ACECODE_VERSION;
             j["cwd"]             = deps.cwd;
             j["uptime_seconds"]  = (now_unix_ms() - deps.start_time_unix_ms) / 1000;
+            // desktop.notifications 透传给前端,desktopNotify.js 用它判抑制规则
+            // (见 openspec/changes/add-desktop-attention-notifications)。
+            // 浏览器直连 daemon 模式没有桌面壳桥,前端会自然 no-op,这里始终输出。
+            if (deps.app_config) {
+                const auto& n = deps.app_config->desktop.notifications;
+                j["notifications"] = {
+                    {"enabled", n.enabled},
+                    {"on_question", n.on_question},
+                    {"on_completion", n.on_completion},
+                    {"suppress_when_focused", n.suppress_when_focused},
+                };
+            }
             crow::response r(j.dump());
             r.add_header("Content-Type", "application/json");
             return r;
@@ -1360,7 +1401,6 @@ struct WebServer::Impl {
             auto ws = compatibility_workspace();
             SessionOptions opts;
             if (auto err = parse_session_options(req, ws, opts)) return std::move(*err);
-            apply_workspace_model_override(ws, opts);
 
             auto id = deps.session_client->create_session(opts);
             LOG_INFO("[web] compatibility /api/sessions create id=" + id + " cwd=" + ws.cwd);
@@ -1510,7 +1550,31 @@ struct WebServer::Impl {
                 r.add_header("Content-Type", "application/json");
                 return with_cors(req, std::move(r));
             }
-            if (!deps.session_client->send_input(id, text)) {
+
+            // openspec/changes/expand-webui-skill-commands:Daemon 端 skill 命令展开。
+            // 若 text 是 `/<skill-name> args` 形式且对应 session 所属 workspace 内
+            // 有这个 skill,把 text 替换成轻量调用提示;UI 仍显示原文(走 metadata
+            // .display_text)— LLM-prompt 与 UI-display 解耦。未命中透传。
+            std::string original_text = text;
+            bool expanded = false;
+            if (deps.session_registry && deps.app_config) {
+                if (auto* entry = deps.session_registry->lookup(id)) {
+                    if (!entry->cwd.empty()) {
+                        SkillRegistry tmp_skills;
+                        initialize_skill_registry(tmp_skills, *deps.app_config, entry->cwd);
+                        auto exp = web::try_expand_skill_command(text, tmp_skills);
+                        if (exp.expanded) {
+                            text = std::move(exp.text);
+                            expanded = true;
+                        }
+                    }
+                }
+            }
+
+            bool ok = expanded
+                ? deps.session_client->send_input(id, text, original_text)
+                : deps.session_client->send_input(id, text);
+            if (!ok) {
                 crow::response r(404);
                 r.body = R"({"error":"unknown session"})";
                 r.add_header("Content-Type", "application/json");
@@ -1661,18 +1725,34 @@ struct WebServer::Impl {
             return with_cors(req, std::move(r));
         });
 
+        // GET /api/sessions/:id/model: 返回当前 session model state。
+        CROW_ROUTE(app, "/api/sessions/<string>/model").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req, const std::string& sid) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.session_registry) return crow::response(503);
+
+            std::string workspace_hash;
+            if (auto w = req.url_params.get("workspace")) workspace_hash = w;
+
+            auto state = current_model_state_for_session(sid, workspace_hash);
+            if (!state.has_value()) {
+                crow::response r(404);
+                r.body = R"({"error":"session not found"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            crow::response r(model_state_to_json(*state).dump());
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        });
+
         // POST /api/sessions/:id/model body {name}: 切当前 effective model
         CROW_ROUTE(app, "/api/sessions/<string>/model").methods(crow::HTTPMethod::POST)
         ([this](const crow::request& req, const std::string& sid) {
             if (auto rej = require_auth(req)) return std::move(*rej);
             if (!deps.app_config) return crow::response(503);
             if (!deps.session_registry) return crow::response(503);
-            if (!deps.provider || !deps.provider_mu) {
-                crow::response r(503);
-                r.body = R"({"error":"provider state unavailable"})";
-                r.add_header("Content-Type", "application/json");
-                return with_cors(req, std::move(r));
-            }
 
             // 校验 session 存在
             if (!deps.session_registry->lookup(sid)) {
@@ -1707,16 +1787,16 @@ struct WebServer::Impl {
                 return with_cors(req, std::move(r));
             }
 
-            // 真正切换。注: v1 切的是 daemon 全局 provider,所有 session 共享一个
-            // provider —— 切完后所有 session 下一轮 turn 都会用新模型。文档要明示。
-            swap_provider_if_needed(*deps.provider, *deps.provider_mu,
-                                      *entry, *deps.app_config);
+            SessionModelState state;
+            std::string error;
+            if (!deps.session_registry->switch_model(sid, *entry, &state, &error)) {
+                crow::response r(error == "session not found" ? 404 : 500);
+                r.body = json{{"error", error.empty() ? "model switch failed" : error}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
 
-            crow::response r(200);
-            r.body = json{
-                {"name",            entry->name},
-                {"context_window",  deps.app_config->context_window},
-            }.dump();
+            crow::response r(model_state_to_json(state).dump());
             r.add_header("Content-Type", "application/json");
             return with_cors(req, std::move(r));
         });
@@ -1805,6 +1885,41 @@ struct WebServer::Impl {
             crow::response r(*body);
             r.add_header("Content-Type", "text/markdown; charset=utf-8");
             return r;
+        });
+    }
+
+    void register_commands() {
+        // GET /api/commands?workspace=<hash>: webui-slash-commands 用,只读返回
+        // builtin + skill 列表。`workspace` 参数让 handler 按目标 workspace cwd
+        // 实时扫描该项目下的 .agent/skills、.acecode/skills,与 daemon 全局 skills
+        // 合并 — desktop 多 workspace 共享一个 daemon,daemon 启动 cwd 固定,
+        // 不带 workspace 时用户切到的 workspace 项目里的 skill 会看不到。
+        CROW_ROUTE(app, "/api/commands").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.skill_registry) {
+                crow::response r(503);
+                r.body = R"({"error":"skill registry unavailable"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            std::optional<std::string> workspace_cwd;
+            const char* workspace_q = req.url_params.get("workspace");
+            if (workspace_q && *workspace_q) {
+                if (auto m = resolve_workspace(workspace_q)) {
+                    if (!m->cwd.empty()) workspace_cwd = m->cwd;
+                }
+            }
+            auto payload = build_commands_payload(*deps.skill_registry,
+                                                    workspace_cwd,
+                                                    deps.app_config);
+            crow::response r(payload.dump());
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        });
+        CROW_ROUTE(app, "/api/commands").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
         });
     }
 

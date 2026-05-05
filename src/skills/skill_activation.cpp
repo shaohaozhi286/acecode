@@ -17,34 +17,22 @@ std::string strip(const std::string& s) {
 
 } // namespace
 
-std::string build_activation_message(const SkillMetadata& meta,
-                                     const std::string& body,
-                                     const std::vector<std::string>& supporting_files,
-                                     const std::string& user_arg) {
+std::string build_skill_invocation_hint(const SkillMetadata& meta,
+                                         const std::string& args) {
     std::ostringstream oss;
 
-    oss << "[SYSTEM: The user has invoked the \"" << meta.name
-        << "\" skill, indicating they want you to follow its instructions. "
-        << "The full skill content is loaded below.]";
+    oss << "[SYSTEM: User invoked /" << meta.name << " skill]";
 
-    std::string trimmed_body = strip(body);
-    if (!trimmed_body.empty()) {
-        oss << "\n\n" << trimmed_body;
+    std::string trimmed_desc = strip(meta.description);
+    if (!trimmed_desc.empty()) {
+        oss << "\n\nDescription: " << trimmed_desc;
     }
+    oss << "\nUse skill_view(name=\"" << meta.name
+        << "\") to load the full SKILL.md if you need details beyond the description.";
 
-    if (!supporting_files.empty()) {
-        oss << "\n\n[This skill has supporting files you can load with the skill_view tool:]";
-        for (const auto& f : supporting_files) {
-            oss << "\n- " << f;
-        }
-        oss << "\n\nTo view any of these, use: skill_view(name=\""
-            << meta.name << "\", file_path=\"<path>\")";
-    }
-
-    std::string trimmed_arg = strip(user_arg);
-    if (!trimmed_arg.empty()) {
-        oss << "\n\nThe user has provided the following instruction alongside the skill invocation: "
-            << trimmed_arg;
+    std::string trimmed_args = strip(args);
+    if (!trimmed_args.empty()) {
+        oss << "\n\nUser's request: " << trimmed_args;
     }
 
     return oss.str();

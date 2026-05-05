@@ -88,7 +88,7 @@ void AgentLoop::worker_main() {
         }
         switch (task.kind) {
         case WorkerTask::Kind::Chat:
-            run_agent(task.payload);
+            run_agent_with_display(task.payload, task.display_text);
             break;
         case WorkerTask::Kind::Shell:
             run_shell(task.payload);
@@ -98,9 +98,17 @@ void AgentLoop::worker_main() {
 }
 
 void AgentLoop::submit(const std::string& user_message) {
+    submit(user_message, std::string{});
+}
+
+void AgentLoop::submit(const std::string& prompt, const std::string& display_text) {
     {
         std::lock_guard<std::mutex> lk(queue_mu_);
-        task_queue_.push(WorkerTask{WorkerTask::Kind::Chat, user_message});
+        WorkerTask task;
+        task.kind = WorkerTask::Kind::Chat;
+        task.payload = prompt;
+        task.display_text = display_text;
+        task_queue_.push(std::move(task));
     }
     queue_cv_.notify_one();
 }
@@ -129,6 +137,11 @@ void AgentLoop::inject_shell_turn(const std::string& cmd,
 }
 
 void AgentLoop::run_agent(const std::string& user_message) {
+    run_agent_with_display(user_message, std::string{});
+}
+
+void AgentLoop::run_agent_with_display(const std::string& user_message,
+                                        const std::string& display_text) {
     abort_requested_ = false;
     busy_ = true;
 
@@ -138,15 +151,26 @@ void AgentLoop::run_agent(const std::string& user_message) {
     ChatMessage user_msg;
     user_msg.role = "user";
     user_msg.content = user_message;
+    if (!display_text.empty() && display_text != user_message) {
+        // 让 UI 渲染 display_text(原文),LLM 看到的仍是 user_message(展开后的)。
+        // session_serializer 会把 metadata 全字段持久化,resume 后恢复。
+        if (!user_msg.metadata.is_object()) user_msg.metadata = nlohmann::json::object();
+        user_msg.metadata["display_text"] = display_text;
+    }
     ensure_user_message_identity(user_msg);
     messages_.push_back(user_msg);
     if (session_manager_) {
         session_manager_->on_message(user_msg);
         session_manager_->begin_user_turn_checkpoint(user_msg.uuid);
     }
-    events_.emit(SessionEventKind::Message,
-        nlohmann::json{{"role", "user"}, {"content", user_message},
-                       {"is_tool", false}, {"id", user_msg.uuid}});
+    nlohmann::json msg_event = {
+        {"role", "user"}, {"content", user_message},
+        {"is_tool", false}, {"id", user_msg.uuid},
+    };
+    if (!user_msg.metadata.is_null() && !user_msg.metadata.empty()) {
+        msg_event["metadata"] = user_msg.metadata;
+    }
+    events_.emit(SessionEventKind::Message, msg_event);
 
     if (callbacks_.on_busy_changed) {
         callbacks_.on_busy_changed(true);

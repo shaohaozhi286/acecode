@@ -62,6 +62,7 @@
 #include "tool/ask_user_question_tool.hpp"
 #include "tool/ask_overlay_input.hpp"
 #include "tui/confirm_question.hpp"
+#include "skills/skill_init.hpp"
 #include "skills/skill_registry.hpp"
 #include "skills/skill_commands.hpp"
 #include "skills/default_skill_seeder.hpp"
@@ -925,11 +926,21 @@ static void initialize_proxy_runtime(const AppConfig& config) {
     // 必须在任何 cpr 调用之前完成(下面 initialize_registry 可能触发 models.dev
     // 拉取)。失败也不应阻塞启动 —— ProxyResolver 内部所有探测都是 soft-fail。
     network::proxy_resolver().init(config.network);
+    // openspec/changes/proxy-fallback-on-unreachable:启动 TCP probe 检测代理
+    // 是否真的在监听,失败时进程级回退直连;所有 cpr 调用站点零变更。
+    network::proxy_resolver().probe_and_maybe_fallback();
     auto resolved = network::proxy_resolver().effective("https://example.com");
-    std::string url_disp = resolved.url.empty()
-                              ? std::string("direct")
-                              : network::redact_credentials(resolved.url);
-    std::string banner = "Proxy: " + url_disp + " (" + resolved.source + ")";
+    std::string banner;
+    if (resolved.source == "auto-fallback") {
+        auto fb = network::proxy_resolver().fallback_info_snapshot();
+        banner = "Proxy: direct (auto-fallback: " + fb.original_url +
+                 " from " + fb.original_source + " unreachable)";
+    } else {
+        std::string url_disp = resolved.url.empty()
+                                  ? std::string("direct")
+                                  : network::redact_credentials(resolved.url);
+        banner = "Proxy: " + url_disp + " (" + resolved.source + ")";
+    }
     if (config.network.proxy_insecure_skip_verify) {
         // ANSI red bold — TUI 还没起来,直接打 stderr 让用户立刻看见。
         banner += "  \x1b[1;31m[INSECURE: TLS verification disabled]\x1b[0m";
@@ -985,46 +996,9 @@ static void register_builtin_tools(ToolExecutor& tools, const AppConfig& config)
     }
 }
 
-static void initialize_skill_registry(SkillRegistry& skill_registry,
-                                      const AppConfig& config,
-                                      const std::string& working_dir) {
-    // Discovery order keeps more specific roots ahead of compatibility/global
-    // roots because SkillRegistry is first-wins by skill name:
-    //   1) project walk  — <cwd...>/.acecode/skills, deepest first, up to HOME
-    //   2) project walk  — <cwd...>/.agent/skills, deepest first, up to HOME
-    //   3) user global   — ~/.acecode/skills (auto-created)
-    //   4) user global   — ~/.agent/skills (compatibility root)
-    //   5) external dirs — config.skills.external_dirs
-    std::vector<std::filesystem::path> roots;
-    std::error_code ec;
-
-    for (const auto& dir : get_project_dirs_up_to_home(working_dir)) {
-        roots.emplace_back(std::filesystem::path(dir) / ".acecode" / "skills");
-    }
-    for (const auto& dir : get_project_dirs_up_to_home(working_dir)) {
-        roots.emplace_back(std::filesystem::path(dir) / ".agent" / "skills");
-    }
-
-    std::string default_acecode_skills_dir =
-        (std::filesystem::path(get_acecode_dir()) / "skills").string();
-    if (!std::filesystem::exists(default_acecode_skills_dir, ec)) {
-        std::filesystem::create_directories(default_acecode_skills_dir, ec);
-    }
-    roots.emplace_back(default_acecode_skills_dir);
-
-    std::string default_agent_skills_dir = expand_path("~/.agent/skills");
-    roots.emplace_back(default_agent_skills_dir);
-
-    for (const auto& raw : config.skills.external_dirs) {
-        std::string expanded = expand_path(raw);
-        if (!expanded.empty()) roots.emplace_back(expanded);
-    }
-
-    skill_registry.set_scan_roots(std::move(roots));
-    skill_registry.set_disabled(std::unordered_set<std::string>(
-        config.skills.disabled.begin(), config.skills.disabled.end()));
-    skill_registry.scan();
-}
+// 实现已抽到 src/skills/skill_init.{hpp,cpp},供 TUI 与 daemon(src/daemon/worker.cpp)
+// 共用。下方所有 `initialize_skill_registry(...)` 调用站点经 `using namespace acecode`
+// 解析到 `acecode::initialize_skill_registry`。
 
 static MemoryConfig initialize_memory_registry(MemoryRegistry& memory_registry,
                                                const AppConfig& config) {

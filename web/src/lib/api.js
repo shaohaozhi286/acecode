@@ -79,18 +79,34 @@ export function createApi(base = null) {
     sendInput:        (id, text)     => request('POST',   `/api/sessions/${encodeURIComponent(id)}/messages`, {text}, base),
     getMessages:      (id, since=0)  => request('GET',    `/api/sessions/${encodeURIComponent(id)}/messages?since=${since}`, undefined, base),
     listSkills:       ()             => request('GET',    '/api/skills', undefined, base),
+    listCommands:     (workspaceHash) => request('GET',
+      '/api/commands' + (workspaceHash ? '?workspace=' + encodeURIComponent(workspaceHash) : ''),
+      undefined, base),
     setSkillEnabled:  (name, en)     => request('PUT',    `/api/skills/${encodeURIComponent(name)}`, {enabled: en}, base),
     getSkillBody:     (name)         => request('GET',    `/api/skills/${encodeURIComponent(name)}/body`, undefined, base),
     getMcp:           ()             => request('GET',    '/api/mcp', undefined, base),
     putMcp:           (cfg)          => request('PUT',    '/api/mcp', cfg, base),
     reloadMcp:        ()             => request('POST',   '/api/mcp/reload', undefined, base),
     listModels:       ()             => request('GET',    '/api/models', undefined, base),
+    getSessionModel:  (sid, workspaceHash = '') => {
+      const qs = workspaceHash ? `?workspace=${encodeURIComponent(workspaceHash)}` : '';
+      return request('GET', `/api/sessions/${encodeURIComponent(sid)}/model${qs}`, undefined, base);
+    },
     switchModel:      (sid, name)    => request('POST',   `/api/sessions/${encodeURIComponent(sid)}/model`, {name}, base),
     getHistory:       (cwd, max=100) => request('GET',    `/api/history?cwd=${encodeURIComponent(cwd)}&max=${max}`, undefined, base),
     appendHistory:    (text)         => request('POST',   '/api/history', {text}, base),
     forkSession:      (sid, atMessageId, title) =>
       request('POST', `/api/sessions/${encodeURIComponent(sid)}/fork`,
               { at_message_id: atMessageId, title: title || '' }, base),
+
+    // 跨 workspace 一次拿全 session 列表(SearchPalette 用)。
+    // 返回 { sessions: [...], errors: [{hash, name, message}] }。
+    // 单个 workspace 拉取失败不阻塞其它 workspace。
+    listAllWorkspaceSessions: () => mergeAllWorkspaceSessions({
+      listWorkspaces: () => request('GET', '/api/workspaces', undefined, base),
+      listSessions: (hash) => request('GET',
+        `/api/workspaces/${encodeURIComponent(hash)}/sessions`, undefined, base),
+    }),
 
     // SidePanel "文件" tab — 列指定目录的直接子项(不递归)。
     // path='' 列 cwd 根本身。showHidden=true 透出 dot 文件,但 noise 黑名单
@@ -130,3 +146,42 @@ export function createApi(base = null) {
 }
 
 export const api = createApi();
+
+// 抽出便于单测:对每个 workspace 并行 listSessions,失败收集到 errors[],成功扁平化
+// 到 sessions[] 并注入 workspace_hash + workspaceName + cwd。
+export async function mergeAllWorkspaceSessions({ listWorkspaces, listSessions }) {
+  let workspaces = [];
+  try {
+    const list = await listWorkspaces();
+    workspaces = Array.isArray(list) ? list : [];
+  } catch (e) {
+    return { sessions: [], errors: [{ hash: '', name: '', message: (e && e.message) || String(e) }] };
+  }
+  const settled = await Promise.allSettled(workspaces.map(async (w) => {
+    const list = await listSessions(w.hash);
+    return { ws: w, list: Array.isArray(list) ? list : [] };
+  }));
+  const sessions = [];
+  const errors = [];
+  for (let i = 0; i < settled.length; ++i) {
+    const r = settled[i];
+    const w = workspaces[i];
+    if (r.status === 'fulfilled') {
+      for (const s of r.value.list) {
+        sessions.push({
+          ...s,
+          workspace_hash: s.workspace_hash || w.hash,
+          workspaceName: w.name || w.cwd || w.hash,
+          cwd: s.cwd || w.cwd,
+        });
+      }
+    } else {
+      errors.push({
+        hash: w.hash,
+        name: w.name || w.cwd || w.hash,
+        message: (r.reason && r.reason.message) || String(r.reason || ''),
+      });
+    }
+  }
+  return { sessions, errors };
+}

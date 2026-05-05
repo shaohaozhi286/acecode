@@ -84,6 +84,18 @@ struct SessionOptions {
     bool auto_start = false;
 };
 
+// ----- Current session model state -----
+
+struct SessionModelState {
+    // Selected saved_models entry name, "(legacy)", or an ad-hoc "(session:...)"
+    // name when a resumed session no longer matches a configured preset.
+    std::string name;
+    std::string provider;
+    std::string model;
+    int         context_window = 0;
+    bool        is_legacy = false;
+};
+
 // ----- Session 元数据(给 list_sessions 用) -----
 
 struct SessionInfo {
@@ -93,8 +105,11 @@ struct SessionInfo {
     std::string created_at;       // ISO 8601
     std::string updated_at;
     std::string summary;          // 最后一条 user 消息的截断
+    std::string model_name;       // saved_models name / "(legacy)" / ad-hoc
     std::string provider;
     std::string model;
+    int         context_window = 0;
+    bool        model_is_legacy = false;
     std::string title;
     int         message_count = 0;
     bool        active = false;   // 是否在 SessionRegistry 内存活
@@ -143,6 +158,17 @@ public:
     // 发送一条用户输入。非阻塞,内部入队到 AgentLoop worker。
     // 返回 false 表示 session 不在当前 registry 中。
     virtual bool send_input(const std::string& session_id, const std::string& text) = 0;
+
+    // 与上面相同,但允许 daemon 在 LLM-prompt 与 UI-display 之间分离 —
+    // `text` 进 LLM history(可能是 daemon 端 expander 展开过的字符串),
+    // `display_text` 进 ChatMessage.metadata.display_text 给 UI 渲染原文。
+    // 默认实现直接退化到单参版本(忽略 display_text);LocalSessionClient 会重写。
+    virtual bool send_input(const std::string& session_id,
+                              const std::string& text,
+                              const std::string& display_text) {
+        (void)display_text;
+        return send_input(session_id, text);
+    }
 
     // 回应一个之前推送的 permission_request。线程安全。
     // 未知 request_id / 已超时的请求 = no-op。

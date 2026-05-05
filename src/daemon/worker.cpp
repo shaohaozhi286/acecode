@@ -12,6 +12,7 @@
 #include "../session/local_session_client.hpp"
 #include "../session/session_registry.hpp"
 #include "../skills/skill_registry.hpp"
+#include "../skills/skill_init.hpp"
 #include "../tool/ask_user_question_tool.hpp"
 #include "../tool/bash_tool.hpp"
 #include "../tool/file_read_tool.hpp"
@@ -19,6 +20,8 @@
 #include "../tool/file_edit_tool.hpp"
 #include "../tool/grep_tool.hpp"
 #include "../tool/glob_tool.hpp"
+#include "../tool/skill_view_tool.hpp"
+#include "../tool/skills_tool.hpp"
 #include "../tool/task_complete_tool.hpp"
 #include "../tool/tool_executor.hpp"
 #include "../tool/web_search/runtime.hpp"
@@ -202,13 +205,20 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     // 代理解析器初始化 —— 必须在第一个 cpr 调用前完成。daemon 路径无 TUI,
     // 横幅写到日志(LOG_INFO),insecure 仍走 LOG_WARN(高优先级)。
     network::proxy_resolver().init(cfg.network);
+    network::proxy_resolver().probe_and_maybe_fallback();
     {
         auto resolved = network::proxy_resolver().effective("https://example.com");
         std::ostringstream oss;
-        oss << "[proxy] effective="
-            << (resolved.url.empty() ? "direct" : network::redact_credentials(resolved.url))
-            << " source=" << resolved.source
-            << " mode=" << cfg.network.proxy_mode;
+        if (resolved.source == "auto-fallback") {
+            auto fb = network::proxy_resolver().fallback_info_snapshot();
+            oss << "[proxy] effective=direct (auto-fallback: " << fb.original_url
+                << " from " << fb.original_source << " unreachable; reason=" << fb.reason << ")";
+        } else {
+            oss << "[proxy] effective="
+                << (resolved.url.empty() ? "direct" : network::redact_credentials(resolved.url))
+                << " source=" << resolved.source
+                << " mode=" << cfg.network.proxy_mode;
+        }
         LOG_INFO(oss.str());
         if (opts.foreground) std::cerr << oss.str() << "\n";
         if (cfg.network.proxy_insecure_skip_verify) {
@@ -316,6 +326,12 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
         }
     }
 
+    // SkillRegistry 必须在 register_tool 之前创建,因为 skills_list / skill_view
+    // tools 持有 registry 引用。与 TUI 走同一份扫描根逻辑(see src/skills/skill_init.cpp),
+    // 让 GET /api/skills 与 GET /api/commands 看到的 skill 集合与 TUI `/skills` 一致。
+    acecode::SkillRegistry skill_registry;
+    acecode::initialize_skill_registry(skill_registry, cfg, cwd);
+
     acecode::ToolExecutor tools;
     tools.register_tool(acecode::create_bash_tool());
     tools.register_tool(acecode::create_file_read_tool());
@@ -333,7 +349,11 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     // → WS question_request)。TUI 工厂版需要 TuiState/ScreenInteractive,这里没有。
     tools.register_tool(acecode::create_ask_user_question_tool_async());
 
-    acecode::SkillRegistry skill_registry; // 不 scan,v1 daemon 不暴露 skills
+    // skills_list / skill_view 让 LLM 按需加载 SKILL.md(配合 expand-webui-skill-commands
+    // 的轻量提示策略 — daemon expander 不再 inject SKILL.md body,LLM 看到提示后用
+    // 这两个 tool 自己取)。
+    tools.register_tool(acecode::create_skills_list_tool(skill_registry));
+    tools.register_tool(acecode::create_skill_view_tool(skill_registry));
     acecode::PermissionManager template_perm;
     if (opts.dangerous) template_perm.set_dangerous(true);
 

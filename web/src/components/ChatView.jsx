@@ -13,6 +13,7 @@ import { connection } from '../lib/connection.js';
 import { Message } from './Message.jsx';
 import { ToolBlock } from './ToolBlock.jsx';
 import { InputBar } from './InputBar.jsx';
+import { QueueCardList } from './QueueCardList.jsx';
 import { QuestionPicker } from './QuestionPicker.jsx';
 import { StickyUserContext } from './StickyUserContext.jsx';
 import { SidePanel } from './SidePanel.jsx';
@@ -33,6 +34,14 @@ import {
 } from '../lib/chatInputQueue.js';
 import { findStickyUserContext, sameStickyUserContext } from '../lib/stickyUserContext.js';
 import { useSessionTranscript } from '../lib/sessionTranscript.js';
+import { maybeNotify } from '../lib/desktopNotify.js';
+import {
+  modelDisplayLabel,
+  modelSelectValue,
+  normalizeModelOptions,
+  normalizeModelState,
+  selectedModelName,
+} from '../lib/sessionModel.js';
 import { VsIcon } from './Icon.jsx';
 
 function isEditableElement(el) {
@@ -127,10 +136,44 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
   const sid = ref?.sessionId || ref?.id || '';
   const sidRef = useRef(sid);
   const api = useMemo(() => createApi(ref), [ref?.port, ref?.token, ref?.workspaceHash]);
+  // 桌面通知 — 见 openspec/changes/add-desktop-attention-notifications。
+  // transcriptTitleRef 由后面的 effect 与 transcript.title 同步;在 callback 里
+  // 通过 ref.current 读最新 title,避免 fireDesktopNotification 进 useCallback deps。
+  const transcriptTitleRef = useRef('');
+  const fireDesktopNotification = useCallback((type, payload) => {
+    if (typeof document === 'undefined') return;
+    const cfg = health?.notifications;
+    const sessionId = ref?.sessionId || sid || '';
+    const workspaceHash = ref?.workspaceHash || '';
+    const sessionTitle = transcriptTitleRef.current || '';
+    let bodyText = '';
+    if (type === 'question') {
+      bodyText = String(payload?.question || payload?.prompt || '');
+    } else if (type === 'completion') {
+      bodyText = String(payload?.final_assistant_text || '');
+    }
+    maybeNotify({
+      type,
+      sessionId,
+      workspaceHash,
+      sessionTitle,
+      bodyText,
+      activeRef: { sessionId, workspaceHash },
+      hasFocus: typeof document.hasFocus === 'function' ? document.hasFocus() : true,
+      cfg,
+    });
+  }, [health?.notifications, ref?.sessionId, ref?.workspaceHash, sid]);
+
   const transcript = useSessionTranscript(ref, {
     live: true,
     onPermissionRequest,
-    onQuestionRequest,
+    onQuestionRequest: (payload) => {
+      onQuestionRequest?.(payload);
+      fireDesktopNotification('question', payload);
+    },
+    onTurnCompleted: (payload) => {
+      fireDesktopNotification('completion', payload);
+    },
     onError: (reason) => toast({
       kind: 'err',
       text: String(reason || '').startsWith('加载会话失败:')
@@ -139,11 +182,17 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
     }),
   });
   const { items, busy, turns, title, status: transcriptStatus, streamingId, applyEvent, setTitle: setTranscriptTitle } = transcript;
+  // 让 fireDesktopNotification 拿到最新 title,无需进入它的 useCallback deps。
+  useEffect(() => { transcriptTitleRef.current = title || ''; }, [title]);
   const [history,  setHistory]  = useState([]);
   const [homeWorkspaces, setHomeWorkspaces] = useState([]);
   const [homeWorkspaceHash, setHomeWorkspaceHash] = useState('');
   const [homeSubmitting, setHomeSubmitting] = useState(false);
   const [projectDropdownOpen, setProjectDropdownOpen] = useState(false);
+  const [modelOptions, setModelOptions] = useState([]);
+  const [modelState, setModelState] = useState(null);
+  const [pendingModelName, setPendingModelName] = useState('');
+  const [modelSwitching, setModelSwitching] = useState(false);
   const scrollRef = useRef(null);
   const inputRef = useRef(null);
   const layoutRef = useRef(null);
@@ -151,8 +200,10 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
   const [queueState, setQueueState] = useState(() => createChatInputQueueState());
   const queueStateRef = useRef(queueState);
   const drainRef = useRef(false);
+  // 排队消息从 transcript 中分离出来,只喂给 InputBar 上方的 QueueCardList。
+  // transcript 只渲染后端真实落库的消息,避免把"草稿/未发送"和"已发送"混在一起。
   const visibleQueuedItems = useMemo(() => buildQueuedMessageItems(queueState, sid), [queueState, sid]);
-  const renderedItems = useMemo(() => [...items, ...visibleQueuedItems], [items, visibleQueuedItems]);
+  const renderedItems = useMemo(() => items, [items]);
   const itemsRef = useRef(renderedItems);
   const stickyRafRef = useRef(0);
   const [stickyUserContext, setStickyUserContext] = useState(null);
@@ -165,6 +216,44 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
 
   useEffect(() => { sidRef.current = sid; }, [sid]);
   useEffect(() => { queueStateRef.current = queueState; }, [queueState]);
+
+  useEffect(() => {
+    if (!sid) {
+      setModelState(null);
+      setPendingModelName('');
+      setModelSwitching(false);
+      return undefined;
+    }
+    let cancelled = false;
+    setPendingModelName('');
+    setModelSwitching(false);
+
+    api.listModels()
+      .then((list) => {
+        if (!cancelled) setModelOptions(normalizeModelOptions(list));
+      })
+      .catch(() => {
+        if (!cancelled) setModelOptions([]);
+      });
+
+    api.getSessionModel(sid, ref?.workspaceHash || '')
+      .then((state) => {
+        if (!cancelled) setModelState(normalizeModelState(state));
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setModelState(normalizeModelState({
+            name: ref?.model_name || ref?.model_preset || '',
+            provider: ref?.provider || '',
+            model: ref?.model || '',
+            context_window: ref?.context_window || 0,
+            is_legacy: ref?.model_is_legacy,
+          }));
+        }
+      });
+
+    return () => { cancelled = true; };
+  }, [api, ref?.context_window, ref?.model, ref?.model_is_legacy, ref?.model_name, ref?.model_preset, ref?.provider, ref?.workspaceHash, sid]);
 
   const updateQueueState = useCallback((updater) => {
     const base = queueStateRef.current;
@@ -456,6 +545,24 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
 
   const abort = useCallback(() => connection.sendAbort(sid), [sid]);
 
+  const switchSessionModel = useCallback(async (name) => {
+    const nextName = String(name || '');
+    const currentName = selectedModelName(modelState);
+    if (!sid || !nextName || nextName === currentName || modelSwitching) return;
+    setPendingModelName(nextName);
+    setModelSwitching(true);
+    try {
+      const nextState = normalizeModelState(await api.switchModel(sid, nextName));
+      setModelState(nextState);
+      toast({ kind: 'ok', text: '已切换到 ' + modelDisplayLabel(nextState, nextName) });
+    } catch (e) {
+      toast({ kind: 'err', text: '模型切换失败:' + (e?.message || '') });
+    } finally {
+      setPendingModelName('');
+      setModelSwitching(false);
+    }
+  }, [api, modelState, modelSwitching, sid]);
+
   const startSidePanelResize = useCallback((event) => {
     if (!showSidePanel || !sid || !onSidePanelResize) return;
     if (event.button != null && event.button !== 0) return;
@@ -526,6 +633,15 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
     if (!sid) return null;
     return busy || transcriptStatus === 'running' ? 'running' : 'idle';
   }, [sid, busy, transcriptStatus]);
+
+  const currentModelLabel = modelDisplayLabel(modelState, ref?.model_name || ref?.model_preset || ref?.model || '加载中');
+  const currentModelName = modelSelectValue(modelState, pendingModelName);
+  const displayedModelOptions = useMemo(() => {
+    const currentName = selectedModelName(modelState);
+    if (!currentName || modelOptions.some((m) => m.name === currentName)) return modelOptions;
+    const normalized = normalizeModelState(modelState);
+    return normalized ? [normalized, ...modelOptions] : modelOptions;
+  }, [modelOptions, modelState]);
 
   // SidePanel 「变更」tab 的数据源:把 items 里 tool 项的 hunks 抽成消息格式。
   // 必须放在 early return 之前,否则空态/有 session 之间 hooks 数量不一致 → React #310。
@@ -689,7 +805,6 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
               data-chat-item-id={String(it.id)}
               data-chat-kind={it.kind || ''}
               data-chat-role={it.kind === 'msg' ? (it.role || '') : (it.kind || '')}
-              data-chat-queued-state={it.queued?.state || undefined}
               data-chat-user-message={it.kind === 'msg' && it.role === 'user' ? 'true' : undefined}
             >
               {it.kind === 'tool' ? (
@@ -699,9 +814,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
                   role={it.role} content={it.content} ts={it.ts}
                   streaming={it.streaming}
                   messageId={it.messageId}
-                  queued={it.queued}
-                  onCancelQueued={cancelQueued}
-                  onRetryQueued={retryQueued}
+                  metadata={it.metadata}
                   onFork={forkAndSwitch}
                 />
               )}
@@ -729,6 +842,12 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
         <QuestionPicker request={questionForView} onResolve={resolveQuestion} />
       )}
 
+      <QueueCardList
+        items={visibleQueuedItems}
+        onCancel={cancelQueued}
+        onRetry={retryQueued}
+      />
+
       <InputBar
         ref={inputRef}
         busy={busy}
@@ -738,7 +857,15 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, health, onP
         disabled={!!questionForView}
         placeholder={questionForView ? '请先回答上方问题…' : undefined}
       />
-      <StatusBar model="—" turns={turns} branch={health?.branch || ''} />
+      <StatusBar
+        model={currentModelLabel}
+        turns={turns}
+        branch={health?.branch || ''}
+        modelOptions={displayedModelOptions}
+        selectedModelName={currentModelName}
+        modelSwitching={modelSwitching}
+        onModelChange={switchSessionModel}
+      />
       </div>
       {sidePanelMounted && (
         <>

@@ -205,6 +205,15 @@ TEST(WebServerHttp, HealthEndpointReturnsBasicMetadata) {
     EXPECT_EQ(j["guid"], "test-guid-aaaa-bbbb");
     EXPECT_EQ(j["pid"], 12345);
     EXPECT_EQ(j["port"], fx.port);
+
+    // desktop.notifications 默认四个 bool 全 true,health 透传给前端做抑制规则判定。
+    // 见 openspec/changes/add-desktop-attention-notifications/specs/desktop-attention-notifications/spec.md
+    ASSERT_TRUE(j.contains("notifications"));
+    ASSERT_TRUE(j["notifications"].is_object());
+    EXPECT_EQ(j["notifications"]["enabled"], true);
+    EXPECT_EQ(j["notifications"]["on_question"], true);
+    EXPECT_EQ(j["notifications"]["on_completion"], true);
+    EXPECT_EQ(j["notifications"]["suppress_when_focused"], true);
 }
 
 // 场景: 跨端口 Web/Desktop fetch 只接受 loopback Origin,且不能因为 remote_ip

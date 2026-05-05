@@ -13,6 +13,8 @@
 #include <gtest/gtest.h>
 
 #include "permissions.hpp"
+#include "config/config.hpp"
+#include "config/saved_models.hpp"
 #include "session/local_session_client.hpp"
 #include "session/session_registry.hpp"
 #include "session/session_storage.hpp"
@@ -32,10 +34,13 @@ using acecode::LocalSessionClient;
 using acecode::PermissionDecision;
 using acecode::PermissionDecisionChoice;
 using acecode::PermissionManager;
+using acecode::AppConfig;
+using acecode::ModelProfile;
 using acecode::SessionEntry;
 using acecode::SessionEvent;
 using acecode::SessionEventKind;
 using acecode::SessionInfo;
+using acecode::SessionModelState;
 using acecode::SessionOptions;
 using acecode::SessionRegistry;
 using acecode::SessionRegistryDeps;
@@ -72,6 +77,28 @@ std::filesystem::path temp_cwd(const std::string& hint) {
     std::filesystem::remove_all(dir);
     std::filesystem::create_directories(dir);
     return dir;
+}
+
+AppConfig make_model_cfg() {
+    AppConfig cfg;
+    cfg.provider = "copilot";
+    cfg.copilot.model = "legacy-model";
+    cfg.context_window = 128000;
+    cfg.default_model_name = "slow";
+
+    ModelProfile slow;
+    slow.name = "slow";
+    slow.provider = "copilot";
+    slow.model = "slow-model";
+    cfg.saved_models.push_back(slow);
+
+    ModelProfile fast;
+    fast.name = "fast";
+    fast.provider = "copilot";
+    fast.model = "fast-model";
+    cfg.saved_models.push_back(fast);
+
+    return cfg;
 }
 
 } // namespace
@@ -213,6 +240,103 @@ TEST(SessionRegistry, CreateUsesWorkspaceCwdFromOptions) {
     std::filesystem::remove_all(workspace_project_dir);
     std::filesystem::remove_all(daemon_cwd);
     std::filesystem::remove_all(workspace_cwd);
+}
+
+// 场景: 新 session 的 model state 来自显式 model_name,并透出到 list_active
+// 供 Web sidebar / footer 使用。
+TEST(SessionRegistry, CreateUsesExplicitSessionModelState) {
+    auto cwd = temp_cwd("explicit_model");
+    auto project_dir = SessionStorage::get_project_dir(cwd.string());
+    std::filesystem::remove_all(project_dir);
+
+    auto cfg = make_model_cfg();
+    ToolExecutor tools;
+    PermissionManager permissions;
+    SessionRegistryDeps deps;
+    deps.provider_accessor = [] { return std::shared_ptr<acecode::LlmProvider>{}; };
+    deps.tools = &tools;
+    deps.cwd = cwd.string();
+    deps.config = &cfg;
+    deps.template_permissions = &permissions;
+    SessionRegistry registry(std::move(deps));
+
+    SessionOptions opts;
+    opts.model_name = "fast";
+    auto id = registry.create(opts);
+
+    auto state = registry.current_model_state(id);
+    ASSERT_TRUE(state.has_value());
+    EXPECT_EQ(state->name, "fast");
+    EXPECT_EQ(state->provider, "copilot");
+    EXPECT_EQ(state->model, "fast-model");
+    EXPECT_FALSE(state->is_legacy);
+
+    auto active = registry.list_active();
+    ASSERT_EQ(active.size(), 1u);
+    EXPECT_EQ(active[0].model_name, "fast");
+    EXPECT_EQ(active[0].provider, "copilot");
+    EXPECT_EQ(active[0].model, "fast-model");
+
+    std::filesystem::remove_all(project_dir);
+    std::filesystem::remove_all(cwd);
+}
+
+// 场景: 切换 session A 的模型不影响同 daemon 内 session B,且 A 的
+// metadata 持久化新的 provider/model/model_preset。
+TEST(SessionRegistry, SwitchModelIsSessionScopedAndPersistsMetadata) {
+    auto cwd = temp_cwd("switch_model");
+    auto project_dir = SessionStorage::get_project_dir(cwd.string());
+    std::filesystem::remove_all(project_dir);
+
+    auto cfg = make_model_cfg();
+    ToolExecutor tools;
+    PermissionManager permissions;
+    SessionRegistryDeps deps;
+    deps.provider_accessor = [] { return std::shared_ptr<acecode::LlmProvider>{}; };
+    deps.tools = &tools;
+    deps.cwd = cwd.string();
+    deps.config = &cfg;
+    deps.template_permissions = &permissions;
+    SessionRegistry registry(std::move(deps));
+
+    SessionOptions a_opts;
+    a_opts.model_name = "slow";
+    SessionOptions b_opts;
+    b_opts.model_name = "slow";
+    auto a_id = registry.create(a_opts);
+    auto b_id = registry.create(b_opts);
+
+    auto* a = registry.lookup(a_id);
+    ASSERT_NE(a, nullptr);
+    acecode::ChatMessage msg;
+    msg.role = "user";
+    msg.content = "persist model";
+    a->sm->on_message(msg);
+
+    auto fast = cfg.saved_models[1];
+    SessionModelState switched;
+    std::string error;
+    ASSERT_TRUE(registry.switch_model(a_id, fast, &switched, &error)) << error;
+    EXPECT_EQ(switched.name, "fast");
+    EXPECT_EQ(switched.model, "fast-model");
+
+    auto a_state = registry.current_model_state(a_id);
+    auto b_state = registry.current_model_state(b_id);
+    ASSERT_TRUE(a_state.has_value());
+    ASSERT_TRUE(b_state.has_value());
+    EXPECT_EQ(a_state->name, "fast");
+    EXPECT_EQ(b_state->name, "slow");
+    EXPECT_EQ(b_state->model, "slow-model");
+
+    auto sessions = SessionStorage::list_sessions(project_dir);
+    ASSERT_EQ(sessions.size(), 1u);
+    EXPECT_EQ(sessions[0].id, a_id);
+    EXPECT_EQ(sessions[0].model_preset, "fast");
+    EXPECT_EQ(sessions[0].provider, "copilot");
+    EXPECT_EQ(sessions[0].model, "fast-model");
+
+    std::filesystem::remove_all(project_dir);
+    std::filesystem::remove_all(cwd);
 }
 
 // 场景: 同一个共享 daemon registry 可以同时持有不同 workspace 的 active

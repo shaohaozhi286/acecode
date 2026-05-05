@@ -389,6 +389,23 @@ AppConfig load_config() {
                     nj["proxy_insecure_skip_verify"].is_boolean())
                     cfg.network.proxy_insecure_skip_verify =
                         nj["proxy_insecure_skip_verify"].get<bool>();
+                if (nj.contains("proxy_probe_enabled") &&
+                    nj["proxy_probe_enabled"].is_boolean())
+                    cfg.network.proxy_probe_enabled =
+                        nj["proxy_probe_enabled"].get<bool>();
+                if (nj.contains("proxy_probe_timeout_ms") &&
+                    nj["proxy_probe_timeout_ms"].is_number_integer()) {
+                    int raw = nj["proxy_probe_timeout_ms"].get<int>();
+                    int clamped = raw;
+                    if (clamped < 200)   clamped = 200;
+                    if (clamped > 10000) clamped = 10000;
+                    if (clamped != raw) {
+                        LOG_WARN("[config] network.proxy_probe_timeout_ms=" +
+                                 std::to_string(raw) + " out of [200, 10000], clamped to " +
+                                 std::to_string(clamped));
+                    }
+                    cfg.network.proxy_probe_timeout_ms = clamped;
+                }
 
                 if (cfg.network.proxy_mode == "manual" && cfg.network.proxy_url.empty()) {
                     std::cerr << "[config] fatal: network.proxy_mode='manual' requires "
@@ -462,6 +479,38 @@ AppConfig load_config() {
                         tj["page_keys_single_line"].is_boolean()) {
                         cfg.tui.page_keys_single_line =
                             tj["page_keys_single_line"].get<bool>();
+                    }
+                }
+            }
+
+            // Desktop shell 配置 — 目前只挂 notifications。
+            // 字段缺失 / 类型错都走默认值(全 true),启动不阻断。
+            if (j.contains("desktop")) {
+                if (!j["desktop"].is_object()) {
+                    LOG_WARN("[config] 'desktop' must be an object, ignoring");
+                } else {
+                    const auto& dj = j["desktop"];
+                    if (dj.contains("notifications")) {
+                        if (!dj["notifications"].is_object()) {
+                            LOG_WARN("[config] 'desktop.notifications' must be an object, "
+                                     "using defaults");
+                        } else {
+                            const auto& nj = dj["notifications"];
+                            if (nj.contains("enabled") && nj["enabled"].is_boolean()) {
+                                cfg.desktop.notifications.enabled = nj["enabled"].get<bool>();
+                            }
+                            if (nj.contains("on_question") && nj["on_question"].is_boolean()) {
+                                cfg.desktop.notifications.on_question = nj["on_question"].get<bool>();
+                            }
+                            if (nj.contains("on_completion") && nj["on_completion"].is_boolean()) {
+                                cfg.desktop.notifications.on_completion = nj["on_completion"].get<bool>();
+                            }
+                            if (nj.contains("suppress_when_focused") &&
+                                nj["suppress_when_focused"].is_boolean()) {
+                                cfg.desktop.notifications.suppress_when_focused =
+                                    nj["suppress_when_focused"].get<bool>();
+                            }
+                        }
                     }
                 }
             }
@@ -747,6 +796,22 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
             tj["page_keys_single_line"] = cfg.tui.page_keys_single_line;
         if (!tj.empty()) j["tui"] = tj;
 
+        DesktopNotificationsConfig dn_d;
+        nlohmann::json dnj = nlohmann::json::object();
+        if (cfg.desktop.notifications.enabled != dn_d.enabled)
+            dnj["enabled"] = cfg.desktop.notifications.enabled;
+        if (cfg.desktop.notifications.on_question != dn_d.on_question)
+            dnj["on_question"] = cfg.desktop.notifications.on_question;
+        if (cfg.desktop.notifications.on_completion != dn_d.on_completion)
+            dnj["on_completion"] = cfg.desktop.notifications.on_completion;
+        if (cfg.desktop.notifications.suppress_when_focused != dn_d.suppress_when_focused)
+            dnj["suppress_when_focused"] = cfg.desktop.notifications.suppress_when_focused;
+        if (!dnj.empty()) {
+            nlohmann::json deskj = nlohmann::json::object();
+            deskj["notifications"] = dnj;
+            j["desktop"] = deskj;
+        }
+
         NetworkConfig net_d;
         nlohmann::json nj = nlohmann::json::object();
         if (cfg.network.proxy_mode != net_d.proxy_mode)
@@ -759,6 +824,10 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
             nj["proxy_ca_bundle"] = cfg.network.proxy_ca_bundle;
         if (cfg.network.proxy_insecure_skip_verify != net_d.proxy_insecure_skip_verify)
             nj["proxy_insecure_skip_verify"] = cfg.network.proxy_insecure_skip_verify;
+        if (cfg.network.proxy_probe_enabled != net_d.proxy_probe_enabled)
+            nj["proxy_probe_enabled"] = cfg.network.proxy_probe_enabled;
+        if (cfg.network.proxy_probe_timeout_ms != net_d.proxy_probe_timeout_ms)
+            nj["proxy_probe_timeout_ms"] = cfg.network.proxy_probe_timeout_ms;
         if (!nj.empty()) j["network"] = nj;
 
         WebSearchConfig ws_d;

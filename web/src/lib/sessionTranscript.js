@@ -71,6 +71,11 @@ export function createTranscriptState(overrides = {}) {
     toolMap: new Map(),
     nextItemId: 1,
     error: '',
+    // turnHadAssistantText / lastAssistantText 用于桌面通知:在 busy=true→false
+    // 转换且本回合产生过 assistant 文本时,emit turn_completed effect。reducer 之外
+    // 的代码不应直接读 / 写它们。见 openspec/changes/add-desktop-attention-notifications。
+    turnHadAssistantText: false,
+    lastAssistantText: '',
     ...overrides,
     toolMap: cloneToolMap(overrides.toolMap),
   };
@@ -100,11 +105,16 @@ export function reduceTranscriptEvent(state, msg) {
       if (role === 'assistant' && next.streamingId != null) {
         const currentStreamingId = next.streamingId;
         next.streamingId = null;
+        const finalContent = p.content || '';
+        if (finalContent && finalContent.trim()) {
+          next.turnHadAssistantText = true;
+          next.lastAssistantText = finalContent;
+        }
         next.items = next.items.map((item) => item.id === currentStreamingId
           ? {
               ...item,
               role: 'assistant',
-              content: p.content || item.content || '',
+              content: finalContent || item.content || '',
               messageId: p.id || item.messageId || '',
               ts: eventTs(msg),
               streaming: false,
@@ -113,6 +123,11 @@ export function reduceTranscriptEvent(state, msg) {
         break;
       }
       next.streamingId = null;
+      const incomingContent = p.content || '';
+      if (role === 'assistant' && incomingContent && incomingContent.trim()) {
+        next.turnHadAssistantText = true;
+        next.lastAssistantText = incomingContent;
+      }
       next.items = [
         ...next.items,
         {
@@ -120,7 +135,8 @@ export function reduceTranscriptEvent(state, msg) {
           id: allocateItemId(next),
           messageId: p.id || '',
           role,
-          content: p.content || '',
+          content: incomingContent,
+          metadata: p.metadata,
           ts: eventTs(msg),
         },
       ];
@@ -128,6 +144,9 @@ export function reduceTranscriptEvent(state, msg) {
     }
     case 'token': {
       const text = p.text || '';
+      if (text && text.trim()) {
+        next.turnHadAssistantText = true;
+      }
       if (next.streamingId == null) {
         const id = allocateItemId(next);
         next.streamingId = id;
@@ -135,11 +154,15 @@ export function reduceTranscriptEvent(state, msg) {
           ...next.items,
           { kind: 'msg', id, role: 'assistant', content: text, ts: eventTs(msg), streaming: true },
         ];
+        next.lastAssistantText = text;
       } else {
         const currentStreamingId = next.streamingId;
-        next.items = next.items.map((item) => item.id === currentStreamingId
-          ? { ...item, content: (item.content || '') + text, ts: eventTs(msg) }
-          : item);
+        next.items = next.items.map((item) => {
+          if (item.id !== currentStreamingId) return item;
+          const merged = (item.content || '') + text;
+          next.lastAssistantText = merged;
+          return { ...item, content: merged, ts: eventTs(msg) };
+        });
       }
       break;
     }
@@ -208,19 +231,39 @@ export function reduceTranscriptEvent(state, msg) {
       });
       break;
     }
-    case 'busy_changed':
+    case 'busy_changed': {
+      const wasBusy = !!state?.busy;
       next.busy = !!p.busy;
       next.status = next.busy ? 'running' : 'idle';
+      if (next.busy && !wasBusy) {
+        // 回合开始 → 重置桌面通知用的回合标记
+        next.turnHadAssistantText = false;
+        next.lastAssistantText = '';
+      }
       if (!p.busy) {
         next.turns = (next.turns || 0) + 1;
         finalizeStreaming(next);
+        if (next.turnHadAssistantText) {
+          effects.push({
+            type: 'turn_completed',
+            payload: { final_assistant_text: next.lastAssistantText || '' },
+          });
+        }
       }
       break;
-    case 'done':
+    }
+    case 'done': {
       next.busy = false;
       next.status = 'idle';
       finalizeStreaming(next);
+      if (next.turnHadAssistantText) {
+        effects.push({
+          type: 'turn_completed',
+          payload: { final_assistant_text: next.lastAssistantText || '' },
+        });
+      }
       break;
+    }
     case 'error':
       next.busy = false;
       next.status = 'error';
@@ -258,6 +301,7 @@ export function loadTranscriptHistory(state, data = {}) {
     messageId: m.id || '',
     role: m.role || 'system',
     content: m.content || '',
+    metadata: m.metadata,
     ts: m.ts || m.timestamp_ms || Date.now(),
   }));
 
@@ -329,6 +373,7 @@ function dispatchEffects(effects, sid, options) {
     if (effect.type === 'error') options.onError?.(payload.reason || '');
     if (effect.type === 'permission_request') options.onPermissionRequest?.(payload);
     if (effect.type === 'question_request') options.onQuestionRequest?.(payload);
+    if (effect.type === 'turn_completed') options.onTurnCompleted?.(payload);
   }
 }
 

@@ -8,11 +8,13 @@ import { SlideOver, Toggle } from './Modal.jsx';
 import { toast } from './Toast.jsx';
 import { clsx } from '../lib/format.js';
 import { VsIcon } from './Icon.jsx';
+import { useSlashCommands } from './SlashCommandsContext.jsx';
 
 export function SkillsPanel({ onClose }) {
   const [skills, setSkills] = useState([]);
   const [search, setSearch] = useState('');
   const [busy,   setBusy]   = useState(true);
+  const slashCommandsCtx = useSlashCommands();
 
   useEffect(() => {
     let off = false;
@@ -34,8 +36,10 @@ export function SkillsPanel({ onClose }) {
   const toggle = async (name, next) => {
     const orig = skills;
     setSkills((prev) => prev.map((s) => s.name === name ? { ...s, enabled: next } : s));
-    try { await api.setSkillEnabled(name, next); }
-    catch (e) {
+    try {
+      await api.setSkillEnabled(name, next);
+      slashCommandsCtx.invalidate?.();
+    } catch (e) {
       setSkills(orig);
       toast({ kind: 'err', text: '切换失败:' + (e.message || '') });
     }

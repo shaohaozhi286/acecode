@@ -13,8 +13,10 @@
 
 using acecode::AppConfig;
 using acecode::ModelProfile;
+using acecode::SessionModelState;
 using acecode::web::find_model_by_name;
 using acecode::web::list_models;
+using acecode::web::model_state_to_json;
 
 namespace {
 
@@ -98,4 +100,22 @@ TEST(ModelsHandler, FindIsCaseSensitive) {
     EXPECT_TRUE(find_model_by_name(cfg, "copilot-fast").has_value());
     EXPECT_FALSE(find_model_by_name(cfg, "COPILOT-FAST").has_value());
     EXPECT_FALSE(find_model_by_name(cfg, "Copilot-Fast").has_value());
+}
+
+// 场景: current session model state 序列化必须包含前端 footer/selector
+// 需要的完整字段。
+TEST(ModelsHandler, ModelStateToJsonIncludesCurrentSessionFields) {
+    SessionModelState state;
+    state.name = "copilot-fast";
+    state.provider = "copilot";
+    state.model = "gpt-5";
+    state.context_window = 400000;
+    state.is_legacy = false;
+
+    auto j = model_state_to_json(state);
+    EXPECT_EQ(j["name"], "copilot-fast");
+    EXPECT_EQ(j["provider"], "copilot");
+    EXPECT_EQ(j["model"], "gpt-5");
+    EXPECT_EQ(j["context_window"], 400000);
+    EXPECT_EQ(j["is_legacy"], false);
 }

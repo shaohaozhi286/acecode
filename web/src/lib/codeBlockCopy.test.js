@@ -66,6 +66,50 @@ await run('copy button target resolves owning code frame', () => {
   assert.equal(codeTextFromCopyButtonTarget(target), 'npm test');
 });
 
+await run('copy button resolves from action slot beside wrap button', () => {
+  const frame = {
+    querySelector(selector) {
+      if (selector === CODE_COPY_SOURCE_SELECTOR) return { textContent: 'long line without visual changes' };
+      return null;
+    },
+  };
+  const actionBar = {
+    closest(selector) {
+      return selector === CODE_COPY_FRAME_SELECTOR ? frame : null;
+    },
+  };
+  const copyButton = {
+    closest(selector) {
+      if (selector === CODE_COPY_FRAME_SELECTOR) return frame;
+      if (selector === '[data-code-actions="true"]') return actionBar;
+      return null;
+    },
+  };
+  const target = {
+    closest(selector) {
+      return selector === CODE_COPY_BUTTON_SELECTOR ? copyButton : null;
+    },
+  };
+  assert.equal(codeTextFromCopyButtonTarget(target), 'long line without visual changes');
+});
+
+await run('wrap action button is not treated as copy target', () => {
+  const wrapButtonTarget = { closest: () => null };
+  assert.equal(codeTextFromCopyButtonTarget(wrapButtonTarget), null);
+});
+
+await run('wrapped preview copy remains source accurate', () => {
+  const source = 'alpha beta gamma delta epsilon\nindented    value';
+  const frame = {
+    dataset: { wrap: 'true' },
+    querySelector(selector) {
+      if (selector === CODE_COPY_SOURCE_SELECTOR) return { textContent: source };
+      return null;
+    },
+  };
+  assert.equal(codeTextFromFrame(frame), source);
+});
+
 await run('non-copy targets are ignored', () => {
   const inlineCodeTarget = { closest: () => null };
   assert.equal(codeTextFromCopyButtonTarget(inlineCodeTarget), null);

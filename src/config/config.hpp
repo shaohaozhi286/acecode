@@ -165,6 +165,20 @@ struct UpgradeConfig {
     int timeout_ms = 30000;
 };
 
+// Desktop shell (acecode-desktop.exe) — OS notification settings.
+// 见 openspec/changes/add-desktop-attention-notifications。
+// 目前只在 Windows 桌面壳读取;非 Windows 平台字段不参与运行,但保留解析。
+struct DesktopNotificationsConfig {
+    bool enabled = true;                 // 总开关
+    bool on_question = true;             // AskUserQuestion 触发通知
+    bool on_completion = true;           // 回合完成触发通知
+    bool suppress_when_focused = true;   // 当前 session 已可见且窗口聚焦时不弹
+};
+
+struct DesktopConfig {
+    DesktopNotificationsConfig notifications;
+};
+
 struct NetworkConfig {
     // "auto"   = Windows: WinHTTP-IE → registry → env → direct;
     //            POSIX: env (HTTPS_PROXY/HTTP_PROXY/ALL_PROXY/NO_PROXY).
@@ -175,6 +189,12 @@ struct NetworkConfig {
     std::string proxy_no_proxy;   // comma-separated; merged with env NO_PROXY
     std::string proxy_ca_bundle;  // PEM path; trusts MITM certs (Fiddler/Charles)
     bool proxy_insecure_skip_verify = false; // 调试逃生口,开启时启动横幅 + LOG_WARN
+
+    // openspec/changes/proxy-fallback-on-unreachable:启动时对解析出的代理做
+    // 一次同步 TCP probe,connect 失败就把进程级 fallback flag 置位、横幅显示
+    // `auto-fallback`、所有 cpr 走直连。`/proxy refresh` 重跑探测。
+    int  proxy_probe_timeout_ms = 1500;  // load_config 时 clamp 到 [200, 10000]
+    bool proxy_probe_enabled = true;     // 总开关:false = 完全跳过探测,等价旧行为
 };
 
 struct AppConfig {
@@ -196,6 +216,7 @@ struct AppConfig {
     WebSearchConfig web_search;                  // 联网搜索工具配置(参见 add-web-search-tool)
     UpgradeConfig upgrade;                       // explicit self-upgrade command config
     TuiConfig tui;                               // 终端渲染策略(legacy fallback 等)
+    DesktopConfig desktop;                       // desktop shell 配置(系统通知等)
 
     // --- model profiles (openspec/changes/model-profiles) ---
     // 用户维护的命名模型列表。为空时 legacy 字段作为兜底 entry "(legacy)"。

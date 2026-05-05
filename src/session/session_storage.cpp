@@ -99,6 +99,9 @@ void SessionStorage::write_meta(const std::string& meta_path, const SessionMeta&
     j["summary"] = meta.summary;
     j["provider"] = meta.provider;
     j["model"] = meta.model;
+    if (!meta.model_preset.empty()) {
+        j["model_preset"] = meta.model_preset;
+    }
     if (!meta.title.empty()) {
         j["title"] = meta.title;
     }
@@ -131,6 +134,7 @@ SessionMeta SessionStorage::read_meta(const std::string& meta_path) {
         if (j.contains("summary"))       meta.summary       = j["summary"].get<std::string>();
         if (j.contains("provider"))      meta.provider      = j["provider"].get<std::string>();
         if (j.contains("model"))         meta.model         = j["model"].get<std::string>();
+        meta.model_preset    = j.value("model_preset",    std::string{});
         meta.title           = j.value("title",           std::string{});
         meta.forked_from     = j.value("forked_from",     std::string{});
         meta.fork_message_id = j.value("fork_message_id", std::string{});

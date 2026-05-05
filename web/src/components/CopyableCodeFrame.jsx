@@ -7,7 +7,9 @@ export function CopyableCodeFrame({
   text = '',
   className = '',
   preClassName = '',
+  actions = null,
   children = null,
+  ...props
 }) {
   const handleCopy = async (event) => {
     event.stopPropagation();
@@ -20,17 +22,20 @@ export function CopyableCodeFrame({
   };
 
   return (
-    <div className={clsx('ace-copyable-code', className)} data-code-copy-frame="true">
-      <button
-        type="button"
-        className="ace-code-copy-btn"
-        data-code-copy-button="true"
-        title="复制代码"
-        aria-label="复制代码"
-        onClick={handleCopy}
-      >
-        <VsIcon name="copy" size={14} />
-      </button>
+    <div className={clsx('ace-copyable-code', className)} data-code-copy-frame="true" {...props}>
+      <div className="ace-code-actions" data-code-actions="true">
+        {actions}
+        <button
+          type="button"
+          className="ace-code-copy-btn"
+          data-code-copy-button="true"
+          title="复制代码"
+          aria-label="复制代码"
+          onClick={handleCopy}
+        >
+          <VsIcon name="copy" size={14} />
+        </button>
+      </div>
       {children || (
         <pre className={preClassName} data-code-copy-source="true">{text}</pre>
       )}

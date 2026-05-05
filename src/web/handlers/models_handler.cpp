@@ -42,4 +42,14 @@ find_model_by_name(const AppConfig& cfg, const std::string& name) {
     return std::nullopt;
 }
 
+nlohmann::json model_state_to_json(const SessionModelState& state) {
+    nlohmann::json o;
+    o["name"] = state.name;
+    o["provider"] = state.provider;
+    o["model"] = state.model;
+    o["context_window"] = state.context_window;
+    o["is_legacy"] = state.is_legacy;
+    return o;
+}
+
 } // namespace acecode::web

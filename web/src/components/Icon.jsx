@@ -38,6 +38,7 @@ const ICONS = {
   stop: 'Stop',
   terminal: 'TerminalReadWrite',
   warning: 'StatusWarning',
+  wordWrap: 'WordWrap',
   error: 'StatusError',
 };
 

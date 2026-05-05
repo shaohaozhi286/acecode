@@ -86,11 +86,23 @@ ModelProfile resolve_effective_model(const AppConfig& cfg,
         }
     }
 
-    // 第 3 层:resume session meta —— 按 (provider, model) 查 saved_models。
-    // 匹配不上时构造 ad-hoc entry,直接作为最终结果返回(绕开后续的按 name 查找)。
+    // 第 3 层:resume session meta —— 新 meta 优先保留明确的 preset name;
+    // 老 meta 没有 name 时仍按 (provider, model) 查 saved_models。
     if (resumed_meta.has_value() &&
         !resumed_meta->provider.empty() &&
         !resumed_meta->model.empty()) {
+        if (!resumed_meta->model_preset.empty()) {
+            if (resumed_meta->model_preset == "(legacy)") {
+                return synth_legacy_entry(cfg);
+            }
+            const ModelProfile* by_meta_name = find_by_name(
+                cfg.saved_models, resumed_meta->model_preset);
+            if (by_meta_name != nullptr) {
+                return *by_meta_name;
+            }
+            LOG_WARN("[model_resolver] session meta points to missing model preset '" +
+                     resumed_meta->model_preset + "'; falling back to provider/model match");
+        }
         const ModelProfile* matched = find_by_provider_model(
             cfg.saved_models, resumed_meta->provider, resumed_meta->model);
         if (matched != nullptr) {

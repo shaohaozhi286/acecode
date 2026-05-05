@@ -1,5 +1,7 @@
 #include "web_host.hpp"
 
+#include "window_chrome.hpp"
+
 #include "../utils/logger.hpp"
 
 #ifdef _WIN32
@@ -27,6 +29,11 @@ namespace acecode::desktop {
 namespace {
 
 constexpr wchar_t kHostWindowClassName[] = L"ACECodeDesktopHostWindow";
+constexpr int kFramelessDragHeightDip = 44;
+
+int dpi_scale(int value, UINT dpi) {
+    return static_cast<int>((static_cast<long long>(value) * static_cast<long long>(dpi)) / 96);
+}
 
 HMONITOR active_monitor() {
     if (HWND fg = ::GetForegroundWindow()) {
@@ -68,8 +75,83 @@ void resize_webview_widget(HWND hwnd) {
     ::MoveWindow(widget, 0, 0, client.right - client.left, client.bottom - client.top, TRUE);
 }
 
+void refresh_non_client_frame(HWND hwnd) {
+    RECT rect{};
+    if (!::GetWindowRect(hwnd, &rect)) return;
+    ::SetWindowPos(hwnd,
+                   nullptr,
+                   rect.left,
+                   rect.top,
+                   rect.right - rect.left,
+                   rect.bottom - rect.top,
+                   SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOMOVE |
+                       SWP_NOSIZE);
+}
+
+int win32_hit_test_value(FramelessHitTestArea area) {
+    switch (area) {
+        // Keep WebView top-bar controls clickable. Dragging is started by the
+        // React top bar through aceDesktop_startWindowDrag, so the parent HWND
+        // should expose the caption area as client unless it is a resize edge.
+        case FramelessHitTestArea::Caption: return HTCLIENT;
+        case FramelessHitTestArea::Left: return HTLEFT;
+        case FramelessHitTestArea::Right: return HTRIGHT;
+        case FramelessHitTestArea::Top: return HTTOP;
+        case FramelessHitTestArea::TopLeft: return HTTOPLEFT;
+        case FramelessHitTestArea::TopRight: return HTTOPRIGHT;
+        case FramelessHitTestArea::Bottom: return HTBOTTOM;
+        case FramelessHitTestArea::BottomLeft: return HTBOTTOMLEFT;
+        case FramelessHitTestArea::BottomRight: return HTBOTTOMRIGHT;
+        case FramelessHitTestArea::Client:
+        default: return HTCLIENT;
+    }
+}
+
+LRESULT frameless_hit_test(HWND hwnd, LPARAM lparam) {
+    RECT window{};
+    if (!::GetWindowRect(hwnd, &window)) return HTCLIENT;
+
+    const int screen_x = static_cast<int>(static_cast<short>(LOWORD(lparam)));
+    const int screen_y = static_cast<int>(static_cast<short>(HIWORD(lparam)));
+    const UINT dpi = ::GetDpiForWindow(hwnd);
+    FramelessHitTestInput input;
+    input.x = screen_x - window.left;
+    input.y = screen_y - window.top;
+    input.width = window.right - window.left;
+    input.height = window.bottom - window.top;
+    input.frame_x = ::GetSystemMetricsForDpi(SM_CXFRAME, dpi);
+    input.frame_y = ::GetSystemMetricsForDpi(SM_CYFRAME, dpi);
+    input.padding = ::GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+    input.drag_height = dpi_scale(kFramelessDragHeightDip, dpi);
+    input.maximized = ::IsZoomed(hwnd) != FALSE;
+    return win32_hit_test_value(classify_frameless_hit_test(input));
+}
+
+LRESULT frameless_nc_calc(HWND hwnd, WPARAM wparam, LPARAM lparam) {
+    if (!wparam || !lparam) return ::DefWindowProcW(hwnd, WM_NCCALCSIZE, wparam, lparam);
+
+    const UINT dpi = ::GetDpiForWindow(hwnd);
+    const int frame_x = ::GetSystemMetricsForDpi(SM_CXFRAME, dpi);
+    const int frame_y = ::GetSystemMetricsForDpi(SM_CYFRAME, dpi);
+    const int padding = ::GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+
+    auto* params = reinterpret_cast<NCCALCSIZE_PARAMS*>(lparam);
+    RECT& client = params->rgrc[0];
+    client.left += frame_x + padding;
+    client.right -= frame_x + padding;
+    client.bottom -= frame_y + padding;
+    if (::IsZoomed(hwnd)) {
+        client.top += padding;
+    }
+    return 0;
+}
+
 LRESULT CALLBACK host_window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     switch (msg) {
+        case WM_NCCALCSIZE:
+            return frameless_nc_calc(hwnd, wparam, lparam);
+        case WM_NCHITTEST:
+            return frameless_hit_test(hwnd, lparam);
         case WM_SIZE:
             resize_webview_widget(hwnd);
             break;
@@ -123,13 +205,14 @@ HWND create_offscreen_host_window(RECT& target_monitor) {
         WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         x,
         y,
-        1280,
-        820,
+        kDefaultDesktopWindowWidth,
+        kDefaultDesktopWindowHeight,
         nullptr,
         nullptr,
         instance,
         nullptr);
     if (hwnd) {
+        refresh_non_client_frame(hwnd);
         // WebView2 initialization for an externally-owned parent HWND is more
         // reliable when the parent is already visible. It is offscreen here,
         // so this does not expose a blank window to the user.
@@ -227,6 +310,13 @@ struct WebHost::Impl {
     HWND custom_window = nullptr;
     bool offscreen_until_ready = false;
     ComApartment com{false};
+
+    HWND hwnd() const {
+        if (custom_window) return custom_window;
+        if (!w) return nullptr;
+        auto r = w->window();
+        return r.ok() ? static_cast<HWND>(r.value()) : nullptr;
+    }
 #endif
     std::unique_ptr<webview::webview> w;
 };
@@ -251,9 +341,7 @@ void WebHost::navigate(const std::string& url) {
 }
 void WebHost::set_visible(bool visible) {
 #ifdef _WIN32
-    auto r = impl_->w->window();
-    if (!r.ok()) return;
-    HWND hwnd = static_cast<HWND>(r.value());
+    HWND hwnd = impl_->hwnd();
     if (!hwnd) return;
     if (visible && impl_->offscreen_until_ready) {
         center_window_on_monitor(hwnd, impl_->target_monitor);
@@ -293,6 +381,46 @@ bool WebHost::open_dev_tools() {
     hr = webview->OpenDevToolsWindow();
     webview->Release();
     return SUCCEEDED(hr);
+#else
+    return false;
+#endif
+}
+bool WebHost::start_window_drag() {
+#ifdef _WIN32
+    HWND hwnd = impl_->hwnd();
+    if (!hwnd || !::IsWindow(hwnd)) return false;
+    ::ReleaseCapture();
+    ::SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+    return true;
+#else
+    return false;
+#endif
+}
+bool WebHost::minimize_window() {
+#ifdef _WIN32
+    HWND hwnd = impl_->hwnd();
+    if (!hwnd || !::IsWindow(hwnd)) return false;
+    ::ShowWindow(hwnd, SW_MINIMIZE);
+    return true;
+#else
+    return false;
+#endif
+}
+bool WebHost::toggle_maximize_window() {
+#ifdef _WIN32
+    HWND hwnd = impl_->hwnd();
+    if (!hwnd || !::IsWindow(hwnd)) return false;
+    ::ShowWindow(hwnd, ::IsZoomed(hwnd) ? SW_RESTORE : SW_MAXIMIZE);
+    return true;
+#else
+    return false;
+#endif
+}
+bool WebHost::close_window() {
+#ifdef _WIN32
+    HWND hwnd = impl_->hwnd();
+    if (!hwnd || !::IsWindow(hwnd)) return false;
+    return ::PostMessageW(hwnd, WM_CLOSE, 0, 0) != FALSE;
 #else
     return false;
 #endif

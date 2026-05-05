@@ -65,11 +65,13 @@ namespace acecode {
 void SessionManager::start_session(const std::string& cwd,
                                    const std::string& provider,
                                    const std::string& model,
-                                   const std::string& preset_session_id) {
+                                   const std::string& preset_session_id,
+                                   const std::string& model_preset) {
     std::lock_guard<std::mutex> lk(mu_);
     cwd_ = cwd;
     provider_name_ = provider;
     model_name_ = model;
+    model_preset_ = model_preset;
     project_dir_ = SessionStorage::get_project_dir(cwd);
     session_id_ = preset_session_id;
     jsonl_path_.clear();
@@ -114,6 +116,7 @@ void SessionManager::ensure_created() {
     meta.message_count = 0;
     meta.provider = provider_name_;
     meta.model = model_name_;
+    meta.model_preset = model_preset_;
     meta.title = pending_title_;
     SessionStorage::write_meta(meta_path_str_, meta);
 }
@@ -218,6 +221,9 @@ std::vector<ChatMessage> SessionManager::resume_session(const std::string& sessi
         created_at_ = meta.created_at;
         last_user_summary_ = meta.summary;
         pending_title_ = meta.title;
+        if (model_preset_.empty()) {
+            model_preset_ = meta.model_preset;
+        }
     }
 
     message_count_ = static_cast<int>(messages.size());
@@ -246,9 +252,16 @@ SessionMeta SessionManager::load_session_meta(const std::string& session_id) con
 
 void SessionManager::set_active_provider(const std::string& provider,
                                          const std::string& model) {
+    set_active_provider(provider, model, std::string{});
+}
+
+void SessionManager::set_active_provider(const std::string& provider,
+                                         const std::string& model,
+                                         const std::string& model_preset) {
     std::lock_guard<std::mutex> lk(mu_);
     provider_name_ = provider;
     model_name_ = model;
+    model_preset_ = model_preset;
     if (created_) {
         update_meta();
     }
@@ -375,6 +388,7 @@ std::string SessionManager::fork_session_to_new_id(
     meta.summary         = last_user_summary;
     meta.provider        = provider_name_;
     meta.model           = model_name_;
+    meta.model_preset    = model_preset_;
     meta.title           = title;
     meta.forked_from     = forked_from_id;
     meta.fork_message_id = fork_message_id;
@@ -434,6 +448,7 @@ void SessionManager::update_meta() {
     meta.summary = last_user_summary_;
     meta.provider = provider_name_;
     meta.model = model_name_;
+    meta.model_preset = model_preset_;
     meta.title = pending_title_;
     SessionStorage::write_meta(meta_path_str_, meta);
 }

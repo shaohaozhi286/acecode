@@ -48,6 +48,7 @@ TEST(SessionStorage, MetaRoundtrip) {
     in.summary       = "fix the resume bug";
     in.provider      = "copilot";
     in.model         = "gpt-4o";
+    in.model_preset  = "copilot-fast";
     in.title         = "resume bug";
 
     SessionStorage::write_meta(meta_path, in);
@@ -61,6 +62,7 @@ TEST(SessionStorage, MetaRoundtrip) {
     EXPECT_EQ(out.summary,       in.summary);
     EXPECT_EQ(out.provider,      in.provider);
     EXPECT_EQ(out.model,         in.model);
+    EXPECT_EQ(out.model_preset,  in.model_preset);
     EXPECT_EQ(out.title,         in.title);
 }
 
@@ -90,6 +92,8 @@ TEST(SessionStorage, LegacyMetaWithoutTitle) {
     ASSERT_NO_THROW(out = SessionStorage::read_meta(meta_path));
     EXPECT_EQ(out.id, "legacy-id");
     EXPECT_EQ(out.message_count, 3);
+    EXPECT_TRUE(out.model_preset.empty())
+        << "legacy meta without 'model_preset' must deserialize to empty preset";
     EXPECT_TRUE(out.title.empty())
         << "legacy meta without 'title' must deserialize to empty title";
 }
@@ -113,6 +117,8 @@ TEST(SessionStorage, EmptyTitleIsOmittedOnWrite) {
                          std::istreambuf_iterator<char>());
     EXPECT_EQ(content.find("\"title\""), std::string::npos)
         << "empty title should be omitted from the serialized JSON; got: " << content;
+    EXPECT_EQ(content.find("\"model_preset\""), std::string::npos)
+        << "empty model_preset should be omitted from the serialized JSON; got: " << content;
 }
 
 // 场景:desktop visibility 是 project-level workspace.json marker,不是

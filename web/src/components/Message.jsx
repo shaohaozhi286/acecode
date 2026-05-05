@@ -47,60 +47,13 @@ function HoverActions({ messageId, getCopyText, onFork }) {
   );
 }
 
-function queuedStatusLabel(state) {
-  if (state === 'sending') return '发送中';
-  if (state === 'failed') return '发送失败';
-  return '排队中';
-}
-
-function UserBubble({ content, ts, messageId, queued, onCancelQueued, onRetryQueued, onFork }) {
-  const queuedId = queued?.id || '';
-  const queuedState = queued?.state || '';
-  const canCancelQueued = queuedId && queuedState === 'queued';
-  const canRetryQueued = queuedId && queuedState === 'failed';
+function UserBubble({ content, ts, messageId, onFork }) {
   return (
-    <div className="self-end max-w-[70%] flex flex-col items-end gap-0.5 group" data-queued-state={queuedState || undefined}>
+    <div className="self-end max-w-[70%] flex flex-col items-end gap-0.5 group">
       <div className="px-3.5 py-2 rounded-[14px] rounded-br-[4px] bg-accent-bg border border-accent-soft text-fg text-[13px] leading-[1.5] whitespace-pre-wrap break-words">
         {content}
       </div>
       <div className="min-h-6 flex items-center justify-end gap-1 mr-1">
-        {queued && (
-          <span
-            className={clsx(
-              'text-[10px] rounded-full px-1.5 h-5 inline-flex items-center border',
-              queuedState === 'failed'
-                ? 'text-danger border-danger/30 bg-danger-bg'
-                : 'text-fg-mute border-border bg-surface-hi',
-            )}
-            title={queued.error || queuedStatusLabel(queuedState)}
-          >
-            {queuedStatusLabel(queuedState)}
-          </span>
-        )}
-        {canRetryQueued && (
-          <button
-            type="button"
-            className="text-[10px] text-accent hover:underline px-1"
-            onClick={(event) => {
-              event.stopPropagation();
-              onRetryQueued?.(queuedId);
-            }}
-          >
-            重试
-          </button>
-        )}
-        {(canCancelQueued || canRetryQueued) && (
-          <button
-            type="button"
-            className="text-[10px] text-fg-mute hover:text-fg px-1"
-            onClick={(event) => {
-              event.stopPropagation();
-              onCancelQueued?.(queuedId);
-            }}
-          >
-            取消
-          </button>
-        )}
         {ts != null && <span className="text-[10px] text-fg-mute">{relativeTime(ts)}</span>}
         <HoverActions
           messageId={messageId}
@@ -134,10 +87,7 @@ function AssistantBubble({ content, ts, streaming, messageId, onFork }) {
           ACECode
         </div>
         <div
-          className={clsx(
-            'ace-md text-[13px] text-fg leading-[1.6] py-0.5',
-            streaming && 'ace-cursor',
-          )}
+          className="ace-md text-[13px] text-fg leading-[1.6] py-0.5"
           onClick={handleMarkdownClick}
           dangerouslySetInnerHTML={html}
         />
@@ -222,12 +172,18 @@ function SystemRow({ role, content }) {
 }
 
 export const Message = memo(function Message({
-  role, content, ts, streaming, messageId, queued, onCancelQueued, onRetryQueued, onFork,
+  role, content, ts, streaming, messageId, metadata, onFork,
 }) {
   if (role === 'user') {
-    return <UserBubble content={content} ts={ts}
-                        messageId={messageId} queued={queued}
-                        onCancelQueued={onCancelQueued} onRetryQueued={onRetryQueued}
+    // expand-webui-skill-commands:daemon 把 /<skill> args 在送给 LLM 前展开为
+    // 轻量提示;原文存到 metadata.display_text,UI 优先显示原文,不让用户看到
+    // 内部展开。
+    const displayContent = (metadata && typeof metadata.display_text === 'string'
+                              && metadata.display_text.length > 0)
+      ? metadata.display_text
+      : content;
+    return <UserBubble content={displayContent} ts={ts}
+                        messageId={messageId}
                         onFork={onFork} />;
   }
   if (role === 'assistant') {

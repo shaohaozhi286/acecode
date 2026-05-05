@@ -2,11 +2,18 @@
 // 上下键在首行/末行翻 history。
 //
 // 提交按钮在右侧悬浮(只在有内容时变蓝),空内容时灰色不可点。
+//
+// 斜杠命令:value 以 / 开头且无空白时,SlashDropdown 浮层显示在输入框上方。
+// 选中后插入 `/<name> ` 到输入框,不立即发送(builtin 与 skill 行为统一)。
+// 已识别的首段命令以 chip 样式叠加渲染(overlay div 与 textarea 同度量)。
 
-import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react';
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import { clsx } from '../lib/format.js';
 import { getInputBarActionState } from '../lib/inputBarState.js';
 import { VsIcon } from './Icon.jsx';
+import { SlashDropdown } from './SlashDropdown.jsx';
+import { useSlashCommands } from './SlashCommandsContext.jsx';
+import { parseLeadingCommand } from '../lib/slashCommands.js';
 
 const MAX_ROWS = 8;
 const LINE_HEIGHT = 20; // 与 leading-[20px] 对齐
@@ -16,8 +23,13 @@ export const InputBar = forwardRef(function InputBar({
 }, ref) {
   const [value, setValue] = useState('');
   const [histPtr, setHistPtr] = useState(-1);
+  const [dropdownClosed, setDropdownClosed] = useState(false); // Esc 关闭后,直到首段变化或重新输入 / 才重开
   const ta = useRef(null);
   const isHero = variant === 'hero';
+
+  const slashCtx = useSlashCommands();
+  const commands = slashCtx?.commands || [];
+  const knownNames = useMemo(() => commands.map((c) => c.name), [commands]);
 
   useImperativeHandle(ref, () => ({
     focus: () => ta.current?.focus(),
@@ -33,12 +45,36 @@ export const InputBar = forwardRef(function InputBar({
   };
   useEffect(autosize, [isHero, value]);
 
+  // 触发条件:value 非空、首字符 /、整段无空白
+  const showDropdownRaw = value.length > 0 && value[0] === '/' && !/\s/.test(value);
+  const showDropdown = showDropdownRaw && !dropdownClosed && commands.length > 0;
+
+  // value 变化:首段不再是 / 时复位 dropdownClosed,允许下次重新出现
+  useEffect(() => {
+    if (!showDropdownRaw) setDropdownClosed(false);
+  }, [showDropdownRaw]);
+
+  const handleSelectCommand = (item) => {
+    if (!item) return;
+    const next = '/' + item.name + ' ';
+    setValue(next);
+    setDropdownClosed(true);
+    requestAnimationFrame(() => {
+      const el = ta.current;
+      if (el) {
+        el.focus();
+        el.setSelectionRange(next.length, next.length);
+      }
+    });
+  };
+
   const submit = () => {
     const v = value.trim();
     if (!v || disabled) return;
     onSubmit?.(value);
     setValue('');
     setHistPtr(-1);
+    setDropdownClosed(false);
     requestAnimationFrame(() => ta.current?.focus());
   };
 
@@ -52,6 +88,8 @@ export const InputBar = forwardRef(function InputBar({
   };
 
   const onKey = (e) => {
+    // 下拉打开时,Enter / Tab / Esc / 方向键 由 SlashDropdown 在捕获阶段处理。
+    // 这里只处理常规情况。
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       submit();
@@ -73,7 +111,12 @@ export const InputBar = forwardRef(function InputBar({
   };
 
   const actionState = getInputBarActionState({ value, disabled, busy });
-  const hasText = actionState.hasText;
+
+  // 命令 chip overlay:首段是已知命令时,在 textarea 上叠一层透明 div,首段包 chip span。
+  const leading = useMemo(() => parseLeadingCommand(value, knownNames), [value, knownNames]);
+  const showChip = leading.name != null;
+  const chipText = showChip ? value.slice(0, leading.headLength) : '';
+  const restText = showChip ? value.slice(leading.headLength) : '';
 
   return (
     <div className={clsx(
@@ -83,6 +126,28 @@ export const InputBar = forwardRef(function InputBar({
         'relative bg-surface border-[1.5px] border-border focus-within:border-accent focus-within:ring-2 focus-within:ring-accent/15 transition',
         isHero ? 'ace-inputbar-hero-card rounded-2xl' : 'rounded-xl',
       )}>
+        {showDropdown && (
+          <SlashDropdown
+            items={commands}
+            query={value.slice(1)}
+            onSelect={handleSelectCommand}
+            onClose={() => setDropdownClosed(true)}
+          />
+        )}
+        {/* chip overlay: pointer-events:none, 透明文本,只让首段 chip 着色 */}
+        {showChip && (
+          <div
+            aria-hidden="true"
+            className={clsx(
+              'absolute inset-0 pointer-events-none whitespace-pre-wrap break-words leading-[20px] font-sans overflow-hidden',
+              isHero ? 'px-4 py-3 pr-14 text-[14px]' : 'px-3 py-2 pr-12 text-[13px]',
+            )}
+            style={{ color: 'transparent' }}
+          >
+            <span className="ace-slash-chip">{chipText}</span>
+            <span>{restText}</span>
+          </div>
+        )}
         <textarea
           ref={ta}
           rows={1}
@@ -92,7 +157,7 @@ export const InputBar = forwardRef(function InputBar({
           disabled={disabled}
           placeholder={placeholder}
           className={clsx(
-            'w-full resize-none bg-transparent border-0 outline-none leading-[20px] font-sans text-fg placeholder:text-fg-mute disabled:opacity-50',
+            'relative w-full resize-none bg-transparent border-0 outline-none leading-[20px] font-sans text-fg placeholder:text-fg-mute disabled:opacity-50',
             isHero ? 'px-4 py-3 pr-14 text-[14px]' : 'px-3 py-2 pr-12 text-[13px]',
           )}
           style={{ height: LINE_HEIGHT + (isHero ? 28 : 16) }}
@@ -145,9 +210,6 @@ export const InputBar = forwardRef(function InputBar({
       </div>
       <div className={clsx('mt-1 px-1 text-[10px] text-fg-mute flex justify-between', isHero && 'px-3')}>
         <span>{actionState.helperText}</span>
-        {value.startsWith('/') && (
-          <span className="text-accent">/ 命令模式</span>
-        )}
       </div>
     </div>
   );

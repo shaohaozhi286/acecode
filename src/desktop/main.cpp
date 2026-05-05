@@ -15,9 +15,11 @@
 
 #include "daemon_pool.hpp"
 #include "folder_picker.hpp"
+#include "notifications_win.hpp"
 #include "open_in_explorer.hpp"
 #include "pick_active.hpp"
 #include "splash_screen.hpp"
+#include "tray_icon_win.hpp"
 #include "url_builder.hpp"
 #include "web_host.hpp"
 #include "workspace_registry.hpp"
@@ -495,7 +497,68 @@ int main(int, char**) {
     const bool desktop_debug = is_desktop_debug_mode();
     WebHost host(/*debug=*/desktop_debug, WebHost::StartupWindowMode::OffscreenUntilReady);
     host.set_title("ACECode");
-    host.set_size(1280, 820);
+    host.set_size(kDefaultDesktopWindowWidth, kDefaultDesktopWindowHeight);
+
+    // 系统托盘 + 通知 — 见 openspec/changes/add-desktop-attention-notifications。
+    // 必须在 host.run() 之前 init,失败 → 主流程不阻断,只是没有托盘 / 通知。
+    auto bring_window_foreground = [&host]() {
+#ifdef _WIN32
+        auto* hwnd = static_cast<HWND>(host.native_window());
+        if (hwnd && ::IsWindow(hwnd)) {
+            if (::IsIconic(hwnd)) ::ShowWindow(hwnd, SW_RESTORE);
+            else                  ::ShowWindow(hwnd, SW_SHOW);
+            ::SetForegroundWindow(hwnd);
+        }
+#else
+        (void)host;
+#endif
+    };
+
+    void* tray_message_hwnd = nullptr;
+    bool tray_ok = init_tray_icon(
+        /*on_show=*/[&bring_window_foreground]() { bring_window_foreground(); },
+        /*on_quit=*/[&host]() {
+            // host.close_window 走 WM_CLOSE → host_window_proc 走 PostQuitMessage,
+            // host.run() 退出。和左上角×按钮路径一致。
+            host.close_window();
+        },
+        &tray_message_hwnd);
+    if (tray_ok) {
+        init_notifications(tray_message_hwnd);
+        // click_handler:把窗口拉前 + 通过 webview eval 让前端跳到对应 session。
+        // 同 workspace 直接调 in-page bridge;跨 workspace 走 search palette
+        // 已有的 activateAndOpenSession 路径(整页 navigate ?open=<sid>)。
+        set_click_handler([&host, &active_mu, &active_hash_dynamic, &bring_window_foreground](
+                              const std::string& /*id*/,
+                              const std::string& workspace_hash,
+                              const std::string& session_id) {
+            bring_window_foreground();
+            std::string current_active;
+            {
+                std::lock_guard<std::mutex> lk(active_mu);
+                current_active = active_hash_dynamic;
+            }
+            // 用 nlohmann::json 做字符串字面量转义,避免手拼 JS 时被 sid 里的引号
+            // / 反斜杠 / 控制字符注入。
+            std::string ws_lit = nlohmann::json(workspace_hash).dump();
+            std::string sid_lit = nlohmann::json(session_id).dump();
+            std::string js;
+            const bool same_workspace = (workspace_hash.empty() ||
+                                         workspace_hash == current_active);
+            if (same_workspace) {
+                js = "(function(){try{if(window.aceDesktop_focusSessionFromBridge){"
+                     "window.aceDesktop_focusSessionFromBridge(" + sid_lit + ");}"
+                     "}catch(e){}})();";
+            } else {
+                js = "(function(){try{if(window.aceDesktop_activateAndOpenSession){"
+                     "window.aceDesktop_activateAndOpenSession(" + ws_lit + "," + sid_lit + ");}"
+                     "}catch(e){}})();";
+            }
+            host.eval(js);
+        });
+    } else {
+        LOG_WARN("[desktop] tray icon unavailable; OS notifications will be disabled");
+    }
 
     std::atomic<bool> page_ready_notified{false};
     auto close_splash_once = [&] {
@@ -534,6 +597,77 @@ int main(int, char**) {
         return nlohmann::json{{"ok", host.open_dev_tools()}}.dump();
     });
 
+    host.bind("aceDesktop_startWindowDrag", [&](const std::string& /*req*/) -> std::string {
+        return nlohmann::json{{"ok", host.start_window_drag()}}.dump();
+    });
+    host.bind("aceDesktop_minimizeWindow", [&](const std::string& /*req*/) -> std::string {
+        return nlohmann::json{{"ok", host.minimize_window()}}.dump();
+    });
+    host.bind("aceDesktop_toggleMaximizeWindow", [&](const std::string& /*req*/) -> std::string {
+        return nlohmann::json{{"ok", host.toggle_maximize_window()}}.dump();
+    });
+    host.bind("aceDesktop_closeWindow", [&](const std::string& /*req*/) -> std::string {
+        return nlohmann::json{{"ok", host.close_window()}}.dump();
+    });
+
+    // 系统通知 bridge — 前端 sessionTranscript.js 在 question_request / 回合完成时调用。
+    // payload: [{ id, workspace_hash, session_id, title, body }]。失败静默 no-op,
+    // 前端 desktopNotify.js 已经做过抑制规则判定,这里不再二次过滤。
+    host.bind("aceDesktop_notify", [&](const std::string& req) -> std::string {
+        try {
+            auto arr = nlohmann::json::parse(req);
+            if (!arr.is_array() || arr.empty() || !arr[0].is_object()) {
+                return nlohmann::json{{"ok", false}, {"error", "expect [{id,workspace_hash,session_id,title,body}]"}}.dump();
+            }
+            const auto& p = arr[0];
+            NotifyPayload payload;
+            if (p.contains("id") && p["id"].is_string())             payload.id = p["id"].get<std::string>();
+            if (p.contains("workspace_hash") && p["workspace_hash"].is_string()) payload.workspace_hash = p["workspace_hash"].get<std::string>();
+            if (p.contains("session_id") && p["session_id"].is_string()) payload.session_id = p["session_id"].get<std::string>();
+            if (p.contains("title") && p["title"].is_string())       payload.title = p["title"].get<std::string>();
+            if (p.contains("body") && p["body"].is_string())         payload.body = p["body"].get<std::string>();
+            show_notification(payload);
+            return nlohmann::json{{"ok", true}}.dump();
+        } catch (const std::exception& e) {
+            return nlohmann::json{{"ok", false}, {"error", e.what()}}.dump();
+        }
+    });
+
+    // 直接触发"切到某 session"。前端可在 SearchPalette 等场景调用,与 toast 点击
+    // 走同一 click_handler 逻辑,UX 与代码路径一致。
+    host.bind("aceDesktop_focusSession", [&host, &active_mu, &active_hash_dynamic, &bring_window_foreground](const std::string& req) -> std::string {
+        try {
+            auto arr = nlohmann::json::parse(req);
+            if (!arr.is_array() || arr.empty() || !arr[0].is_object()) {
+                return nlohmann::json{{"ok", false}, {"error", "expect [{workspace_hash,session_id}]"}}.dump();
+            }
+            const auto& p = arr[0];
+            std::string ws  = p.value("workspace_hash", std::string{});
+            std::string sid = p.value("session_id", std::string{});
+            if (sid.empty()) {
+                return nlohmann::json{{"ok", false}, {"error", "session_id required"}}.dump();
+            }
+            bring_window_foreground();
+            std::string current_active;
+            {
+                std::lock_guard<std::mutex> lk(active_mu);
+                current_active = active_hash_dynamic;
+            }
+            const bool same_workspace = (ws.empty() || ws == current_active);
+            std::string ws_lit = nlohmann::json(ws).dump();
+            std::string sid_lit = nlohmann::json(sid).dump();
+            std::string js = same_workspace
+                ? "(function(){try{if(window.aceDesktop_focusSessionFromBridge){"
+                  "window.aceDesktop_focusSessionFromBridge(" + sid_lit + ");}}catch(e){}})();"
+                : "(function(){try{if(window.aceDesktop_activateAndOpenSession){"
+                  "window.aceDesktop_activateAndOpenSession(" + ws_lit + "," + sid_lit + ");}}catch(e){}})();";
+            host.eval(js);
+            return nlohmann::json{{"ok", true}}.dump();
+        } catch (const std::exception& e) {
+            return nlohmann::json{{"ok", false}, {"error", e.what()}}.dump();
+        }
+    });
+
     host.bind("aceDesktop_openInExplorer", [&](const std::string& req) -> std::string {
         try {
             auto arr = nlohmann::json::parse(req);
@@ -561,9 +695,16 @@ int main(int, char**) {
     // navigate 前注入 JS: hook console + window 错误事件 → 全部转发回 native。
     // 故意不 hook console.log / console.info,避免噪音(可在前端代码里需要时
     // 显式调 aceDesktop_logFromWeb('info', ...))。
+#ifdef _WIN32
+    constexpr const char* kFramelessWindowFlag = "true";
+#else
+    constexpr const char* kFramelessWindowFlag = "false";
+#endif
     host.init_script(std::string("window.__ACECODE_DESKTOP_SHELL__=true;\n") +
                                      "window.__ACECODE_DESKTOP_DEBUG__=" +
-                                     (desktop_debug ? "true" : "false") + ";\n" + R"JS(
+                                     (desktop_debug ? "true" : "false") + ";\n" +
+                                     "window.__ACECODE_FRAMELESS_WINDOW__=" +
+                                     kFramelessWindowFlag + ";\n" + R"JS(
     (function () {
       var notifyReady = function () {
         try {
@@ -811,6 +952,10 @@ int main(int, char**) {
             acecode::write_last_active_workspace_hash(active_hash_dynamic);
         }
     }
+    // 退出前撤销系统通知 + 移除托盘图标。顺序与 init 相反。
+    shutdown_notifications();
+    shutdown_tray_icon();
+
     auto failures = pool.stop_all();
     return failures.empty() ? 0 : 100; // 部分失败返回非零便于诊断
 }

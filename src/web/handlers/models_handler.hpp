@@ -12,6 +12,7 @@
 
 #include "../../config/config.hpp"
 #include "../../config/saved_models.hpp"
+#include "../../session/session_client.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -34,5 +35,9 @@ nlohmann::json list_models(const AppConfig& cfg);
 // 未命中返回 nullopt。
 std::optional<ModelProfile>
 find_model_by_name(const AppConfig& cfg, const std::string& name);
+
+// Serialize current per-session model state for GET/POST
+// /api/sessions/:id/model.
+nlohmann::json model_state_to_json(const SessionModelState& state);
 
 } // namespace acecode::web

@@ -5,6 +5,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { clsx } from '../lib/format.js';
+import { optionLabel } from '../lib/sessionModel.js';
 import { VsIcon } from './Icon.jsx';
 
 const MODES = [
@@ -13,7 +14,15 @@ const MODES = [
   { id: 'yolo',        label: 'Yolo',         hint: '跳过所有确认',                       color: 'danger' },
 ];
 
-export function StatusBar({ model = '—', turns = 0, branch = '' }) {
+export function StatusBar({
+  model = '—',
+  turns = 0,
+  branch = '',
+  modelOptions = [],
+  selectedModelName = '',
+  modelSwitching = false,
+  onModelChange,
+}) {
   const [mode, setMode] = useState('default');
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
@@ -67,7 +76,24 @@ export function StatusBar({ model = '—', turns = 0, branch = '' }) {
           </div>
         )}
       </div>
-      <span className="px-1.5 py-px rounded bg-surface-hi text-[10px]">{model}</span>
+      {onModelChange && modelOptions.length > 0 ? (
+        <select
+          value={selectedModelName || ''}
+          disabled={modelSwitching}
+          onChange={(e) => onModelChange(e.target.value)}
+          title={model}
+          className="h-[18px] max-w-[220px] px-1.5 py-0 rounded bg-surface-hi border border-transparent text-[10px] text-fg-mute outline-none hover:text-fg focus:border-accent disabled:opacity-60"
+        >
+          {!selectedModelName && <option value="">{model}</option>}
+          {modelOptions.map((option) => (
+            <option key={option.name} value={option.name}>
+              {optionLabel(option)}
+            </option>
+          ))}
+        </select>
+      ) : (
+        <span className="px-1.5 py-px rounded bg-surface-hi text-[10px] max-w-[220px] truncate" title={model}>{model}</span>
+      )}
       <span>{turns} 轮次</span>
       {branch && <span className="ml-auto truncate max-w-[40%]">{branch}</span>}
       {!branch && <span className="ml-auto" />}

@@ -53,9 +53,10 @@ std::vector<std::string> register_skill_commands(CommandRegistry& cmd_registry,
                 return;
             }
 
-            std::string body = skill_registry.read_skill_body(skill_name);
-            auto files = skill_registry.list_supporting_files(skill_name);
-            std::string message = build_activation_message(*found, body, files, args);
+            // openspec/changes/expand-webui-skill-commands:轻量调用提示。
+            // 不再注入 SKILL.md body — 多次调用同名 skill 会让 context 成倍膨胀。
+            // 让 LLM 按需用 skill_view tool 一次性加载 SKILL.md。
+            std::string message = build_skill_invocation_hint(*found, args);
 
             {
                 std::lock_guard<std::mutex> lk(ctx.state.mu);

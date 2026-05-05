@@ -161,6 +161,10 @@ web/
 
 SidePanel 折叠 UI:`ChatView` 把 `SidePanel` 包到 `<div class="ace-side-panel-shell" style={{width: collapsed ? 0 : sidePanelWidth}} data-collapsed={...}>`,折叠态宽度归 0 + opacity 过渡 200ms,SidePanel 仍 mount(tab/cache/preview 内部 state 保留)。SidePanel tab 行右端有 `.ace-side-panel-collapse-btn`(展开态),折叠态时 ChatView 顶部 header 内显示 `.ace-side-panel-expand-fab` 让用户重新展开。
 
+全局会话搜索面板(`add-webui-search-palette`):`Ctrl+K` / `Cmd+K`(经 `lib/useGlobalShortcut.js` 的 `matchShortcut` 判定,`window` keydown + preventDefault)或 TopBar 🔍 按钮触发 `SearchPalette`。前端**纯聚合**所有 workspace 的 sessions:`api.listAllWorkspaceSessions`(底层 `mergeAllWorkspaceSessions` 纯函数 + `Promise.allSettled`,单 workspace 失败不阻塞其它)→ `lib/searchSessions.js::rankSessions` 加权排序(title 前缀 +1000 / 子串 +500 / summary +200 / workspaceName +100 / fuzzy 兜底 +50,叠 24h/7d/30d 时间衰减 0~50)→ z-300 居中模态。键盘导航 ↑/↓/PgUp/PgDn/Home/End/Enter/Esc;选中同 workspace 直接 `setActiveRef`;跨 workspace 优先 `aceDesktop_activateWorkspace` + 整页 navigate `?open=<sid>`(App.jsx mount 时解析并 `replaceState` 抹掉 query),无 bridge 时降级直接 setActiveRef。数据 60s TTL 缓存,`session_status` / `session_status_snapshot` / `mark_session_read_ack` 任一 WS 帧到达即 invalidate。**后端零路由变更**。
+
+排队卡片栈(`redesign-webui-queue-cards`):busy 期间提交的待发送消息**不进 transcript**,改由 `<QueueCardList>`(在 `<InputBar>` 上方)渲染成卡片堆。状态机(`lib/chatInputQueue.js`)与 `enqueueQueuedInput` / `cancelQueuedInput` / `markQueuedInput*` / `nextQueuedInput` / `completeQueuedInputForMessage` 全部不变;只是渲染分支换地方。每张卡片左侧 3px `.ace-queue-card-indicator` 色条标注状态(QUEUED 灰 / FAILED 红),右侧恒挂"取消"(close 图标),FAILED 多一个"重试"。状态↔标签映射收敛在 `lib/queueCardItem.js::buildQueueCardItem`(纯函数,Node 单测覆盖);DOM 端只是把这份结构映射到 className。`Message.jsx::UserBubble` 已剥离 `queued`/`onCancelQueued`/`onRetryQueued` props——transcript 里出现的 user 气泡一定是后端真实落库的消息。
+
 ### Web UI: HTTP / WS 协议增量
 
 `add-web-chat-ui` change 在 `add-web-daemon` 的 14 条 Requirement 之上扩 9 项;`enhance-webui-chat-rendering` 又扩 1 个端点 + 协议字段;`add-webui-side-panel` 加 2 个文件浏览端点:
@@ -176,6 +180,8 @@ SidePanel 折叠 UI:`ChatView` 把 `SidePanel` 包到 `<div class="ace-side-pane
 | `PUT /api/skills/:name` body `{enabled}` / `GET /api/skills/:name/body` | 启停切换 + 查看 SKILL.md;PUT 写 `cfg.skills.disabled` 数组并 `save_config` + `SkillRegistry::reload` |
 | `GET /api/files?cwd=&path=&show_hidden=` → `[{name,path,kind,size?,modified_ms?}]` | SidePanel 文件 tab 的 lazy 文件树。`cwd` 必须 ∈ `{deps.cwd}` 白名单;`path` 走 `weakly_canonical(cwd/path)` + prefix 检查防越权。硬编码 noise 黑名单(.git/node_modules/dist/build/__pycache__/.venv/venv/target/.next/.cache)始终过滤。隐藏文件(dot 开头)默认过滤,`show_hidden=1` 透出 |
 | `GET /api/files/content?cwd=&path=` → `text/plain; charset=utf-8` body | SidePanel 预览 tab 读文件原文。> 5MB → 415 `{error:"file too large",size:N}`;前 512 字节出现 `\0` → 415 `{error:"binary"}`;不存在 → 404。实现:`src/web/handlers/files_handler.{hpp,cpp}`(纯函数,17 个 unit test 覆盖路径越权 / 噪音过滤 / 排序 / 二进制嗅探) |
+| `GET /api/commands?workspace=<hash>` → `{builtins:[{name,description}][, skills:[{name,description}]]}` | InputBar 斜杠下拉的命令清单。builtins **硬编码白名单 = init + compact**(描述与 TUI `register_builtin_commands` / `register_init_command` 对齐)。**`workspace` 参数(由 `expand-webui-skill-commands` 引入)**:缺省 → 不返回 `skills` 字段(向后兼容旧客户端);提供 → handler 用 `acecode::initialize_skill_registry(tmp, *cfg, workspace_cwd)` 临时构造一个 SkillRegistry 扫该 workspace 的项目链(`.agent/skills`、`.acecode/skills` + 全局 + external_dirs),与 daemon 全局 SkillRegistry 合并(workspace local 优先,first-wins by name),按字典序输出 skills 字段。`/init` `/compact` 在 web 端选中后只插入输入框 + chip 高亮,daemon 端**不**做特殊执行(原 add-webui-slash-commands 决策);`/<skill-name> args` 由下面新加的 expander 真展开。实现:`src/web/handlers/commands_handler.{hpp,cpp}`(纯函数 `build_commands_payload` + gtest case)|
+| `POST /api/sessions/:id/messages`(行为扩展) | `expand-webui-skill-commands` 引入:在 `send_input` 之前调 `try_expand_skill_command(text, registry)`(`src/web/handlers/skill_command_expander.{hpp,cpp}`)。命中已知 skill 名(按 session 的 workspace cwd 临时 scan)→ text 被替换为 `build_skill_invocation_hint(meta, args)` 的**轻量提示**:`[SYSTEM: User invoked /<name> skill] + Description + Use skill_view(name=...) to load full SKILL.md + User's request: <args>`。**不**注入 SKILL.md body / supporting_files,LLM 第一次看到提示后主动 invoke `skill_view` tool 把 SKILL.md 拉一次进 context,后续重复同名 `/skill` 调用不再注入(避免 context 膨胀)。TUI `src/skills/skill_commands.cpp::cmd.execute` 也走同一个 `build_skill_invocation_hint`,跨端行为统一。Builtin (`/init`/`/compact`) 不在 SkillRegistry 中 → 透传走普通 user message;未知命令 (`/foobar`) 同样透传。**不**新增执行端点,**不**改 AgentLoop API |
 
 `SessionMeta` 增加 `forked_from` / `fork_message_id` 字段(空时省略,老 meta 文件向后兼容)。Web 上每条消息 hover 浮出 `[复制] [分叉]` actions(codex 风格);分叉成功后立刻切到新 session(同 sidebar)。
 
@@ -193,13 +199,18 @@ handler 实现在 `src/web/handlers/{fork,models,history,skills,files}_handler.{
 - `pick_active.{hpp,cpp}` — 启动选 active workspace 的纯函数:`state.json::last_active_workspace_hash` → process cwd 的 hash → registry 第一项 → 空。
 - `folder_picker_win.cpp` — `IFileOpenDialog` + `FOS_PICKFOLDERS`,COM STA。
 - `web_host.{hpp,cpp}` — webview 包装,暴露 `bind/eval/init_script/native_window`,debug=true 默认开 F12 DevTools。
-- `main.cpp::wWinMain` — 串起所有,quit 时写 `last_active_workspace_hash` + `pool.stop_all()`。
+- `tray_icon_win.{hpp,cpp}` / `notifications_win.{hpp,cpp}` — 系统托盘 + OS 气泡通知。tray 注册 hidden message-only window,WndProc 接 `Shell_NotifyIcon` 回调消息(`NIN_BALLOONUSERCLICK` / `WM_RBUTTONUP` 等);通知用 `Shell_NotifyIconW(NIM_MODIFY, NIF_INFO)` piggyback 在同一图标上。`init_tray_icon` → `init_notifications(tray_hwnd)`,顺序不能反。V1 仅气泡,V2 计划接 WinRT ToastNotificationManager(需 AUMID + 开始菜单 .lnk + cppwinrt)。
+- `main.cpp::wWinMain` — 串起所有,quit 时写 `last_active_workspace_hash` + `pool.stop_all()` + `shutdown_notifications()` + `shutdown_tray_icon()`。
 
 JS↔C++ bridge(同进程,webview `bind`,无 HTTP):
 - `aceDesktop_listWorkspaces()` → `[{hash, cwd, name, daemon_state, active, port?, token?}]`
 - `aceDesktop_activateWorkspace(hash)` → `{port, token}` 或 `{error}`
 - `aceDesktop_renameWorkspace(hash, name)` → `{ok}` 或 `{error}`
 - `aceDesktop_addWorkspace()` → `{hash, cwd, name}` 或 `null`(取消)
+- `aceDesktop_notify({id, workspace_hash, session_id, title, body})` → `{ok}` — 投递 OS 系统通知(`add-desktop-attention-notifications`),前端在 `sessionTranscript.js` 命中 `question_request` / busy→idle+回合有 assistant 输出 时调用;前端 `lib/desktopNotify.js::shouldSuppress` 已根据 `health.notifications` cfg + `document.hasFocus()` + 当前 active session 做抑制规则,native 端不二次过滤。
+- `aceDesktop_focusSession({workspace_hash, session_id})` → `{ok}` — 把窗口拉前 + 切 session。toast 点击在 native click_handler 里走相同路径(`SetForegroundWindow + ShowWindow(SW_RESTORE)` + `webview.eval` 调 `window.aceDesktop_focusSessionFromBridge` / `window.aceDesktop_activateAndOpenSession`,后两个由 `App.jsx` mount 时注册到 window)。
+
+桌面通知抑制规则(`config.desktop.notifications`,默认四个 bool 均 true):`enabled` 总开关 / `on_question` AskUserQuestion 触发 / `on_completion` 回合完成触发 / `suppress_when_focused` 当前 session 已可见且窗口聚焦时跳过(避免对正盯屏的用户重复打扰)。配置经 `/api/health` 透传给前端(`health.notifications`),`lib/desktopNotify.js::maybeNotify` 一站式构造 payload + 抑制 + 投递。**多 workspace v1 限制**:webview 只连 active workspace 的 daemon,后台 workspace 的事件感知不到;v2 future work。
 
 切换 workspace 走**整页 navigate**(对设计稿 D6"无重载切换"的合理偏离):跨 loopback 端口 fetch 受 CORS 拦截,整页 navigate 让 origin 跟着切。代价是滚动 / 弹窗状态丢失,但 input box 清空 / 消息列表替换符合 spec。后续若加 `Access-Control-Allow-Origin: http://127.0.0.1:*` 可恢复无重载。
 
@@ -221,6 +232,8 @@ Both `main.cpp` and `daemon/worker.cpp` call `proxy_resolver().init(cfg.network)
 `ProxyResolver::effective(target_url)` priority: session override > `mode=off` > manual `proxy_url` > auto platform path > direct. NO_PROXY filters host (suffix `.foo.com`, bare suffix, `*` wildcard, case-insensitive). SOCKS5 via `manual proxy_url = "socks5://..."` (libcurl native).
 
 **Behavior change:** Windows users upgrading get `proxy_mode = "auto"` by default, which means ACECode now follows the system proxy. To keep the old direct-only behavior: `{"network":{"proxy_mode":"off"}}`.
+
+**Auto-fallback on unreachable proxy** (`proxy-fallback-on-unreachable`): 启动时调用 `proxy_resolver().probe_and_maybe_fallback()` 在 `init` 之后做一次同步 TCP probe(`src/network/tcp_probe.{hpp,cpp,_posix.cpp,_win.cpp}`)— 对解析出的代理 host:port 做非阻塞 connect + poll/WSAPoll,失败时设进程级 `fallback_active_`。横幅变成 `Proxy: direct (auto-fallback: <redacted-original-url> from <original-source> unreachable)`,所有 cpr 走直连。`/proxy` 输出新增 `Reachable : yes/no (<reason>)`,fallback 时多一行 `Original proxy : <url> (<source>)`。`/proxy refresh` 同时清 fallback + 重探(用户启动 Fiddler 后立即生效)。两个新配置:`network.proxy_probe_enabled`(默认 true,false = 一键回到旧行为)、`network.proxy_probe_timeout_ms`(默认 1500,clamp 到 [200, 10000])。Session override (`/proxy off` / `/proxy set`) 永远胜过 fallback — 用户显式意志不被二次猜测。
 
 ### Web Search
 
@@ -281,7 +294,9 @@ Both `main.cpp` and `daemon/worker.cpp` call `proxy_resolver().init(cfg.network)
     "proxy_url": "",
     "proxy_no_proxy": "",
     "proxy_ca_bundle": "",
-    "proxy_insecure_skip_verify": false
+    "proxy_insecure_skip_verify": false,
+    "proxy_probe_enabled": true,
+    "proxy_probe_timeout_ms": 1500
   },
   "web_search": {
     "enabled": true,
@@ -291,6 +306,14 @@ Both `main.cpp` and `daemon/worker.cpp` call `proxy_resolver().init(cfg.network)
     "timeout_ms": 8000
   },
   "tui": { "alt_screen_mode": "auto" },
+  "desktop": {
+    "notifications": {
+      "enabled": true,
+      "on_question": true,
+      "on_completion": true,
+      "suppress_when_focused": true
+    }
+  },
   "saved_models": [
     { "name": "local-lm", "provider": "openai", "base_url": "http://localhost:1234/v1", "api_key": "x", "model": "llama-3" },
     { "name": "copilot-fast", "provider": "copilot", "model": "gpt-4o" }

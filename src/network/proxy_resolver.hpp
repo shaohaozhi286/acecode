@@ -69,7 +69,23 @@ public:
     void init(const NetworkConfig& cfg);
 
     // 重新探测 auto 模式下的系统代理。manual / off 模式下是 no-op。
+    // 同时清除 fallback flag 并重跑 TCP probe(refresh 语义 = 重判一切)。
     void refresh();
+
+    // openspec/changes/proxy-fallback-on-unreachable:启动后立即调一次,
+    // 失败时设置 fallback flag,后续 effective() 强制返回 {"", "auto-fallback"}。
+    // probe_enabled=false / 直连 / 解析不出 host 时 no-op。线程安全。
+    void probe_and_maybe_fallback();
+
+    // /proxy 命令显示用 — fallback 状态快照(若激活)。
+    struct FallbackInfo {
+        bool active = false;
+        std::string original_url;     // 已脱敏的原代理 URL
+        std::string original_source;  // 比如 "windows-system" / "manual"
+        std::string reason;           // tcp_probe_reason_name(...) 输出
+    };
+    FallbackInfo fallback_info_snapshot() const;
+    bool is_fallback_active() const;
 
     // 解析当前生效代理。target_url 用于:(a) 选择 http/https 子代理、
     // (b) 跑 NO_PROXY 匹配。空 URL 视作 https。
@@ -103,8 +119,18 @@ private:
     std::string session_override_url_;
     std::vector<std::string> no_proxy_list_;
 
+    // openspec/changes/proxy-fallback-on-unreachable:进程级 fallback 状态。
+    // probe_and_maybe_fallback() 写,effective() 在 session override 之后读;
+    // refresh() 清空。
+    bool fallback_active_ = false;
+    std::string fallback_original_url_;     // 已脱敏
+    std::string fallback_original_source_;
+    std::string fallback_reason_;
+
     void rebuild_no_proxy_list_unlocked();
     ResolvedProxy resolve_auto_unlocked(const std::string& target_url) const;
+    // 持有 mu_ 时调用 — 内部探测后写 fallback 字段。返回 true = fallback 激活。
+    bool probe_and_maybe_fallback_unlocked();
 };
 
 // 进程级单例。Meyers singleton + 内部 mutex,跨线程安全。

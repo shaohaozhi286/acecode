@@ -5,6 +5,7 @@
 
 #include "proxy_resolver.hpp"
 
+#include "tcp_probe.hpp"
 #include "../utils/logger.hpp"
 
 #include <algorithm>
@@ -47,6 +48,32 @@ std::string host_of(const std::string& url) {
     auto end = rest.find_first_of("/:?#");
     if (end != std::string::npos) rest = rest.substr(0, end);
     return to_lower(rest);
+}
+
+// 从 URL 抽出 port。无显式 port → 按 scheme 默认(http=80, https=443,
+// socks*/socks=1080)。无法解析 → 0。
+int port_of(const std::string& url) {
+    auto sp = url.find("://");
+    if (sp == std::string::npos) return 0;
+    auto rest = url.substr(sp + 3);
+    auto at = rest.find('@');
+    if (at != std::string::npos) rest = rest.substr(at + 1);
+    // 找 port:host[:port][/...]
+    auto path_or_q = rest.find_first_of("/?#");
+    std::string hostport = (path_or_q == std::string::npos) ? rest : rest.substr(0, path_or_q);
+    auto colon = hostport.rfind(':');
+    if (colon != std::string::npos) {
+        std::string p = hostport.substr(colon + 1);
+        try {
+            int v = std::stoi(p);
+            if (v > 0 && v <= 65535) return v;
+        } catch (...) {}
+    }
+    std::string scheme = to_lower(url.substr(0, sp));
+    if (scheme == "https") return 443;
+    if (scheme == "http")  return 80;
+    if (scheme.rfind("socks", 0) == 0) return 1080;
+    return 0;
 }
 
 // 从 URL 抽出 user:pass(若有)。返回 (username, password);
@@ -168,13 +195,92 @@ void ProxyResolver::init(const NetworkConfig& cfg) {
     auto_cache_valid_ = false;
     session_override_ = SessionOverride::None;
     session_override_url_.clear();
+    fallback_active_ = false;
+    fallback_original_url_.clear();
+    fallback_original_source_.clear();
+    fallback_reason_.clear();
     rebuild_no_proxy_list_unlocked();
 }
 
 void ProxyResolver::refresh() {
     std::lock_guard<std::mutex> lk(mu_);
     auto_cache_valid_ = false; // 下次 effective() 时重新探测
+    // 清 fallback 状态:refresh 语义是"重判一切",让 probe 重新决定。
+    fallback_active_ = false;
+    fallback_original_url_.clear();
+    fallback_original_source_.clear();
+    fallback_reason_.clear();
     rebuild_no_proxy_list_unlocked();
+    // 重跑探测;调用持锁版本避免重入。
+    probe_and_maybe_fallback_unlocked();
+}
+
+bool ProxyResolver::probe_and_maybe_fallback_unlocked() {
+    if (!cfg_.proxy_probe_enabled) return false;
+
+    // 预解析 effective url(不重入 effective()):内联 session override 与
+    // config-mode 分支的 URL 计算,**不**复用 effective() 因为后者会读
+    // fallback_active_,而我们正要决定它。
+    std::string url;
+    std::string source;
+    if (session_override_ == SessionOverride::ForceOff) {
+        return false;
+    } else if (session_override_ == SessionOverride::ForceManual) {
+        url = normalize_proxy_url(session_override_url_);
+        source = "session-override";
+    } else if (cfg_.proxy_mode == "off") {
+        return false;
+    } else if (cfg_.proxy_mode == "manual") {
+        url = normalize_proxy_url(cfg_.proxy_url);
+        source = "manual";
+    } else {
+        // auto:走平台探测一次(忽略 cache 状态,我们正在初始化)
+        if (!auto_cache_valid_) {
+            auto_cache_ = resolve_auto_unlocked("https://example.com");
+            auto_cache_valid_ = true;
+        }
+        url = auto_cache_.url;
+        source = auto_cache_.source;
+    }
+
+    if (url.empty()) return false; // 已经直连了,没什么可探的
+
+    std::string host = host_of(url);
+    int port = port_of(url);
+    if (host.empty() || port <= 0) return false;
+
+    auto probe = current_tcp_probe();
+    auto result = probe(host, port, cfg_.proxy_probe_timeout_ms);
+    if (result.reason == TcpProbeReason::Ok) return false;
+
+    fallback_active_ = true;
+    fallback_original_url_ = redact_credentials(url);
+    fallback_original_source_ = source;
+    fallback_reason_ = tcp_probe_reason_name(result.reason);
+    LOG_WARN(std::string("[proxy] fallback to direct: ") + fallback_original_url_ +
+             " unreachable (" + fallback_reason_ +
+             (result.detail.empty() ? "" : ": " + result.detail) + ")");
+    return true;
+}
+
+void ProxyResolver::probe_and_maybe_fallback() {
+    std::lock_guard<std::mutex> lk(mu_);
+    probe_and_maybe_fallback_unlocked();
+}
+
+bool ProxyResolver::is_fallback_active() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return fallback_active_;
+}
+
+ProxyResolver::FallbackInfo ProxyResolver::fallback_info_snapshot() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    FallbackInfo info;
+    info.active = fallback_active_;
+    info.original_url = fallback_original_url_;
+    info.original_source = fallback_original_source_;
+    info.reason = fallback_reason_;
+    return info;
 }
 
 void ProxyResolver::set_session_override_off() {
@@ -234,7 +340,13 @@ ResolvedProxy ProxyResolver::effective(const std::string& target_url) const {
         return {norm, "session-override"};
     }
 
-    // 2. config-level mode
+    // 2. fallback 短路 — proxy probe 检测到代理不可达时,所有非 session-override
+    //    的代理路径都直连。session override 已在上面处理(用户显式意志胜出)。
+    if (fallback_active_) {
+        return {"", "auto-fallback"};
+    }
+
+    // 3. config-level mode
     if (cfg_.proxy_mode == "off") {
         return {"", "mode=off"};
     }
@@ -252,7 +364,7 @@ ResolvedProxy ProxyResolver::effective(const std::string& target_url) const {
         return {norm, "manual"};
     }
 
-    // 3. auto: 平台代理探测(带缓存)
+    // 4. auto: 平台代理探测(带缓存)
     // 注意 auto_detect 自身可能根据 target_url scheme 选择不同子代理,这意味着
     // 严格说 cache 应该按 (target_scheme) 分桶。当前实现简化为"探测一次,所有
     // scheme 共用同一个结果",auto_detect 内部会再根据 scheme 微调返回值。

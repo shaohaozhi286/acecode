@@ -15,6 +15,7 @@ struct SessionMeta {
     std::string summary;
     std::string provider;
     std::string model;
+    std::string model_preset;  // optional saved_models name / "(legacy)" for this session
     std::string title;  // optional user-set window title; empty = unset
 
     // Web fork 相关元数据(openspec session-fork capability)。

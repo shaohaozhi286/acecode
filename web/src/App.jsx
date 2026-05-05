@@ -1,6 +1,6 @@
 // 顶层 App:鉴权 gate(401 → TokenPrompt)+ 主壳。
 //
-// 视觉对齐设计稿方向 C:顶部 44px TopBar + 200px Sidebar + 主区(单会话/4宫格/9宫格)
+// 视觉对齐设计稿方向 C:顶部 44px TopBar + 270px Sidebar + 主区(单会话/4宫格/9宫格)
 // + 22px StatusBar。所有面板/弹框作为 overlay 渲染在主区之上。
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -8,9 +8,11 @@ import { api, ApiError } from './lib/api.js';
 import { setToken } from './lib/auth.js';
 import { connection } from './lib/connection.js';
 import { usePreference } from './lib/usePreference.js';
+import { useGlobalShortcut } from './lib/useGlobalShortcut.js';
 import { TopBar } from './components/TopBar.jsx';
 import { Sidebar } from './components/Sidebar.jsx';
 import { ChatView } from './components/ChatView.jsx';
+import { SearchPalette } from './components/SearchPalette.jsx';
 import { Grid4View } from './components/Grid4View.jsx';
 import { Grid9View } from './components/Grid9View.jsx';
 import { ExpandedOverlay } from './components/ExpandedOverlay.jsx';
@@ -21,9 +23,11 @@ import { MCPPanel } from './components/MCPPanel.jsx';
 import { SettingsPage } from './components/SettingsPage.jsx';
 import { DesktopContextMenu } from './components/DesktopContextMenu.jsx';
 import { Toaster, toast } from './components/Toast.jsx';
+import { SlashCommandsProvider } from './components/SlashCommandsContext.jsx';
 
 const SINGLE_LAYOUT_STORAGE_KEY = 'acecode.singleLayoutWidths.v1';
-const DEFAULT_SINGLE_LAYOUT = { sidebar: 200, sidePanel: 280 };
+const LEGACY_DEFAULT_SINGLE_LAYOUT = { sidebar: 200, sidePanel: 280 };
+const DEFAULT_SINGLE_LAYOUT = { sidebar: 270, sidePanel: 280 };
 const MIN_SIDEBAR_WIDTH = 160;
 const MAX_SIDEBAR_WIDTH = 360;
 const MIN_SIDE_PANEL_WIDTH = 240;
@@ -80,6 +84,7 @@ export function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [permReqs,     setPermReqs]     = useState([]);
   const [questionReqs, setQuestionReqs] = useState([]);
+  const [searchOpen,   setSearchOpen]   = useState(false);
   const [singleLayout, setSingleLayout] = usePreference(
     SINGLE_LAYOUT_STORAGE_KEY, DEFAULT_SINGLE_LAYOUT, validateLayoutWidths);
   const [uiPrefs, setUiPrefs] = usePreference(
@@ -89,6 +94,16 @@ export function App() {
   const projectSidebarCollapsed = !!uiPrefs.sidebarCollapsed;
   const singleShellRef = useRef(null);
   const sidebarResizeActiveRef = useRef(false);
+
+  useEffect(() => {
+    setSingleLayout((prev) => {
+      if (prev?.sidebar === LEGACY_DEFAULT_SINGLE_LAYOUT.sidebar
+          && prev?.sidePanel === LEGACY_DEFAULT_SINGLE_LAYOUT.sidePanel) {
+        return DEFAULT_SINGLE_LAYOUT;
+      }
+      return prev;
+    });
+  }, [setSingleLayout]);
 
   const probe = useCallback(async () => {
     try {
@@ -106,6 +121,102 @@ export function App() {
   }, []);
 
   useEffect(() => { probe(); }, [probe]);
+
+  // 解析 URL 上的 ?open=<sessionId>(SearchPalette 跨 workspace 跳转后落地用)。
+  // 解析后立即从 URL 抹掉,避免刷新二次触发。
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    const openId = params.get('open');
+    if (!openId) return;
+    setActiveRef((prev) => ({ ...(prev || {}), sessionId: openId }));
+    params.delete('open');
+    const qs = params.toString();
+    const newUrl = window.location.pathname + (qs ? '?' + qs : '');
+    window.history.replaceState(null, '', newUrl);
+  }, []);
+
+  // 桌面壳通知 click_handler 走 webview eval 调这两个 window 全局函数,见
+  // openspec/changes/add-desktop-attention-notifications。
+  // 同 workspace:focusSessionFromBridge → setActiveRef
+  // 跨 workspace:activateAndOpenSession → 复用 SearchPalette 已有的整页 navigate 逻辑
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.aceDesktop_focusSessionFromBridge = (sessionId) => {
+      if (!sessionId) return;
+      setActiveRef((prev) => ({ ...(prev || {}), sessionId: String(sessionId) }));
+    };
+    window.aceDesktop_activateAndOpenSession = async (workspaceHash, sessionId) => {
+      if (!sessionId) return;
+      const targetHash = workspaceHash || '';
+      if (targetHash && typeof window.aceDesktop_activateWorkspace === 'function') {
+        try {
+          const raw = await window.aceDesktop_activateWorkspace(targetHash);
+          const r = typeof raw === 'string' ? JSON.parse(raw) : raw;
+          if (r && !r.error && r.port && r.token) {
+            const url = `http://127.0.0.1:${r.port}/?token=${encodeURIComponent(r.token)}&open=${encodeURIComponent(sessionId)}`;
+            window.location.href = url;
+            return;
+          }
+        } catch {
+          // 降级:直接 setActiveRef
+        }
+      }
+      setActiveRef({ workspaceHash: targetHash, sessionId: String(sessionId) });
+    };
+    return () => {
+      try {
+        delete window.aceDesktop_focusSessionFromBridge;
+        delete window.aceDesktop_activateAndOpenSession;
+      } catch {
+        // strict mode 下 delete window prop 偶发抛错;static assignment 兜底
+        window.aceDesktop_focusSessionFromBridge = undefined;
+        window.aceDesktop_activateAndOpenSession = undefined;
+      }
+    };
+  }, []);
+
+  // 全局 Ctrl/Cmd+K 切换搜索面板。matchShortcut 处理大小写与修饰键。
+  useGlobalShortcut(
+    (e) => e.key && e.key.toLowerCase() === 'k' && (e.ctrlKey || e.metaKey),
+    () => setSearchOpen((o) => !o),
+    [],
+  );
+
+  const handleSelectSession = useCallback(async (session) => {
+    if (!session?.id) return;
+    setSearchOpen(false);
+    const targetHash = session.workspace_hash || '';
+    const sameWorkspace = !targetHash || targetHash === activeRef?.workspaceHash;
+
+    if (!sameWorkspace
+        && typeof window !== 'undefined'
+        && typeof window.aceDesktop_activateWorkspace === 'function') {
+      try {
+        const raw = await window.aceDesktop_activateWorkspace(targetHash);
+        const r = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        if (r && !r.error && r.port && r.token) {
+          const url = `http://127.0.0.1:${r.port}/?token=${encodeURIComponent(r.token)}&open=${encodeURIComponent(session.id)}`;
+          window.location.href = url;
+          return;
+        }
+      } catch {
+        // 降级:无 bridge 或 bridge 失败时按浏览器直访模式跳。
+      }
+    }
+
+    setActiveRef({
+      workspaceHash: targetHash,
+      contextId: 'default',
+      sessionId: session.id,
+      cwd: session.cwd || '',
+      title: session.title,
+      summary: session.summary,
+      message_count: session.message_count,
+      created_at: session.created_at,
+      updated_at: session.updated_at,
+    });
+  }, [activeRef?.workspaceHash]);
 
   useEffect(() => {
     const pushUnique = (setter, payload) => {
@@ -259,12 +370,14 @@ export function App() {
   };
 
   return (
+    <SlashCommandsProvider workspaceHash={activeRef?.workspaceHash || ''}>
     <div className="h-full w-full flex flex-col bg-bg text-fg font-sans">
       <TopBar
         view={view}
         onViewChange={switchView}
         onSettings={() => setShowSettings(true)}
         onNewSession={() => openHomeForWorkspace()}
+        onOpenSearch={() => setSearchOpen(true)}
         sidebarCollapsed={sidebarCollapsed}
         onToggleSidebar={toggleProjectSidebar}
       />
@@ -321,6 +434,12 @@ export function App() {
         {showSkills   && <SkillsPanel  onClose={() => setShowSkills(false)} />}
         {showMcp      && <MCPPanel     onClose={() => setShowMcp(false)} />}
         {showSettings && <SettingsPage onClose={() => setShowSettings(false)} health={health} />}
+        <SearchPalette
+          open={searchOpen}
+          onClose={() => setSearchOpen(false)}
+          currentWorkspaceHash={activeRef?.workspaceHash || ''}
+          onSelectSession={handleSelectSession}
+        />
         {permReq      && (
           <PermissionModal
             request={permReq}
@@ -331,5 +450,6 @@ export function App() {
       <DesktopContextMenu />
       <Toaster />
     </div>
+    </SlashCommandsProvider>
   );
 }

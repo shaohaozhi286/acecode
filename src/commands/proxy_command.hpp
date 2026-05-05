@@ -25,6 +25,14 @@ struct ProxyDisplaySnapshot {
     std::string mode;          // cfg.network.proxy_mode
     std::string ca_bundle;     // 空 = 未配置
     bool insecure = false;
+
+    // openspec/changes/proxy-fallback-on-unreachable: fallback 状态显示。
+    // active 为 false → Reachable 行显示 "yes";true → "no (<reason>)" + 多一行
+    // "Original proxy : <redacted-url> (<original-source>)"。
+    bool reachable = true;             // false = TCP probe 判定原代理不可达
+    std::string reachable_reason;      // 仅当 reachable=false 有意义,如 "Refused"
+    std::string original_proxy_url;    // 仅当 reachable=false 有意义,已脱敏
+    std::string original_proxy_source; // 仅当 reachable=false 有意义,如 "manual"
 };
 std::string format_proxy_display(const ProxyDisplaySnapshot& snap);
 

@@ -55,9 +55,9 @@ struct WebServerDeps {
     acecode::desktop::WorkspaceRegistry* workspace_registry = nullptr;
     // 非 const:PUT /api/skills/:name 要写 cfg.skills.disabled 后调 set_disabled + reload。
     SkillRegistry*             skill_registry = nullptr;
-    // POST /api/sessions/:id/model 用 — 通过 swap_provider_if_needed 改写
-    // worker.cpp 持有的 provider 句柄。两个指针一起为空时,模型切换端点
-    // 返回 503(daemon 没拿到 provider state,通常是测试 fixture 略过了)。
+    // Legacy daemon-global provider handle. Current web session model switching
+    // is session-scoped through SessionRegistry; keep this for older routes /
+    // fixtures that still inspect daemon provider state.
     std::shared_ptr<LlmProvider>* provider = nullptr;
     std::mutex*                    provider_mu = nullptr;
     bool                       dangerous = false;

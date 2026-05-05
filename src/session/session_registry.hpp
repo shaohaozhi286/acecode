@@ -19,6 +19,7 @@
 #include "../config/config.hpp"
 #include "../permissions.hpp"
 #include "../provider/llm_provider.hpp"
+#include "../config/saved_models.hpp"
 #include "../tool/tool_executor.hpp"
 #include "ask_user_question_prompter.hpp"
 #include "permission_prompter.hpp"
@@ -27,6 +28,7 @@
 
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -45,6 +47,12 @@ struct SessionEntry {
     std::string workspace_hash;
     std::string provider;
     std::string model;
+    SessionModelState model_state;
+    struct ProviderSlot {
+        mutable std::mutex mu;
+        std::shared_ptr<LlmProvider> provider;
+    };
+    std::shared_ptr<ProviderSlot> provider_slot;
     std::unique_ptr<SessionManager>     sm;
     std::unique_ptr<PermissionManager>  perm;
     std::unique_ptr<AgentLoop>           loop;
@@ -102,14 +110,26 @@ public:
     // 列出当前 daemon 内活跃 session 的元数据(只看内存,不读磁盘历史)。
     std::vector<SessionInfo> list_active() const;
 
+    // Read or switch the effective model for one active session. Switching
+    // affects future turns for that session only; an in-flight turn keeps the
+    // provider shared_ptr snapshot it already captured.
+    std::optional<SessionModelState> current_model_state(const std::string& id) const;
+    bool switch_model(const std::string& id,
+                      const ModelProfile& profile,
+                      SessionModelState* out = nullptr,
+                      std::string* error = nullptr);
+
+    // Resolve persisted metadata to displayable model state without activating
+    // the session. Used by web endpoints for inactive disk sessions.
+    std::optional<SessionModelState> model_state_from_meta(const SessionMeta& meta) const;
+
     // 当前活跃 session 数(测试 / 监控用)。
     std::size_t size() const;
 
 private:
     std::unique_ptr<SessionEntry> make_entry_locked(const std::string& id,
                                                      const SessionOptions& opts,
-                                                     const std::string& provider,
-                                                     const std::string& model);
+                                                     const SessionMeta* resumed_meta);
     void restore_loop_history(SessionEntry& entry,
                               const std::vector<ChatMessage>& messages) const;
 

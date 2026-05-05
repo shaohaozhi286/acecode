@@ -23,15 +23,22 @@ import { aggregateHunksFromMessages } from '../lib/sessionChanges.js';
 import { hunksToUnifiedDiff } from '../lib/diff.js';
 import { langForFile } from '../lib/lang.js';
 import { joinWorkspacePath } from '../lib/desktopContextMenu.js';
+import { usePreference } from '../lib/usePreference.js';
 import { clsx, formatBytes } from '../lib/format.js';
 import { CopyableCodeFrame } from './CopyableCodeFrame.jsx';
 import { VsIcon } from './Icon.jsx';
+
+const FILE_PREVIEW_WRAP_STORAGE_KEY = 'acecode.filePreviewWrap.v1';
 
 const TABS = [
   { key: 'files',   label: '文件' },
   { key: 'changes', label: '变更' },
   { key: 'preview', label: '预览' },
 ];
+
+function validateBooleanPreference(value) {
+  return typeof value === 'boolean';
+}
 
 function escapeHtml(s) {
   return String(s)
@@ -225,7 +232,7 @@ function ChangeGroup({ group }) {
 // ────────────────────────────────────────────────────────────
 // 预览 tab — 文件原文 + hljs 高亮
 // ────────────────────────────────────────────────────────────
-function PreviewPanel({ api, cwd, path }) {
+function PreviewPanel({ api, cwd, path, wrapPreview, onToggleWrapPreview }) {
   const [state, setState] = useState({ status: 'idle', text: '', error: null, lang: '', size: 0 });
 
   useEffect(() => {
@@ -290,12 +297,29 @@ function PreviewPanel({ api, cwd, path }) {
   } else {
     html = `<pre><code>${escapeHtml(state.text)}</code></pre>`;
   }
+  const wrapTitle = wrapPreview ? '关闭自动换行' : '开启自动换行';
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
       <div className="px-2 py-1 text-[10px] text-fg-mute font-mono border-b border-border truncate" title={path}>
         {path} · {formatBytes(state.text.length)}{lang ? ` · ${lang}` : ''}
       </div>
-      <CopyableCodeFrame text={state.text} className="flex-1 min-h-0 ace-side-preview-code">
+      <CopyableCodeFrame
+        text={state.text}
+        className="flex-1 min-h-0 ace-side-preview-code"
+        data-wrap={wrapPreview ? 'true' : 'false'}
+        actions={(
+          <button
+            type="button"
+            className={clsx('ace-code-action-btn ace-code-wrap-btn', wrapPreview && 'is-active')}
+            title={wrapTitle}
+            aria-label={wrapTitle}
+            aria-pressed={wrapPreview}
+            onClick={(event) => { event.stopPropagation(); onToggleWrapPreview?.(); }}
+          >
+            <VsIcon name="wordWrap" size={14} />
+          </button>
+        )}
+      >
         <div
           className="h-full overflow-auto text-[11px] ace-preview"
           dangerouslySetInnerHTML={{ __html: html }}
@@ -310,6 +334,11 @@ function PreviewPanel({ api, cwd, path }) {
 // ────────────────────────────────────────────────────────────
 export function SidePanel({ sessionRef, sessionId, cwd, messages, width = 280, collapsed = false, onToggleCollapse }) {
   const api = useMemo(() => createApi(sessionRef || null), [sessionRef?.port, sessionRef?.token, sessionRef?.workspaceHash]);
+  const [wrapPreview, setWrapPreview] = usePreference(
+    FILE_PREVIEW_WRAP_STORAGE_KEY,
+    false,
+    validateBooleanPreference,
+  );
 
   const [activeTab,    setActiveTab]    = useState('files');
   const [expandedDirs, setExpandedDirs] = useState(new Set());
@@ -334,6 +363,9 @@ export function SidePanel({ sessionRef, sessionId, cwd, messages, width = 280, c
     setSelectedPath(entry.path);
     setActiveTab('preview');
   }, []);
+  const toggleWrapPreview = useCallback(() => {
+    setWrapPreview((prev) => !prev);
+  }, [setWrapPreview]);
 
   return (
     // 宽度由父级 wrapper(.ace-side-panel-shell)控制,这里 100% 占满。width prop
@@ -383,7 +415,13 @@ export function SidePanel({ sessionRef, sessionId, cwd, messages, width = 280, c
         )}
         {activeTab === 'changes' && <ChangesList messages={messages} />}
         {activeTab === 'preview' && (
-          <PreviewPanel api={api} cwd={cwd} path={selectedPath} />
+          <PreviewPanel
+            api={api}
+            cwd={cwd}
+            path={selectedPath}
+            wrapPreview={wrapPreview}
+            onToggleWrapPreview={toggleWrapPreview}
+          />
         )}
       </div>
     </div>
