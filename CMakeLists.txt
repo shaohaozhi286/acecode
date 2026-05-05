@@ -63,13 +63,22 @@ endif()
 include(${CMAKE_SOURCE_DIR}/cmake/acecode_embed_assets.cmake)
 acecode_compute_build_version(ACECODE_BUILD_VERSION)
 set(ACECODE_WEB_DIST "${CMAKE_SOURCE_DIR}/web/dist")
+set(ACECODE_WEB_EMBED_DIR "${ACECODE_WEB_DIST}")
 if(NOT EXISTS "${ACECODE_WEB_DIST}")
     message(WARNING
-        "[acecode] web/dist/ not found — front-end will not be embedded. "
-        "Run `pnpm install && pnpm build` inside web/ before re-configuring.")
+        "[acecode] web/dist/ not found — embedding a minimal fallback page. "
+        "Run `pnpm install && pnpm build` inside web/ before re-configuring for the full UI.")
+    set(ACECODE_WEB_EMBED_DIR "${CMAKE_BINARY_DIR}/generated/web-dist-fallback")
+    file(MAKE_DIRECTORY "${ACECODE_WEB_EMBED_DIR}")
+    file(WRITE "${ACECODE_WEB_EMBED_DIR}/index.html"
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>ACECode</title></head>"
+        "<body><main style=\"font-family: sans-serif; padding: 24px;\">"
+        "<h1>ACECode Web UI assets were not built</h1>"
+        "<p>Run <code>pnpm install && pnpm build</code> inside <code>web/</code>, then reconfigure CMake.</p>"
+        "</main></body></html>")
 endif()
 acecode_generate_embedded_assets(
-    ${ACECODE_WEB_DIST}
+    ${ACECODE_WEB_EMBED_DIR}
     ${CMAKE_BINARY_DIR}/generated/static_assets_data.cpp
     ${ACECODE_BUILD_VERSION}
 )

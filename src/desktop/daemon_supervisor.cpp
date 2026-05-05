@@ -19,6 +19,11 @@
 #  include <winsock2.h>
 #  include <ws2tcpip.h>
 #  pragma comment(lib, "ws2_32.lib")
+#else
+#  include <arpa/inet.h>
+#  include <netinet/in.h>
+#  include <sys/socket.h>
+#  include <unistd.h>
 #endif
 
 namespace acecode::desktop {
@@ -371,7 +376,31 @@ SpawnResult DaemonSupervisor::spawn(const SpawnRequest&) {
 bool DaemonSupervisor::wait_until_ready(int, std::chrono::milliseconds) { return false; }
 void DaemonSupervisor::stop() {}
 bool DaemonSupervisor::running() const { return false; }
-int  pick_free_loopback_port() { return 0; }
+int pick_free_loopback_port() {
+    int s = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) return 0;
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = 0;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+    if (::bind(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+        ::close(s);
+        return 0;
+    }
+
+    sockaddr_in bound{};
+    socklen_t len = sizeof(bound);
+    if (::getsockname(s, reinterpret_cast<sockaddr*>(&bound), &len) != 0) {
+        ::close(s);
+        return 0;
+    }
+
+    int port = ntohs(bound.sin_port);
+    ::close(s);
+    return port;
+}
 
 #endif
 
