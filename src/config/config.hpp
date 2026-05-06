@@ -225,17 +225,6 @@ struct AppConfig {
     std::string default_model_name;
 };
 
-// Expand ~ and ${ENV} style variables in a path string. Returns the expanded
-// form; missing env vars are left as-is (per hermes convention).
-std::string expand_path(const std::string& raw);
-
-// Collect project-level directories from cwd up to (but not including) the
-// user's home directory. Returned deepest-first so cwd-level skills take
-// precedence over ancestor-level skills when scanned in order. HOME itself is
-// excluded because the user-global skills root (`~/.acecode/skills`) is
-// registered separately.
-std::vector<std::string> get_project_dirs_up_to_home(const std::string& cwd);
-
 // Normalize upgrade.base_url by trimming surrounding whitespace and adding a
 // trailing slash when non-empty.
 std::string normalize_upgrade_base_url(std::string raw);
