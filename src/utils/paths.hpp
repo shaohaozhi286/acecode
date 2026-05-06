@@ -13,8 +13,20 @@
 // 绕过 once 保护,fixture TearDown 应调 reset_run_mode_for_test() 清场。
 
 #include <string>
+#include <vector>
 
 namespace acecode {
+
+// Expand ~ and ${ENV} style variables in a path string. Returns the expanded
+// form; missing env vars are left as-is (per hermes convention).
+std::string expand_path(const std::string& raw);
+
+// Collect project-level directories from cwd up to (but not including) the
+// user's home directory. Returned deepest-first so cwd-level skills take
+// precedence over ancestor-level skills when scanned in order. HOME itself is
+// excluded because the user-global skills root (`~/.acecode/skills`) is
+// registered separately.
+std::vector<std::string> get_project_dirs_up_to_home(const std::string& cwd);
 
 enum class RunMode {
     User    = 0, // 默认 — TUI / standalone daemon / `acecode daemon --foreground`

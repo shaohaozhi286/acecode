@@ -7,8 +7,86 @@
 #include <filesystem>
 #include <mutex>
 #include <string>
+#include <system_error>
+#include <vector>
 
 namespace acecode {
+
+std::string expand_path(const std::string& raw) {
+    if (raw.empty()) return raw;
+
+    std::string result;
+    result.reserve(raw.size());
+    size_t i = 0;
+
+    // ${VAR} substitution first so later ~ expansion sees final text.
+    while (i < raw.size()) {
+        if (raw[i] == '$' && i + 1 < raw.size() && raw[i + 1] == '{') {
+            size_t end = raw.find('}', i + 2);
+            if (end == std::string::npos) {
+                result.push_back(raw[i++]);
+                continue;
+            }
+            std::string var_name = raw.substr(i + 2, end - (i + 2));
+            const char* val = std::getenv(var_name.c_str());
+            if (val) {
+                result.append(val);
+            } else {
+                result.append(raw, i, end + 1 - i); // leave ${VAR} untouched
+            }
+            i = end + 1;
+        } else {
+            result.push_back(raw[i++]);
+        }
+    }
+
+    if (!result.empty() && result.front() == '~') {
+#ifdef _WIN32
+        const char* home = std::getenv("USERPROFILE");
+#else
+        const char* home = std::getenv("HOME");
+#endif
+        if (home && *home) {
+            result = std::string(home) + result.substr(1);
+        }
+    }
+
+    return result;
+}
+
+std::vector<std::string> get_project_dirs_up_to_home(const std::string& cwd) {
+    namespace fs = std::filesystem;
+    std::vector<std::string> dirs;
+    if (cwd.empty()) return dirs;
+
+    std::error_code ec;
+    fs::path abs = fs::weakly_canonical(fs::path(cwd), ec);
+    if (ec || abs.empty()) abs = fs::path(cwd);
+
+    fs::path home_path;
+#ifdef _WIN32
+    const char* home_env = std::getenv("USERPROFILE");
+#else
+    const char* home_env = std::getenv("HOME");
+#endif
+    if (home_env && *home_env) {
+        std::error_code hec;
+        home_path = fs::weakly_canonical(fs::path(home_env), hec);
+        if (hec) home_path = fs::path(home_env);
+    }
+
+    // Walk up from cwd; stop at/above HOME (the user-global root is added
+    // separately) or once we hit a filesystem root. Deepest first.
+    fs::path cur = abs;
+    while (true) {
+        if (!home_path.empty() && cur == home_path) break;
+        dirs.push_back(cur.string());
+        fs::path parent = cur.parent_path();
+        if (parent == cur) break;
+        cur = parent;
+    }
+    return dirs;
+}
 
 namespace {
 

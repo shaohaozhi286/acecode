@@ -30,6 +30,7 @@
 #include "../tool/web_search/web_search_tool.hpp"
 #include "../network/proxy_resolver.hpp"
 #include "../utils/logger.hpp"
+#include "../utils/paths.hpp"
 #include "../utils/token.hpp"
 #include "../web/auth.hpp"
 #include "../web/server.hpp"

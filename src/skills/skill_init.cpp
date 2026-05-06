@@ -2,6 +2,7 @@
 
 #include "skill_registry.hpp"
 #include "../config/config.hpp"
+#include "../utils/paths.hpp"
 
 #include <filesystem>
 #include <unordered_set>
