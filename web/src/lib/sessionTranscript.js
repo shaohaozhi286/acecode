@@ -25,11 +25,35 @@ function cloneToolMap(toolMap) {
   return new Map();
 }
 
+function cloneTokenUsage(tokenUsage) {
+  if (!tokenUsage || typeof tokenUsage !== 'object') return null;
+  return { ...tokenUsage };
+}
+
 function cloneState(state) {
   return {
     ...state,
     items: Array.isArray(state.items) ? state.items : [],
     toolMap: cloneToolMap(state.toolMap),
+    tokenUsage: cloneTokenUsage(state.tokenUsage),
+  };
+}
+
+function readUsageInt(payload, snakeKey, camelKey) {
+  const raw = payload?.[snakeKey] ?? payload?.[camelKey];
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.trunc(value));
+}
+
+function normalizeUsagePayload(payload, timestampMs) {
+  const hasDataRaw = payload?.has_data ?? payload?.hasData;
+  return {
+    promptTokens: readUsageInt(payload, 'prompt_tokens', 'promptTokens'),
+    completionTokens: readUsageInt(payload, 'completion_tokens', 'completionTokens'),
+    totalTokens: readUsageInt(payload, 'total_tokens', 'totalTokens'),
+    hasData: hasDataRaw === true,
+    timestampMs: Number(timestampMs) || Date.now(),
   };
 }
 
@@ -71,6 +95,7 @@ export function createTranscriptState(overrides = {}) {
     toolMap: new Map(),
     nextItemId: 1,
     error: '',
+    tokenUsage: null,
     // turnHadAssistantText / lastAssistantText 用于桌面通知:在 busy=true→false
     // 转换且本回合产生过 assistant 文本时,emit turn_completed effect。reducer 之外
     // 的代码不应直接读 / 写它们。见 openspec/changes/add-desktop-attention-notifications。
@@ -78,6 +103,7 @@ export function createTranscriptState(overrides = {}) {
     lastAssistantText: '',
     ...overrides,
     toolMap: cloneToolMap(overrides.toolMap),
+    tokenUsage: cloneTokenUsage(overrides.tokenUsage),
   };
 }
 
@@ -229,6 +255,10 @@ export function reduceTranscriptEvent(state, msg) {
           },
         };
       });
+      break;
+    }
+    case 'usage': {
+      next.tokenUsage = normalizeUsagePayload(p, eventTs(msg));
       break;
     }
     case 'busy_changed': {

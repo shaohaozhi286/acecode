@@ -65,6 +65,60 @@ run('busy done error 状态按事件更新', () => {
   assert.equal(state.error, 'boom');
 });
 
+run('usage 事件更新 token usage 且不新增 transcript item', () => {
+  const state = reduceMany([
+    {
+      type: 'usage',
+      payload: { prompt_tokens: 8000, completion_tokens: 1200, total_tokens: 9200, has_data: true },
+      timestamp_ms: 123,
+      seq: 1,
+    },
+  ]);
+  assert.equal(state.items.length, 0);
+  assert.deepEqual(state.tokenUsage, {
+    promptTokens: 8000,
+    completionTokens: 1200,
+    totalTokens: 9200,
+    hasData: true,
+    timestampMs: 123,
+  });
+  assert.equal(state.lastSeq, 1);
+});
+
+run('history replay 会恢复 usage 事件状态', () => {
+  const loaded = loadTranscriptHistory(createTranscriptState({ title: 's1' }), {
+    messages: [{ id: 'u1', role: 'user', content: 'hello', ts: 1 }],
+    events: [
+      {
+        type: 'usage',
+        payload: { prompt_tokens: 64000, completion_tokens: 500, total_tokens: 64500, has_data: true },
+        timestamp_ms: 456,
+        seq: 2,
+      },
+    ],
+  }).state;
+  assert.equal(loaded.items.length, 1);
+  assert.equal(loaded.tokenUsage.promptTokens, 64000);
+  assert.equal(loaded.tokenUsage.completionTokens, 500);
+  assert.equal(loaded.tokenUsage.totalTokens, 64500);
+  assert.equal(loaded.tokenUsage.hasData, true);
+  assert.equal(loaded.tokenUsage.timestampMs, 456);
+  assert.equal(loaded.lastSeq, 2);
+});
+
+run('新 transcript token usage 默认为 unknown 且不跨 session 继承', () => {
+  const previous = reduceMany([
+    { type: 'usage', payload: { prompt_tokens: 8000, completion_tokens: 1, total_tokens: 8001, has_data: true }, seq: 1 },
+  ]);
+  assert.equal(previous.tokenUsage.promptTokens, 8000);
+
+  const fresh = createTranscriptState({ title: 'next' });
+  assert.equal(fresh.tokenUsage, null);
+
+  const loaded = loadTranscriptHistory(previous, { messages: [], events: [] }).state;
+  assert.equal(loaded.tokenUsage, null);
+});
+
 run('tool lifecycle 保留进度、summary、失败输出和 hunks', () => {
   const hunk = { file: 'a.txt', old_start: 1, old_lines: ['a'], new_start: 1, new_lines: ['b'] };
   const state = reduceMany([

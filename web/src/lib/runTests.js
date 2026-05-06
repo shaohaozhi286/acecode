@@ -9,6 +9,7 @@ import './queueCardItem.test.js';
 import './sessionSubscription.test.js';
 import './sessionTranscript.test.js';
 import './sessionModel.test.js';
+import './tokenBudget.test.js';
 import './pinnedSessions.test.js';
 import './usePreference.test.js';
 import './api.test.js';

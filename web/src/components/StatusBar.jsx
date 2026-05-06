@@ -7,6 +7,7 @@ import { useEffect, useRef, useState } from 'react';
 import { clsx } from '../lib/format.js';
 import { optionLabel } from '../lib/sessionModel.js';
 import { VsIcon } from './Icon.jsx';
+import { TokenBudgetRing } from './TokenBudgetRing.jsx';
 
 const MODES = [
   { id: 'default',     label: '默认',          hint: '写/执行操作前确认',                  color: 'ok'     },
@@ -22,6 +23,7 @@ export function StatusBar({
   selectedModelName = '',
   modelSwitching = false,
   onModelChange,
+  tokenBudget = null,
 }) {
   const [mode, setMode] = useState('default');
   const [open, setOpen] = useState(false);
@@ -36,6 +38,24 @@ export function StatusBar({
 
   const cur = MODES.find((m) => m.id === mode) || MODES[0];
   const dotCls = cur.color === 'ok' ? 'bg-ok' : cur.color === 'warn' ? 'bg-warn' : 'bg-danger';
+  const modelControl = onModelChange && modelOptions.length > 0 ? (
+    <select
+      value={selectedModelName || ''}
+      disabled={modelSwitching}
+      onChange={(e) => onModelChange(e.target.value)}
+      title={model}
+      className="h-[18px] max-w-[220px] px-1.5 py-0 rounded bg-surface-hi border border-transparent text-[10px] text-fg-mute outline-none hover:text-fg focus:border-accent disabled:opacity-60"
+    >
+      {!selectedModelName && <option value="">{model}</option>}
+      {modelOptions.map((option) => (
+        <option key={option.name} value={option.name}>
+          {optionLabel(option)}
+        </option>
+      ))}
+    </select>
+  ) : (
+    <span className="px-1.5 py-px rounded bg-surface-hi text-[10px] max-w-[220px] truncate" title={model}>{model}</span>
+  );
 
   return (
     <div className="h-[22px] flex items-center px-2.5 gap-4 bg-surface-alt border-t border-border text-[11px] text-fg-mute shrink-0">
@@ -76,24 +96,10 @@ export function StatusBar({
           </div>
         )}
       </div>
-      {onModelChange && modelOptions.length > 0 ? (
-        <select
-          value={selectedModelName || ''}
-          disabled={modelSwitching}
-          onChange={(e) => onModelChange(e.target.value)}
-          title={model}
-          className="h-[18px] max-w-[220px] px-1.5 py-0 rounded bg-surface-hi border border-transparent text-[10px] text-fg-mute outline-none hover:text-fg focus:border-accent disabled:opacity-60"
-        >
-          {!selectedModelName && <option value="">{model}</option>}
-          {modelOptions.map((option) => (
-            <option key={option.name} value={option.name}>
-              {optionLabel(option)}
-            </option>
-          ))}
-        </select>
-      ) : (
-        <span className="px-1.5 py-px rounded bg-surface-hi text-[10px] max-w-[220px] truncate" title={model}>{model}</span>
-      )}
+      <span className="flex items-center gap-1.5 min-w-0">
+        {modelControl}
+        {tokenBudget && <TokenBudgetRing budget={tokenBudget} />}
+      </span>
       <span>{turns} 轮次</span>
       {branch && <span className="ml-auto truncate max-w-[40%]">{branch}</span>}
       {!branch && <span className="ml-auto" />}

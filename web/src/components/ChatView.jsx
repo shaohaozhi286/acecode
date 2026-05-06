@@ -35,6 +35,7 @@ import {
 import { findStickyUserContext, sameStickyUserContext } from '../lib/stickyUserContext.js';
 import { useSessionTranscript } from '../lib/sessionTranscript.js';
 import { maybeNotify } from '../lib/desktopNotify.js';
+import { normalizeTokenBudget } from '../lib/tokenBudget.js';
 import {
   modelDisplayLabel,
   modelSelectValue,
@@ -182,7 +183,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         : '错误:' + (reason || ''),
     }),
   });
-  const { items, busy, turns, title, status: transcriptStatus, streamingId, applyEvent, setTitle: setTranscriptTitle } = transcript;
+  const { items, busy, turns, title, status: transcriptStatus, streamingId, tokenUsage, applyEvent, setTitle: setTranscriptTitle } = transcript;
   // 让 fireDesktopNotification 拿到最新 title,无需进入它的 useCallback deps。
   useEffect(() => { transcriptTitleRef.current = title || ''; }, [title]);
   const [history,  setHistory]  = useState([]);
@@ -647,6 +648,11 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
 
   const currentModelLabel = modelDisplayLabel(modelState, ref?.model_name || ref?.model_preset || ref?.model || '加载中');
   const currentModelName = modelSelectValue(modelState, pendingModelName);
+  const currentContextWindow = Number(modelState?.contextWindow || ref?.context_window || ref?.contextWindow || 0) || 0;
+  const tokenBudget = useMemo(() => normalizeTokenBudget({
+    usage: tokenUsage,
+    contextWindow: currentContextWindow,
+  }), [currentContextWindow, tokenUsage]);
   const displayedModelOptions = useMemo(() => {
     const currentName = selectedModelName(modelState);
     if (!currentName || modelOptions.some((m) => m.name === currentName)) return modelOptions;
@@ -876,6 +882,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         selectedModelName={currentModelName}
         modelSwitching={modelSwitching}
         onModelChange={switchSessionModel}
+        tokenBudget={tokenBudget}
       />
       </div>
       {sidePanelMounted && (
