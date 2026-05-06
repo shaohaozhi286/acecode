@@ -2532,6 +2532,26 @@ static int run_interactive_app(const CliOptions& cli,
                 return true;
             }
 
+            // Model picker: Enter switches in-memory.
+            if (state.model_picker_active) {
+                if (state.model_picker_selected >= 0 &&
+                    state.model_picker_selected <
+                        static_cast<int>(state.model_picker_items.size())) {
+                    auto chosen = state.model_picker_items[state.model_picker_selected].name;
+                    auto cb = state.model_picker_callback;
+                    state.model_picker_active = false;
+                    state.model_picker_items.clear();
+                    state.model_picker_view_offset = 0;
+                    state.model_picker_callback = nullptr;
+                    lk.unlock();
+                    if (cb) cb(chosen, TuiState::ModelPickerScope::InMemory);
+                    lk.lock();
+                    clamp_chat_focus();
+                }
+                screen.PostEvent(Event::Custom);
+                return true;
+            }
+
             // confirm_pending 现在由上面的 confirm overlay handler 单独拦截
             // (Enter 直接走那条路径),这里不会再被 confirm 触发。
 
@@ -2674,6 +2694,25 @@ static int run_interactive_app(const CliOptions& cli,
                 }
                 return true;
             }
+            if (state.model_picker_active) {
+                const int total = static_cast<int>(state.model_picker_items.size());
+                if (total > 0) {
+                    const int step = acecode::tui::kModelPickerVisibleRows;
+                    if (event == Event::PageUp) {
+                        state.model_picker_selected = std::max(0, state.model_picker_selected - step);
+                    } else if (event == Event::PageDown) {
+                        state.model_picker_selected = std::min(total - 1, state.model_picker_selected + step);
+                    } else if (event == Event::Home) {
+                        state.model_picker_selected = 0;
+                    } else {  // End
+                        state.model_picker_selected = total - 1;
+                    }
+                    state.model_picker_view_offset = acecode::tui::scroll_to_keep_visible(
+                        state.model_picker_selected, state.model_picker_view_offset, step, total);
+                    screen.PostEvent(Event::Custom);
+                }
+                return true;
+            }
         }
         if (event == Event::PageUp) {
             std::lock_guard<std::mutex> lk(state.mu);
@@ -2706,7 +2745,7 @@ static int run_interactive_app(const CliOptions& cli,
         // picker 没有"全局吞键"逻辑, 单独让位.
         if (event == Event::Special("\x1B[1;3A")) {
             std::lock_guard<std::mutex> lk(state.mu);
-            if (state.resume_picker_active) return true;
+            if (state.resume_picker_active || state.model_picker_active) return true;
             if (scroll_chat_by_lines(-1) != 0) {
                 screen.PostEvent(Event::Custom);
             }
@@ -2714,7 +2753,7 @@ static int run_interactive_app(const CliOptions& cli,
         }
         if (event == Event::Special("\x1B[1;3B")) {
             std::lock_guard<std::mutex> lk(state.mu);
-            if (state.resume_picker_active) return true;
+            if (state.resume_picker_active || state.model_picker_active) return true;
             if (scroll_chat_by_lines(1) != 0) {
                 screen.PostEvent(Event::Custom);
             }
@@ -2759,6 +2798,18 @@ static int run_interactive_app(const CliOptions& cli,
                 state.input_cursor = 0;
                 state.conversation.push_back({"system", "Resume cancelled.", false});
                 state.chat_follow_tail = true;
+                clamp_chat_focus();
+                screen.PostEvent(Event::Custom);
+                return true;
+            }
+            // Escape during model picker → cancel (no switch, no message).
+            if (state.model_picker_active) {
+                state.model_picker_active = false;
+                state.model_picker_items.clear();
+                state.model_picker_view_offset = 0;
+                state.model_picker_callback = nullptr;
+                state.input_text.clear(); state.pasted_texts.clear();
+                state.input_cursor = 0;
                 clamp_chat_focus();
                 screen.PostEvent(Event::Custom);
                 return true;
@@ -2964,6 +3015,15 @@ static int run_interactive_app(const CliOptions& cli,
                 screen.PostEvent(Event::Custom);
                 return true;
             }
+            if (state.model_picker_active) {
+                if (state.model_picker_selected > 0) state.model_picker_selected--;
+                state.model_picker_view_offset = acecode::tui::scroll_to_keep_visible(
+                    state.model_picker_selected, state.model_picker_view_offset,
+                    acecode::tui::kModelPickerVisibleRows,
+                    static_cast<int>(state.model_picker_items.size()));
+                screen.PostEvent(Event::Custom);
+                return true;
+            }
             if (state.input_history.empty()) return true;
             if (state.history_index == -1) {
                 state.saved_input = prepend_mode_prefix(state.input_text, state.input_mode);
@@ -2992,6 +3052,17 @@ static int run_interactive_app(const CliOptions& cli,
                 screen.PostEvent(Event::Custom);
                 return true;
             }
+            if (state.model_picker_active) {
+                if (state.model_picker_selected <
+                    static_cast<int>(state.model_picker_items.size()) - 1)
+                    state.model_picker_selected++;
+                state.model_picker_view_offset = acecode::tui::scroll_to_keep_visible(
+                    state.model_picker_selected, state.model_picker_view_offset,
+                    acecode::tui::kModelPickerVisibleRows,
+                    static_cast<int>(state.model_picker_items.size()));
+                screen.PostEvent(Event::Custom);
+                return true;
+            }
             if (state.history_index == -1) return true;
             if (state.history_index < (int)state.input_history.size() - 1) {
                 state.history_index++;
@@ -3013,7 +3084,7 @@ static int run_interactive_app(const CliOptions& cli,
         // ArrowLeft / ArrowRight: move caret one UTF-8 glyph.
         if (event == Event::ArrowLeft) {
             std::lock_guard<std::mutex> lk(state.mu);
-            if (state.resume_picker_active) return true;
+            if (state.resume_picker_active || state.model_picker_active) return true;
             if (state.input_cursor > state.input_text.size()) {
                 state.input_cursor = state.input_text.size();
             }
@@ -3033,7 +3104,7 @@ static int run_interactive_app(const CliOptions& cli,
         }
         if (event == Event::ArrowRight) {
             std::lock_guard<std::mutex> lk(state.mu);
-            if (state.resume_picker_active) return true;
+            if (state.resume_picker_active || state.model_picker_active) return true;
             if (state.input_cursor >= state.input_text.size()) {
                 state.input_cursor = state.input_text.size();
                 return true;
@@ -3072,7 +3143,7 @@ static int run_interactive_app(const CliOptions& cli,
         };
         if (is_home_event(event)) {
             std::lock_guard<std::mutex> lk(state.mu);
-            if (state.resume_picker_active) return true;
+            if (state.resume_picker_active || state.model_picker_active) return true;
             state.input_cursor = 0;
             return true;
         }
@@ -3095,13 +3166,14 @@ static int run_interactive_app(const CliOptions& cli,
         }
         if (is_end_event(event)) {
             std::lock_guard<std::mutex> lk(state.mu);
-            if (state.resume_picker_active) return true;
+            if (state.resume_picker_active || state.model_picker_active) return true;
             state.input_cursor = state.input_text.size();
             return true;
         }
         // Delete: remove UTF-8 glyph at the caret (to the right)
         if (event == Event::Delete) {
             std::lock_guard<std::mutex> lk(state.mu);
+            if (state.resume_picker_active || state.model_picker_active) return true;
             if (state.input_cursor > state.input_text.size()) {
                 state.input_cursor = state.input_text.size();
             }
@@ -3127,6 +3199,9 @@ static int run_interactive_app(const CliOptions& cli,
         // Backspace: remove UTF-8 glyph preceding the caret
         if (event == Event::Backspace) {
             std::lock_guard<std::mutex> lk(state.mu);
+            // Picker overlays own the keyboard — swallow Backspace so it
+            // doesn't reach the input buffer.
+            if (state.resume_picker_active || state.model_picker_active) return true;
             if (state.input_cursor > state.input_text.size()) {
                 state.input_cursor = state.input_text.size();
             }
@@ -3163,7 +3238,7 @@ static int run_interactive_app(const CliOptions& cli,
         }
         // Printable character input
         if (event.is_character()) {
-            std::lock_guard<std::mutex> lk(state.mu);
+            std::unique_lock<std::mutex> lk(state.mu);
             // During resume picker, digit keys select directly
             if (state.resume_picker_active) {
                 std::string ch = event.character();
@@ -3183,6 +3258,43 @@ static int run_interactive_app(const CliOptions& cli,
                         screen.PostEvent(Event::Custom);
                     }
                 }
+                return true;
+            }
+            // Model picker char keys: 1-9 jump+switch, c = cwd-pin switch,
+            // d = default switch. Anything else is swallowed (no input edits).
+            if (state.model_picker_active) {
+                std::string ch = event.character();
+                if (ch.empty()) return true;
+                char c = ch[0];
+
+                auto fire = [&](int target_idx, TuiState::ModelPickerScope scope) {
+                    if (target_idx < 0 ||
+                        target_idx >= static_cast<int>(state.model_picker_items.size())) {
+                        return;
+                    }
+                    auto chosen = state.model_picker_items[target_idx].name;
+                    auto cb = state.model_picker_callback;
+                    state.model_picker_active = false;
+                    state.model_picker_items.clear();
+                    state.model_picker_view_offset = 0;
+                    state.model_picker_callback = nullptr;
+                    state.input_text.clear(); state.pasted_texts.clear();
+                    state.input_cursor = 0;
+                    lk.unlock();
+                    if (cb) cb(chosen, scope);
+                    lk.lock();
+                    clamp_chat_focus();
+                    screen.PostEvent(Event::Custom);
+                };
+
+                if (c >= '1' && c <= '9') {
+                    fire(c - '1', TuiState::ModelPickerScope::InMemory);
+                } else if (c == 'c' || c == 'C') {
+                    fire(state.model_picker_selected, TuiState::ModelPickerScope::Cwd);
+                } else if (c == 'd' || c == 'D') {
+                    fire(state.model_picker_selected, TuiState::ModelPickerScope::Default);
+                }
+                // Other keys: ignore but consume so they don't leak into input.
                 return true;
             }
             // Shell-mode trigger: `!` on an empty Normal buffer switches mode
@@ -3770,6 +3882,82 @@ static int run_interactive_app(const CliOptions& cli,
             picker_rows.push_back(text(""));
             rewind_picker_element = vbox(std::move(picker_rows)) | border | color(Color::Cyan);
         }
+        // /model picker overlay —— saved_models 列表 + (legacy) 兜底,
+        // 行首三组 glyph 标 current/default/cwd-pinned。键位:Enter = 切;
+        // c = 切 + 钉到 cwd;d = 切 + 设全局默认;Esc = 取消。
+        Element model_picker_element = text("");
+        if (state.model_picker_active && !state.model_picker_items.empty()) {
+            Elements picker_rows;
+            picker_rows.push_back(
+                text(" Pick a model "
+                     "(Up/Down/PgUp/PgDn/Home/End nav, 1-9 jump, "
+                     "Enter switch, c pin to cwd, d set as default, Esc cancel):")
+                | bold | color(Color::Cyan));
+            picker_rows.push_back(text(""));
+            // Glyph legend so first-time users grok the markers.
+            picker_rows.push_back(
+                hbox({
+                    text("  Legend: "),
+                    text("* current ") | color(Color::Green),
+                    text("⭐ default ") | color(Color::Yellow),
+                    text("📌 cwd ") | color(Color::Cyan),
+                }) | dim);
+            picker_rows.push_back(text(""));
+
+            const int total = static_cast<int>(state.model_picker_items.size());
+            const int visible = std::min(acecode::tui::kModelPickerVisibleRows, total);
+            int offset = std::clamp(state.model_picker_view_offset, 0,
+                                    std::max(0, total - visible));
+            const int items_above = offset;
+            const int items_below = std::max(0, total - offset - visible);
+
+            if (items_above > 0) {
+                picker_rows.push_back(
+                    text("  \xE2\x86\x91 " + std::to_string(items_above) + " more above")
+                    | dim | color(Color::GrayLight));
+            } else {
+                picker_rows.push_back(text(""));
+            }
+
+            for (int i = offset; i < offset + visible; ++i) {
+                bool selected = (i == state.model_picker_selected);
+                const auto& it = state.model_picker_items[i];
+                // Build "  [N] glyphs name  provider/model" — three glyph
+                // columns are reserved as fixed-width spaces so name columns
+                // line up between flagged and unflagged rows.
+                std::string current_glyph = it.is_current ? "*" : " ";
+                std::string default_glyph = it.is_default ? "\xE2\xAD\x90" : " ";  // ⭐
+                std::string cwd_glyph     = it.is_cwd     ? "\xF0\x9F\x93\x8C" : " ";  // 📌
+                std::string idx_prefix = (i < 9)
+                    ? "  [" + std::to_string(i + 1) + "] "
+                    : "      ";
+                std::string row_text = idx_prefix
+                    + current_glyph + " "
+                    + default_glyph + " "
+                    + cwd_glyph + "  "
+                    + it.display;
+                auto row = text(row_text);
+                if (selected) {
+                    row = row | bold | color(Color::White) | bgcolor(Color::RGB(0, 80, 120));
+                } else if (it.is_current) {
+                    row = row | color(Color::Green);
+                } else {
+                    row = row | color(Color::GrayLight);
+                }
+                picker_rows.push_back(row);
+            }
+
+            if (items_below > 0) {
+                picker_rows.push_back(
+                    text("  \xE2\x86\x93 " + std::to_string(items_below) + " more below")
+                    | dim | color(Color::GrayLight));
+            } else {
+                picker_rows.push_back(text(""));
+            }
+
+            picker_rows.push_back(text(""));
+            model_picker_element = vbox(std::move(picker_rows)) | border | color(Color::Cyan);
+        }
         Element slash_dropdown_element = render_slash_dropdown(state);
 
         // AskUserQuestion overlay —— 和 confirm_pending 互斥,在渲染层面
@@ -4001,6 +4189,7 @@ static int run_interactive_app(const CliOptions& cli,
             message_view,
             resume_picker_element,
             rewind_picker_element,
+            model_picker_element,
             ask_overlay_element,
             confirm_overlay_element,
             slash_dropdown_element,

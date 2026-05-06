@@ -165,30 +165,137 @@ static bool parse_model_args(const std::string& raw, std::string& flag,
     return true;
 }
 
-// 渲染 picker 列表(纯文本回退,无 FTXUI)。覆盖 saved_models + 兜底 (legacy)。
-// 当前 effective 行加 "*"。这是最小骨架 —— 真正的 FTXUI picker(任务 5.2)
-// 留待后续(picker 与 TuiState/screen 耦合,本 phase 用文本展示先解锁验证)。
-static void render_model_picker(CommandContext& ctx) {
-    std::lock_guard<std::mutex> lk(ctx.state.mu);
+// 把单个 entry 渲染成 picker 行的右侧内容:`name  provider/model`,字段对齐到
+// name 最大宽度 + 2 空格。FTXUI 渲染层不做对齐,只是把这串字符串原样上屏。
+static std::string format_model_picker_row(const ModelProfile& e, size_t name_width) {
     std::ostringstream oss;
-    oss << "Available models:\n";
+    oss << e.name;
+    size_t pad = name_width >= e.name.size() ? name_width - e.name.size() : 0;
+    oss << std::string(pad + 2, ' ') << e.provider << "/" << e.model;
+    return oss.str();
+}
+
+// FTXUI picker 激活。把 saved_models(+ legacy 兜底)灌进 state.model_picker_items,
+// 标注 current / default / cwd 三组旗标,然后翻起 model_picker_active。具体的
+// 上下键 / Enter / c / d / Esc 路由在 main.cpp 事件 handler 内,callback 回到
+// 这里完成 swap+persist。
+static void render_model_picker(CommandContext& ctx) {
     std::string current = current_effective_name(ctx);
+    auto cwd_override = load_cwd_model_override(ctx.cwd);
+
+    // 收集要展示的 entry,保证 (legacy) 总在末尾出现一次。
+    std::vector<ModelProfile> rows;
+    rows.reserve(ctx.config.saved_models.size() + 1);
     bool legacy_listed_in_saved = false;
     for (const auto& e : ctx.config.saved_models) {
         if (e.name == "(legacy)") legacy_listed_in_saved = true;
-        oss << "  " << (e.name == current ? "*" : " ")
-            << " " << e.name << "  (" << e.provider << "/" << e.model << ")\n";
+        rows.push_back(e);
     }
     if (!legacy_listed_in_saved) {
-        ModelProfile legacy = synth_legacy_entry(ctx.config);
-        oss << "  " << (legacy.name == current ? "*" : " ")
-            << " " << legacy.name << "  (" << legacy.provider << "/"
-            << legacy.model << ")\n";
+        rows.push_back(synth_legacy_entry(ctx.config));
     }
-    oss << "\nUse: /model <name>           - switch this session (in-memory)\n"
-        << "     /model --cwd <name>     - switch + persist to this directory\n"
-        << "     /model --default <name> - switch + persist as global default";
-    ctx.state.conversation.push_back({"system", oss.str(), false});
+
+    size_t name_width = 0;
+    for (const auto& e : rows) name_width = std::max(name_width, e.name.size());
+
+    std::vector<TuiState::ModelPickerItem> items;
+    items.reserve(rows.size());
+    int initial_selected = 0;
+    for (size_t i = 0; i < rows.size(); ++i) {
+        const auto& e = rows[i];
+        TuiState::ModelPickerItem item;
+        item.name = e.name;
+        item.display = format_model_picker_row(e, name_width);
+        item.is_current = (e.name == current);
+        item.is_default = (!ctx.config.default_model_name.empty() &&
+                           e.name == ctx.config.default_model_name);
+        item.is_cwd = (cwd_override.has_value() && !cwd_override->empty() &&
+                       e.name == *cwd_override);
+        if (item.is_current) initial_selected = static_cast<int>(i);
+        items.push_back(std::move(item));
+    }
+
+    // 闭包只能捕获长期存活的句柄(对齐 resume_callback 的做法):CommandContext
+    // 本身在 cmd_model 返回后就析构,但下面这些指针/引用都指向 main.cpp 持有的
+    // 长生命对象。
+    auto* state_ptr = &ctx.state;
+    auto& provider_ref = ctx.provider;
+    auto* provider_handle = ctx.provider_handle;
+    auto* provider_mu = ctx.provider_mu;
+    auto* config = &ctx.config;
+    auto* token_tracker = &ctx.token_tracker;
+    auto& agent_loop = ctx.agent_loop;
+    std::string cwd = ctx.cwd;
+
+    auto cb = [state_ptr, &provider_ref, provider_handle, provider_mu,
+               config, token_tracker, &agent_loop, cwd](
+                  const std::string& chosen, TuiState::ModelPickerScope scope) {
+        // 调用本回调时 state.mu 已由 main.cpp 的事件 handler 释放(它在
+        // 翻 model_picker_active=false / 清理 items 之后就 unlock,然后
+        // 调用 cb)。下面手动加/解锁,语义对齐 announce_switch。
+        std::optional<ModelProfile> entry;
+        if (chosen == "(legacy)") {
+            entry = synth_legacy_entry(*config);
+        } else {
+            for (const auto& e : config->saved_models) {
+                if (e.name == chosen) { entry = e; break; }
+            }
+        }
+        if (!entry.has_value()) {
+            std::lock_guard<std::mutex> lk(state_ptr->mu);
+            std::ostringstream oss;
+            oss << "Unknown model name: " << chosen
+                << ". Run /model to pick from available.";
+            state_ptr->conversation.push_back({"system", oss.str(), false});
+            state_ptr->chat_follow_tail = true;
+            return;
+        }
+
+        if (provider_handle && provider_mu) {
+            swap_provider_if_needed(*provider_handle, *provider_mu, *entry, *config);
+        } else {
+            provider_ref.set_model(entry->model);
+            config->context_window = resolve_model_context_window(
+                *config, provider_ref.name(), provider_ref.model(),
+                config->context_window);
+        }
+
+        std::string scope_note;
+        switch (scope) {
+            case TuiState::ModelPickerScope::Cwd:
+                save_cwd_model_override(cwd, chosen);
+                scope_note = "[persisted to cwd]";
+                break;
+            case TuiState::ModelPickerScope::Default:
+                config->default_model_name = chosen;
+                save_config(*config);
+                scope_note = "[persisted as default]";
+                break;
+            case TuiState::ModelPickerScope::InMemory:
+                break;
+        }
+
+        std::lock_guard<std::mutex> lk(state_ptr->mu);
+        agent_loop.set_context_window(config->context_window);
+        state_ptr->token_status = token_tracker->format_status(config->context_window);
+        std::ostringstream oss;
+        oss << "Switched to " << entry->name
+            << " (" << entry->provider << "/" << entry->model << ")";
+        if (!scope_note.empty()) oss << " " << scope_note;
+        std::string info = oss.str();
+        state_ptr->status_line = info;
+        state_ptr->conversation.push_back({"system", info, false});
+        state_ptr->chat_follow_tail = true;
+    };
+
+    std::lock_guard<std::mutex> lk(ctx.state.mu);
+    ctx.state.model_picker_items = std::move(items);
+    ctx.state.model_picker_selected = std::clamp(
+        initial_selected, 0,
+        std::max(0, static_cast<int>(ctx.state.model_picker_items.size()) - 1));
+    ctx.state.model_picker_view_offset = 0;
+    ctx.state.model_picker_callback = std::move(cb);
+    ctx.state.model_picker_active = true;
     ctx.state.chat_follow_tail = true;
 }
 

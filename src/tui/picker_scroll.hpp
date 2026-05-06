@@ -15,6 +15,10 @@ inline constexpr int kRewindPickerVisibleRows = 10;
 // 但可以通过 ArrowUp/Down 把不在窗口内的命令滚动进来。
 inline constexpr int kSlashDropdownVisibleRows = 8;
 
+// /model picker 视口默认高度。saved_models 通常 ≤ 10,但 enterprise/local-LM
+// 用户可能堆十几个 entry,留出滚动余地。
+inline constexpr int kModelPickerVisibleRows = 10;
+
 // 把 picker 视口偏移调整到能让选中项保持可见。
 // 纯函数,无 FTXUI 依赖,可在 acecode_testable 中直接 include。
 // 语义参考 design.md (scrollable-resume-picker):

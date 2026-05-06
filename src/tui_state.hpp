@@ -186,6 +186,41 @@ struct TuiState {
     int rewind_mode_selected = 0;
     std::function<void(RewindItem, RewindRestoreMode)> rewind_callback;
 
+    // Model picker state (multi-model-config-design change). Activated by
+    // bare `/model`. Lists `saved_models` + a synthesized `(legacy)` row when
+    // missing. Each row carries the entry name, a precomputed display string,
+    // and three boolean flags rendered as glyphs:
+    //   is_current — provider snapshot's (provider, model) tuple matches
+    //   is_default — name == config.default_model_name
+    //   is_cwd     — name == loaded cwd_model_override (empty if no override)
+    // Keys (handled in main.cpp event handler):
+    //   ↑/↓/PgUp/PgDn/Home/End — navigate
+    //   1-9 — jump to row
+    //   Enter — switch in-memory (no persistence)
+    //   c    — switch + persist as cwd override
+    //   d    — switch + persist as global default
+    //   Esc  — cancel
+    // Callback signature carries the chosen entry name plus a scope hint so
+    // builtin_commands.cpp owns all the swap_provider_if_needed / save_config
+    // / save_cwd_model_override plumbing — keeps main.cpp UI-only.
+    enum class ModelPickerScope {
+        InMemory,   // Enter
+        Cwd,        // c
+        Default,    // d
+    };
+    struct ModelPickerItem {
+        std::string name;
+        std::string display;   // "  copilot-fast    copilot/gpt-4o"
+        bool is_current = false;
+        bool is_default = false;
+        bool is_cwd = false;
+    };
+    bool model_picker_active = false;
+    std::vector<ModelPickerItem> model_picker_items;
+    int model_picker_selected = 0;
+    int model_picker_view_offset = 0;
+    std::function<void(const std::string& name, ModelPickerScope)> model_picker_callback;
+
     // Slash-command dropdown state. Set by refresh_slash_dropdown() after every
     // input_text change. active becomes true when input starts with `/`, has no
     // whitespace, no other overlay is in the way, and the dismissed flag is
