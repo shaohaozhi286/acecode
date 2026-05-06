@@ -292,6 +292,7 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
                     StreamEvent evt;
                     evt.type = StreamEventType::ToolCall;
                     evt.tool_call = call;
+                    evt.tool_index = idx;
                     callback(evt);
                 }
                 pending_tools.clear();
@@ -376,6 +377,9 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
                     for (const auto& tc_delta : delta["tool_calls"]) {
                         int index = tc_delta.value("index", 0);
                         auto& acc = pending_tools[index];
+                        const std::string before_id = acc.id;
+                        const std::string before_name = acc.name;
+                        const std::size_t before_args_size = acc.arguments.size();
 
                         const bool has_id = tc_delta.contains("id") && !tc_delta["id"].is_null();
                         std::string incoming_id = has_id ? tc_delta["id"].get<std::string>() : std::string();
@@ -426,6 +430,18 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
                                 }
                             }
                         }
+                        if (acc.id != before_id || acc.name != before_name ||
+                            acc.arguments.size() != before_args_size) {
+                            StreamEvent progress_evt;
+                            progress_evt.type = StreamEventType::ToolCallDelta;
+                            progress_evt.tool_index = index;
+                            progress_evt.tool_call.id = acc.id;
+                            progress_evt.tool_call.function_name = acc.name;
+                            // Do not expose partial raw argument JSON through
+                            // progress metadata; only report accumulated size.
+                            progress_evt.tool_call_argument_bytes = acc.arguments.size();
+                            callback(progress_evt);
+                        }
                     }
                 }
 
@@ -441,6 +457,7 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
                         StreamEvent evt;
                         evt.type = StreamEventType::ToolCall;
                         evt.tool_call = call;
+                        evt.tool_index = idx;
                         callback(evt);
                     }
                     pending_tools.clear();

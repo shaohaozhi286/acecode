@@ -135,6 +135,76 @@ run('tool lifecycle 保留进度、summary、失败输出和 hunks', () => {
   assert.deepEqual(tool.hunks, [hunk]);
 });
 
+run('agent_progress 更新活动状态且 busy 结束时清理', () => {
+  const state = reduceMany([
+    { type: 'busy_changed', payload: { busy: true }, seq: 1 },
+    {
+      type: 'agent_progress',
+      payload: {
+        phase: 'tool_planning',
+        label: '正在准备调用 grep',
+        detail: '参数 2 KB',
+        tool: 'grep',
+        tool_call_id: 'call-1',
+        tool_index: 0,
+        started_at_ms: 1000,
+      },
+      timestamp_ms: 1200,
+      seq: 2,
+    },
+  ]);
+  assert.equal(state.activity.phase, 'tool_planning');
+  assert.equal(state.activity.tool, 'grep');
+  assert.equal(state.activity.toolCallId, 'call-1');
+  assert.equal(state.activity.startedAtMs, 1000);
+
+  const cleared = reduceTranscriptEvent(state, { type: 'busy_changed', payload: { busy: false }, seq: 3 }).state;
+  assert.equal(cleared.activity, null);
+});
+
+run('tool_call_id 优先关联并行同名工具', () => {
+  const state = reduceMany([
+    { type: 'tool_start', payload: { tool: 'grep', tool_call_id: 'call-a', tool_index: 0 }, seq: 1 },
+    { type: 'tool_start', payload: { tool: 'grep', tool_call_id: 'call-b', tool_index: 1 }, seq: 2 },
+    { type: 'tool_update', payload: { tool: 'grep', tool_call_id: 'call-b', tail_lines: ['B'], total_lines: 1 }, seq: 3 },
+    { type: 'tool_end', payload: { tool: 'grep', tool_call_id: 'call-a', success: true }, seq: 4 },
+    { type: 'tool_end', payload: { tool: 'grep', tool_call_id: 'call-b', success: false, output: 'bad' }, seq: 5 },
+  ]);
+  assert.equal(state.items.length, 2);
+  const [a, b] = state.items.map((item) => item.tool);
+  assert.equal(a.toolCallId, 'call-a');
+  assert.equal(b.toolCallId, 'call-b');
+  assert.equal(a.isDone, true);
+  assert.equal(a.success, true);
+  assert.deepEqual(b.tailLines, ['B']);
+  assert.equal(b.success, false);
+  assert.equal(b.output, 'bad');
+});
+
+run('reasoning 事件不追加到可见 assistant 消息', () => {
+  const state = reduceMany([
+    { type: 'reasoning', payload: { text: 'hidden thought' }, seq: 1 },
+    { type: 'token', payload: { text: 'visible' }, seq: 2 },
+  ]);
+  assert.equal(state.items.length, 1);
+  assert.equal(state.items[0].role, 'assistant');
+  assert.equal(state.items[0].content, 'visible');
+});
+
+run('新 session 不继承上一 session 活动状态', () => {
+  const previous = reduceMany([
+    { type: 'busy_changed', payload: { busy: true }, seq: 1 },
+    { type: 'agent_progress', payload: { phase: 'model_waiting', label: '等待' }, seq: 2 },
+  ]);
+  assert.equal(previous.activity.phase, 'model_waiting');
+
+  const fresh = createTranscriptState({ title: 'next' });
+  assert.equal(fresh.activity, null);
+
+  const loaded = loadTranscriptHistory(previous, { messages: [], events: [] }).state;
+  assert.equal(loaded.activity, null);
+});
+
 run('compact projection 只取最近窗口且不改写 item 内容', () => {
   const items = Array.from({ length: 10 }, (_, index) => ({ kind: 'msg', id: index + 1, role: 'assistant', content: `m${index + 1}` }));
   const compact = projectCompactTranscriptItems(items, 4);

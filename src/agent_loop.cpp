@@ -15,8 +15,46 @@
 #include <thread>
 #include <sstream>
 #include <deque>
+#include <cstdint>
 
 namespace acecode {
+
+namespace {
+
+std::int64_t now_epoch_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+nlohmann::json build_agent_progress_payload(
+    const std::string& phase,
+    const std::string& label,
+    const std::string& detail,
+    const std::string& tool,
+    const std::string& tool_call_id,
+    int tool_index,
+    std::int64_t started_at_ms) {
+    nlohmann::json payload;
+    payload["phase"] = phase;
+    payload["label"] = label;
+    if (!detail.empty()) payload["detail"] = detail;
+    if (!tool.empty()) payload["tool"] = tool;
+    if (!tool_call_id.empty()) payload["tool_call_id"] = tool_call_id;
+    if (tool_index >= 0) payload["tool_index"] = tool_index;
+    if (started_at_ms > 0) payload["started_at_ms"] = started_at_ms;
+    return payload;
+}
+
+std::string format_bytes_detail(std::size_t bytes) {
+    if (bytes < 1024) return "参数 " + std::to_string(bytes) + " 字节";
+    std::ostringstream oss;
+    oss.setf(std::ios::fixed);
+    oss.precision(1);
+    oss << "参数 " << (static_cast<double>(bytes) / 1024.0) << " KB";
+    return oss.str();
+}
+
+} // namespace
 
 AgentLoop::AgentLoop(ProviderAccessor provider_accessor, ToolExecutor& tools,
                      AgentCallbacks callbacks, const std::string& cwd,
@@ -192,6 +230,42 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
 
     const int max_iter = loop_cfg_.max_iterations;
 
+    std::mutex progress_mu;
+    std::string active_progress_key;
+    std::int64_t active_progress_started_at_ms = 0;
+    std::chrono::steady_clock::time_point last_progress_emit_at{};
+    auto emit_agent_progress = [&](const std::string& phase,
+                                   const std::string& label,
+                                   const std::string& detail = std::string{},
+                                   const std::string& tool = std::string{},
+                                   const std::string& tool_call_id = std::string{},
+                                   int tool_index = -1,
+                                   bool force = false) {
+        const auto now = std::chrono::steady_clock::now();
+        const std::string key = phase + "\0" + tool + "\0" + tool_call_id + "\0" + std::to_string(tool_index);
+        nlohmann::json payload;
+        {
+            std::lock_guard<std::mutex> lk(progress_mu);
+            if (key != active_progress_key) {
+                active_progress_key = key;
+                active_progress_started_at_ms = now_epoch_ms();
+                force = true;
+            }
+            if (!force && last_progress_emit_at.time_since_epoch().count() != 0) {
+                const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_progress_emit_at);
+                if (elapsed < std::chrono::milliseconds(750)) return;
+            }
+            last_progress_emit_at = now;
+            payload = build_agent_progress_payload(
+                phase, label, detail, tool, tool_call_id, tool_index,
+                active_progress_started_at_ms);
+        }
+        EventDispatcher::EmitOptions opts;
+        opts.buffered = true;
+        opts.coalesce_key = "agent_progress";
+        events_.emit(SessionEventKind::AgentProgress, std::move(payload), opts);
+    };
+
     while (!abort_requested_ && !terminator_fired && total_iterations < max_iter) {
         ++total_iterations;
         LOG_INFO("--- Agent loop turn " + std::to_string(total_iterations) +
@@ -230,8 +304,11 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
         ChatResponse accumulated;
         accumulated.finish_reason = "stop";
         std::mutex resp_mu;
+        std::size_t reasoning_bytes = 0;
+        int reasoning_fragments = 0;
 
-        auto stream_callback = [&accumulated, &resp_mu, this](const StreamEvent& evt) {
+        auto stream_callback = [&accumulated, &resp_mu, &emit_agent_progress,
+                                &reasoning_bytes, &reasoning_fragments, this](const StreamEvent& evt) {
             switch (evt.type) {
             case StreamEventType::Delta:
                 {
@@ -248,10 +325,26 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
                     std::lock_guard<std::mutex> lk(resp_mu);
                     accumulated.reasoning_content += evt.content;
                 }
+                reasoning_bytes += evt.content.size();
+                reasoning_fragments++;
+                emit_agent_progress("reasoning", "正在推理",
+                    "片段 " + std::to_string(reasoning_fragments) + ", " +
+                    std::to_string(reasoning_bytes) + " 字节");
                 // Future TUI hook (e.g. a "Thinking..." panel) can subscribe
                 // here. Today we only accumulate so format_assistant_tool_calls
                 // and the empty-turn branch can echo it back to DeepSeek.
                 events_.emit(SessionEventKind::Reasoning, nlohmann::json{{"text", evt.content}});
+                break;
+            case StreamEventType::ToolCallDelta:
+                {
+                    const std::string tool_name = evt.tool_call.function_name;
+                    const std::string label = tool_name.empty()
+                        ? "正在准备工具调用"
+                        : "正在准备调用 " + tool_name;
+                    emit_agent_progress("tool_planning", label,
+                        format_bytes_detail(evt.tool_call_argument_bytes),
+                        tool_name, evt.tool_call.id, evt.tool_index);
+                }
                 break;
             case StreamEventType::ToolCall:
                 {
@@ -290,6 +383,9 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
             break;
         }
         try {
+            emit_agent_progress(total_iterations == 1 ? "model_waiting" : "model_followup",
+                total_iterations == 1 ? "正在等待模型响应" : "正在等待模型继续响应",
+                std::string{}, std::string{}, std::string{}, -1, true);
             provider_snapshot->chat_stream(messages_with_system, tool_defs, stream_callback, &abort_requested_);
             LOG_INFO("chat_stream returned. content_len=" + std::to_string(accumulated.content.size()) + " tool_calls=" + std::to_string(accumulated.tool_calls.size()));
         } catch (const std::exception& e) {
@@ -426,6 +522,181 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
             }
         };
 
+        using ToolRunner = std::function<ToolResult(const ToolContext&,
+                                                     const std::string&,
+                                                     const std::string&)>;
+
+        auto run_tool_with_lifecycle = [&](const ToolCall& tc,
+                                           size_t tool_index,
+                                           bool emit_tui_progress,
+                                           const ToolRunner& runner) -> ToolResult {
+            std::string exec_path, exec_cmd;
+            extract_context(tc, exec_path, exec_cmd);
+
+            std::string cmd_preview;
+            if (!exec_cmd.empty()) cmd_preview = exec_cmd;
+            else if (!exec_path.empty()) cmd_preview = exec_path;
+            else cmd_preview = tc.function_name;
+            if (cmd_preview.size() > 60) cmd_preview = cmd_preview.substr(0, 57) + "...";
+
+            std::string display_override =
+                ToolExecutor::build_tool_call_preview(tc.function_name, tc.function_arguments);
+            bool is_task_complete = (tc.function_name == "task_complete");
+
+            auto tool_start_tp = std::chrono::steady_clock::now();
+            const int tool_index_int = static_cast<int>(tool_index);
+
+            {
+                nlohmann::json args_payload;
+                try { args_payload = nlohmann::json::parse(tc.function_arguments); }
+                catch (...) { args_payload = tc.function_arguments; }
+                events_.emit(SessionEventKind::ToolStart,
+                    web::build_tool_start_payload(tc.function_name, args_payload,
+                                                    cmd_preview, display_override,
+                                                    is_task_complete,
+                                                    tc.id, tool_index_int));
+            }
+
+            emit_agent_progress("tool_running", "正在调用工具 " + tc.function_name,
+                cmd_preview, tc.function_name, tc.id, tool_index_int, true);
+
+            struct ProgressState {
+                std::mutex mu;
+                std::string current_line;
+                std::deque<std::string> tail_lines;
+                int total_lines = 0;
+                size_t total_bytes = 0;
+                std::chrono::steady_clock::time_point last_emit_at{};
+            };
+            auto prog = std::make_shared<ProgressState>();
+
+            ToolContext tool_ctx;
+            tool_ctx.cwd = cwd_;
+            tool_ctx.abort_flag = &abort_requested_;
+            if (session_manager_) {
+                tool_ctx.track_file_write_before = [this](const std::string& path) {
+                    if (session_manager_) {
+                        session_manager_->track_file_write_before(path);
+                    }
+                };
+            }
+            if (ask_prompter_) {
+                AskUserQuestionPrompter* p = ask_prompter_;
+                std::atomic<bool>* abort_flag_ptr = &abort_requested_;
+                auto ask_progress = emit_agent_progress;
+                const std::string tool_name_for_question = tc.function_name;
+                const std::string tool_call_id_for_question = tc.id;
+                tool_ctx.ask_user_questions =
+                    [p, abort_flag_ptr, ask_progress, tool_name_for_question,
+                     tool_call_id_for_question, tool_index_int](const nlohmann::json& questions_payload) -> nlohmann::json {
+                        ask_progress("question_waiting", "正在等待用户回答",
+                            std::string{}, tool_name_for_question,
+                            tool_call_id_for_question, tool_index_int, true);
+                        AskUserQuestionResponse resp = p->prompt(questions_payload, abort_flag_ptr);
+                        nlohmann::json out;
+                        out["cancelled"] = resp.cancelled;
+                        nlohmann::json arr = nlohmann::json::array();
+                        for (const auto& a : resp.answers) {
+                            nlohmann::json item;
+                            item["question_id"] = a.question_id;
+                            item["selected"]    = a.selected;
+                            item["custom_text"] = a.custom_text;
+                            arr.push_back(std::move(item));
+                        }
+                        out["answers"] = std::move(arr);
+                        return out;
+                    };
+            }
+
+            std::function<void(const std::vector<std::string>&,
+                               const std::string&,
+                               size_t,
+                               int)> stream_update_cb;
+            if (emit_tui_progress) stream_update_cb = callbacks_.on_tool_progress_update;
+            EventDispatcher* events_ptr = &events_;
+            std::string tool_name_copy = tc.function_name;
+            std::string tool_call_id_copy = tc.id;
+            const std::string update_coalesce_key = "tool_update:" +
+                (!tc.id.empty() ? tc.id : (tc.function_name + ":" + std::to_string(tool_index_int)));
+            tool_ctx.stream = [prog, stream_update_cb, events_ptr, tool_start_tp,
+                                tool_name_copy, tool_call_id_copy, tool_index_int,
+                                update_coalesce_key](const std::string& chunk) {
+                std::vector<std::string> snapshot;
+                std::string current_partial;
+                int total_lines = 0;
+                size_t total_bytes = 0;
+                bool should_emit = false;
+                {
+                    std::lock_guard<std::mutex> lk(prog->mu);
+                    feed_line_state(chunk, prog->current_line, prog->tail_lines, prog->total_lines);
+                    prog->total_bytes += chunk.size();
+                    snapshot.assign(prog->tail_lines.begin(), prog->tail_lines.end());
+                    current_partial = prog->current_line;
+                    total_lines = prog->total_lines;
+                    total_bytes = prog->total_bytes;
+                    const auto now = std::chrono::steady_clock::now();
+                    should_emit = prog->last_emit_at.time_since_epoch().count() == 0 ||
+                        std::chrono::duration_cast<std::chrono::milliseconds>(now - prog->last_emit_at) >=
+                            std::chrono::milliseconds(500);
+                    if (should_emit) prog->last_emit_at = now;
+                }
+                if (stream_update_cb) {
+                    stream_update_cb(snapshot, current_partial, total_bytes, total_lines);
+                }
+                if (!should_emit) return;
+                auto elapsed_ms =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - tool_start_tp).count();
+                EventDispatcher::EmitOptions opts;
+                opts.buffered = true;
+                opts.coalesce_key = update_coalesce_key;
+                events_ptr->emit(SessionEventKind::ToolUpdate,
+                    web::build_tool_update_payload(tool_name_copy, snapshot,
+                                                     current_partial,
+                                                     total_lines,
+                                                     total_bytes,
+                                                     elapsed_ms / 1000.0,
+                                                     tool_call_id_copy,
+                                                     tool_index_int),
+                    opts);
+            };
+
+            struct ProgressGuard {
+                std::function<void()> end_cb;
+                ~ProgressGuard() { if (end_cb) end_cb(); }
+            };
+            ProgressGuard guard;
+            if (emit_tui_progress && callbacks_.on_tool_progress_start) {
+                callbacks_.on_tool_progress_start(tc.function_name, cmd_preview);
+                guard.end_cb = callbacks_.on_tool_progress_end;
+            }
+
+            ToolResult result;
+            try {
+                result = runner(tool_ctx, exec_path, exec_cmd);
+            } catch (const std::exception& e) {
+                LOG_ERROR("Tool lifecycle runner error: " + std::string(e.what()));
+                result = ToolResult{"[Error] Tool execution failed: " + std::string(e.what()), false};
+            }
+
+            auto elapsed_ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - tool_start_tp).count();
+            std::string snippet;
+            if (!result.success) {
+                int lines = 0;
+                for (char c : result.output) {
+                    snippet.push_back(c);
+                    if (c == '\n' && ++lines >= 20) break;
+                }
+            }
+            events_.emit(SessionEventKind::ToolEnd,
+                web::build_tool_end_payload(tc.function_name, result,
+                                              elapsed_ms / 1000.0, snippet,
+                                              tc.id, tool_index_int));
+            return result;
+        };
+
         // Phase 1: Execute read-only tools in parallel
         if (!read_entries.empty() && !abort_requested_) {
             // Notify TUI about all read-only tool calls
@@ -448,46 +719,20 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
 
                 for (size_t j = i; j < batch_end; ++j) {
                     const auto& entry = read_entries[j];
-                    std::string t_name = entry.tc->function_name;
-                    std::string t_args = entry.tc->function_arguments;
-                    std::string t_path;
-                    std::string t_cmd;
-                    extract_context(*entry.tc, t_path, t_cmd);
-                    ToolContext t_ctx;
-                    t_ctx.cwd = cwd_;
-                    t_ctx.abort_flag = &abort_requested_;
-                    if (session_manager_) {
-                        t_ctx.track_file_write_before = [this](const std::string& path) {
-                            if (session_manager_) {
-                                session_manager_->track_file_write_before(path);
-                            }
-                        };
-                    }
-                    // AskUserQuestion 工具(read-only)走这条并行路径,需要这个回调
-                    // 才能把 questions 推给前端;漏注入会让 daemon 工厂版直接 fail-fast。
-                    if (ask_prompter_) {
-                        AskUserQuestionPrompter* p = ask_prompter_;
-                        std::atomic<bool>* abort_flag_ptr = &abort_requested_;
-                        t_ctx.ask_user_questions =
-                            [p, abort_flag_ptr](const nlohmann::json& questions_payload) -> nlohmann::json {
-                                AskUserQuestionResponse resp = p->prompt(questions_payload, abort_flag_ptr);
-                                nlohmann::json out;
-                                out["cancelled"] = resp.cancelled;
-                                nlohmann::json arr = nlohmann::json::array();
-                                for (const auto& a : resp.answers) {
-                                    nlohmann::json item;
-                                    item["question_id"] = a.question_id;
-                                    item["selected"]    = a.selected;
-                                    item["custom_text"] = a.custom_text;
-                                    arr.push_back(std::move(item));
-                                }
-                                out["answers"] = std::move(arr);
-                                return out;
-                            };
-                    }
+                    ToolCall tc_copy = *entry.tc;
+                    size_t original_index = entry.original_index;
                     futures.push_back(std::async(std::launch::async,
-                        [&execute_single_tool, t_name, t_args, t_path, t_ctx]() {
-                            return execute_single_tool(t_name, t_args, t_path, t_ctx);
+                        [&run_tool_with_lifecycle, &execute_single_tool,
+                         tc_copy, original_index]() {
+                            return run_tool_with_lifecycle(
+                                tc_copy, original_index, false,
+                                [&execute_single_tool, &tc_copy](const ToolContext& ctx,
+                                                                  const std::string& ctx_path,
+                                                                  const std::string&) {
+                                    return execute_single_tool(
+                                        tc_copy.function_name, tc_copy.function_arguments,
+                                        ctx_path, ctx);
+                                });
                         }));
                 }
 
@@ -527,11 +772,6 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
             dispatch_message("tool_call",
                     "[Tool: " + tc.function_name + "] " + tc.function_arguments, true);
 
-            std::string ctx_path, ctx_command;
-            extract_context(tc, ctx_path, ctx_command);
-
-            bool auto_allow = permissions_.should_auto_allow(tc.function_name, false, ctx_path, ctx_command);
-
             auto emit_tool_result_callback = [&](size_t idx) {
                 if (!callbacks_.on_tool_result) return;
                 ChatMessage call_msg;
@@ -542,180 +782,45 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
                 callbacks_.on_tool_result(call_msg, tc.function_name, results[idx]);
             };
 
-            // Path safety validation
-            if (!ctx_path.empty() && tc.function_name != "bash") {
-                std::string path_error = path_validator_.validate(ctx_path);
-                if (!path_error.empty()) {
-                    LOG_WARN("Path validation failed: " + path_error);
-                    results[entry.original_index] = ToolResult{"[Error] " + path_error, false};
-                    result_ready[entry.original_index] = true;
-                    dispatch_message("tool_result", results[entry.original_index].output, true);
-                    emit_tool_result_callback(entry.original_index);
-                    continue;
-                }
+            results[entry.original_index] = run_tool_with_lifecycle(
+                tc, entry.original_index, true,
+                [&](const ToolContext& tool_ctx,
+                    const std::string& ctx_path,
+                    const std::string& ctx_command) -> ToolResult {
+                    bool auto_allow = permissions_.should_auto_allow(
+                        tc.function_name, false, ctx_path, ctx_command);
 
-                // Dangerous path: force confirmation even in Yolo mode (unless -dangerous)
-                if (path_validator_.is_dangerous_path(ctx_path) && auto_allow && !permissions_.is_dangerous()) {
-                    LOG_INFO("Dangerous path detected, forcing confirmation: " + ctx_path);
-                    auto_allow = false;
-                }
-            }
-
-            if (!auto_allow && (prompter_ || callbacks_.on_tool_confirm)) {
-                // Section 7.6: 优先走 prompter_(daemon 异步路径);未注入时
-                // 回落到 callbacks_.on_tool_confirm(TUI 同步路径)。
-                PermissionResult perm = prompter_
-                    ? prompter_->prompt(tc.function_name, tc.function_arguments, &abort_requested_)
-                    : callbacks_.on_tool_confirm(tc.function_name, tc.function_arguments);
-                if (perm == PermissionResult::Deny) {
-                    results[entry.original_index] = ToolResult{"[User denied tool execution]", false};
-                    result_ready[entry.original_index] = true;
-                    dispatch_message("tool_result", "[User denied tool execution]", true);
-                    emit_tool_result_callback(entry.original_index);
-                    continue;
-                }
-                if (perm == PermissionResult::AlwaysAllow) {
-                    permissions_.add_session_allow(tc.function_name);
-                }
-            }
-
-            std::string exec_path, exec_cmd;
-            extract_context(tc, exec_path, exec_cmd);
-
-            // Build command preview: for bash use the command string, else tool name + primary arg.
-            std::string cmd_preview;
-            if (!exec_cmd.empty()) cmd_preview = exec_cmd;
-            else if (!exec_path.empty()) cmd_preview = exec_path;
-            else cmd_preview = tc.function_name;
-            if (cmd_preview.size() > 60) cmd_preview = cmd_preview.substr(0, 57) + "...";
-
-            // 提前算 display_override(对齐 TUI: bash → "bash  cmd",file_* → "file_*  path",
-            // 其他工具返回空 → 浏览器侧 fallback 到 tool 名 + 参数预览)。
-            std::string display_override =
-                ToolExecutor::build_tool_call_preview(tc.function_name, tc.function_arguments);
-            bool is_task_complete = (tc.function_name == "task_complete");
-
-            // 工具计时(供 ToolEnd.elapsed_seconds 与 ToolUpdate 实时秒数)
-            auto tool_start_tp = std::chrono::steady_clock::now();
-
-            // §1.2.2: 推 ToolStart 事件给 daemon 路径。TUI 路径不依赖此事件
-            // (它走 callbacks_.on_tool_progress_start),所以两路并行不冲突。
-            {
-                nlohmann::json args_payload;
-                try { args_payload = nlohmann::json::parse(tc.function_arguments); }
-                catch (...) { args_payload = tc.function_arguments; }
-                events_.emit(SessionEventKind::ToolStart,
-                    web::build_tool_start_payload(tc.function_name, args_payload,
-                                                    cmd_preview, display_override,
-                                                    is_task_complete));
-            }
-
-            // Shared progress state for this one tool call.
-            // Accessed from the streaming callback which runs on the bash_tool's
-            // polling loop (same worker thread), so no extra synchronisation
-            // beyond the mutable lambda capture.
-            struct ProgressState {
-                std::string current_line;
-                std::deque<std::string> tail_lines;
-                int total_lines = 0;
-                size_t total_bytes = 0;
-            };
-            auto prog = std::make_shared<ProgressState>();
-
-            ToolContext tool_ctx;
-            tool_ctx.cwd = cwd_;
-            tool_ctx.abort_flag = &abort_requested_;
-            if (session_manager_) {
-                tool_ctx.track_file_write_before = [this](const std::string& path) {
-                    if (session_manager_) {
-                        session_manager_->track_file_write_before(path);
-                    }
-                };
-            }
-
-            // §1.1.3: 把 ask_user_question prompter 包成 ctx 回调。daemon 工厂版
-            // AskUserQuestion 工具(create_ask_user_question_tool_async)读这个回调;
-            // TUI 工厂版完全忽略它,继续走 TuiState overlay 流程。
-            if (ask_prompter_) {
-                AskUserQuestionPrompter* p = ask_prompter_;
-                std::atomic<bool>* abort_flag_ptr = &abort_requested_;
-                tool_ctx.ask_user_questions =
-                    [p, abort_flag_ptr](const nlohmann::json& questions_payload) -> nlohmann::json {
-                        AskUserQuestionResponse resp = p->prompt(questions_payload, abort_flag_ptr);
-                        nlohmann::json out;
-                        out["cancelled"] = resp.cancelled;
-                        nlohmann::json arr = nlohmann::json::array();
-                        for (const auto& a : resp.answers) {
-                            nlohmann::json item;
-                            item["question_id"] = a.question_id;
-                            item["selected"]    = a.selected;
-                            item["custom_text"] = a.custom_text;
-                            arr.push_back(std::move(item));
+                    if (!ctx_path.empty() && tc.function_name != "bash") {
+                        std::string path_error = path_validator_.validate(ctx_path);
+                        if (!path_error.empty()) {
+                            LOG_WARN("Path validation failed: " + path_error);
+                            return ToolResult{"[Error] " + path_error, false};
                         }
-                        out["answers"] = std::move(arr);
-                        return out;
-                    };
-            }
-
-            // §1.2.3: stream 回调同时驱动 TUI 进度回调 + 推 ToolUpdate 事件。
-            // current_partial = current_line(未完整 line),tail_lines = 最近 5 行(由
-            // feed_line_state 维护)。elapsed_seconds 实时算。
-            auto stream_update_cb = callbacks_.on_tool_progress_update;
-            EventDispatcher* events_ptr = &events_;
-            std::string tool_name_copy = tc.function_name;
-            tool_ctx.stream = [prog, stream_update_cb, events_ptr, tool_start_tp,
-                                tool_name_copy](const std::string& chunk) {
-                feed_line_state(chunk, prog->current_line, prog->tail_lines, prog->total_lines);
-                prog->total_bytes += chunk.size();
-                std::vector<std::string> snapshot(prog->tail_lines.begin(), prog->tail_lines.end());
-                if (stream_update_cb) {
-                    stream_update_cb(snapshot, prog->current_line, prog->total_bytes, prog->total_lines);
-                }
-                auto elapsed_ms =
-                    std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now() - tool_start_tp).count();
-                events_ptr->emit(SessionEventKind::ToolUpdate,
-                    web::build_tool_update_payload(tool_name_copy, snapshot,
-                                                     prog->current_line,
-                                                     prog->total_lines,
-                                                     prog->total_bytes,
-                                                     elapsed_ms / 1000.0));
-            };
-
-            // RAII guard: ensures on_tool_progress_end fires on any exit path.
-            struct ProgressGuard {
-                std::function<void()> end_cb;
-                ~ProgressGuard() { if (end_cb) end_cb(); }
-            };
-            ProgressGuard guard;
-            if (callbacks_.on_tool_progress_start) {
-                callbacks_.on_tool_progress_start(tc.function_name, cmd_preview);
-                guard.end_cb = callbacks_.on_tool_progress_end;
-            }
-
-            results[entry.original_index] = execute_single_tool(
-                tc.function_name, tc.function_arguments, exec_path, tool_ctx);
-            result_ready[entry.original_index] = true;
-
-            // §1.2.4: 推 ToolEnd 事件。summary 来自 ToolResult::summary(opt-in 工具
-            // 才填);失败时 output 字段携带前 20 行 stderr 供前端 dim 显示。
-            {
-                const ToolResult& r = results[entry.original_index];
-                auto elapsed_ms =
-                    std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now() - tool_start_tp).count();
-                std::string snippet;
-                if (!r.success) {
-                    int lines = 0;
-                    for (char c : r.output) {
-                        snippet.push_back(c);
-                        if (c == '\n' && ++lines >= 20) break;
+                        if (path_validator_.is_dangerous_path(ctx_path) && auto_allow && !permissions_.is_dangerous()) {
+                            LOG_INFO("Dangerous path detected, forcing confirmation: " + ctx_path);
+                            auto_allow = false;
+                        }
                     }
-                }
-                events_.emit(SessionEventKind::ToolEnd,
-                    web::build_tool_end_payload(tc.function_name, r,
-                                                  elapsed_ms / 1000.0, snippet));
-            }
+
+                    if (!auto_allow && (prompter_ || callbacks_.on_tool_confirm)) {
+                        emit_agent_progress("permission_waiting", "正在等待权限确认",
+                            tc.function_name, tc.function_name, tc.id,
+                            static_cast<int>(entry.original_index), true);
+                        PermissionResult perm = prompter_
+                            ? prompter_->prompt(tc.function_name, tc.function_arguments, &abort_requested_)
+                            : callbacks_.on_tool_confirm(tc.function_name, tc.function_arguments);
+                        if (perm == PermissionResult::Deny) {
+                            return ToolResult{"[User denied tool execution]", false};
+                        }
+                        if (perm == PermissionResult::AlwaysAllow) {
+                            permissions_.add_session_allow(tc.function_name);
+                        }
+                    }
+
+                    return execute_single_tool(tc.function_name, tc.function_arguments,
+                                               ctx_path, tool_ctx);
+                });
+            result_ready[entry.original_index] = true;
 
             dispatch_message("tool_result", results[entry.original_index].output, true);
             emit_tool_result_callback(entry.original_index);

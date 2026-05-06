@@ -28,8 +28,7 @@ std::string trim(const std::string& s) {
 }
 
 std::string truncate(const std::string& s, std::size_t max) {
-    if (s.size() <= max) return s;
-    return s.substr(0, max - 1) + "\xE2\x80\xA6"; // U+2026
+    return truncate_with_ellipsis(s, max);
 }
 
 std::string error_kind_str(SearchError::Kind k) {
@@ -47,8 +46,7 @@ ToolSummary make_success_summary(const std::string& query,
     ToolSummary s;
     s.icon = "S"; // Search
     s.verb = "web_search";
-    std::string q = query;
-    if (q.size() > 40) q = q.substr(0, 37) + "...";
+    std::string q = truncate(query, 40);
     s.object = "\"" + q + "\"";
     s.metrics.push_back({"results", std::to_string(resp.hits.size())});
     s.metrics.push_back({"backend", resp.backend_name});
@@ -60,8 +58,7 @@ ToolSummary make_error_summary(const std::string& query, const SearchError& err)
     ToolSummary s;
     s.icon = "!";
     s.verb = "web_search";
-    std::string q = query;
-    if (q.size() > 40) q = q.substr(0, 37) + "...";
+    std::string q = truncate(query, 40);
     s.object = "\"" + q + "\"";
     s.metrics.push_back({"failed", error_kind_str(err.kind)});
     s.metrics.push_back({"err", truncate(err.message, 80)});

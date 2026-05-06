@@ -32,7 +32,9 @@ nlohmann::json build_tool_start_payload(
     const nlohmann::json& args_payload,
     const std::string& command_preview,
     const std::string& display_override,
-    bool is_task_complete);
+    bool is_task_complete,
+    const std::string& tool_call_id = {},
+    int tool_index = -1);
 
 // 构造 tool_update payload。tail_lines 最多 5 条由 caller 截好(本函数不截)。
 nlohmann::json build_tool_update_payload(
@@ -41,7 +43,9 @@ nlohmann::json build_tool_update_payload(
     const std::string& current_partial,
     int total_lines,
     std::size_t total_bytes,
-    double elapsed_seconds);
+    double elapsed_seconds,
+    const std::string& tool_call_id = {},
+    int tool_index = -1);
 
 // 构造 tool_end payload。result.summary 缺省时 "summary" 字段不出现;
 // success=false 时附带前 N 行 stderr/output 给前端 dim 显示(N 由 caller
@@ -50,6 +54,8 @@ nlohmann::json build_tool_end_payload(
     const std::string& tool_name,
     const ToolResult& result,
     double elapsed_seconds,
-    const std::string& output_snippet);
+    const std::string& output_snippet,
+    const std::string& tool_call_id = {},
+    int tool_index = -1);
 
 } // namespace acecode::web

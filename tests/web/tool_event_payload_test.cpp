@@ -53,6 +53,29 @@ TEST(ToolEventPayload, ToolStartFullPayload) {
     EXPECT_EQ(p["command_preview"], "echo hi");
     EXPECT_EQ(p["display_override"], "bash  echo hi");
     EXPECT_EQ(p["is_task_complete"], false);
+    EXPECT_FALSE(p.contains("tool_call_id"));
+    EXPECT_FALSE(p.contains("tool_index"));
+}
+
+// 场景: 新 daemon 会给 tool_start/update/end 带 provider call id + turn 内 index,
+// 前端用它们区分并行同名工具;老调用不带字段仍保持兼容。
+TEST(ToolEventPayload, ToolLifecycleCarriesCorrelationFields) {
+    nlohmann::json args = {{"pattern", "foo"}};
+    auto start = build_tool_start_payload("grep", args, "grep foo", "grep  foo",
+                                          false, "call-1", 2);
+    EXPECT_EQ(start["tool_call_id"], "call-1");
+    EXPECT_EQ(start["tool_index"], 2);
+
+    auto update = build_tool_update_payload("grep", {"hit"}, "", 1, 3, 0.2,
+                                            "call-1", 2);
+    EXPECT_EQ(update["tool_call_id"], "call-1");
+    EXPECT_EQ(update["tool_index"], 2);
+
+    ToolResult r;
+    r.success = true;
+    auto end = build_tool_end_payload("grep", r, 0.3, "", "call-1", 2);
+    EXPECT_EQ(end["tool_call_id"], "call-1");
+    EXPECT_EQ(end["tool_index"], 2);
 }
 
 // 场景: task_complete 工具的 tool_start 必须带 is_task_complete=true,

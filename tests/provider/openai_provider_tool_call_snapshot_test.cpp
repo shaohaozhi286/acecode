@@ -68,6 +68,7 @@ struct LocalHttpServer {
 // 把 chat_stream 跑出的 ToolCall 事件收集成 vector 的便捷工具。
 struct StreamCollector {
     std::vector<ToolCall> tool_calls;
+    std::vector<StreamEvent> tool_call_deltas;
     int done_events = 0;
     int error_events = 0;
     std::mutex mu;
@@ -76,9 +77,10 @@ struct StreamCollector {
         return [this](const StreamEvent& evt) {
             std::lock_guard<std::mutex> lk(mu);
             switch (evt.type) {
-                case StreamEventType::ToolCall: tool_calls.push_back(evt.tool_call); break;
-                case StreamEventType::Done:     ++done_events; break;
-                case StreamEventType::Error:    ++error_events; break;
+                case StreamEventType::ToolCall:      tool_calls.push_back(evt.tool_call); break;
+                case StreamEventType::ToolCallDelta: tool_call_deltas.push_back(evt); break;
+                case StreamEventType::Done:          ++done_events; break;
+                case StreamEventType::Error:         ++error_events; break;
                 default: break;
             }
         };
@@ -196,6 +198,50 @@ TEST(OpenAiProviderToolCallSnapshotTest, StandardOpenAiIncrementalDeltaStillConc
     EXPECT_EQ(col.tool_calls[0].function_name, "get_weather");
     // 关键:增量必须按拼接还原,而不是被错误地"替换"成最后一帧的尾段。
     EXPECT_EQ(col.tool_calls[0].function_arguments, R"({"location": "SF"})");
+    EXPECT_EQ(col.error_events, 0);
+}
+
+// 用例 2.1:工具调用 delta 期间应额外发 ToolCallDelta 规划元数据,让 AgentLoop
+// 在最终 ToolCall flush 之前就能告诉 Web 正在准备哪个工具。该事件只带名称、id、
+// index 与累计参数字节数,不携带 raw partial arguments。
+TEST(OpenAiProviderToolCallSnapshotTest, ToolCallDeltaEmitsSafePlanningMetadata) {
+    LocalHttpServer server([](httplib::Server& s) {
+        s.Post("/chat/completions", [](const httplib::Request&, httplib::Response& res) {
+            std::string body;
+            body += "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{"
+                    "\"id\":\"call_meta\",\"type\":\"function\",\"index\":0,"
+                    "\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"com\"}}]},\"index\":0}]}\n\n";
+            body += "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{"
+                    "\"index\":0,\"function\":{\"arguments\":\"mand\\\": \\\"pwd\\\"}\"}}]},\"index\":0}]}\n\n";
+            body += "data: {\"choices\":[{\"delta\":{},\"index\":0,\"finish_reason\":\"tool_calls\"}]}\n\n";
+            body += "data: [DONE]\n\n";
+            res.set_content(body, "text/event-stream");
+            res.status = 200;
+        });
+    });
+
+    OpenAiCompatProvider provider(
+        "http://127.0.0.1:" + std::to_string(server.port), "", "test-model");
+
+    ChatMessage user_msg;
+    user_msg.role = "user";
+    user_msg.content = "pwd";
+    std::vector<ChatMessage> messages = {user_msg};
+    std::vector<ToolDef> tools;
+
+    StreamCollector col;
+    std::atomic<bool> abort_flag{false};
+    provider.chat_stream(messages, tools, col.callback(), &abort_flag);
+
+    ASSERT_EQ(col.tool_calls.size(), 1u);
+    ASSERT_GE(col.tool_call_deltas.size(), 2u);
+    EXPECT_EQ(col.tool_call_deltas[0].tool_call.id, "call_meta");
+    EXPECT_EQ(col.tool_call_deltas[0].tool_call.function_name, "bash");
+    EXPECT_EQ(col.tool_call_deltas[0].tool_index, 0);
+    EXPECT_GT(col.tool_call_deltas[0].tool_call_argument_bytes, 0u);
+    EXPECT_TRUE(col.tool_call_deltas[0].tool_call.function_arguments.empty());
+    EXPECT_EQ(col.tool_call_deltas.back().tool_call_argument_bytes,
+              col.tool_calls[0].function_arguments.size());
     EXPECT_EQ(col.error_events, 0);
 }
 

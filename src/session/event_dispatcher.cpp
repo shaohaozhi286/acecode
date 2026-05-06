@@ -9,6 +9,11 @@ EventDispatcher::EventDispatcher(std::size_t buffer_capacity)
     : buffer_capacity_(buffer_capacity == 0 ? 1 : buffer_capacity) {}
 
 std::uint64_t EventDispatcher::emit(SessionEventKind kind, nlohmann::json payload) {
+    return emit(kind, std::move(payload), EmitOptions{});
+}
+
+std::uint64_t EventDispatcher::emit(SessionEventKind kind, nlohmann::json payload,
+                                    EmitOptions options) {
     SessionEvent evt;
     evt.kind         = kind;
     evt.seq          = ++seq_counter_;
@@ -21,7 +26,9 @@ std::uint64_t EventDispatcher::emit(SessionEventKind kind, nlohmann::json payloa
     std::vector<EventListener> snapshot;
     {
         std::lock_guard<std::mutex> lk(mu_);
-        push_to_buffer(evt);
+        if (options.buffered) {
+            push_to_buffer(evt, options.coalesce_key);
+        }
         snapshot.reserve(listeners_.size());
         for (auto& [_, l] : listeners_) snapshot.push_back(l);
     }
@@ -64,10 +71,30 @@ std::size_t EventDispatcher::listener_count() const {
     return listeners_.size();
 }
 
-void EventDispatcher::push_to_buffer(const SessionEvent& evt) {
+void EventDispatcher::push_to_buffer(const SessionEvent& evt, const std::string& coalesce_key) {
     // 调用方持锁
+    if (!coalesce_key.empty()) {
+        auto it = coalesced_seq_by_key_.find(coalesce_key);
+        if (it != coalesced_seq_by_key_.end()) {
+            const std::uint64_t old_seq = it->second;
+            for (auto bit = buffer_.begin(); bit != buffer_.end(); ++bit) {
+                if (bit->seq == old_seq) {
+                    buffer_.erase(bit);
+                    break;
+                }
+            }
+        }
+        coalesced_seq_by_key_[coalesce_key] = evt.seq;
+    }
     buffer_.push_back(evt);
-    while (buffer_.size() > buffer_capacity_) buffer_.pop_front();
+    while (buffer_.size() > buffer_capacity_) {
+        const auto evicted_seq = buffer_.front().seq;
+        for (auto it = coalesced_seq_by_key_.begin(); it != coalesced_seq_by_key_.end();) {
+            if (it->second == evicted_seq) it = coalesced_seq_by_key_.erase(it);
+            else ++it;
+        }
+        buffer_.pop_front();
+    }
 }
 
 } // namespace acecode

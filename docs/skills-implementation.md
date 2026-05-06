@@ -159,8 +159,12 @@ struct SkillMetadata {
 ### `skills_list`（`src/tool/skills_tool.cpp`）
 
 - 入参：可选 `category`。
-- 返回：`{success, skills: [{name, description, category?}], count, categories, message?, hint?}`。
+- 返回：`{success, skills: [{name, description, category?}], count, categories, available_categories, reason, fallback_applied, ...}`。
 - 仅返回**名字 + 描述 + 分类**，即 "tier-1" 元数据。保证模型低成本地全量扫一遍再决定要不要深入。
+- `category` 会先做 trim；纯空白视为未提供。
+- 如果 `category` 不在已发现类别里（例如模型误传 `*`、`:` 或拼错类别名），工具会回退到**未过滤**列表，而不是返回误导性的空结果。
+- `reason` 用来区分 `registry_empty`、`empty_after_valid_filter`、`fallback_from_invalid_filter`、`ok`，便于模型自修复和日志排障。
+- 该工具由共享 `ToolExecutor` 同时服务 TUI 和 daemon/web 会话，所以这套回退语义天然在两端一致。
 
 ### `skill_view`（`src/tool/skill_view_tool.cpp`）
 

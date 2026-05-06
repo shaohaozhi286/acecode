@@ -7,7 +7,7 @@
 // hunks 字段(file_edit / file_write):展开区走 diff2html 渲染,而不是
 // 纯 <pre>{output}</pre>。bash 工具的展开区头部加 `$ <command>` prompt 行。
 
-import { memo, useMemo, useState } from 'react';
+import { memo, useEffect, useMemo, useState } from 'react';
 import { clsx, formatBytes, formatElapsed } from '../lib/format.js';
 import { hunksToUnifiedDiff } from '../lib/diff.js';
 import { CopyableCodeFrame } from './CopyableCodeFrame.jsx';
@@ -43,10 +43,23 @@ export const ToolBlock = memo(function ToolBlock({ entry }) {
     totalLines = 0,
     totalBytes = 0,
     elapsed = 0,
+    startedAtMs = 0,
     summary = null,
     output = '',
     hunks = [],
   } = entry || {};
+
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (isDone || !startedAtMs) return undefined;
+    setNowMs(Date.now());
+    const id = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [isDone, startedAtMs]);
+
+  const liveElapsed = !isDone && startedAtMs
+    ? Math.max(Number(elapsed) || 0, Math.max(0, (nowMs - startedAtMs) / 1000))
+    : (Number(elapsed) || 0);
 
   // diff2html 渲染:先把 hunks 转 unified diff,再交给 diff2html。空 hunks 时
   // 不构造,避免每次 render 浪费。
@@ -159,7 +172,7 @@ export const ToolBlock = memo(function ToolBlock({ entry }) {
       <div className="text-fg-mute text-[10px] mt-0.5 flex gap-3">
         <span>{totalLines} 行</span>
         <span>{formatBytes(totalBytes)}</span>
-        <span>{formatElapsed(elapsed)}</span>
+        <span>{formatElapsed(liveElapsed)}</span>
       </div>
       {hidden > 0 && (
         <div className="text-fg-mute text-[10px] mt-1">... +{hidden} 行已折叠</div>

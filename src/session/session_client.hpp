@@ -31,6 +31,7 @@ namespace acecode {
 enum class SessionEventKind {
     Token,             // payload: {"text": "..."}
     Reasoning,         // payload: {"text": "..."} (DeepSeek thinking 等)
+    AgentProgress,     // payload: {"phase":"...", "label":"...", ...} (Web activity indicator)
     Message,           // payload: 一条完整 ChatMessage(JSON 序列化形式)
     ToolStart,         // payload: {"tool":"...", "command_preview":"..."}
     ToolUpdate,        // payload: {"tool":"...", "tail":[...], "partial":"...", "total_lines":N, "total_bytes":N}
@@ -191,6 +192,7 @@ inline const char* to_string(SessionEventKind k) {
     switch (k) {
         case SessionEventKind::Token:             return "token";
         case SessionEventKind::Reasoning:         return "reasoning";
+        case SessionEventKind::AgentProgress:     return "agent_progress";
         case SessionEventKind::Message:           return "message";
         case SessionEventKind::ToolStart:         return "tool_start";
         case SessionEventKind::ToolUpdate:        return "tool_update";

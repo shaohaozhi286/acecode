@@ -4,6 +4,7 @@
 #include <vector>
 #include <functional>
 #include <atomic>
+#include <cstddef>
 #include <nlohmann/json.hpp>
 
 namespace acecode {
@@ -73,14 +74,19 @@ struct ToolDef {
 
 // Streaming event types for chat_stream()
 //   ReasoningDelta — chain-of-thought fragment from a reasoning-mode model.
+//   ToolCallDelta — safe metadata while a streaming provider is still
+//                   accumulating a tool call; tool_call.function_arguments is
+//                   partial and should not be rendered raw to users.
 //   Callbacks are free to ignore it; today the agent loop drops it silently
 //   and a future TUI panel can subscribe.
-enum class StreamEventType { Delta, ToolCall, Done, Error, Usage, ReasoningDelta };
+enum class StreamEventType { Delta, ToolCall, ToolCallDelta, Done, Error, Usage, ReasoningDelta };
 
 struct StreamEvent {
     StreamEventType type;
     std::string content;        // Delta: token fragment
-    ToolCall tool_call;         // ToolCall: complete tool call
+    ToolCall tool_call;         // ToolCall: complete call; ToolCallDelta: partial metadata
+    int tool_index = -1;        // ToolCall/ToolCallDelta: index within current assistant turn
+    std::size_t tool_call_argument_bytes = 0; // ToolCallDelta: accumulated argument bytes
     std::string error;          // Error: description
     TokenUsage usage;           // Usage: token counts from server
 };

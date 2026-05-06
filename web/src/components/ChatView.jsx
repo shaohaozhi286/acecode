@@ -65,6 +65,50 @@ function collectRowMetrics(container) {
   });
 }
 
+function formatElapsedSeconds(startedAtMs, nowMs) {
+  const start = Number(startedAtMs) || 0;
+  if (!start) return '';
+  const seconds = Math.max(0, Math.floor((nowMs - start) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  return `${minutes}m ${rest}s`;
+}
+
+function ActivityIndicator({ activity }) {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    setNowMs(Date.now());
+    const id = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [activity?.startedAtMs, activity?.phase, activity?.toolCallId, activity?.toolIndex]);
+
+  const label = activity?.label || '正在处理请求';
+  const detail = activity?.detail || '';
+  const elapsed = formatElapsedSeconds(activity?.startedAtMs, nowMs);
+  return (
+    <div className="flex gap-2 max-w-[85%]">
+      <div className="w-6 h-6 rounded-full bg-ok text-white text-[11px] font-bold flex items-center justify-center mt-[2px]">A</div>
+      <div className="rounded-2xl border border-border bg-surface-hi px-3 py-2 text-[12px] text-fg shadow-sm min-w-[180px]">
+        <div className="flex items-center gap-2">
+          <span className="font-medium">{label}</span>
+          {elapsed && <span className="text-fg-mute tabular-nums">{elapsed}</span>}
+        </div>
+        {detail && <div className="text-fg-mute mt-0.5 truncate max-w-[420px]">{detail}</div>}
+        <div className="flex gap-1 mt-2" aria-hidden="true">
+          {[0, 1, 2].map((i) => (
+            <span
+              key={i}
+              className="w-1.5 h-1.5 rounded-full bg-fg-mute"
+              style={{ animation: `ace-pulse 1.2s ease-in-out ${i * 0.2}s infinite` }}
+            />
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function normalizeSessionRef(sessionRef, sessionId) {
   if (sessionRef && typeof sessionRef === 'object') return sessionRef;
   if (typeof sessionRef === 'string' && sessionRef) return { sessionId: sessionRef };
@@ -183,7 +227,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         : '错误:' + (reason || ''),
     }),
   });
-  const { items, busy, turns, title, status: transcriptStatus, streamingId, tokenUsage, applyEvent, setTitle: setTranscriptTitle } = transcript;
+  const { items, busy, turns, title, status: transcriptStatus, streamingId, tokenUsage, activity, applyEvent, setTitle: setTranscriptTitle } = transcript;
   // 让 fireDesktopNotification 拿到最新 title,无需进入它的 useCallback deps。
   useEffect(() => { transcriptTitleRef.current = title || ''; }, [title]);
   const [history,  setHistory]  = useState([]);
@@ -206,6 +250,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   // transcript 只渲染后端真实落库的消息,避免把"草稿/未发送"和"已发送"混在一起。
   const visibleQueuedItems = useMemo(() => buildQueuedMessageItems(queueState, sid), [queueState, sid]);
   const renderedItems = useMemo(() => items, [items]);
+  const hasActiveTool = useMemo(() => renderedItems.some((item) => item.kind === 'tool' && !item.tool?.isDone), [renderedItems]);
   const itemsRef = useRef(renderedItems);
   const stickyRafRef = useRef(0);
   const [stickyUserContext, setStickyUserContext] = useState(null);
@@ -837,19 +882,8 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
               )}
             </div>
           ))}
-          {busy && streamingId == null && (
-            <div className="flex gap-2 max-w-[85%]">
-              <div className="w-6 h-6 rounded-full bg-ok text-white text-[11px] font-bold flex items-center justify-center mt-[2px]">A</div>
-              <div className="flex gap-1 py-2 px-3">
-                {[0,1,2].map((i) => (
-                  <span
-                    key={i}
-                    className="w-1.5 h-1.5 rounded-full bg-fg-mute"
-                    style={{ animation: `ace-pulse 1.2s ease-in-out ${i * 0.2}s infinite` }}
-                  />
-                ))}
-              </div>
-            </div>
+          {busy && streamingId == null && !hasActiveTool && (
+            <ActivityIndicator activity={activity} />
           )}
         </div>
         <StickyUserContext context={stickyUserContext} />

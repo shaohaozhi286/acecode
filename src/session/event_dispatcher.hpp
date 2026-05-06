@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <deque>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -33,10 +34,23 @@ public:
     using EventListener  = SessionClient::EventListener;
     using SubscriptionId = SessionClient::SubscriptionId;
 
+    struct EmitOptions {
+        // Buffered events are replayed to reconnecting clients via
+        // subscribe(since_seq). Transient progress ticks can set this false so
+        // they are delivered live without evicting durable transcript events.
+        bool buffered = true;
+
+        // When non-empty and buffered=true, only the latest buffered event for
+        // the same coalesce_key is retained. Listeners still receive every live
+        // event; replay clients receive the latest state only.
+        std::string coalesce_key;
+    };
+
     explicit EventDispatcher(std::size_t buffer_capacity = 1024);
 
     // 由 AgentLoop 调用。线程安全。返回分配的 seq(从 1 开始)。
     std::uint64_t emit(SessionEventKind kind, nlohmann::json payload);
+    std::uint64_t emit(SessionEventKind kind, nlohmann::json payload, EmitOptions options);
 
     // 注册一个 listener。`since_seq` > 0 时立刻回放缓存里 seq > since_seq
     // 的事件给这个 listener(同步调用),然后把它加入活跃列表。返回 id 供
@@ -53,7 +67,7 @@ public:
     std::size_t listener_count() const;
 
 private:
-    void push_to_buffer(const SessionEvent& evt);
+    void push_to_buffer(const SessionEvent& evt, const std::string& coalesce_key = {});
 
     std::atomic<std::uint64_t> seq_counter_{0};
     std::atomic<SubscriptionId> next_sub_id_{1};
@@ -61,6 +75,7 @@ private:
 
     mutable std::mutex                                   mu_;
     std::deque<SessionEvent>                             buffer_;
+    std::unordered_map<std::string, std::uint64_t>        coalesced_seq_by_key_;
     std::unordered_map<SubscriptionId, EventListener>   listeners_;
 };
 

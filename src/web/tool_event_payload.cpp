@@ -21,13 +21,17 @@ nlohmann::json build_tool_start_payload(
     const nlohmann::json& args_payload,
     const std::string& command_preview,
     const std::string& display_override,
-    bool is_task_complete) {
+    bool is_task_complete,
+    const std::string& tool_call_id,
+    int tool_index) {
     nlohmann::json p;
     p["tool"]              = tool_name;
     p["args"]              = args_payload;
     p["command_preview"]   = command_preview;
     p["display_override"]  = display_override;
     p["is_task_complete"]  = is_task_complete;
+    if (!tool_call_id.empty()) p["tool_call_id"] = tool_call_id;
+    if (tool_index >= 0) p["tool_index"] = tool_index;
     return p;
 }
 
@@ -37,7 +41,9 @@ nlohmann::json build_tool_update_payload(
     const std::string& current_partial,
     int total_lines,
     std::size_t total_bytes,
-    double elapsed_seconds) {
+    double elapsed_seconds,
+    const std::string& tool_call_id,
+    int tool_index) {
     nlohmann::json p;
     p["tool"]            = tool_name;
     p["tail_lines"]      = tail_lines;
@@ -45,6 +51,8 @@ nlohmann::json build_tool_update_payload(
     p["total_lines"]     = total_lines;
     p["total_bytes"]     = total_bytes;
     p["elapsed_seconds"] = elapsed_seconds;
+    if (!tool_call_id.empty()) p["tool_call_id"] = tool_call_id;
+    if (tool_index >= 0) p["tool_index"] = tool_index;
     return p;
 }
 
@@ -52,11 +60,15 @@ nlohmann::json build_tool_end_payload(
     const std::string& tool_name,
     const ToolResult& result,
     double elapsed_seconds,
-    const std::string& output_snippet) {
+    const std::string& output_snippet,
+    const std::string& tool_call_id,
+    int tool_index) {
     nlohmann::json p;
     p["tool"]            = tool_name;
     p["success"]         = result.success;
     p["elapsed_seconds"] = elapsed_seconds;
+    if (!tool_call_id.empty()) p["tool_call_id"] = tool_call_id;
+    if (tool_index >= 0) p["tool_index"] = tool_index;
     if (result.summary.has_value()) {
         p["summary"] = tool_summary_to_json(*result.summary);
     }

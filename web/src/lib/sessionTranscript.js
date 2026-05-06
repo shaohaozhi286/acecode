@@ -36,6 +36,7 @@ function cloneState(state) {
     items: Array.isArray(state.items) ? state.items : [],
     toolMap: cloneToolMap(state.toolMap),
     tokenUsage: cloneTokenUsage(state.tokenUsage),
+    activity: state.activity && typeof state.activity === 'object' ? { ...state.activity } : null,
   };
 }
 
@@ -68,7 +69,13 @@ function eventTs(msg) {
 }
 
 function toolKey(payload = {}) {
-  return payload.tool_call_id || payload.call_id || payload.id || payload.tool || '_anon';
+  if (payload.tool_call_id || payload.call_id || payload.id) {
+    return payload.tool_call_id || payload.call_id || payload.id;
+  }
+  if (payload.tool_index !== undefined && payload.tool_index !== null) {
+    return `${payload.tool || '_tool'}#${payload.tool_index}`;
+  }
+  return payload.tool || '_anon';
 }
 
 function finalizeStreaming(next) {
@@ -96,6 +103,7 @@ export function createTranscriptState(overrides = {}) {
     nextItemId: 1,
     error: '',
     tokenUsage: null,
+    activity: null,
     // turnHadAssistantText / lastAssistantText 用于桌面通知:在 busy=true→false
     // 转换且本回合产生过 assistant 文本时,emit turn_completed effect。reducer 之外
     // 的代码不应直接读 / 写它们。见 openspec/changes/add-desktop-attention-notifications。
@@ -126,6 +134,22 @@ export function reduceTranscriptEvent(state, msg) {
   }
 
   switch (t) {
+    case 'agent_progress': {
+      const phase = p.phase || '';
+      const label = p.label || '';
+      if (!phase && !label) break;
+      next.activity = {
+        phase,
+        label: label || phase,
+        detail: p.detail || '',
+        tool: p.tool || '',
+        toolCallId: p.tool_call_id || p.call_id || p.id || '',
+        toolIndex: p.tool_index ?? null,
+        startedAtMs: Number(p.started_at_ms) || eventTs(msg),
+        timestampMs: eventTs(msg),
+      };
+      break;
+    }
     case 'message': {
       const role = p.role || 'system';
       if (role === 'assistant' && next.streamingId != null) {
@@ -201,6 +225,9 @@ export function reduceTranscriptEvent(state, msg) {
         isDone: false,
         success: null,
         tool: p.tool || '',
+        toolCallId: p.tool_call_id || p.call_id || p.id || '',
+        toolIndex: p.tool_index ?? null,
+        startedAtMs: eventTs(msg),
         displayOverride: p.display_override || '',
         title: p.display_override || p.command_preview || `${p.tool || ''}  ${JSON.stringify(p.args || {})}`,
         tailLines: [],
@@ -230,6 +257,8 @@ export function reduceTranscriptEvent(state, msg) {
             totalLines: p.total_lines || item.tool.totalLines,
             totalBytes: p.total_bytes || item.tool.totalBytes,
             elapsed: p.elapsed_seconds || item.tool.elapsed,
+            toolCallId: p.tool_call_id || item.tool.toolCallId || '',
+            toolIndex: p.tool_index ?? item.tool.toolIndex ?? null,
           },
         };
       });
@@ -252,6 +281,9 @@ export function reduceTranscriptEvent(state, msg) {
             summary: p.summary || item.tool.summary,
             output: p.output || '',
             hunks: Array.isArray(p.hunks) ? p.hunks : [],
+            elapsed: p.elapsed_seconds || item.tool.elapsed,
+            toolCallId: p.tool_call_id || item.tool.toolCallId || '',
+            toolIndex: p.tool_index ?? item.tool.toolIndex ?? null,
           },
         };
       });
@@ -271,6 +303,7 @@ export function reduceTranscriptEvent(state, msg) {
         next.lastAssistantText = '';
       }
       if (!p.busy) {
+        next.activity = null;
         next.turns = (next.turns || 0) + 1;
         finalizeStreaming(next);
         if (next.turnHadAssistantText) {
@@ -285,6 +318,7 @@ export function reduceTranscriptEvent(state, msg) {
     case 'done': {
       next.busy = false;
       next.status = 'idle';
+      next.activity = null;
       finalizeStreaming(next);
       if (next.turnHadAssistantText) {
         effects.push({
@@ -298,6 +332,7 @@ export function reduceTranscriptEvent(state, msg) {
       next.busy = false;
       next.status = 'error';
       next.error = p.reason || '';
+      next.activity = null;
       effects.push({ type: 'error', payload: p });
       break;
     case 'permission_request':

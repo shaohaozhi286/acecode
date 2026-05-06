@@ -88,6 +88,70 @@ TEST(EventDispatcher, BufferEvictsOldEventsBeyondCapacity) {
     EXPECT_EQ(got2[2].seq, 5u);
 }
 
+// 场景: 非 durable progress 事件应分配 seq 并投递给 live listener,但不进 replay buffer。
+// 这样频繁的 agent_progress 不会挤掉 message/tool_end 这类 durable 事件。
+TEST(EventDispatcher, NonBufferedEventsAreLiveOnlyAndNotReplayed) {
+    EventDispatcher d;
+    std::vector<SessionEvent> live;
+    d.subscribe([&](const SessionEvent& e) { live.push_back(e); });
+
+    EventDispatcher::EmitOptions opts;
+    opts.buffered = false;
+    auto seq = d.emit(SessionEventKind::AgentProgress,
+        {{"phase", "model_waiting"}, {"label", "waiting"}}, opts);
+
+    ASSERT_EQ(live.size(), 1u);
+    EXPECT_EQ(live[0].kind, SessionEventKind::AgentProgress);
+    EXPECT_EQ(live[0].seq, seq);
+    EXPECT_EQ(d.current_seq(), seq);
+
+    std::vector<SessionEvent> replay;
+    d.subscribe([&](const SessionEvent& e) { replay.push_back(e); }, /*since_seq=*/0);
+    EXPECT_TRUE(replay.empty()) << "live-only progress 不应 replay";
+
+    d.emit(SessionEventKind::Done, {});
+    std::vector<SessionEvent> replay2;
+    d.subscribe([&](const SessionEvent& e) { replay2.push_back(e); }, /*since_seq=*/seq);
+    ASSERT_EQ(replay2.size(), 1u);
+    EXPECT_EQ(replay2[0].kind, SessionEventKind::Done);
+}
+
+// 场景: coalesce_key 只保留最后一个 buffered progress 状态供 reconnect replay。
+// live listener 仍收到全部状态变化,方便当前连接即时更新。
+TEST(EventDispatcher, CoalescedBufferedEventsReplayOnlyLatestForKey) {
+    EventDispatcher d;
+    auto base = d.emit(SessionEventKind::Token, {{"text", "old"}});
+    std::vector<SessionEvent> live;
+    d.subscribe([&](const SessionEvent& e) { live.push_back(e); });
+
+    EventDispatcher::EmitOptions opts;
+    opts.buffered = true;
+    opts.coalesce_key = "session:activity";
+    auto s1 = d.emit(SessionEventKind::AgentProgress,
+        {{"phase", "model_waiting"}, {"label", "waiting"}}, opts);
+    auto s2 = d.emit(SessionEventKind::AgentProgress,
+        {{"phase", "reasoning"}, {"label", "reasoning"}}, opts);
+    auto s3 = d.emit(SessionEventKind::AgentProgress,
+        {{"phase", "tool_planning"}, {"label", "planning"}}, opts);
+
+    ASSERT_EQ(live.size(), 3u);
+    EXPECT_EQ(live[0].seq, s1);
+    EXPECT_EQ(live[2].seq, s3);
+
+    std::vector<SessionEvent> replay;
+    d.subscribe([&](const SessionEvent& e) { replay.push_back(e); }, /*since_seq=*/0);
+    EXPECT_TRUE(replay.empty()) << "since=0 仍不 replay";
+
+    std::vector<SessionEvent> replay2;
+    d.subscribe([&](const SessionEvent& e) { replay2.push_back(e); }, /*since_seq=*/base);
+    ASSERT_EQ(replay2.size(), 1u);
+    EXPECT_EQ(replay2[0].seq, s3);
+    EXPECT_EQ(replay2[0].payload["phase"], "tool_planning");
+    EXPECT_EQ(d.current_seq(), s3);
+
+    (void)s2;
+}
+
 // 场景: unsubscribe 后该 listener 不再收到事件。
 TEST(EventDispatcher, UnsubscribeStopsDelivery) {
     EventDispatcher d;

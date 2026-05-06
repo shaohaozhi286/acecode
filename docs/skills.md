@@ -55,7 +55,7 @@ Two activation paths, both routed through the agent loop:
 
 1. **User invocation** — Type `/<skill-name> [optional argument]`. acecode loads the full body, appends any supporting file listing and the optional argument, and submits the result as a user message. The LLM then follows the skill's instructions.
 2. **LLM discovery** — The LLM sees a `# Skills` hint in the system prompt whenever at least one skill is installed, plus two tools:
-   - `skills_list` — returns `[{name, description, category}, …]`. Tier-1 metadata.
+  - `skills_list` — returns `[{name, description, category}, …]` plus lightweight discovery metadata such as `reason`, `fallback_applied`, and `available_categories`. Invalid or unknown `category` filters are ignored and fall back to the unfiltered list.
    - `skill_view` — returns the full SKILL.md body (tier-2) or a supporting file (tier-3). `{name, file_path?}`.
 
 The LLM is expected to call `skills_list` when a task looks skill-shaped, then `skill_view` to load the chosen skill before acting.

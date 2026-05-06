@@ -211,3 +211,66 @@ TEST(WebSearchFormat, ErrorTextWithFallback) {
               std::string::npos);
     EXPECT_NE(out.find("Tried fallback bing_cn: bing-fail"), std::string::npos);
 }
+
+// 场景:中文 query 进入 ToolSummary 时按 UTF-8 codepoint 截断,不能截断到半个字节序列。
+TEST_F(WebSearchToolTest, SummaryTruncationKeepsUtf8ValidityForChineseQuery) {
+    WebSearchConfig cfg;
+    BackendRouter router(cfg);
+    auto mock = std::make_unique<MockBackend>("bing_cn", make_resp("bing_cn", 1));
+    router.register_backend(std::move(mock));
+    router.resolve_active(Region::Cn);
+
+    auto tool = create_web_search_tool(router, cfg);
+    ToolContext ctx;
+    const std::string query =
+        u8"今天天气热点评新闻头条中国经济科技体育娱乐社会国际"
+        u8"今天天气热点评新闻头条中国经济科技体育娱乐社会国际";
+    nlohmann::json args = {
+        {"query", query},
+        {"limit", 1},
+    };
+
+    auto r = tool.execute(args.dump(), ctx);
+    ASSERT_TRUE(r.success);
+    ASSERT_TRUE(r.summary.has_value());
+
+    nlohmann::json encoded = {
+        {"object", r.summary->object},
+        {"output", r.output},
+    };
+    EXPECT_NO_THROW({
+        std::string dumped = encoded.dump();
+        EXPECT_FALSE(dumped.empty());
+    });
+    EXPECT_NE(r.summary->object.find("…"), std::string::npos);
+}
+
+// 场景:错误摘要里的中文错误文本同样按 UTF-8 安全截断,不能在 JSON dump 时炸掉。
+TEST_F(WebSearchToolTest, ErrorSummaryTruncationKeepsUtf8Validity) {
+    WebSearchConfig cfg;
+    BackendRouter router(cfg);
+    const std::string long_error =
+        u8"搜索服务返回了很长的中文错误消息用于验证截断不会破坏UTF8编码并且仍然可以安全序列化到JSON中";
+    router.register_backend(std::make_unique<MockBackend>(
+        "bing_cn",
+        SearchError{SearchError::Kind::Network, long_error, "bing_cn"}));
+    router.resolve_active(Region::Cn);
+
+    auto tool = create_web_search_tool(router, cfg);
+    ToolContext ctx;
+    auto r = tool.execute(nlohmann::json{{"query", u8"中文查询测试"}}.dump(), ctx);
+    ASSERT_FALSE(r.success);
+    ASSERT_TRUE(r.summary.has_value());
+
+    nlohmann::json encoded = {
+        {"object", r.summary->object},
+        {"metrics", nlohmann::json::array()},
+    };
+    for (const auto& [k, v] : r.summary->metrics) {
+        encoded["metrics"].push_back(nlohmann::json::array({k, v}));
+    }
+    EXPECT_NO_THROW({
+        std::string dumped = encoded.dump();
+        EXPECT_FALSE(dumped.empty());
+    });
+}
