@@ -1,3 +1,6 @@
+# os
+.DS_Store
+
 # Build directories
 **/build/
 **/build2/
