@@ -720,6 +720,62 @@ TEST(WebServerHttp, GetMessagesForInactiveDiskSessionReturnsHistory) {
     EXPECT_EQ(j["messages"][0]["content"], "old disk prompt");
 }
 
+TEST(WebServerHttp, RestoreFileCheckpointRestoresTrackedFile) {
+    WebServerFixture fx;
+    auto post = cpr::Post(cpr::Url{fx.url("/api/sessions")},
+                          cpr::Header{{"Content-Type", "application/json"}},
+                          cpr::Body{R"({})"});
+    ASSERT_EQ(post.status_code, 201) << post.text;
+    auto sid = json::parse(post.text)["session_id"].get<std::string>();
+
+    auto* entry = fx.registry->lookup(sid);
+    ASSERT_NE(entry, nullptr);
+    ASSERT_NE(entry->sm, nullptr);
+
+    const std::string message_id = "checkpoint-user-1";
+    const auto file_path = fx.cwd_dir / "tracked.txt";
+    {
+        std::ofstream out(file_path, std::ios::binary);
+        out << "before\n";
+    }
+    entry->sm->begin_user_turn_checkpoint(message_id);
+    entry->sm->track_file_write_before(file_path.string());
+    {
+        std::ofstream out(file_path, std::ios::binary | std::ios::trunc);
+        out << "after\n";
+    }
+
+    auto restore = cpr::Post(cpr::Url{
+        fx.url("/api/sessions/" + sid + "/file-checkpoints/" + message_id + "/restore")},
+        cpr::Header{{"Content-Type", "application/json"}},
+        cpr::Body{R"({})"});
+    ASSERT_EQ(restore.status_code, 200) << restore.text;
+    auto body = json::parse(restore.text);
+    EXPECT_TRUE(body["ok"].get<bool>());
+    ASSERT_EQ(body["files_changed"].size(), 1u);
+
+    std::ifstream in(file_path, std::ios::binary);
+    std::string restored((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    EXPECT_EQ(restored, "before\n");
+}
+
+TEST(WebServerHttp, RestoreFileCheckpointRejectsMissingCheckpoint) {
+    WebServerFixture fx;
+    auto post = cpr::Post(cpr::Url{fx.url("/api/sessions")},
+                          cpr::Header{{"Content-Type", "application/json"}},
+                          cpr::Body{R"({})"});
+    ASSERT_EQ(post.status_code, 201) << post.text;
+    auto sid = json::parse(post.text)["session_id"].get<std::string>();
+
+    auto restore = cpr::Post(cpr::Url{
+        fx.url("/api/sessions/" + sid + "/file-checkpoints/missing-message/restore")},
+        cpr::Header{{"Content-Type", "application/json"}},
+        cpr::Body{R"({})"});
+    ASSERT_EQ(restore.status_code, 404) << restore.text;
+    auto body = json::parse(restore.text);
+    EXPECT_EQ(body["error"], "file checkpoint not found");
+}
+
 // 场景: POST /api/sessions/:id/resume 把 inactive 磁盘历史恢复进 registry,
 // 之后 list_sessions 应标记 active=true。
 TEST(WebServerHttp, ResumeDiskSessionActivatesIt) {

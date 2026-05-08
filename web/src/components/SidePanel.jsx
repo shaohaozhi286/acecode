@@ -4,7 +4,7 @@
 // 三个 tab,设计稿原画的"上 tab + 下方共用代码预览区"两段式被用户校正:
 // 不做共用代码区,三个 tab 各自占满下半区。
 //   - 文件: lazy 加载文件树,点击文件 → 自动切预览 tab + load
-//   - 变更: 当前 session 内 tool_end.hunks 前端聚合(file_edit/file_write 才有
+//   - 审查: 当前 session 内 tool_end.hunks 前端聚合(file_edit/file_write 才有
 //           hunks,bash sed 抓不到 — 已知 limitation,空态文案要明示)
 //   - 预览: 选中文件 highlight.js 高亮原文,5MB cap / binary 拒绝时友好提示
 //
@@ -16,23 +16,22 @@
 // 整面板不渲染。
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import * as Diff2Html from 'diff2html';
 import hljs from 'highlight.js/lib/core';
 import { ApiError, createApi } from '../lib/api.js';
-import { aggregateHunksFromMessages } from '../lib/sessionChanges.js';
-import { hunksToUnifiedDiff } from '../lib/diff.js';
+import { aggregateHunksFromMessages, summarizeChangeGroups } from '../lib/sessionChanges.js';
 import { langForFile } from '../lib/lang.js';
 import { joinWorkspacePath } from '../lib/desktopContextMenu.js';
 import { usePreference } from '../lib/usePreference.js';
 import { clsx, formatBytes } from '../lib/format.js';
 import { CopyableCodeFrame } from './CopyableCodeFrame.jsx';
 import { VsIcon } from './Icon.jsx';
+import { ChangeReviewPanel } from './ChangeReview.jsx';
 
 const FILE_PREVIEW_WRAP_STORAGE_KEY = 'acecode.filePreviewWrap.v1';
 
 const TABS = [
   { key: 'files',   label: '文件' },
-  { key: 'changes', label: '变更' },
+  { key: 'changes', label: '审查' },
   { key: 'preview', label: '预览' },
 ];
 
@@ -173,70 +172,13 @@ function FileTree({ api, cwd, treeCache, setTreeCache, expandedDirs, setExpanded
 }
 
 // ────────────────────────────────────────────────────────────
-// 变更 tab — 聚合 messages.hunks
+// 审查 tab — 聚合 messages.hunks
 // ────────────────────────────────────────────────────────────
-function ChangesList({ messages }) {
-  const groups = useMemo(() => aggregateHunksFromMessages(messages || []), [messages]);
-
-  if (groups.length === 0) {
-    return (
-      <div className="flex-1 flex flex-col items-center justify-center text-center px-4 py-8 gap-2">
-        <div className="text-fg-mute text-[12px]">本会话暂无文件变更</div>
-        <div className="text-fg-mute text-[10px] opacity-70">
-          仅显示 file_edit / file_write 工具的改动
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="flex-1 overflow-y-auto px-2 py-2 flex flex-col gap-2">
-      {groups.map((g) => (
-        <ChangeGroup key={g.file} group={g} />
-      ))}
-    </div>
-  );
-}
-
-function ChangeGroup({ group }) {
-  const [open, setOpen] = useState(true);
-  const diffHtml = useMemo(() => {
-    if (!open) return '';
-    const unified = hunksToUnifiedDiff(group.hunks, group.file);
-    if (!unified) return '';
-    try {
-      return Diff2Html.html(unified, {
-        drawFileList: false,
-        outputFormat: 'line-by-line',
-        matching: 'lines',
-      });
-    } catch {
-      return '';
-    }
-  }, [open, group]);
-
-  return (
-    <div className="border border-border rounded-md bg-surface overflow-hidden">
-      <button
-        type="button"
-        className="w-full flex items-center gap-1.5 px-2 py-1.5 cursor-pointer hover:bg-surface-hi text-left"
-        onClick={() => setOpen((v) => !v)}
-      >
-        <VsIcon name={open ? 'glyphDown' : 'expandRight'} size={9} />
-        <VsIcon name="file" size={13} mono={false} />
-        <span className="text-[11px] font-mono truncate flex-1">{group.file}</span>
-        {group.totalAdditions > 0 && (
-          <span className="text-[10px] text-ok font-mono">+{group.totalAdditions}</span>
-        )}
-        {group.totalDeletions > 0 && (
-          <span className="text-[10px] text-danger font-mono">-{group.totalDeletions}</span>
-        )}
-      </button>
-      {open && diffHtml && (
-        <div className="ace-diff border-t border-border" dangerouslySetInnerHTML={{ __html: diffHtml }} />
-      )}
-    </div>
-  );
+function ChangesList({ messages, groups, summary }) {
+  const fallbackGroups = useMemo(() => aggregateHunksFromMessages(messages || []), [messages]);
+  const reviewGroups = groups || fallbackGroups;
+  const reviewSummary = summary || summarizeChangeGroups(reviewGroups);
+  return <ChangeReviewPanel groups={reviewGroups} summary={reviewSummary} />;
 }
 
 // ────────────────────────────────────────────────────────────
@@ -342,7 +284,18 @@ function PreviewPanel({ api, cwd, path, wrapPreview, onToggleWrapPreview }) {
 // ────────────────────────────────────────────────────────────
 // 主组件
 // ────────────────────────────────────────────────────────────
-export function SidePanel({ sessionRef, sessionId, cwd, messages, width = 280, collapsed = false, onToggleCollapse }) {
+export function SidePanel({
+  sessionRef,
+  sessionId,
+  cwd,
+  messages,
+  changeGroups = null,
+  changeSummary = null,
+  reviewRequest = 0,
+  width = 280,
+  collapsed = false,
+  onToggleCollapse,
+}) {
   const api = useMemo(() => createApi(sessionRef || null), [sessionRef?.port, sessionRef?.token, sessionRef?.workspaceHash]);
   const [wrapPreview, setWrapPreview] = usePreference(
     FILE_PREVIEW_WRAP_STORAGE_KEY,
@@ -394,6 +347,11 @@ export function SidePanel({ sessionRef, sessionId, cwd, messages, width = 280, c
     setActiveTab('files');
     setSelectedPath(null);
   }, [cwd]);
+
+  useEffect(() => {
+    if (!reviewRequest) return;
+    setActiveTab('changes');
+  }, [reviewRequest]);
 
   const onPickFile = useCallback((entry) => {
     setSelectedPath(entry.path);
@@ -449,7 +407,13 @@ export function SidePanel({ sessionRef, sessionId, cwd, messages, width = 280, c
             onPickFile={onPickFile}
           />
         )}
-        {activeTab === 'changes' && <ChangesList messages={messages} />}
+        {activeTab === 'changes' && (
+          <ChangesList
+            messages={messages}
+            groups={changeGroups}
+            summary={changeSummary}
+          />
+        )}
         {activeTab === 'preview' && (
           <PreviewPanel
             api={api}

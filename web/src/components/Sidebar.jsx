@@ -6,7 +6,7 @@
 //
 // 收起态(view !== 'single')→ width 0,sidebar 整个折叠让出主区。
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../lib/api.js';
 import { connection } from '../lib/connection.js';
 import { SESSION_PIN_TOGGLE_EVENT } from '../lib/desktopContextMenu.js';
@@ -18,7 +18,7 @@ import {
   pinnedSessionsForList,
   unpinSessionId,
 } from '../lib/pinnedSessions.js';
-import { sessionDisplayTitle } from '../lib/sessionTitle.js';
+import { sessionDisplayTitle, withNewSessionDisplayTitles } from '../lib/sessionTitle.js';
 import { pushTrayMenu } from '../lib/desktopTrayMenu.js';
 import {
   applyStatusSnapshot,
@@ -56,6 +56,26 @@ function attentionMeta(state) {
   return { label: '已读', dot: 'bg-fg-mute/45' };
 }
 
+// 内联 Pin 图标 — VsIcon 走 <img>,CSS `color` 不会级联进 SVG,所以
+// Pin.svg 的硬编码 `fill="#000000"` 永远渲染成纯黑(亮色)/反相后的近白
+// (暗色),button 上的 `text-fg-mute` / `text-accent` 都没用。这里改用
+// 内联 <svg fill="currentColor">,让父按钮的 `text-*` 真正生效。
+// 视觉上额外 `-rotate-45` 让钉头朝左上、跟设计稿一致。
+function PinIconInline({ size = 12 }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 16 16"
+      fill="currentColor"
+      className="-rotate-45"
+      aria-hidden="true"
+    >
+      <path d="M5.75 1.5h4.5v1.25l-.85.85 1.85 3.1 1.25.55v1.15L9.2 9.3 8.1 14.5H7L5.9 9.3 2.5 8.4V7.25l1.25-.55 1.85-3.1-.85-.85V1.5Zm.8 1 .45.45-.1.28-2.1 3.52-.9.4v.2l2.85.75.82 3.9.83-3.9 2.85-.75v-.2l-.9-.4-2.1-3.52-.1-.28.45-.45H6.55Z"/>
+    </svg>
+  );
+}
+
 function SessionRow({ s, active, pinned = false, onSelect, onTogglePin }) {
   const attention = s.attention_state || s.read_state || 'read';
   const meta = attentionMeta(attention);
@@ -81,15 +101,20 @@ function SessionRow({ s, active, pinned = false, onSelect, onTogglePin }) {
           onTogglePin?.(s, !pinned);
         }}
         className={clsx(
-          'ace-session-pin-btn w-5 h-6 rounded flex items-center justify-center shrink-0 transition',
+          'ace-session-pin-btn w-5 h-6 rounded flex items-center justify-center shrink-0 transition-colors',
+          // 未 pin: 默认软灰(text-fg-mute),hover 走 text-fg —— 亮色模式下
+          // 颜色加深(灰→近黑),暗色模式下变亮(深灰→近白),符合"hover
+          // 增强对比"的双向语义。
+          // 已 pin: 用 text-accent(蓝)区别于普通可 hover 状态;它本身已经
+          // 是激活态,不再做颜色 hover,避免大幅 hue 跳动。
           pinned
             ? 'opacity-100 text-accent'
-            : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 text-fg-mute hover:text-accent',
+            : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 text-fg-mute hover:text-fg',
         )}
         title={pinned ? '取消置顶' : '置顶'}
         aria-label={pinned ? '取消置顶' : '置顶'}
       >
-        <VsIcon name="pin" size={12} />
+        <PinIconInline size={12} />
       </button>
       <button
         type="button"
@@ -101,7 +126,7 @@ function SessionRow({ s, active, pinned = false, onSelect, onTogglePin }) {
         ) : (
           <span className={clsx('w-1.5 h-1.5 rounded-full shrink-0', meta.dot)} title={meta.label} />
         )}
-        <span className="flex-1 truncate">{sessionDisplayTitle(s, s.name || s.id)}</span>
+        <span className="flex-1 truncate">{sessionDisplayTitle(s, s.name || '')}</span>
         <span className="text-[10px] text-fg-mute shrink-0">{relativeTime(s.updated_at || s.created_at)}</span>
       </button>
     </div>
@@ -382,13 +407,18 @@ export function Sidebar({ activeId, onSelect, collapsed, width = 200, onOpenSkil
     return () => clearInterval(t);
   }, [refresh]);
 
+  const renderedSessions = useMemo(
+    () => withNewSessionDisplayTitles(mergeSessionsWithStatus(sessions, statusBySession)),
+    [sessions, statusBySession],
+  );
+
   // 把 active workspace 的 sessions / pinned ids / workspaceName 推到桌面 tray 菜单。
   // pushTrayMenu 内部 100ms debounce + 无 bridge 时 no-op。
   // 设计:openspec/changes/enhance-desktop-tray-menu。
   useEffect(() => {
     const activeWs = workspaces.find((w) => w.hash === activeWorkspaceHash);
     const activeSessions = activeWorkspaceHash
-      ? sessions.filter((s) => (s.workspace_hash || s.workspaceHash) === activeWorkspaceHash)
+      ? renderedSessions.filter((s) => (s.workspace_hash || s.workspaceHash) === activeWorkspaceHash)
       : [];
     const pinnedIds = activeWorkspaceHash
       ? normalizePinnedIds(pinnedByWorkspace.get(activeWorkspaceHash) || [])
@@ -398,7 +428,7 @@ export function Sidebar({ activeId, onSelect, collapsed, width = 200, onOpenSkil
       pinnedSessionIds: pinnedIds,
       workspaceName: activeWs?.name || '',
     });
-  }, [sessions, pinnedByWorkspace, activeWorkspaceHash, workspaces]);
+  }, [renderedSessions, pinnedByWorkspace, activeWorkspaceHash, workspaces]);
 
   useEffect(() => {
     const handler = (e) => {
@@ -483,6 +513,7 @@ export function Sidebar({ activeId, onSelect, collapsed, width = 200, onOpenSkil
               workspaceHash: r.workspace_hash || ws.hash,
               contextId: r.context_id,
               sessionId: r.session_id || session.id,
+              displayTitle: session.displayTitle || session.display_title,
               port: r.port,
               token: r.token,
               cwd: r.cwd || ws.cwd,
@@ -508,6 +539,7 @@ export function Sidebar({ activeId, onSelect, collapsed, width = 200, onOpenSkil
       workspaceHash: session.workspace_hash || ws?.hash,
       contextId: 'default',
       sessionId: session.id,
+      displayTitle: session.displayTitle || session.display_title,
       port: ws?.port,
       token: ws?.token,
       cwd: session.cwd || ws?.cwd,
@@ -591,19 +623,23 @@ export function Sidebar({ activeId, onSelect, collapsed, width = 200, onOpenSkil
         created_at: r.created_at || now,
         updated_at: r.updated_at || now,
       };
+      const decoratedNextSession =
+        withNewSessionDisplayTitles([...sessions.filter((item) => item.id !== id), nextSession])
+          .find((item) => item.id === id) || nextSession;
 
       setActiveWorkspaceHash(workspaceHash);
       updateExpanded((prev) => new Set(prev).add(workspaceHash));
       setWorkspaces((prev) => prev.map((item) => ({ ...item, active: item.hash === workspaceHash })));
-      setSessions((prev) => [nextSession, ...prev.filter((item) => item.id !== id)]);
-      setStatusBySession((prev) => applyStatusUpdate(prev, { ...nextSession, session_id: id, state: 'read' }));
+      setSessions((prev) => [decoratedNextSession, ...prev.filter((item) => item.id !== id)]);
+      setStatusBySession((prev) => applyStatusUpdate(prev, { ...decoratedNextSession, session_id: id, state: 'read' }));
       connection.subscribeWorkspaceStatus(workspaceHash);
       syncRetainedSessionIds(new Set([...retainedSessionIdsRef.current, id]));
-      markSessionRead(nextSession);
+      markSessionRead(decoratedNextSession);
       onSelect?.({
         workspaceHash,
         contextId: 'default',
         sessionId: id,
+        displayTitle: decoratedNextSession.displayTitle || decoratedNextSession.display_title,
         port: ws.port,
         token: ws.token,
         cwd,
@@ -635,7 +671,6 @@ export function Sidebar({ activeId, onSelect, collapsed, width = 200, onOpenSkil
     }
   };
 
-  const renderedSessions = mergeSessionsWithStatus(sessions, statusBySession);
   const pinnedSessions = pinnedSessionsForList(renderedSessions, pinnedByWorkspace);
   const workspaceForSession = (session) => {
     const hash = session.workspace_hash || session.workspaceHash || '';

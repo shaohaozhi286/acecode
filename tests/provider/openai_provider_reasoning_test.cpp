@@ -319,11 +319,19 @@ TEST(OpenAiProviderReasoningTest, BuildRequestBodyEchoesReasoningWithToolCalls) 
     EXPECT_EQ(msgs[1].value("tool_call_id", std::string{}), "call_1");
 }
 
-// 用例 7:历史 session 出现 orphan tool_call(assistant 写盘了 tool_calls 但
-// 紧跟着是 user 消息,没有 tool 结果)时,build_request_body 必须自动合成一条
-// 占位 tool 消息,否则 OpenAI 端会以 "No tool output found for function call …"
-// 直接 400,该 session 永远 stuck。背景:daemon 中途被 kill / 工具执行抛异常 /
-// resume 截在 assistant 之后 都会留下这种 orphan。修复见 openai_provider.cpp。
+// 用例 7(回归测试,2026-05-08 由用户实际 session 触发):
+// **触发场景**:消息序列里中间出现一条 orphan assistant tool_call —— 即
+//   [user, assistant{tool_calls=[id=X]}, user] —— assistant 后面紧跟着的不是
+//   tool 结果消息而是 user 消息。这种状态由 daemon 中途被 kill / 工具执行抛异常
+//   未持久化 / resume 选了截断在 assistant 之后的 jsonl 等场景产生。
+// **期望行为**:build_request_body 在 orphan assistant 后自动插入一条
+//   role=tool, tool_call_id=X, content=非空占位文本 的 stub 消息,把 4 条总长度
+//   保持顺序为 [user, assistant, tool(stub), user]。orphan 的原 user 消息不能
+//   被吞、顺序不能错位。
+// **修复前 bug 表现**:OpenAI Chat Completions 端会以 HTTP 400
+//   `{"error":{"message":"No tool output found for function call …"}}` 拒绝整个
+//   请求 —— 该 session 之后任何用户输入都会持续 400,session 永久卡死(用户的
+//   `20260506-140715-3c8b` 卡了 2 天就是这个原因)。
 TEST(OpenAiProviderReasoningTest, OrphanToolCallGetsPlaceholderToolMessage) {
     TestableProvider provider("http://example.invalid", "", "test-model");
 
@@ -369,8 +377,14 @@ TEST(OpenAiProviderReasoningTest, OrphanToolCallGetsPlaceholderToolMessage) {
     EXPECT_EQ(msgs[3]["content"].get<std::string>(), "再解读一下");
 }
 
-// 用例 8:正常配对的 assistant.tool_calls + tool 应该原样保留,不能被多塞 stub。
-// 防御逻辑只能补漏,不能制造重复。
+// 用例 8(防误触保护):
+// **触发场景**:正常配对的 [assistant{tool_calls=[id=call_abc]}, tool{call_id=call_abc}]
+//   —— 这是健康会话最常见的形态,真实 tool 结果已经存在。
+// **期望行为**:build_request_body 输出仍然只有 2 条,顺序不变,真实 tool 内容
+//   ("real result")保持不变。**不能**因为补漏逻辑误塞额外的 stub。
+// **为什么写这个用例**:用例 7 的 orphan 检测如果实现成"任何 assistant.tool_calls
+//   都补一条",就会让健康会话的每个工具调用后多出一条空 stub —— context 翻倍 +
+//   消息顺序错乱。这条用例守住"只补漏不重复"的边界。
 TEST(OpenAiProviderReasoningTest, MatchedToolCallStaysIntactNoExtraStub) {
     TestableProvider provider("http://example.invalid", "", "test-model");
 
@@ -404,8 +418,16 @@ TEST(OpenAiProviderReasoningTest, MatchedToolCallStaysIntactNoExtraStub) {
     EXPECT_EQ(msgs[1]["content"].get<std::string>(), "real result");
 }
 
-// 用例 9:一个 assistant 同时发起多个 tool_calls,只有部分有结果时,只为缺失的
-// 那个补 stub —— 已存在的 tool 消息保持原样,顺序不被打乱。
+// 用例 9(并行工具调用的部分 orphan):
+// **触发场景**:assistant 一回合并行发起两个 tool_calls(id=call_a, call_b),
+//   持久化后只有 call_a 的 tool 结果落了盘,call_b 的中途丢失(工具抛异常 /
+//   并发执行被 abort)。消息序列变成 [assistant{tool_calls=[a,b]}, tool{a}]。
+// **期望行为**:输出 3 条 [assistant, tool{a, real result}, tool{b, stub}]。
+//   call_a 的真实结果原样保留(content="grep result"),call_b 的 stub 紧跟在后,
+//   顺序不能颠倒(OpenAI 不要求 id 顺序,但 tool 消息必须连续夹在 assistant 和
+//   下一个非 tool 消息之间)。
+// **修复前 bug 表现**:同用例 7,OpenAI 会 400 提示 `call_b` 没有 tool output;
+//   即便 call_a 是好的,整个请求仍被拒。
 TEST(OpenAiProviderReasoningTest, PartialOrphanInParallelToolCalls) {
     TestableProvider provider("http://example.invalid", "", "test-model");
 

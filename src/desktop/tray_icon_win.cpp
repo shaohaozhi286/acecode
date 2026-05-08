@@ -34,6 +34,8 @@ namespace {
 
 constexpr wchar_t kTrayWndClass[] = L"ACECodeDesktopTrayWindow";
 constexpr UINT kTrayIconUid = 0xACEC; // 任意常量,保持稳定即可
+constexpr wchar_t kAppIconResourceName[] = L"IDI_ICON1";
+constexpr int kAppIconResourceId = 1;
 
 UINT g_tray_callback_msg = 0; // 由 RegisterWindowMessageW 注册,避免与其他 WM_USER 撞号
 HWND g_tray_window = nullptr;
@@ -50,17 +52,19 @@ TrayClickHandler g_new_chat_handler;
 TrayClickHandler g_open_app_handler;
 
 HICON load_app_icon_for_tray() {
-    // acecode.rc.in 里把 acecode.ico 作为 IDI_ICON1 (id=1) 编入二进制。
-    // 加载策略(逐级 fallback,保证最差也是程序图标而不是系统通用图标):
-    //   1. LoadImageW + SM_CXSMICON × SM_CYSMICON  → 16×16 frame,质感最佳
-    //   2. LoadImageW + SM_CXICON × SM_CYICON      → 32×32 frame,shell downscale
-    //   3. LoadIconW (MAKEINTRESOURCEW(1))         → 老路径,等价 LoadImage 32×32
-    //   4. LoadIconW (IDI_APPLICATION)             → 终极兜底,系统默认图标
+    // acecode.rc.in 把 acecode.ico 编成 IDI_ICON1。旧构建里 IDI_ICON1 可能是
+    // 命名资源,新构建里是数字资源(1),所以两种都试一遍。
     HINSTANCE hinst = ::GetModuleHandleW(nullptr);
     int sx = ::GetSystemMetrics(SM_CXSMICON);
     int sy = ::GetSystemMetrics(SM_CYSMICON);
     if (HICON ic = static_cast<HICON>(::LoadImageW(
-            hinst, MAKEINTRESOURCEW(1), IMAGE_ICON, sx, sy, LR_DEFAULTCOLOR))) {
+            hinst, kAppIconResourceName, IMAGE_ICON, sx, sy, LR_DEFAULTCOLOR))) {
+        LOG_INFO("[desktop] tray icon: loaded named small frame via LoadImageW " +
+                 std::to_string(sx) + "x" + std::to_string(sy));
+        return ic;
+    }
+    if (HICON ic = static_cast<HICON>(::LoadImageW(
+            hinst, MAKEINTRESOURCEW(kAppIconResourceId), IMAGE_ICON, sx, sy, LR_DEFAULTCOLOR))) {
         LOG_INFO("[desktop] tray icon: loaded small frame via LoadImageW " +
                  std::to_string(sx) + "x" + std::to_string(sy));
         return ic;
@@ -68,12 +72,22 @@ HICON load_app_icon_for_tray() {
     int lx = ::GetSystemMetrics(SM_CXICON);
     int ly = ::GetSystemMetrics(SM_CYICON);
     if (HICON ic = static_cast<HICON>(::LoadImageW(
-            hinst, MAKEINTRESOURCEW(1), IMAGE_ICON, lx, ly, LR_DEFAULTCOLOR))) {
+            hinst, kAppIconResourceName, IMAGE_ICON, lx, ly, LR_DEFAULTCOLOR))) {
+        LOG_WARN("[desktop] tray icon: small frame load failed, fell back to "
+                 "named large frame (will be downscaled by shell)");
+        return ic;
+    }
+    if (HICON ic = static_cast<HICON>(::LoadImageW(
+            hinst, MAKEINTRESOURCEW(kAppIconResourceId), IMAGE_ICON, lx, ly, LR_DEFAULTCOLOR))) {
         LOG_WARN("[desktop] tray icon: small frame load failed, fell back to "
                  "large frame (will be downscaled by shell)");
         return ic;
     }
-    if (HICON ic = ::LoadIconW(hinst, MAKEINTRESOURCEW(1))) {
+    if (HICON ic = ::LoadIconW(hinst, kAppIconResourceName)) {
+        LOG_WARN("[desktop] tray icon: LoadImageW failed, fell back to named LoadIconW");
+        return ic;
+    }
+    if (HICON ic = ::LoadIconW(hinst, MAKEINTRESOURCEW(kAppIconResourceId))) {
         LOG_WARN("[desktop] tray icon: LoadImageW failed, fell back to LoadIconW");
         return ic;
     }

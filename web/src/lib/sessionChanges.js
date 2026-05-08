@@ -1,9 +1,9 @@
-// SidePanel「变更」tab 的核心数据源:把当前 session 的 messages 数组里所有
+// 审查视图的核心数据源:把当前 session 的 messages 数组里所有
 // `tool_end` 携带的 hunks 字段聚合成 per-file 的变更列表。
 //
 // 协议参考:enhance-webui-chat-rendering 给 tool_end payload 加了
-// `hunks: [{file, before, after, additions, deletions, lines: [...]}]`,
-// 由 src/web/tool_event_payload.cpp 序列化(只有 file_edit / file_write 工具会带)。
+// `hunks: [{old_start, old_count, new_start, new_count, lines: [...]}]`,
+// 文件名和加删行来自 tool summary。前端聚合时会把这些字段回填到 hunk 上。
 //
 // **已知 limitation**: 用户授权 agent 用 `bash sed` / `awk` / `git checkout` 改的
 // 文件**抓不到**(无 hunks metadata)。前端面板的空态 / 头部应该明示此限制。
@@ -11,7 +11,7 @@
 //
 // 输入(messages 形状,REST `/messages` 与 WS `tool_end` 都满足):
 //   [
-//     { role:'tool', hunks: [{file, before, after, additions, deletions, lines}] },
+//     { role:'tool', file:'src/foo.cpp', additions:1, deletions:0, hunks:[...] },
 //     ...
 //   ]
 //   message 没有 hunks 字段就跳过(普通 user/assistant/system 消息不参与)。
@@ -28,6 +28,11 @@
 //   ]
 // 顺序 = 文件名首次出现的消息顺序(稳定),便于 UI 跟踪 agent 的改动轨迹。
 
+function finiteNumber(value) {
+  const n = Number(value || 0);
+  return Number.isFinite(n) ? n : 0;
+}
+
 /**
  * @param {Array<{hunks?: Array<{file:string, additions?:number, deletions?:number, [k:string]:any}>}>} messages
  * @returns {Array<{file:string, hunks:Array<object>, totalAdditions:number, totalDeletions:number}>}
@@ -41,23 +46,199 @@ export function aggregateHunksFromMessages(messages) {
 
   for (const m of messages) {
     if (!m || !Array.isArray(m.hunks)) continue;
+    const messageFile = typeof m.file === 'string' ? m.file : '';
+    const messageAdditions = finiteNumber(m.additions);
+    const messageDeletions = finiteNumber(m.deletions);
+    let messageStatsApplied = false;
+    const hasPerHunkStats = m.hunks.some((h) => h && (h.additions != null || h.deletions != null));
+
     for (const h of m.hunks) {
-      if (!h || typeof h.file !== 'string' || !h.file) continue;
-      let g = groups.get(h.file);
+      const file = (h && typeof h.file === 'string' && h.file)
+        ? h.file
+        : messageFile;
+      if (!h || !file) continue;
+      let g = groups.get(file);
       if (!g) {
         g = {
-          file: h.file,
+          file,
           hunks: [],
           totalAdditions: 0,
           totalDeletions: 0,
         };
-        groups.set(h.file, g);
+        groups.set(file, g);
       }
-      g.hunks.push(h);
-      g.totalAdditions += Number(h.additions || 0);
-      g.totalDeletions += Number(h.deletions || 0);
+      g.hunks.push(h.file ? h : { ...h, file });
+      if (h.additions != null || h.deletions != null) {
+        g.totalAdditions += finiteNumber(h.additions);
+        g.totalDeletions += finiteNumber(h.deletions);
+      }
+      if (!hasPerHunkStats && !messageStatsApplied && file === messageFile) {
+        g.totalAdditions += messageAdditions;
+        g.totalDeletions += messageDeletions;
+        messageStatsApplied = true;
+      }
     }
   }
 
   return Array.from(groups.values());
+}
+
+function metricValue(metrics, label) {
+  if (!Array.isArray(metrics)) return 0;
+  const item = metrics.find((m) => m && String(m.label || '') === label);
+  return finiteNumber(item?.value);
+}
+
+function toolFileName(tool) {
+  const summaryObject = tool?.summary && typeof tool.summary.object === 'string'
+    ? tool.summary.object.trim()
+    : '';
+  if (summaryObject) return summaryObject;
+  for (const key of ['displayOverride', 'title']) {
+    const value = typeof tool?.[key] === 'string' ? tool[key].trim() : '';
+    if (value) return value;
+  }
+  return 'change';
+}
+
+function hunkMessageFromToolItem(item) {
+  if (item?.kind !== 'tool'
+    || !Array.isArray(item.tool?.hunks)
+    || item.tool.hunks.length === 0) {
+    return null;
+  }
+  const file = toolFileName(item.tool);
+  const metrics = item.tool?.summary?.metrics || [];
+  return {
+    file,
+    additions: metricValue(metrics, '+'),
+    deletions: metricValue(metrics, '-'),
+    hunks: item.tool.hunks.map((hunk) => (
+      hunk?.file ? hunk : { ...hunk, file }
+    )),
+  };
+}
+
+/**
+ * 从 ChatView 的 transcript items 中抽取可参与 diff 汇总的 tool hunks。
+ * @param {Array<{kind?:string, tool?:{hunks?:Array<object>}}>} items
+ * @returns {Array<{hunks:Array<object>}>}
+ */
+export function collectHunkMessagesFromItems(items) {
+  if (!Array.isArray(items)) return [];
+  return items
+    .map((item) => hunkMessageFromToolItem(item))
+    .filter(Boolean);
+}
+
+/**
+ * @param {Array<{file:string,totalAdditions?:number,totalDeletions?:number}>} groups
+ * @returns {{fileCount:number,totalAdditions:number,totalDeletions:number,hasChanges:boolean}}
+ */
+export function summarizeChangeGroups(groups) {
+  const list = Array.isArray(groups) ? groups : [];
+  const summary = {
+    fileCount: list.length,
+    totalAdditions: 0,
+    totalDeletions: 0,
+    hasChanges: list.length > 0,
+  };
+  for (const group of list) {
+    summary.totalAdditions += finiteNumber(group?.totalAdditions);
+    summary.totalDeletions += finiteNumber(group?.totalDeletions);
+  }
+  return summary;
+}
+
+function previewText(content) {
+  return String(content || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+}
+
+function hunkSignature(hunk) {
+  if (!hunk || typeof hunk !== 'object') return '';
+  return [
+    hunk.file || '',
+    hunk.old_start ?? '',
+    hunk.old_count ?? '',
+    hunk.new_start ?? '',
+    hunk.new_count ?? '',
+    Array.isArray(hunk.lines) ? hunk.lines.length : 0,
+  ].join(':');
+}
+
+export function changeGroupsSignature(groups) {
+  const list = Array.isArray(groups) ? groups : [];
+  return list.map((group) => [
+    group.file || '',
+    finiteNumber(group.totalAdditions),
+    finiteNumber(group.totalDeletions),
+    Array.isArray(group.hunks) ? group.hunks.map(hunkSignature).join(',') : '',
+  ].join('@')).join('|');
+}
+
+export function changeSetSignature(changeSet) {
+  if (!changeSet || typeof changeSet !== 'object') return '';
+  const anchor = changeSet.userMessageId || changeSet.userItemId || changeSet.afterItemId || 'orphan';
+  return `${anchor}::${changeGroupsSignature(changeSet.groups)}`;
+}
+
+export function collectTurnChangeSetsFromItems(items) {
+  if (!Array.isArray(items)) return [];
+
+  const sets = [];
+  let current = null;
+
+  const flush = () => {
+    if (!current || current.messages.length === 0) {
+      current = null;
+      return;
+    }
+    const groups = aggregateHunksFromMessages(current.messages);
+    const summary = summarizeChangeGroups(groups);
+    if (summary.hasChanges) {
+      const set = {
+        key: '',
+        userItemId: current.userItemId,
+        userMessageId: current.userMessageId,
+        afterItemId: current.afterItemId,
+        title: current.preview || '本轮变更',
+        groups,
+        summary,
+      };
+      set.key = changeSetSignature(set);
+      sets.push(set);
+    }
+    current = null;
+  };
+
+  for (const item of items) {
+    if (item?.kind === 'msg' && item.role === 'user') {
+      flush();
+      current = {
+        userItemId: item.id,
+        userMessageId: item.messageId || '',
+        preview: previewText(item.content),
+        afterItemId: item.id,
+        messages: [],
+      };
+      continue;
+    }
+
+    const hunkMessage = hunkMessageFromToolItem(item);
+    if (!hunkMessage) continue;
+    if (!current) {
+      current = {
+        userItemId: '',
+        userMessageId: '',
+        preview: '',
+        afterItemId: item.id,
+        messages: [],
+      };
+    }
+    current.afterItemId = item.id;
+    current.messages.push(hunkMessage);
+  }
+
+  flush();
+  return sets;
 }

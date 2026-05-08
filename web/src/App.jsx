@@ -7,6 +7,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, ApiError } from './lib/api.js';
 import { setToken } from './lib/auth.js';
 import { connection } from './lib/connection.js';
+import { createNewSessionForActiveWorkspace } from './lib/newSession.js';
 import { usePreference } from './lib/usePreference.js';
 import { useGlobalShortcut } from './lib/useGlobalShortcut.js';
 import { TopBar } from './components/TopBar.jsx';
@@ -210,6 +211,7 @@ export function App() {
       workspaceHash: targetHash,
       contextId: 'default',
       sessionId: session.id,
+      displayTitle: session.displayTitle || session.display_title,
       cwd: session.cwd || '',
       title: session.title,
       summary: session.summary,
@@ -270,17 +272,28 @@ export function App() {
     if (view !== 'single') switchView('single');
   }, [activeRef, health, switchView, view]);
 
+  const createDesktopTraySession = useCallback(async () => {
+    try {
+      const next = await createNewSessionForActiveWorkspace(api, activeRef, health);
+      setActiveRef(next);
+      setExpanded(null);
+      if (view !== 'single') switchView('single');
+    } catch (e) {
+      toast({ kind: 'err', text: '新建会话失败:' + (e.message || '') });
+    }
+  }, [activeRef, health, switchView, view]);
+
   // 暴露 aceDesktop_createNewSession 给 desktop 壳的托盘 "新建会话" 菜单调用。
   // 设计:openspec/changes/enhance-desktop-tray-menu。
   useEffect(() => {
     if (typeof window === 'undefined') return undefined;
     window.aceDesktop_createNewSession = () => {
-      try { openHomeForWorkspace(); } catch (e) { /* swallow */ }
+      createDesktopTraySession();
     };
     return () => {
       if (window.aceDesktop_createNewSession) delete window.aceDesktop_createNewSession;
     };
-  }, [openHomeForWorkspace]);
+  }, [createDesktopTraySession]);
 
   const setSidebarWidth = useCallback((nextWidth, shellWidth = 0) => {
     const sidePanelVisible = !!(activeRef?.sessionId || activeRef?.id) && !sidePanelCollapsed;

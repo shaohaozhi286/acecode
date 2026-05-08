@@ -106,6 +106,34 @@ run('history replay 会恢复 usage 事件状态', () => {
   assert.equal(loaded.lastSeq, 2);
 });
 
+run('history load 将带 tool_hunks metadata 的 tool message 恢复为 tool item', () => {
+  const hunk = { old_start: 1, old_count: 1, new_start: 1, new_count: 2, lines: [] };
+  const loaded = loadTranscriptHistory(createTranscriptState({ title: 's1' }), {
+    messages: [
+      { id: 'u1', role: 'user', content: 'change file', ts: 1 },
+      {
+        id: 't1',
+        role: 'tool',
+        content: 'edited',
+        ts: 2,
+        metadata: {
+          tool_summary: { verb: 'Edit', object: 'src/a.js', icon: 'edit', metrics: [['+', '2'], ['-', '1']] },
+          tool_hunks: [hunk],
+        },
+      },
+    ],
+    events: [],
+  }).state;
+  assert.equal(loaded.items.length, 2);
+  assert.equal(loaded.items[1].kind, 'tool');
+  assert.equal(loaded.items[1].tool.summary.object, 'src/a.js');
+  assert.deepEqual(loaded.items[1].tool.summary.metrics, [
+    { label: '+', value: '2' },
+    { label: '-', value: '1' },
+  ]);
+  assert.deepEqual(loaded.items[1].tool.hunks, [hunk]);
+});
+
 run('新 transcript token usage 默认为 unknown 且不跨 session 继承', () => {
   const previous = reduceMany([
     { type: 'usage', payload: { prompt_tokens: 8000, completion_tokens: 1, total_tokens: 8001, has_data: true }, seq: 1 },

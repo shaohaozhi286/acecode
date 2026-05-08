@@ -2,6 +2,7 @@
 //
 // 验收点:
 //   - buildTrayMenuPayload:pinned 上限 5 / recent 上限 14、subtitle 截断 40
+//   - 空标题会话展示为 "新会话N",不透出 GUID
 //   - sessions 中混合 pinned + recent 时,pinned 取 pinnedSessionIds 内项,
 //     recent 取剩下的前 14 条
 //   - workspaceName 作为 fallback subtitle 注入
@@ -77,10 +78,14 @@ run('buildTrayMenuPayload recent 超 14 → 截到 14', () => {
   assert.equal(p.recent.length, RECENT_LIMIT_INCLUDING_MORE);
 });
 
-run('buildTrayMenuPayload 无 title 用 (无标题) 兜底', () => {
-  const sessions = [{ id: 's1' }];
+run('buildTrayMenuPayload 无 title 用新会话编号兜底', () => {
+  const sessions = [
+    { id: 's2', created_at: '2026-05-08T02:00:00Z' },
+    { id: 's1', created_at: '2026-05-08T01:00:00Z' },
+  ];
   const p = buildTrayMenuPayload({ sessions, pinnedSessionIds: [], workspaceName: '' });
-  assert.equal(p.recent[0].title, '(无标题)');
+  assert.equal(p.recent[0].title, '新会话2');
+  assert.equal(p.recent[1].title, '新会话1');
 });
 
 run('buildTrayMenuPayload subtitle 优先 summary,fallback workspaceName', () => {

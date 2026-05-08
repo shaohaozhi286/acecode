@@ -14,6 +14,7 @@
 #include "tool/tool_executor.hpp"
 
 #include <nlohmann/json.hpp>
+#include <chrono>
 #include <string>
 
 using acecode::create_bash_tool;
@@ -74,8 +75,54 @@ TEST(BashToolSummary, FailedExitCodeAppearsInMetrics) {
     EXPECT_EQ(get_metric(*r.summary, "exit"), "2");
 }
 
+#ifdef _WIN32
+// 场景 3 (Windows only,回归测试,2026-05-08 由 agent-browser 触发):
+//
+// **触发场景**:bash_tool 直接 spawn 的子进程(cmd.exe)在 spawn 完一个会继续
+//   存活的孙进程后立即退出。`start /B cmd /c "timeout /t 8 /nobreak >nul"`
+//   是最简单的复现:`start /B` 把内层 cmd 放到后台并继承父 cmd 的标准输出/错误
+//   管道写端;父 cmd 跑完后续 `&& echo done` 后立刻 exit,但内层 cmd 仍 hold
+//   管道写端 8 秒。真实场景:`agent-browser open https://...` 启动 Chrome 后退出,
+//   Chrome 接管管道写端继续运行。
+//
+// **期望行为**:bash_tool 在父 cmd 退出后**瞬时返回**(< 4s),输出里包含 "done"
+//   (说明父 cmd 的 echo 被正确捕获),success=true。后台孙进程的命运交给 OS,
+//   bash_tool 不等。
+//
+// **修复前 bug 表现**:`bash_tool.cpp:191-198` 的"进程正常退出 drain"分支裸调
+//   ReadFile,Windows 同步 ReadFile 在管道还有任何写端持有者时会**永久阻塞**等
+//   EOF。这条 drain 在 abort_flag / timeout 检查的**外面**,所以 Esc 失效、120s
+//   timeout 失效,TUI 表面"卡死"直到孙进程自己退出(本测试约 8s,用户的真实
+//   case 是 36 分钟还没退)。
+//
+// **阈值 4000ms 的依据**:本机实测修复后命中 30-100ms 区间;CI / Windows Defender
+//   扫描子进程偶尔会拖到 1-2s,4s 给足缓冲。回归时会回到 ~8000ms 量级(等孙进程
+//   自然退出),4s 一刀切干净。
+TEST(BashToolWinPipeDrain, ReturnsPromptlyWhenGrandchildHoldsPipe) {
+    ToolImpl tool = create_bash_tool();
+
+    nlohmann::json args = {
+        {"command", "start /B cmd /c \"timeout /t 8 /nobreak >nul\" && echo done"},
+        {"timeout_ms", 30000},
+    };
+    ToolContext ctx;
+
+    auto t0 = std::chrono::steady_clock::now();
+    ToolResult r = tool.execute(args.dump(), ctx);
+    auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - t0).count();
+
+    EXPECT_LT(elapsed_ms, 4000)
+        << "bash_tool blocked in post-exit drain due to grandchild holding pipe write end; "
+           "actual elapsed=" << elapsed_ms << "ms";
+    EXPECT_TRUE(r.success);
+    // 父 cmd 在 echo done 后 exit;输出里应该看到 "done"。
+    EXPECT_NE(r.output.find("done"), std::string::npos);
+}
+#endif
+
 #ifndef _WIN32
-// 场景 3 (POSIX only): 用 `head -c 150000 /dev/zero` 生成超过 100KB 的输出,
+// 场景 4 (POSIX only): 用 `head -c 150000 /dev/zero` 生成超过 100KB 的输出,
 // 应触发 head+tail 截断并在 output 里插入 marker。
 TEST(BashToolSummary, LargeOutputTriggersHeadTailTruncation) {
     ToolImpl tool = create_bash_tool();

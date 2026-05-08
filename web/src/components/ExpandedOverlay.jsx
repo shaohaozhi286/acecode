@@ -1,14 +1,24 @@
 // 点击宫格里的 MiniSession 后展开为完整会话覆盖层。
 // 接住整个主区,内嵌一个简化版 ChatView(直接重用 ChatView 组件,有 sessionId 即可)。
+//
+// sessionRef 经 sessionRefFromGridPayload 规范化:server 给 Grid 的 payload
+// 是 snake_case (workspace_hash / display_title / message_count),原先这里
+// 直接读 camelCase 属性会全部 undefined,下游 ChatView 把 undefined 拼进
+// `/api/workspaces/${workspaceHash}/...` URL → 404 workspace not found。
+// 详见 openspec/changes/fix-desktop-grid-show-pinned-only。
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ChatView } from './ChatView.jsx';
 import { clsx } from '../lib/format.js';
+import { sessionRefFromGridPayload } from '../lib/gridPinnedSessions.js';
 import { sessionDisplayTitle } from '../lib/sessionTitle.js';
 import { VsIcon } from './Icon.jsx';
 
 export function ExpandedOverlay({ session, onClose }) {
   const [show, setShow] = useState(false);
+  // 用 useMemo 稳定 sessionRef 引用,避免 ChatView 内部依赖 ref 的
+  // useMemo / useEffect 因父组件每次 render 新建对象而抖动。
+  const sessionRef = useMemo(() => sessionRefFromGridPayload(session), [session]);
   useEffect(() => { requestAnimationFrame(() => setShow(true)); }, []);
   const close = useCallback(() => {
     setShow(false);
@@ -42,7 +52,7 @@ export function ExpandedOverlay({ session, onClose }) {
       >
         <div className="h-9 px-3.5 flex items-center gap-2 bg-accent-bg border-b border-border shrink-0">
           <span className="flex-1 text-[13px] font-semibold text-accent truncate">
-            {sessionDisplayTitle(session, session.id)}
+            {sessionDisplayTitle(session)}
           </span>
           <button
             type="button"
@@ -58,27 +68,15 @@ export function ExpandedOverlay({ session, onClose }) {
           ><VsIcon name="close" size={12} /></button>
         </div>
         <div className="flex-1 flex overflow-hidden">
-          <ChatView
-            sessionRef={{
-              sessionId: session.sessionId || session.id,
-              port: session.port,
-              token: session.token,
-              contextId: session.contextId,
-              workspaceHash: session.workspaceHash,
-              active: session.active,
-              busy: session.busy,
-              status: session.status,
-              title: session.title,
-              summary: session.summary,
-              message_count: session.message_count,
-              created_at: session.created_at,
-              updated_at: session.updated_at,
-            }}
-            onSessionPromoted={() => {}}
-            health={null}
-            onPermissionRequest={() => {}}
-            onQuestionRequest={() => {}}
-          />
+          {sessionRef && (
+            <ChatView
+              sessionRef={sessionRef}
+              onSessionPromoted={() => {}}
+              health={null}
+              onPermissionRequest={() => {}}
+              onQuestionRequest={() => {}}
+            />
+          )}
         </div>
       </div>
     </div>

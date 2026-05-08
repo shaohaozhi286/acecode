@@ -68,6 +68,88 @@ function eventTs(msg) {
   return msg?.timestamp_ms || msg?.ts || Date.now();
 }
 
+function normalizeSummaryMetrics(metrics) {
+  if (!Array.isArray(metrics)) return [];
+  return metrics
+    .map((metric) => {
+      if (Array.isArray(metric) && metric.length >= 2) {
+        return { label: String(metric[0] ?? ''), value: String(metric[1] ?? '') };
+      }
+      if (metric && typeof metric === 'object') {
+        return {
+          label: String(metric.label ?? ''),
+          value: String(metric.value ?? ''),
+        };
+      }
+      return null;
+    })
+    .filter((metric) => metric && metric.label);
+}
+
+function normalizePersistedToolSummary(metadata) {
+  const raw = metadata?.tool_summary;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  return {
+    verb: typeof raw.verb === 'string' ? raw.verb : '',
+    object: typeof raw.object === 'string' ? raw.object : '',
+    icon: typeof raw.icon === 'string' ? raw.icon : '',
+    metrics: normalizeSummaryMetrics(raw.metrics),
+  };
+}
+
+function normalizePersistedToolHunks(metadata) {
+  const raw = metadata?.tool_hunks;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((hunk) => hunk && typeof hunk === 'object' && !Array.isArray(hunk))
+    .map((hunk) => ({ ...hunk }));
+}
+
+function historyItemFromMessage(next, m) {
+  const metadata = m?.metadata && typeof m.metadata === 'object' ? m.metadata : null;
+  if ((m?.role || '') === 'tool' && metadata) {
+    const summary = normalizePersistedToolSummary(metadata);
+    const hunks = normalizePersistedToolHunks(metadata);
+    if (summary || hunks.length > 0) {
+      return {
+        kind: 'tool',
+        id: allocateItemId(next),
+        messageId: m.id || '',
+        tool: {
+          isTaskComplete: false,
+          isDone: true,
+          success: true,
+          tool: m.tool || '',
+          toolCallId: m.tool_call_id || m.toolCallId || '',
+          toolIndex: m.tool_index ?? m.toolIndex ?? null,
+          startedAtMs: m.ts || m.timestamp_ms || Date.now(),
+          displayOverride: '',
+          title: summary?.object || m.content || '工具调用',
+          tailLines: [],
+          currentPartial: '',
+          totalLines: 0,
+          totalBytes: 0,
+          elapsed: 0,
+          summary,
+          output: m.content || '',
+          hunks,
+        },
+        ts: m.ts || m.timestamp_ms || Date.now(),
+      };
+    }
+  }
+
+  return {
+    kind: 'msg',
+    id: allocateItemId(next),
+    messageId: m.id || '',
+    role: m.role || 'system',
+    content: m.content || '',
+    metadata: m.metadata,
+    ts: m.ts || m.timestamp_ms || Date.now(),
+  };
+}
+
 function toolKey(payload = {}) {
   if (payload.tool_call_id || payload.call_id || payload.id) {
     return payload.tool_call_id || payload.call_id || payload.id;
@@ -360,15 +442,7 @@ export function loadTranscriptHistory(state, data = {}) {
   const effects = [];
   const msgs = Array.isArray(data.messages) ? data.messages : [];
 
-  next.items = msgs.map((m) => ({
-    kind: 'msg',
-    id: allocateItemId(next),
-    messageId: m.id || '',
-    role: m.role || 'system',
-    content: m.content || '',
-    metadata: m.metadata,
-    ts: m.ts || m.timestamp_ms || Date.now(),
-  }));
+  next.items = msgs.map((m) => historyItemFromMessage(next, m));
 
   const restoredTitle = titleFromMessages(msgs);
   if (restoredTitle) next.title = restoredTitle;
@@ -448,7 +522,7 @@ export function useSessionTranscript(sessionRef, options = {}) {
   const api = useMemo(() => createApi(ref), [ref?.port, ref?.token, ref?.workspaceHash]);
   const liveMode = options.live ?? 'auto';
   const isLive = !!sid && canLiveMonitorSession(ref, liveMode);
-  const initialTitle = sid ? sessionDisplayTitle(ref, sid) : '';
+  const initialTitle = sid ? sessionDisplayTitle(ref) : '';
   const [state, setState] = useState(() => createTranscriptState({ title: initialTitle, isLive, loadState: sid ? 'loading' : 'idle' }));
   const stateRef = useRef(state);
   const optionsRef = useRef(options);
@@ -471,7 +545,7 @@ export function useSessionTranscript(sessionRef, options = {}) {
   }, []);
 
   useEffect(() => {
-    const baseTitle = sid ? sessionDisplayTitle(ref, sid) : '';
+    const baseTitle = sid ? sessionDisplayTitle(ref) : '';
     const reset = createTranscriptState({
       title: baseTitle,
       isLive,

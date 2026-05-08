@@ -7,7 +7,7 @@
 //
 // 没有 sessionId 时显示 Codex 风格新任务主页(首条消息提交时才创建 session)。
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createApi } from '../lib/api.js';
 import { connection } from '../lib/connection.js';
 import { Message } from './Message.jsx';
@@ -18,8 +18,16 @@ import { QuestionPicker } from './QuestionPicker.jsx';
 import { StickyUserContext } from './StickyUserContext.jsx';
 import { SidePanel } from './SidePanel.jsx';
 import { StatusBar } from './StatusBar.jsx';
+import { ChangeConversationCard, ChangeGlassDock } from './ChangeReview.jsx';
 import { toast } from './Toast.jsx';
 import { clsx } from '../lib/format.js';
+import {
+  aggregateHunksFromMessages,
+  changeGroupsSignature,
+  collectTurnChangeSetsFromItems,
+  collectHunkMessagesFromItems,
+  summarizeChangeGroups,
+} from '../lib/sessionChanges.js';
 import {
   buildQueuedMessageItems,
   cancelQueuedInput,
@@ -239,6 +247,10 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   const [modelState, setModelState] = useState(null);
   const [pendingModelName, setPendingModelName] = useState('');
   const [modelSwitching, setModelSwitching] = useState(false);
+  const [reviewRequest, setReviewRequest] = useState(0);
+  const [dismissedDockSignature, setDismissedDockSignature] = useState('');
+  const [revertingChangeKeys, setRevertingChangeKeys] = useState(() => new Set());
+  const [restoredChangeKeys, setRestoredChangeKeys] = useState(() => new Set());
   const scrollRef = useRef(null);
   const inputRef = useRef(null);
   const layoutRef = useRef(null);
@@ -705,14 +717,72 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     return normalized ? [normalized, ...modelOptions] : modelOptions;
   }, [modelOptions, modelState]);
 
-  // SidePanel 「变更」tab 的数据源:把 items 里 tool 项的 hunks 抽成消息格式。
+  // 三处 diff UI 共用同一份数据源:把 items 里 tool 项的 hunks 抽成消息格式。
   // 必须放在 early return 之前,否则空态/有 session 之间 hooks 数量不一致 → React #310。
-  const sidePanelMessages = useMemo(() => {
-    if (!showSidePanel) return [];
-    return items
-      .filter((it) => it.kind === 'tool' && Array.isArray(it.tool?.hunks) && it.tool.hunks.length > 0)
-      .map((it) => ({ hunks: it.tool.hunks }));
-  }, [items, showSidePanel]);
+  const changeMessages = useMemo(() => collectHunkMessagesFromItems(items), [items]);
+  const changeGroups = useMemo(() => aggregateHunksFromMessages(changeMessages), [changeMessages]);
+  const changeSummary = useMemo(() => summarizeChangeGroups(changeGroups), [changeGroups]);
+  const changeSignature = useMemo(() => changeGroupsSignature(changeGroups), [changeGroups]);
+  const turnChangeSets = useMemo(() => collectTurnChangeSetsFromItems(items), [items]);
+  const changeSetByAfterItemId = useMemo(() => {
+    const map = new Map();
+    for (const changeSet of turnChangeSets) {
+      if (changeSet.afterItemId !== undefined && changeSet.afterItemId !== null) {
+        map.set(changeSet.afterItemId, changeSet);
+      }
+    }
+    return map;
+  }, [turnChangeSets]);
+  const showChangeDock = changeSummary.hasChanges
+    && !!changeSignature
+    && dismissedDockSignature !== changeSignature;
+
+  useEffect(() => {
+    setDismissedDockSignature('');
+    setRevertingChangeKeys(new Set());
+    setRestoredChangeKeys(new Set());
+  }, [sid]);
+
+  const openReviewPanel = useCallback(() => {
+    if (!showSidePanel || !sid) return;
+    if (sidePanelCollapsed) onToggleSidePanel?.();
+    if (onSidePanelResize && sidePanelWidth < 500) {
+      const contentWidth = layoutRef.current?.getBoundingClientRect().width || 0;
+      onSidePanelResize(520, contentWidth);
+    }
+    setReviewRequest((n) => n + 1);
+  }, [onSidePanelResize, onToggleSidePanel, showSidePanel, sid, sidePanelCollapsed, sidePanelWidth]);
+
+  const dismissChangeDock = useCallback(() => {
+    setDismissedDockSignature(changeSignature || '');
+  }, [changeSignature]);
+
+  const restoreChangeSet = useCallback(async (changeSet) => {
+    if (!sid || !changeSet?.userMessageId) {
+      toast({ kind: 'err', text: '撤销失败:此轮没有可用 checkpoint' });
+      return;
+    }
+    if (busy) {
+      toast({ kind: 'err', text: '当前会话仍在运行，结束后再撤销文件改动' });
+      return;
+    }
+    const key = changeSet.key;
+    setRevertingChangeKeys((prev) => new Set(prev).add(key));
+    try {
+      const result = await api.restoreSessionCheckpoint(sid, changeSet.userMessageId);
+      setRestoredChangeKeys((prev) => new Set(prev).add(key));
+      const changed = Array.isArray(result?.files_changed) ? result.files_changed.length : 0;
+      toast({ kind: 'ok', text: changed > 0 ? `已撤销 ${changed} 个文件改动` : '没有文件需要撤销' });
+    } catch (e) {
+      toast({ kind: 'err', text: '撤销失败:' + (e?.body?.error || e?.message || '') });
+    } finally {
+      setRevertingChangeKeys((prev) => {
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
+    }
+  }, [api, busy, sid]);
 
   const questionForView = useMemo(() => {
     if (!questionRequest) return null;
@@ -859,29 +929,44 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
           onScroll={scheduleStickyMeasure}
           className="h-full overflow-y-auto px-3.5 py-3 flex flex-col gap-3"
         >
-          {renderedItems.map((it) => (
-            <div
-              key={it.id}
-              className="ace-chat-row flex flex-col"
-              data-chat-row="true"
-              data-chat-item-id={String(it.id)}
-              data-chat-kind={it.kind || ''}
-              data-chat-role={it.kind === 'msg' ? (it.role || '') : (it.kind || '')}
-              data-chat-user-message={it.kind === 'msg' && it.role === 'user' ? 'true' : undefined}
-            >
-              {it.kind === 'tool' ? (
-                <ToolBlock entry={it.tool} />
-              ) : (
-                <Message
-                  role={it.role} content={it.content} ts={it.ts}
-                  streaming={it.streaming}
-                  messageId={it.messageId}
-                  metadata={it.metadata}
-                  onFork={forkAndSwitch}
-                />
-              )}
-            </div>
-          ))}
+          {renderedItems.map((it) => {
+            const changeSet = changeSetByAfterItemId.get(it.id);
+            return (
+              <Fragment key={it.id}>
+                <div
+                  className="ace-chat-row flex flex-col"
+                  data-chat-row="true"
+                  data-chat-item-id={String(it.id)}
+                  data-chat-kind={it.kind || ''}
+                  data-chat-role={it.kind === 'msg' ? (it.role || '') : (it.kind || '')}
+                  data-chat-user-message={it.kind === 'msg' && it.role === 'user' ? 'true' : undefined}
+                >
+                  {it.kind === 'tool' ? (
+                    <ToolBlock entry={it.tool} />
+                  ) : (
+                    <Message
+                      role={it.role} content={it.content} ts={it.ts}
+                      streaming={it.streaming}
+                      messageId={it.messageId}
+                      metadata={it.metadata}
+                      onFork={forkAndSwitch}
+                    />
+                  )}
+                </div>
+                {changeSet && (
+                  <ChangeConversationCard
+                    groups={changeSet.groups}
+                    summary={changeSet.summary}
+                    title={changeSet.title}
+                    onReview={openReviewPanel}
+                    onRevert={changeSet.userMessageId ? () => restoreChangeSet(changeSet) : undefined}
+                    reverting={revertingChangeKeys.has(changeSet.key)}
+                    restored={restoredChangeKeys.has(changeSet.key)}
+                  />
+                )}
+              </Fragment>
+            );
+          })}
           {busy && streamingId == null && !hasActiveTool && (
             <ActivityIndicator activity={activity} />
           )}
@@ -898,6 +983,13 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         onCancel={cancelQueued}
         onRetry={retryQueued}
       />
+      {showChangeDock && (
+        <ChangeGlassDock
+          summary={changeSummary}
+          onReview={openReviewPanel}
+          onDismiss={dismissChangeDock}
+        />
+      )}
 
       <InputBar
         ref={inputRef}
@@ -943,7 +1035,10 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
               sessionRef={ref}
               sessionId={sid}
               cwd={sidePanelCwd}
-              messages={sidePanelMessages}
+              messages={changeMessages}
+              changeGroups={changeGroups}
+              changeSummary={changeSummary}
+              reviewRequest={reviewRequest}
               width={sidePanelWidth}
               collapsed={sidePanelCollapsed}
               onToggleCollapse={onToggleSidePanel}

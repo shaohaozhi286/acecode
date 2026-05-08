@@ -9,6 +9,8 @@
 // session_status 帧把 bridge 调爆;subtitle / pinned 切片在 buildTrayMenuPayload
 // 这一纯函数里完成,便于单测。
 
+import { sessionDisplayTitle, withNewSessionDisplayTitles } from './sessionTitle.js';
+
 export const PINNED_LIMIT = 5;
 export const RECENT_LIMIT_INCLUDING_MORE = 14;
 export const SUBTITLE_LIMIT = 40;
@@ -23,9 +25,9 @@ function truncateSubtitle(s) {
 }
 
 function safeTitle(s) {
-  if (s == null) return '(无标题)';
+  if (s == null) return '新会话1';
   const t = String(s).trim();
-  return t || '(无标题)';
+  return t || '新会话1';
 }
 
 // 把单条 session 转成 tray item 的形态。
@@ -33,7 +35,7 @@ function toTrayItem(session, { workspaceName }) {
   return {
     session_id: String(session.id || session.session_id || ''),
     workspace_hash: String(session.workspace_hash || session.workspaceHash || ''),
-    title: safeTitle(session.title || session.summary),
+    title: safeTitle(sessionDisplayTitle(session, '')),
     // subtitle 优先用 summary,其次 workspaceName。空字符串视为没有副标题(native 单行渲染)。
     subtitle: truncateSubtitle(session.summary || workspaceName || ''),
   };
@@ -46,7 +48,7 @@ export function buildTrayMenuPayload({ sessions, pinnedSessionIds, workspaceName
   const pins = new Set(
     Array.isArray(pinnedSessionIds) ? pinnedSessionIds.map(String) : []
   );
-  const list = Array.isArray(sessions) ? sessions : [];
+  const list = withNewSessionDisplayTitles(Array.isArray(sessions) ? sessions : []);
   const pinned = [];
   const recent = [];
   for (const s of list) {
