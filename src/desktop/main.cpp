@@ -19,6 +19,7 @@
 #include "notifications_win.hpp"
 #include "open_in_explorer.hpp"
 #include "pick_active.hpp"
+#include "single_instance.hpp"
 #include "splash_screen.hpp"
 #include "tray_icon_win.hpp"
 #include "url_builder.hpp"
@@ -294,6 +295,15 @@ int main(int, char**) {
     LOG_INFO(std::string("[desktop] DPI awareness ") +
              (acecode::desktop::enable_desktop_dpi_awareness() ? "enabled" : "not enabled"));
 #endif
+
+    // 单例锁:per-user。已有实例时把对方拉前 + 自己 exit(0),避免多份 desktop /
+    // 多份 daemon 子进程同时存在。设计见 src/desktop/single_instance.hpp。
+    SingleInstance singleton;
+    if (!singleton.try_acquire()) {
+        LOG_INFO("[desktop] another acecode-desktop instance is running, focusing it");
+        focus_existing_instance(); // POSIX 端是 stub,返回 false 也只是 exit
+        return 0;
+    }
 
     SplashScreen splash;
     splash.show();

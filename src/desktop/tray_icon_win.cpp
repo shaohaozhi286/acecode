@@ -51,16 +51,34 @@ TrayClickHandler g_open_app_handler;
 
 HICON load_app_icon_for_tray() {
     // acecode.rc.in 里把 acecode.ico 作为 IDI_ICON1 (id=1) 编入二进制。
-    // 用 LoadImageW 显式按 SM_CXSMICON × SM_CYSMICON 加载,避免 LoadIconW 默认
-    // 走 SM_CXICON (32×32) 再被 shell downscale 成 16×16 锯齿。.ico 多 frame 时
-    // Windows 直接挑最匹配的那帧。
+    // 加载策略(逐级 fallback,保证最差也是程序图标而不是系统通用图标):
+    //   1. LoadImageW + SM_CXSMICON × SM_CYSMICON  → 16×16 frame,质感最佳
+    //   2. LoadImageW + SM_CXICON × SM_CYICON      → 32×32 frame,shell downscale
+    //   3. LoadIconW (MAKEINTRESOURCEW(1))         → 老路径,等价 LoadImage 32×32
+    //   4. LoadIconW (IDI_APPLICATION)             → 终极兜底,系统默认图标
     HINSTANCE hinst = ::GetModuleHandleW(nullptr);
-    int w = ::GetSystemMetrics(SM_CXSMICON);
-    int h = ::GetSystemMetrics(SM_CYSMICON);
-    HICON ic = static_cast<HICON>(::LoadImageW(
-        hinst, MAKEINTRESOURCEW(1), IMAGE_ICON, w, h, LR_DEFAULTCOLOR));
-    if (ic) return ic;
-    // 32512 = IDI_APPLICATION 数值常量。LoadImageW 一致用 W 版本。
+    int sx = ::GetSystemMetrics(SM_CXSMICON);
+    int sy = ::GetSystemMetrics(SM_CYSMICON);
+    if (HICON ic = static_cast<HICON>(::LoadImageW(
+            hinst, MAKEINTRESOURCEW(1), IMAGE_ICON, sx, sy, LR_DEFAULTCOLOR))) {
+        LOG_INFO("[desktop] tray icon: loaded small frame via LoadImageW " +
+                 std::to_string(sx) + "x" + std::to_string(sy));
+        return ic;
+    }
+    int lx = ::GetSystemMetrics(SM_CXICON);
+    int ly = ::GetSystemMetrics(SM_CYICON);
+    if (HICON ic = static_cast<HICON>(::LoadImageW(
+            hinst, MAKEINTRESOURCEW(1), IMAGE_ICON, lx, ly, LR_DEFAULTCOLOR))) {
+        LOG_WARN("[desktop] tray icon: small frame load failed, fell back to "
+                 "large frame (will be downscaled by shell)");
+        return ic;
+    }
+    if (HICON ic = ::LoadIconW(hinst, MAKEINTRESOURCEW(1))) {
+        LOG_WARN("[desktop] tray icon: LoadImageW failed, fell back to LoadIconW");
+        return ic;
+    }
+    LOG_ERROR("[desktop] tray icon: app icon resource missing, using IDI_APPLICATION");
+    // 32512 = IDI_APPLICATION 数值常量。
     return ::LoadIconW(nullptr, MAKEINTRESOURCEW(32512));
 }
 

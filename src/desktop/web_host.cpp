@@ -44,6 +44,14 @@ constexpr UINT kRequestQuitMsg = WM_USER + 0x10;
 // 共享同一线程(webview2 message pump 线程 = 主线程)。
 std::function<bool()> g_close_handler;
 
+// 单例联动:第二次启动 acecode-desktop 会向已有 host window 派 focus msg,
+// 让我们把窗口拉前 + 显示。同名 RegisterWindowMessageW 在两端拿到一致 UINT,
+// 见 single_instance_win.cpp 头注。第一次访问时 lazily register,缓存到 static。
+UINT focus_existing_instance_msg() {
+    static UINT id = ::RegisterWindowMessageW(L"ACECode_FocusExistingInstance_v1");
+    return id;
+}
+
 int dpi_scale(int value, UINT dpi) {
     return static_cast<int>((static_cast<long long>(value) * static_cast<long long>(dpi)) / 96);
 }
@@ -196,6 +204,18 @@ LRESULT CALLBACK host_window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpa
             if (msg == kRequestQuitMsg) {
                 // 来自 WebHost::request_quit 的真正退出信号 — 绕过 close handler。
                 ::DestroyWindow(hwnd);
+                return 0;
+            }
+            if (UINT focus_msg = focus_existing_instance_msg();
+                focus_msg != 0 && msg == focus_msg) {
+                // 第二个 acecode-desktop 进程检测到单例锁被占,通过 PostMessageW
+                // 让我们把窗口拉前。等价于左键单击托盘 + close-to-tray 还原。
+                if (::IsIconic(hwnd)) {
+                    ::ShowWindow(hwnd, SW_RESTORE);
+                } else {
+                    ::ShowWindow(hwnd, SW_SHOW);
+                }
+                ::SetForegroundWindow(hwnd);
                 return 0;
             }
             break;

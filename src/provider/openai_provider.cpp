@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <sstream>
 #include <map>
+#include <unordered_set>
 
 namespace acecode {
 
@@ -74,7 +75,67 @@ nlohmann::json OpenAiCompatProvider::build_request_body(
         LOG_WARN("build_request_body: total " + std::to_string(dropped_invalid_role) +
                  " message(s) dropped due to invalid role");
     }
-    body["messages"] = msgs_json;
+
+    // Orphan tool_call 防御:OpenAI / Chat Completions 严格要求
+    // assistant.tool_calls[*].id 都必须有一条 role=tool, tool_call_id=<id>
+    // 紧跟在后面;否则整个请求 400 "No tool output found for function call …"。
+    // 历史 session 在以下场景会持久化出 orphan(被打断的工具调用):
+    //   - daemon 中途被 kill / 崩溃,assistant 已写盘但 tool result 未来得及落
+    //   - 工具执行抛异常路径里 ToolResult 没被 append
+    //   - resume 选了一个旧 jsonl,正好截在 assistant 之后
+    // 一旦有 orphan,该 session 的下一条 user 消息会让 LLM 端永久作废。我们在
+    // 请求出口把 orphan 用占位 tool 消息补齐,让 session 自动复活;同时 WARN
+    // 一条供排查。msgs_ 内存与 session jsonl 都不动 — 只在序列化层补洞。
+    nlohmann::json patched = nlohmann::json::array();
+    int synthesized_stubs = 0;
+    {
+        size_t n = msgs_json.size();
+        for (size_t i = 0; i < n; ) {
+            const auto& cur = msgs_json[i];
+            patched.push_back(cur);
+            const std::string role = cur.value("role", std::string{});
+            if (role == "assistant" && cur.contains("tool_calls") &&
+                cur["tool_calls"].is_array() && !cur["tool_calls"].empty()) {
+                std::vector<std::string> needed_ids;
+                for (const auto& tc : cur["tool_calls"]) {
+                    if (tc.contains("id") && tc["id"].is_string()) {
+                        needed_ids.push_back(tc["id"].get<std::string>());
+                    }
+                }
+                std::unordered_set<std::string> seen_ids;
+                size_t j = i + 1;
+                while (j < n && msgs_json[j].value("role", std::string{}) == "tool") {
+                    patched.push_back(msgs_json[j]);
+                    if (msgs_json[j].contains("tool_call_id") &&
+                        msgs_json[j]["tool_call_id"].is_string()) {
+                        seen_ids.insert(msgs_json[j]["tool_call_id"].get<std::string>());
+                    }
+                    ++j;
+                }
+                for (const auto& id : needed_ids) {
+                    if (!seen_ids.count(id)) {
+                        nlohmann::json stub;
+                        stub["role"] = "tool";
+                        stub["tool_call_id"] = id;
+                        stub["content"] =
+                            "[Error] Tool execution was interrupted before it could "
+                            "produce a result. No output is available for this call.";
+                        patched.push_back(std::move(stub));
+                        ++synthesized_stubs;
+                    }
+                }
+                i = j;
+            } else {
+                ++i;
+            }
+        }
+    }
+    if (synthesized_stubs > 0) {
+        LOG_WARN("build_request_body: synthesized " + std::to_string(synthesized_stubs) +
+                 " placeholder tool message(s) for orphan tool_call(s) "
+                 "(likely from interrupted prior turns; session will continue)");
+    }
+    body["messages"] = patched;
 
     // Build tools array
     if (!tools.empty()) {
