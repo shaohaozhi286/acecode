@@ -90,7 +90,7 @@ ctest --test-dir build --output-on-failure
 
 ### 桌面构建
 
-这里使用上面列出的同一组受支持 `<triplet>` 值。如果桌面壳需要完整内置 Web UI，请先构建 [web/](web)。
+这里使用上面列出的同一组受支持 `<triplet>` 值。如果桌面壳需要完整内置 Web UI，请先构建 [web/](web)，再配置 CMake。
 
 ```bash
 cmake -S . -B build -G Ninja \
@@ -103,7 +103,7 @@ cmake -S . -B build -G Ninja \
 cmake --build build --target acecode-desktop
 ```
 
-桌面 target 运行时要求 daemon 可执行文件位于旁边。
+在 macOS 上，这个 target 会产出 `build/ACECode.app`；在 Windows 上会产出 `acecode-desktop.exe`。
 
 ### Windows 注意事项
 
@@ -173,7 +173,7 @@ acecode service uninstall
 
 ### 桌面壳
 
-可选的 `acecode-desktop` target 会把 Web UI 包装为原生桌面壳。它可以跟踪多个 workspace，并为每个活跃 workspace 运行独立 daemon 进程。构建时传入 `-DACECODE_BUILD_DESKTOP=ON`；当前模型见 [docs/desktop-shell/multi-workspace.md](docs/desktop-shell/multi-workspace.md)。
+可选的 `acecode-desktop` target 会把 Web UI 包装为原生桌面壳。它可以通过共享 daemon 进程跟踪多个 workspace。构建时传入 `-DACECODE_BUILD_DESKTOP=ON`；当前模型见 [docs/desktop-shell/multi-workspace.md](docs/desktop-shell/multi-workspace.md)。
 
 ## TUI 使用
 

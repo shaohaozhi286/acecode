@@ -5,12 +5,12 @@
 ## 关键模型
 
 ```
-acecode-desktop.exe (父)
+acecode-desktop.exe / ACECode.app (父)
   ├── WebHost (webview, 主窗口)
   ├── WorkspaceRegistry  ← .acecode/projects/<hash>/workspace.json
   └── DaemonPool
     └── Slot[__shared_daemon__/default]
-      └── DaemonSupervisor → acecode.exe daemon (shared port/token)
+      └── DaemonSupervisor → acecode.exe / Contents/MacOS/acecode-daemon daemon (shared port/token)
 ```
 
 所有 workspace / session / conversation 共享同一个 daemon 子进程。workspace

@@ -85,8 +85,8 @@ What we _are_ building:
 4. Native menu, system tray, OS notifications, file/folder pickers, drag &
    drop, single-instance lock, deep-link handler (`acecode://`).
 5. CMake packaging: Windows MSIX + standalone `.exe`, macOS `.app`
-   (universal binary), Linux AppImage. Each shipped with the daemon binary
-   colocated.
+   (universal binary), Linux AppImage. Each ships with the daemon binary
+   colocated, or inside `Contents/MacOS/` for the macOS app bundle.
 
 ## Risks (covered in `design.md`)
 

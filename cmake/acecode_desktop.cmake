@@ -56,6 +56,8 @@ if(WIN32)
         ${ACECODE_DESKTOP_SOURCES}
         ${ACECODE_WINDOWS_RESOURCES}
     )
+elseif(APPLE)
+    add_executable(acecode-desktop MACOSX_BUNDLE ${ACECODE_DESKTOP_SOURCES})
 else()
     add_executable(acecode-desktop ${ACECODE_DESKTOP_SOURCES})
 endif()
@@ -83,6 +85,40 @@ target_link_libraries(acecode-desktop PRIVATE
 # acecode_unit_tests 也能链通,再在 acecode_testable 一侧添加(见根 CMakeLists)。
 if(WIN32)
     target_link_libraries(acecode-desktop PRIVATE ole32 shell32 user32 gdi32)
+endif()
+
+if(APPLE)
+    target_link_libraries(acecode-desktop PRIVATE "-framework CoreGraphics")
+endif()
+
+if(APPLE)
+    set_target_properties(acecode-desktop PROPERTIES
+        # Keep the app bundle user-facing while avoiding a case-insensitive
+        # collision with the bundled daemon binary copied below.
+        RUNTIME_OUTPUT_NAME "ACECode"
+        MACOSX_BUNDLE_BUNDLE_NAME "ACECode"
+        MACOSX_BUNDLE_GUI_IDENTIFIER "dev.acecode.desktop"
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/cmake/macos/ACECodeDesktopInfo.plist.in"
+        MACOSX_BUNDLE_INFO_STRING "ACECode Desktop"
+        MACOSX_BUNDLE_LONG_VERSION_STRING "${PROJECT_VERSION}"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+        MACOSX_BUNDLE_BUNDLE_VERSION "${ACECODE_BUILD_VERSION}"
+        MACOSX_BUNDLE_COPYRIGHT "ACECode contributors"
+    )
+    add_dependencies(acecode-desktop acecode)
+    set_property(TARGET acecode-desktop APPEND PROPERTY
+        LINK_DEPENDS $<TARGET_FILE:acecode>)
+    add_custom_command(TARGET acecode-desktop POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E rm -f
+            $<TARGET_FILE_DIR:acecode-desktop>/acecode-desktop
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:acecode>
+            $<TARGET_FILE_DIR:acecode-desktop>/acecode-daemon
+        COMMAND ${CMAKE_COMMAND} -E rm -rf
+            "$<TARGET_BUNDLE_DIR:acecode-desktop>/../acecode-desktop.app"
+        COMMENT "Copying acecode daemon into ACECode.app bundle"
+        VERBATIM
+    )
 endif()
 
 if(MSVC)

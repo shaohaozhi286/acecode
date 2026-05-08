@@ -99,9 +99,10 @@ one process but loses crash isolation and forces us to fork the
 `src/desktop/daemon_supervisor.{hpp,cpp}` owns the daemon child. Lifecycle:
 
 ### 4.1 Spawn
-- Compute daemon binary path: same directory as the desktop binary, named
-  `acecode` (POSIX) / `acecode.exe` (Windows). If absent, fall back to
-  whatever `acecode` resolves to via `$PATH`.
+- Compute daemon binary path beside the desktop executable: `acecode.exe`
+  next to `acecode-desktop.exe` on Windows, and `Contents/MacOS/acecode-daemon`
+  inside `ACECode.app` on macOS. Linux/non-bundled development builds use
+  `acecode` beside the desktop executable.
 - Build argv:
   ```
   acecode daemon --foreground --port 0 --emit-runtime-json
@@ -312,6 +313,17 @@ of `tasks.md`.
 
 ### 9.3 Bundle layout
 
+macOS local CMake builds produce a standard app bundle:
+
+```
+ACECode.app/
+  Contents/Info.plist
+  Contents/MacOS/ACECode              ← the GUI executable
+  Contents/MacOS/acecode-daemon       ← bundled daemon executable
+```
+
+Windows and Linux development builds use a flat layout:
+
 ```
 acecode-desktop                        ← the GUI binary
 acecode (or acecode.exe)               ← the same daemon binary as today
@@ -325,8 +337,9 @@ share/acecode/web/                     ← embedded; daemon already serves it
 - **Windows**: standalone `.exe` (acecode-desktop) + colocated `acecode.exe`
   + WebView2 Evergreen Bootstrapper (auto-installs runtime if missing).
   Future: MSIX. NSIS for v1.
-- **macOS**: `.app` bundle, codesigned + notarized in CI. Universal
-  binary (x86_64 + arm64).
+- **macOS**: local builds produce `ACECode.app` with the daemon copied into
+  `Contents/MacOS/acecode-daemon`. Codesigning, notarization, and universal binaries
+  are packaging follow-ups.
 - **Linux**: AppImage embedding `webkit2gtk-4.1` is too large; we ship a
   `.tar.gz` + `.deb` listing `libwebkit2gtk-4.1-0` as a runtime dep. Flatpak
   is a follow-up.

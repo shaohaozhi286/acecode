@@ -90,7 +90,7 @@ Unit tests live under `tests/` and link against the `acecode_testable` object li
 
 ### Desktop Build
 
-Use the same supported `<triplet>` values listed above. Build [web/](web) first when the desktop shell should use the full embedded Web UI.
+Use the same supported `<triplet>` values listed above. Build [web/](web) first, then configure CMake, when the desktop shell should use the full embedded Web UI.
 
 ```bash
 cmake -S . -B build -G Ninja \
@@ -103,7 +103,7 @@ cmake -S . -B build -G Ninja \
 cmake --build build --target acecode-desktop
 ```
 
-The desktop target expects the daemon executable beside it at runtime.
+On macOS, this target produces `build/ACECode.app`. On Windows, it produces `acecode-desktop.exe`.
 
 ### Windows Notes
 
@@ -173,7 +173,7 @@ Service mode uses the platform service data directory rather than the normal use
 
 ### Desktop Shell
 
-The optional `acecode-desktop` target wraps the web UI in a native desktop shell. It can track multiple workspaces and run a separate daemon process for each active workspace. Build it with `-DACECODE_BUILD_DESKTOP=ON`; see [docs/desktop-shell/multi-workspace.md](docs/desktop-shell/multi-workspace.md) for the current model.
+The optional `acecode-desktop` target wraps the web UI in a native desktop shell. It can track multiple workspaces through a shared daemon process. Build it with `-DACECODE_BUILD_DESKTOP=ON`; see [docs/desktop-shell/multi-workspace.md](docs/desktop-shell/multi-workspace.md) for the current model.
 
 ## TUI Usage
 
