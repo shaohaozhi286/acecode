@@ -104,6 +104,7 @@ export function createApi(base = null) {
     updateModel:      (name, draft)  => request('PUT',    `/api/models/${encodeURIComponent(name)}`, draft, base),
     removeModel:      (name)         => request('DELETE', `/api/models/${encodeURIComponent(name)}`, undefined, base),
     setDefaultModel:  (name)         => request('POST',   '/api/config/default-model', {name}, base),
+    getDefaultModel:  ()             => request('GET',    '/api/config/default-model', undefined, base),
     getHistory:       (cwd, max=100) => request('GET',    `/api/history?cwd=${encodeURIComponent(cwd)}&max=${max}`, undefined, base),
     appendHistory:    (text)         => request('POST',   '/api/history', {text}, base),
     forkSession:      (sid, atMessageId, title) =>

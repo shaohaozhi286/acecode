@@ -1752,6 +1752,18 @@ struct WebServer::Impl {
             return with_cors(req, std::move(r));
         });
 
+        // GET /api/config/default-model: 返回当前 default_model_name
+        // (给 WebUI ModelManager 标星用)。读 cfg 的字段,空字符串也照返。
+        CROW_ROUTE(app, "/api/config/default-model").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.app_config) return crow::response(503);
+            crow::response r(200);
+            r.add_header("Content-Type", "application/json");
+            r.body = json{{"name", deps.app_config->default_model_name}}.dump();
+            return with_cors(req, std::move(r));
+        });
+
         // GET /api/sessions/:id/model: 返回当前 session model state。
         CROW_ROUTE(app, "/api/sessions/<string>/model").methods(crow::HTTPMethod::GET)
         ([this](const crow::request& req, const std::string& sid) {
