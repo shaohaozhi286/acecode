@@ -7,6 +7,12 @@ import { useTheme } from '../theme.jsx';
 import { toast } from './Toast.jsx';
 import { clsx } from '../lib/format.js';
 import { VsIcon } from './Icon.jsx';
+import {
+  WindowControls,
+  isFramelessDesktop,
+  isInteractiveTarget,
+  useFramelessWindowState,
+} from './WindowControls.jsx';
 
 const VIEWS = [
   { key: 'single', label: '单会话' },
@@ -27,56 +33,9 @@ function QuickBtn({ title, onClick, children }) {
   );
 }
 
-function isFramelessDesktop() {
-  return typeof window !== 'undefined'
-    && window.__ACECODE_FRAMELESS_WINDOW__ === true
-    && typeof window.aceDesktop_startWindowDrag === 'function';
-}
-
-function isInteractiveTarget(target) {
-  return !!target?.closest?.('button,a,input,textarea,select,[role="button"],[data-ace-no-window-drag="true"]');
-}
-
-function WindowGlyph({ type }) {
-  if (type === 'minimize') {
-    return (
-      <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-        <path d="M3.5 10.5h9" />
-      </svg>
-    );
-  }
-  if (type === 'maximize') {
-    return (
-      <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-        <rect x="4.25" y="4.25" width="7.5" height="7.5" rx="1" />
-      </svg>
-    );
-  }
-  return (
-    <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-      <path d="M4.25 4.25l7.5 7.5M11.75 4.25l-7.5 7.5" />
-    </svg>
-  );
-}
-
-function WindowControl({ type, title, onClick }) {
-  return (
-    <button
-      type="button"
-      data-ace-no-window-drag="true"
-      title={title}
-      aria-label={title}
-      onClick={onClick}
-      className={clsx('ace-window-control', type === 'close' && 'ace-window-control-close')}
-    >
-      <WindowGlyph type={type} />
-    </button>
-  );
-}
-
 export function TopBar({ view, onViewChange, onSettings, onNewSession, onOpenSearch, sidebarCollapsed = false, onToggleSidebar }) {
   const { theme, toggle } = useTheme();
-  const framelessDesktop = isFramelessDesktop();
+  const { framelessDesktop, isMaximized } = useFramelessWindowState();
   const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad|iPod/.test(navigator.platform || '');
   const searchHotkeyHint = isMac ? '搜索 (Cmd+K)' : '搜索 (Ctrl+K)';
 
@@ -151,13 +110,7 @@ export function TopBar({ view, onViewChange, onSettings, onNewSession, onOpenSea
           <VsIcon name="settings" size={20} />
           <span>设置</span>
         </button>
-        {framelessDesktop && (
-          <div className="ace-window-controls" data-ace-no-window-drag="true">
-            <WindowControl type="minimize" title="最小化" onClick={() => window.aceDesktop_minimizeWindow?.()} />
-            <WindowControl type="maximize" title="最大化或还原" onClick={() => window.aceDesktop_toggleMaximizeWindow?.()} />
-            <WindowControl type="close" title="关闭" onClick={() => window.aceDesktop_closeWindow?.()} />
-          </div>
-        )}
+        {framelessDesktop && <WindowControls isMaximized={isMaximized} />}
       </div>
     </div>
   );

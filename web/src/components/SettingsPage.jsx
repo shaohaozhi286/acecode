@@ -8,26 +8,19 @@ import { Toggle } from './Modal.jsx';
 import { clsx } from '../lib/format.js';
 import { VsIcon } from './Icon.jsx';
 import { ModelManager } from './ModelManager.jsx';
+import {
+  WindowControls,
+  isInteractiveTarget,
+  useFramelessWindowState,
+} from './WindowControls.jsx';
 
 const NAV = ['常规', '外观', '配置', '个性化', 'MCP 服务器', '模型', '环境', '项目指令', '已归档对话', '使用情况'];
-
-// 与 TopBar 同款 frameless 拖动:非按钮等交互元素 + 左键 → 触发 native 拖动;
-// 双击切最大化。在 frameless 模式下 SettingsPage 全屏覆盖 TopBar,自身 header
-// 必须接管,否则用户无法拖窗口。
-function isFramelessDesktop() {
-  return typeof window !== 'undefined'
-    && window.__ACECODE_FRAMELESS_WINDOW__ === true
-    && typeof window.aceDesktop_startWindowDrag === 'function';
-}
-function isInteractiveTarget(target) {
-  return !!target?.closest?.('button,a,input,textarea,select,[role="button"],[data-ace-no-window-drag="true"]');
-}
 
 export function SettingsPage({ onClose, health }) {
   const { theme, set: setTheme } = useTheme();
   const [activeNav, setActiveNav] = useState(0);
   const [show, setShow] = useState(false);
-  const framelessDesktop = isFramelessDesktop();
+  const { framelessDesktop, isMaximized } = useFramelessWindowState();
 
   useEffect(() => { requestAnimationFrame(() => setShow(true)); }, []);
   const close = () => { setShow(false); setTimeout(onClose, 240); };
@@ -51,7 +44,7 @@ export function SettingsPage({ onClose, health }) {
     >
       <div
         className={clsx(
-          'h-11 px-4 flex items-center bg-surface border-b border-border shrink-0',
+          'h-11 pl-4 pr-0 flex items-center bg-surface border-b border-border shrink-0',
           framelessDesktop && 'ace-desktop-frameless-topbar',
         )}
         onMouseDown={onHeaderMouseDown}
@@ -62,7 +55,10 @@ export function SettingsPage({ onClose, health }) {
           className="px-3 h-7 rounded-md text-fg-2 text-[13px] hover:bg-surface-hi transition flex items-center gap-1.5"
         ><VsIcon name="back" size={13} />返回</button>
         <span className="flex-1 text-center text-[15px] font-semibold">设置</span>
-        <div className="w-16" />
+        {/* 占位:让标题居中,与 TopBar 视觉对齐;frameless 模式下右侧由 WindowControls 占据 */}
+        <div className={clsx(framelessDesktop ? 'flex items-center pr-0' : 'w-16 pr-4')}>
+          {framelessDesktop && <WindowControls isMaximized={isMaximized} />}
+        </div>
       </div>
       <div className="flex-1 flex overflow-hidden">
         <nav className="w-[200px] bg-surface-alt border-r border-border py-2 overflow-y-auto shrink-0">
@@ -87,7 +83,10 @@ export function SettingsPage({ onClose, health }) {
           {activeNav === 1 && <SectionAppearance theme={theme} setTheme={setTheme} />}
           {activeNav === 5 && (
             <>
-              <h2 className="text-xl font-bold mb-5">模型</h2>
+              <h2 className="text-xl font-bold mb-1">模型</h2>
+              <p className="text-[12px] text-fg-mute mb-5">
+                管理已保存的模型预设;★ 表示当前默认。聊天界面顶栏切换的就是这里的列表。
+              </p>
               <ModelManager />
             </>
           )}
