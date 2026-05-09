@@ -80,6 +80,9 @@ std::optional<SavedModelDraft> parse_model_draft(const nlohmann::json& body,
                                                   std::string& err) {
     if (!body.is_object()) { err = "body must be a JSON object"; return std::nullopt; }
     SavedModelDraft d;
+    // 注意:可选字段碰到 null / 非 string 静默跳过(out 保持默认空串),
+    // 与下方 models_dev_provider_id 的处理保持一致;只有必填字段才会硬性
+    // 报错。前端 form 经常把空 input 序列化成 null,这里宽容处理避免误拒。
     auto get_str = [&](const char* key, std::string& out, bool required) {
         if (!body.contains(key)) {
             if (required && err.empty()) {
@@ -88,7 +91,7 @@ std::optional<SavedModelDraft> parse_model_draft(const nlohmann::json& body,
             return;
         }
         if (!body[key].is_string()) {
-            if (err.empty()) {
+            if (required && err.empty()) {
                 err = std::string("field '") + key + "' must be string";
             }
             return;

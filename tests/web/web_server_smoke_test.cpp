@@ -863,3 +863,81 @@ TEST(WebServerHttp, CreateSessionWithBadJsonReturns400) {
     auto j = json::parse(r.text);
     EXPECT_TRUE(j.contains("error"));
 }
+
+// ------------------- saved_models CRUD route smoke tests -------------------
+// 触发场景:Task 4 新增 4 个 endpoint(POST /api/models / PUT / DELETE /
+// POST /api/config/default-model)。pure helper test 已覆盖 parse + 状态码
+// 映射,这里补 route-level wiring:鉴权 + 落盘 + JSON 形态。配置文件指向
+// fixture 的 tmp_dir,绝不会污染真实 ~/.acecode/config.json。
+
+// 场景:POST /api/models 成功 → 200 + body 含 name/provider/model/is_legacy=false,
+// 关键安全契约:**响应里永远不能出现 api_key**(profile_to_safe_json 已剥离)。
+TEST(WebServerHttp, PostModelsCreatesSavedEntryWithoutApiKey) {
+    WebServerFixture fx;
+    json req = {
+        {"name", "smoke-openai"},
+        {"provider", "openai"},
+        {"model", "llama-3"},
+        {"base_url", "http://localhost:1234/v1"},
+        {"api_key", "sk-secret-do-not-leak"},
+    };
+    auto r = cpr::Post(cpr::Url{fx.url("/api/models")},
+                       cpr::Header{{"Content-Type", "application/json"}},
+                       cpr::Body{req.dump()});
+    ASSERT_EQ(r.status_code, 200) << r.text;
+    auto j = json::parse(r.text);
+    EXPECT_EQ(j["name"], "smoke-openai");
+    EXPECT_EQ(j["provider"], "openai");
+    EXPECT_EQ(j["model"], "llama-3");
+    EXPECT_EQ(j["is_legacy"], false);
+    EXPECT_EQ(j["base_url"], "http://localhost:1234/v1");
+    EXPECT_FALSE(j.contains("api_key")) << "api_key 必须从响应中剥离";
+
+    // 落盘后 cfg 内存应已含此条目
+    ASSERT_EQ(fx.cfg.saved_models.size(), 1u);
+    EXPECT_EQ(fx.cfg.saved_models[0].name, "smoke-openai");
+    EXPECT_EQ(fx.cfg.saved_models[0].api_key, "sk-secret-do-not-leak");
+}
+
+// 场景:POST /api/models 重名 → 409 NAME_TAKEN(saved_models_editor 校验)。
+// 第一次提交建立基线;第二次同 name 必须被拒,且 cfg 不重复。
+TEST(WebServerHttp, PostModelsDuplicateNameRejectedWith409) {
+    WebServerFixture fx;
+    json req = {
+        {"name", "dup-name"},
+        {"provider", "copilot"},
+        {"model", "gpt-4o"},
+    };
+    auto first = cpr::Post(cpr::Url{fx.url("/api/models")},
+                           cpr::Header{{"Content-Type", "application/json"}},
+                           cpr::Body{req.dump()});
+    ASSERT_EQ(first.status_code, 200) << first.text;
+
+    auto second = cpr::Post(cpr::Url{fx.url("/api/models")},
+                            cpr::Header{{"Content-Type", "application/json"}},
+                            cpr::Body{req.dump()});
+    ASSERT_EQ(second.status_code, 409) << second.text;
+    auto j = json::parse(second.text);
+    EXPECT_EQ(j["error"], "NAME_TAKEN");
+    // cfg 不应出现两条同 name 条目
+    EXPECT_EQ(fx.cfg.saved_models.size(), 1u);
+}
+
+// 场景:POST /api/config/default-model body name 既不在 saved_models 也不是
+// "(legacy)" → 404 NOT_FOUND;cfg.default_model_name 不变。
+// 回归表现:用户在 picker 里随便输入一个名字也能被 set 成 default,然后
+// 启动时 model_resolver 解析失败。
+TEST(WebServerHttp, PostDefaultModelUnknownNameReturns404) {
+    WebServerFixture fx;
+    fx.cfg.default_model_name = "previous-default";
+
+    json req = {{"name", "totally-not-a-real-model"}};
+    auto r = cpr::Post(cpr::Url{fx.url("/api/config/default-model")},
+                       cpr::Header{{"Content-Type", "application/json"}},
+                       cpr::Body{req.dump()});
+    ASSERT_EQ(r.status_code, 404) << r.text;
+    auto j = json::parse(r.text);
+    EXPECT_EQ(j["error"], "NOT_FOUND");
+    EXPECT_EQ(fx.cfg.default_model_name, "previous-default")
+        << "校验失败时不应改 default_model_name";
+}

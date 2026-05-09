@@ -176,6 +176,46 @@ TEST(ModelsHandler, ParseDraftReportsMissingField) {
     EXPECT_NE(err.find("provider"), std::string::npos);
 }
 
+// 触发场景:前端 form 经常把空 input 序列化成 null,而不是省略字段;同时
+// 偶发情况下 base_url / api_key 可能是 number / bool 等非字符串类型(测试
+// stub / 错配的 schema)。可选字段一旦因此整体拒绝,UX 上看就是"明明
+// 没填也要报错"。这里和 models_dev_provider_id 的处理对齐:可选字段碰到
+// null 或 非 string,静默跳过而不是设 err。
+// 期望行为:body 含 base_url=null + api_key=42(int)→ parse 仍返回有效
+// draft,err 留空,base_url / api_key 为空字符串(语义同字段缺省)。
+// 回归表现:前端表单提交"只填必填项"被后端拒绝。
+TEST(ModelsHandler, ParseDraftSkipsNullOptionalFields) {
+    nlohmann::json body = {
+        {"name", "lm"},
+        {"provider", "copilot"},
+        {"model", "gpt-4o"},
+        {"base_url", nullptr},  // null
+        {"api_key", 42},         // 非字符串
+    };
+    std::string err;
+    auto d = parse_model_draft(body, err);
+    ASSERT_TRUE(d.has_value()) << "可选字段为 null/非 string 时应静默跳过";
+    EXPECT_TRUE(err.empty());
+    EXPECT_EQ(d->base_url, "");
+    EXPECT_EQ(d->api_key, "");
+}
+
+// 触发场景:必填字段是 null/非字符串(比如前端误把 name 写成数字)。这种
+// 情况和可选字段不一样 —— 必须明确报错给前端,提示哪个字段类型错了。
+// 期望行为:err 中应出现 "name",且 parse 返回 nullopt;否则前端会以为
+// 提交成功但拿到一个 name 为空的 draft。
+TEST(ModelsHandler, ParseDraftRejectsNonStringRequiredField) {
+    nlohmann::json body = {
+        {"name", 42},  // 非 string,name 是必填
+        {"provider", "copilot"},
+        {"model", "gpt-4o"},
+    };
+    std::string err;
+    auto d = parse_model_draft(body, err);
+    EXPECT_FALSE(d.has_value());
+    EXPECT_NE(err.find("name"), std::string::npos);
+}
+
 // 触发场景:前端 POST /api/models body 完整(含 openai 必填的 base_url +
 // api_key)。
 // 期望行为:全部字段就绪,返回的 SavedModelDraft 字段值与输入一致;

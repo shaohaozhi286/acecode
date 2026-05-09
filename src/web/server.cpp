@@ -1914,15 +1914,21 @@ struct WebServer::Impl {
                 return json_err(500, "PERSIST_FAILED", e.what());
             }
 
+            // 找到刚改完的条目(name 可能与 url_name 不同)
+            const ModelProfile* updated = nullptr;
+            for (const auto& e : deps.app_config->saved_models) {
+                if (e.name == draft->name) { updated = &e; break; }
+            }
+            if (!updated) {
+                // 理论不可达:update_saved_model 返回 OK 意味着条目已存在
+                // 且 name == draft->name。真走到这里说明并发突变或内部状态
+                // 异常 — 别静默吐空 body,显式 500 让前端能看到。
+                return json_err(500, "INVARIANT_BROKEN",
+                                "post-update entry not found in saved_models");
+            }
             crow::response r(200);
             r.add_header("Content-Type", "application/json");
-            // 找到刚改完的条目(name 可能与 url_name 不同)
-            for (const auto& e : deps.app_config->saved_models) {
-                if (e.name == draft->name) {
-                    r.body = profile_to_safe_json(e).dump();
-                    break;
-                }
-            }
+            r.body = profile_to_safe_json(*updated).dump();
             return with_cors(req, std::move(r));
         });
 
