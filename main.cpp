@@ -90,6 +90,7 @@
 #include "utils/token_tracker.hpp"
 #include "markdown/markdown_formatter.hpp"
 #include "session/session_manager.hpp"
+#include "session/session_registry.hpp"
 #include "session/session_resume_restore.hpp"
 #include "tui/diff_view.hpp"
 #include "tui/paste_handler.hpp"
@@ -1266,18 +1267,27 @@ static int run_interactive_app(const CliOptions& cli,
     // 启动时这里只看前两级;resume 的 meta 应用延到下面读到 meta 之后。
     auto cwd_override = load_cwd_model_override(working_dir);
     ModelProfile effective_entry = resolve_effective_model(config, cwd_override, std::nullopt);
-    std::shared_ptr<LlmProvider> provider = create_provider_from_entry(effective_entry);
-    std::mutex provider_mu;  // 保护 provider 替换操作(design D4)
-    auto provider_accessor = [&provider, &provider_mu]() -> std::shared_ptr<LlmProvider> {
-        std::lock_guard<std::mutex> lk(provider_mu);
-        return provider;
+    // ProviderSlot 把 shared_ptr<LlmProvider> 与保护它的 mutex 打包成一个
+    // 整体(design D4 / 任务 5)。CommandContext 拿 &provider_slot,/model 走
+    // swap_provider_if_needed 替换 .provider 字段。
+    SessionEntry::ProviderSlot provider_slot;
+    {
+        std::lock_guard<std::mutex> lk(provider_slot.mu);
+        provider_slot.provider = create_provider_from_entry(effective_entry);
+    }
+    auto provider_accessor = [&provider_slot]() -> std::shared_ptr<LlmProvider> {
+        std::lock_guard<std::mutex> lk(provider_slot.mu);
+        return provider_slot.provider;
     };
-    config.context_window = resolve_model_context_window(
-        config,
-        provider->name(),
-        provider->model(),
-        config.context_window
-    );
+    {
+        auto p = provider_accessor();
+        config.context_window = resolve_model_context_window(
+            config,
+            p->name(),
+            p->model(),
+            config.context_window
+        );
+    }
 
     // ---- Init web search runtime ----
     initialize_web_search_runtime(config);
@@ -1305,8 +1315,11 @@ static int run_interactive_app(const CliOptions& cli,
 
     // ---- TUI state ----
     TuiState state;
-    state.status_line = "[" + provider->name() + "] model: " +
-        (config.provider == "copilot" ? config.copilot.model : config.openai.model);
+    {
+        auto p = provider_accessor();
+        state.status_line = "[" + p->name() + "] model: " +
+            (config.provider == "copilot" ? config.copilot.model : config.openai.model);
+    }
 
     restore_input_history(state, config, working_dir);
 
@@ -1436,7 +1449,8 @@ static int run_interactive_app(const CliOptions& cli,
     std::thread auth_thread;
 
     if (config.provider == "copilot") {
-        auto* copilot = dynamic_cast<CopilotProvider*>(provider.get());
+        auto provider_snapshot = provider_accessor();
+        auto* copilot = dynamic_cast<CopilotProvider*>(provider_snapshot.get());
         if (copilot && !copilot->is_authenticated()) {
             {
                 std::lock_guard<std::mutex> lk(state.mu);
@@ -1622,7 +1636,7 @@ static int run_interactive_app(const CliOptions& cli,
     // Auto-compact tracking state for circuit breaker
     AutoCompactTrackingState compact_tracking;
 
-    callbacks.on_auto_compact = [&state, &clamp_chat_focus, &screen, &agent_loop, &provider,
+    callbacks.on_auto_compact = [&state, &clamp_chat_focus, &screen, &agent_loop, &provider_accessor,
                                   &compact_tracking, &config, &token_tracker]() -> bool {
         // Circuit breaker: stop after consecutive failures
         if (compact_tracking.consecutive_failures >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES) {
@@ -1673,7 +1687,7 @@ static int run_interactive_app(const CliOptions& cli,
         }
         screen.PostEvent(Event::Custom);
 
-        auto result = compact_context(*provider, agent_loop, state, 4, true);
+        auto result = compact_context(*provider_accessor(), agent_loop, state, 4, true);
 
         if (result.performed) {
             compact_tracking.consecutive_failures = 0;
@@ -1702,7 +1716,10 @@ static int run_interactive_app(const CliOptions& cli,
 
     // ---- Session manager ----
     SessionManager session_manager;
-    session_manager.start_session(working_dir, provider->name(), provider->model());
+    {
+        auto p = provider_accessor();
+        session_manager.start_session(working_dir, p->name(), p->model());
+    }
     agent_loop.set_session_manager(&session_manager);
 
     // Register session finalization for clean shutdown
@@ -1740,8 +1757,11 @@ static int run_interactive_app(const CliOptions& cli,
             if (!resumed_meta.provider.empty() && !resumed_meta.model.empty()) {
                 ModelProfile resumed_entry = resolve_effective_model(
                     config, cwd_override, std::optional<SessionMeta>{resumed_meta});
-                swap_provider_if_needed(provider, provider_mu, resumed_entry, config);
-                session_manager.set_active_provider(provider->name(), provider->model());
+                swap_provider_if_needed(provider_slot.provider, provider_slot.mu, resumed_entry, config);
+                {
+                    auto p = provider_accessor();
+                    session_manager.set_active_provider(p->name(), p->model());
+                }
                 if (resumed_entry.name.rfind("(session:", 0) == 0) {
                     state.conversation.push_back({"system",
                         "⚠ Resumed with ad-hoc model entry (session recorded " +
@@ -1945,7 +1965,7 @@ static int run_interactive_app(const CliOptions& cli,
     };
 
     // Wrap with CatchEvent to handle all keyboard input
-    auto input_with_esc = CatchEvent(input_renderer, [&state, &screen, &clamp_chat_focus, &auth_done, &cmd_registry, &agent_loop, &provider, &provider_mu, &config, &token_tracker, &permissions, &session_manager, &scroll_chat_by_lines, &chat_box, &scrollbar_box, &message_line_counts, &mcp_manager, &tools, &skill_registry, &memory_registry, &working_dir, &insert_pasted_text_at_cursor](Event event) {
+    auto input_with_esc = CatchEvent(input_renderer, [&state, &screen, &clamp_chat_focus, &auth_done, &cmd_registry, &agent_loop, &provider_slot, &provider_accessor, &config, &token_tracker, &permissions, &session_manager, &scroll_chat_by_lines, &chat_box, &scrollbar_box, &message_line_counts, &mcp_manager, &tools, &skill_registry, &memory_registry, &working_dir, &insert_pasted_text_at_cursor](Event event) {
         // drag-autoscroll: 事件线程入口处消费 anim_thread 攒下的 selection 偏移
         // 补偿. 所有对 FTXUI selection_data_ 的写都发生在这条路径上, 跟
         // HandleSelection 串行 — 避免跨线程数据竞争. 不 return, 让事件继续正常处理.
@@ -2604,7 +2624,7 @@ static int run_interactive_app(const CliOptions& cli,
             // Slash command interception（用 expanded_prompt 派发：spec 4.3）。
             if (!expanded_prompt.empty() && expanded_prompt[0] == '/') {
                 CommandContext cmd_ctx{
-                    state, agent_loop, *provider, &provider, &provider_mu,
+                    state, agent_loop, *provider_accessor(), &provider_slot,
                     config, token_tracker,
                     permissions,
                     [&screen]() { screen.Exit(); },

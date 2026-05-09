@@ -6,6 +6,7 @@
 #include "../config/config.hpp"
 #include "../utils/token_tracker.hpp"
 #include "../session/session_manager.hpp"
+#include "../session/session_registry.hpp"
 
 #include <memory>
 #include <mutex>
@@ -27,13 +28,12 @@ struct CommandContext {
     AgentLoop& agent_loop;
     // Snapshot of the current provider for read-only operations within the
     // command. The shared_ptr keeps the instance alive across the command body
-    // even if main.cpp swaps `provider` mid-call. For commands that need to
-    // *swap* the provider (e.g. /model), use `provider_handle` + `provider_mu`.
+    // even if main.cpp swaps the underlying provider mid-call. For commands
+    // that need to *swap* the provider (e.g. /model), use `provider_slot`.
     LlmProvider& provider;
-    // Live handle into main.cpp's `std::shared_ptr<LlmProvider> provider`.
-    // Required by /model so it can call swap_provider_if_needed under lock.
-    std::shared_ptr<LlmProvider>* provider_handle = nullptr;
-    std::mutex* provider_mu = nullptr;
+    // ProviderSlot 持有一个 shared_ptr + mutex。/model 等切换命令用它做 swap。
+    // 命令体内的只读访问仍走 provider 引用(dispatch 时已 lock+deref 过)。
+    SessionEntry::ProviderSlot* provider_slot = nullptr;
     AppConfig& config;
     TokenTracker& token_tracker;
     PermissionManager& permissions;

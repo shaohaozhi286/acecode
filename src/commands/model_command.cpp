@@ -154,10 +154,11 @@ void cmd_model(CommandContext& ctx, const std::string& args) {
         return;
     }
 
-    // 切换前保护:provider_handle / provider_mu 缺失则退化为旧行为。理论
-    // 上启动期 main.cpp 总会传入这俩,但 init_command 的测试桩不会。
-    if (ctx.provider_handle && ctx.provider_mu) {
-        swap_provider_if_needed(*ctx.provider_handle, *ctx.provider_mu, *entry, ctx.config);
+    // 切换前保护:provider_slot 缺失则退化为旧行为。理论上启动期 main.cpp
+    // 总会传入,但 init_command 等测试桩不会。
+    if (ctx.provider_slot) {
+        swap_provider_if_needed(ctx.provider_slot->provider,
+                                ctx.provider_slot->mu, *entry, ctx.config);
     } else {
         ctx.provider.set_model(entry->model);
         ctx.config.context_window = resolve_model_context_window(

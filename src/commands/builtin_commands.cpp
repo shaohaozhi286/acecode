@@ -567,14 +567,16 @@ static void do_resume_session(CommandContext& ctx, const std::string& session_id
 
     // 与 --resume CLI 路径(main.cpp)对齐:resume 前先把 meta 的 provider+model
     // 应用到运行时,可能触发 swap_provider_if_needed。design D6 / 任务 6.3。
-    if (target && ctx.provider_handle && ctx.provider_mu &&
+    if (target && ctx.provider_slot &&
         !target->provider.empty() && !target->model.empty()) {
         auto cwd_override = load_cwd_model_override(ctx.cwd);
         ModelProfile resumed_entry = resolve_effective_model(
             ctx.config, cwd_override, std::optional<SessionMeta>{*target});
-        swap_provider_if_needed(*ctx.provider_handle, *ctx.provider_mu, resumed_entry, ctx.config);
+        swap_provider_if_needed(ctx.provider_slot->provider,
+                                ctx.provider_slot->mu, resumed_entry, ctx.config);
         ctx.session_manager->set_active_provider(
-            ctx.provider_handle->get()->name(), ctx.provider_handle->get()->model());
+            ctx.provider_slot->provider->name(),
+            ctx.provider_slot->provider->model());
         if (resumed_entry.name.rfind("(session:", 0) == 0) {
             ctx.state.conversation.push_back({"system",
                 "Warning: Resumed with ad-hoc model entry (session recorded " +
@@ -660,27 +662,28 @@ static void cmd_resume(CommandContext& ctx, const std::string& args) {
     auto captured_sessions = sessions;
     auto* sm = ctx.session_manager;
     auto* al = &ctx.agent_loop;
-    auto* provider_handle = ctx.provider_handle;
-    auto* provider_mu = ctx.provider_mu;
+    auto* provider_slot = ctx.provider_slot;
     auto* config = &ctx.config;
     auto* tools = ctx.tools;
     std::string cwd = ctx.cwd;
     ctx.state.resume_callback = [&state = ctx.state, sm, al,
-                                 provider_handle, provider_mu, config, tools, cwd,
+                                 provider_slot, config, tools, cwd,
                                  captured_sessions](const std::string& sid) {
         // resume 前应用 provider+model(任务 6.3)。和 do_resume_session 同源。
         const SessionMeta* target = nullptr;
         for (const auto& s : captured_sessions) {
             if (s.id == sid) { target = &s; break; }
         }
-        if (target && provider_handle && provider_mu && config &&
+        if (target && provider_slot && config &&
             !target->provider.empty() && !target->model.empty()) {
             auto cwd_override = load_cwd_model_override(cwd);
             ModelProfile resumed_entry = resolve_effective_model(
                 *config, cwd_override, std::optional<SessionMeta>{*target});
-            swap_provider_if_needed(*provider_handle, *provider_mu, resumed_entry, *config);
+            swap_provider_if_needed(provider_slot->provider,
+                                    provider_slot->mu, resumed_entry, *config);
             if (sm) sm->set_active_provider(
-                provider_handle->get()->name(), provider_handle->get()->model());
+                provider_slot->provider->name(),
+                provider_slot->provider->model());
             if (resumed_entry.name.rfind("(session:", 0) == 0) {
                 state.conversation.push_back({"system",
                     "Warning: Resumed with ad-hoc model entry (session recorded " +
