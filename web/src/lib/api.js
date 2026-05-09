@@ -93,6 +93,10 @@ export function createApi(base = null) {
       return request('GET', `/api/sessions/${encodeURIComponent(sid)}/model${qs}`, undefined, base);
     },
     switchModel:      (sid, name)    => request('POST',   `/api/sessions/${encodeURIComponent(sid)}/model`, {name}, base),
+    addModel:         (draft)        => request('POST',   '/api/models', draft, base),
+    updateModel:      (name, draft)  => request('PUT',    `/api/models/${encodeURIComponent(name)}`, draft, base),
+    removeModel:      (name)         => request('DELETE', `/api/models/${encodeURIComponent(name)}`, undefined, base),
+    setDefaultModel:  (name)         => request('POST',   '/api/config/default-model', {name}, base),
     getHistory:       (cwd, max=100) => request('GET',    `/api/history?cwd=${encodeURIComponent(cwd)}&max=${max}`, undefined, base),
     appendHistory:    (text)         => request('POST',   '/api/history', {text}, base),
     forkSession:      (sid, atMessageId, title) =>
