@@ -58,8 +58,10 @@ void report_unknown_name(CommandContext& ctx, const std::string& name) {
 // 当前 effective entry —— 用 name 与 saved_models 匹配;命中 saved_models 则
 // 复用,否则合成 legacy entry。仅用于 picker 高亮当前选中行。
 std::string current_effective_name(CommandContext& ctx) {
-    std::string pname = ctx.provider.name();
-    std::string pmodel = ctx.provider.model();
+    auto provider_snap = ctx.provider_slot ? ctx.provider_slot->provider : nullptr;
+    if (!provider_snap) return "(legacy)";
+    std::string pname = provider_snap->name();
+    std::string pmodel = provider_snap->model();
     for (const auto& e : ctx.config.saved_models) {
         if (e.provider == pname && e.model == pmodel) return e.name;
     }
@@ -154,15 +156,16 @@ void cmd_model(CommandContext& ctx, const std::string& args) {
         return;
     }
 
-    // 切换前保护:provider_slot 缺失则退化为旧行为。理论上启动期 main.cpp
-    // 总会传入,但 init_command 等测试桩不会。
+    // 切换前保护:provider_slot 缺失则忽略(测试桩没接 slot 时只更新配置)。
+    // 启动期 main.cpp 总会传入。
     if (ctx.provider_slot) {
         swap_provider_if_needed(ctx.provider_slot->provider,
                                 ctx.provider_slot->mu, *entry, ctx.config);
     } else {
-        ctx.provider.set_model(entry->model);
+        // 无 slot —— 至少把 context_window 按目标 entry 重算,避免 picker 显示
+        // 与实际不一致。set_model / 真切换交给上层注入 slot 后再做。
         ctx.config.context_window = resolve_model_context_window(
-            ctx.config, ctx.provider.name(), ctx.provider.model(),
+            ctx.config, entry->provider, entry->model,
             ctx.config.context_window);
     }
 

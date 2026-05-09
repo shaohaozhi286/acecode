@@ -26,13 +26,9 @@ class CommandRegistry;
 struct CommandContext {
     TuiState& state;
     AgentLoop& agent_loop;
-    // Snapshot of the current provider for read-only operations within the
-    // command. The shared_ptr keeps the instance alive across the command body
-    // even if main.cpp swaps the underlying provider mid-call. For commands
-    // that need to *swap* the provider (e.g. /model), use `provider_slot`.
-    LlmProvider& provider;
-    // ProviderSlot 持有一个 shared_ptr + mutex。/model 等切换命令用它做 swap。
-    // 命令体内的只读访问仍走 provider 引用(dispatch 时已 lock+deref 过)。
+    // ProviderSlot 持有当前 LlmProvider + mutex。读 provider 字段时,从 slot 拿
+    // shared_ptr 副本(`auto p = ctx.provider_slot->provider;`),保活引用不被
+    // 并发 swap 拽走;写(切模型)用 apply_model_to_session 或 swap_provider_if_needed。
     SessionEntry::ProviderSlot* provider_slot = nullptr;
     AppConfig& config;
     TokenTracker& token_tracker;

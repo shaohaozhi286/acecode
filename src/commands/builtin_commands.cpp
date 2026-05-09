@@ -79,11 +79,13 @@ static void cmd_clear(CommandContext& ctx, const std::string& /*args*/) {
 }
 
 static void cmd_config(CommandContext& ctx, const std::string& /*args*/) {
+    // 从 slot 拿 shared_ptr 副本,保活引用不被并发 swap 拽走。
+    auto provider_snap = ctx.provider_slot ? ctx.provider_slot->provider : nullptr;
     std::lock_guard<std::mutex> lk(ctx.state.mu);
     std::ostringstream oss;
     oss << "Current configuration:\n"
         << "  provider:       " << ctx.config.provider << "\n"
-        << "  model:          " << ctx.provider.model() << "\n"
+        << "  model:          " << (provider_snap ? provider_snap->model() : std::string("(unavailable)")) << "\n"
         << "  context_window: " << ctx.config.context_window << "\n"
         << "  permission:     " << PermissionManager::mode_name(ctx.permissions.mode());
     if (ctx.config.provider == "openai") {
@@ -126,14 +128,25 @@ static void cmd_compact(CommandContext& ctx, const std::string& /*args*/) {
         ctx.state.compact_thread.join();
     }
 
-    // Capture references for the background thread
-    auto& provider   = ctx.provider;
+    // 把 provider 通过 shared_ptr by-value 捕获进线程,生命周期不再依赖 ctx
+    // 的存活期 —— /model 切走旧 provider 时,这里仍持一份 ref-count 保活直到
+    // compact 线程结束。slot 缺失(测试桩)时直接报错并退出。
+    auto provider_snap = ctx.provider_slot ? ctx.provider_slot->provider : nullptr;
+    if (!provider_snap) {
+        std::lock_guard<std::mutex> lk(ctx.state.mu);
+        ctx.state.is_compacting = false;
+        ctx.state.conversation.push_back({"system",
+            "Compaction unavailable: no provider attached.", false});
+        ctx.state.chat_follow_tail = true;
+        return;
+    }
+
     auto& agent_loop = ctx.agent_loop;
     auto& state      = ctx.state;
     auto post_event  = ctx.post_event;
 
-    ctx.state.compact_thread = std::thread([&provider, &agent_loop, &state, post_event]() {
-        auto result = compact_context(provider, agent_loop, state, 4, false,
+    ctx.state.compact_thread = std::thread([provider_snap, &agent_loop, &state, post_event]() {
+        auto result = compact_context(*provider_snap, agent_loop, state, 4, false,
                                       &state.compact_abort_requested);
 
         {

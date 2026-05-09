@@ -2624,7 +2624,7 @@ static int run_interactive_app(const CliOptions& cli,
             // Slash command interception（用 expanded_prompt 派发：spec 4.3）。
             if (!expanded_prompt.empty() && expanded_prompt[0] == '/') {
                 CommandContext cmd_ctx{
-                    state, agent_loop, *provider_accessor(), &provider_slot,
+                    state, agent_loop, &provider_slot,
                     config, token_tracker,
                     permissions,
                     [&screen]() { screen.Exit(); },
