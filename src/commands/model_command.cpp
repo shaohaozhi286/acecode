@@ -2,6 +2,7 @@
 
 #include "../config/config.hpp"
 #include "../config/saved_models.hpp"
+#include "../config/saved_models_editor.hpp"
 #include "../provider/apply_model_to_session.hpp"
 #include "../provider/cwd_model_override.hpp"
 #include "../provider/model_context_resolver.hpp"
@@ -13,6 +14,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <vector>
 
 namespace acecode {
 
@@ -205,26 +207,175 @@ void render_model_picker(CommandContext& ctx) {
     if (ctx.post_event) ctx.post_event();
 }
 
-void cmd_model(CommandContext& ctx, const std::string& args) {
-    std::string flag, name;
-    if (!parse_model_args(args, flag, name)) {
+// 把 SavedModelDraft 从 kvs 抽出来。default_name 只在 edit 路径用 ——
+// 用户没显式给 name= 时回落到 sub 后面的 bare name。
+SavedModelDraft draft_from_kvs(const std::map<std::string, std::string>& kvs,
+                                const std::string& default_name = "") {
+    SavedModelDraft d;
+    auto get = [&](const char* k, std::string& out) {
+        auto it = kvs.find(k);
+        if (it != kvs.end()) out = it->second;
+    };
+    get("name", d.name);
+    if (d.name.empty()) d.name = default_name;
+    get("provider", d.provider);
+    get("model", d.model);
+    get("base_url", d.base_url);
+    get("api_key", d.api_key);
+    auto it_pid = kvs.find("models_dev_provider_id");
+    if (it_pid != kvs.end()) d.models_dev_provider_id = it_pid->second;
+    return d;
+}
+
+// 把编辑结果写到 conversation 行。OK 用 ok_msg,非 OK 用 to_string(rc)。
+void announce_editor_result(CommandContext& ctx, SavedModelEditError rc,
+                              const std::string& ok_msg) {
+    std::lock_guard<std::mutex> lk(ctx.state.mu);
+    if (rc == SavedModelEditError::OK) {
+        ctx.state.conversation.push_back({"system", ok_msg, false});
+    } else {
+        ctx.state.conversation.push_back({"system",
+            std::string("/model failed: ") + to_string(rc), false});
+    }
+    ctx.state.chat_follow_tail = true;
+}
+
+void cmd_model_add(CommandContext& ctx, const ParsedModelSub& p) {
+    auto d = draft_from_kvs(p.kvs);
+    auto rc = add_saved_model(ctx.config, d);
+    if (rc == SavedModelEditError::OK) {
+        try {
+            save_config(ctx.config);
+        } catch (const std::exception& e) {
+            // 回滚内存:add 把 entry push_back 到末尾,所以 pop 即可。
+            if (!ctx.config.saved_models.empty()) ctx.config.saved_models.pop_back();
+            std::lock_guard<std::mutex> lk(ctx.state.mu);
+            ctx.state.conversation.push_back({"system",
+                std::string("/model add: write failed: ") + e.what(), false});
+            ctx.state.chat_follow_tail = true;
+            return;
+        }
+    }
+    announce_editor_result(ctx, rc, "Added: " + d.name);
+}
+
+void cmd_model_edit(CommandContext& ctx, const ParsedModelSub& p) {
+    if (p.name.empty()) {
+        announce_editor_result(ctx, SavedModelEditError::INVALID_NAME, "");
+        return;
+    }
+    auto d = draft_from_kvs(p.kvs, p.name);
+    // patch 语义:缺省字段 fallback 到现有条目,避免误清空 base_url/api_key。
+    for (const auto& e : ctx.config.saved_models) {
+        if (e.name == p.name) {
+            if (d.provider.empty()) d.provider = e.provider;
+            if (d.model.empty()) d.model = e.model;
+            if (d.base_url.empty()) d.base_url = e.base_url;
+            if (d.api_key.empty()) d.api_key = e.api_key;
+            if (!d.models_dev_provider_id.has_value())
+                d.models_dev_provider_id = e.models_dev_provider_id;
+            break;
+        }
+    }
+    auto snapshot = ctx.config.saved_models;
+    auto rc = update_saved_model(ctx.config, p.name, d);
+    if (rc == SavedModelEditError::OK) {
+        try {
+            save_config(ctx.config);
+        } catch (const std::exception& e) {
+            ctx.config.saved_models = std::move(snapshot);
+            std::lock_guard<std::mutex> lk(ctx.state.mu);
+            ctx.state.conversation.push_back({"system",
+                std::string("/model edit: write failed: ") + e.what(), false});
+            ctx.state.chat_follow_tail = true;
+            return;
+        }
+    }
+    announce_editor_result(ctx, rc, "Updated: " + d.name);
+}
+
+void cmd_model_rm(CommandContext& ctx, const ParsedModelSub& p) {
+    if (p.name.empty()) {
+        announce_editor_result(ctx, SavedModelEditError::INVALID_NAME, "");
+        return;
+    }
+    auto snapshot = ctx.config.saved_models;
+    auto rc = remove_saved_model(ctx.config, p.name);
+    if (rc == SavedModelEditError::OK) {
+        try {
+            save_config(ctx.config);
+        } catch (const std::exception& e) {
+            ctx.config.saved_models = std::move(snapshot);
+            std::lock_guard<std::mutex> lk(ctx.state.mu);
+            ctx.state.conversation.push_back({"system",
+                std::string("/model rm: write failed: ") + e.what(), false});
+            ctx.state.chat_follow_tail = true;
+            return;
+        }
+    }
+    announce_editor_result(ctx, rc, "Removed: " + p.name);
+}
+
+void cmd_model_set_default(CommandContext& ctx, const ParsedModelSub& p) {
+    if (p.name.empty()) {
+        announce_editor_result(ctx, SavedModelEditError::INVALID_NAME, "");
+        return;
+    }
+    // "(legacy)" 是合法的 default(承认 legacy 配置链优先)。
+    bool found = (p.name == "(legacy)");
+    if (!found) {
+        for (const auto& e : ctx.config.saved_models) {
+            if (e.name == p.name) { found = true; break; }
+        }
+    }
+    if (!found) {
+        announce_editor_result(ctx, SavedModelEditError::NOT_FOUND, "");
+        return;
+    }
+    std::string before = ctx.config.default_model_name;
+    ctx.config.default_model_name = p.name;
+    try {
+        save_config(ctx.config);
+    } catch (const std::exception& e) {
+        ctx.config.default_model_name = before;
         std::lock_guard<std::mutex> lk(ctx.state.mu);
         ctx.state.conversation.push_back({"system",
-            "Usage: /model | /model <name> | /model --cwd <name> | /model --default <name>",
+            std::string("/model set-default: write failed: ") + e.what(), false});
+        ctx.state.chat_follow_tail = true;
+        return;
+    }
+    announce_editor_result(ctx, SavedModelEditError::OK, "Default: " + p.name);
+}
+
+void cmd_model(CommandContext& ctx, const std::string& args) {
+    ParsedModelSub p;
+    if (!parse_model_subcommand(args, p)) {
+        std::lock_guard<std::mutex> lk(ctx.state.mu);
+        ctx.state.conversation.push_back({"system",
+            "Usage: /model | /model <name> | /model --cwd <name> | /model --default <name>\n"
+            "       /model add name=X provider=openai model=Y base_url=Z api_key=K\n"
+            "       /model edit <name> [field=value ...]\n"
+            "       /model rm <name>\n"
+            "       /model set-default <name>",
             false});
         ctx.state.chat_follow_tail = true;
         return;
     }
 
+    if (p.sub == "add")          { cmd_model_add(ctx, p); return; }
+    if (p.sub == "edit")         { cmd_model_edit(ctx, p); return; }
+    if (p.sub == "rm")           { cmd_model_rm(ctx, p); return; }
+    if (p.sub == "set-default")  { cmd_model_set_default(ctx, p); return; }
+
     // 无参 → 列表(picker 占位)
-    if (flag.empty() && name.empty()) {
+    if (p.flag.empty() && p.name.empty()) {
         render_model_picker(ctx);
         return;
     }
 
-    auto entry = lookup_entry_by_name(ctx.config, name);
+    auto entry = lookup_entry_by_name(ctx.config, p.name);
     if (!entry.has_value()) {
-        report_unknown_name(ctx, name);
+        report_unknown_name(ctx, p.name);
         return;
     }
 
@@ -261,11 +412,11 @@ void cmd_model(CommandContext& ctx, const std::string& args) {
     }
 
     std::string scope_note;
-    if (flag == "--cwd") {
-        save_cwd_model_override(ctx.cwd, name);
+    if (p.flag == "--cwd") {
+        save_cwd_model_override(ctx.cwd, p.name);
         scope_note = "[persisted to cwd]";
-    } else if (flag == "--default") {
-        ctx.config.default_model_name = name;
+    } else if (p.flag == "--default") {
+        ctx.config.default_model_name = p.name;
         save_config(ctx.config);
         scope_note = "[persisted as default]";
     }
@@ -273,6 +424,57 @@ void cmd_model(CommandContext& ctx, const std::string& args) {
 }
 
 } // namespace
+
+// parse_model_subcommand 暴露给单测和 cmd_model。raw 是 /model 后面的
+// 字符串。命中 add/edit/rm/set-default 时 out.sub 非空,否则回退到旧的
+// flag/name 解析(无 sub 路径)。返回 false 表示参数格式无效。
+bool parse_model_subcommand(const std::string& raw, ParsedModelSub& out) {
+    out = {};
+    std::string s = trim(raw);
+    if (s.empty()) return true;  // 无参 → picker
+
+    static const std::vector<std::string> SUBS = {
+        "add", "edit", "rm", "set-default"};
+    for (const auto& k : SUBS) {
+        // 必须是完整 token —— "add" 或 "add <rest>"。"adder ..." 不命中。
+        if (s == k || (s.size() > k.size() && s.compare(0, k.size(), k) == 0
+                       && std::isspace(static_cast<unsigned char>(s[k.size()])))) {
+            out.sub = k;
+            std::string rest = s.size() > k.size()
+                ? trim(s.substr(k.size())) : std::string{};
+
+            if (k == "add") {
+                // add 全 kv,无 bare name(name 通过 name=... 提供)。
+                std::istringstream iss(rest);
+                std::string tok;
+                while (iss >> tok) {
+                    auto eq = tok.find('=');
+                    if (eq == std::string::npos) return false;
+                    out.kvs[tok.substr(0, eq)] = tok.substr(eq + 1);
+                }
+            } else {
+                // edit/rm/set-default 第一个 token 是 name,后续可选 kv。
+                std::istringstream iss(rest);
+                std::string tok;
+                if (!(iss >> tok)) return false;
+                out.name = tok;
+                while (iss >> tok) {
+                    auto eq = tok.find('=');
+                    if (eq == std::string::npos) return false;
+                    out.kvs[tok.substr(0, eq)] = tok.substr(eq + 1);
+                }
+            }
+            return true;
+        }
+    }
+
+    // 不是已知 sub → fallback 到旧的 flag/name 解析。
+    std::string flag, name;
+    if (!parse_model_args(raw, flag, name)) return false;
+    out.flag = flag;
+    out.name = name;
+    return true;
+}
 
 void register_model_command(CommandRegistry& registry) {
     registry.register_command({"model", "Show or switch current model", cmd_model});
