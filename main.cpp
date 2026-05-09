@@ -45,7 +45,7 @@
 #include "provider/models_dev_registry.hpp"
 #include "provider/model_resolver.hpp"
 #include "provider/cwd_model_override.hpp"
-#include "provider/provider_swap.hpp"
+#include "provider/apply_model_to_session.hpp"
 #include "tool/tool_executor.hpp"
 #include "tool/bash_tool.hpp"
 #include "tool/file_read_tool.hpp"
@@ -1269,7 +1269,7 @@ static int run_interactive_app(const CliOptions& cli,
     ModelProfile effective_entry = resolve_effective_model(config, cwd_override, std::nullopt);
     // ProviderSlot 把 shared_ptr<LlmProvider> 与保护它的 mutex 打包成一个
     // 整体(design D4 / 任务 5)。CommandContext 拿 &provider_slot,/model 走
-    // swap_provider_if_needed 替换 .provider 字段。
+    // apply_model_to_session 替换 .provider 字段。
     SessionEntry::ProviderSlot provider_slot;
     {
         std::lock_guard<std::mutex> lk(provider_slot.mu);
@@ -1757,10 +1757,17 @@ static int run_interactive_app(const CliOptions& cli,
             if (!resumed_meta.provider.empty() && !resumed_meta.model.empty()) {
                 ModelProfile resumed_entry = resolve_effective_model(
                     config, cwd_override, std::optional<SessionMeta>{resumed_meta});
-                swap_provider_if_needed(provider_slot.provider, provider_slot.mu, resumed_entry, config);
-                {
-                    auto p = provider_accessor();
-                    session_manager.set_active_provider(p->name(), p->model());
+                ApplyModelDeps deps;
+                deps.provider_slot = &provider_slot;
+                deps.sm = &session_manager;
+                deps.loop = &agent_loop;
+                deps.cfg = &config;
+                try {
+                    auto result = apply_model_to_session(resumed_entry, deps);
+                    config.context_window = result.state.context_window;
+                } catch (const std::exception& e) {
+                    state.conversation.push_back({"system",
+                        std::string("⚠ Resume model switch failed: ") + e.what(), false});
                 }
                 if (resumed_entry.name.rfind("(session:", 0) == 0) {
                     state.conversation.push_back({"system",

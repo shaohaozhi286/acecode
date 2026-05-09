@@ -2,10 +2,10 @@
 
 #include "../config/config.hpp"
 #include "../config/saved_models.hpp"
+#include "../provider/apply_model_to_session.hpp"
 #include "../provider/cwd_model_override.hpp"
 #include "../provider/model_context_resolver.hpp"
 #include "../provider/model_resolver.hpp"
-#include "../provider/provider_swap.hpp"
 
 #include <cctype>
 #include <mutex>
@@ -159,8 +159,27 @@ void cmd_model(CommandContext& ctx, const std::string& args) {
     // 切换前保护:provider_slot 缺失则忽略(测试桩没接 slot 时只更新配置)。
     // 启动期 main.cpp 总会传入。
     if (ctx.provider_slot) {
-        swap_provider_if_needed(ctx.provider_slot->provider,
-                                ctx.provider_slot->mu, *entry, ctx.config);
+        ApplyModelDeps deps;
+        deps.provider_slot = ctx.provider_slot;
+        deps.sm = ctx.session_manager;
+        deps.loop = &ctx.agent_loop;
+        deps.cfg = &ctx.config;
+        try {
+            auto result = apply_model_to_session(*entry, deps);
+            ctx.config.context_window = result.state.context_window;
+            if (!result.warning.empty()) {
+                std::lock_guard<std::mutex> lk(ctx.state.mu);
+                ctx.state.conversation.push_back({"system",
+                    "Warning: " + result.warning, false});
+                ctx.state.chat_follow_tail = true;
+            }
+        } catch (const std::exception& e) {
+            std::lock_guard<std::mutex> lk(ctx.state.mu);
+            ctx.state.conversation.push_back({"system",
+                std::string("Switch failed: ") + e.what(), false});
+            ctx.state.chat_follow_tail = true;
+            return;
+        }
     } else {
         // 无 slot —— 至少把 context_window 按目标 entry 重算,避免 picker 显示
         // 与实际不一致。set_model / 真切换交给上层注入 slot 后再做。

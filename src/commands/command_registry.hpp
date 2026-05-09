@@ -28,7 +28,7 @@ struct CommandContext {
     AgentLoop& agent_loop;
     // ProviderSlot 持有当前 LlmProvider + mutex。读 provider 字段时,从 slot 拿
     // shared_ptr 副本(`auto p = ctx.provider_slot->provider;`),保活引用不被
-    // 并发 swap 拽走;写(切模型)用 apply_model_to_session 或 swap_provider_if_needed。
+    // 并发 swap 拽走;写(切模型)用 apply_model_to_session。
     SessionEntry::ProviderSlot* provider_slot = nullptr;
     AppConfig& config;
     TokenTracker& token_tracker;

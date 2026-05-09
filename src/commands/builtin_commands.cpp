@@ -9,9 +9,9 @@
 #include "websearch_command.hpp"
 #include "../config/config.hpp"
 #include "../config/saved_models.hpp"
+#include "../provider/apply_model_to_session.hpp"
 #include "../provider/cwd_model_override.hpp"
 #include "../provider/model_resolver.hpp"
-#include "../provider/provider_swap.hpp"
 #include "../tool/mcp_manager.hpp"
 #include "../tool/tool_executor.hpp"
 #include "../skills/skill_registry.hpp"
@@ -19,6 +19,7 @@
 #include "../session/session_manager.hpp"
 #include "../session/session_resume_restore.hpp"
 #include "../session/session_rewind.hpp"
+#include "../utils/logger.hpp"
 #include "../utils/terminal_title.hpp"
 #include <algorithm>
 #include <mutex>
@@ -579,17 +580,23 @@ static void do_resume_session(CommandContext& ctx, const std::string& session_id
     }
 
     // 与 --resume CLI 路径(main.cpp)对齐:resume 前先把 meta 的 provider+model
-    // 应用到运行时,可能触发 swap_provider_if_needed。design D6 / 任务 6.3。
+    // 应用到运行时,经 apply_model_to_session 收口(daemon/TUI 共用)。design D6 / 任务 6.3。
     if (target && ctx.provider_slot &&
         !target->provider.empty() && !target->model.empty()) {
         auto cwd_override = load_cwd_model_override(ctx.cwd);
         ModelProfile resumed_entry = resolve_effective_model(
             ctx.config, cwd_override, std::optional<SessionMeta>{*target});
-        swap_provider_if_needed(ctx.provider_slot->provider,
-                                ctx.provider_slot->mu, resumed_entry, ctx.config);
-        ctx.session_manager->set_active_provider(
-            ctx.provider_slot->provider->name(),
-            ctx.provider_slot->provider->model());
+        ApplyModelDeps deps;
+        deps.provider_slot = ctx.provider_slot;
+        deps.sm = ctx.session_manager;
+        deps.loop = &ctx.agent_loop;
+        deps.cfg = &ctx.config;
+        try {
+            auto result = apply_model_to_session(resumed_entry, deps);
+            ctx.config.context_window = result.state.context_window;
+        } catch (const std::exception& e) {
+            LOG_WARN(std::string("[/resume] model switch failed: ") + e.what());
+        }
         if (resumed_entry.name.rfind("(session:", 0) == 0) {
             ctx.state.conversation.push_back({"system",
                 "Warning: Resumed with ad-hoc model entry (session recorded " +
@@ -692,11 +699,17 @@ static void cmd_resume(CommandContext& ctx, const std::string& args) {
             auto cwd_override = load_cwd_model_override(cwd);
             ModelProfile resumed_entry = resolve_effective_model(
                 *config, cwd_override, std::optional<SessionMeta>{*target});
-            swap_provider_if_needed(provider_slot->provider,
-                                    provider_slot->mu, resumed_entry, *config);
-            if (sm) sm->set_active_provider(
-                provider_slot->provider->name(),
-                provider_slot->provider->model());
+            ApplyModelDeps deps;
+            deps.provider_slot = provider_slot;
+            deps.sm = sm;
+            deps.loop = al;
+            deps.cfg = config;
+            try {
+                auto result = apply_model_to_session(resumed_entry, deps);
+                config->context_window = result.state.context_window;
+            } catch (const std::exception& e) {
+                LOG_WARN(std::string("[/resume] model switch failed: ") + e.what());
+            }
             if (resumed_entry.name.rfind("(session:", 0) == 0) {
                 state.conversation.push_back({"system",
                     "Warning: Resumed with ad-hoc model entry (session recorded " +
