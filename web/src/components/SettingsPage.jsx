@@ -7,6 +7,7 @@ import { useTheme } from '../theme.jsx';
 import { Toggle } from './Modal.jsx';
 import { clsx } from '../lib/format.js';
 import { VsIcon } from './Icon.jsx';
+import { ModelManager } from './ModelManager.jsx';
 
 const NAV = ['常规', '外观', '配置', '个性化', 'MCP 服务器', '模型', '环境', '项目指令', '已归档对话', '使用情况'];
 
@@ -55,7 +56,13 @@ export function SettingsPage({ onClose, health }) {
         <div className="flex-1 overflow-y-auto px-12 py-6">
           {activeNav === 0 && <SectionGeneral health={health} />}
           {activeNav === 1 && <SectionAppearance theme={theme} setTheme={setTheme} />}
-          {activeNav !== 0 && activeNav !== 1 && (
+          {activeNav === 5 && (
+            <>
+              <h2 className="text-xl font-bold mb-5">模型</h2>
+              <ModelManager />
+            </>
+          )}
+          {activeNav !== 0 && activeNav !== 1 && activeNav !== 5 && (
             <div className="text-fg-mute text-sm">{NAV[activeNav]} — 待补充</div>
           )}
         </div>
