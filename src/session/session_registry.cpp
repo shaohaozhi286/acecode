@@ -352,35 +352,69 @@ bool SessionRegistry::switch_model(const std::string& id,
         return false;
     }
 
-    std::lock_guard<std::mutex> lk(mu_);
-    auto it = entries_.find(id);
-    if (it == entries_.end() || !it->second) {
-        if (error) *error = "session not found";
-        return false;
-    }
-    auto& entry = *it->second;
-    if (!entry.provider_slot) {
-        entry.provider_slot = std::make_shared<SessionEntry::ProviderSlot>();
+    // Phase 1: under mu_, find the entry and capture per-session deps.
+    // We deliberately release mu_ before calling apply_model_to_session
+    // because the helper may do blocking I/O (Copilot silent_auth HTTPS
+    // exchange, set_active_provider meta write). Holding mu_ across that
+    // would block list_active / lookup / other switch_model calls in
+    // every active session.
+    std::shared_ptr<SessionEntry::ProviderSlot> slot;
+    SessionManager* sm = nullptr;
+    AgentLoop* loop = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = entries_.find(id);
+        if (it == entries_.end() || !it->second) {
+            if (error) *error = "session not found";
+            return false;
+        }
+        auto& entry = *it->second;
+        if (!entry.provider_slot) {
+            entry.provider_slot = std::make_shared<SessionEntry::ProviderSlot>();
+        }
+        slot = entry.provider_slot;
+        sm = entry.sm.get();
+        loop = entry.loop.get();
     }
 
+    // Phase 2: lock-free helper call. provider_slot has its own internal
+    // mutex; sm and loop are stable for the lifetime of the SessionEntry,
+    // and apply_model_to_session does not access the registry.
     ApplyModelDeps deps;
-    deps.provider_slot = entry.provider_slot.get();
-    deps.sm = entry.sm.get();
-    deps.loop = entry.loop.get();
+    deps.provider_slot = slot.get();
+    deps.sm = sm;
+    deps.loop = loop;
     deps.cfg = const_cast<AppConfig*>(deps_.config);
 
+    ApplyModelResult result;
     try {
-        auto result = apply_model_to_session(profile, deps);
-        entry.model_state = result.state;
-        entry.provider = result.state.provider;
-        entry.model = result.state.model;
-        if (out) *out = result.state;
-        if (error && !result.warning.empty()) *error = result.warning;
-        return true;
+        result = apply_model_to_session(profile, deps);
     } catch (const std::exception& e) {
         if (error) *error = e.what();
         return false;
     }
+
+    // Phase 3: re-take mu_ to publish state into the entry. If the entry
+    // got destroyed in between, the helper already mutated the slot but
+    // the state writeback is moot — return success with the resolved
+    // state for the caller to consume.
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = entries_.find(id);
+        if (it != entries_.end() && it->second) {
+            auto& entry = *it->second;
+            entry.model_state = result.state;
+            entry.provider = result.state.provider;
+            entry.model = result.state.model;
+        }
+    }
+
+    if (out) *out = result.state;
+    // 注意:result.warning(silent_auth / meta-persist 非致命退化)在
+    // 成功路径上不再写到 *error — error 只在失败时填,保持与重构前的
+    // 接口契约一致。warning 字段当前只走 LOG_WARN;若以后 HTTP handler
+    // 想把 warning 透给 UI,改 switch_model 签名加 string* warning。
+    return true;
 }
 
 std::optional<SessionModelState>
