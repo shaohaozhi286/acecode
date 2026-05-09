@@ -52,4 +52,61 @@ nlohmann::json model_state_to_json(const SessionModelState& state) {
     return o;
 }
 
+int http_status_for_edit_error(SavedModelEditError e) {
+    switch (e) {
+        case SavedModelEditError::OK: return 200;
+        case SavedModelEditError::NOT_FOUND: return 404;
+        case SavedModelEditError::NAME_TAKEN:
+        case SavedModelEditError::IN_USE_AS_DEFAULT: return 409;
+        default: return 400;
+    }
+}
+
+nlohmann::json profile_to_safe_json(const ModelProfile& entry) {
+    nlohmann::json o;
+    o["name"]      = entry.name;
+    o["provider"]  = entry.provider;
+    o["model"]     = entry.model;
+    o["is_legacy"] = entry.name == "(legacy)";
+    if (!entry.base_url.empty()) o["base_url"] = entry.base_url;
+    if (entry.models_dev_provider_id.has_value()) {
+        o["models_dev_provider_id"] = *entry.models_dev_provider_id;
+    }
+    // api_key 永不输出 — 安全契约
+    return o;
+}
+
+std::optional<SavedModelDraft> parse_model_draft(const nlohmann::json& body,
+                                                  std::string& err) {
+    if (!body.is_object()) { err = "body must be a JSON object"; return std::nullopt; }
+    SavedModelDraft d;
+    auto get_str = [&](const char* key, std::string& out, bool required) {
+        if (!body.contains(key)) {
+            if (required && err.empty()) {
+                err = std::string("missing field '") + key + "'";
+            }
+            return;
+        }
+        if (!body[key].is_string()) {
+            if (err.empty()) {
+                err = std::string("field '") + key + "' must be string";
+            }
+            return;
+        }
+        out = body[key].get<std::string>();
+    };
+    get_str("name", d.name, true);
+    get_str("provider", d.provider, true);
+    get_str("model", d.model, true);
+    get_str("base_url", d.base_url, false);
+    get_str("api_key", d.api_key, false);
+    if (body.contains("models_dev_provider_id") &&
+        body["models_dev_provider_id"].is_string()) {
+        std::string s = body["models_dev_provider_id"].get<std::string>();
+        if (!s.empty()) d.models_dev_provider_id = std::move(s);
+    }
+    if (!err.empty()) return std::nullopt;
+    return d;
+}
+
 } // namespace acecode::web

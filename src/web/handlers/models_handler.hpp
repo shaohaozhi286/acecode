@@ -12,6 +12,7 @@
 
 #include "../../config/config.hpp"
 #include "../../config/saved_models.hpp"
+#include "../../config/saved_models_editor.hpp"
 #include "../../session/session_client.hpp"
 
 #include <nlohmann/json.hpp>
@@ -39,5 +40,20 @@ find_model_by_name(const AppConfig& cfg, const std::string& name);
 // Serialize current per-session model state for GET/POST
 // /api/sessions/:id/model.
 nlohmann::json model_state_to_json(const SessionModelState& state);
+
+// 把 SavedModelEditError 映射到 HTTP 状态码。
+// 200 不触发(成功路径不调这个);其它分支:
+//   - NOT_FOUND          → 404
+//   - NAME_TAKEN / IN_USE_AS_DEFAULT → 409
+//   - 其它(校验失败)   → 400
+int http_status_for_edit_error(SavedModelEditError e);
+
+// 把 ModelProfile 序列化到 JSON 格式(api_key 字段总是省略)。
+// 给 POST/PUT 成功响应用。
+nlohmann::json profile_to_safe_json(const ModelProfile& entry);
+
+// 解析 POST/PUT body 到 SavedModelDraft。失败返 nullopt + err 写错误说明。
+std::optional<SavedModelDraft> parse_model_draft(const nlohmann::json& body,
+                                                  std::string& err);
 
 } // namespace acecode::web

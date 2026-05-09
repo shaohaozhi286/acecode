@@ -4,6 +4,7 @@
 #include "origin.hpp"
 #include "static_assets.hpp"
 #include "../config/config.hpp"
+#include "../config/saved_models_editor.hpp"
 #include "../desktop/workspace_registry.hpp"
 #include "../provider/llm_provider.hpp"
 #include "../session/ask_user_question_prompter.hpp"
@@ -1727,6 +1728,14 @@ struct WebServer::Impl {
         ([this](const crow::request& req) {
             return cors_preflight(req);
         });
+        CROW_ROUTE(app, "/api/models/<string>").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req, const std::string&) {
+            return cors_preflight(req);
+        });
+        CROW_ROUTE(app, "/api/config/default-model").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
         CROW_ROUTE(app, "/api/sessions/<string>/model").methods(crow::HTTPMethod::Options)
         ([this](const crow::request& req, const std::string&) {
             return cors_preflight(req);
@@ -1816,6 +1825,193 @@ struct WebServer::Impl {
 
             crow::response r(model_state_to_json(state).dump());
             r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        });
+
+        // POST /api/models: 新增 saved_models 条目。body = SavedModelDraft JSON。
+        // 失败时 cfg 不变;落盘失败时 cfg 内存回滚保持与磁盘一致。
+        CROW_ROUTE(app, "/api/models").methods(crow::HTTPMethod::POST)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.app_config) return crow::response(503);
+
+            auto json_err = [&](int status, const char* code, const std::string& msg) {
+                crow::response r(status);
+                r.body = json{{"error", code}, {"message", msg}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            };
+
+            json body;
+            try { body = json::parse(req.body); }
+            catch (const std::exception& e) {
+                return json_err(400, "BAD_JSON", std::string("invalid JSON body: ") + e.what());
+            }
+            std::string err;
+            auto draft = parse_model_draft(body, err);
+            if (!draft) return json_err(400, "BAD_REQUEST", err);
+
+            auto rc = add_saved_model(*deps.app_config, *draft);
+            if (rc != SavedModelEditError::OK) {
+                return json_err(http_status_for_edit_error(rc),
+                                to_string(rc),
+                                "saved_models add rejected");
+            }
+            try {
+                if (!deps.config_path.empty()) {
+                    save_config(*deps.app_config, deps.config_path);
+                } else {
+                    save_config(*deps.app_config);
+                }
+            } catch (const std::exception& e) {
+                deps.app_config->saved_models.pop_back();  // 回滚
+                return json_err(500, "PERSIST_FAILED", e.what());
+            }
+
+            crow::response r(200);
+            r.add_header("Content-Type", "application/json");
+            r.body = profile_to_safe_json(deps.app_config->saved_models.back()).dump();
+            return with_cors(req, std::move(r));
+        });
+
+        // PUT /api/models/<name>: 更新 saved_models 条目(可改名)。
+        CROW_ROUTE(app, "/api/models/<string>").methods(crow::HTTPMethod::PUT)
+        ([this](const crow::request& req, const std::string& url_name) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.app_config) return crow::response(503);
+
+            auto json_err = [&](int status, const char* code, const std::string& msg) {
+                crow::response r(status);
+                r.body = json{{"error", code}, {"message", msg}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            };
+
+            json body;
+            try { body = json::parse(req.body); }
+            catch (const std::exception& e) {
+                return json_err(400, "BAD_JSON", std::string("invalid JSON body: ") + e.what());
+            }
+            std::string err;
+            auto draft = parse_model_draft(body, err);
+            if (!draft) return json_err(400, "BAD_REQUEST", err);
+
+            auto snapshot = deps.app_config->saved_models;
+            auto rc = update_saved_model(*deps.app_config, url_name, *draft);
+            if (rc != SavedModelEditError::OK) {
+                return json_err(http_status_for_edit_error(rc),
+                                to_string(rc),
+                                "saved_models update rejected");
+            }
+            try {
+                if (!deps.config_path.empty()) {
+                    save_config(*deps.app_config, deps.config_path);
+                } else {
+                    save_config(*deps.app_config);
+                }
+            } catch (const std::exception& e) {
+                deps.app_config->saved_models = std::move(snapshot);
+                return json_err(500, "PERSIST_FAILED", e.what());
+            }
+
+            crow::response r(200);
+            r.add_header("Content-Type", "application/json");
+            // 找到刚改完的条目(name 可能与 url_name 不同)
+            for (const auto& e : deps.app_config->saved_models) {
+                if (e.name == draft->name) {
+                    r.body = profile_to_safe_json(e).dump();
+                    break;
+                }
+            }
+            return with_cors(req, std::move(r));
+        });
+
+        // DELETE /api/models/<name>: 删除 saved_models 条目。default 不能删。
+        CROW_ROUTE(app, "/api/models/<string>").methods(crow::HTTPMethod::Delete)
+        ([this](const crow::request& req, const std::string& url_name) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.app_config) return crow::response(503);
+
+            auto json_err = [&](int status, const char* code, const std::string& msg) {
+                crow::response r(status);
+                r.body = json{{"error", code}, {"message", msg}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            };
+
+            auto snapshot = deps.app_config->saved_models;
+            auto rc = remove_saved_model(*deps.app_config, url_name);
+            if (rc != SavedModelEditError::OK) {
+                return json_err(http_status_for_edit_error(rc),
+                                to_string(rc),
+                                "saved_models remove rejected");
+            }
+            try {
+                if (!deps.config_path.empty()) {
+                    save_config(*deps.app_config, deps.config_path);
+                } else {
+                    save_config(*deps.app_config);
+                }
+            } catch (const std::exception& e) {
+                deps.app_config->saved_models = std::move(snapshot);
+                return json_err(500, "PERSIST_FAILED", e.what());
+            }
+
+            crow::response r(200);
+            r.add_header("Content-Type", "application/json");
+            r.body = json{{"ok", true}}.dump();
+            return with_cors(req, std::move(r));
+        });
+
+        // POST /api/config/default-model body {name}: 设置 cfg.default_model_name。
+        // name 必须存在于 saved_models 或为 "(legacy)"。
+        CROW_ROUTE(app, "/api/config/default-model").methods(crow::HTTPMethod::POST)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.app_config) return crow::response(503);
+
+            auto json_err = [&](int status, const char* code, const std::string& msg) {
+                crow::response r(status);
+                r.body = json{{"error", code}, {"message", msg}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            };
+
+            json body;
+            try { body = json::parse(req.body); }
+            catch (const std::exception& e) {
+                return json_err(400, "BAD_JSON", std::string("invalid JSON body: ") + e.what());
+            }
+            if (!body.is_object() || !body.contains("name") || !body["name"].is_string()) {
+                return json_err(400, "BAD_REQUEST", "expected {name: string}");
+            }
+            std::string name = body["name"].get<std::string>();
+
+            // name 必须存在(saved_models 或 (legacy))
+            bool found = (name == "(legacy)");
+            if (!found) {
+                for (const auto& e : deps.app_config->saved_models) {
+                    if (e.name == name) { found = true; break; }
+                }
+            }
+            if (!found) return json_err(404, "NOT_FOUND", "no such model name");
+
+            std::string before = deps.app_config->default_model_name;
+            deps.app_config->default_model_name = name;
+            try {
+                if (!deps.config_path.empty()) {
+                    save_config(*deps.app_config, deps.config_path);
+                } else {
+                    save_config(*deps.app_config);
+                }
+            } catch (const std::exception& e) {
+                deps.app_config->default_model_name = before;
+                return json_err(500, "PERSIST_FAILED", e.what());
+            }
+
+            crow::response r(200);
+            r.add_header("Content-Type", "application/json");
+            r.body = json{{"default_model_name", name}}.dump();
             return with_cors(req, std::move(r));
         });
     }

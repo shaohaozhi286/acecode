@@ -119,3 +119,82 @@ TEST(ModelsHandler, ModelStateToJsonIncludesCurrentSessionFields) {
     EXPECT_EQ(j["context_window"], 400000);
     EXPECT_EQ(j["is_legacy"], false);
 }
+
+// ------------------- 增删改 helper 测试 -------------------
+
+#include "config/saved_models_editor.hpp"
+
+using acecode::SavedModelDraft;
+using acecode::SavedModelEditError;
+using acecode::web::http_status_for_edit_error;
+using acecode::web::parse_model_draft;
+using acecode::web::profile_to_safe_json;
+
+// 触发场景:server.cpp 把 saved_models_editor 的错误码翻成 HTTP 状态;
+// 这层映射与前端 toast 文案强相关 — NOT_FOUND→404 / NAME_TAKEN→409 /
+// IN_USE_AS_DEFAULT→409,任一改错都会让"删默认"这种 UX 走偏(本来要 409
+// 提示先改默认,变成 500 用户不知道为啥)。
+// 期望行为:固定的状态码映射,新增其它枚举值默认 fallback 400(校验失败)。
+TEST(ModelsHandler, ErrorToHttpStatusMapping) {
+    EXPECT_EQ(http_status_for_edit_error(SavedModelEditError::NOT_FOUND), 404);
+    EXPECT_EQ(http_status_for_edit_error(SavedModelEditError::NAME_TAKEN), 409);
+    EXPECT_EQ(http_status_for_edit_error(SavedModelEditError::IN_USE_AS_DEFAULT), 409);
+    EXPECT_EQ(http_status_for_edit_error(SavedModelEditError::INVALID_NAME), 400);
+    EXPECT_EQ(http_status_for_edit_error(SavedModelEditError::INVALID_API_KEY), 400);
+    EXPECT_EQ(http_status_for_edit_error(SavedModelEditError::RESERVED_NAME), 400);
+    EXPECT_EQ(http_status_for_edit_error(SavedModelEditError::UNKNOWN_PROVIDER), 400);
+    EXPECT_EQ(http_status_for_edit_error(SavedModelEditError::MISSING_MODEL), 400);
+    EXPECT_EQ(http_status_for_edit_error(SavedModelEditError::MISSING_BASE_URL), 400);
+}
+
+// 触发场景:POST/PUT 成功后把 ModelProfile 序列化回去给前端。api_key 是
+// 敏感字段 — spec 安全契约:api_key 永不出现在 HTTP response 里。
+// 期望行为:profile_to_safe_json 输出永远不含 "api_key" key,即使输入有值。
+// 回归就泄露 api_key 给浏览器(F12 看 Network 直接看到)。
+TEST(ModelsHandler, ProfileToSafeJsonOmitsApiKey) {
+    ModelProfile p;
+    p.name = "local";
+    p.provider = "openai";
+    p.model = "llama-3";
+    p.base_url = "http://localhost/v1";
+    p.api_key = "sk-secret";
+    auto j = profile_to_safe_json(p);
+    EXPECT_FALSE(j.contains("api_key"));
+    EXPECT_EQ(j["base_url"], "http://localhost/v1");
+    EXPECT_EQ(j["name"], "local");
+    EXPECT_EQ(j["is_legacy"], false);
+}
+
+// 触发场景:前端 POST /api/models 漏字段时,后端要给出明确的字段名,
+// 否则前端只能笼统报"提交失败"。
+// 期望行为:漏 provider 字段 → err 字符串里出现 "provider";返回 nullopt。
+TEST(ModelsHandler, ParseDraftReportsMissingField) {
+    nlohmann::json body = {{"name", "x"}};
+    std::string err;
+    auto d = parse_model_draft(body, err);
+    EXPECT_FALSE(d.has_value());
+    EXPECT_NE(err.find("provider"), std::string::npos);
+}
+
+// 触发场景:前端 POST /api/models body 完整(含 openai 必填的 base_url +
+// api_key)。
+// 期望行为:全部字段就绪,返回的 SavedModelDraft 字段值与输入一致;
+// err 留空。
+TEST(ModelsHandler, ParseDraftAcceptsFullBody) {
+    nlohmann::json body = {
+        {"name", "local"},
+        {"provider", "openai"},
+        {"model", "llama-3"},
+        {"base_url", "http://localhost/v1"},
+        {"api_key", "sk-x"},
+    };
+    std::string err;
+    auto d = parse_model_draft(body, err);
+    ASSERT_TRUE(d.has_value());
+    EXPECT_EQ(d->name, "local");
+    EXPECT_EQ(d->provider, "openai");
+    EXPECT_EQ(d->model, "llama-3");
+    EXPECT_EQ(d->base_url, "http://localhost/v1");
+    EXPECT_EQ(d->api_key, "sk-x");
+    EXPECT_TRUE(err.empty());
+}
