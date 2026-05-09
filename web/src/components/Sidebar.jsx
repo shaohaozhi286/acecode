@@ -31,7 +31,6 @@ import {
 } from '../lib/sessionStatus.js';
 import { toast } from './Toast.jsx';
 import { VsIcon } from './Icon.jsx';
-import { Settings } from './Settings.jsx';
 
 function hasDesktopBridge() {
   return typeof window.aceDesktop_listWorkspaces === 'function';
@@ -224,7 +223,6 @@ function WorkspaceGroup({ ws, expanded, onToggle, sessions, activeId, onSelect, 
 
 export function Sidebar({ activeId, onSelect, collapsed, width = 200, onOpenSkills, onOpenMcp }) {
   const [pane,        setPane]        = useState('sessions'); // 'sessions' | 'skills' | 'mcp'
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const [workspaces,  setWorkspaces]  = useState([]);
   const [sessions,    setSessions]    = useState([]);
   const [statusBySession, setStatusBySession] = useState(() => new Map());
@@ -786,17 +784,7 @@ export function Sidebar({ activeId, onSelect, collapsed, width = 200, onOpenSkil
             {t.label}
           </button>
         ))}
-        <button
-          type="button"
-          onClick={() => setSettingsOpen(true)}
-          className="shrink-0 w-7 h-7 rounded text-fg-mute hover:text-fg hover:bg-surface-hi flex items-center justify-center transition"
-          title="设置(模型管理)"
-          aria-label="设置"
-        >
-          <VsIcon name="settings" size={16} />
-        </button>
       </div>
-      <Settings open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </aside>
   );
 }
