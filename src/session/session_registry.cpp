@@ -2,6 +2,7 @@
 
 #include "session_rewind.hpp"
 #include "session_storage.hpp"
+#include "../provider/apply_model_to_session.hpp"
 #include "../provider/copilot_provider.hpp"
 #include "../provider/model_context_resolver.hpp"
 #include "../provider/model_resolver.hpp"
@@ -351,47 +352,35 @@ bool SessionRegistry::switch_model(const std::string& id,
         return false;
     }
 
-    ResolvedSessionModel resolved;
-    try {
-        resolved = resolve_from_profile(*deps_.config, profile);
-    } catch (const std::exception& e) {
-        if (error) *error = e.what();
-        return false;
-    }
-    if (!resolved.provider) {
-        if (error) *error = "provider unavailable";
-        return false;
-    }
-
     std::lock_guard<std::mutex> lk(mu_);
     auto it = entries_.find(id);
     if (it == entries_.end() || !it->second) {
         if (error) *error = "session not found";
         return false;
     }
-
     auto& entry = *it->second;
     if (!entry.provider_slot) {
         entry.provider_slot = std::make_shared<SessionEntry::ProviderSlot>();
     }
-    {
-        std::lock_guard<std::mutex> provider_lk(entry.provider_slot->mu);
-        entry.provider_slot->provider = std::move(resolved.provider);
-    }
 
-    entry.model_state = resolved.state;
-    entry.provider = resolved.state.provider;
-    entry.model = resolved.state.model;
-    if (entry.loop && resolved.state.context_window > 0) {
-        entry.loop->set_context_window(resolved.state.context_window);
+    ApplyModelDeps deps;
+    deps.provider_slot = entry.provider_slot.get();
+    deps.sm = entry.sm.get();
+    deps.loop = entry.loop.get();
+    deps.cfg = const_cast<AppConfig*>(deps_.config);
+
+    try {
+        auto result = apply_model_to_session(profile, deps);
+        entry.model_state = result.state;
+        entry.provider = result.state.provider;
+        entry.model = result.state.model;
+        if (out) *out = result.state;
+        if (error && !result.warning.empty()) *error = result.warning;
+        return true;
+    } catch (const std::exception& e) {
+        if (error) *error = e.what();
+        return false;
     }
-    if (entry.sm) {
-        entry.sm->set_active_provider(resolved.state.provider,
-                                      resolved.state.model,
-                                      resolved.state.name);
-    }
-    if (out) *out = resolved.state;
-    return true;
 }
 
 std::optional<SessionModelState>
