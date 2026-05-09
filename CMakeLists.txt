@@ -224,6 +224,13 @@ endif()
 # 才会真添加 acecode-desktop 这个 target,否则文件本身做无操作 return。
 include(${CMAKE_SOURCE_DIR}/cmake/acecode_desktop.cmake)
 
+# tuitest helloworld 子目标(opt-in,默认 OFF)。-DACECODE_BUILD_TUITEST=ON 开启。
+include(${CMAKE_SOURCE_DIR}/cmake/acecode_tuitest.cmake)
+
+# acetui C++ TUI 库子目标(opt-in,默认 OFF)。-DACECODE_BUILD_ACETUI=ON 开启;
+# 是 codex codex-rs/tui 渲染层能力的 C++ 自研复刻学习项目,不影响主二进制。
+include(${CMAKE_SOURCE_DIR}/cmake/acetui.cmake)
+
 # Bundled models.dev snapshot. Installed alongside the executable so
 # find_models_dev_dir() can resolve <exe_dir>/../share/acecode/models_dev.
 if(EXISTS ${CMAKE_SOURCE_DIR}/assets/models_dev/api.json)

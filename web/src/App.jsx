@@ -36,7 +36,15 @@ const MAX_SIDE_PANEL_WIDTH = 560;
 const MIN_CHAT_WIDTH = 360;
 
 const UI_PREFS_STORAGE_KEY = 'acecode.uiPrefs.v1';
-const DEFAULT_UI_PREFS = { view: 'single', sidePanelCollapsed: false, sidebarCollapsed: false };
+const DEFAULT_UI_PREFS = {
+  view: 'single',
+  sidePanelCollapsed: false,
+  sidebarCollapsed: false,
+  // 右侧面板"最大化":用整个聊天主区显示 SidePanel,聊天列表/输入框被
+  // 隐藏,只剩左侧 sidebar(若 sidebar 也折叠就是全屏 SidePanel)。再点一
+  // 次回到默认布局。跨刷新持久化,符合"用户操作过最大化就保留状态"。
+  sidePanelMaximized: false,
+};
 const ALLOWED_VIEWS = new Set(['single', 'grid4', 'grid9']);
 
 function clamp(value, min, max) {
@@ -53,7 +61,8 @@ function validateUiPrefs(v) {
   return v && typeof v === 'object'
     && ALLOWED_VIEWS.has(v.view)
     && typeof v.sidePanelCollapsed === 'boolean'
-    && (v.sidebarCollapsed == null || typeof v.sidebarCollapsed === 'boolean');
+    && (v.sidebarCollapsed == null || typeof v.sidebarCollapsed === 'boolean')
+    && (v.sidePanelMaximized == null || typeof v.sidePanelMaximized === 'boolean');
 }
 
 function homeRefFromWorkspace(workspace, fallbackRef, health) {
@@ -93,6 +102,7 @@ export function App() {
     UI_PREFS_STORAGE_KEY, DEFAULT_UI_PREFS, validateUiPrefs);
   const view = uiPrefs.view;
   const sidePanelCollapsed = uiPrefs.sidePanelCollapsed;
+  const sidePanelMaximized = !!uiPrefs.sidePanelMaximized;
   const projectSidebarCollapsed = !!uiPrefs.sidebarCollapsed;
   const singleShellRef = useRef(null);
   const sidebarResizeActiveRef = useRef(false);
@@ -256,6 +266,19 @@ export function App() {
 
   const toggleSidePanel = useCallback(() => {
     setUiPrefs((prev) => ({ ...prev, sidePanelCollapsed: !prev.sidePanelCollapsed }));
+  }, [setUiPrefs]);
+
+  // 最大化 / 还原右侧面板。最大化时强制确保 SidePanel 处于"未折叠"状态,
+  // 否则用户进入最大化后看到一片空白(panel 宽 0 + 聊天区已隐藏)。
+  const toggleSidePanelMaximized = useCallback(() => {
+    setUiPrefs((prev) => {
+      const nextMax = !prev.sidePanelMaximized;
+      return {
+        ...prev,
+        sidePanelMaximized: nextMax,
+        sidePanelCollapsed: nextMax ? false : prev.sidePanelCollapsed,
+      };
+    });
   }, [setUiPrefs]);
 
   const toggleProjectSidebar = useCallback(() => {
@@ -447,6 +470,8 @@ export function App() {
               onSidePanelResize={setSidePanelWidth}
               sidePanelCollapsed={sidePanelCollapsed}
               onToggleSidePanel={toggleSidePanel}
+              sidePanelMaximized={sidePanelMaximized}
+              onToggleSidePanelMaximized={toggleSidePanelMaximized}
               questionRequest={visibleQuestionReq}
               onQuestionResolve={resolveVisibleQuestion}
             />

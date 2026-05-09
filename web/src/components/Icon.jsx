@@ -31,6 +31,8 @@ const ICONS = {
   run: 'Run',
   running: 'StatusRunning',
   save: 'Save',
+  screenFull: 'ScreenFull',
+  screenNormal: 'ScreenNormal',
   search: 'Search',
   searchSparkle: 'SearchSparkle',
   send: 'Send',

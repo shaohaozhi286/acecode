@@ -295,6 +295,9 @@ export function SidePanel({
   width = 280,
   collapsed = false,
   onToggleCollapse,
+  // 最大化:面板撑满整个聊天区,聊天区被父组件隐藏。再点击切换图标还原。
+  maximized = false,
+  onToggleMaximize,
 }) {
   const api = useMemo(() => createApi(sessionRef || null), [sessionRef?.port, sessionRef?.token, sessionRef?.workspaceHash]);
   const [wrapPreview, setWrapPreview] = usePreference(
@@ -380,7 +383,21 @@ export function SidePanel({
             </button>
           ))}
         </div>
-        {onToggleCollapse && (
+        {/* 最大化按钮放在收起按钮的左侧。最大化时聊天区已隐藏,继续允许"收起"
+            会让整个区域变空,所以最大化态下隐藏收起按钮。 */}
+        {onToggleMaximize && (
+          <button
+            type="button"
+            onClick={onToggleMaximize}
+            className="ace-side-panel-maximize-btn"
+            title={maximized ? '还原右侧面板' : '展开为整屏'}
+            aria-label={maximized ? '还原右侧面板' : '展开为整屏'}
+            aria-pressed={maximized}
+          >
+            <VsIcon name={maximized ? 'screenNormal' : 'screenFull'} size={14} />
+          </button>
+        )}
+        {onToggleCollapse && !maximized && (
           <button
             type="button"
             onClick={onToggleCollapse}

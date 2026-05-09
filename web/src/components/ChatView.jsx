@@ -185,7 +185,7 @@ function isRealWorkspaceHash(hash) {
   return !!hash && hash !== '__local__';
 }
 
-export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWorkspaceChange, health, onPermissionRequest, onQuestionRequest, questionRequest, onQuestionResolve, showSidePanel = false, sidePanelWidth = 280, onSidePanelResize, sidePanelCollapsed = false, onToggleSidePanel }) {
+export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWorkspaceChange, health, onPermissionRequest, onQuestionRequest, questionRequest, onQuestionResolve, showSidePanel = false, sidePanelWidth = 280, onSidePanelResize, sidePanelCollapsed = false, onToggleSidePanel, sidePanelMaximized = false, onToggleSidePanelMaximized }) {
   const ref = useMemo(() => normalizeSessionRef(sessionRef, sessionId), [sessionRef, sessionId]);
   const sid = ref?.sessionId || ref?.id || '';
   const sidRef = useRef(sid);
@@ -896,7 +896,14 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
 
   return (
     <div ref={layoutRef} className="flex-1 flex min-w-0 ace-chat-layout">
-      <div className="flex-1 flex flex-col min-w-0 relative">
+      <div
+        className={clsx(
+          'flex-1 flex flex-col min-w-0 relative',
+          // 最大化时隐藏整个聊天主区,SidePanel 接管下方 ace-side-panel-shell
+          // 用 inline width:100% 撑满本 layout 的剩余空间。
+          sidePanelMaximized && 'hidden',
+        )}
+      >
       <div className="h-9 px-3 flex items-center justify-between bg-surface border-b border-border shrink-0 gap-2">
         <div className="flex items-center gap-2 min-w-0">
           <span className="text-[13px] font-semibold text-fg truncate">{title}</span>
@@ -1013,7 +1020,9 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
       </div>
       {sidePanelMounted && (
         <>
-          {!sidePanelCollapsed && (
+          {/* 最大化时:不显示拖拽手柄(没有左侧聊天区可对比着调宽度);
+              折叠时也不显示。 */}
+          {!sidePanelCollapsed && !sidePanelMaximized && (
             <div
               role="separator"
               aria-label="调整右侧栏宽度"
@@ -1029,7 +1038,12 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
           <div
             className="ace-side-panel-shell"
             data-collapsed={sidePanelCollapsed ? 'true' : 'false'}
-            style={{ width: sidePanelCollapsed ? 0 : sidePanelWidth }}
+            data-maximized={sidePanelMaximized ? 'true' : 'false'}
+            style={{
+              width: sidePanelMaximized
+                ? '100%'
+                : (sidePanelCollapsed ? 0 : sidePanelWidth),
+            }}
           >
             <SidePanel
               sessionRef={ref}
@@ -1042,6 +1056,8 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
               width={sidePanelWidth}
               collapsed={sidePanelCollapsed}
               onToggleCollapse={onToggleSidePanel}
+              maximized={sidePanelMaximized}
+              onToggleMaximize={onToggleSidePanelMaximized}
             />
           </div>
         </>

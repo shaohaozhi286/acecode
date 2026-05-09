@@ -1028,8 +1028,10 @@ body {
   border-bottom-color: var(--ace-accent);
 }
 
-/* tab 行右端的折叠按钮,vsCode 风格的 splitter icon */
-.ace-side-panel-collapse-btn {
+/* tab 行右端的折叠按钮,vsCode 风格的 splitter icon。最大化按钮 .ace-side-panel-maximize-btn
+   跟它共享同一套尺寸/hover/focus 样式 — 视觉上排在收起按钮左边构成"操作栏"。 */
+.ace-side-panel-collapse-btn,
+.ace-side-panel-maximize-btn {
   width: 28px;
   height: 32px;
   display: inline-flex;
@@ -1042,13 +1044,23 @@ body {
   flex-shrink: 0;
   transition: color .15s ease, background .15s ease;
 }
-.ace-side-panel-collapse-btn:hover {
+.ace-side-panel-collapse-btn:hover,
+.ace-side-panel-maximize-btn:hover {
   color: var(--ace-fg);
   background: var(--ace-surface-alt);
 }
-.ace-side-panel-collapse-btn:focus-visible {
+.ace-side-panel-collapse-btn:focus-visible,
+.ace-side-panel-maximize-btn:focus-visible {
   outline: 2px solid var(--ace-accent);
   outline-offset: -2px;
+}
+/* 最大化激活态:按钮持久 accent 色,与 hover 区分。 */
+.ace-side-panel-maximize-btn[aria-pressed="true"] {
+  color: var(--ace-accent);
+}
+.ace-side-panel-maximize-btn[aria-pressed="true"]:hover {
+  color: var(--ace-accent);
+  background: var(--ace-accent-bg);
 }
 
 .ace-review-panel {
