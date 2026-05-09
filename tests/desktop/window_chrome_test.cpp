@@ -10,6 +10,7 @@ using acecode::desktop::FramelessHitTestArea;
 using acecode::desktop::FramelessHitTestInput;
 using acecode::desktop::classify_frameless_hit_test;
 using acecode::desktop::frameless_resize_border;
+using acecode::desktop::parse_resize_direction;
 
 namespace {
 
@@ -78,4 +79,35 @@ TEST(DesktopWindowChrome, MaximizedWindowSuppressesResizeEdges) {
 
     in.y = 818;
     EXPECT_EQ(classify_frameless_hit_test(in), FramelessHitTestArea::Client);
+}
+
+// 场景: 前端 strip 在 mousedown 时通过 aceDesktop_startWindowResize 把方向
+// 字符串送进 native;parse_resize_direction 是这条桥的"必经哨兵",所有合法
+// 边/角必须能正确翻译,无效值必须返回 nullopt 而不是 fallback。
+TEST(DesktopWindowChrome, ParseResizeDirectionAcceptsAllEightEdgesAndCorners) {
+    EXPECT_EQ(parse_resize_direction("top"),          FramelessHitTestArea::Top);
+    EXPECT_EQ(parse_resize_direction("bottom"),       FramelessHitTestArea::Bottom);
+    EXPECT_EQ(parse_resize_direction("left"),         FramelessHitTestArea::Left);
+    EXPECT_EQ(parse_resize_direction("right"),        FramelessHitTestArea::Right);
+    EXPECT_EQ(parse_resize_direction("top-left"),     FramelessHitTestArea::TopLeft);
+    EXPECT_EQ(parse_resize_direction("top-right"),    FramelessHitTestArea::TopRight);
+    EXPECT_EQ(parse_resize_direction("bottom-left"),  FramelessHitTestArea::BottomLeft);
+    EXPECT_EQ(parse_resize_direction("bottom-right"), FramelessHitTestArea::BottomRight);
+}
+
+// 场景: caller 打错字 / 大小写不一致 / 空串 / 注入"client"或"caption"试图
+// 让 native 当成拖动 — 都必须返回 nullopt,WebHost::start_window_resize 才能
+// 安全地拒绝调用。回归点:不要为了"宽松"加大小写归一化或下划线/空格容忍,
+// 否则前端拼错字会被 native 静默接受、产生难以排查的怪异 resize。
+TEST(DesktopWindowChrome, ParseResizeDirectionRejectsInvalidStrings) {
+    EXPECT_FALSE(parse_resize_direction(""));
+    EXPECT_FALSE(parse_resize_direction("Top"));
+    EXPECT_FALSE(parse_resize_direction("TOP"));
+    EXPECT_FALSE(parse_resize_direction("top_left"));
+    EXPECT_FALSE(parse_resize_direction("topleft"));
+    EXPECT_FALSE(parse_resize_direction("top "));
+    EXPECT_FALSE(parse_resize_direction("client"));
+    EXPECT_FALSE(parse_resize_direction("caption"));
+    EXPECT_FALSE(parse_resize_direction("ne"));
+    EXPECT_FALSE(parse_resize_direction("northwest"));
 }

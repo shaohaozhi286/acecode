@@ -7,6 +7,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, ApiError } from './lib/api.js';
 import { setToken } from './lib/auth.js';
 import { connection } from './lib/connection.js';
+import { createNewSessionForActiveWorkspace } from './lib/newSession.js';
 import { usePreference } from './lib/usePreference.js';
 import { useGlobalShortcut } from './lib/useGlobalShortcut.js';
 import { TopBar } from './components/TopBar.jsx';
@@ -24,6 +25,7 @@ import { SettingsPage } from './components/SettingsPage.jsx';
 import { DesktopContextMenu } from './components/DesktopContextMenu.jsx';
 import { Toaster, toast } from './components/Toast.jsx';
 import { SlashCommandsProvider } from './components/SlashCommandsContext.jsx';
+import { FramelessResizeHandles } from './components/FramelessResizeHandles.jsx';
 
 const SINGLE_LAYOUT_STORAGE_KEY = 'acecode.singleLayoutWidths.v1';
 const LEGACY_DEFAULT_SINGLE_LAYOUT = { sidebar: 200, sidePanel: 280 };
@@ -35,7 +37,15 @@ const MAX_SIDE_PANEL_WIDTH = 560;
 const MIN_CHAT_WIDTH = 360;
 
 const UI_PREFS_STORAGE_KEY = 'acecode.uiPrefs.v1';
-const DEFAULT_UI_PREFS = { view: 'single', sidePanelCollapsed: false, sidebarCollapsed: false };
+const DEFAULT_UI_PREFS = {
+  view: 'single',
+  sidePanelCollapsed: false,
+  sidebarCollapsed: false,
+  // 右侧面板"最大化":用整个聊天主区显示 SidePanel,聊天列表/输入框被
+  // 隐藏,只剩左侧 sidebar(若 sidebar 也折叠就是全屏 SidePanel)。再点一
+  // 次回到默认布局。跨刷新持久化,符合"用户操作过最大化就保留状态"。
+  sidePanelMaximized: false,
+};
 const ALLOWED_VIEWS = new Set(['single', 'grid4', 'grid9']);
 
 function clamp(value, min, max) {
@@ -52,7 +62,8 @@ function validateUiPrefs(v) {
   return v && typeof v === 'object'
     && ALLOWED_VIEWS.has(v.view)
     && typeof v.sidePanelCollapsed === 'boolean'
-    && (v.sidebarCollapsed == null || typeof v.sidebarCollapsed === 'boolean');
+    && (v.sidebarCollapsed == null || typeof v.sidebarCollapsed === 'boolean')
+    && (v.sidePanelMaximized == null || typeof v.sidePanelMaximized === 'boolean');
 }
 
 function homeRefFromWorkspace(workspace, fallbackRef, health) {
@@ -92,6 +103,7 @@ export function App() {
     UI_PREFS_STORAGE_KEY, DEFAULT_UI_PREFS, validateUiPrefs);
   const view = uiPrefs.view;
   const sidePanelCollapsed = uiPrefs.sidePanelCollapsed;
+  const sidePanelMaximized = !!uiPrefs.sidePanelMaximized;
   const projectSidebarCollapsed = !!uiPrefs.sidebarCollapsed;
   const singleShellRef = useRef(null);
   const sidebarResizeActiveRef = useRef(false);
@@ -210,6 +222,7 @@ export function App() {
       workspaceHash: targetHash,
       contextId: 'default',
       sessionId: session.id,
+      displayTitle: session.displayTitle || session.display_title,
       cwd: session.cwd || '',
       title: session.title,
       summary: session.summary,
@@ -256,6 +269,19 @@ export function App() {
     setUiPrefs((prev) => ({ ...prev, sidePanelCollapsed: !prev.sidePanelCollapsed }));
   }, [setUiPrefs]);
 
+  // 最大化 / 还原右侧面板。最大化时强制确保 SidePanel 处于"未折叠"状态,
+  // 否则用户进入最大化后看到一片空白(panel 宽 0 + 聊天区已隐藏)。
+  const toggleSidePanelMaximized = useCallback(() => {
+    setUiPrefs((prev) => {
+      const nextMax = !prev.sidePanelMaximized;
+      return {
+        ...prev,
+        sidePanelMaximized: nextMax,
+        sidePanelCollapsed: nextMax ? false : prev.sidePanelCollapsed,
+      };
+    });
+  }, [setUiPrefs]);
+
   const toggleProjectSidebar = useCallback(() => {
     setUiPrefs((prev) => ({
       ...prev,
@@ -269,6 +295,29 @@ export function App() {
     setExpanded(null);
     if (view !== 'single') switchView('single');
   }, [activeRef, health, switchView, view]);
+
+  const createDesktopTraySession = useCallback(async () => {
+    try {
+      const next = await createNewSessionForActiveWorkspace(api, activeRef, health);
+      setActiveRef(next);
+      setExpanded(null);
+      if (view !== 'single') switchView('single');
+    } catch (e) {
+      toast({ kind: 'err', text: '新建会话失败:' + (e.message || '') });
+    }
+  }, [activeRef, health, switchView, view]);
+
+  // 暴露 aceDesktop_createNewSession 给 desktop 壳的托盘 "新建会话" 菜单调用。
+  // 设计:openspec/changes/enhance-desktop-tray-menu。
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+    window.aceDesktop_createNewSession = () => {
+      createDesktopTraySession();
+    };
+    return () => {
+      if (window.aceDesktop_createNewSession) delete window.aceDesktop_createNewSession;
+    };
+  }, [createDesktopTraySession]);
 
   const setSidebarWidth = useCallback((nextWidth, shellWidth = 0) => {
     const sidePanelVisible = !!(activeRef?.sessionId || activeRef?.id) && !sidePanelCollapsed;
@@ -341,6 +390,7 @@ export function App() {
         <div className="h-full flex items-center justify-center text-fg-mute text-sm">
           <span className="ace-spinner mr-2" /> 连接 daemon…
         </div>
+        <FramelessResizeHandles />
         <DesktopContextMenu />
         <Toaster />
       </>
@@ -350,6 +400,7 @@ export function App() {
     return (
       <>
         <TokenPrompt onSubmit={onSubmitToken} />
+        <FramelessResizeHandles />
         <DesktopContextMenu />
         <Toaster />
       </>
@@ -422,6 +473,8 @@ export function App() {
               onSidePanelResize={setSidePanelWidth}
               sidePanelCollapsed={sidePanelCollapsed}
               onToggleSidePanel={toggleSidePanel}
+              sidePanelMaximized={sidePanelMaximized}
+              onToggleSidePanelMaximized={toggleSidePanelMaximized}
               questionRequest={visibleQuestionReq}
               onQuestionResolve={resolveVisibleQuestion}
             />
@@ -449,6 +502,7 @@ export function App() {
           />
         )}
       </div>
+      <FramelessResizeHandles />
       <DesktopContextMenu />
       <Toaster />
     </div>

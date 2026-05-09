@@ -98,6 +98,11 @@ export function createApi(base = null) {
     forkSession:      (sid, atMessageId, title) =>
       request('POST', `/api/sessions/${encodeURIComponent(sid)}/fork`,
               { at_message_id: atMessageId, title: title || '' }, base),
+    restoreSessionCheckpoint: (sid, atMessageId) =>
+      request('POST',
+        `/api/sessions/${encodeURIComponent(sid)}/file-checkpoints/${encodeURIComponent(atMessageId)}/restore`,
+        {},
+        base),
 
     // 跨 workspace 一次拿全 session 列表(SearchPalette 用)。
     // 返回 { sessions: [...], errors: [{hash, name, message}] }。

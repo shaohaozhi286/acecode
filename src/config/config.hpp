@@ -177,6 +177,9 @@ struct DesktopNotificationsConfig {
 
 struct DesktopConfig {
     DesktopNotificationsConfig notifications;
+    // 关窗(× / Alt+F4 / aceDesktop_closeWindow)默认隐藏到托盘。
+    // false 时回到旧行为(关窗即退出)。见 openspec/changes/enhance-desktop-tray-menu。
+    bool close_to_tray = true;
 };
 
 struct NetworkConfig {

@@ -1,3 +1,5 @@
 #include <windows.h>
 
+#define IDI_ICON1 1
+
 IDI_ICON1 ICON "@ACECODE_ICON_PATH@"

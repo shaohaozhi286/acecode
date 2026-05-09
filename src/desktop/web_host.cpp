@@ -1,8 +1,11 @@
 #include "web_host.hpp"
 
+#include "web_host_close_policy.hpp"
 #include "window_chrome.hpp"
 
 #include "../utils/logger.hpp"
+
+#include <functional>
 
 #ifdef _WIN32
 #  ifndef WIN32_LEAN_AND_MEAN
@@ -34,6 +37,24 @@ namespace {
 
 constexpr wchar_t kHostWindowClassName[] = L"ACECodeDesktopHostWindow";
 constexpr int kFramelessDragHeightDip = 44;
+
+// WM_USER 区私有消息:绕过 close_request_handler 直接走 DestroyWindow。
+// 选 0x10 偏移留出 0..0xF 给未来扩展;远离 webview/Common Controls 常用的
+// WM_USER..WM_USER+0x100 区段。
+constexpr UINT kRequestQuitMsg = WM_USER + 0x10;
+
+// 全局 close_request_handler — 只在主线程上写,WndProc 在主线程上读。
+// 用 std::function 包装避免裸函数指针;mutex 不需要,因为 WndProc 与 setter
+// 共享同一线程(webview2 message pump 线程 = 主线程)。
+std::function<bool()> g_close_handler;
+
+// 单例联动:第二次启动 acecode-desktop 会向已有 host window 派 focus msg,
+// 让我们把窗口拉前 + 显示。同名 RegisterWindowMessageW 在两端拿到一致 UINT,
+// 见 single_instance_win.cpp 头注。第一次访问时 lazily register,缓存到 static。
+UINT focus_existing_instance_msg() {
+    static UINT id = ::RegisterWindowMessageW(L"ACECode_FocusExistingInstance_v1");
+    return id;
+}
 
 int dpi_scale(int value, UINT dpi) {
     return static_cast<int>((static_cast<long long>(value) * static_cast<long long>(dpi)) / 96);
@@ -173,12 +194,34 @@ LRESULT CALLBACK host_window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpa
             resize_webview_widget(hwnd);
             return 0;
         case WM_CLOSE:
+            // close handler 返回 true 表示已消化(隐藏到托盘),不要 DestroyWindow。
+            // 派发逻辑提取到 web_host_close_policy.hpp 的纯函数,unit test 共用。
+            if (dispatch_wm_close(g_close_handler) == CloseDispatch::ConsumedByHandler) {
+                return 0;
+            }
             ::DestroyWindow(hwnd);
             return 0;
         case WM_DESTROY:
             ::PostQuitMessage(0);
             return 0;
         default:
+            if (msg == kRequestQuitMsg) {
+                // 来自 WebHost::request_quit 的真正退出信号 — 绕过 close handler。
+                ::DestroyWindow(hwnd);
+                return 0;
+            }
+            if (UINT focus_msg = focus_existing_instance_msg();
+                focus_msg != 0 && msg == focus_msg) {
+                // 第二个 acecode-desktop 进程检测到单例锁被占,通过 PostMessageW
+                // 让我们把窗口拉前。等价于左键单击托盘 + close-to-tray 还原。
+                if (::IsIconic(hwnd)) {
+                    ::ShowWindow(hwnd, SW_RESTORE);
+                } else {
+                    ::ShowWindow(hwnd, SW_SHOW);
+                }
+                ::SetForegroundWindow(hwnd);
+                return 0;
+            }
             break;
     }
     return ::DefWindowProcW(hwnd, msg, wparam, lparam);
@@ -423,6 +466,34 @@ bool WebHost::start_window_drag() {
     return false;
 #endif
 }
+bool WebHost::start_window_resize(const std::string& direction) {
+#ifdef _WIN32
+    HWND hwnd = impl_->hwnd();
+    if (!hwnd || !::IsWindow(hwnd)) return false;
+    // 最大化窗口走 native resize 会被 Windows 解读为"拖出还原",体验诡异;
+    // 直接拒绝,前端 strip 在最大化时也不应渲染。
+    if (::IsZoomed(hwnd)) return false;
+    auto area = parse_resize_direction(direction);
+    if (!area) return false;
+    const int ht = win32_hit_test_value(*area);
+    // Caption / Client 不是 resize 命中,parse_resize_direction 已经过滤掉,
+    // 这里二次保险:任何不是 resize 边/角的值都不发消息。
+    switch (ht) {
+        case HTLEFT: case HTRIGHT: case HTTOP: case HTBOTTOM:
+        case HTTOPLEFT: case HTTOPRIGHT:
+        case HTBOTTOMLEFT: case HTBOTTOMRIGHT:
+            break;
+        default:
+            return false;
+    }
+    ::ReleaseCapture();
+    ::SendMessageW(hwnd, WM_NCLBUTTONDOWN, ht, 0);
+    return true;
+#else
+    (void)direction;
+    return false;
+#endif
+}
 bool WebHost::minimize_window() {
 #ifdef _WIN32
     HWND hwnd = impl_->hwnd();
@@ -450,6 +521,20 @@ bool WebHost::close_window() {
     return ::PostMessageW(hwnd, WM_CLOSE, 0, 0) != FALSE;
 #else
     return false;
+#endif
+}
+void WebHost::set_close_request_handler(std::function<bool()> handler) {
+#ifdef _WIN32
+    g_close_handler = std::move(handler);
+#else
+    (void)handler;
+#endif
+}
+void WebHost::request_quit() {
+#ifdef _WIN32
+    HWND hwnd = impl_->hwnd();
+    if (!hwnd || !::IsWindow(hwnd)) return;
+    ::PostMessageW(hwnd, kRequestQuitMsg, 0, 0);
 #endif
 }
 void WebHost::bind(const std::string& name, SyncHandler fn) {

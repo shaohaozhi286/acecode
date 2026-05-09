@@ -306,10 +306,166 @@ TEST(OpenAiProviderReasoningTest, BuildRequestBodyEchoesReasoningWithToolCalls) 
 
     auto body = provider.build_request_body(messages, tools, false);
     const auto& msgs = body["messages"];
-    ASSERT_EQ(msgs.size(), 1u);
+    // 注:build_request_body 现在会为 orphan tool_call 合成 stub tool 消息以避免
+    // OpenAI 端 400(详见用例 OrphanToolCall*)。本用例输入是单条 assistant 带
+    // tool_calls 但没有 tool 结果,所以会被补一条 stub —— 因此 size=2。
+    // 我们关心的是 reasoning_content 仍正确回传到 assistant 消息。
+    ASSERT_EQ(msgs.size(), 2u);
     ASSERT_TRUE(msgs[0].contains("tool_calls"));
     ASSERT_TRUE(msgs[0].contains("reasoning_content"));
     EXPECT_EQ(msgs[0]["reasoning_content"].get<std::string>(), "decide to call file_read");
+    // 第 2 条是合成 stub。
+    EXPECT_EQ(msgs[1].value("role", std::string{}), "tool");
+    EXPECT_EQ(msgs[1].value("tool_call_id", std::string{}), "call_1");
+}
+
+// 用例 7(回归测试,2026-05-08 由用户实际 session 触发):
+// **触发场景**:消息序列里中间出现一条 orphan assistant tool_call —— 即
+//   [user, assistant{tool_calls=[id=X]}, user] —— assistant 后面紧跟着的不是
+//   tool 结果消息而是 user 消息。这种状态由 daemon 中途被 kill / 工具执行抛异常
+//   未持久化 / resume 选了截断在 assistant 之后的 jsonl 等场景产生。
+// **期望行为**:build_request_body 在 orphan assistant 后自动插入一条
+//   role=tool, tool_call_id=X, content=非空占位文本 的 stub 消息,把 4 条总长度
+//   保持顺序为 [user, assistant, tool(stub), user]。orphan 的原 user 消息不能
+//   被吞、顺序不能错位。
+// **修复前 bug 表现**:OpenAI Chat Completions 端会以 HTTP 400
+//   `{"error":{"message":"No tool output found for function call …"}}` 拒绝整个
+//   请求 —— 该 session 之后任何用户输入都会持续 400,session 永久卡死(用户的
+//   `20260506-140715-3c8b` 卡了 2 天就是这个原因)。
+TEST(OpenAiProviderReasoningTest, OrphanToolCallGetsPlaceholderToolMessage) {
+    TestableProvider provider("http://example.invalid", "", "test-model");
+
+    // 模拟一个被打断的 session:user 提问 → assistant 发起 web_search 调用 →
+    // (tool 结果丢失) → user 又发了一条新消息。
+    ChatMessage u1;
+    u1.role = "user";
+    u1.content = "解读下今天百度头条";
+
+    ChatMessage orphan;
+    orphan.role = "assistant";
+    orphan.content = "";
+    orphan.tool_calls = nlohmann::json::array({
+        nlohmann::json{
+            {"id", "call_VLsQS3a2qyysX8yMojt23dso"},
+            {"type", "function"},
+            {"function", {
+                {"name", "web_search"},
+                {"arguments", "{\"limit\":8,\"query\":\"百度热搜\"}"}
+            }}
+        }
+    });
+
+    ChatMessage u2;
+    u2.role = "user";
+    u2.content = "再解读一下";
+
+    std::vector<ChatMessage> messages = {u1, orphan, u2};
+    std::vector<ToolDef> tools;
+
+    auto body = provider.build_request_body(messages, tools, /*stream=*/false);
+    const auto& msgs = body["messages"];
+    // 期望:user, assistant(tool_calls), tool(stub), user — 共 4 条。
+    ASSERT_EQ(msgs.size(), 4u);
+    EXPECT_EQ(msgs[0].value("role", std::string{}), "user");
+    EXPECT_EQ(msgs[1].value("role", std::string{}), "assistant");
+    EXPECT_EQ(msgs[2].value("role", std::string{}), "tool");
+    EXPECT_EQ(msgs[2].value("tool_call_id", std::string{}),
+              "call_VLsQS3a2qyysX8yMojt23dso");
+    // stub content 需要明确传达"被中断",不能是空字符串(某些 endpoint 会拒)。
+    EXPECT_FALSE(msgs[2].value("content", std::string{}).empty());
+    EXPECT_EQ(msgs[3].value("role", std::string{}), "user");
+    EXPECT_EQ(msgs[3]["content"].get<std::string>(), "再解读一下");
+}
+
+// 用例 8(防误触保护):
+// **触发场景**:正常配对的 [assistant{tool_calls=[id=call_abc]}, tool{call_id=call_abc}]
+//   —— 这是健康会话最常见的形态,真实 tool 结果已经存在。
+// **期望行为**:build_request_body 输出仍然只有 2 条,顺序不变,真实 tool 内容
+//   ("real result")保持不变。**不能**因为补漏逻辑误塞额外的 stub。
+// **为什么写这个用例**:用例 7 的 orphan 检测如果实现成"任何 assistant.tool_calls
+//   都补一条",就会让健康会话的每个工具调用后多出一条空 stub —— context 翻倍 +
+//   消息顺序错乱。这条用例守住"只补漏不重复"的边界。
+TEST(OpenAiProviderReasoningTest, MatchedToolCallStaysIntactNoExtraStub) {
+    TestableProvider provider("http://example.invalid", "", "test-model");
+
+    ChatMessage assistant_msg;
+    assistant_msg.role = "assistant";
+    assistant_msg.content = "";
+    assistant_msg.tool_calls = nlohmann::json::array({
+        nlohmann::json{
+            {"id", "call_abc"},
+            {"type", "function"},
+            {"function", {
+                {"name", "file_read"},
+                {"arguments", "{\"file_path\":\"a.md\"}"}
+            }}
+        }
+    });
+
+    ChatMessage tool_msg;
+    tool_msg.role = "tool";
+    tool_msg.content = "real result";
+    tool_msg.tool_call_id = "call_abc";
+
+    std::vector<ChatMessage> messages = {assistant_msg, tool_msg};
+    std::vector<ToolDef> tools;
+
+    auto body = provider.build_request_body(messages, tools, /*stream=*/false);
+    const auto& msgs = body["messages"];
+    ASSERT_EQ(msgs.size(), 2u);
+    EXPECT_EQ(msgs[0].value("role", std::string{}), "assistant");
+    EXPECT_EQ(msgs[1].value("role", std::string{}), "tool");
+    EXPECT_EQ(msgs[1]["content"].get<std::string>(), "real result");
+}
+
+// 用例 9(并行工具调用的部分 orphan):
+// **触发场景**:assistant 一回合并行发起两个 tool_calls(id=call_a, call_b),
+//   持久化后只有 call_a 的 tool 结果落了盘,call_b 的中途丢失(工具抛异常 /
+//   并发执行被 abort)。消息序列变成 [assistant{tool_calls=[a,b]}, tool{a}]。
+// **期望行为**:输出 3 条 [assistant, tool{a, real result}, tool{b, stub}]。
+//   call_a 的真实结果原样保留(content="grep result"),call_b 的 stub 紧跟在后,
+//   顺序不能颠倒(OpenAI 不要求 id 顺序,但 tool 消息必须连续夹在 assistant 和
+//   下一个非 tool 消息之间)。
+// **修复前 bug 表现**:同用例 7,OpenAI 会 400 提示 `call_b` 没有 tool output;
+//   即便 call_a 是好的,整个请求仍被拒。
+TEST(OpenAiProviderReasoningTest, PartialOrphanInParallelToolCalls) {
+    TestableProvider provider("http://example.invalid", "", "test-model");
+
+    ChatMessage assistant_msg;
+    assistant_msg.role = "assistant";
+    assistant_msg.content = "";
+    assistant_msg.tool_calls = nlohmann::json::array({
+        nlohmann::json{
+            {"id", "call_a"},
+            {"type", "function"},
+            {"function", {{"name", "grep"}, {"arguments", "{}"}}}
+        },
+        nlohmann::json{
+            {"id", "call_b"},
+            {"type", "function"},
+            {"function", {{"name", "glob"}, {"arguments", "{}"}}}
+        }
+    });
+
+    // 只有 call_a 有结果,call_b 是 orphan。
+    ChatMessage tool_a;
+    tool_a.role = "tool";
+    tool_a.content = "grep result";
+    tool_a.tool_call_id = "call_a";
+
+    std::vector<ChatMessage> messages = {assistant_msg, tool_a};
+    std::vector<ToolDef> tools;
+
+    auto body = provider.build_request_body(messages, tools, /*stream=*/false);
+    const auto& msgs = body["messages"];
+    // 期望:assistant, tool(call_a, 真实), tool(call_b, stub) — 共 3 条。
+    ASSERT_EQ(msgs.size(), 3u);
+    EXPECT_EQ(msgs[0].value("role", std::string{}), "assistant");
+    EXPECT_EQ(msgs[1].value("tool_call_id", std::string{}), "call_a");
+    EXPECT_EQ(msgs[1]["content"].get<std::string>(), "grep result");
+    EXPECT_EQ(msgs[2].value("tool_call_id", std::string{}), "call_b");
+    // call_b 的 content 应该是 stub(非空)。
+    EXPECT_FALSE(msgs[2].value("content", std::string{}).empty());
 }
 
 } // namespace

@@ -35,4 +35,16 @@ FramelessHitTestArea classify_frameless_hit_test(const FramelessHitTestInput& in
     return FramelessHitTestArea::Client;
 }
 
+std::optional<FramelessHitTestArea> parse_resize_direction(std::string_view direction) {
+    if (direction == "top") return FramelessHitTestArea::Top;
+    if (direction == "bottom") return FramelessHitTestArea::Bottom;
+    if (direction == "left") return FramelessHitTestArea::Left;
+    if (direction == "right") return FramelessHitTestArea::Right;
+    if (direction == "top-left") return FramelessHitTestArea::TopLeft;
+    if (direction == "top-right") return FramelessHitTestArea::TopRight;
+    if (direction == "bottom-left") return FramelessHitTestArea::BottomLeft;
+    if (direction == "bottom-right") return FramelessHitTestArea::BottomRight;
+    return std::nullopt;
+}
+
 } // namespace acecode::desktop

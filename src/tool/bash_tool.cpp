@@ -190,8 +190,22 @@ static ToolResult execute_bash(const std::string& arguments_json, const ToolCont
 
         DWORD wait_result = WaitForSingleObject(pi.hProcess, 0);
         if (wait_result == WAIT_OBJECT_0) {
-            // Process finished - drain remaining output
-            while (ReadFile(hReadPipe, buffer, sizeof(buffer), &bytes_read, nullptr) && bytes_read > 0) {
+            // Process finished - drain remaining output.
+            // **不能**裸 ReadFile:Windows 管道在同步模式下,只要还有任何进程
+            // 持有写端,ReadFile 在数据耗尽时会**永久阻塞**。直接子进程(cmd.exe)
+            // 已退出,但孙进程(典型场景:`agent-browser open` 启动的 Chrome,
+            // 后台 daemon,detached 的 powershell 子任务……)如果继承了同一根管道,
+            // 仍 hold 着写端,ReadFile 永远等不到 EOF。这条循环之外才有 abort /
+            // timeout 检查,一旦在这里 block 住,Esc / Ctrl+C / 120s 超时全部失效,
+            // TUI 表现为"卡死"。修复:沿用下方 abort / timeout drain 一样的模式,
+            // 只 drain 当前可读字节,管道里没数据立刻 break,把后台孙进程的命运
+            // 交给 OS。
+            while (true) {
+                DWORD drain_avail = 0;
+                if (!PeekNamedPipe(hReadPipe, nullptr, 0, nullptr, &drain_avail, nullptr)) break;
+                if (drain_avail == 0) break;
+                if (!ReadFile(hReadPipe, buffer, sizeof(buffer), &bytes_read, nullptr)) break;
+                if (bytes_read == 0) break;
                 process_raw(buffer, bytes_read);
             }
             break;

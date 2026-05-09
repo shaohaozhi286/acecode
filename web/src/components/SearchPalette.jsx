@@ -7,7 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../lib/api.js';
 import { connection } from '../lib/connection.js';
 import { rankSessions, searchRelativeTime } from '../lib/searchSessions.js';
-import { sessionDisplayTitle } from '../lib/sessionTitle.js';
+import { sessionDisplayTitle, withNewSessionDisplayTitles } from '../lib/sessionTitle.js';
 import { clsx } from '../lib/format.js';
 import { VsIcon } from './Icon.jsx';
 
@@ -79,7 +79,7 @@ export function SearchPalette({ open, onClose, currentWorkspaceHash = '', onSele
 
   // 排序后的可见列表;空查询时取最近 50 条。
   const items = useMemo(() => {
-    const ranked = rankSessions(data.sessions || [], query, Date.now());
+    const ranked = rankSessions(withNewSessionDisplayTitles(data.sessions || []), query, Date.now());
     return query.trim() ? ranked : ranked.slice(0, MAX_EMPTY_RESULTS);
   }, [data, query]);
 
@@ -204,7 +204,7 @@ export function SearchPalette({ open, onClose, currentWorkspaceHash = '', onSele
                 )}
               >
                 <VsIcon name="code" size={16} className="text-fg-mute shrink-0" />
-                <span className="flex-1 truncate">{sessionDisplayTitle(s, '(无标题)')}</span>
+                <span className="flex-1 truncate">{sessionDisplayTitle(s)}</span>
                 <span className="text-[12px] text-fg-mute shrink-0">{right}</span>
               </div>
             );

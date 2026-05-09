@@ -415,6 +415,9 @@ AppConfig load_config() {
                     LOG_WARN("[config] 'desktop' must be an object, ignoring");
                 } else {
                     const auto& dj = j["desktop"];
+                    if (dj.contains("close_to_tray") && dj["close_to_tray"].is_boolean()) {
+                        cfg.desktop.close_to_tray = dj["close_to_tray"].get<bool>();
+                    }
                     if (dj.contains("notifications")) {
                         if (!dj["notifications"].is_object()) {
                             LOG_WARN("[config] 'desktop.notifications' must be an object, "
@@ -721,6 +724,7 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
             tj["page_keys_single_line"] = cfg.tui.page_keys_single_line;
         if (!tj.empty()) j["tui"] = tj;
 
+        DesktopConfig desk_d;
         DesktopNotificationsConfig dn_d;
         nlohmann::json dnj = nlohmann::json::object();
         if (cfg.desktop.notifications.enabled != dn_d.enabled)
@@ -731,9 +735,13 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
             dnj["on_completion"] = cfg.desktop.notifications.on_completion;
         if (cfg.desktop.notifications.suppress_when_focused != dn_d.suppress_when_focused)
             dnj["suppress_when_focused"] = cfg.desktop.notifications.suppress_when_focused;
+        nlohmann::json deskj = nlohmann::json::object();
+        if (cfg.desktop.close_to_tray != desk_d.close_to_tray)
+            deskj["close_to_tray"] = cfg.desktop.close_to_tray;
         if (!dnj.empty()) {
-            nlohmann::json deskj = nlohmann::json::object();
             deskj["notifications"] = dnj;
+        }
+        if (!deskj.empty()) {
             j["desktop"] = deskj;
         }
 

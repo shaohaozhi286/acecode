@@ -53,9 +53,27 @@ public:
 
     // Windows frameless desktop chrome helpers. 非 Windows 平台返回 false。
     bool start_window_drag();
+    // 从 JS 端发起原生 resize:WebView2 子窗口默认会吃掉 WM_NCHITTEST,导致
+    // 父窗口在子窗口覆盖区域拿不到 resize 命中。前端在窗口边缘 strip 上 mousedown
+    // 时调这个方法,内部 ReleaseCapture + WM_NCLBUTTONDOWN(HT*) 让 Windows
+    // 进入和"鼠标真在 NC 区按下"等价的原生 resize 循环 — Aero snap / Win+方向键
+    // 这些系统手势也跟着可用。direction 见 parse_resize_direction。最大化时拒绝
+    // 调用并返回 false,避免 Windows 从屏幕边拉出诡异的还原行为。
+    bool start_window_resize(const std::string& direction);
     bool minimize_window();
     bool toggle_maximize_window();
+    // 关闭请求(× / Alt+F4 / aceDesktop_closeWindow)。会先派发到
+    // close_request_handler;handler 返回 true 表示已消化(典型如"隐藏到托盘"),
+    // 返回 false / 未注册 → 走原 DestroyWindow 退出路径。
     bool close_window();
+
+    // 注册"关窗请求"拦截 handler。回调返回 true → 不 DestroyWindow,留住进程。
+    // 见 openspec/changes/enhance-desktop-tray-menu(close_to_tray)。
+    void set_close_request_handler(std::function<bool()> handler);
+
+    // 真正退出请求 — 绕过 close_request_handler 直接 DestroyWindow + PostQuitMessage。
+    // 用于托盘 "退出" 菜单等需要无条件退出的入口。
+    void request_quit();
 
     // 注册同步 binding。fn 接到的是 JSON array 字符串(JS 端调时传的实参打包),
     // 返回的字符串必须是合法 JSON value(对象/数组/字符串字面/数字/null)。

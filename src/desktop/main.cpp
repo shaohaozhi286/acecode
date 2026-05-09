@@ -19,6 +19,7 @@
 #include "notifications_win.hpp"
 #include "open_in_explorer.hpp"
 #include "pick_active.hpp"
+#include "single_instance.hpp"
 #include "splash_screen.hpp"
 #include "tray_icon_win.hpp"
 #include "url_builder.hpp"
@@ -328,8 +329,28 @@ int main(int, char**) {
              (acecode::desktop::enable_desktop_dpi_awareness() ? "enabled" : "not enabled"));
 #endif
 
+    // 单例锁:per-user。已有实例时把对方拉前 + 自己 exit(0),避免多份 desktop /
+    // 多份 daemon 子进程同时存在。设计见 src/desktop/single_instance.hpp。
+    SingleInstance singleton;
+    if (!singleton.try_acquire()) {
+        LOG_INFO("[desktop] another acecode-desktop instance is running, focusing it");
+        focus_existing_instance(); // POSIX 端是 stub,返回 false 也只是 exit
+        return 0;
+    }
+
     SplashScreen splash;
     splash.show();
+
+    // 加载 desktop 端用到的 config(目前只关心 desktop.close_to_tray)。
+    // 失败回退默认 AppConfig — 不阻断启动,与 daemon 一致;只是 close-to-tray
+    // 默认值仍生效。Daemon 子进程会自己再次 load_config,所以 Desktop 这次读
+    // 不会污染或覆盖 daemon 端配置。
+    acecode::AppConfig desktop_cfg;
+    try {
+        desktop_cfg = acecode::load_config();
+    } catch (const std::exception& e) {
+        LOG_WARN(std::string("[desktop] load_config failed, using defaults: ") + e.what());
+    }
 
     std::string daemon_exe = locate_daemon_exe();
     if (daemon_exe.empty()) {
@@ -487,43 +508,85 @@ int main(int, char**) {
     bool tray_ok = init_tray_icon(
         /*on_show=*/[&bring_window_foreground]() { bring_window_foreground(); },
         /*on_quit=*/[&host]() {
-            // host.close_window 走 WM_CLOSE → host_window_proc 走 PostQuitMessage,
-            // host.run() 退出。和左上角×按钮路径一致。
-            host.close_window();
+            // 托盘 "退出" 必须绕过 close_request_handler(关窗 = 隐藏到托盘),
+            // 否则等于点 ×,根本退不出去。走 request_quit 直接 DestroyWindow。
+            host.request_quit();
         },
         &tray_message_hwnd);
-    if (tray_ok) {
-        init_notifications(tray_message_hwnd);
-        // click_handler:把窗口拉前 + 通过 webview eval 让前端跳到对应 session。
-        // 同 workspace 直接调 in-page bridge;跨 workspace 走 search palette
-        // 已有的 activateAndOpenSession 路径(整页 navigate ?open=<sid>)。
-        set_click_handler([&host, &active_mu, &active_hash_dynamic, &bring_window_foreground](
-                              const std::string& /*id*/,
+
+    // close-to-tray:WM_CLOSE / Alt+F4 / aceDesktop_closeWindow 全部归到
+    // ShowWindow(SW_HIDE),保留 daemon + tray 在后台。`config.desktop.close_to_tray
+    // == false` 或 tray 安装失败时跳过该 handler,回到旧的关窗即退出。
+    if (tray_ok && desktop_cfg.desktop.close_to_tray) {
+        host.set_close_request_handler([&host]() {
+#ifdef _WIN32
+            auto* hwnd = static_cast<HWND>(host.native_window());
+            if (hwnd && ::IsWindow(hwnd)) {
+                ::ShowWindow(hwnd, SW_HIDE);
+                return true;
+            }
+#else
+            (void)host;
+#endif
+            return false;
+        });
+    }
+
+    // 共享的 "focus session" lambda — toast 点击 / tray 菜单 session 项 / 直接
+     // bridge 调用都走同一份 JS 派发逻辑。
+    auto focus_session = [&host, &active_mu, &active_hash_dynamic, &bring_window_foreground](
                               const std::string& workspace_hash,
                               const std::string& session_id) {
+        bring_window_foreground();
+        std::string current_active;
+        {
+            std::lock_guard<std::mutex> lk(active_mu);
+            current_active = active_hash_dynamic;
+        }
+        // 用 nlohmann::json 做字符串字面量转义,避免手拼 JS 时被 sid 里的引号
+        // / 反斜杠 / 控制字符注入。
+        std::string ws_lit = nlohmann::json(workspace_hash).dump();
+        std::string sid_lit = nlohmann::json(session_id).dump();
+        std::string js;
+        const bool same_workspace = (workspace_hash.empty() ||
+                                     workspace_hash == current_active);
+        if (same_workspace) {
+            js = "(function(){try{if(window.aceDesktop_focusSessionFromBridge){"
+                 "window.aceDesktop_focusSessionFromBridge(" + sid_lit + ");}"
+                 "}catch(e){}})();";
+        } else {
+            js = "(function(){try{if(window.aceDesktop_activateAndOpenSession){"
+                 "window.aceDesktop_activateAndOpenSession(" + ws_lit + "," + sid_lit + ");}"
+                 "}catch(e){}})();";
+        }
+        host.eval(js);
+    };
+
+    if (tray_ok) {
+        init_notifications(tray_message_hwnd);
+        // toast click_handler:复用 focus_session。
+        set_click_handler([focus_session](const std::string& /*id*/,
+                                          const std::string& workspace_hash,
+                                          const std::string& session_id) {
+            focus_session(workspace_hash, session_id);
+        });
+
+        // tray 菜单 session click 也走 focus_session。
+        set_tray_session_click_handler(
+            [focus_session](const std::string& workspace_hash, const std::string& session_id) {
+                focus_session(workspace_hash, session_id);
+            });
+
+        // tray 菜单 "新建会话":拉前 + 调前端钩子(没注册时安全 no-op)。
+        set_tray_new_chat_handler([&host, &bring_window_foreground]() {
             bring_window_foreground();
-            std::string current_active;
-            {
-                std::lock_guard<std::mutex> lk(active_mu);
-                current_active = active_hash_dynamic;
-            }
-            // 用 nlohmann::json 做字符串字面量转义,避免手拼 JS 时被 sid 里的引号
-            // / 反斜杠 / 控制字符注入。
-            std::string ws_lit = nlohmann::json(workspace_hash).dump();
-            std::string sid_lit = nlohmann::json(session_id).dump();
-            std::string js;
-            const bool same_workspace = (workspace_hash.empty() ||
-                                         workspace_hash == current_active);
-            if (same_workspace) {
-                js = "(function(){try{if(window.aceDesktop_focusSessionFromBridge){"
-                     "window.aceDesktop_focusSessionFromBridge(" + sid_lit + ");}"
-                     "}catch(e){}})();";
-            } else {
-                js = "(function(){try{if(window.aceDesktop_activateAndOpenSession){"
-                     "window.aceDesktop_activateAndOpenSession(" + ws_lit + "," + sid_lit + ");}"
-                     "}catch(e){}})();";
-            }
-            host.eval(js);
+            host.eval("(function(){try{if(window.aceDesktop_createNewSession)"
+                      "window.aceDesktop_createNewSession();}catch(e){}})();");
+        });
+
+        // tray 菜单 "打开 ACECode":等价单击 tray 行为。
+        set_tray_open_app_handler([&bring_window_foreground]() {
+            bring_window_foreground();
         });
     } else {
         LOG_WARN("[desktop] tray icon unavailable; OS notifications will be disabled");
@@ -568,6 +631,24 @@ int main(int, char**) {
 
     host.bind("aceDesktop_startWindowDrag", [&](const std::string& /*req*/) -> std::string {
         return nlohmann::json{{"ok", host.start_window_drag()}}.dump();
+    });
+    // 前端在窗口 4 边的不可见 strip 上 mousedown 时调用,内部 SendMessage 进入
+    // 原生 resize 循环。direction 见 parse_resize_direction;非法/最大化/平台
+    // 不支持(macOS/Linux 当前 stub)→ ok:false 但不抛错,前端静默吞掉。
+    host.bind("aceDesktop_startWindowResize", [&](const std::string& req) -> std::string {
+        std::string direction;
+        try {
+            auto arr = nlohmann::json::parse(req);
+            if (arr.is_array() && !arr.empty() && arr[0].is_string()) {
+                direction = arr[0].get<std::string>();
+            }
+        } catch (...) {
+            // 非法 JSON 也走下面的 ok:false 分支
+        }
+        if (direction.empty()) {
+            return nlohmann::json{{"ok", false}, {"error", "expect [direction]"}}.dump();
+        }
+        return nlohmann::json{{"ok", host.start_window_resize(direction)}}.dump();
     });
     host.bind("aceDesktop_minimizeWindow", [&](const std::string& /*req*/) -> std::string {
         return nlohmann::json{{"ok", host.minimize_window()}}.dump();
@@ -634,6 +715,47 @@ int main(int, char**) {
             return nlohmann::json{{"ok", true}}.dump();
         } catch (const std::exception& e) {
             return nlohmann::json{{"ok", false}, {"error", e.what()}}.dump();
+        }
+    });
+
+    // bridge: setTrayMenu — 前端推送 pinned + recent session 列表给 native 缓存。
+    // 右键托盘时 native 取这份缓存渲染 Codex 风格菜单。
+    // payload: [{ workspace_name, pinned: [{session_id, workspace_hash, title, subtitle}], recent: [...] }]
+    // 见 openspec/changes/enhance-desktop-tray-menu。
+    host.bind("aceDesktop_setTrayMenu", [&](const std::string& req) -> std::string {
+        try {
+            auto arr = nlohmann::json::parse(req);
+            if (!arr.is_array() || arr.empty() || !arr[0].is_object()) {
+                return nlohmann::json{{"ok", false}, {"error", "expect [{workspace_name, pinned, recent}]"}}.dump();
+            }
+            const auto& p = arr[0];
+            TrayMenuPayload payload;
+            if (p.contains("workspace_name") && p["workspace_name"].is_string()) {
+                payload.workspace_name = p["workspace_name"].get<std::string>();
+            }
+            auto fill = [](const nlohmann::json& src, std::vector<TrayMenuItem>& dst) {
+                if (!src.is_array()) return;
+                for (const auto& it : src) {
+                    if (!it.is_object()) continue;
+                    TrayMenuItem item;
+                    if (it.contains("session_id") && it["session_id"].is_string())
+                        item.session_id = it["session_id"].get<std::string>();
+                    if (it.contains("workspace_hash") && it["workspace_hash"].is_string())
+                        item.workspace_hash = it["workspace_hash"].get<std::string>();
+                    if (it.contains("title") && it["title"].is_string())
+                        item.title = it["title"].get<std::string>();
+                    if (it.contains("subtitle") && it["subtitle"].is_string())
+                        item.subtitle = it["subtitle"].get<std::string>();
+                    if (item.session_id.empty()) continue; // 没有 session_id 的项无意义,跳过
+                    dst.push_back(std::move(item));
+                }
+            };
+            if (p.contains("pinned")) fill(p["pinned"], payload.pinned);
+            if (p.contains("recent")) fill(p["recent"], payload.recent);
+            set_tray_menu_payload(std::move(payload));
+            return nlohmann::json{{"ok", true}}.dump();
+        } catch (const std::exception& e) {
+            return nlohmann::json{{"ok", false}, {"error", std::string("parse: ") + e.what()}}.dump();
         }
     });
 
@@ -759,6 +881,9 @@ int main(int, char**) {
         if (!is_existing_directory(m->cwd)) {
             return {{"error", "workspace path is not available: " + m->cwd}};
         }
+        // 切 workspace 前先清托盘菜单缓存,避免新 workspace 第一次 setTrayMenu 之前
+        // 用户右键看到旧 workspace 的 session 残留(decision 5 in design.md)。
+        clear_tray_menu_payload();
         ActivateRequest req;
         req.hash = kSharedDaemonSlotHash;
         req.cwd = choose_launch_cwd(m->cwd, proc_cwd, daemon_exe);

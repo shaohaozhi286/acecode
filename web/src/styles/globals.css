@@ -541,6 +541,282 @@ body {
 .ace-diff .d2h-del  { background: var(--ace-danger-bg); color: var(--ace-danger); }
 .ace-diff .d2h-info { background: var(--ace-surface-alt); color: var(--ace-fg-mute); }
 
+/* Codex-style change review surfaces */
+.ace-change-totals {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: var(--ace-fg-2);
+  font-size: 13px;
+  white-space: nowrap;
+}
+.ace-change-totals-compact {
+  font-size: 12px;
+}
+.ace-change-add,
+.ace-change-del {
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+.ace-change-add { color: var(--ace-ok); }
+.ace-change-del { color: var(--ace-danger); }
+
+.ace-change-card {
+  width: min(100%, 680px);
+  align-self: center;
+  border: 1px solid var(--ace-border);
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--ace-surface) 96%, var(--ace-bg));
+  box-shadow: var(--ace-shadow);
+  overflow: hidden;
+}
+.ace-change-card-header {
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 10px 0 12px;
+  border-bottom: 1px solid var(--ace-border-soft);
+}
+.ace-change-card-title {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ace-change-card-title-stack {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.ace-change-card-subtitle {
+  min-width: 0;
+  max-width: 480px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ace-fg-mute);
+  font-size: 11px;
+}
+.ace-change-card-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.ace-change-ghost-btn,
+.ace-change-icon-btn {
+  height: 26px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--ace-fg-mute);
+  cursor: pointer;
+  transition: background .15s ease, color .15s ease;
+}
+.ace-change-ghost-btn {
+  padding: 0 8px;
+  font-size: 12px;
+}
+.ace-change-icon-btn {
+  width: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.ace-change-ghost-btn:hover:not(:disabled),
+.ace-change-icon-btn:hover {
+  background: var(--ace-surface-hi);
+  color: var(--ace-fg);
+}
+.ace-change-ghost-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.ace-change-card-body {
+  max-height: min(52vh, 520px);
+  overflow: auto;
+}
+.ace-change-card-file + .ace-change-card-file {
+  border-top: 1px solid var(--ace-border-soft);
+}
+.ace-change-file-row {
+  width: 100%;
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 10px;
+  border: 0;
+  background: transparent;
+  color: var(--ace-fg);
+  cursor: pointer;
+  text-align: left;
+}
+.ace-change-file-row:hover,
+.ace-change-file-row.is-selected {
+  background: var(--ace-surface-hi);
+}
+.ace-change-file-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.ace-change-file-counts {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  font-size: 11px;
+}
+.ace-change-inline-diff {
+  border-top: 1px solid var(--ace-border-soft);
+  background: var(--ace-surface);
+  overflow-x: auto;
+}
+.ace-change-diff-compact,
+.ace-review-diff {
+  margin-top: 0;
+}
+.ace-change-diff-compact .d2h-file-wrapper,
+.ace-review-diff .d2h-file-wrapper {
+  border: 0;
+  border-radius: 0;
+  margin: 0;
+}
+.ace-change-diff-compact .d2h-file-header,
+.ace-review-diff .d2h-file-header {
+  display: none;
+}
+.ace-change-diff-compact .d2h-code-line,
+.ace-change-diff-compact .d2h-code-side-line,
+.ace-review-diff .d2h-code-line,
+.ace-review-diff .d2h-code-side-line {
+  padding: 0 6px;
+}
+/* diff2html 默认让行号 `position: absolute` + `width: 7.5em` 浮在最左,靠
+   `.d2h-code-line { padding: 0 8em; }` 给它让出 8em 左侧空间。我们上面把
+   padding 覆盖成 6px,这条让位规则就被吃掉了 —— 绝对定位的行号会**盖在**
+   代码内容前 ~7.5em 上,看起来就是每行开头被切掉一段(用户报告"显示一坨
+   大便")。这里把行号改回正常文档流,让它跟代码并排占位,padding 6px 才
+   不会再撞行号。同时给行号一个紧凑宽度,适配窄面板(原 7.5em 在 280px
+   面板里太宽)。 */
+.ace-change-diff-compact .d2h-code-linenumber,
+.ace-change-diff-compact .d2h-code-side-linenumber,
+.ace-review-diff .d2h-code-linenumber,
+.ace-review-diff .d2h-code-side-linenumber {
+  position: static;
+  width: 3.5em;
+  min-width: 3.5em;
+  padding: 0 6px;
+  text-align: right;
+  flex-shrink: 0;
+}
+/* line-num1(老行号)与 line-num2(新行号)默认 num1 `float: left`、num2
+   `float: right` + 强制 `width: 3.5em`。我们把外层 cell 宽度收紧后,
+   num2 的 3.5em 在窄 cell 里装不下 → 被挤到下一行 → 整行 2 倍高(用户
+   截图里 "-" 行行高翻倍即此 bug)。修复:取消 float、把宽度交回 cell,
+   让两个数字 inline 共享 cell 宽度。"-" 行 num2 为空、"+" 行 num1 为空
+   都不会再占额外横向空间。 */
+.ace-change-diff-compact .d2h-code-linenumber .line-num1,
+.ace-change-diff-compact .d2h-code-linenumber .line-num2,
+.ace-review-diff .d2h-code-linenumber .line-num1,
+.ace-review-diff .d2h-code-linenumber .line-num2 {
+  float: none;
+  display: inline;
+  width: auto;
+  min-width: 0;
+  padding: 0;
+}
+.ace-change-empty-diff {
+  padding: 12px;
+  color: var(--ace-fg-mute);
+  font-size: 12px;
+}
+
+.ace-change-glass-wrap {
+  position: relative;
+  z-index: 12;
+  height: 0;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
+.ace-change-glass-dock {
+  transform: translateY(-22px);
+  width: min(760px, calc(100% - 40px));
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 14px 0 18px;
+  border: 1px solid color-mix(in oklab, var(--ace-border) 74%, transparent);
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--ace-surface) 68%, transparent);
+  color: var(--ace-fg);
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.10);
+  backdrop-filter: blur(18px) saturate(1.28);
+  -webkit-backdrop-filter: blur(18px) saturate(1.28);
+  pointer-events: auto;
+}
+.ace-change-glass-dock:hover {
+  border-color: color-mix(in oklab, var(--ace-accent) 35%, var(--ace-border));
+  background: color-mix(in oklab, var(--ace-surface) 76%, transparent);
+}
+.ace-change-glass-main {
+  flex: 1;
+  min-width: 0;
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+.ace-change-glass-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--ace-fg-mute);
+  font-size: 12px;
+  font-weight: 600;
+}
+.ace-change-glass-dock:hover .ace-change-glass-action {
+  color: var(--ace-accent);
+}
+.ace-change-glass-close {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--ace-fg-mute);
+  cursor: pointer;
+}
+.ace-change-glass-close:hover {
+  background: var(--ace-surface-hi);
+  color: var(--ace-fg);
+}
+[data-theme="dark"] .ace-change-glass-dock {
+  background: color-mix(in oklab, var(--ace-surface) 56%, transparent);
+  box-shadow: 0 16px 42px rgba(0, 0, 0, 0.36);
+}
+
 /* hover actions on chat messages (复制 / 分叉) */
 .ace-msg-actions {
   flex: 0 0 auto;
@@ -752,8 +1028,10 @@ body {
   border-bottom-color: var(--ace-accent);
 }
 
-/* tab 行右端的折叠按钮,vsCode 风格的 splitter icon */
-.ace-side-panel-collapse-btn {
+/* tab 行右端的折叠按钮,vsCode 风格的 splitter icon。最大化按钮 .ace-side-panel-maximize-btn
+   跟它共享同一套尺寸/hover/focus 样式 — 视觉上排在收起按钮左边构成"操作栏"。 */
+.ace-side-panel-collapse-btn,
+.ace-side-panel-maximize-btn {
   width: 28px;
   height: 32px;
   display: inline-flex;
@@ -766,13 +1044,79 @@ body {
   flex-shrink: 0;
   transition: color .15s ease, background .15s ease;
 }
-.ace-side-panel-collapse-btn:hover {
+.ace-side-panel-collapse-btn:hover,
+.ace-side-panel-maximize-btn:hover {
   color: var(--ace-fg);
   background: var(--ace-surface-alt);
 }
-.ace-side-panel-collapse-btn:focus-visible {
+.ace-side-panel-collapse-btn:focus-visible,
+.ace-side-panel-maximize-btn:focus-visible {
   outline: 2px solid var(--ace-accent);
   outline-offset: -2px;
+}
+/* 最大化激活态:按钮持久 accent 色,与 hover 区分。 */
+.ace-side-panel-maximize-btn[aria-pressed="true"] {
+  color: var(--ace-accent);
+}
+.ace-side-panel-maximize-btn[aria-pressed="true"]:hover {
+  color: var(--ace-accent);
+  background: var(--ace-accent-bg);
+}
+
+.ace-review-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--ace-surface-alt);
+}
+.ace-review-summary {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--ace-border);
+  background: color-mix(in oklab, var(--ace-surface) 88%, var(--ace-surface-hi));
+  flex-shrink: 0;
+}
+.ace-review-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--ace-fg);
+  font-size: 13px;
+  font-weight: 600;
+}
+.ace-review-file-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px;
+}
+.ace-review-file {
+  border: 1px solid var(--ace-border);
+  border-radius: 7px;
+  background: var(--ace-surface);
+  overflow: hidden;
+}
+.ace-review-file + .ace-review-file {
+  margin-top: 8px;
+}
+.ace-review-diff-scroll {
+  border-top: 1px solid var(--ace-border);
+  overflow: auto;
+  background: var(--ace-surface);
+}
+.ace-review-diff {
+  min-width: 720px;
+}
+.ace-review-diff .d2h-code-side-linenumber,
+.ace-review-diff .d2h-code-linenumber {
+  background: color-mix(in oklab, var(--ace-surface-hi) 70%, var(--ace-surface));
+  color: var(--ace-fg-mute);
 }
 
 /* 折叠态时 chat header 行内显示的展开按钮(对齐 codex 视觉) */
@@ -860,12 +1204,35 @@ body {
 .ace-side-preview-code .ace-code-copy-btn,
 .ace-side-preview-code .ace-code-action-btn {
   background: color-mix(in oklab, var(--ace-code-bg) 82%, var(--ace-surface));
-  border-color: color-mix(in oklab, var(--ace-code-fg) 14%, transparent);
+  border-color: color-mix(in oklab, var(--ace-code-fg) 32%, transparent);
+  color: var(--ace-code-fg);
+  opacity: 0.85;
+}
+.ace-side-preview-code:hover .ace-code-copy-btn,
+.ace-side-preview-code:hover .ace-code-action-btn,
+.ace-side-preview-code .ace-code-copy-btn:focus-visible,
+.ace-side-preview-code .ace-code-action-btn:focus-visible {
+  opacity: 1;
+}
+.ace-side-preview-code .ace-code-copy-btn:hover,
+.ace-side-preview-code .ace-code-action-btn:hover {
+  background: color-mix(in oklab, var(--ace-code-fg) 12%, var(--ace-code-bg));
+  border-color: color-mix(in oklab, var(--ace-code-fg) 50%, transparent);
+  color: var(--ace-code-fg);
+}
+.ace-side-preview-code .ace-code-copy-btn .ace-icon,
+.ace-side-preview-code .ace-code-action-btn .ace-icon {
+  opacity: 0.95;
+}
+.ace-side-preview-code .ace-code-copy-btn .ace-icon[data-monochrome="true"],
+.ace-side-preview-code .ace-code-action-btn .ace-icon[data-monochrome="true"] {
+  filter: invert(1) brightness(0.92);
 }
 .ace-side-preview-code .ace-code-wrap-btn.is-active {
   background: color-mix(in oklab, var(--ace-accent) 18%, var(--ace-code-bg));
   border-color: color-mix(in oklab, var(--ace-accent) 68%, transparent);
   color: var(--ace-accent);
+  opacity: 1;
 }
 .ace-preview pre {
   margin: 0;

@@ -4,7 +4,7 @@
 // 三个 tab,设计稿原画的"上 tab + 下方共用代码预览区"两段式被用户校正:
 // 不做共用代码区,三个 tab 各自占满下半区。
 //   - 文件: lazy 加载文件树,点击文件 → 自动切预览 tab + load
-//   - 变更: 当前 session 内 tool_end.hunks 前端聚合(file_edit/file_write 才有
+//   - 审查: 当前 session 内 tool_end.hunks 前端聚合(file_edit/file_write 才有
 //           hunks,bash sed 抓不到 — 已知 limitation,空态文案要明示)
 //   - 预览: 选中文件 highlight.js 高亮原文,5MB cap / binary 拒绝时友好提示
 //
@@ -16,25 +16,29 @@
 // 整面板不渲染。
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import * as Diff2Html from 'diff2html';
 import hljs from 'highlight.js/lib/core';
 import { ApiError, createApi } from '../lib/api.js';
-import { aggregateHunksFromMessages } from '../lib/sessionChanges.js';
-import { hunksToUnifiedDiff } from '../lib/diff.js';
+import { aggregateHunksFromMessages, summarizeChangeGroups } from '../lib/sessionChanges.js';
 import { langForFile } from '../lib/lang.js';
 import { joinWorkspacePath } from '../lib/desktopContextMenu.js';
 import { usePreference } from '../lib/usePreference.js';
 import { clsx, formatBytes } from '../lib/format.js';
 import { CopyableCodeFrame } from './CopyableCodeFrame.jsx';
 import { VsIcon } from './Icon.jsx';
+import { ChangeReviewPanel } from './ChangeReview.jsx';
 
 const FILE_PREVIEW_WRAP_STORAGE_KEY = 'acecode.filePreviewWrap.v1';
 
 const TABS = [
   { key: 'files',   label: '文件' },
-  { key: 'changes', label: '变更' },
+  { key: 'changes', label: '审查' },
   { key: 'preview', label: '预览' },
 ];
+
+// 切 cwd / 没有 cwd 时给 FileTree 传一个稳定的空 Map / Set,避免每次渲染
+// 都 new 一份导致 useEffect deps 抖动 / 子组件 useCallback 失效。
+const EMPTY_TREE_CACHE    = new Map();
+const EMPTY_EXPANDED_DIRS = new Set();
 
 function validateBooleanPreference(value) {
   return typeof value === 'boolean';
@@ -50,7 +54,12 @@ function escapeHtml(s) {
 // ────────────────────────────────────────────────────────────
 // 文件 tab — lazy 文件树
 // ────────────────────────────────────────────────────────────
-function FileTree({ api, cwd, expandedDirs, setExpandedDirs, treeCache, setTreeCache,
+// treeCache / expandedDirs 由父组件按 cwd-key 维护(见 SidePanel 主组件),
+// 这样 tab 切换 / session 切换都能保留同一 cwd 的缓存,而 cwd 切换时直接读不到
+// 不会有任何"清缓存"的并发写者 — 之前父子两边各写一次 treeCache 的 child-first
+// effect 竞争(loadDir('') 守卫读到旧 treeCache 直接 bail,父级 setTreeCache(new Map())
+// 又跑得更晚把刚拉的根清掉)在这个数据结构下不复存在。
+function FileTree({ api, cwd, treeCache, setTreeCache, expandedDirs, setExpandedDirs,
                     selectedPath, onPickFile }) {
   const [loading, setLoading] = useState(new Set()); // path 集合,正在请求中
   const [errors, setErrors]   = useState(new Map()); // path → 错误文案
@@ -70,11 +79,11 @@ function FileTree({ api, cwd, expandedDirs, setExpandedDirs, treeCache, setTreeC
     }
   }, [api, cwd, treeCache, loading, setTreeCache]);
 
-  // 首次 mount + cwd 变 → 拉根
+  // 首次 mount + cwd 变 → 拉根。treeCache 是 cwd 私有的,新 cwd 必然为空 Map,
+  // loadDir 守卫不会命中,所以一定会发请求。
   useEffect(() => {
     if (!cwd) return;
     loadDir('');
-    // cwd 变会触发外层 reset,treeCache 已清空 — 这里只负责拉新根
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cwd]);
 
@@ -163,70 +172,13 @@ function FileTree({ api, cwd, expandedDirs, setExpandedDirs, treeCache, setTreeC
 }
 
 // ────────────────────────────────────────────────────────────
-// 变更 tab — 聚合 messages.hunks
+// 审查 tab — 聚合 messages.hunks
 // ────────────────────────────────────────────────────────────
-function ChangesList({ messages }) {
-  const groups = useMemo(() => aggregateHunksFromMessages(messages || []), [messages]);
-
-  if (groups.length === 0) {
-    return (
-      <div className="flex-1 flex flex-col items-center justify-center text-center px-4 py-8 gap-2">
-        <div className="text-fg-mute text-[12px]">本会话暂无文件变更</div>
-        <div className="text-fg-mute text-[10px] opacity-70">
-          仅显示 file_edit / file_write 工具的改动
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="flex-1 overflow-y-auto px-2 py-2 flex flex-col gap-2">
-      {groups.map((g) => (
-        <ChangeGroup key={g.file} group={g} />
-      ))}
-    </div>
-  );
-}
-
-function ChangeGroup({ group }) {
-  const [open, setOpen] = useState(true);
-  const diffHtml = useMemo(() => {
-    if (!open) return '';
-    const unified = hunksToUnifiedDiff(group.hunks, group.file);
-    if (!unified) return '';
-    try {
-      return Diff2Html.html(unified, {
-        drawFileList: false,
-        outputFormat: 'line-by-line',
-        matching: 'lines',
-      });
-    } catch {
-      return '';
-    }
-  }, [open, group]);
-
-  return (
-    <div className="border border-border rounded-md bg-surface overflow-hidden">
-      <button
-        type="button"
-        className="w-full flex items-center gap-1.5 px-2 py-1.5 cursor-pointer hover:bg-surface-hi text-left"
-        onClick={() => setOpen((v) => !v)}
-      >
-        <VsIcon name={open ? 'glyphDown' : 'expandRight'} size={9} />
-        <VsIcon name="file" size={13} mono={false} />
-        <span className="text-[11px] font-mono truncate flex-1">{group.file}</span>
-        {group.totalAdditions > 0 && (
-          <span className="text-[10px] text-ok font-mono">+{group.totalAdditions}</span>
-        )}
-        {group.totalDeletions > 0 && (
-          <span className="text-[10px] text-danger font-mono">-{group.totalDeletions}</span>
-        )}
-      </button>
-      {open && diffHtml && (
-        <div className="ace-diff border-t border-border" dangerouslySetInnerHTML={{ __html: diffHtml }} />
-      )}
-    </div>
-  );
+function ChangesList({ messages, groups, summary }) {
+  const fallbackGroups = useMemo(() => aggregateHunksFromMessages(messages || []), [messages]);
+  const reviewGroups = groups || fallbackGroups;
+  const reviewSummary = summary || summarizeChangeGroups(reviewGroups);
+  return <ChangeReviewPanel groups={reviewGroups} summary={reviewSummary} />;
 }
 
 // ────────────────────────────────────────────────────────────
@@ -332,7 +284,21 @@ function PreviewPanel({ api, cwd, path, wrapPreview, onToggleWrapPreview }) {
 // ────────────────────────────────────────────────────────────
 // 主组件
 // ────────────────────────────────────────────────────────────
-export function SidePanel({ sessionRef, sessionId, cwd, messages, width = 280, collapsed = false, onToggleCollapse }) {
+export function SidePanel({
+  sessionRef,
+  sessionId,
+  cwd,
+  messages,
+  changeGroups = null,
+  changeSummary = null,
+  reviewRequest = 0,
+  width = 280,
+  collapsed = false,
+  onToggleCollapse,
+  // 最大化:面板撑满整个聊天区,聊天区被父组件隐藏。再点击切换图标还原。
+  maximized = false,
+  onToggleMaximize,
+}) {
   const api = useMemo(() => createApi(sessionRef || null), [sessionRef?.port, sessionRef?.token, sessionRef?.workspaceHash]);
   const [wrapPreview, setWrapPreview] = usePreference(
     FILE_PREVIEW_WRAP_STORAGE_KEY,
@@ -341,23 +307,54 @@ export function SidePanel({ sessionRef, sessionId, cwd, messages, width = 280, c
   );
 
   const [activeTab,    setActiveTab]    = useState('files');
-  const [expandedDirs, setExpandedDirs] = useState(new Set());
-  const [treeCache,    setTreeCache]    = useState(new Map());
   const [selectedPath, setSelectedPath] = useState(null);
 
-  // cwd 变时整面板 reset(典型场景:desktop 切 workspace → daemon 重启 → 新 cwd)。
-  // 切 session 但 cwd 不变(同 daemon 多 session)→ 文件树/选中/tab 全保留,
-  // 这样用户切来切去不会重复看一遍同一棵 cwd 的文件树。
+  // 按 cwd 隔离的文件树缓存:cwd → Map<path, entries[]>。每个 cwd 一份独立缓存,
+  // 切 cwd 时新 cwd 自动 .get() 取不到,FileTree 守卫不会误命中旧数据,也不需要
+  // 任何"清缓存"动作,从根上消除 child-first effect 竞争(具体细节见 FileTree
+  // 上方注释)。同 cwd 内 tab 切换 / session 切换都能复用,符合"切 session 不
+  // 重复拉同一棵树"的原设计。
+  const [treeCacheByCwd,    setTreeCacheByCwd]    = useState(new Map()); // cwd → Map<path, entries[]>
+  const [expandedDirsByCwd, setExpandedDirsByCwd] = useState(new Map()); // cwd → Set<path>
+
+  const cwdKey = cwd || '';
+  const treeCache    = treeCacheByCwd.get(cwdKey) || EMPTY_TREE_CACHE;
+  const expandedDirs = expandedDirsByCwd.get(cwdKey) || EMPTY_EXPANDED_DIRS;
+
+  const setTreeCache = useCallback((updater) => {
+    setTreeCacheByCwd(prev => {
+      const cur = prev.get(cwdKey) || new Map();
+      const next = typeof updater === 'function' ? updater(cur) : updater;
+      const n = new Map(prev);
+      n.set(cwdKey, next);
+      return n;
+    });
+  }, [cwdKey]);
+  const setExpandedDirs = useCallback((updater) => {
+    setExpandedDirsByCwd(prev => {
+      const cur = prev.get(cwdKey) || new Set();
+      const next = typeof updater === 'function' ? updater(cur) : updater;
+      const n = new Map(prev);
+      n.set(cwdKey, next);
+      return n;
+    });
+  }, [cwdKey]);
+
+  // cwd 变时 tab 回到「文件」,清选中文件(预览 tab 会自动空)。**不**清 treeCache,
+  // 自然按 cwd-key 隔离即可。
   const lastCwd = useRef('');
   useEffect(() => {
     const c = cwd || '';
     if (c === lastCwd.current) return;
     lastCwd.current = c;
     setActiveTab('files');
-    setExpandedDirs(new Set());
-    setTreeCache(new Map());
     setSelectedPath(null);
   }, [cwd]);
+
+  useEffect(() => {
+    if (!reviewRequest) return;
+    setActiveTab('changes');
+  }, [reviewRequest]);
 
   const onPickFile = useCallback((entry) => {
     setSelectedPath(entry.path);
@@ -386,7 +383,21 @@ export function SidePanel({ sessionRef, sessionId, cwd, messages, width = 280, c
             </button>
           ))}
         </div>
-        {onToggleCollapse && (
+        {/* 最大化按钮放在收起按钮的左侧。最大化时聊天区已隐藏,继续允许"收起"
+            会让整个区域变空,所以最大化态下隐藏收起按钮。 */}
+        {onToggleMaximize && (
+          <button
+            type="button"
+            onClick={onToggleMaximize}
+            className="ace-side-panel-maximize-btn"
+            title={maximized ? '还原右侧面板' : '展开为整屏'}
+            aria-label={maximized ? '还原右侧面板' : '展开为整屏'}
+            aria-pressed={maximized}
+          >
+            <VsIcon name={maximized ? 'screenNormal' : 'screenFull'} size={14} />
+          </button>
+        )}
+        {onToggleCollapse && !maximized && (
           <button
             type="button"
             onClick={onToggleCollapse}
@@ -405,15 +416,21 @@ export function SidePanel({ sessionRef, sessionId, cwd, messages, width = 280, c
           <FileTree
             api={api}
             cwd={cwd}
-            expandedDirs={expandedDirs}
-            setExpandedDirs={setExpandedDirs}
             treeCache={treeCache}
             setTreeCache={setTreeCache}
+            expandedDirs={expandedDirs}
+            setExpandedDirs={setExpandedDirs}
             selectedPath={selectedPath}
             onPickFile={onPickFile}
           />
         )}
-        {activeTab === 'changes' && <ChangesList messages={messages} />}
+        {activeTab === 'changes' && (
+          <ChangesList
+            messages={messages}
+            groups={changeGroups}
+            summary={changeSummary}
+          />
+        )}
         {activeTab === 'preview' && (
           <PreviewPanel
             api={api}

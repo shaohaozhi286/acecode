@@ -1327,6 +1327,10 @@ struct WebServer::Impl {
         ([this](const crow::request& req, const std::string&) {
             return cors_preflight(req);
         });
+        CROW_ROUTE(app, "/api/sessions/<string>/file-checkpoints/<string>/restore").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req, const std::string&, const std::string&) {
+            return cors_preflight(req);
+        });
 
         // GET /api/sessions: 内存活跃 + 磁盘历史合并去重。spec 9.3
         CROW_ROUTE(app, "/api/sessions").methods(crow::HTTPMethod::GET)
@@ -1535,6 +1539,68 @@ struct WebServer::Impl {
 
             crow::response r(202);
             r.body = R"({"queued":true})";
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        });
+
+        // POST /api/sessions/:id/file-checkpoints/:message_id/restore:
+        // restore workspace files to the checkpoint captured for that user turn.
+        // This is code-only rewind; conversation history remains intact.
+        CROW_ROUTE(app, "/api/sessions/<string>/file-checkpoints/<string>/restore").methods(crow::HTTPMethod::POST)
+        ([this](const crow::request& req, const std::string& id, const std::string& message_id) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (message_id.empty()) {
+                crow::response r(400);
+                r.body = R"({"error":"message_id required"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            if (!deps.session_registry) {
+                crow::response r(503);
+                r.body = R"({"error":"session registry unavailable"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            auto* entry = deps.session_registry->lookup(id);
+            if (!entry || !entry->sm) {
+                crow::response r(404);
+                r.body = R"({"error":"unknown session"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            if (entry->loop && entry->loop->is_busy()) {
+                crow::response r(409);
+                r.body = R"({"error":"session busy"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            if (!entry->sm->file_checkpoint_can_restore(message_id)) {
+                crow::response r(404);
+                r.body = R"({"error":"file checkpoint not found"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            FileCheckpointRestoreResult result;
+            try {
+                result = entry->sm->rewind_files_to_checkpoint(message_id);
+            } catch (const std::exception& e) {
+                LOG_ERROR("[web] restore checkpoint " + id + " threw: " + e.what());
+                crow::response r(500);
+                r.body = json{{"error", std::string("restore failed: ") + e.what()}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            json resp;
+            resp["ok"] = result.ok();
+            resp["session_id"] = id;
+            resp["message_id"] = message_id;
+            resp["files_changed"] = result.files_changed;
+            resp["errors"] = result.errors;
+            crow::response r(result.ok() ? 200 : 500);
+            r.body = resp.dump();
             r.add_header("Content-Type", "application/json");
             return with_cors(req, std::move(r));
         });

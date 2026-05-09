@@ -454,3 +454,22 @@ These are deferred but worth flagging:
 | D8 | Drop daemon when desktop crashes (OS-level) | No zombie daemons. |
 | D9 | Additive front-end only | Browser UI must keep working. |
 | D10 | `ACECODE_BUILD_DESKTOP=OFF` by default | Keep current CI green from day one. |
+
+---
+
+## 15. 关窗 = 隐藏到托盘 + 托盘 Codex 风格菜单
+
+延伸 change:`openspec/changes/enhance-desktop-tray-menu`。
+
+- 关窗(× / Alt+F4 / `aceDesktop_closeWindow`)默认走 `ShowWindow(SW_HIDE)`,daemon 子进程仍存活,托盘图标继续 install。`config.desktop.close_to_tray = false` 时回到旧的 DestroyWindow 退出路径。
+- 真退出:托盘 "退出" 菜单 → `WebHost::request_quit()` → `PostMessageW(hwnd, WM_USER + 0x10, 0, 0)`,WndProc 收到后绕过 close handler 直接 DestroyWindow。`web_host_close_policy.hpp::dispatch_wm_close` / `dispatch_request_quit` 是纯函数,unit test 覆盖。
+- 托盘图标改走 `LoadImageW(IMAGE_ICON, SM_CXSMICON, SM_CYSMICON, LR_DEFAULTCOLOR)`,从 .ico 直接挑 16×16 frame(`assets/windows/acecode.ico` 已含)。
+- 单击 / 双击 tray 都路由到 `on_show()`(并行兼容,`bring_window_foreground` 幂等)。
+- 右键菜单结构(由 `tray_menu_layout.hpp::compute_menu_layout(payload)` 算):
+  - Pinned 段(disabled header + 至多 5 项)
+  - Recent 段(disabled header + 顶层 6 项 + More 子菜单收 overflow,Recent 总数含 More 不超 14)
+  - 新建会话 / 打开 ACECode / 退出
+  - 空状态(无 pinned + 无 recent)→ 退化为 "新建会话 / 打开 ACECode / 退出"
+- 数据流:前端 `web/src/lib/desktopTrayMenu.js::pushTrayMenu({sessions, pinnedSessionIds, workspaceName})` 100ms debounce → `aceDesktop_setTrayMenu` bridge → native `set_tray_menu_payload(...)` mutex 缓存。`Sidebar.jsx` 在 `(sessions, pinnedByWorkspace, activeWorkspaceHash, workspaces)` 任一变化时触发。
+- 切 workspace:`aceDesktop_activateWorkspace` bridge 在 navigate 之前 native 主动 `clear_tray_menu_payload()` 防菜单残留旧 workspace 的 session。
+- 跨 workspace session 项暂不展示(同 `add-desktop-attention-notifications` 的 v1 限制),v2 future work。

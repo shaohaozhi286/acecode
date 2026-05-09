@@ -22,6 +22,8 @@ namespace acecode::desktop {
 namespace {
 
 constexpr wchar_t kSplashClassName[] = L"ACECodeSplashWindow";
+constexpr wchar_t kAppIconResourceName[] = L"IDI_ICON1";
+constexpr int kAppIconResourceId = 1;
 
 HMONITOR active_monitor() {
     if (HWND fg = ::GetForegroundWindow()) {
@@ -166,7 +168,17 @@ struct SplashScreen::Impl {
     void load_icon(HINSTANCE instance) {
         icon = static_cast<HICON>(::LoadImageW(
             instance,
-            L"IDI_ICON1",
+            kAppIconResourceName,
+            IMAGE_ICON,
+            icon_size,
+            icon_size,
+            LR_DEFAULTCOLOR));
+        destroy_icon = icon != nullptr;
+        if (icon) return;
+
+        icon = static_cast<HICON>(::LoadImageW(
+            instance,
+            MAKEINTRESOURCEW(kAppIconResourceId),
             IMAGE_ICON,
             icon_size,
             icon_size,
@@ -187,7 +199,10 @@ struct SplashScreen::Impl {
             if (icon) return;
         }
 
-        icon = ::LoadIconW(instance, L"IDI_ICON1");
+        icon = ::LoadIconW(instance, kAppIconResourceName);
+        if (icon) return;
+
+        icon = ::LoadIconW(instance, MAKEINTRESOURCEW(kAppIconResourceId));
         destroy_icon = false;
     }
 

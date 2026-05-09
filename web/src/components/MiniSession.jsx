@@ -96,12 +96,15 @@ export function MiniSession({ session, compact, onClick }) {
     port: session.port,
     token: session.token,
     cwd: session.cwd,
+    displayTitle: session.displayTitle || session.display_title,
     title: session.title,
     summary: session.summary,
   }), [
     session.active,
     session.busy,
     session.cwd,
+    session.displayTitle,
+    session.display_title,
     session.id,
     session.port,
     session.sessionId,
@@ -137,7 +140,7 @@ export function MiniSession({ session, compact, onClick }) {
       )}>
         <span className={clsx('rounded-full shrink-0', compact ? 'w-1.5 h-1.5' : 'w-[7px] h-[7px]', statusColor(stateLabel))} />
         <span className={clsx('flex-1 truncate font-semibold text-fg', compact ? 'text-[10px]' : 'text-[11px]')}>
-          {sessionDisplayTitle(session, session.id)}
+          {sessionDisplayTitle(session)}
         </span>
         <span className={clsx(compact ? 'text-[8px]' : 'text-[9px]', live ? 'text-ok' : 'text-fg-mute')}>
           {live ? '实时' : '静态'}
