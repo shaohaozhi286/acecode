@@ -1,410 +1,238 @@
-# AceCode 架构文档
+# ACECode Architecture
 
-## 总体架构
+ACECode has one shared agent core with several runtime surfaces around it: terminal TUI, daemon API, bundled web UI, Windows service mode, and the optional desktop shell. This document is the durable map of those parts. Implementation notes that change more often live in [CLAUDE.md](CLAUDE.md).
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        User (Terminal)                       │
-└────────────────────────┬────────────────────────────────────┘
-                         │
-┌────────────────────────▼────────────────────────────────────┐
-│                     TUI Layer (FTXUI)                        │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐     │
-│  │ Chat View    │  │ Input Box    │  │ Status Bar   │     │
-│  └──────────────┘  └──────────────┘  └──────────────┘     │
-│  ┌──────────────┐  ┌──────────────┐                        │
-│  │ MD Renderer  │  │ Thinking     │                        │
-│  └──────────────┘  └──────────────┘                        │
-└────────────────────────┬────────────────────────────────────┘
-                         │
-┌────────────────────────▼────────────────────────────────────┐
-│                    Application Layer                         │
-│  ┌──────────────────────────────────────────────────────┐  │
-│  │              Agent Loop (submit/cancel)              │  │
-│  └───────┬──────────────────────────────────────┬───────┘  │
-│          │                                       │          │
-│  ┌───────▼───────┐                     ┌────────▼────────┐ │
-│  │   Provider    │                     │  Tool Executor  │ │
-│  │ ┌───────────┐ │                     │ ┌─────────────┐ │ │
-│  │ │  OpenAI   │ │                     │ │   Bash      │ │ │
-│  │ │  Copilot  │ │                     │ │   FileRead  │ │ │
-│  │ └───────────┘ │                     │ │   FileWrite │ │ │
-│  └───────────────┘                     │ │   FileEdit  │ │ │
-│                                         │ │   Grep      │ │ │
-│  ┌───────────────┐                     │ │   Glob      │ │ │
-│  │   Session     │                     │ └─────────────┘ │ │
-│  │   Manager     │                     └─────────────────┘ │
-│  └───────────────┘                     ┌─────────────────┐ │
-│                                         │  Permission     │ │
-│  ┌───────────────┐                     │  Manager        │ │
-│  │   Config      │                     └─────────────────┘ │
-│  └───────────────┘                                          │
-└─────────────────────────────────────────────────────────────┘
-```
+## Runtime Surfaces
 
-## 模块说明
+| Surface | Entry point | Role |
+| --- | --- | --- |
+| Terminal TUI | [main.cpp](main.cpp) | Interactive shell experience with FTXUI rendering, slash commands, permission prompts, and local session work. |
+| Daemon worker | [src/daemon/](src/daemon) | Background process that owns config, sessions, agent loops, heartbeat files, auth token, and termination handling. |
+| HTTP/WebSocket API | [src/web/](src/web) | Crow server exposing health, sessions, messages, files, skills, MCP, models, and live session events. |
+| Web frontend | [web/](web) | React/Vite/Tailwind UI served by the daemon from embedded or filesystem assets. |
+| Windows service | [src/daemon/service_win.cpp](src/daemon/service_win.cpp) | SCM wrapper for running the daemon before login with a service data directory. |
+| Desktop shell | [src/desktop/](src/desktop) | Optional webview shell that manages multiple workspace daemons and native desktop integration. |
 
-### 1. TUI Layer（用户界面层）
+## Architecture Diagrams
 
-**职责**：处理所有用户交互和显示
+### System Topology
 
-**核心组件**：
-- `TuiState` - 界面状态管理
-- `ChatView` - 对话显示（支持markdown）
-- `InputBox` - 用户输入（带历史记录）
-- `StatusBar` - 状态显示
-- `ThinkingAnimation` - 思考动画
+```mermaid
+flowchart TB
+    user[User] --> tui[Terminal TUI<br/>main.cpp + FTXUI]
+    user --> desktop[Desktop Shell<br/>src/desktop]
+    user --> browser[Browser Web UI<br/>web/src]
 
-**依赖**：FTXUI库
+    desktop --> daemonA[Workspace Daemon<br/>acecode daemon]
+    browser --> webapi[HTTP + WebSocket API<br/>src/web]
+    tui --> core[Shared Agent Core<br/>AgentLoop]
+    daemonA --> webapi
+    webapi --> registry[SessionRegistry<br/>per-session runtime]
+    registry --> core
 
-**线程**：运行在UI主线程
+    core --> provider[LlmProvider<br/>Copilot or OpenAI-compatible]
+    core --> tools[ToolExecutor<br/>built-ins + skills + MCP]
+    core --> sessions[SessionManager<br/>JSONL + metadata]
+    core --> permissions[PermissionManager]
 
-### 2. Application Layer（应用层）
-
-#### AgentLoop
-**职责**：核心业务逻辑，协调provider和tool
-
-**主要方法**：
-- `submit(prompt)` - 提交用户请求
-- `cancel()` - 取消当前执行
-- `resume(session_id)` - 恢复会话
-
-**流程**：
-```
-submit() 
-  → 添加user消息
-  → 调用provider.chat_completion() 
-  → 处理assistant response
-  → 如果有tool_calls:
-      → 逐个执行tool (需要权限确认)
-      → 添加tool_result消息
-      → 递归调用provider (续写)
-  → 完成
+    provider --> network[Network + ProxyResolver]
+    tools --> workspace[Project Workspace]
+    tools --> memory[Memory Registry]
+    tools --> skills[Skill Registry]
+    sessions --> data[(ACECode data dir)]
 ```
 
-**当前问题**：
-- ⚠️ 内部无串行化保证，依赖外部调用约定
-- ⚠️ detach线程生命周期管理风险
+### Agent Turn Flow
 
-#### Provider（LLM提供者）
-**接口**：
-```cpp
-ChatCompletionResult chat_completion(
-    const std::vector<ChatMessage>& messages,
-    const std::vector<ToolDef>& tools,
-    StreamCallback on_delta,
-    std::atomic<bool>& abort_requested
-);
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant T as TUI or Web Client
+    participant A as AgentLoop
+    participant P as LlmProvider
+    participant M as PermissionManager
+    participant X as ToolExecutor
+    participant S as SessionManager
+
+    U->>T: submit prompt
+    T->>A: submit(messages, callbacks)
+    A->>S: append user message
+    A->>P: stream chat completion
+    P-->>A: assistant delta
+    A-->>T: render streaming text
+    P-->>A: tool calls
+    loop For each tool call
+        A->>M: check permission
+        M-->>T: prompt when needed
+        T-->>M: allow or deny
+        A->>X: execute tool
+        X-->>A: ToolResult
+        A->>S: append tool result
+    end
+    A->>P: continue with tool results
+    P-->>A: text-only assistant reply or task_complete
+    A->>S: persist final assistant message
+    A-->>T: turn complete
 ```
 
-**实现**：
-- `OpenAIProvider` - OpenAI兼容API
-- `CopilotProvider` - GitHub Copilot
+### Daemon And Web Event Flow
 
-**特性**：
-- 流式输出支持
-- 取消支持
-- 自动token刷新（Copilot）
+```mermaid
+flowchart LR
+    client[Web UI or API Client] -->|REST| routes[HTTP Routes<br/>src/web/handlers]
+    client <-->|WebSocket| ws[WS Session Channel]
 
-#### Tool Executor
-**职责**：执行工具调用并返回结果
+    routes --> auth[Token Auth<br/>loopback bypass]
+    ws --> auth
+    auth --> local[LocalSessionClient]
+    local --> registry[SessionRegistry]
 
-**工具列表**：
-| 工具 | 只读 | 说明 |
-|------|------|------|
-| bash | ❌ | 执行shell命令 |
-| file_read | ✅ | 读取文件 |
-| file_write | ❌ | 写入文件 |
-| file_edit | ❌ | 编辑文件 |
-| grep | ✅ | 正则搜索 |
-| glob | ✅ | 文件查找 |
-
-**权限流程**：
-```
-execute(tool_name, args)
-  → PathValidator.validate(path) - 路径验证
-  → PermissionManager.should_auto_allow() - 权限决策
-  → 如果需要确认:
-      → on_tool_confirm() 回调UI
-      → 等待用户决策
-  → 执行工具
-  → 返回ToolResult
+    registry --> entry[SessionEntry]
+    entry --> loop[AgentLoop]
+    entry --> manager[SessionManager]
+    entry --> prompt[Async Permission + Question Prompters]
+    loop --> dispatcher[EventDispatcher<br/>seq + replay ring]
+    dispatcher --> ws
+    manager --> store[(Project Session Store)]
 ```
 
-**当前问题**：
-- ⚠️ Deny和Prompt语义混淆
-- ⚠️ bash工具安全规则不足
+### Persistence Map
 
-#### Session Manager
-**职责**：会话持久化
+```mermaid
+flowchart TB
+    cfg[config.json] --> runtime[TUI or daemon runtime]
+    state[state.json] --> runtime
+    models[models_dev snapshot] --> provider[Model resolution]
+    runtime --> provider
 
-**功能**：
-- 保存对话历史到磁盘
-- 按项目CWD分类存储
-- 恢复历史会话
-- 自动清理旧会话
+    runtime --> sessions[(projects/cwd_hash<br/>sessions + metadata)]
+    runtime --> history[(input_history.jsonl)]
+    runtime --> memory[(memory/*.md<br/>MEMORY.md index)]
+    runtime --> runfiles[(run/pid port guid token heartbeat)]
 
-**存储结构**：
-```
-~/.acecode/
-  ├── config.json
-  ├── copilot_token.json
-  └── projects/
-      └── <cwd_hash>/
-          ├── session_<timestamp>.json
-          └── ...
+    sessions --> resume[resume and replay]
+    sessions --> rewind[rewind checkpoints]
+    memory --> prompt[system prompt context]
+    history --> tuiInput[TUI input history]
+    runfiles --> daemonStatus[daemon status and auth]
 ```
 
-#### Config Manager
-**职责**：配置管理
+## Source Ownership
 
-**配置项**：
-- provider选择
-- API endpoint/key
-- model名称
-- 会话保留策略
+| Area | Ownership |
+| --- | --- |
+| [main.cpp](main.cpp) | TUI entry point, CLI option parsing for interactive mode, provider/tool setup, FTXUI event loop, and terminal-specific UI wiring. |
+| [src/agent_loop.cpp](src/agent_loop.cpp) and [src/agent_loop.hpp](src/agent_loop.hpp) | Multi-turn agent state machine, streaming callbacks, tool-call loop, cancellation, max-iteration handling, and completion semantics. |
+| [src/provider/](src/provider) | `LlmProvider` implementations, provider factory/swap logic, Copilot auth integration, OpenAI-compatible streaming, model profiles, and context-window resolution. |
+| [src/tool/](src/tool) | Tool registry, built-in tools, tool result metadata, summaries, MCP bridge, skills tools, memory tools, and optional web-search tool. |
+| [src/permissions.hpp](src/permissions.hpp) | Permission modes and glob-style tool/path allow rules. |
+| [src/session/](src/session) | Session JSONL persistence, metadata sidecars, replay, resume restore, rewind checkpoints, daemon session registry, and event dispatch. |
+| [src/commands/](src/commands) | Slash command registry and built-in command implementations. |
+| [src/config/](src/config) | Config load/save/validation, saved model profiles, and default schema behavior. |
+| [src/skills/](src/skills) | Skill discovery, command registration, lazy skill body loading, default skill seeding, and skill invocation hints. |
+| [src/memory/](src/memory) | Persistent user memory registry and memory file lifecycle. |
+| [src/project_instructions/](src/project_instructions) | Configurable project-instruction discovery and prompt injection. |
+| [src/history/](src/history) | Per-working-directory input history storage. |
+| [src/daemon/](src/daemon) | Foreground/detached/service daemon launch, runtime files, heartbeat, process supervision, and worker lifecycle. |
+| [src/web/](src/web) | HTTP routes, WebSocket envelopes, payload codecs, auth, static assets, and web-specific handlers. |
+| [src/desktop/](src/desktop) | Workspace registry, daemon pool, native webview host, tray, notifications, and desktop bridge. |
+| [src/tui/](src/tui) and [src/markdown/](src/markdown) | Reusable TUI helpers, markdown rendering, overlays, progress rendering, scroll helpers, and terminal render mode helpers. |
+| [src/network/](src/network) | Proxy resolution, proxy probing, and shared networking configuration. |
+| [src/utils/](src/utils) | Shared filesystem, encoding, logging, state, token, UUID, hashing, stream, and terminal helpers. |
+| [tests/](tests) | GoogleTest coverage for headless logic through `acecode_testable`. |
 
-### 3. Utils Layer（工具层）
+## Terminal Turn Flow
 
-**新增工具类**（✨本次重构）：
-- `ToolArgsParser` - JSON参数解析
-- `ToolErrors` - 错误消息标准化
-- `FileOperations` - 文件操作封装
-- `constants` - 常量定义
-
-**原有工具**：
-- `Logger` - 日志
-- `PathValidator` - 路径验证
-- `encoding` - UTF-8转换
-- `uuid` - UUID生成
-- `diff_utils` - 差异生成
-
-## 数据流
-
-### 1. 用户提交请求
-```
-User Input
-  ↓
-TUI (Event)
-  ↓
-main.cpp (detach thread) ⚠️
-  ↓
-AgentLoop.submit()
-  ↓
-Provider.chat_completion()
-  ↓ (streaming)
-Callback → TUI update
+```text
+User input
+  -> TUI command/input handling
+  -> AgentLoop::submit
+  -> LlmProvider streaming request
+  -> assistant text and/or tool calls
+  -> PermissionManager decision
+  -> ToolExecutor execution
+  -> tool result appended to conversation
+  -> next provider request until assistant text-only completion or explicit task_complete
 ```
 
-### 2. 工具调用
-```
-Provider返回tool_calls
-  ↓
-AgentLoop遍历tool_calls
-  ↓
-ToolExecutor.execute()
-  ↓
-PathValidator.validate()
-  ↓
-PermissionManager.check()
-  ↓ (如需确认)
-UI回调 → 用户选择
-  ↓
-Tool实现 (bash/file_read/...)
-  ↓
-返回ToolResult
-  ↓
-添加tool_result消息
-  ↓
-继续调用Provider (带tool_result)
+The TUI keeps rendering state in `TuiState`; callbacks from the worker side post events back to the FTXUI loop. Read-only tools are normally auto-approved. Write and exec tools prompt unless permission mode or rules allow them.
+
+## Daemon And Web Flow
+
+```text
+acecode daemon start
+  -> spawn detached worker
+  -> load config and resolve data dir
+  -> write pid/port/guid/token/heartbeat files
+  -> create SessionRegistry and WebServer
+  -> serve REST, WebSocket, and static frontend assets
 ```
 
-## 并发模型
+Each daemon session owns its own `SessionManager`, `PermissionManager`, `AgentLoop`, async permission prompter, and question prompter. `EventDispatcher` assigns monotonic sequence numbers and keeps a bounded replay buffer so WebSocket clients can reconnect without losing recent frames.
 
-### 当前模型（有问题⚠️）
+Loopback clients can skip daemon auth. Non-loopback clients must provide the daemon token, and non-loopback dangerous mode is rejected. Full protocol details live in [docs/daemon-api.md](docs/daemon-api.md).
 
-```
-UI Thread
-  ├─ FTXUI事件循环
-  ├─ 渲染
-  └─ 收集输入
-      ↓
-      创建detach线程执行submit() ⚠️
-      
-Detached Thread (每次submit一个) ⚠️
-  ├─ AgentLoop.submit()
-  ├─ 调用Provider
-  ├─ 执行Tools
-  └─ 回调UI (PostEvent)
-  
-Animation Thread (thinking)
-  └─ 定时更新动画状态 → PostEvent
-```
+## Persistence
 
-**问题**：
-- detach线程在程序退出时可能悬空
-- 多个线程PostEvent，顺序不确定
-- 状态访问需要频繁加锁
-- 取消机制不完善
+| Data | Location |
+| --- | --- |
+| User config | `~/.acecode/config.json` for normal user mode. |
+| Service config/data | Platform service data directory in service mode. |
+| Sessions | `~/.acecode/projects/<cwd_hash>/` with JSONL messages and metadata sidecars. |
+| Rewind checkpoints | Project session storage associated with user turns. |
+| Input history | Per-project JSONL history independent of session messages. |
+| Memory | `~/.acecode/memory/` with indexed Markdown entries. |
+| Runtime daemon files | `<data_dir>/run/` for pid, port, guid, token, and heartbeat. |
+| State | `~/.acecode/state.json` for small cross-session flags and caches. |
+| Bundled model catalog | `assets/models_dev/` at source time, installed under `share/acecode/models_dev`. |
 
-### 建议模型（TODO）
+Session serialization intentionally keeps runtime-only UI fields out of persisted messages. Resume paths rebuild display rows and tool previews from persisted canonical messages and metadata.
 
-```
-UI Thread
-  ├─ FTXUI事件循环
-  ├─ 渲染
-  ├─ 处理events (来自worker)
-  └─ 发送任务到worker队列
-  
-Worker Thread (单例)
-  ├─ 从队列取任务
-  ├─ 执行submit/cancel/resume
-  ├─ 所有AgentLoop状态访问在此线程
-  └─ 通过PostEvent通知UI
-  
-  所有状态修改串行化 ✅
-  join即可安全退出 ✅
-```
+## Providers And Models
 
-## 配置与扩展点
+ACECode supports GitHub Copilot and OpenAI-compatible endpoints through a shared `LlmProvider` interface. Model selection can come from legacy provider fields, named `saved_models`, a global default, per-project overrides, or resumed session metadata.
 
-### 添加新工具
+Context-window resolution uses saved profile data, bundled models.dev metadata, provider defaults, and configured fallbacks. See [docs/model-context-resolution.md](docs/model-context-resolution.md).
 
-1. 创建 `src/tool/my_tool.cpp`:
-```cpp
-#include "utils/tool_args_parser.hpp"
-#include "utils/tool_errors.hpp"
+## Tools And Permissions
 
-static ToolResult execute_my_tool(const std::string& args_json) {
-    ToolArgsParser parser(args_json);
-    if (parser.has_error()) {
-        return ToolResult{parser.error(), false};
-    }
-    
-    std::string param = parser.get_or<std::string>("param", "");
-    if (param.empty()) {
-        return ToolResult{ToolErrors::missing_parameter("param"), false};
-    }
-    
-    // 实现逻辑
-    return ToolResult{result, true};
-}
+`ToolExecutor` owns the authoritative tool registry. Built-ins include shell execution, file read/write/edit, grep, glob, task completion, structured user questions, skills, memory, optional web search, and MCP-provided tools.
 
-ToolImpl create_my_tool() {
-    // 定义schema
-    ToolDef def;
-    def.name = "my_tool";
-    def.description = "...";
-    def.parameters = {...};
-    
-    return ToolImpl{def, execute_my_tool, /*is_read_only=*/true};
-}
-```
+Permission behavior is centralized in [src/permissions.hpp](src/permissions.hpp):
 
-2. 在 `tool_executor.cpp` 中注册:
-```cpp
-tools_.push_back(create_my_tool());
-```
+- `Default`: auto-allow read-only tools, prompt for writes and exec.
+- `AcceptEdits`: auto-allow file writes/edits, still prompt for shell commands.
+- `Yolo`: allow all tools.
 
-### 添加新Provider
+Memory writes are path-locked to the memory directory even when broader permissions are enabled.
 
-1. 继承 `Provider` 接口
-2. 实现 `chat_completion()` 方法
-3. 在 `main.cpp` 中根据配置创建实例
+## Extension Points
 
-### 添加新命令
+- Add a slash command under [src/commands/](src/commands), then register it in the command registry.
+- Add a tool under [src/tool/](src/tool), return structured `ToolResult` metadata when useful, and register it where TUI/daemon tools are initialized.
+- Add provider behavior under [src/provider/](src/provider), keeping model profile and context-resolution rules centralized.
+- Add daemon routes under [src/web/handlers/](src/web/handlers) and register them in [src/web/server.cpp](src/web/server.cpp).
+- Add frontend behavior under [web/src/](web/src); rebuild `web/dist/` before embedding.
+- Add focused unit tests under [tests/](tests), mirroring source paths with `_test.cpp` file names.
 
-1. 在 `builtin_commands.cpp` 中添加处理函数:
-```cpp
-static void cmd_my_command(CommandContext& ctx, const std::string& args) {
-    // 实现
-}
-```
+## Build Targets
 
-2. 注册到 `execute_builtin_command()`:
-```cpp
-commands["/mycommand"] = cmd_my_command;
-```
+| Target | Purpose |
+| --- | --- |
+| `acecode_testable` | Object library containing headless reusable logic for production binaries and tests. |
+| `acecode` | Main terminal/daemon executable. |
+| `acecode_unit_tests` | GoogleTest binary when `BUILD_TESTING=ON`. |
+| `acecode-desktop` | Optional desktop shell when `ACECODE_BUILD_DESKTOP=ON`. |
 
-## 安全模型
+The CMake build embeds `web/dist/` into generated C++ asset data. If the web build is absent, a minimal fallback page is embedded so API builds still work.
 
-### 路径验证
-- 所有文件操作路径必须在CWD内
-- 使用 `std::filesystem::weakly_canonical` 规范化
-- 前缀匹配检查
+## Reference Docs
 
-### 权限管理
-- 只读工具默认auto-allow
-- 写/执行工具默认prompt
-- 支持自定义规则（allow/deny）
-- `--dangerous` 模式跳过所有确认⚠️
-
-### Mtime冲突检测
-- file_read时记录mtime
-- file_write/edit前检查mtime
-- 如果外部修改则拒绝写入
-
-## 性能考虑
-
-### Token管理
-- `/compact` 命令压缩历史
-- 自动检测PTL错误并重试
-- 估算：~4 chars per token
-
-### 输出限制
-- bash输出：100KB截断
-- file_read：10MB限制
-- grep结果：200条限制
-- glob结果：500条限制
-
-### 缓存
-- Session按需加载
-- Copilot token缓存到磁盘
-- Mtime记录在内存
-
-## 测试策略（TODO）
-
-### 单元测试
-- [ ] ToolArgsParser
-- [ ] ToolErrors
-- [ ] FileOperations
-- [ ] PathValidator
-- [ ] PermissionManager
-
-### 集成测试
-- [ ] AgentLoop基本流程
-- [ ] Tool执行
-- [ ] Session保存/恢复
-
-### E2E测试
-- [ ] 完整对话流程
-- [ ] 工具调用确认
-- [ ] 取消机制
-
-## 依赖关系
-
-```
-acecode
-├── ftxui (TUI framework)
-├── nlohmann-json (JSON解析)
-├── cpr (HTTP client)
-│   └── libcurl (>= 8.14 for Windows TLS)
-└── C++17 标准库
-```
-
-## 部署
-
-### 编译要求
-- CMake >= 3.20
-- C++17 compiler
-- vcpkg
-
-### 运行要求
-- 交互式TTY
-- 网络连接（调用LLM API）
-- 对项目目录的读写权限
-
----
-
-_架构版本: v0.1 (重构进行中)_  
-_最后更新: 2025-01-XX_
+- [README.md](README.md) and [README_CN.md](README_CN.md): user-facing overview, setup, run modes, and build entry points.
+- [AGENTS.md](AGENTS.md): repository rules for coding agents and contributors.
+- [CLAUDE.md](CLAUDE.md): implementation memory for current subsystem notes.
+- [docs/user-manual.md](docs/user-manual.md): user workflow details.
+- [docs/daemon-api.md](docs/daemon-api.md): daemon HTTP/WebSocket protocol.
+- [docs/model-context-resolution.md](docs/model-context-resolution.md): model and context-window behavior.
+- [docs/skills.md](docs/skills.md) and [docs/skills-implementation.md](docs/skills-implementation.md): skills usage and implementation.
+- [docs/desktop-shell/multi-workspace.md](docs/desktop-shell/multi-workspace.md): desktop multi-workspace design.

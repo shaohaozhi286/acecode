@@ -21,9 +21,13 @@
 #include <algorithm>
 #include <memory>
 #include <mutex>
+#include <utility>
 
 #ifdef _WIN32
 #  include <windows.h>
+#endif
+#ifdef __APPLE__
+#  include <CoreGraphics/CoreGraphics.h>
 #endif
 
 namespace acecode::desktop {
@@ -300,6 +304,28 @@ struct ComApartment {
 };
 #endif
 
+namespace {
+
+std::pair<int, int> adjusted_window_size(int width, int height) {
+#ifdef __APPLE__
+    CGRect bounds = CGDisplayBounds(CGMainDisplayID());
+    const double display_width = bounds.size.width;
+    const double display_height = bounds.size.height;
+    if (display_width > 0 && display_height > 0) {
+        auto clamp_dimension = [](int value, double display, double margin, int preferred_min) {
+            const int max_value = static_cast<int>(std::max(1.0, display - margin));
+            const int min_value = std::min(preferred_min, max_value);
+            return std::max(min_value, std::min(value, max_value));
+        };
+        width = clamp_dimension(width, display_width, 80.0, 900);
+        height = clamp_dimension(height, display_height, 120.0, 640);
+    }
+#endif
+    return {width, height};
+}
+
+} // namespace
+
 struct WebHost::Impl {
     explicit Impl(bool debug, StartupWindowMode startup_mode)
 #ifdef _WIN32
@@ -372,7 +398,8 @@ void WebHost::set_title(const std::string& title) {
     impl_->w->set_title(title);
 }
 void WebHost::set_size(int width, int height) {
-    impl_->w->set_size(width, height, WEBVIEW_HINT_NONE);
+    auto adjusted = adjusted_window_size(width, height);
+    impl_->w->set_size(adjusted.first, adjusted.second, WEBVIEW_HINT_NONE);
 #ifdef _WIN32
     if (impl_->custom_window) {
         resize_webview_widget(impl_->custom_window);

@@ -35,6 +35,7 @@
 #include <nlohmann/json.hpp>
 
 #include <atomic>
+#include <cstdlib>
 #include <filesystem>
 #include <mutex>
 #include <random>
@@ -52,6 +53,9 @@
 #  endif
 #  include <windows.h>
 #endif
+#ifdef __APPLE__
+#  include <mach-o/dyld.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -68,12 +72,39 @@ std::string desktop_exe_dir() {
     std::wstring wpath(buf, n);
     return acecode::wide_to_utf8(fs::path(wpath).parent_path().wstring());
 }
+#elif defined(__APPLE__)
+std::string desktop_exe_dir() {
+    uint32_t size = 1024;
+    std::vector<char> buf(size);
+    if (_NSGetExecutablePath(buf.data(), &size) != 0) {
+        buf.assign(static_cast<size_t>(size) + 1, '\0');
+        if (_NSGetExecutablePath(buf.data(), &size) != 0) return "";
+    }
 
+    fs::path exe(buf.data());
+    std::error_code ec;
+    fs::path resolved = fs::weakly_canonical(exe, ec);
+    if (ec) {
+        ec.clear();
+        resolved = fs::absolute(exe, ec);
+        if (ec) resolved = exe;
+    }
+    return resolved.parent_path().string();
+}
+#else
+std::string desktop_exe_dir() {
+    std::error_code ec;
+    auto p = fs::current_path(ec);
+    if (ec) return "";
+    return p.string();
+}
+#endif
+
+#ifdef _WIN32
 void show_error(const std::string& msg) {
     std::wstring w = acecode::utf8_to_wide(msg);
     ::MessageBoxW(nullptr, w.c_str(), L"ACECode Desktop", MB_ICONERROR | MB_OK);
 }
-
 #endif
 
 fs::path path_from_utf8(const std::string& path) {
@@ -93,15 +124,20 @@ std::string path_to_utf8(const fs::path& path) {
 }
 
 std::string locate_daemon_exe() {
-#ifdef _WIN32
     auto dir = desktop_exe_dir();
     if (dir.empty()) return "";
-    fs::path p = path_from_utf8(dir) / "acecode.exe";
-    if (fs::exists(p)) return path_to_utf8(p);
-    return "";
+#ifdef _WIN32
+    std::vector<const char*> candidates{"acecode.exe"};
+#elif defined(__APPLE__)
+    std::vector<const char*> candidates{"acecode-daemon", "acecode"};
 #else
-    return "";
+    std::vector<const char*> candidates{"acecode"};
 #endif
+    for (const char* name : candidates) {
+        fs::path p = path_from_utf8(dir) / name;
+        if (fs::exists(p)) return path_to_utf8(p);
+    }
+    return "";
 }
 
 // dev 模式: 探到仓库 web/dist/ (Vite build 产物) → 让 daemon 走
@@ -112,11 +148,11 @@ std::string locate_daemon_exe() {
 //
 // 探测顺序:
 //   1. 环境变量 ACECODE_DEV_WEB_DIR(显式指定绝对路径,信用户判断)
-//   2. 自动猜:从 desktop exe 向上 1-5 层找 "web/dist/index.html"
-//      build/Release/acecode-desktop.exe → ../web/dist, ../../web/dist, ...
+//   2. 自动猜:从 desktop exe 向上找 "web/dist/index.html"
+//      Windows: build/Release/acecode-desktop.exe → ../../web/dist
+//      macOS: build/ACECode.app/Contents/MacOS/ACECode → ../../../../web/dist
 // 找不到返回空字符串 → daemon 走 embedded(cmake 已把 web/dist 嵌进二进制)。
 std::string detect_dev_web_dir() {
-#ifdef _WIN32
     if (const char* env = std::getenv("ACECODE_DEV_WEB_DIR"); env && *env) {
         fs::path p = fs::path(env) / "index.html";
         if (fs::exists(p)) return env;
@@ -124,16 +160,13 @@ std::string detect_dev_web_dir() {
     auto dir = desktop_exe_dir();
     if (dir.empty()) return "";
     fs::path cur = path_from_utf8(dir);
-    for (int i = 0; i < 5; ++i) {
+    for (int i = 0; i < 8; ++i) {
         fs::path candidate = cur / "web" / "dist";
         if (fs::exists(candidate / "index.html")) return path_to_utf8(candidate);
         if (!cur.has_parent_path()) break;
         cur = cur.parent_path();
     }
     return "";
-#else
-    return "";
-#endif
 }
 
 std::string projects_dir() {

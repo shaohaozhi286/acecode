@@ -4,6 +4,9 @@
 #include "../utils/token.hpp"
 
 #include <chrono>
+#include <cerrno>
+#include <cstring>
+#include <filesystem>
 #include <thread>
 #include <sstream>
 #include <vector>
@@ -21,12 +24,19 @@
 #  pragma comment(lib, "ws2_32.lib")
 #else
 #  include <arpa/inet.h>
+#  include <fcntl.h>
 #  include <netinet/in.h>
+#  include <signal.h>
 #  include <sys/socket.h>
+#  include <sys/time.h>
+#  include <sys/types.h>
+#  include <sys/wait.h>
 #  include <unistd.h>
 #endif
 
 namespace acecode::desktop {
+
+namespace fs = std::filesystem;
 
 namespace {
 
@@ -104,6 +114,90 @@ std::string windows_error_suffix(DWORD err) {
     std::ostringstream oss;
     oss << " (gle=" << err << ")";
     return oss.str();
+}
+#else
+bool tcp_probe(int port) {
+    int s = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) return false;
+
+    timeval tv{};
+    tv.tv_sec = 0;
+    tv.tv_usec = 500 * 1000;
+    ::setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    ::setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(static_cast<uint16_t>(port));
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+    int rc = ::connect(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+    ::close(s);
+    return rc == 0;
+}
+
+std::string errno_suffix(const char* op) {
+    std::ostringstream oss;
+    oss << op << " failed (errno=" << errno << ": " << std::strerror(errno) << ")";
+    return oss.str();
+}
+
+bool validate_spawn_request(const SpawnRequest& req, std::string& error) {
+    if (req.daemon_exe_path.empty()) {
+        error = "daemon_exe_path empty";
+        return false;
+    }
+    if (req.port <= 0 || req.port > 65535) {
+        error = "port out of range";
+        return false;
+    }
+    if (req.token.empty()) {
+        error = "token empty";
+        return false;
+    }
+    if (::access(req.daemon_exe_path.c_str(), X_OK) != 0) {
+        error = "daemon executable is not accessible: " + req.daemon_exe_path +
+                " (errno=" + std::to_string(errno) + ": " + std::strerror(errno) + ")";
+        return false;
+    }
+    if (!req.cwd.empty()) {
+        std::error_code ec;
+        if (!fs::is_directory(req.cwd, ec) || ec) {
+            error = "working directory is not accessible: " + req.cwd;
+            return false;
+        }
+    }
+    return true;
+}
+
+std::vector<std::string> build_posix_argv(const SpawnRequest& req) {
+    std::vector<std::string> argv;
+    argv.reserve(8);
+    argv.push_back(req.daemon_exe_path);
+    argv.push_back("daemon");
+    argv.push_back("--foreground");
+    argv.push_back("--port=" + std::to_string(req.port));
+    argv.push_back("--token=" + req.token);
+    if (req.dangerous) argv.push_back("-dangerous");
+    if (!req.static_dir.empty()) argv.push_back("--static-dir=" + req.static_dir);
+    if (!req.run_dir.empty()) argv.push_back("--run-dir=" + req.run_dir);
+    return argv;
+}
+
+void redirect_stdio_to_dev_null() {
+    int fd = ::open("/dev/null", O_RDWR);
+    if (fd < 0) return;
+    ::dup2(fd, STDIN_FILENO);
+    ::dup2(fd, STDOUT_FILENO);
+    ::dup2(fd, STDERR_FILENO);
+    if (fd > STDERR_FILENO) ::close(fd);
+}
+
+void signal_process_group(pid_t pid, int sig) {
+    if (pid <= 0) return;
+    if (::kill(-pid, sig) != 0) {
+        ::kill(pid, sig);
+    }
 }
 #endif
 
@@ -361,21 +455,96 @@ int pick_free_loopback_port() {
     return port;
 }
 
-#else // !_WIN32 — POSIX stub(MVP 不支持,留接口免得 acecode_testable 链接错)
+#else // !_WIN32
 
-struct DaemonSupervisor::Impl {};
+struct DaemonSupervisor::Impl {
+    pid_t pid = -1;
+    bool exited = false;
+    int exit_status = 0;
+
+    bool poll_exited() {
+        if (pid <= 0 || exited) return exited;
+        int status = 0;
+        pid_t rc = ::waitpid(pid, &status, WNOHANG);
+        if (rc == pid) {
+            exited = true;
+            exit_status = status;
+            return true;
+        }
+        return false;
+    }
+};
 
 DaemonSupervisor::DaemonSupervisor() : impl_(new Impl()) {}
-DaemonSupervisor::~DaemonSupervisor() { delete impl_; }
+DaemonSupervisor::~DaemonSupervisor() {
+    stop();
+    delete impl_;
+}
 
-SpawnResult DaemonSupervisor::spawn(const SpawnRequest&) {
+SpawnResult DaemonSupervisor::spawn(const SpawnRequest& req) {
     SpawnResult r;
-    r.error = "DaemonSupervisor: POSIX path not implemented in MVP";
+    std::string validation_error;
+    if (!validate_spawn_request(req, validation_error)) {
+        r.error = validation_error;
+        return r;
+    }
+
+    auto argv_storage = build_posix_argv(req);
+    std::vector<char*> argv;
+    argv.reserve(argv_storage.size() + 1);
+    for (auto& arg : argv_storage) argv.push_back(arg.data());
+    argv.push_back(nullptr);
+
+    pid_t pid = ::fork();
+    if (pid < 0) {
+        r.error = errno_suffix("fork");
+        return r;
+    }
+    if (pid == 0) {
+        ::setpgid(0, 0);
+        if (!req.cwd.empty() && ::chdir(req.cwd.c_str()) != 0) {
+            _exit(126);
+        }
+        redirect_stdio_to_dev_null();
+        ::execv(req.daemon_exe_path.c_str(), argv.data());
+        _exit(127);
+    }
+
+    ::setpgid(pid, pid);
+    impl_->pid = pid;
+    impl_->exited = false;
+    impl_->exit_status = 0;
+    r.ok = true;
+    r.pid = static_cast<long long>(pid);
     return r;
 }
-bool DaemonSupervisor::wait_until_ready(int, std::chrono::milliseconds) { return false; }
-void DaemonSupervisor::stop() {}
-bool DaemonSupervisor::running() const { return false; }
+bool DaemonSupervisor::wait_until_ready(int port, std::chrono::milliseconds timeout) {
+    auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (impl_->poll_exited()) return false;
+        if (tcp_probe(port)) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    return false;
+}
+void DaemonSupervisor::stop() {
+    if (impl_->pid <= 0 || impl_->exited) return;
+    signal_process_group(impl_->pid, SIGTERM);
+    int status = 0;
+    pid_t rc = ::waitpid(impl_->pid, &status, WNOHANG);
+    if (rc == 0) {
+        signal_process_group(impl_->pid, SIGKILL);
+        rc = ::waitpid(impl_->pid, &status, 0);
+    }
+    if (rc == impl_->pid) {
+        impl_->exited = true;
+        impl_->exit_status = status;
+    }
+}
+bool DaemonSupervisor::running() const {
+    if (impl_->pid <= 0 || impl_->exited) return false;
+    return !impl_->poll_exited();
+}
 int pick_free_loopback_port() {
     int s = ::socket(AF_INET, SOCK_STREAM, 0);
     if (s < 0) return 0;

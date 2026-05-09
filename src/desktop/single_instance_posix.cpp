@@ -10,8 +10,8 @@
 
 #ifndef _WIN32
 
+#include "../config/config.hpp"
 #include "../utils/logger.hpp"
-#include "../utils/paths.hpp"
 
 #include <cerrno>
 #include <cstring>
@@ -27,7 +27,7 @@ namespace acecode::desktop {
 namespace {
 
 std::string default_lock_path() {
-    fs::path run_dir = fs::path(acecode::get_acecode_dir()) / "run";
+    fs::path run_dir = fs::path(acecode::get_run_dir());
     std::error_code ec;
     fs::create_directories(run_dir, ec);
     return (run_dir / "acecode-desktop.lock").string();

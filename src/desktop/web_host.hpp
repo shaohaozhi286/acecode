@@ -15,8 +15,8 @@
 
 namespace acecode::desktop {
 
-inline constexpr int kDefaultDesktopWindowWidth = 1664;  // 1280 * 1.3
-inline constexpr int kDefaultDesktopWindowHeight = 1066; // 820 * 1.3
+inline constexpr int kDefaultDesktopWindowWidth = 1280;
+inline constexpr int kDefaultDesktopWindowHeight = 820;
 
 class WebHost {
 public:

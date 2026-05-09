@@ -1,110 +1,110 @@
 # CLAUDE.md
 
-Guidance for Claude Code working in this repo.
+Implementation memory for coding agents working in this repository. For user-facing setup and run modes, use [README.md](README.md). For stable structure, use [ARCHITECTURE.md](ARCHITECTURE.md). For contributor rules, use [AGENTS.md](AGENTS.md).
 
-## Project Overview
+## Current Runtime Surfaces
 
-ACECode is a terminal AI coding agent in C++17. FTXUI-based TUI, multi-turn conversations with tool calling via OpenAI-compatible APIs or GitHub Copilot. Also ships a daemon mode that exposes the same agent loop over HTTP/WebSocket.
+ACECode ships one main executable with terminal TUI and daemon subcommands, plus an optional desktop shell target.
 
-## Build
+- TUI mode starts from [main.cpp](main.cpp), configures provider/tools/commands, runs the FTXUI loop, and posts worker callbacks back into the UI event queue.
+- Daemon mode starts from [src/daemon/cli.cpp](src/daemon/cli.cpp), converges on `worker.cpp::run_worker`, writes runtime files, then serves [src/web/](src/web) routes and WebSocket events.
+- Web UI code lives in [web/src/](web/src), builds with React 18, Vite, Tailwind v4, `markdown-it`, `highlight.js`, and `diff2html`, then gets embedded from `web/dist/` by CMake.
+- Desktop mode is opt-in through `-DACECODE_BUILD_DESKTOP=ON`; [src/desktop/](src/desktop) manages workspace registry, daemon pool, webview host, tray, notifications, and bridge calls.
 
-**Prerequisites:** CMake >= 3.20, Ninja, vcpkg, C++17 compiler.
+## Build And Verification Notes
 
-```bash
-git submodule update --init --recursive
+Use the command set in [AGENTS.md](AGENTS.md) as the source of truth. Important local facts:
 
-<vcpkg-root>/vcpkg install cpr nlohmann-json ftxui \
-  --triplet <triplet> \
-  --overlay-ports=$PWD/ports
+- `acecode_testable` is the shared object library for headless logic and unit tests.
+- `acecode` links `acecode_testable` plus FTXUI and TUI/markdown sources.
+- `acecode_unit_tests` is available when `BUILD_TESTING=ON`.
+- `acecode-desktop` is only created when desktop building is enabled.
+- Rebuild [web/](web) with `pnpm build` before configuring CMake when embedded frontend assets need to change.
+- Windows builds require libcurl 8.14 or newer for TLS behavior and use UTF-8 compile options.
 
-cmake -S . -B build -G Ninja \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_TOOLCHAIN_FILE=<vcpkg-root>/scripts/buildsystems/vcpkg.cmake \
-  -DVCPKG_TARGET_TRIPLET=<triplet> \
-  -DVCPKG_OVERLAY_PORTS=$PWD/ports
+## Agent Loop And Tools
 
-cmake --build build --config Release
-```
+[src/agent_loop.cpp](src/agent_loop.cpp) is the multi-turn state machine. A text-only assistant reply ends the loop. `task_complete` is an optional explicit terminator that renders a concise completion row. `AskUserQuestion` is not a terminator; its answer returns as a tool result. `config.agent_loop.max_iterations` is the hard cap.
 
-Output: `build/acecode`. On Windows, libcurl >= 8.14 is required for TLS. A custom FTXUI overlay port lives in `/ports/ftxui/`.
+Core tools are registered for both TUI and daemon paths: `bash`, `file_read`, `file_write`, `file_edit`, `grep`, `glob`, `task_complete`, `AskUserQuestion`, skill tools, memory tools, optional `web_search`, and MCP tools. `ToolResult` can carry summaries and hunks so TUI/web resume can render useful compact rows instead of raw output folds.
 
-**Tests:** `-DBUILD_TESTING=ON` (default), then
-```
-cmake --build build --target acecode_unit_tests && ctest --test-dir build --output-on-failure
-```
-Tests under `tests/` mirror `src/` layout, files end in `_test.cpp`. `tests/CMakeLists.txt` globs `*_test.cpp` automatically. The test binary links against `acecode_testable` (an OBJECT library covering every `src/*.cpp` **except** `src/tui/` and `src/markdown/`, which pull FTXUI). `main.cpp` is always excluded.
+`bash_tool` streams cleaned output, polls abort state, truncates very large output, and supports POSIX `stdin_inputs`. File tools should preserve checkpoint hooks by calling `track_file_write_before` before mutating files.
 
-## Running
+## Sessions And Persistence
 
-```bash
-./build/acecode                    # Fresh session
-./build/acecode --resume [id]      # Resume a previous session
-./build/acecode configure          # Setup wizard
-./build/acecode -dangerous         # Bypass permission checks
-```
+[src/session/](src/session) persists canonical conversation messages as JSONL with metadata sidecars. Runtime-only display fields are not serialized. Resume paths rebuild TUI pseudo-rows, tool previews, summaries, and diffs from persisted messages and metadata.
 
-Config: `~/.acecode/config.json`. Sessions: `.acecode/projects/<cwd_hash>/`.
+Rewind support uses per-user-turn checkpoints. `SessionManager::track_file_write_before` is the hook file-mutating tools call so `/rewind` can restore file state.
 
-## Architecture
+Daemon session multiplexing uses `SessionRegistry`. Each session entry owns its own `SessionManager`, `PermissionManager`, `AgentLoop`, async permission prompter, and question prompter. `EventDispatcher` gives each emitted event a monotonic sequence number and keeps a bounded replay ring.
 
-### Data Flow
+## Skills, Memory, And Project Instructions
 
-User input → TUI event handler → `AgentLoop` → `LlmProvider::chat_stream()` → SSE parse → streaming tokens back to TUI. Tool calls flow through `PermissionManager` → `ToolExecutor` → result appended to history → next LLM turn.
+[src/skills/](src/skills) discovers `SKILL.md` files from configured global, project, and external skill directories. Skill metadata is read from YAML frontmatter at startup; full bodies are loaded lazily through skill invocation or the `skill_view` tool.
 
-### Key Components
+[src/memory/](src/memory) stores Markdown memory entries under `~/.acecode/memory/` and rewrites an index on upsert/remove. `memory_write` is constrained to that directory even under broad permission modes.
 
-- **`main.cpp`** — CLI parsing, terminal setup, FTXUI rendering loop, event dispatch. The TUI layout and event wiring live here.
+[src/project_instructions/](src/project_instructions) loads configured project-instruction filenames from the global config directory and then from the project hierarchy, outer-first, subject to per-file and aggregate byte caps. The repository root intentionally keeps only canonical docs; do not add duplicate root instruction files for this repository.
 
-- **`src/agent_loop.{hpp,cpp}`** — Multi-turn state machine on a worker thread, callbacks back to TUI. **Termination protocol**: a text-only assistant reply ends the loop (default of hermes-agent and claudecodehaha). `task_complete` is the OPTIONAL explicit terminator that renders a "Done: <summary>" row. `AskUserQuestion` is **NOT** a terminator — its answer flows back as a `tool_result`. Hard cap: `config.agent_loop.max_iterations` (default 50). Esc emits `[Interrupted]` and short-circuits.
+## Daemon And Web UI
 
-- **`src/provider/`** — `LlmProvider` interface with `OpenAiCompatProvider` (OpenAI-compatible REST+SSE; supports DeepSeek/Qwen/OpenRouter reasoning via `delta.reasoning_content` and echoes it back on assistant messages — see `openspec/changes/support-deepseek-reasoning`) and `CopilotProvider` (GitHub device-flow OAuth). `ModelContextResolver` + `models_dev_registry` consult a bundled `models.dev/api.json` snapshot at `<exe_dir>/../share/acecode/models_dev/`; network refresh is opt-in via `config.models_dev.allow_network` or `/models refresh --network`.
+Daemon startup writes pid, port, guid, token, and heartbeat files under `<data_dir>/run/`. Runtime file writes are atomic where practical, and daemon tokens are owner-only on supported platforms.
 
-- **`src/tool/`** — `ToolExecutor` registry with built-ins: `bash_tool`, `file_read_tool`, `file_write_tool`, `file_edit_tool`, `grep_tool`, `glob_tool`, `AskUserQuestion`, plus `web_search` (registered only when `cfg.web_search.enabled` is true; see `src/tool/web_search/`). `ToolResult` carries an optional `summary: ToolSummary` for the green/red one-line success/failure row; tools without `summary` fall back to the legacy 10-line fold. `bash_tool` streams cleaned output via `ctx.stream`, polls `ctx.abort_flag` every 10ms, head+tail-truncates output above 100KB, and accepts `stdin_inputs: string[]` (POSIX only).
+[src/web/server.cpp](src/web/server.cpp) registers health, sessions, messages, skills, MCP, model, history, files, commands, fork, and static asset routes. WebSocket payloads use envelopes with `type`, `seq`, `timestamp_ms`, and `payload`.
 
-- **`src/permissions.hpp`** — `PermissionManager` with three modes (`Default`, `AcceptEdits`, `Yolo`). Read-only tools auto-approve; write/exec prompts unless glob rules match.
+Loopback requests bypass daemon token auth. Non-loopback requests require `X-ACECode-Token` or `?token=`, and non-loopback dangerous mode is rejected. Keep [docs/daemon-api.md](docs/daemon-api.md) in sync for protocol changes.
 
-- **`src/session/`** — `SessionManager` persists conversation as JSONL + metadata sidecar, lazily created on first message. `session_replay.{hpp,cpp}` expands canonical OpenAI roles into TUI pseudo-rows on `--resume`. `tool_metadata_codec.{hpp,cpp}` rides on `ChatMessage.metadata` under reserved subkeys `tool_summary` / `tool_hunks` so resume restores green/red summaries and color diffs. Decoders are lenient — malformed JSON returns `nullopt` so legacy sessions degrade to the gray fold instead of crashing. `session_serializer` uses an explicit field allowlist; runtime-only fields (`expanded`, `display_override`) never persist.
+The frontend has pure helpers under [web/src/lib/](web/src/lib) with Node-based tests. Prefer adding data-shaping logic there rather than embedding it directly in components.
 
-- **Tool-result rendering (`main.cpp`)** — Successful summarized rows render as one green line (`icon verb · object · m1 · m2 …`). Failed rows add up to 3 dimmed lines of stderr. `Ctrl+E` toggles `expanded` to fall back to the 10-line fold. `tool_call` rows prefer `display_override` (recomputed via `ToolExecutor::build_tool_call_preview` on resume, never persisted) over the raw `[Tool: X] {JSON}` form.
+## Desktop Shell
 
-- **`src/tui/tool_progress.{hpp,cpp}`** — Live tool-progress renderer. While `state.tool_running`, replaces the thinking spinner with a 5-line tail + status block (tool name, command preview, elapsed seconds, cumulative bytes); the bottom status bar gets a compact `◑ bash 23s` chip. Pushed via `AgentLoop::on_tool_progress_*` callbacks; `main.cpp` throttles re-renders to ≥150ms. While waiting on the LLM, a `○ Thinking 14s ~82 tok` chip appears in the bottom bar (token segment after 3000ms; prefers exact `last_completion_tokens_authoritative`).
+The desktop shell runs a webview against workspace-local daemon processes. It does not change daemon internals; each daemon still serves one current working directory. Workspace switching currently uses whole-page navigation so browser origin follows the active loopback port.
 
-- **`src/tui/picker_scroll.hpp`** — Header-only viewport-scroll helper for keyboard-navigated overlays. Pure function `scroll_to_keep_visible(selected, prev_offset, visible_rows, total)` — no FTXUI dep, consumed by `acecode_testable`. Visible-row constants: `kResumePickerVisibleRows = 10`, `kRewindPickerVisibleRows = 10`, `kSlashDropdownVisibleRows = 8`. All three overlays support ArrowUp/Down + PgUp/PgDn + Home/End and render `↑ N more above` / `↓ M more below` indicators.
+Key modules:
 
-- **`src/tui/slash_dropdown.{hpp,cpp}`** — Autocomplete dropdown above the input while the buffer starts with `/` and contains no whitespace. Reads `CommandRegistry`, ranks by prefix > substring(name) > substring(description). Suppressed while resume picker, rewind picker, tool-confirmation, or AskUserQuestion overlay is active.
+- `workspace_registry`: persisted workspace list and names.
+- `daemon_pool`: per-workspace daemon process management.
+- `web_host`: native webview wrapper and bridge binding.
+- `tray_icon_win` and `notifications_win`: Windows tray and notification integration.
 
-- **`src/tui_state.hpp`** — Central shared state: messages, input buffer, animation flags, overlays, tool-progress state, waiting-indicator state. Waiting fields reset on `on_busy_changed(true)` and are only meaningful while `is_waiting`.
+Detailed behavior is in [docs/desktop-shell/multi-workspace.md](docs/desktop-shell/multi-workspace.md).
 
-- **`src/prompt/system_prompt.hpp`** — Builds dynamic system prompt from cwd info + tool registry descriptions.
+## Network, Proxy, And Web Search
 
-- **`src/markdown/`** — Lexer + formatter from markdown to ANSI escapes, with code-block syntax highlighting.
+[src/network/proxy_resolver.*](src/network) centralizes proxy behavior for cpr call sites. `proxy_mode=auto` follows platform/system proxy settings; `off` forces direct; `manual` uses `proxy_url`. Startup can probe proxy reachability and temporarily fall back to direct if the configured proxy is unreachable.
 
-- **`src/utils/`** — `logger.hpp` (file log, daemon mode rotates daily), `token_tracker.hpp`, `path_validator.hpp`, `encoding.hpp`, `uuid.hpp`, `stream_processing.hpp` (used by `bash_tool`: `strip_ansi`, `utf8_safe_boundary`, `feed_line_state`), `base64.hpp` (encoder only, used by OSC 52 clipboard), `paths.{hpp,cpp}` (process-level `RunMode` enum + `resolve_data_dir`: `User`→`~/.acecode/`, `Service`→`%PROGRAMDATA%\acecode\` / `/Library/Application Support/acecode/` / `/var/lib/acecode/`).
+`/proxy` shows or changes the session-level effective proxy state without persisting changes.
 
-- **`src/auth/github_auth.hpp`** — Copilot device-flow OAuth, token persistence + refresh.
+[src/tool/web_search/](src/tool/web_search) provides optional HTML-backed search with backend auto-detection and fallback. `/websearch` shows status, refreshes region detection, or switches backend for the current session. If `config.web_search.enabled=false`, the tool is not registered.
 
-- **`src/daemon/`** — Background daemon wrapping the agent loop in HTTP/WebSocket (`openspec/changes/add-web-daemon`). Three startup modes converge on `worker.cpp::run_worker(opts, cfg)`: `acecode daemon --foreground`, `acecode daemon start` (POSIX double-fork+setsid / Windows `DETACHED_PROCESS`), `acecode service install` + `start` (Windows SCM via `service_win.cpp`, runs as LocalSystem). Shared startup: load config → `validate_can_start` (GUID mutex) → write pid/port/guid/token to `<data_dir>/run/` → `HeartbeatWriter` (writes JSON every 2s, reads `timestamp_ms` not mtime) → `SessionRegistry` + `LocalSessionClient` + `WebServer` → block on `server.run()` until SIGTERM/CTRL_BREAK or `request_worker_termination()`. `runtime_files.cpp` does atomic `.tmp + rename`; token is owner-only (POSIX `chmod 0600` / Windows DACL).
+## Model Profiles And Context Windows
 
-- **`src/web/`** — Crow 1.3.2 HTTP/WebSocket server on `127.0.0.1:28080` (configurable via `web.port`; port-in-use is fail-fast, no fallback). Routes: `GET /api/health`, `GET/POST/DELETE /api/sessions`, `GET /api/sessions/:id/messages?since=N`, `GET /api/skills`, `GET/PUT /api/mcp` (PUT writes config without auto-reload), `WS /ws/sessions/:id`. WS envelope: `{type, seq, timestamp_ms, payload}`. `auth.cpp::require_auth` — loopback free pass, non-loopback requires `X-ACECode-Token` or `?token=`; `preflight_bind_check` rejects non-loopback without a token and any `-dangerous + non-loopback`.
+Model resolution layers are:
 
-- **`src/session/` (daemon multiplexing)** — `SessionRegistry` is `unordered_map<id, unique_ptr<SessionEntry>>`; each entry owns its own `SessionManager` + `PermissionManager` + `AgentLoop` + `AsyncPrompter`. `SessionClient` is the abstract surface; `LocalSessionClient` is the same-process impl. `EventDispatcher` is the per-session pub/sub: monotonic seq, 1024-capacity ring buffer, atomic replay-then-register on subscribe so reconnect fills gaps without losing racy frames. `permission_prompter.cpp` indirects `AgentLoop`'s permission ask: `CallbackPrompter` (TUI synchronous modal) vs `AsyncPrompter` (daemon, emits `PermissionRequest`, blocks 5min on condvar with abort polling). Swap via `AgentLoop::set_permission_prompter`; absent injection preserves the legacy callback path (TUI is zero-changed by daemon work).
+1. `default_model_name` from `saved_models`.
+2. Per-project model override.
+3. Resumed session provider/model metadata.
+4. Legacy provider config fallback.
 
-- **`src/skills/`** — User-authored `SKILL.md` discovered from `.acecode/skills`, `.agent/skills`, plus `skills.external_dirs`. `SkillRegistry` reads only YAML frontmatter at startup, lazy-loads body when invoked. Each skill registers as `/<skill-name>`; `skills_list` and `skill_view` tools expose them to the LLM. `/skills reload` rescans.
+Context windows resolve through model profile data, bundled models.dev metadata, provider defaults, and configured fallbacks. The detailed rules live in [docs/model-context-resolution.md](docs/model-context-resolution.md).
 
-- **`src/memory/`** — Cross-session user memory under `~/.acecode/memory/`. `MemoryRegistry` scans `<name>.md` entries with `name`/`description`/`type` frontmatter (`type ∈ {user, feedback, project, reference}`), rewrites `MEMORY.md` index on every upsert/remove. Tools: `memory_read` (no args = full index; by type or name), `memory_write` (path-locked to memory dir even in Yolo mode; auto-approved). Commands: `/memory list|view|edit|forget|reload`, `/init` (LLM authors ACECODE.md via `file_write_tool`; static skeleton fallback when no provider configured).
+## Config Notes
 
-- **`src/history/`** — Per-cwd persistent input history (`<project_dir>/input_history.jsonl`, independent of any session JSONL). `record_history` lambda in `main.cpp` centralises space-only and adjacent-duplicate suppression for both Normal and Shell (`!`) modes. Append-first; head-truncates via `<file>.tmp + rename` when over `config.input_history.max_entries`. Resilient load (missing → empty; malformed → skip-with-warning). `/history` lists oldest-first; `/history clear` wipes both memory and disk.
+The config schema is intentionally sparse on write: defaults are omitted when possible. Notable sections are `saved_models`, `models_dev`, `skills`, `memory`, `project_instructions`, `agent_loop`, `daemon`, `web`, `network`, `web_search`, `tui`, `desktop`, and `mcp_servers`.
 
-- **`src/project_instructions/`** — Loads `ACECODE.md` / `AGENT.md` / `CLAUDE.md` from `~/.acecode/` then walks HOME → cwd outer-first, picking at most one file per directory by `cfg.filenames` priority. Toggles `read_agent_md` / `read_claude_md` (no toggle for `ACECODE.md`). Caps: per-file `max_bytes`, aggregate `max_total_bytes`, walk-depth `max_depth`. Injected as `# Project Instructions` after tool descriptions.
+`mcp_servers` without `transport` default to stdio. `sse` is the legacy two-endpoint protocol. `http` is Streamable HTTP, defaulting to `/mcp` when no endpoint is provided.
 
-### Threading Model
+## Useful Source Anchors
 
-**TUI mode:**
-1. **Agent worker** — `AgentLoop`, blocked on LLM HTTP streaming
-2. **Auth thread** — Copilot device-flow polling (only when needed)
-3. **Animation thread** — drives the thinking spinner
+- [src/commands/builtin_commands.cpp](src/commands/builtin_commands.cpp): slash command registration and command help.
+- [src/tool/tool_executor.cpp](src/tool/tool_executor.cpp): tool registry behavior, tool result message formatting, and compact call previews.
+- [src/web/tool_event_payload.cpp](src/web/tool_event_payload.cpp): web serialization of tool progress and summaries.
+- [src/web/message_payload.cpp](src/web/message_payload.cpp): REST/WS message payload identity and metadata.
+- [src/session/session_serializer.cpp](src/session/session_serializer.cpp): persisted message field allowlist.
+- [src/tui/render_mode.hpp](src/tui/render_mode.hpp): pure terminal render-mode decision logic.
+- [src/utils/paths.cpp](src/utils/paths.cpp): user vs service data directory resolution.
 
-Callbacks post events back into the FTXUI `ScreenInteractive` event queue.
+## Maintenance Notes
 
 **Daemon mode:** main thread blocks in `Crow::App::run()`. Plus:
 1. **HeartbeatWriter** — every `heartbeat_interval_ms` (default 2000)

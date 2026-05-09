@@ -12,7 +12,8 @@
 //   - port + token 都由父进程预生成传入子进程: 避免父子两端跨进程读 run/ 文件
 //     存在的时序竞争(daemon 写文件 vs 父进程 poll)。
 //
-// v1 仅实现 Windows 路径。POSIX 版本是后续的扩展点(fork+execve+prctl PDEATHSIG)。
+// Windows 走 Job Object。POSIX/macOS 走 fork+execve + process group,父进程
+// 正常退出时 stop() 会回收 daemon；父进程崩溃后的 PDEATHSIG 等增强留作后续。
 
 #include <chrono>
 #include <string>
@@ -73,8 +74,8 @@ private:
     Impl* impl_;
 };
 
-// 工具: 选一个 loopback 空闲端口。失败返回 0。Windows 走 winsock,
-// 用 ::bind(:0) + getsockname 拿系统分配的端口,然后立刻 closesocket。
+// 工具: 选一个 loopback 空闲端口。失败返回 0。用 ::bind(:0) + getsockname
+// 拿系统分配的端口,然后立刻关闭 socket。
 // 注意: TOCTOU — 拿到端口和 daemon bind 之间窗口期里端口可能被别人抢,
 // MVP 接受这个小概率失败(失败时整个 spawn 流程会因 daemon bind 报错退出)。
 int pick_free_loopback_port();
