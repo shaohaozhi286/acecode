@@ -1,0 +1,19 @@
+// web/src/lib/modelManager.js
+// 提交前的快速校验,避免没必要的 4xx 往返。规则与后端 saved_models_editor
+// 保持一致;后端是真值源,前端不重复实现复杂分支。
+
+export function validateModelDraft(draft) {
+  if (!draft || typeof draft !== 'object') return { ok: false, code: 'BAD_REQUEST' };
+  const { name, provider, model, base_url, api_key } = draft;
+  if (!name || typeof name !== 'string' || name.length === 0)
+    return { ok: false, code: 'INVALID_NAME' };
+  if (name.startsWith('(')) return { ok: false, code: 'RESERVED_NAME' };
+  if (provider !== 'openai' && provider !== 'copilot')
+    return { ok: false, code: 'UNKNOWN_PROVIDER' };
+  if (!model) return { ok: false, code: 'MISSING_MODEL' };
+  if (provider === 'openai') {
+    if (!base_url) return { ok: false, code: 'MISSING_BASE_URL' };
+    if (!api_key) return { ok: false, code: 'INVALID_API_KEY' };
+  }
+  return { ok: true };
+}

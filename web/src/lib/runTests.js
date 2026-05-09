@@ -23,3 +23,6 @@ import './desktopNotify.test.js';
 import './desktopTrayMenu.test.js';
 import './newSession.test.js';
 import './gridPinnedSessions.test.js';
+import './errors.test.js';
+import './modelPicker.test.js';
+import './modelManager.test.js';
