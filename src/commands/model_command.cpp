@@ -6,6 +6,7 @@
 #include "../provider/cwd_model_override.hpp"
 #include "../provider/model_context_resolver.hpp"
 #include "../provider/model_resolver.hpp"
+#include "../tui/model_picker.hpp"
 
 #include <cctype>
 #include <mutex>
@@ -106,31 +107,102 @@ bool parse_model_args(const std::string& raw, std::string& flag,
     return true;
 }
 
-// 渲染 picker 列表(纯文本回退,无 FTXUI)。覆盖 saved_models + 兜底 (legacy)。
-// 当前 effective 行加 "*"。这是最小骨架 —— 真正的 FTXUI picker(任务 5.2)
-// 留待后续(picker 与 TuiState/screen 耦合,本 phase 用文本展示先解锁验证)。
+// 打开 /model picker —— 把选项列表写进 TuiState、注册 on_pick 回调,然后
+// post 一帧让 main.cpp 渲染层看到 model_picker_open=true 并画 inline overlay。
+// 选中行用 build_model_picker_options 算出来的 is_current=true 那条;用户
+// 直接 Esc 取消时初始 highlight 不会误导。
+//
+// on_pick 回调 by-value 捕获 ctx 里需要的指针,不能持 ctx 引用 —— picker
+// 关闭时 cmd_model 已经返回了。语义和 /resume callback 一致:apply +
+// announce 都在主线程跑(事件分支调它),因此可以放心读 cfg / state。
 void render_model_picker(CommandContext& ctx) {
-    std::lock_guard<std::mutex> lk(ctx.state.mu);
-    std::ostringstream oss;
-    oss << "Available models:\n";
-    std::string current = current_effective_name(ctx);
-    bool legacy_listed_in_saved = false;
-    for (const auto& e : ctx.config.saved_models) {
-        if (e.name == "(legacy)") legacy_listed_in_saved = true;
-        oss << "  " << (e.name == current ? "*" : " ")
-            << " " << e.name << "  (" << e.provider << "/" << e.model << ")\n";
+    auto options = build_model_picker_options(ctx.config, current_effective_name(ctx));
+
+    // 捕获 picker on_pick 需要的所有原始引用 / 指针。
+    auto* state_ptr = &ctx.state;
+    auto* config_ptr = &ctx.config;
+    auto* provider_slot = ctx.provider_slot;
+    auto* sm = ctx.session_manager;
+    auto* al = &ctx.agent_loop;
+    auto& token_tracker = ctx.token_tracker;
+
+    // 约定:调用方 MUST 持 state_ptr->mu(和 /resume callback 一致 ——
+    // main.cpp 的 Enter 分支已经持 unique_lock<state.mu>;callback 内部
+    // 不再加锁,直接读写 state)。
+    auto callback = [state_ptr, config_ptr, provider_slot, sm, al, &token_tracker](
+                        const std::string& name) {
+        // 找 entry —— "(legacy)" 走 synth,否则在 saved_models 里查。
+        std::optional<ModelProfile> entry;
+        if (name == "(legacy)") {
+            entry = synth_legacy_entry(*config_ptr);
+        } else {
+            for (const auto& e : config_ptr->saved_models) {
+                if (e.name == name) { entry = e; break; }
+            }
+        }
+        if (!entry.has_value()) {
+            state_ptr->conversation.push_back(
+                {"system", "Unknown model name: " + name, false});
+            state_ptr->chat_follow_tail = true;
+            return;
+        }
+
+        // 切换。语义和 cmd_model 主路径里的 if (ctx.provider_slot) {...}
+        // else {...} 完全一致 —— 这里没法构造完整 CommandContext,所以
+        // 内联出来直接用捕获的指针走 apply_model_to_session。
+        if (provider_slot) {
+            ApplyModelDeps deps;
+            deps.provider_slot = provider_slot;
+            deps.sm = sm;
+            deps.loop = al;
+            deps.cfg = config_ptr;
+            try {
+                auto result = apply_model_to_session(*entry, deps);
+                config_ptr->context_window = result.state.context_window;
+                if (!result.warning.empty()) {
+                    state_ptr->conversation.push_back(
+                        {"system", "Warning: " + result.warning, false});
+                    state_ptr->chat_follow_tail = true;
+                }
+            } catch (const std::exception& e) {
+                state_ptr->conversation.push_back(
+                    {"system", std::string("Switch failed: ") + e.what(), false});
+                state_ptr->chat_follow_tail = true;
+                return;
+            }
+        } else {
+            config_ptr->context_window = resolve_model_context_window(
+                *config_ptr, entry->provider, entry->model, config_ptr->context_window);
+        }
+
+        // 等价于 announce_switch(它会再加锁,这里把内联出来避免重入)。
+        al->set_context_window(config_ptr->context_window);
+        state_ptr->token_status = token_tracker.format_status(config_ptr->context_window);
+        std::ostringstream oss;
+        oss << "Switched to " << entry->name
+            << " (" << entry->provider << "/" << entry->model << ")";
+        std::string info = oss.str();
+        state_ptr->status_line = info;
+        state_ptr->conversation.push_back({"system", info, false});
+        state_ptr->chat_follow_tail = true;
+    };
+
+    {
+        std::lock_guard<std::mutex> lk(ctx.state.mu);
+        ctx.state.model_picker_options = std::move(options);
+        ctx.state.model_picker_selected = 0;
+        ctx.state.model_picker_view_offset = 0;
+        // 初始 highlight 落在当前 effective 行(build_model_picker_options 已标 is_current)。
+        for (std::size_t i = 0; i < ctx.state.model_picker_options.size(); ++i) {
+            if (ctx.state.model_picker_options[i].is_current) {
+                ctx.state.model_picker_selected = static_cast<int>(i);
+                break;
+            }
+        }
+        ctx.state.model_picker_callback = std::move(callback);
+        ctx.state.model_picker_open = true;
     }
-    if (!legacy_listed_in_saved) {
-        ModelProfile legacy = synth_legacy_entry(ctx.config);
-        oss << "  " << (legacy.name == current ? "*" : " ")
-            << " " << legacy.name << "  (" << legacy.provider << "/"
-            << legacy.model << ")\n";
-    }
-    oss << "\nUse: /model <name>           - switch this session (in-memory)\n"
-        << "     /model --cwd <name>     - switch + persist to this directory\n"
-        << "     /model --default <name> - switch + persist as global default";
-    ctx.state.conversation.push_back({"system", oss.str(), false});
-    ctx.state.chat_follow_tail = true;
+    if (ctx.post_event) ctx.post_event();
 }
 
 void cmd_model(CommandContext& ctx, const std::string& args) {

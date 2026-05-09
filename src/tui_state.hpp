@@ -2,6 +2,7 @@
 
 #include "permissions.hpp"
 #include "tui/paste_handler.hpp"
+#include "tui/model_picker.hpp"
 #include "utils/drag_scroll.hpp"
 #include "tool/tool_executor.hpp"
 #include "tool/ask_user_question_tool.hpp"
@@ -152,6 +153,17 @@ struct TuiState {
     int resume_selected = 0; // currently highlighted index
     int resume_view_offset = 0; // top index of the visible viewport window
     std::function<void(const std::string& session_id)> resume_callback;
+
+    // /model picker 状态。和 resume_picker_active 同结构 —— main.cpp 在
+    // model_picker_open=true 时画一层 inline overlay,Up/Down 调
+    // model_picker_selected,Enter → callback(name),Esc → 关 picker。
+    // callback 由 cmd_model 在打开 picker 时填(它持有 CommandContext
+    // 引用,可以直接 dispatch "/model <name>")。
+    bool model_picker_open = false;
+    std::vector<ModelPickerOption> model_picker_options;
+    int model_picker_selected = 0;
+    int model_picker_view_offset = 0;
+    std::function<void(const std::string& name)> model_picker_callback;
 
     // Rewind picker state. Target selection and restore-mode selection are
     // separate phases so Esc can step back from modes before cancelling.

@@ -2559,6 +2559,26 @@ static int run_interactive_app(const CliOptions& cli,
                 return true;
             }
 
+            // /model picker: Enter confirms,callback 在持 state.mu 的同
+            // 一锁内跑(和 /resume 同款约定),完成后清状态 + post 一帧。
+            if (state.model_picker_open) {
+                if (state.model_picker_selected >= 0 &&
+                    state.model_picker_selected <
+                        static_cast<int>(state.model_picker_options.size())) {
+                    auto name = state.model_picker_options[state.model_picker_selected].name;
+                    auto cb = state.model_picker_callback;
+                    state.model_picker_open = false;
+                    state.model_picker_options.clear();
+                    state.model_picker_selected = 0;
+                    state.model_picker_view_offset = 0;
+                    state.model_picker_callback = nullptr;
+                    if (cb) cb(name);
+                    clamp_chat_focus();
+                }
+                screen.PostEvent(Event::Custom);
+                return true;
+            }
+
             // confirm_pending 现在由上面的 confirm overlay handler 单独拦截
             // (Enter 直接走那条路径),这里不会再被 confirm 触发。
 
@@ -2701,6 +2721,28 @@ static int run_interactive_app(const CliOptions& cli,
                 }
                 return true;
             }
+            if (state.model_picker_open) {
+                const int total = static_cast<int>(state.model_picker_options.size());
+                if (total > 0) {
+                    const int step = acecode::tui::kResumePickerVisibleRows;
+                    if (event == Event::PageUp) {
+                        state.model_picker_selected =
+                            std::max(0, state.model_picker_selected - step);
+                    } else if (event == Event::PageDown) {
+                        state.model_picker_selected =
+                            std::min(total - 1, state.model_picker_selected + step);
+                    } else if (event == Event::Home) {
+                        state.model_picker_selected = 0;
+                    } else {  // End
+                        state.model_picker_selected = total - 1;
+                    }
+                    state.model_picker_view_offset = acecode::tui::scroll_to_keep_visible(
+                        state.model_picker_selected, state.model_picker_view_offset,
+                        step, total);
+                    screen.PostEvent(Event::Custom);
+                }
+                return true;
+            }
         }
         if (event == Event::PageUp) {
             std::lock_guard<std::mutex> lk(state.mu);
@@ -2734,6 +2776,7 @@ static int run_interactive_app(const CliOptions& cli,
         if (event == Event::Special("\x1B[1;3A")) {
             std::lock_guard<std::mutex> lk(state.mu);
             if (state.resume_picker_active) return true;
+            if (state.model_picker_open) return true;
             if (scroll_chat_by_lines(-1) != 0) {
                 screen.PostEvent(Event::Custom);
             }
@@ -2742,6 +2785,7 @@ static int run_interactive_app(const CliOptions& cli,
         if (event == Event::Special("\x1B[1;3B")) {
             std::lock_guard<std::mutex> lk(state.mu);
             if (state.resume_picker_active) return true;
+            if (state.model_picker_open) return true;
             if (scroll_chat_by_lines(1) != 0) {
                 screen.PostEvent(Event::Custom);
             }
@@ -2786,6 +2830,18 @@ static int run_interactive_app(const CliOptions& cli,
                 state.input_cursor = 0;
                 state.conversation.push_back({"system", "Resume cancelled.", false});
                 state.chat_follow_tail = true;
+                clamp_chat_focus();
+                screen.PostEvent(Event::Custom);
+                return true;
+            }
+            // Escape during /model picker → cancel(不写气泡 —— 保持安静,
+            // 用户大概率只是看了一眼当前模型就关掉)。
+            if (state.model_picker_open) {
+                state.model_picker_open = false;
+                state.model_picker_options.clear();
+                state.model_picker_selected = 0;
+                state.model_picker_view_offset = 0;
+                state.model_picker_callback = nullptr;
                 clamp_chat_focus();
                 screen.PostEvent(Event::Custom);
                 return true;
@@ -2991,6 +3047,15 @@ static int run_interactive_app(const CliOptions& cli,
                 screen.PostEvent(Event::Custom);
                 return true;
             }
+            if (state.model_picker_open) {
+                if (state.model_picker_selected > 0) state.model_picker_selected--;
+                state.model_picker_view_offset = acecode::tui::scroll_to_keep_visible(
+                    state.model_picker_selected, state.model_picker_view_offset,
+                    acecode::tui::kResumePickerVisibleRows,
+                    static_cast<int>(state.model_picker_options.size()));
+                screen.PostEvent(Event::Custom);
+                return true;
+            }
             if (state.input_history.empty()) return true;
             if (state.history_index == -1) {
                 state.saved_input = prepend_mode_prefix(state.input_text, state.input_mode);
@@ -3019,6 +3084,17 @@ static int run_interactive_app(const CliOptions& cli,
                 screen.PostEvent(Event::Custom);
                 return true;
             }
+            if (state.model_picker_open) {
+                if (state.model_picker_selected <
+                    static_cast<int>(state.model_picker_options.size()) - 1)
+                    state.model_picker_selected++;
+                state.model_picker_view_offset = acecode::tui::scroll_to_keep_visible(
+                    state.model_picker_selected, state.model_picker_view_offset,
+                    acecode::tui::kResumePickerVisibleRows,
+                    static_cast<int>(state.model_picker_options.size()));
+                screen.PostEvent(Event::Custom);
+                return true;
+            }
             if (state.history_index == -1) return true;
             if (state.history_index < (int)state.input_history.size() - 1) {
                 state.history_index++;
@@ -3041,6 +3117,7 @@ static int run_interactive_app(const CliOptions& cli,
         if (event == Event::ArrowLeft) {
             std::lock_guard<std::mutex> lk(state.mu);
             if (state.resume_picker_active) return true;
+            if (state.model_picker_open) return true;
             if (state.input_cursor > state.input_text.size()) {
                 state.input_cursor = state.input_text.size();
             }
@@ -3061,6 +3138,7 @@ static int run_interactive_app(const CliOptions& cli,
         if (event == Event::ArrowRight) {
             std::lock_guard<std::mutex> lk(state.mu);
             if (state.resume_picker_active) return true;
+            if (state.model_picker_open) return true;
             if (state.input_cursor >= state.input_text.size()) {
                 state.input_cursor = state.input_text.size();
                 return true;
@@ -3207,6 +3285,24 @@ static int run_interactive_app(const CliOptions& cli,
                         state.input_cursor = 0;
                         if (cb) cb(sid);
                         clamp_chat_focus();
+                        screen.PostEvent(Event::Custom);
+                    }
+                }
+                return true;
+            }
+            // /model picker:数字键 1-9 直接跳到对应行(选中,不立即提交 ——
+            // 和 /resume 不同,模型切换是有副作用的操作,留 Enter 确认)。
+            // 其它字符 absorb,不写进 input_text。
+            if (state.model_picker_open) {
+                std::string ch = event.character();
+                if (!ch.empty() && ch[0] >= '1' && ch[0] <= '9') {
+                    int idx = ch[0] - '1';
+                    if (idx < static_cast<int>(state.model_picker_options.size())) {
+                        state.model_picker_selected = idx;
+                        state.model_picker_view_offset = acecode::tui::scroll_to_keep_visible(
+                            state.model_picker_selected, state.model_picker_view_offset,
+                            acecode::tui::kResumePickerVisibleRows,
+                            static_cast<int>(state.model_picker_options.size()));
                         screen.PostEvent(Event::Custom);
                     }
                 }
@@ -3797,6 +3893,62 @@ static int run_interactive_app(const CliOptions& cli,
             picker_rows.push_back(text(""));
             rewind_picker_element = vbox(std::move(picker_rows)) | border | color(Color::Cyan);
         }
+        // /model picker overlay。同 resume_picker_element 的视觉风格(青边、
+        // 滚动指示、选中行高亮)—— 单纯多一列前缀 "*" 标记当前 effective entry。
+        Element model_picker_element = text("");
+        if (state.model_picker_open && !state.model_picker_options.empty()) {
+            Elements picker_rows;
+            picker_rows.push_back(
+                text(" Select a model (Up/Down/PgUp/PgDn/Home/End to navigate, Enter to confirm, Esc to cancel):")
+                | bold | color(Color::Cyan));
+            picker_rows.push_back(text(""));
+
+            const int total = static_cast<int>(state.model_picker_options.size());
+            // 复用 /resume 的视口高度常量 —— picker 行为口径一致,行少时
+            // scroll_to_keep_visible 直接返回 0,不会留空行。
+            const int visible = std::min(acecode::tui::kResumePickerVisibleRows, total);
+            int offset = std::clamp(state.model_picker_view_offset, 0,
+                                    std::max(0, total - visible));
+            const int items_above = offset;
+            const int items_below = std::max(0, total - offset - visible);
+
+            if (items_above > 0) {
+                picker_rows.push_back(
+                    text("  \xE2\x86\x91 " + std::to_string(items_above) + " more above")
+                    | dim | color(Color::GrayLight));
+            } else {
+                picker_rows.push_back(text(""));
+            }
+
+            for (int i = offset; i < offset + visible; ++i) {
+                bool selected = (i == state.model_picker_selected);
+                const auto& opt = state.model_picker_options[i];
+                std::string marker = opt.is_current ? "* " : "  ";
+                std::string body =
+                    "  " + marker + opt.name + "  (" + opt.provider + "/" + opt.model + ")";
+                auto row = text(body);
+                if (selected) {
+                    row = row | bold | color(Color::White) | bgcolor(Color::RGB(0, 80, 120));
+                } else if (opt.is_current) {
+                    row = row | color(Color::Yellow);
+                } else {
+                    row = row | color(Color::GrayLight);
+                }
+                picker_rows.push_back(row);
+            }
+
+            if (items_below > 0) {
+                picker_rows.push_back(
+                    text("  \xE2\x86\x93 " + std::to_string(items_below) + " more below")
+                    | dim | color(Color::GrayLight));
+            } else {
+                picker_rows.push_back(text(""));
+            }
+
+            picker_rows.push_back(text(""));
+            model_picker_element = vbox(std::move(picker_rows)) | border | color(Color::Cyan);
+        }
+
         Element slash_dropdown_element = render_slash_dropdown(state);
 
         // AskUserQuestion overlay —— 和 confirm_pending 互斥,在渲染层面
@@ -4028,6 +4180,7 @@ static int run_interactive_app(const CliOptions& cli,
             message_view,
             resume_picker_element,
             rewind_picker_element,
+            model_picker_element,
             ask_overlay_element,
             confirm_overlay_element,
             slash_dropdown_element,
