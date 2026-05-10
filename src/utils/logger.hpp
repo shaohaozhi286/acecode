@@ -19,6 +19,7 @@
 #include <filesystem>
 #include <functional>
 #include <cstdio>
+#include <thread>
 
 namespace acecode {
 
@@ -108,9 +109,13 @@ public:
         }
         if (sep != std::string::npos) fname = fname.substr(sep + 1);
 
+        std::ostringstream thread_oss;
+        thread_oss << std::this_thread::get_id();
+
         std::ostringstream line_oss;
         line_oss << std::put_time(&tm_buf, "%H:%M:%S") << "."
                  << std::setfill('0') << std::setw(3) << ms.count()
+                 << " [tid=" << thread_oss.str() << "]"
                  << " " << level_str(level)
                  << " [" << fname << ":" << line << "] "
                  << msg << "\n";

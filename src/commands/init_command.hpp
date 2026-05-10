@@ -21,6 +21,8 @@ std::string build_acecode_md_skeleton(const std::filesystem::path& cwd);
 // ACECODE.md / CLAUDE.md / AGENT.md already exist in `cwd`.
 std::string build_init_prompt(const std::filesystem::path& cwd);
 
+bool has_usable_init_provider(const AppConfig& cfg);
+
 // Register `/init` — generate or improve ACECODE.md in cwd. With a configured
 // provider `/init` delegates the analysis to the LLM. With no provider it falls
 // back to writing the static skeleton produced by `build_acecode_md_skeleton`.

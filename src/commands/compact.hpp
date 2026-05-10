@@ -32,6 +32,8 @@ struct CompactResult {
     bool performed = false;
     int messages_compressed = 0;
     int estimated_tokens_saved = 0;
+    std::string summary_text;
+    std::vector<ChatMessage> compacted_messages;
     std::string error;
 };
 
@@ -82,6 +84,17 @@ std::vector<ChatMessage> normalize_messages_for_api(const std::vector<ChatMessag
 // ============================================================
 // Full Compact (tasks 5.x)
 // ============================================================
+
+// Pure compact core. It summarizes a message list and returns the replacement
+// message list without touching TUI state or an AgentLoop instance.
+CompactResult compact_messages(
+    LlmProvider& provider,
+    const std::vector<ChatMessage>& messages,
+    const std::string& cwd,
+    int keep_turns = 4,
+    bool is_auto = false,
+    std::atomic<bool>* abort_flag = nullptr
+);
 
 // Perform context compaction with new boundary-aware pipeline
 CompactResult compact_context(

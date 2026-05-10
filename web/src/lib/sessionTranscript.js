@@ -150,6 +150,11 @@ function historyItemFromMessage(next, m) {
   };
 }
 
+function visibleTranscriptMessages(messages) {
+  if (!Array.isArray(messages)) return [];
+  return messages.filter((m) => !m?.is_meta);
+}
+
 function toolKey(payload = {}) {
   if (payload.tool_call_id || payload.call_id || payload.id) {
     return payload.tool_call_id || payload.call_id || payload.id;
@@ -216,6 +221,17 @@ export function reduceTranscriptEvent(state, msg) {
   }
 
   switch (t) {
+    case 'transcript_replace': {
+      finalizeStreaming(next);
+      next.toolMap = new Map();
+      const messages = visibleTranscriptMessages(p.messages);
+      next.items = messages.map((m) => historyItemFromMessage(next, m));
+      const restoredTitle = titleFromMessages(messages);
+      if (restoredTitle) next.title = restoredTitle;
+      next.tokenUsage = null;
+      next.error = '';
+      break;
+    }
     case 'agent_progress': {
       const phase = p.phase || '';
       const label = p.label || '';
@@ -440,7 +456,7 @@ export function loadTranscriptHistory(state, data = {}) {
     loadState: 'loaded',
   });
   const effects = [];
-  const msgs = Array.isArray(data.messages) ? data.messages : [];
+  const msgs = visibleTranscriptMessages(data.messages);
 
   next.items = msgs.map((m) => historyItemFromMessage(next, m));
 

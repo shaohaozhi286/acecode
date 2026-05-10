@@ -1,0 +1,44 @@
+#include <gtest/gtest.h>
+
+#include "web/handlers/builtin_command_handler.hpp"
+
+TEST(BuiltinCommandHandler, ParsesSupportedCommandName) {
+    auto parsed = acecode::web::parse_builtin_command_request(
+        R"({"command":"init","display_text":"/init"})");
+
+    ASSERT_TRUE(parsed.ok) << parsed.error;
+    EXPECT_EQ(parsed.request.name, "init");
+    EXPECT_EQ(parsed.request.args, "");
+    EXPECT_EQ(parsed.request.display_text, "/init");
+}
+
+TEST(BuiltinCommandHandler, ParsesSlashTextAndArgs) {
+    auto parsed = acecode::web::parse_builtin_command_request(
+        R"({"command":"/compact now"})");
+
+    ASSERT_TRUE(parsed.ok) << parsed.error;
+    EXPECT_EQ(parsed.request.name, "compact");
+    EXPECT_EQ(parsed.request.args, "now");
+    EXPECT_EQ(parsed.request.display_text, "/compact now");
+}
+
+TEST(BuiltinCommandHandler, RejectsUnsupportedCommand) {
+    auto parsed = acecode::web::parse_builtin_command_request(
+        R"({"command":"model"})");
+
+    EXPECT_FALSE(parsed.ok);
+    EXPECT_EQ(parsed.status, 400);
+    EXPECT_EQ(parsed.error, "unsupported command");
+    EXPECT_EQ(parsed.request.name, "model");
+    auto body = acecode::web::builtin_command_error_json(parsed);
+    EXPECT_EQ(body["error"], "unsupported command");
+    EXPECT_EQ(body["command"], "model");
+}
+
+TEST(BuiltinCommandHandler, RejectsBadJson) {
+    auto parsed = acecode::web::parse_builtin_command_request("{");
+
+    EXPECT_FALSE(parsed.ok);
+    EXPECT_EQ(parsed.status, 400);
+    EXPECT_NE(parsed.error.find("bad json"), std::string::npos);
+}

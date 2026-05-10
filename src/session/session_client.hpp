@@ -39,6 +39,7 @@ enum class SessionEventKind {
     PermissionRequest, // payload: {"request_id":"...", "tool":"...", "args": {...}}
     QuestionRequest,   // payload: {"request_id":"...", "questions":[...]} (AskUserQuestion 工具)
     Usage,             // payload: {"input": N, "output": N, ...}
+    TranscriptReplace, // payload: {"messages": [...]} full visible transcript replacement
     BusyChanged,       // payload: {"busy": bool}
     Done,              // payload: {} —— 一轮 agent loop 结束
     Error,             // payload: {"reason":"...", "request_id":"..."(可选)}
@@ -62,6 +63,24 @@ enum class PermissionDecisionChoice {
 struct PermissionDecision {
     std::string request_id;
     PermissionDecisionChoice choice = PermissionDecisionChoice::Deny;
+};
+
+enum class BuiltinCommandStatus {
+    Accepted,
+    UnknownSession,
+    UnsupportedCommand,
+    Failed,
+};
+
+struct BuiltinCommandRequest {
+    std::string name;
+    std::string args;
+    std::string display_text;
+};
+
+struct BuiltinCommandResult {
+    BuiltinCommandStatus status = BuiltinCommandStatus::Failed;
+    std::string message;
 };
 
 // ----- Session 创建参数 -----
@@ -169,6 +188,13 @@ public:
         return send_input(session_id, text);
     }
 
+    // Execute a daemon-owned builtin command, currently limited to `/init` and
+    // `/compact`. This is intentionally separate from send_input so command
+    // text is not skill-expanded or sent to the model as an ordinary message.
+    virtual BuiltinCommandResult execute_builtin_command(
+        const std::string& session_id,
+        const BuiltinCommandRequest& request) = 0;
+
     // 回应一个之前推送的 permission_request。线程安全。
     // 未知 request_id / 已超时的请求 = no-op。
     virtual void respond_permission(const std::string& session_id,
@@ -198,6 +224,7 @@ inline const char* to_string(SessionEventKind k) {
         case SessionEventKind::PermissionRequest: return "permission_request";
         case SessionEventKind::QuestionRequest:   return "question_request";
         case SessionEventKind::Usage:             return "usage";
+        case SessionEventKind::TranscriptReplace: return "transcript_replace";
         case SessionEventKind::BusyChanged:       return "busy_changed";
         case SessionEventKind::Done:              return "done";
         case SessionEventKind::Error:             return "error";

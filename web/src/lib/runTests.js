@@ -21,6 +21,7 @@ import './api.test.js';
 import './searchSessions.test.js';
 import './useGlobalShortcut.test.js';
 import './slashCommands.test.js';
+import './builtinCommandRouting.test.js';
 import './slashCommandWorkspace.test.js';
 import './desktopNotify.test.js';
 import './desktopTrayMenu.test.js';

@@ -8,7 +8,7 @@
 //   - parseLeadingCommand:命中 / 未命中(命令名未知)/ 含空格 / 空串
 
 import assert from 'node:assert/strict';
-import { rankCommands, flattenCommands, parseLeadingCommand } from './slashCommands.js';
+import { rankCommands, flattenCommands, parseLeadingCommand, parseExecutableBuiltinCommand } from './slashCommands.js';
 
 function run(name, fn) {
   try {
@@ -121,4 +121,20 @@ run('parseLeadingCommand:tab 与换行也算空白边界', () => {
   const r2 = parseLeadingCommand('/init\nnext', ['init']);
   assert.equal(r2.name, 'init');
   assert.equal(r2.headLength, 5);
+});
+
+run('parseExecutableBuiltinCommand:只识别 init 和 compact', () => {
+  assert.deepEqual(parseExecutableBuiltinCommand('/init'), {
+    name: 'init',
+    args: '',
+    display_text: '/init',
+  });
+  assert.deepEqual(parseExecutableBuiltinCommand('/compact now'), {
+    name: 'compact',
+    args: 'now',
+    display_text: '/compact now',
+  });
+  assert.equal(parseExecutableBuiltinCommand('/code-review check this'), null);
+  assert.equal(parseExecutableBuiltinCommand('/unknown'), null);
+  assert.equal(parseExecutableBuiltinCommand('plain text'), null);
 });

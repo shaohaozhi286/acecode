@@ -43,6 +43,8 @@ bool session_event_has_user_visible_output(SessionEventKind kind,
             const auto role = payload.value("role", std::string{});
             return role != "user";
         }
+        case SessionEventKind::TranscriptReplace:
+            return true;
         case SessionEventKind::Usage:
         case SessionEventKind::AgentProgress:
         case SessionEventKind::BusyChanged:

@@ -84,6 +84,7 @@ export function createApi(base = null) {
       request('PUT', `/api/workspaces/${encodeURIComponent(hash)}/pinned-sessions`, { session_ids: sessionIds }, base),
     destroySession:   (id)           => request('DELETE', `/api/sessions/${encodeURIComponent(id)}`, undefined, base),
     sendInput:        (id, text)     => request('POST',   `/api/sessions/${encodeURIComponent(id)}/messages`, {text}, base),
+    executeCommand:   (id, command)  => request('POST',   `/api/sessions/${encodeURIComponent(id)}/commands`, command, base),
     getMessages:      (id, since=0)  => request('GET',    `/api/sessions/${encodeURIComponent(id)}/messages?since=${since}`, undefined, base),
     listSkills:       ()             => request('GET',    '/api/skills', undefined, base),
     listCommands:     (workspaceHash) => request('GET',

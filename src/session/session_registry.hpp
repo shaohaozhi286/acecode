@@ -124,6 +124,10 @@ public:
     std::optional<PermissionMode> permission_mode(const std::string& id) const;
     bool set_permission_mode(const std::string& id, PermissionMode mode);
 
+    BuiltinCommandResult execute_builtin_command(
+        const std::string& id,
+        const BuiltinCommandRequest& request);
+
     // Resolve persisted metadata to displayable model state without activating
     // the session. Used by web endpoints for inactive disk sessions.
     std::optional<SessionModelState> model_state_from_meta(const SessionMeta& meta) const;

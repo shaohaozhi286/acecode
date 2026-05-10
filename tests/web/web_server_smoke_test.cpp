@@ -743,6 +743,35 @@ TEST(WebServerHttp, PostMessageQueuesInputInDaemonSession) {
     EXPECT_TRUE(found) << "HTTP submit should be owned by daemon session";
 }
 
+TEST(WebServerHttp, PostBuiltinCommandRejectsUnknownSession) {
+    WebServerFixture fx;
+    auto r = cpr::Post(cpr::Url{fx.url("/api/sessions/missing-session/commands")},
+                       cpr::Header{{"Content-Type", "application/json"}},
+                       cpr::Body{R"({"command":"init"})"});
+
+    EXPECT_EQ(r.status_code, 404);
+    auto body = json::parse(r.text);
+    EXPECT_EQ(body["error"], "unknown session");
+}
+
+TEST(WebServerHttp, PostBuiltinCommandRejectsUnsupportedCommand) {
+    WebServerFixture fx;
+    auto post = cpr::Post(cpr::Url{fx.url("/api/sessions")},
+                          cpr::Header{{"Content-Type", "application/json"}},
+                          cpr::Body{R"({})"});
+    ASSERT_EQ(post.status_code, 201);
+    auto sid = json::parse(post.text)["session_id"].get<std::string>();
+
+    auto r = cpr::Post(cpr::Url{fx.url("/api/sessions/" + sid + "/commands")},
+                       cpr::Header{{"Content-Type", "application/json"}},
+                       cpr::Body{R"({"command":"model"})"});
+
+    EXPECT_EQ(r.status_code, 400);
+    auto body = json::parse(r.text);
+    EXPECT_EQ(body["error"], "unsupported command");
+    EXPECT_EQ(body["command"], "model");
+}
+
 // 场景: inactive 磁盘历史不在 registry 内存里时,GET messages 也应能返回
 // ChatMessage 历史,让 Web 点击历史会话前可预览/补齐。
 TEST(WebServerHttp, GetMessagesForInactiveDiskSessionReturnsHistory) {

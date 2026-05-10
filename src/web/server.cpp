@@ -25,6 +25,7 @@
 #include "handlers/models_handler.hpp"
 #include "handlers/permission_mode_handler.hpp"
 #include "handlers/pinned_sessions_handler.hpp"
+#include "handlers/builtin_command_handler.hpp"
 #include "handlers/commands_handler.hpp"
 #include "handlers/skill_command_expander.hpp"
 #include "handlers/skills_handler.hpp"
@@ -1318,6 +1319,10 @@ struct WebServer::Impl {
         ([this](const crow::request& req, const std::string&) {
             return cors_preflight(req);
         });
+        CROW_ROUTE(app, "/api/sessions/<string>/commands").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req, const std::string&) {
+            return cors_preflight(req);
+        });
         CROW_ROUTE(app, "/api/sessions/<string>/permissions").methods(crow::HTTPMethod::Options)
         ([this](const crow::request& req, const std::string&) {
             return cors_preflight(req);
@@ -1542,6 +1547,58 @@ struct WebServer::Impl {
 
             crow::response r(202);
             r.body = R"({"queued":true})";
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        });
+
+        // POST /api/sessions/:id/commands: daemon-owned builtin slash command
+        // execution. This deliberately bypasses skill expansion and ordinary
+        // message submission so `/init` and `/compact` have TUI-equivalent
+        // behavior in Desktop/Web.
+        CROW_ROUTE(app, "/api/sessions/<string>/commands").methods(crow::HTTPMethod::POST)
+        ([this](const crow::request& req, const std::string& id) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.session_client) {
+                crow::response r(503);
+                r.body = R"({"error":"session client unavailable"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            auto parsed = web::parse_builtin_command_request(req.body);
+            if (!parsed.ok) {
+                crow::response r(parsed.status);
+                r.body = web::builtin_command_error_json(parsed).dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            BuiltinCommandRequest cmd;
+            cmd.name = std::move(parsed.request.name);
+            cmd.args = std::move(parsed.request.args);
+            cmd.display_text = std::move(parsed.request.display_text);
+            auto result = deps.session_client->execute_builtin_command(id, cmd);
+            if (result.status == BuiltinCommandStatus::UnknownSession) {
+                crow::response r(404);
+                r.body = R"({"error":"unknown session"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            if (result.status == BuiltinCommandStatus::UnsupportedCommand) {
+                crow::response r(400);
+                r.body = json{{"error", "unsupported command"}, {"command", cmd.name}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            if (result.status == BuiltinCommandStatus::Failed) {
+                crow::response r(500);
+                r.body = json{{"error", result.message.empty() ? "command failed" : result.message}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            crow::response r(202);
+            r.body = json{{"queued", true}, {"command", cmd.name}}.dump();
             r.add_header("Content-Type", "application/json");
             return with_cors(req, std::move(r));
         });

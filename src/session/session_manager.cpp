@@ -8,6 +8,7 @@
 #include <regex>
 #include <set>
 #include <sstream>
+#include <unordered_map>
 
 namespace {
 
@@ -137,6 +138,53 @@ void SessionManager::on_message(const ChatMessage& msg) {
     }
 
     update_meta();
+}
+
+bool SessionManager::replace_active_messages(const std::vector<ChatMessage>& messages) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!started_) return false;
+
+    ensure_created();
+    if (!created_) return false;
+
+    std::set<std::string> retained_user_uuids;
+    for (const auto& msg : messages) {
+        if (msg.role == "user" && !msg.uuid.empty()) {
+            retained_user_uuids.insert(msg.uuid);
+        }
+    }
+
+    std::unordered_map<std::string, std::vector<ChatMessage>> checkpoints_by_user;
+    for (const auto& existing : SessionStorage::load_messages(jsonl_path_)) {
+        auto snapshot = FileCheckpointStore::decode_snapshot_message(existing);
+        if (!snapshot.has_value()) continue;
+        if (retained_user_uuids.count(snapshot->message_uuid)) {
+            checkpoints_by_user[snapshot->message_uuid].push_back(existing);
+        }
+    }
+
+    std::vector<ChatMessage> rewritten;
+    rewritten.reserve(messages.size() + checkpoints_by_user.size());
+    last_user_summary_.clear();
+    for (const auto& msg : messages) {
+        if (is_file_checkpoint_message(msg)) continue;
+        rewritten.push_back(msg);
+        if (msg.role == "user") {
+            if (!msg.content.empty()) {
+                last_user_summary_ = extract_summary(msg.content);
+            }
+            auto it = checkpoints_by_user.find(msg.uuid);
+            if (it != checkpoints_by_user.end()) {
+                rewritten.insert(rewritten.end(), it->second.begin(), it->second.end());
+            }
+        }
+    }
+
+    SessionStorage::write_messages(jsonl_path_, rewritten);
+    checkpoint_store_.load_from_messages(project_dir_, session_id_, rewritten);
+    message_count_ = static_cast<int>(rewritten.size());
+    update_meta();
+    return true;
 }
 
 void SessionManager::begin_user_turn_checkpoint(const std::string& user_message_uuid) {

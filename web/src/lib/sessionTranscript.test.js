@@ -134,6 +134,21 @@ run('history load 将带 tool_hunks metadata 的 tool message 恢复为 tool ite
   assert.deepEqual(loaded.items[1].tool.hunks, [hunk]);
 });
 
+run('history load 不显示内部 meta 消息', () => {
+  const loaded = loadTranscriptHistory(createTranscriptState({ title: 's1' }), {
+    messages: [
+      { id: 'm1', role: 'system', content: '[Compact boundary]', is_meta: true },
+      { id: 's1', role: 'system', content: '[Conversation summary]\nold prompt summarized' },
+      { id: 'u1', role: 'user', content: 'kept prompt' },
+    ],
+    events: [],
+  }).state;
+  assert.deepEqual(loaded.items.map((item) => item.content), [
+    '[Conversation summary]\nold prompt summarized',
+    'kept prompt',
+  ]);
+});
+
 run('新 transcript token usage 默认为 unknown 且不跨 session 继承', () => {
   const previous = reduceMany([
     { type: 'usage', payload: { prompt_tokens: 8000, completion_tokens: 1, total_tokens: 8001, has_data: true }, seq: 1 },
@@ -217,6 +232,67 @@ run('reasoning 事件不追加到可见 assistant 消息', () => {
   assert.equal(state.items.length, 1);
   assert.equal(state.items[0].role, 'assistant');
   assert.equal(state.items[0].content, 'visible');
+});
+
+run('transcript_replace 替换 compact 前旧消息并清理 token usage', () => {
+  const previous = reduceMany([
+    { type: 'message', payload: { id: 'u-old', role: 'user', content: 'old prompt' }, seq: 1 },
+    { type: 'usage', payload: { prompt_tokens: 1000, total_tokens: 1000, has_data: true }, seq: 2 },
+    { type: 'busy_changed', payload: { busy: true }, seq: 3 },
+  ]);
+  assert.equal(previous.items.length, 1);
+  assert.equal(previous.tokenUsage.promptTokens, 1000);
+
+  const state = reduceMany([
+    {
+      type: 'transcript_replace',
+      payload: {
+        messages: [
+          { id: 'meta', role: 'system', content: '[Compact boundary]', is_meta: true },
+          { id: 'summary', role: 'system', content: '[Conversation summary]\nold prompt summarized' },
+          { id: 'u-keep', role: 'user', content: 'kept prompt' },
+        ],
+      },
+      seq: 4,
+    },
+    {
+      type: 'message',
+      payload: { role: 'system', content: 'Compacted 2 messages, saved ~400 tokens.' },
+      seq: 5,
+    },
+    { type: 'busy_changed', payload: { busy: false }, seq: 6 },
+  ], previous);
+
+  assert.deepEqual(state.items.map((item) => item.content), [
+    '[Conversation summary]\nold prompt summarized',
+    'kept prompt',
+    'Compacted 2 messages, saved ~400 tokens.',
+  ]);
+  assert.equal(state.items.some((item) => item.content === 'old prompt'), false);
+  assert.equal(state.tokenUsage, null);
+  assert.equal(state.busy, false);
+  assert.equal(state.status, 'idle');
+});
+
+run('transcript_replace 清理正在流式输出和活动工具映射', () => {
+  const previous = reduceMany([
+    { type: 'token', payload: { text: 'partial' }, seq: 1 },
+  ]);
+  assert.notEqual(previous.streamingId, null);
+  const withToolMap = {
+    ...previous,
+    toolMap: new Map([['call-1', 42]]),
+  };
+
+  const state = reduceTranscriptEvent(withToolMap, {
+    type: 'transcript_replace',
+    payload: { messages: [{ id: 'u1', role: 'user', content: 'after compact' }] },
+    seq: 3,
+  }).state;
+
+  assert.equal(state.streamingId, null);
+  assert.equal(state.toolMap.size, 0);
+  assert.deepEqual(state.items.map((item) => item.content), ['after compact']);
 });
 
 run('新 session 不继承上一 session 活动状态', () => {

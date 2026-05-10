@@ -51,17 +51,6 @@ std::string skeleton_body_internal(bool claude_exists, bool agent_exists) {
 // Mirrors the preconditions AgentLoop relies on when calling chat_stream, not a
 // comprehensive auth probe — false positives just reach AgentLoop which
 // surfaces the HTTP error normally. Rationale in design.md D4.
-bool has_usable_provider(const AppConfig& cfg) {
-    if (cfg.provider == "copilot") {
-        // Background token refresh handles validity; treat as usable if chosen.
-        return true;
-    }
-    if (cfg.provider == "openai") {
-        return !cfg.openai.api_key.empty();
-    }
-    return false;
-}
-
 // Body adapted from claudecodehaha/src/commands/init.ts OLD_INIT_PROMPT with
 // CLAUDE.md → ACECODE.md, Claude Code → acecode, and an acecode-specific file
 // prefix. The wording ("not obvious instructions", "avoid listing every
@@ -158,7 +147,7 @@ void cmd_init(CommandContext& ctx, const std::string& /*args*/) {
     std::error_code ec;
     bool acecode_exists = fs::exists(cwd / "ACECODE.md", ec);
 
-    if (!has_usable_provider(ctx.config)) {
+    if (!has_usable_init_provider(ctx.config)) {
         // Offline fallback: write the static skeleton, same refuse-on-exists
         // behavior as the pre-LLM implementation. The skeleton helper already
         // tolerates the case where neither legacy file is present.
@@ -235,6 +224,17 @@ std::string build_init_prompt(const fs::path& cwd) {
         out += migration_suffix(claude_exists, agent_exists);
     }
     return out;
+}
+
+bool has_usable_init_provider(const AppConfig& cfg) {
+    if (cfg.provider == "copilot") {
+        // Background token refresh handles validity; treat as usable if chosen.
+        return true;
+    }
+    if (cfg.provider == "openai") {
+        return !cfg.openai.api_key.empty();
+    }
+    return false;
 }
 
 void register_init_command(CommandRegistry& registry) {

@@ -216,16 +216,15 @@ TokenWarningState calculate_token_warning_state(int estimated_tokens, int contex
 // Full Compact (tasks 5.x + 6.x PTL retry)
 // ============================================================
 
-CompactResult compact_context(
+CompactResult compact_messages(
     LlmProvider& provider,
-    AgentLoop& agent_loop,
-    TuiState& state,
+    const std::vector<ChatMessage>& messages,
+    const std::string& cwd,
     int keep_turns,
     bool is_auto,
     std::atomic<bool>* abort_flag
 ) {
     CompactResult result;
-    auto& messages = agent_loop.messages_mut();
 
     if (messages.empty()) {
         result.error = "No conversation history to compact.";
@@ -396,7 +395,7 @@ CompactResult compact_context(
     // Post-compact state re-injection: current working directory
     ChatMessage cwd_msg;
     cwd_msg.role = "system";
-    cwd_msg.content = "[Post-compact context] Current working directory: " + agent_loop.cwd();
+    cwd_msg.content = "[Post-compact context] Current working directory: " + cwd;
     cwd_msg.is_meta = true;
     new_messages.push_back(cwd_msg);
 
@@ -406,9 +405,33 @@ CompactResult compact_context(
     result.performed = true;
     result.messages_compressed = keep_from - active_start;
     result.estimated_tokens_saved = std::max(0, tokens_before - estimate_message_tokens({summary_msg}));
+    result.summary_text = summary_text;
+    result.compacted_messages = std::move(new_messages);
 
-    // Update agent loop messages
-    messages = std::move(new_messages);
+    return result;
+}
+
+CompactResult compact_context(
+    LlmProvider& provider,
+    AgentLoop& agent_loop,
+    TuiState& state,
+    int keep_turns,
+    bool is_auto,
+    std::atomic<bool>* abort_flag
+) {
+    CompactResult result = compact_messages(
+        provider,
+        agent_loop.messages(),
+        agent_loop.cwd(),
+        keep_turns,
+        is_auto,
+        abort_flag);
+
+    if (!result.performed) {
+        return result;
+    }
+
+    agent_loop.messages_mut() = result.compacted_messages;
 
     // Update TUI conversation display
     {
@@ -427,7 +450,7 @@ CompactResult compact_context(
         std::vector<TuiState::Message> new_conv;
         new_conv.reserve(state.conversation.size() - tui_keep + 2);
         new_conv.push_back({"system", "--- [Compact Boundary] ---", false});
-        new_conv.push_back({"system", "[Conversation summary]\n" + summary_text, false});
+        new_conv.push_back({"system", "[Conversation summary]\n" + result.summary_text, false});
         new_conv.insert(new_conv.end(),
                         state.conversation.begin() + tui_keep,
                         state.conversation.end());

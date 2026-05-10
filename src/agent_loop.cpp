@@ -54,6 +54,20 @@ std::string format_bytes_detail(std::size_t bytes) {
     return oss.str();
 }
 
+nlohmann::json build_transcript_replace_payload(
+    const std::vector<ChatMessage>& messages,
+    const CompactResult& result) {
+    nlohmann::json arr = nlohmann::json::array();
+    for (const auto& msg : messages) {
+        arr.push_back(web::chat_message_to_payload_json(msg));
+    }
+    return nlohmann::json{
+        {"messages", std::move(arr)},
+        {"messages_compressed", result.messages_compressed},
+        {"estimated_tokens_saved", result.estimated_tokens_saved},
+    };
+}
+
 } // namespace
 
 AgentLoop::AgentLoop(ProviderAccessor provider_accessor, ToolExecutor& tools,
@@ -131,6 +145,9 @@ void AgentLoop::worker_main() {
         case WorkerTask::Kind::Shell:
             run_shell(task.payload);
             break;
+        case WorkerTask::Kind::Compact:
+            run_compact();
+            break;
         }
     }
 }
@@ -157,6 +174,20 @@ void AgentLoop::submit_shell(std::string command) {
         task_queue_.push(WorkerTask{WorkerTask::Kind::Shell, std::move(command)});
     }
     queue_cv_.notify_one();
+}
+
+void AgentLoop::submit_compact() {
+    {
+        std::lock_guard<std::mutex> lk(queue_mu_);
+        WorkerTask task;
+        task.kind = WorkerTask::Kind::Compact;
+        task_queue_.push(std::move(task));
+    }
+    queue_cv_.notify_one();
+}
+
+void AgentLoop::emit_system_message(const std::string& content) {
+    dispatch_message("system", content, false);
 }
 
 void AgentLoop::inject_shell_turn(const std::string& cmd,
@@ -890,6 +921,69 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
     busy_ = false;
     events_.emit(SessionEventKind::BusyChanged, nlohmann::json{{"busy", false}});
     events_.emit(SessionEventKind::Done, nlohmann::json::object());
+}
+
+void AgentLoop::run_compact() {
+    abort_requested_ = false;
+    busy_ = true;
+
+    if (callbacks_.on_busy_changed) {
+        callbacks_.on_busy_changed(true);
+    }
+    events_.emit(SessionEventKind::BusyChanged, nlohmann::json{{"busy", true}});
+    events_.emit(SessionEventKind::AgentProgress, nlohmann::json{
+        {"phase", "compacting"},
+        {"label", "Compacting conversation"},
+        {"started_at_ms", now_epoch_ms()},
+    });
+    dispatch_message("system", "Compacting conversation...", false);
+
+    auto finish = [this]() {
+        if (callbacks_.on_busy_changed) {
+            callbacks_.on_busy_changed(false);
+        }
+        busy_ = false;
+        events_.emit(SessionEventKind::BusyChanged, nlohmann::json{{"busy", false}});
+        events_.emit(SessionEventKind::Done, nlohmann::json::object());
+    };
+
+    std::shared_ptr<LlmProvider> provider_snapshot;
+    if (provider_accessor_) provider_snapshot = provider_accessor_();
+    if (!provider_snapshot) {
+        dispatch_message("error", "[Error] provider unavailable for /compact", false);
+        finish();
+        return;
+    }
+
+    CompactResult result = compact_messages(
+        *provider_snapshot,
+        messages_,
+        cwd_,
+        4,
+        false,
+        &abort_requested_);
+
+    if (!result.performed) {
+        dispatch_message("error", "[Error] " + result.error, false);
+        finish();
+        return;
+    }
+
+    messages_ = result.compacted_messages;
+    if (session_manager_) {
+        session_manager_->replace_active_messages(messages_);
+    }
+
+    events_.emit(SessionEventKind::TranscriptReplace,
+                 build_transcript_replace_payload(messages_, result));
+
+    dispatch_message(
+        "system",
+        "Compacted " + std::to_string(result.messages_compressed) +
+            " messages, saved ~" +
+            std::to_string(result.estimated_tokens_saved) + " tokens.",
+        false);
+    finish();
 }
 
 void AgentLoop::run_shell(const std::string& command) {

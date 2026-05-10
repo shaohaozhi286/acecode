@@ -55,6 +55,7 @@ import {
 import { normalizePermissionMode } from '../lib/permissionMode.js';
 import { VsIcon } from './Icon.jsx';
 import { commandWorkspaceHashForInput } from '../lib/slashCommandWorkspace.js';
+import { inputRouteForText, sessionCreateOptionsForText } from '../lib/builtinCommandRouting.js';
 import { fileTreeRefreshKeyFromItems } from '../lib/fileTreeRefresh.js';
 import { buildAssistantRunDirectives } from '../lib/assistantRunDirectives.js';
 import {
@@ -558,20 +559,35 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     updateQueueState((prev) => retryQueuedInput(prev, queuedId));
   }, [updateQueueState]);
 
+  const sendInputOrBuiltin = useCallback((targetSid, text) => {
+    const route = inputRouteForText(text);
+    if (route.kind === 'builtin') {
+      return api.executeCommand(targetSid, route.command);
+    }
+    return api.sendInput(targetSid, text);
+  }, [api]);
+
   const submit = useCallback((text) => {
+    const route = inputRouteForText(text);
+    const isBuiltin = route.kind === 'builtin';
     if (!sid) {
-      // 自动新建会话并让 daemon 直接接管首条消息。
+      // 自动新建会话。普通消息由 daemon auto_start 接管;builtin 先创建
+      // 空会话,再走专门 command endpoint。
       const trimmed = String(text || '').trim();
       if (!trimmed || homeSubmitting) return;
       const target = selectedHomeWorkspace || fallbackWorkspaceOption(ref, health);
       const targetHash = target?.hash || '';
+      const createOptions = sessionCreateOptionsForText(text);
       const create = isRealWorkspaceHash(targetHash)
-        ? api.createWorkspaceSession(targetHash, { initial_user_message: text, auto_start: true })
-        : api.createSession({ initial_user_message: text, auto_start: true });
+        ? api.createWorkspaceSession(targetHash, createOptions)
+        : api.createSession(createOptions);
       setHomeSubmitting(true);
-      create.then((r) => {
+      create.then(async (r) => {
         const id = r && (r.session_id || r.id);
         if (id) {
+          if (isBuiltin) {
+            await api.executeCommand(id, route.command);
+          }
           const next = newSessionRefFrom(ref, id);
           if (r.workspace_hash || isRealWorkspaceHash(targetHash)) {
             next.workspaceHash = r.workspace_hash || targetHash;
@@ -586,18 +602,20 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         .finally(() => setHomeSubmitting(false));
       return;
     }
-    if (busy) {
+    if (busy && !isBuiltin) {
       enqueueInput(text);
       return;
     }
-    api.sendInput(sid, text).catch((e) => {
+    sendInputOrBuiltin(sid, text).catch((e) => {
       toast({ kind: 'err', text: '发送失败:' + (e.message || '') });
       applyEvent({ type: 'busy_changed', payload: { busy: false } }, { emitEffects: false });
     });
     recordInputHistory(text);
     if (!ref?.title) setTranscriptTitle(text);
-    applyEvent({ type: 'busy_changed', payload: { busy: true } }, { emitEffects: false });
-  }, [sid, busy, api, ref, health, homeSubmitting, selectedHomeWorkspace, onSessionPromoted, recordInputHistory, enqueueInput, applyEvent, setTranscriptTitle]);
+    if (!isBuiltin) {
+      applyEvent({ type: 'busy_changed', payload: { busy: true } }, { emitEffects: false });
+    }
+  }, [sid, busy, api, ref, health, homeSubmitting, selectedHomeWorkspace, onSessionPromoted, recordInputHistory, enqueueInput, applyEvent, setTranscriptTitle, sendInputOrBuiltin]);
 
   const drainQueuedInput = useCallback(() => {
     const targetSid = sidRef.current;
@@ -607,10 +625,12 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
 
     drainRef.current = true;
     updateQueueState((prev) => markQueuedInputSending(prev, queuedItem.queued.id));
-    api.sendInput(targetSid, queuedItem.content)
+    sendInputOrBuiltin(targetSid, queuedItem.content)
       .then(() => {
         if (sidRef.current === targetSid) {
-          applyEvent({ type: 'busy_changed', payload: { busy: true } }, { emitEffects: false });
+          if (inputRouteForText(queuedItem.content).kind !== 'builtin') {
+            applyEvent({ type: 'busy_changed', payload: { busy: true } }, { emitEffects: false });
+          }
         }
       })
       .catch((e) => {
@@ -621,7 +641,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
       .finally(() => {
         drainRef.current = false;
       });
-  }, [api, applyEvent, busy, updateQueueState]);
+  }, [applyEvent, busy, sendInputOrBuiltin, updateQueueState]);
 
   const prevBusyRef = useRef(busy);
   useEffect(() => {

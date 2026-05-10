@@ -109,6 +109,14 @@ public:
     // user-role entry to messages_ for the next LLM turn.
     void submit_shell(std::string command);
 
+    // Queue a manual `/compact` control task on the same worker as chat/tool
+    // turns so transcript mutation cannot race an active model run.
+    void submit_compact();
+
+    // Emit a visible system message without adding it to LLM history. Used by
+    // daemon-owned builtin commands for TUI-like progress and fallback output.
+    void emit_system_message(const std::string& content);
+
     // Append a single user-role entry to messages_ representing an already-run
     // shell command and its captured output. Used both by the shell worker
     // branch and by --resume to rehydrate LLM context from persisted session
@@ -189,6 +197,7 @@ private:
     // When `display_text` is empty, behaves identically to run_agent(prompt).
     void run_agent_with_display(const std::string& prompt, const std::string& display_text);
     void run_shell(const std::string& command);
+    void run_compact();
 
     // Section 7: 同时调老 on_message callback(若 TUI 挂了)和新事件流
     // (events_)。所有 on_message 触发点都该走这个 helper,确保 daemon
@@ -198,7 +207,7 @@ private:
                            bool is_tool);
 
     struct WorkerTask {
-        enum class Kind { Chat, Shell };
+        enum class Kind { Chat, Shell, Compact };
         Kind kind = Kind::Chat;
         std::string payload;
         // 仅 Chat 用:UI 渲染时希望显示的"原文",而 payload(发给 LLM)可能

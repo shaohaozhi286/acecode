@@ -2,6 +2,7 @@
 
 #include "session_rewind.hpp"
 #include "session_storage.hpp"
+#include "../commands/init_command.hpp"
 #include "../provider/apply_model_to_session.hpp"
 #include "../provider/copilot_provider.hpp"
 #include "../provider/model_context_resolver.hpp"
@@ -11,6 +12,7 @@
 #include "../utils/cwd_hash.hpp"
 
 #include <filesystem>
+#include <fstream>
 #include <optional>
 #include <utility>
 
@@ -330,6 +332,65 @@ SessionEntry* SessionRegistry::lookup(const std::string& id) {
     std::lock_guard<std::mutex> lk(mu_);
     auto it = entries_.find(id);
     return it == entries_.end() ? nullptr : it->second.get();
+}
+
+BuiltinCommandResult SessionRegistry::execute_builtin_command(
+    const std::string& id,
+    const BuiltinCommandRequest& request) {
+    if (request.name != "init" && request.name != "compact") {
+        return {BuiltinCommandStatus::UnsupportedCommand, "unsupported command"};
+    }
+
+    SessionEntry* entry = lookup(id);
+    if (!entry || !entry->loop) {
+        return {BuiltinCommandStatus::UnknownSession, "unknown session"};
+    }
+
+    if (request.name == "compact") {
+        entry->loop->submit_compact();
+        return {BuiltinCommandStatus::Accepted, "queued"};
+    }
+
+    const std::filesystem::path cwd = std::filesystem::path(entry->cwd);
+    const std::filesystem::path target = cwd / "ACECODE.md";
+
+    bool provider_usable = false;
+    if (entry->provider_slot) {
+        std::lock_guard<std::mutex> lk(entry->provider_slot->mu);
+        provider_usable = static_cast<bool>(entry->provider_slot->provider);
+    }
+    if (!provider_usable) {
+        std::error_code ec;
+        if (std::filesystem::exists(target, ec)) {
+            entry->loop->emit_system_message(
+                "ACECODE.md already exists at " + target.generic_string() +
+                " - no model is configured, so /init cannot propose improvements. "
+                "Edit it by hand, or run /configure first and re-run /init to get "
+                "an LLM-driven improvement pass.");
+            return {BuiltinCommandStatus::Accepted, "completed"};
+        }
+
+        std::ofstream ofs(target, std::ios::binary);
+        if (!ofs.is_open()) {
+            entry->loop->emit_system_message(
+                "Failed to open " + target.generic_string() + " for writing.");
+            return {BuiltinCommandStatus::Failed, "failed to open ACECODE.md for writing"};
+        }
+        ofs << build_acecode_md_skeleton(cwd);
+        entry->loop->emit_system_message(
+            "Created " + target.generic_string() +
+            " (offline skeleton - no model is configured, run /configure to get "
+            "a filled-in version).");
+        return {BuiltinCommandStatus::Accepted, "completed"};
+    }
+
+    entry->loop->emit_system_message(
+        "[Invoking /init - analyzing codebase and authoring ACECODE.md...]");
+    const std::string display = request.display_text.empty()
+        ? std::string{"/init"}
+        : request.display_text;
+    entry->loop->submit(build_init_prompt(cwd), display);
+    return {BuiltinCommandStatus::Accepted, "queued"};
 }
 
 std::optional<SessionModelState>

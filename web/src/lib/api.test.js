@@ -5,7 +5,7 @@
 // 不打真实网络,通过依赖注入 listWorkspaces / listSessions 两个 mock 完成。
 
 import assert from 'node:assert/strict';
-import { mergeAllWorkspaceSessions } from './api.js';
+import { createApi, mergeAllWorkspaceSessions } from './api.js';
 
 function run(name, fn) {
   try {
@@ -107,4 +107,38 @@ await run('listSessions 返回非数组 → 视为空 + 不报错', async () => 
   });
   assert.equal(result.sessions.length, 0);
   assert.equal(result.errors.length, 0);
+});
+
+await run('executeCommand posts to builtin command endpoint', async () => {
+  const previousFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    calls.push({ url, opts });
+    return {
+      ok: true,
+      status: 202,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ queued: true, command: 'init' }),
+    };
+  };
+  try {
+    const client = createApi({ origin: 'http://127.0.0.1:4567', token: 'tok' });
+    const result = await client.executeCommand('session/a', {
+      command: 'init',
+      args: '',
+      display_text: '/init',
+    });
+    assert.deepEqual(result, { queued: true, command: 'init' });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, 'http://127.0.0.1:4567/api/sessions/session%2Fa/commands');
+    assert.equal(calls[0].opts.method, 'POST');
+    assert.equal(calls[0].opts.headers['X-ACECode-Token'], 'tok');
+    assert.deepEqual(JSON.parse(calls[0].opts.body), {
+      command: 'init',
+      args: '',
+      display_text: '/init',
+    });
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
 });

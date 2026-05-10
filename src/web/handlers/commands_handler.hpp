@@ -6,8 +6,9 @@
 // + 所有已启用的 skill。其它 builtin(model/resume/rewind/clear 等)与 web 多
 // 会话语义冲突或已有专门 UI,故不暴露。
 //
-// 选中后**不**触发后端执行(实现层在前端,选中即插入 textarea)。详见
-// openspec/changes/add-webui-slash-commands。
+// 选中后**不**触发后端执行(选中只插入 textarea)。提交时,前端会把 init /
+// compact 路由到 `POST /api/sessions/:id/commands`,skills 和未知 slash 文本
+// 继续走普通消息路径。详见 openspec/changes/add-webui-slash-commands。
 
 #include <nlohmann/json.hpp>
 

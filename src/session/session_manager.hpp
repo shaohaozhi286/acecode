@@ -24,6 +24,10 @@ public:
     // Appends to JSONL and periodically updates metadata.
     void on_message(const ChatMessage& msg);
 
+    // Replace the current active JSONL transcript, preserving checkpoint
+    // metadata for user turns that remain in the supplied message list.
+    bool replace_active_messages(const std::vector<ChatMessage>& messages);
+
     // File checkpoint integration for /rewind. begin_user_turn_checkpoint()
     // creates the per-user snapshot; track_file_write_before() updates that
     // snapshot immediately before a write tool mutates a file.

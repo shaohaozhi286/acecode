@@ -55,6 +55,12 @@ bool LocalSessionClient::send_input(const std::string& session_id,
     return true;
 }
 
+BuiltinCommandResult LocalSessionClient::execute_builtin_command(
+    const std::string& session_id,
+    const BuiltinCommandRequest& request) {
+    return registry_.execute_builtin_command(session_id, request);
+}
+
 void LocalSessionClient::respond_permission(const std::string& session_id,
                                                const PermissionDecision& decision) {
     SessionEntry* entry = registry_.lookup(session_id);

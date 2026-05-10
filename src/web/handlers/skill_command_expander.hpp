@@ -7,7 +7,9 @@
 //
 // 路径:`POST /api/sessions/:id/messages` 的 lambda 在调 `send_input()` 之前
 // 调用 `try_expand_skill_command(text, registry)`,命中时用返回的 expanded
-// text 替换原 text。前端的 SlashDropdown / chip 行为保持不变。
+// text 替换原 text。`/init` 和 `/compact` 不应到达这里:Desktop/Web 提交
+// 时会改走 `POST /api/sessions/:id/commands`。前端的 SlashDropdown / chip
+// 行为保持不变。
 //
 // 设计要点见 openspec/changes/expand-webui-skill-commands/design.md。
 //

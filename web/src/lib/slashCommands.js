@@ -76,3 +76,14 @@ export function parseLeadingCommand(value, knownNames = []) {
     headLength: end,
   };
 }
+
+export function parseExecutableBuiltinCommand(value) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  const leading = parseLeadingCommand(text, ['init', 'compact']);
+  if (!leading.name) return null;
+  return {
+    name: leading.name,
+    args: text.slice(leading.headLength).trim(),
+    display_text: text,
+  };
+}

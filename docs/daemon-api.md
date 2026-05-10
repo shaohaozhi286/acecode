@@ -140,6 +140,45 @@ Fetch session content. Two modes by `since`:
 If the requested seq predates the ring-buffer start, you'll get an empty list
 and should re-fetch with `since=0`.
 
+### `POST /api/sessions/:id/commands`
+
+Execute daemon-owned builtin slash commands. This endpoint is intentionally
+separate from `POST /api/sessions/:id/messages`: commands are not skill-expanded
+and are not submitted as literal user messages. Supported command names are
+limited to `init` and `compact`.
+
+**Request body**:
+```json
+{
+  "command": "init",
+  "args": "",
+  "display_text": "/init"
+}
+```
+
+`command` may also be sent as slash text such as `"/compact"`. `display_text`
+is preserved for the visible user-facing command label when the command enqueues
+an LLM turn.
+
+**Response 202**:
+```json
+{ "queued": true, "command": "compact" }
+```
+
+Errors:
+- `400 {"error":"unsupported command","command":"..."}` for names other than
+  `init` or `compact`.
+- `404 {"error":"unknown session"}` when the session is not active in the
+  daemon registry.
+
+`/init` with a provider enqueues the same init prompt used by the TUI while
+displaying `/init` in the transcript. Without a provider it writes the offline
+`ACECODE.md` skeleton and emits a visible system message. `/compact` runs on the
+AgentLoop worker queue, emits progress/completion/error messages, rewrites the
+active JSONL transcript on success, and emits a `transcript_replace` event with
+the compacted message list plus `messages_compressed` and
+`estimated_tokens_saved`.
+
 ### `GET /api/sessions/:id/permissions`
 
 Return the active session's permission mode. This is session-scoped; changing
@@ -243,6 +282,7 @@ server          : unsubscribes from EventDispatcher; AgentLoop keeps running
 | `ToolEnd`          | Tool finished | `{ "tool": "...", "ok": true, "summary": ToolSummary?, "hunks": ToolHunks?, "output_tail": "..." }` |
 | `PermissionRequest`| Tool needs user confirmation | `{ "request_id": "...", "tool": "...", "args": {...}, "options": ["allow","deny","allow_session"] }` |
 | `Usage`            | LLM reported token usage | `{ "prompt_tokens": N, "completion_tokens": N, "total_tokens": N }` |
+| `TranscriptReplace`| `/compact` replaced the visible transcript | `{ "messages": ChatMessage[], "messages_compressed": N, "estimated_tokens_saved": N }` |
 | `BusyChanged`      | Transition between idle / waiting / running | `{ "busy": true, "reason": "waiting_llm"|"running_tool" }` |
 | `Done`             | Agent loop reached a terminator (text reply / `task_complete` / max_iterations / abort) | `{ "reason": "text"|"task_complete"|"abort"|"max_iters", "summary": "..."? }` |
 | `Error`            | Something failed (provider error / tool exception / permission timeout) | `{ "code": "...", "message": "..." }` |

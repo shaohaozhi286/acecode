@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <regex>
 #include <sstream>
 #include <string>
 
@@ -78,6 +79,23 @@ TEST_F(LoggerRotationTest, SingleFileModeWritesToTargetFileOnly) {
         << "单文件模式应写入指定文件";
     EXPECT_EQ(captured.str(), "")
         << "单文件模式不应镜像到 stderr";
+}
+
+// 场景: acecode.log 的每条日志都应在时间字段后携带线程 ID 字段,便于并发
+// worker / UI 回调排查。格式保持为: <time> [tid=<id>] <level> ...
+TEST_F(LoggerRotationTest, SingleFileModeIncludesThreadIdAfterTimestamp) {
+    auto log_path = tmp_dir_ / "acecode.log";
+    acecode::Logger::instance().init(log_path.string());
+
+    LOG_INFO("thread-id-format-line");
+
+    std::istringstream lines(read_file(log_path));
+    std::string line;
+    ASSERT_TRUE(std::getline(lines, line));
+
+    const std::regex expected(
+        R"(^[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3} \[tid=[^\]]+\] INF \[logger_test\.cpp:[0-9]+\] thread-id-format-line$)");
+    EXPECT_TRUE(std::regex_match(line, expected)) << line;
 }
 
 // 场景: init_with_rotation 应该自动创建 logs 目录并打开 daemon-{今日}.log。

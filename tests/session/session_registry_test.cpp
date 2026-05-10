@@ -23,7 +23,11 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <mutex>
 #include <random>
 #include <thread>
 
@@ -70,6 +74,28 @@ struct TestFixture {
         d.template_permissions = &self.permissions;
         return d;
     }
+};
+
+class InitStubProvider : public acecode::LlmProvider {
+public:
+    acecode::ChatResponse chat(
+        const std::vector<acecode::ChatMessage>&,
+        const std::vector<acecode::ToolDef>&) override {
+        acecode::ChatResponse resp;
+        resp.content = "init complete";
+        resp.finish_reason = "stop";
+        return resp;
+    }
+
+    void chat_stream(const std::vector<acecode::ChatMessage>&,
+                     const std::vector<acecode::ToolDef>&,
+                     const acecode::StreamCallback&,
+                     std::atomic<bool>* = nullptr) override {}
+
+    std::string name() const override { return "init-stub"; }
+    bool is_authenticated() override { return true; }
+    std::string model() const override { return "init-stub"; }
+    void set_model(const std::string&) override {}
 };
 
 std::filesystem::path temp_cwd(const std::string& hint) {
@@ -119,6 +145,169 @@ TEST(SessionRegistry, CreateGeneratesUniqueIds) {
     fx.registry.destroy(a);
     fx.registry.destroy(b);
     EXPECT_EQ(fx.registry.size(), 0u);
+}
+
+TEST(LocalSessionClient, InitBuiltinNoProviderWritesSkeletonWithoutUserMessage) {
+    auto cwd = temp_cwd("init_builtin");
+    TestFixture fx;
+    LocalSessionClient client(fx.registry);
+
+    SessionOptions opts;
+    opts.cwd = cwd.string();
+    auto id = client.create_session(opts);
+
+    std::vector<SessionEvent> events;
+    auto sub = client.subscribe(id, [&](const SessionEvent& evt) {
+        events.push_back(evt);
+    });
+    ASSERT_NE(sub, 0u);
+
+    acecode::BuiltinCommandRequest req;
+    req.name = "init";
+    req.display_text = "/init";
+    auto result = client.execute_builtin_command(id, req);
+
+    EXPECT_EQ(result.status, acecode::BuiltinCommandStatus::Accepted);
+    EXPECT_TRUE(std::filesystem::exists(cwd / "ACECODE.md"));
+
+    auto* entry = fx.registry.lookup(id);
+    ASSERT_NE(entry, nullptr);
+    ASSERT_NE(entry->loop, nullptr);
+    EXPECT_TRUE(entry->loop->messages().empty())
+        << "/init offline fallback should not submit an ordinary user turn";
+
+    ASSERT_FALSE(events.empty());
+    EXPECT_EQ(events.back().kind, SessionEventKind::Message);
+    EXPECT_EQ(events.back().payload.value("role", ""), "system");
+    EXPECT_NE(events.back().payload.value("content", "").find("Created "), std::string::npos);
+
+    client.unsubscribe(id, sub);
+    fx.registry.destroy(id);
+    std::error_code ec;
+    std::filesystem::remove_all(cwd, ec);
+}
+
+TEST(LocalSessionClient, InitBuiltinWithProviderQueuesPromptWithDisplayText) {
+    auto cwd = temp_cwd("init_builtin_provider");
+    TestFixture fx;
+    LocalSessionClient client(fx.registry);
+
+    SessionOptions opts;
+    opts.cwd = cwd.string();
+    auto id = client.create_session(opts);
+
+    auto* entry = fx.registry.lookup(id);
+    ASSERT_NE(entry, nullptr);
+    ASSERT_NE(entry->provider_slot, nullptr);
+    {
+        std::lock_guard<std::mutex> lk(entry->provider_slot->mu);
+        entry->provider_slot->provider = std::make_shared<InitStubProvider>();
+    }
+
+    std::mutex mu;
+    std::condition_variable cv;
+    bool saw_user_prompt = false;
+    auto sub = client.subscribe(id, [&](const SessionEvent& evt) {
+        if (evt.kind != SessionEventKind::Message) return;
+        if (evt.payload.value("role", "") != "user") return;
+        if (evt.payload.value("content", "").find("Please analyze this codebase") == std::string::npos) {
+            return;
+        }
+        const auto it = evt.payload.find("metadata");
+        if (it == evt.payload.end() || !it->is_object()) return;
+        if (it->value("display_text", "") != "/init") return;
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            saw_user_prompt = true;
+        }
+        cv.notify_all();
+    });
+    ASSERT_NE(sub, 0u);
+
+    acecode::BuiltinCommandRequest req;
+    req.name = "init";
+    req.display_text = "/init";
+    auto result = client.execute_builtin_command(id, req);
+
+    EXPECT_EQ(result.status, acecode::BuiltinCommandStatus::Accepted);
+    {
+        std::unique_lock<std::mutex> lk(mu);
+        cv.wait_for(lk, 2s, [&] { return saw_user_prompt; });
+    }
+    EXPECT_TRUE(saw_user_prompt);
+
+    client.unsubscribe(id, sub);
+    fx.registry.destroy(id);
+    std::error_code ec;
+    std::filesystem::remove_all(cwd, ec);
+}
+
+TEST(LocalSessionClient, InitBuiltinNoProviderRefusesExistingAcecode) {
+    auto cwd = temp_cwd("init_builtin_existing");
+    const auto target = cwd / "ACECODE.md";
+    const std::string original = "# ACECODE.md\n\nExisting guidance.\n";
+    {
+        std::ofstream ofs(target, std::ios::binary);
+        ofs << original;
+    }
+
+    TestFixture fx;
+    LocalSessionClient client(fx.registry);
+
+    SessionOptions opts;
+    opts.cwd = cwd.string();
+    auto id = client.create_session(opts);
+
+    std::vector<SessionEvent> events;
+    auto sub = client.subscribe(id, [&](const SessionEvent& evt) {
+        events.push_back(evt);
+    });
+    ASSERT_NE(sub, 0u);
+
+    acecode::BuiltinCommandRequest req;
+    req.name = "init";
+    req.display_text = "/init";
+    auto result = client.execute_builtin_command(id, req);
+
+    EXPECT_EQ(result.status, acecode::BuiltinCommandStatus::Accepted);
+    std::ifstream ifs(target, std::ios::binary);
+    std::string after((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+    EXPECT_EQ(after, original);
+    ASSERT_FALSE(events.empty());
+    EXPECT_NE(events.back().payload.value("content", "").find("already exists"), std::string::npos);
+
+    client.unsubscribe(id, sub);
+    fx.registry.destroy(id);
+    std::error_code ec;
+    std::filesystem::remove_all(cwd, ec);
+}
+
+TEST(LocalSessionClient, UnknownBuiltinSessionReturnsUnknownSession) {
+    TestFixture fx;
+    LocalSessionClient client(fx.registry);
+
+    acecode::BuiltinCommandRequest req;
+    req.name = "init";
+    auto result = client.execute_builtin_command("missing-session", req);
+
+    EXPECT_EQ(result.status, acecode::BuiltinCommandStatus::UnknownSession);
+}
+
+TEST(LocalSessionClient, UnsupportedBuiltinCommandRejectedBeforeMessageSubmit) {
+    TestFixture fx;
+    LocalSessionClient client(fx.registry);
+    auto id = client.create_session({});
+
+    acecode::BuiltinCommandRequest req;
+    req.name = "model";
+    auto result = client.execute_builtin_command(id, req);
+
+    EXPECT_EQ(result.status, acecode::BuiltinCommandStatus::UnsupportedCommand);
+    auto* entry = fx.registry.lookup(id);
+    ASSERT_NE(entry, nullptr);
+    ASSERT_NE(entry->loop, nullptr);
+    EXPECT_TRUE(entry->loop->messages().empty());
+    fx.registry.destroy(id);
 }
 
 // 场景: lookup 不存在的 session 返回 nullptr,不崩溃。HTTP handler 拿到这个
