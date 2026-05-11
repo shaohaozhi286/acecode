@@ -14,6 +14,7 @@
 // daemon 端通过 workspace-aware API 在同一进程内服务多个 workspace。
 
 #include "daemon_pool.hpp"
+#include "chromium_app_launcher.hpp"
 #include "dpi_win.hpp"
 #include "folder_picker.hpp"
 #include "notifications_win.hpp"
@@ -1110,66 +1111,87 @@ int main(int, char**) {
                   what_str);
 
 #ifdef _WIN32
-        // 询问用户是否继续。MB_YESNO + 中文文案 + IT 排查信息。
-        const std::wstring prompt =
-            L"ACECode 桌面版无法初始化 WebView2 组件。\n\n"
-            L"可能的原因:\n"
-            L"  · 未安装 \"Microsoft Edge WebView2 Runtime\"(注意:仅有 Edge 浏览器并不等价)\n"
-            L"  · WebView2 用户数据目录损坏(可删除 %LOCALAPPDATA%\\acecode-desktop\\EBWebView)\n"
-            L"  · 杀毒/EDR 拦截 msedgewebview2.exe\n\n"
-            L"是否改用系统默认浏览器继续使用 ACECode?\n"
-            L"(daemon 后台保留,前端所有业务功能可在浏览器内完成)\n\n"
-            L"详细日志:%USERPROFILE%\\.acecode\\logs\\desktop-*.log";
-        int choice = ::MessageBoxW(nullptr, prompt.c_str(),
-                                    L"ACECode WebView2 启动失败",
-                                    MB_YESNO | MB_ICONWARNING | MB_SETFOREGROUND);
-        if (choice != IDYES) {
-            LOG_INFO("[desktop] user declined browser fallback, exiting");
-            pool.stop_all();
-            return 1;
-        }
-
-        // 拿到 daemon URL。url 在 try 块外定义,onboarding daemon 启动失败
-        // 时仍是 onboarding_url() 占位符 — 那种状态降级也没意义,直接弹错。
+        // daemon URL 必须就绪;onboarding daemon 启动失败时仍是 about:blank 占
+        // 位符,降级也没意义 — 这种情况直接弹错退出避免用户看到一个空白浏览
+        // 器窗口。
         if (url.empty() || url == onboarding_url()) {
             ::MessageBoxW(nullptr,
                           L"daemon 未就绪,无法启动浏览器模式。\n"
-                          L"请查看日志后重试,或联系 IT。",
+                          L"请查看 %USERPROFILE%\\.acecode\\logs\\desktop-*.log 后重试。",
                           L"ACECode 启动失败",
                           MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
             pool.stop_all();
             return 1;
         }
 
-        const std::wstring wurl = acecode::utf8_to_wide(url);
-        HINSTANCE sh = ::ShellExecuteW(nullptr, L"open", wurl.c_str(),
-                                       nullptr, nullptr, SW_SHOWNORMAL);
-        if (reinterpret_cast<intptr_t>(sh) <= 32) {
-            const DWORD le = ::GetLastError();
-            LOG_ERROR("[desktop] ShellExecuteW failed gle=" + std::to_string(le) +
-                      " url=" + url);
+        // 静默降级:优先 Chromium 系浏览器 --app=<url> 假装独立 native 窗口
+        // (无地址栏 / 无标签栏 / 独立 taskbar 图标),用户体感最接近原生
+        // webview。找不到 Chromium 时 fallback ShellExecuteW 走系统默认浏览
+        // 器(可能是 Firefox / 其它,只能用普通 tab,UX 退化但功能完整)。
+        auto open_app_window = [&url]() -> bool {
+            auto found = acecode::desktop::find_chromium_app_browser();
+            if (found.has_value()) {
+                std::string err;
+                if (acecode::desktop::launch_chromium_app_mode(found->exe, url, err)) {
+                    LOG_INFO("[desktop] launched browser app-mode via " +
+                             found->display_name + ": " + found->exe.string() +
+                             " --app=" + url);
+                    return true;
+                }
+                LOG_WARN("[desktop] " + found->display_name +
+                         " --app= launch failed: " + err +
+                         " — falling back to ShellExecuteW");
+            } else {
+                LOG_INFO("[desktop] no Chromium-based browser found for app-mode; "
+                         "using ShellExecuteW default browser");
+            }
+            const std::wstring wurl = acecode::utf8_to_wide(url);
+            HINSTANCE sh = ::ShellExecuteW(nullptr, L"open", wurl.c_str(),
+                                           nullptr, nullptr, SW_SHOWNORMAL);
+            if (reinterpret_cast<intptr_t>(sh) > 32) {
+                LOG_INFO("[desktop] launched default browser tab: " + url);
+                return true;
+            }
+            LOG_ERROR("[desktop] ShellExecuteW failed gle=" +
+                      std::to_string(::GetLastError()) + " url=" + url);
+            return false;
+        };
+
+        if (!open_app_window()) {
             const std::wstring fallback_msg =
-                L"无法启动默认浏览器。请手动复制下面 URL 在浏览器打开:\n\n" +
+                L"无法启动浏览器。请手动复制下面 URL 在浏览器打开:\n\n" +
                 acecode::utf8_to_wide(url);
             ::MessageBoxW(nullptr, fallback_msg.c_str(),
                           L"ACECode 浏览器降级失败",
                           MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
-            // 不退出 — 用户拷贝 URL 后可以自行打开,desktop 进程仍需保持
-            // 让 daemon 活,跌到下面 message loop。
-        } else {
-            LOG_INFO("[desktop] browser fallback launched, url=" + url);
+            // 不立即退出 — 用户拷贝 URL 后可以自行打开,desktop 进程仍保持
+            // 让 daemon 活,下面跌入 message loop。
         }
 
-        // 简易 message loop 让 desktop 进程保持运行 — daemon 由 Job Object
-        // 绑生死,desktop 不在 daemon 跟着 kill。退出方式:任务管理器(P5
-        // 计划补一个最小托盘"退出"菜单避免用户必须开任务管理器)。Windows
-        // session logoff 时 WM_QUIT 会广播到所有进程,loop 自然退出。
+        // 浏览器降级模式下的托盘 — 给用户一个看得见的"退出"出口,否则
+        // desktop 进程只能任务管理器结束(daemon 被 Job Object 绑生死)。
+        // on_show 重新拉起 app 窗口(用户关闭浏览器窗口想再开时用)。
+        // on_quit 走 PostQuitMessage 退 message loop,后续走 stop_all。
+        void* tray_message_hwnd_fallback = nullptr;
+        bool tray_ok_fallback = init_tray_icon(
+            /*on_show=*/[&open_app_window]() { open_app_window(); },
+            /*on_quit=*/[]() { ::PostQuitMessage(0); },
+            &tray_message_hwnd_fallback);
+        if (!tray_ok_fallback) {
+            LOG_WARN("[desktop] browser-fallback tray init failed; user must end "
+                     "process via Task Manager to stop daemon");
+        }
+
+        // Message loop — daemon 由 Job Object 跟 desktop 绑生死,所以这里必
+        // 须让 desktop 挂着。Windows session logoff 时 WM_QUIT 广播让 loop
+        // 自然退出;托盘 "退出" 也走 PostQuitMessage(0) 同样路径。
         MSG msg;
         while (::GetMessageW(&msg, nullptr, 0, 0) > 0) {
             ::TranslateMessage(&msg);
             ::DispatchMessageW(&msg);
         }
         LOG_INFO("[desktop] browser-fallback message loop exited");
+        if (tray_ok_fallback) shutdown_tray_icon();
         pool.stop_all();
         return 0;
 #else
