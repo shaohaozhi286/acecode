@@ -5,6 +5,8 @@
 #include "static_assets.hpp"
 #include "../config/config.hpp"
 #include "../config/saved_models_editor.hpp"
+#include "../desktop/folder_picker.hpp"
+#include "../desktop/open_in_explorer.hpp"
 #include "../desktop/workspace_registry.hpp"
 #include "../provider/llm_provider.hpp"
 #include "../session/ask_user_question_prompter.hpp"
@@ -758,6 +760,7 @@ struct WebServer::Impl {
         register_skills();
         register_commands();
         register_mcp();
+        register_system();
         register_websocket();
         register_static();
     }
@@ -2533,6 +2536,136 @@ struct WebServer::Impl {
             r.body = R"({"error":"mcp reload not implemented in v1; restart daemon to pick up changes"})";
             r.add_header("Content-Type", "application/json");
             return r;
+        });
+    }
+
+    // -----------------------------------------------------------------
+    // /api/system/*  原 desktop JS-bridge 下沉端点。
+    //
+    // 设计动机:WebView2 不可用时(企业内网常见,Edge >=126 不许第三方借用),
+    // 前端要能直接跑在系统浏览器里访问 daemon。但 "在资源管理器里打开目录"、
+    // "弹文件夹选择" 这两个动作浏览器物理上做不了 —— 浏览器只是 UI 层,
+    // daemon 跟 webview 同一台机器、同一 session、同一用户权限,完全可以代
+    // 执行 native 操作。把这两个动作下沉到 daemon HTTP 后,webview 模式与
+    // 浏览器降级模式 UI 路径完全一致。
+    //
+    // 安全:loopback-only + token 认证已经保证只有本机有效用户能命中端点。
+    // 路径白名单(workspace cwd 列表)在 open-in-explorer 里再加一道,避免
+    // 浏览器里的恶意 web page 让 daemon 打开 C:\Windows\System32 之类。
+    // pick-folder 是用户主动触发,无白名单意义(用户本身就在选目录)。
+    // -----------------------------------------------------------------
+    void register_system() {
+        CROW_ROUTE(app, "/api/system/open-in-explorer").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
+        CROW_ROUTE(app, "/api/system/pick-folder").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
+
+        // POST /api/system/open-in-explorer body {"path": "<abs>"}
+        // 在系统文件管理器里打开 path 目录。等价于原 aceDesktop_openInExplorer。
+        // 路径必须是已注册 workspace cwd 或其子目录(白名单)。
+        //   - 非法 JSON / 缺 path     → 400
+        //   - 路径不是绝对路径 / 不存在 → 404 (validate_open_directory_request)
+        //   - 不在白名单内             → 403
+        //   - launcher 失败            → 500
+        // 成功 → 200 {"ok": true}
+        CROW_ROUTE(app, "/api/system/open-in-explorer").methods(crow::HTTPMethod::POST)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+
+            std::string path;
+            try {
+                auto j = json::parse(req.body);
+                path = j.value("path", std::string{});
+            } catch (const std::exception& e) {
+                crow::response r(400);
+                r.body = json{{"error", std::string("bad json: ") + e.what()}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            if (path.empty()) {
+                crow::response r(400);
+                r.body = R"({"error":"path required"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            // 白名单 = 当前所有已注册 workspace 的 cwd。is_under_allowed_root
+            // 内部做大小写归一(Windows) + 子目录前缀匹配。
+            std::vector<std::string> allowed_roots;
+            if (deps.workspace_registry) {
+                deps.workspace_registry->scan(projects_dir());
+                for (const auto& m : deps.workspace_registry->list()) {
+                    if (!m.cwd.empty()) allowed_roots.push_back(m.cwd);
+                }
+            }
+
+            auto result = acecode::desktop::open_directory_in_file_manager(
+                path, allowed_roots);
+            if (!result.ok) {
+                // 错误信息粒度:不存在 → 404;白名单拒绝 → 403;其它(launcher
+                // 失败 / fork 失败 / ShellExecute 失败)→ 500。validate_*
+                // 已经返回字符串,这里按 prefix 分类。
+                int status = 500;
+                if (result.error.find("not an existing directory") != std::string::npos ||
+                    result.error == "path required" ||
+                    result.error == "failed to resolve path") {
+                    status = 404;
+                } else if (result.error.find("outside registered workspaces") != std::string::npos) {
+                    status = 403;
+                } else if (result.error == "path must be absolute") {
+                    status = 400;
+                }
+                LOG_INFO("[web] open-in-explorer rejected path=" + path +
+                         " status=" + std::to_string(status) +
+                         " error=" + result.error);
+                crow::response r(status);
+                r.body = json{{"error", result.error}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            LOG_INFO("[web] open-in-explorer ok path=" + path);
+            crow::response r(200);
+            r.body = R"({"ok":true})";
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        });
+
+        // POST /api/system/pick-folder
+        // body 可选 {} (后续可扩 title / initial_dir,本期 MVP 不传)。
+        // 调起 native folder picker (Windows: IFileOpenDialog;POSIX MVP 阶段
+        // 直接 503 - "platform not supported")。同步阻塞直到用户选定 / 取消。
+        // 用户选了    → 200 {"ok": true, "path": "<abs>"}
+        // 用户取消    → 200 {"ok": false, "canceled": true}
+        // 平台不支持  → 503
+        //
+        // 阻塞行为:Crow 的 thread pool 一个 handler thread 阻塞不影响其他
+        // 请求。folder picker 的 owner 是 nullptr(daemon 没主窗口),Windows
+        // 上可能弹在任务栏闪烁需要用户点亮;前端调用方应当通过 UI 文案提示
+        // "请在任务栏切换到文件夹选择对话框"。
+        CROW_ROUTE(app, "/api/system/pick-folder").methods(crow::HTTPMethod::POST)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            auto picked = acecode::desktop::pick_folder(nullptr);
+            if (!picked.has_value()) {
+                // pick_folder 在 POSIX MVP 阶段直接返 nullopt 不区分"取消" vs
+                // "平台不支持";Windows 上 nullopt = 用户取消 / 失败。最稳的
+                // 客户端语义:把 nullopt 一律当作 "canceled",前端如果重试
+                // 多次仍 canceled 再提示用户手输路径(降级路径已在 P3 规划)。
+                LOG_INFO("[web] pick-folder returned no selection");
+                crow::response r(200);
+                r.body = R"({"ok":false,"canceled":true})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            LOG_INFO("[web] pick-folder selected path=" + *picked);
+            crow::response r(200);
+            r.body = json{{"ok", true}, {"path", *picked}}.dump();
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
         });
     }
 

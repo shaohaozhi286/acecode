@@ -488,6 +488,64 @@ TEST(WebServerHttp, WorkspaceDeleteRejectsUnknownHash) {
     EXPECT_EQ(del.status_code, 404) << del.text;
 }
 
+// /api/system/open-in-explorer 入参校验 — 我们不验证 ShellExecute 真的拉起
+// Explorer(那是 e2e + 平台相关行为),只验证 daemon 做了 (1) 路径白名单
+// 拒绝越界,(2) 路径不存在 404,(3) 缺参 400。**真正打开 Explorer 的 launch
+// 路径无法在 headless 测试机里跑**,所以这条路径在 e2e 阶段手动验证。
+TEST(WebServerHttp, SystemOpenInExplorerRejectsPathOutsideWorkspace) {
+    WebServerFixture fx;
+
+    auto outside_dir = fx.tmp_dir / "outside";
+    std::filesystem::create_directories(outside_dir);
+
+    auto post = cpr::Post(cpr::Url{fx.url("/api/system/open-in-explorer")},
+                          cpr::Header{{"Content-Type", "application/json"}},
+                          cpr::Body{json{{"path", outside_dir.string()}}.dump()});
+    EXPECT_EQ(post.status_code, 403) << post.text;
+}
+
+TEST(WebServerHttp, SystemOpenInExplorerRejectsMissingPath) {
+    WebServerFixture fx;
+
+    auto post = cpr::Post(cpr::Url{fx.url("/api/system/open-in-explorer")},
+                          cpr::Header{{"Content-Type", "application/json"}},
+                          cpr::Body{"{}"});
+    EXPECT_EQ(post.status_code, 400) << post.text;
+
+    auto bad_json = cpr::Post(cpr::Url{fx.url("/api/system/open-in-explorer")},
+                              cpr::Header{{"Content-Type", "application/json"}},
+                              cpr::Body{"not json"});
+    EXPECT_EQ(bad_json.status_code, 400) << bad_json.text;
+}
+
+TEST(WebServerHttp, SystemOpenInExplorerRejectsNonexistentPath) {
+    WebServerFixture fx;
+
+    auto ghost = (fx.cwd_dir / "this-subdir-does-not-exist").string();
+    auto post = cpr::Post(cpr::Url{fx.url("/api/system/open-in-explorer")},
+                          cpr::Header{{"Content-Type", "application/json"}},
+                          cpr::Body{json{{"path", ghost}}.dump()});
+    EXPECT_EQ(post.status_code, 404) << post.text;
+}
+
+// pick-folder 端点本身在 POSIX CI 上 pick_folder() 返 nullopt
+// (MVP 没接 GTK/Cocoa),Windows GUI 上 IFileOpenDialog 同步阻塞需要用户
+// 交互。两种环境下都不适合 e2e 测真"弹窗+选目录"。这里只验证 endpoint 存活
+// + 返回结构稳定(POSIX 上必返 {ok:false,canceled:true}),POST 不带 body 也
+// 不报 500。Windows 上跑这条会卡住等用户,所以 Windows CI 跳过。
+#ifndef _WIN32
+TEST(WebServerHttp, SystemPickFolderReturnsCanceledOnPosixStub) {
+    WebServerFixture fx;
+    auto post = cpr::Post(cpr::Url{fx.url("/api/system/pick-folder")},
+                          cpr::Header{{"Content-Type", "application/json"}},
+                          cpr::Body{"{}"});
+    ASSERT_EQ(post.status_code, 200) << post.text;
+    auto body = json::parse(post.text);
+    EXPECT_EQ(body["ok"], false);
+    EXPECT_EQ(body["canceled"], true);
+}
+#endif
+
 // 场景:在非 daemon 启动 cwd 的 workspace 里 fork,新 session 必须用源
 // workspace cwd 装回 registry；否则前端切到新 fork 时 WS 会报 unknown session。
 TEST(WebServerHttp, ForkWorkspaceSessionResumesInSourceWorkspace) {
