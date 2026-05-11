@@ -297,37 +297,6 @@ void center_window_on_monitor(HWND hwnd, const RECT& monitor) {
     ::SetWindowPos(hwnd, nullptr, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
-// 终态失败弹窗:WebView2 默认路径 + Edge 浏览器 fallback 都失败时,给用户
-// 一个可读中文提示(原本是 wWinMain 上面那个"未经处理的异常"调试器对话框,
-// 普通用户看不懂也帮不上忙)。reason 透传 webview::exception::what(),通常
-// 含 HRESULT;接进 MessageBox 文案末尾,IT 排查时直接复制就行。
-void show_webview2_failure_message_box(const char* reason) {
-    const std::string body =
-        "ACECode 桌面版无法初始化 WebView2 组件。\n\n"
-        "可能的原因与解决办法:\n"
-        "  1. 未安装 \"Microsoft Edge WebView2 Runtime\"(注意:仅有 Edge 浏览器并不等价)。\n"
-        "     请到 https://developer.microsoft.com/microsoft-edge/webview2/ 下载 Evergreen Standalone Installer 安装。\n"
-        "  2. WebView2 用户数据目录损坏。请尝试删除以下目录后重试:\n"
-        "     %LOCALAPPDATA%\\acecode-desktop\\EBWebView\n"
-        "  3. 杀毒/EDR 软件拦截了 msedgewebview2.exe 的启动,请将其加入信任。\n\n"
-        "详细日志:%USERPROFILE%\\.acecode\\logs\\desktop-*.log\n\n"
-        "失败原因(供 IT 排查):\n";
-    std::string full = body + (reason ? reason : "(unknown)");
-
-    const int wlen = ::MultiByteToWideChar(CP_UTF8, 0, full.c_str(),
-                                           static_cast<int>(full.size()), nullptr, 0);
-    std::wstring wbody;
-    if (wlen > 0) {
-        wbody.resize(static_cast<std::size_t>(wlen));
-        ::MultiByteToWideChar(CP_UTF8, 0, full.c_str(),
-                              static_cast<int>(full.size()), wbody.data(), wlen);
-    }
-    ::MessageBoxW(nullptr,
-                  wbody.empty() ? L"WebView2 initialization failed." : wbody.c_str(),
-                  L"ACECode 启动失败",
-                  MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
-}
-
 } // namespace
 
 struct ComApartment {
@@ -416,9 +385,9 @@ struct WebHost::Impl {
             auto edge_folder = find_edge_browser_folder();
             if (!edge_folder.has_value()) {
                 LOG_ERROR("[desktop] no Microsoft Edge browser folder found to "
-                          "fall back to; aborting startup");
-                show_webview2_failure_message_box(e1.what());
-                ::ExitProcess(1);
+                          "fall back to; rethrowing for wWinMain browser-fallback "
+                          "branch");
+                throw; // wWinMain 的 catch 决定弹 MessageBox 询问浏览器降级
             }
             const std::wstring folder_w = edge_folder->wstring();
             LOG_INFO(std::string("[desktop] retrying WebView2 with Edge browser "
@@ -436,8 +405,7 @@ struct WebHost::Impl {
             } catch (const webview::exception& e2) {
                 LOG_ERROR(std::string("[desktop] WebView2 Edge browser folder "
                                       "fallback also failed: ") + e2.what());
-                show_webview2_failure_message_box(e2.what());
-                ::ExitProcess(1);
+                throw; // 同上 — 让 wWinMain 接管降级 / 用户确认
             }
         }
         if (custom_window) {

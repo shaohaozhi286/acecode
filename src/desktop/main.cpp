@@ -496,6 +496,11 @@ int main(int, char**) {
     // 父窗口在屏幕外保持可见状态完成 WebView2 渲染,页面 ready 后再移回
     // 当前屏幕中央。这样用户启动时只看到透明 icon,不会看到白屏。
     const bool desktop_debug = is_desktop_debug_mode();
+    // WebHost 构造可能抛 webview::exception(WebView2 Runtime 缺失等)。Impl
+    // ctor 内部已经做两层 fallback(默认 Loader → Edge 浏览器目录),都失败时
+    // rethrow 由这里接管 — 询问用户是否在系统默认浏览器中继续运行,daemon
+    // 保留后台,所有业务逻辑走 daemon HTTP(P1-P3 已下沉)。
+    try {
     WebHost host(/*debug=*/desktop_debug, WebHost::StartupWindowMode::OffscreenUntilReady);
     host.set_title("ACECode");
     host.set_size(kDefaultDesktopWindowWidth, kDefaultDesktopWindowHeight);
@@ -1079,6 +1084,102 @@ int main(int, char**) {
 
     auto failures = pool.stop_all();
     return failures.empty() ? 0 : 100; // 部分失败返回非零便于诊断
+    } catch (...) {
+        // webview/webview 的 webview::exception 是否派生自 std::exception 我们
+        // 不直接 include webview.h(为了让 main.cpp 跟 webview 解耦),所以用
+        // catch (...) 兜底而非 catch (std::exception&)。webview_ex_what() 内
+        // 部对 std::exception 取 what(),其它情形 fallback 到固定字符串。
+        const std::string what_str = []() -> std::string {
+            try { throw; }
+            catch (const std::exception& se) { return se.what(); }
+            catch (...) { return "(unknown WebView2 init exception)"; }
+        }();
+        // WebHost 构造失败 — 进入"系统默认浏览器"降级流程。所有 daemon
+        // / pool 状态在 try 外定义,可在 catch 内继续操作;host / 托盘 /
+        // 通知尚未初始化(异常发生在 host ctor 内),不需要 shutdown。
+        //
+        // 选择 daemon 后台保留 + ShellExecuteW 打开 URL 的设计原因:
+        //   1) daemon 已由 desktop 进程 spawn 在 Job Object 内,且 supervisor
+        //      设了 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE — desktop 退出 Job 关
+        //      daemon 跟着死。要让 daemon 继续服务浏览器,desktop 进程必须
+        //      "挂着"(简单 message loop 等系统/用户结束)。
+        //   2) 业务逻辑在 P1-P3 已全部下沉到 daemon HTTP,浏览器里 UI 完整。
+        //      Tier A 的窗口 chrome / 托盘 / 系统通知降级缺失,前端 detect
+        //      bridge 不存在自动隐藏对应 UI。
+        LOG_ERROR(std::string("[desktop] WebView2 initialization failed: ") +
+                  what_str);
+
+#ifdef _WIN32
+        // 询问用户是否继续。MB_YESNO + 中文文案 + IT 排查信息。
+        const std::wstring prompt =
+            L"ACECode 桌面版无法初始化 WebView2 组件。\n\n"
+            L"可能的原因:\n"
+            L"  · 未安装 \"Microsoft Edge WebView2 Runtime\"(注意:仅有 Edge 浏览器并不等价)\n"
+            L"  · WebView2 用户数据目录损坏(可删除 %LOCALAPPDATA%\\acecode-desktop\\EBWebView)\n"
+            L"  · 杀毒/EDR 拦截 msedgewebview2.exe\n\n"
+            L"是否改用系统默认浏览器继续使用 ACECode?\n"
+            L"(daemon 后台保留,前端所有业务功能可在浏览器内完成)\n\n"
+            L"详细日志:%USERPROFILE%\\.acecode\\logs\\desktop-*.log";
+        int choice = ::MessageBoxW(nullptr, prompt.c_str(),
+                                    L"ACECode WebView2 启动失败",
+                                    MB_YESNO | MB_ICONWARNING | MB_SETFOREGROUND);
+        if (choice != IDYES) {
+            LOG_INFO("[desktop] user declined browser fallback, exiting");
+            pool.stop_all();
+            return 1;
+        }
+
+        // 拿到 daemon URL。url 在 try 块外定义,onboarding daemon 启动失败
+        // 时仍是 onboarding_url() 占位符 — 那种状态降级也没意义,直接弹错。
+        if (url.empty() || url == onboarding_url()) {
+            ::MessageBoxW(nullptr,
+                          L"daemon 未就绪,无法启动浏览器模式。\n"
+                          L"请查看日志后重试,或联系 IT。",
+                          L"ACECode 启动失败",
+                          MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+            pool.stop_all();
+            return 1;
+        }
+
+        const std::wstring wurl = acecode::utf8_to_wide(url);
+        HINSTANCE sh = ::ShellExecuteW(nullptr, L"open", wurl.c_str(),
+                                       nullptr, nullptr, SW_SHOWNORMAL);
+        if (reinterpret_cast<intptr_t>(sh) <= 32) {
+            const DWORD le = ::GetLastError();
+            LOG_ERROR("[desktop] ShellExecuteW failed gle=" + std::to_string(le) +
+                      " url=" + url);
+            const std::wstring fallback_msg =
+                L"无法启动默认浏览器。请手动复制下面 URL 在浏览器打开:\n\n" +
+                acecode::utf8_to_wide(url);
+            ::MessageBoxW(nullptr, fallback_msg.c_str(),
+                          L"ACECode 浏览器降级失败",
+                          MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+            // 不退出 — 用户拷贝 URL 后可以自行打开,desktop 进程仍需保持
+            // 让 daemon 活,跌到下面 message loop。
+        } else {
+            LOG_INFO("[desktop] browser fallback launched, url=" + url);
+        }
+
+        // 简易 message loop 让 desktop 进程保持运行 — daemon 由 Job Object
+        // 绑生死,desktop 不在 daemon 跟着 kill。退出方式:任务管理器(P5
+        // 计划补一个最小托盘"退出"菜单避免用户必须开任务管理器)。Windows
+        // session logoff 时 WM_QUIT 会广播到所有进程,loop 自然退出。
+        MSG msg;
+        while (::GetMessageW(&msg, nullptr, 0, 0) > 0) {
+            ::TranslateMessage(&msg);
+            ::DispatchMessageW(&msg);
+        }
+        LOG_INFO("[desktop] browser-fallback message loop exited");
+        pool.stop_all();
+        return 0;
+#else
+        // POSIX 上 webview/webview 走 WKWebView / WebKitGTK,异常路径跟
+        // WebView2 完全不同,这里不构造浏览器降级 UI,直接 rethrow 给外层
+        // 顶层 catch(MessageBox 在 POSIX 上没意义,顶层 catch 用 fprintf)。
+        (void)what_str;
+        throw;
+#endif
+    }
     }; // end of run lambda
 
     try {
