@@ -228,6 +228,11 @@ struct AppConfig {
     std::string default_model_name;
 };
 
+// Build a backwards-compatible ModelProfile from the legacy top-level
+// provider/openai/copilot fields. Used when config.json has not been migrated
+// to saved_models yet, so startup can still create a provider.
+ModelProfile legacy_model_profile_from_config(const AppConfig& cfg);
+
 // Normalize upgrade.base_url by trimming surrounding whitespace and adding a
 // trailing slash when non-empty.
 std::string normalize_upgrade_base_url(std::string raw);

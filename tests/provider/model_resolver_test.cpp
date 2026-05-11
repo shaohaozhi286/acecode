@@ -8,8 +8,6 @@
 #include "config/config.hpp"
 #include "session/session_storage.hpp"
 
-#include <stdexcept>
-
 using namespace acecode;
 
 namespace {
@@ -71,13 +69,32 @@ TEST(ModelResolverTest, ResumeMetaWinsOverCwdAndDefault) {
     EXPECT_EQ(got.name, "beta");
 }
 
-// 7.12 — saved_models 空 + default 空 → 无可用模型,抛出明确错误。
-TEST(ModelResolverTest, EmptyConfigThrows) {
+// 7.12 — saved_models 空 + default 空 → 从旧 schema 字段合成 copilot profile,
+// 确保 daemon / desktop 在未迁移配置下也能启动。
+TEST(ModelResolverTest, EmptyConfigUsesLegacyCopilotFallback) {
     AppConfig cfg;
 
-    EXPECT_THROW(
-        (void)resolve_effective_model(cfg, std::nullopt, std::nullopt),
-        std::runtime_error);
+    ModelProfile got = resolve_effective_model(cfg, std::nullopt, std::nullopt);
+    EXPECT_EQ(got.name, "copilot");
+    EXPECT_EQ(got.provider, "copilot");
+    EXPECT_EQ(got.model, "gpt-4o");
+}
+
+// 额外 — saved_models 为空但旧 openai 字段可用时,直接用旧字段构造临时
+// profile。api_key 允许为空,由 OpenAI-compatible provider 决定是否发送鉴权头。
+TEST(ModelResolverTest, EmptyConfigUsesLegacyOpenAiFields) {
+    AppConfig cfg;
+    cfg.provider = "openai";
+    cfg.openai.base_url = "http://localhost:1234/v1";
+    cfg.openai.api_key = "";
+    cfg.openai.model = "local-model";
+
+    ModelProfile got = resolve_effective_model(cfg, std::nullopt, std::nullopt);
+    EXPECT_EQ(got.name, "openai");
+    EXPECT_EQ(got.provider, "openai");
+    EXPECT_EQ(got.base_url, "http://localhost:1234/v1");
+    EXPECT_EQ(got.api_key, "");
+    EXPECT_EQ(got.model, "local-model");
 }
 
 // 7.13 — cwd override 指向已删 entry(saved_models 中不存在该 name)→

@@ -99,8 +99,8 @@ TEST(SavedModelsTest, DefaultNameNotInListFails) {
     EXPECT_NE(err.find("ghost"), std::string::npos) << err;
 }
 
-// 7.7 — 空 saved_models + 空 default → 校验通过(纯空配置合法,运行入口在
-// 需要模型时自行报错)。
+// 7.7 — 空 saved_models + 空 default → 校验通过。运行入口会从旧 schema
+// provider/openai/copilot 字段合成临时模型兜底。
 TEST(SavedModelsTest, EmptyConfigurationPasses) {
     std::vector<ModelProfile> entries;
     std::string err;

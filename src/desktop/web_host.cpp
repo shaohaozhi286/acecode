@@ -297,6 +297,37 @@ void center_window_on_monitor(HWND hwnd, const RECT& monitor) {
     ::SetWindowPos(hwnd, nullptr, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
+// 终态失败弹窗:WebView2 默认路径 + Edge 浏览器 fallback 都失败时,给用户
+// 一个可读中文提示(原本是 wWinMain 上面那个"未经处理的异常"调试器对话框,
+// 普通用户看不懂也帮不上忙)。reason 透传 webview::exception::what(),通常
+// 含 HRESULT;接进 MessageBox 文案末尾,IT 排查时直接复制就行。
+void show_webview2_failure_message_box(const char* reason) {
+    const std::string body =
+        "ACECode 桌面版无法初始化 WebView2 组件。\n\n"
+        "可能的原因与解决办法:\n"
+        "  1. 未安装 \"Microsoft Edge WebView2 Runtime\"(注意:仅有 Edge 浏览器并不等价)。\n"
+        "     请到 https://developer.microsoft.com/microsoft-edge/webview2/ 下载 Evergreen Standalone Installer 安装。\n"
+        "  2. WebView2 用户数据目录损坏。请尝试删除以下目录后重试:\n"
+        "     %LOCALAPPDATA%\\acecode-desktop\\EBWebView\n"
+        "  3. 杀毒/EDR 软件拦截了 msedgewebview2.exe 的启动,请将其加入信任。\n\n"
+        "详细日志:%USERPROFILE%\\.acecode\\logs\\desktop-*.log\n\n"
+        "失败原因(供 IT 排查):\n";
+    std::string full = body + (reason ? reason : "(unknown)");
+
+    const int wlen = ::MultiByteToWideChar(CP_UTF8, 0, full.c_str(),
+                                           static_cast<int>(full.size()), nullptr, 0);
+    std::wstring wbody;
+    if (wlen > 0) {
+        wbody.resize(static_cast<std::size_t>(wlen));
+        ::MultiByteToWideChar(CP_UTF8, 0, full.c_str(),
+                              static_cast<int>(full.size()), wbody.data(), wlen);
+    }
+    ::MessageBoxW(nullptr,
+                  wbody.empty() ? L"WebView2 initialization failed." : wbody.c_str(),
+                  L"ACECode 启动失败",
+                  MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+}
+
 } // namespace
 
 struct ComApartment {

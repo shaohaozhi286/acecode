@@ -3,8 +3,6 @@
 
 #include "../utils/logger.hpp"
 
-#include <stdexcept>
-
 namespace acecode {
 
 namespace {
@@ -99,7 +97,10 @@ ModelProfile resolve_effective_model(const AppConfig& cfg,
     if (by_name != nullptr) return *by_name;
     if (!cfg.saved_models.empty()) return cfg.saved_models.front();
 
-    throw std::runtime_error("no saved model configured");
+    ModelProfile legacy = legacy_model_profile_from_config(cfg);
+    LOG_WARN("[model_resolver] no saved_models configured; using legacy " +
+             legacy.provider + "/" + legacy.model + " profile '" + legacy.name + "'");
+    return legacy;
 }
 
 } // namespace acecode

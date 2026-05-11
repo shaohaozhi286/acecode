@@ -6,6 +6,8 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <nlohmann/json.hpp>
 #include <string>
 
 #ifdef _WIN32
@@ -80,7 +82,7 @@ protected:
 TEST_F(ConfigFirstInitTest, LoadConfigTracksFreshAcecodeHomeCreationOnce) {
     ASSERT_FALSE(fs::exists(temp_home / ".acecode"));
 
-    (void)acecode::load_config();
+    auto cfg = acecode::load_config();
 
     EXPECT_TRUE(fs::is_directory(temp_home / ".acecode"));
     EXPECT_TRUE(acecode::was_acecode_home_created_by_process());
@@ -90,6 +92,45 @@ TEST_F(ConfigFirstInitTest, LoadConfigTracksFreshAcecodeHomeCreationOnce) {
     (void)acecode::load_config();
 
     EXPECT_FALSE(acecode::consume_acecode_home_created_by_process());
+
+    ASSERT_EQ(cfg.saved_models.size(), 1u);
+    EXPECT_EQ(cfg.saved_models[0].name, "copilot");
+    EXPECT_EQ(cfg.saved_models[0].provider, "copilot");
+    EXPECT_EQ(cfg.saved_models[0].model, "gpt-4o");
+    EXPECT_EQ(cfg.default_model_name, "copilot");
+
+    std::ifstream ifs(temp_home / ".acecode" / "config.json");
+    ASSERT_TRUE(ifs.is_open());
+    auto j = nlohmann::json::parse(ifs);
+    ASSERT_TRUE(j.contains("saved_models"));
+    ASSERT_TRUE(j["saved_models"].is_array());
+    ASSERT_EQ(j["saved_models"].size(), 1u);
+    EXPECT_EQ(j["saved_models"][0]["name"], "copilot");
+    EXPECT_EQ(j["default_model_name"], "copilot");
+}
+
+TEST_F(ConfigFirstInitTest, OldSchemaConfigSynthesizesCopilotSavedModel) {
+    fs::create_directories(temp_home / ".acecode");
+    {
+        std::ofstream ofs(temp_home / ".acecode" / "config.json");
+        ofs << R"({
+    "provider": "copilot",
+    "copilot": { "model": "gpt-4o" },
+    "openai": {
+        "base_url": "http://localhost:1234/v1",
+        "api_key": "",
+        "model": "local-model"
+    }
+})";
+    }
+
+    auto cfg = acecode::load_config();
+
+    ASSERT_EQ(cfg.saved_models.size(), 1u);
+    EXPECT_EQ(cfg.saved_models[0].name, "copilot");
+    EXPECT_EQ(cfg.saved_models[0].provider, "copilot");
+    EXPECT_EQ(cfg.saved_models[0].model, "gpt-4o");
+    EXPECT_EQ(cfg.default_model_name, "copilot");
 }
 
 } // namespace

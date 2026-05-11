@@ -7,7 +7,7 @@ if(CMAKE_HOST_WIN32 AND DEFINED CMAKE_TOOLCHAIN_FILE AND CMAKE_TOOLCHAIN_FILE MA
     set(VCPKG_TARGET_TRIPLET "x64-windows-static" CACHE STRING "Vcpkg target triplet" FORCE)
 endif()
 
-project(acecode VERSION 0.1.4 LANGUAGES C CXX)
+project(acecode VERSION 0.1.6 LANGUAGES C CXX)
 
 # CTest integration: defines BUILD_TESTING (default ON). Release packaging can
 # disable it with -DBUILD_TESTING=OFF to skip the test binary and the gtest

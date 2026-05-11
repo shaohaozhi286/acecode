@@ -31,6 +31,17 @@ std::string trim_ascii_copy(const std::string& s) {
     return s.substr(first, last - first);
 }
 
+std::string legacy_model_profile_name(const AppConfig& cfg) {
+    if (cfg.provider == "openai") {
+        if (cfg.openai.models_dev_provider_id.has_value() &&
+            !cfg.openai.models_dev_provider_id->empty()) {
+            return *cfg.openai.models_dev_provider_id;
+        }
+        return "openai";
+    }
+    return "copilot";
+}
+
 } // namespace
 
 std::string normalize_upgrade_base_url(std::string raw) {
@@ -44,6 +55,31 @@ std::string normalize_upgrade_base_url(std::string raw) {
 bool is_valid_upgrade_base_url(const std::string& raw) {
     const std::string url = normalize_upgrade_base_url(raw);
     return url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0;
+}
+
+ModelProfile legacy_model_profile_from_config(const AppConfig& cfg) {
+    ModelProfile profile;
+    profile.name = legacy_model_profile_name(cfg);
+    if (cfg.provider == "openai") {
+        OpenAiConfig defaults;
+        profile.provider = "openai";
+        profile.base_url = cfg.openai.base_url.empty()
+            ? defaults.base_url
+            : cfg.openai.base_url;
+        profile.api_key = cfg.openai.api_key;
+        profile.model = cfg.openai.model.empty()
+            ? defaults.model
+            : cfg.openai.model;
+        profile.models_dev_provider_id = cfg.openai.models_dev_provider_id;
+        return profile;
+    }
+
+    CopilotConfig defaults;
+    profile.provider = "copilot";
+    profile.model = cfg.copilot.model.empty()
+        ? defaults.model
+        : cfg.copilot.model;
+    return profile;
 }
 
 std::string get_acecode_dir() {
@@ -120,11 +156,39 @@ static void write_default_config(const std::string& config_path) {
     j["openai"]["api_key"] = "";
     j["openai"]["model"] = "local-model";
     j["copilot"]["model"] = "gpt-4o";
+    j["saved_models"] = nlohmann::json::array({{
+        {"name", "copilot"},
+        {"provider", "copilot"},
+        {"model", "gpt-4o"}
+    }});
+    j["default_model_name"] = "copilot";
 
     std::ofstream ofs(config_path);
     if (ofs.is_open()) {
         ofs << j.dump(2) << std::endl;
     }
+}
+
+static void synthesize_legacy_saved_model_if_needed(AppConfig& cfg) {
+    if (!cfg.saved_models.empty()) return;
+
+    ModelProfile legacy = legacy_model_profile_from_config(cfg);
+    std::vector<ModelProfile> candidate{legacy};
+    std::string err;
+    if (validate_saved_models(candidate, legacy.name, err)) {
+        cfg.saved_models = std::move(candidate);
+        cfg.default_model_name = legacy.name;
+        LOG_WARN("[config] saved_models missing; synthesized legacy model profile '" +
+                 legacy.name + "' from provider/openai/copilot fields");
+        return;
+    }
+
+    if (!cfg.default_model_name.empty()) {
+        LOG_WARN("[config] default_model_name ignored because saved_models is empty: " +
+                 cfg.default_model_name);
+        cfg.default_model_name.clear();
+    }
+    LOG_WARN("[config] saved_models missing and legacy fields cannot be migrated: " + err);
 }
 
 AppConfig load_config() {
@@ -465,7 +529,7 @@ AppConfig load_config() {
                 // silently ignored — see align-loop-with-hermes.
             }
             // --- model profiles (openspec/changes/model-profiles) ---
-            // 缺失视为未设 —— 具体运行入口在需要模型时自行报错。
+            // 缺失视为旧 schema,load_config 末尾会从 legacy provider 字段合成兜底。
             if (j.contains("saved_models")) {
                 std::string err;
                 auto parsed = parse_saved_models(j["saved_models"], err);
@@ -478,14 +542,6 @@ AppConfig load_config() {
             }
             if (j.contains("default_model_name") && j["default_model_name"].is_string()) {
                 cfg.default_model_name = j["default_model_name"].get<std::string>();
-            }
-            if (!cfg.saved_models.empty() || !cfg.default_model_name.empty()) {
-                std::string err;
-                if (!validate_saved_models(cfg.saved_models, cfg.default_model_name, err)) {
-                    std::cerr << "[config] fatal: " << err << std::endl;
-                    LOG_ERROR(std::string("[config] saved_models validation failure: ") + err);
-                    std::exit(1);
-                }
             }
 
             if (j.contains("mcp_servers") && j["mcp_servers"].is_object()) {
@@ -597,6 +653,20 @@ AppConfig load_config() {
     }
     if (const char* env = std::getenv("ACECODE_UPGRADE_BASE_URL")) {
         cfg.upgrade.base_url = normalize_upgrade_base_url(env);
+    }
+
+    synthesize_legacy_saved_model_if_needed(cfg);
+    if (!cfg.saved_models.empty()) {
+        std::string err;
+        if (!validate_saved_models(cfg.saved_models, cfg.default_model_name, err)) {
+            std::cerr << "[config] fatal: " << err << std::endl;
+            LOG_ERROR(std::string("[config] saved_models validation failure: ") + err);
+            std::exit(1);
+        }
+    } else if (!cfg.default_model_name.empty()) {
+        LOG_WARN("[config] default_model_name ignored because saved_models is empty: " +
+                 cfg.default_model_name);
+        cfg.default_model_name.clear();
     }
 
     return cfg;
