@@ -1,6 +1,7 @@
 #include "web_host.hpp"
 
 #include "web_host_close_policy.hpp"
+#include "webview2_runtime_probe.hpp"
 #include "window_chrome.hpp"
 
 #include "../utils/logger.hpp"
@@ -296,6 +297,37 @@ void center_window_on_monitor(HWND hwnd, const RECT& monitor) {
     ::SetWindowPos(hwnd, nullptr, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
+// 终态失败弹窗:WebView2 默认路径 + Edge 浏览器 fallback 都失败时,给用户
+// 一个可读中文提示(原本是 wWinMain 上面那个"未经处理的异常"调试器对话框,
+// 普通用户看不懂也帮不上忙)。reason 透传 webview::exception::what(),通常
+// 含 HRESULT;接进 MessageBox 文案末尾,IT 排查时直接复制就行。
+void show_webview2_failure_message_box(const char* reason) {
+    const std::string body =
+        "ACECode 桌面版无法初始化 WebView2 组件。\n\n"
+        "可能的原因与解决办法:\n"
+        "  1. 未安装 \"Microsoft Edge WebView2 Runtime\"(注意:仅有 Edge 浏览器并不等价)。\n"
+        "     请到 https://developer.microsoft.com/microsoft-edge/webview2/ 下载 Evergreen Standalone Installer 安装。\n"
+        "  2. WebView2 用户数据目录损坏。请尝试删除以下目录后重试:\n"
+        "     %LOCALAPPDATA%\\acecode-desktop\\EBWebView\n"
+        "  3. 杀毒/EDR 软件拦截了 msedgewebview2.exe 的启动,请将其加入信任。\n\n"
+        "详细日志:%USERPROFILE%\\.acecode\\logs\\desktop-*.log\n\n"
+        "失败原因(供 IT 排查):\n";
+    std::string full = body + (reason ? reason : "(unknown)");
+
+    const int wlen = ::MultiByteToWideChar(CP_UTF8, 0, full.c_str(),
+                                           static_cast<int>(full.size()), nullptr, 0);
+    std::wstring wbody;
+    if (wlen > 0) {
+        wbody.resize(static_cast<std::size_t>(wlen));
+        ::MultiByteToWideChar(CP_UTF8, 0, full.c_str(),
+                              static_cast<int>(full.size()), wbody.data(), wlen);
+    }
+    ::MessageBoxW(nullptr,
+                  wbody.empty() ? L"WebView2 initialization failed." : wbody.c_str(),
+                  L"ACECode 启动失败",
+                  MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+}
+
 } // namespace
 
 struct ComApartment {
@@ -348,20 +380,65 @@ struct WebHost::Impl {
                             : nullptr),
           offscreen_until_ready(custom_window != nullptr),
           com(custom_window != nullptr) {
-        try {
-            w = std::make_unique<webview::webview>(
-                debug,
-                custom_window ? static_cast<void*>(custom_window) : nullptr);
-        } catch (const webview::exception& e) {
-            if (!custom_window) throw;
-            LOG_WARN(std::string("[desktop] offscreen WebView host failed; falling back: ") +
-                     e.what());
-            if (::IsWindow(custom_window)) {
-                ::DestroyWindow(custom_window);
+        // 三段式构造:
+        //   (1) 默认 Loader 路径,优先 offscreen custom_window;失败 → 切
+        //       自管 nullptr 父窗口再试一次(沿用现有降级)。
+        //   (2) (1) 整段还是抛 → 探测 Edge 浏览器自带的 msedgewebview2.exe
+        //       目录,通过 WEBVIEW2_BROWSER_EXECUTABLE_FOLDER 环境变量
+        //       (WebView2Loader.dll 公开的覆盖钩子)指过去再试。
+        //   (3) Edge fallback 仍失败或没找到 Edge → 弹中文 MessageBox 给用户
+        //       可执行的修复指引,LOG_ERROR 落盘后 ExitProcess(1) 而不是
+        //       让 webview::exception 一路裸抛到 wWinMain — 那样普通用户
+        //       只会看到 Windows "未经处理的异常" 调试器对话框,完全看不懂。
+        auto make_webview_default_path = [&]() -> std::unique_ptr<webview::webview> {
+            try {
+                return std::make_unique<webview::webview>(
+                    debug,
+                    custom_window ? static_cast<void*>(custom_window) : nullptr);
+            } catch (const webview::exception& e) {
+                if (!custom_window) throw;
+                LOG_WARN(std::string("[desktop] offscreen WebView host failed; "
+                                     "falling back to default window: ") + e.what());
+                if (::IsWindow(custom_window)) {
+                    ::DestroyWindow(custom_window);
+                }
+                custom_window = nullptr;
+                offscreen_until_ready = false;
+                return std::make_unique<webview::webview>(debug, nullptr);
             }
-            custom_window = nullptr;
-            offscreen_until_ready = false;
-            w = std::make_unique<webview::webview>(debug, nullptr);
+        };
+
+        try {
+            w = make_webview_default_path();
+        } catch (const webview::exception& e1) {
+            LOG_WARN(std::string("[desktop] WebView2 default loader path failed: ") +
+                     e1.what());
+            auto edge_folder = find_edge_browser_folder();
+            if (!edge_folder.has_value()) {
+                LOG_ERROR("[desktop] no Microsoft Edge browser folder found to "
+                          "fall back to; aborting startup");
+                show_webview2_failure_message_box(e1.what());
+                ::ExitProcess(1);
+            }
+            const std::wstring folder_w = edge_folder->wstring();
+            LOG_INFO(std::string("[desktop] retrying WebView2 with Edge browser "
+                                 "folder: ") + edge_folder->string());
+            if (!::SetEnvironmentVariableW(L"WEBVIEW2_BROWSER_EXECUTABLE_FOLDER",
+                                           folder_w.c_str())) {
+                LOG_ERROR("[desktop] SetEnvironmentVariableW("
+                          "WEBVIEW2_BROWSER_EXECUTABLE_FOLDER) failed, last_error=" +
+                          std::to_string(::GetLastError()));
+            }
+            try {
+                // custom_window 在 default 路径内已被清掉(如果走过 offscreen),
+                // 这里直接喂 nullptr 让 webview 自己造窗口最稳妥。
+                w = std::make_unique<webview::webview>(debug, nullptr);
+            } catch (const webview::exception& e2) {
+                LOG_ERROR(std::string("[desktop] WebView2 Edge browser folder "
+                                      "fallback also failed: ") + e2.what());
+                show_webview2_failure_message_box(e2.what());
+                ::ExitProcess(1);
+            }
         }
         if (custom_window) {
             resize_webview_widget(custom_window);

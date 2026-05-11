@@ -35,6 +35,7 @@
 #include <nlohmann/json.hpp>
 
 #include <atomic>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <mutex>
@@ -316,6 +317,16 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
 #else
 int main(int, char**) {
 #endif
+    // 顶层 try/catch:wWinMain 是 Windows 子系统的 EXE 入口,任何未捕获的
+    // C++ 异常会触发 std::terminate → 系统弹"未经处理的异常"调试器对话框,
+    // 普通用户既看不懂也无从下手。把整个 body 包成 IIFE lambda 让 catch 兜
+    // 底:落 LOG_ERROR、弹中文 MessageBox 给用户可执行的修复指引,然后
+    // return 1 走正常退出。
+    //
+    // 注意 logger 初始化也在 lambda 内,因为它本身也可能抛(磁盘满 / 路径
+    // 受 GPO 锁)。catch 里依然先调 LOG_ERROR(失败时是 no-op,不影响
+    // MessageBox 给用户提示)。
+    auto run = []() -> int {
     using namespace acecode::desktop;
 
     // desktop 自己的日志路径: ~/.acecode/logs/desktop-<date>.log。和 daemon
@@ -1068,4 +1079,45 @@ int main(int, char**) {
 
     auto failures = pool.stop_all();
     return failures.empty() ? 0 : 100; // 部分失败返回非零便于诊断
+    }; // end of run lambda
+
+    try {
+        return run();
+    } catch (const std::exception& e) {
+        LOG_ERROR(std::string("[desktop] unhandled exception during startup: ") + e.what());
+#ifdef _WIN32
+        const std::string body = std::string(
+            "ACECode 桌面版启动时遇到未预期的错误,即将退出。\n\n"
+            "请把以下日志文件发给 IT/开发以便定位:\n"
+            "  %USERPROFILE%\\.acecode\\logs\\desktop-*.log\n\n"
+            "异常信息:\n") + e.what();
+        const int wlen = ::MultiByteToWideChar(CP_UTF8, 0, body.c_str(),
+                                               static_cast<int>(body.size()), nullptr, 0);
+        std::wstring wbody;
+        if (wlen > 0) {
+            wbody.resize(static_cast<std::size_t>(wlen));
+            ::MultiByteToWideChar(CP_UTF8, 0, body.c_str(),
+                                  static_cast<int>(body.size()), wbody.data(), wlen);
+        }
+        ::MessageBoxW(nullptr,
+                      wbody.empty() ? L"Unhandled exception during startup." : wbody.c_str(),
+                      L"ACECode 启动失败",
+                      MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+#else
+        std::fprintf(stderr, "[desktop] unhandled exception: %s\n", e.what());
+#endif
+        return 1;
+    } catch (...) {
+        LOG_ERROR("[desktop] unhandled non-std::exception during startup");
+#ifdef _WIN32
+        ::MessageBoxW(nullptr,
+                      L"ACECode 桌面版启动时遇到未预期的错误,即将退出。\n"
+                      L"请把日志文件 %USERPROFILE%\\.acecode\\logs\\desktop-*.log 发给 IT 团队。",
+                      L"ACECode 启动失败",
+                      MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+#else
+        std::fprintf(stderr, "[desktop] unhandled non-std::exception during startup\n");
+#endif
+        return 1;
+    }
 }
