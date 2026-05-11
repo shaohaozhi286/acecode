@@ -72,6 +72,12 @@ export function createApi(base = null) {
     health:           ()             => request('GET',    '/api/health', undefined, base),
     listWorkspaces:   ()             => request('GET',    '/api/workspaces', undefined, base),
     registerWorkspace:(cwd)          => request('POST',   '/api/workspaces', {cwd}, base),
+    renameWorkspace:  (hash, name)   => request('PATCH',  `/api/workspaces/${encodeURIComponent(hash)}`, {name}, base),
+    removeWorkspace:  (hash)         => request('DELETE', `/api/workspaces/${encodeURIComponent(hash)}`, undefined, base),
+    // 系统层操作的 daemon-side 实现 — webview 不可用 / 浏览器降级时业务也能跑。
+    // 见 src/web/server.cpp::register_system 与 openspec/decisions/desktop-down-sink。
+    openInExplorer:   (path)         => request('POST',   '/api/system/open-in-explorer', {path}, base),
+    pickFolder:       ()             => request('POST',   '/api/system/pick-folder', {}, base),
     listSessions:     ()             => request('GET',    '/api/sessions', undefined, base),
     createSession:    (opts={})      => request('POST',   '/api/sessions', opts, base),
     resumeSession:    (id)           => request('POST',   `/api/sessions/${encodeURIComponent(id)}/resume`, {}, base),

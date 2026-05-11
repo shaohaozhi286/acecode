@@ -8,7 +8,12 @@ import {
   openInExplorerTargetFromElement,
   sessionPinTargetFromElement,
 } from '../lib/desktopContextMenu.js';
+import { createApi } from '../lib/api.js';
 import { toast } from './Toast.jsx';
+
+// 单例 default api client — createApi(null) 内部从全局 _baseOrigin / _baseToken
+// 取值(由 setBase 在 App 启动时配好),所以这里不需要 prop drill / context。
+const apiClient = createApi();
 
 const MENU_WIDTH = 176;
 const MENU_ROW_HEIGHT = 30;
@@ -36,7 +41,14 @@ const TEXT_INPUT_TYPES = new Set([
 ]);
 
 function isDesktopShell() {
-  return !!(window.__ACECODE_DESKTOP_SHELL__ || window.aceDesktop_openDevTools || window.aceDesktop_openInExplorer);
+  // 原 detection 只看 native bridge,浏览器降级模式会整个禁用右键菜单(连
+  // 复制/粘贴/全选都灰)。把"在资源管理器中打开"下沉到 daemon HTTP 之后,
+  // 浏览器走 loopback 也能享受这条菜单 — 把 loopback host 也认作"可用"。
+  if (window.__ACECODE_DESKTOP_SHELL__) return true;
+  if (typeof window.aceDesktop_openDevTools === 'function') return true;
+  if (typeof window.aceDesktop_openInExplorer === 'function') return true;
+  const host = window.location?.hostname || '';
+  return host === '127.0.0.1' || host === 'localhost' || host === '[::1]';
 }
 
 function parseDesktopResult(value) {
@@ -139,19 +151,20 @@ async function pasteIntoTarget(target) {
 }
 
 async function openTargetInExplorer(openTarget) {
-  if (!openTarget?.path || typeof window.aceDesktop_openInExplorer !== 'function') {
-    toast({ kind: 'err', text: '无法打开:desktop bridge 不可用' });
+  if (!openTarget?.path) {
+    toast({ kind: 'err', text: '无法打开:缺少路径' });
     return;
   }
+  // HTTP-first:daemon 跟前端同一台机器同一 session,POST /api/system/open-
+  // in-explorer 走 ShellExecuteW / open / xdg-open。这条路径浏览器降级模式也
+  // 一样跑得通,webview 层不再持有业务逻辑。
   try {
-    const result = parseDesktopResult(await window.aceDesktop_openInExplorer(openTarget.path));
-    if (!result?.ok) {
-      toast({ kind: 'err', text: '打开失败:' + (result?.error || '') });
-      return;
-    }
+    await apiClient.openInExplorer(openTarget.path);
     toast({ kind: 'ok', text: '已在资源管理器中打开' });
   } catch (e) {
-    toast({ kind: 'err', text: '打开异常:' + (e?.message || '') });
+    // daemon 端 403 = 白名单拒绝(不在已注册 workspace cwd 内)
+    const msg = e?.body?.error || e?.message || '';
+    toast({ kind: 'err', text: '打开失败:' + msg });
   }
 }
 

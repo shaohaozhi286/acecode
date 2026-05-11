@@ -555,31 +555,39 @@ export function Sidebar({ activeId, onSelect, collapsed, width = 200, onOpenHome
   };
 
   const onRename = async (hash, name) => {
-    if (!hasDesktopBridge()) throw new Error('not in desktop mode');
-    const r = parseDesktopResult(await window.aceDesktop_renameWorkspace(hash, name));
-    if (!r.ok) throw new Error(r.error || 'rename failed');
+    // 主路径走 daemon HTTP — 浏览器降级模式也能用。webview 模式下 daemon 同源
+    // 同进程组,延迟可忽略;同时为了不丢 native 副作用(webview 在 sidebar
+    // 视图态外可能有其它缓存),保留 bridge 调用作为 fire-and-forget,失败
+    // 不影响业务结果。
+    await api.renameWorkspace(hash, name);
+    if (typeof window.aceDesktop_renameWorkspace === 'function') {
+      try { await window.aceDesktop_renameWorkspace(hash, name); } catch { /* best-effort */ }
+    }
     setWorkspaces((prev) => prev.map((w) => w.hash === hash ? { ...w, name } : w));
     await refresh(hash);
   };
 
   const removeWorkspace = async (ws) => {
     if (!ws?.hash) return;
-    if (!hasDesktopRemoveWorkspace()) {
-      toast({ kind: 'info', text: '需在 desktop shell 中使用' });
-      return;
-    }
     const ok = window.confirm(
       `从桌面项目列表移除“${ws.name || ws.hash}”？\n\n不会删除项目文件、会话或 .acecode 数据。之后可通过“添加项目”重新显示。`,
     );
     if (!ok) return;
 
     try {
-      const r = parseDesktopResult(await window.aceDesktop_removeWorkspace(ws.hash));
-      if (!r?.ok) throw new Error(r?.error || 'remove failed');
+      // HTTP-first;原 bridge 路径返 r.active_workspace_hash 这种 native
+      // 建议下一活跃 workspace,daemon 不算这个,客户端按"还剩第一个或保
+      // 持现状"算等价结果(下文 fallback)。bridge 仍 fire-and-forget 调
+      // 用以清理 native 托盘菜单缓存等副作用。
+      await api.removeWorkspace(ws.hash);
+      if (typeof window.aceDesktop_removeWorkspace === 'function') {
+        try { await window.aceDesktop_removeWorkspace(ws.hash); } catch { /* best-effort */ }
+      }
 
       const remaining = workspaces.filter((w) => w.hash !== ws.hash);
-      const nextHash = r.active_workspace_hash
-        || ((ws.active || activeWorkspaceHash === ws.hash) ? (remaining[0]?.hash || '') : activeWorkspaceHash);
+      const nextHash = (ws.active || activeWorkspaceHash === ws.hash)
+        ? (remaining[0]?.hash || '')
+        : activeWorkspaceHash;
 
       setWorkspaces(remaining.map((w) => ({ ...w, active: w.hash === nextHash })));
       setSessions((prev) => prev.filter((s) => (s.workspace_hash || s.workspaceHash || '') !== ws.hash));
@@ -658,16 +666,52 @@ export function Sidebar({ activeId, onSelect, collapsed, width = 200, onOpenHome
     }
   };
 
-  const onAddWorkspace = async () => {
-    if (!hasDesktopBridge()) {
-      toast({ kind: 'info', text: '需在 desktop shell 中使用' });
-      return;
-    }
-    try {
+  // pick + register 工作流:
+  //   1) webview 模式:优先调 native bridge,一次拿到 cwd + register 全套
+  //      (跟原行为完全一致,避免 webview 用户体验回归)
+  //   2) Chromium 系浏览器:试 showDirectoryPicker (File System Access API)
+  //      取目录 name,但拿不到绝对路径(API 安全限制) → 退到方案 3
+  //   3) 其它浏览器(Firefox / 旧 Edge 已不可能) / 方案 2 拿不到 cwd:
+  //      调 daemon POST /api/system/pick-folder 让 daemon 弹 native folder
+  //      picker,拿到绝对路径。daemon 跟用户同一 session、同一权限,在
+  //      Windows 上走 IFileOpenDialog,POSIX MVP 阶段 daemon 返 canceled。
+  const pickWorkspaceCwd = async () => {
+    if (typeof window.aceDesktop_addWorkspace === 'function') {
       const ws = parseDesktopResult(await window.aceDesktop_addWorkspace());
-      if (ws == null) return;
+      if (ws == null) return null;
+      if (!ws || !ws.hash) return null;
+      return { cwd: ws.cwd, prefilled: ws };
+    }
+    // 浏览器降级模式:File System Access API 拿不到绝对路径(handle 不暴露
+    // 真实 cwd),所以直接走 daemon picker。除非以后接入 OPFS / DirectoryHandle
+    // 的 cwd 推断,不然这条更可靠。
+    try {
+      const r = await api.pickFolder();
+      if (r && r.ok && r.path) return { cwd: r.path };
+      return null; // 用户取消 / 平台不支持
+    } catch (e) {
+      throw e;
+    }
+  };
+
+  const onAddWorkspace = async () => {
+    try {
+      const picked = await pickWorkspaceCwd();
+      if (!picked) return;
+      let ws = picked.prefilled || null;
+      if (!ws || !ws.hash) {
+        try {
+          ws = await api.registerWorkspace(picked.cwd);
+        } catch (e) {
+          toast({ kind: 'err', text: '添加项目失败:' + (e.message || '') });
+          return;
+        }
+      } else {
+        // bridge 已经在 desktop 端 register 过;再 POST 一次幂等(daemon 端
+        // register_new 已存在时直接返回已有 meta,不重写 workspace.json)。
+        try { await api.registerWorkspace(ws.cwd); } catch { /* 幂等容错 */ }
+      }
       if (!ws || !ws.hash) return;
-      try { await api.registerWorkspace(ws.cwd); } catch { /* daemon 可能已入册;忽略 */ }
       onActivate(ws);
     } catch (e) {
       toast({ kind: 'err', text: '添加项目失败:' + (e.message || '') });
@@ -740,7 +784,7 @@ export function Sidebar({ activeId, onSelect, collapsed, width = 200, onOpenHome
                   onRename={onRename}
                   onActivate={onActivate}
                   onNewSession={createSessionInWorkspace}
-                  onRemove={hasDesktopRemoveWorkspace() ? removeWorkspace : undefined}
+                  onRemove={removeWorkspace}
                   onTogglePin={togglePinnedSession}
                 />
               );
