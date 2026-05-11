@@ -410,6 +410,84 @@ TEST(WebServerHttp, WorkspaceListRefreshesExternalRename) {
     EXPECT_EQ(ws_list[0]["name"], "renamed-from-desktop");
 }
 
+// 场景: PATCH /api/workspaces/:hash 改 name 成功路径。
+// 返回 200 + 与列表项同构 JSON,且后续 GET 列表里 name 已更新。
+TEST(WebServerHttp, WorkspaceRenameViaHttpUpdatesName) {
+    WebServerFixture fx;
+    const std::string hash = acecode::compute_cwd_hash(fx.cwd);
+
+    auto patch = cpr::Patch(cpr::Url{fx.url("/api/workspaces/" + hash)},
+                            cpr::Header{{"Content-Type", "application/json"}},
+                            cpr::Body{json{{"name", "renamed-via-http"}}.dump()});
+    ASSERT_EQ(patch.status_code, 200) << patch.text;
+    auto updated = json::parse(patch.text);
+    EXPECT_EQ(updated["hash"], hash);
+    EXPECT_EQ(updated["name"], "renamed-via-http");
+
+    auto get_ws = cpr::Get(cpr::Url{fx.url("/api/workspaces")});
+    ASSERT_EQ(get_ws.status_code, 200) << get_ws.text;
+    auto ws_list = json::parse(get_ws.text);
+    ASSERT_TRUE(ws_list.is_array());
+    ASSERT_FALSE(ws_list.empty());
+    EXPECT_EQ(ws_list[0]["hash"], hash);
+    EXPECT_EQ(ws_list[0]["name"], "renamed-via-http");
+}
+
+// 场景: PATCH 不带 name 字段(或 name 为空字符串)→ 400,内存 cache 不动。
+TEST(WebServerHttp, WorkspaceRenameRejectsMissingOrEmptyName) {
+    WebServerFixture fx;
+    const std::string hash = acecode::compute_cwd_hash(fx.cwd);
+
+    auto no_name = cpr::Patch(cpr::Url{fx.url("/api/workspaces/" + hash)},
+                              cpr::Header{{"Content-Type", "application/json"}},
+                              cpr::Body{"{}"});
+    EXPECT_EQ(no_name.status_code, 400) << no_name.text;
+
+    auto empty_name = cpr::Patch(cpr::Url{fx.url("/api/workspaces/" + hash)},
+                                 cpr::Header{{"Content-Type", "application/json"}},
+                                 cpr::Body{json{{"name", ""}}.dump()});
+    EXPECT_EQ(empty_name.status_code, 400) << empty_name.text;
+
+    auto bad_json = cpr::Patch(cpr::Url{fx.url("/api/workspaces/" + hash)},
+                               cpr::Header{{"Content-Type", "application/json"}},
+                               cpr::Body{"not json"});
+    EXPECT_EQ(bad_json.status_code, 400) << bad_json.text;
+}
+
+// 场景: PATCH 指向未知 hash → 404,不创建新 entry。
+TEST(WebServerHttp, WorkspaceRenameRejectsUnknownHash) {
+    WebServerFixture fx;
+    auto patch = cpr::Patch(cpr::Url{fx.url("/api/workspaces/0000000000000000")},
+                            cpr::Header{{"Content-Type", "application/json"}},
+                            cpr::Body{json{{"name", "ghost"}}.dump()});
+    EXPECT_EQ(patch.status_code, 404) << patch.text;
+}
+
+// 场景: DELETE /api/workspaces/:hash 成功 → 204,后续 GET 列表里它消失。
+// 不动 hash 目录或 session 文件 — registry.hide 只翻 desktop_visible 标志。
+TEST(WebServerHttp, WorkspaceDeleteHidesFromList) {
+    WebServerFixture fx;
+    const std::string hash = acecode::compute_cwd_hash(fx.cwd);
+
+    auto del = cpr::Delete(cpr::Url{fx.url("/api/workspaces/" + hash)});
+    EXPECT_EQ(del.status_code, 204) << del.text;
+
+    auto get_ws = cpr::Get(cpr::Url{fx.url("/api/workspaces")});
+    ASSERT_EQ(get_ws.status_code, 200) << get_ws.text;
+    auto ws_list = json::parse(get_ws.text);
+    ASSERT_TRUE(ws_list.is_array());
+    for (const auto& w : ws_list) {
+        EXPECT_NE(w.value("hash", std::string{}), hash);
+    }
+}
+
+// 场景: DELETE 指向未知 hash → 404,不影响其他 workspace。
+TEST(WebServerHttp, WorkspaceDeleteRejectsUnknownHash) {
+    WebServerFixture fx;
+    auto del = cpr::Delete(cpr::Url{fx.url("/api/workspaces/0000000000000000")});
+    EXPECT_EQ(del.status_code, 404) << del.text;
+}
+
 // 场景:在非 daemon 启动 cwd 的 workspace 里 fork,新 session 必须用源
 // workspace cwd 装回 registry；否则前端切到新 fork 时 WS 会报 unknown session。
 TEST(WebServerHttp, ForkWorkspaceSessionResumesInSourceWorkspace) {

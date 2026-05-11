@@ -767,6 +767,10 @@ struct WebServer::Impl {
         ([this](const crow::request& req) {
             return cors_preflight(req);
         });
+        CROW_ROUTE(app, "/api/workspaces/<string>").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req, const std::string&) {
+            return cors_preflight(req);
+        });
         CROW_ROUTE(app, "/api/workspaces/<string>/sessions").methods(crow::HTTPMethod::Options)
         ([this](const crow::request& req, const std::string&) {
             return cors_preflight(req);
@@ -940,6 +944,90 @@ struct WebServer::Impl {
             crow::response r(200);
             r.body = json{{"session_id", id}, {"id", id}, {"active", true}, {"workspace_hash", ws->hash}, {"cwd", ws->cwd}}.dump();
             r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        });
+
+        // PATCH /api/workspaces/:hash:行内重命名,body {"name": "<新名>"}。
+        // 等价于原 desktop bridge aceDesktop_renameWorkspace 的下沉版本 ——
+        // 浏览器降级模式下前端也能改名,而不必走 webview JS-bridge。
+        // 失败语义:
+        //   - workspace_registry 未挂载   → 503
+        //   - body 不是合法 JSON          → 400
+        //   - 缺 name / name 为空字符串   → 400
+        //   - hash 未知 / set_name 返 false → 404
+        // 成功返回 200 + 与 GET /api/workspaces 列表项同构的 workspace JSON,
+        // 方便前端拿到 hash 后立即覆盖本地缓存。
+        CROW_ROUTE(app, "/api/workspaces/<string>").methods(crow::HTTPMethod::PATCH)
+        ([this](const crow::request& req, const std::string& hash) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.workspace_registry) {
+                crow::response r(503);
+                r.body = R"({"error":"workspace registry unavailable"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            std::string name;
+            try {
+                auto j = json::parse(req.body);
+                name = j.value("name", std::string{});
+            } catch (const std::exception& e) {
+                crow::response r(400);
+                r.body = json{{"error", std::string("bad json: ") + e.what()}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            if (name.empty()) {
+                crow::response r(400);
+                r.body = R"({"error":"name required"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            if (!deps.workspace_registry->set_name(projects_dir(), hash, name)) {
+                crow::response r(404);
+                r.body = R"({"error":"workspace not found"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            auto m = deps.workspace_registry->get(hash);
+            if (!m.has_value()) {
+                // 写盘成功但内存被并发 scan 清掉 — 罕见但要兜底,客户端拿
+                // 200 + 空体当作"再 GET 一次列表"。
+                crow::response r(200);
+                r.body = R"({"hash":"")" + hash + R"(""})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            LOG_INFO("[web] workspace renamed hash=" + hash + " name=" + name);
+            crow::response r(200);
+            r.body = workspace_to_json(*m).dump();
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        });
+
+        // DELETE /api/workspaces/:hash:从 Desktop 项目列表隐藏 workspace。
+        // 等价于原 desktop bridge aceDesktop_removeWorkspace。语义跟 registry::hide
+        // 完全一致 ── 写 desktop_visible=false,不删 hash 目录、session、用户文件。
+        // 失败:
+        //   - workspace_registry 未挂载   → 503
+        //   - hash 未知 / 隐藏失败         → 404
+        // 成功 → 204 No Content。
+        CROW_ROUTE(app, "/api/workspaces/<string>").methods(crow::HTTPMethod::DELETE)
+        ([this](const crow::request& req, const std::string& hash) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.workspace_registry) {
+                crow::response r(503);
+                r.body = R"({"error":"workspace registry unavailable"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            if (!deps.workspace_registry->hide(projects_dir(), hash)) {
+                crow::response r(404);
+                r.body = R"({"error":"workspace not found"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            LOG_INFO("[web] workspace hidden hash=" + hash);
+            crow::response r(204);
             return with_cors(req, std::move(r));
         });
     }
