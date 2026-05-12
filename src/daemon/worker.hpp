@@ -28,6 +28,7 @@ struct WorkerOptions {
     std::string token_override;     // 非空时覆盖自动生成 token(desktop 预生成,前端无需 poll token 文件)
     std::string static_dir_override; // 非空时覆盖 cfg.web.static_dir(desktop dev 模式注入仓库 web/ 路径)
     std::string cwd_override;       // 非空时先切到该目录,让 session/history/tools 使用指定 workspace
+    bool        native_folder_picker_enabled = false; // desktop/webapp 内部:允许 daemon 调 OS 目录选择器
 };
 
 // 主入口。返回进程退出码: 0 成功正常退出,非 0 启动失败 / 异常。

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "utf8_path.hpp"
+
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -27,7 +29,7 @@ inline bool atomic_write_file(const std::string& path,
                               const std::string& content,
                               bool restrict_permissions = false) {
     namespace fs = std::filesystem;
-    fs::path target(path);
+    fs::path target = path_from_utf8(path);
     fs::path tmp = target;
     tmp += ".tmp";
 
@@ -47,7 +49,7 @@ inline bool atomic_write_file(const std::string& path,
     if (restrict_permissions) {
 #ifndef _WIN32
         // 0600
-        if (::chmod(tmp.string().c_str(), S_IRUSR | S_IWUSR) != 0) {
+        if (::chmod(path_to_utf8(tmp).c_str(), S_IRUSR | S_IWUSR) != 0) {
             std::error_code rmec;
             fs::remove(tmp, rmec);
             return false;
@@ -64,17 +66,18 @@ inline bool atomic_write_file(const std::string& path,
                 std::string buf(len, '\0');
                 if (::GetTokenInformation(token, TokenUser, buf.data(), len, &len)) {
                     PSID user_sid = reinterpret_cast<TOKEN_USER*>(buf.data())->User.Sid;
-                    EXPLICIT_ACCESSA ea{};
+                    EXPLICIT_ACCESSW ea{};
                     ea.grfAccessPermissions = GENERIC_READ | GENERIC_WRITE;
                     ea.grfAccessMode = SET_ACCESS;
                     ea.grfInheritance = NO_INHERITANCE;
                     ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
                     ea.Trustee.TrusteeType = TRUSTEE_IS_USER;
-                    ea.Trustee.ptstrName = static_cast<LPSTR>(user_sid);
+                    ea.Trustee.ptstrName = reinterpret_cast<LPWSTR>(user_sid);
                     PACL acl = nullptr;
-                    if (::SetEntriesInAclA(1, &ea, nullptr, &acl) == ERROR_SUCCESS && acl) {
-                        ::SetNamedSecurityInfoA(
-                            const_cast<LPSTR>(tmp.string().c_str()),
+                    if (::SetEntriesInAclW(1, &ea, nullptr, &acl) == ERROR_SUCCESS && acl) {
+                        std::wstring tmp_w = tmp.wstring();
+                        ::SetNamedSecurityInfoW(
+                            const_cast<LPWSTR>(tmp_w.c_str()),
                             SE_FILE_OBJECT,
                             DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
                             nullptr, nullptr, acl, nullptr);

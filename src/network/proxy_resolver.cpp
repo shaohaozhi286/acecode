@@ -7,6 +7,7 @@
 
 #include "tcp_probe.hpp"
 #include "../utils/logger.hpp"
+#include "../utils/utf8_path.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -180,8 +181,8 @@ void ProxyResolver::rebuild_no_proxy_list_unlocked() {
     // POSIX/Windows env 上的 NO_PROXY 也合并进来(只在 auto 模式有意义)。
     if (cfg_.proxy_mode == "auto") {
         for (const char* k : {"NO_PROXY", "no_proxy"}) {
-            const char* v = std::getenv(k);
-            if (v && *v) {
+            std::string v = getenv_utf8(k);
+            if (!v.empty()) {
                 auto extra = parse_no_proxy(v);
                 no_proxy_list_.insert(no_proxy_list_.end(), extra.begin(), extra.end());
             }
@@ -391,7 +392,7 @@ ProxyOptions ProxyResolver::options_for(const std::string& target_url) const {
         // 直连:可选 ca_bundle 仍可生效(用户可能配了自定义企业 CA)
         std::lock_guard<std::mutex> lk(mu_);
         if (!cfg_.proxy_ca_bundle.empty() &&
-            std::filesystem::exists(cfg_.proxy_ca_bundle)) {
+            std::filesystem::exists(acecode::path_from_utf8(cfg_.proxy_ca_bundle))) {
             opts.ca_bundle = cfg_.proxy_ca_bundle;
         }
         return opts;
@@ -418,7 +419,7 @@ ProxyOptions ProxyResolver::options_for(const std::string& target_url) const {
             opts.insecure = true;
         }
         if (!cfg_.proxy_ca_bundle.empty() &&
-            std::filesystem::exists(cfg_.proxy_ca_bundle)) {
+            std::filesystem::exists(acecode::path_from_utf8(cfg_.proxy_ca_bundle))) {
             opts.ca_bundle = cfg_.proxy_ca_bundle;
         } else if (!cfg_.proxy_ca_bundle.empty()) {
             LOG_WARN("[proxy] proxy_ca_bundle not found on disk: " + cfg_.proxy_ca_bundle);

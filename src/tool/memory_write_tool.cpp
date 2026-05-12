@@ -4,6 +4,7 @@
 #include "../memory/memory_registry.hpp"
 #include "../memory/memory_types.hpp"
 #include "../utils/logger.hpp"
+#include "../utils/utf8_path.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -112,8 +113,8 @@ ToolImpl create_memory_write_tool(MemoryRegistry& registry) {
         out["name"] = written->name;
         out["description"] = written->description;
         out["type"] = memory_type_to_string(written->type);
-        out["path"] = written->path.generic_string();
-        LOG_INFO("[memory_write] persisted " + written->path.generic_string());
+        out["path"] = path_to_utf8_generic(written->path);
+        LOG_INFO("[memory_write] persisted " + path_to_utf8_generic(written->path));
         return ToolResult{out.dump(), true};
     };
 

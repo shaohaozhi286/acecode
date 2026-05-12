@@ -1,6 +1,7 @@
 #include "cwd_hash.hpp"
 
 #include "encoding.hpp"
+#include "utf8_path.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -107,13 +108,13 @@ std::string normalize_cwd_for_hash(const std::string& cwd) {
             normalized = *final_path;
         } else {
 #endif
-        fs::path p(normalized);
+        fs::path p = path_from_utf8(normalized);
         // Only canonicalize existing paths. Non-existing synthetic test paths
         // keep their historical string identity.
         if (fs::exists(p, ec)) {
             auto canonical = fs::weakly_canonical(p, ec);
             if (!ec && !canonical.empty()) {
-                normalized = canonical.string();
+                normalized = path_to_utf8(canonical);
             }
         }
 #ifdef _WIN32

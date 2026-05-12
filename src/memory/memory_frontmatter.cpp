@@ -1,7 +1,9 @@
 #include "memory_frontmatter.hpp"
 
 #include "../skills/frontmatter.hpp"
+#include "../utils/encoding.hpp"
 #include "../utils/logger.hpp"
+#include "../utils/utf8_path.hpp"
 
 #include <fstream>
 #include <sstream>
@@ -17,7 +19,7 @@ std::string read_file_to_string(const fs::path& path) {
     if (!ifs.is_open()) return {};
     std::ostringstream oss;
     oss << ifs.rdbuf();
-    return oss.str();
+    return ensure_utf8(oss.str());
 }
 
 // Escape a scalar string for the rendered frontmatter. Quotes are minimal:
@@ -45,13 +47,13 @@ std::optional<MemoryEntry> parse_memory_entry_file(const fs::path& path) {
 
     std::string content = read_file_to_string(path);
     if (content.empty()) {
-        LOG_WARN("[memory] entry file is empty or unreadable: " + path.string());
+        LOG_WARN("[memory] entry file is empty or unreadable: " + path_to_utf8(path));
         return std::nullopt;
     }
 
     auto [fm, body] = parse_frontmatter(content);
     if (fm.empty()) {
-        LOG_WARN("[memory] entry missing frontmatter: " + path.string());
+        LOG_WARN("[memory] entry missing frontmatter: " + path_to_utf8(path));
         return std::nullopt;
     }
 
@@ -59,21 +61,21 @@ std::optional<MemoryEntry> parse_memory_entry_file(const fs::path& path) {
     std::string type_s = get_string(fm, "type", "");
     if (desc.empty() || type_s.empty()) {
         LOG_WARN("[memory] entry missing required field (description/type): " +
-                 path.string());
+                 path_to_utf8(path));
         return std::nullopt;
     }
 
     auto parsed_type = parse_memory_type(type_s);
     if (!parsed_type.has_value()) {
         LOG_WARN("[memory] entry has invalid type '" + type_s +
-                 "' (allowed: user|feedback|project|reference): " + path.string());
+                 "' (allowed: user|feedback|project|reference): " + path_to_utf8(path));
         return std::nullopt;
     }
 
     MemoryEntry entry;
     // On-disk name wins: derive from the file stem so callers never confuse
     // frontmatter `name` with the identifier used for lookup.
-    entry.name = path.stem().string();
+    entry.name = path_to_utf8(path.stem());
     entry.description = desc;
     entry.type = *parsed_type;
     entry.path = path;

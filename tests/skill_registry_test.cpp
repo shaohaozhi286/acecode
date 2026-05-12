@@ -1,4 +1,6 @@
 #include "skills/skill_registry.hpp"
+#include "utils/encoding.hpp"
+#include "utils/utf8_path.hpp"
 
 #include <gtest/gtest.h>
 
@@ -14,7 +16,7 @@ void write_skill(const fs::path& root,
                  const std::string& category,
                  const std::string& name,
                  const std::string& description) {
-    fs::path dir = root / category / name;
+    fs::path dir = root / acecode::path_from_utf8(category) / acecode::path_from_utf8(name);
     fs::create_directories(dir);
     std::ofstream ofs(dir / "SKILL.md", std::ios::binary);
     ofs << "---\n"
@@ -71,6 +73,26 @@ TEST_F(SkillRegistryCompatTest, PrefersEarlierRootForDuplicateSkillNames) {
     ASSERT_TRUE(found.has_value());
     EXPECT_EQ(found->description, "from acecode root");
     EXPECT_EQ(registry.list().size(), 1u);
+}
+
+TEST_F(SkillRegistryCompatTest, PreservesUtf8CategoryDescriptionAndBody) {
+    fs::path root = temp_root / "skills-root";
+    write_skill(root, u8"中文分类", "unicode-skill", u8"处理中文描述");
+
+    acecode::SkillRegistry registry;
+    registry.set_scan_roots({root});
+    registry.scan();
+
+    auto found = registry.find("unicode-skill");
+    ASSERT_TRUE(found.has_value());
+    EXPECT_EQ(found->category, u8"中文分类");
+    EXPECT_EQ(found->description, u8"处理中文描述");
+    EXPECT_TRUE(acecode::is_valid_utf8(found->category));
+    EXPECT_TRUE(acecode::is_valid_utf8(found->description));
+
+    std::string body = registry.read_skill_body("unicode-skill");
+    EXPECT_NE(body.find(u8"处理中文描述"), std::string::npos);
+    EXPECT_TRUE(acecode::is_valid_utf8(body));
 }
 
 } // namespace

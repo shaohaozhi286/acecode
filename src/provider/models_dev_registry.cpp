@@ -3,6 +3,7 @@
 
 #include "../network/proxy_resolver.hpp"
 #include "../utils/logger.hpp"
+#include "../utils/utf8_path.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -55,7 +56,7 @@ std::optional<nlohmann::json> read_json_file(const fs::path& path) {
         return j;
     } catch (const std::exception& e) {
         LOG_ERROR(std::string("Failed to parse models.dev JSON at ") +
-                  path.string() + ": " + e.what());
+                  path_to_utf8(path) + ": " + e.what());
         return std::nullopt;
     }
 }
@@ -100,44 +101,44 @@ void initialize_registry(const AppConfig& cfg, const std::string& argv0_dir) {
 void reload_registry_from_disk(const AppConfig& cfg, const std::string& argv0_dir) {
     if (cfg.models_dev.user_override_path.has_value() &&
         !cfg.models_dev.user_override_path->empty()) {
-        fs::path p(*cfg.models_dev.user_override_path);
+        fs::path p = path_from_utf8(*cfg.models_dev.user_override_path);
         auto parsed = read_json_file(p);
         if (parsed) {
             if (!validate_registry_schema(*parsed)) {
-                LOG_ERROR("models.dev user override at " + p.string() +
+                LOG_ERROR("models.dev user override at " + path_to_utf8(p) +
                           " failed schema validation; treating as empty");
                 install(std::make_shared<const nlohmann::json>(nlohmann::json::object()),
-                        RegistrySource{RegistrySource::Kind::Empty, p.string(), std::nullopt, std::nullopt});
+                        RegistrySource{RegistrySource::Kind::Empty, path_to_utf8(p), std::nullopt, std::nullopt});
                 return;
             }
-            LOG_INFO("Loaded models.dev user override from " + p.string());
+            LOG_INFO("Loaded models.dev user override from " + path_to_utf8(p));
             install(std::make_shared<const nlohmann::json>(std::move(*parsed)),
-                    RegistrySource{RegistrySource::Kind::UserOverride, p.string(), std::nullopt, std::nullopt});
+                    RegistrySource{RegistrySource::Kind::UserOverride, path_to_utf8(p), std::nullopt, std::nullopt});
             return;
         }
-        LOG_WARN("models.dev user_override_path '" + p.string() +
+        LOG_WARN("models.dev user_override_path '" + path_to_utf8(p) +
                  "' is missing or unreadable; falling back to bundled snapshot");
     }
 
     auto seed = find_models_dev_dir(argv0_dir);
     if (seed) {
-        fs::path api_path = fs::path(*seed) / "api.json";
+        fs::path api_path = path_from_utf8(*seed) / "api.json";
         auto parsed = read_json_file(api_path);
         if (parsed) {
             std::optional<nlohmann::json> manifest =
-                read_json_file(fs::path(*seed) / "MANIFEST.json");
+                read_json_file(path_from_utf8(*seed) / "MANIFEST.json");
 
             if (!validate_registry_schema(*parsed)) {
-                LOG_ERROR("Bundled models.dev registry at " + api_path.string() +
+                LOG_ERROR("Bundled models.dev registry at " + path_to_utf8(api_path) +
                           " failed schema validation; treating as empty");
                 install(std::make_shared<const nlohmann::json>(nlohmann::json::object()),
-                        RegistrySource{RegistrySource::Kind::Empty, api_path.string(),
+                        RegistrySource{RegistrySource::Kind::Empty, path_to_utf8(api_path),
                                        std::move(manifest), seed});
                 return;
             }
-            LOG_INFO("Loaded bundled models.dev registry from " + api_path.string());
+            LOG_INFO("Loaded bundled models.dev registry from " + path_to_utf8(api_path));
             install(std::make_shared<const nlohmann::json>(std::move(*parsed)),
-                    RegistrySource{RegistrySource::Kind::Bundled, api_path.string(),
+                    RegistrySource{RegistrySource::Kind::Bundled, path_to_utf8(api_path),
                                    std::move(manifest), seed});
             return;
         }

@@ -3,6 +3,7 @@
 #include "../utils/constants.hpp"
 #include "../utils/logger.hpp"
 #include "../utils/paths.hpp"
+#include "../utils/utf8_path.hpp"
 
 #include <atomic>
 #include <cctype>
@@ -93,11 +94,11 @@ std::string get_run_dir() {
     // 把 run/ 切到 per-workspace 路径(避免共享 ~/.acecode/run/ 互相覆盖锁文件)。
     auto override_path = get_run_dir_override();
     if (!override_path.empty()) return override_path;
-    return (fs::path(get_acecode_dir()) / constants::SUBDIR_RUN).string();
+    return path_to_utf8(path_from_utf8(get_acecode_dir()) / constants::SUBDIR_RUN);
 }
 
 std::string get_logs_dir() {
-    return (fs::path(get_acecode_dir()) / constants::SUBDIR_LOGS).string();
+    return path_to_utf8(path_from_utf8(get_acecode_dir()) / constants::SUBDIR_LOGS);
 }
 
 std::vector<std::string> validate_config(const AppConfig& cfg) {
@@ -163,7 +164,7 @@ static void write_default_config(const std::string& config_path) {
     }});
     j["default_model_name"] = "copilot";
 
-    std::ofstream ofs(config_path);
+    std::ofstream ofs(path_from_utf8(config_path));
     if (ofs.is_open()) {
         ofs << j.dump(2) << std::endl;
     }
@@ -195,22 +196,24 @@ AppConfig load_config() {
     AppConfig cfg;
 
     std::string acecode_dir = get_acecode_dir();
-    std::string config_path = (fs::path(acecode_dir) / "config.json").string();
+    std::string config_path = path_to_utf8(path_from_utf8(acecode_dir) / "config.json");
 
     // Create directory and default config if missing
     std::error_code home_ec;
-    bool home_exists = fs::exists(acecode_dir, home_ec);
+    fs::path native_acecode_dir = path_from_utf8(acecode_dir);
+    fs::path native_config_path = path_from_utf8(config_path);
+    bool home_exists = fs::exists(native_acecode_dir, home_ec);
     if (home_ec) home_exists = false;
     if (!home_exists) {
-        fs::create_directories(acecode_dir);
+        fs::create_directories(native_acecode_dir);
         g_acecode_home_created_by_process.store(true);
     }
-    if (!fs::exists(config_path)) {
+    if (!fs::exists(native_config_path)) {
         write_default_config(config_path);
     }
 
     // Read config file
-    std::ifstream ifs(config_path);
+    std::ifstream ifs(native_config_path);
     if (ifs.is_open()) {
         try {
             nlohmann::json j = nlohmann::json::parse(ifs);
@@ -635,23 +638,24 @@ AppConfig load_config() {
     }
 
     // Environment variable overrides
-    if (const char* env = std::getenv("ACECODE_PROVIDER")) {
+    std::string env;
+    if (getenv_utf8("ACECODE_PROVIDER", env)) {
         cfg.provider = env;
     }
-    if (const char* env = std::getenv("ACECODE_OPENAI_BASE_URL")) {
+    if (getenv_utf8("ACECODE_OPENAI_BASE_URL", env)) {
         cfg.openai.base_url = env;
     }
-    if (const char* env = std::getenv("ACECODE_OPENAI_API_KEY")) {
+    if (getenv_utf8("ACECODE_OPENAI_API_KEY", env)) {
         cfg.openai.api_key = env;
     }
-    if (const char* env = std::getenv("ACECODE_MODEL")) {
+    if (getenv_utf8("ACECODE_MODEL", env)) {
         if (cfg.provider == "openai") {
             cfg.openai.model = env;
         } else {
             cfg.copilot.model = env;
         }
     }
-    if (const char* env = std::getenv("ACECODE_UPGRADE_BASE_URL")) {
+    if (getenv_utf8("ACECODE_UPGRADE_BASE_URL", env)) {
         cfg.upgrade.base_url = normalize_upgrade_base_url(env);
     }
 
@@ -930,21 +934,22 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
 
 void save_config(const AppConfig& cfg) {
     std::string acecode_dir = get_acecode_dir();
-    std::string config_path = (fs::path(acecode_dir) / "config.json").string();
+    std::string config_path = path_to_utf8(path_from_utf8(acecode_dir) / "config.json");
 
-    if (!fs::exists(acecode_dir)) {
-        fs::create_directories(acecode_dir);
+    fs::path native_acecode_dir = path_from_utf8(acecode_dir);
+    if (!fs::exists(native_acecode_dir)) {
+        fs::create_directories(native_acecode_dir);
     }
 
     auto j = build_config_json(cfg);
-    std::ofstream ofs(config_path);
+    std::ofstream ofs(path_from_utf8(config_path));
     if (ofs.is_open()) {
         ofs << j.dump(2) << std::endl;
     }
 }
 
 void save_config(const AppConfig& cfg, const std::string& explicit_path) {
-    fs::path p(explicit_path);
+    fs::path p = path_from_utf8(explicit_path);
     if (p.has_parent_path() && !fs::exists(p.parent_path())) {
         fs::create_directories(p.parent_path());
     }

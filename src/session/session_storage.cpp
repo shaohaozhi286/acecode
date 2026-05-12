@@ -3,6 +3,7 @@
 #include "../config/config.hpp"
 #include "../utils/atomic_file.hpp"
 #include "../utils/cwd_hash.hpp"
+#include "../utils/utf8_path.hpp"
 
 #include <nlohmann/json.hpp>
 #include <filesystem>
@@ -61,7 +62,7 @@ std::string SessionStorage::generate_session_id() {
 std::string SessionStorage::get_project_dir(const std::string& cwd) {
     std::string acecode_dir = get_acecode_dir();
     std::string hash = compute_project_hash(cwd);
-    return (fs::path(acecode_dir) / "projects" / hash).string();
+    return path_to_utf8(path_from_utf8(acecode_dir) / "projects" / hash);
 }
 
 void SessionStorage::append_message(const std::string& session_path, const ChatMessage& msg) {
@@ -72,9 +73,9 @@ void SessionStorage::append_message(const std::string& session_path, const ChatM
     std::lock_guard<std::mutex> lk(append_mu);
 
     std::error_code ec;
-    fs::create_directories(fs::path(session_path).parent_path(), ec);
+    fs::create_directories(path_from_utf8(session_path).parent_path(), ec);
 
-    std::ofstream ofs(session_path, std::ios::binary | std::ios::app);
+    std::ofstream ofs(path_from_utf8(session_path), std::ios::binary | std::ios::app);
     if (!ofs.is_open()) return;
     ofs.write(record.data(), static_cast<std::streamsize>(record.size()));
     ofs.flush();
@@ -83,7 +84,7 @@ void SessionStorage::append_message(const std::string& session_path, const ChatM
 void SessionStorage::write_messages(const std::string& session_path,
                                     const std::vector<ChatMessage>& messages) {
     std::error_code ec;
-    fs::create_directories(fs::path(session_path).parent_path(), ec);
+    fs::create_directories(path_from_utf8(session_path).parent_path(), ec);
 
     std::string content;
     for (const auto& msg : messages) {
@@ -95,7 +96,7 @@ void SessionStorage::write_messages(const std::string& session_path,
 
 std::vector<ChatMessage> SessionStorage::load_messages(const std::string& session_path) {
     std::vector<ChatMessage> messages;
-    std::ifstream ifs(session_path, std::ios::binary);
+    std::ifstream ifs(path_from_utf8(session_path), std::ios::binary);
     if (!ifs.is_open()) return messages;
 
     std::string content((std::istreambuf_iterator<char>(ifs)),
@@ -146,13 +147,13 @@ void SessionStorage::write_meta(const std::string& meta_path, const SessionMeta&
     }
 
     std::error_code ec;
-    fs::create_directories(fs::path(meta_path).parent_path(), ec);
+    fs::create_directories(path_from_utf8(meta_path).parent_path(), ec);
     atomic_write_file(meta_path, j.dump(2) + '\n');
 }
 
 SessionMeta SessionStorage::read_meta(const std::string& meta_path) {
     SessionMeta meta;
-    std::ifstream ifs(meta_path);
+    std::ifstream ifs(path_from_utf8(meta_path));
     if (!ifs.is_open()) return meta;
 
     try {
@@ -269,18 +270,19 @@ std::vector<SessionStorage::SessionFileCandidate>
 SessionStorage::find_session_files(const std::string& project_dir,
                                     const std::string& session_id) {
     std::vector<SessionFileCandidate> result;
-    if (session_id.empty() || !fs::exists(project_dir) || !fs::is_directory(project_dir)) {
+    fs::path project_path = path_from_utf8(project_dir);
+    if (session_id.empty() || !fs::exists(project_path) || !fs::is_directory(project_path)) {
         return result;
     }
 
-    const fs::path jsonl = SessionStorage::session_path(project_dir, session_id);
+    const fs::path jsonl = path_from_utf8(SessionStorage::session_path(project_dir, session_id));
     std::error_code ec;
     if (!fs::is_regular_file(jsonl, ec)) {
         return result;
     }
 
     SessionFileCandidate c;
-    c.jsonl_path = jsonl.string();
+    c.jsonl_path = path_to_utf8(jsonl);
     c.meta_path = SessionStorage::meta_path(project_dir, session_id);
     c.pid = 0;
     c.mtime = file_mtime_epoch(jsonl);
@@ -290,15 +292,16 @@ SessionStorage::find_session_files(const std::string& project_dir,
 
 bool SessionStorage::has_incompatible_pid_session_files(
     const std::string& project_dir, const std::string& session_id) {
-    if (!fs::exists(project_dir) || !fs::is_directory(project_dir)) {
+    fs::path project_path = path_from_utf8(project_dir);
+    if (!fs::exists(project_path) || !fs::is_directory(project_path)) {
         return false;
     }
 
     const auto& jsonl_re = pid_session_filename_regex();
     const auto& meta_re = pid_meta_filename_regex();
-    for (const auto& entry : fs::directory_iterator(project_dir)) {
+    for (const auto& entry : fs::directory_iterator(project_path)) {
         if (!entry.is_regular_file()) continue;
-        std::string fname = entry.path().filename().string();
+        std::string fname = path_to_utf8(entry.path().filename());
         std::smatch m;
         if (std::regex_match(fname, m, jsonl_re) ||
             std::regex_match(fname, m, meta_re)) {
@@ -312,19 +315,20 @@ bool SessionStorage::has_incompatible_pid_session_files(
 
 std::vector<SessionMeta> SessionStorage::list_sessions(const std::string& project_dir) {
     std::vector<SessionMeta> sessions;
-    if (!fs::exists(project_dir) || !fs::is_directory(project_dir)) {
+    fs::path project_path = path_from_utf8(project_dir);
+    if (!fs::exists(project_path) || !fs::is_directory(project_path)) {
         return sessions;
     }
 
     const auto& re = meta_filename_regex();
-    for (const auto& entry : fs::directory_iterator(project_dir)) {
+    for (const auto& entry : fs::directory_iterator(project_path)) {
         if (!entry.is_regular_file()) continue;
-        std::string fname = entry.path().filename().string();
+        std::string fname = path_to_utf8(entry.path().filename());
         std::smatch m;
         if (!std::regex_match(fname, m, re)) continue;
         std::string id = m[1].str();
 
-        SessionMeta meta = read_meta(entry.path().string());
+        SessionMeta meta = read_meta(path_to_utf8(entry.path()));
         if (meta.id.empty()) continue;
         enrich_meta_from_messages(project_dir, id, meta);
         sessions.push_back(std::move(meta));
@@ -347,7 +351,7 @@ static std::string make_session_path(const std::string& project_dir,
         fname += std::to_string(pid);
     }
     fname += suffix;
-    return (fs::path(project_dir) / fname).string();
+    return path_to_utf8(path_from_utf8(project_dir) / fname);
 }
 
 std::string SessionStorage::session_path(const std::string& project_dir,

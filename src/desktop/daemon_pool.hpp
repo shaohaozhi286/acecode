@@ -42,6 +42,7 @@ struct ActivateRequest {
     bool        dangerous = false;
     std::string static_dir;       // 非空 → daemon 走 FileSystem 静态资源(dev 热重载)
     std::string run_dir;          // 非空 → daemon 把 runtime files 写到这里(per-workspace 隔离 GUID 锁 / heartbeat / port / token)
+    bool        native_folder_picker_enabled = false; // desktop/webapp 内部:允许 shared daemon 打开 OS 目录选择器
 };
 
 struct ActivateResult {

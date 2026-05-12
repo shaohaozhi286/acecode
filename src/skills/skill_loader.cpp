@@ -1,7 +1,9 @@
 #include "skill_loader.hpp"
 
 #include "frontmatter.hpp"
+#include "../utils/encoding.hpp"
 #include "../utils/logger.hpp"
+#include "../utils/utf8_path.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -22,7 +24,7 @@ std::string read_frontmatter_chunk(const fs::path& path) {
     std::string buf(FRONTMATTER_READ_BUDGET, '\0');
     ifs.read(buf.data(), static_cast<std::streamsize>(FRONTMATTER_READ_BUDGET));
     buf.resize(static_cast<size_t>(ifs.gcount()));
-    return buf;
+    return ensure_utf8(buf);
 }
 
 std::string truncate(const std::string& s, size_t n) {
@@ -58,7 +60,7 @@ std::string derive_category(const fs::path& skill_dir, const fs::path& scan_root
     auto first = *it;
     ++it;
     if (it == rel.end()) return "";
-    return first.string();
+    return path_to_utf8(first);
 }
 
 } // namespace
@@ -129,7 +131,7 @@ std::optional<SkillMetadata> load_skill_from_dir(const fs::path& dir,
 
     std::string chunk = read_frontmatter_chunk(skill_md);
     if (chunk.empty()) {
-        LOG_WARN("[skills] Empty or unreadable SKILL.md: " + skill_md.string());
+        LOG_WARN("[skills] Empty or unreadable SKILL.md: " + path_to_utf8(skill_md));
         return std::nullopt;
     }
 
@@ -141,15 +143,15 @@ std::optional<SkillMetadata> load_skill_from_dir(const fs::path& dir,
 
     std::string fm_name = get_string(fm, "name");
     if (fm_name.empty()) {
-        meta.name = dir.filename().string();
-        LOG_WARN("[skills] " + skill_md.string() + " missing frontmatter 'name'; using dir name '" + meta.name + "'");
+        meta.name = path_to_utf8(dir.filename());
+        LOG_WARN("[skills] " + path_to_utf8(skill_md) + " missing frontmatter 'name'; using dir name '" + meta.name + "'");
     } else {
         meta.name = fm_name;
     }
 
     meta.command_key = normalize_skill_command_key(meta.name);
     if (meta.command_key.empty()) {
-        LOG_WARN("[skills] Skill name '" + meta.name + "' has no usable command slug; skipping " + skill_md.string());
+        LOG_WARN("[skills] Skill name '" + meta.name + "' has no usable command slug; skipping " + path_to_utf8(skill_md));
         return std::nullopt;
     }
 

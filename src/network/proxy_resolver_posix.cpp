@@ -9,6 +9,7 @@
 #if !_WIN32
 
 #include "proxy_resolver.hpp"
+#include "../utils/encoding.hpp"
 
 #include <cstdlib>
 #include <cstring>
@@ -31,9 +32,9 @@ std::string scheme_of_url(const std::string& url) {
 struct EnvHit { std::string value; std::string name; };
 std::optional<EnvHit> first_env(std::initializer_list<const char*> names) {
     for (const char* n : names) {
-        const char* v = std::getenv(n);
-        if (v && *v) {
-            return EnvHit{std::string(v), std::string(n)};
+        std::string v = getenv_utf8(n);
+        if (!v.empty()) {
+            return EnvHit{v, std::string(n)};
         }
     }
     return std::nullopt;
@@ -56,8 +57,8 @@ ResolvedProxy auto_detect(const NetworkConfig& /*cfg*/, const std::string& targe
     }
 
     for (const char* n : ordered) {
-        const char* v = std::getenv(n);
-        if (v && *v) {
+        std::string v = getenv_utf8(n);
+        if (!v.empty()) {
             std::string norm = normalize_proxy_url(v);
             if (!norm.empty()) {
                 return {norm, std::string("env:") + n};

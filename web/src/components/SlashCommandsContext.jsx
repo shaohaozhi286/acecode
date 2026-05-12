@@ -5,7 +5,7 @@
 
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api.js';
-import { flattenCommands } from '../lib/slashCommands.js';
+import { commandsWithFallback, fallbackCommands } from '../lib/slashCommands.js';
 
 const SlashCommandsContext = createContext({
   commands: [],
@@ -15,7 +15,7 @@ const SlashCommandsContext = createContext({
 });
 
 export function SlashCommandsProvider({ workspaceHash = '', children }) {
-  const [commands, setCommands] = useState([]);
+  const [commands, setCommands] = useState(() => fallbackCommands());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const reqIdRef = useRef(0);
@@ -26,10 +26,11 @@ export function SlashCommandsProvider({ workspaceHash = '', children }) {
     try {
       const payload = await api.listCommands(workspaceHash);
       if (reqId !== reqIdRef.current) return;
-      setCommands(flattenCommands(payload));
+      setCommands(commandsWithFallback(payload));
       setError(null);
     } catch (e) {
       if (reqId !== reqIdRef.current) return;
+      setCommands(fallbackCommands());
       setError(e);
     } finally {
       if (reqId === reqIdRef.current) setLoading(false);

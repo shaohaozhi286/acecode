@@ -39,6 +39,8 @@
 // 给 acecode_testable 加 PUBLIC 的 ASIO_STANDALONE,所以这里直接 include 即可。
 #include <crow.h>
 
+#include "../utils/utf8_path.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -277,7 +279,7 @@ struct WebServer::Impl {
 
     std::string projects_dir() const {
         if (!deps.projects_dir.empty()) return deps.projects_dir;
-        return (std::filesystem::path(get_acecode_dir()) / "projects").string();
+        return path_to_utf8(path_from_utf8(get_acecode_dir()) / "projects");
     }
 
     acecode::desktop::WorkspaceMeta compatibility_workspace() const {
@@ -399,7 +401,7 @@ struct WebServer::Impl {
     }
 
     std::filesystem::path pinned_sessions_path_for_cwd(const std::string& cwd) const {
-        return std::filesystem::path(SessionStorage::get_project_dir(cwd)) /
+        return path_from_utf8(SessionStorage::get_project_dir(cwd)) /
                "pinned_sessions.json";
     }
 
@@ -434,8 +436,8 @@ struct WebServer::Impl {
     }
 
     std::string attention_store_path_for_cwd(const std::string& cwd) const {
-        return (std::filesystem::path(SessionStorage::get_project_dir(cwd)) /
-                "session_read_state.json").string();
+        return path_to_utf8(path_from_utf8(SessionStorage::get_project_dir(cwd)) /
+                            "session_read_state.json");
     }
 
     void load_attention_workspace_locked(const std::string& workspace_hash,
@@ -445,7 +447,7 @@ struct WebServer::Impl {
         if (loaded_attention_workspaces.count(workspace_hash)) return;
         loaded_attention_workspaces.insert(workspace_hash);
 
-        std::ifstream in(attention_store_path_for_cwd(cwd));
+        std::ifstream in(path_from_utf8(attention_store_path_for_cwd(cwd)));
         if (!in) return;
         try {
             json root = json::parse(in, nullptr, true, true);
@@ -483,10 +485,11 @@ struct WebServer::Impl {
             }
         }
 
-        const auto path = std::filesystem::path(attention_store_path_for_cwd(cwd_it->second));
+        const auto path = path_from_utf8(attention_store_path_for_cwd(cwd_it->second));
         std::error_code ec;
         std::filesystem::create_directories(path.parent_path(), ec);
-        const auto tmp = path.string() + ".tmp";
+        auto tmp = path;
+        tmp += ".tmp";
         {
             std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
             if (!out) return;
@@ -767,6 +770,10 @@ struct WebServer::Impl {
         ([this](const crow::request& req) {
             return cors_preflight(req);
         });
+        CROW_ROUTE(app, "/api/workspaces/pick-folder").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
         CROW_ROUTE(app, "/api/workspaces/<string>/sessions").methods(crow::HTTPMethod::Options)
         ([this](const crow::request& req, const std::string&) {
             return cors_preflight(req);
@@ -825,6 +832,46 @@ struct WebServer::Impl {
             auto m = deps.workspace_registry->register_new(projects_dir(), cwd);
             LOG_INFO("[web] workspace registered hash=" + m.hash + " cwd=" + m.cwd);
             crow::response r(201);
+            r.body = workspace_to_json(m).dump();
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        });
+
+        CROW_ROUTE(app, "/api/workspaces/pick-folder").methods(crow::HTTPMethod::POST)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.native_folder_picker_enabled) {
+                crow::response r(501);
+                r.body = R"({"error":"native folder picker unavailable"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            if (!deps.workspace_registry) {
+                crow::response r(503);
+                r.body = R"({"error":"workspace registry unavailable"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            if (!deps.native_folder_picker) {
+                crow::response r(503);
+                r.body = R"({"error":"native folder picker callback unavailable"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            auto picked = deps.native_folder_picker();
+            if (!picked || picked->empty()) {
+                crow::response r(200);
+                r.body = "null";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            std::string cwd = *picked;
+            for (auto& c : cwd) {
+                if (c == '\\') c = '/';
+            }
+            auto m = deps.workspace_registry->register_new(projects_dir(), cwd);
+            LOG_INFO("[web] native folder picker registered workspace hash=" + m.hash + " cwd=" + m.cwd);
+            crow::response r(200);
             r.body = workspace_to_json(m).dump();
             r.add_header("Content-Type", "application/json");
             return with_cors(req, std::move(r));
@@ -1248,7 +1295,7 @@ struct WebServer::Impl {
             std::filesystem::path abs_cwd =
                 std::holds_alternative<std::filesystem::path>(abs_cwd_v)
                     ? std::get<std::filesystem::path>(abs_cwd_v)
-                    : std::filesystem::path(cwd_q);
+                    : path_from_utf8(cwd_q);
 
             auto listed = list_directory(abs_target, abs_cwd, show_hidden);
             if (std::holds_alternative<FileError>(listed)) {
@@ -2321,12 +2368,6 @@ struct WebServer::Impl {
         CROW_ROUTE(app, "/api/commands").methods(crow::HTTPMethod::GET)
         ([this](const crow::request& req) {
             if (auto rej = require_auth(req)) return std::move(*rej);
-            if (!deps.skill_registry) {
-                crow::response r(503);
-                r.body = R"({"error":"skill registry unavailable"})";
-                r.add_header("Content-Type", "application/json");
-                return with_cors(req, std::move(r));
-            }
             std::optional<std::string> workspace_cwd;
             const char* workspace_q = req.url_params.get("workspace");
             if (workspace_q && *workspace_q) {
@@ -2334,9 +2375,9 @@ struct WebServer::Impl {
                     if (!m->cwd.empty()) workspace_cwd = m->cwd;
                 }
             }
-            auto payload = build_commands_payload(*deps.skill_registry,
-                                                    workspace_cwd,
-                                                    deps.app_config);
+            SkillRegistry empty_registry;
+            const auto& registry = deps.skill_registry ? *deps.skill_registry : empty_registry;
+            auto payload = build_commands_payload(registry, workspace_cwd, deps.app_config);
             crow::response r(payload.dump());
             r.add_header("Content-Type", "application/json");
             return with_cors(req, std::move(r));

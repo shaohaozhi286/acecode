@@ -3,6 +3,7 @@
 #include "atomic_file.hpp"
 #include "logger.hpp"
 #include "paths.hpp"
+#include "utf8_path.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -26,7 +27,7 @@ std::string& test_path_override() {
 std::string state_file_path() {
     const auto& override_path = test_path_override();
     if (!override_path.empty()) return override_path;
-    return (fs::path(resolve_data_dir(get_run_mode())) / "state.json").string();
+    return path_to_utf8(path_from_utf8(resolve_data_dir(get_run_mode())) / "state.json");
 }
 
 // 加载现有 state.json:解析失败 / 文件不存在 → 返回空 object。
@@ -36,10 +37,11 @@ nlohmann::json load_state_or_empty(bool* is_corrupted = nullptr) {
 
     std::string p = state_file_path();
     std::error_code ec;
-    if (!fs::exists(p, ec) || ec) {
+    auto path = path_from_utf8(p);
+    if (!fs::exists(path, ec) || ec) {
         return nlohmann::json::object();
     }
-    std::ifstream ifs(p);
+    std::ifstream ifs(path);
     if (!ifs.is_open()) {
         return nlohmann::json::object();
     }
@@ -83,7 +85,7 @@ void write_state_flag(const std::string& key, bool value) {
 
     std::string p = state_file_path();
     std::error_code ec;
-    fs::create_directories(fs::path(p).parent_path(), ec);
+    fs::create_directories(path_from_utf8(p).parent_path(), ec);
     // 目录创建失败不致命 — atomic_write_file 失败时再处理。
 
     if (!atomic_write_file(p, j.dump(2))) {
@@ -108,7 +110,7 @@ void write_state_value(const std::string& key, const nlohmann::json& value) {
 
     std::string p = state_file_path();
     std::error_code ec;
-    fs::create_directories(fs::path(p).parent_path(), ec);
+    fs::create_directories(path_from_utf8(p).parent_path(), ec);
 
     if (!atomic_write_file(p, j.dump(2))) {
         LOG_WARN("[state_file] failed to write " + p);
@@ -126,7 +128,7 @@ void erase_state_key(const std::string& key) {
 
     std::string p = state_file_path();
     std::error_code ec;
-    fs::create_directories(fs::path(p).parent_path(), ec);
+    fs::create_directories(path_from_utf8(p).parent_path(), ec);
 
     if (!atomic_write_file(p, j.dump(2))) {
         LOG_WARN("[state_file] failed to write " + p);

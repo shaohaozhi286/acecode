@@ -1,6 +1,8 @@
 #include "paths.hpp"
 
+#include "encoding.hpp"
 #include "logger.hpp"
+#include "utf8_path.hpp"
 
 #include <atomic>
 #include <cstdlib>
@@ -28,8 +30,8 @@ std::string expand_path(const std::string& raw) {
                 continue;
             }
             std::string var_name = raw.substr(i + 2, end - (i + 2));
-            const char* val = std::getenv(var_name.c_str());
-            if (val) {
+            std::string val = getenv_utf8(var_name.c_str());
+            if (!val.empty()) {
                 result.append(val);
             } else {
                 result.append(raw, i, end + 1 - i); // leave ${VAR} untouched
@@ -42,12 +44,12 @@ std::string expand_path(const std::string& raw) {
 
     if (!result.empty() && result.front() == '~') {
 #ifdef _WIN32
-        const char* home = std::getenv("USERPROFILE");
+        std::string home = getenv_utf8("USERPROFILE");
 #else
-        const char* home = std::getenv("HOME");
+        std::string home = getenv_utf8("HOME");
 #endif
-        if (home && *home) {
-            result = std::string(home) + result.substr(1);
+        if (!home.empty()) {
+            result = home + result.substr(1);
         }
     }
 
@@ -60,19 +62,19 @@ std::vector<std::string> get_project_dirs_up_to_home(const std::string& cwd) {
     if (cwd.empty()) return dirs;
 
     std::error_code ec;
-    fs::path abs = fs::absolute(fs::path(cwd), ec).lexically_normal();
-    if (ec || abs.empty()) abs = fs::path(cwd).lexically_normal();
+    fs::path abs = fs::absolute(path_from_utf8(cwd), ec).lexically_normal();
+    if (ec || abs.empty()) abs = path_from_utf8(cwd).lexically_normal();
 
     fs::path home_path;
 #ifdef _WIN32
-    const char* home_env = std::getenv("USERPROFILE");
+    std::string home_env = getenv_utf8("USERPROFILE");
 #else
-    const char* home_env = std::getenv("HOME");
+    std::string home_env = getenv_utf8("HOME");
 #endif
-    if (home_env && *home_env) {
+    if (!home_env.empty()) {
         std::error_code hec;
-        home_path = fs::absolute(fs::path(home_env), hec).lexically_normal();
-        if (hec) home_path = fs::path(home_env).lexically_normal();
+        home_path = fs::absolute(path_from_utf8(home_env), hec).lexically_normal();
+        if (hec) home_path = path_from_utf8(home_env).lexically_normal();
     }
 
     // Walk up from cwd; stop at/above HOME (the user-global root is added
@@ -80,7 +82,7 @@ std::vector<std::string> get_project_dirs_up_to_home(const std::string& cwd) {
     fs::path cur = abs;
     while (true) {
         if (!home_path.empty() && cur == home_path) break;
-        dirs.push_back(cur.string());
+        dirs.push_back(path_to_utf8(cur));
         fs::path parent = cur.parent_path();
         if (parent == cur) break;
         cur = parent;
@@ -125,34 +127,34 @@ std::string resolve_data_dir(RunMode mode) {
 
 #if defined(_WIN32)
     if (mode == RunMode::Service) {
-        const char* progdata = std::getenv("PROGRAMDATA");
-        std::string base = progdata ? progdata : "C:\\ProgramData";
-        return (fs::path(base) / "acecode").string();
+        std::string base = getenv_utf8("PROGRAMDATA");
+        if (base.empty()) base = "C:\\ProgramData";
+        return path_to_utf8(path_from_utf8(base) / "acecode");
     }
     // RunMode::User — 与历史 get_acecode_dir() 行为完全一致
-    if (const char* userprofile = std::getenv("USERPROFILE")) {
-        return (fs::path(userprofile) / ".acecode").string();
+    if (std::string userprofile = getenv_utf8("USERPROFILE"); !userprofile.empty()) {
+        return path_to_utf8(path_from_utf8(userprofile) / ".acecode");
     }
-    const char* drive = std::getenv("HOMEDRIVE");
-    const char* path  = std::getenv("HOMEPATH");
-    if (drive && path) {
-        return (fs::path(std::string(drive) + path) / ".acecode").string();
+    std::string drive = getenv_utf8("HOMEDRIVE");
+    std::string path  = getenv_utf8("HOMEPATH");
+    if (!drive.empty() && !path.empty()) {
+        return path_to_utf8(path_from_utf8(drive + path) / ".acecode");
     }
-    return (fs::path(".") / ".acecode").string();
+    return path_to_utf8(path_from_utf8(".") / ".acecode");
 
 #elif defined(__APPLE__)
     if (mode == RunMode::Service) {
         return "/Library/Application Support/acecode";
     }
-    const char* home = std::getenv("HOME");
-    return (fs::path(home ? home : ".") / ".acecode").string();
+    std::string home = getenv_utf8("HOME");
+    return path_to_utf8(path_from_utf8(home.empty() ? "." : home) / ".acecode");
 
 #else // Linux 或其他 POSIX
     if (mode == RunMode::Service) {
         return "/var/lib/acecode";
     }
-    const char* home = std::getenv("HOME");
-    return (fs::path(home ? home : ".") / ".acecode").string();
+    std::string home = getenv_utf8("HOME");
+    return path_to_utf8(path_from_utf8(home.empty() ? "." : home) / ".acecode");
 #endif
 }
 

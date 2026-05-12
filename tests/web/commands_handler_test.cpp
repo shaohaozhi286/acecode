@@ -14,6 +14,7 @@
 
 #include "config/config.hpp"
 #include "skills/skill_registry.hpp"
+#include "utils/encoding.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -211,4 +212,28 @@ TEST_F(CommandsHandlerTest, EmptyWorkspaceCwdTreatedAsAbsent) {
         global, std::optional<std::string>{std::string{}}, &cfg);
 
     EXPECT_FALSE(payload.contains("skills"));
+}
+
+// 场景:本机/global skill 的 frontmatter 可能来自非 UTF-8 文件。命令 API
+// 不能因为 description 中有坏字节就在 JSON dump 时 500。
+TEST_F(CommandsHandlerTest, InvalidUtf8SkillDescriptionIsSanitized) {
+    fs::path dir = tmp_root / ".agent" / "skills" / "general" / "bad-encoding";
+    fs::create_directories(dir);
+    std::ofstream ofs(dir / "SKILL.md", std::ios::binary);
+    ofs << "---\n"
+        << "name: bad-encoding\n"
+        << "description: ";
+    ofs.put(static_cast<char>(0xff));
+    ofs << "\n---\n\n# bad-encoding\n";
+    ofs.close();
+
+    acecode::SkillRegistry global;
+    acecode::AppConfig cfg;
+    auto payload = acecode::web::build_commands_payload(
+        global, std::optional<std::string>{tmp_root.string()}, &cfg);
+
+    auto desc = find_skill_desc(payload, "bad-encoding");
+    ASSERT_TRUE(desc.has_value());
+    EXPECT_TRUE(acecode::is_valid_utf8(*desc));
+    EXPECT_NO_THROW((void)payload.dump());
 }

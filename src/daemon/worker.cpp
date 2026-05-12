@@ -1,5 +1,6 @@
 #include "worker.hpp"
 
+#include "../desktop/folder_picker.hpp"
 #include "../desktop/workspace_registry.hpp"
 #include "guid.hpp"
 #include "heartbeat.hpp"
@@ -32,6 +33,7 @@
 #include "../utils/logger.hpp"
 #include "../utils/paths.hpp"
 #include "../utils/token.hpp"
+#include "../utils/utf8_path.hpp"
 #include "../web/auth.hpp"
 #include "../web/server.hpp"
 
@@ -63,14 +65,6 @@ namespace {
 std::mutex              g_term_mu;
 std::condition_variable g_term_cv;
 std::atomic<bool>       g_term_requested{false};
-
-std::string path_to_utf8(const std::filesystem::path& p) {
-#ifdef _WIN32
-    return p.u8string();
-#else
-    return p.string();
-#endif
-}
 
 void request_terminate() {
     g_term_requested.store(true);
@@ -111,7 +105,7 @@ bool apply_cwd_override(const std::string& raw, bool foreground) {
 
     namespace fs = std::filesystem;
 
-    fs::path requested = fs::path(acecode::expand_path(raw));
+    fs::path requested = acecode::path_from_utf8(acecode::expand_path(raw));
     std::error_code ec;
     fs::path effective = requested.is_absolute()
         ? requested
@@ -125,7 +119,7 @@ bool apply_cwd_override(const std::string& raw, bool foreground) {
 
     std::error_code dir_ec;
     if (!fs::exists(effective, dir_ec) || !fs::is_directory(effective, dir_ec)) {
-        std::string msg = "[daemon] --cwd path is not a directory: " + path_to_utf8(effective);
+        std::string msg = "[daemon] --cwd path is not a directory: " + acecode::path_to_utf8(effective);
         LOG_ERROR(msg);
         if (foreground) std::cerr << msg << "\n";
         return false;
@@ -133,14 +127,14 @@ bool apply_cwd_override(const std::string& raw, bool foreground) {
 
     fs::current_path(effective, dir_ec);
     if (dir_ec) {
-        std::string msg = "[daemon] failed to switch --cwd to " + path_to_utf8(effective)
+        std::string msg = "[daemon] failed to switch --cwd to " + acecode::path_to_utf8(effective)
             + ": " + dir_ec.message();
         LOG_ERROR(msg);
         if (foreground) std::cerr << msg << "\n";
         return false;
     }
 
-    std::string msg = "[daemon] cwd=" + path_to_utf8(fs::current_path())
+    std::string msg = "[daemon] cwd=" + acecode::path_to_utf8(fs::current_path())
         + " (from --cwd=" + raw + ")";
     LOG_INFO(msg);
     if (foreground) std::cerr << msg << "\n";
@@ -285,9 +279,9 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     //   - PermissionManager (template,SessionRegistry 给每个 session 复制 mode)
     //   - SessionRegistry + LocalSessionClient
     //   - WebServer (HTTP + WebSocket)
-    std::string cwd = path_to_utf8(std::filesystem::current_path());
+    std::string cwd = acecode::current_path_utf8();
     std::string projects_dir =
-        (std::filesystem::path(acecode::get_acecode_dir()) / "projects").string();
+        acecode::path_to_utf8(acecode::path_from_utf8(acecode::get_acecode_dir()) / "projects");
     acecode::desktop::ensure_workspace_metadata(projects_dir, cwd);
     acecode::desktop::WorkspaceRegistry workspace_registry;
     workspace_registry.scan(projects_dir);
@@ -377,7 +371,7 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     web_deps.daemon_cfg         = &cfg_mut.daemon;
     web_deps.app_config         = &cfg_mut;
     web_deps.config_path        =
-        (std::filesystem::path(acecode::get_acecode_dir()) / "config.json").string();
+        acecode::path_to_utf8(acecode::path_from_utf8(acecode::get_acecode_dir()) / "config.json");
     web_deps.cwd                = cwd;
     web_deps.projects_dir       = projects_dir;
     web_deps.token              = token;
@@ -387,6 +381,12 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     web_deps.session_client     = &client;
     web_deps.session_registry   = &registry;
     web_deps.workspace_registry = &workspace_registry;
+    web_deps.native_folder_picker_enabled = opts.native_folder_picker_enabled;
+    if (opts.native_folder_picker_enabled) {
+        web_deps.native_folder_picker = [] {
+            return acecode::desktop::pick_folder(nullptr);
+        };
+    }
     web_deps.skill_registry     = &skill_registry;
     web_deps.provider           = &provider;
     web_deps.provider_mu        = &provider_mu;

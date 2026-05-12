@@ -1,6 +1,7 @@
 #include "github_auth.hpp"
 #include "../config/config.hpp"
 #include "../network/proxy_resolver.hpp"
+#include "../utils/utf8_path.hpp"
 
 #include <cpr/cpr.h>
 #include <cpr/ssl_options.h>
@@ -165,10 +166,11 @@ CopilotToken exchange_copilot_token(const std::string& github_token) {
 
 void save_github_token(const std::string& token) {
     std::string dir = get_acecode_dir();
-    if (!fs::exists(dir)) {
-        fs::create_directories(dir);
+    fs::path native_dir = path_from_utf8(dir);
+    if (!fs::exists(native_dir)) {
+        fs::create_directories(native_dir);
     }
-    std::string path = (fs::path(dir) / "github_token").string();
+    fs::path path = native_dir / "github_token";
     std::ofstream ofs(path);
     if (ofs.is_open()) {
         ofs << token;
@@ -176,7 +178,7 @@ void save_github_token(const std::string& token) {
 }
 
 std::string load_github_token() {
-    std::string path = (fs::path(get_acecode_dir()) / "github_token").string();
+    fs::path path = path_from_utf8(get_acecode_dir()) / "github_token";
     if (!fs::exists(path)) {
         return "";
     }

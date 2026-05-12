@@ -11,6 +11,7 @@
 #include "../provider/provider_factory.hpp"
 #include "../utils/logger.hpp"
 #include "../utils/cwd_hash.hpp"
+#include "../utils/utf8_path.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -365,7 +366,7 @@ BuiltinCommandResult SessionRegistry::execute_builtin_command(
         return {BuiltinCommandStatus::Accepted, "queued"};
     }
 
-    const std::filesystem::path cwd = std::filesystem::path(entry->cwd);
+    const std::filesystem::path cwd = path_from_utf8(entry->cwd);
     const std::filesystem::path target = cwd / "ACECODE.md";
 
     bool provider_usable = false;
@@ -377,7 +378,7 @@ BuiltinCommandResult SessionRegistry::execute_builtin_command(
         std::error_code ec;
         if (std::filesystem::exists(target, ec)) {
             entry->loop->emit_system_message(
-                "ACECODE.md already exists at " + target.generic_string() +
+                "ACECODE.md already exists at " + path_to_utf8_generic(target) +
                 " - no model is configured, so /init cannot propose improvements. "
                 "Edit it by hand, or run /configure first and re-run /init to get "
                 "an LLM-driven improvement pass.");
@@ -387,12 +388,12 @@ BuiltinCommandResult SessionRegistry::execute_builtin_command(
         std::ofstream ofs(target, std::ios::binary);
         if (!ofs.is_open()) {
             entry->loop->emit_system_message(
-                "Failed to open " + target.generic_string() + " for writing.");
+                "Failed to open " + path_to_utf8_generic(target) + " for writing.");
             return {BuiltinCommandStatus::Failed, "failed to open ACECODE.md for writing"};
         }
         ofs << build_acecode_md_skeleton(cwd);
         entry->loop->emit_system_message(
-            "Created " + target.generic_string() +
+            "Created " + path_to_utf8_generic(target) +
             " (offline skeleton - no model is configured, run /configure to get "
             "a filled-in version).");
         return {BuiltinCommandStatus::Accepted, "completed"};

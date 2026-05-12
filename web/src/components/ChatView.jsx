@@ -18,13 +18,12 @@ import { QuestionPicker } from './QuestionPicker.jsx';
 import { StickyUserContext } from './StickyUserContext.jsx';
 import { SidePanel } from './SidePanel.jsx';
 import { StatusBar } from './StatusBar.jsx';
-import { ChangeConversationCard, ChangeGlassDock } from './ChangeReview.jsx';
+import { ChangeGlassDock } from './ChangeReview.jsx';
 import { toast } from './Toast.jsx';
 import { clsx } from '../lib/format.js';
 import {
   aggregateHunksFromMessages,
   changeGroupsSignature,
-  collectTurnChangeSetsFromItems,
   collectHunkMessagesFromItems,
   summarizeChangeGroups,
 } from '../lib/sessionChanges.js';
@@ -42,6 +41,7 @@ import {
 } from '../lib/chatInputQueue.js';
 import { findStickyUserContext, sameStickyUserContext } from '../lib/stickyUserContext.js';
 import { useSessionTranscript } from '../lib/sessionTranscript.js';
+import { projectCollapsedTranscriptItems } from '../lib/transcriptProjection.js';
 import { usePreference } from '../lib/usePreference.js';
 import { maybeNotify } from '../lib/desktopNotify.js';
 import { normalizeTokenBudget } from '../lib/tokenBudget.js';
@@ -125,6 +125,46 @@ function ActivityIndicator({ activity }) {
           ))}
         </div>
       </div>
+    </div>
+  );
+}
+
+function ActivitySummaryBlock({ item, expanded, onToggle }) {
+  const count = Array.isArray(item?.collapsedItems) ? item.collapsedItems.length : 0;
+  return (
+    <div className="rounded-md border border-border bg-surface-hi text-fg my-0.5 overflow-hidden">
+      <button
+        type="button"
+        className="w-full px-2.5 py-1.5 flex items-center gap-2 text-left hover:bg-surface transition"
+        onClick={onToggle}
+        title={expanded ? '收起详情' : '展开详情'}
+        aria-label={expanded ? '收起详情' : '展开详情'}
+      >
+        <VsIcon name="run" size={13} className="text-fg-mute shrink-0" />
+        <span className="text-[12px] font-medium flex-1 min-w-0 truncate">{item?.title || '已处理'}</span>
+        {count > 0 && (
+          <span className="text-[10px] text-fg-mute shrink-0 tabular-nums">{count} 项</span>
+        )}
+        <span className="opacity-60 flex items-center shrink-0">
+          <VsIcon name={expanded ? 'expandUp' : 'expandDown'} size={12} />
+        </span>
+      </button>
+    </div>
+  );
+}
+
+function CompletionSummaryBlock({ item }) {
+  return (
+    <div className="max-w-[88%] ml-8 px-1 py-0.5 text-[12px] leading-5 italic text-fg-mute whitespace-pre-wrap break-words">
+      {item?.title || '总结：已完成'}
+    </div>
+  );
+}
+
+function TerminationNoticeBlock({ item }) {
+  return (
+    <div className="max-w-[88%] ml-8 px-1 py-0.5 text-[12px] leading-5 text-danger whitespace-pre-wrap break-words">
+      {item?.content || '任务已终止'}
     </div>
   );
 }
@@ -267,8 +307,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     {},
     validateDockDismissals,
   );
-  const [revertingChangeKeys, setRevertingChangeKeys] = useState(() => new Set());
-  const [restoredChangeKeys, setRestoredChangeKeys] = useState(() => new Set());
+  const [expandedActivityKeys, setExpandedActivityKeys] = useState(() => new Set());
   const scrollRef = useRef(null);
   const inputRef = useRef(null);
   const layoutRef = useRef(null);
@@ -279,7 +318,11 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   // 排队消息从 transcript 中分离出来,只喂给 InputBar 上方的 QueueCardList。
   // transcript 只渲染后端真实落库的消息,避免把"草稿/未发送"和"已发送"混在一起。
   const visibleQueuedItems = useMemo(() => buildQueuedMessageItems(queueState, sid), [queueState, sid]);
-  const renderedItems = useMemo(() => items, [items]);
+  const rawItems = items;
+  const renderedItems = useMemo(
+    () => projectCollapsedTranscriptItems(rawItems, { deferTrailingToolSummary: busy }),
+    [rawItems, busy],
+  );
   // 决定每条 assistant 消息是否需要显示头像 + ACECode 名牌:同一 run 中只首条显示,
   // 空内容(且非 streaming)直接隐藏整行。详见 lib/assistantRunDirectives.js。
   const assistantRunDirectives = useMemo(
@@ -672,7 +715,15 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     if (changed) updateQueueState(nextState);
   }, [items, sid, updateQueueState]);
 
-  const abort = useCallback(() => connection.sendAbort(sid), [sid]);
+  const abort = useCallback(() => {
+    if (!sid) return;
+    applyEvent({
+      type: 'turn_aborted',
+      payload: { reason: '用户已终止本轮任务' },
+      timestamp_ms: Date.now(),
+    }, { emitEffects: false });
+    connection.sendAbort(sid);
+  }, [applyEvent, sid]);
 
   const switchSessionModel = useCallback(async (name) => {
     const nextName = String(name || '');
@@ -812,24 +863,22 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     [changeDockDismissalKey, dismissedDockSignatures],
   );
   const fileTreeRefreshKey = useMemo(() => fileTreeRefreshKeyFromItems(items), [items]);
-  const turnChangeSets = useMemo(() => collectTurnChangeSetsFromItems(items), [items]);
-  const changeSetByAfterItemId = useMemo(() => {
-    const map = new Map();
-    for (const changeSet of turnChangeSets) {
-      if (changeSet.afterItemId !== undefined && changeSet.afterItemId !== null) {
-        map.set(changeSet.afterItemId, changeSet);
-      }
-    }
-    return map;
-  }, [turnChangeSets]);
   const showChangeDock = changeSummary.hasChanges
     && !!changeSignature
     && dismissedDockSignature !== changeSignature;
 
   useEffect(() => {
-    setRevertingChangeKeys(new Set());
-    setRestoredChangeKeys(new Set());
+    setExpandedActivityKeys(new Set());
   }, [sid]);
+
+  const toggleActivitySummary = useCallback((key) => {
+    setExpandedActivityKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
 
   const openReviewPanel = useCallback(() => {
     if (!showSidePanel || !sid) return;
@@ -849,33 +898,6 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
       changeSignature,
     ));
   }, [changeDockDismissalKey, changeSignature, setDismissedDockSignatures]);
-
-  const restoreChangeSet = useCallback(async (changeSet) => {
-    if (!sid || !changeSet?.userMessageId) {
-      toast({ kind: 'err', text: '撤销失败:此轮没有可用 checkpoint' });
-      return;
-    }
-    if (busy) {
-      toast({ kind: 'err', text: '当前会话仍在运行，结束后再撤销文件改动' });
-      return;
-    }
-    const key = changeSet.key;
-    setRevertingChangeKeys((prev) => new Set(prev).add(key));
-    try {
-      const result = await api.restoreSessionCheckpoint(sid, changeSet.userMessageId);
-      setRestoredChangeKeys((prev) => new Set(prev).add(key));
-      const changed = Array.isArray(result?.files_changed) ? result.files_changed.length : 0;
-      toast({ kind: 'ok', text: changed > 0 ? `已撤销 ${changed} 个文件改动` : '没有文件需要撤销' });
-    } catch (e) {
-      toast({ kind: 'err', text: '撤销失败:' + (e?.body?.error || e?.message || '') });
-    } finally {
-      setRevertingChangeKeys((prev) => {
-        const next = new Set(prev);
-        next.delete(key);
-        return next;
-      });
-    }
-  }, [api, busy, sid]);
 
   const questionForView = useMemo(() => {
     if (!questionRequest) return null;
@@ -1030,25 +1052,99 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
           className="h-full overflow-y-auto px-3.5 py-3 flex flex-col gap-3"
         >
           {renderedItems.map((it) => {
-            const changeSet = changeSetByAfterItemId.get(it.id);
+            if (it.kind === 'termination_notice') {
+              return (
+                <div
+                  key={it.id}
+                  className="ace-chat-row flex flex-col"
+                  data-chat-row="true"
+                  data-chat-item-id={String(it.id)}
+                  data-chat-kind={it.kind || ''}
+                  data-chat-role="termination_notice"
+                >
+                  <TerminationNoticeBlock item={it} />
+                </div>
+              );
+            }
+
+            if (it.kind === 'completion_summary') {
+              return (
+                <div
+                  key={it.id}
+                  className="ace-chat-row flex flex-col"
+                  data-chat-row="true"
+                  data-chat-item-id={String(it.id)}
+                  data-chat-kind={it.kind || ''}
+                  data-chat-role="completion_summary"
+                >
+                  <CompletionSummaryBlock item={it} />
+                </div>
+              );
+            }
+
+            if (it.kind === 'activity_summary') {
+              const expanded = expandedActivityKeys.has(it.id);
+              const hiddenDirectives = expanded
+                ? buildAssistantRunDirectives(it.collapsedItems || [])
+                : new Map();
+              return (
+                <Fragment key={it.id}>
+                  <div
+                    className="ace-chat-row flex flex-col"
+                    data-chat-row="true"
+                    data-chat-item-id={String(it.id)}
+                    data-chat-kind={it.kind || ''}
+                    data-chat-role="activity_summary"
+                  >
+                    <ActivitySummaryBlock
+                      item={it}
+                      expanded={expanded}
+                      onToggle={() => toggleActivitySummary(it.id)}
+                    />
+                    {expanded && (
+                      <div className="mt-1 ml-4 pl-3 border-l border-border/70 flex flex-col gap-2">
+                        {(it.collapsedItems || []).map((child) => {
+                          const childDirective = child.kind === 'msg' && child.role === 'assistant'
+                            ? hiddenDirectives.get(child.id)
+                            : undefined;
+                          if (childDirective?.hide) return null;
+                          const childContinuation = childDirective ? childDirective.showHeader === false : false;
+                          return (
+                            <div
+                              key={`activity-hidden-${child.id}`}
+                              className="flex flex-col"
+                              data-chat-kind={child.kind || ''}
+                              data-chat-role={child.kind === 'msg' ? (child.role || '') : (child.kind || '')}
+                            >
+                              {child.kind === 'tool' ? (
+                                <ToolBlock entry={child.tool} />
+                              ) : (
+                                <Message
+                                  role={child.role}
+                                  content={child.content}
+                                  ts={child.ts}
+                                  streaming={child.streaming}
+                                  messageId={child.messageId}
+                                  metadata={child.metadata}
+                                  onFork={forkAndSwitch}
+                                  continuation={childContinuation}
+                                />
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                </Fragment>
+              );
+            }
             const directive = it.kind === 'msg' && it.role === 'assistant'
               ? assistantRunDirectives.get(it.id)
               : undefined;
-            // 空内容 + 非 streaming 的 assistant 行整体隐藏(只剩 changeSet 卡片);
-            // afterItemId 永远落在 user/tool 行上,不会丢 change card 锚点。
+            // 空内容 + 非 streaming 的 assistant 行整体隐藏。
             if (directive?.hide) {
-              return changeSet ? (
-                <ChangeConversationCard
-                  key={it.id}
-                  groups={changeSet.groups}
-                  summary={changeSet.summary}
-                  title={changeSet.title}
-                  onReview={openReviewPanel}
-                  onRevert={changeSet.userMessageId ? () => restoreChangeSet(changeSet) : undefined}
-                  reverting={revertingChangeKeys.has(changeSet.key)}
-                  restored={restoredChangeKeys.has(changeSet.key)}
-                />
-              ) : null;
+              return null;
             }
             const continuation = directive ? directive.showHeader === false : false;
             return (
@@ -1075,17 +1171,6 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
                     />
                   )}
                 </div>
-                {changeSet && (
-                  <ChangeConversationCard
-                    groups={changeSet.groups}
-                    summary={changeSet.summary}
-                    title={changeSet.title}
-                    onReview={openReviewPanel}
-                    onRevert={changeSet.userMessageId ? () => restoreChangeSet(changeSet) : undefined}
-                    reverting={revertingChangeKeys.has(changeSet.key)}
-                    restored={restoredChangeKeys.has(changeSet.key)}
-                  />
-                )}
               </Fragment>
             );
           })}

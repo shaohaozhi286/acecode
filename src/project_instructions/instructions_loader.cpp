@@ -1,6 +1,8 @@
 #include "instructions_loader.hpp"
 
+#include "../utils/encoding.hpp"
 #include "../utils/logger.hpp"
+#include "../utils/utf8_path.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -35,13 +37,13 @@ std::string read_file_capped(const fs::path& path, std::size_t max_bytes,
     if (static_cast<std::size_t>(read_n) > max_bytes) {
         per_file_truncated = true;
         content.resize(max_bytes);
-        LOG_WARN("[project_instructions] file " + path.generic_string() +
+        LOG_WARN("[project_instructions] file " + path_to_utf8_generic(path) +
                  " exceeded per-file cap " + std::to_string(max_bytes) +
                  " bytes; truncated");
-        return content;
+        return ensure_utf8(content);
     }
     content.resize(static_cast<std::size_t>(read_n));
-    return content;
+    return ensure_utf8(content);
 }
 
 // Compute effective filenames list by intersecting cfg.filenames with the
@@ -82,7 +84,7 @@ fs::path canonicalish_path(const fs::path& path) {
 }
 
 std::string comparable_path_key(const fs::path& path) {
-    std::string key = canonicalish_path(path).generic_string();
+    std::string key = path_to_utf8_generic(canonicalish_path(path));
 #ifdef _WIN32
     std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) {
         return static_cast<char>(std::tolower(c));
@@ -104,12 +106,12 @@ std::vector<fs::path> walk_cwd_chain(const fs::path& cwd, int max_depth) {
 
     fs::path home_path;
 #ifdef _WIN32
-    const char* home_env = std::getenv("USERPROFILE");
+    std::string home_env = getenv_utf8("USERPROFILE");
 #else
-    const char* home_env = std::getenv("HOME");
+    std::string home_env = getenv_utf8("HOME");
 #endif
-    if (home_env && *home_env) {
-        home_path = canonicalish_path(fs::path(home_env));
+    if (!home_env.empty()) {
+        home_path = canonicalish_path(path_from_utf8(home_env));
     }
 
     fs::path abs = canonicalish_path(cwd);
@@ -139,14 +141,12 @@ std::vector<fs::path> walk_cwd_chain(const fs::path& cwd, int max_depth) {
 fs::path get_acecode_home_dir() {
     std::string home;
 #ifdef _WIN32
-    const char* up = std::getenv("USERPROFILE");
-    if (up) home = up;
+    home = getenv_utf8("USERPROFILE");
 #else
-    const char* h = std::getenv("HOME");
-    if (h) home = h;
+    home = getenv_utf8("HOME");
 #endif
     if (home.empty()) home = ".";
-    return fs::path(home) / ".acecode";
+    return path_from_utf8(home) / ".acecode";
 }
 
 } // namespace
@@ -166,7 +166,7 @@ MergedInstructions load_project_instructions(const std::string& cwd,
     if (!global_file.empty()) files_to_load.push_back(global_file);
 
     // Step 2: project chain (outer-first)
-    std::vector<fs::path> chain = walk_cwd_chain(fs::path(cwd), cfg.max_depth);
+    std::vector<fs::path> chain = walk_cwd_chain(path_from_utf8(cwd), cfg.max_depth);
     for (const auto& dir : chain) {
         fs::path picked = pick_file_in_dir(dir, filenames);
         if (!picked.empty()) files_to_load.push_back(picked);
@@ -182,7 +182,7 @@ MergedInstructions load_project_instructions(const std::string& cwd,
             body << "\n[... project instructions truncated at aggregate cap]\n";
             result.truncated = true;
             LOG_WARN("[project_instructions] aggregate cap hit before reading " +
-                     path.generic_string());
+                     path_to_utf8_generic(path));
             break;
         }
         std::size_t per_cap = std::min<std::size_t>(cfg.max_bytes, remaining);
@@ -191,7 +191,7 @@ MergedInstructions load_project_instructions(const std::string& cwd,
         if (content.empty()) continue;
 
         // File header so the LLM knows which file contributed each section.
-        body << "\n## Source: " << path.generic_string() << "\n\n";
+        body << "\n## Source: " << path_to_utf8_generic(path) << "\n\n";
         body << content;
         if (content.empty() || content.back() != '\n') body << "\n";
         if (file_trunc) {

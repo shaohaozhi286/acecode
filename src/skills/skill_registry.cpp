@@ -2,7 +2,9 @@
 
 #include "frontmatter.hpp"
 #include "skill_loader.hpp"
+#include "../utils/encoding.hpp"
 #include "../utils/logger.hpp"
+#include "../utils/utf8_path.hpp"
 
 #include <algorithm>
 #include <array>
@@ -20,7 +22,7 @@ const std::array<std::string, 3> kExcludedDirs = {".git", ".github", ".hub"};
 
 bool is_excluded_segment(const fs::path& path) {
     for (const auto& part : path) {
-        std::string s = part.string();
+        std::string s = path_to_utf8(part);
         for (const auto& ex : kExcludedDirs) {
             if (s == ex) return true;
         }
@@ -61,7 +63,7 @@ void SkillRegistry::scan() {
              it.increment(ec)) {
             if (ec) { ec.clear(); continue; }
             if (it->is_directory()) {
-                std::string name = it->path().filename().string();
+                std::string name = path_to_utf8(it->path().filename());
                 for (const auto& ex : kExcludedDirs) {
                     if (name == ex) { it.disable_recursion_pending(); break; }
                 }
@@ -120,7 +122,7 @@ std::string SkillRegistry::read_skill_body(const std::string& name) const {
     if (!ifs.is_open()) return "";
     std::ostringstream oss;
     oss << ifs.rdbuf();
-    auto [fm, body] = parse_frontmatter(oss.str());
+    auto [fm, body] = parse_frontmatter(ensure_utf8(oss.str()));
     (void)fm;
     return body;
 }
@@ -143,7 +145,7 @@ std::vector<std::string> SkillRegistry::list_supporting_files(const std::string&
             std::error_code rec;
             auto rel = fs::relative(it->path(), meta->skill_dir, rec);
             if (rec) continue;
-            bucket.push_back(rel.generic_string());
+            bucket.push_back(path_to_utf8_generic(rel));
         }
         std::sort(bucket.begin(), bucket.end());
         for (auto& s : bucket) out.push_back(std::move(s));
@@ -160,7 +162,7 @@ std::optional<fs::path> SkillRegistry::resolve_skill_file(
     // Reject explicit traversal tokens before hitting the filesystem.
     if (relative_path.find("..") != std::string::npos) return std::nullopt;
 
-    fs::path target = meta->skill_dir / relative_path;
+    fs::path target = meta->skill_dir / path_from_utf8(relative_path);
     std::error_code ec;
     fs::path resolved = fs::weakly_canonical(target, ec);
     if (ec) resolved = target;
@@ -168,8 +170,8 @@ std::optional<fs::path> SkillRegistry::resolve_skill_file(
     if (ec) root = meta->skill_dir;
 
     // Ensure the resolved path stays under the skill directory.
-    auto root_str = root.generic_string();
-    auto res_str = resolved.generic_string();
+    auto root_str = path_to_utf8_generic(root);
+    auto res_str = path_to_utf8_generic(resolved);
     if (res_str.size() < root_str.size()) return std::nullopt;
     if (res_str.compare(0, root_str.size(), root_str) != 0) return std::nullopt;
     if (res_str.size() > root_str.size() && res_str[root_str.size()] != '/') {

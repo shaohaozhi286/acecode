@@ -32,3 +32,4 @@ import './modelPicker.test.js';
 import './modelManager.test.js';
 import './fileTreeRefresh.test.js';
 import './assistantRunDirectives.test.js';
+import './transcriptProjection.test.js';

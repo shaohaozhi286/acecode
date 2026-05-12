@@ -475,7 +475,9 @@ export function Sidebar({ activeId, onSelect, collapsed, width = 200, onOpenHome
     setActiveWorkspaceHash(ws.hash);
     updateExpanded((prev) => new Set(prev).add(ws.hash));
     if (!hasDesktopBridge()) {
+      setWorkspaces((prev) => prev.map((item) => ({ ...item, active: item.hash === ws.hash })));
       onOpenHome?.(ws);
+      refresh(ws.hash).catch(() => {});
       return;
     }
     try {
@@ -659,18 +661,23 @@ export function Sidebar({ activeId, onSelect, collapsed, width = 200, onOpenHome
   };
 
   const onAddWorkspace = async () => {
-    if (!hasDesktopBridge()) {
-      toast({ kind: 'info', text: '需在 desktop shell 中使用' });
-      return;
-    }
     try {
-      const ws = parseDesktopResult(await window.aceDesktop_addWorkspace());
+      const ws = hasDesktopBridge()
+        ? parseDesktopResult(await window.aceDesktop_addWorkspace())
+        : await api.pickWorkspaceFolder();
       if (ws == null) return;
       if (!ws || !ws.hash) return;
-      try { await api.registerWorkspace(ws.cwd); } catch { /* daemon 可能已入册;忽略 */ }
-      onActivate(ws);
+      if (hasDesktopBridge()) {
+        try { await api.registerWorkspace(ws.cwd); } catch { /* daemon 可能已入册;忽略 */ }
+      }
+      await refresh(ws.hash);
+      await onActivate(ws);
     } catch (e) {
-      toast({ kind: 'err', text: '添加项目失败:' + (e.message || '') });
+      if (!hasDesktopBridge() && (e.status === 404 || e.status === 501)) {
+        toast({ kind: 'info', text: '需在 desktop webapp 中使用' });
+      } else {
+        toast({ kind: 'err', text: '添加项目失败:' + (e.message || '') });
+      }
     }
   };
 

@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include "session/session_storage.hpp"
+#include "utils/utf8_path.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -251,4 +252,29 @@ TEST(SessionStorage, ComputeProjectHashIsCaseAndSlashInsensitive) {
     const std::string a = SessionStorage::compute_project_hash("C:/Users/Shao/ace");
     const std::string b = SessionStorage::compute_project_hash("c:\\users\\shao\\ace");
     EXPECT_EQ(a, b);
+}
+
+TEST(SessionStorage, MetaRoundtripsThroughUtf8ProjectDirectory) {
+    auto root = make_unique_tmp_dir("utf8-project");
+    auto dir = root / acecode::path_from_utf8(u8"会话目录");
+    fs::create_directories(dir);
+    std::string project_dir = acecode::path_to_utf8(dir);
+    const std::string sid = "20260512-120000-abcd";
+
+    SessionMeta in;
+    in.id = sid;
+    in.cwd = project_dir;
+    in.summary = u8"中文摘要";
+
+    std::string meta_path = SessionStorage::meta_path(project_dir, sid);
+    SessionStorage::write_meta(meta_path, in);
+
+    ASSERT_TRUE(fs::exists(acecode::path_from_utf8(meta_path)));
+    SessionMeta out = SessionStorage::read_meta(meta_path);
+    EXPECT_EQ(out.cwd, project_dir);
+    EXPECT_EQ(out.summary, u8"中文摘要");
+
+    auto sessions = SessionStorage::list_sessions(project_dir);
+    ASSERT_EQ(sessions.size(), 1u);
+    EXPECT_EQ(sessions[0].summary, u8"中文摘要");
 }

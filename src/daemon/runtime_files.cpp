@@ -4,6 +4,7 @@
 #include "../utils/atomic_file.hpp"
 #include "../utils/constants.hpp"
 #include "../utils/logger.hpp"
+#include "../utils/utf8_path.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -17,16 +18,16 @@ namespace acecode::daemon {
 std::string ensure_run_dir() {
     std::string dir = acecode::get_run_dir();
     std::error_code ec;
-    fs::create_directories(dir, ec);
+    fs::create_directories(path_from_utf8(dir), ec);
     return dir;
 }
 
 static std::string run_path(const char* fname) {
-    return (fs::path(acecode::get_run_dir()) / fname).string();
+    return path_to_utf8(path_from_utf8(acecode::get_run_dir()) / fname);
 }
 
 static std::optional<std::string> read_text(const std::string& path) {
-    std::ifstream ifs(path, std::ios::binary);
+    std::ifstream ifs(path_from_utf8(path), std::ios::binary);
     if (!ifs.is_open()) return std::nullopt;
     std::string s((std::istreambuf_iterator<char>(ifs)),
                    std::istreambuf_iterator<char>());
@@ -95,10 +96,10 @@ std::optional<std::string> read_token() {
 
 void cleanup_runtime_files() {
     std::error_code ec;
-    fs::remove(run_path(constants::RUN_FILE_PID), ec);
-    fs::remove(run_path(constants::RUN_FILE_PORT), ec);
-    fs::remove(run_path(constants::RUN_FILE_HEARTBEAT), ec);
-    fs::remove(run_path(constants::RUN_FILE_TOKEN), ec);
+    fs::remove(path_from_utf8(run_path(constants::RUN_FILE_PID)), ec);
+    fs::remove(path_from_utf8(run_path(constants::RUN_FILE_PORT)), ec);
+    fs::remove(path_from_utf8(run_path(constants::RUN_FILE_HEARTBEAT)), ec);
+    fs::remove(path_from_utf8(run_path(constants::RUN_FILE_TOKEN)), ec);
     // guid 故意保留: 事后追溯用
 }
 

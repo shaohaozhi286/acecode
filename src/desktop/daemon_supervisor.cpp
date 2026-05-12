@@ -181,6 +181,7 @@ std::vector<std::string> build_posix_argv(const SpawnRequest& req) {
     if (req.dangerous) argv.push_back("-dangerous");
     if (!req.static_dir.empty()) argv.push_back("--static-dir=" + req.static_dir);
     if (!req.run_dir.empty()) argv.push_back("--run-dir=" + req.run_dir);
+    if (req.native_folder_picker_enabled) argv.push_back("--native-folder-picker");
     return argv;
 }
 
@@ -286,6 +287,7 @@ SpawnResult DaemonSupervisor::spawn(const SpawnRequest& req) {
     argv.push_back(L"--port=" + std::to_wstring(req.port));
     argv.push_back(L"--token=" + acecode::utf8_to_wide(req.token));
     if (req.dangerous) argv.push_back(L"-dangerous");
+    if (req.native_folder_picker_enabled) argv.push_back(L"--native-folder-picker");
     if (!req.static_dir.empty()) {
         std::wstring static_dir_w = acecode::utf8_to_wide(req.static_dir);
         if (static_dir_w.empty()) {

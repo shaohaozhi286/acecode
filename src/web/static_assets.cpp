@@ -1,6 +1,7 @@
 #include "static_assets.hpp"
 
 #include "../utils/logger.hpp"
+#include "../utils/utf8_path.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -67,16 +68,16 @@ std::optional<AssetLookupResult> EmbeddedAssetSource::lookup(const std::string& 
 }
 
 std::optional<AssetLookupResult> FileSystemAssetSource::lookup(const std::string& path) const {
-    fs::path full = fs::path(root_) / path;
+    fs::path full = path_from_utf8(root_) / path_from_utf8(path);
 
     // 安全:确保 full 在 root_ 之下(防 ".." 穿越)。weakly_canonical 可能解析失败,
     // 用 lexically_normal 也行。
     std::error_code ec;
     auto canon = fs::weakly_canonical(full, ec);
     if (ec) return std::nullopt;
-    auto root_canon = fs::weakly_canonical(fs::path(root_), ec);
+    auto root_canon = fs::weakly_canonical(path_from_utf8(root_), ec);
     if (ec) return std::nullopt;
-    auto rel = canon.lexically_relative(root_canon).generic_string();
+    auto rel = path_to_utf8_generic(canon.lexically_relative(root_canon));
     if (rel.rfind("..", 0) == 0) return std::nullopt; // 越界
 
     if (!fs::exists(canon, ec) || !fs::is_regular_file(canon, ec)) return std::nullopt;
@@ -98,7 +99,7 @@ std::unique_ptr<AssetSource> make_asset_source(const std::string& static_dir) {
     if (static_dir.empty()) {
         return std::make_unique<EmbeddedAssetSource>();
     }
-    if (!fs::exists(static_dir)) {
+    if (!fs::exists(path_from_utf8(static_dir))) {
         throw std::runtime_error("web.static_dir path does not exist: " + static_dir);
     }
     LOG_INFO("[web] using FileSystem asset source: " + static_dir);

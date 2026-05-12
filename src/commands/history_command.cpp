@@ -4,6 +4,7 @@
 
 #include "history/input_history_store.hpp"
 #include "session/session_storage.hpp"
+#include "utils/utf8_path.hpp"
 
 #include <chrono>
 #include <filesystem>
@@ -26,9 +27,8 @@ std::string trim(const std::string& s) {
 }
 
 std::string history_file_path_for_cwd() {
-    std::error_code ec;
-    std::string cwd = std::filesystem::current_path(ec).string();
-    if (ec) cwd = ".";
+    std::string cwd = current_path_utf8();
+    if (cwd.empty()) cwd = ".";
     return InputHistoryStore::file_path(SessionStorage::get_project_dir(cwd));
 }
 

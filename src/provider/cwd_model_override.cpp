@@ -3,6 +3,7 @@
 
 #include "../session/session_storage.hpp"
 #include "../utils/logger.hpp"
+#include "../utils/utf8_path.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -13,17 +14,17 @@ namespace fs = std::filesystem;
 namespace acecode {
 
 std::string cwd_model_override_path(const fs::path& cwd) {
-    std::string project_dir = SessionStorage::get_project_dir(cwd.string());
-    return (fs::path(project_dir) / "model_override.json").string();
+    std::string project_dir = SessionStorage::get_project_dir(path_to_utf8(cwd));
+    return path_to_utf8(path_from_utf8(project_dir) / "model_override.json");
 }
 
 std::optional<std::string> load_cwd_model_override(const fs::path& cwd) {
     std::string path = cwd_model_override_path(cwd);
     std::error_code ec;
-    if (!fs::exists(path, ec) || ec) return std::nullopt;
+    if (!fs::exists(path_from_utf8(path), ec) || ec) return std::nullopt;
 
     try {
-        std::ifstream ifs(path);
+        std::ifstream ifs(path_from_utf8(path));
         if (!ifs.is_open()) {
             LOG_WARN(std::string("[cwd_model_override] cannot open ") + path);
             return std::nullopt;
@@ -47,7 +48,7 @@ void save_cwd_model_override(const fs::path& cwd, const std::string& name) {
     std::string tmp = path + ".tmp";
 
     try {
-        fs::path p(path);
+        fs::path p = path_from_utf8(path);
         std::error_code ec;
         if (p.has_parent_path()) {
             fs::create_directories(p.parent_path(), ec);
@@ -58,7 +59,7 @@ void save_cwd_model_override(const fs::path& cwd, const std::string& name) {
         }
 
         {
-            std::ofstream ofs(tmp, std::ios::binary | std::ios::trunc);
+            std::ofstream ofs(path_from_utf8(tmp), std::ios::binary | std::ios::trunc);
             if (!ofs.is_open()) {
                 LOG_ERROR(std::string("[cwd_model_override] cannot open tmp: ") + tmp);
                 return;
@@ -69,28 +70,28 @@ void save_cwd_model_override(const fs::path& cwd, const std::string& name) {
         }
 
         ec.clear();
-        fs::rename(tmp, path, ec);
+        fs::rename(path_from_utf8(tmp), path_from_utf8(path), ec);
         if (ec) {
             // Windows: rename 到已存在文件会失败,回退 remove + rename。
-            fs::remove(path, ec);
+            fs::remove(path_from_utf8(path), ec);
             ec.clear();
-            fs::rename(tmp, path, ec);
+            fs::rename(path_from_utf8(tmp), path_from_utf8(path), ec);
             if (ec) {
                 LOG_ERROR(std::string("[cwd_model_override] rename failed: ") + ec.message());
-                fs::remove(tmp, ec);  // 别遗留 .tmp
+                fs::remove(path_from_utf8(tmp), ec);  // 别遗留 .tmp
             }
         }
     } catch (const std::exception& e) {
         LOG_ERROR(std::string("[cwd_model_override] save exception: ") + e.what());
         std::error_code ec;
-        fs::remove(tmp, ec);
+        fs::remove(path_from_utf8(tmp), ec);
     }
 }
 
 void remove_cwd_model_override(const fs::path& cwd) {
     std::string path = cwd_model_override_path(cwd);
     std::error_code ec;
-    fs::remove(path, ec);
+    fs::remove(path_from_utf8(path), ec);
     if (ec) {
         LOG_WARN(std::string("[cwd_model_override] remove failed: ") + ec.message());
     }

@@ -1,6 +1,7 @@
 #include "configure_catalog.hpp"
 
 #include "configure_picker.hpp"
+#include "../utils/encoding.hpp"
 #include "../utils/terminal_input.hpp"
 
 #include <algorithm>
@@ -25,13 +26,13 @@ bool contains_ci(const std::string& haystack, const std::string& needle) {
 }
 
 std::string env_get_ci(const std::string& name) {
-    if (const char* v = std::getenv(name.c_str())) return v;
+    if (std::string v = getenv_utf8(name.c_str()); !v.empty()) return v;
 #ifdef _WIN32
-    if (const char* v = std::getenv(lower(name).c_str())) return v;
+    if (std::string v = getenv_utf8(lower(name).c_str()); !v.empty()) return v;
     std::string upper = name;
     std::transform(upper.begin(), upper.end(), upper.begin(),
                    [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
-    if (const char* v = std::getenv(upper.c_str())) return v;
+    if (std::string v = getenv_utf8(upper.c_str()); !v.empty()) return v;
 #endif
     return {};
 }

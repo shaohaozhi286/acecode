@@ -3,6 +3,7 @@
 #include "../memory/memory_registry.hpp"
 #include "../memory/memory_types.hpp"
 #include "../utils/logger.hpp"
+#include "../utils/utf8_path.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -62,7 +63,7 @@ ToolImpl create_memory_read_tool(MemoryRegistry& registry,
             out["description"] = found->description;
             out["type"] = memory_type_to_string(found->type);
             out["body"] = found->body;
-            out["path"] = found->path.generic_string();
+            out["path"] = path_to_utf8_generic(found->path);
             return ToolResult{out.dump(), true};
         }
 

@@ -1,6 +1,7 @@
 #include "memory_paths.hpp"
 
 #include "../config/config.hpp"
+#include "../utils/utf8_path.hpp"
 
 #include <algorithm>
 
@@ -9,7 +10,7 @@ namespace fs = std::filesystem;
 namespace acecode {
 
 fs::path get_memory_dir() {
-    return fs::path(get_acecode_dir()) / "memory";
+    return path_from_utf8(get_acecode_dir()) / "memory";
 }
 
 fs::path get_memory_index_path() {
@@ -57,8 +58,8 @@ bool is_within_memory_dir(const fs::path& path) {
     // Compare as generic (forward-slash) strings case-insensitively on Windows,
     // case-sensitively elsewhere. A simple lexical prefix check is enough here
     // because weakly_canonical has already resolved .. and symlinks.
-    std::string target_s = canonical_target.generic_string();
-    std::string memory_s = canonical_memory.generic_string();
+    std::string target_s = path_to_utf8_generic(canonical_target);
+    std::string memory_s = path_to_utf8_generic(canonical_memory);
     while (!memory_s.empty() && memory_s.back() == '/') memory_s.pop_back();
 
 #ifdef _WIN32

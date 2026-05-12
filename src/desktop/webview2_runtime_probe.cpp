@@ -3,6 +3,7 @@
 #include "webview2_runtime_probe.hpp"
 
 #include "../utils/logger.hpp"
+#include "../utils/utf8_path.hpp"
 
 #include <array>
 #include <cstdint>
@@ -84,7 +85,7 @@ pick_latest_in_application_dir(const fs::path& application_dir) {
         std::error_code ec_entry;
         if (!entry.is_directory(ec_entry) || ec_entry) continue;
 
-        const std::string name = entry.path().filename().string();
+        const std::string name = acecode::path_to_utf8(entry.path().filename());
         auto parsed = parse_version_4(name);
         if (!parsed.has_value()) continue;
 

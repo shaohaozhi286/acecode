@@ -72,6 +72,7 @@ export function createApi(base = null) {
     health:           ()             => request('GET',    '/api/health', undefined, base),
     listWorkspaces:   ()             => request('GET',    '/api/workspaces', undefined, base),
     registerWorkspace:(cwd)          => request('POST',   '/api/workspaces', {cwd}, base),
+    pickWorkspaceFolder:()           => request('POST',   '/api/workspaces/pick-folder', undefined, base),
     listSessions:     ()             => request('GET',    '/api/sessions', undefined, base),
     createSession:    (opts={})      => request('POST',   '/api/sessions', opts, base),
     resumeSession:    (id)           => request('POST',   `/api/sessions/${encodeURIComponent(id)}/resume`, {}, base),

@@ -11,12 +11,19 @@
 // 所有方法必须在主线程上调(WebHost::run 之前 bind 安全)。
 
 #include <functional>
+#include <stdexcept>
 #include <string>
 
 namespace acecode::desktop {
 
 inline constexpr int kDefaultDesktopWindowWidth = 1280;
 inline constexpr int kDefaultDesktopWindowHeight = 820;
+
+class WebHostInitializationError : public std::runtime_error {
+public:
+    explicit WebHostInitializationError(const std::string& message)
+        : std::runtime_error(message) {}
+};
 
 class WebHost {
 public:

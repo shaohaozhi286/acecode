@@ -9,6 +9,7 @@
 #if _WIN32
 
 #include "proxy_resolver.hpp"
+#include "../utils/encoding.hpp"
 #include "../utils/logger.hpp"
 
 #define WIN32_LEAN_AND_MEAN
@@ -137,8 +138,8 @@ std::optional<std::pair<std::string, std::string>> try_env(const std::string& ta
                    "HTTPS_PROXY", "https_proxy"};
     }
     for (const char* n : ordered) {
-        const char* v = std::getenv(n);
-        if (v && *v) {
+        std::string v = getenv_utf8(n);
+        if (!v.empty()) {
             std::string norm = normalize_proxy_url(v);
             if (!norm.empty()) {
                 return std::make_pair(norm, std::string("env:") + n);

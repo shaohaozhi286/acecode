@@ -97,6 +97,7 @@ ActivateResult DaemonPool::activate(const ActivateRequest& req,
         sreq.cwd = req.cwd;            // CreateProcess 用 lpCurrentDirectory 直接落地
         sreq.static_dir = req.static_dir;
         sreq.run_dir = req.run_dir;
+        sreq.native_folder_picker_enabled = req.native_folder_picker_enabled;
         auto sr = slot->sup->spawn(sreq);
         if (!sr.ok) {
             err = sr.error;

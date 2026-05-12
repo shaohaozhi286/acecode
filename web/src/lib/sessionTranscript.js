@@ -68,6 +68,38 @@ function eventTs(msg) {
   return msg?.timestamp_ms || msg?.ts || Date.now();
 }
 
+function terminationNoticeText(payload = {}) {
+  const source = payload.source || '';
+  const reason = String(payload.reason || payload.message || '').trim();
+  if (source === 'user') return reason || '用户已终止本轮任务';
+  return reason ? `任务已终止：${reason}` : '任务已终止';
+}
+
+function isAbortLikeReason(reason) {
+  return /abort|cancel|interrupt|terminat|用户.*终止|已终止|取消|中断/i.test(String(reason || ''));
+}
+
+function appendTerminationNotice(next, msg, payload = {}) {
+  const text = terminationNoticeText(payload);
+  const last = next.items[next.items.length - 1];
+  if (last?.kind === 'termination_notice') {
+    if (last.content === text) return;
+    if (last.source === 'user' && payload.source !== 'user' && isAbortLikeReason(payload.reason || payload.message)) {
+      return;
+    }
+  }
+  next.items = [
+    ...next.items,
+    {
+      kind: 'termination_notice',
+      id: allocateItemId(next),
+      source: payload.source || 'server',
+      content: text,
+      ts: eventTs(msg),
+    },
+  ];
+}
+
 function normalizeSummaryMetrics(metrics) {
   if (!Array.isArray(metrics)) return [];
   return metrics
@@ -431,7 +463,16 @@ export function reduceTranscriptEvent(state, msg) {
       next.status = 'error';
       next.error = p.reason || '';
       next.activity = null;
+      finalizeStreaming(next);
+      appendTerminationNotice(next, msg, { ...p, source: p.source || 'server' });
       effects.push({ type: 'error', payload: p });
+      break;
+    case 'turn_aborted':
+      next.busy = false;
+      next.status = 'idle';
+      next.activity = null;
+      finalizeStreaming(next);
+      appendTerminationNotice(next, msg, { ...p, source: 'user' });
       break;
     case 'permission_request':
       effects.push({ type: 'permission_request', payload: p });

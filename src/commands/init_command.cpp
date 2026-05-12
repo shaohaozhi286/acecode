@@ -1,6 +1,7 @@
 #include "init_command.hpp"
 
 #include "../config/config.hpp"
+#include "../utils/utf8_path.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -143,7 +144,7 @@ std::string migration_suffix(bool claude_exists, bool agent_exists) {
 }
 
 void cmd_init(CommandContext& ctx, const std::string& /*args*/) {
-    fs::path cwd = fs::path(ctx.agent_loop.cwd());
+    fs::path cwd = path_from_utf8(ctx.agent_loop.cwd());
     std::error_code ec;
     bool acecode_exists = fs::exists(cwd / "ACECODE.md", ec);
 
@@ -154,7 +155,7 @@ void cmd_init(CommandContext& ctx, const std::string& /*args*/) {
         fs::path target = cwd / "ACECODE.md";
         if (acecode_exists) {
             emit(ctx,
-                 "ACECODE.md already exists at " + target.generic_string() +
+                 "ACECODE.md already exists at " + path_to_utf8_generic(target) +
                  " — no model is configured, so /init cannot propose "
                  "improvements. Edit it by hand, or run /configure first and "
                  "re-run /init to get an LLM-driven improvement pass.");
@@ -164,13 +165,13 @@ void cmd_init(CommandContext& ctx, const std::string& /*args*/) {
         std::ofstream ofs(target, std::ios::binary);
         if (!ofs.is_open()) {
             emit(ctx,
-                 "Failed to open " + target.generic_string() +
+                 "Failed to open " + path_to_utf8_generic(target) +
                  " for writing.");
             return;
         }
         ofs << build_acecode_md_skeleton(cwd);
         emit(ctx,
-             "Created " + target.generic_string() +
+             "Created " + path_to_utf8_generic(target) +
              " (offline skeleton — no model is configured, run /configure to "
              "get a filled-in version).");
         return;

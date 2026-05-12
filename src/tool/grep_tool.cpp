@@ -1,5 +1,7 @@
 #include "grep_tool.hpp"
 #include "ignore_utils.hpp"
+#include "utils/encoding.hpp"
+#include "utils/utf8_path.hpp"
 #include <nlohmann/json.hpp>
 #include <filesystem>
 #include <fstream>
@@ -45,10 +47,11 @@ static ToolResult execute_grep(const std::string& arguments_json, const ToolCont
     }
 
     if (search_path.empty()) {
-        search_path = ctx.cwd.empty() ? std::filesystem::current_path().string() : ctx.cwd;
+        search_path = ctx.cwd.empty() ? current_path_utf8() : ctx.cwd;
     }
 
-    if (!std::filesystem::is_directory(search_path)) {
+    const auto search_root = path_from_utf8(search_path);
+    if (!std::filesystem::is_directory(search_root)) {
         return ToolResult{"[Error] Path is not a directory: " + search_path, false};
     }
 
@@ -65,7 +68,7 @@ static ToolResult execute_grep(const std::string& arguments_json, const ToolCont
 
     std::error_code ec;
     for (auto it = std::filesystem::recursive_directory_iterator(
-             search_path,
+             search_root,
              std::filesystem::directory_options::skip_permission_denied,
              ec);
          it != std::filesystem::recursive_directory_iterator(); ++it)
@@ -73,7 +76,7 @@ static ToolResult execute_grep(const std::string& arguments_json, const ToolCont
         if (ec) { ec.clear(); continue; }
 
         if (it->is_directory()) {
-            if (should_ignore_dir(it->path().filename().string())) {
+            if (should_ignore_dir(path_to_utf8(it->path().filename()))) {
                 it.disable_recursion_pending();
                 continue;
             }
@@ -84,7 +87,7 @@ static ToolResult execute_grep(const std::string& arguments_json, const ToolCont
 
         // Check include pattern
         if (!include_pattern.empty() &&
-            !filename_matches(it->path().filename().string(), include_pattern)) {
+            !filename_matches(path_to_utf8(it->path().filename()), include_pattern)) {
             continue;
         }
 
@@ -100,10 +103,10 @@ static ToolResult execute_grep(const std::string& arguments_json, const ToolCont
             line_num++;
             if (std::regex_search(line, re)) {
                 // Use relative path for cleaner output
-                auto rel = std::filesystem::relative(it->path(), search_path, ec);
-                std::string display_path = ec ? it->path().string() : rel.string();
+                auto rel = std::filesystem::relative(it->path(), search_root, ec);
+                std::string display_path = ec ? path_to_utf8(it->path()) : path_to_utf8_generic(rel);
 
-                results << display_path << ":" << line_num << ":" << line << "\n";
+                results << display_path << ":" << line_num << ":" << ensure_utf8(line) << "\n";
                 match_count++;
 
                 if (match_count >= MAX_RESULTS) {

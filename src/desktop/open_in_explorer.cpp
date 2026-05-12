@@ -1,6 +1,6 @@
 #include "open_in_explorer.hpp"
 
-#include "../utils/encoding.hpp"
+#include "../utils/utf8_path.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -13,8 +13,8 @@
 #  ifndef NOMINMAX
 #    define NOMINMAX
 #  endif
-#  include <shellapi.h>
 #  include <windows.h>
+#  include <shellapi.h>
 #else
 #  include <cstdlib>
 #  include <unistd.h>
@@ -25,18 +25,10 @@ namespace fs = std::filesystem;
 namespace acecode::desktop {
 namespace {
 
-fs::path path_from_utf8(const std::string& text) {
-#ifdef _WIN32
-    return fs::path(acecode::utf8_to_wide(text));
-#else
-    return fs::path(text);
-#endif
-}
-
 std::string compare_key(fs::path path) {
     std::error_code ec;
     path = path.lexically_normal();
-    std::string value = path.generic_string();
+    std::string value = acecode::path_to_utf8_generic(path);
     while (value.size() > 1 && value.back() == '/') value.pop_back();
 #ifdef _WIN32
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
@@ -63,7 +55,7 @@ bool is_under_allowed_root(const fs::path& canonical_path,
     for (const auto& root_text : allowed_roots_utf8) {
         if (root_text.empty()) continue;
         std::error_code ec;
-        auto root = fs::weakly_canonical(path_from_utf8(root_text), ec);
+        auto root = fs::weakly_canonical(acecode::path_from_utf8(root_text), ec);
         if (ec || root.empty()) continue;
         if (!fs::is_directory(root, ec) || ec) continue;
         had_valid_root = true;
@@ -86,7 +78,7 @@ bool platform_open_directory(const fs::path& path, std::string& error) {
 #  else
     const char* opener = "xdg-open";
 #  endif
-    const std::string native_path = path.string();
+    const std::string native_path = acecode::path_to_utf8(path);
     pid_t pid = ::fork();
     if (pid < 0) {
         error = "fork failed";
@@ -110,7 +102,7 @@ ValidatedOpenDirectory validate_open_directory_request(
     }
 
     std::error_code ec;
-    auto requested = path_from_utf8(path_utf8);
+    auto requested = acecode::path_from_utf8(path_utf8);
     if (requested.empty()) {
         return {false, {}, "path required"};
     }

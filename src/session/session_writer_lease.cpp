@@ -1,6 +1,7 @@
 #include "session_writer_lease.hpp"
 
 #include "../utils/atomic_file.hpp"
+#include "../utils/utf8_path.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -49,14 +50,14 @@ std::int64_t SessionWriterLease::now_ms() {
 
 std::string SessionWriterLease::lease_path(const std::string& project_dir,
                                            const std::string& session_id) {
-    return (fs::path(project_dir) / "leases" / (session_id + ".writer.json")).string();
+    return path_to_utf8(path_from_utf8(project_dir) / "leases" / (session_id + ".writer.json"));
 }
 
 std::optional<SessionWriterLeaseInfo> SessionWriterLease::read(
     const std::string& project_dir,
     const std::string& session_id) {
     const std::string path = lease_path(project_dir, session_id);
-    std::ifstream ifs(path);
+    std::ifstream ifs(path_from_utf8(path));
     if (!ifs.is_open()) return std::nullopt;
 
     try {
@@ -92,7 +93,7 @@ SessionWriterLeaseResult SessionWriterLease::acquire(
     if (stale_ms <= 0) stale_ms = kDefaultStaleMs;
 
     std::error_code ec;
-    fs::create_directories(fs::path(result.path).parent_path(), ec);
+    fs::create_directories(path_from_utf8(result.path).parent_path(), ec);
     if (ec) {
         result.status = SessionWriterLeaseResult::Status::Error;
         result.error = ec.message();
@@ -155,14 +156,14 @@ bool SessionWriterLease::release(const std::string& project_dir,
     if (!existing.has_value() || existing->pid != pid) return false;
 
     std::error_code ec;
-    fs::remove(lease_path(project_dir, session_id), ec);
+    fs::remove(path_from_utf8(lease_path(project_dir, session_id)), ec);
     return !ec;
 }
 
 void SessionWriterLease::remove(const std::string& project_dir,
                                 const std::string& session_id) {
     std::error_code ec;
-    fs::remove(lease_path(project_dir, session_id), ec);
+    fs::remove(path_from_utf8(lease_path(project_dir, session_id)), ec);
 }
 
 } // namespace acecode

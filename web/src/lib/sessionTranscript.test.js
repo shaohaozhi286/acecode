@@ -63,6 +63,31 @@ run('busy done error 状态按事件更新', () => {
   assert.equal(state.busy, false);
   assert.equal(state.status, 'error');
   assert.equal(state.error, 'boom');
+  assert.equal(state.items.at(-1).kind, 'termination_notice');
+  assert.equal(state.items.at(-1).content, '任务已终止：boom');
+});
+
+run('用户主动终止追加独立红色提示项', () => {
+  const state = reduceMany([
+    { type: 'busy_changed', payload: { busy: true }, seq: 1 },
+    { type: 'turn_aborted', payload: { reason: '用户已终止本轮任务' }, seq: 2 },
+  ]);
+
+  assert.equal(state.busy, false);
+  assert.equal(state.status, 'idle');
+  assert.equal(state.items.length, 1);
+  assert.equal(state.items[0].kind, 'termination_notice');
+  assert.equal(state.items[0].content, '用户已终止本轮任务');
+});
+
+run('用户终止后的 abort 类服务端错误不重复追加终止提示', () => {
+  const state = reduceMany([
+    { type: 'turn_aborted', payload: { reason: '用户已终止本轮任务' }, seq: 1 },
+    { type: 'error', payload: { reason: 'aborted by user' }, seq: 2 },
+  ]);
+
+  assert.equal(state.items.filter((item) => item.kind === 'termination_notice').length, 1);
+  assert.equal(state.items[0].content, '用户已终止本轮任务');
 });
 
 run('usage 事件更新 token usage 且不新增 transcript item', () => {

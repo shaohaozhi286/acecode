@@ -19,8 +19,10 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 
 namespace acecode {
@@ -60,6 +62,8 @@ struct WebServerDeps {
     // session-scoped through SessionRegistry.
     std::shared_ptr<LlmProvider>* provider = nullptr;
     std::mutex*                    provider_mu = nullptr;
+    bool                       native_folder_picker_enabled = false;
+    std::function<std::optional<std::string>()> native_folder_picker;
     bool                       dangerous = false;
 };
 

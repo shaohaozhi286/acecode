@@ -8,7 +8,14 @@
 //   - parseLeadingCommand:命中 / 未命中(命令名未知)/ 含空格 / 空串
 
 import assert from 'node:assert/strict';
-import { rankCommands, flattenCommands, parseLeadingCommand, parseExecutableBuiltinCommand } from './slashCommands.js';
+import {
+  rankCommands,
+  flattenCommands,
+  commandsWithFallback,
+  fallbackCommands,
+  parseLeadingCommand,
+  parseExecutableBuiltinCommand,
+} from './slashCommands.js';
 
 function run(name, fn) {
   try {
@@ -39,6 +46,75 @@ run('flattenCommands 注入 kind 字段并保留 builtin/skill 顺序', () => {
   assert.equal(ITEMS[1].kind, 'builtin');
   assert.equal(ITEMS[2].kind, 'skill');
   assert.equal(ITEMS[2].name, 'code-review');
+});
+
+run('fallbackCommands 返回基础 builtin 命令', () => {
+  const r = fallbackCommands();
+  assert.equal(r.length, 2);
+  assert.equal(r[0].kind, 'builtin');
+  assert.equal(r[0].name, 'init');
+  assert.equal(r[1].kind, 'builtin');
+  assert.equal(r[1].name, 'compact');
+});
+
+run('commandsWithFallback:空响应回退到基础命令', () => {
+  const r1 = commandsWithFallback(null);
+  const r2 = commandsWithFallback({ builtins: [], skills: [] });
+  assert.deepEqual(r1.map((x) => x.name), ['init', 'compact']);
+  assert.deepEqual(r2.map((x) => x.name), ['init', 'compact']);
+});
+
+run('commandsWithFallback:后端返回 skills 时保留 skill + builtin 组合', () => {
+  const r = commandsWithFallback({
+    builtins: [
+      { name: 'init', description: 'Generate ACECODE.md' },
+      { name: 'compact', description: 'Compress conversation history' },
+    ],
+    skills: [{ name: 'calculator', description: 'Exact math' }],
+  });
+  assert.deepEqual(r.map((x) => `${x.kind}:${x.name}`), [
+    'builtin:init',
+    'builtin:compact',
+    'skill:calculator',
+  ]);
+});
+
+run('commandsWithFallback:skills-only 响应也补上基础命令', () => {
+  const r = commandsWithFallback({
+    skills: [{ name: 'calculator', description: 'Exact math' }],
+  });
+  assert.deepEqual(r.map((x) => `${x.kind}:${x.name}`), [
+    'builtin:init',
+    'builtin:compact',
+    'skill:calculator',
+  ]);
+});
+
+run('commandsWithFallback:partial builtin 响应补齐缺失基础命令', () => {
+  const r = commandsWithFallback({
+    builtins: [{ name: 'init', description: 'custom init' }],
+    skills: [{ name: 'calculator', description: 'Exact math' }],
+  });
+  assert.deepEqual(r.map((x) => `${x.kind}:${x.name}`), [
+    'builtin:init',
+    'builtin:compact',
+    'skill:calculator',
+  ]);
+  assert.equal(r[0].description, 'custom init');
+});
+
+run('commandsWithFallback:额外 builtin 保留在基础命令之后', () => {
+  const r = commandsWithFallback({
+    builtins: [
+      { name: 'init', description: 'custom init' },
+      { name: 'custom', description: 'Custom command' },
+    ],
+  });
+  assert.deepEqual(r.map((x) => `${x.kind}:${x.name}`), [
+    'builtin:init',
+    'builtin:compact',
+    'builtin:custom',
+  ]);
 });
 
 run('空查询返回原 flatten 顺序(builtin 在前)', () => {

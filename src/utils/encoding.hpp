@@ -2,16 +2,6 @@
 
 #include <string>
 
-#ifdef _WIN32
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#endif
-
 namespace acecode {
 
 // Check if a string is valid UTF-8
@@ -38,64 +28,13 @@ inline bool is_valid_utf8(const std::string& str) {
 
 #ifdef _WIN32
 // Convert a string from the specified codepage to UTF-8
-inline std::string codepage_to_utf8(const std::string& src, UINT codepage = CP_ACP) {
-    if (src.empty()) return src;
-
-    // First convert to wide string (UTF-16)
-    int wide_len = MultiByteToWideChar(codepage, 0, src.c_str(), (int)src.size(), nullptr, 0);
-    if (wide_len <= 0) return src;
-
-    std::wstring wide(wide_len, L'\0');
-    MultiByteToWideChar(codepage, 0, src.c_str(), (int)src.size(), &wide[0], wide_len);
-
-    // Then convert wide string to UTF-8
-    int utf8_len = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), wide_len, nullptr, 0, nullptr, nullptr);
-    if (utf8_len <= 0) return src;
-
-    std::string utf8(utf8_len, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), wide_len, &utf8[0], utf8_len, nullptr, nullptr);
-    return utf8;
-}
-
-inline std::wstring multibyte_to_wide(const std::string& src,
-                                      UINT codepage,
-                                      DWORD flags = 0) {
-    if (src.empty()) return {};
-    int wide_len = MultiByteToWideChar(codepage, flags, src.data(),
-                                       static_cast<int>(src.size()),
-                                       nullptr, 0);
-    if (wide_len <= 0) return {};
-
-    std::wstring wide(static_cast<size_t>(wide_len), L'\0');
-    MultiByteToWideChar(codepage, flags, src.data(), static_cast<int>(src.size()),
-                        wide.data(), wide_len);
-    return wide;
-}
-
-inline std::wstring utf8_to_wide(const std::string& src) {
-    if (src.empty()) return {};
-
-    // Most ACECode persisted paths are UTF-8. Some older Windows paths came
-    // from narrow filesystem APIs and are in the active codepage, so keep an
-    // ACP fallback to avoid stranding existing metadata.
-    std::wstring wide = multibyte_to_wide(src, CP_UTF8, MB_ERR_INVALID_CHARS);
-    if (!wide.empty()) return wide;
-    return multibyte_to_wide(src, CP_ACP);
-}
-
-inline std::string wide_to_utf8(const std::wstring& wide) {
-    if (wide.empty()) return {};
-    int utf8_len = WideCharToMultiByte(CP_UTF8, 0, wide.data(),
-                                       static_cast<int>(wide.size()),
-                                       nullptr, 0, nullptr, nullptr);
-    if (utf8_len <= 0) return {};
-
-    std::string utf8(static_cast<size_t>(utf8_len), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()),
-                        utf8.data(), utf8_len, nullptr, nullptr);
-    return utf8;
-}
+std::string codepage_to_utf8(const std::string& src, unsigned int codepage = 0);
+std::wstring utf8_to_wide(const std::string& src);
+std::string wide_to_utf8(const std::wstring& wide);
 #endif
+
+bool getenv_utf8(const char* name, std::string& out);
+std::string getenv_utf8(const char* name);
 
 inline std::string truncate_utf8_prefix(const std::string& src,
                                         size_t max_bytes,

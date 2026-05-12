@@ -3,6 +3,7 @@
 #include "../../config/config.hpp"
 #include "../../skills/skill_init.hpp"
 #include "../../skills/skill_registry.hpp"
+#include "../../utils/encoding.hpp"
 
 #include <algorithm>
 #include <unordered_set>
@@ -61,8 +62,8 @@ nlohmann::json build_commands_payload(const SkillRegistry& global_skills,
         nlohmann::json arr = nlohmann::json::array();
         for (const auto& s : entries) {
             arr.push_back({
-                {"name", s.name},
-                {"description", s.description},
+                {"name", ensure_utf8(s.name)},
+                {"description", ensure_utf8(s.description)},
             });
         }
         out["skills"] = std::move(arr);

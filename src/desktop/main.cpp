@@ -15,6 +15,7 @@
 
 #include "daemon_pool.hpp"
 #include "dpi_win.hpp"
+#include "edge_app_launcher.hpp"
 #include "folder_picker.hpp"
 #include "notifications_win.hpp"
 #include "open_in_explorer.hpp"
@@ -31,6 +32,7 @@
 #include "../utils/encoding.hpp"
 #include "../utils/logger.hpp"
 #include "../utils/state_file.hpp"
+#include "../utils/utf8_path.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -38,6 +40,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <memory>
 #include <mutex>
 #include <random>
 #include <sstream>
@@ -53,6 +56,7 @@
 #    define NOMINMAX
 #  endif
 #  include <windows.h>
+#  include <shellapi.h>
 #endif
 #ifdef __APPLE__
 #  include <mach-o/dyld.h>
@@ -65,7 +69,27 @@ namespace {
 constexpr const char* kSharedDaemonSlotHash = "__shared_daemon__";
 constexpr const char* kSharedDaemonContextId = "default";
 
+bool is_webapp_arg(const std::string& arg) {
+    return arg == "--webapp";
+}
+
 #ifdef _WIN32
+bool desktop_webapp_requested() {
+    int argc = 0;
+    LPWSTR* argv = ::CommandLineToArgvW(::GetCommandLineW(), &argc);
+    if (!argv) return false;
+
+    bool requested = false;
+    for (int i = 1; i < argc; ++i) {
+        if (is_webapp_arg(acecode::wide_to_utf8(argv[i]))) {
+            requested = true;
+            break;
+        }
+    }
+    ::LocalFree(argv);
+    return requested;
+}
+
 std::string desktop_exe_dir() {
     wchar_t buf[MAX_PATH] = {0};
     DWORD n = ::GetModuleFileNameW(nullptr, buf, MAX_PATH);
@@ -90,14 +114,21 @@ std::string desktop_exe_dir() {
         resolved = fs::absolute(exe, ec);
         if (ec) resolved = exe;
     }
-    return resolved.parent_path().string();
+    return acecode::path_to_utf8(resolved.parent_path());
 }
 #else
+bool desktop_webapp_requested(int argc, char** argv) {
+    for (int i = 1; i < argc; ++i) {
+        if (argv[i] && is_webapp_arg(argv[i])) return true;
+    }
+    return false;
+}
+
 std::string desktop_exe_dir() {
     std::error_code ec;
     auto p = fs::current_path(ec);
     if (ec) return "";
-    return p.string();
+    return acecode::path_to_utf8(p);
 }
 #endif
 
@@ -109,19 +140,21 @@ void show_error(const std::string& msg) {
 #endif
 
 fs::path path_from_utf8(const std::string& path) {
-#ifdef _WIN32
-    return fs::u8path(path);
-#else
-    return fs::path(path);
-#endif
+    return acecode::path_from_utf8(path);
 }
 
 std::string path_to_utf8(const fs::path& path) {
-#ifdef _WIN32
-    return path.u8string();
-#else
-    return path.string();
-#endif
+    return acecode::path_to_utf8(path);
+}
+
+std::string append_query_param(const std::string& url,
+                               const std::string& key,
+                               const std::string& value) {
+    if (url.empty() || url == "about:blank") return url;
+    const char separator = url.find('?') == std::string::npos ? '?' : '&';
+    return url + separator +
+           acecode::desktop::percent_encode(key) + "=" +
+           acecode::desktop::percent_encode(value);
 }
 
 std::string locate_daemon_exe() {
@@ -154,8 +187,9 @@ std::string locate_daemon_exe() {
 //      macOS: build/ACECode.app/Contents/MacOS/ACECode → ../../../../web/dist
 // 找不到返回空字符串 → daemon 走 embedded(cmake 已把 web/dist 嵌进二进制)。
 std::string detect_dev_web_dir() {
-    if (const char* env = std::getenv("ACECODE_DEV_WEB_DIR"); env && *env) {
-        fs::path p = fs::path(env) / "index.html";
+    std::string env = acecode::getenv_utf8("ACECODE_DEV_WEB_DIR");
+    if (!env.empty()) {
+        fs::path p = path_from_utf8(env) / "index.html";
         if (fs::exists(p)) return env;
     }
     auto dir = desktop_exe_dir();
@@ -171,7 +205,11 @@ std::string detect_dev_web_dir() {
 }
 
 std::string projects_dir() {
-    return (fs::path(acecode::get_acecode_dir()) / "projects").string();
+    return path_to_utf8(path_from_utf8(acecode::get_acecode_dir()) / "projects");
+}
+
+std::string desktop_shared_run_dir() {
+    return path_to_utf8(path_from_utf8(acecode::get_acecode_dir()) / "run" / "desktop-shared");
 }
 
 std::string current_cwd() {
@@ -213,9 +251,10 @@ std::string choose_launch_cwd(const std::string& preferred,
 
 void log_legacy_workspace_run_dirs(const std::string& proj_dir) {
     std::error_code ec;
-    if (!fs::is_directory(proj_dir, ec) || ec) return;
+    fs::path native_proj_dir = path_from_utf8(proj_dir);
+    if (!fs::is_directory(native_proj_dir, ec) || ec) return;
     int count = 0;
-    for (const auto& project_entry : fs::directory_iterator(proj_dir, ec)) {
+    for (const auto& project_entry : fs::directory_iterator(native_proj_dir, ec)) {
         if (ec) break;
         if (!project_entry.is_directory(ec) || ec) continue;
         fs::path run_dir = project_entry.path() / "run";
@@ -226,7 +265,7 @@ void log_legacy_workspace_run_dirs(const std::string& proj_dir) {
             ++count;
             if (count <= 8) {
                 LOG_WARN("[desktop] legacy workspace run dir ignored by shared daemon: " +
-                         run_entry.path().string());
+                         path_to_utf8(run_entry.path()));
             }
         }
     }
@@ -314,8 +353,10 @@ bool post_workspace_to_daemon(int port, const std::string& token,
 
 #ifdef _WIN32
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
+    const bool force_webapp = desktop_webapp_requested();
 #else
-int main(int, char**) {
+int main(int argc, char** argv) {
+    const bool force_webapp = desktop_webapp_requested(argc, argv);
 #endif
     // 顶层 try/catch:wWinMain 是 Windows 子系统的 EXE 入口,任何未捕获的
     // C++ 异常会触发 std::terminate → 系统弹"未经处理的异常"调试器对话框,
@@ -326,7 +367,7 @@ int main(int, char**) {
     // 注意 logger 初始化也在 lambda 内,因为它本身也可能抛(磁盘满 / 路径
     // 受 GPO 锁)。catch 里依然先调 LOG_ERROR(失败时是 no-op,不影响
     // MessageBox 给用户提示)。
-    auto run = []() -> int {
+    auto run = [force_webapp]() -> int {
     using namespace acecode::desktop;
 
     // desktop 自己的日志路径: ~/.acecode/logs/desktop-<date>.log。和 daemon
@@ -335,6 +376,9 @@ int main(int, char**) {
     acecode::Logger::instance().init_with_rotation(acecode::get_logs_dir(), "desktop", false);
     acecode::Logger::instance().set_level(acecode::LogLevel::Dbg);
     LOG_INFO("[desktop] starting acecode-desktop");
+    if (force_webapp) {
+        LOG_INFO("[desktop] --webapp requested; embedded WebView will be skipped");
+    }
 #ifdef _WIN32
     LOG_INFO(std::string("[desktop] DPI awareness ") +
              (acecode::desktop::enable_desktop_dpi_awareness() ? "enabled" : "not enabled"));
@@ -446,7 +490,8 @@ int main(int, char**) {
             req.daemon_exe_path = daemon_exe;
             req.static_dir = dev_web_dir;
             req.context_id = kSharedDaemonContextId;
-            req.run_dir = (fs::path(acecode::get_acecode_dir()) / "run" / "desktop-shared").string();
+            req.run_dir = desktop_shared_run_dir();
+            req.native_folder_picker_enabled = true;
             ActivateResult r;
             if (launch_cwd.empty()) {
                 r.error = "no usable working directory for daemon";
@@ -478,7 +523,8 @@ int main(int, char**) {
         req.daemon_exe_path = daemon_exe;
         req.static_dir = dev_web_dir;
         req.context_id = kSharedDaemonContextId;
-        req.run_dir = (fs::path(acecode::get_acecode_dir()) / "run" / "desktop-shared").string();
+        req.run_dir = desktop_shared_run_dir();
+        req.native_folder_picker_enabled = true;
         ActivateResult r;
         if (launch_cwd.empty()) {
             r.error = "no usable working directory for daemon";
@@ -492,11 +538,49 @@ int main(int, char**) {
         }
     }
 
+    auto run_edge_app_mode = [&](const std::string& reason,
+                                 const std::string& webview_error = std::string{}) -> int {
+        LOG_WARN("[desktop] starting Edge app mode: " + reason);
+        splash.close();
+        const std::string edge_url = append_query_param(url, "ace_webapp", "1");
+        auto edge_result = launch_edge_app_and_wait(edge_url);
+        if (!edge_result.ok) {
+            LOG_ERROR("[desktop] Edge app mode failed: " + edge_result.error);
+#ifdef _WIN32
+            std::string body = "ACECode Desktop could not launch Microsoft Edge app mode.\n\n"
+                               "Reason:\n" + reason +
+                               "\n\nEdge failure:\n" + edge_result.error;
+            if (!webview_error.empty()) {
+                body += "\n\nWebView2 failure:\n" + webview_error;
+            }
+            show_error(body);
+#endif
+            auto failures = pool.stop_all();
+            return failures.empty() ? 1 : 100;
+        }
+        LOG_INFO("[desktop] Edge app mode exited with code " +
+                 std::to_string(edge_result.exit_code));
+        auto failures = pool.stop_all();
+        return failures.empty() ? 0 : 100;
+    };
+
+    if (force_webapp) {
+        return run_edge_app_mode("--webapp requested");
+    }
+
     // 注意:这里不再用全屏 splash 盖主窗口。WebHost 会用自建 Win32
     // 父窗口在屏幕外保持可见状态完成 WebView2 渲染,页面 ready 后再移回
     // 当前屏幕中央。这样用户启动时只看到透明 icon,不会看到白屏。
     const bool desktop_debug = is_desktop_debug_mode();
-    WebHost host(/*debug=*/desktop_debug, WebHost::StartupWindowMode::OffscreenUntilReady);
+    std::unique_ptr<WebHost> host_storage;
+    try {
+        host_storage = std::make_unique<WebHost>(
+            /*debug=*/desktop_debug,
+            WebHost::StartupWindowMode::OffscreenUntilReady);
+    } catch (const WebHostInitializationError& e) {
+        return run_edge_app_mode("embedded WebView unavailable", e.what());
+    }
+    WebHost& host = *host_storage;
     host.set_title("ACECode");
     host.set_size(kDefaultDesktopWindowWidth, kDefaultDesktopWindowHeight);
 
@@ -920,7 +1004,8 @@ int main(int, char**) {
         // Keep runtime files isolated from standalone daemon runs, but do not
         // create per-workspace or per-resume run dirs.
         req.context_id = kSharedDaemonContextId;
-        req.run_dir = (fs::path(acecode::get_acecode_dir()) / "run" / "desktop-shared").string();
+        req.run_dir = desktop_shared_run_dir();
+        req.native_folder_picker_enabled = true;
         auto r = pool.activate(req);
         if (!r.ok) {
             return {{"error", r.error}};
@@ -967,7 +1052,8 @@ int main(int, char**) {
             areq.cwd = choose_launch_cwd(m->cwd, proc_cwd, daemon_exe);
             areq.daemon_exe_path = daemon_exe;
             areq.static_dir = dev_web_dir;
-            areq.run_dir = (fs::path(acecode::get_acecode_dir()) / "run" / "desktop-shared").string();
+            areq.run_dir = desktop_shared_run_dir();
+            areq.native_folder_picker_enabled = true;
             auto ar = pool.activate(areq);
             if (!ar.ok) return nlohmann::json{{"error", ar.error}}.dump();
 

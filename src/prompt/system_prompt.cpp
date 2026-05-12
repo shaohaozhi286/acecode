@@ -3,6 +3,8 @@
 #include "../memory/memory_registry.hpp"
 #include "../project_instructions/instructions_loader.hpp"
 #include "../skills/skill_registry.hpp"
+#include "../utils/encoding.hpp"
+#include "../utils/utf8_path.hpp"
 #include <sstream>
 #include <filesystem>
 
@@ -26,8 +28,8 @@ static std::string get_default_shell() {
 #ifdef _WIN32
     return "cmd.exe";
 #else
-    const char* shell = std::getenv("SHELL");
-    return shell ? shell : "/bin/sh";
+    std::string shell = getenv_utf8("SHELL");
+    return shell.empty() ? "/bin/sh" : shell;
 #endif
 }
 
@@ -207,7 +209,7 @@ std::string build_system_prompt(const ToolExecutor& tools, const std::string& cw
             if (!merged.sources.empty()) {
                 oss << "Sources:";
                 for (const auto& s : merged.sources) {
-                    oss << " " << s.generic_string() << ";";
+                    oss << " " << path_to_utf8_generic(s) << ";";
                 }
                 oss << "\n\n";
             }

@@ -14,6 +14,8 @@
 #include "memory/memory_paths.hpp"
 #include "memory/memory_registry.hpp"
 #include "memory/memory_types.hpp"
+#include "utils/encoding.hpp"
+#include "utils/utf8_path.hpp"
 
 #include <atomic>
 #include <cstdlib>
@@ -22,6 +24,13 @@
 #include <optional>
 #include <sstream>
 #include <thread>
+
+#ifdef _WIN32
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  include <windows.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -35,7 +44,8 @@ constexpr const char* kHomeEnvName = "HOME";
 
 void set_env(const char* name, const std::string& value) {
 #ifdef _WIN32
-    _putenv_s(name, value.c_str());
+    SetEnvironmentVariableW(acecode::utf8_to_wide(name).c_str(),
+                            acecode::utf8_to_wide(value).c_str());
 #else
     setenv(name, value.c_str(), 1);
 #endif
@@ -64,7 +74,7 @@ protected:
         std::error_code ec;
         fs::remove_all(temp_home, ec);
         fs::create_directories(temp_home);
-        set_env(kHomeEnvName, temp_home.string());
+        set_env(kHomeEnvName, acecode::path_to_utf8(temp_home));
 
         // 预建 memory 目录,简化测试
         fs::create_directories(acecode::get_memory_dir());
@@ -80,7 +90,7 @@ protected:
                           const std::string& description,
                           const std::string& type,
                           const std::string& body) {
-        fs::path p = acecode::get_memory_dir() / (name + ".md");
+        fs::path p = acecode::get_memory_dir() / acecode::path_from_utf8(name + ".md");
         std::ofstream ofs(p, std::ios::binary);
         ofs << "---\n"
             << "name: \"" << name << "\"\n"
@@ -260,4 +270,19 @@ TEST_F(MemoryRegistryTest, ReadIndexRawTruncates) {
     std::string idx = reg.read_index_raw(32);
     EXPECT_GE(idx.size(), 32u);
     EXPECT_NE(idx.find("truncated"), std::string::npos);
+}
+
+TEST_F(MemoryRegistryTest, ScanPreservesUtf8PathStemAndBody) {
+    write_entry_file(u8"中文记忆", u8"中文描述", "project", u8"正文内容\n");
+
+    acecode::MemoryRegistry reg;
+    reg.scan();
+
+    auto found = reg.find(u8"中文记忆");
+    ASSERT_TRUE(found.has_value());
+    EXPECT_EQ(found->name, u8"中文记忆");
+    EXPECT_EQ(found->description, u8"中文描述");
+    EXPECT_EQ(found->body, u8"\n正文内容\n");
+    EXPECT_TRUE(acecode::is_valid_utf8(found->name));
+    EXPECT_TRUE(acecode::is_valid_utf8(found->body));
 }

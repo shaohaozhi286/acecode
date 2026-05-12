@@ -7,6 +7,7 @@
 #include "../skills/default_skill_seeder.hpp"
 #include "../utils/logger.hpp"
 #include "../utils/paths.hpp"
+#include "../utils/utf8_path.hpp"
 
 #include <chrono>
 #include <filesystem>
@@ -33,6 +34,7 @@ void print_help(std::ostream& os) {
        << "  --port=<N>             override web.port for this worker\n"
        << "  --static-dir=<PATH>    serve front-end assets from PATH\n"
        << "  --run-dir=<PATH>       isolate runtime files (heartbeat/pid/port/token) to PATH\n"
+       << "  --native-folder-picker enable Desktop native folder picker API\n"
        << "  --supervised --guid=G  launcher-internal: launched by Service supervisor\n"
        << "  -dangerous             skip permission checks (loopback bind only)\n";
 }
@@ -45,15 +47,16 @@ bool starts_with(const std::string& s, const std::string& p) {
 std::string executable_dir_from_path(const std::string& exe_path) {
     if (exe_path.empty()) return "";
     std::error_code ec;
-    fs::path abs = fs::weakly_canonical(fs::path(exe_path), ec);
-    if (!ec) return abs.parent_path().string();
-    return fs::path(exe_path).parent_path().string();
+    fs::path native_exe = path_from_utf8(exe_path);
+    fs::path abs = fs::weakly_canonical(native_exe, ec);
+    if (!ec) return path_to_utf8(abs.parent_path());
+    return path_to_utf8(native_exe.parent_path());
 }
 
 void seed_default_skills_if_first_initialization(const std::string& exe_path) {
     bool first_initialization = acecode::consume_acecode_home_created_by_process();
     auto result = acecode::install_default_global_skills_on_first_initialization(
-        fs::path(acecode::get_acecode_dir()),
+        path_from_utf8(acecode::get_acecode_dir()),
         executable_dir_from_path(exe_path),
         first_initialization);
     if (!result.attempted) return;
@@ -137,6 +140,8 @@ Args parse(const std::vector<std::string>& tokens) {
                 return a;
             }
             a.run_dir_override = tokens[++i];
+        } else if (t == "--native-folder-picker") {
+            a.native_folder_picker_enabled = true;
         } else if (t == "-dangerous") {
             a.dangerous = true;
         } else if (t == "--help" || t == "-h") {
@@ -176,6 +181,7 @@ static int do_foreground(const Args& a, const std::string& exe_path) {
     opts.token_override      = a.token_override;
     opts.static_dir_override = a.static_dir_override;
     opts.cwd_override        = a.cwd_override;
+    opts.native_folder_picker_enabled = a.native_folder_picker_enabled;
     return run_worker(opts, cfg);
 }
 
@@ -208,6 +214,9 @@ static int do_start(const Args& a, const std::string& exe_path) {
     }
     if (!a.run_dir_override.empty()) {
         argv.push_back("--run-dir=" + a.run_dir_override);
+    }
+    if (a.native_folder_picker_enabled) {
+        argv.push_back("--native-folder-picker");
     }
     if (a.dangerous) argv.push_back("-dangerous");
 

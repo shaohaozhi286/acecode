@@ -10,11 +10,20 @@
 #include <gtest/gtest.h>
 
 #include "project_instructions/instructions_loader.hpp"
+#include "utils/encoding.hpp"
+#include "utils/utf8_path.hpp"
 
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <string>
+
+#ifdef _WIN32
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  include <windows.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -28,7 +37,8 @@ constexpr const char* kHomeEnvName = "HOME";
 
 void set_env(const char* n, const std::string& v) {
 #ifdef _WIN32
-    _putenv_s(n, v.c_str());
+    SetEnvironmentVariableW(acecode::utf8_to_wide(n).c_str(),
+                            acecode::utf8_to_wide(v).c_str());
 #else
     setenv(n, v.c_str(), 1);
 #endif
@@ -232,4 +242,18 @@ TEST_F(InstructionsLoaderTest, NoFilesEmptyResult) {
     auto merged = acecode::load_project_instructions(repo.string(), cfg);
     EXPECT_TRUE(merged.merged_body.empty());
     EXPECT_EQ(merged.sources.size(), 0u);
+}
+
+TEST_F(InstructionsLoaderTest, PreservesUtf8PathAndContentInternally) {
+    fs::path repo = temp_home / acecode::path_from_utf8(u8"中文项目");
+    write_file(repo / "ACECODE.md", u8"# 规则\n默认使用 UTF-8\n");
+
+    acecode::ProjectInstructionsConfig cfg;
+    auto merged = acecode::load_project_instructions(acecode::path_to_utf8(repo), cfg);
+
+    EXPECT_NE(merged.merged_body.find(u8"中文项目"), std::string::npos);
+    EXPECT_NE(merged.merged_body.find(u8"默认使用 UTF-8"), std::string::npos);
+    EXPECT_TRUE(acecode::is_valid_utf8(merged.merged_body));
+    ASSERT_EQ(merged.sources.size(), 1u);
+    EXPECT_EQ(acecode::path_to_utf8(merged.sources[0].parent_path().filename()), u8"中文项目");
 }

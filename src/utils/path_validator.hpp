@@ -1,5 +1,7 @@
 #pragma once
 
+#include "utf8_path.hpp"
+
 #include <string>
 #include <vector>
 #include <filesystem>
@@ -13,7 +15,7 @@ public:
         : dangerous_mode_(dangerous_mode)
     {
         try {
-            working_dir_ = normalize(std::filesystem::weakly_canonical(working_dir).string());
+            working_dir_ = normalize(path_to_utf8(std::filesystem::weakly_canonical(path_from_utf8(working_dir))));
         } catch (...) {
             working_dir_ = normalize(working_dir);
         }
@@ -25,9 +27,9 @@ public:
 
         std::string resolved;
         try {
-            resolved = normalize(std::filesystem::weakly_canonical(resolve_input_path(path)).string());
+            resolved = normalize(path_to_utf8(std::filesystem::weakly_canonical(resolve_input_path(path))));
         } catch (...) {
-            resolved = normalize(resolve_input_path(path).string());
+            resolved = normalize(path_to_utf8(resolve_input_path(path)));
         }
 
         // CWD boundary check
@@ -45,9 +47,9 @@ public:
 
         std::string resolved;
         try {
-            resolved = normalize(std::filesystem::weakly_canonical(resolve_input_path(path)).string());
+            resolved = normalize(path_to_utf8(std::filesystem::weakly_canonical(resolve_input_path(path))));
         } catch (...) {
-            resolved = normalize(resolve_input_path(path).string());
+            resolved = normalize(path_to_utf8(resolve_input_path(path)));
         }
 
         // Check filename against dangerous files list
@@ -102,9 +104,9 @@ private:
     }
 
     std::filesystem::path resolve_input_path(const std::string& path) const {
-        std::filesystem::path p(path);
+        std::filesystem::path p = path_from_utf8(path);
         if (p.is_relative() && !working_dir_.empty()) {
-            return std::filesystem::path(working_dir_) / p;
+            return path_from_utf8(working_dir_) / p;
         }
         return p;
     }

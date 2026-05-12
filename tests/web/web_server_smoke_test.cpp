@@ -36,8 +36,10 @@
 #include <cpr/cpr.h>
 #include <cctype>
 #include <filesystem>
+#include <functional>
 #include <fstream>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <random>
 #include <thread>
 
@@ -62,6 +64,18 @@ std::filesystem::path path_from_utf8(const std::string& s) {
 #endif
 }
 
+void write_skill_md(const std::filesystem::path& root,
+                    const std::string& name,
+                    const std::string& description) {
+    const auto dir = root / "general" / name;
+    std::filesystem::create_directories(dir);
+    std::ofstream ofs(dir / "SKILL.md", std::ios::binary);
+    ofs << "---\n"
+        << "name: " << name << "\n"
+        << "description: " << description << "\n"
+        << "---\n\n# " << name << "\n";
+}
+
 struct WebServerFixture {
     acecode::ToolExecutor tools;
     acecode::PermissionManager template_perm;
@@ -83,7 +97,11 @@ struct WebServerFixture {
     std::string cwd;
     std::string project_dir;
 
-    explicit WebServerFixture(bool register_default_workspace = true) {
+    explicit WebServerFixture(
+        bool register_default_workspace = true,
+        bool native_folder_picker_enabled = false,
+        std::function<std::optional<std::string>()> native_folder_picker = {},
+        bool attach_skill_registry = true) {
         port = pick_test_port();
         web_cfg.bind = "127.0.0.1";
         web_cfg.port = port;
@@ -142,7 +160,9 @@ struct WebServerFixture {
         wdeps.session_registry = registry.get();
         wdeps.projects_dir = projects_dir.string();
         wdeps.workspace_registry = workspace_registry.get();
-        wdeps.skill_registry = &skill_registry;
+        wdeps.native_folder_picker_enabled = native_folder_picker_enabled;
+        wdeps.native_folder_picker = std::move(native_folder_picker);
+        wdeps.skill_registry = attach_skill_registry ? &skill_registry : nullptr;
         wdeps.dangerous = false;
 
         server = std::make_unique<acecode::web::WebServer>(std::move(wdeps));
@@ -398,6 +418,115 @@ TEST(WebServerHttp, WorkspaceScopedSessionLifecycle) {
     EXPECT_EQ(sessions[0]["id"], created["session_id"]);
     EXPECT_EQ(sessions[0]["workspace_hash"], other_hash);
     EXPECT_EQ(sessions[0]["cwd"], other_cwd);
+}
+
+// 场景:workspace 下有 .agent/skills 时,GET /api/commands?workspace=<hash>
+// 必须同时返回基础 builtin 命令与该 workspace 的 skill,否则前端输入 `/`
+// 只能看到空下拉或看不到 skill。
+TEST(WebServerHttp, CommandsEndpointReturnsBuiltinsAndWorkspaceSkills) {
+    WebServerFixture fx(true, false, {}, false);
+    write_skill_md(fx.cwd_dir / ".agent" / "skills", "api-calculator", "Exact math helper");
+
+    auto workspaces = cpr::Get(cpr::Url{fx.url("/api/workspaces")});
+    ASSERT_EQ(workspaces.status_code, 200) << workspaces.text;
+    auto ws_list = json::parse(workspaces.text);
+    ASSERT_TRUE(ws_list.is_array());
+    ASSERT_FALSE(ws_list.empty());
+    const auto hash = ws_list[0]["hash"].get<std::string>();
+
+    auto r = cpr::Get(cpr::Url{fx.url("/api/commands?workspace=" + hash)});
+    ASSERT_EQ(r.status_code, 200) << r.text;
+    auto body = json::parse(r.text);
+
+    ASSERT_TRUE(body.contains("builtins"));
+    ASSERT_TRUE(body["builtins"].is_array());
+    ASSERT_GE(body["builtins"].size(), 2u);
+    EXPECT_EQ(body["builtins"][0]["name"].get<std::string>(), "init");
+    EXPECT_EQ(body["builtins"][1]["name"].get<std::string>(), "compact");
+
+    ASSERT_TRUE(body.contains("skills"));
+    bool found = false;
+    for (const auto& skill : body["skills"]) {
+        if (skill["name"].get<std::string>() == "api-calculator") {
+            found = true;
+            EXPECT_EQ(skill["description"].get<std::string>(), "Exact math helper");
+        }
+    }
+    EXPECT_TRUE(found) << r.text;
+}
+
+// 场景: native folder picker API 只给 Desktop 启动的 daemon 用。standalone
+// 默认关闭时必须拒绝,且不能调用 picker callback。
+TEST(WebServerHttp, NativeFolderPickerEndpointRejectsWhenDisabled) {
+    bool called = false;
+    WebServerFixture fx(true, false, [&called]() -> std::optional<std::string> {
+        called = true;
+        return std::string{"should-not-be-called"};
+    });
+
+    auto pick = cpr::Post(cpr::Url{fx.url("/api/workspaces/pick-folder")});
+    ASSERT_EQ(pick.status_code, 501) << pick.text;
+    auto body = json::parse(pick.text);
+    EXPECT_EQ(body["error"], "native folder picker unavailable");
+    EXPECT_FALSE(called);
+}
+
+// 场景: 用户取消 OS 目录选择器时 route 返回 JSON null,不注册新 workspace。
+TEST(WebServerHttp, NativeFolderPickerEndpointReturnsNullOnCancel) {
+    bool called = false;
+    WebServerFixture fx(true, true, [&called]() -> std::optional<std::string> {
+        called = true;
+        return std::nullopt;
+    });
+    const auto before = fx.workspace_registry->list().size();
+
+    auto pick = cpr::Post(cpr::Url{fx.url("/api/workspaces/pick-folder")});
+    ASSERT_EQ(pick.status_code, 200) << pick.text;
+    EXPECT_EQ(pick.text, "null");
+    EXPECT_TRUE(called);
+    EXPECT_EQ(fx.workspace_registry->list().size(), before);
+}
+
+// 场景: Desktop webapp 模式通过 daemon endpoint 调原生 picker。选中目录后
+// daemon 应注册 workspace 并返回与 /api/workspaces 相同的 metadata schema。
+TEST(WebServerHttp, NativeFolderPickerEndpointRegistersSelectedFolder) {
+    auto picked_path = std::filesystem::temp_directory_path() /
+        ("acecode_picked_workspace_" + std::to_string(std::random_device{}()));
+    std::filesystem::create_directories(picked_path);
+    RemoveTreeOnExit cleanup{picked_path};
+
+    std::string picked = picked_path.string();
+    std::string expected_cwd = picked;
+    for (auto& c : expected_cwd) {
+        if (c == '\\') c = '/';
+    }
+    const std::string expected_hash = acecode::compute_cwd_hash(expected_cwd);
+
+    bool called = false;
+    WebServerFixture fx(true, true, [&called, picked]() -> std::optional<std::string> {
+        called = true;
+        return picked;
+    });
+
+    auto pick = cpr::Post(cpr::Url{fx.url("/api/workspaces/pick-folder")});
+    ASSERT_EQ(pick.status_code, 200) << pick.text;
+    EXPECT_TRUE(called);
+    auto body = json::parse(pick.text);
+    EXPECT_EQ(body["hash"], expected_hash);
+    EXPECT_EQ(body["cwd"], expected_cwd);
+    EXPECT_EQ(body["available"], true);
+
+    auto get_ws = cpr::Get(cpr::Url{fx.url("/api/workspaces")});
+    ASSERT_EQ(get_ws.status_code, 200) << get_ws.text;
+    auto workspaces = json::parse(get_ws.text);
+    bool found = false;
+    for (const auto& ws : workspaces) {
+        if (ws.value("hash", "") == expected_hash) {
+            found = true;
+            EXPECT_EQ(ws["cwd"], expected_cwd);
+        }
+    }
+    EXPECT_TRUE(found);
 }
 
 // 场景:desktop bridge 直接改 workspace.json 后,daemon 的 /api/workspaces

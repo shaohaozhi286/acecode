@@ -3,6 +3,7 @@
 #include "../utils/atomic_file.hpp"
 #include "../utils/cwd_hash.hpp"
 #include "../utils/logger.hpp"
+#include "../utils/utf8_path.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -20,7 +21,7 @@ constexpr const char* kWorkspaceJson = "workspace.json";
 
 // 给 hash 目录 + 根 projects_dir 拼出 workspace.json 完整路径。
 std::string workspace_json_path(const std::string& projects_dir, const std::string& hash) {
-    return (fs::path(projects_dir) / hash / kWorkspaceJson).string();
+    return path_to_utf8(path_from_utf8(projects_dir) / hash / kWorkspaceJson);
 }
 
 // 尝试读取 workspace.json。返回 nullopt 表示文件不存在 / 损坏 / 缺关键字段。
@@ -28,9 +29,9 @@ std::optional<WorkspaceMeta> read_workspace_json(const std::string& projects_dir
                                                  const std::string& hash) {
     std::string p = workspace_json_path(projects_dir, hash);
     std::error_code ec;
-    if (!fs::exists(p, ec) || ec) return std::nullopt;
+    if (!fs::exists(path_from_utf8(p), ec) || ec) return std::nullopt;
 
-    std::ifstream ifs(p);
+    std::ifstream ifs(path_from_utf8(p));
     if (!ifs.is_open()) return std::nullopt;
 
     std::stringstream buf;
@@ -68,14 +69,14 @@ std::optional<WorkspaceMeta> read_workspace_json(const std::string& projects_dir
 }
 
 bool write_workspace_json(const std::string& projects_dir, const WorkspaceMeta& m) {
-    fs::path dir = fs::path(projects_dir) / m.hash;
+    fs::path dir = path_from_utf8(projects_dir) / m.hash;
     std::error_code ec;
     fs::create_directories(dir, ec);
     if (ec) {
         LOG_WARN("[workspace_registry] create_directories failed: " + ec.message());
         return false;
     }
-    std::string p = (dir / kWorkspaceJson).string();
+    std::string p = path_to_utf8(dir / kWorkspaceJson);
 
     nlohmann::json j;
     j["cwd"] = m.cwd;
@@ -117,16 +118,17 @@ void WorkspaceRegistry::scan(const std::string& projects_dir) {
     entries_.clear();
 
     std::error_code ec;
-    if (!fs::exists(projects_dir, ec) || !fs::is_directory(projects_dir, ec)) {
+    fs::path native_projects_dir = path_from_utf8(projects_dir);
+    if (!fs::exists(native_projects_dir, ec) || !fs::is_directory(native_projects_dir, ec)) {
         return; // 空目录或不存在 — 注册表保持空
     }
 
-    for (auto it = fs::directory_iterator(projects_dir, ec);
+    for (auto it = fs::directory_iterator(native_projects_dir, ec);
          !ec && it != fs::directory_iterator();
          it.increment(ec)) {
         if (ec) break;
         if (!it->is_directory(ec)) continue;
-        std::string hash = it->path().filename().string();
+        std::string hash = path_to_utf8(it->path().filename());
         // hash 目录名约定: 16 位 hex。不强制(防止过滤掉合法案例),只防过短目录。
         if (hash.size() < 4) continue;
 
@@ -203,7 +205,7 @@ bool ensure_workspace_metadata(const std::string& projects_dir, const std::strin
 
     std::string p = workspace_json_path(projects_dir, m.hash);
     std::error_code ec;
-    if (fs::exists(p, ec) && !ec) {
+    if (fs::exists(path_from_utf8(p), ec) && !ec) {
         return true;
     }
     return write_workspace_json(projects_dir, m);

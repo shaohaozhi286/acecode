@@ -11,6 +11,23 @@ function lower(s) {
   return typeof s === 'string' ? s.toLowerCase() : '';
 }
 
+const FALLBACK_BUILTINS = Object.freeze([
+  Object.freeze({
+    kind: 'builtin',
+    name: 'init',
+    description: 'Analyze this codebase and generate (or improve) ACECODE.md',
+  }),
+  Object.freeze({
+    kind: 'builtin',
+    name: 'compact',
+    description: 'Compress conversation history',
+  }),
+]);
+
+export function fallbackCommands() {
+  return FALLBACK_BUILTINS.map((c) => ({ ...c }));
+}
+
 // 把后端返回的 {builtins, skills} 拍平成统一项数组,加 kind 字段以备扩展。
 // 顺序:builtins 先(后端固定 init→compact),skills 后(后端按字典序)。
 export function flattenCommands(payload) {
@@ -26,6 +43,20 @@ export function flattenCommands(payload) {
     }
   }
   return out;
+}
+
+export function commandsWithFallback(payload) {
+  const commands = flattenCommands(payload);
+  const fallbackBuiltins = fallbackCommands();
+  const fallbackNames = new Set(fallbackBuiltins.map((c) => c.name));
+  const payloadBuiltins = new Map(
+    commands
+      .filter((c) => c.kind === 'builtin' && fallbackNames.has(c.name))
+      .map((c) => [c.name, c]),
+  );
+  const mergedBuiltins = fallbackBuiltins.map((c) => payloadBuiltins.get(c.name) || c);
+  const rest = commands.filter((c) => c.kind !== 'builtin' || !fallbackNames.has(c.name));
+  return [...mergedBuiltins, ...rest];
 }
 
 // 给单条命令打分。query 已 lowercase。

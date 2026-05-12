@@ -1,5 +1,6 @@
 #include "glob_tool.hpp"
 #include "ignore_utils.hpp"
+#include "utils/utf8_path.hpp"
 #include <nlohmann/json.hpp>
 #include <filesystem>
 #include <sstream>
@@ -101,10 +102,11 @@ static ToolResult execute_glob(const std::string& arguments_json, const ToolCont
     }
 
     if (search_path.empty()) {
-        search_path = ctx.cwd.empty() ? std::filesystem::current_path().string() : ctx.cwd;
+        search_path = ctx.cwd.empty() ? current_path_utf8() : ctx.cwd;
     }
 
-    if (!std::filesystem::is_directory(search_path)) {
+    const auto search_root = path_from_utf8(search_path);
+    if (!std::filesystem::is_directory(search_root)) {
         return ToolResult{"[Error] Path is not a directory: " + search_path, false};
     }
 
@@ -113,7 +115,7 @@ static ToolResult execute_glob(const std::string& arguments_json, const ToolCont
 
     std::error_code ec;
     for (auto it = std::filesystem::recursive_directory_iterator(
-             search_path,
+             search_root,
              std::filesystem::directory_options::skip_permission_denied,
              ec);
          it != std::filesystem::recursive_directory_iterator(); ++it)
@@ -121,7 +123,7 @@ static ToolResult execute_glob(const std::string& arguments_json, const ToolCont
         if (ec) { ec.clear(); continue; }
 
         if (it->is_directory()) {
-            if (should_ignore_dir(it->path().filename().string())) {
+            if (should_ignore_dir(path_to_utf8(it->path().filename()))) {
                 it.disable_recursion_pending();
             }
             continue;
@@ -129,10 +131,10 @@ static ToolResult execute_glob(const std::string& arguments_json, const ToolCont
 
         if (!it->is_regular_file()) continue;
 
-        auto rel = std::filesystem::relative(it->path(), search_path, ec);
+        auto rel = std::filesystem::relative(it->path(), search_root, ec);
         if (ec) { ec.clear(); continue; }
 
-        std::string rel_str = rel.generic_string(); // use forward slashes
+        std::string rel_str = path_to_utf8_generic(rel); // use forward slashes
         if (glob_match(pattern, rel_str)) {
             matches.push_back(rel_str);
             if (matches.size() >= MAX_GLOB_RESULTS) {

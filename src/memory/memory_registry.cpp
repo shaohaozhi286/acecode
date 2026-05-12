@@ -4,7 +4,9 @@
 #include "memory_index.hpp"
 #include "memory_paths.hpp"
 
+#include "../utils/encoding.hpp"
 #include "../utils/logger.hpp"
+#include "../utils/utf8_path.hpp"
 
 #include <algorithm>
 #include <fstream>
@@ -22,7 +24,7 @@ std::string read_file_to_string(const fs::path& path) {
     if (!ifs.is_open()) return {};
     std::ostringstream oss;
     oss << ifs.rdbuf();
-    return oss.str();
+    return ensure_utf8(oss.str());
 }
 
 // Atomic write: dump text to `<target>.tmp-<rand>` then rename() over target.
@@ -40,9 +42,9 @@ std::string atomic_write(const fs::path& target, const std::string& content) {
 
     {
         std::ofstream ofs(tmp, std::ios::binary | std::ios::trunc);
-        if (!ofs.is_open()) return "failed to open temp file: " + tmp.string();
+        if (!ofs.is_open()) return "failed to open temp file: " + path_to_utf8(tmp);
         ofs.write(content.data(), static_cast<std::streamsize>(content.size()));
-        if (!ofs) return "failed to write temp file: " + tmp.string();
+        if (!ofs) return "failed to write temp file: " + path_to_utf8(tmp);
     }
 
     fs::rename(tmp, target, ec);
@@ -67,7 +69,7 @@ void MemoryRegistry::scan() {
         return;
     }
     if (!fs::is_directory(dir, ec)) {
-        LOG_WARN("[memory] " + dir.string() + " is not a directory; ignoring");
+        LOG_WARN("[memory] " + path_to_utf8(dir) + " is not a directory; ignoring");
         return;
     }
 
@@ -79,7 +81,7 @@ void MemoryRegistry::scan() {
         if (!fs::is_regular_file(p)) continue;
         if (p.extension() != ".md") continue;
         // Skip the index itself; entries live in sibling files.
-        std::string stem = p.stem().string();
+        std::string stem = path_to_utf8(p.stem());
         std::string stem_lower = stem;
         std::transform(stem_lower.begin(), stem_lower.end(), stem_lower.begin(),
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });

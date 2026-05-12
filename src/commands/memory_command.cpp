@@ -4,6 +4,7 @@
 #include "../memory/memory_registry.hpp"
 #include "../memory/memory_types.hpp"
 #include "../utils/logger.hpp"
+#include "../utils/utf8_path.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -87,7 +88,7 @@ void handle_list(CommandContext& ctx, const ParsedCommand& pc) {
 
     auto entries = ctx.memory->list(filter);
     std::ostringstream oss;
-    oss << "Memory directory: " << get_memory_dir().generic_string() << "\n";
+    oss << "Memory directory: " << path_to_utf8_generic(get_memory_dir()) << "\n";
     if (entries.empty()) {
         oss << "No memory entries"
             << (filter.has_value() ? " of type " + pc.type_filter : std::string{})
@@ -112,22 +113,25 @@ void handle_view(CommandContext& ctx, const ParsedCommand& pc) {
     std::ostringstream oss;
     oss << "[" << memory_type_to_string(found->type) << "] " << found->name << "\n"
         << "Description: " << found->description << "\n"
-        << "Path: " << found->path.generic_string() << "\n\n"
+        << "Path: " << path_to_utf8_generic(found->path) << "\n\n"
         << found->body;
     emit(ctx, oss.str());
 }
 
 int run_editor(const fs::path& target) {
     std::string editor;
-    const char* env = std::getenv("EDITOR");
-    if (env && *env) editor = env;
+    editor = getenv_utf8("EDITOR");
 #ifdef _WIN32
     if (editor.empty()) editor = "notepad";
 #else
     if (editor.empty()) editor = "vim";
 #endif
-    std::string cmd = editor + " \"" + target.string() + "\"";
+    std::string cmd = editor + " \"" + path_to_utf8(target) + "\"";
+#ifdef _WIN32
+    return _wsystem(utf8_to_wide(cmd).c_str());
+#else
     return std::system(cmd.c_str());
+#endif
 }
 
 void handle_edit(CommandContext& ctx, const ParsedCommand& pc) {
@@ -140,14 +144,14 @@ void handle_edit(CommandContext& ctx, const ParsedCommand& pc) {
     fs::path target = resolve_memory_entry_path(name);
     if (!fs::exists(target)) {
         emit(ctx, "No memory entry named '" + name + "' (looked for " +
-             target.generic_string() + ").");
+             path_to_utf8_generic(target) + ").");
         return;
     }
 
     int rc = run_editor(target);
     (void)rc; // rc varies per editor; reload regardless and report path.
     ctx.memory->reload();
-    emit(ctx, "Reloaded memory from disk (edited " + target.generic_string() + ").");
+    emit(ctx, "Reloaded memory from disk (edited " + path_to_utf8_generic(target) + ").");
 }
 
 void handle_forget(CommandContext& ctx, const ParsedCommand& pc) {

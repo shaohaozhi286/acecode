@@ -1,6 +1,7 @@
 #include "default_skill_seeder.hpp"
 
 #include "../utils/logger.hpp"
+#include "../utils/utf8_path.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -142,8 +143,8 @@ void write_seed_state(DefaultSkillSeedInstallResult& result) {
     nlohmann::json j;
     j["bundle_version"] = kSeedBundleVersion;
     j["first_initialization"] = result.first_initialization;
-    j["seed_skills_dir"] = result.seed_skills_dir.generic_string();
-    j["target_root"] = result.target_root.generic_string();
+    j["seed_skills_dir"] = path_to_utf8_generic(result.seed_skills_dir);
+    j["target_root"] = path_to_utf8_generic(result.target_root);
     j["generated_at_unix"] = static_cast<long long>(std::time(nullptr));
     j["skills"] = nlohmann::json::array();
 
@@ -194,18 +195,17 @@ const std::vector<DefaultSkillSeed>& default_skill_seeds() {
 }
 
 std::optional<fs::path> find_default_skill_seed_dir(const std::string& argv0_dir) {
-    if (const char* env = std::getenv("ACECODE_SEED_SKILLS_DIR")) {
-        if (env && *env) {
-            if (auto found = valid_seed_dir(fs::path(env))) return found;
-        }
+    std::string env = getenv_utf8("ACECODE_SEED_SKILLS_DIR");
+    if (!env.empty()) {
+        if (auto found = valid_seed_dir(path_from_utf8(env))) return found;
     }
 
     if (!argv0_dir.empty()) {
-        fs::path install_candidate = fs::path(argv0_dir) / ".." / "share" /
+        fs::path install_candidate = path_from_utf8(argv0_dir) / ".." / "share" /
                                      "acecode" / "seed" / "skills";
         if (auto found = valid_seed_dir(install_candidate)) return found;
 
-        fs::path probe = fs::path(argv0_dir);
+        fs::path probe = path_from_utf8(argv0_dir);
         for (int i = 0; i < 5; ++i) {
             fs::path dev_candidate = probe / "assets" / "seed" / "skills";
             if (auto found = valid_seed_dir(dev_candidate)) return found;
@@ -255,7 +255,7 @@ DefaultSkillSeedInstallResult install_default_global_skills(
         DefaultSkillSeedOutcome outcome;
         outcome.name = seed.name;
         outcome.source_id = seed.source_id;
-        outcome.relative_path = seed.relative_path.generic_string();
+        outcome.relative_path = path_to_utf8_generic(seed.relative_path);
 
         fs::path source_dir = seed_skills_dir / seed.relative_path;
         fs::path source_md = source_dir / "SKILL.md";
@@ -263,7 +263,7 @@ DefaultSkillSeedInstallResult install_default_global_skills(
 
         if (!fs::is_regular_file(source_md, ec)) {
             outcome.result = "missing_source";
-            outcome.message = source_md.generic_string();
+            outcome.message = path_to_utf8_generic(source_md);
             result.outcomes.push_back(std::move(outcome));
             continue;
         }

@@ -2,6 +2,7 @@
 
 #include "../tool/diff_utils.hpp"
 #include "../utils/logger.hpp"
+#include "../utils/utf8_path.hpp"
 #include "../utils/uuid.hpp"
 
 #include <nlohmann/json.hpp>
@@ -37,7 +38,7 @@ std::string hash_hex16(const std::string& data) {
 std::optional<std::string> read_binary_file(const fs::path& path, std::string* error = nullptr) {
     std::ifstream ifs(path, std::ios::binary);
     if (!ifs.is_open()) {
-        if (error) *error = "cannot open " + path.string();
+        if (error) *error = "cannot open " + path_to_utf8(path);
         return std::nullopt;
     }
     std::string s((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
@@ -111,17 +112,18 @@ void FileCheckpointStore::reset() {
 
 std::string FileCheckpointStore::checkpoint_dir() const {
     if (project_dir_.empty() || session_id_.empty()) return {};
-    return (fs::path(project_dir_) / "file-checkpoints" / session_id_).string();
+    return path_to_utf8(path_from_utf8(project_dir_) / "file-checkpoints" / session_id_);
 }
 
 std::string FileCheckpointStore::normalize_tracking_path(const std::string& file_path) const {
     std::error_code ec;
-    fs::path p = fs::weakly_canonical(file_path, ec);
+    fs::path native_file_path = path_from_utf8(file_path);
+    fs::path p = fs::weakly_canonical(native_file_path, ec);
     if (ec) {
-        p = fs::absolute(file_path, ec);
+        p = fs::absolute(native_file_path, ec);
     }
-    if (ec) p = fs::path(file_path);
-    std::string s = p.lexically_normal().string();
+    if (ec) p = native_file_path;
+    std::string s = path_to_utf8_generic(p.lexically_normal());
     std::replace(s.begin(), s.end(), '\\', '/');
     return s;
 }
@@ -129,7 +131,7 @@ std::string FileCheckpointStore::normalize_tracking_path(const std::string& file
 std::string FileCheckpointStore::backup_path(const std::string& backup_file_name,
                                              const std::string& session_id_override) const {
     const std::string& sid = session_id_override.empty() ? session_id_ : session_id_override;
-    return (fs::path(project_dir_) / "file-checkpoints" / sid / backup_file_name).string();
+    return path_to_utf8(path_from_utf8(project_dir_) / "file-checkpoints" / sid / backup_file_name);
 }
 
 std::string FileCheckpointStore::make_backup_file_name(
@@ -180,20 +182,21 @@ std::optional<FileCheckpointSnapshot> FileCheckpointStore::track_before_write(
     backup.backup_time = iso_timestamp();
 
     std::error_code ec;
-    if (!fs::exists(tracking_path, ec)) {
+    fs::path native_tracking_path = path_from_utf8(tracking_path);
+    if (!fs::exists(native_tracking_path, ec)) {
         backup.absent = true;
     } else {
         backup.backup_file_name = make_backup_file_name(tracking_path, backup.version);
-        const fs::path dest = backup_path(backup.backup_file_name);
+        const fs::path dest = path_from_utf8(backup_path(backup.backup_file_name));
         fs::create_directories(dest.parent_path(), ec);
         ec.clear();
-        fs::copy_file(tracking_path, dest, fs::copy_options::overwrite_existing, ec);
+        fs::copy_file(native_tracking_path, dest, fs::copy_options::overwrite_existing, ec);
         if (ec) {
             LOG_WARN("File checkpoint backup failed for " + tracking_path + ": " + ec.message());
             return std::nullopt;
         }
         ec.clear();
-        auto perms = fs::status(tracking_path, ec).permissions();
+        auto perms = fs::status(native_tracking_path, ec).permissions();
         if (!ec) {
             fs::permissions(dest, perms, ec);
         }
@@ -216,11 +219,11 @@ FileCheckpointDiffStats FileCheckpointStore::diff_stats(const std::string& user_
     if (!snapshot) return stats;
 
     for (const auto& [tracking_path, backup] : snapshot->tracked_file_backups) {
-        const fs::path original = tracking_path;
+        const fs::path original = path_from_utf8(tracking_path);
         std::optional<std::string> target_content;
         if (!backup.absent) {
             std::string error;
-            target_content = read_binary_file(backup_path(backup.backup_file_name), &error);
+            target_content = read_binary_file(path_from_utf8(backup_path(backup.backup_file_name)), &error);
             if (!target_content.has_value()) {
                 stats.errors.push_back("Missing backup for " + tracking_path + ": " + error);
                 continue;
@@ -281,7 +284,7 @@ FileCheckpointRestoreResult FileCheckpointStore::rewind_to(
             continue;
         }
 
-        const fs::path src = backup_path(backup.backup_file_name);
+        const fs::path src = path_from_utf8(backup_path(backup.backup_file_name));
         if (!fs::exists(src, ec)) {
             result.errors.push_back("Backup missing for " + tracking_path);
             continue;
@@ -350,8 +353,8 @@ std::vector<ChatMessage> FileCheckpointStore::fork_to_session(
             if (backup.absent || backup.backup_file_name.empty()) continue;
             if (!copied_backups.insert(backup.backup_file_name).second) continue;
 
-            const fs::path src = backup_path(backup.backup_file_name, old_session_id);
-            const fs::path dst = backup_path(backup.backup_file_name, new_session_id);
+            const fs::path src = path_from_utf8(backup_path(backup.backup_file_name, old_session_id));
+            const fs::path dst = path_from_utf8(backup_path(backup.backup_file_name, new_session_id));
             std::error_code ec;
             fs::create_directories(dst.parent_path(), ec);
             ec.clear();
@@ -360,7 +363,7 @@ std::vector<ChatMessage> FileCheckpointStore::fork_to_session(
                 ec.clear();
                 fs::copy_file(src, dst, fs::copy_options::overwrite_existing, ec);
                 if (ec) {
-                    LOG_WARN("File checkpoint fork copy failed for " + src.string() + ": " + ec.message());
+                    LOG_WARN("File checkpoint fork copy failed for " + path_to_utf8(src) + ": " + ec.message());
                 }
             }
         }
@@ -438,7 +441,7 @@ void FileCheckpointStore::remove_session_backups(
     const std::string& project_dir,
     const std::string& session_id) {
     std::error_code ec;
-    fs::remove_all(fs::path(project_dir) / "file-checkpoints" / session_id, ec);
+    fs::remove_all(path_from_utf8(project_dir) / "file-checkpoints" / session_id, ec);
 }
 
 void FileCheckpointStore::enforce_snapshot_cap() {
@@ -450,7 +453,7 @@ void FileCheckpointStore::enforce_snapshot_cap() {
 
 void FileCheckpointStore::cleanup_unreferenced_backups() const {
     const std::string dir = checkpoint_dir();
-    if (dir.empty() || !fs::exists(dir)) return;
+    if (dir.empty() || !fs::exists(path_from_utf8(dir))) return;
 
     std::set<std::string> referenced;
     for (const auto& snapshot : snapshots_) {
@@ -462,9 +465,9 @@ void FileCheckpointStore::cleanup_unreferenced_backups() const {
     }
 
     std::error_code ec;
-    for (const auto& entry : fs::directory_iterator(dir, ec)) {
+    for (const auto& entry : fs::directory_iterator(path_from_utf8(dir), ec)) {
         if (ec || !entry.is_regular_file()) continue;
-        const std::string name = entry.path().filename().string();
+        const std::string name = path_to_utf8(entry.path().filename());
         if (referenced.count(name) == 0) {
             fs::remove(entry.path(), ec);
         }

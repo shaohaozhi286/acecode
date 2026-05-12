@@ -12,6 +12,7 @@
 
 #include "../config/config.hpp"
 #include "../utils/logger.hpp"
+#include "../utils/utf8_path.hpp"
 
 #include <cerrno>
 #include <cstring>
@@ -27,10 +28,10 @@ namespace acecode::desktop {
 namespace {
 
 std::string default_lock_path() {
-    fs::path run_dir = fs::path(acecode::get_run_dir());
+    fs::path run_dir = acecode::path_from_utf8(acecode::get_run_dir());
     std::error_code ec;
     fs::create_directories(run_dir, ec);
-    return (run_dir / "acecode-desktop.lock").string();
+    return acecode::path_to_utf8(run_dir / "acecode-desktop.lock");
 }
 
 // 把 fd 装在 native_handle_ 里(用 intptr_t cast 进 void*),与 Windows 端

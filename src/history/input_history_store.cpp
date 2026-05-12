@@ -4,6 +4,7 @@
 #include "history/input_history_store.hpp"
 
 #include "utils/logger.hpp"
+#include "utils/utf8_path.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -30,7 +31,7 @@ bool trim_empty(const std::string& s) {
 // 原始分行，供 rewrite_atomic 等内部函数复用。
 std::vector<std::string> read_all_lines(const std::string& path) {
     std::vector<std::string> out;
-    std::ifstream ifs(path);
+    std::ifstream ifs(path_from_utf8(path));
     if (!ifs.is_open()) return out;
     std::string line;
     while (std::getline(ifs, line)) {
@@ -47,7 +48,7 @@ void rewrite_atomic(const std::string& path, const std::vector<std::string>& ent
     std::string tmp = path + ".tmp";
     try {
         {
-            std::ofstream ofs(tmp, std::ios::binary | std::ios::trunc);
+            std::ofstream ofs(path_from_utf8(tmp), std::ios::binary | std::ios::trunc);
             if (!ofs.is_open()) {
                 LOG_ERROR(std::string("[input_history] cannot open tmp file for rewrite: ") + tmp);
                 return;
@@ -59,38 +60,38 @@ void rewrite_atomic(const std::string& path, const std::vector<std::string>& ent
             }
         }
         std::error_code ec;
-        fs::rename(tmp, path, ec);
+        fs::rename(path_from_utf8(tmp), path_from_utf8(path), ec);
         if (ec) {
             // Windows 下 rename 到已存在文件会失败，降级为 remove + rename
-            fs::remove(path, ec);
+            fs::remove(path_from_utf8(path), ec);
             ec.clear();
-            fs::rename(tmp, path, ec);
+            fs::rename(path_from_utf8(tmp), path_from_utf8(path), ec);
             if (ec) {
                 LOG_ERROR(std::string("[input_history] rewrite rename failed: ") + ec.message());
-                fs::remove(tmp, ec); // 不遗留 .tmp
+                fs::remove(path_from_utf8(tmp), ec); // 不遗留 .tmp
             }
         }
     } catch (const std::exception& e) {
         LOG_ERROR(std::string("[input_history] rewrite_atomic exception: ") + e.what());
         std::error_code ec;
-        fs::remove(tmp, ec);
+        fs::remove(path_from_utf8(tmp), ec);
     }
 }
 
 } // namespace
 
 std::string InputHistoryStore::file_path(const std::string& project_dir) {
-    return (fs::path(project_dir) / "input_history.jsonl").string();
+    return path_to_utf8(path_from_utf8(project_dir) / "input_history.jsonl");
 }
 
 std::vector<std::string> InputHistoryStore::load(const std::string& path) {
     std::vector<std::string> out;
     std::error_code ec;
-    if (!fs::exists(path, ec) || ec) {
+    if (!fs::exists(path_from_utf8(path), ec) || ec) {
         return out;
     }
     try {
-        std::ifstream ifs(path);
+        std::ifstream ifs(path_from_utf8(path));
         if (!ifs.is_open()) {
             LOG_ERROR(std::string("[input_history] cannot open for read: ") + path);
             return out;
@@ -128,7 +129,7 @@ void InputHistoryStore::append(const std::string& path,
 
     try {
         // 目录按需创建（首次在该工作目录写入时必要）。
-        fs::path p(path);
+        fs::path p = path_from_utf8(path);
         if (p.has_parent_path()) {
             std::error_code ec;
             fs::create_directories(p.parent_path(), ec);
@@ -140,7 +141,7 @@ void InputHistoryStore::append(const std::string& path,
 
         // append-first：一次短 IO。
         {
-            std::ofstream ofs(path, std::ios::binary | std::ios::app);
+            std::ofstream ofs(path_from_utf8(path), std::ios::binary | std::ios::app);
             if (!ofs.is_open()) {
                 LOG_ERROR(std::string("[input_history] cannot open for append: ") + path);
                 return;
@@ -181,12 +182,12 @@ void InputHistoryStore::append(const std::string& path,
 void InputHistoryStore::clear(const std::string& path) {
     try {
         std::error_code ec;
-        fs::remove(path, ec);
+        fs::remove(path_from_utf8(path), ec);
         if (ec) {
             LOG_ERROR(std::string("[input_history] clear failed: ") + ec.message());
         }
         // .tmp 也顺手清掉，避免上一次崩溃残留
-        fs::remove(path + ".tmp", ec);
+        fs::remove(path_from_utf8(path + ".tmp"), ec);
     } catch (const std::exception& e) {
         LOG_ERROR(std::string("[input_history] clear exception: ") + e.what());
     }

@@ -42,7 +42,7 @@ public:
         rotation_dir_.clear();
         rotation_base_.clear();
         last_open_date_.clear();
-        ofs_.open(log_file, std::ios::out | std::ios::app);
+        ofs_.open(path_from_utf8_(log_file), std::ios::out | std::ios::app);
         enabled_ = ofs_.is_open();
     }
 
@@ -167,11 +167,19 @@ private:
         return format_date_(tm_buf);
     }
 
+    static std::filesystem::path path_from_utf8_(const std::string& path) {
+#ifdef _WIN32
+        return std::filesystem::u8path(path);
+#else
+        return std::filesystem::path(path);
+#endif
+    }
+
     void open_rotated_locked_(const std::string& date) {
         if (ofs_.is_open()) ofs_.close();
-        auto path = std::filesystem::path(rotation_dir_) /
+        auto path = path_from_utf8_(rotation_dir_) /
                     (rotation_base_ + "-" + date + ".log");
-        ofs_.open(path.string(), std::ios::out | std::ios::app);
+        ofs_.open(path, std::ios::out | std::ios::app);
         last_open_date_ = date;
         enabled_ = ofs_.is_open();
     }
