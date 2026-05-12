@@ -26,6 +26,7 @@
 #include "session/session_storage.hpp"
 #include "skills/skill_registry.hpp"
 #include "tool/tool_executor.hpp"
+#include "utils/encoding.hpp"
 #include "utils/cwd_hash.hpp"
 #include "web/server.hpp"
 
@@ -51,6 +52,14 @@ namespace {
 int pick_test_port() {
     static std::atomic<int> next{46000};
     return next.fetch_add(7);
+}
+
+std::filesystem::path path_from_utf8(const std::string& s) {
+#ifdef _WIN32
+    return std::filesystem::path(acecode::utf8_to_wide(s));
+#else
+    return std::filesystem::path(s);
+#endif
 }
 
 struct WebServerFixture {
@@ -523,6 +532,47 @@ TEST(WebServerHttp, FilesEndpointAllowsRegisteredWorkspaceCwd) {
                             cpr::Parameters{{"cwd", other_cwd}, {"path", "src/main.txt"}});
     ASSERT_EQ(content.status_code, 200) << content.text;
     EXPECT_EQ(content.text, "hello from registered workspace");
+}
+
+// 场景:/api/files 遇到中文文件夹/文件名时必须返回 UTF-8 JSON,不能抛异常变 500。
+TEST(WebServerHttp, FilesEndpointReturnsUtf8ForChinesePaths) {
+    WebServerFixture fx;
+
+    auto other_cwd_path = fx.tmp_dir / "files-cwd-utf8";
+    auto chinese_dir = other_cwd_path / path_from_utf8(u8"中文目录");
+    std::filesystem::create_directories(chinese_dir);
+    {
+        std::ofstream ofs(chinese_dir / path_from_utf8(u8"中文文件.txt"), std::ios::binary);
+        ofs << "hello utf8";
+    }
+    const std::string other_cwd = other_cwd_path.string();
+
+    auto post_ws = cpr::Post(cpr::Url{fx.url("/api/workspaces")},
+                             cpr::Header{{"Content-Type", "application/json"}},
+                             cpr::Body{json{{"cwd", other_cwd}}.dump()});
+    ASSERT_EQ(post_ws.status_code, 201) << post_ws.text;
+
+    auto root = cpr::Get(cpr::Url{fx.url("/api/files")},
+                         cpr::Parameters{{"cwd", other_cwd}, {"path", ""}});
+    ASSERT_EQ(root.status_code, 200) << root.text;
+    auto root_entries = json::parse(root.text);
+    bool saw_chinese_dir = false;
+    for (const auto& e : root_entries) {
+        if (e.value("name", "") == u8"中文目录" &&
+            e.value("path", "") == u8"中文目录" &&
+            e.value("kind", "") == "dir") {
+            saw_chinese_dir = true;
+        }
+    }
+    EXPECT_TRUE(saw_chinese_dir);
+
+    auto nested = cpr::Get(cpr::Url{fx.url("/api/files")},
+                           cpr::Parameters{{"cwd", other_cwd}, {"path", u8"中文目录"}});
+    ASSERT_EQ(nested.status_code, 200) << nested.text;
+    auto nested_entries = json::parse(nested.text);
+    ASSERT_EQ(nested_entries.size(), 1u);
+    EXPECT_EQ(nested_entries[0]["name"], u8"中文文件.txt");
+    EXPECT_EQ(nested_entries[0]["path"], u8"中文目录/中文文件.txt");
 }
 
 // 场景:workspace pinned-sessions API 持久化有序 session id,并过滤不存在 id。

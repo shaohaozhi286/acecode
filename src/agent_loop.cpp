@@ -1,5 +1,6 @@
 #include "agent_loop.hpp"
 #include "prompt/system_prompt.hpp"
+#include "utils/encoding.hpp"
 #include "utils/logger.hpp"
 #include "utils/stream_processing.hpp"
 #include "commands/compact.hpp"

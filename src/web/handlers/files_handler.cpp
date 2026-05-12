@@ -1,5 +1,7 @@
 #include "files_handler.hpp"
 
+#include "utils/encoding.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -31,12 +33,39 @@ namespace {
 //     vs `d:\acetest` 是同一目录;current_path / desktop bridge 报告的盘符大小写
 //     不一致是常见坑)
 std::string normalize_path_for_compare(const std::string& s) {
-    std::string out = fs::path(s).lexically_normal().generic_string();
+#ifdef _WIN32
+    fs::path path(acecode::utf8_to_wide(s));
+#else
+    fs::path path(s);
+#endif
+    std::string out;
+#ifdef _WIN32
+    out = acecode::wide_to_utf8(path.lexically_normal().generic_wstring());
+#else
+    out = path.lexically_normal().generic_string();
+#endif
     if (out.size() > 1 && out.back() == '/') out.pop_back();
 #ifdef _WIN32
     for (auto& c : out) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
 #endif
     return out;
+}
+
+fs::path path_from_utf8(const std::string& s) {
+#ifdef _WIN32
+    return fs::path(acecode::utf8_to_wide(s));
+#else
+    return fs::path(s);
+#endif
+}
+
+std::string path_to_utf8_generic(const fs::path& p) {
+    auto normalized = p.lexically_normal();
+#ifdef _WIN32
+    return acecode::wide_to_utf8(normalized.generic_wstring());
+#else
+    return normalized.generic_string();
+#endif
 }
 
 // 噪音目录黑名单 — 始终过滤,与 show_hidden 无关。
@@ -88,7 +117,7 @@ bool is_linked_directory(const fs::directory_entry& entry) {
 
 // 把 fs::path 归一成 forward-slash 字符串(跨平台,前端拼 URL 用)。
 std::string to_forward_slash(const fs::path& p) {
-    return p.lexically_normal().generic_string();
+    return path_to_utf8_generic(p);
 }
 
 // fs::file_time_type → unix epoch ms。C++17 没有标准转换,用 chrono::clock_cast
@@ -127,19 +156,19 @@ validate_path_within(const std::string& cwd,
     fs::path abs_target;
     {
         std::error_code ec;
-        abs_cwd = fs::weakly_canonical(fs::path(cwd), ec);
-        if (ec) abs_cwd = fs::path(cwd).lexically_normal();
+        abs_cwd = fs::weakly_canonical(path_from_utf8(cwd), ec);
+        if (ec) abs_cwd = path_from_utf8(cwd).lexically_normal();
     }
     {
         std::error_code ec;
-        fs::path joined = path.empty() ? abs_cwd : (abs_cwd / fs::path(path));
+        fs::path joined = path.empty() ? abs_cwd : (abs_cwd / path_from_utf8(path));
         abs_target = fs::weakly_canonical(joined, ec);
         if (ec) abs_target = joined.lexically_normal();
     }
 
     // 3) prefix 比较 — 走同样的归一(forward slash + 大小写)
-    auto cwd_cmp    = normalize_path_for_compare(abs_cwd.generic_string());
-    auto target_cmp = normalize_path_for_compare(abs_target.generic_string());
+    auto cwd_cmp    = normalize_path_for_compare(path_to_utf8_generic(abs_cwd));
+    auto target_cmp = normalize_path_for_compare(path_to_utf8_generic(abs_target));
     if (target_cmp == cwd_cmp) return abs_target;
     if (cwd_cmp.empty() || cwd_cmp.back() != '/') cwd_cmp += '/';
     if (target_cmp.rfind(cwd_cmp, 0) != 0) {
@@ -170,7 +199,7 @@ list_directory(const fs::path& abs_dir,
     for (; it != end; it.increment(ec)) {
         if (ec) break; // 单项错误不致命,跳出循环返回已收集
         const auto& entry_path = it->path();
-        std::string name = entry_path.filename().string();
+        std::string name = path_to_utf8_generic(entry_path.filename());
         if (name.empty()) continue;
 
         // noise 黑名单永远过滤

@@ -10,6 +10,7 @@
 #include <gtest/gtest.h>
 
 #include "web/handlers/files_handler.hpp"
+#include "utils/encoding.hpp"
 
 #include <cstdint>
 #include <filesystem>
@@ -52,8 +53,24 @@ void write_file(const fs::path& p, const std::string& content) {
     ofs.write(content.data(), static_cast<std::streamsize>(content.size()));
 }
 
+fs::path path_from_utf8(const std::string& s) {
+#ifdef _WIN32
+    return fs::path(acecode::utf8_to_wide(s));
+#else
+    return fs::path(s);
+#endif
+}
+
+std::string path_to_utf8(const fs::path& p) {
+#ifdef _WIN32
+    return acecode::wide_to_utf8(p.lexically_normal().generic_wstring());
+#else
+    return p.lexically_normal().generic_string();
+#endif
+}
+
 std::string cwd_str(const TempDir& d) {
-    return d.path.lexically_normal().generic_string();
+    return path_to_utf8(d.path);
 }
 
 } // namespace
@@ -214,6 +231,46 @@ TEST(FilesHandler, ListDirectoryUsesForwardSlash) {
     auto& entries = std::get<std::vector<FileEntry>>(result);
     ASSERT_EQ(entries.size(), 1u);
     EXPECT_EQ(entries[0].path, "src/main.cpp");
+}
+
+// 场景:Windows 中文文件名必须以 UTF-8 进入 JSON 层,不能走 ACP 窄字符串导致 500。
+TEST(FilesHandler, ListDirectoryReturnsUtf8ForChineseNames) {
+    TempDir tmp;
+    fs::create_directories(tmp.path / path_from_utf8(u8"中文目录"));
+    write_file(tmp.path / path_from_utf8(u8"中文文件.txt"), "hello");
+
+    auto result = list_directory(tmp.path, tmp.path, /*show_hidden=*/false);
+    ASSERT_TRUE(std::holds_alternative<std::vector<FileEntry>>(result));
+    auto& entries = std::get<std::vector<FileEntry>>(result);
+
+    bool saw_dir = false;
+    bool saw_file = false;
+    for (const auto& e : entries) {
+        EXPECT_TRUE(acecode::is_valid_utf8(e.name));
+        EXPECT_TRUE(acecode::is_valid_utf8(e.path));
+        if (e.name == u8"中文目录") {
+            saw_dir = true;
+            EXPECT_EQ(e.path, u8"中文目录");
+        }
+        if (e.name == u8"中文文件.txt") {
+            saw_file = true;
+            EXPECT_EQ(e.path, u8"中文文件.txt");
+        }
+    }
+    EXPECT_TRUE(saw_dir);
+    EXPECT_TRUE(saw_file);
+}
+
+// 场景:URL query 传入 UTF-8 中文相对路径时,validate_path_within 能解析到真实目录。
+TEST(FilesHandler, PathValidatorAcceptsUtf8ChineseSubpath) {
+    TempDir tmp;
+    auto sub = tmp.path / path_from_utf8(u8"中文目录");
+    fs::create_directories(sub);
+
+    auto cwd = cwd_str(tmp);
+    auto result = validate_path_within(cwd, u8"中文目录", {cwd});
+    ASSERT_TRUE(std::holds_alternative<fs::path>(result));
+    EXPECT_TRUE(fs::equivalent(std::get<fs::path>(result), sub));
 }
 
 // 场景:list_directory 目标不存在 → NotFound。
