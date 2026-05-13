@@ -84,7 +84,7 @@ std::optional<std::string> pick_folder(void* parent_hwnd) {
 
 } // namespace acecode::desktop
 
-#else // POSIX stub
+#elif !defined(__APPLE__) // POSIX stub (Linux etc.)
 
 #include <optional>
 #include <string>
@@ -92,7 +92,7 @@ std::optional<std::string> pick_folder(void* parent_hwnd) {
 namespace acecode::desktop {
 
 std::optional<std::string> pick_folder(void* /*parent*/) {
-    // POSIX 版本未实现 — 后续 PR 接 GTK FileChooser / NSOpenPanel。
+    // Linux 版本未实现 — 后续 PR 接 GTK FileChooser。
     return std::nullopt;
 }
 

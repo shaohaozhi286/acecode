@@ -167,6 +167,14 @@ add_library(acecode_testable OBJECT
     ${CMAKE_BINARY_DIR}/generated/version.hpp
     ${CMAKE_BINARY_DIR}/generated/static_assets_data.cpp
 )
+if(APPLE)
+    # folder_picker_mac.mm 是 Objective-C++,不在 *.cpp GLOB 里。
+    # acecode_testable 里的 worker.cpp 会调用 pick_folder,所以需在此层提供实现。
+    target_sources(acecode_testable PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/desktop/folder_picker_mac.mm
+    )
+    target_link_libraries(acecode_testable PUBLIC "-framework AppKit")
+endif()
 target_include_directories(acecode_testable PUBLIC
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_BINARY_DIR}/generated
