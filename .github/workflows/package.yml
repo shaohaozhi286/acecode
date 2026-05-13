@@ -68,6 +68,23 @@ jobs:
       - name: Run vcpkg
         uses: lukka/run-vcpkg@v11
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: '9'
+
+      - name: Build web UI
+        shell: bash
+        run: |
+          cd web
+          pnpm install --frozen-lockfile
+          pnpm build
+
       - name: Configure
         shell: bash
         run: |
