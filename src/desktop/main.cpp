@@ -98,6 +98,13 @@ std::string desktop_exe_dir() {
     return acecode::wide_to_utf8(fs::path(wpath).parent_path().wstring());
 }
 #elif defined(__APPLE__)
+bool desktop_webapp_requested(int argc, char** argv) {
+    for (int i = 1; i < argc; ++i) {
+        if (argv[i] && is_webapp_arg(argv[i])) return true;
+    }
+    return false;
+}
+
 std::string desktop_exe_dir() {
     uint32_t size = 1024;
     std::vector<char> buf(size);
