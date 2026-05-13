@@ -4,6 +4,7 @@
 #include "utils/logger.hpp"
 #include "utils/stream_processing.hpp"
 #include "commands/compact.hpp"
+#include "commands/micro_compact.hpp"
 #include "session/tool_metadata_codec.hpp"
 #include "session/session_rewind.hpp"
 #include "web/message_payload.hpp"
@@ -314,6 +315,10 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
             LOG_INFO("Auto-compact triggered: estimated tokens exceed threshold (context_window=" + std::to_string(context_window_) + ")");
             if (callbacks_.on_auto_compact) {
                 callbacks_.on_auto_compact();
+            } else {
+                // Daemon mode has no UI callback wired. Run compaction inline so
+                // web/desktop sessions don't silently overflow their context window.
+                perform_auto_compact_inline();
             }
         }
 
@@ -985,6 +990,88 @@ void AgentLoop::run_compact() {
             std::to_string(result.estimated_tokens_saved) + " tokens.",
         false);
     finish();
+}
+
+bool AgentLoop::perform_auto_compact_inline() {
+    // Called from within run_agent_with_display when callbacks_.on_auto_compact is
+    // null (daemon mode). Mirrors the two-phase compaction the TUI callback in
+    // main.cpp performs, but emits events + persists via session_manager_ instead
+    // of mutating TuiState. Must not toggle busy_ — we're still inside an active
+    // turn here.
+    if (auto_compact_consecutive_failures_ >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES) {
+        LOG_WARN("Auto-compact circuit breaker tripped (" +
+                 std::to_string(auto_compact_consecutive_failures_) +
+                 " consecutive failures), skipping");
+        return false;
+    }
+
+    // Phase 1: micro-compact (clear old tool results in place)
+    {
+        auto [boundary_start, _count] = get_messages_after_compact_boundary(messages_);
+        int pre_tokens = estimate_message_tokens(
+            std::vector<ChatMessage>(messages_.begin() + boundary_start, messages_.end()));
+        auto micro_result = run_micro_compact(messages_, boundary_start);
+        if (micro_result.performed) {
+            messages_.push_back(create_microcompact_boundary_message(
+                pre_tokens,
+                micro_result.estimated_tokens_saved,
+                micro_result.cleared_tool_call_ids));
+
+            std::ostringstream oss;
+            oss << "[Micro-compact] Cleared " << micro_result.tool_results_cleared
+                << " old tool results, saved ~"
+                << micro_result.estimated_tokens_saved << " tokens";
+            dispatch_message("system", oss.str(), false);
+
+            if (session_manager_) {
+                session_manager_->replace_active_messages(messages_);
+            }
+
+            // If micro-compact alone got us under threshold, skip Phase 2.
+            // Re-check using only the heuristic estimate — last_api_prompt_tokens_
+            // is stale (pre-micro) and would incorrectly force a full compact.
+            if (!should_auto_compact(messages_, context_window_, 0)) {
+                return true;
+            }
+        }
+    }
+
+    // Phase 2: full compact via summarization
+    dispatch_message("system", "[Auto-compact] Context approaching limit, compacting...", false);
+
+    std::shared_ptr<LlmProvider> provider;
+    if (provider_accessor_) provider = provider_accessor_();
+    if (!provider) {
+        auto_compact_consecutive_failures_++;
+        dispatch_message("system", "[Auto-compact] provider unavailable", false);
+        return false;
+    }
+
+    auto result = compact_messages(*provider, messages_, cwd_, 4, true, &abort_requested_);
+    if (!result.performed) {
+        auto_compact_consecutive_failures_++;
+        dispatch_message("system", "[Auto-compact] " + result.error, false);
+        return false;
+    }
+
+    messages_ = result.compacted_messages;
+    if (session_manager_) {
+        session_manager_->replace_active_messages(messages_);
+    }
+    events_.emit(SessionEventKind::TranscriptReplace,
+                 build_transcript_replace_payload(messages_, result));
+
+    auto_compact_consecutive_failures_ = 0;
+    // Reset the cached API-side prompt count so the next iteration's
+    // should_auto_compact check uses the estimate from the (now shorter)
+    // transcript rather than the stale pre-compact API number.
+    last_api_prompt_tokens_.store(0);
+
+    std::ostringstream oss;
+    oss << "[Auto-compact] Compacted " << result.messages_compressed
+        << " messages, saved ~" << result.estimated_tokens_saved << " tokens";
+    dispatch_message("system", oss.str(), false);
+    return true;
 }
 
 void AgentLoop::run_shell(const std::string& command) {

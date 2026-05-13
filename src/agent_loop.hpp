@@ -199,6 +199,13 @@ private:
     void run_shell(const std::string& command);
     void run_compact();
 
+    // Daemon-mode auto-compact path: invoked from within run_agent_with_display
+    // when no on_auto_compact callback is wired. Performs the same two-phase
+    // (micro then full) compaction the TUI does, but emits events + writes back
+    // through session_manager_ so web/desktop clients refresh correctly.
+    // Returns true if any compaction happened. Maintains its own circuit breaker.
+    bool perform_auto_compact_inline();
+
     // Section 7: 同时调老 on_message callback(若 TUI 挂了)和新事件流
     // (events_)。所有 on_message 触发点都该走这个 helper,确保 daemon
     // 模式下没装 callbacks 也能拿到事件。
@@ -230,6 +237,7 @@ private:
     // is called from main.cpp — gives tests / embedders a sane behavior out of the box.
     AgentLoopConfig loop_cfg_;
     std::atomic<int> last_api_prompt_tokens_{0}; // from most recent API response
+    int auto_compact_consecutive_failures_ = 0;  // circuit breaker for inline auto-compact
     SessionManager* session_manager_ = nullptr;
     const SkillRegistry* skill_registry_ = nullptr;
     const MemoryRegistry* memory_registry_ = nullptr;
