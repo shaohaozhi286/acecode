@@ -103,13 +103,20 @@ function ActivityIndicator({ activity }) {
     return () => window.clearInterval(id);
   }, [activity?.startedAtMs, activity?.phase, activity?.toolCallId, activity?.toolIndex]);
 
+  const isPermWaiting = activity?.phase === 'permission_waiting';
   const label = activity?.label || '正在处理请求';
   const detail = activity?.detail || '';
   const elapsed = formatElapsedSeconds(activity?.startedAtMs, nowMs);
   return (
     <div className="flex gap-2 max-w-[85%]">
-      <div className="w-6 h-6 rounded-full bg-ok text-white text-[11px] font-bold flex items-center justify-center mt-[2px]">A</div>
-      <div className="rounded-2xl border border-border bg-surface-hi px-3 py-2 text-[12px] text-fg shadow-sm min-w-[180px]">
+      <div className={clsx(
+        'w-6 h-6 rounded-full text-white text-[11px] font-bold flex items-center justify-center mt-[2px]',
+        isPermWaiting ? 'bg-warn' : 'bg-ok',
+      )}>A</div>
+      <div className={clsx(
+        'rounded-2xl border px-3 py-2 text-[12px] text-fg shadow-sm min-w-[180px]',
+        isPermWaiting ? 'border-warn/50 bg-warn/10' : 'border-border bg-surface-hi',
+      )}>
         <div className="flex items-center gap-2">
           <span className="font-medium">{label}</span>
           {elapsed && <span className="text-fg-mute tabular-nums">{elapsed}</span>}
@@ -119,7 +126,7 @@ function ActivityIndicator({ activity }) {
           {[0, 1, 2].map((i) => (
             <span
               key={i}
-              className="w-1.5 h-1.5 rounded-full bg-fg-mute"
+              className={clsx('w-1.5 h-1.5 rounded-full', isPermWaiting ? 'bg-warn' : 'bg-fg-mute')}
               style={{ animation: `ace-pulse 1.2s ease-in-out ${i * 0.2}s infinite` }}
             />
           ))}
@@ -1174,7 +1181,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
               </Fragment>
             );
           })}
-          {busy && streamingId == null && !hasActiveTool && (
+          {busy && streamingId == null && (!hasActiveTool || activity?.phase === 'permission_waiting') && (
             <ActivityIndicator activity={activity} />
           )}
         </div>

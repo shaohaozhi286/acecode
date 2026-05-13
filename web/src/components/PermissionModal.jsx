@@ -1,7 +1,7 @@
 // permission_request 弹框。Allow / AllowAlways / Deny 三按钮。
 // 多 request 排队由 App 层管(本组件每次只显示一个)。
 
-import { useMemo } from 'react';
+import { useMemo, useRef } from 'react';
 import { connection } from '../lib/connection.js';
 import { Modal } from './Modal.jsx';
 import { VsIcon } from './Icon.jsx';
@@ -57,15 +57,26 @@ function formatArgsPreview(args) {
 
 export function PermissionModal({ request, onResolve }) {
   const preview = useMemo(() => formatArgsPreview(request?.args), [request?.args]);
+  const resolvedRef = useRef(false);
 
   const respond = (choice, close) => {
+    resolvedRef.current = true;
     connection.sendDecision(request.request_id, choice, request.session_id);
     close();
     setTimeout(() => onResolve?.(), 220);
   };
 
+  // Escape key or backdrop click: send deny immediately so the backend is
+  // unblocked instead of waiting up to 5 minutes for the timeout.
+  const handleModalClose = () => {
+    if (!resolvedRef.current) {
+      connection.sendDecision(request.request_id, 'deny', request.session_id);
+    }
+    onResolve?.();
+  };
+
   return (
-    <Modal width={520} onClose={onResolve}>
+    <Modal width={520} onClose={handleModalClose}>
       {({ close }) => (
         <>
           <div className="px-4.5 py-3 bg-warn/10 border-b border-border flex items-center gap-2">
