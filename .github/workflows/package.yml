@@ -36,17 +36,22 @@ jobs:
             executable: acecode.exe
             archive_extension: zip
             msvc_arch: amd64
+            build_desktop: true
+            cmake_extra_args: -DACECODE_BUILD_DESKTOP=ON
           - id: macos-x64
             os: macos-15
             triplet: x64-osx
             executable: acecode
             archive_extension: tar.gz
-            cmake_extra_args: -DCMAKE_OSX_ARCHITECTURES=x86_64
+            build_desktop: true
+            cmake_extra_args: -DCMAKE_OSX_ARCHITECTURES=x86_64 -DACECODE_BUILD_DESKTOP=ON
           - id: macos-arm64
             os: macos-15
             triplet: arm64-osx
             executable: acecode
             archive_extension: tar.gz
+            build_desktop: true
+            cmake_extra_args: -DACECODE_BUILD_DESKTOP=ON
 
     steps:
       - name: Checkout
@@ -77,6 +82,11 @@ jobs:
         shell: bash
         run: cmake --build build --config Release --target acecode
 
+      - name: Build desktop
+        if: matrix.build_desktop
+        shell: bash
+        run: cmake --build build --config Release --target acecode-desktop
+
       - name: Extract debug symbols (Linux)
         if: runner.os == 'Linux'
         shell: bash
@@ -100,6 +110,9 @@ jobs:
           mkdir -p "$package_dir"
           cp "build/${{ matrix.executable }}" "$package_dir/"
           cp README.md README_CN.md "$package_dir/"
+          if [ "${{ matrix.build_desktop }}" = "true" ] && [ -d "build/ACECode.app" ]; then
+            cp -r "build/ACECode.app" "$package_dir/"
+          fi
           tar -C dist -czf "acecode-${{ matrix.id }}.tar.gz" "acecode-${{ matrix.id }}"
 
       - name: Package (Windows)
@@ -110,6 +123,9 @@ jobs:
           New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
           Copy-Item "build/${{ matrix.executable }}" "$packageDir/"
           Copy-Item "README.md","README_CN.md" "$packageDir/"
+          if ("${{ matrix.build_desktop }}" -eq "true" -and (Test-Path "build/Release/acecode-desktop.exe")) {
+            Copy-Item "build/Release/acecode-desktop.exe" "$packageDir/"
+          }
           Compress-Archive -Path "$packageDir/*" -DestinationPath "acecode-${{ matrix.id }}.zip" -Force
 
       - name: Upload artifact
@@ -125,6 +141,14 @@ jobs:
         with:
           name: acecode-${{ matrix.id }}-pdb
           path: build/**/acecode.pdb
+          if-no-files-found: warn
+
+      - name: Upload desktop PDB
+        if: runner.os == 'Windows' && matrix.build_desktop
+        uses: actions/upload-artifact@v4
+        with:
+          name: acecode-${{ matrix.id }}-desktop-pdb
+          path: build/**/acecode-desktop.pdb
           if-no-files-found: warn
 
       - name: Upload debug symbols (Linux)
