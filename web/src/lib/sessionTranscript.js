@@ -30,12 +30,18 @@ function cloneTokenUsage(tokenUsage) {
   return { ...tokenUsage };
 }
 
+function cloneGoal(goal) {
+  if (!goal || typeof goal !== 'object') return null;
+  return { ...goal };
+}
+
 function cloneState(state) {
   return {
     ...state,
     items: Array.isArray(state.items) ? state.items : [],
     toolMap: cloneToolMap(state.toolMap),
     tokenUsage: cloneTokenUsage(state.tokenUsage),
+    goal: cloneGoal(state.goal),
     activity: state.activity && typeof state.activity === 'object' ? { ...state.activity } : null,
   };
 }
@@ -184,7 +190,7 @@ function historyItemFromMessage(next, m) {
 
 function visibleTranscriptMessages(messages) {
   if (!Array.isArray(messages)) return [];
-  return messages.filter((m) => !m?.is_meta);
+  return messages.filter((m) => !m?.is_meta && !m?.metadata?.hidden_goal_context);
 }
 
 function toolKey(payload = {}) {
@@ -222,6 +228,7 @@ export function createTranscriptState(overrides = {}) {
     nextItemId: 1,
     error: '',
     tokenUsage: null,
+    goal: null,
     activity: null,
     // turnHadAssistantText / lastAssistantText 用于桌面通知:在 busy=true→false
     // 转换且本回合产生过 assistant 文本时,emit turn_completed effect。reducer 之外
@@ -231,6 +238,7 @@ export function createTranscriptState(overrides = {}) {
     ...overrides,
     toolMap: cloneToolMap(overrides.toolMap),
     tokenUsage: cloneTokenUsage(overrides.tokenUsage),
+    goal: cloneGoal(overrides.goal),
   };
 }
 
@@ -421,6 +429,14 @@ export function reduceTranscriptEvent(state, msg) {
     }
     case 'usage': {
       next.tokenUsage = normalizeUsagePayload(p, eventTs(msg));
+      break;
+    }
+    case 'goal_updated': {
+      next.goal = cloneGoal(p.goal);
+      break;
+    }
+    case 'goal_cleared': {
+      next.goal = null;
       break;
     }
     case 'busy_changed': {

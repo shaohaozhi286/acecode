@@ -1795,6 +1795,7 @@ struct WebServer::Impl {
                     if (entry->loop) {
                         json msgs = json::array();
                         for (const auto& m : entry->loop->messages()) {
+                            if (is_hidden_goal_context_message(m)) continue;
                             msgs.push_back(chat_message_to_json(m));
                         }
                         json wrapper;
@@ -1812,6 +1813,7 @@ struct WebServer::Impl {
                     json msgs = json::array();
                     for (const auto& m : SessionStorage::load_messages(candidates.front().jsonl_path)) {
                         if (is_file_checkpoint_message(m)) continue;
+                        if (is_hidden_goal_context_message(m)) continue;
                         msgs.push_back(chat_message_to_json(m));
                     }
                     json wrapper;

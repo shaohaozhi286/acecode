@@ -3,11 +3,13 @@
 #include "file_checkpoint_store.hpp"
 #include "session_storage.hpp"
 #include "session_writer_lease.hpp"
+#include "thread_goal_store.hpp"
 #include "../provider/llm_provider.hpp"
 
 #include <string>
 #include <vector>
 #include <fstream>
+#include <memory>
 #include <mutex>
 
 namespace acecode {
@@ -107,6 +109,15 @@ public:
 
     bool has_active_session() const;
 
+    // Ensure a canonical session id and metadata file exist, then return the id.
+    // Used by goal commands/tools, which can create state before the first chat
+    // message is written.
+    std::string ensure_active_session_id();
+
+    ThreadGoalStore* goal_store();
+    ThreadGoalStore* existing_goal_store();
+    const ThreadGoalStore* goal_store() const;
+
     // Set the in-memory title for the current session. Persisted to .meta.json
     // on the next update_meta() (every 5 messages, or finalize). Pass empty
     // string to clear.
@@ -149,6 +160,7 @@ private:
     bool writer_lease_active_ = false;
     bool archived_ = false;
     FileCheckpointStore checkpoint_store_;
+    std::unique_ptr<ThreadGoalStore> goal_store_;
 
     mutable std::mutex mu_;
 };

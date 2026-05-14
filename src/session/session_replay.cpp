@@ -46,6 +46,10 @@ std::vector<TuiState::Message> replay_session_messages(
         if (is_file_checkpoint_message(msg)) {
             continue;
         }
+        if (msg.metadata.is_object() &&
+            msg.metadata.value("hidden_goal_context", false)) {
+            continue;
+        }
 
         if (msg.role == "user" || msg.role == "system") {
             // 规范角色,文本承载所有信息,直接推入。

@@ -22,6 +22,11 @@ const FALLBACK_BUILTINS = Object.freeze([
     name: 'compact',
     description: 'Compress conversation history',
   }),
+  Object.freeze({
+    kind: 'builtin',
+    name: 'goal',
+    description: 'Create, view, pause, resume, edit, or clear the thread goal',
+  }),
 ]);
 
 export function fallbackCommands() {
@@ -110,7 +115,7 @@ export function parseLeadingCommand(value, knownNames = []) {
 
 export function parseExecutableBuiltinCommand(value) {
   const text = typeof value === 'string' ? value.trim() : '';
-  const leading = parseLeadingCommand(text, ['init', 'compact']);
+  const leading = parseLeadingCommand(text, ['init', 'compact', 'goal']);
   if (!leading.name) return null;
   return {
     name: leading.name,

@@ -1,6 +1,7 @@
 #include "builtin_commands.hpp"
 #include "compact.hpp"
 #include "history_command.hpp"
+#include "goal_command.hpp"
 #include "init_command.hpp"
 #include "memory_command.hpp"
 #include "model_command.hpp"
@@ -19,15 +20,75 @@
 #include "../session/session_manager.hpp"
 #include "../session/session_resume_restore.hpp"
 #include "../session/session_rewind.hpp"
+#include "../session/thread_goal_store.hpp"
 #include "../utils/logger.hpp"
 #include "../utils/terminal_title.hpp"
 #include <algorithm>
+#include <limits>
 #include <mutex>
 #include <sstream>
 #include <iomanip>
 #include <thread>
+#include <nlohmann/json.hpp>
 
 namespace acecode {
+
+namespace {
+
+std::string format_goal_status_chip(const ThreadGoal& goal) {
+    std::ostringstream oss;
+    oss << "goal: " << to_string(goal.status) << " "
+        << TokenTracker::format_tokens(static_cast<int>(std::min<std::int64_t>(
+            goal.tokens_used, static_cast<std::int64_t>(std::numeric_limits<int>::max()))));
+    if (goal.token_budget.has_value()) {
+        oss << "/" << TokenTracker::format_tokens(static_cast<int>(std::min<std::int64_t>(
+            *goal.token_budget, static_cast<std::int64_t>(std::numeric_limits<int>::max()))));
+    }
+    return oss.str();
+}
+
+void publish_goal_state_locked(TuiState& state, AgentLoop& agent_loop, SessionManager* session_manager) {
+    if (!session_manager) {
+        state.goal_status.clear();
+        return;
+    }
+    const std::string sid = session_manager->current_session_id();
+    if (sid.empty()) {
+        state.goal_status.clear();
+        agent_loop.restore_goal_runtime();
+        return;
+    }
+
+    ThreadGoalStore* store = session_manager->existing_goal_store();
+    if (!store) {
+        state.goal_status.clear();
+        agent_loop.events().emit(SessionEventKind::GoalCleared,
+            nlohmann::json{{"session_id", sid}});
+        agent_loop.restore_goal_runtime();
+        return;
+    }
+
+    std::string error;
+    auto goal = store->get_thread_goal(sid, &error);
+    if (!error.empty()) {
+        LOG_WARN("[goal] failed to publish TUI goal state: " + error);
+        state.goal_status.clear();
+        agent_loop.restore_goal_runtime();
+        return;
+    }
+    if (goal.has_value()) {
+        state.goal_status = format_goal_status_chip(*goal);
+        agent_loop.events().emit(SessionEventKind::GoalUpdated,
+            nlohmann::json{{"session_id", goal->thread_id}, {"goal", thread_goal_to_json(*goal)}});
+    } else {
+        state.goal_status.clear();
+        agent_loop.events().emit(SessionEventKind::GoalCleared,
+            nlohmann::json{{"session_id", sid}});
+    }
+    agent_loop.restore_goal_runtime();
+}
+
+} // namespace
 
 static void cmd_help(CommandContext& ctx, const std::string& /*args*/) {
     std::lock_guard<std::mutex> lk(ctx.state.mu);
@@ -39,6 +100,7 @@ static void cmd_help(CommandContext& ctx, const std::string& /*args*/) {
         << "  /model    - Show or switch current model\n"
         << "  /config   - Show current configuration\n"
         << "  /tokens   - Show session token usage\n"
+        << "  /goal     - Create, view, pause, resume, edit, or clear the thread goal\n"
         << "  /resume   - Resume a previous session\n"
         << "  /rewind   - Rewind to a previous user turn\n"
         << "  /mcp      - Manage MCP servers\n"
@@ -68,8 +130,16 @@ static void cmd_clear(CommandContext& ctx, const std::string& /*args*/) {
     ctx.agent_loop.clear_messages();
     ctx.token_tracker.reset();
     ctx.state.token_status.clear();
+    ctx.state.goal_status.clear();
+    std::string cleared_session_id;
     if (ctx.session_manager) {
+        cleared_session_id = ctx.session_manager->current_session_id();
         ctx.session_manager->end_current_session();
+    }
+    if (!cleared_session_id.empty()) {
+        ctx.agent_loop.events().emit(SessionEventKind::GoalCleared,
+            nlohmann::json{{"session_id", cleared_session_id}});
+        ctx.agent_loop.restore_goal_runtime();
     }
     if (!ctx.state.current_session_title.empty()) {
         ctx.state.current_session_title.clear();
@@ -625,6 +695,8 @@ static void do_resume_session(CommandContext& ctx, const std::string& session_id
         std::ostringstream oss;
         oss << "Resumed session " << session_id << " (" << messages.size() << " messages)";
         ctx.state.conversation.push_back({"system", oss.str(), false});
+        publish_goal_state_locked(ctx.state, ctx.agent_loop, ctx.session_manager);
+        ctx.agent_loop.maybe_continue_goal();
     }
     ctx.state.chat_follow_tail = true;
 
@@ -754,6 +826,8 @@ static void cmd_resume(CommandContext& ctx, const std::string& args) {
             std::ostringstream oss;
             oss << "Resumed session " << sid << " (" << messages.size() << " messages)";
             state.conversation.push_back({"system", oss.str(), false});
+            publish_goal_state_locked(state, *al, sm);
+            al->maybe_continue_goal();
         }
         state.chat_follow_tail = true;
 
@@ -943,6 +1017,7 @@ static void cmd_rewind(CommandContext& ctx, const std::string& /*args*/) {
                 state.pending_queue.clear();
                 state.token_status.clear();
                 token_tracker->reset();
+                publish_goal_state_locked(state, *al, sm);
                 state.chat_follow_tail = true;
                 state.chat_focus_index = static_cast<int>(state.conversation.size()) - 1;
                 state.chat_line_offset = 0;
@@ -967,6 +1042,7 @@ void register_builtin_commands(CommandRegistry& registry) {
     register_model_command(registry);
     registry.register_command({"config", "Show current configuration", cmd_config});
     registry.register_command({"tokens", "Show session token usage", cmd_tokens});
+    register_goal_command(registry);
     registry.register_command({"compact", "Compress conversation history", cmd_compact});
     registry.register_command({"resume", "Resume a previous session", cmd_resume});
     registry.register_command({"rewind", "Rewind to a previous user turn", cmd_rewind});

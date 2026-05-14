@@ -131,6 +131,51 @@ run('history replay 会恢复 usage 事件状态', () => {
   assert.equal(loaded.lastSeq, 2);
 });
 
+run('goal 事件更新和清理 transcript goal 状态', () => {
+  const goal = {
+    thread_id: 's1',
+    goal_id: 'g1',
+    objective: 'finish port',
+    status: 'active',
+    token_budget: 50000,
+    tokens_used: 1200,
+    remaining_tokens: 48800,
+  };
+  const state = reduceMany([
+    { type: 'goal_updated', payload: { goal }, seq: 1 },
+    { type: 'goal_cleared', payload: { session_id: 's1' }, seq: 2 },
+  ]);
+
+  assert.equal(state.items.length, 0);
+  assert.equal(state.goal, null);
+  assert.equal(state.lastSeq, 2);
+});
+
+run('history replay 恢复最近 goal 事件状态', () => {
+  const loaded = loadTranscriptHistory(createTranscriptState({ title: 's1' }), {
+    messages: [],
+    events: [
+      {
+        type: 'goal_updated',
+        payload: {
+          goal: {
+            thread_id: 's1',
+            goal_id: 'g1',
+            objective: 'finish port',
+            status: 'paused',
+            tokens_used: 100,
+          },
+        },
+        seq: 1,
+      },
+    ],
+  }).state;
+
+  assert.equal(loaded.goal.objective, 'finish port');
+  assert.equal(loaded.goal.status, 'paused');
+  assert.equal(loaded.lastSeq, 1);
+});
+
 run('history load 将带 tool_hunks metadata 的 tool message 恢复为 tool item', () => {
   const hunk = { old_start: 1, old_count: 1, new_start: 1, new_count: 2, lines: [] };
   const loaded = loadTranscriptHistory(createTranscriptState({ title: 's1' }), {
@@ -172,6 +217,24 @@ run('history load 不显示内部 meta 消息', () => {
     '[Conversation summary]\nold prompt summarized',
     'kept prompt',
   ]);
+});
+
+run('history load 不显示隐藏 goal context 消息', () => {
+  const loaded = loadTranscriptHistory(createTranscriptState({ title: 's1' }), {
+    messages: [
+      { id: 'u1', role: 'user', content: 'visible prompt' },
+      {
+        id: 'g1',
+        role: 'user',
+        content: '<goal_context>continue</goal_context>',
+        metadata: { hidden_goal_context: true },
+      },
+      { id: 'a1', role: 'assistant', content: 'visible answer' },
+    ],
+    events: [],
+  }).state;
+
+  assert.deepEqual(loaded.items.map((item) => item.content), ['visible prompt', 'visible answer']);
 });
 
 run('新 transcript token usage 默认为 unknown 且不跨 session 继承', () => {

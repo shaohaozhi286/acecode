@@ -60,6 +60,8 @@ openspec
 acecode.log
 daemon-*.log
 .agent
+claudecodehaha/
+hermes-agent/
 # .claude 整体忽略,但项目级 skills 入仓库共享
 .claude/*
 !.claude/skills/

@@ -77,6 +77,7 @@ void SessionManager::start_session(const std::string& cwd,
     model_preset_ = model_preset;
     surface_ = surface.empty() ? "unknown" : surface;
     project_dir_ = SessionStorage::get_project_dir(cwd);
+    goal_store_ = std::make_unique<ThreadGoalStore>(project_dir_);
     session_id_ = preset_session_id;
     jsonl_path_.clear();
     meta_path_str_.clear();
@@ -390,6 +391,7 @@ std::string SessionManager::fork_active_session(const std::vector<ChatMessage>& 
         }
     }
 
+    const std::string previous_session_id = session_id_;
     const std::string new_session_id = SessionStorage::generate_session_id();
     auto checkpoint_meta = checkpoint_store_.fork_to_session(new_session_id, retained_user_uuids);
 
@@ -429,6 +431,12 @@ std::string SessionManager::fork_active_session(const std::vector<ChatMessage>& 
         message_count_++;
     }
     update_meta();
+    if (goal_store_ && !previous_session_id.empty()) {
+        std::string goal_error;
+        if (!goal_store_->copy_goal_reset_usage(previous_session_id, session_id_, &goal_error)) {
+            LOG_WARN("[session] failed to copy goal for fork: " + goal_error);
+        }
+    }
     return session_id_;
 }
 
@@ -491,6 +499,12 @@ std::string SessionManager::fork_session_to_new_id(
     meta.forked_from     = forked_from_id;
     meta.fork_message_id = fork_message_id;
     SessionStorage::write_meta(new_meta, meta);
+    if (goal_store_ && !forked_from_id.empty()) {
+        std::string goal_error;
+        if (!goal_store_->copy_goal_reset_usage(forked_from_id, new_session_id, &goal_error)) {
+            LOG_WARN("[session] failed to copy goal for session fork: " + goal_error);
+        }
+    }
 
     return new_session_id;
 }
@@ -528,6 +542,45 @@ std::string SessionManager::current_session_id() const {
 bool SessionManager::has_active_session() const {
     std::lock_guard<std::mutex> lk(mu_);
     return created_ && !finalized_;
+}
+
+std::string SessionManager::ensure_active_session_id() {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!started_) return {};
+    if (!ensure_created()) return {};
+    return session_id_;
+}
+
+ThreadGoalStore* SessionManager::goal_store() {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (goal_store_ && !goal_store_->available()) {
+        std::string goal_error;
+        if (!goal_store_->initialize(&goal_error)) {
+            LOG_WARN("[session] goal store initialization failed: " + goal_error);
+            goal_store_.reset();
+        }
+    }
+    return goal_store_.get();
+}
+
+ThreadGoalStore* SessionManager::existing_goal_store() {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!goal_store_) return nullptr;
+    if (!goal_store_->available()) {
+        const auto db_path = ThreadGoalStore::database_path_for_project(project_dir_);
+        if (!fs::exists(db_path)) return nullptr;
+        std::string goal_error;
+        if (!goal_store_->initialize(&goal_error)) {
+            LOG_WARN("[session] goal store initialization failed: " + goal_error);
+            goal_store_.reset();
+        }
+    }
+    return goal_store_.get();
+}
+
+const ThreadGoalStore* SessionManager::goal_store() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return goal_store_.get();
 }
 
 void SessionManager::update_meta() {

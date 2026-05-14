@@ -299,7 +299,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         : '错误:' + (reason || ''),
     }),
   });
-  const { items, busy, turns, title, status: transcriptStatus, streamingId, tokenUsage, activity, applyEvent, setTitle: setTranscriptTitle } = transcript;
+  const { items, busy, turns, title, status: transcriptStatus, streamingId, tokenUsage, goal, activity, applyEvent, setTitle: setTranscriptTitle } = transcript;
   // 让 fireDesktopNotification 拿到最新 title,无需进入它的 useCallback deps。
   useEffect(() => { transcriptTitleRef.current = title || ''; }, [title]);
   const [history,  setHistory]  = useState([]);
@@ -1273,6 +1273,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         modelSwitching={modelSwitching}
         onModelChange={switchSessionModel}
         tokenBudget={tokenBudget}
+        goal={goal}
         permissionMode={permissionMode}
         permissionSwitching={permissionSwitching}
         onPermissionModeChange={switchPermissionMode}

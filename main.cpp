@@ -54,6 +54,7 @@
 #include "tool/grep_tool.hpp"
 #include "tool/glob_tool.hpp"
 #include "tool/task_complete_tool.hpp"
+#include "tool/goal_tool.hpp"
 #include "tool/mcp_manager.hpp"
 #include "tool/skills_tool.hpp"
 #include "tool/skill_view_tool.hpp"
@@ -1026,6 +1027,9 @@ static void register_builtin_tools(ToolExecutor& tools, const AppConfig& config)
     tools.register_tool(create_grep_tool());
     tools.register_tool(create_glob_tool());
     tools.register_tool(create_task_complete_tool());
+    tools.register_tool(create_get_goal_tool());
+    tools.register_tool(create_create_goal_tool());
+    tools.register_tool(create_update_goal_tool());
     if (config.web_search.enabled) {
         tools.register_tool(web_search::create_web_search_tool(
             web_search::runtime().router(), web_search::runtime().cfg()));
@@ -1657,6 +1661,11 @@ static int run_interactive_app(const CliOptions& cli,
         state.last_completion_tokens_authoritative = usage.completion_tokens;
         screen.PostEvent(Event::Custom);
     };
+    callbacks.on_goal_status = [&state, &screen](const std::string& status) {
+        std::lock_guard<std::mutex> lk(state.mu);
+        state.goal_status = status;
+        screen.PostEvent(Event::Custom);
+    };
     callbacks.on_transcript_replace = [&state, &clamp_chat_focus, &screen](
         const std::vector<ChatMessage>& /*messages*/,
         const CompactResult& result) {
@@ -1779,6 +1788,8 @@ static int run_interactive_app(const CliOptions& cli,
                 acecode::append_resumed_session_messages(messages, state, agent_loop, tools);
                 state.conversation.push_back({"system",
                     "Resumed session " + target_id + " (" + std::to_string(messages.size()) + " messages)", false});
+                agent_loop.publish_current_goal_state();
+                agent_loop.maybe_continue_goal();
                 if (!resumed_title.empty()) {
                     set_terminal_title(resumed_title);
                     state.current_session_title = resumed_title;
@@ -4307,6 +4318,9 @@ static int run_interactive_app(const CliOptions& cli,
         Element token_el = state.token_status.empty()
             ? text("")
             : text("  " + state.token_status + "  ") | dim | color(Color::CyanLight);
+        Element goal_el = state.goal_status.empty()
+            ? text("")
+            : text("  " + state.goal_status + "  ") | dim | color(Color::GreenLight);
         // Tool timer chip — persistent even when the main progress element is
         // obscured by overlays or scrolled out of view. Thinking-timer chip
         // shows elapsed time + live output-token estimate while the agent is
@@ -4322,6 +4336,7 @@ static int run_interactive_app(const CliOptions& cli,
                 filler(),
                 thinking_timer_el,
                 tool_timer_el,
+                goal_el,
                 token_el,
                 text(perm_mode_str + "  ") | dim | color(Color::GrayDark),
             });
@@ -4331,6 +4346,7 @@ static int run_interactive_app(const CliOptions& cli,
                 filler(),
                 thinking_timer_el,
                 tool_timer_el,
+                goal_el,
                 token_el,
                 text(perm_mode_str + "  ") | dim | color(Color::GrayDark),
             });
@@ -4339,6 +4355,7 @@ static int run_interactive_app(const CliOptions& cli,
                 text("  ctrl+p: cycle permission mode") | dim | color(Color::GrayDark),
                 filler(),
                 tool_timer_el,
+                goal_el,
                 token_el,
                 text(perm_mode_str + "  ") | dim | color(Color::GrayDark),
             });

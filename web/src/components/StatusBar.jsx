@@ -16,6 +16,7 @@ export function StatusBar({
   modelSwitching = false,
   onModelChange,
   tokenBudget = null,
+  goal = null,
   permissionMode = 'default',
   permissionSwitching = false,
   onPermissionModeChange,
@@ -62,6 +63,9 @@ export function StatusBar({
   ) : (
     <span className="px-1.5 py-px rounded bg-surface-hi text-[10px] max-w-[220px] truncate" title={model}>{model}</span>
   );
+  const goalLabel = goal
+    ? `${goal.status || 'goal'}${goal.token_budget ? ` ${goal.tokens_used || 0}/${goal.token_budget}` : ''}`
+    : '';
 
   return (
     <div className="h-[22px] flex items-center px-2.5 gap-4 bg-surface-alt border-t border-border text-[11px] text-fg-mute shrink-0">
@@ -110,6 +114,14 @@ export function StatusBar({
         {tokenBudget && <TokenBudgetRing budget={tokenBudget} />}
       </span>
       <span>{turns} 轮次</span>
+      {goal && (
+        <span
+          className="min-w-0 max-w-[28%] truncate px-1.5 py-px rounded bg-surface-hi text-[10px]"
+          title={goal.objective || goalLabel}
+        >
+          Goal: {goalLabel}
+        </span>
+      )}
       {branch && <span className="ml-auto truncate max-w-[40%]">{branch}</span>}
       {!branch && <span className="ml-auto" />}
     </div>

@@ -21,6 +21,11 @@ std::string compute_message_id(const ChatMessage& m) {
     return sha1_hex(buf);
 }
 
+bool is_hidden_goal_context_message(const ChatMessage& m) {
+    return m.metadata.is_object() &&
+           m.metadata.value("hidden_goal_context", false);
+}
+
 nlohmann::json chat_message_to_payload_json(const ChatMessage& m) {
     // 复用 session_serializer 的字段集合 + 顶层 id。
     nlohmann::json j;

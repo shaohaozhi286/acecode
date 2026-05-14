@@ -87,6 +87,7 @@ find_package(cpr CONFIG REQUIRED)
 find_package(ftxui CONFIG REQUIRED)
 find_package(libzip CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
+find_package(SQLite3 REQUIRED)
 
 # Crow is the HTTP/WebSocket server used by `acecode daemon`. Wired up as
 # QUIET in M1 so existing builds keep working before users re-run vcpkg
@@ -186,6 +187,7 @@ target_link_libraries(acecode_testable PUBLIC
     cpr::cpr
     libzip::zip
     nlohmann_json::nlohmann_json
+    SQLite::SQLite3
     mcp
 )
 if(Crow_FOUND)

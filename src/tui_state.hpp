@@ -91,6 +91,7 @@ struct TuiState {
     std::string current_thinking_phrase = "Thinking";
     std::string status_line; // for auth/provider status
     std::string token_status; // for token usage display
+    std::string goal_status; // compact goal status chip
 
     // Input history for up/down navigation
     std::vector<std::string> input_history;

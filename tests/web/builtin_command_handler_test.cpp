@@ -22,6 +22,16 @@ TEST(BuiltinCommandHandler, ParsesSlashTextAndArgs) {
     EXPECT_EQ(parsed.request.display_text, "/compact now");
 }
 
+TEST(BuiltinCommandHandler, ParsesGoalCommand) {
+    auto parsed = acecode::web::parse_builtin_command_request(
+        R"({"command":"/goal --tokens 50K finish migration"})");
+
+    ASSERT_TRUE(parsed.ok) << parsed.error;
+    EXPECT_EQ(parsed.request.name, "goal");
+    EXPECT_EQ(parsed.request.args, "--tokens 50K finish migration");
+    EXPECT_EQ(parsed.request.display_text, "/goal --tokens 50K finish migration");
+}
+
 TEST(BuiltinCommandHandler, RejectsUnsupportedCommand) {
     auto parsed = acecode::web::parse_builtin_command_request(
         R"({"command":"model"})");

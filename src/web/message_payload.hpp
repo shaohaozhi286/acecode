@@ -19,6 +19,7 @@ namespace acecode::web {
 
 // 计算 ChatMessage 的稳定 ID。空 content/timestamp 也不会崩。
 std::string compute_message_id(const ChatMessage& m);
+bool is_hidden_goal_context_message(const ChatMessage& m);
 
 // 把 ChatMessage 序列化为 web 协议 JSON,**总是带 id 字段**。
 // 字段集合 = session_serializer 的输出 + 顶层 id。

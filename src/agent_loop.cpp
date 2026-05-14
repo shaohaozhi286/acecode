@@ -7,6 +7,7 @@
 #include "commands/micro_compact.hpp"
 #include "session/tool_metadata_codec.hpp"
 #include "session/session_rewind.hpp"
+#include "session/thread_goal_store.hpp"
 #include "web/message_payload.hpp"
 #include "web/tool_event_payload.hpp"
 #include <nlohmann/json.hpp>
@@ -18,6 +19,7 @@
 #include <sstream>
 #include <deque>
 #include <cstdint>
+#include <limits>
 
 namespace acecode {
 
@@ -53,6 +55,25 @@ std::string format_bytes_detail(std::size_t bytes) {
     oss.setf(std::ios::fixed);
     oss.precision(1);
     oss << "参数 " << (static_cast<double>(bytes) / 1024.0) << " KB";
+    return oss.str();
+}
+
+bool is_hidden_goal_context_message(const ChatMessage& msg) {
+    return msg.metadata.is_object() &&
+           msg.metadata.value("hidden_goal_context", false);
+}
+
+std::string format_goal_status_chip(const ThreadGoal& goal) {
+    std::ostringstream oss;
+    oss << "goal: " << to_string(goal.status) << " "
+        << TokenTracker::format_tokens(static_cast<int>(std::min<std::int64_t>(
+               goal.tokens_used,
+               static_cast<std::int64_t>(std::numeric_limits<int>::max()))));
+    if (goal.token_budget.has_value()) {
+        oss << "/" << TokenTracker::format_tokens(static_cast<int>(std::min<std::int64_t>(
+            *goal.token_budget,
+            static_cast<std::int64_t>(std::numeric_limits<int>::max()))));
+    }
     return oss.str();
 }
 
@@ -142,7 +163,7 @@ void AgentLoop::worker_main() {
         }
         switch (task.kind) {
         case WorkerTask::Kind::Chat:
-            run_agent_with_display(task.payload, task.display_text);
+            run_agent_with_display(task.payload, task.display_text, task.hidden_goal_context);
             break;
         case WorkerTask::Kind::Shell:
             run_shell(task.payload);
@@ -165,6 +186,7 @@ void AgentLoop::submit(const std::string& prompt, const std::string& display_tex
         task.kind = WorkerTask::Kind::Chat;
         task.payload = prompt;
         task.display_text = display_text;
+        task.hidden_goal_context = false;
         task_queue_.push(std::move(task));
     }
     queue_cv_.notify_one();
@@ -307,6 +329,182 @@ bool AgentLoop::maybe_run_auto_compact() {
     return true;
 }
 
+void AgentLoop::restore_goal_runtime() {
+    goal_accounting_thread_id_.clear();
+    goal_accounting_goal_id_.clear();
+    goal_time_checkpoint_ = {};
+    if (!session_manager_) return;
+
+    const std::string sid = session_manager_->current_session_id();
+    ThreadGoalStore* store = session_manager_->existing_goal_store();
+    if (!store || sid.empty()) return;
+
+    std::string error;
+    auto goal = store->get_thread_goal(sid, &error);
+    if (!error.empty()) {
+        LOG_WARN("[goal] failed to restore runtime state: " + error);
+        return;
+    }
+    if (!goal.has_value() || goal->status != ThreadGoalStatus::Active) return;
+    goal_accounting_thread_id_ = sid;
+    goal_accounting_goal_id_ = goal->goal_id;
+    goal_time_checkpoint_ = std::chrono::steady_clock::now();
+}
+
+void AgentLoop::publish_current_goal_state() {
+    if (!session_manager_) {
+        if (callbacks_.on_goal_status) callbacks_.on_goal_status(std::string{});
+        return;
+    }
+
+    const std::string sid = session_manager_->current_session_id();
+    if (sid.empty()) {
+        if (callbacks_.on_goal_status) callbacks_.on_goal_status(std::string{});
+        return;
+    }
+
+    ThreadGoalStore* store = session_manager_->existing_goal_store();
+    if (!store) {
+        emit_goal_cleared(sid);
+        return;
+    }
+
+    std::string error;
+    auto goal = store->get_thread_goal(sid, &error);
+    if (!error.empty()) {
+        LOG_WARN("[goal] failed to publish current goal state: " + error);
+        if (callbacks_.on_goal_status) callbacks_.on_goal_status(std::string{});
+        return;
+    }
+    if (goal.has_value()) {
+        emit_goal_updated(*goal);
+    } else {
+        emit_goal_cleared(sid);
+    }
+}
+
+void AgentLoop::emit_goal_updated(const ThreadGoal& goal) {
+    events_.emit(SessionEventKind::GoalUpdated,
+        nlohmann::json{{"session_id", goal.thread_id}, {"goal", thread_goal_to_json(goal)}});
+    if (callbacks_.on_goal_status) {
+        callbacks_.on_goal_status(format_goal_status_chip(goal));
+    }
+    if (goal.status == ThreadGoalStatus::Active) {
+        goal_accounting_thread_id_ = goal.thread_id;
+        goal_accounting_goal_id_ = goal.goal_id;
+        goal_time_checkpoint_ = std::chrono::steady_clock::now();
+    } else if (goal.goal_id == goal_accounting_goal_id_) {
+        goal_accounting_thread_id_.clear();
+        goal_accounting_goal_id_.clear();
+        goal_time_checkpoint_ = {};
+    }
+}
+
+void AgentLoop::emit_goal_cleared(const std::string& session_id) {
+    events_.emit(SessionEventKind::GoalCleared,
+        nlohmann::json{{"session_id", session_id}});
+    if (callbacks_.on_goal_status) callbacks_.on_goal_status(std::string{});
+    if (session_id == goal_accounting_thread_id_) {
+        goal_accounting_thread_id_.clear();
+        goal_accounting_goal_id_.clear();
+        goal_time_checkpoint_ = {};
+    }
+}
+
+void AgentLoop::account_goal_usage(std::int64_t token_delta, bool allow_complete) {
+    if (!session_manager_) return;
+    const std::string sid = session_manager_->current_session_id();
+    ThreadGoalStore* store = session_manager_->existing_goal_store();
+    if (!store || sid.empty()) return;
+
+    if (goal_accounting_thread_id_ != sid || goal_accounting_goal_id_.empty()) {
+        restore_goal_runtime();
+    }
+    if (goal_accounting_thread_id_ != sid || goal_accounting_goal_id_.empty()) return;
+
+    const auto now = std::chrono::steady_clock::now();
+    std::int64_t elapsed_seconds = 0;
+    if (goal_time_checkpoint_.time_since_epoch().count() != 0) {
+        elapsed_seconds = std::chrono::duration_cast<std::chrono::seconds>(
+            now - goal_time_checkpoint_).count();
+    }
+    goal_time_checkpoint_ = now;
+
+    std::string error;
+    auto result = store->account_thread_goal_usage(
+        sid,
+        goal_accounting_goal_id_,
+        std::max<std::int64_t>(0, token_delta),
+        elapsed_seconds,
+        allow_complete,
+        &error);
+    if (!error.empty()) {
+        LOG_WARN("[goal] accounting failed: " + error);
+        return;
+    }
+    if (!result.goal.has_value()) return;
+
+    if (result.became_budget_limited) {
+        emit_goal_updated(*result.goal);
+        if (budget_notice_goal_id_ != result.goal->goal_id) {
+            budget_notice_goal_id_ = result.goal->goal_id;
+            dispatch_message("system", "[Goal] Token budget reached; automatic continuation stopped.", false);
+        }
+        return;
+    }
+
+    if (result.updated) {
+        emit_goal_updated(*result.goal);
+    }
+}
+
+std::string AgentLoop::build_goal_context_prompt(const ThreadGoal& goal) const {
+    std::ostringstream oss;
+    oss << "<goal_context>\n"
+        << "Continue working toward the active thread goal.\n\n"
+        << "Objective:\n"
+        << goal.objective << "\n\n"
+        << "Status: " << to_string(goal.status) << "\n"
+        << "Tokens used: " << goal.tokens_used;
+    if (goal.token_budget.has_value()) {
+        oss << " / " << *goal.token_budget
+            << " (remaining "
+            << std::max<std::int64_t>(0, *goal.token_budget - goal.tokens_used)
+            << ")";
+    }
+    oss << "\nElapsed seconds: " << goal.time_used_seconds << "\n\n"
+        << "When the objective is actually achieved, call update_goal with "
+        << "status \"complete\". Do not mark it complete for partial progress.\n"
+        << "</goal_context>";
+    return oss.str();
+}
+
+void AgentLoop::maybe_continue_goal() {
+    if (!session_manager_ || abort_requested_.load() || busy_.load()) return;
+    const std::string sid = session_manager_->current_session_id();
+    ThreadGoalStore* store = session_manager_->existing_goal_store();
+    if (!store || sid.empty()) return;
+
+    std::string error;
+    auto goal = store->get_thread_goal(sid, &error);
+    if (!error.empty()) {
+        LOG_WARN("[goal] failed to load goal for continuation: " + error);
+        return;
+    }
+    if (!goal.has_value() || goal->status != ThreadGoalStatus::Active) return;
+
+    {
+        std::lock_guard<std::mutex> lk(queue_mu_);
+        if (shutdown_requested_ || !task_queue_.empty()) return;
+        WorkerTask task;
+        task.kind = WorkerTask::Kind::Chat;
+        task.payload = build_goal_context_prompt(*goal);
+        task.hidden_goal_context = true;
+        task_queue_.push(std::move(task));
+    }
+    queue_cv_.notify_one();
+}
+
 void AgentLoop::inject_shell_turn(const std::string& cmd,
                                   const std::string& stdout_text,
                                   const std::string& stderr_text,
@@ -323,13 +521,15 @@ void AgentLoop::inject_shell_turn(const std::string& cmd,
 }
 
 void AgentLoop::run_agent(const std::string& user_message) {
-    run_agent_with_display(user_message, std::string{});
+    run_agent_with_display(user_message, std::string{}, false);
 }
 
 void AgentLoop::run_agent_with_display(const std::string& user_message,
-                                        const std::string& display_text) {
+                                        const std::string& display_text,
+                                        bool hidden_goal_context) {
     abort_requested_ = false;
     busy_ = true;
+    restore_goal_runtime();
 
     LOG_INFO("=== submit() user_message: " + log_truncate(user_message, 200));
 
@@ -343,20 +543,28 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
         if (!user_msg.metadata.is_object()) user_msg.metadata = nlohmann::json::object();
         user_msg.metadata["display_text"] = display_text;
     }
+    if (hidden_goal_context) {
+        if (!user_msg.metadata.is_object()) user_msg.metadata = nlohmann::json::object();
+        user_msg.metadata["hidden_goal_context"] = true;
+    }
     ensure_user_message_identity(user_msg);
     messages_.push_back(user_msg);
     if (session_manager_) {
         session_manager_->on_message(user_msg);
-        session_manager_->begin_user_turn_checkpoint(user_msg.uuid);
+        if (!hidden_goal_context) {
+            session_manager_->begin_user_turn_checkpoint(user_msg.uuid);
+        }
     }
-    nlohmann::json msg_event = {
-        {"role", "user"}, {"content", user_message},
-        {"is_tool", false}, {"id", user_msg.uuid},
-    };
-    if (!user_msg.metadata.is_null() && !user_msg.metadata.empty()) {
-        msg_event["metadata"] = user_msg.metadata;
+    if (!hidden_goal_context) {
+        nlohmann::json msg_event = {
+            {"role", "user"}, {"content", user_message},
+            {"is_tool", false}, {"id", user_msg.uuid},
+        };
+        if (!user_msg.metadata.is_null() && !user_msg.metadata.empty()) {
+            msg_event["metadata"] = user_msg.metadata;
+        }
+        events_.emit(SessionEventKind::Message, msg_event);
     }
-    events_.emit(SessionEventKind::Message, msg_event);
 
     if (callbacks_.on_busy_changed) {
         callbacks_.on_busy_changed(true);
@@ -502,6 +710,9 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
                 break;
             case StreamEventType::Usage:
                 last_api_prompt_tokens_.store(evt.usage.prompt_tokens);
+                if (evt.usage.has_data) {
+                    account_goal_usage(evt.usage.total_tokens, false);
+                }
                 if (callbacks_.on_usage) {
                     callbacks_.on_usage(evt.usage);
                 }
@@ -545,7 +756,7 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
             break;
         }
 
-        if (!accumulated.usage.has_data && callbacks_.on_usage &&
+        if (!accumulated.usage.has_data &&
             (!accumulated.content.empty() || !accumulated.tool_calls.empty())) {
             TokenUsage estimated_usage;
             estimated_usage.prompt_tokens = estimate_message_tokens(messages_with_system);
@@ -564,7 +775,10 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
             estimated_usage.has_data = false;
             // Note: don't set last_api_prompt_tokens_ here — keep it 0 so
             // should_auto_compact knows this is an estimate, not API data.
-            callbacks_.on_usage(estimated_usage);
+            account_goal_usage(estimated_usage.total_tokens, false);
+            if (callbacks_.on_usage) {
+                callbacks_.on_usage(estimated_usage);
+            }
         }
 
         if (!accumulated.has_tool_calls()) {
@@ -719,6 +933,28 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
             ToolContext tool_ctx;
             tool_ctx.cwd = cwd_;
             tool_ctx.abort_flag = &abort_requested_;
+            tool_ctx.session_manager = session_manager_;
+            tool_ctx.account_goal_usage = [this]() {
+                account_goal_usage(0, true);
+            };
+            tool_ctx.emit_goal_updated = [this](const nlohmann::json& goal_payload) {
+                if (session_manager_) {
+                    const std::string sid = session_manager_->current_session_id();
+                    ThreadGoalStore* store = session_manager_->existing_goal_store();
+                    if (store && !sid.empty()) {
+                        auto goal = store->get_thread_goal(sid);
+                        if (goal.has_value()) {
+                            emit_goal_updated(*goal);
+                            return;
+                        }
+                    }
+                    events_.emit(SessionEventKind::GoalUpdated,
+                        nlohmann::json{{"session_id", sid}, {"goal", goal_payload}});
+                }
+            };
+            tool_ctx.emit_goal_cleared = [this](const std::string& session_id) {
+                emit_goal_cleared(session_id);
+            };
             if (session_manager_) {
                 tool_ctx.track_file_write_before = [this](const std::string& path) {
                     if (session_manager_) {
@@ -890,6 +1126,7 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
                         results[idx] = ToolResult{"[Error] " + std::string(e.what()), false};
                     }
                     result_ready[idx] = true;
+                    account_goal_usage(0, false);
 
                     // Report result to TUI
                     dispatch_message("tool_result", results[idx].output, true);
@@ -969,6 +1206,7 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
                                                ctx_path, tool_ctx);
                 });
             result_ready[entry.original_index] = true;
+            account_goal_usage(0, false);
 
             dispatch_message("tool_result", results[entry.original_index].output, true);
             emit_tool_result_callback(entry.original_index);
@@ -1030,12 +1268,30 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
         dispatch_message("system", stop_msg, false);
     }
 
+    if (abort_requested_) {
+        account_goal_usage(0, false);
+        if (session_manager_) {
+            const std::string sid = session_manager_->current_session_id();
+            ThreadGoalStore* store = session_manager_->goal_store();
+            if (store && !sid.empty()) {
+                std::string error;
+                if (store->pause_active_thread_goal(sid, &error)) {
+                    auto goal = store->get_thread_goal(sid);
+                    if (goal.has_value()) emit_goal_updated(*goal);
+                }
+            }
+        }
+    } else {
+        account_goal_usage(0, false);
+    }
+
     if (callbacks_.on_busy_changed) {
         callbacks_.on_busy_changed(false);
     }
     busy_ = false;
     events_.emit(SessionEventKind::BusyChanged, nlohmann::json{{"busy", false}});
     events_.emit(SessionEventKind::Done, nlohmann::json::object());
+    maybe_continue_goal();
 }
 
 void AgentLoop::run_compact() {

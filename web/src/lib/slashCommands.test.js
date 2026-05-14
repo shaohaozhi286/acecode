@@ -31,6 +31,7 @@ const ITEMS = flattenCommands({
   builtins: [
     { name: 'init', description: 'Generate ACECODE.md' },
     { name: 'compact', description: 'Compress conversation history' },
+    { name: 'goal', description: 'Manage thread goal' },
   ],
   skills: [
     { name: 'code-review', description: 'Review code changes' },
@@ -40,28 +41,32 @@ const ITEMS = flattenCommands({
 });
 
 run('flattenCommands 注入 kind 字段并保留 builtin/skill 顺序', () => {
-  assert.equal(ITEMS.length, 5);
+  assert.equal(ITEMS.length, 6);
   assert.equal(ITEMS[0].kind, 'builtin');
   assert.equal(ITEMS[0].name, 'init');
   assert.equal(ITEMS[1].kind, 'builtin');
-  assert.equal(ITEMS[2].kind, 'skill');
-  assert.equal(ITEMS[2].name, 'code-review');
+  assert.equal(ITEMS[2].kind, 'builtin');
+  assert.equal(ITEMS[2].name, 'goal');
+  assert.equal(ITEMS[3].kind, 'skill');
+  assert.equal(ITEMS[3].name, 'code-review');
 });
 
 run('fallbackCommands 返回基础 builtin 命令', () => {
   const r = fallbackCommands();
-  assert.equal(r.length, 2);
+  assert.equal(r.length, 3);
   assert.equal(r[0].kind, 'builtin');
   assert.equal(r[0].name, 'init');
   assert.equal(r[1].kind, 'builtin');
   assert.equal(r[1].name, 'compact');
+  assert.equal(r[2].kind, 'builtin');
+  assert.equal(r[2].name, 'goal');
 });
 
 run('commandsWithFallback:空响应回退到基础命令', () => {
   const r1 = commandsWithFallback(null);
   const r2 = commandsWithFallback({ builtins: [], skills: [] });
-  assert.deepEqual(r1.map((x) => x.name), ['init', 'compact']);
-  assert.deepEqual(r2.map((x) => x.name), ['init', 'compact']);
+  assert.deepEqual(r1.map((x) => x.name), ['init', 'compact', 'goal']);
+  assert.deepEqual(r2.map((x) => x.name), ['init', 'compact', 'goal']);
 });
 
 run('commandsWithFallback:后端返回 skills 时保留 skill + builtin 组合', () => {
@@ -69,12 +74,14 @@ run('commandsWithFallback:后端返回 skills 时保留 skill + builtin 组合',
     builtins: [
       { name: 'init', description: 'Generate ACECODE.md' },
       { name: 'compact', description: 'Compress conversation history' },
+      { name: 'goal', description: 'Manage thread goal' },
     ],
     skills: [{ name: 'calculator', description: 'Exact math' }],
   });
   assert.deepEqual(r.map((x) => `${x.kind}:${x.name}`), [
     'builtin:init',
     'builtin:compact',
+    'builtin:goal',
     'skill:calculator',
   ]);
 });
@@ -86,6 +93,7 @@ run('commandsWithFallback:skills-only 响应也补上基础命令', () => {
   assert.deepEqual(r.map((x) => `${x.kind}:${x.name}`), [
     'builtin:init',
     'builtin:compact',
+    'builtin:goal',
     'skill:calculator',
   ]);
 });
@@ -98,6 +106,7 @@ run('commandsWithFallback:partial builtin 响应补齐缺失基础命令', () =>
   assert.deepEqual(r.map((x) => `${x.kind}:${x.name}`), [
     'builtin:init',
     'builtin:compact',
+    'builtin:goal',
     'skill:calculator',
   ]);
   assert.equal(r[0].description, 'custom init');
@@ -113,16 +122,18 @@ run('commandsWithFallback:额外 builtin 保留在基础命令之后', () => {
   assert.deepEqual(r.map((x) => `${x.kind}:${x.name}`), [
     'builtin:init',
     'builtin:compact',
+    'builtin:goal',
     'builtin:custom',
   ]);
 });
 
 run('空查询返回原 flatten 顺序(builtin 在前)', () => {
   const r = rankCommands('', ITEMS);
-  assert.equal(r.length, 5);
+  assert.equal(r.length, 6);
   assert.equal(r[0].name, 'init');
   assert.equal(r[1].name, 'compact');
-  assert.equal(r[2].name, 'code-review');
+  assert.equal(r[2].name, 'goal');
+  assert.equal(r[3].name, 'code-review');
 });
 
 run('name 前缀匹配 > name 子串 > description 子串', () => {
@@ -199,7 +210,7 @@ run('parseLeadingCommand:tab 与换行也算空白边界', () => {
   assert.equal(r2.headLength, 5);
 });
 
-run('parseExecutableBuiltinCommand:只识别 init 和 compact', () => {
+run('parseExecutableBuiltinCommand:识别 init、compact 和 goal', () => {
   assert.deepEqual(parseExecutableBuiltinCommand('/init'), {
     name: 'init',
     args: '',
@@ -209,6 +220,11 @@ run('parseExecutableBuiltinCommand:只识别 init 和 compact', () => {
     name: 'compact',
     args: 'now',
     display_text: '/compact now',
+  });
+  assert.deepEqual(parseExecutableBuiltinCommand('/goal --tokens 50K finish'), {
+    name: 'goal',
+    args: '--tokens 50K finish',
+    display_text: '/goal --tokens 50K finish',
   });
   assert.equal(parseExecutableBuiltinCommand('/code-review check this'), null);
   assert.equal(parseExecutableBuiltinCommand('/unknown'), null);

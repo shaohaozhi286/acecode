@@ -15,6 +15,8 @@
 
 namespace acecode {
 
+class SessionManager;
+
 // Structured summary used by the TUI to render a single-line tool-result row
 // (icon + verb + object + dot-separated metrics). Unset on tools that have not
 // opted in; the TUI then falls back to the legacy 10-line fold path.
@@ -71,6 +73,13 @@ struct ToolContext {
     //          answers: [ { question_id, selected: [str], custom_text: str } ] }
     // Empty function = AskUserQuestion tool returns the rejected ToolResult.
     std::function<nlohmann::json(const nlohmann::json& questions_payload)> ask_user_questions;
+
+    // Per-session state injected by AgentLoop. Goal tools use this instead of
+    // binding to one SessionManager at process-wide tool registration time.
+    SessionManager* session_manager = nullptr;
+    std::function<void()> account_goal_usage;
+    std::function<void(const nlohmann::json& goal_payload)> emit_goal_updated;
+    std::function<void(const std::string& session_id)> emit_goal_cleared;
 };
 
 // Origin of a registered tool. MCP tools are grouped separately in the system
