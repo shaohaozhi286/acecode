@@ -4,6 +4,7 @@
 #include "utils/logger.hpp"
 #include "utils/stream_processing.hpp"
 #include "commands/compact.hpp"
+#include "commands/micro_compact.hpp"
 #include "session/tool_metadata_codec.hpp"
 #include "session/session_rewind.hpp"
 #include "web/message_payload.hpp"
@@ -191,6 +192,121 @@ void AgentLoop::emit_system_message(const std::string& content) {
     dispatch_message("system", content, false);
 }
 
+bool AgentLoop::active_estimate_exceeds_auto_threshold() const {
+    auto [start, count] = get_messages_after_compact_boundary(messages_);
+    std::vector<ChatMessage> active(messages_.begin() + start,
+                                    messages_.begin() + start + count);
+    return estimate_message_tokens(active) > get_auto_compact_threshold(context_window_);
+}
+
+void AgentLoop::apply_compact_result(const CompactResult& result) {
+    messages_ = result.compacted_messages;
+    last_api_prompt_tokens_.store(0);
+    if (session_manager_) {
+        session_manager_->replace_active_messages(messages_);
+    }
+
+    events_.emit(SessionEventKind::TranscriptReplace,
+                 build_transcript_replace_payload(messages_, result));
+    if (callbacks_.on_transcript_replace) {
+        callbacks_.on_transcript_replace(messages_, result);
+    }
+}
+
+bool AgentLoop::maybe_run_auto_compact() {
+    if (auto_compact_consecutive_failures_ >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES) {
+        LOG_WARN("Auto-compact circuit breaker tripped (" +
+                 std::to_string(auto_compact_consecutive_failures_) +
+                 " consecutive failures)");
+        dispatch_message("system",
+                         "[Auto-compact] Skipped after repeated compaction failures.",
+                         false);
+        return false;
+    }
+
+    auto [boundary_start, boundary_count] = get_messages_after_compact_boundary(messages_);
+    (void)boundary_count;
+    int pre_tokens = estimate_message_tokens(
+        std::vector<ChatMessage>(messages_.begin() + boundary_start, messages_.end()));
+
+    auto micro_result = run_micro_compact(messages_, boundary_start);
+    if (micro_result.performed) {
+        messages_.push_back(create_microcompact_boundary_message(
+            pre_tokens,
+            micro_result.estimated_tokens_saved,
+            micro_result.cleared_tool_call_ids));
+        last_api_prompt_tokens_.store(0);
+        if (session_manager_) {
+            session_manager_->replace_active_messages(messages_);
+        }
+
+        CompactResult replace_result;
+        replace_result.performed = true;
+        replace_result.estimated_tokens_saved = micro_result.estimated_tokens_saved;
+        replace_result.compacted_messages = messages_;
+        events_.emit(SessionEventKind::TranscriptReplace,
+                     build_transcript_replace_payload(messages_, replace_result));
+
+        dispatch_message(
+            "system",
+            "[Micro-compact] Cleared " +
+                std::to_string(micro_result.tool_results_cleared) +
+                " old tool results, saved ~" +
+                TokenTracker::format_tokens(micro_result.estimated_tokens_saved) +
+                " tokens",
+            false);
+
+        if (!active_estimate_exceeds_auto_threshold()) {
+            auto_compact_consecutive_failures_ = 0;
+            return true;
+        }
+    }
+
+    events_.emit(SessionEventKind::AgentProgress, nlohmann::json{
+        {"phase", "compacting"},
+        {"label", "Compacting conversation"},
+        {"started_at_ms", now_epoch_ms()},
+    });
+    dispatch_message("system",
+                     "[Auto-compact] Context approaching limit, compacting...",
+                     false);
+
+    std::shared_ptr<LlmProvider> provider_snapshot;
+    if (provider_accessor_) provider_snapshot = provider_accessor_();
+    if (!provider_snapshot) {
+        auto_compact_consecutive_failures_++;
+        dispatch_message("system",
+                         "[Auto-compact] provider unavailable for compaction",
+                         false);
+        return false;
+    }
+
+    CompactResult result = compact_messages(
+        *provider_snapshot,
+        messages_,
+        cwd_,
+        4,
+        true,
+        &abort_requested_);
+
+    if (!result.performed) {
+        auto_compact_consecutive_failures_++;
+        dispatch_message("system", "[Auto-compact] " + result.error, false);
+        return false;
+    }
+
+    apply_compact_result(result);
+    auto_compact_consecutive_failures_ = 0;
+
+    dispatch_message(
+        "system",
+        "[Auto-compact] Compacted " + std::to_string(result.messages_compressed) +
+            " messages, saved ~" +
+            TokenTracker::format_tokens(result.estimated_tokens_saved) + " tokens",
+        false);
+    return true;
+}
+
 void AgentLoop::inject_shell_turn(const std::string& cmd,
                                   const std::string& stdout_text,
                                   const std::string& stderr_text,
@@ -312,9 +428,7 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
         // Auto-compact check: prefer API-reported token count, fallback to estimate
         if (should_auto_compact(messages_, context_window_, last_api_prompt_tokens_.load())) {
             LOG_INFO("Auto-compact triggered: estimated tokens exceed threshold (context_window=" + std::to_string(context_window_) + ")");
-            if (callbacks_.on_auto_compact) {
-                callbacks_.on_auto_compact();
-            }
+            maybe_run_auto_compact();
         }
 
         // Build system prompt each turn (dynamic: includes current tools and CWD)
@@ -970,13 +1084,7 @@ void AgentLoop::run_compact() {
         return;
     }
 
-    messages_ = result.compacted_messages;
-    if (session_manager_) {
-        session_manager_->replace_active_messages(messages_);
-    }
-
-    events_.emit(SessionEventKind::TranscriptReplace,
-                 build_transcript_replace_payload(messages_, result));
+    apply_compact_result(result);
 
     dispatch_message(
         "system",

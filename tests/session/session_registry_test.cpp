@@ -98,6 +98,58 @@ public:
     void set_model(const std::string&) override {}
 };
 
+class AutoCompactStubProvider : public acecode::LlmProvider {
+public:
+    int compact_calls = 0;
+    bool stream_saw_summary = false;
+
+    acecode::ChatResponse chat(
+        const std::vector<acecode::ChatMessage>&,
+        const std::vector<acecode::ToolDef>&) override {
+        compact_calls++;
+        acecode::ChatResponse resp;
+        resp.content = "<summary>Daemon compact summary.</summary>";
+        resp.finish_reason = "stop";
+        return resp;
+    }
+
+    void chat_stream(const std::vector<acecode::ChatMessage>& messages,
+                     const std::vector<acecode::ToolDef>&,
+                     const acecode::StreamCallback& callback,
+                     std::atomic<bool>* = nullptr) override {
+        for (const auto& msg : messages) {
+            if (msg.content.find("Daemon compact summary") != std::string::npos) {
+                stream_saw_summary = true;
+            }
+        }
+        acecode::StreamEvent delta;
+        delta.type = acecode::StreamEventType::Delta;
+        delta.content = "ok";
+        callback(delta);
+    }
+
+    std::string name() const override { return "auto-compact-stub"; }
+    bool is_authenticated() override { return true; }
+    std::string model() const override { return "auto-compact-stub"; }
+    void set_model(const std::string&) override {}
+};
+
+acecode::ChatMessage registry_msg(std::string role, std::string content) {
+    acecode::ChatMessage msg;
+    msg.role = std::move(role);
+    msg.content = std::move(content);
+    return msg;
+}
+
+void add_registry_compactable_history(acecode::AgentLoop& loop) {
+    for (int i = 0; i < 5; ++i) {
+        loop.push_message(registry_msg(
+            "user", "old user " + std::to_string(i) + " " + std::string(900, 'u')));
+        loop.push_message(registry_msg(
+            "assistant", "old assistant " + std::to_string(i) + " " + std::string(900, 'a')));
+    }
+}
+
 std::filesystem::path temp_cwd(const std::string& hint) {
     auto dir = std::filesystem::temp_directory_path() /
         ("acecode_registry_" + hint + "_" + std::to_string(std::random_device{}()));
@@ -235,6 +287,60 @@ TEST(LocalSessionClient, InitBuiltinWithProviderQueuesPromptWithDisplayText) {
         cv.wait_for(lk, 2s, [&] { return saw_user_prompt; });
     }
     EXPECT_TRUE(saw_user_prompt);
+
+    client.unsubscribe(id, sub);
+    fx.registry.destroy(id);
+    std::error_code ec;
+    std::filesystem::remove_all(cwd, ec);
+}
+
+TEST(LocalSessionClient, DaemonSessionAutoCompactsWithEmptyCallbacks) {
+    auto cwd = temp_cwd("daemon_auto_compact");
+    TestFixture fx;
+    LocalSessionClient client(fx.registry);
+
+    SessionOptions opts;
+    opts.cwd = cwd.string();
+    auto id = client.create_session(opts);
+
+    auto* entry = fx.registry.lookup(id);
+    ASSERT_NE(entry, nullptr);
+    ASSERT_NE(entry->loop, nullptr);
+    ASSERT_NE(entry->provider_slot, nullptr);
+
+    auto provider = std::make_shared<AutoCompactStubProvider>();
+    {
+        std::lock_guard<std::mutex> lk(entry->provider_slot->mu);
+        entry->provider_slot->provider = provider;
+    }
+    entry->loop->set_context_window(1);
+    add_registry_compactable_history(*entry->loop);
+
+    std::mutex mu;
+    std::condition_variable cv;
+    bool done = false;
+    bool saw_replace = false;
+    auto sub = client.subscribe(id, [&](const SessionEvent& evt) {
+        std::lock_guard<std::mutex> lk(mu);
+        if (evt.kind == SessionEventKind::TranscriptReplace) {
+            saw_replace = true;
+        }
+        if (evt.kind == SessionEventKind::Done) {
+            done = true;
+            cv.notify_all();
+        }
+    });
+    ASSERT_NE(sub, 0u);
+
+    EXPECT_TRUE(client.send_input(id, "trigger daemon auto compact"));
+    {
+        std::unique_lock<std::mutex> lk(mu);
+        ASSERT_TRUE(cv.wait_for(lk, 5s, [&] { return done; }));
+    }
+
+    EXPECT_GE(provider->compact_calls, 1);
+    EXPECT_TRUE(provider->stream_saw_summary);
+    EXPECT_TRUE(saw_replace);
 
     client.unsubscribe(id, sub);
     fx.registry.destroy(id);

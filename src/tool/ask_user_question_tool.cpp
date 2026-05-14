@@ -311,6 +311,11 @@ ToolImpl create_ask_user_question_tool(TuiState& state,
             state.ask_multi_selected.assign(
                 (*parsed)[0].options.size(), false);
             state.ask_other_input_active = false;
+            state.ask_scroll_offset = 0;
+            state.ask_scroll_total_rows = 0;
+            state.ask_scroll_visible_rows = 0;
+            state.ask_scrollbar_dragging = false;
+            state.ask_scroll_to_focus_requested = true;
         }
         screen.PostEvent(ftxui::Event::Custom);
 
@@ -333,6 +338,11 @@ ToolImpl create_ask_user_question_tool(TuiState& state,
             state.ask_other_input_active = false;
             state.ask_current_question = 0;
             state.ask_option_focus = 0;
+            state.ask_scroll_offset = 0;
+            state.ask_scroll_total_rows = 0;
+            state.ask_scroll_visible_rows = 0;
+            state.ask_scrollbar_dragging = false;
+            state.ask_scroll_to_focus_requested = false;
         }
         screen.PostEvent(ftxui::Event::Custom);
 

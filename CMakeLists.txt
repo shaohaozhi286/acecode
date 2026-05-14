@@ -150,6 +150,7 @@ endforeach()
 # are pure string logic used by main.cpp and unit tests, so compile them once
 # in acecode_testable and remove them from the TUI-only source group.
 set(ACECODE_TESTABLE_TUI_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/tui/ask_question_overlay.cpp
     ${CMAKE_SOURCE_DIR}/src/tui/text_truncation.cpp
     ${CMAKE_SOURCE_DIR}/src/tui/paste_handler.cpp
     ${CMAKE_SOURCE_DIR}/src/tui/confirm_question.cpp

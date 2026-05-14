@@ -37,12 +37,6 @@ struct CompactResult {
     std::string error;
 };
 
-struct AutoCompactTrackingState {
-    int consecutive_failures = 0;
-    bool compacted = false;
-    int turn_counter = 0;
-};
-
 struct TokenWarningState {
     double percent_left = 100.0;
     bool is_above_warning = false;

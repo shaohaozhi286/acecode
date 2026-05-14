@@ -142,6 +142,11 @@ struct TuiState {
     int ask_option_focus = 0;
     std::vector<bool> ask_multi_selected;
     bool ask_other_input_active = false;
+    int ask_scroll_offset = 0;
+    int ask_scroll_total_rows = 0;
+    int ask_scroll_visible_rows = 0;
+    bool ask_scrollbar_dragging = false;
+    bool ask_scroll_to_focus_requested = false;
 
     // Resume session picker state
     struct ResumeItem {

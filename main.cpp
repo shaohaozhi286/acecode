@@ -86,7 +86,6 @@
 #include "commands/command_registry.hpp"
 #include "commands/builtin_commands.hpp"
 #include "commands/compact.hpp"
-#include "commands/micro_compact.hpp"
 #include "utils/token_tracker.hpp"
 #include "markdown/markdown_formatter.hpp"
 #include "session/session_manager.hpp"
@@ -94,6 +93,7 @@
 #include "session/session_resume_restore.hpp"
 #include "tui/diff_view.hpp"
 #include "tui/paste_handler.hpp"
+#include "tui/ask_question_overlay.hpp"
 #include "tui/picker_scroll.hpp"
 #include "tui/render_mode_factory.hpp"
 #include "utils/terminal_capability.hpp"
@@ -103,6 +103,7 @@
 #include "tui/thick_vscroll_bar.hpp"
 #include "tui/tool_progress.hpp"
 #include "utils/base64.hpp"
+#include "utils/clipboard.hpp"
 #include "utils/terminal_title.hpp"
 #include "session/session_storage.hpp"
 #include "history/input_history_store.hpp"
@@ -722,6 +723,40 @@ static void update_ime_composition_window(const std::string& input_text,
 #include "tui_state.hpp"
 using acecode::TuiState;
 
+static void set_transient_status_line_locked(TuiState& state,
+                                             const std::string& message) {
+    if (state.status_line_clear_at.time_since_epoch().count() == 0) {
+        state.status_line_saved = state.status_line;
+    }
+    state.status_line = message;
+    state.status_line_clear_at =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+}
+
+static std::string clipboard_paste_status_message(
+    acecode::ClipboardTextReadResult::Status status) {
+    using Status = acecode::ClipboardTextReadResult::Status;
+    switch (status) {
+        case Status::Empty:
+            return "Clipboard is empty";
+        case Status::TooLarge:
+            return "Clipboard text too large (max " +
+                   std::to_string(acecode::kMaxClipboardTextBytes / (1024 * 1024)) +
+                   " MB)";
+        case Status::Unavailable:
+#ifdef _WIN32
+            return "Clipboard paste unavailable";
+#elif defined(__APPLE__)
+            return "Clipboard paste unavailable (pbpaste failed)";
+#else
+            return "Clipboard paste unavailable (install wl-clipboard, xclip, or xsel)";
+#endif
+        case Status::Success:
+        default:
+            return "";
+    }
+}
+
 struct CliOptions {
     bool dangerous_mode = false;
     bool run_configure_cmd = false;
@@ -1176,6 +1211,11 @@ static void shutdown_after_tui_loop(TuiState& state,
             // agent_loop.abort() 已经置 abort_flag,工具的 wait 谓词因此成立。
             state.ask_pending = false;
             state.ask_result_ok = false;
+            state.ask_scroll_offset = 0;
+            state.ask_scroll_total_rows = 0;
+            state.ask_scroll_visible_rows = 0;
+            state.ask_scrollbar_dragging = false;
+            state.ask_scroll_to_focus_requested = false;
             state.ask_cv.notify_one();
         }
     }
@@ -1336,6 +1376,9 @@ static int run_interactive_app(const CliOptions& cli,
     // populated by acecode::tui::thick_vscroll_bar each Render so the mouse
     // handler can hit-test "click on scrollbar" vs "click in chat content".
     Box scrollbar_box;
+    // AskUserQuestion overlay owns a separate scrollbar track while active.
+    // It must not share hit-testing state with the chat transcript scrollbar.
+    Box ask_scrollbar_box;
 
     // drag-autoscroll: 每帧渲染时由 reflect 回填每条消息的屏幕 box,
     // 下一帧 (事件线程 / anim_thread) 读这里算每条消息的行数,供
@@ -1614,12 +1657,35 @@ static int run_interactive_app(const CliOptions& cli,
         state.last_completion_tokens_authoritative = usage.completion_tokens;
         screen.PostEvent(Event::Custom);
     };
-    callbacks.on_auto_compact = [&state, &clamp_chat_focus, &screen]() -> bool {
+    callbacks.on_transcript_replace = [&state, &clamp_chat_focus, &screen](
+        const std::vector<ChatMessage>& /*messages*/,
+        const CompactResult& result) {
+        if (!result.performed || result.summary_text.empty()) {
+            return;
+        }
         std::lock_guard<std::mutex> lk(state.mu);
-        state.conversation.push_back({"system", "[Auto-compact] Context approaching limit, compacting...", false});
+        int tui_keep = 0;
+        int tui_turns = 0;
+        for (int i = static_cast<int>(state.conversation.size()) - 1; i >= 0; --i) {
+            if (state.conversation[i].role == "user") {
+                tui_turns++;
+                if (tui_turns >= 4) {
+                    tui_keep = i;
+                    break;
+                }
+            }
+        }
+        std::vector<TuiState::Message> new_conv;
+        new_conv.reserve(state.conversation.size() - tui_keep + 2);
+        new_conv.push_back({"system", "--- [Compact Boundary] ---", false});
+        new_conv.push_back({"system", "[Conversation summary]\n" + result.summary_text, false});
+        new_conv.insert(new_conv.end(),
+                        state.conversation.begin() + tui_keep,
+                        state.conversation.end());
+        state.conversation = std::move(new_conv);
+        state.chat_follow_tail = true;
         clamp_chat_focus();
         screen.PostEvent(Event::Custom);
-        return false;
     };
 
     PermissionManager permissions;
@@ -1633,85 +1699,6 @@ static int run_interactive_app(const CliOptions& cli,
     agent_loop.set_memory_config(&runtime_memory_cfg);
     agent_loop.set_project_instructions_config(&config.project_instructions);
 
-    // Auto-compact tracking state for circuit breaker
-    AutoCompactTrackingState compact_tracking;
-
-    callbacks.on_auto_compact = [&state, &clamp_chat_focus, &screen, &agent_loop, &provider_accessor,
-                                  &compact_tracking, &config, &token_tracker]() -> bool {
-        // Circuit breaker: stop after consecutive failures
-        if (compact_tracking.consecutive_failures >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES) {
-            LOG_WARN("Auto-compact circuit breaker tripped (" +
-                     std::to_string(compact_tracking.consecutive_failures) + " consecutive failures)");
-            return false;
-        }
-
-        compact_tracking.turn_counter++;
-
-        // Phase 1: Try micro-compact first
-        {
-            auto [boundary_start, boundary_count] = get_messages_after_compact_boundary(agent_loop.messages());
-            auto& msgs = agent_loop.messages_mut();
-            int pre_tokens = estimate_message_tokens(
-                std::vector<ChatMessage>(msgs.begin() + boundary_start, msgs.end()));
-
-            auto micro_result = run_micro_compact(msgs, boundary_start);
-            if (micro_result.performed) {
-                // Insert microcompact boundary marker
-                auto mc_boundary = create_microcompact_boundary_message(
-                    pre_tokens, micro_result.estimated_tokens_saved, micro_result.cleared_tool_call_ids);
-                msgs.push_back(mc_boundary);
-
-                {
-                    std::lock_guard<std::mutex> lk(state.mu);
-                    std::ostringstream oss;
-                    oss << "[Micro-compact] Cleared " << micro_result.tool_results_cleared
-                        << " old tool results, saved ~"
-                        << TokenTracker::format_tokens(micro_result.estimated_tokens_saved) << " tokens";
-                    state.conversation.push_back({"system", oss.str(), false});
-                    clamp_chat_focus();
-                }
-                screen.PostEvent(Event::Custom);
-
-                // Check if micro-compact was sufficient
-                if (!should_auto_compact(agent_loop.messages(), config.context_window, token_tracker.last_prompt_tokens())) {
-                    return true;
-                }
-            }
-        }
-
-        // Phase 2: Full compact
-        {
-            std::lock_guard<std::mutex> lk(state.mu);
-            state.conversation.push_back({"system", "[Auto-compact] Context approaching limit, compacting...", false});
-            clamp_chat_focus();
-        }
-        screen.PostEvent(Event::Custom);
-
-        auto result = compact_context(*provider_accessor(), agent_loop, state, 4, true);
-
-        if (result.performed) {
-            compact_tracking.consecutive_failures = 0;
-            compact_tracking.compacted = true;
-        } else {
-            compact_tracking.consecutive_failures++;
-        }
-
-        {
-            std::lock_guard<std::mutex> lk(state.mu);
-            if (!result.performed) {
-                state.conversation.push_back({"system", "[Auto-compact] " + result.error, false});
-            } else {
-                std::ostringstream oss;
-                oss << "[Auto-compact] Compacted " << result.messages_compressed
-                    << " messages, saved ~"
-                    << TokenTracker::format_tokens(result.estimated_tokens_saved) << " tokens";
-                state.conversation.push_back({"system", oss.str(), false});
-            }
-            clamp_chat_focus();
-        }
-        screen.PostEvent(Event::Custom);
-        return result.performed;
-    };
     agent_loop.set_callbacks(callbacks);
 
     // ---- Session manager ----
@@ -1987,8 +1974,63 @@ static int run_interactive_app(const CliOptions& cli,
         state.history_index = -1;
     };
 
+    auto can_accept_clipboard_paste_locked = [&state]() {
+        return !state.ask_pending &&
+               !state.confirm_pending &&
+               !state.exit_confirm_pending &&
+               !state.rewind_picker_active &&
+               !state.resume_picker_active &&
+               !state.model_picker_open;
+    };
+
+    auto paste_system_clipboard_text = [
+        &state,
+        &screen,
+        &cmd_registry,
+        &insert_pasted_text_at_cursor,
+        &can_accept_clipboard_paste_locked
+    ]() {
+        {
+            std::lock_guard<std::mutex> lk(state.mu);
+            if (!can_accept_clipboard_paste_locked()) {
+                return true;
+            }
+        }
+
+        auto clipboard = acecode::read_system_clipboard_text();
+
+        {
+            std::lock_guard<std::mutex> lk(state.mu);
+            if (!can_accept_clipboard_paste_locked()) {
+                return true;
+            }
+            if (!clipboard) {
+                set_transient_status_line_locked(
+                    state, clipboard_paste_status_message(clipboard.status));
+                screen.PostEvent(Event::Custom);
+                return true;
+            }
+
+            std::string normalized =
+                acecode::tui::normalize_pasted_text(clipboard.text);
+            if (normalized.empty()) {
+                set_transient_status_line_locked(
+                    state,
+                    clipboard_paste_status_message(
+                        acecode::ClipboardTextReadResult::Status::Empty));
+                screen.PostEvent(Event::Custom);
+                return true;
+            }
+
+            insert_pasted_text_at_cursor(normalized);
+            refresh_slash_dropdown(state, cmd_registry);
+        }
+        screen.PostEvent(Event::Custom);
+        return true;
+    };
+
     // Wrap with CatchEvent to handle all keyboard input
-    auto input_with_esc = CatchEvent(input_renderer, [&state, &screen, &clamp_chat_focus, &auth_done, &cmd_registry, &agent_loop, &provider_slot, &provider_accessor, &config, &token_tracker, &permissions, &session_manager, &scroll_chat_by_lines, &chat_box, &scrollbar_box, &message_line_counts, &mcp_manager, &tools, &skill_registry, &memory_registry, &working_dir, &insert_pasted_text_at_cursor](Event event) {
+    auto input_with_esc = CatchEvent(input_renderer, [&state, &screen, &clamp_chat_focus, &auth_done, &cmd_registry, &agent_loop, &provider_slot, &provider_accessor, &config, &token_tracker, &permissions, &session_manager, &scroll_chat_by_lines, &chat_box, &scrollbar_box, &ask_scrollbar_box, &message_line_counts, &mcp_manager, &tools, &skill_registry, &memory_registry, &working_dir, &insert_pasted_text_at_cursor, &paste_system_clipboard_text](Event event) {
         // drag-autoscroll: 事件线程入口处消费 anim_thread 攒下的 selection 偏移
         // 补偿. 所有对 FTXUI selection_data_ 的写都发生在这条路径上, 跟
         // HandleSelection 串行 — 避免跨线程数据竞争. 不 return, 让事件继续正常处理.
@@ -2022,6 +2064,9 @@ static int run_interactive_app(const CliOptions& cli,
             if (pr.consume) {
                 return true;
             }
+        }
+        if (event == Event::CtrlV) {
+            return paste_system_clipboard_text();
         }
         if (event == Event::CtrlC) {
             // If an operation is active, Ctrl+C behaves like Escape: cancel the
@@ -2092,6 +2137,112 @@ static int run_interactive_app(const CliOptions& cli,
                 const int option_count = static_cast<int>(q.options.size());
                 const int total_rows = option_count + 1; // + "Other..."
 
+                auto reset_ask_scroll_state = [&]() {
+                    state.ask_scroll_offset = 0;
+                    state.ask_scroll_total_rows = 0;
+                    state.ask_scroll_visible_rows = 0;
+                    state.ask_scrollbar_dragging = false;
+                    state.ask_scroll_to_focus_requested = false;
+                };
+
+                auto clamp_ask_scroll = [&]() {
+                    state.ask_scroll_offset = acecode::tui::clamp_scroll_offset(
+                        state.ask_scroll_offset,
+                        state.ask_scroll_total_rows,
+                        state.ask_scroll_visible_rows);
+                };
+
+                auto scroll_ask_by_lines = [&](int delta) {
+                    const int before = state.ask_scroll_offset;
+                    state.ask_scroll_offset = acecode::tui::scroll_offset_by_lines(
+                        state.ask_scroll_offset, delta,
+                        state.ask_scroll_total_rows,
+                        state.ask_scroll_visible_rows);
+                    return state.ask_scroll_offset != before;
+                };
+
+                auto scroll_ask_to_mouse_y = [&](int mouse_y) {
+                    const int track_height =
+                        ask_scrollbar_box.y_max - ask_scrollbar_box.y_min + 1;
+                    state.ask_scroll_offset = acecode::tui::scroll_offset_for_track_y(
+                        mouse_y, ask_scrollbar_box.y_min, track_height,
+                        state.ask_scroll_total_rows,
+                        state.ask_scroll_visible_rows);
+                };
+
+                auto advance_or_finish_question = [&]() {
+                    state.ask_current_question++;
+                    if (state.ask_current_question >=
+                        static_cast<int>(state.ask_questions.size())) {
+                        state.ask_result_ok = true;
+                        state.ask_pending = false;
+                        reset_ask_scroll_state();
+                        state.ask_cv.notify_one();
+                    } else {
+                        state.ask_option_focus = 0;
+                        state.ask_multi_selected.assign(
+                            state.ask_questions[state.ask_current_question]
+                                .options.size(), false);
+                        state.ask_other_input_active = false;
+                        state.ask_scroll_offset = 0;
+                        state.ask_scrollbar_dragging = false;
+                        state.ask_scroll_to_focus_requested = true;
+                        clamp_ask_scroll();
+                    }
+                };
+
+                if (event == Event::PageUp || event == Event::PageDown) {
+                    const int page_step =
+                        std::max(1, state.ask_scroll_visible_rows - 1);
+                    const int delta =
+                        (event == Event::PageUp) ? -page_step : page_step;
+                    if (scroll_ask_by_lines(delta)) {
+                        screen.PostEvent(Event::Custom);
+                    }
+                    return true;
+                }
+
+                if (event.is_mouse()) {
+                    auto& mouse = event.mouse();
+                    constexpr int WHEEL_LINES = 3;
+                    if (mouse.button == Mouse::WheelUp) {
+                        if (scroll_ask_by_lines(-WHEEL_LINES)) {
+                            screen.PostEvent(Event::Custom);
+                        }
+                        return true;
+                    }
+                    if (mouse.button == Mouse::WheelDown) {
+                        if (scroll_ask_by_lines(WHEEL_LINES)) {
+                            screen.PostEvent(Event::Custom);
+                        }
+                        return true;
+                    }
+                    if (mouse.button == Mouse::Left &&
+                        mouse.motion == Mouse::Pressed &&
+                        state.ask_scroll_total_rows > state.ask_scroll_visible_rows &&
+                        ask_scrollbar_box.Contain(mouse.x, mouse.y)) {
+                        state.ask_scrollbar_dragging = true;
+                        scroll_ask_to_mouse_y(mouse.y);
+                        screen.PostEvent(Event::Custom);
+                        return true;
+                    }
+                    if (mouse.button == Mouse::Left &&
+                        mouse.motion == Mouse::Released) {
+                        if (state.ask_scrollbar_dragging) {
+                            state.ask_scrollbar_dragging = false;
+                            screen.PostEvent(Event::Custom);
+                        }
+                        return true;
+                    }
+                    if (mouse.motion == Mouse::Moved &&
+                        state.ask_scrollbar_dragging) {
+                        scroll_ask_to_mouse_y(mouse.y);
+                        screen.PostEvent(Event::Custom);
+                        return true;
+                    }
+                    return true;
+                }
+
                 // Esc —— 整体拒绝。
                 if (event == Event::Escape) {
                     if (state.ask_other_input_active) {
@@ -2102,6 +2253,7 @@ static int run_interactive_app(const CliOptions& cli,
                     } else {
                         state.ask_result_ok = false;
                         state.ask_pending = false;
+                        reset_ask_scroll_state();
                         state.ask_cv.notify_one();
                     }
                     screen.PostEvent(Event::Custom);
@@ -2117,18 +2269,7 @@ static int run_interactive_app(const CliOptions& cli,
                         state.ask_result_answers[q.question] = answer;
 
                         // 推进到下一题或提交。
-                        state.ask_current_question++;
-                        if (state.ask_current_question >=
-                            static_cast<int>(state.ask_questions.size())) {
-                            state.ask_result_ok = true;
-                            state.ask_pending = false;
-                            state.ask_cv.notify_one();
-                        } else {
-                            state.ask_option_focus = 0;
-                            state.ask_multi_selected.assign(
-                                state.ask_questions[state.ask_current_question]
-                                    .options.size(), false);
-                        }
+                        advance_or_finish_question();
                         screen.PostEvent(Event::Custom);
                         return true;
                     }
@@ -2151,6 +2292,7 @@ static int run_interactive_app(const CliOptions& cli,
                     event == Event::Character('k')) {
                     state.ask_option_focus =
                         (state.ask_option_focus - 1 + total_rows) % total_rows;
+                    state.ask_scroll_to_focus_requested = true;
                     screen.PostEvent(Event::Custom);
                     return true;
                 }
@@ -2158,6 +2300,7 @@ static int run_interactive_app(const CliOptions& cli,
                     event == Event::Character('j')) {
                     state.ask_option_focus =
                         (state.ask_option_focus + 1) % total_rows;
+                    state.ask_scroll_to_focus_requested = true;
                     screen.PostEvent(Event::Custom);
                     return true;
                 }
@@ -2184,6 +2327,7 @@ static int run_interactive_app(const CliOptions& cli,
                         state.ask_other_input_active = true;
                         state.input_text.clear(); state.pasted_texts.clear();
                         state.input_cursor = 0;
+                        state.ask_scroll_to_focus_requested = true;
                         screen.PostEvent(Event::Custom);
                         return true;
                     }
@@ -2204,18 +2348,7 @@ static int run_interactive_app(const CliOptions& cli,
                     state.ask_result_answers[q.question] = answer;
 
                     // 推进或提交。
-                    state.ask_current_question++;
-                    if (state.ask_current_question >=
-                        static_cast<int>(state.ask_questions.size())) {
-                        state.ask_result_ok = true;
-                        state.ask_pending = false;
-                        state.ask_cv.notify_one();
-                    } else {
-                        state.ask_option_focus = 0;
-                        state.ask_multi_selected.assign(
-                            state.ask_questions[state.ask_current_question]
-                                .options.size(), false);
-                    }
+                    advance_or_finish_question();
                     screen.PostEvent(Event::Custom);
                     return true;
                 }
@@ -2895,15 +3028,14 @@ static int run_interactive_app(const CliOptions& cli,
         if (event.is_mouse()) {
             auto& mouse = event.mouse();
 
-            // mouse-selection-copy: right-click-press copies the current
-            // FTXUI selection to the terminal clipboard via OSC 52. Runs
-            // anywhere inside the TUI (not gated by chat_box) so users can
-            // right-click wherever feels natural. Silent no-op when the
-            // selection is empty.
+            // mouse-selection-copy / clipboard-paste: right-click copies the
+            // current FTXUI selection via OSC 52. With no selection, terminal
+            // mouse tracking prevents the host context menu on many Linux
+            // terminals, so use the click as an explicit clipboard paste.
             if (mouse.button == Mouse::Right && mouse.motion == Mouse::Pressed) {
                 std::string sel = screen.GetSelection();
                 if (sel.empty()) {
-                    return false;
+                    return paste_system_clipboard_text();
                 }
                 std::string seq = "\x1b]52;c;" + base64_encode(sel) + "\x1b\\";
                 std::fwrite(seq.data(), 1, seq.size(), stdout);
@@ -2916,13 +3048,7 @@ static int run_interactive_app(const CliOptions& cli,
                     // number shown matches what OSC 52 actually transports.
                     std::string msg = "Copied " + std::to_string(sel.size()) +
                                       " bytes to clipboard";
-                    // Snapshot the prior status so we can restore it on clear.
-                    if (state.status_line_clear_at.time_since_epoch().count() == 0) {
-                        state.status_line_saved = state.status_line;
-                    }
-                    state.status_line = msg;
-                    state.status_line_clear_at =
-                        std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+                    set_transient_status_line_locked(state, msg);
                 }
                 screen.PostEvent(Event::Custom);
                 return true;
@@ -3347,7 +3473,7 @@ static int run_interactive_app(const CliOptions& cli,
         return false;
     });
 
-    auto renderer = Renderer(input_with_esc, [&state, &screen, &version_str, &cwd_display, &chat_box, &scrollbar_box, &message_boxes, &message_line_counts, &anim_tick, &input_with_esc, &permissions, dangerous_mode] {
+    auto renderer = Renderer(input_with_esc, [&state, &screen, &version_str, &cwd_display, &chat_box, &scrollbar_box, &ask_scrollbar_box, &message_boxes, &message_line_counts, &anim_tick, &input_with_esc, &permissions, dangerous_mode] {
         std::lock_guard<std::mutex> lk(state.mu);
 
         // drag-autoscroll: 把上一帧 reflect 回填的 box 高度同步到行数表,
@@ -3971,66 +4097,104 @@ static int run_interactive_app(const CliOptions& cli,
         // 显式让 ask 优先(事件层在 confirm 分支之前也已经拦截,这里只是
         // 作为显式护栏)。
         Element ask_overlay_element = text("");
+        ask_scrollbar_box = Box{};
         if (state.ask_pending && !state.ask_questions.empty() &&
             state.ask_current_question >= 0 &&
             state.ask_current_question <
                 static_cast<int>(state.ask_questions.size())) {
             const auto& q = state.ask_questions[state.ask_current_question];
+            const auto terminal_size = Terminal::Size();
+            const int content_width = std::max(20, terminal_size.dimx - 10);
+            const int max_visible_rows =
+                std::max(4, std::min(14, terminal_size.dimy - 12));
+
+            acecode::tui::AskOverlayLayoutInput layout_input;
+            layout_input.question = &q;
+            layout_input.current_question_index = state.ask_current_question;
+            layout_input.total_questions =
+                static_cast<int>(state.ask_questions.size());
+            layout_input.option_focus = state.ask_option_focus;
+            layout_input.multi_selected = state.ask_multi_selected;
+            layout_input.other_input_active = state.ask_other_input_active;
+            layout_input.content_width = content_width;
+
+            auto layout = acecode::tui::build_ask_overlay_layout(layout_input);
+            const int total = static_cast<int>(layout.rows.size());
+            const int visible = total > 0 ? std::min(total, max_visible_rows) : 0;
+
+            if (state.ask_scroll_to_focus_requested &&
+                layout.focused_row_begin >= 0) {
+                state.ask_scroll_offset = acecode::tui::ensure_row_range_visible(
+                    state.ask_scroll_offset,
+                    visible,
+                    total,
+                    layout.focused_row_begin,
+                    layout.focused_row_end);
+                state.ask_scroll_to_focus_requested = false;
+            }
+            state.ask_scroll_offset = acecode::tui::clamp_scroll_offset(
+                state.ask_scroll_offset, total, visible);
+            state.ask_scroll_total_rows = total;
+            state.ask_scroll_visible_rows = visible;
+
             Elements rows;
-            std::string header_line = " Question " +
-                std::to_string(state.ask_current_question + 1) + "/" +
-                std::to_string(state.ask_questions.size()) +
-                "  [" + q.header + "]";
-            rows.push_back(text(header_line) | bold | color(Color::Cyan));
-            rows.push_back(text(" " + q.question) | color(Color::White));
-            rows.push_back(text(""));
-
-            int option_count = static_cast<int>(q.options.size());
-            int total_rows = option_count + 1; // +1 for "Other..."
-            for (int i = 0; i < total_rows; ++i) {
-                bool is_other = (i == option_count);
-                bool focused = (i == state.ask_option_focus);
-                std::string marker;
-                if (q.multi_select) {
-                    bool checked = !is_other && i < static_cast<int>(state.ask_multi_selected.size()) &&
-                                   state.ask_multi_selected[i];
-                    marker = checked ? "[x] " : "[ ] ";
-                } else {
-                    // 单选时焦点位置用实心圆点;其它位置留空圆点。
-                    marker = focused ? "(\xE2\x97\x8F) " : "( ) ";
+            const int begin = state.ask_scroll_offset;
+            const int end = std::min(total, begin + visible);
+            for (int i = begin; i < end; ++i) {
+                const auto& row = layout.rows[i];
+                Element el = row.text.empty() ? text("") : text(row.text);
+                switch (row.kind) {
+                    case acecode::tui::AskOverlayRowKind::Header:
+                        el = el | bold | color(Color::Cyan);
+                        break;
+                    case acecode::tui::AskOverlayRowKind::Body:
+                        el = el | color(Color::White);
+                        break;
+                    case acecode::tui::AskOverlayRowKind::Option:
+                        if (row.focused) {
+                            el = el | bold | color(Color::White) |
+                                bgcolor(Color::RGB(0, 60, 100));
+                        } else {
+                            el = el | color(Color::GrayLight);
+                        }
+                        break;
+                    case acecode::tui::AskOverlayRowKind::Hint:
+                        el = el | dim | color(Color::GrayDark);
+                        break;
+                    case acecode::tui::AskOverlayRowKind::CustomPrompt:
+                        el = el | color(Color::Yellow);
+                        break;
+                    case acecode::tui::AskOverlayRowKind::Blank:
+                        break;
                 }
-                std::string prefix = focused ? " \xE2\x96\xB8 " : "   ";
-                std::string body;
-                if (is_other) {
-                    body = "Other...";
-                } else {
-                    body = q.options[i].label;
-                    if (!q.options[i].description.empty()) {
-                        body += "  ";
-                        body += q.options[i].description;
-                    }
-                }
-                auto row = text(prefix + marker + body);
-                if (focused) {
-                    row = row | bold | color(Color::White) | bgcolor(Color::RGB(0, 60, 100));
-                } else {
-                    row = row | color(Color::GrayLight);
-                }
-                rows.push_back(row);
+                rows.push_back(el);
             }
-            rows.push_back(text(""));
 
-            std::string hint = q.multi_select
-                ? " \xE2\x86\x91\xE2\x86\x93 move   Space toggle   Enter submit   Esc cancel"
-                : " \xE2\x86\x91\xE2\x86\x93 move   Enter select   Esc cancel";
-            rows.push_back(text(hint) | dim | color(Color::GrayDark));
-
-            if (state.ask_other_input_active) {
-                rows.push_back(text(""));
-                rows.push_back(text(" Custom answer (Enter to submit, Esc to back out):")
-                               | color(Color::Yellow));
+            Elements bar_rows;
+            const bool overflow = visible > 0 && total > visible;
+            int thumb_start = 0;
+            int thumb_size = visible;
+            if (overflow) {
+                thumb_size = std::max(1, visible * visible / total);
+                thumb_size = std::min(visible, thumb_size);
+                const int max_offset = total - visible;
+                const int max_thumb_start = visible - thumb_size;
+                thumb_start = max_offset > 0
+                    ? state.ask_scroll_offset * max_thumb_start / max_offset
+                    : 0;
             }
-            ask_overlay_element = vbox(std::move(rows)) | border | color(Color::Cyan);
+            for (int i = 0; i < visible; ++i) {
+                const bool in_thumb =
+                    overflow && i >= thumb_start && i < thumb_start + thumb_size;
+                auto bar = text(in_thumb ? " \xE2\x94\x83 " : "   ");
+                bar_rows.push_back(bar | color(in_thumb ? Color::Cyan : Color::GrayDark));
+            }
+
+            Element body = hbox({
+                vbox(std::move(rows)) | flex,
+                vbox(std::move(bar_rows)) | reflect(ask_scrollbar_box),
+            });
+            ask_overlay_element = body | border | color(Color::Cyan);
         }
 
         // Tool confirmation overlay —— 取代旧的单行 "y/a/n" 提示。
