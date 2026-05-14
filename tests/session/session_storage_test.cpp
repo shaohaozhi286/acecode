@@ -52,6 +52,7 @@ TEST(SessionStorage, MetaRoundtrip) {
     in.model         = "gpt-4o";
     in.model_preset  = "copilot-fast";
     in.title         = "resume bug";
+    in.archived      = true;
 
     SessionStorage::write_meta(meta_path, in);
     SessionMeta out = SessionStorage::read_meta(meta_path);
@@ -66,6 +67,7 @@ TEST(SessionStorage, MetaRoundtrip) {
     EXPECT_EQ(out.model,         in.model);
     EXPECT_EQ(out.model_preset,  in.model_preset);
     EXPECT_EQ(out.title,         in.title);
+    EXPECT_EQ(out.archived,      in.archived);
 }
 
 // 场景:手造一份老版本 .meta.json(完全不含 title 字段),read_meta 必须
@@ -98,6 +100,8 @@ TEST(SessionStorage, LegacyMetaWithoutTitle) {
         << "legacy meta without 'model_preset' must deserialize to empty preset";
     EXPECT_TRUE(out.title.empty())
         << "legacy meta without 'title' must deserialize to empty title";
+    EXPECT_FALSE(out.archived)
+        << "legacy meta without 'archived' must deserialize to false";
 }
 
 // 场景:SessionMeta.title 为空时,write_meta 必须跳过该字段,而不是写成
@@ -121,6 +125,8 @@ TEST(SessionStorage, EmptyTitleIsOmittedOnWrite) {
         << "empty title should be omitted from the serialized JSON; got: " << content;
     EXPECT_EQ(content.find("\"model_preset\""), std::string::npos)
         << "empty model_preset should be omitted from the serialized JSON; got: " << content;
+    EXPECT_EQ(content.find("\"archived\""), std::string::npos)
+        << "false archived state should be omitted from the serialized JSON; got: " << content;
 }
 
 // 场景:desktop visibility 是 project-level workspace.json marker,不是

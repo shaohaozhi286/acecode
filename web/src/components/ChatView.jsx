@@ -58,6 +58,7 @@ import { commandWorkspaceHashForInput } from '../lib/slashCommandWorkspace.js';
 import { inputRouteForText, sessionCreateOptionsForText } from '../lib/builtinCommandRouting.js';
 import { fileTreeRefreshKeyFromItems } from '../lib/fileTreeRefresh.js';
 import { buildAssistantRunDirectives } from '../lib/assistantRunDirectives.js';
+import { activityChromeState } from '../lib/assistantAvatarDisplay.js';
 import {
   CHANGE_DOCK_DISMISSALS_STORAGE_KEY,
   dismissChangeDockSignature,
@@ -95,7 +96,7 @@ function formatElapsedSeconds(startedAtMs, nowMs) {
   return `${minutes}m ${rest}s`;
 }
 
-function ActivityIndicator({ activity }) {
+function ActivityIndicator({ activity, showAceCodeAvatar = true }) {
   const [nowMs, setNowMs] = useState(() => Date.now());
   useEffect(() => {
     setNowMs(Date.now());
@@ -106,9 +107,12 @@ function ActivityIndicator({ activity }) {
   const label = activity?.label || '正在处理请求';
   const detail = activity?.detail || '';
   const elapsed = formatElapsedSeconds(activity?.startedAtMs, nowMs);
+  const chrome = activityChromeState(showAceCodeAvatar);
   return (
-    <div className="flex gap-2 max-w-[85%]">
-      <div className="w-6 h-6 rounded-full bg-ok text-white text-[11px] font-bold flex items-center justify-center mt-[2px]">A</div>
+    <div className={`flex ${chrome.gapClass} max-w-[85%]`}>
+      {chrome.showAvatar && (
+        <div className="w-6 h-6 rounded-full bg-ok text-white text-[11px] font-bold flex items-center justify-center mt-[2px]">A</div>
+      )}
       <div className="rounded-2xl border border-border bg-surface-hi px-3 py-2 text-[12px] text-fg shadow-sm min-w-[180px]">
         <div className="flex items-center gap-2">
           <span className="font-medium">{label}</span>
@@ -130,32 +134,29 @@ function ActivityIndicator({ activity }) {
 }
 
 function ActivitySummaryBlock({ item, expanded, onToggle }) {
-  const count = Array.isArray(item?.collapsedItems) ? item.collapsedItems.length : 0;
   return (
-    <div className="rounded-md border border-border bg-surface-hi text-fg my-0.5 overflow-hidden">
+    <div className="ml-8 my-1 max-w-[88%]">
       <button
         type="button"
-        className="w-full px-2.5 py-1.5 flex items-center gap-2 text-left hover:bg-surface transition"
+        className="group inline-flex max-w-full items-center gap-2 px-0 py-0.5 text-left text-fg-mute/80 transition-colors"
         onClick={onToggle}
         title={expanded ? '收起详情' : '展开详情'}
         aria-label={expanded ? '收起详情' : '展开详情'}
       >
-        <VsIcon name="run" size={13} className="text-fg-mute shrink-0" />
-        <span className="text-[12px] font-medium flex-1 min-w-0 truncate">{item?.title || '已处理'}</span>
-        {count > 0 && (
-          <span className="text-[10px] text-fg-mute shrink-0 tabular-nums">{count} 项</span>
-        )}
-        <span className="opacity-60 flex items-center shrink-0">
-          <VsIcon name={expanded ? 'expandUp' : 'expandDown'} size={12} />
+        <VsIcon name="edit" size={13} className="shrink-0 opacity-80" />
+        <span className="text-[12px] font-medium min-w-0 truncate group-hover:text-fg transition-colors">
+          {item?.title || '已处理'}
         </span>
+        <VsIcon name={expanded ? 'expandDown' : 'expandRight'} size={11} className="shrink-0 opacity-80" />
       </button>
+      <div className="mt-1 h-px w-full origin-top scale-y-50 bg-fg-mute/20" aria-hidden="true" />
     </div>
   );
 }
 
 function CompletionSummaryBlock({ item }) {
   return (
-    <div className="max-w-[88%] ml-8 px-1 py-0.5 text-[12px] leading-5 italic text-fg-mute whitespace-pre-wrap break-words">
+    <div className="max-w-[88%] ml-8 px-1 py-0.5 text-[12px] leading-5 italic text-fg whitespace-pre-wrap break-words">
       {item?.title || '总结：已完成'}
     </div>
   );
@@ -237,7 +238,7 @@ function isRealWorkspaceHash(hash) {
   return !!hash && hash !== '__local__';
 }
 
-export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWorkspaceChange, health, onPermissionRequest, onQuestionRequest, questionRequest, onQuestionResolve, onPermissionModeChanged, showSidePanel = false, sidePanelWidth = 280, onSidePanelResize, sidePanelCollapsed = false, onToggleSidePanel, sidePanelMaximized = false, onToggleSidePanelMaximized }) {
+export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWorkspaceChange, health, onPermissionRequest, onQuestionRequest, questionRequest, onQuestionResolve, onPermissionModeChanged, showSidePanel = false, sidePanelWidth = 280, onSidePanelResize, sidePanelCollapsed = false, onToggleSidePanel, sidePanelMaximized = false, onToggleSidePanelMaximized, showAceCodeAvatar = true }) {
   const ref = useMemo(() => normalizeSessionRef(sessionRef, sessionId), [sessionRef, sessionId]);
   const sid = ref?.sessionId || ref?.id || '';
   const sidRef = useRef(sid);
@@ -307,6 +308,8 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     {},
     validateDockDismissals,
   );
+  const changeDockRef = useRef(null);
+  const [changeDockBottomPadding, setChangeDockBottomPadding] = useState(0);
   const [expandedActivityKeys, setExpandedActivityKeys] = useState(() => new Set());
   const scrollRef = useRef(null);
   const inputRef = useRef(null);
@@ -447,11 +450,27 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     inputRef.current?.focus();
   }, [questionRequest]);
 
-  // 自动滚到底
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [renderedItems, busy]);
+  // 自动滚到底。审查栏会异步测量高度并给消息区补 bottom padding,
+  // 因此需要在 padding 生效后再补几帧滚动,否则切换会话时会停在底部上方。
+  useLayoutEffect(() => {
+    let raf1 = 0;
+    let raf2 = 0;
+    const scrollToBottom = () => {
+      const el = scrollRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    };
+
+    scrollToBottom();
+    raf1 = requestAnimationFrame(() => {
+      scrollToBottom();
+      raf2 = requestAnimationFrame(scrollToBottom);
+    });
+
+    return () => {
+      if (raf1) cancelAnimationFrame(raf1);
+      if (raf2) cancelAnimationFrame(raf2);
+    };
+  }, [renderedItems, busy, changeDockBottomPadding, sid]);
 
   useEffect(() => {
     let timer = 0;
@@ -867,6 +886,25 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     && !!changeSignature
     && dismissedDockSignature !== changeSignature;
 
+  useLayoutEffect(() => {
+    if (!showChangeDock) {
+      setChangeDockBottomPadding(0);
+      return undefined;
+    }
+
+    const measure = () => {
+      const height = changeDockRef.current?.getBoundingClientRect().height || 0;
+      setChangeDockBottomPadding(height ? Math.ceil(height) + 3 : 0);
+    };
+
+    measure();
+    const element = changeDockRef.current;
+    if (!element || typeof ResizeObserver === 'undefined') return undefined;
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [showChangeDock, changeSummary.fileCount, changeSummary.totalAdditions, changeSummary.totalDeletions]);
+
   useEffect(() => {
     setExpandedActivityKeys(new Set());
   }, [sid]);
@@ -1050,6 +1088,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
           ref={scrollRef}
           onScroll={scheduleStickyMeasure}
           className="h-full overflow-y-auto px-3.5 py-3 flex flex-col gap-3"
+          style={changeDockBottomPadding > 0 ? { paddingBottom: changeDockBottomPadding } : undefined}
         >
           {renderedItems.map((it) => {
             if (it.kind === 'termination_notice') {
@@ -1109,6 +1148,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
                             : undefined;
                           if (childDirective?.hide) return null;
                           const childContinuation = childDirective ? childDirective.showHeader === false : false;
+                          const childShowFooter = childDirective ? childDirective.showFooter !== false : true;
                           return (
                             <div
                               key={`activity-hidden-${child.id}`}
@@ -1128,6 +1168,8 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
                                   metadata={child.metadata}
                                   onFork={forkAndSwitch}
                                   continuation={childContinuation}
+                                  showFooter={childShowFooter}
+                                  showAceCodeAvatar={showAceCodeAvatar}
                                 />
                               )}
                             </div>
@@ -1147,6 +1189,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
               return null;
             }
             const continuation = directive ? directive.showHeader === false : false;
+            const showFooter = directive ? directive.showFooter !== false : true;
             return (
               <Fragment key={it.id}>
                 <div
@@ -1168,6 +1211,8 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
                       metadata={it.metadata}
                       onFork={forkAndSwitch}
                       continuation={continuation}
+                      showFooter={showFooter}
+                      showAceCodeAvatar={showAceCodeAvatar}
                     />
                   )}
                 </div>
@@ -1175,10 +1220,19 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
             );
           })}
           {busy && streamingId == null && !hasActiveTool && (
-            <ActivityIndicator activity={activity} />
+            <ActivityIndicator activity={activity} showAceCodeAvatar={showAceCodeAvatar} />
           )}
         </div>
         <StickyUserContext context={stickyUserContext} />
+        {showChangeDock && (
+          <ChangeGlassDock
+            dockRef={changeDockRef}
+            scrollRef={scrollRef}
+            summary={changeSummary}
+            onReview={openReviewPanel}
+            onDismiss={dismissChangeDock}
+          />
+        )}
       </div>
 
       {questionForView && (
@@ -1190,14 +1244,6 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         onCancel={cancelQueued}
         onRetry={retryQueued}
       />
-      {showChangeDock && (
-        <ChangeGlassDock
-          summary={changeSummary}
-          onReview={openReviewPanel}
-          onDismiss={dismissChangeDock}
-        />
-      )}
-
       <InputBar
         ref={inputRef}
         busy={busy}

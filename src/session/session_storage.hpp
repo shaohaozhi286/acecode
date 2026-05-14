@@ -23,6 +23,9 @@ struct SessionMeta {
     // 老 meta 文件没有这两个字段时读出来就是空,序列化时也省略。
     std::string forked_from;       // 源 session id
     std::string fork_message_id;   // 在源 session 哪条消息上分叉(含此条)
+
+    // Sidebar archive state. Missing field in legacy metadata is false.
+    bool archived = false;
 };
 
 class SessionStorage {

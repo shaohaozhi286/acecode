@@ -167,28 +167,122 @@ export function ChangeConversationCard({
   );
 }
 
-export function ChangeGlassDock({ summary, onReview, onDismiss }) {
+export function ChangeGlassDock({ summary, onReview, onDismiss, dockRef, scrollRef }) {
+  const localDockRef = useRef(null);
+  const rootRef = dockRef || localDockRef;
+  const backdropRef = useRef(null);
+
+  useEffect(() => {
+    const source = scrollRef?.current;
+    const root = rootRef.current;
+    const backdrop = backdropRef.current;
+    const crop = backdrop?.querySelector('.ace-change-glass-blur-crop');
+    if (!source || !root || !backdrop || !crop) return undefined;
+
+    let raf = 0;
+    const dock = root.querySelector('.ace-change-glass-dock');
+
+    const positionClone = () => {
+      const clone = crop.firstElementChild;
+      if (!clone || !dock) return;
+      const sourceRect = source.getBoundingClientRect();
+      const dockRect = dock.getBoundingClientRect();
+      clone.style.left = `${sourceRect.left - dockRect.left}px`;
+      clone.style.top = `${sourceRect.top - dockRect.top - source.scrollTop}px`;
+      clone.style.width = `${sourceRect.width}px`;
+      clone.style.minHeight = `${source.scrollHeight}px`;
+    };
+
+    const rebuildClone = () => {
+      const clone = source.cloneNode(true);
+      clone.removeAttribute('id');
+      clone.setAttribute('aria-hidden', 'true');
+      clone.classList.add('ace-change-glass-source-clone');
+      clone.style.position = 'absolute';
+      clone.style.height = 'auto';
+      clone.style.maxHeight = 'none';
+      clone.style.overflow = 'visible';
+      clone.style.pointerEvents = 'none';
+      clone.style.margin = '0';
+      clone.scrollTop = 0;
+      crop.replaceChildren(clone);
+      positionClone();
+    };
+
+    const scheduleRebuild = () => {
+      if (raf) cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        rebuildClone();
+      });
+    };
+
+    const syncPosition = () => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        positionClone();
+      });
+    };
+
+    rebuildClone();
+    source.addEventListener('scroll', syncPosition, { passive: true });
+    window.addEventListener('resize', syncPosition);
+
+    const mutationObserver = typeof MutationObserver !== 'undefined'
+      ? new MutationObserver(scheduleRebuild)
+      : null;
+    mutationObserver?.observe(source, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+      attributes: true,
+      attributeFilter: ['class', 'style'],
+    });
+
+    const resizeObserver = typeof ResizeObserver !== 'undefined'
+      ? new ResizeObserver(syncPosition)
+      : null;
+    resizeObserver?.observe(source);
+    if (dock) resizeObserver?.observe(dock);
+
+    return () => {
+      if (raf) cancelAnimationFrame(raf);
+      source.removeEventListener('scroll', syncPosition);
+      window.removeEventListener('resize', syncPosition);
+      mutationObserver?.disconnect();
+      resizeObserver?.disconnect();
+      crop.replaceChildren();
+    };
+  }, [rootRef, scrollRef, summary?.fileCount, summary?.totalAdditions, summary?.totalDeletions]);
+
   if (!summary?.hasChanges) return null;
   return (
-    <div className="ace-change-glass-wrap" data-change-region="composer">
+    <div ref={rootRef} className="ace-change-glass-wrap" data-change-region="composer">
       <div className="ace-change-glass-dock">
+        <div ref={backdropRef} className="ace-change-glass-blur-backdrop" aria-hidden="true">
+          <div className="ace-change-glass-blur-crop" />
+        </div>
         <button
           type="button"
           className="ace-change-glass-main"
-          onClick={onReview}
+          onClick={(event) => {
+            event.stopPropagation();
+            onReview?.();
+          }}
           title="打开右侧审查面板"
         >
           <ChangeTotals summary={summary} compact />
-          <span className="ace-change-glass-action">
-            审查
-            <VsIcon name="expandRight" size={10} />
-          </span>
+          <span className="ace-change-glass-action">查看更改</span>
         </button>
         {onDismiss && (
           <button
             type="button"
             className="ace-change-glass-close"
-            onClick={onDismiss}
+            onClick={(event) => {
+              event.stopPropagation();
+              onDismiss();
+            }}
             title="关闭变更摘要"
             aria-label="关闭变更摘要"
           >

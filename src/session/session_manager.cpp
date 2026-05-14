@@ -89,6 +89,7 @@ void SessionManager::start_session(const std::string& cwd,
     pending_title_.clear();
     last_error_.clear();
     writer_lease_active_ = false;
+    archived_ = false;
     checkpoint_store_.reset();
     checkpoint_store_.set_session(project_dir_, session_id_);
 }
@@ -132,6 +133,7 @@ bool SessionManager::ensure_created() {
     meta.model = model_name_;
     meta.model_preset = model_preset_;
     meta.title = pending_title_;
+    meta.archived = archived_;
     SessionStorage::write_meta(meta_path_str_, meta);
     return true;
 }
@@ -280,6 +282,7 @@ std::vector<ChatMessage> SessionManager::resume_session(const std::string& sessi
     }
     created_ = true;
     finalized_ = false;
+    archived_ = false;
     checkpoint_store_.load_from_messages(project_dir_, session_id_, messages);
 
     // Restore persisted display/model metadata when present.
@@ -288,6 +291,7 @@ std::vector<ChatMessage> SessionManager::resume_session(const std::string& sessi
         created_at_ = meta.created_at;
         last_user_summary_ = meta.summary;
         pending_title_ = meta.title;
+        archived_ = meta.archived;
         if (model_preset_.empty()) {
             model_preset_ = meta.model_preset;
         }
@@ -368,6 +372,7 @@ void SessionManager::end_current_session() {
     created_at_.clear();
     pending_title_.clear();
     last_error_.clear();
+    archived_ = false;
     checkpoint_store_.reset();
     checkpoint_store_.set_session(project_dir_, "");
     // Keep started_=true, cwd_, provider_name_, model_name_, project_dir_
@@ -540,6 +545,7 @@ void SessionManager::update_meta() {
     meta.model = model_name_;
     meta.model_preset = model_preset_;
     meta.title = pending_title_;
+    meta.archived = archived_;
     SessionStorage::write_meta(meta_path_str_, meta);
     refresh_writer_lease_locked();
 }
@@ -547,6 +553,14 @@ void SessionManager::update_meta() {
 void SessionManager::set_session_title(std::string title) {
     std::lock_guard<std::mutex> lk(mu_);
     pending_title_ = std::move(title);
+    if (created_) {
+        update_meta();
+    }
+}
+
+void SessionManager::set_session_archived(bool archived) {
+    std::lock_guard<std::mutex> lk(mu_);
+    archived_ = archived;
     if (created_) {
         update_meta();
     }

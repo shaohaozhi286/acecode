@@ -147,6 +147,12 @@ function countObject(set, fallbackPrefix, index, object) {
   set.add(object || `${fallbackPrefix}:${index}`);
 }
 
+function countTranscriptOnlyTools(items) {
+  const resultRows = items.filter((item) => isToolTranscriptResultMessage(item)).length;
+  if (resultRows > 0) return resultRows;
+  return items.filter((item) => isToolTranscriptMessage(item)).length;
+}
+
 function summarizeToolItems(items) {
   const created = new Set();
   const edited = new Set();
@@ -184,6 +190,10 @@ function summarizeToolItems(items) {
     }
   });
 
+  if (totalTools === 0) {
+    totalTools = countTranscriptOnlyTools(items);
+  }
+
   const parts = [];
   if (created.size > 0) parts.push(`已创建 ${created.size} 个文件`);
   if (edited.size > 0) parts.push(`已编辑 ${edited.size} 个文件`);
@@ -191,6 +201,10 @@ function summarizeToolItems(items) {
   if (commands > 0) parts.push(`已运行 ${commands} 条命令`);
   if (totalTools > 0) parts.push(`调用 ${totalTools} 个工具`);
   return parts.length > 0 ? parts.join('，') : '已调用工具';
+}
+
+function hasCollapsibleToolActivity(items) {
+  return items.some(isCompletedCollapsibleTool) || items.some(isToolTranscriptMessage);
 }
 
 function coveredIds(items) {
@@ -273,15 +287,104 @@ function makeCompletionSummaryItem(item) {
   };
 }
 
+function isFinalCollapseSkippable(item) {
+  return isEmptyAssistantMessage(item)
+    || isToolTranscriptMessage(item)
+    || isTaskCompleteToolCallMessage(item);
+}
+
+function findLastSignificantIndex(items) {
+  for (let i = items.length - 1; i >= 0; i -= 1) {
+    if (isFinalCollapseSkippable(items[i])) continue;
+    return i;
+  }
+  return -1;
+}
+
+function findPreviousSignificantIndex(items, beforeIndex) {
+  for (let i = beforeIndex - 1; i >= 0; i -= 1) {
+    if (isFinalCollapseSkippable(items[i])) continue;
+    return i;
+  }
+  return -1;
+}
+
+function preservedTurnPrefix(items) {
+  return items.filter((item) => isUserMessage(item));
+}
+
+function finalProcessedItemsBefore(items, beforeIndex) {
+  const processed = [];
+  for (let i = 0; i < beforeIndex; i += 1) {
+    const item = items[i];
+    if (isUserMessage(item)) continue;
+    if (isEmptyAssistantMessage(item)) continue;
+    if (isTaskCompleteTool(item) || isTaskCompleteToolCallMessage(item)) continue;
+    processed.push(item);
+  }
+  return processed;
+}
+
+function pushProcessedSummary(out, processed, endItem) {
+  if (processed.length > 0) {
+    out.push(makeProcessedItem(processed, endItem));
+  }
+}
+
+function projectFinalCollapsedTurn(items, options = {}) {
+  const lastIndex = findLastSignificantIndex(items);
+  if (lastIndex < 0) return null;
+
+  const last = items[lastIndex];
+  if (isSuccessfulTaskComplete(last)) {
+    const out = preservedTurnPrefix(items);
+    const previousIndex = findPreviousSignificantIndex(items, lastIndex);
+    const previous = previousIndex >= 0 ? items[previousIndex] : null;
+    if (assistantHasText(previous) && !isStreamingAssistant(previous)) {
+      pushProcessedSummary(out, finalProcessedItemsBefore(items, previousIndex), last);
+      out.push(previous);
+    } else {
+      pushProcessedSummary(out, finalProcessedItemsBefore(items, lastIndex), last);
+    }
+    out.push(makeCompletionSummaryItem(last));
+    return out;
+  }
+
+  if (!options.deferTrailingToolSummary && assistantHasText(last) && !isStreamingAssistant(last)) {
+    const out = preservedTurnPrefix(items);
+    pushProcessedSummary(out, finalProcessedItemsBefore(items, lastIndex), last);
+    out.push(last);
+    return out;
+  }
+
+  return null;
+}
+
 function flushToolBuffer(out, buffer, { collapse = true } = {}) {
   if (buffer.length > 0) {
-    if (collapse && buffer.some(isCompletedCollapsibleTool)) {
+    if (collapse && hasCollapsibleToolActivity(buffer)) {
       out.push(makeToolSummaryItem(buffer));
+    } else if (!collapse && buffer.some(isCompletedCollapsibleTool)) {
+      out.push(...buffer.filter((item) => (
+        !isToolTranscriptMessage(item) && !isEmptyAssistantMessage(item)
+      )));
     } else {
       out.push(...buffer);
     }
     buffer.length = 0;
   }
+}
+
+function flushWrapperNoiseBeforeStructuredTool(out, buffer) {
+  if (buffer.length === 0) return;
+  const onlyWrapperNoise = buffer.every((item) => (
+    isToolTranscriptMessage(item) || isEmptyAssistantMessage(item)
+  ));
+  if (onlyWrapperNoise) {
+    buffer.length = 0;
+    return;
+  }
+  flushToolBuffer(out, buffer);
 }
 
 function projectGenericTurn(items, options = {}) {
@@ -314,7 +417,8 @@ function projectGenericTurn(items, options = {}) {
       continue;
     }
 
-    flushToolBuffer(out, tools);
+    if (isToolItem(item)) flushWrapperNoiseBeforeStructuredTool(out, tools);
+    else flushToolBuffer(out, tools);
     out.push(item);
   }
 
@@ -388,7 +492,8 @@ function projectCompletionTurn(items, options = {}) {
       tools.push(item);
       continue;
     }
-    flushToolBuffer(out, tools);
+    if (isToolItem(item)) flushWrapperNoiseBeforeStructuredTool(out, tools);
+    else flushToolBuffer(out, tools);
     out.push(item);
   }
   flushToolBuffer(out, tools, { collapse: !options.deferTrailingToolSummary });
@@ -398,6 +503,8 @@ function projectCompletionTurn(items, options = {}) {
 
 function projectTurn(items, options = {}) {
   if (!Array.isArray(items) || items.length === 0) return [];
+  const finalCollapsed = projectFinalCollapsedTurn(items, options);
+  if (finalCollapsed) return finalCollapsed;
   return projectCompletionTurn(items, options);
 }
 

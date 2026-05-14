@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <random>
+#include <string_view>
 
 #ifdef _WIN32
 #  ifndef WIN32_LEAN_AND_MEAN
@@ -19,6 +20,11 @@
 namespace fs = std::filesystem;
 
 namespace {
+
+void append_utf16le(std::string& out, char16_t ch) {
+    out.push_back(static_cast<char>(ch & 0xFF));
+    out.push_back(static_cast<char>((ch >> 8) & 0xFF));
+}
 
 struct TempTree {
     fs::path path;
@@ -75,4 +81,16 @@ TEST(Utf8PathTest, EnvironmentValuesAreUtf8Internally) {
 #else
     unsetenv(kName);
 #endif
+}
+
+TEST(EncodingTest, EnsureUtf8ConvertsUtf16LeBomText) {
+    std::string bytes;
+    bytes.push_back(static_cast<char>(0xFF));
+    bytes.push_back(static_cast<char>(0xFE));
+    for (char16_t ch : std::u16string_view(u"name: 中文\n")) {
+        append_utf16le(bytes, ch);
+    }
+
+    EXPECT_EQ(acecode::ensure_utf8(bytes), u8"name: 中文\n");
+    EXPECT_TRUE(acecode::is_valid_utf8(acecode::ensure_utf8(bytes)));
 }

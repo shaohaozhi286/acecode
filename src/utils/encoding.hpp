@@ -68,44 +68,6 @@ inline std::string truncate_utf8_suffix(const std::string& src,
 
 // Ensure a string is valid UTF-8. On Windows, tries codepage conversion first.
 // Falls back to replacing invalid bytes with '?'.
-inline std::string ensure_utf8(const std::string& src) {
-    if (src.empty() || is_valid_utf8(src)) return src;
-
-#ifdef _WIN32
-    // Try converting from the system's active codepage (e.g., GBK/CP936)
-    std::string converted = codepage_to_utf8(src);
-    if (is_valid_utf8(converted)) return converted;
-#endif
-
-    // Fallback: strip invalid bytes
-    std::string result;
-    result.reserve(src.size());
-    const unsigned char* bytes = reinterpret_cast<const unsigned char*>(src.data());
-    size_t len = src.size();
-    for (size_t i = 0; i < len; ) {
-        unsigned char c = bytes[i];
-        int seq_len = 0;
-        if (c <= 0x7F) { seq_len = 1; }
-        else if ((c & 0xE0) == 0xC0) { seq_len = 2; }
-        else if ((c & 0xF0) == 0xE0) { seq_len = 3; }
-        else if ((c & 0xF8) == 0xF0) { seq_len = 4; }
-        else { result += '?'; i++; continue; }
-
-        if (i + seq_len > len) { result += '?'; i++; continue; }
-
-        bool valid = true;
-        for (int j = 1; j < seq_len; j++) {
-            if ((bytes[i + j] & 0xC0) != 0x80) { valid = false; break; }
-        }
-        if (valid) {
-            result.append(src, i, seq_len);
-            i += seq_len;
-        } else {
-            result += '?';
-            i++;
-        }
-    }
-    return result;
-}
+std::string ensure_utf8(const std::string& src);
 
 } // namespace acecode

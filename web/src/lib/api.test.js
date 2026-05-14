@@ -5,7 +5,7 @@
 // 不打真实网络,通过依赖注入 listWorkspaces / listSessions 两个 mock 完成。
 
 import assert from 'node:assert/strict';
-import { createApi, mergeAllWorkspaceSessions } from './api.js';
+import { ApiError, createApi, mergeAllWorkspaceSessions } from './api.js';
 
 function run(name, fn) {
   try {
@@ -138,6 +138,88 @@ await run('executeCommand posts to builtin command endpoint', async () => {
       args: '',
       display_text: '/init',
     });
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+await run('readFileBlob fetches authenticated binary file content', async () => {
+  const previousFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    calls.push({ url, opts });
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => 'image/png' },
+      blob: async () => new Blob(['png-bytes'], { type: 'image/png' }),
+    };
+  };
+  try {
+    const client = createApi({ origin: 'http://127.0.0.1:4567', token: 'tok' });
+    const blob = await client.readFileBlob('/repo root', 'docs/a b.png');
+
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, 'http://127.0.0.1:4567/api/files/blob?cwd=%2Frepo%20root&path=docs%2Fa%20b.png');
+    assert.equal(calls[0].opts.method, 'GET');
+    assert.equal(calls[0].opts.headers['X-ACECode-Token'], 'tok');
+    assert.equal(blob.type, 'image/png');
+    assert.equal(await blob.text(), 'png-bytes');
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+await run('readFileBlob parses JSON errors as ApiError body', async () => {
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 415,
+    headers: { get: () => 'application/json' },
+    json: async () => ({ error: 'file too large', size: 123 }),
+  });
+  try {
+    const client = createApi({ origin: 'http://127.0.0.1:4567', token: 'tok' });
+    await assert.rejects(
+      () => client.readFileBlob('/repo', 'large.png'),
+      (err) => {
+        assert.equal(err instanceof ApiError, true);
+        assert.equal(err.status, 415);
+        assert.deepEqual(err.body, { error: 'file too large', size: 123 });
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+await run('archive API methods use expected endpoints and archived query flag', async () => {
+  const previousFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    calls.push({ url, opts });
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => 'application/json' },
+      json: async () => [],
+    };
+  };
+  try {
+    const client = createApi({ origin: 'http://127.0.0.1:4567', token: 'tok' });
+    await client.listSessions({ archived: true });
+    await client.listWorkspaceSessions('w/a', { archived: true });
+    await client.archiveSession('s/a');
+    await client.unarchiveWorkspaceSession('w/a', 's/a');
+
+    assert.equal(calls[0].url, 'http://127.0.0.1:4567/api/sessions?archived=1');
+    assert.equal(calls[0].opts.method, 'GET');
+    assert.equal(calls[1].url, 'http://127.0.0.1:4567/api/workspaces/w%2Fa/sessions?archived=1');
+    assert.equal(calls[2].url, 'http://127.0.0.1:4567/api/sessions/s%2Fa/archive');
+    assert.equal(calls[2].opts.method, 'PUT');
+    assert.equal(calls[3].url, 'http://127.0.0.1:4567/api/workspaces/w%2Fa/sessions/s%2Fa/archive');
+    assert.equal(calls[3].opts.method, 'DELETE');
   } finally {
     globalThis.fetch = previousFetch;
   }

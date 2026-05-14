@@ -31,7 +31,7 @@ run('单条 assistant 消息显示 header', () => {
     { kind: 'msg', id: 1, role: 'assistant', content: 'hello' },
   ];
   const d = buildAssistantRunDirectives(items);
-  assert.deepEqual(d.get(1), { showHeader: true });
+  assert.deepEqual(d.get(1), { showHeader: true, showFooter: true });
 });
 
 run('连续 assistant + 中间 tool 行: 只第一条带 header', () => {
@@ -45,9 +45,9 @@ run('连续 assistant + 中间 tool 行: 只第一条带 header', () => {
     { kind: 'msg', id: 5, role: 'assistant', content: '完成' },
   ];
   const d = buildAssistantRunDirectives(items);
-  assert.deepEqual(d.get(1), { showHeader: true });
-  assert.deepEqual(d.get(3), { showHeader: false });
-  assert.deepEqual(d.get(5), { showHeader: false });
+  assert.deepEqual(d.get(1), { showHeader: true, showFooter: false });
+  assert.deepEqual(d.get(3), { showHeader: false, showFooter: false });
+  assert.deepEqual(d.get(5), { showHeader: false, showFooter: true });
 });
 
 run('user 消息切断 run, 之后第一条 assistant 重新带 header', () => {
@@ -59,10 +59,10 @@ run('user 消息切断 run, 之后第一条 assistant 重新带 header', () => {
     { kind: 'msg', id: 5, role: 'assistant', content: '答二-续' },
   ];
   const d = buildAssistantRunDirectives(items);
-  assert.deepEqual(d.get(1), { showHeader: true });
-  assert.deepEqual(d.get(2), { showHeader: false });
-  assert.deepEqual(d.get(4), { showHeader: true });
-  assert.deepEqual(d.get(5), { showHeader: false });
+  assert.deepEqual(d.get(1), { showHeader: true, showFooter: false });
+  assert.deepEqual(d.get(2), { showHeader: false, showFooter: true });
+  assert.deepEqual(d.get(4), { showHeader: true, showFooter: false });
+  assert.deepEqual(d.get(5), { showHeader: false, showFooter: true });
 });
 
 run('空内容 + 非 streaming 的 assistant 隐藏 + 不消耗 header 名额', () => {
@@ -75,7 +75,7 @@ run('空内容 + 非 streaming 的 assistant 隐藏 + 不消耗 header 名额', 
   ];
   const d = buildAssistantRunDirectives(items);
   assert.deepEqual(d.get(1), { hide: true });
-  assert.deepEqual(d.get(3), { showHeader: true });
+  assert.deepEqual(d.get(3), { showHeader: true, showFooter: true });
 });
 
 run('空内容 + streaming 的 assistant 不隐藏 + 计入 run', () => {
@@ -85,8 +85,8 @@ run('空内容 + streaming 的 assistant 不隐藏 + 计入 run', () => {
     { kind: 'msg', id: 2, role: 'assistant', content: '后续' },
   ];
   const d = buildAssistantRunDirectives(items);
-  assert.deepEqual(d.get(1), { showHeader: true });
-  assert.deepEqual(d.get(2), { showHeader: false });
+  assert.deepEqual(d.get(1), { showHeader: true, showFooter: false });
+  assert.deepEqual(d.get(2), { showHeader: false, showFooter: true });
 });
 
 run('多个 user 之间的多个 run, 各自独立计算', () => {
@@ -98,9 +98,9 @@ run('多个 user 之间的多个 run, 各自独立计算', () => {
     { kind: 'msg', id: 5, role: 'assistant', content: 'a2' },
   ];
   const d = buildAssistantRunDirectives(items);
-  assert.deepEqual(d.get(2), { showHeader: true });
-  assert.deepEqual(d.get(3), { showHeader: false });
-  assert.deepEqual(d.get(5), { showHeader: true });
+  assert.deepEqual(d.get(2), { showHeader: true, showFooter: false });
+  assert.deepEqual(d.get(3), { showHeader: false, showFooter: true });
+  assert.deepEqual(d.get(5), { showHeader: true, showFooter: true });
 });
 
 run('system 行不影响 run', () => {
@@ -111,6 +111,18 @@ run('system 行不影响 run', () => {
     { kind: 'msg', id: 3, role: 'assistant', content: 'a2' },
   ];
   const d = buildAssistantRunDirectives(items);
-  assert.deepEqual(d.get(1), { showHeader: true });
-  assert.deepEqual(d.get(3), { showHeader: false });
+  assert.deepEqual(d.get(1), { showHeader: true, showFooter: false });
+  assert.deepEqual(d.get(3), { showHeader: false, showFooter: true });
+});
+
+run('activity summary 和 completion summary 不切断 footer run', () => {
+  const items = [
+    { kind: 'msg', id: 1, role: 'assistant', content: 'first' },
+    { kind: 'activity_summary', id: 's1', title: '调用 2 个工具' },
+    { kind: 'msg', id: 2, role: 'assistant', content: 'second' },
+    { kind: 'completion_summary', id: 'c1', title: '总结：done' },
+  ];
+  const d = buildAssistantRunDirectives(items);
+  assert.deepEqual(d.get(1), { showHeader: true, showFooter: false });
+  assert.deepEqual(d.get(2), { showHeader: false, showFooter: true });
 });

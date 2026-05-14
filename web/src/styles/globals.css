@@ -741,39 +741,86 @@ body {
 }
 
 .ace-change-glass-wrap {
-  position: relative;
-  z-index: 12;
-  height: 0;
-  display: flex;
-  justify-content: center;
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 5;
+  padding: 0 12px 9px;
   pointer-events: none;
 }
+.ace-change-glass-wrap + .border-t {
+  border-top-color: transparent;
+  padding-top: 4px;
+}
 .ace-change-glass-dock {
-  transform: translateY(-22px);
-  width: min(760px, calc(100% - 40px));
-  min-height: 44px;
+  position: relative;
+  width: 100%;
+  min-height: 50px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 0 14px 0 18px;
-  border: 1px solid color-mix(in oklab, var(--ace-border) 74%, transparent);
+  gap: 8px;
+  padding: 0 10px 0 18px;
+  border: 1px solid color-mix(in oklab, var(--ace-border) 58%, transparent);
   border-radius: 999px;
-  background: color-mix(in oklab, var(--ace-surface) 68%, transparent);
+  background: var(--ace-surface);
   color: var(--ace-fg);
-  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.10);
-  backdrop-filter: blur(18px) saturate(1.28);
-  -webkit-backdrop-filter: blur(18px) saturate(1.28);
+  box-shadow: var(--ace-shadow);
+  overflow: hidden;
+  isolation: isolate;
+  transform: translateZ(0);
   pointer-events: auto;
 }
+.ace-change-glass-blur-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  border-radius: inherit;
+  overflow: hidden;
+  pointer-events: none;
+}
+.ace-change-glass-blur-crop {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  filter: blur(6px);
+  transform: translateZ(0) scale(1.02);
+  transform-origin: center;
+  pointer-events: none;
+  contain: paint;
+}
+.ace-change-glass-source-clone {
+  position: absolute !important;
+  opacity: .88;
+  pointer-events: none !important;
+  user-select: none !important;
+}
+.ace-change-glass-source-clone * {
+  pointer-events: none !important;
+  user-select: none !important;
+}
+.ace-change-glass-dock::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  z-index: 1;
+  background: color-mix(in oklab, var(--ace-surface) 36%, transparent);
+  pointer-events: none;
+}
+.ace-change-glass-dock::after {
+  content: none;
+}
 .ace-change-glass-dock:hover {
-  border-color: color-mix(in oklab, var(--ace-accent) 35%, var(--ace-border));
-  background: color-mix(in oklab, var(--ace-surface) 76%, transparent);
+  color: var(--ace-fg);
 }
 .ace-change-glass-main {
+  position: relative;
+  z-index: 1;
   flex: 1;
   min-width: 0;
-  min-height: 42px;
+  min-height: 46px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -783,19 +830,22 @@ body {
   color: inherit;
   cursor: pointer;
   text-align: left;
+  pointer-events: auto;
 }
 .ace-change-glass-action {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
   color: var(--ace-fg-mute);
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
+  white-space: nowrap;
 }
 .ace-change-glass-dock:hover .ace-change-glass-action {
-  color: var(--ace-accent);
+  color: var(--ace-fg-mute);
 }
 .ace-change-glass-close {
+  position: relative;
+  z-index: 1;
   flex: 0 0 auto;
   width: 26px;
   height: 26px;
@@ -807,14 +857,11 @@ body {
   background: transparent;
   color: var(--ace-fg-mute);
   cursor: pointer;
+  pointer-events: auto;
 }
 .ace-change-glass-close:hover {
-  background: var(--ace-surface-hi);
+  background: color-mix(in oklab, var(--ace-surface-hi) 62%, transparent);
   color: var(--ace-fg);
-}
-[data-theme="dark"] .ace-change-glass-dock {
-  background: color-mix(in oklab, var(--ace-surface) 56%, transparent);
-  box-shadow: 0 16px 42px rgba(0, 0, 0, 0.36);
 }
 
 /* hover actions on chat messages (复制 / 分叉) */
@@ -1231,7 +1278,8 @@ body {
 .ace-side-preview-code .ace-code-action-btn .ace-icon[data-monochrome="true"] {
   filter: invert(1) brightness(0.92);
 }
-.ace-side-preview-code .ace-code-wrap-btn.is-active {
+.ace-side-preview-code .ace-code-wrap-btn.is-active,
+.ace-side-preview-code .ace-code-markdown-btn.is-active {
   background: color-mix(in oklab, var(--ace-accent) 18%, var(--ace-code-bg));
   border-color: color-mix(in oklab, var(--ace-accent) 68%, transparent);
   color: var(--ace-accent);
@@ -1254,7 +1302,7 @@ body {
   min-width: 100%;
   box-sizing: border-box;
   overflow: visible;
-  padding-right: 78px;
+  padding: 0;
 }
 .ace-side-preview-code[data-wrap="false"] .ace-preview pre {
   white-space: pre;
@@ -1264,9 +1312,9 @@ body {
   overflow-x: hidden;
 }
 .ace-side-preview-code[data-wrap="true"] .ace-preview pre {
-  width: auto;
-  max-width: 100%;
-  min-width: 100%;
+  width: 100%;
+  max-width: none;
+  min-width: 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   word-break: break-word;
@@ -1276,6 +1324,34 @@ body {
   white-space: inherit;
   overflow-wrap: inherit;
   word-break: inherit;
+}
+
+.ace-side-markdown-preview {
+  height: 100%;
+  min-width: 0;
+  padding: 12px 14px 24px;
+  overflow: auto;
+  background: var(--ace-surface);
+  color: var(--ace-fg);
+}
+.ace-side-markdown-preview .ace-copyable-code > pre {
+  padding-right: 46px;
+}
+.ace-side-image-preview {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+  padding: 12px;
+  background: var(--ace-code-bg);
+}
+.ace-side-image-preview img {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
 }
 
 /* Queue card list (above InputBar): 排队中的待发送消息卡片栈。

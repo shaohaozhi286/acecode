@@ -20,6 +20,7 @@
 #include <fstream>
 #include <optional>
 #include <random>
+#include <string_view>
 
 namespace fs = std::filesystem;
 
@@ -34,6 +35,19 @@ void write_skill_md(const fs::path& root, const std::string& name,
         << "name: " << name << "\n"
         << "description: " << description << "\n"
         << "---\n\n# " << name << "\n";
+}
+
+void append_utf16le(std::string& out, char16_t ch) {
+    out.push_back(static_cast<char>(ch & 0xFF));
+    out.push_back(static_cast<char>((ch >> 8) & 0xFF));
+}
+
+std::string utf16le_bom_bytes(std::u16string_view text) {
+    std::string out;
+    out.push_back(static_cast<char>(0xFF));
+    out.push_back(static_cast<char>(0xFE));
+    for (char16_t ch : text) append_utf16le(out, ch);
+    return out;
 }
 
 class CommandsHandlerTest : public ::testing::Test {
@@ -236,4 +250,29 @@ TEST_F(CommandsHandlerTest, InvalidUtf8SkillDescriptionIsSanitized) {
     ASSERT_TRUE(desc.has_value());
     EXPECT_TRUE(acecode::is_valid_utf8(*desc));
     EXPECT_NO_THROW((void)payload.dump());
+}
+
+TEST_F(CommandsHandlerTest, Utf16LegacySkillDescriptionIsDecoded) {
+    fs::path dir = tmp_root / ".agent" / "skills" / "general" / "calculator";
+    fs::create_directories(dir);
+    std::ofstream ofs(dir / "SKILL.md", std::ios::binary);
+    ofs << utf16le_bom_bytes(
+        u"name: calculator\r\n"
+        u"description: A simple calculator skill\r\n"
+        u"category: general\r\n"
+        u"\r\n"
+        u"---\r\n"
+        u"\r\n"
+        u"# Calculator Skill\r\n");
+    ofs.close();
+
+    acecode::SkillRegistry global;
+    acecode::AppConfig cfg;
+    auto payload = acecode::web::build_commands_payload(
+        global, std::optional<std::string>{tmp_root.string()}, &cfg);
+
+    auto desc = find_skill_desc(payload, "calculator");
+    ASSERT_TRUE(desc.has_value());
+    EXPECT_EQ(*desc, "A simple calculator skill");
+    EXPECT_TRUE(acecode::is_valid_utf8(*desc));
 }

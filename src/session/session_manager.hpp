@@ -112,6 +112,10 @@ public:
     // string to clear.
     void set_session_title(std::string title);
 
+    // Set the in-memory archive state for the current session and persist it
+    // immediately when metadata already exists.
+    void set_session_archived(bool archived);
+
     // Return the current in-memory title (empty when unset).
     std::string current_title() const;
 
@@ -143,6 +147,7 @@ private:
     std::string pending_title_;
     std::string last_error_;
     bool writer_lease_active_ = false;
+    bool archived_ = false;
     FileCheckpointStore checkpoint_store_;
 
     mutable std::mutex mu_;

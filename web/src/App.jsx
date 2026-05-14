@@ -9,6 +9,12 @@ import { setToken } from './lib/auth.js';
 import { connection } from './lib/connection.js';
 import { createNewSessionForActiveWorkspace } from './lib/newSession.js';
 import { usePreference } from './lib/usePreference.js';
+import {
+  DEFAULT_UI_PREFS,
+  UI_PREFS_STORAGE_KEY,
+  effectiveShowAceCodeAvatar,
+  validateUiPrefs,
+} from './lib/uiPrefs.js';
 import { useGlobalShortcut } from './lib/useGlobalShortcut.js';
 import { TopBar } from './components/TopBar.jsx';
 import { Sidebar } from './components/Sidebar.jsx';
@@ -31,18 +37,6 @@ const MIN_SIDE_PANEL_WIDTH = 240;
 const MAX_SIDE_PANEL_WIDTH = 560;
 const MIN_CHAT_WIDTH = 360;
 
-const UI_PREFS_STORAGE_KEY = 'acecode.uiPrefs.v1';
-const DEFAULT_UI_PREFS = {
-  view: 'single',
-  sidePanelCollapsed: false,
-  sidebarCollapsed: false,
-  // 右侧面板"最大化":用整个聊天主区显示 SidePanel,聊天列表/输入框被
-  // 隐藏,只剩左侧 sidebar(若 sidebar 也折叠就是全屏 SidePanel)。再点一
-  // 次回到默认布局。跨刷新持久化,符合"用户操作过最大化就保留状态"。
-  sidePanelMaximized: false,
-};
-const ALLOWED_VIEWS = new Set(['single', 'grid4', 'grid9']);
-
 function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
 }
@@ -51,14 +45,6 @@ function validateLayoutWidths(v) {
   return v && typeof v === 'object'
     && typeof v.sidebar === 'number' && Number.isFinite(v.sidebar)
     && typeof v.sidePanel === 'number' && Number.isFinite(v.sidePanel);
-}
-
-function validateUiPrefs(v) {
-  return v && typeof v === 'object'
-    && ALLOWED_VIEWS.has(v.view)
-    && typeof v.sidePanelCollapsed === 'boolean'
-    && (v.sidebarCollapsed == null || typeof v.sidebarCollapsed === 'boolean')
-    && (v.sidePanelMaximized == null || typeof v.sidePanelMaximized === 'boolean');
 }
 
 function homeRefFromWorkspace(workspace, fallbackRef, health) {
@@ -97,6 +83,7 @@ export function App() {
   const sidePanelCollapsed = uiPrefs.sidePanelCollapsed;
   const sidePanelMaximized = !!uiPrefs.sidePanelMaximized;
   const projectSidebarCollapsed = !!uiPrefs.sidebarCollapsed;
+  const showAceCodeAvatar = effectiveShowAceCodeAvatar(uiPrefs);
   const singleShellRef = useRef(null);
   const sidebarResizeActiveRef = useRef(false);
 
@@ -269,6 +256,10 @@ export function App() {
       ...prev,
       sidebarCollapsed: !prev.sidebarCollapsed,
     }));
+  }, [setUiPrefs]);
+
+  const setShowAceCodeAvatar = useCallback((show) => {
+    setUiPrefs({ showAceCodeAvatar: !!show });
   }, [setUiPrefs]);
 
   const openHomeForWorkspace = useCallback((workspace = null) => {
@@ -456,6 +447,7 @@ export function App() {
               onToggleSidePanel={toggleSidePanel}
               sidePanelMaximized={sidePanelMaximized}
               onToggleSidePanelMaximized={toggleSidePanelMaximized}
+              showAceCodeAvatar={showAceCodeAvatar}
               questionRequest={visibleQuestionReq}
               onQuestionResolve={resolveVisibleQuestion}
               onPermissionModeChanged={handlePermissionModeChanged}
@@ -468,6 +460,8 @@ export function App() {
             health={health}
             activeSessionId={activeId}
             onPermissionModeChanged={handlePermissionModeChanged}
+            showAceCodeAvatar={showAceCodeAvatar}
+            onShowAceCodeAvatarChanged={setShowAceCodeAvatar}
           />
         )}
         <SearchPalette

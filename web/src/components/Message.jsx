@@ -1,7 +1,7 @@
 // 单条消息渲染:user 气泡(右)/ assistant 头像+正文(左)/ system 灰条。
 // assistant 走 markdown-it 渲染(见 lib/markdown.js)。
 //
-// hover actions(codex 风格):每条 user / assistant 消息悬停时浮出
+// hover actions(codex 风格):user 消息和 assistant run 最后一条消息悬停时浮出
 // 消息底部同侧的复制 + 分叉按钮(左消息在左下角,右消息在右下角)。复制走 navigator.clipboard.writeText;分叉
 // 调上层 onFork(messageId) — disabled 当 messageId 缺失。
 
@@ -10,6 +10,7 @@ import { renderMarkdown } from '../lib/markdown.js';
 import { codeTextFromCopyButtonTarget, copyTextToClipboard } from '../lib/codeBlockCopy.js';
 import { relativeTime } from '../lib/format.js';
 import { buildCompactMessagePreview } from '../lib/compactMessagePreview.js';
+import { assistantChromeState } from '../lib/assistantAvatarDisplay.js';
 import { CopyableCodeFrame } from './CopyableCodeFrame.jsx';
 import { VsIcon } from './Icon.jsx';
 import { toast } from './Toast.jsx';
@@ -66,8 +67,18 @@ function UserBubble({ content, ts, messageId, onFork }) {
   );
 }
 
-function AssistantBubble({ content, ts, streaming, messageId, onFork, continuation }) {
+function AssistantBubble({
+  content,
+  ts,
+  streaming,
+  messageId,
+  onFork,
+  continuation,
+  showFooter,
+  showAceCodeAvatar,
+}) {
   const html = { __html: renderMarkdown(content || '') };
+  const chrome = assistantChromeState({ showAceCodeAvatar, continuation });
   const handleMarkdownClick = useCallback(async (event) => {
     const text = codeTextFromCopyButtonTarget(event.target);
     if (text == null) return;
@@ -83,14 +94,16 @@ function AssistantBubble({ content, ts, streaming, messageId, onFork, continuati
   // continuation = true: 同一个 assistant run 中的非首条, 不重复显示头像 + ACECode 名牌,
   // 用一个等宽空白占位让正文与首条对齐(头像宽 6 + gap-2 = 总 32px, 与 flex gap 一致)。
   return (
-    <div className="flex gap-2 max-w-[88%] group relative">
-      {continuation ? (
+    <div className={`flex ${chrome.gapClass} max-w-[88%] group relative`}>
+      {chrome.showAvatarPlaceholder ? (
         <div className="w-6 shrink-0" aria-hidden="true" />
-      ) : (
+      ) : chrome.showAvatar ? (
         <div className="w-6 h-6 rounded-full bg-ok text-white text-[11px] font-bold flex items-center justify-center shrink-0 mt-[2px]">A</div>
+      ) : (
+        null
       )}
       <div className="flex-1 min-w-0 flex flex-col gap-1">
-        {!continuation && (
+        {chrome.showName && (
           <div className="text-[12px] font-semibold text-fg flex items-center gap-1.5">
             ACECode
           </div>
@@ -100,16 +113,18 @@ function AssistantBubble({ content, ts, streaming, messageId, onFork, continuati
           onClick={handleMarkdownClick}
           dangerouslySetInnerHTML={html}
         />
-        <div className="min-h-6 flex items-center gap-1">
-          {!streaming && (
-            <HoverActions
-              messageId={messageId}
-              getCopyText={() => content || ''}
-              onFork={onFork}
-            />
-          )}
-          {ts != null && <span className="text-[10px] text-fg-mute font-normal">{relativeTime(ts)}</span>}
-        </div>
+        {showFooter && (
+          <div className="min-h-6 flex items-center gap-1">
+            {!streaming && (
+              <HoverActions
+                messageId={messageId}
+                getCopyText={() => content || ''}
+                onFork={onFork}
+              />
+            )}
+            {ts != null && <span className="text-[10px] text-fg-mute font-normal">{relativeTime(ts)}</span>}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -155,7 +170,16 @@ function SystemRow({ role, content }) {
 }
 
 export const Message = memo(function Message({
-  role, content, ts, streaming, messageId, metadata, onFork, continuation,
+  role,
+  content,
+  ts,
+  streaming,
+  messageId,
+  metadata,
+  onFork,
+  continuation,
+  showFooter = true,
+  showAceCodeAvatar = true,
 }) {
   if (role === 'user') {
     // expand-webui-skill-commands:daemon 把 /<skill> args 在送给 LLM 前展开为
@@ -172,7 +196,9 @@ export const Message = memo(function Message({
   if (role === 'assistant') {
     return <AssistantBubble content={content} ts={ts} streaming={streaming}
                              messageId={messageId} onFork={onFork}
-                             continuation={continuation} />;
+                             continuation={continuation}
+                             showFooter={showFooter}
+                             showAceCodeAvatar={showAceCodeAvatar} />;
   }
   return <SystemRow role={role} content={content} />;
 });

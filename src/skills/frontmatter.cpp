@@ -177,11 +177,67 @@ FrontmatterMap parse_mapping_block(const std::vector<std::string>& lines,
     return out;
 }
 
+Frontmatter parse_yaml_block(const std::string& yaml_block) {
+    std::vector<std::string> lines;
+    {
+        std::istringstream iss(yaml_block);
+        std::string l;
+        while (std::getline(iss, l)) lines.push_back(l);
+    }
+
+    Frontmatter fm;
+    try {
+        size_t idx = 0;
+        fm = parse_mapping_block(lines, idx, 0);
+    } catch (...) {
+        fm = simple_kv_parse(yaml_block);
+    }
+
+    if (fm.empty()) {
+        fm = simple_kv_parse(yaml_block);
+    }
+
+    return fm;
+}
+
+bool has_skill_metadata_shape(const Frontmatter& fm) {
+    return fm.find("name") != fm.end() || fm.find("description") != fm.end();
+}
+
 } // namespace
 
 std::pair<Frontmatter, std::string> parse_frontmatter(const std::string& content) {
     // Must start with "---" optionally followed by whitespace then newline.
     if (content.size() < 4 || content.compare(0, 3, "---") != 0) {
+        // Legacy ACECode skills were sometimes written as:
+        //
+        //   name: ...
+        //   description: ...
+        //   ---
+        //   # body
+        //
+        // Accept that shape for compatibility, but only when the header parses
+        // into recognizable skill metadata.
+        size_t cursor = 0;
+        while (cursor < content.size()) {
+            size_t line_end = content.find('\n', cursor);
+            std::string line = (line_end == std::string::npos)
+                ? content.substr(cursor)
+                : content.substr(cursor, line_end - cursor);
+            if (strip(line) == "---") {
+                std::string yaml_block = content.substr(0, cursor);
+                Frontmatter fm = parse_yaml_block(yaml_block);
+                if (has_skill_metadata_shape(fm)) {
+                    std::string body = (line_end == std::string::npos)
+                        ? std::string{}
+                        : content.substr(line_end + 1);
+                    return {fm, body};
+                }
+                break;
+            }
+            if (line_end == std::string::npos) break;
+            cursor = line_end + 1;
+        }
         return {Frontmatter{}, content};
     }
     // Find the terminating "\n---" line.
@@ -219,25 +275,7 @@ std::pair<Frontmatter, std::string> parse_frontmatter(const std::string& content
         ? std::string{}
         : content.substr(body_start + 1);
 
-    // Split into lines for structured pass.
-    std::vector<std::string> lines;
-    {
-        std::istringstream iss(yaml_block);
-        std::string l;
-        while (std::getline(iss, l)) lines.push_back(l);
-    }
-
-    Frontmatter fm;
-    try {
-        size_t idx = 0;
-        fm = parse_mapping_block(lines, idx, 0);
-    } catch (...) {
-        fm = simple_kv_parse(yaml_block);
-    }
-
-    if (fm.empty()) {
-        fm = simple_kv_parse(yaml_block);
-    }
+    Frontmatter fm = parse_yaml_block(yaml_block);
 
     return {fm, body};
 }

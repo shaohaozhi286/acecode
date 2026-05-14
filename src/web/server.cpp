@@ -47,8 +47,10 @@
 #include <cctype>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -68,6 +70,23 @@ using nlohmann::json;
 std::uint64_t parse_seq(const std::string& s) {
     if (s.empty()) return 0;
     try { return std::stoull(s); } catch (...) { return 0; }
+}
+
+std::optional<std::string> preview_image_mime(const std::string& path) {
+    auto dot = path.find_last_of('.');
+    if (dot == std::string::npos || dot + 1 >= path.size()) return std::nullopt;
+    std::string ext = path.substr(dot + 1);
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    if (ext == "png")  return "image/png";
+    if (ext == "jpg" || ext == "jpeg") return "image/jpeg";
+    if (ext == "gif")  return "image/gif";
+    if (ext == "webp") return "image/webp";
+    if (ext == "bmp")  return "image/bmp";
+    if (ext == "ico")  return "image/x-icon";
+    if (ext == "svg")  return "image/svg+xml";
+    return std::nullopt;
 }
 
 std::int64_t now_unix_ms() {
@@ -303,6 +322,13 @@ struct WebServer::Impl {
         return std::nullopt;
     }
 
+    bool archived_query_requested(const crow::request& req) const {
+        auto raw = req.url_params.get("archived");
+        if (!raw) return false;
+        const std::string value = ascii_lower(raw);
+        return value == "1" || value == "true" || value == "yes";
+    }
+
     std::vector<std::string> allowed_file_cwds() const {
         std::vector<std::string> out;
         std::unordered_set<std::string> seen;
@@ -347,6 +373,7 @@ struct WebServer::Impl {
         o["model_preset"]  = o["model_name"];
         o["context_window"] = s.context_window;
         o["message_count"] = s.message_count > 0 ? s.message_count : (m ? m->message_count : 0);
+        o["archived"]      = m ? m->archived : false;
         append_attention_fields(o, s.id, o.value("workspace_hash", std::string{}),
                                 o.value("cwd", std::string{}), s.busy);
         return o;
@@ -368,11 +395,13 @@ struct WebServer::Impl {
         o["model_name"]     = m.model_preset;
         o["model_preset"]   = m.model_preset;
         o["message_count"]  = m.message_count;
+        o["archived"]       = m.archived;
         append_attention_fields(o, m.id, workspace_hash, m.cwd, false);
         return o;
     }
 
-    json sessions_for_workspace(const acecode::desktop::WorkspaceMeta& ws) const {
+    json sessions_for_workspace(const acecode::desktop::WorkspaceMeta& ws,
+                                bool archived_only = false) const {
         std::vector<SessionInfo> active;
         if (deps.session_client) active = deps.session_client->list_sessions();
 
@@ -391,13 +420,100 @@ struct WebServer::Impl {
             seen.insert(s.id);
             auto meta_it = disk_by_id.find(s.id);
             const SessionMeta* m = meta_it == disk_by_id.end() ? nullptr : &meta_it->second;
+            const bool archived = m ? m->archived : false;
+            if (archived != archived_only) continue;
             arr.push_back(session_info_to_json(s, m));
         }
         for (const auto& m : disk) {
             if (seen.count(m.id)) continue;
+            if (m.archived != archived_only) continue;
             arr.push_back(session_meta_to_json(m, ws.hash));
         }
         return arr;
+    }
+
+    bool session_entry_matches_workspace(const SessionEntry& entry,
+                                         const acecode::desktop::WorkspaceMeta& ws) const {
+        if (!entry.workspace_hash.empty()) return entry.workspace_hash == ws.hash;
+        return entry.cwd == ws.cwd;
+    }
+
+    std::optional<SessionMeta> find_session_meta_for_workspace(
+        const acecode::desktop::WorkspaceMeta& ws,
+        const std::string& id) const {
+        if (id.empty()) return std::nullopt;
+
+        const auto project_dir = SessionStorage::get_project_dir(ws.cwd);
+        const auto direct_meta_path = SessionStorage::meta_path(project_dir, id);
+        std::error_code ec;
+        if (std::filesystem::is_regular_file(path_from_utf8(direct_meta_path), ec)) {
+            auto meta = SessionStorage::read_meta(direct_meta_path);
+            if (!meta.id.empty()) return meta;
+        }
+
+        const auto candidates = SessionStorage::find_session_files(project_dir, id);
+        if (!candidates.empty() && !candidates.front().meta_path.empty()) {
+            auto meta = SessionStorage::read_meta(candidates.front().meta_path);
+            if (!meta.id.empty()) return meta;
+        }
+
+        if (deps.session_registry) {
+            if (auto* entry = deps.session_registry->lookup(id)) {
+                if (!session_entry_matches_workspace(*entry, ws)) return std::nullopt;
+                const auto now = SessionStorage::now_iso8601();
+                SessionMeta meta;
+                meta.id = id;
+                meta.cwd = entry->cwd.empty() ? ws.cwd : entry->cwd;
+                meta.created_at = now;
+                meta.updated_at = now;
+                meta.provider = entry->provider;
+                meta.model = entry->model;
+                meta.model_preset = entry->model_state.name;
+                if (entry->sm) {
+                    meta.title = entry->sm->current_title();
+                }
+                return meta;
+            }
+        }
+
+        return std::nullopt;
+    }
+
+    crow::response set_session_archive_state(
+        const crow::request& req,
+        const acecode::desktop::WorkspaceMeta& ws,
+        const std::string& id,
+        bool archived) {
+        auto maybe_meta = find_session_meta_for_workspace(ws, id);
+        if (!maybe_meta.has_value()) {
+            crow::response r(404);
+            r.body = R"({"error":"session not found"})";
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        }
+
+        SessionMeta meta = *maybe_meta;
+        if (archived && deps.session_client) {
+            deps.session_client->destroy_session(id);
+            const auto reread = find_session_meta_for_workspace(ws, id);
+            if (reread.has_value()) meta = *reread;
+        } else if (!archived && deps.session_registry) {
+            if (auto* entry = deps.session_registry->lookup(id)) {
+                if (session_entry_matches_workspace(*entry, ws) && entry->sm) {
+                    entry->sm->set_session_archived(false);
+                    const auto reread = find_session_meta_for_workspace(ws, id);
+                    if (reread.has_value()) meta = *reread;
+                }
+            }
+        }
+
+        meta.archived = archived;
+        const auto project_dir = SessionStorage::get_project_dir(ws.cwd);
+        SessionStorage::write_meta(SessionStorage::meta_path(project_dir, id), meta);
+
+        crow::response r(session_meta_to_json(meta, ws.hash).dump());
+        r.add_header("Content-Type", "application/json");
+        return with_cors(req, std::move(r));
     }
 
     std::filesystem::path pinned_sessions_path_for_cwd(const std::string& cwd) const {
@@ -415,16 +531,23 @@ struct WebServer::Impl {
             out.push_back(id);
         };
 
+        auto project_dir = SessionStorage::get_project_dir(ws.cwd);
+        std::unordered_set<std::string> archived_ids;
+        for (const auto& m : SessionStorage::list_sessions(project_dir)) {
+            if (m.archived) archived_ids.insert(m.id);
+        }
+
         if (deps.session_client) {
             for (const auto& s : deps.session_client->list_sessions()) {
                 const bool same_workspace = s.workspace_hash == ws.hash ||
                     (s.workspace_hash.empty() && s.cwd == ws.cwd);
+                if (archived_ids.count(s.id)) continue;
                 if (same_workspace) add(s.id);
             }
         }
 
-        auto project_dir = SessionStorage::get_project_dir(ws.cwd);
         for (const auto& m : SessionStorage::list_sessions(project_dir)) {
+            if (m.archived) continue;
             add(m.id);
         }
         return out;
@@ -782,6 +905,10 @@ struct WebServer::Impl {
         ([this](const crow::request& req, const std::string&, const std::string&) {
             return cors_preflight(req);
         });
+        CROW_ROUTE(app, "/api/workspaces/<string>/sessions/<string>/archive").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req, const std::string&, const std::string&) {
+            return cors_preflight(req);
+        });
 
         CROW_ROUTE(app, "/api/workspaces").methods(crow::HTTPMethod::GET)
         ([this](const crow::request& req) {
@@ -887,7 +1014,7 @@ struct WebServer::Impl {
                 r.add_header("Content-Type", "application/json");
                 return with_cors(req, std::move(r));
             }
-            auto arr = sessions_for_workspace(*ws);
+            auto arr = sessions_for_workspace(*ws, archived_query_requested(req));
             crow::response r(arr.dump());
             r.add_header("Content-Type", "application/json");
             return with_cors(req, std::move(r));
@@ -988,6 +1115,32 @@ struct WebServer::Impl {
             r.body = json{{"session_id", id}, {"id", id}, {"active", true}, {"workspace_hash", ws->hash}, {"cwd", ws->cwd}}.dump();
             r.add_header("Content-Type", "application/json");
             return with_cors(req, std::move(r));
+        });
+
+        CROW_ROUTE(app, "/api/workspaces/<string>/sessions/<string>/archive").methods(crow::HTTPMethod::PUT)
+        ([this](const crow::request& req, const std::string& hash, const std::string& id) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            auto ws = resolve_workspace(hash);
+            if (!ws.has_value()) {
+                crow::response r(404);
+                r.body = R"({"error":"workspace not found"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            return set_session_archive_state(req, *ws, id, true);
+        });
+
+        CROW_ROUTE(app, "/api/workspaces/<string>/sessions/<string>/archive").methods(crow::HTTPMethod::Delete)
+        ([this](const crow::request& req, const std::string& hash, const std::string& id) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            auto ws = resolve_workspace(hash);
+            if (!ws.has_value()) {
+                crow::response r(404);
+                r.body = R"({"error":"workspace not found"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            return set_session_archive_state(req, *ws, id, false);
         });
     }
 
@@ -1221,6 +1374,10 @@ struct WebServer::Impl {
         ([this](const crow::request& req) {
             return cors_preflight(req);
         });
+        CROW_ROUTE(app, "/api/files/blob").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
 
         // 把 FileError 序列化为 (status_code, json) — 共用给两个端点。
         // err.message 透出到 body.detail 便于浏览器 network tab 排查;不会泄露
@@ -1349,6 +1506,74 @@ struct WebServer::Impl {
             r.add_header("Cache-Control", "no-cache");
             return with_cors(req, std::move(r));
         });
+
+        // GET /api/files/blob?cwd=<abs>&path=<rel>
+        CROW_ROUTE(app, "/api/files/blob").methods(crow::HTTPMethod::GET)
+        ([this, error_response](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+
+            std::string cwd_q;
+            std::string path_q;
+            if (auto c = req.url_params.get("cwd"))  cwd_q  = c;
+            if (auto p = req.url_params.get("path")) path_q = p;
+            if (cwd_q.empty() || path_q.empty()) {
+                crow::response r(400);
+                r.body = R"({"error":"cwd and path parameters required"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            auto mime = preview_image_mime(path_q);
+            if (!mime.has_value()) {
+                crow::response r(415);
+                r.body = R"({"error":"unsupported file type"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            auto allowed_cwds = allowed_file_cwds();
+            auto validated = validate_path_within(cwd_q, path_q, allowed_cwds);
+            if (std::holds_alternative<FileError>(validated)) {
+                return error_response(req, std::get<FileError>(validated));
+            }
+            auto abs_file = std::get<std::filesystem::path>(validated);
+
+            std::error_code ec;
+            if (!std::filesystem::exists(abs_file, ec) || ec) {
+                return error_response(req, FileError{FileErrorKind::NotFound, 0, "file not found"});
+            }
+            if (std::filesystem::is_directory(abs_file, ec) || ec) {
+                return error_response(req, FileError{FileErrorKind::NotFound, 0, "is a directory"});
+            }
+            auto sz = std::filesystem::file_size(abs_file, ec);
+            if (ec) {
+                return error_response(req, FileError{FileErrorKind::IoError, 0, ec.message()});
+            }
+            constexpr std::uint64_t kMaxImagePreviewBytes = 20ull * 1024 * 1024;
+            if (sz > kMaxImagePreviewBytes) {
+                return error_response(req, FileError{
+                    FileErrorKind::TooLarge,
+                    static_cast<std::uint64_t>(sz),
+                    "file exceeds image preview cap",
+                });
+            }
+
+            std::ifstream in(abs_file, std::ios::binary);
+            if (!in) {
+                return error_response(req, FileError{FileErrorKind::IoError, 0, "failed to open file"});
+            }
+            std::string body((std::istreambuf_iterator<char>(in)),
+                             std::istreambuf_iterator<char>());
+            if (!in.good() && !in.eof()) {
+                return error_response(req, FileError{FileErrorKind::IoError, 0, "failed to read file"});
+            }
+
+            crow::response r(std::move(body));
+            r.add_header("Content-Type", *mime);
+            r.add_header("Cache-Control", "no-cache");
+            r.add_header("X-Content-Type-Options", "nosniff");
+            return with_cors(req, std::move(r));
+        });
     }
 
     void register_health() {
@@ -1407,6 +1632,10 @@ struct WebServer::Impl {
         ([this](const crow::request& req, const std::string&) {
             return cors_preflight(req);
         });
+        CROW_ROUTE(app, "/api/sessions/<string>/archive").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req, const std::string&) {
+            return cors_preflight(req);
+        });
         CROW_ROUTE(app, "/api/sessions/<string>/fork").methods(crow::HTTPMethod::Options)
         ([this](const crow::request& req, const std::string&) {
             return cors_preflight(req);
@@ -1421,7 +1650,7 @@ struct WebServer::Impl {
         ([this](const crow::request& req) {
             if (auto rej = require_auth(req)) return std::move(*rej);
             LOG_INFO("[web] compatibility /api/sessions list for cwd=" + deps.cwd);
-            auto arr = sessions_for_workspace(compatibility_workspace());
+            auto arr = sessions_for_workspace(compatibility_workspace(), archived_query_requested(req));
             crow::response r(arr.dump());
             r.add_header("Content-Type", "application/json");
             return with_cors(req, std::move(r));
@@ -1501,6 +1730,18 @@ struct WebServer::Impl {
             r.body = json{{"session_id", id}, {"id", id}, {"active", true}, {"workspace_hash", ws.hash}, {"cwd", ws.cwd}}.dump();
             r.add_header("Content-Type", "application/json");
             return with_cors(req, std::move(r));
+        });
+
+        CROW_ROUTE(app, "/api/sessions/<string>/archive").methods(crow::HTTPMethod::PUT)
+        ([this](const crow::request& req, const std::string& id) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            return set_session_archive_state(req, compatibility_workspace(), id, true);
+        });
+
+        CROW_ROUTE(app, "/api/sessions/<string>/archive").methods(crow::HTTPMethod::Delete)
+        ([this](const crow::request& req, const std::string& id) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            return set_session_archive_state(req, compatibility_workspace(), id, false);
         });
 
         // DELETE /api/sessions/:id: 销毁。spec 9.5

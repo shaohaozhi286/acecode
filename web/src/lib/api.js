@@ -45,6 +45,10 @@ function fullUrl(path, base) {
   return origin ? origin + path : path;
 }
 
+function sessionsPath(path, opts = {}) {
+  return opts && opts.archived ? `${path}?archived=1` : path;
+}
+
 async function request(method, path, body, base) {
   const headers = {};
   const token = baseToken(base);
@@ -73,12 +77,18 @@ export function createApi(base = null) {
     listWorkspaces:   ()             => request('GET',    '/api/workspaces', undefined, base),
     registerWorkspace:(cwd)          => request('POST',   '/api/workspaces', {cwd}, base),
     pickWorkspaceFolder:()           => request('POST',   '/api/workspaces/pick-folder', undefined, base),
-    listSessions:     ()             => request('GET',    '/api/sessions', undefined, base),
+    listSessions:     (opts={})      => request('GET',    sessionsPath('/api/sessions', opts), undefined, base),
     createSession:    (opts={})      => request('POST',   '/api/sessions', opts, base),
     resumeSession:    (id)           => request('POST',   `/api/sessions/${encodeURIComponent(id)}/resume`, {}, base),
-    listWorkspaceSessions:  (hash)        => request('GET',  `/api/workspaces/${encodeURIComponent(hash)}/sessions`, undefined, base),
+    listWorkspaceSessions:  (hash, opts={}) => request('GET',  sessionsPath(`/api/workspaces/${encodeURIComponent(hash)}/sessions`, opts), undefined, base),
     createWorkspaceSession: (hash, opts={}) => request('POST', `/api/workspaces/${encodeURIComponent(hash)}/sessions`, opts, base),
     resumeWorkspaceSession: (hash, id)    => request('POST', `/api/workspaces/${encodeURIComponent(hash)}/sessions/${encodeURIComponent(id)}/resume`, {}, base),
+    archiveSession:   (id)           => request('PUT',    `/api/sessions/${encodeURIComponent(id)}/archive`, {}, base),
+    unarchiveSession: (id)           => request('DELETE', `/api/sessions/${encodeURIComponent(id)}/archive`, undefined, base),
+    archiveWorkspaceSession: (hash, id) =>
+      request('PUT', `/api/workspaces/${encodeURIComponent(hash)}/sessions/${encodeURIComponent(id)}/archive`, {}, base),
+    unarchiveWorkspaceSession: (hash, id) =>
+      request('DELETE', `/api/workspaces/${encodeURIComponent(hash)}/sessions/${encodeURIComponent(id)}/archive`, undefined, base),
     getPinnedSessions: (hash) =>
       request('GET', `/api/workspaces/${encodeURIComponent(hash)}/pinned-sessions`, undefined, base),
     setPinnedSessions: (hash, sessionIds=[]) =>
@@ -128,6 +138,11 @@ export function createApi(base = null) {
       listSessions: (hash) => request('GET',
         `/api/workspaces/${encodeURIComponent(hash)}/sessions`, undefined, base),
     }),
+    listAllArchivedSessions: () => mergeAllWorkspaceSessions({
+      listWorkspaces: () => request('GET', '/api/workspaces', undefined, base),
+      listSessions: (hash) => request('GET',
+        `/api/workspaces/${encodeURIComponent(hash)}/sessions?archived=1`, undefined, base),
+    }),
 
     // SidePanel "文件" tab — 列指定目录的直接子项(不递归)。
     // path='' 列 cwd 根本身。showHidden=true 透出 dot 文件,但 noise 黑名单
@@ -162,6 +177,30 @@ export function createApi(base = null) {
         throw new ApiError(resp.status, parsed);
       }
       return resp.text();
+    },
+
+    // SidePanel image preview uses an authenticated binary fetch. A plain
+    // <img src="/api/..."> cannot attach the daemon token header.
+    readFileBlob: async (cwd, path) => {
+      const qs = `?cwd=${encodeURIComponent(cwd)}&path=${encodeURIComponent(path)}`;
+      const headers = {};
+      const token = baseToken(base);
+      if (token) headers['X-ACECode-Token'] = token;
+      const resp = await fetch(fullUrl('/api/files/blob' + qs, base), {
+        method: 'GET',
+        headers,
+      });
+      if (!resp.ok) {
+        let parsed = null;
+        const ctype = resp.headers.get('Content-Type') || '';
+        if (ctype.includes('application/json')) {
+          parsed = await resp.json().catch(() => null);
+        } else {
+          parsed = await resp.text().catch(() => '');
+        }
+        throw new ApiError(resp.status, parsed);
+      }
+      return resp.blob();
     },
   };
 }

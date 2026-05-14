@@ -145,6 +145,9 @@ void SessionStorage::write_meta(const std::string& meta_path, const SessionMeta&
     if (!meta.fork_message_id.empty()) {
         j["fork_message_id"] = meta.fork_message_id;
     }
+    if (meta.archived) {
+        j["archived"] = true;
+    }
 
     std::error_code ec;
     fs::create_directories(path_from_utf8(meta_path).parent_path(), ec);
@@ -170,6 +173,7 @@ SessionMeta SessionStorage::read_meta(const std::string& meta_path) {
         meta.title           = j.value("title",           std::string{});
         meta.forked_from     = j.value("forked_from",     std::string{});
         meta.fork_message_id = j.value("fork_message_id", std::string{});
+        meta.archived        = j.value("archived",        false);
     } catch (...) {
         // Return empty meta on parse failure
     }

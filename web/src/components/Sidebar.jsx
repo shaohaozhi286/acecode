@@ -29,6 +29,7 @@ import {
   statusCursor,
   workspaceHasUnread,
 } from '../lib/sessionStatus.js';
+import { sidebarSessionProjection } from '../lib/sidebarSessions.js';
 import { toast } from './Toast.jsx';
 import { VsIcon } from './Icon.jsx';
 
@@ -76,7 +77,30 @@ function PinIconInline({ size = 12 }) {
   );
 }
 
-function SessionRow({ s, active, pinned = false, onSelect, onTogglePin }) {
+function ArchiveIconInline({ size = 14 }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      xmlns="http://www.w3.org/2000/svg"
+      aria-hidden="true"
+    >
+      <path
+        fill="currentColor"
+        d="M20.25 3.75C20.664 3.75 21 4.086 21 4.5v2.25c0 .414-.336.75-.75.75h-.75V12H18V7.5H6.017v10.519H12V19.5H5.25a.75.75 0 0 1-.75-.75V7.5h-.75A.75.75 0 0 1 3 6.75V4.5c0-.414.336-.75.75-.75h16.5ZM19.5 5.124h-15v.937h15v-.937Z"
+      />
+      <path
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        d="m15.915 13.35 1.351 1.289 4.022.023.15 4.65-7.65.15-.15-5.962 2.277-.15Z"
+      />
+    </svg>
+  );
+}
+
+function SessionRow({ s, active, pinned = false, onSelect, onTogglePin, onArchive }) {
   const attention = s.attention_state || s.read_state || 'read';
   const meta = attentionMeta(attention);
   const workspaceHash = s.workspace_hash || s.workspaceHash || '';
@@ -129,14 +153,43 @@ function SessionRow({ s, active, pinned = false, onSelect, onTogglePin }) {
         <span className="flex-1 truncate">{sessionDisplayTitle(s, s.name || '')}</span>
         <span className="text-[10px] text-fg-mute shrink-0">{relativeTime(s.updated_at || s.created_at)}</span>
       </button>
+      <button
+        type="button"
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          onArchive?.(s);
+        }}
+        className="w-5 h-6 rounded flex items-center justify-center shrink-0 text-fg-mute hover:text-fg hover:bg-surface-hi opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition"
+        title="归档"
+        aria-label="归档"
+      >
+        <ArchiveIconInline size={14} />
+      </button>
     </div>
   );
 }
 
-function WorkspaceGroup({ ws, expanded, onToggle, sessions, activeId, onSelect, onRename, onActivate, onNewSession, onRemove, onTogglePin }) {
+function WorkspaceGroup({
+  ws,
+  expanded,
+  onToggle,
+  sessions,
+  sessionListExpanded,
+  onToggleSessionList,
+  activeId,
+  onSelect,
+  onRename,
+  onActivate,
+  onNewSession,
+  onRemove,
+  onTogglePin,
+  onArchive,
+}) {
   const [editing, setEditing] = useState(false);
   const [draft,   setDraft]   = useState(ws.name);
   const hasUnread = workspaceHasUnread(sessions);
+  const projectedSessions = sidebarSessionProjection(sessions, sessionListExpanded);
 
   useEffect(() => {
     if (!editing) setDraft(ws.name);
@@ -211,9 +264,27 @@ function WorkspaceGroup({ ws, expanded, onToggle, sessions, activeId, onSelect, 
           {sessions.length === 0 ? (
             <div className="mx-1.5 ml-[22px] px-2 py-[3px] text-[11px] text-fg-mute italic">暂无对话</div>
           ) : (
-            sessions.map((s) => (
-              <SessionRow key={s.id} s={s} active={s.id === activeId} onSelect={onSelect} onTogglePin={onTogglePin} />
-            ))
+            <>
+              {projectedSessions.visibleSessions.map((s) => (
+                <SessionRow
+                  key={s.id}
+                  s={s}
+                  active={s.id === activeId}
+                  onSelect={onSelect}
+                  onTogglePin={onTogglePin}
+                  onArchive={onArchive}
+                />
+              ))}
+              {projectedSessions.collapsible && (
+                <button
+                  type="button"
+                  onClick={() => onToggleSessionList?.(ws.hash)}
+                  className="block w-[calc(100%-28px)] mx-1.5 ml-[22px] px-2 py-[5px] rounded-md text-left text-[12px] text-fg-mute hover:text-fg hover:bg-surface-hi transition"
+                >
+                  {projectedSessions.action === 'expand' ? '展开显示' : '折叠显示'}
+                </button>
+              )}
+            </>
           )}
         </div>
       )}
@@ -227,6 +298,7 @@ export function Sidebar({ activeId, onSelect, collapsed, width = 200, onOpenHome
   const [statusBySession, setStatusBySession] = useState(() => new Map());
   const [pinnedByWorkspace, setPinnedByWorkspace] = useState(() => new Map());
   const [expanded,    setExpanded]    = useState(new Set());
+  const [expandedSessionLists, setExpandedSessionLists] = useState(new Set());
   const [activeWorkspaceHash, setActiveWorkspaceHash] = useState('');
   const refreshingRef = useRef(false);
   const expandedRef = useRef(new Set());
@@ -296,6 +368,15 @@ export function Sidebar({ activeId, onSelect, collapsed, width = 200, onOpenHome
       toast({ kind: 'err', text: (shouldPin ? '置顶失败:' : '取消置顶失败:') + (e.message || '') });
     }
   }, [activeWorkspaceHash, setPinnedWorkspaceIds]);
+
+  const toggleSessionListExpanded = useCallback((hash) => {
+    if (!hash) return;
+    setExpandedSessionLists((prev) => {
+      const next = new Set(prev);
+      next.has(hash) ? next.delete(hash) : next.add(hash);
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     const handler = (event) => {
@@ -400,10 +481,57 @@ export function Sidebar({ activeId, onSelect, collapsed, width = 200, onOpenHome
     }
   }, [activeWorkspaceHash, setPinnedMap, syncRetainedSessionIds, updateExpanded]);
 
+  const archiveSession = useCallback(async (session) => {
+    const id = session?.id || session?.sessionId || session?.session_id || '';
+    const workspaceHash = session?.workspace_hash || session?.workspaceHash || activeWorkspaceHash || '';
+    if (!id) return;
+
+    try {
+      if (workspaceHash && workspaceHash !== '__local__') {
+        await api.archiveWorkspaceSession(workspaceHash, id);
+      } else {
+        await api.archiveSession(id);
+      }
+
+      const previousPinned = normalizePinnedIds(pinnedByWorkspaceRef.current.get(workspaceHash) || []);
+      if (workspaceHash && previousPinned.includes(id)) {
+        const nextPinned = unpinSessionId(previousPinned, id);
+        setPinnedWorkspaceIds(workspaceHash, nextPinned);
+        try {
+          const saved = await api.setPinnedSessions(workspaceHash, nextPinned);
+          setPinnedWorkspaceIds(workspaceHash, normalizePinnedIds(saved?.session_ids || nextPinned));
+        } catch {
+          // Archiving already succeeded; stale pinned state will be pruned on next refresh.
+        }
+      }
+
+      setSessions((prev) => prev.filter((item) => (item.id || item.session_id || item.sessionId) !== id));
+      if (id === activeId) {
+        onOpenHome?.({
+          hash: workspaceHash,
+          workspaceHash,
+          cwd: session.cwd || '',
+          name: session.workspaceName || session.workspace_name || '',
+        });
+      }
+      toast({ kind: 'ok', text: '已归档' });
+      window.dispatchEvent(new Event('ace-session-archive-changed'));
+      refresh(workspaceHash).catch(() => {});
+    } catch (e) {
+      toast({ kind: 'err', text: '归档失败:' + (e.message || '') });
+    }
+  }, [activeId, activeWorkspaceHash, onOpenHome, refresh, setPinnedWorkspaceIds]);
+
   useEffect(() => {
     refresh();
     const t = setInterval(() => refresh().catch(() => {}), 5000);
     return () => clearInterval(t);
+  }, [refresh]);
+
+  useEffect(() => {
+    const handler = () => refresh().catch(() => {});
+    window.addEventListener('ace-session-archive-changed', handler);
+    return () => window.removeEventListener('ace-session-archive-changed', handler);
   }, [refresh]);
 
   const renderedSessions = useMemo(
@@ -725,6 +853,7 @@ export function Sidebar({ activeId, onSelect, collapsed, width = 200, onOpenHome
                       active={s.id === activeId}
                       onSelect={(session) => selectSession(workspaceForSession(session), session)}
                       onTogglePin={togglePinnedSession}
+                      onArchive={archiveSession}
                     />
                   ))}
                 </div>
@@ -742,6 +871,8 @@ export function Sidebar({ activeId, onSelect, collapsed, width = 200, onOpenHome
                   expanded={expanded.has(ws.hash)}
                   onToggle={onToggle}
                   sessions={items}
+                  sessionListExpanded={expandedSessionLists.has(ws.hash)}
+                  onToggleSessionList={toggleSessionListExpanded}
                   activeId={activeId}
                   onSelect={(session) => selectSession(ws, session)}
                   onRename={onRename}
@@ -749,6 +880,7 @@ export function Sidebar({ activeId, onSelect, collapsed, width = 200, onOpenHome
                   onNewSession={createSessionInWorkspace}
                   onRemove={hasDesktopRemoveWorkspace() ? removeWorkspace : undefined}
                   onTogglePin={togglePinnedSession}
+                  onArchive={archiveSession}
                 />
               );
             })}

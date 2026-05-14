@@ -20,6 +20,7 @@ import hljs from 'highlight.js/lib/core';
 import { ApiError, createApi } from '../lib/api.js';
 import { aggregateHunksFromMessages, summarizeChangeGroups } from '../lib/sessionChanges.js';
 import { langForFile } from '../lib/lang.js';
+import { renderMarkdown } from '../lib/markdown.js';
 import { joinWorkspacePath } from '../lib/desktopContextMenu.js';
 import { usePreference } from '../lib/usePreference.js';
 import { clsx, formatBytes } from '../lib/format.js';
@@ -28,12 +29,29 @@ import { VsIcon } from './Icon.jsx';
 import { ChangeReviewPanel } from './ChangeReview.jsx';
 
 const FILE_PREVIEW_WRAP_STORAGE_KEY = 'acecode.filePreviewWrap.v1';
+const MARKDOWN_EXTENSIONS = new Set(['md', 'markdown']);
+const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico', 'svg']);
 
 const TABS = [
   { key: 'files',   label: '文件' },
   { key: 'changes', label: '审查' },
   { key: 'preview', label: '预览' },
 ];
+
+function extensionForPath(path) {
+  const name = String(path || '').split(/[\\/]/).pop() || '';
+  const dot = name.lastIndexOf('.');
+  if (dot < 0 || dot === name.length - 1) return '';
+  return name.slice(dot + 1).toLowerCase();
+}
+
+function isMarkdownPreview(path) {
+  return MARKDOWN_EXTENSIONS.has(extensionForPath(path));
+}
+
+function isImagePreview(path) {
+  return IMAGE_EXTENSIONS.has(extensionForPath(path));
+}
 
 // 切 cwd / 没有 cwd 时给 FileTree 传一个稳定的空 Map / Set,避免每次渲染
 // 都 new 一份导致 useEffect deps 抖动 / 子组件 useCallback 失效。
@@ -182,21 +200,82 @@ function ChangesList({ messages, groups, summary }) {
 }
 
 // ────────────────────────────────────────────────────────────
-// 预览 tab — 文件原文 + hljs 高亮
+// 预览 tab — Markdown 渲染 / 图片 / 文件原文 + hljs 高亮
 // ────────────────────────────────────────────────────────────
 function PreviewPanel({ api, cwd, path, wrapPreview, onToggleWrapPreview, refreshToken }) {
-  const [state, setState] = useState({ status: 'idle', text: '', error: null, lang: '', size: 0 });
+  const [state, setState] = useState({
+    status: 'idle',
+    kind: 'text',
+    text: '',
+    error: null,
+    lang: '',
+    size: 0,
+    imageUrl: '',
+    contentType: '',
+  });
+  const [markdownSource, setMarkdownSource] = useState(false);
 
   useEffect(() => {
     if (!cwd || !path) {
-      setState({ status: 'idle', text: '', error: null, lang: '', size: 0 });
+      setState({ status: 'idle', kind: 'text', text: '', error: null, lang: '', size: 0, imageUrl: '', contentType: '' });
       return;
     }
     let cancelled = false;
-    setState({ status: 'loading', text: '', error: null, lang: '', size: 0 });
+    let objectUrl = '';
+    setMarkdownSource(false);
+    setState({ status: 'loading', kind: 'text', text: '', error: null, lang: '', size: 0, imageUrl: '', contentType: '' });
+
+    if (isImagePreview(path)) {
+      api.readFileBlob(cwd, path).then((blob) => {
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(blob);
+        setState({
+          status: 'ok',
+          kind: 'image',
+          text: '',
+          error: null,
+          lang: '',
+          size: blob.size || 0,
+          imageUrl: objectUrl,
+          contentType: blob.type || '',
+        });
+      }).catch((err) => {
+        if (cancelled) return;
+        let msg = '读取失败';
+        let extraSize = 0;
+        if (err instanceof ApiError) {
+          const body = err.body;
+          if (body && typeof body === 'object') {
+            if (body.error === 'file too large') {
+              extraSize = Number(body.size || 0);
+              msg = `文件过大 (${formatBytes(extraSize)}),无法在浏览器内预览`;
+            } else if (body.error === 'unsupported file type') msg = '该图片格式暂不支持预览';
+            else if (body.error === 'not found') msg = '文件不存在';
+            else if (body.error) msg = body.error;
+          } else {
+            msg = `读取失败 (HTTP ${err.status})`;
+          }
+        }
+        setState({ status: 'error', kind: 'image', text: '', error: msg, lang: '', size: extraSize, imageUrl: '', contentType: '' });
+      });
+      return () => {
+        cancelled = true;
+        if (objectUrl) URL.revokeObjectURL(objectUrl);
+      };
+    }
+
     api.readFile(cwd, path).then((text) => {
       if (cancelled) return;
-      setState({ status: 'ok', text, error: null, lang: langForFile(path), size: text.length });
+      setState({
+        status: 'ok',
+        kind: isMarkdownPreview(path) ? 'markdown' : 'text',
+        text,
+        error: null,
+        lang: langForFile(path),
+        size: text.length,
+        imageUrl: '',
+        contentType: '',
+      });
     }).catch((err) => {
       if (cancelled) return;
       // err.body 可能是 {error, size}
@@ -215,7 +294,7 @@ function PreviewPanel({ api, cwd, path, wrapPreview, onToggleWrapPreview, refres
           msg = `读取失败 (HTTP ${err.status})`;
         }
       }
-      setState({ status: 'error', text: '', error: msg, lang: '', size: extraSize });
+      setState({ status: 'error', kind: 'text', text: '', error: msg, lang: '', size: extraSize, imageUrl: '', contentType: '' });
     });
     return () => { cancelled = true; };
   }, [api, cwd, path, refreshToken]);
@@ -235,6 +314,18 @@ function PreviewPanel({ api, cwd, path, wrapPreview, onToggleWrapPreview, refres
     );
   }
   if (state.status !== 'ok') return null;
+  if (state.kind === 'image') {
+    return (
+      <div className="flex-1 flex flex-col overflow-hidden">
+        <div className="px-2 py-1 text-[10px] text-fg-mute font-mono border-b border-border truncate" title={path}>
+          {path} · {formatBytes(state.size)}{state.contentType ? ` · ${state.contentType}` : ''}
+        </div>
+        <div className="ace-side-image-preview">
+          <img src={state.imageUrl} alt={path} draggable="false" />
+        </div>
+      </div>
+    );
+  }
 
   const lang = state.lang;
   let html;
@@ -250,32 +341,58 @@ function PreviewPanel({ api, cwd, path, wrapPreview, onToggleWrapPreview, refres
     html = `<pre><code>${escapeHtml(state.text)}</code></pre>`;
   }
   const wrapTitle = wrapPreview ? '关闭自动换行' : '开启自动换行';
+  const isMarkdown = state.kind === 'markdown';
+  const showMarkdownRendered = isMarkdown && !markdownSource;
+  const markdownToggleTitle = markdownSource ? '渲染 Markdown' : '查看 Markdown 原文';
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
       <div className="px-2 py-1 text-[10px] text-fg-mute font-mono border-b border-border truncate" title={path}>
-        {path} · {formatBytes(state.text.length)}{lang ? ` · ${lang}` : ''}
+        {path} · {formatBytes(state.text.length)}{showMarkdownRendered ? ' · Markdown 预览' : (lang ? ` · ${lang}` : '')}
       </div>
       <CopyableCodeFrame
         text={state.text}
         className="flex-1 min-h-0 ace-side-preview-code"
         data-wrap={wrapPreview ? 'true' : 'false'}
         actions={(
-          <button
-            type="button"
-            className={clsx('ace-code-action-btn ace-code-wrap-btn', wrapPreview && 'is-active')}
-            title={wrapTitle}
-            aria-label={wrapTitle}
-            aria-pressed={wrapPreview}
-            onClick={(event) => { event.stopPropagation(); onToggleWrapPreview?.(); }}
-          >
-            <VsIcon name="wordWrap" size={14} />
-          </button>
+          <>
+            {isMarkdown && (
+              <button
+                type="button"
+                className={clsx('ace-code-action-btn ace-code-markdown-btn', showMarkdownRendered && 'is-active')}
+                title={markdownToggleTitle}
+                aria-label={markdownToggleTitle}
+                aria-pressed={showMarkdownRendered}
+                onClick={(event) => { event.stopPropagation(); setMarkdownSource((prev) => !prev); }}
+              >
+                <VsIcon name={markdownSource ? 'document' : 'code'} size={14} />
+              </button>
+            )}
+            {!showMarkdownRendered && (
+              <button
+                type="button"
+                className={clsx('ace-code-action-btn ace-code-wrap-btn', wrapPreview && 'is-active')}
+                title={wrapTitle}
+                aria-label={wrapTitle}
+                aria-pressed={wrapPreview}
+                onClick={(event) => { event.stopPropagation(); onToggleWrapPreview?.(); }}
+              >
+                <VsIcon name="wordWrap" size={14} />
+              </button>
+            )}
+          </>
         )}
       >
-        <div
-          className="h-full overflow-auto text-[11px] ace-preview"
-          dangerouslySetInnerHTML={{ __html: html }}
-        />
+        {showMarkdownRendered ? (
+          <div
+            className="h-full overflow-auto ace-md ace-side-markdown-preview"
+            dangerouslySetInnerHTML={{ __html: renderMarkdown(state.text) }}
+          />
+        ) : (
+          <div
+            className="h-full overflow-auto text-[11px] ace-preview"
+            dangerouslySetInnerHTML={{ __html: html }}
+          />
+        )}
       </CopyableCodeFrame>
     </div>
   );

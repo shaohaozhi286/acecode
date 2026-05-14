@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <string_view>
 
 namespace fs = std::filesystem;
 
@@ -25,6 +26,19 @@ void write_skill(const fs::path& root,
         << "---\n\n"
         << "# " << name << "\n\n"
         << description << "\n";
+}
+
+void append_utf16le(std::string& out, char16_t ch) {
+    out.push_back(static_cast<char>(ch & 0xFF));
+    out.push_back(static_cast<char>((ch >> 8) & 0xFF));
+}
+
+std::string utf16le_bom_bytes(std::u16string_view text) {
+    std::string out;
+    out.push_back(static_cast<char>(0xFF));
+    out.push_back(static_cast<char>(0xFE));
+    for (char16_t ch : text) append_utf16le(out, ch);
+    return out;
 }
 
 class SkillRegistryCompatTest : public ::testing::Test {
@@ -92,6 +106,37 @@ TEST_F(SkillRegistryCompatTest, PreservesUtf8CategoryDescriptionAndBody) {
 
     std::string body = registry.read_skill_body("unicode-skill");
     EXPECT_NE(body.find(u8"处理中文描述"), std::string::npos);
+    EXPECT_TRUE(acecode::is_valid_utf8(body));
+}
+
+TEST_F(SkillRegistryCompatTest, LoadsUtf16LegacyHeaderSkill) {
+    fs::path root = temp_root / "skills-root";
+    fs::path dir = root / "general" / "calculator";
+    fs::create_directories(dir);
+    std::ofstream ofs(dir / "SKILL.md", std::ios::binary);
+    ofs << utf16le_bom_bytes(
+        u"name: calculator\r\n"
+        u"description: A simple calculator skill\r\n"
+        u"category: general\r\n"
+        u"\r\n"
+        u"---\r\n"
+        u"\r\n"
+        u"# Calculator Skill\r\n");
+    ofs.close();
+
+    acecode::SkillRegistry registry;
+    registry.set_scan_roots({root});
+    registry.scan();
+
+    auto found = registry.find("calculator");
+    ASSERT_TRUE(found.has_value());
+    EXPECT_EQ(found->name, "calculator");
+    EXPECT_EQ(found->description, "A simple calculator skill");
+    EXPECT_EQ(found->category, "general");
+    EXPECT_TRUE(acecode::is_valid_utf8(found->description));
+
+    std::string body = registry.read_skill_body("calculator");
+    EXPECT_NE(body.find("# Calculator Skill"), std::string::npos);
     EXPECT_TRUE(acecode::is_valid_utf8(body));
 }
 

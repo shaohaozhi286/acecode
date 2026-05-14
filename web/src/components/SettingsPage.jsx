@@ -9,8 +9,9 @@ import { useEffect, useMemo, useState } from 'react';
 import { useTheme } from '../theme.jsx';
 import { api } from '../lib/api.js';
 import { Toggle } from './Modal.jsx';
-import { clsx } from '../lib/format.js';
+import { clsx, relativeTime } from '../lib/format.js';
 import { normalizePermissionMode } from '../lib/permissionMode.js';
+import { sessionDisplayTitle } from '../lib/sessionTitle.js';
 import { VsIcon } from './Icon.jsx';
 import { ModelManager } from './ModelManager.jsx';
 import { toast } from './Toast.jsx';
@@ -22,7 +23,14 @@ import {
 
 const NAV = ['常规', '外观', '配置', '个性化', 'MCP 服务器', '模型', '工具', '已归档会话', '使用情况'];
 
-export function SettingsPage({ onClose, health, activeSessionId = '', onPermissionModeChanged }) {
+export function SettingsPage({
+  onClose,
+  health,
+  activeSessionId = '',
+  onPermissionModeChanged,
+  showAceCodeAvatar = true,
+  onShowAceCodeAvatarChanged,
+}) {
   const { theme, set: setTheme } = useTheme();
   const [activeNav, setActiveNav] = useState(0);
   const [show, setShow] = useState(false);
@@ -94,7 +102,12 @@ export function SettingsPage({ onClose, health, activeSessionId = '', onPermissi
           )}
           {activeNav === 1 && <SectionAppearance theme={theme} setTheme={setTheme} />}
           {activeNav === 2 && <SectionConfig />}
-          {activeNav === 3 && <SectionPersonalization />}
+          {activeNav === 3 && (
+            <SectionPersonalization
+              showAceCodeAvatar={showAceCodeAvatar}
+              onShowAceCodeAvatarChanged={onShowAceCodeAvatarChanged}
+            />
+          )}
           {activeNav === 4 && <SectionMCP />}
           {activeNav === 5 && (
             <>
@@ -439,7 +452,7 @@ function SectionConfig() {
 // ─── 个性化 ────────────────────────────────────────────────────────────────
 // UI 占位:自定义指令文本框 + 保存按钮。设计 panels.jsx::renderPersonalizationContent。
 
-function SectionPersonalization() {
+function SectionPersonalization({ showAceCodeAvatar = true, onShowAceCodeAvatarChanged }) {
   const [text, setText] = useState('');
   const [saved, setSaved] = useState(false);
 
@@ -452,6 +465,26 @@ function SectionPersonalization() {
   return (
     <>
       <h2 className="text-xl font-bold mb-5">个性化</h2>
+
+      <div
+        role="checkbox"
+        aria-checked={showAceCodeAvatar}
+        tabIndex={0}
+        onClick={() => onShowAceCodeAvatarChanged?.(!showAceCodeAvatar)}
+        onKeyDown={(e) => {
+          if (e.key === ' ' || e.key === 'Enter') {
+            e.preventDefault();
+            onShowAceCodeAvatarChanged?.(!showAceCodeAvatar);
+          }
+        }}
+        className="flex items-center justify-between px-3.5 py-2.5 rounded-md bg-surface border border-border mb-5 cursor-pointer hover:bg-surface-hi transition"
+      >
+        <div className="min-w-0 pr-3">
+          <div className="text-[13px] font-medium">ACECode 头像显示</div>
+          <div className="text-[11px] text-fg-mute mt-0.5">控制聊天窗口中 ACECode 头像和名称是否显示</div>
+        </div>
+        <Toggle on={showAceCodeAvatar} onChange={onShowAceCodeAvatarChanged} />
+      </div>
 
       <div className="text-[14px] font-semibold mb-1">自定义指令</div>
       <p className="text-[12px] text-fg-mute mb-3">为你的项目向 ACECode 提供额外说明和上下文</p>
@@ -636,19 +669,57 @@ function SectionTools() {
 }
 
 // ─── 已归档会话 ────────────────────────────────────────────────────────────
-// UI 占位:列表 + 取消归档按钮。设计 panels.jsx::renderArchivedContent。
-// mock 数据,后端接口就绪后改为真实 archived sessions 查询。
-
-const ARCHIVED_PLACEHOLDER = [
-  { id: 1, title: '你好',              date: '2026年5月6日 0:35',  project: 'acecode' },
-  { id: 2, title: '打开浏览器',         date: '2026年5月5日 22:06', project: 'browser-use-browser-n-users-shao' },
-  { id: 3, title: 'Enter explore mode', date: '2026年5月5日 22:06', project: 'enter-explore-mode-think-deeply-visualize' },
-  { id: 4, title: '你好',              date: '2026年5月4日 0:32',  project: 'shz_test' },
-  { id: 5, title: '你好',              date: '2026年5月3日 0:51',  project: '1-美工版' },
-];
-
 function SectionArchived() {
-  const [list, setList] = useState(ARCHIVED_PLACEHOLDER);
+  const [list, setList] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError('');
+    api.listAllArchivedSessions()
+      .then(async (result) => {
+        let sessions = Array.isArray(result?.sessions) ? result.sessions : [];
+        if (sessions.length === 0 && Array.isArray(result?.errors) && result.errors.length === 0) {
+          const workspaces = await api.listWorkspaces().catch(() => []);
+          if (!Array.isArray(workspaces) || workspaces.length === 0) {
+            const local = await api.listSessions({ archived: true }).catch(() => []);
+            sessions = (Array.isArray(local) ? local : []).map((item) => ({
+              ...item,
+              workspace_hash: item.workspace_hash || '__local__',
+              workspaceName: item.workspaceName || '当前会话',
+            }));
+          }
+        }
+        if (!cancelled) setList(sessions);
+      })
+      .catch((e) => {
+        if (!cancelled) setError(e.message || String(e));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  const unarchive = async (item) => {
+    const id = item?.id || item?.session_id || item?.sessionId || '';
+    const workspaceHash = item?.workspace_hash || item?.workspaceHash || '';
+    if (!id) return;
+    try {
+      if (workspaceHash && workspaceHash !== '__local__') {
+        await api.unarchiveWorkspaceSession(workspaceHash, id);
+      } else {
+        await api.unarchiveSession(id);
+      }
+      setList((prev) => prev.filter((x) => (x.id || x.session_id || x.sessionId) !== id));
+      window.dispatchEvent(new Event('ace-session-archive-changed'));
+      toast({ kind: 'ok', text: '已取消归档' });
+    } catch (e) {
+      toast({ kind: 'err', text: '取消归档失败:' + (e.message || '') });
+    }
+  };
 
   return (
     <>
@@ -657,7 +728,15 @@ function SectionArchived() {
       <div className="text-[14px] font-semibold mb-1">归档列表</div>
       <p className="text-[12px] text-fg-mute mb-3">已归档的会话不会出现在侧栏,可随时取消归档恢复</p>
 
-      {list.length === 0 ? (
+      {loading ? (
+        <div className="px-3.5 py-8 rounded-md bg-surface border border-border text-[12px] text-fg-mute text-center">
+          <span className="ace-spinner mr-2" /> 加载中
+        </div>
+      ) : error ? (
+        <div className="px-3.5 py-8 rounded-md bg-surface border border-border text-[12px] text-danger text-center">
+          加载失败:{error}
+        </div>
+      ) : list.length === 0 ? (
         <div className="px-3.5 py-8 rounded-md bg-surface border border-border text-[12px] text-fg-mute text-center">
           暂无已归档会话
         </div>
@@ -668,14 +747,14 @@ function SectionArchived() {
             className="flex items-center justify-between px-3.5 py-2.5 rounded-md bg-surface border border-border mb-2"
           >
             <div className="min-w-0 pr-3">
-              <div className="text-[13px] font-medium truncate">{item.title}</div>
+              <div className="text-[13px] font-medium truncate">{sessionDisplayTitle(item, item.name || '')}</div>
               <div className="text-[11px] text-fg-mute mt-0.5 truncate">
-                {item.date} · {item.project}
+                {relativeTime(item.updated_at || item.created_at)} · {item.workspaceName || item.cwd || item.workspace_hash || 'workspace'}
               </div>
             </div>
             <button
               type="button"
-              onClick={() => setList((prev) => prev.filter((x) => x.id !== item.id))}
+              onClick={() => unarchive(item)}
               className="shrink-0 px-3 py-1 rounded-md text-[12px] text-fg-2 bg-surface-hi hover:bg-surface-alt border border-border transition"
             >
               取消归档

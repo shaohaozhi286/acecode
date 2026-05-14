@@ -733,6 +733,76 @@ TEST(WebServerHttp, WorkspacePinnedSessionsPersistAndPruneIds) {
     EXPECT_EQ(get_body["session_ids"][0], session_id);
 }
 
+// 场景:归档 workspace 会话后,默认列表隐藏它;专用 archived 查询能看到,
+// 取消归档后恢复到默认列表。
+TEST(WebServerHttp, WorkspaceArchiveSessionHidesFromDefaultList) {
+    WebServerFixture fx;
+    const std::string hash = acecode::compute_cwd_hash(fx.cwd);
+
+    auto create = cpr::Post(cpr::Url{fx.url("/api/workspaces/" + hash + "/sessions")},
+                            cpr::Header{{"Content-Type", "application/json"}},
+                            cpr::Body{R"({})"});
+    ASSERT_EQ(create.status_code, 201) << create.text;
+    const std::string session_id = json::parse(create.text).value("session_id", std::string{});
+    ASSERT_FALSE(session_id.empty());
+
+    auto archive = cpr::Put(cpr::Url{fx.url("/api/workspaces/" + hash + "/sessions/" + session_id + "/archive")});
+    ASSERT_EQ(archive.status_code, 200) << archive.text;
+    auto archived_body = json::parse(archive.text);
+    EXPECT_EQ(archived_body["id"], session_id);
+    EXPECT_TRUE(archived_body.value("archived", false));
+
+    auto visible = cpr::Get(cpr::Url{fx.url("/api/workspaces/" + hash + "/sessions")});
+    ASSERT_EQ(visible.status_code, 200) << visible.text;
+    auto visible_sessions = json::parse(visible.text);
+    EXPECT_TRUE(std::none_of(visible_sessions.begin(), visible_sessions.end(),
+        [&](const json& s) { return s.value("id", std::string{}) == session_id; }));
+
+    auto archived = cpr::Get(cpr::Url{fx.url("/api/workspaces/" + hash + "/sessions?archived=1")});
+    ASSERT_EQ(archived.status_code, 200) << archived.text;
+    auto archived_sessions = json::parse(archived.text);
+    ASSERT_EQ(archived_sessions.size(), 1u);
+    EXPECT_EQ(archived_sessions[0]["id"], session_id);
+    EXPECT_TRUE(archived_sessions[0].value("archived", false));
+
+    auto unarchive = cpr::Delete(cpr::Url{fx.url("/api/workspaces/" + hash + "/sessions/" + session_id + "/archive")});
+    ASSERT_EQ(unarchive.status_code, 200) << unarchive.text;
+    EXPECT_FALSE(json::parse(unarchive.text).value("archived", true));
+
+    auto restored = cpr::Get(cpr::Url{fx.url("/api/workspaces/" + hash + "/sessions")});
+    ASSERT_EQ(restored.status_code, 200) << restored.text;
+    auto restored_sessions = json::parse(restored.text);
+    EXPECT_TRUE(std::any_of(restored_sessions.begin(), restored_sessions.end(),
+        [&](const json& s) { return s.value("id", std::string{}) == session_id; }));
+}
+
+// 场景:兼容 /api/sessions 路由也遵守归档隐藏与 archived 查询语义。
+TEST(WebServerHttp, CompatibilityArchiveSessionHidesFromDefaultList) {
+    WebServerFixture fx;
+
+    auto create = cpr::Post(cpr::Url{fx.url("/api/sessions")},
+                            cpr::Header{{"Content-Type", "application/json"}},
+                            cpr::Body{R"({})"});
+    ASSERT_EQ(create.status_code, 201) << create.text;
+    const std::string session_id = json::parse(create.text).value("session_id", std::string{});
+    ASSERT_FALSE(session_id.empty());
+
+    auto archive = cpr::Put(cpr::Url{fx.url("/api/sessions/" + session_id + "/archive")});
+    ASSERT_EQ(archive.status_code, 200) << archive.text;
+
+    auto visible = cpr::Get(cpr::Url{fx.url("/api/sessions")});
+    ASSERT_EQ(visible.status_code, 200) << visible.text;
+    auto visible_sessions = json::parse(visible.text);
+    EXPECT_TRUE(std::none_of(visible_sessions.begin(), visible_sessions.end(),
+        [&](const json& s) { return s.value("id", std::string{}) == session_id; }));
+
+    auto archived = cpr::Get(cpr::Url{fx.url("/api/sessions?archived=1")});
+    ASSERT_EQ(archived.status_code, 200) << archived.text;
+    auto archived_sessions = json::parse(archived.text);
+    ASSERT_EQ(archived_sessions.size(), 1u);
+    EXPECT_EQ(archived_sessions[0]["id"], session_id);
+}
+
 // 场景: shared daemon 为 desktop onboarding 启动时,当前 cwd 只有 hidden
 // workspace marker。它可以服务普通 /api/sessions,但不能出现在 /api/workspaces。
 TEST(WebServerHttp, HiddenDefaultWorkspaceNotListedOrResolved) {
