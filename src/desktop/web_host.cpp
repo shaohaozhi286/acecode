@@ -121,6 +121,68 @@ void refresh_non_client_frame(HWND hwnd) {
                        SWP_NOSIZE);
 }
 
+void log_webview_setting_failure(const char* operation, HRESULT hr) {
+    LOG_WARN(std::string("[desktop] ") + operation +
+             " failed, hr=" + std::to_string(static_cast<long>(hr)));
+}
+
+void configure_browser_defaults(webview::webview& host) {
+    auto controller_result = host.browser_controller();
+    if (!controller_result.ok()) {
+        LOG_WARN("[desktop] browser_controller unavailable; browser defaults not configured");
+        return;
+    }
+    auto* controller = static_cast<ICoreWebView2Controller*>(controller_result.value());
+    if (!controller) return;
+
+    HRESULT hr = controller->put_ZoomFactor(1.0);
+    if (FAILED(hr)) {
+        log_webview_setting_failure("put_ZoomFactor", hr);
+    }
+
+    ICoreWebView2* core = nullptr;
+    hr = controller->get_CoreWebView2(&core);
+    if (FAILED(hr) || !core) {
+        log_webview_setting_failure("get_CoreWebView2", hr);
+        return;
+    }
+
+    ICoreWebView2Settings* settings = nullptr;
+    hr = core->get_Settings(&settings);
+    core->Release();
+    if (FAILED(hr) || !settings) {
+        log_webview_setting_failure("get_Settings", hr);
+        return;
+    }
+
+    hr = settings->put_IsZoomControlEnabled(FALSE);
+    if (FAILED(hr)) {
+        log_webview_setting_failure("put_IsZoomControlEnabled", hr);
+    }
+
+    ICoreWebView2Settings5* settings5 = nullptr;
+    hr = settings->QueryInterface(IID_PPV_ARGS(&settings5));
+    if (SUCCEEDED(hr) && settings5) {
+        const HRESULT pinch_hr = settings5->put_IsPinchZoomEnabled(FALSE);
+        if (FAILED(pinch_hr)) {
+            log_webview_setting_failure("put_IsPinchZoomEnabled", pinch_hr);
+        }
+        settings5->Release();
+    }
+
+    ICoreWebView2Settings6* settings6 = nullptr;
+    hr = settings->QueryInterface(IID_PPV_ARGS(&settings6));
+    if (SUCCEEDED(hr) && settings6) {
+        const HRESULT swipe_hr = settings6->put_IsSwipeNavigationEnabled(FALSE);
+        if (FAILED(swipe_hr)) {
+            log_webview_setting_failure("put_IsSwipeNavigationEnabled", swipe_hr);
+        }
+        settings6->Release();
+    }
+
+    settings->Release();
+}
+
 int win32_hit_test_value(FramelessHitTestArea area) {
     switch (area) {
         // Keep WebView top-bar controls clickable. Dragging is started by the
@@ -413,6 +475,9 @@ struct WebHost::Impl {
         }
         if (custom_window) {
             resize_webview_widget(custom_window);
+        }
+        if (w) {
+            configure_browser_defaults(*w);
         }
     }
 #else

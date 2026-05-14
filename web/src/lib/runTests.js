@@ -21,6 +21,7 @@ import './uiPrefs.test.js';
 import './api.test.js';
 import './searchSessions.test.js';
 import './useGlobalShortcut.test.js';
+import './browserDefaults.test.js';
 import './slashCommands.test.js';
 import './builtinCommandRouting.test.js';
 import './slashCommandWorkspace.test.js';

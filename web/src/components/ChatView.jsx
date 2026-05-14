@@ -111,11 +111,15 @@ function ActivityIndicator({ activity, showAceCodeAvatar = true }) {
   const chrome = activityChromeState(showAceCodeAvatar);
   return (
     <div className={`flex ${chrome.gapClass} max-w-[85%]`}>
-      {chrome.showAvatar && (
+      {chrome.showAvatar ? (
         <div className={clsx(
           'w-6 h-6 rounded-full text-white text-[11px] font-bold flex items-center justify-center mt-[2px]',
           isPermWaiting ? 'bg-warn' : 'bg-ok',
         )}>A</div>
+      ) : chrome.showAvatarPlaceholder ? (
+        <div className="w-6 shrink-0" aria-hidden="true" />
+      ) : (
+        null
       )}
       <div className={clsx(
         'rounded-2xl border px-3 py-2 text-[12px] text-fg shadow-sm min-w-[180px]',
