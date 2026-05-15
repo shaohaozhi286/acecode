@@ -10,17 +10,29 @@ using acecode::read_system_clipboard_text_from_commands;
 
 TEST(ClipboardTest, LinuxCommandCandidatesPreferWaylandThenX11) {
     auto commands = linux_clipboard_text_commands(true, true);
-    ASSERT_EQ(commands.size(), 3u);
+    ASSERT_EQ(commands.size(), 5u);
     EXPECT_NE(commands[0].find("wl-paste"), std::string::npos);
     EXPECT_NE(commands[1].find("xclip"), std::string::npos);
+    EXPECT_NE(commands[1].find("clipboard"), std::string::npos);
     EXPECT_NE(commands[2].find("xsel"), std::string::npos);
+    EXPECT_NE(commands[2].find("clipboard"), std::string::npos);
+    EXPECT_NE(commands[3].find("xclip"), std::string::npos);
+    EXPECT_NE(commands[3].find("primary"), std::string::npos);
+    EXPECT_NE(commands[4].find("xsel"), std::string::npos);
+    EXPECT_NE(commands[4].find("primary"), std::string::npos);
 }
 
 TEST(ClipboardTest, LinuxCommandCandidatesUseX11ToolsWhenOnlyDisplayExists) {
     auto commands = linux_clipboard_text_commands(false, true);
-    ASSERT_EQ(commands.size(), 2u);
+    ASSERT_EQ(commands.size(), 4u);
     EXPECT_NE(commands[0].find("xclip"), std::string::npos);
+    EXPECT_NE(commands[0].find("clipboard"), std::string::npos);
     EXPECT_NE(commands[1].find("xsel"), std::string::npos);
+    EXPECT_NE(commands[1].find("clipboard"), std::string::npos);
+    EXPECT_NE(commands[2].find("xclip"), std::string::npos);
+    EXPECT_NE(commands[2].find("primary"), std::string::npos);
+    EXPECT_NE(commands[3].find("xsel"), std::string::npos);
+    EXPECT_NE(commands[3].find("primary"), std::string::npos);
 }
 
 TEST(ClipboardTest, LinuxCommandCandidatesEmptyWithoutDisplay) {

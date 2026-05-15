@@ -38,6 +38,9 @@ int apply_tui_section(const nlohmann::json& j_with_tui, TuiConfig& out) {
             out.alt_screen_mode = "auto";
         }
     }
+    if (tj.contains("mouse_tracking") && tj["mouse_tracking"].is_boolean()) {
+        out.mouse_tracking = tj["mouse_tracking"].get<bool>();
+    }
     return warnings;
 }
 
@@ -47,12 +50,14 @@ int apply_tui_section(const nlohmann::json& j_with_tui, TuiConfig& out) {
 TEST(ConfigTuiDefaults, StructDefault) {
     TuiConfig t;
     EXPECT_EQ(t.alt_screen_mode, "auto");
+    EXPECT_TRUE(t.mouse_tracking);
 }
 
 // 场景:AppConfig 中默认包含 tui 字段且默认 "auto"
 TEST(ConfigTuiDefaults, NestedInAppConfig) {
     AppConfig cfg;
     EXPECT_EQ(cfg.tui.alt_screen_mode, "auto");
+    EXPECT_TRUE(cfg.tui.mouse_tracking);
 }
 
 // 场景:config.json 完全没有 tui 段 → 默认值,无警告
@@ -61,6 +66,7 @@ TEST(ConfigTuiLoader, MissingBlockKeepsDefault) {
     nlohmann::json j = nlohmann::json::object();
     EXPECT_EQ(apply_tui_section(j, t), 0);
     EXPECT_EQ(t.alt_screen_mode, "auto");
+    EXPECT_TRUE(t.mouse_tracking);
 }
 
 // 场景:tui 段是空对象 → 默认值不变
@@ -69,6 +75,23 @@ TEST(ConfigTuiLoader, EmptyBlockKeepsDefault) {
     nlohmann::json j = {{"tui", nlohmann::json::object()}};
     EXPECT_EQ(apply_tui_section(j, t), 0);
     EXPECT_EQ(t.alt_screen_mode, "auto");
+    EXPECT_TRUE(t.mouse_tracking);
+}
+
+// 场景:mouse_tracking 是布尔开关, false 会被接受。
+TEST(ConfigTuiLoader, AcceptsMouseTrackingBoolean) {
+    TuiConfig t;
+    nlohmann::json j = {{"tui", {{"mouse_tracking", false}}}};
+    EXPECT_EQ(apply_tui_section(j, t), 0);
+    EXPECT_FALSE(t.mouse_tracking);
+}
+
+// 场景:mouse_tracking 字段类型错误(非 bool)→ 不修改,无 warn。
+TEST(ConfigTuiLoader, NonBooleanMouseTrackingIgnored) {
+    TuiConfig t;
+    nlohmann::json j = {{"tui", {{"mouse_tracking", "false"}}}};
+    EXPECT_EQ(apply_tui_section(j, t), 0);
+    EXPECT_TRUE(t.mouse_tracking);
 }
 
 // 场景:三种合法字符串都被原样接受

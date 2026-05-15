@@ -1411,6 +1411,7 @@ static int run_interactive_app(const CliOptions& cli,
     // graceful Loop exit instead of letting the default handler kill us.
     g_active_screen.store(&screen, std::memory_order_release);
     screen.ForceHandleCtrlC(false);
+    screen.TrackMouse(config.tui.mouse_tracking);
     // mouse-selection-copy: register a no-op SelectionChange callback so
     // FTXUI enables live selection tracking. The right-click branch in the
     // CatchEvent handler reads screen.GetSelection() on demand; we don't

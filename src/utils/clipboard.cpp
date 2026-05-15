@@ -112,6 +112,8 @@ std::vector<std::string> linux_clipboard_text_commands(bool has_wayland_display,
     if (has_x11_display) {
         commands.push_back("xclip -selection clipboard -o 2>/dev/null");
         commands.push_back("xsel --clipboard --output 2>/dev/null");
+        commands.push_back("xclip -selection primary -o 2>/dev/null");
+        commands.push_back("xsel --primary --output 2>/dev/null");
     }
     return commands;
 }
