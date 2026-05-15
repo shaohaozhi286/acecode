@@ -143,6 +143,36 @@ await run('executeCommand posts to builtin command endpoint', async () => {
   }
 });
 
+await run('UI preference API reads and writes daemon-backed avatar preference', async () => {
+  const previousFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    calls.push({ url, opts });
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ show_acecode_avatar: false }),
+    };
+  };
+  try {
+    const client = createApi({ origin: 'http://127.0.0.1:4567', token: 'tok' });
+    const got = await client.getUiPreferences();
+    const saved = await client.setUiPreferences({ show_acecode_avatar: false });
+
+    assert.deepEqual(got, { show_acecode_avatar: false });
+    assert.deepEqual(saved, { show_acecode_avatar: false });
+    assert.equal(calls[0].url, 'http://127.0.0.1:4567/api/config/ui-preferences');
+    assert.equal(calls[0].opts.method, 'GET');
+    assert.equal(calls[0].opts.headers['X-ACECode-Token'], 'tok');
+    assert.equal(calls[1].url, 'http://127.0.0.1:4567/api/config/ui-preferences');
+    assert.equal(calls[1].opts.method, 'PUT');
+    assert.deepEqual(JSON.parse(calls[1].opts.body), { show_acecode_avatar: false });
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
 await run('readFileBlob fetches authenticated binary file content', async () => {
   const previousFetch = globalThis.fetch;
   const calls = [];

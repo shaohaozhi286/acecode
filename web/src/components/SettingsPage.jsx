@@ -483,7 +483,9 @@ function SectionPersonalization({ showAceCodeAvatar = true, onShowAceCodeAvatarC
           <div className="text-[13px] font-medium">ACECode 头像显示</div>
           <div className="text-[11px] text-fg-mute mt-0.5">控制聊天窗口中 ACECode 头像和名称是否显示</div>
         </div>
-        <Toggle on={showAceCodeAvatar} onChange={onShowAceCodeAvatarChanged} />
+        <div onClick={(e) => e.stopPropagation()}>
+          <Toggle on={showAceCodeAvatar} onChange={onShowAceCodeAvatarChanged} />
+        </div>
       </div>
 
       <div className="text-[14px] font-semibold mb-1">自定义指令</div>

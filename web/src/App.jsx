@@ -86,6 +86,7 @@ export function App() {
   const showAceCodeAvatar = effectiveShowAceCodeAvatar(uiPrefs);
   const singleShellRef = useRef(null);
   const sidebarResizeActiveRef = useRef(false);
+  const avatarPrefTouchedRef = useRef(false);
 
   useEffect(() => {
     setSingleLayout((prev) => {
@@ -102,6 +103,16 @@ export function App() {
       const h = await api.health();
       setHealth(h);
       setAuthState('ok');
+      api.getUiPreferences()
+        .then((prefs) => {
+          if (avatarPrefTouchedRef.current) return;
+          if (typeof prefs?.show_acecode_avatar === 'boolean') {
+            setUiPrefs({ showAceCodeAvatar: prefs.show_acecode_avatar });
+          }
+        })
+        .catch(() => {
+          // localStorage remains the fallback when talking to an older daemon.
+        });
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) {
         setAuthState('need-token');
@@ -110,7 +121,7 @@ export function App() {
         setAuthState('need-token');
       }
     }
-  }, []);
+  }, [setUiPrefs]);
 
   useEffect(() => { probe(); }, [probe]);
 
@@ -259,7 +270,13 @@ export function App() {
   }, [setUiPrefs]);
 
   const setShowAceCodeAvatar = useCallback((show) => {
-    setUiPrefs({ showAceCodeAvatar: !!show });
+    const next = !!show;
+    avatarPrefTouchedRef.current = true;
+    setUiPrefs({ showAceCodeAvatar: next });
+    api.setUiPreferences({ show_acecode_avatar: next })
+      .catch((e) => {
+        toast({ kind: 'err', text: '头像偏好保存失败:' + (e?.message || '') });
+      });
   }, [setUiPrefs]);
 
   const openHomeForWorkspace = useCallback((workspace = null) => {

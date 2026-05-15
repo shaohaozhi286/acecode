@@ -111,6 +111,10 @@ json chat_message_to_json(const ChatMessage& m) {
     return chat_message_to_payload_json(m);
 }
 
+json ui_preferences_to_json(const WebUiPreferencesConfig& prefs) {
+    return json{{"show_acecode_avatar", prefs.show_acecode_avatar}};
+}
+
 // SessionEvent → 上行 WS 消息(也用于 /messages 回放)。
 json session_event_to_json(const SessionEvent& evt,
                            const std::string& session_id = {},
@@ -879,6 +883,7 @@ struct WebServer::Impl {
         register_pinned_sessions();
         register_sessions();
         register_models();
+        register_ui_preferences();
         register_history();
         register_files();
         register_skills();
@@ -2512,6 +2517,69 @@ struct WebServer::Impl {
             crow::response r(200);
             r.add_header("Content-Type", "application/json");
             r.body = json{{"default_model_name", name}}.dump();
+            return with_cors(req, std::move(r));
+        });
+    }
+
+    void register_ui_preferences() {
+        CROW_ROUTE(app, "/api/config/ui-preferences").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
+
+        // GET /api/config/ui-preferences: non-sensitive Web/Desktop UI prefs.
+        CROW_ROUTE(app, "/api/config/ui-preferences").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.app_config) return crow::response(503);
+            crow::response r(200);
+            r.add_header("Content-Type", "application/json");
+            r.body = ui_preferences_to_json(deps.app_config->web_ui).dump();
+            return with_cors(req, std::move(r));
+        });
+
+        // PUT /api/config/ui-preferences body {show_acecode_avatar:boolean}.
+        CROW_ROUTE(app, "/api/config/ui-preferences").methods(crow::HTTPMethod::PUT)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.app_config) return crow::response(503);
+
+            auto json_err = [&](int status, const char* code, const std::string& msg) {
+                crow::response r(status);
+                r.body = json{{"error", code}, {"message", msg}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            };
+
+            json body;
+            try { body = json::parse(req.body); }
+            catch (const std::exception& e) {
+                return json_err(400, "BAD_JSON", std::string("invalid JSON body: ") + e.what());
+            }
+            if (!body.is_object() ||
+                !body.contains("show_acecode_avatar") ||
+                !body["show_acecode_avatar"].is_boolean()) {
+                return json_err(400, "BAD_REQUEST",
+                                "expected {show_acecode_avatar: boolean}");
+            }
+
+            const auto before = deps.app_config->web_ui;
+            deps.app_config->web_ui.show_acecode_avatar =
+                body["show_acecode_avatar"].get<bool>();
+            try {
+                if (!deps.config_path.empty()) {
+                    save_config(*deps.app_config, deps.config_path);
+                } else {
+                    save_config(*deps.app_config);
+                }
+            } catch (const std::exception& e) {
+                deps.app_config->web_ui = before;
+                return json_err(500, "PERSIST_FAILED", e.what());
+            }
+
+            crow::response r(200);
+            r.add_header("Content-Type", "application/json");
+            r.body = ui_preferences_to_json(deps.app_config->web_ui).dump();
             return with_cors(req, std::move(r));
         });
     }

@@ -224,6 +224,34 @@ List skills the daemon registered at startup.
 }
 ```
 
+### `GET /api/config/ui-preferences`
+
+Read non-sensitive Web/Desktop UI preferences from `~/.acecode/config.json`.
+Missing legacy fields default to visible ACECode avatars.
+
+**Response 200**:
+```json
+{ "show_acecode_avatar": true }
+```
+
+### `PUT /api/config/ui-preferences`
+
+Persist non-sensitive Web/Desktop UI preferences.
+
+**Request body**:
+```json
+{ "show_acecode_avatar": false }
+```
+
+**Response 200** echoes the persisted value:
+```json
+{ "show_acecode_avatar": false }
+```
+
+Errors:
+- `400 {"error":"BAD_REQUEST"}` when `show_acecode_avatar` is missing or not a boolean.
+- `500 {"error":"PERSIST_FAILED"}` when writing `config.json` fails.
+
 ### `GET /api/mcp` / `PUT /api/mcp`
 
 Read / write the `mcp_servers` segment of `~/.acecode/config.json`. GET

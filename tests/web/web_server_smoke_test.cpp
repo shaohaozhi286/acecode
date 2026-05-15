@@ -1188,6 +1188,48 @@ TEST(WebServerHttp, UnknownRouteReturns404) {
     EXPECT_EQ(r.status_code, 404);
 }
 
+// 场景:GET /api/config/ui-preferences 返回头像显示偏好默认值。
+TEST(WebServerHttp, GetUiPreferencesReturnsAvatarDefault) {
+    WebServerFixture fx;
+    auto r = cpr::Get(cpr::Url{fx.url("/api/config/ui-preferences")});
+    ASSERT_EQ(r.status_code, 200) << r.text;
+    auto j = json::parse(r.text);
+    ASSERT_TRUE(j.contains("show_acecode_avatar"));
+    EXPECT_EQ(j["show_acecode_avatar"], true);
+}
+
+// 场景:PUT /api/config/ui-preferences 更新内存并落盘。
+TEST(WebServerHttp, PutUiPreferencesPersistsAvatarSetting) {
+    WebServerFixture fx;
+    json req = {{"show_acecode_avatar", false}};
+    auto put = cpr::Put(cpr::Url{fx.url("/api/config/ui-preferences")},
+                        cpr::Header{{"Content-Type", "application/json"}},
+                        cpr::Body{req.dump()});
+    ASSERT_EQ(put.status_code, 200) << put.text;
+    auto body = json::parse(put.text);
+    EXPECT_EQ(body["show_acecode_avatar"], false);
+    EXPECT_FALSE(fx.cfg.web_ui.show_acecode_avatar);
+
+    std::ifstream ifs(fx.tmp_dir / "config.json");
+    ASSERT_TRUE(ifs.is_open());
+    auto saved = json::parse(ifs);
+    ASSERT_TRUE(saved.contains("web_ui"));
+    EXPECT_EQ(saved["web_ui"]["show_acecode_avatar"], false);
+}
+
+// 场景:PUT /api/config/ui-preferences 非 bool payload 被拒绝且不改 cfg。
+TEST(WebServerHttp, PutUiPreferencesRejectsInvalidAvatarPayload) {
+    WebServerFixture fx;
+    json req = {{"show_acecode_avatar", "false"}};
+    auto r = cpr::Put(cpr::Url{fx.url("/api/config/ui-preferences")},
+                      cpr::Header{{"Content-Type", "application/json"}},
+                      cpr::Body{req.dump()});
+    ASSERT_EQ(r.status_code, 400) << r.text;
+    auto j = json::parse(r.text);
+    EXPECT_EQ(j["error"], "BAD_REQUEST");
+    EXPECT_TRUE(fx.cfg.web_ui.show_acecode_avatar);
+}
+
 // 场景: POST /api/sessions body 是非法 JSON → 400 + error JSON,不影响 server。
 TEST(WebServerHttp, CreateSessionWithBadJsonReturns400) {
     WebServerFixture fx;

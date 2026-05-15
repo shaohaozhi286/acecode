@@ -325,6 +325,18 @@ AppConfig load_config() {
                 if (wj.contains("static_dir") && wj["static_dir"].is_string())
                     cfg.web.static_dir = wj["static_dir"].get<std::string>();
             }
+            if (j.contains("web_ui")) {
+                if (!j["web_ui"].is_object()) {
+                    LOG_WARN("[config] 'web_ui' must be an object, ignoring");
+                } else {
+                    const auto& wuj = j["web_ui"];
+                    if (wuj.contains("show_acecode_avatar") &&
+                        wuj["show_acecode_avatar"].is_boolean()) {
+                        cfg.web_ui.show_acecode_avatar =
+                            wuj["show_acecode_avatar"].get<bool>();
+                    }
+                }
+            }
             if (j.contains("models_dev") && j["models_dev"].is_object()) {
                 const auto& mj = j["models_dev"];
                 if (mj.contains("allow_network") && mj["allow_network"].is_boolean())
@@ -738,6 +750,12 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
         if (!cfg.web.static_dir.empty())
             wj["static_dir"] = cfg.web.static_dir;
         if (!wj.empty()) j["web"] = wj;
+
+        WebUiPreferencesConfig wui_d;
+        nlohmann::json wuij = nlohmann::json::object();
+        if (cfg.web_ui.show_acecode_avatar != wui_d.show_acecode_avatar)
+            wuij["show_acecode_avatar"] = cfg.web_ui.show_acecode_avatar;
+        if (!wuij.empty()) j["web_ui"] = wuij;
 
         MemoryConfig mem_d;
         nlohmann::json memj = nlohmann::json::object();
