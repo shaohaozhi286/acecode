@@ -135,6 +135,13 @@ function normalizePersistedToolSummary(metadata) {
   };
 }
 
+function readRuntimeTurnCount(data) {
+  const raw = data?.turn_count ?? data?.turnCount;
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return null;
+  return Math.max(0, Math.trunc(value));
+}
+
 function normalizePersistedToolHunks(metadata) {
   const raw = metadata?.tool_hunks;
   if (!Array.isArray(raw)) return [];
@@ -552,6 +559,25 @@ export function loadTranscriptHistory(state, data = {}) {
     effects.push(...reduced.effects);
   }
   flushPendingStreamEvents();
+
+  if (Object.prototype.hasOwnProperty.call(data, 'goal')) {
+    next.goal = cloneGoal(data.goal);
+  }
+  const restoredTurnCount = readRuntimeTurnCount(data);
+  if (restoredTurnCount !== null) {
+    next.turns = restoredTurnCount;
+  }
+  const restoredUsage = data.token_usage ?? data.tokenUsage ?? data.latest_token_usage ?? data.latestTokenUsage;
+  if (restoredUsage && typeof restoredUsage === 'object') {
+    next.tokenUsage = normalizeUsagePayload(restoredUsage, Date.now());
+  }
+  if (data.busy === true) {
+    next.busy = true;
+    next.status = 'running';
+  } else if (data.busy === false && next.status !== 'error') {
+    next.busy = false;
+    next.status = 'idle';
+  }
 
   return { state: next, effects };
 }

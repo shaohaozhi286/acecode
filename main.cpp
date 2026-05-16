@@ -92,6 +92,7 @@
 #include "session/session_manager.hpp"
 #include "session/session_registry.hpp"
 #include "session/session_resume_restore.hpp"
+#include "tui/chat_scroll.hpp"
 #include "tui/diff_view.hpp"
 #include "tui/paste_handler.hpp"
 #include "tui/ask_question_overlay.hpp"
@@ -1156,6 +1157,13 @@ static void configure_permissions(PermissionManager& permissions,
     permissions.add_rule({"bash", "", "rm -rf /", RuleAction::Deny, 100});
 }
 
+static PermissionMode permission_mode_from_meta_name(std::string mode) {
+    if (mode == "acceptEdits") mode = "accept-edits";
+    if (mode == "accept-edits") return PermissionMode::AcceptEdits;
+    if (mode == "yolo") return PermissionMode::Yolo;
+    return PermissionMode::Default;
+}
+
 static void register_slash_commands(CommandRegistry& cmd_registry,
                                     SkillRegistry& skill_registry) {
     register_builtin_commands(cmd_registry);
@@ -1422,16 +1430,20 @@ static int run_interactive_app(const CliOptions& cli,
     // 所以和其它无依赖的内置工具分开、等 `state` / `screen` 就绪之后再注册。
     tools.register_tool(create_ask_user_question_tool(state, screen));
 
-    auto clamp_chat_focus = [&state]() {
+    auto clamp_chat_focus = [&state, &message_line_counts]() {
         if (state.conversation.empty()) {
             state.chat_focus_index = -1;
+            state.chat_line_offset = 0;
             state.chat_follow_tail = true;
             return;
         }
 
-        int last = static_cast<int>(state.conversation.size()) - 1;
+        int message_count = static_cast<int>(state.conversation.size());
+        int last = message_count - 1;
         if (state.chat_follow_tail) {
             state.chat_focus_index = last;
+            state.chat_line_offset =
+                acecode::tui::chat_tail_line_offset(message_line_counts, last);
             return;
         }
 
@@ -1441,9 +1453,13 @@ static int run_interactive_app(const CliOptions& cli,
         if (state.chat_focus_index > last) {
             state.chat_focus_index = last;
         }
-        if (state.chat_focus_index == last) {
-            state.chat_follow_tail = true;
-        }
+        state.chat_line_offset = acecode::tui::clamp_chat_line_offset(
+            state.chat_line_offset,
+            acecode::tui::chat_line_count_at(
+                message_line_counts, state.chat_focus_index));
+        state.chat_follow_tail = acecode::tui::is_chat_tail_position(
+            state.chat_focus_index, state.chat_line_offset,
+            message_count, message_line_counts);
     };
 
     // 按行粒度滚动: 鼠标滚轮 / PgUp / PgDn / 拖到边界 auto-scroll 全部走它.
@@ -1457,11 +1473,15 @@ static int run_interactive_app(const CliOptions& cli,
         if (state.chat_focus_index < 0) {
             state.chat_focus_index = last_msg;
         }
+        if (state.chat_follow_tail) {
+            state.chat_focus_index = last_msg;
+            state.chat_line_offset =
+                acecode::tui::chat_tail_line_offset(message_line_counts,
+                                                    last_msg);
+        }
 
         auto lines_of = [&](int idx) -> int {
-            if (idx < 0 || idx >= static_cast<int>(message_line_counts.size())) return 1;
-            int h = message_line_counts[idx];
-            return h > 0 ? h : 1;
+            return acecode::tui::chat_line_count_at(message_line_counts, idx);
         };
 
         int actual = 0;
@@ -1486,9 +1506,10 @@ static int run_interactive_app(const CliOptions& cli,
         }
         // 到达最后一条消息的最末行就重新 follow_tail —— 适用于鼠标滚轮 / PgDn /
         // 拖到底三种场景:用户主动滚到底就期望新内容自动跟进。其他位置保持手动锁定。
-        int last_lines = lines_of(last_msg);
-        state.chat_follow_tail = (state.chat_focus_index == last_msg &&
-                                  state.chat_line_offset >= last_lines - 1);
+        state.chat_follow_tail = acecode::tui::is_chat_tail_position(
+            state.chat_focus_index, state.chat_line_offset,
+            static_cast<int>(state.conversation.size()),
+            message_line_counts);
         return actual;
     };
 
@@ -1716,6 +1737,9 @@ static int run_interactive_app(const CliOptions& cli,
     {
         auto p = provider_accessor();
         session_manager.start_session(working_dir, p->name(), p->model());
+        session_manager.set_permission_mode(
+            PermissionManager::mode_name(permissions.mode()),
+            /*persist_immediately=*/false);
     }
     agent_loop.set_session_manager(&session_manager);
 
@@ -1787,6 +1811,14 @@ static int run_interactive_app(const CliOptions& cli,
                 state.conversation.push_back({"system", "Session " + target_id + " not found.", false});
             } else {
                 acecode::append_resumed_session_messages(messages, state, agent_loop, tools);
+                permissions.set_mode(permission_mode_from_meta_name(resumed_meta.permission_mode));
+                permissions.clear_session_allows();
+                session_manager.set_permission_mode(
+                    PermissionManager::mode_name(permissions.mode()),
+                    /*persist_immediately=*/false);
+                token_tracker.restore(resumed_meta.last_token_usage,
+                                      resumed_meta.session_token_usage);
+                state.token_status = token_tracker.format_status(config.context_window);
                 state.conversation.push_back({"system",
                     "Resumed session " + target_id + " (" + std::to_string(messages.size()) + " messages)", false});
                 agent_loop.publish_current_goal_state();
@@ -3029,6 +3061,7 @@ static int run_interactive_app(const CliOptions& cli,
             std::lock_guard<std::mutex> lk(state.mu);
             if (!state.is_waiting && !state.confirm_pending) {
                 auto new_mode = permissions.cycle_mode();
+                session_manager.set_permission_mode(PermissionManager::mode_name(new_mode));
                 state.conversation.push_back({"system",
                     std::string("Permission mode: ") + PermissionManager::mode_name(new_mode) +
                     " - " + PermissionManager::mode_description(new_mode), false});
@@ -3097,12 +3130,12 @@ static int run_interactive_app(const CliOptions& cli,
                 if (idx >= 0) {
                     state.chat_focus_index = idx;
                     state.chat_line_offset = off;
-                    int last_msg = static_cast<int>(state.conversation.size()) - 1;
-                    if (idx == last_msg) {
-                        // 拖到底自然恢复 follow_tail —— 与 scroll_chat 的
-                        // (next == last) 路径保持一致。
-                        state.chat_follow_tail = true;
-                    }
+                    // 拖到底自然恢复 follow_tail,但"底"必须是最后一条消息的
+                    // 最后一行;最后一条长回复的内部行仍然是手动滚动位置。
+                    state.chat_follow_tail = acecode::tui::is_chat_tail_position(
+                        idx, off,
+                        static_cast<int>(state.drag_scrollbar_snapshot.size()),
+                        state.drag_scrollbar_snapshot);
                 }
                 screen.PostEvent(Event::Custom);
                 return true;
@@ -3156,9 +3189,10 @@ static int run_interactive_app(const CliOptions& cli,
                     if (idx >= 0) {
                         state.chat_focus_index = idx;
                         state.chat_line_offset = off;
-                        int last_msg =
-                            static_cast<int>(state.conversation.size()) - 1;
-                        state.chat_follow_tail = (idx == last_msg);
+                        state.chat_follow_tail = acecode::tui::is_chat_tail_position(
+                            idx, off,
+                            static_cast<int>(state.drag_scrollbar_snapshot.size()),
+                            state.drag_scrollbar_snapshot);
                     }
                     screen.PostEvent(Event::Custom);
                     return true;
@@ -3515,6 +3549,33 @@ static int run_interactive_app(const CliOptions& cli,
                 }
             } else if (message_line_counts[i] <= 0) {
                 message_line_counts[i] = 1;
+            }
+        }
+        if (n_msgs == 0) {
+            state.chat_focus_index = -1;
+            state.chat_line_offset = 0;
+            state.chat_follow_tail = true;
+        } else {
+            int last = static_cast<int>(n_msgs) - 1;
+            if (state.chat_follow_tail) {
+                state.chat_focus_index = last;
+                state.chat_line_offset =
+                    acecode::tui::chat_tail_line_offset(message_line_counts,
+                                                        last);
+            } else {
+                if (state.chat_focus_index < 0) {
+                    state.chat_focus_index = 0;
+                }
+                if (state.chat_focus_index > last) {
+                    state.chat_focus_index = last;
+                }
+                state.chat_line_offset = acecode::tui::clamp_chat_line_offset(
+                    state.chat_line_offset,
+                    acecode::tui::chat_line_count_at(
+                        message_line_counts, state.chat_focus_index));
+                state.chat_follow_tail = acecode::tui::is_chat_tail_position(
+                    state.chat_focus_index, state.chat_line_offset,
+                    static_cast<int>(n_msgs), message_line_counts);
             }
         }
 

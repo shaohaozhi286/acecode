@@ -20,6 +20,10 @@ struct ValidatedOpenDirectory {
 
 using DirectoryOpenLauncher = std::function<bool(const std::filesystem::path&, std::string&)>;
 
+std::vector<std::string> append_allowed_open_root(
+    std::vector<std::string> allowed_roots_utf8,
+    const std::string& extra_root_utf8);
+
 ValidatedOpenDirectory validate_open_directory_request(
     const std::string& path_utf8,
     const std::vector<std::string>& allowed_roots_utf8 = {});

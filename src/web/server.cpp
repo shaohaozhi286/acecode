@@ -58,6 +58,21 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
+#include <cpr/cpr.h>
+#include "../network/proxy_resolver.hpp"
+
+#ifdef DELETE
+#undef DELETE
+#endif
+#ifdef GET
+#undef GET
+#endif
+#ifdef POST
+#undef POST
+#endif
+#ifdef PUT
+#undef PUT
+#endif
 
 namespace acecode::web {
 
@@ -70,6 +85,11 @@ using nlohmann::json;
 std::uint64_t parse_seq(const std::string& s) {
     if (s.empty()) return 0;
     try { return std::stoull(s); } catch (...) { return 0; }
+}
+
+std::string trim_trailing_slash(std::string value) {
+    while (!value.empty() && value.back() == '/') value.pop_back();
+    return value;
 }
 
 std::optional<std::string> preview_image_mime(const std::string& path) {
@@ -360,6 +380,32 @@ struct WebServer::Impl {
         return o;
     }
 
+    static bool token_usage_has_values(const TokenUsage& usage) {
+        return usage.has_data ||
+               usage.prompt_tokens != 0 ||
+               usage.completion_tokens != 0 ||
+               usage.total_tokens != 0 ||
+               usage.cache_read_tokens != 0 ||
+               usage.cache_write_tokens != 0 ||
+               usage.reasoning_tokens != 0;
+    }
+
+    static json token_usage_to_json(const TokenUsage& usage) {
+        return json{
+            {"prompt_tokens", usage.prompt_tokens},
+            {"completion_tokens", usage.completion_tokens},
+            {"total_tokens", usage.total_tokens},
+            {"cache_read_tokens", usage.cache_read_tokens},
+            {"cache_write_tokens", usage.cache_write_tokens},
+            {"reasoning_tokens", usage.reasoning_tokens},
+            {"has_data", usage.has_data},
+        };
+    }
+
+    static json token_usage_or_null(const TokenUsage& usage) {
+        return token_usage_has_values(usage) ? token_usage_to_json(usage) : json(nullptr);
+    }
+
     json session_info_to_json(const SessionInfo& s, const SessionMeta* m) const {
         json o;
         o["id"]            = s.id;
@@ -377,6 +423,18 @@ struct WebServer::Impl {
         o["model_preset"]  = o["model_name"];
         o["context_window"] = s.context_window;
         o["message_count"] = s.message_count > 0 ? s.message_count : (m ? m->message_count : 0);
+        o["turn_count"]    = s.turn_count > 0 ? s.turn_count : (m ? m->turn_count : 0);
+        o["permission_mode"] = !s.permission_mode.empty()
+            ? s.permission_mode
+            : (m ? m->permission_mode : "default");
+        o["token_usage"] = token_usage_or_null(
+            token_usage_has_values(s.last_token_usage)
+                ? s.last_token_usage
+                : (m ? m->last_token_usage : TokenUsage{}));
+        o["session_token_usage"] = token_usage_or_null(
+            token_usage_has_values(s.session_token_usage)
+                ? s.session_token_usage
+                : (m ? m->session_token_usage : TokenUsage{}));
         o["archived"]      = m ? m->archived : false;
         append_attention_fields(o, s.id, o.value("workspace_hash", std::string{}),
                                 o.value("cwd", std::string{}), s.busy);
@@ -399,9 +457,73 @@ struct WebServer::Impl {
         o["model_name"]     = m.model_preset;
         o["model_preset"]   = m.model_preset;
         o["message_count"]  = m.message_count;
+        o["turn_count"]     = m.turn_count;
+        o["permission_mode"] = m.permission_mode.empty() ? "default" : m.permission_mode;
+        o["token_usage"] = token_usage_or_null(m.last_token_usage);
+        o["session_token_usage"] = token_usage_or_null(m.session_token_usage);
         o["archived"]       = m.archived;
         append_attention_fields(o, m.id, workspace_hash, m.cwd, false);
         return o;
+    }
+
+    void append_session_runtime_snapshot(json& wrapper,
+                                         const std::string& session_id) const {
+        if (session_id.empty()) return;
+        SessionMeta meta;
+        bool have_meta = false;
+        if (deps.session_registry) {
+            if (auto* entry = deps.session_registry->lookup(session_id)) {
+                if (entry->loop) {
+                    wrapper["busy"] = entry->loop->is_busy();
+                }
+                if (entry->sm) {
+                    meta = entry->sm->load_session_meta(session_id);
+                    have_meta = !meta.id.empty();
+                    wrapper["turn_count"] = entry->sm->current_turn_count();
+                    wrapper["permission_mode"] = entry->sm->current_permission_mode();
+                    wrapper["token_usage"] = token_usage_or_null(entry->sm->current_last_token_usage());
+                    wrapper["session_token_usage"] =
+                        token_usage_or_null(entry->sm->current_session_token_usage());
+                }
+            }
+        }
+
+        if (!have_meta) {
+            auto project_dir = SessionStorage::get_project_dir(deps.cwd);
+            auto meta_path = SessionStorage::meta_path(project_dir, session_id);
+            meta = SessionStorage::read_meta(meta_path);
+            have_meta = !meta.id.empty();
+        }
+        if (have_meta) {
+            if (!wrapper.contains("turn_count")) wrapper["turn_count"] = meta.turn_count;
+            if (!wrapper.contains("permission_mode")) {
+                wrapper["permission_mode"] = meta.permission_mode.empty() ? "default" : meta.permission_mode;
+            }
+            if (!wrapper.contains("token_usage")) {
+                wrapper["token_usage"] = token_usage_or_null(meta.last_token_usage);
+            }
+            if (!wrapper.contains("session_token_usage")) {
+                wrapper["session_token_usage"] = token_usage_or_null(meta.session_token_usage);
+            }
+        }
+
+        if (!deps.session_registry) return;
+        auto* entry = deps.session_registry->lookup(session_id);
+        if (!entry) return;
+
+        if (entry->sm) {
+            if (auto* store = entry->sm->existing_goal_store()) {
+                std::string error;
+                auto goal = store->get_thread_goal(session_id, &error);
+                if (!error.empty()) {
+                    LOG_WARN("[web] failed to snapshot thread goal: " + error);
+                } else {
+                    wrapper["goal"] = goal.has_value()
+                        ? thread_goal_to_json(*goal)
+                        : nlohmann::json(nullptr);
+                }
+            }
+        }
     }
 
     json sessions_for_workspace(const acecode::desktop::WorkspaceMeta& ws,
@@ -1806,6 +1928,7 @@ struct WebServer::Impl {
                         json wrapper;
                         wrapper["events"]   = std::move(arr);
                         wrapper["messages"] = std::move(msgs);
+                        append_session_runtime_snapshot(wrapper, id);
                         crow::response r(wrapper.dump());
                         r.add_header("Content-Type", "application/json");
                         return with_cors(req, std::move(r));
@@ -1824,6 +1947,7 @@ struct WebServer::Impl {
                     json wrapper;
                     wrapper["events"]   = std::move(arr);
                     wrapper["messages"] = std::move(msgs);
+                    append_session_runtime_snapshot(wrapper, id);
                     crow::response r(wrapper.dump());
                     r.add_header("Content-Type", "application/json");
                     return with_cors(req, std::move(r));
@@ -1966,6 +2090,14 @@ struct WebServer::Impl {
             }
             auto mode = deps.session_registry->permission_mode(id);
             if (!mode.has_value()) {
+                auto project_dir = SessionStorage::get_project_dir(deps.cwd);
+                auto meta = SessionStorage::read_meta(SessionStorage::meta_path(project_dir, id));
+                if (!meta.id.empty()) {
+                    auto parsed = parse_permission_mode_name(meta.permission_mode);
+                    crow::response r(permission_mode_to_json(parsed.value_or(PermissionMode::Default)).dump());
+                    r.add_header("Content-Type", "application/json");
+                    return with_cors(req, std::move(r));
+                }
                 crow::response r(404);
                 r.body = R"({"error":"unknown session"})";
                 r.add_header("Content-Type", "application/json");
@@ -2204,6 +2336,10 @@ struct WebServer::Impl {
         });
         CROW_ROUTE(app, "/api/models/<string>").methods(crow::HTTPMethod::Options)
         ([this](const crow::request& req, const std::string&) {
+            return cors_preflight(req);
+        });
+        CROW_ROUTE(app, "/api/models/probe").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
             return cors_preflight(req);
         });
         CROW_ROUTE(app, "/api/config/default-model").methods(crow::HTTPMethod::Options)
@@ -2538,6 +2674,64 @@ struct WebServer::Impl {
             return with_cors(req, std::move(r));
         });
 
+        // POST /api/models/probe: best-effort OpenAI-compatible /models probe.
+        CROW_ROUTE(app, "/api/models/probe").methods(crow::HTTPMethod::POST)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+
+            auto json_err = [&](int status, const char* code, const std::string& msg) {
+                crow::response r(status);
+                r.body = json{{"error", code}, {"message", msg}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            };
+
+            json body;
+            try { body = json::parse(req.body); }
+            catch (const std::exception& e) {
+                return json_err(400, "BAD_JSON", std::string("invalid JSON body: ") + e.what());
+            }
+
+            std::string err_code;
+            std::string err;
+            auto parsed = parse_model_probe_request(body, err_code, err);
+            if (!parsed) {
+                return json_err(400, err_code.empty() ? "BAD_REQUEST" : err_code.c_str(), err);
+            }
+
+            const std::string url = trim_trailing_slash(parsed->base_url) + "/models";
+            cpr::Header headers = {{"Content-Type", "application/json"}};
+            if (!parsed->api_key.empty()) {
+                headers["Authorization"] = "Bearer " + parsed->api_key;
+            }
+            auto proxy_opts = network::proxy_options_for(url);
+            cpr::Response response = cpr::Get(
+                cpr::Url{url},
+                headers,
+                network::build_ssl_options(proxy_opts),
+                proxy_opts.proxies,
+                proxy_opts.auth,
+                cpr::Timeout{10000}
+            );
+
+            if (response.status_code == 0) {
+                return json_err(502, "PROBE_FAILED", response.error.message);
+            }
+            if (response.status_code < 200 || response.status_code >= 300) {
+                return json_err(502, "PROBE_HTTP_ERROR",
+                                "upstream returned HTTP " + std::to_string(response.status_code));
+            }
+
+            try {
+                auto ids = parse_openai_model_ids(json::parse(response.text));
+                crow::response r(json{{"models", ids}}.dump());
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            } catch (const std::exception& e) {
+                return json_err(502, "PROBE_BAD_JSON", e.what());
+            }
+        });
+
         // PUT /api/config/ui-preferences body {show_acecode_avatar:boolean}.
         CROW_ROUTE(app, "/api/config/ui-preferences").methods(crow::HTTPMethod::PUT)
         ([this](const crow::request& req) {
@@ -2585,6 +2779,42 @@ struct WebServer::Impl {
     }
 
     void register_skills() {
+        CROW_ROUTE(app, "/api/skills/root").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
+
+        // GET /api/skills/root?workspace=<hash>: resolve effective skill directory
+        CROW_ROUTE(app, "/api/skills/root").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+
+            std::optional<acecode::desktop::WorkspaceMeta> ws;
+            const char* workspace_q = req.url_params.get("workspace");
+            if (workspace_q && *workspace_q) {
+                ws = resolve_workspace(workspace_q);
+                if (!ws.has_value()) {
+                    crow::response r(404);
+                    r.body = R"({"error":"workspace not found"})";
+                    r.add_header("Content-Type", "application/json");
+                    return with_cors(req, std::move(r));
+                }
+            } else {
+                ws = compatibility_workspace();
+            }
+
+            auto selected = resolve_skill_root_for_cwd(ws->cwd);
+            json body{
+                {"path", path_to_utf8(selected.path)},
+                {"source", selected.source},
+                {"workspace_hash", ws->hash},
+                {"cwd", ws->cwd},
+            };
+            crow::response r(body.dump());
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        });
+
         // GET /api/skills: spec 9.7
         CROW_ROUTE(app, "/api/skills").methods(crow::HTTPMethod::GET)
         ([this](const crow::request& req) {

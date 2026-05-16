@@ -1,4 +1,5 @@
 #include "system_prompt.hpp"
+#include "system_datetime.hpp"
 #include "../config/config.hpp"
 #include "../memory/memory_registry.hpp"
 #include "../project_instructions/instructions_loader.hpp"
@@ -153,7 +154,8 @@ std::string build_system_prompt(const ToolExecutor& tools, const std::string& cw
     oss << "# Environment\n\n"
         << "- OS: " << get_os_name() << "\n"
         << "- CWD: " << cwd << "\n"
-        << "- Shell: " << get_default_shell() << "\n\n";
+        << "- Shell: " << get_default_shell() << "\n"
+        << "- Current local date/time: " << current_prompt_datetime() << "\n\n";
 
     oss << get_shell_guidance();
 

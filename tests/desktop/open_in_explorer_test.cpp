@@ -8,6 +8,7 @@
 namespace fs = std::filesystem;
 
 using acecode::desktop::open_directory_in_file_manager;
+using acecode::desktop::append_allowed_open_root;
 using acecode::desktop::validate_open_directory_request;
 
 namespace {
@@ -80,6 +81,24 @@ TEST(DesktopOpenInExplorer, AllowsExistingDirectoryWhenNoRegistryRootsProvided) 
 
     std::error_code ec;
     fs::remove_all(root, ec);
+}
+
+TEST(DesktopOpenInExplorer, AppendsGlobalSkillsRootOnce) {
+    auto root = make_tmp_dir("acecode_open_explorer_root_append");
+    auto skills = make_tmp_dir("acecode_open_explorer_skills_append");
+
+    auto roots = append_allowed_open_root({path_string(root)}, path_string(skills));
+    ASSERT_EQ(roots.size(), 2u);
+
+    roots = append_allowed_open_root(std::move(roots), path_string(skills));
+    EXPECT_EQ(roots.size(), 2u);
+
+    auto result = validate_open_directory_request(path_string(skills), roots);
+    EXPECT_TRUE(result.ok) << result.error;
+
+    std::error_code ec;
+    fs::remove_all(root, ec);
+    fs::remove_all(skills, ec);
 }
 
 TEST(DesktopOpenInExplorer, UsesInjectedLauncherAfterValidation) {

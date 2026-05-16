@@ -5,21 +5,22 @@
 //
 // 斜杠命令:value 以 / 开头且无空白时,SlashDropdown 浮层显示在输入框上方。
 // 选中后插入 `/<name> ` 到输入框,不立即发送(builtin 与 skill 行为统一)。
-// 已识别的首段命令以 chip 样式叠加渲染(overlay div 与 textarea 同度量)。
+// 已识别的首段命令以原子 token 样式叠加渲染(overlay div 与 textarea 同度量)。
 
 import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import { clsx } from '../lib/format.js';
+import { getGoalStopControlState } from '../lib/goalControl.js';
 import { getInputBarActionState } from '../lib/inputBarState.js';
 import { VsIcon } from './Icon.jsx';
 import { SlashDropdown } from './SlashDropdown.jsx';
 import { useSlashCommands } from './SlashCommandsContext.jsx';
-import { parseLeadingCommand } from '../lib/slashCommands.js';
+import { deleteLeadingCommandBlock, parseLeadingCommand } from '../lib/slashCommands.js';
 
 const MAX_ROWS = 8;
 const LINE_HEIGHT = 20; // 与 leading-[20px] 对齐
 
 export const InputBar = forwardRef(function InputBar({
-  disabled, placeholder = '输入消息或 / 命令…', onSubmit, onAbort, busy, history = [], variant = 'default',
+  disabled, placeholder = '输入消息或 / 命令…', onSubmit, onAbort, busy, goal = null, goalStopping = false, history = [], variant = 'default',
 }, ref) {
   const [value, setValue] = useState('');
   const [histPtr, setHistPtr] = useState(-1);
@@ -87,9 +88,35 @@ export const InputBar = forwardRef(function InputBar({
     return !el.value.substring(el.selectionEnd).includes('\n');
   };
 
+  const leading = useMemo(() => parseLeadingCommand(value, knownNames), [value, knownNames]);
+  const showChip = leading.name != null;
+
   const onKey = (e) => {
     // 下拉打开时,Enter / Tab / Esc / 方向键 由 SlashDropdown 在捕获阶段处理。
     // 这里只处理常规情况。
+    if ((e.key === 'Backspace' || e.key === 'Delete') && showChip) {
+      const edit = deleteLeadingCommandBlock(
+        value,
+        leading,
+        e.currentTarget.selectionStart,
+        e.currentTarget.selectionEnd,
+        e.key === 'Delete' ? 'forward' : 'backward',
+      );
+      if (edit) {
+        e.preventDefault();
+        setValue(edit.value);
+        setHistPtr(-1);
+        setDropdownClosed(false);
+        requestAnimationFrame(() => {
+          const el = ta.current;
+          if (el) {
+            el.focus();
+            el.setSelectionRange(edit.selectionStart, edit.selectionEnd);
+          }
+        });
+        return;
+      }
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       submit();
@@ -111,10 +138,12 @@ export const InputBar = forwardRef(function InputBar({
   };
 
   const actionState = getInputBarActionState({ value, disabled, busy });
+  const stopControl = getGoalStopControlState({ goal, busy, stopping: goalStopping });
+  const inputRightPadding = stopControl.visible
+    ? (isHero ? 'pr-36' : 'pr-32')
+    : (isHero ? 'pr-14' : 'pr-12');
 
-  // 命令 chip overlay:首段是已知命令时,在 textarea 上叠一层透明 div,首段包 chip span。
-  const leading = useMemo(() => parseLeadingCommand(value, knownNames), [value, knownNames]);
-  const showChip = leading.name != null;
+  // 命令 token overlay:首段是已知命令时,textarea 文字透明,由 overlay 负责着色渲染。
   const chipText = showChip ? value.slice(0, leading.headLength) : '';
   const restText = showChip ? value.slice(leading.headLength) : '';
 
@@ -134,15 +163,15 @@ export const InputBar = forwardRef(function InputBar({
             onClose={() => setDropdownClosed(true)}
           />
         )}
-        {/* chip overlay: pointer-events:none, 透明文本,只让首段 chip 着色 */}
+        {/* command overlay: pointer-events:none,与 textarea 使用相同度量。 */}
         {showChip && (
           <div
             aria-hidden="true"
             className={clsx(
-              'absolute inset-0 pointer-events-none whitespace-pre-wrap break-words leading-[20px] font-sans overflow-hidden',
-              isHero ? 'px-4 py-3 pr-14 text-[14px]' : 'px-3 py-2 pr-12 text-[13px]',
+              'absolute inset-0 pointer-events-none whitespace-pre-wrap break-words leading-[20px] font-sans text-fg overflow-hidden',
+              isHero ? 'px-4 py-3 text-[14px]' : 'px-3 py-2 text-[13px]',
+              inputRightPadding,
             )}
-            style={{ color: 'transparent' }}
           >
             <span className="ace-slash-chip">{chipText}</span>
             <span>{restText}</span>
@@ -157,21 +186,27 @@ export const InputBar = forwardRef(function InputBar({
           disabled={disabled}
           placeholder={placeholder}
           className={clsx(
-            'relative w-full resize-none bg-transparent border-0 outline-none leading-[20px] font-sans text-fg placeholder:text-fg-mute disabled:opacity-50',
-            isHero ? 'px-4 py-3 pr-14 text-[14px]' : 'px-3 py-2 pr-12 text-[13px]',
+            'relative w-full resize-none bg-transparent border-0 outline-none leading-[20px] font-sans placeholder:text-fg-mute disabled:opacity-50',
+            showChip ? 'text-transparent' : 'text-fg',
+            isHero ? 'px-4 py-3 text-[14px]' : 'px-3 py-2 text-[13px]',
+            inputRightPadding,
           )}
-          style={{ height: LINE_HEIGHT + (isHero ? 28 : 16) }}
+          style={{
+            height: LINE_HEIGHT + (isHero ? 28 : 16),
+            caretColor: showChip ? 'var(--ace-fg)' : undefined,
+          }}
         />
         <div className={clsx("absolute flex items-center gap-1", isHero ? "right-2.5 bottom-2.5" : "right-1.5 bottom-1")}>
-          {busy && (
+          {stopControl.visible && (
             <button
               type="button"
               onClick={onAbort}
-              className="px-2 h-7 rounded-md text-[11px] text-danger border border-danger/40 hover:bg-danger-bg transition flex items-center gap-1"
-              title="中断当前任务"
+              disabled={stopControl.disabled}
+              className="px-2 h-7 rounded-md text-[11px] text-danger border border-danger/40 hover:bg-danger-bg transition flex items-center gap-1 disabled:opacity-50 disabled:cursor-wait"
+              title={stopControl.title}
             >
               <VsIcon name="stop" size={12} mono={false} />
-              <span>中断</span>
+              <span>{stopControl.label}</span>
             </button>
           )}
           {busy ? (

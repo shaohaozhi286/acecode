@@ -143,6 +143,40 @@ await run('executeCommand posts to builtin command endpoint', async () => {
   }
 });
 
+await run('probeModels posts draft to model probe endpoint', async () => {
+  const previousFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    calls.push({ url, opts });
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ models: ['gpt-4o'] }),
+    };
+  };
+  try {
+    const client = createApi({ origin: 'http://127.0.0.1:4567', token: 'tok' });
+    const result = await client.probeModels({
+      provider: 'openai',
+      base_url: 'http://localhost:1234/v1',
+      api_key: 'sk',
+    });
+    assert.deepEqual(result, { models: ['gpt-4o'] });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, 'http://127.0.0.1:4567/api/models/probe');
+    assert.equal(calls[0].opts.method, 'POST');
+    assert.equal(calls[0].opts.headers['X-ACECode-Token'], 'tok');
+    assert.deepEqual(JSON.parse(calls[0].opts.body), {
+      provider: 'openai',
+      base_url: 'http://localhost:1234/v1',
+      api_key: 'sk',
+    });
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
 await run('UI preference API reads and writes daemon-backed avatar preference', async () => {
   const previousFetch = globalThis.fetch;
   const calls = [];
@@ -168,6 +202,32 @@ await run('UI preference API reads and writes daemon-backed avatar preference', 
     assert.equal(calls[1].url, 'http://127.0.0.1:4567/api/config/ui-preferences');
     assert.equal(calls[1].opts.method, 'PUT');
     assert.deepEqual(JSON.parse(calls[1].opts.body), { show_acecode_avatar: false });
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+await run('getSkillRoot uses workspace query and auth token', async () => {
+  const previousFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    calls.push({ url, opts });
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ path: '/repo/.acecode/skills', source: 'project_acecode' }),
+    };
+  };
+  try {
+    const client = createApi({ origin: 'http://127.0.0.1:4567', token: 'tok' });
+    const got = await client.getSkillRoot('workspace/hash');
+
+    assert.deepEqual(got, { path: '/repo/.acecode/skills', source: 'project_acecode' });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, 'http://127.0.0.1:4567/api/skills/root?workspace=workspace%2Fhash');
+    assert.equal(calls[0].opts.method, 'GET');
+    assert.equal(calls[0].opts.headers['X-ACECode-Token'], 'tok');
   } finally {
     globalThis.fetch = previousFetch;
   }

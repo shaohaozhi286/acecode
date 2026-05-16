@@ -5,7 +5,7 @@
 import { useTheme } from '../theme.jsx';
 import { toast } from './Toast.jsx';
 import { clsx } from '../lib/format.js';
-import { VsIcon } from './Icon.jsx';
+import { NavigationArrowIcon, PanelToggleIcon, VsIcon } from './Icon.jsx';
 import {
   WindowControls,
   isFramelessDesktop,
@@ -13,20 +13,34 @@ import {
   useFramelessWindowState,
 } from './WindowControls.jsx';
 
-function QuickBtn({ title, onClick, children }) {
+function QuickBtn({ title, onClick, children, disabled = false }) {
   return (
     <button
       type="button"
       title={title}
       onClick={onClick}
-      className="w-7 h-7 rounded-md bg-surface-hi/0 hover:bg-surface-hi text-fg-2 hover:text-fg flex items-center justify-center text-[14px] transition"
+      disabled={disabled}
+      className={clsx(
+        'w-7 h-7 rounded-md bg-surface-hi/0 text-fg-2 flex items-center justify-center text-[14px] transition',
+        disabled ? 'opacity-35 cursor-not-allowed' : 'hover:bg-surface-hi hover:text-fg',
+      )}
     >
       {children}
     </button>
   );
 }
 
-export function TopBar({ onSettings, onNewSession, onOpenSearch, sidebarCollapsed = false, onToggleSidebar }) {
+export function TopBar({
+  onSettings,
+  onNewSession,
+  onOpenSearch,
+  sidebarCollapsed = false,
+  onToggleSidebar,
+  onGoBack,
+  onGoForward,
+  canGoBack = false,
+  canGoForward = false,
+}) {
   const { theme, toggle } = useTheme();
   const { framelessDesktop, isMaximized } = useFramelessWindowState();
   const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad|iPod/.test(navigator.platform || '');
@@ -56,11 +70,13 @@ export function TopBar({ onSettings, onNewSession, onOpenSearch, sidebarCollapse
       </div>
 
       <QuickBtn title={sidebarCollapsed ? '展开项目栏' : '收起项目栏'} onClick={onToggleSidebar}>
-        <VsIcon
-          name="expandRight"
-          size={15}
-          className={clsx('transition-transform', !sidebarCollapsed && 'rotate-180')}
-        />
+        <PanelToggleIcon side="left" size={16} />
+      </QuickBtn>
+      <QuickBtn title="后退" onClick={onGoBack} disabled={!canGoBack}>
+        <NavigationArrowIcon direction="back" size={16} />
+      </QuickBtn>
+      <QuickBtn title="前进" onClick={onGoForward} disabled={!canGoForward}>
+        <NavigationArrowIcon direction="forward" size={16} />
       </QuickBtn>
       <QuickBtn title="新对话" onClick={onNewSession}>
         <VsIcon name="editWindow" size={16} />

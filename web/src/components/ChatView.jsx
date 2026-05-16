@@ -53,7 +53,7 @@ import {
   selectedModelName,
 } from '../lib/sessionModel.js';
 import { normalizePermissionMode } from '../lib/permissionMode.js';
-import { VsIcon } from './Icon.jsx';
+import { PanelToggleIcon, VsIcon } from './Icon.jsx';
 import { commandWorkspaceHashForInput } from '../lib/slashCommandWorkspace.js';
 import { inputRouteForText, sessionCreateOptionsForText } from '../lib/builtinCommandRouting.js';
 import { fileTreeRefreshKeyFromItems } from '../lib/fileTreeRefresh.js';
@@ -311,8 +311,10 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   const [modelState, setModelState] = useState(null);
   const [pendingModelName, setPendingModelName] = useState('');
   const [modelSwitching, setModelSwitching] = useState(false);
+  const [modelRefreshing, setModelRefreshing] = useState(false);
   const [permissionMode, setPermissionMode] = useState('default');
   const [permissionSwitching, setPermissionSwitching] = useState(false);
+  const [goalStopping, setGoalStopping] = useState(false);
   const [reviewRequest, setReviewRequest] = useState(0);
   const [dismissedDockSignatures, setDismissedDockSignatures] = usePreference(
     CHANGE_DOCK_DISMISSALS_STORAGE_KEY,
@@ -372,6 +374,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
       setModelState(null);
       setPendingModelName('');
       setModelSwitching(false);
+      setModelRefreshing(false);
       return undefined;
     }
     let cancelled = false;
@@ -404,6 +407,33 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     return () => { cancelled = true; };
   }, [api, ref?.context_window, ref?.model, ref?.model_name, ref?.model_preset, ref?.provider, ref?.workspaceHash, sid]);
 
+  const refreshSessionModels = useCallback(async () => {
+    if (!sid || modelRefreshing) return;
+    const targetSid = sid;
+    const workspaceHash = ref?.workspaceHash || '';
+    setModelRefreshing(true);
+    try {
+      const [modelsResult, stateResult] = await Promise.allSettled([
+        api.listModels(),
+        api.getSessionModel(targetSid, workspaceHash),
+      ]);
+      if (sidRef.current !== targetSid) return;
+      if (modelsResult.status === 'fulfilled') {
+        setModelOptions(normalizeModelOptions(modelsResult.value));
+      }
+      if (stateResult.status === 'fulfilled') {
+        setModelState(normalizeModelState(stateResult.value));
+      }
+      if (modelsResult.status === 'fulfilled') {
+        toast({ kind: 'ok', text: '模型列表已刷新' });
+      } else {
+        toast({ kind: 'err', text: '模型列表刷新失败:' + (modelsResult.reason?.message || '') });
+      }
+    } finally {
+      setModelRefreshing(false);
+    }
+  }, [api, modelRefreshing, ref?.workspaceHash, sid]);
+
   useEffect(() => {
     if (!sid) {
       setPermissionMode('default');
@@ -417,10 +447,10 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         if (!cancelled) setPermissionMode(normalizePermissionMode(state?.mode));
       })
       .catch(() => {
-        if (!cancelled) setPermissionMode('default');
+        if (!cancelled) setPermissionMode(normalizePermissionMode(ref?.permission_mode));
       });
     return () => { cancelled = true; };
-  }, [api, sid]);
+  }, [api, ref?.permission_mode, sid]);
 
   const updateQueueState = useCallback((updater) => {
     const base = queueStateRef.current;
@@ -755,6 +785,26 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     connection.sendAbort(sid);
   }, [applyEvent, sid]);
 
+  const goalActive = goal?.status === 'active';
+
+  useEffect(() => {
+    if (!goalActive) setGoalStopping(false);
+  }, [goalActive, sid]);
+
+  const stopCurrentWork = useCallback(() => {
+    if (!sid) return;
+    if (busy) {
+      abort();
+      return;
+    }
+    if (!goalActive || goalStopping) return;
+    setGoalStopping(true);
+    connection.sendAbort(sid);
+    api.executeCommand(sid, { name: 'goal', args: 'pause', display_text: '/goal pause' })
+      .catch((e) => toast({ kind: 'err', text: '停止 Goal 失败:' + (e?.message || '') }))
+      .finally(() => setGoalStopping(false));
+  }, [abort, api, busy, goalActive, goalStopping, sid]);
+
   const switchSessionModel = useCallback(async (name) => {
     const nextName = String(name || '');
     const currentName = selectedModelName(modelState);
@@ -1058,6 +1108,97 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
 
   const sidePanelMounted = showSidePanel && !!sid;
 
+  function renderExpandedActivityItems(children, keyPrefix) {
+    const list = Array.isArray(children) ? children : [];
+    const directives = buildAssistantRunDirectives(list);
+
+    return list.map((child, index) => {
+      const key = `${keyPrefix}-${child.id ?? index}`;
+
+      if (child.kind === 'activity_summary') {
+        const nestedExpanded = expandedActivityKeys.has(child.id);
+        const nestedItems = child.detailItems || child.collapsedItems || [];
+        return (
+          <div
+            key={key}
+            className="flex flex-col"
+            data-chat-kind={child.kind || ''}
+            data-chat-role="activity_summary"
+          >
+            <ActivitySummaryBlock
+              item={child}
+              expanded={nestedExpanded}
+              onToggle={() => toggleActivitySummary(child.id)}
+            />
+            {nestedExpanded && (
+              <div className="mt-1 ml-4 pl-3 border-l border-border/70 flex flex-col gap-2">
+                {renderExpandedActivityItems(nestedItems, `${key}-nested`)}
+              </div>
+            )}
+          </div>
+        );
+      }
+
+      if (child.kind === 'completion_summary') {
+        return (
+          <div
+            key={key}
+            className="flex flex-col"
+            data-chat-kind={child.kind || ''}
+            data-chat-role="completion_summary"
+          >
+            <CompletionSummaryBlock item={child} />
+          </div>
+        );
+      }
+
+      if (child.kind === 'termination_notice') {
+        return (
+          <div
+            key={key}
+            className="flex flex-col"
+            data-chat-kind={child.kind || ''}
+            data-chat-role="termination_notice"
+          >
+            <TerminationNoticeBlock item={child} />
+          </div>
+        );
+      }
+
+      const childDirective = child.kind === 'msg' && child.role === 'assistant'
+        ? directives.get(child.id)
+        : undefined;
+      if (childDirective?.hide) return null;
+      const childContinuation = childDirective ? childDirective.showHeader === false : false;
+      const childShowFooter = childDirective ? childDirective.showFooter !== false : true;
+      return (
+        <div
+          key={key}
+          className="flex flex-col"
+          data-chat-kind={child.kind || ''}
+          data-chat-role={child.kind === 'msg' ? (child.role || '') : (child.kind || '')}
+        >
+          {child.kind === 'tool' ? (
+            <ToolBlock entry={child.tool} />
+          ) : (
+            <Message
+              role={child.role}
+              content={child.content}
+              ts={child.ts}
+              streaming={child.streaming}
+              messageId={child.messageId}
+              metadata={child.metadata}
+              onFork={forkAndSwitch}
+              continuation={childContinuation}
+              showFooter={childShowFooter}
+              showAceCodeAvatar={showAceCodeAvatar}
+            />
+          )}
+        </div>
+      );
+    });
+  }
+
   return (
     <div ref={layoutRef} className="flex-1 flex min-w-0 ace-chat-layout">
       <div
@@ -1089,7 +1230,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
             title="展开右侧面板"
             aria-label="展开右侧面板"
           >
-            <VsIcon name="expandRight" size={14} />
+            <PanelToggleIcon side="right" size={15} />
           </button>
         )}
       </div>
@@ -1134,9 +1275,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
 
             if (it.kind === 'activity_summary') {
               const expanded = expandedActivityKeys.has(it.id);
-              const hiddenDirectives = expanded
-                ? buildAssistantRunDirectives(it.collapsedItems || [])
-                : new Map();
+              const detailItems = it.detailItems || it.collapsedItems || [];
               return (
                 <Fragment key={it.id}>
                   <div
@@ -1153,39 +1292,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
                     />
                     {expanded && (
                       <div className="mt-1 ml-4 pl-3 border-l border-border/70 flex flex-col gap-2">
-                        {(it.collapsedItems || []).map((child) => {
-                          const childDirective = child.kind === 'msg' && child.role === 'assistant'
-                            ? hiddenDirectives.get(child.id)
-                            : undefined;
-                          if (childDirective?.hide) return null;
-                          const childContinuation = childDirective ? childDirective.showHeader === false : false;
-                          const childShowFooter = childDirective ? childDirective.showFooter !== false : true;
-                          return (
-                            <div
-                              key={`activity-hidden-${child.id}`}
-                              className="flex flex-col"
-                              data-chat-kind={child.kind || ''}
-                              data-chat-role={child.kind === 'msg' ? (child.role || '') : (child.kind || '')}
-                            >
-                              {child.kind === 'tool' ? (
-                                <ToolBlock entry={child.tool} />
-                              ) : (
-                                <Message
-                                  role={child.role}
-                                  content={child.content}
-                                  ts={child.ts}
-                                  streaming={child.streaming}
-                                  messageId={child.messageId}
-                                  metadata={child.metadata}
-                                  onFork={forkAndSwitch}
-                                  continuation={childContinuation}
-                                  showFooter={childShowFooter}
-                                  showAceCodeAvatar={showAceCodeAvatar}
-                                />
-                              )}
-                            </div>
-                          );
-                        })}
+                        {renderExpandedActivityItems(detailItems, `activity-hidden-${it.id}`)}
                       </div>
                     )}
                   </div>
@@ -1258,9 +1365,11 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
       <InputBar
         ref={inputRef}
         busy={busy}
+        goal={goal}
+        goalStopping={goalStopping}
         history={history}
         onSubmit={submit}
-        onAbort={abort}
+        onAbort={stopCurrentWork}
         disabled={!!questionForView}
         placeholder={questionForView ? '请先回答上方问题…' : undefined}
       />
@@ -1271,7 +1380,9 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         modelOptions={displayedModelOptions}
         selectedModelName={currentModelName}
         modelSwitching={modelSwitching}
+        modelRefreshing={modelRefreshing}
         onModelChange={switchSessionModel}
+        onRefreshModels={refreshSessionModels}
         tokenBudget={tokenBudget}
         goal={goal}
         permissionMode={permissionMode}

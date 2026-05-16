@@ -104,6 +104,8 @@ TEST(ModelsHandler, ModelStateToJsonIncludesCurrentSessionFields) {
 using acecode::SavedModelDraft;
 using acecode::SavedModelEditError;
 using acecode::web::http_status_for_edit_error;
+using acecode::web::parse_model_probe_request;
+using acecode::web::parse_openai_model_ids;
 using acecode::web::parse_model_draft;
 using acecode::web::profile_to_safe_json;
 
@@ -213,4 +215,66 @@ TEST(ModelsHandler, ParseDraftAcceptsFullBody) {
     EXPECT_EQ(d->base_url, "http://localhost/v1");
     EXPECT_EQ(d->api_key, "sk-x");
     EXPECT_TRUE(err.empty());
+}
+
+TEST(ModelsHandler, ParseOpenAiModelIdsAcceptsStandardDataArray) {
+    nlohmann::json body = {
+        {"data", nlohmann::json::array({
+            {{"id", "gpt-4o"}},
+            {{"id", "gpt-4o-mini"}},
+            {{"id", "gpt-4o"}},
+            {{"object", "model"}},
+        })},
+    };
+    auto ids = parse_openai_model_ids(body);
+    ASSERT_EQ(ids.size(), 2u);
+    EXPECT_EQ(ids[0], "gpt-4o");
+    EXPECT_EQ(ids[1], "gpt-4o-mini");
+}
+
+TEST(ModelsHandler, ParseOpenAiModelIdsAcceptsFallbackShapes) {
+    auto from_models = parse_openai_model_ids(nlohmann::json{
+        {"models", nlohmann::json::array({"b-model", "a-model"})},
+    });
+    ASSERT_EQ(from_models.size(), 2u);
+    EXPECT_EQ(from_models[0], "a-model");
+    EXPECT_EQ(from_models[1], "b-model");
+
+    auto from_array = parse_openai_model_ids(nlohmann::json::array({
+        {{"id", "z-model"}},
+        "manual-model",
+    }));
+    ASSERT_EQ(from_array.size(), 2u);
+    EXPECT_EQ(from_array[0], "manual-model");
+    EXPECT_EQ(from_array[1], "z-model");
+}
+
+TEST(ModelsHandler, ParseProbeRequestValidatesProviderAndBaseUrl) {
+    std::string code;
+    std::string err;
+    auto unsupported = parse_model_probe_request(
+        nlohmann::json{{"provider", "copilot"}, {"base_url", "http://x"}},
+        code,
+        err);
+    EXPECT_FALSE(unsupported.has_value());
+    EXPECT_EQ(code, "UNKNOWN_PROVIDER");
+
+    code.clear();
+    err.clear();
+    auto missing_url = parse_model_probe_request(
+        nlohmann::json{{"provider", "openai"}},
+        code,
+        err);
+    EXPECT_FALSE(missing_url.has_value());
+    EXPECT_EQ(code, "MISSING_BASE_URL");
+
+    code.clear();
+    err.clear();
+    auto ok = parse_model_probe_request(
+        nlohmann::json{{"provider", "openai"}, {"base_url", "http://localhost/v1"}, {"api_key", "sk"}},
+        code,
+        err);
+    ASSERT_TRUE(ok.has_value());
+    EXPECT_EQ(ok->base_url, "http://localhost/v1");
+    EXPECT_EQ(ok->api_key, "sk");
 }

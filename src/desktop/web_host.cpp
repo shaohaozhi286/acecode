@@ -27,11 +27,21 @@
 #ifdef _WIN32
 #  include <windows.h>
 #endif
+#if !defined(_WIN32) && !defined(__APPLE__)
+#  include <dlfcn.h>
+#endif
 #ifdef __APPLE__
 #  include <CoreGraphics/CoreGraphics.h>
 #endif
 
 namespace acecode::desktop {
+
+namespace {
+
+// 全局 close_request_handler — 只在主线程上写,窗口回调在同一 GUI 主线程上读。
+std::function<bool()> g_close_handler;
+
+} // namespace
 
 #ifdef _WIN32
 namespace {
@@ -43,11 +53,6 @@ constexpr int kFramelessDragHeightDip = 44;
 // 选 0x10 偏移留出 0..0xF 给未来扩展;远离 webview/Common Controls 常用的
 // WM_USER..WM_USER+0x100 区段。
 constexpr UINT kRequestQuitMsg = WM_USER + 0x10;
-
-// 全局 close_request_handler — 只在主线程上写,WndProc 在主线程上读。
-// 用 std::function 包装避免裸函数指针;mutex 不需要,因为 WndProc 与 setter
-// 共享同一线程(webview2 message pump 线程 = 主线程)。
-std::function<bool()> g_close_handler;
 
 // 窗口最大化/还原状态变化 handler。同样 main thread only。WndProc 在 WM_SIZE
 // 时检测 IsZoomed 与 g_last_known_maximized 是否不同,变化时触发并同步缓存。
@@ -383,6 +388,70 @@ struct ComApartment {
 
 namespace {
 
+#if !defined(_WIN32) && !defined(__APPLE__)
+struct GtkWindowApi {
+    using GtkWidgetShow = void (*)(void*);
+    using GtkWidgetHide = void (*)(void*);
+    using GtkWindowPresent = void (*)(void*);
+    using GtkWindowClose = void (*)(void*);
+    using GSignalConnectData = unsigned long (*)(void*, const char*, void*, void*, void*, int);
+
+    void* gtk = nullptr;
+    void* gobject = nullptr;
+    GtkWidgetShow widget_show = nullptr;
+    GtkWidgetHide widget_hide = nullptr;
+    GtkWindowPresent window_present = nullptr;
+    GtkWindowClose window_close = nullptr;
+    GSignalConnectData signal_connect_data = nullptr;
+
+    bool load() {
+        if (gtk && gobject) return true;
+        gtk = ::dlopen("libgtk-3.so.0", RTLD_LAZY | RTLD_LOCAL);
+        gobject = ::dlopen("libgobject-2.0.so.0", RTLD_LAZY | RTLD_LOCAL);
+        if (!gtk || !gobject) {
+            LOG_WARN("[desktop] GTK3/GObject runtime not available for window controls");
+            return false;
+        }
+        auto sym = [](void* lib, const char* name) -> void* {
+            return ::dlsym(lib, name);
+        };
+        widget_show = reinterpret_cast<GtkWidgetShow>(sym(gtk, "gtk_widget_show"));
+        widget_hide = reinterpret_cast<GtkWidgetHide>(sym(gtk, "gtk_widget_hide"));
+        window_present = reinterpret_cast<GtkWindowPresent>(sym(gtk, "gtk_window_present"));
+        window_close = reinterpret_cast<GtkWindowClose>(sym(gtk, "gtk_window_close"));
+        signal_connect_data = reinterpret_cast<GSignalConnectData>(
+            sym(gobject, "g_signal_connect_data"));
+        return widget_show && widget_hide && window_present && window_close &&
+               signal_connect_data;
+    }
+};
+
+GtkWindowApi& gtk_window_api() {
+    static GtkWindowApi api;
+    return api;
+}
+
+bool g_linux_force_close = false;
+
+extern "C" int linux_window_delete_event(void*, void*, void*) {
+    if (g_linux_force_close) return 0;
+    return dispatch_wm_close(g_close_handler) == CloseDispatch::ConsumedByHandler ? 1 : 0;
+}
+
+void install_linux_close_handler(webview::webview& w) {
+    auto window = w.window();
+    if (!window.ok() || !window.value()) return;
+    auto& api = gtk_window_api();
+    if (!api.load()) return;
+    api.signal_connect_data(window.value(),
+                            "delete-event",
+                            reinterpret_cast<void*>(linux_window_delete_event),
+                            nullptr,
+                            nullptr,
+                            0);
+}
+#endif
+
 std::pair<int, int> adjusted_window_size(int width, int height) {
 #ifdef __APPLE__
     CGRect bounds = CGDisplayBounds(CGMainDisplayID());
@@ -484,6 +553,9 @@ struct WebHost::Impl {
     {
         (void)startup_mode;
         w = std::make_unique<webview::webview>(debug, nullptr);
+#if !defined(__APPLE__)
+        install_linux_close_handler(*w);
+#endif
     }
 #endif
 
@@ -550,7 +622,20 @@ void WebHost::set_visible(bool visible) {
         ::SetForegroundWindow(hwnd);
     }
 #else
+#if !defined(__APPLE__)
+    auto window = impl_->w->window();
+    if (!window.ok() || !window.value()) return;
+    auto& api = gtk_window_api();
+    if (!api.load()) return;
+    if (visible) {
+        api.widget_show(window.value());
+        api.window_present(window.value());
+    } else {
+        api.widget_hide(window.value());
+    }
+#else
     (void)visible;
+#endif
 #endif
 }
 void WebHost::init_script(const std::string& js) {
@@ -663,21 +748,41 @@ bool WebHost::close_window() {
     if (!hwnd || !::IsWindow(hwnd)) return false;
     return ::PostMessageW(hwnd, WM_CLOSE, 0, 0) != FALSE;
 #else
+#if !defined(__APPLE__)
+    if (dispatch_wm_close(g_close_handler) == CloseDispatch::ConsumedByHandler) {
+        return true;
+    }
+    auto window = impl_->w->window();
+    if (!window.ok() || !window.value()) return false;
+    auto& api = gtk_window_api();
+    if (!api.load()) return false;
+    api.window_close(window.value());
+    return true;
+#else
     return false;
+#endif
 #endif
 }
 void WebHost::set_close_request_handler(std::function<bool()> handler) {
-#ifdef _WIN32
     g_close_handler = std::move(handler);
-#else
-    (void)handler;
-#endif
 }
 void WebHost::request_quit() {
 #ifdef _WIN32
     HWND hwnd = impl_->hwnd();
     if (!hwnd || !::IsWindow(hwnd)) return;
     ::PostMessageW(hwnd, kRequestQuitMsg, 0, 0);
+#else
+#if !defined(__APPLE__)
+    auto window = impl_->w->window();
+    g_linux_force_close = true;
+    if (window.ok() && window.value()) {
+        auto& api = gtk_window_api();
+        if (api.load()) {
+            api.window_close(window.value());
+        }
+    }
+#endif
+    impl_->w->terminate();
 #endif
 }
 void WebHost::bind(const std::string& name, SyncHandler fn) {

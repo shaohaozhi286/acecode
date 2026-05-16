@@ -17,3 +17,55 @@ export function validateModelDraft(draft) {
   }
   return { ok: true };
 }
+
+export function splitModelIds(value) {
+  const seen = new Set();
+  const out = [];
+  String(value || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .forEach((id) => {
+      if (seen.has(id)) return;
+      seen.add(id);
+      out.push(id);
+    });
+  return out;
+}
+
+export function modelNameSlug(value, fallback = 'model') {
+  const cleaned = String(value || '')
+    .trim()
+    .replace(/^\(+/, '')
+    .replace(/[^A-Za-z0-9._-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+  return cleaned || fallback;
+}
+
+export function buildModelDraftsFromSelection(draft) {
+  const ids = splitModelIds(draft?.model);
+  if (ids.length === 0) return [];
+  const baseName = String(draft?.name || '').trim();
+  const seenNames = new Set();
+  return ids.map((modelId, index) => {
+    const modelSlug = modelNameSlug(modelId, `model-${index + 1}`);
+    const rawName = ids.length === 1
+      ? modelNameSlug(baseName || modelId, modelSlug)
+      : baseName
+        ? `${modelNameSlug(baseName)}-${modelSlug}`
+        : modelSlug;
+    let name = rawName;
+    let suffix = 2;
+    while (seenNames.has(name)) {
+      name = `${rawName}-${suffix}`;
+      suffix += 1;
+    }
+    seenNames.add(name);
+    return {
+      ...draft,
+      name,
+      model: modelId,
+    };
+  });
+}

@@ -781,6 +781,43 @@ TEST(SessionRegistry, ResumeDiskSessionRestoresLoopHistory) {
     std::filesystem::remove_all(cwd);
 }
 
+TEST(SessionRegistry, ResumeDiskSessionRestoresPermissionMode) {
+    auto cwd = temp_cwd("resume_permission");
+    auto project_dir = SessionStorage::get_project_dir(cwd.string());
+    std::filesystem::remove_all(project_dir);
+    const std::string id = "20260502-020304-abcd";
+
+    {
+        acecode::SessionManager sm;
+        sm.start_session(cwd.string(), "test-provider", "test-model", id);
+        sm.set_permission_mode("accept-edits");
+        sm.on_message(registry_msg("user", "remember permissions"));
+        sm.finalize();
+    }
+
+    ToolExecutor tools;
+    PermissionManager permissions;
+    SessionRegistryDeps deps;
+    deps.provider_accessor = [] { return std::shared_ptr<acecode::LlmProvider>{}; };
+    deps.tools = &tools;
+    deps.cwd = cwd.string();
+    deps.template_permissions = &permissions;
+    SessionRegistry registry(std::move(deps));
+
+    ASSERT_TRUE(registry.resume(id));
+    auto mode = registry.permission_mode(id);
+    ASSERT_TRUE(mode.has_value());
+    EXPECT_EQ(*mode, PermissionMode::AcceptEdits);
+
+    auto* entry = registry.lookup(id);
+    ASSERT_NE(entry, nullptr);
+    ASSERT_NE(entry->sm, nullptr);
+    EXPECT_EQ(entry->sm->current_permission_mode(), "accept-edits");
+
+    std::filesystem::remove_all(project_dir);
+    std::filesystem::remove_all(cwd);
+}
+
 // 场景: 共享 daemon 从指定 workspace storage 恢复 session,不能从 daemon cwd
 // 的 storage 查找。
 TEST(SessionRegistry, ResumeUsesWorkspaceCwdFromOptions) {

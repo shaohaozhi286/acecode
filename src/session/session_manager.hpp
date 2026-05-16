@@ -130,6 +130,14 @@ public:
     // Return the current in-memory title (empty when unset).
     std::string current_title() const;
 
+    // Persisted runtime state for the active session.
+    void set_permission_mode(std::string mode, bool persist_immediately = true);
+    std::string current_permission_mode() const;
+    void record_token_usage(const TokenUsage& usage);
+    TokenUsage current_last_token_usage() const;
+    TokenUsage current_session_token_usage() const;
+    int current_turn_count() const;
+
 private:
     bool ensure_created();  // Lazy creation of session files on first message
     void update_meta();     // Write current metadata to disk
@@ -153,9 +161,13 @@ private:
     bool finalized_ = false;  // finalize() called
 
     int message_count_ = 0;
+    int turn_count_ = 0;
     std::string last_user_summary_;
     std::string created_at_;
     std::string pending_title_;
+    std::string permission_mode_ = "default";
+    TokenUsage last_token_usage_;
+    TokenUsage session_token_usage_;
     std::string last_error_;
     bool writer_lease_active_ = false;
     bool archived_ = false;

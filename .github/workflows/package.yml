@@ -150,6 +150,7 @@ jobs:
             cp -r "build/ACECode.app" "$package_dir/"
           elif [ "${{ matrix.build_desktop }}" = "true" ] && [ -f "build/acecode-desktop" ]; then
             cp "build/acecode-desktop" "$package_dir/"
+            cp "web/dist/acecode-logo.png" "$package_dir/"
           fi
           tar -C dist -czf "acecode-${{ matrix.id }}.tar.gz" "acecode-${{ matrix.id }}"
 
