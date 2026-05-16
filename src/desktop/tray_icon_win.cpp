@@ -24,9 +24,91 @@
 #endif
 
 #include <mutex>
+#include <cstdint>
 #include <utility>
+#include <vector>
+
+#if !defined(_WIN32) && !defined(__APPLE__)
+#  include <dlfcn.h>
+#  include <filesystem>
+#  include <limits.h>
+#  include <unistd.h>
+#endif
 
 namespace acecode::desktop {
+
+namespace {
+
+// 菜单 payload + handlers,主线程读 + 多线程写,统一上锁。Win32 和 Linux
+// 后端共享这份状态,避免复制 pinned/recent/new/open/quit 的分发规则。
+std::mutex g_payload_mu;
+TrayMenuPayload g_payload;
+TraySessionClickHandler g_session_click_handler;
+TrayClickHandler g_new_chat_handler;
+TrayClickHandler g_open_app_handler;
+TrayClickHandler g_on_show;
+TrayClickHandler g_on_quit;
+
+TrayMenuPayload snapshot_payload() {
+    std::lock_guard<std::mutex> lk(g_payload_mu);
+    return g_payload;
+}
+
+TraySessionClickHandler get_session_click_handler() {
+    std::lock_guard<std::mutex> lk(g_payload_mu);
+    return g_session_click_handler;
+}
+
+TrayClickHandler get_new_chat_handler() {
+    std::lock_guard<std::mutex> lk(g_payload_mu);
+    return g_new_chat_handler;
+}
+
+TrayClickHandler get_open_app_handler() {
+    std::lock_guard<std::mutex> lk(g_payload_mu);
+    return g_open_app_handler;
+}
+
+bool dispatch_session_click(const TrayMenuLayout& layout, unsigned cmd) {
+    for (const auto& e : layout.entries) {
+        if (e.id == cmd && (e.kind == TrayMenuEntryKind::PinnedItem ||
+                             e.kind == TrayMenuEntryKind::RecentItem ||
+                             e.kind == TrayMenuEntryKind::MoreSubmenuItem)) {
+            auto handler = get_session_click_handler();
+            if (handler) handler(e.workspace_hash, e.session_id);
+            return true;
+        }
+    }
+    return false;
+}
+
+void dispatch_menu_command(const TrayMenuLayout& layout, unsigned cmd) {
+    if (cmd == 0) return;
+    if (cmd == kMenuIdShow || cmd == kMenuIdOpenApp) {
+        auto h = get_open_app_handler();
+        if (h) h();
+        else if (g_on_show) g_on_show();
+    } else if (cmd == kMenuIdQuit) {
+        if (g_on_quit) g_on_quit();
+    } else if (cmd == kMenuIdNewChat) {
+        auto h = get_new_chat_handler();
+        if (h) h();
+    } else {
+        dispatch_session_click(layout, cmd);
+    }
+}
+
+void reset_tray_state() {
+    g_on_show = nullptr;
+    g_on_quit = nullptr;
+    std::lock_guard<std::mutex> lk(g_payload_mu);
+    g_payload = TrayMenuPayload{};
+    g_session_click_handler = nullptr;
+    g_new_chat_handler = nullptr;
+    g_open_app_handler = nullptr;
+}
+
+} // namespace
 
 #ifdef _WIN32
 
@@ -39,17 +121,8 @@ constexpr int kAppIconResourceId = 1;
 
 UINT g_tray_callback_msg = 0; // 由 RegisterWindowMessageW 注册,避免与其他 WM_USER 撞号
 HWND g_tray_window = nullptr;
-TrayClickHandler g_on_show;
-TrayClickHandler g_on_quit;
 NOTIFYICONDATAW g_nid{};
 bool g_icon_added = false;
-
-// 菜单 payload + handlers,主线程读 + 多线程写,统一上锁。
-std::mutex g_payload_mu;
-TrayMenuPayload g_payload;
-TraySessionClickHandler g_session_click_handler;
-TrayClickHandler g_new_chat_handler;
-TrayClickHandler g_open_app_handler;
 
 HICON load_app_icon_for_tray() {
     // acecode.rc.in 把 acecode.ico 编成 IDI_ICON1。旧构建里 IDI_ICON1 可能是
@@ -94,27 +167,6 @@ HICON load_app_icon_for_tray() {
     LOG_ERROR("[desktop] tray icon: app icon resource missing, using IDI_APPLICATION");
     // 32512 = IDI_APPLICATION 数值常量。
     return ::LoadIconW(nullptr, MAKEINTRESOURCEW(32512));
-}
-
-// 菜单 popup 用的快照拷贝。读 payload 后持锁释放,渲染期间不再持锁。
-TrayMenuPayload snapshot_payload() {
-    std::lock_guard<std::mutex> lk(g_payload_mu);
-    return g_payload;
-}
-
-TraySessionClickHandler get_session_click_handler() {
-    std::lock_guard<std::mutex> lk(g_payload_mu);
-    return g_session_click_handler;
-}
-
-TrayClickHandler get_new_chat_handler() {
-    std::lock_guard<std::mutex> lk(g_payload_mu);
-    return g_new_chat_handler;
-}
-
-TrayClickHandler get_open_app_handler() {
-    std::lock_guard<std::mutex> lk(g_payload_mu);
-    return g_open_app_handler;
 }
 
 // 把 layout 翻译成 AppendMenuW 的实际调用。MoreSubmenuItem 收进 popup,
@@ -163,21 +215,6 @@ void append_layout_to_menu(HMENU menu, const TrayMenuLayout& layout) {
     (void)more_root_inserted; // 避免 unused 警告;子菜单的句柄交给 menu 拥有,DestroyMenu 时连带回收
 }
 
-// 由 cmd ID 反查 (workspace_hash, session_id),从 layout 直接线性查表。
-// 命中后调 session click handler;未命中(ID 是 fixed item 但调用方没传 layout)返回 false。
-bool dispatch_session_click(const TrayMenuLayout& layout, UINT cmd) {
-    for (const auto& e : layout.entries) {
-        if (e.id == cmd && (e.kind == TrayMenuEntryKind::PinnedItem ||
-                             e.kind == TrayMenuEntryKind::RecentItem ||
-                             e.kind == TrayMenuEntryKind::MoreSubmenuItem)) {
-            auto handler = get_session_click_handler();
-            if (handler) handler(e.workspace_hash, e.session_id);
-            return true;
-        }
-    }
-    return false;
-}
-
 void show_context_menu(HWND hwnd) {
     TrayMenuPayload payload = snapshot_payload();
     TrayMenuLayout layout = compute_menu_layout(payload);
@@ -196,19 +233,7 @@ void show_context_menu(HWND hwnd) {
                                 pt.x, pt.y, 0, hwnd, nullptr);
     ::DestroyMenu(menu);
 
-    if (cmd == 0) return;
-    if (cmd == kMenuIdShow || cmd == kMenuIdOpenApp) {
-        auto h = get_open_app_handler();
-        if (h) h();
-        else if (g_on_show) g_on_show();
-    } else if (cmd == kMenuIdQuit) {
-        if (g_on_quit) g_on_quit();
-    } else if (cmd == kMenuIdNewChat) {
-        auto h = get_new_chat_handler();
-        if (h) h();
-    } else {
-        dispatch_session_click(layout, cmd);
-    }
+    dispatch_menu_command(layout, cmd);
 }
 
 LRESULT CALLBACK tray_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
@@ -326,16 +351,269 @@ void shutdown_tray_icon() {
     }
     HINSTANCE hinst = ::GetModuleHandleW(nullptr);
     ::UnregisterClassW(kTrayWndClass, hinst);
-    g_on_show = nullptr;
-    g_on_quit = nullptr;
-    {
-        std::lock_guard<std::mutex> lk(g_payload_mu);
-        g_payload = TrayMenuPayload{};
-        g_session_click_handler = nullptr;
-        g_new_chat_handler = nullptr;
-        g_open_app_handler = nullptr;
+    reset_tray_state();
+}
+
+#elif !defined(__APPLE__)
+
+namespace {
+
+namespace fs = std::filesystem;
+
+struct GtkTrayApi {
+    using GtkStatusIconNewFromFile = void* (*)(const char*);
+    using GtkStatusIconNewFromIconName = void* (*)(const char*);
+    using GtkStatusIconSetTooltipText = void (*)(void*, const char*);
+    using GtkStatusIconSetVisible = void (*)(void*, int);
+    using GtkMenuNew = void* (*)();
+    using GtkMenuItemNewWithLabel = void* (*)(const char*);
+    using GtkMenuItemSetSubmenu = void (*)(void*, void*);
+    using GtkSeparatorMenuItemNew = void* (*)();
+    using GtkMenuShellAppend = void (*)(void*, void*);
+    using GtkWidgetShowAll = void (*)(void*);
+    using GtkMenuPopupAtPointer = void (*)(void*, const void*);
+    using GtkWidgetDestroy = void (*)(void*);
+    using GSignalConnectData = unsigned long (*)(void*, const char*, void*, void*, void*, int);
+    using GObjectUnref = void (*)(void*);
+
+    void* gtk = nullptr;
+    void* gobject = nullptr;
+    GtkStatusIconNewFromFile status_new_from_file = nullptr;
+    GtkStatusIconNewFromIconName status_new_from_icon_name = nullptr;
+    GtkStatusIconSetTooltipText status_set_tooltip_text = nullptr;
+    GtkStatusIconSetVisible status_set_visible = nullptr;
+    GtkMenuNew menu_new = nullptr;
+    GtkMenuItemNewWithLabel menu_item_new_with_label = nullptr;
+    GtkMenuItemSetSubmenu menu_item_set_submenu = nullptr;
+    GtkSeparatorMenuItemNew separator_menu_item_new = nullptr;
+    GtkMenuShellAppend menu_shell_append = nullptr;
+    GtkWidgetShowAll widget_show_all = nullptr;
+    GtkMenuPopupAtPointer menu_popup_at_pointer = nullptr;
+    GtkWidgetDestroy widget_destroy = nullptr;
+    GSignalConnectData signal_connect_data = nullptr;
+    GObjectUnref object_unref = nullptr;
+
+    bool load() {
+        if (gtk && gobject) return true;
+        gtk = ::dlopen("libgtk-3.so.0", RTLD_LAZY | RTLD_LOCAL);
+        gobject = ::dlopen("libgobject-2.0.so.0", RTLD_LAZY | RTLD_LOCAL);
+        if (!gtk || !gobject) {
+            LOG_WARN("[desktop] tray: GTK3/GObject runtime not available");
+            return false;
+        }
+        auto sym = [](void* lib, const char* name) -> void* {
+            return ::dlsym(lib, name);
+        };
+        status_new_from_file = reinterpret_cast<GtkStatusIconNewFromFile>(
+            sym(gtk, "gtk_status_icon_new_from_file"));
+        status_new_from_icon_name = reinterpret_cast<GtkStatusIconNewFromIconName>(
+            sym(gtk, "gtk_status_icon_new_from_icon_name"));
+        status_set_tooltip_text = reinterpret_cast<GtkStatusIconSetTooltipText>(
+            sym(gtk, "gtk_status_icon_set_tooltip_text"));
+        status_set_visible = reinterpret_cast<GtkStatusIconSetVisible>(
+            sym(gtk, "gtk_status_icon_set_visible"));
+        menu_new = reinterpret_cast<GtkMenuNew>(sym(gtk, "gtk_menu_new"));
+        menu_item_new_with_label = reinterpret_cast<GtkMenuItemNewWithLabel>(
+            sym(gtk, "gtk_menu_item_new_with_label"));
+        menu_item_set_submenu = reinterpret_cast<GtkMenuItemSetSubmenu>(
+            sym(gtk, "gtk_menu_item_set_submenu"));
+        separator_menu_item_new = reinterpret_cast<GtkSeparatorMenuItemNew>(
+            sym(gtk, "gtk_separator_menu_item_new"));
+        menu_shell_append = reinterpret_cast<GtkMenuShellAppend>(
+            sym(gtk, "gtk_menu_shell_append"));
+        widget_show_all = reinterpret_cast<GtkWidgetShowAll>(
+            sym(gtk, "gtk_widget_show_all"));
+        menu_popup_at_pointer = reinterpret_cast<GtkMenuPopupAtPointer>(
+            sym(gtk, "gtk_menu_popup_at_pointer"));
+        widget_destroy = reinterpret_cast<GtkWidgetDestroy>(
+            sym(gtk, "gtk_widget_destroy"));
+        signal_connect_data = reinterpret_cast<GSignalConnectData>(
+            sym(gobject, "g_signal_connect_data"));
+        object_unref = reinterpret_cast<GObjectUnref>(sym(gobject, "g_object_unref"));
+        return status_set_tooltip_text && status_set_visible && menu_new &&
+               menu_item_new_with_label && menu_item_set_submenu &&
+               separator_menu_item_new && menu_shell_append &&
+               widget_show_all && menu_popup_at_pointer && widget_destroy &&
+               signal_connect_data && object_unref &&
+               (status_new_from_file || status_new_from_icon_name);
+    }
+};
+
+GtkTrayApi g_gtk;
+void* g_status_icon = nullptr;
+void* g_context_menu = nullptr;
+TrayMenuLayout g_context_layout;
+bool g_linux_tray_installed = false;
+
+std::string linux_exe_dir() {
+    std::vector<char> buf(static_cast<size_t>(PATH_MAX) + 1);
+    ssize_t n = ::readlink("/proc/self/exe", buf.data(), buf.size() - 1);
+    if (n <= 0) return {};
+    buf[static_cast<size_t>(n)] = '\0';
+    std::error_code ec;
+    fs::path resolved = fs::weakly_canonical(fs::path(buf.data()), ec);
+    if (ec) resolved = fs::path(buf.data());
+    return resolved.parent_path().string();
+}
+
+std::string find_linux_tray_icon() {
+    std::vector<fs::path> roots;
+    if (auto dir = linux_exe_dir(); !dir.empty()) roots.push_back(fs::path(dir));
+    std::error_code ec;
+    roots.push_back(fs::current_path(ec));
+    for (auto root : roots) {
+        for (int i = 0; i < 8 && !root.empty(); ++i) {
+            for (const auto& rel : {
+                     fs::path("acecode-logo.png"),
+                     fs::path("web/dist/acecode-logo.png"),
+                     fs::path("assets/windows/acecode_icon.png"),
+                 }) {
+                fs::path candidate = root / rel;
+                std::error_code exists_ec;
+                if (fs::exists(candidate, exists_ec) && !exists_ec) {
+                    return candidate.string();
+                }
+            }
+            if (!root.has_parent_path()) break;
+            fs::path parent = root.parent_path();
+            if (parent == root) break;
+            root = std::move(parent);
+        }
+    }
+    return {};
+}
+
+extern "C" void linux_tray_activate(void*, void*) {
+    if (g_on_show) g_on_show();
+}
+
+extern "C" void linux_menu_item_activate(void*, void* data) {
+    auto cmd = static_cast<unsigned>(reinterpret_cast<std::uintptr_t>(data));
+    dispatch_menu_command(g_context_layout, cmd);
+}
+
+void append_linux_menu_item(void* menu, const TrayMenuEntry& entry) {
+    void* item = nullptr;
+    if (entry.kind == TrayMenuEntryKind::Separator) {
+        item = g_gtk.separator_menu_item_new();
+    } else {
+        item = g_gtk.menu_item_new_with_label(entry.label.c_str());
+        if (entry.id != 0 && entry.kind != TrayMenuEntryKind::PinnedHeader &&
+            entry.kind != TrayMenuEntryKind::RecentHeader &&
+            entry.kind != TrayMenuEntryKind::MoreSubmenuRoot) {
+            auto data = reinterpret_cast<void*>(
+                static_cast<std::uintptr_t>(entry.id));
+            g_gtk.signal_connect_data(
+                item, "activate", reinterpret_cast<void*>(linux_menu_item_activate),
+                data, nullptr, 0);
+        }
+    }
+    if (item) g_gtk.menu_shell_append(menu, item);
+}
+
+void append_linux_layout_to_menu(void* menu, const TrayMenuLayout& layout) {
+    void* more_menu = nullptr;
+    for (const auto& entry : layout.entries) {
+        if (entry.kind == TrayMenuEntryKind::MoreSubmenuRoot) {
+            void* root = g_gtk.menu_item_new_with_label(entry.label.c_str());
+            more_menu = g_gtk.menu_new();
+            if (root && more_menu) {
+                g_gtk.menu_item_set_submenu(root, more_menu);
+                g_gtk.menu_shell_append(menu, root);
+            }
+        } else if (entry.kind == TrayMenuEntryKind::MoreSubmenuItem) {
+            append_linux_menu_item(more_menu ? more_menu : menu, entry);
+        } else {
+            append_linux_menu_item(menu, entry);
+        }
     }
 }
+
+void show_linux_context_menu() {
+    if (!g_linux_tray_installed) return;
+    if (g_context_menu) {
+        g_gtk.widget_destroy(g_context_menu);
+        g_context_menu = nullptr;
+    }
+    TrayMenuPayload payload = snapshot_payload();
+    g_context_layout = compute_menu_layout(payload);
+    g_context_menu = g_gtk.menu_new();
+    if (!g_context_menu) return;
+    append_linux_layout_to_menu(g_context_menu, g_context_layout);
+    g_gtk.widget_show_all(g_context_menu);
+    g_gtk.menu_popup_at_pointer(g_context_menu, nullptr);
+}
+
+extern "C" void linux_tray_popup_menu(void*, unsigned, unsigned, void*) {
+    show_linux_context_menu();
+}
+
+} // namespace
+
+bool init_tray_icon(TrayClickHandler on_show,
+                    TrayClickHandler on_quit,
+                    void** out_message_hwnd) {
+    if (out_message_hwnd) *out_message_hwnd = nullptr;
+    if (g_linux_tray_installed) {
+        LOG_WARN("[desktop] init_tray_icon called twice, ignoring second call");
+        return true;
+    }
+    if (!g_gtk.load()) return false;
+
+    std::string icon_path = find_linux_tray_icon();
+    if (!icon_path.empty() && g_gtk.status_new_from_file) {
+        g_status_icon = g_gtk.status_new_from_file(icon_path.c_str());
+        LOG_INFO("[desktop] tray: loading Linux tray icon from " + icon_path);
+    }
+    if (!g_status_icon && g_gtk.status_new_from_icon_name) {
+        g_status_icon = g_gtk.status_new_from_icon_name("utilities-terminal");
+        LOG_WARN("[desktop] tray: ACECode icon not found, using fallback icon name");
+    }
+    if (!g_status_icon) return false;
+
+    g_on_show = std::move(on_show);
+    g_on_quit = std::move(on_quit);
+    g_gtk.status_set_tooltip_text(g_status_icon, "ACECode");
+    g_gtk.signal_connect_data(
+        g_status_icon, "activate", reinterpret_cast<void*>(linux_tray_activate),
+        nullptr, nullptr, 0);
+    g_gtk.signal_connect_data(
+        g_status_icon, "popup-menu", reinterpret_cast<void*>(linux_tray_popup_menu),
+        nullptr, nullptr, 0);
+    g_gtk.status_set_visible(g_status_icon, 1);
+    g_linux_tray_installed = true;
+    LOG_INFO("[desktop] tray: Linux GTK status icon installed");
+    return true;
+}
+
+void shutdown_tray_icon() {
+    if (g_context_menu) {
+        g_gtk.widget_destroy(g_context_menu);
+        g_context_menu = nullptr;
+    }
+    if (g_status_icon) {
+        g_gtk.status_set_visible(g_status_icon, 0);
+        g_gtk.object_unref(g_status_icon);
+        g_status_icon = nullptr;
+    }
+    g_context_layout = TrayMenuLayout{};
+    g_linux_tray_installed = false;
+    reset_tray_state();
+}
+
+#else // __APPLE__ and other non-Linux platforms
+
+bool init_tray_icon(TrayClickHandler /*on_show*/,
+                    TrayClickHandler /*on_quit*/,
+                    void** out_message_hwnd) {
+    if (out_message_hwnd) *out_message_hwnd = nullptr;
+    return false;
+}
+void shutdown_tray_icon() {
+    reset_tray_state();
+}
+
+#endif // _WIN32
 
 void set_tray_menu_payload(TrayMenuPayload payload) {
     std::lock_guard<std::mutex> lk(g_payload_mu);
@@ -361,23 +639,5 @@ void set_tray_open_app_handler(TrayClickHandler handler) {
     std::lock_guard<std::mutex> lk(g_payload_mu);
     g_open_app_handler = std::move(handler);
 }
-
-#else // !_WIN32
-
-bool init_tray_icon(TrayClickHandler /*on_show*/,
-                    TrayClickHandler /*on_quit*/,
-                    void** out_message_hwnd) {
-    if (out_message_hwnd) *out_message_hwnd = nullptr;
-    return false;
-}
-void shutdown_tray_icon() {}
-
-void set_tray_menu_payload(TrayMenuPayload /*payload*/) {}
-void clear_tray_menu_payload() {}
-void set_tray_session_click_handler(TraySessionClickHandler /*handler*/) {}
-void set_tray_new_chat_handler(TrayClickHandler /*handler*/) {}
-void set_tray_open_app_handler(TrayClickHandler /*handler*/) {}
-
-#endif // _WIN32
 
 } // namespace acecode::desktop

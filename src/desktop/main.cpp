@@ -621,7 +621,7 @@ int main(int argc, char** argv) {
             ::SetForegroundWindow(hwnd);
         }
 #else
-        (void)host;
+        host.set_visible(true);
 #endif
     };
 
@@ -647,7 +647,8 @@ int main(int argc, char** argv) {
                 return true;
             }
 #else
-            (void)host;
+            host.set_visible(false);
+            return true;
 #endif
             return false;
         });
