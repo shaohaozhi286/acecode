@@ -1,0 +1,1295 @@
+[33mcommit b2841971671d364b857b79e00fffc20d8b68290c[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmaster[m[33m)[m
+Author: tmoonlgihtOnLinux <tmoonlgiht@163.com>
+Date:   Sat May 16 09:08:14 2026 +0000
+
+    l
+
+[33mcommit f38dae50af1af7a008531fd41201a7394a43372f[m[33m ([m[1;31morigin/master[m[33m, [m[1;31morigin/HEAD[m[33m)[m
+Author: tmoonlgihtOnLinux <tmoonlgiht@163.com>
+Date:   Sat May 16 04:19:06 2026 +0000
+
+    适配linux
+
+[33mcommit 5f2bee358ede2a69c37a58f9fe21006a8dd12bfa[m
+Author: tmoonlgihtOnLinux <tmoonlgiht@163.com>
+Date:   Fri May 15 17:02:59 2026 +0000
+
+    解决TUI LINUX下不能复制粘贴的问题
+
+[33mcommit dbd8796a16bea3db99da2eaa9e1f9feeb18f976b[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Fri May 15 16:33:18 2026 +0800
+
+    feat: add UI preferences API for avatar display settings and implement related tests
+
+[33mcommit 0d4bbcdaec9e5bf89da61ea7aa11e55d2727ba5f[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Fri May 15 01:06:10 2026 +0800
+
+    Implement thread goal management system with SQLite storage
+    
+    - Added `ThreadGoalStore` class for managing thread goals, including methods for creating, updating, pausing, and deleting goals.
+    - Introduced `ThreadGoal` and `ThreadGoalStatus` structures to represent goals and their statuses.
+    - Implemented goal-related tools: `create_get_goal_tool`, `create_create_goal_tool`, and `create_update_goal_tool` for handling goal operations.
+    - Developed tests for goal lifecycle, including creation, updating, pausing, and session management.
+    - Ensured proper error handling and validation for goal objectives and budgets.
+    - Integrated JSON serialization for thread goals using nlohmann/json.
+
+[33mcommit 7008f8a74f8ee69f0936a41bc75e73bf6d0def97[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Thu May 14 23:44:11 2026 +0800
+
+    Refactor and enhance TUI ask question overlay and clipboard functionality
+    
+    - Removed AutoCompactTrackingState structure from compact.hpp.
+    - Added new ask_question_overlay.cpp and ask_question_overlay.hpp files to implement TUI overlay for asking questions with improved layout and scrolling.
+    - Updated TuiState to include scrolling state variables for the ask question overlay.
+    - Implemented clipboard functionality in clipboard.cpp and clipboard.hpp for reading system clipboard text across platforms.
+    - Added tests for the new clipboard functionality and TUI overlay behavior, ensuring proper wrapping, scrolling, and UTF-8 handling.
+    - Enhanced agent loop tests to validate auto-compaction behavior and circuit breaker logic.
+
+[33mcommit 83192680ae8ef4a14d91b2bfe03c8d56c844c8db[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Thu May 14 14:55:34 2026 +0800
+
+    feat: implement browser default settings and zoom controls; enhance avatar display logic
+
+[33mcommit 6903b2df213b09bdbdaf469b84c493fb7ae0715b[m
+Merge: f1f5792 1cf2778
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Thu May 14 14:07:41 2026 +0800
+
+    Merge branch 'master' of https://github.com/shaohaozhi286/acecode
+
+[33mcommit f1f5792c7493ff69112d6dad04705c5ac46312f0[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Thu May 14 14:02:26 2026 +0800
+
+    feat: add assistant avatar display logic and tests
+    
+    - Implemented `assistantChromeState` and `activityChromeState` functions to manage avatar visibility based on user interactions.
+    - Created corresponding tests to validate the behavior of avatar display logic.
+    
+    feat: enhance API tests for file blob handling
+    
+    - Added tests for `readFileBlob` to ensure correct fetching of binary file content and error handling with `ApiError`.
+    - Verified that API methods for archiving sessions use the expected endpoints.
+    
+    feat: introduce sidebar session projection logic
+    
+    - Created `sidebarSessionProjection` function to manage the visibility of sidebar sessions based on a collapse limit.
+    - Added tests to validate the behavior of sidebar session projection.
+    
+    fix: update transcript projection logic for tool handling
+    
+    - Enhanced `projectFinalCollapsedTurn` and related functions to correctly handle tool messages and their summaries.
+    - Added tests to ensure proper behavior of transcript projections with structured tools.
+    
+    feat: implement UI preferences management
+    
+    - Introduced `uiPrefs.js` to manage user interface preferences, including avatar visibility.
+    - Added tests for UI preferences validation and effective settings.
+    
+    style: improve global CSS styles
+    
+    - Refined styles for various components including change glass wrap, dock, and markdown previews for better visual consistency and usability.
+
+[33mcommit 1cf277812927f7c5bf671a0a50903b5fb14b266f[m
+Author: huangxiangxin <huangxiangxin@finogeeks.com>
+Date:   Wed May 13 17:42:53 2026 +0800
+
+    fix: fix permission_waiting dead lock
+
+[33mcommit 04e39ae4d25824cedaa1b5a16cc0b508d0b608a8[m
+Author: huangxiangxin <huangxiangxin@finogeeks.com>
+Date:   Wed May 13 17:42:23 2026 +0800
+
+    fix: fix mac daemon error
+
+[33mcommit 43289e1fb075aa8d8cad614b4f1e6e459a012bcb[m
+Author: huangxiangxin <huangxiangxin@finogeeks.com>
+Date:   Wed May 13 17:41:38 2026 +0800
+
+    fix: mac file open support
+
+[33mcommit bdaaaf80bee2fe131484be613fd68466a6b344df[m
+Author: huangxiangxin <huangxiangxin@finogeeks.com>
+Date:   Wed May 13 17:41:07 2026 +0800
+
+    deprecate: dep
+
+[33mcommit 9e494fb10cea269a0da4a3fcbd18162996406589[m
+Author: huangxiangxin <huangxiangxin@finogeeks.com>
+Date:   Wed May 13 15:38:21 2026 +0800
+
+    fix: fix app empty page
+
+[33mcommit 25b3230c4282e7b3dd1869d28990c3d8e2478f66[m
+Author: huangxiangxin <huangxiangxin@finogeeks.com>
+Date:   Wed May 13 15:20:58 2026 +0800
+
+    feat: add desktop app actions workflows
+
+[33mcommit 39f46a2c5964941a2e8e63dfbc149d8f84ad7551[m
+Author: huangxiangxin <huangxiangxin@finogeeks.com>
+Date:   Wed May 13 15:14:50 2026 +0800
+
+    fix: build error fixed
+
+[33mcommit 735e082144c2f2c8e1e74fe0c0389f02cdfb2d40[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Wed May 13 02:21:18 2026 +0800
+
+    feat: 统一解决utf8编码问题 enhance sidebar workspace management and add workspace folder selection
+    
+    - Updated Sidebar component to manage active workspaces more effectively.
+    - Added functionality to refresh workspace data upon selection.
+    - Implemented workspace folder picking for non-desktop bridge environments.
+    - Improved error handling for workspace addition.
+    
+    feat: implement fallback commands in SlashCommandsContext
+    
+    - Introduced fallback commands to ensure availability when backend commands are not present.
+    - Updated command handling logic to incorporate fallback commands seamlessly.
+    
+    feat: add transcript projection functionality
+    
+    - Created transcriptProjection module to manage and summarize tool interactions.
+    - Implemented logic to handle task completion and tool usage summaries.
+    - Added tests to validate the new projection logic and ensure consistent behavior.
+    
+    fix: update API to include workspace folder picking
+    
+    - Added new API endpoint for selecting workspace folders.
+    - Adjusted existing API calls to accommodate the new functionality.
+    
+    test: enhance test coverage for session transcript and slash commands
+    
+    - Added tests for new features in session transcript handling.
+    - Improved test coverage for slash command fallback functionality.
+    
+    chore: update main entry point for compatibility mode
+    
+    - Set document title for compatibility mode when running ACECode in webapp.
+
+[33mcommit c409ee3b8bfc7006eb1f6fbb3003865bcf691e00[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Tue May 12 12:25:08 2026 +0800
+
+    feat: 添加对 UTF-8 编码的支持，确保中文文件名在文件处理和 Web 服务器中正确返回
+
+[33mcommit facf21d7fb5bfd71e7bdb9a74903e58fd60d1d6f[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Tue May 12 11:45:02 2026 +0800
+
+    回滚+解决乱码问题
+
+[33mcommit 06f977039e16d69e833b3239953d3ef07f7d61c9[m
+Author: shaohaozhi286 <shaohaozhi286@gmail.com>
+Date:   Mon May 11 20:10:57 2026 +0800
+
+    desktop: fall back to Edge browser folder when WebView2 Runtime is missing (#10)
+    
+    很多企业 / 信创环境的机器只装了 Microsoft Edge 浏览器,而没有单独安装
+    "Microsoft Edge WebView2 Runtime"。现状下 acecode-desktop 走 WebView2Loader
+    默认 Runtime 发现路径直接抛 webview::exception,被 wWinMain 一路裸抛触发
+    Windows "未经处理的异常" 调试器对话框 — 普通用户既看不懂也无从下手。
+    
+    WebView2Loader 公开了 WEBVIEW2_BROWSER_EXECUTABLE_FOLDER 环境变量(等价于
+    CreateCoreWebView2EnvironmentWithOptions 的 browserExecutableFolder 参数),
+    而 Edge 100+ 浏览器目录里都自带同版本的 msedgewebview2.exe,可以直接复用
+    避免分发 ~180MB 的 Fixed Version Runtime。
+    
+    新增 src/desktop/webview2_runtime_probe.{hpp,cpp},暴露纯函数
+    find_edge_browser_folder_in(roots) + Win32 系统调用版
+    find_edge_browser_folder()。Impl ctor 被改成三段式:默认 Loader → Edge
+    浏览器目录 fallback → 终态 MessageBox + ExitProcess(1)。wWinMain 同时包顶层
+    try/catch 兜底任何其他启动期异常,避免再有"无声秒退"。
+    
+    测试覆盖纯函数版本(版本号字典序陷阱、缺 exe 跳过、跨 root global latest 等)。
+    
+    Co-authored-by: Claude <noreply@anthropic.com>
+
+[33mcommit 33f127258baa65e672b2fdbe57d535868796ad29[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Mon May 11 17:04:26 2026 +0800
+
+    feat: synthesize legacy model profiles for backward compatibility in configuration
+
+[33mcommit b6643b84adde45ef2907e53457f7bbe2364c54a7[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Mon May 11 14:02:17 2026 +0800
+
+    Implement session writer lease management and enhance atomic file writing
+    
+    - Added `SessionWriterLease` class to manage session leases, including methods for acquiring, refreshing, releasing, and reading lease information.
+    - Introduced `SessionWriterLeaseInfo` and `SessionWriterLeaseResult` structures to encapsulate lease data and results.
+    - Enhanced `atomic_write_file` function to ensure target directories are created before writing files.
+    - Updated `WebServer` to check for active sessions using the new lease management system, returning appropriate error responses for conflicts.
+    - Modified tests to cover new session lease functionality, including acquiring leases, handling conflicts, and ensuring proper cleanup of stale leases.
+    - Refactored existing tests to ensure compatibility with the new canonical session file structure, removing PID suffixes from session file names.
+    - Added tests for handling malformed JSONL files and ensuring atomic writes for metadata.
+
+[33mcommit d0d3db8c6625b6b25a3619bdeaf6077a9535549a[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Mon May 11 01:03:28 2026 +0800
+
+    feat: implement builtin command handling and routing
+    
+    - Add support for builtin commands in the logger, including thread ID in logs.
+    - Enhance web server tests to validate handling of unknown and unsupported commands.
+    - Introduce builtin command routing logic in the ChatView component.
+    - Implement API methods for executing commands and update tests accordingly.
+    - Create a new builtin command handler to parse and validate commands.
+    - Add tests for builtin command parsing and error handling.
+    - Implement session management for compacting messages and retaining checkpoints.
+    - Add compact event handling in the agent loop to emit transcript replacements.
+    - Ensure proper handling of compacted messages and their storage in session files.
+
+[33mcommit e5cb09bef984c5747d3ad42b05376e89376ed8d8[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sun May 10 23:23:25 2026 +0800
+
+    Refactor model handling and remove legacy references
+    
+    - Updated ModelPickerOption to remove legacy entry handling.
+    - Simplified models_handler to exclude legacy entries from JSON output.
+    - Adjusted models_handler.hpp and models_handler.cpp to reflect changes in model listing.
+    - Removed legacy checks from server routes and related logic.
+    - Updated tests to reflect the removal of legacy model handling.
+    - Refactored UI components to remove legacy model references.
+    - Added new tests for model context resolver to ensure non-blocking behavior.
+
+[33mcommit dfa97736b8a8bc1b697de81ce45405ec245b89f5[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sun May 10 21:59:22 2026 +0800
+
+    feat: Refactor SidePanel and Sidebar components, removing Skills and MCP tabs
+    
+    - Updated SidePanel to replace the refresh button text with an icon.
+    - Simplified Sidebar by removing Skills and MCP tabs, along with related state management.
+    - Enhanced ToolBlock for better output preview handling and UI improvements.
+    - Updated TopBar to remove the central view pill and related functionality.
+    - Introduced new utility functions for managing assistant message display directives.
+    - Added tests for new utility functions and modified existing tests for session changes.
+    - Implemented compact message preview utilities for better message handling.
+    - Updated global styles to remove unnecessary styles related to the refresh button.
+
+[33mcommit f059877f3ebfa605216a4935bcc8f9303797f1f9[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sun May 10 13:17:51 2026 +0800
+
+    feat: implement permission mode management in session handling
+    
+    - Add tests for resolving all pending permission prompts when switching to Yolo mode.
+    - Ensure permission mode is scoped to the current active session in the session registry.
+    - Introduce API endpoints for getting and setting session permission modes.
+    - Implement UI changes to reflect permission mode updates in the web application.
+    - Create a new file tree refresh mechanism to update the file tree based on completed tool calls.
+    - Normalize permission mode handling in the application logic and UI components.
+    - Enhance the status bar to display the current permission mode and allow switching.
+    - Add tests for permission mode normalization and option retrieval.
+
+[33mcommit 215ac0aea3f0f66014743f2bbe2daeafa46fa38d[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sun May 10 01:26:11 2026 +0800
+
+    feat(web): SettingsPage 加窗口控件 + ModelManager 套统一样式
+    
+    DRY 改造:
+    - 抽 WindowControls.jsx(WindowControl/WindowGlyph/useFramelessWindowState
+      /isFramelessDesktop/isInteractiveTarget),TopBar 与 SettingsPage 共用
+    - TopBar 删本地实现,改 import,代码减 60+ 行
+    - SettingsPage header 右上角加 minimize / maximize↔restore / close 三连
+      (frameless 模式才显示),不再被全屏覆盖遮住
+    
+    ModelManager 美化(套 acecode-frontend-style):
+    - 列表行卡片化:bg-surface + border + rounded-md + 选中态 active 描边
+      + accent-bg(§ 4.1 + § 5),hover 变高亮底
+    - 默认条目用 ★ 主色图标 + name 行 13px medium 主标 + 11px fg-mute 副描
+      述(provider · model)
+    - (legacy) 行禁用编辑,opacity-70,无操作按钮
+    - 表单字段 h-8 圆角 focus 变 accent 描边(§ 6.1)
+    - 主按钮 accent 圆角 + 编辑模式追加「取消」次按钮
+    - 「+ 新增模型」改虚线占位卡,与列表项视觉对齐
+    
+    SettingsPage 模型 section 顶部加描述,与「常规」「外观」同形(§ 3)。
+    
+    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+[33mcommit d08d4875d11c66dbae86a2ad0589fb654ff4cd8d[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sun May 10 01:17:07 2026 +0800
+
+    chore: add acecode-frontend-style skill
+    
+    提炼 SettingsPage 「常规」「外观」section 的统一视觉规则成 SKILL.md:容
+    器、标题层级、行卡片、单选卡片、小型 input、状态指示、分隔线、按钮、
+    颜色 token。新写设置 / 管理 / 配置类面板时套这套约定,不要重新发明视
+    觉风格。
+    
+    .gitignore 改为只忽略 .claude/ 下非 skills 的文件,让项目级 skill 入仓
+    库团队共享。
+    
+    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+[33mcommit 1581ce38cdef0901caff08b500725e2734ac0562[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sun May 10 01:10:18 2026 +0800
+
+    feat(web/daemon): api_key patch semantics — 编辑时不必重输
+    
+    后端:PUT /api/models/<name> 现在做 patch 合并 — body 缺 api_key /
+    base_url 时从 existing 条目注入,update_saved_model 看到的总是完整草稿。
+    
+    前端:ModelManager 编辑模式 api_key 字段预填 mask "••••••••";聚焦清空
+    让用户输入,blur 没改回填 mask;onChange 翻 apiKeyTouched=true。提交时
+    未 touched 就把 api_key 字段从 payload 删除,后端 patch 注入旧值。
+    
+    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+[33mcommit df40108791d796a634bd079b061d735e0ae82d78[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sun May 10 01:06:11 2026 +0800
+
+    fix(web): SettingsPage frameless drag + 权限模式单选
+    
+    - frameless 模式下 SettingsPage header 复用 TopBar 拖动机制(非交互区
+      按住左键拖窗口,双击切最大化),消除 SettingsPage 全屏覆盖 TopBar
+      时无法拖动的问题
+    - 权限模式三个 Toggle 改为单选 radiogroup 语义(state 从 boolean[]
+      改为 index;关闭当前档忽略;整行可点击 + 键盘空格/回车切换 + ARIA)
+    
+    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+[33mcommit 2a0292e85b37307a1d8b36cd852b7e34ee3f9e29[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sun May 10 01:03:32 2026 +0800
+
+    refactor(web): remove redundant Sidebar settings gear
+    
+    TopBar 已有齿轮 → SettingsPage(含模型 slot),Sidebar 这个二级入口纯多
+    余。删按钮 + state + Settings.jsx 抽屉。
+    
+    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+[33mcommit 9caa9bc677d4b20b0c4a4c64954a527b8e612c8b[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sun May 10 00:23:23 2026 +0800
+
+    feat(web): wire ModelManager into TopBar SettingsPage 模型 nav slot
+    
+    Settings drawer + SettingsPage 现在都展示 ModelManager,消除「模型 — 待补
+    充」UX trap;两条入口指向同一 UI。
+    
+    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+[33mcommit a068f1ef5941b22cc23bce5f6c5d7d7fc3b7a25b[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sun May 10 00:19:10 2026 +0800
+
+    feat(web): saved_models management drawer
+    
+    Sidebar 底栏齿轮 → 设置抽屉,左侧 saved_models 列表(默认带 ★),右侧表单。
+    增 / 删 / 改 / 设默认全在前端。后端补 GET /api/config/default-model
+    让前端能标星。
+    
+    OpenAI 类编辑时 api_key 必须重新填(后端校验非空);后续可补 patch
+    语义。
+    
+    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+[33mcommit 6161d50596c80a191525cd6a78c6651a1324305a[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sun May 10 00:02:47 2026 +0800
+
+    feat(web): model picker i18n toasts + orphan placeholder
+    
+    切换失败时用 errors.js 文案;当前值不在列表时插 disabled 灰条提示用户。
+    api.js request() 在失败时把后端 error code 附到 err.code,前端可用其 i18n。
+    
+    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+[33mcommit 187abd8824bafe89fed842647456d44f6024db4d[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sat May 9 23:58:33 2026 +0800
+
+    feat(web): api client methods for saved_models CRUD
+    
+    addModel / updateModel / removeModel / setDefaultModel 给 ModelManager
+    组件用。
+    
+    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+[33mcommit 89d9159ca85ea80b2e0d79e4a746d9b63e4312f9[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sat May 9 23:57:13 2026 +0800
+
+    feat(web): error code i18n + model picker/manager helpers
+    
+    errors.js / modelPicker.js / modelManager.js 是 ModelPicker 与 ModelManager
+    组件的纯逻辑底座,Node 单测覆盖。
+    
+    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+[33mcommit 03a084b6ec8da282c4ccef1f825b530117d55cc0[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sat May 9 23:49:45 2026 +0800
+
+    feat(tui): /model add|edit|rm|set-default subcommands
+    
+    支持在 TUI 内增删改 saved_models 与设置全局默认。失败时 cfg 内存与磁盘
+    保持同步(回滚)。
+    
+    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+[33mcommit 077ff06135807421a3b41492335a9ba77c6caafd[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sat May 9 23:33:43 2026 +0800
+
+    feat(tui): replace /model text list with FTXUI picker
+    
+    /model 无参时弹出 inline overlay 选择器,↑↓/PgUp/PgDn/Home/End 导航,
+    Enter 切换,Esc 关闭,数字键 1-9 跳行;当前 effective entry 行打 *。
+    和现有 /resume picker 走同款状态-标志 + main.cpp 渲染分支 + 事件分支
+    模式(main.cpp 全程没用过 FTXUI Modal)。
+    
+    build_model_picker_options 拆成纯函数(src/tui/model_picker.{hpp,cpp})
+    给单测覆盖:命中行 is_current 标记、(legacy) 兜底追加、saved_models
+    里已有 (legacy) 不重复、ad-hoc 名字不命中时全 false、空 saved_models
+    退化到单条 (legacy)。
+    
+    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+[33mcommit 4e8493660961ebb0d98ae618cda69f66ba3ac49b[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sat May 9 23:19:51 2026 +0800
+
+    docs: refresh CLAUDE.md model selection sections
+    
+    - /api/models row: per-session ProviderSlot + apply_model_to_session
+    - 新加 /api/models 增删改 + default-model 端点行
+    - 删 provider_swap.cpp 引用,描述切换 helper 现状
+    
+    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+[33mcommit 95cac1b28f39889947254c4922ae680ab33b1c78[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sat May 9 23:12:23 2026 +0800
+
+    refactor(tui): /model & /resume use apply_model_to_session
+    
+    TUI 与 daemon 现在共用同一份切换 helper,provider_swap 模块删除。
+    
+    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+[33mcommit 67cd3ccd90a13401df9e943af18a9e9c78030932[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sat May 9 23:06:08 2026 +0800
+
+    fix: delete CommandContext.provider field per spec § 4.2
+    
+    ctx.provider 是 LlmProvider& 直接引用 — `*provider_accessor()` 在构造表达式
+    结束后引用就变成对 slot 当前 shared_ptr 指向实例的悬挂引用,/model 切换
+    + /compact 后台线程同时跑会 use-after-free。
+    
+    按 spec § 4.2 删除该字段,所有 read 改成从 slot 拿 shared_ptr 副本(自带
+    ref-count 保活)。cmd_compact 把 provider 通过 shared_ptr by-value 捕获进
+    线程,生命周期不再依赖 ctx 的存活期。
+    
+    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+[33mcommit 9a6b37d9b768d5ee733a4177d3fdf9d7bb774096[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sat May 9 22:54:38 2026 +0800
+
+    refactor(tui): replace provider_handle/provider_mu with ProviderSlot
+    
+    CommandContext 与 main.cpp 升级到 SessionEntry::ProviderSlot。本提交不改
+    切换语义,/model 与 resume 仍走 swap_provider_if_needed,下一提交切到
+    apply_model_to_session。
+    
+    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+[33mcommit 7d23cba54d6552f0df798550b776162ebdd0434f[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sat May 9 22:48:17 2026 +0800
+
+    fix: tighten Task 4 model handlers (null fields, PUT invariant, tests)
+    
+    - parse_model_draft silently skips null/non-string optional fields
+      (was rejecting whole body — inconsistent with models_dev_provider_id)
+    - PUT /api/models/<name> returns 500 INVARIANT_BROKEN if post-update
+      lookup fails (was silently shipping empty body)
+    - 补 parse_model_draft 单测覆盖 null 可选字段与必填字段类型错配
+    - 补 3 个 route-level smoke tests:POST /api/models 成功 + 排除 api_key、
+      POST /api/models 重名 → 409 NAME_TAKEN、POST /api/config/default-model
+      未知 name → 404 NOT_FOUND
+    
+    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+[33mcommit 8e36afd4caa5b383511563fef730260b30813c73[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sat May 9 22:35:25 2026 +0800
+
+    feat: daemon endpoints for saved_models CRUD + default-model
+    
+    POST/PUT/DELETE /api/models 与 POST /api/config/default-model;失败时
+    内存回滚保证 config.json 不会半保存。
+    
+    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+[33mcommit 01a84dd63c20452165b01df5b307cc173bd009bc[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sat May 9 22:27:45 2026 +0800
+
+    test: cover rename + add-rejection rollback for saved_models_editor
+    
+    补 Task 3 code review 找到的三类测试缺口:
+    - update 改名撞已存在 name → NAME_TAKEN
+    - update 改名(非 default)成功路径
+    - add 各拒绝分支均不改 cfg.saved_models(回滚保证)
+    
+    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+[33mcommit f66bf9dcfb40a0c2a8882e3a8b26b36027c9df0b[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sat May 9 22:20:16 2026 +0800
+
+    feat: add saved_models_editor module
+    
+    纯逻辑 add/update/remove for saved_models 注册表。九个错误码覆盖每个失
+    败分支,失败时 cfg 不变。
+    
+    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+[33mcommit 81aab26ba29ea636566bdc6345ec0b0486523f07[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sat May 9 22:16:36 2026 +0800
+
+    fix: switch_model releases mu_ during helper call
+    
+    回退 Task 2 引入的锁作用域回归 — apply_model_to_session 现在跑在 mu_ 释
+    放期间,避免 Copilot silent_auth 的 HTTPS 交换阻塞其它会话操作。同时把
+    warning 通道从 *error 移除,保持"error 只在失败时填"的原契约。
+    
+    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+[33mcommit 56c7529cfd7acf2d28aed2c93c583f98f8833ed6[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sat May 9 22:09:36 2026 +0800
+
+    refactor: SessionRegistry::switch_model delegates to shared helper
+    
+    把 per-session 切换的副作用统一到 apply_model_to_session,daemon 路径
+    现在与未来的 TUI 路径走同一份代码。
+    
+    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+[33mcommit ea0814fd9bb4f0511b0dfc229d1971c6aafc4906[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sat May 9 21:58:34 2026 +0800
+
+    feat: add apply_model_to_session shared helper
+    
+    抽出 per-session 模型切换的纯逻辑(创建 provider + 替换 slot + 更新 loop +
+    写 meta),给 daemon 与 TUI 后续共用。本提交只新增 helper + 测试,调用方
+    切换在后续任务里做。
+    
+    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+[33mcommit cdb9fe467cab18c1ee51d22aefdb163854dd4ac3[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sat May 9 21:45:40 2026 +0800
+
+    docs: add model selection implementation plan
+    
+    13 个任务覆盖共享 helper、saved_models editor、daemon HTTP 端点、TUI provider_slot 升级、TUI picker 与子命令、WebUI lib helpers/api/UI 改造,以及端到端 checklist。
+    
+    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+[33mcommit d5f9d81bf1c1161122255c77dcb1c7e61d3e54f4[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sat May 9 21:27:05 2026 +0800
+
+    docs: add model selection design spec
+    
+    模型选择功能完善的设计文档:抽 apply_model_to_session 共享 helper 让 TUI/WebUI 统一 per-session 切换语义,补 saved_models 增删改 UI 与 daemon 端点。
+    
+    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+[33mcommit d9f79655397d06ea14b66b8bb9cb60bcd10ab044[m
+Author: calvinhxx <18166855846@163.com>
+Date:   Sat May 9 19:15:21 2026 +0800
+
+    Dev (#9)
+    
+    * doc: update docs
+    
+    1.update documents
+    2.deprecate expired docs
+    
+    * feat: mac_platform support desktop app
+    
+    * fix: build error fix
+    
+    ---------
+    
+    Co-authored-by: huangxiangxin <huangxiangxin@finogeeks.com>
+    Co-authored-by: shaohaozhi286 <shaohaozhi286@gmail.com>
+
+[33mcommit 292a09a78c9fe481d586217507fd0ef55479fe60[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sat May 9 14:11:07 2026 +0800
+
+    feat: add native window resizing functionality and corresponding UI handles for frameless mode
+
+[33mcommit df5d9c6426e58bfb1df6b7255cac8cc1c8beefbe[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sat May 9 12:53:09 2026 +0800
+
+    feat: add session changes aggregation and review features
+    
+    - Implemented aggregation of hunks from session messages in `sessionChanges.js`.
+    - Added utility functions for summarizing change groups and generating signatures for change sets.
+    - Introduced new session title handling in `sessionTitle.js` to manage untitled sessions and display titles.
+    - Created tests for session changes and title functionalities to ensure correctness.
+    - Enhanced global styles for change review surfaces, including new CSS classes for better UI presentation.
+
+[33mcommit dd4faf8fa133f5fa8f7f140fafffc5c80b44854e[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sat May 9 00:30:27 2026 +0800
+
+    feat: add ChangeReview component and related functionality
+    
+    - Introduced ChangeReview component for displaying and reviewing changes in a side panel.
+    - Implemented ChangeConversationCard and ChangeGlassDock for summarizing and managing changes.
+    - Added utility functions for handling session changes and aggregating hunks.
+    - Created gridPinnedSessions module for managing pinned sessions in the UI.
+    - Developed newSession module for creating sessions with proper handling of workspace and titles.
+    - Added comprehensive tests for all new functionalities to ensure reliability and correctness.
+
+[33mcommit b1f21ef7b03c6af81ce49cf4139d1e357237bc24[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Fri May 8 14:24:30 2026 +0800
+
+    feat: Implement single instance management for acecode-desktop to prevent multiple instances from running simultaneously
+
+[33mcommit cea8684190c4c14e93cdb0149b8e149eab801c36[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Thu May 7 12:57:35 2026 +0800
+
+    feat: Enhance desktop tray menu functionality and close handling
+    
+    - Implemented a close request handler in WebHost to manage window close events.
+    - Added a request_quit method to bypass the close handler for unconditional exits.
+    - Extracted close dispatch logic into a separate policy header for better testability.
+    - Introduced unit tests for close handler behavior and tray menu payload management.
+    - Developed a new desktop tray menu module to push session data to the native tray.
+    - Added debounce functionality to optimize tray menu updates.
+    - Created comprehensive tests for tray menu payload construction and behavior.
+    - Updated App and Sidebar components to integrate new tray menu functionalities.
+
+[33mcommit 63fd8309a3fa98f7c81a92a37d022d19d2d113d2[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Thu May 7 00:39:29 2026 +0800
+
+    feat: Enhance tool lifecycle events and improve activity tracking
+    
+    - Updated tool_event_payload to include tool_call_id and tool_index for better correlation of tool events.
+    - Added StreamCollector to capture ToolCallDelta events for improved agent feedback during tool execution.
+    - Implemented tests for tool lifecycle events, ensuring proper emission of keyed tool_start and tool_end events.
+    - Enhanced EventDispatcher to handle non-buffered events and coalesced buffered events for better event management.
+    - Improved ChatView and ToolBlock components to display activity indicators and elapsed time for ongoing tool operations.
+    - Added SkillsToolTest to validate category filtering robustness and logging for invalid categories.
+
+[33mcommit fa9711a71ce98be7fab860022df049b6566cbabf[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Wed May 6 21:15:04 2026 +0800
+
+    refactor: extract OriginParts + parse_origin into web/origin module
+    
+    Lift the pure-string-manipulation OriginParts struct, parse_origin, and
+    split_host_port out of server.cpp's anon namespace into a dedicated
+    web/origin.{hpp,cpp} TU under namespace acecode::web. server.cpp shrinks
+    by ~50 LOC and the parsers become unit-testable.
+    
+    ascii_lower stays in server.cpp — it has another caller (is_loopback_host)
+    that is not part of this carve-out. origin.cpp keeps its own private
+    ascii_lower.
+    
+    Adds tests/web/origin_test.cpp covering well-formed http/https, missing
+    scheme, IPv6 bracketed hosts, bare-IPv6 multi-colon heuristic, default
+    port fill, and lowercase normalization. Picked up automatically by the
+    tests/*_test.cpp glob — no CMake change.
+
+[33mcommit 4f4c1168f6c89e93c16b4e244411519b67bf6b31[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Wed May 6 21:12:32 2026 +0800
+
+    refactor: extract enable_desktop_dpi_awareness into dpi_win.{hpp,cpp}
+    
+    Self-contained 65-line Win32 fallback chain
+    (SetProcessDpiAwarenessContext -> SetProcessDpiAwareness -> SetProcessDPIAware)
+    with zero state shared with the rest of desktop/main.cpp. Mirrors the
+    existing tray_icon_win / notifications_win / folder_picker_win convention
+    (_WIN32-guarded TU under namespace acecode::desktop).
+    
+    Pure code reorganization, no behavior change.
+
+[33mcommit c31a747adb8d161a285b8d6d112c390437360764[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Wed May 6 21:10:38 2026 +0800
+
+    refactor: extract /model command into model_command.{hpp,cpp}
+    
+    Mirrors the convention already used by history_command, init_command,
+    memory_command, proxy_command, websearch_command. The /model dispatch
+    (picker, in-memory swap, --cwd / --default persistence) was the only
+    sibling still inlined in builtin_commands.cpp. Pure code reorganization,
+    no behavior change.
+    
+    builtin_commands.cpp keeps the static 'trim' helper since cmd_page_step
+    still depends on it. The src/commands tree is glob-picked-up by the root
+    CMakeLists, so no CMake change is needed.
+
+[33mcommit d1f4e63dab52a3c16bd463322f1b3c3301ac532c[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Wed May 6 21:06:45 2026 +0800
+
+    refactor: move expand_path / get_project_dirs_up_to_home to utils/paths
+    
+    These are general path utilities, not config schema concerns. Lifting them
+    out of src/config/config.cpp puts them next to the rest of the path helpers
+    in src/utils/paths.{hpp,cpp}. Pure code reorganization — no behavior change.
+    
+    Callers updated: src/skills/skill_init.cpp and src/daemon/worker.cpp now
+    include <utils/paths.hpp> directly instead of relying on transitive include
+    through config.hpp.
+
+[33mcommit 4185ecc111e4acbc8356d7281e65ef06e5f8b347[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Wed May 6 21:37:53 2026 +0800
+
+    feat: 添加 token 预算功能，优化状态栏和聊天视图中的 token 使用显示
+
+[33mcommit 228cdee5b66eb915171fa5acc23bed1bdffb72f5[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Wed May 6 16:20:03 2026 +0800
+
+    feat: add workspace selection logic for slash command completion
+    
+    - Implemented `pickWorkspaceHash` function to retrieve workspace hash from the source object.
+    - Created `commandWorkspaceHashForInput` function to determine the appropriate workspace hash based on session state and selected workspace.
+    - Added regression tests for workspace selection logic covering various scenarios including session presence and workspace selection states.
+
+[33mcommit db93238395c0b0306e85262261e122cb7f2bc7cb[m[33m ([m[1;31morigin/copilot/refactor-code-for-better-readability[m[33m)[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Wed May 6 01:26:23 2026 +0800
+
+    feat: 添加 CopilotProvider 支持，优化会话注册时的鉴权逻辑
+
+[33mcommit d920da1c1519078eb5bb34e8250d9bc9adefc6f0[m[33m ([m[1;33mtag: [m[1;33mv0.1.5[m[33m)[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Wed May 6 00:29:20 2026 +0800
+
+    feat: add queue card item handling and related tests
+    
+    - Implemented `buildQueueCardItem` and `buildQueueCardItems` for transforming queue items into a structured format for display in `QueueCardList`.
+    - Added unit tests for `buildQueueCardItem` covering various states (QUEUED, SENDING, FAILED) and ensuring proper handling of edge cases.
+    - Introduced `searchSessions` module for scoring and ranking sessions based on user queries, including freshness scoring and relative time formatting.
+    - Created unit tests for `searchSessions` to validate scoring logic and time bucket categorization.
+    - Developed `sessionModel` module for normalizing model states and generating display labels, with corresponding tests to ensure functionality.
+    - Added `slashCommands` module for command ranking and parsing, including tests for command matching and sorting logic.
+    - Implemented `useGlobalShortcut` hook for handling global keyboard shortcuts, with tests for shortcut matching behavior.
+
+[33mcommit 54de855979599ab9b0d6791b4bf796662aabe1cf[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Tue May 5 14:54:24 2026 +0800
+
+    feat: 添加回退页面支持并优化端口选择逻辑
+
+[33mcommit f51ae21fa739eb038f390755c211b4422751e581[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Tue May 5 14:53:48 2026 +0800
+
+    feat: Implement workspace hiding and restoration functionality
+    
+    - Added `hide` method to `WorkspaceRegistry` to mark workspaces as hidden without deleting associated files.
+    - Updated `register_new` method to restore hidden workspaces, preserving their names and visibility status.
+    - Enhanced tests for workspace hiding and restoration scenarios.
+    - Modified the UI to support new task home with workspace selection and hints for actions.
+    - Updated components to integrate new workspace management features, including the ability to remove workspaces from the desktop project list.
+    - Improved styling for the new task home interface and input bar.
+
+[33mcommit c3aeb4bb58fec5c4b3ebfa59e1ab30528ee92e44[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Tue May 5 13:00:41 2026 +0800
+
+    feat: 添加 DPI 感知支持，优化权限请求模态框和侧边栏样式
+
+[33mcommit 02937ff2a39f269803370d738e9d4c70f9bd5727[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Tue May 5 02:25:49 2026 +0800
+
+    feat: 添加项目栏收缩功能，优化上下文菜单重开延迟逻辑
+
+[33mcommit dca2b95f473a0cb21cd10269c7cffaeb212df65a[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Tue May 5 02:14:00 2026 +0800
+
+    feat: add session subscription and transcript management with tests
+    
+    - Implement session subscription manager with retain and release functionality.
+    - Create session transcript management including event handling and state management.
+    - Add tests for session subscription and transcript functionalities to ensure correctness.
+    - Introduce usePreference hook for managing UI preferences with localStorage.
+    - Enhance global styles for desktop context menus and side panels.
+    - Update theme management to persist user preferences using usePreference.
+
+[33mcommit 0216f2eccee058b82186cc77945119ca21889966[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Mon May 4 16:57:02 2026 +0800
+
+    feat: add sticky user context in web chat
+
+[33mcommit 41bc631a6206398e2c57cc8c914f5a957733bdad[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Mon May 4 16:31:08 2026 +0800
+
+    feat: enhance workspace handling and session management
+    
+    - Added workspace scanning in the server implementation to refresh workspace data.
+    - Improved session resumption logic to include workspace hash and current working directory (cwd).
+    - Updated response structure to include workspace hash and cwd for forked sessions.
+    - Introduced tests for handling title collisions when forking sessions.
+    - Implemented workspace list refresh on external changes to workspace.json.
+    - Ensured new sessions created in a forked workspace retain the correct cwd and workspace hash.
+    - Refactored QuestionModal to use a new inline QuestionPicker component for better user experience.
+    - Added logic for handling question selection and submission in the QuestionPicker.
+    - Enhanced styling for message actions and icons for better visibility and interaction.
+    - Introduced unit tests for question picker logic to ensure payload correctness and navigation state management.
+
+[33mcommit e51ba07322c53d481d2ebbbc3dad98b1caf30f61[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Mon May 4 16:30:30 2026 +0800
+
+    feat: implement SidePanel component with file tree, changes list, and preview functionality
+    
+    - Added SidePanel component to display a fixed workspace panel in single session view.
+    - Implemented lazy loading for file tree with expandable directories.
+    - Created changes tab to aggregate and display file changes from session messages.
+    - Developed preview tab to show file content with syntax highlighting using highlight.js.
+    - Introduced utility functions for diff rendering and language mapping for file types.
+    - Enhanced Sidebar component to support dynamic width and improved styling.
+    - Updated ToolBlock component to render diffs for tool outputs.
+    - Added API functions for file listing and reading file content.
+    - Introduced global styles for code highlighting and SidePanel layout.
+
+[33mcommit a1039cf2b8e0e8375aba3ea5ca219fa4d93f5552[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Mon May 4 12:48:10 2026 +0800
+
+    feat: 添加 AddFolder 和 EditWindow SVG 图标，并在 Icon 组件和 Sidebar 中集成新会话功能
+
+[33mcommit 6d66cfd45bc009364006add09d7ab3795182f36f[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sun May 3 00:27:08 2026 +0800
+
+    Add new SVG icons and update Icon component for improved icon management
+    
+    - Added new SVG icons: Save, Search, SearchSparkle, Send, Settings, StatusError, StatusHelp, StatusInformation, StatusNotStarted, StatusOK, StatusRunning, StatusWarning, Stop, TerminalReadWrite.
+    - Created Icon component to dynamically render icons based on a mapping of icon names to their respective SVG files.
+    - Introduced TOOL_ICON_MAP for mapping special characters to corresponding icons.
+
+[33mcommit 4230de08b05ef65ff743e86b79ac102d7d44768c[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sat May 2 23:17:05 2026 +0800
+
+    feat: enhance session management and input handling
+    
+    - Updated `send_input` method to return a boolean indicating success or failure.
+    - Added `busy` state to `SessionInfo` to track if a session is currently processing input.
+    - Modified WebSocket connection to support multiple session subscriptions and handle session-specific messages.
+    - Implemented new API endpoint for queuing user input to the daemon without requiring an active WebSocket connection.
+    - Enhanced frontend components to manage session state and handle permission and question requests more effectively.
+    - Updated tests to verify the new input queuing functionality and session handling.
+
+[33mcommit 4f82b4adeba408db2299ffb2a583ee20dc756a91[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sat May 2 18:51:50 2026 +0800
+
+    Add favicon and session title utility functions
+    
+    - Introduced a new favicon.ico file for the web application.
+    - Added sessionTitle.js with two functions:
+      - titleFromMessages: Extracts the last user message content as the title.
+      - sessionDisplayTitle: Generates a display title for a session based on its properties, including title, summary, and message count.
+
+[33mcommit 53b223f5452b530f80ec83de8edb0f43f804c7cf[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sat May 2 16:20:43 2026 +0800
+
+    feat: add ToolBlock and TopBar components, implement API client and authentication, and set up WebSocket connection
+    
+    - Introduced ToolBlock component for displaying tool execution status with progress and summary modes.
+    - Added TopBar component for navigation and quick actions including theme toggle and session management.
+    - Implemented API client in api.js for handling HTTP requests with automatic token management.
+    - Created auth.js for token persistence using sessionStorage and URL parameters.
+    - Established WebSocket connection management in connection.js with automatic reconnection and message handling.
+    - Added utility functions in format.js for formatting bytes and elapsed time, and rendering relative time.
+    - Developed markdown.js for converting simple markdown syntax to safe HTML.
+    - Set up main entry point in main.jsx and global styles in globals.css using Tailwind CSS.
+    - Implemented theme context in theme.jsx for managing light/dark mode with localStorage persistence.
+    - Configured Vite for development and production builds with single file output and proxy settings.
+
+[33mcommit eae840addff6b8cffa088acd5a67b9e7e8dd4dad[m
+Merge: d392e2c 9f6f1ec
+Author: shaohaozhi286 <shaohaozhi286@gmail.com>
+Date:   Sat May 2 00:52:22 2026 +0800
+
+    Merge pull request #5 from shaohaozhi286/claude/desktop-webview-design-GttVa
+    
+    docs: add desktop-shell design (webview-based GUI wrapper)
+
+[33mcommit 9f6f1ecf1b1a0db9731a0d048ef8a3f6b68ea021[m[33m ([m[1;31morigin/claude/desktop-webview-design-GttVa[m[33m)[m
+Author: Claude <noreply@anthropic.com>
+Date:   Fri May 1 16:51:52 2026 +0000
+
+    docs: add desktop-shell design (webview-based GUI wrapper)
+    
+    Proposes a native desktop binary that embeds a system WebView and reuses
+    the existing daemon + web/ front-end. Captures rationale (vs Tauri /
+    Electron), process supervision model, per-launch loopback token, daemon
+    CLI extensions, and a phased task list.
+    
+    https://claude.ai/code/session_01Ds9DoAecUiN5tivHVfiSmR
+
+[33mcommit d392e2c0afa4a936667c90db4109d6f41f213067[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sat May 2 00:45:18 2026 +0800
+
+    feat: 添加 PgUp/PgDn 单行滚动切换功能，支持终端 Alt+方向键吞掉的情况
+
+[33mcommit eefb80554b20f3472ad15643a443581d2c3e76de[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Fri May 1 17:04:11 2026 +0800
+
+    fix: 修复 main.cpp 中 Region 缺少 web_search:: 命名空间限定导致 Windows build 失败
+    
+    main.cpp:949/951 直接写 Region/Region::Unknown,但该枚举位于
+    acecode::web_search 命名空间。MSVC 报 C2065，Linux/macOS 同样会失败。
+    显式加上 web_search::Region 限定。
+    
+    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+[33mcommit cfd7733c703108a5216ef70473883e4524ae9ecb[m[33m ([m[1;33mtag: [m[1;33mv0.1.3[m[33m)[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Fri May 1 15:49:09 2026 +0800
+
+    Add comprehensive tests for web search tool, confirm question, paste handler, base64 decoding, and state file management
+    
+    - Implement tests for the web search tool covering JSON input parsing, error handling, and markdown output formatting.
+    - Create tests for confirm question generation based on different tool types and input scenarios.
+    - Add tests for paste handler functionality, including normalization, placeholder management, and state machine behavior.
+    - Introduce tests for base64 decoding, validating both standard and illegal inputs.
+    - Develop tests for state file management, ensuring proper handling of web search region caching and JSON integrity.
+
+[33mcommit 9e60fc9dc330dc71a95f92bb6df444801978a99f[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Fri May 1 00:05:59 2026 +0800
+
+    Refactor code structure for improved readability and maintainability
+
+[33mcommit 8d890a54b92bf352891bbc4e97e1a99f20a29da8[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Thu Apr 30 22:04:56 2026 +0800
+
+    feat: add ACECode WebUI components and connection handling
+    
+    - Implemented ace-chat for chat interface with message handling and input history.
+    - Created ace-mcp-editor for editing MCP JSON configurations with validation and save functionality.
+    - Developed ace-message for rendering individual messages with role-based styling.
+    - Added ace-model-picker for selecting models with session management.
+    - Introduced ace-permission-modal for handling permission requests with a queue system.
+    - Built ace-question-modal for user question prompts with multi-select options.
+    - Created ace-sidebar for navigation between sessions, skills, and MCP editor.
+    - Developed ace-skills-panel for managing skills with enable/disable functionality.
+    - Implemented ace-token-prompt for token input during remote access.
+    - Added ace-tool-block for displaying tool call outputs with progress and summary states.
+    - Established AceConnection for WebSocket handling with automatic reconnection and session management.
+    - Created index.html for the main application entry point.
+    - Added style.css for custom styling of the WebUI components.
+    - Included Bootstrap assets for UI styling and layout.
+
+[33mcommit d21a4b529dc2e931b504475d79c9f94a009bd526[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Wed Apr 29 11:49:45 2026 +0800
+
+    feat: Implement Windows service support and CLI commands
+    
+    - Added service_win.hpp to define service-related constants and functions for Windows.
+    - Implemented run_service_main_dispatcher and run_cli for service management.
+    - Introduced picker_scroll.hpp to manage scrolling behavior in TUI pickers.
+    - Created paths.cpp and paths.hpp for cross-platform data directory resolution and run mode management.
+    - Added tests for picker_scroll and logger functionalities to ensure correct behavior in various scenarios.
+    - Implemented paths_test to validate run mode behavior and data directory resolution across platforms.
+
+[33mcommit 591d80f08d88ceef5db04abb9db0221733d1ca34[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sun Apr 26 23:17:56 2026 +0800
+
+    feat: Implement WebServer and associated tests
+    
+    - Add WebServer class to handle HTTP/WebSocket connections, including lifecycle management and routing.
+    - Introduce SessionClient, SessionRegistry, and SkillRegistry dependencies for WebServer.
+    - Create unit tests for EventDispatcher to ensure correct event sequencing and listener behavior.
+    - Implement AsyncPrompter tests to validate permission request handling and decision routing.
+    - Add tests for SessionRegistry to verify session creation, lookup, and destruction functionalities.
+    - Develop authentication tests to ensure proper handling of loopback and non-loopback requests.
+    - Create smoke tests for WebServer to validate HTTP routes and responses, including session management and error handling.
+
+[33mcommit bee8f7c09235f95414da92bfaa630e2757caaaf7[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sun Apr 26 19:28:01 2026 +0800
+
+    feat: 添加并行会话写入器和端到端测试，验证 daemon 与 TUI 在同一 cwd 下不冲突
+
+[33mcommit e930d2f6c1b250e68048e7e51879d893302672b6[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sun Apr 26 18:23:49 2026 +0800
+
+    Implement file checkpointing and session rewind functionality
+    
+    - Added FileCheckpointStore class for managing file checkpoints, including snapshot creation, tracking changes, and restoring previous states.
+    - Introduced FileCheckpointBackup, FileCheckpointSnapshot, FileCheckpointDiffStats, and FileCheckpointRestoreResult structures for handling checkpoint data.
+    - Implemented session rewind capabilities in session_rewind.cpp and session_rewind.hpp, including functions to ensure user message identity and collect rewind targets.
+    - Created unit tests for FileCheckpointStore and session rewind functionalities, covering scenarios like diffing, restoring, and handling errors.
+    - Developed file checkpoint hooks for file write and edit operations to track changes before mutations.
+
+[33mcommit 42773c6c9519c1e648006a4ee808bc64f1c4eecf[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sun Apr 26 17:38:27 2026 +0800
+
+    Add comprehensive tests for session replay, resume, serialization, and text truncation
+    
+    - Implement tests for session replay functionality, ensuring correct handling of user, assistant, and tool messages.
+    - Add tests for session resume and restore processes, verifying that tool calls and results are correctly managed.
+    - Create tests for serialization and deserialization of ChatMessage metadata, focusing on tool summaries and hunks.
+    - Introduce tests for tool metadata codec to ensure round-trip encoding and decoding of ToolSummary and DiffHunk structures.
+    - Implement tests for text truncation logic, covering various edge cases including UTF-8 handling and budget constraints.
+
+[33mcommit 8d7001a6e2d109feec143203f1a8a46cad578f25[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sun Apr 26 15:21:55 2026 +0800
+
+    Implement daemon CLI and worker functionality
+    
+    - Added `cli.cpp` and `cli.hpp` for command-line interface handling, including subcommands: start, stop, and status.
+    - Introduced `heartbeat.cpp` and `heartbeat.hpp` to manage heartbeat signaling for the worker process.
+    - Created `runtime_files.cpp` and `runtime_files.hpp` for managing runtime files such as PID, port, GUID, and heartbeat.
+    - Developed `supervisor.cpp` and `supervisor.hpp` to oversee the worker process, ensuring it is alive and restarting if necessary.
+    - Implemented `worker.cpp` and `worker.hpp` to define the main worker process logic, including validation and heartbeat management.
+    - Added unit tests for CLI argument parsing and session storage with PID suffix to ensure correct behavior and prevent conflicts.
+
+[33mcommit 0f9037830bc131c014d1e09f2b57b99ef4fcd9e4[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sat Apr 25 22:00:25 2026 +0800
+
+    feat: 替换FTXUI的vscroll_indicator为可拖动的滚动条，保持视觉一致性并支持鼠标点击拖动
+
+[33mcommit 13ea662b9b61b97a464ca2a9471995ce75feaa31[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sat Apr 25 21:42:30 2026 +0800
+
+    Add unit tests for agent loop configuration, OpenAI provider reasoning, task completion tool, and TUI vertical scroll bar
+    
+    - Implemented `StubLlmProvider` for agent loop testing to simulate LLM responses.
+    - Created tests for `AgentLoopConfig` to validate default values and clamping behavior for `max_iterations`.
+    - Added tests for OpenAI provider to ensure correct handling of reasoning content in streaming and non-streaming scenarios.
+    - Developed tests for `task_complete_tool` to verify summary handling and error messages for invalid inputs.
+    - Added tests for `thick_vscroll_bar` to ensure correct mapping of mouse coordinates to focus indices and offsets.
+
+[33mcommit 813814fbcea5e019a291ef7b7c6d9f71eb520327[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sat Apr 25 17:53:20 2026 +0800
+
+    feat: 删除不再需要的index.html文件
+
+[33mcommit 87dc8728cbe45a48db64b5833b7091fe0a1389eb[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sat Apr 25 06:41:07 2026 +0800
+
+    feat:解决大模型服务提示400问题 增强消息处理，添加非法角色过滤和日志记录
+
+[33mcommit 2bf06e3fc1aa5a8894f2798355d0dfcd4c827a72[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sat Apr 25 05:32:03 2026 +0800
+
+    Add comprehensive unit tests for model profiles and input handling
+    
+    - Implement tests for saved_models validation and parsing in saved_models_test.cpp, covering various scenarios including minimal valid entries, duplicate names, reserved prefixes, and missing fields.
+    - Create cwd_model_override_test.cpp to validate loading and saving of model overrides, ensuring proper handling of missing files and malformed JSON.
+    - Add model_resolver_test.cpp to verify effective model resolution logic, including default handling, cwd overrides, and session metadata.
+    - Introduce openai_provider_abort_test.cpp to test the cancellation of long-running HTTP requests during silent reasoning phases and ensure proper logging.
+    - Develop ask_overlay_input_test.cpp to validate character input handling in the ask overlay, ensuring correct cursor movement and state management.
+    - Implement text_input_ops_test.cpp to cover low-level text manipulation functions, including insertion, deletion, and cursor movement for UTF-8 encoded strings.
+
+[33mcommit e4bd27141459aea8d44197fba5baf30b895387eb[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Wed Apr 22 01:56:50 2026 +0800
+
+    feat: Implement AskUserQuestion tool for user interaction
+    
+    - Added a new tool `AskUserQuestion` to facilitate gathering user preferences through multiple choice questions.
+    - Introduced validation for question and option structures, ensuring unique questions and valid headers.
+    - Enhanced state management in TuiState to handle the new tool's overlay.
+    - Updated rendering logic to display a static "Thinking" message during tool execution.
+    - Added comprehensive unit tests for input history management and the new AskUserQuestion tool, covering various edge cases and validation rules.
+
+[33mcommit e94bf1d7d7a62391dcd065d7b2769af5e2137316[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Wed Apr 22 01:27:57 2026 +0800
+
+    Add unit tests for session serialization, tool execution, and diff utilities
+    
+    - Implement tests for session serialization to ensure runtime fields are not serialized in JSONL.
+    - Add tests for bash tool execution to validate summary metrics for successful and failed commands.
+    - Create tests for diff utilities to cover various scenarios including pure additions, deletions, and structured diffs.
+    - Introduce tests for file read/write tools to verify summary metrics and handling of large files.
+    - Implement word diff tests to validate tokenization, change ratio calculations, and early return behavior for long inputs.
+    - Ensure all tests cover edge cases and maintain expected behavior across different scenarios.
+
+[33mcommit e7d835e03b5f12b7401c9ec95b3cde452b3d329e[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Tue Apr 21 16:10:39 2026 +0800
+
+    Add comprehensive tests for memory and project instruction functionalities
+    
+    - Implement tests for memory read tool covering various scenarios including filtering by type, retrieving full body by name, and handling invalid types.
+    - Create tests for memory registry to validate loading of valid entries, handling of conflicts during upsert operations, and ensuring thread safety during concurrent writes.
+    - Add tests for memory write tool to verify successful upserts, error handling for missing required fields, and validation against illegal names.
+    - Introduce tests for instructions loader to ensure correct loading of project instructions from various files, handling of custom filename orders, and proper behavior when disabled.
+    - Implement system prompt tests to validate the injection logic based on memory and project instruction availability.
+    - Add tests for skill registry to ensure correct loading and preference of skills from different roots.
+
+[33mcommit a81a9ae541ba3929b4bebb08ec889fe141936cf5[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Tue Apr 21 02:18:08 2026 +0800
+
+    feat: Add models_dev_catalog and related tests
+    
+    - Introduced models_dev_catalog.hpp to define ModelEntry and ProviderEntry structures for managing model metadata.
+    - Implemented build_catalog function to construct a catalog from JSON input, handling optional fields gracefully.
+    - Added utility functions for formatting context, cost, and capabilities of models.
+    - Created configure_catalog_test.cpp to cover filtering and formatting functionalities for providers and models.
+    - Developed config_models_dev_test.cpp to ensure backward compatibility and correct serialization of new config fields.
+    - Implemented models_dev_paths_test.cpp to validate the directory search order for models_dev.
+    - Added models_dev_registry_test.cpp to test registry schema validation and provider entry retrieval.
+    - Created drag_scroll_test.cpp to verify the logic of drag scrolling functionality.
+    - Added ftxui_cjk_selection_test.cpp to ensure correct handling of CJK character selection in FTXUI.
+    - Implemented models_dev_catalog_test.cpp to validate the catalog building process and output formatting.
+
+[33mcommit b7e968e66b370ed5c73f91001d5d2c345de583c5[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sun Apr 19 23:16:28 2026 +0800
+
+    feat: 添加单元测试基础设施，集成GoogleTest，覆盖多个模块的功能测试
+
+[33mcommit 7bc6a016fda1f5f56f3c5e6fc27373b1994f53ad[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sun Apr 19 20:51:15 2026 +0800
+
+    feat: 添加自定义窗口标题功能，支持设置和清除会话标题，优化会话恢复时标题的处理
+
+[33mcommit ccf4fbdbc714bac0c67b6d718374c7e49963cfe1[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sun Apr 19 19:56:38 2026 +0800
+
+    feat: 添加守护进程支持和配置验证功能，优化文件写入。增加随机数生成逻辑。引入crow httpserver
+
+[33mcommit cb7b822ad7ff25c627b0beac85abaf59bb1d41bd[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sun Apr 19 18:13:12 2026 +0800
+
+    feat: 优化描述截断逻辑以支持UTF-8字符边界
+
+[33mcommit 6ad3765ffd16f6ff4b622914d62e68532f7ccb65[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sun Apr 19 00:59:29 2026 +0800
+
+    系统提示词优化：更新了系统提示词（System Prompt），为工具（Skill）的使用方式和调用指令提供了更清晰的指引。
+    
+    Bash 工具增强：
+    新增对标准输入（stdin）的支持。
+    
+    优化了输出处理逻辑。
+    增加了中止（Abort）功能。
+    
+    文件操作工具升级：修改了文件编辑、读取和写入工具，使其支持 ToolContext（工具上下文），以实现更好的系统集成。
+    
+    检索工具更新：更新了 glob 和 grep 工具的执行签名，将 ToolContext 纳入其中。
+    
+    MCP 管理器改进：优化了 MCP（Model Context Protocol）管理器，使其在工具执行期间能够有效处理 ToolContext。
+    
+    skill管理工具增强：增强了技能查看（Skill View）和技能列表（Skills List）工具，通过支持 ToolContext 提升其功能性。
+    
+    执行器重构：重构了 ToolExecutor，使其支持带有 ToolContext 的执行模式，从而实现了流式输出（Streaming）和中止能力。
+    
+    引入进度管理结构：在 TuiState 中引入了全新的 ToolProgress 结构，用于管理工具执行的状态并实时更新进度。
+    
+    新增实用工具函数：增加了 Base64 编码和流处理的辅助函数，包括 ANSI 码剥离以及 UTF-8 边界处理。
+    
+    TUI 界面反馈优化：在终端用户界面（TUI）中实现了工具进度和计时器的渲染功能，提升了工具执行期间的用户反馈体验。
+
+[33mcommit be7cc4106ccc6a501f2ff141c3097677d239cfc2[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sat Apr 18 20:11:00 2026 +0800
+
+    feat: 完成项目重构和文档整理
+    
+    - 创建了4个核心工具类以消除DRY违规，提升代码质量
+      - ToolArgsParser: 统一JSON参数解析
+      - ToolErrors: 标准化错误消息
+      - FileOperations: 封装文件操作
+      - constants: 集中常量定义
+    - 重构了3个工具文件以使用新的工具类，减少了约30%的代码行数
+    - 新增了8个项目文档，提升文档完整度
+    - 创建了代码质量检查脚本，自动检测常见的DRY违规和代码质量问题
+    - 更新了TODO清单，明确后续改进方向
+    - 解决了多个核心问题，提升了项目的可维护性和用户体验
+
+[33mcommit f2d8e11a2f8b5be89a377e4836a20f716f1cbca8[m
+Merge: f5957de 8962e9d
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sat Apr 18 17:12:39 2026 +0800
+
+    Merge branch 'master' of https://github.com/shaohaozhi286/acecode
+
+[33mcommit f5957deb0a75009024bbe0667f4b10ebd5b1dac4[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Sat Apr 18 17:12:36 2026 +0800
+
+    feat: add skill management tools and slash command dropdown
+    
+    - Introduced `skill_view` tool to load full SKILL.md content or supporting files.
+    - Added `skills_list` tool to list available skills with minimal metadata.
+    - Enhanced `ToolExecutor` with `unregister_tool` method for dynamic tool management.
+    - Implemented slash command dropdown functionality for improved command input experience.
+    - Updated `TuiState` to manage slash command dropdown state and input modes.
+    - Added necessary data structures and helper functions for skill management and dropdown rendering.
+
+[33mcommit 8962e9db342a3ebdc52333176bd46017dabb7475[m
+Merge: 0f301a6 399b9f1
+Author: shaohaozhi286 <shaohaozhi286@gmail.com>
+Date:   Fri Apr 17 16:18:26 2026 +0800
+
+    Merge pull request #4 from tmoonlight/master
+    
+    说明文档更新
+
+[33mcommit 0f301a6dc936a0a17d4bc3c1d942d5881718bc7f[m
+Author: tmoonlight <shaohaozhi@live.cn>
+Date:   Fri Apr 17 13:53:36 2026 +0800
+
+    feat: 添加MCP服务器管理功能，支持工具注册和连接
