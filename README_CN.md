@@ -241,7 +241,6 @@ MCP servers 可以在运行时添加更多工具。
 | `network` | 系统/手动代理、代理探测和 TLS 选项。 |
 | `web_search` | 联网搜索工具开关和 backend 选择。 |
 | `tui.alt_screen_mode` | 终端渲染模式。 |
-| `tui.mouse_tracking` | 是否启用 TUI 鼠标捕获；设为 `false` 可让终端显示原生右键菜单。 |
 | `desktop.notifications` | 桌面壳通知行为。 |
 | `mcp_servers` | Stdio、SSE 或 Streamable HTTP MCP server 定义。 |
 

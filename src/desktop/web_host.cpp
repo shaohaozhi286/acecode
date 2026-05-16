@@ -32,6 +32,8 @@
 #endif
 #ifdef __APPLE__
 #  include <CoreGraphics/CoreGraphics.h>
+#  import <AppKit/AppKit.h>
+#  include <objc/runtime.h>
 #endif
 
 namespace acecode::desktop {
@@ -40,6 +42,28 @@ namespace {
 
 // 全局 close_request_handler — 只在主线程上写,窗口回调在同一 GUI 主线程上读。
 std::function<bool()> g_close_handler;
+
+#ifdef __APPLE__
+BOOL acecode_mac_window_should_close(id /*self*/, SEL /*cmd*/, id /*sender*/) {
+    return dispatch_wm_close(g_close_handler) == CloseDispatch::ConsumedByHandler
+        ? NO
+        : YES;
+}
+
+void install_mac_close_handler(webview::webview& w) {
+    auto window_result = w.window();
+    if (!window_result.ok() || !window_result.value()) return;
+    NSWindow* window = static_cast<NSWindow*>(window_result.value());
+    id delegate = [window delegate];
+    if (!delegate) return;
+    Class cls = object_getClass(delegate);
+    if (!cls) return;
+    class_addMethod(cls,
+                    @selector(windowShouldClose:),
+                    reinterpret_cast<IMP>(acecode_mac_window_should_close),
+                    "c@:@");
+}
+#endif
 
 } // namespace
 
@@ -553,7 +577,9 @@ struct WebHost::Impl {
     {
         (void)startup_mode;
         w = std::make_unique<webview::webview>(debug, nullptr);
-#if !defined(__APPLE__)
+#if defined(__APPLE__)
+        install_mac_close_handler(*w);
+#else
         install_linux_close_handler(*w);
 #endif
     }
@@ -634,7 +660,15 @@ void WebHost::set_visible(bool visible) {
         api.widget_hide(window.value());
     }
 #else
-    (void)visible;
+    auto window_result = impl_->w->window();
+    if (!window_result.ok() || !window_result.value()) return;
+    NSWindow* window = static_cast<NSWindow*>(window_result.value());
+    if (visible) {
+        [window makeKeyAndOrderFront:nil];
+        [NSApp activateIgnoringOtherApps:YES];
+    } else {
+        [window orderOut:nil];
+    }
 #endif
 #endif
 }
@@ -759,7 +793,14 @@ bool WebHost::close_window() {
     api.window_close(window.value());
     return true;
 #else
-    return false;
+    if (dispatch_wm_close(g_close_handler) == CloseDispatch::ConsumedByHandler) {
+        return true;
+    }
+    auto window_result = impl_->w->window();
+    if (!window_result.ok() || !window_result.value()) return false;
+    NSWindow* window = static_cast<NSWindow*>(window_result.value());
+    [window close];
+    return true;
 #endif
 #endif
 }

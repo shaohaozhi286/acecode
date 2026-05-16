@@ -22,6 +22,9 @@
 #  include <windows.h>
 #  include <shellapi.h>
 #endif
+#ifdef __APPLE__
+#  import <AppKit/AppKit.h>
+#endif
 
 #include <mutex>
 #include <cstdint>
@@ -33,6 +36,35 @@
 #  include <filesystem>
 #  include <limits.h>
 #  include <unistd.h>
+#endif
+
+#ifdef __APPLE__
+namespace acecode::desktop {
+void mac_tray_menu_item_activated(long tag);
+void mac_tray_status_item_activated();
+void mac_tray_menu_needs_update(NSMenu* menu);
+}
+
+@interface ACECodeTrayMenuTarget : NSObject <NSMenuDelegate>
+- (void)menuItemActivated:(id)sender;
+- (void)statusItemActivated:(id)sender;
+@end
+
+@implementation ACECodeTrayMenuTarget
+- (void)menuItemActivated:(id)sender {
+    if (![sender respondsToSelector:@selector(tag)]) return;
+    acecode::desktop::mac_tray_menu_item_activated([sender tag]);
+}
+
+- (void)statusItemActivated:(id)sender {
+    (void)sender;
+    acecode::desktop::mac_tray_status_item_activated();
+}
+
+- (void)menuNeedsUpdate:(NSMenu*)menu {
+    acecode::desktop::mac_tray_menu_needs_update(menu);
+}
+@end
 #endif
 
 namespace acecode::desktop {
@@ -601,7 +633,167 @@ void shutdown_tray_icon() {
     reset_tray_state();
 }
 
-#else // __APPLE__ and other non-Linux platforms
+#elif defined(__APPLE__)
+
+namespace {
+
+NSStatusItem* g_status_item = nil;
+NSMenu* g_status_menu = nil;
+TrayMenuLayout g_mac_context_layout;
+
+ACECodeTrayMenuTarget* g_menu_target = nil;
+
+void append_mac_menu_item(NSMenu* menu, const TrayMenuEntry& entry) {
+    if (!menu) return;
+    if (entry.kind == TrayMenuEntryKind::Separator) {
+        [menu addItem:[NSMenuItem separatorItem]];
+        return;
+    }
+
+    NSString* label = [NSString stringWithUTF8String:entry.label.c_str()];
+    if (!label) label = @"";
+    NSMenuItem* item = [[NSMenuItem alloc]
+        initWithTitle:label
+               action:nil
+        keyEquivalent:@""];
+    [item setTarget:g_menu_target];
+    [item setTag:static_cast<NSInteger>(entry.id)];
+
+    if (entry.kind == TrayMenuEntryKind::PinnedHeader ||
+        entry.kind == TrayMenuEntryKind::RecentHeader) {
+        [item setEnabled:NO];
+    } else if (entry.id != 0 && entry.kind != TrayMenuEntryKind::MoreSubmenuRoot) {
+        [item setAction:@selector(menuItemActivated:)];
+    }
+
+    [menu addItem:item];
+    [item release];
+}
+
+void append_mac_layout_to_menu(NSMenu* menu, const TrayMenuLayout& layout) {
+    NSMenu* more_menu = nil;
+    for (const auto& entry : layout.entries) {
+        if (entry.kind == TrayMenuEntryKind::MoreSubmenuRoot) {
+            NSString* label = [NSString stringWithUTF8String:entry.label.c_str()];
+            if (!label) label = @"";
+            NSMenuItem* root = [[NSMenuItem alloc]
+                initWithTitle:label
+                       action:nil
+                keyEquivalent:@""];
+            more_menu = [[NSMenu alloc] initWithTitle:label];
+            [root setSubmenu:more_menu];
+            [menu addItem:root];
+            [more_menu release];
+            [root release];
+        } else if (entry.kind == TrayMenuEntryKind::MoreSubmenuItem) {
+            append_mac_menu_item(more_menu ? more_menu : menu, entry);
+        } else {
+            append_mac_menu_item(menu, entry);
+        }
+    }
+}
+
+NSImage* load_status_item_image() {
+    NSBundle* bundle = [NSBundle mainBundle];
+    NSString* icon_path = [bundle pathForResource:@"acecode" ofType:@"icns"];
+    NSImage* image = nil;
+    if (icon_path) {
+        image = [[[NSImage alloc] initWithContentsOfFile:icon_path] autorelease];
+    }
+    if (!image) {
+        image = [NSApp applicationIconImage];
+    }
+    if (image) {
+        [image setSize:NSMakeSize(18.0, 18.0)];
+    }
+    return image;
+}
+
+} // namespace
+
+void mac_tray_menu_item_activated(long tag) {
+    auto cmd = static_cast<unsigned>(tag);
+    dispatch_menu_command(g_mac_context_layout, cmd);
+}
+
+void mac_tray_status_item_activated() {
+    if (g_on_show) g_on_show();
+}
+
+void mac_tray_menu_needs_update(NSMenu* menu) {
+    if (!menu) return;
+    [menu removeAllItems];
+    TrayMenuPayload payload = snapshot_payload();
+    g_mac_context_layout = compute_menu_layout(payload);
+    append_mac_layout_to_menu(menu, g_mac_context_layout);
+}
+
+bool init_tray_icon(TrayClickHandler on_show,
+                    TrayClickHandler on_quit,
+                    void** out_message_hwnd) {
+    if (out_message_hwnd) *out_message_hwnd = nullptr;
+    if (g_status_item) {
+        LOG_WARN("[desktop] init_tray_icon called twice, ignoring second call");
+        return true;
+    }
+
+    g_on_show = std::move(on_show);
+    g_on_quit = std::move(on_quit);
+    g_menu_target = [[ACECodeTrayMenuTarget alloc] init];
+    g_status_menu = [[NSMenu alloc] initWithTitle:@"ACECode"];
+    [g_status_menu setDelegate:g_menu_target];
+    [g_status_menu setAutoenablesItems:NO];
+
+    g_status_item = [[[NSStatusBar systemStatusBar]
+        statusItemWithLength:NSSquareStatusItemLength] retain];
+    if (!g_status_item) {
+        [g_status_menu release];
+        g_status_menu = nil;
+        [g_menu_target release];
+        g_menu_target = nil;
+        reset_tray_state();
+        return false;
+    }
+
+    NSStatusBarButton* button = [g_status_item button];
+    if (button) {
+        NSImage* image = load_status_item_image();
+        if (image) {
+            [button setImage:image];
+        } else {
+            [button setTitle:@"ACE"];
+        }
+        [button setToolTip:@"ACECode"];
+        [button setTarget:g_menu_target];
+        [button setAction:@selector(statusItemActivated:)];
+        [button sendActionOn:NSEventMaskLeftMouseUp | NSEventMaskRightMouseUp];
+    }
+    [g_status_item setMenu:g_status_menu];
+
+    LOG_INFO("[desktop] tray: macOS status item installed");
+    return true;
+}
+
+void shutdown_tray_icon() {
+    if (g_status_item) {
+        [[NSStatusBar systemStatusBar] removeStatusItem:g_status_item];
+        [g_status_item release];
+        g_status_item = nil;
+    }
+    if (g_status_menu) {
+        [g_status_menu setDelegate:nil];
+        [g_status_menu release];
+        g_status_menu = nil;
+    }
+    if (g_menu_target) {
+        [g_menu_target release];
+        g_menu_target = nil;
+    }
+    g_mac_context_layout = TrayMenuLayout{};
+    reset_tray_state();
+}
+
+#else // other non-Linux platforms
 
 bool init_tray_icon(TrayClickHandler /*on_show*/,
                     TrayClickHandler /*on_quit*/,

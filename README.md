@@ -241,7 +241,6 @@ Important config areas:
 | `network` | System/manual proxy behavior, proxy probing, and TLS options. |
 | `web_search` | Web-search tool enablement and backend choice. |
 | `tui.alt_screen_mode` | Terminal rendering mode. |
-| `tui.mouse_tracking` | Enable TUI mouse capture; set `false` to let the terminal show its native right-click menu. |
 | `desktop.notifications` | Desktop shell notification behavior. |
 | `mcp_servers` | Stdio, SSE, or Streamable HTTP MCP server definitions. |
 

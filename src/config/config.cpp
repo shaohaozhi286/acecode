@@ -484,11 +484,6 @@ AppConfig load_config() {
                         cfg.tui.page_keys_single_line =
                             tj["page_keys_single_line"].get<bool>();
                     }
-                    if (tj.contains("mouse_tracking") &&
-                        tj["mouse_tracking"].is_boolean()) {
-                        cfg.tui.mouse_tracking =
-                            tj["mouse_tracking"].get<bool>();
-                    }
                 }
             }
 
@@ -817,8 +812,6 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
         nlohmann::json tj = nlohmann::json::object();
         if (cfg.tui.alt_screen_mode != tui_d.alt_screen_mode)
             tj["alt_screen_mode"] = cfg.tui.alt_screen_mode;
-        if (cfg.tui.mouse_tracking != tui_d.mouse_tracking)
-            tj["mouse_tracking"] = cfg.tui.mouse_tracking;
         if (cfg.tui.page_keys_single_line != tui_d.page_keys_single_line)
             tj["page_keys_single_line"] = cfg.tui.page_keys_single_line;
         if (!tj.empty()) j["tui"] = tj;
