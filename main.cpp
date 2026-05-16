@@ -421,10 +421,35 @@ static void seed_default_skills_if_first_initialization(const std::string& argv0
              " errors=" + std::to_string(errors));
 }
 
+static void write_terminal_control_sequence(std::string_view seq) {
+#ifdef _WIN32
+    auto stdout_handle = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD out_mode = 0;
+    const bool restore_mode =
+        stdout_handle != INVALID_HANDLE_VALUE &&
+        GetConsoleMode(stdout_handle, &out_mode);
+    if (!restore_mode) {
+        return;
+    }
+    constexpr DWORD enable_virtual_terminal_processing = 0x0004;
+    constexpr DWORD disable_newline_auto_return = 0x0008;
+    SetConsoleMode(stdout_handle,
+                   out_mode | enable_virtual_terminal_processing |
+                       disable_newline_auto_return);
+#endif
+
+    std::cout.write(seq.data(), static_cast<std::streamsize>(seq.size()));
+    std::cout.flush();
+
+#ifdef _WIN32
+    SetConsoleMode(stdout_handle, out_mode);
+#endif
+}
+
 // ---- Reset terminal cursor visibility on exit ----
 static void reset_cursor() {
     // DECTCEM: show cursor (ESC [ ? 25 h)
-    std::cout << "\033[?25h" << std::flush;
+    write_terminal_control_sequence("\033[?25h");
 }
 
 // ---- Session finalization on exit ----
@@ -1187,9 +1212,9 @@ static void run_tui_loop(ftxui::ScreenInteractive& screen,
     // the paste accumulator in the CatchEvent body intercepts them before
     // normal Return / character handlers run — preventing pasted newlines
     // from accidentally submitting partial prompts.
-    std::cout << acecode::tui::kBracketedPasteEnableSeq << std::flush;
+    write_terminal_control_sequence(acecode::tui::kBracketedPasteEnableSeq);
     screen.Loop(renderer);
-    std::cout << acecode::tui::kBracketedPasteDisableSeq << std::flush;
+    write_terminal_control_sequence(acecode::tui::kBracketedPasteDisableSeq);
 }
 
 static void shutdown_after_tui_loop(TuiState& state,
@@ -3620,9 +3645,24 @@ static int run_interactive_app(const CliOptions& cli,
         }) | bgcolor(Color::RGB(0, 30, 45));
 
         // -- Messages --
+        // Bottom-anchor short transcripts while following the tail. FTXUI's
+        // yframe only scrolls when the child is taller than the viewport, so a
+        // short chat at tail otherwise remains pinned to the top.
+        Elements message_elements;
+        const int chat_viewport_rows = chat_box.y_max >= chat_box.y_min
+            ? chat_box.y_max - chat_box.y_min + 1
+            : 0;
+        const int tail_top_padding =
+            acecode::tui::chat_bottom_anchor_top_padding_rows(
+            message_line_counts,
+            static_cast<int>(state.conversation.size()),
+            chat_viewport_rows);
+        for (int i = 0; i < tail_top_padding; ++i) {
+            message_elements.push_back(text(""));
+        }
+
         // drag-autoscroll: 每条消息渲染时 reflect 到 message_boxes[i], 下一帧
         // Renderer 开头用这些 box 的高度更新 message_line_counts (按行滚动需要).
-        Elements message_elements;
         for (size_t i = 0; i < state.conversation.size(); ++i) {
             const auto& msg = state.conversation[i];
             bool focused_message = static_cast<int>(i) == state.chat_focus_index;
@@ -3909,6 +3949,11 @@ static int run_interactive_app(const CliOptions& cli,
             message_elements.push_back(text(""));
         }
 
+        Element message_body = vbox(std::move(message_elements));
+        if (state.chat_follow_tail) {
+            message_body = message_body | focusPositionRelative(0.0f, 1.0f);
+        }
+
         // draggable-thick-scrollbar: thumb glyph identical to upstream
         // vscroll_indicator (┃╹╻),painted only in the rightmost reserved
         // column. We reserve 3 columns total so the *invisible* hit zone
@@ -3919,7 +3964,7 @@ static int run_interactive_app(const CliOptions& cli,
         // (3 cells) so long sessions don't shrink the click target to a
         // single half-block.
         auto message_view = acecode::tui::thick_vscroll_bar(
-                                vbox(std::move(message_elements)),
+                                std::move(message_body),
                                 /*width=*/3,
                                 scrollbar_box)
             | yframe | reflect(chat_box) | flex
@@ -3933,7 +3978,7 @@ static int run_interactive_app(const CliOptions& cli,
         // Priority: if a tool is streaming output, show the live tool-progress
         // element instead of the thinking animation (the tool is the more
         // specific "in-progress" signal).
-        Element thinking_element = text("");
+        Element thinking_element = emptyElement();
         if (state.tool_running) {
             thinking_element = render_tool_progress(state);
         } else if (state.is_waiting) {
@@ -3989,7 +4034,7 @@ static int run_interactive_app(const CliOptions& cli,
         // -- Prompt line --
         Element prompt_line;
         // Resume picker overlay above the prompt
-        Element resume_picker_element = text("");
+        Element resume_picker_element = emptyElement();
         if (state.resume_picker_active && !state.resume_items.empty()) {
             Elements picker_rows;
             picker_rows.push_back(
@@ -4036,7 +4081,7 @@ static int run_interactive_app(const CliOptions& cli,
             picker_rows.push_back(text(""));
             resume_picker_element = vbox(std::move(picker_rows)) | border | color(Color::Cyan);
         }
-        Element rewind_picker_element = text("");
+        Element rewind_picker_element = emptyElement();
         if (state.rewind_picker_active && !state.rewind_items.empty()) {
             Elements picker_rows;
             if (state.rewind_mode_active) {
@@ -4110,7 +4155,7 @@ static int run_interactive_app(const CliOptions& cli,
         }
         // /model picker overlay。同 resume_picker_element 的视觉风格(青边、
         // 滚动指示、选中行高亮)—— 单纯多一列前缀 "*" 标记当前 effective entry。
-        Element model_picker_element = text("");
+        Element model_picker_element = emptyElement();
         if (state.model_picker_open && !state.model_picker_options.empty()) {
             Elements picker_rows;
             picker_rows.push_back(
@@ -4169,7 +4214,7 @@ static int run_interactive_app(const CliOptions& cli,
         // AskUserQuestion overlay —— 和 confirm_pending 互斥,在渲染层面
         // 显式让 ask 优先(事件层在 confirm 分支之前也已经拦截,这里只是
         // 作为显式护栏)。
-        Element ask_overlay_element = text("");
+        Element ask_overlay_element = emptyElement();
         ask_scrollbar_box = Box{};
         if (state.ask_pending && !state.ask_questions.empty() &&
             state.ask_current_question >= 0 &&
@@ -4277,7 +4322,7 @@ static int run_interactive_app(const CliOptions& cli,
         //   2  No
         // ↑↓ 移焦点,Enter 提交焦点项,1/2/3 数字键直选,Shift+Tab 直接选第二项,
         // Esc → Deny。事件分支在 CatchEvent 中,渲染层只是把状态画出来。
-        Element confirm_overlay_element = text("");
+        Element confirm_overlay_element = emptyElement();
         if (state.confirm_pending) {
             Elements rows;
             std::string title = acecode::tui::build_confirm_question(

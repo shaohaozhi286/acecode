@@ -32,4 +32,34 @@ inline bool is_chat_tail_position(int focus_index,
     return line_offset >= chat_tail_line_offset(line_counts, focus_index);
 }
 
+inline int chat_transcript_display_rows(const std::vector<int>& line_counts,
+                                        int message_count) {
+    if (message_count <= 0) {
+        return 0;
+    }
+
+    int rows = 0;
+    for (int i = 0; i < message_count; ++i) {
+        rows += chat_line_count_at(line_counts, i);
+        rows += 1; // Spacer row rendered after every message.
+    }
+    return rows;
+}
+
+inline int chat_bottom_anchor_top_padding_rows(
+    const std::vector<int>& line_counts,
+    int message_count,
+    int viewport_rows) {
+    if (message_count <= 0 || viewport_rows <= 0) {
+        return 0;
+    }
+
+    const int transcript_rows =
+        chat_transcript_display_rows(line_counts, message_count);
+    if (transcript_rows >= viewport_rows) {
+        return 0;
+    }
+    return viewport_rows - transcript_rows;
+}
+
 } // namespace acecode::tui

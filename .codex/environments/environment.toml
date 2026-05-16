@@ -11,6 +11,11 @@ icon = "run"
 command = "N:\\Users\\shao\\acecode\\build\\Debug\\acecode-desktop.exe"
 
 [[actions]]
+name = "运行 TUI"
+icon = "run"
+command = "C:\\Users\\shao\\acecode\\build\\Release\\acecode.exe"
+
+[[actions]]
 name = "编译"
 icon = "run"
 command = "cmd /c \"taskkill /im acecode.exe /f 2>nul & taskkill /im acecode-desktop.exe /f 2>nul & cmake --build C:\\Users\\shao\\acecode\\build --config Debug -j28\""

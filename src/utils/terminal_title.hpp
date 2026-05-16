@@ -5,9 +5,9 @@
 
 namespace acecode {
 
-// Write `ESC ] 2 ; <text> ESC \` to stdout to set the terminal/window title.
-// Empty text emits the same sequence with an empty body, which most terminals
-// interpret as "let the next program (e.g. shell) repaint the title".
+// Set the terminal/window title. Windows uses the console title API to avoid
+// leaking OSC escape bytes in legacy cmd.exe; POSIX terminals use OSC 2.
+// Empty text clears the title.
 void set_terminal_title(std::string_view text);
 
 // Convenience: set_terminal_title("").

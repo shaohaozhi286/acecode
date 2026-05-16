@@ -146,7 +146,7 @@ void refresh_slash_dropdown(TuiState& state, const CommandRegistry& reg) {
 ftxui::Element render_slash_dropdown(const TuiState& state) {
     using namespace ftxui;
     if (!state.slash_dropdown_active || state.slash_dropdown_items.empty()) {
-        return text("");
+        return emptyElement();
     }
 
     const int term_cols = Terminal::Size().dimx;
