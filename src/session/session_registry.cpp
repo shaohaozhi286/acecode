@@ -203,6 +203,13 @@ bool parse_goal_budget_value(const std::string& text, std::int64_t* out) {
     return *out > 0;
 }
 
+PermissionMode permission_mode_from_name(std::string mode) {
+    if (mode == "acceptEdits") mode = "accept-edits";
+    if (mode == "accept-edits") return PermissionMode::AcceptEdits;
+    if (mode == "yolo") return PermissionMode::Yolo;
+    return PermissionMode::Default;
+}
+
 struct RegistryGoalArgs {
     std::optional<std::int64_t> token_budget;
     std::string remainder;
@@ -465,6 +472,12 @@ SessionRegistry::make_entry_locked(const std::string& id,
         // 注意: rules 当前没有 copy 接口 — v1 暂不复制 rules,daemon 路径
         // 自己装(后续 Section 9 落 HTTP 时一起补)。TUI 路径不受影响。
     }
+    if (resumed_meta) {
+        entry->perm->set_mode(permission_mode_from_name(resumed_meta->permission_mode));
+    }
+    entry->sm->set_permission_mode(
+        PermissionManager::mode_name(entry->perm->mode()),
+        /*persist_immediately=*/false);
 
     // AgentLoop: 给一个空 callbacks(daemon 全走 events_)
     AgentCallbacks empty_cb;
@@ -674,6 +687,9 @@ bool SessionRegistry::set_permission_mode(const std::string& id, PermissionMode 
     if (it == entries_.end() || !it->second || !it->second->perm) return false;
     it->second->perm->set_mode(mode);
     it->second->perm->clear_session_allows();
+    if (it->second->sm) {
+        it->second->sm->set_permission_mode(PermissionManager::mode_name(mode));
+    }
     if (mode == PermissionMode::Yolo && it->second->prompter) {
         it->second->prompter->resolve_all(PermissionDecisionChoice::Allow);
     }
@@ -794,6 +810,12 @@ std::vector<SessionInfo> SessionRegistry::list_active() const {
             // 拿:这里**可选**调 load_session_meta 走磁盘读,有 IO 成本。
             // v1 不读磁盘(list_active 是热路径),只填 id + active + title。
             info.title = entry->sm->current_title();
+            info.turn_count = entry->sm->current_turn_count();
+            info.last_token_usage = entry->sm->current_last_token_usage();
+            info.session_token_usage = entry->sm->current_session_token_usage();
+        }
+        if (entry->perm) {
+            info.permission_mode = PermissionManager::mode_name(entry->perm->mode());
         }
         info.provider = entry->provider;
         info.model = entry->model;

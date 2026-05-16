@@ -8,6 +8,7 @@ import { api, ApiError } from './lib/api.js';
 import { setToken } from './lib/auth.js';
 import { connection } from './lib/connection.js';
 import { createNewSessionForActiveWorkspace } from './lib/newSession.js';
+import { goBack, goForward, pushNavigation } from './lib/navigationHistory.js';
 import { usePreference } from './lib/usePreference.js';
 import {
   DEFAULT_UI_PREFS,
@@ -69,8 +70,10 @@ export function App() {
   const [health,    setHealth]    = useState(null);
 
   const [activeRef,    setActiveRef]    = useState(null);
+  const [navHistory, setNavHistory] = useState({ back: [], forward: [] });
   const [commandWorkspaceHash, setCommandWorkspaceHash] = useState('');
   const [showSettings, setShowSettings] = useState(false);
+  const [settingsNavKey, setSettingsNavKey] = useState('general');
   const [permReqs,     setPermReqs]     = useState([]);
   const [questionReqs, setQuestionReqs] = useState([]);
   const [searchOpen,   setSearchOpen]   = useState(false);
@@ -87,6 +90,53 @@ export function App() {
   const singleShellRef = useRef(null);
   const sidebarResizeActiveRef = useRef(false);
   const avatarPrefTouchedRef = useRef(false);
+  const activeRefRef = useRef(activeRef);
+  const navHistoryRef = useRef(navHistory);
+
+  useEffect(() => { activeRefRef.current = activeRef; }, [activeRef]);
+  useEffect(() => { navHistoryRef.current = navHistory; }, [navHistory]);
+
+  const replaceActiveRef = useCallback((nextRefOrUpdater) => {
+    const current = activeRefRef.current;
+    const next = typeof nextRefOrUpdater === 'function'
+      ? nextRefOrUpdater(current)
+      : nextRefOrUpdater;
+    activeRefRef.current = next;
+    setActiveRef(next);
+  }, []);
+
+  const navigateToRef = useCallback((nextRefOrUpdater) => {
+    const current = activeRefRef.current;
+    const next = typeof nextRefOrUpdater === 'function'
+      ? nextRefOrUpdater(current)
+      : nextRefOrUpdater;
+    const nextHistory = pushNavigation(navHistoryRef.current, current, next);
+    navHistoryRef.current = nextHistory;
+    activeRefRef.current = next;
+    setNavHistory(nextHistory);
+    setActiveRef(next);
+  }, []);
+
+  const goBackActiveRef = useCallback(() => {
+    const result = goBack(navHistoryRef.current, activeRefRef.current);
+    navHistoryRef.current = result.history;
+    activeRefRef.current = result.activeRef;
+    setNavHistory(result.history);
+    setActiveRef(result.activeRef);
+  }, []);
+
+  const goForwardActiveRef = useCallback(() => {
+    const result = goForward(navHistoryRef.current, activeRefRef.current);
+    navHistoryRef.current = result.history;
+    activeRefRef.current = result.activeRef;
+    setNavHistory(result.history);
+    setActiveRef(result.activeRef);
+  }, []);
+
+  const openSettingsSection = useCallback((key = 'general') => {
+    setSettingsNavKey(key || 'general');
+    setShowSettings(true);
+  }, []);
 
   useEffect(() => {
     setSingleLayout((prev) => {
@@ -132,12 +182,12 @@ export function App() {
     const params = new URLSearchParams(window.location.search);
     const openId = params.get('open');
     if (!openId) return;
-    setActiveRef((prev) => ({ ...(prev || {}), sessionId: openId }));
+    replaceActiveRef((prev) => ({ ...(prev || {}), sessionId: openId }));
     params.delete('open');
     const qs = params.toString();
     const newUrl = window.location.pathname + (qs ? '?' + qs : '');
     window.history.replaceState(null, '', newUrl);
-  }, []);
+  }, [replaceActiveRef]);
 
   // 桌面壳通知 click_handler 走 webview eval 调这两个 window 全局函数,见
   // openspec/changes/add-desktop-attention-notifications。
@@ -147,7 +197,7 @@ export function App() {
     if (typeof window === 'undefined') return;
     window.aceDesktop_focusSessionFromBridge = (sessionId) => {
       if (!sessionId) return;
-      setActiveRef((prev) => ({ ...(prev || {}), sessionId: String(sessionId) }));
+      navigateToRef((prev) => ({ ...(prev || {}), sessionId: String(sessionId) }));
     };
     window.aceDesktop_activateAndOpenSession = async (workspaceHash, sessionId) => {
       if (!sessionId) return;
@@ -162,10 +212,10 @@ export function App() {
             return;
           }
         } catch {
-          // 降级:直接 setActiveRef
+          // 降级:直接在当前前端状态中打开
         }
       }
-      setActiveRef({ workspaceHash: targetHash, sessionId: String(sessionId) });
+      navigateToRef({ workspaceHash: targetHash, sessionId: String(sessionId) });
     };
     return () => {
       try {
@@ -177,7 +227,7 @@ export function App() {
         window.aceDesktop_activateAndOpenSession = undefined;
       }
     };
-  }, []);
+  }, [navigateToRef]);
 
   // 全局 Ctrl/Cmd+K 切换搜索面板。matchShortcut 处理大小写与修饰键。
   useGlobalShortcut(
@@ -190,7 +240,7 @@ export function App() {
     if (!session?.id) return;
     setSearchOpen(false);
     const targetHash = session.workspace_hash || '';
-    const sameWorkspace = !targetHash || targetHash === activeRef?.workspaceHash;
+    const sameWorkspace = !targetHash || targetHash === activeRefRef.current?.workspaceHash;
 
     if (!sameWorkspace
         && typeof window !== 'undefined'
@@ -208,7 +258,7 @@ export function App() {
       }
     }
 
-    setActiveRef({
+    navigateToRef({
       workspaceHash: targetHash,
       contextId: 'default',
       sessionId: session.id,
@@ -220,7 +270,7 @@ export function App() {
       created_at: session.created_at,
       updated_at: session.updated_at,
     });
-  }, [activeRef?.workspaceHash]);
+  }, [navigateToRef]);
 
   useEffect(() => {
     const pushUnique = (setter, payload) => {
@@ -280,17 +330,17 @@ export function App() {
   }, [setUiPrefs]);
 
   const openHomeForWorkspace = useCallback((workspace = null) => {
-    setActiveRef(homeRefFromWorkspace(workspace, activeRef, health));
-  }, [activeRef, health]);
+    navigateToRef(homeRefFromWorkspace(workspace, activeRefRef.current, health));
+  }, [health, navigateToRef]);
 
   const createDesktopTraySession = useCallback(async () => {
     try {
-      const next = await createNewSessionForActiveWorkspace(api, activeRef, health);
-      setActiveRef(next);
+      const next = await createNewSessionForActiveWorkspace(api, activeRefRef.current, health);
+      navigateToRef(next);
     } catch (e) {
       toast({ kind: 'err', text: '新建会话失败:' + (e.message || '') });
     }
-  }, [activeRef, health]);
+  }, [health, navigateToRef]);
 
   const handlePermissionModeChanged = useCallback(({ sessionId, mode }) => {
     if (mode !== 'yolo' || !sessionId) return;
@@ -418,19 +468,25 @@ export function App() {
     <SlashCommandsProvider workspaceHash={commandWorkspaceHash}>
     <div className="h-full w-full flex flex-col bg-bg text-fg font-sans">
       <TopBar
-        onSettings={() => setShowSettings(true)}
+        onSettings={() => openSettingsSection('general')}
         onNewSession={() => openHomeForWorkspace()}
         onOpenSearch={() => setSearchOpen(true)}
         sidebarCollapsed={sidebarCollapsed}
         onToggleSidebar={toggleProjectSidebar}
+        onGoBack={goBackActiveRef}
+        onGoForward={goForwardActiveRef}
+        canGoBack={navHistory.back.length > 0}
+        canGoForward={navHistory.forward.length > 0}
       />
       <div ref={singleShellRef} className="flex-1 flex overflow-hidden relative min-h-0 ace-single-shell">
         <Sidebar
           activeId={activeId}
-          onSelect={setActiveRef}
+          activeRef={activeRef}
+          onSelect={navigateToRef}
           collapsed={sidebarCollapsed}
           width={singleLayout.sidebar}
           onOpenHome={openHomeForWorkspace}
+          onOpenSettingsSection={openSettingsSection}
         />
         {view === 'single' && !projectSidebarCollapsed && (
           <div
@@ -454,7 +510,7 @@ export function App() {
           {view === 'single' && (
             <ChatView
               sessionRef={activeRef}
-              onSessionPromoted={setActiveRef}
+              onSessionPromoted={navigateToRef}
               onCommandWorkspaceChange={setCommandWorkspaceHash}
               health={health}
               showSidePanel
@@ -474,6 +530,7 @@ export function App() {
         {showSettings && (
           <SettingsPage
             onClose={() => setShowSettings(false)}
+            initialNavKey={settingsNavKey}
             health={health}
             activeSessionId={activeId}
             onPermissionModeChanged={handlePermissionModeChanged}

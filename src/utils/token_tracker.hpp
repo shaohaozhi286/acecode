@@ -8,6 +8,11 @@ namespace acecode {
 
 class TokenTracker {
 public:
+    struct Snapshot {
+        TokenUsage last;
+        TokenUsage session;
+    };
+
     // Record usage from a server response.
     // Updates both "last" (current context) and "session" (cumulative) counters.
     void record(const TokenUsage& usage);
@@ -26,6 +31,10 @@ public:
     int cache_read_tokens() const;
     int cache_write_tokens() const;
 
+    Snapshot snapshot() const;
+    void restore(const Snapshot& snapshot);
+    void restore(const TokenUsage& last, const TokenUsage& session);
+
     // Reset all counters
     void reset();
 
@@ -42,6 +51,11 @@ private:
     // Most recent API call (current context window occupancy)
     int last_prompt_tokens_ = 0;
     int last_completion_tokens_ = 0;
+    int last_total_tokens_ = 0;
+    int last_cache_read_tokens_ = 0;
+    int last_cache_write_tokens_ = 0;
+    int last_reasoning_tokens_ = 0;
+    bool last_has_data_ = false;
 
     // Session cumulative
     int session_prompt_tokens_ = 0;
@@ -49,6 +63,8 @@ private:
     int session_total_tokens_ = 0;
     int session_cache_read_tokens_ = 0;
     int session_cache_write_tokens_ = 0;
+    int session_reasoning_tokens_ = 0;
+    bool session_has_data_ = false;
 };
 
 } // namespace acecode

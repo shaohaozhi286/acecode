@@ -22,6 +22,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "../provider/llm_provider.hpp"
+
 namespace acecode {
 
 // ----- 事件流 -----
@@ -132,6 +134,10 @@ struct SessionInfo {
     int         context_window = 0;
     std::string title;
     int         message_count = 0;
+    int         turn_count = 0;
+    std::string permission_mode = "default";
+    TokenUsage  last_token_usage;
+    TokenUsage  session_token_usage;
     bool        active = false;   // 是否在 SessionRegistry 内存活
     bool        busy = false;     // 是否正在处理当前轮
 };

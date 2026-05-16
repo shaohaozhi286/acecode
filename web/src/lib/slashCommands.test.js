@@ -14,6 +14,7 @@ import {
   commandsWithFallback,
   fallbackCommands,
   parseLeadingCommand,
+  deleteLeadingCommandBlock,
   parseExecutableBuiltinCommand,
 } from './slashCommands.js';
 
@@ -208,6 +209,41 @@ run('parseLeadingCommand:tab 与换行也算空白边界', () => {
   const r2 = parseLeadingCommand('/init\nnext', ['init']);
   assert.equal(r2.name, 'init');
   assert.equal(r2.headLength, 5);
+});
+
+run('deleteLeadingCommandBlock:Backspace 在命令块内会整块删除', () => {
+  const text = '/init hello';
+  const leading = parseLeadingCommand(text, ['init']);
+  assert.deepEqual(deleteLeadingCommandBlock(text, leading, 3, 3, 'backward'), {
+    value: 'hello',
+    selectionStart: 0,
+    selectionEnd: 0,
+  });
+});
+
+run('deleteLeadingCommandBlock:Backspace 在命令后的空格处也整块删除', () => {
+  const text = '/init hello';
+  const leading = parseLeadingCommand(text, ['init']);
+  assert.equal(deleteLeadingCommandBlock(text, leading, 6, 6, 'backward')?.value, 'hello');
+});
+
+run('deleteLeadingCommandBlock:Delete 在命令块前会整块删除', () => {
+  const text = '/compact now';
+  const leading = parseLeadingCommand(text, ['compact']);
+  assert.equal(deleteLeadingCommandBlock(text, leading, 0, 0, 'forward')?.value, 'now');
+});
+
+run('deleteLeadingCommandBlock:选区碰到命令块时删除整个命令和选区', () => {
+  const text = '/init hello world';
+  const leading = parseLeadingCommand(text, ['init']);
+  assert.equal(deleteLeadingCommandBlock(text, leading, 2, 11, 'backward')?.value, 'world');
+});
+
+run('deleteLeadingCommandBlock:不碰到命令块时返回 null', () => {
+  const text = '/init hello';
+  const leading = parseLeadingCommand(text, ['init']);
+  assert.equal(deleteLeadingCommandBlock(text, leading, 7, 7, 'backward'), null);
+  assert.equal(deleteLeadingCommandBlock('plain', { name: null, headLength: 0 }, 1, 1, 'backward'), null);
 });
 
 run('parseExecutableBuiltinCommand:识别 init、compact 和 goal', () => {

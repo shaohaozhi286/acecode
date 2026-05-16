@@ -94,6 +94,23 @@ bool platform_open_directory(const fs::path& path, std::string& error) {
 
 } // namespace
 
+std::vector<std::string> append_allowed_open_root(
+    std::vector<std::string> allowed_roots_utf8,
+    const std::string& extra_root_utf8) {
+    if (extra_root_utf8.empty()) return allowed_roots_utf8;
+
+    const auto extra_key = compare_key(acecode::path_from_utf8(extra_root_utf8));
+    if (extra_key.empty()) return allowed_roots_utf8;
+
+    for (const auto& root : allowed_roots_utf8) {
+        if (compare_key(acecode::path_from_utf8(root)) == extra_key) {
+            return allowed_roots_utf8;
+        }
+    }
+    allowed_roots_utf8.push_back(extra_root_utf8);
+    return allowed_roots_utf8;
+}
+
 ValidatedOpenDirectory validate_open_directory_request(
     const std::string& path_utf8,
     const std::vector<std::string>& allowed_roots_utf8) {

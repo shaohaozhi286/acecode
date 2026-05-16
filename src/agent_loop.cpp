@@ -710,16 +710,26 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
                 break;
             case StreamEventType::Usage:
                 last_api_prompt_tokens_.store(evt.usage.prompt_tokens);
+                {
+                    std::lock_guard<std::mutex> lk(resp_mu);
+                    accumulated.usage = evt.usage;
+                }
                 if (evt.usage.has_data) {
                     account_goal_usage(evt.usage.total_tokens, false);
                 }
                 if (callbacks_.on_usage) {
                     callbacks_.on_usage(evt.usage);
                 }
+                if (session_manager_) {
+                    session_manager_->record_token_usage(evt.usage);
+                }
                 events_.emit(SessionEventKind::Usage, nlohmann::json{
                     {"prompt_tokens", evt.usage.prompt_tokens},
                     {"completion_tokens", evt.usage.completion_tokens},
                     {"total_tokens", evt.usage.total_tokens},
+                    {"cache_read_tokens", evt.usage.cache_read_tokens},
+                    {"cache_write_tokens", evt.usage.cache_write_tokens},
+                    {"reasoning_tokens", evt.usage.reasoning_tokens},
                     {"has_data", evt.usage.has_data},
                 });
                 break;
@@ -778,6 +788,9 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
             account_goal_usage(estimated_usage.total_tokens, false);
             if (callbacks_.on_usage) {
                 callbacks_.on_usage(estimated_usage);
+            }
+            if (session_manager_) {
+                session_manager_->record_token_usage(estimated_usage);
             }
         }
 

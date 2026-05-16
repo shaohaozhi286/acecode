@@ -23,6 +23,62 @@ namespace fs = std::filesystem;
 
 namespace acecode {
 
+namespace {
+
+std::string normalize_permission_mode_name(std::string mode) {
+    if (mode == "acceptEdits") mode = "accept-edits";
+    if (mode == "accept-edits" || mode == "yolo") return mode;
+    return "default";
+}
+
+bool token_usage_has_values(const TokenUsage& usage) {
+    return usage.has_data ||
+           usage.prompt_tokens != 0 ||
+           usage.completion_tokens != 0 ||
+           usage.total_tokens != 0 ||
+           usage.cache_read_tokens != 0 ||
+           usage.cache_write_tokens != 0 ||
+           usage.reasoning_tokens != 0;
+}
+
+nlohmann::json token_usage_to_json(const TokenUsage& usage) {
+    return nlohmann::json{
+        {"prompt_tokens", usage.prompt_tokens},
+        {"completion_tokens", usage.completion_tokens},
+        {"total_tokens", usage.total_tokens},
+        {"cache_read_tokens", usage.cache_read_tokens},
+        {"cache_write_tokens", usage.cache_write_tokens},
+        {"reasoning_tokens", usage.reasoning_tokens},
+        {"has_data", usage.has_data},
+    };
+}
+
+TokenUsage token_usage_from_json(const nlohmann::json& j) {
+    TokenUsage usage;
+    if (!j.is_object()) return usage;
+    usage.prompt_tokens = j.value("prompt_tokens", 0);
+    usage.completion_tokens = j.value("completion_tokens", 0);
+    usage.total_tokens = j.value("total_tokens", 0);
+    usage.cache_read_tokens = j.value("cache_read_tokens", 0);
+    usage.cache_write_tokens = j.value("cache_write_tokens", 0);
+    usage.reasoning_tokens = j.value("reasoning_tokens", 0);
+    usage.has_data = j.value("has_data", false);
+    return usage;
+}
+
+bool is_hidden_goal_context_message_storage(const ChatMessage& msg) {
+    return msg.metadata.is_object() &&
+           msg.metadata.value("hidden_goal_context", false);
+}
+
+bool is_visible_user_turn(const ChatMessage& msg) {
+    return msg.role == "user" &&
+           !msg.is_meta &&
+           !is_hidden_goal_context_message_storage(msg);
+}
+
+} // namespace
+
 std::string SessionStorage::compute_project_hash(const std::string& cwd) {
     // 委托到 utils/cwd_hash.cpp 的共享实现 — desktop 的 WorkspaceRegistry 与
     // daemon 的 SessionStorage 必须用同一份算法,否则同一目录两边算出不同 hash。
@@ -138,6 +194,14 @@ void SessionStorage::write_meta(const std::string& meta_path, const SessionMeta&
     if (!meta.title.empty()) {
         j["title"] = meta.title;
     }
+    j["permission_mode"] = normalize_permission_mode_name(meta.permission_mode);
+    j["turn_count"] = (std::max)(0, meta.turn_count);
+    if (token_usage_has_values(meta.last_token_usage)) {
+        j["last_token_usage"] = token_usage_to_json(meta.last_token_usage);
+    }
+    if (token_usage_has_values(meta.session_token_usage)) {
+        j["session_token_usage"] = token_usage_to_json(meta.session_token_usage);
+    }
     // fork 元数据:空字符串时省略,保持老 meta 文件 byte-byte 不变。
     if (!meta.forked_from.empty()) {
         j["forked_from"] = meta.forked_from;
@@ -171,6 +235,15 @@ SessionMeta SessionStorage::read_meta(const std::string& meta_path) {
         if (j.contains("model"))         meta.model         = j["model"].get<std::string>();
         meta.model_preset    = j.value("model_preset",    std::string{});
         meta.title           = j.value("title",           std::string{});
+        meta.permission_mode = normalize_permission_mode_name(
+            j.value("permission_mode", std::string{"default"}));
+        meta.turn_count      = (std::max)(0, j.value("turn_count", 0));
+        if (j.contains("last_token_usage")) {
+            meta.last_token_usage = token_usage_from_json(j["last_token_usage"]);
+        }
+        if (j.contains("session_token_usage")) {
+            meta.session_token_usage = token_usage_from_json(j["session_token_usage"]);
+        }
         meta.forked_from     = j.value("forked_from",     std::string{});
         meta.fork_message_id = j.value("fork_message_id", std::string{});
         meta.archived        = j.value("archived",        false);
@@ -241,6 +314,7 @@ std::string extract_storage_summary(const std::string& content) {
 
 bool is_visible_history_message(const ChatMessage& msg) {
     if (msg.is_meta || msg.is_compact_summary) return false;
+    if (is_hidden_goal_context_message_storage(msg)) return false;
     if (!msg.content.empty()) return true;
     if (!msg.tool_calls.is_null() && !msg.tool_calls.empty()) return true;
     return false;
@@ -249,22 +323,27 @@ bool is_visible_history_message(const ChatMessage& msg) {
 void enrich_meta_from_messages(const std::string& project_dir,
                                const std::string& session_id,
                                SessionMeta& meta) {
-    if (meta.message_count > 0 && !meta.summary.empty()) return;
+    if (meta.message_count > 0 && !meta.summary.empty() && meta.turn_count > 0) return;
 
     const auto path = SessionStorage::session_path(project_dir, session_id);
     auto messages = SessionStorage::load_messages(path);
     if (messages.empty()) return;
 
     int visible_count = 0;
+    int visible_turn_count = 0;
     std::string latest_user;
     for (const auto& msg : messages) {
         if (!is_visible_history_message(msg)) continue;
         ++visible_count;
-        if (msg.role == "user" && !msg.content.empty()) {
+        if (is_visible_user_turn(msg)) {
+            ++visible_turn_count;
+        }
+        if (is_visible_user_turn(msg) && !msg.content.empty()) {
             latest_user = msg.content;
         }
     }
     if (meta.message_count <= 0) meta.message_count = visible_count;
+    if (meta.turn_count <= 0) meta.turn_count = visible_turn_count;
     if (meta.summary.empty() && !latest_user.empty()) {
         meta.summary = extract_storage_summary(latest_user);
     }

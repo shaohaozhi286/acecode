@@ -101,3 +101,37 @@ TEST(SessionManagerResume, PidOnlyOldDataIsRejectedAndDoesNotCreateCanonical) {
     fs::remove_all(project_dir);
     fs::remove_all(cwd);
 }
+
+TEST(SessionManagerResume, RestoresPersistedRuntimeState) {
+    auto cwd = make_temp_cwd("runtime_state");
+    auto project_dir = SessionStorage::get_project_dir(cwd.string());
+    fs::remove_all(project_dir);
+
+    SessionManager writer;
+    writer.start_session(cwd.string(), "test-provider", "test-model");
+    writer.set_permission_mode("yolo");
+    writer.on_message(message("user", "first turn"));
+    writer.on_message(message("assistant", "reply"));
+
+    acecode::TokenUsage usage;
+    usage.prompt_tokens = 8000;
+    usage.completion_tokens = 1200;
+    usage.total_tokens = 9200;
+    usage.has_data = true;
+    writer.record_token_usage(usage);
+    const std::string session_id = writer.current_session_id();
+    writer.finalize();
+
+    SessionManager reader;
+    reader.start_session(cwd.string(), "test-provider", "test-model");
+    auto messages = reader.resume_session(session_id);
+    ASSERT_EQ(messages.size(), 2u);
+
+    EXPECT_EQ(reader.current_permission_mode(), "yolo");
+    EXPECT_EQ(reader.current_turn_count(), 1);
+    EXPECT_EQ(reader.current_last_token_usage().prompt_tokens, 8000);
+    EXPECT_EQ(reader.current_session_token_usage().total_tokens, 9200);
+
+    fs::remove_all(project_dir);
+    fs::remove_all(cwd);
+}

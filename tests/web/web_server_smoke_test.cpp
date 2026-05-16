@@ -355,6 +355,10 @@ TEST(WebServerHttp, SessionPermissionModeEndpointUpdatesActiveSession) {
     ASSERT_NE(entry->perm, nullptr);
     EXPECT_EQ(entry->perm->mode(), acecode::PermissionMode::Yolo);
     EXPECT_TRUE(entry->perm->should_auto_allow("bash", false));
+
+    auto meta = acecode::SessionStorage::read_meta(
+        acecode::SessionStorage::meta_path(fx.project_dir, sid));
+    EXPECT_EQ(meta.permission_mode, "yolo");
 }
 
 // 场景: 权限模式端点应拒绝未知 mode,避免前端 typo 把 daemon 状态改坏。
@@ -949,6 +953,32 @@ TEST(WebServerHttp, GetMessagesReturnsEventsAndMessagesSchema) {
     EXPECT_TRUE(j["messages"].is_array());
 }
 
+// 场景:首次打开/切回 Web 会话时,即使 goal_updated 事件已在订阅前发出,
+// /messages 也必须携带当前 goal 快照,否则用户看不到停止 /goal 的入口。
+TEST(WebServerHttp, GetMessagesIncludesCurrentGoalSnapshot) {
+    WebServerFixture fx;
+    auto post = cpr::Post(cpr::Url{fx.url("/api/sessions")},
+                          cpr::Header{{"Content-Type", "application/json"}},
+                          cpr::Body{R"({})"});
+    ASSERT_EQ(post.status_code, 201);
+    auto sid = json::parse(post.text)["session_id"].get<std::string>();
+
+    auto* entry = fx.registry->lookup(sid);
+    ASSERT_NE(entry, nullptr);
+    ASSERT_TRUE(entry->sm);
+    ASSERT_TRUE(entry->sm->goal_store()->replace_thread_goal(
+        sid, "stop this goal from web", std::nullopt, acecode::ThreadGoalStatus::Active));
+
+    auto r = cpr::Get(cpr::Url{fx.url("/api/sessions/" + sid + "/messages")});
+    ASSERT_EQ(r.status_code, 200) << r.text;
+    auto j = json::parse(r.text);
+    ASSERT_TRUE(j.contains("goal")) << r.text;
+    EXPECT_EQ(j["goal"]["status"], "active");
+    EXPECT_EQ(j["goal"]["objective"], "stop this goal from web");
+    ASSERT_TRUE(j.contains("busy")) << r.text;
+    EXPECT_FALSE(j["busy"].get<bool>());
+}
+
 // 场景: GET /api/sessions/:id/messages?since=N 走 replay-only 路径,返回的是
 // 数组(不带 messages 包裹)。SubscribeListener 在事件数=0 时返回空数组 200。
 TEST(WebServerHttp, GetMessagesWithSinceReturnsArrayOnly) {
@@ -1044,6 +1074,11 @@ TEST(WebServerHttp, GetMessagesForInactiveDiskSessionReturnsHistory) {
     meta.created_at = "2026-05-02T01:02:03Z";
     meta.updated_at = meta.created_at;
     meta.message_count = 1;
+    meta.turn_count = 1;
+    meta.permission_mode = "accept-edits";
+    meta.last_token_usage.prompt_tokens = 32000;
+    meta.last_token_usage.total_tokens = 33000;
+    meta.last_token_usage.has_data = true;
     acecode::SessionStorage::write_meta(
         acecode::SessionStorage::meta_path(fx.project_dir, sid, 0), meta);
 
@@ -1053,6 +1088,10 @@ TEST(WebServerHttp, GetMessagesForInactiveDiskSessionReturnsHistory) {
     ASSERT_TRUE(j.contains("messages"));
     ASSERT_EQ(j["messages"].size(), 1u);
     EXPECT_EQ(j["messages"][0]["content"], "old disk prompt");
+    EXPECT_EQ(j["turn_count"], 1);
+    EXPECT_EQ(j["permission_mode"], "accept-edits");
+    ASSERT_TRUE(j["token_usage"].is_object());
+    EXPECT_EQ(j["token_usage"]["prompt_tokens"], 32000);
 }
 
 TEST(WebServerHttp, RestoreFileCheckpointRestoresTrackedFile) {
@@ -1151,6 +1190,33 @@ TEST(WebServerHttp, SkillsReturnsEmptyArrayWhenNotScanned) {
     auto j = json::parse(r.text);
     EXPECT_TRUE(j.is_array());
     EXPECT_EQ(j.size(), 0u);
+}
+
+// 场景: GET /api/skills/root 返回选中 workspace 的有效 skill 目录。
+TEST(WebServerHttp, SkillRootReturnsProjectAcecodeSkillsForWorkspace) {
+    WebServerFixture fx;
+    const auto local_skills = fx.cwd_dir / ".acecode" / "skills";
+    std::filesystem::create_directories(local_skills);
+    const std::string hash = acecode::compute_cwd_hash(fx.cwd);
+
+    auto r = cpr::Get(cpr::Url{fx.url("/api/skills/root?workspace=" + hash)});
+    ASSERT_EQ(r.status_code, 200) << r.text;
+    auto body = json::parse(r.text);
+    EXPECT_EQ(body["source"], "project_acecode");
+    EXPECT_EQ(body["workspace_hash"], hash);
+    EXPECT_EQ(std::filesystem::weakly_canonical(path_from_utf8(body["path"].get<std::string>())),
+              std::filesystem::weakly_canonical(local_skills));
+}
+
+// 场景:未知 workspace 不能通过 /api/skills/root 获取任意文件系统路径。
+TEST(WebServerHttp, SkillRootRejectsUnknownWorkspace) {
+    WebServerFixture fx;
+
+    auto r = cpr::Get(cpr::Url{fx.url("/api/skills/root?workspace=missing-workspace")});
+    ASSERT_EQ(r.status_code, 404) << r.text;
+    auto body = json::parse(r.text);
+    EXPECT_EQ(body["error"], "workspace not found");
+    EXPECT_FALSE(body.contains("path"));
 }
 
 // 场景: GET/PUT /api/mcp 互通 — PUT 写入 + GET 读回内容一致(spec 9.8)。
@@ -1273,6 +1339,22 @@ TEST(WebServerHttp, PostModelsCreatesSavedEntryWithoutApiKey) {
     ASSERT_EQ(fx.cfg.saved_models.size(), 2u);
     EXPECT_EQ(fx.cfg.saved_models.back().name, "smoke-openai");
     EXPECT_EQ(fx.cfg.saved_models.back().api_key, "sk-secret-do-not-leak");
+}
+
+// 场景:POST /api/models/probe 只接受 OpenAI-compatible 探测参数。这里走
+// 400 分支,不发真实网络请求,用于固定 route wiring + 错误码。
+TEST(WebServerHttp, PostModelsProbeRejectsUnsupportedProvider) {
+    WebServerFixture fx;
+    json req = {
+        {"provider", "copilot"},
+        {"base_url", "http://localhost:1234/v1"},
+    };
+    auto r = cpr::Post(cpr::Url{fx.url("/api/models/probe")},
+                       cpr::Header{{"Content-Type", "application/json"}},
+                       cpr::Body{req.dump()});
+    ASSERT_EQ(r.status_code, 400) << r.text;
+    auto j = json::parse(r.text);
+    EXPECT_EQ(j["error"], "UNKNOWN_PROVIDER");
 }
 
 // 场景:POST /api/models 重名 → 409 NAME_TAKEN(saved_models_editor 校验)。

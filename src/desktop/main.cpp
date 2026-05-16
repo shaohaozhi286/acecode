@@ -887,6 +887,10 @@ int main(int argc, char** argv) {
             for (const auto& m : registry.list()) {
                 if (!m.cwd.empty()) roots.push_back(m.cwd);
             }
+            const auto global_skills_root = path_to_utf8(path_from_utf8(acecode::get_acecode_dir()) / "skills");
+            std::error_code skills_ec;
+            fs::create_directories(path_from_utf8(global_skills_root), skills_ec);
+            roots = acecode::desktop::append_allowed_open_root(std::move(roots), global_skills_root);
             if (roots.empty()) {
                 return nlohmann::json{{"ok", false}, {"error", "no registered workspaces"}}.dump();
             }
