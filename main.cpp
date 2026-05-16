@@ -3049,17 +3049,29 @@ static int run_interactive_app(const CliOptions& cli,
                 if (sel.empty()) {
                     return paste_system_clipboard_text();
                 }
-                std::string seq = "\x1b]52;c;" + base64_encode(sel) + "\x1b\\";
-                std::fwrite(seq.data(), 1, seq.size(), stdout);
-                std::fflush(stdout);
+                auto clipboard_write = acecode::write_system_clipboard_text(sel);
+                bool copied = static_cast<bool>(clipboard_write);
+                const char* copy_method = "system clipboard";
+                if (!copied &&
+                    clipboard_write.status != ClipboardTextWriteResult::Status::TooLarge) {
+                    std::string seq = "\x1b]52;c;" + base64_encode(sel) + "\x1b\\";
+                    std::fwrite(seq.data(), 1, seq.size(), stdout);
+                    std::fflush(stdout);
+                    copied = true;
+                    copy_method = "OSC 52";
+                }
                 LOG_INFO("Copied " + std::to_string(sel.size()) +
-                         " bytes to clipboard via OSC 52");
+                         " bytes to clipboard via " + copy_method);
                 {
                     std::lock_guard<std::mutex> lk(state.mu);
-                    // sel.size() is a byte count, not a codepoint count — the
-                    // number shown matches what OSC 52 actually transports.
-                    std::string msg = "Copied " + std::to_string(sel.size()) +
-                                      " bytes to clipboard";
+                    std::string msg;
+                    if (copied) {
+                        // sel.size() is a byte count, not a codepoint count.
+                        msg = "Copied " + std::to_string(sel.size()) +
+                              " bytes to clipboard";
+                    } else {
+                        msg = "Clipboard copy failed";
+                    }
                     set_transient_status_line_locked(state, msg);
                 }
                 screen.PostEvent(Event::Custom);

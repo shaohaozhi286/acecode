@@ -99,11 +99,17 @@ if(APPLE)
 endif()
 
 if(APPLE)
+    set(ACECODE_MACOS_ICON "${CMAKE_SOURCE_DIR}/assets/macos/acecode.icns")
+    target_sources(acecode-desktop PRIVATE "${ACECODE_MACOS_ICON}")
+    set_source_files_properties("${ACECODE_MACOS_ICON}" PROPERTIES
+        MACOSX_PACKAGE_LOCATION "Resources"
+    )
     set_target_properties(acecode-desktop PROPERTIES
         # Keep the app bundle user-facing while avoiding a case-insensitive
         # collision with the bundled daemon binary copied below.
         RUNTIME_OUTPUT_NAME "ACECode"
         MACOSX_BUNDLE_BUNDLE_NAME "ACECode"
+        MACOSX_BUNDLE_ICON_FILE "acecode.icns"
         MACOSX_BUNDLE_GUI_IDENTIFIER "dev.acecode.desktop"
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/cmake/macos/ACECodeDesktopInfo.plist.in"
         MACOSX_BUNDLE_INFO_STRING "ACECode Desktop"

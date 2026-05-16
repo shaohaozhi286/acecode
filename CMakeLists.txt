@@ -185,6 +185,9 @@ target_include_directories(acecode_testable PUBLIC
 )
 target_link_libraries(acecode_testable PUBLIC
     cpr::cpr
+    ftxui::screen
+    ftxui::dom
+    ftxui::component
     libzip::zip
     nlohmann_json::nlohmann_json
     SQLite::SQLite3

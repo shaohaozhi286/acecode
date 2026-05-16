@@ -140,8 +140,8 @@ struct AgentLoopConfig {
 // 非法值会在 load_config 中被规范化为 "auto" 并 LOG_WARN。
 struct TuiConfig {
     std::string alt_screen_mode = "auto";
-    // When false, FTXUI will not enable terminal mouse tracking. This lets the
-    // terminal emulator keep native right-click context menus, at the cost of
+    // When false, FTXUI will not enable terminal mouse tracking. This lets some
+    // terminal emulators keep native right-click context menus, at the cost of
     // mouse wheel scrolling, drag selection, and draggable scrollbars in TUI.
     bool mouse_tracking = true;
     // 把 PgUp / PgDn 当成单行滚动 (等同 Alt+↑/↓). 部分终端 (老 conhost / Cmder /

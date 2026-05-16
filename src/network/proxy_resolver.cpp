@@ -443,7 +443,7 @@ cpr::SslOptions build_ssl_options(const ProxyOptions& opts) {
             return cpr::Ssl(cpr::ssl::NoRevoke{true},
                             cpr::ssl::VerifyPeer{false},
                             cpr::ssl::VerifyHost{false},
-                            cpr::ssl::CaInfo{*opts.ca_bundle});
+                            cpr::ssl::CaInfo{std::string(*opts.ca_bundle)});
         }
         return cpr::Ssl(cpr::ssl::NoRevoke{true},
                         cpr::ssl::VerifyPeer{false},
@@ -451,7 +451,7 @@ cpr::SslOptions build_ssl_options(const ProxyOptions& opts) {
     }
     if (opts.ca_bundle) {
         return cpr::Ssl(cpr::ssl::NoRevoke{true},
-                        cpr::ssl::CaInfo{*opts.ca_bundle});
+                        cpr::ssl::CaInfo{std::string(*opts.ca_bundle)});
     }
     return cpr::Ssl(cpr::ssl::NoRevoke{true});
 }

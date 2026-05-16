@@ -6,7 +6,9 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #ifdef _WIN32
@@ -38,6 +40,14 @@ FILE* open_pipe(const std::string& command) {
 #endif
 }
 
+FILE* open_write_pipe(const std::string& command) {
+#ifdef _WIN32
+    return _popen(command.c_str(), "w");
+#else
+    return popen(command.c_str(), "w");
+#endif
+}
+
 int close_pipe(FILE* pipe) {
 #ifdef _WIN32
     return _pclose(pipe);
@@ -60,6 +70,14 @@ ClipboardTextReadResult result(ClipboardTextReadResult::Status status,
     ClipboardTextReadResult r;
     r.status = status;
     r.text = std::move(text);
+    r.detail = std::move(detail);
+    return r;
+}
+
+ClipboardTextWriteResult write_result(ClipboardTextWriteResult::Status status,
+                                      std::string detail = {}) {
+    ClipboardTextWriteResult r;
+    r.status = status;
     r.detail = std::move(detail);
     return r;
 }
@@ -99,6 +117,49 @@ ClipboardTextReadResult read_windows_clipboard_text(std::size_t max_bytes) {
     }
     return result(ClipboardTextReadResult::Status::Success, std::move(text));
 }
+
+ClipboardTextWriteResult write_windows_clipboard_text(std::string_view text,
+                                                      std::size_t max_bytes) {
+    if (text.size() > max_bytes) {
+        return write_result(ClipboardTextWriteResult::Status::TooLarge);
+    }
+    std::wstring wide = utf8_to_wide(std::string(text));
+    if (!text.empty() && wide.empty()) {
+        return write_result(ClipboardTextWriteResult::Status::Unavailable,
+                            "UTF-8 conversion failed");
+    }
+
+    const SIZE_T bytes = (wide.size() + 1) * sizeof(wchar_t);
+    HGLOBAL handle = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (!handle) {
+        return write_result(ClipboardTextWriteResult::Status::Unavailable,
+                            "GlobalAlloc failed");
+    }
+
+    void* locked = GlobalLock(handle);
+    if (!locked) {
+        GlobalFree(handle);
+        return write_result(ClipboardTextWriteResult::Status::Unavailable,
+                            "GlobalLock failed");
+    }
+    std::memcpy(locked, wide.c_str(), bytes);
+    GlobalUnlock(handle);
+
+    if (!OpenClipboard(nullptr)) {
+        GlobalFree(handle);
+        return write_result(ClipboardTextWriteResult::Status::Unavailable,
+                            "OpenClipboard failed");
+    }
+    EmptyClipboard();
+    if (!SetClipboardData(CF_UNICODETEXT, handle)) {
+        CloseClipboard();
+        GlobalFree(handle);
+        return write_result(ClipboardTextWriteResult::Status::Unavailable,
+                            "SetClipboardData failed");
+    }
+    CloseClipboard();
+    return write_result(ClipboardTextWriteResult::Status::Success);
+}
 #endif
 
 } // namespace
@@ -114,6 +175,19 @@ std::vector<std::string> linux_clipboard_text_commands(bool has_wayland_display,
         commands.push_back("xsel --clipboard --output 2>/dev/null");
         commands.push_back("xclip -selection primary -o 2>/dev/null");
         commands.push_back("xsel --primary --output 2>/dev/null");
+    }
+    return commands;
+}
+
+std::vector<std::string> linux_clipboard_write_commands(bool has_wayland_display,
+                                                        bool has_x11_display) {
+    std::vector<std::string> commands;
+    if (has_wayland_display) {
+        commands.push_back("wl-copy --type text/plain 2>/dev/null");
+    }
+    if (has_x11_display) {
+        commands.push_back("xclip -selection clipboard 2>/dev/null");
+        commands.push_back("xsel --clipboard --input 2>/dev/null");
     }
     return commands;
 }
@@ -181,6 +255,37 @@ ClipboardTextReadResult read_system_clipboard_text_from_commands(
                   "No clipboard command succeeded");
 }
 
+ClipboardTextWriteResult write_system_clipboard_text_from_commands(
+    const std::vector<std::string>& commands,
+    std::string_view text,
+    std::size_t max_bytes) {
+    if (text.size() > max_bytes) {
+        return write_result(ClipboardTextWriteResult::Status::TooLarge);
+    }
+    if (commands.empty()) {
+        return write_result(ClipboardTextWriteResult::Status::Unavailable,
+                            "No clipboard command candidates");
+    }
+
+    for (const auto& command : commands) {
+        FILE* pipe = open_write_pipe(command);
+        if (!pipe) {
+            continue;
+        }
+
+        const std::size_t written =
+            text.empty() ? 0 : std::fwrite(text.data(), 1, text.size(), pipe);
+        const bool write_ok = written == text.size();
+        const int status = close_pipe(pipe);
+        if (write_ok && command_succeeded(status)) {
+            return write_result(ClipboardTextWriteResult::Status::Success);
+        }
+    }
+
+    return write_result(ClipboardTextWriteResult::Status::Unavailable,
+                        "No clipboard command succeeded");
+}
+
 ClipboardTextReadResult read_system_clipboard_text(std::size_t max_bytes) {
 #ifdef _WIN32
     return read_windows_clipboard_text(max_bytes);
@@ -191,6 +296,23 @@ ClipboardTextReadResult read_system_clipboard_text(std::size_t max_bytes) {
     return read_system_clipboard_text_from_commands(
         linux_clipboard_text_commands(has_env_value("WAYLAND_DISPLAY"),
                                       has_env_value("DISPLAY")),
+        max_bytes);
+#endif
+}
+
+ClipboardTextWriteResult write_system_clipboard_text(std::string_view text,
+                                                     std::size_t max_bytes) {
+#ifdef _WIN32
+    return write_windows_clipboard_text(text, max_bytes);
+#elif defined(__APPLE__)
+    return write_system_clipboard_text_from_commands({"pbcopy 2>/dev/null"},
+                                                     text,
+                                                     max_bytes);
+#else
+    return write_system_clipboard_text_from_commands(
+        linux_clipboard_write_commands(has_env_value("WAYLAND_DISPLAY"),
+                                       has_env_value("DISPLAY")),
+        text,
         max_bytes);
 #endif
 }

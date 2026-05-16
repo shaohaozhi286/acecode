@@ -1,5 +1,9 @@
 # os
 .DS_Store
+._*
+.AppleDouble
+.LSOverride
+Icon?
 
 # Build directories
 **/build/
@@ -47,6 +51,7 @@ ipch/
 
 # vcpkg (local installs)
 vcpkg_installed/
+.deps/
 
 # IDE / Editor
 .vscode/
