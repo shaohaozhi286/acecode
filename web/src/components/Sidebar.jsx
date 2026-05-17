@@ -22,6 +22,10 @@ import { sessionDisplayTitle, withNewSessionDisplayTitles } from '../lib/session
 import { pushTrayMenu } from '../lib/desktopTrayMenu.js';
 import { usePreference } from '../lib/usePreference.js';
 import {
+  SESSION_LIST_CHANGED_EVENT,
+  normalizeSessionListChangedDetail,
+} from '../lib/sessionListEvents.js';
+import {
   applyStatusSnapshot,
   applyStatusUpdate,
   mergeSessionStatus,
@@ -30,7 +34,11 @@ import {
   statusCursor,
   workspaceHasUnread,
 } from '../lib/sessionStatus.js';
-import { sidebarSessionProjection } from '../lib/sidebarSessions.js';
+import {
+  sidebarSessionProjection,
+  sortSidebarSessionsNewestFirst,
+  upsertSidebarSession,
+} from '../lib/sidebarSessions.js';
 import { toast } from './Toast.jsx';
 import { VsIcon } from './Icon.jsx';
 
@@ -422,6 +430,7 @@ export function Sidebar({
   const [expandedSessionLists, setExpandedSessionLists] = useState(new Set());
   const [activeWorkspaceHash, setActiveWorkspaceHash] = useState('');
   const refreshingRef = useRef(false);
+  const pendingRefreshHashRef = useRef('');
   const expandedRef = useRef(new Set());
   const pinnedByWorkspaceRef = useRef(new Map());
   const retainedSessionIdsRef = useRef(new Set());
@@ -512,7 +521,10 @@ export function Sidebar({
   }, [togglePinnedSession]);
 
   const refresh = useCallback(async (preferredHash = activeWorkspaceHash) => {
-    if (refreshingRef.current) return;
+    if (refreshingRef.current) {
+      pendingRefreshHashRef.current = preferredHash || activeWorkspaceHash || pendingRefreshHashRef.current;
+      return;
+    }
     refreshingRef.current = true;
     try {
       let workspaceArr = [];
@@ -586,7 +598,7 @@ export function Sidebar({
           const list = await api.listWorkspaceSessions(w.hash);
           return (Array.isArray(list) ? list : []).map((s) => ({ ...s, workspace_hash: s.workspace_hash || w.hash, cwd: s.cwd || w.cwd }));
         }));
-        const arr = perWorkspace.flat();
+        const arr = sortSidebarSessionsNewestFirst(perWorkspace.flat());
         setSessions(arr);
         setStatusBySession((prev) => arr.reduce((map, s) => applyStatusUpdate(map, {
           ...s,
@@ -599,6 +611,9 @@ export function Sidebar({
       catch { /* 鉴权失败不致命 */ }
     } finally {
       refreshingRef.current = false;
+      const pendingHash = pendingRefreshHashRef.current;
+      pendingRefreshHashRef.current = '';
+      if (pendingHash) setTimeout(() => refresh(pendingHash).catch(() => {}), 0);
     }
   }, [activeWorkspaceHash, setPinnedMap, syncRetainedSessionIds, updateExpanded]);
 
@@ -654,6 +669,32 @@ export function Sidebar({
     window.addEventListener('ace-session-archive-changed', handler);
     return () => window.removeEventListener('ace-session-archive-changed', handler);
   }, [refresh]);
+
+  useEffect(() => {
+    const handler = (event) => {
+      const detail = normalizeSessionListChangedDetail(event.detail || {});
+      const workspaceHash = detail.workspaceHash || activeWorkspaceHash;
+      if (workspaceHash) {
+        updateExpanded((prev) => new Set(prev).add(workspaceHash));
+        connection.subscribeWorkspaceStatus(workspaceHash);
+      }
+      if (detail.session) {
+        const session = {
+          ...detail.session,
+          workspace_hash: detail.session.workspace_hash || detail.session.workspaceHash || workspaceHash,
+        };
+        setSessions((prev) => upsertSidebarSession(prev, session));
+        setStatusBySession((prev) => applyStatusUpdate(prev, {
+          ...session,
+          session_id: session.id || detail.sessionId,
+          state: session.attention_state || session.read_state || 'read',
+        }));
+      }
+      refresh(workspaceHash).catch(() => {});
+    };
+    window.addEventListener(SESSION_LIST_CHANGED_EVENT, handler);
+    return () => window.removeEventListener(SESSION_LIST_CHANGED_EVENT, handler);
+  }, [activeWorkspaceHash, refresh, updateExpanded]);
 
   const renderedSessions = useMemo(
     () => withNewSessionDisplayTitles(mergeSessionsWithStatus(sessions, statusBySession)),

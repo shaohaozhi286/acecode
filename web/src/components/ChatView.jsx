@@ -59,6 +59,7 @@ import { inputRouteForText, sessionCreateOptionsForText } from '../lib/builtinCo
 import { fileTreeRefreshKeyFromItems } from '../lib/fileTreeRefresh.js';
 import { buildAssistantRunDirectives } from '../lib/assistantRunDirectives.js';
 import { activityChromeState } from '../lib/assistantAvatarDisplay.js';
+import { notifySessionListChanged } from '../lib/sessionListEvents.js';
 import {
   CHANGE_DOCK_DISMISSALS_STORAGE_KEY,
   dismissChangeDockSignature,
@@ -897,11 +898,33 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         toast({ kind: 'err', text: '分叉失败:无 session_id' });
         return;
       }
+      const workspaceHash = r.workspace_hash || ref?.workspaceHash || '';
+      const cwd = r.cwd || ref?.cwd || '';
+      const now = new Date().toISOString();
+      const forkedSession = {
+        ...r,
+        id: r.session_id,
+        active: true,
+        status: 'idle',
+        attention_state: 'read',
+        read_state: 'read',
+        workspace_hash: workspaceHash,
+        cwd,
+        title: r.title,
+        created_at: r.created_at || now,
+        updated_at: r.updated_at || now,
+      };
       onSessionPromoted?.({
         ...newSessionRefFrom(ref, r.session_id),
         title: r.title,
-        workspaceHash: r.workspace_hash || ref?.workspaceHash,
-        cwd: r.cwd || ref?.cwd,
+        workspaceHash,
+        cwd,
+      });
+      notifySessionListChanged({
+        reason: 'fork',
+        sessionId: r.session_id,
+        workspaceHash,
+        session: forkedSession,
       });
       toast({ kind: 'ok', text: '已分叉到 ' + (r.title || r.session_id) });
     } catch (e) {

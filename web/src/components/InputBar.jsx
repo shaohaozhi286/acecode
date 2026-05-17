@@ -1,5 +1,5 @@
 // 输入框:textarea 自动撑高(最多 8 行) + Enter 发 / Shift+Enter 换行 +
-// 上下键在首行/末行翻 history。
+// 空输入或未编辑的历史项用上下键翻 history。
 //
 // 提交按钮在右侧悬浮(只在有内容时变蓝),空内容时灰色不可点。
 //
@@ -15,6 +15,7 @@ import { VsIcon } from './Icon.jsx';
 import { SlashDropdown } from './SlashDropdown.jsx';
 import { useSlashCommands } from './SlashCommandsContext.jsx';
 import { deleteLeadingCommandBlock, parseLeadingCommand } from '../lib/slashCommands.js';
+import { getNextInputHistoryPointer, shouldNavigateInputHistory } from '../lib/inputHistoryNavigation.js';
 
 const MAX_ROWS = 8;
 const LINE_HEIGHT = 20; // 与 leading-[20px] 对齐
@@ -24,6 +25,7 @@ export const InputBar = forwardRef(function InputBar({
 }, ref) {
   const [value, setValue] = useState('');
   const [histPtr, setHistPtr] = useState(-1);
+  const [editedSinceHistory, setEditedSinceHistory] = useState(false);
   const [dropdownClosed, setDropdownClosed] = useState(false); // Esc 关闭后,直到首段变化或重新输入 / 才重开
   const ta = useRef(null);
   const isHero = variant === 'hero';
@@ -34,7 +36,11 @@ export const InputBar = forwardRef(function InputBar({
 
   useImperativeHandle(ref, () => ({
     focus: () => ta.current?.focus(),
-    clear: () => setValue(''),
+    clear: () => {
+      setValue('');
+      setHistPtr(-1);
+      setEditedSinceHistory(false);
+    },
   }));
 
   const autosize = () => {
@@ -59,6 +65,7 @@ export const InputBar = forwardRef(function InputBar({
     if (!item) return;
     const next = '/' + item.name + ' ';
     setValue(next);
+    setEditedSinceHistory(true);
     setDropdownClosed(true);
     requestAnimationFrame(() => {
       const el = ta.current;
@@ -75,17 +82,15 @@ export const InputBar = forwardRef(function InputBar({
     onSubmit?.(value);
     setValue('');
     setHistPtr(-1);
+    setEditedSinceHistory(false);
     setDropdownClosed(false);
     requestAnimationFrame(() => ta.current?.focus());
   };
 
-  const atFirstLine = () => {
-    const el = ta.current; if (!el) return true;
-    return !el.value.substring(0, el.selectionStart).includes('\n');
-  };
-  const atLastLine = () => {
-    const el = ta.current; if (!el) return true;
-    return !el.value.substring(el.selectionEnd).includes('\n');
+  const handleChange = (e) => {
+    const next = e.target.value;
+    setValue(next);
+    setEditedSinceHistory(next.length > 0);
   };
 
   const leading = useMemo(() => parseLeadingCommand(value, knownNames), [value, knownNames]);
@@ -105,6 +110,7 @@ export const InputBar = forwardRef(function InputBar({
       if (edit) {
         e.preventDefault();
         setValue(edit.value);
+        setEditedSinceHistory(edit.value.length > 0);
         setHistPtr(-1);
         setDropdownClosed(false);
         requestAnimationFrame(() => {
@@ -122,18 +128,32 @@ export const InputBar = forwardRef(function InputBar({
       submit();
       return;
     }
-    if (e.key === 'ArrowUp' && atFirstLine() && history.length) {
+    if (shouldNavigateInputHistory({
+      key: e.key,
+      value,
+      editedSinceHistory,
+      historyLength: history.length,
+      historyPointer: histPtr,
+      altKey: e.altKey,
+      ctrlKey: e.ctrlKey,
+      metaKey: e.metaKey,
+      shiftKey: e.shiftKey,
+    })) {
       e.preventDefault();
-      const next = histPtr === -1 ? history.length - 1 : Math.max(0, histPtr - 1);
-      setHistPtr(next);
-      setValue(history[next] || '');
+      const next = getNextInputHistoryPointer({
+        key: e.key,
+        historyLength: history.length,
+        historyPointer: histPtr,
+      });
+      if (next === -1) {
+        setHistPtr(-1);
+        setValue('');
+      } else {
+        setHistPtr(next);
+        setValue(history[next] || '');
+      }
+      setEditedSinceHistory(false);
       return;
-    }
-    if (e.key === 'ArrowDown' && atLastLine() && histPtr !== -1) {
-      e.preventDefault();
-      const next = histPtr + 1;
-      if (next >= history.length) { setHistPtr(-1); setValue(''); }
-      else                         { setHistPtr(next); setValue(history[next]); }
     }
   };
 
@@ -181,7 +201,7 @@ export const InputBar = forwardRef(function InputBar({
           ref={ta}
           rows={1}
           value={value}
-          onChange={(e) => setValue(e.target.value)}
+          onChange={handleChange}
           onKeyDown={onKey}
           disabled={disabled}
           placeholder={placeholder}

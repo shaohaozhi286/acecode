@@ -21,3 +21,8 @@ Run:
 ```
 
 Press `q` or `Esc` to exit.
+
+At startup, the demo prints `CONHOST: YES` or `CONHOST: NO` before entering the
+TUI. On Windows Console Host (`conhost.exe`), it also warns that some Windows 10
+conhost setups render FTXUI output poorly. Windows Terminal is recommended for
+this demo.
