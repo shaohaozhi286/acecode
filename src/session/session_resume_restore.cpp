@@ -2,6 +2,7 @@
 
 #include "session_replay.hpp"
 #include "session_rewind.hpp"
+#include "tool_result_storage.hpp"
 #include "../agent_loop.hpp"
 #include "../tool/tool_executor.hpp"
 #include "../tui_state.hpp"
@@ -34,6 +35,10 @@ void append_resumed_session_messages(const std::vector<ChatMessage>& messages,
     for (size_t i = 0; i < messages.size(); ++i) {
         const auto& msg = messages[i];
         if (is_file_checkpoint_message(msg)) {
+            continue;
+        }
+        if (is_content_replacement_message(msg)) {
+            agent_loop.push_message(msg);
             continue;
         }
 

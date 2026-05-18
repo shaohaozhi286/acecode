@@ -1,7 +1,9 @@
 #include "session_manager.hpp"
 #include "session_serializer.hpp"
 #include "session_rewind.hpp"
+#include "tool_result_storage.hpp"
 #include "../utils/logger.hpp"
+#include "../utils/utf8_path.hpp"
 
 #include <filesystem>
 #include <algorithm>
@@ -9,6 +11,8 @@
 #include <set>
 #include <sstream>
 #include <unordered_map>
+
+namespace fs = std::filesystem;
 
 namespace {
 
@@ -85,9 +89,27 @@ void add_usage_to_session_total(acecode::TokenUsage& total,
     total.has_data = total.has_data || delta.has_data;
 }
 
-} // namespace
+std::string normalize_path_for_prefix(const std::string& input) {
+    std::string out = input;
+    for (char& ch : out) {
+        if (ch == '\\') ch = '/';
+    }
+    while (out.size() > 1 && out.back() == '/') out.pop_back();
+    return out;
+}
 
-namespace fs = std::filesystem;
+std::string canonical_or_absolute_utf8(const std::string& input) {
+    std::error_code ec;
+    fs::path p = acecode::path_from_utf8(input);
+    fs::path resolved = fs::weakly_canonical(p, ec);
+    if (ec) {
+        resolved = p.is_absolute() ? p : fs::absolute(p, ec);
+        if (ec) resolved = p;
+    }
+    return normalize_path_for_prefix(acecode::path_to_utf8(resolved));
+}
+
+} // namespace
 
 namespace acecode {
 
@@ -308,6 +330,12 @@ std::vector<ChatMessage> SessionManager::resume_session(const std::string& sessi
         return {};
     }
     auto messages = SessionStorage::load_messages(jsonl_path);
+    const auto replacement_state = reconstruct_tool_result_replacement_state(messages);
+    const int replacement_count = apply_tool_result_replacements(messages, replacement_state);
+    if (replacement_count > 0) {
+        LOG_INFO("[session] reapplied " + std::to_string(replacement_count) +
+                 " persisted tool result replacement(s) on resume");
+    }
 
     // Resume adopts the canonical transcript directly. It must not copy history
     // into a new PID-suffixed file or rewrite the shared transcript.
@@ -588,6 +616,7 @@ void SessionManager::cleanup_old_sessions(int max_sessions) {
         std::error_code ec;
         fs::remove(SessionStorage::session_path(project_dir_, id), ec);
         fs::remove(SessionStorage::meta_path(project_dir_, id), ec);
+        fs::remove_all(path_from_utf8(project_dir_) / id, ec);
         SessionWriterLease::remove(project_dir_, id);
         FileCheckpointStore::remove_session_backups(project_dir_, id);
     }
@@ -614,6 +643,33 @@ std::string SessionManager::ensure_active_session_id() {
     if (!started_) return {};
     if (!ensure_created()) return {};
     return session_id_;
+}
+
+std::string SessionManager::ensure_tool_results_dir() {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!started_) return {};
+    if (!ensure_created()) return {};
+    const std::string dir = tool_results_dir_for_session(project_dir_, session_id_);
+    std::error_code ec;
+    fs::create_directories(path_from_utf8(dir), ec);
+    if (ec) {
+        LOG_WARN("[session] failed to create tool results dir " + dir + ": " + ec.message());
+        return {};
+    }
+    return dir;
+}
+
+bool SessionManager::is_tool_result_artifact_path(const std::string& path) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (project_dir_.empty() || session_id_.empty() || path.empty()) return false;
+    const std::string dir = canonical_or_absolute_utf8(
+        tool_results_dir_for_session(project_dir_, session_id_));
+    const std::string resolved = canonical_or_absolute_utf8(path);
+    if (dir.empty() || resolved.empty()) return false;
+    if (resolved.size() <= dir.size()) return false;
+    if (resolved.compare(0, dir.size(), dir) != 0) return false;
+    const char next = resolved[dir.size()];
+    return next == '/' || next == '\\';
 }
 
 ThreadGoalStore* SessionManager::goal_store() {

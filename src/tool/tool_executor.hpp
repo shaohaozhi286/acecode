@@ -77,6 +77,12 @@ struct ToolContext {
     // Per-session state injected by AgentLoop. Goal tools use this instead of
     // binding to one SessionManager at process-wide tool registration time.
     SessionManager* session_manager = nullptr;
+
+    // AgentLoop sets this so bash can hand the full output to the
+    // tool-result budget layer. Standalone tool callers keep the legacy
+    // 100KB inline cap unless they explicitly opt in.
+    bool preserve_full_output = false;
+
     std::function<void()> account_goal_usage;
     std::function<void(const nlohmann::json& goal_payload)> emit_goal_updated;
     std::function<void(const std::string& session_id)> emit_goal_cleared;

@@ -140,8 +140,10 @@ std::string build_system_prompt(const ToolExecutor& tools, const std::string& cw
     oss << "# Using your tools\n\n"
         << "- Prefer dedicated tools over shell commands when an appropriate tool exists.\n"
         << "- Always use absolute file paths with file tools.\n"
-        << "- Before editing a file, read it first.\n"
-        << "- When using file_edit, include enough context to uniquely identify the target.\n"
+        << "- Before editing an existing non-empty file, read the full file first; partial line-range reads are not enough for file_edit.\n"
+        << "- When using file_edit, include enough context to uniquely identify the target, or set replace_all=true when every occurrence should change.\n"
+        << "- Use file_edit with empty old_string only to create a missing file or fill a blank file.\n"
+        << "- Tool results wrapped in <persisted-output> are previews; read the saved path with file_read if you need the full output.\n"
         << "- Avoid interactive shell programs.\n"
         << "- If multiple independent tool calls are needed, make them in parallel.\n\n";
 

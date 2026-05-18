@@ -2,6 +2,10 @@
 
 Implementation memory for coding agents working in this repository. For user-facing setup and run modes, use [README.md](README.md). For stable structure, use [ARCHITECTURE.md](ARCHITECTURE.md). For contributor rules, use [AGENTS.md](AGENTS.md).
 
+## Project-Level Agent Overrides
+
+The Superpowers plugin is disabled for this repository. Do not invoke or follow `superpowers:*` skills, including `superpowers:using-superpowers`, unless the user explicitly re-enables Superpowers for a specific turn.
+
 ## Current Runtime Surfaces
 
 ACECode ships one main executable with terminal TUI and daemon subcommands, plus an optional desktop shell target.

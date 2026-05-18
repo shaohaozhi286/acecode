@@ -41,13 +41,11 @@ static ToolResult execute_file_read(const std::string& arguments_json, const Too
         return size_check;
     }
 
-    // Track mtime for later conflict detection
-    MtimeTracker::instance().record_read(file_path);
-
     std::string content;
     std::string error;
+    const bool partial_read = (start_line > 0 || end_line > 0);
 
-    if (start_line > 0 || end_line > 0) {
+    if (partial_read) {
         // Line range mode
         if (!FileOperations::read_lines(file_path, start_line, end_line, content, error)) {
             return ToolResult{error, false};
@@ -59,13 +57,15 @@ static ToolResult execute_file_read(const std::string& arguments_json, const Too
         }
     }
 
+    // 局部读取只能证明模型看过片段,不能支撑后续精确写入；全量读取才缓存内容。
+    MtimeTracker::instance().record_read(file_path, content, partial_read);
+
     // Large-file hint: only when the caller asked for the whole file (both
     // range bounds omitted) and the payload exceeds 200 KB. Appended as a
     // trailing hint line so the LLM sees the suggestion in-band, and tagged
     // on the summary so the TUI can mark the row.
     bool hint_added = false;
-    const bool range_specified = (start_line > 0 && end_line > 0);
-    if (!range_specified && content.size() > FILE_READ_LARGE_HINT_THRESHOLD) {
+    if (!partial_read && content.size() > FILE_READ_LARGE_HINT_THRESHOLD) {
         const size_t kb = content.size() / 1024;
         if (!content.empty() && content.back() != '\n') content += "\n";
         content += "[hint: file is large (" + std::to_string(kb) +

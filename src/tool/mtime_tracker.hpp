@@ -5,6 +5,7 @@
 #include <map>
 #include <mutex>
 #include <filesystem>
+#include <optional>
 
 namespace acecode {
 
@@ -14,22 +15,51 @@ class MtimeTracker {
 public:
     using clock = std::filesystem::file_time_type;
 
-    // Record the mtime of a file at the time it was read by the agent.
+    enum class FullReadStatus {
+        Ok,
+        NotRead,
+        PartialRead,
+        ExternallyModified
+    };
+
+    struct FullReadCheck {
+        FullReadStatus status = FullReadStatus::Ok;
+        bool content_unchanged_after_mtime_change = false;
+    };
+
+    // Record the mtime of a file at the time it was read or observed by the agent.
     void record_read(const std::string& path);
+
+    // Record a full or partial read. Full reads keep content so later edit checks can
+    // distinguish real external changes from timestamp-only churn.
+    void record_read(const std::string& path, const std::string& content, bool partial);
 
     // Check if a file has been externally modified since the last recorded read.
     // Returns true if the file was modified externally (mtime changed).
     // Returns false if no record exists or mtime is unchanged.
     bool was_externally_modified(const std::string& path) const;
 
+    // Require a prior full read before editing and compare stored bytes when mtimes differ.
+    FullReadCheck validate_full_read_for_edit(
+        const std::string& path,
+        const std::string& current_content
+    ) const;
+
     // Update the record after a successful write (so subsequent edits don't false-alarm).
     void record_write(const std::string& path);
+    void record_write(const std::string& path, const std::string& content);
 
     static MtimeTracker& instance();
 
 private:
+    struct Record {
+        clock mtime;
+        bool partial = false;
+        std::optional<std::string> content;
+    };
+
     mutable std::mutex mu_;
-    std::map<std::string, clock> records_;
+    std::map<std::string, Record> records_;
 };
 
 } // namespace acecode

@@ -114,6 +114,14 @@ public:
     // message is written.
     std::string ensure_active_session_id();
 
+    // Directory for full tool outputs persisted out of the prompt context.
+    // Creates the active session lazily, matching on_message/goal behavior.
+    std::string ensure_tool_results_dir();
+
+    // Narrow allowlist for file_read: persisted tool results live in ACECode's
+    // session store, outside cwd, but the model needs to read them back.
+    bool is_tool_result_artifact_path(const std::string& path) const;
+
     ThreadGoalStore* goal_store();
     ThreadGoalStore* existing_goal_store();
     const ThreadGoalStore* goal_store() const;

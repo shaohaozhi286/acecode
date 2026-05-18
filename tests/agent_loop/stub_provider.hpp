@@ -59,6 +59,15 @@ public:
         return turn_count_;
     }
 
+    std::vector<acecode::ChatMessage> messages_for_turn(int zero_based_index) const {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (zero_based_index < 0 ||
+            static_cast<std::size_t>(zero_based_index) >= request_messages_.size()) {
+            return {};
+        }
+        return request_messages_[static_cast<std::size_t>(zero_based_index)];
+    }
+
     // Simulate LLM latency by polling abort_flag inside chat_stream for ~ms
     // before emitting the scripted response. 0 (default) = no latency.
     // Abort-tests use this to guarantee a window where abort() can land before
@@ -80,7 +89,7 @@ public:
     }
 
     void chat_stream(
-        const std::vector<acecode::ChatMessage>& /*messages*/,
+        const std::vector<acecode::ChatMessage>& messages,
         const std::vector<acecode::ToolDef>& /*tools*/,
         const acecode::StreamCallback& callback,
         std::atomic<bool>* abort_flag = nullptr) override {
@@ -93,6 +102,7 @@ public:
                 responses_.erase(responses_.begin());
             }
             ++turn_count_;
+            request_messages_.push_back(messages);
             latency_ms = latency_ms_;
         }
 
@@ -132,6 +142,7 @@ public:
 private:
     mutable std::mutex mu_;
     std::vector<ScriptedResponse> responses_;
+    std::vector<std::vector<acecode::ChatMessage>> request_messages_;
     int turn_count_ = 0;
     int latency_ms_ = 0;
 };

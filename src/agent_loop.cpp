@@ -6,6 +6,7 @@
 #include "commands/compact.hpp"
 #include "commands/micro_compact.hpp"
 #include "session/tool_metadata_codec.hpp"
+#include "session/tool_result_storage.hpp"
 #include "session/session_rewind.hpp"
 #include "session/thread_goal_store.hpp"
 #include "web/message_payload.hpp"
@@ -870,7 +871,12 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
                                           const ToolContext& tool_ctx = ToolContext{}) -> ToolResult {
             // Path safety validation (for file tools, not bash)
             if (!ctx_path.empty() && tool_name != "bash") {
-                std::string path_error = path_validator_.validate(ctx_path);
+                const bool session_artifact_read =
+                    tool_name == "file_read" &&
+                    session_manager_ &&
+                    session_manager_->is_tool_result_artifact_path(ctx_path);
+                std::string path_error =
+                    session_artifact_read ? std::string{} : path_validator_.validate(ctx_path);
                 if (!path_error.empty()) {
                     LOG_WARN("Path validation failed: " + path_error);
                     return ToolResult{"[Error] " + path_error, false};
@@ -947,6 +953,7 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
             tool_ctx.cwd = cwd_;
             tool_ctx.abort_flag = &abort_requested_;
             tool_ctx.session_manager = session_manager_;
+            tool_ctx.preserve_full_output = true;
             tool_ctx.account_goal_usage = [this]() {
                 account_goal_usage(0, true);
             };
@@ -1140,18 +1147,6 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
                     }
                     result_ready[idx] = true;
                     account_goal_usage(0, false);
-
-                    // Report result to TUI
-                    dispatch_message("tool_result", results[idx].output, true);
-                    if (callbacks_.on_tool_result) {
-                        const auto& tc = *read_entries[i + j].tc;
-                        ChatMessage call_msg;
-                        call_msg.role = "tool_call";
-                        call_msg.content = "[Tool: " + tc.function_name + "] " + tc.function_arguments;
-                        call_msg.display_override =
-                            ToolExecutor::build_tool_call_preview(tc.function_name, tc.function_arguments);
-                        callbacks_.on_tool_result(call_msg, tc.function_name, results[idx]);
-                    }
                 }
 
                 i = batch_end;
@@ -1168,16 +1163,6 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
             dispatch_message("tool_call",
                     "[Tool: " + tc.function_name + "] " + tc.function_arguments, true);
 
-            auto emit_tool_result_callback = [&](size_t idx) {
-                if (!callbacks_.on_tool_result) return;
-                ChatMessage call_msg;
-                call_msg.role = "tool_call";
-                call_msg.content = "[Tool: " + tc.function_name + "] " + tc.function_arguments;
-                call_msg.display_override =
-                    ToolExecutor::build_tool_call_preview(tc.function_name, tc.function_arguments);
-                callbacks_.on_tool_result(call_msg, tc.function_name, results[idx]);
-            };
-
             results[entry.original_index] = run_tool_with_lifecycle(
                 tc, entry.original_index, true,
                 [&](const ToolContext& tool_ctx,
@@ -1187,7 +1172,13 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
                         tc.function_name, false, ctx_path, ctx_command);
 
                     if (!ctx_path.empty() && tc.function_name != "bash") {
-                        std::string path_error = path_validator_.validate(ctx_path);
+                        const bool session_artifact_read =
+                            tc.function_name == "file_read" &&
+                            session_manager_ &&
+                            session_manager_->is_tool_result_artifact_path(ctx_path);
+                        std::string path_error = session_artifact_read
+                            ? std::string{}
+                            : path_validator_.validate(ctx_path);
                         if (!path_error.empty()) {
                             LOG_WARN("Path validation failed: " + path_error);
                             return ToolResult{"[Error] " + path_error, false};
@@ -1217,15 +1208,29 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
 
                     return execute_single_tool(tc.function_name, tc.function_arguments,
                                                ctx_path, tool_ctx);
-                });
+            });
             result_ready[entry.original_index] = true;
             account_goal_usage(0, false);
-
-            dispatch_message("tool_result", results[entry.original_index].output, true);
-            emit_tool_result_callback(entry.original_index);
         }
 
-        // Phase 3: Record all results in original order
+        std::vector<ToolResultReplacementRecord> replacement_records;
+        if (session_manager_) {
+            const std::string tool_results_dir = session_manager_->ensure_tool_results_dir();
+            if (!tool_results_dir.empty()) {
+                // 从当前 transcript 重建 seen/replacement,再只处理这一批 fresh 结果。
+                // 这样 resume、compact、测试直接注入 messages_ 都不会留下陈旧状态。
+                auto replacement_state = reconstruct_tool_result_replacement_state(messages_);
+                auto budget_result = enforce_tool_result_budget(
+                    accumulated.tool_calls,
+                    results,
+                    result_ready,
+                    tool_results_dir,
+                    replacement_state);
+                replacement_records = std::move(budget_result.newly_replaced);
+            }
+        }
+
+        // Phase 3: Record and dispatch all results in original order
         for (size_t i = 0; i < accumulated.tool_calls.size(); ++i) {
             const auto& tc = accumulated.tool_calls[i];
             ChatMessage tool_msg;
@@ -1247,6 +1252,24 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
             }
             messages_.push_back(tool_msg);
             if (session_manager_) session_manager_->on_message(tool_msg);
+
+            if (result_ready[i]) {
+                dispatch_message("tool_result", results[i].output, true);
+                if (callbacks_.on_tool_result) {
+                    ChatMessage call_msg;
+                    call_msg.role = "tool_call";
+                    call_msg.content = "[Tool: " + tc.function_name + "] " + tc.function_arguments;
+                    call_msg.display_override =
+                        ToolExecutor::build_tool_call_preview(tc.function_name, tc.function_arguments);
+                    callbacks_.on_tool_result(call_msg, tc.function_name, results[i]);
+                }
+            }
+        }
+
+        if (!replacement_records.empty()) {
+            ChatMessage meta_msg = encode_content_replacement_message(replacement_records);
+            messages_.push_back(meta_msg);
+            if (session_manager_) session_manager_->on_message(meta_msg);
         }
 
         // Terminator detection. The ONLY terminator tool is task_complete.
