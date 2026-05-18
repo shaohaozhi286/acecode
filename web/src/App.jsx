@@ -3,12 +3,13 @@
 // 视觉对齐设计稿方向 C:顶部 44px TopBar + 270px Sidebar + 主区(单会话/4宫格/9宫格)
 // + 22px StatusBar。所有面板/弹框作为 overlay 渲染在主区之上。
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, ApiError } from './lib/api.js';
 import { setToken } from './lib/auth.js';
 import { connection } from './lib/connection.js';
 import { createNewSessionForActiveWorkspace } from './lib/newSession.js';
 import { goBack, goForward, pushNavigation } from './lib/navigationHistory.js';
+import { pendingQuestionSessionIds } from './lib/pendingQuestions.js';
 import { usePreference } from './lib/usePreference.js';
 import {
   DEFAULT_UI_PREFS,
@@ -283,6 +284,10 @@ export function App() {
       const msg = e.detail || {};
       const payload = { ...(msg.payload || {}) };
       if (msg.session_id && !payload.session_id) payload.session_id = msg.session_id;
+      if (msg.type === 'question_request' && !payload.session_id) {
+        const current = activeRefRef.current || {};
+        payload.session_id = current.sessionId || current.id || '';
+      }
       if (msg.type === 'permission_request') pushUnique(setPermReqs, payload);
       if (msg.type === 'question_request') pushUnique(setQuestionReqs, payload);
     };
@@ -427,6 +432,12 @@ export function App() {
     }
   }, [setSidebarWidth, singleLayout.sidebar, view]);
 
+  const activeId = activeRef?.sessionId || activeRef?.id || '';
+  const pendingQuestionSessionIdsForSidebar = useMemo(
+    () => pendingQuestionSessionIds(questionReqs, activeId),
+    [questionReqs, activeId],
+  );
+
   if (authState === 'checking') {
     return (
       <>
@@ -450,7 +461,6 @@ export function App() {
     );
   }
 
-  const activeId = activeRef?.sessionId || activeRef?.id || '';
   const sidebarCollapsed = view !== 'single' || projectSidebarCollapsed;
   const permReq = permReqs[0] || null;
   const visibleQuestionReq = !permReq
@@ -487,6 +497,7 @@ export function App() {
           width={singleLayout.sidebar}
           onOpenHome={openHomeForWorkspace}
           onOpenSettingsSection={openSettingsSection}
+          pendingQuestionSessionIds={pendingQuestionSessionIdsForSidebar}
         />
         {view === 'single' && !projectSidebarCollapsed && (
           <div

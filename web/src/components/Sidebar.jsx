@@ -25,6 +25,7 @@ import {
   SESSION_LIST_CHANGED_EVENT,
   normalizeSessionListChangedDetail,
 } from '../lib/sessionListEvents.js';
+import { sessionHasPendingQuestion } from '../lib/pendingQuestions.js';
 import {
   applyStatusSnapshot,
   applyStatusUpdate,
@@ -221,7 +222,7 @@ function ArchiveIconInline({ size = 14 }) {
   );
 }
 
-function SessionRow({ s, active, pinned = false, onSelect, onTogglePin, onArchive }) {
+function SessionRow({ s, active, pinned = false, pendingQuestion = false, onSelect, onTogglePin, onArchive }) {
   const attention = s.attention_state || s.read_state || 'read';
   const meta = attentionMeta(attention);
   const workspaceHash = s.workspace_hash || s.workspaceHash || '';
@@ -271,7 +272,15 @@ function SessionRow({ s, active, pinned = false, onSelect, onTogglePin, onArchiv
         ) : (
           <span className={clsx('w-1.5 h-1.5 rounded-full shrink-0', meta.dot)} title={meta.label} />
         )}
-        <span className="flex-1 truncate">{sessionDisplayTitle(s, s.name || '')}</span>
+        <span className="flex-1 min-w-0 truncate">{sessionDisplayTitle(s, s.name || '')}</span>
+        {pendingQuestion && (
+          <span
+            className="shrink-0 rounded-full border border-ok-border bg-ok-bg px-2 py-[1px] text-[11px] font-medium leading-[18px] text-ok"
+            title="等待用户回复 AskUserQuestion"
+          >
+            等待回复
+          </span>
+        )}
         <span className="text-[10px] text-fg-mute shrink-0">{relativeTime(s.updated_at || s.created_at)}</span>
       </button>
       <button
@@ -306,6 +315,7 @@ function WorkspaceGroup({
   onRemove,
   onTogglePin,
   onArchive,
+  pendingQuestionSessionIds,
 }) {
   const [editing, setEditing] = useState(false);
   const [draft,   setDraft]   = useState(ws.name);
@@ -391,6 +401,7 @@ function WorkspaceGroup({
                   key={s.id}
                   s={s}
                   active={s.id === activeId}
+                  pendingQuestion={sessionHasPendingQuestion(s, pendingQuestionSessionIds)}
                   onSelect={onSelect}
                   onTogglePin={onTogglePin}
                   onArchive={onArchive}
@@ -421,6 +432,7 @@ export function Sidebar({
   width = 200,
   onOpenHome,
   onOpenSettingsSection,
+  pendingQuestionSessionIds = new Set(),
 }) {
   const [workspaces,  setWorkspaces]  = useState([]);
   const [sessions,    setSessions]    = useState([]);
@@ -1013,6 +1025,7 @@ export function Sidebar({
                       s={s}
                       pinned
                       active={s.id === activeId}
+                      pendingQuestion={sessionHasPendingQuestion(s, pendingQuestionSessionIds)}
                       onSelect={(session) => selectSession(workspaceForSession(session), session)}
                       onTogglePin={togglePinnedSession}
                       onArchive={archiveSession}
@@ -1043,6 +1056,7 @@ export function Sidebar({
                   onRemove={hasDesktopRemoveWorkspace() ? removeWorkspace : undefined}
                   onTogglePin={togglePinnedSession}
                   onArchive={archiveSession}
+                  pendingQuestionSessionIds={pendingQuestionSessionIds}
                 />
               );
             })}

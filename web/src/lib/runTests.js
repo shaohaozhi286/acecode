@@ -1,4 +1,5 @@
 import './questionPicker.test.js';
+import './pendingQuestions.test.js';
 import './stickyUserContext.test.js';
 import './desktopContextMenu.test.js';
 import './sessionStatus.test.js';
