@@ -131,6 +131,103 @@ run('history replay 会恢复 usage 事件状态', () => {
   assert.equal(loaded.lastSeq, 2);
 });
 
+run('goal 事件更新和清理 transcript goal 状态', () => {
+  const goal = {
+    thread_id: 's1',
+    goal_id: 'g1',
+    objective: 'finish port',
+    status: 'active',
+    token_budget: 50000,
+    tokens_used: 1200,
+    remaining_tokens: 48800,
+  };
+  const state = reduceMany([
+    { type: 'goal_updated', payload: { goal }, seq: 1 },
+    { type: 'goal_cleared', payload: { session_id: 's1' }, seq: 2 },
+  ]);
+
+  assert.equal(state.items.length, 0);
+  assert.equal(state.goal, null);
+  assert.equal(state.lastSeq, 2);
+});
+
+run('history replay 恢复最近 goal 事件状态', () => {
+  const loaded = loadTranscriptHistory(createTranscriptState({ title: 's1' }), {
+    messages: [],
+    events: [
+      {
+        type: 'goal_updated',
+        payload: {
+          goal: {
+            thread_id: 's1',
+            goal_id: 'g1',
+            objective: 'finish port',
+            status: 'paused',
+            tokens_used: 100,
+          },
+        },
+        seq: 1,
+      },
+    ],
+  }).state;
+
+  assert.equal(loaded.goal.objective, 'finish port');
+  assert.equal(loaded.goal.status, 'paused');
+  assert.equal(loaded.lastSeq, 1);
+});
+
+run('history load 使用运行时快照恢复当前 goal 和 busy 状态', () => {
+  const loaded = loadTranscriptHistory(createTranscriptState({ title: 's1' }), {
+    messages: [],
+    events: [],
+    goal: {
+      thread_id: 's1',
+      goal_id: 'g1',
+      objective: 'finish port',
+      status: 'active',
+      tokens_used: 100,
+    },
+    busy: true,
+  }).state;
+
+  assert.equal(loaded.goal.objective, 'finish port');
+  assert.equal(loaded.goal.status, 'active');
+  assert.equal(loaded.busy, true);
+  assert.equal(loaded.status, 'running');
+});
+
+run('history load 使用运行时快照恢复轮次和 token 状态', () => {
+  const loaded = loadTranscriptHistory(createTranscriptState({ title: 's1' }), {
+    messages: [{ id: 'u1', role: 'user', content: 'hello', ts: 1 }],
+    events: [],
+    turn_count: 5,
+    token_usage: {
+      prompt_tokens: 32000,
+      completion_tokens: 1200,
+      total_tokens: 33200,
+      has_data: true,
+    },
+  }).state;
+
+  assert.equal(loaded.turns, 5);
+  assert.equal(loaded.tokenUsage.promptTokens, 32000);
+  assert.equal(loaded.tokenUsage.completionTokens, 1200);
+  assert.equal(loaded.tokenUsage.totalTokens, 33200);
+  assert.equal(loaded.tokenUsage.hasData, true);
+});
+
+run('history load 的 idle 运行时快照不增加轮次', () => {
+  const loaded = loadTranscriptHistory(createTranscriptState({ title: 's1', turns: 3 }), {
+    messages: [],
+    events: [],
+    busy: false,
+  }).state;
+
+  assert.equal(loaded.busy, false);
+  assert.equal(loaded.status, 'idle');
+  assert.equal(loaded.turns, 0);
+});
+
 run('history load 将带 tool_hunks metadata 的 tool message 恢复为 tool item', () => {
   const hunk = { old_start: 1, old_count: 1, new_start: 1, new_count: 2, lines: [] };
   const loaded = loadTranscriptHistory(createTranscriptState({ title: 's1' }), {
@@ -172,6 +269,24 @@ run('history load 不显示内部 meta 消息', () => {
     '[Conversation summary]\nold prompt summarized',
     'kept prompt',
   ]);
+});
+
+run('history load 不显示隐藏 goal context 消息', () => {
+  const loaded = loadTranscriptHistory(createTranscriptState({ title: 's1' }), {
+    messages: [
+      { id: 'u1', role: 'user', content: 'visible prompt' },
+      {
+        id: 'g1',
+        role: 'user',
+        content: '<goal_context>continue</goal_context>',
+        metadata: { hidden_goal_context: true },
+      },
+      { id: 'a1', role: 'assistant', content: 'visible answer' },
+    ],
+    events: [],
+  }).state;
+
+  assert.deepEqual(loaded.items.map((item) => item.content), ['visible prompt', 'visible answer']);
 });
 
 run('新 transcript token usage 默认为 unknown 且不跨 session 继承', () => {

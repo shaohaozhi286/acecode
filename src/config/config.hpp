@@ -90,6 +90,10 @@ struct WebConfig {
     std::string static_dir;
 };
 
+struct WebUiPreferencesConfig {
+    bool show_acecode_avatar = true;
+};
+
 struct ModelsDevConfig {
     bool allow_network = false;                          // permit any HTTP request to models.dev
     std::optional<std::string> user_override_path;       // local api.json that beats the bundled snapshot
@@ -126,10 +130,7 @@ struct AgentLoopConfig {
 // 序列下产生的画面跳动 —— 详细背景见
 // openspec/changes/add-legacy-terminal-fallback/。
 //
-//   "auto"   = 默认。根据 detect_terminal_capabilities() 的结果决定:
-//              检测到 Windows Terminal → TerminalOutput;
-//              检测到 Cmder/ConEmu 或 legacy conhost → AltScreen;
-//              其它 / POSIX → TerminalOutput(等价历史行为)。
+//   "auto"   = 默认。走 alt-screen,让 TUI 启动时直接撑满终端。
 //   "always" = 始终走 alt-screen(\033[?1049h)。
 //   "never"  = 始终走 TerminalOutput。
 //
@@ -137,9 +138,9 @@ struct AgentLoopConfig {
 struct TuiConfig {
     std::string alt_screen_mode = "auto";
     // 把 PgUp / PgDn 当成单行滚动 (等同 Alt+↑/↓). 部分终端 (老 conhost / Cmder /
-    // 某些远程 SSH 客户端) 吞掉 Alt+方向键序列, 用户拿不到 Alt+Arrow; 打开此开关后
-    // PgUp / PgDn 也走 scroll_chat_by_lines(±1), 牺牲掉它们原本"翻一页"的语义.
-    bool page_keys_single_line = false;
+    // 某些远程 SSH 客户端) 吞掉 Alt+方向键序列, 用户拿不到 Alt+Arrow; 默认打开,
+    // 需要整页滚动时可通过 /page-step off 写入 tui.page_keys_single_line=false.
+    bool page_keys_single_line = true;
 };
 
 // Network / HTTP client tuning. Drives the system-proxy integration —
@@ -212,6 +213,7 @@ struct AppConfig {
     ProjectInstructionsConfig project_instructions; // ACECODE.md / AGENT.md / CLAUDE.md loader
     DaemonConfig daemon;                         // daemon process supervision settings
     WebConfig web;                               // HTTP/WebSocket server settings
+    WebUiPreferencesConfig web_ui;               // Web/Desktop UI-only preferences
     ModelsDevConfig models_dev;                  // bundled models.dev registry behaviour
     InputHistoryConfig input_history;            // per-cwd persistent ↑/↓ history
     AgentLoopConfig agent_loop;                  // agent-loop termination tunables

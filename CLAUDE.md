@@ -119,23 +119,23 @@ The config schema is intentionally sparse on write: defaults are omitted when po
 
 ### Mouse Input + Clipboard
 
-FTXUI mouse tracking is enabled by default — wheel scrolls `chat_focus_index` by ±1 (same `scroll_chat()` helper as ArrowUp/Down). Some terminals intercept native click-and-drag selection; Shift+drag is the universal bypass. FTXUI's drag-select drives a built-in selection styled blue/white; right-click writes OSC 52 (`ESC ] 52 ; c ; <base64> ESC \`) using `src/utils/base64.hpp`, then flashes `Copied N bytes to clipboard` (auto-cleared ~2s via `status_line_clear_at`). Inside tmux, set `set -g set-clipboard on` or the OSC 52 is consumed.
+FTXUI mouse tracking is enabled by default — wheel scrolls `chat_focus_index` by ±1 (same `scroll_chat()` helper as ArrowUp/Down). Some terminals intercept native click-and-drag selection; Shift+drag is the universal bypass. FTXUI's drag-select drives a built-in selection styled blue/white; right-click with a non-empty selection writes OSC 52 (`ESC ] 52 ; c ; <base64> ESC \`) using `src/utils/base64.hpp`, then flashes `Copied N bytes to clipboard` (auto-cleared ~2s via `status_line_clear_at`). Right-click with no selection and Ctrl+V both read text from the system clipboard via `src/utils/clipboard.*` and feed the existing paste-normalization path; on Linux this requires `wl-paste`, `xclip`, or `xsel`. Inside tmux, set `set -g set-clipboard on` or the OSC 52 copy path is consumed.
 
 ### Legacy terminal fallback
 
 FTXUI's default `TerminalOutput()` mode emits `\033[1A` per frame to rewind. This breaks on Win10 < 1809 conhost and Cmder/ConEmu pty wrappers (banner stacking, viewport drift). Workaround: alt-screen (`\033[?1049h`).
 
-`detect_terminal_capabilities()` reads `ConEmuPID` / `WT_SESSION` env + Windows build via `RtlGetVersion`. `decide_render_mode(cfg.tui, caps)` is a pure function in `src/tui/render_mode.hpp` (no FTXUI dep, in `acecode_testable`). `make_screen_interactive` is the only FTXUI consumer.
+`detect_terminal_capabilities()` reads `ConEmuPID` / `WT_SESSION` env, Windows build via `RtlGetVersion`, and classic conhost signals (visible `ConsoleWindowClass`, hidden pseudoconsole + VT support). `decide_render_mode(cfg.tui, caps)` is a pure function in `src/tui/render_mode.hpp` (no FTXUI dep, in `acecode_testable`). `make_screen_interactive` is the only FTXUI consumer.
 
 | `tui.alt_screen_mode` | caps | decision |
 |---|---|---|
 | `"always"` | any | AltScreen |
 | `"never"` | any | TerminalOutput |
-| `"auto"` | `is_windows_terminal=true` | TerminalOutput (short-circuit) |
-| `"auto"` | `is_conemu` or `is_legacy_conhost` | AltScreen |
-| `"auto"` | empty | TerminalOutput |
+| `"auto"` | any | AltScreen |
 
 CLI `--alt-screen` / `-alt-screen` forces alt-screen for this launch (no config write). One-time hint shown via `state.conversation` (not LLM context, not session JSONL) when auto-detect triggers AltScreen; idempotency tracked in `~/.acecode/state.json` `legacy_terminal_hint_shown`. Explicit choices (`always`, CLI flag) suppress the hint.
+
+Classic/legacy conhost also enables a conservative TUI layout via `should_use_conhost_compat_layout(caps)`: the header drops the ACE block-art logo, version/model/cwd are left-aligned, and the outer frame uses only ASCII horizontal lines with no vertical sides or Unicode corners. Windows Terminal (`WT_SESSION`) suppresses this layout even when stdio is backed by console handles.
 
 ### Web UI (browser front-end)
 

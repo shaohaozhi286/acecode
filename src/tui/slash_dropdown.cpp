@@ -3,6 +3,7 @@
 #include "picker_scroll.hpp"
 
 #include <ftxui/dom/elements.hpp>
+#include <ftxui/screen/string.hpp>
 #include <ftxui/screen/terminal.hpp>
 
 #include <algorithm>
@@ -14,12 +15,39 @@ namespace acecode {
 namespace {
 
 constexpr int kNarrowTerminalColumns = 40;
+constexpr const char* kHorizontalLine = "\xE2\x94\x80";
 
 bool contains_whitespace(const std::string& s) {
     for (char c : s) {
         if (c == ' ' || c == '\t' || c == '\n' || c == '\r') return true;
     }
     return false;
+}
+
+std::string repeat_utf8(const char* glyph, int count) {
+    std::string out;
+    if (count <= 0) return out;
+    const std::string g(glyph);
+    out.reserve(g.size() * static_cast<size_t>(count));
+    for (int i = 0; i < count; ++i) out += g;
+    return out;
+}
+
+std::string truncate_cells(const std::string& value, int max_cells) {
+    if (max_cells <= 0) return {};
+    if (ftxui::string_width(value) <= max_cells) return value;
+    if (max_cells <= 3) return value.substr(0, static_cast<size_t>(max_cells));
+
+    std::string out;
+    int width = 0;
+    for (const auto& glyph : ftxui::Utf8ToGlyphs(value)) {
+        if (glyph.empty()) continue;
+        const int glyph_width = std::max(0, ftxui::string_width(glyph));
+        if (width + glyph_width > max_cells - 3) break;
+        out += glyph;
+        width += glyph_width;
+    }
+    return out + "...";
 }
 
 int score_command(const std::string& query,
@@ -143,10 +171,11 @@ void refresh_slash_dropdown(TuiState& state, const CommandRegistry& reg) {
     state.slash_dropdown_active = true;
 }
 
-ftxui::Element render_slash_dropdown(const TuiState& state) {
+ftxui::Element render_slash_dropdown(const TuiState& state,
+                                     bool conhost_compat_layout) {
     using namespace ftxui;
     if (!state.slash_dropdown_active || state.slash_dropdown_items.empty()) {
-        return text("");
+        return emptyElement();
     }
 
     const int term_cols = Terminal::Size().dimx;
@@ -160,16 +189,30 @@ ftxui::Element render_slash_dropdown(const TuiState& state) {
     const int items_below = std::max(0, total - offset - visible);
 
     Elements rows;
+    std::vector<std::string> compat_rows;
+    const int compat_max_cols = std::max(1, term_cols > 4 ? term_cols - 4 : term_cols);
     if (items_above > 0) {
-        rows.push_back(
-            text("  \xE2\x86\x91 " + std::to_string(items_above) + " more above")
-            | dim | color(Color::GrayDark));
+        if (conhost_compat_layout) {
+            compat_rows.push_back("  ^ " + std::to_string(items_above) + " more above");
+        } else {
+            rows.push_back(
+                text("  \xE2\x86\x91 " + std::to_string(items_above) + " more above")
+                | dim | color(Color::GrayDark));
+        }
     }
     for (int i = offset; i < offset + visible; ++i) {
         const auto& item = state.slash_dropdown_items[i];
         const bool selected = (i == state.slash_dropdown_selected);
         Element row;
-        if (narrow) {
+        if (conhost_compat_layout) {
+            std::string line = "  /" + item.name;
+            if (!narrow && !item.description.empty()) {
+                line += " - " + item.description;
+            }
+            line = truncate_cells(line, compat_max_cols);
+            compat_rows.push_back(line);
+            row = text(line);
+        } else if (narrow) {
             row = text("  /" + item.name + "  ");
         } else {
             std::string desc = item.description;
@@ -194,12 +237,45 @@ ftxui::Element render_slash_dropdown(const TuiState& state) {
         rows.push_back(row);
     }
     if (items_below > 0) {
-        rows.push_back(
-            text("  \xE2\x86\x93 " + std::to_string(items_below) + " more below")
-            | dim | color(Color::GrayDark));
+        if (conhost_compat_layout) {
+            compat_rows.push_back("  v " + std::to_string(items_below) + " more below");
+        } else {
+            rows.push_back(
+                text("  \xE2\x86\x93 " + std::to_string(items_below) + " more below")
+                | dim | color(Color::GrayDark));
+        }
     }
 
-    return vbox(std::move(rows)) | border | color(Color::Cyan);
+    if (conhost_compat_layout) {
+        int frame_width = 1;
+        for (const auto& line : compat_rows) {
+            frame_width = std::max(frame_width, ftxui::string_width(line));
+        }
+        frame_width = std::min(frame_width, compat_max_cols);
+
+        Elements compat_elements;
+        compat_elements.push_back(text(repeat_utf8(kHorizontalLine, frame_width)));
+        for (int i = 0; i < static_cast<int>(compat_rows.size()); ++i) {
+            const int item_index = offset + i - (items_above > 0 ? 1 : 0);
+            const bool selected =
+                item_index >= offset &&
+                item_index < offset + visible &&
+                item_index == state.slash_dropdown_selected;
+            Element row = text(truncate_cells(compat_rows[i], frame_width));
+            if (selected) {
+                row = row | bold | color(Color::White) |
+                    bgcolor(Color::RGB(0, 80, 120));
+            } else {
+                row = row | color(Color::GrayLight);
+            }
+            compat_elements.push_back(row);
+        }
+        compat_elements.push_back(text(repeat_utf8(kHorizontalLine, frame_width)));
+        return vbox(std::move(compat_elements)) | color(Color::Cyan);
+    }
+
+    Element body = vbox(std::move(rows));
+    return body | border | color(Color::Cyan);
 }
 
 } // namespace acecode

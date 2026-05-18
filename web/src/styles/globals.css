@@ -95,7 +95,15 @@
 }
 
 * { box-sizing: border-box; }
-html, body, #root { height: 100%; margin: 0; padding: 0; }
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
 
 body {
   font-family: var(--font-sans);
@@ -964,16 +972,14 @@ body {
   border-color: color-mix(in oklab, var(--ace-accent-soft) 70%, var(--ace-border) 30%);
 }
 
-/* SlashDropdown 命令 chip:首段命令名以 accent 色背景高亮显示。
+/* SlashDropdown 命令 token:首段命令名以 accent 色文字显示。
    关键约束:overlay 与 textarea 的字符度量必须 1:1 对齐,不能有任何 padding/
    margin/font-weight 差异,否则会双层错位重叠(像两个 /init 写在一起)。
-   做法:overlay 全文 color:transparent,chip span 也保持 transparent —
-   只暴露 background-color 让 textarea 真实文字直接画在彩色背景上。 */
+   做法:命令存在时 textarea 文本透明,由 overlay 负责绘制可见文本。 */
 .ace-slash-chip {
-  display: inline;
-  background: color-mix(in oklab, var(--ace-accent) 22%, transparent);
-  border-radius: 3px;
-  /* 故意不写 color / padding / margin / font-weight,继承 overlay 的 color:transparent */
+  display: inline-block;
+  color: var(--ace-accent);
+  background: transparent;
 }
 
 /* Single view column resize handles

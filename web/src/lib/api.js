@@ -98,6 +98,9 @@ export function createApi(base = null) {
     executeCommand:   (id, command)  => request('POST',   `/api/sessions/${encodeURIComponent(id)}/commands`, command, base),
     getMessages:      (id, since=0)  => request('GET',    `/api/sessions/${encodeURIComponent(id)}/messages?since=${since}`, undefined, base),
     listSkills:       ()             => request('GET',    '/api/skills', undefined, base),
+    getSkillRoot:     (workspaceHash = '') => request('GET',
+      '/api/skills/root' + (workspaceHash ? '?workspace=' + encodeURIComponent(workspaceHash) : ''),
+      undefined, base),
     listCommands:     (workspaceHash) => request('GET',
       '/api/commands' + (workspaceHash ? '?workspace=' + encodeURIComponent(workspaceHash) : ''),
       undefined, base),
@@ -107,6 +110,7 @@ export function createApi(base = null) {
     putMcp:           (cfg)          => request('PUT',    '/api/mcp', cfg, base),
     reloadMcp:        ()             => request('POST',   '/api/mcp/reload', undefined, base),
     listModels:       ()             => request('GET',    '/api/models', undefined, base),
+    probeModels:      (draft)        => request('POST',   '/api/models/probe', draft, base),
     getSessionModel:  (sid, workspaceHash = '') => {
       const qs = workspaceHash ? `?workspace=${encodeURIComponent(workspaceHash)}` : '';
       return request('GET', `/api/sessions/${encodeURIComponent(sid)}/model${qs}`, undefined, base);
@@ -119,6 +123,8 @@ export function createApi(base = null) {
     removeModel:      (name)         => request('DELETE', `/api/models/${encodeURIComponent(name)}`, undefined, base),
     setDefaultModel:  (name)         => request('POST',   '/api/config/default-model', {name}, base),
     getDefaultModel:  ()             => request('GET',    '/api/config/default-model', undefined, base),
+    getUiPreferences: ()             => request('GET',    '/api/config/ui-preferences', undefined, base),
+    setUiPreferences: (prefs)        => request('PUT',    '/api/config/ui-preferences', prefs, base),
     getHistory:       (cwd, max=100) => request('GET',    `/api/history?cwd=${encodeURIComponent(cwd)}&max=${max}`, undefined, base),
     appendHistory:    (text)         => request('POST',   '/api/history', {text}, base),
     forkSession:      (sid, atMessageId, title) =>

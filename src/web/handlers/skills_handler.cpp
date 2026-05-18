@@ -1,10 +1,14 @@
 #include "skills_handler.hpp"
 
 #include "../../skills/skill_registry.hpp"
+#include "../../utils/utf8_path.hpp"
 #include "../../utils/logger.hpp"
 
 #include <algorithm>
+#include <system_error>
 #include <unordered_set>
+
+namespace fs = std::filesystem;
 
 namespace acecode::web {
 
@@ -21,7 +25,48 @@ void apply_registry_disabled_set(SkillRegistry& registry,
     registry.reload();
 }
 
+bool existing_directory(const fs::path& path) {
+    std::error_code ec;
+    return fs::is_directory(path, ec) && !ec;
+}
+
+fs::path normalized_path(const fs::path& path) {
+    std::error_code ec;
+    auto resolved = fs::weakly_canonical(path, ec);
+    if (!ec && !resolved.empty()) return resolved;
+    return path.lexically_normal();
+}
+
 } // namespace
+
+SkillRootSelection select_skill_root(const fs::path& workspace_cwd,
+                                     const fs::path& global_acecode_skills_root,
+                                     bool create_global_fallback) {
+    if (!workspace_cwd.empty()) {
+        const auto acecode_project_skills = workspace_cwd / ".acecode" / "skills";
+        if (existing_directory(acecode_project_skills)) {
+            return {normalized_path(acecode_project_skills), "project_acecode"};
+        }
+
+        const auto agent_project_skills = workspace_cwd / ".agent" / "skills";
+        if (existing_directory(agent_project_skills)) {
+            return {normalized_path(agent_project_skills), "project_agent"};
+        }
+    }
+
+    if (create_global_fallback) {
+        std::error_code ec;
+        fs::create_directories(global_acecode_skills_root, ec);
+    }
+    return {normalized_path(global_acecode_skills_root), "global_acecode"};
+}
+
+SkillRootSelection resolve_skill_root_for_cwd(const std::string& workspace_cwd_utf8) {
+    fs::path cwd;
+    if (!workspace_cwd_utf8.empty()) cwd = acecode::path_from_utf8(workspace_cwd_utf8);
+    const auto global_root = acecode::path_from_utf8(get_acecode_dir()) / "skills";
+    return select_skill_root(cwd, global_root, true);
+}
 
 SkillToggleResult set_skill_enabled(const std::string& name,
                                        bool enabled,

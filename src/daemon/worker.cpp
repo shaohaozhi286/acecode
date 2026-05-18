@@ -21,6 +21,7 @@
 #include "../tool/file_edit_tool.hpp"
 #include "../tool/grep_tool.hpp"
 #include "../tool/glob_tool.hpp"
+#include "../tool/goal_tool.hpp"
 #include "../tool/skill_view_tool.hpp"
 #include "../tool/skills_tool.hpp"
 #include "../tool/task_complete_tool.hpp"
@@ -335,6 +336,9 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     tools.register_tool(acecode::create_grep_tool());
     tools.register_tool(acecode::create_glob_tool());
     tools.register_tool(acecode::create_task_complete_tool());
+    tools.register_tool(acecode::create_get_goal_tool());
+    tools.register_tool(acecode::create_create_goal_tool());
+    tools.register_tool(acecode::create_update_goal_tool());
     if (cfg.web_search.enabled) {
         tools.register_tool(acecode::web_search::create_web_search_tool(
             acecode::web_search::runtime().router(),

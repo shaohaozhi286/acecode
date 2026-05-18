@@ -1,5 +1,8 @@
 #include "models_handler.hpp"
 
+#include <algorithm>
+#include <set>
+
 namespace acecode::web {
 
 namespace {
@@ -101,6 +104,68 @@ std::optional<SavedModelDraft> parse_model_draft(const nlohmann::json& body,
     }
     if (!err.empty()) return std::nullopt;
     return d;
+}
+
+std::optional<ModelProbeRequest> parse_model_probe_request(const nlohmann::json& body,
+                                                           std::string& err_code,
+                                                           std::string& err) {
+    if (!body.is_object()) {
+        err_code = "BAD_REQUEST";
+        err = "body must be a JSON object";
+        return std::nullopt;
+    }
+
+    auto string_value = [&](const char* key) -> std::string {
+        if (!body.contains(key) || !body[key].is_string()) return {};
+        return body[key].get<std::string>();
+    };
+
+    ModelProbeRequest request;
+    request.provider = string_value("provider");
+    request.base_url = string_value("base_url");
+    request.api_key = string_value("api_key");
+
+    if (request.provider.empty()) request.provider = "openai";
+    if (request.provider != "openai") {
+        err_code = "UNKNOWN_PROVIDER";
+        err = "model probing currently supports provider=openai";
+        return std::nullopt;
+    }
+    if (request.base_url.empty()) {
+        err_code = "MISSING_BASE_URL";
+        err = "base_url is required";
+        return std::nullopt;
+    }
+    return request;
+}
+
+std::vector<std::string> parse_openai_model_ids(const nlohmann::json& body) {
+    const nlohmann::json* list = nullptr;
+    if (body.is_object()) {
+        if (body.contains("data") && body["data"].is_array()) {
+            list = &body["data"];
+        } else if (body.contains("models") && body["models"].is_array()) {
+            list = &body["models"];
+        }
+    } else if (body.is_array()) {
+        list = &body;
+    }
+    if (!list) return {};
+
+    std::set<std::string> unique;
+    for (const auto& item : *list) {
+        if (item.is_string()) {
+            auto value = item.get<std::string>();
+            if (!value.empty()) unique.insert(std::move(value));
+            continue;
+        }
+        if (!item.is_object() || !item.contains("id") || !item["id"].is_string()) {
+            continue;
+        }
+        auto value = item["id"].get<std::string>();
+        if (!value.empty()) unique.insert(std::move(value));
+    }
+    return {unique.begin(), unique.end()};
 }
 
 } // namespace acecode::web

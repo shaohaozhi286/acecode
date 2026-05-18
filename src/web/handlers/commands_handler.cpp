@@ -41,6 +41,10 @@ nlohmann::json build_commands_payload(const SkillRegistry& global_skills,
         {"name", "compact"},
         {"description", "Compress conversation history"},
     });
+    builtins.push_back({
+        {"name", "goal"},
+        {"description", "Create, view, pause, resume, edit, or clear the thread goal"},
+    });
     out["builtins"] = std::move(builtins);
 
     // Skills:仅在调用方传 workspace_cwd 时返回 `skills` 字段;缺省 → 不输出

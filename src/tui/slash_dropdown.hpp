@@ -23,7 +23,9 @@ class CommandRegistry;
 void refresh_slash_dropdown(TuiState& state, const CommandRegistry& reg);
 
 // Render the dropdown as a single FTXUI Element. Returns an empty element
-// when not active. Caller holds state.mu.
-ftxui::Element render_slash_dropdown(const TuiState& state);
+// when not active. Caller holds state.mu. conhost_compat_layout avoids
+// Unicode corners/vertical borders for classic Windows Console Host.
+ftxui::Element render_slash_dropdown(const TuiState& state,
+                                     bool conhost_compat_layout = false);
 
 } // namespace acecode

@@ -57,6 +57,34 @@ size_t utf8_safe_prefix_length(const std::string& text, size_t max_bytes) {
     return last_valid;
 }
 
+std::string normalize_permission_mode_name(std::string mode) {
+    if (mode == "acceptEdits") mode = "accept-edits";
+    if (mode == "accept-edits" || mode == "yolo") return mode;
+    return "default";
+}
+
+bool is_hidden_goal_context_message(const acecode::ChatMessage& msg) {
+    return msg.metadata.is_object() &&
+           msg.metadata.value("hidden_goal_context", false);
+}
+
+bool is_visible_user_turn_message(const acecode::ChatMessage& msg) {
+    return msg.role == "user" &&
+           !msg.is_meta &&
+           !is_hidden_goal_context_message(msg);
+}
+
+void add_usage_to_session_total(acecode::TokenUsage& total,
+                                const acecode::TokenUsage& delta) {
+    total.prompt_tokens += delta.prompt_tokens;
+    total.completion_tokens += delta.completion_tokens;
+    total.total_tokens += delta.total_tokens;
+    total.cache_read_tokens += delta.cache_read_tokens;
+    total.cache_write_tokens += delta.cache_write_tokens;
+    total.reasoning_tokens += delta.reasoning_tokens;
+    total.has_data = total.has_data || delta.has_data;
+}
+
 } // namespace
 
 namespace fs = std::filesystem;
@@ -77,6 +105,7 @@ void SessionManager::start_session(const std::string& cwd,
     model_preset_ = model_preset;
     surface_ = surface.empty() ? "unknown" : surface;
     project_dir_ = SessionStorage::get_project_dir(cwd);
+    goal_store_ = std::make_unique<ThreadGoalStore>(project_dir_);
     session_id_ = preset_session_id;
     jsonl_path_.clear();
     meta_path_str_.clear();
@@ -84,9 +113,13 @@ void SessionManager::start_session(const std::string& cwd,
     created_ = false;
     finalized_ = false;
     message_count_ = 0;
+    turn_count_ = 0;
     last_user_summary_.clear();
     created_at_.clear();
     pending_title_.clear();
+    permission_mode_ = "default";
+    last_token_usage_ = {};
+    session_token_usage_ = {};
     last_error_.clear();
     writer_lease_active_ = false;
     archived_ = false;
@@ -133,6 +166,10 @@ bool SessionManager::ensure_created() {
     meta.model = model_name_;
     meta.model_preset = model_preset_;
     meta.title = pending_title_;
+    meta.permission_mode = permission_mode_;
+    meta.turn_count = turn_count_;
+    meta.last_token_usage = last_token_usage_;
+    meta.session_token_usage = session_token_usage_;
     meta.archived = archived_;
     SessionStorage::write_meta(meta_path_str_, meta);
     return true;
@@ -147,9 +184,12 @@ void SessionManager::on_message(const ChatMessage& msg) {
     // Append message to JSONL
     SessionStorage::append_message(jsonl_path_, msg);
     message_count_++;
+    if (is_visible_user_turn_message(msg)) {
+        turn_count_++;
+    }
 
     // Track last user message for summary
-    if (msg.role == "user" && !msg.content.empty()) {
+    if (is_visible_user_turn_message(msg) && !msg.content.empty()) {
         last_user_summary_ = extract_summary(msg.content);
     }
 
@@ -182,10 +222,12 @@ bool SessionManager::replace_active_messages(const std::vector<ChatMessage>& mes
     std::vector<ChatMessage> rewritten;
     rewritten.reserve(messages.size() + checkpoints_by_user.size());
     last_user_summary_.clear();
+    turn_count_ = 0;
     for (const auto& msg : messages) {
         if (is_file_checkpoint_message(msg)) continue;
         rewritten.push_back(msg);
-        if (msg.role == "user") {
+        if (is_visible_user_turn_message(msg)) {
+            turn_count_++;
             if (!msg.content.empty()) {
                 last_user_summary_ = extract_summary(msg.content);
             }
@@ -291,6 +333,10 @@ std::vector<ChatMessage> SessionManager::resume_session(const std::string& sessi
         created_at_ = meta.created_at;
         last_user_summary_ = meta.summary;
         pending_title_ = meta.title;
+        permission_mode_ = normalize_permission_mode_name(meta.permission_mode);
+        turn_count_ = meta.turn_count;
+        last_token_usage_ = meta.last_token_usage;
+        session_token_usage_ = meta.session_token_usage;
         archived_ = meta.archived;
         if (model_preset_.empty()) {
             model_preset_ = meta.model_preset;
@@ -301,6 +347,11 @@ std::vector<ChatMessage> SessionManager::resume_session(const std::string& sessi
     }
 
     message_count_ = static_cast<int>(messages.size());
+    if (turn_count_ <= 0) {
+        for (const auto& msg : messages) {
+            if (is_visible_user_turn_message(msg)) turn_count_++;
+        }
+    }
     update_meta();
 
     return messages;
@@ -368,9 +419,12 @@ void SessionManager::end_current_session() {
     created_ = false;
     finalized_ = false;
     message_count_ = 0;
+    turn_count_ = 0;
     last_user_summary_.clear();
     created_at_.clear();
     pending_title_.clear();
+    last_token_usage_ = {};
+    session_token_usage_ = {};
     last_error_.clear();
     archived_ = false;
     checkpoint_store_.reset();
@@ -390,6 +444,7 @@ std::string SessionManager::fork_active_session(const std::vector<ChatMessage>& 
         }
     }
 
+    const std::string previous_session_id = session_id_;
     const std::string new_session_id = SessionStorage::generate_session_id();
     auto checkpoint_meta = checkpoint_store_.fork_to_session(new_session_id, retained_user_uuids);
 
@@ -402,6 +457,9 @@ std::string SessionManager::fork_active_session(const std::vector<ChatMessage>& 
     created_ = false;
     finalized_ = false;
     message_count_ = 0;
+    turn_count_ = 0;
+    last_token_usage_ = {};
+    session_token_usage_ = {};
     last_user_summary_.clear();
 
     if (!acquire_writer_lease_locked()) {
@@ -410,7 +468,7 @@ std::string SessionManager::fork_active_session(const std::vector<ChatMessage>& 
     created_ = true;
 
     for (auto it = retained_prefix.rbegin(); it != retained_prefix.rend(); ++it) {
-        if (it->role == "user" && !it->content.empty()) {
+        if (is_visible_user_turn_message(*it) && !it->content.empty()) {
             last_user_summary_ = extract_summary(it->content);
             break;
         }
@@ -423,12 +481,21 @@ std::string SessionManager::fork_active_session(const std::vector<ChatMessage>& 
         if (is_file_checkpoint_message(msg)) continue;
         SessionStorage::append_message(jsonl_path_, msg);
         message_count_++;
+        if (is_visible_user_turn_message(msg)) {
+            turn_count_++;
+        }
     }
     for (const auto& msg : checkpoint_meta) {
         SessionStorage::append_message(jsonl_path_, msg);
         message_count_++;
     }
     update_meta();
+    if (goal_store_ && !previous_session_id.empty()) {
+        std::string goal_error;
+        if (!goal_store_->copy_goal_reset_usage(previous_session_id, session_id_, &goal_error)) {
+            LOG_WARN("[session] failed to copy goal for fork: " + goal_error);
+        }
+    }
     return session_id_;
 }
 
@@ -455,6 +522,7 @@ std::string SessionManager::fork_session_to_new_id(
 
     // 写新 jsonl(过滤 file_checkpoint 元消息;新 session 不继承 checkpoints)
     int count = 0;
+    int turn_count = 0;
     std::string last_user_summary;
     bool io_error = false;
     try {
@@ -462,7 +530,10 @@ std::string SessionManager::fork_session_to_new_id(
             if (is_file_checkpoint_message(msg)) continue;
             SessionStorage::append_message(new_jsonl, msg);
             count++;
-            if (msg.role == "user" && !msg.content.empty()) {
+            if (is_visible_user_turn_message(msg)) {
+                turn_count++;
+            }
+            if (is_visible_user_turn_message(msg) && !msg.content.empty()) {
                 last_user_summary = extract_summary(msg.content);
             }
         }
@@ -483,14 +554,22 @@ std::string SessionManager::fork_session_to_new_id(
     meta.created_at      = SessionStorage::now_iso8601();
     meta.updated_at      = meta.created_at;
     meta.message_count   = count;
+    meta.turn_count      = turn_count;
     meta.summary         = last_user_summary;
     meta.provider        = provider_name_;
     meta.model           = model_name_;
     meta.model_preset    = model_preset_;
     meta.title           = title;
+    meta.permission_mode = permission_mode_;
     meta.forked_from     = forked_from_id;
     meta.fork_message_id = fork_message_id;
     SessionStorage::write_meta(new_meta, meta);
+    if (goal_store_ && !forked_from_id.empty()) {
+        std::string goal_error;
+        if (!goal_store_->copy_goal_reset_usage(forked_from_id, new_session_id, &goal_error)) {
+            LOG_WARN("[session] failed to copy goal for session fork: " + goal_error);
+        }
+    }
 
     return new_session_id;
 }
@@ -530,6 +609,45 @@ bool SessionManager::has_active_session() const {
     return created_ && !finalized_;
 }
 
+std::string SessionManager::ensure_active_session_id() {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!started_) return {};
+    if (!ensure_created()) return {};
+    return session_id_;
+}
+
+ThreadGoalStore* SessionManager::goal_store() {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (goal_store_ && !goal_store_->available()) {
+        std::string goal_error;
+        if (!goal_store_->initialize(&goal_error)) {
+            LOG_WARN("[session] goal store initialization failed: " + goal_error);
+            goal_store_.reset();
+        }
+    }
+    return goal_store_.get();
+}
+
+ThreadGoalStore* SessionManager::existing_goal_store() {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!goal_store_) return nullptr;
+    if (!goal_store_->available()) {
+        const auto db_path = ThreadGoalStore::database_path_for_project(project_dir_);
+        if (!fs::exists(db_path)) return nullptr;
+        std::string goal_error;
+        if (!goal_store_->initialize(&goal_error)) {
+            LOG_WARN("[session] goal store initialization failed: " + goal_error);
+            goal_store_.reset();
+        }
+    }
+    return goal_store_.get();
+}
+
+const ThreadGoalStore* SessionManager::goal_store() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return goal_store_.get();
+}
+
 void SessionManager::update_meta() {
     // Must be called under lock
     if (!created_) return;
@@ -540,11 +658,15 @@ void SessionManager::update_meta() {
     meta.created_at = created_at_;
     meta.updated_at = SessionStorage::now_iso8601();
     meta.message_count = message_count_;
+    meta.turn_count = turn_count_;
     meta.summary = last_user_summary_;
     meta.provider = provider_name_;
     meta.model = model_name_;
     meta.model_preset = model_preset_;
     meta.title = pending_title_;
+    meta.permission_mode = permission_mode_;
+    meta.last_token_usage = last_token_usage_;
+    meta.session_token_usage = session_token_usage_;
     meta.archived = archived_;
     SessionStorage::write_meta(meta_path_str_, meta);
     refresh_writer_lease_locked();
@@ -569,6 +691,51 @@ void SessionManager::set_session_archived(bool archived) {
 std::string SessionManager::current_title() const {
     std::lock_guard<std::mutex> lk(mu_);
     return pending_title_;
+}
+
+void SessionManager::set_permission_mode(std::string mode, bool persist_immediately) {
+    std::lock_guard<std::mutex> lk(mu_);
+    permission_mode_ = normalize_permission_mode_name(std::move(mode));
+    if (persist_immediately) {
+        if (!created_ && started_) {
+            ensure_created();
+        }
+        if (created_) {
+            update_meta();
+        }
+    }
+}
+
+std::string SessionManager::current_permission_mode() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return permission_mode_;
+}
+
+void SessionManager::record_token_usage(const TokenUsage& usage) {
+    std::lock_guard<std::mutex> lk(mu_);
+    last_token_usage_ = usage;
+    add_usage_to_session_total(session_token_usage_, usage);
+    if (!created_ && started_) {
+        ensure_created();
+    }
+    if (created_) {
+        update_meta();
+    }
+}
+
+TokenUsage SessionManager::current_last_token_usage() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return last_token_usage_;
+}
+
+TokenUsage SessionManager::current_session_token_usage() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return session_token_usage_;
+}
+
+int SessionManager::current_turn_count() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return turn_count_;
 }
 
 bool SessionManager::acquire_writer_lease_locked() {

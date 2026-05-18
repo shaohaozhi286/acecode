@@ -27,11 +27,45 @@
 #ifdef _WIN32
 #  include <windows.h>
 #endif
+#if !defined(_WIN32) && !defined(__APPLE__)
+#  include <dlfcn.h>
+#endif
 #ifdef __APPLE__
 #  include <CoreGraphics/CoreGraphics.h>
+#  import <AppKit/AppKit.h>
+#  include <objc/runtime.h>
 #endif
 
 namespace acecode::desktop {
+
+namespace {
+
+// 全局 close_request_handler — 只在主线程上写,窗口回调在同一 GUI 主线程上读。
+std::function<bool()> g_close_handler;
+
+#ifdef __APPLE__
+BOOL acecode_mac_window_should_close(id /*self*/, SEL /*cmd*/, id /*sender*/) {
+    return dispatch_wm_close(g_close_handler) == CloseDispatch::ConsumedByHandler
+        ? NO
+        : YES;
+}
+
+void install_mac_close_handler(webview::webview& w) {
+    auto window_result = w.window();
+    if (!window_result.ok() || !window_result.value()) return;
+    NSWindow* window = static_cast<NSWindow*>(window_result.value());
+    id delegate = [window delegate];
+    if (!delegate) return;
+    Class cls = object_getClass(delegate);
+    if (!cls) return;
+    class_addMethod(cls,
+                    @selector(windowShouldClose:),
+                    reinterpret_cast<IMP>(acecode_mac_window_should_close),
+                    "c@:@");
+}
+#endif
+
+} // namespace
 
 #ifdef _WIN32
 namespace {
@@ -43,11 +77,6 @@ constexpr int kFramelessDragHeightDip = 44;
 // 选 0x10 偏移留出 0..0xF 给未来扩展;远离 webview/Common Controls 常用的
 // WM_USER..WM_USER+0x100 区段。
 constexpr UINT kRequestQuitMsg = WM_USER + 0x10;
-
-// 全局 close_request_handler — 只在主线程上写,WndProc 在主线程上读。
-// 用 std::function 包装避免裸函数指针;mutex 不需要,因为 WndProc 与 setter
-// 共享同一线程(webview2 message pump 线程 = 主线程)。
-std::function<bool()> g_close_handler;
 
 // 窗口最大化/还原状态变化 handler。同样 main thread only。WndProc 在 WM_SIZE
 // 时检测 IsZoomed 与 g_last_known_maximized 是否不同,变化时触发并同步缓存。
@@ -119,6 +148,68 @@ void refresh_non_client_frame(HWND hwnd) {
                    rect.bottom - rect.top,
                    SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOMOVE |
                        SWP_NOSIZE);
+}
+
+void log_webview_setting_failure(const char* operation, HRESULT hr) {
+    LOG_WARN(std::string("[desktop] ") + operation +
+             " failed, hr=" + std::to_string(static_cast<long>(hr)));
+}
+
+void configure_browser_defaults(webview::webview& host) {
+    auto controller_result = host.browser_controller();
+    if (!controller_result.ok()) {
+        LOG_WARN("[desktop] browser_controller unavailable; browser defaults not configured");
+        return;
+    }
+    auto* controller = static_cast<ICoreWebView2Controller*>(controller_result.value());
+    if (!controller) return;
+
+    HRESULT hr = controller->put_ZoomFactor(1.0);
+    if (FAILED(hr)) {
+        log_webview_setting_failure("put_ZoomFactor", hr);
+    }
+
+    ICoreWebView2* core = nullptr;
+    hr = controller->get_CoreWebView2(&core);
+    if (FAILED(hr) || !core) {
+        log_webview_setting_failure("get_CoreWebView2", hr);
+        return;
+    }
+
+    ICoreWebView2Settings* settings = nullptr;
+    hr = core->get_Settings(&settings);
+    core->Release();
+    if (FAILED(hr) || !settings) {
+        log_webview_setting_failure("get_Settings", hr);
+        return;
+    }
+
+    hr = settings->put_IsZoomControlEnabled(FALSE);
+    if (FAILED(hr)) {
+        log_webview_setting_failure("put_IsZoomControlEnabled", hr);
+    }
+
+    ICoreWebView2Settings5* settings5 = nullptr;
+    hr = settings->QueryInterface(IID_PPV_ARGS(&settings5));
+    if (SUCCEEDED(hr) && settings5) {
+        const HRESULT pinch_hr = settings5->put_IsPinchZoomEnabled(FALSE);
+        if (FAILED(pinch_hr)) {
+            log_webview_setting_failure("put_IsPinchZoomEnabled", pinch_hr);
+        }
+        settings5->Release();
+    }
+
+    ICoreWebView2Settings6* settings6 = nullptr;
+    hr = settings->QueryInterface(IID_PPV_ARGS(&settings6));
+    if (SUCCEEDED(hr) && settings6) {
+        const HRESULT swipe_hr = settings6->put_IsSwipeNavigationEnabled(FALSE);
+        if (FAILED(swipe_hr)) {
+            log_webview_setting_failure("put_IsSwipeNavigationEnabled", swipe_hr);
+        }
+        settings6->Release();
+    }
+
+    settings->Release();
 }
 
 int win32_hit_test_value(FramelessHitTestArea area) {
@@ -321,6 +412,70 @@ struct ComApartment {
 
 namespace {
 
+#if !defined(_WIN32) && !defined(__APPLE__)
+struct GtkWindowApi {
+    using GtkWidgetShow = void (*)(void*);
+    using GtkWidgetHide = void (*)(void*);
+    using GtkWindowPresent = void (*)(void*);
+    using GtkWindowClose = void (*)(void*);
+    using GSignalConnectData = unsigned long (*)(void*, const char*, void*, void*, void*, int);
+
+    void* gtk = nullptr;
+    void* gobject = nullptr;
+    GtkWidgetShow widget_show = nullptr;
+    GtkWidgetHide widget_hide = nullptr;
+    GtkWindowPresent window_present = nullptr;
+    GtkWindowClose window_close = nullptr;
+    GSignalConnectData signal_connect_data = nullptr;
+
+    bool load() {
+        if (gtk && gobject) return true;
+        gtk = ::dlopen("libgtk-3.so.0", RTLD_LAZY | RTLD_LOCAL);
+        gobject = ::dlopen("libgobject-2.0.so.0", RTLD_LAZY | RTLD_LOCAL);
+        if (!gtk || !gobject) {
+            LOG_WARN("[desktop] GTK3/GObject runtime not available for window controls");
+            return false;
+        }
+        auto sym = [](void* lib, const char* name) -> void* {
+            return ::dlsym(lib, name);
+        };
+        widget_show = reinterpret_cast<GtkWidgetShow>(sym(gtk, "gtk_widget_show"));
+        widget_hide = reinterpret_cast<GtkWidgetHide>(sym(gtk, "gtk_widget_hide"));
+        window_present = reinterpret_cast<GtkWindowPresent>(sym(gtk, "gtk_window_present"));
+        window_close = reinterpret_cast<GtkWindowClose>(sym(gtk, "gtk_window_close"));
+        signal_connect_data = reinterpret_cast<GSignalConnectData>(
+            sym(gobject, "g_signal_connect_data"));
+        return widget_show && widget_hide && window_present && window_close &&
+               signal_connect_data;
+    }
+};
+
+GtkWindowApi& gtk_window_api() {
+    static GtkWindowApi api;
+    return api;
+}
+
+bool g_linux_force_close = false;
+
+extern "C" int linux_window_delete_event(void*, void*, void*) {
+    if (g_linux_force_close) return 0;
+    return dispatch_wm_close(g_close_handler) == CloseDispatch::ConsumedByHandler ? 1 : 0;
+}
+
+void install_linux_close_handler(webview::webview& w) {
+    auto window = w.window();
+    if (!window.ok() || !window.value()) return;
+    auto& api = gtk_window_api();
+    if (!api.load()) return;
+    api.signal_connect_data(window.value(),
+                            "delete-event",
+                            reinterpret_cast<void*>(linux_window_delete_event),
+                            nullptr,
+                            nullptr,
+                            0);
+}
+#endif
+
 std::pair<int, int> adjusted_window_size(int width, int height) {
 #ifdef __APPLE__
     CGRect bounds = CGDisplayBounds(CGMainDisplayID());
@@ -414,11 +569,19 @@ struct WebHost::Impl {
         if (custom_window) {
             resize_webview_widget(custom_window);
         }
+        if (w) {
+            configure_browser_defaults(*w);
+        }
     }
 #else
     {
         (void)startup_mode;
         w = std::make_unique<webview::webview>(debug, nullptr);
+#if defined(__APPLE__)
+        install_mac_close_handler(*w);
+#else
+        install_linux_close_handler(*w);
+#endif
     }
 #endif
 
@@ -485,7 +648,28 @@ void WebHost::set_visible(bool visible) {
         ::SetForegroundWindow(hwnd);
     }
 #else
-    (void)visible;
+#if !defined(__APPLE__)
+    auto window = impl_->w->window();
+    if (!window.ok() || !window.value()) return;
+    auto& api = gtk_window_api();
+    if (!api.load()) return;
+    if (visible) {
+        api.widget_show(window.value());
+        api.window_present(window.value());
+    } else {
+        api.widget_hide(window.value());
+    }
+#else
+    auto window_result = impl_->w->window();
+    if (!window_result.ok() || !window_result.value()) return;
+    NSWindow* window = static_cast<NSWindow*>(window_result.value());
+    if (visible) {
+        [window makeKeyAndOrderFront:nil];
+        [NSApp activateIgnoringOtherApps:YES];
+    } else {
+        [window orderOut:nil];
+    }
+#endif
 #endif
 }
 void WebHost::init_script(const std::string& js) {
@@ -598,21 +782,48 @@ bool WebHost::close_window() {
     if (!hwnd || !::IsWindow(hwnd)) return false;
     return ::PostMessageW(hwnd, WM_CLOSE, 0, 0) != FALSE;
 #else
-    return false;
+#if !defined(__APPLE__)
+    if (dispatch_wm_close(g_close_handler) == CloseDispatch::ConsumedByHandler) {
+        return true;
+    }
+    auto window = impl_->w->window();
+    if (!window.ok() || !window.value()) return false;
+    auto& api = gtk_window_api();
+    if (!api.load()) return false;
+    api.window_close(window.value());
+    return true;
+#else
+    if (dispatch_wm_close(g_close_handler) == CloseDispatch::ConsumedByHandler) {
+        return true;
+    }
+    auto window_result = impl_->w->window();
+    if (!window_result.ok() || !window_result.value()) return false;
+    NSWindow* window = static_cast<NSWindow*>(window_result.value());
+    [window close];
+    return true;
+#endif
 #endif
 }
 void WebHost::set_close_request_handler(std::function<bool()> handler) {
-#ifdef _WIN32
     g_close_handler = std::move(handler);
-#else
-    (void)handler;
-#endif
 }
 void WebHost::request_quit() {
 #ifdef _WIN32
     HWND hwnd = impl_->hwnd();
     if (!hwnd || !::IsWindow(hwnd)) return;
     ::PostMessageW(hwnd, kRequestQuitMsg, 0, 0);
+#else
+#if !defined(__APPLE__)
+    auto window = impl_->w->window();
+    g_linux_force_close = true;
+    if (window.ok() && window.value()) {
+        auto& api = gtk_window_api();
+        if (api.load()) {
+            api.window_close(window.value());
+        }
+    }
+#endif
+    impl_->w->terminate();
 #endif
 }
 void WebHost::bind(const std::string& name, SyncHandler fn) {

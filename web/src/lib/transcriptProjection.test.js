@@ -254,6 +254,67 @@ run('final assistant text 加 task_complete 时保留 final 并折叠前序活�
   assert.equal(projected.some((item) => item.kind === 'tool' && item.tool?.isTaskComplete), false);
 });
 
+run('大折叠展开内容保留内部工具小折叠层级', () => {
+  const projected = projectCollapsedTranscriptItems([
+    user(1, 'implement'),
+    assistant(2, 'I will inspect first'),
+    tool(3, { verb: 'Read', object: 'src/a.js', name: 'file_read' }),
+    tool(4, { verb: 'Read', object: 'src/b.js', name: 'file_read' }),
+    assistant(5, 'I found the files'),
+    tool(6, { verb: 'Created', object: 'src/c.js', name: 'file_write' }),
+    assistant(7, 'Final answer kept'),
+    taskComplete(8, 'all done'),
+  ]);
+
+  const processed = projected[1];
+  assert.equal(processed.kind, 'activity_summary');
+  assert.equal(processed.mode, 'processed');
+  assert.deepEqual(processed.coveredItemIds, [2, 3, 4, 5, 6]);
+  assert.deepEqual(
+    processed.detailItems.map((item) => [item.kind, item.mode || item.role, item.title || item.content]),
+    [
+      ['msg', 'assistant', 'I will inspect first'],
+      ['activity_summary', 'tools', '读取 2 个文件，调用 2 个工具'],
+      ['msg', 'assistant', 'I found the files'],
+      ['activity_summary', 'tools', '已创建 1 个文件，调用 1 个工具'],
+    ],
+  );
+  assert.deepEqual(processed.detailItems[1].coveredItemIds, [3, 4]);
+  assert.deepEqual(processed.detailItems[1].collapsedItems.map((item) => item.id), [3, 4]);
+  assert.deepEqual(processed.collapsedItems.map((item) => item.id), [2, 3, 4, 5, 6]);
+});
+
+run('live complete 到达时保留前一条 streaming assistant 文本', () => {
+  const projected = projectCollapsedTranscriptItems([
+    user(1, 'implement'),
+    tool(2, { verb: 'Read', object: 'src/a.js', name: 'file_read' }),
+    assistant(3, 'Final answer still visible while streaming flag remains', 3000, { streaming: true }),
+    taskComplete(4, 'all done'),
+  ], { deferTrailingToolSummary: true });
+
+  assert.deepEqual(projected.map((item) => item.kind), ['msg', 'activity_summary', 'msg', 'completion_summary']);
+  assert.equal(projected[1].mode, 'processed');
+  assert.deepEqual(projected[1].coveredItemIds, [2]);
+  assert.equal(projected[2].content, 'Final answer still visible while streaming flag remains');
+  assert.equal(projected[2].streaming, true);
+  assert.equal(projected[3].title, '总结：all done');
+});
+
+run('live complete 摘要形态到达时保留前一条 streaming assistant 文本', () => {
+  const projected = projectCollapsedTranscriptItems([
+    user(1, 'implement'),
+    tool(2, { verb: 'Read', object: 'src/a.js', name: 'file_read' }),
+    assistant(3, 'Final answer still visible', 3000, { streaming: true }),
+    completeSummaryTool(4, 'all done'),
+  ], { deferTrailingToolSummary: true });
+
+  assert.deepEqual(projected.map((item) => item.kind), ['msg', 'activity_summary', 'msg', 'completion_summary']);
+  assert.equal(projected[1].mode, 'processed');
+  assert.deepEqual(projected[1].coveredItemIds, [2]);
+  assert.equal(projected[2].content, 'Final answer still visible');
+  assert.equal(projected[3].title, '总结：all done');
+});
+
 run('没有 final assistant text 时 task_complete 保留可展开处理摘要', () => {
   const projected = projectCollapsedTranscriptItems([
     user(1),

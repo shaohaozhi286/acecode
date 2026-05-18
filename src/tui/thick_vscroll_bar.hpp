@@ -27,7 +27,8 @@ namespace acecode::tui {
 // no-scroll case by returning {0,0}).
 ftxui::Element thick_vscroll_bar(ftxui::Element child,
                                  int width,
-                                 ftxui::Box& out_track_box);
+                                 ftxui::Box& out_track_box,
+                                 bool force_ascii = false);
 
 // Pure mapping from mouse y-coordinate to (focus_index, line_offset) for
 // a chat-style message list. No FTXUI dependency — exposed inline so unit

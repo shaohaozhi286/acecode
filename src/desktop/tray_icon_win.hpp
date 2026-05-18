@@ -1,14 +1,18 @@
 #pragma once
 
-// Windows 桌面壳的系统托盘图标 (NotifyIcon)。
+// 桌面壳的系统托盘图标。
 //
 // 见 openspec/changes/add-desktop-attention-notifications/。
 // 扩展 Codex 风格菜单 + close-to-tray:openspec/changes/enhance-desktop-tray-menu/。
 //
-// 注册:
+// Windows 注册:
 //   1. 创建一个 hidden message-only 窗口(HWND_MESSAGE),WndProc 接 tray 事件
 //   2. Shell_NotifyIconW(NIM_ADD, ...) 把图标加进通知区
-//   3. 暴露 message-only HWND 给 notifications_win,让气泡通知 piggyback 上去
+//   3. 暴露 message-only HWND 给 notifications_win,让气泡通知 piggyback 上去。
+//
+// Linux 注册:
+//   - 复用 WebKitGTK/GTK3 runtime,通过 GtkStatusIcon 安装图标和菜单。
+//   - 不强制链接 GTK:Linux 后端运行时 dlopen,缺失时安全降级为无托盘。
 //
 // 行为:
 //   - 左键单击 / 双击 → on_show()(把主窗口拉前)
@@ -45,8 +49,9 @@ using TraySessionClickHandler =
 
 // init 必须在主线程上调,在 WebHost::run() 之前。
 //
-// out_message_hwnd 必填,init 成功后写入 tray 的 message-only HWND(typed `void*`
-// 让该 header 不必 include <windows.h>);失败时写 nullptr 并返回 false。
+// out_message_hwnd 必填。Windows init 成功后写入 tray 的 message-only HWND
+// (typed `void*` 让该 header 不必 include <windows.h>);Linux 写 nullptr。
+// 失败时写 nullptr 并返回 false。
 //
 // 失败原因:RegisterClass / CreateWindow / Shell_NotifyIcon NIM_ADD 任一出错。
 // 失败时主流程仍可继续,只是没有托盘图标。

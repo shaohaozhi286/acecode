@@ -70,7 +70,7 @@ protected:
 } // namespace
 
 // 场景:不传 workspace_cwd 时**完全不输出** `skills` 字段(向后兼容)。
-// builtins 仍然在,顺序固定 init→compact。
+// builtins 仍然在,顺序固定 init→compact→goal。
 TEST_F(CommandsHandlerTest, NoWorkspaceCwdOmitsSkillsField) {
     acecode::SkillRegistry registry;
     registry.set_scan_roots({tmp_root});
@@ -81,11 +81,13 @@ TEST_F(CommandsHandlerTest, NoWorkspaceCwdOmitsSkillsField) {
     ASSERT_TRUE(payload.contains("builtins"));
     EXPECT_FALSE(payload.contains("skills")) << "缺 workspace_cwd 不应输出 skills 字段";
 
-    ASSERT_EQ(payload["builtins"].size(), 2u);
+    ASSERT_EQ(payload["builtins"].size(), 3u);
     EXPECT_EQ(payload["builtins"][0]["name"].get<std::string>(), "init");
     EXPECT_EQ(payload["builtins"][1]["name"].get<std::string>(), "compact");
+    EXPECT_EQ(payload["builtins"][2]["name"].get<std::string>(), "goal");
     EXPECT_FALSE(payload["builtins"][0]["description"].get<std::string>().empty());
     EXPECT_FALSE(payload["builtins"][1]["description"].get<std::string>().empty());
+    EXPECT_FALSE(payload["builtins"][2]["description"].get<std::string>().empty());
 }
 
 // 测试 helper:在 payload.skills 中按 name 找,返回 description(找不到 → nullopt)

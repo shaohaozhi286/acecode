@@ -13,7 +13,7 @@
 
 namespace acecode::tui {
 
-// AltScreen → ScreenInteractive::Fullscreen()(\033[?1049h 切到备用屏)
+// AltScreen → ScreenInteractive::Fullscreen()(\033[?1049h 切到备用屏并撑满终端)
 // TerminalOutput → ScreenInteractive::TerminalOutput()(原历史行为)
 ftxui::ScreenInteractive make_screen_interactive(ScreenRenderMode mode);
 

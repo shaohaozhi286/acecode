@@ -19,6 +19,16 @@ namespace {
 constexpr unsigned kWin10_1809_Build = 17763;
 
 #ifdef _WIN32
+bool wide_equals_ignore_case(const std::wstring& lhs, const wchar_t* rhs) {
+    const int result = CompareStringOrdinal(
+        lhs.c_str(),
+        static_cast<int>(lhs.size()),
+        rhs,
+        -1,
+        TRUE);
+    return result == CSTR_EQUAL;
+}
+
 // 用 RtlGetVersion 拿到真实 Windows build 号,绕开 GetVersionExW 的兼容性
 // shim(那个会一直返回 6.2 即使在 Win11 上)。失败 → nullopt + LOG_WARN。
 std::optional<unsigned> probe_windows_build() {
@@ -42,9 +52,52 @@ std::optional<unsigned> probe_windows_build() {
     }
     return static_cast<unsigned>(info.dwBuildNumber);
 }
+
+bool is_console_window_class(HWND hwnd) {
+    wchar_t class_name[256] = {};
+    constexpr int class_name_count = static_cast<int>(sizeof(class_name) / sizeof(class_name[0]));
+    if (GetClassNameW(hwnd, class_name, class_name_count) <= 0) {
+        return false;
+    }
+    return wide_equals_ignore_case(class_name, L"ConsoleWindowClass");
+}
+
+bool console_handle_supports_vt(DWORD std_handle) {
+    HANDLE handle = GetStdHandle(std_handle);
+    if (!handle || handle == INVALID_HANDLE_VALUE) return false;
+
+    DWORD mode = 0;
+    if (!GetConsoleMode(handle, &mode)) return false;
+
+    const DWORD vt_mode = mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+    if (!SetConsoleMode(handle, vt_mode)) return false;
+
+    SetConsoleMode(handle, mode);
+    return true;
+}
+
+bool probe_classic_conhost() {
+    HWND hwnd = GetConsoleWindow();
+    if (!hwnd) return false;
+
+    if (is_console_window_class(hwnd) && IsWindowVisible(hwnd)) {
+        return true;
+    }
+
+    if (console_handle_supports_vt(STD_OUTPUT_HANDLE) ||
+        console_handle_supports_vt(STD_ERROR_HANDLE)) {
+        return false;
+    }
+
+    return true;
+}
 #else
 std::optional<unsigned> probe_windows_build() {
     return std::nullopt; // 非 Windows 平台没有 build 号
+}
+
+bool probe_classic_conhost() {
+    return false;
 }
 #endif
 
@@ -58,7 +111,8 @@ std::optional<std::string> default_env_lookup(const char* name) {
 
 TerminalCapabilities detect_terminal_capabilities_with(
     const std::function<std::optional<std::string>(const char* name)>& env_lookup,
-    const std::function<std::optional<unsigned>()>& version_lookup) {
+    const std::function<std::optional<unsigned>()>& version_lookup,
+    const std::function<bool()>& classic_conhost_lookup) {
     TerminalCapabilities caps;
 
     // ConEmu/Cmder: 任何非空值都视为命中(ConEmu 设置的是 PID 字符串)。
@@ -79,9 +133,16 @@ TerminalCapabilities detect_terminal_capabilities_with(
         caps.is_legacy_conhost = true;
     }
 
-    // 来源标签优先级:ConEmu > legacy conhost > 空。
+    if (!caps.is_windows_terminal && classic_conhost_lookup &&
+        classic_conhost_lookup()) {
+        caps.is_classic_conhost = true;
+    }
+
+    // 来源标签优先级:ConEmu > classic conhost > legacy conhost > 空。
     if (caps.is_conemu) {
         caps.source_label = "Cmder/ConEmu";
+    } else if (caps.is_classic_conhost) {
+        caps.source_label = "Windows Console Host";
     } else if (caps.is_legacy_conhost) {
         caps.source_label = "legacy Windows console";
     }
@@ -90,7 +151,8 @@ TerminalCapabilities detect_terminal_capabilities_with(
 }
 
 TerminalCapabilities detect_terminal_capabilities() {
-    return detect_terminal_capabilities_with(default_env_lookup, probe_windows_build);
+    return detect_terminal_capabilities_with(
+        default_env_lookup, probe_windows_build, probe_classic_conhost);
 }
 
 } // namespace acecode

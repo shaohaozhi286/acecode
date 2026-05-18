@@ -52,6 +52,18 @@ TEST(SessionStorage, MetaRoundtrip) {
     in.model         = "gpt-4o";
     in.model_preset  = "copilot-fast";
     in.title         = "resume bug";
+    in.permission_mode = "accept-edits";
+    in.turn_count    = 3;
+    in.last_token_usage.prompt_tokens = 8000;
+    in.last_token_usage.completion_tokens = 1200;
+    in.last_token_usage.total_tokens = 9200;
+    in.last_token_usage.has_data = true;
+    in.session_token_usage.prompt_tokens = 18000;
+    in.session_token_usage.completion_tokens = 2200;
+    in.session_token_usage.total_tokens = 20200;
+    in.session_token_usage.cache_read_tokens = 4000;
+    in.session_token_usage.reasoning_tokens = 300;
+    in.session_token_usage.has_data = true;
     in.archived      = true;
 
     SessionStorage::write_meta(meta_path, in);
@@ -67,6 +79,18 @@ TEST(SessionStorage, MetaRoundtrip) {
     EXPECT_EQ(out.model,         in.model);
     EXPECT_EQ(out.model_preset,  in.model_preset);
     EXPECT_EQ(out.title,         in.title);
+    EXPECT_EQ(out.permission_mode, in.permission_mode);
+    EXPECT_EQ(out.turn_count,    in.turn_count);
+    EXPECT_EQ(out.last_token_usage.prompt_tokens, 8000);
+    EXPECT_EQ(out.last_token_usage.completion_tokens, 1200);
+    EXPECT_EQ(out.last_token_usage.total_tokens, 9200);
+    EXPECT_TRUE(out.last_token_usage.has_data);
+    EXPECT_EQ(out.session_token_usage.prompt_tokens, 18000);
+    EXPECT_EQ(out.session_token_usage.completion_tokens, 2200);
+    EXPECT_EQ(out.session_token_usage.total_tokens, 20200);
+    EXPECT_EQ(out.session_token_usage.cache_read_tokens, 4000);
+    EXPECT_EQ(out.session_token_usage.reasoning_tokens, 300);
+    EXPECT_TRUE(out.session_token_usage.has_data);
     EXPECT_EQ(out.archived,      in.archived);
 }
 
@@ -100,6 +124,12 @@ TEST(SessionStorage, LegacyMetaWithoutTitle) {
         << "legacy meta without 'model_preset' must deserialize to empty preset";
     EXPECT_TRUE(out.title.empty())
         << "legacy meta without 'title' must deserialize to empty title";
+    EXPECT_EQ(out.permission_mode, "default")
+        << "legacy meta without 'permission_mode' must default to default";
+    EXPECT_EQ(out.turn_count, 0)
+        << "legacy meta without 'turn_count' must deserialize to zero";
+    EXPECT_EQ(out.last_token_usage.total_tokens, 0);
+    EXPECT_EQ(out.session_token_usage.total_tokens, 0);
     EXPECT_FALSE(out.archived)
         << "legacy meta without 'archived' must deserialize to false";
 }
@@ -185,6 +215,7 @@ TEST(SessionStorage, ListSessionsBackfillsSummaryAndCountFromJsonl) {
     EXPECT_EQ(sessions[0].id, sid);
     EXPECT_EQ(sessions[0].summary, user.content);
     EXPECT_EQ(sessions[0].message_count, 1);
+    EXPECT_EQ(sessions[0].turn_count, 1);
 }
 
 // 场景:JSONL 可能因为异常退出留下坏行或未以换行结尾的半行。

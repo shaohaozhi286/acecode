@@ -30,12 +30,18 @@ function cloneTokenUsage(tokenUsage) {
   return { ...tokenUsage };
 }
 
+function cloneGoal(goal) {
+  if (!goal || typeof goal !== 'object') return null;
+  return { ...goal };
+}
+
 function cloneState(state) {
   return {
     ...state,
     items: Array.isArray(state.items) ? state.items : [],
     toolMap: cloneToolMap(state.toolMap),
     tokenUsage: cloneTokenUsage(state.tokenUsage),
+    goal: cloneGoal(state.goal),
     activity: state.activity && typeof state.activity === 'object' ? { ...state.activity } : null,
   };
 }
@@ -129,6 +135,13 @@ function normalizePersistedToolSummary(metadata) {
   };
 }
 
+function readRuntimeTurnCount(data) {
+  const raw = data?.turn_count ?? data?.turnCount;
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return null;
+  return Math.max(0, Math.trunc(value));
+}
+
 function normalizePersistedToolHunks(metadata) {
   const raw = metadata?.tool_hunks;
   if (!Array.isArray(raw)) return [];
@@ -184,7 +197,7 @@ function historyItemFromMessage(next, m) {
 
 function visibleTranscriptMessages(messages) {
   if (!Array.isArray(messages)) return [];
-  return messages.filter((m) => !m?.is_meta);
+  return messages.filter((m) => !m?.is_meta && !m?.metadata?.hidden_goal_context);
 }
 
 function toolKey(payload = {}) {
@@ -222,6 +235,7 @@ export function createTranscriptState(overrides = {}) {
     nextItemId: 1,
     error: '',
     tokenUsage: null,
+    goal: null,
     activity: null,
     // turnHadAssistantText / lastAssistantText 用于桌面通知:在 busy=true→false
     // 转换且本回合产生过 assistant 文本时,emit turn_completed effect。reducer 之外
@@ -231,6 +245,7 @@ export function createTranscriptState(overrides = {}) {
     ...overrides,
     toolMap: cloneToolMap(overrides.toolMap),
     tokenUsage: cloneTokenUsage(overrides.tokenUsage),
+    goal: cloneGoal(overrides.goal),
   };
 }
 
@@ -423,6 +438,14 @@ export function reduceTranscriptEvent(state, msg) {
       next.tokenUsage = normalizeUsagePayload(p, eventTs(msg));
       break;
     }
+    case 'goal_updated': {
+      next.goal = cloneGoal(p.goal);
+      break;
+    }
+    case 'goal_cleared': {
+      next.goal = null;
+      break;
+    }
     case 'busy_changed': {
       const wasBusy = !!state?.busy;
       next.busy = !!p.busy;
@@ -536,6 +559,25 @@ export function loadTranscriptHistory(state, data = {}) {
     effects.push(...reduced.effects);
   }
   flushPendingStreamEvents();
+
+  if (Object.prototype.hasOwnProperty.call(data, 'goal')) {
+    next.goal = cloneGoal(data.goal);
+  }
+  const restoredTurnCount = readRuntimeTurnCount(data);
+  if (restoredTurnCount !== null) {
+    next.turns = restoredTurnCount;
+  }
+  const restoredUsage = data.token_usage ?? data.tokenUsage ?? data.latest_token_usage ?? data.latestTokenUsage;
+  if (restoredUsage && typeof restoredUsage === 'object') {
+    next.tokenUsage = normalizeUsagePayload(restoredUsage, Date.now());
+  }
+  if (data.busy === true) {
+    next.busy = true;
+    next.status = 'running';
+  } else if (data.busy === false && next.status !== 'error') {
+    next.busy = false;
+    next.status = 'idle';
+  }
 
   return { state: next, effects };
 }

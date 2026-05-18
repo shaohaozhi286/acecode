@@ -16,6 +16,7 @@ run('idle 输入使用发送模式', () => {
   assert.equal(state.mode, 'send');
   assert.equal(state.submitLabel, '发送');
   assert.equal(state.submitTitle, '发送 (Enter)');
+  assert.equal(state.helperText, 'Enter 发送 · Shift+Enter 换行 · 空输入上下键历史');
   assert.equal(state.canSubmit, true);
   assert.equal(state.canAbort, false);
 });
@@ -25,6 +26,7 @@ run('busy 输入使用排队模式并保留中断能力', () => {
   assert.equal(state.mode, 'queue');
   assert.equal(state.submitLabel, '排队');
   assert.equal(state.submitTitle, '排队下一条 (Enter)');
+  assert.equal(state.helperText, 'Enter 排队 · Shift+Enter 换行 · 空输入上下键历史');
   assert.equal(state.canSubmit, true);
   assert.equal(state.canAbort, true);
 });

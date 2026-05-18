@@ -25,11 +25,15 @@ jobs:
             triplet: x64-linux
             executable: acecode
             archive_extension: tar.gz
+            build_desktop: true
+            cmake_extra_args: -DACECODE_BUILD_DESKTOP=ON
           - id: linux-arm64
             os: ubuntu-22.04-arm
             triplet: arm64-linux
             executable: acecode
             archive_extension: tar.gz
+            build_desktop: true
+            cmake_extra_args: -DACECODE_BUILD_DESKTOP=ON
           - id: windows-x64
             os: windows-2022
             triplet: x64-windows-static
@@ -67,6 +71,13 @@ jobs:
 
       - name: Run vcpkg
         uses: lukka/run-vcpkg@v11
+
+      - name: Install Linux desktop dependencies
+        if: runner.os == 'Linux' && matrix.build_desktop
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -112,6 +123,14 @@ jobs:
           strip --strip-debug "build/${{ matrix.executable }}"
           objcopy --add-gnu-debuglink="build/${{ matrix.executable }}.debug" "build/${{ matrix.executable }}"
 
+      - name: Extract desktop debug symbols (Linux)
+        if: runner.os == 'Linux' && matrix.build_desktop
+        shell: bash
+        run: |
+          objcopy --only-keep-debug "build/acecode-desktop" "build/acecode-desktop.debug"
+          strip --strip-debug "build/acecode-desktop"
+          objcopy --add-gnu-debuglink="build/acecode-desktop.debug" "build/acecode-desktop"
+
       - name: Extract debug symbols (macOS)
         if: runner.os == 'macOS'
         shell: bash
@@ -129,6 +148,9 @@ jobs:
           cp README.md README_CN.md "$package_dir/"
           if [ "${{ matrix.build_desktop }}" = "true" ] && [ -d "build/ACECode.app" ]; then
             cp -r "build/ACECode.app" "$package_dir/"
+          elif [ "${{ matrix.build_desktop }}" = "true" ] && [ -f "build/acecode-desktop" ]; then
+            cp "build/acecode-desktop" "$package_dir/"
+            cp "web/dist/acecode-logo.png" "$package_dir/"
           fi
           tar -C dist -czf "acecode-${{ matrix.id }}.tar.gz" "acecode-${{ matrix.id }}"
 
@@ -174,6 +196,14 @@ jobs:
         with:
           name: acecode-${{ matrix.id }}-debug
           path: build/${{ matrix.executable }}.debug
+          if-no-files-found: warn
+
+      - name: Upload desktop debug symbols (Linux)
+        if: runner.os == 'Linux' && matrix.build_desktop
+        uses: actions/upload-artifact@v4
+        with:
+          name: acecode-${{ matrix.id }}-desktop-debug
+          path: build/acecode-desktop.debug
           if-no-files-found: warn
 
       - name: Upload dSYM (macOS)

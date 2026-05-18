@@ -32,21 +32,34 @@ run('assistantChromeState uses placeholder for continuation when avatar display 
   });
 });
 
-run('assistantChromeState removes avatar chrome and placeholder when disabled', () => {
+run('assistantChromeState hides the avatar but preserves the assistant gutter when disabled', () => {
   assert.deepEqual(assistantChromeState({
     showAceCodeAvatar: false,
     continuation: true,
   }), {
     showAvatar: false,
     showName: false,
-    showAvatarPlaceholder: false,
-    gapClass: 'gap-0',
+    showAvatarPlaceholder: true,
+    gapClass: 'gap-2',
+  });
+});
+
+run('assistantChromeState hides the name but preserves the gutter for first message when avatar is disabled', () => {
+  assert.deepEqual(assistantChromeState({
+    showAceCodeAvatar: false,
+    continuation: false,
+  }), {
+    showAvatar: false,
+    showName: false,
+    showAvatarPlaceholder: true,
+    gapClass: 'gap-2',
   });
 });
 
 run('activityChromeState hides waiting-state avatar when disabled', () => {
   assert.deepEqual(activityChromeState(false), {
     showAvatar: false,
-    gapClass: 'gap-0',
+    showAvatarPlaceholder: true,
+    gapClass: 'gap-2',
   });
 });

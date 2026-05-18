@@ -86,13 +86,100 @@ std::optional<std::string> pick_folder(void* parent_hwnd) {
 
 #elif !defined(__APPLE__) // POSIX stub (Linux etc.)
 
+#include "../utils/logger.hpp"
+
+#include <array>
+#include <cerrno>
+#include <cstring>
 #include <optional>
 #include <string>
+#include <sys/wait.h>
+#include <unistd.h>
+#include <vector>
 
 namespace acecode::desktop {
 
+namespace {
+
+std::optional<std::string> run_folder_picker_command(const std::vector<const char*>& argv) {
+    int pipefd[2] = {-1, -1};
+    if (::pipe(pipefd) != 0) {
+        LOG_WARN(std::string("[folder_picker] pipe failed: ") + std::strerror(errno));
+        return std::nullopt;
+    }
+
+    pid_t pid = ::fork();
+    if (pid < 0) {
+        LOG_WARN(std::string("[folder_picker] fork failed: ") + std::strerror(errno));
+        ::close(pipefd[0]);
+        ::close(pipefd[1]);
+        return std::nullopt;
+    }
+
+    if (pid == 0) {
+        ::close(pipefd[0]);
+        ::dup2(pipefd[1], STDOUT_FILENO);
+        ::close(pipefd[1]);
+        ::execvp(argv[0], const_cast<char* const*>(argv.data()));
+        ::_exit(errno == ENOENT ? 127 : 126);
+    }
+
+    ::close(pipefd[1]);
+    std::string out;
+    std::array<char, 512> buf{};
+    while (true) {
+        ssize_t n = ::read(pipefd[0], buf.data(), buf.size());
+        if (n > 0) {
+            out.append(buf.data(), static_cast<size_t>(n));
+            continue;
+        }
+        if (n < 0 && errno == EINTR) continue;
+        break;
+    }
+    ::close(pipefd[0]);
+
+    int status = 0;
+    while (::waitpid(pid, &status, 0) < 0) {
+        if (errno == EINTR) continue;
+        LOG_WARN(std::string("[folder_picker] waitpid failed: ") + std::strerror(errno));
+        return std::nullopt;
+    }
+
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        return std::nullopt;
+    }
+    while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) {
+        out.pop_back();
+    }
+    if (out.empty()) return std::nullopt;
+    return out;
+}
+
+} // namespace
+
 std::optional<std::string> pick_folder(void* /*parent*/) {
-    // Linux 版本未实现 — 后续 PR 接 GTK FileChooser。
+    // Linux best effort without adding a hard GTK dependency to acecode_testable.
+    // Desktop packages can depend on zenity/kdialog for a native folder dialog;
+    // absence or user cancellation both map to nullopt.
+    if (auto picked = run_folder_picker_command({
+            "zenity",
+            "--file-selection",
+            "--directory",
+            "--title=Select project folder",
+            nullptr,
+        })) {
+        return picked;
+    }
+    if (auto picked = run_folder_picker_command({
+            "kdialog",
+            "--getexistingdirectory",
+            ".",
+            "--title",
+            "Select project folder",
+            nullptr,
+        })) {
+        return picked;
+    }
     return std::nullopt;
 }
 

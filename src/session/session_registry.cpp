@@ -2,6 +2,7 @@
 
 #include "session_rewind.hpp"
 #include "session_storage.hpp"
+#include "thread_goal_store.hpp"
 #include "../commands/init_command.hpp"
 #include "../provider/apply_model_to_session.hpp"
 #include "../provider/copilot_provider.hpp"
@@ -13,9 +14,12 @@
 #include "../utils/cwd_hash.hpp"
 #include "../utils/utf8_path.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <optional>
+#include <sstream>
 #include <utility>
 
 namespace acecode {
@@ -167,6 +171,247 @@ SessionOptions with_resolved_workspace(const SessionRegistryDeps& deps,
     return out;
 }
 
+std::string trim_ascii(std::string s) {
+    auto is_space = [](unsigned char c) { return std::isspace(c) != 0; };
+    while (!s.empty() && is_space(static_cast<unsigned char>(s.front()))) s.erase(s.begin());
+    while (!s.empty() && is_space(static_cast<unsigned char>(s.back()))) s.pop_back();
+    return s;
+}
+
+std::string lower_ascii(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return s;
+}
+
+bool parse_goal_budget_value(const std::string& text, std::int64_t* out) {
+    if (!out || text.empty()) return false;
+    std::string s = lower_ascii(text);
+    std::int64_t multiplier = 1;
+    if (!s.empty() && (s.back() == 'k' || s.back() == 'm')) {
+        multiplier = s.back() == 'k' ? 1000 : 1000000;
+        s.pop_back();
+    }
+    if (s.empty()) return false;
+    std::int64_t value = 0;
+    for (char c : s) {
+        if (!std::isdigit(static_cast<unsigned char>(c))) return false;
+        value = value * 10 + (c - '0');
+    }
+    *out = value * multiplier;
+    return *out > 0;
+}
+
+PermissionMode permission_mode_from_name(std::string mode) {
+    if (mode == "acceptEdits") mode = "accept-edits";
+    if (mode == "accept-edits") return PermissionMode::AcceptEdits;
+    if (mode == "yolo") return PermissionMode::Yolo;
+    return PermissionMode::Default;
+}
+
+struct RegistryGoalArgs {
+    std::optional<std::int64_t> token_budget;
+    std::string remainder;
+    std::string error;
+};
+
+RegistryGoalArgs parse_registry_goal_args(std::string args) {
+    RegistryGoalArgs parsed;
+    args = trim_ascii(std::move(args));
+    if (args.rfind("--tokens", 0) != 0) {
+        parsed.remainder = args;
+        return parsed;
+    }
+    std::string rest = trim_ascii(args.substr(std::string("--tokens").size()));
+    const auto split = rest.find_first_of(" \t\r\n");
+    const std::string budget_text = split == std::string::npos ? rest : rest.substr(0, split);
+    std::int64_t budget = 0;
+    if (!parse_goal_budget_value(budget_text, &budget)) {
+        parsed.error = "Goal token budget must be a positive integer, optionally suffixed with K or M.";
+        return parsed;
+    }
+    parsed.token_budget = budget;
+    parsed.remainder = split == std::string::npos ? std::string{} : trim_ascii(rest.substr(split + 1));
+    return parsed;
+}
+
+std::string format_registry_goal_summary(const ThreadGoal& goal) {
+    std::ostringstream oss;
+    oss << "Goal:\n"
+        << "  objective: " << goal.objective << "\n"
+        << "  status:    " << to_string(goal.status) << "\n"
+        << "  tokens:    " << goal.tokens_used;
+    if (goal.token_budget.has_value()) {
+        oss << " / " << *goal.token_budget
+            << " (" << std::max<std::int64_t>(0, *goal.token_budget - goal.tokens_used)
+            << " remaining)";
+    }
+    oss << "\n  elapsed:   " << goal.time_used_seconds << "s";
+    return oss.str();
+}
+
+BuiltinCommandResult execute_goal_builtin(SessionEntry& entry,
+                                          const BuiltinCommandRequest& request) {
+    if (!entry.sm || !entry.loop) return {BuiltinCommandStatus::Failed, "session unavailable"};
+    ThreadGoalStore* store = entry.sm->goal_store();
+    if (!store) {
+        entry.loop->emit_system_message("Goal storage is not available.");
+        return {BuiltinCommandStatus::Failed, "goal storage unavailable"};
+    }
+
+    const std::string args = trim_ascii(request.args);
+    const std::string lower = lower_ascii(args);
+    std::string sid = entry.sm->current_session_id();
+    std::string error;
+
+    auto emit_updated = [&entry](const ThreadGoal& goal) {
+        entry.loop->events().emit(SessionEventKind::GoalUpdated,
+            nlohmann::json{{"session_id", goal.thread_id}, {"goal", thread_goal_to_json(goal)}});
+        entry.loop->restore_goal_runtime();
+    };
+    auto emit_cleared = [&entry](const std::string& session_id) {
+        entry.loop->events().emit(SessionEventKind::GoalCleared,
+            nlohmann::json{{"session_id", session_id}});
+        entry.loop->restore_goal_runtime();
+    };
+
+    if (args.empty() || lower == "view") {
+        if (sid.empty()) {
+            entry.loop->emit_system_message("No goal set. Use /goal <objective> to create one.");
+            return {BuiltinCommandStatus::Accepted, "completed"};
+        }
+        auto goal = store->get_thread_goal(sid, &error);
+        if (!error.empty()) {
+            entry.loop->emit_system_message("Goal error: " + error);
+            return {BuiltinCommandStatus::Failed, error};
+        }
+        entry.loop->emit_system_message(goal.has_value()
+            ? format_registry_goal_summary(*goal)
+            : "No goal set. Use /goal <objective> to create one.");
+        return {BuiltinCommandStatus::Accepted, "completed"};
+    }
+
+    const auto first_space = args.find_first_of(" \t\r\n");
+    const std::string sub = lower_ascii(first_space == std::string::npos
+        ? args
+        : args.substr(0, first_space));
+    const std::string tail = first_space == std::string::npos
+        ? std::string{}
+        : trim_ascii(args.substr(first_space + 1));
+
+    const bool state_only = sub == "clear" || sub == "pause" || sub == "resume" || sub == "edit";
+    if (!state_only) sid = entry.sm->ensure_active_session_id();
+    if (sid.empty()) {
+        entry.loop->emit_system_message("No active session is available for /goal.");
+        return {BuiltinCommandStatus::Failed, "no active session"};
+    }
+    auto current = store->get_thread_goal(sid, &error);
+    if (!error.empty()) {
+        entry.loop->emit_system_message("Goal error: " + error);
+        return {BuiltinCommandStatus::Failed, error};
+    }
+
+    if (sub == "clear") {
+        if (!current.has_value()) {
+            entry.loop->emit_system_message("No goal to clear.");
+            return {BuiltinCommandStatus::Accepted, "completed"};
+        }
+        if (!store->delete_thread_goal(sid, &error)) {
+            entry.loop->emit_system_message("Goal error: " + error);
+            return {BuiltinCommandStatus::Failed, error};
+        }
+        emit_cleared(sid);
+        entry.loop->emit_system_message("Goal cleared.");
+        return {BuiltinCommandStatus::Accepted, "completed"};
+    }
+
+    if (sub == "pause") {
+        if (!current.has_value() || current->status != ThreadGoalStatus::Active) {
+            entry.loop->emit_system_message("Goal is not active.");
+            return {BuiltinCommandStatus::Accepted, "completed"};
+        }
+        if (!store->update_thread_goal_status(sid, current->goal_id, ThreadGoalStatus::Paused, &error)) {
+            entry.loop->emit_system_message("Goal error: " + error);
+            return {BuiltinCommandStatus::Failed, error};
+        }
+        auto goal = store->get_thread_goal(sid);
+        if (goal.has_value()) emit_updated(*goal);
+        entry.loop->emit_system_message("Goal paused.");
+        return {BuiltinCommandStatus::Accepted, "completed"};
+    }
+
+    if (sub == "resume") {
+        if (!current.has_value()) {
+            entry.loop->emit_system_message("No goal to resume.");
+            return {BuiltinCommandStatus::Accepted, "completed"};
+        }
+        if (current->status == ThreadGoalStatus::Complete) {
+            entry.loop->emit_system_message("Goal is already complete.");
+            return {BuiltinCommandStatus::Accepted, "completed"};
+        }
+        if (current->token_budget.has_value() && current->tokens_used >= *current->token_budget) {
+            entry.loop->emit_system_message("Goal is over its token budget. Create a replacement goal with a larger budget.");
+            return {BuiltinCommandStatus::Accepted, "completed"};
+        }
+        if (!store->update_thread_goal_status(sid, current->goal_id, ThreadGoalStatus::Active, &error)) {
+            entry.loop->emit_system_message("Goal error: " + error);
+            return {BuiltinCommandStatus::Failed, error};
+        }
+        auto goal = store->get_thread_goal(sid);
+        if (goal.has_value()) emit_updated(*goal);
+        entry.loop->emit_system_message("Goal resumed.");
+        entry.loop->maybe_continue_goal();
+        return {BuiltinCommandStatus::Accepted, "completed"};
+    }
+
+    if (sub == "edit") {
+        if (!current.has_value()) {
+            entry.loop->emit_system_message("No goal to edit.");
+            return {BuiltinCommandStatus::Accepted, "completed"};
+        }
+        auto parsed = parse_registry_goal_args(tail);
+        if (!parsed.error.empty()) {
+            entry.loop->emit_system_message(parsed.error);
+            return {BuiltinCommandStatus::Failed, parsed.error};
+        }
+        const std::string objective = trim_goal_objective(parsed.remainder);
+        if (!validate_goal_objective(objective, &error)) {
+            entry.loop->emit_system_message(error);
+            return {BuiltinCommandStatus::Failed, error};
+        }
+        auto budget = parsed.token_budget.has_value() ? parsed.token_budget : current->token_budget;
+        if (!store->update_thread_goal_objective(sid, current->goal_id, objective, budget, &error)) {
+            entry.loop->emit_system_message("Goal error: " + error);
+            return {BuiltinCommandStatus::Failed, error};
+        }
+        auto goal = store->get_thread_goal(sid);
+        if (goal.has_value()) emit_updated(*goal);
+        entry.loop->emit_system_message(goal.has_value() ? format_registry_goal_summary(*goal) : "Goal updated.");
+        return {BuiltinCommandStatus::Accepted, "completed"};
+    }
+
+    auto parsed = parse_registry_goal_args(args);
+    if (!parsed.error.empty()) {
+        entry.loop->emit_system_message(parsed.error);
+        return {BuiltinCommandStatus::Failed, parsed.error};
+    }
+    const std::string objective = trim_goal_objective(parsed.remainder);
+    if (!validate_goal_objective(objective, &error)) {
+        entry.loop->emit_system_message(error);
+        return {BuiltinCommandStatus::Failed, error};
+    }
+    if (!store->replace_thread_goal(sid, objective, parsed.token_budget, ThreadGoalStatus::Active, &error)) {
+        entry.loop->emit_system_message("Goal error: " + error);
+        return {BuiltinCommandStatus::Failed, error};
+    }
+    auto goal = store->get_thread_goal(sid);
+    if (goal.has_value()) emit_updated(*goal);
+    entry.loop->emit_system_message(goal.has_value() ? format_registry_goal_summary(*goal) : "Goal created.");
+    entry.loop->maybe_continue_goal();
+    return {BuiltinCommandStatus::Accepted, "completed"};
+}
+
 } // namespace
 
 SessionRegistry::SessionRegistry(SessionRegistryDeps deps)
@@ -227,6 +472,12 @@ SessionRegistry::make_entry_locked(const std::string& id,
         // 注意: rules 当前没有 copy 接口 — v1 暂不复制 rules,daemon 路径
         // 自己装(后续 Section 9 落 HTTP 时一起补)。TUI 路径不受影响。
     }
+    if (resumed_meta) {
+        entry->perm->set_mode(permission_mode_from_name(resumed_meta->permission_mode));
+    }
+    entry->sm->set_permission_mode(
+        PermissionManager::mode_name(entry->perm->mode()),
+        /*persist_immediately=*/false);
 
     // AgentLoop: 给一个空 callbacks(daemon 全走 events_)
     AgentCallbacks empty_cb;
@@ -337,6 +588,8 @@ bool SessionRegistry::resume(const std::string& id, const SessionOptions& opts) 
         return false;
     }
     restore_loop_history(*entry, messages);
+    entry->loop->publish_current_goal_state();
+    entry->loop->maybe_continue_goal();
 
     entries_.emplace(id, std::move(entry));
     LOG_INFO("[registry] resumed session " + id);
@@ -352,7 +605,7 @@ SessionEntry* SessionRegistry::lookup(const std::string& id) {
 BuiltinCommandResult SessionRegistry::execute_builtin_command(
     const std::string& id,
     const BuiltinCommandRequest& request) {
-    if (request.name != "init" && request.name != "compact") {
+    if (request.name != "init" && request.name != "compact" && request.name != "goal") {
         return {BuiltinCommandStatus::UnsupportedCommand, "unsupported command"};
     }
 
@@ -364,6 +617,10 @@ BuiltinCommandResult SessionRegistry::execute_builtin_command(
     if (request.name == "compact") {
         entry->loop->submit_compact();
         return {BuiltinCommandStatus::Accepted, "queued"};
+    }
+
+    if (request.name == "goal") {
+        return execute_goal_builtin(*entry, request);
     }
 
     const std::filesystem::path cwd = path_from_utf8(entry->cwd);
@@ -430,6 +687,9 @@ bool SessionRegistry::set_permission_mode(const std::string& id, PermissionMode 
     if (it == entries_.end() || !it->second || !it->second->perm) return false;
     it->second->perm->set_mode(mode);
     it->second->perm->clear_session_allows();
+    if (it->second->sm) {
+        it->second->sm->set_permission_mode(PermissionManager::mode_name(mode));
+    }
     if (mode == PermissionMode::Yolo && it->second->prompter) {
         it->second->prompter->resolve_all(PermissionDecisionChoice::Allow);
     }
@@ -550,6 +810,12 @@ std::vector<SessionInfo> SessionRegistry::list_active() const {
             // 拿:这里**可选**调 load_session_meta 走磁盘读,有 IO 成本。
             // v1 不读磁盘(list_active 是热路径),只填 id + active + title。
             info.title = entry->sm->current_title();
+            info.turn_count = entry->sm->current_turn_count();
+            info.last_token_usage = entry->sm->current_last_token_usage();
+            info.session_token_usage = entry->sm->current_session_token_usage();
+        }
+        if (entry->perm) {
+            info.permission_mode = PermissionManager::mode_name(entry->perm->mode());
         }
         info.provider = entry->provider;
         info.model = entry->model;

@@ -23,10 +23,14 @@ bool ascii_icons_enabled() {
 
 class ThickVScrollBar : public ftxui::Node {
    public:
-    ThickVScrollBar(ftxui::Element child, int width, ftxui::Box* out_track_box)
+    ThickVScrollBar(ftxui::Element child,
+                    int width,
+                    ftxui::Box* out_track_box,
+                    bool force_ascii)
         : ftxui::Node({std::move(child)}),
           width_(width < 1 ? 1 : width),
-          out_track_box_(out_track_box) {}
+          out_track_box_(out_track_box),
+          force_ascii_(force_ascii) {}
 
     void ComputeRequirement() override {
         // 等价于 NodeDecorator::ComputeRequirement:子节点先 compute,再把
@@ -100,7 +104,7 @@ class ThickVScrollBar : public ftxui::Node {
                 scroll_range_2x * scroll_offset_inner / max_scroll_inner;
         }
 
-        const bool ascii = ascii_icons_enabled();
+        const bool ascii = force_ascii_ || ascii_icons_enabled();
         // 视觉与上游 vscroll_indicator 完全对齐:thumb 整格 = ┃ (U+2503
         // BOX DRAWINGS HEAVY VERTICAL),半格(子格精度边界)= ╹ / ╻
         // (U+2579 / U+257B)。以前我们试过 width=2 + █ 实块拼出"粗条",
@@ -133,15 +137,17 @@ class ThickVScrollBar : public ftxui::Node {
    private:
     int width_;
     ftxui::Box* out_track_box_;
+    bool force_ascii_;
 };
 
 } // namespace
 
 ftxui::Element thick_vscroll_bar(ftxui::Element child,
                                  int width,
-                                 ftxui::Box& out_track_box) {
+                                 ftxui::Box& out_track_box,
+                                 bool force_ascii) {
     return std::make_shared<ThickVScrollBar>(std::move(child), width,
-                                             &out_track_box);
+                                             &out_track_box, force_ascii);
 }
 
 } // namespace acecode::tui

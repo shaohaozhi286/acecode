@@ -42,10 +42,11 @@ set(ACECODE_DESKTOP_SOURCES
     ${CMAKE_SOURCE_DIR}/src/desktop/splash_screen.cpp
     ${CMAKE_SOURCE_DIR}/src/desktop/web_host.cpp
 )
-# 注:notifications_win.cpp / tray_icon_win.cpp 是纯 Win32 调用(Shell_NotifyIcon
-# / RegisterClassEx 等),不依赖 webview/webview,所以走 acecode_testable 路径
-# (根 CMakeLists.txt 的 ACECODE_ALL_SOURCES GLOB 会拾取),acecode-desktop 通过
-# target_link_libraries 继承。这样 acecode_unit_tests 也能跑相关纯逻辑测试。
+# 注:notifications_win.cpp / tray_icon_win.cpp 的 Windows 路径走 Shell_NotifyIcon
+# / RegisterClassEx,Linux tray 路径运行时 dlopen GTK3,因此仍不直接依赖
+# webview/webview 头或 link target。它们走 acecode_testable 路径(根 CMakeLists.txt
+# 的 ACECODE_ALL_SOURCES GLOB 会拾取),acecode-desktop 通过 target_link_libraries
+# 继承。这样 acecode_unit_tests 也能跑相关纯逻辑测试。
 # 设计:openspec/changes/add-desktop-attention-notifications。
 
 # Windows 上,acecode-desktop 用 WIN32 子系统(无 console 黑窗)。
@@ -80,6 +81,13 @@ target_link_libraries(acecode-desktop PRIVATE
     ftxui::component
 )
 
+if(NOT APPLE)
+    # Flat development/package layouts expect the daemon binary beside the
+    # desktop shell. Make `cmake --build --target acecode-desktop` produce both
+    # executables on Windows and Linux.
+    add_dependencies(acecode-desktop acecode)
+endif()
+
 # ole32 / shell32: folder_picker_win.cpp 用 IFileOpenDialog 的 COM 路径需要它们。
 # folder_picker_win.cpp 在 acecode_testable 里,所以这里不必单独 link;但为了让
 # acecode_unit_tests 也能链通,再在 acecode_testable 一侧添加(见根 CMakeLists)。
@@ -92,11 +100,17 @@ if(APPLE)
 endif()
 
 if(APPLE)
+    set(ACECODE_MACOS_ICON "${CMAKE_SOURCE_DIR}/assets/macos/acecode.icns")
+    target_sources(acecode-desktop PRIVATE "${ACECODE_MACOS_ICON}")
+    set_source_files_properties("${ACECODE_MACOS_ICON}" PROPERTIES
+        MACOSX_PACKAGE_LOCATION "Resources"
+    )
     set_target_properties(acecode-desktop PROPERTIES
         # Keep the app bundle user-facing while avoiding a case-insensitive
         # collision with the bundled daemon binary copied below.
         RUNTIME_OUTPUT_NAME "ACECode"
         MACOSX_BUNDLE_BUNDLE_NAME "ACECode"
+        MACOSX_BUNDLE_ICON_FILE "acecode.icns"
         MACOSX_BUNDLE_GUI_IDENTIFIER "dev.acecode.desktop"
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/cmake/macos/ACECodeDesktopInfo.plist.in"
         MACOSX_BUNDLE_INFO_STRING "ACECode Desktop"

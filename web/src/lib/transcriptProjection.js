@@ -241,6 +241,11 @@ function makeToolSummaryItem(items) {
   };
 }
 
+function makeProcessedDetailItems(items) {
+  if (!Array.isArray(items) || items.length === 0) return [];
+  return projectGenericTurn(items, { deferTrailingToolSummary: false });
+}
+
 function makeProcessedItem(items, endItem) {
   const { startTs, endTs } = collapsedTimestamps(items, endItem);
   const duration = startTs && endTs ? formatDurationMs(endTs - startTs) : '';
@@ -250,6 +255,7 @@ function makeProcessedItem(items, endItem) {
     id: collapsedId('processed', items),
     title: duration ? `已处理 ${duration}` : '已处理',
     collapsedItems: items.slice(),
+    detailItems: makeProcessedDetailItems(items),
     coveredItemIds: coveredIds(items),
     ts: startTs || endTs || Date.now(),
   };
@@ -340,7 +346,7 @@ function projectFinalCollapsedTurn(items, options = {}) {
     const out = preservedTurnPrefix(items);
     const previousIndex = findPreviousSignificantIndex(items, lastIndex);
     const previous = previousIndex >= 0 ? items[previousIndex] : null;
-    if (assistantHasText(previous) && !isStreamingAssistant(previous)) {
+    if (assistantHasText(previous)) {
       pushProcessedSummary(out, finalProcessedItemsBefore(items, previousIndex), last);
       out.push(previous);
     } else {

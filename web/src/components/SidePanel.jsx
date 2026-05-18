@@ -25,7 +25,7 @@ import { joinWorkspacePath } from '../lib/desktopContextMenu.js';
 import { usePreference } from '../lib/usePreference.js';
 import { clsx, formatBytes } from '../lib/format.js';
 import { CopyableCodeFrame } from './CopyableCodeFrame.jsx';
-import { VsIcon } from './Icon.jsx';
+import { PanelToggleIcon, VsIcon } from './Icon.jsx';
 import { ChangeReviewPanel } from './ChangeReview.jsx';
 
 const FILE_PREVIEW_WRAP_STORAGE_KEY = 'acecode.filePreviewWrap.v1';
@@ -568,7 +568,7 @@ export function SidePanel({
             aria-label={collapsed ? '展开右侧面板' : '收起右侧面板'}
             aria-expanded={!collapsed}
           >
-            <VsIcon name="expandRight" size={14} />
+            <PanelToggleIcon side="right" size={15} />
           </button>
         )}
       </div>

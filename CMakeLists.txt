@@ -7,7 +7,9 @@ if(CMAKE_HOST_WIN32 AND DEFINED CMAKE_TOOLCHAIN_FILE AND CMAKE_TOOLCHAIN_FILE MA
     set(VCPKG_TARGET_TRIPLET "x64-windows-static" CACHE STRING "Vcpkg target triplet" FORCE)
 endif()
 
-project(acecode VERSION 0.1.6 LANGUAGES C CXX)
+project(acecode VERSION 0.2.0 LANGUAGES C CXX)
+
+option(ACECODE_TUI_INPUT_TRACE "Enable verbose TUI input event trace logging." OFF)
 
 # CTest integration: defines BUILD_TESTING (default ON). Release packaging can
 # disable it with -DBUILD_TESTING=OFF to skip the test binary and the gtest
@@ -87,6 +89,7 @@ find_package(cpr CONFIG REQUIRED)
 find_package(ftxui CONFIG REQUIRED)
 find_package(libzip CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
+find_package(unofficial-sqlite3 CONFIG REQUIRED)
 
 # Crow is the HTTP/WebSocket server used by `acecode daemon`. Wired up as
 # QUIET in M1 so existing builds keep working before users re-run vcpkg
@@ -150,6 +153,7 @@ endforeach()
 # are pure string logic used by main.cpp and unit tests, so compile them once
 # in acecode_testable and remove them from the TUI-only source group.
 set(ACECODE_TESTABLE_TUI_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/tui/ask_question_overlay.cpp
     ${CMAKE_SOURCE_DIR}/src/tui/text_truncation.cpp
     ${CMAKE_SOURCE_DIR}/src/tui/paste_handler.cpp
     ${CMAKE_SOURCE_DIR}/src/tui/confirm_question.cpp
@@ -168,8 +172,18 @@ add_library(acecode_testable OBJECT
     ${CMAKE_BINARY_DIR}/generated/static_assets_data.cpp
 )
 if(APPLE)
+    enable_language(OBJCXX)
     # folder_picker_mac.mm 是 Objective-C++,不在 *.cpp GLOB 里。
     # acecode_testable 里的 worker.cpp 会调用 pick_folder,所以需在此层提供实现。
+    set_source_files_properties(
+        ${CMAKE_SOURCE_DIR}/src/desktop/tray_icon_win.cpp
+        ${CMAKE_SOURCE_DIR}/src/desktop/web_host.cpp
+        PROPERTIES LANGUAGE OBJCXX
+    )
+    set_source_files_properties(
+        ${CMAKE_SOURCE_DIR}/src/desktop/web_host.cpp
+        PROPERTIES COMPILE_OPTIONS "-Wno-auto-var-id"
+    )
     target_sources(acecode_testable PRIVATE
         ${CMAKE_SOURCE_DIR}/src/desktop/folder_picker_mac.mm
     )
@@ -183,8 +197,12 @@ target_include_directories(acecode_testable PUBLIC
 )
 target_link_libraries(acecode_testable PUBLIC
     cpr::cpr
+    ftxui::screen
+    ftxui::dom
+    ftxui::component
     libzip::zip
     nlohmann_json::nlohmann_json
+    unofficial::sqlite3::sqlite3
     mcp
 )
 if(Crow_FOUND)
@@ -212,6 +230,9 @@ target_link_libraries(acecode PRIVATE
     ftxui::dom
     ftxui::component
 )
+target_compile_definitions(acecode PRIVATE
+    $<$<BOOL:${ACECODE_TUI_INPUT_TRACE}>:ACECODE_TUI_INPUT_TRACE=1>
+)
 
 source_group(TREE ${CMAKE_SOURCE_DIR} FILES
     ${CMAKE_SOURCE_DIR}/main.cpp
@@ -235,10 +256,6 @@ include(${CMAKE_SOURCE_DIR}/cmake/acecode_desktop.cmake)
 
 # tuitest helloworld 子目标(opt-in,默认 OFF)。-DACECODE_BUILD_TUITEST=ON 开启。
 include(${CMAKE_SOURCE_DIR}/cmake/acecode_tuitest.cmake)
-
-# acetui C++ TUI 库子目标(opt-in,默认 OFF)。-DACECODE_BUILD_ACETUI=ON 开启;
-# 是 codex codex-rs/tui 渲染层能力的 C++ 自研复刻学习项目,不影响主二进制。
-include(${CMAKE_SOURCE_DIR}/cmake/acetui.cmake)
 
 # Bundled models.dev snapshot. Installed alongside the executable so
 # find_models_dev_dir() can resolve <exe_dir>/../share/acecode/models_dev.

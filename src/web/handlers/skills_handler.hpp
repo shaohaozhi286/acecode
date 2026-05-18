@@ -14,6 +14,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <filesystem>
 #include <optional>
 #include <string>
 
@@ -28,6 +29,17 @@ struct SkillToggleResult {
     int            http_status = 200;
     nlohmann::json body;
 };
+
+struct SkillRootSelection {
+    std::filesystem::path path;
+    std::string           source;
+};
+
+SkillRootSelection select_skill_root(const std::filesystem::path& workspace_cwd,
+                                     const std::filesystem::path& global_acecode_skills_root,
+                                     bool create_global_fallback);
+
+SkillRootSelection resolve_skill_root_for_cwd(const std::string& workspace_cwd_utf8);
 
 // 切换 skill 启停。config_path 空 = 用 save_config 默认路径(~/.acecode/config.json)。
 SkillToggleResult set_skill_enabled(const std::string& name,

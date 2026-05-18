@@ -91,6 +91,7 @@ struct TuiState {
     std::string current_thinking_phrase = "Thinking";
     std::string status_line; // for auth/provider status
     std::string token_status; // for token usage display
+    std::string goal_status; // compact goal status chip
 
     // Input history for up/down navigation
     std::vector<std::string> input_history;
@@ -142,6 +143,11 @@ struct TuiState {
     int ask_option_focus = 0;
     std::vector<bool> ask_multi_selected;
     bool ask_other_input_active = false;
+    int ask_scroll_offset = 0;
+    int ask_scroll_total_rows = 0;
+    int ask_scroll_visible_rows = 0;
+    bool ask_scrollbar_dragging = false;
+    bool ask_scroll_to_focus_requested = false;
 
     // Resume session picker state
     struct ResumeItem {
@@ -234,6 +240,8 @@ struct TuiState {
     //   last_drag_scroll_at     — 时间门,控制按行滚动的节奏 (60ms/行)
     //   chat_line_offset        — 在 chat_focus_index 这条消息内的额外行偏移
     //                              用于按行滚动 (现有按消息粒度滚动不动它)
+    //   chat_scroll_top_row     — 聊天 transcript 视口顶部的绝对显示行,
+    //                              包含消息间 spacer;用于驱动 yframe 精确定位
     //   pending_shift_dy        — anim_thread → 事件线程的请求,
     //                              事件线程消费时调用 screen.ShiftSelection(0, dy)
     bool drag_left_pressed = false;
@@ -242,6 +250,7 @@ struct TuiState {
     drag_scroll::Phase drag_phase = drag_scroll::Phase::Idle;
     std::chrono::steady_clock::time_point last_drag_scroll_at{};
     int chat_line_offset = 0;
+    int chat_scroll_top_row = 0;
     int pending_shift_dy = 0;
 
     // selection-anchor-compensation:每帧 Renderer 开头比较 chat_focus_index 对应
@@ -264,9 +273,12 @@ struct TuiState {
     //                              的 y → (focus_index, line_offset) 映射全
     //                              用这份快照,这样流式输出追加新消息时拇指
     //                              不会被指针下扯走
+    //   drag_scrollbar_grab_offset_2x — 鼠标按在 thumb 内部的 2x 子格偏移,
+    //                                   用于拖动时保持正常滚动条语义
     enum class DragScrollbarPhase { Idle, Dragging };
     DragScrollbarPhase drag_scrollbar_phase = DragScrollbarPhase::Idle;
     std::vector<int> drag_scrollbar_snapshot;
+    int drag_scrollbar_grab_offset_2x = 0;
 
     // Async compact state
     bool is_compacting = false;                       // protected by mu

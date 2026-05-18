@@ -20,6 +20,11 @@ import {
 } from '../lib/pinnedSessions.js';
 import { sessionDisplayTitle, withNewSessionDisplayTitles } from '../lib/sessionTitle.js';
 import { pushTrayMenu } from '../lib/desktopTrayMenu.js';
+import { usePreference } from '../lib/usePreference.js';
+import {
+  SESSION_LIST_CHANGED_EVENT,
+  normalizeSessionListChangedDetail,
+} from '../lib/sessionListEvents.js';
 import {
   applyStatusSnapshot,
   applyStatusUpdate,
@@ -29,9 +34,19 @@ import {
   statusCursor,
   workspaceHasUnread,
 } from '../lib/sessionStatus.js';
-import { sidebarSessionProjection } from '../lib/sidebarSessions.js';
+import {
+  sidebarSessionProjection,
+  sortSidebarSessionsNewestFirst,
+  upsertSidebarSession,
+} from '../lib/sidebarSessions.js';
 import { toast } from './Toast.jsx';
 import { VsIcon } from './Icon.jsx';
+
+const CUSTOM_SECTION_STORAGE_KEY = 'acecode.sidebarCustomSectionExpanded.v1';
+
+function validateBooleanPreference(value) {
+  return typeof value === 'boolean';
+}
 
 function hasDesktopBridge() {
   return typeof window.aceDesktop_listWorkspaces === 'function';
@@ -74,6 +89,112 @@ function PinIconInline({ size = 12 }) {
     >
       <path d="M5.75 1.5h4.5v1.25l-.85.85 1.85 3.1 1.25.55v1.15L9.2 9.3 8.1 14.5H7L5.9 9.3 2.5 8.4V7.25l1.25-.55 1.85-3.1-.85-.85V1.5Zm.8 1 .45.45-.1.28-2.1 3.52-.9.4v.2l2.85.75.82 3.9.83-3.9 2.85-.75v-.2l-.9-.4-2.1-3.52-.1-.28.45-.45H6.55Z"/>
     </svg>
+  );
+}
+
+function countObjectKeys(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return 0;
+  return Object.keys(value).length;
+}
+
+function CustomSidebarItem({ icon, label, count = null, warning = false, onClick }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="w-full flex items-center gap-2 px-4 py-[6px] text-[12px] text-fg hover:bg-surface-hi transition text-left"
+    >
+      <VsIcon name={icon} size={16} />
+      <span className="flex-1 min-w-0 truncate">{label}</span>
+      {warning ? (
+        <VsIcon name="warning" size={14} mono={false} className="shrink-0" title="未配置模型" />
+      ) : count != null ? (
+        <span className="text-[11px] text-fg-mute shrink-0 tabular-nums">{count}</span>
+      ) : null}
+    </button>
+  );
+}
+
+function CustomSidebarSection({ activeRef, activeWorkspaceHash, onOpenSettingsSection }) {
+  const [expanded, setExpanded] = usePreference(
+    CUSTOM_SECTION_STORAGE_KEY,
+    true,
+    validateBooleanPreference,
+  );
+  const [counts, setCounts] = useState({ skills: null, mcp: null, models: null });
+
+  const refreshCounts = useCallback(async () => {
+    const [skills, mcp, models] = await Promise.allSettled([
+      api.listSkills(),
+      api.getMcp(),
+      api.listModels(),
+    ]);
+    setCounts({
+      skills: skills.status === 'fulfilled' && Array.isArray(skills.value) ? skills.value.length : null,
+      mcp: mcp.status === 'fulfilled' ? countObjectKeys(mcp.value) : null,
+      models: models.status === 'fulfilled' && Array.isArray(models.value) ? models.value.length : null,
+    });
+  }, []);
+
+  useEffect(() => {
+    refreshCounts().catch(() => {});
+    const timer = setInterval(() => refreshCounts().catch(() => {}), 15000);
+    return () => clearInterval(timer);
+  }, [refreshCounts]);
+
+  const openSkills = async () => {
+    const workspaceHash =
+      activeRef?.workspaceHash || activeRef?.workspace_hash || activeWorkspaceHash || '';
+    try {
+      const root = await api.getSkillRoot(workspaceHash);
+      const path = root?.path || '';
+      if (!path) throw new Error('empty path');
+      if (typeof window.aceDesktop_openInExplorer === 'function') {
+        const result = parseDesktopResult(await window.aceDesktop_openInExplorer(path));
+        if (!result?.ok) throw new Error(result?.error || 'open failed');
+        toast({ kind: 'ok', text: '已打开技能目录' });
+        return;
+      }
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(path);
+        toast({ kind: 'ok', text: '技能目录路径已复制' });
+      } else {
+        toast({ kind: 'info', text: path });
+      }
+    } catch (e) {
+      toast({ kind: 'err', text: '打开技能目录失败:' + (e?.message || '') });
+    }
+  };
+
+  return (
+    <div className="border-t border-border shrink-0 py-2">
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        className="w-full flex items-center px-4 py-1.5 text-[12px] text-fg-2 hover:text-fg transition"
+      >
+        <span className="flex-1 text-left">自定义</span>
+        <VsIcon name={expanded ? 'expandDown' : 'expandRight'} size={12} />
+      </button>
+      {expanded && (
+        <div className="pt-1">
+          <CustomSidebarItem icon="lightbulb" label="技能" count={counts.skills} onClick={openSkills} />
+          <CustomSidebarItem
+            icon="mcp"
+            label="MCP 服务器"
+            count={counts.mcp}
+            onClick={() => onOpenSettingsSection?.('mcp')}
+          />
+          <CustomSidebarItem
+            icon="code"
+            label="模型"
+            count={counts.models && counts.models > 0 ? counts.models : null}
+            warning={counts.models === 0}
+            onClick={() => onOpenSettingsSection?.('models')}
+          />
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -292,7 +413,15 @@ function WorkspaceGroup({
   );
 }
 
-export function Sidebar({ activeId, onSelect, collapsed, width = 200, onOpenHome }) {
+export function Sidebar({
+  activeId,
+  activeRef,
+  onSelect,
+  collapsed,
+  width = 200,
+  onOpenHome,
+  onOpenSettingsSection,
+}) {
   const [workspaces,  setWorkspaces]  = useState([]);
   const [sessions,    setSessions]    = useState([]);
   const [statusBySession, setStatusBySession] = useState(() => new Map());
@@ -301,6 +430,7 @@ export function Sidebar({ activeId, onSelect, collapsed, width = 200, onOpenHome
   const [expandedSessionLists, setExpandedSessionLists] = useState(new Set());
   const [activeWorkspaceHash, setActiveWorkspaceHash] = useState('');
   const refreshingRef = useRef(false);
+  const pendingRefreshHashRef = useRef('');
   const expandedRef = useRef(new Set());
   const pinnedByWorkspaceRef = useRef(new Map());
   const retainedSessionIdsRef = useRef(new Set());
@@ -391,7 +521,10 @@ export function Sidebar({ activeId, onSelect, collapsed, width = 200, onOpenHome
   }, [togglePinnedSession]);
 
   const refresh = useCallback(async (preferredHash = activeWorkspaceHash) => {
-    if (refreshingRef.current) return;
+    if (refreshingRef.current) {
+      pendingRefreshHashRef.current = preferredHash || activeWorkspaceHash || pendingRefreshHashRef.current;
+      return;
+    }
     refreshingRef.current = true;
     try {
       let workspaceArr = [];
@@ -465,7 +598,7 @@ export function Sidebar({ activeId, onSelect, collapsed, width = 200, onOpenHome
           const list = await api.listWorkspaceSessions(w.hash);
           return (Array.isArray(list) ? list : []).map((s) => ({ ...s, workspace_hash: s.workspace_hash || w.hash, cwd: s.cwd || w.cwd }));
         }));
-        const arr = perWorkspace.flat();
+        const arr = sortSidebarSessionsNewestFirst(perWorkspace.flat());
         setSessions(arr);
         setStatusBySession((prev) => arr.reduce((map, s) => applyStatusUpdate(map, {
           ...s,
@@ -478,6 +611,9 @@ export function Sidebar({ activeId, onSelect, collapsed, width = 200, onOpenHome
       catch { /* 鉴权失败不致命 */ }
     } finally {
       refreshingRef.current = false;
+      const pendingHash = pendingRefreshHashRef.current;
+      pendingRefreshHashRef.current = '';
+      if (pendingHash) setTimeout(() => refresh(pendingHash).catch(() => {}), 0);
     }
   }, [activeWorkspaceHash, setPinnedMap, syncRetainedSessionIds, updateExpanded]);
 
@@ -533,6 +669,32 @@ export function Sidebar({ activeId, onSelect, collapsed, width = 200, onOpenHome
     window.addEventListener('ace-session-archive-changed', handler);
     return () => window.removeEventListener('ace-session-archive-changed', handler);
   }, [refresh]);
+
+  useEffect(() => {
+    const handler = (event) => {
+      const detail = normalizeSessionListChangedDetail(event.detail || {});
+      const workspaceHash = detail.workspaceHash || activeWorkspaceHash;
+      if (workspaceHash) {
+        updateExpanded((prev) => new Set(prev).add(workspaceHash));
+        connection.subscribeWorkspaceStatus(workspaceHash);
+      }
+      if (detail.session) {
+        const session = {
+          ...detail.session,
+          workspace_hash: detail.session.workspace_hash || detail.session.workspaceHash || workspaceHash,
+        };
+        setSessions((prev) => upsertSidebarSession(prev, session));
+        setStatusBySession((prev) => applyStatusUpdate(prev, {
+          ...session,
+          session_id: session.id || detail.sessionId,
+          state: session.attention_state || session.read_state || 'read',
+        }));
+      }
+      refresh(workspaceHash).catch(() => {});
+    };
+    window.addEventListener(SESSION_LIST_CHANGED_EVENT, handler);
+    return () => window.removeEventListener(SESSION_LIST_CHANGED_EVENT, handler);
+  }, [activeWorkspaceHash, refresh, updateExpanded]);
 
   const renderedSessions = useMemo(
     () => withNewSessionDisplayTitles(mergeSessionsWithStatus(sessions, statusBySession)),
@@ -886,6 +1048,11 @@ export function Sidebar({ activeId, onSelect, collapsed, width = 200, onOpenHome
             })}
           </div>
         </div>
+        <CustomSidebarSection
+          activeRef={activeRef}
+          activeWorkspaceHash={activeWorkspaceHash}
+          onOpenSettingsSection={onOpenSettingsSection}
+        />
       </div>
     </aside>
   );

@@ -103,7 +103,9 @@ cmake -S . -B build -G Ninja \
 cmake --build build --target acecode-desktop
 ```
 
-On macOS, this target produces `build/ACECode.app`. On Windows, it produces `acecode-desktop.exe`.
+On Linux, install the WebKitGTK development package before configuring the desktop target, for example `sudo apt install libwebkit2gtk-4.1-dev` on Ubuntu 24.04. At runtime the system WebKitGTK library is required, for example `libwebkit2gtk-4.1-0` on Ubuntu.
+
+On macOS, this target produces `build/ACECode.app`. On Windows and Linux, it produces a flat layout with `acecode-desktop` and the colocated `acecode` daemon executable in the build directory.
 
 ### Windows Notes
 
@@ -138,7 +140,7 @@ Read-only tools normally run automatically. File writes, edits, and shell comman
 ./acecode --resume            # Resume the latest session for this project
 ./acecode --resume <id>       # Resume a specific session
 ./acecode configure           # Run the setup wizard
-./acecode --alt-screen        # Force alternate-screen rendering for this launch
+./acecode --alt-screen        # Force fullscreen alternate-screen rendering for this launch
 ./acecode --dangerous         # Skip permission prompts; use only in a sandbox
 ```
 
@@ -173,7 +175,7 @@ Service mode uses the platform service data directory rather than the normal use
 
 ### Desktop Shell
 
-The optional `acecode-desktop` target wraps the web UI in a native desktop shell. It can track multiple workspaces through a shared daemon process. Build it with `-DACECODE_BUILD_DESKTOP=ON`; see [docs/desktop-shell/multi-workspace.md](docs/desktop-shell/multi-workspace.md) for the current model.
+The optional `acecode-desktop` target wraps the web UI in a native desktop shell. It can track multiple workspaces through a shared daemon process. Build it with `-DACECODE_BUILD_DESKTOP=ON`; on Linux it uses WebKitGTK through `webview/webview`. See [docs/desktop-shell/multi-workspace.md](docs/desktop-shell/multi-workspace.md) for the current model.
 
 ## TUI Usage
 
@@ -198,7 +200,7 @@ The optional `acecode-desktop` target wraps the web UI in a native desktop shell
 | `/proxy` | Show, refresh, or override the HTTP proxy for LLM/API requests. |
 | `/websearch` | Show or switch the web-search backend. |
 | `/title` | Set or show the terminal title. |
-| `/page-step` | Toggle single-line PgUp/PgDn scrolling. |
+| `/page-step` | Toggle PgUp/PgDn between default single-line and page scrolling. |
 | `/models` | Inspect the bundled models.dev registry. |
 | `/exit` | Exit ACECode. |
 
@@ -238,7 +240,7 @@ Important config areas:
 | `daemon`, `web` | Daemon heartbeat, service, bind, port, and static asset settings. |
 | `network` | System/manual proxy behavior, proxy probing, and TLS options. |
 | `web_search` | Web-search tool enablement and backend choice. |
-| `tui.alt_screen_mode` | Terminal rendering mode. |
+| `tui.alt_screen_mode` | Terminal rendering mode; `auto` starts fullscreen, `never` restores terminal-output mode. |
 | `desktop.notifications` | Desktop shell notification behavior. |
 | `mcp_servers` | Stdio, SSE, or Streamable HTTP MCP server definitions. |
 

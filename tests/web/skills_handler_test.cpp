@@ -134,3 +134,38 @@ TEST_F(SkillsHandlerTest, GetSkillBodyMissing) {
     populate_registry_with_skill(registry, tmp_root, "real");
     EXPECT_FALSE(acecode::web::get_skill_body("nonexistent", registry).has_value());
 }
+
+TEST_F(SkillsHandlerTest, SelectSkillRootPrefersAcecodeProjectSkills) {
+    const auto project = tmp_root / "project";
+    const auto local_skills = project / ".acecode" / "skills";
+    const auto agent_skills = project / ".agent" / "skills";
+    const auto global_skills = tmp_root / "global" / "skills";
+    fs::create_directories(local_skills);
+    fs::create_directories(agent_skills);
+
+    auto selected = acecode::web::select_skill_root(project, global_skills, false);
+    EXPECT_EQ(selected.source, "project_acecode");
+    EXPECT_EQ(fs::weakly_canonical(selected.path), fs::weakly_canonical(local_skills));
+}
+
+TEST_F(SkillsHandlerTest, SelectSkillRootUsesAgentProjectSkillsWhenAcecodeMissing) {
+    const auto project = tmp_root / "project";
+    const auto agent_skills = project / ".agent" / "skills";
+    const auto global_skills = tmp_root / "global" / "skills";
+    fs::create_directories(agent_skills);
+
+    auto selected = acecode::web::select_skill_root(project, global_skills, false);
+    EXPECT_EQ(selected.source, "project_agent");
+    EXPECT_EQ(fs::weakly_canonical(selected.path), fs::weakly_canonical(agent_skills));
+}
+
+TEST_F(SkillsHandlerTest, SelectSkillRootFallsBackToGlobalAcecodeSkillsAndCreatesIt) {
+    const auto project = tmp_root / "project";
+    const auto global_skills = tmp_root / "global" / "skills";
+    fs::create_directories(project);
+
+    auto selected = acecode::web::select_skill_root(project, global_skills, true);
+    EXPECT_EQ(selected.source, "global_acecode");
+    EXPECT_TRUE(fs::is_directory(global_skills));
+    EXPECT_EQ(fs::weakly_canonical(selected.path), fs::weakly_canonical(global_skills));
+}

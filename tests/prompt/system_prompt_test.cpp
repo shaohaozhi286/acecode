@@ -74,6 +74,17 @@ TEST_F(SystemPromptTest, EmptyInputsOmitSections) {
     EXPECT_EQ(out.find("# Project Instructions"), std::string::npos);
 }
 
+// 场景:每轮 system prompt 的 Environment 段必须暴露本地日期时间,
+// 让模型回答"现在几点"/"今天"等相对时间问题时不靠猜。
+TEST_F(SystemPromptTest, EnvironmentIncludesCurrentLocalDatetime) {
+    acecode::ToolExecutor tools;
+    std::string out = acecode::build_system_prompt(tools, temp_home.string());
+
+    EXPECT_NE(out.find("# Environment"), std::string::npos);
+    EXPECT_NE(out.find("- Current local date/time: "), std::string::npos);
+    EXPECT_NE(out.find(" UTC"), std::string::npos);
+}
+
 // 场景:memory 有条目 -> MEMORY.md 非空 -> 注入 User Memory 段
 TEST_F(SystemPromptTest, MemorySectionAppearsWhenIndexNonEmpty) {
     fs::create_directories(acecode::get_memory_dir());

@@ -18,6 +18,7 @@
 
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace acecode::web {
 
@@ -52,5 +53,17 @@ nlohmann::json profile_to_safe_json(const ModelProfile& entry);
 // 解析 POST/PUT body 到 SavedModelDraft。失败返 nullopt + err 写错误说明。
 std::optional<SavedModelDraft> parse_model_draft(const nlohmann::json& body,
                                                   std::string& err);
+
+struct ModelProbeRequest {
+    std::string provider;
+    std::string base_url;
+    std::string api_key;
+};
+
+std::optional<ModelProbeRequest> parse_model_probe_request(const nlohmann::json& body,
+                                                           std::string& err_code,
+                                                           std::string& err);
+
+std::vector<std::string> parse_openai_model_ids(const nlohmann::json& body);
 
 } // namespace acecode::web

@@ -9,6 +9,7 @@ vcpkg_cmake_configure(
         -DFTXUI_ENABLE_INSTALL=ON
         -DFTXUI_BUILD_TESTS=OFF
         -DFTXUI_BUILD_DOCS=OFF
+        -DACECODE_TUI_INPUT_TRACE=ON
 )
 
 vcpkg_cmake_install()

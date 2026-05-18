@@ -22,6 +22,11 @@ const FALLBACK_BUILTINS = Object.freeze([
     name: 'compact',
     description: 'Compress conversation history',
   }),
+  Object.freeze({
+    kind: 'builtin',
+    name: 'goal',
+    description: 'Create, view, pause, resume, edit, or clear the thread goal',
+  }),
 ]);
 
 export function fallbackCommands() {
@@ -108,9 +113,45 @@ export function parseLeadingCommand(value, knownNames = []) {
   };
 }
 
+export function leadingCommandBlockEnd(value, leading) {
+  if (typeof value !== 'string' || !leading?.name || !Number.isFinite(leading.headLength)) {
+    return 0;
+  }
+  let end = Math.max(0, Math.min(value.length, leading.headLength));
+  if (end < value.length && /\s/.test(value[end])) end += 1;
+  return end;
+}
+
+export function deleteLeadingCommandBlock(value, leading, selectionStart, selectionEnd, direction = 'backward') {
+  if (typeof value !== 'string' || !leading?.name) return null;
+  const blockEnd = leadingCommandBlockEnd(value, leading);
+  if (blockEnd <= 0) return null;
+
+  const rawStart = Number.isFinite(selectionStart) ? selectionStart : 0;
+  const rawEnd = Number.isFinite(selectionEnd) ? selectionEnd : rawStart;
+  const start = Math.max(0, Math.min(value.length, Math.min(rawStart, rawEnd)));
+  const end = Math.max(start, Math.min(value.length, Math.max(rawStart, rawEnd)));
+  const hasSelection = start !== end;
+
+  const touchesBlock = hasSelection
+    ? start < blockEnd && end > 0
+    : direction === 'forward'
+      ? start < blockEnd
+      : start > 0 && start <= blockEnd;
+  if (!touchesBlock) return null;
+
+  let deleteEnd = hasSelection ? Math.max(blockEnd, end) : blockEnd;
+  if (deleteEnd < value.length && /\s/.test(value[deleteEnd])) deleteEnd += 1;
+  return {
+    value: value.slice(deleteEnd),
+    selectionStart: 0,
+    selectionEnd: 0,
+  };
+}
+
 export function parseExecutableBuiltinCommand(value) {
   const text = typeof value === 'string' ? value.trim() : '';
-  const leading = parseLeadingCommand(text, ['init', 'compact']);
+  const leading = parseLeadingCommand(text, ['init', 'compact', 'goal']);
   if (!leading.name) return null;
   return {
     name: leading.name,

@@ -6,6 +6,7 @@
 //   - Cmder/ConEmu(ConEmuPID 命中)→ is_conemu = true,source_label = "Cmder/ConEmu"
 //   - Windows Terminal(WT_SESSION 命中)→ is_windows_terminal = true
 //   - legacy conhost(build < 17763)→ is_legacy_conhost = true
+//   - classic conhost(Win32 console window/VT 探测命中)→ is_classic_conhost = true
 //   - 多信号同时命中 → 各自独立 + source_label 走优先级
 //   - 全空 → 全 false + 空 source_label
 //   - version_lookup 返回 nullopt(探测失败 / 非 Windows)→ legacy 保守 false
@@ -36,6 +37,10 @@ auto make_version_lookup(std::optional<unsigned> build) {
     return [build]() -> std::optional<unsigned> { return build; };
 }
 
+auto make_classic_conhost_lookup(bool hit) {
+    return [hit]() -> bool { return hit; };
+}
+
 } // namespace
 
 // 场景:仅 ConEmuPID 命中 → is_conemu=true,source_label="Cmder/ConEmu"
@@ -46,6 +51,7 @@ TEST(TerminalCapability, ConEmuOnly) {
     EXPECT_TRUE(caps.is_conemu);
     EXPECT_FALSE(caps.is_windows_terminal);
     EXPECT_FALSE(caps.is_legacy_conhost);
+    EXPECT_FALSE(caps.is_classic_conhost);
     EXPECT_EQ(caps.source_label, "Cmder/ConEmu");
 }
 
@@ -58,6 +64,7 @@ TEST(TerminalCapability, WindowsTerminalOnly) {
     EXPECT_FALSE(caps.is_conemu);
     EXPECT_TRUE(caps.is_windows_terminal);
     EXPECT_FALSE(caps.is_legacy_conhost);
+    EXPECT_FALSE(caps.is_classic_conhost);
     EXPECT_EQ(caps.source_label, "");
 }
 
@@ -69,6 +76,7 @@ TEST(TerminalCapability, LegacyConhost1803) {
     EXPECT_FALSE(caps.is_conemu);
     EXPECT_FALSE(caps.is_windows_terminal);
     EXPECT_TRUE(caps.is_legacy_conhost);
+    EXPECT_FALSE(caps.is_classic_conhost);
     EXPECT_EQ(caps.source_label, "legacy Windows console");
 }
 
@@ -120,6 +128,7 @@ TEST(TerminalCapability, ConEmuOverridesLegacyLabel) {
         make_version_lookup(17134u));
     EXPECT_TRUE(caps.is_conemu);
     EXPECT_TRUE(caps.is_legacy_conhost);
+    EXPECT_FALSE(caps.is_classic_conhost);
     EXPECT_EQ(caps.source_label, "Cmder/ConEmu");
 }
 
@@ -141,5 +150,57 @@ TEST(TerminalCapability, NoSignalsAllFalse) {
     EXPECT_FALSE(caps.is_conemu);
     EXPECT_FALSE(caps.is_windows_terminal);
     EXPECT_FALSE(caps.is_legacy_conhost);
+    EXPECT_FALSE(caps.is_classic_conhost);
     EXPECT_EQ(caps.source_label, "");
+}
+
+// 场景:classic conhost 探测命中 → is_classic_conhost=true,
+// source_label 使用 "Windows Console Host"。
+TEST(TerminalCapability, ClassicConhostOnly) {
+    auto caps = detect_terminal_capabilities_with(
+        make_env_lookup(std::nullopt, std::nullopt),
+        make_version_lookup(std::nullopt),
+        make_classic_conhost_lookup(true));
+    EXPECT_FALSE(caps.is_conemu);
+    EXPECT_FALSE(caps.is_windows_terminal);
+    EXPECT_FALSE(caps.is_legacy_conhost);
+    EXPECT_TRUE(caps.is_classic_conhost);
+    EXPECT_EQ(caps.source_label, "Windows Console Host");
+    EXPECT_TRUE(should_use_conhost_compat_layout(caps));
+}
+
+// 场景:WT_SESSION 命中时,即使底层 Win32 探测看到 console handle,
+// 也不能把 Windows Terminal 误判成 classic conhost。
+TEST(TerminalCapability, WindowsTerminalSuppressesClassicConhost) {
+    auto caps = detect_terminal_capabilities_with(
+        make_env_lookup(std::nullopt, std::string("guid-string")),
+        make_version_lookup(std::nullopt),
+        make_classic_conhost_lookup(true));
+    EXPECT_TRUE(caps.is_windows_terminal);
+    EXPECT_FALSE(caps.is_classic_conhost);
+    EXPECT_EQ(caps.source_label, "");
+    EXPECT_FALSE(should_use_conhost_compat_layout(caps));
+}
+
+// 场景:ConEmu + classic conhost 同时命中时,两个信号保留,
+// 但来源标签仍使用更具体的 Cmder/ConEmu。
+TEST(TerminalCapability, ConEmuOverridesClassicConhostLabel) {
+    auto caps = detect_terminal_capabilities_with(
+        make_env_lookup(std::string("12345"), std::nullopt),
+        make_version_lookup(std::nullopt),
+        make_classic_conhost_lookup(true));
+    EXPECT_TRUE(caps.is_conemu);
+    EXPECT_TRUE(caps.is_classic_conhost);
+    EXPECT_EQ(caps.source_label, "Cmder/ConEmu");
+    EXPECT_TRUE(should_use_conhost_compat_layout(caps));
+}
+
+// 场景:legacy conhost 信号也会启用兼容布局,即使 Win32 console window
+// 探测没有命中,仍对老系统保守降级。
+TEST(TerminalCapability, LegacyConhostUsesCompatLayout) {
+    auto caps = detect_terminal_capabilities_with(
+        make_env_lookup(std::nullopt, std::nullopt),
+        make_version_lookup(17134u));
+    EXPECT_TRUE(caps.is_legacy_conhost);
+    EXPECT_TRUE(should_use_conhost_compat_layout(caps));
 }

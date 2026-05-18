@@ -534,8 +534,8 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
     // libcurl invokes this ~1 Hz regardless of whether bytes are flowing, so it
     // is the only path that can cancel during a model's silent reasoning phase.
     auto progress_cb = cpr::ProgressCallback{
-        [abort_flag](cpr::cpr_pf_arg_t /*dl_total*/, cpr::cpr_pf_arg_t /*dl_now*/,
-                     cpr::cpr_pf_arg_t /*ul_total*/, cpr::cpr_pf_arg_t /*ul_now*/,
+        [abort_flag](cpr::cpr_off_t /*dl_total*/, cpr::cpr_off_t /*dl_now*/,
+                     cpr::cpr_off_t /*ul_total*/, cpr::cpr_off_t /*ul_now*/,
                      intptr_t /*userdata*/) -> bool {
             return !(abort_flag && abort_flag->load());
         }
@@ -554,9 +554,9 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
         progress_cb
     );
 
-    const bool aborted_by_callback = (r.error.code == cpr::ErrorCode::ABORTED_BY_CALLBACK);
-    if ((abort_flag && abort_flag->load()) || aborted_by_callback) {
-        if (aborted_by_callback && accumulated.content.empty() && pending_tools.empty()) {
+    const bool user_aborted = abort_flag && abort_flag->load();
+    if (user_aborted) {
+        if (accumulated.content.empty() && pending_tools.empty()) {
             LOG_WARN("SSE request aborted by user (no-data phase or progress callback)");
         } else {
             LOG_WARN("SSE request aborted by user");

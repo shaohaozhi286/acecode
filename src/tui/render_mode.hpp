@@ -10,12 +10,10 @@
 //   - make_screen_interactive(mode) — 工厂,会调 FTXUI,实现在
 //     render_mode.cpp,排除在 acecode_testable 外。
 //
-// 决策表(详见 spec/legacy-terminal-fallback/spec.md "Render mode 决策"):
+// 决策表:
 //   alt_screen_mode == "always"  → AltScreen
 //   alt_screen_mode == "never"   → TerminalOutput
-//   alt_screen_mode == "auto" + WT_SESSION 命中 → TerminalOutput(short-circuit)
-//   alt_screen_mode == "auto" + ConEmuPID 或 legacy conhost 命中 → AltScreen
-//   alt_screen_mode == "auto" + 三个信号全无 → TerminalOutput(默认行为)
+//   alt_screen_mode == "auto"    → AltScreen(默认一开始撑满全屏)
 
 #include "config/config.hpp"
 #include "utils/terminal_capability.hpp"
@@ -28,19 +26,13 @@ enum class ScreenRenderMode {
 };
 
 inline ScreenRenderMode decide_render_mode(const TuiConfig& cfg,
-                                            const TerminalCapabilities& caps) {
+                                            const TerminalCapabilities& /*caps*/) {
     // 显式覆盖优先于自动探测。
     if (cfg.alt_screen_mode == "always") return ScreenRenderMode::AltScreen;
     if (cfg.alt_screen_mode == "never")  return ScreenRenderMode::TerminalOutput;
 
-    // auto 路径:WT_SESSION 命中即认定为现代终端,直接 short-circuit。
-    if (caps.is_windows_terminal) return ScreenRenderMode::TerminalOutput;
-
-    // 否则 ConEmu 或 legacy conhost 命中 → fallback 到 alt-screen。
-    if (caps.is_conemu || caps.is_legacy_conhost) return ScreenRenderMode::AltScreen;
-
-    // 三个信号全无 → 默认行为。
-    return ScreenRenderMode::TerminalOutput;
+    // auto 路径默认走 FTXUI Fullscreen,确保 TUI 启动时直接占满终端。
+    return ScreenRenderMode::AltScreen;
 }
 
 } // namespace acecode::tui

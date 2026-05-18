@@ -22,6 +22,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "../provider/llm_provider.hpp"
+
 namespace acecode {
 
 // ----- 事件流 -----
@@ -40,6 +42,8 @@ enum class SessionEventKind {
     QuestionRequest,   // payload: {"request_id":"...", "questions":[...]} (AskUserQuestion 工具)
     Usage,             // payload: {"input": N, "output": N, ...}
     TranscriptReplace, // payload: {"messages": [...]} full visible transcript replacement
+    GoalUpdated,       // payload: {"session_id":"...", "goal": {...}}
+    GoalCleared,       // payload: {"session_id":"..."}
     BusyChanged,       // payload: {"busy": bool}
     Done,              // payload: {} —— 一轮 agent loop 结束
     Error,             // payload: {"reason":"...", "request_id":"..."(可选)}
@@ -130,6 +134,10 @@ struct SessionInfo {
     int         context_window = 0;
     std::string title;
     int         message_count = 0;
+    int         turn_count = 0;
+    std::string permission_mode = "default";
+    TokenUsage  last_token_usage;
+    TokenUsage  session_token_usage;
     bool        active = false;   // 是否在 SessionRegistry 内存活
     bool        busy = false;     // 是否正在处理当前轮
 };
@@ -225,6 +233,8 @@ inline const char* to_string(SessionEventKind k) {
         case SessionEventKind::QuestionRequest:   return "question_request";
         case SessionEventKind::Usage:             return "usage";
         case SessionEventKind::TranscriptReplace: return "transcript_replace";
+        case SessionEventKind::GoalUpdated:       return "goal_updated";
+        case SessionEventKind::GoalCleared:       return "goal_cleared";
         case SessionEventKind::BusyChanged:       return "busy_changed";
         case SessionEventKind::Done:              return "done";
         case SessionEventKind::Error:             return "error";

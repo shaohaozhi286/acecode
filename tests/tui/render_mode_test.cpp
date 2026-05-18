@@ -5,9 +5,7 @@
 // 决策表参见 spec/legacy-terminal-fallback/spec.md "Render mode 决策":
 //   alt_screen_mode == "always"  → AltScreen
 //   alt_screen_mode == "never"   → TerminalOutput
-//   auto + WT_SESSION 命中       → TerminalOutput(short-circuit)
-//   auto + ConEmu 或 legacy     → AltScreen
-//   auto + 全空                 → TerminalOutput
+//   auto                         → AltScreen(默认一开始撑满全屏)
 
 #include <gtest/gtest.h>
 
@@ -56,19 +54,18 @@ TEST(RenderModeDecide, NeverIgnoresAllCaps) {
               ScreenRenderMode::TerminalOutput);
 }
 
-// 场景:auto + Windows Terminal 命中 → TerminalOutput(short-circuit)
-TEST(RenderModeDecide, AutoWindowsTerminalShortCircuits) {
+// 场景:auto + Windows Terminal 命中 → AltScreen
+TEST(RenderModeDecide, AutoWindowsTerminalUsesAltScreen) {
     EXPECT_EQ(decide_render_mode(with_mode("auto"),
                                   make_caps(false, true, false)),
-              ScreenRenderMode::TerminalOutput);
+              ScreenRenderMode::AltScreen);
 }
 
-// 场景:auto + WT 同时命中 ConEmu(理论不可能,但要决策稳定)
-// → 仍 short-circuit 到 TerminalOutput,因为 WT 信号优先
-TEST(RenderModeDecide, AutoWTBeatsConEmu) {
+// 场景:auto + WT 同时命中 ConEmu(理论不可能,但要决策稳定)→ AltScreen
+TEST(RenderModeDecide, AutoWTPlusConEmuUsesAltScreen) {
     EXPECT_EQ(decide_render_mode(with_mode("auto"),
                                   make_caps(true, true, false)),
-              ScreenRenderMode::TerminalOutput);
+              ScreenRenderMode::AltScreen);
 }
 
 // 场景:auto + 仅 ConEmu 命中 → AltScreen
@@ -92,9 +89,9 @@ TEST(RenderModeDecide, AutoConEmuPlusLegacyTriggersAltScreen) {
               ScreenRenderMode::AltScreen);
 }
 
-// 场景:auto + 全空(macOS / Linux / 现代 Windows 无包装层)→ TerminalOutput
-TEST(RenderModeDecide, AutoNoSignalsKeepsDefault) {
+// 场景:auto + 全空(macOS / Linux / 现代 Windows 无包装层)→ AltScreen
+TEST(RenderModeDecide, AutoNoSignalsUsesAltScreenDefault) {
     EXPECT_EQ(decide_render_mode(with_mode("auto"),
                                   make_caps(false, false, false)),
-              ScreenRenderMode::TerminalOutput);
+              ScreenRenderMode::AltScreen);
 }

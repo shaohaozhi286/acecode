@@ -26,6 +26,7 @@ class SkillRegistry;
 class MemoryRegistry;
 struct MemoryConfig;
 struct ProjectInstructionsConfig;
+struct CompactResult;
 
 // Callbacks for the TUI to observe agent loop events
 struct AgentCallbacks {
@@ -54,9 +55,15 @@ struct AgentCallbacks {
     // Called when token usage data is received from the provider
     std::function<void(const TokenUsage& usage)> on_usage;
 
-    // Called when auto-compact is needed (estimated tokens exceed threshold)
-    // Returns true if compaction was performed successfully
-    std::function<bool()> on_auto_compact;
+    // Called when the current thread goal status changes. Empty string means
+    // no goal is active for the current session.
+    std::function<void(const std::string& status)> on_goal_status;
+
+    // Called after the shared AgentLoop compact path has replaced model
+    // history. TUI uses this as a display observer; daemon/Web consumers use
+    // the TranscriptReplace event stream instead.
+    std::function<void(const std::vector<ChatMessage>& messages,
+                       const CompactResult& result)> on_transcript_replace;
 
     // Called just before a tool begins executing. `command_preview` is a short
     // human-readable summary (e.g. the first 60 chars of a bash command).
@@ -160,6 +167,9 @@ public:
     void set_agent_loop_config(AgentLoopConfig cfg) { loop_cfg_ = cfg; }
 
     void set_session_manager(SessionManager* sm) { session_manager_ = sm; }
+    void restore_goal_runtime();
+    void publish_current_goal_state();
+    void maybe_continue_goal();
 
     void set_skill_registry(const SkillRegistry* sr) { skill_registry_ = sr; }
     void set_memory_registry(const MemoryRegistry* mr) { memory_registry_ = mr; }
@@ -195,9 +205,18 @@ private:
     // Variant that records `display_text` into the user message's metadata.display_text
     // so UI can show the original input while the LLM sees an expanded `prompt`.
     // When `display_text` is empty, behaves identically to run_agent(prompt).
-    void run_agent_with_display(const std::string& prompt, const std::string& display_text);
+    void run_agent_with_display(const std::string& prompt,
+                                const std::string& display_text,
+                                bool hidden_goal_context = false);
     void run_shell(const std::string& command);
     void run_compact();
+    void account_goal_usage(std::int64_t token_delta = 0, bool allow_complete = false);
+    void emit_goal_updated(const ThreadGoal& goal);
+    void emit_goal_cleared(const std::string& session_id);
+    std::string build_goal_context_prompt(const ThreadGoal& goal) const;
+    bool maybe_run_auto_compact();
+    bool active_estimate_exceeds_auto_threshold() const;
+    void apply_compact_result(const CompactResult& result);
 
     // Section 7: 同时调老 on_message callback(若 TUI 挂了)和新事件流
     // (events_)。所有 on_message 触发点都该走这个 helper,确保 daemon
@@ -214,6 +233,7 @@ private:
         // 是被 daemon expander 展开过的字符串(skill 调用提示等)。空 = UI 与
         // LLM 看到同一份(payload)。
         std::string display_text;
+        bool hidden_goal_context = false;
     };
 
     ProviderAccessor provider_accessor_;
@@ -230,11 +250,16 @@ private:
     // is called from main.cpp — gives tests / embedders a sane behavior out of the box.
     AgentLoopConfig loop_cfg_;
     std::atomic<int> last_api_prompt_tokens_{0}; // from most recent API response
+    int auto_compact_consecutive_failures_ = 0;
     SessionManager* session_manager_ = nullptr;
     const SkillRegistry* skill_registry_ = nullptr;
     const MemoryRegistry* memory_registry_ = nullptr;
     const MemoryConfig* memory_cfg_ = nullptr;
     const ProjectInstructionsConfig* project_instructions_cfg_ = nullptr;
+    std::string goal_accounting_thread_id_;
+    std::string goal_accounting_goal_id_;
+    std::string budget_notice_goal_id_;
+    std::chrono::steady_clock::time_point goal_time_checkpoint_{};
 
     // Worker thread and task queue
     std::thread worker_thread_;

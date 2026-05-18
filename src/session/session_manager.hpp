@@ -3,11 +3,13 @@
 #include "file_checkpoint_store.hpp"
 #include "session_storage.hpp"
 #include "session_writer_lease.hpp"
+#include "thread_goal_store.hpp"
 #include "../provider/llm_provider.hpp"
 
 #include <string>
 #include <vector>
 #include <fstream>
+#include <memory>
 #include <mutex>
 
 namespace acecode {
@@ -107,6 +109,15 @@ public:
 
     bool has_active_session() const;
 
+    // Ensure a canonical session id and metadata file exist, then return the id.
+    // Used by goal commands/tools, which can create state before the first chat
+    // message is written.
+    std::string ensure_active_session_id();
+
+    ThreadGoalStore* goal_store();
+    ThreadGoalStore* existing_goal_store();
+    const ThreadGoalStore* goal_store() const;
+
     // Set the in-memory title for the current session. Persisted to .meta.json
     // on the next update_meta() (every 5 messages, or finalize). Pass empty
     // string to clear.
@@ -118,6 +129,14 @@ public:
 
     // Return the current in-memory title (empty when unset).
     std::string current_title() const;
+
+    // Persisted runtime state for the active session.
+    void set_permission_mode(std::string mode, bool persist_immediately = true);
+    std::string current_permission_mode() const;
+    void record_token_usage(const TokenUsage& usage);
+    TokenUsage current_last_token_usage() const;
+    TokenUsage current_session_token_usage() const;
+    int current_turn_count() const;
 
 private:
     bool ensure_created();  // Lazy creation of session files on first message
@@ -142,13 +161,18 @@ private:
     bool finalized_ = false;  // finalize() called
 
     int message_count_ = 0;
+    int turn_count_ = 0;
     std::string last_user_summary_;
     std::string created_at_;
     std::string pending_title_;
+    std::string permission_mode_ = "default";
+    TokenUsage last_token_usage_;
+    TokenUsage session_token_usage_;
     std::string last_error_;
     bool writer_lease_active_ = false;
     bool archived_ = false;
     FileCheckpointStore checkpoint_store_;
+    std::unique_ptr<ThreadGoalStore> goal_store_;
 
     mutable std::mutex mu_;
 };
