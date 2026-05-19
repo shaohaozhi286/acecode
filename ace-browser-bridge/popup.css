@@ -1,0 +1,74 @@
+:root {
+  color-scheme: light;
+  font-family: Arial, sans-serif;
+}
+
+body {
+  margin: 0;
+  min-width: 280px;
+  background: #f7f8fb;
+  color: #1b1f2a;
+}
+
+.panel {
+  padding: 16px;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.mark {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border-radius: 8px;
+  background: #1f6feb;
+  color: #fff;
+  font-weight: 700;
+}
+
+h1 {
+  margin: 0 0 4px;
+  font-size: 15px;
+  line-height: 1.2;
+}
+
+p {
+  margin: 0;
+  color: #536173;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+button {
+  flex: 1;
+  min-height: 32px;
+  border: 0;
+  border-radius: 6px;
+  background: #1f6feb;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+button.secondary {
+  border: 1px solid #ccd5e1;
+  background: #fff;
+  color: #1b1f2a;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}

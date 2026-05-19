@@ -977,7 +977,8 @@ static CliOptions parse_cli_options(int argc, char* argv[]) {
     CliOptions cli;
     for (int i = 1; i < argc; ++i) {
         std::string arg(argv[i]);
-        if (arg == "-dangerous" || arg == "--dangerous") {
+        if (arg == "-dangerous" || arg == "--dangerous" ||
+            arg == "-yolo" || arg == "--yolo") {
             cli.dangerous_mode = true;
         } else if (arg == "configure") {
             cli.run_configure_cmd = true;
@@ -1220,12 +1221,12 @@ static void restore_input_history(TuiState& state,
 static void add_startup_messages(TuiState& state,
                                  bool dangerous_mode,
                                  const McpManager& mcp_manager) {
-    // If dangerous mode, show startup warning. Note: -dangerous skips permission
+    // If YOLO mode is forced from CLI, show startup warning. Note: this skips permission
     // confirmations but does NOT suppress AskUserQuestion overlays (those are a
     // legitimate LLM-driven request for input).
     if (dangerous_mode) {
         state.conversation.push_back({"system",
-            "[DANGEROUS MODE] All permission checks are bypassed. Use with caution! "
+            "[YOLO MODE] All permission checks are bypassed. Use with caution. "
             "(AskUserQuestion overlays are still shown when the model needs input.)",
             false});
     }
@@ -1512,6 +1513,7 @@ static int run_interactive_app(const CliOptions& cli,
     // AskUserQuestion overlay owns a separate scrollbar track while active.
     // It must not share hit-testing state with the chat transcript scrollbar.
     Box ask_scrollbar_box;
+    Box ask_overlay_box;
 
     // drag-autoscroll: 每帧渲染时由 reflect 回填每条消息的屏幕 box,
     // 下一帧 (事件线程 / anim_thread) 读这里算每条消息的行数,供
@@ -2231,7 +2233,7 @@ static int run_interactive_app(const CliOptions& cli,
     };
 
     // Wrap with CatchEvent to handle all keyboard input
-    auto input_with_esc = CatchEvent(input_renderer, [&state, &screen, &clamp_chat_focus, &chat_viewport_rows, &auth_done, &cmd_registry, &agent_loop, &provider_slot, &provider_accessor, &config, &token_tracker, &permissions, &session_manager, &scroll_chat_by_lines, &chat_box, &scrollbar_box, &ask_scrollbar_box, &message_line_counts, &mcp_manager, &tools, &skill_registry, &memory_registry, &working_dir, &insert_pasted_text_at_cursor, &paste_system_clipboard_text](Event event) {
+    auto input_with_esc = CatchEvent(input_renderer, [&state, &screen, &clamp_chat_focus, &chat_viewport_rows, &auth_done, &cmd_registry, &agent_loop, &provider_slot, &provider_accessor, &config, &token_tracker, &permissions, &session_manager, &scroll_chat_by_lines, &chat_box, &scrollbar_box, &ask_scrollbar_box, &ask_overlay_box, &message_line_counts, &mcp_manager, &tools, &skill_registry, &memory_registry, &working_dir, &insert_pasted_text_at_cursor, &paste_system_clipboard_text](Event event) {
 #if ACECODE_TUI_INPUT_TRACE
         if (event != Event::Custom &&
             !event.is_cursor_position() &&
@@ -2255,6 +2257,7 @@ static int run_interactive_app(const CliOptions& cli,
                       " chat_box=" + box_for_log(chat_box) +
                       " scrollbar_box=" + box_for_log(scrollbar_box) +
                       " ask_scrollbar_box=" + box_for_log(ask_scrollbar_box) +
+                      " ask_overlay_box=" + box_for_log(ask_overlay_box) +
                       state_snapshot);
         }
 #endif
@@ -2430,6 +2433,26 @@ static int run_interactive_app(const CliOptions& cli,
                         (event == Event::PageUp) ? -page_step : page_step;
                     if (scroll_ask_by_lines(delta)) {
                         screen.PostEvent(Event::Custom);
+                        return true;
+                    }
+
+                    const int chat_step = config.tui.page_keys_single_line
+                        ? 1
+                        : std::max(1, chat_viewport_rows() - 2);
+                    const int chat_delta =
+                        (event == Event::PageUp) ? -chat_step : chat_step;
+                    if (scroll_chat_by_lines(chat_delta) != 0) {
+                        screen.PostEvent(Event::Custom);
+                    }
+                    return true;
+                }
+
+                if (event == Event::Special("\x1B[1;3A") ||
+                    event == Event::Special("\x1B[1;3B")) {
+                    const int delta =
+                        (event == Event::Special("\x1B[1;3A")) ? -1 : 1;
+                    if (scroll_chat_by_lines(delta) != 0) {
+                        screen.PostEvent(Event::Custom);
                     }
                     return true;
                 }
@@ -2437,6 +2460,95 @@ static int run_interactive_app(const CliOptions& cli,
                 if (event.is_mouse()) {
                     auto& mouse = event.mouse();
                     constexpr int WHEEL_LINES = 3;
+                    auto contains_box = [](const Box& box, int x, int y) {
+                        return box.x_min <= box.x_max &&
+                               box.y_min <= box.y_max &&
+                               box.Contain(x, y);
+                    };
+                    auto scroll_chat_from_ask = [&](int delta) {
+                        const int actual = scroll_chat_by_lines(delta);
+                        if (actual != 0) {
+                            screen.PostEvent(Event::Custom);
+                        }
+                        return actual;
+                    };
+                    auto begin_chat_scrollbar_drag = [&]() {
+                        state.drag_scrollbar_snapshot = message_line_counts;
+                        state.drag_scrollbar_phase =
+                            TuiState::DragScrollbarPhase::Dragging;
+                        const bool was_follow_tail = state.chat_follow_tail;
+                        state.chat_follow_tail = false;
+                        const int track_height =
+                            scrollbar_box.y_max - scrollbar_box.y_min + 1;
+                        const int snapshot_count = static_cast<int>(
+                            state.drag_scrollbar_snapshot.size());
+                        const int viewport_rows = chat_viewport_rows();
+                        const int max_top = acecode::tui::chat_max_scroll_top_row(
+                            state.drag_scrollbar_snapshot, snapshot_count,
+                            viewport_rows);
+                        const int current_top = was_follow_tail
+                            ? max_top
+                            : state.chat_scroll_top_row;
+                        const auto geometry =
+                            acecode::tui::chat_scrollbar_thumb_geometry(
+                                scrollbar_box.y_min, track_height,
+                                state.drag_scrollbar_snapshot, snapshot_count,
+                                viewport_rows, current_top);
+                        state.drag_scrollbar_grab_offset_2x =
+                            acecode::tui::chat_scrollbar_grab_offset_2x(
+                                mouse.y, geometry);
+                        state.chat_scroll_top_row =
+                            acecode::tui::chat_scrollbar_y_to_top_row_with_grab(
+                                mouse.y, scrollbar_box.y_min, geometry,
+                                state.drag_scrollbar_grab_offset_2x);
+                        auto [idx, off] = acecode::tui::chat_focus_from_display_row(
+                            state.drag_scrollbar_snapshot, snapshot_count,
+                            state.chat_scroll_top_row);
+                        if (idx >= 0) {
+                            state.chat_focus_index = idx;
+                            state.chat_line_offset = off;
+                            state.chat_follow_tail =
+                                state.chat_scroll_top_row >= max_top;
+                        }
+                        screen.PostEvent(Event::Custom);
+                    };
+                    auto move_chat_scrollbar_drag = [&]() {
+                        const int track_height =
+                            scrollbar_box.y_max - scrollbar_box.y_min + 1;
+                        const int snapshot_count = static_cast<int>(
+                            state.drag_scrollbar_snapshot.size());
+                        const int viewport_rows = chat_viewport_rows();
+                        const auto geometry =
+                            acecode::tui::chat_scrollbar_thumb_geometry(
+                                scrollbar_box.y_min, track_height,
+                                state.drag_scrollbar_snapshot, snapshot_count,
+                                viewport_rows, state.chat_scroll_top_row);
+                        state.chat_scroll_top_row =
+                            acecode::tui::chat_scrollbar_y_to_top_row_with_grab(
+                                mouse.y, scrollbar_box.y_min, geometry,
+                                state.drag_scrollbar_grab_offset_2x);
+                        auto [idx, off] = acecode::tui::chat_focus_from_display_row(
+                            state.drag_scrollbar_snapshot, snapshot_count,
+                            state.chat_scroll_top_row);
+                        if (idx >= 0) {
+                            state.chat_focus_index = idx;
+                            state.chat_line_offset = off;
+                            state.chat_follow_tail =
+                                state.chat_scroll_top_row >= geometry.max_top_row;
+                        }
+                        screen.PostEvent(Event::Custom);
+                    };
+                    auto end_chat_drag_state = [&]() {
+                        state.drag_left_pressed = false;
+                        state.drag_phase = drag_scroll::Phase::Idle;
+                        state.last_drag_scroll_at = {};
+                    };
+                    auto end_chat_scrollbar_drag = [&]() {
+                        state.drag_scrollbar_phase =
+                            TuiState::DragScrollbarPhase::Idle;
+                        state.drag_scrollbar_snapshot.clear();
+                        state.drag_scrollbar_grab_offset_2x = 0;
+                    };
 #if ACECODE_TUI_INPUT_TRACE
                     LOG_DEBUG("[input] ask overlay mouse path " +
                               event_for_log(event) +
@@ -2447,9 +2559,138 @@ static int run_interactive_app(const CliOptions& cli,
                               "/" +
                               std::to_string(state.ask_scroll_visible_rows) +
                               " ask_scrollbar=" +
-                              box_for_log(ask_scrollbar_box));
+                              box_for_log(ask_scrollbar_box) +
+                              " ask_overlay=" + box_for_log(ask_overlay_box) +
+                              " chat_box=" + box_for_log(chat_box) +
+                              " scrollbar_box=" + box_for_log(scrollbar_box));
 #endif
-                    if (mouse.button == Mouse::WheelUp) {
+
+                    if (mouse.button == Mouse::Right &&
+                        mouse.motion == Mouse::Pressed) {
+                        std::string sel = screen.GetSelection();
+                        if (!sel.empty()) {
+                            lk.unlock();
+                            auto clipboard_write =
+                                acecode::write_system_clipboard_text(sel);
+                            std::string status_msg;
+                            if (clipboard_write) {
+                                status_msg = "Copied " +
+                                             std::to_string(sel.size()) +
+                                             " bytes to clipboard";
+                            } else if (
+                                clipboard_write.status !=
+                                ClipboardTextWriteResult::Status::TooLarge) {
+                                std::string seq = "\x1b]52;c;" +
+                                                  base64_encode(sel) + "\x1b\\";
+                                std::fwrite(seq.data(), 1, seq.size(), stdout);
+                                std::fflush(stdout);
+                                status_msg = "Sent OSC 52 copy request";
+                            } else {
+                                status_msg = clipboard_copy_status_message(
+                                    clipboard_write.status);
+                            }
+                            lk.lock();
+                            set_transient_status_line_locked(state, status_msg);
+                            screen.PostEvent(Event::Custom);
+                        }
+                        return true;
+                    }
+
+                    if (state.ask_scrollbar_dragging) {
+                        if (mouse.button == Mouse::Left &&
+                            mouse.motion == Mouse::Released) {
+                            state.ask_scrollbar_dragging = false;
+                            screen.PostEvent(Event::Custom);
+                            return true;
+                        }
+                        if (mouse.motion == Mouse::Moved) {
+                            scroll_ask_to_mouse_y(mouse.y);
+                            screen.PostEvent(Event::Custom);
+                            return true;
+                        }
+                    }
+
+                    if (state.drag_scrollbar_phase ==
+                        TuiState::DragScrollbarPhase::Dragging) {
+                        if (mouse.button == Mouse::Left &&
+                            mouse.motion == Mouse::Released) {
+                            end_chat_scrollbar_drag();
+                            screen.PostEvent(Event::Custom);
+                            return true;
+                        }
+                        if (mouse.motion == Mouse::Moved) {
+                            move_chat_scrollbar_drag();
+                            return true;
+                        }
+                    }
+
+                    if (mouse.button == Mouse::Left &&
+                        mouse.motion == Mouse::Pressed &&
+                        state.ask_scroll_total_rows >
+                            state.ask_scroll_visible_rows &&
+                        contains_box(ask_scrollbar_box, mouse.x, mouse.y)) {
+                        state.ask_scrollbar_dragging = true;
+                        scroll_ask_to_mouse_y(mouse.y);
+                        screen.PostEvent(Event::Custom);
+                        return true;
+                    }
+
+                    if (mouse.button == Mouse::Left &&
+                        mouse.motion == Mouse::Pressed &&
+                        contains_box(scrollbar_box, mouse.x, mouse.y)) {
+                        begin_chat_scrollbar_drag();
+                        return true;
+                    }
+
+                    if (mouse.button == Mouse::Left &&
+                        mouse.motion == Mouse::Pressed &&
+                        contains_box(chat_box, mouse.x, mouse.y) &&
+                        !contains_box(scrollbar_box, mouse.x, mouse.y)) {
+                        state.drag_left_pressed = true;
+                        state.last_mouse_x = mouse.x;
+                        state.last_mouse_y = mouse.y;
+                        state.drag_phase = drag_scroll::Phase::Dragging;
+                        state.last_drag_scroll_at = {};
+                        return false;
+                    }
+
+                    if (mouse.motion == Mouse::Moved &&
+                        state.drag_left_pressed) {
+                        state.last_mouse_x = mouse.x;
+                        state.last_mouse_y = mouse.y;
+                        auto new_phase = drag_scroll::classify(
+                            mouse.y, chat_box.y_min, chat_box.y_max, true,
+                            drag_scroll::Config{});
+                        const bool phase_changed =
+                            new_phase != state.drag_phase;
+                        state.drag_phase = new_phase;
+                        if (phase_changed &&
+                            (new_phase == drag_scroll::Phase::ScrollingUp ||
+                             new_phase == drag_scroll::Phase::ScrollingDown)) {
+                            screen.PostEvent(Event::Custom);
+                        }
+                        return false;
+                    }
+
+                    if (mouse.button == Mouse::Left &&
+                        mouse.motion == Mouse::Released &&
+                        state.drag_left_pressed) {
+                        end_chat_drag_state();
+                        return false;
+                    }
+
+                    const bool is_wheel_event =
+                        mouse.button == Mouse::WheelUp ||
+                        mouse.button == Mouse::WheelDown;
+                    const bool ask_mouse_target =
+                        contains_box(ask_overlay_box, mouse.x, mouse.y) ||
+                        contains_box(ask_scrollbar_box, mouse.x, mouse.y);
+                    const bool chat_mouse_target =
+                        acecode::tui::is_chat_mouse_target(
+                            mouse.x, mouse.y, chat_box.x_min, chat_box.y_min,
+                            chat_box.x_max, chat_box.y_max, is_wheel_event);
+
+                    if (mouse.button == Mouse::WheelUp && ask_mouse_target) {
 #if ACECODE_TUI_INPUT_TRACE
                         const int before = state.ask_scroll_offset;
 #endif
@@ -2468,7 +2709,7 @@ static int run_interactive_app(const CliOptions& cli,
                         }
                         return true;
                     }
-                    if (mouse.button == Mouse::WheelDown) {
+                    if (mouse.button == Mouse::WheelDown && ask_mouse_target) {
 #if ACECODE_TUI_INPUT_TRACE
                         const int before = state.ask_scroll_offset;
 #endif
@@ -2487,28 +2728,20 @@ static int run_interactive_app(const CliOptions& cli,
                         }
                         return true;
                     }
-                    if (mouse.button == Mouse::Left &&
-                        mouse.motion == Mouse::Pressed &&
-                        state.ask_scroll_total_rows > state.ask_scroll_visible_rows &&
-                        ask_scrollbar_box.Contain(mouse.x, mouse.y)) {
-                        state.ask_scrollbar_dragging = true;
-                        scroll_ask_to_mouse_y(mouse.y);
-                        screen.PostEvent(Event::Custom);
+
+                    if (mouse.button == Mouse::WheelUp && chat_mouse_target) {
+                        scroll_chat_from_ask(-WHEEL_LINES);
                         return true;
                     }
+                    if (mouse.button == Mouse::WheelDown && chat_mouse_target) {
+                        scroll_chat_from_ask(WHEEL_LINES);
+                        return true;
+                    }
+
                     if (mouse.button == Mouse::Left &&
                         mouse.motion == Mouse::Released) {
-                        if (state.ask_scrollbar_dragging) {
-                            state.ask_scrollbar_dragging = false;
-                            screen.PostEvent(Event::Custom);
-                        }
-                        return true;
-                    }
-                    if (mouse.motion == Mouse::Moved &&
-                        state.ask_scrollbar_dragging) {
-                        scroll_ask_to_mouse_y(mouse.y);
-                        screen.PostEvent(Event::Custom);
-                        return true;
+                        end_chat_drag_state();
+                        end_chat_scrollbar_drag();
                     }
                     return true;
                 }
@@ -4010,7 +4243,7 @@ static int run_interactive_app(const CliOptions& cli,
         return false;
     });
 
-    auto renderer = Renderer(input_with_esc, [&state, &screen, &version_str, &cwd_display, &chat_box, &scrollbar_box, &ask_scrollbar_box, &message_boxes, &message_layout_boxes, &message_line_counts, &message_line_count_width, &anim_tick, &input_with_esc, &permissions, dangerous_mode, conhost_compat_layout, &clamp_chat_focus, &chat_viewport_rows] {
+    auto renderer = Renderer(input_with_esc, [&state, &screen, &version_str, &cwd_display, &chat_box, &scrollbar_box, &ask_scrollbar_box, &ask_overlay_box, &message_boxes, &message_layout_boxes, &message_line_counts, &message_line_count_width, &anim_tick, &input_with_esc, &permissions, dangerous_mode, conhost_compat_layout, &clamp_chat_focus, &chat_viewport_rows] {
         std::lock_guard<std::mutex> lk(state.mu);
         auto compat_horizontal_line = [] {
             const int cols = Terminal::Size().dimx;
@@ -4694,6 +4927,7 @@ static int run_interactive_app(const CliOptions& cli,
         // 作为显式护栏)。
         Element ask_overlay_element = emptyElement();
         ask_scrollbar_box = Box{};
+        ask_overlay_box = Box{};
         if (state.ask_pending && !state.ask_questions.empty() &&
             state.ask_current_question >= 0 &&
             state.ask_current_question <
@@ -4801,6 +5035,7 @@ static int run_interactive_app(const CliOptions& cli,
             } else {
                 ask_overlay_element = body | border | color(Color::Cyan);
             }
+            ask_overlay_element = ask_overlay_element | reflect(ask_overlay_box);
         }
 
         // Tool confirmation overlay —— 取代旧的单行 "y/a/n" 提示。
@@ -4935,7 +5170,7 @@ static int run_interactive_app(const CliOptions& cli,
             Elements status_parts;
             if (dangerous_mode) {
                 status_parts.push_back(
-                    text("  [DANGEROUS MODE]  ") | bold | color(Color::Red));
+                    text("  [YOLO]  ") | bold | color(Color::Yellow));
             } else if (state.is_waiting || state.tool_running) {
                 status_parts.push_back(
                     text("  esc / ctrl+c to interrupt  ") | dim |
@@ -4972,7 +5207,7 @@ static int run_interactive_app(const CliOptions& cli,
             bottom_bar = hbox(std::move(status_parts));
         } else if (dangerous_mode) {
             bottom_bar = hbox({
-                text("  [DANGEROUS MODE]") | bold | color(Color::Red),
+                text("  [YOLO]") | bold | color(Color::Yellow),
                 filler(),
                 thinking_timer_el,
                 tool_timer_el,

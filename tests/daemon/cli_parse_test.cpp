@@ -55,6 +55,14 @@ TEST(DaemonCliParse, DangerousFlag) {
     EXPECT_EQ(a.sub, "start");
 }
 
+// 场景: --yolo 是 dangerous 模式的友好别名。
+TEST(DaemonCliParse, YoloAliasEnablesDangerousMode) {
+    Args a = parse({"start", "--yolo"});
+    EXPECT_TRUE(a.dangerous);
+    EXPECT_EQ(a.sub, "start");
+    EXPECT_TRUE(a.error.empty());
+}
+
 // 场景: 未知参数必须报错,不能被静默吞掉(否则 typo 会让用户以为命令生效了)
 TEST(DaemonCliParse, UnknownArgRejected) {
     Args a = parse({"start", "--turbo"});

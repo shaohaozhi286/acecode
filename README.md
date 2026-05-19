@@ -141,7 +141,7 @@ Read-only tools normally run automatically. File writes, edits, and shell comman
 ./acecode --resume <id>       # Resume a specific session
 ./acecode configure           # Run the setup wizard
 ./acecode --alt-screen        # Force fullscreen alternate-screen rendering for this launch
-./acecode --dangerous         # Skip permission prompts; use only in a sandbox
+./acecode --yolo              # Skip permission prompts; same as --dangerous
 ```
 
 ACECode expects an interactive TTY. It is designed to be launched from the project root you want the agent to work on.
@@ -236,7 +236,7 @@ Important config areas:
 | `saved_models`, `default_model_name` | Named model profiles and defaults. |
 | `context_window`, `models_dev` | Context-window resolution and bundled models.dev lookup behavior. |
 | `skills`, `memory`, `project_instructions` | Optional context sources and their limits. |
-| `agent_loop.max_iterations` | Hard cap for one agent turn. |
+| `agent_loop.max_iterations` | Hard cap for one agent turn; `0` or omitted means unlimited. |
 | `daemon`, `web` | Daemon heartbeat, service, bind, port, and static asset settings. |
 | `network` | System/manual proxy behavior, proxy probing, and TLS options. |
 | `web_search` | Web-search tool enablement and backend choice. |

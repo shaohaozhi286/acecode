@@ -21,3 +21,7 @@ export function getGoalStopControlState({ goal = null, busy = false, stopping = 
           : '',
   };
 }
+
+export function shouldAbortForStopControl(options = {}) {
+  return getGoalStopControlState(options).action === 'abort';
+}

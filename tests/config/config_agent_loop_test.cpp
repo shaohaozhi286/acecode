@@ -1,7 +1,7 @@
 // 覆盖 src/config/config.{hpp,cpp} 中 agent_loop 段的序列化与 clamp 语义,
 // 以 align-loop-with-hermes 之后的极简 schema 为基线:
-//   - AgentLoopConfig 只剩 max_iterations 一个字段,默认 50
-//   - max_iterations 越界时钳制到 [1, 10000]
+//   - AgentLoopConfig 只剩 max_iterations 一个字段,默认 0(无限制)
+//   - max_iterations = 0 表示无限制,正数硬上限钳制到 [1, 10000]
 //   - 缺省整段 / 缺省字段 / 不认识的 legacy 字段(auto_continue /
 //     max_consecutive_empty_iterations) 都不报错,合规向后兼容
 //
@@ -25,7 +25,7 @@ int apply_agent_loop_section(const nlohmann::json& alj, AgentLoopConfig& out) {
     int warnings = 0;
     if (alj.contains("max_iterations") && alj["max_iterations"].is_number_integer()) {
         int v = alj["max_iterations"].get<int>();
-        if (v < 1) { v = 1; ++warnings; }
+        if (v < 0) { v = 0; ++warnings; }
         else if (v > 10000) { v = 10000; ++warnings; }
         out.max_iterations = v;
     }
@@ -34,16 +34,16 @@ int apply_agent_loop_section(const nlohmann::json& alj, AgentLoopConfig& out) {
 
 } // namespace
 
-// 场景:AgentLoopConfig 结构体默认 max_iterations=50
+// 场景:AgentLoopConfig 结构体默认 max_iterations=0,表示无限制
 TEST(ConfigAgentLoopDefaults, StructDefaults) {
     AgentLoopConfig al;
-    EXPECT_EQ(al.max_iterations, 50);
+    EXPECT_EQ(al.max_iterations, 0);
 }
 
-// 场景:整个 AppConfig 里 agent_loop.max_iterations 默认 50
+// 场景:整个 AppConfig 里 agent_loop.max_iterations 默认 0
 TEST(ConfigAgentLoopDefaults, NestedInAppConfig) {
     AppConfig cfg;
-    EXPECT_EQ(cfg.agent_loop.max_iterations, 50);
+    EXPECT_EQ(cfg.agent_loop.max_iterations, 0);
 }
 
 // 场景:config.json 没有 agent_loop 段 → 结构体保持默认值
@@ -51,7 +51,7 @@ TEST(ConfigAgentLoopLoader, MissingBlockKeepsDefaults) {
     AppConfig cfg;
     nlohmann::json j = nlohmann::json::object();
     EXPECT_FALSE(j.contains("agent_loop"));
-    EXPECT_EQ(cfg.agent_loop.max_iterations, 50);
+    EXPECT_EQ(cfg.agent_loop.max_iterations, 0);
 }
 
 // 场景:agent_loop 段为空对象 → max_iterations 仍是默认值,无警告
@@ -59,7 +59,7 @@ TEST(ConfigAgentLoopLoader, EmptyBlockKeepsDefault) {
     AgentLoopConfig al;
     nlohmann::json alj = nlohmann::json::object();
     EXPECT_EQ(apply_agent_loop_section(alj, al), 0);
-    EXPECT_EQ(al.max_iterations, 50);
+    EXPECT_EQ(al.max_iterations, 0);
 }
 
 // 场景:max_iterations 在合法范围内 → 直接接受,无警告
@@ -70,20 +70,20 @@ TEST(ConfigAgentLoopLoader, AcceptInRangeValue) {
     EXPECT_EQ(al.max_iterations, 100);
 }
 
-// 场景:max_iterations = 0 被钳制到 1,产生一条警告
-TEST(ConfigAgentLoopLoader, ClampMaxIterationsZero) {
+// 场景:max_iterations = 0 表示无限制,直接接受
+TEST(ConfigAgentLoopLoader, AcceptUnlimitedZero) {
     AgentLoopConfig al;
     nlohmann::json alj = {{"max_iterations", 0}};
-    EXPECT_EQ(apply_agent_loop_section(alj, al), 1);
-    EXPECT_EQ(al.max_iterations, 1);
+    EXPECT_EQ(apply_agent_loop_section(alj, al), 0);
+    EXPECT_EQ(al.max_iterations, 0);
 }
 
-// 场景:max_iterations < 0 被钳制到 1
+// 场景:max_iterations < 0 被钳制到 0
 TEST(ConfigAgentLoopLoader, ClampMaxIterationsNegative) {
     AgentLoopConfig al;
     nlohmann::json alj = {{"max_iterations", -999}};
     EXPECT_EQ(apply_agent_loop_section(alj, al), 1);
-    EXPECT_EQ(al.max_iterations, 1);
+    EXPECT_EQ(al.max_iterations, 0);
 }
 
 // 场景:max_iterations 超上限 10000 被钳制
@@ -96,6 +96,11 @@ TEST(ConfigAgentLoopLoader, ClampMaxIterationsTooLarge) {
 
 // 场景:合法边界值(恰好在上下界)原样保留,不触发警告
 TEST(ConfigAgentLoopLoader, AcceptBoundaryValues) {
+    AgentLoopConfig al0;
+    nlohmann::json alj0 = {{"max_iterations", 0}};
+    EXPECT_EQ(apply_agent_loop_section(alj0, al0), 0);
+    EXPECT_EQ(al0.max_iterations, 0);
+
     AgentLoopConfig al1;
     nlohmann::json alj1 = {{"max_iterations", 1}};
     EXPECT_EQ(apply_agent_loop_section(alj1, al1), 0);

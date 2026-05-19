@@ -123,6 +123,8 @@ public:
     // Emit a visible system message without adding it to LLM history. Used by
     // daemon-owned builtin commands for TUI-like progress and fallback output.
     void emit_system_message(const std::string& content);
+    void emit_transcript_system_message(const std::string& content,
+                                        nlohmann::json metadata = nlohmann::json::object());
 
     // Append a single user-role entry to messages_ representing an already-run
     // shell command and its captured output. Used both by the shell worker
@@ -135,6 +137,7 @@ public:
 
     // Abort the current inference. Safe to call from any thread.
     void abort();
+    void clear_stale_abort_request();
 
     // Signal the worker thread to exit and wait for it to finish.
     void shutdown();
@@ -246,8 +249,8 @@ private:
     PermissionManager& permissions_;
     PathValidator path_validator_;
     int context_window_ = 128000;
-    // agent_loop termination policy. Fresh defaults (50 / 3) until set_agent_loop_config
-    // is called from main.cpp — gives tests / embedders a sane behavior out of the box.
+    // agent_loop termination policy. Fresh defaults come from AgentLoopConfig
+    // until set_agent_loop_config is called from main.cpp.
     AgentLoopConfig loop_cfg_;
     std::atomic<int> last_api_prompt_tokens_{0}; // from most recent API response
     int auto_compact_consecutive_failures_ = 0;

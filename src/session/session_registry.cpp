@@ -31,6 +31,11 @@ bool is_llm_role(const std::string& role) {
            role == "system" || role == "tool";
 }
 
+bool is_transcript_only_message(const ChatMessage& msg) {
+    return msg.metadata.is_object() &&
+           msg.metadata.value("transcript_only", false);
+}
+
 std::pair<std::string, std::string>
 current_provider_model(const SessionRegistryDeps& deps,
                        const std::string& fallback_model) {
@@ -251,6 +256,34 @@ std::string format_registry_goal_summary(const ThreadGoal& goal) {
     return oss.str();
 }
 
+void emit_goal_audit_message(SessionEntry& entry,
+                             const ThreadGoal& goal,
+                             const std::string& action,
+                             const std::string& label) {
+    if (!entry.loop) return;
+    entry.loop->emit_transcript_system_message(
+        "[Goal] " + label + ": " + goal.objective,
+        nlohmann::json{
+            {"goal_audit", true},
+            {"goal_action", action},
+            {"goal_id", goal.goal_id},
+            {"thread_id", goal.thread_id},
+        });
+}
+
+std::optional<ThreadGoal> current_active_goal(SessionEntry& entry) {
+    if (!entry.sm) return std::nullopt;
+    const std::string sid = entry.sm->current_session_id();
+    ThreadGoalStore* store = entry.sm->existing_goal_store();
+    if (!store || sid.empty()) return std::nullopt;
+    std::string error;
+    auto goal = store->get_thread_goal(sid, &error);
+    if (!error.empty() || !goal.has_value() || goal->status != ThreadGoalStatus::Active) {
+        return std::nullopt;
+    }
+    return goal;
+}
+
 BuiltinCommandResult execute_goal_builtin(SessionEntry& entry,
                                           const BuiltinCommandRequest& request) {
     if (!entry.sm || !entry.loop) return {BuiltinCommandStatus::Failed, "session unavailable"};
@@ -361,6 +394,10 @@ BuiltinCommandResult execute_goal_builtin(SessionEntry& entry,
         auto goal = store->get_thread_goal(sid);
         if (goal.has_value()) emit_updated(*goal);
         entry.loop->emit_system_message("Goal resumed.");
+        if (goal.has_value()) {
+            emit_goal_audit_message(entry, *goal, "resume", "Resumed");
+        }
+        entry.loop->clear_stale_abort_request();
         entry.loop->maybe_continue_goal();
         return {BuiltinCommandStatus::Accepted, "completed"};
     }
@@ -408,6 +445,9 @@ BuiltinCommandResult execute_goal_builtin(SessionEntry& entry,
     auto goal = store->get_thread_goal(sid);
     if (goal.has_value()) emit_updated(*goal);
     entry.loop->emit_system_message(goal.has_value() ? format_registry_goal_summary(*goal) : "Goal created.");
+    if (goal.has_value()) {
+        emit_goal_audit_message(entry, *goal, "create", "Started");
+    }
     entry.loop->maybe_continue_goal();
     return {BuiltinCommandStatus::Accepted, "completed"};
 }
@@ -550,7 +590,7 @@ void SessionRegistry::restore_loop_history(
             continue;
         }
 
-        if (is_llm_role(msg.role)) {
+        if (is_llm_role(msg.role) && !is_transcript_only_message(msg)) {
             entry.loop->push_message(msg);
         }
     }
@@ -589,6 +629,9 @@ bool SessionRegistry::resume(const std::string& id, const SessionOptions& opts) 
     }
     restore_loop_history(*entry, messages);
     entry->loop->publish_current_goal_state();
+    if (auto goal = current_active_goal(*entry)) {
+        emit_goal_audit_message(*entry, *goal, "session_resume", "Continuing");
+    }
     entry->loop->maybe_continue_goal();
 
     entries_.emplace(id, std::move(entry));

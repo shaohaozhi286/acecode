@@ -60,6 +60,7 @@ import { fileTreeRefreshKeyFromItems } from '../lib/fileTreeRefresh.js';
 import { buildAssistantRunDirectives } from '../lib/assistantRunDirectives.js';
 import { activityChromeState } from '../lib/assistantAvatarDisplay.js';
 import { notifySessionListChanged } from '../lib/sessionListEvents.js';
+import { getGoalStopControlState } from '../lib/goalControl.js';
 import {
   CHANGE_DOCK_DISMISSALS_STORAGE_KEY,
   dismissChangeDockSignature,
@@ -794,17 +795,17 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
 
   const stopCurrentWork = useCallback(() => {
     if (!sid) return;
-    if (busy) {
+    const stopControl = getGoalStopControlState({ goal, busy, stopping: goalStopping });
+    if (stopControl.action === 'abort') {
       abort();
       return;
     }
-    if (!goalActive || goalStopping) return;
+    if (stopControl.action !== 'pause_goal' || goalStopping) return;
     setGoalStopping(true);
-    connection.sendAbort(sid);
     api.executeCommand(sid, { name: 'goal', args: 'pause', display_text: '/goal pause' })
       .catch((e) => toast({ kind: 'err', text: '停止 Goal 失败:' + (e?.message || '') }))
       .finally(() => setGoalStopping(false));
-  }, [abort, api, busy, goalActive, goalStopping, sid]);
+  }, [abort, api, busy, goal, goalStopping, sid]);
 
   const switchSessionModel = useCallback(async (name) => {
     const nextName = String(name || '');

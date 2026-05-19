@@ -36,7 +36,7 @@ void print_help(std::ostream& os) {
        << "  --run-dir=<PATH>       isolate runtime files (heartbeat/pid/port/token) to PATH\n"
        << "  --native-folder-picker enable Desktop native folder picker API\n"
        << "  --supervised --guid=G  launcher-internal: launched by Service supervisor\n"
-       << "  -dangerous             skip permission checks (loopback bind only)\n";
+       << "  --yolo, --dangerous    skip permission checks (loopback bind only)\n";
 }
 
 // 简单 starts_with(C++17 没有 string::starts_with)
@@ -142,7 +142,8 @@ Args parse(const std::vector<std::string>& tokens) {
             a.run_dir_override = tokens[++i];
         } else if (t == "--native-folder-picker") {
             a.native_folder_picker_enabled = true;
-        } else if (t == "-dangerous") {
+        } else if (t == "-dangerous" || t == "--dangerous" ||
+                   t == "-yolo" || t == "--yolo") {
             a.dangerous = true;
         } else if (t == "--help" || t == "-h") {
             a.sub = "help";

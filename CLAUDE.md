@@ -28,7 +28,7 @@ Use the command set in [AGENTS.md](AGENTS.md) as the source of truth. Important 
 
 ## Agent Loop And Tools
 
-[src/agent_loop.cpp](src/agent_loop.cpp) is the multi-turn state machine. A text-only assistant reply ends the loop. `task_complete` is an optional explicit terminator that renders a concise completion row. `AskUserQuestion` is not a terminator; its answer returns as a tool result. `config.agent_loop.max_iterations` is the hard cap.
+[src/agent_loop.cpp](src/agent_loop.cpp) is the multi-turn state machine. A text-only assistant reply ends the loop. `task_complete` is an optional explicit terminator that renders a concise completion row. `AskUserQuestion` is not a terminator; its answer returns as a tool result. `config.agent_loop.max_iterations` is an optional hard cap; `0` or omitted means unlimited.
 
 Core tools are registered for both TUI and daemon paths: `bash`, `file_read`, `file_write`, `file_edit`, `grep`, `glob`, `task_complete`, `AskUserQuestion`, skill tools, memory tools, optional `web_search`, and MCP tools. `ToolResult` can carry summaries and hunks so TUI/web resume can render useful compact rows instead of raw output folds.
 
@@ -294,7 +294,7 @@ Both `main.cpp` and `daemon/worker.cpp` call `proxy_resolver().init(cfg.network)
     "refresh_on_command_only": true
   },
   "input_history": { "enabled": true, "max_entries": 10 },
-  "agent_loop": { "max_iterations": 50 },
+  "agent_loop": { "max_iterations": 0 },
   "daemon": {
     "auto_start_on_double_click": false,
     "service_name": "ACECodeDaemon",

@@ -2,6 +2,7 @@
 //   (a) text-only 响应直接结束 loop,无条件
 //   (b) turn 1 调用 task_complete → 1 轮退出,UI 渲染 Done 摘要
 //   (c) 长链工具调用 → 命中 max_iterations 硬上限
+//   (c2) 默认 max_iterations=0 → 不因 50 轮默认值提前停止
 //   (d) AskUserQuestion 不是终止器 — 模型应继续下一轮(tool_result 走回模型)
 //   (e) 用户 abort → 立刻退出,发 [Interrupted] 系统消息
 //
@@ -226,6 +227,21 @@ TEST(AgentLoopTermination, MaxIterationsHardCap) {
     ASSERT_TRUE(h.submit_and_wait("do it"));
     EXPECT_EQ(h.turn_count(), 3);
     EXPECT_NE(h.last_system_message().find("max_iterations"),
+              std::string::npos);
+}
+
+// 场景 (c2):默认 max_iterations=0 表示无限制,不会按旧默认 50 轮停止。
+TEST(AgentLoopTermination, DefaultMaxIterationsIsUnlimited) {
+    AgentLoopHarness h;
+
+    for (int i = 0; i < 55; ++i) {
+        h.push_tool_call("noop", "{}", "c" + std::to_string(i));
+    }
+    h.push_task_complete("done after old default");
+
+    ASSERT_TRUE(h.submit_and_wait("do it", std::chrono::seconds(10)));
+    EXPECT_EQ(h.turn_count(), 56);
+    EXPECT_EQ(h.last_system_message().find("max_iterations"),
               std::string::npos);
 }
 

@@ -524,14 +524,14 @@ AppConfig load_config() {
 
             if (j.contains("agent_loop") && j["agent_loop"].is_object()) {
                 const auto& alj = j["agent_loop"];
-                // max_iterations ∈ [1, 10000]. Clamp + warn on out-of-range so a
-                // broken config value never leaves the loop unbounded.
+                // max_iterations = 0 disables the cap. Positive values are
+                // clamped to [1, 10000].
                 if (alj.contains("max_iterations") && alj["max_iterations"].is_number_integer()) {
                     int v = alj["max_iterations"].get<int>();
-                    if (v < 1) {
+                    if (v < 0) {
                         LOG_WARN("[config] agent_loop.max_iterations=" + std::to_string(v) +
-                                 " is out of range (min 1); clamping to 1");
-                        v = 1;
+                                 " is out of range (min 0); clamping to 0");
+                        v = 0;
                     } else if (v > 10000) {
                         LOG_WARN("[config] agent_loop.max_iterations=" + std::to_string(v) +
                                  " is out of range (max 10000); clamping to 10000");

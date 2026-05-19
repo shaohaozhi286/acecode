@@ -141,7 +141,7 @@ TUI 启动后，输入需求并回车：
 ./acecode --resume <id>       # 恢复指定会话
 ./acecode configure           # 运行配置向导
 ./acecode --alt-screen        # 本次启动强制使用全屏 alternate screen 渲染
-./acecode --dangerous         # 跳过权限确认；只应在沙盒中使用
+./acecode --yolo              # 跳过权限确认；等同于 --dangerous
 ```
 
 ACECode 需要交互式 TTY。建议从希望 agent 操作的项目根目录启动。
@@ -236,7 +236,7 @@ MCP servers 可以在运行时添加更多工具。
 | `saved_models`, `default_model_name` | 命名模型配置和默认模型。 |
 | `context_window`, `models_dev` | 上下文窗口解析和内置 models.dev 查询行为。 |
 | `skills`, `memory`, `project_instructions` | 可选上下文来源及其限制。 |
-| `agent_loop.max_iterations` | 单次 agent 回合硬上限。 |
+| `agent_loop.max_iterations` | 单次 agent 回合硬上限；`0` 或省略表示无限制。 |
 | `daemon`, `web` | Daemon 心跳、服务、bind、port 和静态资源设置。 |
 | `network` | 系统/手动代理、代理探测和 TLS 选项。 |
 | `web_search` | 联网搜索工具开关和 backend 选择。 |

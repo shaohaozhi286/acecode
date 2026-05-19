@@ -123,7 +123,7 @@ struct InputHistoryConfig {
 // `AskUserQuestion` is NEVER a terminator (its tool_result feeds back to
 // the model and the loop continues, exactly like any other tool).
 struct AgentLoopConfig {
-    int max_iterations = 50; // hard cap on total LLM turns per run()
+    int max_iterations = 0; // 0 = unlimited; positive values cap total LLM turns per run()
 };
 
 // TUI 渲染策略。绕开 Win10 < 1809 的 conhost / Cmder/ConEmu 在密集 cursor-up

@@ -16,6 +16,11 @@ bool is_llm_role(const std::string& role) {
            role == "system" || role == "tool";
 }
 
+bool is_transcript_only_message(const ChatMessage& msg) {
+    return msg.metadata.is_object() &&
+           msg.metadata.value("transcript_only", false);
+}
+
 } // namespace
 
 void append_resumed_session_messages(const std::vector<ChatMessage>& messages,
@@ -71,7 +76,7 @@ void append_resumed_session_messages(const std::vector<ChatMessage>& messages,
 
         // Keep provider-facing history canonical. UI-only pseudo-roles such as
         // standalone `tool_result` are rendered, but not sent to providers.
-        if (is_llm_role(msg.role)) {
+        if (is_llm_role(msg.role) && !is_transcript_only_message(msg)) {
             agent_loop.push_message(msg);
         }
         replay_buffer.push_back(msg);

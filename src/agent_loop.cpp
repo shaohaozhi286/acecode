@@ -8,6 +8,7 @@
 #include "session/tool_metadata_codec.hpp"
 #include "session/tool_result_storage.hpp"
 #include "session/session_rewind.hpp"
+#include "session/session_storage.hpp"
 #include "session/thread_goal_store.hpp"
 #include "web/message_payload.hpp"
 #include "web/tool_event_payload.hpp"
@@ -134,6 +135,12 @@ void AgentLoop::abort() {
     abort_requested_ = true;
 }
 
+void AgentLoop::clear_stale_abort_request() {
+    if (!busy_.load()) {
+        abort_requested_ = false;
+    }
+}
+
 void AgentLoop::shutdown() {
     {
         std::lock_guard<std::mutex> lk(queue_mu_);
@@ -181,6 +188,7 @@ void AgentLoop::submit(const std::string& user_message) {
 }
 
 void AgentLoop::submit(const std::string& prompt, const std::string& display_text) {
+    clear_stale_abort_request();
     {
         std::lock_guard<std::mutex> lk(queue_mu_);
         WorkerTask task;
@@ -194,6 +202,7 @@ void AgentLoop::submit(const std::string& prompt, const std::string& display_tex
 }
 
 void AgentLoop::submit_shell(std::string command) {
+    clear_stale_abort_request();
     {
         std::lock_guard<std::mutex> lk(queue_mu_);
         task_queue_.push(WorkerTask{WorkerTask::Kind::Shell, std::move(command)});
@@ -202,6 +211,7 @@ void AgentLoop::submit_shell(std::string command) {
 }
 
 void AgentLoop::submit_compact() {
+    clear_stale_abort_request();
     {
         std::lock_guard<std::mutex> lk(queue_mu_);
         WorkerTask task;
@@ -213,6 +223,33 @@ void AgentLoop::submit_compact() {
 
 void AgentLoop::emit_system_message(const std::string& content) {
     dispatch_message("system", content, false);
+}
+
+void AgentLoop::emit_transcript_system_message(const std::string& content,
+                                               nlohmann::json metadata) {
+    ChatMessage msg;
+    msg.role = "system";
+    msg.content = content;
+    msg.timestamp = SessionStorage::now_iso8601();
+    msg.metadata = metadata.is_object() ? std::move(metadata) : nlohmann::json::object();
+    msg.metadata["transcript_only"] = true;
+
+    if (callbacks_.on_message) {
+        callbacks_.on_message(msg.role, msg.content, false);
+    }
+    if (session_manager_) {
+        session_manager_->on_message(msg);
+    }
+
+    nlohmann::json payload = {
+        {"role", msg.role},
+        {"content", msg.content},
+        {"is_tool", false},
+        {"id", web::compute_message_id(msg)},
+        {"timestamp", msg.timestamp},
+        {"metadata", msg.metadata},
+    };
+    events_.emit(SessionEventKind::Message, std::move(payload));
 }
 
 bool AgentLoop::active_estimate_exceeds_auto_threshold() const {
@@ -579,13 +616,14 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
     //   - terminator_fired = true → model called task_complete ⇒ exit
     //   - text-only reply (zero tool calls) ⇒ exit (matches hermes-agent /
     //     claudecodehaha; the user re-prompts manually if the model hedged)
-    //   - total_iterations ≥ max → hard cap ⇒ emit system message and exit
+    //   - max_iterations > 0 and total_iterations ≥ max → hard cap ⇒ emit system message and exit
     //   - abort_requested_ ⇒ exit immediately, [Interrupted] system message
     int total_iterations = 0;
     bool terminator_fired = false;
     std::string terminator_reason;
 
     const int max_iter = loop_cfg_.max_iterations;
+    const bool has_max_iterations = max_iter > 0;
 
     std::mutex progress_mu;
     std::string active_progress_key;
@@ -623,7 +661,8 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
         events_.emit(SessionEventKind::AgentProgress, std::move(payload), opts);
     };
 
-    while (!abort_requested_ && !terminator_fired && total_iterations < max_iter) {
+    while (!abort_requested_ && !terminator_fired &&
+           (!has_max_iterations || total_iterations < max_iter)) {
         ++total_iterations;
         LOG_INFO("--- Agent loop turn " + std::to_string(total_iterations) +
                  ", messages: " + std::to_string(messages_.size()));
@@ -1297,7 +1336,8 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
     // Post-loop reason emission. The abort and consecutive-empty branches emit
     // their own messages inside the loop; only the max_iterations branch lands
     // here with work still conceptually pending.
-    if (!abort_requested_ && !terminator_fired && total_iterations >= max_iter) {
+    if (!abort_requested_ && !terminator_fired &&
+        has_max_iterations && total_iterations >= max_iter) {
         std::string stop_msg = "Agent loop stopped: reached max_iterations (" +
                                std::to_string(max_iter) + ")";
         LOG_WARN(stop_msg);
