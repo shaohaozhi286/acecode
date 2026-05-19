@@ -2597,8 +2597,7 @@ static int run_interactive_app(const CliOptions& cli,
                     }
 
                     if (state.ask_scrollbar_dragging) {
-                        if (mouse.button == Mouse::Left &&
-                            mouse.motion == Mouse::Released) {
+                        if (mouse.motion == Mouse::Released) {
                             state.ask_scrollbar_dragging = false;
                             screen.PostEvent(Event::Custom);
                             return true;
@@ -2612,8 +2611,7 @@ static int run_interactive_app(const CliOptions& cli,
 
                     if (state.drag_scrollbar_phase ==
                         TuiState::DragScrollbarPhase::Dragging) {
-                        if (mouse.button == Mouse::Left &&
-                            mouse.motion == Mouse::Released) {
+                        if (mouse.motion == Mouse::Released) {
                             end_chat_scrollbar_drag();
                             screen.PostEvent(Event::Custom);
                             return true;
@@ -2654,6 +2652,16 @@ static int run_interactive_app(const CliOptions& cli,
                         return false;
                     }
 
+                    if (mouse.button == Mouse::Left &&
+                        mouse.motion == Mouse::Pressed) {
+                        // Everything except explicit scrollbar hits remains
+                        // selectable while a question is pending. Returning
+                        // false is important: App::HandleSelection only keeps
+                        // the drag selection alive when the component did not
+                        // consume the mouse event.
+                        return false;
+                    }
+
                     if (mouse.motion == Mouse::Moved &&
                         state.drag_left_pressed) {
                         state.last_mouse_x = mouse.x;
@@ -2676,6 +2684,17 @@ static int run_interactive_app(const CliOptions& cli,
                         mouse.motion == Mouse::Released &&
                         state.drag_left_pressed) {
                         end_chat_drag_state();
+                        return false;
+                    }
+
+                    if (mouse.button == Mouse::Left &&
+                        (mouse.motion == Mouse::Moved ||
+                         mouse.motion == Mouse::Released)) {
+                        return false;
+                    }
+
+                    if (mouse.motion == Mouse::Moved ||
+                        mouse.motion == Mouse::Released) {
                         return false;
                     }
 
