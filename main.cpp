@@ -190,6 +190,145 @@ static std::string renderable_tool_summary_line(const acecode::ToolSummary& s,
         prefix, s.object, suffix, max_visual_width);
 }
 
+static std::string collapse_sidebar_title_whitespace(std::string_view text) {
+    std::string out;
+    bool in_space = false;
+    for (unsigned char c : text) {
+        if (std::isspace(c)) {
+            if (!out.empty() && !in_space) {
+                out.push_back(' ');
+            }
+            in_space = true;
+        } else {
+            out.push_back(static_cast<char>(c));
+            in_space = false;
+        }
+    }
+    if (!out.empty() && out.back() == ' ') {
+        out.pop_back();
+    }
+    return out;
+}
+
+static std::string first_user_message_title(const acecode::TuiState& state) {
+    for (const auto& msg : state.conversation) {
+        if (msg.role == "user") {
+            std::string title = collapse_sidebar_title_whitespace(msg.content);
+            if (!title.empty()) {
+                return title;
+            }
+        }
+    }
+    std::string explicit_title =
+        collapse_sidebar_title_whitespace(state.current_session_title);
+    return explicit_title.empty() ? std::string("New session") : explicit_title;
+}
+
+static void trim_ascii_space_suffix(std::string& text) {
+    while (!text.empty() && text.back() == ' ') {
+        text.pop_back();
+    }
+}
+
+static std::string truncate_cells_prefix(std::string_view text, int max_cells) {
+    if (max_cells <= 0) {
+        return {};
+    }
+    std::string out;
+    int used = 0;
+    for (const auto& glyph : ftxui::Utf8ToGlyphs(std::string(text))) {
+        if (glyph.empty()) {
+            continue;
+        }
+        const int width = std::max(0, ftxui::string_width(glyph));
+        if (used + width > max_cells) {
+            break;
+        }
+        out += glyph;
+        used += width;
+    }
+    return out;
+}
+
+static std::vector<std::string> sidebar_title_lines(const std::string& title,
+                                                    int max_width) {
+    max_width = std::max(1, max_width);
+    const auto glyphs = ftxui::Utf8ToGlyphs(title);
+    std::vector<std::string> lines;
+    std::size_t index = 0;
+
+    for (int line_index = 0; line_index < 2 && index < glyphs.size(); ++line_index) {
+        std::string line;
+        int width = 0;
+        while (index < glyphs.size()) {
+            const auto& glyph = glyphs[index];
+            const int glyph_width = std::max(0, ftxui::string_width(glyph));
+            if (width > 0 && width + glyph_width > max_width) {
+                break;
+            }
+            if (width == 0 && glyph_width > max_width) {
+                line += glyph;
+                ++index;
+                break;
+            }
+            line += glyph;
+            width += glyph_width;
+            ++index;
+        }
+        trim_ascii_space_suffix(line);
+        lines.push_back(std::move(line));
+        while (index < glyphs.size() && glyphs[index] == " ") {
+            ++index;
+        }
+    }
+
+    if (lines.empty()) {
+        lines.push_back("New session");
+    }
+    if (index < glyphs.size()) {
+        if (lines.size() == 1) {
+            lines.push_back("");
+        }
+        const int body_width = std::max(0, max_width - 3);
+        lines[1] = truncate_cells_prefix(lines[1], body_width);
+        trim_ascii_space_suffix(lines[1]);
+        lines[1] += "...";
+    }
+    return lines;
+}
+
+static Element render_regular_sidebar(const acecode::TuiState& state,
+                                      const std::string& version_str,
+                                      const std::string& cwd_display,
+                                      int sidebar_width) {
+    const int content_width = std::max(1, sidebar_width - 2);
+    Elements title_rows;
+    for (const auto& line : sidebar_title_lines(first_user_message_title(state),
+                                                content_width)) {
+        title_rows.push_back(text(line) | bold | color(Color::White));
+    }
+
+    Elements bottom_rows;
+    bottom_rows.push_back(paragraph(version_str) | color(Color::GrayLight) | dim);
+    if (!state.status_line.empty()) {
+        bottom_rows.push_back(paragraph(state.status_line) | color(Color::White));
+    }
+    if (!cwd_display.empty()) {
+        bottom_rows.push_back(paragraph(cwd_display) | color(Color::CyanLight) | dim);
+    }
+
+    return hbox({
+        text(" "),
+        vbox({
+            vbox(std::move(title_rows)),
+            filler(),
+            vbox(std::move(bottom_rows)),
+        }) | flex,
+        text(" "),
+    }) | size(WIDTH, EQUAL, sidebar_width) |
+       bgcolor(Color::RGB(18, 18, 20));
+}
+
 static Element render_tool_result_lines_preserving_breaks(
     const std::string& display_content) {
     Elements lines;
@@ -4284,6 +4423,13 @@ static int run_interactive_app(const CliOptions& cli,
             }
             return text(line);
         };
+        constexpr int kRegularSidebarThresholdCols = 95;
+        constexpr int kRegularSidebarWidthCols = 32;
+        const int terminal_width =
+            std::max(Terminal::Size().dimx, screen.dimx());
+        const bool show_regular_sidebar =
+            !conhost_compat_layout &&
+            terminal_width > kRegularSidebarThresholdCols;
 
         // drag-autoscroll: 把上一帧布局分配的未裁剪 box 高度同步到行数表,
         // 供 scroll_chat_by_lines 做按行滚动. 普通 ftxui::reflect 会在 Render
@@ -4371,17 +4517,26 @@ static int run_interactive_app(const CliOptions& cli,
                 text("\xE2\x96\x91\xE2\x96\x80\xE2\x96\x91\xE2\x96\x80\xE2\x96\x91\xE2\x96\x80\xE2\x96\x80\xE2\x96\x80\xE2\x96\x91\xE2\x96\x80\xE2\x96\x80\xE2\x96\x80\xE2"),
             }) | color(Color::Cyan) | bold;
 
-            header = hbox({
-                text("    "),
-                logo,
-                filler(),
-                vbox({
-                    text(version_str) | color(Color::GrayLight) | dim,
-                    text(state.status_line) | color(Color::White),
-                    text(cwd_display) | color(Color::CyanLight) | dim,
-                }),
-                text("  "),
-            }) | bgcolor(Color::RGB(0, 30, 45));
+            if (show_regular_sidebar) {
+                header = hbox({
+                    text("    "),
+                    logo,
+                    filler(),
+                    text("  "),
+                }) | bgcolor(Color::RGB(0, 30, 45));
+            } else {
+                header = hbox({
+                    text("    "),
+                    logo,
+                    filler(),
+                    vbox({
+                        text(version_str) | color(Color::GrayLight) | dim,
+                        text(state.status_line) | color(Color::White),
+                        text(cwd_display) | color(Color::CyanLight) | dim,
+                    }),
+                    text("  "),
+                }) | bgcolor(Color::RGB(0, 30, 45));
+            }
         }
 
         // -- Messages --
@@ -4429,7 +4584,12 @@ static int run_interactive_app(const CliOptions& cli,
                 Element md_content;
                 try {
                     acecode::markdown::FormatOptions md_opts;
-                    md_opts.terminal_width = ftxui::Terminal::Size().dimx - 6;
+                    const int fallback_width = terminal_width -
+                        (show_regular_sidebar ? kRegularSidebarWidthCols + 9 : 6);
+                    md_opts.terminal_width =
+                        std::max(20, (current_message_width > 0
+                            ? current_message_width
+                            : fallback_width) - 6);
                     md_opts.syntax_highlight = true;
                     md_opts.hyperlinks = true;
                     md_opts.strip_xml = true;
@@ -5281,7 +5441,7 @@ static int run_interactive_app(const CliOptions& cli,
             ? compat_horizontal_line()
             : separatorLight();
 
-        Element root = vbox({
+        Element main_root = vbox({
             header,
             header_separator | color(Color::GrayDark),
             message_view,
@@ -5300,12 +5460,22 @@ static int run_interactive_app(const CliOptions& cli,
         if (conhost_compat_layout) {
             return vbox({
                 compat_horizontal_line() | color(outer_border_color),
-                root | flex,
+                main_root | flex,
                 compat_horizontal_line() | color(outer_border_color),
             }) | flex;
         }
 
-        return root | borderRounded | color(outer_border_color);
+        if (show_regular_sidebar) {
+            Element sidebar = render_regular_sidebar(
+                state, version_str, cwd_display, kRegularSidebarWidthCols);
+            return hbox({
+                main_root | flex,
+                separator() | color(outer_border_color),
+                sidebar,
+            }) | borderRounded | color(outer_border_color) | flex;
+        }
+
+        return main_root | borderRounded | color(outer_border_color) | flex;
     });
 
     run_tui_loop(screen, renderer);
