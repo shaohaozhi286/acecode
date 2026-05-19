@@ -215,8 +215,8 @@ if(Crow_FOUND)
 endif()
 if(WIN32)
     # ws2_32: src/desktop/daemon_supervisor.cpp 用 winsock 探测端口连通性。
-    # ole32/shell32: src/desktop/folder_picker_win.cpp 的 COM + IFileOpenDialog。
-    target_link_libraries(acecode_testable PUBLIC bcrypt advapi32 winhttp ws2_32 ole32 shell32)
+    # ole32/shell32/user32: src/desktop/folder_picker_win.cpp 的 COM + IFileOpenDialog + owner/foreground handling。
+    target_link_libraries(acecode_testable PUBLIC bcrypt advapi32 winhttp ws2_32 ole32 shell32 user32)
 endif()
 
 add_executable(acecode

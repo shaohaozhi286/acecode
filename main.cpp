@@ -2368,6 +2368,15 @@ static int run_interactive_app(const CliOptions& cli,
         {
             std::unique_lock<std::mutex> lk(state.mu);
             if (state.ask_pending) {
+                // Redraw/timer events must not be reported as "handled" while a
+                // question is open. FTXUI clears the active text selection when
+                // a component handles any event; the thinking animation posts
+                // Event::Custom frequently, which otherwise erases drag
+                // selection before it can stay visible.
+                if (event == Event::Custom || event.is_cursor_position()) {
+                    return false;
+                }
+
                 auto& q = state.ask_questions[state.ask_current_question];
                 const int option_count = static_cast<int>(q.options.size());
                 const int total_rows = option_count + 1; // + "Other..."

@@ -605,6 +605,22 @@ int main(int argc, char** argv) {
             WebHost::StartupWindowMode::OffscreenUntilReady);
     } catch (const WebHostInitializationError& e) {
         return run_edge_app_mode("embedded WebView unavailable", e.what());
+    } catch (const std::exception& e) {
+#ifdef _WIN32
+        LOG_WARN(std::string("[desktop] WebHost construction failed with unexpected exception; "
+                             "entering Edge app mode: ") + e.what());
+        return run_edge_app_mode("embedded WebView unavailable", e.what());
+#else
+        throw;
+#endif
+    } catch (...) {
+#ifdef _WIN32
+        LOG_WARN("[desktop] WebHost construction failed with unknown exception; "
+                 "entering Edge app mode");
+        return run_edge_app_mode("embedded WebView unavailable", "unknown WebHost initialization error");
+#else
+        throw;
+#endif
     }
     WebHost& host = *host_storage;
     host.set_title("ACECode");
