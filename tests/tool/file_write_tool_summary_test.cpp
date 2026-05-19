@@ -8,10 +8,12 @@
 
 #include "tool/file_write_tool.hpp"
 #include "tool/tool_executor.hpp"
+#include "utils/text_file_buffer.hpp"
 
 #include <nlohmann/json.hpp>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 
 namespace fs = std::filesystem;
 using acecode::create_file_write_tool;
@@ -32,6 +34,12 @@ std::string get_metric(const acecode::ToolSummary& s, const std::string& k) {
         if (kv.first == k) return kv.second;
     }
     return {};
+}
+
+std::string read_file(const fs::path& path) {
+    std::ifstream ifs(path, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(ifs),
+                       std::istreambuf_iterator<char>());
 }
 
 } // namespace
@@ -97,3 +105,59 @@ TEST(FileWriteToolSummary, MissingFilePathDoesNotCrash) {
 
     EXPECT_FALSE(r.success);
 }
+
+TEST(FileWriteToolSummary, OverwritePreservesUtf16LeEncoding) {
+    ToolImpl tool = create_file_write_tool();
+
+    auto p = fresh_temp_path(".txt");
+    {
+        std::ofstream ofs(p, std::ios::binary);
+        const char raw[] = {
+            static_cast<char>(0xFF), static_cast<char>(0xFE),
+            'a', 0, '\r', 0, '\n', 0
+        };
+        ofs.write(raw, sizeof(raw));
+    }
+
+    nlohmann::json args = {
+        {"file_path", p.string()},
+        {"content", "b\n"}
+    };
+    ToolResult r = tool.execute(args.dump(), ToolContext{});
+
+    ASSERT_TRUE(r.success) << r.output;
+    std::string raw = read_file(p);
+    ASSERT_GE(raw.size(), 6u);
+    EXPECT_EQ(static_cast<unsigned char>(raw[0]), 0xFF);
+    EXPECT_EQ(static_cast<unsigned char>(raw[1]), 0xFE);
+    auto decoded = acecode::read_text_file_buffer(p.string());
+    ASSERT_TRUE(decoded.success) << decoded.error;
+    EXPECT_EQ(decoded.buffer.metadata.encoding, acecode::TextEncoding::Utf16Le);
+    EXPECT_EQ(decoded.buffer.text, "b\n");
+
+    fs::remove(p);
+}
+
+#ifdef _WIN32
+TEST(FileWriteToolSummary, OverwriteGbkRejectsUnrepresentableText) {
+    ToolImpl tool = create_file_write_tool();
+
+    auto p = fresh_temp_path(".txt");
+    std::string original("\xD6\xD0\xCE\xC4\n", 5); // "中文\n" in CP936
+    {
+        std::ofstream ofs(p, std::ios::binary);
+        ofs << original;
+    }
+
+    nlohmann::json args = {
+        {"file_path", p.string()},
+        {"content", std::string(u8"emoji \xF0\x9F\x98\x80\n")}
+    };
+    ToolResult r = tool.execute(args.dump(), ToolContext{});
+
+    EXPECT_FALSE(r.success);
+    EXPECT_EQ(read_file(p), original);
+
+    fs::remove(p);
+}
+#endif

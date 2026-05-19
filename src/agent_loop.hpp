@@ -19,6 +19,7 @@
 #include <thread>
 #include <condition_variable>
 #include <queue>
+#include <map>
 
 namespace acecode {
 
@@ -263,6 +264,7 @@ private:
     std::string goal_accounting_goal_id_;
     std::string budget_notice_goal_id_;
     std::chrono::steady_clock::time_point goal_time_checkpoint_{};
+    std::map<std::string, std::chrono::steady_clock::time_point> recent_safe_edit_failures_;
 
     // Worker thread and task queue
     std::thread worker_thread_;

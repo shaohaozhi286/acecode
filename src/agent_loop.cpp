@@ -3,6 +3,7 @@
 #include "utils/encoding.hpp"
 #include "utils/logger.hpp"
 #include "utils/stream_processing.hpp"
+#include "utils/text_file_buffer.hpp"
 #include "commands/compact.hpp"
 #include "commands/micro_compact.hpp"
 #include "session/tool_metadata_codec.hpp"
@@ -22,6 +23,7 @@
 #include <deque>
 #include <cstdint>
 #include <limits>
+#include <cctype>
 
 namespace acecode {
 
@@ -58,6 +60,44 @@ std::string format_bytes_detail(std::size_t bytes) {
     oss.precision(1);
     oss << "参数 " << (static_cast<double>(bytes) / 1024.0) << " KB";
     return oss.str();
+}
+
+std::string ascii_lower(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return value;
+}
+
+std::string normalize_path_for_command_match(std::string value) {
+    std::replace(value.begin(), value.end(), '\\', '/');
+    return ascii_lower(std::move(value));
+}
+
+bool command_mentions_path(const std::string& command, const std::string& path) {
+    std::string cmd = normalize_path_for_command_match(command);
+    std::string normalized_path = normalize_path_for_command_match(path);
+    if (normalized_path.empty()) return false;
+    if (cmd.find(normalized_path) != std::string::npos) return true;
+
+    size_t slash = normalized_path.find_last_of('/');
+    std::string basename = slash == std::string::npos
+        ? normalized_path
+        : normalized_path.substr(slash + 1);
+    return basename.size() >= 4 && cmd.find(basename) != std::string::npos;
+}
+
+bool command_looks_like_file_write(const std::string& command) {
+    std::string cmd = ascii_lower(command);
+    return cmd.find(">") != std::string::npos ||
+           cmd.find("set-content") != std::string::npos ||
+           cmd.find("out-file") != std::string::npos ||
+           cmd.find("add-content") != std::string::npos ||
+           cmd.find("sed -i") != std::string::npos ||
+           cmd.find("python") != std::string::npos ||
+           cmd.find("powershell") != std::string::npos ||
+           cmd.find("copy ") != std::string::npos ||
+           cmd.find("move ") != std::string::npos;
 }
 
 bool is_hidden_goal_context_message(const ChatMessage& msg) {
@@ -1210,6 +1250,30 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
                     bool auto_allow = permissions_.should_auto_allow(
                         tc.function_name, false, ctx_path, ctx_command);
 
+                    if (tc.function_name == "bash" && command_looks_like_file_write(ctx_command)) {
+                        const auto now = std::chrono::steady_clock::now();
+                        for (auto it = recent_safe_edit_failures_.begin();
+                             it != recent_safe_edit_failures_.end();) {
+                            if (now - it->second > std::chrono::minutes(10)) {
+                                it = recent_safe_edit_failures_.erase(it);
+                            } else {
+                                ++it;
+                            }
+                        }
+                        for (const auto& [failed_path, when] : recent_safe_edit_failures_) {
+                            (void)when;
+                            if (command_mentions_path(ctx_command, failed_path) &&
+                                !permissions_.is_dangerous() &&
+                                permissions_.mode() != PermissionMode::Yolo) {
+                                return ToolResult{
+                                    "[Error] Shell write blocked for " + failed_path +
+                                    " because a recent safe file edit failed. "
+                                    "Use file_read metadata plus file_edit range mode, or perform an explicit encoding conversion instead of bypassing text safety.",
+                                    false};
+                            }
+                        }
+                    }
+
                     if (!ctx_path.empty() && tc.function_name != "bash") {
                         const bool session_artifact_read =
                             tc.function_name == "file_read" &&
@@ -1245,8 +1309,39 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
                         }
                     }
 
-                    return execute_single_tool(tc.function_name, tc.function_arguments,
-                                               ctx_path, tool_ctx);
+                    ToolResult tool_result = execute_single_tool(tc.function_name, tc.function_arguments,
+                                                                 ctx_path, tool_ctx);
+
+                    if ((tc.function_name == "file_edit" || tc.function_name == "file_write") &&
+                        !ctx_path.empty() && !tool_result.success) {
+                        const std::string lower = ascii_lower(tool_result.output);
+                        if (lower.find("encoding") != std::string::npos ||
+                            lower.find("old_string") != std::string::npos ||
+                            lower.find("range hash") != std::string::npos ||
+                            lower.find("round-trip") != std::string::npos) {
+                            recent_safe_edit_failures_[ctx_path] = std::chrono::steady_clock::now();
+                        }
+                    }
+
+                    if (tc.function_name == "bash" && tool_result.success &&
+                        command_looks_like_file_write(ctx_command)) {
+                        for (const auto& [failed_path, when] : recent_safe_edit_failures_) {
+                            (void)when;
+                            if (!command_mentions_path(ctx_command, failed_path)) continue;
+                            auto check = read_text_file_buffer(failed_path);
+                            if (!check.success) {
+                                tool_result.success = false;
+                                if (!tool_result.output.empty() && tool_result.output.back() != '\n') {
+                                    tool_result.output += "\n";
+                                }
+                                tool_result.output +=
+                                    "[Error] Post-command encoding sanity check failed for " +
+                                    failed_path + ": " + check.error;
+                            }
+                        }
+                    }
+
+                    return tool_result;
             });
             result_ready[entry.original_index] = true;
             account_goal_usage(0, false);

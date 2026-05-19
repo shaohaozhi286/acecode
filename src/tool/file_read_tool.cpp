@@ -5,11 +5,59 @@
 #include "utils/tool_args_parser.hpp"
 #include "utils/tool_errors.hpp"
 #include "utils/file_operations.hpp"
+#include "utils/text_file_buffer.hpp"
 #include <nlohmann/json.hpp>
+#include <algorithm>
+#include <limits>
+#include <sstream>
 
 namespace acecode {
 
 static constexpr size_t FILE_READ_LARGE_HINT_THRESHOLD = 200 * 1024; // 200 KB
+
+namespace {
+
+static std::string format_read_metadata_footer(const FileReadEditMetadata& metadata) {
+    std::ostringstream oss;
+    oss << "\n<acecode-edit-metadata"
+        << " read_id=\"" << metadata.read_id << "\""
+        << " encoding=\"" << metadata.encoding << "\""
+        << " line_endings=\"" << metadata.line_ending << "\"";
+    if (metadata.start_line > 0 && metadata.end_line > 0) {
+        oss << " range=\"" << metadata.start_line << "-" << metadata.end_line << "\"";
+    }
+    if (!metadata.range_hash.empty()) {
+        oss << " range_hash=\"" << metadata.range_hash << "\"";
+    }
+    oss << " />\n";
+    return oss.str();
+}
+
+static std::string format_numbered_range(const std::string& lf_text,
+                                         int start_line,
+                                         int end_line,
+                                         int& out_start,
+                                         int& out_end,
+                                         int& out_total,
+                                         bool& ok) {
+    std::vector<std::string> lines = split_lf_lines_preserve_empty(lf_text);
+    out_total = static_cast<int>(lines.size());
+    int start = start_line > 0 ? start_line : 1;
+    int end = end_line > 0 ? end_line : std::numeric_limits<int>::max();
+    end = std::min(end, out_total);
+    ok = out_total > 0 && start <= end && start <= out_total;
+    if (!ok) return {};
+
+    std::ostringstream oss;
+    for (int line = start; line <= end; ++line) {
+        oss << line << ": " << lines[static_cast<size_t>(line - 1)] << "\n";
+    }
+    out_start = start;
+    out_end = end;
+    return oss.str();
+}
+
+} // namespace
 
 static ToolResult execute_file_read(const std::string& arguments_json, const ToolContext& /*ctx*/) {
     // Parse arguments
@@ -41,48 +89,72 @@ static ToolResult execute_file_read(const std::string& arguments_json, const Too
         return size_check;
     }
 
+    auto read_result = read_text_file_buffer(file_path);
+    if (!read_result.success) {
+        return ToolResult{read_result.error, false};
+    }
+
+    const TextFileBuffer& buffer = read_result.buffer;
     std::string content;
-    std::string error;
     const bool partial_read = (start_line > 0 || end_line > 0);
+    int displayed_line_count = 0;
+    FileReadEditMetadata metadata;
+    metadata.read_id = read_id_for_text_buffer(file_path, buffer.raw_bytes);
+    metadata.encoding = text_encoding_label(buffer.metadata.encoding);
+    metadata.line_ending = line_ending_label(buffer.metadata.line_ending);
 
     if (partial_read) {
-        // Line range mode
-        if (!FileOperations::read_lines(file_path, start_line, end_line, content, error)) {
-            return ToolResult{error, false};
+        int actual_start = 0;
+        int actual_end = 0;
+        int total_lines = 0;
+        bool ok = false;
+        content = format_numbered_range(buffer.text, start_line, end_line,
+                                        actual_start, actual_end, total_lines, ok);
+        if (!ok) {
+            int start = start_line > 0 ? start_line : 1;
+            int end = end_line > 0 ? end_line : total_lines;
+            return ToolResult{ToolErrors::no_lines_in_range(start, end, total_lines), false};
         }
+        displayed_line_count = actual_end - actual_start + 1;
+        metadata.start_line = actual_start;
+        metadata.end_line = actual_end;
+        metadata.range_hash = range_hash(buffer.text, actual_start, actual_end);
     } else {
-        // Full file read
-        if (!FileOperations::read_content(file_path, content, error)) {
-            return ToolResult{error, false};
+        content = buffer.text;
+        for (char c : content) if (c == '\n') ++displayed_line_count;
+        if (!content.empty() && content.back() != '\n') ++displayed_line_count;
+        metadata.start_line = content.empty() ? 0 : 1;
+        metadata.end_line = displayed_line_count;
+        if (displayed_line_count > 0) {
+            metadata.range_hash = range_hash(buffer.text, 1, displayed_line_count);
         }
     }
 
-    // 局部读取只能证明模型看过片段,不能支撑后续精确写入；全量读取才缓存内容。
-    MtimeTracker::instance().record_read(file_path, content, partial_read);
+    // 写入校验基于模型真实看到的 UTF-8/LF 文本,避免拿原始字节和规范化文本比较。
+    MtimeTracker::instance().record_read(file_path, buffer.text, partial_read, metadata);
 
     // Large-file hint: only when the caller asked for the whole file (both
     // range bounds omitted) and the payload exceeds 200 KB. Appended as a
     // trailing hint line so the LLM sees the suggestion in-band, and tagged
     // on the summary so the TUI can mark the row.
     bool hint_added = false;
-    if (!partial_read && content.size() > FILE_READ_LARGE_HINT_THRESHOLD) {
-        const size_t kb = content.size() / 1024;
+    if (!partial_read && buffer.text.size() > FILE_READ_LARGE_HINT_THRESHOLD) {
+        const size_t kb = buffer.text.size() / 1024;
         if (!content.empty() && content.back() != '\n') content += "\n";
         content += "[hint: file is large (" + std::to_string(kb) +
                    "KB). Consider using start_line / end_line to narrow the read next time.]";
         hint_added = true;
     }
 
-    // Count lines for summary metric.
-    int line_count = 0;
-    for (char c : content) if (c == '\n') ++line_count;
-    if (!content.empty() && content.back() != '\n') ++line_count;
+    content += format_read_metadata_footer(metadata);
 
     ToolSummary summary;
     summary.verb = "Read";
     summary.object = file_path;
-    summary.metrics.emplace_back("lines", std::to_string(line_count));
+    summary.metrics.emplace_back("lines", std::to_string(displayed_line_count));
     summary.metrics.emplace_back("size", format_bytes_compact(content.size()));
+    summary.metrics.emplace_back("enc", metadata.encoding);
+    summary.metrics.emplace_back("eol", metadata.line_ending);
     if (hint_added) summary.metrics.emplace_back("hint", "large_file");
     summary.icon = tool_icon("file_read");
 

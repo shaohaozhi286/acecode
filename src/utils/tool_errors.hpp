@@ -68,8 +68,9 @@ public:
 
     static std::string string_not_found(const std::string& file_path) {
         return "[Error] old_string not found in " + file_path +
-               ". Re-read the file and make sure to use the exact string, "
-               "including whitespace and indentation.";
+               ". Re-read the relevant lines with file_read start_line/end_line "
+               "and retry with start_line/end_line/expected_hash, or use an exact "
+               "old_string including whitespace and indentation.";
     }
 
     static std::string string_not_unique(size_t count, const std::string& file_path) {

@@ -13,13 +13,22 @@ void MtimeTracker::record_read(const std::string& path) {
 }
 
 void MtimeTracker::record_read(const std::string& path, const std::string& content, bool partial) {
+    record_read(path, content, partial, FileReadEditMetadata{});
+}
+
+void MtimeTracker::record_read(const std::string& path,
+                               const std::string& normalized_content,
+                               bool partial,
+                               const FileReadEditMetadata& metadata) {
     try {
         auto mtime = std::filesystem::last_write_time(path_from_utf8(path));
         std::lock_guard<std::mutex> lk(mu_);
         records_[path] = Record{
             mtime,
             partial,
-            partial ? std::optional<std::string>{} : std::optional<std::string>{content}
+            partial ? std::optional<std::string>{} : std::optional<std::string>{normalized_content},
+            metadata.read_id.empty() ? std::optional<FileReadEditMetadata>{}
+                                     : std::optional<FileReadEditMetadata>{metadata}
         };
     } catch (...) {
         // File may not exist yet; that's OK
@@ -75,7 +84,7 @@ void MtimeTracker::record_write(const std::string& path) {
     try {
         auto mtime = std::filesystem::last_write_time(path_from_utf8(path));
         std::lock_guard<std::mutex> lk(mu_);
-        records_[path] = Record{mtime, false, std::optional<std::string>{}};
+        records_[path] = Record{mtime, false, std::optional<std::string>{}, std::optional<FileReadEditMetadata>{}};
     } catch (...) {}
 }
 
@@ -83,8 +92,15 @@ void MtimeTracker::record_write(const std::string& path, const std::string& cont
     try {
         auto mtime = std::filesystem::last_write_time(path_from_utf8(path));
         std::lock_guard<std::mutex> lk(mu_);
-        records_[path] = Record{mtime, false, std::optional<std::string>{content}};
+        records_[path] = Record{mtime, false, std::optional<std::string>{content}, std::optional<FileReadEditMetadata>{}};
     } catch (...) {}
+}
+
+std::optional<FileReadEditMetadata> MtimeTracker::read_metadata(const std::string& path) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    auto it = records_.find(path);
+    if (it == records_.end()) return std::nullopt;
+    return it->second.metadata;
 }
 
 } // namespace acecode

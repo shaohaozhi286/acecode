@@ -6,8 +6,18 @@
 #include <mutex>
 #include <filesystem>
 #include <optional>
+#include <vector>
 
 namespace acecode {
+
+struct FileReadEditMetadata {
+    std::string read_id;
+    std::string encoding;
+    std::string line_ending;
+    int start_line = 0;
+    int end_line = 0;
+    std::string range_hash;
+};
 
 // Tracks file modification times to detect concurrent external edits.
 // Thread-safe: guarded by internal mutex.
@@ -33,6 +43,10 @@ public:
     // Record a full or partial read. Full reads keep content so later edit checks can
     // distinguish real external changes from timestamp-only churn.
     void record_read(const std::string& path, const std::string& content, bool partial);
+    void record_read(const std::string& path,
+                     const std::string& normalized_content,
+                     bool partial,
+                     const FileReadEditMetadata& metadata);
 
     // Check if a file has been externally modified since the last recorded read.
     // Returns true if the file was modified externally (mtime changed).
@@ -49,6 +63,8 @@ public:
     void record_write(const std::string& path);
     void record_write(const std::string& path, const std::string& content);
 
+    std::optional<FileReadEditMetadata> read_metadata(const std::string& path) const;
+
     static MtimeTracker& instance();
 
 private:
@@ -56,6 +72,7 @@ private:
         clock mtime;
         bool partial = false;
         std::optional<std::string> content;
+        std::optional<FileReadEditMetadata> metadata;
     };
 
     mutable std::mutex mu_;

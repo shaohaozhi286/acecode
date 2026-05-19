@@ -131,3 +131,45 @@ TEST(FileReadToolSummary, MissingFileDoesNotCrash) {
 
     EXPECT_FALSE(r.success);
 }
+
+TEST(FileReadToolSummary, OutputIncludesEditMetadataFooter) {
+    ToolImpl tool = create_file_read_tool();
+
+    auto p = make_temp_file("line1\r\nline2\r\n");
+    nlohmann::json args = {
+        {"file_path", p.string()},
+        {"start_line", 2},
+        {"end_line", 2}
+    };
+    ToolResult r = tool.execute(args.dump(), ToolContext{});
+
+    ASSERT_TRUE(r.success) << r.output;
+    EXPECT_NE(r.output.find("2: line2\n"), std::string::npos);
+    EXPECT_NE(r.output.find("acecode-edit-metadata"), std::string::npos);
+    EXPECT_NE(r.output.find("encoding=\"utf-8\""), std::string::npos);
+    EXPECT_NE(r.output.find("line_endings=\"crlf\""), std::string::npos);
+    EXPECT_NE(r.output.find("range_hash=\"sha256:"), std::string::npos);
+
+    fs::remove(p);
+}
+
+#ifdef _WIN32
+TEST(FileReadToolSummary, ReadsGbkAsUtf8) {
+    ToolImpl tool = create_file_read_tool();
+
+    auto p = fs::temp_directory_path() / "acecode_file_read_summary_gbk.txt";
+    {
+        std::ofstream ofs(p, std::ios::binary);
+        ofs << std::string("\xD6\xD0\xCE\xC4\n", 5); // "中文\n" in CP936
+    }
+
+    ToolResult r = tool.execute(nlohmann::json({{"file_path", p.string()}}).dump(),
+                                ToolContext{});
+
+    ASSERT_TRUE(r.success) << r.output;
+    EXPECT_NE(r.output.find(std::string(u8"中文")), std::string::npos);
+    EXPECT_NE(r.output.find("encoding=\"gbk/cp936\""), std::string::npos);
+
+    fs::remove(p);
+}
+#endif

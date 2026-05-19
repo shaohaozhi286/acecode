@@ -6,6 +6,7 @@
 #include "utils/tool_args_parser.hpp"
 #include "utils/tool_errors.hpp"
 #include "utils/file_operations.hpp"
+#include "utils/text_file_buffer.hpp"
 #include "utils/utf8_path.hpp"
 #include <nlohmann/json.hpp>
 #include <algorithm>
@@ -13,6 +14,7 @@
 #include <exception>
 #include <filesystem>
 #include <optional>
+#include <sstream>
 #include <vector>
 
 namespace acecode {
@@ -306,21 +308,24 @@ static ToolResult run_validated_write(
     bool file_existed,
     const std::string& old_content,
     const std::string& new_content,
+    const TextFileMetadata& metadata,
     const ToolContext& ctx
 ) {
-    if (ctx.track_file_write_before) {
-        try {
-            ctx.track_file_write_before(file_path);
-        } catch (const std::exception& e) {
-            LOG_WARN(std::string("file_edit checkpoint hook failed: ") + e.what());
-        } catch (...) {
-            LOG_WARN("file_edit checkpoint hook failed with unknown error");
+    auto before_write = [&](const std::string& path) {
+        if (ctx.track_file_write_before) {
+            try {
+                ctx.track_file_write_before(path);
+            } catch (const std::exception& e) {
+                LOG_WARN(std::string("file_edit checkpoint hook failed: ") + e.what());
+            } catch (...) {
+                LOG_WARN("file_edit checkpoint hook failed with unknown error");
+            }
         }
-    }
+    };
 
-    std::string error;
-    if (!FileOperations::write_content(file_path, new_content, error)) {
-        return ToolResult{error, false};
+    auto write_result = safe_write_text_file(file_path, new_content, metadata, before_write);
+    if (!write_result.success) {
+        return ToolResult{write_result.error, false};
     }
 
     MtimeTracker::instance().record_write(file_path, new_content);
@@ -343,6 +348,92 @@ static ToolResult run_validated_write(
     return r;
 }
 
+static std::string normalize_expected_hash(std::string hash) {
+    while (!hash.empty() && std::isspace(static_cast<unsigned char>(hash.front()))) hash.erase(hash.begin());
+    while (!hash.empty() && std::isspace(static_cast<unsigned char>(hash.back()))) hash.pop_back();
+    if (hash.rfind("sha256:", 0) == 0) return hash;
+    return "sha256:" + hash;
+}
+
+static bool find_line_range_offsets(const std::string& lf_text,
+                                    int start_line,
+                                    int end_line,
+                                    size_t& start_offset,
+                                    size_t& end_offset,
+                                    int& total_lines) {
+    start_offset = 0;
+    end_offset = 0;
+    total_lines = 0;
+    if (start_line <= 0 || end_line < start_line) return false;
+
+    std::vector<size_t> starts;
+    if (!lf_text.empty()) starts.push_back(0);
+    for (size_t i = 0; i < lf_text.size(); ++i) {
+        if (lf_text[i] == '\n' && i + 1 < lf_text.size()) {
+            starts.push_back(i + 1);
+        }
+    }
+    total_lines = static_cast<int>(starts.size());
+    if (total_lines == 0 || start_line > total_lines) return false;
+
+    const int clamped_end = std::min(end_line, total_lines);
+    start_offset = starts[static_cast<size_t>(start_line - 1)];
+    end_offset = clamped_end < total_lines
+        ? starts[static_cast<size_t>(clamped_end)]
+        : lf_text.size();
+    return true;
+}
+
+static ToolResult make_hash_mismatch_result(const std::string& file_path,
+                                            const std::string& content,
+                                            int start_line,
+                                            int end_line,
+                                            const std::string& current_hash) {
+    std::ostringstream oss;
+    oss << "[Error] range hash mismatch in " << file_path << ". The file changed "
+        << "since it was read, or the wrong range was supplied.\n"
+        << "Retry with expected_hash=\"" << current_hash << "\" and this current range:\n"
+        << "```text\n" << content << "```\n";
+    ToolResult result{oss.str(), false};
+    ToolSummary summary;
+    summary.verb = "Edit failed";
+    summary.object = file_path;
+    summary.metrics.emplace_back("range", std::to_string(start_line) + "-" + std::to_string(end_line));
+    summary.metrics.emplace_back("hash", current_hash);
+    summary.icon = tool_icon("file_edit");
+    result.summary = std::move(summary);
+    return result;
+}
+
+static ToolResult make_old_string_not_found_result(const std::string& file_path,
+                                                   const std::string& normalized_content,
+                                                   const std::string& requested_old) {
+    std::ostringstream oss;
+    oss << ToolErrors::string_not_found(file_path) << "\n"
+        << "ACECode matches old_string against UTF-8 text with LF line endings. "
+        << "Prefer retrying with file_read start_line/end_line metadata and "
+        << "file_edit start_line/end_line/expected_hash instead of shell or Python writes.";
+
+    std::string first_line = normalize_text_to_lf(requested_old);
+    size_t nl = first_line.find('\n');
+    if (nl != std::string::npos) first_line.resize(nl);
+    while (!first_line.empty() && std::isspace(static_cast<unsigned char>(first_line.front()))) first_line.erase(first_line.begin());
+    while (!first_line.empty() && std::isspace(static_cast<unsigned char>(first_line.back()))) first_line.pop_back();
+
+    if (!first_line.empty()) {
+        size_t pos = normalized_content.find(first_line);
+        if (pos != std::string::npos) {
+            int line = 1;
+            for (size_t i = 0; i < pos; ++i) {
+                if (normalized_content[i] == '\n') ++line;
+            }
+            oss << "\nA substring from old_string appears near line " << line
+                << ". Re-read a narrow range around that line and use the returned range_hash.";
+        }
+    }
+    return ToolResult{oss.str(), false};
+}
+
 } // namespace
 
 static ToolResult execute_file_edit(const std::string& arguments_json, const ToolContext& ctx) {
@@ -356,11 +447,17 @@ static ToolResult execute_file_edit(const std::string& arguments_json, const Too
     std::string old_string = parser.get_or<std::string>("old_string", "");
     std::string new_string = parser.get_or<std::string>("new_string", "");
     bool replace_all = parse_semantic_bool(arguments_json, "replace_all", false);
+    int start_line = parser.get_or<int>("start_line", 0);
+    int end_line = parser.get_or<int>("end_line", 0);
+    std::string expected_hash = parser.get_or<std::string>("expected_hash", "");
+    std::string read_id = parser.get_or<std::string>("read_id", "");
+    const bool range_mode = start_line > 0 || end_line > 0 ||
+                            !expected_hash.empty() || !read_id.empty();
 
     if (file_path.empty()) {
         return ToolResult{ToolErrors::missing_parameter("file_path"), false};
     }
-    if (old_string == new_string) {
+    if (!range_mode && old_string == new_string) {
         return ToolResult{ToolErrors::no_changes_to_make(), false};
     }
     if (ends_with_ipynb(file_path)) {
@@ -387,20 +484,66 @@ static ToolResult execute_file_edit(const std::string& arguments_json, const Too
         }
     }
 
-    std::string content;
-    std::string error;
-    if (file_exists && !FileOperations::read_content(file_path, content, error)) {
-        return ToolResult{error, false};
+    TextFileBuffer buffer;
+    if (file_exists) {
+        auto read_result = read_text_file_buffer(file_path);
+        if (!read_result.success) {
+            return ToolResult{read_result.error, false};
+        }
+        buffer = std::move(read_result.buffer);
+    } else {
+        buffer.path = file_path;
+        buffer.metadata = default_new_file_text_metadata();
+    }
+
+    if (range_mode) {
+        if (!file_exists) {
+            return ToolResult{ToolErrors::file_not_found(file_path, current_path_utf8()), false};
+        }
+        if (!old_string.empty()) {
+            return ToolResult{"[Error] Range edit cannot be combined with old_string. "
+                              "Use either old_string/new_string or start_line/end_line/expected_hash.",
+                              false};
+        }
+        if (start_line <= 0 || end_line < start_line || expected_hash.empty()) {
+            return ToolResult{"[Error] Range edit requires start_line, end_line, and expected_hash.", false};
+        }
+
+        size_t start_offset = 0;
+        size_t end_offset = 0;
+        int total_lines = 0;
+        if (!find_line_range_offsets(buffer.text, start_line, end_line,
+                                     start_offset, end_offset, total_lines)) {
+            return ToolResult{ToolErrors::no_lines_in_range(start_line, end_line, total_lines), false};
+        }
+
+        const std::string current_range = buffer.text.substr(start_offset, end_offset - start_offset);
+        const std::string current_hash = range_hash(buffer.text, start_line, end_line);
+        if (normalize_expected_hash(expected_hash) != current_hash) {
+            return make_hash_mismatch_result(file_path, current_range, start_line, end_line, current_hash);
+        }
+
+        std::string normalized_new = normalize_text_to_lf(new_string);
+        std::string new_content = buffer.text;
+        new_content.replace(start_offset, end_offset - start_offset, normalized_new);
+        if (new_content == buffer.text) {
+            return ToolResult{ToolErrors::no_changes_to_make(), false};
+        }
+
+        return run_validated_write(file_path, true, buffer.text, new_content,
+                                   buffer.metadata, ctx);
     }
 
     if (old_string.empty()) {
-        if (file_exists && !is_blank_content(content)) {
+        if (file_exists && !is_blank_content(buffer.text)) {
             return ToolResult{ToolErrors::cannot_create_file_exists(file_path), false};
         }
-        return run_validated_write(file_path, file_exists, content, new_string, ctx);
+        return run_validated_write(file_path, file_exists, buffer.text,
+                                   normalize_text_to_lf(new_string),
+                                   buffer.metadata, ctx);
     }
 
-    const auto read_check = MtimeTracker::instance().validate_full_read_for_edit(file_path, content);
+    const auto read_check = MtimeTracker::instance().validate_full_read_for_edit(file_path, buffer.text);
     switch (read_check.status) {
         case MtimeTracker::FullReadStatus::Ok:
             break;
@@ -412,28 +555,31 @@ static ToolResult execute_file_edit(const std::string& arguments_json, const Too
             return ToolResult{ToolErrors::external_modification(file_path), false};
     }
 
-    auto match_plan = build_match_plan(content, old_string, new_string);
+    std::string normalized_old = normalize_text_to_lf(old_string);
+    std::string normalized_new = normalize_text_to_lf(new_string);
+    auto match_plan = build_match_plan(buffer.text, normalized_old, normalized_new);
     if (!match_plan.has_value()) {
-        return ToolResult{ToolErrors::string_not_found(file_path), false};
+        return make_old_string_not_found_result(file_path, buffer.text, old_string);
     }
 
-    const size_t count = count_occurrences(content, match_plan->actual_old);
+    const size_t count = count_occurrences(buffer.text, match_plan->actual_old);
     if (count == 0) {
-        return ToolResult{ToolErrors::string_not_found(file_path), false};
+        return make_old_string_not_found_result(file_path, buffer.text, old_string);
     }
     if (count > 1 && !replace_all) {
         return ToolResult{ToolErrors::string_not_unique(count, file_path), false};
     }
 
-    std::string old_content = content;
-    content = replace_occurrences(
-        content,
+    std::string old_content = buffer.text;
+    std::string new_content = replace_occurrences(
+        buffer.text,
         match_plan->actual_old,
         match_plan->actual_new,
         replace_all
     );
 
-    return run_validated_write(file_path, true, old_content, content, ctx);
+    return run_validated_write(file_path, true, old_content, new_content,
+                               buffer.metadata, ctx);
 }
 
 ToolImpl create_file_edit_tool() {
@@ -441,9 +587,11 @@ ToolImpl create_file_edit_tool() {
     def.name = "file_edit";
     def.description = "Edit a file by replacing an exact string with a new string. "
                       "Read existing non-empty files with file_read before editing. "
+                      "Prefer start_line/end_line/expected_hash from file_read metadata for precise range edits. "
                       "The old_string must appear exactly once unless replace_all is true. "
                       "Use empty old_string only to create a missing file or fill a blank file. "
                       "Include surrounding context lines to ensure uniqueness. "
+                      "Existing text files preserve their original encoding and line endings; unsafe encoding changes are rejected. "
                       "Always use absolute paths.";
     def.parameters = nlohmann::json({
         {"type", "object"},
@@ -464,9 +612,25 @@ ToolImpl create_file_edit_tool() {
                 {"type", "boolean"},
                 {"description", "Replace all occurrences of old_string. Defaults to false."},
                 {"default", false}
+            }},
+            {"start_line", {
+                {"type", "integer"},
+                {"description", "Range edit start line (1-indexed, inclusive). Use with end_line and expected_hash instead of old_string."}
+            }},
+            {"end_line", {
+                {"type", "integer"},
+                {"description", "Range edit end line (1-indexed, inclusive). Use with start_line and expected_hash instead of old_string."}
+            }},
+            {"expected_hash", {
+                {"type", "string"},
+                {"description", "Range hash returned by file_read metadata. Required for range edits."}
+            }},
+            {"read_id", {
+                {"type", "string"},
+                {"description", "Optional read_id returned by file_read for traceability."}
             }}
         }},
-        {"required", nlohmann::json::array({"file_path", "old_string", "new_string"})}
+        {"required", nlohmann::json::array({"file_path", "new_string"})}
     });
 
     return ToolImpl{def, execute_file_edit, /*is_read_only=*/false};

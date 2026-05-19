@@ -4,6 +4,7 @@
 #include "tool/file_read_tool.hpp"
 #include "tool/mtime_tracker.hpp"
 #include "tool/tool_executor.hpp"
+#include "utils/text_file_buffer.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -309,3 +310,84 @@ TEST(FileEditToolBehavior, AsciiQuoteAnchorMatchesCurlyQuoteFile) {
 
     fs::remove(path);
 }
+
+TEST(FileEditToolBehavior, RangeEditUsesHashAndPreservesCrLf) {
+    auto path = temp_file(".txt");
+    write_file(path, "a\r\nb\r\nc\r\n");
+    auto decoded = acecode::read_text_file_buffer(path.string());
+    ASSERT_TRUE(decoded.success) << decoded.error;
+    std::string hash = acecode::range_hash(decoded.buffer.text, 2, 2);
+
+    ToolResult result = run_edit({
+        {"file_path", path.string()},
+        {"start_line", 2},
+        {"end_line", 2},
+        {"expected_hash", hash},
+        {"new_string", "B\n"}
+    });
+
+    ASSERT_TRUE(result.success) << result.output;
+    EXPECT_EQ(read_file(path), "a\r\nB\r\nc\r\n");
+
+    fs::remove(path);
+}
+
+TEST(FileEditToolBehavior, RangeEditHashMismatchReturnsCurrentRange) {
+    auto path = temp_file(".txt");
+    write_file(path, "a\nb\nc\n");
+
+    ToolResult result = run_edit({
+        {"file_path", path.string()},
+        {"start_line", 2},
+        {"end_line", 2},
+        {"expected_hash", "sha256:wrong"},
+        {"new_string", "B\n"}
+    });
+
+    EXPECT_FALSE(result.success);
+    EXPECT_NE(result.output.find("range hash mismatch"), std::string::npos);
+    EXPECT_NE(result.output.find("b\n"), std::string::npos);
+    EXPECT_EQ(read_file(path), "a\nb\nc\n");
+
+    fs::remove(path);
+}
+
+#ifdef _WIN32
+TEST(FileEditToolBehavior, GbkFileEditPreservesLegacyEncoding) {
+    auto path = temp_file(".txt");
+    write_file(path, std::string("\xD6\xD0\xCE\xC4\n", 5)); // "中文\n" in CP936
+    mark_full_read(path);
+
+    ToolResult result = run_edit({
+        {"file_path", path.string()},
+        {"old_string", std::string(u8"中文")},
+        {"new_string", std::string(u8"改动")}
+    });
+
+    ASSERT_TRUE(result.success) << result.output;
+    std::string raw = read_file(path);
+    EXPECT_EQ(raw.find(std::string(u8"改动")), std::string::npos);
+    auto decoded = acecode::read_text_file_buffer(path.string());
+    ASSERT_TRUE(decoded.success) << decoded.error;
+    EXPECT_EQ(decoded.buffer.text, std::string(u8"改动\n"));
+}
+
+TEST(FileEditToolBehavior, GbkUnrepresentableReplacementFailsBeforeMutation) {
+    auto path = temp_file(".txt");
+    std::string original("\xD6\xD0\xCE\xC4\n", 5); // "中文\n" in CP936
+    write_file(path, original);
+    mark_full_read(path);
+
+    ToolResult result = run_edit({
+        {"file_path", path.string()},
+        {"old_string", std::string(u8"中文")},
+        {"new_string", std::string(u8"emoji \xF0\x9F\x98\x80")}
+    });
+
+    EXPECT_FALSE(result.success);
+    EXPECT_NE(result.output.find("target encoding"), std::string::npos);
+    EXPECT_EQ(read_file(path), original);
+
+    fs::remove(path);
+}
+#endif

@@ -318,6 +318,14 @@ yes / always / no: _
 - `glob` — 查找文件路径
 - `AskUserQuestion` — AI 反向向你发起 1–4 道多选题（每题 2–4 个选项 + 自动追加的 "Other..." 自定义文本行，支持多选）。弹出独占的多选 overlay，操作：↑/↓ 选项、Space 切换（仅多选）、Enter 提交、Esc 拒绝。拒绝时工具返回 `[Error] User declined to answer questions.`
 
+### 文本编辑与编码保护
+
+`file_read` / `file_edit` / `file_write` 会把支持的文本文件解码为 UTF-8 并统一按 LF 交给模型处理；写回已有文件时会保留原始编码、BOM 和主导换行风格。当前支持 UTF-8、UTF-8 BOM、UTF-16LE/BE、GBK/CP936、GB18030。二进制或无法可靠识别的文本会在写入前被拒绝。
+
+`file_read` 的结果末尾会带 `acecode-edit-metadata`，其中包含 `read_id`、`encoding`、`line_endings` 和 `range_hash`。当 `old_string` 因空白、换行或编码显示问题难以命中时，优先让 AI 用 `file_read` 读取小范围行号，再用 `file_edit` 的 `start_line` / `end_line` / `expected_hash` 做范围编辑，而不是用 shell、Python 或 PowerShell 绕过安全写入。
+
+写入前 ACECode 会检查新文本能否被目标编码表示；写入后会重新读回并比对规范化文本。如果 round-trip 校验失败，会自动恢复写入前的原始字节，并在错误中说明是否回滚成功。
+
 ### 安全保护
 
 acecode 内置了若干安全规则，以下操作会被自动拒绝，即使在 Yolo 模式下也有保护：

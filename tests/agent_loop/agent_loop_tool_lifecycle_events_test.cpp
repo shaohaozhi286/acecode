@@ -9,6 +9,8 @@
 #include "provider/llm_provider.hpp"
 #include "session/event_dispatcher.hpp"
 #include "stub_provider.hpp"
+#include "tool/file_edit_tool.hpp"
+#include "tool/mtime_tracker.hpp"
 #include "tool/tool_executor.hpp"
 
 #include <atomic>
@@ -18,6 +20,8 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -59,6 +63,27 @@ ToolImpl make_probe_tool(std::string name, bool read_only, std::atomic<int>* cal
     impl.execute = [calls](const std::string&, const ToolContext&) -> ToolResult {
         if (calls) calls->fetch_add(1);
         return ToolResult{"probe ok", true};
+    };
+    return impl;
+}
+
+ToolImpl make_fake_bash_tool(std::atomic<int>* calls) {
+    ToolDef def;
+    def.name = "bash";
+    def.description = "Fake bash for AgentLoop guard tests";
+    def.parameters = {
+        {"type", "object"},
+        {"properties", nlohmann::json::object({
+            {"command", {{"type", "string"}}},
+        })},
+    };
+    ToolImpl impl;
+    impl.definition = def;
+    impl.is_read_only = false;
+    impl.source = ToolSource::Builtin;
+    impl.execute = [calls](const std::string&, const ToolContext&) -> ToolResult {
+        if (calls) calls->fetch_add(1);
+        return ToolResult{"fake bash executed", true};
     };
     return impl;
 }
@@ -137,6 +162,66 @@ private:
     std::condition_variable busy_cv_;
     bool busy_ = false;
     std::atomic<int> confirm_count_{0};
+};
+
+class AllowingToolHarness {
+public:
+    explicit AllowingToolHarness(std::string cwd)
+        : cwd_(std::move(cwd)) {
+        AgentCallbacks cb;
+        cb.on_busy_changed = [this](bool busy) {
+            std::lock_guard<std::mutex> lk(busy_mu_);
+            busy_ = busy;
+            if (!busy) busy_cv_.notify_all();
+        };
+        cb.on_tool_confirm = [](const std::string&, const std::string&) {
+            return PermissionResult::Allow;
+        };
+        cb.on_tool_result = [this](const acecode::ChatMessage&,
+                                   const std::string& name,
+                                   const ToolResult& result) {
+            std::lock_guard<std::mutex> lk(results_mu_);
+            results_.push_back({name, result});
+        };
+        auto accessor = [this]() -> std::shared_ptr<acecode::LlmProvider> { return provider_; };
+        loop_ = std::make_unique<AgentLoop>(accessor, tools_, cb, cwd_, perms_);
+    }
+
+    ~AllowingToolHarness() {
+        loop_.reset();
+    }
+
+    ToolExecutor& tools() { return tools_; }
+    StubLlmProvider& provider() { return *provider_; }
+
+    bool submit_and_wait(std::chrono::milliseconds timeout = 5s) {
+        {
+            std::lock_guard<std::mutex> lk(busy_mu_);
+            busy_ = true;
+        }
+        loop_->submit("go");
+        std::unique_lock<std::mutex> lk(busy_mu_);
+        return busy_cv_.wait_for(lk, timeout, [this] { return !busy_; });
+    }
+
+    std::vector<std::pair<std::string, ToolResult>> results() const {
+        std::lock_guard<std::mutex> lk(results_mu_);
+        return results_;
+    }
+
+private:
+    std::string cwd_;
+    std::shared_ptr<StubLlmProvider> provider_ = std::make_shared<StubLlmProvider>();
+    ToolExecutor tools_;
+    PermissionManager perms_;
+    std::unique_ptr<AgentLoop> loop_;
+
+    mutable std::mutex results_mu_;
+    std::vector<std::pair<std::string, ToolResult>> results_;
+
+    std::mutex busy_mu_;
+    std::condition_variable busy_cv_;
+    bool busy_ = false;
 };
 
 } // namespace
@@ -226,6 +311,47 @@ TEST(AgentLoopToolLifecycleEvents, PermissionDenialStillEmitsTerminalToolEnd) {
     ASSERT_TRUE(ends[0].payload.contains("output"));
     EXPECT_NE(ends[0].payload["output"].get<std::string>().find("User denied"),
               std::string::npos);
+
+    fs::remove_all(cwd);
+}
+
+TEST(AgentLoopToolLifecycleEvents, ShellWriteAfterSafeEditFailureIsBlocked) {
+    auto cwd = make_temp_dir("acecode_shell_guard");
+    auto target = cwd / "target.txt";
+    {
+        std::ofstream ofs(target, std::ios::binary);
+        ofs << "alpha\n";
+    }
+    acecode::MtimeTracker::instance().record_read(target.string(), "alpha\n", false);
+
+    std::atomic<int> bash_calls{0};
+    AllowingToolHarness h(cwd.string());
+    h.tools().register_tool(acecode::create_file_edit_tool());
+    h.tools().register_tool(make_fake_bash_tool(&bash_calls));
+
+    h.provider().push_tool_call("file_edit", nlohmann::json{
+        {"file_path", target.string()},
+        {"old_string", "missing"},
+        {"new_string", "beta"}
+    }.dump(), "edit-fail");
+    h.provider().push_tool_call("bash", nlohmann::json{
+        {"command", "type nul > \"" + target.string() + "\""}
+    }.dump(), "bash-write");
+    h.provider().push_text("done");
+
+    ASSERT_TRUE(h.submit_and_wait());
+    EXPECT_EQ(bash_calls.load(), 0);
+
+    auto results = h.results();
+    bool saw_block = false;
+    for (const auto& [name, result] : results) {
+        if (name == "bash") {
+            saw_block = true;
+            EXPECT_FALSE(result.success);
+            EXPECT_NE(result.output.find("Shell write blocked"), std::string::npos);
+        }
+    }
+    EXPECT_TRUE(saw_block);
 
     fs::remove_all(cwd);
 }
