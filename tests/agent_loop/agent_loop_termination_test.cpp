@@ -37,6 +37,8 @@ using acecode::AgentCallbacks;
 using acecode::ChatMessage;
 using acecode::PermissionManager;
 using acecode::PermissionResult;
+using acecode::ProviderErrorInfo;
+using acecode::ProviderErrorKind;
 using acecode::ToolDef;
 using acecode::ToolExecutor;
 using acecode::ToolImpl;
@@ -107,6 +109,15 @@ public:
     void set_stub_latency_ms(int ms) { provider_->set_latency_ms(ms); }
 
     void push_text(std::string s) { provider_->push_text(std::move(s)); }
+    void push_provider_error(ProviderErrorInfo error,
+                             bool after_payload = false,
+                             std::string text = {},
+                             std::vector<acecode::ToolCall> tool_calls = {}) {
+        provider_->push_error(std::move(error),
+                              after_payload,
+                              std::move(text),
+                              std::move(tool_calls));
+    }
     void push_tool_call(std::string name, std::string args, std::string id = "c1") {
         provider_->push_tool_call(std::move(name), std::move(args), std::move(id));
     }
@@ -187,6 +198,20 @@ private:
 };
 
 } // namespace
+
+ProviderErrorInfo make_stub_provider_error(std::string display = "HTTP 500 from stub") {
+    ProviderErrorInfo error;
+    error.kind = ProviderErrorKind::Http;
+    error.status_code = 500;
+    error.provider = "stub";
+    error.model = "stub-1";
+    error.display_message = std::move(display);
+    error.raw_body = R"({"error":"boom"})";
+    error.body_is_json = true;
+    error.pretty_json = "{\n  \"error\": \"boom\"\n}";
+    error.retryable = true;
+    return error;
+}
 
 // 场景 (a):text-only 响应直接结束 loop。chit-chat 与 mid-task hedge 都走这条路径。
 TEST(AgentLoopTermination, TextOnlyEndsTurnUnconditionally) {
@@ -283,4 +308,48 @@ TEST(AgentLoopTermination, UserAbortShortCircuits) {
     EXPECT_EQ(last.find("max_iterations"), std::string::npos);
     // 也绝不该累积 nudge
     EXPECT_EQ(h.count_nudges(), 0);
+    EXPECT_EQ(h.count_by_role("error"), 0);
+    EXPECT_EQ(last, "[Interrupted]");
+}
+
+TEST(AgentLoopTermination, ProviderErrorDoesNotCreateEmptyAssistantAndNextTurnWorks) {
+    AgentLoopHarness h;
+    h.push_provider_error(make_stub_provider_error());
+
+    ASSERT_TRUE(h.submit_and_wait("first"));
+    EXPECT_EQ(h.turn_count(), 1);
+    EXPECT_EQ(h.count_by_role("error"), 1);
+    EXPECT_EQ(h.count_by_role("assistant"), 0);
+
+    h.push_text("ok");
+    ASSERT_TRUE(h.submit_and_wait("second"));
+    EXPECT_EQ(h.turn_count(), 2);
+    EXPECT_EQ(h.count_by_role("assistant"), 1);
+}
+
+TEST(AgentLoopTermination, ProviderErrorAfterToolCallDoesNotExecuteOrPersistToolCall) {
+    AgentLoopHarness h;
+    acecode::ToolCall tc;
+    tc.id = "call-failed";
+    tc.function_name = "noop";
+    tc.function_arguments = "{}";
+    h.push_provider_error(make_stub_provider_error("stream ended before done"),
+                          true,
+                          std::string{},
+                          {tc});
+
+    ASSERT_TRUE(h.submit_and_wait("use tool"));
+    EXPECT_EQ(h.count_by_role("error"), 1);
+    EXPECT_EQ(h.count_by_role("assistant"), 0);
+    EXPECT_EQ(h.count_by_role("tool_call"), 0);
+    EXPECT_EQ(h.count_by_role("tool_result"), 0);
+}
+
+TEST(AgentLoopTermination, SuccessfulEmptyResponseIsStillPersistedAsAssistant) {
+    AgentLoopHarness h;
+
+    ASSERT_TRUE(h.submit_and_wait("empty"));
+    EXPECT_EQ(h.turn_count(), 1);
+    EXPECT_EQ(h.count_by_role("error"), 0);
+    EXPECT_EQ(h.count_by_role("assistant"), 1);
 }

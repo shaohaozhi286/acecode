@@ -90,6 +90,80 @@ run('用户终止后的 abort 类服务端错误不重复追加终止提示', ()
   assert.equal(state.items[0].content, '用户已终止本轮任务');
 });
 
+run('provider JSON 错误 message 保留完整展示文本和 metadata', () => {
+  const prettyJson = '{\n  "unexpected": {\n    "nested": true\n  }\n}';
+  const state = reduceTranscriptEvent(createTranscriptState(), {
+    type: 'message',
+    payload: {
+      id: 'e1',
+      role: 'error',
+      content: `[Error] HTTP 400 from openai model test\n${prettyJson}`,
+      metadata: {
+        provider_error: {
+          kind: 'http',
+          status_code: 400,
+          body_is_json: true,
+          raw_body: '{"unexpected":{"nested":true}}',
+          pretty_json: prettyJson,
+        },
+      },
+    },
+    seq: 1,
+  }).state;
+
+  assert.equal(state.items.length, 1);
+  assert.equal(state.items[0].role, 'error');
+  assert.match(state.items[0].content, /"nested": true/);
+  assert.equal(state.items[0].metadata.provider_error.raw_body, '{"unexpected":{"nested":true}}');
+});
+
+run('provider 非 JSON 错误 message 保留原始文本', () => {
+  const rawBody = 'gateway says nope';
+  const state = reduceTranscriptEvent(createTranscriptState(), {
+    type: 'message',
+    payload: {
+      id: 'e1',
+      role: 'error',
+      content: `[Error] HTTP 400 from openai model test\n${rawBody}`,
+      metadata: {
+        provider_error: {
+          kind: 'http',
+          status_code: 400,
+          body_is_json: false,
+          raw_body: rawBody,
+        },
+      },
+    },
+    seq: 1,
+  }).state;
+
+  assert.equal(state.items.length, 1);
+  assert.equal(state.items[0].role, 'error');
+  assert.match(state.items[0].content, /gateway says nope/);
+  assert.equal(state.items[0].metadata.provider_error.raw_body, rawBody);
+});
+
+run('provider 错误 message 会结束已有 partial assistant streaming 状态', () => {
+  const state = reduceMany([
+    { type: 'token', payload: { text: 'partial' }, seq: 1 },
+    {
+      type: 'message',
+      payload: {
+        id: 'e1',
+        role: 'error',
+        content: '[Error] stream ended before done',
+        metadata: { provider_error: { kind: 'malformed_sse' } },
+      },
+      seq: 2,
+    },
+  ]);
+
+  assert.equal(state.streamingId, null);
+  assert.equal(state.items[0].role, 'assistant');
+  assert.equal(state.items[0].streaming, false);
+  assert.equal(state.items[1].role, 'error');
+});
+
 run('usage 事件更新 token usage 且不新增 transcript item', () => {
   const state = reduceMany([
     {

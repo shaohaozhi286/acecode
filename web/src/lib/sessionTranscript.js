@@ -317,7 +317,7 @@ export function reduceTranscriptEvent(state, msg) {
           : item);
         break;
       }
-      next.streamingId = null;
+      finalizeStreaming(next);
       const incomingContent = p.content || '';
       if (role === 'assistant' && incomingContent && incomingContent.trim()) {
         next.turnHadAssistantText = true;

@@ -53,6 +53,39 @@ nlohmann::json build_agent_progress_payload(
     return payload;
 }
 
+std::string provider_error_kind_to_json_string(ProviderErrorKind kind) {
+    switch (kind) {
+    case ProviderErrorKind::None:          return "none";
+    case ProviderErrorKind::UserCancelled: return "user_cancelled";
+    case ProviderErrorKind::Timeout:       return "timeout";
+    case ProviderErrorKind::Network:       return "network";
+    case ProviderErrorKind::Http:          return "http";
+    case ProviderErrorKind::MalformedSse:  return "malformed_sse";
+    case ProviderErrorKind::MalformedJson: return "malformed_json";
+    case ProviderErrorKind::Unknown:       return "unknown";
+    }
+    return "unknown";
+}
+
+nlohmann::json provider_error_to_json(const ProviderErrorInfo& info) {
+    nlohmann::json j = {
+        {"kind", provider_error_kind_to_json_string(info.kind)},
+        {"status_code", info.status_code},
+        {"provider", info.provider},
+        {"model", info.model},
+        {"request_id", info.request_id},
+        {"display_message", info.display_message},
+        {"raw_body", info.raw_body},
+        {"body_is_json", info.body_is_json},
+        {"pretty_json", info.pretty_json},
+        {"retryable", info.retryable},
+        {"retry_attempt", info.retry_attempt},
+        {"retry_max_attempts", info.retry_max_attempts},
+        {"retry_delay_ms", info.retry_delay_ms},
+    };
+    return j;
+}
+
 std::string format_bytes_detail(std::size_t bytes) {
     if (bytes < 1024) return "参数 " + std::to_string(bytes) + " 字节";
     std::ostringstream oss;
@@ -154,7 +187,8 @@ AgentLoop::~AgentLoop() {
 
 void AgentLoop::dispatch_message(const std::string& role,
                                   const std::string& content,
-                                  bool is_tool) {
+                                  bool is_tool,
+                                  nlohmann::json metadata) {
     if (callbacks_.on_message) {
         callbacks_.on_message(role, content, is_tool);
     }
@@ -165,10 +199,13 @@ void AgentLoop::dispatch_message(const std::string& role,
     ChatMessage tmp;
     tmp.role    = role;
     tmp.content = content;
-    events_.emit(SessionEventKind::Message,
-        nlohmann::json{
-            {"role", role}, {"content", content}, {"is_tool", is_tool},
-            {"id", web::compute_message_id(tmp)}});
+    nlohmann::json payload = {
+        {"role", role}, {"content", content}, {"is_tool", is_tool},
+        {"id", web::compute_message_id(tmp)}};
+    if (metadata.is_object() && !metadata.empty()) {
+        payload["metadata"] = std::move(metadata);
+    }
+    events_.emit(SessionEventKind::Message, std::move(payload));
 }
 
 void AgentLoop::abort() {
@@ -740,9 +777,13 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
         std::mutex resp_mu;
         std::size_t reasoning_bytes = 0;
         int reasoning_fragments = 0;
+        bool provider_error_seen = false;
+        ProviderErrorInfo provider_error_info;
 
         auto stream_callback = [&accumulated, &resp_mu, &emit_agent_progress,
-                                &reasoning_bytes, &reasoning_fragments, this](const StreamEvent& evt) {
+                                &reasoning_bytes, &reasoning_fragments,
+                                &provider_error_seen, &provider_error_info,
+                                this](const StreamEvent& evt) {
             switch (evt.type) {
             case StreamEventType::Delta:
                 {
@@ -813,8 +854,41 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
                     {"has_data", evt.usage.has_data},
                 });
                 break;
+            case StreamEventType::Retry:
+                provider_error_info = evt.provider_error;
+                emit_agent_progress(
+                    "model_retry",
+                    "正在重试模型请求",
+                    "第 " + std::to_string(evt.provider_error.retry_attempt + 1) +
+                        " 次请求将在 " +
+                        std::to_string(evt.provider_error.retry_delay_ms) +
+                        " ms 后发起",
+                    std::string{},
+                    std::string{},
+                    -1,
+                    true);
+                break;
             case StreamEventType::Error:
-                dispatch_message("error", "[Error] " + evt.error, false);
+                if ((evt.provider_error.kind == ProviderErrorKind::UserCancelled ||
+                     evt.error == "Request cancelled") &&
+                    abort_requested_.load()) {
+                    break;
+                }
+                provider_error_seen = true;
+                provider_error_info = evt.provider_error;
+                if (!provider_error_info.has_error()) {
+                    provider_error_info.kind = ProviderErrorKind::Unknown;
+                    provider_error_info.display_message = evt.error;
+                }
+                if (provider_error_info.display_message.empty()) {
+                    provider_error_info.display_message = evt.error;
+                }
+                {
+                    nlohmann::json metadata;
+                    metadata["provider_error"] = provider_error_to_json(provider_error_info);
+                    dispatch_message("error", "[Error] " + provider_error_info.display_message, false,
+                                     std::move(metadata));
+                }
                 break;
             }
         };
@@ -843,6 +917,12 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
 
         if (abort_requested_) {
             dispatch_message("system", "[Interrupted]", false);
+            break;
+        }
+
+        if (provider_error_seen) {
+            LOG_WARN("Provider stream failed; ending turn without assistant message: " +
+                     log_truncate(provider_error_info.display_message, 500));
             break;
         }
 

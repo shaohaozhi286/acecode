@@ -29,6 +29,9 @@ namespace acecode_test {
 struct ScriptedResponse {
     std::string text;                         // may be empty
     std::vector<acecode::ToolCall> tool_calls; // may be empty
+    bool emit_error = false;
+    acecode::ProviderErrorInfo provider_error;
+    bool error_after_payload = false;
 };
 
 class StubLlmProvider : public acecode::LlmProvider {
@@ -41,6 +44,19 @@ public:
 
     void push_text(std::string s) {
         push_response({std::move(s), {}});
+    }
+
+    void push_error(acecode::ProviderErrorInfo error,
+                    bool after_payload = false,
+                    std::string text = {},
+                    std::vector<acecode::ToolCall> tool_calls = {}) {
+        ScriptedResponse r;
+        r.text = std::move(text);
+        r.tool_calls = std::move(tool_calls);
+        r.emit_error = true;
+        r.provider_error = std::move(error);
+        r.error_after_payload = after_payload;
+        push_response(std::move(r));
     }
 
     void push_tool_call(std::string tool_name, std::string args_json,
@@ -117,6 +133,17 @@ public:
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
 
+        if (r.emit_error && !r.error_after_payload) {
+            acecode::StreamEvent evt;
+            evt.type = acecode::StreamEventType::Error;
+            evt.provider_error = r.provider_error;
+            evt.error = r.provider_error.display_message.empty()
+                ? std::string("provider error")
+                : r.provider_error.display_message;
+            callback(evt);
+            return;
+        }
+
         if (!r.text.empty()) {
             acecode::StreamEvent evt;
             evt.type = acecode::StreamEventType::Delta;
@@ -128,6 +155,16 @@ public:
             evt.type = acecode::StreamEventType::ToolCall;
             evt.tool_call = std::move(tc);
             callback(evt);
+        }
+        if (r.emit_error) {
+            acecode::StreamEvent evt;
+            evt.type = acecode::StreamEventType::Error;
+            evt.provider_error = r.provider_error;
+            evt.error = r.provider_error.display_message.empty()
+                ? std::string("provider error")
+                : r.provider_error.display_message;
+            callback(evt);
+            return;
         }
         acecode::StreamEvent done_evt;
         done_evt.type = acecode::StreamEventType::Done;

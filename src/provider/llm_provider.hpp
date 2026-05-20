@@ -72,6 +72,35 @@ struct ToolDef {
     nlohmann::json parameters; // JSON Schema object
 };
 
+enum class ProviderErrorKind {
+    None,
+    UserCancelled,
+    Timeout,
+    Network,
+    Http,
+    MalformedSse,
+    MalformedJson,
+    Unknown,
+};
+
+struct ProviderErrorInfo {
+    ProviderErrorKind kind = ProviderErrorKind::None;
+    int status_code = 0;
+    std::string provider;
+    std::string model;
+    std::string request_id;
+    std::string display_message;
+    std::string raw_body;
+    bool body_is_json = false;
+    std::string pretty_json;
+    bool retryable = false;
+    int retry_attempt = 0;
+    int retry_max_attempts = 0;
+    int retry_delay_ms = 0;
+
+    bool has_error() const { return kind != ProviderErrorKind::None; }
+};
+
 // Streaming event types for chat_stream()
 //   ReasoningDelta — chain-of-thought fragment from a reasoning-mode model.
 //   ToolCallDelta — safe metadata while a streaming provider is still
@@ -79,7 +108,18 @@ struct ToolDef {
 //                   partial and should not be rendered raw to users.
 //   Callbacks are free to ignore it; today the agent loop drops it silently
 //   and a future TUI panel can subscribe.
-enum class StreamEventType { Delta, ToolCall, ToolCallDelta, Done, Error, Usage, ReasoningDelta };
+//   Retry — provider is retrying a transient failure before any assistant/tool
+//           output has been emitted.
+enum class StreamEventType {
+    Delta,
+    ToolCall,
+    ToolCallDelta,
+    Done,
+    Error,
+    Usage,
+    Retry,
+    ReasoningDelta,
+};
 
 struct StreamEvent {
     StreamEventType type;
@@ -88,6 +128,7 @@ struct StreamEvent {
     int tool_index = -1;        // ToolCall/ToolCallDelta: index within current assistant turn
     std::size_t tool_call_argument_bytes = 0; // ToolCallDelta: accumulated argument bytes
     std::string error;          // Error: description
+    ProviderErrorInfo provider_error; // Error/Retry: structured provider failure
     TokenUsage usage;           // Usage: token counts from server
 };
 

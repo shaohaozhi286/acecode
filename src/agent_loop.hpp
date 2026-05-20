@@ -226,8 +226,9 @@ private:
     // (events_)。所有 on_message 触发点都该走这个 helper,确保 daemon
     // 模式下没装 callbacks 也能拿到事件。
     void dispatch_message(const std::string& role,
-                           const std::string& content,
-                           bool is_tool);
+                          const std::string& content,
+                          bool is_tool,
+                          nlohmann::json metadata = nlohmann::json::object());
 
     struct WorkerTask {
         enum class Kind { Chat, Shell, Compact };
