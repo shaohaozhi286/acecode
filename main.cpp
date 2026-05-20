@@ -1067,9 +1067,21 @@ static std::optional<int> dispatch_non_tui_command(int argc, char* argv[]) {
 
     if (argc >= 2 && (std::string(argv[1]) == "upgrade" ||
                       std::string(argv[1]) == "update")) {
+        bool force_update = false;
+        for (int i = 2; i < argc; ++i) {
+            const std::string arg = argv[i] ? std::string(argv[i]) : std::string();
+            if (arg == "--force") {
+                force_update = true;
+                continue;
+            }
+            std::cerr << "acecode " << argv[1] << ": unknown option: " << arg << "\n"
+                      << "usage: acecode " << argv[1] << " [--force]\n";
+            return 64;
+        }
         AppConfig config = load_config();
         return acecode::upgrade::run_upgrade_command(
-            config, exe_path, ACECODE_VERSION, std::cout, std::cerr);
+            config, exe_path, ACECODE_VERSION, std::cout, std::cerr,
+            force_update);
     }
 
     if (argc >= 2 && std::string(argv[1]) == "--apply-update") {

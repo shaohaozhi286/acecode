@@ -1,5 +1,6 @@
 #include "apply.hpp"
 
+#include "console.hpp"
 #include "package.hpp"
 #include "../config/config.hpp"
 
@@ -389,19 +390,26 @@ int run_apply_update_command(const std::vector<std::string>& args,
         return 64;
     }
 
-    out << "Waiting for ACECode to exit before applying update...\n";
+    out << styled(out, ConsoleStyle::Bold, "ACECode Update Installer") << "\n"
+        << styled(out, ConsoleStyle::Cyan,
+                  "[1/3] Waiting for ACECode to exit before applying update...")
+        << "\n";
     wait_for_parent(opts->parent_pid);
 
+    out << styled(out, ConsoleStyle::Cyan, "[2/3] Applying staged update...") << "\n";
     std::string apply_error;
     if (!apply_staged_update(opts->staging_dir, opts->install_dir,
                              opts->backup_dir, target, &apply_error)) {
         err << "acecode update apply failed: " << apply_error << "\n"
             << "Backup directory: " << opts->backup_dir.string() << "\n";
+        prompt_press_any_key_if_interactive(out);
         return 1;
     }
 
-    out << "ACECode update applied successfully.\n"
+    out << styled(out, ConsoleStyle::Cyan, "[3/3] Finalizing") << "\n"
+        << styled(out, ConsoleStyle::Green, "ACECode update applied successfully.") << "\n"
         << "Backup directory: " << opts->backup_dir.string() << "\n";
+    prompt_press_any_key_if_interactive(out);
     return 0;
 }
 

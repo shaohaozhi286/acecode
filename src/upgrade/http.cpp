@@ -29,6 +29,13 @@ HttpTextResult fetch_text(const std::string& url, int timeout_ms) {
 DownloadResult download_to_file(const std::string& url,
                                 const std::filesystem::path& output_path,
                                 int timeout_ms) {
+    return download_to_file(url, output_path, timeout_ms, DownloadProgressCallback{});
+}
+
+DownloadResult download_to_file(const std::string& url,
+                                const std::filesystem::path& output_path,
+                                int timeout_ms,
+                                const DownloadProgressCallback& progress_cb) {
     DownloadResult out;
     std::ofstream ofs(output_path, std::ios::binary);
     if (!ofs) {
@@ -41,6 +48,9 @@ DownloadResult download_to_file(const std::string& url,
             ofs.write(data.data(), static_cast<std::streamsize>(data.size()));
             if (!ofs) return false;
             out.bytes_written += static_cast<std::uintmax_t>(data.size());
+            if (progress_cb) {
+                progress_cb(DownloadProgress{out.bytes_written});
+            }
             return true;
         }
     };
@@ -48,7 +58,8 @@ DownloadResult download_to_file(const std::string& url,
     auto proxy_opts = network::proxy_options_for(url);
     cpr::Response r = cpr::Get(
         cpr::Url{url},
-        cpr::Header{{"Accept", "application/zip"}, {"User-Agent", "acecode-updater"}},
+        cpr::Header{{"Accept", "application/zip, application/octet-stream, application/x-zip-compressed, */*"},
+                    {"User-Agent", "acecode-updater"}},
         network::build_ssl_options(proxy_opts),
         proxy_opts.proxies,
         proxy_opts.auth,

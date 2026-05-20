@@ -193,10 +193,14 @@ std::string current_target() {
 
 SelectionResult select_update_package(const UpdateManifest& manifest,
                                       const std::string& current_version,
-                                      const std::string& target) {
+                                      const std::string& target,
+                                      bool force) {
     SelectionResult result;
-    auto current = parse_sem_version(current_version);
-    if (!current) {
+    std::optional<SemVersion> current;
+    if (!force) {
+        current = parse_sem_version(current_version);
+    }
+    if (!force && !current) {
         result.error = "running ACECode version is not semantic: " + current_version;
         return result;
     }
@@ -207,7 +211,7 @@ SelectionResult select_update_package(const UpdateManifest& manifest,
         if (!parsed) {
             continue;
         }
-        if (compare_sem_version(*parsed, *current) <= 0) {
+        if (!force && compare_sem_version(*parsed, *current) <= 0) {
             continue;
         }
 
