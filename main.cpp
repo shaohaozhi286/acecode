@@ -1052,8 +1052,18 @@ static std::string executable_path_from_argv(int argc, char* argv[]) {
     return (argc > 0 && argv[0]) ? std::string(argv[0]) : std::string();
 }
 
+static bool is_version_command_arg(const std::string& arg) {
+    return arg == "version" || arg == "-version" || arg == "--version" ||
+           arg == "/version";
+}
+
 static std::optional<int> dispatch_non_tui_command(int argc, char* argv[]) {
     const std::string exe_path = executable_path_from_argv(argc, argv);
+
+    if (argc >= 2 && is_version_command_arg(argv[1] ? std::string(argv[1]) : std::string())) {
+        std::cout << "acecode v" ACECODE_VERSION << "\n";
+        return 0;
+    }
 
     if (argc >= 2 && (std::string(argv[1]) == "upgrade" ||
                       std::string(argv[1]) == "update")) {
