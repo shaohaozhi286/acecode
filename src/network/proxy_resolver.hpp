@@ -129,6 +129,11 @@ private:
 
     void rebuild_no_proxy_list_unlocked();
     ResolvedProxy resolve_auto_unlocked(const std::string& target_url) const;
+    ResolvedProxy effective_unlocked(const std::string& target_url,
+                                     bool honor_fallback) const;
+    ResolvedProxy effective_for_use(const std::string& target_url);
+    bool probe_resolved_and_maybe_fallback_unlocked(const ResolvedProxy& resolved);
+    void clear_fallback_unlocked();
     // 持有 mu_ 时调用 — 内部探测后写 fallback 字段。返回 true = fallback 激活。
     bool probe_and_maybe_fallback_unlocked();
 };

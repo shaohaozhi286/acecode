@@ -7,7 +7,8 @@
 //   - probe Refused → flag 设、effective() 返回 auto-fallback
 //   - probe_enabled=false → 跳过 probe(等价旧行为)
 //   - refresh() 清 flag 并重探
-//   - /proxy off / set 仍胜过 fallback(session override 显式意志)
+//   - options_for 使用前会 lazy probe,代理不通就 fallback
+//   - /proxy off 仍胜出;set 会清旧 fallback,但新代理使用前仍要探测
 //   - /proxy reset 在 fallback 仍激活时回 auto-fallback,而非原 URL
 
 #include <gtest/gtest.h>
@@ -158,9 +159,56 @@ TEST(ProxyResolverFallback, SessionOverrideManualBeatsFallback) {
     EXPECT_NE(eff.url.find("otherproxy.local"), std::string::npos);
 }
 
-// 场景:/proxy reset 在 fallback 仍激活时回到 auto-fallback,而非原代理 URL
-// 这是 spec 强调的行为 — reset 只清 session override,不清 fallback
-TEST(ProxyResolverFallback, SessionResetWithFallbackStillReturnsAutoFallback) {
+// 场景:没有显式调用 probe_and_maybe_fallback,options_for 使用代理前也会探测;
+// 代理 Refused 时直接返回 auto-fallback / 直连
+TEST(ProxyResolverFallback, OptionsForManualProxyProbesAndFallsBack) {
+    StubProbe stub({TcpProbeReason::Refused, ""});
+    ProxyResolver r;
+    r.init(make_manual_cfg("http://127.0.0.1:8888"));
+
+    auto opts = r.options_for("https://api.example.com");
+    EXPECT_TRUE(r.is_fallback_active());
+    EXPECT_FALSE(opts.proxies.has("http"));
+    EXPECT_FALSE(opts.proxies.has("https"));
+    EXPECT_EQ(opts.resolved.source, "auto-fallback");
+}
+
+// 场景:/proxy set <url> 也不绕过使用前探测;新代理不通时同样 fallback
+TEST(ProxyResolverFallback, OptionsForSessionOverrideProxyProbesAndFallsBack) {
+    StubProbe stub({TcpProbeReason::Refused, ""});
+    NetworkConfig n;
+    n.proxy_mode = "off";
+    n.proxy_probe_enabled = true;
+    n.proxy_probe_timeout_ms = 200;
+    ProxyResolver r;
+    r.init(n);
+    r.set_session_override_url("http://127.0.0.1:9999");
+
+    auto opts = r.options_for("https://api.example.com");
+    EXPECT_TRUE(r.is_fallback_active());
+    EXPECT_FALSE(opts.proxies.has("http"));
+    EXPECT_FALSE(opts.proxies.has("https"));
+    EXPECT_EQ(opts.resolved.source, "auto-fallback");
+    EXPECT_EQ(r.fallback_info_snapshot().original_source, "session-override");
+}
+
+// 场景:使用前探测 Ok 时仍正常返回代理参数
+TEST(ProxyResolverFallback, OptionsForManualProxyKeepsReachableProxy) {
+    StubProbe stub({TcpProbeReason::Ok, ""});
+    ProxyResolver r;
+    r.init(make_manual_cfg("http://127.0.0.1:8888"));
+
+    auto opts = r.options_for("https://api.example.com");
+    EXPECT_FALSE(r.is_fallback_active());
+    EXPECT_TRUE(opts.proxies.has("http"));
+    EXPECT_TRUE(opts.proxies.has("https"));
+    EXPECT_EQ(opts.resolved.url, "http://127.0.0.1:8888");
+    EXPECT_EQ(opts.resolved.source, "manual");
+}
+
+// 场景:/proxy set 会清旧 fallback;/proxy reset 后回到 config,真正使用时重新
+// probe config 代理,若仍不可达则再次 auto-fallback
+TEST(ProxyResolverFallback, SessionResetReprobesConfigProxyOnUse) {
     StubProbe stub({TcpProbeReason::Refused, ""});
     ProxyResolver r;
     r.init(make_manual_cfg("http://127.0.0.1:8888"));
@@ -170,8 +218,13 @@ TEST(ProxyResolverFallback, SessionResetWithFallbackStillReturnsAutoFallback) {
     r.set_session_override_url("http://otherproxy.local:3128");
     r.reset_session_override();
     auto eff = r.effective("https://api.example.com");
-    EXPECT_EQ(eff.source, "auto-fallback");
-    EXPECT_EQ(eff.url, "");
+    EXPECT_EQ(eff.source, "manual");
+    EXPECT_EQ(eff.url, "http://127.0.0.1:8888");
+
+    auto opts = r.options_for("https://api.example.com");
+    EXPECT_EQ(opts.resolved.source, "auto-fallback");
+    EXPECT_FALSE(opts.proxies.has("http"));
+    EXPECT_FALSE(opts.proxies.has("https"));
 }
 
 // 场景:proxy_mode=off 时不做 probe(没什么可探的)

@@ -207,47 +207,24 @@ void ProxyResolver::refresh() {
     std::lock_guard<std::mutex> lk(mu_);
     auto_cache_valid_ = false; // 下次 effective() 时重新探测
     // 清 fallback 状态:refresh 语义是"重判一切",让 probe 重新决定。
-    fallback_active_ = false;
-    fallback_original_url_.clear();
-    fallback_original_source_.clear();
-    fallback_reason_.clear();
+    clear_fallback_unlocked();
     rebuild_no_proxy_list_unlocked();
     // 重跑探测;调用持锁版本避免重入。
     probe_and_maybe_fallback_unlocked();
 }
 
-bool ProxyResolver::probe_and_maybe_fallback_unlocked() {
-    if (!cfg_.proxy_probe_enabled) return false;
+void ProxyResolver::clear_fallback_unlocked() {
+    fallback_active_ = false;
+    fallback_original_url_.clear();
+    fallback_original_source_.clear();
+    fallback_reason_.clear();
+}
 
-    // 预解析 effective url(不重入 effective()):内联 session override 与
-    // config-mode 分支的 URL 计算,**不**复用 effective() 因为后者会读
-    // fallback_active_,而我们正要决定它。
-    std::string url;
-    std::string source;
-    if (session_override_ == SessionOverride::ForceOff) {
-        return false;
-    } else if (session_override_ == SessionOverride::ForceManual) {
-        url = normalize_proxy_url(session_override_url_);
-        source = "session-override";
-    } else if (cfg_.proxy_mode == "off") {
-        return false;
-    } else if (cfg_.proxy_mode == "manual") {
-        url = normalize_proxy_url(cfg_.proxy_url);
-        source = "manual";
-    } else {
-        // auto:走平台探测一次(忽略 cache 状态,我们正在初始化)
-        if (!auto_cache_valid_) {
-            auto_cache_ = resolve_auto_unlocked("https://example.com");
-            auto_cache_valid_ = true;
-        }
-        url = auto_cache_.url;
-        source = auto_cache_.source;
-    }
+bool ProxyResolver::probe_resolved_and_maybe_fallback_unlocked(const ResolvedProxy& resolved) {
+    if (!cfg_.proxy_probe_enabled || resolved.url.empty()) return false;
 
-    if (url.empty()) return false; // 已经直连了,没什么可探的
-
-    std::string host = host_of(url);
-    int port = port_of(url);
+    std::string host = host_of(resolved.url);
+    int port = port_of(resolved.url);
     if (host.empty() || port <= 0) return false;
 
     auto probe = current_tcp_probe();
@@ -255,13 +232,20 @@ bool ProxyResolver::probe_and_maybe_fallback_unlocked() {
     if (result.reason == TcpProbeReason::Ok) return false;
 
     fallback_active_ = true;
-    fallback_original_url_ = redact_credentials(url);
-    fallback_original_source_ = source;
+    fallback_original_url_ = redact_credentials(resolved.url);
+    fallback_original_source_ = resolved.source;
     fallback_reason_ = tcp_probe_reason_name(result.reason);
     LOG_WARN(std::string("[proxy] fallback to direct: ") + fallback_original_url_ +
              " unreachable (" + fallback_reason_ +
              (result.detail.empty() ? "" : ": " + result.detail) + ")");
     return true;
+}
+
+bool ProxyResolver::probe_and_maybe_fallback_unlocked() {
+    if (!cfg_.proxy_probe_enabled) return false;
+
+    return probe_resolved_and_maybe_fallback_unlocked(
+        effective_unlocked("https://example.com", /*honor_fallback=*/false));
 }
 
 void ProxyResolver::probe_and_maybe_fallback() {
@@ -288,12 +272,14 @@ void ProxyResolver::set_session_override_off() {
     std::lock_guard<std::mutex> lk(mu_);
     session_override_ = SessionOverride::ForceOff;
     session_override_url_.clear();
+    clear_fallback_unlocked();
 }
 
 void ProxyResolver::set_session_override_url(std::string url) {
     std::lock_guard<std::mutex> lk(mu_);
     session_override_ = SessionOverride::ForceManual;
     session_override_url_ = std::move(url);
+    clear_fallback_unlocked();
 }
 
 void ProxyResolver::reset_session_override() {
@@ -325,13 +311,19 @@ ResolvedProxy ProxyResolver::resolve_auto_unlocked(const std::string& target_url
     return auto_detect(cfg_, target_url);
 }
 
-ResolvedProxy ProxyResolver::effective(const std::string& target_url) const {
-    std::lock_guard<std::mutex> lk(mu_);
-
+ResolvedProxy ProxyResolver::effective_unlocked(const std::string& target_url,
+                                                bool honor_fallback) const {
     // 1. session override 最优先(/proxy off / /proxy set)
     if (session_override_ == SessionOverride::ForceOff) {
         return {"", "session-override:off"};
     }
+
+    // 2. fallback 短路 — 使用前探测或启动探测发现代理不可达时,所有代理来源
+    //    都直连。/proxy set 会清掉旧 fallback,下一次使用时重新探测新 URL。
+    if (honor_fallback && fallback_active_) {
+        return {"", "auto-fallback"};
+    }
+
     if (session_override_ == SessionOverride::ForceManual) {
         std::string norm = normalize_proxy_url(session_override_url_);
         if (norm.empty()) return {"", "none-after-error"};
@@ -339,12 +331,6 @@ ResolvedProxy ProxyResolver::effective(const std::string& target_url) const {
             return {"", "no_proxy"};
         }
         return {norm, "session-override"};
-    }
-
-    // 2. fallback 短路 — proxy probe 检测到代理不可达时,所有非 session-override
-    //    的代理路径都直连。session override 已在上面处理(用户显式意志胜出)。
-    if (fallback_active_) {
-        return {"", "auto-fallback"};
     }
 
     // 3. config-level mode
@@ -384,9 +370,26 @@ ResolvedProxy ProxyResolver::effective(const std::string& target_url) const {
     return auto_cache_;
 }
 
+ResolvedProxy ProxyResolver::effective(const std::string& target_url) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return effective_unlocked(target_url, /*honor_fallback=*/true);
+}
+
+ResolvedProxy ProxyResolver::effective_for_use(const std::string& target_url) {
+    std::lock_guard<std::mutex> lk(mu_);
+    ResolvedProxy resolved = effective_unlocked(target_url, /*honor_fallback=*/true);
+    if (resolved.url.empty()) {
+        return resolved;
+    }
+    if (probe_resolved_and_maybe_fallback_unlocked(resolved)) {
+        return {"", "auto-fallback"};
+    }
+    return resolved;
+}
+
 ProxyOptions ProxyResolver::options_for(const std::string& target_url) const {
     ProxyOptions opts;
-    opts.resolved = effective(target_url);
+    opts.resolved = const_cast<ProxyResolver*>(this)->effective_for_use(target_url);
 
     if (opts.resolved.url.empty()) {
         // 直连:可选 ca_bundle 仍可生效(用户可能配了自定义企业 CA)
