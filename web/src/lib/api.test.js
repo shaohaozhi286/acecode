@@ -207,6 +207,38 @@ await run('UI preference API reads and writes daemon-backed avatar preference', 
   }
 });
 
+await run('Upgrade config API reads and writes daemon-backed base_url', async () => {
+  const previousFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    calls.push({ url, opts });
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ base_url: 'http://2017studio.imwork.net:82/aupdate/' }),
+    };
+  };
+  try {
+    const client = createApi({ origin: 'http://127.0.0.1:4567', token: 'tok' });
+    const got = await client.getUpgradeConfig();
+    const saved = await client.setUpgradeConfig({ base_url: 'https://updates.example.test/ace' });
+
+    assert.deepEqual(got, { base_url: 'http://2017studio.imwork.net:82/aupdate/' });
+    assert.deepEqual(saved, { base_url: 'http://2017studio.imwork.net:82/aupdate/' });
+    assert.equal(calls[0].url, 'http://127.0.0.1:4567/api/config/upgrade');
+    assert.equal(calls[0].opts.method, 'GET');
+    assert.equal(calls[0].opts.headers['X-ACECode-Token'], 'tok');
+    assert.equal(calls[1].url, 'http://127.0.0.1:4567/api/config/upgrade');
+    assert.equal(calls[1].opts.method, 'PUT');
+    assert.deepEqual(JSON.parse(calls[1].opts.body), {
+      base_url: 'https://updates.example.test/ace',
+    });
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
 await run('ACE Browser Bridge API reads and writes daemon-backed enabled flag', async () => {
   const previousFetch = globalThis.fetch;
   const calls = [];

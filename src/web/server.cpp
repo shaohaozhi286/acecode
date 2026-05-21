@@ -137,6 +137,10 @@ json ui_preferences_to_json(const WebUiPreferencesConfig& prefs) {
     return json{{"show_acecode_avatar", prefs.show_acecode_avatar}};
 }
 
+json upgrade_config_to_json(const UpgradeConfig& cfg) {
+    return json{{"base_url", normalize_upgrade_base_url(cfg.base_url)}};
+}
+
 json ace_browser_bridge_settings_to_json(const AceBrowserBridgeConfig& cfg) {
     json out;
     out["enabled"] = cfg.enabled;
@@ -2689,6 +2693,10 @@ struct WebServer::Impl {
         ([this](const crow::request& req) {
             return cors_preflight(req);
         });
+        CROW_ROUTE(app, "/api/config/upgrade").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
         CROW_ROUTE(app, "/api/config/ace-browser-bridge").methods(crow::HTTPMethod::Options)
         ([this](const crow::request& req) {
             return cors_preflight(req);
@@ -2702,6 +2710,67 @@ struct WebServer::Impl {
             crow::response r(200);
             r.add_header("Content-Type", "application/json");
             r.body = ui_preferences_to_json(deps.app_config->web_ui).dump();
+            return with_cors(req, std::move(r));
+        });
+
+        // GET /api/config/upgrade: self-upgrade service settings.
+        CROW_ROUTE(app, "/api/config/upgrade").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.app_config) return crow::response(503);
+            crow::response r(200);
+            r.add_header("Content-Type", "application/json");
+            r.body = upgrade_config_to_json(deps.app_config->upgrade).dump();
+            return with_cors(req, std::move(r));
+        });
+
+        // PUT /api/config/upgrade body {base_url:string}.
+        CROW_ROUTE(app, "/api/config/upgrade").methods(crow::HTTPMethod::PUT)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.app_config) return crow::response(503);
+
+            auto json_err = [&](int status, const char* code, const std::string& msg) {
+                crow::response r(status);
+                r.body = json{{"error", code}, {"message", msg}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            };
+
+            json body;
+            try { body = json::parse(req.body); }
+            catch (const std::exception& e) {
+                return json_err(400, "BAD_JSON", std::string("invalid JSON body: ") + e.what());
+            }
+            if (!body.is_object() ||
+                !body.contains("base_url") ||
+                !body["base_url"].is_string()) {
+                return json_err(400, "BAD_REQUEST", "expected {base_url: string}");
+            }
+
+            const std::string normalized =
+                normalize_upgrade_base_url(body["base_url"].get<std::string>());
+            if (!is_valid_upgrade_base_url(normalized)) {
+                return json_err(400, "BAD_REQUEST",
+                                "upgrade.base_url must be a non-empty http or https URL");
+            }
+
+            const auto before = deps.app_config->upgrade;
+            deps.app_config->upgrade.base_url = normalized;
+            try {
+                if (!deps.config_path.empty()) {
+                    save_config(*deps.app_config, deps.config_path);
+                } else {
+                    save_config(*deps.app_config);
+                }
+            } catch (const std::exception& e) {
+                deps.app_config->upgrade = before;
+                return json_err(500, "PERSIST_FAILED", e.what());
+            }
+
+            crow::response r(200);
+            r.add_header("Content-Type", "application/json");
+            r.body = upgrade_config_to_json(deps.app_config->upgrade).dump();
             return with_cors(req, std::move(r));
         });
 

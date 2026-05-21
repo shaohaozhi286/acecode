@@ -1,8 +1,8 @@
 // 全屏设置页:左栏导航 + 右栏内容(Codex 风格)。
 //
 // 设计来源:Claude Design 高保真原型 (panels.jsx)。NAV 顺序与设计稿一致。
-// 后端真实接入的 section:常规 (权限模式) / 外观 (主题) / 模型 (ModelManager) / 工具。
-// 其余 section (配置 / 个性化 / MCP / 已归档会话 / 使用情况) 当前仅 UI 占位
+// 后端真实接入的 section:常规 (权限模式) / 外观 (主题) / 配置 / 模型 (ModelManager) / 工具。
+// 其余 section (个性化 / MCP / 已归档会话 / 使用情况) 当前部分为 UI 占位
 // — 状态走本地 useState,提交按钮无网络副作用,待后端接口就绪后接入。
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -35,6 +35,8 @@ const NAV = [
   { key: 'archived', label: '已归档会话' },
   { key: 'usage', label: '使用情况' },
 ];
+
+const DEFAULT_UPGRADE_SERVICE_URL = 'http://2017studio.imwork.net:82/aupdate/';
 
 function navIndexForKey(key) {
   const idx = NAV.findIndex((item) => item.key === key);
@@ -348,14 +350,60 @@ function SectionAppearance({ theme, setTheme }) {
 }
 
 // ─── 配置 ──────────────────────────────────────────────────────────────────
-// UI 占位:程序版本 / 工作空间依赖项 / 诊断 / 重置。设计 panels.jsx::renderConfigContent。
+// 真实接入:升级服务 URL。其余程序版本 / 依赖项 / 诊断 / 重置仍保留占位。
 
 function SectionConfig() {
+  const [upgradeUrl, setUpgradeUrl] = useState(DEFAULT_UPGRADE_SERVICE_URL);
+  const [upgradeLoading, setUpgradeLoading] = useState(true);
+  const [upgradeSaving, setUpgradeSaving] = useState(false);
+  const [upgradeSaved, setUpgradeSaved] = useState(false);
+  const [upgradeError, setUpgradeError] = useState('');
   const [depPython, setDepPython] = useState(true);
   const [depNode, setDepNode] = useState(true);
   const [depCsharp, setDepCsharp] = useState(false);
   const [diagRunning, setDiagRunning] = useState(false);
   const [resetRunning, setResetRunning] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setUpgradeLoading(true);
+    setUpgradeError('');
+    api.getUpgradeConfig()
+      .then((cfg) => {
+        if (!cancelled) setUpgradeUrl(cfg?.base_url || DEFAULT_UPGRADE_SERVICE_URL);
+      })
+      .catch((e) => {
+        if (!cancelled) setUpgradeError(e?.message || String(e));
+      })
+      .finally(() => {
+        if (!cancelled) setUpgradeLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  const saveUpgradeUrl = async () => {
+    const baseUrl = upgradeUrl.trim();
+    if (!baseUrl || !/^https?:\/\//i.test(baseUrl)) {
+      setUpgradeError('升级服务 URL 必须使用 http 或 https');
+      return;
+    }
+    setUpgradeSaving(true);
+    setUpgradeSaved(false);
+    setUpgradeError('');
+    try {
+      const saved = await api.setUpgradeConfig({ base_url: baseUrl });
+      setUpgradeUrl(saved?.base_url || baseUrl);
+      setUpgradeSaved(true);
+      toast({ kind: 'ok', text: '升级服务 URL 已保存' });
+      setTimeout(() => setUpgradeSaved(false), 1500);
+    } catch (e) {
+      const message = e?.message || String(e);
+      setUpgradeError(message);
+      toast({ kind: 'err', text: message });
+    } finally {
+      setUpgradeSaving(false);
+    }
+  };
 
   const runDiag = () => {
     setDiagRunning(true);
@@ -381,6 +429,71 @@ function SectionConfig() {
   return (
     <>
       <h2 className="text-xl font-bold mb-5">配置</h2>
+
+      <div className="text-[14px] font-semibold mb-1">升级服务</div>
+      <div className="rounded-md bg-surface border border-border px-3.5 py-3 mb-5">
+        <label htmlFor="upgrade-service-url" className="text-[13px] font-medium mb-2 block">
+          升级服务 URL
+        </label>
+        <div className="flex gap-2">
+          <input
+            id="upgrade-service-url"
+            type="url"
+            value={upgradeUrl}
+            onChange={(e) => {
+              setUpgradeUrl(e.target.value);
+              setUpgradeSaved(false);
+              setUpgradeError('');
+            }}
+            disabled={upgradeLoading || upgradeSaving}
+            spellCheck={false}
+            className={clsx(
+              'flex-1 min-w-0 h-8 px-2.5 rounded-md border bg-bg text-fg text-[12px] font-mono outline-none transition',
+              upgradeError ? 'border-danger' : 'border-border focus:border-accent',
+            )}
+            placeholder={DEFAULT_UPGRADE_SERVICE_URL}
+          />
+          <button
+            type="button"
+            onClick={() => {
+              setUpgradeUrl(DEFAULT_UPGRADE_SERVICE_URL);
+              setUpgradeSaved(false);
+              setUpgradeError('');
+            }}
+            disabled={upgradeLoading || upgradeSaving}
+            className="shrink-0 px-3 py-1.5 rounded-md text-[12px] border border-border text-fg-2 hover:bg-surface-hi disabled:opacity-50 transition"
+          >
+            默认
+          </button>
+          <button
+            type="button"
+            onClick={saveUpgradeUrl}
+            disabled={upgradeLoading || upgradeSaving}
+            className={clsx(
+              'shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[12px] font-medium transition disabled:opacity-50 disabled:cursor-not-allowed',
+              upgradeSaved ? 'bg-ok text-white' : 'bg-accent text-white hover:opacity-90',
+            )}
+          >
+            {upgradeSaving ? (
+              <>
+                <span className="ace-spinner" style={{ width: 12, height: 12 }} />
+                保存中...
+              </>
+            ) : (
+              <>
+                <VsIcon
+                  name={upgradeSaved ? 'ok' : 'save'}
+                  size={13}
+                  mono={false}
+                  className="ace-icon-on-accent"
+                />
+                {upgradeSaved ? '已保存' : '保存'}
+              </>
+            )}
+          </button>
+        </div>
+        {upgradeError && <div className="mt-2 text-[12px] text-danger">{upgradeError}</div>}
+      </div>
 
       <div className="text-[14px] font-semibold mb-1">工作空间依赖项</div>
       <p className="text-[12px] text-fg-mute mb-3">管理 ACECode 安装并提供给 Agent 使用的开发工具</p>

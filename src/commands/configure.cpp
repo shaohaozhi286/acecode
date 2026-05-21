@@ -459,6 +459,28 @@ static void configure_openai(AppConfig& cfg) {
     }
 }
 
+static void configure_upgrade_service(AppConfig& cfg) {
+    std::cout << "\n--- Upgrade Service Configuration ---\n" << std::endl;
+
+    const std::string current = normalize_upgrade_base_url(cfg.upgrade.base_url);
+    while (true) {
+        const std::string raw = read_line("Upgrade service URL", current);
+        const std::string normalized = normalize_upgrade_base_url(raw);
+        if (is_valid_upgrade_base_url(normalized)) {
+            cfg.upgrade.base_url = normalized;
+            return;
+        }
+
+        std::cerr << "Invalid upgrade service URL: use a non-empty http or https URL."
+                  << std::endl;
+        if (!read_confirm("Try again?", true)) {
+            cfg.upgrade.base_url = current;
+            std::cout << "Keeping upgrade service URL: " << current << std::endl;
+            return;
+        }
+    }
+}
+
 int run_configure(const AppConfig& current_config) {
     AppConfig cfg = current_config;
 
@@ -513,6 +535,7 @@ int run_configure(const AppConfig& current_config) {
     }
 
     upsert_configured_saved_model(cfg);
+    configure_upgrade_service(cfg);
 
     // Configuration summary
     std::cout << "\n--- Configuration Summary ---" << std::endl;
@@ -532,6 +555,7 @@ int run_configure(const AppConfig& current_config) {
         }
     }
     std::cout << "  Saved model: " << cfg.default_model_name << std::endl;
+    std::cout << "  Upgrade service URL: " << cfg.upgrade.base_url << std::endl;
     std::cout << std::endl;
 
     if (read_confirm("Save configuration?", true)) {

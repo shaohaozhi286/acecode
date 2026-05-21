@@ -1296,6 +1296,49 @@ TEST(WebServerHttp, PutUiPreferencesRejectsInvalidAvatarPayload) {
     EXPECT_TRUE(fx.cfg.web_ui.show_acecode_avatar);
 }
 
+// 场景:GET /api/config/upgrade 返回当前升级服务 URL 默认值。
+TEST(WebServerHttp, GetUpgradeConfigReturnsDefaultBaseUrl) {
+    WebServerFixture fx;
+    auto r = cpr::Get(cpr::Url{fx.url("/api/config/upgrade")});
+    ASSERT_EQ(r.status_code, 200) << r.text;
+    auto j = json::parse(r.text);
+    ASSERT_TRUE(j.contains("base_url"));
+    EXPECT_EQ(j["base_url"], "http://2017studio.imwork.net:82/aupdate/");
+}
+
+// 场景:PUT /api/config/upgrade 规范化 URL、更新内存并落盘。
+TEST(WebServerHttp, PutUpgradeConfigPersistsNormalizedBaseUrl) {
+    WebServerFixture fx;
+    json req = {{"base_url", " https://updates.example.test/ace "}};
+    auto put = cpr::Put(cpr::Url{fx.url("/api/config/upgrade")},
+                        cpr::Header{{"Content-Type", "application/json"}},
+                        cpr::Body{req.dump()});
+    ASSERT_EQ(put.status_code, 200) << put.text;
+    auto body = json::parse(put.text);
+    EXPECT_EQ(body["base_url"], "https://updates.example.test/ace/");
+    EXPECT_EQ(fx.cfg.upgrade.base_url, "https://updates.example.test/ace/");
+
+    std::ifstream ifs(fx.tmp_dir / "config.json");
+    ASSERT_TRUE(ifs.is_open());
+    auto saved = json::parse(ifs);
+    ASSERT_TRUE(saved.contains("upgrade"));
+    EXPECT_EQ(saved["upgrade"]["base_url"], "https://updates.example.test/ace/");
+}
+
+// 场景:PUT /api/config/upgrade 非 http(s) URL 被拒绝且不改 cfg。
+TEST(WebServerHttp, PutUpgradeConfigRejectsInvalidBaseUrl) {
+    WebServerFixture fx;
+    const std::string before = fx.cfg.upgrade.base_url;
+    json req = {{"base_url", "ftp://updates.example.test/ace"}};
+    auto r = cpr::Put(cpr::Url{fx.url("/api/config/upgrade")},
+                      cpr::Header{{"Content-Type", "application/json"}},
+                      cpr::Body{req.dump()});
+    ASSERT_EQ(r.status_code, 400) << r.text;
+    auto j = json::parse(r.text);
+    EXPECT_EQ(j["error"], "BAD_REQUEST");
+    EXPECT_EQ(fx.cfg.upgrade.base_url, before);
+}
+
 // 场景: POST /api/sessions body 是非法 JSON → 400 + error JSON,不影响 server。
 TEST(WebServerHttp, CreateSessionWithBadJsonReturns400) {
     WebServerFixture fx;
