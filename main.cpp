@@ -49,6 +49,7 @@
 #include "provider/apply_model_to_session.hpp"
 #include "tool/tool_executor.hpp"
 #include "tool/bash_tool.hpp"
+#include "tool/builtin_tool_registry.hpp"
 #include "tool/file_read_tool.hpp"
 #include "tool/file_write_tool.hpp"
 #include "tool/file_edit_tool.hpp"
@@ -63,6 +64,7 @@
 #include "tool/memory_write_tool.hpp"
 #include "tool/ask_user_question_tool.hpp"
 #include "tool/ask_overlay_input.hpp"
+#include "tool/ace_browser_bridge/browser_tools.hpp"
 #include "tui/confirm_question.hpp"
 #include "skills/skill_init.hpp"
 #include "skills/skill_registry.hpp"
@@ -106,6 +108,8 @@
 #include "tui/text_truncation.hpp"
 #include "tui/thick_vscroll_bar.hpp"
 #include "tui/tool_progress.hpp"
+#include "tui/sidebar_model.hpp"
+#include "tui/input_history_navigation.hpp"
 #include "utils/base64.hpp"
 #include "utils/clipboard.hpp"
 #include "utils/drag_scroll.hpp"
@@ -250,6 +254,156 @@ static std::string truncate_cells_prefix(std::string_view text, int max_cells) {
     return out;
 }
 
+static std::string truncate_cells_middle_ascii(std::string_view text, int max_cells) {
+    if (max_cells <= 0) {
+        return {};
+    }
+    const std::string input(text);
+    if (ftxui::string_width(input) <= max_cells) {
+        return input;
+    }
+    if (max_cells <= 3) {
+        return truncate_cells_prefix(input, max_cells);
+    }
+
+    const int body_cells = max_cells - 3;
+    const int head_cells = std::max(1, body_cells / 2);
+    const int tail_cells = std::max(0, body_cells - head_cells);
+    const auto glyphs = ftxui::Utf8ToGlyphs(input);
+
+    std::string head;
+    int used_head = 0;
+    for (const auto& glyph : glyphs) {
+        const int width = std::max(0, ftxui::string_width(glyph));
+        if (used_head + width > head_cells) {
+            break;
+        }
+        head += glyph;
+        used_head += width;
+    }
+
+    std::vector<std::string> tail_glyphs;
+    int used_tail = 0;
+    for (std::size_t i = glyphs.size(); i > 0; --i) {
+        const auto& glyph = glyphs[i - 1];
+        const int width = std::max(0, ftxui::string_width(glyph));
+        if (used_tail + width > tail_cells) {
+            break;
+        }
+        tail_glyphs.push_back(glyph);
+        used_tail += width;
+    }
+    std::reverse(tail_glyphs.begin(), tail_glyphs.end());
+
+    std::string out = head + "...";
+    for (const auto& glyph : tail_glyphs) {
+        out += glyph;
+    }
+    return out;
+}
+
+static Element sidebar_section_header(const std::string& label, int count) {
+    return hbox({
+        text(label) | color(Color::GrayLight) | dim,
+        text(" " + std::to_string(count)) | color(Color::GrayDark) | dim,
+    });
+}
+
+static std::string sidebar_change_stats_text(
+    const acecode::tui::SidebarFileChange& change) {
+    std::string out;
+    if (change.additions > 0) {
+        out += "+" + std::to_string(change.additions);
+    }
+    if (change.deletions > 0) {
+        if (!out.empty()) {
+            out += " ";
+        }
+        out += "-" + std::to_string(change.deletions);
+    }
+    return out.empty() ? std::string("0") : out;
+}
+
+static Element render_sidebar_change_row(
+    const acecode::tui::SidebarFileChange& change,
+    int content_width) {
+    const std::string stats_text = sidebar_change_stats_text(change);
+    const int file_width =
+        std::max(1, content_width - 2 - static_cast<int>(stats_text.size()) - 1);
+    Elements stats_parts;
+    if (change.additions > 0) {
+        stats_parts.push_back(
+            text("+" + std::to_string(change.additions)) |
+            color(Color::GreenLight));
+    }
+    if (change.deletions > 0) {
+        if (!stats_parts.empty()) {
+            stats_parts.push_back(text(" "));
+        }
+        stats_parts.push_back(
+            text("-" + std::to_string(change.deletions)) |
+            color(Color::RedLight));
+    }
+    if (stats_parts.empty()) {
+        stats_parts.push_back(text("0") | color(Color::GrayDark) | dim);
+    }
+
+    return hbox({
+        text("  ") | color(Color::GrayDark),
+        text(truncate_cells_middle_ascii(
+                 change.display_file.empty() ? change.file : change.display_file,
+                 file_width)) |
+            color(Color::GrayLight),
+        filler(),
+        hbox(std::move(stats_parts)),
+    });
+}
+
+static Element queued_badge() {
+    return text(" QUEUED ") | bold | color(Color::White) |
+           bgcolor(Color::RGB(128, 96, 0));
+}
+
+static Element render_pending_queue_block(const acecode::TuiState& state,
+                                          int available_width) {
+    if (state.pending_queue.empty()) {
+        return emptyElement();
+    }
+
+    constexpr std::size_t kMaxVisibleQueuedPrompts = 3;
+    constexpr int kBadgeCells = 8;
+    const int prompt_width =
+        std::max(10, available_width - kBadgeCells - 5);
+    const std::size_t visible =
+        std::min(kMaxVisibleQueuedPrompts, state.pending_queue.size());
+
+    Elements rows;
+    const std::size_t hidden =
+        state.pending_queue.size() > visible
+            ? state.pending_queue.size() - visible
+            : 0;
+    if (hidden > 0) {
+        rows.push_back(
+            text("  +" + std::to_string(hidden) + " more queued") |
+            color(Color::GrayDark) | dim);
+    }
+
+    const std::size_t start = state.pending_queue.size() - visible;
+    for (std::size_t i = start; i < state.pending_queue.size(); ++i) {
+        const std::string preview = collapse_sidebar_title_whitespace(
+            state.pending_queue[i]);
+        rows.push_back(hbox({
+            text(" "),
+            queued_badge(),
+            text(" "),
+            text(truncate_cells_middle_ascii(preview, prompt_width)) |
+                color(Color::White),
+        }));
+    }
+
+    return vbox(std::move(rows));
+}
+
 static std::vector<std::string> sidebar_title_lines(const std::string& title,
                                                     int max_width) {
     max_width = std::max(1, max_width);
@@ -302,13 +456,47 @@ static Element render_regular_sidebar(const acecode::TuiState& state,
                                       const std::string& cwd_display,
                                       int sidebar_width) {
     const int content_width = std::max(1, sidebar_width - 2);
-    Elements title_rows;
+    Elements top_rows;
     for (const auto& line : sidebar_title_lines(first_user_message_title(state),
                                                 content_width)) {
-        title_rows.push_back(text(line) | bold | color(Color::White));
+        top_rows.push_back(text(line) | bold | color(Color::White));
+    }
+
+    const auto file_changes =
+        acecode::tui::collect_sidebar_file_changes(state.conversation,
+                                                   cwd_display);
+    top_rows.push_back(text(""));
+    top_rows.push_back(sidebar_section_header(
+        "Files Changed", static_cast<int>(file_changes.size())));
+
+    constexpr std::size_t kMaxSidebarFiles = 5;
+    const std::size_t shown_files =
+        std::min(kMaxSidebarFiles, file_changes.size());
+    for (std::size_t i = 0; i < shown_files; ++i) {
+        top_rows.push_back(
+            render_sidebar_change_row(file_changes[i], content_width));
+    }
+    if (file_changes.size() > shown_files) {
+        top_rows.push_back(
+            text("  +" + std::to_string(file_changes.size() - shown_files) +
+                 " more") |
+            color(Color::GrayDark) | dim);
     }
 
     Elements bottom_rows;
+    const bool show_bash_task =
+        state.tool_running && state.tool_progress.tool_name == "bash";
+    if (show_bash_task) {
+        bottom_rows.push_back(sidebar_section_header("Background Tasks", 1));
+        std::string command = state.tool_progress.command_preview.empty()
+            ? std::string("bash")
+            : state.tool_progress.command_preview;
+        bottom_rows.push_back(
+            text("  " + truncate_cells_middle_ascii(command,
+                                                    std::max(1, content_width - 2))) |
+            color(Color::GrayLight));
+        bottom_rows.push_back(text(""));
+    }
     bottom_rows.push_back(paragraph(version_str) | color(Color::GrayLight) | dim);
     if (!state.status_line.empty()) {
         bottom_rows.push_back(paragraph(state.status_line) | color(Color::White));
@@ -320,7 +508,7 @@ static Element render_regular_sidebar(const acecode::TuiState& state,
     return hbox({
         text(" "),
         vbox({
-            vbox(std::move(title_rows)),
+            vbox(std::move(top_rows)),
             filler(),
             vbox(std::move(bottom_rows)),
         }) | flex,
@@ -1301,23 +1489,6 @@ static void initialize_web_search_runtime(const AppConfig& config) {
     }
 }
 
-static void register_builtin_tools(ToolExecutor& tools, const AppConfig& config) {
-    tools.register_tool(create_bash_tool());
-    tools.register_tool(create_file_read_tool());
-    tools.register_tool(create_file_write_tool());
-    tools.register_tool(create_file_edit_tool());
-    tools.register_tool(create_grep_tool());
-    tools.register_tool(create_glob_tool());
-    tools.register_tool(create_task_complete_tool());
-    tools.register_tool(create_get_goal_tool());
-    tools.register_tool(create_create_goal_tool());
-    tools.register_tool(create_update_goal_tool());
-    if (config.web_search.enabled) {
-        tools.register_tool(web_search::create_web_search_tool(
-            web_search::runtime().router(), web_search::runtime().cfg()));
-    }
-}
-
 // 实现已抽到 src/skills/skill_init.{hpp,cpp},供 TUI 与 daemon(src/daemon/worker.cpp)
 // 共用。下方所有 `initialize_skill_registry(...)` 调用站点经 `using namespace acecode`
 // 解析到 `acecode::initialize_skill_registry`。
@@ -1629,7 +1800,7 @@ static int run_interactive_app(const CliOptions& cli,
 
     // ---- Setup tools ----
     ToolExecutor tools;
-    register_builtin_tools(tools, config);
+    register_session_builtin_tools(tools, config);
 
     // ---- Skill registry ----
     SkillRegistry skill_registry;
@@ -1652,8 +1823,7 @@ static int run_interactive_app(const CliOptions& cli,
     TuiState state;
     {
         auto p = provider_accessor();
-        state.status_line = "[" + p->name() + "] model: " +
-            (config.provider == "copilot" ? config.copilot.model : config.openai.model);
+        state.status_line = "[" + p->name() + "] model: " + p->model();
     }
 
     restore_input_history(state, config, working_dir);
@@ -3521,9 +3691,6 @@ static int run_interactive_app(const CliOptions& cli,
                 // 队列保存展开版（spec 4.5）；提交后气泡显示展开版（用户反馈：
                 // 上屏不要看到 [] 占位符）。
                 state.pending_queue.push_back(expanded_prompt);
-                state.conversation.push_back({"user", expanded_prompt, false});
-                state.chat_follow_tail = true;
-                clamp_chat_focus();
             } else {
                 state.conversation.push_back({"user", expanded_prompt, false});
                 state.chat_follow_tail = true;
@@ -4153,20 +4320,11 @@ static int run_interactive_app(const CliOptions& cli,
                 screen.PostEvent(Event::Custom);
                 return true;
             }
-            if (state.input_history.empty()) return true;
-            if (state.history_index == -1) {
-                state.saved_input = prepend_mode_prefix(state.input_text, state.input_mode);
-                state.history_index = (int)state.input_history.size() - 1;
-            } else if (state.history_index > 0) {
-                state.history_index--;
+            if (acecode::tui::navigate_input_history_up(state)) {
+                // 历史覆盖输入：清掉本会话旧粘贴留下的孤儿 pasted_texts（spec 3.7）。
+                acecode::tui::prune_unreferenced(state.pasted_texts, state.input_text);
+                refresh_slash_dropdown(state, cmd_registry);
             }
-            auto [hist_mode, hist_text] = parse_mode_prefix(state.input_history[state.history_index]);
-            state.input_mode = hist_mode;
-            state.input_text = hist_text;
-            state.input_cursor = state.input_text.size();
-            // 历史覆盖输入：清掉本会话旧粘贴留下的孤儿 pasted_texts（spec 3.7）。
-            acecode::tui::prune_unreferenced(state.pasted_texts, state.input_text);
-            refresh_slash_dropdown(state, cmd_registry);
             return true;
         }
         if (event == Event::ArrowDown) {
@@ -4192,22 +4350,11 @@ static int run_interactive_app(const CliOptions& cli,
                 screen.PostEvent(Event::Custom);
                 return true;
             }
-            if (state.history_index == -1) return true;
-            if (state.history_index < (int)state.input_history.size() - 1) {
-                state.history_index++;
-                auto [hist_mode, hist_text] = parse_mode_prefix(state.input_history[state.history_index]);
-                state.input_mode = hist_mode;
-                state.input_text = hist_text;
-            } else {
-                state.history_index = -1;
-                auto [saved_mode, saved_text] = parse_mode_prefix(state.saved_input);
-                state.input_mode = saved_mode;
-                state.input_text = saved_text;
+            if (acecode::tui::navigate_input_history_down(state)) {
+                // 历史覆盖输入：清掉本会话旧粘贴留下的孤儿 pasted_texts（spec 3.7）。
+                acecode::tui::prune_unreferenced(state.pasted_texts, state.input_text);
+                refresh_slash_dropdown(state, cmd_registry);
             }
-            state.input_cursor = state.input_text.size();
-            // 历史覆盖输入：清掉本会话旧粘贴留下的孤儿 pasted_texts（spec 3.7）。
-            acecode::tui::prune_unreferenced(state.pasted_texts, state.input_text);
-            refresh_slash_dropdown(state, cmd_registry);
             return true;
         }
         // ArrowLeft / ArrowRight: move caret one UTF-8 glyph.
@@ -4445,13 +4592,15 @@ static int run_interactive_app(const CliOptions& cli,
             }
             return text(line);
         };
-        constexpr int kRegularSidebarThresholdCols = 95;
+        constexpr int kRegularSidebarThresholdCols = 120;
         constexpr int kRegularSidebarWidthCols = 32;
         const int terminal_width =
             std::max(Terminal::Size().dimx, screen.dimx());
         const bool show_regular_sidebar =
             !conhost_compat_layout &&
             terminal_width > kRegularSidebarThresholdCols;
+        const bool hide_regular_sidebar_banner =
+            show_regular_sidebar && !state.conversation.empty();
 
         // drag-autoscroll: 把上一帧布局分配的未裁剪 box 高度同步到行数表,
         // 供 scroll_chat_by_lines 做按行滚动. 普通 ftxui::reflect 会在 Render
@@ -4539,7 +4688,9 @@ static int run_interactive_app(const CliOptions& cli,
                 text("\xE2\x96\x91\xE2\x96\x80\xE2\x96\x91\xE2\x96\x80\xE2\x96\x91\xE2\x96\x80\xE2\x96\x80\xE2\x96\x80\xE2\x96\x91\xE2\x96\x80\xE2\x96\x80\xE2\x96\x80\xE2"),
             }) | color(Color::Cyan) | bold;
 
-            if (show_regular_sidebar) {
+            if (show_regular_sidebar && hide_regular_sidebar_banner) {
+                header = emptyElement();
+            } else if (show_regular_sidebar) {
                 header = hbox({
                     text("    "),
                     logo,
@@ -5348,7 +5499,8 @@ static int run_interactive_app(const CliOptions& cli,
             prompt_parts.push_back(input_with_esc->Render() | flex);
             if (!state.pending_queue.empty()) {
                 prompt_parts.push_back(
-                    text(" [" + std::to_string(state.pending_queue.size()) + " queued]") | dim | color(Color::GrayDark));
+                    text(" QUEUED " + std::to_string(state.pending_queue.size()) + " ") |
+                    bold | color(Color::White) | bgcolor(Color::RGB(128, 96, 0)));
             }
             prompt_line = hbox(std::move(prompt_parts));
         }
@@ -5456,12 +5608,18 @@ static int run_interactive_app(const CliOptions& cli,
             ? Color::Red
             : Color::GrayLight;
 
-        Element header_separator = conhost_compat_layout
-            ? compat_horizontal_line()
-            : separatorHeavy();
+        Element header_separator = hide_regular_sidebar_banner
+            ? emptyElement()
+            : (conhost_compat_layout ? compat_horizontal_line() : separatorHeavy());
         Element prompt_separator = conhost_compat_layout
             ? compat_horizontal_line()
             : separatorLight();
+        const int pending_queue_width = current_message_width > 0
+            ? current_message_width
+            : std::max(20, terminal_width -
+                (show_regular_sidebar ? kRegularSidebarWidthCols + 6 : 4));
+        Element pending_queue_element =
+            render_pending_queue_block(state, pending_queue_width);
 
         Element main_root = vbox({
             header,
@@ -5474,6 +5632,7 @@ static int run_interactive_app(const CliOptions& cli,
             confirm_overlay_element,
             slash_dropdown_element,
             thinking_element,
+            pending_queue_element,
             prompt_separator | color(Color::GrayDark),
             prompt_line,
             bottom_bar,

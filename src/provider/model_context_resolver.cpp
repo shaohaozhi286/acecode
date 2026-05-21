@@ -2,6 +2,7 @@
 
 #include "../network/proxy_resolver.hpp"
 #include "../utils/logger.hpp"
+#include "../codex/codex_model_catalog.hpp"
 #include "models_dev_registry.hpp"
 
 #include <cpr/cpr.h>
@@ -290,6 +291,16 @@ int cached_or_local_context(const AppConfig& config,
     const std::string key = context_cache_key(config, provider_name, model);
     if (int context = cached_context(key); context > 0) {
         return context;
+    }
+
+    const std::string normalized_provider = to_lower_copy(
+        provider_name.empty() ? config.provider : provider_name);
+    if (normalized_provider == "codex") {
+        int context = codex::context_window_for_model(model);
+        if (context > 0) {
+            remember_context(key, context);
+            return context;
+        }
     }
 
     const std::string models_dev_provider = detect_models_dev_provider(config, provider_name);

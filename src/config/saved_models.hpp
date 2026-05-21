@@ -14,8 +14,8 @@ namespace acecode {
 // (例如 `(session:XXXX)`);user-defined name MUST NOT 以 `(` 开头。
 struct ModelProfile {
     std::string name;
-    std::string provider;  // "openai" | "copilot"
-    std::string base_url;  // openai 必填;copilot 忽略
+    std::string provider;  // "openai" | "copilot" | "codex"
+    std::string base_url;  // openai 必填;copilot/codex 忽略
     std::string api_key;   // openai 必填
     std::string model;     // 模型标识,必填
     std::optional<std::string> models_dev_provider_id;  // 可选,给 context resolver 的 hint
@@ -38,6 +38,7 @@ std::optional<std::vector<ModelProfile>> parse_saved_models(const nlohmann::json
 //  - 列表内 name 唯一(大小写敏感比较)
 //  - provider == "openai" 时 base_url / api_key 必须非空(api_key 允许为"<空字符串>"
 //    用于 local LM Studio 等无认证的场景 —— TODO 若后续严格化可改)
+//  - provider == "copilot" 或 "codex" 时只要求 model 非空
 //  - 若 default_name 非空,MUST 指向列表中某 entry 的 name
 bool validate_saved_models(const std::vector<ModelProfile>& entries,
                            const std::string& default_name,

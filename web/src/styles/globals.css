@@ -1222,6 +1222,43 @@ body {
   background: transparent;
 }
 .ace-file-row:hover { background: var(--ace-surface-hi); }
+.ace-file-row[data-review-status="M"] {
+  color: var(--ace-warn);
+  font-weight: 700;
+}
+.ace-file-row[data-review-status="U"] {
+  color: var(--ace-ok);
+  font-weight: 700;
+}
+.ace-file-row[data-review-status="D"] {
+  color: var(--ace-danger);
+  font-weight: 700;
+}
+.ace-file-name {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.ace-file-row[data-review-status] .ace-file-name {
+  color: inherit;
+  font-weight: 700;
+}
+.ace-file-row[data-review-status="D"] .ace-file-name {
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+.ace-file-status-badge {
+  flex: 0 0 20px;
+  width: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: auto;
+  color: inherit;
+  font-size: 14px;
+  line-height: 1;
+  font-weight: 900;
+  letter-spacing: 0;
+}
 
 /* 预览区 — hljs pre 撑满 */
 .ace-side-preview-code {

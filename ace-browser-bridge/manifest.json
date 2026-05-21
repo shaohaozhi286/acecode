@@ -1,18 +1,37 @@
 {
   "manifest_version": 3,
   "name": "ACE Browser Bridge",
-  "description": "Prototype browser bridge for ACECode. Opens a virtual cursor overlay in the current tab.",
+  "description": "ACECode browser bridge plugin for managed tabs, snapshots, pointer actions, screenshots, PDF, and network capture.",
   "version": "0.1.0",
   "action": {
     "default_title": "ACE Browser Bridge",
     "default_popup": "popup.html"
   },
+  "background": {
+    "service_worker": "service_worker.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content/virtual-cursor.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
   "permissions": [
     "activeTab",
+    "alarms",
+    "debugger",
     "scripting",
+    "storage",
+    "tabGroups",
     "tabs"
   ],
   "host_permissions": [
+    "http://127.0.0.1:52007/*",
     "<all_urls>"
   ]
 }

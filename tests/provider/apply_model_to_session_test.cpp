@@ -93,3 +93,29 @@ TEST(ApplyModelToSession, SwapsProviderAndPopulatesState) {
         EXPECT_EQ(slot.provider->model(), "gpt-4o-mini");
     }
 }
+
+// 场景:切换到 codex saved model → 只构造 CodexProvider,不触碰 Codex token。
+TEST(ApplyModelToSession, SwapsToCodexProvider) {
+    auto cfg = make_copilot_cfg();
+    SessionEntry::ProviderSlot slot;
+    ModelProfile profile;
+    profile.name = "codex";
+    profile.provider = "codex";
+    profile.model = "gpt-5.5";
+    ApplyModelDeps deps;
+    deps.cfg = &cfg;
+    deps.provider_slot = &slot;
+
+    auto result = apply_model_to_session(profile, deps);
+
+    EXPECT_EQ(result.state.name, "codex");
+    EXPECT_EQ(result.state.provider, "codex");
+    EXPECT_EQ(result.state.model, "gpt-5.5");
+    EXPECT_EQ(result.state.context_window, 272000);
+    {
+        std::lock_guard<std::mutex> lk(slot.mu);
+        ASSERT_TRUE(slot.provider);
+        EXPECT_EQ(slot.provider->name(), "codex");
+        EXPECT_EQ(slot.provider->model(), "gpt-5.5");
+    }
+}

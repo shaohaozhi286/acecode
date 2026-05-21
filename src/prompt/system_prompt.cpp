@@ -97,6 +97,18 @@ static std::string generate_tools_prompt(const ToolExecutor& tools) {
     return oss.str();
 }
 
+static std::string browser_tools_guidance(const ToolExecutor& tools) {
+    if (!tools.has_tool("browser_status")) return "";
+    std::ostringstream oss;
+    oss << "# Browser Tools\n\n"
+        << "- Use the built-in `browser_*` tools as the primary path for ACE browser automation.\n"
+        << "- Start with `browser_status`; then use `browser_open` or `browser_find_tab` to select a page.\n"
+        << "- Call `browser_read_page` before interacting with a page, and prefer the returned `@e` refs over hand-written CSS selectors.\n"
+        << "- In progressive mode, call `browser_enable` only when you need extra groups such as interaction, pointer, capture, network, diagnostics, or advanced.\n"
+        << "- Use `browser_wait` after navigation or clicks when the page may still be loading or changing.\n\n";
+    return oss.str();
+}
+
 std::string build_system_prompt(const ToolExecutor& tools, const std::string& cwd,
                                 const SkillRegistry* skills,
                                 const MemoryRegistry* memory,
@@ -169,6 +181,8 @@ std::string build_system_prompt(const ToolExecutor& tools, const std::string& cw
         << "These commands are executed directly and their output is appended to the conversation "
         << "as a `<bash-input>` / `<bash-stdout>` / `<bash-stderr>` / `<bash-exit-code>` block under the `user` role.\n"
         << "- When you see such a block, treat it as a result the user has already obtained. Do NOT re-run the same command; use the output to answer or plan the next step.\n\n";
+
+    oss << browser_tools_guidance(tools);
 
     oss << generate_tools_prompt(tools);
 

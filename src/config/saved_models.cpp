@@ -9,6 +9,10 @@ namespace acecode {
 
 namespace {
 
+bool is_supported_provider(const std::string& provider) {
+    return provider == "openai" || provider == "copilot" || provider == "codex";
+}
+
 // 单条 entry 解析。失败时把错误塞进 err(已带 entry 索引/name 上下文)并返回 nullopt。
 std::optional<ModelProfile> parse_one_entry(const nlohmann::json& node, std::size_t idx,
                                           std::string& err) {
@@ -40,11 +44,11 @@ std::optional<ModelProfile> parse_one_entry(const nlohmann::json& node, std::siz
         err = oss.str();
         return std::nullopt;
     }
-    if (e.provider != "openai" && e.provider != "copilot") {
+    if (!is_supported_provider(e.provider)) {
         std::ostringstream oss;
         oss << "saved_models[" << idx << "] (name='" << e.name
             << "') has unknown provider '" << e.provider
-            << "' (expected 'openai' or 'copilot')";
+            << "' (expected 'openai', 'copilot', or 'codex')";
         err = oss.str();
         return std::nullopt;
     }
@@ -56,7 +60,7 @@ std::optional<ModelProfile> parse_one_entry(const nlohmann::json& node, std::siz
         return std::nullopt;
     }
 
-    // base_url / api_key:openai 必填;copilot 忽略(允许字段缺失或为空)。
+    // base_url / api_key:openai 必填;copilot/codex 忽略(允许字段缺失或为空)。
     get_str("base_url", e.base_url);
     get_str("api_key", e.api_key);
 
@@ -132,7 +136,7 @@ bool validate_saved_models(const std::vector<ModelProfile>& entries,
                 return false;
             }
         }
-        // copilot:不需要 base_url / api_key,model 已在 parse 阶段检验非空。
+        // copilot/codex:不需要 base_url / api_key,model 已在 parse 阶段检验非空。
     }
 
     if (!default_name.empty()) {

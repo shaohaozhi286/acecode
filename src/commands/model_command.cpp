@@ -344,6 +344,7 @@ void cmd_model(CommandContext& ctx, const std::string& args) {
         ctx.state.conversation.push_back({"system",
             "Usage: /model | /model <name> | /model --cwd <name> | /model --default <name>\n"
             "       /model add name=X provider=openai model=Y base_url=Z api_key=K\n"
+            "       /model add name=codex provider=codex model=gpt-5.5\n"
             "       /model edit <name> [field=value ...]\n"
             "       /model rm <name>\n"
             "       /model set-default <name>",

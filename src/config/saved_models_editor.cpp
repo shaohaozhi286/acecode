@@ -26,7 +26,7 @@ namespace {
 SavedModelEditError validate_draft_basic(const SavedModelDraft& d) {
     if (d.name.empty()) return SavedModelEditError::INVALID_NAME;
     if (d.name.front() == '(') return SavedModelEditError::RESERVED_NAME;
-    if (d.provider != "openai" && d.provider != "copilot")
+    if (d.provider != "openai" && d.provider != "copilot" && d.provider != "codex")
         return SavedModelEditError::UNKNOWN_PROVIDER;
     if (d.model.empty()) return SavedModelEditError::MISSING_MODEL;
     if (d.provider == "openai") {

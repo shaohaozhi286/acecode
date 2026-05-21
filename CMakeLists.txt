@@ -158,6 +158,8 @@ set(ACECODE_TESTABLE_TUI_SOURCES
     ${CMAKE_SOURCE_DIR}/src/tui/paste_handler.cpp
     ${CMAKE_SOURCE_DIR}/src/tui/confirm_question.cpp
     ${CMAKE_SOURCE_DIR}/src/tui/model_picker.cpp
+    ${CMAKE_SOURCE_DIR}/src/tui/input_history_navigation.cpp
+    ${CMAKE_SOURCE_DIR}/src/tui/sidebar_model.cpp
 )
 list(APPEND ACECODE_TESTABLE_SOURCES ${ACECODE_TESTABLE_TUI_SOURCES})
 list(REMOVE_ITEM ACECODE_TUI_SOURCES ${ACECODE_TESTABLE_TUI_SOURCES})
@@ -249,6 +251,8 @@ source_group("generated" FILES
 if(BUILD_TESTING)
     add_subdirectory(tests)
 endif()
+
+add_subdirectory(ace-browser-cli)
 
 # desktop shell 子目标(opt-in,默认 OFF)。include 后只有当 ACECODE_BUILD_DESKTOP=ON
 # 才会真添加 acecode-desktop 这个 target,否则文件本身做无操作 return。

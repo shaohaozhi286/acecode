@@ -121,6 +121,39 @@ TEST(SavedModelsTest, CopilotEntryWithoutBaseUrlPasses) {
     EXPECT_TRUE(validate_saved_models(entries, "copilot-fast", err)) << err;
 }
 
+// 额外 — codex entry 与 copilot 一样不需要 base_url / api_key。
+TEST(SavedModelsTest, CodexEntryWithoutBaseUrlPasses) {
+    nlohmann::json j = nlohmann::json::array();
+    j.push_back({
+        {"name", "codex"},
+        {"provider", "codex"},
+        {"model", "gpt-5.5"}
+    });
+
+    std::string err;
+    auto parsed = parse_saved_models(j, err);
+    ASSERT_TRUE(parsed.has_value()) << err;
+    ASSERT_EQ(parsed->size(), 1u);
+    EXPECT_EQ((*parsed)[0].provider, "codex");
+
+    err.clear();
+    EXPECT_TRUE(validate_saved_models(*parsed, "codex", err)) << err;
+}
+
+// 额外 — codex entry 缺 model 仍然在 parse 阶段拒绝。
+TEST(SavedModelsTest, CodexEntryMissingModelFails) {
+    nlohmann::json j = nlohmann::json::array();
+    j.push_back({
+        {"name", "codex"},
+        {"provider", "codex"}
+    });
+
+    std::string err;
+    auto parsed = parse_saved_models(j, err);
+    EXPECT_FALSE(parsed.has_value());
+    EXPECT_NE(err.find("model"), std::string::npos) << err;
+}
+
 // 额外 — parse_saved_models 拒绝非数组的输入。
 TEST(SavedModelsTest, ParseRejectsNonArray) {
     nlohmann::json j = nlohmann::json::object();

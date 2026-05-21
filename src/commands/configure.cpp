@@ -1,6 +1,8 @@
 #include "configure.hpp"
 #include "configure_catalog.hpp"
 #include "configure_picker.hpp"
+#include "codex/codex_app_server_client.hpp"
+#include "codex/codex_model_catalog.hpp"
 #include "config/config.hpp"
 #include "auth/github_auth.hpp"
 #include "network/proxy_resolver.hpp"
@@ -13,6 +15,9 @@
 #include <sstream>
 #include <vector>
 #include <algorithm>
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include <cpr/cpr.h>
 #include <cpr/ssl_options.h>
 #include <nlohmann/json.hpp>
@@ -29,6 +34,7 @@ static std::string mask_key(const std::string& key) {
 }
 
 static std::string configured_saved_model_name(const AppConfig& cfg) {
+    if (cfg.provider == "codex") return "codex";
     if (cfg.provider == "copilot") return "copilot";
     if (cfg.openai.models_dev_provider_id.has_value() &&
         !cfg.openai.models_dev_provider_id->empty()) {
@@ -46,6 +52,9 @@ static ModelProfile configured_profile_from_current_fields(const AppConfig& cfg)
         profile.api_key = cfg.openai.api_key;
         profile.model = cfg.openai.model;
         profile.models_dev_provider_id = cfg.openai.models_dev_provider_id;
+    } else if (cfg.provider == "codex") {
+        profile.provider = "codex";
+        profile.model = cfg.codex.model;
     } else {
         profile.provider = "copilot";
         profile.model = cfg.copilot.model;
@@ -233,6 +242,175 @@ static void configure_copilot(AppConfig& cfg) {
     }
 }
 
+static std::string codex_account_label(const codex::AccountInfo& account) {
+    if (!account.present) return "(not logged in)";
+    std::ostringstream oss;
+    oss << account.type;
+    if (!account.email.empty()) oss << " " << account.email;
+    if (!account.plan_type.empty()) oss << " (" << account.plan_type << ")";
+    return oss.str();
+}
+
+static bool wait_for_codex_login(codex::AppServerClient& client,
+                                 const std::string& login_id) {
+    std::mutex mu;
+    std::condition_variable cv;
+    bool done = false;
+
+    client.set_notification_handler(
+        [&](const std::string& method, const nlohmann::json& params) {
+            if (method != "account/login/completed") return;
+            if (!login_id.empty() && params.contains("loginId") &&
+                params["loginId"].is_string() &&
+                params["loginId"].get<std::string>() != login_id) {
+                return;
+            }
+            {
+                std::lock_guard<std::mutex> lk(mu);
+                done = true;
+            }
+            cv.notify_all();
+        });
+
+    std::unique_lock<std::mutex> lk(mu);
+    for (int elapsed = 0; elapsed < 600; ++elapsed) {
+        if (cv.wait_for(lk, std::chrono::seconds(1), [&] { return done; })) {
+            return true;
+        }
+        if ((elapsed + 1) % 10 == 0) {
+            std::cout << "  Waiting for Codex login..." << std::endl;
+        }
+    }
+    return false;
+}
+
+static void configure_codex(AppConfig& cfg) {
+    std::cout << "\n--- Codex Configuration ---\n" << std::endl;
+
+    codex::AppServerClient client;
+    std::string error;
+    if (!client.start(&error) || !client.initialize(&error)) {
+        std::cerr << "Error: Failed to start `codex app-server`: "
+                  << error << std::endl;
+        std::cerr << "Install or update the official Codex CLI, then retry."
+                  << std::endl;
+        return;
+    }
+
+    auto account = client.read_account(false, &error);
+    if (!account.has_value()) {
+        std::cerr << "Warning: Codex account check failed: " << error << std::endl;
+    } else if (account->present) {
+        std::cout << "Codex authentication: "
+                  << codex_account_label(*account) << std::endl;
+        if (read_confirm("Re-authenticate?", false)) {
+            account->present = false;
+        }
+    } else {
+        std::cout << "Codex authentication required." << std::endl;
+    }
+
+    if (!account.has_value() || !account->present) {
+        std::cout << "\nStarting Codex ChatGPT device login..." << std::endl;
+        auto login = client.start_device_login(&error);
+        if (!login.has_value()) {
+            std::cerr << "Error: Failed to start Codex login: "
+                      << error << std::endl;
+            return;
+        }
+
+        std::string url = !login->verification_url.empty()
+            ? login->verification_url
+            : login->auth_url;
+        std::cout << "\n  Please open: " << url << std::endl;
+        if (!login->user_code.empty()) {
+            std::cout << "  Enter code:  " << login->user_code << std::endl;
+        }
+        std::cout << std::endl;
+
+        if (!wait_for_codex_login(client, login->login_id)) {
+            std::cerr << "Authentication timed out." << std::endl;
+            return;
+        }
+
+        account = client.read_account(true, &error);
+        if (!account.has_value() || !account->present) {
+            std::cerr << "Authentication did not produce a Codex account.";
+            if (!error.empty()) std::cerr << " " << error;
+            std::cerr << std::endl;
+            return;
+        }
+        std::cout << "Authentication successful: "
+                  << codex_account_label(*account) << std::endl;
+    }
+
+    std::cout << "\nFetching available Codex models..." << std::endl;
+    auto models = client.list_models(false, &error);
+    if (!models.empty()) {
+        std::vector<PickerItem> items;
+        std::vector<std::string> ids;
+        items.reserve(models.size());
+        ids.reserve(models.size());
+        std::size_t default_index = 0;
+        for (std::size_t i = 0; i < models.size(); ++i) {
+            const auto& m = models[i];
+            PickerItem item;
+            item.label = m.id;
+            std::ostringstream secondary;
+            bool has_secondary = false;
+            if (!m.display_name.empty() && m.display_name != m.id) {
+                secondary << m.display_name;
+                has_secondary = true;
+            }
+            if (!m.description.empty()) {
+                if (has_secondary) secondary << "  ";
+                secondary << m.description;
+                has_secondary = true;
+            }
+            int context = codex::context_window_for_model(m.id);
+            if (context > 0) {
+                if (has_secondary) secondary << "  ";
+                secondary << "ctx=" << format_context(context);
+                has_secondary = true;
+            }
+            if (m.is_default) {
+                if (has_secondary) secondary << "  ";
+                secondary << "default";
+            }
+            item.secondary = secondary.str();
+            items.push_back(std::move(item));
+            ids.push_back(m.id);
+            if (m.id == cfg.codex.model || (cfg.codex.model.empty() && m.is_default)) {
+                default_index = i;
+            }
+        }
+
+        PickerOptions opts;
+        opts.title = "Select a Codex model";
+        opts.page_size = 30;
+        opts.allow_custom = true;
+        opts.default_index = default_index;
+
+        PickerResult r = run_ftxui_picker(items, opts);
+        if (r.cancelled) {
+            std::cout << "Model selection cancelled - keeping: "
+                      << cfg.codex.model << "\n";
+        } else if (r.custom) {
+            cfg.codex.model = read_line("Custom model id", cfg.codex.model);
+        } else {
+            cfg.codex.model = ids[r.index];
+        }
+    } else {
+        std::cerr << "Warning: Could not fetch Codex model list";
+        if (!error.empty()) std::cerr << ": " << error;
+        std::cerr << std::endl;
+        cfg.codex.model = read_line("Model", cfg.codex.model);
+    }
+
+    cfg.provider = "codex";
+    cfg.openai.models_dev_provider_id.reset();
+}
+
 static void configure_openai(AppConfig& cfg) {
     std::cout << "\n--- OpenAI Compatible Configuration ---\n" << std::endl;
 
@@ -290,13 +468,16 @@ int run_configure(const AppConfig& current_config) {
     bool catalog_ready = !compat_providers.empty();
 
     int default_provider = 0;
-    if (cfg.provider == "openai") {
-        default_provider = (cfg.openai.models_dev_provider_id.has_value() && catalog_ready) ? 1 : 2;
+    if (cfg.provider == "codex") {
+        default_provider = 1;
+    } else if (cfg.provider == "openai") {
+        default_provider = (cfg.openai.models_dev_provider_id.has_value() && catalog_ready) ? 2 : 3;
     }
 
     while (true) {
         std::vector<std::string> options = {
             "Copilot (GitHub)",
+            "Codex (ChatGPT)",
             catalog_ready ? ("Browse models.dev catalog (" +
                              std::to_string(compat_providers.size()) + " providers)")
                           : "Browse models.dev catalog (unavailable: no bundled snapshot found)",
@@ -313,6 +494,10 @@ int run_configure(const AppConfig& current_config) {
             break;
         }
         if (choice == 1) {
+            configure_codex(cfg);
+            break;
+        }
+        if (choice == 2) {
             if (!catalog_ready) {
                 std::cout << "Catalog unavailable; please pick another option.\n";
                 continue;
@@ -335,6 +520,8 @@ int run_configure(const AppConfig& current_config) {
     std::cout << "  Provider: " << cfg.provider << std::endl;
     if (cfg.provider == "copilot") {
         std::cout << "  Model:    " << cfg.copilot.model << std::endl;
+    } else if (cfg.provider == "codex") {
+        std::cout << "  Model:    " << cfg.codex.model << std::endl;
     } else {
         std::cout << "  Base URL: " << cfg.openai.base_url << std::endl;
         std::cout << "  API Key:  " << mask_key(cfg.openai.api_key) << std::endl;
@@ -350,7 +537,9 @@ int run_configure(const AppConfig& current_config) {
     if (read_confirm("Save configuration?", true)) {
         save_config(cfg);
         LOG_INFO(std::string("configure: saved (") + format_source_line(cfg) +
-                 ", model=" + (cfg.provider == "copilot" ? cfg.copilot.model : cfg.openai.model) + ")");
+                 ", model=" + (cfg.provider == "copilot"
+                     ? cfg.copilot.model
+                     : (cfg.provider == "codex" ? cfg.codex.model : cfg.openai.model)) + ")");
         std::cout << "Configuration saved!" << std::endl;
     } else {
         std::cout << "Configuration cancelled." << std::endl;

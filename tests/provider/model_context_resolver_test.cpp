@@ -119,3 +119,18 @@ TEST(ModelContextResolver, NonblockingFallsBackWithoutEndpointProbe) {
 
     EXPECT_EQ(got, 77777);
 }
+
+// 场景:Codex provider 使用 Codex CLI 模型 catalog 的运行上下文,不回退到全局 128k。
+TEST(ModelContextResolver, NonblockingUsesCodexModelContext) {
+    acecode::reset_model_context_window_cache_for_test();
+    acecode::AppConfig cfg;
+    cfg.provider = "codex";
+    cfg.context_window = 128000;
+
+    EXPECT_EQ(acecode::resolve_model_context_window_nonblocking(
+                  cfg, "codex", "gpt-5.5", cfg.context_window),
+              272000);
+    EXPECT_EQ(acecode::resolve_model_context_window_nonblocking(
+                  cfg, "codex", "gpt-5.3-codex-spark", cfg.context_window),
+              128000);
+}

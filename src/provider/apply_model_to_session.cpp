@@ -26,6 +26,8 @@ AppConfig config_for_profile_context(const AppConfig& cfg,
         c.openai.api_key = profile.api_key;
         c.openai.model = profile.model;
         c.openai.models_dev_provider_id = profile.models_dev_provider_id;
+    } else if (profile.provider == "codex") {
+        c.codex.model = profile.model;
     } else {
         c.copilot.model = profile.model;
     }

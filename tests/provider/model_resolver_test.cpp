@@ -97,6 +97,20 @@ TEST(ModelResolverTest, EmptyConfigUsesLegacyOpenAiFields) {
     EXPECT_EQ(got.model, "local-model");
 }
 
+// 额外 — saved_models 为空但旧 codex 字段可用时,构造 codex 临时 profile。
+TEST(ModelResolverTest, EmptyConfigUsesLegacyCodexFields) {
+    AppConfig cfg;
+    cfg.provider = "codex";
+    cfg.codex.model = "gpt-5.5";
+
+    ModelProfile got = resolve_effective_model(cfg, std::nullopt, std::nullopt);
+    EXPECT_EQ(got.name, "codex");
+    EXPECT_EQ(got.provider, "codex");
+    EXPECT_EQ(got.model, "gpt-5.5");
+    EXPECT_TRUE(got.base_url.empty());
+    EXPECT_TRUE(got.api_key.empty());
+}
+
 // 7.13 — cwd override 指向已删 entry(saved_models 中不存在该 name)→
 // resolver 不抛,降级到 default。
 TEST(ModelResolverTest, MissingCwdOverrideFallsBack) {

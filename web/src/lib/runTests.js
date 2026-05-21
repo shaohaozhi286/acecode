@@ -39,6 +39,7 @@ import './errors.test.js';
 import './modelPicker.test.js';
 import './modelManager.test.js';
 import './fileTreeRefresh.test.js';
+import './fileTreeChangeStatus.test.js';
 import './assistantRunDirectives.test.js';
 import './assistantAvatarDisplay.test.js';
 import './transcriptProjection.test.js';

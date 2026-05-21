@@ -119,11 +119,14 @@ TEST(ConfigureCatalog, FormatModelSummary) {
     EXPECT_NE(s.find("knowledge:     2025-02-28"), std::string::npos);
 }
 
-// 场景：format_source_line 区分 copilot / catalog / custom。
+// 场景：format_source_line 区分 copilot / codex / catalog / custom。
 TEST(ConfigureCatalog, FormatSourceLineThreeStates) {
     AppConfig cfg;
     cfg.provider = "copilot";
     EXPECT_EQ(format_source_line(cfg), "copilot");
+
+    cfg.provider = "codex";
+    EXPECT_EQ(format_source_line(cfg), "codex");
 
     cfg.provider = "openai";
     cfg.openai.models_dev_provider_id.reset();

@@ -12,10 +12,12 @@
 #include <atomic>
 #include <optional>
 #include <utility>
+#include <mutex>
 
 namespace acecode {
 
 class SessionManager;
+class ToolExecutor;
 
 // Structured summary used by the TUI to render a single-line tool-result row
 // (icon + verb + object + dot-separated metrics). Unset on tools that have not
@@ -86,6 +88,11 @@ struct ToolContext {
     std::function<void()> account_goal_usage;
     std::function<void(const nlohmann::json& goal_payload)> emit_goal_updated;
     std::function<void(const std::string& session_id)> emit_goal_cleared;
+
+    // Runtime access to the active executor. Tools that intentionally change
+    // the available tool set, such as browser_enable, use this to register
+    // additional tools for the next model request.
+    ToolExecutor* tool_executor = nullptr;
 };
 
 // Origin of a registered tool. MCP tools are grouped separately in the system
@@ -151,6 +158,7 @@ public:
 
 private:
     std::map<std::string, ToolImpl> tools_;
+    mutable std::mutex tools_mu_;
 };
 
 } // namespace acecode

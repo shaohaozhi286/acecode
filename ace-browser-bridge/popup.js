@@ -1,6 +1,10 @@
 const statusEl = document.getElementById("status");
+const daemonEl = document.getElementById("daemon");
+const pluginEl = document.getElementById("plugin");
 const startButton = document.getElementById("start");
 const stopButton = document.getElementById("stop");
+const reconnectButton = document.getElementById("reconnect");
+const releaseButton = document.getElementById("release");
 
 function setStatus(message) {
   statusEl.textContent = message;
@@ -27,11 +31,28 @@ async function ensureCursorScript(tabId) {
 async function sendCursorCommand(command) {
   const tab = await getActiveTab();
   await ensureCursorScript(tab.id);
-  const response = await chrome.tabs.sendMessage(tab.id, {
+  return chrome.tabs.sendMessage(tab.id, {
     source: "ace-browser-bridge",
     command
   });
-  return response;
+}
+
+async function sendWorkerCommand(command) {
+  return chrome.runtime.sendMessage({
+    source: "ace-browser-bridge",
+    command
+  });
+}
+
+async function refreshStatus() {
+  const response = await sendWorkerCommand("get_status");
+  if (!response?.ok) {
+    throw new Error(response?.error || "Cannot read plugin status.");
+  }
+  const data = response.data;
+  daemonEl.textContent = `127.0.0.1:${data.port || 52007}`;
+  pluginEl.textContent = `v${data.extensionVersion || chrome.runtime.getManifest().version}`;
+  setStatus(data.connected ? "Connected to ace-browser-cli." : (data.lastError || "Daemon is not connected."));
 }
 
 async function run(command) {
@@ -53,5 +74,30 @@ async function run(command) {
 
 startButton.addEventListener("click", () => run("start"));
 stopButton.addEventListener("click", () => run("stop"));
+reconnectButton.addEventListener("click", async () => {
+  reconnectButton.disabled = true;
+  try {
+    await sendWorkerCommand("reconnect");
+    await refreshStatus();
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error));
+  } finally {
+    reconnectButton.disabled = false;
+  }
+});
+releaseButton.addEventListener("click", async () => {
+  releaseButton.disabled = true;
+  try {
+    const response = await sendWorkerCommand("release");
+    if (!response?.ok) throw new Error(response?.error || "Release failed.");
+    setStatus("Page control released.");
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error));
+  } finally {
+    releaseButton.disabled = false;
+  }
+});
 
-run("start");
+refreshStatus().catch((error) => {
+  setStatus(error instanceof Error ? error.message : String(error));
+});

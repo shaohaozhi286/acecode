@@ -133,4 +133,29 @@ TEST_F(ConfigFirstInitTest, OldSchemaConfigSynthesizesCopilotSavedModel) {
     EXPECT_EQ(cfg.default_model_name, "copilot");
 }
 
+TEST_F(ConfigFirstInitTest, OldSchemaConfigSynthesizesCodexSavedModel) {
+    fs::create_directories(temp_home / ".acecode");
+    {
+        std::ofstream ofs(temp_home / ".acecode" / "config.json");
+        ofs << R"({
+    "provider": "codex",
+    "codex": { "model": "gpt-5.5" },
+    "copilot": { "model": "gpt-4o" },
+    "openai": {
+        "base_url": "http://localhost:1234/v1",
+        "api_key": "",
+        "model": "local-model"
+    }
+})";
+    }
+
+    auto cfg = acecode::load_config();
+
+    ASSERT_EQ(cfg.saved_models.size(), 1u);
+    EXPECT_EQ(cfg.saved_models[0].name, "codex");
+    EXPECT_EQ(cfg.saved_models[0].provider, "codex");
+    EXPECT_EQ(cfg.saved_models[0].model, "gpt-5.5");
+    EXPECT_EQ(cfg.default_model_name, "codex");
+}
+
 } // namespace

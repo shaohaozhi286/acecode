@@ -12,13 +12,28 @@
         <div class="mark" aria-hidden="true">A</div>
         <div>
           <h1>ACE Browser Bridge</h1>
-          <p id="status">Preparing cursor overlay...</p>
+          <p id="status">Checking daemon connection...</p>
         </div>
       </header>
 
+      <dl class="meta">
+        <div>
+          <dt>Daemon</dt>
+          <dd id="daemon">127.0.0.1:52007</dd>
+        </div>
+        <div>
+          <dt>Plugin</dt>
+          <dd id="plugin">v0.1.0</dd>
+        </div>
+      </dl>
+
       <div class="actions">
-        <button id="start" type="button">Start</button>
+        <button id="start" type="button">Start Cursor</button>
         <button id="stop" type="button" class="secondary">Stop</button>
+      </div>
+      <div class="actions">
+        <button id="reconnect" type="button">Reconnect</button>
+        <button id="release" type="button" class="secondary">Release</button>
       </div>
     </main>
 

@@ -11,6 +11,7 @@
 #include <fstream>
 #include <iostream>
 #include <filesystem>
+#include <initializer_list>
 
 namespace fs = std::filesystem;
 
@@ -32,7 +33,23 @@ std::string trim_ascii_copy(const std::string& s) {
     return s.substr(first, last - first);
 }
 
+bool is_one_of(const std::string& value, std::initializer_list<const char*> allowed) {
+    for (const char* item : allowed) {
+        if (value == item) return true;
+    }
+    return false;
+}
+
+[[noreturn]] void fatal_config_value(const std::string& message) {
+    std::cerr << "[config] fatal: " << message << std::endl;
+    LOG_ERROR("[config] " + message);
+    std::exit(1);
+}
+
 std::string legacy_model_profile_name(const AppConfig& cfg) {
+    if (cfg.provider == "codex") {
+        return "codex";
+    }
     if (cfg.provider == "openai") {
         if (cfg.openai.models_dev_provider_id.has_value() &&
             !cfg.openai.models_dev_provider_id->empty()) {
@@ -61,6 +78,14 @@ bool is_valid_upgrade_base_url(const std::string& raw) {
 ModelProfile legacy_model_profile_from_config(const AppConfig& cfg) {
     ModelProfile profile;
     profile.name = legacy_model_profile_name(cfg);
+    if (cfg.provider == "codex") {
+        CodexConfig defaults;
+        profile.provider = "codex";
+        profile.model = cfg.codex.model.empty()
+            ? defaults.model
+            : cfg.codex.model;
+        return profile;
+    }
     if (cfg.provider == "openai") {
         OpenAiConfig defaults;
         profile.provider = "openai";
@@ -130,6 +155,55 @@ std::vector<std::string> validate_config(const AppConfig& cfg) {
     if (cfg.project_instructions.max_total_bytes < cfg.project_instructions.max_bytes) {
         errors.push_back("project_instructions.max_total_bytes must be >= max_bytes");
     }
+    if (!is_one_of(cfg.ace_browser_bridge.tool_mode, {"progressive", "compact", "full"})) {
+        errors.push_back("ace_browser_bridge.tool_mode invalid: " +
+                         cfg.ace_browser_bridge.tool_mode);
+    }
+    if (!is_one_of(cfg.ace_browser_bridge.default_mode, {"auto", "dom", "cdp", "os"})) {
+        errors.push_back("ace_browser_bridge.default_mode invalid: " +
+                         cfg.ace_browser_bridge.default_mode);
+    }
+    if (!is_one_of(cfg.ace_browser_bridge.pointer_speed, {"fast", "normal", "slow", "custom"})) {
+        errors.push_back("ace_browser_bridge.pointer_speed invalid: " +
+                         cfg.ace_browser_bridge.pointer_speed);
+    }
+    const auto& pc = cfg.ace_browser_bridge.pointer_custom;
+    if (pc.move_duration_ms_min < 0 ||
+        pc.move_duration_ms_max < pc.move_duration_ms_min ||
+        pc.move_duration_ms_max > 10000) {
+        errors.push_back("ace_browser_bridge.pointer_custom move duration out of range");
+    }
+    if (pc.click_hold_ms_min < 0 ||
+        pc.click_hold_ms_max < pc.click_hold_ms_min ||
+        pc.click_hold_ms_max > 5000) {
+        errors.push_back("ace_browser_bridge.pointer_custom click hold out of range");
+    }
+    if (pc.typing_delay_ms_min < 0 ||
+        pc.typing_delay_ms_max < pc.typing_delay_ms_min ||
+        pc.typing_delay_ms_max > 5000) {
+        errors.push_back("ace_browser_bridge.pointer_custom typing delay out of range");
+    }
+    if (pc.jitter_px < 0.0 || pc.jitter_px > 50.0) {
+        errors.push_back("ace_browser_bridge.pointer_custom.jitter_px out of range");
+    }
+    if (pc.max_path_points < 2 || pc.max_path_points > 500) {
+        errors.push_back("ace_browser_bridge.pointer_custom.max_path_points out of range");
+    }
+    if (cfg.ace_browser_bridge.status_cache_ttl_ms < 0 ||
+        cfg.ace_browser_bridge.status_cache_ttl_ms > 10000) {
+        errors.push_back("ace_browser_bridge.status_cache_ttl_ms out of range (0-10000): " +
+                         std::to_string(cfg.ace_browser_bridge.status_cache_ttl_ms));
+    }
+    if (cfg.ace_browser_bridge.tool_timeout_ms < 1000 ||
+        cfg.ace_browser_bridge.tool_timeout_ms > 300000) {
+        errors.push_back("ace_browser_bridge.tool_timeout_ms out of range (1000-300000): " +
+                         std::to_string(cfg.ace_browser_bridge.tool_timeout_ms));
+    }
+    if (cfg.ace_browser_bridge.operation_overlay_watchdog_ms < 1000 ||
+        cfg.ace_browser_bridge.operation_overlay_watchdog_ms > 120000) {
+        errors.push_back("ace_browser_bridge.operation_overlay_watchdog_ms out of range (1000-120000): " +
+                         std::to_string(cfg.ace_browser_bridge.operation_overlay_watchdog_ms));
+    }
     if (!is_valid_upgrade_base_url(cfg.upgrade.base_url)) {
         errors.push_back("upgrade.base_url must be a non-empty http or https URL");
     }
@@ -157,6 +231,7 @@ static void write_default_config(const std::string& config_path) {
     j["openai"]["api_key"] = "";
     j["openai"]["model"] = "local-model";
     j["copilot"]["model"] = "gpt-4o";
+    j["codex"]["model"] = "gpt-5.5";
     j["saved_models"] = nlohmann::json::array({{
         {"name", "copilot"},
         {"provider", "copilot"},
@@ -180,7 +255,7 @@ static void synthesize_legacy_saved_model_if_needed(AppConfig& cfg) {
         cfg.saved_models = std::move(candidate);
         cfg.default_model_name = legacy.name;
         LOG_WARN("[config] saved_models missing; synthesized legacy model profile '" +
-                 legacy.name + "' from provider/openai/copilot fields");
+                 legacy.name + "' from provider/openai/copilot/codex fields");
         return;
     }
 
@@ -239,6 +314,11 @@ AppConfig load_config() {
                 auto& cj = j["copilot"];
                 if (cj.contains("model") && cj["model"].is_string())
                     cfg.copilot.model = cj["model"].get<std::string>();
+            }
+            if (j.contains("codex") && j["codex"].is_object()) {
+                auto& cj = j["codex"];
+                if (cj.contains("model") && cj["model"].is_string())
+                    cfg.codex.model = cj["model"].get<std::string>();
             }
             if (j.contains("context_window") && j["context_window"].is_number_integer()) {
                 cfg.context_window = j["context_window"].get<int>();
@@ -462,6 +542,143 @@ AppConfig load_config() {
                 }
             }
 
+            // Browser bridge tools. Canonical config key is ace_browser_bridge;
+            // accept ace-browser-bridge as a compatibility alias for docs/tools.
+            const nlohmann::json* abj_ptr = nullptr;
+            if (j.contains("ace_browser_bridge")) {
+                abj_ptr = &j["ace_browser_bridge"];
+            } else if (j.contains("ace-browser-bridge")) {
+                abj_ptr = &j["ace-browser-bridge"];
+            }
+            if (abj_ptr != nullptr) {
+                const auto& abj = *abj_ptr;
+                if (!abj.is_object()) {
+                    LOG_WARN("[config] 'ace_browser_bridge' must be an object, ignoring");
+                } else {
+                    if (abj.contains("enabled") && abj["enabled"].is_boolean())
+                        cfg.ace_browser_bridge.enabled = abj["enabled"].get<bool>();
+                    if (abj.contains("cli_path") && abj["cli_path"].is_string())
+                        cfg.ace_browser_bridge.cli_path = abj["cli_path"].get<std::string>();
+                    if (abj.contains("tool_mode") && abj["tool_mode"].is_string()) {
+                        std::string v = abj["tool_mode"].get<std::string>();
+                        if (!is_one_of(v, {"progressive", "compact", "full"})) {
+                            fatal_config_value("ace_browser_bridge.tool_mode='" + v +
+                                               "' invalid; expected one of: progressive, compact, full");
+                        }
+                        cfg.ace_browser_bridge.tool_mode = std::move(v);
+                    }
+                    if (abj.contains("default_mode") && abj["default_mode"].is_string()) {
+                        std::string v = abj["default_mode"].get<std::string>();
+                        if (!is_one_of(v, {"auto", "dom", "cdp", "os"})) {
+                            fatal_config_value("ace_browser_bridge.default_mode='" + v +
+                                               "' invalid; expected one of: auto, dom, cdp, os");
+                        }
+                        cfg.ace_browser_bridge.default_mode = std::move(v);
+                    }
+                    if (abj.contains("pointer_speed") && abj["pointer_speed"].is_string()) {
+                        std::string v = abj["pointer_speed"].get<std::string>();
+                        if (!is_one_of(v, {"fast", "normal", "slow", "custom"})) {
+                            fatal_config_value("ace_browser_bridge.pointer_speed='" + v +
+                                               "' invalid; expected one of: fast, normal, slow, custom");
+                        }
+                        cfg.ace_browser_bridge.pointer_speed = std::move(v);
+                    }
+                    if (abj.contains("status_cache_ttl_ms") &&
+                        abj["status_cache_ttl_ms"].is_number_integer()) {
+                        int v = abj["status_cache_ttl_ms"].get<int>();
+                        if (v < 0 || v > 10000) {
+                            fatal_config_value("ace_browser_bridge.status_cache_ttl_ms=" +
+                                               std::to_string(v) + " out of range (0..10000)");
+                        }
+                        cfg.ace_browser_bridge.status_cache_ttl_ms = v;
+                    }
+                    if (abj.contains("tool_timeout_ms") &&
+                        abj["tool_timeout_ms"].is_number_integer()) {
+                        int v = abj["tool_timeout_ms"].get<int>();
+                        if (v < 1000 || v > 300000) {
+                            fatal_config_value("ace_browser_bridge.tool_timeout_ms=" +
+                                               std::to_string(v) + " out of range (1000..300000)");
+                        }
+                        cfg.ace_browser_bridge.tool_timeout_ms = v;
+                    }
+                    if (abj.contains("os_pointer_enabled") &&
+                        abj["os_pointer_enabled"].is_boolean())
+                        cfg.ace_browser_bridge.os_pointer_enabled =
+                            abj["os_pointer_enabled"].get<bool>();
+                    if (abj.contains("tab_group_enabled") &&
+                        abj["tab_group_enabled"].is_boolean())
+                        cfg.ace_browser_bridge.tab_group_enabled =
+                            abj["tab_group_enabled"].get<bool>();
+                    if (abj.contains("operation_overlay_enabled") &&
+                        abj["operation_overlay_enabled"].is_boolean())
+                        cfg.ace_browser_bridge.operation_overlay_enabled =
+                            abj["operation_overlay_enabled"].get<bool>();
+                    if (abj.contains("operation_overlay_watchdog_ms") &&
+                        abj["operation_overlay_watchdog_ms"].is_number_integer()) {
+                        int v = abj["operation_overlay_watchdog_ms"].get<int>();
+                        if (v < 1000 || v > 120000) {
+                            fatal_config_value("ace_browser_bridge.operation_overlay_watchdog_ms=" +
+                                               std::to_string(v) + " out of range (1000..120000)");
+                        }
+                        cfg.ace_browser_bridge.operation_overlay_watchdog_ms = v;
+                    }
+                    if (abj.contains("pointer_custom")) {
+                        if (!abj["pointer_custom"].is_object()) {
+                            LOG_WARN("[config] 'ace_browser_bridge.pointer_custom' must be an object, ignoring");
+                        } else {
+                            const auto& pcj = abj["pointer_custom"];
+                            auto parse_int_range = [&](const char* key, int min_v, int max_v, int& out) {
+                                if (!pcj.contains(key) || !pcj[key].is_number_integer()) return;
+                                int v = pcj[key].get<int>();
+                                if (v < min_v || v > max_v) {
+                                    fatal_config_value(std::string("ace_browser_bridge.pointer_custom.") +
+                                                       key + "=" + std::to_string(v) +
+                                                       " out of range (" + std::to_string(min_v) +
+                                                       ".." + std::to_string(max_v) + ")");
+                                }
+                                out = v;
+                            };
+                            parse_int_range("move_duration_ms_min", 0, 10000,
+                                            cfg.ace_browser_bridge.pointer_custom.move_duration_ms_min);
+                            parse_int_range("move_duration_ms_max", 0, 10000,
+                                            cfg.ace_browser_bridge.pointer_custom.move_duration_ms_max);
+                            parse_int_range("click_hold_ms_min", 0, 5000,
+                                            cfg.ace_browser_bridge.pointer_custom.click_hold_ms_min);
+                            parse_int_range("click_hold_ms_max", 0, 5000,
+                                            cfg.ace_browser_bridge.pointer_custom.click_hold_ms_max);
+                            parse_int_range("typing_delay_ms_min", 0, 5000,
+                                            cfg.ace_browser_bridge.pointer_custom.typing_delay_ms_min);
+                            parse_int_range("typing_delay_ms_max", 0, 5000,
+                                            cfg.ace_browser_bridge.pointer_custom.typing_delay_ms_max);
+                            parse_int_range("max_path_points", 2, 500,
+                                            cfg.ace_browser_bridge.pointer_custom.max_path_points);
+                            if (pcj.contains("jitter_px") && pcj["jitter_px"].is_number()) {
+                                double v = pcj["jitter_px"].get<double>();
+                                if (v < 0.0 || v > 50.0) {
+                                    fatal_config_value("ace_browser_bridge.pointer_custom.jitter_px=" +
+                                                       std::to_string(v) +
+                                                       " out of range (0..50)");
+                                }
+                                cfg.ace_browser_bridge.pointer_custom.jitter_px = v;
+                            }
+                            const auto& pc = cfg.ace_browser_bridge.pointer_custom;
+                            if (pc.move_duration_ms_max < pc.move_duration_ms_min) {
+                                fatal_config_value("ace_browser_bridge.pointer_custom move_duration_ms_max "
+                                                   "must be >= move_duration_ms_min");
+                            }
+                            if (pc.click_hold_ms_max < pc.click_hold_ms_min) {
+                                fatal_config_value("ace_browser_bridge.pointer_custom click_hold_ms_max "
+                                                   "must be >= click_hold_ms_min");
+                            }
+                            if (pc.typing_delay_ms_max < pc.typing_delay_ms_min) {
+                                fatal_config_value("ace_browser_bridge.pointer_custom typing_delay_ms_max "
+                                                   "must be >= typing_delay_ms_min");
+                            }
+                        }
+                    }
+                }
+            }
+
             // TUI 渲染策略段。不存在时保持 TuiConfig 默认值(alt_screen_mode="auto")。
             // 非对象类型 + 非法字符串值都规范化到 "auto",启动不阻断。
             if (j.contains("tui")) {
@@ -663,6 +880,8 @@ AppConfig load_config() {
     if (getenv_utf8("ACECODE_MODEL", env)) {
         if (cfg.provider == "openai") {
             cfg.openai.model = env;
+        } else if (cfg.provider == "codex") {
+            cfg.codex.model = env;
         } else {
             cfg.copilot.model = env;
         }
@@ -713,6 +932,7 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
         j["openai"]["models_dev_provider_id"] = *cfg.openai.models_dev_provider_id;
     }
     j["copilot"]["model"] = cfg.copilot.model;
+    j["codex"]["model"] = cfg.codex.model;
     j["context_window"] = cfg.context_window;
     j["max_sessions"] = cfg.max_sessions;
 
@@ -868,6 +1088,55 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
         if (cfg.web_search.timeout_ms != ws_d.timeout_ms)
             wsj["timeout_ms"] = cfg.web_search.timeout_ms;
         if (!wsj.empty()) j["web_search"] = wsj;
+
+        AceBrowserBridgeConfig ab_d;
+        nlohmann::json abj = nlohmann::json::object();
+        if (cfg.ace_browser_bridge.enabled != ab_d.enabled)
+            abj["enabled"] = cfg.ace_browser_bridge.enabled;
+        if (cfg.ace_browser_bridge.cli_path != ab_d.cli_path)
+            abj["cli_path"] = cfg.ace_browser_bridge.cli_path;
+        if (cfg.ace_browser_bridge.tool_mode != ab_d.tool_mode)
+            abj["tool_mode"] = cfg.ace_browser_bridge.tool_mode;
+        if (cfg.ace_browser_bridge.default_mode != ab_d.default_mode)
+            abj["default_mode"] = cfg.ace_browser_bridge.default_mode;
+        if (cfg.ace_browser_bridge.pointer_speed != ab_d.pointer_speed)
+            abj["pointer_speed"] = cfg.ace_browser_bridge.pointer_speed;
+        if (cfg.ace_browser_bridge.status_cache_ttl_ms != ab_d.status_cache_ttl_ms)
+            abj["status_cache_ttl_ms"] = cfg.ace_browser_bridge.status_cache_ttl_ms;
+        if (cfg.ace_browser_bridge.tool_timeout_ms != ab_d.tool_timeout_ms)
+            abj["tool_timeout_ms"] = cfg.ace_browser_bridge.tool_timeout_ms;
+        if (cfg.ace_browser_bridge.os_pointer_enabled != ab_d.os_pointer_enabled)
+            abj["os_pointer_enabled"] = cfg.ace_browser_bridge.os_pointer_enabled;
+        if (cfg.ace_browser_bridge.tab_group_enabled != ab_d.tab_group_enabled)
+            abj["tab_group_enabled"] = cfg.ace_browser_bridge.tab_group_enabled;
+        if (cfg.ace_browser_bridge.operation_overlay_enabled != ab_d.operation_overlay_enabled)
+            abj["operation_overlay_enabled"] = cfg.ace_browser_bridge.operation_overlay_enabled;
+        if (cfg.ace_browser_bridge.operation_overlay_watchdog_ms !=
+            ab_d.operation_overlay_watchdog_ms)
+            abj["operation_overlay_watchdog_ms"] =
+                cfg.ace_browser_bridge.operation_overlay_watchdog_ms;
+
+        const auto& pc = cfg.ace_browser_bridge.pointer_custom;
+        const auto& pc_d = ab_d.pointer_custom;
+        nlohmann::json pcj = nlohmann::json::object();
+        if (pc.move_duration_ms_min != pc_d.move_duration_ms_min)
+            pcj["move_duration_ms_min"] = pc.move_duration_ms_min;
+        if (pc.move_duration_ms_max != pc_d.move_duration_ms_max)
+            pcj["move_duration_ms_max"] = pc.move_duration_ms_max;
+        if (pc.click_hold_ms_min != pc_d.click_hold_ms_min)
+            pcj["click_hold_ms_min"] = pc.click_hold_ms_min;
+        if (pc.click_hold_ms_max != pc_d.click_hold_ms_max)
+            pcj["click_hold_ms_max"] = pc.click_hold_ms_max;
+        if (pc.typing_delay_ms_min != pc_d.typing_delay_ms_min)
+            pcj["typing_delay_ms_min"] = pc.typing_delay_ms_min;
+        if (pc.typing_delay_ms_max != pc_d.typing_delay_ms_max)
+            pcj["typing_delay_ms_max"] = pc.typing_delay_ms_max;
+        if (pc.jitter_px != pc_d.jitter_px)
+            pcj["jitter_px"] = pc.jitter_px;
+        if (pc.max_path_points != pc_d.max_path_points)
+            pcj["max_path_points"] = pc.max_path_points;
+        if (!pcj.empty()) abj["pointer_custom"] = pcj;
+        if (!abj.empty()) j["ace_browser_bridge"] = abj;
 
         UpgradeConfig up_d;
         nlohmann::json upj = nlohmann::json::object();

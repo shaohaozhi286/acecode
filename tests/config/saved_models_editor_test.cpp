@@ -118,6 +118,37 @@ TEST(SavedModelsEditor, AddAppendsValidDraft) {
     EXPECT_EQ(cfg.saved_models[1].api_key, "sk-x");
 }
 
+// 场景:add codex 不要求 base_url/api_key,只要求 model。
+TEST(SavedModelsEditor, AddAcceptsCodexDraftWithoutApiFields) {
+    auto cfg = make_cfg_with_one_default();
+    SavedModelDraft d;
+    d.name = "codex";
+    d.provider = "codex";
+    d.model = "gpt-5.5";
+    EXPECT_EQ(add_saved_model(cfg, d), SavedModelEditError::OK);
+    ASSERT_EQ(cfg.saved_models.size(), 2u);
+    EXPECT_EQ(cfg.saved_models[1].name, "codex");
+    EXPECT_EQ(cfg.saved_models[1].provider, "codex");
+    EXPECT_EQ(cfg.saved_models[1].model, "gpt-5.5");
+    EXPECT_TRUE(cfg.saved_models[1].base_url.empty());
+    EXPECT_TRUE(cfg.saved_models[1].api_key.empty());
+}
+
+// 场景:update 可把非默认 entry 改为 codex,并清掉 OpenAI 专用字段。
+TEST(SavedModelsEditor, UpdateCanSwitchEntryToCodex) {
+    auto cfg = make_cfg_with_one_default();
+    add_saved_model(cfg, good_openai_draft("local-lm"));
+
+    SavedModelDraft d;
+    d.name = "local-lm";
+    d.provider = "codex";
+    d.model = "gpt-5.5";
+    EXPECT_EQ(update_saved_model(cfg, "local-lm", d), SavedModelEditError::OK);
+    EXPECT_EQ(cfg.saved_models[1].provider, "codex");
+    EXPECT_TRUE(cfg.saved_models[1].base_url.empty());
+    EXPECT_TRUE(cfg.saved_models[1].api_key.empty());
+}
+
 // 场景:update 不存在的 name → NOT_FOUND,cfg 不变。
 TEST(SavedModelsEditor, UpdateRejectsNotFound) {
     auto cfg = make_cfg_with_one_default();
