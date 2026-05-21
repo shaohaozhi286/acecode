@@ -39,7 +39,7 @@ namespace {
 
 using json = nlohmann::json;
 
-constexpr const char* kCliVersion = "0.1.0";
+constexpr const char* kHostVersion = "0.1.0";
 constexpr const char* kDaemonVersion = "0.1.0";
 constexpr const char* kProtocolVersion = "0.1";
 constexpr const char* kHost = "127.0.0.1";
@@ -161,9 +161,9 @@ json stopped_status(int port) {
         {"version", nullptr},
         {"extension_version", nullptr},
         {"protocol_version", nullptr},
-        {"cli_protocol_version", kProtocolVersion},
+        {"host_protocol_version", kProtocolVersion},
         {"version_compatible", true},
-        {"cli_version", kCliVersion},
+        {"host_version", kHostVersion},
         {"port", port},
         {"capabilities", default_capabilities(false)},
     };
@@ -257,7 +257,7 @@ std::optional<json> materialize_binary_payloads(json& value) {
             value.contains("data") && value["data"].is_string()) {
             auto bytes = decode_base64(value["data"].get<std::string>());
             if (!bytes) {
-                return failure("invalid_cli_response", "bridge returned invalid base64 data");
+                return failure("invalid_host_response", "bridge returned invalid base64 data");
             }
             std::filesystem::path path = normalize_bridge_path(value["path"].get<std::string>());
             std::error_code ec;
@@ -342,7 +342,7 @@ HttpResponse http_request(const std::string& method, const std::string& path, co
     req << "Host: " << kHost << ":" << port << "\r\n";
     req << "Connection: close\r\n";
     req << "Accept: application/json\r\n";
-    req << "X-Ace-Browser-Cli: 1\r\n";
+    req << "X-Ace-Browser-Host: 1\r\n";
     if (!body.empty()) {
         req << "Content-Type: application/json; charset=utf-8\r\n";
         req << "Content-Length: " << body.size() << "\r\n";
@@ -399,7 +399,7 @@ std::optional<json> parse_json(const std::string& text) {
 json normalize_daemon_envelope(const std::string& body) {
     auto parsed = parse_json(body);
     if (!parsed || !parsed->is_object() || !parsed->contains("ok") || !(*parsed)["ok"].is_boolean()) {
-        return failure("invalid_cli_response", "daemon returned an invalid JSON envelope");
+        return failure("invalid_host_response", "daemon returned an invalid JSON envelope");
     }
     if ((*parsed)["ok"].get<bool>()) {
         if (!parsed->contains("data")) (*parsed)["data"] = json::object();
@@ -409,7 +409,7 @@ json normalize_daemon_envelope(const std::string& body) {
         }
         normalize_path_fields((*parsed)["data"]);
     } else if (!parsed->contains("error") || !(*parsed)["error"].is_object()) {
-        return failure("invalid_cli_response", "daemon returned an invalid error envelope");
+        return failure("invalid_host_response", "daemon returned an invalid error envelope");
     }
     return *parsed;
 }
@@ -427,7 +427,7 @@ int status_command(int argc, char** argv) {
     }
     json envelope = normalize_daemon_envelope(response.body);
     if (envelope.value("ok", false) && envelope["data"].is_object()) {
-        envelope["data"]["cli_version"] = kCliVersion;
+        envelope["data"]["host_version"] = kHostVersion;
         envelope["data"]["port"] = port;
     }
     print_json(envelope);
@@ -451,7 +451,7 @@ json command_envelope_from_stdin(int port, std::string input) {
 
     HttpResponse response = http_request("POST", "/command", parsed->dump(), port);
     if (!response.transport_ok) {
-        return failure("daemon_not_running", "ace-browser-cli daemon is not running on 127.0.0.1:" + std::to_string(port));
+        return failure("daemon_not_running", "ace-browser-host daemon is not running on 127.0.0.1:" + std::to_string(port));
     }
     if (response.status != 200) {
         return failure("daemon_error", "daemon command endpoint returned HTTP " + std::to_string(response.status));
@@ -626,10 +626,10 @@ json daemon_status_payload(const DaemonState& state, int port) {
         {"version", kDaemonVersion},
         {"extension_version", state.extension_connected ? json(state.extension_version) : json(nullptr)},
         {"protocol_version", state.extension_connected ? json(state.protocol_version) : json(nullptr)},
-        {"cli_protocol_version", kProtocolVersion},
+        {"host_protocol_version", kProtocolVersion},
         {"version_compatible", state.version_compatible},
         {"version_error", state.version_error.empty() ? json(nullptr) : json(state.version_error)},
-        {"cli_version", kCliVersion},
+        {"host_version", kHostVersion},
         {"port", port},
         {"browser", state.browser.empty() ? json(nullptr) : json(state.browser)},
         {"capabilities", state.extension_connected ? state.capabilities : default_capabilities(false)},
@@ -653,7 +653,7 @@ json handle_plugin_hello(DaemonState& state, const std::string& body) {
         state.version_compatible = false;
         state.version_error = "ace-browser-bridge protocol version " +
             (state.protocol_version.empty() ? std::string("<missing>") : state.protocol_version) +
-            " is not compatible with ace-browser-cli protocol " + kProtocolVersion;
+            " is not compatible with ace-browser-host protocol " + kProtocolVersion;
     } else {
         state.version_compatible = true;
         state.version_error.clear();
@@ -692,7 +692,7 @@ json handle_command(DaemonState& state, const std::string& body) {
         }
         if (!state.version_compatible) {
             return failure("version_mismatch", state.version_error.empty()
-                ? "ace-browser-cli and ace-browser-bridge protocol versions are not compatible"
+                ? "ace-browser-host and ace-browser-bridge protocol versions are not compatible"
                 : state.version_error);
         }
         pending = std::make_shared<DaemonState::PendingAction>();
@@ -768,10 +768,11 @@ std::string route_request(const HttpRequest& req, DaemonState& state, int port, 
     if (req.method == "OPTIONS") {
         return http_empty_response(204, cors_origin);
     }
-    const bool cli_request = header_equals(req, "x-ace-browser-cli", "1");
+    const bool host_request = header_equals(req, "x-ace-browser-host", "1") ||
+                              header_equals(req, "x-ace-browser-cli", "1");
     const bool plugin_request = header_equals(req, "x-ace-browser-bridge", "extension");
     if (req.method == "GET" && req.path == "/status") {
-        if (!cli_request) return http_json_response(403, failure("unauthorized", "status requires ace-browser-cli"));
+        if (!host_request) return http_json_response(403, failure("unauthorized", "status requires ace-browser-host"));
         return http_json_response(200, success(daemon_status_payload(state, port)));
     }
     if (req.method == "POST" && req.path == "/plugin/hello") {
@@ -787,11 +788,11 @@ std::string route_request(const HttpRequest& req, DaemonState& state, int port, 
         return http_json_response(200, handle_plugin_result(state, req.body), cors_origin);
     }
     if (req.method == "POST" && req.path == "/command") {
-        if (!cli_request) return http_json_response(403, failure("unauthorized", "command requires ace-browser-cli"));
+        if (!host_request) return http_json_response(403, failure("unauthorized", "command requires ace-browser-host"));
         return http_json_response(200, handle_command(state, req.body));
     }
     if (req.method == "POST" && req.path == "/shutdown") {
-        if (!cli_request) return http_json_response(403, failure("unauthorized", "shutdown requires ace-browser-cli"));
+        if (!host_request) return http_json_response(403, failure("unauthorized", "shutdown requires ace-browser-host"));
         running = false;
         return http_json_response(200, success({{"success", true}}));
     }
@@ -868,7 +869,7 @@ int shutdown_command(int argc, char** argv) {
     int port = parse_port(argc, argv);
     HttpResponse response = http_request("POST", "/shutdown", "{}", port);
     if (!response.transport_ok) {
-        print_json(failure("daemon_not_running", "ace-browser-cli daemon is not running on 127.0.0.1:" + std::to_string(port)));
+        print_json(failure("daemon_not_running", "ace-browser-host daemon is not running on 127.0.0.1:" + std::to_string(port)));
         return 0;
     }
     print_json(normalize_daemon_envelope(response.body));
@@ -877,7 +878,7 @@ int shutdown_command(int argc, char** argv) {
 
 void print_help() {
     std::cout
-        << "ace-browser-cli commands:\n"
+        << "ace-browser-host commands:\n"
         << "  status --json [--port 52007]\n"
         << "  command --json [--port 52007]     # reads {session,action,args} from stdin\n"
         << "  screenshot --json --session <name> --output <path> [--port 52007]\n"

@@ -252,7 +252,7 @@ if(BUILD_TESTING)
     add_subdirectory(tests)
 endif()
 
-add_subdirectory(ace-browser-cli)
+add_subdirectory(ace-browser-host)
 
 # desktop shell 子目标(opt-in,默认 OFF)。include 后只有当 ACECODE_BUILD_DESKTOP=ON
 # 才会真添加 acecode-desktop 这个 target,否则文件本身做无操作 return。

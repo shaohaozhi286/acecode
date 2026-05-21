@@ -207,6 +207,36 @@ await run('UI preference API reads and writes daemon-backed avatar preference', 
   }
 });
 
+await run('ACE Browser Bridge API reads and writes daemon-backed enabled flag', async () => {
+  const previousFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    calls.push({ url, opts });
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ enabled: true, tool_mode: 'progressive' }),
+    };
+  };
+  try {
+    const client = createApi({ origin: 'http://127.0.0.1:4567', token: 'tok' });
+    const got = await client.getAceBrowserBridge();
+    const saved = await client.setAceBrowserBridge({ enabled: true });
+
+    assert.equal(got.enabled, true);
+    assert.equal(saved.tool_mode, 'progressive');
+    assert.equal(calls[0].url, 'http://127.0.0.1:4567/api/config/ace-browser-bridge');
+    assert.equal(calls[0].opts.method, 'GET');
+    assert.equal(calls[0].opts.headers['X-ACECode-Token'], 'tok');
+    assert.equal(calls[1].url, 'http://127.0.0.1:4567/api/config/ace-browser-bridge');
+    assert.equal(calls[1].opts.method, 'PUT');
+    assert.deepEqual(JSON.parse(calls[1].opts.body), { enabled: true });
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
 await run('getSkillRoot uses workspace query and auth token', async () => {
   const previousFetch = globalThis.fetch;
   const calls = [];

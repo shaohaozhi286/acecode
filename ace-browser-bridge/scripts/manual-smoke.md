@@ -2,10 +2,10 @@
 
 这份清单用于补充 `scripts/smoke.ps1` 的静态检查，覆盖必须在真实浏览器里确认的插件行为。
 
-1. 构建或定位 `ace-browser-cli.exe`，启动 daemon：
+1. 构建或定位 `ace-browser-host.exe`，启动 daemon：
 
    ```powershell
-   build/ace-browser-cli/Debug/ace-browser-cli.exe serve --json --port 52007
+   build/ace-browser-host/Debug/ace-browser-host.exe serve --json --port 52007
    ```
 
 2. 在 `chrome://extensions` 启用 Developer mode，使用 Load unpacked 加载 `ace-browser-bridge` 目录。

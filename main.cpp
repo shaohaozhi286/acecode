@@ -364,6 +364,56 @@ static Element queued_badge() {
            bgcolor(Color::RGB(128, 96, 0));
 }
 
+static std::string repeat_utf8_glyph(const char* glyph, int count) {
+    std::string out;
+    if (count <= 0) {
+        return out;
+    }
+    const std::string g(glyph);
+    out.reserve(g.size() * static_cast<std::size_t>(count));
+    for (int i = 0; i < count; ++i) {
+        out += g;
+    }
+    return out;
+}
+
+static Color token_progress_color(int percent) {
+    if (percent <= 0) {
+        return Color::GrayDark;
+    }
+    if (percent > 90) {
+        return Color::RedLight;
+    }
+    if (percent >= 60) {
+        return Color::Yellow;
+    }
+    return Color::GreenLight;
+}
+
+static Element render_token_usage_chip(const acecode::TuiState& state) {
+    if (state.token_status.empty()) {
+        return text("");
+    }
+
+    constexpr int kBarCells = 10;
+    constexpr const char* kFilled = "\xE2\x96\x88";
+    constexpr const char* kEmpty = "\xE2\x96\x91";
+
+    const int percent = std::clamp(state.token_percent, 0, 100);
+    const int filled = percent <= 0 ? 0 : std::clamp((percent + 9) / 10, 1, kBarCells);
+    const int empty = kBarCells - filled;
+    const Color progress_color = token_progress_color(percent);
+
+    return hbox({
+        text("  " + state.token_status + " ") | dim | color(Color::CyanLight),
+        text("[") | dim | color(Color::GrayDark),
+        text(repeat_utf8_glyph(kFilled, filled)) | color(progress_color),
+        text(repeat_utf8_glyph(kEmpty, empty)) | dim | color(Color::GrayDark),
+        text("] ") | dim | color(Color::GrayDark),
+        text(std::to_string(percent) + "%  ") | dim | color(progress_color),
+    });
+}
+
 static Element render_pending_queue_block(const acecode::TuiState& state,
                                           int available_width) {
     if (state.pending_queue.empty()) {
@@ -2058,6 +2108,7 @@ static int run_interactive_app(const CliOptions& cli,
     // ---- Token tracking ----
     TokenTracker token_tracker;
     state.token_status = token_tracker.format_status(config.context_window);
+    state.token_percent = token_tracker.context_percent(config.context_window);
 
     // ---- Agent callbacks ----
     std::atomic<bool> agent_aborting{false};  // shared abort flag for confirm_cv
@@ -2150,6 +2201,7 @@ static int run_interactive_app(const CliOptions& cli,
         token_tracker.record(usage);
         std::lock_guard<std::mutex> lk(state.mu);
         state.token_status = token_tracker.format_status(config.context_window);
+        state.token_percent = token_tracker.context_percent(config.context_window);
         state.last_completion_tokens_authoritative = usage.completion_tokens;
         screen.PostEvent(Event::Custom);
     };
@@ -2289,6 +2341,7 @@ static int run_interactive_app(const CliOptions& cli,
                 token_tracker.restore(resumed_meta.last_token_usage,
                                       resumed_meta.session_token_usage);
                 state.token_status = token_tracker.format_status(config.context_window);
+                state.token_percent = token_tracker.context_percent(config.context_window);
                 state.conversation.push_back({"system",
                     "Resumed session " + target_id + " (" + std::to_string(messages.size()) + " messages)", false});
                 agent_loop.publish_current_goal_state();
@@ -5507,9 +5560,7 @@ static int run_interactive_app(const CliOptions& cli,
 
         // -- Bottom status bar --
         std::string perm_mode_str = std::string("mode: ") + PermissionManager::mode_name(permissions.mode());
-        Element token_el = state.token_status.empty()
-            ? text("")
-            : text("  " + state.token_status + "  ") | dim | color(Color::CyanLight);
+        Element token_el = render_token_usage_chip(state);
         Element goal_el = state.goal_status.empty()
             ? text("")
             : text("  " + state.goal_status + "  ") | dim | color(Color::GreenLight);

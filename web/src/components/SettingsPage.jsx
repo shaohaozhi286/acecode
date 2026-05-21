@@ -1,8 +1,8 @@
 // 全屏设置页:左栏导航 + 右栏内容(Codex 风格)。
 //
 // 设计来源:Claude Design 高保真原型 (panels.jsx)。NAV 顺序与设计稿一致。
-// 后端真实接入的 section:常规 (权限模式) / 外观 (主题) / 模型 (ModelManager)。
-// 其余 section (配置 / 个性化 / MCP / 工具 / 已归档会话 / 使用情况) 当前仅 UI 占位
+// 后端真实接入的 section:常规 (权限模式) / 外观 (主题) / 模型 (ModelManager) / 工具。
+// 其余 section (配置 / 个性化 / MCP / 已归档会话 / 使用情况) 当前仅 UI 占位
 // — 状态走本地 useState,提交按钮无网络副作用,待后端接口就绪后接入。
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -698,16 +698,54 @@ function SectionMCP() {
 }
 
 // ─── 工具 ──────────────────────────────────────────────────────────────────
-// UI 占位:Browser Use 等内置工具开关。设计 panels.jsx::renderToolsContent。
 
 function SectionTools() {
-  const [browserUse, setBrowserUse] = useState(true);
+  const [bridgeEnabled, setBridgeEnabled] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError('');
+    api.getAceBrowserBridge()
+      .then((cfg) => {
+        if (!cancelled) setBridgeEnabled(!!cfg?.enabled);
+      })
+      .catch((e) => {
+        if (!cancelled) setError(e.message || String(e));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  const setBridge = async (next) => {
+    const before = bridgeEnabled;
+    setBridgeEnabled(next);
+    setSaving(true);
+    setError('');
+    try {
+      const saved = await api.setAceBrowserBridge({ enabled: next });
+      setBridgeEnabled(!!saved?.enabled);
+      toast({ kind: 'ok', text: next ? 'ACE Browser Bridge 已启用' : 'ACE Browser Bridge 已关闭' });
+    } catch (e) {
+      setBridgeEnabled(before);
+      const message = e.message || String(e);
+      setError(message);
+      toast({ kind: 'err', text: message });
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const tools = [
     {
-      key: 'browser_use',
-      name: 'Browser Use',
-      desc: '让 ACECode 控制内置浏览器进行页面操作 / 截图 / 表单填写',
+      key: 'ace_browser_bridge',
+      name: 'ACE Browser Bridge',
+      desc: '启用 ACECode 内置 browser_* 工具，连接 ace-browser-host 与浏览器插件。',
       icon: (
         <svg
           width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -719,8 +757,8 @@ function SectionTools() {
           <path d="M12 3a13 13 0 0 1 0 18M12 3a13 13 0 0 0 0 18" />
         </svg>
       ),
-      on: browserUse,
-      toggle: () => setBrowserUse((v) => !v),
+      on: bridgeEnabled,
+      toggle: setBridge,
     },
   ];
 
@@ -729,7 +767,14 @@ function SectionTools() {
       <h2 className="text-xl font-bold mb-5">工具</h2>
 
       <div className="text-[14px] font-semibold mb-1">内置工具</div>
-      <p className="text-[12px] text-fg-mute mb-3">启用后 Agent 可在任务中自动调用</p>
+      <p className="text-[12px] text-fg-mute mb-3">
+        启用后 Agent 可在任务中自动调用；会写入 ace_browser_bridge 配置。
+      </p>
+      {error && (
+        <div className="mb-3 px-3 py-2 rounded-md border border-danger/40 bg-danger/10 text-danger text-[12px]">
+          {error}
+        </div>
+      )}
 
       {tools.map((tool) => (
         <div
@@ -743,7 +788,7 @@ function SectionTools() {
             <div className="text-[13px] font-medium">{tool.name}</div>
             <div className="text-[11px] text-fg-mute mt-0.5">{tool.desc}</div>
           </div>
-          <Toggle on={tool.on} onChange={tool.toggle} />
+          <Toggle on={tool.on} onChange={tool.toggle} disabled={loading || saving} />
         </div>
       ))}
 

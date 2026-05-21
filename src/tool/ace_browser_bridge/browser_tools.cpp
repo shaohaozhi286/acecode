@@ -259,7 +259,7 @@ BridgeEnvelope health_gate(const std::shared_ptr<BrowserToolState>& state) {
     BridgeEnvelope status = state->client->status();
     if (!status.ok) return status;
     if (!status.data.value("running", false)) {
-        return make_error("daemon_not_running", "ace-browser-cli daemon is not running");
+        return make_error("daemon_not_running", "ace-browser-host daemon is not running");
     }
     if (!status.data.value("extension_connected", false)) {
         return make_error("extension_not_connected", "ace-browser-bridge extension is not connected");
@@ -375,7 +375,7 @@ ToolImpl make_status_tool(const std::shared_ptr<BrowserToolState>& state) {
     ToolDef def;
     def.name = "browser_status";
     def.description =
-        "Report ace-browser-cli daemon, ace-browser-bridge extension, CLI versions, capabilities, and enabled browser tool groups.";
+        "Report ace-browser-host daemon, ace-browser-bridge extension, host versions, capabilities, and enabled browser tool groups.";
     def.parameters = object_schema(nlohmann::json::object());
 
     ToolImpl impl;
@@ -1191,6 +1191,14 @@ void register_ace_browser_bridge_tools(ToolExecutor& tools,
             register_tool_group(tools, state, group);
         }
     }
+}
+
+std::size_t unregister_ace_browser_bridge_tools(ToolExecutor& tools) {
+    std::size_t removed = 0;
+    for (const auto& name : ace_browser_full_tool_names()) {
+        if (tools.unregister_tool(name)) ++removed;
+    }
+    return removed;
 }
 
 } // namespace acecode::ace_browser_bridge

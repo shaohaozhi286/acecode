@@ -87,6 +87,10 @@ dd {
   margin-top: 10px;
 }
 
+.actions[hidden] {
+  display: none;
+}
+
 button {
   flex: 1;
   min-height: 32px;

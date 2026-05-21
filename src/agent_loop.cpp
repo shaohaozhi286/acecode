@@ -686,9 +686,6 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
     }
     events_.emit(SessionEventKind::BusyChanged, nlohmann::json{{"busy", true}});
 
-    auto tool_defs = tools_.get_tool_definitions();
-    LOG_DEBUG("Registered tools: " + std::to_string(tool_defs.size()));
-
     // Agent loop termination protocol (see openspec/changes/align-loop-with-hermes):
     //   - terminator_fired = true → model called task_complete ⇒ exit
     //   - text-only reply (zero tool calls) ⇒ exit (matches hermes-agent /
@@ -761,6 +758,8 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
             tools_, cwd_, skill_registry_, memory_registry_,
             memory_cfg_, project_instructions_cfg_);
         LOG_DEBUG("System prompt length: " + std::to_string(system_prompt.size()));
+        auto tool_defs = tools_.get_tool_definitions();
+        LOG_DEBUG("Registered tools: " + std::to_string(tool_defs.size()));
 
         // Prepare messages with system prompt at front, filtering out meta messages
         auto api_messages = normalize_messages_for_api(messages_);

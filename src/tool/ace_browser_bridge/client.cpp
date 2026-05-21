@@ -1,5 +1,6 @@
 #include "client.hpp"
 
+#include "utils/utf8_path.hpp"
 #include "utils/encoding.hpp"
 
 #include <algorithm>
@@ -7,6 +8,7 @@
 #include <cerrno>
 #include <cstring>
 #include <filesystem>
+#include <limits.h>
 #include <sstream>
 #include <thread>
 #include <utility>
@@ -22,6 +24,9 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 #endif
 
 namespace acecode::ace_browser_bridge {
@@ -107,6 +112,53 @@ void close_fd(int& fd) {
 }
 #endif
 
+std::string default_host_executable_name() {
+#ifdef _WIN32
+    return "ace-browser-host.exe";
+#else
+    return "ace-browser-host";
+#endif
+}
+
+std::filesystem::path current_executable_dir() {
+#ifdef _WIN32
+    std::vector<wchar_t> buffer(MAX_PATH);
+    for (;;) {
+        DWORD n = ::GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+        if (n == 0) return {};
+        if (n < buffer.size()) {
+            return std::filesystem::path(std::wstring(buffer.data(), n)).parent_path();
+        }
+        if (buffer.size() >= 32768) return {};
+        buffer.resize(buffer.size() * 2);
+    }
+#elif defined(__APPLE__)
+    uint32_t size = 0;
+    (void)_NSGetExecutablePath(nullptr, &size);
+    if (size == 0) return {};
+    std::vector<char> buffer(size + 1);
+    if (_NSGetExecutablePath(buffer.data(), &size) != 0) return {};
+    return std::filesystem::path(buffer.data()).parent_path();
+#elif defined(__linux__)
+    char buffer[PATH_MAX];
+    ssize_t n = ::readlink("/proc/self/exe", buffer, sizeof(buffer) - 1);
+    if (n <= 0) return {};
+    buffer[n] = '\0';
+    return std::filesystem::path(buffer).parent_path();
+#else
+    return {};
+#endif
+}
+
+std::string resolve_host_path(const AceBrowserBridgeConfig& config) {
+    if (!config.host_path.empty()) return config.host_path;
+    const auto dir = current_executable_dir();
+    if (!dir.empty()) {
+        return path_to_utf8(dir / default_host_executable_name());
+    }
+    return default_host_executable_name();
+}
+
 } // namespace
 
 AceBrowserBridgeClient::AceBrowserBridgeClient(AceBrowserBridgeConfig config,
@@ -126,7 +178,7 @@ BridgeEnvelope AceBrowserBridgeClient::parse_envelope(const std::string& stdout_
     auto parsed = nlohmann::json::parse(stdout_text, nullptr, false);
     if (parsed.is_discarded() || !parsed.is_object() ||
         !parsed.contains("ok") || !parsed["ok"].is_boolean()) {
-        return make_error("invalid_cli_response", "ace-browser-cli returned an invalid JSON envelope");
+        return make_error("invalid_host_response", "ace-browser-host returned an invalid JSON envelope");
     }
 
     BridgeEnvelope envelope;
@@ -138,12 +190,12 @@ BridgeEnvelope AceBrowserBridgeClient::parse_envelope(const std::string& stdout_
     }
 
     if (!parsed.contains("error") || !parsed["error"].is_object()) {
-        return make_error("invalid_cli_response", "ace-browser-cli returned an invalid error envelope");
+        return make_error("invalid_host_response", "ace-browser-host returned an invalid error envelope");
     }
     const auto& err = parsed["error"];
     if (!err.contains("code") || !err["code"].is_string() ||
         !err.contains("message") || !err["message"].is_string()) {
-        return make_error("invalid_cli_response", "ace-browser-cli error envelope is missing code or message");
+        return make_error("invalid_host_response", "ace-browser-host error envelope is missing code or message");
     }
     envelope.error = BridgeError{err["code"].get<std::string>(),
                                  err["message"].get<std::string>()};
@@ -154,18 +206,18 @@ BridgeEnvelope AceBrowserBridgeClient::run_json_command(const std::vector<std::s
                                                         const std::string& stdin_text) {
     std::vector<std::string> argv;
     argv.reserve(args.size() + 1);
-    argv.push_back(config_.cli_path);
+    argv.push_back(resolve_host_path(config_));
     argv.insert(argv.end(), args.begin(), args.end());
 
     CliProcessResult result = runner_(argv, stdin_text, std::chrono::milliseconds(config_.tool_timeout_ms));
     if (result.timed_out) {
-        return make_error("cli_timeout", "ace-browser-cli timed out");
+        return make_error("host_timeout", "ace-browser-host timed out");
     }
     if (!result.error.empty()) {
-        return make_error("cli_not_found", result.error);
+        return make_error("host_not_found", result.error);
     }
     if (result.exit_code != 0 && result.stdout_text.empty()) {
-        return make_error("cli_failed", "ace-browser-cli exited with code " +
+        return make_error("host_failed", "ace-browser-host exited with code " +
                                         std::to_string(result.exit_code));
     }
     return parse_envelope(result.stdout_text);
@@ -214,7 +266,7 @@ CliProcessResult run_cli_process(const std::vector<std::string>& argv,
                                  std::chrono::milliseconds timeout) {
     CliProcessResult result;
     if (argv.empty() || argv[0].empty()) {
-        result.error = "ace-browser-cli path is empty";
+        result.error = "ace-browser-host path is empty";
         return result;
     }
     if (timeout.count() <= 0) timeout = std::chrono::milliseconds(30000);
@@ -281,7 +333,7 @@ CliProcessResult run_cli_process(const std::vector<std::string>& argv,
     close_handle(child_stdin_read);
     close_handle(child_stdout_write);
     if (!ok) {
-        result.error = "Failed to start ace-browser-cli: " + windows_error_message(GetLastError());
+        result.error = "Failed to start ace-browser-host: " + windows_error_message(GetLastError());
         cleanup();
         return result;
     }

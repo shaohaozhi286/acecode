@@ -371,6 +371,7 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     web_deps.start_time_unix_ms = now_unix_ms();
     web_deps.session_client     = &client;
     web_deps.session_registry   = &registry;
+    web_deps.tools              = &tools;
     web_deps.workspace_registry = &workspace_registry;
     web_deps.native_folder_picker_enabled = opts.native_folder_picker_enabled;
     if (opts.native_folder_picker_enabled) {

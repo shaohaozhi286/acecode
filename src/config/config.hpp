@@ -178,11 +178,9 @@ struct AceBrowserPointerCustomConfig {
 
 struct AceBrowserBridgeConfig {
     bool enabled = false;
-#ifdef _WIN32
-    std::string cli_path = "ace-browser-cli.exe";
-#else
-    std::string cli_path = "ace-browser-cli";
-#endif
+    // Deprecated compatibility override. New configs do not write this field;
+    // the client resolves ace-browser-host next to the acecode executable.
+    std::string host_path;
     // "progressive" | "compact" | "full"
     std::string tool_mode = "progressive";
     // "auto" | "dom" | "cdp" | "os"

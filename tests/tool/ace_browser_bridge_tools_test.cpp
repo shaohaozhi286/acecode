@@ -28,7 +28,7 @@ struct FakeBridgeCli {
             {"extension_connected", true},
             {"version", "daemon-test"},
             {"extension_version", "extension-test"},
-            {"cli_version", "cli-test"},
+            {"host_version", "host-test"},
         }},
     };
     nlohmann::json command_response = {
@@ -73,7 +73,7 @@ AceBrowserBridgeConfig enabled_config(std::string mode = "progressive") {
     AceBrowserBridgeConfig cfg;
     cfg.enabled = true;
     cfg.tool_mode = std::move(mode);
-    cfg.cli_path = "fake-ace-browser-cli";
+    cfg.host_path = "fake-ace-browser-host";
     return cfg;
 }
 

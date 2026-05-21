@@ -52,7 +52,7 @@ async function refreshStatus() {
   const data = response.data;
   daemonEl.textContent = `127.0.0.1:${data.port || 52007}`;
   pluginEl.textContent = `v${data.extensionVersion || chrome.runtime.getManifest().version}`;
-  setStatus(data.connected ? "Connected to ace-browser-cli." : (data.lastError || "Daemon is not connected."));
+  setStatus(data.connected ? "Connected to ace-browser-host." : (data.lastError || "Daemon is not connected."));
 }
 
 async function run(command) {

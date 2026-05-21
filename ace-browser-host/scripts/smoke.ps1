@@ -6,11 +6,21 @@ param(
 $ErrorActionPreference = "Stop"
 
 if ($ExePath -eq "") {
-    $candidate = Join-Path $PSScriptRoot "..\..\build\ace-browser-cli\ace-browser-cli.exe"
-    if (Test-Path $candidate) {
-        $ExePath = (Resolve-Path $candidate).Path
-    } else {
-        $ExePath = "ace-browser-cli.exe"
+    $candidates = @(
+        (Join-Path $PSScriptRoot "..\..\build\Debug\ace-browser-host.exe"),
+        (Join-Path $PSScriptRoot "..\..\build\Release\ace-browser-host.exe"),
+        (Join-Path $PSScriptRoot "..\..\build\RelWithDebInfo\ace-browser-host.exe"),
+        (Join-Path $PSScriptRoot "..\..\build\MinSizeRel\ace-browser-host.exe"),
+        (Join-Path $PSScriptRoot "..\..\build\ace-browser-host.exe")
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-Path $candidate) {
+            $ExePath = (Resolve-Path $candidate).Path
+            break
+        }
+    }
+    if ($ExePath -eq "") {
+        $ExePath = "ace-browser-host.exe"
     }
 } elseif (Test-Path $ExePath) {
     $ExePath = (Resolve-Path $ExePath).Path
@@ -147,4 +157,4 @@ try {
     }
 }
 
-Write-Host "ace-browser-cli smoke passed"
+Write-Host "ace-browser-host smoke passed"

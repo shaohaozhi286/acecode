@@ -1,10 +1,10 @@
 # ace-browser-bridge
 
-`ace-browser-bridge` 是 ACECode 的浏览器插件交付物。`ace-browser-cli` 是独立的本地 C++ CLI/daemon 项目，可执行文件名为 `ace-browser-cli.exe`，默认 daemon 地址为 `127.0.0.1:52007`。
+`ace-browser-bridge` 是 ACECode 的浏览器插件交付物。`ace-browser-host` 是独立的本地 C++ CLI/daemon 项目，可执行文件名为 `ace-browser-host.exe`，默认 daemon 地址为 `127.0.0.1:52007`。
 
 插件负责：
 
-- 与 `ace-browser-cli` daemon 建立握手和轮询连接。
+- 与 `ace-browser-host` daemon 建立握手和轮询连接。
 - 维护 managed browser session、owned/adopted tab 和 Chrome tab group 状态色。
 - 注入 `content/virtual-cursor.js`，提供 snapshot、`@e` 元素引用、目标解析、DOM 动作和 operation overlay。
 - 通过 Chrome Debugger API 执行 CDP pointer、typing、network capture 和 PDF 导出。
@@ -16,7 +16,7 @@
 2. 启用 `Developer mode`。
 3. 点击 `Load unpacked`。
 4. 选择目录：`C:\Users\shao\acecode\ace-browser-bridge`。
-5. 启动 `ace-browser-cli.exe serve --json --port 52007`。
+5. 启动 `ace-browser-host.exe serve --json --port 52007`。
 6. 打开普通 `http://` 或 `https://` 页面，插件会连接本地 daemon。
 
 Chrome 内部页无法注入扩展脚本，例如 `chrome://extensions`、`chrome://newtab` 和 Chrome Web Store。测试时使用普通网页。

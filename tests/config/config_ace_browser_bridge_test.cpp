@@ -25,11 +25,7 @@ bool has_error_containing(const std::vector<std::string>& errors, const std::str
 TEST(ConfigAceBrowserBridgeDefaults, StructDefault) {
     AceBrowserBridgeConfig c;
     EXPECT_FALSE(c.enabled);
-#ifdef _WIN32
-    EXPECT_EQ(c.cli_path, "ace-browser-cli.exe");
-#else
-    EXPECT_EQ(c.cli_path, "ace-browser-cli");
-#endif
+    EXPECT_TRUE(c.host_path.empty());
     EXPECT_EQ(c.tool_mode, "progressive");
     EXPECT_EQ(c.default_mode, "auto");
     EXPECT_EQ(c.pointer_speed, "normal");
@@ -117,7 +113,6 @@ TEST(ConfigAceBrowserBridgeSave, PersistsNonDefaultValues) {
 
     AppConfig cfg;
     cfg.ace_browser_bridge.enabled = true;
-    cfg.ace_browser_bridge.cli_path = "C:/tools/ace-browser-cli.exe";
     cfg.ace_browser_bridge.tool_mode = "full";
     cfg.ace_browser_bridge.default_mode = "cdp";
     cfg.ace_browser_bridge.pointer_speed = "fast";
@@ -131,7 +126,7 @@ TEST(ConfigAceBrowserBridgeSave, PersistsNonDefaultValues) {
     ASSERT_TRUE(j.contains("ace_browser_bridge"));
     const auto& abj = j["ace_browser_bridge"];
     EXPECT_EQ(abj["enabled"], true);
-    EXPECT_EQ(abj["cli_path"], "C:/tools/ace-browser-cli.exe");
+    EXPECT_FALSE(abj.contains("host_path"));
     EXPECT_EQ(abj["tool_mode"], "full");
     EXPECT_EQ(abj["default_mode"], "cdp");
     EXPECT_EQ(abj["pointer_speed"], "fast");

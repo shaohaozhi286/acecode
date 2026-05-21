@@ -35,6 +35,7 @@ void announce_switch(CommandContext& ctx, const ModelProfile& entry,
     std::lock_guard<std::mutex> lk(ctx.state.mu);
     ctx.agent_loop.set_context_window(ctx.config.context_window);
     ctx.state.token_status = ctx.token_tracker.format_status(ctx.config.context_window);
+    ctx.state.token_percent = ctx.token_tracker.context_percent(ctx.config.context_window);
     std::ostringstream oss;
     oss << "Switched to " << entry.name
         << " (" << entry.provider << "/" << entry.model << ")";
@@ -173,6 +174,7 @@ void render_model_picker(CommandContext& ctx) {
         // 等价于 announce_switch(它会再加锁,这里把内联出来避免重入)。
         al->set_context_window(config_ptr->context_window);
         state_ptr->token_status = token_tracker.format_status(config_ptr->context_window);
+        state_ptr->token_percent = token_tracker.context_percent(config_ptr->context_window);
         std::ostringstream oss;
         oss << "Switched to " << entry->name
             << " (" << entry->provider << "/" << entry->model << ")";

@@ -19,6 +19,8 @@
 #include "../daemon/platform.hpp"
 #include "../skills/skill_registry.hpp"
 #include "../skills/skill_metadata.hpp"
+#include "../tool/ace_browser_bridge/browser_tools.hpp"
+#include "../tool/tool_executor.hpp"
 #include "../utils/logger.hpp"
 #include "../utils/cwd_hash.hpp"
 #include "handlers/files_handler.hpp"
@@ -133,6 +135,31 @@ json chat_message_to_json(const ChatMessage& m) {
 
 json ui_preferences_to_json(const WebUiPreferencesConfig& prefs) {
     return json{{"show_acecode_avatar", prefs.show_acecode_avatar}};
+}
+
+json ace_browser_bridge_settings_to_json(const AceBrowserBridgeConfig& cfg) {
+    json out;
+    out["enabled"] = cfg.enabled;
+    out["tool_mode"] = cfg.tool_mode;
+    out["default_mode"] = cfg.default_mode;
+    out["pointer_speed"] = cfg.pointer_speed;
+    out["status_cache_ttl_ms"] = cfg.status_cache_ttl_ms;
+    out["tool_timeout_ms"] = cfg.tool_timeout_ms;
+    out["os_pointer_enabled"] = cfg.os_pointer_enabled;
+    out["tab_group_enabled"] = cfg.tab_group_enabled;
+    out["operation_overlay_enabled"] = cfg.operation_overlay_enabled;
+    out["operation_overlay_watchdog_ms"] = cfg.operation_overlay_watchdog_ms;
+    out["pointer_custom"] = {
+        {"move_duration_ms_min", cfg.pointer_custom.move_duration_ms_min},
+        {"move_duration_ms_max", cfg.pointer_custom.move_duration_ms_max},
+        {"click_hold_ms_min", cfg.pointer_custom.click_hold_ms_min},
+        {"click_hold_ms_max", cfg.pointer_custom.click_hold_ms_max},
+        {"typing_delay_ms_min", cfg.pointer_custom.typing_delay_ms_min},
+        {"typing_delay_ms_max", cfg.pointer_custom.typing_delay_ms_max},
+        {"jitter_px", cfg.pointer_custom.jitter_px},
+        {"max_path_points", cfg.pointer_custom.max_path_points},
+    };
+    return out;
 }
 
 // SessionEvent → 上行 WS 消息(也用于 /messages 回放)。
@@ -2662,6 +2689,10 @@ struct WebServer::Impl {
         ([this](const crow::request& req) {
             return cors_preflight(req);
         });
+        CROW_ROUTE(app, "/api/config/ace-browser-bridge").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
 
         // GET /api/config/ui-preferences: non-sensitive Web/Desktop UI prefs.
         CROW_ROUTE(app, "/api/config/ui-preferences").methods(crow::HTTPMethod::GET)
@@ -2671,6 +2702,70 @@ struct WebServer::Impl {
             crow::response r(200);
             r.add_header("Content-Type", "application/json");
             r.body = ui_preferences_to_json(deps.app_config->web_ui).dump();
+            return with_cors(req, std::move(r));
+        });
+
+        // GET /api/config/ace-browser-bridge: browser bridge tool settings.
+        CROW_ROUTE(app, "/api/config/ace-browser-bridge").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.app_config) return crow::response(503);
+            crow::response r(200);
+            r.add_header("Content-Type", "application/json");
+            r.body = ace_browser_bridge_settings_to_json(
+                deps.app_config->ace_browser_bridge).dump();
+            return with_cors(req, std::move(r));
+        });
+
+        // PUT /api/config/ace-browser-bridge body {enabled:boolean}.
+        CROW_ROUTE(app, "/api/config/ace-browser-bridge").methods(crow::HTTPMethod::PUT)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.app_config) return crow::response(503);
+
+            auto json_err = [&](int status, const char* code, const std::string& msg) {
+                crow::response r(status);
+                r.body = json{{"error", code}, {"message", msg}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            };
+
+            json body;
+            try { body = json::parse(req.body); }
+            catch (const std::exception& e) {
+                return json_err(400, "BAD_JSON", std::string("invalid JSON body: ") + e.what());
+            }
+            if (!body.is_object() ||
+                !body.contains("enabled") ||
+                !body["enabled"].is_boolean()) {
+                return json_err(400, "BAD_REQUEST", "expected {enabled: boolean}");
+            }
+
+            const auto before = deps.app_config->ace_browser_bridge;
+            deps.app_config->ace_browser_bridge.enabled = body["enabled"].get<bool>();
+            try {
+                if (!deps.config_path.empty()) {
+                    save_config(*deps.app_config, deps.config_path);
+                } else {
+                    save_config(*deps.app_config);
+                }
+            } catch (const std::exception& e) {
+                deps.app_config->ace_browser_bridge = before;
+                return json_err(500, "PERSIST_FAILED", e.what());
+            }
+
+            if (deps.tools) {
+                ace_browser_bridge::unregister_ace_browser_bridge_tools(*deps.tools);
+                if (deps.app_config->ace_browser_bridge.enabled) {
+                    ace_browser_bridge::register_ace_browser_bridge_tools(
+                        *deps.tools, deps.app_config->ace_browser_bridge);
+                }
+            }
+
+            crow::response r(200);
+            r.add_header("Content-Type", "application/json");
+            r.body = ace_browser_bridge_settings_to_json(
+                deps.app_config->ace_browser_bridge).dump();
             return with_cors(req, std::move(r));
         });
 

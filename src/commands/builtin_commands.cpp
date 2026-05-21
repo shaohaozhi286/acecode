@@ -14,6 +14,7 @@
 #include "../provider/cwd_model_override.hpp"
 #include "../provider/model_resolver.hpp"
 #include "../tool/mcp_manager.hpp"
+#include "../tool/ace_browser_bridge/browser_tools.hpp"
 #include "../tool/tool_executor.hpp"
 #include "../skills/skill_registry.hpp"
 #include "../skills/skill_commands.hpp"
@@ -96,6 +97,7 @@ static void cmd_help(CommandContext& ctx, const std::string& /*args*/) {
     oss << "Available commands:\n"
         << "  /help     - Show this help message\n"
         << "  /clear    - Clear conversation history\n"
+        << "  /new      - Alias for /clear\n"
         << "  /compact  - Compress conversation history\n"
         << "  /model    - Show or switch current model\n"
         << "  /config   - Show current configuration\n"
@@ -109,6 +111,7 @@ static void cmd_help(CommandContext& ctx, const std::string& /*args*/) {
         << "  /init     - Generate an ACECODE.md skeleton in the current directory\n"
         << "  /history  - List or clear the per-working-directory input history\n"
         << "  /models   - Inspect bundled models.dev registry\n"
+        << "  /browser  - Show or toggle ACE Browser Bridge tools for this session\n"
         << "  /proxy    - Show or switch the HTTP proxy used for LLM/API requests\n"
         << "  /title    - Set or show the window title for this session\n"
         << "  /exit     - Exit acecode";
@@ -129,7 +132,8 @@ static void cmd_clear(CommandContext& ctx, const std::string& /*args*/) {
     ctx.state.conversation.clear();
     ctx.agent_loop.clear_messages();
     ctx.token_tracker.reset();
-    ctx.state.token_status.clear();
+    ctx.state.token_status = ctx.token_tracker.format_status(ctx.config.context_window);
+    ctx.state.token_percent = ctx.token_tracker.context_percent(ctx.config.context_window);
     ctx.state.goal_status.clear();
     std::string cleared_session_id;
     if (ctx.session_manager) {
@@ -486,6 +490,66 @@ static std::string trim(const std::string& s) {
     size_t j = s.size();
     while (j > i && std::isspace(static_cast<unsigned char>(s[j - 1]))) --j;
     return s.substr(i, j - i);
+}
+
+static std::string lower_trimmed(const std::string& s) {
+    std::string out = trim(s);
+    std::transform(out.begin(), out.end(), out.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+    return out;
+}
+
+static bool browser_tools_enabled(const ToolExecutor* tools) {
+    return tools && tools->has_tool("browser_status");
+}
+
+static void cmd_browser(CommandContext& ctx, const std::string& args) {
+    std::string a = lower_trimmed(args);
+    if (a == "enable") a = "on";
+    if (a == "disable") a = "off";
+
+    std::string message;
+    if (!ctx.tools) {
+        message = "ACE Browser Bridge tools unavailable: no tool registry attached.";
+    } else if (a.empty() || a == "status") {
+        std::ostringstream oss;
+        oss << "ACE Browser Bridge tools: "
+            << (browser_tools_enabled(ctx.tools) ? "on" : "off")
+            << " for this session\n"
+            << "  config default: "
+            << (ctx.config.ace_browser_bridge.enabled ? "on" : "off") << "\n"
+            << "  tool_mode:      " << ctx.config.ace_browser_bridge.tool_mode << "\n"
+            << "Use /browser on, /browser off, or /browser toggle.";
+        message = oss.str();
+    } else if (a == "on") {
+        AceBrowserBridgeConfig cfg = ctx.config.ace_browser_bridge;
+        cfg.enabled = true;
+        ace_browser_bridge::unregister_ace_browser_bridge_tools(*ctx.tools);
+        ace_browser_bridge::register_ace_browser_bridge_tools(*ctx.tools, cfg);
+        message = "ACE Browser Bridge tools enabled for this session.";
+    } else if (a == "off") {
+        const std::size_t removed =
+            ace_browser_bridge::unregister_ace_browser_bridge_tools(*ctx.tools);
+        message = removed == 0
+            ? "ACE Browser Bridge tools were already off for this session."
+            : "ACE Browser Bridge tools disabled for this session.";
+    } else if (a == "toggle") {
+        if (browser_tools_enabled(ctx.tools)) {
+            ace_browser_bridge::unregister_ace_browser_bridge_tools(*ctx.tools);
+            message = "ACE Browser Bridge tools disabled for this session.";
+        } else {
+            AceBrowserBridgeConfig cfg = ctx.config.ace_browser_bridge;
+            cfg.enabled = true;
+            ace_browser_bridge::register_ace_browser_bridge_tools(*ctx.tools, cfg);
+            message = "ACE Browser Bridge tools enabled for this session.";
+        }
+    } else {
+        message = "Usage: /browser [status|on|off|toggle]";
+    }
+
+    std::lock_guard<std::mutex> lk(ctx.state.mu);
+    ctx.state.conversation.push_back({"system", message, false});
+    ctx.state.chat_follow_tail = true;
 }
 
 // /page-step: 切换 PgUp / PgDn 是否按单行滚动. 兜底给吞 Alt+方向键的终端.
@@ -955,8 +1019,9 @@ static void cmd_rewind(CommandContext& ctx, const std::string& /*args*/) {
     auto* al = &ctx.agent_loop;
     auto* tools = ctx.tools;
     auto* token_tracker = &ctx.token_tracker;
+    auto* config = &ctx.config;
     ctx.state.rewind_callback =
-        [&state = ctx.state, sm, al, tools, token_tracker](
+        [&state = ctx.state, sm, al, tools, token_tracker, config](
             TuiState::RewindItem item,
             TuiState::RewindRestoreMode mode) {
             // Caller holds state.mu, matching the /resume picker callback.
@@ -1015,8 +1080,9 @@ static void cmd_rewind(CommandContext& ctx, const std::string& /*args*/) {
                 state.input_cursor = state.input_text.size();
                 state.history_index = -1;
                 state.pending_queue.clear();
-                state.token_status.clear();
                 token_tracker->reset();
+                state.token_status = token_tracker->format_status(config->context_window);
+                state.token_percent = token_tracker->context_percent(config->context_window);
                 publish_goal_state_locked(state, *al, sm);
                 state.chat_follow_tail = true;
                 state.chat_focus_index = static_cast<int>(state.conversation.size()) - 1;
@@ -1039,6 +1105,7 @@ static void cmd_rewind(CommandContext& ctx, const std::string& /*args*/) {
 void register_builtin_commands(CommandRegistry& registry) {
     registry.register_command({"help", "Show available commands", cmd_help});
     registry.register_command({"clear", "Clear conversation history", cmd_clear});
+    registry.register_command({"new", "Alias for /clear", cmd_clear});
     register_model_command(registry);
     registry.register_command({"config", "Show current configuration", cmd_config});
     registry.register_command({"tokens", "Show session token usage", cmd_tokens});
@@ -1054,6 +1121,7 @@ void register_builtin_commands(CommandRegistry& registry) {
     register_history_command(registry);
     register_proxy_command(registry);
     register_websearch_command(registry);
+    registry.register_command({"browser", "Show or toggle ACE Browser Bridge tools for this session", cmd_browser});
     registry.register_command({"title", "Set or show the window title for this session", cmd_title});
     registry.register_command({"page-step", "Toggle single-line PgUp/PgDn scrolling (for terminals that swallow Alt+Arrow)", cmd_page_step});
     registry.register_command({"exit", "Exit acecode", cmd_exit});

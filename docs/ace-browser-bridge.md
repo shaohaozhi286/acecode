@@ -1,6 +1,6 @@
 # ace-browser-bridge 集成说明
 
-`ace-browser-bridge` 是浏览器插件，`ace-browser-cli` 是本地 C++ CLI/daemon。ACECode 内置的 `browser_*` tools 只调用 `ace-browser-cli` 的 JSON 契约，不直接访问浏览器插件内部协议。
+`ace-browser-bridge` 是浏览器插件，`ace-browser-host` 是本地 C++ CLI/daemon。ACECode 内置的 `browser_*` tools 只调用 `ace-browser-host` 的 JSON 契约，不直接访问浏览器插件内部协议。
 
 默认端口为 `52007`，daemon 只监听 `127.0.0.1`。
 
@@ -12,7 +12,6 @@
 {
   "ace_browser_bridge": {
     "enabled": true,
-    "cli_path": "ace-browser-cli.exe",
     "tool_mode": "progressive",
     "default_mode": "auto",
     "pointer_speed": "normal",
@@ -25,6 +24,8 @@
   }
 }
 ```
+
+`ace-browser-host(.exe)` 默认从 `acecode` 可执行文件同目录解析，不需要在配置里写路径。旧版本的路径覆盖字段仍会被兼容读取，但新配置不会再保存这些字段。
 
 `tool_mode`：
 
@@ -43,7 +44,14 @@
 7. 需要排查时用 `browser_trace` 和 `browser_list_tabs`。
 8. 结束任务时用 `browser_close_session` 清理 owned tabs。
 
-常规诊断路径使用 `browser_status`。当前没有新增单独的 `/browser` slash command；`browser_status` 已能返回 daemon、插件、协议版本、capabilities 和已启用工具组。
+常规诊断路径使用 `browser_status`。TUI 中也可以用 `/browser` 做当前会话级开关：
+
+- `/browser` 或 `/browser status`：显示当前会话是否已注册 `browser_*` tools。
+- `/browser on`：只为当前 TUI 会话启用 ACE Browser Bridge tools，不写入全局配置。
+- `/browser off`：只为当前 TUI 会话移除 `browser_*` tools，不写入全局配置。
+- `/browser toggle`：切换当前 TUI 会话状态。
+
+Web 设置页的“工具 -> ACE Browser Bridge”开关会写入全局 `ace_browser_bridge.enabled` 配置，并同步 daemon 当前共享工具集。新会话默认按该全局配置启动。
 
 ## 工具组
 
@@ -99,9 +107,9 @@
 
 ## 版本与本地边界
 
-CLI daemon 和插件握手时会交换 `protocol_version`。当前协议版本为 `0.1`；版本不兼容时页面动作返回 `version_mismatch`，`browser_status` 会显示 `protocol_version`、`cli_protocol_version` 和 `version_compatible`。
+CLI daemon 和插件握手时会交换 `protocol_version`。当前协议版本为 `0.1`；版本不兼容时页面动作返回 `version_mismatch`，`browser_status` 会显示 `protocol_version`、`host_protocol_version` 和 `version_compatible`。
 
-daemon 只监听 `127.0.0.1:52007`，CLI 和插件端点使用本地调用头区分调用方。ACECode 不直接访问 daemon HTTP 端点，只调用 `ace-browser-cli`。
+daemon 只监听 `127.0.0.1:52007`，CLI 和插件端点使用本地调用头区分调用方。ACECode 不直接访问 daemon HTTP 端点，只调用 `ace-browser-host`。
 
 插件 trace 保存在内存环形缓冲区，默认不落盘。工具结果会截断大文本、网络 body 和 evaluate value；截图/PDF 的 base64 在 CLI 写入本地文件后会被移除。
 

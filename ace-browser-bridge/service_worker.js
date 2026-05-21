@@ -1,7 +1,7 @@
 const ACE_SOURCE = "ace-browser-bridge";
 const DEFAULT_PORT = 52007;
 const PROTOCOL_VERSION = "0.1";
-const HEARTBEAT_ALARM = "ace-browser-cli-heartbeat";
+const HEARTBEAT_ALARM = "ace-browser-host-heartbeat";
 
 let daemonPort = DEFAULT_PORT;
 let connectionState = {

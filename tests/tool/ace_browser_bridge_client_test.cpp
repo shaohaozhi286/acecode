@@ -39,13 +39,13 @@ TEST(AceBrowserBridgeClientEnvelope, RejectsInvalidEnvelope) {
     auto envelope = AceBrowserBridgeClient::parse_envelope("not-json");
     ASSERT_FALSE(envelope.ok);
     ASSERT_TRUE(envelope.error.has_value());
-    EXPECT_EQ(envelope.error->code, "invalid_cli_response");
+    EXPECT_EQ(envelope.error->code, "invalid_host_response");
 }
 
 TEST(AceBrowserBridgeClientInvocation, BuildsCommandArgvAndStdin) {
     auto calls = std::make_shared<std::vector<Call>>();
     AceBrowserBridgeConfig cfg;
-    cfg.cli_path = "custom-cli";
+    cfg.host_path = "custom-host";
     AceBrowserBridgeClient client(cfg, [calls](const std::vector<std::string>& argv,
                                                const std::string& stdin_text,
                                                std::chrono::milliseconds) {
@@ -61,7 +61,7 @@ TEST(AceBrowserBridgeClientInvocation, BuildsCommandArgvAndStdin) {
 
     ASSERT_TRUE(envelope.ok);
     ASSERT_EQ(calls->size(), 1u);
-    EXPECT_EQ((*calls)[0].argv, (std::vector<std::string>{"custom-cli", "command", "--json"}));
+    EXPECT_EQ((*calls)[0].argv, (std::vector<std::string>{"custom-host", "command", "--json"}));
     auto sent = nlohmann::json::parse((*calls)[0].stdin_text);
     EXPECT_EQ(sent["session"], "demo");
     EXPECT_EQ(sent["action"], "snapshot");
@@ -71,7 +71,7 @@ TEST(AceBrowserBridgeClientInvocation, BuildsCommandArgvAndStdin) {
 TEST(AceBrowserBridgeClientInvocation, BuildsScreenshotArgv) {
     auto calls = std::make_shared<std::vector<Call>>();
     AceBrowserBridgeConfig cfg;
-    cfg.cli_path = "custom-cli";
+    cfg.host_path = "custom-host";
     AceBrowserBridgeClient client(cfg, [calls](const std::vector<std::string>& argv,
                                                const std::string& stdin_text,
                                                std::chrono::milliseconds) {
@@ -84,7 +84,7 @@ TEST(AceBrowserBridgeClientInvocation, BuildsScreenshotArgv) {
     ASSERT_TRUE(envelope.ok);
     ASSERT_EQ(calls->size(), 1u);
     EXPECT_EQ((*calls)[0].argv,
-              (std::vector<std::string>{"custom-cli", "screenshot", "--json",
+              (std::vector<std::string>{"custom-host", "screenshot", "--json",
                                         "--session", "demo", "--output", "C:/tmp/page.png"}));
     EXPECT_EQ((*calls)[0].stdin_text, "");
 }
@@ -132,17 +132,17 @@ TEST(AceBrowserBridgeClientInvocation, MapsTimeout) {
     auto envelope = client.status();
     ASSERT_FALSE(envelope.ok);
     ASSERT_TRUE(envelope.error.has_value());
-    EXPECT_EQ(envelope.error->code, "cli_timeout");
+    EXPECT_EQ(envelope.error->code, "host_timeout");
 }
 
 TEST(AceBrowserBridgeClientInvocation, MapsProcessLaunchErrorToCliNotFound) {
     AceBrowserBridgeClient client(AceBrowserBridgeConfig{},
         [](const std::vector<std::string>&, const std::string&, std::chrono::milliseconds) {
-            return CliProcessResult{-1, false, "", "Failed to start ace-browser-cli"};
+            return CliProcessResult{-1, false, "", "Failed to start ace-browser-host"};
         });
 
     auto envelope = client.status();
     ASSERT_FALSE(envelope.ok);
     ASSERT_TRUE(envelope.error.has_value());
-    EXPECT_EQ(envelope.error->code, "cli_not_found");
+    EXPECT_EQ(envelope.error->code, "host_not_found");
 }

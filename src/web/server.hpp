@@ -30,6 +30,7 @@ class LlmProvider;
 class SessionClient;
 class SessionRegistry;
 class SkillRegistry;
+class ToolExecutor;
 } // namespace acecode
 
 namespace acecode::desktop {
@@ -54,6 +55,7 @@ struct WebServerDeps {
     std::int64_t               start_time_unix_ms = 0;
     SessionClient*             session_client = nullptr;
     SessionRegistry*           session_registry = nullptr;
+    ToolExecutor*              tools = nullptr;
     acecode::desktop::WorkspaceRegistry* workspace_registry = nullptr;
     // 非 const:PUT /api/skills/:name 要写 cfg.skills.disabled 后调 set_disabled + reload。
     SkillRegistry*             skill_registry = nullptr;

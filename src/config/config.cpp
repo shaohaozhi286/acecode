@@ -557,8 +557,11 @@ AppConfig load_config() {
                 } else {
                     if (abj.contains("enabled") && abj["enabled"].is_boolean())
                         cfg.ace_browser_bridge.enabled = abj["enabled"].get<bool>();
-                    if (abj.contains("cli_path") && abj["cli_path"].is_string())
-                        cfg.ace_browser_bridge.cli_path = abj["cli_path"].get<std::string>();
+                    if (abj.contains("host_path") && abj["host_path"].is_string()) {
+                        cfg.ace_browser_bridge.host_path = abj["host_path"].get<std::string>();
+                    } else if (abj.contains("cli_path") && abj["cli_path"].is_string()) {
+                        cfg.ace_browser_bridge.host_path = abj["cli_path"].get<std::string>();
+                    }
                     if (abj.contains("tool_mode") && abj["tool_mode"].is_string()) {
                         std::string v = abj["tool_mode"].get<std::string>();
                         if (!is_one_of(v, {"progressive", "compact", "full"})) {
@@ -1093,8 +1096,6 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
         nlohmann::json abj = nlohmann::json::object();
         if (cfg.ace_browser_bridge.enabled != ab_d.enabled)
             abj["enabled"] = cfg.ace_browser_bridge.enabled;
-        if (cfg.ace_browser_bridge.cli_path != ab_d.cli_path)
-            abj["cli_path"] = cfg.ace_browser_bridge.cli_path;
         if (cfg.ace_browser_bridge.tool_mode != ab_d.tool_mode)
             abj["tool_mode"] = cfg.ace_browser_bridge.tool_mode;
         if (cfg.ace_browser_bridge.default_mode != ab_d.default_mode)

@@ -1,6 +1,8 @@
 #include "token_tracker.hpp"
 #include <sstream>
 #include <iomanip>
+#include <algorithm>
+#include <cstdint>
 
 namespace acecode {
 
@@ -153,6 +155,21 @@ std::string TokenTracker::format_status(int context_window) const {
     std::lock_guard<std::mutex> lk(mu_);
     // Display current context occupancy (last prompt tokens), not cumulative total
     return format_tokens(last_prompt_tokens_) + "/" + format_tokens(context_window);
+}
+
+int TokenTracker::context_percent(int context_window) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return context_percent_for(last_prompt_tokens_, context_window);
+}
+
+int TokenTracker::context_percent_for(int prompt_tokens, int context_window) {
+    if (prompt_tokens <= 0 || context_window <= 0) {
+        return 0;
+    }
+    const auto prompt = static_cast<std::int64_t>(prompt_tokens);
+    const auto context = static_cast<std::int64_t>(context_window);
+    const auto rounded = (prompt * 100 + context / 2) / context;
+    return static_cast<int>(std::clamp<std::int64_t>(rounded, 0, 100));
 }
 
 } // namespace acecode

@@ -125,6 +125,8 @@ export function createApi(base = null) {
     getDefaultModel:  ()             => request('GET',    '/api/config/default-model', undefined, base),
     getUiPreferences: ()             => request('GET',    '/api/config/ui-preferences', undefined, base),
     setUiPreferences: (prefs)        => request('PUT',    '/api/config/ui-preferences', prefs, base),
+    getAceBrowserBridge: ()          => request('GET',    '/api/config/ace-browser-bridge', undefined, base),
+    setAceBrowserBridge: (cfg)       => request('PUT',    '/api/config/ace-browser-bridge', cfg, base),
     getHistory:       (cwd, max=100) => request('GET',    `/api/history?cwd=${encodeURIComponent(cwd)}&max=${max}`, undefined, base),
     appendHistory:    (text)         => request('POST',   '/api/history', {text}, base),
     forkSession:      (sid, atMessageId, title) =>
