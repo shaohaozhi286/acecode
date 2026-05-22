@@ -1,4 +1,5 @@
 #include "config/config.hpp"
+#include "upgrade/check.hpp"
 #include "upgrade/http.hpp"
 #include "upgrade/manifest.hpp"
 #include "upgrade/upgrade.hpp"
@@ -174,4 +175,64 @@ TEST(UpgradeHttp, ChecksumMismatchReturnsBeforeExtraction) {
 
     EXPECT_NE(code, 0);
     EXPECT_NE(err.str().find("checksum mismatch"), std::string::npos);
+}
+
+TEST(UpgradeHttp, UpdateCheckReportsAvailableWithoutDownloadingPackage) {
+    bool package_requested = false;
+    LocalHttpServer server([&](httplib::Server& s) {
+        s.Get("/aceupdate.json", [](const httplib::Request&, httplib::Response& res) {
+            res.set_content(manifest_for("9.9.9", acecode::upgrade::current_target(),
+                                         "acecode.zip", std::string(64, 'a')),
+                            "application/json");
+        });
+        s.Get("/acecode.zip", [&](const httplib::Request&, httplib::Response& res) {
+            package_requested = true;
+            res.status = 500;
+        });
+    });
+
+    auto result = acecode::upgrade::check_for_update(
+        upgrade_config_for(server), "0.1.2");
+
+    EXPECT_EQ(result.status, acecode::upgrade::UpdateCheckStatus::UpdateAvailable);
+    EXPECT_TRUE(result.update_available());
+    EXPECT_EQ(result.latest_version, "9.9.9");
+    EXPECT_EQ(result.package_file, "acecode.zip");
+    EXPECT_FALSE(package_requested);
+}
+
+TEST(UpgradeHttp, UpdateCheckReportsUpToDate) {
+    LocalHttpServer server([](httplib::Server& s) {
+        s.Get("/aceupdate.json", [](const httplib::Request&, httplib::Response& res) {
+            res.set_content(manifest_for("0.1.2", acecode::upgrade::current_target(),
+                                         "acecode.zip", std::string(64, 'a')),
+                            "application/json");
+        });
+    });
+
+    auto result = acecode::upgrade::check_for_update(
+        upgrade_config_for(server), "0.1.2");
+
+    EXPECT_EQ(result.status, acecode::upgrade::UpdateCheckStatus::UpToDate);
+    EXPECT_FALSE(result.update_available());
+}
+
+TEST(UpgradeHttp, UpdateCheckRejectsInvalidConfigBeforeNetwork) {
+    acecode::AppConfig cfg;
+    cfg.upgrade.base_url = "ftp://updates.example.test/";
+
+    auto result = acecode::upgrade::check_for_update(cfg, "0.1.2");
+
+    EXPECT_EQ(result.status, acecode::upgrade::UpdateCheckStatus::InvalidConfig);
+    EXPECT_FALSE(result.error.empty());
+}
+
+TEST(UpgradeHttp, UpdateCheckReportsManifestFailure) {
+    LocalHttpServer server([](httplib::Server&) {});
+
+    auto result = acecode::upgrade::check_for_update(
+        upgrade_config_for(server), "0.1.2");
+
+    EXPECT_EQ(result.status, acecode::upgrade::UpdateCheckStatus::ManifestUnavailable);
+    EXPECT_EQ(result.http_status, 404);
 }

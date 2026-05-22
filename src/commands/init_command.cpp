@@ -232,10 +232,7 @@ bool has_usable_init_provider(const AppConfig& cfg) {
         // Background token refresh handles validity; treat as usable if chosen.
         return true;
     }
-    if (cfg.provider == "codex") {
-        // Codex app-server owns account validity and reports auth failures at request time.
-        return true;
-    }
+    if (cfg.provider == "codex") return false;
     if (cfg.provider == "openai") {
         return !cfg.openai.api_key.empty();
     }

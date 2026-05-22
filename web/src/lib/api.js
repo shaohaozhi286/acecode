@@ -127,6 +127,8 @@ export function createApi(base = null) {
     setUiPreferences: (prefs)        => request('PUT',    '/api/config/ui-preferences', prefs, base),
     getUpgradeConfig: ()             => request('GET',    '/api/config/upgrade', undefined, base),
     setUpgradeConfig: (cfg)          => request('PUT',    '/api/config/upgrade', cfg, base),
+    getUpdateStatus: ()              => request('GET',    '/api/update/status', undefined, base),
+    startUpdate: ()                  => request('POST',   '/api/update/start', undefined, base),
     getAceBrowserBridge: ()          => request('GET',    '/api/config/ace-browser-bridge', undefined, base),
     setAceBrowserBridge: (cfg)       => request('PUT',    '/api/config/ace-browser-bridge', cfg, base),
     getHistory:       (cwd, max=100) => request('GET',    `/api/history?cwd=${encodeURIComponent(cwd)}&max=${max}`, undefined, base),

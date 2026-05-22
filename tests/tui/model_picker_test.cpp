@@ -72,3 +72,21 @@ TEST(ModelPicker, EmptySavedModelsReturnsEmptyList) {
     auto opts = build_model_picker_options(cfg, "copilot-fast");
     EXPECT_TRUE(opts.empty());
 }
+
+// 场景:旧配置里还有 codex saved model → picker 不展示已屏蔽 provider。
+TEST(ModelPicker, BuildOptionsSkipsDisabledCodexProvider) {
+    auto cfg = make_cfg_with_two();
+    ModelProfile c;
+    c.name = "codex";
+    c.provider = "codex";
+    c.model = "gpt-5.5";
+    cfg.saved_models.push_back(c);
+
+    auto opts = build_model_picker_options(cfg, "codex");
+
+    ASSERT_EQ(opts.size(), 2u);
+    for (const auto& o : opts) {
+        EXPECT_NE(o.provider, "codex");
+        EXPECT_FALSE(o.is_current);
+    }
+}

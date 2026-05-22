@@ -66,6 +66,7 @@ struct WebServerDeps {
     std::mutex*                    provider_mu = nullptr;
     bool                       native_folder_picker_enabled = false;
     std::function<std::optional<std::string>()> native_folder_picker;
+    std::function<bool(std::string*)> start_update_command;
     bool                       dangerous = false;
 };
 

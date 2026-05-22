@@ -13,7 +13,7 @@ namespace acecode {
 
 struct SavedModelDraft {
     std::string name;
-    std::string provider;  // "openai" | "copilot"
+    std::string provider;  // "openai" | "copilot"; legacy "codex" is disabled
     std::string model;
     std::string base_url;  // openai 必填
     std::string api_key;   // openai 必填
@@ -28,6 +28,7 @@ enum class SavedModelEditError {
     RESERVED_NAME,        // 以 ( 开头(系统占用)
     NAME_TAKEN,           // 新增/改名时撞已有 name
     UNKNOWN_PROVIDER,     // 不是 openai/copilot
+    PROVIDER_DISABLED,    // provider 已知但当前被屏蔽
     MISSING_MODEL,
     MISSING_BASE_URL,     // openai 必填
     INVALID_API_KEY,      // openai 必填(空字符串触发)

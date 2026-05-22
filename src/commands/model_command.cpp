@@ -1,6 +1,7 @@
 #include "model_command.hpp"
 
 #include "../config/config.hpp"
+#include "../config/model_provider_registry.hpp"
 #include "../config/saved_models.hpp"
 #include "../config/saved_models_editor.hpp"
 #include "../provider/apply_model_to_session.hpp"
@@ -24,7 +25,7 @@ namespace {
 std::optional<ModelProfile> lookup_entry_by_name(const AppConfig& cfg,
                                                  const std::string& name) {
     for (const auto& e : cfg.saved_models) {
-        if (e.name == name) return e;
+        if (e.name == name && is_runtime_model_provider_enabled(e.provider)) return e;
     }
     return std::nullopt;
 }
@@ -146,7 +147,10 @@ void render_model_picker(CommandContext& ctx) {
         // 找 entry。
         std::optional<ModelProfile> entry;
         for (const auto& e : config_ptr->saved_models) {
-            if (e.name == name) { entry = e; break; }
+            if (e.name == name && is_runtime_model_provider_enabled(e.provider)) {
+                entry = e;
+                break;
+            }
         }
         if (!entry.has_value()) {
             state_ptr->conversation.push_back(
@@ -336,7 +340,10 @@ void cmd_model_set_default(CommandContext& ctx, const ParsedModelSub& p) {
     }
     bool found = false;
     for (const auto& e : ctx.config.saved_models) {
-        if (e.name == p.name) { found = true; break; }
+        if (e.name == p.name && is_runtime_model_provider_enabled(e.provider)) {
+            found = true;
+            break;
+        }
     }
     if (!found) {
         announce_editor_result(ctx, SavedModelEditError::NOT_FOUND, "");
@@ -364,7 +371,6 @@ void cmd_model(CommandContext& ctx, const std::string& args) {
         ctx.state.conversation.push_back({"system",
             "Usage: /model | /model <name> | /model --cwd <name> | /model --default <name>\n"
             "       /model add name=X provider=openai model=Y base_url=Z api_key=K [context_window=N]\n"
-            "       /model add name=codex provider=codex model=gpt-5.5\n"
             "       /model edit <name> [field=value ...]\n"
             "       /model rm <name>\n"
             "       /model set-default <name>",

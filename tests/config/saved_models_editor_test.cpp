@@ -138,24 +138,19 @@ TEST(SavedModelsEditor, AddRejectsNegativeContextWindow) {
     EXPECT_EQ(cfg.saved_models.size(), 1u);
 }
 
-// 场景:add codex 不要求 base_url/api_key,只要求 model。
-TEST(SavedModelsEditor, AddAcceptsCodexDraftWithoutApiFields) {
+// 场景:add codex 被屏蔽,不能新增到可选 saved_models。
+TEST(SavedModelsEditor, AddRejectsDisabledCodexProvider) {
     auto cfg = make_cfg_with_one_default();
     SavedModelDraft d;
     d.name = "codex";
     d.provider = "codex";
     d.model = "gpt-5.5";
-    EXPECT_EQ(add_saved_model(cfg, d), SavedModelEditError::OK);
-    ASSERT_EQ(cfg.saved_models.size(), 2u);
-    EXPECT_EQ(cfg.saved_models[1].name, "codex");
-    EXPECT_EQ(cfg.saved_models[1].provider, "codex");
-    EXPECT_EQ(cfg.saved_models[1].model, "gpt-5.5");
-    EXPECT_TRUE(cfg.saved_models[1].base_url.empty());
-    EXPECT_TRUE(cfg.saved_models[1].api_key.empty());
+    EXPECT_EQ(add_saved_model(cfg, d), SavedModelEditError::PROVIDER_DISABLED);
+    EXPECT_EQ(cfg.saved_models.size(), 1u);
 }
 
-// 场景:update 可把非默认 entry 改为 codex,并清掉 OpenAI 专用字段。
-TEST(SavedModelsEditor, UpdateCanSwitchEntryToCodex) {
+// 场景:update 也不能把现有 entry 切到 codex。
+TEST(SavedModelsEditor, UpdateRejectsSwitchToDisabledCodexProvider) {
     auto cfg = make_cfg_with_one_default();
     add_saved_model(cfg, good_openai_draft("local-lm"));
 
@@ -163,10 +158,9 @@ TEST(SavedModelsEditor, UpdateCanSwitchEntryToCodex) {
     d.name = "local-lm";
     d.provider = "codex";
     d.model = "gpt-5.5";
-    EXPECT_EQ(update_saved_model(cfg, "local-lm", d), SavedModelEditError::OK);
-    EXPECT_EQ(cfg.saved_models[1].provider, "codex");
-    EXPECT_TRUE(cfg.saved_models[1].base_url.empty());
-    EXPECT_TRUE(cfg.saved_models[1].api_key.empty());
+    EXPECT_EQ(update_saved_model(cfg, "local-lm", d),
+              SavedModelEditError::PROVIDER_DISABLED);
+    EXPECT_EQ(cfg.saved_models[1].provider, "openai");
 }
 
 // 场景:update 不存在的 name → NOT_FOUND,cfg 不变。
@@ -296,6 +290,10 @@ TEST(SavedModelsEditor, AddLeavesCfgUnchangedOnAllRejections) {
     auto bad_provider = good_openai_draft();
     bad_provider.provider = "anthropic";
     try_reject(bad_provider, SavedModelEditError::UNKNOWN_PROVIDER);
+
+    auto disabled_provider = good_openai_draft();
+    disabled_provider.provider = "codex";
+    try_reject(disabled_provider, SavedModelEditError::PROVIDER_DISABLED);
 
     auto no_model = good_openai_draft();
     no_model.model = "";

@@ -85,6 +85,7 @@
 #  include "daemon/service_win.hpp"
 #endif
 #include "upgrade/apply.hpp"
+#include "upgrade/check.hpp"
 #include "upgrade/manifest.hpp"
 #include "upgrade/upgrade.hpp"
 #include "commands/command_registry.hpp"
@@ -548,6 +549,10 @@ static Element render_regular_sidebar(const acecode::TuiState& state,
         bottom_rows.push_back(text(""));
     }
     bottom_rows.push_back(paragraph(version_str) | color(Color::GrayLight) | dim);
+    if (!state.update_notice.empty()) {
+        bottom_rows.push_back(paragraph(state.update_notice) |
+                              color(Color::YellowLight));
+    }
     if (!state.status_line.empty()) {
         bottom_rows.push_back(paragraph(state.status_line) | color(Color::White));
     }
@@ -1539,6 +1544,30 @@ static void initialize_web_search_runtime(const AppConfig& config) {
     }
 }
 
+static std::thread start_tui_update_check(const AppConfig& config,
+                                          TuiState& state,
+                                          ScreenInteractive& screen) {
+    return std::thread([config, &state, &screen] {
+        try {
+            auto result = acecode::upgrade::check_for_update(config, ACECODE_VERSION);
+            if (result.update_available()) {
+                std::lock_guard<std::mutex> lk(state.mu);
+                state.update_notice = "Update available: v" + result.latest_version +
+                                      ". Run acecode update.";
+                screen.PostEvent(Event::Custom);
+            } else if (result.status != acecode::upgrade::UpdateCheckStatus::UpToDate) {
+                LOG_DEBUG(std::string("[upgrade] startup check skipped: ") +
+                          acecode::upgrade::update_check_status_name(result.status) +
+                          (result.error.empty() ? "" : " (" + result.error + ")"));
+            }
+        } catch (const std::exception& e) {
+            LOG_DEBUG(std::string("[upgrade] startup check failed: ") + e.what());
+        } catch (...) {
+            LOG_DEBUG("[upgrade] startup check failed with unknown exception");
+        }
+    });
+}
+
 // 实现已抽到 src/skills/skill_init.{hpp,cpp},供 TUI 与 daemon(src/daemon/worker.cpp)
 // 共用。下方所有 `initialize_skill_registry(...)` 调用站点经 `using namespace acecode`
 // 解析到 `acecode::initialize_skill_registry`。
@@ -1703,6 +1732,7 @@ static void shutdown_after_tui_loop(TuiState& state,
                                     std::atomic<bool>& agent_aborting,
                                     std::thread& anim_thread,
                                     std::thread& auth_thread,
+                                    std::thread& update_check_thread,
                                     SessionManager& session_manager,
                                     const AppConfig& config) {
     g_active_screen.store(nullptr, std::memory_order_release);
@@ -1753,6 +1783,10 @@ static void shutdown_after_tui_loop(TuiState& state,
 
     if (auth_thread.joinable()) {
         auth_thread.join();
+    }
+
+    if (update_check_thread.joinable()) {
+        update_check_thread.join();
     }
 
     // Finalize session before exit
@@ -1937,6 +1971,7 @@ static int run_interactive_app(const CliOptions& cli,
     // CatchEvent handler reads screen.GetSelection() on demand; we don't
     // need per-change work here yet. Future: hook "auto-clear on new drag".
     screen.SelectionChange([]{});
+    std::thread update_check_thread = start_tui_update_check(config, state, screen);
 
     // AskUserQuestion 依赖 TuiState + ScreenInteractive 才能发起阻塞 overlay,
     // 所以和其它无依赖的内置工具分开、等 `state` / `screen` 就绪之后再注册。
@@ -4730,6 +4765,9 @@ static int run_interactive_app(const CliOptions& cli,
         if (conhost_compat_layout) {
             header = vbox({
                 text(version_str) | color(Color::GrayLight) | dim,
+                state.update_notice.empty()
+                    ? emptyElement()
+                    : paragraph(state.update_notice) | color(Color::YellowLight),
                 text(state.status_line) | color(Color::White),
                 text(cwd_display) | color(Color::CyanLight) | dim,
             }) | bgcolor(Color::RGB(0, 30, 45));
@@ -4757,6 +4795,9 @@ static int run_interactive_app(const CliOptions& cli,
                     filler(),
                     vbox({
                         text(version_str) | color(Color::GrayLight) | dim,
+                        state.update_notice.empty()
+                            ? emptyElement()
+                            : paragraph(state.update_notice) | color(Color::YellowLight),
                         text(state.status_line) | color(Color::White),
                         text(cwd_display) | color(Color::CyanLight) | dim,
                     }),
@@ -5713,6 +5754,7 @@ static int run_interactive_app(const CliOptions& cli,
     run_tui_loop(screen, renderer);
     shutdown_after_tui_loop(state, agent_loop, mcp_manager, running,
                             agent_aborting, anim_thread, auth_thread,
+                            update_check_thread,
                             session_manager, config);
 
     return 0;

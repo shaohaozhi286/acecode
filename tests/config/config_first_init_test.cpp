@@ -133,7 +133,7 @@ TEST_F(ConfigFirstInitTest, OldSchemaConfigSynthesizesCopilotSavedModel) {
     EXPECT_EQ(cfg.default_model_name, "copilot");
 }
 
-TEST_F(ConfigFirstInitTest, OldSchemaConfigSynthesizesCodexSavedModel) {
+TEST_F(ConfigFirstInitTest, OldSchemaCodexConfigFallsBackToCopilotSavedModel) {
     fs::create_directories(temp_home / ".acecode");
     {
         std::ofstream ofs(temp_home / ".acecode" / "config.json");
@@ -152,10 +152,34 @@ TEST_F(ConfigFirstInitTest, OldSchemaConfigSynthesizesCodexSavedModel) {
     auto cfg = acecode::load_config();
 
     ASSERT_EQ(cfg.saved_models.size(), 1u);
-    EXPECT_EQ(cfg.saved_models[0].name, "codex");
-    EXPECT_EQ(cfg.saved_models[0].provider, "codex");
-    EXPECT_EQ(cfg.saved_models[0].model, "gpt-5.5");
-    EXPECT_EQ(cfg.default_model_name, "codex");
+    EXPECT_EQ(cfg.provider, "copilot");
+    EXPECT_EQ(cfg.saved_models[0].name, "copilot");
+    EXPECT_EQ(cfg.saved_models[0].provider, "copilot");
+    EXPECT_EQ(cfg.saved_models[0].model, "gpt-4o");
+    EXPECT_EQ(cfg.default_model_name, "copilot");
+}
+
+TEST_F(ConfigFirstInitTest, SavedModelsDefaultCodexFallsBackToEnabledModel) {
+    fs::create_directories(temp_home / ".acecode");
+    {
+        std::ofstream ofs(temp_home / ".acecode" / "config.json");
+        ofs << R"({
+    "provider": "codex",
+    "codex": { "model": "gpt-5.5" },
+    "copilot": { "model": "gpt-4o" },
+    "saved_models": [
+        { "name": "codex", "provider": "codex", "model": "gpt-5.5" },
+        { "name": "copilot", "provider": "copilot", "model": "gpt-4o" }
+    ],
+    "default_model_name": "codex"
+})";
+    }
+
+    auto cfg = acecode::load_config();
+
+    EXPECT_EQ(cfg.provider, "copilot");
+    ASSERT_EQ(cfg.saved_models.size(), 2u);
+    EXPECT_EQ(cfg.default_model_name, "copilot");
 }
 
 } // namespace

@@ -21,6 +21,8 @@
 #include "../skills/skill_metadata.hpp"
 #include "../tool/ace_browser_bridge/browser_tools.hpp"
 #include "../tool/tool_executor.hpp"
+#include "../upgrade/apply.hpp"
+#include "../upgrade/check.hpp"
 #include "../utils/logger.hpp"
 #include "../utils/cwd_hash.hpp"
 #include "handlers/files_handler.hpp"
@@ -62,6 +64,16 @@
 #include <nlohmann/json.hpp>
 #include <cpr/cpr.h>
 #include "../network/proxy_resolver.hpp"
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <sys/types.h>
+#include <unistd.h>
+#endif
 
 #ifdef DELETE
 #undef DELETE
@@ -139,6 +151,72 @@ json ui_preferences_to_json(const WebUiPreferencesConfig& prefs) {
 
 json upgrade_config_to_json(const UpgradeConfig& cfg) {
     return json{{"base_url", normalize_upgrade_base_url(cfg.base_url)}};
+}
+
+json update_check_to_json(const acecode::upgrade::UpdateCheckResult& result) {
+    json out = {
+        {"status", acecode::upgrade::update_check_status_name(result.status)},
+        {"update_available", result.update_available()},
+        {"current_version", result.current_version},
+        {"latest_version", result.latest_version},
+        {"target", result.target},
+        {"manifest_url", result.manifest_url},
+    };
+    if (!result.package_file.empty()) out["package_file"] = result.package_file;
+    if (!result.package_url.empty()) out["package_url"] = result.package_url;
+    if (result.package_size) out["package_size"] = *result.package_size;
+    if (result.http_status != 0) out["http_status"] = result.http_status;
+    if (!result.error.empty()) out["error"] = result.error;
+    return out;
+}
+
+bool start_default_update_command(std::string* error) {
+    auto exe = acecode::upgrade::current_executable_path("");
+    if (exe.empty()) {
+        if (error) *error = "cannot resolve acecode executable path";
+        return false;
+    }
+
+#ifdef _WIN32
+    std::string cmd = acecode::upgrade::quote_command_arg(exe.string()) + " update";
+    std::vector<char> mutable_cmd(cmd.begin(), cmd.end());
+    mutable_cmd.push_back('\0');
+    std::string cwd = exe.parent_path().string();
+    STARTUPINFOA si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    BOOL ok = ::CreateProcessA(
+        nullptr,
+        mutable_cmd.data(),
+        nullptr,
+        nullptr,
+        FALSE,
+        CREATE_NEW_CONSOLE,
+        nullptr,
+        cwd.empty() ? nullptr : cwd.c_str(),
+        &si,
+        &pi);
+    if (!ok) {
+        if (error) *error = "failed to launch acecode update";
+        return false;
+    }
+    ::CloseHandle(pi.hThread);
+    ::CloseHandle(pi.hProcess);
+    return true;
+#else
+    pid_t pid = ::fork();
+    if (pid < 0) {
+        if (error) *error = "failed to fork acecode update";
+        return false;
+    }
+    if (pid == 0) {
+        (void)::setsid();
+        std::string exe_s = exe.string();
+        ::execl(exe_s.c_str(), exe_s.c_str(), "update", static_cast<char*>(nullptr));
+        ::_exit(127);
+    }
+    return true;
+#endif
 }
 
 json ace_browser_bridge_settings_to_json(const AceBrowserBridgeConfig& cfg) {
@@ -2700,6 +2778,14 @@ struct WebServer::Impl {
         ([this](const crow::request& req) {
             return cors_preflight(req);
         });
+        CROW_ROUTE(app, "/api/update/status").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
+        CROW_ROUTE(app, "/api/update/start").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
         CROW_ROUTE(app, "/api/config/ace-browser-bridge").methods(crow::HTTPMethod::Options)
         ([this](const crow::request& req) {
             return cors_preflight(req);
@@ -2724,6 +2810,60 @@ struct WebServer::Impl {
             crow::response r(200);
             r.add_header("Content-Type", "application/json");
             r.body = upgrade_config_to_json(deps.app_config->upgrade).dump();
+            return with_cors(req, std::move(r));
+        });
+
+        // GET /api/update/status: manifest-only update availability check.
+        CROW_ROUTE(app, "/api/update/status").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.app_config) return crow::response(503);
+
+            auto result = acecode::upgrade::check_for_update(*deps.app_config,
+                                                             ACECODE_VERSION);
+            crow::response r(200);
+            r.add_header("Content-Type", "application/json");
+            r.body = update_check_to_json(result).dump();
+            return with_cors(req, std::move(r));
+        });
+
+        // POST /api/update/start: explicit user-triggered acecode update.
+        CROW_ROUTE(app, "/api/update/start").methods(crow::HTTPMethod::POST)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.app_config) return crow::response(503);
+
+            auto json_err = [&](int status, const char* code, const std::string& msg) {
+                crow::response r(status);
+                r.body = json{{"error", code}, {"message", msg}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            };
+
+            auto result = acecode::upgrade::check_for_update(*deps.app_config,
+                                                             ACECODE_VERSION);
+            if (!result.update_available()) {
+                crow::response r(409);
+                r.add_header("Content-Type", "application/json");
+                r.body = json{{"error", "NO_UPDATE"},
+                              {"message", "no compatible update is available"},
+                              {"status", update_check_to_json(result)}}.dump();
+                return with_cors(req, std::move(r));
+            }
+
+            std::string start_error;
+            bool started = deps.start_update_command
+                ? deps.start_update_command(&start_error)
+                : start_default_update_command(&start_error);
+            if (!started) {
+                return json_err(500, "START_FAILED", start_error);
+            }
+
+            crow::response r(202);
+            r.add_header("Content-Type", "application/json");
+            r.body = json{{"started", true},
+                          {"latest_version", result.latest_version},
+                          {"message", "acecode update started"}}.dump();
             return with_cors(req, std::move(r));
         });
 

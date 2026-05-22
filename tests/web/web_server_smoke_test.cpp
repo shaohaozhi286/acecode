@@ -15,6 +15,7 @@
 // 集成测验证。当前 WS 行为依赖 spec 里描述的 hello-binding 协议。
 
 #include <gtest/gtest.h>
+#include <httplib.h>
 
 #include "config/saved_models.hpp"
 #include "permissions.hpp"
@@ -26,6 +27,7 @@
 #include "session/session_storage.hpp"
 #include "skills/skill_registry.hpp"
 #include "tool/tool_executor.hpp"
+#include "upgrade/manifest.hpp"
 #include "utils/encoding.hpp"
 #include "utils/cwd_hash.hpp"
 #include "web/server.hpp"
@@ -101,7 +103,8 @@ struct WebServerFixture {
         bool register_default_workspace = true,
         bool native_folder_picker_enabled = false,
         std::function<std::optional<std::string>()> native_folder_picker = {},
-        bool attach_skill_registry = true) {
+        bool attach_skill_registry = true,
+        std::function<bool(std::string*)> start_update_command = {}) {
         port = pick_test_port();
         web_cfg.bind = "127.0.0.1";
         web_cfg.port = port;
@@ -162,6 +165,7 @@ struct WebServerFixture {
         wdeps.workspace_registry = workspace_registry.get();
         wdeps.native_folder_picker_enabled = native_folder_picker_enabled;
         wdeps.native_folder_picker = std::move(native_folder_picker);
+        wdeps.start_update_command = std::move(start_update_command);
         wdeps.skill_registry = attach_skill_registry ? &skill_registry : nullptr;
         wdeps.dangerous = false;
 
@@ -191,6 +195,42 @@ struct WebServerFixture {
         return "http://127.0.0.1:" + std::to_string(port) + path;
     }
 };
+
+struct LocalUpdateServer {
+    httplib::Server svr;
+    int port = 0;
+    std::thread th;
+
+    explicit LocalUpdateServer(std::function<void(httplib::Server&)> setup) {
+        setup(svr);
+        port = svr.bind_to_any_port("127.0.0.1");
+        th = std::thread([this] { svr.listen_after_bind(); });
+        for (int i = 0; i < 50 && !svr.is_running(); ++i) {
+            std::this_thread::sleep_for(10ms);
+        }
+    }
+
+    ~LocalUpdateServer() {
+        svr.stop();
+        if (th.joinable()) th.join();
+    }
+
+    std::string base_url() const {
+        return "http://127.0.0.1:" + std::to_string(port) + "/";
+    }
+};
+
+std::string update_manifest_for(const std::string& version) {
+    return R"({
+      "schema_version": 1,
+      "latest": ")" + version + R"(",
+      "releases": [
+        {"version": ")" + version + R"(", "packages": [
+          {"target": ")" + acecode::upgrade::current_target() + R"(", "file": "acecode.zip", "sha256": ")" + std::string(64, 'a') + R"("}
+        ]}
+      ]
+    })";
+}
 
 struct CwdModelOverrideCleanup {
     std::string cwd;
@@ -1337,6 +1377,57 @@ TEST(WebServerHttp, PutUpgradeConfigRejectsInvalidBaseUrl) {
     auto j = json::parse(r.text);
     EXPECT_EQ(j["error"], "BAD_REQUEST");
     EXPECT_EQ(fx.cfg.upgrade.base_url, before);
+}
+
+// 场景:GET /api/update/status 只检查 manifest,返回有新版状态。
+TEST(WebServerHttp, GetUpdateStatusReportsAvailableVersion) {
+    LocalUpdateServer update_server([](httplib::Server& s) {
+        s.Get("/aceupdate.json", [](const httplib::Request&, httplib::Response& res) {
+            res.set_content(update_manifest_for("9.9.9"), "application/json");
+        });
+        s.Get("/acecode.zip", [](const httplib::Request&, httplib::Response& res) {
+            res.status = 500;
+        });
+    });
+    WebServerFixture fx;
+    fx.cfg.upgrade.base_url = update_server.base_url();
+    fx.cfg.upgrade.timeout_ms = 3000;
+
+    auto r = cpr::Get(cpr::Url{fx.url("/api/update/status")});
+    ASSERT_EQ(r.status_code, 200) << r.text;
+    auto j = json::parse(r.text);
+    EXPECT_EQ(j["status"], "available");
+    EXPECT_EQ(j["update_available"], true);
+    EXPECT_EQ(j["latest_version"], "9.9.9");
+    EXPECT_EQ(j["package_file"], "acecode.zip");
+}
+
+// 场景:POST /api/update/start 显式用户动作才触发升级命令。
+TEST(WebServerHttp, PostUpdateStartRunsInjectedUpdateCommand) {
+    LocalUpdateServer update_server([](httplib::Server& s) {
+        s.Get("/aceupdate.json", [](const httplib::Request&, httplib::Response& res) {
+            res.set_content(update_manifest_for("9.9.9"), "application/json");
+        });
+    });
+    bool called = false;
+    WebServerFixture fx(
+        true,
+        false,
+        {},
+        true,
+        [&](std::string*) {
+            called = true;
+            return true;
+        });
+    fx.cfg.upgrade.base_url = update_server.base_url();
+    fx.cfg.upgrade.timeout_ms = 3000;
+
+    auto r = cpr::Post(cpr::Url{fx.url("/api/update/start")});
+    ASSERT_EQ(r.status_code, 202) << r.text;
+    auto j = json::parse(r.text);
+    EXPECT_EQ(j["started"], true);
+    EXPECT_EQ(j["latest_version"], "9.9.9");
+    EXPECT_TRUE(called);
 }
 
 // 场景: POST /api/sessions body 是非法 JSON → 400 + error JSON,不影响 server。

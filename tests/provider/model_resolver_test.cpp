@@ -69,6 +69,21 @@ TEST(ModelResolverTest, ResumeMetaWinsOverCwdAndDefault) {
     EXPECT_EQ(got.name, "beta");
 }
 
+// 额外 — resume 到旧 codex session 时跳过已屏蔽 provider,回落到 default。
+TEST(ModelResolverTest, DisabledCodexResumeMetaFallsBackToDefault) {
+    AppConfig cfg = make_cfg("alpha");
+    SessionMeta meta;
+    meta.id = "codex-old-session";
+    meta.provider = "codex";
+    meta.model = "gpt-5.5";
+    meta.model_preset = "codex";
+
+    ModelProfile got = resolve_effective_model(cfg, std::nullopt, std::optional{meta});
+
+    EXPECT_EQ(got.name, "alpha");
+    EXPECT_EQ(got.provider, "openai");
+}
+
 // 7.12 — saved_models 空 + default 空 → 从旧 schema 字段合成 copilot profile,
 // 确保 daemon / desktop 在未迁移配置下也能启动。
 TEST(ModelResolverTest, EmptyConfigUsesLegacyCopilotFallback) {
@@ -97,16 +112,16 @@ TEST(ModelResolverTest, EmptyConfigUsesLegacyOpenAiFields) {
     EXPECT_EQ(got.model, "local-model");
 }
 
-// 额外 — saved_models 为空但旧 codex 字段可用时,构造 codex 临时 profile。
-TEST(ModelResolverTest, EmptyConfigUsesLegacyCodexFields) {
+// 额外 — saved_models 为空但旧 codex 字段可用时,屏蔽 codex 并回退 copilot。
+TEST(ModelResolverTest, EmptyConfigWithLegacyCodexFallsBackToCopilot) {
     AppConfig cfg;
     cfg.provider = "codex";
     cfg.codex.model = "gpt-5.5";
 
     ModelProfile got = resolve_effective_model(cfg, std::nullopt, std::nullopt);
-    EXPECT_EQ(got.name, "codex");
-    EXPECT_EQ(got.provider, "codex");
-    EXPECT_EQ(got.model, "gpt-5.5");
+    EXPECT_EQ(got.name, "copilot");
+    EXPECT_EQ(got.provider, "copilot");
+    EXPECT_EQ(got.model, "gpt-4o");
     EXPECT_TRUE(got.base_url.empty());
     EXPECT_TRUE(got.api_key.empty());
 }

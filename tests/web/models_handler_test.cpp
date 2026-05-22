@@ -51,6 +51,20 @@ TEST(ModelsHandler, ListIncludesAllSavedModels) {
     EXPECT_EQ(arr[1]["context_window"], 64000);
 }
 
+// 场景:旧配置里遗留 codex saved model 时,Web 模型列表不暴露已屏蔽 provider。
+TEST(ModelsHandler, ListAndFindSkipDisabledCodexProvider) {
+    auto cfg = make_cfg_with_two();
+    ModelProfile c;
+    c.name = "codex";
+    c.provider = "codex";
+    c.model = "gpt-5.5";
+    cfg.saved_models.push_back(c);
+
+    auto arr = list_models(cfg);
+    ASSERT_EQ(arr.size(), 2u);
+    EXPECT_FALSE(find_model_by_name(cfg, "codex").has_value());
+}
+
 // 场景: 空 saved_models 时,list_models 返回空数组。
 TEST(ModelsHandler, ListEmptySavedReturnsEmptyArray) {
     AppConfig cfg;
@@ -124,6 +138,7 @@ TEST(ModelsHandler, ErrorToHttpStatusMapping) {
     EXPECT_EQ(http_status_for_edit_error(SavedModelEditError::INVALID_API_KEY), 400);
     EXPECT_EQ(http_status_for_edit_error(SavedModelEditError::RESERVED_NAME), 400);
     EXPECT_EQ(http_status_for_edit_error(SavedModelEditError::UNKNOWN_PROVIDER), 400);
+    EXPECT_EQ(http_status_for_edit_error(SavedModelEditError::PROVIDER_DISABLED), 400);
     EXPECT_EQ(http_status_for_edit_error(SavedModelEditError::MISSING_MODEL), 400);
     EXPECT_EQ(http_status_for_edit_error(SavedModelEditError::MISSING_BASE_URL), 400);
     EXPECT_EQ(http_status_for_edit_error(SavedModelEditError::INVALID_CONTEXT_WINDOW), 400);

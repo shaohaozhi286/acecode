@@ -237,7 +237,7 @@ struct NetworkConfig {
 };
 
 struct AppConfig {
-    std::string provider = "copilot"; // "copilot", "openai", or "codex"
+    std::string provider = "copilot"; // active runtime provider: "copilot" or "openai"
     OpenAiConfig openai;
     CopilotConfig copilot;
     CodexConfig codex;

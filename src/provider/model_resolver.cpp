@@ -1,6 +1,7 @@
 // model_resolver 实现。见 design.md D2。
 #include "model_resolver.hpp"
 
+#include "../config/model_provider_registry.hpp"
 #include "../utils/logger.hpp"
 
 namespace acecode {
@@ -12,7 +13,7 @@ const ModelProfile* find_by_name(const std::vector<ModelProfile>& entries,
                                const std::string& name) {
     if (name.empty()) return nullptr;
     for (const auto& e : entries) {
-        if (e.name == name) return &e;
+        if (e.name == name && is_runtime_model_provider_enabled(e.provider)) return &e;
     }
     return nullptr;
 }
@@ -24,7 +25,17 @@ const ModelProfile* find_by_provider_model(const std::vector<ModelProfile>& entr
                                          const std::string& provider,
                                          const std::string& model) {
     for (const auto& e : entries) {
-        if (e.provider == provider && e.model == model) return &e;
+        if (e.provider == provider && e.model == model &&
+            is_runtime_model_provider_enabled(e.provider)) {
+            return &e;
+        }
+    }
+    return nullptr;
+}
+
+const ModelProfile* first_enabled_profile(const std::vector<ModelProfile>& entries) {
+    for (const auto& e : entries) {
+        if (is_runtime_model_provider_enabled(e.provider)) return &e;
     }
     return nullptr;
 }
@@ -74,28 +85,36 @@ ModelProfile resolve_effective_model(const AppConfig& cfg,
     if (resumed_meta.has_value() &&
         !resumed_meta->provider.empty() &&
         !resumed_meta->model.empty()) {
-        if (!resumed_meta->model_preset.empty()) {
-            const ModelProfile* by_meta_name = find_by_name(
-                cfg.saved_models, resumed_meta->model_preset);
-            if (by_meta_name != nullptr) {
-                return *by_meta_name;
+        if (!is_runtime_model_provider_enabled(resumed_meta->provider)) {
+            LOG_WARN("[model_resolver] session meta provider '" +
+                     resumed_meta->provider +
+                     "' is disabled; falling back to configured model");
+        } else {
+            if (!resumed_meta->model_preset.empty()) {
+                const ModelProfile* by_meta_name = find_by_name(
+                    cfg.saved_models, resumed_meta->model_preset);
+                if (by_meta_name != nullptr) {
+                    return *by_meta_name;
+                }
+                LOG_WARN("[model_resolver] session meta points to missing model preset '" +
+                         resumed_meta->model_preset + "'; falling back to provider/model match");
             }
-            LOG_WARN("[model_resolver] session meta points to missing model preset '" +
-                     resumed_meta->model_preset + "'; falling back to provider/model match");
+            const ModelProfile* matched = find_by_provider_model(
+                cfg.saved_models, resumed_meta->provider, resumed_meta->model);
+            if (matched != nullptr) {
+                return *matched;
+            }
+            // 未命中 —— ad-hoc 兜底(spec: name 以 "(session:" 开头,触发系统提示)。
+            return build_ad_hoc_entry(cfg, *resumed_meta);
         }
-        const ModelProfile* matched = find_by_provider_model(
-            cfg.saved_models, resumed_meta->provider, resumed_meta->model);
-        if (matched != nullptr) {
-            return *matched;
-        }
-        // 未命中 —— ad-hoc 兜底(spec: name 以 "(session:" 开头,触发系统提示)。
-        return build_ad_hoc_entry(cfg, *resumed_meta);
     }
 
-    // 第 4 层:按 chosen_name 查 saved_models;没配置 default 时取 saved_models 首项。
+    // 第 4 层:按 chosen_name 查 saved_models;没配置 default 时取首个可运行 entry。
     const ModelProfile* by_name = find_by_name(cfg.saved_models, chosen_name);
     if (by_name != nullptr) return *by_name;
-    if (!cfg.saved_models.empty()) return cfg.saved_models.front();
+    if (const ModelProfile* fallback = first_enabled_profile(cfg.saved_models)) {
+        return *fallback;
+    }
 
     ModelProfile legacy = legacy_model_profile_from_config(cfg);
     LOG_WARN("[model_resolver] no saved_models configured; using legacy " +

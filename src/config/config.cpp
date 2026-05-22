@@ -1,5 +1,6 @@
 #include "config.hpp"
 
+#include "model_provider_registry.hpp"
 #include "../utils/constants.hpp"
 #include "../utils/logger.hpp"
 #include "../utils/paths.hpp"
@@ -47,9 +48,6 @@ bool is_one_of(const std::string& value, std::initializer_list<const char*> allo
 }
 
 std::string legacy_model_profile_name(const AppConfig& cfg) {
-    if (cfg.provider == "codex") {
-        return "codex";
-    }
     if (cfg.provider == "openai") {
         if (cfg.openai.models_dev_provider_id.has_value() &&
             !cfg.openai.models_dev_provider_id->empty()) {
@@ -78,14 +76,6 @@ bool is_valid_upgrade_base_url(const std::string& raw) {
 ModelProfile legacy_model_profile_from_config(const AppConfig& cfg) {
     ModelProfile profile;
     profile.name = legacy_model_profile_name(cfg);
-    if (cfg.provider == "codex") {
-        CodexConfig defaults;
-        profile.provider = "codex";
-        profile.model = cfg.codex.model.empty()
-            ? defaults.model
-            : cfg.codex.model;
-        return profile;
-    }
     if (cfg.provider == "openai") {
         OpenAiConfig defaults;
         profile.provider = "openai";
@@ -265,6 +255,88 @@ static void synthesize_legacy_saved_model_if_needed(AppConfig& cfg) {
         cfg.default_model_name.clear();
     }
     LOG_WARN("[config] saved_models missing and legacy fields cannot be migrated: " + err);
+}
+
+static bool profile_name_exists(const std::vector<ModelProfile>& entries,
+                                const std::string& name) {
+    for (const auto& entry : entries) {
+        if (entry.name == name) return true;
+    }
+    return false;
+}
+
+static const ModelProfile* find_profile_by_name(const std::vector<ModelProfile>& entries,
+                                                const std::string& name) {
+    if (name.empty()) return nullptr;
+    for (const auto& entry : entries) {
+        if (entry.name == name) return &entry;
+    }
+    return nullptr;
+}
+
+static const ModelProfile* first_enabled_profile(const std::vector<ModelProfile>& entries) {
+    for (const auto& entry : entries) {
+        if (is_runtime_model_provider_enabled(entry.provider)) return &entry;
+    }
+    return nullptr;
+}
+
+static ModelProfile fallback_copilot_profile(const AppConfig& cfg) {
+    ModelProfile profile;
+    profile.name = "copilot";
+    profile.provider = "copilot";
+    profile.model = cfg.copilot.model.empty() ? CopilotConfig{}.model : cfg.copilot.model;
+    return profile;
+}
+
+static void sanitize_disabled_model_providers(AppConfig& cfg) {
+    bool provider_was_disabled = false;
+    if (!is_runtime_model_provider_enabled(cfg.provider)) {
+        LOG_WARN(std::string("[config] provider '") + cfg.provider +
+                 "' is disabled; falling back to an enabled saved model");
+        provider_was_disabled = true;
+    }
+
+    if (cfg.saved_models.empty()) {
+        if (provider_was_disabled) cfg.provider = "copilot";
+        return;
+    }
+
+    const ModelProfile* default_profile =
+        find_profile_by_name(cfg.saved_models, cfg.default_model_name);
+    if (default_profile &&
+        is_runtime_model_provider_enabled(default_profile->provider)) {
+        if (provider_was_disabled) cfg.provider = default_profile->provider;
+        return;
+    }
+
+    if (default_profile) {
+        LOG_WARN(std::string("[config] default model '") + cfg.default_model_name +
+                 "' uses disabled provider '" + default_profile->provider + "'");
+    }
+
+    if (const ModelProfile* fallback = first_enabled_profile(cfg.saved_models)) {
+        if (cfg.default_model_name != fallback->name) {
+            LOG_WARN("[config] switching default model to enabled profile '" +
+                     fallback->name + "'");
+        }
+        cfg.default_model_name = fallback->name;
+        cfg.provider = fallback->provider;
+        return;
+    }
+
+    ModelProfile fallback = fallback_copilot_profile(cfg);
+    if (profile_name_exists(cfg.saved_models, fallback.name)) {
+        int suffix = 2;
+        do {
+            fallback.name = "copilot-" + std::to_string(suffix++);
+        } while (profile_name_exists(cfg.saved_models, fallback.name));
+    }
+    LOG_WARN("[config] no enabled saved model profiles; adding fallback '" +
+             fallback.name + "'");
+    cfg.saved_models.push_back(fallback);
+    cfg.default_model_name = cfg.saved_models.back().name;
+    cfg.provider = cfg.saved_models.back().provider;
 }
 
 AppConfig load_config() {
@@ -901,6 +973,7 @@ AppConfig load_config() {
             LOG_ERROR(std::string("[config] saved_models validation failure: ") + err);
             std::exit(1);
         }
+        sanitize_disabled_model_providers(cfg);
     } else if (!cfg.default_model_name.empty()) {
         LOG_WARN("[config] default_model_name ignored because saved_models is empty: " +
                  cfg.default_model_name);

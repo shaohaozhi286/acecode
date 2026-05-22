@@ -1,5 +1,7 @@
 #include "models_handler.hpp"
 
+#include "../../config/model_provider_registry.hpp"
+
 #include <algorithm>
 #include <set>
 
@@ -28,6 +30,7 @@ nlohmann::json entry_to_json(const ModelProfile& entry) {
 nlohmann::json list_models(const AppConfig& cfg) {
     nlohmann::json arr = nlohmann::json::array();
     for (const auto& entry : cfg.saved_models) {
+        if (!is_runtime_model_provider_enabled(entry.provider)) continue;
         arr.push_back(entry_to_json(entry));
     }
     return arr;
@@ -36,7 +39,7 @@ nlohmann::json list_models(const AppConfig& cfg) {
 std::optional<ModelProfile>
 find_model_by_name(const AppConfig& cfg, const std::string& name) {
     for (const auto& entry : cfg.saved_models) {
-        if (entry.name == name) return entry;
+        if (entry.name == name && is_runtime_model_provider_enabled(entry.provider)) return entry;
     }
     return std::nullopt;
 }

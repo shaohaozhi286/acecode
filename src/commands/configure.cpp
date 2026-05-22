@@ -490,16 +490,13 @@ int run_configure(const AppConfig& current_config) {
     bool catalog_ready = !compat_providers.empty();
 
     int default_provider = 0;
-    if (cfg.provider == "codex") {
-        default_provider = 1;
-    } else if (cfg.provider == "openai") {
-        default_provider = (cfg.openai.models_dev_provider_id.has_value() && catalog_ready) ? 2 : 3;
+    if (cfg.provider == "openai") {
+        default_provider = (cfg.openai.models_dev_provider_id.has_value() && catalog_ready) ? 1 : 2;
     }
 
     while (true) {
         std::vector<std::string> options = {
             "Copilot (GitHub)",
-            "Codex (ChatGPT)",
             catalog_ready ? ("Browse models.dev catalog (" +
                              std::to_string(compat_providers.size()) + " providers)")
                           : "Browse models.dev catalog (unavailable: no bundled snapshot found)",
@@ -516,10 +513,6 @@ int run_configure(const AppConfig& current_config) {
             break;
         }
         if (choice == 1) {
-            configure_codex(cfg);
-            break;
-        }
-        if (choice == 2) {
             if (!catalog_ready) {
                 std::cout << "Catalog unavailable; please pick another option.\n";
                 continue;
@@ -543,8 +536,6 @@ int run_configure(const AppConfig& current_config) {
     std::cout << "  Provider: " << cfg.provider << std::endl;
     if (cfg.provider == "copilot") {
         std::cout << "  Model:    " << cfg.copilot.model << std::endl;
-    } else if (cfg.provider == "codex") {
-        std::cout << "  Model:    " << cfg.codex.model << std::endl;
     } else {
         std::cout << "  Base URL: " << cfg.openai.base_url << std::endl;
         std::cout << "  API Key:  " << mask_key(cfg.openai.api_key) << std::endl;
@@ -563,7 +554,7 @@ int run_configure(const AppConfig& current_config) {
         LOG_INFO(std::string("configure: saved (") + format_source_line(cfg) +
                  ", model=" + (cfg.provider == "copilot"
                      ? cfg.copilot.model
-                     : (cfg.provider == "codex" ? cfg.codex.model : cfg.openai.model)) + ")");
+                     : cfg.openai.model) + ")");
         std::cout << "Configuration saved!" << std::endl;
     } else {
         std::cout << "Configuration cancelled." << std::endl;

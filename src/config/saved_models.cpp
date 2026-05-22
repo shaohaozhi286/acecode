@@ -2,16 +2,14 @@
 // 对应 openspec/changes/model-profiles 任务 1.2。
 #include "config/saved_models.hpp"
 
+#include "model_provider_registry.hpp"
+
 #include <set>
 #include <sstream>
 
 namespace acecode {
 
 namespace {
-
-bool is_supported_provider(const std::string& provider) {
-    return provider == "openai" || provider == "copilot" || provider == "codex";
-}
 
 // 单条 entry 解析。失败时把错误塞进 err(已带 entry 索引/name 上下文)并返回 nullopt。
 std::optional<ModelProfile> parse_one_entry(const nlohmann::json& node, std::size_t idx,
@@ -44,7 +42,7 @@ std::optional<ModelProfile> parse_one_entry(const nlohmann::json& node, std::siz
         err = oss.str();
         return std::nullopt;
     }
-    if (!is_supported_provider(e.provider)) {
+    if (!is_known_model_provider(e.provider)) {
         std::ostringstream oss;
         oss << "saved_models[" << idx << "] (name='" << e.name
             << "') has unknown provider '" << e.provider

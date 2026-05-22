@@ -1,6 +1,7 @@
 #include "upgrade.hpp"
 
 #include "apply.hpp"
+#include "check.hpp"
 #include "console.hpp"
 #include "http.hpp"
 #include "manifest.hpp"
@@ -14,6 +15,7 @@
 #include <iomanip>
 #include <iostream>
 #include <sstream>
+#include <utility>
 
 namespace fs = std::filesystem;
 
@@ -151,6 +153,84 @@ private:
 };
 
 } // namespace
+
+const char* update_check_status_name(UpdateCheckStatus status) {
+    switch (status) {
+        case UpdateCheckStatus::UpdateAvailable: return "available";
+        case UpdateCheckStatus::UpToDate: return "up_to_date";
+        case UpdateCheckStatus::InvalidConfig: return "invalid_config";
+        case UpdateCheckStatus::UnsupportedTarget: return "unsupported_target";
+        case UpdateCheckStatus::ManifestUnavailable: return "manifest_unavailable";
+        case UpdateCheckStatus::ManifestInvalid: return "manifest_invalid";
+    }
+    return "unknown";
+}
+
+UpdateCheckResult check_for_update(const AppConfig& config,
+                                   const std::string& current_version) {
+    UpdateCheckResult result;
+    result.current_version = current_version;
+    result.target = current_target();
+
+    std::string cfg_error;
+    if (!validate_upgrade_settings(config.upgrade, &cfg_error)) {
+        result.status = UpdateCheckStatus::InvalidConfig;
+        result.error = std::move(cfg_error);
+        return result;
+    }
+
+    if (result.target.find("unknown") != std::string::npos) {
+        result.status = UpdateCheckStatus::UnsupportedTarget;
+        result.error = "unsupported platform target: " + result.target;
+        return result;
+    }
+
+    const std::string base_url = normalize_update_base_url(config.upgrade.base_url);
+    result.manifest_url = manifest_url(base_url);
+
+    HttpTextResult manifest_resp = fetch_text(result.manifest_url,
+                                              config.upgrade.timeout_ms);
+    result.http_status = manifest_resp.status_code;
+    if (!manifest_resp.error.empty()) {
+        result.status = UpdateCheckStatus::ManifestUnavailable;
+        result.error = manifest_resp.error;
+        return result;
+    }
+    if (manifest_resp.status_code != 200) {
+        result.status = UpdateCheckStatus::ManifestUnavailable;
+        result.error = "manifest request returned HTTP " +
+                       std::to_string(manifest_resp.status_code);
+        return result;
+    }
+
+    std::string parse_error;
+    auto parsed_manifest = parse_update_manifest(manifest_resp.body, &parse_error);
+    if (!parsed_manifest) {
+        result.status = UpdateCheckStatus::ManifestInvalid;
+        result.error = parse_error;
+        return result;
+    }
+
+    SelectionResult selection =
+        select_update_package(*parsed_manifest, current_version, result.target);
+    if (selection.status == SelectionStatus::InvalidManifest) {
+        result.status = UpdateCheckStatus::ManifestInvalid;
+        result.error = selection.error;
+        return result;
+    }
+    if (selection.status == SelectionStatus::UpToDate || !selection.selected) {
+        result.status = UpdateCheckStatus::UpToDate;
+        result.latest_version = parsed_manifest->latest;
+        return result;
+    }
+
+    result.status = UpdateCheckStatus::UpdateAvailable;
+    result.latest_version = selection.selected->version;
+    result.package_file = selection.selected->package.file;
+    result.package_url = resolve_package_url(base_url, result.package_file);
+    result.package_size = selection.selected->package.size;
+    return result;
+}
 
 int run_upgrade_command(const AppConfig& config,
                         const std::string& argv0,
