@@ -259,7 +259,11 @@ BridgeEnvelope health_gate(const std::shared_ptr<BrowserToolState>& state) {
     BridgeEnvelope status = state->client->status();
     if (!status.ok) return status;
     if (!status.data.value("running", false)) {
-        return make_error("daemon_not_running", "ace-browser-host daemon is not running");
+        std::string message = "ace-browser-host daemon is not running";
+        if (status.data.contains("auto_start_error") && status.data["auto_start_error"].is_string()) {
+            message += "; auto-start failed: " + status.data["auto_start_error"].get<std::string>();
+        }
+        return make_error("daemon_not_running", message);
     }
     if (!status.data.value("extension_connected", false)) {
         return make_error("extension_not_connected", "ace-browser-bridge extension is not connected");
@@ -415,7 +419,7 @@ ToolImpl make_open_tool(const std::shared_ptr<BrowserToolState>& state) {
     def.parameters = object_schema({
         {"url", string_prop("URL to open.")},
         {"session", session_prop()},
-        {"new_tab", {{"type", "boolean"}, {"description", "Open in a new tab. Defaults to true."}}},
+        {"new_tab", {{"type", "boolean"}, {"description", "Open in a new tab. Defaults to false; omitted calls reuse the session tab when possible."}}},
         {"group_title", string_prop("Optional browser tab group title.")},
     }, {"url"});
 
@@ -430,13 +434,13 @@ ToolImpl make_open_tool(const std::shared_ptr<BrowserToolState>& state) {
         if (!error.empty()) return error_result("invalid_arguments", error);
         nlohmann::json bridge_args;
         bridge_args["url"] = url;
-        bridge_args["newTab"] = args.value("new_tab", true);
+        bridge_args["newTab"] = args.value("new_tab", false);
         if (args.contains("group_title")) bridge_args["group_title"] = args["group_title"];
         ToolResult result = command_result(state, ctx, args, "navigate", std::move(bridge_args));
         if (result.success) {
             auto j = nlohmann::json::parse(result.output, nullptr, false);
             if (j.is_object() && j.contains("data")) {
-                j["data"]["ownership"] = "owned";
+                if (!j["data"].contains("ownership")) j["data"]["ownership"] = "owned";
                 result.output = j.dump(2);
             }
         }

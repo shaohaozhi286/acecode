@@ -4,9 +4,14 @@
 
 #include <gtest/gtest.h>
 
+#include "config/config.hpp"
 #include "config/saved_models.hpp"
 
+#include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <nlohmann/json.hpp>
+#include <string>
 
 using namespace acecode;
 
@@ -154,6 +159,42 @@ TEST(SavedModelsTest, CodexEntryMissingModelFails) {
     EXPECT_NE(err.find("model"), std::string::npos) << err;
 }
 
+// 额外 — context_window 是可选正整数;解析后参与 validate。
+TEST(SavedModelsTest, OptionalContextWindowParsesAndValidates) {
+    nlohmann::json j = nlohmann::json::array();
+    j.push_back({
+        {"name", "local-lm"},
+        {"provider", "openai"},
+        {"base_url", "http://localhost:1234/v1"},
+        {"api_key", "x"},
+        {"model", "llama-3"},
+        {"context_window", 64000}
+    });
+
+    std::string err;
+    auto parsed = parse_saved_models(j, err);
+    ASSERT_TRUE(parsed.has_value()) << err;
+    ASSERT_EQ(parsed->size(), 1u);
+    ASSERT_TRUE((*parsed)[0].context_window.has_value());
+    EXPECT_EQ(*(*parsed)[0].context_window, 64000);
+
+    err.clear();
+    EXPECT_TRUE(validate_saved_models(*parsed, "local-lm", err)) << err;
+}
+
+// 额外 — 手工构造的无效 context_window 不能通过 validate。
+TEST(SavedModelsTest, InvalidContextWindowFailsValidation) {
+    ModelProfile e;
+    e.name = "local";
+    e.provider = "copilot";
+    e.model = "gpt-4o";
+    e.context_window = 0;
+
+    std::string err;
+    EXPECT_FALSE(validate_saved_models({e}, "", err));
+    EXPECT_NE(err.find("context_window"), std::string::npos) << err;
+}
+
 // 额外 — parse_saved_models 拒绝非数组的输入。
 TEST(SavedModelsTest, ParseRejectsNonArray) {
     nlohmann::json j = nlohmann::json::object();
@@ -172,4 +213,32 @@ TEST(SavedModelsTest, ParseTreatsNullAsEmpty) {
     auto parsed = parse_saved_models(j, err);
     ASSERT_TRUE(parsed.has_value()) << err;
     EXPECT_TRUE(parsed->empty());
+}
+
+// 额外 — save_config 把 per-model context_window 写回 saved_models entry。
+TEST(SavedModelsTest, SaveConfigPersistsContextWindow) {
+    const auto suffix = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto path = std::filesystem::temp_directory_path() /
+        ("acecode-saved-model-context-window-" + std::to_string(suffix) + ".json");
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+
+    AppConfig cfg;
+    ModelProfile e;
+    e.name = "local";
+    e.provider = "copilot";
+    e.model = "gpt-4o";
+    e.context_window = 64000;
+    cfg.saved_models.push_back(e);
+    cfg.default_model_name = "local";
+    save_config(cfg, path.string());
+
+    std::ifstream ifs(path);
+    ASSERT_TRUE(ifs.is_open());
+    const auto saved = nlohmann::json::parse(ifs);
+    ASSERT_TRUE(saved.contains("saved_models"));
+    ASSERT_EQ(saved["saved_models"].size(), 1u);
+    EXPECT_EQ(saved["saved_models"][0]["context_window"], 64000);
+
+    std::filesystem::remove(path, ec);
 }

@@ -2562,6 +2562,9 @@ struct WebServer::Impl {
                 if (existing) {
                     if (!body.contains("api_key")) draft->api_key = existing->api_key;
                     if (!body.contains("base_url")) draft->base_url = existing->base_url;
+                    if (!body.contains("context_window")) {
+                        draft->context_window = existing->context_window;
+                    }
                 }
             }
 

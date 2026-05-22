@@ -273,6 +273,23 @@ std::string context_cache_key(const AppConfig& config,
            base_url + "\n" + provider_hint;
 }
 
+AppConfig config_for_profile_context(const AppConfig& cfg,
+                                     const ModelProfile& profile) {
+    AppConfig context_cfg = cfg;
+    context_cfg.provider = profile.provider;
+    if (profile.provider == "openai") {
+        context_cfg.openai.base_url = profile.base_url;
+        context_cfg.openai.api_key = profile.api_key;
+        context_cfg.openai.model = profile.model;
+        context_cfg.openai.models_dev_provider_id = profile.models_dev_provider_id;
+    } else if (profile.provider == "codex") {
+        context_cfg.codex.model = profile.model;
+    } else {
+        context_cfg.copilot.model = profile.model;
+    }
+    return context_cfg;
+}
+
 int cached_context(const std::string& key) {
     std::lock_guard<std::mutex> lk(g_context_cache_mu);
     auto it = g_context_cache.find(key);
@@ -390,6 +407,28 @@ int resolve_model_context_window_nonblocking(const AppConfig& config,
     }
     warm_context_async(config, provider_name, model);
     return fallback_context_window;
+}
+
+int resolve_model_profile_context_window(const AppConfig& config,
+                                         const ModelProfile& profile,
+                                         int fallback_context_window) {
+    if (profile.context_window.has_value() && *profile.context_window > 0) {
+        return *profile.context_window;
+    }
+    auto context_cfg = config_for_profile_context(config, profile);
+    return resolve_model_context_window(
+        context_cfg, profile.provider, profile.model, fallback_context_window);
+}
+
+int resolve_model_profile_context_window_nonblocking(const AppConfig& config,
+                                                     const ModelProfile& profile,
+                                                     int fallback_context_window) {
+    if (profile.context_window.has_value() && *profile.context_window > 0) {
+        return *profile.context_window;
+    }
+    auto context_cfg = config_for_profile_context(config, profile);
+    return resolve_model_context_window_nonblocking(
+        context_cfg, profile.provider, profile.model, fallback_context_window);
 }
 
 void reset_model_context_window_cache_for_test() {

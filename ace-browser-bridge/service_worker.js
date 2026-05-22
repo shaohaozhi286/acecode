@@ -2,6 +2,7 @@ const ACE_SOURCE = "ace-browser-bridge";
 const DEFAULT_PORT = 52007;
 const PROTOCOL_VERSION = "0.1";
 const HEARTBEAT_ALARM = "ace-browser-host-heartbeat";
+const SESSION_REGISTRY_STORAGE_KEY = "aceBrowserBridgeSessions";
 
 let daemonPort = DEFAULT_PORT;
 let connectionState = {
@@ -17,6 +18,8 @@ const traceBySession = new Map();
 const networkBySession = new Map();
 const debuggerTabs = new Set();
 const tabSessionByTabId = new Map();
+let registryRestorePromise = null;
+let registryPersistTimer = null;
 
 function daemonBaseUrl() {
   return `http://127.0.0.1:${daemonPort}`;
@@ -35,6 +38,96 @@ function capabilities() {
 
 async function saveConnectionState() {
   await chrome.storage.local.set({ aceBrowserBridgeConnection: connectionState });
+}
+
+function registryStorage() {
+  return chrome.storage.session || chrome.storage.local;
+}
+
+function shortSessionHash(value) {
+  let hash = 2166136261;
+  for (const ch of String(value || "")) {
+    hash ^= ch.codePointAt(0);
+    hash = Math.imul(hash, 16777619) >>> 0;
+  }
+  return hash.toString(36).padStart(6, "0").slice(-6);
+}
+
+function defaultGroupTitle(session) {
+  return `ACE-${shortSessionHash(session)}`;
+}
+
+function isLegacyDefaultGroupTitle(session, title) {
+  return title === `ACE: ${String(session || "").slice(0, 24)}`;
+}
+
+function normalizedSessionState(raw) {
+  if (!raw || typeof raw.session !== "string" || !raw.session) return null;
+  const tabId = Number(raw.tabId);
+  const groupId = Number(raw.groupId);
+  const storedTitle = typeof raw.groupTitle === "string" ? raw.groupTitle : "";
+  return {
+    session: raw.session,
+    tabId: Number.isFinite(tabId) && tabId > 0 ? tabId : null,
+    ownership: raw.ownership === "owned" ? "owned" : "adopted",
+    groupId: Number.isFinite(groupId) ? groupId : null,
+    status: typeof raw.status === "string" && raw.status ? raw.status : "idle",
+    groupTitle: storedTitle && !isLegacyDefaultGroupTitle(raw.session, storedTitle)
+      ? storedTitle
+      : defaultGroupTitle(raw.session),
+    lastPointer: raw.lastPointer && Number.isFinite(Number(raw.lastPointer.x)) && Number.isFinite(Number(raw.lastPointer.y))
+      ? { x: Number(raw.lastPointer.x), y: Number(raw.lastPointer.y) }
+      : null
+  };
+}
+
+function serializedSessionRegistry() {
+  return Array.from(sessions.values()).map((state) => ({
+    session: state.session,
+    tabId: state.tabId,
+    ownership: state.ownership,
+    groupId: state.groupId,
+    status: state.status,
+    groupTitle: state.groupTitle,
+    lastPointer: state.lastPointer
+  }));
+}
+
+async function persistSessionRegistryNow() {
+  try {
+    await registryStorage().set({
+      [SESSION_REGISTRY_STORAGE_KEY]: serializedSessionRegistry()
+    });
+  } catch (error) {
+    connectionState.lastError = error instanceof Error ? error.message : String(error);
+  }
+}
+
+function scheduleSessionRegistryPersist() {
+  if (registryPersistTimer !== null) clearTimeout(registryPersistTimer);
+  registryPersistTimer = setTimeout(() => {
+    registryPersistTimer = null;
+    persistSessionRegistryNow();
+  }, 50);
+}
+
+async function restoreSessionRegistry() {
+  try {
+    const stored = await registryStorage().get(SESSION_REGISTRY_STORAGE_KEY);
+    const items = stored?.[SESSION_REGISTRY_STORAGE_KEY];
+    if (!Array.isArray(items)) return;
+    for (const item of items) {
+      const state = normalizedSessionState(item);
+      if (state) sessions.set(state.session, state);
+    }
+  } catch (error) {
+    connectionState.lastError = error instanceof Error ? error.message : String(error);
+  }
+}
+
+async function ensureSessionRegistryRestored() {
+  if (!registryRestorePromise) registryRestorePromise = restoreSessionRegistry();
+  await registryRestorePromise;
 }
 
 async function helloDaemon() {
@@ -116,7 +209,7 @@ function sessionState(session) {
       ownership: "adopted",
       groupId: null,
       status: "idle",
-      groupTitle: `ACE: ${session.slice(0, 24)}`,
+      groupTitle: defaultGroupTitle(session),
       lastPointer: null
     });
   }
@@ -156,6 +249,7 @@ async function tabForSession(session) {
   const tab = await activePageTab();
   state.tabId = tab.id;
   state.ownership = "adopted";
+  await persistSessionRegistryNow();
   return tab;
 }
 
@@ -171,7 +265,10 @@ async function updateGroup(session, title, status = "idle") {
   const state = sessionState(session);
   state.status = status;
   if (title) state.groupTitle = title;
-  if (!state.tabId || !chrome.tabs.group || !chrome.tabGroups) return;
+  if (!state.tabId || !chrome.tabs.group || !chrome.tabGroups) {
+    await persistSessionRegistryNow();
+    return;
+  }
   try {
     const groupId = await chrome.tabs.group({ tabIds: [state.tabId] });
     state.groupId = groupId;
@@ -181,6 +278,8 @@ async function updateGroup(session, title, status = "idle") {
     });
   } catch (error) {
     connectionState.lastError = error instanceof Error ? error.message : String(error);
+  } finally {
+    await persistSessionRegistryNow();
   }
 }
 
@@ -276,7 +375,7 @@ async function handleNavigate(session, args) {
       return { ok: false, error: { code: "invalid_request", message: "navigate goto requires url" } };
     }
     let tab;
-    if (args.newTab !== false || !(await tabExists(state.tabId))) {
+    if (args.newTab === true || !(await tabExists(state.tabId))) {
       tab = await chrome.tabs.create({ url: args.url, active: true });
       state.tabId = tab.id;
       state.ownership = "owned";
@@ -370,6 +469,7 @@ async function handleCloseSession(session) {
   sessions.delete(session);
   traceBySession.delete(session);
   networkBySession.delete(session);
+  await persistSessionRegistryNow();
   return { ok: true, data: { success: true, closed, detached } };
 }
 
@@ -585,6 +685,7 @@ async function cdpPointerAction(session, args, kind) {
   await allowBridgeEvents(session, durationMs + holdMs + 500);
   await dispatchMousePath(tab.id, path);
   state.lastPointer = { x: target.x, y: target.y };
+  scheduleSessionRegistryPersist();
 
   if (kind === "hover") {
     return {
@@ -646,6 +747,7 @@ async function cdpDrag(session, args) {
   await dispatchMousePath(tab.id, dragPath.map((point) => ({ ...point, buttons: 1 })));
   await cdpCommand(tab.id, "Input.dispatchMouseEvent", { type: "mouseReleased", x: to.x, y: to.y, button: "left", buttons: 0 });
   state.lastPointer = { x: to.x, y: to.y };
+  scheduleSessionRegistryPersist();
   return {
     ok: true,
     data: { success: true, mode: "cdp", speed, from, to, path_points: approach.length + dragPath.length, duration_ms: approachMs + dragMs }
@@ -668,6 +770,7 @@ async function cdpScroll(session, args) {
     deltaY: Number(args.delta_y || 0)
   });
   state.lastPointer = { x: target.x, y: target.y };
+  scheduleSessionRegistryPersist();
   return { ok: true, data: { success: true, mode: "cdp", target, delta_x: Number(args.delta_x || 0), delta_y: Number(args.delta_y || 0) } };
 }
 
@@ -847,7 +950,22 @@ chrome.debugger.onDetach.addListener((source) => {
   }
 });
 
+chrome.tabs.onRemoved.addListener((tabId) => {
+  let changed = false;
+  for (const state of sessions.values()) {
+    if (state.tabId === tabId) {
+      state.tabId = null;
+      state.groupId = null;
+      changed = true;
+    }
+  }
+  debuggerTabs.delete(tabId);
+  tabSessionByTabId.delete(tabId);
+  if (changed) scheduleSessionRegistryPersist();
+});
+
 async function dispatchDaemonAction(action) {
+  await ensureSessionRegistryRestored();
   const actionName = action.action;
   const args = action.args || {};
   const session = sessionName(action);
@@ -977,14 +1095,20 @@ async function startPolling() {
   }
 }
 
+async function connectAndPoll() {
+  await ensureSessionRegistryRestored();
+  await helloDaemon();
+  startPolling();
+}
+
 chrome.runtime.onInstalled.addListener(() => {
   chrome.alarms.create(HEARTBEAT_ALARM, { periodInMinutes: 1 });
-  helloDaemon().then(startPolling);
+  connectAndPoll();
 });
 
 chrome.runtime.onStartup.addListener(() => {
   chrome.alarms.create(HEARTBEAT_ALARM, { periodInMinutes: 1 });
-  helloDaemon().then(startPolling);
+  connectAndPoll();
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
@@ -1024,4 +1148,4 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   return true;
 });
 
-helloDaemon().then(startPolling);
+connectAndPoll();

@@ -1162,6 +1162,9 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
             if (e.models_dev_provider_id.has_value() && !e.models_dev_provider_id->empty()) {
                 ej["models_dev_provider_id"] = *e.models_dev_provider_id;
             }
+            if (e.context_window.has_value() && *e.context_window > 0) {
+                ej["context_window"] = *e.context_window;
+            }
             arr.push_back(std::move(ej));
         }
         j["saved_models"] = std::move(arr);

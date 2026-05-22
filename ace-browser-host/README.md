@@ -29,6 +29,8 @@ ace-browser-host.exe shutdown --json
 
 `status --json` 也使用 envelope。daemon 不可连接时返回 `ok:true` 且 `running:false`，方便 ACECode 展示健康状态，而不是把 daemon 未启动视为 CLI 执行失败。
 
+ACECode 的内置 `browser_*` 工具会在调用时自动检查并后台启动 `ace-browser-host serve --json --port 52007`。手动运行 `serve` 主要用于独立调试 host、插件或 CLI 协议。
+
 ## Daemon HTTP Surface
 
 daemon 只监听 loopback，并要求本地调用头：

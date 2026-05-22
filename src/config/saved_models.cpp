@@ -69,6 +69,17 @@ std::optional<ModelProfile> parse_one_entry(const nlohmann::json& node, std::siz
         std::string s = node["models_dev_provider_id"].get<std::string>();
         if (!s.empty()) e.models_dev_provider_id = std::move(s);
     }
+    if (node.contains("context_window") && node["context_window"].is_number_integer()) {
+        int context_window = node["context_window"].get<int>();
+        if (context_window <= 0) {
+            std::ostringstream oss;
+            oss << "saved_models[" << idx << "] (name='" << e.name
+                << "') has invalid context_window";
+            err = oss.str();
+            return std::nullopt;
+        }
+        e.context_window = context_window;
+    }
 
     return e;
 }
@@ -135,6 +146,13 @@ bool validate_saved_models(const std::vector<ModelProfile>& entries,
                 err = oss.str();
                 return false;
             }
+        }
+        if (e.context_window.has_value() && *e.context_window <= 0) {
+            std::ostringstream oss;
+            oss << "saved_models entry '" << e.name
+                << "' has invalid context_window";
+            err = oss.str();
+            return false;
         }
         // copilot/codex:不需要 base_url / api_key,model 已在 parse 阶段检验非空。
     }

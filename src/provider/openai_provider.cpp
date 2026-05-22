@@ -649,12 +649,14 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
                     if (delta.contains("content") && !delta["content"].is_null()) {
                         std::string token = delta["content"].get<std::string>();
                         accumulated.content += token;
-                        if (!token.empty()) emitted_stream_output = true;
+                        if (!token.empty()) {
+                            emitted_stream_output = true;
 
-                        StreamEvent evt;
-                        evt.type = StreamEventType::Delta;
-                        evt.content = token;
-                        callback(evt);
+                            StreamEvent evt;
+                            evt.type = StreamEventType::Delta;
+                            evt.content = token;
+                            callback(evt);
+                        }
                     }
 
                     if (delta.contains("tool_calls") && delta["tool_calls"].is_array()) {

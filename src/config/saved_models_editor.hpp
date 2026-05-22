@@ -18,6 +18,8 @@ struct SavedModelDraft {
     std::string base_url;  // openai 必填
     std::string api_key;   // openai 必填
     std::optional<std::string> models_dev_provider_id;
+    // 可选手动上下文窗口(token 数)。unset = 不覆盖;0 = 清除旧 override。
+    std::optional<int> context_window;
 };
 
 enum class SavedModelEditError {
@@ -29,6 +31,7 @@ enum class SavedModelEditError {
     MISSING_MODEL,
     MISSING_BASE_URL,     // openai 必填
     INVALID_API_KEY,      // openai 必填(空字符串触发)
+    INVALID_CONTEXT_WINDOW, // context_window < 0
     NOT_FOUND,            // update/remove 时 name 不存在
     IN_USE_AS_DEFAULT,    // remove/改名时该 name 是 cfg.default_model_name
 };

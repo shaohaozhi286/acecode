@@ -24,6 +24,18 @@ int resolve_model_context_window_nonblocking(
     int fallback_context_window
 );
 
+int resolve_model_profile_context_window(
+    const AppConfig& config,
+    const ModelProfile& profile,
+    int fallback_context_window
+);
+
+int resolve_model_profile_context_window_nonblocking(
+    const AppConfig& config,
+    const ModelProfile& profile,
+    int fallback_context_window
+);
+
 // Test helper for process-local cache/in-flight state.
 void reset_model_context_window_cache_for_test();
 

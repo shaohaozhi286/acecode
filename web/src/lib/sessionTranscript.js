@@ -343,6 +343,7 @@ export function reduceTranscriptEvent(state, msg) {
         next.turnHadAssistantText = true;
       }
       if (next.streamingId == null) {
+        if (!text.trim()) break;
         const id = allocateItemId(next);
         next.streamingId = id;
         next.items = [

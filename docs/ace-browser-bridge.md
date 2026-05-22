@@ -27,6 +27,8 @@
 
 `ace-browser-host(.exe)` 默认从 `acecode` 可执行文件同目录解析，不需要在配置里写路径。旧版本的路径覆盖字段仍会被兼容读取，但新配置不会再保存这些字段。
 
+调用任意 `browser_*` 工具时，ACECode 会先检查 `ace-browser-host` daemon 状态；如果 host 可执行文件存在但 daemon 未运行，会自动在后台启动 `ace-browser-host serve --json --port 52007`，然后继续检查浏览器插件连接状态。
+
 `tool_mode`：
 
 - `progressive`：默认只暴露核心工具，通过 `browser_enable` 按需启用更多组。
@@ -36,7 +38,7 @@
 ## 推荐工作流
 
 1. `browser_status`：确认 CLI daemon、浏览器插件和版本状态。
-2. `browser_open` 或 `browser_find_tab`：打开新页面或复用用户当前页面。
+2. `browser_open` 或 `browser_find_tab`：打开页面或复用用户当前页面；`browser_open` 默认复用当前 session 的 managed tab，只有显式 `new_tab:true` 才新建 tab。
 3. `browser_read_page`：读取 snapshot、页面文本和 `@e` 元素引用。
 4. `browser_wait`：导航或点击后等待 URL、文本、元素或网络条件。
 5. `browser_enable`：按需启用 `interaction`、`pointer`、`capture`、`network`、`diagnostics`、`advanced`。
@@ -44,7 +46,7 @@
 7. 需要排查时用 `browser_trace` 和 `browser_list_tabs`。
 8. 结束任务时用 `browser_close_session` 清理 owned tabs。
 
-常规诊断路径使用 `browser_status`。TUI 中也可以用 `/browser` 做当前会话级开关：
+常规诊断路径使用 `browser_status`；该工具也会触发 host 自动启动。TUI 中也可以用 `/browser` 做当前会话级开关：
 
 - `/browser` 或 `/browser status`：显示当前会话是否已注册 `browser_*` tools。
 - `/browser on`：只为当前 TUI 会话启用 ACE Browser Bridge tools，不写入全局配置。
@@ -123,7 +125,7 @@ daemon 只监听 `127.0.0.1:52007`，CLI 和插件端点使用本地调用头区
 
 ## 手工验证清单
 
-- daemon 未启动、daemon 已启动但插件未连接、插件已连接三种 `browser_status`。
+- daemon 未启动时 `browser_status` 自动启动 host、daemon 已启动但插件未连接、插件已连接三种状态。
 - 打开 `https://httpbin.org/forms/post`，读取 snapshot refs，填写字段，通过 `@e` 点击提交。
 - CSS selector 找不到元素时，重新 `browser_read_page` 并用 `@e` ref 操作。
 - `browser_wait` 等待元素可点击、文本出现、network idle。
@@ -137,5 +139,7 @@ daemon 只监听 `127.0.0.1:52007`，CLI 和插件端点使用本地调用头区
 - `browser_type` 输入文本并发送 Enter。
 - `browser_trace` 返回最近操作摘要。
 - owned/adopted tab 行为：`browser_close_session` 关闭 owned tab，不关闭 adopted tab。
+- 重复调用同一 session 的 `browser_open` 默认复用原 tab；传 `new_tab:true` 时才创建新的 owned tab。
+- 默认标签组标题使用类似 `ACE-a1b2c3` 的短 hash；显式 `group_title` 会覆盖默认标题。
 - 标签组在 operating、network、waiting、error 状态下切换颜色。
 - AI 操作期间页面出现蓝绿色渐变边框和 `AI 正在操作浏览器`，并拦截页面内容区输入。

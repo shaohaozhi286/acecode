@@ -94,6 +94,21 @@ TEST(ApplyModelToSession, SwapsProviderAndPopulatesState) {
     }
 }
 
+// 场景:profile 带手动 context_window → session state 使用该值。
+TEST(ApplyModelToSession, UsesProfileContextWindowOverride) {
+    auto cfg = make_copilot_cfg();
+    SessionEntry::ProviderSlot slot;
+    auto profile = make_copilot_profile();
+    profile.context_window = 64000;
+    ApplyModelDeps deps;
+    deps.cfg = &cfg;
+    deps.provider_slot = &slot;
+
+    auto result = apply_model_to_session(profile, deps);
+
+    EXPECT_EQ(result.state.context_window, 64000);
+}
+
 // 场景:切换到 codex saved model → 只构造 CodexProvider,不触碰 Codex token。
 TEST(ApplyModelToSession, SwapsToCodexProvider) {
     auto cfg = make_copilot_cfg();

@@ -11,7 +11,14 @@ import { api } from '../lib/api.js';
 import { Toggle } from './Modal.jsx';
 import { clsx, relativeTime } from '../lib/format.js';
 import { lookupErrorMessage } from '../lib/errors.js';
-import { buildModelDraftsFromSelection, splitModelIds, validateModelDraft } from '../lib/modelManager.js';
+import {
+  buildModelDraftsFromSelection,
+  filterModelIds,
+  formatContextWindowK,
+  parseContextWindowK,
+  splitModelIds,
+  validateModelDraft,
+} from '../lib/modelManager.js';
 import { normalizePermissionMode } from '../lib/permissionMode.js';
 import { sessionDisplayTitle } from '../lib/sessionTitle.js';
 import { VsIcon } from './Icon.jsx';
@@ -1154,7 +1161,12 @@ const MODEL_NEW_PROVIDER_PILL = {
 };
 
 const MODEL_NEW_DRAFT_DEFAULT = {
-  name: '', provider: 'openai', model: '', base_url: 'https://api.openai.com/v1', api_key: '',
+  name: '',
+  provider: 'openai',
+  model: '',
+  base_url: 'https://api.openai.com/v1',
+  api_key: '',
+  context_window_k: '',
 };
 const MODEL_NEW_API_KEY_MASK = '••••••••';
 
@@ -1165,6 +1177,7 @@ function draftFromModelProfile(m) {
     model: m?.model || '',
     base_url: m?.base_url || '',
     api_key: m?.provider === 'openai' ? MODEL_NEW_API_KEY_MASK : '',
+    context_window_k: formatContextWindowK(m?.context_window),
   };
 }
 
@@ -1178,6 +1191,8 @@ function payloadForModelDraft(draft, { omitApiKey = false } = {}) {
     payload.base_url = String(draft.base_url || '').trim();
     if (!omitApiKey) payload.api_key = String(draft.api_key || '');
   }
+  const parsedContext = parseContextWindowK(draft.context_window_k);
+  payload.context_window = parsedContext.ok && parsedContext.tokens ? parsedContext.tokens : 0;
   return payload;
 }
 
@@ -1285,6 +1300,11 @@ function SectionModelNew() {
       return;
     }
     for (const item of drafts) {
+      const contextWindow = parseContextWindowK(item.context_window_k);
+      if (!contextWindow.ok) {
+        toast({ kind: 'err', text: lookupErrorMessage(contextWindow.code) });
+        return;
+      }
       const payload = payloadForModelDraft(item, { omitApiKey });
       const validatePayload = omitApiKey ? { ...payload, api_key: '__patch__' } : payload;
       const valid = validateModelDraft(validatePayload);
@@ -1409,7 +1429,12 @@ function SectionModelNew() {
                     {providerLabel(m.provider)}
                   </span>
                 </div>
-                <div className="text-[12px] text-fg-mute font-mono truncate">{m.model}</div>
+                <div className="text-[12px] text-fg-mute font-mono truncate">
+                  {m.model}
+                  {m.context_window ? (
+                    <span className="font-sans"> · 上下文 {formatContextWindowK(m.context_window)}k</span>
+                  ) : null}
+                </div>
               </div>
 
               <div className="flex gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
@@ -1510,6 +1535,11 @@ function ModelFormPreview({
   const [fetchError, setFetchError] = useState('');
 
   const selectedModels = splitModelIds(data.model);
+  const modelFilter = customInput.trim();
+  const filteredAvailable = useMemo(
+    () => filterModelIds(available || [], modelFilter),
+    [available, modelFilter],
+  );
 
   const doFetch = async () => {
     if (!onProbeModels || data.provider !== 'openai' || !data.base_url) return;
@@ -1668,6 +1698,20 @@ function ModelFormPreview({
         </div>
       )}
 
+      {/* Context Window */}
+      <div className="mb-4">
+        <div className="text-[12px] font-medium text-fg-2 mb-1.5">上下文窗口(K,可选)</div>
+        <input
+          type="number"
+          min="0"
+          step="0.001"
+          className={clsx(fieldClass, 'font-mono text-[12px]')}
+          placeholder="例如: 128"
+          value={data.context_window_k || ''}
+          onChange={(e) => setData({ context_window_k: e.target.value })}
+        />
+      </div>
+
       {/* Model ID 区域 */}
       <div className="mb-5">
         <div className="flex items-center justify-between mb-1.5">
@@ -1707,7 +1751,7 @@ function ModelFormPreview({
               </svg>
               <input
                 type="text"
-                placeholder="自定义模型 ID,回车添加"
+                placeholder="过滤或自定义模型 ID,回车添加"
                 className="flex-1 px-1 py-0.5 bg-transparent text-[12px] font-mono text-fg outline-none placeholder:text-fg-mute"
                 value={customInput}
                 onChange={(e) => setCustomInput(e.target.value)}
@@ -1745,7 +1789,11 @@ function ModelFormPreview({
                 {data.provider !== 'openai' && 'Copilot 模型请手动输入'}
                 {data.provider === 'openai' && fetchStatus === 'idle' && (data.base_url ? '尚未获取模型列表' : '请先填写 Base URL')}
                 {fetchStatus === 'fetching' && '正在获取...'}
-                {fetchStatus === 'success'  && `已查询到 ${available?.length || 0} 个模型`}
+                {fetchStatus === 'success' && (
+                  modelFilter && available?.length
+                    ? `已查询到 ${available.length} 个模型 · 匹配 ${filteredAvailable.length} 个`
+                    : `已查询到 ${available?.length || 0} 个模型`
+                )}
                 {fetchStatus === 'failed'   && '上次获取失败 · 点「刷新」重试'}
               </span>
               <button
@@ -1788,36 +1836,42 @@ function ModelFormPreview({
               </div>
             )}
             {fetchStatus === 'success' && available && available.length > 0 && (
-              <div className="max-h-[200px] overflow-y-auto">
-                {available.map((mid, idx) => {
-                  const checked = selectedModels.includes(mid);
-                  const isLast = idx === available.length - 1;
-                  return (
-                    <button
-                      key={mid}
-                      type="button"
-                      onClick={() => toggleModelPick(mid)}
-                      className={clsx(
-                        'w-full flex items-center gap-2.5 px-3.5 py-2 text-left transition',
-                        !isLast && 'border-b border-border',
-                        checked ? 'bg-accent-bg' : 'hover:bg-surface-hi',
-                      )}
-                    >
-                      <span
+              filteredAvailable.length > 0 ? (
+                <div className="max-h-[200px] overflow-y-auto">
+                  {filteredAvailable.map((mid, idx) => {
+                    const checked = selectedModels.includes(mid);
+                    const isLast = idx === filteredAvailable.length - 1;
+                    return (
+                      <button
+                        key={mid}
+                        type="button"
+                        onClick={() => toggleModelPick(mid)}
                         className={clsx(
-                          'w-[18px] h-[18px] rounded flex items-center justify-center text-white text-[11px] font-bold leading-none transition shrink-0',
-                          checked
-                            ? 'bg-accent border-2 border-accent'
-                            : 'border-2 border-border bg-transparent',
+                          'w-full flex items-center gap-2.5 px-3.5 py-2 text-left transition',
+                          !isLast && 'border-b border-border',
+                          checked ? 'bg-accent-bg' : 'hover:bg-surface-hi',
                         )}
                       >
-                        {checked && <span>✓</span>}
-                      </span>
-                      <span className="text-[12px] font-mono text-fg">{mid}</span>
-                    </button>
-                  );
-                })}
-              </div>
+                        <span
+                          className={clsx(
+                            'w-[18px] h-[18px] rounded flex items-center justify-center text-white text-[11px] font-bold leading-none transition shrink-0',
+                            checked
+                              ? 'bg-accent border-2 border-accent'
+                              : 'border-2 border-border bg-transparent',
+                          )}
+                        >
+                          {checked && <span>✓</span>}
+                        </span>
+                        <span className="text-[12px] font-mono text-fg">{mid}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="px-3.5 py-3 text-[12px] text-fg-mute text-center">
+                  没有匹配的模型 · 可回车作为自定义模型添加
+                </div>
+              )
             )}
             {fetchStatus === 'success' && available && available.length === 0 && (
               <div className="px-3.5 py-3 text-[12px] text-fg-mute text-center">

@@ -9,6 +9,7 @@
 #include "../tui/model_picker.hpp"
 
 #include <cctype>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -26,6 +27,17 @@ std::optional<ModelProfile> lookup_entry_by_name(const AppConfig& cfg,
         if (e.name == name) return e;
     }
     return std::nullopt;
+}
+
+int parse_nonnegative_int_or_invalid(const std::string& value) {
+    if (value.empty()) return -1;
+    long long parsed = 0;
+    for (char ch : value) {
+        if (!std::isdigit(static_cast<unsigned char>(ch))) return -1;
+        parsed = parsed * 10 + (ch - '0');
+        if (parsed > std::numeric_limits<int>::max()) return -1;
+    }
+    return static_cast<int>(parsed);
 }
 
 // 把切换结果反馈到 TUI。调用前已做完 swap;这里只更新状态行 / 系统消息。
@@ -167,8 +179,8 @@ void render_model_picker(CommandContext& ctx) {
                 return;
             }
         } else {
-            config_ptr->context_window = resolve_model_context_window(
-                *config_ptr, entry->provider, entry->model, config_ptr->context_window);
+            config_ptr->context_window = resolve_model_profile_context_window(
+                *config_ptr, *entry, config_ptr->context_window);
         }
 
         // 等价于 announce_switch(它会再加锁,这里把内联出来避免重入)。
@@ -219,6 +231,10 @@ SavedModelDraft draft_from_kvs(const std::map<std::string, std::string>& kvs,
     get("api_key", d.api_key);
     auto it_pid = kvs.find("models_dev_provider_id");
     if (it_pid != kvs.end()) d.models_dev_provider_id = it_pid->second;
+    auto it_context = kvs.find("context_window");
+    if (it_context != kvs.end()) {
+        d.context_window = parse_nonnegative_int_or_invalid(it_context->second);
+    }
     return d;
 }
 
@@ -269,6 +285,8 @@ void cmd_model_edit(CommandContext& ctx, const ParsedModelSub& p) {
             if (d.api_key.empty()) d.api_key = e.api_key;
             if (!d.models_dev_provider_id.has_value())
                 d.models_dev_provider_id = e.models_dev_provider_id;
+            if (!d.context_window.has_value())
+                d.context_window = e.context_window;
             break;
         }
     }
@@ -345,7 +363,7 @@ void cmd_model(CommandContext& ctx, const std::string& args) {
         std::lock_guard<std::mutex> lk(ctx.state.mu);
         ctx.state.conversation.push_back({"system",
             "Usage: /model | /model <name> | /model --cwd <name> | /model --default <name>\n"
-            "       /model add name=X provider=openai model=Y base_url=Z api_key=K\n"
+            "       /model add name=X provider=openai model=Y base_url=Z api_key=K [context_window=N]\n"
             "       /model add name=codex provider=codex model=gpt-5.5\n"
             "       /model edit <name> [field=value ...]\n"
             "       /model rm <name>\n"
@@ -399,9 +417,8 @@ void cmd_model(CommandContext& ctx, const std::string& args) {
     } else {
         // 无 slot —— 至少把 context_window 按目标 entry 重算,避免 picker 显示
         // 与实际不一致。set_model / 真切换交给上层注入 slot 后再做。
-        ctx.config.context_window = resolve_model_context_window(
-            ctx.config, entry->provider, entry->model,
-            ctx.config.context_window);
+        ctx.config.context_window = resolve_model_profile_context_window(
+            ctx.config, *entry, ctx.config.context_window);
     }
 
     std::string scope_note;

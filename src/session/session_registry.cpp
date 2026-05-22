@@ -64,32 +64,14 @@ std::optional<ModelProfile> explicit_profile(const AppConfig& cfg,
     return std::nullopt;
 }
 
-AppConfig config_for_profile_context(const AppConfig& cfg,
-                                     const ModelProfile& profile) {
-    AppConfig context_cfg = cfg;
-    context_cfg.provider = profile.provider;
-    if (profile.provider == "openai") {
-        context_cfg.openai.base_url = profile.base_url;
-        context_cfg.openai.api_key = profile.api_key;
-        context_cfg.openai.model = profile.model;
-        context_cfg.openai.models_dev_provider_id = profile.models_dev_provider_id;
-    } else if (profile.provider == "codex") {
-        context_cfg.codex.model = profile.model;
-    } else {
-        context_cfg.copilot.model = profile.model;
-    }
-    return context_cfg;
-}
-
 SessionModelState state_from_profile(const AppConfig& cfg,
                                      const ModelProfile& profile) {
-    auto context_cfg = config_for_profile_context(cfg, profile);
     SessionModelState state;
     state.name = profile.name;
     state.provider = profile.provider;
     state.model = profile.model;
-    state.context_window = resolve_model_context_window_nonblocking(
-        context_cfg, profile.provider, profile.model, cfg.context_window);
+    state.context_window = resolve_model_profile_context_window_nonblocking(
+        cfg, profile, cfg.context_window);
     return state;
 }
 

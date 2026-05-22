@@ -15,8 +15,22 @@ namespace acecode {
 
 namespace {
 
-constexpr int kSchemaVersion = 1;
+constexpr int kSchemaVersion = 2;
 constexpr std::size_t kMaxObjectiveBytes = 4000;
+constexpr const char* kThreadGoalsCreateSql =
+    "CREATE TABLE IF NOT EXISTS thread_goals ("
+    "thread_id TEXT PRIMARY KEY,"
+    "goal_id TEXT NOT NULL,"
+    "objective TEXT NOT NULL,"
+    "status TEXT NOT NULL CHECK(status IN ("
+        "'active','paused','blocked','usage_limited','budget_limited','complete'"
+    ")),"
+    "token_budget INTEGER NULL,"
+    "tokens_used INTEGER NOT NULL DEFAULT 0,"
+    "time_used_seconds INTEGER NOT NULL DEFAULT 0,"
+    "created_at_ms INTEGER NOT NULL,"
+    "updated_at_ms INTEGER NOT NULL"
+    ");";
 
 std::int64_t now_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -90,6 +104,59 @@ std::optional<std::int64_t> column_optional_i64(sqlite3_stmt* stmt, int index) {
     return static_cast<std::int64_t>(sqlite3_column_int64(stmt, index));
 }
 
+bool thread_goal_table_supports_stopped_statuses(sqlite3* db, std::string* error) {
+    Statement stmt(db,
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'thread_goals';",
+        error);
+    if (!stmt) return false;
+    const int rc = sqlite3_step(stmt.get());
+    if (rc == SQLITE_ROW) {
+        const std::string sql = column_text(stmt.get(), 0);
+        return sql.find("'blocked'") != std::string::npos &&
+               sql.find("'usage_limited'") != std::string::npos;
+    }
+    if (rc != SQLITE_DONE) set_error(error, sqlite_error(db, "schema read failed"));
+    return false;
+}
+
+bool migrate_thread_goal_statuses_v2(sqlite3* db, std::string* error) {
+    return exec_sql(db,
+        "DROP TABLE IF EXISTS thread_goals_new;"
+        "CREATE TABLE thread_goals_new ("
+        "thread_id TEXT PRIMARY KEY,"
+        "goal_id TEXT NOT NULL,"
+        "objective TEXT NOT NULL,"
+        "status TEXT NOT NULL CHECK(status IN ("
+            "'active','paused','blocked','usage_limited','budget_limited','complete'"
+        ")),"
+        "token_budget INTEGER NULL,"
+        "tokens_used INTEGER NOT NULL DEFAULT 0,"
+        "time_used_seconds INTEGER NOT NULL DEFAULT 0,"
+        "created_at_ms INTEGER NOT NULL,"
+        "updated_at_ms INTEGER NOT NULL"
+        ");"
+        "INSERT INTO thread_goals_new("
+        "thread_id, goal_id, objective, status, token_budget, tokens_used, "
+        "time_used_seconds, created_at_ms, updated_at_ms"
+        ") SELECT "
+        "thread_id, goal_id, objective, status, token_budget, tokens_used, "
+        "time_used_seconds, created_at_ms, updated_at_ms "
+        "FROM thread_goals;"
+        "DROP TABLE thread_goals;"
+        "ALTER TABLE thread_goals_new RENAME TO thread_goals;",
+        error);
+}
+
+bool record_schema_version(sqlite3* db, int version, std::int64_t applied_at_ms, std::string* error) {
+    Statement stmt(db,
+        "INSERT OR IGNORE INTO schema_migrations(version, applied_at_ms) VALUES(?, ?);",
+        error);
+    return stmt &&
+           bind_i64(stmt.get(), 1, version) &&
+           bind_i64(stmt.get(), 2, applied_at_ms) &&
+           sqlite3_step(stmt.get()) == SQLITE_DONE;
+}
+
 ThreadGoal row_to_goal(sqlite3_stmt* stmt) {
     ThreadGoal goal;
     goal.thread_id = column_text(stmt, 0);
@@ -110,6 +177,8 @@ std::string to_string(ThreadGoalStatus status) {
     switch (status) {
         case ThreadGoalStatus::Active: return "active";
         case ThreadGoalStatus::Paused: return "paused";
+        case ThreadGoalStatus::Blocked: return "blocked";
+        case ThreadGoalStatus::UsageLimited: return "usage_limited";
         case ThreadGoalStatus::BudgetLimited: return "budget_limited";
         case ThreadGoalStatus::Complete: return "complete";
     }
@@ -119,6 +188,8 @@ std::string to_string(ThreadGoalStatus status) {
 std::optional<ThreadGoalStatus> parse_thread_goal_status(const std::string& status) {
     if (status == "active") return ThreadGoalStatus::Active;
     if (status == "paused") return ThreadGoalStatus::Paused;
+    if (status == "blocked") return ThreadGoalStatus::Blocked;
+    if (status == "usage_limited") return ThreadGoalStatus::UsageLimited;
     if (status == "budget_limited") return ThreadGoalStatus::BudgetLimited;
     if (status == "complete") return ThreadGoalStatus::Complete;
     return std::nullopt;
@@ -223,28 +294,25 @@ bool ThreadGoalStore::initialize(std::string* error) {
         error)) return false;
 
     if (!exec_sql(db_, "BEGIN IMMEDIATE;", error)) return false;
-    bool ok = exec_sql(db_,
-        "CREATE TABLE IF NOT EXISTS thread_goals ("
-        "thread_id TEXT PRIMARY KEY,"
-        "goal_id TEXT NOT NULL,"
-        "objective TEXT NOT NULL,"
-        "status TEXT NOT NULL CHECK(status IN ('active','paused','budget_limited','complete')),"
-        "token_budget INTEGER NULL,"
-        "tokens_used INTEGER NOT NULL DEFAULT 0,"
-        "time_used_seconds INTEGER NOT NULL DEFAULT 0,"
-        "created_at_ms INTEGER NOT NULL,"
-        "updated_at_ms INTEGER NOT NULL"
-        ");",
-        error);
+    bool ok = exec_sql(db_, kThreadGoalsCreateSql, error);
     if (ok) {
-        Statement stmt(db_,
-            "INSERT OR IGNORE INTO schema_migrations(version, applied_at_ms) VALUES(?, ?);",
-            error);
-        ok = stmt &&
-             bind_i64(stmt.get(), 1, kSchemaVersion) &&
-             bind_i64(stmt.get(), 2, now_ms()) &&
-             sqlite3_step(stmt.get()) == SQLITE_DONE;
-        if (!ok && error && error->empty()) *error = sqlite_error(db_, "migration insert failed");
+        std::string schema_error;
+        const bool supports_stopped =
+            thread_goal_table_supports_stopped_statuses(db_, &schema_error);
+        if (!schema_error.empty()) {
+            set_error(error, schema_error);
+            ok = false;
+        } else if (!supports_stopped) {
+            ok = migrate_thread_goal_statuses_v2(db_, error);
+        }
+    }
+    if (ok) {
+        const std::int64_t applied_at = now_ms();
+        ok = record_schema_version(db_, 1, applied_at, error) &&
+             record_schema_version(db_, kSchemaVersion, applied_at, error);
+        if (!ok && error && error->empty()) {
+            *error = sqlite_error(db_, "migration insert failed");
+        }
     }
     if (ok) {
         ok = exec_sql(db_, "COMMIT;", error);

@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include "config/config.hpp"
+#include "config/saved_models.hpp"
 #include "provider/model_context_resolver.hpp"
 #include "provider/models_dev_registry.hpp"
 
@@ -133,4 +134,31 @@ TEST(ModelContextResolver, NonblockingUsesCodexModelContext) {
     EXPECT_EQ(acecode::resolve_model_context_window_nonblocking(
                   cfg, "codex", "gpt-5.3-codex-spark", cfg.context_window),
               128000);
+}
+
+// 场景:saved model 配了手动 context_window → 优先于 models.dev / cache / fallback。
+TEST(ModelContextResolver, ProfileContextWindowOverrideWins) {
+    acecode::reset_model_context_window_cache_for_test();
+    auto dir = tmp_dir("profile_override");
+    auto registry_path = dir / "api.json";
+    write_file(registry_path, kOpenRouterRegistry);
+
+    auto cfg = make_openrouter_cfg(registry_path);
+    acecode::initialize_registry(cfg, "");
+
+    acecode::ModelProfile profile;
+    profile.name = "manual";
+    profile.provider = "openai";
+    profile.base_url = cfg.openai.base_url;
+    profile.api_key = cfg.openai.api_key;
+    profile.model = cfg.openai.model;
+    profile.models_dev_provider_id = "openrouter";
+    profile.context_window = 64000;
+
+    EXPECT_EQ(acecode::resolve_model_profile_context_window_nonblocking(
+                  cfg, profile, 128000),
+              64000);
+    EXPECT_EQ(acecode::resolve_model_profile_context_window(
+                  cfg, profile, 128000),
+              64000);
 }

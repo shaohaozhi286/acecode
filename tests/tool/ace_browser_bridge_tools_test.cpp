@@ -320,6 +320,37 @@ TEST(AceBrowserBridgeToolsSession, DefaultsSessionNameWhenNoSessionManager) {
     auto sent = nlohmann::json::parse(fake->calls.back().stdin_text);
     EXPECT_EQ(sent["session"], "acecode-default");
     EXPECT_EQ(sent["args"]["session"], "acecode-default");
+    EXPECT_EQ(sent["args"]["newTab"], false);
+}
+
+TEST(AceBrowserBridgeToolsSession, ExplicitNewTabIsForwarded) {
+    ToolExecutor tools;
+    auto fake = make_fake();
+    register_ace_browser_bridge_tools(tools, enabled_config("progressive"), fake->runner());
+
+    ToolResult result = tools.execute("browser_open", R"({"url":"https://example.com","new_tab":true})");
+
+    ASSERT_TRUE(result.success);
+    ASSERT_GE(fake->calls.size(), 2u);
+    auto sent = nlohmann::json::parse(fake->calls.back().stdin_text);
+    EXPECT_EQ(sent["action"], "navigate");
+    EXPECT_EQ(sent["args"]["newTab"], true);
+}
+
+TEST(AceBrowserBridgeToolsSession, OpenPreservesBridgeOwnership) {
+    ToolExecutor tools;
+    auto fake = make_fake();
+    fake->command_response = {
+        {"ok", true},
+        {"data", {{"success", true}, {"tabId", 42}, {"ownership", "adopted"}}},
+    };
+    register_ace_browser_bridge_tools(tools, enabled_config("progressive"), fake->runner());
+
+    ToolResult result = tools.execute("browser_open", R"({"url":"https://example.com"})");
+
+    ASSERT_TRUE(result.success);
+    auto out = result_json(result);
+    EXPECT_EQ(out["data"]["ownership"], "adopted");
 }
 
 TEST(AceBrowserBridgeToolsTabs, ListTabsPreservesOwnershipMetadata) {
@@ -328,8 +359,8 @@ TEST(AceBrowserBridgeToolsTabs, ListTabsPreservesOwnershipMetadata) {
     fake->command_response = {
         {"ok", true},
         {"data", {{"success", true}, {"tabs", nlohmann::json::array({
-            {{"session", "demo"}, {"tabId", 1}, {"ownership", "owned"}, {"groupTitle", "ACE: demo"}},
-            {{"session", "demo"}, {"tabId", 2}, {"ownership", "adopted"}, {"groupTitle", "ACE: demo"}}
+            {{"session", "demo"}, {"tabId", 1}, {"ownership", "owned"}, {"groupTitle", "ACE-a1b2c3"}},
+            {{"session", "demo"}, {"tabId", 2}, {"ownership", "adopted"}, {"groupTitle", "ACE-a1b2c3"}}
         })}}},
     };
     register_ace_browser_bridge_tools(tools, enabled_config("full"), fake->runner());

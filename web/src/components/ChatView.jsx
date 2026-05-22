@@ -348,6 +348,16 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     [renderedItems],
   );
   const hasActiveTool = useMemo(() => renderedItems.some((item) => item.kind === 'tool' && !item.tool?.isDone), [renderedItems]);
+  const hasVisibleStreamingAssistant = useMemo(() => (
+    streamingId != null
+    && renderedItems.some((item) => (
+      item.kind === 'msg'
+      && item.role === 'assistant'
+      && item.id === streamingId
+      && typeof item.content === 'string'
+      && item.content.trim()
+    ))
+  ), [renderedItems, streamingId]);
   const itemsRef = useRef(renderedItems);
   const stickyRafRef = useRef(0);
   const [stickyUserContext, setStickyUserContext] = useState(null);
@@ -1361,7 +1371,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
               </Fragment>
             );
           })}
-          {busy && streamingId == null && (!hasActiveTool || activity?.phase === 'permission_waiting') && (
+          {busy && !hasVisibleStreamingAssistant && (!hasActiveTool || activity?.phase === 'permission_waiting') && (
             <ActivityIndicator activity={activity} showAceCodeAvatar={showAceCodeAvatar} />
           )}
         </div>

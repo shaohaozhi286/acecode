@@ -2,9 +2,12 @@
 
 #include "session/thread_goal_store.hpp"
 
+#include <sqlite3.h>
+
 #include <filesystem>
 #include <optional>
 #include <random>
+#include <string>
 
 namespace fs = std::filesystem;
 
@@ -50,6 +53,74 @@ TEST(ThreadGoalStore, ReplaceGetAndDeleteGoal) {
 
     ASSERT_TRUE(store.delete_thread_goal("thread-a", &error)) << error;
     EXPECT_FALSE(store.get_thread_goal("thread-a", &error).has_value());
+}
+
+TEST(ThreadGoalStore, SupportsStoppedStatuses) {
+    auto dir = temp_dir("stopped");
+    acecode::ThreadGoalStore store(dir);
+    ASSERT_TRUE(store.initialize());
+
+    std::string error;
+    ASSERT_TRUE(store.replace_thread_goal(
+        "thread-a", "wait for external input", std::nullopt, acecode::ThreadGoalStatus::Blocked, &error)) << error;
+    auto goal = store.get_thread_goal("thread-a", &error);
+    ASSERT_TRUE(goal.has_value()) << error;
+    EXPECT_EQ(goal->status, acecode::ThreadGoalStatus::Blocked);
+    EXPECT_EQ(acecode::to_string(goal->status), "blocked");
+    EXPECT_EQ(acecode::thread_goal_to_json(*goal)["status"], "blocked");
+    EXPECT_FALSE(acecode::is_thread_goal_active(goal->status));
+
+    ASSERT_TRUE(store.update_thread_goal_status(
+        "thread-a", goal->goal_id, acecode::ThreadGoalStatus::UsageLimited, &error)) << error;
+    goal = store.get_thread_goal("thread-a", &error);
+    ASSERT_TRUE(goal.has_value()) << error;
+    EXPECT_EQ(goal->status, acecode::ThreadGoalStatus::UsageLimited);
+    auto parsed = acecode::parse_thread_goal_status("usage_limited");
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_EQ(*parsed, acecode::ThreadGoalStatus::UsageLimited);
+}
+
+TEST(ThreadGoalStore, MigratesV1StatusConstraintForStoppedStatuses) {
+    auto dir = temp_dir("migrate");
+    sqlite3* db = nullptr;
+    const std::string path = (dir / "state.sqlite3").u8string();
+    ASSERT_EQ(sqlite3_open_v2(path.c_str(), &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr), SQLITE_OK);
+    char* raw_error = nullptr;
+    const int rc = sqlite3_exec(db,
+        "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at_ms INTEGER NOT NULL);"
+        "INSERT INTO schema_migrations(version, applied_at_ms) VALUES(1, 1);"
+        "CREATE TABLE thread_goals ("
+        "thread_id TEXT PRIMARY KEY,"
+        "goal_id TEXT NOT NULL,"
+        "objective TEXT NOT NULL,"
+        "status TEXT NOT NULL CHECK(status IN ('active','paused','budget_limited','complete')),"
+        "token_budget INTEGER NULL,"
+        "tokens_used INTEGER NOT NULL DEFAULT 0,"
+        "time_used_seconds INTEGER NOT NULL DEFAULT 0,"
+        "created_at_ms INTEGER NOT NULL,"
+        "updated_at_ms INTEGER NOT NULL"
+        ");"
+        "INSERT INTO thread_goals(thread_id, goal_id, objective, status, token_budget, "
+        "tokens_used, time_used_seconds, created_at_ms, updated_at_ms) "
+        "VALUES('thread-a', 'goal-a', 'finish migration', 'active', NULL, 0, 0, 1, 1);",
+        nullptr,
+        nullptr,
+        &raw_error);
+    const std::string sqlite_error = raw_error ? raw_error : "";
+    sqlite3_free(raw_error);
+    sqlite3_close(db);
+    ASSERT_EQ(rc, SQLITE_OK) << sqlite_error;
+
+    acecode::ThreadGoalStore store(dir);
+    std::string error;
+    ASSERT_TRUE(store.initialize(&error)) << error;
+    auto goal = store.get_thread_goal("thread-a", &error);
+    ASSERT_TRUE(goal.has_value()) << error;
+    ASSERT_TRUE(store.update_thread_goal_status(
+        "thread-a", goal->goal_id, acecode::ThreadGoalStatus::Blocked, &error)) << error;
+    goal = store.get_thread_goal("thread-a", &error);
+    ASSERT_TRUE(goal.has_value()) << error;
+    EXPECT_EQ(goal->status, acecode::ThreadGoalStatus::Blocked);
 }
 
 TEST(ThreadGoalStore, AccountingTransitionsToBudgetLimitedOnce) {

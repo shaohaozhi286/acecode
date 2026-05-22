@@ -123,6 +123,112 @@ TEST(AceBrowserBridgeClientStatus, DoesNotCacheUnhealthyStatus) {
     EXPECT_EQ(*calls, 2);
 }
 
+TEST(AceBrowserBridgeClientStatus, AutoStartsHostWhenStatusReportsStopped) {
+    auto calls = std::make_shared<std::vector<Call>>();
+    auto started = std::make_shared<int>(0);
+    AceBrowserBridgeConfig cfg;
+    cfg.host_path = "custom-host";
+    AceBrowserBridgeClient client(
+        cfg,
+        [calls, started](const std::vector<std::string>& argv,
+                         const std::string& stdin_text,
+                         std::chrono::milliseconds) {
+            calls->push_back(Call{argv, stdin_text});
+            if (*started == 0) {
+                return CliProcessResult{0, false,
+                    R"({"ok":true,"data":{"running":false,"extension_connected":false}})", ""};
+            }
+            return CliProcessResult{0, false,
+                R"({"ok":true,"data":{"running":true,"extension_connected":false}})", ""};
+        },
+        [started](const std::vector<std::string>& argv) {
+            EXPECT_EQ(argv, (std::vector<std::string>{"custom-host", "serve", "--json", "--port", "52007"}));
+            ++(*started);
+            return HostStartResult{true, ""};
+        });
+
+    auto envelope = client.status();
+
+    ASSERT_TRUE(envelope.ok);
+    EXPECT_TRUE(envelope.data["running"].get<bool>());
+    EXPECT_FALSE(envelope.data["extension_connected"].get<bool>());
+    EXPECT_TRUE(envelope.data["auto_start_attempted"].get<bool>());
+    EXPECT_TRUE(envelope.data["auto_started"].get<bool>());
+    EXPECT_EQ(*started, 1);
+    ASSERT_GE(calls->size(), 2u);
+}
+
+TEST(AceBrowserBridgeClientStatus, ReportsAutoStartFailureInStatusData) {
+    auto started = std::make_shared<int>(0);
+    AceBrowserBridgeConfig cfg;
+    cfg.host_path = "custom-host";
+    AceBrowserBridgeClient client(
+        cfg,
+        [](const std::vector<std::string>&,
+           const std::string&,
+           std::chrono::milliseconds) {
+            return CliProcessResult{0, false,
+                R"({"ok":true,"data":{"running":false,"extension_connected":false}})", ""};
+        },
+        [started](const std::vector<std::string>&) {
+            ++(*started);
+            return HostStartResult{false, "boom"};
+        });
+
+    auto envelope = client.status();
+
+    ASSERT_TRUE(envelope.ok);
+    EXPECT_FALSE(envelope.data["running"].get<bool>());
+    EXPECT_TRUE(envelope.data["auto_start_attempted"].get<bool>());
+    EXPECT_EQ(envelope.data["auto_start_error"], "boom");
+    EXPECT_EQ(*started, 1);
+}
+
+TEST(AceBrowserBridgeClientInvocation, RetriesCommandAfterStartingStoppedHost) {
+    auto calls = std::make_shared<std::vector<Call>>();
+    auto started = std::make_shared<int>(0);
+    auto command_calls = std::make_shared<int>(0);
+    AceBrowserBridgeConfig cfg;
+    cfg.host_path = "custom-host";
+    AceBrowserBridgeClient client(
+        cfg,
+        [calls, started, command_calls](const std::vector<std::string>& argv,
+                                        const std::string& stdin_text,
+                                        std::chrono::milliseconds) {
+            calls->push_back(Call{argv, stdin_text});
+            if (argv.size() >= 2 && argv[1] == "command") {
+                ++(*command_calls);
+                if (*command_calls == 1) {
+                    return CliProcessResult{0, false,
+                        R"({"ok":false,"error":{"code":"daemon_not_running","message":"not running"}})", ""};
+                }
+                return CliProcessResult{0, false,
+                    R"({"ok":true,"data":{"success":true}})", ""};
+            }
+            if (*started == 0) {
+                return CliProcessResult{0, false,
+                    R"({"ok":true,"data":{"running":false,"extension_connected":false}})", ""};
+            }
+            return CliProcessResult{0, false,
+                R"({"ok":true,"data":{"running":true,"extension_connected":true}})", ""};
+        },
+        [started](const std::vector<std::string>&) {
+            ++(*started);
+            return HostStartResult{true, ""};
+        });
+
+    BrowserCommandRequest req;
+    req.session = "demo";
+    req.action = "snapshot";
+    auto envelope = client.command(req);
+
+    ASSERT_TRUE(envelope.ok);
+    EXPECT_EQ(envelope.data["success"], true);
+    EXPECT_EQ(*started, 1);
+    EXPECT_EQ(*command_calls, 2);
+    ASSERT_GE(calls->size(), 4u);
+}
+
 TEST(AceBrowserBridgeClientInvocation, MapsTimeout) {
     AceBrowserBridgeClient client(AceBrowserBridgeConfig{},
         [](const std::vector<std::string>&, const std::string&, std::chrono::milliseconds) {

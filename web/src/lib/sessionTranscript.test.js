@@ -50,6 +50,31 @@ run('assistant token streaming 被 final message 替换', () => {
   assert.equal(state.streamingId, null);
 });
 
+run('空 token 不创建 assistant streaming 占位', () => {
+  const state = reduceMany([
+    { type: 'busy_changed', payload: { busy: true }, seq: 1 },
+    { type: 'agent_progress', payload: { phase: 'model_waiting', label: '等待模型' }, seq: 2 },
+    { type: 'token', payload: { text: '' }, seq: 3 },
+    { type: 'token', payload: { text: '  \n' }, seq: 4 },
+  ]);
+
+  assert.equal(state.items.length, 0);
+  assert.equal(state.streamingId, null);
+  assert.equal(state.activity.phase, 'model_waiting');
+});
+
+run('已有可见 assistant stream 后继续保留空白 token', () => {
+  const state = reduceMany([
+    { type: 'token', payload: { text: 'hello' }, seq: 1 },
+    { type: 'token', payload: { text: '\n\n' }, seq: 2 },
+    { type: 'token', payload: { text: 'world' }, seq: 3 },
+  ]);
+
+  assert.equal(state.items.length, 1);
+  assert.equal(state.items[0].content, 'hello\n\nworld');
+  assert.notEqual(state.streamingId, null);
+});
+
 run('busy done error 状态按事件更新', () => {
   let state = reduceMany([
     { type: 'busy_changed', payload: { busy: true }, seq: 1 },

@@ -93,15 +93,21 @@ ToolDef update_goal_def() {
     ToolDef def;
     def.name = "update_goal";
     def.description =
-        "Update the current goal. Only status \"complete\" is allowed, and only "
-        "after the objective is actually achieved.";
+        "Update the current goal. Use this tool only to mark the goal achieved "
+        "or genuinely blocked. Set status \"complete\" only when the objective "
+        "is actually achieved and no required work remains. Set status "
+        "\"blocked\" only when the same blocking condition has repeated for at "
+        "least three consecutive goal turns and the agent cannot make meaningful "
+        "progress without user input or an external-state change. Do not use "
+        "\"blocked\" merely because the work is hard, slow, uncertain, "
+        "incomplete, or would benefit from clarification.";
     def.parameters = {
         {"type", "object"},
         {"properties", {
             {"status", {
                 {"type", "string"},
-                {"enum", {"complete"}},
-                {"description", "The only allowed update is marking the goal complete."},
+                {"enum", {"complete", "blocked"}},
+                {"description", "Allowed values are complete and blocked."},
             }},
         }},
         {"required", {"status"}},
@@ -192,8 +198,13 @@ ToolImpl create_update_goal_tool() {
             return tool_error(std::string("invalid JSON: ") + e.what());
         }
         const std::string status = args.value("status", "");
-        if (status != "complete") {
-            return tool_error("update_goal only supports status \"complete\"");
+        std::optional<ThreadGoalStatus> target_status;
+        if (status == "complete") {
+            target_status = ThreadGoalStatus::Complete;
+        } else if (status == "blocked") {
+            target_status = ThreadGoalStatus::Blocked;
+        } else {
+            return tool_error("update_goal only supports status \"complete\" or \"blocked\"");
         }
 
         if (ctx.account_goal_usage) ctx.account_goal_usage();
@@ -203,7 +214,7 @@ ToolImpl create_update_goal_tool() {
         if (!error.empty()) return tool_error(error);
         if (!goal.has_value()) return tool_error("no goal exists");
 
-        if (!store->update_thread_goal_status(session_id, goal->goal_id, ThreadGoalStatus::Complete, &error)) {
+        if (!store->update_thread_goal_status(session_id, goal->goal_id, *target_status, &error)) {
             return tool_error(error.empty() ? "failed to update goal" : error);
         }
         auto updated = store->get_thread_goal(session_id, &error);
@@ -213,7 +224,7 @@ ToolImpl create_update_goal_tool() {
 
         nlohmann::json out;
         out["goal"] = updated.has_value() ? thread_goal_to_json(*updated) : nlohmann::json(nullptr);
-        out["final"] = true;
+        out["final"] = *target_status == ThreadGoalStatus::Complete;
         if (updated.has_value() && updated->token_budget.has_value()) {
             out["token_budget"] = *updated->token_budget;
             out["tokens_used"] = updated->tokens_used;

@@ -32,6 +32,8 @@
 namespace acecode::ace_browser_bridge {
 namespace {
 
+constexpr const char* kDefaultHostPort = "52007";
+
 BridgeEnvelope make_error(std::string code, std::string message) {
     BridgeEnvelope envelope;
     envelope.ok = false;
@@ -159,12 +161,21 @@ std::string resolve_host_path(const AceBrowserBridgeConfig& config) {
     return default_host_executable_name();
 }
 
+bool error_code_is(const BridgeEnvelope& envelope, const char* code) {
+    return !envelope.ok && envelope.error && envelope.error->code == code;
+}
+
 } // namespace
 
 AceBrowserBridgeClient::AceBrowserBridgeClient(AceBrowserBridgeConfig config,
-                                               CliRunner runner)
-    : config_(std::move(config)),
-      runner_(runner ? std::move(runner) : run_cli_process) {}
+                                               CliRunner runner,
+                                               HostStarter host_starter)
+    : config_(std::move(config)) {
+    const bool custom_runner = static_cast<bool>(runner);
+    runner_ = custom_runner ? std::move(runner) : CliRunner(run_cli_process);
+    host_starter_ = host_starter ? std::move(host_starter)
+                                 : (custom_runner ? HostStarter{} : HostStarter(start_host_process));
+}
 
 nlohmann::json AceBrowserBridgeClient::command_request_json(const BrowserCommandRequest& request) {
     nlohmann::json j = nlohmann::json::object();
@@ -229,6 +240,58 @@ bool AceBrowserBridgeClient::should_cache_status(const BridgeEnvelope& envelope)
            envelope.data.value("extension_connected", false);
 }
 
+BridgeEnvelope AceBrowserBridgeClient::status_once() {
+    return run_json_command({"status", "--json"}, "");
+}
+
+HostStartResult AceBrowserBridgeClient::start_host_daemon() {
+    if (!host_starter_) {
+        return HostStartResult{false, "ace-browser-host auto-start is not available"};
+    }
+    return host_starter_({
+        resolve_host_path(config_),
+        "serve",
+        "--json",
+        "--port",
+        kDefaultHostPort,
+    });
+}
+
+BridgeEnvelope AceBrowserBridgeClient::ensure_host_running_from_status(BridgeEnvelope status_envelope) {
+    if (!status_envelope.ok || !status_envelope.data.is_object() ||
+        status_envelope.data.value("running", false)) {
+        return status_envelope;
+    }
+
+    HostStartResult start = start_host_daemon();
+    status_envelope.data["auto_start_attempted"] = true;
+    if (!start.ok) {
+        status_envelope.data["auto_start_error"] =
+            start.error.empty() ? "ace-browser-host failed to start" : start.error;
+        return status_envelope;
+    }
+
+    clear_status_cache();
+    BridgeEnvelope latest = status_envelope;
+    for (int attempt = 0; attempt < 20; ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(attempt < 5 ? 100 : 250));
+        latest = status_once();
+        if (!latest.ok) return latest;
+        if (latest.data.is_object()) {
+            latest.data["auto_start_attempted"] = true;
+            latest.data["auto_started"] = true;
+        }
+        if (latest.data.value("running", false)) return latest;
+    }
+
+    if (latest.ok && latest.data.is_object()) {
+        latest.data["auto_start_attempted"] = true;
+        latest.data["auto_started"] = true;
+        latest.data["auto_start_error"] = "ace-browser-host did not report running after start";
+    }
+    return latest;
+}
+
 BridgeEnvelope AceBrowserBridgeClient::status() {
     const auto now = std::chrono::steady_clock::now();
     if (cached_status_.has_value()) {
@@ -238,7 +301,7 @@ BridgeEnvelope AceBrowserBridgeClient::status() {
         }
     }
 
-    BridgeEnvelope envelope = run_json_command({"status", "--json"}, "");
+    BridgeEnvelope envelope = ensure_host_running_from_status(status_once());
     if (should_cache_status(envelope)) {
         cached_status_ = envelope;
         cached_status_at_ = now;
@@ -249,12 +312,26 @@ BridgeEnvelope AceBrowserBridgeClient::status() {
 }
 
 BridgeEnvelope AceBrowserBridgeClient::command(const BrowserCommandRequest& request) {
-    return run_json_command({"command", "--json"}, command_request_json(request).dump());
+    const std::string body = command_request_json(request).dump();
+    BridgeEnvelope envelope = run_json_command({"command", "--json"}, body);
+    if (!error_code_is(envelope, "daemon_not_running")) return envelope;
+
+    BridgeEnvelope status_envelope = ensure_host_running_from_status(status_once());
+    if (!status_envelope.ok) return status_envelope;
+    if (!status_envelope.data.value("running", false)) return envelope;
+    return run_json_command({"command", "--json"}, body);
 }
 
 BridgeEnvelope AceBrowserBridgeClient::screenshot(const std::string& session,
                                                   const std::string& output_path) {
-    return run_json_command({"screenshot", "--json", "--session", session, "--output", output_path}, "");
+    std::vector<std::string> args = {"screenshot", "--json", "--session", session, "--output", output_path};
+    BridgeEnvelope envelope = run_json_command(args, "");
+    if (!error_code_is(envelope, "daemon_not_running")) return envelope;
+
+    BridgeEnvelope status_envelope = ensure_host_running_from_status(status_once());
+    if (!status_envelope.ok) return status_envelope;
+    if (!status_envelope.data.value("running", false)) return envelope;
+    return run_json_command(args, "");
 }
 
 void AceBrowserBridgeClient::clear_status_cache() {
@@ -460,6 +537,72 @@ CliProcessResult run_cli_process(const std::vector<std::string>& argv,
     if (reader.joinable()) reader.join();
     close_fd(stdout_pipe[0]);
     return result;
+#endif
+}
+
+HostStartResult start_host_process(const std::vector<std::string>& argv) {
+    if (argv.empty() || argv[0].empty()) {
+        return HostStartResult{false, "ace-browser-host path is empty"};
+    }
+
+#ifdef _WIN32
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+
+    PROCESS_INFORMATION pi{};
+    std::wstring command_line = build_windows_command_line(argv);
+    std::vector<wchar_t> mutable_command(command_line.begin(), command_line.end());
+    mutable_command.push_back(L'\0');
+
+    std::wstring cwd;
+    try {
+        cwd = std::filesystem::path(utf8_to_wide(argv[0])).parent_path().wstring();
+    } catch (...) {
+        cwd.clear();
+    }
+
+    BOOL ok = CreateProcessW(nullptr,
+                             mutable_command.data(),
+                             nullptr,
+                             nullptr,
+                             FALSE,
+                             CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
+                             nullptr,
+                             cwd.empty() ? nullptr : cwd.c_str(),
+                             &si,
+                             &pi);
+    if (!ok) {
+        return HostStartResult{false, "Failed to start ace-browser-host: " +
+                                          windows_error_message(GetLastError())};
+    }
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return HostStartResult{true, ""};
+#else
+    pid_t pid = fork();
+    if (pid < 0) {
+        return HostStartResult{false, std::string("fork failed: ") + std::strerror(errno)};
+    }
+    if (pid == 0) {
+        setsid();
+        int devnull = open("/dev/null", O_RDWR);
+        if (devnull >= 0) {
+            dup2(devnull, STDIN_FILENO);
+            dup2(devnull, STDOUT_FILENO);
+            dup2(devnull, STDERR_FILENO);
+            if (devnull > STDERR_FILENO) close(devnull);
+        }
+
+        std::vector<char*> cargv;
+        cargv.reserve(argv.size() + 1);
+        for (const auto& item : argv) {
+            cargv.push_back(const_cast<char*>(item.c_str()));
+        }
+        cargv.push_back(nullptr);
+        execvp(cargv[0], cargv.data());
+        _exit(127);
+    }
+    return HostStartResult{true, ""};
 #endif
 }
 

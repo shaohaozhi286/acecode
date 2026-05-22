@@ -2,7 +2,10 @@
 import assert from 'node:assert/strict';
 import {
   buildModelDraftsFromSelection,
+  filterModelIds,
+  formatContextWindowK,
   modelNameSlug,
+  parseContextWindowK,
   splitModelIds,
   validateModelDraft,
 } from './modelManager.js';
@@ -62,8 +65,46 @@ run('合法 openai 草稿 → ok', () => {
   }), { ok: true });
 });
 
+run('非法 context_window → INVALID_CONTEXT_WINDOW', () => {
+  assert.equal(validateModelDraft({
+    name: 'lm', provider: 'copilot', model: 'l', context_window: -1,
+  }).code, 'INVALID_CONTEXT_WINDOW');
+});
+
 run('splitModelIds 去空去重并保留顺序', () => {
   assert.deepEqual(splitModelIds(' gpt-4o, ,glm-4,gpt-4o '), ['gpt-4o', 'glm-4']);
+});
+
+run('filterModelIds 使用输入内容缩小模型列表', () => {
+  assert.deepEqual(
+    filterModelIds(['gpt-4o', 'openrouter/anthropic/claude-3.7', 'glm-4-flash'], 'CLAUDE'),
+    ['openrouter/anthropic/claude-3.7'],
+  );
+});
+
+run('filterModelIds 支持多个空格分隔条件', () => {
+  assert.deepEqual(
+    filterModelIds(['gpt-4o-mini', 'gpt-4.1', 'gpt-4.1-mini'], 'gpt mini'),
+    ['gpt-4o-mini', 'gpt-4.1-mini'],
+  );
+});
+
+run('parseContextWindowK 把 K 单位换算为 token 数', () => {
+  assert.deepEqual(parseContextWindowK('128'), { ok: true, tokens: 128000 });
+  assert.deepEqual(parseContextWindowK('131.072'), { ok: true, tokens: 131072 });
+  assert.deepEqual(parseContextWindowK(''), { ok: true, tokens: null });
+});
+
+run('parseContextWindowK 拒绝非正数或超精度小数', () => {
+  assert.equal(parseContextWindowK('0').code, 'INVALID_CONTEXT_WINDOW');
+  assert.equal(parseContextWindowK('abc').code, 'INVALID_CONTEXT_WINDOW');
+  assert.equal(parseContextWindowK('1.2345').code, 'INVALID_CONTEXT_WINDOW');
+});
+
+run('formatContextWindowK 把 token 数显示为 K', () => {
+  assert.equal(formatContextWindowK(128000), '128');
+  assert.equal(formatContextWindowK(131072), '131.072');
+  assert.equal(formatContextWindowK(0), '');
 });
 
 run('modelNameSlug 清理不可用字符并避免保留前缀', () => {

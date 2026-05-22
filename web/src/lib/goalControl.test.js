@@ -42,3 +42,10 @@ run('paused goal without a running turn hides stop control', () => {
   assert.equal(state.visible, false);
   assert.equal(state.action, 'none');
 });
+
+run('blocked goal without a running turn hides stop control', () => {
+  const state = getGoalStopControlState({ goal: { status: 'blocked' }, busy: false });
+  assert.equal(isActiveGoal({ status: 'blocked' }), false);
+  assert.equal(state.visible, false);
+  assert.equal(state.action, 'none');
+});

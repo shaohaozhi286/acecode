@@ -56,6 +56,12 @@ $content = Get-Content -Raw $contentPath
 
 Assert-Contains $serviceWorker "const DEFAULT_PORT = 52007" "service worker must default to port 52007"
 Assert-Contains $serviceWorker "protocol_version: PROTOCOL_VERSION" "service worker must send protocol_version in hello"
+Assert-Contains $serviceWorker "aceBrowserBridgeSessions" "service worker must persist session tab registry"
+Assert-Contains $serviceWorker "restoreSessionRegistry" "service worker must restore session registry on startup"
+Assert-Contains $serviceWorker "args.newTab === true" "service worker must only create new tabs on explicit newTab or missing session tab"
+Assert-Contains $serviceWorker "function shortSessionHash" "service worker must derive short group title hashes"
+Assert-Contains $serviceWorker 'return `ACE-${shortSessionHash(session)}`' "service worker must use short ACE hash group titles"
+Assert-Contains $serviceWorker "isLegacyDefaultGroupTitle" "service worker must migrate legacy default group titles"
 Assert-Contains $serviceWorker "chrome.debugger.attach" "service worker must contain CDP attach path"
 Assert-Contains $serviceWorker "Input.dispatchMouseEvent" "service worker must dispatch mouse events"
 Assert-Contains $serviceWorker 'type: "mousePressed"' "service worker must dispatch mousePressed"
