@@ -5113,10 +5113,18 @@ static int run_interactive_app(const CliOptions& cli,
         }
 
         Element message_body = vbox(std::move(message_elements));
-        const int frame_focus_y =
-            acecode::tui::chat_frame_focus_y_for_scroll_top(
-                state.chat_scroll_top_row, chat_viewport_rows());
-        message_body = message_body | focusPosition(0, frame_focus_y);
+        if (state.chat_follow_tail) {
+            // /resume replaces the transcript before the next render has
+            // measured the new paragraph heights. Use FTXUI's rendered bottom
+            // anchor while tail-follow is active so the first restored frame
+            // lands at the true tail instead of an underestimated absolute row.
+            message_body = message_body | focusPositionRelative(0.0f, 1.0f);
+        } else {
+            const int frame_focus_y =
+                acecode::tui::chat_frame_focus_y_for_scroll_top(
+                    state.chat_scroll_top_row, chat_viewport_rows());
+            message_body = message_body | focusPosition(0, frame_focus_y);
+        }
 
         // draggable-thick-scrollbar: thumb glyph identical to upstream
         // vscroll_indicator (┃╹╻),painted only in the rightmost reserved

@@ -1,5 +1,5 @@
 // 覆盖 src/session/session_storage.cpp 的磁盘 schema:
-//   - SessionMeta 全字段 roundtrip(含本次新增的 title)
+//   - SessionMeta 全字段 roundtrip(含 title / input_draft)
 //   - 老版本 .meta.json(无 title 字段)向后兼容
 //   - 空 title 必须被序列化路径省略,不污染 JSON
 //   - compute_project_hash 稳定且对路径大小写/分隔符不敏感
@@ -52,6 +52,7 @@ TEST(SessionStorage, MetaRoundtrip) {
     in.model         = "gpt-4o";
     in.model_preset  = "copilot-fast";
     in.title         = "resume bug";
+    in.input_draft   = "continue this refactor";
     in.permission_mode = "accept-edits";
     in.turn_count    = 3;
     in.last_token_usage.prompt_tokens = 8000;
@@ -79,6 +80,7 @@ TEST(SessionStorage, MetaRoundtrip) {
     EXPECT_EQ(out.model,         in.model);
     EXPECT_EQ(out.model_preset,  in.model_preset);
     EXPECT_EQ(out.title,         in.title);
+    EXPECT_EQ(out.input_draft,   in.input_draft);
     EXPECT_EQ(out.permission_mode, in.permission_mode);
     EXPECT_EQ(out.turn_count,    in.turn_count);
     EXPECT_EQ(out.last_token_usage.prompt_tokens, 8000);
@@ -124,6 +126,8 @@ TEST(SessionStorage, LegacyMetaWithoutTitle) {
         << "legacy meta without 'model_preset' must deserialize to empty preset";
     EXPECT_TRUE(out.title.empty())
         << "legacy meta without 'title' must deserialize to empty title";
+    EXPECT_TRUE(out.input_draft.empty())
+        << "legacy meta without 'input_draft' must deserialize to empty draft";
     EXPECT_EQ(out.permission_mode, "default")
         << "legacy meta without 'permission_mode' must default to default";
     EXPECT_EQ(out.turn_count, 0)
@@ -157,6 +161,8 @@ TEST(SessionStorage, EmptyTitleIsOmittedOnWrite) {
         << "empty model_preset should be omitted from the serialized JSON; got: " << content;
     EXPECT_EQ(content.find("\"archived\""), std::string::npos)
         << "false archived state should be omitted from the serialized JSON; got: " << content;
+    EXPECT_EQ(content.find("\"input_draft\""), std::string::npos)
+        << "empty input_draft should be omitted from the serialized JSON; got: " << content;
 }
 
 // 场景:desktop visibility 是 project-level workspace.json marker,不是

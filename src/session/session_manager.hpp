@@ -138,6 +138,10 @@ public:
     // Return the current in-memory title (empty when unset).
     std::string current_title() const;
 
+    // Persisted unsubmitted chat input draft for the active session.
+    void set_input_draft(std::string draft);
+    std::string current_input_draft() const;
+
     // Persisted runtime state for the active session.
     void set_permission_mode(std::string mode, bool persist_immediately = true);
     std::string current_permission_mode() const;
@@ -173,6 +177,7 @@ private:
     std::string last_user_summary_;
     std::string created_at_;
     std::string pending_title_;
+    std::string input_draft_;
     std::string permission_mode_ = "default";
     TokenUsage last_token_usage_;
     TokenUsage session_token_usage_;

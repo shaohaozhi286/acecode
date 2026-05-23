@@ -49,6 +49,15 @@ function sessionsPath(path, opts = {}) {
   return opts && opts.archived ? `${path}?archived=1` : path;
 }
 
+export function sessionDraftPath(id, workspaceHash = '') {
+  const sid = encodeURIComponent(id);
+  const hash = String(workspaceHash || '').trim();
+  if (hash) {
+    return `/api/workspaces/${encodeURIComponent(hash)}/sessions/${sid}/draft`;
+  }
+  return `/api/sessions/${sid}/draft`;
+}
+
 async function request(method, path, body, base) {
   const headers = {};
   const token = baseToken(base);
@@ -94,6 +103,10 @@ export function createApi(base = null) {
     setPinnedSessions: (hash, sessionIds=[]) =>
       request('PUT', `/api/workspaces/${encodeURIComponent(hash)}/pinned-sessions`, { session_ids: sessionIds }, base),
     destroySession:   (id)           => request('DELETE', `/api/sessions/${encodeURIComponent(id)}`, undefined, base),
+    getSessionDraft:  (id, workspaceHash = '') =>
+      request('GET', sessionDraftPath(id, workspaceHash), undefined, base),
+    setSessionDraft:  (id, text = '', workspaceHash = '') =>
+      request('PUT', sessionDraftPath(id, workspaceHash), { text }, base),
     sendInput:        (id, text)     => request('POST',   `/api/sessions/${encodeURIComponent(id)}/messages`, {text}, base),
     executeCommand:   (id, command)  => request('POST',   `/api/sessions/${encodeURIComponent(id)}/commands`, command, base),
     getMessages:      (id, since=0)  => request('GET',    `/api/sessions/${encodeURIComponent(id)}/messages?since=${since}`, undefined, base),

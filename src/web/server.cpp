@@ -706,6 +706,7 @@ struct WebServer::Impl {
                 meta.model_preset = entry->model_state.name;
                 if (entry->sm) {
                     meta.title = entry->sm->current_title();
+                    meta.input_draft = entry->sm->current_input_draft();
                 }
                 return meta;
             }
@@ -749,6 +750,93 @@ struct WebServer::Impl {
         crow::response r(session_meta_to_json(meta, ws.hash).dump());
         r.add_header("Content-Type", "application/json");
         return with_cors(req, std::move(r));
+    }
+
+    crow::response session_input_draft_response(
+        const crow::request& req,
+        const std::string& id,
+        const std::string& text) {
+        crow::response r(json{{"session_id", id}, {"id", id}, {"text", text}}.dump());
+        r.add_header("Content-Type", "application/json");
+        return with_cors(req, std::move(r));
+    }
+
+    std::optional<crow::response> parse_session_input_draft_request(
+        const crow::request& req,
+        std::string& text) {
+        try {
+            auto j = json::parse(req.body);
+            if (!j.contains("text") || !j["text"].is_string()) {
+                crow::response r(400);
+                r.body = R"({"error":"text required"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            text = j["text"].get<std::string>();
+            return std::nullopt;
+        } catch (const std::exception& e) {
+            crow::response r(400);
+            r.body = json{{"error", std::string("bad json: ") + e.what()}}.dump();
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        }
+    }
+
+    SessionEntry* active_session_entry_for_workspace(
+        const acecode::desktop::WorkspaceMeta& ws,
+        const std::string& id) const {
+        if (!deps.session_registry) return nullptr;
+        auto* entry = deps.session_registry->lookup(id);
+        if (!entry || !session_entry_matches_workspace(*entry, ws)) return nullptr;
+        return entry;
+    }
+
+    crow::response get_session_input_draft(
+        const crow::request& req,
+        const acecode::desktop::WorkspaceMeta& ws,
+        const std::string& id) {
+        if (auto* entry = active_session_entry_for_workspace(ws, id)) {
+            const std::string text = entry->sm ? entry->sm->current_input_draft() : std::string{};
+            return session_input_draft_response(req, id, text);
+        }
+
+        auto maybe_meta = find_session_meta_for_workspace(ws, id);
+        if (!maybe_meta.has_value()) {
+            crow::response r(404);
+            r.body = R"({"error":"session not found"})";
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        }
+        return session_input_draft_response(req, id, maybe_meta->input_draft);
+    }
+
+    crow::response set_session_input_draft(
+        const crow::request& req,
+        const acecode::desktop::WorkspaceMeta& ws,
+        const std::string& id) {
+        std::string text;
+        if (auto err = parse_session_input_draft_request(req, text)) return std::move(*err);
+
+        if (auto* entry = active_session_entry_for_workspace(ws, id)) {
+            if (entry->sm) {
+                entry->sm->set_input_draft(text);
+                return session_input_draft_response(req, id, entry->sm->current_input_draft());
+            }
+        }
+
+        auto maybe_meta = find_session_meta_for_workspace(ws, id);
+        if (!maybe_meta.has_value()) {
+            crow::response r(404);
+            r.body = R"({"error":"session not found"})";
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        }
+
+        SessionMeta meta = *maybe_meta;
+        meta.input_draft = text;
+        const auto project_dir = SessionStorage::get_project_dir(ws.cwd);
+        SessionStorage::write_meta(SessionStorage::meta_path(project_dir, id), meta);
+        return session_input_draft_response(req, id, text);
     }
 
     std::filesystem::path pinned_sessions_path_for_cwd(const std::string& cwd) const {
@@ -1145,6 +1233,10 @@ struct WebServer::Impl {
         ([this](const crow::request& req, const std::string&, const std::string&) {
             return cors_preflight(req);
         });
+        CROW_ROUTE(app, "/api/workspaces/<string>/sessions/<string>/draft").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req, const std::string&, const std::string&) {
+            return cors_preflight(req);
+        });
 
         CROW_ROUTE(app, "/api/workspaces").methods(crow::HTTPMethod::GET)
         ([this](const crow::request& req) {
@@ -1377,6 +1469,32 @@ struct WebServer::Impl {
                 return with_cors(req, std::move(r));
             }
             return set_session_archive_state(req, *ws, id, false);
+        });
+
+        CROW_ROUTE(app, "/api/workspaces/<string>/sessions/<string>/draft").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req, const std::string& hash, const std::string& id) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            auto ws = resolve_workspace(hash);
+            if (!ws.has_value()) {
+                crow::response r(404);
+                r.body = R"({"error":"workspace not found"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            return get_session_input_draft(req, *ws, id);
+        });
+
+        CROW_ROUTE(app, "/api/workspaces/<string>/sessions/<string>/draft").methods(crow::HTTPMethod::PUT)
+        ([this](const crow::request& req, const std::string& hash, const std::string& id) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            auto ws = resolve_workspace(hash);
+            if (!ws.has_value()) {
+                crow::response r(404);
+                r.body = R"({"error":"workspace not found"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            return set_session_input_draft(req, *ws, id);
         });
     }
 
@@ -1872,6 +1990,10 @@ struct WebServer::Impl {
         ([this](const crow::request& req, const std::string&) {
             return cors_preflight(req);
         });
+        CROW_ROUTE(app, "/api/sessions/<string>/draft").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req, const std::string&) {
+            return cors_preflight(req);
+        });
         CROW_ROUTE(app, "/api/sessions/<string>/fork").methods(crow::HTTPMethod::Options)
         ([this](const crow::request& req, const std::string&) {
             return cors_preflight(req);
@@ -1978,6 +2100,18 @@ struct WebServer::Impl {
         ([this](const crow::request& req, const std::string& id) {
             if (auto rej = require_auth(req)) return std::move(*rej);
             return set_session_archive_state(req, compatibility_workspace(), id, false);
+        });
+
+        CROW_ROUTE(app, "/api/sessions/<string>/draft").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req, const std::string& id) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            return get_session_input_draft(req, compatibility_workspace(), id);
+        });
+
+        CROW_ROUTE(app, "/api/sessions/<string>/draft").methods(crow::HTTPMethod::PUT)
+        ([this](const crow::request& req, const std::string& id) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            return set_session_input_draft(req, compatibility_workspace(), id);
         });
 
         // DELETE /api/sessions/:id: 销毁。spec 9.5

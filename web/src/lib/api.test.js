@@ -5,7 +5,7 @@
 // 不打真实网络,通过依赖注入 listWorkspaces / listSessions 两个 mock 完成。
 
 import assert from 'node:assert/strict';
-import { ApiError, createApi, mergeAllWorkspaceSessions } from './api.js';
+import { ApiError, createApi, mergeAllWorkspaceSessions, sessionDraftPath } from './api.js';
 
 function run(name, fn) {
   try {
@@ -408,6 +408,43 @@ await run('archive API methods use expected endpoints and archived query flag', 
     assert.equal(calls[2].opts.method, 'PUT');
     assert.equal(calls[3].url, 'http://127.0.0.1:4567/api/workspaces/w%2Fa/sessions/s%2Fa/archive');
     assert.equal(calls[3].opts.method, 'DELETE');
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+await run('session draft API uses workspace route when workspace hash is available', async () => {
+  const previousFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    calls.push({ url, opts });
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ session_id: 's/a', text: 'draft text' }),
+    };
+  };
+  try {
+    const client = createApi({ origin: 'http://127.0.0.1:4567', token: 'tok' });
+    assert.equal(
+      sessionDraftPath('s/a', 'w/a'),
+      '/api/workspaces/w%2Fa/sessions/s%2Fa/draft',
+    );
+    assert.equal(sessionDraftPath('s/a'), '/api/sessions/s%2Fa/draft');
+
+    await client.getSessionDraft('s/a', 'w/a');
+    await client.setSessionDraft('s/a', 'draft text', 'w/a');
+    await client.setSessionDraft('s/a', '');
+
+    assert.equal(calls[0].url, 'http://127.0.0.1:4567/api/workspaces/w%2Fa/sessions/s%2Fa/draft');
+    assert.equal(calls[0].opts.method, 'GET');
+    assert.equal(calls[1].url, 'http://127.0.0.1:4567/api/workspaces/w%2Fa/sessions/s%2Fa/draft');
+    assert.equal(calls[1].opts.method, 'PUT');
+    assert.deepEqual(JSON.parse(calls[1].opts.body), { text: 'draft text' });
+    assert.equal(calls[2].url, 'http://127.0.0.1:4567/api/sessions/s%2Fa/draft');
+    assert.equal(calls[2].opts.method, 'PUT');
+    assert.deepEqual(JSON.parse(calls[2].opts.body), { text: '' });
   } finally {
     globalThis.fetch = previousFetch;
   }

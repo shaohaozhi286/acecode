@@ -330,12 +330,23 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   const inputRef = useRef(null);
   const layoutRef = useRef(null);
   const sidePanelResizeActiveRef = useRef(false);
+  const [composerValue, setComposerValue] = useState('');
+  const [composerSubmitting, setComposerSubmitting] = useState(false);
+  const [draftReadyKey, setDraftReadyKey] = useState('');
+  const draftEditVersionRef = useRef(0);
+  const draftSessionKeyRef = useRef('');
+  const draftLastSavedRef = useRef({ key: '', text: '' });
+  const composerValueRef = useRef('');
+  const composerDirtyRef = useRef(false);
   const [queueState, setQueueState] = useState(() => createChatInputQueueState());
   const queueStateRef = useRef(queueState);
   const drainRef = useRef(false);
   // 排队消息从 transcript 中分离出来,只喂给 InputBar 上方的 QueueCardList。
   // transcript 只渲染后端真实落库的消息,避免把"草稿/未发送"和"已发送"混在一起。
   const visibleQueuedItems = useMemo(() => buildQueuedMessageItems(queueState, sid), [queueState, sid]);
+  const draftWorkspaceHash = isRealWorkspaceHash(ref?.workspaceHash) ? ref.workspaceHash : '';
+  const draftSessionKey = sid ? `${draftWorkspaceHash}:${sid}` : '';
+  composerValueRef.current = composerValue;
   const rawItems = items;
   const renderedItems = useMemo(
     () => projectCollapsedTranscriptItems(rawItems, { deferTrailingToolSummary: busy }),
@@ -379,7 +390,105 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   }, [commandWorkspaceHash, onCommandWorkspaceChange]);
 
   useEffect(() => { sidRef.current = sid; }, [sid]);
+  useEffect(() => { draftSessionKeyRef.current = draftSessionKey; }, [draftSessionKey]);
   useEffect(() => { queueStateRef.current = queueState; }, [queueState]);
+
+  const handleComposerChange = useCallback((next) => {
+    draftEditVersionRef.current += 1;
+    composerDirtyRef.current = true;
+    setComposerValue(next);
+  }, []);
+
+  const persistDraftValue = useCallback((targetSid, targetWorkspaceHash, targetKey, text) => {
+    if (!targetSid || !targetKey) return Promise.resolve(null);
+    return api.setSessionDraft(targetSid, text, targetWorkspaceHash)
+      .then((result) => {
+        if (draftSessionKeyRef.current === targetKey) {
+          draftLastSavedRef.current = { key: targetKey, text };
+          if (composerValueRef.current === text) {
+            composerDirtyRef.current = false;
+          }
+        }
+        return result;
+      })
+      .catch(() => null);
+  }, [api]);
+
+  const clearCurrentSessionDraft = useCallback(() => {
+    const targetSid = sid;
+    const targetWorkspaceHash = draftWorkspaceHash;
+    const targetKey = draftSessionKey;
+    if (!targetSid || !targetKey) return;
+    if (draftSessionKeyRef.current === targetKey) {
+      draftEditVersionRef.current += 1;
+      setComposerValue('');
+    }
+    void persistDraftValue(targetSid, targetWorkspaceHash, targetKey, '');
+  }, [draftSessionKey, draftWorkspaceHash, persistDraftValue, sid]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const targetSid = sid;
+    const targetWorkspaceHash = draftWorkspaceHash;
+    const targetKey = draftSessionKey;
+    const editVersionAtLoad = draftEditVersionRef.current;
+    setDraftReadyKey('');
+    setComposerSubmitting(false);
+
+    if (!targetSid || !targetKey) {
+      composerDirtyRef.current = false;
+      setComposerValue('');
+      draftLastSavedRef.current = { key: '', text: '' };
+      return () => { cancelled = true; };
+    }
+
+    composerDirtyRef.current = false;
+    setComposerValue('');
+    api.getSessionDraft(targetSid, targetWorkspaceHash)
+      .then((result) => {
+        if (cancelled || draftSessionKeyRef.current !== targetKey) return;
+        const text = typeof result?.text === 'string' ? result.text : '';
+        draftLastSavedRef.current = { key: targetKey, text };
+        if (draftEditVersionRef.current === editVersionAtLoad) {
+          setComposerValue(text);
+        }
+        setDraftReadyKey(targetKey);
+      })
+      .catch(() => {
+        if (cancelled || draftSessionKeyRef.current !== targetKey) return;
+        draftLastSavedRef.current = { key: targetKey, text: '' };
+        setDraftReadyKey(targetKey);
+      });
+
+    return () => { cancelled = true; };
+  }, [api, draftSessionKey, draftWorkspaceHash, sid]);
+
+  useEffect(() => {
+    const targetSid = sid;
+    const targetWorkspaceHash = draftWorkspaceHash;
+    const targetKey = draftSessionKey;
+    return () => {
+      if (!targetSid || !targetKey || !composerDirtyRef.current) return;
+      void persistDraftValue(targetSid, targetWorkspaceHash, targetKey, composerValueRef.current);
+    };
+  }, [draftSessionKey, draftWorkspaceHash, persistDraftValue, sid]);
+
+  useEffect(() => {
+    if (!sid || !draftSessionKey || draftReadyKey !== draftSessionKey) return undefined;
+    if (draftLastSavedRef.current.key === draftSessionKey &&
+        draftLastSavedRef.current.text === composerValue) {
+      return undefined;
+    }
+
+    const targetSid = sid;
+    const targetWorkspaceHash = draftWorkspaceHash;
+    const targetKey = draftSessionKey;
+    const text = composerValue;
+    const timer = setTimeout(() => {
+      void persistDraftValue(targetSid, targetWorkspaceHash, targetKey, text);
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [composerValue, draftReadyKey, draftSessionKey, draftWorkspaceHash, persistDraftValue, sid]);
 
   useEffect(() => {
     if (!sid) {
@@ -717,20 +826,29 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         .finally(() => setHomeSubmitting(false));
       return;
     }
+    if (composerSubmitting) return;
     if (busy && !isBuiltin) {
       enqueueInput(text);
+      clearCurrentSessionDraft();
       return;
     }
-    sendInputOrBuiltin(sid, text).catch((e) => {
-      toast({ kind: 'err', text: '发送失败:' + (e.message || '') });
-      applyEvent({ type: 'busy_changed', payload: { busy: false } }, { emitEffects: false });
-    });
-    recordInputHistory(text);
-    if (!ref?.title) setTranscriptTitle(text);
-    if (!isBuiltin) {
-      applyEvent({ type: 'busy_changed', payload: { busy: true } }, { emitEffects: false });
-    }
-  }, [sid, busy, api, ref, health, homeSubmitting, selectedHomeWorkspace, onSessionPromoted, recordInputHistory, enqueueInput, applyEvent, setTranscriptTitle, sendInputOrBuiltin]);
+    const targetSid = sid;
+    setComposerSubmitting(true);
+    sendInputOrBuiltin(targetSid, text)
+      .then(() => {
+        recordInputHistory(text);
+        if (!ref?.title) setTranscriptTitle(text);
+        clearCurrentSessionDraft();
+        if (!isBuiltin) {
+          applyEvent({ type: 'busy_changed', payload: { busy: true } }, { emitEffects: false });
+        }
+      })
+      .catch((e) => {
+        toast({ kind: 'err', text: '发送失败:' + (e.message || '') });
+        applyEvent({ type: 'busy_changed', payload: { busy: false } }, { emitEffects: false });
+      })
+      .finally(() => setComposerSubmitting(false));
+  }, [sid, busy, api, ref, health, homeSubmitting, selectedHomeWorkspace, onSessionPromoted, recordInputHistory, enqueueInput, applyEvent, setTranscriptTitle, sendInputOrBuiltin, composerSubmitting, clearCurrentSessionDraft]);
 
   const drainQueuedInput = useCallback(() => {
     const targetSid = sidRef.current;
@@ -1402,9 +1520,11 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         goal={goal}
         goalStopping={goalStopping}
         history={history}
+        value={composerValue}
+        onChange={handleComposerChange}
         onSubmit={submit}
         onAbort={stopCurrentWork}
-        disabled={!!questionForView}
+        disabled={!!questionForView || composerSubmitting}
         placeholder={questionForView ? '请先回答上方问题…' : undefined}
       />
       <StatusBar

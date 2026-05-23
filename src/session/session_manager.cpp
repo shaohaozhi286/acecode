@@ -139,6 +139,7 @@ void SessionManager::start_session(const std::string& cwd,
     last_user_summary_.clear();
     created_at_.clear();
     pending_title_.clear();
+    input_draft_.clear();
     permission_mode_ = "default";
     last_token_usage_ = {};
     session_token_usage_ = {};
@@ -188,6 +189,7 @@ bool SessionManager::ensure_created() {
     meta.model = model_name_;
     meta.model_preset = model_preset_;
     meta.title = pending_title_;
+    meta.input_draft = input_draft_;
     meta.permission_mode = permission_mode_;
     meta.turn_count = turn_count_;
     meta.last_token_usage = last_token_usage_;
@@ -361,6 +363,7 @@ std::vector<ChatMessage> SessionManager::resume_session(const std::string& sessi
         created_at_ = meta.created_at;
         last_user_summary_ = meta.summary;
         pending_title_ = meta.title;
+        input_draft_ = meta.input_draft;
         permission_mode_ = normalize_permission_mode_name(meta.permission_mode);
         turn_count_ = meta.turn_count;
         last_token_usage_ = meta.last_token_usage;
@@ -451,6 +454,7 @@ void SessionManager::end_current_session() {
     last_user_summary_.clear();
     created_at_.clear();
     pending_title_.clear();
+    input_draft_.clear();
     last_token_usage_ = {};
     session_token_usage_ = {};
     last_error_.clear();
@@ -489,6 +493,7 @@ std::string SessionManager::fork_active_session(const std::vector<ChatMessage>& 
     last_token_usage_ = {};
     session_token_usage_ = {};
     last_user_summary_.clear();
+    input_draft_.clear();
 
     if (!acquire_writer_lease_locked()) {
         return {};
@@ -588,6 +593,7 @@ std::string SessionManager::fork_session_to_new_id(
     meta.model           = model_name_;
     meta.model_preset    = model_preset_;
     meta.title           = title;
+    meta.input_draft     = std::string{};
     meta.permission_mode = permission_mode_;
     meta.forked_from     = forked_from_id;
     meta.fork_message_id = fork_message_id;
@@ -720,6 +726,7 @@ void SessionManager::update_meta() {
     meta.model = model_name_;
     meta.model_preset = model_preset_;
     meta.title = pending_title_;
+    meta.input_draft = input_draft_;
     meta.permission_mode = permission_mode_;
     meta.last_token_usage = last_token_usage_;
     meta.session_token_usage = session_token_usage_;
@@ -747,6 +754,41 @@ void SessionManager::set_session_archived(bool archived) {
 std::string SessionManager::current_title() const {
     std::lock_guard<std::mutex> lk(mu_);
     return pending_title_;
+}
+
+void SessionManager::set_input_draft(std::string draft) {
+    std::lock_guard<std::mutex> lk(mu_);
+    input_draft_ = std::move(draft);
+    if (!created_ && started_ && !input_draft_.empty()) {
+        ensure_created();
+    }
+    if (!created_) return;
+
+    SessionMeta meta = SessionStorage::read_meta(meta_path_str_);
+    if (meta.id.empty()) {
+        meta.id = session_id_;
+        meta.cwd = cwd_;
+        meta.created_at = created_at_.empty() ? SessionStorage::now_iso8601() : created_at_;
+        meta.updated_at = meta.created_at;
+        meta.message_count = message_count_;
+        meta.turn_count = turn_count_;
+        meta.summary = last_user_summary_;
+        meta.provider = provider_name_;
+        meta.model = model_name_;
+        meta.model_preset = model_preset_;
+        meta.title = pending_title_;
+        meta.permission_mode = permission_mode_;
+        meta.last_token_usage = last_token_usage_;
+        meta.session_token_usage = session_token_usage_;
+        meta.archived = archived_;
+    }
+    meta.input_draft = input_draft_;
+    SessionStorage::write_meta(meta_path_str_, meta);
+}
+
+std::string SessionManager::current_input_draft() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return input_draft_;
 }
 
 void SessionManager::set_permission_mode(std::string mode, bool persist_immediately) {

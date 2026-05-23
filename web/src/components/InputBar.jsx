@@ -7,7 +7,7 @@
 // 选中后插入 `/<name> ` 到输入框,不立即发送(builtin 与 skill 行为统一)。
 // 已识别的首段命令以原子 token 样式叠加渲染(overlay div 与 textarea 同度量)。
 
-import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import { clsx } from '../lib/format.js';
 import { getGoalStopControlState } from '../lib/goalControl.js';
 import { getInputBarActionState } from '../lib/inputBarState.js';
@@ -22,13 +22,22 @@ const LINE_HEIGHT = 20; // 与 leading-[20px] 对齐
 
 export const InputBar = forwardRef(function InputBar({
   disabled, placeholder = '输入消息或 / 命令…', onSubmit, onAbort, busy, goal = null, goalStopping = false, history = [], variant = 'default',
+  value: controlledValue, onChange,
 }, ref) {
-  const [value, setValue] = useState('');
+  const isControlled = controlledValue != null;
+  const [internalValue, setInternalValue] = useState('');
+  const value = isControlled ? String(controlledValue || '') : internalValue;
   const [histPtr, setHistPtr] = useState(-1);
   const [editedSinceHistory, setEditedSinceHistory] = useState(false);
   const [dropdownClosed, setDropdownClosed] = useState(false); // Esc 关闭后,直到首段变化或重新输入 / 才重开
   const ta = useRef(null);
   const isHero = variant === 'hero';
+
+  const updateValue = useCallback((next) => {
+    const text = String(next || '');
+    if (!isControlled) setInternalValue(text);
+    onChange?.(text);
+  }, [isControlled, onChange]);
 
   const slashCtx = useSlashCommands();
   const commands = slashCtx?.commands || [];
@@ -37,11 +46,11 @@ export const InputBar = forwardRef(function InputBar({
   useImperativeHandle(ref, () => ({
     focus: () => ta.current?.focus(),
     clear: () => {
-      setValue('');
+      updateValue('');
       setHistPtr(-1);
       setEditedSinceHistory(false);
     },
-  }));
+  }), [updateValue]);
 
   const autosize = () => {
     const el = ta.current;
@@ -64,7 +73,7 @@ export const InputBar = forwardRef(function InputBar({
   const handleSelectCommand = (item) => {
     if (!item) return;
     const next = '/' + item.name + ' ';
-    setValue(next);
+    updateValue(next);
     setEditedSinceHistory(true);
     setDropdownClosed(true);
     requestAnimationFrame(() => {
@@ -80,7 +89,7 @@ export const InputBar = forwardRef(function InputBar({
     const v = value.trim();
     if (!v || disabled) return;
     onSubmit?.(value);
-    setValue('');
+    if (!isControlled) updateValue('');
     setHistPtr(-1);
     setEditedSinceHistory(false);
     setDropdownClosed(false);
@@ -89,7 +98,7 @@ export const InputBar = forwardRef(function InputBar({
 
   const handleChange = (e) => {
     const next = e.target.value;
-    setValue(next);
+    updateValue(next);
     setEditedSinceHistory(next.length > 0);
   };
 
@@ -109,7 +118,7 @@ export const InputBar = forwardRef(function InputBar({
       );
       if (edit) {
         e.preventDefault();
-        setValue(edit.value);
+        updateValue(edit.value);
         setEditedSinceHistory(edit.value.length > 0);
         setHistPtr(-1);
         setDropdownClosed(false);
@@ -147,10 +156,10 @@ export const InputBar = forwardRef(function InputBar({
       });
       if (next === -1) {
         setHistPtr(-1);
-        setValue('');
+        updateValue('');
       } else {
         setHistPtr(next);
-        setValue(history[next] || '');
+        updateValue(history[next] || '');
       }
       setEditedSinceHistory(false);
       return;
