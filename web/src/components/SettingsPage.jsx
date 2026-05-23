@@ -27,6 +27,7 @@ import { toast } from './Toast.jsx';
 import {
   WindowControls,
   isInteractiveTarget,
+  nativePointerEvent,
   useFramelessWindowState,
 } from './WindowControls.jsx';
 
@@ -78,7 +79,7 @@ export function SettingsPage({
       window.aceDesktop_toggleMaximizeWindow();
       return;
     }
-    window.aceDesktop_startWindowDrag();
+    window.aceDesktop_startWindowDrag(nativePointerEvent(event));
   };
 
   return (

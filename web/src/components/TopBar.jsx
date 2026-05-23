@@ -10,6 +10,7 @@ import {
   WindowControls,
   isFramelessDesktop,
   isInteractiveTarget,
+  nativePointerEvent,
   useFramelessWindowState,
 } from './WindowControls.jsx';
 
@@ -61,7 +62,7 @@ export function TopBar({
       window.aceDesktop_toggleMaximizeWindow();
       return;
     }
-    window.aceDesktop_startWindowDrag();
+    window.aceDesktop_startWindowDrag(nativePointerEvent(event));
   };
 
   return (

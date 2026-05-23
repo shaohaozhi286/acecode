@@ -21,6 +21,15 @@ export function isInteractiveTarget(target) {
   return !!target?.closest?.('button,a,input,textarea,select,[role="button"],[data-ace-no-window-drag="true"]');
 }
 
+export function nativePointerEvent(event) {
+  return {
+    button: (event?.button ?? 0) + 1,
+    screenX: event?.screenX ?? 0,
+    screenY: event?.screenY ?? 0,
+    time: Math.max(0, Math.floor(event?.timeStamp ?? 0)),
+  };
+}
+
 // 监听 native 推送的 maximize 状态。多个组件可同时挂(WndProc 每次都遍历 webview
 // 找全局回调,这里覆盖式注册 — 期望同一时刻只有一个 SettingsPage 或 TopBar 在
 // 监听;切走时 cleanup 还原 null)。
