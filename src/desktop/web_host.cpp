@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <utility>
 
 #ifdef _WIN32
@@ -416,24 +417,42 @@ namespace {
 struct GtkWindowApi {
     using GtkWidgetShow = void (*)(void*);
     using GtkWidgetHide = void (*)(void*);
+    using GtkWindowSetDecorated = void (*)(void*, int);
     using GtkWindowPresent = void (*)(void*);
     using GtkWindowClose = void (*)(void*);
+    using GtkWindowBeginMoveDrag = void (*)(void*, int, int, int, unsigned int);
+    using GtkWindowBeginResizeDrag = void (*)(void*, int, int, int, int, unsigned int);
+    using GtkWindowIconify = void (*)(void*);
+    using GtkWindowMaximize = void (*)(void*);
+    using GtkWindowUnmaximize = void (*)(void*);
+    using GtkWindowGetWindow = void* (*)(void*);
+    using GdkWindowGetState = int (*)(void*);
     using GSignalConnectData = unsigned long (*)(void*, const char*, void*, void*, void*, int);
 
     void* gtk = nullptr;
+    void* gdk = nullptr;
     void* gobject = nullptr;
     GtkWidgetShow widget_show = nullptr;
     GtkWidgetHide widget_hide = nullptr;
+    GtkWindowSetDecorated window_set_decorated = nullptr;
     GtkWindowPresent window_present = nullptr;
     GtkWindowClose window_close = nullptr;
+    GtkWindowBeginMoveDrag window_begin_move_drag = nullptr;
+    GtkWindowBeginResizeDrag window_begin_resize_drag = nullptr;
+    GtkWindowIconify window_iconify = nullptr;
+    GtkWindowMaximize window_maximize = nullptr;
+    GtkWindowUnmaximize window_unmaximize = nullptr;
+    GtkWindowGetWindow window_get_window = nullptr;
+    GdkWindowGetState gdk_window_get_state = nullptr;
     GSignalConnectData signal_connect_data = nullptr;
 
     bool load() {
-        if (gtk && gobject) return true;
+        if (gtk && gdk && gobject) return true;
         gtk = ::dlopen("libgtk-3.so.0", RTLD_LAZY | RTLD_LOCAL);
+        gdk = ::dlopen("libgdk-3.so.0", RTLD_LAZY | RTLD_LOCAL);
         gobject = ::dlopen("libgobject-2.0.so.0", RTLD_LAZY | RTLD_LOCAL);
-        if (!gtk || !gobject) {
-            LOG_WARN("[desktop] GTK3/GObject runtime not available for window controls");
+        if (!gtk || !gdk || !gobject) {
+            LOG_WARN("[desktop] GTK3/GDK/GObject runtime not available for window controls");
             return false;
         }
         auto sym = [](void* lib, const char* name) -> void* {
@@ -441,12 +460,28 @@ struct GtkWindowApi {
         };
         widget_show = reinterpret_cast<GtkWidgetShow>(sym(gtk, "gtk_widget_show"));
         widget_hide = reinterpret_cast<GtkWidgetHide>(sym(gtk, "gtk_widget_hide"));
+        window_set_decorated = reinterpret_cast<GtkWindowSetDecorated>(
+            sym(gtk, "gtk_window_set_decorated"));
         window_present = reinterpret_cast<GtkWindowPresent>(sym(gtk, "gtk_window_present"));
         window_close = reinterpret_cast<GtkWindowClose>(sym(gtk, "gtk_window_close"));
+        window_begin_move_drag = reinterpret_cast<GtkWindowBeginMoveDrag>(
+            sym(gtk, "gtk_window_begin_move_drag"));
+        window_begin_resize_drag = reinterpret_cast<GtkWindowBeginResizeDrag>(
+            sym(gtk, "gtk_window_begin_resize_drag"));
+        window_iconify = reinterpret_cast<GtkWindowIconify>(sym(gtk, "gtk_window_iconify"));
+        window_maximize = reinterpret_cast<GtkWindowMaximize>(sym(gtk, "gtk_window_maximize"));
+        window_unmaximize = reinterpret_cast<GtkWindowUnmaximize>(
+            sym(gtk, "gtk_window_unmaximize"));
+        window_get_window = reinterpret_cast<GtkWindowGetWindow>(
+            sym(gtk, "gtk_widget_get_window"));
+        gdk_window_get_state = reinterpret_cast<GdkWindowGetState>(
+            sym(gdk, "gdk_window_get_state"));
         signal_connect_data = reinterpret_cast<GSignalConnectData>(
             sym(gobject, "g_signal_connect_data"));
-        return widget_show && widget_hide && window_present && window_close &&
-               signal_connect_data;
+        return widget_show && widget_hide && window_set_decorated && window_present &&
+               window_close && window_begin_move_drag && window_begin_resize_drag &&
+               window_iconify && window_maximize && window_unmaximize && window_get_window &&
+               gdk_window_get_state && signal_connect_data;
     }
 };
 
@@ -456,10 +491,34 @@ GtkWindowApi& gtk_window_api() {
 }
 
 bool g_linux_force_close = false;
+std::function<void(bool)> g_linux_window_state_handler;
+bool g_linux_last_known_maximized = false;
+
+constexpr int kGdkWindowStateMaximized = 1 << 2;
+
+struct GdkEventWindowStateCompat {
+    int type;
+    void* window;
+    signed char send_event;
+    int changed_mask;
+    int new_window_state;
+};
 
 extern "C" int linux_window_delete_event(void*, void*, void*) {
     if (g_linux_force_close) return 0;
     return dispatch_wm_close(g_close_handler) == CloseDispatch::ConsumedByHandler ? 1 : 0;
+}
+
+extern "C" int linux_window_state_event(void*, GdkEventWindowStateCompat* event, void*) {
+    const bool maximized = event &&
+        ((event->new_window_state & kGdkWindowStateMaximized) != 0);
+    if (maximized != g_linux_last_known_maximized) {
+        g_linux_last_known_maximized = maximized;
+        if (g_linux_window_state_handler) {
+            g_linux_window_state_handler(maximized);
+        }
+    }
+    return 0;
 }
 
 void install_linux_close_handler(webview::webview& w) {
@@ -473,6 +532,48 @@ void install_linux_close_handler(webview::webview& w) {
                             nullptr,
                             nullptr,
                             0);
+}
+
+void install_linux_window_state_handler(webview::webview& w) {
+    auto window = w.window();
+    if (!window.ok() || !window.value()) return;
+    auto& api = gtk_window_api();
+    if (!api.load()) return;
+    api.signal_connect_data(window.value(),
+                            "window-state-event",
+                            reinterpret_cast<void*>(linux_window_state_event),
+                            nullptr,
+                            nullptr,
+                            0);
+}
+
+void configure_linux_window_chrome(webview::webview& w) {
+    auto window = w.window();
+    if (!window.ok() || !window.value()) return;
+    auto& api = gtk_window_api();
+    if (!api.load()) return;
+    api.window_set_decorated(window.value(), 0);
+}
+
+bool linux_window_is_maximized(void* window) {
+    if (!window) return false;
+    auto& api = gtk_window_api();
+    if (!api.load()) return false;
+    void* gdk_window = api.window_get_window(window);
+    if (!gdk_window) return g_linux_last_known_maximized;
+    return (api.gdk_window_get_state(gdk_window) & kGdkWindowStateMaximized) != 0;
+}
+
+std::optional<int> gtk_resize_edge_for_direction(const std::string& direction) {
+    if (direction == "top-left") return 0;      // GDK_WINDOW_EDGE_NORTH_WEST
+    if (direction == "top") return 1;           // GDK_WINDOW_EDGE_NORTH
+    if (direction == "top-right") return 2;     // GDK_WINDOW_EDGE_NORTH_EAST
+    if (direction == "left") return 3;          // GDK_WINDOW_EDGE_WEST
+    if (direction == "right") return 4;         // GDK_WINDOW_EDGE_EAST
+    if (direction == "bottom-left") return 5;   // GDK_WINDOW_EDGE_SOUTH_WEST
+    if (direction == "bottom") return 6;        // GDK_WINDOW_EDGE_SOUTH
+    if (direction == "bottom-right") return 7;  // GDK_WINDOW_EDGE_SOUTH_EAST
+    return std::nullopt;
 }
 #endif
 
@@ -580,7 +681,9 @@ struct WebHost::Impl {
 #if defined(__APPLE__)
         install_mac_close_handler(*w);
 #else
+        configure_linux_window_chrome(*w);
         install_linux_close_handler(*w);
+        install_linux_window_state_handler(*w);
 #endif
     }
 #endif
@@ -701,19 +804,36 @@ bool WebHost::open_dev_tools() {
     return false;
 #endif
 }
-bool WebHost::start_window_drag() {
+bool WebHost::start_window_drag(const PointerEvent& event) {
 #ifdef _WIN32
+    (void)event;
     HWND hwnd = impl_->hwnd();
     if (!hwnd || !::IsWindow(hwnd)) return false;
     ::ReleaseCapture();
     ::SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
     return true;
 #else
+#if !defined(__APPLE__)
+    auto window = impl_->w->window();
+    if (!window.ok() || !window.value()) return false;
+    auto& api = gtk_window_api();
+    if (!api.load()) return false;
+    api.window_begin_move_drag(window.value(),
+                               event.button <= 0 ? 1 : event.button,
+                               event.root_x,
+                               event.root_y,
+                               event.timestamp);
+    return true;
+#else
+    (void)event;
     return false;
 #endif
+#endif
 }
-bool WebHost::start_window_resize(const std::string& direction) {
+bool WebHost::start_window_resize(const std::string& direction,
+                                  const PointerEvent& event) {
 #ifdef _WIN32
+    (void)event;
     HWND hwnd = impl_->hwnd();
     if (!hwnd || !::IsWindow(hwnd)) return false;
     // 最大化窗口走 native resize 会被 Windows 解读为"拖出还原",体验诡异;
@@ -736,8 +856,26 @@ bool WebHost::start_window_resize(const std::string& direction) {
     ::SendMessageW(hwnd, WM_NCLBUTTONDOWN, ht, 0);
     return true;
 #else
+#if !defined(__APPLE__)
+    auto edge = gtk_resize_edge_for_direction(direction);
+    if (!edge) return false;
+    auto window = impl_->w->window();
+    if (!window.ok() || !window.value()) return false;
+    if (linux_window_is_maximized(window.value())) return false;
+    auto& api = gtk_window_api();
+    if (!api.load()) return false;
+    api.window_begin_resize_drag(window.value(),
+                                 *edge,
+                                 event.button <= 0 ? 1 : event.button,
+                                 event.root_x,
+                                 event.root_y,
+                                 event.timestamp);
+    return true;
+#else
     (void)direction;
+    (void)event;
     return false;
+#endif
 #endif
 }
 bool WebHost::minimize_window() {
@@ -747,7 +885,16 @@ bool WebHost::minimize_window() {
     ::ShowWindow(hwnd, SW_MINIMIZE);
     return true;
 #else
+#if !defined(__APPLE__)
+    auto window = impl_->w->window();
+    if (!window.ok() || !window.value()) return false;
+    auto& api = gtk_window_api();
+    if (!api.load()) return false;
+    api.window_iconify(window.value());
+    return true;
+#else
     return false;
+#endif
 #endif
 }
 bool WebHost::toggle_maximize_window() {
@@ -757,7 +904,25 @@ bool WebHost::toggle_maximize_window() {
     ::ShowWindow(hwnd, ::IsZoomed(hwnd) ? SW_RESTORE : SW_MAXIMIZE);
     return true;
 #else
+#if !defined(__APPLE__)
+    auto window = impl_->w->window();
+    if (!window.ok() || !window.value()) return false;
+    auto& api = gtk_window_api();
+    if (!api.load()) return false;
+    const bool maximized = linux_window_is_maximized(window.value());
+    if (maximized) {
+        api.window_unmaximize(window.value());
+    } else {
+        api.window_maximize(window.value());
+    }
+    g_linux_last_known_maximized = !maximized;
+    if (g_linux_window_state_handler) {
+        g_linux_window_state_handler(!maximized);
+    }
+    return true;
+#else
     return false;
+#endif
 #endif
 }
 bool WebHost::is_window_maximized() const {
@@ -766,14 +931,24 @@ bool WebHost::is_window_maximized() const {
     if (!hwnd || !::IsWindow(hwnd)) return false;
     return ::IsZoomed(hwnd) != FALSE;
 #else
+#if !defined(__APPLE__)
+    auto window = impl_->w->window();
+    if (!window.ok() || !window.value()) return false;
+    return linux_window_is_maximized(window.value());
+#else
     return false;
+#endif
 #endif
 }
 void WebHost::set_window_state_change_handler(WindowStateHandler handler) {
 #ifdef _WIN32
     g_window_state_handler = std::move(handler);
 #else
+#if !defined(__APPLE__)
+    g_linux_window_state_handler = std::move(handler);
+#else
     (void)handler;
+#endif
 #endif
 }
 bool WebHost::close_window() {
