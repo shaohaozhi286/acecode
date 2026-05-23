@@ -2643,6 +2643,9 @@ struct WebServer::Impl {
                     if (!body.contains("context_window")) {
                         draft->context_window = existing->context_window;
                     }
+                    if (!body.contains("stream_timeout_ms")) {
+                        draft->stream_timeout_ms = existing->stream_timeout_ms;
+                    }
                 }
             }
 

@@ -22,6 +22,9 @@ nlohmann::json entry_to_json(const ModelProfile& entry) {
     if (entry.context_window.has_value() && *entry.context_window > 0) {
         o["context_window"] = *entry.context_window;
     }
+    if (entry.stream_timeout_ms.has_value() && *entry.stream_timeout_ms > 0) {
+        o["stream_timeout_ms"] = *entry.stream_timeout_ms;
+    }
     return o;
 }
 
@@ -75,6 +78,9 @@ nlohmann::json profile_to_safe_json(const ModelProfile& entry) {
     if (entry.context_window.has_value() && *entry.context_window > 0) {
         o["context_window"] = *entry.context_window;
     }
+    if (entry.stream_timeout_ms.has_value() && *entry.stream_timeout_ms > 0) {
+        o["stream_timeout_ms"] = *entry.stream_timeout_ms;
+    }
     // api_key 永不输出 — 安全契约
     return o;
 }
@@ -108,6 +114,9 @@ std::optional<SavedModelDraft> parse_model_draft(const nlohmann::json& body,
     get_str("api_key", d.api_key, false);
     if (body.contains("context_window") && body["context_window"].is_number_integer()) {
         d.context_window = body["context_window"].get<int>();
+    }
+    if (body.contains("stream_timeout_ms") && body["stream_timeout_ms"].is_number_integer()) {
+        d.stream_timeout_ms = body["stream_timeout_ms"].get<int>();
     }
     if (body.contains("models_dev_provider_id") &&
         body["models_dev_provider_id"].is_string()) {

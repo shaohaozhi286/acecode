@@ -633,7 +633,8 @@ acecode 启动时按 transport 连接每个配置的 MCP 服务器：
   "openai": {
     "base_url": "http://localhost:1234/v1",
     "api_key": "your-api-key",
-    "model": "your-model-name"
+    "model": "your-model-name",
+    "stream_timeout_ms": 180000
   },
   "copilot": {
     "model": "gpt-4o"
@@ -653,6 +654,7 @@ acecode 启动时按 transport 连接每个配置的 MCP 服务器：
 | `openai.base_url` | string | OpenAI 兼容 API 的地址 |
 | `openai.api_key` | string | API 鉴权密钥 |
 | `openai.model` | string | 使用的模型名称 |
+| `openai.stream_timeout_ms` | number | OpenAI 兼容流式请求超时，单位毫秒，默认 `180000` |
 | `copilot.model` | string | Copilot 模型名（默认 `gpt-4o`） |
 | `context_window` | number | 上下文窗口大小（token 数），通常自动解析 |
 | `max_sessions` | number | 最多保留的历史会话数（默认 50） |
@@ -662,6 +664,32 @@ acecode 启动时按 transport 连接每个配置的 MCP 服务器：
 | `input_history.max_entries` | number | 每个工作目录保留的历史条数上限（默认 10） |
 
 运行 `./acecode configure` 可以通过交互式向导修改配置。
+
+OpenAI 兼容网关如果推理时间很长或流式连接容易在 3 分钟附近中断，可以把全局或单个 `saved_models` 条目的 `stream_timeout_ms` 调大。例如：
+
+```json
+{
+  "openai": {
+    "base_url": "https://gateway.example.com/v1",
+    "api_key": "sk-...",
+    "model": "slow-model",
+    "stream_timeout_ms": 3000000
+  },
+  "saved_models": [
+    {
+      "name": "slow-gateway",
+      "provider": "openai",
+      "base_url": "https://gateway.example.com/v1",
+      "api_key": "sk-...",
+      "model": "slow-model",
+      "stream_timeout_ms": 3000000
+    }
+  ],
+  "default_model_name": "slow-gateway"
+}
+```
+
+也可以在启动前设置环境变量 `ACECODE_OPENAI_STREAM_TIMEOUT_MS`，它会覆盖旧式 `openai.stream_timeout_ms` 默认值；未在 `saved_models` 中显式设置 `stream_timeout_ms` 的 OpenAI 条目会使用该全局值。
 
 ---
 

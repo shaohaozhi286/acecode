@@ -233,7 +233,8 @@ Important config areas:
 | Area | Purpose |
 | --- | --- |
 | `provider`, `openai`, `copilot` | Legacy provider selection and endpoint/model settings. |
-| `saved_models`, `default_model_name` | Named model profiles and defaults. |
+| `openai.stream_timeout_ms` | OpenAI-compatible streaming timeout in milliseconds; default `180000`, raise it for slow gateways. |
+| `saved_models`, `default_model_name` | Named model profiles and defaults; OpenAI entries can also set `stream_timeout_ms`. |
 | `context_window`, `models_dev` | Context-window resolution and bundled models.dev lookup behavior. |
 | `skills`, `memory`, `project_instructions` | Optional context sources and their limits. |
 | `agent_loop.max_iterations` | Hard cap for one agent turn; `0` or omitted means unlimited. |

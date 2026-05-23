@@ -16,8 +16,14 @@ namespace acecode {
 
 OpenAiCompatProvider::OpenAiCompatProvider(const std::string& base_url,
                                            const std::string& api_key,
-                                           const std::string& model)
-    : base_url_(base_url), api_key_(api_key), model_(model) {}
+                                           const std::string& model,
+                                           int stream_timeout_ms)
+    : base_url_(base_url),
+      api_key_(api_key),
+      model_(model),
+      stream_timeout_ms_(stream_timeout_ms > 0
+          ? stream_timeout_ms
+          : OpenAiConfig::kDefaultStreamTimeoutMs) {}
 
 namespace {
 
@@ -728,7 +734,7 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
             network::build_ssl_options(proxy_opts),
             proxy_opts.proxies,
             proxy_opts.auth,
-            cpr::Timeout{180000},
+            cpr::Timeout{stream_timeout_ms_},
             write_cb,
             progress_cb
         );
@@ -756,7 +762,22 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
 
         ProviderErrorInfo error_info;
         const std::string request_id = extract_request_id(r.header);
-        if (r.status_code != 0 && r.status_code != 200) {
+        const bool transport_failed = static_cast<bool>(r.error);
+        const ProviderErrorKind transport_kind = classify_cpr_error(r.error);
+        if (transport_failed && transport_kind == ProviderErrorKind::Timeout) {
+            const int status_code = r.status_code == 0 ? 0 : static_cast<int>(r.status_code);
+            LOG_ERROR("SSE connection timed out: " + r.error.message +
+                      " body=" + log_truncate(raw_body_capture, 2000));
+            error_info = make_provider_error(
+                ProviderErrorKind::Timeout,
+                status_code,
+                name(),
+                model_,
+                request_id,
+                raw_body_capture,
+                r.error.message.empty() ? std::string("request timed out") : r.error.message,
+                true);
+        } else if (r.status_code != 0 && r.status_code != 200) {
             const std::string err_body = r.text.empty() ? raw_body_capture : r.text;
             LOG_ERROR("SSE HTTP error: " + std::to_string(r.status_code) +
                       " body=" + log_truncate(err_body, 2000));
@@ -770,10 +791,9 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
                 std::string{},
                 is_retryable_http_status(static_cast<int>(r.status_code), err_body));
         } else if (r.status_code == 0) {
-            const ProviderErrorKind kind = classify_cpr_error(r.error);
             LOG_ERROR("SSE connection failed: " + r.error.message);
             error_info = make_provider_error(
-                kind,
+                transport_kind,
                 0,
                 name(),
                 model_,

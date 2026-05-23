@@ -142,6 +142,10 @@ public:
 
     int turn_count() const { return provider_->turn_count(); }
 
+    std::vector<ChatMessage> request_messages_for_turn(int zero_based_index) const {
+        return provider_->messages_for_turn(zero_based_index);
+    }
+
     struct Msg {
         std::string role;
         std::string content;
@@ -343,6 +347,36 @@ TEST(AgentLoopTermination, ProviderErrorAfterToolCallDoesNotExecuteOrPersistTool
     EXPECT_EQ(h.count_by_role("assistant"), 0);
     EXPECT_EQ(h.count_by_role("tool_call"), 0);
     EXPECT_EQ(h.count_by_role("tool_result"), 0);
+}
+
+TEST(AgentLoopTermination, TimeoutAfterPartialToolCallIsNotReplayedAsOrphan) {
+    AgentLoopHarness h;
+    acecode::ToolCall tc;
+    tc.id = "call-timeout";
+    tc.function_name = "noop";
+    tc.function_arguments = "{}";
+    ProviderErrorInfo timeout = make_stub_provider_error("request timed out");
+    timeout.kind = ProviderErrorKind::Timeout;
+    timeout.status_code = 200;
+
+    h.push_provider_error(std::move(timeout), true, std::string{}, {tc});
+
+    ASSERT_TRUE(h.submit_and_wait("use tool"));
+    EXPECT_EQ(h.count_by_role("error"), 1);
+    EXPECT_EQ(h.count_by_role("assistant"), 0);
+    EXPECT_EQ(h.count_by_role("tool_call"), 0);
+    EXPECT_EQ(h.count_by_role("tool_result"), 0);
+
+    h.push_text("ok");
+    ASSERT_TRUE(h.submit_and_wait("next"));
+
+    const auto second_request = h.request_messages_for_turn(1);
+    for (const auto& msg : second_request) {
+        EXPECT_NE(msg.role, "tool");
+        if (msg.role == "assistant") {
+            EXPECT_TRUE(msg.tool_calls.is_null() || msg.tool_calls.empty());
+        }
+    }
 }
 
 TEST(AgentLoopTermination, SuccessfulEmptyResponseIsStillPersistedAsAssistant) {

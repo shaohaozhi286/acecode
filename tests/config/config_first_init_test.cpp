@@ -23,6 +23,7 @@ constexpr const char* kHomeEnvName = "USERPROFILE";
 #else
 constexpr const char* kHomeEnvName = "HOME";
 #endif
+constexpr const char* kOpenAiStreamTimeoutEnvName = "ACECODE_OPENAI_STREAM_TIMEOUT_MS";
 
 void set_env_value(const char* name, const std::string& value) {
 #ifdef _WIN32
@@ -53,7 +54,9 @@ class ConfigFirstInitTest : public ::testing::Test {
 protected:
     fs::path temp_home;
     std::string previous_home;
+    std::string previous_stream_timeout;
     bool had_previous_home = false;
+    bool had_previous_stream_timeout = false;
 
     void SetUp() override {
         acecode::reset_run_mode_for_test();
@@ -62,8 +65,13 @@ protected:
             previous_home = existing;
             had_previous_home = true;
         }
+        if (const char* existing = std::getenv(kOpenAiStreamTimeoutEnvName)) {
+            previous_stream_timeout = existing;
+            had_previous_stream_timeout = true;
+        }
         temp_home = make_temp_root();
         set_env_value(kHomeEnvName, temp_home.string());
+        clear_env_value(kOpenAiStreamTimeoutEnvName);
     }
 
     void TearDown() override {
@@ -71,6 +79,11 @@ protected:
             set_env_value(kHomeEnvName, previous_home);
         } else {
             clear_env_value(kHomeEnvName);
+        }
+        if (had_previous_stream_timeout) {
+            set_env_value(kOpenAiStreamTimeoutEnvName, previous_stream_timeout);
+        } else {
+            clear_env_value(kOpenAiStreamTimeoutEnvName);
         }
         acecode::reset_acecode_home_created_flag_for_test();
         acecode::reset_run_mode_for_test();
@@ -131,6 +144,52 @@ TEST_F(ConfigFirstInitTest, OldSchemaConfigSynthesizesCopilotSavedModel) {
     EXPECT_EQ(cfg.saved_models[0].provider, "copilot");
     EXPECT_EQ(cfg.saved_models[0].model, "gpt-4o");
     EXPECT_EQ(cfg.default_model_name, "copilot");
+}
+
+TEST_F(ConfigFirstInitTest, OpenAiStreamTimeoutParsesIntoLegacySavedModel) {
+    fs::create_directories(temp_home / ".acecode");
+    {
+        std::ofstream ofs(temp_home / ".acecode" / "config.json");
+        ofs << R"({
+    "provider": "openai",
+    "openai": {
+        "base_url": "http://localhost:1234/v1",
+        "api_key": "sk-test",
+        "model": "local-model",
+        "stream_timeout_ms": 240000
+    }
+})";
+    }
+
+    auto cfg = acecode::load_config();
+
+    EXPECT_EQ(cfg.openai.stream_timeout_ms, 240000);
+    ASSERT_EQ(cfg.saved_models.size(), 1u);
+    ASSERT_TRUE(cfg.saved_models[0].stream_timeout_ms.has_value());
+    EXPECT_EQ(*cfg.saved_models[0].stream_timeout_ms, 240000);
+}
+
+TEST_F(ConfigFirstInitTest, OpenAiStreamTimeoutEnvOverrideFeedsLegacySavedModel) {
+    set_env_value(kOpenAiStreamTimeoutEnvName, "345678");
+    fs::create_directories(temp_home / ".acecode");
+    {
+        std::ofstream ofs(temp_home / ".acecode" / "config.json");
+        ofs << R"({
+    "provider": "openai",
+    "openai": {
+        "base_url": "http://localhost:1234/v1",
+        "api_key": "sk-test",
+        "model": "local-model"
+    }
+})";
+    }
+
+    auto cfg = acecode::load_config();
+
+    EXPECT_EQ(cfg.openai.stream_timeout_ms, 345678);
+    ASSERT_EQ(cfg.saved_models.size(), 1u);
+    ASSERT_TRUE(cfg.saved_models[0].stream_timeout_ms.has_value());
+    EXPECT_EQ(*cfg.saved_models[0].stream_timeout_ms, 345678);
 }
 
 TEST_F(ConfigFirstInitTest, OldSchemaCodexConfigFallsBackToCopilotSavedModel) {

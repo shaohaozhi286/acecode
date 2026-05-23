@@ -11,9 +11,12 @@
 namespace acecode {
 
 struct OpenAiConfig {
+    static constexpr int kDefaultStreamTimeoutMs = 180000;
+
     std::string base_url = "http://localhost:1234/v1";
     std::string api_key;
     std::string model = "local-model";
+    int stream_timeout_ms = kDefaultStreamTimeoutMs;
     // Optional provider id from the bundled models.dev registry (e.g. "anthropic",
     // "openrouter"). Lets resolve_model_context_window() and other catalog-aware
     // call sites pick the correct provider entry even when base_url is a proxy.

@@ -51,6 +51,7 @@ static ModelProfile configured_profile_from_current_fields(const AppConfig& cfg)
         profile.base_url = cfg.openai.base_url;
         profile.api_key = cfg.openai.api_key;
         profile.model = cfg.openai.model;
+        profile.stream_timeout_ms = cfg.openai.stream_timeout_ms;
         profile.models_dev_provider_id = cfg.openai.models_dev_provider_id;
     } else if (cfg.provider == "codex") {
         profile.provider = "codex";

@@ -239,6 +239,10 @@ SavedModelDraft draft_from_kvs(const std::map<std::string, std::string>& kvs,
     if (it_context != kvs.end()) {
         d.context_window = parse_nonnegative_int_or_invalid(it_context->second);
     }
+    auto it_stream_timeout = kvs.find("stream_timeout_ms");
+    if (it_stream_timeout != kvs.end()) {
+        d.stream_timeout_ms = parse_nonnegative_int_or_invalid(it_stream_timeout->second);
+    }
     return d;
 }
 
@@ -291,6 +295,8 @@ void cmd_model_edit(CommandContext& ctx, const ParsedModelSub& p) {
                 d.models_dev_provider_id = e.models_dev_provider_id;
             if (!d.context_window.has_value())
                 d.context_window = e.context_window;
+            if (!d.stream_timeout_ms.has_value())
+                d.stream_timeout_ms = e.stream_timeout_ms;
             break;
         }
     }
@@ -370,7 +376,7 @@ void cmd_model(CommandContext& ctx, const std::string& args) {
         std::lock_guard<std::mutex> lk(ctx.state.mu);
         ctx.state.conversation.push_back({"system",
             "Usage: /model | /model <name> | /model --cwd <name> | /model --default <name>\n"
-            "       /model add name=X provider=openai model=Y base_url=Z api_key=K [context_window=N]\n"
+            "       /model add name=X provider=openai model=Y base_url=Z api_key=K [context_window=N] [stream_timeout_ms=N]\n"
             "       /model edit <name> [field=value ...]\n"
             "       /model rm <name>\n"
             "       /model set-default <name>",

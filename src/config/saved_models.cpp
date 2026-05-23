@@ -78,6 +78,17 @@ std::optional<ModelProfile> parse_one_entry(const nlohmann::json& node, std::siz
         }
         e.context_window = context_window;
     }
+    if (node.contains("stream_timeout_ms") && node["stream_timeout_ms"].is_number_integer()) {
+        int stream_timeout_ms = node["stream_timeout_ms"].get<int>();
+        if (stream_timeout_ms <= 0) {
+            std::ostringstream oss;
+            oss << "saved_models[" << idx << "] (name='" << e.name
+                << "') has invalid stream_timeout_ms";
+            err = oss.str();
+            return std::nullopt;
+        }
+        e.stream_timeout_ms = stream_timeout_ms;
+    }
 
     return e;
 }
@@ -149,6 +160,13 @@ bool validate_saved_models(const std::vector<ModelProfile>& entries,
             std::ostringstream oss;
             oss << "saved_models entry '" << e.name
                 << "' has invalid context_window";
+            err = oss.str();
+            return false;
+        }
+        if (e.stream_timeout_ms.has_value() && *e.stream_timeout_ms <= 0) {
+            std::ostringstream oss;
+            oss << "saved_models entry '" << e.name
+                << "' has invalid stream_timeout_ms";
             err = oss.str();
             return false;
         }

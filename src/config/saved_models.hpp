@@ -20,6 +20,7 @@ struct ModelProfile {
     std::string model;     // 模型标识,必填
     std::optional<std::string> models_dev_provider_id;  // 可选,给 context resolver 的 hint
     std::optional<int> context_window;  // 可选,手动覆盖该模型的上下文窗口(token 数)
+    std::optional<int> stream_timeout_ms; // 可选,OpenAI streaming request timeout(ms)
 };
 
 // 解析失败时的描述。line_hint = -1 表示无具体行号信息。

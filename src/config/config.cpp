@@ -13,6 +13,7 @@
 #include <iostream>
 #include <filesystem>
 #include <initializer_list>
+#include <limits>
 
 namespace fs = std::filesystem;
 
@@ -39,6 +40,23 @@ bool is_one_of(const std::string& value, std::initializer_list<const char*> allo
         if (value == item) return true;
     }
     return false;
+}
+
+std::optional<int> parse_positive_int(const std::string& value) {
+    const std::string trimmed = trim_ascii_copy(value);
+    if (trimmed.empty()) return std::nullopt;
+    try {
+        std::size_t pos = 0;
+        long long parsed = std::stoll(trimmed, &pos, 10);
+        if (pos != trimmed.size() ||
+            parsed <= 0 ||
+            parsed > std::numeric_limits<int>::max()) {
+            return std::nullopt;
+        }
+        return static_cast<int>(parsed);
+    } catch (...) {
+        return std::nullopt;
+    }
 }
 
 [[noreturn]] void fatal_config_value(const std::string& message) {
@@ -86,6 +104,7 @@ ModelProfile legacy_model_profile_from_config(const AppConfig& cfg) {
         profile.model = cfg.openai.model.empty()
             ? defaults.model
             : cfg.openai.model;
+        profile.stream_timeout_ms = cfg.openai.stream_timeout_ms;
         profile.models_dev_provider_id = cfg.openai.models_dev_provider_id;
         return profile;
     }
@@ -135,6 +154,9 @@ std::vector<std::string> validate_config(const AppConfig& cfg) {
     }
     if (cfg.memory.max_index_bytes == 0) {
         errors.push_back("memory.max_index_bytes must be > 0");
+    }
+    if (cfg.openai.stream_timeout_ms <= 0) {
+        errors.push_back("openai.stream_timeout_ms must be > 0");
     }
     if (cfg.project_instructions.max_depth < 1) {
         errors.push_back("project_instructions.max_depth must be >= 1");
@@ -376,6 +398,16 @@ AppConfig load_config() {
                     cfg.openai.api_key = oj["api_key"].get<std::string>();
                 if (oj.contains("model") && oj["model"].is_string())
                     cfg.openai.model = oj["model"].get<std::string>();
+                if (oj.contains("stream_timeout_ms") &&
+                    oj["stream_timeout_ms"].is_number_integer()) {
+                    int v = oj["stream_timeout_ms"].get<int>();
+                    if (v <= 0) {
+                        fatal_config_value("openai.stream_timeout_ms=" +
+                                           std::to_string(v) +
+                                           " out of range (>0)");
+                    }
+                    cfg.openai.stream_timeout_ms = v;
+                }
                 if (oj.contains("models_dev_provider_id") &&
                     oj["models_dev_provider_id"].is_string()) {
                     cfg.openai.models_dev_provider_id =
@@ -952,6 +984,16 @@ AppConfig load_config() {
     if (getenv_utf8("ACECODE_OPENAI_API_KEY", env)) {
         cfg.openai.api_key = env;
     }
+    if (getenv_utf8("ACECODE_OPENAI_STREAM_TIMEOUT_MS", env)) {
+        auto parsed = parse_positive_int(env);
+        if (parsed.has_value()) {
+            cfg.openai.stream_timeout_ms = *parsed;
+        } else {
+            LOG_WARN("[config] ACECODE_OPENAI_STREAM_TIMEOUT_MS='" + env +
+                     "' invalid; expected positive integer, keeping " +
+                     std::to_string(cfg.openai.stream_timeout_ms));
+        }
+    }
     if (getenv_utf8("ACECODE_MODEL", env)) {
         if (cfg.provider == "openai") {
             cfg.openai.model = env;
@@ -1003,6 +1045,9 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
     j["openai"]["base_url"] = cfg.openai.base_url;
     j["openai"]["api_key"] = cfg.openai.api_key;
     j["openai"]["model"] = cfg.openai.model;
+    if (cfg.openai.stream_timeout_ms != OpenAiConfig::kDefaultStreamTimeoutMs) {
+        j["openai"]["stream_timeout_ms"] = cfg.openai.stream_timeout_ms;
+    }
     if (cfg.openai.models_dev_provider_id.has_value() &&
         !cfg.openai.models_dev_provider_id->empty()) {
         j["openai"]["models_dev_provider_id"] = *cfg.openai.models_dev_provider_id;
@@ -1237,6 +1282,9 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
             }
             if (e.context_window.has_value() && *e.context_window > 0) {
                 ej["context_window"] = *e.context_window;
+            }
+            if (e.stream_timeout_ms.has_value() && *e.stream_timeout_ms > 0) {
+                ej["stream_timeout_ms"] = *e.stream_timeout_ms;
             }
             arr.push_back(std::move(ej));
         }

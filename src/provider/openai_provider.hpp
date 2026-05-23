@@ -9,7 +9,8 @@ class OpenAiCompatProvider : public LlmProvider {
 public:
     OpenAiCompatProvider(const std::string& base_url,
                          const std::string& api_key,
-                         const std::string& model);
+                         const std::string& model,
+                         int stream_timeout_ms = OpenAiConfig::kDefaultStreamTimeoutMs);
 
     ChatResponse chat(
         const std::vector<ChatMessage>& messages,
@@ -31,9 +32,14 @@ public:
     // 运行时切换同-provider 的 entry 时,base_url / api_key 可能也变了。
     // 调用方假定在持 provider_mu 锁内调用 —— 不再加内部锁。
     // 对应 openspec/changes/model-profiles 任务 4.4 与 design.md D4。
-    void reconfigure(const std::string& base_url, const std::string& api_key) {
+    void reconfigure(const std::string& base_url,
+                     const std::string& api_key,
+                     int stream_timeout_ms = OpenAiConfig::kDefaultStreamTimeoutMs) {
         base_url_ = base_url;
         api_key_ = api_key;
+        stream_timeout_ms_ = stream_timeout_ms > 0
+            ? stream_timeout_ms
+            : OpenAiConfig::kDefaultStreamTimeoutMs;
     }
 
 protected:
@@ -59,6 +65,7 @@ protected:
     std::string base_url_;
     std::string api_key_;
     std::string model_;
+    int stream_timeout_ms_ = OpenAiConfig::kDefaultStreamTimeoutMs;
 };
 
 } // namespace acecode

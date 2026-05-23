@@ -13,7 +13,8 @@ std::shared_ptr<LlmProvider> create_provider_from_entry(const ModelProfile& entr
         return std::make_shared<OpenAiCompatProvider>(
             entry.base_url,
             entry.api_key,
-            entry.model
+            entry.model,
+            entry.stream_timeout_ms.value_or(OpenAiConfig::kDefaultStreamTimeoutMs)
         );
     }
     if (entry.provider == "codex") {

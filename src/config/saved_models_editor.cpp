@@ -19,6 +19,7 @@ const char* to_string(SavedModelEditError e) {
         case SavedModelEditError::MISSING_BASE_URL:  return "MISSING_BASE_URL";
         case SavedModelEditError::INVALID_API_KEY:   return "INVALID_API_KEY";
         case SavedModelEditError::INVALID_CONTEXT_WINDOW: return "INVALID_CONTEXT_WINDOW";
+        case SavedModelEditError::INVALID_STREAM_TIMEOUT: return "INVALID_STREAM_TIMEOUT";
         case SavedModelEditError::NOT_FOUND:         return "NOT_FOUND";
         case SavedModelEditError::IN_USE_AS_DEFAULT: return "IN_USE_AS_DEFAULT";
     }
@@ -42,6 +43,9 @@ SavedModelEditError validate_draft_basic(const SavedModelDraft& d) {
     if (d.context_window.has_value() && *d.context_window < 0) {
         return SavedModelEditError::INVALID_CONTEXT_WINDOW;
     }
+    if (d.stream_timeout_ms.has_value() && *d.stream_timeout_ms < 0) {
+        return SavedModelEditError::INVALID_STREAM_TIMEOUT;
+    }
     return SavedModelEditError::OK;
 }
 
@@ -57,6 +61,9 @@ ModelProfile to_profile(const SavedModelDraft& d) {
     p.models_dev_provider_id = d.models_dev_provider_id;
     if (d.context_window.has_value() && *d.context_window > 0) {
         p.context_window = *d.context_window;
+    }
+    if (d.stream_timeout_ms.has_value() && *d.stream_timeout_ms > 0) {
+        p.stream_timeout_ms = *d.stream_timeout_ms;
     }
     return p;
 }
