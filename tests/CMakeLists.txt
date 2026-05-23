@@ -51,3 +51,13 @@ gtest_discover_tests(acecode_unit_tests
     PROPERTIES LABELS "unit"
     DISCOVERY_MODE PRE_TEST
 )
+
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    add_test(
+        NAME tui_chat_viewport_scripts
+        COMMAND ${Python3_EXECUTABLE} -m unittest tests.scripts.tui_chat_viewport_scripts_test
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    )
+    set_tests_properties(tui_chat_viewport_scripts PROPERTIES LABELS "script;tui")
+endif()

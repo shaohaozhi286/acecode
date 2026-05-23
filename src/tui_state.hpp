@@ -54,7 +54,7 @@ struct TuiState {
         // on_tool_result for new tool executions; absent for legacy/resumed
         // messages (TUI then falls back to the 10-line fold path).
         std::optional<ToolSummary> summary;
-        bool expanded = false;            // toggled by Ctrl+E on the focused row
+        bool expanded = false;            // toggled by Ctrl+O on the focused row
         // Runtime-only compact preview for tool_call rows (mirrors
         // ChatMessage::display_override).
         std::string display_override;
@@ -225,6 +225,11 @@ struct TuiState {
 
     int chat_focus_index = -1;
     bool chat_follow_tail = true;
+    // One-shot request for paths that replace the transcript, especially
+    // `/resume`. The legacy yframe path learns new message heights from
+    // reflect boxes one render late, so it needs an automatic follow-up render
+    // to clamp to the real tail without waiting for user input.
+    bool chat_tail_repaint_requested = false;
     bool ctrl_c_armed = false;
     std::chrono::steady_clock::time_point last_ctrl_c_time{};
 

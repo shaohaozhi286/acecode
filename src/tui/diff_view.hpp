@@ -12,7 +12,7 @@ struct DiffViewOptions {
     int width = 80;               // 渲染可用宽度(由 chat_box.size.x 推导)
     int max_hunks = 3;            // 折叠态最多显示的 hunk 数(<=0 表无限)
     int max_lines_per_hunk = 20;  // 折叠态每 hunk 最多行数(<=0 表无限)
-    bool expanded = false;        // 由 Ctrl+E 切换;true 时忽略上面两个上限
+    bool expanded = false;        // 由 Ctrl+O 切换;true 时忽略上面两个上限
     double word_diff_threshold = 0.4; // 低于此值才启用词级深色高亮
 };
 

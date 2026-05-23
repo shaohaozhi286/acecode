@@ -343,6 +343,28 @@ run('complete task 摘要形态不计入工具并显示 summary metric', () => {
   assert.equal(projected[2].title, '总结：创建helloworld.txt文件，内容为helloworld');
 });
 
+run('complete summary 保留 Markdown 原文供渲染层使用', () => {
+  const markdownSummary = [
+    '**完成** 以下内容:',
+    '',
+    '- 更新 `README.md`',
+    '- 运行测试',
+    '',
+    '```bash',
+    'pnpm test',
+    '```',
+  ].join('\n');
+  const projected = projectCollapsedTranscriptItems([
+    user(1),
+    tool(2, { verb: 'Read', object: 'README.md', name: 'file_read' }),
+    taskComplete(3, markdownSummary),
+  ]);
+
+  assert.equal(projected[2].kind, 'completion_summary');
+  assert.equal(projected[2].summary, markdownSummary);
+  assert.equal(projected[2].title, `总结：${markdownSummary}`);
+});
+
 run('task_complete 的 tool_call 和 tool_result 包装行不会在 live 投影中露出', () => {
   const projected = projectCollapsedTranscriptItems([
     user(1),

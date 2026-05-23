@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <optional>
 #include <unordered_set>
+#include <memory>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -96,6 +97,7 @@
 #include "session/session_manager.hpp"
 #include "session/session_registry.hpp"
 #include "session/session_resume_restore.hpp"
+#include "tui/chat_viewport.hpp"
 #include "tui/chat_scroll.hpp"
 #include "tui/diff_view.hpp"
 #include "tui/unclipped_reflect.hpp"
@@ -182,6 +184,94 @@ static bool is_success_summary(const acecode::ToolSummary& s) {
         if (kv.first == "timeout" && kv.second == "true") return false;
     }
     return true;
+}
+
+static bool env_flag_enabled(const char* name) {
+    const char* value = std::getenv(name);
+    return value && value[0] != '\0' &&
+           !(value[0] == '0' && value[1] == '\0');
+}
+
+static bool env_flag_default_enabled(const char* name, bool default_value) {
+    const char* value = std::getenv(name);
+    if (!value) {
+        return default_value;
+    }
+    return value[0] != '\0' &&
+           !(value[0] == '0' && value[1] == '\0');
+}
+
+static const char* screen_render_mode_name(
+    acecode::tui::ScreenRenderMode mode) {
+    switch (mode) {
+        case acecode::tui::ScreenRenderMode::AltScreen:
+            return "AltScreen";
+        case acecode::tui::ScreenRenderMode::TerminalOutput:
+            return "TerminalOutput";
+    }
+    return "Unknown";
+}
+
+static std::string tool_summary_metric_string(const acecode::ToolSummary& s) {
+    std::string metric_str;
+    for (const auto& kv : s.metrics) {
+        std::string seg;
+        if (kv.first == "time" || kv.first == "bytes" ||
+            kv.first == "size" || kv.first == "lines") {
+            seg = kv.second + (kv.first == "lines" ? " lines" : "");
+        } else if (kv.first == "+") {
+            seg = "+" + kv.second;
+        } else if (kv.first == "-") {
+            seg = "-" + kv.second;
+        } else if (kv.first == "exit") {
+            seg = "exit " + kv.second;
+        } else if (kv.first == "truncated" && kv.second == "true") {
+            seg = "truncated";
+        } else if (kv.first == "aborted" && kv.second == "true") {
+            seg = "aborted";
+        } else if (kv.first == "timeout" && kv.second == "true") {
+            seg = "timeout";
+        } else if (kv.first == "hint") {
+            seg = "hint:" + kv.second;
+        } else {
+            seg = kv.first + "=" + kv.second;
+        }
+        if (!metric_str.empty()) metric_str += " \xC2\xB7 ";
+        metric_str += seg;
+    }
+    return metric_str;
+}
+
+static std::string renderable_tool_summary_line(const acecode::ToolSummary& s,
+                                                const std::string& metric_str,
+                                                int max_visual_width);
+
+static std::vector<acecode::tui::ChatViewportMessageInput>
+chat_viewport_messages_from_state(
+    const std::vector<acecode::TuiState::Message>& messages) {
+    std::vector<acecode::tui::ChatViewportMessageInput> out;
+    out.reserve(messages.size());
+    for (const auto& msg : messages) {
+        acecode::tui::ChatViewportMessageInput row;
+        row.role = msg.role;
+        row.content = msg.content;
+        row.display_override = msg.display_override;
+        row.expanded = msg.expanded;
+        row.has_summary = msg.summary.has_value();
+        row.has_hunks = msg.hunks.has_value();
+        if (msg.role == "tool_result" && msg.summary.has_value() &&
+            !msg.expanded) {
+            row.display_override = renderable_tool_summary_line(
+                *msg.summary,
+                tool_summary_metric_string(*msg.summary),
+                100000);
+        }
+        row.layout_version =
+            std::string(row.has_summary ? "summary" : "") +
+            (row.has_hunks ? ":hunks" : "");
+        out.push_back(std::move(row));
+    }
+    return out;
 }
 
 static std::string renderable_tool_summary_line(const acecode::ToolSummary& s,
@@ -866,6 +956,35 @@ static void flush_terminal_input_buffer() {
 #ifndef ACECODE_TUI_INPUT_TRACE
 #define ACECODE_TUI_INPUT_TRACE 0
 #endif
+
+static std::string scroll_trace_box(const Box& box) {
+    return "[" + std::to_string(box.x_min) + "," +
+           std::to_string(box.y_min) + "]-[" +
+           std::to_string(box.x_max) + "," +
+           std::to_string(box.y_max) + "]";
+}
+
+static const char* scroll_trace_mouse_button(Mouse::Button button) {
+    switch (button) {
+    case Mouse::Left:
+        return "Left";
+    case Mouse::Middle:
+        return "Middle";
+    case Mouse::Right:
+        return "Right";
+    case Mouse::None:
+        return "None";
+    case Mouse::WheelUp:
+        return "WheelUp";
+    case Mouse::WheelDown:
+        return "WheelDown";
+    case Mouse::WheelLeft:
+        return "WheelLeft";
+    case Mouse::WheelRight:
+        return "WheelRight";
+    }
+    return "?";
+}
 
 #if ACECODE_TUI_INPUT_TRACE
 static std::string box_for_log(const Box& box) {
@@ -1930,23 +2049,30 @@ static int run_interactive_app(const CliOptions& cli,
     Box ask_scrollbar_box;
     Box ask_overlay_box;
 
-    // drag-autoscroll: 每帧渲染时由 reflect 回填每条消息的屏幕 box,
-    // 下一帧 (事件线程 / anim_thread) 读这里算每条消息的行数,供
-    // scroll_chat_by_lines 做按行粒度的平滑滚动. Renderer 重新构建 element
-    // 树时先把上一帧的高度同步到 message_line_counts, 再把 boxes 清零.
-    // 读写发生在 (a) 事件线程 Renderer callback (b) anim_thread 通过
-    // state.mu 保护下的 scroll_chat_by_lines, 不显式加锁 — 与现有 state
-    // 读取路径保持一致的 "PostEvent happens-before" 模型.
-    std::vector<Box> message_boxes;
-    std::vector<Box> message_layout_boxes;
-    std::vector<int> message_line_counts;
-    int message_line_count_width = 0;
+    // Legacy yframe/focusPosition rollback state. ChatViewport owns its row
+    // model and scrollbar geometry; when the opt-in path is active these
+    // vectors are kept empty so new scrolling cannot accidentally depend on
+    // stale reflect heights. The legacy path still needs them for row math,
+    // selection-anchor compensation, and scrollbar drag snapshots until the
+    // real-terminal validation gate allows the rollback path to be removed.
+    struct LegacyChatScrollLayoutState {
+        std::vector<Box> message_boxes;
+        std::vector<Box> message_layout_boxes;
+        std::vector<int> message_line_counts;
+        int message_line_count_width = 0;
+    };
+    LegacyChatScrollLayoutState legacy_chat_scroll;
 
     // 终端能力探测 + render mode 决策。默认 auto 走 Fullscreen,让 TUI
     // 启动时直接撑满终端;config "never" 可回到 TerminalOutput。
     // CLI --alt-screen / -alt-screen 把 effective alt_screen_mode 临时强制为
     // "always",优先级高于 config.json,只影响本次启动,不写回。
     auto term_caps = acecode::detect_terminal_capabilities();
+    if (env_flag_enabled("ACECODE_TUI_FORCE_CONHOST_COMPAT_LAYOUT")) {
+        term_caps.is_windows_terminal = false;
+        term_caps.is_classic_conhost = true;
+        term_caps.source_label = "forced ConHost compatibility layout";
+    }
     if (force_alt_screen) {
         config.tui.alt_screen_mode = "always";
     }
@@ -1957,6 +2083,12 @@ static int run_interactive_app(const CliOptions& cli,
     if (conhost_compat_layout) {
         render_mode = acecode::tui::ScreenRenderMode::AltScreen;
     }
+    LOG_INFO(std::string("[tui] render_mode=") +
+             screen_render_mode_name(render_mode) +
+             " conhost_compat_layout=" +
+             (conhost_compat_layout ? "1" : "0") +
+             " terminal_source=" +
+             (term_caps.source_label.empty() ? "default" : term_caps.source_label));
 
     maybe_add_legacy_terminal_hint(state, config, term_caps, render_mode,
                                    force_alt_screen);
@@ -1982,8 +2114,26 @@ static int run_interactive_app(const CliOptions& cli,
             ? chat_box.y_max - chat_box.y_min + 1
             : 0;
     };
+    auto chat_viewport_component =
+        std::make_shared<acecode::tui::ChatViewport>();
+    const char* chat_viewport_env = std::getenv("ACECODE_TUI_CHAT_VIEWPORT");
+    const bool use_chat_viewport =
+        env_flag_default_enabled("ACECODE_TUI_CHAT_VIEWPORT", true);
+    acecode::tui::ChatViewportOptions chat_viewport_options;
+    chat_viewport_options.debug_trace =
+        env_flag_enabled("ACECODE_TUI_CHAT_VIEWPORT_TRACE");
+    chat_viewport_component->set_options(chat_viewport_options);
+    const bool trace_chat_scroll =
+        env_flag_enabled("ACECODE_TUI_SCROLL_TRACE") ||
+        chat_viewport_options.debug_trace;
+    LOG_INFO(std::string("[tui] chat_viewport=") +
+             (use_chat_viewport ? "1" : "0") +
+             " source=" + (chat_viewport_env ? "env" : "default") +
+             " trace=" + (trace_chat_scroll ? "1" : "0"));
+    const bool force_osc52_copy =
+        env_flag_enabled("ACECODE_TUI_FORCE_OSC52_COPY");
 
-    auto clamp_chat_focus = [&state, &message_line_counts, &chat_viewport_rows]() {
+    auto clamp_chat_focus = [&state, &legacy_chat_scroll, &chat_viewport_rows]() {
         if (state.conversation.empty()) {
             state.chat_focus_index = -1;
             state.chat_line_offset = 0;
@@ -1996,24 +2146,24 @@ static int run_interactive_app(const CliOptions& cli,
         int last = message_count - 1;
         const int viewport_rows = chat_viewport_rows();
         const int max_scroll_top =
-            acecode::tui::chat_max_scroll_top_row(message_line_counts,
+            acecode::tui::chat_max_scroll_top_row(legacy_chat_scroll.message_line_counts,
                                                   message_count,
                                                   viewport_rows);
         if (state.chat_follow_tail) {
             state.chat_focus_index = last;
             state.chat_line_offset =
-                acecode::tui::chat_tail_line_offset(message_line_counts, last);
+                acecode::tui::chat_tail_line_offset(legacy_chat_scroll.message_line_counts, last);
             state.chat_scroll_top_row = max_scroll_top;
             return;
         }
 
         state.chat_scroll_top_row =
             acecode::tui::clamp_chat_scroll_top_row(state.chat_scroll_top_row,
-                                                    message_line_counts,
+                                                    legacy_chat_scroll.message_line_counts,
                                                     message_count,
                                                     viewport_rows);
         auto [idx, off] = acecode::tui::chat_focus_from_display_row(
-            message_line_counts, message_count, state.chat_scroll_top_row);
+            legacy_chat_scroll.message_line_counts, message_count, state.chat_scroll_top_row);
         state.chat_focus_index = idx;
         state.chat_line_offset = off;
         state.chat_follow_tail = state.chat_scroll_top_row >= max_scroll_top;
@@ -2024,28 +2174,28 @@ static int run_interactive_app(const CliOptions& cli,
     // 再从顶部行反推当前 focus message. 返回实际滚了几行, 供调用方调用
     // screen.ShiftSelection(0, -actual) 补偿 FTXUI 屏幕坐标选区.
     // 注意: 本 lambda 必须在持有 state.mu 的上下文中调用.
-    auto scroll_chat_by_lines = [&state, &message_line_counts, &chat_viewport_rows](int delta_lines) -> int {
+    auto scroll_chat_by_lines = [&state, &legacy_chat_scroll, &chat_viewport_rows](int delta_lines) -> int {
         if (state.conversation.empty()) return 0;
         const int message_count = static_cast<int>(state.conversation.size());
         int last_msg = message_count - 1;
         const int viewport_rows = chat_viewport_rows();
         const int max_scroll_top =
-            acecode::tui::chat_max_scroll_top_row(message_line_counts,
+            acecode::tui::chat_max_scroll_top_row(legacy_chat_scroll.message_line_counts,
                                                   message_count,
                                                   viewport_rows);
         if (state.chat_follow_tail) {
             state.chat_focus_index = last_msg;
             state.chat_line_offset =
-                acecode::tui::chat_tail_line_offset(message_line_counts,
+                acecode::tui::chat_tail_line_offset(legacy_chat_scroll.message_line_counts,
                                                     last_msg);
             state.chat_scroll_top_row = max_scroll_top;
         }
 
         const int before = acecode::tui::clamp_chat_scroll_top_row(
-            state.chat_scroll_top_row, message_line_counts, message_count,
+            state.chat_scroll_top_row, legacy_chat_scroll.message_line_counts, message_count,
             viewport_rows);
         const int after = acecode::tui::clamp_chat_scroll_top_row(
-            before + delta_lines, message_line_counts, message_count,
+            before + delta_lines, legacy_chat_scroll.message_line_counts, message_count,
             viewport_rows);
         state.chat_scroll_top_row = after;
         const int actual = after - before;
@@ -2053,12 +2203,12 @@ static int run_interactive_app(const CliOptions& cli,
         if (after >= max_scroll_top) {
             state.chat_focus_index = last_msg;
             state.chat_line_offset =
-                acecode::tui::chat_tail_line_offset(message_line_counts,
+                acecode::tui::chat_tail_line_offset(legacy_chat_scroll.message_line_counts,
                                                     last_msg);
             state.chat_follow_tail = true;
         } else {
             auto [idx, off] = acecode::tui::chat_focus_from_display_row(
-                message_line_counts, message_count, after);
+                legacy_chat_scroll.message_line_counts, message_count, after);
             state.chat_focus_index = idx;
             state.chat_line_offset = off;
             state.chat_follow_tail = false;
@@ -2379,6 +2529,8 @@ static int run_interactive_app(const CliOptions& cli,
                 state.token_percent = token_tracker.context_percent(config.context_window);
                 state.conversation.push_back({"system",
                     "Resumed session " + target_id + " (" + std::to_string(messages.size()) + " messages)", false});
+                state.chat_follow_tail = true;
+                state.chat_tail_repaint_requested = true;
                 agent_loop.publish_current_goal_state();
                 agent_loop.maybe_continue_goal();
                 if (!resumed_title.empty()) {
@@ -2480,7 +2632,9 @@ static int run_interactive_app(const CliOptions& cli,
 
     // ---- Animation ticker thread ----
     std::atomic<bool> running{true};
-    std::thread anim_thread([&running, &anim_tick, &state, &screen, &scroll_chat_by_lines, conhost_compat_layout] {
+    std::thread anim_thread([&running, &anim_tick, &state, &screen,
+                             &scroll_chat_by_lines, conhost_compat_layout,
+                             chat_viewport_component, use_chat_viewport] {
         while (running) {
             // drag-autoscroll: 拖动到边界期间提速到 50ms 唤醒, 其他时间保持 300ms.
             // 每次唤醒前读最新 phase, 避免拖动开始后还得等一个完整的 300ms.
@@ -2517,7 +2671,13 @@ static int run_interactive_app(const CliOptions& cli,
                     if (drag_scroll::should_tick(now, state.last_drag_scroll_at,
                                                   std::chrono::milliseconds(60))) {
                         int dy = (state.drag_phase == drag_scroll::Phase::ScrollingUp) ? -1 : 1;
-                        int actual = scroll_chat_by_lines(dy);
+                        int actual = use_chat_viewport
+                            ? chat_viewport_component->scroll_by_rows(dy)
+                            : scroll_chat_by_lines(dy);
+                        if (use_chat_viewport) {
+                            state.chat_follow_tail =
+                                chat_viewport_component->is_at_tail();
+                        }
                         if (actual != 0) {
                             // scroll_chat_by_lines(+1) 让视口顶部下移一行 → 屏幕
                             // 内容相对上移 actual 行 → 原 anchor 文本屏幕坐标应
@@ -2651,8 +2811,34 @@ static int run_interactive_app(const CliOptions& cli,
         return true;
     };
 
+    auto copy_selection_text = [force_osc52_copy](const std::string& sel) {
+        if (!force_osc52_copy) {
+            auto clipboard_write = acecode::write_system_clipboard_text(sel);
+            if (clipboard_write) {
+                LOG_INFO("Copied " + std::to_string(sel.size()) +
+                         " bytes to clipboard via system clipboard");
+                return "Copied " + std::to_string(sel.size()) +
+                       " bytes to clipboard";
+            }
+            if (clipboard_write.status ==
+                ClipboardTextWriteResult::Status::TooLarge) {
+                std::string status_msg =
+                    clipboard_copy_status_message(clipboard_write.status);
+                LOG_WARN(status_msg);
+                return status_msg;
+            }
+        }
+
+        std::string seq = "\x1b]52;c;" + base64_encode(sel) + "\x1b\\";
+        std::fwrite(seq.data(), 1, seq.size(), stdout);
+        std::fflush(stdout);
+        LOG_INFO("Sent OSC 52 copy request for " +
+                 std::to_string(sel.size()) + " bytes");
+        return std::string("Sent OSC 52 copy request");
+    };
+
     // Wrap with CatchEvent to handle all keyboard input
-    auto input_with_esc = CatchEvent(input_renderer, [&state, &screen, &clamp_chat_focus, &chat_viewport_rows, &auth_done, &cmd_registry, &agent_loop, &provider_slot, &provider_accessor, &config, &token_tracker, &permissions, &session_manager, &scroll_chat_by_lines, &chat_box, &scrollbar_box, &ask_scrollbar_box, &ask_overlay_box, &message_line_counts, &mcp_manager, &tools, &skill_registry, &memory_registry, &working_dir, &insert_pasted_text_at_cursor, &paste_system_clipboard_text](Event event) {
+    auto input_with_esc = CatchEvent(input_renderer, [&state, &screen, &clamp_chat_focus, &chat_viewport_rows, &auth_done, &cmd_registry, &agent_loop, &provider_slot, &provider_accessor, &config, &token_tracker, &permissions, &session_manager, &scroll_chat_by_lines, &chat_box, &scrollbar_box, &ask_scrollbar_box, &ask_overlay_box, &legacy_chat_scroll, &mcp_manager, &tools, &skill_registry, &memory_registry, &working_dir, &insert_pasted_text_at_cursor, &paste_system_clipboard_text, &copy_selection_text, chat_viewport_component, use_chat_viewport, trace_chat_scroll](Event event) {
 #if ACECODE_TUI_INPUT_TRACE
         if (event != Event::Custom &&
             !event.is_cursor_position() &&
@@ -2680,6 +2866,15 @@ static int run_interactive_app(const CliOptions& cli,
                       state_snapshot);
         }
 #endif
+
+        auto sync_chat_viewport_state = [&]() {
+            const auto top = chat_viewport_component->top_display_row();
+            state.chat_focus_index = top.message_index;
+            state.chat_line_offset = top.message_row;
+            state.chat_scroll_top_row =
+                chat_viewport_component->state().scroll_top_row;
+            state.chat_follow_tail = chat_viewport_component->is_at_tail();
+        };
 
         // drag-autoscroll: 事件线程入口处消费 anim_thread 攒下的 selection 偏移
         // 补偿. 所有对 FTXUI selection_data_ 的写都发生在这条路径上, 跟
@@ -2869,7 +3064,13 @@ static int run_interactive_app(const CliOptions& cli,
                         : std::max(1, chat_viewport_rows() - 2);
                     const int chat_delta =
                         (event == Event::PageUp) ? -chat_step : chat_step;
-                    if (scroll_chat_by_lines(chat_delta) != 0) {
+                    const int actual = use_chat_viewport
+                        ? chat_viewport_component->scroll_by_rows(chat_delta)
+                        : scroll_chat_by_lines(chat_delta);
+                    if (use_chat_viewport) {
+                        sync_chat_viewport_state();
+                    }
+                    if (actual != 0) {
                         screen.PostEvent(Event::Custom);
                     }
                     return true;
@@ -2879,7 +3080,13 @@ static int run_interactive_app(const CliOptions& cli,
                     event == Event::Special("\x1B[1;3B")) {
                     const int delta =
                         (event == Event::Special("\x1B[1;3A")) ? -1 : 1;
-                    if (scroll_chat_by_lines(delta) != 0) {
+                    const int actual = use_chat_viewport
+                        ? chat_viewport_component->scroll_by_rows(delta)
+                        : scroll_chat_by_lines(delta);
+                    if (use_chat_viewport) {
+                        sync_chat_viewport_state();
+                    }
+                    if (actual != 0) {
                         screen.PostEvent(Event::Custom);
                     }
                     return true;
@@ -2894,14 +3101,19 @@ static int run_interactive_app(const CliOptions& cli,
                                box.Contain(x, y);
                     };
                     auto scroll_chat_from_ask = [&](int delta) {
-                        const int actual = scroll_chat_by_lines(delta);
+                        const int actual = use_chat_viewport
+                            ? chat_viewport_component->scroll_by_rows(delta)
+                            : scroll_chat_by_lines(delta);
+                        if (use_chat_viewport) {
+                            sync_chat_viewport_state();
+                        }
                         if (actual != 0) {
                             screen.PostEvent(Event::Custom);
                         }
                         return actual;
                     };
                     auto begin_chat_scrollbar_drag = [&]() {
-                        state.drag_scrollbar_snapshot = message_line_counts;
+                        state.drag_scrollbar_snapshot = legacy_chat_scroll.message_line_counts;
                         state.drag_scrollbar_phase =
                             TuiState::DragScrollbarPhase::Dragging;
                         const bool was_follow_tail = state.chat_follow_tail;
@@ -2998,25 +3210,7 @@ static int run_interactive_app(const CliOptions& cli,
                         std::string sel = screen.GetSelection();
                         if (!sel.empty()) {
                             lk.unlock();
-                            auto clipboard_write =
-                                acecode::write_system_clipboard_text(sel);
-                            std::string status_msg;
-                            if (clipboard_write) {
-                                status_msg = "Copied " +
-                                             std::to_string(sel.size()) +
-                                             " bytes to clipboard";
-                            } else if (
-                                clipboard_write.status !=
-                                ClipboardTextWriteResult::Status::TooLarge) {
-                                std::string seq = "\x1b]52;c;" +
-                                                  base64_encode(sel) + "\x1b\\";
-                                std::fwrite(seq.data(), 1, seq.size(), stdout);
-                                std::fflush(stdout);
-                                status_msg = "Sent OSC 52 copy request";
-                            } else {
-                                status_msg = clipboard_copy_status_message(
-                                    clipboard_write.status);
-                            }
+                            std::string status_msg = copy_selection_text(sel);
                             lk.lock();
                             set_transient_status_line_locked(state, status_msg);
                             screen.PostEvent(Event::Custom);
@@ -3037,7 +3231,29 @@ static int run_interactive_app(const CliOptions& cli,
                         }
                     }
 
-                    if (state.drag_scrollbar_phase ==
+                    const bool is_wheel_event =
+                        mouse.button == Mouse::WheelUp ||
+                        mouse.button == Mouse::WheelDown;
+                    const bool ask_mouse_target =
+                        contains_box(ask_overlay_box, mouse.x, mouse.y) ||
+                        contains_box(ask_scrollbar_box, mouse.x, mouse.y);
+                    const Box active_chat_box = use_chat_viewport
+                        ? chat_viewport_component->chat_box()
+                        : chat_box;
+                    const Box active_scrollbar_box = use_chat_viewport
+                        ? chat_viewport_component->scrollbar_box()
+                        : scrollbar_box;
+
+                    if (use_chat_viewport && !ask_mouse_target) {
+                        if (chat_viewport_component->OnEvent(event)) {
+                            sync_chat_viewport_state();
+                            screen.PostEvent(Event::Custom);
+                            return true;
+                        }
+                    }
+
+                    if (!use_chat_viewport &&
+                        state.drag_scrollbar_phase ==
                         TuiState::DragScrollbarPhase::Dragging) {
                         if (mouse.motion == Mouse::Released) {
                             end_chat_scrollbar_drag();
@@ -3061,7 +3277,8 @@ static int run_interactive_app(const CliOptions& cli,
                         return true;
                     }
 
-                    if (mouse.button == Mouse::Left &&
+                    if (!use_chat_viewport &&
+                        mouse.button == Mouse::Left &&
                         mouse.motion == Mouse::Pressed &&
                         contains_box(scrollbar_box, mouse.x, mouse.y)) {
                         begin_chat_scrollbar_drag();
@@ -3070,8 +3287,8 @@ static int run_interactive_app(const CliOptions& cli,
 
                     if (mouse.button == Mouse::Left &&
                         mouse.motion == Mouse::Pressed &&
-                        contains_box(chat_box, mouse.x, mouse.y) &&
-                        !contains_box(scrollbar_box, mouse.x, mouse.y)) {
+                        contains_box(active_chat_box, mouse.x, mouse.y) &&
+                        !contains_box(active_scrollbar_box, mouse.x, mouse.y)) {
                         state.drag_left_pressed = true;
                         state.last_mouse_x = mouse.x;
                         state.last_mouse_y = mouse.y;
@@ -3095,7 +3312,7 @@ static int run_interactive_app(const CliOptions& cli,
                         state.last_mouse_x = mouse.x;
                         state.last_mouse_y = mouse.y;
                         auto new_phase = drag_scroll::classify(
-                            mouse.y, chat_box.y_min, chat_box.y_max, true,
+                            mouse.y, active_chat_box.y_min, active_chat_box.y_max, true,
                             drag_scroll::Config{});
                         const bool phase_changed =
                             new_phase != state.drag_phase;
@@ -3126,16 +3343,11 @@ static int run_interactive_app(const CliOptions& cli,
                         return false;
                     }
 
-                    const bool is_wheel_event =
-                        mouse.button == Mouse::WheelUp ||
-                        mouse.button == Mouse::WheelDown;
-                    const bool ask_mouse_target =
-                        contains_box(ask_overlay_box, mouse.x, mouse.y) ||
-                        contains_box(ask_scrollbar_box, mouse.x, mouse.y);
                     const bool chat_mouse_target =
                         acecode::tui::is_chat_mouse_target(
-                            mouse.x, mouse.y, chat_box.x_min, chat_box.y_min,
-                            chat_box.x_max, chat_box.y_max, is_wheel_event);
+                            mouse.x, mouse.y, active_chat_box.x_min,
+                            active_chat_box.y_min, active_chat_box.x_max,
+                            active_chat_box.y_max, is_wheel_event);
 
                     if (mouse.button == Mouse::WheelUp && ask_mouse_target) {
 #if ACECODE_TUI_INPUT_TRACE
@@ -3230,7 +3442,7 @@ static int run_interactive_app(const CliOptions& cli,
                     // "Custom → swallow → PostEvent(Custom)" 会形成事件自回环
                     // 把事件循环打爆(表现为 TUI 卡死)。无论哪种情况都 return
                     // true 消耗事件,防止透传到下游 shell-mode / slash-dropdown
-                    // / Ctrl+E tool_result-expand 等 handler。
+                    // / Ctrl+O tool_result-expand 等 handler。
                     if (acecode::try_handle_ask_other_input(state, event)) {
                         screen.PostEvent(Event::Custom);
                     }
@@ -3841,6 +4053,18 @@ static int run_interactive_app(const CliOptions& cli,
             }
         }
         if (event == Event::PageUp) {
+            if (use_chat_viewport) {
+                std::lock_guard<std::mutex> lk(state.mu);
+                const int step = config.tui.page_keys_single_line
+                    ? 1
+                    : std::max(1, chat_viewport_component->state().viewport_rows - 2);
+                const int actual = chat_viewport_component->scroll_by_rows(-step);
+                sync_chat_viewport_state();
+                if (actual != 0) {
+                    screen.PostEvent(Event::Custom);
+                }
+                return true;
+            }
             std::lock_guard<std::mutex> lk(state.mu);
             // page_keys_single_line 默认开启:把 PgUp 当作单行滚动,等同 Alt+↑.
             // 适用于吞掉 Alt+方向键序列的终端 (老 conhost / Cmder / 部分 SSH 客户端).
@@ -3854,7 +4078,7 @@ static int run_interactive_app(const CliOptions& cli,
             const int actual = scroll_chat_by_lines(-step);
 #if ACECODE_TUI_INPUT_TRACE
             const int max_top = acecode::tui::chat_max_scroll_top_row(
-                message_line_counts,
+                legacy_chat_scroll.message_line_counts,
                 static_cast<int>(state.conversation.size()),
                 chat_viewport_rows());
             LOG_DEBUG("[input] chat page up step=" + std::to_string(step) +
@@ -3876,6 +4100,18 @@ static int run_interactive_app(const CliOptions& cli,
             return true;
         }
         if (event == Event::PageDown) {
+            if (use_chat_viewport) {
+                std::lock_guard<std::mutex> lk(state.mu);
+                const int step = config.tui.page_keys_single_line
+                    ? 1
+                    : std::max(1, chat_viewport_component->state().viewport_rows - 2);
+                const int actual = chat_viewport_component->scroll_by_rows(step);
+                sync_chat_viewport_state();
+                if (actual != 0) {
+                    screen.PostEvent(Event::Custom);
+                }
+                return true;
+            }
             std::lock_guard<std::mutex> lk(state.mu);
             int step = config.tui.page_keys_single_line
                 ? 1
@@ -3887,7 +4123,7 @@ static int run_interactive_app(const CliOptions& cli,
             const int actual = scroll_chat_by_lines(step);
 #if ACECODE_TUI_INPUT_TRACE
             const int max_top = acecode::tui::chat_max_scroll_top_row(
-                message_line_counts,
+                legacy_chat_scroll.message_line_counts,
                 static_cast<int>(state.conversation.size()),
                 chat_viewport_rows());
             LOG_DEBUG("[input] chat page down step=" + std::to_string(step) +
@@ -3919,6 +4155,12 @@ static int run_interactive_app(const CliOptions& cli,
             std::lock_guard<std::mutex> lk(state.mu);
             if (state.resume_picker_active) return true;
             if (state.model_picker_open) return true;
+            if (use_chat_viewport &&
+                chat_viewport_component->OnEvent(event)) {
+                sync_chat_viewport_state();
+                screen.PostEvent(Event::Custom);
+                return true;
+            }
             if (scroll_chat_by_lines(-1) != 0) {
                 screen.PostEvent(Event::Custom);
             }
@@ -3928,6 +4170,12 @@ static int run_interactive_app(const CliOptions& cli,
             std::lock_guard<std::mutex> lk(state.mu);
             if (state.resume_picker_active) return true;
             if (state.model_picker_open) return true;
+            if (use_chat_viewport &&
+                chat_viewport_component->OnEvent(event)) {
+                sync_chat_viewport_state();
+                screen.PostEvent(Event::Custom);
+                return true;
+            }
             if (scroll_chat_by_lines(1) != 0) {
                 screen.PostEvent(Event::Custom);
             }
@@ -3936,6 +4184,12 @@ static int run_interactive_app(const CliOptions& cli,
         if (event == Event::Home) {
             std::lock_guard<std::mutex> lk(state.mu);
             if (!state.conversation.empty()) {
+                if (use_chat_viewport) {
+                    chat_viewport_component->scroll_to_row(0);
+                    sync_chat_viewport_state();
+                    screen.PostEvent(Event::Custom);
+                    return true;
+                }
                 state.chat_scroll_top_row = 0;
                 state.chat_focus_index = 0;
                 state.chat_line_offset = 0;
@@ -3947,6 +4201,13 @@ static int run_interactive_app(const CliOptions& cli,
         if (event == Event::End) {
             std::lock_guard<std::mutex> lk(state.mu);
             if (!state.conversation.empty()) {
+                if (use_chat_viewport) {
+                    chat_viewport_component->scroll_to_tail();
+                    sync_chat_viewport_state();
+                    state.chat_follow_tail = true;
+                    screen.PostEvent(Event::Custom);
+                    return true;
+                }
                 state.chat_follow_tail = true;
                 clamp_chat_focus();
                 screen.PostEvent(Event::Custom);
@@ -4034,25 +4295,7 @@ static int run_interactive_app(const CliOptions& cli,
                 if (sel.empty()) {
                     return paste_system_clipboard_text();
                 }
-                auto clipboard_write = acecode::write_system_clipboard_text(sel);
-                std::string status_msg;
-                if (clipboard_write) {
-                    status_msg = "Copied " + std::to_string(sel.size()) +
-                                 " bytes to clipboard";
-                    LOG_INFO("Copied " + std::to_string(sel.size()) +
-                             " bytes to clipboard via system clipboard");
-                } else if (
-                    clipboard_write.status != ClipboardTextWriteResult::Status::TooLarge) {
-                    std::string seq = "\x1b]52;c;" + base64_encode(sel) + "\x1b\\";
-                    std::fwrite(seq.data(), 1, seq.size(), stdout);
-                    std::fflush(stdout);
-                    status_msg = "Sent OSC 52 copy request";
-                    LOG_INFO("Sent OSC 52 copy request for " +
-                             std::to_string(sel.size()) + " bytes");
-                } else {
-                    status_msg = clipboard_copy_status_message(clipboard_write.status);
-                    LOG_WARN(status_msg);
-                }
+                std::string status_msg = copy_selection_text(sel);
                 {
                     std::lock_guard<std::mutex> lk(state.mu);
                     set_transient_status_line_locked(state, status_msg);
@@ -4061,15 +4304,59 @@ static int run_interactive_app(const CliOptions& cli,
                 return true;
             }
 
+            if (use_chat_viewport) {
+                std::lock_guard<std::mutex> lk(state.mu);
+                const bool is_wheel_event =
+                    mouse.button == Mouse::WheelUp ||
+                    mouse.button == Mouse::WheelDown;
+                const int before_top =
+                    chat_viewport_component->state().scroll_top_row;
+                const bool before_tail = chat_viewport_component->is_at_tail();
+                const bool handled = chat_viewport_component->OnEvent(event);
+                if (trace_chat_scroll && is_wheel_event) {
+                    const int after_top =
+                        chat_viewport_component->state().scroll_top_row;
+                    LOG_DEBUG("[chat-scroll] path=viewport wheel button=" +
+                              std::string(scroll_trace_mouse_button(mouse.button)) +
+                              " handled=" + (handled ? "1" : "0") +
+                              " actual=" +
+                              std::to_string(after_top - before_top) +
+                              " top=" + std::to_string(before_top) + "->" +
+                              std::to_string(after_top) +
+                              " follow_tail=" +
+                              std::string(before_tail ? "1" : "0") + "->" +
+                              std::string(chat_viewport_component->is_at_tail()
+                                              ? "1"
+                                              : "0") +
+                              " total_rows=" +
+                              std::to_string(chat_viewport_component->state().total_rows) +
+                              " viewport_rows=" +
+                              std::to_string(chat_viewport_component->state().viewport_rows) +
+                              " chat_box=" +
+                              scroll_trace_box(chat_viewport_component->chat_box()) +
+                              " scrollbar_box=" +
+                              scroll_trace_box(chat_viewport_component->scrollbar_box()));
+                }
+                if (handled) {
+                    sync_chat_viewport_state();
+                    screen.PostEvent(Event::Custom);
+                    return true;
+                }
+                if (is_wheel_event) {
+                    return false;
+                }
+            }
+
             // draggable-thick-scrollbar: 左键 Pressed 落在滚动条列时,优先
             // 进入"拖滚动条"分支,跳过下面的 drag-select 启动。两态互斥 ——
             // 一次按下不会同时开始选区拖拽和滚动条拖拽。
-            if (mouse.button == Mouse::Left && mouse.motion == Mouse::Pressed &&
+            if (!use_chat_viewport &&
+                mouse.button == Mouse::Left && mouse.motion == Mouse::Pressed &&
                 scrollbar_box.Contain(mouse.x, mouse.y)) {
                 std::lock_guard<std::mutex> lk(state.mu);
-                // 快照 message_line_counts —— 流式输出追加新行时,拖动期间的
+                // 快照 legacy_chat_scroll.message_line_counts —— 流式输出追加新行时,拖动期间的
                 // y → line 映射继续按按下瞬间的几何走,不被指针下扯走。
-                state.drag_scrollbar_snapshot = message_line_counts;
+                state.drag_scrollbar_snapshot = legacy_chat_scroll.message_line_counts;
                 state.drag_scrollbar_phase = TuiState::DragScrollbarPhase::Dragging;
                 const bool was_follow_tail = state.chat_follow_tail;
                 // 一旦用户主动操纵滚动条,就视为离开尾巴跟随;松手时不自动恢复。
@@ -4145,8 +4432,11 @@ static int run_interactive_app(const CliOptions& cli,
                 if (mouse.motion == Mouse::Pressed) {
                     // draggable-thick-scrollbar: 落在滚动条列上的 Pressed 已经
                     // 在上一个分支被吞掉,这里只剩内容区的左键按下 → 启动选区拖拽。
+                    const Box active_scrollbar_box = use_chat_viewport
+                        ? chat_viewport_component->scrollbar_box()
+                        : scrollbar_box;
                     if (chat_box.Contain(mouse.x, mouse.y) &&
-                        !scrollbar_box.Contain(mouse.x, mouse.y)) {
+                        !active_scrollbar_box.Contain(mouse.x, mouse.y)) {
                         std::lock_guard<std::mutex> lk(state.mu);
 #if ACECODE_TUI_INPUT_TRACE
                         LOG_DEBUG("[drag-select] pressed start mouse=(" +
@@ -4217,7 +4507,8 @@ static int run_interactive_app(const CliOptions& cli,
                 // draggable-thick-scrollbar: 滚动条拖拽优先级高于 drag-select
                 // —— 两态互斥,Pressed 分支保证只可能进一态。直接 early return,
                 // 不让下面的 drag-autoscroll 分类运行,避免拖滚动条时选区被误激活。
-                if (state.drag_scrollbar_phase ==
+                if (!use_chat_viewport &&
+                    state.drag_scrollbar_phase ==
                     TuiState::DragScrollbarPhase::Dragging) {
                     int track_height =
                         scrollbar_box.y_max - scrollbar_box.y_min + 1;
@@ -4324,6 +4615,14 @@ static int run_interactive_app(const CliOptions& cli,
                               " chat_box=" + box_for_log(chat_box));
                 }
 #endif
+                if (trace_chat_scroll && is_wheel_event) {
+                    LOG_DEBUG("[chat-scroll] path=legacy wheel button=" +
+                              std::string(scroll_trace_mouse_button(mouse.button)) +
+                              " handled=0 reason=outside-chat mouse=(" +
+                              std::to_string(mouse.x) + "," +
+                              std::to_string(mouse.y) + ") chat_box=" +
+                              scroll_trace_box(chat_box));
+                }
                 return false;
             }
 #if ACECODE_TUI_INPUT_TRACE
@@ -4343,7 +4642,40 @@ static int run_interactive_app(const CliOptions& cli,
                 const int before_offset = state.chat_line_offset;
                 const bool before_tail = state.chat_follow_tail;
 #endif
+                const int before_top = state.chat_scroll_top_row;
+                const bool before_tail_for_trace = state.chat_follow_tail;
+                const int before_focus_for_trace = state.chat_focus_index;
+                const int before_offset_for_trace = state.chat_line_offset;
                 const int actual = scroll_chat_by_lines(-WHEEL_LINES);
+                if (trace_chat_scroll) {
+                    const int max_top = acecode::tui::chat_max_scroll_top_row(
+                        legacy_chat_scroll.message_line_counts,
+                        static_cast<int>(state.conversation.size()),
+                        chat_viewport_rows());
+                    LOG_DEBUG("[chat-scroll] path=legacy wheel button=WheelUp "
+                              "handled=1 delta=-" +
+                              std::to_string(WHEEL_LINES) +
+                              " actual=" + std::to_string(actual) +
+                              " top=" + std::to_string(before_top) + "->" +
+                              std::to_string(state.chat_scroll_top_row) +
+                              " max_top=" + std::to_string(max_top) +
+                              " focus=" +
+                              std::to_string(before_focus_for_trace) + "->" +
+                              std::to_string(state.chat_focus_index) +
+                              " offset=" +
+                              std::to_string(before_offset_for_trace) + "->" +
+                              std::to_string(state.chat_line_offset) +
+                              " follow_tail=" +
+                              std::string(before_tail_for_trace ? "1" : "0") +
+                              "->" +
+                              std::string(state.chat_follow_tail ? "1" : "0") +
+                              " viewport_rows=" +
+                              std::to_string(chat_viewport_rows()) +
+                              " line_counts=" +
+                              std::to_string(
+                                  legacy_chat_scroll.message_line_counts.size()) +
+                              " chat_box=" + scroll_trace_box(chat_box));
+                }
 #if ACECODE_TUI_INPUT_TRACE
                 LOG_DEBUG("[input] chat wheel up delta=-" +
                           std::to_string(WHEEL_LINES) +
@@ -4368,7 +4700,40 @@ static int run_interactive_app(const CliOptions& cli,
                 const int before_offset = state.chat_line_offset;
                 const bool before_tail = state.chat_follow_tail;
 #endif
+                const int before_top = state.chat_scroll_top_row;
+                const bool before_tail_for_trace = state.chat_follow_tail;
+                const int before_focus_for_trace = state.chat_focus_index;
+                const int before_offset_for_trace = state.chat_line_offset;
                 const int actual = scroll_chat_by_lines(WHEEL_LINES);
+                if (trace_chat_scroll) {
+                    const int max_top = acecode::tui::chat_max_scroll_top_row(
+                        legacy_chat_scroll.message_line_counts,
+                        static_cast<int>(state.conversation.size()),
+                        chat_viewport_rows());
+                    LOG_DEBUG("[chat-scroll] path=legacy wheel button=WheelDown "
+                              "handled=1 delta=" +
+                              std::to_string(WHEEL_LINES) +
+                              " actual=" + std::to_string(actual) +
+                              " top=" + std::to_string(before_top) + "->" +
+                              std::to_string(state.chat_scroll_top_row) +
+                              " max_top=" + std::to_string(max_top) +
+                              " focus=" +
+                              std::to_string(before_focus_for_trace) + "->" +
+                              std::to_string(state.chat_focus_index) +
+                              " offset=" +
+                              std::to_string(before_offset_for_trace) + "->" +
+                              std::to_string(state.chat_line_offset) +
+                              " follow_tail=" +
+                              std::string(before_tail_for_trace ? "1" : "0") +
+                              "->" +
+                              std::string(state.chat_follow_tail ? "1" : "0") +
+                              " viewport_rows=" +
+                              std::to_string(chat_viewport_rows()) +
+                              " line_counts=" +
+                              std::to_string(
+                                  legacy_chat_scroll.message_line_counts.size()) +
+                              " chat_box=" + scroll_trace_box(chat_box));
+                }
 #if ACECODE_TUI_INPUT_TRACE
                 LOG_DEBUG("[input] chat wheel down delta=" +
                           std::to_string(WHEEL_LINES) +
@@ -4513,26 +4878,59 @@ static int run_interactive_app(const CliOptions& cli,
             state.input_cursor = 0;
             return true;
         }
-        // Ctrl+E contextual expand: when a summarized tool_result is focused
+        // Ctrl+O contextual expand: when a summarized tool_result is focused
         // in the chat view, toggle its expanded state. Falls through to the
-        // readline-style "move to end of line" when no chat message is focused.
-        if (event == Event::Special(std::string(1, '\x05'))) {
+        // normal input path when no chat message is focused.
+        if (event == Event::Special(std::string(1, '\x0F'))) {
             std::lock_guard<std::mutex> lk(state.mu);
-            if (state.chat_focus_index >= 0 &&
-                state.chat_focus_index < static_cast<int>(state.conversation.size())) {
-                auto& msg = state.conversation[state.chat_focus_index];
-                if (msg.role == "tool_result" &&
-                    (msg.summary.has_value() || msg.hunks.has_value())) {
-                    msg.expanded = !msg.expanded;
-                    if (state.chat_focus_index <
-                        static_cast<int>(message_line_counts.size())) {
-                        message_line_counts[state.chat_focus_index] = 0;
+            auto expandable_tool_result = [&](int index) {
+                if (index < 0 ||
+                    index >= static_cast<int>(state.conversation.size())) {
+                    return false;
+                }
+                const auto& msg = state.conversation[index];
+                return msg.role == "tool_result" &&
+                    (msg.summary.has_value() || msg.hunks.has_value());
+            };
+
+            int target_index = -1;
+            if (expandable_tool_result(state.chat_focus_index)) {
+                target_index = state.chat_focus_index;
+            } else if (use_chat_viewport) {
+                auto [first_visible, last_visible] =
+                    chat_viewport_component->visible_message_index_bounds();
+                if (first_visible >= 0 && last_visible >= first_visible) {
+                    last_visible = std::min(
+                        last_visible,
+                        static_cast<int>(state.conversation.size()) - 1);
+                    for (int i = last_visible; i >= first_visible; --i) {
+                        if (expandable_tool_result(i)) {
+                            target_index = i;
+                            break;
+                        }
                     }
-                    screen.PostEvent(Event::Custom);
-                    return true;
+                }
+            } else {
+                for (int i = static_cast<int>(state.conversation.size()) - 1;
+                     i >= 0; --i) {
+                    if (expandable_tool_result(i)) {
+                        target_index = i;
+                        break;
+                    }
                 }
             }
-            // Fall through to end-of-line if nothing to toggle.
+
+            if (target_index >= 0) {
+                auto& msg = state.conversation[target_index];
+                msg.expanded = !msg.expanded;
+                if (target_index <
+                    static_cast<int>(legacy_chat_scroll.message_line_counts.size())) {
+                    legacy_chat_scroll.message_line_counts[target_index] = 0;
+                }
+                screen.PostEvent(Event::Custom);
+                return true;
+            }
+            return false;
         }
         if (is_end_event(event)) {
             std::lock_guard<std::mutex> lk(state.mu);
@@ -4667,8 +5065,9 @@ static int run_interactive_app(const CliOptions& cli,
         return false;
     });
 
-    auto renderer = Renderer(input_with_esc, [&state, &screen, &version_str, &cwd_display, &chat_box, &scrollbar_box, &ask_scrollbar_box, &ask_overlay_box, &message_boxes, &message_layout_boxes, &message_line_counts, &message_line_count_width, &anim_tick, &input_with_esc, &permissions, dangerous_mode, conhost_compat_layout, &clamp_chat_focus, &chat_viewport_rows] {
+    auto renderer = Renderer(input_with_esc, [&state, &screen, &version_str, &cwd_display, &chat_box, &scrollbar_box, &ask_scrollbar_box, &ask_overlay_box, &legacy_chat_scroll, &anim_tick, &input_with_esc, &permissions, dangerous_mode, conhost_compat_layout, &clamp_chat_focus, &chat_viewport_rows, chat_viewport_component, use_chat_viewport, trace_chat_scroll] {
         std::lock_guard<std::mutex> lk(state.mu);
+        bool post_tail_repaint = false;
         auto compat_horizontal_line = [] {
             const int cols = Terminal::Size().dimx;
             const int safe_cols = std::max(1, cols > 4 ? cols - 4 : cols);
@@ -4690,76 +5089,115 @@ static int run_interactive_app(const CliOptions& cli,
         const bool hide_regular_sidebar_banner =
             show_regular_sidebar && !state.conversation.empty();
 
-        // drag-autoscroll: 把上一帧布局分配的未裁剪 box 高度同步到行数表,
-        // 供 scroll_chat_by_lines 做按行滚动. 普通 ftxui::reflect 会在 Render
-        // 阶段和 screen.stencil 取交集,只能拿到可见高度;这里必须用未裁剪高度,
-        // 否则长消息会被误判为只剩当前可见的几行,导致底部滚动范围过短.
         size_t n_msgs = state.conversation.size();
         const int current_message_width = chat_box.x_max >= chat_box.x_min
             ? chat_box.x_max - chat_box.x_min + 1
             : 0;
-        const bool line_count_width_changed =
-            current_message_width > 0 &&
-            current_message_width != message_line_count_width;
-        if (line_count_width_changed) {
-            message_line_counts.assign(n_msgs, 0);
-            message_line_count_width = current_message_width;
-        }
-        message_line_counts.resize(n_msgs);
-        for (size_t i = 0; i < n_msgs; ++i) {
-            if (!line_count_width_changed && i < message_layout_boxes.size()) {
-                int h = message_layout_boxes[i].y_max -
-                        message_layout_boxes[i].y_min + 1;
-                message_line_counts[i] =
-                    acecode::tui::update_chat_line_count_estimate(
-                        message_line_counts[i], h);
-            } else if (message_line_counts[i] <= 0) {
-                message_line_counts[i] = 1;
+        if (!use_chat_viewport) {
+            // drag-autoscroll: 把上一帧布局分配的未裁剪 box 高度同步到行数表,
+            // 供 scroll_chat_by_lines 做按行滚动. 普通 ftxui::reflect 会在 Render
+            // 阶段和 screen.stencil 取交集,只能拿到可见高度;这里必须用未裁剪高度,
+            // 否则长消息会被误判为只剩当前可见的几行,导致底部滚动范围过短.
+            const bool line_count_width_changed =
+                current_message_width > 0 &&
+                current_message_width != legacy_chat_scroll.message_line_count_width;
+            if (line_count_width_changed) {
+                legacy_chat_scroll.message_line_counts.assign(n_msgs, 0);
+                legacy_chat_scroll.message_line_count_width = current_message_width;
             }
-        }
-        clamp_chat_focus();
+            legacy_chat_scroll.message_line_counts.resize(n_msgs);
+            for (size_t i = 0; i < n_msgs; ++i) {
+                if (!line_count_width_changed && i < legacy_chat_scroll.message_layout_boxes.size()) {
+                    int h = legacy_chat_scroll.message_layout_boxes[i].y_max -
+                            legacy_chat_scroll.message_layout_boxes[i].y_min + 1;
+                    legacy_chat_scroll.message_line_counts[i] =
+                        acecode::tui::update_chat_line_count_estimate(
+                            legacy_chat_scroll.message_line_counts[i], h);
+                } else if (legacy_chat_scroll.message_line_counts[i] <= 0) {
+                    legacy_chat_scroll.message_line_counts[i] = 1;
+                }
+            }
+            clamp_chat_focus();
+            if (state.chat_tail_repaint_requested) {
+                if (trace_chat_scroll) {
+                    const int max_top = acecode::tui::chat_max_scroll_top_row(
+                        legacy_chat_scroll.message_line_counts,
+                        static_cast<int>(state.conversation.size()),
+                        chat_viewport_rows());
+                    LOG_DEBUG("[chat-scroll] path=legacy tail-repaint "
+                              "action=request top=" +
+                              std::to_string(state.chat_scroll_top_row) +
+                              " max_top=" + std::to_string(max_top) +
+                              " viewport_rows=" +
+                              std::to_string(chat_viewport_rows()) +
+                              " messages=" + std::to_string(n_msgs) +
+                              " line_counts=" +
+                              std::to_string(
+                                  legacy_chat_scroll.message_line_counts.size()));
+                }
+                post_tail_repaint = true;
+                state.chat_tail_repaint_requested = false;
+            }
 
-        // selection-anchor-compensation: 在清空 boxes 之前,先用上一帧 reflect 的
-        // box.y_min 检测 anchor 漂移。focus_index 和 line_offset 都没变(用户没动
-        // 滚轮 / PgUp / 拖滚动条)而 y_min 变了 —— 这种纯 layout 漂移期间如果用户
-        // 在拖选,FTXUI 的 selection_data_ 钉在物理屏幕坐标会错位,这里调
-        // ShiftSelection 把锚点跟随移到新位置。ShiftSelection 内部会在没有 active
-        // selection 时 early return,这里无条件调用是安全的。
-        {
-            int cur_focus = state.chat_focus_index;
-            int cur_offset = state.chat_line_offset;
-            int cur_y = (cur_focus >= 0 && cur_focus < (int)message_boxes.size())
-                ? message_boxes[cur_focus].y_min : 0;
-            bool focus_unchanged = (cur_focus == state.last_focus_index &&
-                                     cur_offset == state.last_chat_line_offset);
-            // last_focus_box_y 的 sentinel 是 -999999 (从未拍过),用 > -1000000
-            // 判断"已有有效快照"。cur_y 在 reflect 没回填时是 0(default Box),
-            // 也跳过补偿——避免被裁出 viewport 的 anchor 触发假阳性 dy。
-            if (focus_unchanged && cur_y > 0 &&
-                state.last_focus_box_y > -1000000 &&
-                cur_y != state.last_focus_box_y) {
-                int dy = cur_y - state.last_focus_box_y;
+            // selection-anchor-compensation: 在清空 boxes 之前,先用上一帧 reflect 的
+            // box.y_min 检测 anchor 漂移。focus_index 和 line_offset 都没变(用户没动
+            // 滚轮 / PgUp / 拖滚动条)而 y_min 变了 —— 这种纯 layout 漂移期间如果用户
+            // 在拖选,FTXUI 的 selection_data_ 钉在物理屏幕坐标会错位,这里调
+            // ShiftSelection 把锚点跟随移到新位置。ShiftSelection 内部会在没有 active
+            // selection 时 early return,这里无条件调用是安全的。
+            {
+                int cur_focus = state.chat_focus_index;
+                int cur_offset = state.chat_line_offset;
+                int cur_y = (cur_focus >= 0 && cur_focus < (int)legacy_chat_scroll.message_boxes.size())
+                    ? legacy_chat_scroll.message_boxes[cur_focus].y_min : 0;
+                bool focus_unchanged = (cur_focus == state.last_focus_index &&
+                                         cur_offset == state.last_chat_line_offset);
+                // last_focus_box_y 的 sentinel 是 -999999 (从未拍过),用 > -1000000
+                // 判断"已有有效快照"。cur_y 在 reflect 没回填时是 0(default Box),
+                // 也跳过补偿——避免被裁出 viewport 的 anchor 触发假阳性 dy。
+                if (focus_unchanged && cur_y > 0 &&
+                    state.last_focus_box_y > -1000000 &&
+                    cur_y != state.last_focus_box_y) {
+                    int dy = cur_y - state.last_focus_box_y;
 #if ACECODE_TUI_INPUT_TRACE
-                LOG_DEBUG("[drag-select] anchor compensation dy=" +
-                          std::to_string(dy) + " focus=" +
-                          std::to_string(cur_focus) + " offset=" +
-                          std::to_string(cur_offset) + " y=" +
-                          std::to_string(state.last_focus_box_y) + "->" +
-                          std::to_string(cur_y));
+                    LOG_DEBUG("[drag-select] anchor compensation dy=" +
+                              std::to_string(dy) + " focus=" +
+                              std::to_string(cur_focus) + " offset=" +
+                              std::to_string(cur_offset) + " y=" +
+                              std::to_string(state.last_focus_box_y) + "->" +
+                              std::to_string(cur_y));
 #endif
-                screen.ShiftSelection(0, dy);
+                    screen.ShiftSelection(0, dy);
+                }
+                // 仅在拿到有效 reflect 数据时更新快照,否则保留上次的;这样 anchor
+                // 短暂被裁出 viewport 再回到可见区时,差值仍是相对最近一次可见位置。
+                if (cur_y > 0) {
+                    state.last_focus_box_y = cur_y;
+                }
+                state.last_focus_index = cur_focus;
+                state.last_chat_line_offset = cur_offset;
             }
-            // 仅在拿到有效 reflect 数据时更新快照,否则保留上次的;这样 anchor
-            // 短暂被裁出 viewport 再回到可见区时,差值仍是相对最近一次可见位置。
-            if (cur_y > 0) {
-                state.last_focus_box_y = cur_y;
-            }
-            state.last_focus_index = cur_focus;
-            state.last_chat_line_offset = cur_offset;
+        } else {
+            // ChatViewport owns row counts, row offsets, and its own scrollbar
+            // hit box. Keep legacy vectors empty so opt-in runs cannot
+            // accidentally depend on stale reflect data from the old path.
+            legacy_chat_scroll.message_line_counts.clear();
+            legacy_chat_scroll.message_boxes.clear();
+            legacy_chat_scroll.message_layout_boxes.clear();
+            legacy_chat_scroll.message_line_count_width = current_message_width;
         }
 
-        message_boxes.assign(n_msgs, Box{});
-        message_layout_boxes.assign(n_msgs, Box{});
+        if (!use_chat_viewport) {
+            legacy_chat_scroll.message_boxes.assign(n_msgs, Box{});
+            legacy_chat_scroll.message_layout_boxes.assign(n_msgs, Box{});
+            if (post_tail_repaint) {
+                if (trace_chat_scroll) {
+                    LOG_DEBUG("[chat-scroll] path=legacy tail-repaint "
+                              "action=post-custom");
+                }
+                screen.PostEvent(Event::Custom);
+            }
+        }
 
         Element header;
         if (conhost_compat_layout) {
@@ -4807,34 +5245,35 @@ static int run_interactive_app(const CliOptions& cli,
         }
 
         // -- Messages --
-        // Bottom-anchor short transcripts while following the tail. FTXUI's
-        // yframe only scrolls when the child is taller than the viewport, so a
-        // short chat at tail otherwise remains pinned to the top.
         Elements message_elements;
-        const int chat_viewport_height = chat_box.y_max >= chat_box.y_min
-            ? chat_box.y_max - chat_box.y_min + 1
-            : 0;
-        const int tail_top_padding =
-            acecode::tui::chat_bottom_anchor_top_padding_rows(
-            message_line_counts,
-            static_cast<int>(state.conversation.size()),
-            chat_viewport_height);
-        for (int i = 0; i < tail_top_padding; ++i) {
-            message_elements.push_back(text(""));
-        }
+        if (!use_chat_viewport) {
+            // Bottom-anchor short transcripts while following the tail. FTXUI's
+            // yframe only scrolls when the child is taller than the viewport, so a
+            // short chat at tail otherwise remains pinned to the top.
+            const int chat_viewport_height = chat_box.y_max >= chat_box.y_min
+                ? chat_box.y_max - chat_box.y_min + 1
+                : 0;
+            const int tail_top_padding =
+                acecode::tui::chat_bottom_anchor_top_padding_rows(
+                legacy_chat_scroll.message_line_counts,
+                static_cast<int>(state.conversation.size()),
+                chat_viewport_height);
+            for (int i = 0; i < tail_top_padding; ++i) {
+                message_elements.push_back(text(""));
+            }
 
-        // drag-autoscroll: 每条消息同时记录两个 box:
-        //   - message_layout_boxes: 未裁剪高度,用于滚动数学;
-        //   - message_boxes: 裁剪后屏幕位置,用于选区锚点补偿。
-        auto tracked_message = [&](size_t index, Element element) -> Element {
-            return std::move(element)
-                | acecode::tui::reflect_unclipped(message_layout_boxes[index])
-                | reflect(message_boxes[index]);
-        };
-        for (size_t i = 0; i < state.conversation.size(); ++i) {
-            const auto& msg = state.conversation[i];
-            bool focused_message = static_cast<int>(i) == state.chat_focus_index;
-            Decorator focus_decorator = nothing;
+            // drag-autoscroll: 每条消息同时记录两个 box:
+            //   - legacy_chat_scroll.message_layout_boxes: 未裁剪高度,用于滚动数学;
+            //   - legacy_chat_scroll.message_boxes: 裁剪后屏幕位置,用于选区锚点补偿。
+            auto tracked_message = [&](size_t index, Element element) -> Element {
+                return std::move(element)
+                    | acecode::tui::reflect_unclipped(legacy_chat_scroll.message_layout_boxes[index])
+                    | reflect(legacy_chat_scroll.message_boxes[index]);
+            };
+            for (size_t i = 0; i < state.conversation.size(); ++i) {
+                const auto& msg = state.conversation[i];
+                bool focused_message = static_cast<int>(i) == state.chat_focus_index;
+                Decorator focus_decorator = nothing;
 
             if (msg.role == "user") {
                 auto line = hbox({
@@ -4896,7 +5335,7 @@ static int run_interactive_app(const CliOptions& cli,
                 // 用户主动 `!cmd` 的输出 —— 全量显示,无截断、无摘要、无 fold。
                 // 用户自己输入的命令就是想看完整输出,任何折叠都不符合预期。
                 // 这与 LLM 工具结果(role="tool_result")形成对照:LLM 调用的
-                // 工具结果走摘要/diff/fold 三优先级,有 Ctrl+E 展开机制。
+                // 工具结果走摘要/diff/fold 三优先级,有 Ctrl+O 展开机制。
                 auto line = hbox({
                     text("   <- ") | color(Color::GrayDark),
                     render_tool_result_lines_preserving_breaks(msg.content) | flex,
@@ -4990,32 +5429,7 @@ static int run_interactive_app(const CliOptions& cli,
 
                     // Build metric tail: " · k=v · k=v" but drop k for
                     // "time"/"bytes"/"lines"/"size" since the value is self-describing.
-                    std::string metric_str;
-                    for (const auto& kv : s.metrics) {
-                        std::string seg;
-                        if (kv.first == "time" || kv.first == "bytes" ||
-                            kv.first == "size" || kv.first == "lines") {
-                            seg = kv.second + (kv.first == "lines" ? " lines" : "");
-                        } else if (kv.first == "+") {
-                            seg = "+" + kv.second;
-                        } else if (kv.first == "-") {
-                            seg = "-" + kv.second;
-                        } else if (kv.first == "exit") {
-                            seg = "exit " + kv.second;
-                        } else if (kv.first == "truncated" && kv.second == "true") {
-                            seg = "truncated";
-                        } else if (kv.first == "aborted" && kv.second == "true") {
-                            seg = "aborted";
-                        } else if (kv.first == "timeout" && kv.second == "true") {
-                            seg = "timeout";
-                        } else if (kv.first == "hint") {
-                            seg = "hint:" + kv.second;
-                        } else {
-                            seg = kv.first + "=" + kv.second;
-                        }
-                        if (!metric_str.empty()) metric_str += " \xC2\xB7 "; // " · "
-                        metric_str += seg;
-                    }
+                    const std::string metric_str = tool_summary_metric_string(s);
 
                     const int summary_width = std::max(
                         20, chat_box.x_max - chat_box.x_min - 6);
@@ -5055,7 +5469,7 @@ static int run_interactive_app(const CliOptions& cli,
                     message_elements.push_back(
                         tracked_message(i, block | focus_decorator));
                 } else {
-                    // ---- Legacy fold path (also used when user pressed Ctrl+E
+                    // ---- Legacy fold path (also used when user pressed Ctrl+O
                     // to expand, and the 10-line cap acts as a secondary safety) ----
                     const int MAX_TOOL_LINES = 10;
                     std::string display_content = msg.content;
@@ -5109,35 +5523,57 @@ static int run_interactive_app(const CliOptions& cli,
                 message_elements.push_back(
                     tracked_message(i, line | focus_decorator));
             }
-            message_elements.push_back(text(""));
+                message_elements.push_back(text(""));
+            }
         }
 
-        Element message_body = vbox(std::move(message_elements));
-        const int frame_focus_y =
-            acecode::tui::chat_frame_focus_y_for_scroll_top(
-                state.chat_scroll_top_row, chat_viewport_rows());
-        message_body = message_body | focusPosition(0, frame_focus_y);
+        Element message_view;
+        if (use_chat_viewport) {
+            if (state.chat_follow_tail) {
+                chat_viewport_component->scroll_to_tail();
+            }
+            state.chat_tail_repaint_requested = false;
+            chat_viewport_component->set_messages(
+                chat_viewport_messages_from_state(state.conversation));
+            const auto top = chat_viewport_component->top_display_row();
+            state.chat_focus_index = top.message_index;
+            state.chat_line_offset = top.message_row;
+            state.chat_scroll_top_row =
+                chat_viewport_component->state().scroll_top_row;
+            state.chat_follow_tail = chat_viewport_component->is_at_tail();
+            message_view = chat_viewport_component->Render()
+                | reflect(chat_box)
+                | flex
+                | selectionBackgroundColor(Color::Blue)
+                | selectionForegroundColor(Color::White);
+        } else {
+            Element message_body = vbox(std::move(message_elements));
+            const int frame_focus_y =
+                acecode::tui::chat_frame_focus_y_for_scroll_top(
+                    state.chat_scroll_top_row, chat_viewport_rows());
+            message_body = message_body | focusPosition(0, frame_focus_y);
 
-        // draggable-thick-scrollbar: thumb glyph identical to upstream
-        // vscroll_indicator (┃╹╻),painted only in the rightmost reserved
-        // column. We reserve 3 columns total so the *invisible* hit zone
-        // is wider than 1 cell — the leftmost 2 reserved columns render
-        // as whitespace but scrollbar_box.Contain() still matches them,
-        // making mouse aim much easier without changing the visual rail
-        // position. The decorator also enforces a minimum thumb height
-        // (3 cells) so long sessions don't shrink the click target to a
-        // single half-block.
-        auto message_view = acecode::tui::thick_vscroll_bar(
-                                std::move(message_body),
-                                /*width=*/3,
-                                scrollbar_box,
-                                conhost_compat_layout)
-            | yframe | reflect(chat_box) | flex
-            // mouse-selection-copy: visual feedback for drag-selection. The
-            // decorator lives on the message_view so selection can span
-            // multiple messages.
-            | selectionBackgroundColor(Color::Blue)
-            | selectionForegroundColor(Color::White);
+            // draggable-thick-scrollbar: thumb glyph identical to upstream
+            // vscroll_indicator (┃╹╻),painted only in the rightmost reserved
+            // column. We reserve 3 columns total so the *invisible* hit zone
+            // is wider than 1 cell — the leftmost 2 reserved columns render
+            // as whitespace but scrollbar_box.Contain() still matches them,
+            // making mouse aim much easier without changing the visual rail
+            // position. The decorator also enforces a minimum thumb height
+            // (3 cells) so long sessions don't shrink the click target to a
+            // single half-block.
+            message_view = acecode::tui::thick_vscroll_bar(
+                                    std::move(message_body),
+                                    /*width=*/3,
+                                    scrollbar_box,
+                                    conhost_compat_layout)
+                | yframe | reflect(chat_box) | flex
+                // mouse-selection-copy: visual feedback for drag-selection. The
+                // decorator lives on the message_view so selection can span
+                // multiple messages.
+                | selectionBackgroundColor(Color::Blue)
+                | selectionForegroundColor(Color::White);
+        }
 
         // -- Thinking indicator / tool progress --
         // Priority: if a tool is streaming output, show the live tool-progress

@@ -10,7 +10,7 @@
 //
 // 本 helper 把 Other 输入态的所有按键拦截集中到一处纯数据变换函数里,
 // main.cpp 调用它 → 永远 return true(消耗事件),绕开下游 shell-mode trigger /
-// slash-dropdown refresh / Ctrl+E tool_result-expand / history_index 重置 /
+// slash-dropdown refresh / Ctrl+O tool_result-expand / history_index 重置 /
 // IME 等所有不该在 Other 态触发的副作用。
 //
 // 锁契约:调用方 MUST 在已持有 `TuiState::mu` 的情况下调本函数。helper

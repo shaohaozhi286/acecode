@@ -22,6 +22,7 @@ Canonical root docs are [README.md](README.md), [README_CN.md](README_CN.md), [A
 ## Architecture Boundaries
 
 - Keep TUI-specific code in [main.cpp](main.cpp), [src/tui/](src/tui), and [src/markdown/](src/markdown). Put reusable, testable logic in the relevant `src/<subsystem>/` area or a focused top-level `src/*.cpp` helper when that is the existing local pattern.
+- Chat transcript scrolling must stay inside FTXUI. The smooth transcript path is `acecode::tui::ChatViewport`, a custom `ftxui::ComponentBase` / `ftxui::Node` under [src/tui/](src/tui), not a separate terminal runtime or out-of-band renderer.
 - `acecode_testable` intentionally excludes the full TUI entry point and desktop WebView shell. Pure helpers can be added there and covered by unit tests.
 - Daemon/API work usually touches [src/daemon/](src/daemon), [src/web/](src/web), and [src/session/](src/session). Update [docs/daemon-api.md](docs/daemon-api.md) when protocol behavior changes.
 - React/Vite/Tailwind frontend work stays under [web/src/](web/src). Do not edit generated build output directly; regenerate it with the web build.

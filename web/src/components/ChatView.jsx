@@ -61,6 +61,8 @@ import { buildAssistantRunDirectives } from '../lib/assistantRunDirectives.js';
 import { activityChromeState } from '../lib/assistantAvatarDisplay.js';
 import { notifySessionListChanged } from '../lib/sessionListEvents.js';
 import { getGoalStopControlState } from '../lib/goalControl.js';
+import { renderMarkdown } from '../lib/markdown.js';
+import { codeTextFromCopyButtonTarget, copyTextToClipboard } from '../lib/codeBlockCopy.js';
 import {
   CHANGE_DOCK_DISMISSALS_STORAGE_KEY,
   dismissChangeDockSignature,
@@ -168,9 +170,31 @@ function ActivitySummaryBlock({ item, expanded, onToggle }) {
 }
 
 function CompletionSummaryBlock({ item }) {
+  const summary = item?.summary || item?.title || '已完成';
+  const html = { __html: renderMarkdown(summary) };
+  const handleMarkdownClick = useCallback(async (event) => {
+    const text = codeTextFromCopyButtonTarget(event.target);
+    if (text == null) return;
+    event.preventDefault();
+    event.stopPropagation();
+    try {
+      await copyTextToClipboard(text);
+      toast({ kind: 'ok', text: '已复制代码' });
+    } catch (e) {
+      toast({ kind: 'err', text: '复制失败:' + (e?.message || '') });
+    }
+  }, []);
+
   return (
-    <div className="max-w-[88%] ml-8 px-1 py-0.5 text-[12px] leading-5 italic text-fg whitespace-pre-wrap break-words">
-      {item?.title || '总结：已完成'}
+    <div className="ml-8 my-1 max-w-[88%] border-l-[3px] border-ok pl-3 py-1">
+      <div className="mb-1 text-[11px] font-semibold tracking-wide text-ok">
+        COMPLETE
+      </div>
+      <div
+        className="ace-md text-[13px] text-fg leading-[1.6] break-words"
+        onClick={handleMarkdownClick}
+        dangerouslySetInnerHTML={html}
+      />
     </div>
   );
 }

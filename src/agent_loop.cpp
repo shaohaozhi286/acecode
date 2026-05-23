@@ -1707,7 +1707,7 @@ void AgentLoop::run_shell(const std::string& command) {
     }
 
     // 用户主动 `!cmd` 的输出必须**全量显示**(不折叠、不摘要、不截断)—— 用户
-    // 自己输入命令就是为了看完整结果,LLM 工具结果的"摘要 + Ctrl+E 展开"语义
+    // 自己输入命令就是为了看完整结果,LLM 工具结果的"摘要 + Ctrl+O 展开"语义
     // 在这里不适用。所以使用一个独立的 TUI 伪角色 `user_shell_output`,渲染分支
     // 走全量路径,与 `tool_result`(LLM 工具结果)区分开。
     // 同样不调 callbacks_.on_tool_result —— 它会把 ToolResult.summary 回填到

@@ -126,6 +126,21 @@ function metricText(metrics, label) {
   return '';
 }
 
+function rawMetricText(metrics, label) {
+  if (!Array.isArray(metrics)) return '';
+  const wanted = String(label || '').toLowerCase();
+  for (const metric of metrics) {
+    if (Array.isArray(metric) && String(metric[0] || '').toLowerCase() === wanted) {
+      return String(metric[1] ?? '').trim();
+    }
+    if (metric && typeof metric === 'object') {
+      const key = String(metric.label || metric.key || metric.name || '').toLowerCase();
+      if (key === wanted) return String(metric.value ?? '').trim();
+    }
+  }
+  return '';
+}
+
 function cleanSummaryText(value) {
   return String(value ?? '').replace(/\s+/g, ' ').trim();
 }
@@ -264,13 +279,13 @@ function makeProcessedItem(items, endItem) {
 function taskCompleteSummaryText(item) {
   const tool = item?.tool || {};
   const summary = tool.summary || {};
-  const metricSummary = metricText(summary.metrics, 'summary');
+  const metricSummary = rawMetricText(summary.metrics, 'summary');
   if (metricSummary) return metricSummary;
 
-  const object = cleanSummaryText(summary.object);
+  const object = String(summary.object ?? '').trim();
   if (object && object.toLowerCase() !== 'task') return object;
 
-  const output = cleanSummaryText(tool.output);
+  const output = String(tool.output ?? '').trim();
   if (output) return output;
 
   const title = cleanSummaryText(tool.title || tool.displayOverride);

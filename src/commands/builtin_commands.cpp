@@ -763,6 +763,7 @@ static void do_resume_session(CommandContext& ctx, const std::string& session_id
         ctx.agent_loop.maybe_continue_goal();
     }
     ctx.state.chat_follow_tail = true;
+    ctx.state.chat_tail_repaint_requested = true;
 
     if (target && !target->title.empty()) {
         set_terminal_title(target->title);
@@ -894,6 +895,7 @@ static void cmd_resume(CommandContext& ctx, const std::string& args) {
             al->maybe_continue_goal();
         }
         state.chat_follow_tail = true;
+        state.chat_tail_repaint_requested = true;
 
         std::string restored_title;
         for (const auto& s : captured_sessions) {
