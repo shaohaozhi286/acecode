@@ -144,13 +144,29 @@ jobs:
         run: |
           package_dir="dist/acecode-${{ matrix.id }}"
           mkdir -p "$package_dir"
+
+          if [ ! -f "build/${{ matrix.executable }}" ]; then
+            echo "Missing terminal executable: build/${{ matrix.executable }}" >&2
+            exit 1
+          fi
           cp "build/${{ matrix.executable }}" "$package_dir/"
           cp README.md README_CN.md "$package_dir/"
-          if [ "${{ matrix.build_desktop }}" = "true" ] && [ -d "build/ACECode.app" ]; then
-            cp -r "build/ACECode.app" "$package_dir/"
-          elif [ "${{ matrix.build_desktop }}" = "true" ] && [ -f "build/acecode-desktop" ]; then
-            cp "build/acecode-desktop" "$package_dir/"
-            cp "web/dist/acecode-logo.png" "$package_dir/"
+
+          if [ "${{ matrix.build_desktop }}" = "true" ]; then
+            if [ "$RUNNER_OS" = "macOS" ]; then
+              if [ ! -d "build/ACECode.app" ]; then
+                echo "Missing desktop app bundle: build/ACECode.app" >&2
+                exit 1
+              fi
+              cp -r "build/ACECode.app" "$package_dir/"
+            else
+              if [ ! -f "build/acecode-desktop" ]; then
+                echo "Missing desktop executable: build/acecode-desktop" >&2
+                exit 1
+              fi
+              cp "build/acecode-desktop" "$package_dir/"
+              cp "web/dist/acecode-logo.png" "$package_dir/"
+            fi
           fi
           tar -C dist -czf "acecode-${{ matrix.id }}.tar.gz" "acecode-${{ matrix.id }}"
 
@@ -160,10 +176,31 @@ jobs:
         run: |
           $packageDir = "dist/acecode-${{ matrix.id }}"
           New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
-          Copy-Item "build/${{ matrix.executable }}" "$packageDir/"
+
+          $terminalExe = "build/${{ matrix.executable }}"
+          if (-not (Test-Path -LiteralPath $terminalExe)) {
+            throw "Missing terminal executable: $terminalExe"
+          }
+          Copy-Item -LiteralPath $terminalExe -Destination "$packageDir/"
           Copy-Item "README.md","README_CN.md" "$packageDir/"
-          if ("${{ matrix.build_desktop }}" -eq "true" -and (Test-Path "build/Release/acecode-desktop.exe")) {
-            Copy-Item "build/Release/acecode-desktop.exe" "$packageDir/"
+
+          if ("${{ matrix.build_desktop }}" -eq "true") {
+            $desktopCandidates = @(
+              "build/acecode-desktop.exe",
+              "build/Release/acecode-desktop.exe",
+              "build/Debug/acecode-desktop.exe",
+              "build/RelWithDebInfo/acecode-desktop.exe",
+              "build/MinSizeRel/acecode-desktop.exe"
+            )
+            $desktopExe = $desktopCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+            if (-not $desktopExe) {
+              $desktopExe = Get-ChildItem -Path "build" -Recurse -Filter "acecode-desktop.exe" -File |
+                Select-Object -ExpandProperty FullName -First 1
+            }
+            if (-not $desktopExe) {
+              throw "Missing desktop executable: acecode-desktop.exe"
+            }
+            Copy-Item -LiteralPath $desktopExe -Destination "$packageDir/"
           }
           Compress-Archive -Path "$packageDir/*" -DestinationPath "acecode-${{ matrix.id }}.zip" -Force
 
@@ -230,9 +267,28 @@ jobs:
         shell: bash
         run: |
           mkdir -p release-assets
-          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.pdb' -o -name '*.debug' \) -exec cp {} release-assets/ \;
+
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) -print0 |
+            while IFS= read -r -d '' file; do
+              cp "$file" "release-assets/$(basename "$file")"
+            done
+
+          find artifacts -type f \( -name '*.pdb' -o -name '*.debug' \) -print0 |
+            while IFS= read -r -d '' file; do
+              relative="${file#artifacts/}"
+              artifact_name="${relative%%/*}"
+              cp "$file" "release-assets/[dev_only]${artifact_name}-$(basename "$file")"
+            done
+
           # Package dSYM directories as tar.gz
-          find artifacts -type d -name '*.dSYM' -exec bash -c 'tar -czf "release-assets/$(basename {}).tar.gz" -C "$(dirname {})" "$(basename {})"' \;
+          find artifacts -type d -name '*.dSYM' -print0 |
+            while IFS= read -r -d '' dsym; do
+              relative="${dsym#artifacts/}"
+              artifact_name="${relative%%/*}"
+              dsym_name="$(basename "$dsym")"
+              tar -czf "release-assets/[dev_only]${artifact_name}-${dsym_name}.tar.gz" -C "$(dirname "$dsym")" "$dsym_name"
+            done
+
           ls -lh release-assets/
 
       - name: Create GitHub Release
