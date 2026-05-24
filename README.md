@@ -64,6 +64,31 @@ If `web/dist/` is missing during CMake configure, the build embeds a minimal fal
 
 ### Configure And Build
 
+Preset builds expect `VCPKG_ROOT` to point to your vcpkg checkout. The common
+release flow is:
+
+```bash
+git submodule update --init --recursive
+
+cmake --preset linux-x64-release
+cmake --build --preset linux-x64-release
+```
+
+Supported normal presets use `<platform>-<arch>-<config>`, where `<config>` is
+`release` or `debug`: `windows-x64`, `linux-x64`, `linux-arm64`, `macos-x64`,
+and `macos-arm64`. Desktop variants use
+`<platform>-<arch>-desktop-<config>`, for example
+`macos-arm64-desktop-debug`.
+
+For a Debug build:
+
+```bash
+cmake --preset linux-x64-debug
+cmake --build --preset linux-x64-debug
+```
+
+Equivalent manual configuration:
+
 ```bash
 git submodule update --init --recursive
 
@@ -86,11 +111,30 @@ cmake --build build --target acecode_unit_tests
 ctest --test-dir build --output-on-failure
 ```
 
+With presets, build the matching test target first, then run the test preset:
+
+```bash
+cmake --build --preset linux-x64-release-tests
+ctest --preset linux-x64-release-tests
+```
+
+Debug test presets follow the same pattern, for example
+`linux-x64-debug-tests`.
+
 Unit tests live under `tests/` and link against the `acecode_testable` object library. TUI-heavy entry-point code stays out of the test target unless logic is isolated into reusable helpers.
 
 ### Desktop Build
 
-Use the same supported `<triplet>` values listed above. Build [web/](web) first, then configure CMake, when the desktop shell should use the full embedded Web UI.
+Use the same supported presets/triplets listed above. Build [web/](web) first, then configure CMake, when the desktop shell should use the full embedded Web UI.
+
+```bash
+cmake --preset linux-x64-desktop-release
+cmake --build --preset linux-x64-desktop-release
+```
+
+For a Debug desktop build, use the matching `*-desktop-debug` preset.
+
+Equivalent manual configuration:
 
 ```bash
 cmake -S . -B build -G Ninja \

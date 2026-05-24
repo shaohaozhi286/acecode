@@ -64,6 +64,30 @@ cd ..
 
 ### 配置与构建
 
+Preset 构建要求 `VCPKG_ROOT` 指向你的 vcpkg checkout。常用 Release 流程是：
+
+```bash
+git submodule update --init --recursive
+
+cmake --preset linux-x64-release
+cmake --build --preset linux-x64-release
+```
+
+普通 presets 使用 `<platform>-<arch>-<config>` 命名，其中 `<config>` 是
+`release` 或 `debug`：`windows-x64`、`linux-x64`、`linux-arm64`、
+`macos-x64` 和 `macos-arm64`。桌面壳变体使用
+`<platform>-<arch>-desktop-<config>`，例如
+`macos-arm64-desktop-debug`。
+
+Debug 构建：
+
+```bash
+cmake --preset linux-x64-debug
+cmake --build --preset linux-x64-debug
+```
+
+等价手动配置：
+
 ```bash
 git submodule update --init --recursive
 
@@ -86,11 +110,29 @@ cmake --build build --target acecode_unit_tests
 ctest --test-dir build --output-on-failure
 ```
 
+使用 presets 时，先构建对应测试 target，再运行 test preset：
+
+```bash
+cmake --build --preset linux-x64-release-tests
+ctest --preset linux-x64-release-tests
+```
+
+Debug 测试 preset 同样按这个模式命名，例如 `linux-x64-debug-tests`。
+
 单元测试位于 `tests/`，并链接到 `acecode_testable` object library。TUI 较重的入口代码不进入测试 target，除非逻辑已经拆成可复用 helper。
 
 ### 桌面构建
 
-这里使用上面列出的同一组受支持 `<triplet>` 值。如果桌面壳需要完整内置 Web UI，请先构建 [web/](web)，再配置 CMake。
+这里使用上面列出的同一组受支持 presets/triplet。如果桌面壳需要完整内置 Web UI，请先构建 [web/](web)，再配置 CMake。
+
+```bash
+cmake --preset linux-x64-desktop-release
+cmake --build --preset linux-x64-desktop-release
+```
+
+Debug 桌面构建使用对应的 `*-desktop-debug` preset。
+
+等价手动配置：
 
 ```bash
 cmake -S . -B build -G Ninja \
