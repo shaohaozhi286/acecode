@@ -66,8 +66,9 @@ public:
     // debug 模式下打开 WebView 开发者工具。非 WebView2 平台返回 false。
     bool open_dev_tools();
 
-    // Frameless desktop chrome helpers. Windows uses native non-client messages;
-    // Linux uses GTK move/resize/window-state APIs; other platforms return false.
+    // Frameless desktop chrome helpers. Windows uses native non-client messages,
+    // Linux uses GTK move/resize/window-state APIs, and macOS uses Cocoa window
+    // operations.
     bool start_window_drag(const PointerEvent& event);
     // 从 JS 端发起原生 resize:WebView2 子窗口默认会吃掉 WM_NCHITTEST,导致
     // 父窗口在子窗口覆盖区域拿不到 resize 命中。前端在窗口边缘 strip 上 mousedown
@@ -79,7 +80,7 @@ public:
                              const PointerEvent& event);
     bool minimize_window();
     bool toggle_maximize_window();
-    // 当前窗口是否处于最大化状态(IsZoomed)。非 Windows 平台始终返回 false。
+    // 当前窗口是否处于最大化状态(IsZoomed / gtk maximized / NSWindow zoomed)。
     // 前端 TopBar 在 mount 时调一次拿初始态,之后靠 set_window_state_change_handler
     // 推送的变更事件维护。
     bool is_window_maximized() const;

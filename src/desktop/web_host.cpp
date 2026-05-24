@@ -45,6 +45,185 @@ namespace {
 std::function<bool()> g_close_handler;
 
 #ifdef __APPLE__
+std::function<void(bool)> g_mac_window_state_handler;
+bool g_mac_last_known_maximized = false;
+
+NSWindow* mac_window_from_host(webview::webview& w) {
+    auto window_result = w.window();
+    if (!window_result.ok() || !window_result.value()) return nil;
+    return static_cast<NSWindow*>(window_result.value());
+}
+
+void notify_mac_window_state_if_changed(NSWindow* window) {
+    if (!window) return;
+    const bool maximized = [window isZoomed] == YES;
+    if (maximized == g_mac_last_known_maximized) return;
+    g_mac_last_known_maximized = maximized;
+    if (g_mac_window_state_handler) {
+        g_mac_window_state_handler(maximized);
+    }
+}
+
+void hide_mac_standard_button(NSWindow* window, NSWindowButton button) {
+    NSButton* button_view = [window standardWindowButton:button];
+    if (!button_view) return;
+    [button_view setHidden:YES];
+    [button_view setEnabled:NO];
+}
+
+void configure_mac_window_chrome(webview::webview& w) {
+    NSWindow* window = mac_window_from_host(w);
+    if (!window) return;
+
+    NSWindowStyleMask style = [window styleMask];
+    style |= NSWindowStyleMaskTitled;
+    style |= NSWindowStyleMaskClosable;
+    style |= NSWindowStyleMaskMiniaturizable;
+    style |= NSWindowStyleMaskResizable;
+    style |= NSWindowStyleMaskFullSizeContentView;
+    [window setStyleMask:style];
+    [window setTitleVisibility:NSWindowTitleHidden];
+    [window setTitlebarAppearsTransparent:YES];
+    [window setToolbar:nil];
+    [window setMovableByWindowBackground:NO];
+
+    NSSize min_size = [window minSize];
+    min_size.width = std::max(min_size.width, static_cast<CGFloat>(320.0));
+    min_size.height = std::max(min_size.height, static_cast<CGFloat>(240.0));
+    [window setMinSize:min_size];
+
+    hide_mac_standard_button(window, NSWindowCloseButton);
+    hide_mac_standard_button(window, NSWindowMiniaturizeButton);
+    hide_mac_standard_button(window, NSWindowZoomButton);
+
+    g_mac_last_known_maximized = [window isZoomed] == YES;
+}
+
+NSEvent* mac_synthetic_left_mouse_event(NSWindow* window) {
+    if (!window) return nil;
+    return [NSEvent mouseEventWithType:NSEventTypeLeftMouseDown
+                              location:[window mouseLocationOutsideOfEventStream]
+                         modifierFlags:0
+                             timestamp:[[NSProcessInfo processInfo] systemUptime]
+                          windowNumber:[window windowNumber]
+                               context:nil
+                           eventNumber:0
+                            clickCount:1
+                              pressure:1.0];
+}
+
+bool mac_perform_window_drag(NSWindow* window) {
+    if (!window) return false;
+    NSEvent* event = mac_synthetic_left_mouse_event(window);
+    if (!event) return false;
+    [window performWindowDragWithEvent:event];
+    notify_mac_window_state_if_changed(window);
+    return true;
+}
+
+bool mac_area_uses_left_edge(FramelessHitTestArea area) {
+    return area == FramelessHitTestArea::Left ||
+           area == FramelessHitTestArea::TopLeft ||
+           area == FramelessHitTestArea::BottomLeft;
+}
+
+bool mac_area_uses_right_edge(FramelessHitTestArea area) {
+    return area == FramelessHitTestArea::Right ||
+           area == FramelessHitTestArea::TopRight ||
+           area == FramelessHitTestArea::BottomRight;
+}
+
+bool mac_area_uses_top_edge(FramelessHitTestArea area) {
+    return area == FramelessHitTestArea::Top ||
+           area == FramelessHitTestArea::TopLeft ||
+           area == FramelessHitTestArea::TopRight;
+}
+
+bool mac_area_uses_bottom_edge(FramelessHitTestArea area) {
+    return area == FramelessHitTestArea::Bottom ||
+           area == FramelessHitTestArea::BottomLeft ||
+           area == FramelessHitTestArea::BottomRight;
+}
+
+NSSize mac_min_window_size(NSWindow* window) {
+    NSSize min_size = window ? [window minSize] : NSMakeSize(0, 0);
+    min_size.width = std::max(min_size.width, static_cast<CGFloat>(320.0));
+    min_size.height = std::max(min_size.height, static_cast<CGFloat>(240.0));
+    return min_size;
+}
+
+NSRect mac_resized_frame(NSRect start_frame,
+                         NSPoint start_mouse,
+                         NSPoint current_mouse,
+                         NSSize min_size,
+                         FramelessHitTestArea area) {
+    const CGFloat dx = current_mouse.x - start_mouse.x;
+    const CGFloat dy = current_mouse.y - start_mouse.y;
+    const CGFloat min_width = std::max(min_size.width, static_cast<CGFloat>(1.0));
+    const CGFloat min_height = std::max(min_size.height, static_cast<CGFloat>(1.0));
+    const CGFloat start_right = NSMaxX(start_frame);
+    const CGFloat start_top = NSMaxY(start_frame);
+
+    NSRect next = start_frame;
+    if (mac_area_uses_left_edge(area)) {
+        next.origin.x = start_frame.origin.x + dx;
+        next.size.width = start_frame.size.width - dx;
+        if (next.size.width < min_width) {
+            next.size.width = min_width;
+            next.origin.x = start_right - min_width;
+        }
+    } else if (mac_area_uses_right_edge(area)) {
+        next.size.width = std::max(min_width, start_frame.size.width + dx);
+    }
+
+    if (mac_area_uses_bottom_edge(area)) {
+        next.origin.y = start_frame.origin.y + dy;
+        next.size.height = start_frame.size.height - dy;
+        if (next.size.height < min_height) {
+            next.size.height = min_height;
+            next.origin.y = start_top - min_height;
+        }
+    } else if (mac_area_uses_top_edge(area)) {
+        next.size.height = std::max(min_height, start_frame.size.height + dy);
+    }
+    return next;
+}
+
+bool mac_track_window_resize(NSWindow* window, FramelessHitTestArea area) {
+    if (!window || [window isZoomed]) return false;
+    if (!mac_area_uses_left_edge(area) && !mac_area_uses_right_edge(area) &&
+        !mac_area_uses_top_edge(area) && !mac_area_uses_bottom_edge(area)) {
+        return false;
+    }
+
+    const NSRect start_frame = [window frame];
+    const NSPoint start_mouse = [NSEvent mouseLocation];
+    const NSSize min_size = mac_min_window_size(window);
+    const NSEventMask mask = NSEventMaskLeftMouseDragged | NSEventMaskLeftMouseUp;
+
+    while (([NSEvent pressedMouseButtons] & 1) != 0) {
+        @autoreleasepool {
+            NSEvent* event = [NSApp nextEventMatchingMask:mask
+                                                untilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]
+                                                   inMode:NSEventTrackingRunLoopMode
+                                                  dequeue:YES];
+            if (!event) continue;
+            const NSEventType type = [event type];
+            if (type == NSEventTypeLeftMouseUp) break;
+            if (type != NSEventTypeLeftMouseDragged) continue;
+
+            const NSRect next = mac_resized_frame(start_frame,
+                                                  start_mouse,
+                                                  [NSEvent mouseLocation],
+                                                  min_size,
+                                                  area);
+            [window setFrame:next display:YES animate:NO];
+        }
+    }
+    notify_mac_window_state_if_changed(window);
+    return true;
+}
+
 BOOL acecode_mac_window_should_close(id /*self*/, SEL /*cmd*/, id /*sender*/) {
     return dispatch_wm_close(g_close_handler) == CloseDispatch::ConsumedByHandler
         ? NO
@@ -52,9 +231,8 @@ BOOL acecode_mac_window_should_close(id /*self*/, SEL /*cmd*/, id /*sender*/) {
 }
 
 void install_mac_close_handler(webview::webview& w) {
-    auto window_result = w.window();
-    if (!window_result.ok() || !window_result.value()) return;
-    NSWindow* window = static_cast<NSWindow*>(window_result.value());
+    NSWindow* window = mac_window_from_host(w);
+    if (!window) return;
     id delegate = [window delegate];
     if (!delegate) return;
     Class cls = object_getClass(delegate);
@@ -679,6 +857,7 @@ struct WebHost::Impl {
         (void)startup_mode;
         w = std::make_unique<webview::webview>(debug, nullptr);
 #if defined(__APPLE__)
+        configure_mac_window_chrome(*w);
         install_mac_close_handler(*w);
 #else
         configure_linux_window_chrome(*w);
@@ -826,7 +1005,7 @@ bool WebHost::start_window_drag(const PointerEvent& event) {
     return true;
 #else
     (void)event;
-    return false;
+    return mac_perform_window_drag(mac_window_from_host(*impl_->w));
 #endif
 #endif
 }
@@ -872,9 +1051,10 @@ bool WebHost::start_window_resize(const std::string& direction,
                                  event.timestamp);
     return true;
 #else
-    (void)direction;
     (void)event;
-    return false;
+    auto area = parse_resize_direction(direction);
+    if (!area) return false;
+    return mac_track_window_resize(mac_window_from_host(*impl_->w), *area);
 #endif
 #endif
 }
@@ -893,7 +1073,10 @@ bool WebHost::minimize_window() {
     api.window_iconify(window.value());
     return true;
 #else
-    return false;
+    NSWindow* window = mac_window_from_host(*impl_->w);
+    if (!window) return false;
+    [window miniaturize:nil];
+    return true;
 #endif
 #endif
 }
@@ -921,7 +1104,11 @@ bool WebHost::toggle_maximize_window() {
     }
     return true;
 #else
-    return false;
+    NSWindow* window = mac_window_from_host(*impl_->w);
+    if (!window) return false;
+    [window zoom:nil];
+    notify_mac_window_state_if_changed(window);
+    return true;
 #endif
 #endif
 }
@@ -936,7 +1123,8 @@ bool WebHost::is_window_maximized() const {
     if (!window.ok() || !window.value()) return false;
     return linux_window_is_maximized(window.value());
 #else
-    return false;
+    NSWindow* window = mac_window_from_host(*impl_->w);
+    return window && [window isZoomed] == YES;
 #endif
 #endif
 }
@@ -947,7 +1135,7 @@ void WebHost::set_window_state_change_handler(WindowStateHandler handler) {
 #if !defined(__APPLE__)
     g_linux_window_state_handler = std::move(handler);
 #else
-    (void)handler;
+    g_mac_window_state_handler = std::move(handler);
 #endif
 #endif
 }

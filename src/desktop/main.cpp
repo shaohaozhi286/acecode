@@ -802,7 +802,7 @@ int main(int argc, char** argv) {
     });
     // 前端在窗口 4 边的不可见 strip 上 mousedown 时调用,内部 SendMessage 进入
     // 原生 resize 循环。direction 见 parse_resize_direction;非法/最大化/平台
-    // 不支持(macOS/Linux 当前 stub)→ ok:false 但不抛错,前端静默吞掉。
+    // 不支持 → ok:false 但不抛错,前端静默吞掉。
     host.bind("aceDesktop_startWindowResize", [&](const std::string& req) -> std::string {
         std::string direction;
         WebHost::PointerEvent event;
@@ -979,11 +979,7 @@ int main(int argc, char** argv) {
     // navigate 前注入 JS: hook console + window 错误事件 → 全部转发回 native。
     // 故意不 hook console.log / console.info,避免噪音(可在前端代码里需要时
     // 显式调 aceDesktop_logFromWeb('info', ...))。
-#if defined(_WIN32) || (!defined(__APPLE__))
     constexpr const char* kFramelessWindowFlag = "true";
-#else
-    constexpr const char* kFramelessWindowFlag = "false";
-#endif
     host.init_script(std::string("window.__ACECODE_DESKTOP_SHELL__=true;\n") +
                                      "window.__ACECODE_DESKTOP_DEBUG__=" +
                                      (desktop_debug ? "true" : "false") + ";\n" +
