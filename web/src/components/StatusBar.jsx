@@ -1,9 +1,9 @@
-// 底部 22px 状态栏:权限模式下拉 + 模型 tag + 轮次 + 分支(占位)
+// 底部 22px 状态栏:权限模式下拉 + 模型下拉 + 轮次 + 分支(占位)
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { clsx } from '../lib/format.js';
 import { PERMISSION_MODES, normalizePermissionMode, permissionModeOption } from '../lib/permissionMode.js';
-import { optionLabel } from '../lib/sessionModel.js';
+import { buildStatusBarModelMenu } from '../lib/sessionModel.js';
 import { RefreshIcon, VsIcon } from './Icon.jsx';
 import { TokenBudgetRing } from './TokenBudgetRing.jsx';
 
@@ -24,45 +24,101 @@ export function StatusBar({
   onPermissionModeChange,
 }) {
   const [localMode, setLocalMode] = useState(normalizePermissionMode(permissionMode));
-  const [open, setOpen] = useState(false);
-  const ref = useRef(null);
+  const [permissionOpen, setPermissionOpen] = useState(false);
+  const [modelOpen, setModelOpen] = useState(false);
+  const permissionRef = useRef(null);
+  const modelRef = useRef(null);
 
   useEffect(() => {
     setLocalMode(normalizePermissionMode(permissionMode));
   }, [permissionMode]);
 
   useEffect(() => {
-    if (!open) return;
-    const onDoc = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    if (!permissionOpen && !modelOpen) return;
+    const onDoc = (e) => {
+      if (permissionRef.current && !permissionRef.current.contains(e.target)) setPermissionOpen(false);
+      if (modelRef.current && !modelRef.current.contains(e.target)) setModelOpen(false);
+    };
+    const onKey = (e) => {
+      if (e.key !== 'Escape') return;
+      setPermissionOpen(false);
+      setModelOpen(false);
+    };
     document.addEventListener('mousedown', onDoc);
-    return () => document.removeEventListener('mousedown', onDoc);
-  }, [open]);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDoc);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [permissionOpen, modelOpen]);
 
   const mode = normalizePermissionMode(onPermissionModeChange ? permissionMode : localMode);
   const cur = permissionModeOption(mode);
   const dotCls = cur.color === 'ok' ? 'bg-ok' : cur.color === 'warn' ? 'bg-warn' : 'bg-danger';
   const modelBusy = modelSwitching || modelRefreshing;
+  const modelMenu = useMemo(() => buildStatusBarModelMenu({
+    modelOptions,
+    selectedModelName,
+    fallbackLabel: model,
+  }), [model, modelOptions, selectedModelName]);
   const selectPermissionMode = (nextMode) => {
     const normalized = normalizePermissionMode(nextMode);
     if (onPermissionModeChange) onPermissionModeChange(normalized);
     else setLocalMode(normalized);
-    setOpen(false);
+    setPermissionOpen(false);
+  };
+  const selectModel = (name) => {
+    const nextName = String(name || '');
+    setModelOpen(false);
+    if (!nextName || nextName === selectedModelName || modelBusy) return;
+    onModelChange?.(nextName);
   };
   const modelControl = onModelChange && modelOptions.length > 0 ? (
-    <select
-      value={selectedModelName || ''}
-      disabled={modelBusy}
-      onChange={(e) => onModelChange(e.target.value)}
-      title={model}
-      className="h-[18px] max-w-[220px] px-1.5 py-0 rounded bg-surface-hi border border-transparent text-[10px] text-fg-mute outline-none hover:text-fg focus:border-accent disabled:opacity-60"
-    >
-      {!selectedModelName && <option value="">{model}</option>}
-      {modelOptions.map((option) => (
-        <option key={option.name} value={option.name}>
-          {optionLabel(option)}
-        </option>
-      ))}
-    </select>
+    <div ref={modelRef} className="relative min-w-0">
+      <button
+        type="button"
+        disabled={modelBusy}
+        onClick={() => {
+          if (modelBusy) return;
+          setPermissionOpen(false);
+          setModelOpen((open) => !open);
+        }}
+        title={modelMenu.displayLabel}
+        aria-haspopup="listbox"
+        aria-expanded={modelOpen}
+        className="h-[18px] px-1.5 py-0 rounded bg-surface-hi border border-transparent text-[10px] text-fg-mute outline-none hover:text-fg focus:border-accent disabled:opacity-60 disabled:cursor-wait inline-flex items-center gap-1"
+      >
+        <span className="shrink-0 whitespace-nowrap">{modelMenu.displayLabel}</span>
+        <VsIcon name="glyphDown" size={9} className="opacity-70 shrink-0" />
+      </button>
+      {modelOpen && !modelBusy && (
+        <div
+          role="listbox"
+          aria-label="选择模型"
+          className="absolute bottom-full left-0 mb-1 min-w-full w-max max-h-[280px] overflow-auto bg-surface border border-border rounded-md ace-shadow-lg p-1 z-50"
+        >
+          {modelMenu.items.map((item) => (
+            <button
+              key={item.name}
+              type="button"
+              role="option"
+              aria-selected={item.active}
+              onClick={() => selectModel(item.name)}
+              className={clsx(
+                'w-full text-left px-2.5 py-1.5 rounded transition flex items-center gap-2',
+                item.active ? 'bg-accent-bg text-accent' : 'text-fg hover:bg-surface-hi',
+              )}
+              title={item.label}
+            >
+              <span className="w-3 shrink-0 text-center">
+                {item.active && <VsIcon name="ok" size={11} mono={false} />}
+              </span>
+              <span className="shrink-0 whitespace-nowrap text-[12px]">{item.label}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   ) : (
     <span className="px-1.5 py-px rounded bg-surface-hi text-[10px] max-w-[220px] truncate" title={model}>{model}</span>
   );
@@ -73,10 +129,13 @@ export function StatusBar({
   return (
     <div className="h-[22px] flex items-center px-2.5 gap-4 bg-surface-alt border-t border-border text-[11px] text-fg-mute shrink-0">
       <div className="flex items-center gap-1">
-        <div ref={ref} className="relative">
+        <div ref={permissionRef} className="relative">
           <button
             type="button"
-            onClick={() => setOpen((o) => !o)}
+            onClick={() => {
+              setModelOpen(false);
+              setPermissionOpen((o) => !o);
+            }}
             title={cur.hint}
             disabled={permissionSwitching}
             className="flex items-center gap-1 px-1.5 py-px rounded hover:bg-surface-hi text-fg-mute transition"
@@ -85,7 +144,7 @@ export function StatusBar({
             <span>{cur.label}</span>
             <VsIcon name="glyphDown" size={9} className="opacity-70" />
           </button>
-          {open && (
+          {permissionOpen && (
             <div className="absolute bottom-full left-0 mb-1 bg-surface border border-border rounded-md ace-shadow-lg p-1 min-w-[220px] z-50">
               {PERMISSION_MODES.map((m) => {
                 const active = m.id === mode;
@@ -126,7 +185,7 @@ export function StatusBar({
           </button>
         )}
       </div>
-      <span className="flex items-center gap-1.5 min-w-0">
+      <span className="flex items-center gap-1.5 shrink-0">
         {modelControl}
         {tokenBudget && <TokenBudgetRing budget={tokenBudget} />}
       </span>
