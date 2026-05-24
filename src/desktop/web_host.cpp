@@ -47,6 +47,8 @@ std::function<bool()> g_close_handler;
 #ifdef __APPLE__
 std::function<void(bool)> g_mac_window_state_handler;
 bool g_mac_last_known_maximized = false;
+NSString* const kAceCodeFocusExistingNotification =
+    @"dev.acecode.desktop.focusExisting.v1";
 
 NSWindow* mac_window_from_host(webview::webview& w) {
     auto window_result = w.window();
@@ -68,7 +70,6 @@ void hide_mac_standard_button(NSWindow* window, NSWindowButton button) {
     NSButton* button_view = [window standardWindowButton:button];
     if (!button_view) return;
     [button_view setHidden:YES];
-    [button_view setEnabled:NO];
 }
 
 void hide_mac_titlebar_container(NSWindow* window) {
@@ -114,6 +115,34 @@ void configure_mac_window_chrome(webview::webview& w) {
     hide_mac_titlebar_container(window);
 
     g_mac_last_known_maximized = [window isZoomed] == YES;
+}
+
+void show_mac_window(NSWindow* window) {
+    if (!window) return;
+    [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+    if ([window isMiniaturized]) {
+        [window deminiaturize:nil];
+    }
+    [window makeKeyAndOrderFront:nil];
+    [NSApp activateIgnoringOtherApps:YES];
+}
+
+void hide_mac_window_to_tray(NSWindow* window) {
+    if (!window) return;
+    [window orderOut:nil];
+    [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
+}
+
+id install_mac_focus_existing_observer(webview::webview& w) {
+    NSWindow* window = mac_window_from_host(w);
+    if (!window) return nil;
+    return [[NSDistributedNotificationCenter defaultCenter]
+        addObserverForName:kAceCodeFocusExistingNotification
+                    object:nil
+                     queue:[NSOperationQueue mainQueue]
+                usingBlock:^(__unused NSNotification* note) {
+                    show_mac_window(window);
+                }];
 }
 
 NSEvent* mac_synthetic_left_mouse_event(NSWindow* window) {
@@ -875,6 +904,7 @@ struct WebHost::Impl {
 #if defined(__APPLE__)
         w = std::make_unique<webview::webview>(debug, nullptr);
         configure_mac_window_chrome(*w);
+        mac_focus_observer = install_mac_focus_existing_observer(*w);
         install_mac_close_handler(*w);
 #else
         w = std::make_unique<webview::webview>(debug, nullptr);
@@ -891,6 +921,12 @@ struct WebHost::Impl {
 #endif
         // Destroy webview first; for m_owns_window=false it removes only the child widget.
         // The parent HWND remains ours and is destroyed below.
+#ifdef __APPLE__
+        if (mac_focus_observer) {
+            [[NSDistributedNotificationCenter defaultCenter] removeObserver:mac_focus_observer];
+            mac_focus_observer = nil;
+        }
+#endif
         w.reset();
 #ifdef _WIN32
         if (hwnd && ::IsWindow(hwnd)) {
@@ -913,6 +949,9 @@ struct WebHost::Impl {
     }
 #endif
     std::unique_ptr<webview::webview> w;
+#ifdef __APPLE__
+    id mac_focus_observer = nil;
+#endif
 };
 
 WebHost::WebHost(bool debug, StartupWindowMode startup_mode)
@@ -975,10 +1014,9 @@ void WebHost::set_visible(bool visible) {
     if (!window_result.ok() || !window_result.value()) return;
     NSWindow* window = static_cast<NSWindow*>(window_result.value());
     if (visible) {
-        [window makeKeyAndOrderFront:nil];
-        [NSApp activateIgnoringOtherApps:YES];
+        show_mac_window(window);
     } else {
-        [window orderOut:nil];
+        hide_mac_window_to_tray(window);
     }
 #endif
 #endif
@@ -1104,6 +1142,8 @@ bool WebHost::minimize_window() {
 #else
     NSWindow* window = mac_window_from_host(*impl_->w);
     if (!window) return false;
+    [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+    [window makeKeyAndOrderFront:nil];
     [window miniaturize:nil];
     return true;
 #endif
