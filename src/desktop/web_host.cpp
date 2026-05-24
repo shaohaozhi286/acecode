@@ -71,6 +71,21 @@ void hide_mac_standard_button(NSWindow* window, NSWindowButton button) {
     [button_view setEnabled:NO];
 }
 
+void hide_mac_titlebar_container(NSWindow* window) {
+    NSView* content_view = [window contentView];
+    NSView* frame_view = [content_view superview];
+    if (!content_view || !frame_view) return;
+
+    [content_view setFrame:[frame_view bounds]];
+    [content_view setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+
+    for (NSView* subview in [frame_view subviews]) {
+        if (subview == content_view) continue;
+        [subview setHidden:YES];
+    }
+    [frame_view setNeedsLayout:YES];
+}
+
 void configure_mac_window_chrome(webview::webview& w) {
     NSWindow* window = mac_window_from_host(w);
     if (!window) return;
@@ -82,6 +97,7 @@ void configure_mac_window_chrome(webview::webview& w) {
     style |= NSWindowStyleMaskResizable;
     style |= NSWindowStyleMaskFullSizeContentView;
     [window setStyleMask:style];
+    [window setHasShadow:YES];
     [window setTitleVisibility:NSWindowTitleHidden];
     [window setTitlebarAppearsTransparent:YES];
     [window setToolbar:nil];
@@ -95,6 +111,7 @@ void configure_mac_window_chrome(webview::webview& w) {
     hide_mac_standard_button(window, NSWindowCloseButton);
     hide_mac_standard_button(window, NSWindowMiniaturizeButton);
     hide_mac_standard_button(window, NSWindowZoomButton);
+    hide_mac_titlebar_container(window);
 
     g_mac_last_known_maximized = [window isZoomed] == YES;
 }
@@ -855,11 +872,12 @@ struct WebHost::Impl {
 #else
     {
         (void)startup_mode;
-        w = std::make_unique<webview::webview>(debug, nullptr);
 #if defined(__APPLE__)
+        w = std::make_unique<webview::webview>(debug, nullptr);
         configure_mac_window_chrome(*w);
         install_mac_close_handler(*w);
 #else
+        w = std::make_unique<webview::webview>(debug, nullptr);
         configure_linux_window_chrome(*w);
         install_linux_close_handler(*w);
         install_linux_window_state_handler(*w);
@@ -906,11 +924,22 @@ void WebHost::set_title(const std::string& title) {
 }
 void WebHost::set_size(int width, int height) {
     auto adjusted = adjusted_window_size(width, height);
+#ifdef __APPLE__
+    NSWindow* window = mac_window_from_host(*impl_->w);
+    if (!window) return;
+    [window setFrame:NSMakeRect(0, 0, adjusted.first, adjusted.second)
+             display:YES
+             animate:NO];
+    [window center];
+    [window makeKeyAndOrderFront:nil];
+    configure_mac_window_chrome(*impl_->w);
+#else
     impl_->w->set_size(adjusted.first, adjusted.second, WEBVIEW_HINT_NONE);
 #ifdef _WIN32
     if (impl_->custom_window) {
         resize_webview_widget(impl_->custom_window);
     }
+#endif
 #endif
 }
 void WebHost::navigate(const std::string& url) {
