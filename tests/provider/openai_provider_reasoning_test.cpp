@@ -23,6 +23,7 @@
 
 #include "provider/openai_provider.hpp"
 #include "provider/llm_provider.hpp"
+#include "tool/tool_executor.hpp"
 
 #include <httplib.h>
 
@@ -416,6 +417,47 @@ TEST(OpenAiProviderReasoningTest, MatchedToolCallStaysIntactNoExtraStub) {
     EXPECT_EQ(msgs[0].value("role", std::string{}), "assistant");
     EXPECT_EQ(msgs[1].value("role", std::string{}), "tool");
     EXPECT_EQ(msgs[1]["content"].get<std::string>(), "real result");
+}
+
+// 用例:ToolExecutor 提供确定性工具顺序,OpenAI-compatible request body
+// 通过 tools array 发送 schema,不依赖 system prompt 里的重复 schema 文本。
+TEST(OpenAiProviderReasoningTest, BuildRequestBodyUsesDeterministicToolsArray) {
+    TestableProvider provider("http://example.invalid", "", "test-model");
+
+    acecode::ToolExecutor executor;
+    auto register_tool = [&](std::string name, std::string description) {
+        ToolDef def;
+        def.name = std::move(name);
+        def.description = std::move(description);
+        def.parameters = {
+            {"type", "object"},
+            {"properties", {
+                {"value", {{"type", "string"}}}
+            }},
+        };
+        acecode::ToolImpl impl;
+        impl.definition = def;
+        impl.execute = [](const std::string&, const acecode::ToolContext&) {
+            return acecode::ToolResult{"ok", true};
+        };
+        executor.register_tool(impl);
+    };
+
+    register_tool("z_tool", "Z tool");
+    register_tool("a_tool", "A tool");
+
+    ChatMessage user;
+    user.role = "user";
+    user.content = "hello";
+    auto body = provider.build_request_body({user}, executor.get_tool_definitions(), false);
+
+    ASSERT_TRUE(body.contains("tools"));
+    const auto& tools = body["tools"];
+    ASSERT_EQ(tools.size(), 2u);
+    EXPECT_EQ(tools[0]["function"]["name"].get<std::string>(), "a_tool");
+    EXPECT_EQ(tools[1]["function"]["name"].get<std::string>(), "z_tool");
+    EXPECT_EQ(tools[0]["function"]["parameters"]["properties"]["value"]["type"].get<std::string>(),
+              "string");
 }
 
 // 用例 9(并行工具调用的部分 orphan):

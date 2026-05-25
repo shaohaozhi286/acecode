@@ -261,6 +261,8 @@ private:
     const MemoryRegistry* memory_registry_ = nullptr;
     const MemoryConfig* memory_cfg_ = nullptr;
     const ProjectInstructionsConfig* project_instructions_cfg_ = nullptr;
+    std::string session_context_cache_key_;
+    std::string session_context_cache_content_;
     std::string goal_accounting_thread_id_;
     std::string goal_accounting_goal_id_;
     std::string budget_notice_goal_id_;

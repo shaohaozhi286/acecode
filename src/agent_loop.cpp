@@ -195,6 +195,26 @@ void append_request_context_for_api(std::vector<ChatMessage>& messages,
     messages.push_back(std::move(msg));
 }
 
+void prepend_session_context_for_api(std::vector<ChatMessage>& messages,
+                                     const std::string& context) {
+    if (context.empty()) return;
+
+    ChatMessage msg;
+    msg.role = "user";
+    msg.content = context;
+    messages.insert(messages.begin(), std::move(msg));
+}
+
+std::string cached_context_for_api(const PromptContextBlock& block,
+                                   std::string& cached_key,
+                                   std::string& cached_content) {
+    if (block.cache_key != cached_key) {
+        cached_key = block.cache_key;
+        cached_content = block.content;
+    }
+    return cached_content;
+}
+
 } // namespace
 
 AgentLoop::AgentLoop(ProviderAccessor provider_accessor, ToolExecutor& tools,
@@ -829,13 +849,26 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
 
         // Prepare messages with system prompt at front, filtering out meta messages
         auto api_messages = normalize_messages_for_api(messages_);
-        append_request_context_for_api(api_messages, build_request_context_prompt(cwd_));
+        std::string session_context = cached_context_for_api(
+            build_session_context_prompt(
+                cwd_, memory_registry_, memory_cfg_, project_instructions_cfg_),
+            session_context_cache_key_, session_context_cache_content_);
+        prepend_session_context_for_api(api_messages, session_context);
+        std::string request_context = build_request_context_prompt(cwd_);
+        append_request_context_for_api(api_messages, request_context);
         std::vector<ChatMessage> messages_with_system;
         ChatMessage sys_msg;
         sys_msg.role = "system";
         sys_msg.content = system_prompt;
         messages_with_system.push_back(sys_msg);
         messages_with_system.insert(messages_with_system.end(), api_messages.begin(), api_messages.end());
+        auto prompt_diag = build_prompt_cache_diagnostics(
+            system_prompt,
+            session_context + "\n" + request_context,
+            tool_defs);
+        LOG_DEBUG("Prompt cache hashes: system=" + prompt_diag.static_system_prompt_hash +
+                  " context=" + prompt_diag.mutable_context_hash +
+                  " tools=" + prompt_diag.tool_schema_hash);
 
         // Use streaming API
         ChatResponse accumulated;
