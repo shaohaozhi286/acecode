@@ -16,9 +16,9 @@
 //     `RegisterWindowMessageW` 拿一个全系统唯一的消息 ID,`PostMessageW` 给
 //     已有 host window 让它把自己拉前。`web_host.cpp::host_window_proc` 收到
 //     这条 msg → ShowWindow + SetForegroundWindow。
-//   - POSIX(Linux / macOS):`flock` 在 `~/.acecode/run/acecode-desktop.lock`
-//     上拿独占锁;窗口拉前 v1 不实现(flock 失败时直接 exit,把文档说清楚),
-//     v2 接 D-Bus / NSDistributedNotificationCenter 时再补。
+//   - POSIX:`flock` 在 `~/.acecode/run/acecode-desktop.lock` 上拿独占锁。
+//     macOS 二次启动通过 NSDistributedNotificationCenter 拉前已有窗口;Linux
+//     目前仍是 stub。
 //
 // 跨平台 boundary:
 //   - `SingleInstance` 类与 `focus_existing_instance()` 自由函数是接口契约。
@@ -60,7 +60,7 @@ private:
 // Windows 实现走 PostMessageW + RegisterWindowMessageW 的 system-wide msg ID,
 // 已有进程的 host_window_proc 收到后 ShowWindow(SW_SHOW) + SetForegroundWindow。
 //
-// POSIX 当前 stub 返回 false;调用方应在 false 时直接 exit。
+// macOS 走分布式通知;Linux 当前 stub 返回 false,调用方应在 false 时直接 exit。
 bool focus_existing_instance();
 
 } // namespace acecode::desktop
