@@ -97,6 +97,7 @@
 #include "session/session_registry.hpp"
 #include "session/session_resume_restore.hpp"
 #include "tui/chat_scroll.hpp"
+#include "tui/chat_render_window.hpp"
 #include "tui/diff_view.hpp"
 #include "tui/unclipped_reflect.hpp"
 #include "tui/paste_handler.hpp"
@@ -4811,6 +4812,12 @@ static int run_interactive_app(const CliOptions& cli,
         // yframe only scrolls when the child is taller than the viewport, so a
         // short chat at tail otherwise remains pinned to the top.
         Elements message_elements;
+        auto push_spacer_rows = [&message_elements](int rows) {
+            if (rows > 0) {
+                message_elements.push_back(
+                    emptyElement() | size(HEIGHT, EQUAL, rows));
+            }
+        };
         const int chat_viewport_height = chat_box.y_max >= chat_box.y_min
             ? chat_box.y_max - chat_box.y_min + 1
             : 0;
@@ -4819,9 +4826,15 @@ static int run_interactive_app(const CliOptions& cli,
             message_line_counts,
             static_cast<int>(state.conversation.size()),
             chat_viewport_height);
-        for (int i = 0; i < tail_top_padding; ++i) {
-            message_elements.push_back(text(""));
-        }
+        push_spacer_rows(tail_top_padding);
+        const auto render_window = acecode::tui::chat_render_window(
+            message_line_counts,
+            static_cast<int>(state.conversation.size()),
+            state.chat_scroll_top_row,
+            chat_viewport_height,
+            acecode::tui::default_chat_render_overscan_rows(
+                chat_viewport_height));
+        push_spacer_rows(render_window.top_spacer_rows);
 
         // drag-autoscroll: 每条消息同时记录两个 box:
         //   - message_layout_boxes: 未裁剪高度,用于滚动数学;
@@ -4831,7 +4844,13 @@ static int run_interactive_app(const CliOptions& cli,
                 | acecode::tui::reflect_unclipped(message_layout_boxes[index])
                 | reflect(message_boxes[index]);
         };
-        for (size_t i = 0; i < state.conversation.size(); ++i) {
+        const size_t render_first =
+            static_cast<size_t>(std::max(0, render_window.first_message));
+        const size_t render_last = std::min(
+            state.conversation.size(),
+            static_cast<size_t>(std::max(0,
+                render_window.last_message_exclusive)));
+        for (size_t i = render_first; i < render_last; ++i) {
             const auto& msg = state.conversation[i];
             bool focused_message = static_cast<int>(i) == state.chat_focus_index;
             Decorator focus_decorator = nothing;
@@ -5111,6 +5130,7 @@ static int run_interactive_app(const CliOptions& cli,
             }
             message_elements.push_back(text(""));
         }
+        push_spacer_rows(render_window.bottom_spacer_rows);
 
         Element message_body = vbox(std::move(message_elements));
         if (state.chat_follow_tail) {
