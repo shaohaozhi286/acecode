@@ -1,9 +1,15 @@
 #include "skills/skill_registry.hpp"
+#include "agent_loop.hpp"
+#include "commands/command_registry.hpp"
+#include "config/config.hpp"
+#include "permissions.hpp"
+#include "tool/tool_executor.hpp"
 #include "utils/encoding.hpp"
 #include "utils/utf8_path.hpp"
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -27,6 +33,30 @@ void write_skill(const fs::path& root,
         << "# " << name << "\n\n"
         << description << "\n";
 }
+
+class NoopProvider : public acecode::LlmProvider {
+public:
+    acecode::ChatResponse chat(const std::vector<acecode::ChatMessage>&,
+                               const std::vector<acecode::ToolDef>&) override {
+        acecode::ChatResponse response;
+        response.finish_reason = "stop";
+        return response;
+    }
+
+    void chat_stream(const std::vector<acecode::ChatMessage>&,
+                     const std::vector<acecode::ToolDef>&,
+                     const acecode::StreamCallback& callback,
+                     std::atomic<bool>* = nullptr) override {
+        acecode::StreamEvent done;
+        done.type = acecode::StreamEventType::Done;
+        callback(done);
+    }
+
+    std::string name() const override { return "noop"; }
+    bool is_authenticated() override { return true; }
+    std::string model() const override { return "noop"; }
+    void set_model(const std::string&) override {}
+};
 
 void append_utf16le(std::string& out, char16_t ch) {
     out.push_back(static_cast<char>(ch & 0xFF));
@@ -138,6 +168,114 @@ TEST_F(SkillRegistryCompatTest, LoadsUtf16LegacyHeaderSkill) {
     std::string body = registry.read_skill_body("calculator");
     EXPECT_NE(body.find("# Calculator Skill"), std::string::npos);
     EXPECT_TRUE(acecode::is_valid_utf8(body));
+}
+
+TEST_F(SkillRegistryCompatTest, ListSeesSkillAddedAfterInitialScanWithoutReload) {
+    fs::path root = temp_root / "skills-root";
+
+    acecode::SkillRegistry registry;
+    registry.set_scan_roots({root});
+    registry.scan();
+    EXPECT_TRUE(registry.list().empty());
+
+    write_skill(root, "engineering", "fresh-skill", "created after scan");
+
+    auto all = registry.list();
+    ASSERT_EQ(all.size(), 1u);
+    EXPECT_EQ(all[0].name, "fresh-skill");
+    EXPECT_EQ(all[0].description, "created after scan");
+}
+
+TEST_F(SkillRegistryCompatTest, FindSeesUpdatedMetadataWithoutReload) {
+    fs::path root = temp_root / "skills-root";
+    write_skill(root, "engineering", "mutable-skill", "first description");
+
+    acecode::SkillRegistry registry;
+    registry.set_scan_roots({root});
+    registry.scan();
+    ASSERT_EQ(registry.find("mutable-skill")->description, "first description");
+
+    write_skill(root, "engineering", "mutable-skill", "updated description");
+
+    auto updated = registry.find("mutable-skill");
+    ASSERT_TRUE(updated.has_value());
+    EXPECT_EQ(updated->description, "updated description");
+}
+
+TEST_F(SkillRegistryCompatTest, SupportingFilesAreDiscoveredWithoutReload) {
+    fs::path root = temp_root / "skills-root";
+    write_skill(root, "engineering", "support-skill", "has support");
+
+    acecode::SkillRegistry registry;
+    registry.set_scan_roots({root});
+    registry.scan();
+    EXPECT_TRUE(registry.list_supporting_files("support-skill").empty());
+
+    fs::path references = root / "engineering" / "support-skill" / "references";
+    fs::create_directories(references);
+    std::ofstream ofs(references / "api.md", std::ios::binary);
+    ofs << "live reference";
+    ofs.close();
+
+    auto files = registry.list_supporting_files("support-skill");
+    ASSERT_EQ(files.size(), 1u);
+    EXPECT_EQ(files[0], "references/api.md");
+    auto resolved = registry.resolve_skill_file("support-skill", "references/api.md");
+    ASSERT_TRUE(resolved.has_value());
+    EXPECT_TRUE(fs::exists(*resolved));
+}
+
+TEST_F(SkillRegistryCompatTest, CommandDispatchInvokesNewSkillWithoutReloadingCommands) {
+    fs::path root = temp_root / "skills-root";
+
+    acecode::SkillRegistry skill_registry;
+    skill_registry.set_scan_roots({root});
+    skill_registry.scan();
+
+    acecode::CommandRegistry command_registry;
+    acecode::TuiState state;
+    state.is_waiting = true;
+    acecode::ToolExecutor tools;
+    acecode::PermissionManager permissions;
+    acecode::AgentCallbacks callbacks;
+    auto provider = std::make_shared<NoopProvider>();
+    acecode::AgentLoop loop(
+        [&]() -> std::shared_ptr<acecode::LlmProvider> { return provider; },
+        tools,
+        callbacks,
+        temp_root.string(),
+        permissions);
+    acecode::AppConfig config;
+    acecode::TokenTracker token_tracker;
+
+    acecode::CommandContext ctx{
+        state,
+        loop,
+        nullptr,
+        config,
+        token_tracker,
+        permissions,
+        [] {},
+        nullptr,
+        [] {},
+        nullptr,
+        &tools,
+        &skill_registry,
+        nullptr,
+        &command_registry,
+        temp_root.string(),
+    };
+
+    write_skill(root, "engineering", "fresh-skill", "created after command registration");
+
+    EXPECT_TRUE(command_registry.dispatch("/fresh-skill run this", ctx));
+    ASSERT_EQ(state.conversation.size(), 1u);
+    EXPECT_NE(state.conversation[0].content.find("[Invoking skill: fresh-skill]"),
+              std::string::npos);
+    ASSERT_EQ(state.pending_queue.size(), 1u);
+    EXPECT_NE(state.pending_queue[0].find("Use skill_view(name=\"fresh-skill\")"),
+              std::string::npos);
+    EXPECT_NE(state.pending_queue[0].find("run this"), std::string::npos);
 }
 
 } // namespace

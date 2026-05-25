@@ -180,6 +180,21 @@ nlohmann::json build_transcript_replace_payload(
     };
 }
 
+void append_request_context_for_api(std::vector<ChatMessage>& messages,
+                                    const std::string& context) {
+    if (context.empty()) return;
+
+    if (!messages.empty() && messages.back().role == "user") {
+        messages.back().content = context + "\n\n[用户输入]\n" + messages.back().content;
+        return;
+    }
+
+    ChatMessage msg;
+    msg.role = "user";
+    msg.content = context;
+    messages.push_back(std::move(msg));
+}
+
 } // namespace
 
 AgentLoop::AgentLoop(ProviderAccessor provider_accessor, ToolExecutor& tools,
@@ -740,6 +755,10 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
 
     const int max_iter = loop_cfg_.max_iterations;
     const bool has_max_iterations = max_iter > 0;
+    constexpr int kMaxContextRescueAttempts = 3;
+    int context_rescue_attempts = 0;
+    int last_context_rescue_tokens = std::numeric_limits<int>::max();
+    bool skip_auto_compact_once = false;
 
     std::mutex progress_mu;
     std::string active_progress_key;
@@ -789,13 +808,18 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
             break;
         }
 
-        // Auto-compact check: prefer API-reported token count, fallback to estimate
-        if (should_auto_compact(messages_, context_window_, last_api_prompt_tokens_.load())) {
+        // Auto-compact check: prefer API-reported token count, fallback to estimate.
+        // A rescue retry skips this once so the retry remains local and bounded.
+        if (skip_auto_compact_once) {
+            skip_auto_compact_once = false;
+        } else if (should_auto_compact(messages_, context_window_, last_api_prompt_tokens_.load())) {
             LOG_INFO("Auto-compact triggered: estimated tokens exceed threshold (context_window=" + std::to_string(context_window_) + ")");
             maybe_run_auto_compact();
         }
 
-        // Build system prompt each turn (dynamic: includes current tools and CWD)
+        // Build the static system prompt each turn. Request-local context such
+        // as current time/CWD is appended near the message tail below so the
+        // system prompt remains cacheable for providers such as DeepSeek.
         std::string system_prompt = build_system_prompt(
             tools_, cwd_, skill_registry_, memory_registry_,
             memory_cfg_, project_instructions_cfg_);
@@ -805,6 +829,7 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
 
         // Prepare messages with system prompt at front, filtering out meta messages
         auto api_messages = normalize_messages_for_api(messages_);
+        append_request_context_for_api(api_messages, build_request_context_prompt(cwd_));
         std::vector<ChatMessage> messages_with_system;
         ChatMessage sys_msg;
         sys_msg.role = "system";
@@ -924,12 +949,6 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
                 if (provider_error_info.display_message.empty()) {
                     provider_error_info.display_message = evt.error;
                 }
-                {
-                    nlohmann::json metadata;
-                    metadata["provider_error"] = provider_error_to_json(provider_error_info);
-                    dispatch_message("error", "[Error] " + provider_error_info.display_message, false,
-                                     std::move(metadata));
-                }
                 break;
             }
         };
@@ -952,8 +971,9 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
             LOG_INFO("chat_stream returned. content_len=" + std::to_string(accumulated.content.size()) + " tool_calls=" + std::to_string(accumulated.tool_calls.size()));
         } catch (const std::exception& e) {
             LOG_ERROR(std::string("chat_stream exception: ") + e.what());
-            dispatch_message("error", std::string("[Error] ") + e.what(), false);
-            break;
+            provider_error_seen = true;
+            provider_error_info.kind = ProviderErrorKind::Unknown;
+            provider_error_info.display_message = e.what();
         }
 
         if (abort_requested_) {
@@ -962,6 +982,71 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
         }
 
         if (provider_error_seen) {
+            const bool model_output_seen =
+                !accumulated.content.empty() ||
+                !accumulated.reasoning_content.empty() ||
+                accumulated.has_tool_calls();
+            const int request_tokens = estimate_message_tokens(messages_with_system);
+
+            if (context_rescue_attempts < kMaxContextRescueAttempts &&
+                should_attempt_context_overflow_rescue(
+                    provider_error_info,
+                    request_tokens,
+                    context_window_,
+                    model_output_seen)) {
+                const int preferred_tail_turns =
+                    context_rescue_attempts == 0 ? 4 :
+                    context_rescue_attempts == 1 ? 2 : 1;
+                auto rescue = rescue_compact_messages(messages_, cwd_, preferred_tail_turns);
+                if (rescue.performed &&
+                    rescue.estimated_tokens_after < last_context_rescue_tokens) {
+                    CompactResult replace_result;
+                    replace_result.performed = true;
+                    replace_result.messages_compressed = rescue.messages_removed;
+                    replace_result.estimated_tokens_saved =
+                        std::max(0, rescue.estimated_tokens_before - rescue.estimated_tokens_after);
+                    replace_result.summary_text = rescue.marker_text;
+                    replace_result.compacted_messages = std::move(rescue.compacted_messages);
+                    apply_compact_result(replace_result);
+
+                    ++context_rescue_attempts;
+                    last_context_rescue_tokens = rescue.estimated_tokens_after;
+                    skip_auto_compact_once = true;
+                    if (total_iterations > 0) {
+                        --total_iterations;
+                    }
+
+                    LOG_WARN("Provider context overflow; rescue compacted " +
+                             std::to_string(rescue.messages_removed) +
+                             " messages, retrying request");
+                    dispatch_message(
+                        "system",
+                        "[Rescue compact] Provider rejected the request as too large; compacted " +
+                            std::to_string(rescue.messages_removed) +
+                            " messages and retrying with the most recent " +
+                            std::to_string(rescue.protected_user_turns) +
+                            " user turn(s).",
+                        false);
+                    continue;
+                }
+
+                nlohmann::json metadata;
+                metadata["provider_error"] = provider_error_to_json(provider_error_info);
+                dispatch_message(
+                    "error",
+                    "[Error] Context is too large and cannot be rescued by compacting earlier history. " +
+                        provider_error_info.display_message,
+                    false,
+                    std::move(metadata));
+                LOG_WARN("Provider context overflow could not be rescued: " +
+                         log_truncate(rescue.error, 500));
+                break;
+            }
+
+            nlohmann::json metadata;
+            metadata["provider_error"] = provider_error_to_json(provider_error_info);
+            dispatch_message("error", "[Error] " + provider_error_info.display_message, false,
+                             std::move(metadata));
             LOG_WARN("Provider stream failed; ending turn without assistant message: " +
                      log_truncate(provider_error_info.display_message, 500));
             break;

@@ -3,6 +3,7 @@
 #include "auth.hpp"
 #include "origin.hpp"
 #include "static_assets.hpp"
+#include "../auth/github_auth.hpp"
 #include "../config/config.hpp"
 #include "../config/saved_models_editor.hpp"
 #include "../desktop/workspace_registry.hpp"
@@ -2589,6 +2590,18 @@ struct WebServer::Impl {
         ([this](const crow::request& req) {
             return cors_preflight(req);
         });
+        CROW_ROUTE(app, "/api/copilot/auth").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
+        CROW_ROUTE(app, "/api/copilot/auth/device").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
+        CROW_ROUTE(app, "/api/copilot/auth/device/poll").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
         CROW_ROUTE(app, "/api/sessions/<string>/model").methods(crow::HTTPMethod::Options)
         ([this](const crow::request& req, const std::string&) {
             return cors_preflight(req);
@@ -2606,7 +2619,7 @@ struct WebServer::Impl {
         });
 
         // GET /api/config/default-model: 返回当前 default_model_name
-        // (给 WebUI ModelManager 标星用)。读 cfg 的字段,空字符串也照返。
+        // (给 WebUI 模型设置页标星用)。读 cfg 的字段,空字符串也照返。
         CROW_ROUTE(app, "/api/config/default-model").methods(crow::HTTPMethod::GET)
         ([this](const crow::request& req) {
             if (auto rej = require_auth(req)) return std::move(*rej);
@@ -2614,6 +2627,131 @@ struct WebServer::Impl {
             crow::response r(200);
             r.add_header("Content-Type", "application/json");
             r.body = json{{"name", deps.app_config->default_model_name}}.dump();
+            return with_cors(req, std::move(r));
+        });
+
+        // GET /api/copilot/auth: local credential status only; never returns tokens.
+        CROW_ROUTE(app, "/api/copilot/auth").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            const bool has_token = has_saved_github_token();
+            crow::response r(200);
+            r.add_header("Content-Type", "application/json");
+            r.body = json{
+                {"provider", "copilot"},
+                {"has_token", has_token},
+                {"authenticated", has_token}
+            }.dump();
+            return with_cors(req, std::move(r));
+        });
+
+        // DELETE /api/copilot/auth: remove saved GitHub token; saved_models stay intact.
+        CROW_ROUTE(app, "/api/copilot/auth").methods(crow::HTTPMethod::Delete)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            std::string error;
+            if (!delete_github_token(&error)) {
+                crow::response r(500);
+                r.add_header("Content-Type", "application/json");
+                r.body = json{{"error", "DELETE_FAILED"}, {"message", error}}.dump();
+                return with_cors(req, std::move(r));
+            }
+            crow::response r(200);
+            r.add_header("Content-Type", "application/json");
+            r.body = json{
+                {"ok", true},
+                {"provider", "copilot"},
+                {"has_token", false},
+                {"authenticated", false}
+            }.dump();
+            return with_cors(req, std::move(r));
+        });
+
+        // POST /api/copilot/auth/device: start GitHub OAuth device flow.
+        CROW_ROUTE(app, "/api/copilot/auth/device").methods(crow::HTTPMethod::POST)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            DeviceCodeResponse dc = request_device_code();
+            if (dc.device_code.empty()) {
+                crow::response r(502);
+                r.add_header("Content-Type", "application/json");
+                r.body = json{
+                    {"error", "DEVICE_CODE_FAILED"},
+                    {"message", "failed to request GitHub device code"}
+                }.dump();
+                return with_cors(req, std::move(r));
+            }
+            crow::response r(200);
+            r.add_header("Content-Type", "application/json");
+            r.body = json{
+                {"status", "pending"},
+                {"provider", "copilot"},
+                {"device_code", dc.device_code},
+                {"user_code", dc.user_code},
+                {"verification_uri", dc.verification_uri},
+                {"interval", dc.interval},
+                {"expires_in", dc.expires_in},
+                {"expires_at_unix_ms", now_unix_ms() + static_cast<std::int64_t>(dc.expires_in) * 1000}
+            }.dump();
+            return with_cors(req, std::move(r));
+        });
+
+        // POST /api/copilot/auth/device/poll body {device_code}: one poll tick.
+        CROW_ROUTE(app, "/api/copilot/auth/device/poll").methods(crow::HTTPMethod::POST)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+
+            auto json_err = [&](int status, const char* code, const std::string& msg) {
+                crow::response r(status);
+                r.body = json{{"error", code}, {"message", msg}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            };
+
+            json body;
+            try { body = json::parse(req.body); }
+            catch (const std::exception& e) {
+                return json_err(400, "BAD_JSON", std::string("invalid JSON body: ") + e.what());
+            }
+            if (!body.is_object() ||
+                !body.contains("device_code") ||
+                !body["device_code"].is_string() ||
+                body["device_code"].get<std::string>().empty()) {
+                return json_err(400, "BAD_REQUEST", "expected {device_code: string}");
+            }
+
+            DevicePollResult poll = poll_for_access_token_once(
+                body["device_code"].get<std::string>());
+            if (poll.status == "authorized") {
+                CopilotToken ct = exchange_copilot_token(poll.access_token);
+                if (ct.token.empty()) {
+                    return json_err(401,
+                                    "COPILOT_TOKEN_EXCHANGE_FAILED",
+                                    "GitHub login succeeded, but Copilot token exchange failed");
+                }
+                save_github_token(poll.access_token);
+                crow::response r(200);
+                r.add_header("Content-Type", "application/json");
+                r.body = json{
+                    {"status", "authenticated"},
+                    {"provider", "copilot"},
+                    {"authenticated", true},
+                    {"has_token", true}
+                }.dump();
+                return with_cors(req, std::move(r));
+            }
+
+            crow::response r(poll.status == "failed" ? 400 : 200);
+            r.add_header("Content-Type", "application/json");
+            r.body = json{
+                {"status", poll.status.empty() ? "failed" : poll.status},
+                {"provider", "copilot"},
+                {"authenticated", false},
+                {"has_token", has_saved_github_token()},
+                {"error", poll.error},
+                {"message", poll.message},
+                {"interval_delta_seconds", poll.interval_delta_seconds}
+            }.dump();
             return with_cors(req, std::move(r));
         });
 
@@ -3141,6 +3279,29 @@ struct WebServer::Impl {
             auto parsed = parse_model_probe_request(body, err_code, err);
             if (!parsed) {
                 return json_err(400, err_code.empty() ? "BAD_REQUEST" : err_code.c_str(), err);
+            }
+
+            if (parsed->provider == "copilot") {
+                const std::string github_token = load_github_token();
+                if (github_token.empty()) {
+                    return json_err(401,
+                                    "COPILOT_AUTH_REQUIRED",
+                                    "GitHub Copilot authentication is required");
+                }
+
+                CopilotModelsResult result = fetch_copilot_model_ids(github_token);
+                if (!result.error.empty()) {
+                    const int status = result.status_code == 401 ? 401 : 502;
+                    return json_err(status,
+                                    result.error.c_str(),
+                                    result.message.empty()
+                                        ? "Copilot model discovery failed"
+                                        : result.message);
+                }
+
+                crow::response r(json{{"models", result.models}}.dump());
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
             }
 
             const std::string url = trim_trailing_slash(parsed->base_url) + "/models";

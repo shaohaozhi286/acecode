@@ -42,7 +42,7 @@ void SkillRegistry::set_disabled(std::unordered_set<std::string> disabled) {
     disabled_ = std::move(disabled);
 }
 
-void SkillRegistry::scan() {
+void SkillRegistry::refresh_from_disk() const {
     std::vector<fs::path> roots;
     std::unordered_set<std::string> disabled;
     {
@@ -89,15 +89,21 @@ void SkillRegistry::scan() {
         return a.name < b.name;
     });
 
+    const auto found_count = found.size();
     {
         std::lock_guard<std::mutex> lk(mu_);
         skills_ = std::move(found);
     }
-    LOG_INFO("[skills] Loaded " + std::to_string(skills_.size()) + " skills from " +
-             std::to_string(roots.size()) + " root(s)");
+    LOG_DEBUG("[skills] Loaded " + std::to_string(found_count) + " skills from " +
+              std::to_string(roots.size()) + " root(s)");
+}
+
+void SkillRegistry::scan() {
+    refresh_from_disk();
 }
 
 std::vector<SkillMetadata> SkillRegistry::list(const std::string& category) const {
+    refresh_from_disk();
     std::lock_guard<std::mutex> lk(mu_);
     if (category.empty()) return skills_;
     std::vector<SkillMetadata> filtered;
@@ -108,6 +114,7 @@ std::vector<SkillMetadata> SkillRegistry::list(const std::string& category) cons
 }
 
 std::optional<SkillMetadata> SkillRegistry::find(const std::string& name_or_key) const {
+    refresh_from_disk();
     std::lock_guard<std::mutex> lk(mu_);
     for (const auto& s : skills_) {
         if (s.name == name_or_key || s.command_key == name_or_key) return s;

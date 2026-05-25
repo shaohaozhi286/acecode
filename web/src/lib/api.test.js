@@ -177,6 +177,44 @@ await run('probeModels posts draft to model probe endpoint', async () => {
   }
 });
 
+await run('Copilot auth API methods use expected endpoints', async () => {
+  const previousFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    calls.push({ url, opts });
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ ok: true, status: 'pending' }),
+    };
+  };
+  try {
+    const client = createApi({ origin: 'http://127.0.0.1:4567', token: 'tok' });
+    await client.getCopilotAuth();
+    await client.startCopilotAuth();
+    await client.pollCopilotAuth('device-123');
+    await client.logoutCopilot();
+
+    assert.equal(calls.length, 4);
+    assert.equal(calls[0].url, 'http://127.0.0.1:4567/api/copilot/auth');
+    assert.equal(calls[0].opts.method, 'GET');
+    assert.equal(calls[1].url, 'http://127.0.0.1:4567/api/copilot/auth/device');
+    assert.equal(calls[1].opts.method, 'POST');
+    assert.deepEqual(JSON.parse(calls[1].opts.body), {});
+    assert.equal(calls[2].url, 'http://127.0.0.1:4567/api/copilot/auth/device/poll');
+    assert.equal(calls[2].opts.method, 'POST');
+    assert.deepEqual(JSON.parse(calls[2].opts.body), { device_code: 'device-123' });
+    assert.equal(calls[3].url, 'http://127.0.0.1:4567/api/copilot/auth');
+    assert.equal(calls[3].opts.method, 'DELETE');
+    for (const call of calls) {
+      assert.equal(call.opts.headers['X-ACECode-Token'], 'tok');
+    }
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
 await run('UI preference API reads and writes daemon-backed avatar preference', async () => {
   const previousFetch = globalThis.fetch;
   const calls = [];

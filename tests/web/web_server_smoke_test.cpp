@@ -17,6 +17,7 @@
 #include <gtest/gtest.h>
 #include <httplib.h>
 
+#include "auth/github_auth.hpp"
 #include "config/saved_models.hpp"
 #include "permissions.hpp"
 #include "desktop/workspace_registry.hpp"
@@ -37,6 +38,7 @@
 #include <chrono>
 #include <cpr/cpr.h>
 #include <cctype>
+#include <cstdlib>
 #include <filesystem>
 #include <functional>
 #include <fstream>
@@ -244,6 +246,45 @@ struct RemoveTreeOnExit {
     ~RemoveTreeOnExit() {
         std::error_code ec;
         if (!path.empty()) std::filesystem::remove_all(path, ec);
+    }
+};
+
+#ifdef _WIN32
+constexpr const char* kHomeEnvName = "USERPROFILE";
+#else
+constexpr const char* kHomeEnvName = "HOME";
+#endif
+
+std::optional<std::string> get_env_value(const char* name) {
+    const char* value = std::getenv(name);
+    if (!value) return std::nullopt;
+    return std::string(value);
+}
+
+void set_env_value(const char* name, const std::optional<std::string>& value) {
+#ifdef _WIN32
+    _putenv_s(name, value ? value->c_str() : "");
+#else
+    if (value) {
+        setenv(name, value->c_str(), 1);
+    } else {
+        unsetenv(name);
+    }
+#endif
+}
+
+struct ScopedHomeOverride {
+    std::optional<std::string> old_home;
+    std::filesystem::path path;
+
+    explicit ScopedHomeOverride(const std::filesystem::path& new_home)
+        : old_home(get_env_value(kHomeEnvName)), path(new_home) {
+        std::filesystem::create_directories(path);
+        set_env_value(kHomeEnvName, path.string());
+    }
+
+    ~ScopedHomeOverride() {
+        set_env_value(kHomeEnvName, old_home);
     }
 };
 
@@ -1480,7 +1521,7 @@ TEST(WebServerHttp, PostModelsCreatesSavedEntryWithoutApiKey) {
 TEST(WebServerHttp, PostModelsProbeRejectsUnsupportedProvider) {
     WebServerFixture fx;
     json req = {
-        {"provider", "copilot"},
+        {"provider", "anthropic"},
         {"base_url", "http://localhost:1234/v1"},
     };
     auto r = cpr::Post(cpr::Url{fx.url("/api/models/probe")},
@@ -1489,6 +1530,55 @@ TEST(WebServerHttp, PostModelsProbeRejectsUnsupportedProvider) {
     ASSERT_EQ(r.status_code, 400) << r.text;
     auto j = json::parse(r.text);
     EXPECT_EQ(j["error"], "UNKNOWN_PROVIDER");
+}
+
+// 场景:Copilot 模型探测需要先通过 desktop/web 登录;无 token 时必须走
+// 401,且不能尝试真实网络。
+TEST(WebServerHttp, PostModelsProbeCopilotRequiresAuthWhenNoToken) {
+    auto temp_home = std::filesystem::temp_directory_path() /
+                     ("acecode_copilot_home_" + std::to_string(std::random_device{}()));
+    RemoveTreeOnExit cleanup{temp_home};
+    ScopedHomeOverride home(temp_home);
+    WebServerFixture fx;
+    json req = {{"provider", "copilot"}};
+
+    auto r = cpr::Post(cpr::Url{fx.url("/api/models/probe")},
+                       cpr::Header{{"Content-Type", "application/json"}},
+                       cpr::Body{req.dump()});
+    ASSERT_EQ(r.status_code, 401) << r.text;
+    auto j = json::parse(r.text);
+    EXPECT_EQ(j["error"], "COPILOT_AUTH_REQUIRED");
+}
+
+// 场景:desktop/web Copilot auth 状态和退出只读写 github_token 文件,
+// 不碰 saved_models,也不泄漏 token 内容。
+TEST(WebServerHttp, CopilotAuthStatusAndLogoutUseSavedTokenOnly) {
+    auto temp_home = std::filesystem::temp_directory_path() /
+                     ("acecode_copilot_auth_home_" + std::to_string(std::random_device{}()));
+    RemoveTreeOnExit cleanup{temp_home};
+    ScopedHomeOverride home(temp_home);
+    WebServerFixture fx;
+
+    auto initial = cpr::Get(cpr::Url{fx.url("/api/copilot/auth")});
+    ASSERT_EQ(initial.status_code, 200) << initial.text;
+    auto initial_body = json::parse(initial.text);
+    EXPECT_EQ(initial_body["has_token"], false);
+    EXPECT_EQ(initial_body["authenticated"], false);
+    EXPECT_EQ(initial.text.find("gho-secret"), std::string::npos);
+
+    acecode::save_github_token("gho-secret-test");
+    auto with_token = cpr::Get(cpr::Url{fx.url("/api/copilot/auth")});
+    ASSERT_EQ(with_token.status_code, 200) << with_token.text;
+    auto with_token_body = json::parse(with_token.text);
+    EXPECT_EQ(with_token_body["has_token"], true);
+    EXPECT_EQ(with_token_body["authenticated"], true);
+    EXPECT_EQ(with_token.text.find("gho-secret-test"), std::string::npos);
+    ASSERT_EQ(fx.cfg.saved_models.size(), 1u);
+
+    auto logout = cpr::Delete(cpr::Url{fx.url("/api/copilot/auth")});
+    ASSERT_EQ(logout.status_code, 200) << logout.text;
+    EXPECT_FALSE(acecode::has_saved_github_token());
+    EXPECT_EQ(fx.cfg.saved_models.size(), 1u);
 }
 
 // 场景:POST /api/models 重名 → 409 NAME_TAKEN(saved_models_editor 校验)。

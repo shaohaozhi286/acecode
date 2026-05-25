@@ -5,6 +5,7 @@
 #include "../utils/uuid.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <stdexcept>
 #include <regex>
 #include <sstream>
@@ -20,6 +21,55 @@ bool is_ptl_error(const std::string& error_msg) {
         || error_msg.find("prompt is too long") != std::string::npos
         || error_msg.find("token limit") != std::string::npos
         || error_msg.find("context_length_exceeded") != std::string::npos;
+}
+
+std::string ascii_lower(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return value;
+}
+
+bool contains_any(const std::string& haystack, const std::vector<std::string>& needles) {
+    for (const auto& needle : needles) {
+        if (haystack.find(needle) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string provider_error_search_text(const acecode::ProviderErrorInfo& info) {
+    return ascii_lower(info.display_message + "\n" + info.raw_body + "\n" + info.pretty_json);
+}
+
+int find_tail_start_for_user_turns(const std::vector<acecode::ChatMessage>& messages, int user_turns) {
+    const int target_turns = std::max(1, user_turns);
+    int turns_found = 0;
+    for (int i = static_cast<int>(messages.size()) - 1; i >= 0; --i) {
+        if (!messages[i].is_meta && messages[i].role == "user") {
+            ++turns_found;
+            if (turns_found >= target_turns) {
+                return i;
+            }
+        }
+    }
+    return 0;
+}
+
+std::vector<int> rescue_tail_candidates(int preferred_tail_user_turns) {
+    std::vector<int> candidates;
+    auto add = [&candidates](int turns) {
+        if (turns <= 0) return;
+        if (std::find(candidates.begin(), candidates.end(), turns) == candidates.end()) {
+            candidates.push_back(turns);
+        }
+    };
+    add(preferred_tail_user_turns);
+    add(4);
+    add(2);
+    add(1);
+    return candidates;
 }
 
 } // namespace
@@ -210,6 +260,141 @@ TokenWarningState calculate_token_warning_state(int estimated_tokens, int contex
     state.is_above_error = remaining < 5000;
     state.is_above_auto_compact = estimated_tokens > get_auto_compact_threshold(context_window);
     return state;
+}
+
+// ============================================================
+// Context-overflow rescue compact
+// ============================================================
+
+bool is_context_overflow_error(const ProviderErrorInfo& info) {
+    if (info.status_code == 413) {
+        return true;
+    }
+
+    const std::string text = provider_error_search_text(info);
+    static const std::vector<std::string> overflow_needles = {
+        "context_length_exceeded",
+        "maximum context length",
+        "max context length",
+        "context length",
+        "context window",
+        "context limit",
+        "context is too long",
+        "context too long",
+        "prompt is too long",
+        "prompt too long",
+        "token limit",
+        "too many tokens",
+        "tokens in the messages",
+        "input is too long",
+        "input too long",
+        "input tokens",
+        "input too large",
+        "request too large",
+        "payload too large",
+        "reduce the length of the messages",
+        "exceeds the model",
+        "exceeded model"
+    };
+    return contains_any(text, overflow_needles);
+}
+
+bool should_attempt_context_overflow_rescue(
+    const ProviderErrorInfo& info,
+    int estimated_request_tokens,
+    int context_window,
+    bool model_output_seen
+) {
+    if (model_output_seen) {
+        return false;
+    }
+    if (is_context_overflow_error(info)) {
+        return true;
+    }
+    if (info.kind != ProviderErrorKind::Http ||
+        (info.status_code != 400 && info.status_code != 422)) {
+        return false;
+    }
+
+    const std::string text = provider_error_search_text(info);
+    const bool ambiguous_bad_request =
+        text.empty() ||
+        text.find("bad request") != std::string::npos ||
+        text.find("invalid_request") != std::string::npos ||
+        text.find("invalid request") != std::string::npos;
+    if (!ambiguous_bad_request) {
+        return false;
+    }
+
+    const int auto_threshold = get_auto_compact_threshold(context_window);
+    const int fallback_threshold = std::max(auto_threshold, 32000);
+    return estimated_request_tokens > fallback_threshold;
+}
+
+ContextRescueResult rescue_compact_messages(
+    const std::vector<ChatMessage>& messages,
+    const std::string& cwd,
+    int preferred_tail_user_turns
+) {
+    ContextRescueResult result;
+    result.estimated_tokens_before = estimate_message_tokens(messages);
+
+    if (messages.empty()) {
+        result.error = "No conversation history to rescue compact.";
+        return result;
+    }
+
+    for (int tail_turns : rescue_tail_candidates(preferred_tail_user_turns)) {
+        const int tail_start = find_tail_start_for_user_turns(messages, tail_turns);
+        if (tail_start <= 0) {
+            continue;
+        }
+
+        std::vector<ChatMessage> compacted;
+        compacted.reserve(static_cast<std::size_t>(messages.size() - tail_start + 3));
+        compacted.push_back(create_compact_boundary_message("rescue", result.estimated_tokens_before));
+
+        ChatMessage summary_msg;
+        summary_msg.role = "system";
+        summary_msg.is_compact_summary = true;
+        summary_msg.content =
+            "[Conversation summary - earlier context truncated because the provider rejected the request as too large.]\n\n"
+            "Earlier conversation context was removed by rescue compact because the provider rejected the previous "
+            "request as too large. A detailed summary was not generated. Continue from the preserved recent "
+            "messages below and the current working directory.";
+        summary_msg.metadata = {
+            {"trigger", "rescue"},
+            {"summary_generated", false},
+            {"protected_user_turns", tail_turns}
+        };
+        compacted.push_back(summary_msg);
+
+        ChatMessage cwd_msg;
+        cwd_msg.role = "system";
+        cwd_msg.content = "[Post-compact context] Current working directory: " + cwd;
+        cwd_msg.is_meta = true;
+        compacted.push_back(cwd_msg);
+
+        compacted.insert(compacted.end(), messages.begin() + tail_start, messages.end());
+
+        const int after = estimate_message_tokens(compacted);
+        if (after >= result.estimated_tokens_before) {
+            continue;
+        }
+
+        result.performed = true;
+        result.can_retry = true;
+        result.messages_removed = tail_start;
+        result.estimated_tokens_after = after;
+        result.protected_user_turns = tail_turns;
+        result.marker_text = summary_msg.content;
+        result.compacted_messages = std::move(compacted);
+        return result;
+    }
+
+    result.error = "Current request is too large to rescue by compacting earlier history.";
+    result.estimated_tokens_after = result.estimated_tokens_before;
+    return result;
 }
 
 // ============================================================

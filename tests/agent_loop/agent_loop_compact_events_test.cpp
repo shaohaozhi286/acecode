@@ -5,6 +5,7 @@
 #include "permissions.hpp"
 #include "provider/llm_provider.hpp"
 #include "tool/tool_executor.hpp"
+#include "stub_provider.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -96,6 +97,25 @@ void add_compactable_history(acecode::AgentLoop& loop, int turns = 5) {
         loop.push_message(loop_msg("user", "old user " + std::to_string(i) + " " + std::string(900, 'u')));
         loop.push_message(loop_msg("assistant", "old assistant " + std::to_string(i) + " " + std::string(900, 'a')));
     }
+}
+
+acecode::ProviderErrorInfo make_context_overflow_error() {
+    acecode::ProviderErrorInfo error;
+    error.kind = acecode::ProviderErrorKind::Http;
+    error.status_code = 400;
+    error.display_message = "context_length_exceeded: maximum context length exceeded";
+    error.raw_body = R"({"error":{"code":"context_length_exceeded"}})";
+    return error;
+}
+
+bool request_contains(const std::vector<acecode::ChatMessage>& messages,
+                      const std::string& needle) {
+    for (const auto& msg : messages) {
+        if (msg.content.find(needle) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
 }
 
 std::vector<acecode::SessionEvent> wait_for_done(
@@ -312,4 +332,85 @@ TEST(AgentLoopCompactEvents, AutoCompactCircuitBreakerDoesNotBlockManualCompact)
     });
     EXPECT_EQ(provider->chat_calls, acecode::MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES + 1)
         << "manual compact should still call the compact provider after auto circuit breaker trips";
+}
+
+TEST(AgentLoopCompactEvents, ContextOverflowRescueCompactsAndRetriesRequest) {
+    auto provider = std::make_shared<acecode_test::StubLlmProvider>();
+    provider->push_error(make_context_overflow_error());
+    provider->push_text("recovered");
+    acecode::ToolExecutor tools;
+    acecode::PermissionManager permissions;
+    acecode::AgentCallbacks cb;
+
+    acecode::AgentLoop loop(
+        [&]() -> std::shared_ptr<acecode::LlmProvider> { return provider; },
+        tools,
+        cb,
+        "/tmp/rescue-compact",
+        permissions);
+    loop.set_context_window(1000000);
+    add_compactable_history(loop, 6);
+
+    auto events = wait_for_done(loop, [&] {
+        loop.submit("latest user request");
+    });
+
+    EXPECT_EQ(provider->turn_count(), 2);
+    auto first_request = provider->messages_for_turn(0);
+    auto second_request = provider->messages_for_turn(1);
+    EXPECT_LT(second_request.size(), first_request.size());
+    EXPECT_TRUE(request_contains(second_request, "latest user request"));
+    EXPECT_TRUE(request_contains(second_request, "detailed summary was not generated"));
+    EXPECT_FALSE(request_contains(second_request, "old user 0"));
+
+    bool saw_replace = false;
+    bool saw_rescue_message = false;
+    for (const auto& evt : events) {
+        if (evt.kind == acecode::SessionEventKind::TranscriptReplace) {
+            saw_replace = true;
+        }
+        if (evt.kind == acecode::SessionEventKind::Message &&
+            evt.payload.value("role", "") == "system" &&
+            evt.payload.value("content", "").find("[Rescue compact]") != std::string::npos) {
+            saw_rescue_message = true;
+        }
+    }
+    EXPECT_TRUE(saw_replace);
+    EXPECT_TRUE(saw_rescue_message);
+}
+
+TEST(AgentLoopCompactEvents, ContextOverflowSingleTurnDoesNotRetryForever) {
+    auto provider = std::make_shared<acecode_test::StubLlmProvider>();
+    provider->push_error(make_context_overflow_error());
+    acecode::ToolExecutor tools;
+    acecode::PermissionManager permissions;
+    acecode::AgentCallbacks cb;
+
+    acecode::AgentLoop loop(
+        [&]() -> std::shared_ptr<acecode::LlmProvider> { return provider; },
+        tools,
+        cb,
+        "/tmp/rescue-compact",
+        permissions);
+    loop.set_context_window(1000000);
+
+    auto events = wait_for_done(loop, [&] {
+        loop.submit("single oversized turn");
+    });
+
+    EXPECT_EQ(provider->turn_count(), 1);
+    bool saw_replace = false;
+    bool saw_error = false;
+    for (const auto& evt : events) {
+        if (evt.kind == acecode::SessionEventKind::TranscriptReplace) {
+            saw_replace = true;
+        }
+        if (evt.kind == acecode::SessionEventKind::Message &&
+            evt.payload.value("role", "") == "error" &&
+            evt.payload.value("content", "").find("cannot be rescued") != std::string::npos) {
+            saw_error = true;
+        }
+    }
+    EXPECT_FALSE(saw_replace);
+    EXPECT_TRUE(saw_error);
 }

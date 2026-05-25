@@ -10,8 +10,10 @@ class MemoryRegistry;
 struct ProjectInstructionsConfig;
 struct MemoryConfig;
 
-// Build the full system prompt with identity, environment info, tool descriptions,
-// and behavior rules. Regenerated each turn to ensure freshness.
+// Build the static system prompt with identity, stable environment info, tool
+// descriptions, and behavior rules. Per-request context such as current time
+// and CWD belongs in build_request_context_prompt() so provider prompt caches
+// can reuse this prefix across turns.
 // When `skills` is non-null and at least one skill is registered, a short hint
 // line is appended telling the model about the skills_list / skill_view tools.
 // When `memory` is non-null and MEMORY.md is non-empty, a `# User Memory`
@@ -23,5 +25,10 @@ std::string build_system_prompt(const ToolExecutor& tools, const std::string& cw
                                 const MemoryRegistry* memory = nullptr,
                                 const MemoryConfig* memory_cfg = nullptr,
                                 const ProjectInstructionsConfig* project_instructions_cfg = nullptr);
+
+// Build dynamic request-local context. This is sent near the end of the
+// messages array for the current provider call only; it must not be persisted
+// into session history.
+std::string build_request_context_prompt(const std::string& cwd);
 
 } // namespace acecode

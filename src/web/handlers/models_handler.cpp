@@ -147,12 +147,12 @@ std::optional<ModelProbeRequest> parse_model_probe_request(const nlohmann::json&
     request.api_key = string_value("api_key");
 
     if (request.provider.empty()) request.provider = "openai";
-    if (request.provider != "openai") {
+    if (request.provider != "openai" && request.provider != "copilot") {
         err_code = "UNKNOWN_PROVIDER";
-        err = "model probing currently supports provider=openai";
+        err = "model probing currently supports provider=openai or provider=copilot";
         return std::nullopt;
     }
-    if (request.base_url.empty()) {
+    if (request.provider == "openai" && request.base_url.empty()) {
         err_code = "MISSING_BASE_URL";
         err = "base_url is required";
         return std::nullopt;

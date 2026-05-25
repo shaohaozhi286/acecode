@@ -74,15 +74,28 @@ TEST_F(SystemPromptTest, EmptyInputsOmitSections) {
     EXPECT_EQ(out.find("# Project Instructions"), std::string::npos);
 }
 
-// 场景:每轮 system prompt 的 Environment 段必须暴露本地日期时间,
-// 让模型回答"现在几点"/"今天"等相对时间问题时不靠猜。
-TEST_F(SystemPromptTest, EnvironmentIncludesCurrentLocalDatetime) {
+// 场景:静态 system prompt 不能包含每次请求都可能变化的上下文,
+// 否则 DeepSeek 等 provider 的 prompt cache 前缀会被打穿。
+TEST_F(SystemPromptTest, StaticEnvironmentOmitsPerRequestContext) {
     acecode::ToolExecutor tools;
     std::string out = acecode::build_system_prompt(tools, temp_home.string());
 
     EXPECT_NE(out.find("# Environment"), std::string::npos);
-    EXPECT_NE(out.find("- Current local date/time: "), std::string::npos);
+    EXPECT_NE(out.find("- OS: "), std::string::npos);
+    EXPECT_NE(out.find("- Shell: "), std::string::npos);
+    EXPECT_EQ(out.find("- CWD: "), std::string::npos);
+    EXPECT_EQ(out.find("Current local date/time"), std::string::npos);
+}
+
+// 场景:动态请求上下文单独构建,由 AgentLoop 放到消息尾部,
+// 让模型仍能回答"现在几点"/"当前目录"等问题。
+TEST_F(SystemPromptTest, RequestContextIncludesCwdAndCurrentLocalDatetime) {
+    std::string out = acecode::build_request_context_prompt(temp_home.string());
+
+    EXPECT_NE(out.find("[当前环境状态]"), std::string::npos);
+    EXPECT_NE(out.find("时间："), std::string::npos);
     EXPECT_NE(out.find(" UTC"), std::string::npos);
+    EXPECT_NE(out.find("工作目录：" + temp_home.string()), std::string::npos);
 }
 
 // 场景:memory 有条目 -> MEMORY.md 非空 -> 注入 User Memory 段

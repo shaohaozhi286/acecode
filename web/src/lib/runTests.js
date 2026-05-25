@@ -22,6 +22,8 @@ import './pinnedSessions.test.js';
 import './usePreference.test.js';
 import './uiPrefs.test.js';
 import './api.test.js';
+import './externalUrl.test.js';
+import './systemClipboard.test.js';
 import './searchSessions.test.js';
 import './useGlobalShortcut.test.js';
 import './browserDefaults.test.js';

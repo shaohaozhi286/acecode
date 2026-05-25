@@ -18,6 +18,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
+#include <utility>
 #include <cpr/cpr.h>
 #include <cpr/ssl_options.h>
 #include <nlohmann/json.hpp>
@@ -120,47 +121,13 @@ static void configure_copilot(AppConfig& cfg) {
 
     // Fetch available models from Copilot API
     std::cout << "\nFetching available models..." << std::endl;
-    CopilotToken ct = exchange_copilot_token(github_token);
-
     std::vector<std::string> model_ids;
-    if (!ct.token.empty()) {
-        static const std::string kCopilotModelsUrl =
-            "https://api.githubcopilot.com/models";
-        auto proxy_opts = network::proxy_options_for(kCopilotModelsUrl);
-        cpr::Response r = cpr::Get(
-            cpr::Url{kCopilotModelsUrl},
-            cpr::Header{
-                {"Authorization", "Bearer " + ct.token},
-                {"Editor-Version", "acecode/0.1.0"},
-                {"Editor-Plugin-Version", "acecode/0.1.0"},
-                {"Copilot-Integration-Id", "vscode-chat"},
-                {"Openai-Intent", "conversation-panel"}
-            },
-            network::build_ssl_options(proxy_opts),
-            proxy_opts.proxies,
-            proxy_opts.auth,
-            cpr::Timeout{10000}
-        );
-
-        if (r.status_code == 200) {
-            try {
-                auto j = nlohmann::json::parse(r.text);
-                if (j.contains("data") && j["data"].is_array()) {
-                    for (const auto& m : j["data"]) {
-                        if (!m.contains("id") || !m["id"].is_string()) continue;
-                        // Filter to chat-capable models only
-                        if (m.contains("capabilities")) {
-                            const auto& caps = m["capabilities"];
-                            if (caps.contains("type") && caps["type"].is_string()
-                                && caps["type"].get<std::string>() != "chat") {
-                                continue;
-                            }
-                        }
-                        model_ids.push_back(m["id"].get<std::string>());
-                    }
-                }
-            } catch (...) {}
-        }
+    CopilotModelsResult models_result = fetch_copilot_model_ids(github_token);
+    if (models_result.error.empty()) {
+        model_ids = std::move(models_result.models);
+    } else if (!models_result.message.empty()) {
+        std::cerr << "Warning: Could not fetch Copilot model list: "
+                  << models_result.message << std::endl;
     }
 
     // Catalog augmentation: enrich each id with metadata from models.dev

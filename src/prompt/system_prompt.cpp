@@ -170,9 +170,7 @@ std::string build_system_prompt(const ToolExecutor& tools, const std::string& cw
 
     oss << "# Environment\n\n"
         << "- OS: " << get_os_name() << "\n"
-        << "- CWD: " << cwd << "\n"
-        << "- Shell: " << get_default_shell() << "\n"
-        << "- Current local date/time: " << current_prompt_datetime() << "\n\n";
+        << "- Shell: " << get_default_shell() << "\n\n";
 
     oss << get_shell_guidance();
 
@@ -262,6 +260,14 @@ std::string build_system_prompt(const ToolExecutor& tools, const std::string& cw
         }
     }
 
+    return oss.str();
+}
+
+std::string build_request_context_prompt(const std::string& cwd) {
+    std::ostringstream oss;
+    oss << "[当前环境状态]\n"
+        << "时间：" << current_prompt_datetime() << "\n"
+        << "工作目录：" << cwd;
     return oss.str();
 }
 

@@ -146,6 +146,10 @@ public:
         return provider_->messages_for_turn(zero_based_index);
     }
 
+    std::vector<ChatMessage> persisted_messages() const {
+        return loop_->messages();
+    }
+
     struct Msg {
         std::string role;
         std::string content;
@@ -227,6 +231,32 @@ TEST(AgentLoopTermination, TextOnlyEndsTurnUnconditionally) {
     EXPECT_EQ(h.count_nudges(), 0);  // 防回归:绝不该出现 nudge
     EXPECT_EQ(h.last_system_message().find("Agent loop stopped"),
               std::string::npos);  // 正常退出,无 cap 消息
+}
+
+// 场景:动态时间/CWD 只进入发给 provider 的 API 消息尾部,
+// 不写入会话历史,避免 system prompt 前缀每轮变化。
+TEST(AgentLoopTermination, RequestContextIsApiOnlyAndAtMessageTail) {
+    AgentLoopHarness h;
+    h.push_text("ok");
+
+    ASSERT_TRUE(h.submit_and_wait("what time is it?"));
+    ASSERT_EQ(h.turn_count(), 1);
+
+    auto request = h.request_messages_for_turn(0);
+    ASSERT_GE(request.size(), 2u);
+    EXPECT_EQ(request.front().role, "system");
+    EXPECT_EQ(request.back().role, "user");
+    EXPECT_NE(request.back().content.find("[当前环境状态]"), std::string::npos);
+    EXPECT_NE(request.back().content.find("时间："), std::string::npos);
+    EXPECT_NE(request.back().content.find("工作目录：."), std::string::npos);
+    EXPECT_NE(request.back().content.find("[用户输入]"), std::string::npos);
+    EXPECT_NE(request.back().content.find("what time is it?"), std::string::npos);
+
+    auto persisted = h.persisted_messages();
+    ASSERT_GE(persisted.size(), 2u);
+    EXPECT_EQ(persisted[0].role, "user");
+    EXPECT_EQ(persisted[0].content, "what time is it?");
+    EXPECT_EQ(persisted[0].content.find("[当前环境状态]"), std::string::npos);
 }
 
 // 场景 (b):turn 1 就调用 task_complete → 1 轮退出,无 cap 消息

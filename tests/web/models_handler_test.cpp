@@ -287,7 +287,7 @@ TEST(ModelsHandler, ParseProbeRequestValidatesProviderAndBaseUrl) {
     std::string code;
     std::string err;
     auto unsupported = parse_model_probe_request(
-        nlohmann::json{{"provider", "copilot"}, {"base_url", "http://x"}},
+        nlohmann::json{{"provider", "anthropic"}, {"base_url", "http://x"}},
         code,
         err);
     EXPECT_FALSE(unsupported.has_value());
@@ -311,4 +311,14 @@ TEST(ModelsHandler, ParseProbeRequestValidatesProviderAndBaseUrl) {
     ASSERT_TRUE(ok.has_value());
     EXPECT_EQ(ok->base_url, "http://localhost/v1");
     EXPECT_EQ(ok->api_key, "sk");
+
+    code.clear();
+    err.clear();
+    auto copilot = parse_model_probe_request(
+        nlohmann::json{{"provider", "copilot"}},
+        code,
+        err);
+    ASSERT_TRUE(copilot.has_value());
+    EXPECT_EQ(copilot->provider, "copilot");
+    EXPECT_TRUE(copilot->base_url.empty());
 }

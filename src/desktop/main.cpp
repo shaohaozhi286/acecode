@@ -16,6 +16,7 @@
 #include "daemon_pool.hpp"
 #include "dpi_win.hpp"
 #include "edge_app_launcher.hpp"
+#include "external_url.hpp"
 #include "folder_picker.hpp"
 #include "notifications_win.hpp"
 #include "open_in_explorer.hpp"
@@ -28,6 +29,7 @@
 #include "workspace_registry.hpp"
 
 #include "../config/config.hpp"
+#include "../utils/clipboard.hpp"
 #include "../utils/cwd_hash.hpp"
 #include "../utils/encoding.hpp"
 #include "../utils/logger.hpp"
@@ -765,6 +767,44 @@ int main(int argc, char** argv) {
     host.bind("aceDesktop_openDevTools", [&](const std::string& /*req*/) -> std::string {
         if (!desktop_debug) return nlohmann::json{{"ok", false}, {"error", "debug only"}}.dump();
         return nlohmann::json{{"ok", host.open_dev_tools()}}.dump();
+    });
+
+    host.bind("aceDesktop_openExternalUrl", [&](const std::string& req) -> std::string {
+        try {
+            auto arr = nlohmann::json::parse(req);
+            if (!arr.is_array() || arr.empty() || !arr[0].is_string()) {
+                return nlohmann::json{{"ok", false}, {"error", "expect [url]"}}.dump();
+            }
+            auto result = acecode::desktop::open_external_url(arr[0].get<std::string>());
+            if (!result.ok) {
+                return nlohmann::json{{"ok", false}, {"error", result.error}}.dump();
+            }
+            return nlohmann::json{{"ok", true}}.dump();
+        } catch (const std::exception& e) {
+            return nlohmann::json{{"ok", false}, {"error", std::string("parse: ") + e.what()}}.dump();
+        }
+    });
+
+    host.bind("aceDesktop_writeClipboardText", [&](const std::string& req) -> std::string {
+        try {
+            auto arr = nlohmann::json::parse(req);
+            if (!arr.is_array() || arr.empty() || !arr[0].is_string()) {
+                return nlohmann::json{{"ok", false}, {"error", "expect [text]"}}.dump();
+            }
+            auto result = acecode::write_system_clipboard_text(arr[0].get<std::string>());
+            if (!result) {
+                std::string error = result.detail;
+                if (error.empty()) {
+                    error = result.status == acecode::ClipboardTextWriteResult::Status::TooLarge
+                        ? "clipboard text is too large"
+                        : "clipboard unavailable";
+                }
+                return nlohmann::json{{"ok", false}, {"error", error}}.dump();
+            }
+            return nlohmann::json{{"ok", true}}.dump();
+        } catch (const std::exception& e) {
+            return nlohmann::json{{"ok", false}, {"error", std::string("parse: ") + e.what()}}.dump();
+        }
     });
 
     auto parse_pointer_event = [](const nlohmann::json& arr) {

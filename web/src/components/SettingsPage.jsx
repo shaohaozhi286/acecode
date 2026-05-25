@@ -1,13 +1,15 @@
 // 全屏设置页:左栏导航 + 右栏内容(Codex 风格)。
 //
 // 设计来源:Claude Design 高保真原型 (panels.jsx)。NAV 顺序与设计稿一致。
-// 后端真实接入的 section:常规 (权限模式) / 外观 (主题) / 配置 / 模型 (ModelManager) / 工具。
+// 后端真实接入的 section:常规 (权限模式) / 外观 (主题) / 配置 / 模型 / 工具。
 // 其余 section (个性化 / MCP / 已归档会话 / 使用情况) 当前部分为 UI 占位
 // — 状态走本地 useState,提交按钮无网络副作用,待后端接口就绪后接入。
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTheme } from '../theme.jsx';
 import { api } from '../lib/api.js';
+import { openExternalUrl } from '../lib/externalUrl.js';
+import { copyTextToSystemClipboard } from '../lib/systemClipboard.js';
 import { Toggle } from './Modal.jsx';
 import { clsx, relativeTime } from '../lib/format.js';
 import { lookupErrorMessage } from '../lib/errors.js';
@@ -21,8 +23,7 @@ import {
 } from '../lib/modelManager.js';
 import { normalizePermissionMode } from '../lib/permissionMode.js';
 import { sessionDisplayTitle } from '../lib/sessionTitle.js';
-import { VsIcon } from './Icon.jsx';
-import { ModelManager } from './ModelManager.jsx';
+import { RefreshIcon, VsIcon } from './Icon.jsx';
 import { toast } from './Toast.jsx';
 import {
   WindowControls,
@@ -38,7 +39,6 @@ const NAV = [
   { key: 'personalization', label: '个性化' },
   { key: 'mcp', label: 'MCP 服务器' },
   { key: 'models', label: '模型' },
-  { key: 'models-new', label: '模型(新)' },
   { key: 'tools', label: '工具' },
   { key: 'archived', label: '已归档会话' },
   { key: 'usage', label: '使用情况' },
@@ -142,16 +142,7 @@ export function SettingsPage({
             />
           )}
           {activeNavKey === 'mcp' && <SectionMCP />}
-          {activeNavKey === 'models' && (
-            <>
-              <h2 className="text-xl font-bold mb-1">模型</h2>
-              <p className="text-[12px] text-fg-mute mb-5">
-                管理已保存的模型预设;★ 表示当前默认。聊天界面顶栏切换的就是这里的列表。
-              </p>
-              <ModelManager />
-            </>
-          )}
-          {activeNavKey === 'models-new' && <SectionModelNew />}
+          {activeNavKey === 'models' && <SectionModel />}
           {activeNavKey === 'tools' && <SectionTools />}
           {activeNavKey === 'archived' && <SectionArchived />}
           {activeNavKey === 'usage' && <SectionUsage />}
@@ -1152,7 +1143,7 @@ function SectionUsage() {
   );
 }
 
-// ─── 模型(新) ────────────────────────────────────────────────────────────
+// ─── 模型 ────────────────────────────────────────────────────────────────
 // Claude Design 高保真原型 (panels.jsx::renderModelContent) 的真实接入版本。
 // saved_models 仍是唯一持久化来源;多选模型提交时拆成多个 saved model 条目。
 
@@ -1201,15 +1192,36 @@ function providerLabel(provider) {
   return provider === 'copilot' ? 'Copilot' : 'OpenAI';
 }
 
-function SectionModelNew() {
+function SectionModel() {
   const [models, setModels] = useState([]);
   const [defaultName, setDefaultName] = useState('');
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState('');
+  const [copilotAuth, setCopilotAuth] = useState({
+    loading: true,
+    authenticated: false,
+    has_token: false,
+  });
+  const [copilotBusy, setCopilotBusy] = useState('');
+  const [copilotFlow, setCopilotFlow] = useState(null);
   const [editingName, setEditingName] = useState(null);
   const [showAdd, setShowAdd] = useState(false);
   const [draft, setDraft] = useState(MODEL_NEW_DRAFT_DEFAULT);
   const [apiKeyTouched, setApiKeyTouched] = useState(false);
+
+  const refreshCopilotAuth = useCallback(async () => {
+    setCopilotAuth((s) => ({ ...s, loading: true }));
+    try {
+      const state = await api.getCopilotAuth();
+      setCopilotAuth({
+        loading: false,
+        authenticated: !!state?.authenticated,
+        has_token: !!state?.has_token,
+      });
+    } catch {
+      setCopilotAuth({ loading: false, authenticated: false, has_token: false });
+    }
+  }, []);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -1230,6 +1242,113 @@ function SectionModelNew() {
   useEffect(() => {
     refresh();
   }, [refresh]);
+  useEffect(() => {
+    refreshCopilotAuth();
+  }, [refreshCopilotAuth]);
+
+  const pollCopilotFlow = useCallback(async () => {
+    if (!copilotFlow?.device_code || copilotBusy) return;
+    setCopilotBusy('poll');
+    try {
+      const state = await api.pollCopilotAuth(copilotFlow.device_code);
+      if (state?.status === 'authenticated') {
+        setCopilotFlow(null);
+        setCopilotAuth({ loading: false, authenticated: true, has_token: true });
+        toast({ kind: 'ok', text: 'Copilot 已登录' });
+        return;
+      }
+      const intervalDelta = Number(state?.interval_delta_seconds || 0);
+      setCopilotFlow((flow) => flow ? {
+        ...flow,
+        status: state?.status || 'pending',
+        message: state?.message || (state?.status === 'slow_down' ? '轮询间隔已调整' : '等待 GitHub 授权'),
+        interval: Math.max(1, Number(flow.interval || 5) + (intervalDelta > 0 ? intervalDelta : 0)),
+      } : flow);
+      if (state?.status === 'expired' || state?.status === 'failed') {
+        toast({ kind: 'err', text: state?.message || 'Copilot 登录失败' });
+      }
+    } catch (err) {
+      setCopilotFlow((flow) => flow ? {
+        ...flow,
+        status: 'failed',
+        message: lookupErrorMessage(err?.code, err?.message),
+      } : flow);
+      toast({ kind: 'err', text: lookupErrorMessage(err?.code, err?.message) });
+    } finally {
+      setCopilotBusy('');
+    }
+  }, [copilotBusy, copilotFlow]);
+
+  useEffect(() => {
+    if (!copilotFlow?.device_code) return undefined;
+    if (copilotBusy) return undefined;
+    if (copilotFlow.status === 'authenticated' ||
+        copilotFlow.status === 'expired' ||
+        copilotFlow.status === 'failed') {
+      return undefined;
+    }
+    const delay = Math.max(1, Number(copilotFlow.interval || 5)) * 1000;
+    const id = window.setTimeout(() => { pollCopilotFlow(); }, delay);
+    return () => window.clearTimeout(id);
+  }, [copilotBusy, copilotFlow, pollCopilotFlow]);
+
+  const copyCopilotUserCode = useCallback(async (userCode, { silent = false } = {}) => {
+    const result = await copyTextToSystemClipboard(userCode);
+    if (result.ok) {
+      if (!silent) toast({ kind: 'ok', text: '验证码已复制' });
+      return result;
+    }
+    if (!silent) {
+      toast({ kind: 'err', text: '复制验证码失败:' + (result.error || '') });
+    }
+    return result;
+  }, []);
+
+  const startCopilotLogin = async () => {
+    if (copilotBusy) return;
+    setCopilotBusy('start');
+    try {
+      const flow = await api.startCopilotAuth();
+      setCopilotFlow({
+        ...flow,
+        status: 'pending',
+        interval: Math.max(1, Number(flow?.interval || 5)),
+        message: '等待 GitHub 授权',
+      });
+      const copyResult = flow?.user_code
+        ? await copyCopilotUserCode(flow.user_code, { silent: true })
+        : null;
+      if (copyResult && !copyResult.ok) {
+        toast({ kind: 'err', text: '验证码自动复制失败:' + (copyResult.error || '') });
+      }
+      if (flow?.verification_uri) {
+        const opened = await openExternalUrl(flow.verification_uri);
+        if (!opened.ok) {
+          toast({ kind: 'err', text: '无法打开系统浏览器:' + (opened.error || '') });
+        }
+      }
+      toast({ kind: 'ok', text: copyResult?.ok ? 'Copilot 登录已开始,验证码已复制' : 'Copilot 登录已开始' });
+    } catch (err) {
+      toast({ kind: 'err', text: lookupErrorMessage(err?.code, err?.message) });
+    } finally {
+      setCopilotBusy('');
+    }
+  };
+
+  const logoutCopilot = async () => {
+    if (copilotBusy) return;
+    setCopilotBusy('logout');
+    try {
+      await api.logoutCopilot();
+      setCopilotFlow(null);
+      setCopilotAuth({ loading: false, authenticated: false, has_token: false });
+      toast({ kind: 'ok', text: 'Copilot 已退出' });
+    } catch (err) {
+      toast({ kind: 'err', text: lookupErrorMessage(err?.code, err?.message) });
+    } finally {
+      setCopilotBusy('');
+    }
+  };
 
   const resetForm = () => {
     setEditingName(null);
@@ -1338,10 +1457,22 @@ function SectionModelNew() {
 
   return (
     <>
-      <h2 className="text-xl font-bold mb-1">模型(新)</h2>
+      <h2 className="text-xl font-bold mb-1">模型</h2>
       <p className="text-[13px] text-fg-mute leading-relaxed mb-6">
         管理已保存的模型预设。标记 ★ 的为当前默认模型,聊天界面顶栏切换的模型列表来自这里。
       </p>
+
+      <CopilotAuthPanel
+        auth={copilotAuth}
+        flow={copilotFlow}
+        busy={copilotBusy}
+        onRefresh={refreshCopilotAuth}
+        onStart={startCopilotLogin}
+        onPoll={pollCopilotFlow}
+        onLogout={logoutCopilot}
+        onOpenExternalUrl={openExternalUrl}
+        onCopyCode={(code) => copyCopilotUserCode(code)}
+      />
 
       <div className="flex items-center justify-between mb-3">
         <div className="text-[12px] text-fg-mute">
@@ -1383,6 +1514,7 @@ function SectionModelNew() {
                   busy={busy === 'submit'}
                   allowMultiple={false}
                   onProbeModels={api.probeModels}
+                  copilotAuthenticated={copilotAuth.authenticated}
                 />
               </div>
             );
@@ -1497,6 +1629,7 @@ function SectionModelNew() {
             onProbeModels={api.probeModels}
             apiKeyTouched={apiKeyTouched}
             setApiKeyTouched={setApiKeyTouched}
+            copilotAuthenticated={copilotAuth.authenticated}
           />
         </div>
       ) : (
@@ -1512,6 +1645,124 @@ function SectionModelNew() {
   );
 }
 
+function CopilotAuthPanel({
+  auth,
+  flow,
+  busy = '',
+  onRefresh,
+  onStart,
+  onPoll,
+  onLogout,
+  onOpenExternalUrl = openExternalUrl,
+  onCopyCode = () => {},
+}) {
+  const pending = busy === 'start' || busy === 'poll' || busy === 'logout';
+  const loggedIn = !!auth?.authenticated;
+  const statusText = auth?.loading ? '检查中' : loggedIn ? '已登录' : '未登录';
+  const statusClass = auth?.loading
+    ? 'text-fg-mute bg-surface-hi'
+    : loggedIn
+      ? 'text-ok bg-ok/15'
+      : 'text-warn bg-warn/15';
+
+  return (
+    <div className="rounded-lg border border-border bg-surface mb-6 overflow-hidden">
+      <div className="px-5 py-3.5 flex items-center gap-3 border-b border-border">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 mb-1">
+            <span className="text-[14px] font-semibold">Copilot</span>
+            <span className={clsx('px-2 py-[2px] rounded text-[10px] font-medium', statusClass)}>
+              {statusText}
+            </span>
+          </div>
+          <div className="text-[12px] text-fg-mute">
+            GitHub Copilot 认证用于获取 Copilot 模型列表和运行 Copilot saved model。
+          </div>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={onRefresh}
+            disabled={pending || auth?.loading}
+            className="w-8 h-8 rounded-md flex items-center justify-center text-fg-mute hover:bg-surface-hi transition disabled:opacity-40"
+            title="刷新状态"
+          >
+            <RefreshIcon size={14} />
+          </button>
+          {loggedIn ? (
+            <button
+              type="button"
+              onClick={onLogout}
+              disabled={pending}
+              className="px-3 py-1.5 rounded-md border border-border text-[12px] text-fg-2 hover:bg-surface-hi transition disabled:opacity-50"
+            >
+              退出
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={onStart}
+              disabled={pending}
+              className="px-3.5 py-1.5 rounded-md bg-accent text-white text-[12px] font-medium hover:opacity-90 transition disabled:opacity-50"
+            >
+              登录
+            </button>
+          )}
+        </div>
+      </div>
+
+      {flow?.device_code && (
+        <div className="px-5 py-4 bg-surface-alt">
+          <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-3 items-center">
+            <div className="min-w-0">
+              <div className="text-[12px] text-fg-mute mb-1">GitHub 验证码</div>
+              <div className="flex items-center gap-2">
+                <div className="font-mono text-[20px] font-semibold tracking-[0.12em] text-fg">
+                  {flow.user_code}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onCopyCode(flow.user_code)}
+                  disabled={!flow.user_code}
+                  className="h-8 px-2.5 rounded-md border border-border bg-surface text-[12px] text-fg-2 inline-flex items-center gap-1.5 hover:bg-surface-hi transition disabled:opacity-40"
+                  title="复制验证码"
+                >
+                  <VsIcon name="copy" size={13} />
+                  复制
+                </button>
+              </div>
+              <a
+                href={flow.verification_uri}
+                onClick={async (event) => {
+                  event.preventDefault();
+                  const opened = await onOpenExternalUrl(flow.verification_uri);
+                  if (!opened.ok) {
+                    toast({ kind: 'err', text: '无法打开系统浏览器:' + (opened.error || '') });
+                  }
+                }}
+                className="mt-1 inline-block text-[12px] text-accent hover:underline break-all"
+              >
+                {flow.verification_uri}
+              </a>
+            </div>
+            <button
+              type="button"
+              onClick={onPoll}
+              disabled={pending || flow.status === 'expired' || flow.status === 'failed'}
+              className="px-3 py-1.5 rounded-md border border-border text-[12px] text-fg-2 hover:bg-surface-hi transition disabled:opacity-40"
+            >
+              检查
+            </button>
+          </div>
+          <div className="mt-3 text-[12px] text-fg-mute">
+            {busy === 'poll' ? '正在检查...' : flow.message || '等待 GitHub 授权'}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ModelFormPreview({
   data,
   setData,
@@ -1524,6 +1775,7 @@ function ModelFormPreview({
   apiKeyTouched = false,
   setApiKeyTouched = () => {},
   onProbeModels,
+  copilotAuthenticated = false,
 }) {
   // 每个 form 实例独立维护 picker 状态 — 不同 baseUrl 的 fetch 结果不混淆。
   // fetchStatus 状态机:'idle' → 'fetching' → ('success' | 'failed')
@@ -1541,16 +1793,19 @@ function ModelFormPreview({
     () => filterModelIds(available || [], modelFilter),
     [available, modelFilter],
   );
+  const canProbeModels = data.provider === 'copilot'
+    ? copilotAuthenticated
+    : data.provider === 'openai' && !!data.base_url;
 
   const doFetch = async () => {
-    if (!onProbeModels || data.provider !== 'openai' || !data.base_url) return;
+    if (!onProbeModels || !canProbeModels) return;
     setFetchStatus('fetching');
     setFetchError('');
     try {
       const result = await onProbeModels({
         provider: data.provider,
-        base_url: data.base_url,
-        api_key: data.api_key === MODEL_NEW_API_KEY_MASK ? '' : data.api_key,
+        base_url: data.provider === 'openai' ? data.base_url : '',
+        api_key: data.provider === 'openai' && data.api_key !== MODEL_NEW_API_KEY_MASK ? data.api_key : '',
       });
       const ids = Array.isArray(result?.models) ? result.models : [];
       setAvailable(ids);
@@ -1569,13 +1824,13 @@ function ModelFormPreview({
     }
     setPickerOpen(true);
     // 仅在 idle (从未尝试) 时自动 fetch;上次 failed 不自动重试 — 走刷新按钮。
-    if (fetchStatus === 'idle' && data.provider === 'openai' && data.base_url) {
+    if (fetchStatus === 'idle' && canProbeModels) {
       doFetch();
     }
   };
 
   const refresh = () => {
-    if (data.provider !== 'openai' || !data.base_url) return;
+    if (!canProbeModels) return;
     doFetch();
   };
 
@@ -1787,7 +2042,7 @@ function ModelFormPreview({
             {/* 已查询模型 section header (含状态 + 刷新按钮) */}
             <div className="flex items-center justify-between px-3.5 py-1.5 bg-surface-alt border-b border-border">
               <span className="text-[11px] text-fg-mute">
-                {data.provider !== 'openai' && 'Copilot 模型请手动输入'}
+                {data.provider === 'copilot' && fetchStatus === 'idle' && (copilotAuthenticated ? '尚未获取 Copilot 模型列表' : '请先登录 Copilot,也可手动输入')}
                 {data.provider === 'openai' && fetchStatus === 'idle' && (data.base_url ? '尚未获取模型列表' : '请先填写 Base URL')}
                 {fetchStatus === 'fetching' && '正在获取...'}
                 {fetchStatus === 'success' && (
@@ -1800,8 +2055,8 @@ function ModelFormPreview({
               <button
                 type="button"
                 onClick={refresh}
-                disabled={data.provider !== 'openai' || !data.base_url || fetchStatus === 'fetching'}
-                title={data.provider === 'openai' && data.base_url ? '刷新模型列表' : '请先填写 Base URL'}
+                disabled={!canProbeModels || fetchStatus === 'fetching'}
+                title={canProbeModels ? '刷新模型列表' : (data.provider === 'copilot' ? '请先登录 Copilot' : '请先填写 Base URL')}
                 className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] text-fg-2 rounded hover:bg-surface-hi transition disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 <svg
