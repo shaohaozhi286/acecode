@@ -26,5 +26,5 @@ if(MSVC)
 endif()
 
 if(WIN32)
-    target_link_libraries(ace-browser-host PRIVATE ws2_32)
+    target_link_libraries(ace-browser-host PRIVATE ws2_32 shell32)
 endif()

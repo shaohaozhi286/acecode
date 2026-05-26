@@ -3,6 +3,7 @@ const DEFAULT_PORT = 52007;
 const PROTOCOL_VERSION = "0.1";
 const HEARTBEAT_ALARM = "ace-browser-host-heartbeat";
 const SESSION_REGISTRY_STORAGE_KEY = "aceBrowserBridgeSessions";
+const NAVIGATION_TIMEOUT_MS = 15000;
 
 let daemonPort = DEFAULT_PORT;
 let connectionState = {
@@ -32,7 +33,8 @@ function capabilities() {
     pdf: true,
     upload: true,
     os_pointer: false,
-    operation_overlay: true
+    operation_overlay: true,
+    input_block: true
   };
 }
 
@@ -66,6 +68,9 @@ function normalizedSessionState(raw) {
   const tabId = Number(raw.tabId);
   const groupId = Number(raw.groupId);
   const storedTitle = typeof raw.groupTitle === "string" ? raw.groupTitle : "";
+  const inputBlockExpiresAt = Number(raw.inputBlockExpiresAt || 0);
+  const inputBlockActive = raw.inputBlocked === true &&
+    (!Number.isFinite(inputBlockExpiresAt) || inputBlockExpiresAt <= 0 || Date.now() < inputBlockExpiresAt);
   return {
     session: raw.session,
     tabId: Number.isFinite(tabId) && tabId > 0 ? tabId : null,
@@ -77,7 +82,13 @@ function normalizedSessionState(raw) {
       : defaultGroupTitle(raw.session),
     lastPointer: raw.lastPointer && Number.isFinite(Number(raw.lastPointer.x)) && Number.isFinite(Number(raw.lastPointer.y))
       ? { x: Number(raw.lastPointer.x), y: Number(raw.lastPointer.y) }
-      : null
+      : null,
+    inputBlocked: inputBlockActive,
+    inputBlockWatchdogMs: Number.isFinite(Number(raw.inputBlockWatchdogMs))
+      ? Number(raw.inputBlockWatchdogMs)
+      : 300000,
+    inputBlockExpiresAt: inputBlockActive && Number.isFinite(inputBlockExpiresAt) ? inputBlockExpiresAt : 0,
+    inputBlockMessage: typeof raw.inputBlockMessage === "string" ? raw.inputBlockMessage : ""
   };
 }
 
@@ -89,7 +100,11 @@ function serializedSessionRegistry() {
     groupId: state.groupId,
     status: state.status,
     groupTitle: state.groupTitle,
-    lastPointer: state.lastPointer
+    lastPointer: state.lastPointer,
+    inputBlocked: state.inputBlocked === true,
+    inputBlockWatchdogMs: state.inputBlockWatchdogMs || 300000,
+    inputBlockExpiresAt: state.inputBlockExpiresAt || 0,
+    inputBlockMessage: state.inputBlockMessage || ""
   }));
 }
 
@@ -210,7 +225,11 @@ function sessionState(session) {
       groupId: null,
       status: "idle",
       groupTitle: defaultGroupTitle(session),
-      lastPointer: null
+      lastPointer: null,
+      inputBlocked: false,
+      inputBlockWatchdogMs: 300000,
+      inputBlockExpiresAt: 0,
+      inputBlockMessage: ""
     });
   }
   return sessions.get(session);
@@ -227,7 +246,46 @@ function trace(session, entry) {
   traceBySession.set(session, list);
 }
 
+function clearInputBlockState(state) {
+  state.inputBlocked = false;
+  state.inputBlockWatchdogMs = 300000;
+  state.inputBlockExpiresAt = 0;
+  state.inputBlockMessage = "";
+}
+
+function inputBlockIsActive(state) {
+  if (!state?.inputBlocked) return false;
+  if (state.inputBlockExpiresAt && Date.now() >= state.inputBlockExpiresAt) {
+    clearInputBlockState(state);
+    scheduleSessionRegistryPersist();
+    return false;
+  }
+  return true;
+}
+
+function inputBlockOverlayArgs(state) {
+  return {
+    watchdog_ms: state.inputBlockWatchdogMs || 300000,
+    message: state.inputBlockMessage || "AI 正在操作浏览器，请暂时不要操作"
+  };
+}
+
+async function applyInputBlockOverlay(session) {
+  const state = sessionState(session);
+  if (!inputBlockIsActive(state)) return { visible: false, pending: false };
+  if (!(await tabExists(state.tabId))) return { visible: false, pending: true };
+  try {
+    await sendPageCommand("show_overlay", inputBlockOverlayArgs(state), state.tabId);
+    return { visible: true, pending: false };
+  } catch (error) {
+    connectionState.lastError = error instanceof Error ? error.message : String(error);
+    return { visible: false, pending: true, warning: connectionState.lastError };
+  }
+}
+
 function statusAfterSuccessfulOperation(session) {
+  const state = sessions.get(session);
+  if (inputBlockIsActive(state)) return "operating";
   return networkBySession.get(session)?.active ? "network" : "idle";
 }
 
@@ -239,6 +297,25 @@ async function tabExists(tabId) {
   } catch {
     return false;
   }
+}
+
+async function waitForTabComplete(tabId, timeoutMs = NAVIGATION_TIMEOUT_MS) {
+  const deadline = Date.now() + timeoutMs;
+
+  await sleep(250);
+  while (Date.now() < deadline) {
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      if (tab.status === "complete") return tab;
+    } catch (error) {
+      throw Object.assign(new Error("navigation tab was closed"), { code: "navigation_tab_closed" });
+    }
+    await sleep(100);
+  }
+
+  throw Object.assign(new Error("timed out waiting for page navigation to complete"), {
+    code: "navigation_timeout"
+  });
 }
 
 async function tabForSession(session) {
@@ -334,9 +411,16 @@ async function sendSessionPageCommand(session, command, args = {}) {
 
 async function withOperatingOverlay(session, actionName, args, fn) {
   await updateGroup(session, null, actionName === "wait" ? "waiting" : "operating");
-  const watchdogMs = args?.operation_overlay_watchdog_ms || 10000;
+  const state = sessionState(session);
+  const manualBlock = inputBlockIsActive(state);
+  const watchdogMs = manualBlock
+    ? (state.inputBlockWatchdogMs || 300000)
+    : (args?.operation_overlay_watchdog_ms || 10000);
   try {
-    await sendSessionPageCommand(session, "show_overlay", { watchdog_ms: watchdogMs });
+    await sendSessionPageCommand(session, "show_overlay", {
+      watchdog_ms: watchdogMs,
+      message: manualBlock ? state.inputBlockMessage : undefined
+    });
   } catch {
     // Some pages cannot receive content scripts; the action below will return the real error.
   }
@@ -358,10 +442,12 @@ async function withOperatingOverlay(session, actionName, args, fn) {
     await updateGroup(session, null, "error");
     return bridgeError(error);
   } finally {
-    try {
-      await sendSessionPageCommand(session, "hide_overlay");
-    } catch {
-      // Ignore cleanup failures; content script watchdog also removes the overlay.
+    if (!inputBlockIsActive(sessionState(session))) {
+      try {
+        await sendSessionPageCommand(session, "hide_overlay");
+      } catch {
+        // Ignore cleanup failures; content script watchdog also removes the overlay.
+      }
     }
   }
 }
@@ -369,6 +455,7 @@ async function withOperatingOverlay(session, actionName, args, fn) {
 async function handleNavigate(session, args) {
   const state = sessionState(session);
   const operation = args.operation || (args.url ? "goto" : "reload");
+  const timeoutMs = clampNumber(args.timeout_ms, 1000, 120000, NAVIGATION_TIMEOUT_MS);
 
   if (operation === "goto") {
     if (!args.url) {
@@ -382,9 +469,12 @@ async function handleNavigate(session, args) {
     } else {
       tab = await chrome.tabs.update(state.tabId, { url: args.url, active: true });
     }
-    await updateGroup(session, args.group_title, "idle");
+    await updateGroup(session, args.group_title, "waiting");
+    tab = await waitForTabComplete(state.tabId, timeoutMs);
+    const blockState = await applyInputBlockOverlay(session);
+    await updateGroup(session, args.group_title, statusAfterSuccessfulOperation(session));
     trace(session, { action: "navigate", url: args.url, tabId: state.tabId });
-    return { ok: true, data: { success: true, url: tab.url || args.url, tabId: state.tabId, ownership: state.ownership } };
+    return { ok: true, data: { success: true, url: tab.url || args.url, tabId: state.tabId, ownership: state.ownership, loaded: true, input_block: blockState } };
   }
 
   const tab = await tabForSession(session);
@@ -392,8 +482,67 @@ async function handleNavigate(session, args) {
   else if (operation === "back") await chrome.tabs.goBack(tab.id);
   else if (operation === "forward") await chrome.tabs.goForward(tab.id);
   else return { ok: false, error: { code: "invalid_request", message: `Unsupported navigate operation: ${operation}` } };
+  await updateGroup(session, null, "waiting");
+  const loadedTab = await waitForTabComplete(tab.id, timeoutMs);
+  const blockState = await applyInputBlockOverlay(session);
+  await updateGroup(session, null, statusAfterSuccessfulOperation(session));
   trace(session, { action: "navigate", operation, tabId: tab.id });
-  return { ok: true, data: { success: true, operation, tabId: tab.id } };
+  return { ok: true, data: { success: true, operation, tabId: tab.id, url: loadedTab.url || tab.url, loaded: true, input_block: blockState } };
+}
+
+async function handleBlockInput(session, args = {}) {
+  const state = sessionState(session);
+  const watchdogMs = clampNumber(args.watchdog_ms ?? args.timeout_ms, 1000, 1800000, 300000);
+  state.inputBlocked = true;
+  state.inputBlockWatchdogMs = watchdogMs;
+  state.inputBlockExpiresAt = Date.now() + watchdogMs;
+  state.inputBlockMessage = typeof args.message === "string" ? args.message.slice(0, 96) : "";
+
+  const blockState = await applyInputBlockOverlay(session);
+  await updateGroup(session, null, "operating");
+  trace(session, {
+    action: "block_input",
+    ok: true,
+    visible: blockState.visible === true,
+    pending: blockState.pending === true
+  });
+  return {
+    ok: true,
+    data: {
+      success: true,
+      blocked: true,
+      visible: blockState.visible === true,
+      pending: blockState.pending === true,
+      warning: blockState.warning || null,
+      watchdog_ms: watchdogMs,
+      expires_at: new Date(state.inputBlockExpiresAt).toISOString()
+    }
+  };
+}
+
+async function handleUnblockInput(session) {
+  const state = sessionState(session);
+  clearInputBlockState(state);
+  let warning = null;
+  if (await tabExists(state.tabId)) {
+    try {
+      await sendPageCommand("hide_overlay", {}, state.tabId);
+    } catch (error) {
+      warning = error instanceof Error ? error.message : String(error);
+      connectionState.lastError = warning;
+    }
+  }
+  await updateGroup(session, null, statusAfterSuccessfulOperation(session));
+  trace(session, { action: "unblock_input", ok: true, warning });
+  return {
+    ok: true,
+    data: {
+      success: true,
+      blocked: false,
+      visible: false,
+      warning
+    }
+  };
 }
 
 async function handleFindTab(session, args) {
@@ -418,9 +567,10 @@ async function handleFindTab(session, args) {
   }
   state.tabId = tab.id;
   state.ownership = "adopted";
-  await updateGroup(session, args.group_title, "idle");
+  const blockState = await applyInputBlockOverlay(session);
+  await updateGroup(session, args.group_title, statusAfterSuccessfulOperation(session));
   trace(session, { action: "find_tab", url: tab.url, tabId: tab.id });
-  return { ok: true, data: { success: true, url: tab.url, title: tab.title, tabId: tab.id, ownership: "adopted" } };
+  return { ok: true, data: { success: true, url: tab.url, title: tab.title, tabId: tab.id, ownership: "adopted", input_block: blockState } };
 }
 
 async function handleListTabs(session) {
@@ -446,6 +596,8 @@ async function handleListTabs(session) {
       groupColor: group?.color || null,
       group_color: group?.color || null,
       status: state.status,
+      inputBlocked: inputBlockIsActive(state),
+      input_blocked: inputBlockIsActive(state),
       active: Boolean(tab?.active),
       url: tab?.url || null,
       title: tab?.title || null
@@ -459,6 +611,11 @@ async function handleCloseSession(session) {
   let closed = 0;
   let detached = 0;
   if (await tabExists(state.tabId)) {
+    try {
+      await sendPageCommand("hide_overlay", {}, state.tabId);
+    } catch {
+      // Ignore cleanup failures while closing or detaching the tab.
+    }
     if (state.ownership === "owned") {
       await chrome.tabs.remove(state.tabId);
       closed = 1;
@@ -1019,6 +1176,12 @@ async function dispatchDaemonAction(action) {
       }
     };
   }
+  if (actionName === "block_input") {
+    return handleBlockInput(session, args);
+  }
+  if (actionName === "unblock_input") {
+    return handleUnblockInput(session);
+  }
   if (actionName === "show_overlay") {
     return sendSessionPageCommand(session, "show_overlay", args);
   }
@@ -1058,7 +1221,7 @@ async function pollDaemonOnce() {
     result = {
       ok: false,
       error: {
-        code: "extension_error",
+        code: error?.code || "extension_error",
         message: error instanceof Error ? error.message : String(error)
       }
     };

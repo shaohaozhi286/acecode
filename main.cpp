@@ -109,6 +109,7 @@
 #include "tui/slash_dropdown.hpp"
 #include "tui/text_truncation.hpp"
 #include "tui/thick_vscroll_bar.hpp"
+#include "tui/non_selectable.hpp"
 #include "tui/tool_progress.hpp"
 #include "tui/sidebar_model.hpp"
 #include "tui/input_history_navigation.hpp"
@@ -561,7 +562,7 @@ static Element render_regular_sidebar(const acecode::TuiState& state,
         bottom_rows.push_back(paragraph(cwd_display) | color(Color::CyanLight) | dim);
     }
 
-    return hbox({
+    Element sidebar = hbox({
         text(" "),
         vbox({
             vbox(std::move(top_rows)),
@@ -571,6 +572,7 @@ static Element render_regular_sidebar(const acecode::TuiState& state,
         text(" "),
     }) | size(WIDTH, EQUAL, sidebar_width) |
        bgcolor(Color::RGB(18, 18, 20));
+    return acecode::tui::non_selectable(std::move(sidebar));
 }
 
 static Element render_tool_result_lines_preserving_breaks(

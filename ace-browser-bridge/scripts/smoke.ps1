@@ -32,7 +32,7 @@ foreach ($path in @($manifestPath, $serviceWorkerPath, $contentPath, $popupPath)
     }
 }
 
-$manifest = Get-Content -Raw $manifestPath | ConvertFrom-Json
+$manifest = Get-Content -Raw -Encoding UTF8 $manifestPath | ConvertFrom-Json
 if ($manifest.manifest_version -ne 3) {
     throw "manifest_version must be 3"
 }
@@ -51,14 +51,19 @@ if ($null -eq $manifest.content_scripts -or $manifest.content_scripts.Count -lt 
     throw "manifest must declare the content script"
 }
 
-$serviceWorker = Get-Content -Raw $serviceWorkerPath
-$content = Get-Content -Raw $contentPath
+$serviceWorker = Get-Content -Raw -Encoding UTF8 $serviceWorkerPath
+$content = Get-Content -Raw -Encoding UTF8 $contentPath
 
 Assert-Contains $serviceWorker "const DEFAULT_PORT = 52007" "service worker must default to port 52007"
 Assert-Contains $serviceWorker "protocol_version: PROTOCOL_VERSION" "service worker must send protocol_version in hello"
 Assert-Contains $serviceWorker "aceBrowserBridgeSessions" "service worker must persist session tab registry"
 Assert-Contains $serviceWorker "restoreSessionRegistry" "service worker must restore session registry on startup"
 Assert-Contains $serviceWorker "args.newTab === true" "service worker must only create new tabs on explicit newTab or missing session tab"
+Assert-Contains $serviceWorker "waitForTabComplete" "service worker must wait for page navigation before returning"
+Assert-Contains $serviceWorker "navigation_timeout" "service worker must report navigation timeout"
+Assert-Contains $serviceWorker "handleBlockInput" "service worker must implement explicit input blocking"
+Assert-Contains $serviceWorker "handleUnblockInput" "service worker must implement explicit input unblock"
+Assert-Contains $serviceWorker "inputBlocked" "service worker must persist session input block state"
 Assert-Contains $serviceWorker "function shortSessionHash" "service worker must derive short group title hashes"
 Assert-Contains $serviceWorker 'return `ACE-${shortSessionHash(session)}`' "service worker must use short ACE hash group titles"
 Assert-Contains $serviceWorker "isLegacyDefaultGroupTitle" "service worker must migrate legacy default group titles"
@@ -70,8 +75,11 @@ Assert-Contains $serviceWorker 'type: "mouseWheel"' "service worker must dispatc
 Assert-Contains $serviceWorker "Input.insertText" "service worker must dispatch text input"
 Assert-Contains $serviceWorker "Input.dispatchKeyEvent" "service worker must dispatch key input"
 Assert-Contains $serviceWorker "show_pointer_path" "service worker must route pointer debug visualization"
+Assert-Contains $serviceWorker "input_block: true" "service worker must advertise input block capability"
 Assert-Contains $serviceWorker "fallback_reason" "service worker must report fallback reason"
 Assert-Contains $content "ace-browser-bridge-operation-label" "content script must include the operation overlay label"
+$overlayText = [string]([char]0x8BF7) + [string]([char]0x6682) + [string]([char]0x65F6) + [string]([char]0x4E0D) + [string]([char]0x8981) + [string]([char]0x64CD) + [string]([char]0x4F5C)
+Assert-Contains $content $overlayText "content script must make the operation overlay obvious"
 Assert-Contains $content "show_pointer_path" "content script must implement pointer debug visualization"
 Assert-Contains $content "cross_origin_iframe" "content script must return a cross-origin iframe boundary error"
 

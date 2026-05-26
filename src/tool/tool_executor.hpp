@@ -34,6 +34,12 @@ struct ToolResult {
     std::string output;
     bool success = true;
     std::optional<ToolSummary> summary; // populated by tools that opt in
+    // Optional user-role prompt to append after this tool result. This is used
+    // for progressive capability disclosure that should affect only the active
+    // conversation after a tool is explicitly opened, rather than the global
+    // cacheable system prompt.
+    std::optional<std::string> post_user_prompt;
+    std::string post_user_prompt_display_text;
     // 结构化 diff hunk。file_edit / file_write 在产生 unified diff 文本的同时
     // 填充这个字段;TUI 用它做彩色带行号 gutter 的渲染。
     // 运行时字段 —— 不写入 session JSONL(由 session_serializer 的 allowlist
@@ -90,8 +96,8 @@ struct ToolContext {
     std::function<void(const std::string& session_id)> emit_goal_cleared;
 
     // Runtime access to the active executor. Tools that intentionally change
-    // the available tool set, such as browser_enable, use this to register
-    // additional tools for the next model request.
+    // the available tool set can use this to register additional tools for the
+    // next model request.
     ToolExecutor* tool_executor = nullptr;
 };
 

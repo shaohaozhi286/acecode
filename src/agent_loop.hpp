@@ -229,6 +229,9 @@ private:
                           const std::string& content,
                           bool is_tool,
                           nlohmann::json metadata = nlohmann::json::object());
+    void append_tool_user_prompt(const std::string& content,
+                                 const std::string& display_text,
+                                 const std::string& source_tool);
 
     struct WorkerTask {
         enum class Kind { Chat, Shell, Compact };

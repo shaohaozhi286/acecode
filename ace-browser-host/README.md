@@ -1,24 +1,49 @@
 # ace-browser-host
 
-`ace-browser-host` 是 ACECode 浏览器工具使用的本地 C++ CLI/daemon。Windows 可执行文件名为 `ace-browser-host.exe`，Unix-like 平台为 `ace-browser-host`。文本按原生 UTF-8 处理。
+`ace-browser-host` 是 ACECode 浏览器能力使用的本地 C++ CLI/daemon。Windows 可执行文件名为 `ace-browser-host.exe`，Unix-like 平台为 `ace-browser-host`。文本按原生 UTF-8 处理。
 
 浏览器插件交付物是独立项目 `ace-browser-bridge`。默认 daemon 地址为 `127.0.0.1:52007`。
 
 ## 命令
 
 ```bash
+ace-browser-host.exe start --json
 ace-browser-host.exe status --json
-ace-browser-host.exe command --json
+ace-browser-host.exe open --json --session <name> --url <url> [--new-tab] [--group-title <title>] [--timeout-ms <ms>]
+ace-browser-host.exe find-tab --json --session <name> (--url <text>|--tab-id <id>|--active)
+ace-browser-host.exe navigate --json --session <name> --operation <goto|back|forward|reload> [--url <url>] [--timeout-ms <ms>]
+ace-browser-host.exe read-page --json --session <name> [--mode summary|elements|focused|changed]
+ace-browser-host.exe wait --json --session <name> --condition <condition> [--target <ref>] [--timeout-ms <ms>]
+ace-browser-host.exe block-input --json --session <name> [--watchdog-ms <ms>] [--message <text>]
+ace-browser-host.exe unblock-input --json --session <name>
+ace-browser-host.exe click --json --session <name> (--target <ref>|--x <n> --y <n>)
+ace-browser-host.exe fill --json --session <name> --target <ref> --value <text>
+ace-browser-host.exe type --json --session <name> --target <ref> [--text <text>] [--submit]
+ace-browser-host.exe hover --json --session <name> --target <ref>
+ace-browser-host.exe drag --json --session <name> --from <ref> (--to <ref>|--offset <x>,<y>)
+ace-browser-host.exe scroll --json --session <name> --delta-y <n>
+ace-browser-host.exe evaluate --json --session <name> --code <javascript>
+ace-browser-host.exe network --json --session <name> --cmd <start|stop|list|detail>
 ace-browser-host.exe screenshot --json --session <name> --output <path>
+ace-browser-host.exe save-pdf --json --session <name> [--file-name <name>]
+ace-browser-host.exe list-tabs --json --session <name>
+ace-browser-host.exe close-session --json --session <name>
+ace-browser-host.exe command --json
 ace-browser-host.exe serve --json
 ace-browser-host.exe shutdown --json
 ```
 
-`command --json` 从 stdin 读取：
+`start --json` 会在 daemon 未运行时后台启动 `serve --json --port 52007`，然后轮询 `status`。
+
+`command --json` 是底层入口，从 stdin 读取：
 
 ```json
 {"session":"acecode-demo","action":"snapshot","args":{}}
 ```
+
+其他子命令只是把结构化 argv 转成同样的 `{session, action, args}` 请求。
+
+`block-input` 会在当前 session 的页面上显示“AI 正在操作浏览器”的明显遮罩并拦截用户输入；如果 session 还没有 tab，会先记录 block 状态，后续 `open` 或 `find-tab` 绑定 tab 后自动应用。任务完成后应单独执行 `unblock-input` 清理遮罩和输入拦截。`--watchdog-ms` 是兜底超时，默认 300000 毫秒。
 
 所有响应都使用统一 envelope：
 
@@ -29,7 +54,7 @@ ace-browser-host.exe shutdown --json
 
 `status --json` 也使用 envelope。daemon 不可连接时返回 `ok:true` 且 `running:false`，方便 ACECode 展示健康状态，而不是把 daemon 未启动视为 CLI 执行失败。
 
-ACECode 的内置 `browser_*` 工具会在调用时自动检查并后台启动 `ace-browser-host serve --json --port 52007`。手动运行 `serve` 主要用于独立调试 host、插件或 CLI 协议。
+ACECode 的内置 `browser_start` 会自动检查并后台启动 `ace-browser-host serve --json --port 52007`。手动运行 `serve` 主要用于独立调试 host、插件或 CLI 协议。
 
 ## Daemon HTTP Surface
 

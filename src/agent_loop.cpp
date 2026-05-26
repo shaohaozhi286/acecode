@@ -257,6 +257,40 @@ void AgentLoop::dispatch_message(const std::string& role,
     events_.emit(SessionEventKind::Message, std::move(payload));
 }
 
+void AgentLoop::append_tool_user_prompt(const std::string& content,
+                                        const std::string& display_text,
+                                        const std::string& source_tool) {
+    if (content.empty()) return;
+
+    ChatMessage msg;
+    msg.role = "user";
+    msg.content = content;
+    msg.metadata = nlohmann::json::object();
+    msg.metadata["display_text"] = display_text.empty()
+        ? "[ACE Browser Bridge prompt loaded]"
+        : display_text;
+    msg.metadata["synthetic_user_prompt"] = true;
+    if (!source_tool.empty()) msg.metadata["source_tool"] = source_tool;
+    ensure_user_message_identity(msg);
+
+    messages_.push_back(msg);
+    if (session_manager_) {
+        session_manager_->on_message(msg);
+    }
+
+    if (callbacks_.on_message) {
+        callbacks_.on_message("user", msg.metadata.value("display_text", msg.content), false);
+    }
+    nlohmann::json event = {
+        {"role", "user"},
+        {"content", msg.content},
+        {"is_tool", false},
+        {"id", msg.uuid},
+        {"metadata", msg.metadata},
+    };
+    events_.emit(SessionEventKind::Message, std::move(event));
+}
+
 void AgentLoop::abort() {
     abort_requested_ = true;
 }
@@ -1635,6 +1669,13 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
                     call_msg.display_override =
                         ToolExecutor::build_tool_call_preview(tc.function_name, tc.function_arguments);
                     callbacks_.on_tool_result(call_msg, tc.function_name, results[i]);
+                }
+                if (results[i].post_user_prompt.has_value() &&
+                    !results[i].post_user_prompt->empty()) {
+                    append_tool_user_prompt(
+                        *results[i].post_user_prompt,
+                        results[i].post_user_prompt_display_text,
+                        tc.function_name);
                 }
             }
         }

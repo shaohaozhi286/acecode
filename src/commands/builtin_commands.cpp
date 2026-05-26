@@ -500,7 +500,7 @@ static std::string lower_trimmed(const std::string& s) {
 }
 
 static bool browser_tools_enabled(const ToolExecutor* tools) {
-    return tools && tools->has_tool("browser_status");
+    return tools && tools->has_tool("browser_start");
 }
 
 static void cmd_browser(CommandContext& ctx, const std::string& args) {

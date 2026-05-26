@@ -857,7 +857,7 @@ function SectionTools() {
     {
       key: 'ace_browser_bridge',
       name: 'ACE Browser Bridge',
-      desc: '启用 ACECode 内置 browser_* 工具，连接 ace-browser-host 与浏览器插件。',
+      desc: '启用 browser_start，并在打开后通过 user prompt 引导模型使用 ace-browser-host CLI。',
       icon: (
         <svg
           width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"

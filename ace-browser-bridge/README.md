@@ -6,7 +6,7 @@
 
 - 与 `ace-browser-host` daemon 建立握手和轮询连接。
 - 维护 managed browser session、owned/adopted tab 和 Chrome tab group 状态色。
-- 注入 `content/virtual-cursor.js`，提供 snapshot、`@e` 元素引用、目标解析、DOM 动作和 operation overlay。
+- 注入 `content/virtual-cursor.js`，提供 snapshot、`@e` 元素引用、目标解析、DOM 动作、operation overlay 和显式用户输入 block。
 - 通过 Chrome Debugger API 执行 CDP pointer、typing、network capture 和 PDF 导出。
 - 通过 popup 显示连接状态、最近错误，并提供紧急释放页面接管提示。
 
@@ -35,4 +35,4 @@ Chrome 内部页无法注入扩展脚本，例如 `chrome://extensions`、`chrom
 powershell -ExecutionPolicy Bypass -File ace-browser-bridge/scripts/smoke.ps1
 ```
 
-该脚本检查 manifest 权限、默认端口、协议握手、CDP 输入路径、operation overlay、pointer debug visualization、跨域 iframe 错误路径，并在本机有 Node.js 时运行 `node --check`。
+该脚本检查 manifest 权限、默认端口、协议握手、CDP 输入路径、operation overlay、显式用户输入 block、pointer debug visualization、跨域 iframe 错误路径，并在本机有 Node.js 时运行 `node --check`。

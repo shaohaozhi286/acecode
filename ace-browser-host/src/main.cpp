@@ -17,6 +17,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -28,10 +29,13 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <shellapi.h>
 #else
+#include <fcntl.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/types.h>
 #include <unistd.h>
 #endif
 
@@ -104,6 +108,144 @@ void print_json(const json& value) {
     std::cout << value.dump() << std::endl;
 }
 
+bool is_valid_utf8(std::string_view s) {
+    std::size_t i = 0;
+    while (i < s.size()) {
+        unsigned char c = static_cast<unsigned char>(s[i]);
+        if (c <= 0x7F) {
+            ++i;
+        } else if (c >= 0xC2 && c <= 0xDF) {
+            if (i + 1 >= s.size()) return false;
+            unsigned char c1 = static_cast<unsigned char>(s[i + 1]);
+            if (c1 < 0x80 || c1 > 0xBF) return false;
+            i += 2;
+        } else if (c == 0xE0) {
+            if (i + 2 >= s.size()) return false;
+            unsigned char c1 = static_cast<unsigned char>(s[i + 1]);
+            unsigned char c2 = static_cast<unsigned char>(s[i + 2]);
+            if (c1 < 0xA0 || c1 > 0xBF || c2 < 0x80 || c2 > 0xBF) return false;
+            i += 3;
+        } else if (c >= 0xE1 && c <= 0xEC) {
+            if (i + 2 >= s.size()) return false;
+            unsigned char c1 = static_cast<unsigned char>(s[i + 1]);
+            unsigned char c2 = static_cast<unsigned char>(s[i + 2]);
+            if (c1 < 0x80 || c1 > 0xBF || c2 < 0x80 || c2 > 0xBF) return false;
+            i += 3;
+        } else if (c == 0xED) {
+            if (i + 2 >= s.size()) return false;
+            unsigned char c1 = static_cast<unsigned char>(s[i + 1]);
+            unsigned char c2 = static_cast<unsigned char>(s[i + 2]);
+            if (c1 < 0x80 || c1 > 0x9F || c2 < 0x80 || c2 > 0xBF) return false;
+            i += 3;
+        } else if (c >= 0xEE && c <= 0xEF) {
+            if (i + 2 >= s.size()) return false;
+            unsigned char c1 = static_cast<unsigned char>(s[i + 1]);
+            unsigned char c2 = static_cast<unsigned char>(s[i + 2]);
+            if (c1 < 0x80 || c1 > 0xBF || c2 < 0x80 || c2 > 0xBF) return false;
+            i += 3;
+        } else if (c == 0xF0) {
+            if (i + 3 >= s.size()) return false;
+            unsigned char c1 = static_cast<unsigned char>(s[i + 1]);
+            unsigned char c2 = static_cast<unsigned char>(s[i + 2]);
+            unsigned char c3 = static_cast<unsigned char>(s[i + 3]);
+            if (c1 < 0x90 || c1 > 0xBF || c2 < 0x80 || c2 > 0xBF || c3 < 0x80 || c3 > 0xBF) return false;
+            i += 4;
+        } else if (c >= 0xF1 && c <= 0xF3) {
+            if (i + 3 >= s.size()) return false;
+            unsigned char c1 = static_cast<unsigned char>(s[i + 1]);
+            unsigned char c2 = static_cast<unsigned char>(s[i + 2]);
+            unsigned char c3 = static_cast<unsigned char>(s[i + 3]);
+            if (c1 < 0x80 || c1 > 0xBF || c2 < 0x80 || c2 > 0xBF || c3 < 0x80 || c3 > 0xBF) return false;
+            i += 4;
+        } else if (c == 0xF4) {
+            if (i + 3 >= s.size()) return false;
+            unsigned char c1 = static_cast<unsigned char>(s[i + 1]);
+            unsigned char c2 = static_cast<unsigned char>(s[i + 2]);
+            unsigned char c3 = static_cast<unsigned char>(s[i + 3]);
+            if (c1 < 0x80 || c1 > 0x8F || c2 < 0x80 || c2 > 0xBF || c3 < 0x80 || c3 > 0xBF) return false;
+            i += 4;
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::string safe_error_message(const char* message) {
+    std::string text = message ? message : "unknown error";
+    return is_valid_utf8(text) ? text : "non-UTF-8 exception message";
+}
+
+struct Utf8Argv {
+    std::vector<std::string> args;
+    std::vector<char*> pointers;
+
+    void refresh() {
+        pointers.clear();
+        pointers.reserve(args.size());
+        for (auto& arg : args) pointers.push_back(arg.data());
+    }
+
+    int argc() const {
+        return static_cast<int>(pointers.size());
+    }
+
+    char** argv() {
+        return pointers.empty() ? nullptr : pointers.data();
+    }
+};
+
+#ifdef _WIN32
+std::optional<std::string> wide_to_utf8(const wchar_t* value) {
+    if (!value) return std::string();
+    int length = lstrlenW(value);
+    if (length == 0) return std::string();
+    int needed = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+                                     value, length, nullptr, 0, nullptr, nullptr);
+    if (needed <= 0) return std::nullopt;
+    std::string out(static_cast<std::size_t>(needed), '\0');
+    int written = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+                                      value, length, out.data(), needed, nullptr, nullptr);
+    if (written != needed) return std::nullopt;
+    return out;
+}
+#endif
+
+std::optional<Utf8Argv> make_utf8_argv(int argc, char** argv, std::string& error) {
+    Utf8Argv out;
+#ifdef _WIN32
+    int wide_argc = 0;
+    LPWSTR* wide_argv = CommandLineToArgvW(GetCommandLineW(), &wide_argc);
+    if (!wide_argv) {
+        error = "failed to read Windows command line";
+        return std::nullopt;
+    }
+    out.args.reserve(static_cast<std::size_t>(wide_argc));
+    for (int i = 0; i < wide_argc; ++i) {
+        auto converted = wide_to_utf8(wide_argv[i]);
+        if (!converted) {
+            LocalFree(wide_argv);
+            error = "failed to convert Windows command line argument to UTF-8 at index " + std::to_string(i);
+            return std::nullopt;
+        }
+        out.args.push_back(std::move(*converted));
+    }
+    LocalFree(wide_argv);
+#else
+    out.args.reserve(static_cast<std::size_t>(std::max(argc, 0)));
+    for (int i = 0; i < argc; ++i) {
+        std::string value = argv[i] ? std::string(argv[i]) : std::string();
+        if (!is_valid_utf8(value)) {
+            error = "CLI arguments must be valid UTF-8; invalid argument index " + std::to_string(i);
+            return std::nullopt;
+        }
+        out.args.push_back(std::move(value));
+    }
+#endif
+    out.refresh();
+    return out;
+}
+
 std::string read_stdin() {
     std::ostringstream ss;
     ss << std::cin.rdbuf();
@@ -118,15 +260,19 @@ std::string lower_copy(std::string s) {
 }
 
 std::optional<std::string> find_arg(int argc, char** argv, const std::string& name) {
-    for (int i = 1; i + 1 < argc; ++i) {
-        if (argv[i] == name) return std::string(argv[i + 1]);
+    const std::string prefix = name + "=";
+    for (int i = 1; i < argc; ++i) {
+        std::string current = argv[i];
+        if (current == name && i + 1 < argc) return std::string(argv[i + 1]);
+        if (current.rfind(prefix, 0) == 0) return current.substr(prefix.size());
     }
     return std::nullopt;
 }
 
 bool has_arg(int argc, char** argv, const std::string& name) {
     for (int i = 1; i < argc; ++i) {
-        if (argv[i] == name) return true;
+        std::string current = argv[i];
+        if (current == name || current.rfind(name + "=", 0) == 0) return true;
     }
     return false;
 }
@@ -143,6 +289,67 @@ int parse_port(int argc, char** argv) {
     }
 }
 
+std::string arg_or_default(int argc, char** argv, const std::string& name, std::string fallback) {
+    auto value = find_arg(argc, argv, name);
+    return value ? *value : std::move(fallback);
+}
+
+std::optional<int> find_int_arg(int argc, char** argv, const std::string& name) {
+    auto value = find_arg(argc, argv, name);
+    if (!value) return std::nullopt;
+    try {
+        return std::stoi(*value);
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::optional<double> find_number_arg(int argc, char** argv, const std::string& name) {
+    auto value = find_arg(argc, argv, name);
+    if (!value) return std::nullopt;
+    try {
+        return std::stod(*value);
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::optional<bool> find_bool_arg(int argc, char** argv, const std::string& name) {
+    const std::string prefix = name + "=";
+    for (int i = 1; i < argc; ++i) {
+        std::string current = argv[i];
+        if (current == name) return true;
+        if (current.rfind(prefix, 0) == 0) {
+            std::string value = lower_copy(current.substr(prefix.size()));
+            if (value == "1" || value == "true" || value == "yes" || value == "on") return true;
+            if (value == "0" || value == "false" || value == "no" || value == "off") return false;
+            return std::nullopt;
+        }
+    }
+    return std::nullopt;
+}
+
+void put_string_arg(json& target, int argc, char** argv,
+                    const std::string& cli_name, const std::string& json_name) {
+    auto value = find_arg(argc, argv, cli_name);
+    if (value) target[json_name] = *value;
+}
+
+void put_bool_flag(json& target, int argc, char** argv,
+                   const std::string& cli_name, const std::string& json_name) {
+    if (auto value = find_bool_arg(argc, argv, cli_name)) target[json_name] = *value;
+}
+
+void put_int_arg(json& target, int argc, char** argv,
+                 const std::string& cli_name, const std::string& json_name) {
+    if (auto value = find_int_arg(argc, argv, cli_name)) target[json_name] = *value;
+}
+
+void put_number_arg(json& target, int argc, char** argv,
+                    const std::string& cli_name, const std::string& json_name) {
+    if (auto value = find_number_arg(argc, argv, cli_name)) target[json_name] = *value;
+}
+
 json default_capabilities(bool extension_connected) {
     return json{
         {"cdp", extension_connected},
@@ -151,6 +358,7 @@ json default_capabilities(bool extension_connected) {
         {"upload", extension_connected},
         {"os_pointer", false},
         {"operation_overlay", extension_connected},
+        {"input_block", extension_connected},
     };
 }
 
@@ -396,6 +604,14 @@ std::optional<json> parse_json(const std::string& text) {
     return parsed;
 }
 
+std::optional<json> parse_args_json(int argc, char** argv) {
+    auto value = find_arg(argc, argv, "--args-json");
+    if (!value) return std::nullopt;
+    auto parsed = parse_json(*value);
+    if (!parsed || !parsed->is_object()) return json();
+    return *parsed;
+}
+
 json normalize_daemon_envelope(const std::string& body) {
     auto parsed = parse_json(body);
     if (!parsed || !parsed->is_object() || !parsed->contains("ok") || !(*parsed)["ok"].is_boolean()) {
@@ -414,23 +630,176 @@ json normalize_daemon_envelope(const std::string& body) {
     return *parsed;
 }
 
-int status_command(int argc, char** argv) {
-    int port = parse_port(argc, argv);
+json status_envelope(int port) {
     HttpResponse response = http_request("GET", "/status", "", port);
     if (!response.transport_ok) {
-        print_json(success(stopped_status(port)));
-        return 0;
+        return success(stopped_status(port));
     }
     if (response.status != 200) {
-        print_json(failure("daemon_error", "daemon status endpoint returned HTTP " + std::to_string(response.status)));
-        return 0;
+        return failure("daemon_error", "daemon status endpoint returned HTTP " + std::to_string(response.status));
     }
     json envelope = normalize_daemon_envelope(response.body);
     if (envelope.value("ok", false) && envelope["data"].is_object()) {
         envelope["data"]["host_version"] = kHostVersion;
         envelope["data"]["port"] = port;
     }
-    print_json(envelope);
+    return envelope;
+}
+
+#ifdef _WIN32
+std::wstring quote_windows_arg(const std::filesystem::path& path) {
+    std::wstring arg = path.wstring();
+    if (arg.empty()) return L"\"\"";
+    bool needs_quotes = false;
+    for (wchar_t ch : arg) {
+        if (ch == L' ' || ch == L'\t' || ch == L'"') {
+            needs_quotes = true;
+            break;
+        }
+    }
+    if (!needs_quotes) return arg;
+
+    std::wstring out = L"\"";
+    int backslashes = 0;
+    for (wchar_t ch : arg) {
+        if (ch == L'\\') {
+            ++backslashes;
+        } else if (ch == L'"') {
+            out.append(backslashes * 2 + 1, L'\\');
+            out.push_back(ch);
+            backslashes = 0;
+        } else {
+            out.append(backslashes, L'\\');
+            backslashes = 0;
+            out.push_back(ch);
+        }
+    }
+    out.append(backslashes * 2, L'\\');
+    out.push_back(L'"');
+    return out;
+}
+#endif
+
+std::filesystem::path current_executable_path(char** argv) {
+#ifdef _WIN32
+    std::vector<wchar_t> buffer(MAX_PATH);
+    for (;;) {
+        DWORD n = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+        if (n == 0) break;
+        if (n < buffer.size()) return std::filesystem::path(std::wstring(buffer.data(), n));
+        if (buffer.size() >= 32768) break;
+        buffer.resize(buffer.size() * 2);
+    }
+#endif
+    std::error_code ec;
+    std::filesystem::path p = std::filesystem::absolute(argv[0], ec);
+    if (!ec) return p;
+    return std::filesystem::path(argv[0]);
+}
+
+bool start_detached_serve(char** argv, int port, std::string& error) {
+    std::filesystem::path exe = current_executable_path(argv);
+#ifdef _WIN32
+    std::wstring command_line = quote_windows_arg(exe) + L" serve --json --port " +
+        std::to_wstring(port);
+    std::vector<wchar_t> mutable_command(command_line.begin(), command_line.end());
+    mutable_command.push_back(L'\0');
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    std::wstring cwd = exe.parent_path().wstring();
+    BOOL ok = CreateProcessW(nullptr,
+                             mutable_command.data(),
+                             nullptr,
+                             nullptr,
+                             FALSE,
+                             CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
+                             nullptr,
+                             cwd.empty() ? nullptr : cwd.c_str(),
+                             &si,
+                             &pi);
+    if (!ok) {
+        error = "failed to start ace-browser-host daemon";
+        return false;
+    }
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return true;
+#else
+    pid_t pid = fork();
+    if (pid < 0) {
+        error = "fork failed";
+        return false;
+    }
+    if (pid == 0) {
+        setsid();
+        int devnull = open("/dev/null", O_RDWR);
+        if (devnull >= 0) {
+            dup2(devnull, STDIN_FILENO);
+            dup2(devnull, STDOUT_FILENO);
+            dup2(devnull, STDERR_FILENO);
+            if (devnull > STDERR_FILENO) close(devnull);
+        }
+        std::string port_s = std::to_string(port);
+        execl(exe.string().c_str(), exe.string().c_str(), "serve", "--json", "--port",
+              port_s.c_str(), static_cast<char*>(nullptr));
+        _exit(127);
+    }
+    return true;
+#endif
+}
+
+int status_command(int argc, char** argv) {
+    int port = parse_port(argc, argv);
+    print_json(status_envelope(port));
+    return 0;
+}
+
+int start_command(int argc, char** argv) {
+    int port = parse_port(argc, argv);
+    json before = status_envelope(port);
+    if (before.value("ok", false) && before["data"].is_object() &&
+        before["data"].value("running", false)) {
+        before["data"]["start_attempted"] = false;
+        before["data"]["already_running"] = true;
+        print_json(before);
+        return 0;
+    }
+
+    std::string error;
+    bool started = start_detached_serve(argv, port, error);
+    if (!started) {
+        json out = before;
+        if (out.value("ok", false) && out["data"].is_object()) {
+            out["data"]["start_attempted"] = true;
+            out["data"]["start_error"] = error.empty() ? "failed to start ace-browser-host daemon" : error;
+            print_json(out);
+        } else {
+            print_json(failure("start_failed", error.empty() ? "failed to start ace-browser-host daemon" : error));
+        }
+        return 0;
+    }
+
+    json latest = before;
+    for (int attempt = 0; attempt < 20; ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(attempt < 5 ? 100 : 250));
+        latest = status_envelope(port);
+        if (latest.value("ok", false) && latest["data"].is_object()) {
+            latest["data"]["start_attempted"] = true;
+            latest["data"]["started"] = true;
+            if (latest["data"].value("running", false)) {
+                print_json(latest);
+                return 0;
+            }
+        }
+    }
+    if (latest.value("ok", false) && latest["data"].is_object()) {
+        latest["data"]["start_attempted"] = true;
+        latest["data"]["started"] = true;
+        latest["data"]["start_error"] = "ace-browser-host did not report running after start";
+    }
+    print_json(latest);
     return 0;
 }
 
@@ -462,6 +831,272 @@ json command_envelope_from_stdin(int port, std::string input) {
 int command_command(int argc, char** argv) {
     print_json(command_envelope_from_stdin(parse_port(argc, argv), read_stdin()));
     return 0;
+}
+
+json command_envelope(int port, const std::string& session,
+                      const std::string& action, json args) {
+    json request = {
+        {"session", session.empty() ? "acecode-default" : session},
+        {"action", action},
+        {"args", args.is_null() ? json::object() : std::move(args)},
+    };
+    return command_envelope_from_stdin(port, request.dump());
+}
+
+bool merge_args_json_or_print(int argc, char** argv, json& args) {
+    auto extra = parse_args_json(argc, argv);
+    if (!extra) return true;
+    if (!extra->is_object()) {
+        print_json(failure("invalid_request", "--args-json must be a JSON object"));
+        return false;
+    }
+    for (auto& item : extra->items()) args[item.key()] = item.value();
+    return true;
+}
+
+int command_alias_command(int argc, char** argv, const std::string& action, json args) {
+    if (!merge_args_json_or_print(argc, argv, args)) return 0;
+    print_json(command_envelope(parse_port(argc, argv),
+                                arg_or_default(argc, argv, "--session", "acecode-default"),
+                                action,
+                                std::move(args)));
+    return 0;
+}
+
+int open_command(int argc, char** argv) {
+    auto url = find_arg(argc, argv, "--url");
+    if (!url || url->empty()) {
+        print_json(failure("invalid_request", "open requires --url <url>"));
+        return 0;
+    }
+    json args;
+    args["url"] = *url;
+    args["newTab"] = find_bool_arg(argc, argv, "--new-tab").value_or(false) ||
+                     find_bool_arg(argc, argv, "--newTab").value_or(false);
+    put_string_arg(args, argc, argv, "--group-title", "group_title");
+    put_int_arg(args, argc, argv, "--timeout-ms", "timeout_ms");
+    return command_alias_command(argc, argv, "navigate", std::move(args));
+}
+
+int find_tab_command(int argc, char** argv) {
+    json args;
+    put_string_arg(args, argc, argv, "--url", "url");
+    put_bool_flag(args, argc, argv, "--active", "active");
+    put_int_arg(args, argc, argv, "--tab-id", "tab_id");
+    if (!args.contains("url") && !args.contains("active") && !args.contains("tab_id") &&
+        !has_arg(argc, argv, "--args-json")) {
+        print_json(failure("invalid_request", "find-tab requires --url, --tab-id, --active, or --args-json"));
+        return 0;
+    }
+    return command_alias_command(argc, argv, "find_tab", std::move(args));
+}
+
+int navigate_command(int argc, char** argv) {
+    json args;
+    std::string op = arg_or_default(argc, argv, "--operation", "");
+    auto url = find_arg(argc, argv, "--url");
+    if (op.empty() && url) op = "goto";
+    if (op.empty()) {
+        print_json(failure("invalid_request", "navigate requires --operation <goto|back|forward|reload> or --url <url>"));
+        return 0;
+    }
+    if (op == "goto") {
+        if (!url || url->empty()) {
+            print_json(failure("invalid_request", "navigate --operation goto requires --url <url>"));
+            return 0;
+        }
+        args["url"] = *url;
+        args["newTab"] = false;
+    } else {
+        args["operation"] = op;
+    }
+    put_int_arg(args, argc, argv, "--timeout-ms", "timeout_ms");
+    return command_alias_command(argc, argv, "navigate", std::move(args));
+}
+
+int read_page_command(int argc, char** argv) {
+    json args;
+    put_string_arg(args, argc, argv, "--mode", "mode");
+    put_string_arg(args, argc, argv, "--since-snapshot-id", "since_snapshot_id");
+    return command_alias_command(argc, argv, "snapshot", std::move(args));
+}
+
+int wait_command(int argc, char** argv) {
+    json args;
+    put_string_arg(args, argc, argv, "--condition", "condition");
+    put_string_arg(args, argc, argv, "--target", "target");
+    put_string_arg(args, argc, argv, "--text", "text");
+    put_string_arg(args, argc, argv, "--url", "url");
+    put_string_arg(args, argc, argv, "--request-id", "request_id");
+    put_int_arg(args, argc, argv, "--timeout-ms", "timeout_ms");
+    if (!args.contains("condition") && !has_arg(argc, argv, "--args-json")) {
+        print_json(failure("invalid_request", "wait requires --condition <condition>"));
+        return 0;
+    }
+    return command_alias_command(argc, argv, "wait", std::move(args));
+}
+
+int block_input_command(int argc, char** argv) {
+    json args;
+    put_int_arg(args, argc, argv, "--watchdog-ms", "watchdog_ms");
+    put_int_arg(args, argc, argv, "--timeout-ms", "timeout_ms");
+    put_string_arg(args, argc, argv, "--message", "message");
+    return command_alias_command(argc, argv, "block_input", std::move(args));
+}
+
+int unblock_input_command(int argc, char** argv) {
+    return command_alias_command(argc, argv, "unblock_input", json::object());
+}
+
+void put_interaction_options(json& args, int argc, char** argv) {
+    put_string_arg(args, argc, argv, "--mode", "mode");
+    put_string_arg(args, argc, argv, "--speed", "speed");
+    put_int_arg(args, argc, argv, "--duration-ms", "duration_ms");
+    put_int_arg(args, argc, argv, "--hold-ms", "hold_ms");
+    put_number_arg(args, argc, argv, "--jitter", "jitter");
+    put_bool_flag(args, argc, argv, "--debug-visualization", "debug_visualization");
+    put_int_arg(args, argc, argv, "--debug-duration-ms", "debug_duration_ms");
+    put_string_arg(args, argc, argv, "--snapshot-id", "snapshot_id");
+}
+
+int click_command(int argc, char** argv) {
+    json args;
+    auto target = find_arg(argc, argv, "--target");
+    if (target) args["selector"] = *target;
+    put_number_arg(args, argc, argv, "--x", "x");
+    put_number_arg(args, argc, argv, "--y", "y");
+    put_string_arg(args, argc, argv, "--button", "button");
+    put_interaction_options(args, argc, argv);
+    if (!args.contains("selector") && !(args.contains("x") && args.contains("y")) &&
+        !has_arg(argc, argv, "--args-json")) {
+        print_json(failure("invalid_request", "click requires --target <ref|selector> or --x/--y"));
+        return 0;
+    }
+    return command_alias_command(argc, argv, "click", std::move(args));
+}
+
+int fill_command(int argc, char** argv) {
+    auto target = find_arg(argc, argv, "--target");
+    auto value = find_arg(argc, argv, "--value");
+    if ((!target || target->empty() || !value) && !has_arg(argc, argv, "--args-json")) {
+        print_json(failure("invalid_request", "fill requires --target <ref|selector> and --value <text>"));
+        return 0;
+    }
+    json args;
+    if (target) args["selector"] = *target;
+    if (value) args["value"] = *value;
+    put_string_arg(args, argc, argv, "--mode", "mode");
+    put_string_arg(args, argc, argv, "--snapshot-id", "snapshot_id");
+    return command_alias_command(argc, argv, "fill", std::move(args));
+}
+
+int type_command(int argc, char** argv) {
+    auto target = find_arg(argc, argv, "--target");
+    if ((!target || target->empty()) && !has_arg(argc, argv, "--args-json")) {
+        print_json(failure("invalid_request", "type requires --target <ref|selector>"));
+        return 0;
+    }
+    json args;
+    if (target) args["selector"] = *target;
+    put_string_arg(args, argc, argv, "--text", "text");
+    put_bool_flag(args, argc, argv, "--clear", "clear");
+    put_bool_flag(args, argc, argv, "--submit", "submit");
+    put_string_arg(args, argc, argv, "--mode", "mode");
+    put_string_arg(args, argc, argv, "--speed", "speed");
+    return command_alias_command(argc, argv, "type", std::move(args));
+}
+
+int hover_command(int argc, char** argv) {
+    auto target = find_arg(argc, argv, "--target");
+    if ((!target || target->empty()) && !has_arg(argc, argv, "--args-json")) {
+        print_json(failure("invalid_request", "hover requires --target <ref|selector>"));
+        return 0;
+    }
+    json args;
+    if (target) args["selector"] = *target;
+    put_interaction_options(args, argc, argv);
+    return command_alias_command(argc, argv, "hover", std::move(args));
+}
+
+int drag_command(int argc, char** argv) {
+    json args;
+    put_string_arg(args, argc, argv, "--from", "from");
+    put_string_arg(args, argc, argv, "--to", "to");
+    if (auto offset = find_arg(argc, argv, "--offset")) {
+        auto comma = offset->find(',');
+        if (comma != std::string::npos) {
+            try {
+                args["offset"] = json::array({
+                    std::stod(offset->substr(0, comma)),
+                    std::stod(offset->substr(comma + 1)),
+                });
+            } catch (...) {
+                print_json(failure("invalid_request", "--offset must be <x>,<y>"));
+                return 0;
+            }
+        }
+    }
+    put_interaction_options(args, argc, argv);
+    if (!args.contains("from") && !has_arg(argc, argv, "--args-json")) {
+        print_json(failure("invalid_request", "drag requires --from <ref|selector>"));
+        return 0;
+    }
+    return command_alias_command(argc, argv, "drag", std::move(args));
+}
+
+int scroll_command(int argc, char** argv) {
+    json args;
+    if (auto target = find_arg(argc, argv, "--target")) args["selector"] = *target;
+    put_number_arg(args, argc, argv, "--delta-x", "delta_x");
+    put_number_arg(args, argc, argv, "--delta-y", "delta_y");
+    put_string_arg(args, argc, argv, "--mode", "mode");
+    put_string_arg(args, argc, argv, "--speed", "speed");
+    if (!args.contains("delta_y") && !args.contains("delta_x") && !has_arg(argc, argv, "--args-json")) {
+        print_json(failure("invalid_request", "scroll requires --delta-y or --delta-x"));
+        return 0;
+    }
+    return command_alias_command(argc, argv, "scroll", std::move(args));
+}
+
+int evaluate_command(int argc, char** argv) {
+    auto code = find_arg(argc, argv, "--code");
+    if ((!code || code->empty()) && !has_arg(argc, argv, "--args-json")) {
+        print_json(failure("invalid_request", "evaluate requires --code <javascript>"));
+        return 0;
+    }
+    json args;
+    if (code) args["code"] = *code;
+    return command_alias_command(argc, argv, "evaluate", std::move(args));
+}
+
+int network_command(int argc, char** argv) {
+    json args;
+    put_string_arg(args, argc, argv, "--cmd", "cmd");
+    put_string_arg(args, argc, argv, "--filter", "filter");
+    put_string_arg(args, argc, argv, "--request-id", "requestId");
+    if (!args.contains("cmd") && !has_arg(argc, argv, "--args-json")) {
+        print_json(failure("invalid_request", "network requires --cmd <start|stop|list|detail>"));
+        return 0;
+    }
+    return command_alias_command(argc, argv, "network", std::move(args));
+}
+
+int save_pdf_command(int argc, char** argv) {
+    json args;
+    put_string_arg(args, argc, argv, "--paper-format", "paper_format");
+    put_bool_flag(args, argc, argv, "--landscape", "landscape");
+    put_number_arg(args, argc, argv, "--scale", "scale");
+    put_bool_flag(args, argc, argv, "--print-background", "print_background");
+    put_string_arg(args, argc, argv, "--file-name", "file_name");
+    return command_alias_command(argc, argv, "save_as_pdf", std::move(args));
+}
+
+int list_tabs_command(int argc, char** argv) {
+    return command_alias_command(argc, argv, "list_tabs", json::object());
+}
+
+int close_session_command(int argc, char** argv) {
+    return command_alias_command(argc, argv, "close_session", json::object());
 }
 
 int screenshot_command(int argc, char** argv) {
@@ -615,6 +1250,7 @@ struct DaemonState {
     json capabilities = default_capabilities(false);
     std::chrono::steady_clock::time_point last_hello{};
     uint64_t next_action_id = 1;
+    bool shutting_down = false;
     std::deque<std::shared_ptr<PendingAction>> queued_actions;
     std::unordered_map<std::string, std::shared_ptr<PendingAction>> pending_actions;
 };
@@ -687,6 +1323,9 @@ json handle_command(DaemonState& state, const std::string& body) {
     std::shared_ptr<DaemonState::PendingAction> pending;
     {
         std::lock_guard<std::mutex> lock(state.mutex);
+        if (state.shutting_down) {
+            return failure("daemon_shutting_down", "ace-browser-host daemon is shutting down");
+        }
         if (!state.extension_connected) {
             return failure("extension_not_connected", "ace-browser-bridge browser plugin is not connected");
         }
@@ -706,9 +1345,15 @@ json handle_command(DaemonState& state, const std::string& body) {
 
     std::unique_lock<std::mutex> lock(state.mutex);
     bool ready = state.cv.wait_for(lock, std::chrono::seconds(30), [&]() {
-        return pending->result.has_value();
+        return pending->result.has_value() || state.shutting_down;
     });
     state.pending_actions.erase(pending->id);
+    if (state.shutting_down && !pending->result) {
+        state.queued_actions.erase(
+            std::remove(state.queued_actions.begin(), state.queued_actions.end(), pending),
+            state.queued_actions.end());
+        return failure("daemon_shutting_down", "ace-browser-host daemon is shutting down");
+    }
     if (!ready || !pending->result) {
         return failure("bridge_timeout", "timed out waiting for browser plugin action result");
     }
@@ -724,14 +1369,20 @@ json handle_plugin_poll(DaemonState& state, const std::string& body) {
     }
     {
         std::lock_guard<std::mutex> lock(state.mutex);
+        if (state.shutting_down) {
+            return success({{"action", nullptr}});
+        }
         state.extension_connected = true;
         state.last_hello = std::chrono::steady_clock::now();
     }
 
     std::unique_lock<std::mutex> lock(state.mutex);
     state.cv.wait_for(lock, std::chrono::seconds(20), [&]() {
-        return !state.queued_actions.empty();
+        return !state.queued_actions.empty() || state.shutting_down;
     });
+    if (state.shutting_down) {
+        return success({{"action", nullptr}});
+    }
     if (!state.extension_connected) {
         return failure("extension_not_connected", "ace-browser-bridge browser plugin is not connected");
     }
@@ -794,6 +1445,11 @@ std::string route_request(const HttpRequest& req, DaemonState& state, int port, 
     if (req.method == "POST" && req.path == "/shutdown") {
         if (!host_request) return http_json_response(403, failure("unauthorized", "shutdown requires ace-browser-host"));
         running = false;
+        {
+            std::lock_guard<std::mutex> lock(state.mutex);
+            state.shutting_down = true;
+        }
+        state.cv.notify_all();
         return http_json_response(200, success({{"success", true}}));
     }
     return http_json_response(404, failure("not_found", "unknown daemon endpoint"));
@@ -833,9 +1489,9 @@ int serve_command(int argc, char** argv) {
         print_json(success({{"running", true}, {"port", port}, {"version", kDaemonVersion}}));
     }
 
-    DaemonState state;
-    std::atomic<bool> running{true};
-    while (running) {
+    auto state = std::make_shared<DaemonState>();
+    auto running = std::make_shared<std::atomic<bool>>(true);
+    while (running->load()) {
         fd_set read_set;
         FD_ZERO(&read_set);
         FD_SET(listener, &read_set);
@@ -848,19 +1504,23 @@ int serve_command(int argc, char** argv) {
         }
         socket_t client = accept(listener, nullptr, nullptr);
         if (client == kInvalidSocket) continue;
-        std::thread([client, &state, port, &running]() {
+        std::thread([client, state, port, running]() {
             auto req = read_http_request(client);
             std::string response;
             if (!req) {
                 response = http_json_response(400, failure("invalid_http_request", "failed to parse HTTP request"));
             } else {
-                response = route_request(*req, state, port, running);
+                response = route_request(*req, *state, port, *running);
             }
             send_all(client, response);
             close_socket(client);
         }).detach();
     }
-    state.cv.notify_all();
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->shutting_down = true;
+    }
+    state->cv.notify_all();
     close_socket(listener);
     return 0;
 }
@@ -879,17 +1539,28 @@ int shutdown_command(int argc, char** argv) {
 void print_help() {
     std::cout
         << "ace-browser-host commands:\n"
+        << "  start --json [--port 52007]\n"
         << "  status --json [--port 52007]\n"
         << "  command --json [--port 52007]     # reads {session,action,args} from stdin\n"
+        << "  open --json --url <url> [--session <name>] [--new-tab] [--timeout-ms <ms>]\n"
+        << "  find-tab --json (--url <text>|--tab-id <id>|--active) [--session <name>]\n"
+        << "  navigate --json --operation <goto|back|forward|reload> [--url <url>] [--session <name>] [--timeout-ms <ms>]\n"
+        << "  read-page --json [--session <name>] [--mode summary|elements|focused|changed]\n"
+        << "  wait --json --condition <condition> [--target <ref>] [--timeout-ms <ms>]\n"
+        << "  block-input --json [--session <name>] [--watchdog-ms <ms>] [--message <text>]\n"
+        << "  unblock-input --json [--session <name>]\n"
+        << "  click|fill|type|hover|drag|scroll --json [--session <name>] ...\n"
+        << "  evaluate --json --code <javascript> [--session <name>]\n"
+        << "  network --json --cmd <start|stop|list|detail> [--filter <text>] [--request-id <id>]\n"
         << "  screenshot --json --session <name> --output <path> [--port 52007]\n"
+        << "  save-pdf --json [--session <name>] [--file-name <name>]\n"
+        << "  list-tabs --json [--session <name>]\n"
+        << "  close-session --json [--session <name>]\n"
         << "  serve --json [--port 52007]\n"
         << "  shutdown --json [--port 52007]\n";
 }
 
-}  // namespace
-
-int main(int argc, char** argv) {
-    configure_utf8_console();
+int main_impl(int argc, char** argv) {
     SocketRuntime sockets;
     if (!sockets.ok()) {
         print_json(failure("socket_error", "failed to initialize socket runtime"));
@@ -902,12 +1573,56 @@ int main(int argc, char** argv) {
     }
 
     std::string command = argv[1];
+    if (command == "start") return start_command(argc, argv);
     if (command == "status") return status_command(argc, argv);
     if (command == "command") return command_command(argc, argv);
+    if (command == "open") return open_command(argc, argv);
+    if (command == "find-tab") return find_tab_command(argc, argv);
+    if (command == "navigate") return navigate_command(argc, argv);
+    if (command == "read-page") return read_page_command(argc, argv);
+    if (command == "wait") return wait_command(argc, argv);
+    if (command == "block-input") return block_input_command(argc, argv);
+    if (command == "unblock-input") return unblock_input_command(argc, argv);
+    if (command == "click") return click_command(argc, argv);
+    if (command == "fill") return fill_command(argc, argv);
+    if (command == "type") return type_command(argc, argv);
+    if (command == "hover") return hover_command(argc, argv);
+    if (command == "drag") return drag_command(argc, argv);
+    if (command == "scroll") return scroll_command(argc, argv);
+    if (command == "evaluate") return evaluate_command(argc, argv);
+    if (command == "network") return network_command(argc, argv);
     if (command == "screenshot") return screenshot_command(argc, argv);
+    if (command == "save-pdf") return save_pdf_command(argc, argv);
+    if (command == "list-tabs") return list_tabs_command(argc, argv);
+    if (command == "close-session") return close_session_command(argc, argv);
     if (command == "serve") return serve_command(argc, argv);
     if (command == "shutdown") return shutdown_command(argc, argv);
 
     print_json(failure("unknown_command", "unknown command: " + command));
     return 1;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    try {
+        configure_utf8_console();
+        std::string encoding_error;
+        auto utf8_argv = make_utf8_argv(argc, argv, encoding_error);
+        if (!utf8_argv) {
+            print_json(failure("invalid_encoding", encoding_error));
+            return 1;
+        }
+        return main_impl(utf8_argv->argc(), utf8_argv->argv());
+    } catch (const nlohmann::json::exception& e) {
+        std::string code = e.id == 316 ? "invalid_encoding" : "json_error";
+        print_json(failure(code, safe_error_message(e.what())));
+        return 1;
+    } catch (const std::exception& e) {
+        print_json(failure("internal_error", safe_error_message(e.what())));
+        return 1;
+    } catch (...) {
+        print_json(failure("internal_error", "unknown internal error"));
+        return 1;
+    }
 }

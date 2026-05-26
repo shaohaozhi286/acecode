@@ -119,7 +119,8 @@ std::string ToolExecutor::build_tool_call_preview(const std::string& tool_name,
                 return {};
             };
             std::string value;
-            if (tool_name == "browser_open") value = value_for("url");
+            if (tool_name == "browser_start") value = value_for("session");
+            else if (tool_name == "browser_open") value = value_for("url");
             else if (tool_name == "browser_navigate") {
                 value = value_for("operation");
                 std::string url = value_for("url");

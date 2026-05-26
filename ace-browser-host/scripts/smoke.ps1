@@ -1,6 +1,6 @@
 param(
     [string]$ExePath = "",
-    [int]$Port = 52007
+    [int]$Port = 52117
 )
 
 $ErrorActionPreference = "Stop"
@@ -64,6 +64,16 @@ if ($false -ne $bad.ok -or $bad.error.code -ne "invalid_request") {
     throw "invalid request was not rejected"
 }
 
+$missingUrl = Invoke-CliJson -Arguments @("open", "--json", "--port", "$Port")
+if ($false -ne $missingUrl.ok -or $missingUrl.error.code -ne "invalid_request") {
+    throw "open without url was not rejected"
+}
+
+$openStopped = Invoke-CliJson -Arguments @("open", "--json", "--url", "https://example.com", "--port", "$Port")
+if ($false -ne $openStopped.ok -or $openStopped.error.code -ne "daemon_not_running") {
+    throw "open should fail while daemon is not running"
+}
+
 $daemon = Start-Process -FilePath $ExePath -ArgumentList @("serve", "--json", "--port", "$Port") -PassThru -WindowStyle Hidden
 Start-Sleep -Milliseconds 800
 try {
@@ -99,11 +109,121 @@ try {
         throw "status did not reflect plugin hello"
     }
 
-    $commandRequest = @{ session = "smoke"; action = "snapshot"; args = @{} } | ConvertTo-Json -Depth 8 -Compress
+    $blockJob = Start-Job -ScriptBlock {
+        param($ExePath, $Port)
+        & $ExePath block-input --json --session smoke --watchdog-ms 123456 --message "AI busy" --port $Port
+    } -ArgumentList $ExePath, $Port
+    try {
+        Start-Sleep -Milliseconds 500
+        $blockPoll = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/plugin/poll" -Headers $pluginHeaders -ContentType "application/json" -Body "{}"
+        if ($true -ne $blockPoll.ok -or $blockPoll.data.action.action -ne "block_input") {
+            throw "plugin poll did not return queued block_input action"
+        }
+        if ($blockPoll.data.action.args.watchdog_ms -ne 123456 -or $blockPoll.data.action.args.message -ne "AI busy") {
+            throw "block-input CLI did not preserve arguments"
+        }
+        $blockResultBody = @{
+            id = $blockPoll.data.action.id
+            result = @{
+                ok = $true
+                data = @{
+                    success = $true
+                    blocked = $true
+                    pending = $true
+                }
+            }
+        } | ConvertTo-Json -Depth 8 -Compress
+        Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/plugin/result" -Headers $pluginHeaders -ContentType "application/json" -Body $blockResultBody | Out-Null
+        $blockOutput = Receive-Job $blockJob -Wait
+        Remove-Job $blockJob -Force
+        $blockJob = $null
+        $blockResult = ($blockOutput | ConvertFrom-Json)
+        if ($true -ne $blockResult.ok -or $true -ne $blockResult.data.blocked) {
+            throw "block-input command did not return successful envelope"
+        }
+    } finally {
+        if ($null -ne $blockJob) {
+            Remove-Job $blockJob -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    $unblockJob = Start-Job -ScriptBlock {
+        param($ExePath, $Port)
+        & $ExePath unblock-input --json --session smoke --port $Port
+    } -ArgumentList $ExePath, $Port
+    try {
+        Start-Sleep -Milliseconds 500
+        $unblockPoll = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/plugin/poll" -Headers $pluginHeaders -ContentType "application/json" -Body "{}"
+        if ($true -ne $unblockPoll.ok -or $unblockPoll.data.action.action -ne "unblock_input") {
+            throw "plugin poll did not return queued unblock_input action"
+        }
+        $unblockResultBody = @{
+            id = $unblockPoll.data.action.id
+            result = @{
+                ok = $true
+                data = @{
+                    success = $true
+                    blocked = $false
+                }
+            }
+        } | ConvertTo-Json -Depth 8 -Compress
+        Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/plugin/result" -Headers $pluginHeaders -ContentType "application/json" -Body $unblockResultBody | Out-Null
+        $unblockOutput = Receive-Job $unblockJob -Wait
+        Remove-Job $unblockJob -Force
+        $unblockJob = $null
+        $unblockResult = ($unblockOutput | ConvertFrom-Json)
+        if ($true -ne $unblockResult.ok -or $false -ne $unblockResult.data.blocked) {
+            throw "unblock-input command did not return successful envelope"
+        }
+    } finally {
+        if ($null -ne $unblockJob) {
+            Remove-Job $unblockJob -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    $unicodeValue = [string]([char]0x5F20) + [string]([char]0x4E09)
+    $fillJob = Start-Job -ScriptBlock {
+        param($ExePath, $Port, $Value)
+        & $ExePath fill --json --session smoke --target "@e1" --value $Value --port $Port
+    } -ArgumentList $ExePath, $Port, $unicodeValue
+    try {
+        Start-Sleep -Milliseconds 500
+        $fillPoll = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/plugin/poll" -Headers $pluginHeaders -ContentType "application/json" -Body "{}"
+        if ($true -ne $fillPoll.ok -or $fillPoll.data.action.action -ne "fill") {
+            throw "plugin poll did not return queued fill action"
+        }
+        if ($fillPoll.data.action.args.value -ne $unicodeValue) {
+            throw "fill CLI did not preserve UTF-8 argument value"
+        }
+        $fillResultBody = @{
+            id = $fillPoll.data.action.id
+            result = @{
+                ok = $true
+                data = @{
+                    success = $true
+                    tag = "INPUT"
+                    mode = "value"
+                }
+            }
+        } | ConvertTo-Json -Depth 8 -Compress
+        Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/plugin/result" -Headers $pluginHeaders -ContentType "application/json" -Body $fillResultBody | Out-Null
+        $fillOutput = Receive-Job $fillJob -Wait
+        Remove-Job $fillJob -Force
+        $fillJob = $null
+        $fillResult = ($fillOutput | ConvertFrom-Json)
+        if ($true -ne $fillResult.ok -or $true -ne $fillResult.data.success) {
+            throw "fill command did not return successful envelope"
+        }
+    } finally {
+        if ($null -ne $fillJob) {
+            Remove-Job $fillJob -Force -ErrorAction SilentlyContinue
+        }
+    }
+
     $commandJob = Start-Job -ScriptBlock {
-        param($ExePath, $CommandRequest, $Port)
-        $CommandRequest | & $ExePath command --json --port $Port
-    } -ArgumentList $ExePath, $commandRequest, $Port
+        param($ExePath, $Port)
+        & $ExePath read-page --json --session smoke --port $Port
+    } -ArgumentList $ExePath, $Port
     try {
         Start-Sleep -Milliseconds 500
         $poll = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/plugin/poll" -Headers $pluginHeaders -ContentType "application/json" -Body "{}"
@@ -145,6 +265,25 @@ try {
     } finally {
         if ($null -ne $commandJob) {
             Remove-Job $commandJob -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    $pollJob = Start-Job -ScriptBlock {
+        param($Port)
+        Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/plugin/poll" -Headers @{ "X-Ace-Browser-Bridge" = "extension" } -ContentType "application/json" -Body "{}"
+    } -ArgumentList $Port
+    try {
+        Start-Sleep -Milliseconds 500
+        Invoke-CliJson -Arguments @("shutdown", "--json", "--port", "$Port") | Out-Null
+        $pollAfterShutdown = Receive-Job $pollJob -Wait
+        if ($true -ne $pollAfterShutdown.ok -or $null -ne $pollAfterShutdown.data.action) {
+            throw "plugin poll did not unblock cleanly during daemon shutdown"
+        }
+        Remove-Job $pollJob -Force
+        $pollJob = $null
+    } finally {
+        if ($null -ne $pollJob) {
+            Remove-Job $pollJob -Force -ErrorAction SilentlyContinue
         }
     }
 } finally {

@@ -129,8 +129,17 @@
     return { ok: true, data: { success: true, duration_ms: durationMs } };
   }
 
+  function overlayLabel(args = {}) {
+    const text = typeof args.message === "string" && args.message.trim()
+      ? args.message.trim()
+      : "AI 正在操作浏览器，请暂时不要操作";
+    return text.slice(0, 96);
+  }
+
   function showOverlay(args = {}) {
     if (state.overlay) {
+      const label = state.overlay.querySelector(".ace-browser-bridge-operation-label");
+      if (label) label.textContent = overlayLabel(args);
       if (state.overlayTimer) window.clearTimeout(state.overlayTimer);
       state.overlayTimer = window.setTimeout(hideOverlay, Math.max(1000, Number(args.watchdog_ms || 10000)));
       refreshOverlayInputMode();
@@ -138,24 +147,31 @@
     }
     const overlay = document.createElement("div");
     overlay.id = "ace-browser-bridge-operation-overlay";
-    overlay.innerHTML = '<div class="ace-browser-bridge-operation-label">AI 正在操作浏览器</div>';
+    const label = document.createElement("div");
+    label.className = "ace-browser-bridge-operation-label";
+    label.textContent = overlayLabel(args);
+    overlay.appendChild(label);
     overlay.style.cssText = [
       "position: fixed",
       "inset: 0",
       "z-index: 2147483646",
       "pointer-events: auto",
       "box-sizing: border-box",
-      "border: 4px solid transparent",
+      "border: 6px solid transparent",
       "border-image: linear-gradient(135deg, #06b6d4, #14b8a6, #2563eb) 1",
-      "background: rgba(2, 132, 199, .03)"
+      "background: rgba(8, 47, 73, .12)",
+      "box-shadow: inset 0 0 0 2px rgba(45, 212, 191, .55), inset 0 0 52px rgba(14, 165, 233, .22)"
     ].join(";");
 
     const style = document.createElement("style");
     style.textContent = [
       "#ace-browser-bridge-operation-overlay .ace-browser-bridge-operation-label{",
-      "position:absolute;top:12px;left:50%;transform:translateX(-50%);",
-      "padding:6px 10px;border-radius:6px;background:rgba(15,23,42,.92);",
-      "color:#fff;font:13px/1.2 Arial,sans-serif;box-shadow:0 8px 24px rgba(15,23,42,.2);",
+      "position:absolute;top:18px;left:50%;transform:translateX(-50%);",
+      "padding:10px 16px;border-radius:8px;background:linear-gradient(135deg,rgba(15,23,42,.96),rgba(8,47,73,.96));",
+      "border:1px solid rgba(125,211,252,.72);",
+      "color:#fff;font:600 15px/1.35 Arial,sans-serif;letter-spacing:0;",
+      "box-shadow:0 14px 38px rgba(15,23,42,.34);",
+      "max-width:min(560px,calc(100vw - 40px));text-align:center;",
       "}"
     ].join("");
     overlay.appendChild(style);
