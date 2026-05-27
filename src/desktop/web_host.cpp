@@ -288,6 +288,53 @@ void install_mac_close_handler(webview::webview& w) {
                     reinterpret_cast<IMP>(acecode_mac_window_should_close),
                     "c@:@");
 }
+
+// macOS WKWebView 不自动转发 Cmd+C/V/X/A 等标准快捷键。
+// 设置包含 Edit 菜单的 NSMenu 后,系统会通过 responder chain
+// 将这些 keyEquivalent 路由到 WKWebView,从而使快捷键生效。
+void install_mac_edit_menu() {
+    NSMenu* main_menu = [[NSMenu alloc] init];
+
+    // Application menu (macOS 要求第一个菜单项为应用菜单)
+    NSMenuItem* app_menu_item = [[NSMenuItem alloc] init];
+    NSMenu* app_menu = [[NSMenu alloc] init];
+    [app_menu addItemWithTitle:@"Quit ACECode"
+                        action:@selector(terminate:)
+                 keyEquivalent:@"q"];
+    [app_menu_item setSubmenu:app_menu];
+    [main_menu addItem:app_menu_item];
+
+    // Edit menu — 提供给 WKWebView 响应 Cmd+C/V/X/A/Z
+    NSMenuItem* edit_menu_item = [[NSMenuItem alloc] init];
+    NSMenu* edit_menu = [[NSMenu alloc] initWithTitle:@"Edit"];
+
+    [edit_menu addItemWithTitle:@"Undo"
+                         action:@selector(undo:)
+                  keyEquivalent:@"z"];
+    NSMenuItem* redo_item = [edit_menu addItemWithTitle:@"Redo"
+                                                 action:@selector(redo:)
+                                          keyEquivalent:@"z"];
+    [redo_item setKeyEquivalentModifierMask:NSEventModifierFlagCommand |
+                                            NSEventModifierFlagShift];
+    [edit_menu addItem:[NSMenuItem separatorItem]];
+    [edit_menu addItemWithTitle:@"Cut"
+                         action:@selector(cut:)
+                  keyEquivalent:@"x"];
+    [edit_menu addItemWithTitle:@"Copy"
+                         action:@selector(copy:)
+                  keyEquivalent:@"c"];
+    [edit_menu addItemWithTitle:@"Paste"
+                         action:@selector(paste:)
+                  keyEquivalent:@"v"];
+    [edit_menu addItemWithTitle:@"Select All"
+                         action:@selector(selectAll:)
+                  keyEquivalent:@"a"];
+
+    [edit_menu_item setSubmenu:edit_menu];
+    [main_menu addItem:edit_menu_item];
+
+    [NSApp setMainMenu:main_menu];
+}
 #endif
 
 } // namespace
@@ -904,6 +951,7 @@ struct WebHost::Impl {
 #if defined(__APPLE__)
         w = std::make_unique<webview::webview>(debug, nullptr);
         configure_mac_window_chrome(*w);
+        install_mac_edit_menu();
         mac_focus_observer = install_mac_focus_existing_observer(*w);
         install_mac_close_handler(*w);
 #else
