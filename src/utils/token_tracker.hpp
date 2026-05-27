@@ -45,6 +45,12 @@ public:
     // Shows current context occupancy (last_prompt_tokens / context_window)
     std::string format_status(int context_window) const;
 
+    // Context occupancy percentage for the status bar, rounded to nearest int.
+    // Returns 0 for invalid context windows and caps overfull contexts at 100.
+    int context_percent(int context_window) const;
+
+    static int context_percent_for(int prompt_tokens, int context_window);
+
 private:
     mutable std::mutex mu_;
 

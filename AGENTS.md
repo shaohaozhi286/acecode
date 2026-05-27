@@ -31,6 +31,10 @@ Canonical root docs are [README.md](README.md), [README_CN.md](README_CN.md), [A
 
 For non-trivial behavior changes, create or continue an OpenSpec change under `openspec/changes/` before implementation. Use the repository's OpenSpec workflow commands or the local `openspec` CLI to propose, apply, and archive changes. During implementation, read the change context, complete tasks one by one, and update task checkboxes in the change's `tasks.md` immediately after each task is complete.
 
+## Project-Level Agent Overrides
+
+The Superpowers plugin is disabled for this repository. Do not invoke or follow `superpowers:*` skills, including `superpowers:using-superpowers`, unless the user explicitly re-enables Superpowers for a specific turn.
+
 ## Coding Style & Naming Conventions
 
 Follow [.editorconfig](.editorconfig): UTF-8, LF line endings, final newline, 4-space indentation for C++ and CMake, and 2-space indentation for JSON/YAML. Use C++17. Keep headers in `src/**/*.hpp` and implementations in matching `.cpp` files where practical. Name test files with the singular suffix `_test.cpp`; `tests/CMakeLists.txt` discovers that pattern automatically.

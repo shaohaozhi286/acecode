@@ -37,6 +37,18 @@ struct CompactResult {
     std::string error;
 };
 
+struct ContextRescueResult {
+    bool performed = false;
+    bool can_retry = false;
+    int messages_removed = 0;
+    int estimated_tokens_before = 0;
+    int estimated_tokens_after = 0;
+    int protected_user_turns = 0;
+    std::string marker_text;
+    std::vector<ChatMessage> compacted_messages;
+    std::string error;
+};
+
 struct TokenWarningState {
     double percent_left = 100.0;
     bool is_above_warning = false;
@@ -117,6 +129,25 @@ bool should_auto_compact(const std::vector<ChatMessage>& messages, int context_w
 
 // Calculate token warning state
 TokenWarningState calculate_token_warning_state(int estimated_tokens, int context_window);
+
+// ============================================================
+// Context-overflow rescue compact
+// ============================================================
+
+bool is_context_overflow_error(const ProviderErrorInfo& info);
+
+bool should_attempt_context_overflow_rescue(
+    const ProviderErrorInfo& info,
+    int estimated_request_tokens,
+    int context_window,
+    bool model_output_seen
+);
+
+ContextRescueResult rescue_compact_messages(
+    const std::vector<ChatMessage>& messages,
+    const std::string& cwd,
+    int preferred_tail_user_turns = 4
+);
 
 // ============================================================
 // PTL retry helpers (tasks 6.x)

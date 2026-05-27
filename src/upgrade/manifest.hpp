@@ -57,6 +57,7 @@ std::string manifest_url(const std::string& base_url);
 std::string current_target();
 SelectionResult select_update_package(const UpdateManifest& manifest,
                                       const std::string& current_version,
-                                      const std::string& target);
+                                      const std::string& target,
+                                      bool force = false);
 
 } // namespace acecode::upgrade

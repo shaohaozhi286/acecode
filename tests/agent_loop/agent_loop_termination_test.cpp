@@ -2,6 +2,7 @@
 //   (a) text-only 响应直接结束 loop,无条件
 //   (b) turn 1 调用 task_complete → 1 轮退出,UI 渲染 Done 摘要
 //   (c) 长链工具调用 → 命中 max_iterations 硬上限
+//   (c2) 默认 max_iterations=0 → 不因 50 轮默认值提前停止
 //   (d) AskUserQuestion 不是终止器 — 模型应继续下一轮(tool_result 走回模型)
 //   (e) 用户 abort → 立刻退出,发 [Interrupted] 系统消息
 //
@@ -16,6 +17,11 @@
 #include <gtest/gtest.h>
 
 #include "agent_loop.hpp"
+#include "config/config.hpp"
+#include "memory/memory_paths.hpp"
+#include "memory/memory_registry.hpp"
+#include "memory/memory_types.hpp"
+#include "project_instructions/instructions_loader.hpp"
 #include "stub_provider.hpp"
 #include "tool/task_complete_tool.hpp"
 #include "tool/tool_executor.hpp"
@@ -25,6 +31,9 @@
 #include <nlohmann/json.hpp>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -36,6 +45,8 @@ using acecode::AgentCallbacks;
 using acecode::ChatMessage;
 using acecode::PermissionManager;
 using acecode::PermissionResult;
+using acecode::ProviderErrorInfo;
+using acecode::ProviderErrorKind;
 using acecode::ToolDef;
 using acecode::ToolExecutor;
 using acecode::ToolImpl;
@@ -45,6 +56,53 @@ using acecode_test::ScriptedResponse;
 using acecode_test::StubLlmProvider;
 
 namespace {
+
+namespace fs = std::filesystem;
+
+#ifdef _WIN32
+constexpr const char* kHomeEnvName = "USERPROFILE";
+#else
+constexpr const char* kHomeEnvName = "HOME";
+#endif
+
+void set_env_var(const char* name, const std::string& value) {
+#ifdef _WIN32
+    _putenv_s(name, value.c_str());
+#else
+    setenv(name, value.c_str(), 1);
+#endif
+}
+
+void write_file(const fs::path& p, const std::string& content) {
+    fs::create_directories(p.parent_path());
+    std::ofstream ofs(p, std::ios::binary | std::ios::trunc);
+    ofs << content;
+}
+
+class TempHomeGuard {
+public:
+    explicit TempHomeGuard(std::string name) {
+        const char* e = std::getenv(kHomeEnvName);
+        prev_home_ = e ? e : "";
+        root_ = fs::temp_directory_path() / fs::path(std::move(name));
+        std::error_code ec;
+        fs::remove_all(root_, ec);
+        fs::create_directories(root_);
+        set_env_var(kHomeEnvName, root_.string());
+    }
+
+    ~TempHomeGuard() {
+        set_env_var(kHomeEnvName, prev_home_);
+        std::error_code ec;
+        fs::remove_all(root_, ec);
+    }
+
+    const fs::path& root() const { return root_; }
+
+private:
+    fs::path root_;
+    std::string prev_home_;
+};
 
 // 一个零副作用的占位"noop"工具,用于让长链工具调用走通(测 max_iterations 用)。
 ToolImpl create_noop_tool() {
@@ -68,7 +126,7 @@ ToolImpl create_noop_tool() {
 // Fixture:封装 AgentLoop + stub + 消息收集器 + 完成同步。
 class AgentLoopHarness {
 public:
-    AgentLoopHarness() {
+    explicit AgentLoopHarness(std::string cwd = ".") {
         tools_.register_tool(create_noop_tool());
         tools_.register_tool(acecode::create_task_complete_tool());
 
@@ -91,7 +149,7 @@ public:
             [this]() -> std::shared_ptr<acecode::LlmProvider> { return provider_; };
 
         loop_ = std::make_unique<AgentLoop>(
-            provider_accessor, tools_, cb, /*cwd=*/".", perms_);
+            provider_accessor, tools_, cb, /*cwd=*/std::move(cwd), perms_);
     }
 
     ~AgentLoopHarness() {
@@ -106,6 +164,15 @@ public:
     void set_stub_latency_ms(int ms) { provider_->set_latency_ms(ms); }
 
     void push_text(std::string s) { provider_->push_text(std::move(s)); }
+    void push_provider_error(ProviderErrorInfo error,
+                             bool after_payload = false,
+                             std::string text = {},
+                             std::vector<acecode::ToolCall> tool_calls = {}) {
+        provider_->push_error(std::move(error),
+                              after_payload,
+                              std::move(text),
+                              std::move(tool_calls));
+    }
     void push_tool_call(std::string name, std::string args, std::string id = "c1") {
         provider_->push_tool_call(std::move(name), std::move(args), std::move(id));
     }
@@ -129,6 +196,28 @@ public:
     void abort() { loop_->abort(); }
 
     int turn_count() const { return provider_->turn_count(); }
+
+    std::vector<ChatMessage> request_messages_for_turn(int zero_based_index) const {
+        return provider_->messages_for_turn(zero_based_index);
+    }
+
+    std::vector<ToolDef> request_tools_for_turn(int zero_based_index) const {
+        return provider_->tools_for_turn(zero_based_index);
+    }
+
+    std::vector<ChatMessage> persisted_messages() const {
+        return loop_->messages();
+    }
+
+    void set_memory_context(const acecode::MemoryRegistry* registry,
+                            const acecode::MemoryConfig* cfg) {
+        loop_->set_memory_registry(registry);
+        loop_->set_memory_config(cfg);
+    }
+
+    void set_project_instructions_config(const acecode::ProjectInstructionsConfig* cfg) {
+        loop_->set_project_instructions_config(cfg);
+    }
 
     struct Msg {
         std::string role;
@@ -187,6 +276,20 @@ private:
 
 } // namespace
 
+ProviderErrorInfo make_stub_provider_error(std::string display = "HTTP 500 from stub") {
+    ProviderErrorInfo error;
+    error.kind = ProviderErrorKind::Http;
+    error.status_code = 500;
+    error.provider = "stub";
+    error.model = "stub-1";
+    error.display_message = std::move(display);
+    error.raw_body = R"({"error":"boom"})";
+    error.body_is_json = true;
+    error.pretty_json = "{\n  \"error\": \"boom\"\n}";
+    error.retryable = true;
+    return error;
+}
+
 // 场景 (a):text-only 响应直接结束 loop。chit-chat 与 mid-task hedge 都走这条路径。
 TEST(AgentLoopTermination, TextOnlyEndsTurnUnconditionally) {
     AgentLoopHarness h;
@@ -197,6 +300,150 @@ TEST(AgentLoopTermination, TextOnlyEndsTurnUnconditionally) {
     EXPECT_EQ(h.count_nudges(), 0);  // 防回归:绝不该出现 nudge
     EXPECT_EQ(h.last_system_message().find("Agent loop stopped"),
               std::string::npos);  // 正常退出,无 cap 消息
+}
+
+// 场景:动态时间/CWD 只进入发给 provider 的 API 消息尾部,
+// 不写入会话历史,避免 system prompt 前缀每轮变化。
+TEST(AgentLoopTermination, RequestContextIsApiOnlyAndAtMessageTail) {
+    AgentLoopHarness h;
+    h.push_text("ok");
+
+    ASSERT_TRUE(h.submit_and_wait("what time is it?"));
+    ASSERT_EQ(h.turn_count(), 1);
+
+    auto request = h.request_messages_for_turn(0);
+    ASSERT_GE(request.size(), 2u);
+    EXPECT_EQ(request.front().role, "system");
+    EXPECT_EQ(request.back().role, "user");
+    EXPECT_NE(request.back().content.find("[当前环境状态]"), std::string::npos);
+    EXPECT_NE(request.back().content.find("时间："), std::string::npos);
+    EXPECT_NE(request.back().content.find("工作目录：."), std::string::npos);
+    EXPECT_NE(request.back().content.find("[用户输入]"), std::string::npos);
+    EXPECT_NE(request.back().content.find("what time is it?"), std::string::npos);
+
+    auto persisted = h.persisted_messages();
+    ASSERT_GE(persisted.size(), 2u);
+    EXPECT_EQ(persisted[0].role, "user");
+    EXPECT_EQ(persisted[0].content, "what time is it?");
+    EXPECT_EQ(persisted[0].content.find("[当前环境状态]"), std::string::npos);
+}
+
+// 场景:Project Instructions / User Memory 从静态 system prompt 移到
+// provider-facing session context,且不进入持久历史。
+TEST(AgentLoopTermination, SessionContextIsApiOnlyAndStaticPromptStaysClean) {
+    TempHomeGuard home("acecode-agentloop-context");
+    fs::path repo = home.root() / "repo";
+    write_file(repo / "ACECODE.md", "# repo rules\nuse goroutines\n");
+
+    fs::create_directories(acecode::get_memory_dir());
+    acecode::MemoryRegistry memory;
+    memory.scan();
+    std::string err;
+    ASSERT_TRUE(memory.upsert("user_profile", acecode::MemoryType::User,
+                              "senior Go dev", "10y Go\n",
+                              acecode::MemoryWriteMode::Create, err).has_value())
+        << err;
+
+    acecode::MemoryConfig memory_cfg;
+    acecode::ProjectInstructionsConfig project_cfg;
+
+    AgentLoopHarness h(repo.string());
+    h.set_memory_context(&memory, &memory_cfg);
+    h.set_project_instructions_config(&project_cfg);
+    h.push_text("ok");
+
+    ASSERT_TRUE(h.submit_and_wait("what should I do?"));
+    ASSERT_EQ(h.turn_count(), 1);
+
+    auto request = h.request_messages_for_turn(0);
+    ASSERT_GE(request.size(), 3u);
+    ASSERT_EQ(request.front().role, "system");
+    EXPECT_EQ(request.front().content.find("# Project Instructions"), std::string::npos);
+    EXPECT_EQ(request.front().content.find("# User Memory"), std::string::npos);
+    EXPECT_EQ(request.front().content.find("use goroutines"), std::string::npos);
+    EXPECT_EQ(request.front().content.find("user_profile.md"), std::string::npos);
+
+    bool saw_project = false;
+    bool saw_memory = false;
+    for (const auto& msg : request) {
+        if (msg.content.find("# Project Instructions") != std::string::npos &&
+            msg.content.find("use goroutines") != std::string::npos) {
+            saw_project = true;
+        }
+        if (msg.content.find("# User Memory") != std::string::npos &&
+            msg.content.find("user_profile.md") != std::string::npos) {
+            saw_memory = true;
+        }
+    }
+    EXPECT_TRUE(saw_project);
+    EXPECT_TRUE(saw_memory);
+    EXPECT_NE(request.back().content.find("[当前环境状态]"), std::string::npos);
+    EXPECT_NE(request.back().content.find("[用户输入]"), std::string::npos);
+
+    auto persisted = h.persisted_messages();
+    for (const auto& msg : persisted) {
+        EXPECT_EQ(msg.content.find("# Project Instructions"), std::string::npos);
+        EXPECT_EQ(msg.content.find("# User Memory"), std::string::npos);
+        EXPECT_EQ(msg.content.find("[当前环境状态]"), std::string::npos);
+    }
+}
+
+// 场景:项目文件和 memory mid-session 变化时,provider context 更新,
+// 但静态 system prompt 字节不变。
+TEST(AgentLoopTermination, MutableContextChangesDoNotChangeStaticSystemPrompt) {
+    TempHomeGuard home("acecode-agentloop-context-edit");
+    fs::path repo = home.root() / "repo";
+    write_file(repo / "ACECODE.md", "before rule\n");
+
+    fs::create_directories(acecode::get_memory_dir());
+    acecode::MemoryRegistry memory;
+    memory.scan();
+    std::string err;
+    ASSERT_TRUE(memory.upsert("first_memory", acecode::MemoryType::User,
+                              "first memory", "before\n",
+                              acecode::MemoryWriteMode::Create, err).has_value())
+        << err;
+
+    acecode::MemoryConfig memory_cfg;
+    acecode::ProjectInstructionsConfig project_cfg;
+
+    AgentLoopHarness h(repo.string());
+    h.set_memory_context(&memory, &memory_cfg);
+    h.set_project_instructions_config(&project_cfg);
+    h.push_text("first ok");
+    ASSERT_TRUE(h.submit_and_wait("first"));
+
+    write_file(repo / "ACECODE.md", "after rule\n");
+    ASSERT_TRUE(memory.upsert("second_memory", acecode::MemoryType::User,
+                              "second memory", "after\n",
+                              acecode::MemoryWriteMode::Create, err).has_value())
+        << err;
+
+    h.push_text("second ok");
+    ASSERT_TRUE(h.submit_and_wait("second"));
+
+    auto first_request = h.request_messages_for_turn(0);
+    auto second_request = h.request_messages_for_turn(1);
+    ASSERT_FALSE(first_request.empty());
+    ASSERT_FALSE(second_request.empty());
+    EXPECT_EQ(first_request.front().role, "system");
+    EXPECT_EQ(second_request.front().role, "system");
+    EXPECT_EQ(first_request.front().content, second_request.front().content);
+
+    auto contains = [](const std::vector<ChatMessage>& messages,
+                       const std::string& needle) {
+        for (const auto& msg : messages) {
+            if (msg.content.find(needle) != std::string::npos) return true;
+        }
+        return false;
+    };
+    EXPECT_TRUE(contains(first_request, "before rule"));
+    EXPECT_FALSE(contains(first_request, "after rule"));
+    EXPECT_TRUE(contains(first_request, "first_memory.md"));
+    EXPECT_FALSE(contains(first_request, "second_memory.md"));
+
+    EXPECT_TRUE(contains(second_request, "after rule"));
+    EXPECT_TRUE(contains(second_request, "second_memory.md"));
 }
 
 // 场景 (b):turn 1 就调用 task_complete → 1 轮退出,无 cap 消息
@@ -226,6 +473,21 @@ TEST(AgentLoopTermination, MaxIterationsHardCap) {
     ASSERT_TRUE(h.submit_and_wait("do it"));
     EXPECT_EQ(h.turn_count(), 3);
     EXPECT_NE(h.last_system_message().find("max_iterations"),
+              std::string::npos);
+}
+
+// 场景 (c2):默认 max_iterations=0 表示无限制,不会按旧默认 50 轮停止。
+TEST(AgentLoopTermination, DefaultMaxIterationsIsUnlimited) {
+    AgentLoopHarness h;
+
+    for (int i = 0; i < 55; ++i) {
+        h.push_tool_call("noop", "{}", "c" + std::to_string(i));
+    }
+    h.push_task_complete("done after old default");
+
+    ASSERT_TRUE(h.submit_and_wait("do it", std::chrono::seconds(10)));
+    EXPECT_EQ(h.turn_count(), 56);
+    EXPECT_EQ(h.last_system_message().find("max_iterations"),
               std::string::npos);
 }
 
@@ -267,4 +529,78 @@ TEST(AgentLoopTermination, UserAbortShortCircuits) {
     EXPECT_EQ(last.find("max_iterations"), std::string::npos);
     // 也绝不该累积 nudge
     EXPECT_EQ(h.count_nudges(), 0);
+    EXPECT_EQ(h.count_by_role("error"), 0);
+    EXPECT_EQ(last, "[Interrupted]");
+}
+
+TEST(AgentLoopTermination, ProviderErrorDoesNotCreateEmptyAssistantAndNextTurnWorks) {
+    AgentLoopHarness h;
+    h.push_provider_error(make_stub_provider_error());
+
+    ASSERT_TRUE(h.submit_and_wait("first"));
+    EXPECT_EQ(h.turn_count(), 1);
+    EXPECT_EQ(h.count_by_role("error"), 1);
+    EXPECT_EQ(h.count_by_role("assistant"), 0);
+
+    h.push_text("ok");
+    ASSERT_TRUE(h.submit_and_wait("second"));
+    EXPECT_EQ(h.turn_count(), 2);
+    EXPECT_EQ(h.count_by_role("assistant"), 1);
+}
+
+TEST(AgentLoopTermination, ProviderErrorAfterToolCallDoesNotExecuteOrPersistToolCall) {
+    AgentLoopHarness h;
+    acecode::ToolCall tc;
+    tc.id = "call-failed";
+    tc.function_name = "noop";
+    tc.function_arguments = "{}";
+    h.push_provider_error(make_stub_provider_error("stream ended before done"),
+                          true,
+                          std::string{},
+                          {tc});
+
+    ASSERT_TRUE(h.submit_and_wait("use tool"));
+    EXPECT_EQ(h.count_by_role("error"), 1);
+    EXPECT_EQ(h.count_by_role("assistant"), 0);
+    EXPECT_EQ(h.count_by_role("tool_call"), 0);
+    EXPECT_EQ(h.count_by_role("tool_result"), 0);
+}
+
+TEST(AgentLoopTermination, TimeoutAfterPartialToolCallIsNotReplayedAsOrphan) {
+    AgentLoopHarness h;
+    acecode::ToolCall tc;
+    tc.id = "call-timeout";
+    tc.function_name = "noop";
+    tc.function_arguments = "{}";
+    ProviderErrorInfo timeout = make_stub_provider_error("request timed out");
+    timeout.kind = ProviderErrorKind::Timeout;
+    timeout.status_code = 200;
+
+    h.push_provider_error(std::move(timeout), true, std::string{}, {tc});
+
+    ASSERT_TRUE(h.submit_and_wait("use tool"));
+    EXPECT_EQ(h.count_by_role("error"), 1);
+    EXPECT_EQ(h.count_by_role("assistant"), 0);
+    EXPECT_EQ(h.count_by_role("tool_call"), 0);
+    EXPECT_EQ(h.count_by_role("tool_result"), 0);
+
+    h.push_text("ok");
+    ASSERT_TRUE(h.submit_and_wait("next"));
+
+    const auto second_request = h.request_messages_for_turn(1);
+    for (const auto& msg : second_request) {
+        EXPECT_NE(msg.role, "tool");
+        if (msg.role == "assistant") {
+            EXPECT_TRUE(msg.tool_calls.is_null() || msg.tool_calls.empty());
+        }
+    }
+}
+
+TEST(AgentLoopTermination, SuccessfulEmptyResponseIsStillPersistedAsAssistant) {
+    AgentLoopHarness h;
+
+    ASSERT_TRUE(h.submit_and_wait("empty"));
+    EXPECT_EQ(h.turn_count(), 1);
+    EXPECT_EQ(h.count_by_role("error"), 0);
+    EXPECT_EQ(h.count_by_role("assistant"), 1);
 }

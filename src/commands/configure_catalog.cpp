@@ -120,6 +120,7 @@ std::string format_model_summary(const ModelEntry& m) {
 }
 
 std::string format_source_line(const AppConfig& cfg) {
+    if (cfg.provider == "codex") return "codex";
     if (cfg.provider == "copilot") return "copilot";
     if (cfg.openai.models_dev_provider_id.has_value() &&
         !cfg.openai.models_dev_provider_id->empty()) {

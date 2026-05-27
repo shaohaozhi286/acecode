@@ -1,8 +1,7 @@
 // POSIX 实现:`flock` 在 `~/.acecode/run/acecode-desktop.lock` 拿独占锁。
 //
-// 设计见 single_instance.hpp 头注。窗口拉前 v1 留 stub:Linux 桌面壳尚未发布,
-// 等到接 D-Bus(GTK/Qt)或 macOS NSDistributedNotificationCenter 时再补真实
-// 跨进程 IPC 通道。
+// 设计见 single_instance.hpp 头注。macOS 通过 distributed notification 唤醒
+// 已有窗口;Linux 桌面壳尚未发布,窗口拉前仍留 D-Bus/GTK 后续实现。
 //
 // 只在非 Windows 平台编译;_WIN32 走 single_instance_win.cpp。
 
@@ -20,6 +19,10 @@
 #include <filesystem>
 #include <sys/file.h>
 #include <unistd.h>
+
+#ifdef __APPLE__
+#  include <CoreFoundation/CoreFoundation.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -84,11 +87,21 @@ void SingleInstance::release() {
 }
 
 bool focus_existing_instance() {
-    // POSIX v1 stub:没有跨进程 "拉前" 通道。调用方收到 false 应当 exit,让用户
-    // 自己点系统托盘 / 切窗(若已经有 desktop 实例的话)。Linux/macOS 桌面壳
-    // 落地时再补真实 IPC。
+#ifdef __APPLE__
+    CFNotificationCenterPostNotification(
+        CFNotificationCenterGetDistributedCenter(),
+        CFSTR("dev.acecode.desktop.focusExisting.v1"),
+        nullptr,
+        nullptr,
+        true);
+    LOG_INFO("[desktop] focus_existing_instance: posted macOS distributed focus notification");
+    return true;
+#else
+    // POSIX v1 stub:Linux 还没有跨进程 "拉前" 通道。调用方收到 false 应当 exit,
+    // 让用户自己点系统托盘 / 切窗(若已经有 desktop 实例的话)。
     LOG_WARN("[desktop] focus_existing_instance: not implemented on POSIX (v1 stub)");
     return false;
+#endif
 }
 
 } // namespace acecode::desktop

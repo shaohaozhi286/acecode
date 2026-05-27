@@ -30,6 +30,7 @@ AppConfig make_cfg_with_two() {
     ModelProfile b;
     b.name = "local-lm"; b.provider = "openai"; b.model = "llama-3";
     b.base_url = "http://localhost:1234/v1"; b.api_key = "x";
+    b.context_window = 64000;
     cfg.saved_models.push_back(b);
 
     return cfg;
@@ -47,6 +48,21 @@ TEST(ModelsHandler, ListIncludesAllSavedModels) {
     EXPECT_EQ(arr[0]["name"], "copilot-fast");
     EXPECT_EQ(arr[1]["name"], "local-lm");
     EXPECT_TRUE(arr[1].contains("base_url"));
+    EXPECT_EQ(arr[1]["context_window"], 64000);
+}
+
+// 场景:旧配置里遗留 codex saved model 时,Web 模型列表不暴露已屏蔽 provider。
+TEST(ModelsHandler, ListAndFindSkipDisabledCodexProvider) {
+    auto cfg = make_cfg_with_two();
+    ModelProfile c;
+    c.name = "codex";
+    c.provider = "codex";
+    c.model = "gpt-5.5";
+    cfg.saved_models.push_back(c);
+
+    auto arr = list_models(cfg);
+    ASSERT_EQ(arr.size(), 2u);
+    EXPECT_FALSE(find_model_by_name(cfg, "codex").has_value());
 }
 
 // 场景: 空 saved_models 时,list_models 返回空数组。
@@ -122,8 +138,10 @@ TEST(ModelsHandler, ErrorToHttpStatusMapping) {
     EXPECT_EQ(http_status_for_edit_error(SavedModelEditError::INVALID_API_KEY), 400);
     EXPECT_EQ(http_status_for_edit_error(SavedModelEditError::RESERVED_NAME), 400);
     EXPECT_EQ(http_status_for_edit_error(SavedModelEditError::UNKNOWN_PROVIDER), 400);
+    EXPECT_EQ(http_status_for_edit_error(SavedModelEditError::PROVIDER_DISABLED), 400);
     EXPECT_EQ(http_status_for_edit_error(SavedModelEditError::MISSING_MODEL), 400);
     EXPECT_EQ(http_status_for_edit_error(SavedModelEditError::MISSING_BASE_URL), 400);
+    EXPECT_EQ(http_status_for_edit_error(SavedModelEditError::INVALID_CONTEXT_WINDOW), 400);
 }
 
 // 触发场景:POST/PUT 成功后把 ModelProfile 序列化回去给前端。api_key 是
@@ -141,6 +159,19 @@ TEST(ModelsHandler, ProfileToSafeJsonOmitsApiKey) {
     EXPECT_FALSE(j.contains("api_key"));
     EXPECT_EQ(j["base_url"], "http://localhost/v1");
     EXPECT_EQ(j["name"], "local");
+}
+
+// 触发场景:成功响应里允许返回非敏感的 context_window override。
+TEST(ModelsHandler, ProfileToSafeJsonIncludesContextWindow) {
+    ModelProfile p;
+    p.name = "local";
+    p.provider = "openai";
+    p.model = "llama-3";
+    p.base_url = "http://localhost/v1";
+    p.api_key = "sk-secret";
+    p.context_window = 96000;
+    auto j = profile_to_safe_json(p);
+    EXPECT_EQ(j["context_window"], 96000);
 }
 
 // 触发场景:前端 POST /api/models 漏字段时,后端要给出明确的字段名,
@@ -205,6 +236,7 @@ TEST(ModelsHandler, ParseDraftAcceptsFullBody) {
         {"model", "llama-3"},
         {"base_url", "http://localhost/v1"},
         {"api_key", "sk-x"},
+        {"context_window", 64000},
     };
     std::string err;
     auto d = parse_model_draft(body, err);
@@ -214,6 +246,8 @@ TEST(ModelsHandler, ParseDraftAcceptsFullBody) {
     EXPECT_EQ(d->model, "llama-3");
     EXPECT_EQ(d->base_url, "http://localhost/v1");
     EXPECT_EQ(d->api_key, "sk-x");
+    ASSERT_TRUE(d->context_window.has_value());
+    EXPECT_EQ(*d->context_window, 64000);
     EXPECT_TRUE(err.empty());
 }
 
@@ -253,7 +287,7 @@ TEST(ModelsHandler, ParseProbeRequestValidatesProviderAndBaseUrl) {
     std::string code;
     std::string err;
     auto unsupported = parse_model_probe_request(
-        nlohmann::json{{"provider", "copilot"}, {"base_url", "http://x"}},
+        nlohmann::json{{"provider", "anthropic"}, {"base_url", "http://x"}},
         code,
         err);
     EXPECT_FALSE(unsupported.has_value());
@@ -277,4 +311,14 @@ TEST(ModelsHandler, ParseProbeRequestValidatesProviderAndBaseUrl) {
     ASSERT_TRUE(ok.has_value());
     EXPECT_EQ(ok->base_url, "http://localhost/v1");
     EXPECT_EQ(ok->api_key, "sk");
+
+    code.clear();
+    err.clear();
+    auto copilot = parse_model_probe_request(
+        nlohmann::json{{"provider", "copilot"}},
+        code,
+        err);
+    ASSERT_TRUE(copilot.has_value());
+    EXPECT_EQ(copilot->provider, "copilot");
+    EXPECT_TRUE(copilot->base_url.empty());
 }

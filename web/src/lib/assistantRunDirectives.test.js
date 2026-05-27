@@ -3,8 +3,7 @@
 // 覆盖触发场景:
 // - 连续 assistant + 中间穿插 tool 行: 只第一条带 header, 其余 continuation
 // - 用户消息把 run 切断: 之后第一条 assistant 重新显示 header
-// - 空内容 + 非 streaming 的 assistant: 隐藏整行 + 不消耗 header 名额
-// - 空内容 + streaming 的 assistant: 正常显示 + 计入 run
+// - 空内容 assistant: 隐藏整行 + 不消耗 header 名额
 // - 非数组 / null 输入: 返回空 Map
 
 import assert from 'node:assert/strict';
@@ -78,15 +77,16 @@ run('空内容 + 非 streaming 的 assistant 隐藏 + 不消耗 header 名额', 
   assert.deepEqual(d.get(3), { showHeader: true, showFooter: true });
 });
 
-run('空内容 + streaming 的 assistant 不隐藏 + 计入 run', () => {
-  // 触发场景: 流式输出刚开始, 内容暂时为空, 不能隐藏
+run('空内容 + streaming 的 assistant 隐藏 + 不消耗 header 名额', () => {
+  // 触发场景: 旧 daemon / provider 空 token 生成了 streaming 空占位
+  // 期望: 不显示静态时间戳, 头部名额留给后续真正有内容的 assistant
   const items = [
     { kind: 'msg', id: 1, role: 'assistant', content: '', streaming: true },
     { kind: 'msg', id: 2, role: 'assistant', content: '后续' },
   ];
   const d = buildAssistantRunDirectives(items);
-  assert.deepEqual(d.get(1), { showHeader: true, showFooter: false });
-  assert.deepEqual(d.get(2), { showHeader: false, showFooter: true });
+  assert.deepEqual(d.get(1), { hide: true });
+  assert.deepEqual(d.get(2), { showHeader: true, showFooter: true });
 });
 
 run('多个 user 之间的多个 run, 各自独立计算', () => {

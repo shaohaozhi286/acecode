@@ -190,6 +190,7 @@ function historyItemFromMessage(next, m) {
     messageId: m.id || '',
     role: m.role || 'system',
     content: m.content || '',
+    contentParts: Array.isArray(m.content_parts) ? m.content_parts : [],
     metadata: m.metadata,
     ts: m.ts || m.timestamp_ms || Date.now(),
   };
@@ -317,7 +318,7 @@ export function reduceTranscriptEvent(state, msg) {
           : item);
         break;
       }
-      next.streamingId = null;
+      finalizeStreaming(next);
       const incomingContent = p.content || '';
       if (role === 'assistant' && incomingContent && incomingContent.trim()) {
         next.turnHadAssistantText = true;
@@ -331,6 +332,7 @@ export function reduceTranscriptEvent(state, msg) {
           messageId: p.id || '',
           role,
           content: incomingContent,
+          contentParts: Array.isArray(p.content_parts) ? p.content_parts : [],
           metadata: p.metadata,
           ts: eventTs(msg),
         },
@@ -343,6 +345,7 @@ export function reduceTranscriptEvent(state, msg) {
         next.turnHadAssistantText = true;
       }
       if (next.streamingId == null) {
+        if (!text.trim()) break;
         const id = allocateItemId(next);
         next.streamingId = id;
         next.items = [

@@ -98,6 +98,12 @@ public:
         // tool that prompts the user mid-loop.
         if (tool_name == "task_complete") return true;
 
+        // Browser bridge tools are governed by their own config switch and
+        // runtime health checks. Marking mutating browser tools non-read-only
+        // keeps them sequential in AgentLoop without adding a confirmation
+        // prompt before every browser action.
+        if (tool_name.rfind("browser_", 0) == 0) return true;
+
         // Session-level always-allow for this tool
         {
             std::lock_guard<std::mutex> lk(mu_);

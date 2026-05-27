@@ -7,7 +7,7 @@
 // - 同一 run 内的多条 assistant 消息(中间穿插 tool 行 / system 行 不影响),
 //   只有第一条显示头像 + "ACECode" 名牌, 其余为 continuation(无头像 / 无名牌)
 // - 工具行(kind === 'tool')和折叠活动摘要不影响 run 状态
-// - 空内容(trim 后为空)且非 streaming 的 assistant 消息隐藏整行, 且不消耗
+// - 空内容(trim 后为空)的 assistant 消息隐藏整行, 且不消耗
 //   header 名额(避免 LLM 仅发起 tool_call 时, 头一个空气泡偷走 header)
 // - 同一 run 内只有最后一条可见 assistant 消息显示时间和复制/分叉操作栏
 
@@ -36,7 +36,7 @@ export function buildAssistantRunDirectives(items) {
     if (it.role !== 'assistant') continue;
     const content = typeof it.content === 'string' ? it.content : '';
     const isEmpty = !content.trim();
-    if (isEmpty && !it.streaming) {
+    if (isEmpty) {
       directives.set(it.id, { hide: true });
       continue;
     }

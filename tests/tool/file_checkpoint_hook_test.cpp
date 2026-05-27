@@ -2,6 +2,7 @@
 
 #include "tool/file_edit_tool.hpp"
 #include "tool/file_write_tool.hpp"
+#include "tool/mtime_tracker.hpp"
 #include "tool/tool_executor.hpp"
 
 #include <nlohmann/json.hpp>
@@ -39,6 +40,10 @@ std::string read_file(const fs::path& path) {
                        std::istreambuf_iterator<char>());
 }
 
+void mark_full_read(const fs::path& path) {
+    acecode::MtimeTracker::instance().record_read(path.string(), read_file(path), false);
+}
+
 } // namespace
 
 TEST(FileCheckpointHook, FileWriteCallsHookOnceBeforeMutation) {
@@ -74,6 +79,7 @@ TEST(FileCheckpointHook, FileEditCallsHookOnceBeforeMutation) {
     ToolImpl tool = create_file_edit_tool();
     auto path = temp_file(".txt");
     write_file(path, "alpha\nbeta\n");
+    mark_full_read(path);
 
     int calls = 0;
     ToolContext ctx;
@@ -101,6 +107,7 @@ TEST(FileCheckpointHook, FileEditValidationFailureDoesNotCallHook) {
     ToolImpl tool = create_file_edit_tool();
     auto path = temp_file(".txt");
     write_file(path, "alpha\n");
+    mark_full_read(path);
 
     int calls = 0;
     ToolContext ctx;

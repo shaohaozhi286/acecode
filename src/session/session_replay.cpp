@@ -4,6 +4,7 @@
 
 #include "session_rewind.hpp"
 #include "tool_metadata_codec.hpp"
+#include "tool_result_storage.hpp"
 #include "../tool/tool_executor.hpp"
 
 #include <nlohmann/json.hpp>
@@ -44,6 +45,9 @@ std::vector<TuiState::Message> replay_session_messages(
 
     for (const auto& msg : messages) {
         if (is_file_checkpoint_message(msg)) {
+            continue;
+        }
+        if (is_content_replacement_message(msg)) {
             continue;
         }
         if (msg.metadata.is_object() &&

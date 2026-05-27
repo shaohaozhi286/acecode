@@ -254,6 +254,7 @@ void cmd_goal(CommandContext& ctx, const std::string& raw_args) {
         auto goal = store->get_thread_goal(sid);
         if (goal.has_value()) emit_goal_updated(ctx, *goal);
         push_goal_message(ctx, "Goal resumed.");
+        ctx.agent_loop.clear_stale_abort_request();
         ctx.agent_loop.maybe_continue_goal();
         return;
     }

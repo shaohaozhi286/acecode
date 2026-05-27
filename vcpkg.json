@@ -1,13 +1,13 @@
 {
-  "name": "acecode",
-  "version-semver": "0.1.4",
-  "dependencies": [
-    "cpr",
-    "crow",
-    "ftxui",
-    "gtest",
-    "libzip",
-    "nlohmann-json",
-    "sqlite3"
-  ]
+    "name":  "acecode",
+    "version-semver":  "0.2.6",
+    "dependencies":  [
+                         "cpr",
+                         "crow",
+                         "ftxui",
+                         "gtest",
+                         "libzip",
+                         "nlohmann-json",
+                         "sqlite3"
+                     ]
 }

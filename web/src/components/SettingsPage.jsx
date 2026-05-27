@@ -1,25 +1,34 @@
 // 全屏设置页:左栏导航 + 右栏内容(Codex 风格)。
 //
 // 设计来源:Claude Design 高保真原型 (panels.jsx)。NAV 顺序与设计稿一致。
-// 后端真实接入的 section:常规 (权限模式) / 外观 (主题) / 模型 (ModelManager)。
-// 其余 section (配置 / 个性化 / MCP / 工具 / 已归档会话 / 使用情况) 当前仅 UI 占位
+// 后端真实接入的 section:常规 (权限模式) / 外观 (主题) / 配置 / 模型 / 工具。
+// 其余 section (个性化 / MCP / 已归档会话 / 使用情况) 当前部分为 UI 占位
 // — 状态走本地 useState,提交按钮无网络副作用,待后端接口就绪后接入。
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTheme } from '../theme.jsx';
 import { api } from '../lib/api.js';
+import { openExternalUrl } from '../lib/externalUrl.js';
+import { copyTextToSystemClipboard } from '../lib/systemClipboard.js';
 import { Toggle } from './Modal.jsx';
 import { clsx, relativeTime } from '../lib/format.js';
 import { lookupErrorMessage } from '../lib/errors.js';
-import { buildModelDraftsFromSelection, splitModelIds, validateModelDraft } from '../lib/modelManager.js';
+import {
+  buildModelDraftsFromSelection,
+  filterModelIds,
+  formatContextWindowK,
+  parseContextWindowK,
+  splitModelIds,
+  validateModelDraft,
+} from '../lib/modelManager.js';
 import { normalizePermissionMode } from '../lib/permissionMode.js';
 import { sessionDisplayTitle } from '../lib/sessionTitle.js';
-import { VsIcon } from './Icon.jsx';
-import { ModelManager } from './ModelManager.jsx';
+import { RefreshIcon, VsIcon } from './Icon.jsx';
 import { toast } from './Toast.jsx';
 import {
   WindowControls,
   isInteractiveTarget,
+  nativePointerEvent,
   useFramelessWindowState,
 } from './WindowControls.jsx';
 
@@ -30,11 +39,12 @@ const NAV = [
   { key: 'personalization', label: '个性化' },
   { key: 'mcp', label: 'MCP 服务器' },
   { key: 'models', label: '模型' },
-  { key: 'models-new', label: '模型(新)' },
   { key: 'tools', label: '工具' },
   { key: 'archived', label: '已归档会话' },
   { key: 'usage', label: '使用情况' },
 ];
+
+const DEFAULT_UPGRADE_SERVICE_URL = 'http://2017studio.imwork.net:82/aupdate/';
 
 function navIndexForKey(key) {
   const idx = NAV.findIndex((item) => item.key === key);
@@ -69,7 +79,7 @@ export function SettingsPage({
       window.aceDesktop_toggleMaximizeWindow();
       return;
     }
-    window.aceDesktop_startWindowDrag();
+    window.aceDesktop_startWindowDrag(nativePointerEvent(event));
   };
 
   return (
@@ -132,16 +142,7 @@ export function SettingsPage({
             />
           )}
           {activeNavKey === 'mcp' && <SectionMCP />}
-          {activeNavKey === 'models' && (
-            <>
-              <h2 className="text-xl font-bold mb-1">模型</h2>
-              <p className="text-[12px] text-fg-mute mb-5">
-                管理已保存的模型预设;★ 表示当前默认。聊天界面顶栏切换的就是这里的列表。
-              </p>
-              <ModelManager />
-            </>
-          )}
-          {activeNavKey === 'models-new' && <SectionModelNew />}
+          {activeNavKey === 'models' && <SectionModel />}
           {activeNavKey === 'tools' && <SectionTools />}
           {activeNavKey === 'archived' && <SectionArchived />}
           {activeNavKey === 'usage' && <SectionUsage />}
@@ -348,14 +349,60 @@ function SectionAppearance({ theme, setTheme }) {
 }
 
 // ─── 配置 ──────────────────────────────────────────────────────────────────
-// UI 占位:程序版本 / 工作空间依赖项 / 诊断 / 重置。设计 panels.jsx::renderConfigContent。
+// 真实接入:升级服务 URL。其余程序版本 / 依赖项 / 诊断 / 重置仍保留占位。
 
 function SectionConfig() {
+  const [upgradeUrl, setUpgradeUrl] = useState(DEFAULT_UPGRADE_SERVICE_URL);
+  const [upgradeLoading, setUpgradeLoading] = useState(true);
+  const [upgradeSaving, setUpgradeSaving] = useState(false);
+  const [upgradeSaved, setUpgradeSaved] = useState(false);
+  const [upgradeError, setUpgradeError] = useState('');
   const [depPython, setDepPython] = useState(true);
   const [depNode, setDepNode] = useState(true);
   const [depCsharp, setDepCsharp] = useState(false);
   const [diagRunning, setDiagRunning] = useState(false);
   const [resetRunning, setResetRunning] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setUpgradeLoading(true);
+    setUpgradeError('');
+    api.getUpgradeConfig()
+      .then((cfg) => {
+        if (!cancelled) setUpgradeUrl(cfg?.base_url || DEFAULT_UPGRADE_SERVICE_URL);
+      })
+      .catch((e) => {
+        if (!cancelled) setUpgradeError(e?.message || String(e));
+      })
+      .finally(() => {
+        if (!cancelled) setUpgradeLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  const saveUpgradeUrl = async () => {
+    const baseUrl = upgradeUrl.trim();
+    if (!baseUrl || !/^https?:\/\//i.test(baseUrl)) {
+      setUpgradeError('升级服务 URL 必须使用 http 或 https');
+      return;
+    }
+    setUpgradeSaving(true);
+    setUpgradeSaved(false);
+    setUpgradeError('');
+    try {
+      const saved = await api.setUpgradeConfig({ base_url: baseUrl });
+      setUpgradeUrl(saved?.base_url || baseUrl);
+      setUpgradeSaved(true);
+      toast({ kind: 'ok', text: '升级服务 URL 已保存' });
+      setTimeout(() => setUpgradeSaved(false), 1500);
+    } catch (e) {
+      const message = e?.message || String(e);
+      setUpgradeError(message);
+      toast({ kind: 'err', text: message });
+    } finally {
+      setUpgradeSaving(false);
+    }
+  };
 
   const runDiag = () => {
     setDiagRunning(true);
@@ -381,6 +428,71 @@ function SectionConfig() {
   return (
     <>
       <h2 className="text-xl font-bold mb-5">配置</h2>
+
+      <div className="text-[14px] font-semibold mb-1">升级服务</div>
+      <div className="rounded-md bg-surface border border-border px-3.5 py-3 mb-5">
+        <label htmlFor="upgrade-service-url" className="text-[13px] font-medium mb-2 block">
+          升级服务 URL
+        </label>
+        <div className="flex gap-2">
+          <input
+            id="upgrade-service-url"
+            type="url"
+            value={upgradeUrl}
+            onChange={(e) => {
+              setUpgradeUrl(e.target.value);
+              setUpgradeSaved(false);
+              setUpgradeError('');
+            }}
+            disabled={upgradeLoading || upgradeSaving}
+            spellCheck={false}
+            className={clsx(
+              'flex-1 min-w-0 h-8 px-2.5 rounded-md border bg-bg text-fg text-[12px] font-mono outline-none transition',
+              upgradeError ? 'border-danger' : 'border-border focus:border-accent',
+            )}
+            placeholder={DEFAULT_UPGRADE_SERVICE_URL}
+          />
+          <button
+            type="button"
+            onClick={() => {
+              setUpgradeUrl(DEFAULT_UPGRADE_SERVICE_URL);
+              setUpgradeSaved(false);
+              setUpgradeError('');
+            }}
+            disabled={upgradeLoading || upgradeSaving}
+            className="shrink-0 px-3 py-1.5 rounded-md text-[12px] border border-border text-fg-2 hover:bg-surface-hi disabled:opacity-50 transition"
+          >
+            默认
+          </button>
+          <button
+            type="button"
+            onClick={saveUpgradeUrl}
+            disabled={upgradeLoading || upgradeSaving}
+            className={clsx(
+              'shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[12px] font-medium transition disabled:opacity-50 disabled:cursor-not-allowed',
+              upgradeSaved ? 'bg-ok text-white' : 'bg-accent text-white hover:opacity-90',
+            )}
+          >
+            {upgradeSaving ? (
+              <>
+                <span className="ace-spinner" style={{ width: 12, height: 12 }} />
+                保存中...
+              </>
+            ) : (
+              <>
+                <VsIcon
+                  name={upgradeSaved ? 'ok' : 'save'}
+                  size={13}
+                  mono={false}
+                  className="ace-icon-on-accent"
+                />
+                {upgradeSaved ? '已保存' : '保存'}
+              </>
+            )}
+          </button>
+        </div>
+        {upgradeError && <div className="mt-2 text-[12px] text-danger">{upgradeError}</div>}
+      </div>
 
       <div className="text-[14px] font-semibold mb-1">工作空间依赖项</div>
       <p className="text-[12px] text-fg-mute mb-3">管理 ACECode 安装并提供给 Agent 使用的开发工具</p>
@@ -698,16 +810,54 @@ function SectionMCP() {
 }
 
 // ─── 工具 ──────────────────────────────────────────────────────────────────
-// UI 占位:Browser Use 等内置工具开关。设计 panels.jsx::renderToolsContent。
 
 function SectionTools() {
-  const [browserUse, setBrowserUse] = useState(true);
+  const [bridgeEnabled, setBridgeEnabled] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError('');
+    api.getAceBrowserBridge()
+      .then((cfg) => {
+        if (!cancelled) setBridgeEnabled(!!cfg?.enabled);
+      })
+      .catch((e) => {
+        if (!cancelled) setError(e.message || String(e));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  const setBridge = async (next) => {
+    const before = bridgeEnabled;
+    setBridgeEnabled(next);
+    setSaving(true);
+    setError('');
+    try {
+      const saved = await api.setAceBrowserBridge({ enabled: next });
+      setBridgeEnabled(!!saved?.enabled);
+      toast({ kind: 'ok', text: next ? 'ACE Browser Bridge 已启用' : 'ACE Browser Bridge 已关闭' });
+    } catch (e) {
+      setBridgeEnabled(before);
+      const message = e.message || String(e);
+      setError(message);
+      toast({ kind: 'err', text: message });
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const tools = [
     {
-      key: 'browser_use',
-      name: 'Browser Use',
-      desc: '让 ACECode 控制内置浏览器进行页面操作 / 截图 / 表单填写',
+      key: 'ace_browser_bridge',
+      name: 'ACE Browser Bridge',
+      desc: '启用 browser_start，并在打开后通过 user prompt 引导模型使用 ace-browser-host CLI。',
       icon: (
         <svg
           width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -719,8 +869,8 @@ function SectionTools() {
           <path d="M12 3a13 13 0 0 1 0 18M12 3a13 13 0 0 0 0 18" />
         </svg>
       ),
-      on: browserUse,
-      toggle: () => setBrowserUse((v) => !v),
+      on: bridgeEnabled,
+      toggle: setBridge,
     },
   ];
 
@@ -729,7 +879,14 @@ function SectionTools() {
       <h2 className="text-xl font-bold mb-5">工具</h2>
 
       <div className="text-[14px] font-semibold mb-1">内置工具</div>
-      <p className="text-[12px] text-fg-mute mb-3">启用后 Agent 可在任务中自动调用</p>
+      <p className="text-[12px] text-fg-mute mb-3">
+        启用后 Agent 可在任务中自动调用；会写入 ace_browser_bridge 配置。
+      </p>
+      {error && (
+        <div className="mb-3 px-3 py-2 rounded-md border border-danger/40 bg-danger/10 text-danger text-[12px]">
+          {error}
+        </div>
+      )}
 
       {tools.map((tool) => (
         <div
@@ -743,7 +900,7 @@ function SectionTools() {
             <div className="text-[13px] font-medium">{tool.name}</div>
             <div className="text-[11px] text-fg-mute mt-0.5">{tool.desc}</div>
           </div>
-          <Toggle on={tool.on} onChange={tool.toggle} />
+          <Toggle on={tool.on} onChange={tool.toggle} disabled={loading || saving} />
         </div>
       ))}
 
@@ -986,7 +1143,7 @@ function SectionUsage() {
   );
 }
 
-// ─── 模型(新) ────────────────────────────────────────────────────────────
+// ─── 模型 ────────────────────────────────────────────────────────────────
 // Claude Design 高保真原型 (panels.jsx::renderModelContent) 的真实接入版本。
 // saved_models 仍是唯一持久化来源;多选模型提交时拆成多个 saved model 条目。
 
@@ -996,7 +1153,12 @@ const MODEL_NEW_PROVIDER_PILL = {
 };
 
 const MODEL_NEW_DRAFT_DEFAULT = {
-  name: '', provider: 'openai', model: '', base_url: 'https://api.openai.com/v1', api_key: '',
+  name: '',
+  provider: 'openai',
+  model: '',
+  base_url: 'https://api.openai.com/v1',
+  api_key: '',
+  context_window_k: '',
 };
 const MODEL_NEW_API_KEY_MASK = '••••••••';
 
@@ -1007,6 +1169,7 @@ function draftFromModelProfile(m) {
     model: m?.model || '',
     base_url: m?.base_url || '',
     api_key: m?.provider === 'openai' ? MODEL_NEW_API_KEY_MASK : '',
+    context_window_k: formatContextWindowK(m?.context_window),
   };
 }
 
@@ -1020,6 +1183,8 @@ function payloadForModelDraft(draft, { omitApiKey = false } = {}) {
     payload.base_url = String(draft.base_url || '').trim();
     if (!omitApiKey) payload.api_key = String(draft.api_key || '');
   }
+  const parsedContext = parseContextWindowK(draft.context_window_k);
+  payload.context_window = parsedContext.ok && parsedContext.tokens ? parsedContext.tokens : 0;
   return payload;
 }
 
@@ -1027,15 +1192,36 @@ function providerLabel(provider) {
   return provider === 'copilot' ? 'Copilot' : 'OpenAI';
 }
 
-function SectionModelNew() {
+function SectionModel() {
   const [models, setModels] = useState([]);
   const [defaultName, setDefaultName] = useState('');
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState('');
+  const [copilotAuth, setCopilotAuth] = useState({
+    loading: true,
+    authenticated: false,
+    has_token: false,
+  });
+  const [copilotBusy, setCopilotBusy] = useState('');
+  const [copilotFlow, setCopilotFlow] = useState(null);
   const [editingName, setEditingName] = useState(null);
   const [showAdd, setShowAdd] = useState(false);
   const [draft, setDraft] = useState(MODEL_NEW_DRAFT_DEFAULT);
   const [apiKeyTouched, setApiKeyTouched] = useState(false);
+
+  const refreshCopilotAuth = useCallback(async () => {
+    setCopilotAuth((s) => ({ ...s, loading: true }));
+    try {
+      const state = await api.getCopilotAuth();
+      setCopilotAuth({
+        loading: false,
+        authenticated: !!state?.authenticated,
+        has_token: !!state?.has_token,
+      });
+    } catch {
+      setCopilotAuth({ loading: false, authenticated: false, has_token: false });
+    }
+  }, []);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -1056,6 +1242,113 @@ function SectionModelNew() {
   useEffect(() => {
     refresh();
   }, [refresh]);
+  useEffect(() => {
+    refreshCopilotAuth();
+  }, [refreshCopilotAuth]);
+
+  const pollCopilotFlow = useCallback(async () => {
+    if (!copilotFlow?.device_code || copilotBusy) return;
+    setCopilotBusy('poll');
+    try {
+      const state = await api.pollCopilotAuth(copilotFlow.device_code);
+      if (state?.status === 'authenticated') {
+        setCopilotFlow(null);
+        setCopilotAuth({ loading: false, authenticated: true, has_token: true });
+        toast({ kind: 'ok', text: 'Copilot 已登录' });
+        return;
+      }
+      const intervalDelta = Number(state?.interval_delta_seconds || 0);
+      setCopilotFlow((flow) => flow ? {
+        ...flow,
+        status: state?.status || 'pending',
+        message: state?.message || (state?.status === 'slow_down' ? '轮询间隔已调整' : '等待 GitHub 授权'),
+        interval: Math.max(1, Number(flow.interval || 5) + (intervalDelta > 0 ? intervalDelta : 0)),
+      } : flow);
+      if (state?.status === 'expired' || state?.status === 'failed') {
+        toast({ kind: 'err', text: state?.message || 'Copilot 登录失败' });
+      }
+    } catch (err) {
+      setCopilotFlow((flow) => flow ? {
+        ...flow,
+        status: 'failed',
+        message: lookupErrorMessage(err?.code, err?.message),
+      } : flow);
+      toast({ kind: 'err', text: lookupErrorMessage(err?.code, err?.message) });
+    } finally {
+      setCopilotBusy('');
+    }
+  }, [copilotBusy, copilotFlow]);
+
+  useEffect(() => {
+    if (!copilotFlow?.device_code) return undefined;
+    if (copilotBusy) return undefined;
+    if (copilotFlow.status === 'authenticated' ||
+        copilotFlow.status === 'expired' ||
+        copilotFlow.status === 'failed') {
+      return undefined;
+    }
+    const delay = Math.max(1, Number(copilotFlow.interval || 5)) * 1000;
+    const id = window.setTimeout(() => { pollCopilotFlow(); }, delay);
+    return () => window.clearTimeout(id);
+  }, [copilotBusy, copilotFlow, pollCopilotFlow]);
+
+  const copyCopilotUserCode = useCallback(async (userCode, { silent = false } = {}) => {
+    const result = await copyTextToSystemClipboard(userCode);
+    if (result.ok) {
+      if (!silent) toast({ kind: 'ok', text: '验证码已复制' });
+      return result;
+    }
+    if (!silent) {
+      toast({ kind: 'err', text: '复制验证码失败:' + (result.error || '') });
+    }
+    return result;
+  }, []);
+
+  const startCopilotLogin = async () => {
+    if (copilotBusy) return;
+    setCopilotBusy('start');
+    try {
+      const flow = await api.startCopilotAuth();
+      setCopilotFlow({
+        ...flow,
+        status: 'pending',
+        interval: Math.max(1, Number(flow?.interval || 5)),
+        message: '等待 GitHub 授权',
+      });
+      const copyResult = flow?.user_code
+        ? await copyCopilotUserCode(flow.user_code, { silent: true })
+        : null;
+      if (copyResult && !copyResult.ok) {
+        toast({ kind: 'err', text: '验证码自动复制失败:' + (copyResult.error || '') });
+      }
+      if (flow?.verification_uri) {
+        const opened = await openExternalUrl(flow.verification_uri);
+        if (!opened.ok) {
+          toast({ kind: 'err', text: '无法打开系统浏览器:' + (opened.error || '') });
+        }
+      }
+      toast({ kind: 'ok', text: copyResult?.ok ? 'Copilot 登录已开始,验证码已复制' : 'Copilot 登录已开始' });
+    } catch (err) {
+      toast({ kind: 'err', text: lookupErrorMessage(err?.code, err?.message) });
+    } finally {
+      setCopilotBusy('');
+    }
+  };
+
+  const logoutCopilot = async () => {
+    if (copilotBusy) return;
+    setCopilotBusy('logout');
+    try {
+      await api.logoutCopilot();
+      setCopilotFlow(null);
+      setCopilotAuth({ loading: false, authenticated: false, has_token: false });
+      toast({ kind: 'ok', text: 'Copilot 已退出' });
+    } catch (err) {
+      toast({ kind: 'err', text: lookupErrorMessage(err?.code, err?.message) });
+    } finally {
+      setCopilotBusy('');
+    }
+  };
 
   const resetForm = () => {
     setEditingName(null);
@@ -1127,6 +1420,11 @@ function SectionModelNew() {
       return;
     }
     for (const item of drafts) {
+      const contextWindow = parseContextWindowK(item.context_window_k);
+      if (!contextWindow.ok) {
+        toast({ kind: 'err', text: lookupErrorMessage(contextWindow.code) });
+        return;
+      }
       const payload = payloadForModelDraft(item, { omitApiKey });
       const validatePayload = omitApiKey ? { ...payload, api_key: '__patch__' } : payload;
       const valid = validateModelDraft(validatePayload);
@@ -1159,10 +1457,22 @@ function SectionModelNew() {
 
   return (
     <>
-      <h2 className="text-xl font-bold mb-1">模型(新)</h2>
+      <h2 className="text-xl font-bold mb-1">模型</h2>
       <p className="text-[13px] text-fg-mute leading-relaxed mb-6">
         管理已保存的模型预设。标记 ★ 的为当前默认模型,聊天界面顶栏切换的模型列表来自这里。
       </p>
+
+      <CopilotAuthPanel
+        auth={copilotAuth}
+        flow={copilotFlow}
+        busy={copilotBusy}
+        onRefresh={refreshCopilotAuth}
+        onStart={startCopilotLogin}
+        onPoll={pollCopilotFlow}
+        onLogout={logoutCopilot}
+        onOpenExternalUrl={openExternalUrl}
+        onCopyCode={(code) => copyCopilotUserCode(code)}
+      />
 
       <div className="flex items-center justify-between mb-3">
         <div className="text-[12px] text-fg-mute">
@@ -1204,6 +1514,7 @@ function SectionModelNew() {
                   busy={busy === 'submit'}
                   allowMultiple={false}
                   onProbeModels={api.probeModels}
+                  copilotAuthenticated={copilotAuth.authenticated}
                 />
               </div>
             );
@@ -1251,7 +1562,12 @@ function SectionModelNew() {
                     {providerLabel(m.provider)}
                   </span>
                 </div>
-                <div className="text-[12px] text-fg-mute font-mono truncate">{m.model}</div>
+                <div className="text-[12px] text-fg-mute font-mono truncate">
+                  {m.model}
+                  {m.context_window ? (
+                    <span className="font-sans"> · 上下文 {formatContextWindowK(m.context_window)}k</span>
+                  ) : null}
+                </div>
               </div>
 
               <div className="flex gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
@@ -1313,6 +1629,7 @@ function SectionModelNew() {
             onProbeModels={api.probeModels}
             apiKeyTouched={apiKeyTouched}
             setApiKeyTouched={setApiKeyTouched}
+            copilotAuthenticated={copilotAuth.authenticated}
           />
         </div>
       ) : (
@@ -1328,6 +1645,124 @@ function SectionModelNew() {
   );
 }
 
+function CopilotAuthPanel({
+  auth,
+  flow,
+  busy = '',
+  onRefresh,
+  onStart,
+  onPoll,
+  onLogout,
+  onOpenExternalUrl = openExternalUrl,
+  onCopyCode = () => {},
+}) {
+  const pending = busy === 'start' || busy === 'poll' || busy === 'logout';
+  const loggedIn = !!auth?.authenticated;
+  const statusText = auth?.loading ? '检查中' : loggedIn ? '已登录' : '未登录';
+  const statusClass = auth?.loading
+    ? 'text-fg-mute bg-surface-hi'
+    : loggedIn
+      ? 'text-ok bg-ok/15'
+      : 'text-warn bg-warn/15';
+
+  return (
+    <div className="rounded-lg border border-border bg-surface mb-6 overflow-hidden">
+      <div className="px-5 py-3.5 flex items-center gap-3 border-b border-border">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 mb-1">
+            <span className="text-[14px] font-semibold">Copilot</span>
+            <span className={clsx('px-2 py-[2px] rounded text-[10px] font-medium', statusClass)}>
+              {statusText}
+            </span>
+          </div>
+          <div className="text-[12px] text-fg-mute">
+            GitHub Copilot 认证用于获取 Copilot 模型列表和运行 Copilot saved model。
+          </div>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={onRefresh}
+            disabled={pending || auth?.loading}
+            className="w-8 h-8 rounded-md flex items-center justify-center text-fg-mute hover:bg-surface-hi transition disabled:opacity-40"
+            title="刷新状态"
+          >
+            <RefreshIcon size={14} />
+          </button>
+          {loggedIn ? (
+            <button
+              type="button"
+              onClick={onLogout}
+              disabled={pending}
+              className="px-3 py-1.5 rounded-md border border-border text-[12px] text-fg-2 hover:bg-surface-hi transition disabled:opacity-50"
+            >
+              退出
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={onStart}
+              disabled={pending}
+              className="px-3.5 py-1.5 rounded-md bg-accent text-white text-[12px] font-medium hover:opacity-90 transition disabled:opacity-50"
+            >
+              登录
+            </button>
+          )}
+        </div>
+      </div>
+
+      {flow?.device_code && (
+        <div className="px-5 py-4 bg-surface-alt">
+          <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-3 items-center">
+            <div className="min-w-0">
+              <div className="text-[12px] text-fg-mute mb-1">GitHub 验证码</div>
+              <div className="flex items-center gap-2">
+                <div className="font-mono text-[20px] font-semibold tracking-[0.12em] text-fg">
+                  {flow.user_code}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onCopyCode(flow.user_code)}
+                  disabled={!flow.user_code}
+                  className="h-8 px-2.5 rounded-md border border-border bg-surface text-[12px] text-fg-2 inline-flex items-center gap-1.5 hover:bg-surface-hi transition disabled:opacity-40"
+                  title="复制验证码"
+                >
+                  <VsIcon name="copy" size={13} />
+                  复制
+                </button>
+              </div>
+              <a
+                href={flow.verification_uri}
+                onClick={async (event) => {
+                  event.preventDefault();
+                  const opened = await onOpenExternalUrl(flow.verification_uri);
+                  if (!opened.ok) {
+                    toast({ kind: 'err', text: '无法打开系统浏览器:' + (opened.error || '') });
+                  }
+                }}
+                className="mt-1 inline-block text-[12px] text-accent hover:underline break-all"
+              >
+                {flow.verification_uri}
+              </a>
+            </div>
+            <button
+              type="button"
+              onClick={onPoll}
+              disabled={pending || flow.status === 'expired' || flow.status === 'failed'}
+              className="px-3 py-1.5 rounded-md border border-border text-[12px] text-fg-2 hover:bg-surface-hi transition disabled:opacity-40"
+            >
+              检查
+            </button>
+          </div>
+          <div className="mt-3 text-[12px] text-fg-mute">
+            {busy === 'poll' ? '正在检查...' : flow.message || '等待 GitHub 授权'}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ModelFormPreview({
   data,
   setData,
@@ -1340,6 +1775,7 @@ function ModelFormPreview({
   apiKeyTouched = false,
   setApiKeyTouched = () => {},
   onProbeModels,
+  copilotAuthenticated = false,
 }) {
   // 每个 form 实例独立维护 picker 状态 — 不同 baseUrl 的 fetch 结果不混淆。
   // fetchStatus 状态机:'idle' → 'fetching' → ('success' | 'failed')
@@ -1352,16 +1788,24 @@ function ModelFormPreview({
   const [fetchError, setFetchError] = useState('');
 
   const selectedModels = splitModelIds(data.model);
+  const modelFilter = customInput.trim();
+  const filteredAvailable = useMemo(
+    () => filterModelIds(available || [], modelFilter),
+    [available, modelFilter],
+  );
+  const canProbeModels = data.provider === 'copilot'
+    ? copilotAuthenticated
+    : data.provider === 'openai' && !!data.base_url;
 
   const doFetch = async () => {
-    if (!onProbeModels || data.provider !== 'openai' || !data.base_url) return;
+    if (!onProbeModels || !canProbeModels) return;
     setFetchStatus('fetching');
     setFetchError('');
     try {
       const result = await onProbeModels({
         provider: data.provider,
-        base_url: data.base_url,
-        api_key: data.api_key === MODEL_NEW_API_KEY_MASK ? '' : data.api_key,
+        base_url: data.provider === 'openai' ? data.base_url : '',
+        api_key: data.provider === 'openai' && data.api_key !== MODEL_NEW_API_KEY_MASK ? data.api_key : '',
       });
       const ids = Array.isArray(result?.models) ? result.models : [];
       setAvailable(ids);
@@ -1380,13 +1824,13 @@ function ModelFormPreview({
     }
     setPickerOpen(true);
     // 仅在 idle (从未尝试) 时自动 fetch;上次 failed 不自动重试 — 走刷新按钮。
-    if (fetchStatus === 'idle' && data.provider === 'openai' && data.base_url) {
+    if (fetchStatus === 'idle' && canProbeModels) {
       doFetch();
     }
   };
 
   const refresh = () => {
-    if (data.provider !== 'openai' || !data.base_url) return;
+    if (!canProbeModels) return;
     doFetch();
   };
 
@@ -1510,6 +1954,20 @@ function ModelFormPreview({
         </div>
       )}
 
+      {/* Context Window */}
+      <div className="mb-4">
+        <div className="text-[12px] font-medium text-fg-2 mb-1.5">上下文窗口(K,可选)</div>
+        <input
+          type="number"
+          min="0"
+          step="0.001"
+          className={clsx(fieldClass, 'font-mono text-[12px]')}
+          placeholder="例如: 128"
+          value={data.context_window_k || ''}
+          onChange={(e) => setData({ context_window_k: e.target.value })}
+        />
+      </div>
+
       {/* Model ID 区域 */}
       <div className="mb-5">
         <div className="flex items-center justify-between mb-1.5">
@@ -1549,7 +2007,7 @@ function ModelFormPreview({
               </svg>
               <input
                 type="text"
-                placeholder="自定义模型 ID,回车添加"
+                placeholder="过滤或自定义模型 ID,回车添加"
                 className="flex-1 px-1 py-0.5 bg-transparent text-[12px] font-mono text-fg outline-none placeholder:text-fg-mute"
                 value={customInput}
                 onChange={(e) => setCustomInput(e.target.value)}
@@ -1584,17 +2042,21 @@ function ModelFormPreview({
             {/* 已查询模型 section header (含状态 + 刷新按钮) */}
             <div className="flex items-center justify-between px-3.5 py-1.5 bg-surface-alt border-b border-border">
               <span className="text-[11px] text-fg-mute">
-                {data.provider !== 'openai' && 'Copilot 模型请手动输入'}
+                {data.provider === 'copilot' && fetchStatus === 'idle' && (copilotAuthenticated ? '尚未获取 Copilot 模型列表' : '请先登录 Copilot,也可手动输入')}
                 {data.provider === 'openai' && fetchStatus === 'idle' && (data.base_url ? '尚未获取模型列表' : '请先填写 Base URL')}
                 {fetchStatus === 'fetching' && '正在获取...'}
-                {fetchStatus === 'success'  && `已查询到 ${available?.length || 0} 个模型`}
+                {fetchStatus === 'success' && (
+                  modelFilter && available?.length
+                    ? `已查询到 ${available.length} 个模型 · 匹配 ${filteredAvailable.length} 个`
+                    : `已查询到 ${available?.length || 0} 个模型`
+                )}
                 {fetchStatus === 'failed'   && '上次获取失败 · 点「刷新」重试'}
               </span>
               <button
                 type="button"
                 onClick={refresh}
-                disabled={data.provider !== 'openai' || !data.base_url || fetchStatus === 'fetching'}
-                title={data.provider === 'openai' && data.base_url ? '刷新模型列表' : '请先填写 Base URL'}
+                disabled={!canProbeModels || fetchStatus === 'fetching'}
+                title={canProbeModels ? '刷新模型列表' : (data.provider === 'copilot' ? '请先登录 Copilot' : '请先填写 Base URL')}
                 className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] text-fg-2 rounded hover:bg-surface-hi transition disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 <svg
@@ -1630,36 +2092,42 @@ function ModelFormPreview({
               </div>
             )}
             {fetchStatus === 'success' && available && available.length > 0 && (
-              <div className="max-h-[200px] overflow-y-auto">
-                {available.map((mid, idx) => {
-                  const checked = selectedModels.includes(mid);
-                  const isLast = idx === available.length - 1;
-                  return (
-                    <button
-                      key={mid}
-                      type="button"
-                      onClick={() => toggleModelPick(mid)}
-                      className={clsx(
-                        'w-full flex items-center gap-2.5 px-3.5 py-2 text-left transition',
-                        !isLast && 'border-b border-border',
-                        checked ? 'bg-accent-bg' : 'hover:bg-surface-hi',
-                      )}
-                    >
-                      <span
+              filteredAvailable.length > 0 ? (
+                <div className="max-h-[200px] overflow-y-auto">
+                  {filteredAvailable.map((mid, idx) => {
+                    const checked = selectedModels.includes(mid);
+                    const isLast = idx === filteredAvailable.length - 1;
+                    return (
+                      <button
+                        key={mid}
+                        type="button"
+                        onClick={() => toggleModelPick(mid)}
                         className={clsx(
-                          'w-[18px] h-[18px] rounded flex items-center justify-center text-white text-[11px] font-bold leading-none transition shrink-0',
-                          checked
-                            ? 'bg-accent border-2 border-accent'
-                            : 'border-2 border-border bg-transparent',
+                          'w-full flex items-center gap-2.5 px-3.5 py-2 text-left transition',
+                          !isLast && 'border-b border-border',
+                          checked ? 'bg-accent-bg' : 'hover:bg-surface-hi',
                         )}
                       >
-                        {checked && <span>✓</span>}
-                      </span>
-                      <span className="text-[12px] font-mono text-fg">{mid}</span>
-                    </button>
-                  );
-                })}
-              </div>
+                        <span
+                          className={clsx(
+                            'w-[18px] h-[18px] rounded flex items-center justify-center text-white text-[11px] font-bold leading-none transition shrink-0',
+                            checked
+                              ? 'bg-accent border-2 border-accent'
+                              : 'border-2 border-border bg-transparent',
+                          )}
+                        >
+                          {checked && <span>✓</span>}
+                        </span>
+                        <span className="text-[12px] font-mono text-fg">{mid}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="px-3.5 py-3 text-[12px] text-fg-mute text-center">
+                  没有匹配的模型 · 可回车作为自定义模型添加
+                </div>
+              )
             )}
             {fetchStatus === 'success' && available && available.length === 0 && (
               <div className="px-3.5 py-3 text-[12px] text-fg-mute text-center">

@@ -16,6 +16,7 @@
 #include "daemon_pool.hpp"
 #include "dpi_win.hpp"
 #include "edge_app_launcher.hpp"
+#include "external_url.hpp"
 #include "folder_picker.hpp"
 #include "notifications_win.hpp"
 #include "open_in_explorer.hpp"
@@ -28,6 +29,7 @@
 #include "workspace_registry.hpp"
 
 #include "../config/config.hpp"
+#include "../utils/clipboard.hpp"
 #include "../utils/cwd_hash.hpp"
 #include "../utils/encoding.hpp"
 #include "../utils/logger.hpp"
@@ -586,6 +588,22 @@ int main(int argc, char** argv) {
             WebHost::StartupWindowMode::OffscreenUntilReady);
     } catch (const WebHostInitializationError& e) {
         return run_edge_app_mode("embedded WebView unavailable", e.what());
+    } catch (const std::exception& e) {
+#ifdef _WIN32
+        LOG_WARN(std::string("[desktop] WebHost construction failed with unexpected exception; "
+                             "entering Edge app mode: ") + e.what());
+        return run_edge_app_mode("embedded WebView unavailable", e.what());
+#else
+        throw;
+#endif
+    } catch (...) {
+#ifdef _WIN32
+        LOG_WARN("[desktop] WebHost construction failed with unknown exception; "
+                 "entering Edge app mode");
+        return run_edge_app_mode("embedded WebView unavailable", "unknown WebHost initialization error");
+#else
+        throw;
+#endif
     }
     WebHost& host = *host_storage;
     host.set_title("ACECode");
@@ -731,18 +749,91 @@ int main(int argc, char** argv) {
         return nlohmann::json{{"ok", host.open_dev_tools()}}.dump();
     });
 
-    host.bind("aceDesktop_startWindowDrag", [&](const std::string& /*req*/) -> std::string {
-        return nlohmann::json{{"ok", host.start_window_drag()}}.dump();
+    host.bind("aceDesktop_openExternalUrl", [&](const std::string& req) -> std::string {
+        try {
+            auto arr = nlohmann::json::parse(req);
+            if (!arr.is_array() || arr.empty() || !arr[0].is_string()) {
+                return nlohmann::json{{"ok", false}, {"error", "expect [url]"}}.dump();
+            }
+            auto result = acecode::desktop::open_external_url(arr[0].get<std::string>());
+            if (!result.ok) {
+                return nlohmann::json{{"ok", false}, {"error", result.error}}.dump();
+            }
+            return nlohmann::json{{"ok", true}}.dump();
+        } catch (const std::exception& e) {
+            return nlohmann::json{{"ok", false}, {"error", std::string("parse: ") + e.what()}}.dump();
+        }
+    });
+
+    host.bind("aceDesktop_writeClipboardText", [&](const std::string& req) -> std::string {
+        try {
+            auto arr = nlohmann::json::parse(req);
+            if (!arr.is_array() || arr.empty() || !arr[0].is_string()) {
+                return nlohmann::json{{"ok", false}, {"error", "expect [text]"}}.dump();
+            }
+            auto result = acecode::write_system_clipboard_text(arr[0].get<std::string>());
+            if (!result) {
+                std::string error = result.detail;
+                if (error.empty()) {
+                    error = result.status == acecode::ClipboardTextWriteResult::Status::TooLarge
+                        ? "clipboard text is too large"
+                        : "clipboard unavailable";
+                }
+                return nlohmann::json{{"ok", false}, {"error", error}}.dump();
+            }
+            return nlohmann::json{{"ok", true}}.dump();
+        } catch (const std::exception& e) {
+            return nlohmann::json{{"ok", false}, {"error", std::string("parse: ") + e.what()}}.dump();
+        }
+    });
+
+    auto parse_pointer_event = [](const nlohmann::json& arr) {
+        WebHost::PointerEvent event;
+        if (!arr.is_array() || arr.empty() || !arr[0].is_object()) return event;
+        const auto& p = arr[0];
+        if (p.contains("button") && p["button"].is_number_integer()) {
+            event.button = p["button"].get<int>();
+        }
+        if (p.contains("screenX") && p["screenX"].is_number()) {
+            event.root_x = static_cast<int>(p["screenX"].get<double>());
+            event.has_position = true;
+        }
+        if (p.contains("screenY") && p["screenY"].is_number()) {
+            event.root_y = static_cast<int>(p["screenY"].get<double>());
+            event.has_position = true;
+        }
+        if (p.contains("time") && p["time"].is_number()) {
+            const double time = p["time"].get<double>();
+            if (time > 0.0) {
+                event.timestamp = static_cast<unsigned int>(time);
+            }
+        }
+        return event;
+    };
+
+    host.bind("aceDesktop_startWindowDrag", [&](const std::string& req) -> std::string {
+        WebHost::PointerEvent event;
+        try {
+            event = parse_pointer_event(nlohmann::json::parse(req));
+        } catch (...) {
+            // Missing pointer metadata is acceptable; GTK can still try with defaults.
+        }
+        return nlohmann::json{{"ok", host.start_window_drag(event)}}.dump();
     });
     // 前端在窗口 4 边的不可见 strip 上 mousedown 时调用,内部 SendMessage 进入
     // 原生 resize 循环。direction 见 parse_resize_direction;非法/最大化/平台
-    // 不支持(macOS/Linux 当前 stub)→ ok:false 但不抛错,前端静默吞掉。
+    // 不支持 → ok:false 但不抛错,前端静默吞掉。
     host.bind("aceDesktop_startWindowResize", [&](const std::string& req) -> std::string {
         std::string direction;
+        WebHost::PointerEvent event;
         try {
             auto arr = nlohmann::json::parse(req);
             if (arr.is_array() && !arr.empty() && arr[0].is_string()) {
                 direction = arr[0].get<std::string>();
+                if (arr.size() > 1) {
+                    nlohmann::json event_arr = nlohmann::json::array({arr[1]});
+                    event = parse_pointer_event(event_arr);
+                }
             }
         } catch (...) {
             // 非法 JSON 也走下面的 ok:false 分支
@@ -750,7 +841,7 @@ int main(int argc, char** argv) {
         if (direction.empty()) {
             return nlohmann::json{{"ok", false}, {"error", "expect [direction]"}}.dump();
         }
-        return nlohmann::json{{"ok", host.start_window_resize(direction)}}.dump();
+        return nlohmann::json{{"ok", host.start_window_resize(direction, event)}}.dump();
     });
     host.bind("aceDesktop_minimizeWindow", [&](const std::string& /*req*/) -> std::string {
         return nlohmann::json{{"ok", host.minimize_window()}}.dump();
@@ -904,11 +995,7 @@ int main(int argc, char** argv) {
     // navigate 前注入 JS: hook console + window 错误事件 → 全部转发回 native。
     // 故意不 hook console.log / console.info,避免噪音(可在前端代码里需要时
     // 显式调 aceDesktop_logFromWeb('info', ...))。
-#ifdef _WIN32
     constexpr const char* kFramelessWindowFlag = "true";
-#else
-    constexpr const char* kFramelessWindowFlag = "false";
-#endif
     host.init_script(std::string("window.__ACECODE_DESKTOP_SHELL__=true;\n") +
                                      "window.__ACECODE_DESKTOP_DEBUG__=" +
                                      (desktop_debug ? "true" : "false") + ";\n" +

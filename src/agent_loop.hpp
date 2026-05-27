@@ -19,6 +19,7 @@
 #include <thread>
 #include <condition_variable>
 #include <queue>
+#include <map>
 
 namespace acecode {
 
@@ -109,6 +110,10 @@ public:
     // skill command expansion). Empty `display_text` falls back to `prompt`.
     void submit(const std::string& prompt, const std::string& display_text);
 
+    // Submit structured user input containing text plus optional attachment or
+    // context parts. Existing text-only submit overloads delegate here.
+    void submit(const UserInput& input);
+
     // Submit a user-initiated shell command triggered by `!` mode. Non-blocking:
     // enqueues on the same worker so it serialises with LLM turns. The worker
     // invokes BashTool directly (no LLM round-trip), emits tool_call + tool_result
@@ -123,6 +128,8 @@ public:
     // Emit a visible system message without adding it to LLM history. Used by
     // daemon-owned builtin commands for TUI-like progress and fallback output.
     void emit_system_message(const std::string& content);
+    void emit_transcript_system_message(const std::string& content,
+                                        nlohmann::json metadata = nlohmann::json::object());
 
     // Append a single user-role entry to messages_ representing an already-run
     // shell command and its captured output. Used both by the shell worker
@@ -135,6 +142,7 @@ public:
 
     // Abort the current inference. Safe to call from any thread.
     void abort();
+    void clear_stale_abort_request();
 
     // Signal the worker thread to exit and wait for it to finish.
     void shutdown();
@@ -202,6 +210,8 @@ public:
 private:
     void worker_main();
     void run_agent(const std::string& user_message);
+    void run_agent_with_input(const UserInput& input,
+                              bool hidden_goal_context = false);
     // Variant that records `display_text` into the user message's metadata.display_text
     // so UI can show the original input while the LLM sees an expanded `prompt`.
     // When `display_text` is empty, behaves identically to run_agent(prompt).
@@ -222,13 +232,18 @@ private:
     // (events_)。所有 on_message 触发点都该走这个 helper,确保 daemon
     // 模式下没装 callbacks 也能拿到事件。
     void dispatch_message(const std::string& role,
-                           const std::string& content,
-                           bool is_tool);
+                          const std::string& content,
+                          bool is_tool,
+                          nlohmann::json metadata = nlohmann::json::object());
+    void append_tool_user_prompt(const std::string& content,
+                                 const std::string& display_text,
+                                 const std::string& source_tool);
 
     struct WorkerTask {
         enum class Kind { Chat, Shell, Compact };
         Kind kind = Kind::Chat;
         std::string payload;
+        UserInput input;
         // 仅 Chat 用:UI 渲染时希望显示的"原文",而 payload(发给 LLM)可能
         // 是被 daemon expander 展开过的字符串(skill 调用提示等)。空 = UI 与
         // LLM 看到同一份(payload)。
@@ -246,8 +261,8 @@ private:
     PermissionManager& permissions_;
     PathValidator path_validator_;
     int context_window_ = 128000;
-    // agent_loop termination policy. Fresh defaults (50 / 3) until set_agent_loop_config
-    // is called from main.cpp — gives tests / embedders a sane behavior out of the box.
+    // agent_loop termination policy. Fresh defaults come from AgentLoopConfig
+    // until set_agent_loop_config is called from main.cpp.
     AgentLoopConfig loop_cfg_;
     std::atomic<int> last_api_prompt_tokens_{0}; // from most recent API response
     int auto_compact_consecutive_failures_ = 0;
@@ -256,10 +271,13 @@ private:
     const MemoryRegistry* memory_registry_ = nullptr;
     const MemoryConfig* memory_cfg_ = nullptr;
     const ProjectInstructionsConfig* project_instructions_cfg_ = nullptr;
+    std::string session_context_cache_key_;
+    std::string session_context_cache_content_;
     std::string goal_accounting_thread_id_;
     std::string goal_accounting_goal_id_;
     std::string budget_notice_goal_id_;
     std::chrono::steady_clock::time_point goal_time_checkpoint_{};
+    std::map<std::string, std::chrono::steady_clock::time_point> recent_safe_edit_failures_;
 
     // Worker thread and task queue
     std::thread worker_thread_;

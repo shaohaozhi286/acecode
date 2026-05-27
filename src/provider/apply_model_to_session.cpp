@@ -17,30 +17,14 @@ namespace acecode {
 
 namespace {
 
-AppConfig config_for_profile_context(const AppConfig& cfg,
-                                     const ModelProfile& profile) {
-    AppConfig c = cfg;
-    c.provider = profile.provider;
-    if (profile.provider == "openai") {
-        c.openai.base_url = profile.base_url;
-        c.openai.api_key = profile.api_key;
-        c.openai.model = profile.model;
-        c.openai.models_dev_provider_id = profile.models_dev_provider_id;
-    } else {
-        c.copilot.model = profile.model;
-    }
-    return c;
-}
-
 SessionModelState state_from_profile(const AppConfig& cfg,
                                       const ModelProfile& profile) {
-    auto context_cfg = config_for_profile_context(cfg, profile);
     SessionModelState state;
     state.name = profile.name;
     state.provider = profile.provider;
     state.model = profile.model;
-    state.context_window = resolve_model_context_window_nonblocking(
-        context_cfg, profile.provider, profile.model, cfg.context_window);
+    state.context_window = resolve_model_profile_context_window_nonblocking(
+        cfg, profile, cfg.context_window);
     return state;
 }
 

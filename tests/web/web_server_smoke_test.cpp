@@ -15,7 +15,9 @@
 // 集成测验证。当前 WS 行为依赖 spec 里描述的 hello-binding 协议。
 
 #include <gtest/gtest.h>
+#include <httplib.h>
 
+#include "auth/github_auth.hpp"
 #include "config/saved_models.hpp"
 #include "permissions.hpp"
 #include "desktop/workspace_registry.hpp"
@@ -26,6 +28,7 @@
 #include "session/session_storage.hpp"
 #include "skills/skill_registry.hpp"
 #include "tool/tool_executor.hpp"
+#include "upgrade/manifest.hpp"
 #include "utils/encoding.hpp"
 #include "utils/cwd_hash.hpp"
 #include "web/server.hpp"
@@ -35,6 +38,7 @@
 #include <chrono>
 #include <cpr/cpr.h>
 #include <cctype>
+#include <cstdlib>
 #include <filesystem>
 #include <functional>
 #include <fstream>
@@ -101,7 +105,8 @@ struct WebServerFixture {
         bool register_default_workspace = true,
         bool native_folder_picker_enabled = false,
         std::function<std::optional<std::string>()> native_folder_picker = {},
-        bool attach_skill_registry = true) {
+        bool attach_skill_registry = true,
+        std::function<bool(std::string*)> start_update_command = {}) {
         port = pick_test_port();
         web_cfg.bind = "127.0.0.1";
         web_cfg.port = port;
@@ -162,6 +167,7 @@ struct WebServerFixture {
         wdeps.workspace_registry = workspace_registry.get();
         wdeps.native_folder_picker_enabled = native_folder_picker_enabled;
         wdeps.native_folder_picker = std::move(native_folder_picker);
+        wdeps.start_update_command = std::move(start_update_command);
         wdeps.skill_registry = attach_skill_registry ? &skill_registry : nullptr;
         wdeps.dangerous = false;
 
@@ -192,6 +198,42 @@ struct WebServerFixture {
     }
 };
 
+struct LocalUpdateServer {
+    httplib::Server svr;
+    int port = 0;
+    std::thread th;
+
+    explicit LocalUpdateServer(std::function<void(httplib::Server&)> setup) {
+        setup(svr);
+        port = svr.bind_to_any_port("127.0.0.1");
+        th = std::thread([this] { svr.listen_after_bind(); });
+        for (int i = 0; i < 50 && !svr.is_running(); ++i) {
+            std::this_thread::sleep_for(10ms);
+        }
+    }
+
+    ~LocalUpdateServer() {
+        svr.stop();
+        if (th.joinable()) th.join();
+    }
+
+    std::string base_url() const {
+        return "http://127.0.0.1:" + std::to_string(port) + "/";
+    }
+};
+
+std::string update_manifest_for(const std::string& version) {
+    return R"({
+      "schema_version": 1,
+      "latest": ")" + version + R"(",
+      "releases": [
+        {"version": ")" + version + R"(", "packages": [
+          {"target": ")" + acecode::upgrade::current_target() + R"(", "file": "acecode.zip", "sha256": ")" + std::string(64, 'a') + R"("}
+        ]}
+      ]
+    })";
+}
+
 struct CwdModelOverrideCleanup {
     std::string cwd;
     ~CwdModelOverrideCleanup() {
@@ -204,6 +246,45 @@ struct RemoveTreeOnExit {
     ~RemoveTreeOnExit() {
         std::error_code ec;
         if (!path.empty()) std::filesystem::remove_all(path, ec);
+    }
+};
+
+#ifdef _WIN32
+constexpr const char* kHomeEnvName = "USERPROFILE";
+#else
+constexpr const char* kHomeEnvName = "HOME";
+#endif
+
+std::optional<std::string> get_env_value(const char* name) {
+    const char* value = std::getenv(name);
+    if (!value) return std::nullopt;
+    return std::string(value);
+}
+
+void set_env_value(const char* name, const std::optional<std::string>& value) {
+#ifdef _WIN32
+    _putenv_s(name, value ? value->c_str() : "");
+#else
+    if (value) {
+        setenv(name, value->c_str(), 1);
+    } else {
+        unsetenv(name);
+    }
+#endif
+}
+
+struct ScopedHomeOverride {
+    std::optional<std::string> old_home;
+    std::filesystem::path path;
+
+    explicit ScopedHomeOverride(const std::filesystem::path& new_home)
+        : old_home(get_env_value(kHomeEnvName)), path(new_home) {
+        std::filesystem::create_directories(path);
+        set_env_value(kHomeEnvName, path.string());
+    }
+
+    ~ScopedHomeOverride() {
+        set_env_value(kHomeEnvName, old_home);
     }
 };
 
@@ -1028,6 +1109,63 @@ TEST(WebServerHttp, PostMessageQueuesInputInDaemonSession) {
     EXPECT_TRUE(found) << "HTTP submit should be owned by daemon session";
 }
 
+TEST(WebServerHttp, UploadAttachmentAndSubmitContentParts) {
+    WebServerFixture fx;
+    auto post = cpr::Post(cpr::Url{fx.url("/api/sessions")},
+                          cpr::Header{{"Content-Type", "application/json"}},
+                          cpr::Body{R"({})"});
+    ASSERT_EQ(post.status_code, 201);
+    auto sid = json::parse(post.text)["session_id"].get<std::string>();
+
+    auto upload = cpr::Post(
+        cpr::Url{fx.url("/api/sessions/" + sid + "/attachments")},
+        cpr::Header{{"Content-Type", "application/json"}},
+        cpr::Body{R"({"name":"screen.png","mime_type":"image/png","data_base64":"YWJj"})"});
+    ASSERT_EQ(upload.status_code, 201) << upload.text;
+    auto attachment = json::parse(upload.text)["attachment"];
+    ASSERT_TRUE(attachment["id"].is_string());
+    EXPECT_EQ(attachment["kind"], "image");
+    const std::string attachment_id = attachment["id"].get<std::string>();
+
+    auto blob = cpr::Get(
+        cpr::Url{fx.url("/api/sessions/" + sid + "/attachments/" + attachment_id + "/blob")});
+    ASSERT_EQ(blob.status_code, 200) << blob.text;
+    EXPECT_EQ(blob.text, "abc");
+
+    auto queued = cpr::Post(
+        cpr::Url{fx.url("/api/sessions/" + sid + "/messages")},
+        cpr::Header{{"Content-Type", "application/json"}},
+        cpr::Body{json{
+            {"text", "describe this"},
+            {"attachments", json::array({json{{"id", attachment_id}}})},
+        }.dump()});
+    ASSERT_EQ(queued.status_code, 202) << queued.text;
+
+    bool found = false;
+    auto deadline = std::chrono::steady_clock::now() + 2s;
+    while (std::chrono::steady_clock::now() < deadline && !found) {
+        auto r = cpr::Get(cpr::Url{fx.url("/api/sessions/" + sid + "/messages")});
+        ASSERT_EQ(r.status_code, 200) << r.text;
+        auto j = json::parse(r.text);
+        for (const auto& m : j["messages"]) {
+            if (m.value("role", "") != "user" ||
+                m.value("content", "") != "describe this" ||
+                !m.contains("content_parts")) {
+                continue;
+            }
+            const auto& parts = m["content_parts"];
+            if (parts.is_array() && parts.size() == 2 &&
+                parts[1].value("type", "") == "image" &&
+                parts[1]["attachment"].value("id", "") == attachment_id) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) std::this_thread::sleep_for(20ms);
+    }
+    EXPECT_TRUE(found) << "attachment content_parts should be persisted";
+}
+
 TEST(WebServerHttp, PostBuiltinCommandRejectsUnknownSession) {
     WebServerFixture fx;
     auto r = cpr::Post(cpr::Url{fx.url("/api/sessions/missing-session/commands")},
@@ -1296,6 +1434,100 @@ TEST(WebServerHttp, PutUiPreferencesRejectsInvalidAvatarPayload) {
     EXPECT_TRUE(fx.cfg.web_ui.show_acecode_avatar);
 }
 
+// 场景:GET /api/config/upgrade 返回当前升级服务 URL 默认值。
+TEST(WebServerHttp, GetUpgradeConfigReturnsDefaultBaseUrl) {
+    WebServerFixture fx;
+    auto r = cpr::Get(cpr::Url{fx.url("/api/config/upgrade")});
+    ASSERT_EQ(r.status_code, 200) << r.text;
+    auto j = json::parse(r.text);
+    ASSERT_TRUE(j.contains("base_url"));
+    EXPECT_EQ(j["base_url"], "http://2017studio.imwork.net:82/aupdate/");
+}
+
+// 场景:PUT /api/config/upgrade 规范化 URL、更新内存并落盘。
+TEST(WebServerHttp, PutUpgradeConfigPersistsNormalizedBaseUrl) {
+    WebServerFixture fx;
+    json req = {{"base_url", " https://updates.example.test/ace "}};
+    auto put = cpr::Put(cpr::Url{fx.url("/api/config/upgrade")},
+                        cpr::Header{{"Content-Type", "application/json"}},
+                        cpr::Body{req.dump()});
+    ASSERT_EQ(put.status_code, 200) << put.text;
+    auto body = json::parse(put.text);
+    EXPECT_EQ(body["base_url"], "https://updates.example.test/ace/");
+    EXPECT_EQ(fx.cfg.upgrade.base_url, "https://updates.example.test/ace/");
+
+    std::ifstream ifs(fx.tmp_dir / "config.json");
+    ASSERT_TRUE(ifs.is_open());
+    auto saved = json::parse(ifs);
+    ASSERT_TRUE(saved.contains("upgrade"));
+    EXPECT_EQ(saved["upgrade"]["base_url"], "https://updates.example.test/ace/");
+}
+
+// 场景:PUT /api/config/upgrade 非 http(s) URL 被拒绝且不改 cfg。
+TEST(WebServerHttp, PutUpgradeConfigRejectsInvalidBaseUrl) {
+    WebServerFixture fx;
+    const std::string before = fx.cfg.upgrade.base_url;
+    json req = {{"base_url", "ftp://updates.example.test/ace"}};
+    auto r = cpr::Put(cpr::Url{fx.url("/api/config/upgrade")},
+                      cpr::Header{{"Content-Type", "application/json"}},
+                      cpr::Body{req.dump()});
+    ASSERT_EQ(r.status_code, 400) << r.text;
+    auto j = json::parse(r.text);
+    EXPECT_EQ(j["error"], "BAD_REQUEST");
+    EXPECT_EQ(fx.cfg.upgrade.base_url, before);
+}
+
+// 场景:GET /api/update/status 只检查 manifest,返回有新版状态。
+TEST(WebServerHttp, GetUpdateStatusReportsAvailableVersion) {
+    LocalUpdateServer update_server([](httplib::Server& s) {
+        s.Get("/aceupdate.json", [](const httplib::Request&, httplib::Response& res) {
+            res.set_content(update_manifest_for("9.9.9"), "application/json");
+        });
+        s.Get("/acecode.zip", [](const httplib::Request&, httplib::Response& res) {
+            res.status = 500;
+        });
+    });
+    WebServerFixture fx;
+    fx.cfg.upgrade.base_url = update_server.base_url();
+    fx.cfg.upgrade.timeout_ms = 3000;
+
+    auto r = cpr::Get(cpr::Url{fx.url("/api/update/status")});
+    ASSERT_EQ(r.status_code, 200) << r.text;
+    auto j = json::parse(r.text);
+    EXPECT_EQ(j["status"], "available");
+    EXPECT_EQ(j["update_available"], true);
+    EXPECT_EQ(j["latest_version"], "9.9.9");
+    EXPECT_EQ(j["package_file"], "acecode.zip");
+}
+
+// 场景:POST /api/update/start 显式用户动作才触发升级命令。
+TEST(WebServerHttp, PostUpdateStartRunsInjectedUpdateCommand) {
+    LocalUpdateServer update_server([](httplib::Server& s) {
+        s.Get("/aceupdate.json", [](const httplib::Request&, httplib::Response& res) {
+            res.set_content(update_manifest_for("9.9.9"), "application/json");
+        });
+    });
+    bool called = false;
+    WebServerFixture fx(
+        true,
+        false,
+        {},
+        true,
+        [&](std::string*) {
+            called = true;
+            return true;
+        });
+    fx.cfg.upgrade.base_url = update_server.base_url();
+    fx.cfg.upgrade.timeout_ms = 3000;
+
+    auto r = cpr::Post(cpr::Url{fx.url("/api/update/start")});
+    ASSERT_EQ(r.status_code, 202) << r.text;
+    auto j = json::parse(r.text);
+    EXPECT_EQ(j["started"], true);
+    EXPECT_EQ(j["latest_version"], "9.9.9");
+    EXPECT_TRUE(called);
+}
+
 // 场景: POST /api/sessions body 是非法 JSON → 400 + error JSON,不影响 server。
 TEST(WebServerHttp, CreateSessionWithBadJsonReturns400) {
     WebServerFixture fx;
@@ -1346,7 +1578,7 @@ TEST(WebServerHttp, PostModelsCreatesSavedEntryWithoutApiKey) {
 TEST(WebServerHttp, PostModelsProbeRejectsUnsupportedProvider) {
     WebServerFixture fx;
     json req = {
-        {"provider", "copilot"},
+        {"provider", "anthropic"},
         {"base_url", "http://localhost:1234/v1"},
     };
     auto r = cpr::Post(cpr::Url{fx.url("/api/models/probe")},
@@ -1355,6 +1587,55 @@ TEST(WebServerHttp, PostModelsProbeRejectsUnsupportedProvider) {
     ASSERT_EQ(r.status_code, 400) << r.text;
     auto j = json::parse(r.text);
     EXPECT_EQ(j["error"], "UNKNOWN_PROVIDER");
+}
+
+// 场景:Copilot 模型探测需要先通过 desktop/web 登录;无 token 时必须走
+// 401,且不能尝试真实网络。
+TEST(WebServerHttp, PostModelsProbeCopilotRequiresAuthWhenNoToken) {
+    auto temp_home = std::filesystem::temp_directory_path() /
+                     ("acecode_copilot_home_" + std::to_string(std::random_device{}()));
+    RemoveTreeOnExit cleanup{temp_home};
+    ScopedHomeOverride home(temp_home);
+    WebServerFixture fx;
+    json req = {{"provider", "copilot"}};
+
+    auto r = cpr::Post(cpr::Url{fx.url("/api/models/probe")},
+                       cpr::Header{{"Content-Type", "application/json"}},
+                       cpr::Body{req.dump()});
+    ASSERT_EQ(r.status_code, 401) << r.text;
+    auto j = json::parse(r.text);
+    EXPECT_EQ(j["error"], "COPILOT_AUTH_REQUIRED");
+}
+
+// 场景:desktop/web Copilot auth 状态和退出只读写 github_token 文件,
+// 不碰 saved_models,也不泄漏 token 内容。
+TEST(WebServerHttp, CopilotAuthStatusAndLogoutUseSavedTokenOnly) {
+    auto temp_home = std::filesystem::temp_directory_path() /
+                     ("acecode_copilot_auth_home_" + std::to_string(std::random_device{}()));
+    RemoveTreeOnExit cleanup{temp_home};
+    ScopedHomeOverride home(temp_home);
+    WebServerFixture fx;
+
+    auto initial = cpr::Get(cpr::Url{fx.url("/api/copilot/auth")});
+    ASSERT_EQ(initial.status_code, 200) << initial.text;
+    auto initial_body = json::parse(initial.text);
+    EXPECT_EQ(initial_body["has_token"], false);
+    EXPECT_EQ(initial_body["authenticated"], false);
+    EXPECT_EQ(initial.text.find("gho-secret"), std::string::npos);
+
+    acecode::save_github_token("gho-secret-test");
+    auto with_token = cpr::Get(cpr::Url{fx.url("/api/copilot/auth")});
+    ASSERT_EQ(with_token.status_code, 200) << with_token.text;
+    auto with_token_body = json::parse(with_token.text);
+    EXPECT_EQ(with_token_body["has_token"], true);
+    EXPECT_EQ(with_token_body["authenticated"], true);
+    EXPECT_EQ(with_token.text.find("gho-secret-test"), std::string::npos);
+    ASSERT_EQ(fx.cfg.saved_models.size(), 1u);
+
+    auto logout = cpr::Delete(cpr::Url{fx.url("/api/copilot/auth")});
+    ASSERT_EQ(logout.status_code, 200) << logout.text;
+    EXPECT_FALSE(acecode::has_saved_github_token());
+    EXPECT_EQ(fx.cfg.saved_models.size(), 1u);
 }
 
 // 场景:POST /api/models 重名 → 409 NAME_TAKEN(saved_models_editor 校验)。

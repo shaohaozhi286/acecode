@@ -27,6 +27,14 @@ public:
 
 class WebHost {
 public:
+    struct PointerEvent {
+        int button = 1;
+        int root_x = 0;
+        int root_y = 0;
+        unsigned int timestamp = 0;
+        bool has_position = false;
+    };
+
     enum class StartupWindowMode {
         DefaultVisible,
         OffscreenUntilReady,
@@ -58,18 +66,21 @@ public:
     // debug 模式下打开 WebView 开发者工具。非 WebView2 平台返回 false。
     bool open_dev_tools();
 
-    // Windows frameless desktop chrome helpers. 非 Windows 平台返回 false。
-    bool start_window_drag();
+    // Frameless desktop chrome helpers. Windows uses native non-client messages,
+    // Linux uses GTK move/resize/window-state APIs, and macOS uses Cocoa window
+    // operations.
+    bool start_window_drag(const PointerEvent& event);
     // 从 JS 端发起原生 resize:WebView2 子窗口默认会吃掉 WM_NCHITTEST,导致
     // 父窗口在子窗口覆盖区域拿不到 resize 命中。前端在窗口边缘 strip 上 mousedown
     // 时调这个方法,内部 ReleaseCapture + WM_NCLBUTTONDOWN(HT*) 让 Windows
     // 进入和"鼠标真在 NC 区按下"等价的原生 resize 循环 — Aero snap / Win+方向键
     // 这些系统手势也跟着可用。direction 见 parse_resize_direction。最大化时拒绝
     // 调用并返回 false,避免 Windows 从屏幕边拉出诡异的还原行为。
-    bool start_window_resize(const std::string& direction);
+    bool start_window_resize(const std::string& direction,
+                             const PointerEvent& event);
     bool minimize_window();
     bool toggle_maximize_window();
-    // 当前窗口是否处于最大化状态(IsZoomed)。非 Windows 平台始终返回 false。
+    // 当前窗口是否处于最大化状态(IsZoomed / gtk maximized / NSWindow zoomed)。
     // 前端 TopBar 在 mount 时调一次拿初始态,之后靠 set_window_state_change_handler
     // 推送的变更事件维护。
     bool is_window_maximized() const;

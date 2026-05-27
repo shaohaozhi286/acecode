@@ -44,16 +44,40 @@ public:
                "Re-read the file before writing to avoid data loss: " + path;
     }
 
+    static std::string file_not_read_for_edit(const std::string& path) {
+        return "[Error] File has not been read yet. Read the full file with file_read "
+               "before editing it: " + path;
+    }
+
+    static std::string file_partially_read_for_edit(const std::string& path) {
+        return "[Error] File was only partially read. Read the full file with file_read "
+               "before editing it: " + path;
+    }
+
+    static std::string no_changes_to_make() {
+        return "[Error] No changes to make: old_string and new_string are exactly the same.";
+    }
+
+    static std::string cannot_create_file_exists(const std::string& path) {
+        return "[Error] Cannot create new file - file already exists: " + path;
+    }
+
+    static std::string notebook_edit_required(const std::string& path) {
+        return "[Error] File is a Jupyter Notebook. Use a notebook-specific editor instead of file_edit: " + path;
+    }
+
     static std::string string_not_found(const std::string& file_path) {
         return "[Error] old_string not found in " + file_path +
-               ". Re-read the file and make sure to use the exact string, "
-               "including whitespace and indentation.";
+               ". Re-read the relevant lines with file_read start_line/end_line "
+               "and retry with start_line/end_line/expected_hash, or use an exact "
+               "old_string including whitespace and indentation.";
     }
 
     static std::string string_not_unique(size_t count, const std::string& file_path) {
         return "[Error] old_string found " + std::to_string(count) +
                " times in " + file_path + ". Include more surrounding lines "
-               "to uniquely identify the target location.";
+               "to uniquely identify the target location, or set replace_all to true "
+               "to replace every occurrence.";
     }
 
     static std::string empty_parameter(const std::string& param_name) {

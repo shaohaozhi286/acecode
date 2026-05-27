@@ -194,6 +194,9 @@ void SessionStorage::write_meta(const std::string& meta_path, const SessionMeta&
     if (!meta.title.empty()) {
         j["title"] = meta.title;
     }
+    if (!meta.input_draft.empty()) {
+        j["input_draft"] = meta.input_draft;
+    }
     j["permission_mode"] = normalize_permission_mode_name(meta.permission_mode);
     j["turn_count"] = (std::max)(0, meta.turn_count);
     if (token_usage_has_values(meta.last_token_usage)) {
@@ -235,6 +238,7 @@ SessionMeta SessionStorage::read_meta(const std::string& meta_path) {
         if (j.contains("model"))         meta.model         = j["model"].get<std::string>();
         meta.model_preset    = j.value("model_preset",    std::string{});
         meta.title           = j.value("title",           std::string{});
+        meta.input_draft     = j.value("input_draft",     std::string{});
         meta.permission_mode = normalize_permission_mode_name(
             j.value("permission_mode", std::string{"default"}));
         meta.turn_count      = (std::max)(0, j.value("turn_count", 0));

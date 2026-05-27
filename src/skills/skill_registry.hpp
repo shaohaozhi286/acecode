@@ -11,9 +11,9 @@
 
 namespace acecode {
 
-// Discovery + in-memory index for SKILL.md documents. Thread-safe for the
-// common pattern of "scan once at startup from UI thread, read from worker
-// threads via list()/find()".
+// Discovery for SKILL.md documents. Thread-safe for concurrent reads and
+// reloads. Read APIs refresh from disk before returning so skill edits made
+// while ACECode is running are visible without restart or manual reload.
 class SkillRegistry {
 public:
     SkillRegistry() = default;
@@ -55,10 +55,12 @@ public:
         const std::string& name, const std::string& relative_path) const;
 
 private:
+    void refresh_from_disk() const;
+
     mutable std::mutex mu_;
     std::vector<std::filesystem::path> roots_;
     std::unordered_set<std::string> disabled_;
-    std::vector<SkillMetadata> skills_;
+    mutable std::vector<SkillMetadata> skills_;
 };
 
 } // namespace acecode

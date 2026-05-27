@@ -2,6 +2,7 @@
 
 #include "session_replay.hpp"
 #include "session_rewind.hpp"
+#include "tool_result_storage.hpp"
 #include "../agent_loop.hpp"
 #include "../tool/tool_executor.hpp"
 #include "../tui_state.hpp"
@@ -13,6 +14,11 @@ namespace {
 bool is_llm_role(const std::string& role) {
     return role == "user" || role == "assistant" ||
            role == "system" || role == "tool";
+}
+
+bool is_transcript_only_message(const ChatMessage& msg) {
+    return msg.metadata.is_object() &&
+           msg.metadata.value("transcript_only", false);
 }
 
 } // namespace
@@ -34,6 +40,10 @@ void append_resumed_session_messages(const std::vector<ChatMessage>& messages,
     for (size_t i = 0; i < messages.size(); ++i) {
         const auto& msg = messages[i];
         if (is_file_checkpoint_message(msg)) {
+            continue;
+        }
+        if (is_content_replacement_message(msg)) {
+            agent_loop.push_message(msg);
             continue;
         }
 
@@ -66,7 +76,7 @@ void append_resumed_session_messages(const std::vector<ChatMessage>& messages,
 
         // Keep provider-facing history canonical. UI-only pseudo-roles such as
         // standalone `tool_result` are rendered, but not sent to providers.
-        if (is_llm_role(msg.role)) {
+        if (is_llm_role(msg.role) && !is_transcript_only_message(msg)) {
             agent_loop.push_message(msg);
         }
         replay_buffer.push_back(msg);

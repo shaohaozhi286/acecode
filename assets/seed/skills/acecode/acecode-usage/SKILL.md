@@ -21,7 +21,7 @@ acecode                          # Fresh TUI session in $PWD
 acecode --resume                 # Resume the most recent session for $PWD
 acecode --resume <session-id>    # Resume a specific session
 acecode configure                # Setup wizard (provider, model, API key)
-acecode -dangerous               # Bypass permission checks (Yolo mode)
+acecode --yolo                   # Bypass permission checks (same as --dangerous)
 acecode -alt-screen              # Force alt-screen rendering for legacy terminals
 acecode --validate-models-registry   # CI helper, validates models.dev bundle
 
@@ -31,7 +31,7 @@ acecode daemon stop|status|logs  # Manage running daemon
 acecode service install|start|stop|uninstall   # Windows-only service wrapper
 ```
 
-`-dangerous` and `--dangerous` are equivalent. `-alt-screen` and `--alt-screen` are equivalent.
+`--yolo`, `-yolo`, `-dangerous`, and `--dangerous` are equivalent. `-alt-screen` and `--alt-screen` are equivalent.
 
 ## Config file
 
@@ -40,7 +40,7 @@ acecode service install|start|stop|uninstall   # Windows-only service wrapper
 - `provider` — `"openai"` or `"copilot"` (legacy single-profile config; prefer `saved_models`)
 - `saved_models` + `default_model_name` — named model registry; entry shape: `{name, provider, base_url, api_key, model}`. Names starting with `(` are reserved.
 - `context_window` — auto-derived from model registry; manual override accepted
-- `agent_loop.max_iterations` — hard cap on tool-call rounds per turn (default 50)
+- `agent_loop.max_iterations` — hard cap on tool-call rounds per turn (`0` or omitted means unlimited)
 - `web.enabled` / `web.bind` / `web.port` — daemon HTTP/WS server (default 127.0.0.1:28080)
 - `daemon.auto_start_on_double_click` — Windows: double-click launches daemon instead of TUI
 - `network.proxy_mode` — `"auto"` (default) / `"off"` / `"manual"`. With `"auto"`, Windows reads system + IE proxy; POSIX reads `HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY`.
@@ -74,7 +74,7 @@ Sessions live under `.acecode/projects/<cwd_hash>/` (one tree per working direct
 - **AcceptEdits** — file writes/edits auto-approve, bash still prompts
 - **Yolo** — everything auto-approves except destructive actions outside the cwd
 
-Mode persists per session. `-dangerous` flag forces Yolo at startup.
+Mode persists per session. `--yolo` flag forces Yolo at startup.
 
 ## Slash commands
 
@@ -125,7 +125,7 @@ acecode daemon stop           # Graceful shutdown
 
 Daemon binds `127.0.0.1:28080` by default and serves a built-in browser UI at `http://localhost:28080/`. Frontend is vanilla ES modules + Custom Elements + Bootstrap 5; no npm build step. Static assets are embedded into the binary, so the daemon ships self-contained — set `web.static_dir` to a non-empty path to serve files from disk during frontend development.
 
-Auth: loopback requests are unauthenticated; non-loopback requires `X-ACECode-Token` or `?token=`. Combining `-dangerous` with a non-loopback bind is rejected.
+Auth: loopback requests are unauthenticated; non-loopback requires `X-ACECode-Token` or `?token=`. Combining YOLO mode with a non-loopback bind is rejected.
 
 Same agent loop, same tools, same SessionRegistry as TUI. Sessions are listed in the sidebar; AskUserQuestion and permission prompts surface as in-page modals over WebSocket.
 

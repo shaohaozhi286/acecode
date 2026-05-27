@@ -11,6 +11,10 @@ std::string serialize_message(const ChatMessage& msg) {
         j["content"] = msg.content;
     }
 
+    if (!msg.content_parts.is_null() && msg.content_parts.is_array() && !msg.content_parts.empty()) {
+        j["content_parts"] = msg.content_parts;
+    }
+
     if (!msg.tool_calls.is_null() && !msg.tool_calls.empty()) {
         j["tool_calls"] = msg.tool_calls;
     }
@@ -60,6 +64,10 @@ ChatMessage deserialize_message(const std::string& line) {
 
     if (j.contains("content") && j["content"].is_string()) {
         msg.content = j["content"].get<std::string>();
+    }
+
+    if (j.contains("content_parts") && j["content_parts"].is_array()) {
+        msg.content_parts = j["content_parts"];
     }
 
     if (j.contains("tool_calls") && j["tool_calls"].is_array()) {

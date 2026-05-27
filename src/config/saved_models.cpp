@@ -2,6 +2,8 @@
 // 对应 openspec/changes/model-profiles 任务 1.2。
 #include "config/saved_models.hpp"
 
+#include "model_provider_registry.hpp"
+
 #include <set>
 #include <sstream>
 
@@ -40,11 +42,11 @@ std::optional<ModelProfile> parse_one_entry(const nlohmann::json& node, std::siz
         err = oss.str();
         return std::nullopt;
     }
-    if (e.provider != "openai" && e.provider != "copilot") {
+    if (!is_known_model_provider(e.provider)) {
         std::ostringstream oss;
         oss << "saved_models[" << idx << "] (name='" << e.name
             << "') has unknown provider '" << e.provider
-            << "' (expected 'openai' or 'copilot')";
+            << "' (expected 'openai', 'copilot', or 'codex')";
         err = oss.str();
         return std::nullopt;
     }
@@ -56,7 +58,7 @@ std::optional<ModelProfile> parse_one_entry(const nlohmann::json& node, std::siz
         return std::nullopt;
     }
 
-    // base_url / api_key:openai 必填;copilot 忽略(允许字段缺失或为空)。
+    // base_url / api_key:openai 必填;copilot/codex 忽略(允许字段缺失或为空)。
     get_str("base_url", e.base_url);
     get_str("api_key", e.api_key);
 
@@ -64,6 +66,28 @@ std::optional<ModelProfile> parse_one_entry(const nlohmann::json& node, std::siz
         node["models_dev_provider_id"].is_string()) {
         std::string s = node["models_dev_provider_id"].get<std::string>();
         if (!s.empty()) e.models_dev_provider_id = std::move(s);
+    }
+    if (node.contains("context_window") && node["context_window"].is_number_integer()) {
+        int context_window = node["context_window"].get<int>();
+        if (context_window <= 0) {
+            std::ostringstream oss;
+            oss << "saved_models[" << idx << "] (name='" << e.name
+                << "') has invalid context_window";
+            err = oss.str();
+            return std::nullopt;
+        }
+        e.context_window = context_window;
+    }
+    if (node.contains("stream_timeout_ms") && node["stream_timeout_ms"].is_number_integer()) {
+        int stream_timeout_ms = node["stream_timeout_ms"].get<int>();
+        if (stream_timeout_ms <= 0) {
+            std::ostringstream oss;
+            oss << "saved_models[" << idx << "] (name='" << e.name
+                << "') has invalid stream_timeout_ms";
+            err = oss.str();
+            return std::nullopt;
+        }
+        e.stream_timeout_ms = stream_timeout_ms;
     }
 
     return e;
@@ -132,7 +156,21 @@ bool validate_saved_models(const std::vector<ModelProfile>& entries,
                 return false;
             }
         }
-        // copilot:不需要 base_url / api_key,model 已在 parse 阶段检验非空。
+        if (e.context_window.has_value() && *e.context_window <= 0) {
+            std::ostringstream oss;
+            oss << "saved_models entry '" << e.name
+                << "' has invalid context_window";
+            err = oss.str();
+            return false;
+        }
+        if (e.stream_timeout_ms.has_value() && *e.stream_timeout_ms <= 0) {
+            std::ostringstream oss;
+            oss << "saved_models entry '" << e.name
+                << "' has invalid stream_timeout_ms";
+            err = oss.str();
+            return false;
+        }
+        // copilot/codex:不需要 base_url / api_key,model 已在 parse 阶段检验非空。
     }
 
     if (!default_name.empty()) {

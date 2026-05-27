@@ -49,6 +49,15 @@ function sessionsPath(path, opts = {}) {
   return opts && opts.archived ? `${path}?archived=1` : path;
 }
 
+export function sessionDraftPath(id, workspaceHash = '') {
+  const sid = encodeURIComponent(id);
+  const hash = String(workspaceHash || '').trim();
+  if (hash) {
+    return `/api/workspaces/${encodeURIComponent(hash)}/sessions/${sid}/draft`;
+  }
+  return `/api/sessions/${sid}/draft`;
+}
+
 async function request(method, path, body, base) {
   const headers = {};
   const token = baseToken(base);
@@ -94,7 +103,18 @@ export function createApi(base = null) {
     setPinnedSessions: (hash, sessionIds=[]) =>
       request('PUT', `/api/workspaces/${encodeURIComponent(hash)}/pinned-sessions`, { session_ids: sessionIds }, base),
     destroySession:   (id)           => request('DELETE', `/api/sessions/${encodeURIComponent(id)}`, undefined, base),
-    sendInput:        (id, text)     => request('POST',   `/api/sessions/${encodeURIComponent(id)}/messages`, {text}, base),
+    getSessionDraft:  (id, workspaceHash = '') =>
+      request('GET', sessionDraftPath(id, workspaceHash), undefined, base),
+    setSessionDraft:  (id, text = '', workspaceHash = '') =>
+      request('PUT', sessionDraftPath(id, workspaceHash), { text }, base),
+    sendInput:        (id, payload)  => {
+      const body = payload && typeof payload === 'object' && !Array.isArray(payload)
+        ? payload
+        : { text: payload };
+      return request('POST', `/api/sessions/${encodeURIComponent(id)}/messages`, body, base);
+    },
+    uploadSessionAttachment: (id, attachment) =>
+      request('POST', `/api/sessions/${encodeURIComponent(id)}/attachments`, attachment, base),
     executeCommand:   (id, command)  => request('POST',   `/api/sessions/${encodeURIComponent(id)}/commands`, command, base),
     getMessages:      (id, since=0)  => request('GET',    `/api/sessions/${encodeURIComponent(id)}/messages?since=${since}`, undefined, base),
     listSkills:       ()             => request('GET',    '/api/skills', undefined, base),
@@ -123,8 +143,18 @@ export function createApi(base = null) {
     removeModel:      (name)         => request('DELETE', `/api/models/${encodeURIComponent(name)}`, undefined, base),
     setDefaultModel:  (name)         => request('POST',   '/api/config/default-model', {name}, base),
     getDefaultModel:  ()             => request('GET',    '/api/config/default-model', undefined, base),
+    getCopilotAuth:   ()             => request('GET',    '/api/copilot/auth', undefined, base),
+    startCopilotAuth: ()             => request('POST',   '/api/copilot/auth/device', {}, base),
+    pollCopilotAuth:  (deviceCode)   => request('POST',   '/api/copilot/auth/device/poll', { device_code: deviceCode }, base),
+    logoutCopilot:    ()             => request('DELETE', '/api/copilot/auth', undefined, base),
     getUiPreferences: ()             => request('GET',    '/api/config/ui-preferences', undefined, base),
     setUiPreferences: (prefs)        => request('PUT',    '/api/config/ui-preferences', prefs, base),
+    getUpgradeConfig: ()             => request('GET',    '/api/config/upgrade', undefined, base),
+    setUpgradeConfig: (cfg)          => request('PUT',    '/api/config/upgrade', cfg, base),
+    getUpdateStatus: ()              => request('GET',    '/api/update/status', undefined, base),
+    startUpdate: ()                  => request('POST',   '/api/update/start', undefined, base),
+    getAceBrowserBridge: ()          => request('GET',    '/api/config/ace-browser-bridge', undefined, base),
+    setAceBrowserBridge: (cfg)       => request('PUT',    '/api/config/ace-browser-bridge', cfg, base),
     getHistory:       (cwd, max=100) => request('GET',    `/api/history?cwd=${encodeURIComponent(cwd)}&max=${max}`, undefined, base),
     appendHistory:    (text)         => request('POST',   '/api/history', {text}, base),
     forkSession:      (sid, atMessageId, title) =>

@@ -51,6 +51,18 @@ run('nextQueuedInput 保持 FIFO 且发送中时不取下一条', () => {
   assert.equal(nextQueuedInput(state, 's1'), null);
 });
 
+run('附件 payload 可以在空文本时排队并保留发送体', () => {
+  let state = createChatInputQueueState();
+  state = enqueueQueuedInput(state, {
+    sessionId: 's1',
+    payload: { text: '', attachments: [{ id: 'att_1' }], contexts: [] },
+    now: 100,
+  });
+  const first = nextQueuedInput(state, 's1');
+  assert.equal(first.content, '');
+  assert.deepEqual(first.queued.payload.attachments, [{ id: 'att_1' }]);
+});
+
 run('cancelled 项不会出现在可见队列也不会被发送', () => {
   let state = createChatInputQueueState();
   state = enqueueQueuedInput(state, { sessionId: 's1', text: 'one' });

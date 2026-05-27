@@ -93,3 +93,35 @@ TEST(ApplyModelToSession, SwapsProviderAndPopulatesState) {
         EXPECT_EQ(slot.provider->model(), "gpt-4o-mini");
     }
 }
+
+// 场景:profile 带手动 context_window → session state 使用该值。
+TEST(ApplyModelToSession, UsesProfileContextWindowOverride) {
+    auto cfg = make_copilot_cfg();
+    SessionEntry::ProviderSlot slot;
+    auto profile = make_copilot_profile();
+    profile.context_window = 64000;
+    ApplyModelDeps deps;
+    deps.cfg = &cfg;
+    deps.provider_slot = &slot;
+
+    auto result = apply_model_to_session(profile, deps);
+
+    EXPECT_EQ(result.state.context_window, 64000);
+}
+
+// 场景:codex provider 已屏蔽,不能通过 /model 或 Web API 切过去。
+TEST(ApplyModelToSession, RejectsDisabledCodexProvider) {
+    auto cfg = make_copilot_cfg();
+    SessionEntry::ProviderSlot slot;
+    ModelProfile profile;
+    profile.name = "codex";
+    profile.provider = "codex";
+    profile.model = "gpt-5.5";
+    ApplyModelDeps deps;
+    deps.cfg = &cfg;
+    deps.provider_slot = &slot;
+
+    EXPECT_THROW(apply_model_to_session(profile, deps), std::runtime_error);
+    std::lock_guard<std::mutex> lk(slot.mu);
+    EXPECT_FALSE(slot.provider);
+}

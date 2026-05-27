@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <utility>
 
 #ifdef _WIN32
@@ -44,6 +45,231 @@ namespace {
 std::function<bool()> g_close_handler;
 
 #ifdef __APPLE__
+std::function<void(bool)> g_mac_window_state_handler;
+bool g_mac_last_known_maximized = false;
+NSString* const kAceCodeFocusExistingNotification =
+    @"dev.acecode.desktop.focusExisting.v1";
+
+NSWindow* mac_window_from_host(webview::webview& w) {
+    auto window_result = w.window();
+    if (!window_result.ok() || !window_result.value()) return nil;
+    return static_cast<NSWindow*>(window_result.value());
+}
+
+void notify_mac_window_state_if_changed(NSWindow* window) {
+    if (!window) return;
+    const bool maximized = [window isZoomed] == YES;
+    if (maximized == g_mac_last_known_maximized) return;
+    g_mac_last_known_maximized = maximized;
+    if (g_mac_window_state_handler) {
+        g_mac_window_state_handler(maximized);
+    }
+}
+
+void hide_mac_standard_button(NSWindow* window, NSWindowButton button) {
+    NSButton* button_view = [window standardWindowButton:button];
+    if (!button_view) return;
+    [button_view setHidden:YES];
+}
+
+void hide_mac_titlebar_container(NSWindow* window) {
+    NSView* content_view = [window contentView];
+    NSView* frame_view = [content_view superview];
+    if (!content_view || !frame_view) return;
+
+    [content_view setFrame:[frame_view bounds]];
+    [content_view setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+
+    for (NSView* subview in [frame_view subviews]) {
+        if (subview == content_view) continue;
+        [subview setHidden:YES];
+    }
+    [frame_view setNeedsLayout:YES];
+}
+
+void configure_mac_window_chrome(webview::webview& w) {
+    NSWindow* window = mac_window_from_host(w);
+    if (!window) return;
+
+    NSWindowStyleMask style = [window styleMask];
+    style |= NSWindowStyleMaskTitled;
+    style |= NSWindowStyleMaskClosable;
+    style |= NSWindowStyleMaskMiniaturizable;
+    style |= NSWindowStyleMaskResizable;
+    style |= NSWindowStyleMaskFullSizeContentView;
+    [window setStyleMask:style];
+    [window setHasShadow:YES];
+    [window setTitleVisibility:NSWindowTitleHidden];
+    [window setTitlebarAppearsTransparent:YES];
+    [window setToolbar:nil];
+    [window setMovableByWindowBackground:NO];
+
+    NSSize min_size = [window minSize];
+    min_size.width = std::max(min_size.width, static_cast<CGFloat>(320.0));
+    min_size.height = std::max(min_size.height, static_cast<CGFloat>(240.0));
+    [window setMinSize:min_size];
+
+    hide_mac_standard_button(window, NSWindowCloseButton);
+    hide_mac_standard_button(window, NSWindowMiniaturizeButton);
+    hide_mac_standard_button(window, NSWindowZoomButton);
+    hide_mac_titlebar_container(window);
+
+    g_mac_last_known_maximized = [window isZoomed] == YES;
+}
+
+void show_mac_window(NSWindow* window) {
+    if (!window) return;
+    [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+    if ([window isMiniaturized]) {
+        [window deminiaturize:nil];
+    }
+    [window makeKeyAndOrderFront:nil];
+    [NSApp activateIgnoringOtherApps:YES];
+}
+
+void hide_mac_window_to_tray(NSWindow* window) {
+    if (!window) return;
+    [window orderOut:nil];
+    [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
+}
+
+id install_mac_focus_existing_observer(webview::webview& w) {
+    NSWindow* window = mac_window_from_host(w);
+    if (!window) return nil;
+    return [[NSDistributedNotificationCenter defaultCenter]
+        addObserverForName:kAceCodeFocusExistingNotification
+                    object:nil
+                     queue:[NSOperationQueue mainQueue]
+                usingBlock:^(__unused NSNotification* note) {
+                    show_mac_window(window);
+                }];
+}
+
+NSEvent* mac_synthetic_left_mouse_event(NSWindow* window) {
+    if (!window) return nil;
+    return [NSEvent mouseEventWithType:NSEventTypeLeftMouseDown
+                              location:[window mouseLocationOutsideOfEventStream]
+                         modifierFlags:0
+                             timestamp:[[NSProcessInfo processInfo] systemUptime]
+                          windowNumber:[window windowNumber]
+                               context:nil
+                           eventNumber:0
+                            clickCount:1
+                              pressure:1.0];
+}
+
+bool mac_perform_window_drag(NSWindow* window) {
+    if (!window) return false;
+    NSEvent* event = mac_synthetic_left_mouse_event(window);
+    if (!event) return false;
+    [window performWindowDragWithEvent:event];
+    notify_mac_window_state_if_changed(window);
+    return true;
+}
+
+bool mac_area_uses_left_edge(FramelessHitTestArea area) {
+    return area == FramelessHitTestArea::Left ||
+           area == FramelessHitTestArea::TopLeft ||
+           area == FramelessHitTestArea::BottomLeft;
+}
+
+bool mac_area_uses_right_edge(FramelessHitTestArea area) {
+    return area == FramelessHitTestArea::Right ||
+           area == FramelessHitTestArea::TopRight ||
+           area == FramelessHitTestArea::BottomRight;
+}
+
+bool mac_area_uses_top_edge(FramelessHitTestArea area) {
+    return area == FramelessHitTestArea::Top ||
+           area == FramelessHitTestArea::TopLeft ||
+           area == FramelessHitTestArea::TopRight;
+}
+
+bool mac_area_uses_bottom_edge(FramelessHitTestArea area) {
+    return area == FramelessHitTestArea::Bottom ||
+           area == FramelessHitTestArea::BottomLeft ||
+           area == FramelessHitTestArea::BottomRight;
+}
+
+NSSize mac_min_window_size(NSWindow* window) {
+    NSSize min_size = window ? [window minSize] : NSMakeSize(0, 0);
+    min_size.width = std::max(min_size.width, static_cast<CGFloat>(320.0));
+    min_size.height = std::max(min_size.height, static_cast<CGFloat>(240.0));
+    return min_size;
+}
+
+NSRect mac_resized_frame(NSRect start_frame,
+                         NSPoint start_mouse,
+                         NSPoint current_mouse,
+                         NSSize min_size,
+                         FramelessHitTestArea area) {
+    const CGFloat dx = current_mouse.x - start_mouse.x;
+    const CGFloat dy = current_mouse.y - start_mouse.y;
+    const CGFloat min_width = std::max(min_size.width, static_cast<CGFloat>(1.0));
+    const CGFloat min_height = std::max(min_size.height, static_cast<CGFloat>(1.0));
+    const CGFloat start_right = NSMaxX(start_frame);
+    const CGFloat start_top = NSMaxY(start_frame);
+
+    NSRect next = start_frame;
+    if (mac_area_uses_left_edge(area)) {
+        next.origin.x = start_frame.origin.x + dx;
+        next.size.width = start_frame.size.width - dx;
+        if (next.size.width < min_width) {
+            next.size.width = min_width;
+            next.origin.x = start_right - min_width;
+        }
+    } else if (mac_area_uses_right_edge(area)) {
+        next.size.width = std::max(min_width, start_frame.size.width + dx);
+    }
+
+    if (mac_area_uses_bottom_edge(area)) {
+        next.origin.y = start_frame.origin.y + dy;
+        next.size.height = start_frame.size.height - dy;
+        if (next.size.height < min_height) {
+            next.size.height = min_height;
+            next.origin.y = start_top - min_height;
+        }
+    } else if (mac_area_uses_top_edge(area)) {
+        next.size.height = std::max(min_height, start_frame.size.height + dy);
+    }
+    return next;
+}
+
+bool mac_track_window_resize(NSWindow* window, FramelessHitTestArea area) {
+    if (!window || [window isZoomed]) return false;
+    if (!mac_area_uses_left_edge(area) && !mac_area_uses_right_edge(area) &&
+        !mac_area_uses_top_edge(area) && !mac_area_uses_bottom_edge(area)) {
+        return false;
+    }
+
+    const NSRect start_frame = [window frame];
+    const NSPoint start_mouse = [NSEvent mouseLocation];
+    const NSSize min_size = mac_min_window_size(window);
+    const NSEventMask mask = NSEventMaskLeftMouseDragged | NSEventMaskLeftMouseUp;
+
+    while (([NSEvent pressedMouseButtons] & 1) != 0) {
+        @autoreleasepool {
+            NSEvent* event = [NSApp nextEventMatchingMask:mask
+                                                untilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]
+                                                   inMode:NSEventTrackingRunLoopMode
+                                                  dequeue:YES];
+            if (!event) continue;
+            const NSEventType type = [event type];
+            if (type == NSEventTypeLeftMouseUp) break;
+            if (type != NSEventTypeLeftMouseDragged) continue;
+
+            const NSRect next = mac_resized_frame(start_frame,
+                                                  start_mouse,
+                                                  [NSEvent mouseLocation],
+                                                  min_size,
+                                                  area);
+            [window setFrame:next display:YES animate:NO];
+        }
+    }
+    notify_mac_window_state_if_changed(window);
+    return true;
+}
+
 BOOL acecode_mac_window_should_close(id /*self*/, SEL /*cmd*/, id /*sender*/) {
     return dispatch_wm_close(g_close_handler) == CloseDispatch::ConsumedByHandler
         ? NO
@@ -51,9 +277,8 @@ BOOL acecode_mac_window_should_close(id /*self*/, SEL /*cmd*/, id /*sender*/) {
 }
 
 void install_mac_close_handler(webview::webview& w) {
-    auto window_result = w.window();
-    if (!window_result.ok() || !window_result.value()) return;
-    NSWindow* window = static_cast<NSWindow*>(window_result.value());
+    NSWindow* window = mac_window_from_host(w);
+    if (!window) return;
     id delegate = [window delegate];
     if (!delegate) return;
     Class cls = object_getClass(delegate);
@@ -416,24 +641,42 @@ namespace {
 struct GtkWindowApi {
     using GtkWidgetShow = void (*)(void*);
     using GtkWidgetHide = void (*)(void*);
+    using GtkWindowSetDecorated = void (*)(void*, int);
     using GtkWindowPresent = void (*)(void*);
     using GtkWindowClose = void (*)(void*);
+    using GtkWindowBeginMoveDrag = void (*)(void*, int, int, int, unsigned int);
+    using GtkWindowBeginResizeDrag = void (*)(void*, int, int, int, int, unsigned int);
+    using GtkWindowIconify = void (*)(void*);
+    using GtkWindowMaximize = void (*)(void*);
+    using GtkWindowUnmaximize = void (*)(void*);
+    using GtkWindowGetWindow = void* (*)(void*);
+    using GdkWindowGetState = int (*)(void*);
     using GSignalConnectData = unsigned long (*)(void*, const char*, void*, void*, void*, int);
 
     void* gtk = nullptr;
+    void* gdk = nullptr;
     void* gobject = nullptr;
     GtkWidgetShow widget_show = nullptr;
     GtkWidgetHide widget_hide = nullptr;
+    GtkWindowSetDecorated window_set_decorated = nullptr;
     GtkWindowPresent window_present = nullptr;
     GtkWindowClose window_close = nullptr;
+    GtkWindowBeginMoveDrag window_begin_move_drag = nullptr;
+    GtkWindowBeginResizeDrag window_begin_resize_drag = nullptr;
+    GtkWindowIconify window_iconify = nullptr;
+    GtkWindowMaximize window_maximize = nullptr;
+    GtkWindowUnmaximize window_unmaximize = nullptr;
+    GtkWindowGetWindow window_get_window = nullptr;
+    GdkWindowGetState gdk_window_get_state = nullptr;
     GSignalConnectData signal_connect_data = nullptr;
 
     bool load() {
-        if (gtk && gobject) return true;
+        if (gtk && gdk && gobject) return true;
         gtk = ::dlopen("libgtk-3.so.0", RTLD_LAZY | RTLD_LOCAL);
+        gdk = ::dlopen("libgdk-3.so.0", RTLD_LAZY | RTLD_LOCAL);
         gobject = ::dlopen("libgobject-2.0.so.0", RTLD_LAZY | RTLD_LOCAL);
-        if (!gtk || !gobject) {
-            LOG_WARN("[desktop] GTK3/GObject runtime not available for window controls");
+        if (!gtk || !gdk || !gobject) {
+            LOG_WARN("[desktop] GTK3/GDK/GObject runtime not available for window controls");
             return false;
         }
         auto sym = [](void* lib, const char* name) -> void* {
@@ -441,12 +684,28 @@ struct GtkWindowApi {
         };
         widget_show = reinterpret_cast<GtkWidgetShow>(sym(gtk, "gtk_widget_show"));
         widget_hide = reinterpret_cast<GtkWidgetHide>(sym(gtk, "gtk_widget_hide"));
+        window_set_decorated = reinterpret_cast<GtkWindowSetDecorated>(
+            sym(gtk, "gtk_window_set_decorated"));
         window_present = reinterpret_cast<GtkWindowPresent>(sym(gtk, "gtk_window_present"));
         window_close = reinterpret_cast<GtkWindowClose>(sym(gtk, "gtk_window_close"));
+        window_begin_move_drag = reinterpret_cast<GtkWindowBeginMoveDrag>(
+            sym(gtk, "gtk_window_begin_move_drag"));
+        window_begin_resize_drag = reinterpret_cast<GtkWindowBeginResizeDrag>(
+            sym(gtk, "gtk_window_begin_resize_drag"));
+        window_iconify = reinterpret_cast<GtkWindowIconify>(sym(gtk, "gtk_window_iconify"));
+        window_maximize = reinterpret_cast<GtkWindowMaximize>(sym(gtk, "gtk_window_maximize"));
+        window_unmaximize = reinterpret_cast<GtkWindowUnmaximize>(
+            sym(gtk, "gtk_window_unmaximize"));
+        window_get_window = reinterpret_cast<GtkWindowGetWindow>(
+            sym(gtk, "gtk_widget_get_window"));
+        gdk_window_get_state = reinterpret_cast<GdkWindowGetState>(
+            sym(gdk, "gdk_window_get_state"));
         signal_connect_data = reinterpret_cast<GSignalConnectData>(
             sym(gobject, "g_signal_connect_data"));
-        return widget_show && widget_hide && window_present && window_close &&
-               signal_connect_data;
+        return widget_show && widget_hide && window_set_decorated && window_present &&
+               window_close && window_begin_move_drag && window_begin_resize_drag &&
+               window_iconify && window_maximize && window_unmaximize && window_get_window &&
+               gdk_window_get_state && signal_connect_data;
     }
 };
 
@@ -456,10 +715,34 @@ GtkWindowApi& gtk_window_api() {
 }
 
 bool g_linux_force_close = false;
+std::function<void(bool)> g_linux_window_state_handler;
+bool g_linux_last_known_maximized = false;
+
+constexpr int kGdkWindowStateMaximized = 1 << 2;
+
+struct GdkEventWindowStateCompat {
+    int type;
+    void* window;
+    signed char send_event;
+    int changed_mask;
+    int new_window_state;
+};
 
 extern "C" int linux_window_delete_event(void*, void*, void*) {
     if (g_linux_force_close) return 0;
     return dispatch_wm_close(g_close_handler) == CloseDispatch::ConsumedByHandler ? 1 : 0;
+}
+
+extern "C" int linux_window_state_event(void*, GdkEventWindowStateCompat* event, void*) {
+    const bool maximized = event &&
+        ((event->new_window_state & kGdkWindowStateMaximized) != 0);
+    if (maximized != g_linux_last_known_maximized) {
+        g_linux_last_known_maximized = maximized;
+        if (g_linux_window_state_handler) {
+            g_linux_window_state_handler(maximized);
+        }
+    }
+    return 0;
 }
 
 void install_linux_close_handler(webview::webview& w) {
@@ -473,6 +756,48 @@ void install_linux_close_handler(webview::webview& w) {
                             nullptr,
                             nullptr,
                             0);
+}
+
+void install_linux_window_state_handler(webview::webview& w) {
+    auto window = w.window();
+    if (!window.ok() || !window.value()) return;
+    auto& api = gtk_window_api();
+    if (!api.load()) return;
+    api.signal_connect_data(window.value(),
+                            "window-state-event",
+                            reinterpret_cast<void*>(linux_window_state_event),
+                            nullptr,
+                            nullptr,
+                            0);
+}
+
+void configure_linux_window_chrome(webview::webview& w) {
+    auto window = w.window();
+    if (!window.ok() || !window.value()) return;
+    auto& api = gtk_window_api();
+    if (!api.load()) return;
+    api.window_set_decorated(window.value(), 0);
+}
+
+bool linux_window_is_maximized(void* window) {
+    if (!window) return false;
+    auto& api = gtk_window_api();
+    if (!api.load()) return false;
+    void* gdk_window = api.window_get_window(window);
+    if (!gdk_window) return g_linux_last_known_maximized;
+    return (api.gdk_window_get_state(gdk_window) & kGdkWindowStateMaximized) != 0;
+}
+
+std::optional<int> gtk_resize_edge_for_direction(const std::string& direction) {
+    if (direction == "top-left") return 0;      // GDK_WINDOW_EDGE_NORTH_WEST
+    if (direction == "top") return 1;           // GDK_WINDOW_EDGE_NORTH
+    if (direction == "top-right") return 2;     // GDK_WINDOW_EDGE_NORTH_EAST
+    if (direction == "left") return 3;          // GDK_WINDOW_EDGE_WEST
+    if (direction == "right") return 4;         // GDK_WINDOW_EDGE_EAST
+    if (direction == "bottom-left") return 5;   // GDK_WINDOW_EDGE_SOUTH_WEST
+    if (direction == "bottom") return 6;        // GDK_WINDOW_EDGE_SOUTH
+    if (direction == "bottom-right") return 7;  // GDK_WINDOW_EDGE_SOUTH_EAST
+    return std::nullopt;
 }
 #endif
 
@@ -576,11 +901,16 @@ struct WebHost::Impl {
 #else
     {
         (void)startup_mode;
-        w = std::make_unique<webview::webview>(debug, nullptr);
 #if defined(__APPLE__)
+        w = std::make_unique<webview::webview>(debug, nullptr);
+        configure_mac_window_chrome(*w);
+        mac_focus_observer = install_mac_focus_existing_observer(*w);
         install_mac_close_handler(*w);
 #else
+        w = std::make_unique<webview::webview>(debug, nullptr);
+        configure_linux_window_chrome(*w);
         install_linux_close_handler(*w);
+        install_linux_window_state_handler(*w);
 #endif
     }
 #endif
@@ -591,6 +921,12 @@ struct WebHost::Impl {
 #endif
         // Destroy webview first; for m_owns_window=false it removes only the child widget.
         // The parent HWND remains ours and is destroyed below.
+#ifdef __APPLE__
+        if (mac_focus_observer) {
+            [[NSDistributedNotificationCenter defaultCenter] removeObserver:mac_focus_observer];
+            mac_focus_observer = nil;
+        }
+#endif
         w.reset();
 #ifdef _WIN32
         if (hwnd && ::IsWindow(hwnd)) {
@@ -613,6 +949,9 @@ struct WebHost::Impl {
     }
 #endif
     std::unique_ptr<webview::webview> w;
+#ifdef __APPLE__
+    id mac_focus_observer = nil;
+#endif
 };
 
 WebHost::WebHost(bool debug, StartupWindowMode startup_mode)
@@ -624,11 +963,22 @@ void WebHost::set_title(const std::string& title) {
 }
 void WebHost::set_size(int width, int height) {
     auto adjusted = adjusted_window_size(width, height);
+#ifdef __APPLE__
+    NSWindow* window = mac_window_from_host(*impl_->w);
+    if (!window) return;
+    [window setFrame:NSMakeRect(0, 0, adjusted.first, adjusted.second)
+             display:YES
+             animate:NO];
+    [window center];
+    [window makeKeyAndOrderFront:nil];
+    configure_mac_window_chrome(*impl_->w);
+#else
     impl_->w->set_size(adjusted.first, adjusted.second, WEBVIEW_HINT_NONE);
 #ifdef _WIN32
     if (impl_->custom_window) {
         resize_webview_widget(impl_->custom_window);
     }
+#endif
 #endif
 }
 void WebHost::navigate(const std::string& url) {
@@ -664,10 +1014,9 @@ void WebHost::set_visible(bool visible) {
     if (!window_result.ok() || !window_result.value()) return;
     NSWindow* window = static_cast<NSWindow*>(window_result.value());
     if (visible) {
-        [window makeKeyAndOrderFront:nil];
-        [NSApp activateIgnoringOtherApps:YES];
+        show_mac_window(window);
     } else {
-        [window orderOut:nil];
+        hide_mac_window_to_tray(window);
     }
 #endif
 #endif
@@ -701,19 +1050,36 @@ bool WebHost::open_dev_tools() {
     return false;
 #endif
 }
-bool WebHost::start_window_drag() {
+bool WebHost::start_window_drag(const PointerEvent& event) {
 #ifdef _WIN32
+    (void)event;
     HWND hwnd = impl_->hwnd();
     if (!hwnd || !::IsWindow(hwnd)) return false;
     ::ReleaseCapture();
     ::SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
     return true;
 #else
-    return false;
+#if !defined(__APPLE__)
+    auto window = impl_->w->window();
+    if (!window.ok() || !window.value()) return false;
+    auto& api = gtk_window_api();
+    if (!api.load()) return false;
+    api.window_begin_move_drag(window.value(),
+                               event.button <= 0 ? 1 : event.button,
+                               event.root_x,
+                               event.root_y,
+                               event.timestamp);
+    return true;
+#else
+    (void)event;
+    return mac_perform_window_drag(mac_window_from_host(*impl_->w));
+#endif
 #endif
 }
-bool WebHost::start_window_resize(const std::string& direction) {
+bool WebHost::start_window_resize(const std::string& direction,
+                                  const PointerEvent& event) {
 #ifdef _WIN32
+    (void)event;
     HWND hwnd = impl_->hwnd();
     if (!hwnd || !::IsWindow(hwnd)) return false;
     // 最大化窗口走 native resize 会被 Windows 解读为"拖出还原",体验诡异;
@@ -736,8 +1102,27 @@ bool WebHost::start_window_resize(const std::string& direction) {
     ::SendMessageW(hwnd, WM_NCLBUTTONDOWN, ht, 0);
     return true;
 #else
-    (void)direction;
-    return false;
+#if !defined(__APPLE__)
+    auto edge = gtk_resize_edge_for_direction(direction);
+    if (!edge) return false;
+    auto window = impl_->w->window();
+    if (!window.ok() || !window.value()) return false;
+    if (linux_window_is_maximized(window.value())) return false;
+    auto& api = gtk_window_api();
+    if (!api.load()) return false;
+    api.window_begin_resize_drag(window.value(),
+                                 *edge,
+                                 event.button <= 0 ? 1 : event.button,
+                                 event.root_x,
+                                 event.root_y,
+                                 event.timestamp);
+    return true;
+#else
+    (void)event;
+    auto area = parse_resize_direction(direction);
+    if (!area) return false;
+    return mac_track_window_resize(mac_window_from_host(*impl_->w), *area);
+#endif
 #endif
 }
 bool WebHost::minimize_window() {
@@ -747,7 +1132,21 @@ bool WebHost::minimize_window() {
     ::ShowWindow(hwnd, SW_MINIMIZE);
     return true;
 #else
-    return false;
+#if !defined(__APPLE__)
+    auto window = impl_->w->window();
+    if (!window.ok() || !window.value()) return false;
+    auto& api = gtk_window_api();
+    if (!api.load()) return false;
+    api.window_iconify(window.value());
+    return true;
+#else
+    NSWindow* window = mac_window_from_host(*impl_->w);
+    if (!window) return false;
+    [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+    [window makeKeyAndOrderFront:nil];
+    [window miniaturize:nil];
+    return true;
+#endif
 #endif
 }
 bool WebHost::toggle_maximize_window() {
@@ -757,7 +1156,29 @@ bool WebHost::toggle_maximize_window() {
     ::ShowWindow(hwnd, ::IsZoomed(hwnd) ? SW_RESTORE : SW_MAXIMIZE);
     return true;
 #else
-    return false;
+#if !defined(__APPLE__)
+    auto window = impl_->w->window();
+    if (!window.ok() || !window.value()) return false;
+    auto& api = gtk_window_api();
+    if (!api.load()) return false;
+    const bool maximized = linux_window_is_maximized(window.value());
+    if (maximized) {
+        api.window_unmaximize(window.value());
+    } else {
+        api.window_maximize(window.value());
+    }
+    g_linux_last_known_maximized = !maximized;
+    if (g_linux_window_state_handler) {
+        g_linux_window_state_handler(!maximized);
+    }
+    return true;
+#else
+    NSWindow* window = mac_window_from_host(*impl_->w);
+    if (!window) return false;
+    [window zoom:nil];
+    notify_mac_window_state_if_changed(window);
+    return true;
+#endif
 #endif
 }
 bool WebHost::is_window_maximized() const {
@@ -766,14 +1187,25 @@ bool WebHost::is_window_maximized() const {
     if (!hwnd || !::IsWindow(hwnd)) return false;
     return ::IsZoomed(hwnd) != FALSE;
 #else
-    return false;
+#if !defined(__APPLE__)
+    auto window = impl_->w->window();
+    if (!window.ok() || !window.value()) return false;
+    return linux_window_is_maximized(window.value());
+#else
+    NSWindow* window = mac_window_from_host(*impl_->w);
+    return window && [window isZoomed] == YES;
+#endif
 #endif
 }
 void WebHost::set_window_state_change_handler(WindowStateHandler handler) {
 #ifdef _WIN32
     g_window_state_handler = std::move(handler);
 #else
-    (void)handler;
+#if !defined(__APPLE__)
+    g_linux_window_state_handler = std::move(handler);
+#else
+    g_mac_window_state_handler = std::move(handler);
+#endif
 #endif
 }
 bool WebHost::close_window() {

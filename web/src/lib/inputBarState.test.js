@@ -38,6 +38,12 @@ run('busy 空输入禁用排队但不禁用中断', () => {
   assert.equal(state.canAbort, true);
 });
 
+run('附件可在空文本时提交', () => {
+  const state = getInputBarActionState({ value: '   ', hasExtras: true });
+  assert.equal(state.canSubmit, true);
+  assert.equal(state.hasExtras, true);
+});
+
 run('blocking disabled 状态禁止发送和排队', () => {
   assert.equal(getInputBarActionState({ value: 'hello', busy: false, disabled: true }).canSubmit, false);
   assert.equal(getInputBarActionState({ value: 'hello', busy: true, disabled: true }).canSubmit, false);

@@ -49,12 +49,59 @@ function HoverActions({ messageId, getCopyText, onFork }) {
   );
 }
 
-function UserBubble({ content, ts, messageId, onFork }) {
+function UserAttachmentStrip({ contentParts = [] }) {
+  const parts = Array.isArray(contentParts) ? contentParts : [];
+  const attachments = parts
+    .filter((part) => part && (part.type === 'image' || part.type === 'file') && part.attachment)
+    .map((part) => ({ ...part.attachment, type: part.type }));
+  const contexts = parts
+    .filter((part) => part && part.type === 'browser_context')
+    .map((part) => part.context || {});
+  if (attachments.length === 0 && contexts.length === 0) return null;
+  return (
+    <div className="flex flex-wrap justify-end gap-2 max-w-full">
+      {attachments.map((att) => {
+        const key = att.id || att.path || att.name;
+        const isImage = att.type === 'image' || String(att.mime_type || '').startsWith('image/');
+        return (
+          <div
+            key={key}
+            className="max-w-[220px] rounded-lg border border-accent-soft bg-surface overflow-hidden text-left"
+            title={att.name}
+          >
+            {isImage && att.blob_url ? (
+              <img src={att.blob_url} alt="" className="block max-h-40 max-w-full object-contain bg-bg" />
+            ) : (
+              <div className="px-2.5 py-2 flex items-center gap-2">
+                <VsIcon name="file" size={15} />
+                <span className="truncate text-[12px] text-fg">{att.name || 'attachment'}</span>
+              </div>
+            )}
+          </div>
+        );
+      })}
+      {contexts.map((ctx) => (
+        <div
+          key={ctx.local_id || ctx.id || ctx.type || 'browser'}
+          className="h-7 px-2 rounded-md border border-accent-soft bg-surface flex items-center gap-1.5 text-[12px] text-fg"
+        >
+          <VsIcon name="search" size={12} />
+          <span>{ctx.label || 'Browser'}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function UserBubble({ content, contentParts, ts, messageId, onFork }) {
   return (
     <div className="self-end max-w-[70%] flex flex-col items-end gap-0.5 group">
-      <div className="px-3.5 py-2 rounded-[14px] rounded-br-[4px] bg-accent-bg border border-accent-soft text-fg text-[13px] leading-[1.5] whitespace-pre-wrap break-words">
-        {content}
-      </div>
+      <UserAttachmentStrip contentParts={contentParts} />
+      {content ? (
+        <div className="px-3.5 py-2 rounded-[14px] rounded-br-[4px] bg-accent-bg border border-accent-soft text-fg text-[13px] leading-[1.5] whitespace-pre-wrap break-words">
+          {content}
+        </div>
+      ) : null}
       <div className="min-h-6 flex items-center justify-end gap-1 mr-1">
         {ts != null && <span className="text-[10px] text-fg-mute">{relativeTime(ts)}</span>}
         <HoverActions
@@ -69,6 +116,7 @@ function UserBubble({ content, ts, messageId, onFork }) {
 
 function AssistantBubble({
   content,
+  contentParts,
   ts,
   streaming,
   messageId,
@@ -172,6 +220,7 @@ function SystemRow({ role, content }) {
 export const Message = memo(function Message({
   role,
   content,
+  contentParts,
   ts,
   streaming,
   messageId,
@@ -189,7 +238,7 @@ export const Message = memo(function Message({
                               && metadata.display_text.length > 0)
       ? metadata.display_text
       : content;
-    return <UserBubble content={displayContent} ts={ts}
+    return <UserBubble content={displayContent} contentParts={contentParts} ts={ts}
                         messageId={messageId}
                         onFork={onFork} />;
   }

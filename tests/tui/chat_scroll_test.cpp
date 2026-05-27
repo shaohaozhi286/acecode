@@ -210,6 +210,49 @@ TEST(ChatScroll, FtxuiTailFocusScrollsDocumentToBottom) {
               "9   ");
 }
 
+TEST(ChatScroll, TailFollowRelativeFocusIgnoresStaleAbsoluteTop) {
+    auto render_with_stale_absolute_top = [] {
+        Elements rows;
+        for (int i = 0; i < 20; ++i) {
+            rows.push_back(text(std::to_string(i)));
+        }
+        Element body = vbox(std::move(rows))
+            | focusPosition(0, chat_frame_focus_y_for_scroll_top(0, 5))
+            | yframe;
+
+        Screen screen(4, 5);
+        Render(screen, body);
+        return screen.ToString();
+    };
+
+    auto render_with_tail_anchor = [] {
+        Elements rows;
+        for (int i = 0; i < 20; ++i) {
+            rows.push_back(text(std::to_string(i)));
+        }
+        Element body = vbox(std::move(rows))
+            | focusPositionRelative(0.0f, 1.0f)
+            | yframe;
+
+        Screen screen(4, 5);
+        Render(screen, body);
+        return screen.ToString();
+    };
+
+    EXPECT_NE(render_with_stale_absolute_top(),
+              "15  \r\n"
+              "16  \r\n"
+              "17  \r\n"
+              "18  \r\n"
+              "19  ");
+    EXPECT_EQ(render_with_tail_anchor(),
+              "15  \r\n"
+              "16  \r\n"
+              "17  \r\n"
+              "18  \r\n"
+              "19  ");
+}
+
 TEST(ChatScroll, AbsoluteScrollTopMovesOneRowAtViewportEdges) {
     auto render_at_top = [](int scroll_top) {
         Elements rows;

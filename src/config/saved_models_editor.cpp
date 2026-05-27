@@ -1,6 +1,8 @@
 // src/config/saved_models_editor.cpp
 #include "saved_models_editor.hpp"
 
+#include "model_provider_registry.hpp"
+
 #include <algorithm>
 
 namespace acecode {
@@ -12,9 +14,12 @@ const char* to_string(SavedModelEditError e) {
         case SavedModelEditError::RESERVED_NAME:     return "RESERVED_NAME";
         case SavedModelEditError::NAME_TAKEN:        return "NAME_TAKEN";
         case SavedModelEditError::UNKNOWN_PROVIDER:  return "UNKNOWN_PROVIDER";
+        case SavedModelEditError::PROVIDER_DISABLED: return "PROVIDER_DISABLED";
         case SavedModelEditError::MISSING_MODEL:     return "MISSING_MODEL";
         case SavedModelEditError::MISSING_BASE_URL:  return "MISSING_BASE_URL";
         case SavedModelEditError::INVALID_API_KEY:   return "INVALID_API_KEY";
+        case SavedModelEditError::INVALID_CONTEXT_WINDOW: return "INVALID_CONTEXT_WINDOW";
+        case SavedModelEditError::INVALID_STREAM_TIMEOUT: return "INVALID_STREAM_TIMEOUT";
         case SavedModelEditError::NOT_FOUND:         return "NOT_FOUND";
         case SavedModelEditError::IN_USE_AS_DEFAULT: return "IN_USE_AS_DEFAULT";
     }
@@ -26,12 +31,20 @@ namespace {
 SavedModelEditError validate_draft_basic(const SavedModelDraft& d) {
     if (d.name.empty()) return SavedModelEditError::INVALID_NAME;
     if (d.name.front() == '(') return SavedModelEditError::RESERVED_NAME;
-    if (d.provider != "openai" && d.provider != "copilot")
+    if (!is_known_model_provider(d.provider))
         return SavedModelEditError::UNKNOWN_PROVIDER;
+    if (!is_runtime_model_provider_enabled(d.provider))
+        return SavedModelEditError::PROVIDER_DISABLED;
     if (d.model.empty()) return SavedModelEditError::MISSING_MODEL;
     if (d.provider == "openai") {
         if (d.base_url.empty()) return SavedModelEditError::MISSING_BASE_URL;
         if (d.api_key.empty()) return SavedModelEditError::INVALID_API_KEY;
+    }
+    if (d.context_window.has_value() && *d.context_window < 0) {
+        return SavedModelEditError::INVALID_CONTEXT_WINDOW;
+    }
+    if (d.stream_timeout_ms.has_value() && *d.stream_timeout_ms < 0) {
+        return SavedModelEditError::INVALID_STREAM_TIMEOUT;
     }
     return SavedModelEditError::OK;
 }
@@ -46,6 +59,12 @@ ModelProfile to_profile(const SavedModelDraft& d) {
         p.api_key = d.api_key;
     }
     p.models_dev_provider_id = d.models_dev_provider_id;
+    if (d.context_window.has_value() && *d.context_window > 0) {
+        p.context_window = *d.context_window;
+    }
+    if (d.stream_timeout_ms.has_value() && *d.stream_timeout_ms > 0) {
+        p.stream_timeout_ms = *d.stream_timeout_ms;
+    }
     return p;
 }
 

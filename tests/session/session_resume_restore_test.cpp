@@ -144,3 +144,22 @@ TEST(SessionResumeRestore, DoesNotPushStandalonePseudoToolResultToProviderHistor
     EXPECT_TRUE(h.state.conversation[0].is_tool);
     EXPECT_TRUE(h.loop_.messages().empty());
 }
+
+TEST(SessionResumeRestore, ReplaysTranscriptOnlyMessagesWithoutProviderHistory) {
+    ResumeRestoreHarness h;
+
+    acecode::ChatMessage audit;
+    audit.role = "system";
+    audit.content = "[Goal] Continuing: visible context";
+    audit.metadata = nlohmann::json{{"transcript_only", true}, {"goal_audit", true}};
+
+    acecode::append_resumed_session_messages({audit},
+                                             h.state,
+                                             h.loop_,
+                                             h.tools_);
+
+    ASSERT_EQ(h.state.conversation.size(), 1u);
+    EXPECT_EQ(h.state.conversation[0].role, "system");
+    EXPECT_EQ(h.state.conversation[0].content, "[Goal] Continuing: visible context");
+    EXPECT_TRUE(h.loop_.messages().empty());
+}

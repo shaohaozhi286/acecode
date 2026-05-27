@@ -1,0 +1,584 @@
+{
+  "version": 2,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 20,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "release-base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+        "VCPKG_MANIFEST_MODE": "ON",
+        "VCPKG_OVERLAY_PORTS": "${sourceDir}/ports",
+        "BUILD_TESTING": "ON"
+      }
+    },
+    {
+      "name": "debug-base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+        "VCPKG_MANIFEST_MODE": "ON",
+        "VCPKG_OVERLAY_PORTS": "${sourceDir}/ports",
+        "BUILD_TESTING": "ON"
+      }
+    },
+    {
+      "name": "desktop-release-base",
+      "hidden": true,
+      "inherits": "release-base",
+      "cacheVariables": {
+        "ACECODE_BUILD_DESKTOP": "ON"
+      }
+    },
+    {
+      "name": "desktop-debug-base",
+      "hidden": true,
+      "inherits": "debug-base",
+      "cacheVariables": {
+        "ACECODE_BUILD_DESKTOP": "ON"
+      }
+    },
+    {
+      "name": "windows-x64-release",
+      "displayName": "Windows x64 Release",
+      "inherits": "release-base",
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "x64-windows-static"
+      }
+    },
+    {
+      "name": "windows-x64-debug",
+      "displayName": "Windows x64 Debug",
+      "inherits": "debug-base",
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "x64-windows-static"
+      }
+    },
+    {
+      "name": "windows-x64-desktop-release",
+      "displayName": "Windows x64 Desktop Release",
+      "inherits": "desktop-release-base",
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "x64-windows-static"
+      }
+    },
+    {
+      "name": "windows-x64-desktop-debug",
+      "displayName": "Windows x64 Desktop Debug",
+      "inherits": "desktop-debug-base",
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "x64-windows-static"
+      }
+    },
+    {
+      "name": "linux-x64-release",
+      "displayName": "Linux x64 Release",
+      "inherits": "release-base",
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "x64-linux"
+      }
+    },
+    {
+      "name": "linux-x64-debug",
+      "displayName": "Linux x64 Debug",
+      "inherits": "debug-base",
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "x64-linux"
+      }
+    },
+    {
+      "name": "linux-x64-desktop-release",
+      "displayName": "Linux x64 Desktop Release",
+      "inherits": "desktop-release-base",
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "x64-linux"
+      }
+    },
+    {
+      "name": "linux-x64-desktop-debug",
+      "displayName": "Linux x64 Desktop Debug",
+      "inherits": "desktop-debug-base",
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "x64-linux"
+      }
+    },
+    {
+      "name": "linux-arm64-release",
+      "displayName": "Linux arm64 Release",
+      "inherits": "release-base",
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "arm64-linux"
+      }
+    },
+    {
+      "name": "linux-arm64-debug",
+      "displayName": "Linux arm64 Debug",
+      "inherits": "debug-base",
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "arm64-linux"
+      }
+    },
+    {
+      "name": "linux-arm64-desktop-release",
+      "displayName": "Linux arm64 Desktop Release",
+      "inherits": "desktop-release-base",
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "arm64-linux"
+      }
+    },
+    {
+      "name": "linux-arm64-desktop-debug",
+      "displayName": "Linux arm64 Desktop Debug",
+      "inherits": "desktop-debug-base",
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "arm64-linux"
+      }
+    },
+    {
+      "name": "macos-x64-release",
+      "displayName": "macOS x64 Release",
+      "inherits": "release-base",
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "x64-osx",
+        "CMAKE_OSX_ARCHITECTURES": "x86_64"
+      }
+    },
+    {
+      "name": "macos-x64-debug",
+      "displayName": "macOS x64 Debug",
+      "inherits": "debug-base",
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "x64-osx",
+        "CMAKE_OSX_ARCHITECTURES": "x86_64"
+      }
+    },
+    {
+      "name": "macos-x64-desktop-release",
+      "displayName": "macOS x64 Desktop Release",
+      "inherits": "desktop-release-base",
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "x64-osx",
+        "CMAKE_OSX_ARCHITECTURES": "x86_64"
+      }
+    },
+    {
+      "name": "macos-x64-desktop-debug",
+      "displayName": "macOS x64 Desktop Debug",
+      "inherits": "desktop-debug-base",
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "x64-osx",
+        "CMAKE_OSX_ARCHITECTURES": "x86_64"
+      }
+    },
+    {
+      "name": "macos-arm64-release",
+      "displayName": "macOS arm64 Release",
+      "inherits": "release-base",
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "arm64-osx",
+        "CMAKE_OSX_ARCHITECTURES": "arm64"
+      }
+    },
+    {
+      "name": "macos-arm64-debug",
+      "displayName": "macOS arm64 Debug",
+      "inherits": "debug-base",
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "arm64-osx",
+        "CMAKE_OSX_ARCHITECTURES": "arm64"
+      }
+    },
+    {
+      "name": "macos-arm64-desktop-release",
+      "displayName": "macOS arm64 Desktop Release",
+      "inherits": "desktop-release-base",
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "arm64-osx",
+        "CMAKE_OSX_ARCHITECTURES": "arm64"
+      }
+    },
+    {
+      "name": "macos-arm64-desktop-debug",
+      "displayName": "macOS arm64 Desktop Debug",
+      "inherits": "desktop-debug-base",
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "arm64-osx",
+        "CMAKE_OSX_ARCHITECTURES": "arm64"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "windows-x64-release",
+      "displayName": "Build Windows x64 Release",
+      "configurePreset": "windows-x64-release",
+      "configuration": "Release",
+      "targets": [
+        "acecode"
+      ]
+    },
+    {
+      "name": "windows-x64-debug",
+      "displayName": "Build Windows x64 Debug",
+      "configurePreset": "windows-x64-debug",
+      "configuration": "Debug",
+      "targets": [
+        "acecode"
+      ]
+    },
+    {
+      "name": "windows-x64-release-tests",
+      "displayName": "Build Windows x64 Release Tests",
+      "configurePreset": "windows-x64-release",
+      "configuration": "Release",
+      "targets": [
+        "acecode_unit_tests"
+      ]
+    },
+    {
+      "name": "windows-x64-debug-tests",
+      "displayName": "Build Windows x64 Debug Tests",
+      "configurePreset": "windows-x64-debug",
+      "configuration": "Debug",
+      "targets": [
+        "acecode_unit_tests"
+      ]
+    },
+    {
+      "name": "windows-x64-desktop-release",
+      "displayName": "Build Windows x64 Desktop Release",
+      "configurePreset": "windows-x64-desktop-release",
+      "configuration": "Release",
+      "targets": [
+        "acecode-desktop"
+      ]
+    },
+    {
+      "name": "windows-x64-desktop-debug",
+      "displayName": "Build Windows x64 Desktop Debug",
+      "configurePreset": "windows-x64-desktop-debug",
+      "configuration": "Debug",
+      "targets": [
+        "acecode-desktop"
+      ]
+    },
+    {
+      "name": "linux-x64-release",
+      "displayName": "Build Linux x64 Release",
+      "configurePreset": "linux-x64-release",
+      "configuration": "Release",
+      "targets": [
+        "acecode"
+      ]
+    },
+    {
+      "name": "linux-x64-debug",
+      "displayName": "Build Linux x64 Debug",
+      "configurePreset": "linux-x64-debug",
+      "configuration": "Debug",
+      "targets": [
+        "acecode"
+      ]
+    },
+    {
+      "name": "linux-x64-release-tests",
+      "displayName": "Build Linux x64 Release Tests",
+      "configurePreset": "linux-x64-release",
+      "configuration": "Release",
+      "targets": [
+        "acecode_unit_tests"
+      ]
+    },
+    {
+      "name": "linux-x64-debug-tests",
+      "displayName": "Build Linux x64 Debug Tests",
+      "configurePreset": "linux-x64-debug",
+      "configuration": "Debug",
+      "targets": [
+        "acecode_unit_tests"
+      ]
+    },
+    {
+      "name": "linux-x64-desktop-release",
+      "displayName": "Build Linux x64 Desktop Release",
+      "configurePreset": "linux-x64-desktop-release",
+      "configuration": "Release",
+      "targets": [
+        "acecode-desktop"
+      ]
+    },
+    {
+      "name": "linux-x64-desktop-debug",
+      "displayName": "Build Linux x64 Desktop Debug",
+      "configurePreset": "linux-x64-desktop-debug",
+      "configuration": "Debug",
+      "targets": [
+        "acecode-desktop"
+      ]
+    },
+    {
+      "name": "linux-arm64-release",
+      "displayName": "Build Linux arm64 Release",
+      "configurePreset": "linux-arm64-release",
+      "configuration": "Release",
+      "targets": [
+        "acecode"
+      ]
+    },
+    {
+      "name": "linux-arm64-debug",
+      "displayName": "Build Linux arm64 Debug",
+      "configurePreset": "linux-arm64-debug",
+      "configuration": "Debug",
+      "targets": [
+        "acecode"
+      ]
+    },
+    {
+      "name": "linux-arm64-release-tests",
+      "displayName": "Build Linux arm64 Release Tests",
+      "configurePreset": "linux-arm64-release",
+      "configuration": "Release",
+      "targets": [
+        "acecode_unit_tests"
+      ]
+    },
+    {
+      "name": "linux-arm64-debug-tests",
+      "displayName": "Build Linux arm64 Debug Tests",
+      "configurePreset": "linux-arm64-debug",
+      "configuration": "Debug",
+      "targets": [
+        "acecode_unit_tests"
+      ]
+    },
+    {
+      "name": "linux-arm64-desktop-release",
+      "displayName": "Build Linux arm64 Desktop Release",
+      "configurePreset": "linux-arm64-desktop-release",
+      "configuration": "Release",
+      "targets": [
+        "acecode-desktop"
+      ]
+    },
+    {
+      "name": "linux-arm64-desktop-debug",
+      "displayName": "Build Linux arm64 Desktop Debug",
+      "configurePreset": "linux-arm64-desktop-debug",
+      "configuration": "Debug",
+      "targets": [
+        "acecode-desktop"
+      ]
+    },
+    {
+      "name": "macos-x64-release",
+      "displayName": "Build macOS x64 Release",
+      "configurePreset": "macos-x64-release",
+      "configuration": "Release",
+      "targets": [
+        "acecode"
+      ]
+    },
+    {
+      "name": "macos-x64-debug",
+      "displayName": "Build macOS x64 Debug",
+      "configurePreset": "macos-x64-debug",
+      "configuration": "Debug",
+      "targets": [
+        "acecode"
+      ]
+    },
+    {
+      "name": "macos-x64-release-tests",
+      "displayName": "Build macOS x64 Release Tests",
+      "configurePreset": "macos-x64-release",
+      "configuration": "Release",
+      "targets": [
+        "acecode_unit_tests"
+      ]
+    },
+    {
+      "name": "macos-x64-debug-tests",
+      "displayName": "Build macOS x64 Debug Tests",
+      "configurePreset": "macos-x64-debug",
+      "configuration": "Debug",
+      "targets": [
+        "acecode_unit_tests"
+      ]
+    },
+    {
+      "name": "macos-x64-desktop-release",
+      "displayName": "Build macOS x64 Desktop Release",
+      "configurePreset": "macos-x64-desktop-release",
+      "configuration": "Release",
+      "targets": [
+        "acecode-desktop"
+      ]
+    },
+    {
+      "name": "macos-x64-desktop-debug",
+      "displayName": "Build macOS x64 Desktop Debug",
+      "configurePreset": "macos-x64-desktop-debug",
+      "configuration": "Debug",
+      "targets": [
+        "acecode-desktop"
+      ]
+    },
+    {
+      "name": "macos-arm64-release",
+      "displayName": "Build macOS arm64 Release",
+      "configurePreset": "macos-arm64-release",
+      "configuration": "Release",
+      "targets": [
+        "acecode"
+      ]
+    },
+    {
+      "name": "macos-arm64-debug",
+      "displayName": "Build macOS arm64 Debug",
+      "configurePreset": "macos-arm64-debug",
+      "configuration": "Debug",
+      "targets": [
+        "acecode"
+      ]
+    },
+    {
+      "name": "macos-arm64-release-tests",
+      "displayName": "Build macOS arm64 Release Tests",
+      "configurePreset": "macos-arm64-release",
+      "configuration": "Release",
+      "targets": [
+        "acecode_unit_tests"
+      ]
+    },
+    {
+      "name": "macos-arm64-debug-tests",
+      "displayName": "Build macOS arm64 Debug Tests",
+      "configurePreset": "macos-arm64-debug",
+      "configuration": "Debug",
+      "targets": [
+        "acecode_unit_tests"
+      ]
+    },
+    {
+      "name": "macos-arm64-desktop-release",
+      "displayName": "Build macOS arm64 Desktop Release",
+      "configurePreset": "macos-arm64-desktop-release",
+      "configuration": "Release",
+      "targets": [
+        "acecode-desktop"
+      ]
+    },
+    {
+      "name": "macos-arm64-desktop-debug",
+      "displayName": "Build macOS arm64 Desktop Debug",
+      "configurePreset": "macos-arm64-desktop-debug",
+      "configuration": "Debug",
+      "targets": [
+        "acecode-desktop"
+      ]
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "windows-x64-release-tests",
+      "displayName": "Test Windows x64 Release",
+      "configurePreset": "windows-x64-release",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "windows-x64-debug-tests",
+      "displayName": "Test Windows x64 Debug",
+      "configurePreset": "windows-x64-debug",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-x64-release-tests",
+      "displayName": "Test Linux x64 Release",
+      "configurePreset": "linux-x64-release",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-x64-debug-tests",
+      "displayName": "Test Linux x64 Debug",
+      "configurePreset": "linux-x64-debug",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-arm64-release-tests",
+      "displayName": "Test Linux arm64 Release",
+      "configurePreset": "linux-arm64-release",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-arm64-debug-tests",
+      "displayName": "Test Linux arm64 Debug",
+      "configurePreset": "linux-arm64-debug",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "macos-x64-release-tests",
+      "displayName": "Test macOS x64 Release",
+      "configurePreset": "macos-x64-release",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "macos-x64-debug-tests",
+      "displayName": "Test macOS x64 Debug",
+      "configurePreset": "macos-x64-debug",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "macos-arm64-release-tests",
+      "displayName": "Test macOS arm64 Release",
+      "configurePreset": "macos-arm64-release",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "macos-arm64-debug-tests",
+      "displayName": "Test macOS arm64 Debug",
+      "configurePreset": "macos-arm64-debug",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

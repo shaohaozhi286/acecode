@@ -10,10 +10,11 @@ import {
   WindowControls,
   isFramelessDesktop,
   isInteractiveTarget,
+  nativePointerEvent,
   useFramelessWindowState,
 } from './WindowControls.jsx';
 
-function QuickBtn({ title, onClick, children, disabled = false }) {
+function QuickBtn({ title, onClick, children, disabled = false, className = '' }) {
   return (
     <button
       type="button"
@@ -23,6 +24,7 @@ function QuickBtn({ title, onClick, children, disabled = false }) {
       className={clsx(
         'w-7 h-7 rounded-md bg-surface-hi/0 text-fg-2 flex items-center justify-center text-[14px] transition',
         disabled ? 'opacity-35 cursor-not-allowed' : 'hover:bg-surface-hi hover:text-fg',
+        className,
       )}
     >
       {children}
@@ -40,11 +42,18 @@ export function TopBar({
   onGoForward,
   canGoBack = false,
   canGoForward = false,
+  updateStatus = null,
+  updateStarting = false,
+  onStartUpdate,
 }) {
   const { theme, toggle } = useTheme();
   const { framelessDesktop, isMaximized } = useFramelessWindowState();
   const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad|iPod/.test(navigator.platform || '');
   const searchHotkeyHint = isMac ? '搜索 (Cmd+K)' : '搜索 (Ctrl+K)';
+  const updateAvailable = !!updateStatus?.update_available;
+  const updateTitle = updateAvailable
+    ? `发现新版 v${updateStatus.latest_version || ''}, 点击升级`
+    : '';
 
   const onTopBarMouseDown = (event) => {
     if (!framelessDesktop || event.button !== 0 || isInteractiveTarget(event.target)) return;
@@ -53,7 +62,7 @@ export function TopBar({
       window.aceDesktop_toggleMaximizeWindow();
       return;
     }
-    window.aceDesktop_startWindowDrag();
+    window.aceDesktop_startWindowDrag(nativePointerEvent(event));
   };
 
   return (
@@ -78,6 +87,21 @@ export function TopBar({
       <QuickBtn title="前进" onClick={onGoForward} disabled={!canGoForward}>
         <NavigationArrowIcon direction="forward" size={16} />
       </QuickBtn>
+      {updateAvailable && (
+        <QuickBtn
+          title={updateTitle}
+          onClick={onStartUpdate}
+          disabled={updateStarting}
+          className="rounded-full bg-accent text-white hover:bg-accent hover:text-white hover:opacity-90"
+        >
+          <VsIcon
+            name={updateStarting ? 'running' : 'glyphDown'}
+            size={14}
+            mono={false}
+            className="ace-icon-on-accent"
+          />
+        </QuickBtn>
+      )}
       <QuickBtn title="新对话" onClick={onNewSession}>
         <VsIcon name="editWindow" size={16} />
       </QuickBtn>

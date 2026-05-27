@@ -60,6 +60,35 @@ TEST(SessionSerializer, UserMessageRoundtrip) {
     EXPECT_TRUE(out.tool_calls.is_null() || out.tool_calls.empty());
 }
 
+TEST(SessionSerializer, ContentPartsRoundtrip) {
+    ChatMessage in;
+    in.role = "user";
+    in.content = "describe this";
+    in.content_parts = nlohmann::json::array({
+        {{"type", "text"}, {"text", "describe this"}},
+        {{"type", "image"},
+         {"attachment", {
+             {"id", "att_1"},
+             {"name", "screen.png"},
+             {"kind", "image"},
+             {"mime_type", "image/png"},
+             {"size_bytes", 123},
+             {"path", "C:/tmp/screen.png"},
+             {"blob_url", "/api/sessions/s1/attachments/att_1/blob"},
+         }}},
+    });
+
+    auto line = serialize_message(in);
+    auto j = nlohmann::json::parse(line);
+    ASSERT_TRUE(j.contains("content_parts"));
+
+    ChatMessage out = deserialize_message(line);
+    ASSERT_TRUE(out.content_parts.is_array());
+    ASSERT_EQ(out.content_parts.size(), 2u);
+    EXPECT_EQ(out.content_parts[1]["attachment"]["id"], "att_1");
+    EXPECT_EQ(out.content_parts[1]["attachment"]["mime_type"], "image/png");
+}
+
 // 场景:assistant 纯工具调用(content 为空 + 非空 tool_calls 数组)。
 // tool_calls 的嵌套结构(id / function.name / function.arguments)必须
 // 原样保留——AgentLoop 要用这些字段重放工具调用。

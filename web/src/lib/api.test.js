@@ -5,7 +5,7 @@
 // 不打真实网络,通过依赖注入 listWorkspaces / listSessions 两个 mock 完成。
 
 import assert from 'node:assert/strict';
-import { ApiError, createApi, mergeAllWorkspaceSessions } from './api.js';
+import { ApiError, createApi, mergeAllWorkspaceSessions, sessionDraftPath } from './api.js';
 
 function run(name, fn) {
   try {
@@ -177,6 +177,44 @@ await run('probeModels posts draft to model probe endpoint', async () => {
   }
 });
 
+await run('Copilot auth API methods use expected endpoints', async () => {
+  const previousFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    calls.push({ url, opts });
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ ok: true, status: 'pending' }),
+    };
+  };
+  try {
+    const client = createApi({ origin: 'http://127.0.0.1:4567', token: 'tok' });
+    await client.getCopilotAuth();
+    await client.startCopilotAuth();
+    await client.pollCopilotAuth('device-123');
+    await client.logoutCopilot();
+
+    assert.equal(calls.length, 4);
+    assert.equal(calls[0].url, 'http://127.0.0.1:4567/api/copilot/auth');
+    assert.equal(calls[0].opts.method, 'GET');
+    assert.equal(calls[1].url, 'http://127.0.0.1:4567/api/copilot/auth/device');
+    assert.equal(calls[1].opts.method, 'POST');
+    assert.deepEqual(JSON.parse(calls[1].opts.body), {});
+    assert.equal(calls[2].url, 'http://127.0.0.1:4567/api/copilot/auth/device/poll');
+    assert.equal(calls[2].opts.method, 'POST');
+    assert.deepEqual(JSON.parse(calls[2].opts.body), { device_code: 'device-123' });
+    assert.equal(calls[3].url, 'http://127.0.0.1:4567/api/copilot/auth');
+    assert.equal(calls[3].opts.method, 'DELETE');
+    for (const call of calls) {
+      assert.equal(call.opts.headers['X-ACECode-Token'], 'tok');
+    }
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
 await run('UI preference API reads and writes daemon-backed avatar preference', async () => {
   const previousFetch = globalThis.fetch;
   const calls = [];
@@ -202,6 +240,104 @@ await run('UI preference API reads and writes daemon-backed avatar preference', 
     assert.equal(calls[1].url, 'http://127.0.0.1:4567/api/config/ui-preferences');
     assert.equal(calls[1].opts.method, 'PUT');
     assert.deepEqual(JSON.parse(calls[1].opts.body), { show_acecode_avatar: false });
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+await run('Upgrade config API reads and writes daemon-backed base_url', async () => {
+  const previousFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    calls.push({ url, opts });
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ base_url: 'http://2017studio.imwork.net:82/aupdate/' }),
+    };
+  };
+  try {
+    const client = createApi({ origin: 'http://127.0.0.1:4567', token: 'tok' });
+    const got = await client.getUpgradeConfig();
+    const saved = await client.setUpgradeConfig({ base_url: 'https://updates.example.test/ace' });
+
+    assert.deepEqual(got, { base_url: 'http://2017studio.imwork.net:82/aupdate/' });
+    assert.deepEqual(saved, { base_url: 'http://2017studio.imwork.net:82/aupdate/' });
+    assert.equal(calls[0].url, 'http://127.0.0.1:4567/api/config/upgrade');
+    assert.equal(calls[0].opts.method, 'GET');
+    assert.equal(calls[0].opts.headers['X-ACECode-Token'], 'tok');
+    assert.equal(calls[1].url, 'http://127.0.0.1:4567/api/config/upgrade');
+    assert.equal(calls[1].opts.method, 'PUT');
+    assert.deepEqual(JSON.parse(calls[1].opts.body), {
+      base_url: 'https://updates.example.test/ace',
+    });
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+await run('Update API checks status and starts explicit update action', async () => {
+  const previousFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    calls.push({ url, opts });
+    return {
+      ok: true,
+      status: opts.method === 'POST' ? 202 : 200,
+      headers: { get: () => 'application/json' },
+      json: async () => opts.method === 'POST'
+        ? ({ started: true, latest_version: '9.9.9' })
+        : ({ status: 'available', update_available: true, latest_version: '9.9.9' }),
+    };
+  };
+  try {
+    const client = createApi({ origin: 'http://127.0.0.1:4567', token: 'tok' });
+    const status = await client.getUpdateStatus();
+    const started = await client.startUpdate();
+
+    assert.deepEqual(status, {
+      status: 'available',
+      update_available: true,
+      latest_version: '9.9.9',
+    });
+    assert.deepEqual(started, { started: true, latest_version: '9.9.9' });
+    assert.equal(calls[0].url, 'http://127.0.0.1:4567/api/update/status');
+    assert.equal(calls[0].opts.method, 'GET');
+    assert.equal(calls[0].opts.headers['X-ACECode-Token'], 'tok');
+    assert.equal(calls[1].url, 'http://127.0.0.1:4567/api/update/start');
+    assert.equal(calls[1].opts.method, 'POST');
+    assert.equal(calls[1].opts.headers['X-ACECode-Token'], 'tok');
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+await run('ACE Browser Bridge API reads and writes daemon-backed enabled flag', async () => {
+  const previousFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    calls.push({ url, opts });
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ enabled: true, tool_mode: 'progressive' }),
+    };
+  };
+  try {
+    const client = createApi({ origin: 'http://127.0.0.1:4567', token: 'tok' });
+    const got = await client.getAceBrowserBridge();
+    const saved = await client.setAceBrowserBridge({ enabled: true });
+
+    assert.equal(got.enabled, true);
+    assert.equal(saved.tool_mode, 'progressive');
+    assert.equal(calls[0].url, 'http://127.0.0.1:4567/api/config/ace-browser-bridge');
+    assert.equal(calls[0].opts.method, 'GET');
+    assert.equal(calls[0].opts.headers['X-ACECode-Token'], 'tok');
+    assert.equal(calls[1].url, 'http://127.0.0.1:4567/api/config/ace-browser-bridge');
+    assert.equal(calls[1].opts.method, 'PUT');
+    assert.deepEqual(JSON.parse(calls[1].opts.body), { enabled: true });
   } finally {
     globalThis.fetch = previousFetch;
   }
@@ -310,6 +446,43 @@ await run('archive API methods use expected endpoints and archived query flag', 
     assert.equal(calls[2].opts.method, 'PUT');
     assert.equal(calls[3].url, 'http://127.0.0.1:4567/api/workspaces/w%2Fa/sessions/s%2Fa/archive');
     assert.equal(calls[3].opts.method, 'DELETE');
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+await run('session draft API uses workspace route when workspace hash is available', async () => {
+  const previousFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    calls.push({ url, opts });
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ session_id: 's/a', text: 'draft text' }),
+    };
+  };
+  try {
+    const client = createApi({ origin: 'http://127.0.0.1:4567', token: 'tok' });
+    assert.equal(
+      sessionDraftPath('s/a', 'w/a'),
+      '/api/workspaces/w%2Fa/sessions/s%2Fa/draft',
+    );
+    assert.equal(sessionDraftPath('s/a'), '/api/sessions/s%2Fa/draft');
+
+    await client.getSessionDraft('s/a', 'w/a');
+    await client.setSessionDraft('s/a', 'draft text', 'w/a');
+    await client.setSessionDraft('s/a', '');
+
+    assert.equal(calls[0].url, 'http://127.0.0.1:4567/api/workspaces/w%2Fa/sessions/s%2Fa/draft');
+    assert.equal(calls[0].opts.method, 'GET');
+    assert.equal(calls[1].url, 'http://127.0.0.1:4567/api/workspaces/w%2Fa/sessions/s%2Fa/draft');
+    assert.equal(calls[1].opts.method, 'PUT');
+    assert.deepEqual(JSON.parse(calls[1].opts.body), { text: 'draft text' });
+    assert.equal(calls[2].url, 'http://127.0.0.1:4567/api/sessions/s%2Fa/draft');
+    assert.equal(calls[2].opts.method, 'PUT');
+    assert.deepEqual(JSON.parse(calls[2].opts.body), { text: '' });
   } finally {
     globalThis.fetch = previousFetch;
   }

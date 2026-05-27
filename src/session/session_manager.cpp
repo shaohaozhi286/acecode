@@ -1,7 +1,9 @@
 #include "session_manager.hpp"
 #include "session_serializer.hpp"
 #include "session_rewind.hpp"
+#include "tool_result_storage.hpp"
 #include "../utils/logger.hpp"
+#include "../utils/utf8_path.hpp"
 
 #include <filesystem>
 #include <algorithm>
@@ -9,6 +11,8 @@
 #include <set>
 #include <sstream>
 #include <unordered_map>
+
+namespace fs = std::filesystem;
 
 namespace {
 
@@ -85,9 +89,27 @@ void add_usage_to_session_total(acecode::TokenUsage& total,
     total.has_data = total.has_data || delta.has_data;
 }
 
-} // namespace
+std::string normalize_path_for_prefix(const std::string& input) {
+    std::string out = input;
+    for (char& ch : out) {
+        if (ch == '\\') ch = '/';
+    }
+    while (out.size() > 1 && out.back() == '/') out.pop_back();
+    return out;
+}
 
-namespace fs = std::filesystem;
+std::string canonical_or_absolute_utf8(const std::string& input) {
+    std::error_code ec;
+    fs::path p = acecode::path_from_utf8(input);
+    fs::path resolved = fs::weakly_canonical(p, ec);
+    if (ec) {
+        resolved = p.is_absolute() ? p : fs::absolute(p, ec);
+        if (ec) resolved = p;
+    }
+    return normalize_path_for_prefix(acecode::path_to_utf8(resolved));
+}
+
+} // namespace
 
 namespace acecode {
 
@@ -117,6 +139,7 @@ void SessionManager::start_session(const std::string& cwd,
     last_user_summary_.clear();
     created_at_.clear();
     pending_title_.clear();
+    input_draft_.clear();
     permission_mode_ = "default";
     last_token_usage_ = {};
     session_token_usage_ = {};
@@ -166,6 +189,7 @@ bool SessionManager::ensure_created() {
     meta.model = model_name_;
     meta.model_preset = model_preset_;
     meta.title = pending_title_;
+    meta.input_draft = input_draft_;
     meta.permission_mode = permission_mode_;
     meta.turn_count = turn_count_;
     meta.last_token_usage = last_token_usage_;
@@ -308,6 +332,12 @@ std::vector<ChatMessage> SessionManager::resume_session(const std::string& sessi
         return {};
     }
     auto messages = SessionStorage::load_messages(jsonl_path);
+    const auto replacement_state = reconstruct_tool_result_replacement_state(messages);
+    const int replacement_count = apply_tool_result_replacements(messages, replacement_state);
+    if (replacement_count > 0) {
+        LOG_INFO("[session] reapplied " + std::to_string(replacement_count) +
+                 " persisted tool result replacement(s) on resume");
+    }
 
     // Resume adopts the canonical transcript directly. It must not copy history
     // into a new PID-suffixed file or rewrite the shared transcript.
@@ -333,6 +363,7 @@ std::vector<ChatMessage> SessionManager::resume_session(const std::string& sessi
         created_at_ = meta.created_at;
         last_user_summary_ = meta.summary;
         pending_title_ = meta.title;
+        input_draft_ = meta.input_draft;
         permission_mode_ = normalize_permission_mode_name(meta.permission_mode);
         turn_count_ = meta.turn_count;
         last_token_usage_ = meta.last_token_usage;
@@ -423,6 +454,7 @@ void SessionManager::end_current_session() {
     last_user_summary_.clear();
     created_at_.clear();
     pending_title_.clear();
+    input_draft_.clear();
     last_token_usage_ = {};
     session_token_usage_ = {};
     last_error_.clear();
@@ -461,6 +493,7 @@ std::string SessionManager::fork_active_session(const std::vector<ChatMessage>& 
     last_token_usage_ = {};
     session_token_usage_ = {};
     last_user_summary_.clear();
+    input_draft_.clear();
 
     if (!acquire_writer_lease_locked()) {
         return {};
@@ -560,6 +593,7 @@ std::string SessionManager::fork_session_to_new_id(
     meta.model           = model_name_;
     meta.model_preset    = model_preset_;
     meta.title           = title;
+    meta.input_draft     = std::string{};
     meta.permission_mode = permission_mode_;
     meta.forked_from     = forked_from_id;
     meta.fork_message_id = fork_message_id;
@@ -588,6 +622,7 @@ void SessionManager::cleanup_old_sessions(int max_sessions) {
         std::error_code ec;
         fs::remove(SessionStorage::session_path(project_dir_, id), ec);
         fs::remove(SessionStorage::meta_path(project_dir_, id), ec);
+        fs::remove_all(path_from_utf8(project_dir_) / id, ec);
         SessionWriterLease::remove(project_dir_, id);
         FileCheckpointStore::remove_session_backups(project_dir_, id);
     }
@@ -614,6 +649,33 @@ std::string SessionManager::ensure_active_session_id() {
     if (!started_) return {};
     if (!ensure_created()) return {};
     return session_id_;
+}
+
+std::string SessionManager::ensure_tool_results_dir() {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!started_) return {};
+    if (!ensure_created()) return {};
+    const std::string dir = tool_results_dir_for_session(project_dir_, session_id_);
+    std::error_code ec;
+    fs::create_directories(path_from_utf8(dir), ec);
+    if (ec) {
+        LOG_WARN("[session] failed to create tool results dir " + dir + ": " + ec.message());
+        return {};
+    }
+    return dir;
+}
+
+bool SessionManager::is_tool_result_artifact_path(const std::string& path) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (project_dir_.empty() || session_id_.empty() || path.empty()) return false;
+    const std::string dir = canonical_or_absolute_utf8(
+        tool_results_dir_for_session(project_dir_, session_id_));
+    const std::string resolved = canonical_or_absolute_utf8(path);
+    if (dir.empty() || resolved.empty()) return false;
+    if (resolved.size() <= dir.size()) return false;
+    if (resolved.compare(0, dir.size(), dir) != 0) return false;
+    const char next = resolved[dir.size()];
+    return next == '/' || next == '\\';
 }
 
 ThreadGoalStore* SessionManager::goal_store() {
@@ -664,6 +726,7 @@ void SessionManager::update_meta() {
     meta.model = model_name_;
     meta.model_preset = model_preset_;
     meta.title = pending_title_;
+    meta.input_draft = input_draft_;
     meta.permission_mode = permission_mode_;
     meta.last_token_usage = last_token_usage_;
     meta.session_token_usage = session_token_usage_;
@@ -691,6 +754,41 @@ void SessionManager::set_session_archived(bool archived) {
 std::string SessionManager::current_title() const {
     std::lock_guard<std::mutex> lk(mu_);
     return pending_title_;
+}
+
+void SessionManager::set_input_draft(std::string draft) {
+    std::lock_guard<std::mutex> lk(mu_);
+    input_draft_ = std::move(draft);
+    if (!created_ && started_ && !input_draft_.empty()) {
+        ensure_created();
+    }
+    if (!created_) return;
+
+    SessionMeta meta = SessionStorage::read_meta(meta_path_str_);
+    if (meta.id.empty()) {
+        meta.id = session_id_;
+        meta.cwd = cwd_;
+        meta.created_at = created_at_.empty() ? SessionStorage::now_iso8601() : created_at_;
+        meta.updated_at = meta.created_at;
+        meta.message_count = message_count_;
+        meta.turn_count = turn_count_;
+        meta.summary = last_user_summary_;
+        meta.provider = provider_name_;
+        meta.model = model_name_;
+        meta.model_preset = model_preset_;
+        meta.title = pending_title_;
+        meta.permission_mode = permission_mode_;
+        meta.last_token_usage = last_token_usage_;
+        meta.session_token_usage = session_token_usage_;
+        meta.archived = archived_;
+    }
+    meta.input_draft = input_draft_;
+    SessionStorage::write_meta(meta_path_str_, meta);
+}
+
+std::string SessionManager::current_input_draft() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return input_draft_;
 }
 
 void SessionManager::set_permission_mode(std::string mode, bool persist_immediately) {

@@ -17,6 +17,7 @@ struct SessionMeta {
     std::string model;
     std::string model_preset;  // optional saved_models name for this session
     std::string title;  // optional user-set window title; empty = unset
+    std::string input_draft;  // optional unsubmitted chat input draft; empty = unset
     std::string permission_mode = "default";  // default | accept-edits | yolo
     int turn_count = 0;  // visible user turns, excluding internal hidden prompts
     TokenUsage last_token_usage;

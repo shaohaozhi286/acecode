@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {
+  buildStatusBarModelMenu,
   modelDisplayLabel,
   modelSelectValue,
   normalizeModelOptions,
@@ -46,4 +47,60 @@ run('pending select value rolls back to previous model when pending clears', () 
   assert.equal(selectedModelName(previous), 'slow');
   assert.equal(modelSelectValue(previous, 'fast'), 'fast');
   assert.equal(modelSelectValue(previous, ''), 'slow');
+});
+
+run('status bar model menu marks selected option active', () => {
+  const menu = buildStatusBarModelMenu({
+    selectedModelName: 'fast',
+    modelOptions: [
+      { name: 'fast', provider: 'openai', model: 'gpt-5' },
+      { name: 'slow', provider: 'copilot', model: 'gpt-4o' },
+    ],
+    fallbackLabel: '加载中',
+  });
+  assert.equal(menu.displayLabel, 'fast (openai/gpt-5)');
+  assert.deepEqual(menu.items.map((item) => [item.name, item.active]), [
+    ['fast', true],
+    ['slow', false],
+  ]);
+  assert.equal(menu.widthLabel, 'slow (copilot/gpt-4o)');
+});
+
+run('status bar model menu uses fallback when no selection exists', () => {
+  const menu = buildStatusBarModelMenu({
+    selectedModelName: '',
+    modelOptions: [{ name: 'fast', provider: 'openai', model: 'gpt-5' }],
+    fallbackLabel: '加载中',
+  });
+  assert.equal(menu.displayLabel, '加载中');
+  assert.equal(menu.items[0].active, false);
+});
+
+run('status bar model menu displays missing selected name without fake option', () => {
+  const menu = buildStatusBarModelMenu({
+    selectedModelName: 'manual-model',
+    modelOptions: [{ name: 'fast', provider: 'openai', model: 'gpt-5' }],
+    fallbackLabel: '加载中',
+  });
+  assert.equal(menu.displayLabel, 'manual-model');
+  assert.deepEqual(menu.items.map((item) => item.name), ['fast']);
+  assert.equal(menu.items.some((item) => item.active), false);
+});
+
+run('status bar model menu exposes longest label for intrinsic sizing', () => {
+  const longLabel = 'very-long-model-profile-name-for-desktop-status-bar (openai/provider/model-with-a-very-long-routing-name)';
+  const menu = buildStatusBarModelMenu({
+    selectedModelName: 'short',
+    modelOptions: [
+      { name: 'short', provider: 'openai', model: 'gpt-5' },
+      {
+        name: 'very-long-model-profile-name-for-desktop-status-bar',
+        provider: 'openai',
+        model: 'provider/model-with-a-very-long-routing-name',
+      },
+    ],
+    fallbackLabel: '加载中',
+  });
+
+  assert.equal(menu.widthLabel, longLabel);
 });

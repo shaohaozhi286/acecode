@@ -23,11 +23,16 @@
 
 #include "provider/openai_provider.hpp"
 #include "provider/llm_provider.hpp"
+#include "session/attachment_store.hpp"
+#include "tool/tool_executor.hpp"
+#include "utils/utf8_path.hpp"
 
 #include <httplib.h>
 
 #include <atomic>
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -418,6 +423,47 @@ TEST(OpenAiProviderReasoningTest, MatchedToolCallStaysIntactNoExtraStub) {
     EXPECT_EQ(msgs[1]["content"].get<std::string>(), "real result");
 }
 
+// 用例:ToolExecutor 提供确定性工具顺序,OpenAI-compatible request body
+// 通过 tools array 发送 schema,不依赖 system prompt 里的重复 schema 文本。
+TEST(OpenAiProviderReasoningTest, BuildRequestBodyUsesDeterministicToolsArray) {
+    TestableProvider provider("http://example.invalid", "", "test-model");
+
+    acecode::ToolExecutor executor;
+    auto register_tool = [&](std::string name, std::string description) {
+        ToolDef def;
+        def.name = std::move(name);
+        def.description = std::move(description);
+        def.parameters = {
+            {"type", "object"},
+            {"properties", {
+                {"value", {{"type", "string"}}}
+            }},
+        };
+        acecode::ToolImpl impl;
+        impl.definition = def;
+        impl.execute = [](const std::string&, const acecode::ToolContext&) {
+            return acecode::ToolResult{"ok", true};
+        };
+        executor.register_tool(impl);
+    };
+
+    register_tool("z_tool", "Z tool");
+    register_tool("a_tool", "A tool");
+
+    ChatMessage user;
+    user.role = "user";
+    user.content = "hello";
+    auto body = provider.build_request_body({user}, executor.get_tool_definitions(), false);
+
+    ASSERT_TRUE(body.contains("tools"));
+    const auto& tools = body["tools"];
+    ASSERT_EQ(tools.size(), 2u);
+    EXPECT_EQ(tools[0]["function"]["name"].get<std::string>(), "a_tool");
+    EXPECT_EQ(tools[1]["function"]["name"].get<std::string>(), "z_tool");
+    EXPECT_EQ(tools[0]["function"]["parameters"]["properties"]["value"]["type"].get<std::string>(),
+              "string");
+}
+
 // 用例 9(并行工具调用的部分 orphan):
 // **触发场景**:assistant 一回合并行发起两个 tool_calls(id=call_a, call_b),
 //   持久化后只有 call_a 的 tool 结果落了盘,call_b 的中途丢失(工具抛异常 /
@@ -466,6 +512,139 @@ TEST(OpenAiProviderReasoningTest, PartialOrphanInParallelToolCalls) {
     EXPECT_EQ(msgs[2].value("tool_call_id", std::string{}), "call_b");
     // call_b 的 content 应该是 stub(非空)。
     EXPECT_FALSE(msgs[2].value("content", std::string{}).empty());
+}
+
+TEST(OpenAiProviderReasoningTest, ImageContentPartSerializesAsDataUrl) {
+    namespace fs = std::filesystem;
+    auto dir = fs::temp_directory_path() / "acecode_openai_image_part_test";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    auto image_path = dir / "screen.png";
+    {
+        std::ofstream ofs(image_path, std::ios::binary);
+        ofs << "abc";
+    }
+
+    acecode::AttachmentRecord record;
+    record.id = "att_test";
+    record.session_id = "session1";
+    record.name = "screen.png";
+    record.kind = "image";
+    record.mime_type = "image/png";
+    record.path = acecode::path_to_utf8(image_path);
+    record.blob_url = "/api/sessions/session1/attachments/att_test/blob";
+    record.size_bytes = 3;
+
+    ChatMessage user;
+    user.role = "user";
+    user.content = "what is in this image?";
+    user.content_parts = nlohmann::json::array({
+        {{"type", "text"}, {"text", user.content}},
+        {{"type", "image"}, {"attachment", acecode::attachment_to_json(record)}},
+    });
+
+    TestableProvider provider("http://example.invalid", "", "test-model");
+    auto body = provider.build_request_body({user}, {}, false);
+    const auto& content = body["messages"][0]["content"];
+
+    ASSERT_TRUE(content.is_array());
+    ASSERT_EQ(content.size(), 2u);
+    EXPECT_EQ(content[0]["type"], "text");
+    EXPECT_EQ(content[1]["type"], "image_url");
+    EXPECT_EQ(content[1]["image_url"]["url"], "data:image/png;base64,YWJj");
+
+    fs::remove_all(dir);
+}
+
+TEST(OpenAiProviderReasoningTest, TextOnlyUserMessageKeepsStringContent) {
+    ChatMessage user;
+    user.role = "user";
+    user.content = "plain text only";
+
+    TestableProvider provider("http://example.invalid", "", "test-model");
+    auto body = provider.build_request_body({user}, {}, false);
+    const auto& content = body["messages"][0]["content"];
+
+    ASSERT_TRUE(content.is_string());
+    EXPECT_EQ(content.get<std::string>(), "plain text only");
+}
+
+TEST(OpenAiProviderReasoningTest, FileContentPartSerializesAsTextContext) {
+    namespace fs = std::filesystem;
+    auto dir = fs::temp_directory_path() / "acecode_openai_file_part_test";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    auto file_path = dir / "notes.txt";
+    {
+        std::ofstream ofs(file_path, std::ios::binary);
+        ofs << "hello from attached file";
+    }
+
+    acecode::AttachmentRecord record;
+    record.id = "att_file";
+    record.session_id = "session1";
+    record.name = "notes.txt";
+    record.kind = "file";
+    record.mime_type = "text/plain";
+    record.path = acecode::path_to_utf8(file_path);
+    record.blob_url = "/api/sessions/session1/attachments/att_file/blob";
+    record.size_bytes = 24;
+
+    ChatMessage user;
+    user.role = "user";
+    user.content = "summarize";
+    user.content_parts = nlohmann::json::array({
+        {{"type", "text"}, {"text", user.content}},
+        {{"type", "file"}, {"attachment", acecode::attachment_to_json(record)}},
+    });
+
+    TestableProvider provider("http://example.invalid", "", "test-model");
+    auto body = provider.build_request_body({user}, {}, false);
+    const auto& content = body["messages"][0]["content"];
+
+    ASSERT_TRUE(content.is_array());
+    ASSERT_EQ(content.size(), 2u);
+    EXPECT_EQ(content[1]["type"], "text");
+    const auto text = content[1]["text"].get<std::string>();
+    EXPECT_NE(text.find("[Attached file]"), std::string::npos);
+    EXPECT_NE(text.find("hello from attached file"), std::string::npos);
+
+    fs::remove_all(dir);
+}
+
+TEST(OpenAiProviderReasoningTest, MissingImageContentPartSerializesFallbackText) {
+    namespace fs = std::filesystem;
+    auto dir = fs::temp_directory_path() / "acecode_openai_missing_image_part_test";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+
+    acecode::AttachmentRecord record;
+    record.id = "att_missing";
+    record.session_id = "session1";
+    record.name = "missing.png";
+    record.kind = "image";
+    record.mime_type = "image/png";
+    record.path = acecode::path_to_utf8(dir / "missing.png");
+    record.blob_url = "/api/sessions/session1/attachments/att_missing/blob";
+    record.size_bytes = 10;
+
+    ChatMessage user;
+    user.role = "user";
+    user.content_parts = nlohmann::json::array({
+        {{"type", "image"}, {"attachment", acecode::attachment_to_json(record)}},
+    });
+
+    TestableProvider provider("http://example.invalid", "", "test-model");
+    auto body = provider.build_request_body({user}, {}, false);
+    const auto& content = body["messages"][0]["content"];
+
+    ASSERT_TRUE(content.is_array());
+    ASSERT_EQ(content.size(), 1u);
+    EXPECT_EQ(content[0]["type"], "text");
+    const auto text = content[0]["text"].get<std::string>();
+    EXPECT_NE(text.find("Attached image unavailable"), std::string::npos);
+
+    fs::remove_all(dir);
 }
 
 } // namespace

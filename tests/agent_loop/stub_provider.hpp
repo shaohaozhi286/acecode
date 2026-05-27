@@ -29,6 +29,9 @@ namespace acecode_test {
 struct ScriptedResponse {
     std::string text;                         // may be empty
     std::vector<acecode::ToolCall> tool_calls; // may be empty
+    bool emit_error = false;
+    acecode::ProviderErrorInfo provider_error;
+    bool error_after_payload = false;
 };
 
 class StubLlmProvider : public acecode::LlmProvider {
@@ -41,6 +44,19 @@ public:
 
     void push_text(std::string s) {
         push_response({std::move(s), {}});
+    }
+
+    void push_error(acecode::ProviderErrorInfo error,
+                    bool after_payload = false,
+                    std::string text = {},
+                    std::vector<acecode::ToolCall> tool_calls = {}) {
+        ScriptedResponse r;
+        r.text = std::move(text);
+        r.tool_calls = std::move(tool_calls);
+        r.emit_error = true;
+        r.provider_error = std::move(error);
+        r.error_after_payload = after_payload;
+        push_response(std::move(r));
     }
 
     void push_tool_call(std::string tool_name, std::string args_json,
@@ -57,6 +73,24 @@ public:
     int turn_count() const {
         std::lock_guard<std::mutex> lk(mu_);
         return turn_count_;
+    }
+
+    std::vector<acecode::ChatMessage> messages_for_turn(int zero_based_index) const {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (zero_based_index < 0 ||
+            static_cast<std::size_t>(zero_based_index) >= request_messages_.size()) {
+            return {};
+        }
+        return request_messages_[static_cast<std::size_t>(zero_based_index)];
+    }
+
+    std::vector<acecode::ToolDef> tools_for_turn(int zero_based_index) const {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (zero_based_index < 0 ||
+            static_cast<std::size_t>(zero_based_index) >= request_tools_.size()) {
+            return {};
+        }
+        return request_tools_[static_cast<std::size_t>(zero_based_index)];
     }
 
     // Simulate LLM latency by polling abort_flag inside chat_stream for ~ms
@@ -80,8 +114,8 @@ public:
     }
 
     void chat_stream(
-        const std::vector<acecode::ChatMessage>& /*messages*/,
-        const std::vector<acecode::ToolDef>& /*tools*/,
+        const std::vector<acecode::ChatMessage>& messages,
+        const std::vector<acecode::ToolDef>& tools,
         const acecode::StreamCallback& callback,
         std::atomic<bool>* abort_flag = nullptr) override {
         ScriptedResponse r;
@@ -93,6 +127,8 @@ public:
                 responses_.erase(responses_.begin());
             }
             ++turn_count_;
+            request_messages_.push_back(messages);
+            request_tools_.push_back(tools);
             latency_ms = latency_ms_;
         }
 
@@ -107,6 +143,17 @@ public:
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
 
+        if (r.emit_error && !r.error_after_payload) {
+            acecode::StreamEvent evt;
+            evt.type = acecode::StreamEventType::Error;
+            evt.provider_error = r.provider_error;
+            evt.error = r.provider_error.display_message.empty()
+                ? std::string("provider error")
+                : r.provider_error.display_message;
+            callback(evt);
+            return;
+        }
+
         if (!r.text.empty()) {
             acecode::StreamEvent evt;
             evt.type = acecode::StreamEventType::Delta;
@@ -118,6 +165,16 @@ public:
             evt.type = acecode::StreamEventType::ToolCall;
             evt.tool_call = std::move(tc);
             callback(evt);
+        }
+        if (r.emit_error) {
+            acecode::StreamEvent evt;
+            evt.type = acecode::StreamEventType::Error;
+            evt.provider_error = r.provider_error;
+            evt.error = r.provider_error.display_message.empty()
+                ? std::string("provider error")
+                : r.provider_error.display_message;
+            callback(evt);
+            return;
         }
         acecode::StreamEvent done_evt;
         done_evt.type = acecode::StreamEventType::Done;
@@ -132,6 +189,8 @@ public:
 private:
     mutable std::mutex mu_;
     std::vector<ScriptedResponse> responses_;
+    std::vector<std::vector<acecode::ChatMessage>> request_messages_;
+    std::vector<std::vector<acecode::ToolDef>> request_tools_;
     int turn_count_ = 0;
     int latency_ms_ = 0;
 };

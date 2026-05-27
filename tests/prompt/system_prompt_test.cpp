@@ -1,8 +1,7 @@
-// 覆盖 src/prompt/system_prompt.{hpp,cpp} 的注入逻辑:
-// - 没有 memory / project_instructions 输入时,prompt 里不出现对应段头
-// - memory 非空时 "# User Memory" 段出现,含 MEMORY.md 原文
-// - 有 ACECODE.md 的 cwd 时 "# Project Instructions" 段出现且列出 Source
-// - cfg.enabled=false 时即便有文件也不注入
+// 覆盖 src/prompt/system_prompt.{hpp,cpp} 的 prompt cache 分区逻辑:
+// - 静态 system prompt 不包含每次请求/会话可能变化的 context
+// - memory / project_instructions 进入 provider-facing session context
+// - full tool schema 只走 provider tools array,不重复塞进 system prompt
 
 #include <gtest/gtest.h>
 
@@ -16,6 +15,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <vector>
 
 namespace fs = std::filesystem;
 
@@ -74,19 +74,33 @@ TEST_F(SystemPromptTest, EmptyInputsOmitSections) {
     EXPECT_EQ(out.find("# Project Instructions"), std::string::npos);
 }
 
-// 场景:每轮 system prompt 的 Environment 段必须暴露本地日期时间,
-// 让模型回答"现在几点"/"今天"等相对时间问题时不靠猜。
-TEST_F(SystemPromptTest, EnvironmentIncludesCurrentLocalDatetime) {
+// 场景:静态 system prompt 不能包含每次请求都可能变化的上下文,
+// 否则 DeepSeek 等 provider 的 prompt cache 前缀会被打穿。
+TEST_F(SystemPromptTest, StaticEnvironmentOmitsPerRequestContext) {
     acecode::ToolExecutor tools;
     std::string out = acecode::build_system_prompt(tools, temp_home.string());
 
     EXPECT_NE(out.find("# Environment"), std::string::npos);
-    EXPECT_NE(out.find("- Current local date/time: "), std::string::npos);
-    EXPECT_NE(out.find(" UTC"), std::string::npos);
+    EXPECT_NE(out.find("- OS: "), std::string::npos);
+    EXPECT_NE(out.find("- Shell: "), std::string::npos);
+    EXPECT_EQ(out.find("- CWD: "), std::string::npos);
+    EXPECT_EQ(out.find("Current local date/time"), std::string::npos);
 }
 
-// 场景:memory 有条目 -> MEMORY.md 非空 -> 注入 User Memory 段
-TEST_F(SystemPromptTest, MemorySectionAppearsWhenIndexNonEmpty) {
+// 场景:动态请求上下文单独构建,由 AgentLoop 放到消息尾部,
+// 让模型仍能回答"现在几点"/"当前目录"等问题。
+TEST_F(SystemPromptTest, RequestContextIncludesCwdAndCurrentLocalDatetime) {
+    std::string out = acecode::build_request_context_prompt(temp_home.string());
+
+    EXPECT_NE(out.find("[当前环境状态]"), std::string::npos);
+    EXPECT_NE(out.find("时间："), std::string::npos);
+    EXPECT_NE(out.find(" UTC"), std::string::npos);
+    EXPECT_NE(out.find("工作目录：" + temp_home.string()), std::string::npos);
+}
+
+// 场景:memory 有条目 -> MEMORY.md 非空 -> 进入 session context,
+// 静态 system prompt 保持不含 User Memory。
+TEST_F(SystemPromptTest, MemoryContextAppearsWhenIndexNonEmpty) {
     fs::create_directories(acecode::get_memory_dir());
     acecode::MemoryRegistry reg;
     reg.scan();
@@ -100,8 +114,13 @@ TEST_F(SystemPromptTest, MemorySectionAppearsWhenIndexNonEmpty) {
     std::string out = acecode::build_system_prompt(
         tools, temp_home.string(),
         /*skills=*/nullptr, &reg, &mcfg, /*project=*/nullptr);
-    EXPECT_NE(out.find("# User Memory"), std::string::npos);
-    EXPECT_NE(out.find("user_profile.md"), std::string::npos);
+    EXPECT_EQ(out.find("# User Memory"), std::string::npos);
+    EXPECT_EQ(out.find("user_profile.md"), std::string::npos);
+
+    auto context = acecode::build_user_memory_context_prompt(&reg, &mcfg);
+    EXPECT_NE(context.content.find("# User Memory"), std::string::npos);
+    EXPECT_NE(context.content.find("user_profile.md"), std::string::npos);
+    EXPECT_FALSE(context.cache_key.empty());
 }
 
 // 场景:memory_cfg.enabled=false 时即使有条目也不注入
@@ -119,10 +138,14 @@ TEST_F(SystemPromptTest, MemoryDisabledByCfg) {
         tools, temp_home.string(),
         /*skills=*/nullptr, &reg, &mcfg, /*project=*/nullptr);
     EXPECT_EQ(out.find("# User Memory"), std::string::npos);
+
+    auto context = acecode::build_user_memory_context_prompt(&reg, &mcfg);
+    EXPECT_TRUE(context.content.empty());
 }
 
-// 场景:cwd 下有 ACECODE.md -> Project Instructions 段 + Source 行
-TEST_F(SystemPromptTest, ProjectInstructionsSectionWithSource) {
+// 场景:cwd 下有 ACECODE.md -> provider-facing Project Instructions context,
+// 静态 system prompt 不包含项目文件内容。
+TEST_F(SystemPromptTest, ProjectInstructionsContextWithSource) {
     fs::path repo = temp_home / "repo";
     write_file(repo / "ACECODE.md", "# rules\nuse goroutines\n");
 
@@ -131,12 +154,17 @@ TEST_F(SystemPromptTest, ProjectInstructionsSectionWithSource) {
     std::string out = acecode::build_system_prompt(
         tools, repo.string(), /*skills=*/nullptr,
         /*memory=*/nullptr, /*memcfg=*/nullptr, &pcfg);
-    EXPECT_NE(out.find("# Project Instructions"), std::string::npos);
-    EXPECT_NE(out.find("ACECODE.md"), std::string::npos);
-    EXPECT_NE(out.find("goroutines"), std::string::npos);
+    EXPECT_EQ(out.find("# Project Instructions"), std::string::npos);
+    EXPECT_EQ(out.find("goroutines"), std::string::npos);
+
+    auto context = acecode::build_project_instructions_context_prompt(repo.string(), &pcfg);
+    EXPECT_NE(context.content.find("# Project Instructions"), std::string::npos);
+    EXPECT_NE(context.content.find("ACECODE.md"), std::string::npos);
+    EXPECT_NE(context.content.find("goroutines"), std::string::npos);
+    EXPECT_FALSE(context.cache_key.empty());
 }
 
-// 场景:有 CLAUDE.md 也会被当作 project instructions 注入(compat 路径)
+// 场景:有 CLAUDE.md 也会被当作 project instructions context(compat 路径)
 TEST_F(SystemPromptTest, ClaudeMdFallback) {
     fs::path repo = temp_home / "repo";
     write_file(repo / "CLAUDE.md", "# legacy claude rules\n");
@@ -145,9 +173,13 @@ TEST_F(SystemPromptTest, ClaudeMdFallback) {
     std::string out = acecode::build_system_prompt(
         tools, repo.string(), /*skills=*/nullptr,
         /*memory=*/nullptr, /*memcfg=*/nullptr, &pcfg);
-    EXPECT_NE(out.find("# Project Instructions"), std::string::npos);
-    EXPECT_NE(out.find("legacy claude rules"), std::string::npos);
-    EXPECT_NE(out.find("CLAUDE.md"), std::string::npos);
+    EXPECT_EQ(out.find("# Project Instructions"), std::string::npos);
+    EXPECT_EQ(out.find("legacy claude rules"), std::string::npos);
+
+    auto context = acecode::build_project_instructions_context_prompt(repo.string(), &pcfg);
+    EXPECT_NE(context.content.find("# Project Instructions"), std::string::npos);
+    EXPECT_NE(context.content.find("legacy claude rules"), std::string::npos);
+    EXPECT_NE(context.content.find("CLAUDE.md"), std::string::npos);
 }
 
 // 场景:cfg.enabled=false 时即便有 ACECODE.md 也不注入
@@ -161,6 +193,59 @@ TEST_F(SystemPromptTest, ProjectInstructionsDisabledByCfg) {
         tools, repo.string(), /*skills=*/nullptr,
         /*memory=*/nullptr, /*memcfg=*/nullptr, &pcfg);
     EXPECT_EQ(out.find("# Project Instructions"), std::string::npos);
+
+    auto context = acecode::build_project_instructions_context_prompt(repo.string(), &pcfg);
+    EXPECT_TRUE(context.content.empty());
+}
+
+// 场景:full tool schema 不再重复塞进静态 system prompt,避免工具 schema 变化
+// 打穿前缀缓存。结构化 schema 仍由 provider tools array 发送。
+TEST_F(SystemPromptTest, StaticPromptDoesNotDuplicateToolSchemas) {
+    acecode::ToolExecutor tools;
+    acecode::ToolDef def;
+    def.name = "example_tool";
+    def.description = "Example tool description.";
+    def.parameters = {
+        {"type", "object"},
+        {"properties", {
+            {"path", {{"type", "string"}, {"description", "Path to read"}}}
+        }},
+    };
+    acecode::ToolImpl impl;
+    impl.definition = def;
+    impl.execute = [](const std::string&, const acecode::ToolContext&) {
+        return acecode::ToolResult{"ok", true};
+    };
+    tools.register_tool(impl);
+
+    std::string out = acecode::build_system_prompt(tools, temp_home.string());
+    EXPECT_NE(out.find("# Tool Schemas"), std::string::npos);
+    EXPECT_EQ(out.find("## example_tool"), std::string::npos);
+    EXPECT_EQ(out.find("Parameters:"), std::string::npos);
+    EXPECT_EQ(out.find("\"properties\""), std::string::npos);
+}
+
+// 场景:hash helper 稳定区分静态 prompt / mutable context / tools 三类变化。
+TEST_F(SystemPromptTest, PromptCacheDiagnosticsSeparatePromptContextAndTools) {
+    acecode::ToolDef tool_a;
+    tool_a.name = "a";
+    tool_a.description = "A";
+    tool_a.parameters = {{"type", "object"}};
+    acecode::ToolDef tool_b = tool_a;
+    tool_b.description = "B";
+
+    std::string static_prompt = "stable";
+    auto d1 = acecode::build_prompt_cache_diagnostics(static_prompt, "ctx1", {tool_a});
+    auto d2 = acecode::build_prompt_cache_diagnostics(static_prompt, "ctx2", {tool_a});
+    auto d3 = acecode::build_prompt_cache_diagnostics(static_prompt, "ctx1", {tool_b});
+
+    EXPECT_EQ(d1.static_system_prompt_hash, d2.static_system_prompt_hash);
+    EXPECT_NE(d1.mutable_context_hash, d2.mutable_context_hash);
+    EXPECT_EQ(d1.tool_schema_hash, d2.tool_schema_hash);
+
+    EXPECT_EQ(d1.static_system_prompt_hash, d3.static_system_prompt_hash);
+    EXPECT_EQ(d1.mutable_context_hash, d3.mutable_context_hash);
+    EXPECT_NE(d1.tool_schema_hash, d3.tool_schema_hash);
 }
 
 // 场景:prompt 必须包含 "# Task completion protocol" 段 + 工具名,

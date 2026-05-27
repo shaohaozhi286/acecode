@@ -7,11 +7,13 @@
 #include <gtest/gtest.h>
 
 #include "tool/file_edit_tool.hpp"
+#include "tool/mtime_tracker.hpp"
 #include "tool/tool_executor.hpp"
 
 #include <nlohmann/json.hpp>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 
 namespace fs = std::filesystem;
 using acecode::create_file_edit_tool;
@@ -34,6 +36,13 @@ std::string get_metric(const acecode::ToolSummary& s, const std::string& k) {
     return {};
 }
 
+void mark_full_read(const fs::path& path) {
+    std::ifstream ifs(path, std::ios::binary);
+    std::string content((std::istreambuf_iterator<char>(ifs)),
+                        std::istreambuf_iterator<char>());
+    acecode::MtimeTracker::instance().record_read(path.string(), content, false);
+}
+
 } // namespace
 
 // 场景 1: 单行替换。文件内容 "a\nOLD\nc\n",把 OLD 替换成 NEW。
@@ -46,6 +55,7 @@ TEST(FileEditToolSummary, SingleLineReplacementStats) {
         std::ofstream ofs(p, std::ios::binary);
         ofs << "a\nOLD\nc\n";
     }
+    mark_full_read(p);
 
     nlohmann::json args = {
         {"file_path", p.string()},
@@ -73,6 +83,7 @@ TEST(FileEditToolSummary, MultilineReplacementStats) {
         std::ofstream ofs(p, std::ios::binary);
         ofs << "prefix\nX\nY\nsuffix\n";
     }
+    mark_full_read(p);
 
     nlohmann::json args = {
         {"file_path", p.string()},
@@ -99,6 +110,7 @@ TEST(FileEditToolSummary, AnchorNotFoundFails) {
         std::ofstream ofs(p, std::ios::binary);
         ofs << "hello world\n";
     }
+    mark_full_read(p);
 
     nlohmann::json args = {
         {"file_path", p.string()},

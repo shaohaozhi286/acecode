@@ -64,6 +64,30 @@ cd ..
 
 ### 配置与构建
 
+Preset 构建要求 `VCPKG_ROOT` 指向你的 vcpkg checkout。常用 Release 流程是：
+
+```bash
+git submodule update --init --recursive
+
+cmake --preset linux-x64-release
+cmake --build --preset linux-x64-release
+```
+
+普通 presets 使用 `<platform>-<arch>-<config>` 命名，其中 `<config>` 是
+`release` 或 `debug`：`windows-x64`、`linux-x64`、`linux-arm64`、
+`macos-x64` 和 `macos-arm64`。桌面壳变体使用
+`<platform>-<arch>-desktop-<config>`，例如
+`macos-arm64-desktop-debug`。
+
+Debug 构建：
+
+```bash
+cmake --preset linux-x64-debug
+cmake --build --preset linux-x64-debug
+```
+
+等价手动配置：
+
 ```bash
 git submodule update --init --recursive
 
@@ -86,11 +110,29 @@ cmake --build build --target acecode_unit_tests
 ctest --test-dir build --output-on-failure
 ```
 
+使用 presets 时，先构建对应测试 target，再运行 test preset：
+
+```bash
+cmake --build --preset linux-x64-release-tests
+ctest --preset linux-x64-release-tests
+```
+
+Debug 测试 preset 同样按这个模式命名，例如 `linux-x64-debug-tests`。
+
 单元测试位于 `tests/`，并链接到 `acecode_testable` object library。TUI 较重的入口代码不进入测试 target，除非逻辑已经拆成可复用 helper。
 
 ### 桌面构建
 
-这里使用上面列出的同一组受支持 `<triplet>` 值。如果桌面壳需要完整内置 Web UI，请先构建 [web/](web)，再配置 CMake。
+这里使用上面列出的同一组受支持 presets/triplet。如果桌面壳需要完整内置 Web UI，请先构建 [web/](web)，再配置 CMake。
+
+```bash
+cmake --preset linux-x64-desktop-release
+cmake --build --preset linux-x64-desktop-release
+```
+
+Debug 桌面构建使用对应的 `*-desktop-debug` preset。
+
+等价手动配置：
 
 ```bash
 cmake -S . -B build -G Ninja \
@@ -141,7 +183,7 @@ TUI 启动后，输入需求并回车：
 ./acecode --resume <id>       # 恢复指定会话
 ./acecode configure           # 运行配置向导
 ./acecode --alt-screen        # 本次启动强制使用全屏 alternate screen 渲染
-./acecode --dangerous         # 跳过权限确认；只应在沙盒中使用
+./acecode --yolo              # 跳过权限确认；等同于 --dangerous
 ```
 
 ACECode 需要交互式 TTY。建议从希望 agent 操作的项目根目录启动。
@@ -233,10 +275,11 @@ MCP servers 可以在运行时添加更多工具。
 | 区域 | 用途 |
 | --- | --- |
 | `provider`, `openai`, `copilot` | 旧式 provider 选择和端点/模型设置。 |
-| `saved_models`, `default_model_name` | 命名模型配置和默认模型。 |
+| `openai.stream_timeout_ms` | OpenAI 兼容流式请求超时，单位毫秒；默认 `180000`，慢网关可调大。 |
+| `saved_models`, `default_model_name` | 命名模型配置和默认模型；OpenAI 条目也可以设置 `stream_timeout_ms`。 |
 | `context_window`, `models_dev` | 上下文窗口解析和内置 models.dev 查询行为。 |
 | `skills`, `memory`, `project_instructions` | 可选上下文来源及其限制。 |
-| `agent_loop.max_iterations` | 单次 agent 回合硬上限。 |
+| `agent_loop.max_iterations` | 单次 agent 回合硬上限；`0` 或省略表示无限制。 |
 | `daemon`, `web` | Daemon 心跳、服务、bind、port 和静态资源设置。 |
 | `network` | 系统/手动代理、代理探测和 TLS 选项。 |
 | `web_search` | 联网搜索工具开关和 backend 选择。 |

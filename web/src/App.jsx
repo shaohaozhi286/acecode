@@ -78,6 +78,8 @@ export function App() {
   const [permReqs,     setPermReqs]     = useState([]);
   const [questionReqs, setQuestionReqs] = useState([]);
   const [searchOpen,   setSearchOpen]   = useState(false);
+  const [updateStatus, setUpdateStatus] = useState(null);
+  const [updateStarting, setUpdateStarting] = useState(false);
   const [singleLayout, setSingleLayout] = usePreference(
     SINGLE_LAYOUT_STORAGE_KEY, DEFAULT_SINGLE_LAYOUT, validateLayoutWidths);
   const [uiPrefs, setUiPrefs] = usePreference(
@@ -175,6 +177,21 @@ export function App() {
   }, [setUiPrefs]);
 
   useEffect(() => { probe(); }, [probe]);
+
+  useEffect(() => {
+    if (authState !== 'ok') return undefined;
+    let cancelled = false;
+    api.getUpdateStatus()
+      .then((status) => {
+        if (!cancelled) setUpdateStatus(status);
+      })
+      .catch(() => {
+        if (!cancelled) setUpdateStatus(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [authState]);
 
   // 解析 URL 上的 ?open=<sessionId>(SearchPalette 跨 workspace 跳转后落地用)。
   // 解析后立即从 URL 抹掉,避免刷新二次触发。
@@ -323,6 +340,19 @@ export function App() {
       sidebarCollapsed: !prev.sidebarCollapsed,
     }));
   }, [setUiPrefs]);
+
+  const startUpdate = useCallback(async () => {
+    if (!updateStatus?.update_available || updateStarting) return;
+    setUpdateStarting(true);
+    try {
+      await api.startUpdate();
+      toast({ kind: 'info', text: '已启动升级,请按提示完成并重启 ACECode' });
+    } catch (e) {
+      toast({ kind: 'err', text: '启动升级失败:' + (e?.message || '') });
+    } finally {
+      setUpdateStarting(false);
+    }
+  }, [updateStarting, updateStatus]);
 
   const setShowAceCodeAvatar = useCallback((show) => {
     const next = !!show;
@@ -487,6 +517,9 @@ export function App() {
         onGoForward={goForwardActiveRef}
         canGoBack={navHistory.back.length > 0}
         canGoForward={navHistory.forward.length > 0}
+        updateStatus={updateStatus}
+        updateStarting={updateStarting}
+        onStartUpdate={startUpdate}
       />
       <div ref={singleShellRef} className="flex-1 flex overflow-hidden relative min-h-0 ace-single-shell">
         <Sidebar

@@ -66,7 +66,7 @@ TEST(GoalTool, CreateGoalCreatesOnlyWhenMissing) {
     EXPECT_NE(rejected.output.find("already exists"), std::string::npos);
 }
 
-TEST(GoalTool, UpdateGoalOnlyAllowsComplete) {
+TEST(GoalTool, UpdateGoalAllowsCompleteAndBlocked) {
     auto cwd = temp_cwd("update");
     acecode::SessionManager sm;
     sm.start_session(cwd.string(), "test", "model", "sid-goal-update");
@@ -84,10 +84,21 @@ TEST(GoalTool, UpdateGoalOnlyAllowsComplete) {
     auto rejected = update.execute(R"({"status":"paused"})", ctx);
     EXPECT_FALSE(rejected.success);
 
-    auto done = update.execute(R"({"status":"complete"})", ctx);
-    ASSERT_TRUE(done.success) << done.output;
+    auto blocked = update.execute(R"({"status":"blocked"})", ctx);
+    ASSERT_TRUE(blocked.success) << blocked.output;
     EXPECT_EQ(account_calls, 1);
     EXPECT_EQ(update_events, 1);
+    auto blocked_goal = sm.goal_store()->get_thread_goal(sm.current_session_id());
+    ASSERT_TRUE(blocked_goal.has_value());
+    EXPECT_EQ(blocked_goal->status, acecode::ThreadGoalStatus::Blocked);
+
+    ASSERT_TRUE(sm.goal_store()->replace_thread_goal(
+        sm.current_session_id(), "finish update", std::nullopt, acecode::ThreadGoalStatus::Active));
+
+    auto done = update.execute(R"({"status":"complete"})", ctx);
+    ASSERT_TRUE(done.success) << done.output;
+    EXPECT_EQ(account_calls, 2);
+    EXPECT_EQ(update_events, 2);
     auto goal = sm.goal_store()->get_thread_goal(sm.current_session_id());
     ASSERT_TRUE(goal.has_value());
     EXPECT_EQ(goal->status, acecode::ThreadGoalStatus::Complete);

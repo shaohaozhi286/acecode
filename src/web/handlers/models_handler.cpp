@@ -1,5 +1,7 @@
 #include "models_handler.hpp"
 
+#include "../../config/model_provider_registry.hpp"
+
 #include <algorithm>
 #include <set>
 
@@ -17,6 +19,12 @@ nlohmann::json entry_to_json(const ModelProfile& entry) {
     if (entry.models_dev_provider_id.has_value()) {
         o["models_dev_provider_id"] = *entry.models_dev_provider_id;
     }
+    if (entry.context_window.has_value() && *entry.context_window > 0) {
+        o["context_window"] = *entry.context_window;
+    }
+    if (entry.stream_timeout_ms.has_value() && *entry.stream_timeout_ms > 0) {
+        o["stream_timeout_ms"] = *entry.stream_timeout_ms;
+    }
     return o;
 }
 
@@ -25,6 +33,7 @@ nlohmann::json entry_to_json(const ModelProfile& entry) {
 nlohmann::json list_models(const AppConfig& cfg) {
     nlohmann::json arr = nlohmann::json::array();
     for (const auto& entry : cfg.saved_models) {
+        if (!is_runtime_model_provider_enabled(entry.provider)) continue;
         arr.push_back(entry_to_json(entry));
     }
     return arr;
@@ -33,7 +42,7 @@ nlohmann::json list_models(const AppConfig& cfg) {
 std::optional<ModelProfile>
 find_model_by_name(const AppConfig& cfg, const std::string& name) {
     for (const auto& entry : cfg.saved_models) {
-        if (entry.name == name) return entry;
+        if (entry.name == name && is_runtime_model_provider_enabled(entry.provider)) return entry;
     }
     return std::nullopt;
 }
@@ -66,6 +75,12 @@ nlohmann::json profile_to_safe_json(const ModelProfile& entry) {
     if (entry.models_dev_provider_id.has_value()) {
         o["models_dev_provider_id"] = *entry.models_dev_provider_id;
     }
+    if (entry.context_window.has_value() && *entry.context_window > 0) {
+        o["context_window"] = *entry.context_window;
+    }
+    if (entry.stream_timeout_ms.has_value() && *entry.stream_timeout_ms > 0) {
+        o["stream_timeout_ms"] = *entry.stream_timeout_ms;
+    }
     // api_key 永不输出 — 安全契约
     return o;
 }
@@ -97,6 +112,12 @@ std::optional<SavedModelDraft> parse_model_draft(const nlohmann::json& body,
     get_str("model", d.model, true);
     get_str("base_url", d.base_url, false);
     get_str("api_key", d.api_key, false);
+    if (body.contains("context_window") && body["context_window"].is_number_integer()) {
+        d.context_window = body["context_window"].get<int>();
+    }
+    if (body.contains("stream_timeout_ms") && body["stream_timeout_ms"].is_number_integer()) {
+        d.stream_timeout_ms = body["stream_timeout_ms"].get<int>();
+    }
     if (body.contains("models_dev_provider_id") &&
         body["models_dev_provider_id"].is_string()) {
         std::string s = body["models_dev_provider_id"].get<std::string>();
@@ -126,12 +147,12 @@ std::optional<ModelProbeRequest> parse_model_probe_request(const nlohmann::json&
     request.api_key = string_value("api_key");
 
     if (request.provider.empty()) request.provider = "openai";
-    if (request.provider != "openai") {
+    if (request.provider != "openai" && request.provider != "copilot") {
         err_code = "UNKNOWN_PROVIDER";
-        err = "model probing currently supports provider=openai";
+        err = "model probing currently supports provider=openai or provider=copilot";
         return std::nullopt;
     }
-    if (request.base_url.empty()) {
+    if (request.provider == "openai" && request.base_url.empty()) {
         err_code = "MISSING_BASE_URL";
         err = "base_url is required";
         return std::nullopt;

@@ -2,16 +2,19 @@
 #include "utils/logger.hpp"
 #include "utils/encoding.hpp"
 #include <nlohmann/json.hpp>
+#include <algorithm>
 #include <sstream>
 
 namespace acecode {
 
 void ToolExecutor::register_tool(const ToolImpl& tool) {
     LOG_INFO("Registering tool: " + tool.definition.name);
+    std::lock_guard<std::mutex> lk(tools_mu_);
     tools_[tool.definition.name] = tool;
 }
 
 bool ToolExecutor::unregister_tool(const std::string& name) {
+    std::lock_guard<std::mutex> lk(tools_mu_);
     auto it = tools_.find(name);
     if (it == tools_.end()) return false;
     LOG_INFO("Unregistering tool: " + name);
@@ -21,6 +24,7 @@ bool ToolExecutor::unregister_tool(const std::string& name) {
 
 std::vector<ToolDef> ToolExecutor::get_tool_definitions() const {
     std::vector<ToolDef> defs;
+    std::lock_guard<std::mutex> lk(tools_mu_);
     for (const auto& [name, impl] : tools_) {
         defs.push_back(impl.definition);
     }
@@ -29,6 +33,7 @@ std::vector<ToolDef> ToolExecutor::get_tool_definitions() const {
 
 std::vector<ToolDef> ToolExecutor::get_tool_definitions_by_source(ToolSource source) const {
     std::vector<ToolDef> defs;
+    std::lock_guard<std::mutex> lk(tools_mu_);
     for (const auto& [name, impl] : tools_) {
         if (impl.source == source) defs.push_back(impl.definition);
     }
@@ -41,28 +46,38 @@ ToolResult ToolExecutor::execute(const std::string& tool_name, const std::string
 
 ToolResult ToolExecutor::execute(const std::string& tool_name, const std::string& arguments_json,
                                  const ToolContext& ctx) const {
-    auto it = tools_.find(tool_name);
-    if (it == tools_.end()) {
-        LOG_ERROR("execute: unknown tool '" + tool_name + "'");
-        return ToolResult{"[Error] Unknown tool: " + tool_name, false};
+    ToolImpl impl;
+    {
+        std::lock_guard<std::mutex> lk(tools_mu_);
+        auto it = tools_.find(tool_name);
+        if (it == tools_.end()) {
+            LOG_ERROR("execute: unknown tool '" + tool_name + "'");
+            return ToolResult{"[Error] Unknown tool: " + tool_name, false};
+        }
+        impl = it->second;
     }
     LOG_DEBUG("execute: " + tool_name + " args=" + log_truncate(arguments_json, 300));
-    auto result = it->second.execute(arguments_json, ctx);
+    ToolContext effective_ctx = ctx;
+    effective_ctx.tool_executor = const_cast<ToolExecutor*>(this);
+    auto result = impl.execute(arguments_json, effective_ctx);
     LOG_DEBUG("execute result: success=" + std::string(result.success ? "true" : "false") + " len=" + std::to_string(result.output.size()));
     return result;
 }
 
 bool ToolExecutor::has_tool(const std::string& name) const {
+    std::lock_guard<std::mutex> lk(tools_mu_);
     return tools_.find(name) != tools_.end();
 }
 
 bool ToolExecutor::is_read_only(const std::string& name) const {
+    std::lock_guard<std::mutex> lk(tools_mu_);
     auto it = tools_.find(name);
     return it != tools_.end() && it->second.is_read_only;
 }
 
 std::string ToolExecutor::generate_tools_prompt() const {
     std::ostringstream oss;
+    std::lock_guard<std::mutex> lk(tools_mu_);
     for (const auto& [name, impl] : tools_) {
         oss << "## " << impl.definition.name << "\n"
             << "Description: " << impl.definition.description << "\n"
@@ -98,6 +113,51 @@ std::string ToolExecutor::build_tool_call_preview(const std::string& tool_name,
                 p = truncate_utf8_suffix(p, 40);
                 return tool_name + "  " + p;
             }
+        } else if (tool_name.rfind("browser_", 0) == 0) {
+            auto value_for = [&j](const char* key) -> std::string {
+                if (j.contains(key) && j[key].is_string()) return j[key].get<std::string>();
+                return {};
+            };
+            std::string value;
+            if (tool_name == "browser_start") value = value_for("session");
+            else if (tool_name == "browser_open") value = value_for("url");
+            else if (tool_name == "browser_navigate") {
+                value = value_for("operation");
+                std::string url = value_for("url");
+                if (!url.empty()) value += " " + url;
+            } else if (tool_name == "browser_read_page") value = value_for("mode");
+            else if (tool_name == "browser_enable") {
+                if (j.contains("groups") && j["groups"].is_array()) {
+                    bool first = true;
+                    for (const auto& g : j["groups"]) {
+                        if (!g.is_string()) continue;
+                        if (!first) value += ",";
+                        value += g.get<std::string>();
+                        first = false;
+                    }
+                }
+            } else if (tool_name == "browser_fill") {
+                value = value_for("target");
+                std::string fill_value = value_for("value");
+                if (!fill_value.empty()) {
+                    value += " <- " + truncate_utf8_prefix(fill_value, 40);
+                }
+            } else if (tool_name == "browser_type") {
+                value = value_for("target");
+                std::string text = value_for("text");
+                if (!text.empty()) value += " <- " + truncate_utf8_prefix(text, 40);
+            } else if (tool_name == "browser_evaluate") {
+                value = truncate_utf8_prefix(value_for("code"), 60);
+            } else if (tool_name == "browser_network") {
+                value = value_for("cmd");
+                std::string filter = value_for("filter");
+                if (!filter.empty()) value += " " + filter;
+            } else {
+                value = value_for("target");
+                if (value.empty()) value = value_for("session");
+            }
+            value = truncate_utf8_prefix(value, 60);
+            return value.empty() ? tool_name : tool_name + "  " + value;
         }
     } catch (...) {
         // fall through to empty preview → TUI legacy render

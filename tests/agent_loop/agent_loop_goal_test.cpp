@@ -190,6 +190,42 @@ TEST(AgentLoopGoal, AbortPausesActiveGoalAfterAccounting) {
     EXPECT_TRUE(h.saw_goal_status(acecode::ThreadGoalStatus::Paused));
 }
 
+TEST(AgentLoopGoal, ResumeAfterAbortClearsStaleAbortAndContinues) {
+    AgentLoopGoalHarness h("abort_resume");
+    h.create_goal();
+    h.provider().set_latency_ms(200);
+
+    std::thread aborter([&h] {
+        std::this_thread::sleep_for(50ms);
+        h.loop().abort();
+    });
+    ASSERT_TRUE(h.submit_and_wait("start", 10s));
+    aborter.join();
+
+    auto paused = h.goal();
+    ASSERT_TRUE(paused.has_value());
+    ASSERT_EQ(paused->status, acecode::ThreadGoalStatus::Paused);
+
+    h.provider().set_latency_ms(0);
+    h.provider().push_tool_call("update_goal", R"({"status":"complete"})", "goal-resumed-done");
+    ASSERT_TRUE(h.session_manager().goal_store()->update_thread_goal_status(
+        h.session_manager().current_session_id(),
+        paused->goal_id,
+        acecode::ThreadGoalStatus::Active));
+
+    h.loop().clear_stale_abort_request();
+    h.loop().maybe_continue_goal();
+
+    ASSERT_TRUE(h.wait_until([&h] {
+        auto goal = h.goal();
+        return goal.has_value() &&
+            goal->status == acecode::ThreadGoalStatus::Complete &&
+            h.saw_goal_status(acecode::ThreadGoalStatus::Complete);
+    }, 10s));
+    EXPECT_TRUE(h.has_hidden_goal_context_message());
+    EXPECT_GE(h.provider().turn_count(), 2);
+}
+
 TEST(AgentLoopGoal, IdleContinuationUsesHiddenContextAndStopsWhenComplete) {
     AgentLoopGoalHarness h("continue");
     h.create_goal();
@@ -199,7 +235,9 @@ TEST(AgentLoopGoal, IdleContinuationUsesHiddenContextAndStopsWhenComplete) {
     ASSERT_TRUE(h.submit_and_wait("start"));
     ASSERT_TRUE(h.wait_until([&h] {
         auto goal = h.goal();
-        return goal.has_value() && goal->status == acecode::ThreadGoalStatus::Complete;
+        return goal.has_value() &&
+            goal->status == acecode::ThreadGoalStatus::Complete &&
+            h.saw_goal_status(acecode::ThreadGoalStatus::Complete);
     }, 10s));
 
     EXPECT_TRUE(h.has_hidden_goal_context_message());

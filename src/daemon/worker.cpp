@@ -16,6 +16,7 @@
 #include "../skills/skill_init.hpp"
 #include "../tool/ask_user_question_tool.hpp"
 #include "../tool/bash_tool.hpp"
+#include "../tool/builtin_tool_registry.hpp"
 #include "../tool/file_read_tool.hpp"
 #include "../tool/file_write_tool.hpp"
 #include "../tool/file_edit_tool.hpp"
@@ -329,21 +330,7 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     acecode::initialize_skill_registry(skill_registry, cfg, cwd);
 
     acecode::ToolExecutor tools;
-    tools.register_tool(acecode::create_bash_tool());
-    tools.register_tool(acecode::create_file_read_tool());
-    tools.register_tool(acecode::create_file_write_tool());
-    tools.register_tool(acecode::create_file_edit_tool());
-    tools.register_tool(acecode::create_grep_tool());
-    tools.register_tool(acecode::create_glob_tool());
-    tools.register_tool(acecode::create_task_complete_tool());
-    tools.register_tool(acecode::create_get_goal_tool());
-    tools.register_tool(acecode::create_create_goal_tool());
-    tools.register_tool(acecode::create_update_goal_tool());
-    if (cfg.web_search.enabled) {
-        tools.register_tool(acecode::web_search::create_web_search_tool(
-            acecode::web_search::runtime().router(),
-            acecode::web_search::runtime().cfg()));
-    }
+    acecode::register_session_builtin_tools(tools, cfg_mut);
     // daemon 用 async 版本(走 ToolContext::ask_user_questions → AskUserQuestionPrompter
     // → WS question_request)。TUI 工厂版需要 TuiState/ScreenInteractive,这里没有。
     tools.register_tool(acecode::create_ask_user_question_tool_async());
@@ -384,6 +371,7 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     web_deps.start_time_unix_ms = now_unix_ms();
     web_deps.session_client     = &client;
     web_deps.session_registry   = &registry;
+    web_deps.tools              = &tools;
     web_deps.workspace_registry = &workspace_registry;
     web_deps.native_folder_picker_enabled = opts.native_folder_picker_enabled;
     if (opts.native_folder_picker_enabled) {

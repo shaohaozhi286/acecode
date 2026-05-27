@@ -14,11 +14,18 @@
 #include <shobjidl.h>
 #include <shlobj.h>
 
+#include <atomic>
+#include <chrono>
+#include <cwchar>
+#include <exception>
 #include <string>
+#include <thread>
 
 namespace acecode::desktop {
 
 namespace {
+
+constexpr const wchar_t* kFolderPickerTitle = L"Select project folder";
 
 // UTF-16 → UTF-8。基础实现,夹带不可解码字节直接落空(MVP 容忍,实际选目录路径都是
 // 系统合法 UTF-16)。
@@ -32,6 +39,110 @@ std::string wide_to_utf8(const std::wstring& w) {
                           out.data(), len, nullptr, nullptr);
     return out;
 }
+
+bool is_usable_owner_window(HWND hwnd) {
+    if (!hwnd || !::IsWindow(hwnd) || !::IsWindowVisible(hwnd)) return false;
+    LONG_PTR style = ::GetWindowLongPtrW(hwnd, GWL_STYLE);
+    return (style & WS_VISIBLE) != 0;
+}
+
+HWND resolve_dialog_owner(HWND requested_parent) {
+    HWND owner = requested_parent;
+    if (!owner) {
+        // Edge app compatibility mode calls the daemon endpoint, so the daemon
+        // has no WebView HWND. The user's click still leaves the Edge app as the
+        // foreground window; using it as owner keeps the dialog above that app.
+        owner = ::GetForegroundWindow();
+    }
+    if (owner) {
+        if (HWND root = ::GetAncestor(owner, GA_ROOT); root) {
+            owner = root;
+        }
+    }
+    return is_usable_owner_window(owner) ? owner : nullptr;
+}
+
+struct DialogForegroundState {
+    DWORD pid = 0;
+    bool found = false;
+};
+
+BOOL CALLBACK pulse_folder_dialog_proc(HWND hwnd, LPARAM param) {
+    auto* state = reinterpret_cast<DialogForegroundState*>(param);
+    if (!state || !hwnd || !::IsWindowVisible(hwnd)) return TRUE;
+
+    DWORD pid = 0;
+    ::GetWindowThreadProcessId(hwnd, &pid);
+    if (pid != state->pid) return TRUE;
+
+    wchar_t title[128] = {0};
+    ::GetWindowTextW(hwnd, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
+    if (std::wcscmp(title, kFolderPickerTitle) != 0) return TRUE;
+
+    if (::IsIconic(hwnd)) {
+        ::ShowWindow(hwnd, SW_RESTORE);
+    } else {
+        ::ShowWindow(hwnd, SW_SHOW);
+    }
+
+    // Windows can deny SetForegroundWindow for background processes. A brief
+    // topmost pulse still makes the user-initiated dialog visible, then returns
+    // it to normal z-order so it does not stay globally topmost.
+    constexpr UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW;
+    ::SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, flags);
+    ::SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, flags);
+    ::BringWindowToTop(hwnd);
+    ::SetForegroundWindow(hwnd);
+    state->found = true;
+    return TRUE;
+}
+
+class DialogForegroundPulse {
+public:
+    DialogForegroundPulse() = default;
+    DialogForegroundPulse(const DialogForegroundPulse&) = delete;
+    DialogForegroundPulse& operator=(const DialogForegroundPulse&) = delete;
+
+    ~DialogForegroundPulse() { stop(); }
+
+    void start() {
+        stop_.store(false);
+        try {
+            worker_ = std::thread([this] {
+                const DWORD pid = ::GetCurrentProcessId();
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+                while (!stop_.load() && std::chrono::steady_clock::now() < deadline) {
+                    DialogForegroundState state;
+                    state.pid = pid;
+                    ::EnumWindows(pulse_folder_dialog_proc, reinterpret_cast<LPARAM>(&state));
+                    if (state.found) {
+                        // One or two extra pulses cover the common-dialog activation
+                        // race without fighting the user for focus afterward.
+                        for (int i = 0; i < 2 && !stop_.load(); ++i) {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(80));
+                            DialogForegroundState again;
+                            again.pid = pid;
+                            ::EnumWindows(pulse_folder_dialog_proc, reinterpret_cast<LPARAM>(&again));
+                        }
+                        break;
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+                }
+            });
+        } catch (const std::exception& e) {
+            LOG_WARN(std::string("[folder_picker] foreground pulse unavailable: ") + e.what());
+        }
+    }
+
+    void stop() {
+        stop_.store(true);
+        if (worker_.joinable()) worker_.join();
+    }
+
+private:
+    std::atomic<bool> stop_{false};
+    std::thread worker_;
+};
 
 } // namespace
 
@@ -57,10 +168,16 @@ std::optional<std::string> pick_folder(void* parent_hwnd) {
         if (SUCCEEDED(dlg->GetOptions(&opts))) {
             dlg->SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
         }
-        dlg->SetTitle(L"Select project folder");
+        dlg->SetTitle(kFolderPickerTitle);
 
-        HWND parent = reinterpret_cast<HWND>(parent_hwnd);
+        HWND requested_parent = reinterpret_cast<HWND>(parent_hwnd);
+        HWND parent = resolve_dialog_owner(requested_parent);
+        DialogForegroundPulse foreground_pulse;
+        if (!requested_parent || !parent) {
+            foreground_pulse.start();
+        }
         hr = dlg->Show(parent);
+        foreground_pulse.stop();
         if (SUCCEEDED(hr)) {
             IShellItem* item = nullptr;
             if (SUCCEEDED(dlg->GetResult(&item)) && item) {

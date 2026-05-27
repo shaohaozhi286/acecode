@@ -14,6 +14,8 @@ namespace acecode {
 enum class ThreadGoalStatus {
     Active,
     Paused,
+    Blocked,
+    UsageLimited,
     BudgetLimited,
     Complete,
 };

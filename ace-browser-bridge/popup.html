@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>ACE Browser Bridge</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main class="panel">
+      <header>
+        <div class="mark" aria-hidden="true">A</div>
+        <div>
+          <h1>ACE Browser Bridge</h1>
+          <p id="status">Checking daemon connection...</p>
+        </div>
+      </header>
+
+      <dl class="meta">
+        <div>
+          <dt>Daemon</dt>
+          <dd id="daemon">127.0.0.1:52007</dd>
+        </div>
+        <div>
+          <dt>Plugin</dt>
+          <dd id="plugin">v0.1.0</dd>
+        </div>
+      </dl>
+
+      <div class="actions" hidden aria-hidden="true">
+        <button id="start" type="button">Start Cursor</button>
+        <button id="stop" type="button" class="secondary">Stop</button>
+      </div>
+      <div class="actions">
+        <button id="reconnect" type="button">Reconnect</button>
+        <button id="release" type="button" class="secondary">Release</button>
+      </div>
+    </main>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

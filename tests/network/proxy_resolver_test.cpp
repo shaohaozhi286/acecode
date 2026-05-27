@@ -269,6 +269,7 @@ TEST(ProxyResolver, OptionsForManualPopulatesBothSchemes) {
     acecode::NetworkConfig cfg;
     cfg.proxy_mode = "manual";
     cfg.proxy_url = "http://127.0.0.1:8888";
+    cfg.proxy_probe_enabled = false;
     ProxyResolver r;
     r.init(cfg);
     auto opts = r.options_for("https://api.example.com");
@@ -282,6 +283,7 @@ TEST(ProxyResolver, InsecureSkipVerifyOnlyAppliesWhenProxyActive) {
     acecode::NetworkConfig cfg;
     cfg.proxy_mode = "manual";
     cfg.proxy_url = "http://127.0.0.1:8888";
+    cfg.proxy_probe_enabled = false;
     cfg.proxy_insecure_skip_verify = true;
     ProxyResolver r;
     r.init(cfg);

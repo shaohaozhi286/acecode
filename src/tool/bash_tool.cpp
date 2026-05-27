@@ -415,12 +415,16 @@ static ToolResult execute_bash(const std::string& arguments_json, const ToolCont
 
     const size_t raw_bytes = full_output.size();
 
+    // AgentLoop 会把大结果交给 tool_result_storage 落盘并生成 preview,所以
+    // 模型驱动路径必须保留完整输出;直接单测/嵌入式调用默认仍走旧的 100KB 保护。
+    const bool should_truncate_inline = !ctx.preserve_full_output;
+
     // Head+tail truncation: keep first 40% and last 60% of MAX_OUTPUT_SIZE,
     // joined by a one-line marker reporting the omitted byte count. This
     // preserves early context (e.g. build args, cwd, path) which a pure
     // tail-only policy loses.
     bool was_truncated = false;
-    if (full_output.size() > MAX_OUTPUT_SIZE) {
+    if (should_truncate_inline && full_output.size() > MAX_OUTPUT_SIZE) {
         const size_t head_cap = static_cast<size_t>(MAX_OUTPUT_SIZE * 0.4);
         const size_t tail_cap = MAX_OUTPUT_SIZE - head_cap; // ~60%
         const size_t omitted = full_output.size() - head_cap - tail_cap;

@@ -9,6 +9,13 @@ import { QUEUED_INPUT_STATE } from './chatInputQueue.js';
 
 export function buildQueueCardItem(item) {
   const queued = item?.queued || {};
+  const payload = queued.payload || {};
+  const attachmentCount = Array.isArray(payload.attachments) ? payload.attachments.length : 0;
+  const contextCount = Array.isArray(payload.contexts) ? payload.contexts.length : 0;
+  const fallbackContent = [
+    attachmentCount ? `${attachmentCount} 个附件` : '',
+    contextCount ? `${contextCount} 个上下文` : '',
+  ].filter(Boolean).join(' + ');
   const state = queued.state || QUEUED_INPUT_STATE.QUEUED;
   let statusLabel = '排队中';
   let statusKind = 'queued';
@@ -25,7 +32,7 @@ export function buildQueueCardItem(item) {
   }
   return {
     queuedId: queued.id || '',
-    content: String(item?.content || ''),
+    content: String(item?.content || fallbackContent || ''),
     state,
     statusLabel,
     statusKind,

@@ -135,3 +135,31 @@ TEST(SessionManagerResume, RestoresPersistedRuntimeState) {
     fs::remove_all(project_dir);
     fs::remove_all(cwd);
 }
+
+TEST(SessionManagerResume, InputDraftSurvivesMetadataRewrite) {
+    auto cwd = make_temp_cwd("input_draft");
+    auto project_dir = SessionStorage::get_project_dir(cwd.string());
+    fs::remove_all(project_dir);
+
+    SessionManager sm;
+    sm.start_session(cwd.string(), "test-provider", "test-model");
+    sm.on_message(message("user", "first turn"));
+    const std::string session_id = sm.current_session_id();
+    ASSERT_FALSE(session_id.empty());
+
+    sm.set_input_draft("continue this refactor");
+    auto meta = SessionStorage::read_meta(SessionStorage::meta_path(project_dir, session_id));
+    EXPECT_EQ(meta.input_draft, "continue this refactor");
+
+    sm.on_message(message("assistant", "reply"));
+    meta = SessionStorage::read_meta(SessionStorage::meta_path(project_dir, session_id));
+    EXPECT_EQ(meta.input_draft, "continue this refactor")
+        << "regular metadata updates must preserve the active input draft";
+
+    sm.set_input_draft("");
+    meta = SessionStorage::read_meta(SessionStorage::meta_path(project_dir, session_id));
+    EXPECT_TRUE(meta.input_draft.empty());
+
+    fs::remove_all(project_dir);
+    fs::remove_all(cwd);
+}

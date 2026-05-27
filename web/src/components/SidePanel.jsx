@@ -23,6 +23,12 @@ import { langForFile } from '../lib/lang.js';
 import { renderMarkdown } from '../lib/markdown.js';
 import { joinWorkspacePath } from '../lib/desktopContextMenu.js';
 import { usePreference } from '../lib/usePreference.js';
+import {
+  buildReviewStatusMap,
+  entriesWithReviewRows,
+  fileChangeStatusTitle,
+  statusForTreeEntry,
+} from '../lib/fileTreeChangeStatus.js';
 import { clsx, formatBytes } from '../lib/format.js';
 import { CopyableCodeFrame } from './CopyableCodeFrame.jsx';
 import { PanelToggleIcon, VsIcon } from './Icon.jsx';
@@ -57,6 +63,7 @@ function isImagePreview(path) {
 // 都 new 一份导致 useEffect deps 抖动 / 子组件 useCallback 失效。
 const EMPTY_TREE_CACHE    = new Map();
 const EMPTY_EXPANDED_DIRS = new Set();
+const EMPTY_REVIEW_STATUS = new Map();
 
 function validateBooleanPreference(value) {
   return typeof value === 'boolean';
@@ -78,7 +85,7 @@ function escapeHtml(s) {
 // effect 竞争(loadDir('') 守卫读到旧 treeCache 直接 bail,父级 setTreeCache(new Map())
 // 又跑得更晚把刚拉的根清掉)在这个数据结构下不复存在。
 function FileTree({ api, cwd, treeCache, setTreeCache, expandedDirs, setExpandedDirs,
-                    selectedPath, onPickFile, refreshToken }) {
+                    selectedPath, onPickFile, refreshToken, reviewStatusByPath }) {
   const [loading, setLoading] = useState(new Set()); // path 集合,正在请求中
   const [errors, setErrors]   = useState(new Map()); // path → 错误文案
 
@@ -133,24 +140,28 @@ function FileTree({ api, cwd, treeCache, setTreeCache, expandedDirs, setExpanded
       );
     }
     if (!entries) return null;
-    if (entries.length === 0) {
+    const displayEntries = entriesWithReviewRows(entries, parentPath, reviewStatusByPath);
+    if (displayEntries.length === 0) {
       return (
         <div className="px-2 py-1 text-fg-mute text-[11px] italic" style={{ paddingLeft: 8 + depth * 14 }}>
           (空目录)
         </div>
       );
     }
-    return entries.map((e) => {
+    return displayEntries.map((e) => {
       const isDir = e.kind === 'dir';
       const isOpen = isDir && expandedDirs.has(e.path);
       const isActive = !isDir && selectedPath === e.path;
       const explorerPath = isDir ? joinWorkspacePath(cwd, e.path) : '';
+      const reviewStatus = e.review_status || statusForTreeEntry(e, reviewStatusByPath);
+      const statusTitle = fileChangeStatusTitle(reviewStatus, isDir);
       return (
         <div key={e.path}>
           <button
             type="button"
             data-desktop-open-in-explorer-kind={isDir ? 'directory' : undefined}
             data-desktop-open-in-explorer-path={explorerPath || undefined}
+            data-review-status={reviewStatus || undefined}
             className={clsx(
               'ace-file-row w-full flex items-center gap-1 text-left text-[12px] font-mono py-[3px] pr-2',
               'hover:bg-surface-hi cursor-pointer',
@@ -158,7 +169,7 @@ function FileTree({ api, cwd, treeCache, setTreeCache, expandedDirs, setExpanded
             )}
             style={{ paddingLeft: 6 + depth * 14 }}
             onClick={() => isDir ? toggleDir(e.path) : onPickFile(e)}
-            title={e.path}
+            title={reviewStatus ? `${e.path} - ${statusTitle}` : e.path}
           >
             {isDir ? (
               <>
@@ -171,7 +182,17 @@ function FileTree({ api, cwd, treeCache, setTreeCache, expandedDirs, setExpanded
                 <VsIcon name="file" size={14} mono={false} />
               </>
             )}
-            <span className="truncate">{e.name}</span>
+            <span className="ace-file-name truncate">{e.name}</span>
+            {reviewStatus && (
+              <span
+                className="ace-file-status-badge"
+                data-status={reviewStatus}
+                title={statusTitle}
+                aria-label={statusTitle}
+              >
+                {reviewStatus}
+              </span>
+            )}
           </button>
           {isDir && isOpen && renderEntries(e.path, depth + 1)}
         </div>
@@ -439,6 +460,16 @@ export function SidePanel({
   const cwdKey = cwd || '';
   const treeCache    = treeCacheByCwd.get(cwdKey) || EMPTY_TREE_CACHE;
   const expandedDirs = expandedDirsByCwd.get(cwdKey) || EMPTY_EXPANDED_DIRS;
+  const fallbackChangeGroups = useMemo(
+    () => (changeGroups ? null : aggregateHunksFromMessages(messages || [])),
+    [changeGroups, messages],
+  );
+  const effectiveChangeGroups = changeGroups || fallbackChangeGroups || [];
+  const effectiveChangeSummary = changeSummary || summarizeChangeGroups(effectiveChangeGroups);
+  const reviewStatusByPath = useMemo(
+    () => buildReviewStatusMap(effectiveChangeGroups),
+    [effectiveChangeGroups],
+  );
 
   const setTreeCache = useCallback((updater) => {
     setTreeCacheByCwd(prev => {
@@ -585,13 +616,14 @@ export function SidePanel({
             selectedPath={selectedPath}
             onPickFile={onPickFile}
             refreshToken={fileRefreshToken}
+            reviewStatusByPath={reviewStatusByPath || EMPTY_REVIEW_STATUS}
           />
         )}
         {activeTab === 'changes' && (
           <ChangesList
             messages={messages}
-            groups={changeGroups}
-            summary={changeSummary}
+            groups={effectiveChangeGroups}
+            summary={effectiveChangeSummary}
           />
         )}
         {activeTab === 'preview' && (

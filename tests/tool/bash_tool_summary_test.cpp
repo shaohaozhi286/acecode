@@ -190,4 +190,21 @@ TEST(BashToolSummary, LargeOutputTriggersHeadTailTruncation) {
     EXPECT_EQ(get_metric(*r.summary, "truncated"), "true");
     EXPECT_NE(r.output.find("bytes omitted"), std::string::npos);
 }
+
+// 场景 5 (POSIX only): AgentLoop 会设置 preserve_full_output,让后续
+// tool_result_storage 先拿到完整输出再决定是否落盘。此时 bash 自己不应先
+// 插入 100KB 截断 marker。
+TEST(BashToolSummary, PreserveFullOutputSkipsInlineTruncation) {
+    ToolImpl tool = create_bash_tool();
+
+    nlohmann::json args = {{"command", "head -c 150000 /dev/zero | cat"}};
+    ToolContext ctx;
+    ctx.preserve_full_output = true;
+    ToolResult r = tool.execute(args.dump(), ctx);
+
+    ASSERT_TRUE(r.summary.has_value());
+    EXPECT_FALSE(has_metric(*r.summary, "truncated"));
+    EXPECT_EQ(r.output.find("bytes omitted"), std::string::npos);
+    EXPECT_GT(r.output.size(), 100u * 1024u);
+}
 #endif

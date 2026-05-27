@@ -118,6 +118,51 @@ TEST(SavedModelsEditor, AddAppendsValidDraft) {
     EXPECT_EQ(cfg.saved_models[1].api_key, "sk-x");
 }
 
+// 场景:add 带 context_window → profile 保存该手动上下文窗口。
+TEST(SavedModelsEditor, AddStoresContextWindowOverride) {
+    auto cfg = make_cfg_with_one_default();
+    auto d = good_openai_draft("local-lm");
+    d.context_window = 64000;
+    EXPECT_EQ(add_saved_model(cfg, d), SavedModelEditError::OK);
+    ASSERT_EQ(cfg.saved_models.size(), 2u);
+    ASSERT_TRUE(cfg.saved_models[1].context_window.has_value());
+    EXPECT_EQ(*cfg.saved_models[1].context_window, 64000);
+}
+
+// 场景:add context_window 为负数 → INVALID_CONTEXT_WINDOW,cfg 不变。
+TEST(SavedModelsEditor, AddRejectsNegativeContextWindow) {
+    auto cfg = make_cfg_with_one_default();
+    auto d = good_openai_draft("local-lm");
+    d.context_window = -1;
+    EXPECT_EQ(add_saved_model(cfg, d), SavedModelEditError::INVALID_CONTEXT_WINDOW);
+    EXPECT_EQ(cfg.saved_models.size(), 1u);
+}
+
+// 场景:add codex 被屏蔽,不能新增到可选 saved_models。
+TEST(SavedModelsEditor, AddRejectsDisabledCodexProvider) {
+    auto cfg = make_cfg_with_one_default();
+    SavedModelDraft d;
+    d.name = "codex";
+    d.provider = "codex";
+    d.model = "gpt-5.5";
+    EXPECT_EQ(add_saved_model(cfg, d), SavedModelEditError::PROVIDER_DISABLED);
+    EXPECT_EQ(cfg.saved_models.size(), 1u);
+}
+
+// 场景:update 也不能把现有 entry 切到 codex。
+TEST(SavedModelsEditor, UpdateRejectsSwitchToDisabledCodexProvider) {
+    auto cfg = make_cfg_with_one_default();
+    add_saved_model(cfg, good_openai_draft("local-lm"));
+
+    SavedModelDraft d;
+    d.name = "local-lm";
+    d.provider = "codex";
+    d.model = "gpt-5.5";
+    EXPECT_EQ(update_saved_model(cfg, "local-lm", d),
+              SavedModelEditError::PROVIDER_DISABLED);
+    EXPECT_EQ(cfg.saved_models[1].provider, "openai");
+}
+
 // 场景:update 不存在的 name → NOT_FOUND,cfg 不变。
 TEST(SavedModelsEditor, UpdateRejectsNotFound) {
     auto cfg = make_cfg_with_one_default();
@@ -147,6 +192,19 @@ TEST(SavedModelsEditor, UpdateReplacesFieldsForSameName) {
     d.api_key = "sk-new";
     EXPECT_EQ(update_saved_model(cfg, "local-lm", d), SavedModelEditError::OK);
     EXPECT_EQ(cfg.saved_models[1].api_key, "sk-new");
+}
+
+// 场景:update context_window=0 清除已有手动 override。
+TEST(SavedModelsEditor, UpdateCanClearContextWindowOverride) {
+    auto cfg = make_cfg_with_one_default();
+    auto d = good_openai_draft("local-lm");
+    d.context_window = 64000;
+    add_saved_model(cfg, d);
+
+    SavedModelDraft updated = good_openai_draft("local-lm");
+    updated.context_window = 0;
+    EXPECT_EQ(update_saved_model(cfg, "local-lm", updated), SavedModelEditError::OK);
+    EXPECT_FALSE(cfg.saved_models[1].context_window.has_value());
 }
 
 // 场景:remove 默认条目 → IN_USE_AS_DEFAULT,cfg 不变。
@@ -233,6 +291,10 @@ TEST(SavedModelsEditor, AddLeavesCfgUnchangedOnAllRejections) {
     bad_provider.provider = "anthropic";
     try_reject(bad_provider, SavedModelEditError::UNKNOWN_PROVIDER);
 
+    auto disabled_provider = good_openai_draft();
+    disabled_provider.provider = "codex";
+    try_reject(disabled_provider, SavedModelEditError::PROVIDER_DISABLED);
+
     auto no_model = good_openai_draft();
     no_model.model = "";
     try_reject(no_model, SavedModelEditError::MISSING_MODEL);
@@ -244,4 +306,8 @@ TEST(SavedModelsEditor, AddLeavesCfgUnchangedOnAllRejections) {
     auto no_key = good_openai_draft();
     no_key.api_key = "";
     try_reject(no_key, SavedModelEditError::INVALID_API_KEY);
+
+    auto bad_context = good_openai_draft();
+    bad_context.context_window = -1;
+    try_reject(bad_context, SavedModelEditError::INVALID_CONTEXT_WINDOW);
 }

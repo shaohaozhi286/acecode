@@ -124,3 +124,17 @@ TEST(GoalCommand, RejectsInvalidBudget) {
     ASSERT_FALSE(h.state_.conversation.empty());
     EXPECT_NE(h.state_.conversation.back().content.find("positive integer"), std::string::npos);
 }
+
+TEST(GoalCommand, ResumeBlockedGoalMakesItActive) {
+    GoalCommandHarness h("blocked_resume");
+
+    const std::string sid = h.sm_.current_session_id();
+    ASSERT_TRUE(h.sm_.goal_store()->replace_thread_goal(
+        sid, "wait for a decision", std::nullopt, acecode::ThreadGoalStatus::Blocked));
+
+    ASSERT_TRUE(h.dispatch("/goal resume"));
+    auto goal = h.goal();
+    ASSERT_TRUE(goal.has_value());
+    EXPECT_EQ(goal->status, acecode::ThreadGoalStatus::Active);
+    EXPECT_NE(h.state_.goal_status.find("active"), std::string::npos);
+}

@@ -114,6 +114,14 @@ public:
     // message is written.
     std::string ensure_active_session_id();
 
+    // Directory for full tool outputs persisted out of the prompt context.
+    // Creates the active session lazily, matching on_message/goal behavior.
+    std::string ensure_tool_results_dir();
+
+    // Narrow allowlist for file_read: persisted tool results live in ACECode's
+    // session store, outside cwd, but the model needs to read them back.
+    bool is_tool_result_artifact_path(const std::string& path) const;
+
     ThreadGoalStore* goal_store();
     ThreadGoalStore* existing_goal_store();
     const ThreadGoalStore* goal_store() const;
@@ -129,6 +137,10 @@ public:
 
     // Return the current in-memory title (empty when unset).
     std::string current_title() const;
+
+    // Persisted unsubmitted chat input draft for the active session.
+    void set_input_draft(std::string draft);
+    std::string current_input_draft() const;
 
     // Persisted runtime state for the active session.
     void set_permission_mode(std::string mode, bool persist_immediately = true);
@@ -165,6 +177,7 @@ private:
     std::string last_user_summary_;
     std::string created_at_;
     std::string pending_title_;
+    std::string input_draft_;
     std::string permission_mode_ = "default";
     TokenUsage last_token_usage_;
     TokenUsage session_token_usage_;

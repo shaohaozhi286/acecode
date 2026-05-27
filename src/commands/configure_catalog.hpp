@@ -32,6 +32,7 @@ std::string format_model_summary(const ModelEntry& m);
 //   `cfg.openai.models_dev_provider_id` set     → "openai (provider=<id> via models.dev)"
 //   `cfg.provider == "openai"` w/o provider id  → "openai (custom)"
 //   `cfg.provider == "copilot"`                 → "copilot"
+//   `cfg.provider == "codex"`                   → "codex"
 std::string format_source_line(const AppConfig& cfg);
 
 // Look up the API key for a provider via env vars in `provider.env` order.

@@ -45,3 +45,36 @@ export function optionLabel(option) {
   }
   return modelDisplayLabel(state, '');
 }
+
+function visualColumns(text) {
+  let columns = 0;
+  for (const ch of String(text || '')) {
+    columns += ch.charCodeAt(0) > 127 ? 2 : 1;
+  }
+  return columns;
+}
+
+export function buildStatusBarModelMenu({ modelOptions = [], selectedModelName = '', fallbackLabel = '—' } = {}) {
+  const options = normalizeModelOptions(modelOptions);
+  const selected = String(selectedModelName || '');
+  const selectedOption = options.find((option) => option.name === selected);
+  const displayLabel = selectedOption
+    ? optionLabel(selectedOption)
+    : (selected || String(fallbackLabel || '—'));
+  const items = options.map((option) => ({
+    name: option.name,
+    label: optionLabel(option),
+    provider: option.provider,
+    model: option.model,
+    active: option.name === selected,
+  }));
+  const widthLabel = [displayLabel, ...items.map((item) => item.label)]
+    .reduce((longest, label) => (
+      visualColumns(label) > visualColumns(longest) ? label : longest
+    ), '');
+  return {
+    displayLabel,
+    widthLabel: widthLabel || displayLabel,
+    items,
+  };
+}

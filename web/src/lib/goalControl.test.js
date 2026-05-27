@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { getGoalStopControlState, isActiveGoal } from './goalControl.js';
+import { getGoalStopControlState, isActiveGoal, shouldAbortForStopControl } from './goalControl.js';
 
 function run(name, fn) {
   try {
@@ -17,6 +17,7 @@ run('active goal is stoppable even when not busy', () => {
   assert.equal(state.visible, true);
   assert.equal(state.action, 'pause_goal');
   assert.equal(state.label, '停止 Goal');
+  assert.equal(shouldAbortForStopControl({ goal: { status: 'active' }, busy: false }), false);
 });
 
 run('busy non-goal turn still shows abort control', () => {
@@ -32,11 +33,19 @@ run('busy active goal makes the stop action an abort', () => {
   assert.equal(state.action, 'abort');
   assert.equal(state.label, '中断 Goal');
   assert.match(state.title, /暂停 Goal/);
+  assert.equal(shouldAbortForStopControl({ goal: { status: 'active' }, busy: true }), true);
 });
 
 run('paused goal without a running turn hides stop control', () => {
   const state = getGoalStopControlState({ goal: { status: 'paused' }, busy: false });
   assert.equal(isActiveGoal({ status: 'paused' }), false);
+  assert.equal(state.visible, false);
+  assert.equal(state.action, 'none');
+});
+
+run('blocked goal without a running turn hides stop control', () => {
+  const state = getGoalStopControlState({ goal: { status: 'blocked' }, busy: false });
+  assert.equal(isActiveGoal({ status: 'blocked' }), false);
   assert.equal(state.visible, false);
   assert.equal(state.action, 'none');
 });

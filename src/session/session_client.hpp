@@ -196,6 +196,12 @@ public:
         return send_input(session_id, text);
     }
 
+    // Structured variant used by multimodal clients. Implementations that do
+    // not understand attachments degrade to the visible text.
+    virtual bool send_input(const std::string& session_id, const UserInput& input) {
+        return send_input(session_id, input.text, input.display_text);
+    }
+
     // Execute a daemon-owned builtin command, currently limited to `/init` and
     // `/compact`. This is intentionally separate from send_input so command
     // text is not skill-expanded or sent to the model as an ordinary message.

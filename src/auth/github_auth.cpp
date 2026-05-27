@@ -12,6 +12,8 @@
 #include <chrono>
 #include <filesystem>
 #include <iostream>
+#include <set>
+#include <utility>
 
 namespace fs = std::filesystem;
 
@@ -20,6 +22,12 @@ namespace acecode {
 // GitHub OAuth App client_id for Copilot CLI integrations.
 // This is the well-known public client_id used by open-source Copilot clients.
 static const std::string GITHUB_CLIENT_ID = "Iv1.b507a08c87ecfe98";
+static const std::string ACCESS_TOKEN_URL =
+    "https://github.com/login/oauth/access_token";
+static const std::string COPILOT_TOKEN_URL =
+    "https://api.github.com/copilot_internal/v2/token";
+static const std::string COPILOT_MODELS_URL =
+    "https://api.githubcopilot.com/models";
 
 DeviceCodeResponse request_device_code() {
     static const std::string kDeviceCodeUrl = "https://github.com/login/device/code";
@@ -80,65 +88,38 @@ std::string poll_for_access_token(
 
         std::this_thread::sleep_for(std::chrono::seconds(poll_interval));
 
-        static const std::string kAccessTokenUrl =
-            "https://github.com/login/oauth/access_token";
-        auto proxy_opts = network::proxy_options_for(kAccessTokenUrl);
-        cpr::Response r = cpr::Post(
-            cpr::Url{kAccessTokenUrl},
-            cpr::Header{
-                {"Accept", "application/json"},
-                {"Content-Type", "application/json"}
-            },
-            cpr::Body{nlohmann::json({
-                {"client_id", GITHUB_CLIENT_ID},
-                {"device_code", device_code},
-                {"grant_type", "urn:ietf:params:oauth:grant-type:device_code"}
-            }).dump()},
-            network::build_ssl_options(proxy_opts),
-            proxy_opts.proxies,
-            proxy_opts.auth,
-            cpr::Timeout{30000}
-        );
-
-        if (r.status_code != 200) {
-            if (status_callback) status_callback("HTTP error during polling.");
+        DevicePollResult poll = poll_for_access_token_once(device_code);
+        if (poll.status == "authorized") {
+            return poll.access_token;
+        }
+        if (poll.status == "pending") {
+            if (status_callback) status_callback("Waiting for authorization...");
             continue;
         }
-
-        try {
-            auto j = nlohmann::json::parse(r.text);
-
-            if (j.contains("access_token")) {
-                return j["access_token"].get<std::string>();
-            }
-
-            std::string error = j.value("error", "");
-            if (error == "authorization_pending") {
-                if (status_callback) status_callback("Waiting for authorization...");
-                continue;
-            } else if (error == "slow_down") {
-                poll_interval += 5;
-                if (status_callback) status_callback("Slowing down polling...");
-                continue;
-            } else if (error == "expired_token") {
-                if (status_callback) status_callback("Device code expired.");
-                return "";
-            } else {
-                if (status_callback) status_callback("Auth error: " + error);
-                return "";
-            }
-        } catch (...) {
-            if (status_callback) status_callback("Failed to parse polling response.");
+        if (poll.status == "slow_down") {
+            poll_interval += poll.interval_delta_seconds > 0
+                ? poll.interval_delta_seconds
+                : 5;
+            if (status_callback) status_callback("Slowing down polling...");
+            continue;
         }
+        if (poll.status == "expired") {
+            if (status_callback) status_callback("Device code expired.");
+            return "";
+        }
+        if (status_callback) {
+            status_callback(poll.message.empty()
+                ? "Auth error: " + poll.error
+                : poll.message);
+        }
+        return "";
     }
 }
 
 CopilotToken exchange_copilot_token(const std::string& github_token) {
-    static const std::string kCopilotTokenUrl =
-        "https://api.github.com/copilot_internal/v2/token";
-    auto proxy_opts = network::proxy_options_for(kCopilotTokenUrl);
+    auto proxy_opts = network::proxy_options_for(COPILOT_TOKEN_URL);
     cpr::Response r = cpr::Get(
-        cpr::Url{kCopilotTokenUrl},
+        cpr::Url{COPILOT_TOKEN_URL},
         cpr::Header{
             {"Authorization", "token " + github_token},
             {"Accept", "application/json"},
@@ -164,6 +145,167 @@ CopilotToken exchange_copilot_token(const std::string& github_token) {
     return result;
 }
 
+DevicePollResult poll_for_access_token_once(const std::string& device_code) {
+    DevicePollResult result;
+    if (device_code.empty()) {
+        result.status = "failed";
+        result.error = "missing_device_code";
+        result.message = "device_code is required";
+        return result;
+    }
+
+    auto proxy_opts = network::proxy_options_for(ACCESS_TOKEN_URL);
+    cpr::Response r = cpr::Post(
+        cpr::Url{ACCESS_TOKEN_URL},
+        cpr::Header{
+            {"Accept", "application/json"},
+            {"Content-Type", "application/json"}
+        },
+        cpr::Body{nlohmann::json({
+            {"client_id", GITHUB_CLIENT_ID},
+            {"device_code", device_code},
+            {"grant_type", "urn:ietf:params:oauth:grant-type:device_code"}
+        }).dump()},
+        network::build_ssl_options(proxy_opts),
+        proxy_opts.proxies,
+        proxy_opts.auth,
+        cpr::Timeout{30000}
+    );
+
+    if (r.status_code != 200) {
+        result.status = "failed";
+        result.error = "http_error";
+        result.message = "HTTP error during polling";
+        return result;
+    }
+
+    try {
+        auto j = nlohmann::json::parse(r.text);
+        if (j.contains("access_token") && j["access_token"].is_string()) {
+            result.status = "authorized";
+            result.access_token = j["access_token"].get<std::string>();
+            return result;
+        }
+
+        std::string error = j.value("error", "");
+        result.error = error;
+        if (error == "authorization_pending") {
+            result.status = "pending";
+            result.message = "Waiting for authorization";
+        } else if (error == "slow_down") {
+            result.status = "slow_down";
+            result.interval_delta_seconds = 5;
+            result.message = "Slow down polling";
+        } else if (error == "expired_token") {
+            result.status = "expired";
+            result.message = "Device code expired";
+        } else {
+            result.status = "failed";
+            result.message = error.empty() ? "Authentication failed" : "Auth error: " + error;
+        }
+    } catch (const std::exception& e) {
+        result.status = "failed";
+        result.error = "bad_json";
+        result.message = e.what();
+    }
+    return result;
+}
+
+CopilotModelsResult fetch_copilot_model_ids(const std::string& github_token) {
+    CopilotModelsResult result;
+    if (github_token.empty()) {
+        result.status_code = 401;
+        result.error = "COPILOT_AUTH_REQUIRED";
+        result.message = "GitHub Copilot authentication is required";
+        return result;
+    }
+
+    CopilotToken ct = exchange_copilot_token(github_token);
+    if (ct.token.empty()) {
+        result.status_code = 401;
+        result.error = "COPILOT_TOKEN_EXCHANGE_FAILED";
+        result.message = "Could not exchange GitHub token for Copilot session token";
+        return result;
+    }
+
+    auto proxy_opts = network::proxy_options_for(COPILOT_MODELS_URL);
+    cpr::Response r = cpr::Get(
+        cpr::Url{COPILOT_MODELS_URL},
+        cpr::Header{
+            {"Authorization", "Bearer " + ct.token},
+            {"Editor-Version", "acecode/0.1.0"},
+            {"Editor-Plugin-Version", "acecode/0.1.0"},
+            {"Copilot-Integration-Id", "vscode-chat"},
+            {"Openai-Intent", "conversation-panel"}
+        },
+        network::build_ssl_options(proxy_opts),
+        proxy_opts.proxies,
+        proxy_opts.auth,
+        cpr::Timeout{10000}
+    );
+
+    result.status_code = static_cast<int>(r.status_code);
+    if (r.status_code == 0) {
+        result.error = "COPILOT_MODELS_UNREACHABLE";
+        result.message = r.error.message;
+        return result;
+    }
+    if (r.status_code < 200 || r.status_code >= 300) {
+        result.error = "COPILOT_MODELS_HTTP_ERROR";
+        result.message = "upstream returned HTTP " + std::to_string(r.status_code);
+        return result;
+    }
+
+    try {
+        auto j = nlohmann::json::parse(r.text);
+        const nlohmann::json* list = nullptr;
+        if (j.is_object()) {
+            if (j.contains("data") && j["data"].is_array()) {
+                list = &j["data"];
+            } else if (j.contains("models") && j["models"].is_array()) {
+                list = &j["models"];
+            }
+        } else if (j.is_array()) {
+            list = &j;
+        }
+
+        std::set<std::string> unique;
+        if (list) {
+            for (const auto& item : *list) {
+                if (item.is_string()) {
+                    auto id = item.get<std::string>();
+                    if (!id.empty()) unique.insert(std::move(id));
+                    continue;
+                }
+                if (!item.is_object() ||
+                    !item.contains("id") ||
+                    !item["id"].is_string()) {
+                    continue;
+                }
+                if (item.contains("capabilities") &&
+                    item["capabilities"].is_object()) {
+                    const auto& caps = item["capabilities"];
+                    if (caps.contains("type") && caps["type"].is_string() &&
+                        caps["type"].get<std::string>() != "chat") {
+                        continue;
+                    }
+                }
+                auto id = item["id"].get<std::string>();
+                if (!id.empty()) unique.insert(std::move(id));
+            }
+        }
+        result.models.assign(unique.begin(), unique.end());
+    } catch (const std::exception& e) {
+        result.error = "COPILOT_MODELS_BAD_JSON";
+        result.message = e.what();
+    }
+    return result;
+}
+
+static fs::path github_token_path() {
+    return path_from_utf8(get_acecode_dir()) / "github_token";
+}
+
 void save_github_token(const std::string& token) {
     std::string dir = get_acecode_dir();
     fs::path native_dir = path_from_utf8(dir);
@@ -178,7 +320,7 @@ void save_github_token(const std::string& token) {
 }
 
 std::string load_github_token() {
-    fs::path path = path_from_utf8(get_acecode_dir()) / "github_token";
+    fs::path path = github_token_path();
     if (!fs::exists(path)) {
         return "";
     }
@@ -188,6 +330,20 @@ std::string load_github_token() {
         std::getline(ifs, token);
     }
     return token;
+}
+
+bool has_saved_github_token() {
+    return !load_github_token().empty();
+}
+
+bool delete_github_token(std::string* error) {
+    std::error_code ec;
+    fs::remove(github_token_path(), ec);
+    if (ec) {
+        if (error) *error = ec.message();
+        return false;
+    }
+    return true;
 }
 
 } // namespace acecode

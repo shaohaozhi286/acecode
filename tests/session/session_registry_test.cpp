@@ -18,6 +18,8 @@
 #include "session/local_session_client.hpp"
 #include "session/session_registry.hpp"
 #include "session/session_storage.hpp"
+#include "session/thread_goal_store.hpp"
+#include "tool/goal_tool.hpp"
 #include "tool/tool_executor.hpp"
 #include "utils/cwd_hash.hpp"
 
@@ -25,8 +27,10 @@
 #include <chrono>
 #include <condition_variable>
 #include <filesystem>
+#include <functional>
 #include <fstream>
 #include <iterator>
+#include <memory>
 #include <mutex>
 #include <random>
 #include <thread>
@@ -60,6 +64,7 @@ namespace {
 struct TestFixture {
     ToolExecutor tools;
     PermissionManager permissions;
+    std::shared_ptr<acecode::LlmProvider> provider;
     SessionRegistry registry;
 
     TestFixture()
@@ -67,7 +72,7 @@ struct TestFixture {
 
     static SessionRegistryDeps make_deps(TestFixture& self) {
         SessionRegistryDeps d;
-        d.provider_accessor = [] { return std::shared_ptr<acecode::LlmProvider>{}; };
+        d.provider_accessor = [&self] { return self.provider; };
         d.tools = &self.tools;
         d.cwd = "/tmp/test_registry";
         d.config = nullptr;
@@ -134,6 +139,72 @@ public:
     void set_model(const std::string&) override {}
 };
 
+class CompleteGoalStubProvider : public acecode::LlmProvider {
+public:
+    acecode::ChatResponse chat(
+        const std::vector<acecode::ChatMessage>&,
+        const std::vector<acecode::ToolDef>&) override {
+        acecode::ChatResponse resp;
+        resp.finish_reason = "stop";
+        return resp;
+    }
+
+    void chat_stream(const std::vector<acecode::ChatMessage>& messages,
+                     const std::vector<acecode::ToolDef>&,
+                     const acecode::StreamCallback& callback,
+                     std::atomic<bool>* = nullptr) override {
+        int call_index = 0;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            requests_.push_back(messages);
+            call_index = ++calls_;
+        }
+
+        if (call_index == 1) {
+            acecode::ToolCall tc;
+            tc.id = "goal-complete";
+            tc.function_name = "update_goal";
+            tc.function_arguments = R"({"status":"complete"})";
+            acecode::StreamEvent tool_evt;
+            tool_evt.type = acecode::StreamEventType::ToolCall;
+            tool_evt.tool_call = std::move(tc);
+            callback(tool_evt);
+        } else {
+            acecode::StreamEvent delta;
+            delta.type = acecode::StreamEventType::Delta;
+            delta.content = "done";
+            callback(delta);
+        }
+
+        acecode::StreamEvent done;
+        done.type = acecode::StreamEventType::Done;
+        callback(done);
+    }
+
+    bool saw_transcript_only_message() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        for (const auto& request : requests_) {
+            for (const auto& msg : request) {
+                if (msg.metadata.is_object() &&
+                    msg.metadata.value("transcript_only", false)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    std::string name() const override { return "complete-goal-stub"; }
+    bool is_authenticated() override { return true; }
+    std::string model() const override { return "complete-goal-stub"; }
+    void set_model(const std::string&) override {}
+
+private:
+    mutable std::mutex mu_;
+    std::vector<std::vector<acecode::ChatMessage>> requests_;
+    int calls_ = 0;
+};
+
 acecode::ChatMessage registry_msg(std::string role, std::string content) {
     acecode::ChatMessage msg;
     msg.role = std::move(role);
@@ -180,6 +251,52 @@ AppConfig make_model_cfg() {
     return cfg;
 }
 
+std::vector<acecode::ChatMessage> load_registry_session_messages(
+    const std::filesystem::path& cwd,
+    const std::string& id) {
+    const std::string project_dir = SessionStorage::get_project_dir(cwd.string());
+    return SessionStorage::load_messages(SessionStorage::session_path(project_dir, id));
+}
+
+bool is_goal_audit(const acecode::ChatMessage& msg, const std::string& action) {
+    return msg.role == "system" &&
+           msg.metadata.is_object() &&
+           msg.metadata.value("transcript_only", false) &&
+           msg.metadata.value("goal_audit", false) &&
+           msg.metadata.value("goal_action", "") == action;
+}
+
+bool is_hidden_goal_context(const acecode::ChatMessage& msg) {
+    return msg.metadata.is_object() &&
+           msg.metadata.value("hidden_goal_context", false);
+}
+
+std::size_t find_message_index(
+    const std::vector<acecode::ChatMessage>& messages,
+    const std::function<bool(const acecode::ChatMessage&)>& pred) {
+    for (std::size_t i = 0; i < messages.size(); ++i) {
+        if (pred(messages[i])) return i;
+    }
+    return messages.size();
+}
+
+bool wait_for_goal_status(SessionEntry* entry,
+                          const std::string& id,
+                          acecode::ThreadGoalStatus status,
+                          std::chrono::milliseconds timeout = 5s) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (entry && entry->sm && entry->sm->goal_store()) {
+            auto goal = entry->sm->goal_store()->get_thread_goal(id);
+            if (goal.has_value() && goal->status == status) return true;
+        }
+        std::this_thread::sleep_for(10ms);
+    }
+    if (!entry || !entry->sm || !entry->sm->goal_store()) return false;
+    auto goal = entry->sm->goal_store()->get_thread_goal(id);
+    return goal.has_value() && goal->status == status;
+}
+
 } // namespace
 
 // 场景: create_session 生成的 id 是 SessionStorage::generate_session_id 格式
@@ -197,6 +314,92 @@ TEST(SessionRegistry, CreateGeneratesUniqueIds) {
     fx.registry.destroy(a);
     fx.registry.destroy(b);
     EXPECT_EQ(fx.registry.size(), 0u);
+}
+
+TEST(LocalSessionClient, GoalCreatePersistsVisibleAuditBeforeHiddenContext) {
+    auto cwd = temp_cwd("goal_audit_create");
+    TestFixture fx;
+    fx.tools.register_tool(acecode::create_update_goal_tool());
+    auto provider = std::make_shared<CompleteGoalStubProvider>();
+    fx.provider = provider;
+    LocalSessionClient client(fx.registry);
+
+    SessionOptions opts;
+    opts.cwd = cwd.string();
+    auto id = client.create_session(opts);
+
+    acecode::BuiltinCommandRequest req;
+    req.name = "goal";
+    req.args = "finish visible audit";
+    req.display_text = "/goal finish visible audit";
+    auto result = client.execute_builtin_command(id, req);
+    EXPECT_EQ(result.status, acecode::BuiltinCommandStatus::Accepted);
+
+    auto* entry = fx.registry.lookup(id);
+    ASSERT_NE(entry, nullptr);
+    ASSERT_TRUE(wait_for_goal_status(entry, id, acecode::ThreadGoalStatus::Complete));
+
+    auto messages = load_registry_session_messages(cwd, id);
+    const auto audit_idx = find_message_index(messages, [](const auto& msg) {
+        return is_goal_audit(msg, "create");
+    });
+    const auto hidden_idx = find_message_index(messages, is_hidden_goal_context);
+    ASSERT_NE(audit_idx, messages.size());
+    ASSERT_NE(hidden_idx, messages.size());
+    EXPECT_LT(audit_idx, hidden_idx);
+    EXPECT_FALSE(messages[audit_idx].is_meta);
+    EXPECT_NE(messages[audit_idx].content.find("[Goal] Started: finish visible audit"),
+              std::string::npos);
+    EXPECT_FALSE(provider->saw_transcript_only_message());
+
+    fx.registry.destroy(id);
+    std::error_code ec;
+    std::filesystem::remove_all(cwd, ec);
+}
+
+TEST(LocalSessionClient, SessionResumeWithActiveGoalPersistsVisibleAuditBeforeContinuation) {
+    auto cwd = temp_cwd("goal_audit_resume");
+    TestFixture fx;
+    fx.tools.register_tool(acecode::create_update_goal_tool());
+    auto provider = std::make_shared<CompleteGoalStubProvider>();
+    fx.provider = provider;
+    LocalSessionClient client(fx.registry);
+
+    SessionOptions opts;
+    opts.cwd = cwd.string();
+    auto id = client.create_session(opts);
+    auto* entry = fx.registry.lookup(id);
+    ASSERT_NE(entry, nullptr);
+    ASSERT_TRUE(entry->sm);
+    ASSERT_TRUE(entry->loop);
+    ASSERT_TRUE(entry->sm->goal_store()->replace_thread_goal(
+        id, "restore visible audit", std::nullopt, acecode::ThreadGoalStatus::Active));
+    entry->loop->emit_transcript_system_message(
+        "[Test] seed resumable session",
+        nlohmann::json{{"test_seed", true}});
+
+    fx.registry.destroy(id);
+    ASSERT_TRUE(client.resume_session(id, opts));
+    entry = fx.registry.lookup(id);
+    ASSERT_NE(entry, nullptr);
+    ASSERT_TRUE(wait_for_goal_status(entry, id, acecode::ThreadGoalStatus::Complete));
+
+    auto messages = load_registry_session_messages(cwd, id);
+    const auto audit_idx = find_message_index(messages, [](const auto& msg) {
+        return is_goal_audit(msg, "session_resume");
+    });
+    const auto hidden_idx = find_message_index(messages, is_hidden_goal_context);
+    ASSERT_NE(audit_idx, messages.size());
+    ASSERT_NE(hidden_idx, messages.size());
+    EXPECT_LT(audit_idx, hidden_idx);
+    EXPECT_FALSE(messages[audit_idx].is_meta);
+    EXPECT_NE(messages[audit_idx].content.find("[Goal] Continuing: restore visible audit"),
+              std::string::npos);
+    EXPECT_FALSE(provider->saw_transcript_only_message());
+
+    fx.registry.destroy(id);
+    std::error_code ec;
+    std::filesystem::remove_all(cwd, ec);
 }
 
 TEST(LocalSessionClient, InitBuiltinNoProviderWritesSkeletonWithoutUserMessage) {

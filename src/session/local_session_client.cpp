@@ -46,12 +46,19 @@ bool LocalSessionClient::send_input(const std::string& session_id, const std::st
 bool LocalSessionClient::send_input(const std::string& session_id,
                                        const std::string& text,
                                        const std::string& display_text) {
+    UserInput input;
+    input.text = text;
+    input.display_text = display_text;
+    return send_input(session_id, input);
+}
+
+bool LocalSessionClient::send_input(const std::string& session_id, const UserInput& input) {
     SessionEntry* entry = registry_.lookup(session_id);
     if (!entry || !entry->loop) {
         LOG_WARN("[client] send_input on unknown session " + session_id);
         return false;
     }
-    entry->loop->submit(text, display_text);
+    entry->loop->submit(input);
     return true;
 }
 

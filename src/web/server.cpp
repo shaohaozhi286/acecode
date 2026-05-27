@@ -3,11 +3,13 @@
 #include "auth.hpp"
 #include "origin.hpp"
 #include "static_assets.hpp"
+#include "../auth/github_auth.hpp"
 #include "../config/config.hpp"
 #include "../config/saved_models_editor.hpp"
 #include "../desktop/workspace_registry.hpp"
 #include "../provider/llm_provider.hpp"
 #include "../session/ask_user_question_prompter.hpp"
+#include "../session/attachment_store.hpp"
 #include "../session/local_session_client.hpp"
 #include "../session/session_attention.hpp"
 #include "../session/session_client.hpp"
@@ -19,7 +21,12 @@
 #include "../daemon/platform.hpp"
 #include "../skills/skill_registry.hpp"
 #include "../skills/skill_metadata.hpp"
+#include "../tool/ace_browser_bridge/browser_tools.hpp"
+#include "../tool/tool_executor.hpp"
+#include "../upgrade/apply.hpp"
+#include "../upgrade/check.hpp"
 #include "../utils/logger.hpp"
+#include "../utils/base64.hpp"
 #include "../utils/cwd_hash.hpp"
 #include "handlers/files_handler.hpp"
 #include "handlers/fork_handler.hpp"
@@ -60,6 +67,16 @@
 #include <nlohmann/json.hpp>
 #include <cpr/cpr.h>
 #include "../network/proxy_resolver.hpp"
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <sys/types.h>
+#include <unistd.h>
+#endif
 
 #ifdef DELETE
 #undef DELETE
@@ -133,6 +150,101 @@ json chat_message_to_json(const ChatMessage& m) {
 
 json ui_preferences_to_json(const WebUiPreferencesConfig& prefs) {
     return json{{"show_acecode_avatar", prefs.show_acecode_avatar}};
+}
+
+json upgrade_config_to_json(const UpgradeConfig& cfg) {
+    return json{{"base_url", normalize_upgrade_base_url(cfg.base_url)}};
+}
+
+json update_check_to_json(const acecode::upgrade::UpdateCheckResult& result) {
+    json out = {
+        {"status", acecode::upgrade::update_check_status_name(result.status)},
+        {"update_available", result.update_available()},
+        {"current_version", result.current_version},
+        {"latest_version", result.latest_version},
+        {"target", result.target},
+        {"manifest_url", result.manifest_url},
+    };
+    if (!result.package_file.empty()) out["package_file"] = result.package_file;
+    if (!result.package_url.empty()) out["package_url"] = result.package_url;
+    if (result.package_size) out["package_size"] = *result.package_size;
+    if (result.http_status != 0) out["http_status"] = result.http_status;
+    if (!result.error.empty()) out["error"] = result.error;
+    return out;
+}
+
+bool start_default_update_command(std::string* error) {
+    auto exe = acecode::upgrade::current_executable_path("");
+    if (exe.empty()) {
+        if (error) *error = "cannot resolve acecode executable path";
+        return false;
+    }
+
+#ifdef _WIN32
+    std::string cmd = acecode::upgrade::quote_command_arg(exe.string()) + " update";
+    std::vector<char> mutable_cmd(cmd.begin(), cmd.end());
+    mutable_cmd.push_back('\0');
+    std::string cwd = exe.parent_path().string();
+    STARTUPINFOA si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    BOOL ok = ::CreateProcessA(
+        nullptr,
+        mutable_cmd.data(),
+        nullptr,
+        nullptr,
+        FALSE,
+        CREATE_NEW_CONSOLE,
+        nullptr,
+        cwd.empty() ? nullptr : cwd.c_str(),
+        &si,
+        &pi);
+    if (!ok) {
+        if (error) *error = "failed to launch acecode update";
+        return false;
+    }
+    ::CloseHandle(pi.hThread);
+    ::CloseHandle(pi.hProcess);
+    return true;
+#else
+    pid_t pid = ::fork();
+    if (pid < 0) {
+        if (error) *error = "failed to fork acecode update";
+        return false;
+    }
+    if (pid == 0) {
+        (void)::setsid();
+        std::string exe_s = exe.string();
+        ::execl(exe_s.c_str(), exe_s.c_str(), "update", static_cast<char*>(nullptr));
+        ::_exit(127);
+    }
+    return true;
+#endif
+}
+
+json ace_browser_bridge_settings_to_json(const AceBrowserBridgeConfig& cfg) {
+    json out;
+    out["enabled"] = cfg.enabled;
+    out["tool_mode"] = cfg.tool_mode;
+    out["default_mode"] = cfg.default_mode;
+    out["pointer_speed"] = cfg.pointer_speed;
+    out["status_cache_ttl_ms"] = cfg.status_cache_ttl_ms;
+    out["tool_timeout_ms"] = cfg.tool_timeout_ms;
+    out["os_pointer_enabled"] = cfg.os_pointer_enabled;
+    out["tab_group_enabled"] = cfg.tab_group_enabled;
+    out["operation_overlay_enabled"] = cfg.operation_overlay_enabled;
+    out["operation_overlay_watchdog_ms"] = cfg.operation_overlay_watchdog_ms;
+    out["pointer_custom"] = {
+        {"move_duration_ms_min", cfg.pointer_custom.move_duration_ms_min},
+        {"move_duration_ms_max", cfg.pointer_custom.move_duration_ms_max},
+        {"click_hold_ms_min", cfg.pointer_custom.click_hold_ms_min},
+        {"click_hold_ms_max", cfg.pointer_custom.click_hold_ms_max},
+        {"typing_delay_ms_min", cfg.pointer_custom.typing_delay_ms_min},
+        {"typing_delay_ms_max", cfg.pointer_custom.typing_delay_ms_max},
+        {"jitter_px", cfg.pointer_custom.jitter_px},
+        {"max_path_points", cfg.pointer_custom.max_path_points},
+    };
+    return out;
 }
 
 // SessionEvent → 上行 WS 消息(也用于 /messages 回放)。
@@ -597,6 +709,7 @@ struct WebServer::Impl {
                 meta.model_preset = entry->model_state.name;
                 if (entry->sm) {
                     meta.title = entry->sm->current_title();
+                    meta.input_draft = entry->sm->current_input_draft();
                 }
                 return meta;
             }
@@ -640,6 +753,93 @@ struct WebServer::Impl {
         crow::response r(session_meta_to_json(meta, ws.hash).dump());
         r.add_header("Content-Type", "application/json");
         return with_cors(req, std::move(r));
+    }
+
+    crow::response session_input_draft_response(
+        const crow::request& req,
+        const std::string& id,
+        const std::string& text) {
+        crow::response r(json{{"session_id", id}, {"id", id}, {"text", text}}.dump());
+        r.add_header("Content-Type", "application/json");
+        return with_cors(req, std::move(r));
+    }
+
+    std::optional<crow::response> parse_session_input_draft_request(
+        const crow::request& req,
+        std::string& text) {
+        try {
+            auto j = json::parse(req.body);
+            if (!j.contains("text") || !j["text"].is_string()) {
+                crow::response r(400);
+                r.body = R"({"error":"text required"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            text = j["text"].get<std::string>();
+            return std::nullopt;
+        } catch (const std::exception& e) {
+            crow::response r(400);
+            r.body = json{{"error", std::string("bad json: ") + e.what()}}.dump();
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        }
+    }
+
+    SessionEntry* active_session_entry_for_workspace(
+        const acecode::desktop::WorkspaceMeta& ws,
+        const std::string& id) const {
+        if (!deps.session_registry) return nullptr;
+        auto* entry = deps.session_registry->lookup(id);
+        if (!entry || !session_entry_matches_workspace(*entry, ws)) return nullptr;
+        return entry;
+    }
+
+    crow::response get_session_input_draft(
+        const crow::request& req,
+        const acecode::desktop::WorkspaceMeta& ws,
+        const std::string& id) {
+        if (auto* entry = active_session_entry_for_workspace(ws, id)) {
+            const std::string text = entry->sm ? entry->sm->current_input_draft() : std::string{};
+            return session_input_draft_response(req, id, text);
+        }
+
+        auto maybe_meta = find_session_meta_for_workspace(ws, id);
+        if (!maybe_meta.has_value()) {
+            crow::response r(404);
+            r.body = R"({"error":"session not found"})";
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        }
+        return session_input_draft_response(req, id, maybe_meta->input_draft);
+    }
+
+    crow::response set_session_input_draft(
+        const crow::request& req,
+        const acecode::desktop::WorkspaceMeta& ws,
+        const std::string& id) {
+        std::string text;
+        if (auto err = parse_session_input_draft_request(req, text)) return std::move(*err);
+
+        if (auto* entry = active_session_entry_for_workspace(ws, id)) {
+            if (entry->sm) {
+                entry->sm->set_input_draft(text);
+                return session_input_draft_response(req, id, entry->sm->current_input_draft());
+            }
+        }
+
+        auto maybe_meta = find_session_meta_for_workspace(ws, id);
+        if (!maybe_meta.has_value()) {
+            crow::response r(404);
+            r.body = R"({"error":"session not found"})";
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        }
+
+        SessionMeta meta = *maybe_meta;
+        meta.input_draft = text;
+        const auto project_dir = SessionStorage::get_project_dir(ws.cwd);
+        SessionStorage::write_meta(SessionStorage::meta_path(project_dir, id), meta);
+        return session_input_draft_response(req, id, text);
     }
 
     std::filesystem::path pinned_sessions_path_for_cwd(const std::string& cwd) const {
@@ -1036,6 +1236,10 @@ struct WebServer::Impl {
         ([this](const crow::request& req, const std::string&, const std::string&) {
             return cors_preflight(req);
         });
+        CROW_ROUTE(app, "/api/workspaces/<string>/sessions/<string>/draft").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req, const std::string&, const std::string&) {
+            return cors_preflight(req);
+        });
 
         CROW_ROUTE(app, "/api/workspaces").methods(crow::HTTPMethod::GET)
         ([this](const crow::request& req) {
@@ -1268,6 +1472,32 @@ struct WebServer::Impl {
                 return with_cors(req, std::move(r));
             }
             return set_session_archive_state(req, *ws, id, false);
+        });
+
+        CROW_ROUTE(app, "/api/workspaces/<string>/sessions/<string>/draft").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req, const std::string& hash, const std::string& id) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            auto ws = resolve_workspace(hash);
+            if (!ws.has_value()) {
+                crow::response r(404);
+                r.body = R"({"error":"workspace not found"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            return get_session_input_draft(req, *ws, id);
+        });
+
+        CROW_ROUTE(app, "/api/workspaces/<string>/sessions/<string>/draft").methods(crow::HTTPMethod::PUT)
+        ([this](const crow::request& req, const std::string& hash, const std::string& id) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            auto ws = resolve_workspace(hash);
+            if (!ws.has_value()) {
+                crow::response r(404);
+                r.body = R"({"error":"workspace not found"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            return set_session_input_draft(req, *ws, id);
         });
     }
 
@@ -1747,6 +1977,14 @@ struct WebServer::Impl {
         ([this](const crow::request& req, const std::string&) {
             return cors_preflight(req);
         });
+        CROW_ROUTE(app, "/api/sessions/<string>/attachments").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req, const std::string&) {
+            return cors_preflight(req);
+        });
+        CROW_ROUTE(app, "/api/sessions/<string>/attachments/<string>/blob").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req, const std::string&, const std::string&) {
+            return cors_preflight(req);
+        });
         CROW_ROUTE(app, "/api/sessions/<string>/commands").methods(crow::HTTPMethod::Options)
         ([this](const crow::request& req, const std::string&) {
             return cors_preflight(req);
@@ -1760,6 +1998,10 @@ struct WebServer::Impl {
             return cors_preflight(req);
         });
         CROW_ROUTE(app, "/api/sessions/<string>/archive").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req, const std::string&) {
+            return cors_preflight(req);
+        });
+        CROW_ROUTE(app, "/api/sessions/<string>/draft").methods(crow::HTTPMethod::Options)
         ([this](const crow::request& req, const std::string&) {
             return cors_preflight(req);
         });
@@ -1871,6 +2113,18 @@ struct WebServer::Impl {
             return set_session_archive_state(req, compatibility_workspace(), id, false);
         });
 
+        CROW_ROUTE(app, "/api/sessions/<string>/draft").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req, const std::string& id) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            return get_session_input_draft(req, compatibility_workspace(), id);
+        });
+
+        CROW_ROUTE(app, "/api/sessions/<string>/draft").methods(crow::HTTPMethod::PUT)
+        ([this](const crow::request& req, const std::string& id) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            return set_session_input_draft(req, compatibility_workspace(), id);
+        });
+
         // DELETE /api/sessions/:id: 销毁。spec 9.5
         // 注意: 用 Delete(混合大小写)避免 Windows <windows.h> 把 DELETE 宏化掉。
         CROW_ROUTE(app, "/api/sessions/<string>").methods(crow::HTTPMethod::Delete)
@@ -1959,6 +2213,114 @@ struct WebServer::Impl {
             return with_cors(req, std::move(r));
         });
 
+        // POST /api/sessions/:id/attachments: upload a session-scoped attachment
+        // as JSON {name,mime_type,data_base64}. The message endpoint only
+        // references returned attachment ids, so retries do not duplicate bytes.
+        CROW_ROUTE(app, "/api/sessions/<string>/attachments").methods(crow::HTTPMethod::POST)
+        ([this](const crow::request& req, const std::string& id) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.session_registry) {
+                crow::response r(503);
+                r.body = R"({"error":"session registry unavailable"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            auto* entry = deps.session_registry->lookup(id);
+            if (!entry) {
+                crow::response r(404);
+                r.body = R"({"error":"unknown session"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            std::string name;
+            std::string mime_type;
+            std::string data_base64;
+            try {
+                auto j = json::parse(req.body);
+                if (j.contains("name") && j["name"].is_string()) {
+                    name = j["name"].get<std::string>();
+                }
+                if (j.contains("mime_type") && j["mime_type"].is_string()) {
+                    mime_type = j["mime_type"].get<std::string>();
+                }
+                if (j.contains("data_base64") && j["data_base64"].is_string()) {
+                    data_base64 = j["data_base64"].get<std::string>();
+                }
+            } catch (const std::exception& e) {
+                crow::response r(400);
+                r.body = json{{"error", std::string("bad json: ") + e.what()}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            auto decoded = base64_decode(data_base64);
+            if (!decoded.has_value()) {
+                crow::response r(400);
+                r.body = R"({"error":"invalid base64 attachment data"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            const std::string project_dir = SessionStorage::get_project_dir(entry->cwd);
+            std::string error;
+            auto record = save_attachment(project_dir, id, name, mime_type, *decoded, &error);
+            if (!record.has_value()) {
+                crow::response r(400);
+                r.body = json{{"error", error.empty() ? "failed to save attachment" : error}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            crow::response r(201);
+            r.body = json{{"attachment", attachment_to_json(*record)}}.dump();
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        });
+
+        CROW_ROUTE(app, "/api/sessions/<string>/attachments/<string>/blob").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req, const std::string& id, const std::string& attachment_id) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.session_registry) {
+                crow::response r(503);
+                r.body = R"({"error":"session registry unavailable"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            auto* entry = deps.session_registry->lookup(id);
+            if (!entry) {
+                crow::response r(404);
+                r.body = R"({"error":"unknown session"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            const std::string project_dir = SessionStorage::get_project_dir(entry->cwd);
+            std::string error;
+            auto record = load_attachment(project_dir, id, attachment_id, &error);
+            if (!record.has_value()) {
+                crow::response r(404);
+                r.body = json{{"error", error.empty() ? "attachment not found" : error}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            auto bytes = read_attachment_bytes(*record, kMaxAttachmentBytes, &error);
+            if (!bytes.has_value()) {
+                crow::response r(404);
+                r.body = json{{"error", error.empty() ? "attachment not found" : error}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            crow::response r(200);
+            r.body = std::move(*bytes);
+            r.add_header("Content-Type", record->mime_type.empty()
+                ? "application/octet-stream"
+                : record->mime_type);
+            r.add_header("Cache-Control", "private, max-age=3600");
+            return with_cors(req, std::move(r));
+        });
+
         // POST /api/sessions/:id/messages: 向 daemon 入队用户输入。WebSocket
         // 只负责观察事件流,这样切换会话/关闭当前连接不会中断后台 AgentLoop。
         CROW_ROUTE(app, "/api/sessions/<string>/messages").methods(crow::HTTPMethod::POST)
@@ -1972,10 +2334,18 @@ struct WebServer::Impl {
             }
 
             std::string text;
+            json attachment_refs = json::array();
+            json contexts = json::array();
             try {
                 auto j = json::parse(req.body);
                 if (j.contains("text") && j["text"].is_string()) {
                     text = j["text"].get<std::string>();
+                }
+                if (j.contains("attachments") && j["attachments"].is_array()) {
+                    attachment_refs = j["attachments"];
+                }
+                if (j.contains("contexts") && j["contexts"].is_array()) {
+                    contexts = j["contexts"];
                 }
             } catch (const std::exception& e) {
                 crow::response r(400);
@@ -1983,9 +2353,9 @@ struct WebServer::Impl {
                 r.add_header("Content-Type", "application/json");
                 return with_cors(req, std::move(r));
             }
-            if (text.empty()) {
+            if (text.empty() && attachment_refs.empty() && contexts.empty()) {
                 crow::response r(400);
-                r.body = R"({"error":"text required"})";
+                r.body = R"({"error":"text or attachment required"})";
                 r.add_header("Content-Type", "application/json");
                 return with_cors(req, std::move(r));
             }
@@ -1996,7 +2366,8 @@ struct WebServer::Impl {
             // .display_text)— LLM-prompt 与 UI-display 解耦。未命中透传。
             std::string original_text = text;
             bool expanded = false;
-            if (deps.session_registry && deps.app_config) {
+            if (attachment_refs.empty() && contexts.empty() &&
+                deps.session_registry && deps.app_config) {
                 if (auto* entry = deps.session_registry->lookup(id)) {
                     if (!entry->cwd.empty()) {
                         SkillRegistry tmp_skills;
@@ -2010,9 +2381,79 @@ struct WebServer::Impl {
                 }
             }
 
-            bool ok = expanded
-                ? deps.session_client->send_input(id, text, original_text)
-                : deps.session_client->send_input(id, text);
+            UserInput input;
+            input.text = text;
+            if (expanded) input.display_text = original_text;
+
+            if (!attachment_refs.empty() || !contexts.empty()) {
+                if (!deps.session_registry) {
+                    crow::response r(503);
+                    r.body = R"({"error":"session registry unavailable"})";
+                    r.add_header("Content-Type", "application/json");
+                    return with_cors(req, std::move(r));
+                }
+                auto* entry = deps.session_registry->lookup(id);
+                if (!entry) {
+                    crow::response r(404);
+                    r.body = R"({"error":"unknown session"})";
+                    r.add_header("Content-Type", "application/json");
+                    return with_cors(req, std::move(r));
+                }
+
+                json parts = json::array();
+                if (!text.empty()) {
+                    parts.push_back(json{{"type", "text"}, {"text", text}});
+                }
+
+                json attachment_meta = json::array();
+                const std::string project_dir = SessionStorage::get_project_dir(entry->cwd);
+                for (const auto& ref : attachment_refs) {
+                    std::string attachment_id;
+                    if (ref.is_string()) {
+                        attachment_id = ref.get<std::string>();
+                    } else if (ref.is_object() && ref.contains("id") && ref["id"].is_string()) {
+                        attachment_id = ref["id"].get<std::string>();
+                    }
+                    if (attachment_id.empty()) {
+                        crow::response r(400);
+                        r.body = R"({"error":"attachment id required"})";
+                        r.add_header("Content-Type", "application/json");
+                        return with_cors(req, std::move(r));
+                    }
+
+                    std::string error;
+                    auto record = load_attachment(project_dir, id, attachment_id, &error);
+                    if (!record.has_value()) {
+                        crow::response r(404);
+                        r.body = json{{"error", error.empty() ? "attachment not found" : error}}.dump();
+                        r.add_header("Content-Type", "application/json");
+                        return with_cors(req, std::move(r));
+                    }
+
+                    json meta = attachment_to_json(*record);
+                    attachment_meta.push_back(meta);
+                    parts.push_back(json{
+                        {"type", record->kind == "image" ? "image" : "file"},
+                        {"attachment", std::move(meta)},
+                    });
+                }
+
+                for (const auto& ctx : contexts) {
+                    if (!ctx.is_object()) continue;
+                    parts.push_back(json{{"type", "browser_context"}, {"context", ctx}});
+                }
+
+                input.content_parts = std::move(parts);
+                input.metadata = json::object();
+                if (!attachment_meta.empty()) {
+                    input.metadata["attachments"] = std::move(attachment_meta);
+                }
+                if (!contexts.empty()) {
+                    input.metadata["contexts"] = contexts;
+                }
+            }
+
+            bool ok = deps.session_client->send_input(id, input);
             if (!ok) {
                 crow::response r(404);
                 r.body = R"({"error":"unknown session"})";
@@ -2346,6 +2787,18 @@ struct WebServer::Impl {
         ([this](const crow::request& req) {
             return cors_preflight(req);
         });
+        CROW_ROUTE(app, "/api/copilot/auth").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
+        CROW_ROUTE(app, "/api/copilot/auth/device").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
+        CROW_ROUTE(app, "/api/copilot/auth/device/poll").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
         CROW_ROUTE(app, "/api/sessions/<string>/model").methods(crow::HTTPMethod::Options)
         ([this](const crow::request& req, const std::string&) {
             return cors_preflight(req);
@@ -2363,7 +2816,7 @@ struct WebServer::Impl {
         });
 
         // GET /api/config/default-model: 返回当前 default_model_name
-        // (给 WebUI ModelManager 标星用)。读 cfg 的字段,空字符串也照返。
+        // (给 WebUI 模型设置页标星用)。读 cfg 的字段,空字符串也照返。
         CROW_ROUTE(app, "/api/config/default-model").methods(crow::HTTPMethod::GET)
         ([this](const crow::request& req) {
             if (auto rej = require_auth(req)) return std::move(*rej);
@@ -2371,6 +2824,131 @@ struct WebServer::Impl {
             crow::response r(200);
             r.add_header("Content-Type", "application/json");
             r.body = json{{"name", deps.app_config->default_model_name}}.dump();
+            return with_cors(req, std::move(r));
+        });
+
+        // GET /api/copilot/auth: local credential status only; never returns tokens.
+        CROW_ROUTE(app, "/api/copilot/auth").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            const bool has_token = has_saved_github_token();
+            crow::response r(200);
+            r.add_header("Content-Type", "application/json");
+            r.body = json{
+                {"provider", "copilot"},
+                {"has_token", has_token},
+                {"authenticated", has_token}
+            }.dump();
+            return with_cors(req, std::move(r));
+        });
+
+        // DELETE /api/copilot/auth: remove saved GitHub token; saved_models stay intact.
+        CROW_ROUTE(app, "/api/copilot/auth").methods(crow::HTTPMethod::Delete)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            std::string error;
+            if (!delete_github_token(&error)) {
+                crow::response r(500);
+                r.add_header("Content-Type", "application/json");
+                r.body = json{{"error", "DELETE_FAILED"}, {"message", error}}.dump();
+                return with_cors(req, std::move(r));
+            }
+            crow::response r(200);
+            r.add_header("Content-Type", "application/json");
+            r.body = json{
+                {"ok", true},
+                {"provider", "copilot"},
+                {"has_token", false},
+                {"authenticated", false}
+            }.dump();
+            return with_cors(req, std::move(r));
+        });
+
+        // POST /api/copilot/auth/device: start GitHub OAuth device flow.
+        CROW_ROUTE(app, "/api/copilot/auth/device").methods(crow::HTTPMethod::POST)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            DeviceCodeResponse dc = request_device_code();
+            if (dc.device_code.empty()) {
+                crow::response r(502);
+                r.add_header("Content-Type", "application/json");
+                r.body = json{
+                    {"error", "DEVICE_CODE_FAILED"},
+                    {"message", "failed to request GitHub device code"}
+                }.dump();
+                return with_cors(req, std::move(r));
+            }
+            crow::response r(200);
+            r.add_header("Content-Type", "application/json");
+            r.body = json{
+                {"status", "pending"},
+                {"provider", "copilot"},
+                {"device_code", dc.device_code},
+                {"user_code", dc.user_code},
+                {"verification_uri", dc.verification_uri},
+                {"interval", dc.interval},
+                {"expires_in", dc.expires_in},
+                {"expires_at_unix_ms", now_unix_ms() + static_cast<std::int64_t>(dc.expires_in) * 1000}
+            }.dump();
+            return with_cors(req, std::move(r));
+        });
+
+        // POST /api/copilot/auth/device/poll body {device_code}: one poll tick.
+        CROW_ROUTE(app, "/api/copilot/auth/device/poll").methods(crow::HTTPMethod::POST)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+
+            auto json_err = [&](int status, const char* code, const std::string& msg) {
+                crow::response r(status);
+                r.body = json{{"error", code}, {"message", msg}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            };
+
+            json body;
+            try { body = json::parse(req.body); }
+            catch (const std::exception& e) {
+                return json_err(400, "BAD_JSON", std::string("invalid JSON body: ") + e.what());
+            }
+            if (!body.is_object() ||
+                !body.contains("device_code") ||
+                !body["device_code"].is_string() ||
+                body["device_code"].get<std::string>().empty()) {
+                return json_err(400, "BAD_REQUEST", "expected {device_code: string}");
+            }
+
+            DevicePollResult poll = poll_for_access_token_once(
+                body["device_code"].get<std::string>());
+            if (poll.status == "authorized") {
+                CopilotToken ct = exchange_copilot_token(poll.access_token);
+                if (ct.token.empty()) {
+                    return json_err(401,
+                                    "COPILOT_TOKEN_EXCHANGE_FAILED",
+                                    "GitHub login succeeded, but Copilot token exchange failed");
+                }
+                save_github_token(poll.access_token);
+                crow::response r(200);
+                r.add_header("Content-Type", "application/json");
+                r.body = json{
+                    {"status", "authenticated"},
+                    {"provider", "copilot"},
+                    {"authenticated", true},
+                    {"has_token", true}
+                }.dump();
+                return with_cors(req, std::move(r));
+            }
+
+            crow::response r(poll.status == "failed" ? 400 : 200);
+            r.add_header("Content-Type", "application/json");
+            r.body = json{
+                {"status", poll.status.empty() ? "failed" : poll.status},
+                {"provider", "copilot"},
+                {"authenticated", false},
+                {"has_token", has_saved_github_token()},
+                {"error", poll.error},
+                {"message", poll.message},
+                {"interval_delta_seconds", poll.interval_delta_seconds}
+            }.dump();
             return with_cors(req, std::move(r));
         });
 
@@ -2531,6 +3109,12 @@ struct WebServer::Impl {
                 if (existing) {
                     if (!body.contains("api_key")) draft->api_key = existing->api_key;
                     if (!body.contains("base_url")) draft->base_url = existing->base_url;
+                    if (!body.contains("context_window")) {
+                        draft->context_window = existing->context_window;
+                    }
+                    if (!body.contains("stream_timeout_ms")) {
+                        draft->stream_timeout_ms = existing->stream_timeout_ms;
+                    }
                 }
             }
 
@@ -2662,6 +3246,22 @@ struct WebServer::Impl {
         ([this](const crow::request& req) {
             return cors_preflight(req);
         });
+        CROW_ROUTE(app, "/api/config/upgrade").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
+        CROW_ROUTE(app, "/api/update/status").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
+        CROW_ROUTE(app, "/api/update/start").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
+        CROW_ROUTE(app, "/api/config/ace-browser-bridge").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
 
         // GET /api/config/ui-preferences: non-sensitive Web/Desktop UI prefs.
         CROW_ROUTE(app, "/api/config/ui-preferences").methods(crow::HTTPMethod::GET)
@@ -2671,6 +3271,185 @@ struct WebServer::Impl {
             crow::response r(200);
             r.add_header("Content-Type", "application/json");
             r.body = ui_preferences_to_json(deps.app_config->web_ui).dump();
+            return with_cors(req, std::move(r));
+        });
+
+        // GET /api/config/upgrade: self-upgrade service settings.
+        CROW_ROUTE(app, "/api/config/upgrade").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.app_config) return crow::response(503);
+            crow::response r(200);
+            r.add_header("Content-Type", "application/json");
+            r.body = upgrade_config_to_json(deps.app_config->upgrade).dump();
+            return with_cors(req, std::move(r));
+        });
+
+        // GET /api/update/status: manifest-only update availability check.
+        CROW_ROUTE(app, "/api/update/status").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.app_config) return crow::response(503);
+
+            auto result = acecode::upgrade::check_for_update(*deps.app_config,
+                                                             ACECODE_VERSION);
+            crow::response r(200);
+            r.add_header("Content-Type", "application/json");
+            r.body = update_check_to_json(result).dump();
+            return with_cors(req, std::move(r));
+        });
+
+        // POST /api/update/start: explicit user-triggered acecode update.
+        CROW_ROUTE(app, "/api/update/start").methods(crow::HTTPMethod::POST)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.app_config) return crow::response(503);
+
+            auto json_err = [&](int status, const char* code, const std::string& msg) {
+                crow::response r(status);
+                r.body = json{{"error", code}, {"message", msg}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            };
+
+            auto result = acecode::upgrade::check_for_update(*deps.app_config,
+                                                             ACECODE_VERSION);
+            if (!result.update_available()) {
+                crow::response r(409);
+                r.add_header("Content-Type", "application/json");
+                r.body = json{{"error", "NO_UPDATE"},
+                              {"message", "no compatible update is available"},
+                              {"status", update_check_to_json(result)}}.dump();
+                return with_cors(req, std::move(r));
+            }
+
+            std::string start_error;
+            bool started = deps.start_update_command
+                ? deps.start_update_command(&start_error)
+                : start_default_update_command(&start_error);
+            if (!started) {
+                return json_err(500, "START_FAILED", start_error);
+            }
+
+            crow::response r(202);
+            r.add_header("Content-Type", "application/json");
+            r.body = json{{"started", true},
+                          {"latest_version", result.latest_version},
+                          {"message", "acecode update started"}}.dump();
+            return with_cors(req, std::move(r));
+        });
+
+        // PUT /api/config/upgrade body {base_url:string}.
+        CROW_ROUTE(app, "/api/config/upgrade").methods(crow::HTTPMethod::PUT)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.app_config) return crow::response(503);
+
+            auto json_err = [&](int status, const char* code, const std::string& msg) {
+                crow::response r(status);
+                r.body = json{{"error", code}, {"message", msg}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            };
+
+            json body;
+            try { body = json::parse(req.body); }
+            catch (const std::exception& e) {
+                return json_err(400, "BAD_JSON", std::string("invalid JSON body: ") + e.what());
+            }
+            if (!body.is_object() ||
+                !body.contains("base_url") ||
+                !body["base_url"].is_string()) {
+                return json_err(400, "BAD_REQUEST", "expected {base_url: string}");
+            }
+
+            const std::string normalized =
+                normalize_upgrade_base_url(body["base_url"].get<std::string>());
+            if (!is_valid_upgrade_base_url(normalized)) {
+                return json_err(400, "BAD_REQUEST",
+                                "upgrade.base_url must be a non-empty http or https URL");
+            }
+
+            const auto before = deps.app_config->upgrade;
+            deps.app_config->upgrade.base_url = normalized;
+            try {
+                if (!deps.config_path.empty()) {
+                    save_config(*deps.app_config, deps.config_path);
+                } else {
+                    save_config(*deps.app_config);
+                }
+            } catch (const std::exception& e) {
+                deps.app_config->upgrade = before;
+                return json_err(500, "PERSIST_FAILED", e.what());
+            }
+
+            crow::response r(200);
+            r.add_header("Content-Type", "application/json");
+            r.body = upgrade_config_to_json(deps.app_config->upgrade).dump();
+            return with_cors(req, std::move(r));
+        });
+
+        // GET /api/config/ace-browser-bridge: browser bridge tool settings.
+        CROW_ROUTE(app, "/api/config/ace-browser-bridge").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.app_config) return crow::response(503);
+            crow::response r(200);
+            r.add_header("Content-Type", "application/json");
+            r.body = ace_browser_bridge_settings_to_json(
+                deps.app_config->ace_browser_bridge).dump();
+            return with_cors(req, std::move(r));
+        });
+
+        // PUT /api/config/ace-browser-bridge body {enabled:boolean}.
+        CROW_ROUTE(app, "/api/config/ace-browser-bridge").methods(crow::HTTPMethod::PUT)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.app_config) return crow::response(503);
+
+            auto json_err = [&](int status, const char* code, const std::string& msg) {
+                crow::response r(status);
+                r.body = json{{"error", code}, {"message", msg}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            };
+
+            json body;
+            try { body = json::parse(req.body); }
+            catch (const std::exception& e) {
+                return json_err(400, "BAD_JSON", std::string("invalid JSON body: ") + e.what());
+            }
+            if (!body.is_object() ||
+                !body.contains("enabled") ||
+                !body["enabled"].is_boolean()) {
+                return json_err(400, "BAD_REQUEST", "expected {enabled: boolean}");
+            }
+
+            const auto before = deps.app_config->ace_browser_bridge;
+            deps.app_config->ace_browser_bridge.enabled = body["enabled"].get<bool>();
+            try {
+                if (!deps.config_path.empty()) {
+                    save_config(*deps.app_config, deps.config_path);
+                } else {
+                    save_config(*deps.app_config);
+                }
+            } catch (const std::exception& e) {
+                deps.app_config->ace_browser_bridge = before;
+                return json_err(500, "PERSIST_FAILED", e.what());
+            }
+
+            if (deps.tools) {
+                ace_browser_bridge::unregister_ace_browser_bridge_tools(*deps.tools);
+                if (deps.app_config->ace_browser_bridge.enabled) {
+                    ace_browser_bridge::register_ace_browser_bridge_tools(
+                        *deps.tools, deps.app_config->ace_browser_bridge);
+                }
+            }
+
+            crow::response r(200);
+            r.add_header("Content-Type", "application/json");
+            r.body = ace_browser_bridge_settings_to_json(
+                deps.app_config->ace_browser_bridge).dump();
             return with_cors(req, std::move(r));
         });
 
@@ -2697,6 +3476,29 @@ struct WebServer::Impl {
             auto parsed = parse_model_probe_request(body, err_code, err);
             if (!parsed) {
                 return json_err(400, err_code.empty() ? "BAD_REQUEST" : err_code.c_str(), err);
+            }
+
+            if (parsed->provider == "copilot") {
+                const std::string github_token = load_github_token();
+                if (github_token.empty()) {
+                    return json_err(401,
+                                    "COPILOT_AUTH_REQUIRED",
+                                    "GitHub Copilot authentication is required");
+                }
+
+                CopilotModelsResult result = fetch_copilot_model_ids(github_token);
+                if (!result.error.empty()) {
+                    const int status = result.status_code == 401 ? 401 : 502;
+                    return json_err(status,
+                                    result.error.c_str(),
+                                    result.message.empty()
+                                        ? "Copilot model discovery failed"
+                                        : result.message);
+                }
+
+                crow::response r(json{{"models", result.models}}.dump());
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
             }
 
             const std::string url = trim_trailing_slash(parsed->base_url) + "/models";

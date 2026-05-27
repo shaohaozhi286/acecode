@@ -11,9 +11,12 @@
 namespace acecode {
 
 struct OpenAiConfig {
+    static constexpr int kDefaultStreamTimeoutMs = 180000;
+
     std::string base_url = "http://localhost:1234/v1";
     std::string api_key;
     std::string model = "local-model";
+    int stream_timeout_ms = kDefaultStreamTimeoutMs;
     // Optional provider id from the bundled models.dev registry (e.g. "anthropic",
     // "openrouter"). Lets resolve_model_context_window() and other catalog-aware
     // call sites pick the correct provider entry even when base_url is a proxy.
@@ -22,6 +25,10 @@ struct OpenAiConfig {
 
 struct CopilotConfig {
     std::string model = "gpt-4o";
+};
+
+struct CodexConfig {
+    std::string model = "gpt-5.5";
 };
 
 enum class McpTransport {
@@ -123,7 +130,7 @@ struct InputHistoryConfig {
 // `AskUserQuestion` is NEVER a terminator (its tool_result feeds back to
 // the model and the loop continues, exactly like any other tool).
 struct AgentLoopConfig {
-    int max_iterations = 50; // hard cap on total LLM turns per run()
+    int max_iterations = 0; // 0 = unlimited; positive values cap total LLM turns per run()
 };
 
 // TUI 渲染策略。绕开 Win10 < 1809 的 conhost / Cmder/ConEmu 在密集 cursor-up
@@ -159,6 +166,37 @@ struct WebSearchConfig {
     std::string api_key;        // 给将来 API backend 用,本期不读
     int max_results = 5;        // 工具入参 limit 上限(min(limit, max_results, 10))
     int timeout_ms = 8000;      // 单次 backend HTTP 请求超时
+};
+
+struct AceBrowserPointerCustomConfig {
+    int move_duration_ms_min = 180;
+    int move_duration_ms_max = 650;
+    int click_hold_ms_min = 45;
+    int click_hold_ms_max = 120;
+    int typing_delay_ms_min = 20;
+    int typing_delay_ms_max = 90;
+    double jitter_px = 2.0;
+    int max_path_points = 80;
+};
+
+struct AceBrowserBridgeConfig {
+    bool enabled = false;
+    // Deprecated compatibility override. New configs do not write this field;
+    // the client resolves ace-browser-host next to the acecode executable.
+    std::string host_path;
+    // "progressive" | "compact" | "full"
+    std::string tool_mode = "progressive";
+    // "auto" | "dom" | "cdp" | "os"
+    std::string default_mode = "auto";
+    // "fast" | "normal" | "slow" | "custom"
+    std::string pointer_speed = "normal";
+    AceBrowserPointerCustomConfig pointer_custom;
+    int status_cache_ttl_ms = 2000;
+    int tool_timeout_ms = 30000;
+    bool os_pointer_enabled = false;
+    bool tab_group_enabled = true;
+    bool operation_overlay_enabled = true;
+    int operation_overlay_watchdog_ms = 10000;
 };
 
 struct UpgradeConfig {
@@ -202,9 +240,10 @@ struct NetworkConfig {
 };
 
 struct AppConfig {
-    std::string provider = "copilot"; // "copilot" or "openai"
+    std::string provider = "copilot"; // active runtime provider: "copilot" or "openai"
     OpenAiConfig openai;
     CopilotConfig copilot;
+    CodexConfig codex;
     int context_window = 128000; // model context window size in tokens
     int max_sessions = 50;       // max saved sessions per project
     std::map<std::string, McpServerConfig> mcp_servers; // MCP stdio servers (optional)
@@ -219,6 +258,7 @@ struct AppConfig {
     AgentLoopConfig agent_loop;                  // agent-loop termination tunables
     NetworkConfig network;                       // proxy / TLS / abort-debug knobs
     WebSearchConfig web_search;                  // 联网搜索工具配置(参见 add-web-search-tool)
+    AceBrowserBridgeConfig ace_browser_bridge;   // browser bridge tools integration
     UpgradeConfig upgrade;                       // explicit self-upgrade command config
     TuiConfig tui;                               // 终端渲染策略(legacy fallback 等)
     DesktopConfig desktop;                       // desktop shell 配置(系统通知等)

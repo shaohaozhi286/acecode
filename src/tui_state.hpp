@@ -1,6 +1,7 @@
 #pragma once
 
 #include "permissions.hpp"
+#include "provider/llm_provider.hpp"
 #include "tui/paste_handler.hpp"
 #include "tui/model_picker.hpp"
 #include "utils/drag_scroll.hpp"
@@ -18,6 +19,7 @@
 #include <atomic>
 #include <thread>
 #include <optional>
+#include <nlohmann/json.hpp>
 
 namespace acecode {
 
@@ -90,7 +92,9 @@ struct TuiState {
     bool is_waiting = false;
     std::string current_thinking_phrase = "Thinking";
     std::string status_line; // for auth/provider status
+    std::string update_notice; // startup update availability prompt
     std::string token_status; // for token usage display
+    int token_percent = 0; // current context usage percentage
     std::string goal_status; // compact goal status chip
 
     // Input history for up/down navigation
@@ -100,6 +104,8 @@ struct TuiState {
 
     // Pending message queue
     std::vector<std::string> pending_queue;
+    std::deque<UserInput> pending_structured_queue;
+    std::vector<nlohmann::json> pending_attachments;
 
     // Tool confirmation state.
     //   confirm_focus —— overlay 当前焦点的选项下标:
