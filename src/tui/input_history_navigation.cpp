@@ -10,6 +10,10 @@ bool try_cancel_latest_pending_for_history_text(TuiState& state,
         return false;
     }
     state.pending_queue.pop_back();
+    if (!state.pending_structured_queue.empty() &&
+        state.pending_structured_queue.back().display_text == text) {
+        state.pending_structured_queue.pop_back();
+    }
     return true;
 }
 

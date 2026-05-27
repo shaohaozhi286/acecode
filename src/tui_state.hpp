@@ -1,6 +1,7 @@
 #pragma once
 
 #include "permissions.hpp"
+#include "provider/llm_provider.hpp"
 #include "tui/paste_handler.hpp"
 #include "tui/model_picker.hpp"
 #include "utils/drag_scroll.hpp"
@@ -18,6 +19,7 @@
 #include <atomic>
 #include <thread>
 #include <optional>
+#include <nlohmann/json.hpp>
 
 namespace acecode {
 
@@ -102,6 +104,8 @@ struct TuiState {
 
     // Pending message queue
     std::vector<std::string> pending_queue;
+    std::deque<UserInput> pending_structured_queue;
+    std::vector<nlohmann::json> pending_attachments;
 
     // Tool confirmation state.
     //   confirm_focus —— overlay 当前焦点的选项下标:

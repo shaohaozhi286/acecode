@@ -75,6 +75,42 @@ function isEditableElement(el) {
   return tag === 'input' || tag === 'textarea' || tag === 'select' || !!el.isContentEditable;
 }
 
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error || new Error('read failed'));
+    reader.onload = () => {
+      const text = String(reader.result || '');
+      const comma = text.indexOf(',');
+      resolve(comma >= 0 ? text.slice(comma + 1) : text);
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function normalizeComposerPayload(text, attachments = [], contexts = []) {
+  return {
+    text: String(text || ''),
+    attachments: attachments
+      .filter((item) => item && !item.uploading && item.id)
+      .map((item) => ({ id: item.id })),
+    contexts: contexts.map((ctx) => ({
+      type: ctx.type || 'browser',
+      label: ctx.label || 'Browser',
+      note: ctx.note || '',
+    })),
+  };
+}
+
+function payloadHasExtras(payload) {
+  return (Array.isArray(payload?.attachments) && payload.attachments.length > 0) ||
+    (Array.isArray(payload?.contexts) && payload.contexts.length > 0);
+}
+
+function payloadText(payload) {
+  return typeof payload === 'string' ? payload : String(payload?.text || '');
+}
+
 function collectRowMetrics(container) {
   if (!container) return [];
   const containerRect = container.getBoundingClientRect();
@@ -331,6 +367,8 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   const layoutRef = useRef(null);
   const sidePanelResizeActiveRef = useRef(false);
   const [composerValue, setComposerValue] = useState('');
+  const [composerAttachments, setComposerAttachments] = useState([]);
+  const [composerContexts, setComposerContexts] = useState([]);
   const [composerSubmitting, setComposerSubmitting] = useState(false);
   const [draftReadyKey, setDraftReadyKey] = useState('');
   const draftEditVersionRef = useRef(0);
@@ -338,6 +376,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   const draftLastSavedRef = useRef({ key: '', text: '' });
   const composerValueRef = useRef('');
   const composerDirtyRef = useRef(false);
+  const preserveComposerExtrasOnSessionChangeRef = useRef(false);
   const [queueState, setQueueState] = useState(() => createChatInputQueueState());
   const queueStateRef = useRef(queueState);
   const drainRef = useRef(false);
@@ -398,6 +437,153 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     composerDirtyRef.current = true;
     setComposerValue(next);
   }, []);
+
+  const clearComposerExtras = useCallback(() => {
+    setComposerAttachments((items) => {
+      for (const item of items) {
+        if (item?.preview_url && item.preview_url.startsWith('blob:')) {
+          URL.revokeObjectURL(item.preview_url);
+        }
+      }
+      return [];
+    });
+    setComposerContexts([]);
+  }, []);
+
+  const createHomeComposerSession = useCallback(async (text, {
+    createOptions = null,
+    preserveExtras = false,
+    title = '',
+  } = {}) => {
+    if (homeSubmitting) return null;
+    const target = selectedHomeWorkspace || fallbackWorkspaceOption(ref, health);
+    const targetHash = target?.hash || '';
+    const options = createOptions || sessionCreateOptionsForText(text);
+    const create = isRealWorkspaceHash(targetHash)
+      ? api.createWorkspaceSession(targetHash, options)
+      : api.createSession(options);
+    setHomeSubmitting(true);
+    try {
+      const r = await create;
+      const id = r && (r.session_id || r.id);
+      if (!id) throw new Error('missing session id');
+      const next = newSessionRefFrom(ref, id);
+      if (r.workspace_hash || isRealWorkspaceHash(targetHash)) {
+        next.workspaceHash = r.workspace_hash || targetHash;
+      }
+      next.workspaceName = target?.name || ref?.workspaceName;
+      next.cwd = r.cwd || target?.cwd || ref?.cwd;
+      next.title = title || text;
+      if (preserveExtras) preserveComposerExtrasOnSessionChangeRef.current = true;
+      onSessionPromoted?.(next);
+      return { id, response: r, target };
+    } finally {
+      setHomeSubmitting(false);
+    }
+  }, [api, health, homeSubmitting, onSessionPromoted, ref, selectedHomeWorkspace]);
+
+  const uploadMediaFilesToSession = useCallback((targetSid, files) => {
+    for (const [index, file] of Array.from(files || []).entries()) {
+      const localId = `local-${Date.now()}-${index}-${Math.random().toString(16).slice(2)}`;
+      const kind = String(file.type || '').startsWith('image/') ? 'image' : 'file';
+      const previewUrl = kind === 'image' ? URL.createObjectURL(file) : '';
+      const localItem = {
+        local_id: localId,
+        name: file.name || 'attachment',
+        kind,
+        mime_type: file.type || '',
+        size_bytes: file.size || 0,
+        preview_url: previewUrl,
+        uploading: true,
+      };
+      setComposerAttachments((items) => [...items, localItem]);
+      fileToBase64(file)
+        .then((dataBase64) => api.uploadSessionAttachment(targetSid, {
+          name: file.name || 'attachment',
+          mime_type: file.type || '',
+          data_base64: dataBase64,
+        }))
+        .then((result) => {
+          const attachment = result?.attachment || {};
+          setComposerAttachments((items) => items.map((item) => (
+            item.local_id === localId
+              ? { ...attachment, local_id: localId, preview_url: previewUrl, uploading: false }
+              : item
+          )));
+        })
+        .catch((e) => {
+          if (previewUrl) URL.revokeObjectURL(previewUrl);
+          setComposerAttachments((items) => items.filter((item) => item.local_id !== localId));
+          toast({ kind: 'err', text: '附件上传失败:' + (e.message || '') });
+        });
+    }
+  }, [api]);
+
+  const handleMediaFiles = useCallback((files) => {
+    const fileList = Array.from(files || []);
+    if (fileList.length === 0) return;
+    if (sid) {
+      uploadMediaFilesToSession(sid, fileList);
+      return;
+    }
+    createHomeComposerSession('', {
+      createOptions: { auto_start: false },
+      preserveExtras: true,
+      title: '附件消息',
+    })
+      .then((created) => {
+        if (created?.id) uploadMediaFilesToSession(created.id, fileList);
+      })
+      .catch((e) => toast({ kind: 'err', text: '新建会话失败:' + (e.message || '') }));
+  }, [createHomeComposerSession, sid, uploadMediaFilesToSession]);
+
+  const removeComposerAttachment = useCallback((key) => {
+    setComposerAttachments((items) => {
+      const removed = items.find((item) => (item.local_id || item.id || item.name) === key);
+      if (removed?.preview_url && removed.preview_url.startsWith('blob:')) {
+        URL.revokeObjectURL(removed.preview_url);
+      }
+      return items.filter((item) => (item.local_id || item.id || item.name) !== key);
+    });
+  }, []);
+
+  const addBrowserContext = useCallback(() => {
+    const item = {
+      local_id: `browser-${Date.now()}`,
+      type: 'browser',
+      label: 'Browser',
+      note: 'Context',
+    };
+    setComposerContexts((items) => items.some((ctx) => ctx.type === 'browser') ? items : [...items, item]);
+  }, []);
+
+  const removeComposerContext = useCallback((key) => {
+    setComposerContexts((items) => items.filter((item) => (item.local_id || item.id || item.type) !== key));
+  }, []);
+
+  const composerInputProps = useMemo(() => ({
+    attachments: composerAttachments,
+    contexts: composerContexts,
+    onMediaFiles: handleMediaFiles,
+    onRemoveAttachment: removeComposerAttachment,
+    onAddBrowserContext: addBrowserContext,
+    onRemoveContext: removeComposerContext,
+  }), [
+    addBrowserContext,
+    composerAttachments,
+    composerContexts,
+    handleMediaFiles,
+    removeComposerAttachment,
+    removeComposerContext,
+  ]);
+
+  useEffect(() => {
+    if (preserveComposerExtrasOnSessionChangeRef.current) {
+      preserveComposerExtrasOnSessionChangeRef.current = false;
+      return;
+    }
+    clearComposerExtras();
+  }, [clearComposerExtras, draftSessionKey]);
 
   const persistDraftValue = useCallback((targetSid, targetWorkspaceHash, targetKey, text) => {
     if (!targetSid || !targetKey) return Promise.resolve(null);
@@ -768,11 +954,12 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     setHistory((h) => [...h, text]);
   }, [api]);
 
-  const enqueueInput = useCallback((text) => {
+  const enqueueInput = useCallback((payload) => {
     if (!sid) return;
-    updateQueueState((prev) => enqueueQueuedInput(prev, { sessionId: sid, text }));
-    recordInputHistory(text);
-    if (!ref?.title) setTranscriptTitle(text);
+    const text = payloadText(payload);
+    updateQueueState((prev) => enqueueQueuedInput(prev, { sessionId: sid, payload }));
+    if (text.trim()) recordInputHistory(text);
+    if (!ref?.title) setTranscriptTitle(text || '附件消息');
   }, [recordInputHistory, ref?.title, setTranscriptTitle, sid, updateQueueState]);
 
   const cancelQueued = useCallback((queuedId) => {
@@ -783,62 +970,67 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     updateQueueState((prev) => retryQueuedInput(prev, queuedId));
   }, [updateQueueState]);
 
-  const sendInputOrBuiltin = useCallback((targetSid, text) => {
+  const sendInputOrBuiltin = useCallback((targetSid, payload) => {
+    const text = payloadText(payload);
+    const hasExtras = payloadHasExtras(payload);
     const route = inputRouteForText(text);
-    if (route.kind === 'builtin') {
+    if (!hasExtras && route.kind === 'builtin') {
       return api.executeCommand(targetSid, route.command);
     }
-    return api.sendInput(targetSid, text);
+    return api.sendInput(targetSid, payload);
   }, [api]);
 
   const submit = useCallback((text) => {
-    const route = inputRouteForText(text);
-    const isBuiltin = route.kind === 'builtin';
+    if (composerAttachments.some((item) => item.uploading)) {
+      toast({ kind: 'err', text: '附件仍在上传，请稍后发送' });
+      return;
+    }
+    const payload = normalizeComposerPayload(text, composerAttachments, composerContexts);
+    const hasExtras = payloadHasExtras(payload);
+    if (!payload.text.trim() && !hasExtras) return;
+    const route = inputRouteForText(payload.text);
+    const isBuiltin = !hasExtras && route.kind === 'builtin';
     if (!sid) {
       // 自动新建会话。普通消息由 daemon auto_start 接管;builtin 先创建
       // 空会话,再走专门 command endpoint。
-      const trimmed = String(text || '').trim();
-      if (!trimmed || homeSubmitting) return;
-      const target = selectedHomeWorkspace || fallbackWorkspaceOption(ref, health);
-      const targetHash = target?.hash || '';
-      const createOptions = sessionCreateOptionsForText(text);
-      const create = isRealWorkspaceHash(targetHash)
-        ? api.createWorkspaceSession(targetHash, createOptions)
-        : api.createSession(createOptions);
-      setHomeSubmitting(true);
-      create.then(async (r) => {
-        const id = r && (r.session_id || r.id);
-        if (id) {
+      const trimmed = String(payload.text || '').trim();
+      if ((!trimmed && !hasExtras) || homeSubmitting) return;
+      const createOptions = hasExtras
+        ? { auto_start: false }
+        : sessionCreateOptionsForText(payload.text);
+      createHomeComposerSession(payload.text, { createOptions })
+        .then(async (created) => {
+          const id = created?.id;
+          if (!id) return;
           if (isBuiltin) {
             await api.executeCommand(id, route.command);
+          } else if (hasExtras) {
+            await sendInputOrBuiltin(id, payload);
           }
-          const next = newSessionRefFrom(ref, id);
-          if (r.workspace_hash || isRealWorkspaceHash(targetHash)) {
-            next.workspaceHash = r.workspace_hash || targetHash;
+          if (payload.text.trim()) recordInputHistory(payload.text);
+          if (hasExtras) {
+            clearComposerExtras();
+            applyEvent({ type: 'busy_changed', payload: { busy: true } }, { emitEffects: false });
           }
-          next.workspaceName = target?.name || ref?.workspaceName;
-          next.cwd = r.cwd || target?.cwd || ref?.cwd;
-          next.title = text;
-          onSessionPromoted?.(next);
-          recordInputHistory(text);
-        }
-      }).catch((e) => toast({ kind: 'err', text: '新建会话失败:' + (e.message || '') }))
-        .finally(() => setHomeSubmitting(false));
+        })
+        .catch((e) => toast({ kind: 'err', text: '新建会话失败:' + (e.message || '') }));
       return;
     }
     if (composerSubmitting) return;
     if (busy && !isBuiltin) {
-      enqueueInput(text);
+      enqueueInput(payload);
       clearCurrentSessionDraft();
+      clearComposerExtras();
       return;
     }
     const targetSid = sid;
     setComposerSubmitting(true);
-    sendInputOrBuiltin(targetSid, text)
+    sendInputOrBuiltin(targetSid, payload)
       .then(() => {
-        recordInputHistory(text);
-        if (!ref?.title) setTranscriptTitle(text);
+        if (payload.text.trim()) recordInputHistory(payload.text);
+        if (!ref?.title) setTranscriptTitle(payload.text || composerAttachments[0]?.name || '附件消息');
         clearCurrentSessionDraft();
+        clearComposerExtras();
         if (!isBuiltin) {
           applyEvent({ type: 'busy_changed', payload: { busy: true } }, { emitEffects: false });
         }
@@ -848,7 +1040,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         applyEvent({ type: 'busy_changed', payload: { busy: false } }, { emitEffects: false });
       })
       .finally(() => setComposerSubmitting(false));
-  }, [sid, busy, api, ref, health, homeSubmitting, selectedHomeWorkspace, onSessionPromoted, recordInputHistory, enqueueInput, applyEvent, setTranscriptTitle, sendInputOrBuiltin, composerSubmitting, clearCurrentSessionDraft]);
+  }, [sid, busy, api, homeSubmitting, recordInputHistory, enqueueInput, applyEvent, setTranscriptTitle, sendInputOrBuiltin, composerSubmitting, clearCurrentSessionDraft, composerAttachments, composerContexts, clearComposerExtras, createHomeComposerSession]);
 
   const drainQueuedInput = useCallback(() => {
     const targetSid = sidRef.current;
@@ -858,10 +1050,12 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
 
     drainRef.current = true;
     updateQueueState((prev) => markQueuedInputSending(prev, queuedItem.queued.id));
-    sendInputOrBuiltin(targetSid, queuedItem.content)
+    const queuedPayload = queuedItem.queued?.payload || queuedItem.content;
+    sendInputOrBuiltin(targetSid, queuedPayload)
       .then(() => {
         if (sidRef.current === targetSid) {
-          if (inputRouteForText(queuedItem.content).kind !== 'builtin') {
+          if (inputRouteForText(payloadText(queuedPayload)).kind !== 'builtin' ||
+              payloadHasExtras(queuedPayload)) {
             applyEvent({ type: 'busy_changed', payload: { busy: true } }, { emitEffects: false });
           }
         }
@@ -1187,6 +1381,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
               onSubmit={submit}
               disabled={!!questionForView || homeSubmitting}
               placeholder="向 ACECode 描述任务，或输入 / 命令..."
+              {...composerInputProps}
             />
             <div className="relative mr-auto ml-0">
               <button
@@ -1336,6 +1531,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
             <Message
               role={child.role}
               content={child.content}
+              contentParts={child.contentParts}
               ts={child.ts}
               streaming={child.streaming}
               messageId={child.messageId}
@@ -1476,6 +1672,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
                   ) : (
                     <Message
                       role={it.role} content={it.content} ts={it.ts}
+                      contentParts={it.contentParts}
                       streaming={it.streaming}
                       messageId={it.messageId}
                       metadata={it.metadata}
@@ -1524,6 +1721,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         onChange={handleComposerChange}
         onSubmit={submit}
         onAbort={stopCurrentWork}
+        {...composerInputProps}
         disabled={!!questionForView || composerSubmitting}
         placeholder={questionForView ? '请先回答上方问题…' : undefined}
       />

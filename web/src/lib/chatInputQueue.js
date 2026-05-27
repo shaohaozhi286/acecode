@@ -14,6 +14,21 @@ function normalizeText(text) {
   return String(text ?? '');
 }
 
+function normalizePayload({ text, payload } = {}) {
+  if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+    return {
+      text: normalizeText(payload.text),
+      attachments: Array.isArray(payload.attachments) ? payload.attachments : [],
+      contexts: Array.isArray(payload.contexts) ? payload.contexts : [],
+    };
+  }
+  return {
+    text: normalizeText(text),
+    attachments: [],
+    contexts: [],
+  };
+}
+
 function cloneItems(state) {
   return Array.isArray(state?.items) ? state.items : [];
 }
@@ -35,10 +50,12 @@ export function createChatInputQueueState(overrides = {}) {
   };
 }
 
-export function enqueueQueuedInput(state, { sessionId, text, now = Date.now() } = {}) {
+export function enqueueQueuedInput(state, { sessionId, text, payload, now = Date.now() } = {}) {
   const sid = normalizeSessionId(sessionId);
-  const content = normalizeText(text);
-  if (!sid || content.trim().length === 0) return state || createChatInputQueueState();
+  const queuedPayload = normalizePayload({ text, payload });
+  const content = queuedPayload.text;
+  const hasExtras = queuedPayload.attachments.length > 0 || queuedPayload.contexts.length > 0;
+  if (!sid || (content.trim().length === 0 && !hasExtras)) return state || createChatInputQueueState();
 
   const current = createChatInputQueueState(state);
   const sequence = nextSequence(current);
@@ -57,6 +74,7 @@ export function enqueueQueuedInput(state, { sessionId, text, now = Date.now() } 
       createdAt: now,
       updatedAt: now,
       error: '',
+      payload: queuedPayload,
     },
   };
 

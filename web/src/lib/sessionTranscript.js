@@ -190,6 +190,7 @@ function historyItemFromMessage(next, m) {
     messageId: m.id || '',
     role: m.role || 'system',
     content: m.content || '',
+    contentParts: Array.isArray(m.content_parts) ? m.content_parts : [],
     metadata: m.metadata,
     ts: m.ts || m.timestamp_ms || Date.now(),
   };
@@ -331,6 +332,7 @@ export function reduceTranscriptEvent(state, msg) {
           messageId: p.id || '',
           role,
           content: incomingContent,
+          contentParts: Array.isArray(p.content_parts) ? p.content_parts : [],
           metadata: p.metadata,
           ts: eventTs(msg),
         },

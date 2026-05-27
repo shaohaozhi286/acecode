@@ -9,6 +9,7 @@
 #include "../desktop/workspace_registry.hpp"
 #include "../provider/llm_provider.hpp"
 #include "../session/ask_user_question_prompter.hpp"
+#include "../session/attachment_store.hpp"
 #include "../session/local_session_client.hpp"
 #include "../session/session_attention.hpp"
 #include "../session/session_client.hpp"
@@ -25,6 +26,7 @@
 #include "../upgrade/apply.hpp"
 #include "../upgrade/check.hpp"
 #include "../utils/logger.hpp"
+#include "../utils/base64.hpp"
 #include "../utils/cwd_hash.hpp"
 #include "handlers/files_handler.hpp"
 #include "handlers/fork_handler.hpp"
@@ -1975,6 +1977,14 @@ struct WebServer::Impl {
         ([this](const crow::request& req, const std::string&) {
             return cors_preflight(req);
         });
+        CROW_ROUTE(app, "/api/sessions/<string>/attachments").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req, const std::string&) {
+            return cors_preflight(req);
+        });
+        CROW_ROUTE(app, "/api/sessions/<string>/attachments/<string>/blob").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req, const std::string&, const std::string&) {
+            return cors_preflight(req);
+        });
         CROW_ROUTE(app, "/api/sessions/<string>/commands").methods(crow::HTTPMethod::Options)
         ([this](const crow::request& req, const std::string&) {
             return cors_preflight(req);
@@ -2203,6 +2213,114 @@ struct WebServer::Impl {
             return with_cors(req, std::move(r));
         });
 
+        // POST /api/sessions/:id/attachments: upload a session-scoped attachment
+        // as JSON {name,mime_type,data_base64}. The message endpoint only
+        // references returned attachment ids, so retries do not duplicate bytes.
+        CROW_ROUTE(app, "/api/sessions/<string>/attachments").methods(crow::HTTPMethod::POST)
+        ([this](const crow::request& req, const std::string& id) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.session_registry) {
+                crow::response r(503);
+                r.body = R"({"error":"session registry unavailable"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            auto* entry = deps.session_registry->lookup(id);
+            if (!entry) {
+                crow::response r(404);
+                r.body = R"({"error":"unknown session"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            std::string name;
+            std::string mime_type;
+            std::string data_base64;
+            try {
+                auto j = json::parse(req.body);
+                if (j.contains("name") && j["name"].is_string()) {
+                    name = j["name"].get<std::string>();
+                }
+                if (j.contains("mime_type") && j["mime_type"].is_string()) {
+                    mime_type = j["mime_type"].get<std::string>();
+                }
+                if (j.contains("data_base64") && j["data_base64"].is_string()) {
+                    data_base64 = j["data_base64"].get<std::string>();
+                }
+            } catch (const std::exception& e) {
+                crow::response r(400);
+                r.body = json{{"error", std::string("bad json: ") + e.what()}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            auto decoded = base64_decode(data_base64);
+            if (!decoded.has_value()) {
+                crow::response r(400);
+                r.body = R"({"error":"invalid base64 attachment data"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            const std::string project_dir = SessionStorage::get_project_dir(entry->cwd);
+            std::string error;
+            auto record = save_attachment(project_dir, id, name, mime_type, *decoded, &error);
+            if (!record.has_value()) {
+                crow::response r(400);
+                r.body = json{{"error", error.empty() ? "failed to save attachment" : error}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            crow::response r(201);
+            r.body = json{{"attachment", attachment_to_json(*record)}}.dump();
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        });
+
+        CROW_ROUTE(app, "/api/sessions/<string>/attachments/<string>/blob").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req, const std::string& id, const std::string& attachment_id) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.session_registry) {
+                crow::response r(503);
+                r.body = R"({"error":"session registry unavailable"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            auto* entry = deps.session_registry->lookup(id);
+            if (!entry) {
+                crow::response r(404);
+                r.body = R"({"error":"unknown session"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            const std::string project_dir = SessionStorage::get_project_dir(entry->cwd);
+            std::string error;
+            auto record = load_attachment(project_dir, id, attachment_id, &error);
+            if (!record.has_value()) {
+                crow::response r(404);
+                r.body = json{{"error", error.empty() ? "attachment not found" : error}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            auto bytes = read_attachment_bytes(*record, kMaxAttachmentBytes, &error);
+            if (!bytes.has_value()) {
+                crow::response r(404);
+                r.body = json{{"error", error.empty() ? "attachment not found" : error}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            crow::response r(200);
+            r.body = std::move(*bytes);
+            r.add_header("Content-Type", record->mime_type.empty()
+                ? "application/octet-stream"
+                : record->mime_type);
+            r.add_header("Cache-Control", "private, max-age=3600");
+            return with_cors(req, std::move(r));
+        });
+
         // POST /api/sessions/:id/messages: 向 daemon 入队用户输入。WebSocket
         // 只负责观察事件流,这样切换会话/关闭当前连接不会中断后台 AgentLoop。
         CROW_ROUTE(app, "/api/sessions/<string>/messages").methods(crow::HTTPMethod::POST)
@@ -2216,10 +2334,18 @@ struct WebServer::Impl {
             }
 
             std::string text;
+            json attachment_refs = json::array();
+            json contexts = json::array();
             try {
                 auto j = json::parse(req.body);
                 if (j.contains("text") && j["text"].is_string()) {
                     text = j["text"].get<std::string>();
+                }
+                if (j.contains("attachments") && j["attachments"].is_array()) {
+                    attachment_refs = j["attachments"];
+                }
+                if (j.contains("contexts") && j["contexts"].is_array()) {
+                    contexts = j["contexts"];
                 }
             } catch (const std::exception& e) {
                 crow::response r(400);
@@ -2227,9 +2353,9 @@ struct WebServer::Impl {
                 r.add_header("Content-Type", "application/json");
                 return with_cors(req, std::move(r));
             }
-            if (text.empty()) {
+            if (text.empty() && attachment_refs.empty() && contexts.empty()) {
                 crow::response r(400);
-                r.body = R"({"error":"text required"})";
+                r.body = R"({"error":"text or attachment required"})";
                 r.add_header("Content-Type", "application/json");
                 return with_cors(req, std::move(r));
             }
@@ -2240,7 +2366,8 @@ struct WebServer::Impl {
             // .display_text)— LLM-prompt 与 UI-display 解耦。未命中透传。
             std::string original_text = text;
             bool expanded = false;
-            if (deps.session_registry && deps.app_config) {
+            if (attachment_refs.empty() && contexts.empty() &&
+                deps.session_registry && deps.app_config) {
                 if (auto* entry = deps.session_registry->lookup(id)) {
                     if (!entry->cwd.empty()) {
                         SkillRegistry tmp_skills;
@@ -2254,9 +2381,79 @@ struct WebServer::Impl {
                 }
             }
 
-            bool ok = expanded
-                ? deps.session_client->send_input(id, text, original_text)
-                : deps.session_client->send_input(id, text);
+            UserInput input;
+            input.text = text;
+            if (expanded) input.display_text = original_text;
+
+            if (!attachment_refs.empty() || !contexts.empty()) {
+                if (!deps.session_registry) {
+                    crow::response r(503);
+                    r.body = R"({"error":"session registry unavailable"})";
+                    r.add_header("Content-Type", "application/json");
+                    return with_cors(req, std::move(r));
+                }
+                auto* entry = deps.session_registry->lookup(id);
+                if (!entry) {
+                    crow::response r(404);
+                    r.body = R"({"error":"unknown session"})";
+                    r.add_header("Content-Type", "application/json");
+                    return with_cors(req, std::move(r));
+                }
+
+                json parts = json::array();
+                if (!text.empty()) {
+                    parts.push_back(json{{"type", "text"}, {"text", text}});
+                }
+
+                json attachment_meta = json::array();
+                const std::string project_dir = SessionStorage::get_project_dir(entry->cwd);
+                for (const auto& ref : attachment_refs) {
+                    std::string attachment_id;
+                    if (ref.is_string()) {
+                        attachment_id = ref.get<std::string>();
+                    } else if (ref.is_object() && ref.contains("id") && ref["id"].is_string()) {
+                        attachment_id = ref["id"].get<std::string>();
+                    }
+                    if (attachment_id.empty()) {
+                        crow::response r(400);
+                        r.body = R"({"error":"attachment id required"})";
+                        r.add_header("Content-Type", "application/json");
+                        return with_cors(req, std::move(r));
+                    }
+
+                    std::string error;
+                    auto record = load_attachment(project_dir, id, attachment_id, &error);
+                    if (!record.has_value()) {
+                        crow::response r(404);
+                        r.body = json{{"error", error.empty() ? "attachment not found" : error}}.dump();
+                        r.add_header("Content-Type", "application/json");
+                        return with_cors(req, std::move(r));
+                    }
+
+                    json meta = attachment_to_json(*record);
+                    attachment_meta.push_back(meta);
+                    parts.push_back(json{
+                        {"type", record->kind == "image" ? "image" : "file"},
+                        {"attachment", std::move(meta)},
+                    });
+                }
+
+                for (const auto& ctx : contexts) {
+                    if (!ctx.is_object()) continue;
+                    parts.push_back(json{{"type", "browser_context"}, {"context", ctx}});
+                }
+
+                input.content_parts = std::move(parts);
+                input.metadata = json::object();
+                if (!attachment_meta.empty()) {
+                    input.metadata["attachments"] = std::move(attachment_meta);
+                }
+                if (!contexts.empty()) {
+                    input.metadata["contexts"] = contexts;
+                }
+            }
+
+            bool ok = deps.session_client->send_input(id, input);
             if (!ok) {
                 crow::response r(404);
                 r.body = R"({"error":"unknown session"})";

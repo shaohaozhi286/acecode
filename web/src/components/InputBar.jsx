@@ -23,6 +23,7 @@ const LINE_HEIGHT = 20; // 与 leading-[20px] 对齐
 export const InputBar = forwardRef(function InputBar({
   disabled, placeholder = '输入消息或 / 命令…', onSubmit, onAbort, busy, goal = null, goalStopping = false, history = [], variant = 'default',
   value: controlledValue, onChange,
+  attachments = [], contexts = [], onMediaFiles, onRemoveAttachment, onAddBrowserContext, onRemoveContext,
 }, ref) {
   const isControlled = controlledValue != null;
   const [internalValue, setInternalValue] = useState('');
@@ -30,8 +31,18 @@ export const InputBar = forwardRef(function InputBar({
   const [histPtr, setHistPtr] = useState(-1);
   const [editedSinceHistory, setEditedSinceHistory] = useState(false);
   const [dropdownClosed, setDropdownClosed] = useState(false); // Esc 关闭后,直到首段变化或重新输入 / 才重开
+  const [capabilityOpen, setCapabilityOpen] = useState(false);
   const ta = useRef(null);
+  const fileInputRef = useRef(null);
+  const capabilityMenuRef = useRef(null);
   const isHero = variant === 'hero';
+  const attachmentItems = Array.isArray(attachments) ? attachments : [];
+  const contextItems = Array.isArray(contexts) ? contexts : [];
+  const hasExtras = attachmentItems.length > 0 || contextItems.length > 0;
+  const hasCapabilityHandlers = !!onMediaFiles || !!onAddBrowserContext;
+  const isImageAttachment = (item) => String(item.kind || item.mime_type || '').startsWith('image');
+  const imageAttachments = attachmentItems.filter(isImageAttachment);
+  const fileAttachments = attachmentItems.filter((item) => !isImageAttachment(item));
 
   const updateValue = useCallback((next) => {
     const text = String(next || '');
@@ -56,7 +67,7 @@ export const InputBar = forwardRef(function InputBar({
     const el = ta.current;
     if (!el) return;
     el.style.height = 'auto';
-    const h = Math.min(el.scrollHeight, LINE_HEIGHT * MAX_ROWS + (isHero ? 28 : 16));
+    const h = Math.min(el.scrollHeight, LINE_HEIGHT * MAX_ROWS + (isHero ? 56 : 48));
     el.style.height = h + 'px';
   };
   useEffect(autosize, [isHero, value]);
@@ -87,7 +98,7 @@ export const InputBar = forwardRef(function InputBar({
 
   const submit = () => {
     const v = value.trim();
-    if (!v || disabled) return;
+    if ((!v && !hasExtras) || disabled) return;
     onSubmit?.(value);
     if (!isControlled) updateValue('');
     setHistPtr(-1);
@@ -95,6 +106,55 @@ export const InputBar = forwardRef(function InputBar({
     setDropdownClosed(false);
     requestAnimationFrame(() => ta.current?.focus());
   };
+
+  const chooseMedia = () => {
+    setCapabilityOpen(false);
+    fileInputRef.current?.click();
+  };
+
+  const handleFiles = (e) => {
+    const files = Array.from(e.target.files || []);
+    e.target.value = '';
+    if (files.length > 0) onMediaFiles?.(files);
+    requestAnimationFrame(() => ta.current?.focus());
+  };
+
+  const addBrowser = () => {
+    setCapabilityOpen(false);
+    onAddBrowserContext?.();
+    requestAnimationFrame(() => ta.current?.focus());
+  };
+
+  useEffect(() => {
+    if (!hasCapabilityHandlers && capabilityOpen) setCapabilityOpen(false);
+  }, [capabilityOpen, hasCapabilityHandlers]);
+
+  useEffect(() => {
+    if (!capabilityOpen) return undefined;
+
+    const closeCapabilityMenu = () => setCapabilityOpen(false);
+    const closeFromPointer = (event) => {
+      const menu = capabilityMenuRef.current;
+      if (menu && event.target instanceof Node && menu.contains(event.target)) return;
+      closeCapabilityMenu();
+    };
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') closeCapabilityMenu();
+    };
+
+    document.addEventListener('click', closeFromPointer, true);
+    document.addEventListener('wheel', closeCapabilityMenu, true);
+    document.addEventListener('keydown', onKeyDown, true);
+    window.addEventListener('blur', closeCapabilityMenu);
+    window.addEventListener('resize', closeCapabilityMenu);
+    return () => {
+      document.removeEventListener('click', closeFromPointer, true);
+      document.removeEventListener('wheel', closeCapabilityMenu, true);
+      document.removeEventListener('keydown', onKeyDown, true);
+      window.removeEventListener('blur', closeCapabilityMenu);
+      window.removeEventListener('resize', closeCapabilityMenu);
+    };
+  }, [capabilityOpen]);
 
   const handleChange = (e) => {
     const next = e.target.value;
@@ -166,11 +226,14 @@ export const InputBar = forwardRef(function InputBar({
     }
   };
 
-  const actionState = getInputBarActionState({ value, disabled, busy });
+  const actionState = getInputBarActionState({ value, disabled, busy, hasExtras });
   const stopControl = getGoalStopControlState({ goal, busy, stopping: goalStopping });
   const inputRightPadding = stopControl.visible
     ? (isHero ? 'pr-36' : 'pr-32')
     : (isHero ? 'pr-14' : 'pr-12');
+  const toolbarRightInset = stopControl.visible || busy
+    ? (isHero ? 'right-36' : 'right-32')
+    : (isHero ? 'right-14' : 'right-12');
 
   // 命令 token overlay:首段是已知命令时,textarea 文字透明,由 overlay 负责着色渲染。
   const chipText = showChip ? value.slice(0, leading.headLength) : '';
@@ -180,6 +243,13 @@ export const InputBar = forwardRef(function InputBar({
     <div className={clsx(
       isHero ? 'ace-inputbar-hero' : 'border-t border-border px-2.5 py-2 bg-surface shrink-0',
     )}>
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={handleFiles}
+      />
       <div className={clsx(
         'relative bg-surface border-[1.5px] border-border focus-within:border-accent focus-within:ring-2 focus-within:ring-accent/15 transition',
         isHero ? 'ace-inputbar-hero-card rounded-2xl' : 'rounded-xl',
@@ -192,13 +262,47 @@ export const InputBar = forwardRef(function InputBar({
             onClose={() => setDropdownClosed(true)}
           />
         )}
+        {imageAttachments.length > 0 && (
+          <div className={clsx(
+            'px-3 pt-3 flex flex-wrap items-start gap-2',
+            isHero && 'px-4',
+          )}>
+            {imageAttachments.map((item) => {
+              const key = item.local_id || item.id || item.name;
+              return (
+                <div
+                  key={key}
+                  className="group relative w-36 h-36 sm:w-40 sm:h-40 shrink-0 overflow-hidden rounded-xl border border-border bg-bg"
+                >
+                  {item.preview_url ? (
+                    <img
+                      src={item.preview_url}
+                      alt=""
+                      className="block w-full h-full object-cover bg-bg"
+                    />
+                  ) : (
+                    <div className="w-full h-full bg-bg" />
+                  )}
+                  <button
+                    type="button"
+                    className="absolute right-2 top-2 w-7 h-7 rounded-full bg-black/75 hover:bg-black/85 text-white flex items-center justify-center"
+                    onClick={() => onRemoveAttachment?.(key)}
+                    aria-label="移除图片"
+                  >
+                    <VsIcon name="close" size={13} />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
         {/* command overlay: pointer-events:none,与 textarea 使用相同度量。 */}
         {showChip && (
           <div
             aria-hidden="true"
             className={clsx(
               'absolute inset-0 pointer-events-none whitespace-pre-wrap break-words leading-[20px] font-sans text-fg overflow-hidden',
-              isHero ? 'px-4 py-3 text-[14px]' : 'px-3 py-2 text-[13px]',
+              isHero ? 'px-4 pt-3 pb-11 text-[14px]' : 'px-3 pt-2 pb-10 text-[13px]',
               inputRightPadding,
             )}
           >
@@ -217,14 +321,93 @@ export const InputBar = forwardRef(function InputBar({
           className={clsx(
             'relative w-full resize-none bg-transparent border-0 outline-none leading-[20px] font-sans placeholder:text-fg-mute disabled:opacity-50',
             showChip ? 'text-transparent' : 'text-fg',
-            isHero ? 'px-4 py-3 text-[14px]' : 'px-3 py-2 text-[13px]',
+            isHero ? 'px-4 pt-3 pb-11 text-[14px]' : 'px-3 pt-2 pb-10 text-[13px]',
             inputRightPadding,
           )}
           style={{
-            height: LINE_HEIGHT + (isHero ? 28 : 16),
+            height: LINE_HEIGHT + (isHero ? 56 : 48),
             caretColor: showChip ? 'var(--ace-fg)' : undefined,
           }}
         />
+        <div className={clsx("absolute left-1.5 flex items-center gap-1 min-w-0 overflow-visible", toolbarRightInset, isHero ? "bottom-2.5" : "bottom-1")}>
+          <div ref={capabilityMenuRef} className="relative shrink-0 flex items-center">
+            <button
+              type="button"
+              disabled={disabled || !hasCapabilityHandlers}
+              className="w-7 h-7 rounded-full flex items-center justify-center text-fg-mute hover:bg-surface-hi hover:text-fg disabled:opacity-50"
+              onClick={() => setCapabilityOpen((open) => !open)}
+              title="添加上下文"
+            >
+              <VsIcon name="add" size={15} />
+            </button>
+            {capabilityOpen && hasCapabilityHandlers && (
+              <div className="absolute left-0 bottom-8 z-50 w-40 py-1 rounded-lg border border-border bg-surface ace-shadow">
+                <button
+                  type="button"
+                  className="w-full h-8 px-2 flex items-center gap-2 text-left text-[13px] text-fg hover:bg-surface-hi disabled:opacity-50"
+                  onClick={chooseMedia}
+                  disabled={!onMediaFiles}
+                >
+                  <VsIcon name="openFile" size={14} />
+                  <span>Media</span>
+                </button>
+                <button
+                  type="button"
+                  className="w-full h-8 px-2 flex items-center gap-2 text-left text-[13px] text-fg hover:bg-surface-hi disabled:opacity-50"
+                  onClick={addBrowser}
+                  disabled={!onAddBrowserContext}
+                >
+                  <VsIcon name="search" size={14} />
+                  <span>Browser</span>
+                </button>
+              </div>
+            )}
+          </div>
+          <div className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden">
+            {contextItems.map((item) => {
+              const key = item.local_id || item.id || item.type || 'browser';
+              return (
+                <div
+                  key={key}
+                  className="group h-7 max-w-[112px] shrink-0 rounded-md px-1.5 flex items-center gap-1 text-[12px] text-fg-mute hover:bg-surface-hi"
+                  title={item.label || '浏览器'}
+                >
+                  <VsIcon name="search" size={13} />
+                  <span className="truncate">浏览器</span>
+                  <button
+                    type="button"
+                    className="w-4 h-4 rounded-full flex items-center justify-center hover:bg-bg text-fg-mute opacity-0 group-hover:opacity-100 focus:opacity-100"
+                    onClick={() => onRemoveContext?.(key)}
+                    aria-label="移除浏览器上下文"
+                  >
+                    <VsIcon name="close" size={9} />
+                  </button>
+                </div>
+              );
+            })}
+            {fileAttachments.map((item) => {
+              const key = item.local_id || item.id || item.name;
+              return (
+                <div
+                  key={key}
+                  className="group h-7 max-w-[160px] min-w-0 rounded-md px-1.5 flex items-center gap-1 text-[12px] text-fg-mute hover:bg-surface-hi"
+                  title={item.name}
+                >
+                  <VsIcon name="file" size={13} />
+                  <span className="truncate">{item.uploading ? `${item.name || '文件'} 上传中` : (item.name || '文件')}</span>
+                  <button
+                    type="button"
+                    className="w-4 h-4 shrink-0 rounded-full flex items-center justify-center hover:bg-bg text-fg-mute opacity-0 group-hover:opacity-100 focus:opacity-100"
+                    onClick={() => onRemoveAttachment?.(key)}
+                    aria-label="移除文件"
+                  >
+                    <VsIcon name="close" size={9} />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
         <div className={clsx("absolute flex items-center gap-1", isHero ? "right-2.5 bottom-2.5" : "right-1.5 bottom-1")}>
           {stopControl.visible && (
             <button

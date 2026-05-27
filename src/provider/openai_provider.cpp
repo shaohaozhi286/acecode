@@ -1,10 +1,13 @@
 #include "openai_provider.hpp"
+#include "session/attachment_store.hpp"
 #include "utils/logger.hpp"
+#include "utils/base64.hpp"
 #include "network/proxy_resolver.hpp"
 #include <cpr/cpr.h>
 #include <cpr/ssl_options.h>
 #include <stdexcept>
 #include <sstream>
+#include <optional>
 #include <map>
 #include <unordered_set>
 #include <algorithm>
@@ -218,6 +221,110 @@ int retry_after_delay_ms(const cpr::Header& headers, int attempt_index) {
     }
 }
 
+bool is_text_like_attachment(const AttachmentRecord& record) {
+    const std::string mime = ascii_lower(record.mime_type);
+    return mime.rfind("text/", 0) == 0 ||
+           mime == "application/json" ||
+           mime == "application/xml" ||
+           mime == "application/yaml" ||
+           mime == "application/x-yaml";
+}
+
+void push_openai_text_part(nlohmann::json& parts, const std::string& text) {
+    if (text.empty()) return;
+    parts.push_back(nlohmann::json{{"type", "text"}, {"text", text}});
+}
+
+std::string file_context_text(const AttachmentRecord& record) {
+    std::ostringstream oss;
+    oss << "[Attached file]\n";
+    oss << "Name: " << record.name << "\n";
+    oss << "MIME type: " << record.mime_type << "\n";
+    oss << "Size: " << record.size_bytes << " bytes";
+
+    if (is_text_like_attachment(record)) {
+        std::string error;
+        auto bytes = read_attachment_bytes(record, 128u * 1024u, &error);
+        if (bytes.has_value()) {
+            oss << "\n\nContent:\n" << *bytes;
+        } else if (!error.empty()) {
+            oss << "\n\nContent unavailable: " << error;
+        }
+    }
+    return oss.str();
+}
+
+nlohmann::json openai_content_for_message(const ChatMessage& msg) {
+    if (msg.content_parts.is_null() || !msg.content_parts.is_array() ||
+        msg.content_parts.empty()) {
+        return msg.content;
+    }
+
+    nlohmann::json parts = nlohmann::json::array();
+    bool saw_text_part = false;
+    for (const auto& part : msg.content_parts) {
+        if (!part.is_object()) continue;
+        const std::string type = part.value("type", std::string{});
+        if (type == "text") {
+            const std::string text = part.value("text", std::string{});
+            if (!text.empty()) {
+                saw_text_part = true;
+                push_openai_text_part(parts, text);
+            }
+            continue;
+        }
+
+        if (type == "image") {
+            auto record = part.contains("attachment")
+                ? attachment_from_json(part["attachment"])
+                : std::optional<AttachmentRecord>{};
+            if (!record.has_value()) {
+                push_openai_text_part(parts, "[Attached image unavailable: invalid metadata]");
+                continue;
+            }
+
+            std::string error;
+            auto bytes = read_attachment_bytes(*record, kMaxAttachmentBytes, &error);
+            if (!bytes.has_value()) {
+                push_openai_text_part(parts,
+                    "[Attached image unavailable: " +
+                    (error.empty() ? record->name : error) + "]");
+                continue;
+            }
+
+            parts.push_back(nlohmann::json{
+                {"type", "image_url"},
+                {"image_url", {
+                    {"url", "data:" + record->mime_type + ";base64," +
+                            base64_encode(*bytes)}
+                }},
+            });
+            continue;
+        }
+
+        if (type == "file") {
+            auto record = part.contains("attachment")
+                ? attachment_from_json(part["attachment"])
+                : std::optional<AttachmentRecord>{};
+            push_openai_text_part(parts, record.has_value()
+                ? file_context_text(*record)
+                : std::string{"[Attached file unavailable: invalid metadata]"});
+            continue;
+        }
+
+        if (type == "browser_context") {
+            const auto ctx = part.contains("context") ? part["context"] : nlohmann::json::object();
+            push_openai_text_part(parts, "[Browser context]\n" + ctx.dump(2));
+        }
+    }
+
+    if (!saw_text_part && !msg.content.empty()) {
+        parts.insert(parts.begin(), nlohmann::json{{"type", "text"}, {"text", msg.content}});
+    }
+
+    return parts.empty() ? nlohmann::json(msg.content) : parts;
+}
+
 } // namespace
 
 nlohmann::json OpenAiCompatProvider::build_request_body(
@@ -263,7 +370,7 @@ nlohmann::json OpenAiCompatProvider::build_request_body(
             m["content"] = msg.content;
             m["tool_call_id"] = msg.tool_call_id;
         } else {
-            m["content"] = msg.content;
+            m["content"] = openai_content_for_message(msg);
         }
 
         // Echo reasoning_content back on assistant messages only. DeepSeek

@@ -117,6 +117,7 @@
 #include "utils/clipboard.hpp"
 #include "utils/drag_scroll.hpp"
 #include "utils/terminal_title.hpp"
+#include "session/attachment_store.hpp"
 #include "session/session_storage.hpp"
 #include "history/input_history_store.hpp"
 #include "desktop/workspace_registry.hpp"
@@ -454,6 +455,29 @@ static Element render_pending_queue_block(const acecode::TuiState& state,
         }));
     }
 
+    return vbox(std::move(rows));
+}
+
+static Element render_pending_attachment_block(const acecode::TuiState& state,
+                                               int available_width) {
+    if (state.pending_attachments.empty()) {
+        return emptyElement();
+    }
+
+    Elements rows;
+    const int label_width = std::max(12, available_width - 18);
+    for (const auto& attachment : state.pending_attachments) {
+        const std::string kind = attachment.value("kind", std::string{"file"});
+        const std::string name = attachment.value("name", std::string{"attachment"});
+        const std::string prefix = kind == "image" ? " image " : " file ";
+        rows.push_back(hbox({
+            text(" "),
+            text(prefix) | bold | color(Color::Black) | bgcolor(Color::CyanLight),
+            text(" "),
+            text(truncate_cells_middle_ascii(name, label_width)) |
+                color(Color::White),
+        }));
+    }
     return vbox(std::move(rows));
 }
 
@@ -1239,6 +1263,82 @@ static std::string clipboard_paste_status_message(
         default:
             return "";
     }
+}
+
+static std::string clipboard_image_status_message(
+    acecode::ClipboardImageReadResult::Status status) {
+    using Status = acecode::ClipboardImageReadResult::Status;
+    switch (status) {
+        case Status::Empty:
+            return "Clipboard has no image";
+        case Status::TooLarge:
+            return "Clipboard image too large (max " +
+                   std::to_string(acecode::kMaxClipboardImageBytes / (1024 * 1024)) +
+                   " MB)";
+        case Status::Unavailable:
+#ifdef _WIN32
+            return "Clipboard image paste unavailable";
+#elif defined(__APPLE__)
+            return "Clipboard image paste unavailable (install pngpaste)";
+#else
+            return "Clipboard image paste unavailable (install wl-clipboard or xclip)";
+#endif
+        case Status::Success:
+        default:
+            return "";
+    }
+}
+
+static bool is_alt_v_event(const Event& event) {
+    return event == Event::Special("\x1Bv") ||
+           event == Event::Special("\x1BV");
+}
+
+static std::string attachment_name_from_json(const nlohmann::json& attachment) {
+    return attachment.value("name", std::string{"attachment"});
+}
+
+static std::string display_prompt_with_attachments(
+    const std::string& prompt,
+    const std::vector<nlohmann::json>& attachments) {
+    std::string display = prompt;
+    for (const auto& attachment : attachments) {
+        if (!display.empty()) display.push_back('\n');
+        const std::string kind = attachment.value("kind", std::string{"file"});
+        display += "[";
+        display += (kind == "image") ? "Image: " : "File: ";
+        display += attachment_name_from_json(attachment);
+        display += "]";
+    }
+    return display;
+}
+
+static UserInput build_user_input_with_attachments(
+    const std::string& prompt,
+    const std::string& display_text,
+    const std::vector<nlohmann::json>& attachments) {
+    UserInput input;
+    input.text = prompt;
+    input.display_text = display_text;
+    input.content_parts = nlohmann::json::array();
+    if (!prompt.empty()) {
+        input.content_parts.push_back({{"type", "text"}, {"text", prompt}});
+    }
+    nlohmann::json attachment_meta = nlohmann::json::array();
+    for (const auto& attachment : attachments) {
+        const std::string kind = attachment.value("kind", std::string{"file"});
+        input.content_parts.push_back({
+            {"type", kind == "image" ? "image" : "file"},
+            {"attachment", attachment},
+        });
+        attachment_meta.push_back(attachment);
+    }
+    if (attachment_meta.empty()) {
+        input.content_parts = nlohmann::json::array();
+    } else {
+        input.metadata["attachments"] = std::move(attachment_meta);
+    }
+    return input;
 }
 
 static std::string clipboard_copy_status_message(
@@ -2461,6 +2561,14 @@ static int run_interactive_app(const CliOptions& cli,
         if (!busy && !state.pending_queue.empty()) {
             std::string next_prompt = state.pending_queue.front();
             state.pending_queue.erase(state.pending_queue.begin());
+            UserInput next_input;
+            bool has_structured_input = false;
+            if (!state.pending_structured_queue.empty() &&
+                state.pending_structured_queue.front().display_text == next_prompt) {
+                next_input = state.pending_structured_queue.front();
+                state.pending_structured_queue.pop_front();
+                has_structured_input = true;
+            }
             state.conversation.push_back({"user", next_prompt, false});
             // draggable-thick-scrollbar: 用户主动拖滚动条时不要被 worker 线程
             // 强行拽回尾巴 —— 让用户看着自己挑的位置,直到他自己释放鼠标。
@@ -2475,7 +2583,11 @@ static int run_interactive_app(const CliOptions& cli,
             state.streaming_output_chars = 0;
             state.last_completion_tokens_authoritative = 0;
             state.is_waiting = true;
-            agent_loop.submit(next_prompt);
+            if (has_structured_input) {
+                agent_loop.submit(next_input);
+            } else {
+                agent_loop.submit(next_prompt);
+            }
         }
         screen.PostEvent(Event::Custom);
     };
@@ -2654,8 +2766,67 @@ static int run_interactive_app(const CliOptions& cli,
         return true;
     };
 
+    auto paste_system_clipboard_image = [
+        &state,
+        &screen,
+        &session_manager,
+        &working_dir,
+        &can_accept_clipboard_paste_locked
+    ]() {
+        {
+            std::lock_guard<std::mutex> lk(state.mu);
+            if (!can_accept_clipboard_paste_locked() ||
+                state.input_mode != InputMode::Normal) {
+                return true;
+            }
+        }
+
+        auto clipboard = acecode::read_system_clipboard_image();
+
+        {
+            std::lock_guard<std::mutex> lk(state.mu);
+            if (!can_accept_clipboard_paste_locked()) {
+                return true;
+            }
+            if (!clipboard) {
+                set_transient_status_line_locked(
+                    state, clipboard_image_status_message(clipboard.status));
+                screen.PostEvent(Event::Custom);
+                return true;
+            }
+        }
+
+        const std::string session_id = session_manager.ensure_active_session_id();
+        const std::string project_dir = SessionStorage::get_project_dir(working_dir);
+        std::string error;
+        auto record = save_attachment(
+            project_dir,
+            session_id,
+            "clipboard.png",
+            clipboard.mime_type.empty() ? "image/png" : clipboard.mime_type,
+            clipboard.bytes,
+            &error);
+
+        {
+            std::lock_guard<std::mutex> lk(state.mu);
+            if (!record.has_value()) {
+                set_transient_status_line_locked(
+                    state,
+                    error.empty() ? "Clipboard image save failed" : error);
+                screen.PostEvent(Event::Custom);
+                return true;
+            }
+            state.pending_attachments.push_back(attachment_to_json(*record));
+            set_transient_status_line_locked(
+                state,
+                "Attached image: " + record->name);
+        }
+        screen.PostEvent(Event::Custom);
+        return true;
+    };
+
     // Wrap with CatchEvent to handle all keyboard input
-    auto input_with_esc = CatchEvent(input_renderer, [&state, &screen, &clamp_chat_focus, &chat_viewport_rows, &auth_done, &cmd_registry, &agent_loop, &provider_slot, &provider_accessor, &config, &token_tracker, &permissions, &session_manager, &scroll_chat_by_lines, &chat_box, &scrollbar_box, &ask_scrollbar_box, &ask_overlay_box, &message_line_counts, &mcp_manager, &tools, &skill_registry, &memory_registry, &working_dir, &insert_pasted_text_at_cursor, &paste_system_clipboard_text](Event event) {
+    auto input_with_esc = CatchEvent(input_renderer, [&state, &screen, &clamp_chat_focus, &chat_viewport_rows, &auth_done, &cmd_registry, &agent_loop, &provider_slot, &provider_accessor, &config, &token_tracker, &permissions, &session_manager, &scroll_chat_by_lines, &chat_box, &scrollbar_box, &ask_scrollbar_box, &ask_overlay_box, &message_line_counts, &mcp_manager, &tools, &skill_registry, &memory_registry, &working_dir, &insert_pasted_text_at_cursor, &paste_system_clipboard_text, &paste_system_clipboard_image](Event event) {
 #if ACECODE_TUI_INPUT_TRACE
         if (event != Event::Custom &&
             !event.is_cursor_position() &&
@@ -2724,6 +2895,9 @@ static int run_interactive_app(const CliOptions& cli,
         }
         if (event == Event::CtrlV) {
             return paste_system_clipboard_text();
+        }
+        if (is_alt_v_event(event)) {
+            return paste_system_clipboard_image();
         }
         if (event == Event::CtrlC) {
             // If an operation is active, Ctrl+C behaves like Escape: cancel the
@@ -3684,7 +3858,7 @@ static int run_interactive_app(const CliOptions& cli,
             // confirm_pending 现在由上面的 confirm overlay handler 单独拦截
             // (Enter 直接走那条路径),这里不会再被 confirm 触发。
 
-            if (state.input_text.empty()) return true;
+            if (state.input_text.empty() && state.pending_attachments.empty()) return true;
             if (!auth_done) return true;
 
             // Block message submission during compaction
@@ -3700,7 +3874,11 @@ static int run_interactive_app(const CliOptions& cli,
             // 没有保留单独的 `visible_prompt`，提交即一并展开上屏。
             const std::string expanded_prompt = acecode::tui::expand_placeholders(
                 state.input_text, state.pasted_texts);
+            const std::vector<nlohmann::json> attachments = state.pending_attachments;
+            const std::string display_prompt =
+                display_prompt_with_attachments(expanded_prompt, attachments);
             state.input_text.clear(); state.pasted_texts.clear();
+            state.pending_attachments.clear();
             state.input_cursor = 0;
             refresh_slash_dropdown(state, cmd_registry);
 
@@ -3726,6 +3904,16 @@ static int run_interactive_app(const CliOptions& cli,
             // Shell input mode: dispatch directly to BashTool via agent worker.
             // Skips slash-command parsing and LLM round-trip.
             if (state.input_mode == InputMode::Shell) {
+                if (!attachments.empty()) {
+                    set_transient_status_line_locked(
+                        state,
+                        "Image attachments are only supported in normal prompt mode");
+                    state.input_text = expanded_prompt;
+                    state.input_cursor = state.input_text.size();
+                    state.pending_attachments = attachments;
+                    screen.PostEvent(Event::Custom);
+                    return true;
+                }
                 const std::string shell_cmd = expanded_prompt;
                 record_history(prepend_mode_prefix(shell_cmd, InputMode::Shell));
                 state.history_index = -1;
@@ -3751,7 +3939,7 @@ static int run_interactive_app(const CliOptions& cli,
             state.history_index = -1;
 
             // Slash command interception（用 expanded_prompt 派发：spec 4.3）。
-            if (!expanded_prompt.empty() && expanded_prompt[0] == '/') {
+            if (attachments.empty() && !expanded_prompt.empty() && expanded_prompt[0] == '/') {
                 CommandContext cmd_ctx{
                     state, agent_loop, &provider_slot,
                     config, token_tracker,
@@ -3781,9 +3969,14 @@ static int run_interactive_app(const CliOptions& cli,
             if (state.is_waiting) {
                 // 队列保存展开版（spec 4.5）；提交后气泡显示展开版（用户反馈：
                 // 上屏不要看到 [] 占位符）。
-                state.pending_queue.push_back(expanded_prompt);
+                state.pending_queue.push_back(display_prompt);
+                if (!attachments.empty()) {
+                    state.pending_structured_queue.push_back(
+                        build_user_input_with_attachments(
+                            expanded_prompt, display_prompt, attachments));
+                }
             } else {
-                state.conversation.push_back({"user", expanded_prompt, false});
+                state.conversation.push_back({"user", display_prompt, false});
                 state.chat_follow_tail = true;
                 clamp_chat_focus();
                 state.current_thinking_phrase = get_random_thinking_phrase(is_user_chinese(state));
@@ -3791,7 +3984,12 @@ static int run_interactive_app(const CliOptions& cli,
                 state.streaming_output_chars = 0;
                 state.last_completion_tokens_authoritative = 0;
                 state.is_waiting = true;
-                agent_loop.submit(expanded_prompt);
+                if (attachments.empty()) {
+                    agent_loop.submit(expanded_prompt);
+                } else {
+                    agent_loop.submit(build_user_input_with_attachments(
+                        expanded_prompt, display_prompt, attachments));
+                }
             }
             return true;
         }
@@ -4003,6 +4201,12 @@ static int run_interactive_app(const CliOptions& cli,
                 state.input_mode = InputMode::Normal;
                 state.input_text.clear(); state.pasted_texts.clear();
                 state.input_cursor = 0;
+                return true;
+            }
+            if (!state.pending_attachments.empty() && state.input_text.empty()) {
+                state.pending_attachments.clear();
+                set_transient_status_line_locked(state, "Cleared pending attachments");
+                screen.PostEvent(Event::Custom);
                 return true;
             }
             if (state.is_waiting || state.tool_running) {
@@ -5742,6 +5946,8 @@ static int run_interactive_app(const CliOptions& cli,
                 (show_regular_sidebar ? kRegularSidebarWidthCols + 6 : 4));
         Element pending_queue_element =
             render_pending_queue_block(state, pending_queue_width);
+        Element pending_attachment_element =
+            render_pending_attachment_block(state, pending_queue_width);
 
         Element main_root = vbox({
             header,
@@ -5756,6 +5962,7 @@ static int run_interactive_app(const CliOptions& cli,
             thinking_element,
             pending_queue_element,
             prompt_separator | color(Color::GrayDark),
+            pending_attachment_element,
             prompt_line,
             bottom_bar,
         });

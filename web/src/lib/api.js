@@ -107,7 +107,14 @@ export function createApi(base = null) {
       request('GET', sessionDraftPath(id, workspaceHash), undefined, base),
     setSessionDraft:  (id, text = '', workspaceHash = '') =>
       request('PUT', sessionDraftPath(id, workspaceHash), { text }, base),
-    sendInput:        (id, text)     => request('POST',   `/api/sessions/${encodeURIComponent(id)}/messages`, {text}, base),
+    sendInput:        (id, payload)  => {
+      const body = payload && typeof payload === 'object' && !Array.isArray(payload)
+        ? payload
+        : { text: payload };
+      return request('POST', `/api/sessions/${encodeURIComponent(id)}/messages`, body, base);
+    },
+    uploadSessionAttachment: (id, attachment) =>
+      request('POST', `/api/sessions/${encodeURIComponent(id)}/attachments`, attachment, base),
     executeCommand:   (id, command)  => request('POST',   `/api/sessions/${encodeURIComponent(id)}/commands`, command, base),
     getMessages:      (id, since=0)  => request('GET',    `/api/sessions/${encodeURIComponent(id)}/messages?since=${since}`, undefined, base),
     listSkills:       ()             => request('GET',    '/api/skills', undefined, base),

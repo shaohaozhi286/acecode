@@ -1109,6 +1109,63 @@ TEST(WebServerHttp, PostMessageQueuesInputInDaemonSession) {
     EXPECT_TRUE(found) << "HTTP submit should be owned by daemon session";
 }
 
+TEST(WebServerHttp, UploadAttachmentAndSubmitContentParts) {
+    WebServerFixture fx;
+    auto post = cpr::Post(cpr::Url{fx.url("/api/sessions")},
+                          cpr::Header{{"Content-Type", "application/json"}},
+                          cpr::Body{R"({})"});
+    ASSERT_EQ(post.status_code, 201);
+    auto sid = json::parse(post.text)["session_id"].get<std::string>();
+
+    auto upload = cpr::Post(
+        cpr::Url{fx.url("/api/sessions/" + sid + "/attachments")},
+        cpr::Header{{"Content-Type", "application/json"}},
+        cpr::Body{R"({"name":"screen.png","mime_type":"image/png","data_base64":"YWJj"})"});
+    ASSERT_EQ(upload.status_code, 201) << upload.text;
+    auto attachment = json::parse(upload.text)["attachment"];
+    ASSERT_TRUE(attachment["id"].is_string());
+    EXPECT_EQ(attachment["kind"], "image");
+    const std::string attachment_id = attachment["id"].get<std::string>();
+
+    auto blob = cpr::Get(
+        cpr::Url{fx.url("/api/sessions/" + sid + "/attachments/" + attachment_id + "/blob")});
+    ASSERT_EQ(blob.status_code, 200) << blob.text;
+    EXPECT_EQ(blob.text, "abc");
+
+    auto queued = cpr::Post(
+        cpr::Url{fx.url("/api/sessions/" + sid + "/messages")},
+        cpr::Header{{"Content-Type", "application/json"}},
+        cpr::Body{json{
+            {"text", "describe this"},
+            {"attachments", json::array({json{{"id", attachment_id}}})},
+        }.dump()});
+    ASSERT_EQ(queued.status_code, 202) << queued.text;
+
+    bool found = false;
+    auto deadline = std::chrono::steady_clock::now() + 2s;
+    while (std::chrono::steady_clock::now() < deadline && !found) {
+        auto r = cpr::Get(cpr::Url{fx.url("/api/sessions/" + sid + "/messages")});
+        ASSERT_EQ(r.status_code, 200) << r.text;
+        auto j = json::parse(r.text);
+        for (const auto& m : j["messages"]) {
+            if (m.value("role", "") != "user" ||
+                m.value("content", "") != "describe this" ||
+                !m.contains("content_parts")) {
+                continue;
+            }
+            const auto& parts = m["content_parts"];
+            if (parts.is_array() && parts.size() == 2 &&
+                parts[1].value("type", "") == "image" &&
+                parts[1]["attachment"].value("id", "") == attachment_id) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) std::this_thread::sleep_for(20ms);
+    }
+    EXPECT_TRUE(found) << "attachment content_parts should be persisted";
+}
+
 TEST(WebServerHttp, PostBuiltinCommandRejectsUnknownSession) {
     WebServerFixture fx;
     auto r = cpr::Post(cpr::Url{fx.url("/api/sessions/missing-session/commands")},

@@ -12,6 +12,7 @@ namespace acecode {
 struct ChatMessage {
     std::string role;    // "system", "user", "assistant", "tool"
     std::string content;
+    nlohmann::json content_parts; // neutral structured text/image/file/context parts
 
     // For assistant messages with tool calls
     nlohmann::json tool_calls; // array of tool_call objects, empty if none
@@ -38,6 +39,21 @@ struct ChatMessage {
     // serialized to session JSONL. When empty, the TUI falls back to the
     // legacy `[Tool: X] {JSON}` format.
     std::string display_override;
+};
+
+struct UserInput {
+    std::string text;
+    std::string display_text;
+    nlohmann::json content_parts = nlohmann::json::array();
+    nlohmann::json metadata = nlohmann::json::object();
+
+    bool has_content_parts() const {
+        return !content_parts.is_null() && content_parts.is_array() && !content_parts.empty();
+    }
+
+    bool empty() const {
+        return text.empty() && !has_content_parts();
+    }
 };
 
 struct ToolCall {

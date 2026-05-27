@@ -6,8 +6,10 @@
 
 using acecode::ClipboardTextReadResult;
 using acecode::ClipboardTextWriteResult;
+using acecode::ClipboardImageReadResult;
 using acecode::linux_clipboard_text_commands;
 using acecode::linux_clipboard_write_commands;
+using acecode::read_system_clipboard_image_from_commands;
 using acecode::read_system_clipboard_text_from_commands;
 using acecode::write_system_clipboard_text_from_commands;
 
@@ -76,6 +78,12 @@ TEST(ClipboardTest, EmptyCommandListIsUnavailable) {
 TEST(ClipboardTest, EmptyWriteCommandListIsUnavailable) {
     auto result = write_system_clipboard_text_from_commands({}, "hello", 1024);
     EXPECT_EQ(result.status, ClipboardTextWriteResult::Status::Unavailable);
+}
+
+TEST(ClipboardTest, EmptyImageCommandListIsUnavailable) {
+    auto result = read_system_clipboard_image_from_commands({}, "image/png", 1024);
+    EXPECT_EQ(result.status, ClipboardImageReadResult::Status::Unavailable);
+    EXPECT_TRUE(result.bytes.empty());
 }
 
 TEST(ClipboardTest, WriteCommandRejectsTooLargeInput) {

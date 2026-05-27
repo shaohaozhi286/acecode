@@ -185,7 +185,25 @@ void append_request_context_for_api(std::vector<ChatMessage>& messages,
     if (context.empty()) return;
 
     if (!messages.empty() && messages.back().role == "user") {
-        messages.back().content = context + "\n\n[用户输入]\n" + messages.back().content;
+        ChatMessage& tail = messages.back();
+        const std::string merged = context + "\n\n[用户输入]\n" + tail.content;
+        if (tail.content_parts.is_array() && !tail.content_parts.empty()) {
+            bool updated_text_part = false;
+            for (auto& part : tail.content_parts) {
+                if (part.is_object() && part.value("type", std::string{}) == "text") {
+                    const std::string text = part.value("text", std::string{});
+                    part["text"] = context + "\n\n[用户输入]\n" + text;
+                    updated_text_part = true;
+                    break;
+                }
+            }
+            if (!updated_text_part) {
+                tail.content_parts.insert(
+                    tail.content_parts.begin(),
+                    nlohmann::json{{"type", "text"}, {"text", merged}});
+            }
+        }
+        tail.content = merged;
         return;
     }
 
@@ -331,7 +349,11 @@ void AgentLoop::worker_main() {
         }
         switch (task.kind) {
         case WorkerTask::Kind::Chat:
-            run_agent_with_display(task.payload, task.display_text, task.hidden_goal_context);
+            if (task.input.empty() && !task.payload.empty()) {
+                task.input.text = std::move(task.payload);
+                task.input.display_text = std::move(task.display_text);
+            }
+            run_agent_with_input(task.input, task.hidden_goal_context);
             break;
         case WorkerTask::Kind::Shell:
             run_shell(task.payload);
@@ -348,13 +370,19 @@ void AgentLoop::submit(const std::string& user_message) {
 }
 
 void AgentLoop::submit(const std::string& prompt, const std::string& display_text) {
+    UserInput input;
+    input.text = prompt;
+    input.display_text = display_text;
+    submit(input);
+}
+
+void AgentLoop::submit(const UserInput& input) {
     clear_stale_abort_request();
     {
         std::lock_guard<std::mutex> lk(queue_mu_);
         WorkerTask task;
         task.kind = WorkerTask::Kind::Chat;
-        task.payload = prompt;
-        task.display_text = display_text;
+        task.input = input;
         task.hidden_goal_context = false;
         task_queue_.push(std::move(task));
     }
@@ -724,7 +752,7 @@ void AgentLoop::maybe_continue_goal() {
         if (shutdown_requested_ || !task_queue_.empty()) return;
         WorkerTask task;
         task.kind = WorkerTask::Kind::Chat;
-        task.payload = build_goal_context_prompt(*goal);
+        task.input.text = build_goal_context_prompt(*goal);
         task.hidden_goal_context = true;
         task_queue_.push(std::move(task));
     }
@@ -753,16 +781,32 @@ void AgentLoop::run_agent(const std::string& user_message) {
 void AgentLoop::run_agent_with_display(const std::string& user_message,
                                         const std::string& display_text,
                                         bool hidden_goal_context) {
+    UserInput input;
+    input.text = user_message;
+    input.display_text = display_text;
+    run_agent_with_input(input, hidden_goal_context);
+}
+
+void AgentLoop::run_agent_with_input(const UserInput& input,
+                                      bool hidden_goal_context) {
     abort_requested_ = false;
     busy_ = true;
     restore_goal_runtime();
 
+    const std::string& user_message = input.text;
+    const std::string& display_text = input.display_text;
     LOG_INFO("=== submit() user_message: " + log_truncate(user_message, 200));
 
     // Add user message
     ChatMessage user_msg;
     user_msg.role = "user";
     user_msg.content = user_message;
+    if (input.has_content_parts()) {
+        user_msg.content_parts = input.content_parts;
+    }
+    if (input.metadata.is_object() && !input.metadata.empty()) {
+        user_msg.metadata = input.metadata;
+    }
     if (!display_text.empty() && display_text != user_message) {
         // 让 UI 渲染 display_text(原文),LLM 看到的仍是 user_message(展开后的)。
         // session_serializer 会把 metadata 全字段持久化,resume 后恢复。
@@ -786,6 +830,10 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
             {"role", "user"}, {"content", user_message},
             {"is_tool", false}, {"id", user_msg.uuid},
         };
+        if (!user_msg.content_parts.is_null() && user_msg.content_parts.is_array() &&
+            !user_msg.content_parts.empty()) {
+            msg_event["content_parts"] = user_msg.content_parts;
+        }
         if (!user_msg.metadata.is_null() && !user_msg.metadata.empty()) {
             msg_event["metadata"] = user_msg.metadata;
         }

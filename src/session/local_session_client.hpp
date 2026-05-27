@@ -30,6 +30,7 @@ public:
     bool send_input(const std::string& session_id,
                       const std::string& text,
                       const std::string& display_text) override;
+    bool send_input(const std::string& session_id, const UserInput& input) override;
     BuiltinCommandResult execute_builtin_command(
         const std::string& session_id,
         const BuiltinCommandRequest& request) override;

@@ -1080,6 +1080,7 @@ static void cmd_rewind(CommandContext& ctx, const std::string& /*args*/) {
                 state.input_cursor = state.input_text.size();
                 state.history_index = -1;
                 state.pending_queue.clear();
+                state.pending_structured_queue.clear();
                 token_tracker->reset();
                 state.token_status = token_tracker->format_status(config->context_window);
                 state.token_percent = token_tracker->context_percent(config->context_window);

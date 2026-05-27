@@ -110,6 +110,10 @@ public:
     // skill command expansion). Empty `display_text` falls back to `prompt`.
     void submit(const std::string& prompt, const std::string& display_text);
 
+    // Submit structured user input containing text plus optional attachment or
+    // context parts. Existing text-only submit overloads delegate here.
+    void submit(const UserInput& input);
+
     // Submit a user-initiated shell command triggered by `!` mode. Non-blocking:
     // enqueues on the same worker so it serialises with LLM turns. The worker
     // invokes BashTool directly (no LLM round-trip), emits tool_call + tool_result
@@ -206,6 +210,8 @@ public:
 private:
     void worker_main();
     void run_agent(const std::string& user_message);
+    void run_agent_with_input(const UserInput& input,
+                              bool hidden_goal_context = false);
     // Variant that records `display_text` into the user message's metadata.display_text
     // so UI can show the original input while the LLM sees an expanded `prompt`.
     // When `display_text` is empty, behaves identically to run_agent(prompt).
@@ -237,6 +243,7 @@ private:
         enum class Kind { Chat, Shell, Compact };
         Kind kind = Kind::Chat;
         std::string payload;
+        UserInput input;
         // 仅 Chat 用:UI 渲染时希望显示的"原文",而 payload(发给 LLM)可能
         // 是被 daemon expander 展开过的字符串(skill 调用提示等)。空 = UI 与
         // LLM 看到同一份(payload)。
