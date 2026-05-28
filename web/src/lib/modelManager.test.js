@@ -2,9 +2,12 @@
 import assert from 'node:assert/strict';
 import {
   buildModelDraftsFromSelection,
+  capabilitySearchText,
+  filterSavedModels,
   filterModelIds,
   formatContextWindowK,
   modelNameSlug,
+  normalizeModelCapabilities,
   parseContextWindowK,
   splitModelIds,
   validateModelDraft,
@@ -71,6 +74,19 @@ run('非法 context_window → INVALID_CONTEXT_WINDOW', () => {
   }).code, 'INVALID_CONTEXT_WINDOW');
 });
 
+run('非法 capabilities → INVALID_CAPABILITY', () => {
+  assert.equal(validateModelDraft({
+    name: 'lm', provider: 'copilot', model: 'l', capabilities: ['vision', 'vision'],
+  }).code, 'INVALID_CAPABILITY');
+});
+
+run('normalizeModelCapabilities 去重并保留顺序', () => {
+  assert.deepEqual(
+    normalizeModelCapabilities(['tool_use', '', 'vision', 'tool_use', 42]),
+    ['tool_use', 'vision'],
+  );
+});
+
 run('splitModelIds 去空去重并保留顺序', () => {
   assert.deepEqual(splitModelIds(' gpt-4o, ,glm-4,gpt-4o '), ['gpt-4o', 'glm-4']);
 });
@@ -87,6 +103,24 @@ run('filterModelIds 支持多个空格分隔条件', () => {
     filterModelIds(['gpt-4o-mini', 'gpt-4.1', 'gpt-4.1-mini'], 'gpt mini'),
     ['gpt-4o-mini', 'gpt-4.1-mini'],
   );
+});
+
+run('capabilitySearchText 展开标签别名', () => {
+  const text = capabilitySearchText(['web_search', 'vision']);
+  assert.match(text, /websearch/);
+  assert.match(text, /联网/);
+  assert.match(text, /vision/);
+});
+
+run('filterSavedModels 支持按能力标签搜索', () => {
+  const models = [
+    { name: 'code', provider: 'openai', model: 'deepseek-v4-pro', capabilities: ['tool_use'] },
+    { name: 'eyes', provider: 'openai', model: 'vision-30b', capabilities: ['vision'] },
+    { name: 'net', provider: 'copilot', model: 'gpt-web', capabilities: ['web_search'] },
+  ];
+  assert.deepEqual(filterSavedModels(models, 'vision').map((m) => m.name), ['eyes']);
+  assert.deepEqual(filterSavedModels(models, 'websearch').map((m) => m.name), ['net']);
+  assert.deepEqual(filterSavedModels(models, '联网').map((m) => m.name), ['net']);
 });
 
 run('parseContextWindowK 把 K 单位换算为 token 数', () => {

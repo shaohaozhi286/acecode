@@ -8,6 +8,7 @@
 
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace acecode {
 
@@ -22,6 +23,7 @@ struct SavedModelDraft {
     std::optional<int> context_window;
     // 可选 OpenAI stream timeout(ms)。unset = 不覆盖;0 = 清除旧 override。
     std::optional<int> stream_timeout_ms;
+    std::vector<std::string> capabilities;
 };
 
 enum class SavedModelEditError {
@@ -36,6 +38,7 @@ enum class SavedModelEditError {
     INVALID_API_KEY,      // openai 必填(空字符串触发)
     INVALID_CONTEXT_WINDOW, // context_window < 0
     INVALID_STREAM_TIMEOUT, // stream_timeout_ms < 0
+    INVALID_CAPABILITY,     // capabilities 含空值/控制字符/重复项
     NOT_FOUND,            // update/remove 时 name 不存在
     IN_USE_AS_DEFAULT,    // remove/改名时该 name 是 cfg.default_model_name
 };

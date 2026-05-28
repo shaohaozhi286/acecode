@@ -171,4 +171,17 @@ TEST(DefaultSkillSeedRegistryTest, AcecodeUsageSkillIsRegisteredInSeedBundle) {
     EXPECT_TRUE(found) << "acecode-usage seed must stay registered in default_skill_seeds()";
 }
 
+TEST(DefaultSkillSeedRegistryTest, VisionImageReaderSkillIsRegisteredInSeedBundle) {
+    bool found = false;
+    for (const auto& seed : acecode::default_skill_seeds()) {
+        if (seed.name == "vision-image-reader") {
+            found = true;
+            EXPECT_EQ(seed.relative_path.generic_string(), "acecode/vision-image-reader");
+            EXPECT_NE(seed.source_id.find("acecode:vision-image-reader"), std::string::npos);
+            break;
+        }
+    }
+    EXPECT_TRUE(found) << "vision-image-reader seed must stay registered in default_skill_seeds()";
+}
+
 } // namespace

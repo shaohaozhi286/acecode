@@ -532,6 +532,14 @@ std::string SessionManager::fork_active_session(const std::vector<ChatMessage>& 
     return session_id_;
 }
 
+std::vector<ChatMessage> SessionManager::load_active_messages() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!started_ || !created_ || jsonl_path_.empty()) {
+        return {};
+    }
+    return SessionStorage::load_messages(jsonl_path_);
+}
+
 std::string SessionManager::fork_session_to_new_id(
     const std::vector<ChatMessage>& retained_prefix,
     const std::string& title,

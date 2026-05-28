@@ -48,6 +48,10 @@ public:
     // Reopens the JSONL file for continued append.
     std::vector<ChatMessage> resume_session(const std::string& session_id);
 
+    // Read the active session transcript without mutating session state.
+    // Returns empty when no active JSONL has been created yet.
+    std::vector<ChatMessage> load_active_messages() const;
+
     // Read the SessionMeta for a previously persisted session by ID, without
     // mutating any in-memory state. Returns empty SessionMeta (id == "") when
     // the meta file is missing. Used by main.cpp's resume path so it can apply

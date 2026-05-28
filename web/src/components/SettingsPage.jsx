@@ -14,9 +14,13 @@ import { Toggle } from './Modal.jsx';
 import { clsx, relativeTime } from '../lib/format.js';
 import { lookupErrorMessage } from '../lib/errors.js';
 import {
+  DEFAULT_MODEL_CAPABILITIES,
+  MODEL_CAPABILITY_OPTIONS,
   buildModelDraftsFromSelection,
+  filterSavedModels,
   filterModelIds,
   formatContextWindowK,
+  normalizeModelCapabilities,
   parseContextWindowK,
   splitModelIds,
   validateModelDraft,
@@ -1159,6 +1163,7 @@ const MODEL_NEW_DRAFT_DEFAULT = {
   base_url: 'https://api.openai.com/v1',
   api_key: '',
   context_window_k: '',
+  capabilities: DEFAULT_MODEL_CAPABILITIES,
 };
 const MODEL_NEW_API_KEY_MASK = '••••••••';
 
@@ -1170,6 +1175,7 @@ function draftFromModelProfile(m) {
     base_url: m?.base_url || '',
     api_key: m?.provider === 'openai' ? MODEL_NEW_API_KEY_MASK : '',
     context_window_k: formatContextWindowK(m?.context_window),
+    capabilities: normalizeModelCapabilities(m?.capabilities),
   };
 }
 
@@ -1185,11 +1191,113 @@ function payloadForModelDraft(draft, { omitApiKey = false } = {}) {
   }
   const parsedContext = parseContextWindowK(draft.context_window_k);
   payload.context_window = parsedContext.ok && parsedContext.tokens ? parsedContext.tokens : 0;
+  payload.capabilities = normalizeModelCapabilities(draft.capabilities);
   return payload;
 }
 
 function providerLabel(provider) {
   return provider === 'copilot' ? 'Copilot' : 'OpenAI';
+}
+
+function capabilityLabel(id) {
+  return MODEL_CAPABILITY_OPTIONS.find((item) => item.id === id)?.label || id;
+}
+
+function CapabilityIcon({ id, size = 14, className = '' }) {
+  const common = {
+    width: size,
+    height: size,
+    viewBox: '0 0 24 24',
+    fill: 'none',
+    stroke: 'currentColor',
+    strokeWidth: '2',
+    strokeLinecap: 'round',
+    strokeLinejoin: 'round',
+    className,
+    'aria-hidden': true,
+  };
+  if (id === 'vision') {
+    return (
+      <svg {...common}>
+        <path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12z" />
+        <circle cx="12" cy="12" r="3" />
+      </svg>
+    );
+  }
+  if (id === 'web_search') {
+    return (
+      <svg {...common}>
+        <circle cx="12" cy="12" r="10" />
+        <path d="M2 12h20" />
+        <path d="M12 2a15 15 0 0 1 0 20" />
+        <path d="M12 2a15 15 0 0 0 0 20" />
+      </svg>
+    );
+  }
+  if (id === 'reasoning') {
+    return (
+      <svg {...common}>
+        <path d="M9 18h6" />
+        <path d="M10 22h4" />
+        <path d="M8.5 14.5A6 6 0 1 1 15.5 14c-.9.6-1.5 1.6-1.5 2.7V17h-4v-.4c0-.9-.5-1.6-1.5-2.1z" />
+      </svg>
+    );
+  }
+  if (id === 'tool_use') {
+    return (
+      <svg {...common}>
+        <path d="M14.7 6.3a4 4 0 0 0-5 5L3 18v3h3l6.7-6.7a4 4 0 0 0 5-5l-2.5 2.5-2.7-2.7 2.2-2.8z" />
+      </svg>
+    );
+  }
+  if (id === 'rerank') {
+    return (
+      <svg {...common}>
+        <path d="M7 7h12" />
+        <path d="M7 12h9" />
+        <path d="M7 17h5" />
+        <path d="M3 7h.01" />
+        <path d="M3 12h.01" />
+        <path d="M3 17h.01" />
+      </svg>
+    );
+  }
+  if (id === 'embedding') {
+    return (
+      <svg {...common}>
+        <rect x="4" y="4" width="6" height="6" rx="1" />
+        <rect x="14" y="4" width="6" height="6" rx="1" />
+        <rect x="4" y="14" width="6" height="6" rx="1" />
+        <path d="M10 7h4" />
+        <path d="M7 10v4" />
+        <path d="M10 17h4" />
+      </svg>
+    );
+  }
+  return <VsIcon name="settings" size={size} className={className} />;
+}
+
+function CapabilityBadges({ capabilities = [], compact = false }) {
+  const tags = normalizeModelCapabilities(capabilities);
+  if (tags.length === 0) return null;
+  return (
+    <div className="flex items-center gap-1">
+      {tags.map((id) => (
+        <span
+          key={id}
+          title={capabilityLabel(id)}
+          className={clsx(
+            'inline-flex items-center justify-center rounded-md border border-border bg-surface-hi text-fg-2',
+            compact ? 'w-6 h-6' : 'w-7 h-7',
+            id === 'tool_use' && 'border-warn/30 bg-warn/10 text-warn',
+            id === 'vision' && 'border-accent/30 bg-accent-bg text-accent',
+          )}
+        >
+          <CapabilityIcon id={id} size={compact ? 12 : 14} />
+        </span>
+      ))}
+    </div>
+  );
 }
 
 function SectionModel() {
@@ -1208,6 +1316,16 @@ function SectionModel() {
   const [showAdd, setShowAdd] = useState(false);
   const [draft, setDraft] = useState(MODEL_NEW_DRAFT_DEFAULT);
   const [apiKeyTouched, setApiKeyTouched] = useState(false);
+  const [savedModelFilter, setSavedModelFilter] = useState('');
+  const visibleModels = useMemo(
+    () => {
+      const filtered = filterSavedModels(models, savedModelFilter);
+      if (!editingName || filtered.some((m) => m?.name === editingName)) return filtered;
+      const editingModel = models.find((m) => m?.name === editingName);
+      return editingModel ? [editingModel, ...filtered] : filtered;
+    },
+    [editingName, models, savedModelFilter],
+  );
 
   const refreshCopilotAuth = useCallback(async () => {
     setCopilotAuth((s) => ({ ...s, loading: true }));
@@ -1476,7 +1594,11 @@ function SectionModel() {
 
       <div className="flex items-center justify-between mb-3">
         <div className="text-[12px] text-fg-mute">
-          {loading ? '正在加载...' : `${models.length} 个已保存模型`}
+          {loading ? '正在加载...' : (
+            savedModelFilter.trim()
+              ? `${models.length} 个已保存模型 · 匹配 ${visibleModels.length} 个`
+              : `${models.length} 个已保存模型`
+          )}
         </div>
         <button
           type="button"
@@ -1488,14 +1610,32 @@ function SectionModel() {
         </button>
       </div>
 
+      {models.length > 0 && (
+        <div className="relative mb-3">
+          <VsIcon name="search" size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-fg-mute" />
+          <input
+            type="text"
+            value={savedModelFilter}
+            onChange={(e) => setSavedModelFilter(e.target.value)}
+            placeholder="按名称、模型 ID 或能力标签过滤,如 vision / websearch / 联网"
+            className="w-full h-9 pl-9 pr-3 rounded-md border border-border bg-surface text-[12px] text-fg outline-none focus:border-accent transition placeholder:text-fg-mute"
+          />
+        </div>
+      )}
+
       <div className="rounded-lg border border-border bg-surface overflow-hidden mb-3">
         {!loading && models.length === 0 && (
           <div className="px-5 py-8 text-center text-[13px] text-fg-mute">
             还没有保存的模型
           </div>
         )}
-        {models.map((m, i) => {
-          const isLast = i === models.length - 1;
+        {!loading && models.length > 0 && visibleModels.length === 0 && (
+          <div className="px-5 py-8 text-center text-[13px] text-fg-mute">
+            没有匹配的模型
+          </div>
+        )}
+        {visibleModels.map((m, i) => {
+          const isLast = i === visibleModels.length - 1;
           const isEditing = editingName === m.name;
           const isDefault = defaultName === m.name;
 
@@ -1561,6 +1701,7 @@ function SectionModel() {
                   >
                     {providerLabel(m.provider)}
                   </span>
+                  <CapabilityBadges capabilities={m.capabilities} compact />
                 </div>
                 <div className="text-[12px] text-fg-mute font-mono truncate">
                   {m.model}
@@ -1878,6 +2019,14 @@ function ModelFormPreview({
 
   const selectedCount = selectedModels.length;
   const canSubmit = selectedCount > 0 && (!editingName || selectedCount === 1);
+  const selectedCapabilities = normalizeModelCapabilities(data.capabilities);
+  const toggleCapability = (id) => {
+    const cur = new Set(selectedCapabilities);
+    if (cur.has(id)) cur.delete(id); else cur.add(id);
+    const knownIds = new Set(MODEL_CAPABILITY_OPTIONS.map((item) => item.id));
+    const unknown = selectedCapabilities.filter((tag) => !knownIds.has(tag));
+    setData({ capabilities: [...unknown, ...MODEL_CAPABILITY_OPTIONS.map((item) => item.id).filter((tag) => cur.has(tag))] });
+  };
 
   return (
     <div className="p-5 rounded-lg border border-accent/30 bg-surface">
@@ -1966,6 +2115,33 @@ function ModelFormPreview({
           value={data.context_window_k || ''}
           onChange={(e) => setData({ context_window_k: e.target.value })}
         />
+      </div>
+
+      <div className="mb-4">
+        <div className="text-[12px] font-medium text-fg-2 mb-1.5">模型能力</div>
+        <div className="flex flex-wrap gap-1.5">
+          {MODEL_CAPABILITY_OPTIONS.map((item) => {
+            const active = selectedCapabilities.includes(item.id);
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => toggleCapability(item.id)}
+                aria-pressed={active}
+                className={clsx(
+                  'inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border text-[12px] transition',
+                  active
+                    ? 'border-accent/40 bg-accent-bg text-accent'
+                    : 'border-border bg-surface text-fg-mute hover:bg-surface-hi hover:text-fg',
+                  item.id === 'tool_use' && active && 'border-warn/35 bg-warn/10 text-warn',
+                )}
+              >
+                <CapabilityIcon id={item.id} size={13} />
+                <span>{item.label}</span>
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       {/* Model ID 区域 */}

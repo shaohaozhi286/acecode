@@ -1286,6 +1286,9 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
             if (e.stream_timeout_ms.has_value() && *e.stream_timeout_ms > 0) {
                 ej["stream_timeout_ms"] = *e.stream_timeout_ms;
             }
+            if (!e.capabilities.empty()) {
+                ej["capabilities"] = e.capabilities;
+            }
             arr.push_back(std::move(ej));
         }
         j["saved_models"] = std::move(arr);

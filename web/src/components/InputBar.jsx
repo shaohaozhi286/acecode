@@ -16,6 +16,7 @@ import { SlashDropdown } from './SlashDropdown.jsx';
 import { useSlashCommands } from './SlashCommandsContext.jsx';
 import { deleteLeadingCommandBlock, parseLeadingCommand } from '../lib/slashCommands.js';
 import { getNextInputHistoryPointer, shouldNavigateInputHistory } from '../lib/inputHistoryNavigation.js';
+import { filesFromClipboardEvent, filesFromTransfer, hasFileTransfer } from '../lib/composerFileTransfer.js';
 
 const MAX_ROWS = 8;
 const LINE_HEIGHT = 20; // 与 leading-[20px] 对齐
@@ -32,9 +33,11 @@ export const InputBar = forwardRef(function InputBar({
   const [editedSinceHistory, setEditedSinceHistory] = useState(false);
   const [dropdownClosed, setDropdownClosed] = useState(false); // Esc 关闭后,直到首段变化或重新输入 / 才重开
   const [capabilityOpen, setCapabilityOpen] = useState(false);
+  const [dragActive, setDragActive] = useState(false);
   const ta = useRef(null);
   const fileInputRef = useRef(null);
   const capabilityMenuRef = useRef(null);
+  const dragDepthRef = useRef(0);
   const composingRef = useRef(false);
   const justFinishedCompositionRef = useRef(false);
   const compositionGuardTimerRef = useRef(0);
@@ -148,6 +151,19 @@ export const InputBar = forwardRef(function InputBar({
     requestAnimationFrame(() => ta.current?.focus());
   };
 
+  const focusTextareaSoon = useCallback(() => {
+    requestAnimationFrame(() => ta.current?.focus());
+  }, []);
+
+  const addMediaFiles = useCallback((files) => {
+    const fileList = Array.from(files || []).filter(Boolean);
+    if (disabled || !onMediaFiles || fileList.length === 0) return false;
+    setCapabilityOpen(false);
+    onMediaFiles(fileList);
+    focusTextareaSoon();
+    return true;
+  }, [disabled, focusTextareaSoon, onMediaFiles]);
+
   const chooseMedia = () => {
     setCapabilityOpen(false);
     fileInputRef.current?.click();
@@ -156,15 +172,69 @@ export const InputBar = forwardRef(function InputBar({
   const handleFiles = (e) => {
     const files = Array.from(e.target.files || []);
     e.target.value = '';
-    if (files.length > 0) onMediaFiles?.(files);
-    requestAnimationFrame(() => ta.current?.focus());
+    addMediaFiles(files);
   };
 
   const addBrowser = () => {
     setCapabilityOpen(false);
     onAddBrowserContext?.();
-    requestAnimationFrame(() => ta.current?.focus());
+    focusTextareaSoon();
   };
+
+  const resetDragState = useCallback(() => {
+    dragDepthRef.current = 0;
+    setDragActive(false);
+  }, []);
+
+  const handleDragEnter = useCallback((event) => {
+    if (disabled || !onMediaFiles || !hasFileTransfer(event.dataTransfer)) return;
+    event.preventDefault();
+    dragDepthRef.current += 1;
+    setDragActive(true);
+  }, [disabled, onMediaFiles]);
+
+  const handleDragOver = useCallback((event) => {
+    if (disabled || !onMediaFiles || !hasFileTransfer(event.dataTransfer)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+    setDragActive(true);
+  }, [disabled, onMediaFiles]);
+
+  const handleDragLeave = useCallback((event) => {
+    if (!dragActive) return;
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (dragDepthRef.current === 0) setDragActive(false);
+  }, [dragActive]);
+
+  const handleDrop = useCallback((event) => {
+    const files = disabled || !onMediaFiles ? [] : filesFromTransfer(event.dataTransfer, { source: 'drop' });
+    if (files.length > 0) {
+      event.preventDefault();
+      event.stopPropagation();
+      addMediaFiles(files);
+    }
+    resetDragState();
+  }, [addMediaFiles, disabled, onMediaFiles, resetDragState]);
+
+  const handlePaste = useCallback((event) => {
+    const files = disabled || !onMediaFiles ? [] : filesFromClipboardEvent(event);
+    if (files.length === 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    addMediaFiles(files);
+  }, [addMediaFiles, disabled, onMediaFiles]);
+
+  useEffect(() => {
+    if (!dragActive) return undefined;
+    window.addEventListener('dragend', resetDragState);
+    window.addEventListener('drop', resetDragState);
+    window.addEventListener('blur', resetDragState);
+    return () => {
+      window.removeEventListener('dragend', resetDragState);
+      window.removeEventListener('drop', resetDragState);
+      window.removeEventListener('blur', resetDragState);
+    };
+  }, [dragActive, resetDragState]);
 
   useEffect(() => {
     if (!hasCapabilityHandlers && capabilityOpen) setCapabilityOpen(false);
@@ -295,7 +365,13 @@ export const InputBar = forwardRef(function InputBar({
       <div className={clsx(
         'relative bg-surface border-[1.5px] border-border focus-within:border-accent focus-within:ring-2 focus-within:ring-accent/15 transition',
         isHero ? 'ace-inputbar-hero-card rounded-2xl' : 'rounded-xl',
-      )}>
+        dragActive && 'border-accent ring-2 ring-accent/20',
+      )}
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+      >
         {showDropdown && (
           <SlashDropdown
             items={commands}
@@ -358,6 +434,7 @@ export const InputBar = forwardRef(function InputBar({
           value={value}
           onChange={handleChange}
           onKeyDown={onKey}
+          onPaste={handlePaste}
           onCompositionStart={handleCompositionStart}
           onCompositionEnd={handleCompositionEnd}
           disabled={disabled}

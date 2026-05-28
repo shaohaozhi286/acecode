@@ -190,6 +190,9 @@ const std::vector<DefaultSkillSeed>& default_skill_seeds() {
         {"acecode-usage",
          "acecode:acecode-usage@2026-05-01",
          fs::path("acecode") / "acecode-usage"},
+        {"vision-image-reader",
+         "acecode:vision-image-reader@2026-05-28",
+         fs::path("acecode") / "vision-image-reader"},
     };
     return seeds;
 }

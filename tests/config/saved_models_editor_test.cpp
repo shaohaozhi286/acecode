@@ -129,12 +129,32 @@ TEST(SavedModelsEditor, AddStoresContextWindowOverride) {
     EXPECT_EQ(*cfg.saved_models[1].context_window, 64000);
 }
 
+// 场景:add 带 capabilities → profile 保存能力标签。
+TEST(SavedModelsEditor, AddStoresCapabilities) {
+    auto cfg = make_cfg_with_one_default();
+    auto d = good_openai_draft("vision-lm");
+    d.capabilities = {"vision", "tool_use"};
+    EXPECT_EQ(add_saved_model(cfg, d), SavedModelEditError::OK);
+    ASSERT_EQ(cfg.saved_models.size(), 2u);
+    EXPECT_EQ(cfg.saved_models[1].capabilities,
+              (std::vector<std::string>{"vision", "tool_use"}));
+}
+
 // 场景:add context_window 为负数 → INVALID_CONTEXT_WINDOW,cfg 不变。
 TEST(SavedModelsEditor, AddRejectsNegativeContextWindow) {
     auto cfg = make_cfg_with_one_default();
     auto d = good_openai_draft("local-lm");
     d.context_window = -1;
     EXPECT_EQ(add_saved_model(cfg, d), SavedModelEditError::INVALID_CONTEXT_WINDOW);
+    EXPECT_EQ(cfg.saved_models.size(), 1u);
+}
+
+// 场景:add capabilities 重复 → INVALID_CAPABILITY,cfg 不变。
+TEST(SavedModelsEditor, AddRejectsDuplicateCapabilities) {
+    auto cfg = make_cfg_with_one_default();
+    auto d = good_openai_draft("vision-lm");
+    d.capabilities = {"vision", "vision"};
+    EXPECT_EQ(add_saved_model(cfg, d), SavedModelEditError::INVALID_CAPABILITY);
     EXPECT_EQ(cfg.saved_models.size(), 1u);
 }
 
@@ -205,6 +225,19 @@ TEST(SavedModelsEditor, UpdateCanClearContextWindowOverride) {
     updated.context_window = 0;
     EXPECT_EQ(update_saved_model(cfg, "local-lm", updated), SavedModelEditError::OK);
     EXPECT_FALSE(cfg.saved_models[1].context_window.has_value());
+}
+
+// 场景:update capabilities 为空数组时清除旧能力标签。
+TEST(SavedModelsEditor, UpdateCanClearCapabilities) {
+    auto cfg = make_cfg_with_one_default();
+    auto d = good_openai_draft("vision-lm");
+    d.capabilities = {"vision", "tool_use"};
+    add_saved_model(cfg, d);
+
+    SavedModelDraft updated = good_openai_draft("vision-lm");
+    updated.capabilities = {};
+    EXPECT_EQ(update_saved_model(cfg, "vision-lm", updated), SavedModelEditError::OK);
+    EXPECT_TRUE(cfg.saved_models[1].capabilities.empty());
 }
 
 // 场景:remove 默认条目 → IN_USE_AS_DEFAULT,cfg 不变。

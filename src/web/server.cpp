@@ -3115,6 +3115,9 @@ struct WebServer::Impl {
                     if (!body.contains("stream_timeout_ms")) {
                         draft->stream_timeout_ms = existing->stream_timeout_ms;
                     }
+                    if (!body.contains("capabilities")) {
+                        draft->capabilities = existing->capabilities;
+                    }
                 }
             }
 

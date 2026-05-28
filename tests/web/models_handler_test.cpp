@@ -31,6 +31,7 @@ AppConfig make_cfg_with_two() {
     b.name = "local-lm"; b.provider = "openai"; b.model = "llama-3";
     b.base_url = "http://localhost:1234/v1"; b.api_key = "x";
     b.context_window = 64000;
+    b.capabilities = {"vision", "tool_use"};
     cfg.saved_models.push_back(b);
 
     return cfg;
@@ -49,6 +50,7 @@ TEST(ModelsHandler, ListIncludesAllSavedModels) {
     EXPECT_EQ(arr[1]["name"], "local-lm");
     EXPECT_TRUE(arr[1].contains("base_url"));
     EXPECT_EQ(arr[1]["context_window"], 64000);
+    EXPECT_EQ(arr[1]["capabilities"], nlohmann::json::array({"vision", "tool_use"}));
 }
 
 // 场景:旧配置里遗留 codex saved model 时,Web 模型列表不暴露已屏蔽 provider。
@@ -142,6 +144,7 @@ TEST(ModelsHandler, ErrorToHttpStatusMapping) {
     EXPECT_EQ(http_status_for_edit_error(SavedModelEditError::MISSING_MODEL), 400);
     EXPECT_EQ(http_status_for_edit_error(SavedModelEditError::MISSING_BASE_URL), 400);
     EXPECT_EQ(http_status_for_edit_error(SavedModelEditError::INVALID_CONTEXT_WINDOW), 400);
+    EXPECT_EQ(http_status_for_edit_error(SavedModelEditError::INVALID_CAPABILITY), 400);
 }
 
 // 触发场景:POST/PUT 成功后把 ModelProfile 序列化回去给前端。api_key 是
@@ -172,6 +175,20 @@ TEST(ModelsHandler, ProfileToSafeJsonIncludesContextWindow) {
     p.context_window = 96000;
     auto j = profile_to_safe_json(p);
     EXPECT_EQ(j["context_window"], 96000);
+}
+
+// 触发场景:成功响应里允许返回非敏感的 capabilities。
+TEST(ModelsHandler, ProfileToSafeJsonIncludesCapabilities) {
+    ModelProfile p;
+    p.name = "vision";
+    p.provider = "openai";
+    p.model = "llava";
+    p.base_url = "http://localhost/v1";
+    p.api_key = "sk-secret";
+    p.capabilities = {"vision", "tool_use"};
+    auto j = profile_to_safe_json(p);
+    EXPECT_EQ(j["capabilities"], nlohmann::json::array({"vision", "tool_use"}));
+    EXPECT_FALSE(j.contains("api_key"));
 }
 
 // 触发场景:前端 POST /api/models 漏字段时,后端要给出明确的字段名,
@@ -237,6 +254,7 @@ TEST(ModelsHandler, ParseDraftAcceptsFullBody) {
         {"base_url", "http://localhost/v1"},
         {"api_key", "sk-x"},
         {"context_window", 64000},
+        {"capabilities", nlohmann::json::array({"vision", "tool_use"})},
     };
     std::string err;
     auto d = parse_model_draft(body, err);
@@ -248,6 +266,7 @@ TEST(ModelsHandler, ParseDraftAcceptsFullBody) {
     EXPECT_EQ(d->api_key, "sk-x");
     ASSERT_TRUE(d->context_window.has_value());
     EXPECT_EQ(*d->context_window, 64000);
+    EXPECT_EQ(d->capabilities, (std::vector<std::string>{"vision", "tool_use"}));
     EXPECT_TRUE(err.empty());
 }
 

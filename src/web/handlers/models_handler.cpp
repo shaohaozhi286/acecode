@@ -25,6 +25,9 @@ nlohmann::json entry_to_json(const ModelProfile& entry) {
     if (entry.stream_timeout_ms.has_value() && *entry.stream_timeout_ms > 0) {
         o["stream_timeout_ms"] = *entry.stream_timeout_ms;
     }
+    if (!entry.capabilities.empty()) {
+        o["capabilities"] = entry.capabilities;
+    }
     return o;
 }
 
@@ -87,6 +90,9 @@ nlohmann::json profile_to_safe_json(const ModelProfile& entry) {
     if (entry.stream_timeout_ms.has_value() && *entry.stream_timeout_ms > 0) {
         o["stream_timeout_ms"] = *entry.stream_timeout_ms;
     }
+    if (!entry.capabilities.empty()) {
+        o["capabilities"] = entry.capabilities;
+    }
     // api_key 永不输出 — 安全契约
     return o;
 }
@@ -128,6 +134,14 @@ std::optional<SavedModelDraft> parse_model_draft(const nlohmann::json& body,
         body["models_dev_provider_id"].is_string()) {
         std::string s = body["models_dev_provider_id"].get<std::string>();
         if (!s.empty()) d.models_dev_provider_id = std::move(s);
+    }
+    if (body.contains("capabilities") && body["capabilities"].is_array()) {
+        for (const auto& item : body["capabilities"]) {
+            if (!item.is_string()) continue;
+            std::string tag = item.get<std::string>();
+            if (tag.empty()) continue;
+            d.capabilities.push_back(std::move(tag));
+        }
     }
     if (!err.empty()) return std::nullopt;
     return d;

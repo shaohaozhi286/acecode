@@ -2,9 +2,60 @@
 // 提交前的快速校验,避免没必要的 4xx 往返。规则与后端 saved_models_editor
 // 保持一致;后端是真值源,前端不重复实现复杂分支。
 
+export const MODEL_CAPABILITY_OPTIONS = [
+  {
+    id: 'vision',
+    label: '视觉',
+    aliases: ['vision', 'image', 'multimodal', 'mm', '看图', '图像'],
+  },
+  {
+    id: 'web_search',
+    label: '联网',
+    aliases: ['websearch', 'web_search', 'web', 'search', '联网', '搜索'],
+  },
+  {
+    id: 'reasoning',
+    label: '推理',
+    aliases: ['reasoning', 'think', 'thinking', '推理', '思考'],
+  },
+  {
+    id: 'tool_use',
+    label: '工具',
+    aliases: ['tool', 'tools', 'tool_use', 'function', 'function_calling', '工具', '函数'],
+  },
+  {
+    id: 'rerank',
+    label: '重排',
+    aliases: ['rerank', 'rank', 'ranking', '重排', '排序'],
+  },
+  {
+    id: 'embedding',
+    label: '嵌入',
+    aliases: ['embedding', 'embed', 'vector', '向量', '嵌入'],
+  },
+];
+
+export const DEFAULT_MODEL_CAPABILITIES = ['tool_use'];
+
+function isValidCapabilityTag(tag) {
+  return typeof tag === 'string' && tag.length > 0 && !/[\u0000-\u001f\u007f]/.test(tag);
+}
+
+export function normalizeModelCapabilities(capabilities) {
+  if (!Array.isArray(capabilities)) return [];
+  const seen = new Set();
+  const out = [];
+  capabilities.forEach((tag) => {
+    if (!isValidCapabilityTag(tag) || seen.has(tag)) return;
+    seen.add(tag);
+    out.push(tag);
+  });
+  return out;
+}
+
 export function validateModelDraft(draft) {
   if (!draft || typeof draft !== 'object') return { ok: false, code: 'BAD_REQUEST' };
-  const { name, provider, model, base_url, api_key, context_window } = draft;
+  const { name, provider, model, base_url, api_key, context_window, capabilities } = draft;
   if (!name || typeof name !== 'string' || name.length === 0)
     return { ok: false, code: 'INVALID_NAME' };
   if (name.startsWith('(')) return { ok: false, code: 'RESERVED_NAME' };
@@ -19,6 +70,13 @@ export function validateModelDraft(draft) {
     const parsed = Number(context_window);
     if (!Number.isInteger(parsed) || parsed < 0 || parsed > 2147483647) {
       return { ok: false, code: 'INVALID_CONTEXT_WINDOW' };
+    }
+  }
+  if (capabilities !== undefined && capabilities !== null) {
+    if (!Array.isArray(capabilities)) return { ok: false, code: 'INVALID_CAPABILITY' };
+    const normalized = normalizeModelCapabilities(capabilities);
+    if (normalized.length !== capabilities.length) {
+      return { ok: false, code: 'INVALID_CAPABILITY' };
     }
   }
   return { ok: true };
@@ -49,6 +107,38 @@ export function filterModelIds(models, query) {
   if (terms.length === 0) return ids;
   return ids.filter((id) => {
     const haystack = String(id || '').toLowerCase();
+    return terms.every((term) => haystack.includes(term));
+  });
+}
+
+export function capabilitySearchText(capabilities) {
+  const ids = normalizeModelCapabilities(capabilities);
+  if (ids.length === 0) return '';
+  const definitionById = new Map(MODEL_CAPABILITY_OPTIONS.map((item) => [item.id, item]));
+  return ids
+    .flatMap((id) => {
+      const def = definitionById.get(id);
+      return def ? [id, def.label, ...(def.aliases || [])] : [id];
+    })
+    .join(' ')
+    .toLowerCase();
+}
+
+export function filterSavedModels(models, query) {
+  const list = Array.isArray(models) ? models : [];
+  const terms = String(query || '')
+    .trim()
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (terms.length === 0) return list;
+  return list.filter((model) => {
+    const haystack = [
+      model?.name,
+      model?.provider,
+      model?.model,
+      capabilitySearchText(model?.capabilities),
+    ].filter(Boolean).join(' ').toLowerCase();
     return terms.every((term) => haystack.includes(term));
   });
 }

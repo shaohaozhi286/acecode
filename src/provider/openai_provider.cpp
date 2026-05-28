@@ -33,7 +33,9 @@ namespace {
 
 constexpr int kStreamMaxAttempts = 3;
 constexpr int kStreamRetryBaseDelayMs = 100;
-constexpr int kStreamRetryMaxDelayMs = 2000;
+// 私有/自建大模型常见高延迟场景下 2s 上限不够 — 拉到 15s,让 5xx/429 的 Retry-After
+// 有足够空间避免雪崩式重试。指数退避总是 ≤ 这个上限。
+constexpr int kStreamRetryMaxDelayMs = 15000;
 constexpr int kStreamRetrySleepSliceMs = 50;
 
 std::string ascii_lower(std::string value) {
@@ -943,6 +945,14 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
                 : "response did not contain SSE data";
             LOG_ERROR("SSE malformed response: " + transport_message +
                       " body=" + log_truncate(raw_body_capture, 2000));
+            // SSE 中途断开(HTTP 200 但通道在 [DONE] 前断)是不稳定私有模型的典型
+            // 形态。只要当前回合没产生已闭合的 tool_call,就允许重试 — partial
+            // text/reasoning 会通过下面的 drop-partial 路径丢弃,AgentLoop 端
+            // 响应 Retry 时清空 accumulated 并发 TranscriptReplace。
+            // MalformedJson(SSE 帧本身解析失败)不重试 — 再发一次大概率仍是 garbage。
+            const bool malformed_sse_retryable =
+                kind == ProviderErrorKind::MalformedSse &&
+                accumulated.tool_calls.empty();
             error_info = make_provider_error(
                 kind,
                 200,
@@ -951,20 +961,37 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
                 request_id,
                 raw_body_capture,
                 transport_message,
-                false);
+                malformed_sse_retryable);
         } else {
             return accumulated;
         }
 
-        const bool timeout_retry = error_info.retryable &&
+        // Drop-partial 重试族:timeout 与 SSE 中途断流。两者 provider 端都会重发
+        // 请求,本地 partial content/reasoning 已经通过 callback emit 出去,
+        // AgentLoop 会响应 Retry 事件清空 accumulated 并发 TranscriptReplace,
+        // 所以本地丢弃 partial state 没有正确性顾虑。Timeout 走 unbounded 重试
+        // (用户偏好);MalformedSse 受 kStreamMaxAttempts 上限约束。
+        const bool drop_partial_retry =
+            error_info.retryable &&
+            (error_info.kind == ProviderErrorKind::Timeout ||
+             error_info.kind == ProviderErrorKind::MalformedSse);
+        const bool drop_partial_unbounded =
+            drop_partial_retry &&
             error_info.kind == ProviderErrorKind::Timeout;
-        if (timeout_retry) {
+        if (drop_partial_retry &&
+            (drop_partial_unbounded || attempt < kStreamMaxAttempts)) {
             const int delay_ms = retry_after_delay_ms(r.header, attempt);
             error_info.retry_attempt = attempt;
-            error_info.retry_max_attempts = -1;
+            error_info.retry_max_attempts =
+                drop_partial_unbounded ? -1 : (kStreamMaxAttempts - 1);
             error_info.retry_delay_ms = delay_ms;
-            LOG_WARN("Retrying streaming request after timeout failure, attempt " +
-                     std::to_string(attempt + 1) + "/unbounded");
+            LOG_WARN("Retrying streaming request after " +
+                     provider_error_kind_to_string(error_info.kind) +
+                     " (drop-partial) attempt " +
+                     std::to_string(attempt + 1) + "/" +
+                     (drop_partial_unbounded
+                         ? std::string("unbounded")
+                         : std::to_string(kStreamMaxAttempts)));
             emit_retry_event(callback, error_info);
             if (sleep_retry_or_aborted(delay_ms, abort_flag)) {
                 auto cancel_info = make_provider_error(

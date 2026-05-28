@@ -285,9 +285,20 @@ TEST(OpenAiProviderErrorRecovery, RepeatedTimeoutRetryStopsOnUserAbort) {
     EXPECT_EQ(count_events(events, StreamEventType::Done), 0);
 }
 
-TEST(OpenAiProviderErrorRecovery, IncompleteSseWithoutTransportTimeoutStaysMalformedSse) {
+TEST(OpenAiProviderErrorRecovery, IncompleteSseWithoutTransportTimeoutNowRetriesThenFailsMalformedSse) {
+    // 触发场景:服务端发出一段 content delta 后正常关闭 HTTP 连接,但从未发送
+    // [DONE] —— 也没有触发 transport timeout(libcurl 不会报错)。这是不稳定
+    // 私有模型最常见的"跑着跑着停了"形态。
+    // 期望行为:provider 把 MalformedSse 标为 retryable(因为没有已闭合的
+    // tool_call),走 drop-partial 重试族,达到 kStreamMaxAttempts(3) 次仍失败
+    // 后才报错。
+    // 回归测试:此前 IncompleteSseWithoutTransportTimeoutStaysMalformedSse 测
+    // 试断言 retry=0、calls=1、立即报错 —— 那是"中途断流直接放弃整个 turn"
+    // 的老行为,对脆弱私有模型极不友好,现已改为下面的新断言。
+    std::atomic<int> calls{0};
     LocalHttpServer server([&](httplib::Server& s) {
-        s.Post("/chat/completions", [](const httplib::Request&, httplib::Response& res) {
+        s.Post("/chat/completions", [&](const httplib::Request&, httplib::Response& res) {
+            ++calls;
             res.status = 200;
             res.set_content(
                 "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
@@ -301,16 +312,26 @@ TEST(OpenAiProviderErrorRecovery, IncompleteSseWithoutTransportTimeoutStaysMalfo
     const auto events = collect_events(provider);
     const StreamEvent* err = last_error_event(events);
     ASSERT_NE(err, nullptr);
+    EXPECT_EQ(calls.load(), 3);
     EXPECT_EQ(err->provider_error.kind, ProviderErrorKind::MalformedSse);
     EXPECT_EQ(err->provider_error.status_code, 200);
-    EXPECT_EQ(count_events(events, StreamEventType::Delta), 1);
-    EXPECT_EQ(count_events(events, StreamEventType::Retry), 0);
+    EXPECT_TRUE(err->provider_error.retryable);
+    // 每次 attempt 都重新流出一个 content delta(总共 3 次),因为 partial
+    // 在 provider 端被丢弃了 —— 但 callback 早就吃过 delta,这里仅做计数。
+    EXPECT_EQ(count_events(events, StreamEventType::Delta), 3);
+    EXPECT_EQ(count_events(events, StreamEventType::Retry), 2);
     EXPECT_EQ(count_events(events, StreamEventType::Done), 0);
 }
 
-TEST(OpenAiProviderErrorRecovery, FinishReasonStopWithoutDoneDoesNotCompleteStream) {
+TEST(OpenAiProviderErrorRecovery, FinishReasonStopWithoutDoneNowRetriesThenFailsMalformedSse) {
+    // 触发场景:服务端发了 content delta 且带 finish_reason=stop,但没有 [DONE]
+    // 帧。同样属于 SSE 协议未完成 —— 没有已闭合 tool_call,应该走 drop-partial 重试。
+    // 回归测试:此前 FinishReasonStopWithoutDoneDoesNotCompleteStream 断言 retry=0、
+    // 立即报错;现在期望走重试族直到 kStreamMaxAttempts 用完。
+    std::atomic<int> calls{0};
     LocalHttpServer server([&](httplib::Server& s) {
-        s.Post("/chat/completions", [](const httplib::Request&, httplib::Response& res) {
+        s.Post("/chat/completions", [&](const httplib::Request&, httplib::Response& res) {
+            ++calls;
             res.status = 200;
             res.set_content(
                 "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n",
@@ -324,9 +345,49 @@ TEST(OpenAiProviderErrorRecovery, FinishReasonStopWithoutDoneDoesNotCompleteStre
     const auto events = collect_events(provider);
     const StreamEvent* err = last_error_event(events);
     ASSERT_NE(err, nullptr);
+    EXPECT_EQ(calls.load(), 3);
     EXPECT_EQ(err->provider_error.kind, ProviderErrorKind::MalformedSse);
-    EXPECT_EQ(count_events(events, StreamEventType::Delta), 1);
+    EXPECT_TRUE(err->provider_error.retryable);
+    EXPECT_EQ(count_events(events, StreamEventType::Delta), 3);
+    EXPECT_EQ(count_events(events, StreamEventType::Retry), 2);
     EXPECT_EQ(count_events(events, StreamEventType::Done), 0);
+}
+
+TEST(OpenAiProviderErrorRecovery, Http200MalformedSseRecoversOnRetry) {
+    // 触发场景:第一次返回 content delta 后不发 [DONE](连接关闭),第二次返
+    // 回完整 SSE 流。这正是用户公司自建模型频繁出现的"跑着跑着断了"的可
+    // 恢复形态。
+    // 期望行为:provider 在第一次失败时 emit Retry,第二次成功 emit Done,
+    // 整个 stream 视为成功;无 Error 事件外发,LLM 拿到完整回复。
+    // 非显然阈值:Delta 至少 2 次 —— 第一次 partial(被 AgentLoop 丢弃)+ 第
+    // 二次正常 stream 的 1 个或多个 delta。
+    std::atomic<int> calls{0};
+    LocalHttpServer server([&](httplib::Server& s) {
+        s.Post("/chat/completions", [&](const httplib::Request&, httplib::Response& res) {
+            const int call = ++calls;
+            res.status = 200;
+            if (call == 1) {
+                res.set_content(
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+                    "text/event-stream");
+                return;
+            }
+            res.set_content(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n"
+                "data: [DONE]\n\n",
+                "text/event-stream");
+        });
+    });
+
+    OpenAiCompatProvider provider(
+        "http://127.0.0.1:" + std::to_string(server.port), "", "test-model", 1000);
+
+    const auto events = collect_events(provider);
+    EXPECT_EQ(calls.load(), 2);
+    EXPECT_EQ(last_error_event(events), nullptr);
+    EXPECT_EQ(count_events(events, StreamEventType::Retry), 1);
+    EXPECT_EQ(count_events(events, StreamEventType::Done), 1);
+    EXPECT_GE(count_events(events, StreamEventType::Delta), 2);
 }
 
 TEST(OpenAiProviderErrorRecovery, RetriesTransientFailureBeforeAnyOutput) {

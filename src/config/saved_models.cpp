@@ -4,12 +4,33 @@
 
 #include "model_provider_registry.hpp"
 
+#include <cctype>
 #include <set>
 #include <sstream>
 
 namespace acecode {
 
 namespace {
+
+bool is_valid_capability_tag(const std::string& tag) {
+    if (tag.empty()) return false;
+    for (unsigned char ch : tag) {
+        if (std::iscntrl(ch)) return false;
+    }
+    return true;
+}
+
+std::vector<std::string> parse_capabilities_array(const nlohmann::json& node) {
+    std::vector<std::string> out;
+    if (!node.is_array()) return out;
+    for (const auto& item : node) {
+        if (!item.is_string()) continue;
+        std::string tag = item.get<std::string>();
+        if (tag.empty()) continue;
+        out.push_back(std::move(tag));
+    }
+    return out;
+}
 
 // 单条 entry 解析。失败时把错误塞进 err(已带 entry 索引/name 上下文)并返回 nullopt。
 std::optional<ModelProfile> parse_one_entry(const nlohmann::json& node, std::size_t idx,
@@ -88,6 +109,9 @@ std::optional<ModelProfile> parse_one_entry(const nlohmann::json& node, std::siz
             return std::nullopt;
         }
         e.stream_timeout_ms = stream_timeout_ms;
+    }
+    if (node.contains("capabilities")) {
+        e.capabilities = parse_capabilities_array(node["capabilities"]);
     }
 
     return e;
@@ -169,6 +193,23 @@ bool validate_saved_models(const std::vector<ModelProfile>& entries,
                 << "' has invalid stream_timeout_ms";
             err = oss.str();
             return false;
+        }
+        std::set<std::string> seen_capabilities;
+        for (const auto& tag : e.capabilities) {
+            if (!is_valid_capability_tag(tag)) {
+                std::ostringstream oss;
+                oss << "saved_models entry '" << e.name
+                    << "' has invalid capability tag";
+                err = oss.str();
+                return false;
+            }
+            if (!seen_capabilities.insert(tag).second) {
+                std::ostringstream oss;
+                oss << "saved_models entry '" << e.name
+                    << "' has duplicate capability '" << tag << "'";
+                err = oss.str();
+                return false;
+            }
         }
         // copilot/codex:不需要 base_url / api_key,model 已在 parse 阶段检验非空。
     }

@@ -4,6 +4,8 @@
 #include "model_provider_registry.hpp"
 
 #include <algorithm>
+#include <cctype>
+#include <set>
 
 namespace acecode {
 
@@ -20,6 +22,7 @@ const char* to_string(SavedModelEditError e) {
         case SavedModelEditError::INVALID_API_KEY:   return "INVALID_API_KEY";
         case SavedModelEditError::INVALID_CONTEXT_WINDOW: return "INVALID_CONTEXT_WINDOW";
         case SavedModelEditError::INVALID_STREAM_TIMEOUT: return "INVALID_STREAM_TIMEOUT";
+        case SavedModelEditError::INVALID_CAPABILITY: return "INVALID_CAPABILITY";
         case SavedModelEditError::NOT_FOUND:         return "NOT_FOUND";
         case SavedModelEditError::IN_USE_AS_DEFAULT: return "IN_USE_AS_DEFAULT";
     }
@@ -27,6 +30,14 @@ const char* to_string(SavedModelEditError e) {
 }
 
 namespace {
+
+bool valid_capability_tag(const std::string& tag) {
+    if (tag.empty()) return false;
+    for (unsigned char ch : tag) {
+        if (std::iscntrl(ch)) return false;
+    }
+    return true;
+}
 
 SavedModelEditError validate_draft_basic(const SavedModelDraft& d) {
     if (d.name.empty()) return SavedModelEditError::INVALID_NAME;
@@ -45,6 +56,11 @@ SavedModelEditError validate_draft_basic(const SavedModelDraft& d) {
     }
     if (d.stream_timeout_ms.has_value() && *d.stream_timeout_ms < 0) {
         return SavedModelEditError::INVALID_STREAM_TIMEOUT;
+    }
+    std::set<std::string> seen_capabilities;
+    for (const auto& tag : d.capabilities) {
+        if (!valid_capability_tag(tag)) return SavedModelEditError::INVALID_CAPABILITY;
+        if (!seen_capabilities.insert(tag).second) return SavedModelEditError::INVALID_CAPABILITY;
     }
     return SavedModelEditError::OK;
 }
@@ -65,6 +81,7 @@ ModelProfile to_profile(const SavedModelDraft& d) {
     if (d.stream_timeout_ms.has_value() && *d.stream_timeout_ms > 0) {
         p.stream_timeout_ms = *d.stream_timeout_ms;
     }
+    p.capabilities = d.capabilities;
     return p;
 }
 

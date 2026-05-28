@@ -1037,7 +1037,12 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
                 break;
             case StreamEventType::Retry:
                 provider_error_info = evt.provider_error;
-                if (evt.provider_error.kind == ProviderErrorKind::Timeout) {
+                // Drop-partial 重试族:Timeout 与 MalformedSse(SSE 中途断流)。
+                // 两者 provider 端都会重发完整请求,本地必须清空 partial 累积
+                // 否则下一次成功的 stream 会叠加成重复内容(同样的 reasoning /
+                // content 出现两遍)。TranscriptReplace 让前端把 partial 痕迹抹掉。
+                if (evt.provider_error.kind == ProviderErrorKind::Timeout ||
+                    evt.provider_error.kind == ProviderErrorKind::MalformedSse) {
                     {
                         std::lock_guard<std::mutex> lk(resp_mu);
                         accumulated = ChatResponse{};
