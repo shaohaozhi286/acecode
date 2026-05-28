@@ -1,4 +1,5 @@
 #include "openai_provider.hpp"
+#include "image/image_processor.hpp"
 #include "session/attachment_store.hpp"
 #include "utils/logger.hpp"
 #include "utils/base64.hpp"
@@ -292,11 +293,35 @@ nlohmann::json openai_content_for_message(const ChatMessage& msg) {
                 continue;
             }
 
+            std::string provider_mime = record->mime_type;
+            std::string provider_bytes = *bytes;
+            auto normalized = image::normalize_image_bytes(provider_bytes, provider_mime);
+            if (normalized.attempted) {
+                LOG_INFO("[provider] image normalization"
+                         " name=" + record->name +
+                         " ok=" + std::string(normalized.ok ? "1" : "0") +
+                         " changed=" + std::string(normalized.changed ? "1" : "0") +
+                         " original_size=" + std::to_string(bytes->size()) +
+                         " reason=" + normalized.reason +
+                         " error=" + normalized.error);
+                if (normalized.ok && normalized.changed) {
+                    provider_bytes = std::move(normalized.bytes);
+                    if (!normalized.mime_type.empty()) {
+                        provider_mime = normalized.mime_type;
+                    }
+                } else if (!normalized.ok) {
+                    push_openai_text_part(parts,
+                        "[Attached image unavailable: image normalization failed: " +
+                        (normalized.error.empty() ? normalized.reason : normalized.error) + "]");
+                    continue;
+                }
+            }
+
             parts.push_back(nlohmann::json{
                 {"type", "image_url"},
                 {"image_url", {
-                    {"url", "data:" + record->mime_type + ";base64," +
-                            base64_encode(*bytes)}
+                    {"url", "data:" + provider_mime + ";base64," +
+                            base64_encode(provider_bytes)}
                 }},
             });
             continue;

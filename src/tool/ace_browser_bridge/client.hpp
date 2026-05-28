@@ -55,6 +55,7 @@ public:
                                     HostStarter host_starter = HostStarter{});
 
     BridgeEnvelope status();
+    BridgeEnvelope ensure_ready();
     BridgeEnvelope command(const BrowserCommandRequest& request);
     BridgeEnvelope screenshot(const std::string& session, const std::string& output_path);
 

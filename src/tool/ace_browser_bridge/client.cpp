@@ -311,6 +311,18 @@ BridgeEnvelope AceBrowserBridgeClient::status() {
     return envelope;
 }
 
+BridgeEnvelope AceBrowserBridgeClient::ensure_ready() {
+    clear_status_cache();
+    BridgeEnvelope envelope = run_json_command({"ensure-ready", "--json"}, "");
+    if (should_cache_status(envelope)) {
+        cached_status_ = envelope;
+        cached_status_at_ = std::chrono::steady_clock::now();
+    } else {
+        cached_status_.reset();
+    }
+    return envelope;
+}
+
 BridgeEnvelope AceBrowserBridgeClient::command(const BrowserCommandRequest& request) {
     const std::string body = command_request_json(request).dump();
     BridgeEnvelope envelope = run_json_command({"command", "--json"}, body);

@@ -39,7 +39,7 @@ import {
   nextQueuedInput,
   retryQueuedInput,
 } from '../lib/chatInputQueue.js';
-import { findStickyUserContext, sameStickyUserContext } from '../lib/stickyUserContext.js';
+import { findStickyUserContext, sameStickyUserContext, scrollTopForStickySourceRow } from '../lib/stickyUserContext.js';
 import { useSessionTranscript } from '../lib/sessionTranscript.js';
 import { projectCollapsedTranscriptItems } from '../lib/transcriptProjection.js';
 import { usePreference } from '../lib/usePreference.js';
@@ -53,6 +53,7 @@ import {
   selectedModelName,
 } from '../lib/sessionModel.js';
 import { normalizePermissionMode } from '../lib/permissionMode.js';
+import { ATTACHMENT_HARD_LIMIT_BYTES, normalizeImageFile } from '../lib/imageNormalize.js';
 import { PanelToggleIcon, VsIcon } from './Icon.jsx';
 import { commandWorkspaceHashForInput } from '../lib/slashCommandWorkspace.js';
 import { inputRouteForText, sessionCreateOptionsForText } from '../lib/builtinCommandRouting.js';
@@ -377,6 +378,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   const composerValueRef = useRef('');
   const composerDirtyRef = useRef(false);
   const preserveComposerExtrasOnSessionChangeRef = useRef(false);
+  const restoreComposerFocusAfterSubmitRef = useRef(false);
   const [queueState, setQueueState] = useState(() => createChatInputQueueState());
   const queueStateRef = useRef(queueState);
   const drainRef = useRef(false);
@@ -497,12 +499,24 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         uploading: true,
       };
       setComposerAttachments((items) => [...items, localItem]);
-      fileToBase64(file)
-        .then((dataBase64) => api.uploadSessionAttachment(targetSid, {
-          name: file.name || 'attachment',
-          mime_type: file.type || '',
-          data_base64: dataBase64,
-        }))
+      normalizeImageFile(file)
+        .then((normalized) => {
+          if (normalized.file.size > ATTACHMENT_HARD_LIMIT_BYTES) {
+            throw new Error('附件超过 25MiB，且无法压缩到限制内');
+          }
+          return normalized;
+        })
+        .then(({ file: uploadFile }) => fileToBase64(uploadFile)
+          .then((dataBase64) => ({ uploadFile, dataBase64 })))
+        .then(({ uploadFile, dataBase64 }) => {
+          const uploadName = uploadFile.name || file.name || 'attachment';
+          const uploadMime = uploadFile.type || file.type || '';
+          return api.uploadSessionAttachment(targetSid, {
+            name: uploadName,
+            mime_type: uploadMime,
+            data_base64: dataBase64,
+          });
+        })
         .then((result) => {
           const attachment = result?.attachment || {};
           setComposerAttachments((items) => items.map((item) => (
@@ -792,11 +806,48 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     });
   }, [measureStickyContext]);
 
+  const jumpToStickyUserSource = useCallback((context) => {
+    const el = scrollRef.current;
+    const targetId = String(context?.itemId || '');
+    if (!el || !targetId) return;
+
+    const targetRow = Array.from(el.querySelectorAll('[data-chat-row="true"]'))
+      .find((row) => row.getAttribute('data-chat-item-id') === targetId);
+    if (!targetRow) return;
+
+    const containerRect = el.getBoundingClientRect();
+    const rowRect = targetRow.getBoundingClientRect();
+    el.scrollTo({
+      top: scrollTopForStickySourceRow({
+        scrollTop: el.scrollTop,
+        containerTop: containerRect.top,
+        rowTop: rowRect.top,
+      }),
+      behavior: 'smooth',
+    });
+    requestAnimationFrame(scheduleStickyMeasure);
+    window.setTimeout(scheduleStickyMeasure, 220);
+  }, [scheduleStickyMeasure]);
+
   const focusChatInput = useCallback((force = false) => {
     if (questionRequest) return;
     if (!force && isEditableElement(document.activeElement)) return;
     inputRef.current?.focus();
   }, [questionRequest]);
+
+  const restoreChatInputFocusSoon = useCallback((force = false) => {
+    requestAnimationFrame(() => {
+      focusChatInput(force);
+      requestAnimationFrame(() => focusChatInput(force));
+      window.setTimeout(() => focusChatInput(force), 80);
+    });
+  }, [focusChatInput]);
+
+  useEffect(() => {
+    if (composerSubmitting || !restoreComposerFocusAfterSubmitRef.current) return;
+    restoreComposerFocusAfterSubmitRef.current = false;
+    restoreChatInputFocusSoon(false);
+  }, [composerSubmitting, restoreChatInputFocusSoon]);
 
   // 自动滚到底。审查栏会异步测量高度并给消息区补 bottom padding,
   // 因此需要在 padding 生效后再补几帧滚动,否则切换会话时会停在底部上方。
@@ -1013,7 +1064,8 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
             applyEvent({ type: 'busy_changed', payload: { busy: true } }, { emitEffects: false });
           }
         })
-        .catch((e) => toast({ kind: 'err', text: '新建会话失败:' + (e.message || '') }));
+        .catch((e) => toast({ kind: 'err', text: '新建会话失败:' + (e.message || '') }))
+        .finally(() => restoreChatInputFocusSoon(false));
       return;
     }
     if (composerSubmitting) return;
@@ -1021,9 +1073,11 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
       enqueueInput(payload);
       clearCurrentSessionDraft();
       clearComposerExtras();
+      restoreChatInputFocusSoon(false);
       return;
     }
     const targetSid = sid;
+    restoreComposerFocusAfterSubmitRef.current = true;
     setComposerSubmitting(true);
     sendInputOrBuiltin(targetSid, payload)
       .then(() => {
@@ -1040,7 +1094,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         applyEvent({ type: 'busy_changed', payload: { busy: false } }, { emitEffects: false });
       })
       .finally(() => setComposerSubmitting(false));
-  }, [sid, busy, api, homeSubmitting, recordInputHistory, enqueueInput, applyEvent, setTranscriptTitle, sendInputOrBuiltin, composerSubmitting, clearCurrentSessionDraft, composerAttachments, composerContexts, clearComposerExtras, createHomeComposerSession]);
+  }, [sid, busy, api, homeSubmitting, recordInputHistory, enqueueInput, applyEvent, setTranscriptTitle, sendInputOrBuiltin, composerSubmitting, clearCurrentSessionDraft, composerAttachments, composerContexts, clearComposerExtras, createHomeComposerSession, restoreChatInputFocusSoon]);
 
   const drainQueuedInput = useCallback(() => {
     const targetSid = sidRef.current;
@@ -1690,7 +1744,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
             <ActivityIndicator activity={activity} showAceCodeAvatar={showAceCodeAvatar} />
           )}
         </div>
-        <StickyUserContext context={stickyUserContext} />
+        <StickyUserContext context={stickyUserContext} onJumpToSource={jumpToStickyUserSource} />
         {showChangeDock && (
           <ChangeGlassDock
             dockRef={changeDockRef}

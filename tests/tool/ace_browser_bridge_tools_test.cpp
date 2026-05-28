@@ -38,7 +38,7 @@ struct FakeBridgeCli {
                                            const std::string& stdin_text,
                                            std::chrono::milliseconds) {
             self->calls.push_back(BridgeCliCall{argv, stdin_text});
-            if (argv.size() >= 2 && argv[1] == "status") {
+            if (argv.size() >= 2 && (argv[1] == "status" || argv[1] == "ensure-ready")) {
                 return CliProcessResult{0, false, self->status.dump(), ""};
             }
             return CliProcessResult{2, false, R"({"ok":false,"error":{"code":"bad_argv","message":"bad argv"}})", ""};
@@ -103,12 +103,15 @@ TEST(AceBrowserBridgeToolsStart, ReturnsStatusAndCliPrompt) {
     ToolResult result = tools.execute("browser_start", R"({"session":"demo"})");
 
     ASSERT_TRUE(result.success);
+    ASSERT_EQ(fake->calls.size(), 1u);
+    EXPECT_EQ(fake->calls[0].argv[1], "ensure-ready");
     auto out = result_json(result);
     EXPECT_EQ(out["data"]["session"], "demo");
     EXPECT_EQ(out["data"]["tool"], "browser_start");
     EXPECT_EQ(out["data"]["cli"]["default_port"], 52007);
     ASSERT_TRUE(result.post_user_prompt.has_value());
     EXPECT_NE(result.post_user_prompt->find("ace-browser-host"), std::string::npos);
+    EXPECT_NE(result.post_user_prompt->find("ensure-ready"), std::string::npos);
     EXPECT_NE(result.post_user_prompt->find("block-input"), std::string::npos);
     EXPECT_NE(result.post_user_prompt->find("unblock-input"), std::string::npos);
     EXPECT_NE(result.post_user_prompt->find("read-page"), std::string::npos);

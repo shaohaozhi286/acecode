@@ -1,6 +1,8 @@
 #include "attachment_store.hpp"
 
+#include "../image/image_processor.hpp"
 #include "../utils/atomic_file.hpp"
+#include "../utils/logger.hpp"
 #include "../utils/utf8_path.hpp"
 
 #include <algorithm>
@@ -50,6 +52,19 @@ std::string extension_for_mime(const std::string& mime_type) {
     if (mime == "text/markdown") return ".md";
     if (mime == "application/json") return ".json";
     return {};
+}
+
+std::string replace_extension_for_mime(const std::string& name,
+                                       const std::string& mime_type) {
+    const std::string ext = extension_for_mime(mime_type);
+    if (ext.empty()) return name;
+    const auto slash = name.find_last_of("/\\");
+    const auto dot = name.find_last_of('.');
+    if (dot != std::string::npos &&
+        (slash == std::string::npos || dot > slash)) {
+        return name.substr(0, dot) + ext;
+    }
+    return name + ext;
 }
 
 fs::path attachments_dir(const std::string& project_dir,
@@ -148,7 +163,60 @@ std::optional<AttachmentRecord> save_attachment(
         set_error(error, "attachment data required");
         return std::nullopt;
     }
-    if (bytes.size() > kMaxAttachmentBytes) {
+
+    std::string stored_name = name.empty() ? "attachment" : name;
+    std::string stored_mime = attachment_mime_for_name(stored_name, supplied_mime_type);
+    std::string stored_bytes = bytes;
+    nlohmann::json normalization = nlohmann::json::object();
+    if (attachment_kind_for_mime(stored_mime, stored_name) == "image") {
+        auto normalized = image::normalize_image_bytes(stored_bytes, stored_mime);
+        if (normalized.attempted) {
+            normalization = {
+                {"backend", normalized.backend},
+                {"changed", normalized.changed},
+                {"ok", normalized.ok},
+                {"reason", normalized.reason},
+                {"original_size_bytes", bytes.size()},
+                {"threshold_bytes", image::kImageCompressionThresholdBytes},
+                {"max_edge", image::kImageNormalizeMaxEdge},
+                {"input_width", normalized.input.width},
+                {"input_height", normalized.input.height},
+                {"input_channels", normalized.input.channels},
+            };
+            if (normalized.output.width > 0 && normalized.output.height > 0) {
+                normalization["output_width"] = normalized.output.width;
+                normalization["output_height"] = normalized.output.height;
+                normalization["output_channels"] = normalized.output.channels;
+            }
+            if (!normalized.error.empty()) normalization["error"] = normalized.error;
+            LOG_INFO("[attachment-store] image normalization"
+                     " session=" + session_id +
+                     " name=" + stored_name +
+                     " ok=" + std::string(normalized.ok ? "1" : "0") +
+                     " changed=" + std::string(normalized.changed ? "1" : "0") +
+                     " original_size=" + std::to_string(bytes.size()) +
+                     " reason=" + normalized.reason +
+                     " error=" + normalized.error);
+            if (!normalized.ok) {
+                set_error(error, "image normalization failed: " +
+                    (normalized.error.empty() ? normalized.reason : normalized.error));
+                return std::nullopt;
+            }
+            if (normalized.ok && normalized.changed) {
+                stored_bytes = std::move(normalized.bytes);
+                if (!normalized.mime_type.empty()) {
+                    const std::string original_name = stored_name;
+                    stored_mime = normalized.mime_type;
+                    stored_name = replace_extension_for_mime(stored_name, stored_mime);
+                    normalization["output_size_bytes"] = stored_bytes.size();
+                    normalization["output_mime_type"] = stored_mime;
+                    normalization["original_name"] = original_name;
+                }
+            }
+        }
+    }
+
+    if (stored_bytes.size() > kMaxAttachmentBytes) {
         set_error(error, "attachment too large");
         return std::nullopt;
     }
@@ -156,11 +224,14 @@ std::optional<AttachmentRecord> save_attachment(
     AttachmentRecord record;
     record.id = generate_attachment_id();
     record.session_id = session_id;
-    record.name = name.empty() ? "attachment" : name;
-    record.mime_type = attachment_mime_for_name(record.name, supplied_mime_type);
+    record.name = stored_name;
+    record.mime_type = stored_mime;
     record.kind = attachment_kind_for_mime(record.mime_type, record.name);
-    record.size_bytes = static_cast<std::uintmax_t>(bytes.size());
+    record.size_bytes = static_cast<std::uintmax_t>(stored_bytes.size());
     record.blob_url = attachment_blob_url(session_id, record.id);
+    if (!normalization.empty()) {
+        record.metadata["image_normalization"] = normalization;
+    }
 
     std::string ext = extension_from_name(record.name);
     if (ext.empty()) ext = extension_for_mime(record.mime_type);
@@ -180,7 +251,7 @@ std::optional<AttachmentRecord> save_attachment(
             set_error(error, "failed to write attachment");
             return std::nullopt;
         }
-        ofs.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        ofs.write(stored_bytes.data(), static_cast<std::streamsize>(stored_bytes.size()));
         if (!ofs.good()) {
             set_error(error, "failed to write attachment bytes");
             return std::nullopt;

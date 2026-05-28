@@ -5,6 +5,7 @@
 插件负责：
 
 - 与 `ace-browser-host` daemon 建立握手和轮询连接。
+- 普通页面加载 content script 时会唤醒 service worker，帮助 `ace-browser-host ensure-ready` 更快确认扩展连接。
 - 维护 managed browser session、owned/adopted tab 和 Chrome tab group 状态色。
 - 注入 `content/virtual-cursor.js`，提供 snapshot、`@e` 元素引用、目标解析、DOM 动作、operation overlay 和显式用户输入 block。
 - 通过 Chrome Debugger API 执行 CDP pointer、typing、network capture 和 PDF 导出。

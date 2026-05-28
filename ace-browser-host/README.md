@@ -8,6 +8,7 @@
 
 ```bash
 ace-browser-host.exe start --json
+ace-browser-host.exe ensure-ready --json [--timeout-ms <ms>] [--no-launch-browser]
 ace-browser-host.exe status --json
 ace-browser-host.exe open --json --session <name> --url <url> [--new-tab] [--group-title <title>] [--timeout-ms <ms>]
 ace-browser-host.exe find-tab --json --session <name> (--url <text>|--tab-id <id>|--active)
@@ -34,6 +35,8 @@ ace-browser-host.exe shutdown --json
 ```
 
 `start --json` 会在 daemon 未运行时后台启动 `serve --json --port 52007`，然后轮询 `status`。
+
+`ensure-ready --json` 是浏览器工具的推荐入口。它会确保 daemon 运行；如果扩展未连接或连接过期，会打开 `http://127.0.0.1:52007/wake` 唤醒默认浏览器和 `ace-browser-bridge` 扩展，然后在超时内等待 `ready=true`。调试时可加 `--no-launch-browser` 只检查和等待，不主动打开浏览器。
 
 `command --json` 是底层入口，从 stdin 读取：
 

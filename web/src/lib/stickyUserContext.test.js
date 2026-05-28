@@ -1,7 +1,7 @@
 // Sticky user context helper 单元测试:覆盖滚动位置到当前用户问题的纯逻辑映射。
 
 import assert from 'node:assert/strict';
-import { findStickyUserContext, sameStickyUserContext } from './stickyUserContext.js';
+import { findStickyUserContext, sameStickyUserContext, scrollTopForStickySourceRow } from './stickyUserContext.js';
 
 function run(name, fn) {
   try {
@@ -96,4 +96,22 @@ run('sticky 上下文相等比较使用来源和内容', () => {
   assert.equal(sameStickyUserContext(null, null), true);
   assert.equal(sameStickyUserContext({ itemId: 1, messageId: 'u1', content: 'a' }, { itemId: 1, messageId: 'u1', content: 'a' }), true);
   assert.equal(sameStickyUserContext({ itemId: 1, messageId: 'u1', content: 'a' }, { itemId: 1, messageId: 'u1', content: 'b' }), false);
+});
+
+run('sticky 源消息跳转根据容器和行位置计算 scrollTop', () => {
+  assert.equal(scrollTopForStickySourceRow({
+    scrollTop: 400,
+    containerTop: 100,
+    rowTop: 260,
+    topInset: 16,
+  }), 544);
+});
+
+run('sticky 源消息跳转不会产生负 scrollTop', () => {
+  assert.equal(scrollTopForStickySourceRow({
+    scrollTop: 10,
+    containerTop: 200,
+    rowTop: 120,
+    topInset: 12,
+  }), 0);
 });

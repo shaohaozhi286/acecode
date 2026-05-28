@@ -89,6 +89,27 @@ TEST(AceBrowserBridgeClientInvocation, BuildsScreenshotArgv) {
     EXPECT_EQ((*calls)[0].stdin_text, "");
 }
 
+TEST(AceBrowserBridgeClientInvocation, BuildsEnsureReadyArgv) {
+    auto calls = std::make_shared<std::vector<Call>>();
+    AceBrowserBridgeConfig cfg;
+    cfg.host_path = "custom-host";
+    AceBrowserBridgeClient client(cfg, [calls](const std::vector<std::string>& argv,
+                                               const std::string& stdin_text,
+                                               std::chrono::milliseconds) {
+        calls->push_back(Call{argv, stdin_text});
+        return CliProcessResult{0, false,
+            R"({"ok":true,"data":{"running":true,"extension_connected":true,"ready":true}})", ""};
+    });
+
+    auto envelope = client.ensure_ready();
+
+    ASSERT_TRUE(envelope.ok);
+    ASSERT_EQ(calls->size(), 1u);
+    EXPECT_EQ((*calls)[0].argv, (std::vector<std::string>{"custom-host", "ensure-ready", "--json"}));
+    EXPECT_EQ((*calls)[0].stdin_text, "");
+    EXPECT_TRUE(envelope.data["ready"].get<bool>());
+}
+
 TEST(AceBrowserBridgeClientStatus, CachesOnlyHealthyStatus) {
     auto calls = std::make_shared<int>(0);
     AceBrowserBridgeConfig cfg;

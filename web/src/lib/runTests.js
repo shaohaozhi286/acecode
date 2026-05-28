@@ -6,6 +6,7 @@ import './sessionStatus.test.js';
 import './codeBlockCopy.test.js';
 import './inputHistoryNavigation.test.js';
 import './inputBarState.test.js';
+import './imageNormalize.test.js';
 import './goalControl.test.js';
 import './chatInputQueue.test.js';
 import './queueCardItem.test.js';

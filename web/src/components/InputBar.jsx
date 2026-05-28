@@ -35,6 +35,9 @@ export const InputBar = forwardRef(function InputBar({
   const ta = useRef(null);
   const fileInputRef = useRef(null);
   const capabilityMenuRef = useRef(null);
+  const composingRef = useRef(false);
+  const justFinishedCompositionRef = useRef(false);
+  const compositionGuardTimerRef = useRef(0);
   const isHero = variant === 'hero';
   const attachmentItems = Array.isArray(attachments) ? attachments : [];
   const contextItems = Array.isArray(contexts) ? contexts : [];
@@ -71,6 +74,44 @@ export const InputBar = forwardRef(function InputBar({
     el.style.height = h + 'px';
   };
   useEffect(autosize, [isHero, value]);
+
+  useEffect(() => () => {
+    if (compositionGuardTimerRef.current) {
+      window.clearTimeout(compositionGuardTimerRef.current);
+    }
+  }, []);
+
+  const clearCompositionEndGuard = () => {
+    if (compositionGuardTimerRef.current) {
+      window.clearTimeout(compositionGuardTimerRef.current);
+      compositionGuardTimerRef.current = 0;
+    }
+  };
+
+  const handleCompositionStart = () => {
+    clearCompositionEndGuard();
+    composingRef.current = true;
+    justFinishedCompositionRef.current = false;
+  };
+
+  const handleCompositionEnd = () => {
+    composingRef.current = false;
+    justFinishedCompositionRef.current = true;
+    clearCompositionEndGuard();
+    compositionGuardTimerRef.current = window.setTimeout(() => {
+      justFinishedCompositionRef.current = false;
+      compositionGuardTimerRef.current = 0;
+    }, 0);
+  };
+
+  const isComposingKeyEvent = (event) => (
+    composingRef.current ||
+    justFinishedCompositionRef.current ||
+    !!event.isComposing ||
+    !!event.nativeEvent?.isComposing ||
+    event.keyCode === 229 ||
+    event.which === 229
+  );
 
   // 触发条件:value 非空、首字符 /、整段无空白
   const showDropdownRaw = value.length > 0 && value[0] === '/' && !/\s/.test(value);
@@ -193,6 +234,7 @@ export const InputBar = forwardRef(function InputBar({
       }
     }
     if (e.key === 'Enter' && !e.shiftKey) {
+      if (isComposingKeyEvent(e)) return;
       e.preventDefault();
       submit();
       return;
@@ -316,6 +358,8 @@ export const InputBar = forwardRef(function InputBar({
           value={value}
           onChange={handleChange}
           onKeyDown={onKey}
+          onCompositionStart={handleCompositionStart}
+          onCompositionEnd={handleCompositionEnd}
           disabled={disabled}
           placeholder={placeholder}
           className={clsx(

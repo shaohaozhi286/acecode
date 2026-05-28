@@ -21,6 +21,17 @@
     refs: new Map()
   };
 
+  try {
+    const wake = chrome.runtime.sendMessage({
+      source: SOURCE,
+      command: "content_ready",
+      url: location.href
+    });
+    if (wake && typeof wake.catch === "function") wake.catch(() => {});
+  } catch {
+    // Service worker wake-up is best effort; direct page commands still work.
+  }
+
   function createCursor() {
     if (state.cursor) return;
 

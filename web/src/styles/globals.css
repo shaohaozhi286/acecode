@@ -932,6 +932,8 @@ body {
   pointer-events: none;
 }
 .ace-sticky-user-context {
+  appearance: none;
+  display: block;
   max-width: min(70%, 760px);
   min-width: min(320px, 100%);
   padding: 7px 10px;
@@ -941,6 +943,20 @@ body {
   color: var(--ace-fg);
   box-shadow: var(--ace-shadow-lg);
   backdrop-filter: blur(10px);
+  font: inherit;
+  text-align: inherit;
+}
+.ace-sticky-user-context-clickable {
+  pointer-events: auto;
+  cursor: pointer;
+}
+.ace-sticky-user-context-clickable:hover {
+  border-color: var(--ace-accent);
+  background: color-mix(in oklab, var(--ace-accent-bg) 94%, var(--ace-surface) 6%);
+}
+.ace-sticky-user-context-clickable:focus-visible {
+  outline: 2px solid var(--ace-accent);
+  outline-offset: 2px;
 }
 .ace-sticky-user-context-label {
   display: flex;
