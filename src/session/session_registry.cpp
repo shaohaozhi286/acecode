@@ -60,7 +60,13 @@ const ModelProfile* find_profile_by_name(const AppConfig& cfg,
 std::optional<ModelProfile> explicit_profile(const AppConfig& cfg,
                                              const std::string& name) {
     if (name.empty()) return std::nullopt;
-    if (const auto* entry = find_profile_by_name(cfg, name)) return *entry;
+    if (const auto* entry = find_profile_by_name(cfg, name)) {
+        ModelProfile profile = *entry;
+        if (profile.provider == "openai" && !profile.stream_timeout_ms.has_value()) {
+            profile.stream_timeout_ms = cfg.openai.stream_timeout_ms;
+        }
+        return profile;
+    }
     return std::nullopt;
 }
 

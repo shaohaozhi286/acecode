@@ -15,6 +15,14 @@
 
 using namespace acecode;
 
+// 额外 — OpenAI 兼容请求默认超时必须是 666 秒。
+TEST(SavedModelsTest, OpenAiStreamTimeoutDefaultIs666Seconds) {
+    EXPECT_EQ(OpenAiConfig::kDefaultStreamTimeoutMs, 666000);
+
+    AppConfig cfg;
+    EXPECT_EQ(cfg.openai.stream_timeout_ms, 666000);
+}
+
 // 7.2 — 合法 saved_models 最小输入(1 个 openai entry,所有字段齐全)→ validate 通过。
 TEST(SavedModelsTest, MinimalValidOpenaiEntryPassesValidation) {
     nlohmann::json j = nlohmann::json::array();

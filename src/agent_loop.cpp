@@ -1037,6 +1037,21 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
                 break;
             case StreamEventType::Retry:
                 provider_error_info = evt.provider_error;
+                if (evt.provider_error.kind == ProviderErrorKind::Timeout) {
+                    {
+                        std::lock_guard<std::mutex> lk(resp_mu);
+                        accumulated = ChatResponse{};
+                        accumulated.finish_reason = "stop";
+                    }
+                    reasoning_bytes = 0;
+                    reasoning_fragments = 0;
+                    if (callbacks_.on_stream_retry_reset) {
+                        callbacks_.on_stream_retry_reset();
+                    }
+                    CompactResult reset_result;
+                    events_.emit(SessionEventKind::TranscriptReplace,
+                                 build_transcript_replace_payload(messages_, reset_result));
+                }
                 emit_agent_progress(
                     "model_retry",
                     "正在重试模型请求",

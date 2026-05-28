@@ -3,7 +3,7 @@
 // 关注点：当大模型处于"推理"阶段、长时间不发送任何 SSE 字节时，按 Esc 触发的
 // abort_flag 必须能在 ~1 秒内取消正在进行的 HTTP 请求。修复前 abort_flag 仅在
 // libcurl write callback（收到字节才触发）里被检查，所以静默期内会一直挂起，
-// 最坏情况要等 cpr::Timeout（180s）才返回。
+// 最坏情况要等 cpr::Timeout（666s）才返回。
 //
 // 修复方案是把 abort_flag 也接到 libcurl 的 progress / xferinfo callback
 // （cpr::ProgressCallback），它每秒触发一次，与是否有数据流无关。

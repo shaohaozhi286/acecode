@@ -144,6 +144,15 @@ public:
         cb.on_tool_confirm = [](const std::string&, const std::string&) {
             return PermissionResult::Allow;
         };
+        cb.on_delta = [this](const std::string& token) {
+            std::lock_guard<std::mutex> lk(msg_mu_);
+            live_stream_ += token;
+        };
+        cb.on_stream_retry_reset = [this]() {
+            std::lock_guard<std::mutex> lk(msg_mu_);
+            live_stream_.clear();
+            ++stream_retry_resets_;
+        };
 
         auto provider_accessor =
             [this]() -> std::shared_ptr<acecode::LlmProvider> { return provider_; };
@@ -179,6 +188,9 @@ public:
     void push_task_complete(std::string summary, std::string id = "c-done") {
         nlohmann::json args = {{"summary", std::move(summary)}};
         provider_->push_tool_call("task_complete", args.dump(), std::move(id));
+    }
+    void push_events(std::vector<acecode::StreamEvent> events) {
+        provider_->push_events(std::move(events));
     }
 
     // 发消息并阻塞直到 on_busy_changed(false)。返回 false 代表超时(测试失败信号)。
@@ -237,6 +249,16 @@ public:
         return n;
     }
 
+    std::string live_stream() {
+        std::lock_guard<std::mutex> lk(msg_mu_);
+        return live_stream_;
+    }
+
+    int stream_retry_resets() {
+        std::lock_guard<std::mutex> lk(msg_mu_);
+        return stream_retry_resets_;
+    }
+
     // align-loop-with-hermes:loop 不再注入 nudge;此 helper 仅作为防回归断言,
     // 任何包含 [acecode:auto-continue] 前缀的 user 消息都说明回归了 nudge 路径。
     int count_nudges() {
@@ -268,6 +290,8 @@ private:
 
     std::mutex msg_mu_;
     std::vector<Msg> messages_;
+    std::string live_stream_;
+    int stream_retry_resets_ = 0;
 
     std::mutex busy_mu_;
     std::condition_variable busy_cv_;
@@ -288,6 +312,55 @@ ProviderErrorInfo make_stub_provider_error(std::string display = "HTTP 500 from 
     error.pretty_json = "{\n  \"error\": \"boom\"\n}";
     error.retryable = true;
     return error;
+}
+
+// 场景: provider 在同一请求内部对 timeout 做重新连接重试时,AgentLoop 必须
+// 清掉失败连接已经流出的临时 assistant 文本,最终只持久化成功重试的输出。
+TEST(AgentLoopTermination, TimeoutRetryResetClearsPartialLiveOutput) {
+    AgentLoopHarness h;
+
+    ProviderErrorInfo timeout = make_stub_provider_error("request timed out");
+    timeout.kind = ProviderErrorKind::Timeout;
+    timeout.status_code = 0;
+    timeout.retryable = true;
+    timeout.retry_attempt = 1;
+    timeout.retry_max_attempts = -1;
+    timeout.retry_delay_ms = 0;
+
+    acecode::StreamEvent partial;
+    partial.type = acecode::StreamEventType::Delta;
+    partial.content = "partial";
+
+    acecode::StreamEvent retry;
+    retry.type = acecode::StreamEventType::Retry;
+    retry.provider_error = timeout;
+    retry.error = timeout.display_message;
+
+    acecode::StreamEvent final_delta;
+    final_delta.type = acecode::StreamEventType::Delta;
+    final_delta.content = "final";
+
+    acecode::StreamEvent done;
+    done.type = acecode::StreamEventType::Done;
+
+    h.push_events({partial, retry, final_delta, done});
+
+    ASSERT_TRUE(h.submit_and_wait("run"));
+    EXPECT_EQ(h.stream_retry_resets(), 1);
+    EXPECT_EQ(h.live_stream(), "final");
+
+    auto persisted = h.persisted_messages();
+    int assistant_count = 0;
+    std::string assistant_content;
+    for (const auto& msg : persisted) {
+        if (msg.role == "assistant") {
+            ++assistant_count;
+            assistant_content = msg.content;
+        }
+    }
+    EXPECT_EQ(assistant_count, 1);
+    EXPECT_EQ(assistant_content, "final");
+    EXPECT_EQ(assistant_content.find("partial"), std::string::npos);
 }
 
 // 场景 (a):text-only 响应直接结束 loop。chit-chat 与 mid-task hedge 都走这条路径。

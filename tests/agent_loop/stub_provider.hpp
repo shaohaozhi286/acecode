@@ -29,6 +29,7 @@ namespace acecode_test {
 struct ScriptedResponse {
     std::string text;                         // may be empty
     std::vector<acecode::ToolCall> tool_calls; // may be empty
+    std::vector<acecode::StreamEvent> events;  // optional exact event script
     bool emit_error = false;
     acecode::ProviderErrorInfo provider_error;
     bool error_after_payload = false;
@@ -67,6 +68,12 @@ public:
         tc.function_name = std::move(tool_name);
         tc.function_arguments = std::move(args_json);
         r.tool_calls.push_back(std::move(tc));
+        push_response(std::move(r));
+    }
+
+    void push_events(std::vector<acecode::StreamEvent> events) {
+        ScriptedResponse r;
+        r.events = std::move(events);
         push_response(std::move(r));
     }
 
@@ -141,6 +148,13 @@ public:
                 return;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+
+        if (!r.events.empty()) {
+            for (const auto& evt : r.events) {
+                callback(evt);
+            }
+            return;
         }
 
         if (r.emit_error && !r.error_after_payload) {

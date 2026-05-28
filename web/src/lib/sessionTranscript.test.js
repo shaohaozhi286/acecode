@@ -534,6 +534,26 @@ run('transcript_replace 清理正在流式输出和活动工具映射', () => {
   assert.deepEqual(state.items.map((item) => item.content), ['after compact']);
 });
 
+run('timeout retry 的 transcript_replace 丢弃失败连接的 partial token', () => {
+  const previous = reduceMany([
+    { type: 'message', payload: { id: 'u1', role: 'user', content: 'work' }, seq: 1 },
+    { type: 'token', payload: { text: 'partial from timed out stream' }, seq: 2 },
+  ]);
+
+  const reset = reduceTranscriptEvent(previous, {
+    type: 'transcript_replace',
+    payload: { messages: [{ id: 'u1', role: 'user', content: 'work' }] },
+    seq: 3,
+  }).state;
+  const final = reduceMany([
+    { type: 'token', payload: { text: 'final' }, seq: 4 },
+    { type: 'message', payload: { id: 'a1', role: 'assistant', content: 'final' }, seq: 5 },
+  ], reset);
+
+  assert.equal(final.streamingId, null);
+  assert.deepEqual(final.items.map((item) => item.content), ['work', 'final']);
+});
+
 run('新 session 不继承上一 session 活动状态', () => {
   const previous = reduceMany([
     { type: 'busy_changed', payload: { busy: true }, seq: 1 },

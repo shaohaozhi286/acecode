@@ -104,7 +104,7 @@ ChatResponse CopilotProvider::chat(
         network::build_ssl_options(proxy_opts),
         proxy_opts.proxies,
         proxy_opts.auth,
-        cpr::Timeout{120000}
+        cpr::Timeout{stream_timeout_ms_}
     );
 
     if (r.status_code == 0) {
@@ -127,7 +127,7 @@ ChatResponse CopilotProvider::chat(
                 network::build_ssl_options(proxy_opts2),
                 proxy_opts2.proxies,
                 proxy_opts2.auth,
-                cpr::Timeout{120000}
+                cpr::Timeout{stream_timeout_ms_}
             );
         }
     }

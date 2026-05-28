@@ -180,10 +180,19 @@ TEST(OpenAiProviderErrorRecovery, Http200MalformedSseJsonBecomesMalformedJsonErr
     EXPECT_NE(err->provider_error.raw_body.find("{not-json}"), std::string::npos);
 }
 
-TEST(OpenAiProviderErrorRecovery, Http200PartialSseThenTransportTimeoutIsTimeout) {
+TEST(OpenAiProviderErrorRecovery, Http200PartialSseThenTransportTimeoutRetriesUntilSuccess) {
+    std::atomic<int> calls{0};
     LocalHttpServer server([&](httplib::Server& s) {
-        s.Post("/chat/completions", [](const httplib::Request&, httplib::Response& res) {
+        s.Post("/chat/completions", [&](const httplib::Request&, httplib::Response& res) {
+            const int call = ++calls;
             res.status = 200;
+            if (call > 1) {
+                res.set_content(
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n"
+                    "data: [DONE]\n\n",
+                    "text/event-stream");
+                return;
+            }
             res.set_chunked_content_provider(
                 "text/event-stream",
                 [sent = false](size_t, httplib::DataSink& sink) mutable {
@@ -194,7 +203,7 @@ TEST(OpenAiProviderErrorRecovery, Http200PartialSseThenTransportTimeoutIsTimeout
                         sink.write(chunk.data(), chunk.size());
                     }
                     std::this_thread::sleep_for(500ms);
-                    return true;
+                    return false;
                 });
         });
     });
@@ -203,19 +212,42 @@ TEST(OpenAiProviderErrorRecovery, Http200PartialSseThenTransportTimeoutIsTimeout
         "http://127.0.0.1:" + std::to_string(server.port), "", "test-model", 150);
 
     const auto events = collect_events(provider);
-    const StreamEvent* err = last_error_event(events);
-    ASSERT_NE(err, nullptr);
-    EXPECT_EQ(err->provider_error.kind, ProviderErrorKind::Timeout);
-    EXPECT_TRUE(err->provider_error.status_code == 0 ||
-                err->provider_error.status_code == 200);
-    EXPECT_TRUE(err->provider_error.retryable);
-    EXPECT_EQ(count_events(events, StreamEventType::Delta), 1);
-    EXPECT_EQ(count_events(events, StreamEventType::Retry), 0);
-    EXPECT_EQ(count_events(events, StreamEventType::Done), 0);
-    EXPECT_NE(err->provider_error.raw_body.find("\"hi\""), std::string::npos);
+    EXPECT_EQ(calls.load(), 2);
+    EXPECT_EQ(last_error_event(events), nullptr);
+    EXPECT_EQ(count_events(events, StreamEventType::Retry), 1);
+    EXPECT_EQ(count_events(events, StreamEventType::Done), 1);
+    EXPECT_GE(count_events(events, StreamEventType::Delta), 2);
 }
 
-TEST(OpenAiProviderErrorRecovery, TimeoutBeforeAnySseDataKeepsBoundedRetry) {
+TEST(OpenAiProviderErrorRecovery, TimeoutBeforeAnySseDataRetriesUntilSuccess) {
+    std::atomic<int> calls{0};
+    LocalHttpServer server([&](httplib::Server& s) {
+        s.Post("/chat/completions", [&](const httplib::Request&, httplib::Response& res) {
+            const int call = ++calls;
+            res.status = 200;
+            if (call < 3) {
+                std::this_thread::sleep_for(300ms);
+                res.set_content("data: [DONE]\n\n", "text/event-stream");
+                return;
+            }
+            res.set_content(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n"
+                "data: [DONE]\n\n",
+                "text/event-stream");
+        });
+    });
+
+    OpenAiCompatProvider provider(
+        "http://127.0.0.1:" + std::to_string(server.port), "", "test-model", 100);
+
+    const auto events = collect_events(provider);
+    EXPECT_EQ(calls.load(), 3);
+    EXPECT_EQ(last_error_event(events), nullptr);
+    EXPECT_EQ(count_events(events, StreamEventType::Retry), 2);
+    EXPECT_EQ(count_events(events, StreamEventType::Done), 1);
+}
+
+TEST(OpenAiProviderErrorRecovery, RepeatedTimeoutRetryStopsOnUserAbort) {
     std::atomic<int> calls{0};
     LocalHttpServer server([&](httplib::Server& s) {
         s.Post("/chat/completions", [&](const httplib::Request&, httplib::Response& res) {
@@ -229,12 +261,27 @@ TEST(OpenAiProviderErrorRecovery, TimeoutBeforeAnySseDataKeepsBoundedRetry) {
     OpenAiCompatProvider provider(
         "http://127.0.0.1:" + std::to_string(server.port), "", "test-model", 100);
 
-    const auto events = collect_events(provider);
+    std::atomic<bool> abort_flag{false};
+    std::atomic<int> retry_events{0};
+    std::vector<StreamEvent> events;
+    std::mutex mu;
+    provider.chat_stream(single_user_message(), std::vector<ToolDef>{},
+                         [&](const StreamEvent& evt) {
+                             {
+                                 std::lock_guard<std::mutex> lk(mu);
+                                 events.push_back(evt);
+                             }
+                             if (evt.type == StreamEventType::Retry &&
+                                 ++retry_events >= 2) {
+                                 abort_flag.store(true);
+                             }
+                         },
+                         &abort_flag);
+
     const StreamEvent* err = last_error_event(events);
     ASSERT_NE(err, nullptr);
-    EXPECT_EQ(err->provider_error.kind, ProviderErrorKind::Timeout);
-    EXPECT_EQ(calls.load(), 3);
-    EXPECT_EQ(count_events(events, StreamEventType::Retry), 2);
+    EXPECT_EQ(err->provider_error.kind, ProviderErrorKind::UserCancelled);
+    EXPECT_EQ(retry_events.load(), 2);
     EXPECT_EQ(count_events(events, StreamEventType::Done), 0);
 }
 

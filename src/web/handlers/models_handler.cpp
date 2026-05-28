@@ -42,7 +42,13 @@ nlohmann::json list_models(const AppConfig& cfg) {
 std::optional<ModelProfile>
 find_model_by_name(const AppConfig& cfg, const std::string& name) {
     for (const auto& entry : cfg.saved_models) {
-        if (entry.name == name && is_runtime_model_provider_enabled(entry.provider)) return entry;
+        if (entry.name == name && is_runtime_model_provider_enabled(entry.provider)) {
+            ModelProfile profile = entry;
+            if (profile.provider == "openai" && !profile.stream_timeout_ms.has_value()) {
+                profile.stream_timeout_ms = cfg.openai.stream_timeout_ms;
+            }
+            return profile;
+        }
     }
     return std::nullopt;
 }

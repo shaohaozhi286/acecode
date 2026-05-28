@@ -41,10 +41,13 @@ AppConfig make_cfg(const std::string& default_name = "") {
 // 7.9 — 仅 default,无 cwd override / 无 resume → 返回 default 对应 entry。
 TEST(ModelResolverTest, DefaultOnlyReturnsDefault) {
     AppConfig cfg = make_cfg("alpha");
+    cfg.openai.stream_timeout_ms = 666000;
     ModelProfile got = resolve_effective_model(cfg, std::nullopt, std::nullopt);
     EXPECT_EQ(got.name, "alpha");
     EXPECT_EQ(got.provider, "openai");
     EXPECT_EQ(got.model, "alpha-model");
+    ASSERT_TRUE(got.stream_timeout_ms.has_value());
+    EXPECT_EQ(*got.stream_timeout_ms, 666000);
 }
 
 // 7.10 — default + cwd override → 返回 cwd 指向的 entry。

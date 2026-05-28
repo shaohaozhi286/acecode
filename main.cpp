@@ -2378,6 +2378,17 @@ static int run_interactive_app(const CliOptions& cli,
         clamp_chat_focus();
         screen.PostEvent(Event::Custom);
     };
+    callbacks.on_stream_retry_reset = [&state, &clamp_chat_focus, &screen]() {
+        std::lock_guard<std::mutex> lk(state.mu);
+        if (!state.conversation.empty() &&
+            state.conversation.back().role == "assistant" &&
+            !state.conversation.back().is_tool) {
+            state.conversation.pop_back();
+        }
+        state.streaming_output_chars = 0;
+        clamp_chat_focus();
+        screen.PostEvent(Event::Custom);
+    };
 
     PermissionManager permissions;
     configure_permissions(permissions, dangerous_mode);

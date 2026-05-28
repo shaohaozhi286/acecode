@@ -1,0 +1,4 @@
+interface:
+  display_name: "ACECode Release"
+  short_description: "Release ACECode with Git tag and self-update server package."
+  default_prompt: "Release ACECode version <version>: commit release changes, tag it, build, publish the Windows updater package, and verify the update server."

@@ -124,8 +124,9 @@ struct ProviderErrorInfo {
 //                   partial and should not be rendered raw to users.
 //   Callbacks are free to ignore it; today the agent loop drops it silently
 //   and a future TUI panel can subscribe.
-//   Retry — provider is retrying a transient failure before any assistant/tool
-//           output has been emitted.
+//   Retry — provider is retrying a transient failure. Timeout retries may occur
+//           after provisional stream output; consumers should discard partial
+//           assistant/tool state before accepting output from the next attempt.
 enum class StreamEventType {
     Delta,
     ToolCall,

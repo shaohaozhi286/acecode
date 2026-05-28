@@ -66,6 +66,11 @@ struct AgentCallbacks {
     std::function<void(const std::vector<ChatMessage>& messages,
                        const CompactResult& result)> on_transcript_replace;
 
+    // Called before a provider timeout retry replays the current model request.
+    // Consumers should clear provisional live assistant output from the failed
+    // stream attempt; persisted history is unchanged.
+    std::function<void()> on_stream_retry_reset;
+
     // Called just before a tool begins executing. `command_preview` is a short
     // human-readable summary (e.g. the first 60 chars of a bash command).
     std::function<void(const std::string& tool_name,

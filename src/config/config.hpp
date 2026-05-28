@@ -11,7 +11,7 @@
 namespace acecode {
 
 struct OpenAiConfig {
-    static constexpr int kDefaultStreamTimeoutMs = 180000;
+    static constexpr int kDefaultStreamTimeoutMs = 666000;
 
     std::string base_url = "http://localhost:1234/v1";
     std::string api_key;

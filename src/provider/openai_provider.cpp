@@ -205,7 +205,8 @@ bool sleep_retry_or_aborted(int delay_ms, std::atomic<bool>* abort_flag) {
 
 int retry_after_delay_ms(const cpr::Header& headers, int attempt_index) {
     int exponential = kStreamRetryBaseDelayMs;
-    for (int i = 1; i < attempt_index; ++i) {
+    const int capped_attempt = (std::min)(attempt_index, 16);
+    for (int i = 1; i < capped_attempt; ++i) {
         exponential = (std::min)(kStreamRetryMaxDelayMs, exponential * 2);
     }
 
@@ -553,7 +554,7 @@ ChatResponse OpenAiCompatProvider::chat(
         network::build_ssl_options(proxy_opts),
         proxy_opts.proxies,
         proxy_opts.auth,
-        cpr::Timeout{120000} // 2 minutes timeout for LLM responses
+        cpr::Timeout{stream_timeout_ms_}
     );
 
     if (r.status_code == 0) {
@@ -638,7 +639,7 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
     ChatResponse last_accumulated;
     last_accumulated.finish_reason = "stop";
 
-    for (int attempt = 1; attempt <= kStreamMaxAttempts; ++attempt) {
+    for (int attempt = 1; ; ++attempt) {
         ChatResponse accumulated;
         accumulated.finish_reason = "stop";
         std::string sse_buffer;
@@ -953,6 +954,32 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
                 false);
         } else {
             return accumulated;
+        }
+
+        const bool timeout_retry = error_info.retryable &&
+            error_info.kind == ProviderErrorKind::Timeout;
+        if (timeout_retry) {
+            const int delay_ms = retry_after_delay_ms(r.header, attempt);
+            error_info.retry_attempt = attempt;
+            error_info.retry_max_attempts = -1;
+            error_info.retry_delay_ms = delay_ms;
+            LOG_WARN("Retrying streaming request after timeout failure, attempt " +
+                     std::to_string(attempt + 1) + "/unbounded");
+            emit_retry_event(callback, error_info);
+            if (sleep_retry_or_aborted(delay_ms, abort_flag)) {
+                auto cancel_info = make_provider_error(
+                    ProviderErrorKind::UserCancelled,
+                    0,
+                    name(),
+                    model_,
+                    std::string{},
+                    std::string{},
+                    std::string{},
+                    false);
+                emit_provider_error(callback, cancel_info);
+                return accumulated;
+            }
+            continue;
         }
 
         const bool can_retry =
