@@ -48,6 +48,8 @@ constexpr const char* kDaemonVersion = "0.1.0";
 constexpr const char* kProtocolVersion = "0.1";
 constexpr const char* kHost = "127.0.0.1";
 constexpr int kDefaultPort = 52007;
+constexpr int kExtensionFreshnessMs = 30000;
+constexpr int kEnsureReadyDefaultTimeoutMs = 15000;
 
 #ifdef _WIN32
 using socket_t = SOCKET;
@@ -365,7 +367,10 @@ json default_capabilities(bool extension_connected) {
 json stopped_status(int port) {
     return json{
         {"running", false},
+        {"ready", false},
         {"extension_connected", false},
+        {"extension_stale", false},
+        {"extension_last_seen_ms", nullptr},
         {"version", nullptr},
         {"extension_version", nullptr},
         {"protocol_version", nullptr},
@@ -678,6 +683,20 @@ std::wstring quote_windows_arg(const std::filesystem::path& path) {
     out.push_back(L'"');
     return out;
 }
+
+std::optional<std::wstring> utf8_to_wide(const std::string& value) {
+    if (value.empty()) return std::wstring();
+    int needed = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                     value.data(), static_cast<int>(value.size()),
+                                     nullptr, 0);
+    if (needed <= 0) return std::nullopt;
+    std::wstring out(static_cast<std::size_t>(needed), L'\0');
+    int written = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                      value.data(), static_cast<int>(value.size()),
+                                      out.data(), needed);
+    if (written != needed) return std::nullopt;
+    return out;
+}
 #endif
 
 std::filesystem::path current_executable_path(char** argv) {
@@ -750,6 +769,44 @@ bool start_detached_serve(char** argv, int port, std::string& error) {
 #endif
 }
 
+bool launch_browser_url(const std::string& url, std::string& error) {
+#ifdef _WIN32
+    auto wide_url = utf8_to_wide(url);
+    if (!wide_url) {
+        error = "browser launch URL is not valid UTF-8";
+        return false;
+    }
+    HINSTANCE result = ShellExecuteW(nullptr, L"open", wide_url->c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    auto code = reinterpret_cast<intptr_t>(result);
+    if (code > 32) return true;
+    error = "ShellExecuteW failed: " + std::to_string(code);
+    return false;
+#else
+#ifdef __APPLE__
+    const char* opener = "open";
+#else
+    const char* opener = "xdg-open";
+#endif
+    pid_t pid = fork();
+    if (pid < 0) {
+        error = "fork failed";
+        return false;
+    }
+    if (pid == 0) {
+        int devnull = open("/dev/null", O_RDWR);
+        if (devnull >= 0) {
+            dup2(devnull, STDIN_FILENO);
+            dup2(devnull, STDOUT_FILENO);
+            dup2(devnull, STDERR_FILENO);
+            if (devnull > STDERR_FILENO) close(devnull);
+        }
+        execlp(opener, opener, url.c_str(), static_cast<char*>(nullptr));
+        _exit(127);
+    }
+    return true;
+#endif
+}
+
 int status_command(int argc, char** argv) {
     int port = parse_port(argc, argv);
     print_json(status_envelope(port));
@@ -798,6 +855,131 @@ int start_command(int argc, char** argv) {
         latest["data"]["start_attempted"] = true;
         latest["data"]["started"] = true;
         latest["data"]["start_error"] = "ace-browser-host did not report running after start";
+    }
+    print_json(latest);
+    return 0;
+}
+
+bool status_envelope_ready(const json& envelope) {
+    if (!envelope.value("ok", false) || !envelope.contains("data") || !envelope["data"].is_object()) {
+        return false;
+    }
+    const auto& data = envelope["data"];
+    return data.value("running", false) &&
+           data.value("extension_connected", false) &&
+           !data.value("extension_stale", false) &&
+           data.value("version_compatible", true);
+}
+
+std::string readiness_error_from_status(const json& envelope) {
+    if (!envelope.value("ok", false)) {
+        if (envelope.contains("error") && envelope["error"].is_object() &&
+            envelope["error"].contains("code") && envelope["error"]["code"].is_string()) {
+            return envelope["error"]["code"].get<std::string>();
+        }
+        return "status_error";
+    }
+    if (!envelope.contains("data") || !envelope["data"].is_object()) return "invalid_status";
+    const auto& data = envelope["data"];
+    if (!data.value("running", false)) return "daemon_not_running";
+    if (!data.value("version_compatible", true)) return "version_mismatch";
+    if (data.value("extension_stale", false)) return "extension_stale";
+    if (!data.value("extension_connected", false)) return "extension_not_connected";
+    return "not_ready";
+}
+
+void annotate_readiness(json& envelope,
+                        bool host_start_attempted,
+                        const std::string& host_start_error,
+                        bool browser_launch_attempted,
+                        const std::string& browser_launch_error,
+                        const std::string& wake_url,
+                        const std::string& ready_error) {
+    if (!envelope.value("ok", false) || !envelope.contains("data") || !envelope["data"].is_object()) return;
+    auto& data = envelope["data"];
+    const bool ready = status_envelope_ready(envelope);
+    data["ready"] = ready;
+    data["host_start_attempted"] = host_start_attempted;
+    data["host_start_error"] = host_start_error.empty() ? json(nullptr) : json(host_start_error);
+    data["browser_launch_attempted"] = browser_launch_attempted;
+    data["browser_launch_error"] = browser_launch_error.empty() ? json(nullptr) : json(browser_launch_error);
+    data["wake_url"] = wake_url;
+    data["ready_error"] = ready ? json(nullptr) : json(ready_error.empty() ? readiness_error_from_status(envelope) : ready_error);
+    data["diagnostics"] = {
+        {"host_running", data.value("running", false)},
+        {"extension_connected", data.value("extension_connected", false)},
+        {"extension_stale", data.value("extension_stale", false)},
+        {"version_compatible", data.value("version_compatible", true)},
+        {"host_start_attempted", host_start_attempted},
+        {"browser_launch_attempted", browser_launch_attempted},
+        {"ready_error", data["ready_error"]},
+    };
+}
+
+int ensure_ready_command(int argc, char** argv) {
+    const int port = parse_port(argc, argv);
+    int timeout_ms = find_int_arg(argc, argv, "--timeout-ms").value_or(kEnsureReadyDefaultTimeoutMs);
+    timeout_ms = std::max(1000, std::min(120000, timeout_ms));
+    const bool launch_browser = !has_arg(argc, argv, "--no-launch-browser");
+    const std::string wake_url = arg_or_default(
+        argc, argv, "--wake-url", "http://127.0.0.1:" + std::to_string(port) + "/wake");
+
+    bool host_start_attempted = false;
+    bool browser_launch_attempted = false;
+    std::string host_start_error;
+    std::string browser_launch_error;
+    json latest = status_envelope(port);
+
+    if (latest.value("ok", false) && latest["data"].is_object() &&
+        !latest["data"].value("running", false)) {
+        host_start_attempted = true;
+        if (!start_detached_serve(argv, port, host_start_error)) {
+            annotate_readiness(latest, host_start_attempted, host_start_error,
+                               browser_launch_attempted, browser_launch_error,
+                               wake_url, "daemon_start_failed");
+            print_json(latest);
+            return 0;
+        }
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    bool browser_launch_checked = false;
+    while (std::chrono::steady_clock::now() <= deadline) {
+        latest = status_envelope(port);
+        if (!latest.value("ok", false)) {
+            print_json(latest);
+            return 0;
+        }
+        if (status_envelope_ready(latest)) {
+            annotate_readiness(latest, host_start_attempted, host_start_error,
+                               browser_launch_attempted, browser_launch_error,
+                               wake_url, {});
+            print_json(latest);
+            return 0;
+        }
+
+        if (latest["data"].is_object() &&
+            latest["data"].value("running", false) &&
+            launch_browser && !browser_launch_checked) {
+            browser_launch_checked = true;
+            browser_launch_attempted = true;
+            if (!launch_browser_url(wake_url, browser_launch_error)) {
+                annotate_readiness(latest, host_start_attempted, host_start_error,
+                                   browser_launch_attempted, browser_launch_error,
+                                   wake_url, "browser_launch_failed");
+                print_json(latest);
+                return 0;
+            }
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    }
+
+    latest = status_envelope(port);
+    if (latest.value("ok", false)) {
+        annotate_readiness(latest, host_start_attempted, host_start_error,
+                           browser_launch_attempted, browser_launch_error,
+                           wake_url, "readiness_timeout");
     }
     print_json(latest);
     return 0;
@@ -1227,6 +1409,17 @@ std::string http_empty_response(int status, const std::string& cors_origin = {})
     return resp.str();
 }
 
+std::string http_html_response(int status, const std::string& body) {
+    std::ostringstream resp;
+    resp << "HTTP/1.1 " << status << " OK\r\n";
+    resp << "Content-Type: text/html; charset=utf-8\r\n";
+    resp << "Cache-Control: no-store\r\n";
+    resp << "Content-Length: " << body.size() << "\r\n";
+    resp << "Connection: close\r\n\r\n";
+    resp << body;
+    return resp.str();
+}
+
 bool header_equals(const HttpRequest& req, const std::string& key, const std::string& value) {
     auto it = req.headers.find(lower_copy(key));
     return it != req.headers.end() && it->second == value;
@@ -1255,20 +1448,40 @@ struct DaemonState {
     std::unordered_map<std::string, std::shared_ptr<PendingAction>> pending_actions;
 };
 
-json daemon_status_payload(const DaemonState& state, int port) {
+long long extension_last_seen_ms_locked(const DaemonState& state) {
+    if (state.last_hello == std::chrono::steady_clock::time_point{}) return -1;
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - state.last_hello).count();
+}
+
+bool extension_fresh_locked(const DaemonState& state) {
+    long long age_ms = extension_last_seen_ms_locked(state);
+    return state.extension_connected && age_ms >= 0 && age_ms <= kExtensionFreshnessMs;
+}
+
+json daemon_status_payload(DaemonState& state, int port) {
+    std::lock_guard<std::mutex> lock(state.mutex);
+    const long long last_seen_ms = extension_last_seen_ms_locked(state);
+    const bool has_seen = last_seen_ms >= 0;
+    const bool fresh = extension_fresh_locked(state);
+    const bool stale = state.extension_connected && !fresh;
     return json{
         {"running", true},
-        {"extension_connected", state.extension_connected},
+        {"ready", fresh && state.version_compatible},
+        {"extension_connected", fresh},
+        {"extension_stale", stale},
+        {"extension_last_seen_ms", has_seen ? json(last_seen_ms) : json(nullptr)},
+        {"extension_freshness_ms", kExtensionFreshnessMs},
         {"version", kDaemonVersion},
-        {"extension_version", state.extension_connected ? json(state.extension_version) : json(nullptr)},
-        {"protocol_version", state.extension_connected ? json(state.protocol_version) : json(nullptr)},
+        {"extension_version", has_seen ? json(state.extension_version) : json(nullptr)},
+        {"protocol_version", has_seen ? json(state.protocol_version) : json(nullptr)},
         {"host_protocol_version", kProtocolVersion},
         {"version_compatible", state.version_compatible},
         {"version_error", state.version_error.empty() ? json(nullptr) : json(state.version_error)},
         {"host_version", kHostVersion},
         {"port", port},
         {"browser", state.browser.empty() ? json(nullptr) : json(state.browser)},
-        {"capabilities", state.extension_connected ? state.capabilities : default_capabilities(false)},
+        {"capabilities", fresh ? state.capabilities : default_capabilities(false)},
     };
 }
 
@@ -1329,6 +1542,9 @@ json handle_command(DaemonState& state, const std::string& body) {
         if (!state.extension_connected) {
             return failure("extension_not_connected", "ace-browser-bridge browser plugin is not connected");
         }
+        if (!extension_fresh_locked(state)) {
+            return failure("extension_stale", "ace-browser-bridge browser plugin connection is stale");
+        }
         if (!state.version_compatible) {
             return failure("version_mismatch", state.version_error.empty()
                 ? "ace-browser-host and ace-browser-bridge protocol versions are not compatible"
@@ -1383,7 +1599,7 @@ json handle_plugin_poll(DaemonState& state, const std::string& body) {
     if (state.shutting_down) {
         return success({{"action", nullptr}});
     }
-    if (!state.extension_connected) {
+    if (!state.extension_connected || !extension_fresh_locked(state)) {
         return failure("extension_not_connected", "ace-browser-bridge browser plugin is not connected");
     }
     if (state.queued_actions.empty()) {
@@ -1418,6 +1634,20 @@ std::string route_request(const HttpRequest& req, DaemonState& state, int port, 
     const std::string cors_origin = extension_cors_origin(req);
     if (req.method == "OPTIONS") {
         return http_empty_response(204, cors_origin);
+    }
+    if (req.method == "GET" && req.path == "/wake") {
+        std::ostringstream html;
+        html << "<!doctype html><html><head><meta charset=\"utf-8\">"
+             << "<title>ACE Browser Bridge Wake</title>"
+             << "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+             << "<style>body{font:14px/1.5 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;"
+             << "margin:32px;color:#0f172a}code{background:#f1f5f9;padding:2px 5px;"
+             << "border-radius:4px}</style></head><body>"
+             << "<h1>ACE Browser Bridge</h1>"
+             << "<p>This local page wakes the browser extension for ACECode.</p>"
+             << "<p>Daemon: <code>127.0.0.1:" << port << "</code></p>"
+             << "</body></html>";
+        return http_html_response(200, html.str());
     }
     const bool host_request = header_equals(req, "x-ace-browser-host", "1") ||
                               header_equals(req, "x-ace-browser-cli", "1");
@@ -1540,6 +1770,7 @@ void print_help() {
     std::cout
         << "ace-browser-host commands:\n"
         << "  start --json [--port 52007]\n"
+        << "  ensure-ready --json [--port 52007] [--timeout-ms <ms>] [--no-launch-browser]\n"
         << "  status --json [--port 52007]\n"
         << "  command --json [--port 52007]     # reads {session,action,args} from stdin\n"
         << "  open --json --url <url> [--session <name>] [--new-tab] [--timeout-ms <ms>]\n"
@@ -1574,6 +1805,7 @@ int main_impl(int argc, char** argv) {
 
     std::string command = argv[1];
     if (command == "start") return start_command(argc, argv);
+    if (command == "ensure-ready") return ensure_ready_command(argc, argv);
     if (command == "status") return status_command(argc, argv);
     if (command == "command") return command_command(argc, argv);
     if (command == "open") return open_command(argc, argv);

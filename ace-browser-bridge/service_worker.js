@@ -1294,6 +1294,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       sendResponse({ ok: true, data });
       return;
     }
+    if (message.command === "content_ready") {
+      const data = await helloDaemon();
+      startPolling();
+      sendResponse({ ok: true, data });
+      return;
+    }
     if (message.command === "release") {
       const response = await sendPageCommand("hide_overlay");
       sendResponse(response);

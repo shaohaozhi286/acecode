@@ -74,6 +74,18 @@ if ($false -ne $openStopped.ok -or $openStopped.error.code -ne "daemon_not_runni
     throw "open should fail while daemon is not running"
 }
 
+$ensureStarted = Invoke-CliJson -Arguments @("ensure-ready", "--json", "--no-launch-browser", "--timeout-ms", "1000", "--port", "$Port")
+try {
+    if ($true -ne $ensureStarted.ok -or $true -ne $ensureStarted.data.running -or $false -ne $ensureStarted.data.ready) {
+        throw "ensure-ready should start the daemon and report ready=false without a plugin"
+    }
+    if ($true -ne $ensureStarted.data.host_start_attempted -or $true -eq $ensureStarted.data.browser_launch_attempted) {
+        throw "ensure-ready did not report host start/no browser launch diagnostics"
+    }
+} finally {
+    Invoke-CliJson -Arguments @("shutdown", "--json", "--port", "$Port") | Out-Null
+}
+
 $daemon = Start-Process -FilePath $ExePath -ArgumentList @("serve", "--json", "--port", "$Port") -PassThru -WindowStyle Hidden
 Start-Sleep -Milliseconds 800
 try {
@@ -83,6 +95,17 @@ try {
     }
     if ($false -ne $running.data.extension_connected) {
         throw "daemon should start without a connected browser plugin"
+    }
+    if ($false -ne $running.data.ready -or $false -ne $running.data.extension_stale) {
+        throw "daemon should not report ready or stale before plugin hello"
+    }
+
+    $notReady = Invoke-CliJson -Arguments @("ensure-ready", "--json", "--no-launch-browser", "--timeout-ms", "100", "--port", "$Port")
+    if ($true -ne $notReady.ok -or $true -ne $notReady.data.running -or $false -ne $notReady.data.ready) {
+        throw "ensure-ready without plugin should report running but not ready"
+    }
+    if ($notReady.data.browser_launch_attempted -ne $false -or $notReady.data.ready_error -ne "readiness_timeout") {
+        throw "ensure-ready did not preserve no-launch readiness diagnostics"
     }
 
     $blocked = Invoke-CliJson -Arguments @("command", "--json", "--port", "$Port") -InputJson '{"session":"smoke","action":"snapshot","args":{}}'
@@ -107,6 +130,17 @@ try {
     $connected = Invoke-CliJson -Arguments @("status", "--json", "--port", "$Port")
     if ($true -ne $connected.data.extension_connected -or $connected.data.extension_version -ne "0.1-smoke") {
         throw "status did not reflect plugin hello"
+    }
+    if ($true -ne $connected.data.ready -or $true -ne $connected.data.version_compatible) {
+        throw "status did not report ready after compatible plugin hello"
+    }
+    if ($null -eq $connected.data.extension_last_seen_ms) {
+        throw "status did not report extension freshness"
+    }
+
+    $ready = Invoke-CliJson -Arguments @("ensure-ready", "--json", "--no-launch-browser", "--timeout-ms", "100", "--port", "$Port")
+    if ($true -ne $ready.ok -or $true -ne $ready.data.ready -or $true -eq $ready.data.browser_launch_attempted) {
+        throw "ensure-ready should report ready without launching browser when plugin is connected"
     }
 
     $blockJob = Start-Job -ScriptBlock {

@@ -37,7 +37,7 @@ Web 设置页的“工具 -> ACE Browser Bridge”开关会写入全局 `ace_bro
 ## 模型工作流
 
 1. 调用 `browser_start`。它会触发 host 状态检查和必要的 host auto-start。
-2. 读取 tool result 中的 `running`、`extension_connected`、版本和 capabilities。
+2. 读取 tool result 中的 `ready`、`running`、`extension_connected`、`extension_stale`、版本和 capabilities。`browser_start` 会调用 `ensure-ready`，在扩展未连接时尝试打开浏览器唤醒页。
 3. 使用注入的 user_prompt 中的 `ace-browser-host(.exe)` CLI 示例执行页面动作。
 4. 开始一组浏览器动作前先执行 `block-input`，让页面显示 AI 正在操作并拦截用户输入。
 5. 先 `read-page` 获取页面文本和 `@e` 元素引用，再交互。
@@ -59,6 +59,7 @@ Web 设置页的“工具 -> ACE Browser Bridge”开关会写入全局 `ace_bro
 
 ```bash
 ace-browser-host.exe start --json
+ace-browser-host.exe ensure-ready --json
 ace-browser-host.exe status --json
 ace-browser-host.exe block-input --json --session acecode-demo --watchdog-ms 300000
 ace-browser-host.exe open --json --session acecode-demo --url https://example.com --timeout-ms 15000
@@ -133,6 +134,26 @@ ace-browser-host.exe unblock-input --json --session acecode-demo
 ```
 
 `block-input` 会显示更明显的蓝绿色边框和提示条，并拦截用户鼠标、键盘、滚轮和触摸输入。如果当前 session 还没有绑定 tab，命令会返回 `pending:true`，后续 `open` 或 `find-tab` 成功后自动应用遮罩。`unblock-input` 应作为浏览器动作结束后的独立命令执行，避免异常路径留下遮罩。
+
+## 启动与连接恢复
+
+`browser_start` 和手工调试都应优先使用：
+
+```bash
+ace-browser-host.exe ensure-ready --json
+```
+
+该命令会启动 host daemon；如果扩展没有新鲜连接，会打开本地 wake 页唤醒默认浏览器和扩展，并等待到 `ready=true` 或超时。失败时重点看：
+
+- `ready_error`
+- `browser_launch_attempted`
+- `browser_launch_error`
+- `extension_connected`
+- `extension_stale`
+- `extension_last_seen_ms`
+- `version_compatible`
+
+如果默认浏览器没有安装或启用 `ace-browser-bridge`，`ensure-ready` 会返回 `ready=false`，此时需要用户打开已安装扩展的浏览器或重新加载扩展。
 
 ## 版本与本地边界
 

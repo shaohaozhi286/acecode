@@ -106,10 +106,12 @@ std::string cli_prompt_for_session(const std::string& session) {
         << "`{\"ok\":false,\"error\":{\"code\":\"...\",\"message\":\"...\"}}`.\n\n"
         << "Readiness:\n"
         << "```bash\n"
+        << host_example << " ensure-ready --json\n"
         << host_example << " start --json\n"
         << host_example << " status --json\n"
         << "```\n"
-        << "If `extension_connected` is false, the browser extension is not connected yet. Ask the user to open the browser or enable the extension, then retry `status`.\n\n"
+        << "Use `ensure-ready` before page actions. It starts the host daemon, opens a normal browser wake page when the extension is not connected, and waits for a fresh bridge connection. "
+        << "If it returns `ready:false`, inspect `ready_error`, `browser_launch_error`, `extension_connected`, `extension_stale`, and `version_compatible` before asking the user to fix the browser or extension.\n\n"
         << "User-operation block:\n"
         << "```bash\n"
         << "# Run before browser commands.\n"
@@ -172,7 +174,7 @@ ToolImpl make_start_tool(const std::shared_ptr<BrowserToolState>& state) {
     ToolDef def;
     def.name = "browser_start";
     def.description =
-        "Start or inspect ACE Browser Bridge and load the CLI usage prompt for this conversation.";
+        "Ensure ACE Browser Bridge host and browser are ready, then load the CLI usage prompt for this conversation.";
     def.parameters = object_schema({
         {"session", string_prop("Optional browser session name. Defaults to the current ACECode thread session.")},
         {"include_prompt", {{"type", "boolean"}, {"description", "Attach the CLI user prompt. Defaults to true."}}},
@@ -193,7 +195,7 @@ ToolImpl make_start_tool(const std::shared_ptr<BrowserToolState>& state) {
         }
 
         const std::string session = default_session_name(args, ctx);
-        BridgeEnvelope envelope = state->client->status();
+        BridgeEnvelope envelope = state->client->ensure_ready();
         nlohmann::json out = envelope_json(envelope);
         if (out["ok"].get<bool>()) {
             auto& data = out["data"];

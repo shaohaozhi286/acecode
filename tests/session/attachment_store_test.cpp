@@ -66,3 +66,22 @@ TEST(AttachmentStore, RejectsInvalidAttachmentId) {
 
     fs::remove_all(dir);
 }
+
+TEST(AttachmentStore, RejectsLargeImageWhenNormalizationFails) {
+    auto dir = unique_tmp_dir("large_image");
+    const std::string project_dir = acecode::path_to_utf8(dir);
+
+    std::string error;
+    auto saved = acecode::save_attachment(
+        project_dir,
+        "session1",
+        "broken.png",
+        "image/png",
+        std::string(10u * 1024u * 1024u, 'x'),
+        &error);
+
+    EXPECT_FALSE(saved.has_value());
+    EXPECT_NE(error.find("image normalization failed"), std::string::npos);
+
+    fs::remove_all(dir);
+}

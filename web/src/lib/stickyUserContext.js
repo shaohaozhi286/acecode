@@ -28,6 +28,21 @@ export function sameStickyUserContext(a, b) {
     && String(a.content || '') === String(b.content || '');
 }
 
+export function scrollTopForStickySourceRow({
+  scrollTop = 0,
+  containerTop = 0,
+  rowTop = 0,
+  topInset = 12,
+} = {}) {
+  return Math.max(
+    0,
+    finiteNumber(scrollTop)
+      + finiteNumber(rowTop)
+      - finiteNumber(containerTop)
+      - Math.max(0, finiteNumber(topInset, 12)),
+  );
+}
+
 export function findStickyUserContext({
   items = [],
   rowMetrics = [],
