@@ -149,6 +149,32 @@ export function deleteLeadingCommandBlock(value, leading, selectionStart, select
   };
 }
 
+// 解析一条已落库消息的首段斜杠命令,供 transcript 渲染成徽标(chip)使用。
+// 与 parseLeadingCommand 的差别:这里额外把命中的命令在 commands 清单里找回
+// kind / description,并把首段(含 `/`)与剩余正文切开,方便 UI 分段渲染。
+//
+// 返回:
+//   - 命中已知命令 → { token, name, kind, description, rest }
+//       token   = 首段含前导 `/`(如 "/taobao-compare")
+//       rest    = 首段之后的全部原文(含分隔空白,交给 whitespace-pre-wrap 保留)
+//   - 不以 `/` 开头 / 首段不是已知命令(未命中 skill)→ null
+//     调用方据此回退到纯文本渲染,避免把 `/foobar` 误当命令高亮。
+export function resolveLeadingSlashCommand(text, commands = []) {
+  if (typeof text !== 'string' || text.length === 0 || text[0] !== '/') return null;
+  const list = Array.isArray(commands) ? commands : [];
+  const knownNames = list.map((c) => c && c.name).filter(Boolean);
+  const leading = parseLeadingCommand(text, knownNames);
+  if (!leading.name) return null;
+  const item = list.find((c) => c && c.name === leading.name) || null;
+  return {
+    token: text.slice(0, leading.headLength),
+    name: leading.name,
+    kind: item && item.kind ? item.kind : 'skill',
+    description: item && item.description ? item.description : '',
+    rest: text.slice(leading.headLength),
+  };
+}
+
 export function parseExecutableBuiltinCommand(value) {
   const text = typeof value === 'string' ? value.trim() : '';
   const leading = parseLeadingCommand(text, ['init', 'compact', 'goal']);

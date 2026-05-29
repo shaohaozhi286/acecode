@@ -44,7 +44,7 @@ Web 设置页的“工具 -> ACE Browser Bridge”开关会写入全局 `ace_bro
 6. 交互优先使用 `@e` ref；CSS selector 作为 fallback。
 7. 所有浏览器动作结束后，单独执行 `unblock-input` 退出 block；需要清理标签页时再使用 `close-session`。
 
-如果模型不能识图，截图仍可保存为文件，但应优先依赖 `read-page`、`evaluate`、`network` 和导出文件 metadata；只有必要时才请用户人工查看保存的截图/PDF。
+如果模型不能识图，截图仍可保存为文件，但应优先依赖 `read-page`、`evaluate`、`network`、`devtools` 和导出文件 metadata；只有必要时才请用户人工查看保存的截图/PDF。
 
 ## CLI 子命令
 
@@ -57,7 +57,7 @@ Web 设置页的“工具 -> ACE Browser Bridge”开关会写入全局 `ace_bro
 
 常用命令：
 
-```bash
+```powershell
 ace-browser-host.exe start --json
 ace-browser-host.exe ensure-ready --json
 ace-browser-host.exe status --json
@@ -76,6 +76,15 @@ ace-browser-host.exe scroll --json --session acecode-demo --delta-y 700
 ace-browser-host.exe evaluate --json --session acecode-demo --code "(() => document.title)()"
 ace-browser-host.exe network --json --session acecode-demo --cmd start
 ace-browser-host.exe network --json --session acecode-demo --cmd list --filter api
+ace-browser-host.exe devtools --json --session acecode-demo --cmd console-start
+ace-browser-host.exe devtools --json --session acecode-demo --cmd console-list --types error,warn
+ace-browser-host.exe devtools --json --session acecode-demo --cmd network-start
+ace-browser-host.exe devtools --json --session acecode-demo --cmd network-detail --request-id <id> --response-file ./response.txt
+ace-browser-host.exe devtools --json --session acecode-demo --cmd emulate --viewport 390x844x3,mobile,touch --network-conditions "Slow 3G"
+ace-browser-host.exe devtools --json --session acecode-demo --cmd performance-start --reload
+ace-browser-host.exe devtools --json --session acecode-demo --cmd performance-stop --output ./trace.json
+ace-browser-host.exe devtools --json --session acecode-demo --cmd heap-snapshot --output ./page.heapsnapshot
+ace-browser-host.exe cdp --json --session acecode-demo --method Runtime.evaluate --params '{\"expression\":\"document.title\",\"returnByValue\":true}'
 ace-browser-host.exe screenshot --json --session acecode-demo --output ./page.png
 ace-browser-host.exe save-pdf --json --session acecode-demo --file-name page.pdf
 ace-browser-host.exe list-tabs --json --session acecode-demo
@@ -155,6 +164,32 @@ ace-browser-host.exe ensure-ready --json
 
 如果默认浏览器没有安装或启用 `ace-browser-bridge`，`ensure-ready` 会返回 `ready=false`，此时需要用户打开已安装扩展的浏览器或重新加载扩展。
 
+## DevTools 能力
+
+插件通过 Chrome `debugger` API 发送 CDP 命令。`status --json` / `browser_start` 的 `capabilities` 在插件连接后会包含：
+
+- `devtools`
+- `raw_cdp`
+- `console`
+- `network`
+- `emulation`
+- `performance`
+- `heap_snapshot`
+
+语义化 DevTools 命令统一走：
+
+```powershell
+ace-browser-host.exe devtools --json --session acecode-demo --cmd <command>
+```
+
+Raw CDP 走：
+
+```powershell
+ace-browser-host.exe cdp --json --session acecode-demo --method <Domain.method> --params '{}'
+```
+
+当前 Raw CDP 默认可用，暂不做插件侧开关或 allowlist。
+
 ## 版本与本地边界
 
 CLI daemon 和插件握手时会交换 `protocol_version`。当前协议版本为 `0.1`；版本不兼容时页面动作返回 `version_mismatch`，`status --json` 会显示 `protocol_version`、`host_protocol_version` 和 `version_compatible`。
@@ -171,6 +206,12 @@ daemon 只监听 `127.0.0.1:52007`，CLI 和插件端点使用本地调用头区
 - CSS selector 找不到元素时，重新 `read-page` 并用 `@e` ref 操作。
 - `wait` 等待元素可点击、文本出现、network idle。
 - `network start/list/detail` 捕获 GET 请求并查看详情。
+- `devtools console-start/console-list/console-get/console-clear` 捕获并查看 console 输出。
+- `devtools network-start/network-list/network-detail` 捕获请求并可把 response body 写到本地文件。
+- `devtools emulate` 能设置 viewport、network、CPU、geolocation、user agent、color scheme 和 extra headers。
+- `devtools performance-start/performance-stop --output trace.json` 写出 trace。
+- `devtools heap-snapshot --output page.heapsnapshot` 写出 heap snapshot。
+- `cdp --method Runtime.evaluate --params ...` 返回 raw CDP result。
 - `screenshot` 保存图片文件且不返回 base64。
 - `save-pdf` 保存 PDF 并返回规范化路径。
 - `click` 的 CDP mode 返回 mode、target、path point count 和 duration。

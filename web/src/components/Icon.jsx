@@ -132,6 +132,45 @@ export function RefreshIcon({ size = 16, className = '', ...props }) {
   );
 }
 
+// 斜杠命令徽标的前导图标。用 currentColor 上色,放进 accent 色徽标里自动变蓝。
+// skill → sparkle(灵感/技能);builtin → 终端提示符 `>_`。
+export function CommandGlyph({ kind = 'skill', size = 12, className = '', ...props }) {
+  if (kind === 'builtin') {
+    return (
+      <svg
+        width={size}
+        height={size}
+        viewBox="0 0 16 16"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        className={className}
+        aria-hidden="true"
+        {...props}
+      >
+        <path d="M3.75 4.5 7 8l-3.25 3.5" />
+        <path d="M8.5 11.5h3.75" />
+      </svg>
+    );
+  }
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 16 16"
+      fill="currentColor"
+      className={className}
+      aria-hidden="true"
+      {...props}
+    >
+      <path d="M8 1.4c.18 1.86.86 3.13 1.96 3.92.78.57 1.86.96 3.24 1.18-1.38.22-2.46.61-3.24 1.18C8.86 8.47 8.18 9.74 8 11.6c-.18-1.86-.86-3.13-1.96-3.92C5.26 7.11 4.18 6.72 2.8 6.5c1.38-.22 2.46-.61 3.24-1.18C7.14 4.53 7.82 3.26 8 1.4z" />
+      <path d="M12.6 9.6c.09.86.42 1.45 1.6 1.65-1.18.2-1.51.79-1.6 1.65-.09-.86-.42-1.45-1.6-1.65 1.18-.2 1.51-.79 1.6-1.65z" />
+    </svg>
+  );
+}
+
 export function NavigationArrowIcon({ direction = 'back', size = 16, className = '', ...props }) {
   const flip = direction === 'forward';
   return (

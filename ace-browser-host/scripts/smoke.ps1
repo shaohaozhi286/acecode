@@ -43,6 +43,45 @@ function Invoke-CliJson {
     return ($output | ConvertFrom-Json)
 }
 
+function Wait-PluginAction {
+    param(
+        [int]$Port,
+        [hashtable]$Headers,
+        [string]$ExpectedAction,
+        [System.Management.Automation.Job]$Job = $null
+    )
+
+    Start-Sleep -Milliseconds 500
+    if ($null -ne $Job -and $Job.State -ne "Running") {
+        $jobOutput = Receive-Job $Job
+        throw "job completed before queued action ${ExpectedAction}: $jobOutput"
+    }
+    $poll = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/plugin/poll" -Headers $Headers -ContentType "application/json" -Body "{}"
+    if ($true -eq $poll.ok -and $null -ne $poll.data.action) {
+        if ($poll.data.action.action -ne $ExpectedAction) {
+            throw "expected queued action $ExpectedAction, got $($poll.data.action.action)"
+        }
+        return $poll
+    }
+    if ($null -ne $Job -and $Job.State -ne "Running") {
+        $jobOutput = Receive-Job $Job
+        throw "job completed without queued action ${ExpectedAction}: $jobOutput"
+    }
+    throw "timed out waiting for queued action $ExpectedAction"
+}
+
+function Receive-CompletedJob {
+    param(
+        [System.Management.Automation.Job]$Job,
+        [string]$Name
+    )
+    $completed = Wait-Job -Job $Job -Timeout 15
+    if ($null -eq $completed) {
+        throw "$Name job did not finish"
+    }
+    return (Receive-Job $Job)
+}
+
 $status = Invoke-CliJson -Arguments @("status", "--json", "--port", "$Port")
 if ($true -ne $status.ok) {
     throw "status did not return ok envelope"
@@ -114,14 +153,15 @@ try {
     }
 
     $pluginHeaders = @{ "X-Ace-Browser-Bridge" = "extension" }
-    $mismatchBody = '{"protocol_version":"9.9","extension_version":"0.1-smoke","browser":"chromium","capabilities":{"cdp":true,"network":true,"pdf":true,"upload":true,"os_pointer":false,"operation_overlay":true}}'
+    $capabilitiesJson = '"capabilities":{"cdp":true,"devtools":true,"raw_cdp":true,"console":true,"network":true,"emulation":true,"performance":true,"heap_snapshot":true,"pdf":true,"upload":true,"os_pointer":false,"operation_overlay":true,"input_block":true}'
+    $mismatchBody = '{"protocol_version":"9.9","extension_version":"0.1-smoke","browser":"chromium",' + $capabilitiesJson + '}'
     Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/plugin/hello" -Headers $pluginHeaders -ContentType "application/json" -Body $mismatchBody | Out-Null
     $mismatch = Invoke-CliJson -Arguments @("command", "--json", "--port", "$Port") -InputJson '{"session":"smoke","action":"snapshot","args":{}}'
     if ($false -ne $mismatch.ok -or $mismatch.error.code -ne "version_mismatch") {
         throw "daemon did not report version_mismatch for incompatible plugin protocol"
     }
 
-    $helloBody = '{"protocol_version":"0.1","extension_version":"0.1-smoke","browser":"chromium","capabilities":{"cdp":true,"network":true,"pdf":true,"upload":true,"os_pointer":false,"operation_overlay":true}}'
+    $helloBody = '{"protocol_version":"0.1","extension_version":"0.1-smoke","browser":"chromium",' + $capabilitiesJson + '}'
     $hello = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/plugin/hello" -Headers $pluginHeaders -ContentType "application/json" -Body $helloBody
     if ($true -ne $hello.ok) {
         throw "plugin hello failed"
@@ -137,10 +177,125 @@ try {
     if ($null -eq $connected.data.extension_last_seen_ms) {
         throw "status did not report extension freshness"
     }
+    foreach ($capability in @("devtools", "raw_cdp", "console", "emulation", "performance", "heap_snapshot")) {
+        if ($true -ne $connected.data.capabilities.$capability) {
+            throw "status did not report DevTools capability: $capability"
+        }
+    }
 
     $ready = Invoke-CliJson -Arguments @("ensure-ready", "--json", "--no-launch-browser", "--timeout-ms", "100", "--port", "$Port")
     if ($true -ne $ready.ok -or $true -ne $ready.data.ready -or $true -eq $ready.data.browser_launch_attempted) {
         throw "ensure-ready should report ready without launching browser when plugin is connected"
+    }
+
+    $devtoolsJob = Start-Job -ScriptBlock {
+        param($ExePath, $Port)
+        & $ExePath devtools --json --session smoke --cmd console-list --types error,warn --port $Port
+    } -ArgumentList $ExePath, $Port
+    try {
+        $devtoolsPoll = Wait-PluginAction -Port $Port -Headers $pluginHeaders -ExpectedAction "devtools" -Job $devtoolsJob
+        if ($true -ne $devtoolsPoll.ok -or $devtoolsPoll.data.action.action -ne "devtools") {
+            throw "plugin poll did not return queued devtools action"
+        }
+        if ($devtoolsPoll.data.action.args.cmd -ne "console-list" -or $devtoolsPoll.data.action.args.types[0] -ne "error") {
+            throw "devtools CLI did not preserve console-list arguments"
+        }
+        $devtoolsResultBody = @{
+            id = $devtoolsPoll.data.action.id
+            result = @{
+                ok = $true
+                data = @{
+                    count = 1
+                    messages = @(@{ id = 1; type = "error"; text = "boom" })
+                }
+            }
+        } | ConvertTo-Json -Depth 8 -Compress
+        Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/plugin/result" -Headers $pluginHeaders -ContentType "application/json" -Body $devtoolsResultBody | Out-Null
+        $devtoolsOutput = Receive-CompletedJob -Job $devtoolsJob -Name "devtools"
+        Remove-Job $devtoolsJob -Force
+        $devtoolsJob = $null
+        $devtoolsResult = ($devtoolsOutput | ConvertFrom-Json)
+        if ($true -ne $devtoolsResult.ok -or $devtoolsResult.data.count -ne 1) {
+            throw "devtools command did not return successful envelope"
+        }
+    } finally {
+        if ($null -ne $devtoolsJob) {
+            Remove-Job $devtoolsJob -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    $cdpJob = Start-Job -ScriptBlock {
+        param($ExePath, $Port)
+        $params = '{\"expression\":\"document.title\",\"returnByValue\":true}'
+        & $ExePath cdp --json --session smoke --method Runtime.evaluate --params $params --port $Port
+    } -ArgumentList $ExePath, $Port
+    try {
+        $cdpPoll = Wait-PluginAction -Port $Port -Headers $pluginHeaders -ExpectedAction "raw_cdp" -Job $cdpJob
+        if ($true -ne $cdpPoll.ok -or $cdpPoll.data.action.action -ne "raw_cdp") {
+            throw "plugin poll did not return queued raw_cdp action"
+        }
+        if ($cdpPoll.data.action.args.method -ne "Runtime.evaluate" -or $cdpPoll.data.action.args.params.expression -ne "document.title") {
+            throw "cdp CLI did not preserve method/params"
+        }
+        $cdpResultBody = @{
+            id = $cdpPoll.data.action.id
+            result = @{
+                ok = $true
+                data = @{
+                    success = $true
+                    method = "Runtime.evaluate"
+                    result = @{ result = @{ type = "string"; value = "Demo" } }
+                }
+            }
+        } | ConvertTo-Json -Depth 8 -Compress
+        Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/plugin/result" -Headers $pluginHeaders -ContentType "application/json" -Body $cdpResultBody | Out-Null
+        $cdpOutput = Receive-CompletedJob -Job $cdpJob -Name "cdp"
+        Remove-Job $cdpJob -Force
+        $cdpJob = $null
+        $cdpResult = ($cdpOutput | ConvertFrom-Json)
+        if ($true -ne $cdpResult.ok -or $cdpResult.data.method -ne "Runtime.evaluate") {
+            throw "cdp command did not return successful envelope"
+        }
+    } finally {
+        if ($null -ne $cdpJob) {
+            Remove-Job $cdpJob -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    $tracePath = Join-Path ([System.IO.Path]::GetTempPath()) ("ace-browser-host-trace-" + [guid]::NewGuid().ToString("N") + ".json")
+    $traceJob = Start-Job -ScriptBlock {
+        param($ExePath, $Port, $TracePath)
+        & $ExePath devtools --json --session smoke --cmd performance-stop --output $TracePath --port $Port
+    } -ArgumentList $ExePath, $Port, $tracePath
+    try {
+        $tracePoll = Wait-PluginAction -Port $Port -Headers $pluginHeaders -ExpectedAction "devtools" -Job $traceJob
+        if ($true -ne $tracePoll.ok -or $tracePoll.data.action.action -ne "devtools" -or $tracePoll.data.action.args.cmd -ne "performance-stop") {
+            throw "plugin poll did not return queued performance-stop action"
+        }
+        $traceResultBody = @{
+            id = $tracePoll.data.action.id
+            result = @{
+                ok = $true
+                data = @{
+                    success = $true
+                    event_count = 1
+                    trace = @{ traceEvents = @(@{ name = "Smoke"; ph = "X"; ts = 1 }) }
+                }
+            }
+        } | ConvertTo-Json -Depth 12 -Compress
+        Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/plugin/result" -Headers $pluginHeaders -ContentType "application/json" -Body $traceResultBody | Out-Null
+        $traceOutput = Receive-CompletedJob -Job $traceJob -Name "performance-stop"
+        Remove-Job $traceJob -Force
+        $traceJob = $null
+        $traceResult = ($traceOutput | ConvertFrom-Json)
+        if ($true -ne $traceResult.ok -or !(Test-Path $tracePath) -or $null -ne $traceResult.data.trace) {
+            throw "performance-stop did not materialize trace output"
+        }
+    } finally {
+        if ($null -ne $traceJob) {
+            Remove-Job $traceJob -Force -ErrorAction SilentlyContinue
+        }
+        Remove-Item $tracePath -Force -ErrorAction SilentlyContinue
     }
 
     $blockJob = Start-Job -ScriptBlock {
@@ -148,8 +303,7 @@ try {
         & $ExePath block-input --json --session smoke --watchdog-ms 123456 --message "AI busy" --port $Port
     } -ArgumentList $ExePath, $Port
     try {
-        Start-Sleep -Milliseconds 500
-        $blockPoll = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/plugin/poll" -Headers $pluginHeaders -ContentType "application/json" -Body "{}"
+        $blockPoll = Wait-PluginAction -Port $Port -Headers $pluginHeaders -ExpectedAction "block_input" -Job $blockJob
         if ($true -ne $blockPoll.ok -or $blockPoll.data.action.action -ne "block_input") {
             throw "plugin poll did not return queued block_input action"
         }
@@ -168,7 +322,7 @@ try {
             }
         } | ConvertTo-Json -Depth 8 -Compress
         Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/plugin/result" -Headers $pluginHeaders -ContentType "application/json" -Body $blockResultBody | Out-Null
-        $blockOutput = Receive-Job $blockJob -Wait
+        $blockOutput = Receive-CompletedJob -Job $blockJob -Name "block-input"
         Remove-Job $blockJob -Force
         $blockJob = $null
         $blockResult = ($blockOutput | ConvertFrom-Json)
@@ -186,8 +340,7 @@ try {
         & $ExePath unblock-input --json --session smoke --port $Port
     } -ArgumentList $ExePath, $Port
     try {
-        Start-Sleep -Milliseconds 500
-        $unblockPoll = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/plugin/poll" -Headers $pluginHeaders -ContentType "application/json" -Body "{}"
+        $unblockPoll = Wait-PluginAction -Port $Port -Headers $pluginHeaders -ExpectedAction "unblock_input" -Job $unblockJob
         if ($true -ne $unblockPoll.ok -or $unblockPoll.data.action.action -ne "unblock_input") {
             throw "plugin poll did not return queued unblock_input action"
         }
@@ -202,7 +355,7 @@ try {
             }
         } | ConvertTo-Json -Depth 8 -Compress
         Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/plugin/result" -Headers $pluginHeaders -ContentType "application/json" -Body $unblockResultBody | Out-Null
-        $unblockOutput = Receive-Job $unblockJob -Wait
+        $unblockOutput = Receive-CompletedJob -Job $unblockJob -Name "unblock-input"
         Remove-Job $unblockJob -Force
         $unblockJob = $null
         $unblockResult = ($unblockOutput | ConvertFrom-Json)
@@ -221,8 +374,7 @@ try {
         & $ExePath fill --json --session smoke --target "@e1" --value $Value --port $Port
     } -ArgumentList $ExePath, $Port, $unicodeValue
     try {
-        Start-Sleep -Milliseconds 500
-        $fillPoll = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/plugin/poll" -Headers $pluginHeaders -ContentType "application/json" -Body "{}"
+        $fillPoll = Wait-PluginAction -Port $Port -Headers $pluginHeaders -ExpectedAction "fill" -Job $fillJob
         if ($true -ne $fillPoll.ok -or $fillPoll.data.action.action -ne "fill") {
             throw "plugin poll did not return queued fill action"
         }
@@ -241,7 +393,7 @@ try {
             }
         } | ConvertTo-Json -Depth 8 -Compress
         Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/plugin/result" -Headers $pluginHeaders -ContentType "application/json" -Body $fillResultBody | Out-Null
-        $fillOutput = Receive-Job $fillJob -Wait
+        $fillOutput = Receive-CompletedJob -Job $fillJob -Name "fill"
         Remove-Job $fillJob -Force
         $fillJob = $null
         $fillResult = ($fillOutput | ConvertFrom-Json)
@@ -259,8 +411,7 @@ try {
         & $ExePath read-page --json --session smoke --port $Port
     } -ArgumentList $ExePath, $Port
     try {
-        Start-Sleep -Milliseconds 500
-        $poll = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/plugin/poll" -Headers $pluginHeaders -ContentType "application/json" -Body "{}"
+        $poll = Wait-PluginAction -Port $Port -Headers $pluginHeaders -ExpectedAction "snapshot" -Job $commandJob
         if ($true -ne $poll.ok -or $null -eq $poll.data.action -or $poll.data.action.action -ne "snapshot") {
             throw "plugin poll did not return queued snapshot action"
         }
@@ -277,7 +428,7 @@ try {
             }
         } | ConvertTo-Json -Depth 8 -Compress
         Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/plugin/result" -Headers $pluginHeaders -ContentType "application/json" -Body $resultBody | Out-Null
-        $commandOutput = Receive-Job $commandJob -Wait
+        $commandOutput = Receive-CompletedJob -Job $commandJob -Name "read-page"
         Remove-Job $commandJob -Force
         $commandJob = $null
         $commandResult = ($commandOutput | ConvertFrom-Json)
@@ -309,7 +460,7 @@ try {
     try {
         Start-Sleep -Milliseconds 500
         Invoke-CliJson -Arguments @("shutdown", "--json", "--port", "$Port") | Out-Null
-        $pollAfterShutdown = Receive-Job $pollJob -Wait
+        $pollAfterShutdown = Receive-CompletedJob -Job $pollJob -Name "poll-after-shutdown"
         if ($true -ne $pollAfterShutdown.ok -or $null -ne $pollAfterShutdown.data.action) {
             throw "plugin poll did not unblock cleanly during daemon shutdown"
         }

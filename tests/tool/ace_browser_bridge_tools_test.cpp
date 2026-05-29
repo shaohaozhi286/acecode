@@ -115,6 +115,9 @@ TEST(AceBrowserBridgeToolsStart, ReturnsStatusAndCliPrompt) {
     EXPECT_NE(result.post_user_prompt->find("block-input"), std::string::npos);
     EXPECT_NE(result.post_user_prompt->find("unblock-input"), std::string::npos);
     EXPECT_NE(result.post_user_prompt->find("read-page"), std::string::npos);
+    EXPECT_NE(result.post_user_prompt->find("devtools --json"), std::string::npos);
+    EXPECT_NE(result.post_user_prompt->find("cdp --json"), std::string::npos);
+    EXPECT_NE(result.post_user_prompt->find("Runtime.evaluate"), std::string::npos);
     EXPECT_NE(result.post_user_prompt->find("If the active model cannot inspect images"),
               std::string::npos);
 }

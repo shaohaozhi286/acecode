@@ -5,15 +5,18 @@
 // 消息底部同侧的复制 + 分叉按钮(左消息在左下角,右消息在右下角)。复制走 navigator.clipboard.writeText;分叉
 // 调上层 onFork(messageId) — disabled 当 messageId 缺失。
 
-import { memo, useCallback, useMemo, useState } from 'react';
+import { memo, useCallback, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { renderMarkdown } from '../lib/markdown.js';
 import { codeTextFromCopyButtonTarget, copyTextToClipboard } from '../lib/codeBlockCopy.js';
 import { relativeTime } from '../lib/format.js';
 import { buildCompactMessagePreview } from '../lib/compactMessagePreview.js';
 import { assistantChromeState } from '../lib/assistantAvatarDisplay.js';
 import { CopyableCodeFrame } from './CopyableCodeFrame.jsx';
-import { VsIcon } from './Icon.jsx';
+import { VsIcon, CommandGlyph } from './Icon.jsx';
 import { toast } from './Toast.jsx';
+import { resolveLeadingSlashCommand } from '../lib/slashCommands.js';
+import { useSlashCommands } from './SlashCommandsContext.jsx';
 
 function HoverActions({ messageId, getCopyText, onFork }) {
   const handleCopy = async (event) => {
@@ -93,13 +96,86 @@ function UserAttachmentStrip({ contentParts = [] }) {
   );
 }
 
+// 斜杠命令徽标:skill 图标 + 蓝色命令名,hover 浮出描述。
+// 放在 whitespace-pre-wrap 容器里随正文内联排版。
+//
+// 描述气泡走 portal 挂到 document.body + position:fixed:聊天区是 overflow 滚动
+// 容器、顶部还有 sticky header,CSS 绝对定位的浮层会被裁剪 / 盖住。portal 到顶层
+// 才能稳定盖在最前。顶部空间不足时(被 header 压住)自动翻到徽标下方。
+function CommandToken({ token, name, kind, description }) {
+  const anchorRef = useRef(null);
+  const [tip, setTip] = useState(null);
+
+  const showTip = useCallback(() => {
+    if (!description) return;
+    const el = anchorRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const right = Math.max(8, window.innerWidth - r.right);
+    if (r.top < 96) {
+      // 顶部空间不足 → 翻到徽标下方,避免被 header 遮住
+      setTip({ placement: 'below', right, top: Math.round(r.bottom + 6) });
+    } else {
+      setTip({ placement: 'above', right, bottom: Math.round(window.innerHeight - r.top + 6) });
+    }
+  }, [description]);
+  const hideTip = useCallback(() => setTip(null), []);
+
+  return (
+    <span
+      ref={anchorRef}
+      className="ace-cmd-token"
+      tabIndex={description ? 0 : undefined}
+      onMouseEnter={showTip}
+      onMouseLeave={hideTip}
+      onFocus={showTip}
+      onBlur={hideTip}
+    >
+      <CommandGlyph kind={kind} size={12} className="ace-cmd-token-glyph" />
+      <span className="ace-cmd-token-name">{token}</span>
+      {tip
+        ? createPortal(
+            <span
+              className="ace-cmd-token-tip"
+              role="tooltip"
+              data-placement={tip.placement}
+              style={{
+                right: tip.right,
+                top: tip.placement === 'below' ? tip.top : undefined,
+                bottom: tip.placement === 'above' ? tip.bottom : undefined,
+              }}
+            >
+              <span className="ace-cmd-token-tip-name">/{name}</span>
+              <span className="ace-cmd-token-tip-desc">{description}</span>
+            </span>,
+            document.body,
+          )
+        : null}
+    </span>
+  );
+}
+
+// 用户消息正文:首段命中已知 skill / builtin 命令时把 "/name" 渲染成徽标,
+// 其余原文照常;未命中(普通消息或未知命令)→ 纯文本回退。
+function UserMessageBody({ content }) {
+  const { commands } = useSlashCommands();
+  const cmd = useMemo(() => resolveLeadingSlashCommand(content, commands), [content, commands]);
+  if (!cmd) return content;
+  return (
+    <>
+      <CommandToken token={cmd.token} name={cmd.name} kind={cmd.kind} description={cmd.description} />
+      {cmd.rest}
+    </>
+  );
+}
+
 function UserBubble({ content, contentParts, ts, messageId, onFork }) {
   return (
     <div className="self-end max-w-[70%] flex flex-col items-end gap-0.5 group">
       <UserAttachmentStrip contentParts={contentParts} />
       {content ? (
         <div className="px-3.5 py-2 rounded-[14px] rounded-br-[4px] bg-accent-bg border border-accent-soft text-fg text-[13px] leading-[1.5] whitespace-pre-wrap break-words">
-          {content}
+          <UserMessageBody content={content} />
         </div>
       ) : null}
       <div className="min-h-6 flex items-center justify-end gap-1 mr-1">

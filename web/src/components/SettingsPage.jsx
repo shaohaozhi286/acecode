@@ -1152,8 +1152,8 @@ function SectionUsage() {
 // saved_models 仍是唯一持久化来源;多选模型提交时拆成多个 saved model 条目。
 
 const MODEL_NEW_PROVIDER_PILL = {
-  openai:    'text-ok bg-ok/15',
-  copilot:   'text-accent bg-accent/15',
+  openai:    'text-ok bg-ok-bg border border-ok-border',
+  copilot:   'text-accent bg-accent-bg border border-accent-soft',
 };
 
 const MODEL_NEW_DRAFT_DEFAULT = {
@@ -1289,8 +1289,8 @@ function CapabilityBadges({ capabilities = [], compact = false }) {
           className={clsx(
             'inline-flex items-center justify-center rounded-md border border-border bg-surface-hi text-fg-2',
             compact ? 'w-6 h-6' : 'w-7 h-7',
-            id === 'tool_use' && 'border-warn/30 bg-warn/10 text-warn',
-            id === 'vision' && 'border-accent/30 bg-accent-bg text-accent',
+            id === 'tool_use' && 'border-warn bg-warn-bg text-warn',
+            id === 'vision' && 'border-accent-soft bg-accent-bg text-accent',
           )}
         >
           <CapabilityIcon id={id} size={compact ? 12 : 14} />
@@ -1684,7 +1684,7 @@ function SectionModel() {
                 title={isDefault ? '当前默认' : '设为默认'}
                 className={clsx(
                   'w-7 h-7 rounded-md flex items-center justify-center text-[14px] shrink-0 transition',
-                  isDefault ? 'text-warn bg-warn/15' : 'text-fg-mute hover:bg-surface-hi',
+                  isDefault ? 'text-warn bg-warn-bg border border-warn' : 'text-fg-mute hover:bg-surface-hi',
                 )}
               >
                 {isDefault ? '★' : '☆'}
@@ -1801,10 +1801,10 @@ function CopilotAuthPanel({
   const loggedIn = !!auth?.authenticated;
   const statusText = auth?.loading ? '检查中' : loggedIn ? '已登录' : '未登录';
   const statusClass = auth?.loading
-    ? 'text-fg-mute bg-surface-hi'
+    ? 'text-fg-mute bg-surface-hi border border-border'
     : loggedIn
-      ? 'text-ok bg-ok/15'
-      : 'text-warn bg-warn/15';
+      ? 'text-ok bg-ok-bg border border-ok-border'
+      : 'text-warn bg-warn-bg border border-warn';
 
   return (
     <div className="rounded-lg border border-border bg-surface mb-6 overflow-hidden">
@@ -2029,7 +2029,7 @@ function ModelFormPreview({
   };
 
   return (
-    <div className="p-5 rounded-lg border border-accent/30 bg-surface">
+    <div className="p-5 rounded-lg border border-accent-soft bg-surface">
       {/* Row 1: 名称 + Provider */}
       <div className="grid grid-cols-2 gap-4 mb-4">
         <div>
@@ -2131,9 +2131,9 @@ function ModelFormPreview({
                 className={clsx(
                   'inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border text-[12px] transition',
                   active
-                    ? 'border-accent/40 bg-accent-bg text-accent'
+                    ? 'border-accent-soft bg-accent-bg text-accent'
                     : 'border-border bg-surface text-fg-mute hover:bg-surface-hi hover:text-fg',
-                  item.id === 'tool_use' && active && 'border-warn/35 bg-warn/10 text-warn',
+                  item.id === 'tool_use' && active && 'border-warn bg-warn-bg text-warn',
                 )}
               >
                 <CapabilityIcon id={item.id} size={13} />
@@ -2319,7 +2319,7 @@ function ModelFormPreview({
             {selectedModels.map((mid) => (
               <span
                 key={mid}
-                className="inline-flex items-center gap-1 pl-2.5 pr-1.5 py-1 rounded-md bg-accent-bg border border-accent/30 text-[12px] font-mono text-accent"
+                className="inline-flex items-center gap-1 pl-2.5 pr-1.5 py-1 rounded-md bg-accent-bg border border-accent-soft text-[12px] font-mono text-accent"
               >
                 {mid}
                 <button

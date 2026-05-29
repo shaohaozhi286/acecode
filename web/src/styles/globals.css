@@ -998,6 +998,80 @@ body {
   background: transparent;
 }
 
+/* transcript 用户气泡里的斜杠命令徽标:skill 图标 + 蓝色命令名,hover 浮出描述。
+   inline-flex 让徽标与 whitespace-pre-wrap 正文内联同行排版。 */
+.ace-cmd-token {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-right: 1px;
+  padding: 0 6px 0 5px;
+  border-radius: 6px;
+  background: color-mix(in oklab, var(--ace-accent) 14%, transparent);
+  border: 1px solid var(--ace-accent-soft);
+  color: var(--ace-accent);
+  font-weight: 600;
+  line-height: 1.35;
+  vertical-align: baseline;
+  cursor: default;
+  outline: none;
+}
+.ace-cmd-token-glyph {
+  flex: 0 0 auto;
+  opacity: 0.95;
+}
+.ace-cmd-token-name {
+  color: var(--ace-accent);
+  white-space: nowrap;
+}
+.ace-cmd-token:hover,
+.ace-cmd-token:focus-visible {
+  background: color-mix(in oklab, var(--ace-accent) 22%, transparent);
+}
+
+/* 描述气泡:portal 到 body + position:fixed,坐标由 JS 计算(锚右对齐徽标右缘)。
+   走 portal + fixed 是为了逃出聊天滚动区 overflow 裁剪与 sticky header 的堆叠上下文,
+   保证始终盖在最前。z-index 高于普通 UI、低于模态(z-300)。 */
+.ace-cmd-token-tip {
+  position: fixed;
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: max-content;
+  max-width: min(320px, 70vw);
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: var(--ace-surface);
+  border: 1px solid var(--ace-border);
+  color: var(--ace-fg);
+  font-weight: 400;
+  text-align: left;
+  white-space: normal;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+  pointer-events: none;
+  animation: ace-cmd-token-tip-in 0.12s ease both;
+}
+@keyframes ace-cmd-token-tip-in {
+  from { opacity: 0; transform: translateY(var(--ace-tip-from, 3px)); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.ace-cmd-token-tip[data-placement="below"] {
+  --ace-tip-from: -3px;
+}
+.ace-cmd-token-tip-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ace-accent);
+}
+.ace-cmd-token-tip-desc {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ace-fg-2);
+}
+
 /* Single view column resize handles
    Zero-width in layout so adjacent panels touch with no visible seam.
    ::before provides a 7px-wide hit zone straddling the boundary;

@@ -115,6 +115,10 @@ jobs:
         shell: bash
         run: cmake --build build --config Release --target acecode-desktop
 
+      - name: Build browser host
+        shell: bash
+        run: cmake --build build --config Release --target ace-browser-host
+
       - name: Extract debug symbols (Linux)
         if: runner.os == 'Linux'
         shell: bash
@@ -152,6 +156,31 @@ jobs:
           cp "build/${{ matrix.executable }}" "$package_dir/"
           cp README.md README_CN.md "$package_dir/"
 
+          browser_host=""
+          for candidate in \
+            "build/ace-browser-host" \
+            "build/Release/ace-browser-host" \
+            "build/RelWithDebInfo/ace-browser-host" \
+            "build/MinSizeRel/ace-browser-host" \
+            "build/Debug/ace-browser-host"; do
+            if [ -f "$candidate" ]; then
+              browser_host="$candidate"
+              break
+            fi
+          done
+          if [ -z "$browser_host" ]; then
+            echo "Missing browser host executable: ace-browser-host" >&2
+            find build -type f -name 'ace-browser-host*' -print >&2 || true
+            exit 1
+          fi
+          cp "$browser_host" "$package_dir/"
+
+          if [ ! -f "ace-browser-bridge/manifest.json" ]; then
+            echo "Missing browser bridge extension manifest: ace-browser-bridge/manifest.json" >&2
+            exit 1
+          fi
+          cp -R "ace-browser-bridge" "$package_dir/"
+
           if [ "${{ matrix.build_desktop }}" = "true" ]; then
             if [ "$RUNNER_OS" = "macOS" ]; then
               if [ ! -d "build/ACECode.app" ]; then
@@ -183,6 +212,28 @@ jobs:
           }
           Copy-Item -LiteralPath $terminalExe -Destination "$packageDir/"
           Copy-Item "README.md","README_CN.md" "$packageDir/"
+
+          $browserHostCandidates = @(
+            "build/ace-browser-host.exe",
+            "build/Release/ace-browser-host.exe",
+            "build/Debug/ace-browser-host.exe",
+            "build/RelWithDebInfo/ace-browser-host.exe",
+            "build/MinSizeRel/ace-browser-host.exe"
+          )
+          $browserHostExe = $browserHostCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          if (-not $browserHostExe) {
+            $browserHostExe = Get-ChildItem -Path "build" -Recurse -Filter "ace-browser-host.exe" -File |
+              Select-Object -ExpandProperty FullName -First 1
+          }
+          if (-not $browserHostExe) {
+            throw "Missing browser host executable: ace-browser-host.exe"
+          }
+          Copy-Item -LiteralPath $browserHostExe -Destination "$packageDir/"
+
+          if (-not (Test-Path -LiteralPath "ace-browser-bridge/manifest.json")) {
+            throw "Missing browser bridge extension manifest: ace-browser-bridge/manifest.json"
+          }
+          Copy-Item -LiteralPath "ace-browser-bridge" -Destination "$packageDir/" -Recurse -Force
 
           if ("${{ matrix.build_desktop }}" -eq "true") {
             $desktopCandidates = @(

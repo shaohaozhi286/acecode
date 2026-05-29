@@ -16,7 +16,11 @@ let connectionState = {
 let polling = false;
 const sessions = new Map();
 const traceBySession = new Map();
+const consoleBySession = new Map();
 const networkBySession = new Map();
+const emulationBySession = new Map();
+const performanceBySession = new Map();
+const heapBySession = new Map();
 const debuggerTabs = new Set();
 const tabSessionByTabId = new Map();
 let registryRestorePromise = null;
@@ -29,7 +33,13 @@ function daemonBaseUrl() {
 function capabilities() {
   return {
     cdp: true,
+    devtools: true,
+    raw_cdp: true,
+    console: true,
     network: true,
+    emulation: true,
+    performance: true,
+    heap_snapshot: true,
     pdf: true,
     upload: true,
     os_pointer: false,
@@ -287,6 +297,21 @@ function statusAfterSuccessfulOperation(session) {
   const state = sessions.get(session);
   if (inputBlockIsActive(state)) return "operating";
   return networkBySession.get(session)?.active ? "network" : "idle";
+}
+
+function debuggerFeatureActive(session) {
+  return Boolean(
+    consoleBySession.get(session)?.active ||
+    networkBySession.get(session)?.active ||
+    emulationBySession.get(session)?.active ||
+    performanceBySession.get(session)?.active ||
+    heapBySession.get(session)?.active
+  );
+}
+
+async function detachDebuggerIfIdle(session, tabId) {
+  if (!tabId || debuggerFeatureActive(session)) return;
+  await detachDebugger(tabId);
 }
 
 async function tabExists(tabId) {
@@ -625,14 +650,43 @@ async function handleCloseSession(session) {
   }
   sessions.delete(session);
   traceBySession.delete(session);
+  consoleBySession.delete(session);
   networkBySession.delete(session);
+  emulationBySession.delete(session);
+  performanceBySession.delete(session);
+  heapBySession.delete(session);
   await persistSessionRegistryNow();
   return { ok: true, data: { success: true, closed, detached } };
 }
 
+function networkState(session) {
+  const existing = networkBySession.get(session);
+  if (existing) return existing;
+  const state = { active: false, tabId: null, requests: [] };
+  networkBySession.set(session, state);
+  return state;
+}
+
+function networkRequestSummary(request) {
+  const { body, responseBody, ...summary } = request;
+  if (body !== undefined) {
+    summary.body = typeof body === "string"
+      ? { inline: true, sizeBytes: body.length }
+      : body;
+  }
+  if (responseBody !== undefined) {
+    summary.responseBody = typeof responseBody === "string"
+      ? { inline: true, sizeBytes: responseBody.length }
+      : responseBody;
+    summary.response_body = summary.responseBody;
+  }
+  return summary;
+}
+
 async function handleNetwork(session, args) {
-  const state = networkBySession.get(session) || { active: false, requests: [] };
-  if (args.cmd === "start") {
+  const state = networkState(session);
+  const cmd = args.cmd || "list";
+  if (cmd === "start") {
     const tab = await tabForSession(session);
     await ensureDebugger(tab.id);
     tabSessionByTabId.set(tab.id, session);
@@ -640,39 +694,419 @@ async function handleNetwork(session, args) {
     state.active = true;
     state.tabId = tab.id;
     state.requests = [];
-    networkBySession.set(session, state);
     await updateGroup(session, null, "network");
-    return { ok: true, data: { success: true, message: "network capture started" } };
+    return { ok: true, data: { success: true, message: "network capture started", tabId: tab.id } };
   }
-  if (args.cmd === "stop") {
+  if (cmd === "stop") {
     state.active = false;
-    networkBySession.set(session, state);
-    if (state.tabId) await detachDebugger(state.tabId);
+    if (state.tabId) await detachDebuggerIfIdle(session, state.tabId);
     await updateGroup(session, null, "idle");
-    return { ok: true, data: { success: true, message: "network capture stopped" } };
+    return { ok: true, data: { success: true, message: "network capture stopped", count: state.requests.length } };
   }
-  if (args.cmd === "list") {
+  if (cmd === "list") {
     const filter = String(args.filter || "");
-    const requests = state.requests.filter((req) => !filter || req.url.includes(filter));
+    const typeFilter = String(args.resource_type || args.resourceType || "").toLowerCase();
+    const requests = state.requests
+      .filter((req) => !filter || req.url.includes(filter))
+      .filter((req) => !typeFilter || String(req.resourceType || "").toLowerCase() === typeFilter)
+      .map(networkRequestSummary);
     return { ok: true, data: { count: requests.length, requests } };
   }
-  if (args.cmd === "detail") {
+  if (cmd === "detail") {
     const requestId = args.requestId || args.request_id;
-    const request = state.requests.find((item) => item.requestId === requestId);
+    const request = state.requests.find((item) => item.requestId === requestId || item.request_id === requestId);
     if (!request) {
       return { ok: false, error: { code: "request_not_found", message: `request not found: ${requestId}` } };
     }
     if (state.tabId && debuggerTabs.has(state.tabId)) {
       try {
-        const body = await chrome.debugger.sendCommand({ tabId: state.tabId }, "Network.getResponseBody", { requestId });
-        request.body = body?.base64Encoded ? { base64Encoded: true, sizeBytes: body.body?.length || 0 } : body?.body;
-      } catch {
-        // Response bodies may be unavailable for cached, preflight, or streaming requests.
+        const body = await chrome.debugger.sendCommand({ tabId: state.tabId }, "Network.getResponseBody", { requestId: request.requestId });
+        if (body?.base64Encoded) {
+          request.responseBody = {
+            base64Encoded: true,
+            body: body.body || "",
+            sizeBytes: body.body?.length || 0
+          };
+          request.response_body = request.responseBody;
+        } else if (typeof body?.body === "string") {
+          request.responseBody = body.body;
+          request.response_body = body.body;
+        }
+      } catch (error) {
+        request.bodyError = error instanceof Error ? error.message : String(error);
+        request.body_error = request.bodyError;
       }
     }
     return { ok: true, data: request };
   }
-  return { ok: false, error: { code: "invalid_request", message: `unknown network cmd: ${args.cmd}` } };
+  return { ok: false, error: { code: "invalid_request", message: `unknown network cmd: ${cmd}` } };
+}
+
+function consoleState(session) {
+  const existing = consoleBySession.get(session);
+  if (existing) return existing;
+  const state = { active: false, tabId: null, nextId: 1, messages: [] };
+  consoleBySession.set(session, state);
+  return state;
+}
+
+function remoteObjectValue(obj) {
+  if (!obj) return null;
+  if (Object.prototype.hasOwnProperty.call(obj, "value")) return obj.value;
+  return obj.description ?? obj.unserializableValue ?? `[${obj.type || "object"}]`;
+}
+
+function appendConsoleMessage(session, message) {
+  const state = consoleState(session);
+  if (!state.active) return;
+  const item = {
+    id: state.nextId++,
+    timestamp: new Date(message.timestamp || Date.now()).toISOString(),
+    ...message
+  };
+  state.messages.push(item);
+  while (state.messages.length > 500) state.messages.shift();
+}
+
+async function handleConsole(session, cmd, args) {
+  const state = consoleState(session);
+  if (cmd === "console-start") {
+    const tab = await tabForSession(session);
+    await ensureDebugger(tab.id);
+    tabSessionByTabId.set(tab.id, session);
+    await cdpCommand(tab.id, "Runtime.enable");
+    try {
+      await cdpCommand(tab.id, "Log.enable");
+    } catch {
+      // Some Chromium targets do not expose Log; Runtime.consoleAPICalled is enough.
+    }
+    if (args.preserve !== true) {
+      state.messages = [];
+      state.nextId = 1;
+    }
+    state.active = true;
+    state.tabId = tab.id;
+    return { ok: true, data: { success: true, message: "console capture started", tabId: tab.id } };
+  }
+  if (cmd === "console-stop") {
+    state.active = false;
+    if (state.tabId) await detachDebuggerIfIdle(session, state.tabId);
+    return { ok: true, data: { success: true, message: "console capture stopped", count: state.messages.length } };
+  }
+  if (cmd === "console-list") {
+    const types = Array.isArray(args.types) ? args.types.map((item) => String(item)) : [];
+    const pageSize = clampNumber(args.page_size ?? args.pageSize, 1, 1000, state.messages.length || 100);
+    const pageIdx = clampNumber(args.page_idx ?? args.pageIdx, 0, 100000, 0);
+    const filtered = state.messages.filter((item) => types.length === 0 || types.includes(item.type));
+    const messages = filtered.slice(pageIdx * pageSize, pageIdx * pageSize + pageSize);
+    return { ok: true, data: { count: filtered.length, page_size: pageSize, page_idx: pageIdx, messages } };
+  }
+  if (cmd === "console-get") {
+    const id = Number(args.id ?? args.msgid);
+    const message = state.messages.find((item) => item.id === id);
+    if (!message) {
+      return { ok: false, error: { code: "console_message_not_found", message: `console message not found: ${id}` } };
+    }
+    return { ok: true, data: message };
+  }
+  if (cmd === "console-clear") {
+    state.messages = [];
+    state.nextId = 1;
+    if (state.tabId && debuggerTabs.has(state.tabId)) {
+      try {
+        await cdpCommand(state.tabId, "Runtime.discardConsoleEntries");
+      } catch {
+        // Ignore clear failures; the bridge buffer is already cleared.
+      }
+    }
+    return { ok: true, data: { success: true, message: "console buffer cleared" } };
+  }
+  return { ok: false, error: { code: "invalid_request", message: `unknown console cmd: ${cmd}` } };
+}
+
+function parseViewport(value, args = {}) {
+  const raw = value || args.viewport;
+  if (!raw && !args.width && !args.height) return null;
+  if (String(raw || "").toLowerCase() === "clear") return { clear: true };
+  const text = String(raw || "");
+  const [sizePart, ...flags] = text.split(",");
+  const parts = sizePart ? sizePart.split("x") : [];
+  const width = clampNumber(args.width ?? parts[0], 1, 10000, 1280);
+  const height = clampNumber(args.height ?? parts[1], 1, 10000, 720);
+  const deviceScaleFactor = clampNumber(
+    args.device_scale_factor ?? args.deviceScaleFactor ?? parts[2],
+    0.1,
+    10,
+    1
+  );
+  const flagSet = new Set(flags.map((item) => item.trim().toLowerCase()).filter(Boolean));
+  return {
+    width,
+    height,
+    deviceScaleFactor,
+    mobile: Boolean(args.mobile) || flagSet.has("mobile"),
+    touch: Boolean(args.touch) || flagSet.has("touch"),
+    screenOrientation: flagSet.has("landscape")
+      ? { type: "landscapePrimary", angle: 90 }
+      : { type: "portraitPrimary", angle: 0 }
+  };
+}
+
+function networkConditionsPreset(name) {
+  const normalized = String(name || "").trim().toLowerCase();
+  if (!normalized || normalized === "clear" || normalized === "none") return null;
+  if (normalized === "offline") return { offline: true, latency: 0, downloadThroughput: 0, uploadThroughput: 0 };
+  if (normalized === "slow 3g") return { offline: false, latency: 400, downloadThroughput: 50 * 1024, uploadThroughput: 50 * 1024 };
+  if (normalized === "fast 3g") return { offline: false, latency: 150, downloadThroughput: 180 * 1024, uploadThroughput: 90 * 1024 };
+  if (normalized === "slow 4g") return { offline: false, latency: 80, downloadThroughput: 512 * 1024, uploadThroughput: 256 * 1024 };
+  if (normalized === "fast 4g") return { offline: false, latency: 20, downloadThroughput: 4 * 1024 * 1024, uploadThroughput: 2 * 1024 * 1024 };
+  return null;
+}
+
+function jsonObjectFromArg(value, label) {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value === "object" && !Array.isArray(value)) return value;
+  try {
+    const parsed = JSON.parse(String(value));
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+  } catch {
+    // Report a stable invalid_request below.
+  }
+  const error = new Error(`${label} must be a JSON object`);
+  error.code = "invalid_request";
+  throw error;
+}
+
+async function handleEmulation(session, args) {
+  const tab = await tabForSession(session);
+  await ensureDebugger(tab.id);
+  tabSessionByTabId.set(tab.id, session);
+  const state = emulationBySession.get(session) || { active: false, tabId: tab.id, applied: [] };
+  state.tabId = tab.id;
+  const applied = [];
+
+  if (args.reset === true || args.clear === true) {
+    await cdpCommand(tab.id, "Emulation.clearDeviceMetricsOverride");
+    await cdpCommand(tab.id, "Emulation.clearGeolocationOverride");
+    await cdpCommand(tab.id, "Emulation.setCPUThrottlingRate", { rate: 1 });
+    await cdpCommand(tab.id, "Network.enable");
+    await cdpCommand(tab.id, "Network.emulateNetworkConditions", {
+      offline: false,
+      latency: 0,
+      downloadThroughput: -1,
+      uploadThroughput: -1
+    });
+    await cdpCommand(tab.id, "Network.setExtraHTTPHeaders", { headers: {} });
+    await cdpCommand(tab.id, "Emulation.setEmulatedMedia", { features: [] });
+    state.active = false;
+    state.applied = [];
+    emulationBySession.set(session, state);
+    await detachDebuggerIfIdle(session, tab.id);
+    return { ok: true, data: { success: true, reset: true } };
+  }
+
+  const viewport = parseViewport(args.viewport, args);
+  if (viewport?.clear) {
+    await cdpCommand(tab.id, "Emulation.clearDeviceMetricsOverride");
+    applied.push("viewport-clear");
+  } else if (viewport) {
+    await cdpCommand(tab.id, "Emulation.setDeviceMetricsOverride", viewport);
+    await cdpCommand(tab.id, "Emulation.setTouchEmulationEnabled", {
+      enabled: Boolean(viewport.touch),
+      maxTouchPoints: viewport.touch ? 5 : 0
+    });
+    applied.push("viewport");
+  }
+
+  const networkName = args.network_conditions || args.networkConditions;
+  if (networkName !== undefined) {
+    const preset = networkConditionsPreset(networkName);
+    await cdpCommand(tab.id, "Network.enable");
+    await cdpCommand(tab.id, "Network.emulateNetworkConditions", preset || {
+      offline: false,
+      latency: 0,
+      downloadThroughput: -1,
+      uploadThroughput: -1
+    });
+    applied.push("network_conditions");
+  }
+
+  const cpuRate = args.cpu_throttling_rate ?? args.cpuThrottlingRate;
+  if (cpuRate !== undefined) {
+    await cdpCommand(tab.id, "Emulation.setCPUThrottlingRate", {
+      rate: clampNumber(cpuRate, 1, 20, 1)
+    });
+    applied.push("cpu");
+  }
+
+  const geolocation = args.geolocation;
+  if (typeof geolocation === "string") {
+    if (geolocation.toLowerCase() === "clear") {
+      await cdpCommand(tab.id, "Emulation.clearGeolocationOverride");
+      applied.push("geolocation-clear");
+    } else {
+      const [lat, lon] = geolocation.split(",").map((part) => Number(part.trim()));
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+        return { ok: false, error: { code: "invalid_request", message: "geolocation must be '<latitude>,<longitude>'" } };
+      }
+      await cdpCommand(tab.id, "Emulation.setGeolocationOverride", {
+        latitude: lat,
+        longitude: lon,
+        accuracy: clampNumber(args.accuracy, 1, 100000, 100)
+      });
+      applied.push("geolocation");
+    }
+  }
+
+  const userAgent = args.user_agent ?? args.userAgent;
+  if (typeof userAgent === "string") {
+    await cdpCommand(tab.id, "Network.setUserAgentOverride", { userAgent });
+    applied.push("user_agent");
+  }
+
+  const colorScheme = args.color_scheme ?? args.colorScheme;
+  if (typeof colorScheme === "string") {
+    const normalized = colorScheme.toLowerCase();
+    await cdpCommand(tab.id, "Emulation.setEmulatedMedia", {
+      features: normalized === "auto" || normalized === "clear"
+        ? []
+        : [{ name: "prefers-color-scheme", value: normalized }]
+    });
+    applied.push("color_scheme");
+  }
+
+  const extraHeaders = jsonObjectFromArg(args.extra_http_headers ?? args.extraHttpHeaders, "extra_http_headers");
+  if (extraHeaders) {
+    await cdpCommand(tab.id, "Network.enable");
+    await cdpCommand(tab.id, "Network.setExtraHTTPHeaders", { headers: extraHeaders });
+    applied.push("extra_http_headers");
+  }
+
+  if (applied.length === 0) {
+    emulationBySession.set(session, state);
+    await detachDebuggerIfIdle(session, tab.id);
+    return { ok: true, data: { success: true, applied, active: state.active, tabId: tab.id } };
+  }
+
+  state.active = true;
+  state.applied = Array.from(new Set([...(state.applied || []), ...applied]));
+  emulationBySession.set(session, state);
+  return { ok: true, data: { success: true, applied, active: state.active, tabId: tab.id } };
+}
+
+function performanceState(session) {
+  const existing = performanceBySession.get(session);
+  if (existing) return existing;
+  const state = { active: false, tabId: null, events: [], complete: false };
+  performanceBySession.set(session, state);
+  return state;
+}
+
+async function waitForPredicate(predicate, timeoutMs, intervalMs = 100) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return true;
+    await sleep(intervalMs);
+  }
+  return predicate();
+}
+
+async function handlePerformance(session, cmd, args) {
+  const state = performanceState(session);
+  if (cmd === "performance-start") {
+    const tab = await tabForSession(session);
+    await ensureDebugger(tab.id);
+    tabSessionByTabId.set(tab.id, session);
+    state.active = true;
+    state.tabId = tab.id;
+    state.events = [];
+    state.complete = false;
+    await cdpCommand(tab.id, "Tracing.start", {
+      categories: args.categories || "devtools.timeline,v8.execute,blink.user_timing,loading,disabled-by-default-devtools.timeline",
+      transferMode: "ReportEvents"
+    });
+    if (args.reload === true) {
+      await chrome.tabs.reload(tab.id);
+      await waitForTabComplete(tab.id, clampNumber(args.timeout_ms, 1000, 120000, NAVIGATION_TIMEOUT_MS));
+    }
+    return { ok: true, data: { success: true, message: "performance trace started", tabId: tab.id } };
+  }
+  if (cmd === "performance-stop") {
+    if (!state.active || !state.tabId) {
+      return { ok: false, error: { code: "trace_not_active", message: "performance trace is not active" } };
+    }
+    await cdpCommand(state.tabId, "Tracing.end");
+    const complete = await waitForPredicate(
+      () => state.complete === true,
+      clampNumber(args.timeout_ms, 1000, 120000, 30000)
+    );
+    state.active = false;
+    await detachDebuggerIfIdle(session, state.tabId);
+    return {
+      ok: true,
+      data: {
+        success: complete,
+        complete,
+        event_count: state.events.length,
+        trace: { traceEvents: state.events }
+      }
+    };
+  }
+  return { ok: false, error: { code: "invalid_request", message: `unknown performance cmd: ${cmd}` } };
+}
+
+async function handleHeapSnapshot(session, args) {
+  const tab = await tabForSession(session);
+  await ensureDebugger(tab.id);
+  tabSessionByTabId.set(tab.id, session);
+  const state = { active: true, tabId: tab.id, chunks: [] };
+  heapBySession.set(session, state);
+  try {
+    await cdpCommand(tab.id, "HeapProfiler.enable");
+    await cdpCommand(tab.id, "HeapProfiler.takeHeapSnapshot", { reportProgress: false });
+  } finally {
+    state.active = false;
+  }
+  const snapshot = state.chunks.join("");
+  await detachDebuggerIfIdle(session, tab.id);
+  return {
+    ok: true,
+    data: {
+      success: true,
+      tabId: tab.id,
+      chunk_count: state.chunks.length,
+      sizeBytes: snapshot.length,
+      snapshot
+    }
+  };
+}
+
+async function handleRawCdp(session, args) {
+  if (typeof args.method !== "string" || !args.method.trim()) {
+    return { ok: false, error: { code: "invalid_request", message: "raw CDP requires method" } };
+  }
+  const tab = await tabForSession(session);
+  const wasAttached = debuggerTabs.has(tab.id);
+  const params = args.params && typeof args.params === "object" && !Array.isArray(args.params) ? args.params : {};
+  const result = await cdpCommand(tab.id, args.method, params);
+  if (!wasAttached) await detachDebuggerIfIdle(session, tab.id);
+  return { ok: true, data: { success: true, method: args.method, result } };
+}
+
+async function handleDevtools(session, args) {
+  const cmd = args.cmd || args.command;
+  if (!cmd) {
+    return { ok: false, error: { code: "invalid_request", message: "devtools requires cmd" } };
+  }
+  if (String(cmd).startsWith("console-")) return handleConsole(session, String(cmd), args);
+  if (String(cmd).startsWith("network-")) {
+    const networkCmd = String(cmd).slice("network-".length);
+    return handleNetwork(session, { ...args, cmd: networkCmd });
+  }
+  if (cmd === "emulate") return handleEmulation(session, args);
+  if (cmd === "performance-start" || cmd === "performance-stop") return handlePerformance(session, String(cmd), args);
+  if (cmd === "heap-snapshot") return handleHeapSnapshot(session, args);
+  return { ok: false, error: { code: "invalid_request", message: `unknown devtools cmd: ${cmd}` } };
 }
 
 function pointerProfile(speed, args = {}) {
@@ -942,9 +1376,7 @@ async function cdpEvaluate(session, args) {
     awaitPromise: true,
     returnByValue: true
   });
-  if (!wasAttached && !networkBySession.get(session)?.active) {
-    await detachDebugger(tab.id);
-  }
+  if (!wasAttached) await detachDebuggerIfIdle(session, tab.id);
   if (result?.exceptionDetails) {
     return {
       ok: false,
@@ -1056,7 +1488,7 @@ async function handleSavePdf(session, args) {
   if (args.paper_format) printOptions.paperWidth = args.paper_format === "letter" ? 8.5 : 8.27;
   if (args.paper_format) printOptions.paperHeight = args.paper_format === "letter" ? 11 : 11.69;
   const result = await cdpCommand(tab.id, "Page.printToPDF", printOptions);
-  if (!wasAttached) await detachDebugger(tab.id);
+  if (!wasAttached) await detachDebuggerIfIdle(session, tab.id);
   const fileName = args.file_name || `ace-browser-bridge-${Date.now()}.pdf`;
   return {
     ok: true,
@@ -1074,36 +1506,132 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
   const tabId = source.tabId;
   const session = tabSessionByTabId.get(tabId);
   if (!session) return;
+  const consoleCapture = consoleBySession.get(session);
+  if (consoleCapture?.active && method === "Runtime.consoleAPICalled") {
+    appendConsoleMessage(session, {
+      type: params.type || "log",
+      text: (params.args || []).map(remoteObjectValue).join(" "),
+      args: (params.args || []).map((arg) => ({
+        type: arg.type,
+        subtype: arg.subtype || null,
+        value: remoteObjectValue(arg),
+        description: arg.description || null
+      })),
+      stackTrace: params.stackTrace || null,
+      stack_trace: params.stackTrace || null,
+      executionContextId: params.executionContextId || null,
+      execution_context_id: params.executionContextId || null
+    });
+  } else if (consoleCapture?.active && method === "Log.entryAdded") {
+    const entry = params.entry || {};
+    appendConsoleMessage(session, {
+      type: entry.level || "log",
+      text: entry.text || "",
+      source: entry.source || null,
+      url: entry.url || null,
+      lineNumber: entry.lineNumber || null,
+      line_number: entry.lineNumber || null,
+      stackTrace: entry.stackTrace || null,
+      stack_trace: entry.stackTrace || null,
+      networkRequestId: entry.networkRequestId || null,
+      network_request_id: entry.networkRequestId || null
+    });
+  }
+
   const state = networkBySession.get(session);
-  if (!state?.active) return;
-  if (method === "Network.requestWillBeSent") {
+  if (state?.active && method === "Network.requestWillBeSent") {
     const request = {
       requestId: params.requestId,
+      request_id: params.requestId,
+      loaderId: params.loaderId || null,
+      loader_id: params.loaderId || null,
+      documentURL: params.documentURL || null,
+      document_url: params.documentURL || null,
       url: params.request?.url || "",
       method: params.request?.method || "",
+      resourceType: params.type || null,
+      resource_type: params.type || null,
+      requestHeaders: params.request?.headers || {},
+      request_headers: params.request?.headers || {},
+      postData: params.request?.postData || null,
+      post_data: params.request?.postData || null,
+      initiator: params.initiator || null,
+      wallTime: params.wallTime || null,
+      wall_time: params.wallTime || null,
+      timestamp: params.timestamp || null,
       status: null,
       mimeType: null,
+      mime_type: null,
       completed: false
     };
     state.requests.push(request);
     while (state.requests.length > 200) state.requests.shift();
-  } else if (method === "Network.responseReceived") {
+  } else if (state?.active && method === "Network.responseReceived") {
     const request = state.requests.find((item) => item.requestId === params.requestId);
     if (request) {
       request.status = params.response?.status || null;
+      request.statusText = params.response?.statusText || null;
+      request.status_text = request.statusText;
       request.mimeType = params.response?.mimeType || null;
+      request.mime_type = request.mimeType;
       request.url = params.response?.url || request.url;
+      request.responseHeaders = params.response?.headers || {};
+      request.response_headers = request.responseHeaders;
+      request.remoteIPAddress = params.response?.remoteIPAddress || null;
+      request.remote_ip_address = request.remoteIPAddress;
+      request.fromDiskCache = params.response?.fromDiskCache || false;
+      request.from_disk_cache = request.fromDiskCache;
+      request.fromServiceWorker = params.response?.fromServiceWorker || false;
+      request.from_service_worker = request.fromServiceWorker;
+      request.timing = params.response?.timing || null;
+      request.securityState = params.response?.securityState || null;
+      request.security_state = request.securityState;
+      request.resourceType = params.type || request.resourceType || null;
+      request.resource_type = request.resourceType;
     }
-  } else if (method === "Network.loadingFinished") {
+  } else if (state?.active && method === "Network.loadingFinished") {
     const request = state.requests.find((item) => item.requestId === params.requestId);
-    if (request) request.completed = true;
+    if (request) {
+      request.completed = true;
+      request.encodedDataLength = params.encodedDataLength || 0;
+      request.encoded_data_length = request.encodedDataLength;
+    }
+  } else if (state?.active && method === "Network.loadingFailed") {
+    const request = state.requests.find((item) => item.requestId === params.requestId);
+    if (request) {
+      request.completed = false;
+      request.failed = true;
+      request.errorText = params.errorText || "";
+      request.error_text = request.errorText;
+      request.canceled = params.canceled === true;
+    }
+  }
+
+  const perf = performanceBySession.get(session);
+  if (perf?.active && method === "Tracing.dataCollected") {
+    const values = Array.isArray(params.value) ? params.value : [];
+    perf.events.push(...values);
+  } else if (perf?.active && method === "Tracing.tracingComplete") {
+    perf.complete = true;
+  }
+
+  const heap = heapBySession.get(session);
+  if (heap?.active && method === "HeapProfiler.addHeapSnapshotChunk") {
+    heap.chunks.push(params.chunk || "");
   }
 });
 
 chrome.debugger.onDetach.addListener((source) => {
   if (source.tabId) {
+    const session = tabSessionByTabId.get(source.tabId);
     debuggerTabs.delete(source.tabId);
     tabSessionByTabId.delete(source.tabId);
+    if (session) {
+      for (const map of [consoleBySession, networkBySession, emulationBySession, performanceBySession, heapBySession]) {
+        const state = map.get(session);
+        if (state?.tabId === source.tabId) state.active = false;
+      }
+    }
   }
 });
 
@@ -1118,6 +1646,11 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   }
   debuggerTabs.delete(tabId);
   tabSessionByTabId.delete(tabId);
+  for (const map of [consoleBySession, networkBySession, emulationBySession, performanceBySession, heapBySession]) {
+    for (const state of map.values()) {
+      if (state?.tabId === tabId) state.active = false;
+    }
+  }
   if (changed) scheduleSessionRegistryPersist();
 });
 
@@ -1155,6 +1688,12 @@ async function dispatchDaemonAction(action) {
   }
   if (actionName === "network") {
     return handleNetwork(session, args);
+  }
+  if (actionName === "devtools") {
+    return handleDevtools(session, args);
+  }
+  if (actionName === "raw_cdp" || actionName === "cdp") {
+    return handleRawCdp(session, args);
   }
   if (actionName === "trace") {
     const list = traceBySession.get(session) || [];

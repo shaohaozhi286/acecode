@@ -16,6 +16,7 @@ import {
   parseLeadingCommand,
   deleteLeadingCommandBlock,
   parseExecutableBuiltinCommand,
+  resolveLeadingSlashCommand,
 } from './slashCommands.js';
 
 function run(name, fn) {
@@ -244,6 +245,46 @@ run('deleteLeadingCommandBlock:不碰到命令块时返回 null', () => {
   const leading = parseLeadingCommand(text, ['init']);
   assert.equal(deleteLeadingCommandBlock(text, leading, 7, 7, 'backward'), null);
   assert.equal(deleteLeadingCommandBlock('plain', { name: null, headLength: 0 }, 1, 1, 'backward'), null);
+});
+
+// resolveLeadingSlashCommand:transcript 用户气泡把首段命令渲染成徽标的解析层。
+// 触发场景:用户发送 "/<skill> 参数",UI 要把 "/skill" 切出来高亮 + 取描述做 hover。
+run('resolveLeadingSlashCommand:命中 skill,切出 token/rest 并带回 kind 与描述', () => {
+  const r = resolveLeadingSlashCommand('/code-review 看看第三个改动', ITEMS);
+  assert.equal(r.token, '/code-review');
+  assert.equal(r.name, 'code-review');
+  assert.equal(r.kind, 'skill');
+  assert.equal(r.description, 'Review code changes');
+  // rest 保留分隔空白,交给 whitespace-pre-wrap 还原视觉间距
+  assert.equal(r.rest, ' 看看第三个改动');
+});
+
+run('resolveLeadingSlashCommand:命中 builtin 也返回 builtin kind', () => {
+  const r = resolveLeadingSlashCommand('/init', ITEMS);
+  assert.equal(r.name, 'init');
+  assert.equal(r.kind, 'builtin');
+  assert.equal(r.token, '/init');
+  assert.equal(r.rest, '');
+});
+
+// 期望行为:未命中 skill(命令名未知)必须返回 null,UI 据此回退纯文本,
+// 不能把 /foobar 误高亮成命令。这是本次美化的核心边界。
+run('resolveLeadingSlashCommand:未知命令名返回 null(未命中 skill)', () => {
+  assert.equal(resolveLeadingSlashCommand('/foobar test', ITEMS), null);
+});
+
+run('resolveLeadingSlashCommand:不以 / 开头 / 空串 / 空清单均返回 null', () => {
+  assert.equal(resolveLeadingSlashCommand('看看第三个球衣', ITEMS), null);
+  assert.equal(resolveLeadingSlashCommand('', ITEMS), null);
+  // 命令清单还没加载完(空数组)时,任何命令都视为未命中,回退纯文本
+  assert.equal(resolveLeadingSlashCommand('/init', []), null);
+});
+
+run('resolveLeadingSlashCommand:命中但该命令无描述时 description 为空串', () => {
+  const items = flattenCommands({ skills: [{ name: 'nodesc' }] });
+  const r = resolveLeadingSlashCommand('/nodesc 干活', items);
+  assert.equal(r.name, 'nodesc');
+  assert.equal(r.description, '');
 });
 
 run('parseExecutableBuiltinCommand:识别 init、compact 和 goal', () => {

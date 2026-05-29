@@ -355,7 +355,13 @@ void put_number_arg(json& target, int argc, char** argv,
 json default_capabilities(bool extension_connected) {
     return json{
         {"cdp", extension_connected},
+        {"devtools", extension_connected},
+        {"raw_cdp", extension_connected},
+        {"console", extension_connected},
         {"network", extension_connected},
+        {"emulation", extension_connected},
+        {"performance", extension_connected},
+        {"heap_snapshot", extension_connected},
         {"pdf", extension_connected},
         {"upload", extension_connected},
         {"os_pointer", false},
@@ -497,6 +503,41 @@ std::optional<json> materialize_binary_payloads(json& value) {
         }
     }
     return std::nullopt;
+}
+
+std::optional<json> write_bytes_file(const std::filesystem::path& path,
+                                     const std::vector<unsigned char>& bytes) {
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+    std::ofstream out(path, std::ios::binary);
+    if (!out.is_open()) {
+        return failure("file_write_failed", "failed to write bridge output file: " + path.u8string());
+    }
+    out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    out.close();
+    if (!out) {
+        return failure("file_write_failed", "failed to write bridge output file: " + path.u8string());
+    }
+    return std::nullopt;
+}
+
+std::optional<json> write_text_file(const std::filesystem::path& path,
+                                    const std::string& text) {
+    std::vector<unsigned char> bytes(text.begin(), text.end());
+    return write_bytes_file(path, bytes);
+}
+
+std::vector<std::string> split_csv(const std::string& input) {
+    std::vector<std::string> out;
+    std::string current;
+    std::istringstream ss(input);
+    while (std::getline(ss, current, ',')) {
+        auto begin = current.find_first_not_of(" \t\r\n");
+        auto end = current.find_last_not_of(" \t\r\n");
+        if (begin == std::string::npos) continue;
+        out.push_back(current.substr(begin, end - begin + 1));
+    }
+    return out;
 }
 
 bool send_all(socket_t s, const std::string& data) {
@@ -1263,6 +1304,175 @@ int network_command(int argc, char** argv) {
     return command_alias_command(argc, argv, "network", std::move(args));
 }
 
+void put_csv_arg(json& args, int argc, char** argv,
+                 const std::string& cli_name, const std::string& json_name) {
+    auto value = find_arg(argc, argv, cli_name);
+    if (!value) return;
+    args[json_name] = split_csv(*value);
+}
+
+void put_json_object_arg(json& args, int argc, char** argv,
+                         const std::string& cli_name, const std::string& json_name) {
+    auto value = find_arg(argc, argv, cli_name);
+    if (!value) return;
+    auto parsed = parse_json(*value);
+    if (!parsed || !parsed->is_object()) {
+        args[json_name] = "__ACE_INVALID_JSON_OBJECT__";
+        return;
+    }
+    args[json_name] = std::move(*parsed);
+}
+
+std::optional<json> materialize_devtools_output(json& envelope, const json& args) {
+    if (!envelope.value("ok", false) || !envelope.contains("data") || !envelope["data"].is_object()) {
+        return std::nullopt;
+    }
+    json& data = envelope["data"];
+    const std::string cmd = args.value("cmd", "");
+    const std::string output = args.value("output", "");
+    if (cmd == "performance-stop" && !output.empty() && data.contains("trace")) {
+        const std::string text = data["trace"].dump();
+        std::filesystem::path path = normalize_bridge_path(output);
+        if (auto error = write_text_file(path, text)) return error;
+        data["path"] = path.u8string();
+        data["output"] = path.u8string();
+        data["sizeBytes"] = text.size();
+        data["size_bytes"] = text.size();
+        data.erase("trace");
+    }
+    if (cmd == "heap-snapshot" && !output.empty() && data.contains("snapshot") && data["snapshot"].is_string()) {
+        const std::string text = data["snapshot"].get<std::string>();
+        std::filesystem::path path = normalize_bridge_path(output);
+        if (auto error = write_text_file(path, text)) return error;
+        data["path"] = path.u8string();
+        data["output"] = path.u8string();
+        data["sizeBytes"] = text.size();
+        data["size_bytes"] = text.size();
+        data.erase("snapshot");
+    }
+    if (cmd == "network-detail") {
+        const std::string request_file = args.value("request_file", "");
+        if (!request_file.empty() && data.contains("postData") && data["postData"].is_string()) {
+            const std::string text = data["postData"].get<std::string>();
+            std::filesystem::path path = normalize_bridge_path(request_file);
+            if (auto error = write_text_file(path, text)) return error;
+            data["requestFile"] = path.u8string();
+            data["request_file"] = path.u8string();
+            data["requestBodySizeBytes"] = text.size();
+            data["request_body_size_bytes"] = text.size();
+        }
+
+        const std::string response_file = args.value("response_file", "");
+        if (!response_file.empty()) {
+            json* body = nullptr;
+            if (data.contains("responseBody")) body = &data["responseBody"];
+            else if (data.contains("response_body")) body = &data["response_body"];
+            else if (data.contains("body")) body = &data["body"];
+            if (body) {
+                std::filesystem::path path = normalize_bridge_path(response_file);
+                std::size_t size = 0;
+                if (body->is_object() && body->value("base64Encoded", false) && body->contains("body") && (*body)["body"].is_string()) {
+                    auto bytes = decode_base64((*body)["body"].get<std::string>());
+                    if (!bytes) return failure("invalid_host_response", "bridge returned invalid base64 response body");
+                    if (auto error = write_bytes_file(path, *bytes)) return error;
+                    size = bytes->size();
+                } else {
+                    std::string text = body->is_string() ? body->get<std::string>() : body->dump();
+                    if (auto error = write_text_file(path, text)) return error;
+                    size = text.size();
+                }
+                data["responseFile"] = path.u8string();
+                data["response_file"] = path.u8string();
+                data["responseBodySizeBytes"] = size;
+                data["response_body_size_bytes"] = size;
+                data.erase("responseBody");
+                data.erase("response_body");
+                data.erase("body");
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+int devtools_command(int argc, char** argv) {
+    json args;
+    put_string_arg(args, argc, argv, "--cmd", "cmd");
+    put_string_arg(args, argc, argv, "--filter", "filter");
+    put_string_arg(args, argc, argv, "--request-id", "requestId");
+    put_string_arg(args, argc, argv, "--resource-type", "resource_type");
+    put_int_arg(args, argc, argv, "--id", "id");
+    put_int_arg(args, argc, argv, "--page-size", "page_size");
+    put_int_arg(args, argc, argv, "--page-idx", "page_idx");
+    put_csv_arg(args, argc, argv, "--types", "types");
+    put_bool_flag(args, argc, argv, "--preserve", "preserve");
+    put_string_arg(args, argc, argv, "--viewport", "viewport");
+    put_int_arg(args, argc, argv, "--width", "width");
+    put_int_arg(args, argc, argv, "--height", "height");
+    put_number_arg(args, argc, argv, "--device-scale-factor", "device_scale_factor");
+    put_bool_flag(args, argc, argv, "--mobile", "mobile");
+    put_bool_flag(args, argc, argv, "--touch", "touch");
+    put_bool_flag(args, argc, argv, "--reset", "reset");
+    put_bool_flag(args, argc, argv, "--clear", "clear");
+    put_string_arg(args, argc, argv, "--network-conditions", "network_conditions");
+    put_number_arg(args, argc, argv, "--cpu-throttling-rate", "cpu_throttling_rate");
+    put_string_arg(args, argc, argv, "--geolocation", "geolocation");
+    put_number_arg(args, argc, argv, "--accuracy", "accuracy");
+    put_string_arg(args, argc, argv, "--user-agent", "user_agent");
+    put_string_arg(args, argc, argv, "--color-scheme", "color_scheme");
+    put_json_object_arg(args, argc, argv, "--extra-http-headers", "extra_http_headers");
+    put_bool_flag(args, argc, argv, "--reload", "reload");
+    put_int_arg(args, argc, argv, "--timeout-ms", "timeout_ms");
+    put_string_arg(args, argc, argv, "--categories", "categories");
+    put_string_arg(args, argc, argv, "--output", "output");
+    put_string_arg(args, argc, argv, "--request-file", "request_file");
+    put_string_arg(args, argc, argv, "--response-file", "response_file");
+
+    if (args.value("extra_http_headers", json()).is_string() &&
+        args["extra_http_headers"].get<std::string>() == "__ACE_INVALID_JSON_OBJECT__") {
+        print_json(failure("invalid_request", "--extra-http-headers must be a JSON object"));
+        return 0;
+    }
+    if (!args.contains("cmd") && !has_arg(argc, argv, "--args-json")) {
+        print_json(failure("invalid_request", "devtools requires --cmd <command>"));
+        return 0;
+    }
+    if (!merge_args_json_or_print(argc, argv, args)) return 0;
+    json envelope = command_envelope(parse_port(argc, argv),
+                                     arg_or_default(argc, argv, "--session", "acecode-default"),
+                                     "devtools",
+                                     args);
+    if (auto error = materialize_devtools_output(envelope, args)) {
+        print_json(*error);
+        return 0;
+    }
+    print_json(envelope);
+    return 0;
+}
+
+int cdp_command(int argc, char** argv) {
+    auto method = find_arg(argc, argv, "--method");
+    if ((!method || method->empty()) && !has_arg(argc, argv, "--args-json")) {
+        print_json(failure("invalid_request", "cdp requires --method <CDP.method>"));
+        return 0;
+    }
+    json args;
+    if (method) args["method"] = *method;
+    if (auto params_text = find_arg(argc, argv, "--params")) {
+        auto parsed = parse_json(*params_text);
+        if (!parsed || !parsed->is_object()) {
+            print_json(failure("invalid_request", "--params must be a JSON object"));
+            return 0;
+        }
+        args["params"] = std::move(*parsed);
+    }
+    if (!merge_args_json_or_print(argc, argv, args)) return 0;
+    print_json(command_envelope(parse_port(argc, argv),
+                                arg_or_default(argc, argv, "--session", "acecode-default"),
+                                "raw_cdp",
+                                std::move(args)));
+    return 0;
+}
+
 int save_pdf_command(int argc, char** argv) {
     json args;
     put_string_arg(args, argc, argv, "--paper-format", "paper_format");
@@ -1783,6 +1993,8 @@ void print_help() {
         << "  click|fill|type|hover|drag|scroll --json [--session <name>] ...\n"
         << "  evaluate --json --code <javascript> [--session <name>]\n"
         << "  network --json --cmd <start|stop|list|detail> [--filter <text>] [--request-id <id>]\n"
+        << "  devtools --json --cmd <console-start|console-list|network-start|network-detail|emulate|performance-start|performance-stop|heap-snapshot> [--session <name>]\n"
+        << "  cdp --json --method <CDP.method> [--params <json>] [--session <name>]\n"
         << "  screenshot --json --session <name> --output <path> [--port 52007]\n"
         << "  save-pdf --json [--session <name>] [--file-name <name>]\n"
         << "  list-tabs --json [--session <name>]\n"
@@ -1823,6 +2035,8 @@ int main_impl(int argc, char** argv) {
     if (command == "scroll") return scroll_command(argc, argv);
     if (command == "evaluate") return evaluate_command(argc, argv);
     if (command == "network") return network_command(argc, argv);
+    if (command == "devtools") return devtools_command(argc, argv);
+    if (command == "cdp") return cdp_command(argc, argv);
     if (command == "screenshot") return screenshot_command(argc, argv);
     if (command == "save-pdf") return save_pdf_command(argc, argv);
     if (command == "list-tabs") return list_tabs_command(argc, argv);
