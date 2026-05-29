@@ -872,11 +872,6 @@ export function Sidebar({
       toast({ kind: 'info', text: '需在 desktop shell 中使用' });
       return;
     }
-    const ok = window.confirm(
-      `从桌面项目列表移除“${ws.name || ws.hash}”？\n\n不会删除项目文件、会话或 .acecode 数据。之后可通过“添加项目”重新显示。`,
-    );
-    if (!ok) return;
-
     try {
       const r = parseDesktopResult(await window.aceDesktop_removeWorkspace(ws.hash));
       if (!r?.ok) throw new Error(r?.error || 'remove failed');
