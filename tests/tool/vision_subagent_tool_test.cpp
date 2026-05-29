@@ -11,6 +11,7 @@
 
 #include <atomic>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <random>
 #include <string>
@@ -257,4 +258,206 @@ TEST(VisionSubagentTool, RegisteredInSharedBuiltinToolSet) {
 
     EXPECT_TRUE(tools.has_tool("vision_analyze"));
     EXPECT_TRUE(tools.is_read_only("vision_analyze"));
+}
+
+namespace {
+
+// 把若干字节写到 cwd 下的文件,返回绝对路径。模拟 browser/shell 工具写出的截图。
+std::string write_file(const fs::path& dir, const std::string& name,
+                       const std::string& bytes) {
+    const fs::path p = dir / name;
+    std::ofstream ofs(p, std::ios::binary);
+    ofs.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    ofs.close();
+    return acecode::path_to_utf8(p);
+}
+
+struct VisionPathFixture {
+    fs::path cwd;
+    std::string project_dir;
+    acecode::SessionManager sm;
+    acecode::AppConfig cfg;
+    std::shared_ptr<CapturingProvider> provider = std::make_shared<CapturingProvider>();
+    acecode::ModelProfile selected;
+
+    explicit VisionPathFixture(const std::string& hint) {
+        cwd = temp_cwd(hint);
+        project_dir = acecode::SessionStorage::get_project_dir(acecode::path_to_utf8(cwd));
+        fs::remove_all(project_dir);
+        sm.start_session(acecode::path_to_utf8(cwd), "stub", "stub-model",
+                         "sid-vision-" + hint);
+        cfg.saved_models.push_back(model_profile("vision-one", {"vision"}));
+    }
+
+    ~VisionPathFixture() {
+        fs::remove_all(project_dir);
+        fs::remove_all(cwd);
+    }
+
+    acecode::ToolImpl tool() {
+        acecode::VisionSubagentToolOptions opts;
+        opts.provider_factory = [this](const acecode::ModelProfile& profile) {
+            selected = profile;
+            return provider;
+        };
+        return acecode::create_vision_analyze_tool(cfg, opts);
+    }
+};
+
+} // namespace
+
+// 场景:image_path 用相对路径(基于 ToolContext.cwd)→ 读取 + 物化 + 发送给视觉模型。
+TEST(VisionSubagentTool, ImagePathRelativeIsMaterializedAndSent) {
+    VisionPathFixture fx("path_rel");
+    write_file(fx.cwd, "shot.png", "fake-png-bytes");
+
+    auto tool = fx.tool();
+    acecode::ToolContext ctx;
+    ctx.cwd = acecode::path_to_utf8(fx.cwd);
+    ctx.session_manager = &fx.sm;
+
+    auto result = tool.execute(
+        R"({"prompt":"describe","image_path":"shot.png"})", ctx);
+
+    EXPECT_TRUE(result.success) << result.output;
+    EXPECT_EQ(fx.selected.name, "vision-one");
+    ASSERT_EQ(fx.provider->messages_.size(), 1u);
+    ASSERT_TRUE(fx.provider->messages_[0].content_parts.is_array());
+    // 物化后的附件应作为 image part 发给视觉模型。
+    EXPECT_EQ(fx.provider->messages_[0].content_parts[1]["type"], "image");
+}
+
+// 场景:image_path 用 workspace 外的绝对路径 → 同样物化并发送。
+TEST(VisionSubagentTool, ImagePathAbsoluteOutsideWorkspace) {
+    VisionPathFixture fx("path_abs");
+    // 写到一个独立的临时目录(不在 fx.cwd 之下),用绝对路径引用。
+    auto outside = temp_cwd("path_abs_outside");
+    const std::string abs_path = write_file(outside, "external.png", "fake-png-bytes");
+
+    auto tool = fx.tool();
+    acecode::ToolContext ctx;
+    ctx.cwd = acecode::path_to_utf8(fx.cwd);
+    ctx.session_manager = &fx.sm;
+
+    nlohmann::json args = {{"prompt", "describe"}, {"image_path", abs_path}};
+    auto result = tool.execute(args.dump(), ctx);
+
+    EXPECT_TRUE(result.success) << result.output;
+    ASSERT_EQ(fx.provider->messages_.size(), 1u);
+
+    fs::remove_all(outside);
+}
+
+// 场景:image_path 指向非图片文件 → 清晰拒绝。
+TEST(VisionSubagentTool, ImagePathNonImageRejected) {
+    VisionPathFixture fx("path_notimg");
+    write_file(fx.cwd, "notes.txt", "plain text");
+
+    auto tool = fx.tool();
+    acecode::ToolContext ctx;
+    ctx.cwd = acecode::path_to_utf8(fx.cwd);
+    ctx.session_manager = &fx.sm;
+
+    auto result = tool.execute(
+        R"({"prompt":"describe","image_path":"notes.txt"})", ctx);
+
+    EXPECT_FALSE(result.success);
+    auto json = nlohmann::json::parse(result.output);
+    EXPECT_EQ(json["error"], "NOT_IMAGE");
+}
+
+// 场景:image_path 指向不存在的路径 → 清晰拒绝。
+TEST(VisionSubagentTool, ImagePathMissingRejected) {
+    VisionPathFixture fx("path_missing");
+
+    auto tool = fx.tool();
+    acecode::ToolContext ctx;
+    ctx.cwd = acecode::path_to_utf8(fx.cwd);
+    ctx.session_manager = &fx.sm;
+
+    auto result = tool.execute(
+        R"({"prompt":"describe","image_path":"nope.png"})", ctx);
+
+    EXPECT_FALSE(result.success);
+    auto json = nlohmann::json::parse(result.output);
+    EXPECT_EQ(json["error"], "IMAGE_PATH_NOT_FOUND");
+}
+
+// 场景:超大 image_path 在读取字节前就被大小校验拒绝(sparse file,瞬时创建)。
+TEST(VisionSubagentTool, ImagePathTooLargeRejectedBeforeRead) {
+    VisionPathFixture fx("path_toolarge");
+    const fs::path big = fx.cwd / "big.png";
+    {
+        std::ofstream ofs(big, std::ios::binary);
+        ofs.put('x');
+        ofs.close();
+    }
+    std::error_code ec;
+    fs::resize_file(big, acecode::kMaxAttachmentBytes + 1, ec);
+    ASSERT_FALSE(ec) << ec.message();
+
+    auto tool = fx.tool();
+    acecode::ToolContext ctx;
+    ctx.cwd = acecode::path_to_utf8(fx.cwd);
+    ctx.session_manager = &fx.sm;
+
+    auto result = tool.execute(
+        R"({"prompt":"describe","image_path":"big.png"})", ctx);
+
+    EXPECT_FALSE(result.success);
+    auto json = nlohmann::json::parse(result.output);
+    EXPECT_EQ(json["error"], "IMAGE_TOO_LARGE");
+}
+
+// 场景:无 active session 时使用 image_path → 清晰拒绝,不崩溃。
+TEST(VisionSubagentTool, ImagePathWithoutActiveSessionRejected) {
+    auto cwd = temp_cwd("path_nosession");
+    const std::string abs_path = write_file(cwd, "shot.png", "fake-png-bytes");
+
+    acecode::AppConfig cfg;
+    cfg.saved_models.push_back(model_profile("vision-one", {"vision"}));
+    auto provider = std::make_shared<CapturingProvider>();
+    acecode::VisionSubagentToolOptions opts;
+    opts.provider_factory = [&](const acecode::ModelProfile&) { return provider; };
+    auto tool = acecode::create_vision_analyze_tool(cfg, opts);
+
+    acecode::ToolContext ctx;  // 无 session_manager
+    ctx.cwd = acecode::path_to_utf8(cwd);
+    nlohmann::json args = {{"prompt", "describe"}, {"image_path", abs_path}};
+    auto result = tool.execute(args.dump(), ctx);
+
+    EXPECT_FALSE(result.success);
+    auto json = nlohmann::json::parse(result.output);
+    EXPECT_EQ(json["error"], "NO_ACTIVE_SESSION");
+
+    fs::remove_all(cwd);
+}
+
+// 场景:无任何视觉模型时使用 image_path → 在物化前就因 NO_VISION_MODEL 拒绝。
+TEST(VisionSubagentTool, ImagePathRejectedWhenNoVisionModel) {
+    auto cwd = temp_cwd("path_novision");
+    const std::string abs_path = write_file(cwd, "shot.png", "fake-png-bytes");
+
+    acecode::AppConfig cfg;
+    cfg.saved_models.push_back(model_profile("text-only", {"tool_use"}));
+    auto tool = acecode::create_vision_analyze_tool(cfg);
+
+    acecode::SessionManager sm;
+    const std::string project_dir =
+        acecode::SessionStorage::get_project_dir(acecode::path_to_utf8(cwd));
+    fs::remove_all(project_dir);
+    sm.start_session(acecode::path_to_utf8(cwd), "stub", "stub-model", "sid-novision");
+
+    acecode::ToolContext ctx;
+    ctx.cwd = acecode::path_to_utf8(cwd);
+    ctx.session_manager = &sm;
+    nlohmann::json args = {{"prompt", "describe"}, {"image_path", abs_path}};
+    auto result = tool.execute(args.dump(), ctx);
+
+    EXPECT_FALSE(result.success);
+    auto json = nlohmann::json::parse(result.output);
+    EXPECT_EQ(json["error"], "NO_VISION_MODEL");
+
+    fs::remove_all(project_dir);
+    fs::remove_all(cwd);
 }

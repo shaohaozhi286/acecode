@@ -129,6 +129,9 @@ std::string attachment_mime_for_name(const std::string& name,
 std::string attachment_kind_for_mime(const std::string& mime_type,
                                      const std::string& name) {
     const std::string mime = ascii_lower(attachment_mime_for_name(name, mime_type));
+    // SVG 是矢量 XML,不是栅格图;多数 vision provider 拒收 data:image/svg+xml,
+    // 因此把它排除出 image 路由,按普通文件处理(route-attachments-by-capability)。
+    if (mime == "image/svg+xml") return "file";
     if (mime.rfind("image/", 0) == 0) return "image";
     if (mime.rfind("text/", 0) == 0 ||
         mime == "application/json" ||

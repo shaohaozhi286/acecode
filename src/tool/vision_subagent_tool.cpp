@@ -3,13 +3,19 @@
 #include "../config/model_provider_registry.hpp"
 #include "../provider/copilot_provider.hpp"
 #include "../provider/provider_factory.hpp"
+#include "../provider/vision_capability.hpp"
 #include "../session/attachment_store.hpp"
 #include "../session/session_manager.hpp"
+#include "../session/session_storage.hpp"
 #include "../utils/encoding.hpp"
 #include "../utils/logger.hpp"
+#include "../utils/utf8_path.hpp"
 
 #include <algorithm>
 #include <atomic>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <random>
 #include <sstream>
 #include <utility>
@@ -18,8 +24,6 @@ namespace acecode {
 
 namespace {
 
-constexpr const char* kVisionCapability = "vision";
-
 ToolResult error_result(const std::string& code, const std::string& message) {
     nlohmann::json out = {
         {"ok", false},
@@ -27,12 +31,6 @@ ToolResult error_result(const std::string& code, const std::string& message) {
         {"message", message},
     };
     return ToolResult{out.dump(2), false};
-}
-
-bool has_capability(const ModelProfile& profile, const std::string& capability) {
-    return std::find(profile.capabilities.begin(),
-                     profile.capabilities.end(),
-                     capability) != profile.capabilities.end();
 }
 
 bool is_image_attachment(const AttachmentRecord& record) {
@@ -67,11 +65,105 @@ std::optional<AttachmentRecord> latest_image_from_messages(
     return std::nullopt;
 }
 
+// 把一个本地图片路径物化成 active session 的图片附件(tasks 2.2 / 2.3 / 2.4)。
+// 相对路径基于 ToolContext.cwd 解析,绝对路径允许指向 workspace 外。校验顺序为先
+// stat(存在性 / 普通文件 / 大小),再读字节,避免把超大文件整个读进内存。
+std::optional<AttachmentRecord> materialize_image_path(
+    const std::string& image_path,
+    const ToolContext& ctx,
+    std::string* error_code,
+    std::string* error_message) {
+    namespace fs = std::filesystem;
+
+    if (!ctx.session_manager) {
+        *error_code = "NO_ACTIVE_SESSION";
+        *error_message =
+            "image_path materialization needs an active session to store the attachment";
+        return std::nullopt;
+    }
+
+    fs::path resolved = path_from_utf8(image_path);
+    if (resolved.is_relative()) {
+        resolved = path_from_utf8(ctx.cwd) / resolved;
+    }
+
+    std::error_code ec;
+    const auto status = fs::status(resolved, ec);
+    if (ec || !fs::exists(status)) {
+        *error_code = "IMAGE_PATH_NOT_FOUND";
+        *error_message = "image_path does not exist: " + image_path;
+        return std::nullopt;
+    }
+    if (!fs::is_regular_file(status)) {
+        *error_code = "IMAGE_PATH_NOT_FILE";
+        *error_message = "image_path must reference a regular file: " + image_path;
+        return std::nullopt;
+    }
+
+    const auto size = fs::file_size(resolved, ec);
+    if (ec) {
+        *error_code = "IMAGE_PATH_NOT_FOUND";
+        *error_message = "failed to stat image_path: " + image_path;
+        return std::nullopt;
+    }
+    if (size > kMaxAttachmentBytes) {
+        *error_code = "IMAGE_TOO_LARGE";
+        *error_message = "image_path exceeds the attachment size limit";
+        return std::nullopt;
+    }
+
+    const std::string filename = path_to_utf8(resolved.filename());
+    const std::string mime = attachment_mime_for_name(filename, std::string{});
+    if (attachment_kind_for_mime(mime, filename) != "image") {
+        *error_code = "NOT_IMAGE";
+        *error_message =
+            "image_path must reference an image file (png/jpeg/gif/webp/bmp)";
+        return std::nullopt;
+    }
+
+    std::ifstream ifs(resolved, std::ios::binary);
+    if (!ifs.is_open()) {
+        *error_code = "IMAGE_READ_FAILED";
+        *error_message = "failed to open image_path: " + image_path;
+        return std::nullopt;
+    }
+    std::string bytes((std::istreambuf_iterator<char>(ifs)),
+                      std::istreambuf_iterator<char>());
+    if (ifs.bad()) {
+        *error_code = "IMAGE_READ_FAILED";
+        *error_message = "failed to read image_path: " + image_path;
+        return std::nullopt;
+    }
+
+    const std::string project_dir = SessionStorage::get_project_dir(ctx.cwd);
+    const std::string session_id = ctx.session_manager->ensure_active_session_id();
+    std::string save_error;
+    auto record = save_attachment(project_dir, session_id, filename, mime, bytes, &save_error);
+    if (!record.has_value()) {
+        *error_code = "SAVE_FAILED";
+        *error_message = save_error.empty() ? "failed to save image attachment" : save_error;
+        return std::nullopt;
+    }
+    // image_path 物化会在 session attachment 目录留下一份独立 blob;vision 调用本身
+    // 隐藏不落 transcript,这条 LOG 便于排查体积增长(tasks 2.7 / design 风险)。
+    LOG_INFO("[vision_analyze] materialized image_path attachment id=" + record->id +
+             " session=" + session_id +
+             " bytes=" + std::to_string(record->size_bytes) +
+             " (not attached to a visible message)");
+    return record;
+}
+
 std::optional<AttachmentRecord> resolve_attachment(
     const nlohmann::json& args,
     const ToolContext& ctx,
     std::string* error_code,
     std::string* error_message) {
+    if (args.contains("image_path") && args["image_path"].is_string() &&
+        !args["image_path"].get<std::string>().empty()) {
+        return materialize_image_path(
+            args["image_path"].get<std::string>(), ctx, error_code, error_message);
+    }
+
     if (args.contains("attachment") && args["attachment"].is_object()) {
         auto record = attachment_from_json(args["attachment"]);
         if (!record.has_value() || !is_image_attachment(*record)) {
@@ -106,26 +198,14 @@ std::optional<AttachmentRecord> resolve_attachment(
     return record;
 }
 
-std::vector<ModelProfile> vision_profiles(const AppConfig& config) {
-    std::vector<ModelProfile> out;
-    for (auto profile : config.saved_models) {
-        if (!is_runtime_model_provider_enabled(profile.provider)) continue;
-        if (!has_capability(profile, kVisionCapability)) continue;
-        if (profile.provider == "openai" && !profile.stream_timeout_ms.has_value()) {
-            profile.stream_timeout_ms = config.openai.stream_timeout_ms;
-        }
-        out.push_back(std::move(profile));
-    }
-    return out;
-}
-
 std::optional<ModelProfile> select_vision_profile(
     const AppConfig& config,
     const std::string& model_name,
     const VisionSubagentToolOptions::IndexChooser& choose_index,
     std::string* error_code,
     std::string* error_message) {
-    auto candidates = vision_profiles(config);
+    // 共享 helper:与序列化层 fallback 的"是否存在可用视觉模型"判定同口径(D5 / 1.8)。
+    auto candidates = runtime_vision_profiles(config);
 
     if (!model_name.empty()) {
         auto it = std::find_if(candidates.begin(), candidates.end(),
@@ -201,14 +281,16 @@ ToolResult execute_vision_analyze(
 
     std::string error_code;
     std::string error_message;
-    auto attachment = resolve_attachment(args, ctx, &error_code, &error_message);
-    if (!attachment.has_value()) {
-        return error_result(error_code, error_message);
-    }
-
+    // 先选视觉模型,再解析/物化附件:无可用视觉模型时直接拒绝,避免 image_path
+    // 先被物化成孤儿附件再失败(tasks 2.6 / design 风险)。
     auto profile = select_vision_profile(
         *config, model_name, options.choose_index, &error_code, &error_message);
     if (!profile.has_value()) {
+        return error_result(error_code, error_message);
+    }
+
+    auto attachment = resolve_attachment(args, ctx, &error_code, &error_message);
+    if (!attachment.has_value()) {
         return error_result(error_code, error_message);
     }
 
@@ -277,9 +359,13 @@ ToolImpl create_vision_analyze_tool(
                 {"type", "string"},
                 {"description", "Question or task for the vision-capable model"}
             }},
+            {"image_path", {
+                {"type", "string"},
+                {"description", "Optional local image file path to analyze. Relative paths resolve against the session working directory; absolute paths may point outside the workspace. The file is read, validated as an image, and stored as a session attachment before being sent to the vision model. Takes precedence over attachment_id / latest-image fallback."}
+            }},
             {"attachment_id", {
                 {"type", "string"},
-                {"description", "Optional image attachment id. If omitted, the latest image attachment in the active session is used."}
+                {"description", "Optional image attachment id. If omitted (and no image_path given), the latest image attachment in the active session is used."}
             }},
             {"attachment", {
                 {"type", "object"},

@@ -291,7 +291,7 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     // cfg_mut 已在前面创建(承接 port_override),这里只继续使用,不再重复声明。
     auto cwd_override = acecode::load_cwd_model_override(cwd);
     auto effective_entry = acecode::resolve_effective_model(cfg_mut, cwd_override, std::nullopt);
-    auto provider = acecode::create_provider_from_entry(effective_entry);
+    auto provider = acecode::create_provider_from_entry(effective_entry, &cfg_mut);
     if (!provider) {
         LOG_ERROR("[daemon] failed to create LLM provider — daemon will start but new sessions cannot run agent loop until provider is configured");
     } else if (effective_entry.provider == "copilot") {

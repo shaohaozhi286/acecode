@@ -1326,9 +1326,13 @@ static UserInput build_user_input_with_attachments(
     }
     nlohmann::json attachment_meta = nlohmann::json::array();
     for (const auto& attachment : attachments) {
-        const std::string kind = attachment.value("kind", std::string{"file"});
+        // 按 MIME + 文件名重新分类(route-attachments-by-capability 1.7),不直接信
+        // 持久化的 kind:SVG 等非视觉媒体会被归为 file,避免误走图片 part。
+        const std::string part_kind = attachment_kind_for_mime(
+            attachment.value("mime_type", std::string{}),
+            attachment.value("name", std::string{}));
         input.content_parts.push_back({
-            {"type", kind == "image" ? "image" : "file"},
+            {"type", part_kind == "image" ? "image" : "file"},
             {"attachment", attachment},
         });
         attachment_meta.push_back(attachment);
@@ -1966,7 +1970,7 @@ static int run_interactive_app(const CliOptions& cli,
     SessionEntry::ProviderSlot provider_slot;
     {
         std::lock_guard<std::mutex> lk(provider_slot.mu);
-        provider_slot.provider = create_provider_from_entry(effective_entry);
+        provider_slot.provider = create_provider_from_entry(effective_entry, &config);
     }
     auto provider_accessor = [&provider_slot]() -> std::shared_ptr<LlmProvider> {
         std::lock_guard<std::mutex> lk(provider_slot.mu);

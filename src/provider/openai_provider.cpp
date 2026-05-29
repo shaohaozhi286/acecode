@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cctype>
 #include <thread>
+#include <vector>
 
 namespace acecode {
 
@@ -258,7 +259,44 @@ std::string file_context_text(const AttachmentRecord& record) {
     return oss.str();
 }
 
-nlohmann::json openai_content_for_message(const ChatMessage& msg) {
+// 判定一条附件是否应当作为 provider 图片 part 发送。以 MIME 为权威依据:
+// SVG(矢量 XML)被排除,误标成 image 但 MIME 非图片的附件返回 false,从而
+// 在序列化层兜底降级为文件句柄(route-attachments-by-capability D3)。
+bool record_is_vision_image(const AttachmentRecord& record) {
+    const std::string mime =
+        ascii_lower(attachment_mime_for_name(record.name, record.mime_type));
+    if (mime == "image/svg+xml") return false;
+    return mime.rfind("image/", 0) == 0;
+}
+
+// 非视觉模型收到图片时的聚合 fallback 文本(tasks 1.9)。多张图合并成一段简短
+// 句柄列表,并按系统是否还有可用视觉模型给出不同引导。
+std::string gated_image_fallback_text(const std::vector<AttachmentRecord>& images,
+                                      bool any_vision_model_available) {
+    std::ostringstream oss;
+    oss << "[Image attachment(s) not sent: the active model cannot inspect images]";
+    for (const auto& record : images) {
+        oss << "\n- " << record.name << " (" << record.mime_type << ", "
+            << record.size_bytes << " bytes";
+        if (!record.id.empty()) oss << ", attachment_id=" << record.id;
+        oss << ")";
+    }
+    if (any_vision_model_available) {
+        oss << "\nUse the vision_analyze tool (pass attachment_id or image_path) to "
+               "inspect the image(s) with a vision-capable model.";
+    } else {
+        oss << "\nNo saved model is tagged with the 'vision' capability, so the "
+               "image(s) cannot be analyzed. Configure a saved model with the vision "
+               "capability to enable image analysis.";
+    }
+    return oss.str();
+}
+
+} // namespace
+
+nlohmann::json openai_content_for_message(const ChatMessage& msg,
+                                          bool model_has_vision,
+                                          bool any_vision_model_available) {
     if (msg.content_parts.is_null() || !msg.content_parts.is_array() ||
         msg.content_parts.empty()) {
         return msg.content;
@@ -266,6 +304,8 @@ nlohmann::json openai_content_for_message(const ChatMessage& msg) {
 
     nlohmann::json parts = nlohmann::json::array();
     bool saw_text_part = false;
+    // 被能力 gate 剥掉的图片附件,循环结束后聚合成一段句柄文本(tasks 1.9)。
+    std::vector<AttachmentRecord> gated_images;
     for (const auto& part : msg.content_parts) {
         if (!part.is_object()) continue;
         const std::string type = part.value("type", std::string{});
@@ -284,6 +324,16 @@ nlohmann::json openai_content_for_message(const ChatMessage& msg) {
                 : std::optional<AttachmentRecord>{};
             if (!record.has_value()) {
                 push_openai_text_part(parts, "[Attached image unavailable: invalid metadata]");
+                continue;
+            }
+            // D3 兜底:误标成 image 的非图片(含 SVG)按文件句柄处理,绝不发图片 payload。
+            if (!record_is_vision_image(*record)) {
+                push_openai_text_part(parts, file_context_text(*record));
+                continue;
+            }
+            // D2/D5 能力 gate:active 模型不能看图时,聚合成 fallback 句柄文本而非发图。
+            if (!model_has_vision) {
+                gated_images.push_back(*record);
                 continue;
             }
 
@@ -346,14 +396,18 @@ nlohmann::json openai_content_for_message(const ChatMessage& msg) {
         }
     }
 
+    if (!gated_images.empty()) {
+        saw_text_part = true;
+        push_openai_text_part(parts,
+            gated_image_fallback_text(gated_images, any_vision_model_available));
+    }
+
     if (!saw_text_part && !msg.content.empty()) {
         parts.insert(parts.begin(), nlohmann::json{{"type", "text"}, {"text", msg.content}});
     }
 
     return parts.empty() ? nlohmann::json(msg.content) : parts;
 }
-
-} // namespace
 
 nlohmann::json OpenAiCompatProvider::build_request_body(
     const std::vector<ChatMessage>& messages,
@@ -398,7 +452,8 @@ nlohmann::json OpenAiCompatProvider::build_request_body(
             m["content"] = msg.content;
             m["tool_call_id"] = msg.tool_call_id;
         } else {
-            m["content"] = openai_content_for_message(msg);
+            m["content"] = openai_content_for_message(
+                msg, model_has_vision_, any_vision_model_available_);
         }
 
         // Echo reasoning_content back on assistant messages only. DeepSeek

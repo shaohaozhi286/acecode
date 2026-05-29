@@ -90,7 +90,7 @@ ResolvedSessionModel resolve_from_profile(const AppConfig& cfg,
                                           const ModelProfile& profile) {
     ResolvedSessionModel resolved;
     resolved.state = state_from_profile(cfg, profile);
-    resolved.provider = create_provider_from_entry(profile);
+    resolved.provider = create_provider_from_entry(profile, &cfg);
     LOG_INFO("[registry] resolve_from_profile name='" + profile.name +
              "' provider='" + profile.provider + "' model='" + profile.model + "'");
     // Copilot provider 持有 github_token_ + copilot_token_ 两层鉴权状态,

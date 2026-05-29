@@ -155,7 +155,7 @@ std::string cli_prompt_for_session(const std::string& session) {
         << "- Omit `--new-tab` unless the user asks for another tab; a session should usually reuse its managed tab.\n"
         << "- Use `fill` for replacing field text and `type` for keyboard-like input, shortcuts, or Enter submission.\n"
         << "- Use `evaluate` for compact DOM reads when `read-page` is too coarse.\n"
-        << "- Screenshots write files and return metadata. If the active model cannot inspect images, rely on `read-page`, `evaluate`, network data, and PDF/screenshot file metadata; ask the user to visually inspect a saved file only when necessary.\n";
+        << "- Screenshots write files and return metadata. If the active model cannot inspect images, pass the saved screenshot path to the `vision_analyze` tool via its `image_path` parameter to have a vision-capable saved model read it; otherwise rely on `read-page`, `evaluate`, network data, and file metadata. Ask the user to visually inspect a saved file only when no vision-capable model is configured.\n";
     return oss.str();
 }
 

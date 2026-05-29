@@ -2432,8 +2432,12 @@ struct WebServer::Impl {
 
                     json meta = attachment_to_json(*record);
                     attachment_meta.push_back(meta);
+                    // 按 MIME + 文件名重新分类(route-attachments-by-capability 1.7),
+                    // 不直接信持久化 kind:SVG 等非视觉媒体归 file,避免误走图片 part。
+                    const std::string part_kind =
+                        attachment_kind_for_mime(record->mime_type, record->name);
                     parts.push_back(json{
-                        {"type", record->kind == "image" ? "image" : "file"},
+                        {"type", part_kind == "image" ? "image" : "file"},
                         {"attachment", std::move(meta)},
                     });
                 }

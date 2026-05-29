@@ -38,7 +38,7 @@ ApplyModelResult apply_model_to_session(const ModelProfile& profile,
     ApplyModelResult result;
     result.state = state_from_profile(*deps.cfg, profile);
 
-    auto new_provider = create_provider_from_entry(profile);
+    auto new_provider = create_provider_from_entry(profile, deps.cfg);
     if (!new_provider) {
         throw std::runtime_error("provider create failed: factory returned null for '"
                                  + profile.name + "'");
