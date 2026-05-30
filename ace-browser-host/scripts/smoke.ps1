@@ -153,7 +153,7 @@ try {
     }
 
     $pluginHeaders = @{ "X-Ace-Browser-Bridge" = "extension" }
-    $capabilitiesJson = '"capabilities":{"cdp":true,"devtools":true,"raw_cdp":true,"console":true,"network":true,"emulation":true,"performance":true,"heap_snapshot":true,"pdf":true,"upload":true,"os_pointer":false,"operation_overlay":true,"input_block":true}'
+    $capabilitiesJson = '"capabilities":{"cdp":true,"devtools":true,"raw_cdp":true,"console":true,"network":true,"emulation":true,"performance":true,"heap_snapshot":true,"pdf":true,"upload":true,"os_pointer":false,"operation_overlay":true}'
     $mismatchBody = '{"protocol_version":"9.9","extension_version":"0.1-smoke","browser":"chromium",' + $capabilitiesJson + '}'
     Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/plugin/hello" -Headers $pluginHeaders -ContentType "application/json" -Body $mismatchBody | Out-Null
     $mismatch = Invoke-CliJson -Arguments @("command", "--json", "--port", "$Port") -InputJson '{"session":"smoke","action":"snapshot","args":{}}'
@@ -425,76 +425,6 @@ try {
             Remove-Job $traceJob -Force -ErrorAction SilentlyContinue
         }
         Remove-Item $tracePath -Force -ErrorAction SilentlyContinue
-    }
-
-    $blockJob = Start-Job -ScriptBlock {
-        param($ExePath, $Port)
-        & $ExePath block-input --json --session smoke --watchdog-ms 123456 --message "AI busy" --port $Port
-    } -ArgumentList $ExePath, $Port
-    try {
-        $blockPoll = Wait-PluginAction -Port $Port -Headers $pluginHeaders -ExpectedAction "block_input" -Job $blockJob
-        if ($true -ne $blockPoll.ok -or $blockPoll.data.action.action -ne "block_input") {
-            throw "plugin poll did not return queued block_input action"
-        }
-        if ($blockPoll.data.action.args.watchdog_ms -ne 123456 -or $blockPoll.data.action.args.message -ne "AI busy") {
-            throw "block-input CLI did not preserve arguments"
-        }
-        $blockResultBody = @{
-            id = $blockPoll.data.action.id
-            result = @{
-                ok = $true
-                data = @{
-                    success = $true
-                    blocked = $true
-                    pending = $true
-                }
-            }
-        } | ConvertTo-Json -Depth 8 -Compress
-        Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/plugin/result" -Headers $pluginHeaders -ContentType "application/json" -Body $blockResultBody | Out-Null
-        $blockOutput = Receive-CompletedJob -Job $blockJob -Name "block-input"
-        Remove-Job $blockJob -Force
-        $blockJob = $null
-        $blockResult = ($blockOutput | ConvertFrom-Json)
-        if ($true -ne $blockResult.ok -or $true -ne $blockResult.data.blocked) {
-            throw "block-input command did not return successful envelope"
-        }
-    } finally {
-        if ($null -ne $blockJob) {
-            Remove-Job $blockJob -Force -ErrorAction SilentlyContinue
-        }
-    }
-
-    $unblockJob = Start-Job -ScriptBlock {
-        param($ExePath, $Port)
-        & $ExePath unblock-input --json --session smoke --port $Port
-    } -ArgumentList $ExePath, $Port
-    try {
-        $unblockPoll = Wait-PluginAction -Port $Port -Headers $pluginHeaders -ExpectedAction "unblock_input" -Job $unblockJob
-        if ($true -ne $unblockPoll.ok -or $unblockPoll.data.action.action -ne "unblock_input") {
-            throw "plugin poll did not return queued unblock_input action"
-        }
-        $unblockResultBody = @{
-            id = $unblockPoll.data.action.id
-            result = @{
-                ok = $true
-                data = @{
-                    success = $true
-                    blocked = $false
-                }
-            }
-        } | ConvertTo-Json -Depth 8 -Compress
-        Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/plugin/result" -Headers $pluginHeaders -ContentType "application/json" -Body $unblockResultBody | Out-Null
-        $unblockOutput = Receive-CompletedJob -Job $unblockJob -Name "unblock-input"
-        Remove-Job $unblockJob -Force
-        $unblockJob = $null
-        $unblockResult = ($unblockOutput | ConvertFrom-Json)
-        if ($true -ne $unblockResult.ok -or $false -ne $unblockResult.data.blocked) {
-            throw "unblock-input command did not return successful envelope"
-        }
-    } finally {
-        if ($null -ne $unblockJob) {
-            Remove-Job $unblockJob -Force -ErrorAction SilentlyContinue
-        }
     }
 
     $unicodeValue = [string]([char]0x5F20) + [string]([char]0x4E09)

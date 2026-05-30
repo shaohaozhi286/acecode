@@ -74,6 +74,22 @@ TEST(AceBrowserHostCli, ParsesBatchStepsArrayFromPayload) {
     EXPECT_EQ((*wrapped)[0]["action"], "read_page");
 }
 
+TEST(AceBrowserHostCli, ListTabsAllFlagControlsAllArg) {
+    // 触发场景:list-tabs 带 --all 时应把 all=true 放进请求 args,让插件枚举浏览器所有 tab
+    //(含点击弹出的 popup 新窗口);否则只列本 session adopt 的那个 tab。
+    // 期望行为:带 --all -> args 含 all==true;不带 --all -> args 不含 all 键(保持旧行为,不放大枚举范围)。
+    std::vector<std::string> with_all = {"ace-browser-host", "list-tabs", "--json", "--session", "demo", "--all"};
+    auto with_ptrs = argv_ptrs(with_all);
+    const json args_with = list_tabs_args(static_cast<int>(with_ptrs.size()), with_ptrs.data());
+    ASSERT_TRUE(args_with.contains("all"));
+    EXPECT_TRUE(args_with["all"].get<bool>());
+
+    std::vector<std::string> without_all = {"ace-browser-host", "list-tabs", "--json", "--session", "demo"};
+    auto without_ptrs = argv_ptrs(without_all);
+    const json args_without = list_tabs_args(static_cast<int>(without_ptrs.size()), without_ptrs.data());
+    EXPECT_FALSE(args_without.contains("all"));
+}
+
 TEST(AceBrowserHostCli, ComputesBatchCommandTimeoutFromStepBudgets) {
     json steps = json::array({
         {
@@ -112,7 +128,7 @@ TEST(AceBrowserHostCli, ComputesBatchCommandTimeoutFromStepBudgets) {
 TEST(AceBrowserHostCli, ParsesBatchPayloadObjectWithVarsAndFinally) {
     std::string error;
     auto payload = parse_batch_payload(
-        R"({"vars":{"status":"done"},"steps":[{"action":"read_page","set":"page"}],"finally":[{"action":"unblock_input"}]})",
+        R"({"vars":{"status":"done"},"steps":[{"action":"read_page","set":"page"}],"finally":[{"action":"read_page","args":{"mode":"summary"}}]})",
         error);
 
     ASSERT_TRUE(payload.has_value()) << error;
@@ -120,7 +136,25 @@ TEST(AceBrowserHostCli, ParsesBatchPayloadObjectWithVarsAndFinally) {
     ASSERT_TRUE((*payload)["steps"].is_array());
     EXPECT_EQ((*payload)["steps"][0]["set"], "page");
     ASSERT_TRUE((*payload)["finally"].is_array());
-    EXPECT_EQ((*payload)["finally"][0]["action"], "unblock_input");
+    EXPECT_EQ((*payload)["finally"][0]["action"], "read_page");
+}
+
+TEST(AceBrowserHostCli, ParsesInlineBatchStdinInputJsonArgument) {
+    std::vector<std::string> args = {
+        "ace-browser-host",
+        "batch",
+        "--stdin-input-json",
+        R"({"steps":[{"action":"read_page","args":{"mode":"summary"}}]})",
+    };
+    auto pointers = argv_ptrs(args);
+
+    auto input = find_arg(static_cast<int>(pointers.size()), pointers.data(), "--stdin-input-json");
+    ASSERT_TRUE(input.has_value());
+
+    std::string error;
+    auto payload = parse_batch_payload(*input, error);
+    ASSERT_TRUE(payload.has_value()) << error;
+    EXPECT_EQ((*payload)["steps"][0]["action"], "read_page");
 }
 
 TEST(AceBrowserHostCli, ComputesBatchCommandTimeoutWithRetryAndFinally) {

@@ -51,8 +51,7 @@ function capabilities() {
     pdf: true,
     upload: true,
     os_pointer: false,
-    operation_overlay: true,
-    input_block: true
+    operation_overlay: true
   };
 }
 
@@ -86,9 +85,6 @@ function normalizedSessionState(raw) {
   const tabId = Number(raw.tabId);
   const groupId = Number(raw.groupId);
   const storedTitle = typeof raw.groupTitle === "string" ? raw.groupTitle : "";
-  const inputBlockExpiresAt = Number(raw.inputBlockExpiresAt || 0);
-  const inputBlockActive = raw.inputBlocked === true &&
-    (!Number.isFinite(inputBlockExpiresAt) || inputBlockExpiresAt <= 0 || Date.now() < inputBlockExpiresAt);
   return {
     session: raw.session,
     tabId: Number.isFinite(tabId) && tabId > 0 ? tabId : null,
@@ -100,13 +96,7 @@ function normalizedSessionState(raw) {
       : defaultGroupTitle(raw.session),
     lastPointer: raw.lastPointer && Number.isFinite(Number(raw.lastPointer.x)) && Number.isFinite(Number(raw.lastPointer.y))
       ? { x: Number(raw.lastPointer.x), y: Number(raw.lastPointer.y) }
-      : null,
-    inputBlocked: inputBlockActive,
-    inputBlockWatchdogMs: Number.isFinite(Number(raw.inputBlockWatchdogMs))
-      ? Number(raw.inputBlockWatchdogMs)
-      : 300000,
-    inputBlockExpiresAt: inputBlockActive && Number.isFinite(inputBlockExpiresAt) ? inputBlockExpiresAt : 0,
-    inputBlockMessage: typeof raw.inputBlockMessage === "string" ? raw.inputBlockMessage : ""
+      : null
   };
 }
 
@@ -118,11 +108,7 @@ function serializedSessionRegistry() {
     groupId: state.groupId,
     status: state.status,
     groupTitle: state.groupTitle,
-    lastPointer: state.lastPointer,
-    inputBlocked: state.inputBlocked === true,
-    inputBlockWatchdogMs: state.inputBlockWatchdogMs || 300000,
-    inputBlockExpiresAt: state.inputBlockExpiresAt || 0,
-    inputBlockMessage: state.inputBlockMessage || ""
+    lastPointer: state.lastPointer
   }));
 }
 
@@ -247,10 +233,18 @@ function postPluginLog(level, message, data = {}) {
 }
 
 async function ensureContentScript(tabId) {
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    files: ["content/virtual-cursor.js"]
-  });
+  // allFrames:true 确保 iframe 内也注入 content script,跨 frame snapshot 与动作路由才能落到子 frame。
+  // virtual-cursor.js 顶层有 window.__aceBrowserBridgeContent 幂等守卫,重复注入不会重复注册监听。
+  // manifest content_scripts 已经声明式 all_frames 注入;此处补注入对个别受限 frame 失败不致命,
+  // 真正缺脚本的 frame 会在后续 sendMessage 时返回明确的连接错误,故吞掉整体异常避免破坏主 frame 流程。
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      files: ["content/virtual-cursor.js"]
+    });
+  } catch {
+    // best-effort：忽略补注入失败
+  }
 }
 
 async function activePageTab() {
@@ -285,10 +279,7 @@ function sessionState(session) {
       status: "idle",
       groupTitle: defaultGroupTitle(session),
       lastPointer: null,
-      inputBlocked: false,
-      inputBlockWatchdogMs: 300000,
-      inputBlockExpiresAt: 0,
-      inputBlockMessage: ""
+      refRouting: null
     });
   }
   return sessions.get(session);
@@ -305,46 +296,7 @@ function trace(session, entry) {
   traceBySession.set(session, list);
 }
 
-function clearInputBlockState(state) {
-  state.inputBlocked = false;
-  state.inputBlockWatchdogMs = 300000;
-  state.inputBlockExpiresAt = 0;
-  state.inputBlockMessage = "";
-}
-
-function inputBlockIsActive(state) {
-  if (!state?.inputBlocked) return false;
-  if (state.inputBlockExpiresAt && Date.now() >= state.inputBlockExpiresAt) {
-    clearInputBlockState(state);
-    scheduleSessionRegistryPersist();
-    return false;
-  }
-  return true;
-}
-
-function inputBlockOverlayArgs(state) {
-  return {
-    watchdog_ms: state.inputBlockWatchdogMs || 300000,
-    message: state.inputBlockMessage || "AI 正在操作浏览器，请暂时不要操作"
-  };
-}
-
-async function applyInputBlockOverlay(session) {
-  const state = sessionState(session);
-  if (!inputBlockIsActive(state)) return { visible: false, pending: false };
-  if (!(await tabExists(state.tabId))) return { visible: false, pending: true };
-  try {
-    await sendPageCommand("show_overlay", inputBlockOverlayArgs(state), state.tabId);
-    return { visible: true, pending: false };
-  } catch (error) {
-    connectionState.lastError = error instanceof Error ? error.message : String(error);
-    return { visible: false, pending: true, warning: connectionState.lastError };
-  }
-}
-
 function statusAfterSuccessfulOperation(session) {
-  const state = sessions.get(session);
-  if (inputBlockIsActive(state)) return "operating";
   return networkBySession.get(session)?.active ? "network" : "idle";
 }
 
@@ -468,36 +420,101 @@ async function cdpCommand(tabId, method, params = {}) {
   }
 }
 
-async function sendPageCommand(command, args = {}, tabId = null) {
+async function sendPageCommand(command, args = {}, tabId = null, frameId = 0) {
   const tab = tabId ? await chrome.tabs.get(tabId) : await activePageTab();
   await ensureContentScript(tab.id);
-  return chrome.tabs.sendMessage(tab.id, {
-    source: ACE_SOURCE,
-    command,
-    args
-  });
+  const message = { source: ACE_SOURCE, command, args };
+  // 开了 all_frames 后,不带 frameId 的 sendMessage 会广播到所有 frame、响应顺序不确定。
+  // 因此默认 frameId=0 明确投递主 frame(等价旧的单 frame 行为);显式传 frameId 路由到 iframe;
+  // 传 frameId=null 才表示"广播到所有 frame"(目前几乎不用)。
+  if (frameId === null) {
+    return chrome.tabs.sendMessage(tab.id, message);
+  }
+  return chrome.tabs.sendMessage(tab.id, message, { frameId });
 }
 
-async function sendSessionPageCommand(session, command, args = {}) {
+async function sendSessionPageCommand(session, command, args = {}, frameId = 0) {
   const tab = await tabForSession(session);
-  return sendPageCommand(command, args, tab.id);
+  return sendPageCommand(command, args, tab.id, frameId);
+}
+
+// 根据动作参数里的 @e ref 查 session 级路由表,判断该 ref 是否落在某个 iframe。
+// 返回 {frameId, localRef} 表示需要把动作定向投递到该 frame;返回 null 表示主 frame 元素,按原路径处理。
+function frameRouteForArgs(session, args) {
+  if (!args || typeof args !== "object") return null;
+  const target = args.target ?? args.selector;
+  if (typeof target !== "string" || !target.startsWith("@e")) return null;
+  const routing = sessionState(session).refRouting;
+  if (!routing) return null;
+  return routing.get(target) || null;
+}
+
+// 跨所有 frame 聚合 snapshot。
+// 设计要点(低回归):主 frame 元素 ref 原样保留、不入路由表 —— 没有 iframe 的页面行为与改动前完全一致;
+// 只有 iframe 元素被重新编号到主 frame 之后,并在 refRouting 记录 globalRef -> {frameId, localRef},
+// 供 click/fill/type 等动作把指令路由回对应 frame 自己的 content script(那里才有该 localRef -> element 映射)。
+async function snapshotWithFrames(session, args = {}) {
+  const tab = await tabForSession(session);
+  await ensureContentScript(tab.id);
+
+  const mainRes = await sendPageCommand("snapshot", args, tab.id, 0);
+  if (!mainRes?.ok) return mainRes;
+
+  const mainElements = Array.isArray(mainRes.data?.elements) ? mainRes.data.elements : [];
+  const routing = new Map();
+  let maxIndex = 0;
+  for (const el of mainElements) {
+    const matched = /^@e(\d+)$/.exec(el?.ref || "");
+    if (matched) maxIndex = Math.max(maxIndex, Number(matched[1]));
+  }
+
+  let frames = [];
+  try {
+    frames = (await chrome.webNavigation.getAllFrames({ tabId: tab.id })) || [];
+  } catch {
+    frames = [];
+  }
+  const childFrames = frames.filter((frame) => frame && frame.frameId !== 0 && !frame.errorOccurred);
+
+  const AGG_LIMIT = 300; // 聚合元素上限,避免广告/追踪类 iframe 把上下文撑爆
+  const aggregated = mainElements.slice();
+  const mainSnapshotId = mainRes.data?.snapshot_id || null;
+  let globalIndex = maxIndex;
+
+  for (const frame of childFrames) {
+    if (aggregated.length >= AGG_LIMIT) break;
+    let frameRes = null;
+    try {
+      frameRes = await sendPageCommand("snapshot", args, tab.id, frame.frameId);
+    } catch {
+      frameRes = null; // 该 frame 不可达或无 content script,跳过
+    }
+    if (!frameRes?.ok || !Array.isArray(frameRes.data?.elements)) continue;
+    for (const el of frameRes.data.elements) {
+      if (aggregated.length >= AGG_LIMIT) break;
+      const localRef = el?.ref;
+      if (typeof localRef !== "string") continue;
+      const globalRef = `@e${++globalIndex}`;
+      routing.set(globalRef, { frameId: frame.frameId, localRef });
+      el.ref = globalRef;
+      el.frame_id = frame.frameId;
+      el.frame_url = frame.url || null;
+      if (mainSnapshotId) el.snapshot_id = mainSnapshotId;
+      aggregated.push(el);
+    }
+  }
+
+  sessionState(session).refRouting = routing;
+
+  const data = { ...mainRes.data, elements: aggregated };
+  data.frame_count = 1 + childFrames.length;
+  data.iframe_element_count = aggregated.length - mainElements.length;
+  return { ok: true, data };
 }
 
 async function withOperatingOverlay(session, actionName, args, fn) {
   await updateGroup(session, null, actionName === "wait" ? "waiting" : "operating");
-  const state = sessionState(session);
-  const manualBlock = inputBlockIsActive(state);
-  const watchdogMs = manualBlock
-    ? (state.inputBlockWatchdogMs || 300000)
-    : (args?.operation_overlay_watchdog_ms || 10000);
-  try {
-    await sendSessionPageCommand(session, "show_overlay", {
-      watchdog_ms: watchdogMs,
-      message: manualBlock ? state.inputBlockMessage : undefined
-    });
-  } catch {
-    // Some pages cannot receive content scripts; the action below will return the real error.
-  }
+  await showOperationOverlay(session, args);
   try {
     const result = await fn();
     trace(session, {
@@ -515,14 +532,17 @@ async function withOperatingOverlay(session, actionName, args, fn) {
     });
     await updateGroup(session, null, "error");
     return bridgeError(error);
-  } finally {
-    if (!inputBlockIsActive(sessionState(session))) {
-      try {
-        await sendSessionPageCommand(session, "hide_overlay");
-      } catch {
-        // Ignore cleanup failures; content script watchdog also removes the overlay.
-      }
-    }
+  }
+}
+
+async function showOperationOverlay(session, args = {}) {
+  const watchdogMs = clampNumber(args?.operation_overlay_watchdog_ms ?? args?.watchdog_ms, 1000, 120000, 10000);
+  try {
+    await sendSessionPageCommand(session, "show_overlay", {
+      watchdog_ms: watchdogMs
+    });
+  } catch {
+    // Some pages cannot receive content scripts; callers should surface the real action result.
   }
 }
 
@@ -545,10 +565,10 @@ async function handleNavigate(session, args) {
     }
     await updateGroup(session, args.group_title, "waiting");
     tab = await waitForTabComplete(state.tabId, timeoutMs);
-    const blockState = await applyInputBlockOverlay(session);
+    await showOperationOverlay(session, args);
     await updateGroup(session, args.group_title, statusAfterSuccessfulOperation(session));
     trace(session, { action: "navigate", url: args.url, tabId: state.tabId });
-    return { ok: true, data: { success: true, url: tab.url || args.url, tabId: state.tabId, ownership: state.ownership, loaded: true, input_block: blockState } };
+    return { ok: true, data: { success: true, url: tab.url || args.url, tabId: state.tabId, ownership: state.ownership, loaded: true } };
   }
 
   const tab = await tabForSession(session);
@@ -558,65 +578,10 @@ async function handleNavigate(session, args) {
   else return { ok: false, error: { code: "invalid_request", message: `Unsupported navigate operation: ${operation}` } };
   await updateGroup(session, null, "waiting");
   const loadedTab = await waitForTabComplete(tab.id, timeoutMs);
-  const blockState = await applyInputBlockOverlay(session);
+  await showOperationOverlay(session, args);
   await updateGroup(session, null, statusAfterSuccessfulOperation(session));
   trace(session, { action: "navigate", operation, tabId: tab.id });
-  return { ok: true, data: { success: true, operation, tabId: tab.id, url: loadedTab.url || tab.url, loaded: true, input_block: blockState } };
-}
-
-async function handleBlockInput(session, args = {}) {
-  const state = sessionState(session);
-  const watchdogMs = clampNumber(args.watchdog_ms ?? args.timeout_ms, 1000, 1800000, 300000);
-  state.inputBlocked = true;
-  state.inputBlockWatchdogMs = watchdogMs;
-  state.inputBlockExpiresAt = Date.now() + watchdogMs;
-  state.inputBlockMessage = typeof args.message === "string" ? args.message.slice(0, 96) : "";
-
-  const blockState = await applyInputBlockOverlay(session);
-  await updateGroup(session, null, "operating");
-  trace(session, {
-    action: "block_input",
-    ok: true,
-    visible: blockState.visible === true,
-    pending: blockState.pending === true
-  });
-  return {
-    ok: true,
-    data: {
-      success: true,
-      blocked: true,
-      visible: blockState.visible === true,
-      pending: blockState.pending === true,
-      warning: blockState.warning || null,
-      watchdog_ms: watchdogMs,
-      expires_at: new Date(state.inputBlockExpiresAt).toISOString()
-    }
-  };
-}
-
-async function handleUnblockInput(session) {
-  const state = sessionState(session);
-  clearInputBlockState(state);
-  let warning = null;
-  if (await tabExists(state.tabId)) {
-    try {
-      await sendPageCommand("hide_overlay", {}, state.tabId);
-    } catch (error) {
-      warning = error instanceof Error ? error.message : String(error);
-      connectionState.lastError = warning;
-    }
-  }
-  await updateGroup(session, null, statusAfterSuccessfulOperation(session));
-  trace(session, { action: "unblock_input", ok: true, warning });
-  return {
-    ok: true,
-    data: {
-      success: true,
-      blocked: false,
-      visible: false,
-      warning
-    }
-  };
+  return { ok: true, data: { success: true, operation, tabId: tab.id, url: loadedTab.url || tab.url, loaded: true } };
 }
 
 async function handleFindTab(session, args) {
@@ -641,18 +606,22 @@ async function handleFindTab(session, args) {
   }
   state.tabId = tab.id;
   state.ownership = "adopted";
-  const blockState = await applyInputBlockOverlay(session);
+  await showOperationOverlay(session, args);
   await updateGroup(session, args.group_title, statusAfterSuccessfulOperation(session));
   trace(session, { action: "find_tab", url: tab.url, tabId: tab.id });
-  return { ok: true, data: { success: true, url: tab.url, title: tab.title, tabId: tab.id, ownership: "adopted", input_block: blockState } };
+  return { ok: true, data: { success: true, url: tab.url, title: tab.title, tabId: tab.id, ownership: "adopted" } };
 }
 
-async function handleListTabs(session) {
+async function handleListTabs(session, args = {}) {
+  // --all / scope=all 时除了 session 管理的 tab,还枚举浏览器里所有 tab,
+  // 让模型能发现点击后弹出的 popup 新窗口(否则只能看到自己 adopt 的那一个 tab)。
+  const includeAll = args?.all === true || args?.all === "true" || args?.scope === "all";
   const tabs = [];
+  const seenTabIds = new Set();
   for (const [name, state] of sessions.entries()) {
+    if (session && name !== session) continue;
     let tab = null;
     if (await tabExists(state.tabId)) tab = await chrome.tabs.get(state.tabId);
-    if (session && name !== session) continue;
     let group = null;
     if (state.groupId !== null && state.groupId !== undefined && chrome.tabGroups) {
       try {
@@ -661,23 +630,52 @@ async function handleListTabs(session) {
         group = null;
       }
     }
+    if (state.tabId) seenTabIds.add(state.tabId);
     tabs.push({
       session: name,
       tabId: state.tabId,
+      managed: true,
       ownership: state.ownership,
       groupId: state.groupId,
       groupTitle: state.groupTitle,
       groupColor: group?.color || null,
       group_color: group?.color || null,
       status: state.status,
-      inputBlocked: inputBlockIsActive(state),
-      input_blocked: inputBlockIsActive(state),
       active: Boolean(tab?.active),
+      windowId: tab?.windowId ?? null,
+      window_id: tab?.windowId ?? null,
+      opener_tab_id: tab?.openerTabId ?? null,
       url: tab?.url || null,
       title: tab?.title || null
     });
   }
-  return { ok: true, data: { success: true, tabs } };
+  if (includeAll) {
+    let allTabs = [];
+    try {
+      allTabs = await chrome.tabs.query({});
+    } catch {
+      allTabs = [];
+    }
+    for (const tab of allTabs) {
+      if (!tab?.id || seenTabIds.has(tab.id)) continue;
+      seenTabIds.add(tab.id);
+      tabs.push({
+        session: null,
+        tabId: tab.id,
+        managed: false,
+        ownership: "unmanaged",
+        groupId: tab.groupId ?? null,
+        status: null,
+        active: Boolean(tab.active),
+        windowId: tab.windowId ?? null,
+        window_id: tab.windowId ?? null,
+        opener_tab_id: tab.openerTabId ?? null,
+        url: tab.url || null,
+        title: tab.title || null
+      });
+    }
+  }
+  return { ok: true, data: { success: true, tabs, scope: includeAll ? "all" : "session" } };
 }
 
 async function handleCloseSession(session) {
@@ -1501,6 +1499,16 @@ async function cdpType(session, args) {
 }
 
 async function pointerAction(session, actionName, args) {
+  // iframe 内元素:绕开 CDP 顶层坐标换算,直接把动作以 DOM 模式定向投递到所属 frame 的 content script。
+  const route = frameRouteForArgs(session, args);
+  if (route && route.frameId) {
+    const result = await sendSessionPageCommand(session, actionName, { ...args, target: route.localRef, mode: "dom" }, route.frameId);
+    if (result?.ok) {
+      result.data = { ...(result.data || {}), mode: result.data?.mode || "dom", frame_id: route.frameId };
+    }
+    return result;
+  }
+
   const mode = args.mode || "auto";
   if (mode === "dom") {
     return sendSessionPageCommand(session, actionName, args);
@@ -2283,28 +2291,18 @@ async function executeBatchSteps(session, steps, context, phase) {
   return { results, stoppedAt };
 }
 
-// batch:在同一受管 tab 上顺序执行多步,一次 dispatch 返回逐步结果。默认遇错即停,自带 block/unblock 生命周期。
+// batch:在同一受管 tab 上顺序执行多步,一次 dispatch 返回逐步结果。默认遇错即停;各交互步骤自行触发操作遮罩 watchdog。
 async function handleBatch(session, args) {
   const steps = Array.isArray(args.steps) ? args.steps : [];
   const finallySteps = Array.isArray(args.finally) ? args.finally : [];
-  const wrapLifecycle = args.lifecycle !== false;
   const context = {
     vars: cloneJson(args.vars && typeof args.vars === "object" ? args.vars : {}),
     last: null
   };
   let main = { results: [], stoppedAt: null };
   let cleanup = { results: [], stoppedAt: null };
-  if (wrapLifecycle) {
-    try { await handleBlockInput(session, { watchdog_ms: args.watchdog_ms }); } catch { /* 遮罩失败不致命 */ }
-  }
-  try {
-    main = await executeBatchSteps(session, steps, context, "main");
-    if (finallySteps.length) cleanup = await executeBatchSteps(session, finallySteps, context, "finally");
-  } finally {
-    if (wrapLifecycle) {
-      try { await handleUnblockInput(session); } catch { /* 释放失败不致命 */ }
-    }
-  }
+  main = await executeBatchSteps(session, steps, context, "main");
+  if (finallySteps.length) cleanup = await executeBatchSteps(session, finallySteps, context, "finally");
   const mainOk = main.stoppedAt === null && main.results.every((r) => r.ok);
   const finallyOk = cleanup.stoppedAt === null && cleanup.results.every((r) => r.ok);
   const overallOk = mainOk && finallyOk;
@@ -2337,13 +2335,13 @@ async function dispatchDaemonAction(action) {
     return handleFindTab(session, args);
   }
   if (actionName === "list_tabs") {
-    return handleListTabs(args.session || session);
+    return handleListTabs(args.session || session, args);
   }
   if (actionName === "close_session") {
     return handleCloseSession(session);
   }
   if (actionName === "snapshot" || actionName === "read_page") {
-    return sendSessionPageCommand(session, "snapshot", args);
+    return snapshotWithFrames(session, args);
   }
   if (actionName === "wait") {
     return withOperatingOverlay(session, actionName, args, () => handleWait(session, args));
@@ -2361,7 +2359,11 @@ async function dispatchDaemonAction(action) {
   }
   if (actionName === "fill") {
     const actionStartedAtMs = Date.now();
-    const result = await withOperatingOverlay(session, actionName, args, () => sendSessionPageCommand(session, actionName, args));
+    // iframe 内元素:把 fill 定向投递到所属 frame,并用该 frame 内的 localRef。
+    const route = frameRouteForArgs(session, args);
+    const fillArgs = route && route.frameId ? { ...args, target: route.localRef } : args;
+    const fillFrameId = route && route.frameId ? route.frameId : 0;
+    const result = await withOperatingOverlay(session, actionName, args, () => sendSessionPageCommand(session, actionName, fillArgs, fillFrameId));
     return applyExpectation(session, args, result, actionStartedAtMs);
   }
   if (actionName === "evaluate") {
@@ -2395,18 +2397,6 @@ async function dispatchDaemonAction(action) {
         message: "file upload dispatch is not available in the extension route yet"
       }
     };
-  }
-  if (actionName === "block_input") {
-    return handleBlockInput(session, args);
-  }
-  if (actionName === "unblock_input") {
-    return handleUnblockInput(session);
-  }
-  if (actionName === "show_overlay") {
-    return sendSessionPageCommand(session, "show_overlay", args);
-  }
-  if (actionName === "hide_overlay") {
-    return sendSessionPageCommand(session, "hide_overlay", args);
   }
   if (actionName === "hide_pointer_path") {
     return sendSessionPageCommand(session, "hide_pointer_path", args);

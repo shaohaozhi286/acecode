@@ -112,8 +112,8 @@ TEST(AceBrowserBridgeToolsStart, ReturnsStatusAndCliPrompt) {
     ASSERT_TRUE(result.post_user_prompt.has_value());
     EXPECT_NE(result.post_user_prompt->find("ace-browser-host"), std::string::npos);
     EXPECT_NE(result.post_user_prompt->find("ensure-ready"), std::string::npos);
-    EXPECT_NE(result.post_user_prompt->find("block-input"), std::string::npos);
-    EXPECT_NE(result.post_user_prompt->find("unblock-input"), std::string::npos);
+    EXPECT_EQ(result.post_user_prompt->find("block-input"), std::string::npos);
+    EXPECT_EQ(result.post_user_prompt->find("unblock-input"), std::string::npos);
     EXPECT_NE(result.post_user_prompt->find("read-page"), std::string::npos);
     EXPECT_NE(result.post_user_prompt->find("devtools --json"), std::string::npos);
     EXPECT_NE(result.post_user_prompt->find("cdp --json"), std::string::npos);

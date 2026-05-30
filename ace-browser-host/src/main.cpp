@@ -379,7 +379,6 @@ json default_capabilities(bool extension_connected) {
         {"upload", extension_connected},
         {"os_pointer", false},
         {"operation_overlay", extension_connected},
-        {"input_block", extension_connected},
     };
 }
 
@@ -1542,7 +1541,11 @@ int batch_command(int argc, char** argv) {
     if (has_arg(argc, argv, "--no-lifecycle")) args["lifecycle"] = false;
 
     std::optional<std::string> input;
-    if (auto steps_file = find_arg(argc, argv, "--steps-file")) {
+    if (auto inline_stdin = find_arg(argc, argv, "--stdin-input-json")) {
+        input = *inline_stdin;
+    } else if (auto inline_input = find_arg(argc, argv, "--input-json")) {
+        input = *inline_input;
+    } else if (auto steps_file = find_arg(argc, argv, "--steps-file")) {
         std::string error;
         input = read_text_file(normalize_bridge_path(*steps_file), error);
         if (!input) {
@@ -1552,7 +1555,7 @@ int batch_command(int argc, char** argv) {
     } else if (!has_arg(argc, argv, "--args-json")) {
         input = read_stdin();
         if (input->find_first_not_of(" \t\r\n") == std::string::npos) {
-            print_json(failure("invalid_request", "batch requires JSON steps on stdin, --steps-file, or --args-json with steps"));
+            print_json(failure("invalid_request", "batch requires JSON steps on stdin, --stdin-input-json, --steps-file, or --args-json with steps"));
             return 0;
         }
     }
@@ -1577,18 +1580,6 @@ int batch_command(int argc, char** argv) {
                                 "batch",
                                 std::move(args)));
     return 0;
-}
-
-int block_input_command(int argc, char** argv) {
-    json args;
-    put_int_arg(args, argc, argv, "--watchdog-ms", "watchdog_ms");
-    put_int_arg(args, argc, argv, "--timeout-ms", "timeout_ms");
-    put_string_arg(args, argc, argv, "--message", "message");
-    return command_alias_command(argc, argv, "block_input", std::move(args));
-}
-
-int unblock_input_command(int argc, char** argv) {
-    return command_alias_command(argc, argv, "unblock_input", json::object());
 }
 
 void put_interaction_options(json& args, int argc, char** argv) {
@@ -1941,8 +1932,16 @@ int save_pdf_command(int argc, char** argv) {
     return command_alias_command(argc, argv, "save_as_pdf", std::move(args));
 }
 
+// 解析 list-tabs 的 argv 为请求 args。--all 时让插件枚举浏览器里所有 tab(含点击弹出的 popup 新窗口),
+// 而不只是本 session adopt 的那个 tab。提取为独立函数便于单元测试覆盖 flag 解析。
+json list_tabs_args(int argc, char** argv) {
+    json args = json::object();
+    put_bool_flag(args, argc, argv, "--all", "all");
+    return args;
+}
+
 int list_tabs_command(int argc, char** argv) {
-    return command_alias_command(argc, argv, "list_tabs", json::object());
+    return command_alias_command(argc, argv, "list_tabs", list_tabs_args(argc, argv));
 }
 
 int close_session_command(int argc, char** argv) {
@@ -2657,9 +2656,7 @@ void print_help() {
         << "  read-page --json [--session <name>] [--mode summary|elements|focused|changed]\n"
         << "  wait --json --condition <condition> [--target <ref|selector>] [--text <text>] [--timeout-ms <ms>]\n"
         << "  assert --json --condition <condition> [--target <ref|selector>] [--text <text>] [--value <text>] [--url <text>] [--method <GET|POST>] [--status-class <2xx|3xx|4xx|5xx>] [--timeout-ms <ms>]\n"
-        << "  batch --json [--session <name>] [--steps-file <path>]  # or JSON steps array/object on stdin\n"
-        << "  block-input --json [--session <name>] [--watchdog-ms <ms>] [--message <text>]\n"
-        << "  unblock-input --json [--session <name>]\n"
+        << "  batch --json [--session <name>] [--steps-file <path>|--stdin-input-json <json>]  # or JSON steps array/object on stdin\n"
         << "  click|fill|type|hover|drag|scroll --json [--session <name>] ...\n"
         << "  evaluate --json --code <javascript> [--session <name>]\n"
         << "  network --json --cmd <start|stop|list|detail> [--filter <text>] [--request-id <id>]\n"
@@ -2667,7 +2664,7 @@ void print_help() {
         << "  cdp --json --method <CDP.method> [--params <json>] [--session <name>]\n"
         << "  screenshot --json --session <name> --output <path> [--target <ref|selector>|--locator <json>|--attachment-ref <ref>] [--port 52007]\n"
         << "  save-pdf --json [--session <name>] [--file-name <name>]\n"
-        << "  list-tabs --json [--session <name>]\n"
+        << "  list-tabs --json [--session <name>] [--all]\n"
         << "  close-session --json [--session <name>]\n"
         << "  serve --json [--port 52007]\n"
         << "  shutdown --json [--port 52007]\n";
@@ -2697,8 +2694,6 @@ int main_impl(int argc, char** argv) {
     if (command == "wait") return wait_command(argc, argv);
     if (command == "assert") return assert_command(argc, argv);
     if (command == "batch") return batch_command(argc, argv);
-    if (command == "block-input") return block_input_command(argc, argv);
-    if (command == "unblock-input") return unblock_input_command(argc, argv);
     if (command == "click") return click_command(argc, argv);
     if (command == "fill") return fill_command(argc, argv);
     if (command == "type") return type_command(argc, argv);

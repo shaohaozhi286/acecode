@@ -21,6 +21,17 @@ function Assert-Contains {
     }
 }
 
+function Assert-NotContains {
+    param(
+        [string]$Text,
+        [string]$Needle,
+        [string]$Message
+    )
+    if ($Text.IndexOf($Needle, [System.StringComparison]::Ordinal) -ge 0) {
+        throw $Message
+    }
+}
+
 $manifestPath = Join-Path $ExtensionDir "manifest.json"
 $serviceWorkerPath = Join-Path $ExtensionDir "service_worker.js"
 $contentPath = Join-Path $ExtensionDir "content\virtual-cursor.js"
@@ -61,9 +72,8 @@ Assert-Contains $serviceWorker "restoreSessionRegistry" "service worker must res
 Assert-Contains $serviceWorker "args.newTab === true" "service worker must only create new tabs on explicit newTab or missing session tab"
 Assert-Contains $serviceWorker "waitForTabComplete" "service worker must wait for page navigation before returning"
 Assert-Contains $serviceWorker "navigation_timeout" "service worker must report navigation timeout"
-Assert-Contains $serviceWorker "handleBlockInput" "service worker must implement explicit input blocking"
-Assert-Contains $serviceWorker "handleUnblockInput" "service worker must implement explicit input unblock"
-Assert-Contains $serviceWorker "inputBlocked" "service worker must persist session input block state"
+Assert-Contains $serviceWorker "showOperationOverlay" "service worker must implement automatic operation overlay"
+Assert-Contains $serviceWorker "withOperatingOverlay" "service worker must wrap page operations with automatic overlay"
 Assert-Contains $serviceWorker "function shortSessionHash" "service worker must derive short group title hashes"
 Assert-Contains $serviceWorker 'return `ACE-${shortSessionHash(session)}`' "service worker must use short ACE hash group titles"
 Assert-Contains $serviceWorker "isLegacyDefaultGroupTitle" "service worker must migrate legacy default group titles"
@@ -83,7 +93,7 @@ Assert-Contains $serviceWorker "Tracing.start" "service worker must support perf
 Assert-Contains $serviceWorker "HeapProfiler.takeHeapSnapshot" "service worker must support heap snapshots"
 Assert-Contains $serviceWorker "Network.getResponseBody" "service worker must support network body detail"
 Assert-Contains $serviceWorker "show_pointer_path" "service worker must route pointer debug visualization"
-Assert-Contains $serviceWorker "input_block: true" "service worker must advertise input block capability"
+Assert-NotContains $serviceWorker "input_block: true" "service worker must not advertise a manual input block capability"
 Assert-Contains $serviceWorker "content_ready" "service worker must accept content script wake messages"
 Assert-Contains $serviceWorker "fallback_reason" "service worker must report fallback reason"
 Assert-Contains $serviceWorker "/plugin/log" "service worker must forward plugin diagnostics to host"
