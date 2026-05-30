@@ -2,8 +2,14 @@ const ACE_SOURCE = "ace-browser-bridge";
 const DEFAULT_PORT = 52007;
 const PROTOCOL_VERSION = "0.1";
 const HEARTBEAT_ALARM = "ace-browser-host-heartbeat";
+// 0.5 分钟 = 30 秒,是 Chrome 允许的最小 alarm 周期。service worker 一旦被回收,alarm 会在
+// 约 30 秒内把它冷启唤醒并恢复轮询,作为保活 ping 的兜底。
+const HEARTBEAT_PERIOD_MINUTES = 0.5;
+const KEEPALIVE_PORT_NAME = "ace-keepalive";
+const KEEPALIVE_PING_MS = 20000;
 const SESSION_REGISTRY_STORAGE_KEY = "aceBrowserBridgeSessions";
 const NAVIGATION_TIMEOUT_MS = 15000;
+const PLUGIN_LOG_TIMEOUT_MS = 800;
 
 let daemonPort = DEFAULT_PORT;
 let connectionState = {
@@ -14,6 +20,8 @@ let connectionState = {
   extensionVersion: chrome.runtime.getManifest().version
 };
 let polling = false;
+let keepAlivePort = null;
+let keepAliveTimer = null;
 const sessions = new Map();
 const traceBySession = new Map();
 const consoleBySession = new Map();
@@ -206,6 +214,38 @@ async function postDaemon(path, body) {
   return response.json();
 }
 
+function postPluginLog(level, message, data = {}) {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), PLUGIN_LOG_TIMEOUT_MS);
+    fetch(`${daemonBaseUrl()}/plugin/log`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Ace-Browser-Bridge": "extension"
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        source: ACE_SOURCE,
+        level,
+        message,
+        at: new Date().toISOString(),
+        data: {
+          extension_version: chrome.runtime.getManifest().version,
+          port: daemonPort,
+          ...data
+        }
+      })
+    }).catch(() => {
+      // Best-effort diagnostics only.
+    }).finally(() => {
+      clearTimeout(timer);
+    });
+  } catch (_error) {
+    // Best-effort diagnostics only; never let logging break browser actions.
+  }
+}
+
 async function ensureContentScript(tabId) {
   await chrome.scripting.executeScript({
     target: { tabId },
@@ -224,6 +264,15 @@ async function activePageTab() {
 
 function sessionName(action) {
   return action.session || action.args?.session || "acecode-default";
+}
+
+function actionLogData(action, extra = {}) {
+  return {
+    id: String(action?.id || ""),
+    action: String(action?.action || ""),
+    session: sessionName(action || {}),
+    ...extra
+  };
 }
 
 function sessionState(session) {
@@ -1462,19 +1511,50 @@ async function pointerAction(session, actionName, args) {
 }
 
 async function handleScreenshot(session, args) {
-  const tab = await tabForSession(session);
-  const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
-  const comma = dataUrl.indexOf(",");
-  const data = comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
-  return {
-    ok: true,
-    data: {
-      path: args.output || `/tmp/ace-browser-bridge-screenshots/${Date.now()}.png`,
-      mimeType: "image/png",
-      sizeBytes: Math.floor(data.length * 3 / 4),
-      data
-    }
-  };
+  const started = Date.now();
+  let tab = null;
+  try {
+    tab = await tabForSession(session);
+    await postPluginLog("info", "screenshot_start", {
+      session,
+      tab_id: tab.id,
+      window_id: tab.windowId,
+      has_output_path: Boolean(args.output)
+    });
+    const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+    const comma = dataUrl.indexOf(",");
+    const data = comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
+    const sizeBytes = Math.floor(data.length * 3 / 4);
+    const path = args.output || `/tmp/ace-browser-bridge-screenshots/${Date.now()}.png`;
+    await postPluginLog("info", "screenshot_finish", {
+      session,
+      tab_id: tab.id,
+      window_id: tab.windowId,
+      size_bytes: sizeBytes,
+      data_length: data.length,
+      duration_ms: Date.now() - started,
+      output_path: path
+    });
+    return {
+      ok: true,
+      data: {
+        path,
+        mimeType: "image/png",
+        sizeBytes,
+        data
+      }
+    };
+  } catch (error) {
+    await postPluginLog("error", "screenshot_error", {
+      session,
+      tab_id: tab?.id || null,
+      window_id: tab?.windowId || null,
+      error_code: error?.code || "extension_error",
+      message: error instanceof Error ? error.message : String(error),
+      duration_ms: Date.now() - started
+    });
+    throw error;
+  }
 }
 
 async function handleSavePdf(session, args) {
@@ -1753,7 +1833,22 @@ async function pollDaemonOnce() {
   const action = poll.data?.action;
   if (!action) return;
 
+  // 立刻向 daemon 确认已收到本指令。daemon 据此判定"投递成功";若收不到 ack,它会在重投窗口后
+  // 把指令重新入队再投一次,从而避免 service worker 在派发瞬间被回收导致指令永久丢失。
+  // ack 在执行前发出,因此一旦发出就代表 worker 真的拿到了指令、即将执行,不会误触发重投。
+  try {
+    await postDaemon("/plugin/ack", {
+      source: ACE_SOURCE,
+      id: action.id,
+      extension_version: chrome.runtime.getManifest().version
+    });
+  } catch {
+    // ack 失败不致命:最坏情况是 daemon 触发一次重投(仅在确实没收到 ack 时才会发生)。
+  }
+
   let result;
+  const started = Date.now();
+  await postPluginLog("info", "action_start", actionLogData(action));
   try {
     result = await dispatchDaemonAction(action);
   } catch (error) {
@@ -1765,11 +1860,27 @@ async function pollDaemonOnce() {
       }
     };
   }
-  await postDaemon("/plugin/result", {
-    source: ACE_SOURCE,
-    id: action.id,
-    result
+  const finishData = actionLogData(action, {
+    ok: Boolean(result?.ok),
+    error_code: result?.ok ? null : (result?.error?.code || "extension_error"),
+    duration_ms: Date.now() - started
   });
+  await postPluginLog(result?.ok ? "info" : "warn", "action_finish", finishData);
+  try {
+    await postDaemon("/plugin/result", {
+      source: ACE_SOURCE,
+      id: action.id,
+      result
+    });
+    await postPluginLog("info", "result_posted", finishData);
+  } catch (error) {
+    await postPluginLog("error", "result_post_failed", actionLogData(action, {
+      error_code: error?.code || "post_failed",
+      message: error instanceof Error ? error.message : String(error),
+      duration_ms: Date.now() - started
+    }));
+    throw error;
+  }
 }
 
 async function startPolling() {
@@ -1797,25 +1908,68 @@ async function startPolling() {
   }
 }
 
+// ---- Service worker 保活 ----
+// MV3 后台 service worker 空闲约 30 秒就被浏览器回收。长轮询一旦在"派发指令的瞬间"被回收,
+// 那条指令在旧设计里会永久丢失(现在 daemon 侧有未确认重投兜底)。这里用"自连端口 + 周期 ping"
+// 在存活期间不断刷新空闲计时,尽量不让 worker 在两次操作之间被回收;真被回收后由 alarm 唤醒。
+function connectKeepAlivePort() {
+  if (keepAlivePort) return;
+  try {
+    keepAlivePort = chrome.runtime.connect({ name: KEEPALIVE_PORT_NAME });
+    keepAlivePort.onDisconnect.addListener(() => {
+      keepAlivePort = null;
+    });
+  } catch {
+    keepAlivePort = null;
+  }
+}
+
+function keepAliveTick() {
+  connectKeepAlivePort();
+  try {
+    keepAlivePort?.postMessage({ type: "ping", at: Date.now() });
+  } catch {
+    keepAlivePort = null;
+  }
+}
+
+function ensureKeepAlive() {
+  if (keepAliveTimer === null) {
+    keepAliveTimer = setInterval(keepAliveTick, KEEPALIVE_PING_MS);
+  }
+  keepAliveTick();
+}
+
+// 自连端口的接收端:收到 ping 即视为一次事件,刷新 service worker 空闲计时(内容无所谓)。
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== KEEPALIVE_PORT_NAME) return;
+  port.onMessage.addListener(() => {
+    // no-op:消息送达本身就足以续命。
+  });
+});
+
 async function connectAndPoll() {
+  ensureKeepAlive();
   await ensureSessionRegistryRestored();
   await helloDaemon();
   startPolling();
 }
 
 chrome.runtime.onInstalled.addListener(() => {
-  chrome.alarms.create(HEARTBEAT_ALARM, { periodInMinutes: 1 });
+  chrome.alarms.create(HEARTBEAT_ALARM, { periodInMinutes: HEARTBEAT_PERIOD_MINUTES });
   connectAndPoll();
 });
 
 chrome.runtime.onStartup.addListener(() => {
-  chrome.alarms.create(HEARTBEAT_ALARM, { periodInMinutes: 1 });
+  chrome.alarms.create(HEARTBEAT_ALARM, { periodInMinutes: HEARTBEAT_PERIOD_MINUTES });
   connectAndPoll();
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === HEARTBEAT_ALARM) {
-    helloDaemon();
+    // 被回收后由 alarm 冷启唤醒:不能只 hello,要把保活和轮询都重新拉起来,
+    // 否则 worker 虽然活了却没人继续 poll,指令照样堆在 daemon 里等超时。
+    connectAndPoll();
   }
 });
 

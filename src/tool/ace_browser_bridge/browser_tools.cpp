@@ -1,6 +1,7 @@
 #include "browser_tools.hpp"
 
 #include "session/session_manager.hpp"
+#include "utils/logger.hpp"
 
 #include <cctype>
 #include <map>
@@ -208,6 +209,9 @@ ToolImpl make_start_tool(const std::shared_ptr<BrowserToolState>& state) {
         }
 
         const std::string session = default_session_name(args, ctx);
+        LOG_INFO("[ace-browser-tool] browser_start session=" + session +
+                 " include_prompt=" + std::string(args.value("include_prompt", true) ? "true" : "false") +
+                 " force_prompt=" + std::string(args.value("force_prompt", false) ? "true" : "false"));
         BridgeEnvelope envelope = state->client->ensure_ready();
         nlohmann::json out = envelope_json(envelope);
         if (out["ok"].get<bool>()) {
@@ -238,6 +242,17 @@ ToolImpl make_start_tool(const std::shared_ptr<BrowserToolState>& state) {
         if (include_prompt && should_emit_prompt(state, session, force_prompt)) {
             result.post_user_prompt = cli_prompt_for_session(session);
             result.post_user_prompt_display_text = "[ACE Browser Bridge CLI prompt loaded]";
+        }
+        if (envelope.ok) {
+            bool ready = out.contains("data") && out["data"].is_object() &&
+                         out["data"].value("ready", false);
+            LOG_INFO("[ace-browser-tool] browser_start finish session=" + session +
+                     " ready=" + std::string(ready ? "true" : "false") +
+                     " prompt_injected=" + std::string(result.post_user_prompt.has_value() ? "true" : "false"));
+        } else {
+            LOG_WARN("[ace-browser-tool] browser_start finish session=" + session +
+                     " ok=false error_code=" +
+                     (envelope.error ? envelope.error->code : std::string("bridge_error")));
         }
         return result;
     };

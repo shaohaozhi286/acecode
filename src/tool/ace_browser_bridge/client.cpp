@@ -1,14 +1,20 @@
 #include "client.hpp"
 
-#include "utils/utf8_path.hpp"
 #include "utils/encoding.hpp"
+#include "utils/logger.hpp"
+#include "utils/utf8_path.hpp"
 
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <cstdio>
+#include <ctime>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <limits.h>
+#include <mutex>
 #include <sstream>
 #include <thread>
 #include <utility>
@@ -165,6 +171,110 @@ bool error_code_is(const BridgeEnvelope& envelope, const char* code) {
     return !envelope.ok && envelope.error && envelope.error->code == code;
 }
 
+std::string bool_text(bool value) {
+    return value ? "true" : "false";
+}
+
+long long elapsed_ms_since(std::chrono::steady_clock::time_point started) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started).count();
+}
+
+std::string cli_args_for_log(const std::vector<std::string>& args) {
+    std::ostringstream oss;
+    for (std::size_t i = 0; i < args.size(); ++i) {
+        if (i > 0) oss << ' ';
+        oss << args[i];
+    }
+    return acecode::log_truncate(oss.str(), 300);
+}
+
+std::string envelope_summary(const BridgeEnvelope& envelope) {
+    std::ostringstream oss;
+    oss << "ok=" << bool_text(envelope.ok);
+    if (envelope.error) oss << " error_code=" << envelope.error->code;
+    if (envelope.data.is_object()) {
+        if (envelope.data.contains("running")) {
+            oss << " running=" << bool_text(envelope.data.value("running", false));
+        }
+        if (envelope.data.contains("ready")) {
+            oss << " ready=" << bool_text(envelope.data.value("ready", false));
+        }
+        if (envelope.data.contains("extension_connected")) {
+            oss << " extension_connected=" << bool_text(envelope.data.value("extension_connected", false));
+        }
+        if (envelope.data.contains("extension_stale")) {
+            oss << " extension_stale=" << bool_text(envelope.data.value("extension_stale", false));
+        }
+        if (envelope.data.contains("queued_actions")) {
+            oss << " queued_actions=" << envelope.data.value("queued_actions", 0);
+        }
+        if (envelope.data.contains("pending_actions")) {
+            oss << " pending_actions=" << envelope.data.value("pending_actions", 0);
+        }
+    }
+    return oss.str();
+}
+
+std::tm local_tm(std::time_t time) {
+    std::tm tm_buf{};
+#ifdef _WIN32
+    localtime_s(&tm_buf, &time);
+#else
+    localtime_r(&time, &tm_buf);
+#endif
+    return tm_buf;
+}
+
+std::string date_string(const std::tm& tm_buf) {
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d",
+                  tm_buf.tm_year + 1900,
+                  tm_buf.tm_mon + 1,
+                  tm_buf.tm_mday);
+    return std::string(buf);
+}
+
+std::mutex& browser_agent_log_mutex() {
+    static std::mutex mu;
+    return mu;
+}
+
+void browser_agent_file_log(const char* level, const std::string& message) {
+    std::lock_guard<std::mutex> lk(browser_agent_log_mutex());
+    try {
+        auto now = std::chrono::system_clock::now();
+        auto time = std::chrono::system_clock::to_time_t(now);
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now.time_since_epoch()) % 1000;
+        std::tm tm_buf = local_tm(time);
+
+        std::error_code ec;
+        const auto dir = acecode::path_from_utf8(acecode::get_logs_dir());
+        std::filesystem::create_directories(dir, ec);
+        if (ec) return;
+
+        std::ofstream out(dir / ("ace-browser-agent-" + date_string(tm_buf) + ".log"),
+                          std::ios::out | std::ios::app);
+        if (!out.is_open()) return;
+        out << std::put_time(&tm_buf, "%H:%M:%S") << "."
+            << std::setfill('0') << std::setw(3) << ms.count()
+            << " " << level << " " << message << "\n";
+    } catch (...) {
+        // Browser diagnostics must not affect tool execution.
+    }
+}
+
+void browser_agent_info(const std::string& message) {
+    LOG_INFO(message);
+    browser_agent_file_log("INF", message);
+}
+
+void browser_agent_warn(const std::string& message) {
+    LOG_WARN(message);
+    browser_agent_file_log("WRN", message);
+}
+
 } // namespace
 
 AceBrowserBridgeClient::AceBrowserBridgeClient(AceBrowserBridgeConfig config,
@@ -220,18 +330,40 @@ BridgeEnvelope AceBrowserBridgeClient::run_json_command(const std::vector<std::s
     argv.push_back(resolve_host_path(config_));
     argv.insert(argv.end(), args.begin(), args.end());
 
+    const auto started = std::chrono::steady_clock::now();
+    browser_agent_info("[ace-browser-client] cli start args=" + cli_args_for_log(args) +
+                       " stdin_bytes=" + std::to_string(stdin_text.size()));
     CliProcessResult result = runner_(argv, stdin_text, std::chrono::milliseconds(config_.tool_timeout_ms));
     if (result.timed_out) {
+        browser_agent_warn("[ace-browser-client] cli timeout args=" + cli_args_for_log(args) +
+                           " duration_ms=" + std::to_string(elapsed_ms_since(started)));
         return make_error("host_timeout", "ace-browser-host timed out");
     }
     if (!result.error.empty()) {
+        browser_agent_warn("[ace-browser-client] cli error args=" + cli_args_for_log(args) +
+                           " error=" + acecode::log_truncate(result.error) +
+                           " duration_ms=" + std::to_string(elapsed_ms_since(started)));
         return make_error("host_not_found", result.error);
     }
     if (result.exit_code != 0 && result.stdout_text.empty()) {
+        browser_agent_warn("[ace-browser-client] cli failed args=" + cli_args_for_log(args) +
+                           " exit_code=" + std::to_string(result.exit_code) +
+                           " duration_ms=" + std::to_string(elapsed_ms_since(started)));
         return make_error("host_failed", "ace-browser-host exited with code " +
                                         std::to_string(result.exit_code));
     }
-    return parse_envelope(result.stdout_text);
+    BridgeEnvelope envelope = parse_envelope(result.stdout_text);
+    const std::string line = "[ace-browser-client] cli finish args=" + cli_args_for_log(args) +
+        " " + envelope_summary(envelope) +
+        " exit_code=" + std::to_string(result.exit_code) +
+        " stdout_bytes=" + std::to_string(result.stdout_text.size()) +
+        " duration_ms=" + std::to_string(elapsed_ms_since(started));
+    if (envelope.ok) {
+        browser_agent_info(line);
+    } else {
+        browser_agent_warn(line);
+    }
+    return envelope;
 }
 
 bool AceBrowserBridgeClient::should_cache_status(const BridgeEnvelope& envelope) const {
@@ -246,15 +378,25 @@ BridgeEnvelope AceBrowserBridgeClient::status_once() {
 
 HostStartResult AceBrowserBridgeClient::start_host_daemon() {
     if (!host_starter_) {
+        browser_agent_warn("[ace-browser-client] host autostart unavailable");
         return HostStartResult{false, "ace-browser-host auto-start is not available"};
     }
-    return host_starter_({
+    std::vector<std::string> argv{
         resolve_host_path(config_),
         "serve",
         "--json",
         "--port",
         kDefaultHostPort,
-    });
+    };
+    browser_agent_info("[ace-browser-client] host autostart start args=" + cli_args_for_log(argv));
+    HostStartResult result = host_starter_(argv);
+    if (result.ok) {
+        browser_agent_info("[ace-browser-client] host autostart launched port=" + std::string(kDefaultHostPort));
+    } else {
+        browser_agent_warn("[ace-browser-client] host autostart failed error=" +
+                           acecode::log_truncate(result.error));
+    }
+    return result;
 }
 
 BridgeEnvelope AceBrowserBridgeClient::ensure_host_running_from_status(BridgeEnvelope status_envelope) {
@@ -308,11 +450,14 @@ BridgeEnvelope AceBrowserBridgeClient::status() {
     } else {
         cached_status_.reset();
     }
+    browser_agent_info("[ace-browser-client] status refresh " + envelope_summary(envelope));
     return envelope;
 }
 
 BridgeEnvelope AceBrowserBridgeClient::ensure_ready() {
     clear_status_cache();
+    const auto started = std::chrono::steady_clock::now();
+    browser_agent_info("[ace-browser-client] ensure-ready start");
     BridgeEnvelope envelope = run_json_command({"ensure-ready", "--json"}, "");
     if (should_cache_status(envelope)) {
         cached_status_ = envelope;
@@ -320,30 +465,75 @@ BridgeEnvelope AceBrowserBridgeClient::ensure_ready() {
     } else {
         cached_status_.reset();
     }
+    const std::string line = "[ace-browser-client] ensure-ready finish " +
+        envelope_summary(envelope) +
+        " duration_ms=" + std::to_string(elapsed_ms_since(started));
+    if (envelope.ok) {
+        browser_agent_info(line);
+    } else {
+        browser_agent_warn(line);
+    }
     return envelope;
 }
 
 BridgeEnvelope AceBrowserBridgeClient::command(const BrowserCommandRequest& request) {
     const std::string body = command_request_json(request).dump();
+    const auto started = std::chrono::steady_clock::now();
+    browser_agent_info("[ace-browser-client] command start action=" + request.action +
+                       " session=" + request.session);
     BridgeEnvelope envelope = run_json_command({"command", "--json"}, body);
-    if (!error_code_is(envelope, "daemon_not_running")) return envelope;
+    if (!error_code_is(envelope, "daemon_not_running")) {
+        const std::string line = "[ace-browser-client] command finish action=" + request.action +
+            " session=" + request.session +
+            " " + envelope_summary(envelope) +
+            " duration_ms=" + std::to_string(elapsed_ms_since(started));
+        envelope.ok ? browser_agent_info(line) : browser_agent_warn(line);
+        return envelope;
+    }
 
+    browser_agent_warn("[ace-browser-client] command daemon_not_running action=" + request.action +
+                       " session=" + request.session +
+                       " attempting_autostart=true");
     BridgeEnvelope status_envelope = ensure_host_running_from_status(status_once());
     if (!status_envelope.ok) return status_envelope;
     if (!status_envelope.data.value("running", false)) return envelope;
-    return run_json_command({"command", "--json"}, body);
+    envelope = run_json_command({"command", "--json"}, body);
+    const std::string line = "[ace-browser-client] command finish action=" + request.action +
+        " session=" + request.session +
+        " " + envelope_summary(envelope) +
+        " retried_after_autostart=true" +
+        " duration_ms=" + std::to_string(elapsed_ms_since(started));
+    envelope.ok ? browser_agent_info(line) : browser_agent_warn(line);
+    return envelope;
 }
 
 BridgeEnvelope AceBrowserBridgeClient::screenshot(const std::string& session,
                                                   const std::string& output_path) {
     std::vector<std::string> args = {"screenshot", "--json", "--session", session, "--output", output_path};
+    const auto started = std::chrono::steady_clock::now();
+    browser_agent_info("[ace-browser-client] screenshot start session=" + session +
+                       " output=" + acecode::log_truncate(output_path, 300));
     BridgeEnvelope envelope = run_json_command(args, "");
-    if (!error_code_is(envelope, "daemon_not_running")) return envelope;
+    if (!error_code_is(envelope, "daemon_not_running")) {
+        const std::string line = "[ace-browser-client] screenshot finish session=" + session +
+            " " + envelope_summary(envelope) +
+            " duration_ms=" + std::to_string(elapsed_ms_since(started));
+        envelope.ok ? browser_agent_info(line) : browser_agent_warn(line);
+        return envelope;
+    }
 
+    browser_agent_warn("[ace-browser-client] screenshot daemon_not_running session=" + session +
+                       " attempting_autostart=true");
     BridgeEnvelope status_envelope = ensure_host_running_from_status(status_once());
     if (!status_envelope.ok) return status_envelope;
     if (!status_envelope.data.value("running", false)) return envelope;
-    return run_json_command(args, "");
+    envelope = run_json_command(args, "");
+    const std::string line = "[ace-browser-client] screenshot finish session=" + session +
+        " " + envelope_summary(envelope) +
+        " retried_after_autostart=true" +
+        " duration_ms=" + std::to_string(elapsed_ms_since(started));
+    envelope.ok ? browser_agent_info(line) : browser_agent_warn(line);
+    return envelope;
 }
 
 void AceBrowserBridgeClient::clear_status_cache() {

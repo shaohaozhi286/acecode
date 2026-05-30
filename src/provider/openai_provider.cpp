@@ -23,7 +23,7 @@ OpenAiCompatProvider::OpenAiCompatProvider(const std::string& base_url,
                                            const std::string& api_key,
                                            const std::string& model,
                                            int stream_timeout_ms)
-    : base_url_(base_url),
+    : base_url_(normalize_base_url(base_url)),
       api_key_(api_key),
       model_(model),
       stream_timeout_ms_(stream_timeout_ms > 0

@@ -125,6 +125,13 @@ export const InputBar = forwardRef(function InputBar({
     if (!showDropdownRaw) setDropdownClosed(false);
   }, [showDropdownRaw]);
 
+  // 斜杠菜单从关闭→打开时重新拉一次 /api/commands:后端按 session cwd 当场扫盘,
+  // 这样会话进行中(比如 agent 用 skill-creator)新写到磁盘的 skill 不必刷新页面
+  // 就能出现在下拉里。只在进入命令态的那一刻触发,不是每次按键。
+  useEffect(() => {
+    if (showDropdownRaw) slashCtx?.invalidate?.();
+  }, [showDropdownRaw]);
+
   const handleSelectCommand = (item) => {
     if (!item) return;
     const next = '/' + item.name + ' ';

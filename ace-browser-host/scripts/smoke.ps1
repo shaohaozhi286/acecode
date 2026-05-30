@@ -7,8 +7,8 @@ $ErrorActionPreference = "Stop"
 
 if ($ExePath -eq "") {
     $candidates = @(
-        (Join-Path $PSScriptRoot "..\..\build\Debug\ace-browser-host.exe"),
         (Join-Path $PSScriptRoot "..\..\build\Release\ace-browser-host.exe"),
+        (Join-Path $PSScriptRoot "..\..\build\Debug\ace-browser-host.exe"),
         (Join-Path $PSScriptRoot "..\..\build\RelWithDebInfo\ace-browser-host.exe"),
         (Join-Path $PSScriptRoot "..\..\build\MinSizeRel\ace-browser-host.exe"),
         (Join-Path $PSScriptRoot "..\..\build\ace-browser-host.exe")
@@ -177,10 +177,19 @@ try {
     if ($null -eq $connected.data.extension_last_seen_ms) {
         throw "status did not report extension freshness"
     }
+    if ($null -eq $connected.data.queued_actions -or $null -eq $connected.data.pending_actions) {
+        throw "status did not report action queue diagnostics"
+    }
     foreach ($capability in @("devtools", "raw_cdp", "console", "emulation", "performance", "heap_snapshot")) {
         if ($true -ne $connected.data.capabilities.$capability) {
             throw "status did not report DevTools capability: $capability"
         }
+    }
+
+    $pluginLogBody = '{"level":"info","message":"smoke_log","data":{"id":"act_smoke","action":"snapshot","session":"smoke"}}'
+    $pluginLog = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/plugin/log" -Headers $pluginHeaders -ContentType "application/json" -Body $pluginLogBody
+    if ($true -ne $pluginLog.ok) {
+        throw "plugin log endpoint failed"
     }
 
     $ready = Invoke-CliJson -Arguments @("ensure-ready", "--json", "--no-launch-browser", "--timeout-ms", "100", "--port", "$Port")

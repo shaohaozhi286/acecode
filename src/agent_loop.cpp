@@ -86,13 +86,21 @@ nlohmann::json provider_error_to_json(const ProviderErrorInfo& info) {
     return j;
 }
 
-std::string format_bytes_detail(std::size_t bytes) {
-    if (bytes < 1024) return "参数 " + std::to_string(bytes) + " 字节";
+// 人类可读的字节量:< 1KB 显示原始字节,否则进位到 KB / MB(保留一位小数)。
+// 进度文案里直接打印原始字节数(如 "8641 字节")观感上会显得异常地大,统一走这里。
+std::string human_bytes(std::size_t bytes) {
+    if (bytes < 1024) return std::to_string(bytes) + " 字节";
     std::ostringstream oss;
     oss.setf(std::ios::fixed);
     oss.precision(1);
-    oss << "参数 " << (static_cast<double>(bytes) / 1024.0) << " KB";
+    double kb = static_cast<double>(bytes) / 1024.0;
+    if (kb < 1024.0) oss << kb << " KB";
+    else oss << (kb / 1024.0) << " MB";
     return oss.str();
+}
+
+std::string format_bytes_detail(std::size_t bytes) {
+    return "参数 " + human_bytes(bytes);
 }
 
 std::string ascii_lower(std::string value) {
@@ -985,7 +993,7 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
                 reasoning_fragments++;
                 emit_agent_progress("reasoning", "正在推理",
                     "片段 " + std::to_string(reasoning_fragments) + ", " +
-                    std::to_string(reasoning_bytes) + " 字节");
+                    human_bytes(reasoning_bytes));
                 // Future TUI hook (e.g. a "Thinking..." panel) can subscribe
                 // here. Today we only accumulate so format_assistant_tool_calls
                 // and the empty-turn branch can echo it back to DeepSeek.

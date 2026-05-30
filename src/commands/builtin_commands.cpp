@@ -673,7 +673,7 @@ static void cmd_skills(CommandContext& ctx, const std::string& args) {
     std::lock_guard<std::mutex> lk(ctx.state.mu);
     std::ostringstream oss;
     if (skills.empty()) {
-        oss << "No skills installed. Add a SKILL.md under ~/.acecode/skills/<category>/<name>/ or ~/.agent/skills/<category>/<name>/ and rerun `/skills reload` (then restart to pick up new /<name> commands).";
+        oss << "No skills installed. Add a SKILL.md under ~/.acecode/skills/<category>/<name>/ or ~/.agent/skills/<category>/<name>/ — it is picked up live the next time you invoke /<name> or run `/skills reload` (no restart needed).";
     } else {
         oss << "Installed skills (" << skills.size() << "):";
         std::string last_cat;

@@ -86,6 +86,10 @@ Assert-Contains $serviceWorker "show_pointer_path" "service worker must route po
 Assert-Contains $serviceWorker "input_block: true" "service worker must advertise input block capability"
 Assert-Contains $serviceWorker "content_ready" "service worker must accept content script wake messages"
 Assert-Contains $serviceWorker "fallback_reason" "service worker must report fallback reason"
+Assert-Contains $serviceWorker "/plugin/log" "service worker must forward plugin diagnostics to host"
+Assert-Contains $serviceWorker "action_start" "service worker must log action start"
+Assert-Contains $serviceWorker "action_finish" "service worker must log action finish"
+Assert-Contains $serviceWorker "screenshot_finish" "service worker must log screenshot summary"
 Assert-Contains $content "ace-browser-bridge-operation-label" "content script must include the operation overlay label"
 Assert-Contains $content "content_ready" "content script must wake the service worker on normal pages"
 $overlayText = [string]([char]0x8BF7) + [string]([char]0x6682) + [string]([char]0x65F6) + [string]([char]0x4E0D) + [string]([char]0x8981) + [string]([char]0x64CD) + [string]([char]0x4F5C)

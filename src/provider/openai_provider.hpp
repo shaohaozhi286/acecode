@@ -3,6 +3,10 @@
 #include "llm_provider.hpp"
 #include "../config/config.hpp"
 
+#include <algorithm>
+#include <cctype>
+#include <string>
+
 namespace acecode {
 
 class OpenAiCompatProvider : public LlmProvider {
@@ -47,11 +51,26 @@ public:
     void reconfigure(const std::string& base_url,
                      const std::string& api_key,
                      int stream_timeout_ms = OpenAiConfig::kDefaultStreamTimeoutMs) {
-        base_url_ = base_url;
+        base_url_ = normalize_base_url(base_url);
         api_key_ = api_key;
         stream_timeout_ms_ = stream_timeout_ms > 0
             ? stream_timeout_ms
             : OpenAiConfig::kDefaultStreamTimeoutMs;
+    }
+
+    // 容忍用户配置 base_url 时多打/少打尾部斜杠:统一裁掉所有尾部 '/',
+    // 拼接端点时再补一个前导 '/'(见 chat / chat_stream 的 "/chat/completions")。
+    // 否则 "http://host/v1/" + "/chat/completions" = ".../v1//chat/completions",
+    // 不少自建网关对双斜杠返回 404 Not Found。前导/内部空白一并裁掉,避免
+    // 复制粘贴带进来的空格污染 URL。static + public 便于单测直接覆盖。
+    static std::string normalize_base_url(std::string value) {
+        auto not_space = [](unsigned char c) { return !std::isspace(c); };
+        value.erase(value.begin(),
+                    std::find_if(value.begin(), value.end(), not_space));
+        value.erase(std::find_if(value.rbegin(), value.rend(), not_space).base(),
+                    value.end());
+        while (!value.empty() && value.back() == '/') value.pop_back();
+        return value;
     }
 
 protected:

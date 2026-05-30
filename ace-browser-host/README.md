@@ -57,7 +57,19 @@ ace-browser-host.exe shutdown --json
 
 `status --json` 也使用 envelope。daemon 不可连接时返回 `ok:true` 且 `running:false`，方便 ACECode 展示健康状态，而不是把 daemon 未启动视为 CLI 执行失败。
 
+连接 daemon 成功后，`status --json` 会包含 `queued_actions` 和 `pending_actions`。排查超时时，`queued_actions > 0` 通常表示 action 尚未被插件 poll 走，`pending_actions > 0` 通常表示 action 已经进入等待结果阶段。
+
 ACECode 的内置 `browser_start` 会自动检查并后台启动 `ace-browser-host serve --json --port 52007`。手动运行 `serve` 主要用于独立调试 host、插件或 CLI 协议。
+
+## 日志
+
+host 不向 stdout 写日志，stdout 只保留 JSON envelope。host CLI、daemon 和插件上报的浏览器 action 摘要统一写入 ACECode 日志目录：
+
+```text
+%USERPROFILE%\.acecode\logs\ace-browser-host-YYYY-MM-DD.log
+```
+
+插件不会直接写本地文件；它会把 `action_start`、`action_finish`、`result_posted`、`screenshot_start`、`screenshot_finish` 等摘要 POST 到 host 的 `/plugin/log`，由 host 写入同一个日志文件。日志只记录 action id、session、action、耗时、错误码、截图大小等摘要，不记录截图 base64、表单填充值、输入文本或网络 body。
 
 ## Daemon HTTP Surface
 
@@ -73,6 +85,7 @@ daemon 只监听 loopback，并要求本地调用头：
 - `POST /plugin/hello`
 - `POST /plugin/poll`
 - `POST /plugin/result`
+- `POST /plugin/log`
 - `POST /shutdown`
 
 `/plugin/hello` 由 `ace-browser-bridge` 上报 `protocol_version`、插件版本、浏览器类型和 capabilities。当前协议版本为 `0.1`；如果插件协议与 CLI daemon 不兼容，页面动作会返回：

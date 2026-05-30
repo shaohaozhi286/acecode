@@ -164,6 +164,36 @@ ace-browser-host.exe ensure-ready --json
 
 如果默认浏览器没有安装或启用 `ace-browser-bridge`，`ensure-ready` 会返回 `ready=false`，此时需要用户打开已安装扩展的浏览器或重新加载扩展。
 
+## 日志与排查
+
+浏览器链路日志统一落在 ACECode 日志路径：
+
+- ACECode agent 调 host 的摘要日志：`%USERPROFILE%\.acecode\logs\ace-browser-agent-YYYY-MM-DD.log`。
+- `ace-browser-host` daemon 和 CLI 日志：`%USERPROFILE%\.acecode\logs\ace-browser-host-YYYY-MM-DD.log`。
+- 浏览器插件日志不会单独落盘；插件通过 `/plugin/log` 把 action 摘要转发给 host，最终也写入 `ace-browser-host-YYYY-MM-DD.log`。
+
+同时，ACECode 现有运行日志仍保留：TUI 是当前工作目录的 `acecode.log`，daemon/desktop 是 `%USERPROFILE%\.acecode\logs\daemon-YYYY-MM-DD.log` 或对应 base name 的日志。
+
+排查 `bridge_timeout` 时按这个顺序看：
+
+1. 先看 `ace-browser-agent-YYYY-MM-DD.log`，确认 `browser_start`、`ensure-ready` 或 CLI 命令是否真的发起，以及返回的 `running`、`ready`、`extension_connected`、`queued_actions`、`pending_actions`。
+2. 再看 `ace-browser-host-YYYY-MM-DD.log`，按同一个 `id=act_N` 查 `command queued`、`plugin_poll dispatch`、`plugin_ack`、`action_start`、`action_finish`、`plugin_result`。每条 `plugin_poll dispatch` 带 `attempt=N`，表示这是第几次派发。
+3. 如果只有 `command queued`，没有 `plugin_poll dispatch`，通常是插件没有轮询或 service worker 未唤醒。
+4. 如果有 `plugin_poll dispatch`，没有 `plugin_ack`，说明指令派发出去但接走它的 service worker 没确认收到（多半在派发瞬间被浏览器回收）。此时 host 会在 ~4 秒后打 `command redeliver` 并以 `attempt=N+1` 重新派发，你会看到同一个 `id=act_N` 再次出现 `plugin_poll dispatch`。整轮 30 秒内反复重投都拿不到结果才最终 `bridge_timeout`。
+5. 如果有 `action_start`，没有 `action_finish`，通常是插件动作卡在浏览器 API 或页面脚本。
+6. 如果有 `action_finish`，没有 `plugin_result`，通常是结果回传失败或 host 已经超时。
+
+`status --json` 会额外返回 `queued_actions` 和 `pending_actions`。这两个字段用于判断 action 是还在 host 队列里，还是已经分发给插件但尚未回传。
+
+### 投递保证与 service worker 保活
+
+MV3 后台 service worker 空闲约 30 秒就被浏览器回收。为避免"指令在派发瞬间被回收而永久丢失、host 干等满 30 秒超时"，链路做了两层防护：
+
+- **host 侧 at-least-once 投递（确认后才算送达 + 未确认自动重投）**：插件取到指令后必须立刻回 `POST /plugin/ack`。host 把指令派发给某次 `/plugin/poll` 后并不立即丢弃，而是记下派发时刻；若 `kRedeliveryAfterMs`（默认 4000ms）内没收到 ack，就判定那次投递丢了，把指令重新入队由下一次 poll 再取一次，直到拿到结果或命令总超时（`kCommandTimeoutMs`，默认 30000ms）。**已 ack 的指令不会被重投**，因此"还活着只是慢"的操作不会被重复执行。
+- **插件侧保活**：service worker 用"自连端口 + 每 20 秒 ping"在存活期间不断刷新空闲计时，尽量不在两次操作之间被回收；心跳 alarm 周期收紧到 30 秒（Chrome 允许的最小值），一旦真被回收也能在约 30 秒内冷启唤醒并恢复 `hello` + 轮询。两者叠加：日常不被回收，偶尔被回收也能快速恢复，配合 host 侧重投把丢失的指令补回来。
+
+`/plugin/ack` 与 `/plugin/poll`、`/plugin/result`、`/plugin/hello`、`/plugin/log` 一样，只接受带 `X-Ace-Browser-Bridge: extension` 头的本地调用。
+
 ## DevTools 能力
 
 插件通过 Chrome `debugger` API 发送 CDP 命令。`status --json` / `browser_start` 的 `capabilities` 在插件连接后会包含：

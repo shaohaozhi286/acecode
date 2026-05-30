@@ -5,7 +5,9 @@
 #include <cctype>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -50,6 +52,12 @@ constexpr const char* kHost = "127.0.0.1";
 constexpr int kDefaultPort = 52007;
 constexpr int kExtensionFreshnessMs = 30000;
 constexpr int kEnsureReadyDefaultTimeoutMs = 15000;
+// 一条命令最多等浏览器插件回结果的总时长。
+constexpr int kCommandTimeoutMs = 30000;
+// 指令被某次 poll 取走后,若超过这个时间还没收到插件 ack,就判定那次投递丢了(接走它的
+// service worker 多半已被浏览器回收),把指令重新入队再投一次。loopback 上正常 ack 仅需毫秒级,
+// 4 秒足以把"还活着只是慢"和"已经死了"区分开,不会误重投正在执行的慢操作。
+constexpr int kRedeliveryAfterMs = 4000;
 
 #ifdef _WIN32
 using socket_t = SOCKET;
@@ -740,6 +748,147 @@ std::optional<std::wstring> utf8_to_wide(const std::string& value) {
 }
 #endif
 
+std::string host_log_truncate(std::string value, std::size_t max_len = 800) {
+    if (value.size() <= max_len) return value;
+    return value.substr(0, max_len) + "...(" + std::to_string(value.size()) + " bytes)";
+}
+
+std::string json_for_log(const json& value, std::size_t max_len = 1200) {
+    if (value.is_null()) return "null";
+    return host_log_truncate(value.dump(), max_len);
+}
+
+#ifdef _WIN32
+std::optional<std::wstring> env_w(const wchar_t* name) {
+    DWORD needed = GetEnvironmentVariableW(name, nullptr, 0);
+    if (needed == 0) return std::nullopt;
+    std::wstring value(needed, L'\0');
+    DWORD written = GetEnvironmentVariableW(name, value.data(), needed);
+    if (written == 0 || written >= needed) return std::nullopt;
+    value.resize(written);
+    return value;
+}
+#endif
+
+std::filesystem::path acecode_user_data_dir() {
+#ifdef _WIN32
+    if (auto profile = env_w(L"USERPROFILE"); profile && !profile->empty()) {
+        return std::filesystem::path(*profile) / L".acecode";
+    }
+    auto drive = env_w(L"HOMEDRIVE");
+    auto path = env_w(L"HOMEPATH");
+    if (drive && path && !drive->empty() && !path->empty()) {
+        return std::filesystem::path(*drive + *path) / L".acecode";
+    }
+    if (auto appdata = env_w(L"APPDATA"); appdata && !appdata->empty()) {
+        return std::filesystem::path(*appdata) / L"acecode";
+    }
+#else
+    if (const char* home = std::getenv("HOME"); home && *home) {
+        return std::filesystem::path(home) / ".acecode";
+    }
+#endif
+    std::error_code ec;
+    auto cwd = std::filesystem::current_path(ec);
+    if (!ec) return cwd / ".acecode";
+    return std::filesystem::path(".acecode");
+}
+
+std::filesystem::path acecode_log_dir() {
+    return acecode_user_data_dir() / "logs";
+}
+
+std::tm local_tm(std::time_t time) {
+    std::tm tm_buf{};
+#ifdef _WIN32
+    localtime_s(&tm_buf, &time);
+#else
+    localtime_r(&time, &tm_buf);
+#endif
+    return tm_buf;
+}
+
+std::string date_string(const std::tm& tm_buf) {
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d",
+                  tm_buf.tm_year + 1900,
+                  tm_buf.tm_mon + 1,
+                  tm_buf.tm_mday);
+    return std::string(buf);
+}
+
+unsigned long current_process_id() {
+#ifdef _WIN32
+    return static_cast<unsigned long>(GetCurrentProcessId());
+#else
+    return static_cast<unsigned long>(getpid());
+#endif
+}
+
+std::mutex& host_log_mutex() {
+    static std::mutex mu;
+    return mu;
+}
+
+void host_log_line(const char* level, const std::string& message) {
+    std::lock_guard<std::mutex> lk(host_log_mutex());
+    try {
+        auto now = std::chrono::system_clock::now();
+        auto time = std::chrono::system_clock::to_time_t(now);
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now.time_since_epoch()) % 1000;
+        std::tm tm_buf = local_tm(time);
+
+        std::error_code ec;
+        const auto dir = acecode_log_dir();
+        std::filesystem::create_directories(dir, ec);
+        if (ec) return;
+
+        const auto path = dir / ("ace-browser-host-" + date_string(tm_buf) + ".log");
+        std::ofstream out(path, std::ios::out | std::ios::app);
+        if (!out.is_open()) return;
+        out << std::put_time(&tm_buf, "%H:%M:%S") << "."
+            << std::setfill('0') << std::setw(3) << ms.count()
+            << " [pid=" << current_process_id() << "] "
+            << level << " " << message << "\n";
+    } catch (...) {
+        // Logging must never affect the CLI JSON protocol.
+    }
+}
+
+void host_log_info(const std::string& message) {
+    host_log_line("INF", message);
+}
+
+void host_log_warn(const std::string& message) {
+    host_log_line("WRN", message);
+}
+
+void host_log_error(const std::string& message) {
+    host_log_line("ERR", message);
+}
+
+std::string envelope_error_code(const json& envelope) {
+    if (envelope.contains("error") && envelope["error"].is_object() &&
+        envelope["error"].contains("code") && envelope["error"]["code"].is_string()) {
+        return envelope["error"]["code"].get<std::string>();
+    }
+    return {};
+}
+
+std::string action_session_from_request(const json& request) {
+    return request.value("session", "acecode-default");
+}
+
+std::string action_name_from_request(const json& request) {
+    return request.value("action", "<missing>");
+}
+
+long long elapsed_ms_since(std::chrono::steady_clock::time_point started) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started).count();
+}
+
 std::filesystem::path current_executable_path(char** argv) {
 #ifdef _WIN32
     std::vector<wchar_t> buffer(MAX_PATH);
@@ -759,6 +908,7 @@ std::filesystem::path current_executable_path(char** argv) {
 
 bool start_detached_serve(char** argv, int port, std::string& error) {
     std::filesystem::path exe = current_executable_path(argv);
+    host_log_info("[cli] start_detached_serve requested port=" + std::to_string(port));
 #ifdef _WIN32
     std::wstring command_line = quote_windows_arg(exe) + L" serve --json --port " +
         std::to_wstring(port);
@@ -780,16 +930,21 @@ bool start_detached_serve(char** argv, int port, std::string& error) {
                              &si,
                              &pi);
     if (!ok) {
+        DWORD error_code = GetLastError();
         error = "failed to start ace-browser-host daemon";
+        host_log_error("[cli] start_detached_serve failed port=" + std::to_string(port) +
+                       " win32_error=" + std::to_string(static_cast<unsigned long>(error_code)));
         return false;
     }
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
+    host_log_info("[cli] start_detached_serve launched port=" + std::to_string(port));
     return true;
 #else
     pid_t pid = fork();
     if (pid < 0) {
         error = "fork failed";
+        host_log_error("[cli] start_detached_serve fork_failed port=" + std::to_string(port));
         return false;
     }
     if (pid == 0) {
@@ -806,6 +961,8 @@ bool start_detached_serve(char** argv, int port, std::string& error) {
               port_s.c_str(), static_cast<char*>(nullptr));
         _exit(127);
     }
+    host_log_info("[cli] start_detached_serve launched port=" + std::to_string(port) +
+                  " pid=" + std::to_string(static_cast<long long>(pid)));
     return true;
 #endif
 }
@@ -856,11 +1013,13 @@ int status_command(int argc, char** argv) {
 
 int start_command(int argc, char** argv) {
     int port = parse_port(argc, argv);
+    host_log_info("[cli] start command port=" + std::to_string(port));
     json before = status_envelope(port);
     if (before.value("ok", false) && before["data"].is_object() &&
         before["data"].value("running", false)) {
         before["data"]["start_attempted"] = false;
         before["data"]["already_running"] = true;
+        host_log_info("[cli] start command already_running port=" + std::to_string(port));
         print_json(before);
         return 0;
     }
@@ -868,6 +1027,8 @@ int start_command(int argc, char** argv) {
     std::string error;
     bool started = start_detached_serve(argv, port, error);
     if (!started) {
+        host_log_error("[cli] start command failed port=" + std::to_string(port) +
+                       " error=" + error);
         json out = before;
         if (out.value("ok", false) && out["data"].is_object()) {
             out["data"]["start_attempted"] = true;
@@ -887,6 +1048,7 @@ int start_command(int argc, char** argv) {
             latest["data"]["start_attempted"] = true;
             latest["data"]["started"] = true;
             if (latest["data"].value("running", false)) {
+                host_log_info("[cli] start command ready port=" + std::to_string(port));
                 print_json(latest);
                 return 0;
             }
@@ -897,6 +1059,7 @@ int start_command(int argc, char** argv) {
         latest["data"]["started"] = true;
         latest["data"]["start_error"] = "ace-browser-host did not report running after start";
     }
+    host_log_warn("[cli] start command timeout waiting for daemon port=" + std::to_string(port));
     print_json(latest);
     return 0;
 }
@@ -970,11 +1133,16 @@ int ensure_ready_command(int argc, char** argv) {
     std::string host_start_error;
     std::string browser_launch_error;
     json latest = status_envelope(port);
+    host_log_info("[cli] ensure-ready start port=" + std::to_string(port) +
+                  " timeout_ms=" + std::to_string(timeout_ms) +
+                  " launch_browser=" + std::string(launch_browser ? "true" : "false"));
 
     if (latest.value("ok", false) && latest["data"].is_object() &&
         !latest["data"].value("running", false)) {
         host_start_attempted = true;
         if (!start_detached_serve(argv, port, host_start_error)) {
+            host_log_error("[cli] ensure-ready daemon_start_failed port=" + std::to_string(port) +
+                           " error=" + host_start_error);
             annotate_readiness(latest, host_start_attempted, host_start_error,
                                browser_launch_attempted, browser_launch_error,
                                wake_url, "daemon_start_failed");
@@ -995,6 +1163,9 @@ int ensure_ready_command(int argc, char** argv) {
             annotate_readiness(latest, host_start_attempted, host_start_error,
                                browser_launch_attempted, browser_launch_error,
                                wake_url, {});
+            host_log_info("[cli] ensure-ready ready port=" + std::to_string(port) +
+                          " host_start_attempted=" + std::string(host_start_attempted ? "true" : "false") +
+                          " browser_launch_attempted=" + std::string(browser_launch_attempted ? "true" : "false"));
             print_json(latest);
             return 0;
         }
@@ -1005,6 +1176,8 @@ int ensure_ready_command(int argc, char** argv) {
             browser_launch_checked = true;
             browser_launch_attempted = true;
             if (!launch_browser_url(wake_url, browser_launch_error)) {
+                host_log_error("[cli] ensure-ready browser_launch_failed port=" + std::to_string(port) +
+                               " error=" + browser_launch_error);
                 annotate_readiness(latest, host_start_attempted, host_start_error,
                                    browser_launch_attempted, browser_launch_error,
                                    wake_url, "browser_launch_failed");
@@ -1022,6 +1195,8 @@ int ensure_ready_command(int argc, char** argv) {
                            browser_launch_attempted, browser_launch_error,
                            wake_url, "readiness_timeout");
     }
+    host_log_warn("[cli] ensure-ready timeout port=" + std::to_string(port) +
+                  " ready_error=" + readiness_error_from_status(latest));
     print_json(latest);
     return 0;
 }
@@ -1041,14 +1216,40 @@ json command_envelope_from_stdin(int port, std::string input) {
         (*parsed)["args"] = json::object();
     }
 
+    const std::string session = action_session_from_request(*parsed);
+    const std::string action = action_name_from_request(*parsed);
+    const auto started = std::chrono::steady_clock::now();
+    host_log_info("[cli] command send action=" + action +
+                  " session=" + session +
+                  " port=" + std::to_string(port));
     HttpResponse response = http_request("POST", "/command", parsed->dump(), port);
     if (!response.transport_ok) {
+        host_log_warn("[cli] command transport_failed action=" + action +
+                      " session=" + session +
+                      " port=" + std::to_string(port) +
+                      " duration_ms=" + std::to_string(elapsed_ms_since(started)));
         return failure("daemon_not_running", "ace-browser-host daemon is not running on 127.0.0.1:" + std::to_string(port));
     }
     if (response.status != 200) {
+        host_log_warn("[cli] command http_error action=" + action +
+                      " session=" + session +
+                      " status=" + std::to_string(response.status) +
+                      " duration_ms=" + std::to_string(elapsed_ms_since(started)));
         return failure("daemon_error", "daemon command endpoint returned HTTP " + std::to_string(response.status));
     }
-    return normalize_daemon_envelope(response.body);
+    json envelope = normalize_daemon_envelope(response.body);
+    const std::string error_code = envelope_error_code(envelope);
+    const std::string line = "[cli] command finish action=" + action +
+        " session=" + session +
+        " ok=" + std::string(envelope.value("ok", false) ? "true" : "false") +
+        (error_code.empty() ? "" : " error_code=" + error_code) +
+        " duration_ms=" + std::to_string(elapsed_ms_since(started));
+    if (envelope.value("ok", false)) {
+        host_log_info(line);
+    } else {
+        host_log_warn(line);
+    }
+    return envelope;
 }
 
 int command_command(int argc, char** argv) {
@@ -1640,6 +1841,10 @@ struct DaemonState {
         std::string id;
         json request;
         std::optional<json> result;
+        bool in_queue = false;                                  // 是否仍排在 queued_actions 待派发
+        bool acked = false;                                     // 插件是否已确认收到本指令(重投判定的关键信号)
+        int dispatch_count = 0;                                 // 已派发次数(诊断 / 日志)
+        std::chrono::steady_clock::time_point dispatched_at{};  // 最近一次派发时刻(重投窗口起点)
     };
 
     std::mutex mutex;
@@ -1692,6 +1897,8 @@ json daemon_status_payload(DaemonState& state, int port) {
         {"port", port},
         {"browser", state.browser.empty() ? json(nullptr) : json(state.browser)},
         {"capabilities", fresh ? state.capabilities : default_capabilities(false)},
+        {"queued_actions", state.queued_actions.size()},
+        {"pending_actions", state.pending_actions.size()},
     };
 }
 
@@ -1704,27 +1911,48 @@ json handle_plugin_hello(DaemonState& state, const std::string& body) {
     if (!parsed || !parsed->is_object()) {
         return failure("invalid_request", "plugin hello expects a JSON object");
     }
-    std::lock_guard<std::mutex> lock(state.mutex);
-    state.extension_connected = true;
-    state.extension_version = parsed->value("extension_version", "unknown");
-    state.protocol_version = parsed->value("protocol_version", "");
-    if (!compatible_protocol_version(state.protocol_version)) {
-        state.version_compatible = false;
-        state.version_error = "ace-browser-bridge protocol version " +
-            (state.protocol_version.empty() ? std::string("<missing>") : state.protocol_version) +
-            " is not compatible with ace-browser-host protocol " + kProtocolVersion;
-    } else {
-        state.version_compatible = true;
-        state.version_error.clear();
+    std::string extension_version;
+    std::string protocol_version;
+    std::string browser;
+    bool compatible = true;
+    std::string version_error;
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        state.extension_connected = true;
+        state.extension_version = parsed->value("extension_version", "unknown");
+        state.protocol_version = parsed->value("protocol_version", "");
+        if (!compatible_protocol_version(state.protocol_version)) {
+            state.version_compatible = false;
+            state.version_error = "ace-browser-bridge protocol version " +
+                (state.protocol_version.empty() ? std::string("<missing>") : state.protocol_version) +
+                " is not compatible with ace-browser-host protocol " + kProtocolVersion;
+        } else {
+            state.version_compatible = true;
+            state.version_error.clear();
+        }
+        state.browser = parsed->value("browser", "");
+        if (parsed->contains("capabilities") && (*parsed)["capabilities"].is_object()) {
+            state.capabilities = (*parsed)["capabilities"];
+        } else {
+            state.capabilities = default_capabilities(true);
+        }
+        state.last_hello = std::chrono::steady_clock::now();
+        extension_version = state.extension_version;
+        protocol_version = state.protocol_version;
+        browser = state.browser;
+        compatible = state.version_compatible;
+        version_error = state.version_error;
     }
-    state.browser = parsed->value("browser", "");
-    if (parsed->contains("capabilities") && (*parsed)["capabilities"].is_object()) {
-        state.capabilities = (*parsed)["capabilities"];
-    } else {
-        state.capabilities = default_capabilities(true);
-    }
-    state.last_hello = std::chrono::steady_clock::now();
     state.cv.notify_all();
+    if (compatible) {
+        host_log_info("[daemon] plugin_hello extension_version=" + extension_version +
+                      " protocol_version=" + protocol_version +
+                      " browser=" + browser);
+    } else {
+        host_log_warn("[daemon] plugin_hello version_mismatch extension_version=" + extension_version +
+                      " protocol_version=" + protocol_version +
+                      " error=" + version_error);
+    }
     return success({{"success", true}});
 }
 
@@ -1743,19 +1971,35 @@ json handle_command(DaemonState& state, const std::string& body) {
         (*parsed)["args"] = json::object();
     }
 
+    const std::string session = action_session_from_request(*parsed);
+    const std::string action = action_name_from_request(*parsed);
+    const auto started = std::chrono::steady_clock::now();
     std::shared_ptr<DaemonState::PendingAction> pending;
     {
         std::lock_guard<std::mutex> lock(state.mutex);
         if (state.shutting_down) {
+            host_log_warn("[daemon] command rejected action=" + action +
+                          " session=" + session +
+                          " reason=daemon_shutting_down");
             return failure("daemon_shutting_down", "ace-browser-host daemon is shutting down");
         }
         if (!state.extension_connected) {
+            host_log_warn("[daemon] command rejected action=" + action +
+                          " session=" + session +
+                          " reason=extension_not_connected");
             return failure("extension_not_connected", "ace-browser-bridge browser plugin is not connected");
         }
         if (!extension_fresh_locked(state)) {
+            host_log_warn("[daemon] command rejected action=" + action +
+                          " session=" + session +
+                          " reason=extension_stale last_seen_ms=" +
+                          std::to_string(extension_last_seen_ms_locked(state)));
             return failure("extension_stale", "ace-browser-bridge browser plugin connection is stale");
         }
         if (!state.version_compatible) {
+            host_log_warn("[daemon] command rejected action=" + action +
+                          " session=" + session +
+                          " reason=version_mismatch");
             return failure("version_mismatch", state.version_error.empty()
                 ? "ace-browser-host and ace-browser-bridge protocol versions are not compatible"
                 : state.version_error);
@@ -1764,27 +2008,88 @@ json handle_command(DaemonState& state, const std::string& body) {
         pending->id = "act_" + std::to_string(state.next_action_id++);
         pending->request = *parsed;
         pending->request["id"] = pending->id;
+        pending->in_queue = true;
         state.queued_actions.push_back(pending);
         state.pending_actions[pending->id] = pending;
+        host_log_info("[daemon] command queued id=" + pending->id +
+                      " action=" + action +
+                      " session=" + session +
+                      " queued=" + std::to_string(state.queued_actions.size()) +
+                      " pending=" + std::to_string(state.pending_actions.size()));
     }
     state.cv.notify_all();
 
     std::unique_lock<std::mutex> lock(state.mutex);
-    bool ready = state.cv.wait_for(lock, std::chrono::seconds(30), [&]() {
-        return pending->result.has_value() || state.shutting_down;
-    });
+    // 等待插件回结果,期间做"未确认即重投":指令一旦被某次 poll 取走(in_queue=false)却迟迟
+    // 没回 ack,基本可判定接走它的 service worker 已被浏览器回收、这次投递丢了,于是把指令重新
+    // 放回队首让下一次 poll 再取一次,直到拿到结果或总超时为止。这样即便插件在派发瞬间被回收,
+    // 指令也不会石沉大海干等满 30 秒。
+    const auto overall_deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(kCommandTimeoutMs);
+    while (!pending->result && !state.shutting_down &&
+           std::chrono::steady_clock::now() < overall_deadline) {
+        state.cv.wait_for(lock, std::chrono::milliseconds(500), [&]() {
+            return pending->result.has_value() || state.shutting_down;
+        });
+        if (pending->result || state.shutting_down) break;
+        const bool dispatched_but_unacked =
+            !pending->in_queue && !pending->acked && pending->dispatch_count > 0;
+        if (dispatched_but_unacked) {
+            const long long since_dispatch =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - pending->dispatched_at).count();
+            if (since_dispatch >= kRedeliveryAfterMs) {
+                pending->in_queue = true;
+                state.queued_actions.push_front(pending);
+                host_log_warn("[daemon] command redeliver id=" + pending->id +
+                              " action=" + action +
+                              " session=" + session +
+                              " attempt=" + std::to_string(pending->dispatch_count) +
+                              " since_dispatch_ms=" + std::to_string(since_dispatch));
+                state.cv.notify_all();
+            }
+        }
+    }
+    const bool had_result = pending->result.has_value();
     state.pending_actions.erase(pending->id);
-    if (state.shutting_down && !pending->result) {
-        state.queued_actions.erase(
-            std::remove(state.queued_actions.begin(), state.queued_actions.end(), pending),
-            state.queued_actions.end());
+    // 无论成功/超时/关停,都把自己从待派发队列摘掉,避免超时后指令仍被某次 poll 取走、
+    // 回了个无人认领的结果(unknown_action)。
+    state.queued_actions.erase(
+        std::remove(state.queued_actions.begin(), state.queued_actions.end(), pending),
+        state.queued_actions.end());
+    if (state.shutting_down && !had_result) {
+        host_log_warn("[daemon] command finish id=" + pending->id +
+                      " action=" + action +
+                      " session=" + session +
+                      " ok=false error_code=daemon_shutting_down" +
+                      " duration_ms=" + std::to_string(elapsed_ms_since(started)));
         return failure("daemon_shutting_down", "ace-browser-host daemon is shutting down");
     }
-    if (!ready || !pending->result) {
+    if (!had_result) {
+        host_log_warn("[daemon] command finish id=" + pending->id +
+                      " action=" + action +
+                      " session=" + session +
+                      " ok=false error_code=bridge_timeout" +
+                      " duration_ms=" + std::to_string(elapsed_ms_since(started)) +
+                      " attempts=" + std::to_string(pending->dispatch_count) +
+                      " queued=" + std::to_string(state.queued_actions.size()) +
+                      " pending=" + std::to_string(state.pending_actions.size()));
         return failure("bridge_timeout", "timed out waiting for browser plugin action result");
     }
     json result = *pending->result;
     normalize_path_fields(result);
+    const std::string error_code = envelope_error_code(result);
+    const std::string line = "[daemon] command finish id=" + pending->id +
+        " action=" + action +
+        " session=" + session +
+        " ok=" + std::string(result.value("ok", false) ? "true" : "false") +
+        (error_code.empty() ? "" : " error_code=" + error_code) +
+        " duration_ms=" + std::to_string(elapsed_ms_since(started));
+    if (result.value("ok", false)) {
+        host_log_info(line);
+    } else {
+        host_log_warn(line);
+    }
     return result;
 }
 
@@ -1810,6 +2115,7 @@ json handle_plugin_poll(DaemonState& state, const std::string& body) {
         return success({{"action", nullptr}});
     }
     if (!state.extension_connected || !extension_fresh_locked(state)) {
+        host_log_warn("[daemon] plugin_poll rejected reason=extension_not_connected");
         return failure("extension_not_connected", "ace-browser-bridge browser plugin is not connected");
     }
     if (state.queued_actions.empty()) {
@@ -1817,6 +2123,15 @@ json handle_plugin_poll(DaemonState& state, const std::string& body) {
     }
     auto pending = state.queued_actions.front();
     state.queued_actions.pop_front();
+    pending->in_queue = false;
+    pending->dispatched_at = std::chrono::steady_clock::now();
+    pending->dispatch_count += 1;
+    host_log_info("[daemon] plugin_poll dispatch id=" + pending->id +
+                  " action=" + action_name_from_request(pending->request) +
+                  " session=" + action_session_from_request(pending->request) +
+                  " attempt=" + std::to_string(pending->dispatch_count) +
+                  " queued=" + std::to_string(state.queued_actions.size()) +
+                  " pending=" + std::to_string(state.pending_actions.size()));
     return success({{"action", pending->request}});
 }
 
@@ -1833,10 +2148,71 @@ json handle_plugin_result(DaemonState& state, const std::string& body) {
     std::lock_guard<std::mutex> lock(state.mutex);
     auto it = state.pending_actions.find(id);
     if (it == state.pending_actions.end()) {
+        host_log_warn("[daemon] plugin_result unknown_action id=" + id);
         return failure("unknown_action", "plugin returned result for unknown action id");
+    }
+    const std::string action = action_name_from_request(it->second->request);
+    const std::string session = action_session_from_request(it->second->request);
+    const json result = (*parsed)["result"];
+    const std::string error_code = envelope_error_code(result);
+    const std::string line = "[daemon] plugin_result id=" + id +
+        " action=" + action +
+        " session=" + session +
+        " ok=" + std::string(result.value("ok", false) ? "true" : "false") +
+        (error_code.empty() ? "" : " error_code=" + error_code);
+    if (result.value("ok", false)) {
+        host_log_info(line);
+    } else {
+        host_log_warn(line);
     }
     it->second->result = (*parsed)["result"];
     state.cv.notify_all();
+    return success({{"success", true}});
+}
+
+json handle_plugin_ack(DaemonState& state, const std::string& body) {
+    auto parsed = parse_json(body.empty() ? "{}" : body);
+    if (!parsed || !parsed->is_object()) {
+        return failure("invalid_request", "plugin ack expects a JSON object");
+    }
+    const std::string id = parsed->value("id", "");
+    if (id.empty()) {
+        return failure("invalid_request", "plugin ack requires id");
+    }
+    std::lock_guard<std::mutex> lock(state.mutex);
+    // ack 顺带当一次插件心跳:刷新 last_hello,避免长操作期间被判 stale。
+    state.extension_connected = true;
+    state.last_hello = std::chrono::steady_clock::now();
+    auto it = state.pending_actions.find(id);
+    if (it == state.pending_actions.end()) {
+        // 指令可能已超时清理或已完成;ack 落空不是错误路径,确认收下即可。
+        return success({{"success", true}, {"known", false}});
+    }
+    it->second->acked = true;
+    host_log_info("[daemon] plugin_ack id=" + id +
+                  " action=" + action_name_from_request(it->second->request) +
+                  " session=" + action_session_from_request(it->second->request));
+    // 唤醒 handle_command 的等待循环,让它立刻看到 acked=true、不再触发重投。
+    state.cv.notify_all();
+    return success({{"success", true}, {"known", true}});
+}
+
+json handle_plugin_log(const std::string& body) {
+    auto parsed = parse_json(body.empty() ? "{}" : body);
+    if (!parsed || !parsed->is_object()) {
+        return failure("invalid_request", "plugin log expects a JSON object");
+    }
+    const std::string level = parsed->value("level", "info");
+    const std::string message = host_log_truncate(parsed->value("message", "plugin_event"), 240);
+    const json data = parsed->contains("data") ? (*parsed)["data"] : json::object();
+    const std::string line = "[extension] " + message + " data=" + json_for_log(data);
+    if (level == "error" || level == "err") {
+        host_log_error(line);
+    } else if (level == "warn" || level == "warning") {
+        host_log_warn(line);
+    } else {
+        host_log_info(line);
+    }
     return success({{"success", true}});
 }
 
@@ -1878,6 +2254,14 @@ std::string route_request(const HttpRequest& req, DaemonState& state, int port, 
         if (!plugin_request) return http_json_response(403, failure("unauthorized", "plugin result requires ace-browser-bridge extension"), cors_origin);
         return http_json_response(200, handle_plugin_result(state, req.body), cors_origin);
     }
+    if (req.method == "POST" && req.path == "/plugin/ack") {
+        if (!plugin_request) return http_json_response(403, failure("unauthorized", "plugin ack requires ace-browser-bridge extension"), cors_origin);
+        return http_json_response(200, handle_plugin_ack(state, req.body), cors_origin);
+    }
+    if (req.method == "POST" && req.path == "/plugin/log") {
+        if (!plugin_request) return http_json_response(403, failure("unauthorized", "plugin log requires ace-browser-bridge extension"), cors_origin);
+        return http_json_response(200, handle_plugin_log(req.body), cors_origin);
+    }
     if (req.method == "POST" && req.path == "/command") {
         if (!host_request) return http_json_response(403, failure("unauthorized", "command requires ace-browser-host"));
         return http_json_response(200, handle_command(state, req.body));
@@ -1885,6 +2269,7 @@ std::string route_request(const HttpRequest& req, DaemonState& state, int port, 
     if (req.method == "POST" && req.path == "/shutdown") {
         if (!host_request) return http_json_response(403, failure("unauthorized", "shutdown requires ace-browser-host"));
         running = false;
+        host_log_info("[daemon] shutdown requested port=" + std::to_string(port));
         {
             std::lock_guard<std::mutex> lock(state.mutex);
             state.shutting_down = true;
@@ -1897,8 +2282,10 @@ std::string route_request(const HttpRequest& req, DaemonState& state, int port, 
 
 int serve_command(int argc, char** argv) {
     int port = parse_port(argc, argv);
+    host_log_info("[daemon] serve starting port=" + std::to_string(port));
     socket_t listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (listener == kInvalidSocket) {
+        host_log_error("[daemon] serve socket_error port=" + std::to_string(port));
         print_json(failure("socket_error", "failed to create listen socket"));
         return 1;
     }
@@ -1916,15 +2303,18 @@ int serve_command(int argc, char** argv) {
     inet_pton(AF_INET, kHost, &addr.sin_addr);
     if (bind(listener, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
         close_socket(listener);
+        host_log_error("[daemon] serve bind_failed port=" + std::to_string(port));
         print_json(failure("bind_failed", "failed to bind 127.0.0.1:" + std::to_string(port)));
         return 1;
     }
     if (listen(listener, 16) != 0) {
         close_socket(listener);
+        host_log_error("[daemon] serve listen_failed port=" + std::to_string(port));
         print_json(failure("listen_failed", "failed to listen on 127.0.0.1:" + std::to_string(port)));
         return 1;
     }
 
+    host_log_info("[daemon] serve listening port=" + std::to_string(port));
     if (has_arg(argc, argv, "--json")) {
         print_json(success({{"running", true}, {"port", port}, {"version", kDaemonVersion}}));
     }
@@ -1948,9 +2338,20 @@ int serve_command(int argc, char** argv) {
             auto req = read_http_request(client);
             std::string response;
             if (!req) {
+                host_log_warn("[daemon] invalid_http_request");
                 response = http_json_response(400, failure("invalid_http_request", "failed to parse HTTP request"));
             } else {
-                response = route_request(*req, *state, port, *running);
+                try {
+                    response = route_request(*req, *state, port, *running);
+                } catch (const std::exception& e) {
+                    host_log_error("[daemon] route_exception path=" + req->path +
+                                   " error=" + host_log_truncate(e.what()));
+                    response = http_json_response(500, failure("internal_error", "daemon route failed"));
+                } catch (...) {
+                    host_log_error("[daemon] route_exception path=" + req->path +
+                                   " error=unknown");
+                    response = http_json_response(500, failure("internal_error", "daemon route failed"));
+                }
             }
             send_all(client, response);
             close_socket(client);
@@ -1962,6 +2363,7 @@ int serve_command(int argc, char** argv) {
     }
     state->cv.notify_all();
     close_socket(listener);
+    host_log_info("[daemon] serve stopped port=" + std::to_string(port));
     return 0;
 }
 

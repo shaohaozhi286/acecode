@@ -1,5 +1,6 @@
 #include "command_registry.hpp"
 #include "../skills/skill_activation.hpp"
+#include "../skills/skill_commands.hpp"
 #include "../skills/skill_registry.hpp"
 
 #include <chrono>
@@ -37,6 +38,18 @@ bool CommandRegistry::dispatch(const std::string& input, CommandContext& ctx) {
 
     auto it = commands_.find(cmd_name);
     if (it == commands_.end()) {
+        // 未命中:先就着磁盘重扫一次并重绑 skill 斜杠命令(会话进行中新写到磁盘的
+        // skill 才能第一次敲就用上,且回填 commands_ 让后续自动补全/`/help` 列得出),
+        // 然后再查一次。reload 走已测过的 reload_skill_commands(只动 skill key,
+        // 内建命令不受影响)。command_registry 即 *this。
+        if (ctx.skills) {
+            reload_skill_commands(*this, *ctx.skills);
+            it = commands_.find(cmd_name);
+            if (it != commands_.end()) {
+                it->second.execute(ctx, args);
+                return true;
+            }
+        }
         if (ctx.skills) {
             auto skill = ctx.skills->find(cmd_name);
             if (skill) {
