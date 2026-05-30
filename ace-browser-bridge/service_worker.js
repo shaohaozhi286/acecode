@@ -1271,7 +1271,13 @@ async function resolvePoint(session, args, role = "target") {
   if (Number.isFinite(Number(args.x)) && Number.isFinite(Number(args.y))) {
     return { x: Number(args.x), y: Number(args.y), rect: null };
   }
-  const target = args[role] || args.target || args.selector;
+  const textTarget = role === "target" && (args.target_text || args.targetText)
+    ? { text: args.target_text || args.targetText }
+    : null;
+  const locatorTarget = role === "target"
+    ? args.locator
+    : (args[`${role}_locator`] || args[`${role}Locator`]);
+  const target = args[role] || locatorTarget || args.target || args.selector || textTarget;
   if (!target) {
     const error = new Error(`${role} target is required`);
     error.code = "invalid_request";
@@ -1281,19 +1287,35 @@ async function resolvePoint(session, args, role = "target") {
   if (!response?.ok) {
     const error = new Error(response?.error?.message || "target resolution failed");
     error.code = response?.error?.code || "element_not_found";
+    error.diagnostics = response?.error?.diagnostics || null;
     throw error;
   }
   const rect = response.data?.rect || {};
   const targetPoint = rect.width && rect.height ? pointInRect(rect) : { x: response.data.x, y: response.data.y };
-  return { ...targetPoint, rect };
+  return { ...targetPoint, rect, element: response.data?.element || null, viewport: response.data?.viewport || null };
 }
 
-function bridgeError(error, fallbackCode = "extension_error") {
+function diagnosticsForBridgeError(error, fallbackCode = "extension_error", extra = {}) {
+  if (error?.diagnostics && typeof error.diagnostics === "object") {
+    return { ...error.diagnostics, ...extra };
+  }
+  return {
+    action: extra.action || null,
+    session: extra.session || null,
+    timestamp_ms: Date.now(),
+    source: "service_worker",
+    code: error?.code || fallbackCode,
+    suggested_next: extra.suggested_next || "Inspect the returned error, read_page, and retry with a narrower locator or assertion."
+  };
+}
+
+function bridgeError(error, fallbackCode = "extension_error", extra = {}) {
   return {
     ok: false,
     error: {
       code: error?.code || fallbackCode,
-      message: error instanceof Error ? error.message : String(error)
+      message: error instanceof Error ? error.message : String(error),
+      diagnostics: diagnosticsForBridgeError(error, fallbackCode, extra)
     }
   };
 }
@@ -1398,7 +1420,7 @@ async function cdpScroll(session, args) {
   const tab = await tabForSession(session);
   const state = sessionState(session);
   let target = state.lastPointer || { x: 200, y: 200 };
-  if (args.target || args.selector) {
+  if (args.target || args.selector || args.target_text || args.targetText || args.locator) {
     target = await resolvePoint(session, args);
   }
   await allowBridgeEvents(session, 500);
@@ -1449,7 +1471,7 @@ async function cdpEvaluate(session, args) {
 async function cdpType(session, args) {
   const speed = args.speed || "normal";
   const profile = pointerProfile(speed, args);
-  if (args.target || args.selector) {
+  if (args.target || args.selector || args.target_text || args.targetText || args.locator) {
     const clickResult = await cdpPointerAction(session, args, "click");
     if (!clickResult.ok) return clickResult;
   }
@@ -1510,21 +1532,151 @@ async function pointerAction(session, actionName, args) {
   return sendSessionPageCommand(session, actionName, args);
 }
 
+function base64ToBytes(data) {
+  const binary = atob(data);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+function bytesToBase64(bytes) {
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+async function blobToBase64(blob) {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  return bytesToBase64(bytes);
+}
+
+function hasTargetedScreenshotArgs(args = {}) {
+  return Boolean(args.target || args.selector || args.target_text || args.targetText || args.locator);
+}
+
+async function cropScreenshotBase64(data, rect, viewport) {
+  if (!rect || !viewport || typeof createImageBitmap !== "function" || typeof OffscreenCanvas === "undefined") {
+    return { data, crop_applied: false, sizeBytes: Math.floor(data.length * 3 / 4), source_width: null, source_height: null };
+  }
+  const blob = new Blob([base64ToBytes(data)], { type: "image/png" });
+  const bitmap = await createImageBitmap(blob);
+  const ratioX = bitmap.width / Math.max(1, Number(viewport.width || bitmap.width));
+  const ratioY = bitmap.height / Math.max(1, Number(viewport.height || bitmap.height));
+  const sx = Math.max(0, Math.round(Number(rect.x || 0) * ratioX));
+  const sy = Math.max(0, Math.round(Number(rect.y || 0) * ratioY));
+  const sw = Math.max(1, Math.min(bitmap.width - sx, Math.round(Number(rect.width || 1) * ratioX)));
+  const sh = Math.max(1, Math.min(bitmap.height - sy, Math.round(Number(rect.height || 1) * ratioY)));
+  const canvas = new OffscreenCanvas(sw, sh);
+  const context = canvas.getContext("2d");
+  context.drawImage(bitmap, sx, sy, sw, sh, 0, 0, sw, sh);
+  const cropped = await canvas.convertToBlob({ type: "image/png" });
+  const croppedData = await blobToBase64(cropped);
+  return {
+    data: croppedData,
+    crop_applied: true,
+    sizeBytes: cropped.size,
+    source_width: bitmap.width,
+    source_height: bitmap.height
+  };
+}
+
+function mimeFromUrl(url, fallback = "application/octet-stream") {
+  const lower = String(url || "").split("?")[0].toLowerCase();
+  if (/\.(png)$/.test(lower)) return "image/png";
+  if (/\.(jpe?g)$/.test(lower)) return "image/jpeg";
+  if (/\.(gif)$/.test(lower)) return "image/gif";
+  if (/\.(webp)$/.test(lower)) return "image/webp";
+  if (/\.(svg)$/.test(lower)) return "image/svg+xml";
+  if (/\.pdf$/.test(lower)) return "application/pdf";
+  if (/\.json$/.test(lower)) return "application/json";
+  if (/\.(log|txt)$/.test(lower)) return "text/plain";
+  return fallback;
+}
+
+async function attachmentUrlForArgs(session, args = {}) {
+  const direct = args.attachment_url || args.attachmentUrl || args.url;
+  if (direct) return { url: direct, ref: null, info: null };
+  const ref = args.attachment_ref || args.attachmentRef;
+  if (!ref) return null;
+  const response = await sendSessionPageCommand(session, "attachment_info", { attachment_ref: ref });
+  if (!response?.ok) {
+    const error = new Error(response?.error?.message || "attachment resolution failed");
+    error.code = response?.error?.code || "element_ref_stale";
+    error.diagnostics = response?.error?.diagnostics || null;
+    throw error;
+  }
+  return { url: response.data?.url, ref, info: response.data };
+}
+
+async function handleAttachmentExport(session, args) {
+  const attachment = await attachmentUrlForArgs(session, args);
+  if (!attachment?.url) return null;
+  const response = await fetch(attachment.url, { credentials: "include" });
+  if (!response.ok) {
+    const error = new Error(`attachment fetch failed: HTTP ${response.status}`);
+    error.code = "attachment_fetch_failed";
+    throw error;
+  }
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  const data = bytesToBase64(bytes);
+  const mimeType = response.headers.get("content-type") || attachment.info?.mime_hint || mimeFromUrl(attachment.url);
+  return {
+    ok: true,
+    data: {
+      path: args.output || `/tmp/ace-browser-bridge-attachments/${Date.now()}`,
+      mimeType,
+      sizeBytes: bytes.length,
+      data,
+      attachment: {
+        ref: attachment.ref,
+        url: attachment.url,
+        kind: attachment.info?.kind || null,
+        name: attachment.info?.name || null
+      }
+    }
+  };
+}
+
 async function handleScreenshot(session, args) {
   const started = Date.now();
   let tab = null;
   try {
+    const attachment = await handleAttachmentExport(session, args);
+    if (attachment) return attachment;
     tab = await tabForSession(session);
+    let target = null;
+    if (hasTargetedScreenshotArgs(args)) {
+      target = await resolvePoint(session, args);
+    }
     await postPluginLog("info", "screenshot_start", {
       session,
       tab_id: tab.id,
       window_id: tab.windowId,
-      has_output_path: Boolean(args.output)
+      has_output_path: Boolean(args.output),
+      targeted: Boolean(target)
     });
     const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
     const comma = dataUrl.indexOf(",");
-    const data = comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
-    const sizeBytes = Math.floor(data.length * 3 / 4);
+    let data = comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
+    let sizeBytes = Math.floor(data.length * 3 / 4);
+    let crop = null;
+    if (target?.rect) {
+      const viewport = target.viewport || {};
+      const cropped = await cropScreenshotBase64(data, target.rect, viewport);
+      data = cropped.data;
+      sizeBytes = cropped.sizeBytes;
+      crop = {
+        applied: cropped.crop_applied,
+        rect: target.rect,
+        viewport,
+        device_pixel_ratio: viewport.device_pixel_ratio || null,
+        source_width: cropped.source_width,
+        source_height: cropped.source_height
+      };
+    }
     const path = args.output || `/tmp/ace-browser-bridge-screenshots/${Date.now()}.png`;
     await postPluginLog("info", "screenshot_finish", {
       session,
@@ -1533,7 +1685,8 @@ async function handleScreenshot(session, args) {
       size_bytes: sizeBytes,
       data_length: data.length,
       duration_ms: Date.now() - started,
-      output_path: path
+      output_path: path,
+      crop_applied: crop?.applied || false
     });
     return {
       ok: true,
@@ -1541,7 +1694,9 @@ async function handleScreenshot(session, args) {
         path,
         mimeType: "image/png",
         sizeBytes,
-        data
+        data,
+        crop,
+        element: target?.element || null
       }
     };
   } catch (error) {
@@ -1636,6 +1791,8 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
       postData: params.request?.postData || null,
       post_data: params.request?.postData || null,
       initiator: params.initiator || null,
+      seenAtMs: Date.now(),
+      seen_at_ms: Date.now(),
       wallTime: params.wallTime || null,
       wall_time: params.wallTime || null,
       timestamp: params.timestamp || null,
@@ -1673,6 +1830,8 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
     const request = state.requests.find((item) => item.requestId === params.requestId);
     if (request) {
       request.completed = true;
+      request.completedAtMs = Date.now();
+      request.completed_at_ms = request.completedAtMs;
       request.encodedDataLength = params.encodedDataLength || 0;
       request.encoded_data_length = request.encodedDataLength;
     }
@@ -1681,6 +1840,8 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
     if (request) {
       request.completed = false;
       request.failed = true;
+      request.completedAtMs = Date.now();
+      request.completed_at_ms = request.completedAtMs;
       request.errorText = params.errorText || "";
       request.error_text = request.errorText;
       request.canceled = params.canceled === true;
@@ -1734,13 +1895,443 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   if (changed) scheduleSessionRegistryPersist();
 });
 
+// ---- 验证条件:网络类在 service worker 侧求值(CDP 抓包状态只在这里) ----
+function isNetworkCondition(condition) {
+  return condition === "network_idle" || condition === "request_finished" || condition === "request_completed";
+}
+
+function networkInFlightCount(session) {
+  const state = networkBySession.get(session);
+  if (!state) return null;
+  return state.requests.filter((r) => !r.completed && !r.failed).length;
+}
+
+function statusMatchesClass(status, cls) {
+  const normalized = String(cls || "").toLowerCase();
+  if (!normalized || normalized === "any" || normalized === "*") return true;
+  const s = Number(status);
+  if (!Number.isFinite(s)) return false;
+  if (normalized === "2xx") return s >= 200 && s < 300;
+  if (normalized === "3xx") return s >= 300 && s < 400;
+  if (normalized === "4xx") return s >= 400 && s < 500;
+  if (normalized === "5xx") return s >= 500 && s < 600;
+  const exact = Number(normalized);
+  return Number.isFinite(exact) && s === exact;
+}
+
+function requestWindowStart(args = {}) {
+  const raw = args.after_ms ?? args.afterMs ?? args.since_ms ?? args.sinceMs ??
+    args.action_started_at_ms ?? args.actionStartedAtMs;
+  const value = Number(raw || 0);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function requestMatchesStatic(request, args = {}) {
+  const needle = String(args.url || "");
+  if (needle && !String(request.url || "").includes(needle)) return false;
+  const requestId = args.request_id || args.requestId;
+  if (requestId && String(request.request_id || request.requestId || "") !== String(requestId)) return false;
+  if (args.url_regex || args.urlRegex) {
+    try {
+      const regex = new RegExp(String(args.url_regex || args.urlRegex));
+      if (!regex.test(String(request.url || ""))) return false;
+    } catch {
+      return false;
+    }
+  }
+  const method = args.method ? String(args.method).toUpperCase() : "";
+  if (method && String(request.method || "").toUpperCase() !== method) return false;
+  const start = requestWindowStart(args);
+  if (start && Number(request.seen_at_ms || request.seenAtMs || 0) < start) return false;
+  if (args.status != null && Number(request.status) !== Number(args.status)) return false;
+  if (!statusMatchesClass(request.status, args.status_class ?? args.statusClass)) return false;
+  const requestBodyNeedle = args.request_body_contains ?? args.requestBodyContains;
+  if (requestBodyNeedle != null && !String(request.post_data || request.postData || "").includes(String(requestBodyNeedle))) {
+    return false;
+  }
+  return true;
+}
+
+async function responseBodyContains(session, request, needle) {
+  if (needle == null || needle === "") return true;
+  if (request.response_body_unavailable) return false;
+  if (request.response_body_text == null) {
+    const state = networkBySession.get(session);
+    try {
+      if (!state?.tabId) return false;
+      const body = await cdpCommand(state.tabId, "Network.getResponseBody", { requestId: request.requestId || request.request_id });
+      const text = body?.base64Encoded ? atob(body.body || "") : String(body?.body || "");
+      request.response_body_text = text;
+      request.response_body_base64_encoded = body?.base64Encoded === true;
+    } catch (error) {
+      request.response_body_unavailable = true;
+      request.response_body_error = error instanceof Error ? error.message : String(error);
+      return false;
+    }
+  }
+  return String(request.response_body_text || "").includes(String(needle));
+}
+
+async function requestMatches(session, request, args = {}) {
+  if (!request.completed || !requestMatchesStatic(request, args)) return false;
+  return responseBodyContains(session, request, args.response_body_contains ?? args.responseBodyContains);
+}
+
+async function latestMatchingCompletedRequest(session, requests, args = {}) {
+  for (let i = requests.length - 1; i >= 0; i -= 1) {
+    if (await requestMatches(session, requests[i], args)) return requests[i];
+  }
+  return null;
+}
+
+function observedNetworkFailure(state, args = {}) {
+  const candidates = state.requests.filter((r) => {
+    const needle = String(args.url || "");
+    if (needle && !String(r.url || "").includes(needle)) return false;
+    const start = requestWindowStart(args);
+    if (start && Number(r.seen_at_ms || r.seenAtMs || 0) < start) return false;
+    return r.completed === true || r.failed === true;
+  });
+  const latest = candidates[candidates.length - 1] || null;
+  return latest
+    ? {
+        matched: false,
+        url: latest.url,
+        method: latest.method,
+        status: latest.status,
+        failed: latest.failed === true,
+        seen_at_ms: latest.seen_at_ms || latest.seenAtMs || null,
+        completed_at_ms: latest.completed_at_ms || latest.completedAtMs || null
+      }
+    : { matched: false };
+}
+
+// 网络类条件的 SW 侧轮询器。抓包未 active 不伪造成功,返回 network_capture_required。
+async function waitForNetworkCondition(session, args, failCode = "wait_timeout") {
+  const timeoutMs = Math.max(1, Number(args.timeout_ms || 5000));
+  const quietMs = Math.max(100, Number(args.quiet_ms || 500));
+  const started = Date.now();
+  const state = networkBySession.get(session);
+  if (!state || !state.active) {
+    return {
+      ok: false,
+      error: {
+        code: "network_capture_required",
+        message: "network condition requires active network capture; run a network start first",
+        diagnostics: diagnosticsForBridgeError(new Error("network capture required"), "network_capture_required", {
+          action: args.condition,
+          session,
+          suggested_next: "Run network --cmd start for this session before network assertions."
+        })
+      }
+    };
+  }
+  const condition = args.condition;
+  let idleSince = null;
+  for (;;) {
+    if (condition === "request_completed") {
+      const match = await latestMatchingCompletedRequest(session, state.requests, args);
+      if (match) {
+        return {
+          ok: true,
+          data: {
+            success: true,
+            matched: condition,
+            observed: {
+              url: match.url,
+              method: match.method,
+              status: match.status,
+              request_id: match.request_id || match.requestId,
+              seen_at_ms: match.seen_at_ms || match.seenAtMs || null,
+              completed_at_ms: match.completed_at_ms || match.completedAtMs || null
+            },
+            elapsed_ms: Date.now() - started
+          }
+        };
+      }
+    } else {
+      const inFlight = networkInFlightCount(session);
+      if (inFlight === 0) {
+        if (idleSince === null) idleSince = Date.now();
+        if (Date.now() - idleSince >= quietMs) {
+          return { ok: true, data: { success: true, matched: condition, observed: { in_flight: 0 }, elapsed_ms: Date.now() - started } };
+        }
+      } else {
+        idleSince = null;
+      }
+    }
+    if (Date.now() - started >= timeoutMs) {
+      let observed;
+      if (condition === "request_completed") {
+        observed = observedNetworkFailure(state, args);
+      } else {
+        observed = { in_flight: networkInFlightCount(session) };
+      }
+      return {
+        ok: false,
+        error: {
+          code: failCode,
+          message: `Timed out waiting for ${condition}`,
+          observed,
+          diagnostics: diagnosticsForBridgeError(new Error(`Timed out waiting for ${condition}`), failCode, {
+            action: condition,
+            session,
+            suggested_next: "Check network capture state, method/status/body filters, and retry with a narrower request window."
+          })
+        }
+      };
+    }
+    await sleep(120);
+  }
+}
+
+// wait / assert 入口:网络类走 SW,DOM 类转 content script(共用 content 的求值器)。
+async function handleWait(session, args) {
+  if (isNetworkCondition(args.condition)) return waitForNetworkCondition(session, args, "wait_timeout");
+  return sendSessionPageCommand(session, "wait", args);
+}
+
+async function handleAssert(session, args) {
+  if (isNetworkCondition(args.condition)) return waitForNetworkCondition(session, args, "assertion_failed");
+  return sendSessionPageCommand(session, "assert", args);
+}
+
+// 动作内联 expect:动作主体成功后就地校验期望,成功折进 verified+observed,失败把整体翻成 expectation_failed。
+async function applyExpectation(session, args, result, actionStartedAtMs = null) {
+  if (!result?.ok || !args?.expect || typeof args.expect !== "object") return result;
+  const expectArgs = { ...args.expect, timeout_ms: args.expect.timeout_ms || 5000 };
+  if (isNetworkCondition(expectArgs.condition) &&
+      expectArgs.after_ms == null &&
+      expectArgs.afterMs == null &&
+      expectArgs.since_ms == null &&
+      expectArgs.sinceMs == null &&
+      expectArgs.action_started_at_ms == null &&
+      expectArgs.actionStartedAtMs == null &&
+      actionStartedAtMs) {
+    expectArgs.action_started_at_ms = actionStartedAtMs;
+  }
+  const verdict = isNetworkCondition(expectArgs.condition)
+    ? await waitForNetworkCondition(session, expectArgs, "expectation_failed")
+    : await sendSessionPageCommand(session, "assert", expectArgs);
+  if (verdict?.ok) {
+    if (result.data && typeof result.data === "object") {
+      result.data.verified = true;
+      result.data.observed = verdict.data?.observed;
+    }
+    return result;
+  }
+  return {
+    ok: false,
+    error: {
+      code: "expectation_failed",
+      message: verdict?.error?.message || "post-action expectation not met",
+      observed: verdict?.error?.observed,
+      diagnostics: verdict?.error?.diagnostics || diagnosticsForBridgeError(new Error("post-action expectation not met"), "expectation_failed", {
+        action: expectArgs.condition,
+        session,
+        suggested_next: "Use read_page/network detail to inspect the actual post-action state and refine the expectation."
+      })
+    }
+  };
+}
+
+function cloneJson(value) {
+  if (value == null) return value;
+  return JSON.parse(JSON.stringify(value));
+}
+
+function valueAtPath(root, path) {
+  const parts = String(path || "").split(".").filter(Boolean);
+  let current = root;
+  for (const part of parts) {
+    if (current == null) return undefined;
+    if (Array.isArray(current) && /^\d+$/.test(part)) current = current[Number(part)];
+    else current = current[part];
+  }
+  return current;
+}
+
+function resolveBatchPath(context, expression) {
+  const path = String(expression || "").trim();
+  if (!path) return "";
+  if (path === "last") return context.last;
+  if (path.startsWith("last.")) return valueAtPath(context.last, path.slice(5));
+  if (path === "vars") return context.vars;
+  if (path.startsWith("vars.")) return valueAtPath(context.vars, path.slice(5));
+  const firstDot = path.indexOf(".");
+  const name = firstDot >= 0 ? path.slice(0, firstDot) : path;
+  const rest = firstDot >= 0 ? path.slice(firstDot + 1) : "";
+  if (Object.prototype.hasOwnProperty.call(context.vars, name)) {
+    return rest ? valueAtPath(context.vars[name], rest) : context.vars[name];
+  }
+  return undefined;
+}
+
+function interpolateBatchValue(value, context) {
+  if (typeof value === "string") {
+    const exact = value.match(/^\$\{([^}]+)\}$/);
+    if (exact) {
+      const resolved = resolveBatchPath(context, exact[1]);
+      return resolved === undefined ? "" : resolved;
+    }
+    return value.replace(/\$\{([^}]+)\}/g, (_match, expression) => {
+      const resolved = resolveBatchPath(context, expression);
+      if (resolved == null) return "";
+      return typeof resolved === "string" ? resolved : JSON.stringify(resolved);
+    });
+  }
+  if (Array.isArray(value)) return value.map((item) => interpolateBatchValue(item, context));
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const [key, child] of Object.entries(value)) out[key] = interpolateBatchValue(child, context);
+    return out;
+  }
+  return value;
+}
+
+function retryOptions(step) {
+  const retry = step.retry && typeof step.retry === "object" ? step.retry : {};
+  const attempts = Math.max(1, Math.min(10, Number(retry.attempts || step.attempts || 1) || 1));
+  const delayMs = Math.max(0, Math.min(30000, Number(retry.delay_ms ?? retry.delayMs ?? 0) || 0));
+  return { attempts, delayMs };
+}
+
+async function shouldRunBatchStep(session, step, context) {
+  if (!step.when || typeof step.when !== "object") return { run: true, verdict: null };
+  const whenArgs = interpolateBatchValue(step.when, context);
+  if (!whenArgs.timeout_ms && !whenArgs.timeoutMs) whenArgs.timeout_ms = 250;
+  const verdict = await handleAssert(session, whenArgs);
+  return { run: Boolean(verdict?.ok), verdict };
+}
+
+async function executeBatchStep(session, rawStep, index, context, phase) {
+  const step = interpolateBatchValue(rawStep || {}, context);
+  const actionName = step.action;
+  const base = {
+    index,
+    phase,
+    name: step.name || null,
+    action: actionName || null
+  };
+  const when = await shouldRunBatchStep(session, step, context);
+  if (!when.run) {
+    return {
+      result: {
+        ...base,
+        ok: true,
+        skipped: true,
+        when: step.when || null,
+        observed: when.verdict?.error?.observed
+      },
+      response: { ok: true, data: { skipped: true } },
+      stop: false
+    };
+  }
+
+  const { attempts, delayMs } = retryOptions(step);
+  let response = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      response = await dispatchDaemonAction({ action: actionName, args: step.args || {}, session });
+    } catch (error) {
+      response = bridgeError(error, "extension_error", { action: actionName, session });
+    }
+    if (response?.ok || attempt >= attempts) {
+      const item = {
+        ...base,
+        ok: Boolean(response?.ok),
+        attempts: attempt,
+        data: response?.ok ? response.data : undefined,
+        error: response?.ok ? undefined : response?.error
+      };
+      if (response?.ok && step.set) {
+        context.vars[String(step.set)] = cloneJson(response.data);
+        item.set = String(step.set);
+      }
+      context.last = {
+        ok: Boolean(response?.ok),
+        action: actionName,
+        data: response?.data,
+        error: response?.error
+      };
+      return {
+        result: item,
+        response,
+        stop: !response?.ok && step.continue_on_error !== true
+      };
+    }
+    if (delayMs > 0) await sleep(delayMs);
+  }
+  return {
+    result: { ...base, ok: false, error: { code: "batch_internal_error", message: "retry loop did not produce a result" } },
+    response: { ok: false, error: { code: "batch_internal_error", message: "retry loop did not produce a result" } },
+    stop: true
+  };
+}
+
+async function executeBatchSteps(session, steps, context, phase) {
+  const results = [];
+  let stoppedAt = null;
+  for (let i = 0; i < steps.length; i += 1) {
+    const outcome = await executeBatchStep(session, steps[i] || {}, i, context, phase);
+    results.push(outcome.result);
+    if (outcome.stop) {
+      stoppedAt = i;
+      break;
+    }
+  }
+  return { results, stoppedAt };
+}
+
+// batch:在同一受管 tab 上顺序执行多步,一次 dispatch 返回逐步结果。默认遇错即停,自带 block/unblock 生命周期。
+async function handleBatch(session, args) {
+  const steps = Array.isArray(args.steps) ? args.steps : [];
+  const finallySteps = Array.isArray(args.finally) ? args.finally : [];
+  const wrapLifecycle = args.lifecycle !== false;
+  const context = {
+    vars: cloneJson(args.vars && typeof args.vars === "object" ? args.vars : {}),
+    last: null
+  };
+  let main = { results: [], stoppedAt: null };
+  let cleanup = { results: [], stoppedAt: null };
+  if (wrapLifecycle) {
+    try { await handleBlockInput(session, { watchdog_ms: args.watchdog_ms }); } catch { /* 遮罩失败不致命 */ }
+  }
+  try {
+    main = await executeBatchSteps(session, steps, context, "main");
+    if (finallySteps.length) cleanup = await executeBatchSteps(session, finallySteps, context, "finally");
+  } finally {
+    if (wrapLifecycle) {
+      try { await handleUnblockInput(session); } catch { /* 释放失败不致命 */ }
+    }
+  }
+  const mainOk = main.stoppedAt === null && main.results.every((r) => r.ok);
+  const finallyOk = cleanup.stoppedAt === null && cleanup.results.every((r) => r.ok);
+  const overallOk = mainOk && finallyOk;
+  return {
+    ok: overallOk,
+    data: {
+      success: overallOk,
+      steps: main.results,
+      finally_steps: cleanup.results,
+      stopped_at: main.stoppedAt,
+      finally_stopped_at: cleanup.stoppedAt,
+      ran: main.results.length,
+      total: steps.length,
+      vars: context.vars
+    }
+  };
+}
+
 async function dispatchDaemonAction(action) {
   await ensureSessionRegistryRestored();
-  const actionName = action.action;
+  let actionName = action.action;
+  if (actionName === "read_page" || actionName === "read-page") actionName = "snapshot";
   const args = action.args || {};
   const session = sessionName(action);
   if (actionName === "navigate") {
-    return handleNavigate(session, args);
+    const actionStartedAtMs = Date.now();
+    return applyExpectation(session, args, await handleNavigate(session, args), actionStartedAtMs);
   }
   if (actionName === "find_tab") {
     return handleFindTab(session, args);
@@ -1755,13 +2346,23 @@ async function dispatchDaemonAction(action) {
     return sendSessionPageCommand(session, "snapshot", args);
   }
   if (actionName === "wait") {
-    return withOperatingOverlay(session, actionName, args, () => sendSessionPageCommand(session, "wait", args));
+    return withOperatingOverlay(session, actionName, args, () => handleWait(session, args));
+  }
+  if (actionName === "assert") {
+    return handleAssert(session, args);
+  }
+  if (actionName === "batch") {
+    return handleBatch(session, args);
   }
   if (["click", "type", "hover", "drag", "scroll"].includes(actionName)) {
-    return withOperatingOverlay(session, actionName, args, () => pointerAction(session, actionName, args));
+    const actionStartedAtMs = Date.now();
+    const result = await withOperatingOverlay(session, actionName, args, () => pointerAction(session, actionName, args));
+    return applyExpectation(session, args, result, actionStartedAtMs);
   }
   if (actionName === "fill") {
-    return withOperatingOverlay(session, actionName, args, () => sendSessionPageCommand(session, actionName, args));
+    const actionStartedAtMs = Date.now();
+    const result = await withOperatingOverlay(session, actionName, args, () => sendSessionPageCommand(session, actionName, args));
+    return applyExpectation(session, args, result, actionStartedAtMs);
   }
   if (actionName === "evaluate") {
     return withOperatingOverlay(session, actionName, args, () => cdpEvaluate(session, args));

@@ -42,8 +42,30 @@ $pluginHeaders = @{ "X-Ace-Browser-Bridge" = "extension" }
 $hostHeaders = @{ "X-Ace-Browser-Host" = "1" }
 $capabilitiesJson = '"capabilities":{"cdp":true,"devtools":true,"raw_cdp":true,"console":true,"network":true,"emulation":true,"performance":true,"heap_snapshot":true,"pdf":true,"upload":true,"os_pointer":false,"operation_overlay":true,"input_block":true}'
 
-function Invoke-Poll {
-    return Invoke-RestMethod -Method Post -Uri "$base/plugin/poll" -Headers $pluginHeaders -ContentType "application/json" -Body "{}"
+function Invoke-BridgePoll {
+    $request = [System.Net.HttpWebRequest]::Create("${base}/plugin/poll")
+    $request.Method = "POST"
+    $request.ContentType = "application/json"
+    $request.Headers.Add("X-Ace-Browser-Bridge", "extension")
+    $body = [System.Text.Encoding]::UTF8.GetBytes("{}")
+    $request.ContentLength = $body.Length
+    $stream = $request.GetRequestStream()
+    try {
+        $stream.Write($body, 0, $body.Length)
+    } finally {
+        $stream.Close()
+    }
+    $response = $request.GetResponse()
+    try {
+        $reader = New-Object System.IO.StreamReader($response.GetResponseStream(), [System.Text.Encoding]::UTF8)
+        $raw = $reader.ReadToEnd()
+    } finally {
+        $response.Close()
+    }
+    if ([string]::IsNullOrWhiteSpace($raw)) {
+        throw "plugin poll returned an empty response body"
+    }
+    return ($raw | ConvertFrom-Json)
 }
 
 function Post-Ack {
@@ -62,6 +84,35 @@ function Get-Status {
     return Invoke-RestMethod -Method Get -Uri "$base/status" -Headers $hostHeaders
 }
 
+function Get-ActionField {
+    param($Poll, [string]$Name)
+    if ($null -eq $Poll -or $null -eq $Poll.data -or $null -eq $Poll.data.action) {
+        return $null
+    }
+    return $Poll.data.action.PSObject.Properties[$Name].Value
+}
+
+function Wait-QueuedAction {
+    param(
+        [System.Management.Automation.Job]$Job,
+        [string]$Name,
+        [int]$TimeoutMs = 10000
+    )
+    $deadline = (Get-Date).AddMilliseconds($TimeoutMs)
+    while ((Get-Date) -lt $deadline) {
+        if ($Job.State -ne "Running") {
+            $jobOutput = Receive-Job $Job
+            throw "$Name job completed before queuing action: $jobOutput"
+        }
+        $status = Get-Status
+        if ($status.data.queued_actions -gt 0) {
+            return
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    throw "$Name command was not queued within $TimeoutMs ms"
+}
+
 $daemon = Start-Process -FilePath $ExePath -ArgumentList @("serve", "--json", "--port", "$Port") -PassThru -WindowStyle Hidden
 Start-Sleep -Milliseconds 800
 try {
@@ -74,25 +125,27 @@ try {
         & $ExePath block-input --json --session redeliver --watchdog-ms 60000 --port $Port
     } -ArgumentList $ExePath, $Port
     try {
-        Start-Sleep -Milliseconds 500
+        Wait-QueuedAction -Job $blockJob -Name "block-input"
         # 第一次 poll:取到指令,然后"假装 worker 立刻被回收" —— 不 ack、不回结果。
-        $poll1 = Invoke-Poll
-        if ($true -ne $poll1.ok -or $null -eq $poll1.data.action -or $poll1.data.action.action -ne "block_input") {
-            throw "first poll did not dispatch block_input: $($poll1 | ConvertTo-Json -Compress)"
+        $poll1 = Invoke-BridgePoll
+        $poll1Action = Get-ActionField -Poll $poll1 -Name "action"
+        if ($true -ne $poll1.ok -or $null -eq $poll1.data.action -or $poll1Action -ne "block_input") {
+            throw "first poll did not dispatch block_input: action=$poll1Action json=$($poll1 | ConvertTo-Json -Depth 20 -Compress)"
         }
-        $actionId = $poll1.data.action.id
+        $actionId = Get-ActionField -Poll $poll1 -Name "id"
 
         # 等过重投窗口(kRedeliveryAfterMs=4000)+ 余量。
         Start-Sleep -Seconds 6
 
         # 第二次 poll:应重新取到"同一条"指令(被 daemon 重投回队列)。
         # 这是关键回归点 —— 旧代码 pop_front 后不再重投,第二次 poll 只会拿到 null,指令永久丢失。
-        $poll2 = Invoke-Poll
+        $poll2 = Invoke-BridgePoll
         if ($true -ne $poll2.ok -or $null -eq $poll2.data.action) {
             throw "redelivery failed: second poll returned no action (lost forever like the old bug)"
         }
-        if ($poll2.data.action.id -ne $actionId) {
-            throw "redelivery returned a different action id: $($poll2.data.action.id) vs $actionId"
+        $poll2Id = Get-ActionField -Poll $poll2 -Name "id"
+        if ($poll2Id -ne $actionId) {
+            throw "redelivery returned a different action id: $poll2Id vs $actionId"
         }
 
         # 这次正常确认 + 回结果,命令应当成功返回(而不是 bridge_timeout)。
@@ -118,12 +171,12 @@ try {
         & $ExePath block-input --json --session redeliver-acked --watchdog-ms 60000 --port $Port
     } -ArgumentList $ExePath, $Port
     try {
-        Start-Sleep -Milliseconds 500
-        $pollA = Invoke-Poll
+        Wait-QueuedAction -Job $ackJob -Name "acked block-input"
+        $pollA = Invoke-BridgePoll
         if ($true -ne $pollA.ok -or $null -eq $pollA.data.action) {
             throw "scenario 2 first poll did not dispatch action"
         }
-        $ackedId = $pollA.data.action.id
+        $ackedId = Get-ActionField -Poll $pollA -Name "id"
 
         # 立刻确认收到 —— 这之后即便迟迟没回结果,也不应被重投(否则慢操作会被重复执行)。
         Post-Ack -Id $ackedId

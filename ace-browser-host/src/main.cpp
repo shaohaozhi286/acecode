@@ -58,6 +58,11 @@ constexpr int kCommandTimeoutMs = 30000;
 // service worker 多半已被浏览器回收),把指令重新入队再投一次。loopback 上正常 ack 仅需毫秒级,
 // 4 秒足以把"还活着只是慢"和"已经死了"区分开,不会误重投正在执行的慢操作。
 constexpr int kRedeliveryAfterMs = 4000;
+// 命令级超时上限。长 batch / 长 wait 可在请求里带 command_timeout_ms 把等待从默认 30s 抬高,
+// 但不超过这个上限,避免单条命令无限期占住 daemon 线程。
+constexpr int kMaxCommandTimeoutMs = 180000;
+constexpr int kCommandTimeoutPaddingMs = 5000;
+constexpr int kDefaultBatchStepBudgetMs = 5000;
 
 #ifdef _WIN32
 using socket_t = SOCKET;
@@ -533,6 +538,22 @@ std::optional<json> write_text_file(const std::filesystem::path& path,
                                     const std::string& text) {
     std::vector<unsigned char> bytes(text.begin(), text.end());
     return write_bytes_file(path, bytes);
+}
+
+std::optional<std::string> read_text_file(const std::filesystem::path& path,
+                                          std::string& error) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in.is_open()) {
+        error = "failed to read bridge input file: " + path.u8string();
+        return std::nullopt;
+    }
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    if (!in.good() && !in.eof()) {
+        error = "failed to read bridge input file: " + path.u8string();
+        return std::nullopt;
+    }
+    return ss.str();
 }
 
 std::vector<std::string> split_csv(const std::string& input) {
@@ -1257,13 +1278,113 @@ int command_command(int argc, char** argv) {
     return 0;
 }
 
-json command_envelope(int port, const std::string& session,
-                      const std::string& action, json args) {
+long long clamp_command_timeout_ms(long long requested) {
+    return std::clamp<long long>(requested, kCommandTimeoutMs, kMaxCommandTimeoutMs);
+}
+
+std::optional<long long> positive_int_field(const json& object, const char* key) {
+    if (!object.is_object() || !object.contains(key)) return std::nullopt;
+    try {
+        long long value = object.value(key, 0LL);
+        if (value > 0) return value;
+    } catch (...) {
+    }
+    return std::nullopt;
+}
+
+long long action_budget_ms(const json& args) {
+    long long budget = kDefaultBatchStepBudgetMs;
+    if (!args.is_object()) return budget;
+    if (auto timeout = positive_int_field(args, "timeout_ms")) {
+        budget = std::max(budget, *timeout);
+    }
+    if (args.contains("expect") && args["expect"].is_object()) {
+        if (auto expect_timeout = positive_int_field(args["expect"], "timeout_ms")) {
+            budget = std::max(budget, *expect_timeout);
+        }
+    }
+    return budget;
+}
+
+long long batch_steps_raw_budget_ms(const json& steps) {
+    if (!steps.is_array() || steps.empty()) return 0;
+    long long total = 0;
+    for (const auto& step : steps) {
+        const json empty_args = json::object();
+        const json& args = (step.is_object() && step.contains("args") && step["args"].is_object())
+            ? step["args"]
+            : empty_args;
+        long long attempts = 1;
+        if (step.is_object() && step.contains("retry") && step["retry"].is_object()) {
+            if (auto retry_attempts = positive_int_field(step["retry"], "attempts")) {
+                attempts = std::clamp<long long>(*retry_attempts, 1, 10);
+            }
+        }
+        long long delay_ms = 0;
+        if (step.is_object() && step.contains("retry") && step["retry"].is_object()) {
+            if (auto retry_delay = positive_int_field(step["retry"], "delay_ms")) {
+                delay_ms = std::min<long long>(*retry_delay, 30000);
+            }
+        }
+        total += action_budget_ms(args) * attempts;
+        if (attempts > 1) total += delay_ms * (attempts - 1);
+        if (total >= kMaxCommandTimeoutMs) return kMaxCommandTimeoutMs;
+    }
+    return total;
+}
+
+long long batch_command_timeout_budget_ms(const json& steps) {
+    if (!steps.is_array() || steps.empty()) return kCommandTimeoutMs;
+    long long total = kCommandTimeoutPaddingMs + batch_steps_raw_budget_ms(steps);
+    return clamp_command_timeout_ms(total);
+}
+
+long long batch_command_timeout_budget_for_args(const json& args) {
+    if (!args.is_object()) return kCommandTimeoutMs;
+    long long total = kCommandTimeoutPaddingMs;
+    if (args.contains("steps") && args["steps"].is_array()) {
+        total += batch_steps_raw_budget_ms(args["steps"]);
+    }
+    if (args.contains("finally") && args["finally"].is_array()) {
+        total += batch_steps_raw_budget_ms(args["finally"]);
+    }
+    return clamp_command_timeout_ms(total);
+}
+
+std::optional<long long> command_timeout_budget_for_action(const std::string& action,
+                                                           const json& args) {
+    if (action == "batch") {
+        return batch_command_timeout_budget_for_args(args);
+    }
+    if (!args.is_object()) return std::nullopt;
+    long long requested = 0;
+    if (auto timeout = positive_int_field(args, "timeout_ms")) {
+        requested = std::max(requested, *timeout);
+    }
+    if (args.contains("expect") && args["expect"].is_object()) {
+        if (auto expect_timeout = positive_int_field(args["expect"], "timeout_ms")) {
+            requested = std::max(requested, *expect_timeout);
+        }
+    }
+    if (requested <= 0) return std::nullopt;
+    return clamp_command_timeout_ms(requested + kCommandTimeoutPaddingMs);
+}
+
+json command_request(const std::string& session, const std::string& action, json args) {
     json request = {
         {"session", session.empty() ? "acecode-default" : session},
         {"action", action},
         {"args", args.is_null() ? json::object() : std::move(args)},
     };
+    if (auto command_timeout = command_timeout_budget_for_action(action, request["args"])) {
+        request["command_timeout_ms"] = *command_timeout;
+    }
+    return request;
+}
+
+json command_envelope(int port, const std::string& session,
+                      const std::string& action, json args) {
+    json request = command_request(session, action, std::move(args));
     return command_envelope_from_stdin(port, request.dump());
 }
 
@@ -1345,19 +1466,117 @@ int read_page_command(int argc, char** argv) {
     return command_alias_command(argc, argv, "snapshot", std::move(args));
 }
 
-int wait_command(int argc, char** argv) {
-    json args;
+void put_condition_options(json& args, int argc, char** argv) {
     put_string_arg(args, argc, argv, "--condition", "condition");
     put_string_arg(args, argc, argv, "--target", "target");
+    put_string_arg(args, argc, argv, "--target-text", "target_text");
     put_string_arg(args, argc, argv, "--text", "text");
+    put_string_arg(args, argc, argv, "--value", "value");
     put_string_arg(args, argc, argv, "--url", "url");
+    put_string_arg(args, argc, argv, "--method", "method");
+    put_string_arg(args, argc, argv, "--status-class", "status_class");
+    put_int_arg(args, argc, argv, "--status", "status");
     put_string_arg(args, argc, argv, "--request-id", "request_id");
+    put_string_arg(args, argc, argv, "--request-body-contains", "request_body_contains");
+    put_string_arg(args, argc, argv, "--response-body-contains", "response_body_contains");
+    put_int_arg(args, argc, argv, "--after-ms", "after_ms");
+    put_int_arg(args, argc, argv, "--since-ms", "since_ms");
     put_int_arg(args, argc, argv, "--timeout-ms", "timeout_ms");
+    put_int_arg(args, argc, argv, "--quiet-ms", "quiet_ms");
+}
+
+int wait_command(int argc, char** argv) {
+    json args;
+    put_condition_options(args, argc, argv);
     if (!args.contains("condition") && !has_arg(argc, argv, "--args-json")) {
         print_json(failure("invalid_request", "wait requires --condition <condition>"));
         return 0;
     }
     return command_alias_command(argc, argv, "wait", std::move(args));
+}
+
+int assert_command(int argc, char** argv) {
+    json args;
+    put_condition_options(args, argc, argv);
+    if (!args.contains("condition") && !has_arg(argc, argv, "--args-json")) {
+        print_json(failure("invalid_request", "assert requires --condition <condition>"));
+        return 0;
+    }
+    return command_alias_command(argc, argv, "assert", std::move(args));
+}
+
+std::optional<json> parse_batch_steps_payload(const std::string& text,
+                                              std::string& error) {
+    auto parsed = parse_json(text);
+    if (!parsed) {
+        error = "batch expects a JSON steps array";
+        return std::nullopt;
+    }
+    if (parsed->is_array()) return *parsed;
+    if (parsed->is_object() && parsed->contains("steps") && (*parsed)["steps"].is_array()) {
+        return (*parsed)["steps"];
+    }
+    error = "batch expects a JSON steps array";
+    return std::nullopt;
+}
+
+std::optional<json> parse_batch_payload(const std::string& text,
+                                        std::string& error) {
+    auto parsed = parse_json(text);
+    if (!parsed) {
+        error = "batch expects a JSON steps array or object with steps";
+        return std::nullopt;
+    }
+    if (parsed->is_array()) return json{{"steps", *parsed}};
+    if (parsed->is_object() && parsed->contains("steps") && (*parsed)["steps"].is_array()) {
+        return *parsed;
+    }
+    error = "batch expects a JSON steps array or object with steps";
+    return std::nullopt;
+}
+
+int batch_command(int argc, char** argv) {
+    json args;
+    put_int_arg(args, argc, argv, "--watchdog-ms", "watchdog_ms");
+    put_bool_flag(args, argc, argv, "--lifecycle", "lifecycle");
+    if (has_arg(argc, argv, "--no-lifecycle")) args["lifecycle"] = false;
+
+    std::optional<std::string> input;
+    if (auto steps_file = find_arg(argc, argv, "--steps-file")) {
+        std::string error;
+        input = read_text_file(normalize_bridge_path(*steps_file), error);
+        if (!input) {
+            print_json(failure("file_read_failed", error));
+            return 0;
+        }
+    } else if (!has_arg(argc, argv, "--args-json")) {
+        input = read_stdin();
+        if (input->find_first_not_of(" \t\r\n") == std::string::npos) {
+            print_json(failure("invalid_request", "batch requires JSON steps on stdin, --steps-file, or --args-json with steps"));
+            return 0;
+        }
+    }
+
+    if (input) {
+        std::string error;
+        auto payload = parse_batch_payload(*input, error);
+        if (!payload) {
+            print_json(failure("invalid_request", error));
+            return 0;
+        }
+        for (auto& item : payload->items()) args[item.key()] = item.value();
+    }
+
+    if (!merge_args_json_or_print(argc, argv, args)) return 0;
+    if (!args.contains("steps") || !args["steps"].is_array()) {
+        print_json(failure("invalid_request", "batch requires a JSON steps array"));
+        return 0;
+    }
+    print_json(command_envelope(parse_port(argc, argv),
+                                arg_or_default(argc, argv, "--session", "acecode-default"),
+                                "batch",
+                                std::move(args)));
+    return 0;
 }
 
 int block_input_command(int argc, char** argv) {
@@ -1383,62 +1602,99 @@ void put_interaction_options(json& args, int argc, char** argv) {
     put_string_arg(args, argc, argv, "--snapshot-id", "snapshot_id");
 }
 
+void put_target_options(json& args, int argc, char** argv) {
+    if (auto target = find_arg(argc, argv, "--target")) args["selector"] = *target;
+    put_string_arg(args, argc, argv, "--target-text", "target_text");
+    put_string_arg(args, argc, argv, "--role", "role");
+    put_string_arg(args, argc, argv, "--name", "name");
+    put_string_arg(args, argc, argv, "--near-text", "near_text");
+    put_int_arg(args, argc, argv, "--nth", "nth");
+    put_bool_flag(args, argc, argv, "--exact", "exact");
+    auto locator_text = find_arg(argc, argv, "--locator");
+    if (!locator_text) locator_text = find_arg(argc, argv, "--locator-json");
+    if (locator_text) {
+        auto parsed = parse_json(*locator_text);
+        if (!parsed || !parsed->is_object()) {
+            args["locator"] = "__ACE_INVALID_JSON_OBJECT__";
+        } else {
+            args["locator"] = std::move(*parsed);
+        }
+    }
+}
+
+bool target_options_valid_or_print(const json& args) {
+    if (args.value("locator", json()).is_string() &&
+        args["locator"].get<std::string>() == "__ACE_INVALID_JSON_OBJECT__") {
+        print_json(failure("invalid_request", "--locator must be a JSON object"));
+        return false;
+    }
+    return true;
+}
+
+bool has_target_spec(const json& args) {
+    return args.contains("selector") ||
+           args.contains("target_text") ||
+           args.contains("locator") ||
+           args.contains("role") ||
+           args.contains("name");
+}
+
 int click_command(int argc, char** argv) {
     json args;
-    auto target = find_arg(argc, argv, "--target");
-    if (target) args["selector"] = *target;
+    put_target_options(args, argc, argv);
+    if (!target_options_valid_or_print(args)) return 0;
     put_number_arg(args, argc, argv, "--x", "x");
     put_number_arg(args, argc, argv, "--y", "y");
     put_string_arg(args, argc, argv, "--button", "button");
     put_interaction_options(args, argc, argv);
-    if (!args.contains("selector") && !(args.contains("x") && args.contains("y")) &&
+    if (!has_target_spec(args) && !(args.contains("x") && args.contains("y")) &&
         !has_arg(argc, argv, "--args-json")) {
-        print_json(failure("invalid_request", "click requires --target <ref|selector> or --x/--y"));
+        print_json(failure("invalid_request", "click requires --target <ref|selector>, --target-text <text>, --locator <json>, role/name, or --x/--y"));
         return 0;
     }
     return command_alias_command(argc, argv, "click", std::move(args));
 }
 
 int fill_command(int argc, char** argv) {
-    auto target = find_arg(argc, argv, "--target");
     auto value = find_arg(argc, argv, "--value");
-    if ((!target || target->empty() || !value) && !has_arg(argc, argv, "--args-json")) {
-        print_json(failure("invalid_request", "fill requires --target <ref|selector> and --value <text>"));
-        return 0;
-    }
     json args;
-    if (target) args["selector"] = *target;
+    put_target_options(args, argc, argv);
+    if (!target_options_valid_or_print(args)) return 0;
     if (value) args["value"] = *value;
     put_string_arg(args, argc, argv, "--mode", "mode");
     put_string_arg(args, argc, argv, "--snapshot-id", "snapshot_id");
+    if ((!has_target_spec(args) || !value) && !has_arg(argc, argv, "--args-json")) {
+        print_json(failure("invalid_request", "fill requires a target locator and --value <text>"));
+        return 0;
+    }
     return command_alias_command(argc, argv, "fill", std::move(args));
 }
 
 int type_command(int argc, char** argv) {
-    auto target = find_arg(argc, argv, "--target");
-    if ((!target || target->empty()) && !has_arg(argc, argv, "--args-json")) {
-        print_json(failure("invalid_request", "type requires --target <ref|selector>"));
-        return 0;
-    }
     json args;
-    if (target) args["selector"] = *target;
+    put_target_options(args, argc, argv);
+    if (!target_options_valid_or_print(args)) return 0;
     put_string_arg(args, argc, argv, "--text", "text");
     put_bool_flag(args, argc, argv, "--clear", "clear");
     put_bool_flag(args, argc, argv, "--submit", "submit");
     put_string_arg(args, argc, argv, "--mode", "mode");
     put_string_arg(args, argc, argv, "--speed", "speed");
+    if (!has_target_spec(args) && !has_arg(argc, argv, "--args-json")) {
+        print_json(failure("invalid_request", "type requires --target <ref|selector>, --target-text <text>, --locator <json>, or role/name"));
+        return 0;
+    }
     return command_alias_command(argc, argv, "type", std::move(args));
 }
 
 int hover_command(int argc, char** argv) {
-    auto target = find_arg(argc, argv, "--target");
-    if ((!target || target->empty()) && !has_arg(argc, argv, "--args-json")) {
-        print_json(failure("invalid_request", "hover requires --target <ref|selector>"));
+    json args;
+    put_target_options(args, argc, argv);
+    if (!target_options_valid_or_print(args)) return 0;
+    put_interaction_options(args, argc, argv);
+    if (!has_target_spec(args) && !has_arg(argc, argv, "--args-json")) {
+        print_json(failure("invalid_request", "hover requires --target <ref|selector>, --target-text <text>, --locator <json>, or role/name"));
         return 0;
     }
-    json args;
-    if (target) args["selector"] = *target;
-    put_interaction_options(args, argc, argv);
     return command_alias_command(argc, argv, "hover", std::move(args));
 }
 
@@ -1470,7 +1726,8 @@ int drag_command(int argc, char** argv) {
 
 int scroll_command(int argc, char** argv) {
     json args;
-    if (auto target = find_arg(argc, argv, "--target")) args["selector"] = *target;
+    put_target_options(args, argc, argv);
+    if (!target_options_valid_or_print(args)) return 0;
     put_number_arg(args, argc, argv, "--delta-x", "delta_x");
     put_number_arg(args, argc, argv, "--delta-y", "delta_y");
     put_string_arg(args, argc, argv, "--mode", "mode");
@@ -1693,19 +1950,22 @@ int close_session_command(int argc, char** argv) {
 }
 
 int screenshot_command(int argc, char** argv) {
-    int port = parse_port(argc, argv);
-    auto session = find_arg(argc, argv, "--session").value_or("acecode-default");
     auto output = find_arg(argc, argv, "--output");
     if (!output) {
         print_json(failure("invalid_request", "screenshot requires --output <path>"));
         return 0;
     }
-    json request = {
-        {"session", session},
-        {"action", "screenshot"},
-        {"args", {{"output", normalize_bridge_path(*output).u8string()}}},
-    };
-    print_json(command_envelope_from_stdin(port, request.dump()));
+    json args;
+    args["output"] = normalize_bridge_path(*output).u8string();
+    put_target_options(args, argc, argv);
+    if (!target_options_valid_or_print(args)) return 0;
+    put_string_arg(args, argc, argv, "--attachment-url", "attachment_url");
+    put_string_arg(args, argc, argv, "--attachment-ref", "attachment_ref");
+    if (!merge_args_json_or_print(argc, argv, args)) return 0;
+    print_json(command_envelope(parse_port(argc, argv),
+                                arg_or_default(argc, argv, "--session", "acecode-default"),
+                                "screenshot",
+                                std::move(args)));
     return 0;
 }
 
@@ -1973,6 +2233,12 @@ json handle_command(DaemonState& state, const std::string& body) {
 
     const std::string session = action_session_from_request(*parsed);
     const std::string action = action_name_from_request(*parsed);
+    // 命令等待预算:请求可带 command_timeout_ms(由 host CLI 为 batch / 长 wait 算出),
+    // clamp 到 [默认 30s, 上限],缺省回落默认值。让长操作不被固定 30s 过早判 bridge_timeout。
+    const long long requested_command_timeout =
+        parsed->value("command_timeout_ms", static_cast<long long>(kCommandTimeoutMs));
+    const long long command_timeout_ms = std::clamp<long long>(
+        requested_command_timeout, kCommandTimeoutMs, kMaxCommandTimeoutMs);
     const auto started = std::chrono::steady_clock::now();
     std::shared_ptr<DaemonState::PendingAction> pending;
     {
@@ -2025,7 +2291,7 @@ json handle_command(DaemonState& state, const std::string& body) {
     // 放回队首让下一次 poll 再取一次,直到拿到结果或总超时为止。这样即便插件在派发瞬间被回收,
     // 指令也不会石沉大海干等满 30 秒。
     const auto overall_deadline =
-        std::chrono::steady_clock::now() + std::chrono::milliseconds(kCommandTimeoutMs);
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(command_timeout_ms);
     while (!pending->result && !state.shutting_down &&
            std::chrono::steady_clock::now() < overall_deadline) {
         state.cv.wait_for(lock, std::chrono::milliseconds(500), [&]() {
@@ -2389,7 +2655,9 @@ void print_help() {
         << "  find-tab --json (--url <text>|--tab-id <id>|--active) [--session <name>]\n"
         << "  navigate --json --operation <goto|back|forward|reload> [--url <url>] [--session <name>] [--timeout-ms <ms>]\n"
         << "  read-page --json [--session <name>] [--mode summary|elements|focused|changed]\n"
-        << "  wait --json --condition <condition> [--target <ref>] [--timeout-ms <ms>]\n"
+        << "  wait --json --condition <condition> [--target <ref|selector>] [--text <text>] [--timeout-ms <ms>]\n"
+        << "  assert --json --condition <condition> [--target <ref|selector>] [--text <text>] [--value <text>] [--url <text>] [--method <GET|POST>] [--status-class <2xx|3xx|4xx|5xx>] [--timeout-ms <ms>]\n"
+        << "  batch --json [--session <name>] [--steps-file <path>]  # or JSON steps array/object on stdin\n"
         << "  block-input --json [--session <name>] [--watchdog-ms <ms>] [--message <text>]\n"
         << "  unblock-input --json [--session <name>]\n"
         << "  click|fill|type|hover|drag|scroll --json [--session <name>] ...\n"
@@ -2397,7 +2665,7 @@ void print_help() {
         << "  network --json --cmd <start|stop|list|detail> [--filter <text>] [--request-id <id>]\n"
         << "  devtools --json --cmd <console-start|console-list|network-start|network-detail|emulate|performance-start|performance-stop|heap-snapshot> [--session <name>]\n"
         << "  cdp --json --method <CDP.method> [--params <json>] [--session <name>]\n"
-        << "  screenshot --json --session <name> --output <path> [--port 52007]\n"
+        << "  screenshot --json --session <name> --output <path> [--target <ref|selector>|--locator <json>|--attachment-ref <ref>] [--port 52007]\n"
         << "  save-pdf --json [--session <name>] [--file-name <name>]\n"
         << "  list-tabs --json [--session <name>]\n"
         << "  close-session --json [--session <name>]\n"
@@ -2427,6 +2695,8 @@ int main_impl(int argc, char** argv) {
     if (command == "navigate") return navigate_command(argc, argv);
     if (command == "read-page") return read_page_command(argc, argv);
     if (command == "wait") return wait_command(argc, argv);
+    if (command == "assert") return assert_command(argc, argv);
+    if (command == "batch") return batch_command(argc, argv);
     if (command == "block-input") return block_input_command(argc, argv);
     if (command == "unblock-input") return unblock_input_command(argc, argv);
     if (command == "click") return click_command(argc, argv);
@@ -2452,6 +2722,7 @@ int main_impl(int argc, char** argv) {
 
 }  // namespace
 
+#ifndef ACE_BROWSER_HOST_NO_MAIN
 int main(int argc, char** argv) {
     try {
         configure_utf8_console();
@@ -2474,3 +2745,4 @@ int main(int argc, char** argv) {
         return 1;
     }
 }
+#endif

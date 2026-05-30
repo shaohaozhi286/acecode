@@ -67,7 +67,10 @@ ace-browser-host.exe find-tab --json --session acecode-demo --active
 ace-browser-host.exe navigate --json --session acecode-demo --operation reload --timeout-ms 15000
 ace-browser-host.exe read-page --json --session acecode-demo --mode summary
 ace-browser-host.exe wait --json --session acecode-demo --condition element_visible --target @e15 --timeout-ms 5000
+ace-browser-host.exe assert --json --session acecode-demo --condition text_equals --target @e7 --text "Saved" --timeout-ms 5000
 ace-browser-host.exe click --json --session acecode-demo --target @e15
+ace-browser-host.exe click --json --session acecode-demo --locator '{"role":"button","name":"Save","within":{"role":"row","name":"BUG-123"}}'
+ace-browser-host.exe click --json --session acecode-demo --target @e15 --args-json "{\"expect\":{\"condition\":\"text_equals\",\"target\":\"#status\",\"text\":\"Saved\",\"timeout_ms\":5000}}"
 ace-browser-host.exe fill --json --session acecode-demo --target @e1 --value "text"
 ace-browser-host.exe type --json --session acecode-demo --target @e2 --text "abc" --submit
 ace-browser-host.exe hover --json --session acecode-demo --target @e3
@@ -76,6 +79,7 @@ ace-browser-host.exe scroll --json --session acecode-demo --delta-y 700
 ace-browser-host.exe evaluate --json --session acecode-demo --code "(() => document.title)()"
 ace-browser-host.exe network --json --session acecode-demo --cmd start
 ace-browser-host.exe network --json --session acecode-demo --cmd list --filter api
+echo '[{"action":"click","args":{"target_text":"Save","expect":{"condition":"text_equals","target":"#status","text":"Saved","timeout_ms":5000}}},{"action":"read_page","args":{"mode":"summary"}}]' | ace-browser-host.exe batch --json --session acecode-demo
 ace-browser-host.exe devtools --json --session acecode-demo --cmd console-start
 ace-browser-host.exe devtools --json --session acecode-demo --cmd console-list --types error,warn
 ace-browser-host.exe devtools --json --session acecode-demo --cmd network-start
@@ -86,6 +90,8 @@ ace-browser-host.exe devtools --json --session acecode-demo --cmd performance-st
 ace-browser-host.exe devtools --json --session acecode-demo --cmd heap-snapshot --output ./page.heapsnapshot
 ace-browser-host.exe cdp --json --session acecode-demo --method Runtime.evaluate --params '{\"expression\":\"document.title\",\"returnByValue\":true}'
 ace-browser-host.exe screenshot --json --session acecode-demo --output ./page.png
+ace-browser-host.exe screenshot --json --session acecode-demo --target @e4 --output ./element.png
+ace-browser-host.exe screenshot --json --session acecode-demo --attachment-ref @a1 --output ./attachment.png
 ace-browser-host.exe save-pdf --json --session acecode-demo --file-name page.pdf
 ace-browser-host.exe list-tabs --json --session acecode-demo
 ace-browser-host.exe unblock-input --json --session acecode-demo
@@ -106,6 +112,19 @@ echo {"session":"acecode-demo","action":"snapshot","args":{}} | ace-browser-host
 - `os`：OS 级鼠标键盘模式，默认关闭；只有 `os_pointer_enabled=true` 时才允许。
 
 长文本替换优先使用 `fill`。需要观察逐字输入、提交 Enter 或按键行为时使用 `type`。
+
+## 结构化定位与页面读取
+
+所有需要目标元素的动作除 `@e`、CSS selector、`--target-text` 外,还支持结构化 locator。locator 是业务无关的元素描述,可组合 `role`、`name`、`exact`、`near_text`、`within`、`nth`:
+
+```powershell
+ace-browser-host.exe click --json --session acecode-demo --locator '{"role":"button","name":"保存","within":{"role":"row","name":"BUG-123"},"exact":true}'
+ace-browser-host.exe fill --json --session acecode-demo --role textbox --name "标题" --value "new title"
+```
+
+`read-page` 返回的 `elements` 不只包含 `role/name/text/rect`,还包含表单 `value`、select `options` / `selected_options`、`disabled`、`aria_disabled`、`busy`、`expanded`、`checked`、`actionable`、`context` 和 `stable_selector`。页面级返回 `focused`、`viewport` 和 `attachments`。附件候选使用 `@a` ref,用于把 bug 页面里的截图、PDF、日志等资源导出给视觉或后续工具。
+
+定位失败或歧义时,错误里的 `diagnostics` 会包含当前 URL、焦点元素、候选目标和 `suggested_next`。盲模型应优先用这些候选修正 locator,而不是直接重复同一个动作。
 
 ## Human Pointer 速度
 
@@ -130,6 +149,57 @@ echo {"session":"acecode-demo","action":"snapshot","args":{}} | ace-browser-host
 ```
 
 单次 pointer action 可传 `--speed`、`--duration-ms`、`--hold-ms` 和 `--jitter` 覆盖全局 profile，bridge 会把数值 clamp 到允许范围。
+
+## 验证与批处理
+
+改动类动作 `click` / `fill` / `type` / `navigate` / `drag` / `scroll` 可通过 `--args-json` 携带 `expect`。动作成功后会立即轮询验证；满足时在 `data` 内返回 `verified:true` 和 `observed`，不满足时整体返回 `ok:false`、`error.code=expectation_failed`，并带实际 `observed` 状态。
+
+```powershell
+ace-browser-host.exe click --json --session acecode-demo --target @e15 --args-json "{\"expect\":{\"condition\":\"text_equals\",\"target\":\"#status\",\"text\":\"Saved\",\"timeout_ms\":5000}}"
+```
+
+`assert` 是独立验证动作，支持既有 `wait` 条件和新增条件：
+
+- DOM / URL：`url_contains`、`url_matches`、`text_present`、`element_present`、`element_visible`、`element_clickable`
+- 作用域与否定：`text_equals`、`value_equals`、`text_absent`、`element_absent`
+- 网络：`network_idle`、`request_finished`、`request_completed`
+
+网络条件依赖当前 session 已开启网络抓包；先运行 `ace-browser-host.exe network --json --session acecode-demo --cmd start`，再用 `assert --condition request_completed --url "/api/save" --status-class 2xx` 确认请求结果。未开启抓包时会返回 `network_capture_required`，不会伪造成功。
+
+内联 `expect` 里的 `request_completed` 默认只匹配动作开始后观察到的请求,避免误用历史请求。网络断言还可限制 `--method`、`--status`、`--request-body-contains`、`--response-body-contains`、`--after-ms` / `--since-ms`,并优先返回最新匹配请求。
+
+`batch` 从 stdin 或 `--steps-file` 读取 JSON steps 数组或 `{steps, vars, finally}` 对象，并作为一个浏览器插件 action 顺序执行。默认首个失败步骤会停止后续步骤；单步可设置 `continue_on_error:true`。batch 默认自行执行输入拦截生命周期，失败路径也会释放；需要禁用时传 `--no-lifecycle`。
+
+```powershell
+@'
+[
+  {"action":"click","args":{"target_text":"Save","expect":{"condition":"text_equals","target":"#status","text":"Saved","timeout_ms":5000}}},
+  {"action":"assert","args":{"condition":"element_absent","target":"#spinner","timeout_ms":5000}},
+  {"action":"read_page","args":{"mode":"summary"}}
+]
+'@ | ace-browser-host.exe batch --json --session acecode-demo
+```
+
+batch v2 支持 `vars`、`${...}` 字符串插值、单步 `set`、单步 `when`、单步 `retry` 和顶层 `finally`:
+
+```powershell
+@'
+{
+  "vars": {"status": "Done"},
+  "steps": [
+    {"action":"read_page","set":"page"},
+    {"action":"click","args":{"locator":{"role":"button","name":"编辑","within":{"role":"row","name":"BUG-123"}}}},
+    {"action":"fill","args":{"role":"combobox","name":"状态","value":"${status}"},"retry":{"attempts":3,"delay_ms":300}},
+    {"action":"click","args":{"role":"button","name":"保存","expect":{"condition":"request_completed","url":"/api/save","method":"POST","status_class":"2xx","timeout_ms":10000}}}
+  ],
+  "finally": [
+    {"action":"read_page","args":{"mode":"summary"}}
+  ]
+}
+'@ | ace-browser-host.exe batch --json --session acecode-demo
+```
+
+验证阶梯：优先用作用域 DOM 条件确认具体元素和值，再用动作作用域 `request_completed` / `network_idle` 确认保存请求和网络静默；只有 DOM 与网络信号不足时，再截具体元素或导出附件交给 vision 能力兜底。失败时先看 `error.observed`、`error.diagnostics`、`stopped_at`、`steps[index].error`，再决定是否重试或换定位方式。
 
 ## AI 操作提示与输入拦截
 
@@ -242,7 +312,7 @@ daemon 只监听 `127.0.0.1:52007`，CLI 和插件端点使用本地调用头区
 - `devtools performance-start/performance-stop --output trace.json` 写出 trace。
 - `devtools heap-snapshot --output page.heapsnapshot` 写出 heap snapshot。
 - `cdp --method Runtime.evaluate --params ...` 返回 raw CDP result。
-- `screenshot` 保存图片文件且不返回 base64。
+- `screenshot` 保存整页/元素截图文件且不返回 base64；`--attachment-ref @a1` 可导出 `read-page` 发现的附件。
 - `save-pdf` 保存 PDF 并返回规范化路径。
 - `click` 的 CDP mode 返回 mode、target、path point count 和 duration。
 - `fast`、`normal`、`slow` profile 的 duration/hold/path summary 有明显差异。

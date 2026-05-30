@@ -18,7 +18,8 @@
     y: Math.max(24, Math.round(window.innerHeight * 0.5)),
     running: false,
     snapshotCounter: 0,
-    refs: new Map()
+    refs: new Map(),
+    attachmentRefs: new Map()
   };
 
   try {
@@ -283,24 +284,77 @@
     state.pointerDebugTimer = window.setTimeout(hidePointerPath, Math.max(500, Number(args.duration_ms || 2500)));
   }
 
+  function normalizeSpace(value, limit = 12000) {
+    return (value ?? "").toString().replace(/\s+/g, " ").trim().slice(0, limit);
+  }
+
+  function cssEscape(value) {
+    if (window.CSS && typeof window.CSS.escape === "function") return window.CSS.escape(String(value));
+    return String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  }
+
   function visibleText() {
-    return (document.body?.innerText || "")
-      .replace(/\s+/g, " ")
-      .trim()
-      .slice(0, 12000);
+    return normalizeSpace(document.body?.innerText || "", 12000);
+  }
+
+  function textFromIds(ids) {
+    return normalizeSpace(String(ids || "").split(/\s+/)
+      .map((id) => document.getElementById(id)?.innerText || document.getElementById(id)?.textContent || "")
+      .filter(Boolean)
+      .join(" "), 240);
+  }
+
+  function elementLabelText(el) {
+    const labelledBy = textFromIds(el.getAttribute("aria-labelledby"));
+    if (labelledBy) return labelledBy;
+    if (el.id) {
+      const label = document.querySelector(`label[for="${cssEscape(el.id)}"]`);
+      if (label) return normalizeSpace(label.innerText || label.textContent || "", 240);
+    }
+    const parentLabel = el.closest?.("label");
+    if (parentLabel) return normalizeSpace(parentLabel.innerText || parentLabel.textContent || "", 240);
+    return "";
   }
 
   function elementName(el) {
-    return (
+    return normalizeSpace(
       el.getAttribute("aria-label") ||
+      elementLabelText(el) ||
       el.getAttribute("placeholder") ||
       el.getAttribute("alt") ||
       el.getAttribute("title") ||
-      el.innerText ||
       el.value ||
-      ""
-    ).toString().replace(/\s+/g, " ").trim().slice(0, 160);
+      el.innerText ||
+      el.textContent ||
+      "",
+      160
+    );
   }
+
+  const targetSelector = [
+    "a[href]",
+    "button",
+    "input",
+    "textarea",
+    "select",
+    "[role]",
+    "summary",
+    "[contenteditable='true']",
+    "[tabindex]"
+  ].join(",");
+
+  const locatorCandidateSelector = [
+    targetSelector,
+    "label",
+    "img[src]",
+    "[aria-label]",
+    "[aria-labelledby]",
+    "[data-testid]",
+    "[data-test]",
+    "tr",
+    "td",
+    "th"
+  ].join(",");
 
   function elementRole(el) {
     if (el.getAttribute("role")) return el.getAttribute("role");
@@ -309,6 +363,11 @@
     if (tag === "button") return "button";
     if (tag === "textarea") return "textbox";
     if (tag === "select") return "combobox";
+    if (tag === "tr") return "row";
+    if (tag === "td") return "cell";
+    if (tag === "th") return "columnheader";
+    if (tag === "img") return "img";
+    if (tag === "summary") return "button";
     if (tag === "input") {
       const type = (el.getAttribute("type") || "text").toLowerCase();
       if (type === "checkbox") return "checkbox";
@@ -318,6 +377,112 @@
     }
     if (el.isContentEditable) return "textbox";
     return tag;
+  }
+
+  function ariaBool(el, name) {
+    const value = el.getAttribute(name);
+    if (value == null) return null;
+    if (value === "true") return true;
+    if (value === "false") return false;
+    return value;
+  }
+
+  function isDisabled(el) {
+    return Boolean(el.disabled) ||
+      el.getAttribute("aria-disabled") === "true" ||
+      Boolean(el.closest?.("[aria-disabled='true'],fieldset[disabled]"));
+  }
+
+  function elementValue(el) {
+    if (el.isContentEditable) return normalizeSpace(el.innerText || el.textContent || "", 4000);
+    if (el.tagName === "SELECT") return el.value ?? "";
+    if ("value" in el) return String(el.value ?? "");
+    return null;
+  }
+
+  function elementOptions(el) {
+    if (el.tagName !== "SELECT") return undefined;
+    return Array.from(el.options || []).slice(0, 80).map((option, index) => ({
+      index,
+      value: option.value,
+      label: normalizeSpace(option.label || option.innerText || option.textContent || option.value, 200),
+      selected: option.selected,
+      disabled: option.disabled
+    }));
+  }
+
+  function stableSelector(el) {
+    if (!el || el.nodeType !== Node.ELEMENT_NODE) return null;
+    if (el.id) return `#${cssEscape(el.id)}`;
+    for (const attr of ["data-testid", "data-test", "name", "aria-label", "title"]) {
+      const value = el.getAttribute(attr);
+      if (value) {
+        const selector = `${el.tagName.toLowerCase()}[${attr}="${cssEscape(value)}"]`;
+        try {
+          if (document.querySelectorAll(selector).length === 1) return selector;
+        } catch {
+          // Fall through to a structural selector.
+        }
+      }
+    }
+    const parts = [];
+    let node = el;
+    for (let depth = 0; node && node.nodeType === Node.ELEMENT_NODE && depth < 5; depth += 1) {
+      const tag = node.tagName.toLowerCase();
+      let part = tag;
+      const parent = node.parentElement;
+      if (parent) {
+        const siblings = Array.from(parent.children).filter((child) => child.tagName === node.tagName);
+        if (siblings.length > 1) part += `:nth-of-type(${siblings.indexOf(node) + 1})`;
+      }
+      parts.unshift(part);
+      node = parent;
+    }
+    return parts.length ? parts.join(" > ") : null;
+  }
+
+  function selectedOptions(el) {
+    if (el.tagName !== "SELECT") return undefined;
+    return Array.from(el.selectedOptions || []).map((option) => option.value);
+  }
+
+  function elementContext(el) {
+    const label = elementLabelText(el);
+    const parent = el.closest?.("tr,[role='row'],li,section,article,form,fieldset,div") || el.parentElement;
+    return {
+      label: label || null,
+      nearby_text: normalizeSpace(parent?.innerText || parent?.textContent || "", 320) || null
+    };
+  }
+
+  function elementState(el) {
+    const value = elementValue(el);
+    const options = elementOptions(el);
+    const disabled = isDisabled(el);
+    const role = elementRole(el);
+    const actionableRoles = new Set(["button", "link", "textbox", "combobox", "checkbox", "radio", "menuitem", "option", "tab", "switch"]);
+    const actionable = isVisible(el) && !disabled && (
+      actionableRoles.has(role) ||
+      el.hasAttribute("tabindex") ||
+      el.isContentEditable ||
+      typeof el.click === "function"
+    );
+    return {
+      value,
+      placeholder: el.getAttribute("placeholder") || null,
+      type: el.getAttribute("type") || null,
+      href: el.href || null,
+      src: el.currentSrc || el.src || null,
+      disabled,
+      aria_disabled: ariaBool(el, "aria-disabled"),
+      busy: ariaBool(el, "aria-busy"),
+      expanded: ariaBool(el, "aria-expanded"),
+      selected: "selected" in el ? Boolean(el.selected) : ariaBool(el, "aria-selected"),
+      checked: "checked" in el ? Boolean(el.checked) : ariaBool(el, "aria-checked"),
+      actionable,
+      options,
+      selected_options: selectedOptions(el)
+    };
   }
 
   function isVisible(el) {
@@ -333,41 +498,141 @@
       rect.left <= window.innerWidth;
   }
 
+  function rectObject(el) {
+    const rect = el.getBoundingClientRect();
+    return {
+      x: Math.round(rect.x),
+      y: Math.round(rect.y),
+      width: Math.round(rect.width),
+      height: Math.round(rect.height)
+    };
+  }
+
+  function candidateSummary(el, rank = null) {
+    const rect = rectObject(el);
+    return {
+      rank,
+      role: elementRole(el),
+      name: elementName(el),
+      tag: el.tagName,
+      text: normalizeSpace(el.innerText || el.textContent || elementName(el), 160),
+      rect,
+      stable_selector: stableSelector(el),
+      context: elementContext(el)
+    };
+  }
+
+  function describeElement(el, ref = null, snapshotId = null) {
+    const stateFields = elementState(el);
+    const item = {
+      ref,
+      snapshot_id: snapshotId,
+      role: elementRole(el),
+      name: elementName(el),
+      tag: el.tagName,
+      text: normalizeSpace(el.innerText || el.textContent || elementName(el), 240),
+      rect: rectObject(el),
+      stable_selector: stableSelector(el),
+      context: elementContext(el),
+      actionable: stateFields.actionable,
+      disabled: stateFields.disabled,
+      aria_disabled: stateFields.aria_disabled,
+      busy: stateFields.busy,
+      expanded: stateFields.expanded,
+      selected: stateFields.selected,
+      checked: stateFields.checked,
+      value: stateFields.value,
+      placeholder: stateFields.placeholder,
+      type: stateFields.type,
+      href: stateFields.href,
+      src: stateFields.src,
+      options: stateFields.options,
+      selected_options: stateFields.selected_options,
+      state: {
+        visible: isVisible(el),
+        actionable: stateFields.actionable,
+        disabled: stateFields.disabled,
+        aria_disabled: stateFields.aria_disabled,
+        busy: stateFields.busy,
+        expanded: stateFields.expanded,
+        selected: stateFields.selected,
+        checked: stateFields.checked
+      }
+    };
+    Object.keys(item).forEach((key) => item[key] === undefined && delete item[key]);
+    return item;
+  }
+
+  function attachmentKind(url, el) {
+    const lower = String(url || "").split("?")[0].toLowerCase();
+    if (el.tagName === "IMG" || /\.(png|jpe?g|gif|webp|bmp|svg)$/.test(lower)) return "image";
+    if (/\.pdf$/.test(lower)) return "pdf";
+    if (el.hasAttribute("download")) return "download";
+    if (/\.(zip|log|txt|csv|json|har|xlsx?|docx?)$/.test(lower)) return "download";
+    return null;
+  }
+
+  function collectAttachments(snapshotId) {
+    state.attachmentRefs.clear();
+    const attachments = [];
+    let index = 1;
+    const seen = new Set();
+    for (const el of Array.from(document.querySelectorAll("img[src],a[href][download],a[href],embed[src],object[data]"))) {
+      if (!isVisible(el) && el.tagName !== "A") continue;
+      const url = el.currentSrc || el.src || el.href || el.data || "";
+      if (!url || seen.has(url)) continue;
+      const kind = attachmentKind(url, el);
+      if (!kind) continue;
+      seen.add(url);
+      const ref = `@a${index++}`;
+      const item = {
+        ref,
+        snapshot_id: snapshotId,
+        kind,
+        url,
+        tag: el.tagName,
+        name: elementName(el),
+        mime_hint: kind === "image" ? "image/*" : kind === "pdf" ? "application/pdf" : null,
+        rect: isVisible(el) ? rectObject(el) : null,
+        context: elementContext(el)
+      };
+      state.attachmentRefs.set(ref, { element: el, ...item });
+      attachments.push(item);
+      if (attachments.length >= 80) break;
+    }
+    return attachments;
+  }
+
+  function attachmentInfo(args = {}) {
+    const ref = args.attachment_ref || args.attachmentRef || args.ref;
+    if (!ref) {
+      const error = new Error("attachment_ref is required");
+      error.code = "invalid_request";
+      throw error;
+    }
+    if (!state.attachmentRefs.has(ref)) collectAttachments(`snap_${Date.now()}_${state.snapshotCounter}`);
+    const item = state.attachmentRefs.get(ref);
+    if (!item) {
+      const error = new Error(`attachment ref not found: ${ref}`);
+      error.code = "element_ref_stale";
+      error.suggested_next = "Run read_page again and use a fresh attachment ref.";
+      throw error;
+    }
+    const { element: _element, ...data } = item;
+    return { ok: true, data };
+  }
+
   function snapshot() {
     const snapshotId = `snap_${Date.now()}_${++state.snapshotCounter}`;
     state.refs.clear();
-    const selector = [
-      "a[href]",
-      "button",
-      "input",
-      "textarea",
-      "select",
-      "[role='button']",
-      "[contenteditable='true']",
-      "[tabindex]"
-    ].join(",");
     const elements = [];
     let index = 1;
-    for (const el of Array.from(document.querySelectorAll(selector))) {
+    for (const el of Array.from(document.querySelectorAll(locatorCandidateSelector))) {
       if (!isVisible(el)) continue;
       const ref = `@e${index++}`;
       state.refs.set(ref, el);
-      const rect = el.getBoundingClientRect();
-      elements.push({
-        ref,
-        snapshot_id: snapshotId,
-        role: elementRole(el),
-        name: elementName(el),
-        tag: el.tagName,
-        text: elementName(el),
-        rect: {
-          x: Math.round(rect.x),
-          y: Math.round(rect.y),
-          width: Math.round(rect.width),
-          height: Math.round(rect.height)
-        }
-      });
-      if (elements.length >= 200) break;
+      elements.push(describeElement(el, ref, snapshotId));
+      if (elements.length >= 250) break;
     }
     return {
       ok: true,
@@ -375,15 +640,145 @@
         snapshot_id: snapshotId,
         url: location.href,
         title: document.title,
+        viewport: {
+          width: window.innerWidth,
+          height: window.innerHeight,
+          scroll_x: window.scrollX,
+          scroll_y: window.scrollY,
+          device_pixel_ratio: window.devicePixelRatio || 1
+        },
+        focused: document.activeElement && document.activeElement !== document.body
+          ? candidateSummary(document.activeElement)
+          : null,
         text: visibleText(),
-        elements
+        elements,
+        attachments: collectAttachments(snapshotId)
       }
     };
   }
 
+  function visibleCandidates(root = document) {
+    const candidates = [];
+    if (root !== document && root.matches?.(locatorCandidateSelector)) candidates.push(root);
+    candidates.push(...Array.from(root.querySelectorAll?.(locatorCandidateSelector) || []));
+    return candidates.filter((el, index, list) => list.indexOf(el) === index).filter(isVisible);
+  }
+
+  function resolveVisibleTextTarget(text, exactOnly = false) {
+    const needle = String(text || "").replace(/\s+/g, " ").trim();
+    if (!needle) {
+      const error = new Error("target_text is required");
+      error.code = "invalid_request";
+      throw error;
+    }
+    const visible = visibleCandidates();
+    const exact = visible.find((el) => elementName(el) === needle);
+    if (exact) return exact;
+    if (exactOnly) {
+      const error = new Error(`element text not found: ${needle}`);
+      error.code = "element_not_found";
+      error.candidates = visible.slice(0, 8).map(candidateSummary);
+      error.suggested_next = "Run read_page, inspect candidates, or relax exact matching.";
+      throw error;
+    }
+    const partial = visible.find((el) => elementName(el).includes(needle));
+    if (partial) return partial;
+    const error = new Error(`element text not found: ${needle}`);
+    error.code = "element_not_found";
+    error.candidates = visible.slice(0, 8).map(candidateSummary);
+    error.suggested_next = "Run read_page, inspect candidates, or refine target_text.";
+    throw error;
+  }
+
+  function locatorHasStructuredFields(locator) {
+    return ["role", "name", "near_text", "nearText", "within", "nth", "exact", "visible", "tag"].some((key) => Object.prototype.hasOwnProperty.call(locator, key));
+  }
+
+  function roleMatches(el, role) {
+    if (!role) return true;
+    return elementRole(el).toLowerCase() === String(role).toLowerCase();
+  }
+
+  function nameMatches(el, locator) {
+    const wanted = locator.name ?? locator.text;
+    if (wanted == null || wanted === "") return true;
+    const haystack = normalizeSpace(elementName(el) || el.innerText || el.textContent || "", 400);
+    const needle = normalizeSpace(wanted, 400);
+    return locator.exact === true ? haystack === needle : haystack.includes(needle);
+  }
+
+  function nearTextMatches(el, text) {
+    const needle = normalizeSpace(text, 400);
+    if (!needle) return true;
+    let node = el;
+    for (let depth = 0; node && depth < 4; depth += 1) {
+      const textValue = normalizeSpace(node.innerText || node.textContent || "", 1000);
+      if (textValue.includes(needle)) return true;
+      node = node.parentElement;
+    }
+    return false;
+  }
+
+  function resolveStructuredLocator(locator) {
+    if (locator.selector) return resolveTarget(locator.selector);
+    if (locator.target) return resolveTarget(locator.target);
+    if (locator.ref) return resolveTarget(locator.ref);
+    const root = locator.within ? resolveTarget(locator.within) : document;
+    const visibleOnly = locator.visible !== false;
+    const tag = locator.tag ? String(locator.tag).toLowerCase() : "";
+    const candidates = visibleCandidates(root)
+      .filter((el) => !visibleOnly || isVisible(el))
+      .filter((el) => !tag || el.tagName.toLowerCase() === tag)
+      .filter((el) => roleMatches(el, locator.role))
+      .filter((el) => nameMatches(el, locator))
+      .filter((el) => nearTextMatches(el, locator.near_text ?? locator.nearText));
+    if (!candidates.length) {
+      const error = new Error("structured locator matched no visible elements");
+      error.code = "element_not_found";
+      error.candidates = visibleCandidates(root).slice(0, 8).map(candidateSummary);
+      error.suggested_next = "Run read_page and refine role/name/within/near_text.";
+      throw error;
+    }
+    if (locator.nth != null) {
+      const nth = Number(locator.nth);
+      if (Number.isInteger(nth) && nth >= 0 && nth < candidates.length) return candidates[nth];
+      const error = new Error(`structured locator nth out of range: ${locator.nth}`);
+      error.code = "element_not_found";
+      error.candidates = candidates.slice(0, 8).map(candidateSummary);
+      error.suggested_next = "Choose an nth value within the candidate list.";
+      throw error;
+    }
+    if (candidates.length > 1) {
+      const error = new Error("structured locator is ambiguous");
+      error.code = "ambiguous_target";
+      error.candidates = candidates.slice(0, 8).map(candidateSummary);
+      error.suggested_next = "Add within, near_text, exact, or nth to disambiguate.";
+      throw error;
+    }
+    return candidates[0];
+  }
+
   function resolveTarget(target) {
+    if (target && typeof target === "object") {
+      if (target.attachment_ref || target.attachmentRef) {
+        const ref = target.attachment_ref || target.attachmentRef;
+        const item = state.attachmentRefs.get(ref);
+        if (!item?.element || !document.documentElement.contains(item.element)) {
+          const error = new Error(`stale attachment ref: ${ref}`);
+          error.code = "element_ref_stale";
+          throw error;
+        }
+        return item.element;
+      }
+      if (typeof target.text === "string" && !locatorHasStructuredFields(target)) {
+        return resolveVisibleTextTarget(target.text, target.exact === true);
+      }
+      return resolveStructuredLocator(target);
+    }
     if (typeof target !== "string" || target.trim() === "") {
-      throw new Error("target is required");
+      const error = new Error("target is required");
+      error.code = "invalid_request";
+      throw error;
     }
     if (target.startsWith("@e")) {
       const el = state.refs.get(target);
@@ -394,10 +789,18 @@
       }
       return el;
     }
-    const el = document.querySelector(target);
+    let el = null;
+    try {
+      el = document.querySelector(target);
+    } catch (error) {
+      error.code = "invalid_selector";
+      throw error;
+    }
     if (!el) {
       const error = new Error(`element not found: ${target}`);
       error.code = "element_not_found";
+      error.candidates = visibleCandidates().slice(0, 8).map(candidateSummary);
+      error.suggested_next = "Run read_page and use @e ref, stable_selector, or a structured locator.";
       throw error;
     }
     return el;
@@ -433,13 +836,32 @@
           y: rect.y,
           width: rect.width,
           height: rect.height
+        },
+        element: describeElement(el, null, null),
+        viewport: {
+          width: window.innerWidth,
+          height: window.innerHeight,
+          scroll_x: window.scrollX,
+          scroll_y: window.scrollY,
+          device_pixel_ratio: window.devicePixelRatio || 1
         }
       }
     };
   }
 
   function targetFromArgs(args) {
-    return args?.target || args?.selector;
+    if (args?.locator && typeof args.locator === "object") return args.locator;
+    if (args?.target && typeof args.target === "object") return args.target;
+    if (args?.target || args?.selector) return args?.target || args?.selector;
+    if (args?.target_text || args?.targetText) return { text: args.target_text || args.targetText };
+    if (args?.role || args?.name || args?.near_text || args?.within) {
+      const locator = {};
+      for (const key of ["role", "name", "near_text", "nearText", "within", "nth", "exact", "tag"]) {
+        if (Object.prototype.hasOwnProperty.call(args, key)) locator[key] = args[key];
+      }
+      return locator;
+    }
+    return null;
   }
 
   function pointForElement(el) {
@@ -476,7 +898,7 @@
     el.dispatchEvent(new MouseEvent("mouseover", { bubbles: true, clientX: point.x, clientY: point.y }));
     el.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, clientX: point.x, clientY: point.y }));
     moveTo(point.x, point.y);
-    return { ok: true, data: { success: true, mode: "dom", target: { x: point.x, y: point.y }, path_points: 1 } };
+    return { ok: true, data: { success: true, mode: "dom", target: { x: point.x, y: point.y }, resolved: candidateSummary(el), path_points: 1 } };
   }
 
   function clickTarget(target, args = {}) {
@@ -498,7 +920,7 @@
     dispatchPointer(el, "pointerdown", point, { button: 0, buttons: 1 });
     dispatchPointer(el, "pointerup", point, { button: 0, buttons: 0 });
     el.click();
-    return { ok: true, data: { success: true, tag: el.tagName, mode: "dom", target: { x: point.x, y: point.y }, path_points: 1 } };
+    return { ok: true, data: { success: true, tag: el.tagName, mode: "dom", target: { x: point.x, y: point.y }, resolved: candidateSummary(el), path_points: 1 } };
   }
 
   function fillTarget(target, value) {
@@ -507,12 +929,12 @@
     if (el.isContentEditable) {
       document.execCommand("selectAll", false, null);
       document.execCommand("insertText", false, String(value ?? ""));
-      return { ok: true, data: { success: true, tag: el.tagName, mode: "contenteditable" } };
+      return { ok: true, data: { success: true, tag: el.tagName, mode: "contenteditable", resolved: candidateSummary(el) } };
     }
     el.value = String(value ?? "");
     el.dispatchEvent(new Event("input", { bubbles: true }));
     el.dispatchEvent(new Event("change", { bubbles: true }));
-    return { ok: true, data: { success: true, tag: el.tagName, mode: "value" } };
+    return { ok: true, data: { success: true, tag: el.tagName, mode: "value", resolved: candidateSummary(el) } };
   }
 
   function sleep(ms) {
@@ -570,7 +992,7 @@
       el.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key }));
       el.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key }));
     }
-    return { ok: true, data: { success: true, tag: el.tagName, mode: "dom", typed_chars: Array.from(text).length, keys } };
+    return { ok: true, data: { success: true, tag: el.tagName, mode: "dom", typed_chars: Array.from(text).length, keys, resolved: candidateSummary(el) } };
   }
 
   function dragTarget(args = {}) {
@@ -624,32 +1046,95 @@
     }));
   }
 
-  function conditionMet(args = {}) {
-    const condition = args.condition;
-    if (condition === "url_contains") return location.href.includes(String(args.url || ""));
-    if (condition === "url_matches") return new RegExp(String(args.url || "")).test(location.href);
-    if (condition === "text_present") return visibleText().includes(String(args.text || ""));
-    if (condition === "element_present") {
-      try { resolveTarget(targetFromArgs(args)); return true; } catch { return false; }
+  // 取目标作用域的文本:有 target 时取该元素文本,无 target 时退回整页可见文本。
+  // 返回 null 表示 target 给了但解析不到(用于区分"作用域不存在"和"作用域里没有该文本")。
+  function scopedText(args) {
+    const target = targetFromArgs(args);
+    if (!target) return visibleText();
+    try {
+      const el = resolveTarget(target);
+      return (el.innerText || el.value || el.textContent || "").replace(/\s+/g, " ").trim();
+    } catch {
+      return null;
     }
-    if (condition === "element_visible" || condition === "element_clickable") {
-      try { return isVisible(resolveTarget(targetFromArgs(args))); } catch { return false; }
-    }
-    if (condition === "network_idle" || condition === "request_finished") return true;
-    return false;
   }
 
-  function waitForCondition(args = {}) {
+  // 取目标元素的"值"(input/textarea 的 value,contenteditable 的文本)。
+  function scopedValue(args) {
+    const target = targetFromArgs(args);
+    if (!target) return null;
+    try {
+      const el = resolveTarget(target);
+      if (el.isContentEditable) return (el.innerText || el.textContent || "").trim();
+      return (el.value != null ? String(el.value) : "").trim();
+    } catch {
+      return null;
+    }
+  }
+
+  // 统一的 DOM 条件求值器,供 wait / assert / 动作内联 expect 共用。
+  // 返回 { met, observed }:met 是否满足,observed 是实际观察到的状态(失败时回给盲模型决策)。
+  // 注意:network_idle / request_completed 等网络类条件在 service worker 侧求值,不在这里。
+  function evaluateCondition(args = {}) {
+    const condition = args.condition;
+    if (condition === "url_contains") {
+      return { met: location.href.includes(String(args.url || "")), observed: location.href };
+    }
+    if (condition === "url_matches") {
+      let met = false;
+      try { met = new RegExp(String(args.url || "")).test(location.href); } catch { met = false; }
+      return { met, observed: location.href };
+    }
+    if (condition === "text_present") {
+      const text = scopedText(args);
+      return { met: text != null && text.includes(String(args.text || "")), observed: text };
+    }
+    if (condition === "text_absent") {
+      const text = scopedText(args);
+      return { met: text != null && !text.includes(String(args.text || "")), observed: text };
+    }
+    if (condition === "text_equals") {
+      const text = scopedText(args);
+      return { met: text != null && text === String(args.text || ""), observed: text };
+    }
+    if (condition === "value_equals") {
+      const value = scopedValue(args);
+      return { met: value != null && value === String(args.value ?? args.text ?? ""), observed: value };
+    }
+    if (condition === "element_present") {
+      try { resolveTarget(targetFromArgs(args)); return { met: true, observed: "present" }; }
+      catch { return { met: false, observed: "absent" }; }
+    }
+    if (condition === "element_visible" || condition === "element_clickable") {
+      try {
+        const visible = isVisible(resolveTarget(targetFromArgs(args)));
+        return { met: visible, observed: visible ? "visible" : "hidden" };
+      } catch { return { met: false, observed: "absent" }; }
+    }
+    if (condition === "element_absent") {
+      // 解析不到 = 已消失 = 满足;解析得到但不可见 = 也算 absent。
+      try {
+        const visible = isVisible(resolveTarget(targetFromArgs(args)));
+        return { met: !visible, observed: visible ? "visible" : "hidden" };
+      } catch { return { met: true, observed: "absent" }; }
+    }
+    return { met: false, observed: null };
+  }
+
+  // wait 与 assert 共用的轮询器:仅 failCode 不同(wait_timeout vs assertion_failed)。
+  // 成功/失败都回 observed,让调用方拿到实际状态。
+  function waitForCondition(args = {}, failCode = "wait_timeout") {
     const started = Date.now();
     const timeoutMs = Math.max(1, Number(args.timeout_ms || 5000));
     return new Promise((resolve) => {
       const tick = () => {
-        if (conditionMet(args)) {
-          resolve({ ok: true, data: { success: true, matched: args.condition, elapsed_ms: Date.now() - started, url: location.href } });
+        const { met, observed } = evaluateCondition(args);
+        if (met) {
+          resolve({ ok: true, data: { success: true, matched: args.condition, observed, elapsed_ms: Date.now() - started, url: location.href } });
           return;
         }
         if (Date.now() - started >= timeoutMs) {
-          resolve({ ok: false, error: { code: "wait_timeout", message: `Timed out waiting for ${args.condition}` } });
+          resolve({ ok: false, error: { code: failCode, message: `Timed out waiting for ${args.condition}`, observed } });
           return;
         }
         window.setTimeout(tick, 100);
@@ -658,12 +1143,39 @@
     });
   }
 
+  function diagnosticsForError(error) {
+    let focused = null;
+    try {
+      focused = document.activeElement && document.activeElement !== document.body
+        ? candidateSummary(document.activeElement)
+        : null;
+    } catch {
+      focused = null;
+    }
+    let candidates = Array.isArray(error?.candidates) ? error.candidates : [];
+    if (!candidates.length && ["element_not_found", "ambiguous_target", "element_ref_stale"].includes(error?.code)) {
+      try {
+        candidates = visibleCandidates().slice(0, 8).map(candidateSummary);
+      } catch {
+        candidates = [];
+      }
+    }
+    return {
+      url: location.href,
+      title: document.title,
+      focused,
+      candidates,
+      suggested_next: error?.suggested_next || "Run read_page, inspect elements/attachments, and retry with a refined locator."
+    };
+  }
+
   function errorResponse(error) {
     return {
       ok: false,
       error: {
         code: error?.code || "extension_error",
-        message: error instanceof Error ? error.message : String(error)
+        message: error instanceof Error ? error.message : String(error),
+        diagnostics: diagnosticsForError(error)
       }
     };
   }
@@ -696,6 +1208,8 @@
         sendResponse({ ok: true, data: { visible: false } });
       } else if (message.command === "resolve_target") {
         sendResponse(rectForTarget(targetFromArgs(message.args)));
+      } else if (message.command === "attachment_info") {
+        sendResponse(attachmentInfo(message.args || {}));
       } else if (message.command === "click") {
         sendResponse(clickTarget(targetFromArgs(message.args), message.args || {}));
       } else if (message.command === "fill") {
@@ -714,6 +1228,10 @@
         return true;
       } else if (message.command === "wait") {
         waitForCondition(message.args || {}).then(sendResponse).catch((error) => sendResponse(errorResponse(error)));
+        return true;
+      } else if (message.command === "assert") {
+        // assert 与 wait 同一个轮询器,只是失败码不同,且面向"确认而非等待"的语义。
+        waitForCondition(message.args || {}, "assertion_failed").then(sendResponse).catch((error) => sendResponse(errorResponse(error)));
         return true;
       } else {
         sendResponse({ ok: false, error: { code: "unknown_command", message: `Unknown command: ${message.command}` } });

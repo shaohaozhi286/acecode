@@ -197,6 +197,126 @@ try {
         throw "ensure-ready should report ready without launching browser when plugin is connected"
     }
 
+    $assertJob = Start-Job -ScriptBlock {
+        param($ExePath, $Port)
+        & $ExePath assert --json --session smoke --condition text_equals --target "#status" --text "Saved" --timeout-ms 5000 --port $Port
+    } -ArgumentList $ExePath, $Port
+    try {
+        $assertPoll = Wait-PluginAction -Port $Port -Headers $pluginHeaders -ExpectedAction "assert" -Job $assertJob
+        if ($assertPoll.data.action.args.condition -ne "text_equals" -or $assertPoll.data.action.args.target -ne "#status" -or $assertPoll.data.action.args.text -ne "Saved") {
+            throw "assert CLI did not preserve condition args"
+        }
+        $assertResultBody = @{
+            id = $assertPoll.data.action.id
+            result = @{ ok = $true; data = @{ matched = "text_equals"; observed = "Saved" } }
+        } | ConvertTo-Json -Depth 8 -Compress
+        Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/plugin/result" -Headers $pluginHeaders -ContentType "application/json" -Body $assertResultBody | Out-Null
+        $assertOutput = Receive-CompletedJob -Job $assertJob -Name "assert"
+        Remove-Job $assertJob -Force
+        $assertJob = $null
+        $assertResult = ($assertOutput | ConvertFrom-Json)
+        if ($true -ne $assertResult.ok -or $assertResult.data.observed -ne "Saved") {
+            throw "assert command did not return successful envelope"
+        }
+    } finally {
+        if ($null -ne $assertJob) {
+            Remove-Job $assertJob -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    $batchSteps = '{"vars":{"status":"Saved"},"steps":[{"action":"assert","args":{"condition":"network_idle","timeout_ms":45000},"set":"idle"},{"action":"read_page","args":{"mode":"summary"},"when":{"condition":"text_present","text":"${status}","timeout_ms":250},"retry":{"attempts":2,"delay_ms":100}}],"finally":[{"action":"read_page","args":{"mode":"focused"}}]}'
+    $batchJob = Start-Job -ScriptBlock {
+        param($ExePath, $Port, $Steps)
+        $Steps | & $ExePath batch --json --session smoke --port $Port
+    } -ArgumentList $ExePath, $Port, $batchSteps
+    try {
+        $batchPoll = Wait-PluginAction -Port $Port -Headers $pluginHeaders -ExpectedAction "batch" -Job $batchJob
+        if ($batchPoll.data.action.args.steps.Count -ne 2 -or $batchPoll.data.action.args.steps[0].action -ne "assert") {
+            throw "batch CLI did not preserve steps"
+        }
+        if ($batchPoll.data.action.args.vars.status -ne "Saved" -or $batchPoll.data.action.args.finally.Count -ne 1) {
+            throw "batch CLI did not preserve v2 vars/finally"
+        }
+        if ($batchPoll.data.action.command_timeout_ms -ne 65100) {
+            throw "batch CLI did not compute expected command_timeout_ms: $($batchPoll.data.action.command_timeout_ms)"
+        }
+        $batchResultBody = @{
+            id = $batchPoll.data.action.id
+            result = @{
+                ok = $true
+                data = @{
+                    ran = 2
+                    stopped_at = $null
+                    finally_steps = @(@{ index = 0; action = "read_page"; ok = $true; data = @{ text = "Saved" } })
+                    steps = @(
+                        @{ index = 0; action = "assert"; ok = $true; data = @{ observed = @{ in_flight = 0 } } },
+                        @{ index = 1; action = "read_page"; ok = $true; data = @{ text = "Saved" } }
+                    )
+                }
+            }
+        } | ConvertTo-Json -Depth 12 -Compress
+        Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/plugin/result" -Headers $pluginHeaders -ContentType "application/json" -Body $batchResultBody | Out-Null
+        $batchOutput = Receive-CompletedJob -Job $batchJob -Name "batch"
+        Remove-Job $batchJob -Force
+        $batchJob = $null
+        $batchResult = ($batchOutput | ConvertFrom-Json)
+        if ($true -ne $batchResult.ok -or $batchResult.data.ran -ne 2) {
+            throw "batch command did not return combined envelope"
+        }
+    } finally {
+        if ($null -ne $batchJob) {
+            Remove-Job $batchJob -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    $screenshotPath = Join-Path ([System.IO.Path]::GetTempPath()) "ace-browser-smoke-element.png"
+    Remove-Item -LiteralPath $screenshotPath -Force -ErrorAction SilentlyContinue
+    $screenshotJob = Start-Job -ScriptBlock {
+        param($ExePath, $Port, $Path)
+        & $ExePath screenshot --json --session smoke --target "@e4" --output $Path --port $Port
+    } -ArgumentList $ExePath, $Port, $screenshotPath
+    try {
+        $screenshotPoll = Wait-PluginAction -Port $Port -Headers $pluginHeaders -ExpectedAction "screenshot" -Job $screenshotJob
+        if ($screenshotPoll.data.action.args.selector -ne "@e4") {
+            throw "screenshot CLI did not preserve target args: $($screenshotPoll.data.action.args | ConvertTo-Json -Depth 8 -Compress)"
+        }
+        $actualScreenshotPath = [System.IO.Path]::GetFullPath([string]$screenshotPoll.data.action.args.output)
+        if ([System.IO.Path]::GetFileName($actualScreenshotPath) -ne "ace-browser-smoke-element.png") {
+            throw "screenshot CLI did not preserve output filename: actual=$actualScreenshotPath"
+        }
+        $pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+        $screenshotResultBody = @{
+            id = $screenshotPoll.data.action.id
+            result = @{
+                ok = $true
+                data = @{
+                    path = $screenshotPath
+                    mimeType = "image/png"
+                    sizeBytes = 68
+                    data = $pngBase64
+                    crop = @{ applied = $true; rect = @{ x = 1; y = 2; width = 3; height = 4 } }
+                }
+            }
+        } | ConvertTo-Json -Depth 12 -Compress
+        Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/plugin/result" -Headers $pluginHeaders -ContentType "application/json" -Body $screenshotResultBody | Out-Null
+        $screenshotOutput = Receive-CompletedJob -Job $screenshotJob -Name "screenshot"
+        Remove-Job $screenshotJob -Force
+        $screenshotJob = $null
+        $screenshotResult = ($screenshotOutput | ConvertFrom-Json)
+        $materializedPath = [string]$screenshotResult.data.path
+        if ($true -ne $screenshotResult.ok -or !(Test-Path $materializedPath) -or $null -ne $screenshotResult.data.data) {
+            throw "screenshot command did not materialize file and strip base64"
+        }
+    } finally {
+        if ($null -ne $screenshotJob) {
+            Remove-Job $screenshotJob -Force -ErrorAction SilentlyContinue
+        }
+        Remove-Item -LiteralPath $screenshotPath -Force -ErrorAction SilentlyContinue
+        if ($materializedPath) {
+            Remove-Item -LiteralPath $materializedPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+
     $devtoolsJob = Start-Job -ScriptBlock {
         param($ExePath, $Port)
         & $ExePath devtools --json --session smoke --cmd console-list --types error,warn --port $Port
