@@ -175,12 +175,6 @@ jobs:
           fi
           cp "$browser_host" "$package_dir/"
 
-          if [ ! -f "ace-browser-bridge/manifest.json" ]; then
-            echo "Missing browser bridge extension manifest: ace-browser-bridge/manifest.json" >&2
-            exit 1
-          fi
-          cp -R "ace-browser-bridge" "$package_dir/"
-
           if [ "${{ matrix.build_desktop }}" = "true" ]; then
             if [ "$RUNNER_OS" = "macOS" ]; then
               if [ ! -d "build/ACECode.app" ]; then
@@ -229,11 +223,6 @@ jobs:
             throw "Missing browser host executable: ace-browser-host.exe"
           }
           Copy-Item -LiteralPath $browserHostExe -Destination "$packageDir/"
-
-          if (-not (Test-Path -LiteralPath "ace-browser-bridge/manifest.json")) {
-            throw "Missing browser bridge extension manifest: ace-browser-bridge/manifest.json"
-          }
-          Copy-Item -LiteralPath "ace-browser-bridge" -Destination "$packageDir/" -Recurse -Force
 
           if ("${{ matrix.build_desktop }}" -eq "true") {
             $desktopCandidates = @(
@@ -302,16 +291,64 @@ jobs:
           path: build/${{ matrix.executable }}.dSYM
           if-no-files-found: warn
 
+  package-browser-extension:
+    name: ace-browser-bridge
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Package Chrome extension
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile, ZIP_DEFLATED
+
+          root = Path("ace-browser-bridge")
+          required = [
+              root / "manifest.json",
+              root / "service_worker.js",
+              root / "content" / "virtual-cursor.js",
+          ]
+          missing = [str(path) for path in required if not path.is_file()]
+          if missing:
+              raise SystemExit("Missing Chrome extension files: " + ", ".join(missing))
+
+          out = Path("ace-browser-bridge.zip")
+          if out.exists():
+              out.unlink()
+          with ZipFile(out, "w", ZIP_DEFLATED) as archive:
+              for path in sorted(root.rglob("*")):
+                  if path.is_file():
+                      archive.write(path, path.as_posix())
+
+          with ZipFile(out) as archive:
+              names = set(archive.namelist())
+          for path in required:
+              entry = path.as_posix()
+              if entry not in names:
+                  raise SystemExit(f"Chrome extension zip missing {entry}")
+          PY
+
+      - name: Upload Chrome extension artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ace-browser-bridge
+          path: ace-browser-bridge.zip
+          if-no-files-found: error
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build-and-package
+    needs:
+      - build-and-package
+      - package-browser-extension
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-          pattern: acecode-*
           merge-multiple: false
 
       - name: Collect release assets
