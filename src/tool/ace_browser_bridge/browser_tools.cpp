@@ -99,7 +99,7 @@ std::string cli_prompt_for_session(const std::string& session) {
 #endif
     std::ostringstream oss;
     oss
-        << "# ACE Browser Bridge\n\n"
+        << "# ACE Browser Host\n\n"
         << "Use the local `" << host << "` CLI for browser work. The only ACECode browser tool is `browser_start`; "
         << "after it is called, do page operations with shell commands against `" << host << "`, not with `browser_*` tools.\n\n"
         << "Default session: `" << session << "`. Default daemon port: `" << kDefaultPort << "`. "
@@ -111,8 +111,8 @@ std::string cli_prompt_for_session(const std::string& session) {
         << host_example << " start --json\n"
         << host_example << " status --json\n"
         << "```\n"
-        << "Use `ensure-ready` before page actions. It starts the host daemon, opens a normal browser wake page when the extension is not connected, and waits for a fresh bridge connection. "
-        << "If it returns `ready:false`, inspect `ready_error`, `browser_launch_error`, `extension_connected`, `extension_stale`, and `version_compatible` before asking the user to fix the browser or extension.\n\n"
+        << "Use `ensure-ready` before page actions. It starts the host daemon and prefers the host-managed direct-CDP Chrome backend; the extension bridge is only a compatibility fallback. "
+        << "If it returns `ready:false`, inspect `ready_error`, `backend`, `direct_cdp`, `browser_launch_error`, `extension_connected`, `extension_stale`, and `version_compatible` before asking the user to fix Chrome or the extension.\n\n"
         << "Page selection and reading:\n"
         << "```bash\n"
         << host_example << " open --json --session " << session << " --url https://example.com\n"
@@ -168,6 +168,7 @@ std::string cli_prompt_for_session(const std::string& session) {
         << host_example << " cdp --json --session " << session << " --method Runtime.evaluate --params '{\\\"expression\\\":\\\"document.title\\\",\\\"returnByValue\\\":true}'\n"
         << "```\n\n"
         << "Workflow rules:\n"
+        << "- Treat `backend=direct_cdp` as the normal path. A `chrome.debugger` ownership error from the extension does not mean CDP is unavailable; retry `ensure-ready`/`status` and use the direct `cdp`, `read-page`, `click`, `fill`, `type`, and `evaluate` commands first.\n"
         << "- Prefer `read-page` first, then use returned `@e` refs, structured locators, or stable_selector for `click`, `fill`, `type`, `hover`, or `drag`; CSS selectors are fallback targets.\n"
         << "- For a sequence of related operations, prefer one `batch` with per-step `expect` / `assert`; for separate single commands, run the normal CLI actions directly. Page operation feedback and input guarding are automatic.\n"
         << "- When a click is expected to open a popup or new window (OAuth, a payment flow such as PayPal, or `target=_blank`), that window is a separate tab the session does not auto-follow. After the click, run `list-tabs --all`, locate the new tab whose `opener_tab_id` matches your session tab (or match by url/title), then `find-tab --tab-id <id>` to adopt and continue in it. Switch back with `find-tab --tab-id <original>` or `find-tab --active`.\n"
@@ -195,7 +196,7 @@ ToolImpl make_start_tool(const std::shared_ptr<BrowserToolState>& state) {
     ToolDef def;
     def.name = "browser_start";
     def.description =
-        "Ensure ACE Browser Bridge host and browser are ready, then load the CLI usage prompt for this conversation.";
+        "Ensure ACE Browser Host direct-CDP browser control is ready, then load the CLI usage prompt for this conversation.";
     def.parameters = object_schema({
         {"session", string_prop("Optional browser session name. Defaults to the current ACECode thread session.")},
         {"include_prompt", {{"type", "boolean"}, {"description", "Attach the CLI user prompt. Defaults to true."}}},

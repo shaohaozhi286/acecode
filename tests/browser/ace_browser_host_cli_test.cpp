@@ -225,6 +225,34 @@ TEST(AceBrowserHostCli, ClampsCommandTimeoutBudget) {
     EXPECT_EQ(clamp_command_timeout_ms(1), kCommandTimeoutMs);
 }
 
+TEST(AceBrowserHostCli, DirectCdpStatusEnvelopeIsReadyWithoutExtension) {
+    json envelope = success({
+        {"running", true},
+        {"ready", true},
+        {"backend", "direct_cdp"},
+        {"direct_cdp_ready", true},
+        {"extension_connected", false},
+        {"extension_stale", false},
+        {"version_compatible", true},
+    });
+
+    EXPECT_TRUE(status_envelope_ready(envelope));
+}
+
+TEST(AceBrowserHostDaemon, StatusPayloadPrefersDirectCdpWithoutExtension) {
+    DaemonState state;
+    state.direct_cdp->test_mark_ready();
+
+    json status = daemon_status_payload(state, 52007);
+
+    EXPECT_TRUE(status["ready"].get<bool>());
+    EXPECT_EQ(status["backend"], "direct_cdp");
+    EXPECT_TRUE(status["direct_cdp_ready"].get<bool>());
+    EXPECT_FALSE(status["extension_connected"].get<bool>());
+    EXPECT_TRUE(status["capabilities"]["cdp"].get<bool>());
+    EXPECT_TRUE(status["capabilities"]["raw_cdp"].get<bool>());
+}
+
 TEST(AceBrowserHostDaemon, AckedLongActionIsNotRedelivered) {
     DaemonState state;
     mark_extension_ready(state);

@@ -2,7 +2,7 @@
 
 `ace-browser-host` 是 ACECode 浏览器能力使用的本地 C++ CLI/daemon。Windows 可执行文件名为 `ace-browser-host.exe`，Unix-like 平台为 `ace-browser-host`。文本按原生 UTF-8 处理。
 
-浏览器插件交付物是独立项目 `ace-browser-bridge`。默认 daemon 地址为 `127.0.0.1:52007`。
+浏览器插件交付物是独立项目 `ace-browser-bridge`。默认 daemon 地址为 `127.0.0.1:52007`。当前首选 backend 是 host-managed direct CDP:host 自己启动/连接 Chrome、持有 browser WebSocket 并管理 tab session；插件 backend 作为兼容 fallback 保留。
 
 ## 命令
 
@@ -36,7 +36,7 @@ ace-browser-host.exe shutdown --json
 
 `start --json` 会在 daemon 未运行时后台启动 `serve --json --port 52007`，然后轮询 `status`。
 
-`ensure-ready --json` 是浏览器工具的推荐入口。它会确保 daemon 运行；如果扩展未连接或连接过期，会打开 `http://127.0.0.1:52007/wake` 唤醒默认浏览器和 `ace-browser-bridge` 扩展，然后在超时内等待 `ready=true`。调试时可加 `--no-launch-browser` 只检查和等待，不主动打开浏览器。
+`ensure-ready --json` 是浏览器工具的推荐入口。它会确保 daemon 运行，并优先启动/连接 direct-CDP Chrome。direct-CDP 使用独立持久 profile：默认 `%USERPROFILE%\.acecode\browser\chrome-profile`，可用 `ACE_BROWSER_USER_DATA_DIR` 覆盖；Chrome 可执行文件可用 `ACE_BROWSER_CHROME` 覆盖。只有 direct-CDP 不可用时，才会打开 `http://127.0.0.1:52007/wake` 唤醒默认浏览器和 `ace-browser-bridge` 扩展 fallback。调试时可加 `--no-launch-browser` 只检查和等待，不主动启动 Chrome 或打开唤醒页。
 
 `command --json` 是底层入口，从 stdin 读取：
 
@@ -46,7 +46,9 @@ ace-browser-host.exe shutdown --json
 
 其他子命令只是把结构化 argv 转成同样的 `{session, action, args}` 请求。
 
-浏览器交互动作会自动在受管页面上显示短时“AI 正在操作浏览器”提示并拦截页面内容区输入。调用方不需要为这层提示执行单独的准备或清理命令；异常路径由页面侧 watchdog 自动释放。
+`status --json` 的 `backend` 字段表示当前首选 backend：`direct_cdp`、`extension` 或 `none`。`direct_cdp` 下会返回 `direct_cdp.ready`、`debug_port`、`ws_url`、`profile_dir`、`chrome_pid` 和 `last_error`。`cdp`、`open`、`navigate`、`read-page`、`evaluate`、`click`、`fill`、`type`、`list-tabs`、`find-tab`、`close-session` 已优先走 direct-CDP；其他动作仍可 fallback 到插件。
+
+浏览器交互动作在插件 backend 下会自动显示短时“AI 正在操作浏览器”提示并拦截页面内容区输入；direct-CDP backend 目前执行原子 DOM/CDP 动作，不依赖 `chrome.debugger`，因此不会被 `Another debugger is already attached` 阻断。
 
 弹窗与跨域 iframe：
 
@@ -110,6 +112,7 @@ daemon 只监听 loopback，并要求本地调用头：
 
 - `GET /status`
 - `POST /command`
+- `POST /direct/ensure`
 - `POST /plugin/hello`
 - `POST /plugin/poll`
 - `POST /plugin/result`

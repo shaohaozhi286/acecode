@@ -369,7 +369,7 @@ BridgeEnvelope AceBrowserBridgeClient::run_json_command(const std::vector<std::s
 bool AceBrowserBridgeClient::should_cache_status(const BridgeEnvelope& envelope) const {
     if (!envelope.ok || !envelope.data.is_object()) return false;
     return envelope.data.value("running", false) &&
-           envelope.data.value("extension_connected", false);
+           envelope.data.value("ready", envelope.data.value("extension_connected", false));
 }
 
 BridgeEnvelope AceBrowserBridgeClient::status_once() {

@@ -2,6 +2,8 @@
 
 `ace-browser-bridge` 是浏览器插件，`ace-browser-host` 是本地 C++ CLI/daemon。ACECode 内置工具只保留 `browser_start`：它负责启动/检查 host，并在当前会话里追加一段 user-role 使用说明。后续页面操作由模型通过 `ace-browser-host(.exe)` CLI 子命令完成。
 
+当前首选 backend 是 host-managed direct CDP，而不是插件 `chrome.debugger`。host 会启动/连接 Chrome、读取 `DevToolsActivePort`、持有 browser-level WebSocket，并在 host 内管理 page target/session。插件 backend 作为兼容 fallback 保留，用于尚未被 direct-CDP 覆盖的高级动作。
+
 默认端口为 `52007`，daemon 只监听 `127.0.0.1`。`ace-browser-host(.exe)` 默认从 `acecode` 可执行文件同目录解析，不需要在配置里写路径。旧版本的路径覆盖字段仍会被兼容读取，但新配置不会再保存这些字段。
 
 ## 启用配置
@@ -37,11 +39,15 @@ Web 设置页的“工具 -> ACE Browser Bridge”开关会写入全局 `ace_bro
 ## 模型工作流
 
 1. 调用 `browser_start`。它会触发 host 状态检查和必要的 host auto-start。
-2. 读取 tool result 中的 `ready`、`running`、`extension_connected`、`extension_stale`、版本和 capabilities。`browser_start` 会调用 `ensure-ready`，在扩展未连接时尝试打开浏览器唤醒页。
+2. 读取 tool result 中的 `ready`、`running`、`backend`、`direct_cdp`、`extension_connected`、`extension_stale`、版本和 capabilities。`browser_start` 会调用 `ensure-ready`，优先准备 direct-CDP Chrome；direct-CDP 不可用时才尝试打开扩展唤醒页。
 3. 使用注入的 user_prompt 中的 `ace-browser-host(.exe)` CLI 示例执行页面动作。
 4. 先 `read-page` 获取页面文本和 `@e` 元素引用，再交互。
 5. 交互优先使用 `@e` ref；CSS selector 作为 fallback。
 6. 浏览器动作会自动显示短时 AI 操作提示并在 watchdog 到期后释放；需要清理标签页时使用 `close-session`。
+
+direct-CDP 使用独立持久 profile，默认 `%USERPROFILE%\.acecode\browser\chrome-profile`，可用 `ACE_BROWSER_USER_DATA_DIR` 覆盖。Chrome 可执行文件可用 `ACE_BROWSER_CHROME` 覆盖。这个 profile 由 host 管理，适合公司内部系统登录态：首次打开后登录一次，后续 daemon 重启仍可复用 cookies。`status --json` 的 `direct_cdp.debug_port` 和 `direct_cdp.ws_url` 可用于排查连接状态。
+
+如果插件返回 `cdp_unavailable` 或 `Another debugger is already attached`，不要把它当成整体 CDP 不可用。先看 `status --json` 的 `backend`；当 `backend=direct_cdp` 时，`cdp`、`open`、`navigate`、`read-page`、`evaluate`、`click`、`fill`、`type` 会绕过插件 `chrome.debugger` 独占限制。
 
 如果模型不能识图，截图仍可保存为文件，但应优先依赖 `read-page`、`evaluate`、`network`、`devtools` 和导出文件 metadata；只有必要时才请用户人工查看保存的截图/PDF。
 

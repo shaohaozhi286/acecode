@@ -17,6 +17,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <random>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -36,6 +37,7 @@
 #include <fcntl.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <sys/wait.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -382,10 +384,48 @@ json default_capabilities(bool extension_connected) {
     };
 }
 
+json direct_cdp_capabilities(bool direct_ready) {
+    return json{
+        {"cdp", direct_ready},
+        {"devtools", false},
+        {"raw_cdp", direct_ready},
+        {"console", false},
+        {"network", false},
+        {"emulation", false},
+        {"performance", false},
+        {"heap_snapshot", false},
+        {"pdf", false},
+        {"upload", false},
+        {"os_pointer", false},
+        {"operation_overlay", false},
+    };
+}
+
+json merge_capabilities(json base, const json& overlay) {
+    if (!base.is_object()) base = json::object();
+    if (!overlay.is_object()) return base;
+    for (const auto& item : overlay.items()) {
+        if (item.value().is_boolean()) {
+            base[item.key()] = base.value(item.key(), false) || item.value().get<bool>();
+        } else if (!base.contains(item.key())) {
+            base[item.key()] = item.value();
+        }
+    }
+    return base;
+}
+
 json stopped_status(int port) {
     return json{
         {"running", false},
         {"ready", false},
+        {"backend", "none"},
+        {"direct_cdp_ready", false},
+        {"direct_cdp", {
+            {"ready", false},
+            {"ws_url", nullptr},
+            {"debug_port", nullptr},
+            {"last_error", nullptr},
+        }},
         {"extension_connected", false},
         {"extension_stale", false},
         {"extension_last_seen_ms", nullptr},
@@ -478,6 +518,35 @@ std::optional<std::vector<unsigned char>> decode_base64(std::string input) {
             out.push_back(static_cast<unsigned char>((val >> valb) & 0xFF));
             valb -= 8;
         }
+    }
+    return out;
+}
+
+std::string encode_base64(std::string_view input) {
+    static constexpr char alphabet[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve(((input.size() + 2) / 3) * 4);
+    std::size_t i = 0;
+    while (i + 3 <= input.size()) {
+        const unsigned int n =
+            (static_cast<unsigned char>(input[i]) << 16) |
+            (static_cast<unsigned char>(input[i + 1]) << 8) |
+            static_cast<unsigned char>(input[i + 2]);
+        out.push_back(alphabet[(n >> 18) & 63]);
+        out.push_back(alphabet[(n >> 12) & 63]);
+        out.push_back(alphabet[(n >> 6) & 63]);
+        out.push_back(alphabet[n & 63]);
+        i += 3;
+    }
+    if (i < input.size()) {
+        unsigned int n = static_cast<unsigned char>(input[i]) << 16;
+        const bool has_second = i + 1 < input.size();
+        if (has_second) n |= static_cast<unsigned char>(input[i + 1]) << 8;
+        out.push_back(alphabet[(n >> 18) & 63]);
+        out.push_back(alphabet[(n >> 12) & 63]);
+        out.push_back(has_second ? alphabet[(n >> 6) & 63] : '=');
+        out.push_back('=');
     }
     return out;
 }
@@ -720,9 +789,19 @@ json status_envelope(int port) {
     return envelope;
 }
 
+json direct_ensure_envelope(int port) {
+    HttpResponse response = http_request("POST", "/direct/ensure", "{}", port);
+    if (!response.transport_ok) {
+        return failure("daemon_not_running", "ace-browser-host daemon is not running on 127.0.0.1:" + std::to_string(port));
+    }
+    if (response.status != 200) {
+        return failure("daemon_error", "direct ensure endpoint returned HTTP " + std::to_string(response.status));
+    }
+    return normalize_daemon_envelope(response.body);
+}
+
 #ifdef _WIN32
-std::wstring quote_windows_arg(const std::filesystem::path& path) {
-    std::wstring arg = path.wstring();
+std::wstring quote_windows_command_arg(std::wstring arg) {
     if (arg.empty()) return L"\"\"";
     bool needs_quotes = false;
     for (wchar_t ch : arg) {
@@ -751,6 +830,10 @@ std::wstring quote_windows_arg(const std::filesystem::path& path) {
     out.append(backslashes * 2, L'\\');
     out.push_back(L'"');
     return out;
+}
+
+std::wstring quote_windows_arg(const std::filesystem::path& path) {
+    return quote_windows_command_arg(path.wstring());
 }
 
 std::optional<std::wstring> utf8_to_wide(const std::string& value) {
@@ -1089,6 +1172,11 @@ bool status_envelope_ready(const json& envelope) {
         return false;
     }
     const auto& data = envelope["data"];
+    if (data.contains("ready") && data["ready"].is_boolean()) {
+        return data.value("running", false) &&
+               data.value("ready", false) &&
+               data.value("version_compatible", true);
+    }
     return data.value("running", false) &&
            data.value("extension_connected", false) &&
            !data.value("extension_stale", false) &&
@@ -1107,6 +1195,11 @@ std::string readiness_error_from_status(const json& envelope) {
     const auto& data = envelope["data"];
     if (!data.value("running", false)) return "daemon_not_running";
     if (!data.value("version_compatible", true)) return "version_mismatch";
+    if (data.value("direct_cdp_ready", false)) return "not_ready";
+    if (data.contains("direct_cdp") && data["direct_cdp"].is_object() &&
+        data["direct_cdp"].contains("last_error") && data["direct_cdp"]["last_error"].is_string()) {
+        return "direct_cdp_unavailable";
+    }
     if (data.value("extension_stale", false)) return "extension_stale";
     if (!data.value("extension_connected", false)) return "extension_not_connected";
     return "not_ready";
@@ -1131,6 +1224,9 @@ void annotate_readiness(json& envelope,
     data["ready_error"] = ready ? json(nullptr) : json(ready_error.empty() ? readiness_error_from_status(envelope) : ready_error);
     data["diagnostics"] = {
         {"host_running", data.value("running", false)},
+        {"backend", data.value("backend", "none")},
+        {"direct_cdp_ready", data.value("direct_cdp_ready", false)},
+        {"direct_cdp", data.value("direct_cdp", json::object())},
         {"extension_connected", data.value("extension_connected", false)},
         {"extension_stale", data.value("extension_stale", false)},
         {"version_compatible", data.value("version_compatible", true)},
@@ -1172,6 +1268,7 @@ int ensure_ready_command(int argc, char** argv) {
     }
 
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    bool direct_ensure_checked = false;
     bool browser_launch_checked = false;
     while (std::chrono::steady_clock::now() <= deadline) {
         latest = status_envelope(port);
@@ -1188,6 +1285,29 @@ int ensure_ready_command(int argc, char** argv) {
                           " browser_launch_attempted=" + std::string(browser_launch_attempted ? "true" : "false"));
             print_json(latest);
             return 0;
+        }
+
+        if (latest["data"].is_object() &&
+            latest["data"].value("running", false) &&
+            launch_browser && !direct_ensure_checked) {
+            direct_ensure_checked = true;
+            browser_launch_attempted = true;
+            json direct = direct_ensure_envelope(port);
+            if (direct.value("ok", false) && direct.contains("data") && direct["data"].is_object()) {
+                latest = direct;
+                if (status_envelope_ready(latest)) {
+                    annotate_readiness(latest, host_start_attempted, host_start_error,
+                                       browser_launch_attempted, browser_launch_error,
+                                       wake_url, {});
+                    host_log_info("[cli] ensure-ready direct_cdp_ready port=" + std::to_string(port));
+                    print_json(latest);
+                    return 0;
+                }
+            } else if (!direct.value("ok", false)) {
+                browser_launch_error = envelope_error_code(direct);
+                host_log_warn("[cli] ensure-ready direct_cdp_failed port=" + std::to_string(port) +
+                              " error=" + browser_launch_error);
+            }
         }
 
         if (latest["data"].is_object() &&
@@ -1968,6 +2088,965 @@ int screenshot_command(int argc, char** argv) {
     return 0;
 }
 
+struct ParsedWebSocketUrl {
+    int port = 0;
+    std::string path;
+};
+
+std::optional<ParsedWebSocketUrl> parse_loopback_ws_url(const std::string& url,
+                                                        std::string& error) {
+    const std::string prefix = "ws://127.0.0.1:";
+    const std::string alt_prefix = "ws://localhost:";
+    std::size_t offset = std::string::npos;
+    if (url.rfind(prefix, 0) == 0) {
+        offset = prefix.size();
+    } else if (url.rfind(alt_prefix, 0) == 0) {
+        offset = alt_prefix.size();
+    } else {
+        error = "direct CDP currently requires a ws://127.0.0.1:<port>/... URL";
+        return std::nullopt;
+    }
+    const std::size_t slash = url.find('/', offset);
+    if (slash == std::string::npos) {
+        error = "CDP WebSocket URL is missing path";
+        return std::nullopt;
+    }
+    int port = 0;
+    try {
+        port = std::stoi(url.substr(offset, slash - offset));
+    } catch (...) {
+        error = "CDP WebSocket URL has invalid port";
+        return std::nullopt;
+    }
+    if (port <= 0 || port > 65535) {
+        error = "CDP WebSocket URL port out of range";
+        return std::nullopt;
+    }
+    return ParsedWebSocketUrl{port, url.substr(slash)};
+}
+
+void set_socket_timeouts(socket_t s, int timeout_ms) {
+#ifdef _WIN32
+    DWORD timeout = static_cast<DWORD>(timeout_ms);
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+#else
+    timeval tv{};
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+#endif
+}
+
+bool recv_exact(socket_t s, char* out, std::size_t size) {
+    std::size_t offset = 0;
+    while (offset < size) {
+#ifdef _WIN32
+        int n = recv(s, out + offset, static_cast<int>(size - offset), 0);
+#else
+        ssize_t n = recv(s, out + offset, size - offset, 0);
+#endif
+        if (n <= 0) return false;
+        offset += static_cast<std::size_t>(n);
+    }
+    return true;
+}
+
+std::string random_bytes(std::size_t size) {
+    static std::mutex rng_mutex;
+    static std::mt19937_64 rng{
+        static_cast<std::mt19937_64::result_type>(
+            std::chrono::high_resolution_clock::now().time_since_epoch().count() ^
+            static_cast<long long>(current_process_id()))};
+    std::lock_guard<std::mutex> lock(rng_mutex);
+    std::string out(size, '\0');
+    for (std::size_t i = 0; i < size; ++i) {
+        out[i] = static_cast<char>(rng() & 0xFF);
+    }
+    return out;
+}
+
+std::string env_string(const char* name) {
+    const char* value = std::getenv(name);
+    return value ? std::string(value) : std::string();
+}
+
+#ifndef _WIN32
+std::optional<std::filesystem::path> find_executable_on_path(const std::string& name) {
+    const char* path_env = std::getenv("PATH");
+    if (!path_env) return std::nullopt;
+    std::istringstream paths(path_env);
+    std::string dir;
+    while (std::getline(paths, dir, ':')) {
+        if (dir.empty()) continue;
+        std::filesystem::path p = std::filesystem::path(dir) / name;
+        std::error_code ec;
+        if (std::filesystem::exists(p, ec)) return p;
+    }
+    return std::nullopt;
+}
+#endif
+
+std::optional<std::filesystem::path> find_chrome_executable() {
+    for (const char* name : {"ACE_BROWSER_CHROME", "CHROME_PATH"}) {
+        std::string value = env_string(name);
+        if (!value.empty()) {
+            std::filesystem::path p = std::filesystem::u8path(value);
+            std::error_code ec;
+            if (std::filesystem::exists(p, ec)) return p;
+        }
+    }
+#ifdef _WIN32
+    std::vector<std::filesystem::path> candidates;
+    if (auto local = env_w(L"LOCALAPPDATA")) {
+        candidates.push_back(std::filesystem::path(*local) / L"Google\\Chrome\\Application\\chrome.exe");
+        candidates.push_back(std::filesystem::path(*local) / L"BraveSoftware\\Brave-Browser\\Application\\brave.exe");
+    }
+    candidates.emplace_back(L"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe");
+    candidates.emplace_back(L"C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe");
+    candidates.emplace_back(L"C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe");
+    for (const auto& p : candidates) {
+        std::error_code ec;
+        if (std::filesystem::exists(p, ec)) return p;
+    }
+#else
+#ifdef __APPLE__
+    for (const char* path : {
+             "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+             "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+             "/Applications/Chromium.app/Contents/MacOS/Chromium",
+             "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"}) {
+        std::filesystem::path p(path);
+        std::error_code ec;
+        if (std::filesystem::exists(p, ec)) return p;
+    }
+#endif
+    for (const char* name : {"google-chrome", "google-chrome-stable", "chromium-browser", "chromium", "brave-browser", "brave-browser-stable"}) {
+        if (auto found = find_executable_on_path(name)) return found;
+    }
+#endif
+    return std::nullopt;
+}
+
+std::filesystem::path direct_cdp_profile_dir() {
+    std::string configured = env_string("ACE_BROWSER_USER_DATA_DIR");
+    if (!configured.empty()) return std::filesystem::u8path(configured);
+    return acecode_user_data_dir() / "browser" / "chrome-profile";
+}
+
+std::optional<std::pair<int, std::string>> read_devtools_active_port_file(const std::filesystem::path& user_data_dir) {
+    std::ifstream in(user_data_dir / "DevToolsActivePort", std::ios::binary);
+    if (!in.is_open()) return std::nullopt;
+    std::string port_line;
+    std::string path_line;
+    std::getline(in, port_line);
+    std::getline(in, path_line);
+    if (port_line.empty()) return std::nullopt;
+    int port = 0;
+    try {
+        port = std::stoi(port_line);
+    } catch (...) {
+        return std::nullopt;
+    }
+    if (port <= 0 || port > 65535) return std::nullopt;
+    if (path_line.empty()) path_line = "/devtools/browser";
+    return std::make_pair(port, path_line);
+}
+
+class DirectCdpBackend {
+  public:
+    DirectCdpBackend() = default;
+    ~DirectCdpBackend() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        close_ws_locked();
+        close_process_locked();
+    }
+
+    bool ensure(std::string& error) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (ready_ && verify_connection_locked()) {
+            error.clear();
+            return true;
+        }
+        close_ws_locked();
+        ready_ = false;
+
+        profile_dir_ = direct_cdp_profile_dir();
+        std::error_code ec;
+        std::filesystem::create_directories(profile_dir_, ec);
+        if (ec) {
+            error = "failed to create Chrome profile directory: " + ec.message();
+            last_error_ = error;
+            return false;
+        }
+
+        if (connect_from_devtools_file_locked(error)) {
+            if (initialize_default_page_locked(error)) return true;
+            close_ws_locked();
+        }
+
+        if (!launch_chrome_locked(error)) {
+            last_error_ = error;
+            return false;
+        }
+        if (!wait_for_devtools_locked(error)) {
+            last_error_ = error;
+            return false;
+        }
+        if (!initialize_default_page_locked(error)) {
+            last_error_ = error;
+            return false;
+        }
+        last_error_.clear();
+        return true;
+    }
+
+    json status() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return json{
+            {"ready", ready_},
+            {"ws_url", ws_url_.empty() ? json(nullptr) : json(ws_url_)},
+            {"debug_port", debug_port_ > 0 ? json(debug_port_) : json(nullptr)},
+            {"profile_dir", profile_dir_.empty() ? json(nullptr) : json(profile_dir_.u8string())},
+            {"chrome_path", chrome_path_.empty() ? json(nullptr) : json(chrome_path_.u8string())},
+            {"chrome_pid", chrome_pid_ > 0 ? json(chrome_pid_) : json(nullptr)},
+            {"launched_by_host", launched_by_host_},
+            {"page_sessions", pages_.size()},
+            {"last_error", last_error_.empty() ? json(nullptr) : json(last_error_)},
+        };
+    }
+
+#ifdef ACE_BROWSER_HOST_NO_MAIN
+    void test_mark_ready(const std::string& ws_url = "ws://127.0.0.1:1/devtools/browser/test") {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ready_ = true;
+        ws_url_ = ws_url;
+        debug_port_ = 1;
+        profile_dir_ = std::filesystem::temp_directory_path() / "ace-browser-host-test-profile";
+        chrome_path_ = std::filesystem::path("chrome-test");
+        chrome_pid_ = 1234;
+        launched_by_host_ = true;
+    }
+#endif
+
+    json execute(const std::string& session, const std::string& action, const json& args) {
+        std::string error;
+        if (!ensure(error)) {
+            return failure("direct_cdp_unavailable", error.empty() ? "direct CDP backend is not ready" : error);
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        try {
+            if (action == "raw_cdp") return execute_raw_cdp_locked(session, args);
+            if (action == "navigate") return execute_navigate_locked(session, args);
+            if (action == "evaluate") return execute_evaluate_locked(session, args);
+            if (action == "snapshot") return execute_snapshot_locked(session, args);
+            if (action == "click") return execute_dom_action_locked(session, action, args);
+            if (action == "fill" || action == "type") return execute_dom_action_locked(session, action, args);
+            if (action == "list_tabs") return execute_list_tabs_locked();
+            if (action == "find_tab") return execute_find_tab_locked(args);
+            if (action == "close_session") return execute_close_session_locked(session);
+            return failure("direct_action_unsupported", "direct CDP backend does not implement action: " + action);
+        } catch (const std::exception& e) {
+            last_error_ = e.what();
+            return failure("direct_cdp_error", safe_error_message(e.what()));
+        }
+    }
+
+  private:
+    struct PageSession {
+        std::string target_id;
+        std::string session_id;
+        std::string url;
+        std::string title;
+    };
+
+    std::mutex mutex_;
+    socket_t ws_ = kInvalidSocket;
+    bool ready_ = false;
+    bool launched_by_host_ = false;
+    int debug_port_ = 0;
+    unsigned long chrome_pid_ = 0;
+    uint64_t next_command_id_ = 1;
+    std::filesystem::path profile_dir_;
+    std::filesystem::path chrome_path_;
+    std::string ws_url_;
+    std::string last_error_;
+    std::unordered_map<std::string, PageSession> pages_;
+#ifdef _WIN32
+    HANDLE chrome_process_ = nullptr;
+#else
+    pid_t chrome_process_ = -1;
+#endif
+
+    void close_ws_locked() {
+        if (ws_ != kInvalidSocket) {
+            close_socket(ws_);
+            ws_ = kInvalidSocket;
+        }
+        ready_ = false;
+    }
+
+    void close_process_locked() {
+#ifdef _WIN32
+        if (chrome_process_) {
+            DWORD code = 0;
+            if (GetExitCodeProcess(chrome_process_, &code) && code == STILL_ACTIVE) {
+                TerminateProcess(chrome_process_, 0);
+                WaitForSingleObject(chrome_process_, 2000);
+            }
+            CloseHandle(chrome_process_);
+            chrome_process_ = nullptr;
+        }
+#else
+        if (chrome_process_ > 0) {
+            kill(chrome_process_, SIGTERM);
+            for (int i = 0; i < 20; ++i) {
+                int status = 0;
+                pid_t r = waitpid(chrome_process_, &status, WNOHANG);
+                if (r == chrome_process_) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            kill(chrome_process_, SIGKILL);
+            int status = 0;
+            waitpid(chrome_process_, &status, 0);
+            chrome_process_ = -1;
+        }
+#endif
+    }
+
+    bool connect_from_devtools_file_locked(std::string& error) {
+        auto active = read_devtools_active_port_file(profile_dir_);
+        if (!active) return false;
+        const std::string url = "ws://127.0.0.1:" + std::to_string(active->first) + active->second;
+        if (!connect_ws_locked(url, error)) {
+            std::error_code ec;
+            std::filesystem::remove(profile_dir_ / "DevToolsActivePort", ec);
+            return false;
+        }
+        debug_port_ = active->first;
+        ws_url_ = url;
+        launched_by_host_ = false;
+        ready_ = true;
+        return true;
+    }
+
+    bool launch_chrome_locked(std::string& error) {
+        auto chrome = find_chrome_executable();
+        if (!chrome) {
+            error = "Chrome executable not found; set ACE_BROWSER_CHROME to chrome.exe";
+            return false;
+        }
+        chrome_path_ = *chrome;
+        std::error_code ec;
+        std::filesystem::remove(profile_dir_ / "DevToolsActivePort", ec);
+
+        std::vector<std::string> args = {
+            "--remote-debugging-port=0",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-background-networking",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-component-update",
+            "--disable-default-apps",
+            "--disable-popup-blocking",
+            "--disable-sync",
+            "--disable-features=Translate",
+            "--user-data-dir=" + profile_dir_.u8string(),
+            "about:blank",
+        };
+#ifdef _WIN32
+        std::wstring command_line = quote_windows_arg(chrome_path_);
+        for (const auto& arg : args) {
+            auto wide = utf8_to_wide(arg);
+            if (!wide) {
+                error = "Chrome argument is not valid UTF-8";
+                return false;
+            }
+            command_line += L" " + quote_windows_command_arg(*wide);
+        }
+        std::vector<wchar_t> mutable_command(command_line.begin(), command_line.end());
+        mutable_command.push_back(L'\0');
+        STARTUPINFOW si{};
+        si.cb = sizeof(si);
+        PROCESS_INFORMATION pi{};
+        BOOL ok = CreateProcessW(nullptr,
+                                 mutable_command.data(),
+                                 nullptr,
+                                 nullptr,
+                                 FALSE,
+                                 CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
+                                 nullptr,
+                                 nullptr,
+                                 &si,
+                                 &pi);
+        if (!ok) {
+            error = "failed to launch Chrome, win32_error=" +
+                std::to_string(static_cast<unsigned long>(GetLastError()));
+            return false;
+        }
+        CloseHandle(pi.hThread);
+        chrome_process_ = pi.hProcess;
+        chrome_pid_ = static_cast<unsigned long>(pi.dwProcessId);
+#else
+        pid_t pid = fork();
+        if (pid < 0) {
+            error = "fork failed launching Chrome";
+            return false;
+        }
+        if (pid == 0) {
+            setsid();
+            int devnull = open("/dev/null", O_RDWR);
+            if (devnull >= 0) {
+                dup2(devnull, STDIN_FILENO);
+                dup2(devnull, STDOUT_FILENO);
+                dup2(devnull, STDERR_FILENO);
+                if (devnull > STDERR_FILENO) close(devnull);
+            }
+            std::vector<std::string> child_args;
+            child_args.push_back(chrome_path_.string());
+            child_args.insert(child_args.end(), args.begin(), args.end());
+            std::vector<char*> argv;
+            for (auto& item : child_args) argv.push_back(item.data());
+            argv.push_back(nullptr);
+            execv(chrome_path_.string().c_str(), argv.data());
+            _exit(127);
+        }
+        chrome_process_ = pid;
+        chrome_pid_ = static_cast<unsigned long>(pid);
+#endif
+        launched_by_host_ = true;
+        host_log_info("[direct-cdp] launched Chrome pid=" + std::to_string(chrome_pid_) +
+                      " profile=" + profile_dir_.u8string());
+        return true;
+    }
+
+    bool wait_for_devtools_locked(std::string& error) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        while (std::chrono::steady_clock::now() <= deadline) {
+            if (auto active = read_devtools_active_port_file(profile_dir_)) {
+                const std::string url = "ws://127.0.0.1:" + std::to_string(active->first) + active->second;
+                if (connect_ws_locked(url, error)) {
+                    debug_port_ = active->first;
+                    ws_url_ = url;
+                    ready_ = true;
+                    host_log_info("[direct-cdp] connected ws_url=" + ws_url_);
+                    return true;
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        error = "timeout waiting for Chrome DevToolsActivePort";
+        return false;
+    }
+
+    bool connect_ws_locked(const std::string& url, std::string& error) {
+        auto parsed = parse_loopback_ws_url(url, error);
+        if (!parsed) return false;
+        socket_t s = connect_loopback(parsed->port);
+        if (s == kInvalidSocket) {
+            error = "failed to connect to Chrome debug port " + std::to_string(parsed->port);
+            return false;
+        }
+        set_socket_timeouts(s, 5000);
+        const std::string key = encode_base64(random_bytes(16));
+        std::ostringstream req;
+        req << "GET " << parsed->path << " HTTP/1.1\r\n"
+            << "Host: 127.0.0.1:" << parsed->port << "\r\n"
+            << "Upgrade: websocket\r\n"
+            << "Connection: Upgrade\r\n"
+            << "Sec-WebSocket-Key: " << key << "\r\n"
+            << "Sec-WebSocket-Version: 13\r\n\r\n";
+        if (!send_all(s, req.str())) {
+            close_socket(s);
+            error = "failed to send CDP WebSocket handshake";
+            return false;
+        }
+        std::string raw;
+        char buffer[1024];
+        while (raw.find("\r\n\r\n") == std::string::npos && raw.size() < 16384) {
+#ifdef _WIN32
+            int n = recv(s, buffer, static_cast<int>(sizeof(buffer)), 0);
+#else
+            ssize_t n = recv(s, buffer, sizeof(buffer), 0);
+#endif
+            if (n <= 0) {
+                close_socket(s);
+                error = "failed to read CDP WebSocket handshake";
+                return false;
+            }
+            raw.append(buffer, static_cast<std::size_t>(n));
+        }
+        if (raw.find(" 101 ") == std::string::npos && raw.find(" 101\r\n") == std::string::npos) {
+            close_socket(s);
+            error = "Chrome rejected CDP WebSocket handshake";
+            return false;
+        }
+        ws_ = s;
+        return true;
+    }
+
+    bool send_ws_frame_locked(unsigned char opcode, std::string_view payload) {
+        std::string frame;
+        frame.push_back(static_cast<char>(0x80 | (opcode & 0x0F)));
+        const std::size_t len = payload.size();
+        if (len < 126) {
+            frame.push_back(static_cast<char>(0x80 | len));
+        } else if (len <= 0xFFFF) {
+            frame.push_back(static_cast<char>(0x80 | 126));
+            frame.push_back(static_cast<char>((len >> 8) & 0xFF));
+            frame.push_back(static_cast<char>(len & 0xFF));
+        } else {
+            frame.push_back(static_cast<char>(0x80 | 127));
+            for (int i = 7; i >= 0; --i) {
+                frame.push_back(static_cast<char>((static_cast<uint64_t>(len) >> (8 * i)) & 0xFF));
+            }
+        }
+        const std::string mask = random_bytes(4);
+        frame.append(mask);
+        for (std::size_t i = 0; i < payload.size(); ++i) {
+            frame.push_back(static_cast<char>(payload[i] ^ mask[i % 4]));
+        }
+        return send_all(ws_, frame);
+    }
+
+    std::optional<std::string> read_ws_text_locked(std::string& error) {
+        std::string fragmented;
+        for (;;) {
+            char header[2];
+            if (!recv_exact(ws_, header, 2)) {
+                error = "failed to read CDP WebSocket frame";
+                return std::nullopt;
+            }
+            const unsigned char b0 = static_cast<unsigned char>(header[0]);
+            const unsigned char b1 = static_cast<unsigned char>(header[1]);
+            const bool fin = (b0 & 0x80) != 0;
+            const unsigned char opcode = b0 & 0x0F;
+            const bool masked = (b1 & 0x80) != 0;
+            uint64_t len = b1 & 0x7F;
+            if (len == 126) {
+                char ext[2];
+                if (!recv_exact(ws_, ext, 2)) {
+                    error = "failed to read CDP WebSocket frame length";
+                    return std::nullopt;
+                }
+                len = (static_cast<unsigned char>(ext[0]) << 8) | static_cast<unsigned char>(ext[1]);
+            } else if (len == 127) {
+                char ext[8];
+                if (!recv_exact(ws_, ext, 8)) {
+                    error = "failed to read CDP WebSocket frame length";
+                    return std::nullopt;
+                }
+                len = 0;
+                for (char ch : ext) len = (len << 8) | static_cast<unsigned char>(ch);
+            }
+            if (len > 64ull * 1024ull * 1024ull) {
+                error = "CDP WebSocket frame too large";
+                return std::nullopt;
+            }
+            char mask[4] = {};
+            if (masked && !recv_exact(ws_, mask, 4)) {
+                error = "failed to read CDP WebSocket mask";
+                return std::nullopt;
+            }
+            std::string payload(static_cast<std::size_t>(len), '\0');
+            if (len > 0 && !recv_exact(ws_, payload.data(), payload.size())) {
+                error = "failed to read CDP WebSocket payload";
+                return std::nullopt;
+            }
+            if (masked) {
+                for (std::size_t i = 0; i < payload.size(); ++i) payload[i] ^= mask[i % 4];
+            }
+            if (opcode == 0x8) {
+                error = "CDP WebSocket closed";
+                return std::nullopt;
+            }
+            if (opcode == 0x9) {
+                send_ws_frame_locked(0xA, payload);
+                continue;
+            }
+            if (opcode == 0xA) continue;
+            if (opcode == 0x1 || opcode == 0x0) {
+                fragmented += payload;
+                if (fin) return fragmented;
+                continue;
+            }
+        }
+    }
+
+    json send_command_locked(const std::string& method,
+                             const json& params,
+                             const std::optional<std::string>& session_id,
+                             std::string& error) {
+        if (ws_ == kInvalidSocket) {
+            error = "CDP WebSocket is not connected";
+            return json();
+        }
+        const uint64_t id = next_command_id_++;
+        json request = {
+            {"id", id},
+            {"method", method},
+        };
+        if (!params.is_null()) request["params"] = params;
+        if (session_id && !session_id->empty()) request["sessionId"] = *session_id;
+        if (!send_ws_frame_locked(0x1, request.dump())) {
+            error = "failed to send CDP command";
+            close_ws_locked();
+            return json();
+        }
+        for (;;) {
+            auto text = read_ws_text_locked(error);
+            if (!text) {
+                close_ws_locked();
+                return json();
+            }
+            auto parsed = parse_json(*text);
+            if (!parsed || !parsed->is_object()) continue;
+            if (parsed->value("id", 0ull) == id) {
+                if (parsed->contains("error")) {
+                    error = parsed->dump();
+                } else {
+                    error.clear();
+                }
+                return *parsed;
+            }
+        }
+    }
+
+    bool verify_connection_locked() {
+        std::string error;
+        json response = send_command_locked("Browser.getVersion", json::object(), std::nullopt, error);
+        return response.is_object() && response.contains("result") && error.empty();
+    }
+
+    bool initialize_default_page_locked(std::string& error) {
+        if (!ensure_page_locked("acecode-default", false, error)) return false;
+        ready_ = true;
+        return true;
+    }
+
+    bool ensure_page_locked(const std::string& session,
+                            bool force_new,
+                            std::string& error) {
+        const std::string key = session.empty() ? "acecode-default" : session;
+        if (!force_new) {
+            auto existing = pages_.find(key);
+            if (existing != pages_.end() && !existing->second.session_id.empty()) return true;
+        }
+        json create = send_command_locked(
+            "Target.createTarget",
+            json{{"url", "about:blank"}},
+            std::nullopt,
+            error);
+        if (!error.empty() || !create.contains("result") || !create["result"].contains("targetId")) {
+            if (error.empty()) error = "Target.createTarget returned no targetId";
+            return false;
+        }
+        const std::string target_id = create["result"]["targetId"].get<std::string>();
+        json attach = send_command_locked(
+            "Target.attachToTarget",
+            json{{"targetId", target_id}, {"flatten", true}},
+            std::nullopt,
+            error);
+        if (!error.empty() || !attach.contains("result") || !attach["result"].contains("sessionId")) {
+            if (error.empty()) error = "Target.attachToTarget returned no sessionId";
+            return false;
+        }
+        const std::string session_id = attach["result"]["sessionId"].get<std::string>();
+        send_command_locked("Page.enable", json::object(), session_id, error);
+        if (!error.empty()) return false;
+        send_command_locked("Runtime.enable", json::object(), session_id, error);
+        if (!error.empty()) return false;
+        error.clear();
+        send_command_locked("Runtime.runIfWaitingForDebugger", json::object(), session_id, error);
+        error.clear();
+        send_command_locked("Network.enable", json::object(), session_id, error);
+        error.clear();
+        pages_[key] = PageSession{target_id, session_id, "about:blank", ""};
+        return true;
+    }
+
+    std::optional<PageSession> page_for_session_locked(const std::string& session,
+                                                       bool force_new,
+                                                       std::string& error) {
+        const std::string key = session.empty() ? "acecode-default" : session;
+        if (!ensure_page_locked(key, force_new, error)) return std::nullopt;
+        return pages_[key];
+    }
+
+    static bool method_is_browser_level(const std::string& method) {
+        return method.rfind("Browser.", 0) == 0 ||
+               method.rfind("Target.", 0) == 0 ||
+               method.rfind("SystemInfo.", 0) == 0;
+    }
+
+    json execute_raw_cdp_locked(const std::string& session, const json& args) {
+        const std::string method = args.value("method", "");
+        if (method.empty()) return failure("invalid_request", "raw_cdp requires method");
+        const json params = args.contains("params") && args["params"].is_object()
+            ? args["params"]
+            : json::object();
+        std::string error;
+        std::optional<std::string> cdp_session;
+        if (!method_is_browser_level(method)) {
+            auto page = page_for_session_locked(session, false, error);
+            if (!page) return failure("direct_cdp_error", error);
+            cdp_session = page->session_id;
+        }
+        json response = send_command_locked(method, params, cdp_session, error);
+        if (!error.empty() && response.contains("error")) {
+            return failure("cdp_error", response["error"].dump());
+        }
+        if (!error.empty()) return failure("direct_cdp_error", error);
+        json data = {
+            {"backend", "direct_cdp"},
+            {"method", method},
+            {"result", response.value("result", json::object())},
+        };
+        return success(std::move(data));
+    }
+
+    json runtime_evaluate_locked(const PageSession& page,
+                                 const std::string& expression,
+                                 bool return_by_value,
+                                 std::string& error) {
+        json response = send_command_locked(
+            "Runtime.evaluate",
+            json{{"expression", expression}, {"awaitPromise", true}, {"returnByValue", return_by_value}},
+            page.session_id,
+            error);
+        if (!error.empty()) return response;
+        if (response.contains("result") && response["result"].contains("exceptionDetails")) {
+            error = response["result"]["exceptionDetails"].dump();
+        }
+        return response;
+    }
+
+    json current_page_summary_locked(const PageSession& page) {
+        std::string error;
+        json url_response = runtime_evaluate_locked(page, "location.href", true, error);
+        std::string url;
+        if (error.empty()) {
+            url = url_response["result"]["result"].value("value", "");
+        }
+        error.clear();
+        json title_response = runtime_evaluate_locked(page, "document.title", true, error);
+        std::string title;
+        if (error.empty()) {
+            title = title_response["result"]["result"].value("value", "");
+        }
+        return json{{"url", url}, {"title", title}};
+    }
+
+    json execute_navigate_locked(const std::string& session, const json& args) {
+        std::string error;
+        const bool force_new = args.value("newTab", false) || args.value("new_tab", false);
+        auto page = page_for_session_locked(session, force_new, error);
+        if (!page) return failure("direct_cdp_error", error);
+        const std::string url = args.value("url", "");
+        const std::string operation = args.value("operation", url.empty() ? "" : "goto");
+        if (operation == "goto") {
+            if (url.empty()) return failure("invalid_request", "navigate goto requires url");
+            json response = send_command_locked("Page.navigate", json{{"url", url}}, page->session_id, error);
+            if (!error.empty()) return failure("cdp_error", error);
+            (void)response;
+        } else if (operation == "reload") {
+            send_command_locked("Page.reload", json::object(), page->session_id, error);
+            if (!error.empty()) return failure("cdp_error", error);
+        } else if (operation == "back" || operation == "forward") {
+            const std::string script = operation == "back" ? "history.back(); true" : "history.forward(); true";
+            runtime_evaluate_locked(*page, script, true, error);
+            if (!error.empty()) return failure("cdp_error", error);
+        } else {
+            return failure("invalid_request", "unsupported navigate operation: " + operation);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(std::min(1500, args.value("timeout_ms", 750))));
+        json summary = current_page_summary_locked(*page);
+        auto it = pages_.find(session.empty() ? "acecode-default" : session);
+        if (it != pages_.end()) {
+            it->second.url = summary.value("url", url);
+            it->second.title = summary.value("title", "");
+        }
+        summary["backend"] = "direct_cdp";
+        summary["success"] = true;
+        return success(std::move(summary));
+    }
+
+    json execute_evaluate_locked(const std::string& session, const json& args) {
+        const std::string code = args.value("code", "");
+        if (code.empty()) return failure("invalid_request", "evaluate requires code");
+        std::string error;
+        auto page = page_for_session_locked(session, false, error);
+        if (!page) return failure("direct_cdp_error", error);
+        json response = runtime_evaluate_locked(*page, code, true, error);
+        if (!error.empty()) return failure("cdp_error", error);
+        json value = response["result"]["result"].value("value", json(nullptr));
+        return success({{"backend", "direct_cdp"}, {"value", value}, {"result", value}});
+    }
+
+    static std::string snapshot_script(const json& args) {
+        (void)args;
+        return R"JS((() => {
+  const textOf = (el) => (el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('title') || '').trim();
+  const roleOf = (el) => el.getAttribute('role') || ({A:'link',BUTTON:'button',INPUT:'textbox',TEXTAREA:'textbox',SELECT:'combobox'}[el.tagName] || el.tagName.toLowerCase());
+  const visible = (el) => {
+    const r = el.getBoundingClientRect();
+    const s = getComputedStyle(el);
+    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+  };
+  const selectorFor = (el) => {
+    if (el.id) return '#' + CSS.escape(el.id);
+    const name = el.getAttribute('name');
+    if (name) return el.tagName.toLowerCase() + '[name="' + CSS.escape(name) + '"]';
+    return el.tagName.toLowerCase();
+  };
+  const nodes = Array.from(document.querySelectorAll('a,button,input,textarea,select,[role],[onclick],[tabindex],summary,label'))
+    .filter(visible)
+    .slice(0, 250);
+  window.__aceBrowserRefs = nodes;
+  const elements = nodes.map((el, idx) => {
+    const r = el.getBoundingClientRect();
+    return {
+      ref: '@e' + (idx + 1),
+      tag: el.tagName.toLowerCase(),
+      role: roleOf(el),
+      name: (el.getAttribute('aria-label') || el.getAttribute('title') || textOf(el)).slice(0, 160),
+      text: textOf(el).slice(0, 240),
+      value: 'value' in el ? el.value : undefined,
+      disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true',
+      actionable: true,
+      stable_selector: selectorFor(el),
+      rect: { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) }
+    };
+  });
+  const active = document.activeElement;
+  return {
+    url: location.href,
+    title: document.title,
+    mode: 'summary',
+    text: (document.body ? document.body.innerText : '').slice(0, 30000),
+    elements,
+    focused: active ? { tag: active.tagName.toLowerCase(), text: textOf(active).slice(0, 160) } : null,
+    viewport: { width: innerWidth, height: innerHeight, device_scale_factor: devicePixelRatio }
+  };
+})())JS";
+    }
+
+    json execute_snapshot_locked(const std::string& session, const json& args) {
+        std::string error;
+        auto page = page_for_session_locked(session, false, error);
+        if (!page) return failure("direct_cdp_error", error);
+        json response = runtime_evaluate_locked(*page, snapshot_script(args), true, error);
+        if (!error.empty()) return failure("cdp_error", error);
+        json value = response["result"]["result"].value("value", json::object());
+        if (!value.is_object()) value = json::object({{"value", value}});
+        value["backend"] = "direct_cdp";
+        value["session"] = session.empty() ? "acecode-default" : session;
+        return success(std::move(value));
+    }
+
+    static std::string dom_action_script(const std::string& action, const json& args) {
+        json payload = args.is_object() ? args : json::object();
+        payload["__action"] = action;
+        const std::string literal = payload.dump();
+        return "(() => {\n"
+               "  const args = " + literal + ";\n"
+               "  const textOf = (el) => (el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('title') || '').trim();\n"
+               "  const norm = (s) => String(s || '').trim().toLowerCase();\n"
+               "  const roleOf = (el) => el.getAttribute('role') || ({A:'link',BUTTON:'button',INPUT:'textbox',TEXTAREA:'textbox',SELECT:'combobox'}[el.tagName] || el.tagName.toLowerCase());\n"
+               "  const visible = (el) => { const r = el.getBoundingClientRect(); const s = getComputedStyle(el); return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };\n"
+               "  function byRef(ref) { const m = /^@e(\\d+)$/.exec(ref || ''); return m && window.__aceBrowserRefs ? window.__aceBrowserRefs[Number(m[1]) - 1] : null; }\n"
+               "  function findTarget() {\n"
+               "    if (args.selector && String(args.selector).startsWith('@e')) return byRef(args.selector);\n"
+               "    if (args.target && String(args.target).startsWith('@e')) return byRef(args.target);\n"
+               "    if (args.selector) { try { return document.querySelector(args.selector); } catch (_) {} }\n"
+               "    const wantedText = args.target_text || args.name || (args.locator && args.locator.name);\n"
+               "    const wantedRole = args.role || (args.locator && args.locator.role);\n"
+               "    const nodes = Array.from(document.querySelectorAll('a,button,input,textarea,select,[role],[onclick],[tabindex],summary,label')).filter(visible);\n"
+               "    return nodes.find((el) => (!wantedRole || norm(roleOf(el)) === norm(wantedRole)) && (!wantedText || norm(textOf(el)).includes(norm(wantedText))));\n"
+               "  }\n"
+               "  const el = findTarget();\n"
+               "  if (!el) return { ok:false, code:'target_not_found', message:'Direct CDP could not resolve target' };\n"
+               "  el.scrollIntoView({ block:'center', inline:'center' });\n"
+               "  if (args.__action === 'click') { el.click(); return { ok:true, action:'click', text:textOf(el).slice(0,160) }; }\n"
+               "  const value = args.value !== undefined ? String(args.value) : String(args.text || '');\n"
+               "  if ('value' in el) { if (args.clear !== false) el.value = ''; el.focus(); el.value = value; el.dispatchEvent(new InputEvent('input', { bubbles:true, inputType:'insertText', data:value })); el.dispatchEvent(new Event('change', { bubbles:true })); }\n"
+               "  else { el.textContent = value; el.dispatchEvent(new Event('input', { bubbles:true })); }\n"
+               "  if (args.submit) { const form = el.form || el.closest('form'); if (form) form.requestSubmit ? form.requestSubmit() : form.submit(); }\n"
+               "  return { ok:true, action:args.__action, value };\n"
+               "})()";
+    }
+
+    json execute_dom_action_locked(const std::string& session, const std::string& action, const json& args) {
+        std::string error;
+        auto page = page_for_session_locked(session, false, error);
+        if (!page) return failure("direct_cdp_error", error);
+        json response = runtime_evaluate_locked(*page, dom_action_script(action, args), true, error);
+        if (!error.empty()) return failure("cdp_error", error);
+        json value = response["result"]["result"].value("value", json::object());
+        if (value.is_object() && value.value("ok", true) == false) {
+            return failure(value.value("code", "direct_dom_action_failed"),
+                           value.value("message", "direct DOM action failed"));
+        }
+        return success({{"backend", "direct_cdp"}, {"success", true}, {"result", value}});
+    }
+
+    json execute_list_tabs_locked() {
+        std::string error;
+        json response = send_command_locked("Target.getTargets", json::object(), std::nullopt, error);
+        if (!error.empty()) return failure("cdp_error", error);
+        json tabs = json::array();
+        for (const auto& target : response["result"].value("targetInfos", json::array())) {
+            if (!target.is_object()) continue;
+            const std::string type = target.value("type", target.value("target_type", ""));
+            if (type != "page" && type != "webview") continue;
+            tabs.push_back({
+                {"target_id", target.value("targetId", "")},
+                {"url", target.value("url", "")},
+                {"title", target.value("title", "")},
+                {"type", type},
+            });
+        }
+        return success({{"backend", "direct_cdp"}, {"tabs", tabs}});
+    }
+
+    json execute_find_tab_locked(const json& args) {
+        json tabs_envelope = execute_list_tabs_locked();
+        if (!tabs_envelope.value("ok", false)) return tabs_envelope;
+        const std::string needle = args.value("url", "");
+        if (needle.empty()) return success({{"backend", "direct_cdp"}, {"found", false}});
+        for (const auto& tab : tabs_envelope["data"]["tabs"]) {
+            if (tab.value("url", "").find(needle) != std::string::npos) {
+                return success({{"backend", "direct_cdp"}, {"found", true}, {"tab", tab}});
+            }
+        }
+        return success({{"backend", "direct_cdp"}, {"found", false}});
+    }
+
+    json execute_close_session_locked(const std::string& session) {
+        const std::string key = session.empty() ? "acecode-default" : session;
+        auto it = pages_.find(key);
+        if (it == pages_.end()) return success({{"backend", "direct_cdp"}, {"closed", false}});
+        std::string error;
+        send_command_locked("Target.closeTarget", json{{"targetId", it->second.target_id}}, std::nullopt, error);
+        pages_.erase(it);
+        return success({{"backend", "direct_cdp"}, {"closed", true}});
+    }
+};
+
+bool direct_cdp_action_supported(const std::string& action) {
+    return action == "raw_cdp" ||
+           action == "navigate" ||
+           action == "evaluate" ||
+           action == "snapshot" ||
+           action == "click" ||
+           action == "fill" ||
+           action == "type" ||
+           action == "list_tabs" ||
+           action == "find_tab" ||
+           action == "close_session";
+}
+
 struct HttpRequest {
     std::string method;
     std::string path;
@@ -2120,6 +3199,7 @@ struct DaemonState {
     bool shutting_down = false;
     std::deque<std::shared_ptr<PendingAction>> queued_actions;
     std::unordered_map<std::string, std::shared_ptr<PendingAction>> pending_actions;
+    std::unique_ptr<DirectCdpBackend> direct_cdp = std::make_unique<DirectCdpBackend>();
 };
 
 long long extension_last_seen_ms_locked(const DaemonState& state) {
@@ -2134,14 +3214,24 @@ bool extension_fresh_locked(const DaemonState& state) {
 }
 
 json daemon_status_payload(DaemonState& state, int port) {
+    json direct_status = state.direct_cdp ? state.direct_cdp->status() : json{{"ready", false}};
+    const bool direct_ready = direct_status.value("ready", false);
     std::lock_guard<std::mutex> lock(state.mutex);
     const long long last_seen_ms = extension_last_seen_ms_locked(state);
     const bool has_seen = last_seen_ms >= 0;
     const bool fresh = extension_fresh_locked(state);
     const bool stale = state.extension_connected && !fresh;
+    const bool extension_ready = fresh && state.version_compatible;
+    const bool ready = direct_ready || extension_ready;
+    const std::string backend = direct_ready ? "direct_cdp" : (extension_ready ? "extension" : "none");
+    json capabilities = direct_ready ? direct_cdp_capabilities(true) : default_capabilities(false);
+    if (fresh) capabilities = merge_capabilities(std::move(capabilities), state.capabilities);
     return json{
         {"running", true},
-        {"ready", fresh && state.version_compatible},
+        {"ready", ready},
+        {"backend", backend},
+        {"direct_cdp_ready", direct_ready},
+        {"direct_cdp", direct_status},
         {"extension_connected", fresh},
         {"extension_stale", stale},
         {"extension_last_seen_ms", has_seen ? json(last_seen_ms) : json(nullptr)},
@@ -2155,7 +3245,7 @@ json daemon_status_payload(DaemonState& state, int port) {
         {"host_version", kHostVersion},
         {"port", port},
         {"browser", state.browser.empty() ? json(nullptr) : json(state.browser)},
-        {"capabilities", fresh ? state.capabilities : default_capabilities(false)},
+        {"capabilities", capabilities},
         {"queued_actions", state.queued_actions.size()},
         {"pending_actions", state.pending_actions.size()},
     };
@@ -2215,6 +3305,19 @@ json handle_plugin_hello(DaemonState& state, const std::string& body) {
     return success({{"success", true}});
 }
 
+json handle_direct_ensure(DaemonState& state, int port) {
+    std::string error;
+    if (!state.direct_cdp || !state.direct_cdp->ensure(error)) {
+        host_log_warn("[daemon] direct_cdp ensure failed port=" + std::to_string(port) +
+                      " error=" + host_log_truncate(error));
+        json status = daemon_status_payload(state, port);
+        status["direct_cdp_error"] = error.empty() ? "direct CDP backend is not ready" : error;
+        return success(std::move(status));
+    }
+    host_log_info("[daemon] direct_cdp ensure ready port=" + std::to_string(port));
+    return success(daemon_status_payload(state, port));
+}
+
 json handle_command(DaemonState& state, const std::string& body) {
     auto parsed = parse_json(body);
     if (!parsed || !parsed->is_object()) {
@@ -2239,6 +3342,29 @@ json handle_command(DaemonState& state, const std::string& body) {
     const long long command_timeout_ms = std::clamp<long long>(
         requested_command_timeout, kCommandTimeoutMs, kMaxCommandTimeoutMs);
     const auto started = std::chrono::steady_clock::now();
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        if (state.shutting_down) {
+            host_log_warn("[daemon] command rejected action=" + action +
+                          " session=" + session +
+                          " reason=daemon_shutting_down");
+            return failure("daemon_shutting_down", "ace-browser-host daemon is shutting down");
+        }
+    }
+    if (direct_cdp_action_supported(action) && state.direct_cdp) {
+        json direct = state.direct_cdp->execute(session, action, (*parsed)["args"]);
+        const std::string direct_error = envelope_error_code(direct);
+        if (direct.value("ok", false) || direct_error != "direct_cdp_unavailable") {
+            host_log_info("[daemon] command direct_cdp finish action=" + action +
+                          " session=" + session +
+                          " ok=" + std::string(direct.value("ok", false) ? "true" : "false") +
+                          " duration_ms=" + std::to_string(elapsed_ms_since(started)));
+            return direct;
+        }
+        host_log_warn("[daemon] direct_cdp unavailable, trying extension fallback action=" + action +
+                      " session=" + session +
+                      " error=" + host_log_truncate(direct.dump()));
+    }
     std::shared_ptr<DaemonState::PendingAction> pending;
     {
         std::lock_guard<std::mutex> lock(state.mutex);
@@ -2526,6 +3652,10 @@ std::string route_request(const HttpRequest& req, DaemonState& state, int port, 
     if (req.method == "POST" && req.path == "/plugin/log") {
         if (!plugin_request) return http_json_response(403, failure("unauthorized", "plugin log requires ace-browser-bridge extension"), cors_origin);
         return http_json_response(200, handle_plugin_log(req.body), cors_origin);
+    }
+    if (req.method == "POST" && req.path == "/direct/ensure") {
+        if (!host_request) return http_json_response(403, failure("unauthorized", "direct ensure requires ace-browser-host"));
+        return http_json_response(200, handle_direct_ensure(state, port));
     }
     if (req.method == "POST" && req.path == "/command") {
         if (!host_request) return http_json_response(403, failure("unauthorized", "command requires ace-browser-host"));
