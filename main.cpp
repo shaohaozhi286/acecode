@@ -91,6 +91,7 @@
 #include "commands/command_registry.hpp"
 #include "commands/builtin_commands.hpp"
 #include "commands/compact.hpp"
+#include "commands/resume_state_sync.hpp"
 #include "utils/token_tracker.hpp"
 #include "markdown/markdown_formatter.hpp"
 #include "session/session_manager.hpp"
@@ -2451,6 +2452,7 @@ static int run_interactive_app(const CliOptions& cli,
             // saved_models 找匹配 entry;找不到则构造 ad-hoc entry,name 以
             // "(session:..." 开头,触发我们后面的系统消息提示。
             SessionMeta resumed_meta = session_manager.load_session_meta(target_id);
+            std::optional<SessionModelState> resumed_model_state;
             if (!resumed_meta.provider.empty() && !resumed_meta.model.empty()) {
                 ModelProfile resumed_entry = resolve_effective_model(
                     config, cwd_override, std::optional<SessionMeta>{resumed_meta});
@@ -2462,6 +2464,7 @@ static int run_interactive_app(const CliOptions& cli,
                 try {
                     auto result = apply_model_to_session(resumed_entry, deps);
                     config.context_window = result.state.context_window;
+                    resumed_model_state = result.state;
                 } catch (const std::exception& e) {
                     state.conversation.push_back({"system",
                         std::string("⚠ Resume model switch failed: ") + e.what(), false});
@@ -2493,8 +2496,8 @@ static int run_interactive_app(const CliOptions& cli,
                     /*persist_immediately=*/false);
                 token_tracker.restore(resumed_meta.last_token_usage,
                                       resumed_meta.session_token_usage);
-                state.token_status = token_tracker.format_status(config.context_window);
-                state.token_percent = token_tracker.context_percent(config.context_window);
+                sync_tui_resume_runtime_state(state, config, token_tracker,
+                                              resumed_model_state);
                 state.conversation.push_back({"system",
                     "Resumed session " + target_id + " (" + std::to_string(messages.size()) + " messages)", false});
                 agent_loop.publish_current_goal_state();

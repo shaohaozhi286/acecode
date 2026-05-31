@@ -7,6 +7,7 @@
 #include "model_command.hpp"
 #include "models_command.hpp"
 #include "proxy_command.hpp"
+#include "resume_state_sync.hpp"
 #include "websearch_command.hpp"
 #include "../config/config.hpp"
 #include "../config/saved_models.hpp"
@@ -27,6 +28,7 @@
 #include <algorithm>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <iomanip>
 #include <thread>
@@ -715,6 +717,8 @@ static void do_resume_session(CommandContext& ctx, const std::string& session_id
 
     // 与 --resume CLI 路径(main.cpp)对齐:resume 前先把 meta 的 provider+model
     // 应用到运行时,经 apply_model_to_session 收口(daemon/TUI 共用)。design D6 / 任务 6.3。
+    std::optional<SessionModelState> resumed_model_state;
+    std::string ad_hoc_model_warning;
     if (target && ctx.provider_slot &&
         !target->provider.empty() && !target->model.empty()) {
         auto cwd_override = load_cwd_model_override(ctx.cwd);
@@ -728,15 +732,15 @@ static void do_resume_session(CommandContext& ctx, const std::string& session_id
         try {
             auto result = apply_model_to_session(resumed_entry, deps);
             ctx.config.context_window = result.state.context_window;
+            resumed_model_state = result.state;
         } catch (const std::exception& e) {
             LOG_WARN(std::string("[/resume] model switch failed: ") + e.what());
         }
         if (resumed_entry.name.rfind("(session:", 0) == 0) {
-            ctx.state.conversation.push_back({"system",
+            ad_hoc_model_warning =
                 "Warning: Resumed with ad-hoc model entry (session recorded " +
                 target->provider + "/" + target->model +
-                ", not in saved_models). Use /model --default <name> to pick a permanent one.",
-                false});
+                ", not in saved_models). Use /model --default <name> to pick a permanent one.";
         }
     }
 
@@ -756,6 +760,15 @@ static void do_resume_session(CommandContext& ctx, const std::string& session_id
         ToolExecutor fallback_tools;
         const ToolExecutor& replay_tools = ctx.tools ? *ctx.tools : fallback_tools;
         append_resumed_session_messages(messages, ctx.state, ctx.agent_loop, replay_tools);
+        if (target) {
+            ctx.token_tracker.restore(target->last_token_usage,
+                                      target->session_token_usage);
+        }
+        sync_tui_resume_runtime_state(ctx.state, ctx.config, ctx.token_tracker,
+                                      resumed_model_state);
+        if (!ad_hoc_model_warning.empty()) {
+            ctx.state.conversation.push_back({"system", ad_hoc_model_warning, false});
+        }
         std::ostringstream oss;
         oss << "Resumed session " << session_id << " (" << messages.size() << " messages)";
         ctx.state.conversation.push_back({"system", oss.str(), false});
@@ -836,16 +849,19 @@ static void cmd_resume(CommandContext& ctx, const std::string& args) {
     auto* al = &ctx.agent_loop;
     auto* provider_slot = ctx.provider_slot;
     auto* config = &ctx.config;
+    auto* token_tracker = &ctx.token_tracker;
     auto* tools = ctx.tools;
     std::string cwd = ctx.cwd;
     ctx.state.resume_callback = [&state = ctx.state, sm, al,
-                                 provider_slot, config, tools, cwd,
+                                 provider_slot, config, token_tracker, tools, cwd,
                                  captured_sessions](const std::string& sid) {
         // resume 前应用 provider+model(任务 6.3)。和 do_resume_session 同源。
         const SessionMeta* target = nullptr;
         for (const auto& s : captured_sessions) {
             if (s.id == sid) { target = &s; break; }
         }
+        std::optional<SessionModelState> resumed_model_state;
+        std::string ad_hoc_model_warning;
         if (target && provider_slot && config &&
             !target->provider.empty() && !target->model.empty()) {
             auto cwd_override = load_cwd_model_override(cwd);
@@ -859,15 +875,15 @@ static void cmd_resume(CommandContext& ctx, const std::string& args) {
             try {
                 auto result = apply_model_to_session(resumed_entry, deps);
                 config->context_window = result.state.context_window;
+                resumed_model_state = result.state;
             } catch (const std::exception& e) {
                 LOG_WARN(std::string("[/resume] model switch failed: ") + e.what());
             }
             if (resumed_entry.name.rfind("(session:", 0) == 0) {
-                state.conversation.push_back({"system",
+                ad_hoc_model_warning =
                     "Warning: Resumed with ad-hoc model entry (session recorded " +
                     target->provider + "/" + target->model +
-                    ", not in saved_models). Use /model --default <name> to pick a permanent one.",
-                    false});
+                    ", not in saved_models). Use /model --default <name> to pick a permanent one.";
             }
         }
 
@@ -887,6 +903,17 @@ static void cmd_resume(CommandContext& ctx, const std::string& args) {
             ToolExecutor fallback_tools;
             const ToolExecutor& replay_tools = tools ? *tools : fallback_tools;
             append_resumed_session_messages(messages, state, *al, replay_tools);
+            if (target && token_tracker && config) {
+                token_tracker->restore(target->last_token_usage,
+                                       target->session_token_usage);
+            }
+            if (token_tracker && config) {
+                sync_tui_resume_runtime_state(state, *config, *token_tracker,
+                                              resumed_model_state);
+            }
+            if (!ad_hoc_model_warning.empty()) {
+                state.conversation.push_back({"system", ad_hoc_model_warning, false});
+            }
             std::ostringstream oss;
             oss << "Resumed session " << sid << " (" << messages.size() << " messages)";
             state.conversation.push_back({"system", oss.str(), false});
