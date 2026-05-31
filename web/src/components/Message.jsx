@@ -17,6 +17,7 @@ import { VsIcon, CommandGlyph } from './Icon.jsx';
 import { toast } from './Toast.jsx';
 import { resolveLeadingSlashCommand } from '../lib/slashCommands.js';
 import { useSlashCommands } from './SlashCommandsContext.jsx';
+import { AttachmentStrip } from './AttachmentStrip.jsx';
 
 function HoverActions({ messageId, getCopyText, onFork }) {
   const handleCopy = async (event) => {
@@ -48,50 +49,6 @@ function HoverActions({ messageId, getCopyText, onFork }) {
       >
         <VsIcon name="fork" size={14} />
       </button>
-    </div>
-  );
-}
-
-function UserAttachmentStrip({ contentParts = [] }) {
-  const parts = Array.isArray(contentParts) ? contentParts : [];
-  const attachments = parts
-    .filter((part) => part && (part.type === 'image' || part.type === 'file') && part.attachment)
-    .map((part) => ({ ...part.attachment, type: part.type }));
-  const contexts = parts
-    .filter((part) => part && part.type === 'browser_context')
-    .map((part) => part.context || {});
-  if (attachments.length === 0 && contexts.length === 0) return null;
-  return (
-    <div className="flex flex-wrap justify-end gap-2 max-w-full">
-      {attachments.map((att) => {
-        const key = att.id || att.path || att.name;
-        const isImage = att.type === 'image' || String(att.mime_type || '').startsWith('image/');
-        return (
-          <div
-            key={key}
-            className="max-w-[220px] rounded-lg border border-accent-soft bg-surface overflow-hidden text-left"
-            title={att.name}
-          >
-            {isImage && att.blob_url ? (
-              <img src={att.blob_url} alt="" className="block max-h-40 max-w-full object-contain bg-bg" />
-            ) : (
-              <div className="px-2.5 py-2 flex items-center gap-2">
-                <VsIcon name="file" size={15} />
-                <span className="truncate text-[12px] text-fg">{att.name || 'attachment'}</span>
-              </div>
-            )}
-          </div>
-        );
-      })}
-      {contexts.map((ctx) => (
-        <div
-          key={ctx.local_id || ctx.id || ctx.type || 'browser'}
-          className="h-7 px-2 rounded-md border border-accent-soft bg-surface flex items-center gap-1.5 text-[12px] text-fg"
-        >
-          <VsIcon name="search" size={12} />
-          <span>{ctx.label || 'Browser'}</span>
-        </div>
-      ))}
     </div>
   );
 }
@@ -172,7 +129,7 @@ function UserMessageBody({ content }) {
 function UserBubble({ content, contentParts, ts, messageId, onFork }) {
   return (
     <div className="self-end max-w-[70%] flex flex-col items-end gap-0.5 group">
-      <UserAttachmentStrip contentParts={contentParts} />
+      <AttachmentStrip contentParts={contentParts} align="right" />
       {content ? (
         <div className="px-3.5 py-2 rounded-[14px] rounded-br-[4px] bg-accent-bg border border-accent-soft text-fg text-[13px] leading-[1.5] whitespace-pre-wrap break-words">
           <UserMessageBody content={content} />
@@ -237,6 +194,7 @@ function AssistantBubble({
           onClick={handleMarkdownClick}
           dangerouslySetInnerHTML={html}
         />
+        <AttachmentStrip contentParts={contentParts} align="left" />
         {showFooter && (
           <div className="min-h-6 flex items-center gap-1">
             {!streaming && (
@@ -319,7 +277,8 @@ export const Message = memo(function Message({
                         onFork={onFork} />;
   }
   if (role === 'assistant') {
-    return <AssistantBubble content={content} ts={ts} streaming={streaming}
+    return <AssistantBubble content={content} contentParts={contentParts}
+                             ts={ts} streaming={streaming}
                              messageId={messageId} onFork={onFork}
                              continuation={continuation}
                              showFooter={showFooter}

@@ -5,6 +5,7 @@
 #include "session_rewind.hpp"
 #include "tool_metadata_codec.hpp"
 #include "tool_result_storage.hpp"
+#include "output_attachments.hpp"
 #include "../tool/tool_executor.hpp"
 
 #include <nlohmann/json.hpp>
@@ -92,6 +93,14 @@ std::vector<TuiState::Message> replay_session_messages(
             TuiState::Message tr_row;
             tr_row.role = "tool_result";
             tr_row.content = msg.content;
+            std::string attachment_fallback =
+                output_attachments_fallback_text(msg.content_parts);
+            if (!attachment_fallback.empty()) {
+                if (!tr_row.content.empty() && tr_row.content.back() != '\n') {
+                    tr_row.content.push_back('\n');
+                }
+                tr_row.content += attachment_fallback;
+            }
             tr_row.is_tool = true;
 
             if (msg.metadata.is_object()) {

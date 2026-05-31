@@ -257,6 +257,35 @@ TEST(SessionReplay, ToolMessageWithoutMetadataFallsBackToFold) {
     EXPECT_FALSE(out[0].hunks.has_value());
 }
 
+TEST(SessionReplay, ToolMessageWithOutputAttachmentShowsTextFallback) {
+    ChatMessage m;
+    m.role = "tool";
+    m.content = "generated";
+    m.content_parts = nlohmann::json::array({
+        {
+            {"type", "image"},
+            {"attachment", {
+                {"id", "att_img"},
+                {"session_id", "sid"},
+                {"name", "plot.png"},
+                {"kind", "image"},
+                {"mime_type", "image/png"},
+                {"path", "C:/tmp/plot.png"},
+                {"blob_url", "/api/sessions/sid/attachments/att_img/blob"},
+                {"size_bytes", 3},
+            }},
+        },
+    });
+
+    ToolExecutor tools;
+    auto out = replay_session_messages({m}, tools);
+
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_EQ(out[0].role, "tool_result");
+    EXPECT_EQ(out[0].content, "generated\n[image: plot.png]");
+    EXPECT_TRUE(out[0].is_tool);
+}
+
 // metadata.tool_summary 类型错 → decode 返回 nullopt → 该字段为空,
 // **整个 replay 不崩溃**。
 TEST(SessionReplay, ToolMessageWithCorruptMetadataFallsBack) {

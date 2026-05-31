@@ -11,6 +11,8 @@ import { memo, useEffect, useMemo, useState } from 'react';
 import { clsx, formatBytes, formatElapsed } from '../lib/format.js';
 import { hunksToUnifiedDiff } from '../lib/diff.js';
 import { compactOneLinePreview } from '../lib/compactMessagePreview.js';
+import { normalizeAttachmentList } from '../lib/messageAttachments.js';
+import { AttachmentStrip } from './AttachmentStrip.jsx';
 import { CopyableCodeFrame } from './CopyableCodeFrame.jsx';
 import { ToolSummaryIcon, VsIcon } from './Icon.jsx';
 import * as Diff2Html from 'diff2html';
@@ -48,7 +50,9 @@ export const ToolBlock = memo(function ToolBlock({ entry }) {
     summary = null,
     output = '',
     hunks = [],
+    attachments = [],
   } = entry || {};
+  const attachmentItems = useMemo(() => normalizeAttachmentList(attachments), [attachments]);
 
   const [nowMs, setNowMs] = useState(() => Date.now());
   useEffect(() => {
@@ -139,6 +143,11 @@ export const ToolBlock = memo(function ToolBlock({ entry }) {
             ) : null}
           </div>
         )}
+        {attachmentItems.length > 0 && (
+          <div className="px-3 pb-2 pt-1">
+            <AttachmentStrip attachments={attachmentItems} align="left" compact />
+          </div>
+        )}
       </div>
     );
   }
@@ -167,6 +176,11 @@ export const ToolBlock = memo(function ToolBlock({ entry }) {
             <VsIcon name={expanded ? 'expandUp' : 'expandDown'} size={12} />
           </span>
         </button>
+        {attachmentItems.length > 0 && (
+          <div className="px-3 pb-2 pt-1">
+            <AttachmentStrip attachments={attachmentItems} align="left" compact />
+          </div>
+        )}
         {expanded && output && (
           <div className="px-3 pb-2 pt-1">
             <CopyableCodeFrame text={output}>

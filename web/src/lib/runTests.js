@@ -8,6 +8,7 @@ import './inputHistoryNavigation.test.js';
 import './inputBarState.test.js';
 import './composerFileTransfer.test.js';
 import './imageNormalize.test.js';
+import './messageAttachments.test.js';
 import './goalControl.test.js';
 import './chatInputQueue.test.js';
 import './queueCardItem.test.js';

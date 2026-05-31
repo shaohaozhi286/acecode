@@ -1,4 +1,5 @@
 #include "tool_event_payload.hpp"
+#include "../session/output_attachments.hpp"
 #include "../session/tool_metadata_codec.hpp"
 
 namespace acecode::web {
@@ -81,6 +82,13 @@ nlohmann::json build_tool_end_payload(
         p["hunks"] = encode_tool_hunks(*result.hunks);
     } else {
         p["hunks"] = nlohmann::json::array();
+    }
+    p["attachments"] = result.has_attachments()
+        ? output_attachments_from_content_parts(
+              output_attachments_to_content_parts(result.attachments))
+        : nlohmann::json::array();
+    if (!result.attachment_warnings.empty()) {
+        p["attachment_warnings"] = result.attachment_warnings;
     }
     return p;
 }

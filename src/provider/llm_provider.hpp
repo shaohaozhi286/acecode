@@ -74,6 +74,7 @@ struct TokenUsage {
 
 struct ChatResponse {
     std::string content;               // text reply (empty if tool_calls present)
+    nlohmann::json content_parts = nlohmann::json::array(); // optional structured output parts
     std::string reasoning_content;     // chain-of-thought (DeepSeek thinking etc.)
     std::vector<ToolCall> tool_calls;  // empty if pure text reply
     std::string finish_reason;         // "stop", "tool_calls", etc.

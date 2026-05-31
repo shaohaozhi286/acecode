@@ -48,12 +48,36 @@ acecode::ToolImpl big_read_tool() {
     return impl;
 }
 
+acecode::ToolImpl big_image_tool() {
+    acecode::ToolDef def;
+    def.name = "big_image";
+    def.description = "Return a large payload with an image attachment.";
+    def.parameters = nlohmann::json{{"type", "object"}, {"properties", nlohmann::json::object()}};
+
+    acecode::ToolImpl impl;
+    impl.definition = std::move(def);
+    impl.is_read_only = true;
+    impl.execute = [](const std::string&, const acecode::ToolContext&) {
+        acecode::ToolResult result{std::string(260000, 'y'), true};
+        result.attachments = nlohmann::json::array({
+            {
+                {"name", "plot.png"},
+                {"mime_type", "image/png"},
+                {"data_url", "data:image/png;base64,YWJj"},
+            },
+        });
+        return result;
+    };
+    return impl;
+}
+
 class Harness {
 public:
     Harness()
         : cwd_(temp_cwd("batch")) {
         sm_.start_session(cwd_.string(), "stub", "stub-1", "sid-large-results");
         tools_.register_tool(big_read_tool());
+        tools_.register_tool(big_image_tool());
 
         acecode::AgentCallbacks cb;
         cb.on_busy_changed = [this](bool busy) {
@@ -139,4 +163,40 @@ TEST(AgentLoopToolResultStorage, PersistsLargeToolResultBeforeProviderFollowup) 
         });
     ASSERT_NE(followup_tool, followup_messages.end());
     EXPECT_TRUE(acecode::is_persisted_output_message(followup_tool->content));
+}
+
+TEST(AgentLoopToolResultStorage, LargeToolResultReplacementPreservesAttachments) {
+    Harness h;
+
+    h.provider().push_tool_call("big_image", "{}", "call-big-image");
+    h.provider().push_text("done");
+
+    ASSERT_TRUE(h.submit_and_wait("run the image tool"));
+
+    const auto& messages = h.loop().messages();
+    auto tool_it = std::find_if(messages.begin(), messages.end(), [](const acecode::ChatMessage& msg) {
+        return msg.role == "tool" && msg.tool_call_id == "call-big-image";
+    });
+    ASSERT_NE(tool_it, messages.end());
+    EXPECT_TRUE(acecode::is_persisted_output_message(tool_it->content));
+    ASSERT_TRUE(tool_it->content_parts.is_array());
+    ASSERT_EQ(tool_it->content_parts.size(), 1u);
+    EXPECT_EQ(tool_it->content_parts[0]["type"], "image");
+    EXPECT_EQ(tool_it->content_parts[0]["attachment"]["name"], "plot.png");
+    EXPECT_EQ(tool_it->content_parts[0]["attachment"]["blob_url"].get<std::string>().find(
+                  "/api/sessions/sid-large-results/attachments/"),
+              0u);
+
+    auto followup_messages = h.provider().messages_for_turn(1);
+    auto followup_tool = std::find_if(
+        followup_messages.begin(),
+        followup_messages.end(),
+        [](const acecode::ChatMessage& msg) {
+            return msg.role == "tool" && msg.tool_call_id == "call-big-image";
+        });
+    ASSERT_NE(followup_tool, followup_messages.end());
+    ASSERT_TRUE(followup_tool->content_parts.is_array());
+    ASSERT_EQ(followup_tool->content_parts.size(), 1u);
+    EXPECT_EQ(followup_tool->content_parts[0]["attachment"]["id"],
+              tool_it->content_parts[0]["attachment"]["id"]);
 }

@@ -239,7 +239,8 @@ private:
     void dispatch_message(const std::string& role,
                           const std::string& content,
                           bool is_tool,
-                          nlohmann::json metadata = nlohmann::json::object());
+                          nlohmann::json metadata = nlohmann::json::object(),
+                          nlohmann::json content_parts = nlohmann::json::array());
     void append_tool_user_prompt(const std::string& content,
                                  const std::string& display_text,
                                  const std::string& source_tool);

@@ -73,6 +73,18 @@ std::string build_http_locator(const McpServerConfig& cfg) {
     return out;
 }
 
+std::string extension_for_mcp_mime(const std::string& mime) {
+    std::string lower = mime;
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    if (lower == "image/jpeg" || lower == "image/jpg") return ".jpg";
+    if (lower == "image/gif") return ".gif";
+    if (lower == "image/webp") return ".webp";
+    if (lower == "image/bmp") return ".bmp";
+    return ".png";
+}
+
 std::string build_locator(const McpServerConfig& cfg) {
     return cfg.transport == McpTransport::Stdio
         ? build_stdio_command_line(cfg)
@@ -442,13 +454,28 @@ ToolResult McpManager::invoke(const std::string& server_name,
             is_error = result["isError"].get<bool>();
         }
         std::string out;
+        nlohmann::json attachments = nlohmann::json::array();
         if (result.contains("content") && result["content"].is_array()) {
             std::ostringstream oss;
+            int image_index = 1;
             for (const auto& item : result["content"]) {
                 if (item.is_object() && item.contains("type") && item["type"] == "text" &&
                     item.contains("text") && item["text"].is_string()) {
                     if (!oss.str().empty()) oss << '\n';
                     oss << item["text"].get<std::string>();
+                } else if (item.is_object() && item.contains("type") && item["type"] == "image" &&
+                           item.contains("data") && item["data"].is_string()) {
+                    const std::string mime = item.value("mimeType", item.value("mime_type", std::string{"image/png"}));
+                    std::string name = item.value("name", std::string{});
+                    if (name.empty()) {
+                        name = "mcp-image-" + std::to_string(image_index) + extension_for_mcp_mime(mime);
+                    }
+                    attachments.push_back(nlohmann::json{
+                        {"name", name},
+                        {"mime_type", mime},
+                        {"data_url", "data:" + mime + ";base64," + item["data"].get<std::string>()},
+                    });
+                    image_index++;
                 }
             }
             out = oss.str();
@@ -456,7 +483,9 @@ ToolResult McpManager::invoke(const std::string& server_name,
         } else {
             out = result.dump();
         }
-        return ToolResult{out, !is_error};
+        ToolResult tool_result{out, !is_error};
+        if (!attachments.empty()) tool_result.attachments = std::move(attachments);
+        return tool_result;
     } catch (const mcp::mcp_exception& e) {
         LOG_ERROR(tag + "call_tool('" + server_name + "', '" + tool_name + "') mcp_exception: " + e.what());
         return ToolResult{std::string("[Error] MCP call failed: ") + e.what(), false};

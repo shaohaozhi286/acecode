@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createApi } from './api.js';
 import { connection } from './connection.js';
+import { attachmentsFromContentParts, normalizeAttachmentList } from './messageAttachments.js';
 import { sessionDisplayTitle, titleFromMessages } from './sessionTitle.js';
 
 export function messageKey(role, content) {
@@ -155,7 +156,8 @@ function historyItemFromMessage(next, m) {
   if ((m?.role || '') === 'tool' && metadata) {
     const summary = normalizePersistedToolSummary(metadata);
     const hunks = normalizePersistedToolHunks(metadata);
-    if (summary || hunks.length > 0) {
+    const attachments = attachmentsFromContentParts(m.content_parts);
+    if (summary || hunks.length > 0 || attachments.length > 0) {
       return {
         kind: 'tool',
         id: allocateItemId(next),
@@ -178,6 +180,37 @@ function historyItemFromMessage(next, m) {
           summary,
           output: m.content || '',
           hunks,
+          attachments,
+        },
+        ts: m.ts || m.timestamp_ms || Date.now(),
+      };
+    }
+  } else if ((m?.role || '') === 'tool') {
+    const attachments = attachmentsFromContentParts(m.content_parts);
+    if (attachments.length > 0) {
+      return {
+        kind: 'tool',
+        id: allocateItemId(next),
+        messageId: m.id || '',
+        tool: {
+          isTaskComplete: false,
+          isDone: true,
+          success: true,
+          tool: m.tool || '',
+          toolCallId: m.tool_call_id || m.toolCallId || '',
+          toolIndex: m.tool_index ?? m.toolIndex ?? null,
+          startedAtMs: m.ts || m.timestamp_ms || Date.now(),
+          displayOverride: '',
+          title: m.content || attachments[0]?.name || '工具调用',
+          tailLines: [],
+          currentPartial: '',
+          totalLines: 0,
+          totalBytes: 0,
+          elapsed: 0,
+          summary: null,
+          output: m.content || '',
+          hunks: [],
+          attachments,
         },
         ts: m.ts || m.timestamp_ms || Date.now(),
       };
@@ -311,6 +344,7 @@ export function reduceTranscriptEvent(state, msg) {
               ...item,
               role: 'assistant',
               content: finalContent || item.content || '',
+              contentParts: Array.isArray(p.content_parts) ? p.content_parts : item.contentParts,
               messageId: p.id || item.messageId || '',
               ts: eventTs(msg),
               streaming: false,
@@ -386,6 +420,7 @@ export function reduceTranscriptEvent(state, msg) {
         summary: p.is_task_complete ? { object: (p.args && p.args.summary) || '完成' } : null,
         output: '',
         hunks: [],
+        attachments: [],
       };
       next.items = [...next.items, { kind: 'tool', id, tool, ts: eventTs(msg) }];
       break;
@@ -429,6 +464,7 @@ export function reduceTranscriptEvent(state, msg) {
             summary: p.summary || item.tool.summary,
             output: p.output || '',
             hunks: Array.isArray(p.hunks) ? p.hunks : [],
+            attachments: normalizeAttachmentList(p.attachments),
             elapsed: p.elapsed_seconds || item.tool.elapsed,
             toolCallId: p.tool_call_id || item.tool.toolCallId || '',
             toolIndex: p.tool_index ?? item.tool.toolIndex ?? null,

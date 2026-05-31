@@ -178,6 +178,33 @@ TEST(ToolEventPayload, ToolEndAlwaysIncludesHunksField) {
     ASSERT_TRUE(p.contains("hunks"));
     EXPECT_TRUE(p["hunks"].is_array());
     EXPECT_EQ(p["hunks"].size(), 0u);
+    ASSERT_TRUE(p.contains("attachments"));
+    EXPECT_TRUE(p["attachments"].is_array());
+    EXPECT_EQ(p["attachments"].size(), 0u);
+}
+
+// 场景: ToolResult.attachments 有值 → tool_end payload 带稳定 attachments 数组。
+TEST(ToolEventPayload, ToolEndCarriesOutputAttachments) {
+    ToolResult r;
+    r.success = true;
+    r.attachments = nlohmann::json::array({
+        {
+            {"id", "att_img"},
+            {"session_id", "sid"},
+            {"name", "screen.png"},
+            {"kind", "image"},
+            {"mime_type", "image/png"},
+            {"path", "C:/tmp/screen.png"},
+            {"blob_url", "/api/sessions/sid/attachments/att_img/blob"},
+            {"size_bytes", 3},
+        },
+    });
+
+    auto p = build_tool_end_payload("browser_screenshot", r, 0.2, "");
+    ASSERT_TRUE(p["attachments"].is_array());
+    ASSERT_EQ(p["attachments"].size(), 1u);
+    EXPECT_EQ(p["attachments"][0]["id"], "att_img");
+    EXPECT_EQ(p["attachments"][0]["mime_type"], "image/png");
 }
 
 // 场景: ToolResult.hunks 有值 → 通过 encode_tool_hunks 序列化进 payload.hunks。

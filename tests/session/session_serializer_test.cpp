@@ -89,6 +89,40 @@ TEST(SessionSerializer, ContentPartsRoundtrip) {
     EXPECT_EQ(out.content_parts[1]["attachment"]["mime_type"], "image/png");
 }
 
+TEST(SessionSerializer, ToolOutputImageContentPartsRoundtrip) {
+    ChatMessage in;
+    in.role = "tool";
+    in.content = "created plot";
+    in.tool_call_id = "call_plot";
+    in.content_parts = nlohmann::json::array({
+        {{"type", "image"},
+         {"attachment", {
+             {"id", "att_plot"},
+             {"session_id", "sid"},
+             {"name", "plot.png"},
+             {"kind", "image"},
+             {"mime_type", "image/png"},
+             {"size_bytes", 3},
+             {"path", "C:/tmp/plot.png"},
+             {"blob_url", "/api/sessions/sid/attachments/att_plot/blob"},
+         }}},
+    });
+
+    auto line = serialize_message(in);
+    auto j = nlohmann::json::parse(line);
+    ASSERT_TRUE(j.contains("content_parts"));
+    EXPECT_EQ(line.find("data:image/"), std::string::npos);
+
+    ChatMessage out = deserialize_message(line);
+    EXPECT_EQ(out.role, "tool");
+    EXPECT_EQ(out.tool_call_id, "call_plot");
+    ASSERT_TRUE(out.content_parts.is_array());
+    ASSERT_EQ(out.content_parts.size(), 1u);
+    EXPECT_EQ(out.content_parts[0]["attachment"]["id"], "att_plot");
+    EXPECT_EQ(out.content_parts[0]["attachment"]["blob_url"],
+              "/api/sessions/sid/attachments/att_plot/blob");
+}
+
 // 场景:assistant 纯工具调用(content 为空 + 非空 tool_calls 数组)。
 // tool_calls 的嵌套结构(id / function.name / function.arguments)必须
 // 原样保留——AgentLoop 要用这些字段重放工具调用。

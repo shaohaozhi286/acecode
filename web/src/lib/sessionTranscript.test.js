@@ -355,6 +355,34 @@ run('history load 将带 tool_hunks metadata 的 tool message 恢复为 tool ite
   assert.deepEqual(loaded.items[1].tool.hunks, [hunk]);
 });
 
+run('history load 将带 output attachment 的 tool message 恢复为 tool item', () => {
+  const attachment = {
+    id: 'att-img',
+    name: 'plot.png',
+    kind: 'image',
+    mime_type: 'image/png',
+    blob_url: '/api/sessions/s1/attachments/att-img/blob',
+  };
+  const loaded = loadTranscriptHistory(createTranscriptState({ title: 's1' }), {
+    messages: [
+      { id: 'u1', role: 'user', content: 'make plot', ts: 1 },
+      {
+        id: 't1',
+        role: 'tool',
+        content: 'created plot',
+        tool_call_id: 'call-plot',
+        content_parts: [{ type: 'image', attachment }],
+        ts: 2,
+      },
+    ],
+    events: [],
+  }).state;
+  assert.equal(loaded.items.length, 2);
+  assert.equal(loaded.items[1].kind, 'tool');
+  assert.equal(loaded.items[1].tool.toolCallId, 'call-plot');
+  assert.deepEqual(loaded.items[1].tool.attachments, [{ ...attachment, type: 'image' }]);
+});
+
 run('history load 不显示内部 meta 消息', () => {
   const loaded = loadTranscriptHistory(createTranscriptState({ title: 's1' }), {
     messages: [
@@ -401,12 +429,13 @@ run('新 transcript token usage 默认为 unknown 且不跨 session 继承', () 
   assert.equal(loaded.tokenUsage, null);
 });
 
-run('tool lifecycle 保留进度、summary、失败输出和 hunks', () => {
+run('tool lifecycle 保留进度、summary、失败输出、hunks 和附件', () => {
   const hunk = { file: 'a.txt', old_start: 1, old_lines: ['a'], new_start: 1, new_lines: ['b'] };
+  const attachment = { id: 'att-img', name: 'screen.png', mime_type: 'image/png', kind: 'image' };
   const state = reduceMany([
     { type: 'tool_start', payload: { tool: 'file_edit', display_override: 'edit a.txt' }, seq: 1 },
     { type: 'tool_update', payload: { tool: 'file_edit', tail_lines: ['patching'], total_lines: 1, total_bytes: 8, elapsed_seconds: 2 }, seq: 2 },
-    { type: 'tool_end', payload: { tool: 'file_edit', success: false, summary: { verb: 'Edit', object: 'a.txt' }, output: 'failed', hunks: [hunk] }, seq: 3 },
+    { type: 'tool_end', payload: { tool: 'file_edit', success: false, summary: { verb: 'Edit', object: 'a.txt' }, output: 'failed', hunks: [hunk], attachments: [attachment] }, seq: 3 },
   ]);
   assert.equal(state.items.length, 1);
   const tool = state.items[0].tool;
@@ -415,6 +444,7 @@ run('tool lifecycle 保留进度、summary、失败输出和 hunks', () => {
   assert.equal(tool.summary.object, 'a.txt');
   assert.equal(tool.output, 'failed');
   assert.deepEqual(tool.hunks, [hunk]);
+  assert.deepEqual(tool.attachments, [attachment]);
 });
 
 run('agent_progress 更新活动状态且 busy 结束时清理', () => {

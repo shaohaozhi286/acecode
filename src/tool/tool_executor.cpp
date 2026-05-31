@@ -1,4 +1,5 @@
 #include "tool_executor.hpp"
+#include "../session/output_attachments.hpp"
 #include "utils/logger.hpp"
 #include "utils/encoding.hpp"
 #include <nlohmann/json.hpp>
@@ -92,6 +93,12 @@ ChatMessage ToolExecutor::format_tool_result(const std::string& tool_call_id, co
     msg.role = "tool";
     msg.content = ensure_utf8(result.output);
     msg.tool_call_id = tool_call_id;
+    if (result.has_attachments()) {
+        msg.content_parts = output_attachments_to_content_parts(result.attachments);
+    }
+    if (!result.attachment_warnings.empty()) {
+        msg.metadata["attachment_warnings"] = result.attachment_warnings;
+    }
     return msg;
 }
 

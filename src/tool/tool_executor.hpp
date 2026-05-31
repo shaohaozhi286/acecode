@@ -45,6 +45,16 @@ struct ToolResult {
     // 运行时字段 —— 不写入 session JSONL(由 session_serializer 的 allowlist
     // 天然挡住;新加字段时如果不加进白名单就不会被序列化)。
     std::optional<std::vector<DiffHunk>> hunks;
+    // Structured output attachments produced by a tool. Items are either stored
+    // AttachmentRecord JSON objects or pre-materialization descriptors such as
+    // {name,mime_type,data_url} / {name,mime_type,path}. AgentLoop materializes
+    // descriptors into session attachments before events and JSONL persistence.
+    nlohmann::json attachments = nlohmann::json::array();
+    std::vector<std::string> attachment_warnings;
+
+    bool has_attachments() const {
+        return attachments.is_array() && !attachments.empty();
+    }
 };
 
 // Runtime context passed into a tool invocation. Optional: if left

@@ -8,6 +8,7 @@
 #include "commands/micro_compact.hpp"
 #include "session/tool_metadata_codec.hpp"
 #include "session/tool_result_storage.hpp"
+#include "session/output_attachments.hpp"
 #include "session/session_rewind.hpp"
 #include "session/session_storage.hpp"
 #include "session/thread_goal_store.hpp"
@@ -263,7 +264,8 @@ AgentLoop::~AgentLoop() {
 void AgentLoop::dispatch_message(const std::string& role,
                                   const std::string& content,
                                   bool is_tool,
-                                  nlohmann::json metadata) {
+                                  nlohmann::json metadata,
+                                  nlohmann::json content_parts) {
     if (callbacks_.on_message) {
         callbacks_.on_message(role, content, is_tool);
     }
@@ -274,9 +276,15 @@ void AgentLoop::dispatch_message(const std::string& role,
     ChatMessage tmp;
     tmp.role    = role;
     tmp.content = content;
+    if (content_parts.is_array() && !content_parts.empty()) {
+        tmp.content_parts = content_parts;
+    }
     nlohmann::json payload = {
         {"role", role}, {"content", content}, {"is_tool", is_tool},
         {"id", web::compute_message_id(tmp)}};
+    if (content_parts.is_array() && !content_parts.empty()) {
+        payload["content_parts"] = std::move(content_parts);
+    }
     if (metadata.is_object() && !metadata.empty()) {
         payload["metadata"] = std::move(metadata);
     }
@@ -1206,6 +1214,9 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
             } else {
                 estimated_response.role = "assistant";
                 estimated_response.content = accumulated.content;
+                if (accumulated.content_parts.is_array() && !accumulated.content_parts.empty()) {
+                    estimated_response.content_parts = accumulated.content_parts;
+                }
                 estimated_response.reasoning_content = accumulated.reasoning_content;
             }
 
@@ -1232,13 +1243,18 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
             ChatMessage assistant_msg;
             assistant_msg.role = "assistant";
             assistant_msg.content = accumulated.content;
+            if (accumulated.content_parts.is_array() && !accumulated.content_parts.empty()) {
+                assistant_msg.content_parts = accumulated.content_parts;
+            }
             // Echo reasoning back on the next turn so DeepSeek thinking-mode
             // doesn't 400. Empty for non-reasoning models — no-op.
             assistant_msg.reasoning_content = accumulated.reasoning_content;
             messages_.push_back(assistant_msg);
             if (session_manager_) session_manager_->on_message(assistant_msg);
 
-            dispatch_message("assistant", accumulated.content, false);
+            dispatch_message("assistant", accumulated.content, false,
+                             nlohmann::json::object(),
+                             accumulated.content_parts);
             break;
         }
 
@@ -1332,6 +1348,31 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
         using ToolRunner = std::function<ToolResult(const ToolContext&,
                                                      const std::string&,
                                                      const std::string&)>;
+
+        auto materialize_result_attachments = [this](ToolResult& result) {
+            if (!result.has_attachments()) return;
+            if (!session_manager_) {
+                result.attachment_warnings.push_back(
+                    "active session required for output attachments");
+                result.attachments = nlohmann::json::array();
+                return;
+            }
+            const std::string session_id = session_manager_->ensure_active_session_id();
+            const std::string project_dir = SessionStorage::get_project_dir(cwd_);
+            auto materialized = materialize_output_attachments(
+                result.attachments,
+                project_dir,
+                session_id,
+                [this](const std::string& path) {
+                    return path_validator_.validate(path);
+                },
+                cwd_);
+            result.attachments = std::move(materialized.attachments);
+            result.attachment_warnings.insert(
+                result.attachment_warnings.end(),
+                materialized.warnings.begin(),
+                materialized.warnings.end());
+        };
 
         auto run_tool_with_lifecycle = [&](const ToolCall& tc,
                                            size_t tool_index,
@@ -1508,6 +1549,7 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
                 LOG_ERROR("Tool lifecycle runner error: " + std::string(e.what()));
                 result = ToolResult{"[Error] Tool execution failed: " + std::string(e.what()), false};
             }
+            materialize_result_attachments(result);
 
             auto elapsed_ms =
                 std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1737,7 +1779,16 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
             if (session_manager_) session_manager_->on_message(tool_msg);
 
             if (result_ready[i]) {
-                dispatch_message("tool_result", results[i].output, true);
+                std::string display_output = results[i].output;
+                std::string attachment_fallback =
+                    output_attachments_fallback_text(results[i].attachments);
+                if (!attachment_fallback.empty()) {
+                    if (!display_output.empty() && display_output.back() != '\n') {
+                        display_output.push_back('\n');
+                    }
+                    display_output += attachment_fallback;
+                }
+                dispatch_message("tool_result", display_output, true);
                 if (callbacks_.on_tool_result) {
                     ChatMessage call_msg;
                     call_msg.role = "tool_call";
