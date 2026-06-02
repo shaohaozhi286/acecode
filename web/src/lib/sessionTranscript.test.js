@@ -38,6 +38,21 @@ run('history load 去重已持久化 replay message 并保留顺序', () => {
   assert.equal(loaded.lastSeq, 5);
 });
 
+run('history load 使用持久 timestamp 而不是页面加载时间', () => {
+  const userTs = '2026-05-01T01:02:03Z';
+  const assistantTs = '2026-05-01T01:02:05Z';
+  const loaded = loadTranscriptHistory(createTranscriptState({ title: 's1' }), {
+    messages: [
+      { id: 'u1', role: 'user', content: 'old prompt', timestamp: userTs },
+      { id: 'a1', role: 'assistant', content: 'old answer', timestamp: assistantTs },
+    ],
+    events: [],
+  }).state;
+
+  assert.equal(loaded.items[0].ts, Date.parse(userTs));
+  assert.equal(loaded.items[1].ts, Date.parse(assistantTs));
+});
+
 run('assistant token streaming 被 final message 替换', () => {
   const state = reduceMany([
     { type: 'token', payload: { text: 'hel' }, seq: 1 },

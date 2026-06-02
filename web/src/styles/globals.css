@@ -1008,7 +1008,7 @@ body {
   margin-right: 1px;
   padding: 0 6px 0 5px;
   border-radius: 6px;
-  background: color-mix(in oklab, var(--ace-accent) 14%, transparent);
+  background: var(--ace-accent-soft);
   border: 1px solid var(--ace-accent-soft);
   color: var(--ace-accent);
   font-weight: 600;
@@ -1027,7 +1027,8 @@ body {
 }
 .ace-cmd-token:hover,
 .ace-cmd-token:focus-visible {
-  background: color-mix(in oklab, var(--ace-accent) 22%, transparent);
+  background: var(--ace-accent-bg);
+  border-color: var(--ace-accent);
 }
 
 /* 描述气泡:portal 到 body + position:fixed,坐标由 JS 计算(锚右对齐徽标右缘)。

@@ -17,7 +17,8 @@ struct ApplyOptions {
 
 unsigned long current_process_id();
 std::filesystem::path current_executable_path(const std::string& argv0);
-std::filesystem::path make_runner_path(unsigned long pid);
+std::filesystem::path make_runner_path(unsigned long pid,
+                                       const std::filesystem::path& install_dir);
 std::vector<std::string> build_apply_runner_args(const ApplyOptions& opts);
 std::string quote_command_arg(const std::string& arg);
 std::optional<ApplyOptions> parse_apply_runner_args(const std::vector<std::string>& args,

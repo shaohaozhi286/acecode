@@ -76,6 +76,125 @@ bool parse_json_body(const std::string& body,
     }
 }
 
+std::string json_scalar_to_string(const nlohmann::json& value) {
+    if (value.is_string()) return value.get<std::string>();
+    if (value.is_number_integer()) return std::to_string(value.get<long long>());
+    if (value.is_number_unsigned()) return std::to_string(value.get<unsigned long long>());
+    if (value.is_boolean()) return value.get<bool>() ? "true" : "false";
+    if (value.is_null()) return {};
+    return value.dump();
+}
+
+std::string first_string_field(const nlohmann::json& object,
+                               std::initializer_list<const char*> keys) {
+    if (!object.is_object()) return {};
+    for (const char* key : keys) {
+        auto it = object.find(key);
+        if (it != object.end() && it->is_string()) {
+            std::string value = it->get<std::string>();
+            if (!value.empty()) return value;
+        }
+    }
+    return {};
+}
+
+int parse_http_status_int(long long value) {
+    return value >= 100 && value <= 599 ? static_cast<int>(value) : 0;
+}
+
+int parse_http_status_text(const std::string& text) {
+    if (text.empty()) return 0;
+    std::string lower = ascii_lower(text);
+    for (const std::string& marker : {
+             std::string("error code"),
+             std::string("status code"),
+             std::string("http status"),
+             std::string("http "),
+         }) {
+        size_t pos = lower.find(marker);
+        if (pos == std::string::npos) continue;
+        pos += marker.size();
+        while (pos < lower.size() && !std::isdigit(static_cast<unsigned char>(lower[pos]))) {
+            ++pos;
+        }
+        long long status = 0;
+        int digits = 0;
+        while (pos < lower.size() && std::isdigit(static_cast<unsigned char>(lower[pos])) && digits < 3) {
+            status = status * 10 + (lower[pos] - '0');
+            ++pos;
+            ++digits;
+        }
+        if (digits == 3) {
+            int parsed = parse_http_status_int(status);
+            if (parsed > 0) return parsed;
+        }
+    }
+    return 0;
+}
+
+int http_status_from_json_field(const nlohmann::json& object,
+                                std::initializer_list<const char*> keys) {
+    if (!object.is_object()) return 0;
+    for (const char* key : keys) {
+        auto it = object.find(key);
+        if (it == object.end() || it->is_null()) continue;
+        if (it->is_number_integer()) {
+            int parsed = parse_http_status_int(it->get<long long>());
+            if (parsed > 0) return parsed;
+        }
+        if (it->is_number_unsigned()) {
+            const auto value = it->get<unsigned long long>();
+            if (value <= 599) {
+                int parsed = parse_http_status_int(static_cast<long long>(value));
+                if (parsed > 0) return parsed;
+            }
+        }
+        if (it->is_string()) {
+            int parsed = parse_http_status_text(it->get<std::string>());
+            if (parsed > 0) return parsed;
+        }
+    }
+    return 0;
+}
+
+bool has_stream_error_payload(const nlohmann::json& j) {
+    auto it = j.find("error");
+    if (it == j.end() || it->is_null()) return false;
+    if (it->is_boolean()) return it->get<bool>();
+    if (it->is_string()) return !it->get<std::string>().empty();
+    if (it->is_object() || it->is_array()) return !it->empty();
+    return true;
+}
+
+std::string stream_error_message_from_payload(const nlohmann::json& j) {
+    auto it = j.find("error");
+    if (it == j.end()) return {};
+    const auto& error = *it;
+    if (error.is_string()) return error.get<std::string>();
+    if (error.is_object()) {
+        std::string message = first_string_field(error, {"message", "detail", "error_description"});
+        std::string type = first_string_field(error, {"type", "code"});
+        if (!message.empty() && !type.empty()) return type + ": " + message;
+        if (!message.empty()) return message;
+        if (!type.empty()) return type;
+    }
+    return json_scalar_to_string(error);
+}
+
+int stream_error_status_from_payload(const nlohmann::json& j,
+                                     const std::string& message) {
+    int status = http_status_from_json_field(
+        j, {"status_code", "status", "http_status", "error_code"});
+    if (status > 0) return status;
+    auto it = j.find("error");
+    if (it != j.end() && it->is_object()) {
+        status = http_status_from_json_field(
+            *it, {"status_code", "status", "http_status", "error_code", "code"});
+        if (status > 0) return status;
+    }
+    return parse_http_status_text(message);
+}
+
 std::string header_value_ci(const cpr::Header& headers, const std::string& key) {
     const std::string wanted = ascii_lower(key);
     for (const auto& [header_key, value] : headers) {
@@ -705,6 +824,10 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
         bool saw_done = false;
         bool saw_sse_data = false;
         bool saw_parse_error = false;
+        bool saw_payload_error = false;
+        std::string payload_error_body;
+        std::string payload_error_message;
+        int payload_error_status_code = 0;
         bool emitted_stream_output = false;
 
         auto flush_pending_tools = [&]() {
@@ -798,6 +921,19 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
 
                 try {
                     auto j = nlohmann::json::parse(event_data);
+
+                    if (has_stream_error_payload(j)) {
+                        saw_payload_error = true;
+                        payload_error_body = event_data;
+                        payload_error_message = stream_error_message_from_payload(j);
+                        payload_error_status_code =
+                            stream_error_status_from_payload(j, payload_error_message);
+                        LOG_ERROR("SSE payload error: " +
+                                  log_truncate(payload_error_message.empty()
+                                      ? event_data
+                                      : payload_error_message, 500));
+                        return false;
+                    }
 
                     if (j.contains("usage") && j["usage"].is_object()) {
                         const auto& u = j["usage"];
@@ -954,7 +1090,23 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
         const std::string request_id = extract_request_id(r.header);
         const bool transport_failed = static_cast<bool>(r.error);
         const ProviderErrorKind transport_kind = classify_cpr_error(r.error);
-        if (transport_failed && transport_kind == ProviderErrorKind::Timeout) {
+        if (saw_payload_error) {
+            const ProviderErrorKind kind = payload_error_status_code > 0
+                ? ProviderErrorKind::Http
+                : ProviderErrorKind::Unknown;
+            error_info = make_provider_error(
+                kind,
+                payload_error_status_code,
+                name(),
+                model_,
+                request_id,
+                payload_error_body,
+                payload_error_message.empty()
+                    ? std::string("stream payload contained an error")
+                    : payload_error_message,
+                payload_error_status_code > 0 &&
+                    is_retryable_http_status(payload_error_status_code, payload_error_body));
+        } else if (transport_failed && transport_kind == ProviderErrorKind::Timeout) {
             const int status_code = r.status_code == 0 ? 0 : static_cast<int>(r.status_code);
             LOG_ERROR("SSE connection timed out: " + r.error.message +
                       " body=" + log_truncate(raw_body_capture, 2000));

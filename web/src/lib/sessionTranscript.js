@@ -3,6 +3,7 @@ import { createApi } from './api.js';
 import { connection } from './connection.js';
 import { attachmentsFromContentParts, normalizeAttachmentList } from './messageAttachments.js';
 import { sessionDisplayTitle, titleFromMessages } from './sessionTitle.js';
+import { transcriptTimestampMs } from './timestamps.js';
 
 export function messageKey(role, content) {
   return `${role || ''}\u0000${content || ''}`;
@@ -72,7 +73,7 @@ function allocateItemId(state) {
 }
 
 function eventTs(msg) {
-  return msg?.timestamp_ms || msg?.ts || Date.now();
+  return transcriptTimestampMs(msg) || Date.now();
 }
 
 function terminationNoticeText(payload = {}) {
@@ -153,6 +154,7 @@ function normalizePersistedToolHunks(metadata) {
 
 function historyItemFromMessage(next, m) {
   const metadata = m?.metadata && typeof m.metadata === 'object' ? m.metadata : null;
+  const ts = transcriptTimestampMs(m) || Date.now();
   if ((m?.role || '') === 'tool' && metadata) {
     const summary = normalizePersistedToolSummary(metadata);
     const hunks = normalizePersistedToolHunks(metadata);
@@ -169,7 +171,7 @@ function historyItemFromMessage(next, m) {
           tool: m.tool || '',
           toolCallId: m.tool_call_id || m.toolCallId || '',
           toolIndex: m.tool_index ?? m.toolIndex ?? null,
-          startedAtMs: m.ts || m.timestamp_ms || Date.now(),
+          startedAtMs: ts,
           displayOverride: '',
           title: summary?.object || m.content || '工具调用',
           tailLines: [],
@@ -182,7 +184,7 @@ function historyItemFromMessage(next, m) {
           hunks,
           attachments,
         },
-        ts: m.ts || m.timestamp_ms || Date.now(),
+        ts,
       };
     }
   } else if ((m?.role || '') === 'tool') {
@@ -199,7 +201,7 @@ function historyItemFromMessage(next, m) {
           tool: m.tool || '',
           toolCallId: m.tool_call_id || m.toolCallId || '',
           toolIndex: m.tool_index ?? m.toolIndex ?? null,
-          startedAtMs: m.ts || m.timestamp_ms || Date.now(),
+          startedAtMs: ts,
           displayOverride: '',
           title: m.content || attachments[0]?.name || '工具调用',
           tailLines: [],
@@ -212,7 +214,7 @@ function historyItemFromMessage(next, m) {
           hunks: [],
           attachments,
         },
-        ts: m.ts || m.timestamp_ms || Date.now(),
+        ts,
       };
     }
   }
@@ -225,7 +227,7 @@ function historyItemFromMessage(next, m) {
     content: m.content || '',
     contentParts: Array.isArray(m.content_parts) ? m.content_parts : [],
     metadata: m.metadata,
-    ts: m.ts || m.timestamp_ms || Date.now(),
+    ts,
   };
 }
 

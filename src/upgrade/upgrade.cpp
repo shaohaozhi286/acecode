@@ -389,7 +389,7 @@ int run_upgrade_command(const AppConfig& config,
 
     fs::path current_exe = current_executable_path(argv0);
     fs::path install_dir = current_exe.parent_path();
-    fs::path runner_path = make_runner_path(current_process_id());
+    fs::path runner_path = make_runner_path(current_process_id(), install_dir);
     std::string runner_error;
     if (!prepare_update_runner(current_exe, runner_path, &runner_error)) {
         err << "acecode upgrade: " << runner_error << "\n";

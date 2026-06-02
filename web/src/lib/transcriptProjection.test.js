@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { projectCollapsedTranscriptItems } from './transcriptProjection.js';
+import { __test__, projectCollapsedTranscriptItems } from './transcriptProjection.js';
 
 function run(name, fn) {
   try {
@@ -27,6 +27,7 @@ function tool(id, {
   success = true,
   ts = id * 1000,
   hunks = [],
+  toolCallId = '',
 } = {}) {
   return {
     kind: 'tool',
@@ -36,10 +37,22 @@ function tool(id, {
       isDone,
       success,
       tool: name,
+      toolCallId,
       summary: { verb, object, metrics: [] },
       output: success ? '' : 'command failed\nstderr details',
       hunks,
     },
+  };
+}
+
+function toolWrapper(id, role, content, extra = {}) {
+  return {
+    kind: 'msg',
+    id,
+    role,
+    content,
+    ts: id * 1000,
+    ...extra,
   };
 }
 
@@ -97,6 +110,30 @@ run('连续工具在 assistant 文本前折叠成一个 activity_summary', () =>
   assert.equal(projected[2].content, 'done');
 });
 
+run('折叠活动摘要使用持久 ISO timestamp', () => {
+  const toolTs = '2026-05-01T01:02:03Z';
+  const projected = projectCollapsedTranscriptItems([
+    { kind: 'msg', id: 1, role: 'user', content: 'do work', timestamp: '2026-05-01T01:02:00Z' },
+    {
+      kind: 'tool',
+      id: 2,
+      timestamp: toolTs,
+      tool: {
+        isDone: true,
+        success: true,
+        tool: 'bash',
+        summary: { verb: 'Ran', object: 'date', metrics: [] },
+        output: '',
+        hunks: [],
+      },
+    },
+    { kind: 'msg', id: 3, role: 'assistant', content: 'done', timestamp: '2026-05-01T01:02:05Z' },
+  ], { deferTrailingToolSummary: true });
+
+  assert.deepEqual(projected.map((item) => item.kind), ['msg', 'activity_summary', 'msg']);
+  assert.equal(projected[1].ts, Date.parse(toolTs));
+});
+
 run('空 assistant 和工具调用返回行不会把连续工具拆成多个摘要', () => {
   const projected = projectCollapsedTranscriptItems([
     user(1),
@@ -151,12 +188,15 @@ run('流式尾部结构化工具隐藏冗余 tool_call 和 tool_result 包装行
 run('没有结构化工具时保留 legacy tool wrapper 行', () => {
   const projected = projectCollapsedTranscriptItems([
     user(1),
-    { kind: 'msg', id: 2, role: 'tool_call', content: '[Tool: legacy] {}', ts: 2000 },
-    { kind: 'msg', id: 3, role: 'tool_result', content: 'legacy output', ts: 3000 },
+    toolWrapper(2, 'tool_call', '[Tool: legacy] {}'),
+    toolWrapper(3, 'tool_result', 'legacy output'),
   ], { deferTrailingToolSummary: true });
 
-  assert.deepEqual(projected.map((item) => item.kind), ['msg', 'msg', 'msg']);
-  assert.deepEqual(projected.map((item) => item.role), ['user', 'tool_call', 'tool_result']);
+  assert.deepEqual(projected.map((item) => item.kind), ['msg', 'msg']);
+  assert.deepEqual(projected.map((item) => item.role), ['user', 'tool_result']);
+  assert.deepEqual(projected[1].coveredItemIds, [2, 3]);
+  assert.match(projected[1].content, /\[Tool: legacy\]/);
+  assert.match(projected[1].content, /legacy output/);
 });
 
 run('连续 legacy 工具返回标签在 assistant 文本前折叠成工具摘要', () => {
@@ -178,12 +218,93 @@ run('运行中的结构化工具隐藏前置 tool_call 包装行', () => {
   const running = tool(3, { isDone: false, name: 'bash', verb: 'Ran' });
   const projected = projectCollapsedTranscriptItems([
     user(1),
-    { kind: 'msg', id: 2, role: 'tool_call', content: '[Tool: bash] {"command":"pnpm test"}', ts: 2000 },
+    toolWrapper(2, 'tool_call', '[Tool: bash] {"command":"pnpm test"}'),
     running,
   ], { deferTrailingToolSummary: true });
 
   assert.deepEqual(projected.map((item) => item.kind), ['msg', 'tool']);
-  assert.equal(projected[1], running);
+  assert.equal(projected[1].tool.isDone, false);
+  assert.deepEqual(projected[1].coveredItemIds, [2, 3]);
+});
+
+run('运行中的结构化工具按 tool_call_id 隐藏调用包装行', () => {
+  const projected = projectCollapsedTranscriptItems([
+    user(1),
+    toolWrapper(2, 'tool_call', '[Tool: bash] {"command":"pnpm test"}', { tool_call_id: 'call-run' }),
+    assistant(3, ' ', 3000, { streaming: true }),
+    tool(4, { isDone: false, name: 'bash', verb: 'Ran', object: 'pnpm test', toolCallId: 'call-run' }),
+  ], { deferTrailingToolSummary: true });
+
+  assert.deepEqual(projected.map((item) => item.kind), ['msg', 'tool']);
+  assert.equal(projected[1].tool.toolCallId, 'call-run');
+  assert.equal(projected[1].tool.isDone, false);
+  assert.deepEqual(projected[1].coveredItemIds, [2, 4]);
+});
+
+run('完成工具按 tool_call_id 合并调用和返回包装行', () => {
+  const projected = projectCollapsedTranscriptItems([
+    user(1),
+    toolWrapper(2, 'tool_call', '[Tool: bash] {"command":"pnpm test"}', { tool_call_id: 'call-done' }),
+    tool(3, { name: 'bash', verb: 'Ran', object: 'pnpm test', toolCallId: 'call-done' }),
+    toolWrapper(4, 'tool_result', 'ok', { tool_call_id: 'call-done' }),
+    assistant(5, 'done'),
+  ], { deferTrailingToolSummary: true });
+
+  assert.deepEqual(projected.map((item) => item.kind), ['msg', 'activity_summary', 'msg']);
+  assert.equal(projected[1].mode, 'tools');
+  assert.deepEqual(projected[1].coveredItemIds, [2, 3, 4]);
+  assert.equal(projected[1].collapsedItems.length, 1);
+  assert.equal(projected[1].collapsedItems[0].kind, 'tool');
+  assert.equal(projected[1].collapsedItems[0].tool.toolCallId, 'call-done');
+  assert.equal(projected[2].content, 'done');
+});
+
+run('同名并行工具按 tool_call_id 各自归并包装行', () => {
+  const projected = projectCollapsedTranscriptItems([
+    user(1),
+    toolWrapper(2, 'tool_call', '[Tool: grep] {"q":"A"}', { tool_call_id: 'call-a' }),
+    toolWrapper(3, 'tool_call', '[Tool: grep] {"q":"B"}', { tool_call_id: 'call-b' }),
+    tool(4, { name: 'grep', verb: 'Read', object: 'A', toolCallId: 'call-a' }),
+    tool(5, { name: 'grep', verb: 'Read', object: 'B', toolCallId: 'call-b' }),
+    toolWrapper(6, 'tool_result', 'B result', { tool_call_id: 'call-b' }),
+    toolWrapper(7, 'tool_result', 'A result', { tool_call_id: 'call-a' }),
+    assistant(8, 'done'),
+  ], { deferTrailingToolSummary: true });
+
+  assert.deepEqual(projected.map((item) => item.kind), ['msg', 'activity_summary', 'msg']);
+  assert.equal(projected[1].collapsedItems.length, 2);
+  const [first, second] = projected[1].collapsedItems;
+  assert.equal(first.tool.toolCallId, 'call-a');
+  assert.equal(second.tool.toolCallId, 'call-b');
+  assert.deepEqual(first.coveredItemIds, [2, 4, 7]);
+  assert.deepEqual(second.coveredItemIds, [3, 5, 6]);
+  assert.equal(projected[1].collapsedItems.some((item) => item.role === 'tool_call' || item.role === 'tool_result'), false);
+});
+
+run('相邻 legacy 调用和返回折叠时保持为一个详情项', () => {
+  const projected = projectCollapsedTranscriptItems([
+    user(1),
+    toolWrapper(2, 'tool_call', '[Tool: legacy] {"x":1}'),
+    toolWrapper(3, 'tool_result', 'legacy output'),
+    assistant(4, 'continue'),
+  ], { deferTrailingToolSummary: true });
+
+  assert.deepEqual(projected.map((item) => item.kind), ['msg', 'activity_summary', 'msg']);
+  assert.equal(projected[1].title, '调用 1 个工具');
+  assert.equal(projected[1].collapsedItems.length, 1);
+  assert.deepEqual(projected[1].collapsedItems[0].coveredItemIds, [2, 3]);
+  assert.match(projected[1].collapsedItems[0].content, /\[Tool: legacy\]/);
+  assert.match(projected[1].collapsedItems[0].content, /legacy output/);
+});
+
+run('不相邻的 ambiguous legacy wrapper 不会被推断合并', () => {
+  const normalized = __test__.normalizeToolInvocationItems([
+    toolWrapper(2, 'tool_call', '[Tool: legacy] {"x":1}'),
+    assistant(3, 'visible separator'),
+    toolWrapper(4, 'tool_result', 'legacy output'),
+  ]);
+
+  assert.deepEqual(normalized.map((item) => item.role), ['tool_call', 'assistant', 'tool_result']);
 });
 
 run('流式遇到 assistant 文字时立刻合并前面的连续工具', () => {

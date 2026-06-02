@@ -1,3 +1,5 @@
+import { transcriptTimestampMs } from './timestamps.js';
+
 function isUserMessage(item) {
   return item?.kind === 'msg' && item.role === 'user';
 }
@@ -28,6 +30,10 @@ function isToolTranscriptMessage(item) {
   return role === 'tool_call' || role === 'tool_result' || role === 'tool';
 }
 
+function isToolCallTranscriptMessage(item) {
+  return item?.kind === 'msg' && String(item.role || '').toLowerCase() === 'tool_call';
+}
+
 function transcriptToolName(item) {
   const direct = item?.tool || item?.tool_name || item?.name || item?.metadata?.tool || item?.metadata?.tool_name;
   if (direct) return String(direct).trim().toLowerCase();
@@ -48,6 +54,17 @@ function isToolTranscriptResultMessage(item) {
   if (item?.kind !== 'msg') return false;
   const role = String(item.role || '').toLowerCase();
   return role === 'tool_result' || role === 'tool';
+}
+
+function toolCallIdForItem(item) {
+  const raw = item?.tool?.toolCallId
+    ?? item?.tool?.tool_call_id
+    ?? item?.toolCallId
+    ?? item?.tool_call_id
+    ?? item?.metadata?.toolCallId
+    ?? item?.metadata?.tool_call_id;
+  const id = String(raw || '').trim();
+  return id || '';
 }
 
 function isTaskCompleteTool(item) {
@@ -83,8 +100,7 @@ function isProcessedActivityItem(item) {
 }
 
 function itemTimestamp(item) {
-  const value = Number(item?.ts ?? item?.timestamp_ms ?? item?.timestampMs ?? 0);
-  return Number.isFinite(value) && value > 0 ? value : 0;
+  return transcriptTimestampMs(item);
 }
 
 function formatDurationMs(durationMs) {
@@ -207,10 +223,15 @@ function hasCollapsibleToolActivity(items) {
   return items.some(isCompletedCollapsibleTool) || items.some(isToolTranscriptMessage);
 }
 
+function coveredIdsForItem(item) {
+  if (Array.isArray(item?.coveredItemIds)) {
+    return item.coveredItemIds.filter((id) => id !== undefined && id !== null);
+  }
+  return item?.id !== undefined && item?.id !== null ? [item.id] : [];
+}
+
 function coveredIds(items) {
-  return items
-    .map((item) => item?.id)
-    .filter((id) => id !== undefined && id !== null);
+  return items.flatMap(coveredIdsForItem);
 }
 
 function collapsedId(mode, items) {
@@ -291,6 +312,173 @@ function makeCompletionSummaryItem(item) {
     coveredItemIds: coveredIds([item]),
     ts: itemTimestamp(item) || Date.now(),
   };
+}
+
+function nearestStructuredToolIndex(indexes, fromIndex) {
+  let best = -1;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const index of indexes || []) {
+    const distance = Math.abs(index - fromIndex);
+    if (distance < bestDistance) {
+      best = index;
+      bestDistance = distance;
+    }
+  }
+  return best;
+}
+
+function nearbyNonEmptyIndex(items, fromIndex, step) {
+  for (let i = fromIndex; i >= 0 && i < items.length; i += step) {
+    if (isEmptyAssistantMessage(items[i])) continue;
+    return i;
+  }
+  return -1;
+}
+
+function sameOrMissingCallId(a, b) {
+  const aId = toolCallIdForItem(a);
+  const bId = toolCallIdForItem(b);
+  return !aId || !bId || aId === bId;
+}
+
+function collectCoveredIds(items) {
+  const ids = [];
+  const seen = new Set();
+  for (const item of items) {
+    for (const id of coveredIdsForItem(item)) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      ids.push(id);
+    }
+  }
+  return ids;
+}
+
+function attachCoveredItems(item, extras) {
+  const coveredItemIds = collectCoveredIds([
+    ...(Array.isArray(extras) ? extras : []),
+    item,
+  ].sort((a, b) => itemTimestamp(a) - itemTimestamp(b)));
+  if (coveredItemIds.length <= coveredIdsForItem(item).length) return item;
+  return { ...item, coveredItemIds };
+}
+
+function suppressStructuredToolWrappers(items) {
+  const structuredById = new Map();
+  items.forEach((item, index) => {
+    if (!isToolItem(item)) return;
+    const id = toolCallIdForItem(item);
+    if (!id) return;
+    const indexes = structuredById.get(id) || [];
+    indexes.push(index);
+    structuredById.set(id, indexes);
+  });
+
+  const hiddenIndexes = new Set();
+  const coveredExtras = new Map();
+  const hideWrapperForTool = (wrapperIndex, toolIndex) => {
+    if (wrapperIndex < 0 || toolIndex < 0 || hiddenIndexes.has(wrapperIndex)) return;
+    hiddenIndexes.add(wrapperIndex);
+    const extras = coveredExtras.get(toolIndex) || [];
+    extras.push(items[wrapperIndex]);
+    coveredExtras.set(toolIndex, extras);
+  };
+
+  items.forEach((item, index) => {
+    if (!isToolTranscriptMessage(item)) return;
+    const id = toolCallIdForItem(item);
+    if (!id || !structuredById.has(id)) return;
+    hideWrapperForTool(index, nearestStructuredToolIndex(structuredById.get(id), index));
+  });
+
+  items.forEach((item, index) => {
+    if (!isToolItem(item)) return;
+
+    const previousIndex = nearbyNonEmptyIndex(items, index - 1, -1);
+    const previous = previousIndex >= 0 ? items[previousIndex] : null;
+    if (
+      isToolCallTranscriptMessage(previous)
+      && !toolCallIdForItem(previous)
+      && sameOrMissingCallId(previous, item)
+    ) {
+      hideWrapperForTool(previousIndex, index);
+    }
+
+    const nextIndex = nearbyNonEmptyIndex(items, index + 1, 1);
+    const next = nextIndex >= 0 ? items[nextIndex] : null;
+    if (
+      isToolTranscriptResultMessage(next)
+      && !toolCallIdForItem(next)
+      && sameOrMissingCallId(item, next)
+    ) {
+      hideWrapperForTool(nextIndex, index);
+    }
+  });
+
+  if (hiddenIndexes.size === 0 && coveredExtras.size === 0) return items;
+
+  return items
+    .map((item, index) => {
+      if (hiddenIndexes.has(index)) return null;
+      const extras = coveredExtras.get(index);
+      return extras ? attachCoveredItems(item, extras) : item;
+    })
+    .filter(Boolean);
+}
+
+function makeLegacyInvocationItem(call, result, betweenItems) {
+  const parts = [call.content, result.content]
+    .map((part) => String(part || '').trim())
+    .filter(Boolean);
+  const coveredItems = [call, ...(betweenItems || []), result];
+  return {
+    ...result,
+    role: 'tool_result',
+    content: parts.join('\n'),
+    coveredItemIds: collectCoveredIds(coveredItems),
+    ts: itemTimestamp(call) || itemTimestamp(result),
+    metadata: {
+      ...(result.metadata || {}),
+      legacyToolInvocation: true,
+    },
+  };
+}
+
+function coalesceAdjacentLegacyWrappers(items) {
+  const out = [];
+  for (let i = 0; i < items.length; i += 1) {
+    const item = items[i];
+    if (!isToolCallTranscriptMessage(item) || isTaskCompleteToolCallMessage(item)) {
+      out.push(item);
+      continue;
+    }
+
+    const betweenItems = [];
+    let resultIndex = i + 1;
+    while (resultIndex < items.length && isEmptyAssistantMessage(items[resultIndex])) {
+      betweenItems.push(items[resultIndex]);
+      resultIndex += 1;
+    }
+
+    const result = items[resultIndex];
+    if (
+      resultIndex < items.length
+      && isToolTranscriptResultMessage(result)
+      && sameOrMissingCallId(item, result)
+    ) {
+      out.push(makeLegacyInvocationItem(item, result, betweenItems));
+      i = resultIndex;
+      continue;
+    }
+
+    out.push(item);
+  }
+  return out;
+}
+
+function normalizeToolInvocationItems(items) {
+  if (!Array.isArray(items) || items.length === 0) return [];
+  return coalesceAdjacentLegacyWrappers(suppressStructuredToolWrappers(items));
 }
 
 function isFinalCollapseSkippable(item) {
@@ -509,9 +697,10 @@ function projectCompletionTurn(items, options = {}) {
 
 function projectTurn(items, options = {}) {
   if (!Array.isArray(items) || items.length === 0) return [];
-  const finalCollapsed = projectFinalCollapsedTurn(items, options);
+  const normalizedItems = normalizeToolInvocationItems(items);
+  const finalCollapsed = projectFinalCollapsedTurn(normalizedItems, options);
   if (finalCollapsed) return finalCollapsed;
-  return projectCompletionTurn(items, options);
+  return projectCompletionTurn(normalizedItems, options);
 }
 
 export function projectCollapsedTranscriptItems(items, options = {}) {
@@ -547,6 +736,7 @@ export const __test__ = {
   isToolTranscriptMessage,
   isTaskCompleteTool,
   isSuccessfulTaskComplete,
+  normalizeToolInvocationItems,
   summarizeToolItems,
   formatDurationMs,
   taskCompleteSummaryText,

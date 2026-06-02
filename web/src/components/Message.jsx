@@ -251,6 +251,14 @@ function SystemRow({ role, content }) {
   );
 }
 
+function ErrorRow({ content }) {
+  return (
+    <div className="self-stretch max-w-[88%] ml-8 rounded-md border border-danger/30 bg-danger-bg px-3 py-2 text-[12px] leading-5 text-danger whitespace-pre-wrap break-words">
+      {content || '[Error]'}
+    </div>
+  );
+}
+
 export const Message = memo(function Message({
   role,
   content,
@@ -283,6 +291,9 @@ export const Message = memo(function Message({
                              continuation={continuation}
                              showFooter={showFooter}
                              showAceCodeAvatar={showAceCodeAvatar} />;
+  }
+  if (role === 'error') {
+    return <ErrorRow content={content} />;
   }
   return <SystemRow role={role} content={content} />;
 });

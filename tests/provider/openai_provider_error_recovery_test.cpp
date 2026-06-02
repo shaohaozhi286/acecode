@@ -180,6 +180,35 @@ TEST(OpenAiProviderErrorRecovery, Http200MalformedSseJsonBecomesMalformedJsonErr
     EXPECT_NE(err->provider_error.raw_body.find("{not-json}"), std::string::npos);
 }
 
+TEST(OpenAiProviderErrorRecovery, Http200SseErrorPayloadWithEmptyChoicesIsPrintedDirectly) {
+    const std::string error_payload =
+        R"({"error":"liteiim_AuthenticationError: AuthenticationError: OpenAIException - Error code: 401 - {'error': 'Unauthorized'}","choices":[]})";
+    LocalHttpServer server([&](httplib::Server& s) {
+        s.Post("/chat/completions", [&](const httplib::Request&, httplib::Response& res) {
+            res.status = 200;
+            res.set_content(
+                "data: " + error_payload + "\n\n"
+                "data: {\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0,\"total_tokens\":0},\"choices\":[]}\n\n"
+                "data: [DONE]\n\n",
+                "text/event-stream");
+        });
+    });
+
+    OpenAiCompatProvider provider(
+        "http://127.0.0.1:" + std::to_string(server.port), "", "test-model");
+
+    const auto events = collect_events(provider);
+    const StreamEvent* err = last_error_event(events);
+    ASSERT_NE(err, nullptr);
+    EXPECT_EQ(err->provider_error.kind, ProviderErrorKind::Http);
+    EXPECT_EQ(err->provider_error.status_code, 401);
+    EXPECT_TRUE(err->provider_error.body_is_json);
+    EXPECT_EQ(err->provider_error.raw_body, error_payload);
+    EXPECT_NE(err->error.find("liteiim_AuthenticationError"), std::string::npos);
+    EXPECT_NE(err->error.find("Unauthorized"), std::string::npos);
+    EXPECT_EQ(count_events(events, StreamEventType::Done), 0);
+}
+
 TEST(OpenAiProviderErrorRecovery, Http200PartialSseThenTransportTimeoutRetriesUntilSuccess) {
     std::atomic<int> calls{0};
     LocalHttpServer server([&](httplib::Server& s) {

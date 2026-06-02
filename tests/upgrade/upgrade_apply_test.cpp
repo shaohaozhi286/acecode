@@ -59,6 +59,14 @@ TEST(UpgradeApply, BuildsAndParsesRunnerArguments) {
     EXPECT_EQ(parsed->backup_dir, opts.backup_dir);
     EXPECT_EQ(quote_command_arg("C:/Program Files/ACECode/acecode.exe"),
               "\"C:/Program Files/ACECode/acecode.exe\"");
+
+    auto runner = make_runner_path(1234, "C:/Program Files/ACECode");
+    EXPECT_EQ(runner.parent_path().filename(), ".acecode-update-runner");
+#ifdef _WIN32
+    EXPECT_EQ(runner.filename(), "acecode-update-runner-1234.exe");
+#else
+    EXPECT_EQ(runner.filename(), "acecode-update-runner-1234");
+#endif
 }
 
 TEST(UpgradeApply, AppliesStagedUpdateAndKeepsBackup) {
@@ -75,6 +83,29 @@ TEST(UpgradeApply, AppliesStagedUpdateAndKeepsBackup) {
     ASSERT_TRUE(apply_staged_update(staging, install, backup, "windows-x64", &err)) << err;
     EXPECT_EQ(read_file(install / "acecode.exe"), "new exe");
     EXPECT_EQ(read_file(install / "share" / "asset.txt"), "asset");
+    EXPECT_EQ(read_file(backup / "old.txt"), "old");
+
+    std::error_code ec;
+    fs::remove_all(root, ec);
+}
+
+TEST(UpgradeApply, KeepsRunnerDirectoryInInstallDir) {
+    fs::path root = temp_root("acecode-apply-runner-dir");
+    fs::path install = root / "install";
+    fs::path staging = root / "staging";
+    fs::path backup = root / "backup";
+
+    write_file(install / "old.txt", "old");
+    write_file(install / ".acecode-update-runner" / "acecode-update-runner-1234.exe",
+               "runner");
+    write_file(staging / "acecode.exe", "new exe");
+
+    std::string err;
+    ASSERT_TRUE(apply_staged_update(staging, install, backup, "windows-x64", &err)) << err;
+    EXPECT_EQ(read_file(install / "acecode.exe"), "new exe");
+    EXPECT_EQ(read_file(install / ".acecode-update-runner" /
+                        "acecode-update-runner-1234.exe"), "runner");
+    EXPECT_FALSE(fs::exists(backup / ".acecode-update-runner"));
     EXPECT_EQ(read_file(backup / "old.txt"), "old");
 
     std::error_code ec;

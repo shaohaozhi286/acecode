@@ -29,6 +29,8 @@ namespace fs = std::filesystem;
 namespace acecode::upgrade {
 namespace {
 
+constexpr const char* kUpdateRunnerDirName = ".acecode-update-runner";
+
 bool is_same_or_inside(const fs::path& maybe_child, const fs::path& maybe_parent) {
     std::error_code ec;
     fs::path child = fs::weakly_canonical(maybe_child, ec);
@@ -43,10 +45,15 @@ bool is_same_or_inside(const fs::path& maybe_child, const fs::path& maybe_parent
     return true;
 }
 
+bool is_update_runner_entry(const fs::directory_entry& entry) {
+    return entry.path().filename() == kUpdateRunnerDirName;
+}
+
 bool remove_directory_contents(const fs::path& dir, std::string* error) {
     std::error_code ec;
     if (!fs::exists(dir, ec)) return true;
     for (const auto& entry : fs::directory_iterator(dir, ec)) {
+        if (is_update_runner_entry(entry)) continue;
         fs::remove_all(entry.path(), ec);
         if (ec) {
             if (error) *error = "failed to remove " + entry.path().string() + ": " + ec.message();
@@ -65,6 +72,7 @@ bool move_directory_contents(const fs::path& from, const fs::path& to, std::stri
     }
     if (!fs::exists(from, ec)) return true;
     for (const auto& entry : fs::directory_iterator(from, ec)) {
+        if (is_update_runner_entry(entry)) continue;
         fs::path dest = to / entry.path().filename();
         fs::rename(entry.path(), dest, ec);
         if (ec) {
@@ -171,11 +179,12 @@ fs::path current_executable_path(const std::string& argv0) {
     return ec ? fs::absolute(p).lexically_normal() : abs;
 }
 
-fs::path make_runner_path(unsigned long pid) {
+fs::path make_runner_path(unsigned long pid, const fs::path& install_dir) {
+    fs::path runner_dir = install_dir / kUpdateRunnerDirName;
 #ifdef _WIN32
-    return fs::temp_directory_path() / ("acecode-update-runner-" + std::to_string(pid) + ".exe");
+    return runner_dir / ("acecode-update-runner-" + std::to_string(pid) + ".exe");
 #else
-    return fs::temp_directory_path() / ("acecode-update-runner-" + std::to_string(pid));
+    return runner_dir / ("acecode-update-runner-" + std::to_string(pid));
 #endif
 }
 
@@ -302,7 +311,10 @@ bool launch_update_runner(const fs::path& runner_path,
         nullptr, mutable_cmd.data(), nullptr, nullptr, TRUE, 0,
         nullptr, nullptr, &si, &pi);
     if (!ok) {
-        if (error) *error = "failed to launch update runner";
+        if (error) {
+            *error = "failed to launch update runner: CreateProcessA error " +
+                     std::to_string(static_cast<unsigned long>(::GetLastError()));
+        }
         return false;
     }
     ::CloseHandle(pi.hThread);
