@@ -57,8 +57,9 @@ private:
 // "目录在但 exe 缺失" 的过滤分支)。
 fs::path make_version_folder(const fs::path& root,
                              const std::string& version,
-                             bool with_exe = true) {
-    fs::path application = root / "Microsoft" / "Edge" / "Application";
+                             bool with_exe = true,
+                             const std::string& product = "Edge") {
+    fs::path application = root / "Microsoft" / product / "Application";
     fs::path folder = application / version;
     std::error_code ec;
     fs::create_directories(folder, ec);
@@ -92,6 +93,17 @@ TEST(Webview2RuntimeProbe, SingleVersionWithExeIsPicked) {
     EXPECT_EQ(result->lexically_normal(), expected.lexically_normal());
 }
 
+// EdgeWebView Runtime 目录同样可作为 browser executable folder fallback。
+TEST(Webview2RuntimeProbe, EdgeWebViewRuntimeFolderIsPicked) {
+    TempDir d;
+    fs::path expected = make_version_folder(d.path(), "120.0.2210.91",
+                                            /*with_exe=*/true,
+                                            "EdgeWebView");
+    auto result = find_edge_browser_folder_in({d.path()});
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->lexically_normal(), expected.lexically_normal());
+}
+
 // 多个合法版本 → 选 4 段版本号最大的
 TEST(Webview2RuntimeProbe, PicksLatestVersionByNumericCompare) {
     TempDir d;
@@ -99,6 +111,19 @@ TEST(Webview2RuntimeProbe, PicksLatestVersionByNumericCompare) {
     make_version_folder(d.path(), "120.0.2210.91");
     fs::path latest = make_version_folder(d.path(), "131.0.2903.86");
     make_version_folder(d.path(), "129.0.2792.79");
+
+    auto result = find_edge_browser_folder_in({d.path()});
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->lexically_normal(), latest.lexically_normal());
+}
+
+// Edge 浏览器与 EdgeWebView Runtime 同时存在时,仍按全局最新版本选择。
+TEST(Webview2RuntimeProbe, AcrossProductsPicksGlobalLatest) {
+    TempDir d;
+    make_version_folder(d.path(), "120.0.2210.91", /*with_exe=*/true, "Edge");
+    fs::path latest = make_version_folder(d.path(), "131.0.2903.86",
+                                          /*with_exe=*/true,
+                                          "EdgeWebView");
 
     auto result = find_edge_browser_folder_in({d.path()});
     ASSERT_TRUE(result.has_value());

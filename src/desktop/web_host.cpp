@@ -879,9 +879,10 @@ struct WebHost::Impl {
         // 三段式构造:
         //   (1) 默认 Loader 路径,优先 offscreen custom_window;失败 → 切
         //       自管 nullptr 父窗口再试一次(沿用现有降级)。
-        //   (2) (1) 整段还是抛 → 探测 Edge 浏览器自带的 msedgewebview2.exe
-        //       目录,通过 WEBVIEW2_BROWSER_EXECUTABLE_FOLDER 环境变量
-        //       (WebView2Loader.dll 公开的覆盖钩子)指过去再试。
+        //   (2) (1) 整段还是抛 → 探测 Edge 浏览器 / EdgeWebView Runtime
+        //       自带的 msedgewebview2.exe 目录,通过
+        //       WEBVIEW2_BROWSER_EXECUTABLE_FOLDER 环境变量(WebView2Loader.dll
+        //       公开的覆盖钩子)指过去再试。
         //   (3) Edge fallback 仍失败或没找到 Edge → 抛 WebHostInitializationError
         //       给 desktop main。main 还有最后一层 Edge --app=<daemon URL>
         //       兜底,不能在 WebHost 构造函数里直接 ExitProcess。
@@ -910,16 +911,16 @@ struct WebHost::Impl {
                      e1.what());
             auto edge_folder = find_edge_browser_folder();
             if (!edge_folder.has_value()) {
-                LOG_ERROR("[desktop] no Microsoft Edge browser folder found to "
-                          "fall back to embedded WebView2");
+                LOG_ERROR("[desktop] no Microsoft Edge/WebView2 executable folder "
+                          "found to fall back to embedded WebView2");
                 throw WebHostInitializationError(
                     std::string("WebView2 default loader path failed and no "
-                                "Edge WebView2 browser folder was found: ") +
+                                "Edge/WebView2 executable folder was found: ") +
                     e1.what());
             }
             const std::wstring folder_w = edge_folder->wstring();
             LOG_INFO(std::string("[desktop] retrying WebView2 with Edge browser "
-                                 "folder: ") + edge_folder->string());
+                                 "or WebView2 folder: ") + edge_folder->string());
             if (!::SetEnvironmentVariableW(L"WEBVIEW2_BROWSER_EXECUTABLE_FOLDER",
                                            folder_w.c_str())) {
                 LOG_ERROR("[desktop] SetEnvironmentVariableW("
@@ -931,10 +932,10 @@ struct WebHost::Impl {
                 // 这里直接喂 nullptr 让 webview 自己造窗口最稳妥。
                 w = std::make_unique<webview::webview>(debug, nullptr);
             } catch (const webview::exception& e2) {
-                LOG_ERROR(std::string("[desktop] WebView2 Edge browser folder "
+                LOG_ERROR(std::string("[desktop] WebView2 Edge/WebView2 folder "
                                       "fallback also failed: ") + e2.what());
                 throw WebHostInitializationError(
-                    std::string("WebView2 Edge browser folder fallback failed: ") +
+                    std::string("WebView2 Edge/WebView2 folder fallback failed: ") +
                     e2.what());
             }
         }

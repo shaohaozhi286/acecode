@@ -59,11 +59,13 @@ std::optional<std::array<std::uint32_t, 4>> parse_version_4(const std::string& s
     return out;
 }
 
-// Edge 浏览器标准布局 <root>/Microsoft/Edge/Application/。我们只用这一条
-// 路径 — Edge Beta/Dev/Canary 各有自己的 root,但同事场景下用户装的就是
-// 正式版 Edge,本期不扫 Beta/Dev/Canary,避免误用 Canary 这种快速变化通道。
-fs::path edge_application_dir(const fs::path& root) {
-    return root / "Microsoft" / "Edge" / "Application";
+// Edge 浏览器与 Evergreen WebView2 Runtime 的标准布局。Edge Beta/Dev/Canary
+// 各有自己的 root,这里仍只扫稳定通道,避免误用快速变化通道。
+std::array<fs::path, 2> webview_application_dirs(const fs::path& root) {
+    return {
+        root / "Microsoft" / "Edge" / "Application",
+        root / "Microsoft" / "EdgeWebView" / "Application",
+    };
 }
 
 // 在一个 Application 目录下扫所有合法版本子目录,挑最大版本 + 验证
@@ -117,12 +119,14 @@ std::optional<fs::path> find_edge_browser_folder_in(
 
     for (const auto& root : roots) {
         if (root.empty()) continue;
-        auto pick = pick_latest_in_application_dir(edge_application_dir(root));
-        if (!pick.has_value()) continue;
+        for (const auto& application_dir : webview_application_dirs(root)) {
+            auto pick = pick_latest_in_application_dir(application_dir);
+            if (!pick.has_value()) continue;
 
-        if (!best_version.has_value() || pick->first > *best_version) {
-            best_version = pick->first;
-            best_folder = pick->second;
+            if (!best_version.has_value() || pick->first > *best_version) {
+                best_version = pick->first;
+                best_folder = pick->second;
+            }
         }
     }
 
@@ -156,6 +160,9 @@ std::optional<fs::path> find_edge_browser_folder() {
     }
     if (auto pfx86 = known_folder_path(FOLDERID_ProgramFilesX86); !pfx86.empty()) {
         roots.push_back(std::move(pfx86));
+    }
+    if (auto local = known_folder_path(FOLDERID_LocalAppData); !local.empty()) {
+        roots.push_back(std::move(local));
     }
     if (roots.empty()) {
         LOG_WARN("[webview2_probe] SHGetKnownFolderPath returned no ProgramFiles paths");

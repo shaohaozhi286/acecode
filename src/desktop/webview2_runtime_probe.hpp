@@ -25,11 +25,13 @@
 
 namespace acecode::desktop {
 
-// 在给定的根目录列表中查找最新版本的 Edge 浏览器自带 msedgewebview2.exe
-// 所在文件夹。纯函数,不调系统 API,unit test 喂临时目录覆盖。
+// 在给定的根目录列表中查找最新版本的 Edge/WebView2 自带
+// msedgewebview2.exe 所在文件夹。纯函数,不调系统 API,unit test 喂临时
+// 目录覆盖。
 //
-// 期望的目录结构(Edge 浏览器标准布局):
+// 期望的目录结构(Edge 浏览器 / EdgeWebView Runtime 标准布局):
 //   <root>/Microsoft/Edge/Application/<version>/msedgewebview2.exe
+//   <root>/Microsoft/EdgeWebView/Application/<version>/msedgewebview2.exe
 // version 必须是 4 段数字格式 "<n>.<n>.<n>.<n>"(过滤 "SetupMetrics" /
 // "Installer" / 回滚备份目录等非版本 entry)。
 //
@@ -42,8 +44,9 @@ namespace acecode::desktop {
 std::optional<std::filesystem::path> find_edge_browser_folder_in(
     const std::vector<std::filesystem::path>& roots);
 
-// Windows 系统调用版:用 SHGetKnownFolderPath 拿 ProgramFiles 与
-// ProgramFiles(x86) 两个根,调上面的纯函数。POSIX 上始终返回 std::nullopt。
+// Windows 系统调用版:用 SHGetKnownFolderPath 拿 ProgramFiles、
+// ProgramFiles(x86) 与 LocalAppData 三个根,调上面的纯函数。POSIX 上始终
+// 返回 std::nullopt。
 //
 // 失败语义和 find_edge_browser_folder_in 一致:返回 nullopt 表示当前机器
 // 没有可复用的 Edge 浏览器二进制,调用方应当向用户提示安装 WebView2 Runtime。
