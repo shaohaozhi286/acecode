@@ -363,6 +363,11 @@ function attachCoveredItems(item, extras) {
   return { ...item, coveredItemIds };
 }
 
+function objectMetadata(item) {
+  const metadata = item?.metadata;
+  return metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : {};
+}
+
 function suppressStructuredToolWrappers(items) {
   const structuredById = new Map();
   items.forEach((item, index) => {
@@ -426,20 +431,43 @@ function suppressStructuredToolWrappers(items) {
     .filter(Boolean);
 }
 
+const LEGACY_INVOCATION_LABEL = '工具调用 / 返回';
+const MISSING_TOOL_REQUEST_TEXT = '请求未记录（旧记录未保存工具调用参数）';
+
+function legacyRequestText(call, result) {
+  const content = String(call?.content || '').trim();
+  if (content) return content;
+  const name = transcriptToolName(result);
+  return name ? `[Tool: ${name}] ${MISSING_TOOL_REQUEST_TEXT}` : MISSING_TOOL_REQUEST_TEXT;
+}
+
+function legacyResultText(result) {
+  const content = String(result?.content || '').trim();
+  return content || '空内容';
+}
+
+function legacyInvocationContent(call, result) {
+  return [
+    '工具调用',
+    legacyRequestText(call, result),
+    '',
+    '工具返回',
+    legacyResultText(result),
+  ].join('\n');
+}
+
 function makeLegacyInvocationItem(call, result, betweenItems) {
-  const parts = [call.content, result.content]
-    .map((part) => String(part || '').trim())
-    .filter(Boolean);
-  const coveredItems = [call, ...(betweenItems || []), result];
+  const coveredItems = [call, ...(betweenItems || []), result].filter(Boolean);
   return {
     ...result,
     role: 'tool_result',
-    content: parts.join('\n'),
+    content: legacyInvocationContent(call, result),
     coveredItemIds: collectCoveredIds(coveredItems),
     ts: itemTimestamp(call) || itemTimestamp(result),
     metadata: {
-      ...(result.metadata || {}),
+      ...objectMetadata(result),
       legacyToolInvocation: true,
+      compact_label: LEGACY_INVOCATION_LABEL,
     },
   };
 }
@@ -476,9 +504,19 @@ function coalesceAdjacentLegacyWrappers(items) {
   return out;
 }
 
+function coalesceResultOnlyLegacyWrappers(items) {
+  return items.map((item) => {
+    if (!isToolTranscriptResultMessage(item)) return item;
+    if (objectMetadata(item).legacyToolInvocation) return item;
+    return makeLegacyInvocationItem(null, item, []);
+  });
+}
+
 function normalizeToolInvocationItems(items) {
   if (!Array.isArray(items) || items.length === 0) return [];
-  return coalesceAdjacentLegacyWrappers(suppressStructuredToolWrappers(items));
+  return coalesceResultOnlyLegacyWrappers(
+    coalesceAdjacentLegacyWrappers(suppressStructuredToolWrappers(items)),
+  );
 }
 
 function isFinalCollapseSkippable(item) {

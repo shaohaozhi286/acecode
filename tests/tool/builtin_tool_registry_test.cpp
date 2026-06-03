@@ -18,6 +18,12 @@ TEST(BuiltinToolRegistry, BrowserToolsDisabledByDefaultInSharedSetupPath) {
     EXPECT_TRUE(tools.has_tool("bash"));
     EXPECT_TRUE(tools.has_tool("file_read"));
     EXPECT_TRUE(tools.has_tool("task_complete"));
+    EXPECT_TRUE(tools.has_tool("TodoWrite"));
+    EXPECT_TRUE(tools.has_tool("EnterPlanMode"));
+    EXPECT_TRUE(tools.has_tool("ExitPlanMode"));
+    EXPECT_FALSE(tools.is_read_only("TodoWrite"));
+    EXPECT_FALSE(tools.is_read_only("EnterPlanMode"));
+    EXPECT_FALSE(tools.is_read_only("ExitPlanMode"));
     EXPECT_FALSE(tools.has_tool("browser_start"));
 }
 

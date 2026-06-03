@@ -6,7 +6,9 @@ import {
   normalizeModelOptions,
   normalizeModelState,
   optionLabel,
+  resolveHomeModelName,
   selectedModelName,
+  withCreateSessionModel,
 } from './sessionModel.js';
 
 function run(name, fn) {
@@ -103,4 +105,38 @@ run('status bar model menu exposes longest label for intrinsic sizing', () => {
   });
 
   assert.equal(menu.widthLabel, longLabel);
+});
+
+run('home model selection initializes from configured default', () => {
+  const options = [
+    { name: 'fast', provider: 'openai', model: 'gpt-5' },
+    { name: 'slow', provider: 'copilot', model: 'gpt-4o' },
+  ];
+  assert.equal(resolveHomeModelName(options, 'slow', ''), 'slow');
+});
+
+run('home model selection preserves an existing valid user choice', () => {
+  const options = [
+    { name: 'fast', provider: 'openai', model: 'gpt-5' },
+    { name: 'slow', provider: 'copilot', model: 'gpt-4o' },
+  ];
+  assert.equal(resolveHomeModelName(options, 'slow', 'fast'), 'fast');
+});
+
+run('home model selection falls back to first option when default is unavailable', () => {
+  const options = [
+    { name: 'fast', provider: 'openai', model: 'gpt-5' },
+  ];
+  assert.equal(resolveHomeModelName(options, 'missing', ''), 'fast');
+});
+
+run('create session options include selected home model without mutating source', () => {
+  const base = { initial_user_message: 'hello', auto_start: true };
+  const next = withCreateSessionModel(base, 'fast');
+  assert.deepEqual(next, { initial_user_message: 'hello', auto_start: true, name: 'fast' });
+  assert.deepEqual(base, { initial_user_message: 'hello', auto_start: true });
+});
+
+run('create session options omit empty home model', () => {
+  assert.deepEqual(withCreateSessionModel({ auto_start: false }, '  '), { auto_start: false });
 });

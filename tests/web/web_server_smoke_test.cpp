@@ -412,7 +412,7 @@ TEST(WebServerHttp, CreateSessionThenListShowsActive) {
 }
 
 // 场景: Web 状态栏/设置页切换权限模式走真实 daemon API,必须立即更新
-// 当前 active session 的 PermissionManager,否则 Yolo 仍会继续弹确认。
+// 当前 active session 的 PermissionManager,否则 Yolo/Plan 会停留在旧状态。
 TEST(WebServerHttp, SessionPermissionModeEndpointUpdatesActiveSession) {
     WebServerFixture fx;
     auto post = cpr::Post(cpr::Url{fx.url("/api/sessions")},
@@ -440,6 +440,20 @@ TEST(WebServerHttp, SessionPermissionModeEndpointUpdatesActiveSession) {
     auto meta = acecode::SessionStorage::read_meta(
         acecode::SessionStorage::meta_path(fx.project_dir, sid));
     EXPECT_EQ(meta.permission_mode, "yolo");
+
+    auto put_plan = cpr::Put(cpr::Url{fx.url("/api/sessions/" + sid + "/permissions")},
+                             cpr::Header{{"Content-Type", "application/json"}},
+                             cpr::Body{R"({"mode":"plan"})"});
+    ASSERT_EQ(put_plan.status_code, 200) << put_plan.text;
+    EXPECT_EQ(json::parse(put_plan.text)["mode"], "plan");
+    EXPECT_EQ(entry->perm->mode(), acecode::PermissionMode::Plan);
+    EXPECT_EQ(entry->perm->pre_plan_mode(), acecode::PermissionMode::Yolo);
+
+    meta = acecode::SessionStorage::read_meta(
+        acecode::SessionStorage::meta_path(fx.project_dir, sid));
+    EXPECT_EQ(meta.permission_mode, "plan");
+    EXPECT_EQ(meta.pre_plan_permission_mode, "yolo");
+    EXPECT_TRUE(std::filesystem::exists(entry->sm->current_plan_file_path()));
 }
 
 // 场景: 权限模式端点应拒绝未知 mode,避免前端 typo 把 daemon 状态改坏。

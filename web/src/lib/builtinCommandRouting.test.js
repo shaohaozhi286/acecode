@@ -29,6 +29,14 @@ run('builtin slash input routes to command endpoint payload', () => {
       display_text: '/compact',
     },
   });
+  assert.deepEqual(inputRouteForText('/plan inspect first'), {
+    kind: 'builtin',
+    command: {
+      command: 'plan',
+      args: 'inspect first',
+      display_text: '/plan inspect first',
+    },
+  });
 });
 
 run('skill slash input remains ordinary message route', () => {

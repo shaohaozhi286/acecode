@@ -27,6 +27,11 @@ const FALLBACK_BUILTINS = Object.freeze([
     name: 'goal',
     description: 'Create, view, pause, resume, edit, or clear the thread goal',
   }),
+  Object.freeze({
+    kind: 'builtin',
+    name: 'plan',
+    description: 'Enter plan mode or start planning a described task',
+  }),
 ]);
 
 export function fallbackCommands() {
@@ -34,7 +39,7 @@ export function fallbackCommands() {
 }
 
 // 把后端返回的 {builtins, skills} 拍平成统一项数组,加 kind 字段以备扩展。
-// 顺序:builtins 先(后端固定 init→compact),skills 后(后端按字典序)。
+// 顺序:builtins 先(后端固定 init→compact→goal→plan),skills 后(后端按字典序)。
 export function flattenCommands(payload) {
   const out = [];
   if (payload && Array.isArray(payload.builtins)) {
@@ -177,7 +182,7 @@ export function resolveLeadingSlashCommand(text, commands = []) {
 
 export function parseExecutableBuiltinCommand(value) {
   const text = typeof value === 'string' ? value.trim() : '';
-  const leading = parseLeadingCommand(text, ['init', 'compact', 'goal']);
+  const leading = parseLeadingCommand(text, ['init', 'compact', 'goal', 'plan']);
   if (!leading.name) return null;
   return {
     name: leading.name,

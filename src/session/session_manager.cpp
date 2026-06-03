@@ -2,6 +2,7 @@
 #include "session_serializer.hpp"
 #include "session_rewind.hpp"
 #include "tool_result_storage.hpp"
+#include "../utils/atomic_file.hpp"
 #include "../utils/logger.hpp"
 #include "../utils/utf8_path.hpp"
 
@@ -17,7 +18,7 @@ namespace fs = std::filesystem;
 namespace {
 
 size_t utf8_safe_prefix_length(const std::string& text, size_t max_bytes) {
-    const size_t limit = std::min(max_bytes, text.size());
+    const size_t limit = (std::min)(max_bytes, text.size());
     size_t i = 0;
     size_t last_valid = 0;
 
@@ -63,8 +64,21 @@ size_t utf8_safe_prefix_length(const std::string& text, size_t max_bytes) {
 
 std::string normalize_permission_mode_name(std::string mode) {
     if (mode == "acceptEdits") mode = "accept-edits";
-    if (mode == "accept-edits" || mode == "yolo") return mode;
+    if (mode == "accept-edits" || mode == "yolo" || mode == "plan") return mode;
     return "default";
+}
+
+std::string normalize_pre_plan_permission_mode_name(std::string mode) {
+    if (mode.empty()) return {};
+    mode = normalize_permission_mode_name(std::move(mode));
+    return mode == "plan" ? std::string{"default"} : mode;
+}
+
+std::string plan_file_path_for_session(const std::string& project_dir,
+                                       const std::string& session_id) {
+    if (project_dir.empty() || session_id.empty()) return {};
+    return acecode::path_to_utf8(
+        acecode::path_from_utf8(project_dir) / "plans" / (session_id + ".md"));
 }
 
 bool is_hidden_goal_context_message(const acecode::ChatMessage& msg) {
@@ -141,8 +155,10 @@ void SessionManager::start_session(const std::string& cwd,
     pending_title_.clear();
     input_draft_.clear();
     permission_mode_ = "default";
+    pre_plan_permission_mode_.clear();
     last_token_usage_ = {};
     session_token_usage_ = {};
+    todos_.clear();
     last_error_.clear();
     writer_lease_active_ = false;
     archived_ = false;
@@ -191,9 +207,11 @@ bool SessionManager::ensure_created() {
     meta.title = pending_title_;
     meta.input_draft = input_draft_;
     meta.permission_mode = permission_mode_;
+    meta.pre_plan_permission_mode = pre_plan_permission_mode_;
     meta.turn_count = turn_count_;
     meta.last_token_usage = last_token_usage_;
     meta.session_token_usage = session_token_usage_;
+    meta.todos = todos_;
     meta.archived = archived_;
     SessionStorage::write_meta(meta_path_str_, meta);
     return true;
@@ -365,9 +383,12 @@ std::vector<ChatMessage> SessionManager::resume_session(const std::string& sessi
         pending_title_ = meta.title;
         input_draft_ = meta.input_draft;
         permission_mode_ = normalize_permission_mode_name(meta.permission_mode);
+        pre_plan_permission_mode_ =
+            normalize_pre_plan_permission_mode_name(meta.pre_plan_permission_mode);
         turn_count_ = meta.turn_count;
         last_token_usage_ = meta.last_token_usage;
         session_token_usage_ = meta.session_token_usage;
+        todos_ = meta.todos;
         archived_ = meta.archived;
         if (model_preset_.empty()) {
             model_preset_ = meta.model_preset;
@@ -457,6 +478,7 @@ void SessionManager::end_current_session() {
     input_draft_.clear();
     last_token_usage_ = {};
     session_token_usage_ = {};
+    todos_.clear();
     last_error_.clear();
     archived_ = false;
     checkpoint_store_.reset();
@@ -494,6 +516,7 @@ std::string SessionManager::fork_active_session(const std::vector<ChatMessage>& 
     session_token_usage_ = {};
     last_user_summary_.clear();
     input_draft_.clear();
+    todos_.clear();
 
     if (!acquire_writer_lease_locked()) {
         return {};
@@ -603,6 +626,7 @@ std::string SessionManager::fork_session_to_new_id(
     meta.title           = title;
     meta.input_draft     = std::string{};
     meta.permission_mode = permission_mode_;
+    meta.pre_plan_permission_mode = pre_plan_permission_mode_;
     meta.forked_from     = forked_from_id;
     meta.fork_message_id = fork_message_id;
     SessionStorage::write_meta(new_meta, meta);
@@ -736,8 +760,10 @@ void SessionManager::update_meta() {
     meta.title = pending_title_;
     meta.input_draft = input_draft_;
     meta.permission_mode = permission_mode_;
+    meta.pre_plan_permission_mode = pre_plan_permission_mode_;
     meta.last_token_usage = last_token_usage_;
     meta.session_token_usage = session_token_usage_;
+    meta.todos = todos_;
     meta.archived = archived_;
     SessionStorage::write_meta(meta_path_str_, meta);
     refresh_writer_lease_locked();
@@ -786,8 +812,10 @@ void SessionManager::set_input_draft(std::string draft) {
         meta.model_preset = model_preset_;
         meta.title = pending_title_;
         meta.permission_mode = permission_mode_;
+        meta.pre_plan_permission_mode = pre_plan_permission_mode_;
         meta.last_token_usage = last_token_usage_;
         meta.session_token_usage = session_token_usage_;
+        meta.todos = todos_;
         meta.archived = archived_;
     }
     meta.input_draft = input_draft_;
@@ -802,6 +830,9 @@ std::string SessionManager::current_input_draft() const {
 void SessionManager::set_permission_mode(std::string mode, bool persist_immediately) {
     std::lock_guard<std::mutex> lk(mu_);
     permission_mode_ = normalize_permission_mode_name(std::move(mode));
+    if (permission_mode_ != "plan") {
+        pre_plan_permission_mode_.clear();
+    }
     if (persist_immediately) {
         if (!created_ && started_) {
             ensure_created();
@@ -815,6 +846,124 @@ void SessionManager::set_permission_mode(std::string mode, bool persist_immediat
 std::string SessionManager::current_permission_mode() const {
     std::lock_guard<std::mutex> lk(mu_);
     return permission_mode_;
+}
+
+void SessionManager::set_pre_plan_permission_mode(std::string mode, bool persist_immediately) {
+    std::lock_guard<std::mutex> lk(mu_);
+    pre_plan_permission_mode_ = normalize_pre_plan_permission_mode_name(std::move(mode));
+    if (persist_immediately) {
+        if (!created_ && started_) {
+            ensure_created();
+        }
+        if (created_) {
+            update_meta();
+        }
+    }
+}
+
+std::string SessionManager::current_pre_plan_permission_mode() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return pre_plan_permission_mode_;
+}
+
+void SessionManager::set_todos(std::vector<TodoItem> todos, bool persist_immediately) {
+    std::lock_guard<std::mutex> lk(mu_);
+    todos_ = std::move(todos);
+    if (persist_immediately) {
+        if (!created_ && started_ && !todos_.empty()) {
+            ensure_created();
+        }
+        if (created_) {
+            update_meta();
+        }
+    }
+}
+
+std::vector<TodoItem> SessionManager::current_todos() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return todos_;
+}
+
+std::string SessionManager::ensure_plan_file_path() {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!started_) return {};
+    if (!ensure_created()) return {};
+    const std::string path = plan_file_path_for_session(project_dir_, session_id_);
+    if (path.empty()) return {};
+    std::error_code ec;
+    fs::create_directories(path_from_utf8(path).parent_path(), ec);
+    if (ec) {
+        LOG_WARN("[session] failed to create plan directory for " + path + ": " + ec.message());
+        return {};
+    }
+    if (!fs::exists(path_from_utf8(path), ec)) {
+        if (!atomic_write_file(path, "")) {
+            LOG_WARN("[session] failed to create plan file " + path);
+            return {};
+        }
+    }
+    return path;
+}
+
+std::string SessionManager::current_plan_file_path() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return plan_file_path_for_session(project_dir_, session_id_);
+}
+
+std::string SessionManager::read_plan_file() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    const std::string path = plan_file_path_for_session(project_dir_, session_id_);
+    if (path.empty()) return {};
+    std::ifstream ifs(path_from_utf8(path), std::ios::binary);
+    if (!ifs.is_open()) return {};
+    std::ostringstream oss;
+    oss << ifs.rdbuf();
+    return oss.str();
+}
+
+bool SessionManager::write_plan_file(const std::string& content, std::string* error) {
+    std::string path;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (!started_) {
+            if (error) *error = "session is not started";
+            return false;
+        }
+        if (!ensure_created()) {
+            if (error) *error = "session is not available";
+            return false;
+        }
+        path = plan_file_path_for_session(project_dir_, session_id_);
+    }
+    if (path.empty()) {
+        if (error) *error = "plan file path is not available";
+        return false;
+    }
+    std::error_code ec;
+    fs::create_directories(path_from_utf8(path).parent_path(), ec);
+    if (ec) {
+        if (error) *error = "failed to create plan directory: " + ec.message();
+        return false;
+    }
+    try {
+        if (atomic_write_file(path, content)) {
+            return true;
+        }
+        if (error) *error = "failed to write plan file atomically";
+        return false;
+    } catch (const std::exception& e) {
+        if (error) *error = e.what();
+        return false;
+    }
+}
+
+bool SessionManager::is_plan_file_path(const std::string& path) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (project_dir_.empty() || session_id_.empty() || path.empty()) return false;
+    const std::string plan_path = canonical_or_absolute_utf8(
+        plan_file_path_for_session(project_dir_, session_id_));
+    const std::string resolved = canonical_or_absolute_utf8(path);
+    return !plan_path.empty() && !resolved.empty() && plan_path == resolved;
 }
 
 void SessionManager::record_token_usage(const TokenUsage& usage) {

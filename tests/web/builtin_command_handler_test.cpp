@@ -32,6 +32,16 @@ TEST(BuiltinCommandHandler, ParsesGoalCommand) {
     EXPECT_EQ(parsed.request.display_text, "/goal --tokens 50K finish migration");
 }
 
+TEST(BuiltinCommandHandler, ParsesPlanCommand) {
+    auto parsed = acecode::web::parse_builtin_command_request(
+        R"({"command":"/plan inspect the updater flow"})");
+
+    ASSERT_TRUE(parsed.ok) << parsed.error;
+    EXPECT_EQ(parsed.request.name, "plan");
+    EXPECT_EQ(parsed.request.args, "inspect the updater flow");
+    EXPECT_EQ(parsed.request.display_text, "/plan inspect the updater flow");
+}
+
 TEST(BuiltinCommandHandler, RejectsUnsupportedCommand) {
     auto parsed = acecode::web::parse_builtin_command_request(
         R"({"command":"model"})");

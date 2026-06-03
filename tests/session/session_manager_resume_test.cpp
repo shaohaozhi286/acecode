@@ -136,6 +136,44 @@ TEST(SessionManagerResume, RestoresPersistedRuntimeState) {
     fs::remove_all(cwd);
 }
 
+TEST(SessionManagerResume, RestoresPlanRuntimeStateAndPlanFile) {
+    auto cwd = make_temp_cwd("plan_runtime_state");
+    auto project_dir = SessionStorage::get_project_dir(cwd.string());
+    fs::remove_all(project_dir);
+
+    SessionManager writer;
+    writer.start_session(cwd.string(), "test-provider", "test-model", "sid-plan-runtime");
+    writer.set_permission_mode("plan");
+    writer.set_pre_plan_permission_mode("accept-edits");
+    const std::string plan_path = writer.ensure_plan_file_path();
+    ASSERT_FALSE(plan_path.empty());
+
+    std::string error;
+    ASSERT_TRUE(writer.write_plan_file("1. Inspect\n2. Implement\n", &error)) << error;
+    writer.on_message(message("user", "first turn"));
+    const std::string session_id = writer.current_session_id();
+    writer.finalize();
+
+    auto meta = SessionStorage::read_meta(SessionStorage::meta_path(project_dir, session_id));
+    EXPECT_EQ(meta.permission_mode, "plan");
+    EXPECT_EQ(meta.pre_plan_permission_mode, "accept-edits");
+
+    SessionManager reader;
+    reader.start_session(cwd.string(), "test-provider", "test-model");
+    auto messages = reader.resume_session(session_id);
+    ASSERT_EQ(messages.size(), 1u);
+
+    EXPECT_EQ(reader.current_permission_mode(), "plan");
+    EXPECT_EQ(reader.current_pre_plan_permission_mode(), "accept-edits");
+    EXPECT_EQ(reader.current_plan_file_path(), plan_path);
+    EXPECT_EQ(reader.read_plan_file(), "1. Inspect\n2. Implement\n");
+    EXPECT_TRUE(reader.is_plan_file_path(plan_path));
+    EXPECT_FALSE(reader.is_plan_file_path((cwd / "other.md").string()));
+
+    fs::remove_all(project_dir);
+    fs::remove_all(cwd);
+}
+
 TEST(SessionManagerResume, InputDraftSurvivesMetadataRewrite) {
     auto cwd = make_temp_cwd("input_draft");
     auto project_dir = SessionStorage::get_project_dir(cwd.string());

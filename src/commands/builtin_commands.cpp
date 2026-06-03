@@ -26,6 +26,8 @@
 #include "../utils/logger.hpp"
 #include "../utils/terminal_title.hpp"
 #include <algorithm>
+#include <cctype>
+#include <chrono>
 #include <limits>
 #include <mutex>
 #include <optional>
@@ -37,6 +39,13 @@
 namespace acecode {
 
 namespace {
+
+std::string trim_ascii_command(std::string s) {
+    auto is_space = [](unsigned char c) { return std::isspace(c) != 0; };
+    while (!s.empty() && is_space(static_cast<unsigned char>(s.front()))) s.erase(s.begin());
+    while (!s.empty() && is_space(static_cast<unsigned char>(s.back()))) s.pop_back();
+    return s;
+}
 
 std::string format_goal_status_chip(const ThreadGoal& goal) {
     std::ostringstream oss;
@@ -105,6 +114,7 @@ static void cmd_help(CommandContext& ctx, const std::string& /*args*/) {
         << "  /config   - Show current configuration\n"
         << "  /tokens   - Show session token usage\n"
         << "  /goal     - Create, view, pause, resume, edit, or clear the thread goal\n"
+        << "  /plan     - Enter plan mode or start planning a described task\n"
         << "  /resume   - Resume a previous session\n"
         << "  /rewind   - Rewind to a previous user turn\n"
         << "  /mcp      - Manage MCP servers\n"
@@ -127,6 +137,61 @@ static void cmd_help(CommandContext& ctx, const std::string& /*args*/) {
     }
     ctx.state.conversation.push_back({"system", oss.str(), false});
     ctx.state.chat_follow_tail = true;
+}
+
+static void cmd_plan(CommandContext& ctx, const std::string& raw_args) {
+    const std::string args = trim_ascii_command(raw_args);
+    std::string plan_file;
+    std::string prompt_to_submit;
+    std::string display_to_submit;
+
+    {
+        std::lock_guard<std::mutex> lk(ctx.state.mu);
+        const PermissionMode before = ctx.permissions.mode();
+        ctx.permissions.set_mode(PermissionMode::Plan);
+        ctx.permissions.clear_session_allows();
+        if (ctx.session_manager) {
+            ctx.session_manager->set_permission_mode("plan");
+            ctx.session_manager->set_pre_plan_permission_mode(
+                PermissionManager::mode_name(
+                    before == PermissionMode::Plan
+                        ? ctx.permissions.pre_plan_mode()
+                        : before));
+            plan_file = ctx.session_manager->ensure_plan_file_path();
+        }
+
+        std::ostringstream oss;
+        oss << "Plan mode enabled.";
+        if (!plan_file.empty()) {
+            oss << "\nPlan file: " << plan_file;
+        }
+        oss << "\nExplore and update only the plan file, then call ExitPlanMode for approval.";
+        ctx.state.conversation.push_back({"system", oss.str(), false});
+        ctx.state.chat_follow_tail = true;
+
+        if (!args.empty()) {
+            display_to_submit = "/plan " + args;
+            if (ctx.state.is_waiting || ctx.state.tool_running) {
+                ctx.state.pending_queue.push_back(display_to_submit);
+                UserInput queued;
+                queued.text = args;
+                queued.display_text = display_to_submit;
+                ctx.state.pending_structured_queue.push_back(std::move(queued));
+            } else {
+                ctx.state.current_thinking_phrase = "Planning";
+                ctx.state.thinking_start_time = std::chrono::steady_clock::now();
+                ctx.state.streaming_output_chars = 0;
+                ctx.state.last_completion_tokens_authoritative = 0;
+                ctx.state.is_waiting = true;
+                prompt_to_submit = args;
+            }
+        }
+    }
+
+    if (!prompt_to_submit.empty()) {
+        ctx.agent_loop.submit(prompt_to_submit, display_to_submit);
+    }
+    if (ctx.post_event) ctx.post_event();
 }
 
 static void cmd_clear(CommandContext& ctx, const std::string& /*args*/) {
@@ -1138,6 +1203,7 @@ void register_builtin_commands(CommandRegistry& registry) {
     registry.register_command({"config", "Show current configuration", cmd_config});
     registry.register_command({"tokens", "Show session token usage", cmd_tokens});
     register_goal_command(registry);
+    registry.register_command({"plan", "Enter plan mode or start planning a described task", cmd_plan});
     registry.register_command({"compact", "Compress conversation history", cmd_compact});
     registry.register_command({"resume", "Resume a previous session", cmd_resume});
     registry.register_command({"rewind", "Rewind to a previous user turn", cmd_rewind});

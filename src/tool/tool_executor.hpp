@@ -104,6 +104,14 @@ struct ToolContext {
     std::function<void()> account_goal_usage;
     std::function<void(const nlohmann::json& goal_payload)> emit_goal_updated;
     std::function<void(const std::string& session_id)> emit_goal_cleared;
+    std::function<void(const nlohmann::json& todo_payload)> emit_todo_updated;
+
+    // Plan-mode tools use these callbacks to mutate the active AgentLoop's
+    // permission state. They are callbacks rather than direct PermissionManager
+    // references so the tool layer stays independent of the TUI/daemon runtime.
+    std::function<std::string()> current_permission_mode;
+    std::function<std::string()> enter_plan_mode;
+    std::function<std::string()> exit_plan_mode;
 
     // Runtime access to the active executor. Tools that intentionally change
     // the available tool set can use this to register additional tools for the

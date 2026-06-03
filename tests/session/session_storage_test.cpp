@@ -53,7 +53,8 @@ TEST(SessionStorage, MetaRoundtrip) {
     in.model_preset  = "copilot-fast";
     in.title         = "resume bug";
     in.input_draft   = "continue this refactor";
-    in.permission_mode = "accept-edits";
+    in.permission_mode = "plan";
+    in.pre_plan_permission_mode = "accept-edits";
     in.turn_count    = 3;
     in.last_token_usage.prompt_tokens = 8000;
     in.last_token_usage.completion_tokens = 1200;
@@ -65,6 +66,10 @@ TEST(SessionStorage, MetaRoundtrip) {
     in.session_token_usage.cache_read_tokens = 4000;
     in.session_token_usage.reasoning_tokens = 300;
     in.session_token_usage.has_data = true;
+    in.todos = {
+        {"1", "Inspect Hermes", "completed"},
+        {"2", "Wire checklist UI", "in_progress"},
+    };
     in.archived      = true;
 
     SessionStorage::write_meta(meta_path, in);
@@ -82,6 +87,7 @@ TEST(SessionStorage, MetaRoundtrip) {
     EXPECT_EQ(out.title,         in.title);
     EXPECT_EQ(out.input_draft,   in.input_draft);
     EXPECT_EQ(out.permission_mode, in.permission_mode);
+    EXPECT_EQ(out.pre_plan_permission_mode, in.pre_plan_permission_mode);
     EXPECT_EQ(out.turn_count,    in.turn_count);
     EXPECT_EQ(out.last_token_usage.prompt_tokens, 8000);
     EXPECT_EQ(out.last_token_usage.completion_tokens, 1200);
@@ -93,6 +99,9 @@ TEST(SessionStorage, MetaRoundtrip) {
     EXPECT_EQ(out.session_token_usage.cache_read_tokens, 4000);
     EXPECT_EQ(out.session_token_usage.reasoning_tokens, 300);
     EXPECT_TRUE(out.session_token_usage.has_data);
+    ASSERT_EQ(out.todos.size(), 2u);
+    EXPECT_EQ(out.todos[0].content, "Inspect Hermes");
+    EXPECT_EQ(out.todos[1].status, "in_progress");
     EXPECT_EQ(out.archived,      in.archived);
 }
 
@@ -130,10 +139,14 @@ TEST(SessionStorage, LegacyMetaWithoutTitle) {
         << "legacy meta without 'input_draft' must deserialize to empty draft";
     EXPECT_EQ(out.permission_mode, "default")
         << "legacy meta without 'permission_mode' must default to default";
+    EXPECT_TRUE(out.pre_plan_permission_mode.empty())
+        << "legacy meta without 'pre_plan_permission_mode' must deserialize to empty";
     EXPECT_EQ(out.turn_count, 0)
         << "legacy meta without 'turn_count' must deserialize to zero";
     EXPECT_EQ(out.last_token_usage.total_tokens, 0);
     EXPECT_EQ(out.session_token_usage.total_tokens, 0);
+    EXPECT_TRUE(out.todos.empty())
+        << "legacy meta without 'todos' must deserialize to an empty checklist";
     EXPECT_FALSE(out.archived)
         << "legacy meta without 'archived' must deserialize to false";
 }
@@ -163,6 +176,44 @@ TEST(SessionStorage, EmptyTitleIsOmittedOnWrite) {
         << "false archived state should be omitted from the serialized JSON; got: " << content;
     EXPECT_EQ(content.find("\"input_draft\""), std::string::npos)
         << "empty input_draft should be omitted from the serialized JSON; got: " << content;
+    EXPECT_EQ(content.find("\"pre_plan_permission_mode\""), std::string::npos)
+        << "empty pre_plan_permission_mode should be omitted from the serialized JSON; got: " << content;
+    EXPECT_EQ(content.find("\"todos\""), std::string::npos)
+        << "empty todos should be omitted from the serialized JSON; got: " << content;
+}
+
+// 场景:pre_plan_permission_mode 只能保存非 Plan mode。坏值和 "plan"
+// 都会被折回 default,避免 resume 后出现 "Plan 的前一个 mode 还是 Plan"。
+TEST(SessionStorage, PrePlanPermissionModeNormalizesInvalidValues) {
+    auto dir = make_unique_tmp_dir("pre-plan-normalize");
+    auto meta_path = (dir / "pre-plan.meta.json").string();
+
+    {
+        std::ofstream ofs(meta_path);
+        ofs <<
+            "{\n"
+            "  \"id\": \"pre-plan\",\n"
+            "  \"cwd\": \"/home/shao/acecode\",\n"
+            "  \"permission_mode\": \"plan\",\n"
+            "  \"pre_plan_permission_mode\": \"plan\"\n"
+            "}\n";
+    }
+    SessionMeta out = SessionStorage::read_meta(meta_path);
+    EXPECT_EQ(out.permission_mode, "plan");
+    EXPECT_EQ(out.pre_plan_permission_mode, "default");
+
+    {
+        std::ofstream ofs(meta_path);
+        ofs <<
+            "{\n"
+            "  \"id\": \"pre-plan\",\n"
+            "  \"cwd\": \"/home/shao/acecode\",\n"
+            "  \"permission_mode\": \"plan\",\n"
+            "  \"pre_plan_permission_mode\": \"ask\"\n"
+            "}\n";
+    }
+    out = SessionStorage::read_meta(meta_path);
+    EXPECT_EQ(out.pre_plan_permission_mode, "default");
 }
 
 // 场景:desktop visibility 是 project-level workspace.json marker,不是

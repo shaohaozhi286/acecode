@@ -78,3 +78,20 @@ export function buildStatusBarModelMenu({ modelOptions = [], selectedModelName =
     items,
   };
 }
+
+export function resolveHomeModelName(modelOptions = [], defaultModelName = '', previousName = '') {
+  const options = normalizeModelOptions(modelOptions);
+  const hasOption = (name) => !!name && options.some((option) => option.name === name);
+  const previous = String(previousName || '');
+  if (hasOption(previous)) return previous;
+  const defaultName = String(defaultModelName || '');
+  if (hasOption(defaultName)) return defaultName;
+  return options[0]?.name || previous || defaultName || '';
+}
+
+export function withCreateSessionModel(options = {}, modelName = '') {
+  const next = { ...(options && typeof options === 'object' ? options : {}) };
+  const name = String(modelName || '').trim();
+  if (name) next.name = name;
+  return next;
+}

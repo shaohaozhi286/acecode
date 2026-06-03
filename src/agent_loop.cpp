@@ -12,6 +12,7 @@
 #include "session/session_rewind.hpp"
 #include "session/session_storage.hpp"
 #include "session/thread_goal_store.hpp"
+#include "session/todo_state.hpp"
 #include "web/message_payload.hpp"
 #include "web/tool_event_payload.hpp"
 #include <nlohmann/json.hpp>
@@ -140,6 +141,81 @@ bool command_looks_like_file_write(const std::string& command) {
            cmd.find("powershell") != std::string::npos ||
            cmd.find("copy ") != std::string::npos ||
            cmd.find("move ") != std::string::npos;
+}
+
+nlohmann::json parse_tool_args_for_permission_payload(const std::string& args_json) {
+    if (args_json.empty()) return nlohmann::json::object();
+    try {
+        auto parsed = nlohmann::json::parse(args_json);
+        return parsed.is_object() ? parsed : nlohmann::json{{"raw", args_json}};
+    } catch (...) {
+        return nlohmann::json{{"raw", args_json}};
+    }
+}
+
+std::string build_plan_permission_args(const std::string& tool_name,
+                                       const std::string& args_json,
+                                       SessionManager* session_manager) {
+    nlohmann::json payload;
+    payload["tool_args"] = parse_tool_args_for_permission_payload(args_json);
+    if (tool_name == "EnterPlanMode") {
+        payload["kind"] = "enter_plan_mode";
+        if (session_manager) {
+            payload["plan_file_path"] = session_manager->current_plan_file_path();
+        }
+        return payload.dump();
+    }
+    if (tool_name == "ExitPlanMode") {
+        payload["kind"] = "plan_approval";
+        if (session_manager) {
+            payload["plan_file_path"] = session_manager->ensure_plan_file_path();
+            payload["plan"] = session_manager->read_plan_file();
+        }
+        return payload.dump();
+    }
+    return args_json;
+}
+
+std::string build_plan_mode_context_prompt(SessionManager* session_manager) {
+    if (!session_manager) return {};
+    const std::string plan_file = session_manager->ensure_plan_file_path();
+    if (plan_file.empty()) return {};
+    const std::string existing_plan = session_manager->read_plan_file();
+
+    std::ostringstream oss;
+    oss << "<plan_mode>\n"
+        << "Plan mode is active. You MUST NOT make any edits except to the plan file.\n\n"
+        << "Plan file path: " << plan_file << "\n"
+        << "Plan exists: " << (existing_plan.empty() ? "false" : "true") << "\n\n"
+        << "Workflow:\n"
+        << "1. Explore the codebase with read-only tools until the approach is clear.\n"
+        << "2. Keep the implementation plan in the plan file. Update that file as your plan changes.\n"
+        << "3. Use AskUserQuestion only for unresolved requirements or approach choices.\n"
+        << "4. When the plan is complete and unambiguous, call ExitPlanMode for user approval.\n\n"
+        << "Do not ask the user whether the plan is OK with AskUserQuestion; ExitPlanMode is the approval request.\n"
+        << "</plan_mode>";
+    return oss.str();
+}
+
+void append_plan_mode_context_for_api(std::vector<ChatMessage>& messages,
+                                      const std::string& context) {
+    if (context.empty()) return;
+    ChatMessage msg;
+    msg.role = "user";
+    msg.content = context;
+    msg.metadata = nlohmann::json{{"hidden_plan_mode_context", true}};
+    messages.push_back(std::move(msg));
+}
+
+void append_todo_context_for_api(std::vector<ChatMessage>& messages,
+                                 const std::vector<TodoItem>& todos) {
+    std::string context = format_todo_injection(todos);
+    if (context.empty()) return;
+    ChatMessage msg;
+    msg.role = "user";
+    msg.content = std::move(context);
+    msg.metadata = nlohmann::json{{"hidden_todo_context", true}};
+    messages.push_back(std::move(msg));
 }
 
 bool is_hidden_goal_context_message(const ChatMessage& msg) {
@@ -653,6 +729,20 @@ void AgentLoop::emit_goal_cleared(const std::string& session_id) {
     }
 }
 
+void AgentLoop::emit_todo_updated(const nlohmann::json& payload) {
+    nlohmann::json event_payload = payload.is_object()
+        ? payload
+        : nlohmann::json::object();
+    if (!event_payload.contains("session_id") && session_manager_) {
+        const std::string sid = session_manager_->current_session_id();
+        if (!sid.empty()) event_payload["session_id"] = sid;
+    }
+    events_.emit(SessionEventKind::TodoUpdated, event_payload);
+    if (callbacks_.on_todo_updated) {
+        callbacks_.on_todo_updated(event_payload);
+    }
+}
+
 void AgentLoop::account_goal_usage(std::int64_t token_delta, bool allow_complete) {
     if (!session_manager_) return;
     const std::string sid = session_manager_->current_session_id();
@@ -954,6 +1044,14 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
         prepend_session_context_for_api(api_messages, session_context);
         std::string request_context = build_request_context_prompt(cwd_);
         append_request_context_for_api(api_messages, request_context);
+        std::string plan_mode_context =
+            permissions_.mode() == PermissionMode::Plan
+                ? build_plan_mode_context_prompt(session_manager_)
+                : std::string{};
+        append_plan_mode_context_for_api(api_messages, plan_mode_context);
+        std::vector<TodoItem> todo_context_items =
+            session_manager_ ? session_manager_->current_todos() : std::vector<TodoItem>{};
+        append_todo_context_for_api(api_messages, todo_context_items);
         std::vector<ChatMessage> messages_with_system;
         ChatMessage sys_msg;
         sys_msg.role = "system";
@@ -962,7 +1060,8 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
         messages_with_system.insert(messages_with_system.end(), api_messages.begin(), api_messages.end());
         auto prompt_diag = build_prompt_cache_diagnostics(
             system_prompt,
-            session_context + "\n" + request_context,
+            session_context + "\n" + request_context + "\n" + plan_mode_context +
+                "\n" + format_todo_injection(todo_context_items),
             tool_defs);
         LOG_DEBUG("Prompt cache hashes: system=" + prompt_diag.static_system_prompt_hash +
                   " context=" + prompt_diag.mutable_context_hash +
@@ -1315,12 +1414,13 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
                                           const ToolContext& tool_ctx = ToolContext{}) -> ToolResult {
             // Path safety validation (for file tools, not bash)
             if (!ctx_path.empty() && tool_name != "bash") {
-                const bool session_artifact_read =
-                    tool_name == "file_read" &&
+                const bool session_artifact_path =
                     session_manager_ &&
-                    session_manager_->is_tool_result_artifact_path(ctx_path);
+                    ((tool_name == "file_read" &&
+                      session_manager_->is_tool_result_artifact_path(ctx_path)) ||
+                     session_manager_->is_plan_file_path(ctx_path));
                 std::string path_error =
-                    session_artifact_read ? std::string{} : path_validator_.validate(ctx_path);
+                    session_artifact_path ? std::string{} : path_validator_.validate(ctx_path);
                 if (!path_error.empty()) {
                     LOG_WARN("Path validation failed: " + path_error);
                     return ToolResult{"[Error] " + path_error, false};
@@ -1443,6 +1543,33 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
             };
             tool_ctx.emit_goal_cleared = [this](const std::string& session_id) {
                 emit_goal_cleared(session_id);
+            };
+            tool_ctx.emit_todo_updated = [this](const nlohmann::json& todo_payload) {
+                emit_todo_updated(todo_payload);
+            };
+            tool_ctx.current_permission_mode = [this]() {
+                return std::string(PermissionManager::mode_name(permissions_.mode()));
+            };
+            tool_ctx.enter_plan_mode = [this]() {
+                permissions_.set_mode(PermissionMode::Plan);
+                permissions_.clear_session_allows();
+                std::string plan_file;
+                if (session_manager_) {
+                    session_manager_->set_permission_mode("plan");
+                    session_manager_->set_pre_plan_permission_mode(
+                        PermissionManager::mode_name(permissions_.pre_plan_mode()));
+                    plan_file = session_manager_->ensure_plan_file_path();
+                }
+                return plan_file;
+            };
+            tool_ctx.exit_plan_mode = [this]() {
+                PermissionMode restored = permissions_.restore_pre_plan_mode();
+                const std::string restored_name = PermissionManager::mode_name(restored);
+                if (session_manager_) {
+                    session_manager_->set_permission_mode(restored_name);
+                    session_manager_->set_pre_plan_permission_mode(std::string{});
+                }
+                return restored_name;
             };
             if (session_manager_) {
                 tool_ctx.track_file_write_before = [this](const std::string& path) {
@@ -1640,6 +1767,19 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
                     const std::string& ctx_command) -> ToolResult {
                     bool auto_allow = permissions_.should_auto_allow(
                         tc.function_name, false, ctx_path, ctx_command);
+                    if (permissions_.mode() == PermissionMode::Plan &&
+                        !permissions_.is_dangerous()) {
+                        const bool targets_plan_file =
+                            session_manager_ &&
+                            (tc.function_name == "file_write" ||
+                             tc.function_name == "file_edit") &&
+                            session_manager_->is_plan_file_path(ctx_path);
+                        auto_allow = targets_plan_file || tc.function_name == "TodoWrite";
+                    }
+                    if (tc.function_name == "ExitPlanMode" &&
+                        permissions_.mode() != PermissionMode::Plan) {
+                        auto_allow = true;
+                    }
 
                     if (tc.function_name == "bash" && command_looks_like_file_write(ctx_command)) {
                         const auto now = std::chrono::steady_clock::now();
@@ -1666,11 +1806,12 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
                     }
 
                     if (!ctx_path.empty() && tc.function_name != "bash") {
-                        const bool session_artifact_read =
-                            tc.function_name == "file_read" &&
+                        const bool session_artifact_path =
                             session_manager_ &&
-                            session_manager_->is_tool_result_artifact_path(ctx_path);
-                        std::string path_error = session_artifact_read
+                            ((tc.function_name == "file_read" &&
+                              session_manager_->is_tool_result_artifact_path(ctx_path)) ||
+                             session_manager_->is_plan_file_path(ctx_path));
+                        std::string path_error = session_artifact_path
                             ? std::string{}
                             : path_validator_.validate(ctx_path);
                         if (!path_error.empty()) {
@@ -1689,13 +1830,19 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
                         emit_agent_progress("permission_waiting", "正在等待权限确认",
                             tc.function_name, tc.function_name, tc.id,
                             static_cast<int>(entry.original_index), true);
+                        const std::string permission_args =
+                            build_plan_permission_args(
+                                tc.function_name, tc.function_arguments, session_manager_);
                         PermissionResult perm = prompter_
-                            ? prompter_->prompt(tc.function_name, tc.function_arguments, &abort_requested_)
-                            : callbacks_.on_tool_confirm(tc.function_name, tc.function_arguments);
+                            ? prompter_->prompt(tc.function_name, permission_args, &abort_requested_)
+                            : callbacks_.on_tool_confirm(tc.function_name, permission_args);
                         if (perm == PermissionResult::Deny) {
                             return ToolResult{"[User denied tool execution]", false};
                         }
-                        if (perm == PermissionResult::AlwaysAllow) {
+                        if (perm == PermissionResult::AlwaysAllow &&
+                            permissions_.mode() != PermissionMode::Plan &&
+                            tc.function_name != "EnterPlanMode" &&
+                            tc.function_name != "ExitPlanMode") {
                             permissions_.add_session_allow(tc.function_name);
                         }
                     }

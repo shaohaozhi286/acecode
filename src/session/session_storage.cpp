@@ -27,8 +27,14 @@ namespace {
 
 std::string normalize_permission_mode_name(std::string mode) {
     if (mode == "acceptEdits") mode = "accept-edits";
-    if (mode == "accept-edits" || mode == "yolo") return mode;
+    if (mode == "accept-edits" || mode == "yolo" || mode == "plan") return mode;
     return "default";
+}
+
+std::string normalize_pre_plan_permission_mode_name(std::string mode) {
+    if (mode.empty()) return {};
+    mode = normalize_permission_mode_name(std::move(mode));
+    return mode == "plan" ? std::string{"default"} : mode;
 }
 
 bool token_usage_has_values(const TokenUsage& usage) {
@@ -198,12 +204,19 @@ void SessionStorage::write_meta(const std::string& meta_path, const SessionMeta&
         j["input_draft"] = meta.input_draft;
     }
     j["permission_mode"] = normalize_permission_mode_name(meta.permission_mode);
+    if (!meta.pre_plan_permission_mode.empty()) {
+        j["pre_plan_permission_mode"] =
+            normalize_pre_plan_permission_mode_name(meta.pre_plan_permission_mode);
+    }
     j["turn_count"] = (std::max)(0, meta.turn_count);
     if (token_usage_has_values(meta.last_token_usage)) {
         j["last_token_usage"] = token_usage_to_json(meta.last_token_usage);
     }
     if (token_usage_has_values(meta.session_token_usage)) {
         j["session_token_usage"] = token_usage_to_json(meta.session_token_usage);
+    }
+    if (!meta.todos.empty()) {
+        j["todos"] = todo_items_to_json(meta.todos);
     }
     // fork 元数据:空字符串时省略,保持老 meta 文件 byte-byte 不变。
     if (!meta.forked_from.empty()) {
@@ -241,12 +254,17 @@ SessionMeta SessionStorage::read_meta(const std::string& meta_path) {
         meta.input_draft     = j.value("input_draft",     std::string{});
         meta.permission_mode = normalize_permission_mode_name(
             j.value("permission_mode", std::string{"default"}));
+        meta.pre_plan_permission_mode = normalize_pre_plan_permission_mode_name(
+            j.value("pre_plan_permission_mode", std::string{}));
         meta.turn_count      = (std::max)(0, j.value("turn_count", 0));
         if (j.contains("last_token_usage")) {
             meta.last_token_usage = token_usage_from_json(j["last_token_usage"]);
         }
         if (j.contains("session_token_usage")) {
             meta.session_token_usage = token_usage_from_json(j["session_token_usage"]);
+        }
+        if (j.contains("todos")) {
+            meta.todos = todo_items_from_json(j["todos"]);
         }
         meta.forked_from     = j.value("forked_from",     std::string{});
         meta.fork_message_id = j.value("fork_message_id", std::string{});

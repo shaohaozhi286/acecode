@@ -149,6 +149,15 @@ public:
     // Persisted runtime state for the active session.
     void set_permission_mode(std::string mode, bool persist_immediately = true);
     std::string current_permission_mode() const;
+    void set_pre_plan_permission_mode(std::string mode, bool persist_immediately = true);
+    std::string current_pre_plan_permission_mode() const;
+    void set_todos(std::vector<TodoItem> todos, bool persist_immediately = true);
+    std::vector<TodoItem> current_todos() const;
+    std::string ensure_plan_file_path();
+    std::string current_plan_file_path() const;
+    std::string read_plan_file() const;
+    bool write_plan_file(const std::string& content, std::string* error = nullptr);
+    bool is_plan_file_path(const std::string& path) const;
     void record_token_usage(const TokenUsage& usage);
     TokenUsage current_last_token_usage() const;
     TokenUsage current_session_token_usage() const;
@@ -183,8 +192,10 @@ private:
     std::string pending_title_;
     std::string input_draft_;
     std::string permission_mode_ = "default";
+    std::string pre_plan_permission_mode_;
     TokenUsage last_token_usage_;
     TokenUsage session_token_usage_;
+    std::vector<TodoItem> todos_;
     std::string last_error_;
     bool writer_lease_active_ = false;
     bool archived_ = false;

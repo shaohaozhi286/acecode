@@ -202,6 +202,7 @@ PermissionMode permission_mode_from_name(std::string mode) {
     if (mode == "acceptEdits") mode = "accept-edits";
     if (mode == "accept-edits") return PermissionMode::AcceptEdits;
     if (mode == "yolo") return PermissionMode::Yolo;
+    if (mode == "plan") return PermissionMode::Plan;
     return PermissionMode::Default;
 }
 
@@ -442,6 +443,40 @@ BuiltinCommandResult execute_goal_builtin(SessionEntry& entry,
     return {BuiltinCommandStatus::Accepted, "completed"};
 }
 
+BuiltinCommandResult execute_plan_builtin(SessionEntry& entry,
+                                          const BuiltinCommandRequest& request) {
+    if (!entry.sm || !entry.loop || !entry.perm) {
+        return {BuiltinCommandStatus::Failed, "session unavailable"};
+    }
+
+    const PermissionMode before = entry.perm->mode();
+    entry.perm->set_mode(PermissionMode::Plan);
+    entry.perm->clear_session_allows();
+    entry.sm->set_permission_mode("plan");
+    entry.sm->set_pre_plan_permission_mode(PermissionManager::mode_name(
+        before == PermissionMode::Plan ? entry.perm->pre_plan_mode() : before));
+    const std::string plan_file = entry.sm->ensure_plan_file_path();
+
+    std::ostringstream oss;
+    oss << "Plan mode enabled.";
+    if (!plan_file.empty()) {
+        oss << "\nPlan file: " << plan_file;
+    }
+    oss << "\nExplore and update only the plan file, then call ExitPlanMode for approval.";
+    entry.loop->emit_system_message(oss.str());
+
+    const std::string args = trim_ascii(request.args);
+    if (!args.empty()) {
+        const std::string display = request.display_text.empty()
+            ? "/plan " + args
+            : request.display_text;
+        entry.loop->submit(args, display);
+        return {BuiltinCommandStatus::Accepted, "queued"};
+    }
+
+    return {BuiltinCommandStatus::Accepted, "completed"};
+}
+
 } // namespace
 
 SessionRegistry::SessionRegistry(SessionRegistryDeps deps)
@@ -503,11 +538,26 @@ SessionRegistry::make_entry_locked(const std::string& id,
         // 自己装(后续 Section 9 落 HTTP 时一起补)。TUI 路径不受影响。
     }
     if (resumed_meta) {
-        entry->perm->set_mode(permission_mode_from_name(resumed_meta->permission_mode));
+        const PermissionMode restored_mode =
+            permission_mode_from_name(resumed_meta->permission_mode);
+        if (restored_mode == PermissionMode::Plan) {
+            entry->perm->set_mode(permission_mode_from_name(
+                resumed_meta->pre_plan_permission_mode.empty()
+                    ? std::string{"default"}
+                    : resumed_meta->pre_plan_permission_mode));
+            entry->perm->set_mode(PermissionMode::Plan);
+        } else {
+            entry->perm->set_mode(restored_mode);
+        }
     }
     entry->sm->set_permission_mode(
         PermissionManager::mode_name(entry->perm->mode()),
         /*persist_immediately=*/false);
+    if (entry->perm->mode() == PermissionMode::Plan) {
+        entry->sm->set_pre_plan_permission_mode(
+            PermissionManager::mode_name(entry->perm->pre_plan_mode()),
+            /*persist_immediately=*/false);
+    }
 
     // AgentLoop: 给一个空 callbacks(daemon 全走 events_)
     AgentCallbacks empty_cb;
@@ -638,7 +688,8 @@ SessionEntry* SessionRegistry::lookup(const std::string& id) {
 BuiltinCommandResult SessionRegistry::execute_builtin_command(
     const std::string& id,
     const BuiltinCommandRequest& request) {
-    if (request.name != "init" && request.name != "compact" && request.name != "goal") {
+    if (request.name != "init" && request.name != "compact" &&
+        request.name != "goal" && request.name != "plan") {
         return {BuiltinCommandStatus::UnsupportedCommand, "unsupported command"};
     }
 
@@ -654,6 +705,10 @@ BuiltinCommandResult SessionRegistry::execute_builtin_command(
 
     if (request.name == "goal") {
         return execute_goal_builtin(*entry, request);
+    }
+
+    if (request.name == "plan") {
+        return execute_plan_builtin(*entry, request);
     }
 
     const std::filesystem::path cwd = path_from_utf8(entry->cwd);
@@ -722,6 +777,13 @@ bool SessionRegistry::set_permission_mode(const std::string& id, PermissionMode 
     it->second->perm->clear_session_allows();
     if (it->second->sm) {
         it->second->sm->set_permission_mode(PermissionManager::mode_name(mode));
+        if (mode == PermissionMode::Plan) {
+            it->second->sm->set_pre_plan_permission_mode(
+                PermissionManager::mode_name(it->second->perm->pre_plan_mode()));
+            it->second->sm->ensure_plan_file_path();
+        } else {
+            it->second->sm->set_pre_plan_permission_mode(std::string{});
+        }
     }
     if (mode == PermissionMode::Yolo && it->second->prompter) {
         it->second->prompter->resolve_all(PermissionDecisionChoice::Allow);

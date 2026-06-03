@@ -212,11 +212,14 @@ function AssistantBubble({
   );
 }
 
-function SystemRow({ role, content }) {
+function SystemRow({ role, content, metadata }) {
   const [expanded, setExpanded] = useState(false);
+  const customLabel = metadata && typeof metadata.compact_label === 'string'
+    ? metadata.compact_label
+    : '';
   const { label, text, preview, lineCount, charCount } = useMemo(
-    () => buildCompactMessagePreview({ role, content }),
-    [role, content],
+    () => buildCompactMessagePreview({ role, content, label: customLabel }),
+    [role, content, customLabel],
   );
 
   return (
@@ -295,5 +298,5 @@ export const Message = memo(function Message({
   if (role === 'error') {
     return <ErrorRow content={content} />;
   }
-  return <SystemRow role={role} content={content} />;
+  return <SystemRow role={role} content={content} metadata={metadata} />;
 });

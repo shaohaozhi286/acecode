@@ -26,7 +26,8 @@ struct PermissionRule {
 enum class PermissionMode {
     Default,      // Prompt for write/exec tools, auto-allow read-only
     AcceptEdits,  // Also auto-allow file_write, file_edit (still ask for bash)
-    Yolo          // Auto-allow everything (dangerous)
+    Yolo,         // Auto-allow everything (dangerous)
+    Plan          // Explore and write only the active plan file before approval
 };
 
 // Result of a permission check
@@ -39,8 +40,41 @@ enum class PermissionResult {
 // Manages tool permission decisions
 class PermissionManager {
 public:
-    void set_mode(PermissionMode mode) { mode_.store(mode, std::memory_order_relaxed); }
+    void set_mode(PermissionMode mode) {
+        const PermissionMode current = mode_.load(std::memory_order_relaxed);
+        if (mode == PermissionMode::Plan) {
+            if (current != PermissionMode::Plan) {
+                pre_plan_mode_.store(current, std::memory_order_relaxed);
+                has_pre_plan_mode_.store(true, std::memory_order_relaxed);
+            }
+        } else {
+            has_pre_plan_mode_.store(false, std::memory_order_relaxed);
+        }
+        mode_.store(mode, std::memory_order_relaxed);
+    }
     PermissionMode mode() const { return mode_.load(std::memory_order_relaxed); }
+
+    PermissionMode pre_plan_mode() const {
+        if (!has_pre_plan_mode_.load(std::memory_order_relaxed)) {
+            return PermissionMode::Default;
+        }
+        PermissionMode mode = pre_plan_mode_.load(std::memory_order_relaxed);
+        return mode == PermissionMode::Plan ? PermissionMode::Default : mode;
+    }
+
+    void set_pre_plan_mode(PermissionMode mode) {
+        if (mode == PermissionMode::Plan) mode = PermissionMode::Default;
+        pre_plan_mode_.store(mode, std::memory_order_relaxed);
+        has_pre_plan_mode_.store(true, std::memory_order_relaxed);
+    }
+
+    PermissionMode restore_pre_plan_mode() {
+        PermissionMode restored = pre_plan_mode();
+        mode_.store(restored, std::memory_order_relaxed);
+        has_pre_plan_mode_.store(false, std::memory_order_relaxed);
+        clear_session_allows();
+        return restored;
+    }
 
     // Enable/disable dangerous mode (bypasses ALL checks including path safety)
     void set_dangerous(bool enabled) { dangerous_mode_.store(enabled, std::memory_order_relaxed); }
@@ -98,6 +132,11 @@ public:
         // tool that prompts the user mid-loop.
         if (tool_name == "task_complete") return true;
 
+        // TodoWrite mutates only session-local checklist state so it must run
+        // sequentially, but it should never interrupt the user with a file/exec
+        // permission prompt.
+        if (tool_name == "TodoWrite") return true;
+
         // Browser bridge tools are governed by their own config switch and
         // runtime health checks. Marking mutating browser tools non-read-only
         // keeps them sequential in AgentLoop without adding a confirmation
@@ -144,9 +183,10 @@ public:
         switch (mode_.load(std::memory_order_relaxed)) {
             case PermissionMode::Default:     next = PermissionMode::AcceptEdits; break;
             case PermissionMode::AcceptEdits: next = PermissionMode::Yolo; break;
-            case PermissionMode::Yolo:        next = PermissionMode::Default; break;
+            case PermissionMode::Yolo:        next = PermissionMode::Plan; break;
+            case PermissionMode::Plan:        next = PermissionMode::Default; break;
         }
-        mode_.store(next, std::memory_order_relaxed);
+        set_mode(next);
         clear_session_allows();
         return next;
     }
@@ -156,6 +196,7 @@ public:
             case PermissionMode::Default:     return "default";
             case PermissionMode::AcceptEdits: return "accept-edits";
             case PermissionMode::Yolo:        return "yolo";
+            case PermissionMode::Plan:        return "plan";
         }
         return "unknown";
     }
@@ -165,6 +206,7 @@ public:
             case PermissionMode::Default:     return "Prompt for write/exec tools";
             case PermissionMode::AcceptEdits: return "Auto-allow file edits, prompt for bash";
             case PermissionMode::Yolo:        return "Auto-allow everything (dangerous!)";
+            case PermissionMode::Plan:        return "Plan first, approve before coding";
         }
         return "";
     }
@@ -249,6 +291,8 @@ private:
     }
 
     std::atomic<PermissionMode> mode_{PermissionMode::Default};
+    std::atomic<PermissionMode> pre_plan_mode_{PermissionMode::Default};
+    std::atomic<bool> has_pre_plan_mode_{false};
     std::atomic<bool> dangerous_mode_{false};
     mutable std::mutex mu_;
     std::set<std::string> session_allowed_;

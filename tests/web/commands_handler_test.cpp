@@ -1,7 +1,7 @@
 // 覆盖 src/web/handlers/commands_handler.cpp::build_commands_payload。
 //
 // 该函数是 GET /api/commands 的纯逻辑层。回归点:
-//   - builtins 顺序意外被改(前端依赖 init→compact 这个固定顺序展示)
+//   - builtins 顺序意外被改(前端依赖 init→compact→goal→plan 这个固定顺序展示)
 //   - 缺 workspace_cwd 时返回了 skills 字段(应该不返回,向后兼容旧客户端)
 //   - 传 workspace_cwd 时漏扫了 .agent/skills 项目目录
 //   - skills 没按字典序 → 用户看到的下拉条目跳来跳去
@@ -70,7 +70,7 @@ protected:
 } // namespace
 
 // 场景:不传 workspace_cwd 时**完全不输出** `skills` 字段(向后兼容)。
-// builtins 仍然在,顺序固定 init→compact→goal。
+// builtins 仍然在,顺序固定 init→compact→goal→plan。
 TEST_F(CommandsHandlerTest, NoWorkspaceCwdOmitsSkillsField) {
     acecode::SkillRegistry registry;
     registry.set_scan_roots({tmp_root});
@@ -81,13 +81,15 @@ TEST_F(CommandsHandlerTest, NoWorkspaceCwdOmitsSkillsField) {
     ASSERT_TRUE(payload.contains("builtins"));
     EXPECT_FALSE(payload.contains("skills")) << "缺 workspace_cwd 不应输出 skills 字段";
 
-    ASSERT_EQ(payload["builtins"].size(), 3u);
+    ASSERT_EQ(payload["builtins"].size(), 4u);
     EXPECT_EQ(payload["builtins"][0]["name"].get<std::string>(), "init");
     EXPECT_EQ(payload["builtins"][1]["name"].get<std::string>(), "compact");
     EXPECT_EQ(payload["builtins"][2]["name"].get<std::string>(), "goal");
+    EXPECT_EQ(payload["builtins"][3]["name"].get<std::string>(), "plan");
     EXPECT_FALSE(payload["builtins"][0]["description"].get<std::string>().empty());
     EXPECT_FALSE(payload["builtins"][1]["description"].get<std::string>().empty());
     EXPECT_FALSE(payload["builtins"][2]["description"].get<std::string>().empty());
+    EXPECT_FALSE(payload["builtins"][3]["description"].get<std::string>().empty());
 }
 
 // 测试 helper:在 payload.skills 中按 name 找,返回 description(找不到 → nullopt)
@@ -161,7 +163,7 @@ TEST_F(CommandsHandlerTest, DisabledSkillsAreFiltered) {
         << "disabled skill 不应出现在响应里";
 }
 
-// 场景:builtins 描述非空,且与 init/compact 命令注册时的描述匹配。
+// 场景:builtins 描述非空,且与 init/compact/goal/plan 命令注册时的描述匹配。
 // 防止有人改了 init_command.cpp / builtin_commands.cpp 的描述忘了同步这里。
 TEST_F(CommandsHandlerTest, BuiltinDescriptionsMatchTuiRegistration) {
     acecode::SkillRegistry registry;
@@ -173,6 +175,10 @@ TEST_F(CommandsHandlerTest, BuiltinDescriptionsMatchTuiRegistration) {
               "Analyze this codebase and generate (or improve) ACECODE.md");
     EXPECT_EQ(payload["builtins"][1]["description"].get<std::string>(),
               "Compress conversation history");
+    EXPECT_EQ(payload["builtins"][2]["description"].get<std::string>(),
+              "Create, view, pause, resume, edit, or clear the thread goal");
+    EXPECT_EQ(payload["builtins"][3]["description"].get<std::string>(),
+              "Enter plan mode or start planning a described task");
 }
 
 // 场景:workspace_cwd 指向某项目时,该项目 .agent/skills 下的 SKILL.md 出现在响应。

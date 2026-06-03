@@ -290,6 +290,42 @@ run('history replay 恢复最近 goal 事件状态', () => {
   assert.equal(loaded.lastSeq, 1);
 });
 
+run('todo_updated 事件更新 transcript checklist 状态', () => {
+  const state = reduceTranscriptEvent(createTranscriptState(), {
+    type: 'todo_updated',
+    payload: {
+      todos: [
+        { id: '1', content: 'Inspect Hermes', status: 'completed' },
+        { id: '2', content: 'Wire checklist UI', status: 'in_progress' },
+      ],
+      summary: { total: 2, completed: 1, in_progress: 1, pending: 0, cancelled: 0 },
+    },
+    seq: 1,
+  }).state;
+
+  assert.equal(state.todos.length, 2);
+  assert.equal(state.todos[0].status, 'completed');
+  assert.equal(state.todos[1].content, 'Wire checklist UI');
+  assert.equal(state.todoSummary.total, 2);
+  assert.equal(state.todoSummary.completed, 1);
+});
+
+run('history load 使用运行时快照恢复 todo checklist', () => {
+  const loaded = loadTranscriptHistory(createTranscriptState({ title: 's1' }), {
+    messages: [],
+    events: [],
+    todos: [
+      { id: '1', content: 'Done task', status: 'completed' },
+      { id: '2', content: 'Next task', status: 'pending' },
+    ],
+    todo_summary: { total: 2, completed: 1, pending: 1 },
+  }).state;
+
+  assert.equal(loaded.todos.length, 2);
+  assert.equal(loaded.todos[0].content, 'Done task');
+  assert.equal(loaded.todoSummary.pending, 1);
+});
+
 run('history load 使用运行时快照恢复当前 goal 和 busy 状态', () => {
   const loaded = loadTranscriptHistory(createTranscriptState({ title: 's1' }), {
     messages: [],

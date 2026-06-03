@@ -9,7 +9,9 @@
 #include "glob_tool.hpp"
 #include "goal_tool.hpp"
 #include "grep_tool.hpp"
+#include "plan_mode_tool.hpp"
 #include "task_complete_tool.hpp"
+#include "todo_write_tool.hpp"
 #include "tool_executor.hpp"
 #include "vision_subagent_tool.hpp"
 #include "web_search/runtime.hpp"
@@ -25,9 +27,12 @@ inline void register_session_builtin_tools(ToolExecutor& tools, const AppConfig&
     tools.register_tool(create_grep_tool());
     tools.register_tool(create_glob_tool());
     tools.register_tool(create_task_complete_tool());
+    tools.register_tool(create_todo_write_tool());
     tools.register_tool(create_get_goal_tool());
     tools.register_tool(create_create_goal_tool());
     tools.register_tool(create_update_goal_tool());
+    tools.register_tool(create_enter_plan_mode_tool());
+    tools.register_tool(create_exit_plan_mode_tool());
     tools.register_tool(create_vision_analyze_tool(config));
     if (config.web_search.enabled) {
         tools.register_tool(web_search::create_web_search_tool(

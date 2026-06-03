@@ -37,6 +37,42 @@ function cloneGoal(goal) {
   return { ...goal };
 }
 
+function normalizeTodoStatus(status) {
+  const value = String(status || '').trim().toLowerCase();
+  if (value === 'pending' || value === 'in_progress' || value === 'completed' || value === 'cancelled') return value;
+  return 'pending';
+}
+
+function normalizeTodos(todos) {
+  if (!Array.isArray(todos)) return [];
+  return todos
+    .filter((item) => item && typeof item === 'object' && !Array.isArray(item))
+    .map((item) => ({
+      id: String(item.id ?? '').trim() || '?',
+      content: String(item.content ?? '').trim() || '(no description)',
+      status: normalizeTodoStatus(item.status),
+    }));
+}
+
+function cloneTodos(todos) {
+  return normalizeTodos(todos);
+}
+
+function normalizeTodoSummary(summary, todos = []) {
+  const fallback = { total: todos.length, pending: 0, in_progress: 0, completed: 0, cancelled: 0 };
+  for (const item of todos) {
+    fallback[item.status] = (fallback[item.status] || 0) + 1;
+  }
+  if (!summary || typeof summary !== 'object') return fallback;
+  return {
+    total: Math.max(0, Number(summary.total) || fallback.total),
+    pending: Math.max(0, Number(summary.pending) || 0),
+    in_progress: Math.max(0, Number(summary.in_progress ?? summary.inProgress) || 0),
+    completed: Math.max(0, Number(summary.completed) || 0),
+    cancelled: Math.max(0, Number(summary.cancelled) || 0),
+  };
+}
+
 function cloneState(state) {
   return {
     ...state,
@@ -44,6 +80,8 @@ function cloneState(state) {
     toolMap: cloneToolMap(state.toolMap),
     tokenUsage: cloneTokenUsage(state.tokenUsage),
     goal: cloneGoal(state.goal),
+    todos: cloneTodos(state.todos),
+    todoSummary: state.todoSummary && typeof state.todoSummary === 'object' ? { ...state.todoSummary } : null,
     activity: state.activity && typeof state.activity === 'object' ? { ...state.activity } : null,
   };
 }
@@ -272,6 +310,8 @@ export function createTranscriptState(overrides = {}) {
     error: '',
     tokenUsage: null,
     goal: null,
+    todos: [],
+    todoSummary: null,
     activity: null,
     // turnHadAssistantText / lastAssistantText 用于桌面通知:在 busy=true→false
     // 转换且本回合产生过 assistant 文本时,emit turn_completed effect。reducer 之外
@@ -282,6 +322,8 @@ export function createTranscriptState(overrides = {}) {
     toolMap: cloneToolMap(overrides.toolMap),
     tokenUsage: cloneTokenUsage(overrides.tokenUsage),
     goal: cloneGoal(overrides.goal),
+    todos: cloneTodos(overrides.todos),
+    todoSummary: overrides.todoSummary && typeof overrides.todoSummary === 'object' ? { ...overrides.todoSummary } : null,
   };
 }
 
@@ -487,6 +529,12 @@ export function reduceTranscriptEvent(state, msg) {
       next.goal = null;
       break;
     }
+    case 'todo_updated': {
+      const todos = normalizeTodos(p.todos);
+      next.todos = todos;
+      next.todoSummary = normalizeTodoSummary(p.summary, todos);
+      break;
+    }
     case 'busy_changed': {
       const wasBusy = !!state?.busy;
       next.busy = !!p.busy;
@@ -603,6 +651,11 @@ export function loadTranscriptHistory(state, data = {}) {
 
   if (Object.prototype.hasOwnProperty.call(data, 'goal')) {
     next.goal = cloneGoal(data.goal);
+  }
+  if (Object.prototype.hasOwnProperty.call(data, 'todos')) {
+    const todos = normalizeTodos(data.todos);
+    next.todos = todos;
+    next.todoSummary = normalizeTodoSummary(data.todo_summary ?? data.todoSummary, todos);
   }
   const restoredTurnCount = readRuntimeTurnCount(data);
   if (restoredTurnCount !== null) {

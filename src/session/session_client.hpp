@@ -44,6 +44,7 @@ enum class SessionEventKind {
     TranscriptReplace, // payload: {"messages": [...]} full visible transcript replacement
     GoalUpdated,       // payload: {"session_id":"...", "goal": {...}}
     GoalCleared,       // payload: {"session_id":"..."}
+    TodoUpdated,       // payload: {"session_id":"...", "todos": [...], "summary": {...}}
     BusyChanged,       // payload: {"busy": bool}
     Done,              // payload: {} —— 一轮 agent loop 结束
     Error,             // payload: {"reason":"...", "request_id":"..."(可选)}
@@ -241,6 +242,7 @@ inline const char* to_string(SessionEventKind k) {
         case SessionEventKind::TranscriptReplace: return "transcript_replace";
         case SessionEventKind::GoalUpdated:       return "goal_updated";
         case SessionEventKind::GoalCleared:       return "goal_cleared";
+        case SessionEventKind::TodoUpdated:       return "todo_updated";
         case SessionEventKind::BusyChanged:       return "busy_changed";
         case SessionEventKind::Done:              return "done";
         case SessionEventKind::Error:             return "error";

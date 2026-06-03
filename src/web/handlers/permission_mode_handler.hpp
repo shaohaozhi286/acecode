@@ -17,7 +17,7 @@ namespace acecode::web {
 std::optional<PermissionMode> parse_permission_mode_name(const std::string& name);
 
 // Serialize a permission mode to the stable Web API shape:
-// {"mode":"default|accept-edits|yolo","description":"..."}
+// {"mode":"default|accept-edits|plan|yolo","description":"..."}
 nlohmann::json permission_mode_to_json(PermissionMode mode);
 
 } // namespace acecode::web

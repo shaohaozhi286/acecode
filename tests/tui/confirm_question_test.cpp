@@ -149,6 +149,25 @@ TEST(ConfirmQuestion, UnknownToolFallback) {
     EXPECT_EQ(s, "Do you want to use memory_write?");
 }
 
+// 场景:EnterPlanMode 权限确认使用专门标题,不展示通用 "use tool" 文案。
+TEST(ConfirmQuestion, EnterPlanModeUsesPlanPrompt) {
+    std::string s = build_confirm_question("EnterPlanMode",
+        R"({"kind":"enter_plan_mode","plan_file_path":"C:/tmp/plans/session.md"})");
+    EXPECT_NE(s.find("Enter plan mode?"), std::string::npos);
+    EXPECT_NE(s.find("C:/tmp/plans/session.md"), std::string::npos);
+}
+
+// 场景:ExitPlanMode 的确认展示 plan 文件路径和计划预览,让 TUI 与 desktop
+// 走同一个审批语义。
+TEST(ConfirmQuestion, ExitPlanModeShowsPlanApprovalPreview) {
+    std::string s = build_confirm_question("ExitPlanMode",
+        R"({"kind":"plan_approval","plan_file_path":"C:/tmp/plans/session.md","plan":"1. Inspect\n2. Implement\n3. Test"})");
+    EXPECT_NE(s.find("Exit plan mode and approve this plan?"), std::string::npos);
+    EXPECT_NE(s.find("Plan file: C:/tmp/plans/session.md"), std::string::npos);
+    EXPECT_NE(s.find("1. Inspect"), std::string::npos);
+    EXPECT_NE(s.find("3. Test"), std::string::npos);
+}
+
 // 场景:坏 JSON 不抛异常,落到通用分支
 TEST(ConfirmQuestion, MalformedJsonFallsBackQuietly) {
     std::string s = build_confirm_question("bash", "not a json");

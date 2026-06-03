@@ -25,7 +25,7 @@ import {
   splitModelIds,
   validateModelDraft,
 } from '../lib/modelManager.js';
-import { normalizePermissionMode } from '../lib/permissionMode.js';
+import { PERMISSION_MODES, normalizePermissionMode } from '../lib/permissionMode.js';
 import { sessionDisplayTitle } from '../lib/sessionTitle.js';
 import { RefreshIcon, VsIcon } from './Icon.jsx';
 import { toast } from './Toast.jsx';
@@ -242,11 +242,7 @@ function SectionGeneral({ health, activeSessionId = '', onPermissionModeChanged 
       <p className="text-[12px] text-fg-mute mb-3">
         {activeSessionId ? '控制当前会话调用工具时的确认行为' : '请先打开一个会话后再切换权限模式'}
       </p>
-      {[
-        { id: 'default',      name: '默认',         desc: '可读取并编辑工作区中的文件;写/执行操作前会请求确认' },
-        { id: 'accept-edits', name: '自动接受编辑',   desc: '文件编辑自动通过,bash/网络命令仍需确认' },
-        { id: 'yolo',         name: '完全访问 (Yolo)', desc: '所有工具调用跳过确认,适合受信任的工作流' },
-      ].map((p, i) => (
+      {PERMISSION_MODES.map((p, i) => (
         <div
           key={i}
           role="radio"
@@ -260,8 +256,8 @@ function SectionGeneral({ health, activeSessionId = '', onPermissionModeChanged 
           )}
         >
           <div>
-            <div className="text-[13px] font-medium">{p.name}</div>
-            <div className="text-[11px] text-fg-mute mt-0.5">{p.desc}</div>
+            <div className="text-[13px] font-medium">{p.label}</div>
+            <div className="text-[11px] text-fg-mute mt-0.5">{p.hint}</div>
           </div>
           <Toggle on={permMode === p.id} onChange={(v) => { if (v) switchPermissionMode(p.id); }} />
         </div>

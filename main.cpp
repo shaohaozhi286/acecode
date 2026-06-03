@@ -419,6 +419,52 @@ static Element render_token_usage_chip(const acecode::TuiState& state) {
     });
 }
 
+static Element render_todo_checklist_block(const acecode::TuiState& state,
+                                           int available_width) {
+    if (state.todos.empty()) {
+        return emptyElement();
+    }
+
+    constexpr std::size_t kMaxVisibleTodos = 8;
+    const int text_width = std::max(12, available_width - 14);
+    Elements rows;
+    rows.push_back(hbox({
+        text("  TodoWrite ") | bold | color(Color::CyanLight),
+        text(std::to_string(state.todos.size()) + " task(s)") |
+            dim | color(Color::GrayDark),
+    }));
+
+    const std::size_t visible =
+        std::min<std::size_t>(kMaxVisibleTodos, state.todos.size());
+    for (std::size_t i = 0; i < visible; ++i) {
+        const auto& item = state.todos[i];
+        const std::string status = normalize_todo_status(item.status);
+        std::string marker = "[ ]";
+        Color row_color = Color::GrayLight;
+        if (status == "in_progress") {
+            marker = "[>]";
+            row_color = Color::Yellow;
+        } else if (status == "completed") {
+            marker = "[x]";
+            row_color = Color::GreenLight;
+        } else if (status == "cancelled") {
+            marker = "[~]";
+            row_color = Color::GrayDark;
+        }
+        rows.push_back(hbox({
+            text("  " + marker + " ") | color(row_color),
+            text(truncate_cells_middle_ascii(item.content, text_width)) |
+                color(row_color) | flex,
+        }));
+    }
+    if (state.todos.size() > visible) {
+        rows.push_back(
+            text("  +" + std::to_string(state.todos.size() - visible) + " more") |
+            dim | color(Color::GrayDark));
+    }
+    return vbox(std::move(rows)) | color(Color::GrayLight);
+}
+
 static Element render_pending_queue_block(const acecode::TuiState& state,
                                           int available_width) {
     if (state.pending_queue.empty()) {
@@ -2353,6 +2399,15 @@ static int run_interactive_app(const CliOptions& cli,
         state.goal_status = status;
         screen.PostEvent(Event::Custom);
     };
+    callbacks.on_todo_updated = [&state, &screen](const nlohmann::json& payload) {
+        std::lock_guard<std::mutex> lk(state.mu);
+        if (payload.is_object() && payload.contains("todos")) {
+            state.todos = todo_items_from_json(payload["todos"]);
+        } else {
+            state.todos.clear();
+        }
+        screen.PostEvent(Event::Custom);
+    };
     callbacks.on_transcript_replace = [&state, &clamp_chat_focus, &screen](
         const std::vector<ChatMessage>& /*messages*/,
         const CompactResult& result) {
@@ -2489,6 +2544,7 @@ static int run_interactive_app(const CliOptions& cli,
                 state.conversation.push_back({"system", "Session " + target_id + " not found.", false});
             } else {
                 acecode::append_resumed_session_messages(messages, state, agent_loop, tools);
+                state.todos = session_manager.current_todos();
                 permissions.set_mode(permission_mode_from_meta_name(resumed_meta.permission_mode));
                 permissions.clear_session_allows();
                 session_manager.set_permission_mode(
@@ -5966,6 +6022,8 @@ static int run_interactive_app(const CliOptions& cli,
             render_pending_queue_block(state, pending_queue_width);
         Element pending_attachment_element =
             render_pending_attachment_block(state, pending_queue_width);
+        Element todo_checklist_element =
+            render_todo_checklist_block(state, pending_queue_width);
 
         Element main_root = vbox({
             header,
@@ -5978,6 +6036,7 @@ static int run_interactive_app(const CliOptions& cli,
             confirm_overlay_element,
             slash_dropdown_element,
             thinking_element,
+            todo_checklist_element,
             pending_queue_element,
             prompt_separator | color(Color::GrayDark),
             pending_attachment_element,

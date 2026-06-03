@@ -7,6 +7,7 @@
 #include "utils/drag_scroll.hpp"
 #include "tool/tool_executor.hpp"
 #include "tool/ask_user_question_tool.hpp"
+#include "session/todo_state.hpp"
 
 #include <string>
 #include <vector>
@@ -96,6 +97,7 @@ struct TuiState {
     std::string token_status; // for token usage display
     int token_percent = 0; // current context usage percentage
     std::string goal_status; // compact goal status chip
+    std::vector<TodoItem> todos; // visible TodoWrite checklist
 
     // Input history for up/down navigation
     std::vector<std::string> input_history;

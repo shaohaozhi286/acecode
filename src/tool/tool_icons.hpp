@@ -19,6 +19,7 @@ inline std::string tool_icon(const std::string& tool_id) {
         if (tool_id == "file_write") return "W";
         if (tool_id == "file_edit") return "E";
         if (tool_id == "task_complete") return "D"; // Done
+        if (tool_id == "TodoWrite") return "T";
         return "*";
     }
     // Default: Unicode glyphs. Kept simple (single-codepoint arrows / glyphs)
@@ -28,6 +29,7 @@ inline std::string tool_icon(const std::string& tool_id) {
     if (tool_id == "file_write") return "\xE2\x9C\x8D"; // writing hand (write)
     if (tool_id == "file_edit") return "\xE2\x9C\x8E";  // lower-right pencil (edit)
     if (tool_id == "task_complete") return "\xE2\x9C\x93"; // check mark (done)
+    if (tool_id == "TodoWrite") return "\xE2\x9C\x93"; // check mark (todo)
     return "*";
 }
 

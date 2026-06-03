@@ -66,6 +66,29 @@ std::string format_command_block(const std::string& cmd) {
     return out;
 }
 
+std::string format_plan_preview(const std::string& plan) {
+    if (plan.empty()) return "  (plan file is empty)";
+    std::string out;
+    size_t pos = 0;
+    int emitted = 0;
+    bool more = false;
+    while (pos <= plan.size()) {
+        size_t nl = plan.find('\n', pos);
+        std::string line = (nl == std::string::npos)
+            ? plan.substr(pos)
+            : plan.substr(pos, nl - pos);
+        if (emitted >= 6) { more = true; break; }
+        out += "  ";
+        out += truncate_command_line(line);
+        ++emitted;
+        if (nl == std::string::npos) break;
+        out += "\n";
+        pos = nl + 1;
+    }
+    if (more) out += "\n  ...";
+    return out;
+}
+
 // 取第一行并截断到 max 字符;若原字符串多行,在末尾加 "↵" 提示还有后续。
 std::string truncate_first_line(const std::string& s, size_t max = 60) {
     size_t nl = s.find('\n');
@@ -106,6 +129,27 @@ std::string build_confirm_question(const std::string& tool_name,
                                    const std::string& arguments_json) {
     try {
         auto j = nlohmann::json::parse(arguments_json);
+
+        if (tool_name == "EnterPlanMode" ||
+            j.value("kind", std::string{}) == "enter_plan_mode") {
+            std::string out = "Enter plan mode?";
+            if (j.contains("plan_file_path") && j["plan_file_path"].is_string()) {
+                out += "\nPlan file: " + truncate_path(j["plan_file_path"].get<std::string>());
+            }
+            return out;
+        }
+
+        if (tool_name == "ExitPlanMode" ||
+            j.value("kind", std::string{}) == "plan_approval") {
+            std::string out = "Exit plan mode and approve this plan?";
+            if (j.contains("plan_file_path") && j["plan_file_path"].is_string()) {
+                out += "\nPlan file: " + truncate_path(j["plan_file_path"].get<std::string>());
+            }
+            if (j.contains("plan") && j["plan"].is_string()) {
+                out += "\n" + format_plan_preview(j["plan"].get<std::string>());
+            }
+            return out;
+        }
 
         if (tool_name == "bash") {
             std::string out = "Do you want to run this command?";

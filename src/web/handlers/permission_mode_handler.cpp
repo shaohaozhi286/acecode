@@ -6,6 +6,7 @@ std::optional<PermissionMode> parse_permission_mode_name(const std::string& name
     if (name == "default") return PermissionMode::Default;
     if (name == "accept-edits" || name == "acceptEdits") return PermissionMode::AcceptEdits;
     if (name == "yolo") return PermissionMode::Yolo;
+    if (name == "plan") return PermissionMode::Plan;
     return std::nullopt;
 }
 

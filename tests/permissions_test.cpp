@@ -23,6 +23,7 @@ TEST(Permissions, DefaultModeAllowsReadOnlyTools) {
     // Read-only: auto-allow without prompt.
     EXPECT_TRUE(pm.should_auto_allow("file_read", /*is_read_only=*/true));
     EXPECT_TRUE(pm.should_auto_allow("grep",      /*is_read_only=*/true));
+    EXPECT_TRUE(pm.should_auto_allow("TodoWrite", /*is_read_only=*/false));
 
     // Write/exec: require prompt in default mode.
     EXPECT_FALSE(pm.should_auto_allow("file_write", /*is_read_only=*/false));
@@ -48,6 +49,47 @@ TEST(Permissions, AcceptEditsModeAllowsFileWritesButNotBash) {
     EXPECT_TRUE(pm.should_auto_allow("file_write", false));
     EXPECT_TRUE(pm.should_auto_allow("file_edit",  false));
     EXPECT_FALSE(pm.should_auto_allow("bash",      false));
+}
+
+// 场景:Plan 模式只按 Default 一样自动放行 read-only 工具;普通写工具
+// 不能因为之前处在 AcceptEdits/Yolo 就被 PermissionManager 直接放行。
+TEST(Permissions, PlanModeAllowsOnlyReadOnlyByDefault) {
+    PermissionManager pm;
+    pm.set_mode(PermissionMode::AcceptEdits);
+    pm.set_mode(PermissionMode::Plan);
+
+    EXPECT_TRUE(pm.should_auto_allow("file_read", true));
+    EXPECT_TRUE(pm.should_auto_allow("TodoWrite", false));
+    EXPECT_FALSE(pm.should_auto_allow("file_write", false));
+    EXPECT_FALSE(pm.should_auto_allow("file_edit", false));
+    EXPECT_FALSE(pm.should_auto_allow("bash", false));
+}
+
+// 场景:进入 Plan 模式时保存之前的非 Plan mode,ExitPlanMode 恢复它;
+// 如果原来就在 Plan 里重复 set,不能把 pre-plan 覆盖成 Plan。
+TEST(Permissions, PlanModeRestoresPreviousNonPlanMode) {
+    PermissionManager pm;
+    pm.set_mode(PermissionMode::AcceptEdits);
+    pm.set_mode(PermissionMode::Plan);
+    EXPECT_EQ(pm.mode(), PermissionMode::Plan);
+    EXPECT_EQ(pm.pre_plan_mode(), PermissionMode::AcceptEdits);
+
+    pm.set_mode(PermissionMode::Plan);
+    EXPECT_EQ(pm.pre_plan_mode(), PermissionMode::AcceptEdits);
+
+    EXPECT_EQ(pm.restore_pre_plan_mode(), PermissionMode::AcceptEdits);
+    EXPECT_EQ(pm.mode(), PermissionMode::AcceptEdits);
+    EXPECT_EQ(pm.pre_plan_mode(), PermissionMode::Default);
+}
+
+// 场景:状态栏/快捷键循环包含 Plan,顺序锁定为
+// Default -> AcceptEdits -> Yolo -> Plan -> Default。
+TEST(Permissions, CycleModeIncludesPlanMode) {
+    PermissionManager pm;
+    EXPECT_EQ(pm.cycle_mode(), PermissionMode::AcceptEdits);
+    EXPECT_EQ(pm.cycle_mode(), PermissionMode::Yolo);
+    EXPECT_EQ(pm.cycle_mode(), PermissionMode::Plan);
+    EXPECT_EQ(pm.cycle_mode(), PermissionMode::Default);
 }
 
 // 场景:添加一条针对 bash + command 前缀 "ls " 的 Allow 规则后,ls -la

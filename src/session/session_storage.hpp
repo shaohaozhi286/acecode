@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../provider/llm_provider.hpp"
+#include "todo_state.hpp"
 #include <string>
 #include <vector>
 
@@ -18,10 +19,12 @@ struct SessionMeta {
     std::string model_preset;  // optional saved_models name for this session
     std::string title;  // optional user-set window title; empty = unset
     std::string input_draft;  // optional unsubmitted chat input draft; empty = unset
-    std::string permission_mode = "default";  // default | accept-edits | yolo
+    std::string permission_mode = "default";  // default | accept-edits | plan | yolo
+    std::string pre_plan_permission_mode;  // previous non-plan mode while permission_mode == plan
     int turn_count = 0;  // visible user turns, excluding internal hidden prompts
     TokenUsage last_token_usage;
     TokenUsage session_token_usage;
+    std::vector<TodoItem> todos;
 
     // Web fork 相关元数据(openspec session-fork capability)。
     // 空字符串 = 这个 session 不是从其它 session 分叉出来的。

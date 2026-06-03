@@ -50,9 +50,11 @@ import {
   modelSelectValue,
   normalizeModelOptions,
   normalizeModelState,
+  resolveHomeModelName,
   selectedModelName,
+  withCreateSessionModel,
 } from '../lib/sessionModel.js';
-import { normalizePermissionMode } from '../lib/permissionMode.js';
+import { normalizePermissionMode, permissionModeOption } from '../lib/permissionMode.js';
 import { ATTACHMENT_HARD_LIMIT_BYTES, normalizeImageFile } from '../lib/imageNormalize.js';
 import { PanelToggleIcon, VsIcon } from './Icon.jsx';
 import { commandWorkspaceHashForInput } from '../lib/slashCommandWorkspace.js';
@@ -62,6 +64,7 @@ import { buildAssistantRunDirectives } from '../lib/assistantRunDirectives.js';
 import { activityChromeState } from '../lib/assistantAvatarDisplay.js';
 import { notifySessionListChanged } from '../lib/sessionListEvents.js';
 import { getGoalStopControlState } from '../lib/goalControl.js';
+import { todoChecklistPresentation } from '../lib/todoChecklist.js';
 import {
   CHANGE_DOCK_DISMISSALS_STORAGE_KEY,
   dismissChangeDockSignature,
@@ -177,6 +180,46 @@ function ActivityIndicator({ activity, showAceCodeAvatar = true }) {
               style={{ animation: `ace-pulse 1.2s ease-in-out ${i * 0.2}s infinite` }}
             />
           ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TodoChecklist({ todos = [], summary = null }) {
+  const checklist = todoChecklistPresentation(todos, summary);
+  if (!checklist.visible) return null;
+
+  return (
+    <div className="border-t border-border bg-surface/95 px-3 py-2 shrink-0">
+      <div className="mx-auto max-w-4xl rounded-md border border-border bg-surface-hi/65 px-2.5 py-2">
+        <div className="flex items-center justify-between gap-3 text-[11px] text-fg-mute mb-1.5">
+          <span className="font-medium text-fg">TodoWrite</span>
+          <span className="tabular-nums">{checklist.done}/{checklist.total}</span>
+        </div>
+        <div className="grid gap-1">
+          {checklist.items.map((item) => {
+            return (
+              <div
+                key={item.key}
+                className="grid grid-cols-[18px_minmax(0,1fr)] items-start gap-2 text-[12px] leading-5"
+                data-todo-status={item.status}
+              >
+                <span
+                  className={clsx('mt-[2px] inline-flex h-[14px] w-[14px] items-center justify-center rounded-sm border', item.markerClassName)}
+                  title={item.markerLabel}
+                  aria-label={item.markerLabel}
+                >
+                  {item.icon === 'check' && <VsIcon name="ok" size={10} mono={false} />}
+                  {item.icon === 'dot' && <span className="h-1.5 w-1.5 rounded-full bg-warn" />}
+                  {item.icon === 'dash' && <span className="h-px w-2 bg-fg-mute" />}
+                </span>
+                <span className={clsx('min-w-0 break-words', item.textClassName)}>
+                  {item.content}
+                </span>
+              </div>
+            );
+          })}
         </div>
       </div>
     </div>
@@ -338,7 +381,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         : '错误:' + (reason || ''),
     }),
   });
-  const { items, busy, turns, title, status: transcriptStatus, streamingId, tokenUsage, goal, activity, applyEvent, setTitle: setTranscriptTitle } = transcript;
+  const { items, busy, turns, title, status: transcriptStatus, streamingId, tokenUsage, goal, todos, todoSummary, activity, applyEvent, setTitle: setTranscriptTitle } = transcript;
   // 让 fireDesktopNotification 拿到最新 title,无需进入它的 useCallback deps。
   useEffect(() => { transcriptTitleRef.current = title || ''; }, [title]);
   const [history,  setHistory]  = useState([]);
@@ -347,6 +390,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   const [homeSubmitting, setHomeSubmitting] = useState(false);
   const [projectDropdownOpen, setProjectDropdownOpen] = useState(false);
   const [modelOptions, setModelOptions] = useState([]);
+  const [homeModelName, setHomeModelName] = useState('');
   const [modelState, setModelState] = useState(null);
   const [pendingModelName, setPendingModelName] = useState('');
   const [modelSwitching, setModelSwitching] = useState(false);
@@ -460,7 +504,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     if (homeSubmitting) return null;
     const target = selectedHomeWorkspace || fallbackWorkspaceOption(ref, health);
     const targetHash = target?.hash || '';
-    const options = createOptions || sessionCreateOptionsForText(text);
+    const options = withCreateSessionModel(createOptions || sessionCreateOptionsForText(text), homeModelName);
     const create = isRealWorkspaceHash(targetHash)
       ? api.createWorkspaceSession(targetHash, options)
       : api.createSession(options);
@@ -482,7 +526,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     } finally {
       setHomeSubmitting(false);
     }
-  }, [api, health, homeSubmitting, onSessionPromoted, ref, selectedHomeWorkspace]);
+  }, [api, health, homeModelName, homeSubmitting, onSessionPromoted, ref, selectedHomeWorkspace]);
 
   const uploadMediaFilesToSession = useCallback((targetSid, files) => {
     for (const [index, file] of Array.from(files || []).entries()) {
@@ -691,16 +735,29 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   }, [composerValue, draftReadyKey, draftSessionKey, draftWorkspaceHash, persistDraftValue, sid]);
 
   useEffect(() => {
-    if (!sid) {
-      setModelState(null);
-      setPendingModelName('');
-      setModelSwitching(false);
-      setModelRefreshing(false);
-      return undefined;
-    }
     let cancelled = false;
     setPendingModelName('');
     setModelSwitching(false);
+    setModelRefreshing(false);
+
+    if (!sid) {
+      setModelState(null);
+      Promise.allSettled([
+        api.listModels(),
+        api.getDefaultModel(),
+      ]).then(([modelsResult, defaultResult]) => {
+        if (cancelled) return;
+        const options = modelsResult.status === 'fulfilled'
+          ? normalizeModelOptions(modelsResult.value)
+          : [];
+        setModelOptions(options);
+        const defaultName = defaultResult.status === 'fulfilled'
+          ? (defaultResult.value?.name || defaultResult.value?.default_model_name || '')
+          : '';
+        setHomeModelName((prev) => resolveHomeModelName(options, defaultName, prev));
+      });
+      return () => { cancelled = true; };
+    }
 
     api.listModels()
       .then((list) => {
@@ -729,21 +786,29 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   }, [api, ref?.context_window, ref?.model, ref?.model_name, ref?.model_preset, ref?.provider, ref?.workspaceHash, sid]);
 
   const refreshSessionModels = useCallback(async () => {
-    if (!sid || modelRefreshing) return;
+    if (modelRefreshing) return;
     const targetSid = sid;
     const workspaceHash = ref?.workspaceHash || '';
     setModelRefreshing(true);
     try {
-      const [modelsResult, stateResult] = await Promise.allSettled([
-        api.listModels(),
-        api.getSessionModel(targetSid, workspaceHash),
-      ]);
-      if (sidRef.current !== targetSid) return;
+      const requests = targetSid
+        ? [api.listModels(), api.getSessionModel(targetSid, workspaceHash)]
+        : [api.listModels(), api.getDefaultModel()];
+      const [modelsResult, stateResult] = await Promise.allSettled(requests);
+      if (targetSid && sidRef.current !== targetSid) return;
+      const nextOptions = modelsResult.status === 'fulfilled'
+        ? normalizeModelOptions(modelsResult.value)
+        : modelOptions;
       if (modelsResult.status === 'fulfilled') {
-        setModelOptions(normalizeModelOptions(modelsResult.value));
+        setModelOptions(nextOptions);
       }
-      if (stateResult.status === 'fulfilled') {
+      if (targetSid && stateResult.status === 'fulfilled') {
         setModelState(normalizeModelState(stateResult.value));
+      } else if (!targetSid) {
+        const defaultName = stateResult.status === 'fulfilled'
+          ? (stateResult.value?.name || stateResult.value?.default_model_name || '')
+          : '';
+        setHomeModelName((prev) => resolveHomeModelName(nextOptions, defaultName, prev));
       }
       if (modelsResult.status === 'fulfilled') {
         toast({ kind: 'ok', text: '模型列表已刷新' });
@@ -753,7 +818,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     } finally {
       setModelRefreshing(false);
     }
-  }, [api, modelRefreshing, ref?.workspaceHash, sid]);
+  }, [api, modelOptions, modelRefreshing, ref?.workspaceHash, sid]);
 
   useEffect(() => {
     if (!sid) {
@@ -1183,6 +1248,12 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
       .finally(() => setGoalStopping(false));
   }, [abort, api, busy, goal, goalStopping, sid]);
 
+  const selectHomeModel = useCallback((name) => {
+    const nextName = String(name || '');
+    if (!nextName || modelRefreshing) return;
+    setHomeModelName(nextName);
+  }, [modelRefreshing]);
+
   const switchSessionModel = useCallback(async (name) => {
     const nextName = String(name || '');
     const currentName = selectedModelName(modelState);
@@ -1212,7 +1283,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
       const confirmedMode = normalizePermissionMode(state?.mode || nextMode);
       setPermissionMode(confirmedMode);
       onPermissionModeChanged?.({ sessionId: sid, mode: confirmedMode });
-      toast({ kind: 'ok', text: '权限模式已切换为 ' + (confirmedMode === 'yolo' ? 'Yolo' : confirmedMode === 'accept-edits' ? '自动接受编辑' : '默认') });
+      toast({ kind: 'ok', text: '权限模式已切换为 ' + permissionModeOption(confirmedMode).label });
     } catch (e) {
       setPermissionMode(previousMode);
       toast({ kind: 'err', text: '权限模式切换失败:' + (e?.message || '') });
@@ -1316,6 +1387,10 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
 
   const currentModelLabel = modelDisplayLabel(modelState, ref?.model_name || ref?.model_preset || ref?.model || '加载中');
   const currentModelName = modelSelectValue(modelState, pendingModelName);
+  const homeModelLabel = modelDisplayLabel(
+    modelOptions.find((option) => option.name === homeModelName) || (homeModelName ? { name: homeModelName } : null),
+    homeModelName || '加载中',
+  );
   const currentContextWindow = Number(modelState?.contextWindow || ref?.context_window || ref?.contextWindow || 0) || 0;
   const tokenBudget = useMemo(() => normalizeTokenBudget({
     usage: tokenUsage,
@@ -1500,7 +1575,16 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         {questionForView && (
           <QuestionPicker request={questionForView} onResolve={resolveQuestion} />
         )}
-        <StatusBar model="—" turns={0} branch={health?.branch || ''} />
+        <StatusBar
+          model={homeModelLabel}
+          turns={0}
+          branch={health?.branch || ''}
+          modelOptions={modelOptions}
+          selectedModelName={homeModelName}
+          modelRefreshing={modelRefreshing}
+          onModelChange={selectHomeModel}
+          onRefreshModels={refreshSessionModels}
+        />
       </div>
     );
   }
@@ -1765,6 +1849,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         onCancel={cancelQueued}
         onRetry={retryQueued}
       />
+      <TodoChecklist todos={todos} summary={todoSummary} />
       <InputBar
         ref={inputRef}
         busy={busy}

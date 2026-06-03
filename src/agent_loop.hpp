@@ -60,6 +60,10 @@ struct AgentCallbacks {
     // no goal is active for the current session.
     std::function<void(const std::string& status)> on_goal_status;
 
+    // Called when TodoWrite publishes or reads the current visible checklist.
+    // The payload shape matches the todo_updated session event.
+    std::function<void(const nlohmann::json& payload)> on_todo_updated;
+
     // Called after the shared AgentLoop compact path has replaced model
     // history. TUI uses this as a display observer; daemon/Web consumers use
     // the TranscriptReplace event stream instead.
@@ -228,6 +232,7 @@ private:
     void account_goal_usage(std::int64_t token_delta = 0, bool allow_complete = false);
     void emit_goal_updated(const ThreadGoal& goal);
     void emit_goal_cleared(const std::string& session_id);
+    void emit_todo_updated(const nlohmann::json& payload);
     std::string build_goal_context_prompt(const ThreadGoal& goal) const;
     bool maybe_run_auto_compact();
     bool active_estimate_exceeds_auto_threshold() const;

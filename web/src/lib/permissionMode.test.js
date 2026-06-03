@@ -14,6 +14,7 @@ function run(name, fn) {
 run('permission mode normalizes daemon canonical names', () => {
   assert.equal(normalizePermissionMode('default'), 'default');
   assert.equal(normalizePermissionMode('accept-edits'), 'accept-edits');
+  assert.equal(normalizePermissionMode('plan'), 'plan');
   assert.equal(normalizePermissionMode('yolo'), 'yolo');
 });
 
@@ -27,6 +28,10 @@ run('permission mode falls back to default for invalid values', () => {
 });
 
 run('permission mode option returns display metadata', () => {
+  const plan = permissionModeOption('plan');
+  assert.equal(plan.label, 'Plan');
+  assert.equal(plan.color, 'plan');
+
   const option = permissionModeOption('yolo');
   assert.equal(option.label, 'Yolo');
   assert.equal(option.color, 'danger');

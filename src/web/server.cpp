@@ -547,6 +547,10 @@ struct WebServer::Impl {
             token_usage_has_values(s.session_token_usage)
                 ? s.session_token_usage
                 : (m ? m->session_token_usage : TokenUsage{}));
+        if (m && !m->todos.empty()) {
+            o["todos"] = todo_items_to_json(m->todos);
+            o["todo_summary"] = todo_summary_to_json(m->todos);
+        }
         o["archived"]      = m ? m->archived : false;
         append_attention_fields(o, s.id, o.value("workspace_hash", std::string{}),
                                 o.value("cwd", std::string{}), s.busy);
@@ -573,6 +577,10 @@ struct WebServer::Impl {
         o["permission_mode"] = m.permission_mode.empty() ? "default" : m.permission_mode;
         o["token_usage"] = token_usage_or_null(m.last_token_usage);
         o["session_token_usage"] = token_usage_or_null(m.session_token_usage);
+        if (!m.todos.empty()) {
+            o["todos"] = todo_items_to_json(m.todos);
+            o["todo_summary"] = todo_summary_to_json(m.todos);
+        }
         o["archived"]       = m.archived;
         append_attention_fields(o, m.id, workspace_hash, m.cwd, false);
         return o;
@@ -596,6 +604,11 @@ struct WebServer::Impl {
                     wrapper["token_usage"] = token_usage_or_null(entry->sm->current_last_token_usage());
                     wrapper["session_token_usage"] =
                         token_usage_or_null(entry->sm->current_session_token_usage());
+                    auto todos = entry->sm->current_todos();
+                    if (!todos.empty()) {
+                        wrapper["todos"] = todo_items_to_json(todos);
+                        wrapper["todo_summary"] = todo_summary_to_json(todos);
+                    }
                 }
             }
         }
@@ -616,6 +629,10 @@ struct WebServer::Impl {
             }
             if (!wrapper.contains("session_token_usage")) {
                 wrapper["session_token_usage"] = token_usage_or_null(meta.session_token_usage);
+            }
+            if (!wrapper.contains("todos") && !meta.todos.empty()) {
+                wrapper["todos"] = todo_items_to_json(meta.todos);
+                wrapper["todo_summary"] = todo_summary_to_json(meta.todos);
             }
         }
 

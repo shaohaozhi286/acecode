@@ -30,7 +30,7 @@ nlohmann::json build_commands_payload(const SkillRegistry& global_skills,
                                         const AppConfig* cfg) {
     nlohmann::json out;
 
-    // Builtin 白名单:与 src/commands/init_command.cpp:241 / builtin_commands.cpp:1065
+    // Builtin 白名单:与 src/commands/init_command.cpp / builtin_commands.cpp
     // 中的描述保持一致。新增/修改命令描述时 grep "init_command" 与 "compact" 同步。
     nlohmann::json builtins = nlohmann::json::array();
     builtins.push_back({
@@ -44,6 +44,10 @@ nlohmann::json build_commands_payload(const SkillRegistry& global_skills,
     builtins.push_back({
         {"name", "goal"},
         {"description", "Create, view, pause, resume, edit, or clear the thread goal"},
+    });
+    builtins.push_back({
+        {"name", "plan"},
+        {"description", "Enter plan mode or start planning a described task"},
     });
     out["builtins"] = std::move(builtins);
 

@@ -54,7 +54,13 @@ export function StatusBar({
 
   const mode = normalizePermissionMode(onPermissionModeChange ? permissionMode : localMode);
   const cur = permissionModeOption(mode);
-  const dotCls = cur.color === 'ok' ? 'bg-ok' : cur.color === 'warn' ? 'bg-warn' : 'bg-danger';
+  const modeDotClass = (color) => {
+    if (color === 'ok') return 'bg-ok';
+    if (color === 'warn') return 'bg-warn';
+    if (color === 'plan') return 'bg-accent';
+    return 'bg-danger';
+  };
+  const dotCls = modeDotClass(cur.color);
   const modelBusy = modelSwitching || modelRefreshing;
   const modelMenu = useMemo(() => buildStatusBarModelMenu({
     modelOptions,
@@ -148,7 +154,7 @@ export function StatusBar({
             <div className="absolute bottom-full left-0 mb-1 bg-surface border border-border rounded-md ace-shadow-lg p-1 min-w-[220px] z-50">
               {PERMISSION_MODES.map((m) => {
                 const active = m.id === mode;
-                const c = m.color === 'ok' ? 'bg-ok' : m.color === 'warn' ? 'bg-warn' : 'bg-danger';
+                const c = modeDotClass(m.color);
                 return (
                   <button
                     key={m.id}

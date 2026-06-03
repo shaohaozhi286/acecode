@@ -158,6 +158,26 @@ TEST(BuiltinCommands, NewIsRegisteredAsClearAlias) {
     EXPECT_EQ(registry.commands().at("new").description, "Alias for /clear");
 }
 
+TEST(BuiltinCommands, PlanCommandEntersPlanModeAndCreatesPlanFile) {
+    ResumeCommandHarness h("plan_command");
+    h.perms_.set_mode(acecode::PermissionMode::AcceptEdits);
+
+    ASSERT_TRUE(h.dispatch("/plan"));
+
+    EXPECT_EQ(h.perms_.mode(), acecode::PermissionMode::Plan);
+    EXPECT_EQ(h.perms_.pre_plan_mode(), acecode::PermissionMode::AcceptEdits);
+    EXPECT_EQ(h.sm_.current_permission_mode(), "plan");
+    EXPECT_EQ(h.sm_.current_pre_plan_permission_mode(), "accept-edits");
+    const std::string plan_file = h.sm_.current_plan_file_path();
+    ASSERT_FALSE(plan_file.empty());
+    EXPECT_TRUE(fs::exists(plan_file));
+
+    std::lock_guard<std::mutex> lk(h.state_.mu);
+    ASSERT_FALSE(h.state_.conversation.empty());
+    EXPECT_NE(h.state_.conversation.back().content.find("Plan mode enabled"), std::string::npos);
+    EXPECT_FALSE(h.state_.is_waiting);
+}
+
 TEST(BuiltinCommands, ResumeByNumberRefreshesModelAndTokenState) {
     ResumeCommandHarness h("resume_number");
 
