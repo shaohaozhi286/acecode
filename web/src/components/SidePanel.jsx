@@ -21,7 +21,13 @@ import { ApiError, createApi } from '../lib/api.js';
 import { aggregateHunksFromMessages, summarizeChangeGroups } from '../lib/sessionChanges.js';
 import { langForFile } from '../lib/lang.js';
 import { renderMarkdown } from '../lib/markdown.js';
-import { joinWorkspacePath } from '../lib/desktopContextMenu.js';
+import {
+  containingWorkspacePath,
+  DESKTOP_CONTEXT_ACTION_EVENT,
+  DESKTOP_CONTEXT_ACTIONS,
+  joinWorkspacePath,
+} from '../lib/desktopContextMenu.js';
+import { copyTextToSystemClipboard } from '../lib/systemClipboard.js';
 import { usePreference } from '../lib/usePreference.js';
 import {
   buildReviewStatusMap,
@@ -76,6 +82,21 @@ function escapeHtml(s) {
     .replace(/>/g, '&gt;');
 }
 
+async function copyWithToast(text, okText) {
+  const result = await copyTextToSystemClipboard(text);
+  if (result.ok) toast({ kind: 'ok', text: okText });
+  else toast({ kind: 'err', text: '复制失败:' + (result.error || '') });
+}
+
+function pathAncestors(path) {
+  const parts = String(path || '').split(/[\\/]/).filter(Boolean);
+  const result = [];
+  for (let i = 1; i < parts.length; i += 1) {
+    result.push(parts.slice(0, i).join('/'));
+  }
+  return result;
+}
+
 // ────────────────────────────────────────────────────────────
 // 文件 tab — lazy 文件树
 // ────────────────────────────────────────────────────────────
@@ -85,7 +106,7 @@ function escapeHtml(s) {
 // effect 竞争(loadDir('') 守卫读到旧 treeCache 直接 bail,父级 setTreeCache(new Map())
 // 又跑得更晚把刚拉的根清掉)在这个数据结构下不复存在。
 function FileTree({ api, cwd, treeCache, setTreeCache, expandedDirs, setExpandedDirs,
-                    selectedPath, onPickFile, refreshToken, reviewStatusByPath }) {
+                    selectedPath, onPickFile, onRefreshTree, refreshToken, reviewStatusByPath }) {
   const [loading, setLoading] = useState(new Set()); // path 集合,正在请求中
   const [errors, setErrors]   = useState(new Map()); // path → 错误文案
 
@@ -121,6 +142,40 @@ function FileTree({ api, cwd, treeCache, setTreeCache, expandedDirs, setExpanded
     });
   }, [loadDir, setExpandedDirs]);
 
+  useEffect(() => {
+    const handler = (event) => {
+      const detail = event.detail || {};
+      const { action, target } = detail;
+      if (target?.type !== 'file') return;
+      const path = target.relativePath || target.path || '';
+      if (!path) return;
+      if (action === DESKTOP_CONTEXT_ACTIONS.PREVIEW_FILE && target.kind !== 'directory') {
+        detail.handled = true;
+        onPickFile?.({ path, name: path.split(/[\\/]/).pop() || path });
+      } else if (action === DESKTOP_CONTEXT_ACTIONS.REFRESH_FILE_TREE) {
+        detail.handled = true;
+        onRefreshTree?.();
+      } else if (action === DESKTOP_CONTEXT_ACTIONS.EXPAND_DIRECTORY && target.kind === 'directory') {
+        detail.handled = true;
+        loadDir(path);
+        setExpandedDirs((prev) => {
+          const next = new Set(prev);
+          next.add(path);
+          return next;
+        });
+      } else if (action === DESKTOP_CONTEXT_ACTIONS.COLLAPSE_DIRECTORY && target.kind === 'directory') {
+        detail.handled = true;
+        setExpandedDirs((prev) => {
+          const next = new Set(prev);
+          next.delete(path);
+          return next;
+        });
+      }
+    };
+    window.addEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
+    return () => window.removeEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
+  }, [loadDir, onPickFile, onRefreshTree, setExpandedDirs]);
+
   // 递归渲染 — 每个目录的子项展开时插入到该目录节点之后
   const renderEntries = (parentPath, depth) => {
     const entries = treeCache.get(parentPath);
@@ -152,7 +207,9 @@ function FileTree({ api, cwd, treeCache, setTreeCache, expandedDirs, setExpanded
       const isDir = e.kind === 'dir';
       const isOpen = isDir && expandedDirs.has(e.path);
       const isActive = !isDir && selectedPath === e.path;
-      const explorerPath = isDir ? joinWorkspacePath(cwd, e.path) : '';
+      const absolutePath = joinWorkspacePath(cwd, e.path);
+      const explorerPath = isDir ? absolutePath : '';
+      const locatePath = isDir ? '' : containingWorkspacePath(cwd, e.path);
       const reviewStatus = e.review_status || statusForTreeEntry(e, reviewStatusByPath);
       const statusTitle = fileChangeStatusTitle(reviewStatus, isDir);
       return (
@@ -161,6 +218,13 @@ function FileTree({ api, cwd, treeCache, setTreeCache, expandedDirs, setExpanded
             type="button"
             data-desktop-open-in-explorer-kind={isDir ? 'directory' : undefined}
             data-desktop-open-in-explorer-path={explorerPath || undefined}
+            data-desktop-file-path={e.path || undefined}
+            data-desktop-file-absolute-path={absolutePath || undefined}
+            data-desktop-file-locate-path={locatePath || undefined}
+            data-desktop-file-kind={isDir ? 'directory' : 'file'}
+            data-desktop-file-selected={isActive ? 'true' : 'false'}
+            data-desktop-file-expanded={isDir ? (isOpen ? 'true' : 'false') : undefined}
+            data-desktop-file-preview={isDir ? undefined : 'true'}
             data-review-status={reviewStatus || undefined}
             className={clsx(
               'ace-file-row w-full flex items-center gap-1 text-left text-[12px] font-mono py-[3px] pr-2',
@@ -172,15 +236,9 @@ function FileTree({ api, cwd, treeCache, setTreeCache, expandedDirs, setExpanded
             title={reviewStatus ? `${e.path} - ${statusTitle}` : e.path}
           >
             {isDir ? (
-              <>
-                <VsIcon name={isOpen ? 'glyphDown' : 'expandRight'} size={9} />
-                <VsIcon name={isOpen ? 'folderOpen' : 'folder'} size={14} mono={false} />
-              </>
+              <VsIcon name={isOpen ? 'folderOpen' : 'folder'} size={14} mono={false} />
             ) : (
-              <>
-                <span className="inline-block w-[9px]" />
-                <VsIcon name="file" size={14} mono={false} />
-              </>
+              <VsIcon name="file" size={14} mono={false} />
             )}
             <span className="ace-file-name truncate">{e.name}</span>
             {reviewStatus && (
@@ -213,11 +271,11 @@ function FileTree({ api, cwd, treeCache, setTreeCache, expandedDirs, setExpanded
 // ────────────────────────────────────────────────────────────
 // 审查 tab — 聚合 messages.hunks
 // ────────────────────────────────────────────────────────────
-function ChangesList({ messages, groups, summary }) {
+function ChangesList({ messages, groups, summary, cwd }) {
   const fallbackGroups = useMemo(() => aggregateHunksFromMessages(messages || []), [messages]);
   const reviewGroups = groups || fallbackGroups;
   const reviewSummary = summary || summarizeChangeGroups(reviewGroups);
-  return <ChangeReviewPanel groups={reviewGroups} summary={reviewSummary} />;
+  return <ChangeReviewPanel groups={reviewGroups} summary={reviewSummary} cwd={cwd} />;
 }
 
 // ────────────────────────────────────────────────────────────
@@ -235,6 +293,34 @@ function PreviewPanel({ api, cwd, path, wrapPreview, onToggleWrapPreview, refres
     contentType: '',
   });
   const [markdownSource, setMarkdownSource] = useState(false);
+
+  useEffect(() => {
+    const handler = (event) => {
+      const detail = event.detail || {};
+      const { action, target } = detail;
+      if (target?.type !== 'preview' || target.path !== path) return;
+      if (action === DESKTOP_CONTEXT_ACTIONS.COPY_PREVIEW_TEXT) {
+        detail.handled = true;
+        if (!state.text) {
+          toast({ kind: 'info', text: '没有可复制的预览文本' });
+          return;
+        }
+        copyWithToast(state.text, '已复制预览内容');
+      } else if (action === DESKTOP_CONTEXT_ACTIONS.COPY_PREVIEW_METADATA) {
+        detail.handled = true;
+        const metadata = [
+          `path: ${path}`,
+          `kind: ${state.kind}`,
+          `size: ${state.size}`,
+          state.contentType ? `content-type: ${state.contentType}` : '',
+          state.lang ? `language: ${state.lang}` : '',
+        ].filter(Boolean).join('\n');
+        copyWithToast(metadata, '已复制预览信息');
+      }
+    };
+    window.addEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
+    return () => window.removeEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
+  }, [path, state.contentType, state.kind, state.lang, state.size, state.text]);
 
   useEffect(() => {
     if (!cwd || !path) {
@@ -335,9 +421,15 @@ function PreviewPanel({ api, cwd, path, wrapPreview, onToggleWrapPreview, refres
     );
   }
   if (state.status !== 'ok') return null;
+  const previewAttrs = {
+    'data-desktop-preview-path': path || undefined,
+    'data-desktop-preview-kind': state.kind || undefined,
+    'data-desktop-preview-size': Number.isFinite(state.size) ? String(state.size) : undefined,
+    'data-desktop-preview-content-type': state.contentType || undefined,
+  };
   if (state.kind === 'image') {
     return (
-      <div className="flex-1 flex flex-col overflow-hidden">
+      <div className="flex-1 flex flex-col overflow-hidden" {...previewAttrs}>
         <div className="px-2 py-1 text-[10px] text-fg-mute font-mono border-b border-border truncate" title={path}>
           {path} · {formatBytes(state.size)}{state.contentType ? ` · ${state.contentType}` : ''}
         </div>
@@ -366,7 +458,7 @@ function PreviewPanel({ api, cwd, path, wrapPreview, onToggleWrapPreview, refres
   const showMarkdownRendered = isMarkdown && !markdownSource;
   const markdownToggleTitle = markdownSource ? '渲染 Markdown' : '查看 Markdown 原文';
   return (
-    <div className="flex-1 flex flex-col overflow-hidden">
+    <div className="flex-1 flex flex-col overflow-hidden" {...previewAttrs}>
       <div className="px-2 py-1 text-[10px] text-fg-mute font-mono border-b border-border truncate" title={path}>
         {path} · {formatBytes(state.text.length)}{showMarkdownRendered ? ' · Markdown 预览' : (lang ? ` · ${lang}` : '')}
       </div>
@@ -543,6 +635,37 @@ export function SidePanel({
     setWrapPreview((prev) => !prev);
   }, [setWrapPreview]);
 
+  useEffect(() => {
+    const handler = (event) => {
+      const detail = event.detail || {};
+      const { action, target } = detail;
+      const filePath = target?.type === 'review'
+        ? target.file
+        : (target?.type === 'file' ? (target.relativePath || target.path) : '');
+      if (!filePath) return;
+
+      if (action === DESKTOP_CONTEXT_ACTIONS.PREVIEW_FILE) {
+        detail.handled = true;
+        setSelectedPath(filePath);
+        setActiveTab('preview');
+      } else if (action === DESKTOP_CONTEXT_ACTIONS.LOCATE_IN_FILE_TREE) {
+        detail.handled = true;
+        setSelectedPath(filePath);
+        setExpandedDirs((prev) => {
+          const next = new Set(prev);
+          for (const dir of pathAncestors(filePath)) next.add(dir);
+          return next;
+        });
+        setActiveTab('files');
+      } else if (action === DESKTOP_CONTEXT_ACTIONS.REFRESH_FILE_TREE && target?.type === 'file') {
+        detail.handled = true;
+        refreshFileTree();
+      }
+    };
+    window.addEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
+    return () => window.removeEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
+  }, [refreshFileTree, setExpandedDirs]);
+
   return (
     // 宽度由父级 wrapper(.ace-side-panel-shell)控制,这里 100% 占满。width prop
     // 仍接收用于 wrapper 同步(ChatView 把同一值给 wrapper inline style)。
@@ -615,6 +738,7 @@ export function SidePanel({
             setExpandedDirs={setExpandedDirs}
             selectedPath={selectedPath}
             onPickFile={onPickFile}
+            onRefreshTree={refreshFileTree}
             refreshToken={fileRefreshToken}
             reviewStatusByPath={reviewStatusByPath || EMPTY_REVIEW_STATUS}
           />
@@ -624,6 +748,7 @@ export function SidePanel({
             messages={messages}
             groups={effectiveChangeGroups}
             summary={effectiveChangeSummary}
+            cwd={cwd}
           />
         )}
         {activeTab === 'preview' && (

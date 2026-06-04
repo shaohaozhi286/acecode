@@ -12,12 +12,12 @@ namespace acecode::markdown {
 // ---------------------------------------------------------------------------
 // Color scheme (matching claude-code's cli-highlight defaults)
 // ---------------------------------------------------------------------------
-static const Color kKeyword   = Color::Blue;
+static const Color kKeyword   = Color::BlueLight;
 static const Color kString    = Color::Green;
 static const Color kNumber    = Color::Yellow;
 static const Color kComment   = Color::GrayDark;
 static const Color kType      = Color::Cyan;
-static const Color kPreproc   = Color::Magenta;
+static const Color kPreproc   = Color::MagentaLight;
 static const Color kFunction  = Color::Yellow;
 static const Color kOperator  = Color::White;
 static const Color kDefault   = Color::GrayLight;

@@ -197,8 +197,8 @@ static Element apply_style(const std::string& txt, const TextStyle& style) {
         // Inline code: yellow (highly visible)
         e = e | color(Color::Yellow);
     } else if (style.is_link) {
-        // Links: blue + underline
-        e = e | color(Color::Blue) | underlined;
+        // Links: bright blue + underline for readability on black backgrounds.
+        e = e | color(Color::BlueLight) | underlined;
     } else if (style.bold && style.italic) {
         // Bold+italic: bright white
         e = e | color(Color::White);

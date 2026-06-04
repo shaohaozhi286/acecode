@@ -11,6 +11,7 @@
 // strip 永远 render(只要进 frameless),最大化时 native 端会拒绝调用。
 
 import { nativePointerEvent } from './WindowControls.jsx';
+import { FRAMELESS_RESIZE_ACTION, framelessResizeMouseDownAction } from '../lib/framelessResize.js';
 
 const RESIZE_STRIP_HEIGHT_PX = 6;
 const RESIZE_STRIP_WIDTH_PX = 6;
@@ -24,8 +25,18 @@ function isFrameless() {
 
 function makeStartResize(direction) {
   return (event) => {
-    if (event.button !== 0) return;
+    const action = framelessResizeMouseDownAction({
+      direction,
+      button: event.button,
+      detail: event.detail,
+      canToggleMaximize: typeof window.aceDesktop_toggleMaximizeWindow === 'function',
+    });
+    if (action === FRAMELESS_RESIZE_ACTION.IGNORE) return;
     event.preventDefault();
+    if (action === FRAMELESS_RESIZE_ACTION.TOGGLE_MAXIMIZE) {
+      window.aceDesktop_toggleMaximizeWindow();
+      return;
+    }
     try {
       window.aceDesktop_startWindowResize(direction, nativePointerEvent(event));
     } catch {

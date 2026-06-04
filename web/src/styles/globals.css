@@ -199,21 +199,54 @@ body {
   outline: none;
   background: var(--ace-surface-hi);
 }
+.ace-desktop-context-menu-item:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.ace-desktop-context-menu-item:disabled:hover,
+.ace-desktop-context-menu-item:disabled:focus-visible {
+  background: transparent;
+}
+.ace-desktop-context-menu-separator {
+  margin-top: 4px;
+  border-top: 1px solid var(--ace-border);
+}
+.ace-desktop-context-menu-danger {
+  color: var(--ace-danger);
+}
+.ace-desktop-context-menu-danger:hover,
+.ace-desktop-context-menu-danger:focus-visible {
+  background: var(--ace-danger-bg);
+}
 
-/* Visual Studio Image Library icons */
+/* IconPark line icons */
 .ace-icon {
+  display: inline-block;
+  flex-shrink: 0;
+  vertical-align: -0.125em;
+  background-color: currentColor;
+  -webkit-mask-image: var(--ace-icon-url);
+  mask-image: var(--ace-icon-url);
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: contain;
+  mask-size: contain;
+}
+.ace-icon-on-accent {
+  color: #fff !important;
+  opacity: 1 !important;
+}
+.ace-sidebar-custom-icon {
   display: inline-block;
   object-fit: contain;
   flex-shrink: 0;
   vertical-align: -0.125em;
 }
-[data-theme="dark"] .ace-icon[data-monochrome="true"] {
+[data-theme="dark"] .ace-sidebar-custom-icon[data-monochrome="true"] {
   filter: invert(1) brightness(1.25);
   opacity: 0.9;
-}
-.ace-icon-on-accent {
-  filter: brightness(0) invert(1) !important;
-  opacity: 1 !important;
 }
 
 /* 流式光标已移除 — ChatView header 的"运行中" chip 已经表达 streaming 状态。 */
@@ -428,10 +461,6 @@ body {
   background: color-mix(in oklab, var(--ace-surface-hi) 86%, transparent);
   border-color: color-mix(in oklab, var(--ace-border) 82%, transparent);
   color: var(--ace-fg);
-}
-[data-theme="dark"] .ace-code-copy-btn .ace-icon[data-monochrome="true"],
-[data-theme="dark"] .ace-code-action-btn .ace-icon[data-monochrome="true"] {
-  filter: invert(1) brightness(0.88);
 }
 .ace-md code {
   background: var(--ace-surface-hi);
@@ -872,6 +901,117 @@ body {
   color: var(--ace-fg);
 }
 
+.ace-global-find {
+  position: fixed;
+  top: 8px;
+  right: clamp(18px, 4vw, 54px);
+  z-index: 700;
+  width: min(340px, calc(100vw - 36px));
+  height: 33px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px 0 12px;
+  border: 1px solid color-mix(in oklab, var(--ace-border) 74%, transparent);
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--ace-surface) 88%, transparent);
+  color: var(--ace-fg);
+  box-shadow: 0 7px 18px rgba(0, 0, 0, 0.10), 0 1px 5px rgba(0, 0, 0, 0.06);
+  -webkit-backdrop-filter: blur(18px) saturate(1.24);
+  backdrop-filter: blur(18px) saturate(1.24);
+  overflow: hidden;
+  isolation: isolate;
+  transform: translateZ(0);
+}
+.ace-global-find::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  border-radius: inherit;
+  background: linear-gradient(
+    180deg,
+    color-mix(in oklab, #fff 44%, transparent),
+    color-mix(in oklab, var(--ace-surface) 8%, transparent)
+  );
+  pointer-events: none;
+}
+[data-theme="dark"] .ace-global-find {
+  background: color-mix(in oklab, var(--ace-surface) 86%, transparent);
+  box-shadow: 0 9px 22px rgba(0, 0, 0, 0.34), 0 1px 7px rgba(0, 0, 0, 0.22);
+}
+.ace-global-find-search,
+.ace-global-find-input,
+.ace-global-find-count,
+.ace-global-find-divider,
+.ace-global-find-button,
+.ace-global-find-close {
+  position: relative;
+  z-index: 1;
+}
+.ace-global-find-search {
+  flex: 0 0 auto;
+  color: var(--ace-fg);
+  opacity: .9;
+}
+.ace-global-find-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 24px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--ace-fg);
+  font-size: 14px;
+  line-height: 24px;
+}
+.ace-global-find-input::placeholder {
+  color: var(--ace-fg-mute);
+  opacity: .72;
+}
+.ace-global-find-input::selection {
+  background: color-mix(in oklab, var(--ace-accent) 32%, transparent);
+}
+.ace-global-find-count {
+  flex: 0 0 auto;
+  min-width: 30px;
+  text-align: right;
+  color: var(--ace-fg-mute);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.ace-global-find-divider {
+  align-self: stretch;
+  width: 1px;
+  margin: 8px 1px;
+  background: color-mix(in oklab, var(--ace-border) 82%, transparent);
+  opacity: .9;
+}
+.ace-global-find-button,
+.ace-global-find-close {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ace-fg-2);
+  cursor: pointer;
+  transition: background-color .12s ease, color .12s ease, opacity .12s ease;
+}
+.ace-global-find-button:hover:not(:disabled),
+.ace-global-find-close:hover {
+  background: color-mix(in oklab, var(--ace-surface-hi) 82%, transparent);
+  color: var(--ace-fg);
+}
+.ace-global-find-button:disabled {
+  opacity: .34;
+  cursor: default;
+}
+
 /* hover actions on chat messages (复制 / 分叉) */
 .ace-msg-actions {
   flex: 0 0 auto;
@@ -902,10 +1042,6 @@ body {
 }
 .ace-msg-actions .ace-icon {
   opacity: 0.62;
-}
-[data-theme="dark"] .ace-msg-actions .ace-icon[data-monochrome="true"] {
-  filter: invert(1) brightness(0.82);
-  opacity: 0.72;
 }
 .ace-msg-actions button:hover:not(:disabled) {
   background: var(--ace-surface-hi);
@@ -1407,10 +1543,6 @@ body {
 .ace-side-preview-code .ace-code-copy-btn .ace-icon,
 .ace-side-preview-code .ace-code-action-btn .ace-icon {
   opacity: 0.95;
-}
-.ace-side-preview-code .ace-code-copy-btn .ace-icon[data-monochrome="true"],
-.ace-side-preview-code .ace-code-action-btn .ace-icon[data-monochrome="true"] {
-  filter: invert(1) brightness(0.92);
 }
 .ace-side-preview-code .ace-code-wrap-btn.is-active,
 .ace-side-preview-code .ace-code-markdown-btn.is-active {

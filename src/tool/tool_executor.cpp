@@ -120,6 +120,16 @@ std::string ToolExecutor::build_tool_call_preview(const std::string& tool_name,
                 p = truncate_utf8_suffix(p, 40);
                 return tool_name + "  " + p;
             }
+        } else if (tool_name == "skill_view") {
+            if (j.contains("name") && j["name"].is_string()) {
+                std::string preview = j["name"].get<std::string>();
+                if (j.contains("file_path") && j["file_path"].is_string()) {
+                    preview += " ";
+                    preview += j["file_path"].get<std::string>();
+                }
+                preview = truncate_utf8_prefix(preview, 80);
+                return tool_name + "  " + preview;
+            }
         } else if (tool_name.rfind("browser_", 0) == 0) {
             auto value_for = [&j](const char* key) -> std::string {
                 if (j.contains(key) && j[key].is_string()) return j[key].get<std::string>();

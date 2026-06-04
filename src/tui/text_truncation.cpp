@@ -61,6 +61,13 @@ std::string take_tail(const std::string& s, int width) {
     return s.substr(start);
 }
 
+std::string trim_ascii_right(std::string s) {
+    while (!s.empty() && (s.back() == ' ' || s.back() == '\t')) {
+        s.pop_back();
+    }
+    return s;
+}
+
 } // namespace
 
 int visual_width(const std::string& s) {
@@ -81,6 +88,82 @@ std::string truncate_middle(const std::string& s, int max_visual_width) {
     const int tail_budget = budget - head_budget;
 
     return take_head(s, head_budget) + kEllipsis + take_tail(s, tail_budget);
+}
+
+std::string truncate_end(const std::string& s, int max_visual_width) {
+    if (visual_width(s) <= max_visual_width) return s;
+    if (s.empty()) return s;
+    if (max_visual_width <= 1) return kEllipsis;
+
+    return take_head(s, max_visual_width - 1) + kEllipsis;
+}
+
+std::string truncate_to_width(const std::string& s, int max_visual_width) {
+    return truncate_end(s, max_visual_width);
+}
+
+std::vector<std::string> wrap_truncate_end(const std::string& s,
+                                           int max_visual_width,
+                                           std::size_t max_lines) {
+    if (s.empty() || max_lines == 0) return {};
+    if (max_visual_width <= 1) return {std::string(kEllipsis)};
+
+    std::vector<size_t> starts;
+    starts.reserve(s.size());
+    for (size_t pos = 0; pos < s.size();) {
+        starts.push_back(pos);
+        pos = next_codepoint_end(s, pos);
+    }
+    starts.push_back(s.size());
+
+    std::vector<std::string> lines;
+    lines.reserve(max_lines);
+    size_t cp = 0;
+    while (cp + 1 < starts.size() && lines.size() < max_lines) {
+        const bool last_line = lines.size() + 1 == max_lines;
+        const size_t line_start_cp = cp;
+        const size_t line_start = starts[line_start_cp];
+        const size_t remaining_cp_count = starts.size() - 1 - cp;
+
+        if (static_cast<int>(remaining_cp_count) <= max_visual_width) {
+            lines.push_back(trim_ascii_right(s.substr(line_start)));
+            return lines;
+        }
+
+        if (last_line) {
+            lines.push_back(truncate_end(trim_ascii_right(s.substr(line_start)),
+                                         max_visual_width));
+            return lines;
+        }
+
+        size_t end_cp = std::min<std::size_t>(
+            line_start_cp + static_cast<std::size_t>(max_visual_width),
+            starts.size() - 1);
+        size_t break_cp = end_cp;
+        for (size_t i = line_start_cp + 1; i < end_cp; ++i) {
+            const std::string glyph = s.substr(starts[i], starts[i + 1] - starts[i]);
+            if (glyph == " " || glyph == "\t") {
+                break_cp = i;
+            }
+        }
+
+        if (break_cp == line_start_cp) {
+            break_cp = end_cp;
+        }
+
+        lines.push_back(trim_ascii_right(
+            s.substr(line_start, starts[break_cp] - line_start)));
+
+        cp = break_cp;
+        while (cp + 1 < starts.size()) {
+            const std::string glyph = s.substr(starts[cp],
+                                               starts[cp + 1] - starts[cp]);
+            if (glyph != " " && glyph != "\t") break;
+            ++cp;
+        }
+    }
+
+    return lines;
 }
 
 std::string truncate_middle_segment(const std::string& prefix,

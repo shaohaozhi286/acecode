@@ -1,6 +1,7 @@
 #include "skill_view_tool.hpp"
 
 #include "../skills/skill_registry.hpp"
+#include "tool_icons.hpp"
 #include "../utils/logger.hpp"
 
 #include <nlohmann/json.hpp>
@@ -25,6 +26,17 @@ nlohmann::json available_skills_list(const SkillRegistry& registry) {
         arr.push_back(all[i].name);
     }
     return arr;
+}
+
+ToolSummary make_loaded_summary(const std::string& name,
+                                const std::string& file_path = std::string()) {
+    ToolSummary summary;
+    summary.icon = tool_icon("skill_view");
+    summary.verb = "skill_view";
+    summary.object = file_path.empty()
+        ? name + " loaded"
+        : name + " " + file_path + " loaded";
+    return summary;
 }
 
 } // namespace
@@ -118,7 +130,9 @@ ToolImpl create_skill_view_tool(SkillRegistry& registry) {
             out["file_path"] = file_path;
             out["content"] = oss.str();
             LOG_DEBUG("[skill_view] loaded supporting file " + file_path + " for skill " + meta->name);
-            return ToolResult{out.dump(), true};
+            ToolResult result{out.dump(), true};
+            result.summary = make_loaded_summary(meta->name, file_path);
+            return result;
         }
 
         // Main SKILL.md body path.
@@ -143,7 +157,9 @@ ToolImpl create_skill_view_tool(SkillRegistry& registry) {
         LOG_DEBUG("[skill_view] loaded SKILL.md for " + meta->name + " (" +
                   std::to_string(body.size()) + " bytes, " +
                   std::to_string(supporting.size()) + " supporting files)");
-        return ToolResult{out.dump(), true};
+        ToolResult result{out.dump(), true};
+        result.summary = make_loaded_summary(meta->name);
+        return result;
     };
 
     return ToolImpl{def, execute, /*is_read_only=*/true};

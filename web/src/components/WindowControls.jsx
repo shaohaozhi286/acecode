@@ -85,7 +85,7 @@ function WindowGlyph({ type }) {
     );
   }
   if (type === 'restore') {
-    // Win11 风格双层方框:后方框画成 L 形(只保留与前方框不重叠的边),前方框完整。
+    // Win11 style: back box as an L shape, front box complete.
     return (
       <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
         <path d="M5.75 6.25V3.25h6.5v6.5H10.25" />

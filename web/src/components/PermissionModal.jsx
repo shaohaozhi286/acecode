@@ -90,9 +90,9 @@ export function PermissionModal({ request, onResolve }) {
     <Modal width={520} onClose={handleModalClose}>
       {({ close }) => (
         <>
-          <div className="px-4.5 py-3 bg-warn/10 border-b border-border flex items-center gap-2">
-            <VsIcon name="warning" size={16} mono={false} />
-            <h3 className="text-[14px] font-semibold">
+          <div className="px-4.5 py-3 bg-warn-bg text-fg border-b border-border flex items-center gap-2">
+            <VsIcon name="warning" size={16} mono={false} className="text-warn" />
+            <h3 className="text-[14px] font-semibold text-fg">
               {title}
             </h3>
           </div>

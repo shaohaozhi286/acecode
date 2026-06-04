@@ -2,22 +2,60 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   buildDesktopContextMenuItems,
   clampContextMenuPosition,
+  contextTargetsFromElement,
   contextMenuOpenDelay,
+  DESKTOP_CONTEXT_ACTION_EVENT,
   DESKTOP_CONTEXT_ACTIONS,
   SESSION_PIN_TOGGLE_EVENT,
-  openInExplorerTargetFromElement,
-  sessionPinTargetFromElement,
 } from '../lib/desktopContextMenu.js';
+import { copyImageToSystemClipboard, copyTextToSystemClipboard } from '../lib/systemClipboard.js';
 import { toast } from './Toast.jsx';
 
-const MENU_WIDTH = 176;
+const MENU_WIDTH = 216;
 const MENU_ROW_HEIGHT = 30;
 const MENU_PADDING = 8;
 
 const ACTION_LABELS = {
   [DESKTOP_CONTEXT_ACTIONS.OPEN_IN_EXPLORER]: '在资源管理器中打开',
+  [DESKTOP_CONTEXT_ACTIONS.LOCATE_FILE]: '在资源管理器中显示',
   [DESKTOP_CONTEXT_ACTIONS.PIN_SESSION]: '置顶',
   [DESKTOP_CONTEXT_ACTIONS.UNPIN_SESSION]: '取消置顶',
+  [DESKTOP_CONTEXT_ACTIONS.OPEN_SESSION]: '打开会话',
+  [DESKTOP_CONTEXT_ACTIONS.COPY_SESSION_TITLE]: '复制会话标题',
+  [DESKTOP_CONTEXT_ACTIONS.COPY_SESSION_ID]: '复制会话 ID',
+  [DESKTOP_CONTEXT_ACTIONS.ARCHIVE_SESSION]: '归档会话',
+  [DESKTOP_CONTEXT_ACTIONS.ACTIVATE_WORKSPACE]: '切换到项目',
+  [DESKTOP_CONTEXT_ACTIONS.EXPAND_WORKSPACE]: '展开项目',
+  [DESKTOP_CONTEXT_ACTIONS.COLLAPSE_WORKSPACE]: '折叠项目',
+  [DESKTOP_CONTEXT_ACTIONS.NEW_WORKSPACE_SESSION]: '新建会话',
+  [DESKTOP_CONTEXT_ACTIONS.RENAME_WORKSPACE]: '重命名项目',
+  [DESKTOP_CONTEXT_ACTIONS.COPY_WORKSPACE_PATH]: '复制项目路径',
+  [DESKTOP_CONTEXT_ACTIONS.REMOVE_WORKSPACE]: '从项目列表移除',
+  [DESKTOP_CONTEXT_ACTIONS.PREVIEW_FILE]: '预览文件',
+  [DESKTOP_CONTEXT_ACTIONS.COPY_RELATIVE_PATH]: '复制相对路径',
+  [DESKTOP_CONTEXT_ACTIONS.COPY_ABSOLUTE_PATH]: '复制绝对路径',
+  [DESKTOP_CONTEXT_ACTIONS.ADD_FILE_CONTEXT]: '加入输入上下文',
+  [DESKTOP_CONTEXT_ACTIONS.REFRESH_FILE_TREE]: '刷新文件树',
+  [DESKTOP_CONTEXT_ACTIONS.EXPAND_DIRECTORY]: '展开目录',
+  [DESKTOP_CONTEXT_ACTIONS.COLLAPSE_DIRECTORY]: '折叠目录',
+  [DESKTOP_CONTEXT_ACTIONS.COPY_PREVIEW_TEXT]: '复制预览内容',
+  [DESKTOP_CONTEXT_ACTIONS.COPY_PREVIEW_METADATA]: '复制预览信息',
+  [DESKTOP_CONTEXT_ACTIONS.COPY_FILE_DIFF]: '复制此文件 diff',
+  [DESKTOP_CONTEXT_ACTIONS.COPY_ALL_DIFFS]: '复制全部 diff',
+  [DESKTOP_CONTEXT_ACTIONS.LOCATE_IN_FILE_TREE]: '在文件树中定位',
+  [DESKTOP_CONTEXT_ACTIONS.EXPAND_ALL_DIFFS]: '展开全部 diff',
+  [DESKTOP_CONTEXT_ACTIONS.COLLAPSE_ALL_DIFFS]: '折叠全部 diff',
+  [DESKTOP_CONTEXT_ACTIONS.COPY_MESSAGE_TEXT]: '复制消息',
+  [DESKTOP_CONTEXT_ACTIONS.FORK_MESSAGE]: '从这里分叉',
+  [DESKTOP_CONTEXT_ACTIONS.COPY_VISIBLE_TOOL_OUTPUT]: '复制可见输出',
+  [DESKTOP_CONTEXT_ACTIONS.COPY_FULL_TOOL_OUTPUT]: '复制完整输出',
+  [DESKTOP_CONTEXT_ACTIONS.EXPAND_TOOL]: '展开工具详情',
+  [DESKTOP_CONTEXT_ACTIONS.COLLAPSE_TOOL]: '收起工具详情',
+  [DESKTOP_CONTEXT_ACTIONS.COPY_ATTACHMENT_IMAGE]: '复制图片',
+  [DESKTOP_CONTEXT_ACTIONS.PREVIEW_ATTACHMENT]: '预览附件',
+  [DESKTOP_CONTEXT_ACTIONS.COPY_ATTACHMENT_NAME]: '复制附件名',
+  [DESKTOP_CONTEXT_ACTIONS.COPY_ATTACHMENT_URL]: '复制附件地址',
+  [DESKTOP_CONTEXT_ACTIONS.REMOVE_ATTACHMENT]: '移除附件',
   [DESKTOP_CONTEXT_ACTIONS.SELECT_ALL]: '全选',
   [DESKTOP_CONTEXT_ACTIONS.COPY]: '复制',
   [DESKTOP_CONTEXT_ACTIONS.PASTE]: '粘贴',
@@ -119,11 +157,33 @@ function insertTextIntoEditable(editable, text) {
 
 async function copySelectionFromTarget(target, rememberedText = '') {
   const text = selectedTextForTarget(target) || rememberedText;
-  if (text && navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text);
+  if (text) {
+    const result = await copyTextToSystemClipboard(text);
+    if (!result?.ok) throw new Error(result?.error || 'clipboard unavailable');
     return;
   }
   document.execCommand('copy');
+}
+
+async function copyTextWithToast(text, label = '已复制') {
+  const result = await copyTextToSystemClipboard(text);
+  if (result?.ok) {
+    toast({ kind: 'ok', text: label });
+  } else {
+    toast({ kind: 'err', text: '复制失败:' + (result?.error || '') });
+  }
+}
+
+export async function copyImageWithToast(target) {
+  const result = await copyImageToSystemClipboard(target?.copyImageUrl || target?.previewUrl || '', {
+    mimeType: target?.mimeType || '',
+  });
+  if (result?.ok) {
+    toast({ kind: 'ok', text: '已复制图片' });
+  } else {
+    toast({ kind: 'err', text: '复制图片失败:' + (result?.error || '') });
+  }
+  return result;
 }
 
 async function pasteIntoTarget(target) {
@@ -165,22 +225,77 @@ function dispatchSessionPinToggle(sessionPinTarget, nextPinned) {
   }));
 }
 
-async function runAction(action, target, rememberedText = '', openTarget = null, sessionPinTarget = null) {
+function dispatchDesktopContextAction(action, targetPayload) {
+  const detail = {
+    action,
+    target: targetPayload || null,
+    handled: false,
+  };
+  window.dispatchEvent(new CustomEvent(DESKTOP_CONTEXT_ACTION_EVENT, { detail }));
+  return !!detail.handled;
+}
+
+async function runAction(item, target, rememberedText = '') {
+  const action = typeof item === 'string' ? item : item?.id;
+  const actionTarget = typeof item === 'object' ? item.target : null;
+  if (!action) return;
+
   switch (action) {
     case DESKTOP_CONTEXT_ACTIONS.OPEN_IN_EXPLORER:
-      await openTargetInExplorer(openTarget);
+      await openTargetInExplorer(actionTarget);
+      break;
+    case DESKTOP_CONTEXT_ACTIONS.LOCATE_FILE:
+      await openTargetInExplorer({ path: actionTarget?.locatePath, kind: 'directory' });
       break;
     case DESKTOP_CONTEXT_ACTIONS.PIN_SESSION:
-      dispatchSessionPinToggle(sessionPinTarget, true);
+      dispatchSessionPinToggle(actionTarget, true);
       break;
     case DESKTOP_CONTEXT_ACTIONS.UNPIN_SESSION:
-      dispatchSessionPinToggle(sessionPinTarget, false);
+      dispatchSessionPinToggle(actionTarget, false);
+      break;
+    case DESKTOP_CONTEXT_ACTIONS.COPY_SESSION_TITLE:
+      await copyTextWithToast(actionTarget?.title || '');
+      break;
+    case DESKTOP_CONTEXT_ACTIONS.COPY_SESSION_ID:
+      await copyTextWithToast(actionTarget?.sessionId || '');
+      break;
+    case DESKTOP_CONTEXT_ACTIONS.COPY_WORKSPACE_PATH:
+      await copyTextWithToast(actionTarget?.path || '');
+      break;
+    case DESKTOP_CONTEXT_ACTIONS.COPY_RELATIVE_PATH:
+      await copyTextWithToast(actionTarget?.relativePath || actionTarget?.file || '');
+      break;
+    case DESKTOP_CONTEXT_ACTIONS.COPY_ABSOLUTE_PATH:
+      await copyTextWithToast(actionTarget?.absolutePath || actionTarget?.path || '');
+      break;
+    case DESKTOP_CONTEXT_ACTIONS.COPY_MESSAGE_TEXT:
+      await copyTextWithToast(actionTarget?.text || '');
+      break;
+    case DESKTOP_CONTEXT_ACTIONS.COPY_VISIBLE_TOOL_OUTPUT:
+      await copyTextWithToast(actionTarget?.visibleOutput || '');
+      break;
+    case DESKTOP_CONTEXT_ACTIONS.COPY_FULL_TOOL_OUTPUT:
+      await copyTextWithToast(actionTarget?.fullOutput || '');
+      break;
+    case DESKTOP_CONTEXT_ACTIONS.COPY_ATTACHMENT_NAME:
+      await copyTextWithToast(actionTarget?.name || '');
+      break;
+    case DESKTOP_CONTEXT_ACTIONS.COPY_ATTACHMENT_URL:
+      await copyTextWithToast(actionTarget?.url || actionTarget?.path || '');
+      break;
+    case DESKTOP_CONTEXT_ACTIONS.COPY_ATTACHMENT_IMAGE:
+      await copyImageWithToast(actionTarget);
       break;
     case DESKTOP_CONTEXT_ACTIONS.SELECT_ALL:
       selectAllForTarget(target);
       break;
     case DESKTOP_CONTEXT_ACTIONS.COPY:
-      await copySelectionFromTarget(target, rememberedText);
+      try {
+        await copySelectionFromTarget(target, rememberedText);
+        toast({ kind: 'ok', text: '已复制' });
+      } catch (e) {
+        toast({ kind: 'err', text: '复制失败:' + (e?.message || '') });
+      }
       break;
     case DESKTOP_CONTEXT_ACTIONS.PASTE:
       await pasteIntoTarget(target);
@@ -193,6 +308,9 @@ async function runAction(action, target, rememberedText = '', openTarget = null,
       await window.aceDesktop_openDevTools?.();
       break;
     default:
+      if (!dispatchDesktopContextAction(action, actionTarget)) {
+        toast({ kind: 'err', text: '操作不可用' });
+      }
       break;
   }
 }
@@ -258,8 +376,14 @@ export function DesktopContextMenu() {
       targetRef.current = target;
       const editableTarget = editableElementFrom(target);
       const editable = !!editableTarget;
-      const openTarget = editable ? null : openInExplorerTargetFromElement(target);
-      const sessionPinTarget = editable ? null : sessionPinTargetFromElement(target);
+      const contextTargets = editable ? {} : contextTargetsFromElement(target);
+      const sessionPinTarget = contextTargets.sessionTarget
+        ? {
+            sessionId: contextTargets.sessionTarget.sessionId,
+            workspaceHash: contextTargets.sessionTarget.workspaceHash,
+            pinned: contextTargets.sessionTarget.pinned,
+          }
+        : null;
       let selectedText = selectedTextForTarget(target);
       if (!selectedText && editableTarget && lastSelectionRef.current.target === editableTarget) {
         selectedText = lastSelectionRef.current.text;
@@ -270,7 +394,7 @@ export function DesktopContextMenu() {
         editable,
         hasSelection,
         debug,
-        openInExplorer: !!openTarget,
+        ...contextTargets,
         sessionPinTarget,
       });
       const pos = clampContextMenuPosition({
@@ -281,7 +405,7 @@ export function DesktopContextMenu() {
         viewportWidth: window.innerWidth,
         viewportHeight: window.innerHeight,
       });
-      openWithSwitchGap({ ...pos, items, selectedText, openTarget, sessionPinTarget });
+      openWithSwitchGap({ ...pos, items, selectedText });
     };
     const onKeyDown = (event) => {
       if (event.key === 'Escape') close();
@@ -320,20 +444,25 @@ export function DesktopContextMenu() {
     >
       {menu.items.map((action) => (
         <button
-          key={action}
+          key={typeof action === 'string' ? action : action.id}
           type="button"
           role="menuitem"
-          className="ace-desktop-context-menu-item"
+          disabled={typeof action === 'object' && action.enabled === false}
+          className={[
+            'ace-desktop-context-menu-item',
+            typeof action === 'object' && action.separatorBefore ? 'ace-desktop-context-menu-separator' : '',
+            typeof action === 'object' && action.danger ? 'ace-desktop-context-menu-danger' : '',
+          ].filter(Boolean).join(' ')}
           onClick={async () => {
+            if (typeof action === 'object' && action.enabled === false) return;
+            if (typeof action === 'object' && action.confirm && !window.confirm(action.confirm)) return;
             const target = targetRef.current;
             const selectedText = menu.selectedText || '';
-            const openTarget = menu.openTarget || null;
-            const sessionPinTarget = menu.sessionPinTarget || null;
             close();
-            await runAction(action, target, selectedText, openTarget, sessionPinTarget);
+            await runAction(action, target, selectedText);
           }}
         >
-          {ACTION_LABELS[action] || action}
+          {ACTION_LABELS[typeof action === 'string' ? action : action.id] || (typeof action === 'string' ? action : action.id)}
         </button>
       ))}
     </div>

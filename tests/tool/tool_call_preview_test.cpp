@@ -89,6 +89,23 @@ TEST(ToolCallPreview, FileEditLongUtf8PathRemainsValidUtf8) {
     EXPECT_TRUE(acecode::is_valid_utf8(preview));
 }
 
+// 场景 4c: skill_view 工具只显示 skill 名和可选支持文件路径,避免 TUI
+// tool_call 行渲染完整 JSON 参数。
+TEST(ToolCallPreview, SkillViewShowsSkillName) {
+    nlohmann::json args = {{"name", "openspec-explore"}};
+    auto preview = ToolExecutor::build_tool_call_preview("skill_view", args.dump());
+    EXPECT_EQ(preview, "skill_view  openspec-explore");
+}
+
+TEST(ToolCallPreview, SkillViewShowsSupportingFilePath) {
+    nlohmann::json args = {
+        {"name", "openspec-explore"},
+        {"file_path", "references/example.md"}
+    };
+    auto preview = ToolExecutor::build_tool_call_preview("skill_view", args.dump());
+    EXPECT_EQ(preview, "skill_view  openspec-explore references/example.md");
+}
+
 // 场景 5: 未知工具 → 返回空字符串,TUI fallback 到 legacy 渲染。
 TEST(ToolCallPreview, UnknownToolReturnsEmpty) {
     nlohmann::json args = {{"any_field", "value"}};

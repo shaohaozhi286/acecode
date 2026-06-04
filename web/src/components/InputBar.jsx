@@ -8,6 +8,7 @@
 // 已识别的首段命令以原子 token 样式叠加渲染(overlay div 与 textarea 同度量)。
 
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { clsx } from '../lib/format.js';
 import { getGoalStopControlState } from '../lib/goalControl.js';
 import { getInputBarActionState } from '../lib/inputBarState.js';
@@ -17,9 +18,28 @@ import { useSlashCommands } from './SlashCommandsContext.jsx';
 import { deleteLeadingCommandBlock, parseLeadingCommand } from '../lib/slashCommands.js';
 import { getNextInputHistoryPointer, shouldNavigateInputHistory } from '../lib/inputHistoryNavigation.js';
 import { filesFromClipboardEvent, filesFromTransfer, hasFileTransfer } from '../lib/composerFileTransfer.js';
+import {
+  DESKTOP_CONTEXT_ACTION_EVENT,
+  DESKTOP_CONTEXT_ACTIONS,
+} from '../lib/desktopContextMenu.js';
 
 const MAX_ROWS = 8;
 const LINE_HEIGHT = 20; // 与 leading-[20px] 对齐
+
+function composerAttachmentKey(item, index = 0) {
+  return String(item?.local_id || item?.id || item?.name || index);
+}
+
+function composerAttachmentContext(item, index = 0) {
+  const key = composerAttachmentKey(item, index);
+  return {
+    key,
+    id: `composer:${key}`,
+    name: item?.name || 'attachment',
+    url: item?.preview_url || item?.blob_url || item?.url || '',
+    path: item?.path || '',
+  };
+}
 
 export const InputBar = forwardRef(function InputBar({
   disabled, placeholder = '输入消息或 / 命令…', onSubmit, onAbort, busy, goal = null, goalStopping = false, history = [], variant = 'default',
@@ -34,6 +54,7 @@ export const InputBar = forwardRef(function InputBar({
   const [dropdownClosed, setDropdownClosed] = useState(false); // Esc 关闭后,直到首段变化或重新输入 / 才重开
   const [capabilityOpen, setCapabilityOpen] = useState(false);
   const [dragActive, setDragActive] = useState(false);
+  const [attachmentPreview, setAttachmentPreview] = useState(null);
   const ta = useRef(null);
   const fileInputRef = useRef(null);
   const capabilityMenuRef = useRef(null);
@@ -49,6 +70,28 @@ export const InputBar = forwardRef(function InputBar({
   const isImageAttachment = (item) => String(item.kind || item.mime_type || '').startsWith('image');
   const imageAttachments = attachmentItems.filter(isImageAttachment);
   const fileAttachments = attachmentItems.filter((item) => !isImageAttachment(item));
+
+  useEffect(() => {
+    const handler = (event) => {
+      const detail = event.detail || {};
+      const { action, target } = detail;
+      if (target?.type !== 'attachment' || !target.id || !target.id.startsWith('composer:')) return;
+      const match = attachmentItems
+        .map((item, index) => ({ item, context: composerAttachmentContext(item, index) }))
+        .find(({ context }) => context.id === target.id);
+      if (!match) return;
+      if (action === DESKTOP_CONTEXT_ACTIONS.PREVIEW_ATTACHMENT) {
+        if (!match.context.url) return;
+        detail.handled = true;
+        setAttachmentPreview({ src: match.context.url, alt: match.context.name });
+      } else if (action === DESKTOP_CONTEXT_ACTIONS.REMOVE_ATTACHMENT) {
+        detail.handled = true;
+        onRemoveAttachment?.(match.context.key);
+      }
+    };
+    window.addEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
+    return () => window.removeEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
+  }, [attachmentItems, onRemoveAttachment]);
 
   const updateValue = useCallback((next) => {
     const text = String(next || '');
@@ -392,11 +435,17 @@ export const InputBar = forwardRef(function InputBar({
             'px-3 pt-3 flex flex-wrap items-start gap-2',
             isHero && 'px-4',
           )}>
-            {imageAttachments.map((item) => {
-              const key = item.local_id || item.id || item.name;
+            {imageAttachments.map((item, index) => {
+              const context = composerAttachmentContext(item, index);
               return (
                 <div
-                  key={key}
+                  key={context.key}
+                  data-desktop-attachment-id={context.id}
+                  data-desktop-attachment-name={context.name}
+                  data-desktop-attachment-url={context.url || undefined}
+                  data-desktop-attachment-path={context.path || undefined}
+                  data-desktop-attachment-preview-url={context.url || undefined}
+                  data-desktop-attachment-mutable="true"
                   className="group relative w-36 h-36 sm:w-40 sm:h-40 shrink-0 overflow-hidden rounded-xl border border-border bg-bg"
                 >
                   {item.preview_url ? (
@@ -411,7 +460,7 @@ export const InputBar = forwardRef(function InputBar({
                   <button
                     type="button"
                     className="absolute right-2 top-2 w-7 h-7 rounded-full bg-black/75 hover:bg-black/85 text-white flex items-center justify-center"
-                    onClick={() => onRemoveAttachment?.(key)}
+                    onClick={() => onRemoveAttachment?.(context.key)}
                     aria-label="移除图片"
                   >
                     <VsIcon name="close" size={13} />
@@ -513,11 +562,17 @@ export const InputBar = forwardRef(function InputBar({
                 </div>
               );
             })}
-            {fileAttachments.map((item) => {
-              const key = item.local_id || item.id || item.name;
+            {fileAttachments.map((item, index) => {
+              const context = composerAttachmentContext(item, index);
               return (
                 <div
-                  key={key}
+                  key={context.key}
+                  data-desktop-attachment-id={context.id}
+                  data-desktop-attachment-name={context.name}
+                  data-desktop-attachment-url={context.url || undefined}
+                  data-desktop-attachment-path={context.path || undefined}
+                  data-desktop-attachment-preview-url={context.url || undefined}
+                  data-desktop-attachment-mutable="true"
                   className="group h-7 max-w-[160px] min-w-0 rounded-md px-1.5 flex items-center gap-1 text-[12px] text-fg-mute hover:bg-surface-hi"
                   title={item.name}
                 >
@@ -526,7 +581,7 @@ export const InputBar = forwardRef(function InputBar({
                   <button
                     type="button"
                     className="w-4 h-4 shrink-0 rounded-full flex items-center justify-center hover:bg-bg text-fg-mute opacity-0 group-hover:opacity-100 focus:opacity-100"
-                    onClick={() => onRemoveAttachment?.(key)}
+                    onClick={() => onRemoveAttachment?.(context.key)}
                     aria-label="移除文件"
                   >
                     <VsIcon name="close" size={9} />
@@ -586,6 +641,33 @@ export const InputBar = forwardRef(function InputBar({
       <div className={clsx('mt-1 px-1 text-[10px] text-fg-mute flex justify-between', isHero && 'px-3')}>
         <span>{actionState.helperText}</span>
       </div>
+      {attachmentPreview
+        ? createPortal(
+            <div
+              className="fixed inset-0 z-[80] bg-black/70 flex items-center justify-center p-6"
+              role="dialog"
+              aria-modal="true"
+              onClick={() => setAttachmentPreview(null)}
+            >
+              <button
+                type="button"
+                className="absolute top-3 right-3 w-8 h-8 rounded-md bg-surface text-fg border border-border flex items-center justify-center"
+                aria-label="关闭预览"
+                title="关闭"
+                onClick={() => setAttachmentPreview(null)}
+              >
+                <VsIcon name="close" size={15} />
+              </button>
+              <img
+                src={attachmentPreview.src}
+                alt={attachmentPreview.alt}
+                className="max-w-full max-h-full object-contain shadow-xl"
+                onClick={(event) => event.stopPropagation()}
+              />
+            </div>,
+            document.body,
+          )
+        : null}
     </div>
   );
 });

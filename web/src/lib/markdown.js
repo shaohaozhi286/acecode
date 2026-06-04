@@ -107,7 +107,7 @@ md.renderer.rules.fence = (tokens, idx) => {
   const codeClass = highlighted.lang ? ` class="hljs language-${escapeHtml(highlighted.lang)}"` : '';
   const langAttr = highlighted.lang ? ` data-code-lang="${escapeHtml(highlighted.lang)}"` : '';
   return `<div class="ace-copyable-code" data-code-copy-frame="true"${langAttr}>`
-    + `<button type="button" class="ace-code-copy-btn" data-code-copy-button="true" title="复制代码" aria-label="复制代码"><img src="/vs-icons/Copy.svg" alt="" width="14" height="14" class="ace-icon" data-monochrome="true" aria-hidden="true" draggable="false" /></button>`
+    + `<button type="button" class="ace-code-copy-btn" data-code-copy-button="true" title="复制代码" aria-label="复制代码"><span class="ace-icon" style="width:14px;height:14px;--ace-icon-url:url('/vs-icons/Copy.svg')" data-monochrome="true" aria-hidden="true"></span></button>`
     + `<pre${preClass}><code${codeClass} data-code-copy-source="true">${highlighted.html}</code></pre>`
     + `</div>\n`;
 };

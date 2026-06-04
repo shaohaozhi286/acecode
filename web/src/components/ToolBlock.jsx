@@ -7,11 +7,15 @@
 // hunks 字段(file_edit / file_write):展开区走 diff2html 渲染,而不是
 // 纯 <pre>{output}</pre>。bash 工具的展开区头部加 `$ <command>` prompt 行。
 
-import { memo, useEffect, useMemo, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { clsx, formatBytes, formatElapsed } from '../lib/format.js';
 import { hunksToUnifiedDiff } from '../lib/diff.js';
 import { compactOneLinePreview } from '../lib/compactMessagePreview.js';
 import { normalizeAttachmentList } from '../lib/messageAttachments.js';
+import {
+  DESKTOP_CONTEXT_ACTION_EVENT,
+  DESKTOP_CONTEXT_ACTIONS,
+} from '../lib/desktopContextMenu.js';
 import { AttachmentStrip } from './AttachmentStrip.jsx';
 import { CopyableCodeFrame } from './CopyableCodeFrame.jsx';
 import { ToolSummaryIcon, VsIcon } from './Icon.jsx';
@@ -33,6 +37,10 @@ function MetricList({ metrics }) {
 
 export const ToolBlock = memo(function ToolBlock({ entry }) {
   const [expanded, setExpanded] = useState(false);
+  const contextIdRef = useRef('');
+  if (!contextIdRef.current) {
+    contextIdRef.current = `tool-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  }
 
   const {
     isTaskComplete = false,
@@ -72,13 +80,16 @@ export const ToolBlock = memo(function ToolBlock({ entry }) {
 
   // diff2html 渲染:先把 hunks 转 unified diff,再交给 diff2html。空 hunks 时
   // 不构造,避免每次 render 浪费。
-  const diffHtml = useMemo(() => {
+  const diffText = useMemo(() => {
     if (!Array.isArray(hunks) || hunks.length === 0) return '';
     const file = (summary && summary.object) || displayOverride || 'change';
-    const unified = hunksToUnifiedDiff(hunks, file);
-    if (!unified) return '';
+    return hunksToUnifiedDiff(hunks, file) || '';
+  }, [hunks, summary, displayOverride]);
+
+  const diffHtml = useMemo(() => {
+    if (!diffText) return '';
     try {
-      return Diff2Html.html(unified, {
+      return Diff2Html.html(diffText, {
         drawFileList: false,
         outputFormat: 'line-by-line',
         matching: 'lines',
@@ -86,12 +97,44 @@ export const ToolBlock = memo(function ToolBlock({ entry }) {
     } catch {
       return '';
     }
-  }, [hunks, summary, displayOverride]);
+  }, [diffText]);
+
+  const fullOutput = output || diffText || tailLines.join('\n') || currentPartial || '';
+  const visibleOutput = expanded ? fullOutput : (outputPreview || currentPartial || tailLines.join('\n') || '');
+  const toolName = title || displayOverride || tool || summary?.object || 'tool';
+  const toolContextAttrs = {
+    'data-desktop-tool-id': contextIdRef.current,
+    'data-desktop-tool-name': toolName,
+    'data-desktop-tool-visible-output': visibleOutput || undefined,
+    'data-desktop-tool-full-output': fullOutput || undefined,
+    'data-desktop-tool-expanded': expanded ? 'true' : 'false',
+    'data-desktop-tool-toggle': isTaskComplete ? 'false' : 'true',
+  };
+
+  useEffect(() => {
+    const handler = (event) => {
+      const detail = event.detail || {};
+      const { action, target } = detail;
+      if (target?.type !== 'tool' || target.id !== contextIdRef.current) return;
+      if (action === DESKTOP_CONTEXT_ACTIONS.EXPAND_TOOL) {
+        detail.handled = true;
+        setExpanded(true);
+      } else if (action === DESKTOP_CONTEXT_ACTIONS.COLLAPSE_TOOL) {
+        detail.handled = true;
+        setExpanded(false);
+      }
+    };
+    window.addEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
+    return () => window.removeEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
+  }, []);
 
   if (isTaskComplete) {
     const text = (summary && summary.object) || '完成';
     return (
-      <div className="flex items-center gap-2 px-2.5 py-1 my-0.5 text-[12px] font-medium text-ok">
+      <div
+        className="flex items-center gap-2 px-2.5 py-1 my-0.5 text-[12px] font-medium text-ok"
+        {...toolContextAttrs}
+      >
         <VsIcon name="ok" size={13} mono={false} />
         <span>Done · {text}</span>
       </div>
@@ -103,6 +146,7 @@ export const ToolBlock = memo(function ToolBlock({ entry }) {
     const ok = !!success;
     return (
       <div
+        {...toolContextAttrs}
         className={clsx(
           'rounded-md font-mono text-[12px] my-0.5 transition',
           ok ? 'bg-ok-bg border border-ok-border text-ok' : 'bg-danger-bg border border-danger/30 text-danger',
@@ -157,6 +201,7 @@ export const ToolBlock = memo(function ToolBlock({ entry }) {
     const ok = !!success;
     return (
       <div
+        {...toolContextAttrs}
         className={clsx(
           'rounded-md font-mono text-[12px] my-0.5 transition',
           ok ? 'bg-ok-bg border border-ok-border text-ok' : 'bg-danger-bg border border-danger/30 text-danger',
@@ -195,7 +240,10 @@ export const ToolBlock = memo(function ToolBlock({ entry }) {
   // 进度模式
   const hidden = Math.max(0, totalLines - tailLines.length);
   return (
-    <div className="rounded-md border border-border bg-surface my-0.5 font-mono text-[11px] overflow-hidden">
+    <div
+      className="rounded-md border border-border bg-surface my-0.5 font-mono text-[11px] overflow-hidden"
+      {...toolContextAttrs}
+    >
       <button
         type="button"
         className="w-full min-w-0 overflow-hidden px-2.5 py-1.5 flex items-center gap-2 text-left text-fg hover:bg-surface-hi transition whitespace-nowrap"

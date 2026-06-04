@@ -63,6 +63,10 @@ import { fileTreeRefreshKeyFromItems } from '../lib/fileTreeRefresh.js';
 import { buildAssistantRunDirectives } from '../lib/assistantRunDirectives.js';
 import { activityChromeState } from '../lib/assistantAvatarDisplay.js';
 import { notifySessionListChanged } from '../lib/sessionListEvents.js';
+import {
+  DESKTOP_CONTEXT_ACTION_EVENT,
+  DESKTOP_CONTEXT_ACTIONS,
+} from '../lib/desktopContextMenu.js';
 import { getGoalStopControlState } from '../lib/goalControl.js';
 import { todoChecklistPresentation } from '../lib/todoChecklist.js';
 import {
@@ -113,6 +117,25 @@ function payloadHasExtras(payload) {
 
 function payloadText(payload) {
   return typeof payload === 'string' ? payload : String(payload?.text || '');
+}
+
+function messageTextForContext(item) {
+  if (item?.kind !== 'msg') return '';
+  if (item.role === 'user' && typeof item.metadata?.display_text === 'string' && item.metadata.display_text) {
+    return item.metadata.display_text;
+  }
+  return String(item.content || '');
+}
+
+function messageContextAttrs(item) {
+  if (item?.kind !== 'msg') return {};
+  const messageId = item.messageId || '';
+  return {
+    'data-desktop-message-id': messageId || undefined,
+    'data-desktop-message-role': item.role || undefined,
+    'data-desktop-message-text': messageTextForContext(item) || undefined,
+    'data-desktop-message-can-fork': messageId ? 'true' : undefined,
+  };
 }
 
 function collectRowMetrics(container) {
@@ -1380,6 +1403,19 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     }
   }, [sid, api, ref, onSessionPromoted]);
 
+  useEffect(() => {
+    const handler = (event) => {
+      const detail = event.detail || {};
+      const { action, target } = detail;
+      if (action !== DESKTOP_CONTEXT_ACTIONS.FORK_MESSAGE) return;
+      if (target?.type !== 'message' || !target.messageId) return;
+      detail.handled = true;
+      forkAndSwitch(target.messageId);
+    };
+    window.addEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
+    return () => window.removeEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
+  }, [forkAndSwitch]);
+
   const status = useMemo(() => {
     if (!sid) return null;
     return busy || transcriptStatus === 'running' ? 'running' : 'idle';
@@ -1662,6 +1698,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
           className="flex flex-col"
           data-chat-kind={child.kind || ''}
           data-chat-role={child.kind === 'msg' ? (child.role || '') : (child.kind || '')}
+          {...messageContextAttrs(child)}
         >
           {child.kind === 'tool' ? (
             <ToolBlock entry={child.tool} />
@@ -1804,6 +1841,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
                   data-chat-role={it.kind === 'msg' ? (it.role || '') : (it.kind || '')}
                   data-chat-user-message={it.kind === 'msg' && it.role === 'user' ? 'true' : undefined}
                   data-chat-assistant-continuation={continuation ? 'true' : undefined}
+                  {...messageContextAttrs(it)}
                 >
                   {it.kind === 'tool' ? (
                     <ToolBlock entry={it.tool} />

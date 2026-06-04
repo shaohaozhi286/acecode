@@ -6,6 +6,7 @@ import {
   projectCompactTranscriptItems,
   reduceTranscriptEvent,
 } from './sessionTranscript.js';
+import { projectCollapsedTranscriptItems } from './transcriptProjection.js';
 
 function run(name, fn) {
   try {
@@ -19,6 +20,20 @@ function run(name, fn) {
 
 function reduceMany(events, initial = createTranscriptState()) {
   return events.reduce((state, event) => reduceTranscriptEvent(state, event).state, initial);
+}
+
+function persistedToolCall(id, name, argumentsText, index = undefined) {
+  const call = {
+    id,
+    type: 'function',
+    function: { name, arguments: argumentsText },
+  };
+  if (index != null) call.index = index;
+  return call;
+}
+
+function projectLoadedItems(items) {
+  return projectCollapsedTranscriptItems(items, { deferTrailingToolSummary: true });
 }
 
 run('history load 去重已持久化 replay message 并保留顺序', () => {
@@ -432,6 +447,150 @@ run('history load 将带 output attachment 的 tool message 恢复为 tool item'
   assert.equal(loaded.items[1].kind, 'tool');
   assert.equal(loaded.items[1].tool.toolCallId, 'call-plot');
   assert.deepEqual(loaded.items[1].tool.attachments, [{ ...attachment, type: 'image' }]);
+});
+
+run('history load 展开 persisted assistant.tool_calls 并匹配无 summary 工具返回', () => {
+  const loaded = loadTranscriptHistory(createTranscriptState({ title: 's1' }), {
+    messages: [
+      { id: 'u1', role: 'user', content: 'run date', ts: 1 },
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: '',
+        tool_calls: [persistedToolCall('call-date', 'shell_command', '{"command":"date"}', 0)],
+        ts: 2,
+      },
+      {
+        id: 't1',
+        role: 'tool',
+        content: 'Thu Jun  4 12:00:00 CST 2026',
+        tool_call_id: 'call-date',
+        tool_index: 0,
+        ts: 3,
+      },
+    ],
+    events: [],
+  }).state;
+
+  assert.deepEqual(loaded.items.map((item) => item.role), ['user', 'tool_call', 'tool']);
+  assert.equal(loaded.items[1].messageId, 'a1:tool_call:call-date');
+  assert.equal(loaded.items[1].content, '[Tool: shell_command] {"command":"date"}');
+  assert.equal(loaded.items[1].tool_call_id, 'call-date');
+  assert.equal(loaded.items[1].tool_index, 0);
+  assert.equal(loaded.items[2].tool_call_id, 'call-date');
+  assert.equal(loaded.items[2].tool_index, 0);
+
+  const projected = projectLoadedItems(loaded.items);
+  const serialized = JSON.stringify(projected);
+  assert.equal(serialized.includes('请求未记录'), false);
+  assert.match(projected[1].content, /\[Tool: shell_command\] \{"command":"date"\}/);
+  assert.match(projected[1].content, /Thu Jun  4 12:00:00 CST 2026/);
+});
+
+run('transcript_replace 展开 persisted assistant.tool_calls 并匹配无 summary 工具返回', () => {
+  const previous = reduceMany([
+    { type: 'message', payload: { id: 'old', role: 'user', content: 'old prompt' }, seq: 1 },
+    { type: 'token', payload: { text: 'partial' }, seq: 2 },
+  ]);
+  const state = reduceTranscriptEvent(previous, {
+    type: 'transcript_replace',
+    payload: {
+      messages: [
+        { id: 'u1', role: 'user', content: 'list files', ts: 1 },
+        {
+          id: 'a1',
+          role: 'assistant',
+          content: '',
+          tool_calls: [persistedToolCall('call-ls', 'shell_command', '{"command":"dir"}', 0)],
+          ts: 2,
+        },
+        { id: 't1', role: 'tool', content: 'README.md', tool_call_id: 'call-ls', tool_index: 0, ts: 3 },
+      ],
+    },
+    seq: 3,
+  }).state;
+
+  assert.equal(state.streamingId, null);
+  assert.deepEqual(state.items.map((item) => item.role), ['user', 'tool_call', 'tool']);
+  assert.equal(state.items[1].content, '[Tool: shell_command] {"command":"dir"}');
+  assert.equal(state.items[2].toolCallId, 'call-ls');
+  assert.equal(JSON.stringify(projectLoadedItems(state.items)).includes('请求未记录'), false);
+});
+
+run('history load 保持 assistant 文本在多个 persisted tool_calls 前面', () => {
+  const loaded = loadTranscriptHistory(createTranscriptState({ title: 's1' }), {
+    messages: [
+      { id: 'u1', role: 'user', content: 'inspect both', ts: 1 },
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: 'I will inspect both files.',
+        tool_calls: [
+          persistedToolCall('call-a', 'file_read', '{"path":"a.txt"}', 0),
+          persistedToolCall('call-b', 'file_read', '{"path":"b.txt"}', 1),
+        ],
+        ts: 2,
+      },
+    ],
+    events: [],
+  }).state;
+
+  assert.deepEqual(loaded.items.map((item) => item.role), ['user', 'assistant', 'tool_call', 'tool_call']);
+  assert.deepEqual(loaded.items.map((item) => item.content), [
+    'inspect both',
+    'I will inspect both files.',
+    '[Tool: file_read] {"path":"a.txt"}',
+    '[Tool: file_read] {"path":"b.txt"}',
+  ]);
+  assert.deepEqual(loaded.items.slice(2).map((item) => item.tool_call_id), ['call-a', 'call-b']);
+  assert.deepEqual(loaded.items.slice(2).map((item) => item.tool_index), [0, 1]);
+});
+
+run('history load 同名并行 persisted tool_calls 按 tool_call_id 匹配各自返回', () => {
+  const loaded = loadTranscriptHistory(createTranscriptState({ title: 's1' }), {
+    messages: [
+      { id: 'u1', role: 'user', content: 'grep both', ts: 1 },
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: '',
+        tool_calls: [
+          persistedToolCall('call-a', 'grep', '{"q":"A"}', 0),
+          persistedToolCall('call-b', 'grep', '{"q":"B"}', 1),
+        ],
+        ts: 2,
+      },
+      { id: 'tb', role: 'tool', content: 'B result', tool_call_id: 'call-b', tool_index: 1, ts: 3 },
+      { id: 'ta', role: 'tool', content: 'A result', tool_call_id: 'call-a', tool_index: 0, ts: 4 },
+      { id: 'a2', role: 'assistant', content: 'done', ts: 5 },
+    ],
+    events: [],
+  }).state;
+
+  const projected = projectLoadedItems(loaded.items);
+  const summary = projected.find((item) => item.kind === 'activity_summary');
+  assert.ok(summary);
+  assert.equal(summary.collapsedItems.length, 2);
+  assert.deepEqual(summary.collapsedItems.map((item) => item.tool_call_id), ['call-a', 'call-b']);
+  assert.match(summary.collapsedItems[0].content, /\[Tool: grep\] \{"q":"A"\}/);
+  assert.match(summary.collapsedItems[0].content, /工具返回\nA result/);
+  assert.match(summary.collapsedItems[1].content, /\[Tool: grep\] \{"q":"B"\}/);
+  assert.match(summary.collapsedItems[1].content, /工具返回\nB result/);
+  assert.equal(JSON.stringify(projected).includes('请求未记录'), false);
+});
+
+run('history load 对确实缺少请求的 tool result 保留请求未记录 fallback', () => {
+  const loaded = loadTranscriptHistory(createTranscriptState({ title: 's1' }), {
+    messages: [
+      { id: 'u1', role: 'user', content: 'legacy result only', ts: 1 },
+      { id: 't1', role: 'tool', content: '{"ok":true}', ts: 2 },
+      { id: 'a1', role: 'assistant', content: 'continue', ts: 3 },
+    ],
+    events: [],
+  }).state;
+
+  const projected = projectLoadedItems(loaded.items);
+  assert.match(JSON.stringify(projected), /请求未记录/);
 });
 
 run('history load 不显示内部 meta 消息', () => {

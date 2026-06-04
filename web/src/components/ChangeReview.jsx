@@ -1,11 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import * as Diff2Html from 'diff2html';
-
-const REVIEW_SIDE_BY_SIDE_MIN_WIDTH = 640;
 import { hunksToUnifiedDiff } from '../lib/diff.js';
+import {
+  DESKTOP_CONTEXT_ACTION_EVENT,
+  DESKTOP_CONTEXT_ACTIONS,
+  joinWorkspacePath,
+} from '../lib/desktopContextMenu.js';
 import { summarizeChangeGroups } from '../lib/sessionChanges.js';
+import { copyTextToSystemClipboard } from '../lib/systemClipboard.js';
 import { clsx } from '../lib/format.js';
 import { VsIcon } from './Icon.jsx';
+import { toast } from './Toast.jsx';
+
+const REVIEW_SIDE_BY_SIDE_MIN_WIDTH = 640;
 
 function safeGroups(groups) {
   return Array.isArray(groups) ? groups : [];
@@ -15,6 +22,16 @@ function normalizedSummary(groups, summary) {
   return summary && typeof summary === 'object'
     ? summary
     : summarizeChangeGroups(groups);
+}
+
+async function copyDiffText(text, okText) {
+  if (!text) {
+    toast({ kind: 'info', text: '没有可复制的 diff' });
+    return;
+  }
+  const result = await copyTextToSystemClipboard(text);
+  if (result.ok) toast({ kind: 'ok', text: okText });
+  else toast({ kind: 'err', text: '复制失败:' + (result.error || '') });
 }
 
 function ChangeTotals({ summary, compact = false }) {
@@ -60,10 +77,15 @@ function DiffPreview({ group, outputFormat = 'line-by-line', className = '' }) {
   );
 }
 
-function ChangeFileButton({ group, open, onClick, selected = false }) {
+function ChangeFileButton({ group, open, onClick, selected = false, cwd = '' }) {
   return (
     <button
       type="button"
+      data-desktop-review-kind="file"
+      data-desktop-review-file={group.file || undefined}
+      data-desktop-review-absolute-path={cwd ? joinWorkspacePath(cwd, group.file) : undefined}
+      data-desktop-review-additions={String(group.totalAdditions || 0)}
+      data-desktop-review-deletions={String(group.totalDeletions || 0)}
       className={clsx('ace-change-file-row', selected && 'is-selected')}
       onClick={onClick}
       title={group.file}
@@ -294,7 +316,7 @@ export function ChangeGlassDock({ summary, onReview, onDismiss, dockRef, scrollR
   );
 }
 
-export function ChangeReviewPanel({ groups, summary }) {
+export function ChangeReviewPanel({ groups, summary, cwd = '' }) {
   const list = safeGroups(groups);
   const changeSummary = normalizedSummary(list, summary);
   const [openFiles, setOpenFiles] = useState(() => new Set(list[0]?.file ? [list[0].file] : []));
@@ -329,6 +351,35 @@ export function ChangeReviewPanel({ groups, summary }) {
     return () => ro.disconnect();
   }, []);
 
+  useEffect(() => {
+    const handler = (event) => {
+      const detail = event.detail || {};
+      const { action, target } = detail;
+      if (target?.type !== 'review') return;
+
+      if (action === DESKTOP_CONTEXT_ACTIONS.COPY_FILE_DIFF) {
+        detail.handled = true;
+        const group = list.find((item) => item.file === target.file);
+        copyDiffText(group ? hunksToUnifiedDiff(group.hunks, group.file) : '', '已复制文件 diff');
+      } else if (action === DESKTOP_CONTEXT_ACTIONS.COPY_ALL_DIFFS) {
+        detail.handled = true;
+        const text = list
+          .map((group) => hunksToUnifiedDiff(group.hunks, group.file))
+          .filter(Boolean)
+          .join('\n\n');
+        copyDiffText(text, '已复制全部 diff');
+      } else if (action === DESKTOP_CONTEXT_ACTIONS.EXPAND_ALL_DIFFS) {
+        detail.handled = true;
+        setOpenFiles(new Set(list.map((group) => group.file).filter(Boolean)));
+      } else if (action === DESKTOP_CONTEXT_ACTIONS.COLLAPSE_ALL_DIFFS) {
+        detail.handled = true;
+        setOpenFiles(new Set());
+      }
+    };
+    window.addEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
+    return () => window.removeEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
+  }, [list]);
+
   if (!changeSummary.hasChanges) {
     return (
       <div className="ace-empty-state">
@@ -349,7 +400,13 @@ export function ChangeReviewPanel({ groups, summary }) {
 
   return (
     <div className="ace-review-panel" data-change-region="side-panel" ref={panelRef}>
-      <div className="ace-review-summary">
+      <div
+        className="ace-review-summary"
+        data-desktop-review-kind="summary"
+        data-desktop-review-additions={String(changeSummary.totalAdditions || 0)}
+        data-desktop-review-deletions={String(changeSummary.totalDeletions || 0)}
+        data-desktop-review-file-count={String(changeSummary.fileCount || 0)}
+      >
         <div className="ace-review-title">
           <VsIcon name="editWindow" size={15} />
           <span>审查</span>
@@ -365,6 +422,7 @@ export function ChangeReviewPanel({ groups, summary }) {
                 group={group}
                 open={open}
                 selected={open}
+                cwd={cwd}
                 onClick={() => toggleFile(group.file)}
               />
               {open && (

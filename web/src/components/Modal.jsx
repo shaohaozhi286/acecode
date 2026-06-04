@@ -22,10 +22,8 @@ export function Modal({ children, onClose, width = 460, dismissOnBackdrop = true
 
   return (
     <div
-      className={clsx(
-        'fixed inset-0 z-[200] flex items-center justify-center p-4 transition-colors duration-200',
-        show ? 'bg-black/35' : 'bg-black/0',
-      )}
+      className="fixed inset-0 z-[200] flex items-center justify-center p-4 transition-colors duration-200"
+      style={{ backgroundColor: show ? 'rgba(0, 0, 0, 0.35)' : 'rgba(0, 0, 0, 0)' }}
       onClick={() => dismissOnBackdrop && handleClose()}
     >
       <div
@@ -61,10 +59,8 @@ export function SlideOver({ children, onClose, width = 380 }) {
 
   return (
     <div
-      className={clsx(
-        'fixed inset-0 z-[250] transition-colors duration-250',
-        show ? 'bg-black/25' : 'bg-black/0',
-      )}
+      className="fixed inset-0 z-[250] transition-colors duration-250"
+      style={{ backgroundColor: show ? 'rgba(0, 0, 0, 0.25)' : 'rgba(0, 0, 0, 0)' }}
       onClick={handleClose}
     >
       <div

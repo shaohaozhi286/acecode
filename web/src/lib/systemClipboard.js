@@ -47,3 +47,80 @@ export async function copyTextToSystemClipboard(
     error: bridgeError || 'clipboard unavailable',
   };
 }
+
+async function writeClipboardImage(clipboard, ClipboardItemCtor, mimeType, blob) {
+  await clipboard.write([new ClipboardItemCtor({ [mimeType]: blob })]);
+}
+
+async function imageBlobToPngBlob(blob, win) {
+  const createImageBitmapFn = win?.createImageBitmap
+    || (typeof createImageBitmap !== 'undefined' ? createImageBitmap : null);
+  const doc = win?.document || (typeof document !== 'undefined' ? document : null);
+  if (typeof createImageBitmapFn !== 'function' || !doc?.createElement) {
+    throw new Error('image/png conversion unavailable');
+  }
+
+  const bitmap = await createImageBitmapFn(blob);
+  try {
+    const canvas = doc.createElement('canvas');
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    const context = canvas.getContext?.('2d');
+    if (!context || typeof canvas.toBlob !== 'function') {
+      throw new Error('image/png conversion unavailable');
+    }
+    context.drawImage(bitmap, 0, 0);
+    return await new Promise((resolve, reject) => {
+      canvas.toBlob((pngBlob) => {
+        if (pngBlob) resolve(pngBlob);
+        else reject(new Error('image/png conversion failed'));
+      }, 'image/png');
+    });
+  } finally {
+    bitmap?.close?.();
+  }
+}
+
+export async function copyImageToSystemClipboard(
+  imageUrl,
+  {
+    mimeType = '',
+    fetchImpl = typeof fetch !== 'undefined' ? fetch : undefined,
+    win = typeof window !== 'undefined' ? window : undefined,
+  } = {},
+) {
+  const url = String(imageUrl || '');
+  if (!url) return { ok: false, error: 'image URL required' };
+  const clipboard = win?.navigator?.clipboard;
+  const ClipboardItemCtor = win?.ClipboardItem || (typeof ClipboardItem !== 'undefined' ? ClipboardItem : null);
+  if (!clipboard || typeof clipboard.write !== 'function' || typeof ClipboardItemCtor !== 'function') {
+    return { ok: false, error: 'image clipboard unavailable' };
+  }
+  if (typeof fetchImpl !== 'function') {
+    return { ok: false, error: 'fetch unavailable' };
+  }
+
+  try {
+    const response = await fetchImpl(url, { credentials: 'same-origin' });
+    if (!response?.ok) {
+      return { ok: false, error: `image fetch failed${response?.status ? `:${response.status}` : ''}` };
+    }
+    const blob = await response.blob();
+    const type = String(mimeType || blob?.type || '').toLowerCase();
+    if (!type.startsWith('image/')) {
+      return { ok: false, error: 'clipboard item is not an image' };
+    }
+    const imageBlob = blob.type === type ? blob : new Blob([blob], { type });
+    try {
+      await writeClipboardImage(clipboard, ClipboardItemCtor, type, imageBlob);
+      return { ok: true, via: 'navigator', mimeType: type };
+    } catch (writeError) {
+      if (type === 'image/png') throw writeError;
+      const pngBlob = await imageBlobToPngBlob(imageBlob, win);
+      await writeClipboardImage(clipboard, ClipboardItemCtor, 'image/png', pngBlob);
+      return { ok: true, via: 'navigator', mimeType: 'image/png', converted: true };
+    }
+  } catch (error) {
+    return { ok: false, error: error?.message || String(error) };
+  }
+}

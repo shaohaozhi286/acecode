@@ -1,8 +1,16 @@
-import { memo, useState } from 'react';
+import { memo, useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { attachmentsFromContentParts, contextsFromContentParts, isImageAttachment, normalizeAttachmentList } from '../lib/messageAttachments.js';
+import {
+  DESKTOP_CONTEXT_ACTION_EVENT,
+  DESKTOP_CONTEXT_ACTIONS,
+} from '../lib/desktopContextMenu.js';
 import { clsx } from '../lib/format.js';
 import { VsIcon } from './Icon.jsx';
+
+function attachmentContextKey(att, index) {
+  return String(att?.id || att?.blob_url || att?.preview_url || att?.url || att?.path || att?.name || index);
+}
 
 export const AttachmentStrip = memo(function AttachmentStrip({
   contentParts = [],
@@ -19,6 +27,24 @@ export const AttachmentStrip = memo(function AttachmentStrip({
     ? (Array.isArray(contexts) ? contexts : [])
     : contextsFromContentParts(contentParts);
 
+  useEffect(() => {
+    const handler = (event) => {
+      const detail = event.detail || {};
+      const { action, target } = detail;
+      if (action !== DESKTOP_CONTEXT_ACTIONS.PREVIEW_ATTACHMENT) return;
+      if (target?.type !== 'attachment' || !target.id) return;
+      const match = attachmentItems.find((att, index) => attachmentContextKey(att, index) === target.id);
+      if (!match) return;
+      const label = match.name || 'attachment';
+      const previewUrl = match.blob_url || match.preview_url || match.url || '';
+      if (!isImageAttachment(match) || !previewUrl) return;
+      detail.handled = true;
+      setPreview({ src: previewUrl, alt: label });
+    };
+    window.addEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
+    return () => window.removeEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
+  }, [attachmentItems]);
+
   if (attachmentItems.length === 0 && contextItems.length === 0) return null;
 
   return (
@@ -28,14 +54,25 @@ export const AttachmentStrip = memo(function AttachmentStrip({
         align === 'right' ? 'justify-end' : 'justify-start',
       )}>
         {attachmentItems.map((att, index) => {
-          const key = att.id || att.blob_url || att.path || att.name || index;
+          const key = attachmentContextKey(att, index);
           const isImage = isImageAttachment(att);
           const label = att.name || 'attachment';
-          const canPreview = isImage && att.blob_url;
+          const attachmentUrl = att.blob_url || att.preview_url || att.url || '';
+          const canPreview = isImage && attachmentUrl;
+          const mimeType = att.mime_type || att.mimeType || '';
           return (
             <button
               key={key}
               type="button"
+              data-desktop-attachment-id={key}
+              data-desktop-attachment-name={label}
+              data-desktop-attachment-url={attachmentUrl || undefined}
+              data-desktop-attachment-path={att.path || undefined}
+              data-desktop-attachment-preview-url={canPreview ? attachmentUrl : undefined}
+              data-desktop-attachment-copy-image-url={canPreview ? attachmentUrl : undefined}
+              data-desktop-attachment-mime-type={mimeType || undefined}
+              data-desktop-attachment-kind={att.kind || (isImage ? 'image' : 'file')}
+              data-desktop-attachment-mutable="false"
               className={clsx(
                 'max-w-[220px] rounded-md border bg-surface overflow-hidden text-left transition',
                 canPreview ? 'cursor-zoom-in hover:border-accent-soft' : 'cursor-default',
@@ -44,12 +81,12 @@ export const AttachmentStrip = memo(function AttachmentStrip({
               )}
               title={label}
               onClick={() => {
-                if (canPreview) setPreview({ src: att.blob_url, alt: label });
+                if (canPreview) setPreview({ src: attachmentUrl, alt: label });
               }}
             >
-              {isImage && att.blob_url ? (
+              {isImage && attachmentUrl ? (
                 <img
-                  src={att.blob_url}
+                  src={attachmentUrl}
                   alt={label}
                   className={clsx(
                     'block max-w-full object-contain bg-bg',

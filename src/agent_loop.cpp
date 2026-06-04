@@ -1765,16 +1765,17 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
                 [&](const ToolContext& tool_ctx,
                     const std::string& ctx_path,
                     const std::string& ctx_command) -> ToolResult {
+                    const bool targets_active_plan_file =
+                        permissions_.mode() == PermissionMode::Plan &&
+                        session_manager_ &&
+                        (tc.function_name == "file_write" ||
+                         tc.function_name == "file_edit") &&
+                        session_manager_->is_plan_file_path(ctx_path);
                     bool auto_allow = permissions_.should_auto_allow(
                         tc.function_name, false, ctx_path, ctx_command);
                     if (permissions_.mode() == PermissionMode::Plan &&
                         !permissions_.is_dangerous()) {
-                        const bool targets_plan_file =
-                            session_manager_ &&
-                            (tc.function_name == "file_write" ||
-                             tc.function_name == "file_edit") &&
-                            session_manager_->is_plan_file_path(ctx_path);
-                        auto_allow = targets_plan_file || tc.function_name == "TodoWrite";
+                        auto_allow = targets_active_plan_file || tc.function_name == "TodoWrite";
                     }
                     if (tc.function_name == "ExitPlanMode" &&
                         permissions_.mode() != PermissionMode::Plan) {
@@ -1818,7 +1819,8 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
                             LOG_WARN("Path validation failed: " + path_error);
                             return ToolResult{"[Error] " + path_error, false};
                         }
-                        if (path_validator_.is_dangerous_path(ctx_path) && auto_allow &&
+                        if (!targets_active_plan_file &&
+                            path_validator_.is_dangerous_path(ctx_path) && auto_allow &&
                             !permissions_.is_dangerous() &&
                             permissions_.mode() != PermissionMode::Yolo) {
                             LOG_INFO("Dangerous path detected, forcing confirmation: " + ctx_path);

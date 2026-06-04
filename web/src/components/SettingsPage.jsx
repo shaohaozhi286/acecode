@@ -37,15 +37,15 @@ import {
 } from './WindowControls.jsx';
 
 const NAV = [
-  { key: 'general', label: '常规' },
-  { key: 'appearance', label: '外观' },
-  { key: 'config', label: '配置' },
-  { key: 'personalization', label: '个性化' },
-  { key: 'mcp', label: 'MCP 服务器' },
-  { key: 'models', label: '模型' },
-  { key: 'tools', label: '工具' },
-  { key: 'archived', label: '已归档会话' },
-  { key: 'usage', label: '使用情况' },
+  { key: 'general', label: '常规', icon: 'settings' },
+  { key: 'appearance', label: '外观', icon: 'brightness' },
+  { key: 'config', label: '配置', icon: 'terminal' },
+  { key: 'personalization', label: '个性化', icon: 'eye' },
+  { key: 'mcp', label: 'MCP 服务器', icon: 'mcp' },
+  { key: 'models', label: '模型', icon: 'brain' },
+  { key: 'tools', label: '工具', icon: 'tool' },
+  { key: 'archived', label: '已归档会话', icon: 'archive' },
+  { key: 'usage', label: '使用情况', icon: 'list' },
 ];
 
 const DEFAULT_UPGRADE_SERVICE_URL = 'http://2017studio.imwork.net:82/aupdate/';
@@ -119,13 +119,14 @@ export function SettingsPage({
               type="button"
               onClick={() => setActiveNav(i)}
               className={clsx(
-                'w-full text-left px-4 py-2 text-[13px] transition border-l-[3px]',
+                'w-full px-4 py-2 text-[13px] transition border-l-[3px] flex items-center gap-2 text-left',
                 activeNav === i
                   ? 'text-accent font-semibold bg-accent-bg border-accent'
                   : 'text-fg hover:bg-surface-hi border-transparent',
               )}
             >
-              {item.label}
+              <VsIcon name={item.icon} size={15} className="shrink-0 opacity-80" />
+              <span className="truncate">{item.label}</span>
             </button>
           ))}
         </nav>
@@ -858,17 +859,7 @@ function SectionTools() {
       key: 'ace_browser_bridge',
       name: 'ACE Browser Bridge',
       desc: '启用 browser_start，并在打开后通过 user prompt 引导模型使用 ace-browser-host CLI。',
-      icon: (
-        <svg
-          width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-          strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"
-          aria-hidden="true"
-        >
-          <circle cx="12" cy="12" r="9" />
-          <path d="M3 12h18" />
-          <path d="M12 3a13 13 0 0 1 0 18M12 3a13 13 0 0 0 0 18" />
-        </svg>
-      ),
+      icon: <VsIcon name="globe" size={20} />,
       on: bridgeEnabled,
       toggle: setBridge,
     },
@@ -1200,77 +1191,15 @@ function capabilityLabel(id) {
 }
 
 function CapabilityIcon({ id, size = 14, className = '' }) {
-  const common = {
-    width: size,
-    height: size,
-    viewBox: '0 0 24 24',
-    fill: 'none',
-    stroke: 'currentColor',
-    strokeWidth: '2',
-    strokeLinecap: 'round',
-    strokeLinejoin: 'round',
-    className,
-    'aria-hidden': true,
-  };
-  if (id === 'vision') {
-    return (
-      <svg {...common}>
-        <path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12z" />
-        <circle cx="12" cy="12" r="3" />
-      </svg>
-    );
-  }
-  if (id === 'web_search') {
-    return (
-      <svg {...common}>
-        <circle cx="12" cy="12" r="10" />
-        <path d="M2 12h20" />
-        <path d="M12 2a15 15 0 0 1 0 20" />
-        <path d="M12 2a15 15 0 0 0 0 20" />
-      </svg>
-    );
-  }
-  if (id === 'reasoning') {
-    return (
-      <svg {...common}>
-        <path d="M9 18h6" />
-        <path d="M10 22h4" />
-        <path d="M8.5 14.5A6 6 0 1 1 15.5 14c-.9.6-1.5 1.6-1.5 2.7V17h-4v-.4c0-.9-.5-1.6-1.5-2.1z" />
-      </svg>
-    );
-  }
-  if (id === 'tool_use') {
-    return (
-      <svg {...common}>
-        <path d="M14.7 6.3a4 4 0 0 0-5 5L3 18v3h3l6.7-6.7a4 4 0 0 0 5-5l-2.5 2.5-2.7-2.7 2.2-2.8z" />
-      </svg>
-    );
-  }
-  if (id === 'rerank') {
-    return (
-      <svg {...common}>
-        <path d="M7 7h12" />
-        <path d="M7 12h9" />
-        <path d="M7 17h5" />
-        <path d="M3 7h.01" />
-        <path d="M3 12h.01" />
-        <path d="M3 17h.01" />
-      </svg>
-    );
-  }
-  if (id === 'embedding') {
-    return (
-      <svg {...common}>
-        <rect x="4" y="4" width="6" height="6" rx="1" />
-        <rect x="14" y="4" width="6" height="6" rx="1" />
-        <rect x="4" y="14" width="6" height="6" rx="1" />
-        <path d="M10 7h4" />
-        <path d="M7 10v4" />
-        <path d="M10 17h4" />
-      </svg>
-    );
-  }
-  return <VsIcon name="settings" size={size} className={className} />;
+  const icon = {
+    vision: 'eye',
+    web_search: 'globe',
+    reasoning: 'brain',
+    tool_use: 'tool',
+    rerank: 'list',
+    embedding: 'embedding',
+  }[id] || 'settings';
+  return <VsIcon name={icon} size={size} className={className} />;
 }
 
 function CapabilityBadges({ capabilities = [], compact = false }) {
@@ -1714,13 +1643,7 @@ function SectionModel() {
                   title="编辑"
                   className="w-8 h-8 rounded-md flex items-center justify-center text-fg-mute hover:bg-surface-hi transition"
                 >
-                  <svg
-                    width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                    strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"
-                  >
-                    <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
-                    <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
-                  </svg>
+                  <VsIcon name="edit" size={14} />
                 </button>
                 <button
                   type="button"
@@ -1734,13 +1657,7 @@ function SectionModel() {
                       : 'text-fg-mute opacity-30 cursor-not-allowed',
                   )}
                 >
-                  <svg
-                    width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                    strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"
-                  >
-                    <polyline points="3 6 5 6 21 6" />
-                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                  </svg>
+                  <VsIcon name="delete" size={14} />
                 </button>
               </div>
             </div>
@@ -2040,28 +1957,30 @@ function ModelFormPreview({
         </div>
         <div>
           <div className="text-[12px] font-medium text-fg-2 mb-1.5">Provider</div>
-          <select
-            className={clsx(fieldClass, 'cursor-pointer appearance-none bg-no-repeat pr-9')}
-            style={{
-              backgroundImage:
-                "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6' fill='none'><path d='M1 1L5 5L9 1' stroke='%23999' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>\")",
-              backgroundPosition: 'right 12px center',
-            }}
-            value={data.provider}
-            onChange={(e) => {
-              const provider = e.target.value;
-              setData({
-                provider,
-                base_url: provider === 'openai' ? (data.base_url || 'https://api.openai.com/v1') : '',
-                api_key: provider === 'openai' ? data.api_key : '',
-              });
-              setFetchStatus('idle');
-              setAvailable(null);
-            }}
-          >
-            <option value="openai">OpenAI</option>
-            <option value="copilot">Copilot</option>
-          </select>
+          <div className="relative">
+            <select
+              className={clsx(fieldClass, 'cursor-pointer appearance-none pr-9')}
+              value={data.provider}
+              onChange={(e) => {
+                const provider = e.target.value;
+                setData({
+                  provider,
+                  base_url: provider === 'openai' ? (data.base_url || 'https://api.openai.com/v1') : '',
+                  api_key: provider === 'openai' ? data.api_key : '',
+                });
+                setFetchStatus('idle');
+                setAvailable(null);
+              }}
+            >
+              <option value="openai">OpenAI</option>
+              <option value="copilot">Copilot</option>
+            </select>
+            <VsIcon
+              name="expandDown"
+              size={14}
+              className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-fg-mute"
+            />
+          </div>
         </div>
       </div>
 
@@ -2154,12 +2073,7 @@ function ModelFormPreview({
                 : 'border-border text-fg bg-surface hover:bg-surface-hi',
             )}
           >
-            <svg
-              width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-              strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"
-            >
-                <path d="M12 5v14M5 12h14" />
-              </svg>
+            <VsIcon name="add" size={13} />
             {allowMultiple ? '添加模型' : '选择模型'}
           </button>
         </div>
@@ -2168,15 +2082,7 @@ function ModelFormPreview({
           <div className="rounded-md border border-border bg-surface-alt overflow-hidden mb-2.5">
             {/* 第一行:自定义输入 — 始终显示,即使 fetch 失败也能手动加 */}
             <div className="flex items-center gap-2 px-3.5 py-2 bg-surface border-b border-border">
-              <svg
-                width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
-                className="shrink-0 text-fg-mute"
-                aria-hidden="true"
-              >
-                <path d="M12 20h9" />
-                <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
-              </svg>
+              <VsIcon name="edit" size={14} className="shrink-0 text-fg-mute" />
               <input
                 type="text"
                 placeholder="过滤或自定义模型 ID,回车添加"
@@ -2201,12 +2107,7 @@ function ModelFormPreview({
                     : 'text-fg-mute bg-transparent opacity-50 cursor-not-allowed',
                 )}
               >
-                <svg
-                  width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                  strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"
-                >
-                  <path d="M12 5v14M5 12h14" />
-                </svg>
+                <VsIcon name="add" size={11} />
                 添加
               </button>
             </div>
@@ -2231,15 +2132,7 @@ function ModelFormPreview({
                 title={canProbeModels ? '刷新模型列表' : (data.provider === 'copilot' ? '请先登录 Copilot' : '请先填写 Base URL')}
                 className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] text-fg-2 rounded hover:bg-surface-hi transition disabled:opacity-40 disabled:cursor-not-allowed"
               >
-                <svg
-                  width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                  strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
-                  className={clsx(fetchStatus === 'fetching' && 'animate-spin')}
-                  aria-hidden="true"
-                >
-                  <path d="M21 2v6h-6" />
-                  <path d="M3 12a9 9 0 0 1 15-6.7L21 8" />
-                </svg>
+                <RefreshIcon size={11} className={clsx(fetchStatus === 'fetching' && 'animate-spin')} />
                 刷新
               </button>
             </div>

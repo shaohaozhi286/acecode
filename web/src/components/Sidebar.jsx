@@ -9,7 +9,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../lib/api.js';
 import { connection } from '../lib/connection.js';
-import { SESSION_PIN_TOGGLE_EVENT } from '../lib/desktopContextMenu.js';
+import {
+  DESKTOP_CONTEXT_ACTION_EVENT,
+  DESKTOP_CONTEXT_ACTIONS,
+  SESSION_PIN_TOGGLE_EVENT,
+} from '../lib/desktopContextMenu.js';
 import { relativeTime, clsx } from '../lib/format.js';
 import {
   filterPinnedSessions,
@@ -73,29 +77,32 @@ function attentionMeta(state) {
   return { label: '已读', dot: 'bg-fg-mute/45' };
 }
 
-// 内联 Pin 图标 — VsIcon 走 <img>,CSS `color` 不会级联进 SVG,所以
-// Pin.svg 的硬编码 `fill="#000000"` 永远渲染成纯黑(亮色)/反相后的近白
-// (暗色),button 上的 `text-fg-mute` / `text-accent` 都没用。这里改用
-// 内联 <svg fill="currentColor">,让父按钮的 `text-*` 真正生效。
-// 视觉上额外 `-rotate-45` 让钉头朝左上、跟设计稿一致。
-function PinIconInline({ size = 12 }) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 16 16"
-      fill="currentColor"
-      className="-rotate-45"
-      aria-hidden="true"
-    >
-      <path d="M5.75 1.5h4.5v1.25l-.85.85 1.85 3.1 1.25.55v1.15L9.2 9.3 8.1 14.5H7L5.9 9.3 2.5 8.4V7.25l1.25-.55 1.85-3.1-.85-.85V1.5Zm.8 1 .45.45-.1.28-2.1 3.52-.9.4v.2l2.85.75.82 3.9.83-3.9 2.85-.75v-.2l-.9-.4-2.1-3.52-.1-.28.45-.45H6.55Z"/>
-    </svg>
-  );
-}
-
 function countObjectKeys(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return 0;
   return Object.keys(value).length;
+}
+
+const LEGACY_CUSTOM_SIDEBAR_ICONS = {
+  lightbulb: 'IntellisenseLightBulbSparkle',
+  mcp: 'MCP',
+  code: 'Code',
+};
+
+function CustomSidebarIcon({ icon }) {
+  const file = LEGACY_CUSTOM_SIDEBAR_ICONS[icon];
+  if (!file) return <VsIcon name={icon} size={16} />;
+  return (
+    <img
+      src={`/vs-icons/${file}.svg`}
+      alt=""
+      width="16"
+      height="16"
+      className="ace-sidebar-custom-icon"
+      draggable="false"
+      aria-hidden="true"
+      data-monochrome="true"
+    />
+  );
 }
 
 function CustomSidebarItem({ icon, label, count = null, warning = false, onClick }) {
@@ -105,7 +112,7 @@ function CustomSidebarItem({ icon, label, count = null, warning = false, onClick
       onClick={onClick}
       className="w-full flex items-center gap-2 px-4 py-[6px] text-[12px] text-fg hover:bg-surface-hi transition text-left"
     >
-      <VsIcon name={icon} size={16} />
+      <CustomSidebarIcon icon={icon} />
       <span className="flex-1 min-w-0 truncate">{label}</span>
       {warning ? (
         <VsIcon name="warning" size={14} mono={false} className="shrink-0" title="未配置模型" />
@@ -199,38 +206,37 @@ function CustomSidebarSection({ activeRef, activeWorkspaceHash, onOpenSettingsSe
   );
 }
 
-function ArchiveIconInline({ size = 14 }) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      xmlns="http://www.w3.org/2000/svg"
-      aria-hidden="true"
-    >
-      <path
-        fill="currentColor"
-        d="M20.25 3.75C20.664 3.75 21 4.086 21 4.5v2.25c0 .414-.336.75-.75.75h-.75V12H18V7.5H6.017v10.519H12V19.5H5.25a.75.75 0 0 1-.75-.75V7.5h-.75A.75.75 0 0 1 3 6.75V4.5c0-.414.336-.75.75-.75h16.5ZM19.5 5.124h-15v.937h15v-.937Z"
-      />
-      <path
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.2"
-        d="m15.915 13.35 1.351 1.289 4.022.023.15 4.65-7.65.15-.15-5.962 2.277-.15Z"
-      />
-    </svg>
-  );
-}
-
 function SessionRow({ s, active, pinned = false, pendingQuestion = false, onSelect, onTogglePin, onArchive }) {
   const attention = s.attention_state || s.read_state || 'read';
   const meta = attentionMeta(attention);
   const workspaceHash = s.workspace_hash || s.workspaceHash || '';
+  const title = sessionDisplayTitle(s, s.name || '');
+
+  useEffect(() => {
+    const handler = (event) => {
+      const detail = event.detail || {};
+      const { action, target } = detail;
+      if (target?.type !== 'session' || target.sessionId !== s.id) return;
+      if (target.workspaceHash && workspaceHash && target.workspaceHash !== workspaceHash) return;
+      if (action === DESKTOP_CONTEXT_ACTIONS.OPEN_SESSION) {
+        detail.handled = true;
+        onSelect?.(s);
+      } else if (action === DESKTOP_CONTEXT_ACTIONS.ARCHIVE_SESSION) {
+        detail.handled = true;
+        onArchive?.(s);
+      }
+    };
+    window.addEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
+    return () => window.removeEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
+  }, [onArchive, onSelect, s, workspaceHash]);
+
   return (
     <div
       data-desktop-session-id={s.id || undefined}
       data-desktop-session-workspace={workspaceHash || undefined}
       data-desktop-session-pinned={pinned ? 'true' : 'false'}
+      data-desktop-session-title={title || undefined}
+      data-desktop-session-archive="true"
       className={clsx(
         'group flex items-center gap-1 mx-1.5 my-px pl-1 pr-2 rounded-md text-[12px] transition',
         active
@@ -260,7 +266,7 @@ function SessionRow({ s, active, pinned = false, pendingQuestion = false, onSele
         title={pinned ? '取消置顶' : '置顶'}
         aria-label={pinned ? '取消置顶' : '置顶'}
       >
-        <PinIconInline size={12} />
+        <VsIcon name="pin" size={12} className="-rotate-45" />
       </button>
       <button
         type="button"
@@ -272,7 +278,7 @@ function SessionRow({ s, active, pinned = false, pendingQuestion = false, onSele
         ) : (
           <span className={clsx('w-1.5 h-1.5 rounded-full shrink-0', meta.dot)} title={meta.label} />
         )}
-        <span className="flex-1 min-w-0 truncate">{sessionDisplayTitle(s, s.name || '')}</span>
+        <span className="flex-1 min-w-0 truncate">{title}</span>
         {pendingQuestion && (
           <span
             className="shrink-0 rounded-full border border-ok-border bg-ok-bg px-2 py-[1px] text-[11px] font-medium leading-[18px] text-ok"
@@ -294,7 +300,7 @@ function SessionRow({ s, active, pinned = false, pendingQuestion = false, onSele
         title="归档"
         aria-label="归档"
       >
-        <ArchiveIconInline size={14} />
+        <VsIcon name="archive" size={14} />
       </button>
     </div>
   );
@@ -326,6 +332,44 @@ function WorkspaceGroup({
     if (!editing) setDraft(ws.name);
   }, [editing, ws.name]);
 
+  useEffect(() => {
+    const handler = (event) => {
+      const detail = event.detail || {};
+      const { action, target } = detail;
+      if (target?.type !== 'workspace' || target.workspaceHash !== ws.hash) return;
+      switch (action) {
+        case DESKTOP_CONTEXT_ACTIONS.ACTIVATE_WORKSPACE:
+          detail.handled = true;
+          if (!ws.active) onActivate?.(ws);
+          break;
+        case DESKTOP_CONTEXT_ACTIONS.EXPAND_WORKSPACE:
+          detail.handled = true;
+          if (!expanded) onToggle?.(ws.hash);
+          break;
+        case DESKTOP_CONTEXT_ACTIONS.COLLAPSE_WORKSPACE:
+          detail.handled = true;
+          if (expanded) onToggle?.(ws.hash);
+          break;
+        case DESKTOP_CONTEXT_ACTIONS.NEW_WORKSPACE_SESSION:
+          detail.handled = true;
+          onNewSession?.(ws);
+          break;
+        case DESKTOP_CONTEXT_ACTIONS.RENAME_WORKSPACE:
+          detail.handled = true;
+          setEditing(true);
+          break;
+        case DESKTOP_CONTEXT_ACTIONS.REMOVE_WORKSPACE:
+          detail.handled = true;
+          onRemove?.(ws);
+          break;
+        default:
+          break;
+      }
+    };
+    window.addEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
+    return () => window.removeEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
+  }, [expanded, onActivate, onNewSession, onRemove, onToggle, ws]);
+
   const commit = async () => {
     setEditing(false);
     const name = draft.trim();
@@ -342,16 +386,20 @@ function WorkspaceGroup({
       <div
         data-desktop-open-in-explorer-kind="workspace"
         data-desktop-open-in-explorer-path={ws.cwd || undefined}
+        data-desktop-workspace-id={ws.hash || undefined}
+        data-desktop-workspace-name={ws.name || undefined}
+        data-desktop-workspace-path={ws.cwd || undefined}
+        data-desktop-workspace-active={ws.active ? 'true' : 'false'}
+        data-desktop-workspace-expanded={expanded ? 'true' : 'false'}
+        data-desktop-workspace-rename="true"
+        data-desktop-workspace-remove={onRemove ? 'true' : undefined}
         className={clsx(
           'group flex items-center gap-2 mx-1.5 px-2.5 py-[6px] rounded-md text-[12px] cursor-pointer transition',
           ws.active ? 'bg-accent-bg text-fg' : 'text-fg hover:bg-surface-hi',
         )}
         onClick={() => (ws.active ? onToggle(ws.hash) : onActivate(ws))}
       >
-        <span className="w-3 shrink-0 flex items-center justify-center opacity-70">
-          <VsIcon name={expanded ? 'expandDown' : 'expandRight'} size={10} />
-        </span>
-        <VsIcon name="folder" size={14} />
+        <VsIcon name={expanded ? 'folderOpen' : 'folder'} size={14} />
         {editing ? (
           <input
             autoFocus

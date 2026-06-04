@@ -29,6 +29,7 @@ import { DesktopContextMenu } from './components/DesktopContextMenu.jsx';
 import { Toaster, toast } from './components/Toast.jsx';
 import { SlashCommandsProvider } from './components/SlashCommandsContext.jsx';
 import { FramelessResizeHandles } from './components/FramelessResizeHandles.jsx';
+import { GlobalFindOverlay } from './components/GlobalFindOverlay.jsx';
 
 const SINGLE_LAYOUT_STORAGE_KEY = 'acecode.singleLayoutWidths.v1';
 const LEGACY_DEFAULT_SINGLE_LAYOUT = { sidebar: 200, sidePanel: 280 };
@@ -475,6 +476,7 @@ export function App() {
           <span className="ace-spinner mr-2" /> 连接 daemon…
         </div>
         <FramelessResizeHandles />
+        <GlobalFindOverlay />
         <DesktopContextMenu />
         <Toaster />
       </>
@@ -485,6 +487,7 @@ export function App() {
       <>
         <TokenPrompt onSubmit={onSubmitToken} />
         <FramelessResizeHandles />
+        <GlobalFindOverlay />
         <DesktopContextMenu />
         <Toaster />
       </>
@@ -596,6 +599,7 @@ export function App() {
         )}
       </div>
       <FramelessResizeHandles />
+      <GlobalFindOverlay />
       <DesktopContextMenu />
       <Toaster />
     </div>

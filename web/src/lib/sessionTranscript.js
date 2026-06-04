@@ -190,6 +190,92 @@ function normalizePersistedToolHunks(metadata) {
     .map((hunk) => ({ ...hunk }));
 }
 
+function stringFromPersistedValue(value) {
+  if (value == null) return '';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
+    return String(value);
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function persistedToolCallId(raw) {
+  const id = raw?.id ?? raw?.tool_call_id ?? raw?.toolCallId ?? raw?.call_id ?? '';
+  return String(id || '').trim();
+}
+
+function persistedToolCallIndex(raw, fallbackIndex) {
+  const value = raw?.tool_index ?? raw?.toolIndex ?? raw?.index;
+  const number = Number(value);
+  if (Number.isFinite(number)) return Math.trunc(number);
+  return fallbackIndex;
+}
+
+function normalizePersistedToolCall(raw, fallbackIndex) {
+  const call = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  const fn = call.function && typeof call.function === 'object' && !Array.isArray(call.function)
+    ? call.function
+    : null;
+  const rawName = fn?.name ?? call.name ?? call.tool ?? call.tool_name ?? '';
+  const rawArgs = fn && Object.prototype.hasOwnProperty.call(fn, 'arguments')
+    ? fn.arguments
+    : call.arguments ?? call.args ?? call.input ?? '';
+  return {
+    name: String(rawName || '').trim(),
+    argumentsText: stringFromPersistedValue(rawArgs),
+    toolCallId: persistedToolCallId(call),
+    toolIndex: persistedToolCallIndex(call, fallbackIndex),
+  };
+}
+
+function persistedToolCallMessageId(message, messageIndex, call) {
+  const parentId = String(message?.id || `message-${messageIndex}`);
+  const suffix = call.toolCallId || `index-${call.toolIndex}`;
+  return `${parentId}:tool_call:${suffix}`;
+}
+
+function persistedToolCallContent(call) {
+  return `[Tool: ${call.name}] ${call.argumentsText}`;
+}
+
+function messageToolCallFields(m) {
+  const toolCallId = String((m?.tool_call_id ?? m?.toolCallId ?? '') || '').trim();
+  const hasToolIndex = m?.tool_index != null || m?.toolIndex != null;
+  const toolIndex = hasToolIndex ? (m.tool_index ?? m.toolIndex) : null;
+  return { toolCallId, hasToolIndex, toolIndex };
+}
+
+function genericHistoryMessageItem(next, m, extra = {}) {
+  const fields = messageToolCallFields(m);
+  const item = {
+    kind: 'msg',
+    id: allocateItemId(next),
+    messageId: extra.messageId || m?.id || '',
+    role: extra.role || m?.role || 'system',
+    content: extra.content ?? m?.content ?? '',
+    contentParts: extra.contentParts || (Array.isArray(m?.content_parts) ? m.content_parts : []),
+    metadata: extra.metadata ?? m?.metadata,
+    ts: extra.ts || transcriptTimestampMs(m) || Date.now(),
+  };
+  const toolCallId = extra.toolCallId ?? fields.toolCallId;
+  const hasToolCallId = Object.prototype.hasOwnProperty.call(extra, 'toolCallId') || !!fields.toolCallId;
+  const hasToolIndex = Object.prototype.hasOwnProperty.call(extra, 'toolIndex') || fields.hasToolIndex;
+  const toolIndex = Object.prototype.hasOwnProperty.call(extra, 'toolIndex') ? extra.toolIndex : fields.toolIndex;
+  if (hasToolCallId) {
+    item.tool_call_id = toolCallId || '';
+    item.toolCallId = toolCallId || '';
+  }
+  if (hasToolIndex) {
+    item.tool_index = toolIndex;
+    item.toolIndex = toolIndex;
+  }
+  return item;
+}
+
 function historyItemFromMessage(next, m) {
   const metadata = m?.metadata && typeof m.metadata === 'object' ? m.metadata : null;
   const ts = transcriptTimestampMs(m) || Date.now();
@@ -257,16 +343,50 @@ function historyItemFromMessage(next, m) {
     }
   }
 
-  return {
-    kind: 'msg',
-    id: allocateItemId(next),
-    messageId: m.id || '',
-    role: m.role || 'system',
-    content: m.content || '',
-    contentParts: Array.isArray(m.content_parts) ? m.content_parts : [],
-    metadata: m.metadata,
-    ts,
-  };
+  return genericHistoryMessageItem(next, m, { ts });
+}
+
+function historyItemsFromMessage(next, m, messageIndex) {
+  const role = m?.role || '';
+  if (role !== 'assistant') return [historyItemFromMessage(next, m)];
+
+  const toolCalls = Array.isArray(m?.tool_calls) ? m.tool_calls : [];
+  if (toolCalls.length === 0) return [historyItemFromMessage(next, m)];
+
+  const items = [];
+  const content = m?.content ?? '';
+  const contentParts = Array.isArray(m?.content_parts) ? m.content_parts : [];
+  if (String(content || '').trim() || contentParts.length > 0) {
+    items.push(historyItemFromMessage(next, m));
+  }
+
+  for (let i = 0; i < toolCalls.length; i += 1) {
+    const call = normalizePersistedToolCall(toolCalls[i], i);
+    items.push(genericHistoryMessageItem(next, m, {
+      messageId: persistedToolCallMessageId(m, messageIndex, call),
+      role: 'tool_call',
+      content: persistedToolCallContent(call),
+      contentParts: [],
+      metadata: {
+        ...(m?.metadata && typeof m.metadata === 'object' && !Array.isArray(m.metadata) ? m.metadata : {}),
+        tool_call_id: call.toolCallId,
+        tool_index: call.toolIndex,
+      },
+      ts: transcriptTimestampMs(m) || Date.now(),
+      toolCallId: call.toolCallId,
+      toolIndex: call.toolIndex,
+    }));
+  }
+
+  return items;
+}
+
+function historyItemsFromMessages(next, messages) {
+  const items = [];
+  for (let i = 0; i < messages.length; i += 1) {
+    items.push(...historyItemsFromMessage(next, messages[i], i));
+  }
+  return items;
 }
 
 function visibleTranscriptMessages(messages) {
@@ -350,7 +470,7 @@ export function reduceTranscriptEvent(state, msg) {
       finalizeStreaming(next);
       next.toolMap = new Map();
       const messages = visibleTranscriptMessages(p.messages);
-      next.items = messages.map((m) => historyItemFromMessage(next, m));
+      next.items = historyItemsFromMessages(next, messages);
       const restoredTitle = titleFromMessages(messages);
       if (restoredTitle) next.title = restoredTitle;
       next.tokenUsage = null;
@@ -611,7 +731,7 @@ export function loadTranscriptHistory(state, data = {}) {
   const effects = [];
   const msgs = visibleTranscriptMessages(data.messages);
 
-  next.items = msgs.map((m) => historyItemFromMessage(next, m));
+  next.items = historyItemsFromMessages(next, msgs);
 
   const restoredTitle = titleFromMessages(msgs);
   if (restoredTitle) next.title = restoredTitle;

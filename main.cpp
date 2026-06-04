@@ -113,6 +113,7 @@
 #include "tui/non_selectable.hpp"
 #include "tui/tool_progress.hpp"
 #include "tui/sidebar_model.hpp"
+#include "tui/todo_checklist_view.hpp"
 #include "tui/input_history_navigation.hpp"
 #include "utils/base64.hpp"
 #include "utils/clipboard.hpp"
@@ -419,52 +420,6 @@ static Element render_token_usage_chip(const acecode::TuiState& state) {
     });
 }
 
-static Element render_todo_checklist_block(const acecode::TuiState& state,
-                                           int available_width) {
-    if (state.todos.empty()) {
-        return emptyElement();
-    }
-
-    constexpr std::size_t kMaxVisibleTodos = 8;
-    const int text_width = std::max(12, available_width - 14);
-    Elements rows;
-    rows.push_back(hbox({
-        text("  TodoWrite ") | bold | color(Color::CyanLight),
-        text(std::to_string(state.todos.size()) + " task(s)") |
-            dim | color(Color::GrayDark),
-    }));
-
-    const std::size_t visible =
-        std::min<std::size_t>(kMaxVisibleTodos, state.todos.size());
-    for (std::size_t i = 0; i < visible; ++i) {
-        const auto& item = state.todos[i];
-        const std::string status = normalize_todo_status(item.status);
-        std::string marker = "[ ]";
-        Color row_color = Color::GrayLight;
-        if (status == "in_progress") {
-            marker = "[>]";
-            row_color = Color::Yellow;
-        } else if (status == "completed") {
-            marker = "[x]";
-            row_color = Color::GreenLight;
-        } else if (status == "cancelled") {
-            marker = "[~]";
-            row_color = Color::GrayDark;
-        }
-        rows.push_back(hbox({
-            text("  " + marker + " ") | color(row_color),
-            text(truncate_cells_middle_ascii(item.content, text_width)) |
-                color(row_color) | flex,
-        }));
-    }
-    if (state.todos.size() > visible) {
-        rows.push_back(
-            text("  +" + std::to_string(state.todos.size() - visible) + " more") |
-            dim | color(Color::GrayDark));
-    }
-    return vbox(std::move(rows)) | color(Color::GrayLight);
-}
-
 static Element render_pending_queue_block(const acecode::TuiState& state,
                                           int available_width) {
     if (state.pending_queue.empty()) {
@@ -593,7 +548,7 @@ static Element render_regular_sidebar(const acecode::TuiState& state,
     top_rows.push_back(sidebar_section_header(
         "Files Changed", static_cast<int>(file_changes.size())));
 
-    constexpr std::size_t kMaxSidebarFiles = 5;
+    constexpr std::size_t kMaxSidebarFiles = 10;
     const std::size_t shown_files =
         std::min(kMaxSidebarFiles, file_changes.size());
     for (std::size_t i = 0; i < shown_files; ++i) {
@@ -608,6 +563,12 @@ static Element render_regular_sidebar(const acecode::TuiState& state,
     }
 
     Elements bottom_rows;
+    if (!state.todos.empty()) {
+        bottom_rows.push_back(
+            acecode::tui::render_todo_checklist_block(state.todos,
+                                                      content_width));
+        bottom_rows.push_back(text(""));
+    }
     const bool show_bash_task =
         state.tool_running && state.tool_progress.tool_name == "bash";
     if (show_bash_task) {
@@ -4962,7 +4923,7 @@ static int run_interactive_app(const CliOptions& cli,
             return text(line);
         };
         constexpr int kRegularSidebarThresholdCols = 120;
-        constexpr int kRegularSidebarWidthCols = 32;
+        constexpr int kRegularSidebarWidthCols = 43;
         const int terminal_width =
             std::max(Terminal::Size().dimx, screen.dimx());
         const bool show_regular_sidebar =
@@ -5137,7 +5098,7 @@ static int run_interactive_app(const CliOptions& cli,
 
             if (msg.role == "user") {
                 auto line = hbox({
-                    text(" > ") | bold | color(Color::Blue),
+                    text(" > ") | bold | color(Color::BlueLight),
                     paragraph(msg.content) | color(Color::White) | flex,
                 });
                 if (focused_message) {
@@ -5183,8 +5144,8 @@ static int run_interactive_app(const CliOptions& cli,
                     display_text = msg.content;
                 }
                 auto line = hbox({
-                    text("   -> ") | color(Color::Magenta),
-                    paragraph(display_text) | color(Color::MagentaLight) | dim | flex,
+                    text("   -> ") | color(Color::MagentaLight),
+                    paragraph(display_text) | color(Color::MagentaLight) | flex,
                 });
                 if (focused_message) {
                     line = line | focus;
@@ -5887,7 +5848,7 @@ static int run_interactive_app(const CliOptions& cli,
             // 导航键,这里的 hbox 不渲染 input_with_esc 是为了让光标不在输入
             // 框里闪、误导用户去打字)。
             prompt_line = hbox({
-                text(" [" + state.confirm_tool_name + "] ") | bold | color(Color::Magenta),
+                text(" [" + state.confirm_tool_name + "] ") | bold | color(Color::MagentaLight),
                 text("awaiting confirmation \xE2\x80\x94 use \xE2\x86\x91\xE2\x86\x93 + Enter (Esc to deny)")
                     | dim | color(Color::GrayDark),
             });
@@ -6023,7 +5984,10 @@ static int run_interactive_app(const CliOptions& cli,
         Element pending_attachment_element =
             render_pending_attachment_block(state, pending_queue_width);
         Element todo_checklist_element =
-            render_todo_checklist_block(state, pending_queue_width);
+            acecode::tui::todo_checklist_uses_sidebar(show_regular_sidebar)
+                ? emptyElement()
+                : acecode::tui::render_todo_checklist_block(
+                    state.todos, pending_queue_width);
 
         Element main_root = vbox({
             header,

@@ -10,7 +10,9 @@
 
 using acecode::tui::truncate_middle;
 using acecode::tui::truncate_middle_segment;
+using acecode::tui::truncate_end;
 using acecode::tui::visual_width;
+using acecode::tui::wrap_truncate_end;
 
 // 场景:短字符串在预算内时必须原样返回,不能插入省略号。
 TEST(TextTruncation, ShortStringReturnsAsIs) {
@@ -86,4 +88,26 @@ TEST(TextTruncation, HandlesTinyBudgetsAndEmptyString) {
     EXPECT_EQ(truncate_middle("abcd", 1), "\xE2\x80\xA6");
     EXPECT_EQ(truncate_middle("abcd", 0), "\xE2\x80\xA6");
     EXPECT_EQ(truncate_middle("", 0), "");
+}
+
+// 场景:自然语言任务文本按尾部截断,保留开头而不是中间挖空。
+TEST(TextTruncation, TailTruncationKeepsTaskPrefix) {
+    const std::string out = truncate_end("Verify tests still work", 12);
+
+    EXPECT_EQ(visual_width(out), 12);
+    EXPECT_EQ(out, "Verify test\xE2\x80\xA6");
+}
+
+// 场景:Todo 侧栏文本最多拆成两行;超过两行时第二行尾部省略。
+TEST(TextTruncation, WrapTruncateEndLimitsToTwoLines) {
+    const auto lines = wrap_truncate_end(
+        "1234567890 abcdefghij klmnopqrst",
+        10,
+        2);
+
+    ASSERT_EQ(lines.size(), 2u);
+    EXPECT_EQ(lines[0], "1234567890");
+    EXPECT_EQ(lines[1], "abcdefghi\xE2\x80\xA6");
+    EXPECT_LE(visual_width(lines[0]), 10);
+    EXPECT_LE(visual_width(lines[1]), 10);
 }

@@ -504,6 +504,47 @@ function coalesceAdjacentLegacyWrappers(items) {
   return out;
 }
 
+function coalesceIdMatchedLegacyWrappers(items) {
+  const resultIndexesById = new Map();
+  items.forEach((item, index) => {
+    if (!isToolTranscriptResultMessage(item)) return;
+    if (objectMetadata(item).legacyToolInvocation) return;
+    const id = toolCallIdForItem(item);
+    if (!id) return;
+    const indexes = resultIndexesById.get(id) || [];
+    indexes.push(index);
+    resultIndexesById.set(id, indexes);
+  });
+  if (resultIndexesById.size === 0) return items;
+
+  const usedResultIndexes = new Set();
+  const out = [];
+  for (let i = 0; i < items.length; i += 1) {
+    if (usedResultIndexes.has(i)) continue;
+    const item = items[i];
+    if (!isToolCallTranscriptMessage(item) || isTaskCompleteToolCallMessage(item)) {
+      out.push(item);
+      continue;
+    }
+
+    const id = toolCallIdForItem(item);
+    if (!id) {
+      out.push(item);
+      continue;
+    }
+
+    const resultIndex = (resultIndexesById.get(id) || []).find((index) => index > i && !usedResultIndexes.has(index));
+    if (resultIndex == null) {
+      out.push(item);
+      continue;
+    }
+
+    out.push(makeLegacyInvocationItem(item, items[resultIndex], []));
+    usedResultIndexes.add(resultIndex);
+  }
+  return out;
+}
+
 function coalesceResultOnlyLegacyWrappers(items) {
   return items.map((item) => {
     if (!isToolTranscriptResultMessage(item)) return item;
@@ -515,7 +556,9 @@ function coalesceResultOnlyLegacyWrappers(items) {
 function normalizeToolInvocationItems(items) {
   if (!Array.isArray(items) || items.length === 0) return [];
   return coalesceResultOnlyLegacyWrappers(
-    coalesceAdjacentLegacyWrappers(suppressStructuredToolWrappers(items)),
+    coalesceAdjacentLegacyWrappers(
+      coalesceIdMatchedLegacyWrappers(suppressStructuredToolWrappers(items)),
+    ),
   );
 }
 

@@ -1,7 +1,11 @@
 // 宫格里的迷你会话卡。使用共享 transcript 投影渲染 compact viewport,
 // active/running 会话实时更新;inactive 磁盘历史只显示静态历史。
 
-import { useMemo } from 'react';
+import { useEffect, useMemo } from 'react';
+import {
+  DESKTOP_CONTEXT_ACTION_EVENT,
+  DESKTOP_CONTEXT_ACTIONS,
+} from '../lib/desktopContextMenu.js';
 import { clsx } from '../lib/format.js';
 import { sessionDisplayTitle } from '../lib/sessionTitle.js';
 import { projectCompactTranscriptItems, useSessionTranscript } from '../lib/sessionTranscript.js';
@@ -123,10 +127,30 @@ export function MiniSession({ session, compact, onClick }) {
   const live = transcript.isLive;
   const active = transcript.busy || session.status === 'running' || transcript.status === 'running';
   const stateLabel = active ? 'running' : session.status;
+  const sessionId = session.sessionId || session.id;
+  const workspaceHash = session.workspaceHash || session.workspace_hash || '';
+  const title = sessionDisplayTitle(session);
+
+  useEffect(() => {
+    const handler = (event) => {
+      const detail = event.detail || {};
+      const { action, target } = detail;
+      if (action !== DESKTOP_CONTEXT_ACTIONS.OPEN_SESSION) return;
+      if (target?.type !== 'session' || target.sessionId !== sessionId) return;
+      if (target.workspaceHash && workspaceHash && target.workspaceHash !== workspaceHash) return;
+      detail.handled = true;
+      onClick?.(session);
+    };
+    window.addEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
+    return () => window.removeEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
+  }, [onClick, session, sessionId, workspaceHash]);
 
   return (
     <button
       type="button"
+      data-desktop-session-id={sessionId || undefined}
+      data-desktop-session-workspace={workspaceHash || undefined}
+      data-desktop-session-title={title || undefined}
       onClick={() => onClick?.(session)}
       className={clsx(
         'flex flex-col rounded-lg overflow-hidden text-left transition cursor-pointer',
@@ -140,7 +164,7 @@ export function MiniSession({ session, compact, onClick }) {
       )}>
         <span className={clsx('rounded-full shrink-0', compact ? 'w-1.5 h-1.5' : 'w-[7px] h-[7px]', statusColor(stateLabel))} />
         <span className={clsx('flex-1 truncate font-semibold text-fg', compact ? 'text-[10px]' : 'text-[11px]')}>
-          {sessionDisplayTitle(session)}
+          {title}
         </span>
         <span className={clsx(compact ? 'text-[8px]' : 'text-[9px]', live ? 'text-ok' : 'text-fg-mute')}>
           {live ? '实时' : '静态'}

@@ -62,7 +62,7 @@ struct TextStyle {
     bool underline = false;
     bool dim = false;
     bool is_code = false;       // Inline code span
-    bool is_link = false;       // Link text (blue + underline)
+    bool is_link = false;       // Link text (bright blue + underline)
     std::string href;           // For links
 };
 
