@@ -15,10 +15,13 @@
 #include "session/session_serializer.hpp"
 #include "session/file_checkpoint_store.hpp"
 #include "session/tool_metadata_codec.hpp"
+#include "session/turn_timing.hpp"
 #include "tool/diff_utils.hpp"
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -36,6 +39,7 @@ using acecode::DiffHunk;
 using acecode::DiffLine;
 using acecode::DiffLineKind;
 using acecode::encode_tool_hunks;
+using acecode::TurnTimingRecord;
 
 namespace {
 
@@ -85,6 +89,28 @@ ChatMessage make_tool(const std::string& tool_call_id, const std::string& output
         m.metadata["tool_hunks"] = encode_tool_hunks(*hunks);
     }
     return m;
+}
+
+ChatMessage make_timing(const std::string& user_uuid,
+                        const std::string& status = "completed",
+                        std::int64_t duration_ms = 1234) {
+    TurnTimingRecord timing;
+    timing.user_message_uuid = user_uuid;
+    timing.started_at_ms = 1000;
+    timing.completed_at_ms = 1000 + duration_ms;
+    timing.duration_ms = duration_ms;
+    timing.status = status;
+    return acecode::make_turn_timing_message(timing, "2026-06-04T00:00:01Z");
+}
+
+std::vector<TurnTimingRecord> loaded_timings(const std::vector<ChatMessage>& messages) {
+    std::vector<TurnTimingRecord> out;
+    for (const auto& msg : messages) {
+        if (!msg.metadata.is_object()) continue;
+        auto timing = acecode::decode_turn_timing(msg.metadata.value("turn_timing", nlohmann::json{}));
+        if (timing.has_value()) out.push_back(*timing);
+    }
+    return out;
 }
 
 std::string read_file(const std::string& path) {
@@ -203,6 +229,58 @@ TEST(SessionFork, ToolHunksMetadataPreserved) {
     EXPECT_TRUE(round.is_array());
     EXPECT_EQ(round.size(), 1u);
     EXPECT_EQ(round[0]["old_start"], 1);
+}
+
+TEST(SessionFork, ReplaceActiveMessagesKeepsTimingForRetainedUsersOnly) {
+    TempCwd cwd;
+    SessionManager sm;
+    sm.start_session(cwd.path(), "openai", "gpt-4");
+    sm.on_message(make_user("U1", "u-1"));
+    sm.on_message(make_timing("u-1", "completed", 2000));
+    sm.on_message(make_user("U2", "u-2"));
+    sm.on_message(make_timing("u-2", "completed", 3000));
+
+    ASSERT_TRUE(sm.replace_active_messages({
+        make_user("U2", "u-2"),
+        make_assistant("A2"),
+    }));
+
+    auto loaded = sm.load_active_messages();
+    auto timings = loaded_timings(loaded);
+    ASSERT_EQ(timings.size(), 1u);
+    EXPECT_EQ(timings[0].user_message_uuid, "u-2");
+    EXPECT_EQ(timings[0].duration_ms, 3000);
+    for (const auto& msg : loaded) {
+        if (msg.metadata.is_object() && msg.metadata.contains("turn_timing")) {
+            EXPECT_TRUE(msg.metadata.value("transcript_only", false));
+        }
+    }
+}
+
+TEST(SessionFork, ForkSessionPreservesTimingForRetainedUsersOnly) {
+    TempCwd cwd;
+    SessionManager sm;
+    sm.start_session(cwd.path(), "openai", "gpt-4");
+    sm.on_message(make_user("U1", "u-1"));
+    sm.on_message(make_timing("u-1", "completed", 2000));
+    sm.on_message(make_user("U2", "u-2"));
+    sm.on_message(make_timing("u-2", "completed", 3000));
+
+    auto new_id = sm.fork_session_to_new_id(
+        {make_user("U2", "u-2"), make_assistant("A2")}, "T", sm.current_session_id(), "u-2");
+    ASSERT_FALSE(new_id.empty());
+
+    auto pdir = SessionStorage::get_project_dir(cwd.path());
+    auto cands = SessionStorage::find_session_files(pdir, new_id);
+    ASSERT_FALSE(cands.empty());
+    auto loaded = SessionStorage::load_messages(cands.front().jsonl_path);
+    auto timings = loaded_timings(loaded);
+    ASSERT_EQ(timings.size(), 1u);
+    EXPECT_EQ(timings[0].user_message_uuid, "u-2");
+    EXPECT_EQ(timings[0].duration_ms, 3000);
+    EXPECT_EQ(std::count_if(loaded.begin(), loaded.end(), [](const ChatMessage& msg) {
+        return msg.role == "user";
+    }), 1);
 }
 
 // 场景:retained_prefix 含 file_checkpoint 元消息 → 新 session 自动过滤(spec

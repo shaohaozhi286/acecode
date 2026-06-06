@@ -139,6 +139,9 @@ std::vector<ChatMessage> normalize_messages_for_api(const std::vector<ChatMessag
     std::vector<ChatMessage> result;
     result.reserve(messages.size());
     for (const auto& msg : messages) {
+        if (msg.metadata.is_object() && msg.metadata.value("transcript_only", false)) {
+            continue;
+        }
         if (!msg.is_meta) {
             result.push_back(msg);
         }

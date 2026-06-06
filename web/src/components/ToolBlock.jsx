@@ -7,7 +7,7 @@
 // hunks 字段(file_edit / file_write):展开区走 diff2html 渲染,而不是
 // 纯 <pre>{output}</pre>。bash 工具的展开区头部加 `$ <command>` prompt 行。
 
-import { memo, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { clsx, formatBytes, formatElapsed } from '../lib/format.js';
 import { hunksToUnifiedDiff } from '../lib/diff.js';
 import { compactOneLinePreview } from '../lib/compactMessagePreview.js';
@@ -35,7 +35,7 @@ function MetricList({ metrics }) {
   );
 }
 
-export const ToolBlock = memo(function ToolBlock({ entry }) {
+export const ToolBlock = memo(function ToolBlock({ entry, onReviewToggle }) {
   const [expanded, setExpanded] = useState(false);
   const contextIdRef = useRef('');
   if (!contextIdRef.current) {
@@ -111,6 +111,11 @@ export const ToolBlock = memo(function ToolBlock({ entry }) {
     'data-desktop-tool-toggle': isTaskComplete ? 'false' : 'true',
   };
 
+  const toggleExpanded = useCallback(() => {
+    onReviewToggle?.();
+    setExpanded((v) => !v);
+  }, [onReviewToggle]);
+
   useEffect(() => {
     const handler = (event) => {
       const detail = event.detail || {};
@@ -118,15 +123,17 @@ export const ToolBlock = memo(function ToolBlock({ entry }) {
       if (target?.type !== 'tool' || target.id !== contextIdRef.current) return;
       if (action === DESKTOP_CONTEXT_ACTIONS.EXPAND_TOOL) {
         detail.handled = true;
+        onReviewToggle?.();
         setExpanded(true);
       } else if (action === DESKTOP_CONTEXT_ACTIONS.COLLAPSE_TOOL) {
         detail.handled = true;
+        onReviewToggle?.();
         setExpanded(false);
       }
     };
     window.addEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
     return () => window.removeEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
-  }, []);
+  }, [onReviewToggle]);
 
   if (isTaskComplete) {
     const text = (summary && summary.object) || '完成';
@@ -157,7 +164,7 @@ export const ToolBlock = memo(function ToolBlock({ entry }) {
           className="w-full min-w-0 overflow-hidden text-left flex items-center gap-1.5 px-2.5 py-[5px] cursor-pointer whitespace-nowrap"
           title={expanded ? '收起' : '展开'}
           aria-label={expanded ? '收起' : '展开'}
-          onClick={() => setExpanded((v) => !v)}
+          onClick={toggleExpanded}
         >
           <ToolSummaryIcon icon={summary.icon} ok={ok} className="shrink-0" />
           <span className="font-medium shrink-0">{summary.verb || ''}</span>
@@ -212,7 +219,7 @@ export const ToolBlock = memo(function ToolBlock({ entry }) {
           className="w-full min-w-0 overflow-hidden text-left flex items-center gap-1.5 px-2.5 py-[5px] cursor-pointer whitespace-nowrap"
           title={outputPreview || (expanded ? '收起' : '展开')}
           aria-label={expanded ? '收起' : '展开'}
-          onClick={() => setExpanded((v) => !v)}
+          onClick={toggleExpanded}
         >
           <VsIcon name={ok ? 'ok' : 'warning'} size={13} mono={false} className="shrink-0" />
           <span className="font-medium flex-1 min-w-0 truncate">{title || tool || '工具完成'}</span>
@@ -249,7 +256,7 @@ export const ToolBlock = memo(function ToolBlock({ entry }) {
         className="w-full min-w-0 overflow-hidden px-2.5 py-1.5 flex items-center gap-2 text-left text-fg hover:bg-surface-hi transition whitespace-nowrap"
         title={outputPreview || (expanded ? '收起' : '展开')}
         aria-label={expanded ? '收起' : '展开'}
-        onClick={() => setExpanded((v) => !v)}
+        onClick={toggleExpanded}
       >
         <span className="ace-spinner w-3 h-3 shrink-0" />
         <span className="font-semibold flex-1 min-w-0 truncate">{title}</span>

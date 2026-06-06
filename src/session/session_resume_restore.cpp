@@ -3,6 +3,7 @@
 #include "session_replay.hpp"
 #include "session_rewind.hpp"
 #include "tool_result_storage.hpp"
+#include "turn_timing.hpp"
 #include "../agent_loop.hpp"
 #include "../tool/tool_executor.hpp"
 #include "../tui_state.hpp"
@@ -44,6 +45,9 @@ void append_resumed_session_messages(const std::vector<ChatMessage>& messages,
         }
         if (is_content_replacement_message(msg)) {
             agent_loop.push_message(msg);
+            continue;
+        }
+        if (is_turn_timing_message(msg)) {
             continue;
         }
 

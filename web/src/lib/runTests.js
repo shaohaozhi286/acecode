@@ -12,6 +12,7 @@ import './imageNormalize.test.js';
 import './messageAttachments.test.js';
 import './goalControl.test.js';
 import './chatInputQueue.test.js';
+import './chatScrollFollow.test.js';
 import './queueCardItem.test.js';
 import './sessionSubscription.test.js';
 import './sessionTranscript.test.js';

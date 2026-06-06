@@ -36,6 +36,25 @@ function projectLoadedItems(items) {
   return projectCollapsedTranscriptItems(items, { deferTrailingToolSummary: true });
 }
 
+function turnTimingMessage(userMessageUuid, durationMs, status = 'completed') {
+  return {
+    id: `timing-${userMessageUuid}`,
+    role: 'system',
+    content: '[Turn timing]',
+    timestamp: '2026-06-04T00:00:05Z',
+    metadata: {
+      transcript_only: true,
+      turn_timing: {
+        user_message_uuid: userMessageUuid,
+        started_at_ms: 1000,
+        completed_at_ms: 1000 + durationMs,
+        duration_ms: durationMs,
+        status,
+      },
+    },
+  };
+}
+
 run('history load 去重已持久化 replay message 并保留顺序', () => {
   const loaded = loadTranscriptHistory(createTranscriptState({ title: 's1' }), {
     messages: [
@@ -591,6 +610,120 @@ run('history load 对确实缺少请求的 tool result 保留请求未记录 fal
 
   const projected = projectLoadedItems(loaded.items);
   assert.match(JSON.stringify(projected), /请求未记录/);
+});
+
+run('history load 消费 turn_timing 并用持久 duration 渲染 processed summary', () => {
+  const loaded = loadTranscriptHistory(createTranscriptState({ title: 's1' }), {
+    messages: [
+      { id: 'u-1', role: 'user', content: 'do work', timestamp: '2026-06-04T00:00:00Z' },
+      { id: 'a-1', role: 'assistant', content: 'I will inspect first', timestamp: '2026-06-04T00:00:01Z' },
+      {
+        id: 'tool-1',
+        role: 'tool',
+        content: 'read file',
+        timestamp: '2026-06-04T00:00:02Z',
+        metadata: { tool_summary: { verb: 'Read', object: 'src/a.js', metrics: [] } },
+      },
+      {
+        id: 'done-1',
+        role: 'tool',
+        tool: 'task_complete',
+        content: 'done',
+        timestamp: '2026-06-04T00:00:03Z',
+        metadata: { tool_summary: { verb: 'complete', object: 'task', metrics: [{ label: 'summary', value: 'done' }] } },
+      },
+      turnTimingMessage('u-1', 65000),
+    ],
+    events: [],
+  }).state;
+
+  assert.equal(loaded.items.some((item) => item.content === '[Turn timing]'), false);
+  const projected = projectLoadedItems(loaded.items);
+  assert.equal(projected[1].kind, 'activity_summary');
+  assert.equal(projected[1].mode, 'processed');
+  assert.equal(projected[1].title, '已处理 1m 5s');
+  assert.equal(projected[2].kind, 'completion_summary');
+
+  const reloaded = loadTranscriptHistory(createTranscriptState({ title: 's1' }), {
+    messages: [
+      { id: 'u-1', role: 'user', content: 'do work', timestamp: '2026-06-04T00:00:00Z' },
+      { id: 'a-1', role: 'assistant', content: 'I will inspect first', timestamp: '2026-06-04T00:00:01Z' },
+      {
+        id: 'tool-1',
+        role: 'tool',
+        content: 'read file',
+        timestamp: '2026-06-04T00:00:02Z',
+        metadata: { tool_summary: { verb: 'Read', object: 'src/a.js', metrics: [] } },
+      },
+      {
+        id: 'done-1',
+        role: 'tool',
+        tool: 'task_complete',
+        content: 'done',
+        timestamp: '2026-06-04T00:00:03Z',
+        metadata: { tool_summary: { verb: 'complete', object: 'task', metrics: [{ label: 'summary', value: 'done' }] } },
+      },
+      turnTimingMessage('u-1', 65000),
+    ],
+    events: [],
+  }).state;
+  assert.equal(projectLoadedItems(reloaded.items)[1].title, '已处理 1m 5s');
+});
+
+run('history load 没有 turn_timing 时保留 timestamp fallback', () => {
+  const loaded = loadTranscriptHistory(createTranscriptState({ title: 's1' }), {
+    messages: [
+      { id: 'u-1', role: 'user', content: 'do work', timestamp: '2026-06-04T00:00:00Z' },
+      { id: 'a-1', role: 'assistant', content: 'I will inspect first', timestamp: '2026-06-04T00:00:01Z' },
+      {
+        id: 'tool-1',
+        role: 'tool',
+        content: 'read file',
+        timestamp: '2026-06-04T00:00:02Z',
+        metadata: { tool_summary: { verb: 'Read', object: 'src/a.js', metrics: [] } },
+      },
+      {
+        id: 'done-1',
+        role: 'tool',
+        tool: 'task_complete',
+        content: 'done',
+        timestamp: '2026-06-04T00:00:03Z',
+        metadata: { tool_summary: { verb: 'complete', object: 'task', metrics: [{ label: 'summary', value: 'done' }] } },
+      },
+    ],
+    events: [],
+  }).state;
+
+  const projected = projectLoadedItems(loaded.items);
+  assert.equal(projected[1].title, '已处理 2s');
+});
+
+run('history load error timing 不把 termination notice 折叠进 processed summary', () => {
+  const loaded = loadTranscriptHistory(createTranscriptState({ title: 's1' }), {
+    messages: [
+      { id: 'u-1', role: 'user', content: 'do work', timestamp: '2026-06-04T00:00:00Z' },
+      { id: 'a-1', role: 'assistant', content: 'I will inspect first', timestamp: '2026-06-04T00:00:01Z' },
+      {
+        id: 'tool-1',
+        role: 'tool',
+        content: 'read file',
+        timestamp: '2026-06-04T00:00:02Z',
+        metadata: { tool_summary: { verb: 'Read', object: 'src/a.js', metrics: [] } },
+      },
+      { id: 'a-2', role: 'assistant', content: 'partial answer', timestamp: '2026-06-04T00:00:03Z' },
+      turnTimingMessage('u-1', 3000, 'error'),
+    ],
+    events: [
+      { type: 'error', payload: { reason: 'provider failed' }, seq: 1 },
+    ],
+  }).state;
+
+  const projected = projectLoadedItems(loaded.items);
+  const notice = projected.at(-1);
+  assert.equal(notice.kind, 'termination_notice');
+  assert.equal(notice.content, '任务已终止：provider failed');
+  assert.equal(projected.some((item) => item.kind === 'activity_summary' && item.collapsedItems?.includes(notice)), false);
+  assert.equal(projected.some((item) => item.content === '[Turn timing]'), false);
 });
 
 run('history load 不显示内部 meta 消息', () => {

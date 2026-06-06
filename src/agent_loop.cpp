@@ -13,6 +13,7 @@
 #include "session/session_storage.hpp"
 #include "session/thread_goal_store.hpp"
 #include "session/todo_state.hpp"
+#include "session/turn_timing.hpp"
 #include "web/message_payload.hpp"
 #include "web/tool_event_payload.hpp"
 #include <nlohmann/json.hpp>
@@ -365,6 +366,25 @@ void AgentLoop::dispatch_message(const std::string& role,
         payload["metadata"] = std::move(metadata);
     }
     events_.emit(SessionEventKind::Message, std::move(payload));
+}
+
+void AgentLoop::append_turn_timing_record(const std::string& user_message_uuid,
+                                          std::int64_t started_at_ms,
+                                          std::int64_t completed_at_ms,
+                                          const std::string& status) {
+    if (user_message_uuid.empty()) return;
+    TurnTimingRecord timing;
+    timing.user_message_uuid = user_message_uuid;
+    timing.started_at_ms = started_at_ms;
+    timing.completed_at_ms = completed_at_ms;
+    timing.duration_ms = std::max<std::int64_t>(0, completed_at_ms - started_at_ms);
+    timing.status = status;
+
+    ChatMessage msg = make_turn_timing_message(timing, SessionStorage::now_iso8601());
+    messages_.push_back(msg);
+    if (session_manager_) {
+        session_manager_->on_message(msg);
+    }
 }
 
 void AgentLoop::append_tool_user_prompt(const std::string& content,
@@ -924,6 +944,12 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
         user_msg.metadata["hidden_goal_context"] = true;
     }
     ensure_user_message_identity(user_msg);
+    const bool visible_timed_turn =
+        !hidden_goal_context &&
+        !(user_msg.metadata.is_object() && user_msg.metadata.value("hidden_goal_context", false));
+    const std::string turn_user_uuid = visible_timed_turn ? user_msg.uuid : std::string{};
+    const std::int64_t turn_started_at_ms = now_epoch_ms();
+    std::string turn_timing_status = "completed";
     messages_.push_back(user_msg);
     if (session_manager_) {
         session_manager_->on_message(user_msg);
@@ -1210,6 +1236,7 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
         if (provider_accessor_) provider_snapshot = provider_accessor_();
         if (!provider_snapshot) {
             LOG_ERROR("provider_accessor returned null; aborting turn");
+            turn_timing_status = "error";
             dispatch_message("error", "[Error] provider unavailable", false);
             break;
         }
@@ -1282,6 +1309,7 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
 
                 nlohmann::json metadata;
                 metadata["provider_error"] = provider_error_to_json(provider_error_info);
+                turn_timing_status = "error";
                 dispatch_message(
                     "error",
                     "[Error] Context is too large and cannot be rescued by compacting earlier history. " +
@@ -1295,6 +1323,7 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
 
             nlohmann::json metadata;
             metadata["provider_error"] = provider_error_to_json(provider_error_info);
+            turn_timing_status = "error";
             dispatch_message("error", "[Error] " + provider_error_info.display_message, false,
                              std::move(metadata));
             LOG_WARN("Provider stream failed; ending turn without assistant message: " +
@@ -1992,10 +2021,12 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
         std::string stop_msg = "Agent loop stopped: reached max_iterations (" +
                                std::to_string(max_iter) + ")";
         LOG_WARN(stop_msg);
+        turn_timing_status = "error";
         dispatch_message("system", stop_msg, false);
     }
 
     if (abort_requested_) {
+        turn_timing_status = "aborted";
         account_goal_usage(0, false);
         if (session_manager_) {
             const std::string sid = session_manager_->current_session_id();
@@ -2010,6 +2041,11 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
         }
     } else {
         account_goal_usage(0, false);
+    }
+
+    if (visible_timed_turn) {
+        append_turn_timing_record(
+            turn_user_uuid, turn_started_at_ms, now_epoch_ms(), turn_timing_status);
     }
 
     if (callbacks_.on_busy_changed) {

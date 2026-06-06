@@ -27,6 +27,7 @@
 #include "tool/tool_executor.hpp"
 #include "permissions.hpp"
 #include "provider/llm_provider.hpp"
+#include "session/turn_timing.hpp"
 
 #include <nlohmann/json.hpp>
 #include <chrono>
@@ -52,6 +53,7 @@ using acecode::ToolExecutor;
 using acecode::ToolImpl;
 using acecode::ToolResult;
 using acecode::ToolSource;
+using acecode::UserInput;
 using acecode_test::ScriptedResponse;
 using acecode_test::StubLlmProvider;
 
@@ -205,6 +207,17 @@ public:
         return busy_cv_.wait_for(lk, timeout, [this] { return !is_busy_; });
     }
 
+    bool submit_input_and_wait(const UserInput& input,
+                        std::chrono::milliseconds timeout = std::chrono::seconds(5)) {
+        {
+            std::lock_guard<std::mutex> lk(busy_mu_);
+            is_busy_ = true;
+        }
+        loop_->submit(input);
+        std::unique_lock<std::mutex> lk(busy_mu_);
+        return busy_cv_.wait_for(lk, timeout, [this] { return !is_busy_; });
+    }
+
     void abort() { loop_->abort(); }
 
     int turn_count() const { return provider_->turn_count(); }
@@ -312,6 +325,97 @@ ProviderErrorInfo make_stub_provider_error(std::string display = "HTTP 500 from 
     error.pretty_json = "{\n  \"error\": \"boom\"\n}";
     error.retryable = true;
     return error;
+}
+
+std::vector<acecode::TurnTimingRecord> turn_timings_from(
+    const std::vector<ChatMessage>& messages) {
+    std::vector<acecode::TurnTimingRecord> out;
+    for (const auto& msg : messages) {
+        if (!msg.metadata.is_object()) continue;
+        auto timing = acecode::decode_turn_timing(msg.metadata.value("turn_timing", nlohmann::json{}));
+        if (timing.has_value()) {
+            EXPECT_TRUE(msg.metadata.value("transcript_only", false));
+            out.push_back(*timing);
+        }
+    }
+    return out;
+}
+
+TEST(AgentLoopTurnTiming, CompletedTurnWritesTranscriptOnlyTiming) {
+    AgentLoopHarness h;
+    h.push_text("done");
+
+    ASSERT_TRUE(h.submit_and_wait("work"));
+
+    const auto messages = h.persisted_messages();
+    auto timings = turn_timings_from(messages);
+    ASSERT_EQ(timings.size(), 1u);
+    ASSERT_GE(messages.size(), 3u);
+    EXPECT_EQ(messages.front().role, "user");
+    EXPECT_EQ(timings[0].user_message_uuid, messages.front().uuid);
+    EXPECT_EQ(timings[0].status, "completed");
+    EXPECT_GE(timings[0].duration_ms, 0);
+    EXPECT_GE(timings[0].completed_at_ms, timings[0].started_at_ms);
+}
+
+TEST(AgentLoopTurnTiming, AbortedTurnWritesOneAbortedTiming) {
+    AgentLoopHarness h;
+    h.set_stub_latency_ms(200);
+    h.push_tool_call("noop", "{}", "c1");
+
+    std::thread aborter([&h] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        h.abort();
+    });
+    ASSERT_TRUE(h.submit_and_wait("abort me", std::chrono::seconds(10)));
+    aborter.join();
+
+    auto timings = turn_timings_from(h.persisted_messages());
+    ASSERT_EQ(timings.size(), 1u);
+    EXPECT_EQ(timings[0].status, "aborted");
+}
+
+TEST(AgentLoopTurnTiming, ProviderErrorWritesOneErrorTiming) {
+    AgentLoopHarness h;
+    h.push_provider_error(make_stub_provider_error("provider failed"));
+
+    ASSERT_TRUE(h.submit_and_wait("fail"));
+
+    auto timings = turn_timings_from(h.persisted_messages());
+    ASSERT_EQ(timings.size(), 1u);
+    EXPECT_EQ(timings[0].status, "error");
+}
+
+TEST(AgentLoopTurnTiming, HiddenContextInputDoesNotCreateTiming) {
+    AgentLoopHarness h;
+    h.push_text("hidden answer");
+    UserInput input;
+    input.text = "hidden goal context";
+    input.metadata = nlohmann::json{{"hidden_goal_context", true}};
+
+    ASSERT_TRUE(h.submit_input_and_wait(input));
+
+    auto timings = turn_timings_from(h.persisted_messages());
+    EXPECT_TRUE(timings.empty());
+}
+
+TEST(AgentLoopTurnTiming, TranscriptOnlyTimingDoesNotEnterNextProviderRequest) {
+    AgentLoopHarness h;
+    h.push_text("first done");
+    ASSERT_TRUE(h.submit_and_wait("first"));
+    ASSERT_EQ(turn_timings_from(h.persisted_messages()).size(), 1u);
+
+    h.push_text("second done");
+    ASSERT_TRUE(h.submit_and_wait("second"));
+
+    const auto second_request = h.request_messages_for_turn(1);
+    ASSERT_FALSE(second_request.empty());
+    for (const auto& msg : second_request) {
+        if (msg.metadata.is_object()) {
+            EXPECT_FALSE(msg.metadata.value("transcript_only", false));
+            EXPECT_FALSE(msg.metadata.contains("turn_timing"));
+        }
+    }
 }
 
 // 场景: provider 在同一请求内部对 timeout 做重新连接重试时,AgentLoop 必须

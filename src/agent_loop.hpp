@@ -246,6 +246,10 @@ private:
                           bool is_tool,
                           nlohmann::json metadata = nlohmann::json::object(),
                           nlohmann::json content_parts = nlohmann::json::array());
+    void append_turn_timing_record(const std::string& user_message_uuid,
+                                   std::int64_t started_at_ms,
+                                   std::int64_t completed_at_ms,
+                                   const std::string& status);
     void append_tool_user_prompt(const std::string& content,
                                  const std::string& display_text,
                                  const std::string& source_tool);

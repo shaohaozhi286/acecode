@@ -2,6 +2,7 @@
 #include "session_serializer.hpp"
 #include "session_rewind.hpp"
 #include "tool_result_storage.hpp"
+#include "turn_timing.hpp"
 #include "../utils/atomic_file.hpp"
 #include "../utils/logger.hpp"
 #include "../utils/utf8_path.hpp"
@@ -12,6 +13,7 @@
 #include <set>
 #include <sstream>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace fs = std::filesystem;
 
@@ -90,6 +92,41 @@ bool is_visible_user_turn_message(const acecode::ChatMessage& msg) {
     return msg.role == "user" &&
            !msg.is_meta &&
            !is_hidden_goal_context_message(msg);
+}
+
+std::string turn_timing_dedupe_key(const acecode::ChatMessage& msg) {
+    if (!msg.metadata.is_object() || !msg.metadata.contains("turn_timing")) return {};
+    return msg.metadata["turn_timing"].dump();
+}
+
+void add_retained_turn_timing_message(
+    std::unordered_map<std::string, std::vector<acecode::ChatMessage>>& out,
+    std::unordered_set<std::string>& seen,
+    const std::set<std::string>& retained_user_uuids,
+    const acecode::ChatMessage& msg) {
+    auto timing = acecode::decode_turn_timing(
+        msg.metadata.is_object() ? msg.metadata.value("turn_timing", nlohmann::json{}) : nlohmann::json{});
+    if (!timing.has_value()) return;
+    if (!retained_user_uuids.count(timing->user_message_uuid)) return;
+    const std::string key = turn_timing_dedupe_key(msg);
+    if (!key.empty() && !seen.insert(key).second) return;
+    out[timing->user_message_uuid].push_back(msg);
+}
+
+std::unordered_map<std::string, std::vector<acecode::ChatMessage>>
+collect_retained_turn_timing_messages(
+    const std::vector<acecode::ChatMessage>& existing_messages,
+    const std::vector<acecode::ChatMessage>& retained_messages,
+    const std::set<std::string>& retained_user_uuids) {
+    std::unordered_map<std::string, std::vector<acecode::ChatMessage>> out;
+    std::unordered_set<std::string> seen;
+    for (const auto& msg : existing_messages) {
+        add_retained_turn_timing_message(out, seen, retained_user_uuids, msg);
+    }
+    for (const auto& msg : retained_messages) {
+        add_retained_turn_timing_message(out, seen, retained_user_uuids, msg);
+    }
+    return out;
 }
 
 void add_usage_to_session_total(acecode::TokenUsage& total,
@@ -252,21 +289,25 @@ bool SessionManager::replace_active_messages(const std::vector<ChatMessage>& mes
         }
     }
 
+    const auto existing_messages = SessionStorage::load_messages(jsonl_path_);
     std::unordered_map<std::string, std::vector<ChatMessage>> checkpoints_by_user;
-    for (const auto& existing : SessionStorage::load_messages(jsonl_path_)) {
+    for (const auto& existing : existing_messages) {
         auto snapshot = FileCheckpointStore::decode_snapshot_message(existing);
         if (!snapshot.has_value()) continue;
         if (retained_user_uuids.count(snapshot->message_uuid)) {
             checkpoints_by_user[snapshot->message_uuid].push_back(existing);
         }
     }
+    auto timing_by_user = collect_retained_turn_timing_messages(
+        existing_messages, messages, retained_user_uuids);
 
     std::vector<ChatMessage> rewritten;
-    rewritten.reserve(messages.size() + checkpoints_by_user.size());
+    rewritten.reserve(messages.size() + checkpoints_by_user.size() + timing_by_user.size());
     last_user_summary_.clear();
     turn_count_ = 0;
     for (const auto& msg : messages) {
         if (is_file_checkpoint_message(msg)) continue;
+        if (is_turn_timing_message(msg)) continue;
         rewritten.push_back(msg);
         if (is_visible_user_turn_message(msg)) {
             turn_count_++;
@@ -276,6 +317,10 @@ bool SessionManager::replace_active_messages(const std::vector<ChatMessage>& mes
             auto it = checkpoints_by_user.find(msg.uuid);
             if (it != checkpoints_by_user.end()) {
                 rewritten.insert(rewritten.end(), it->second.begin(), it->second.end());
+            }
+            auto timing_it = timing_by_user.find(msg.uuid);
+            if (timing_it != timing_by_user.end()) {
+                rewritten.insert(rewritten.end(), timing_it->second.begin(), timing_it->second.end());
             }
         }
     }
@@ -501,6 +546,8 @@ std::string SessionManager::fork_active_session(const std::vector<ChatMessage>& 
     const std::string previous_session_id = session_id_;
     const std::string new_session_id = SessionStorage::generate_session_id();
     auto checkpoint_meta = checkpoint_store_.fork_to_session(new_session_id, retained_user_uuids);
+    auto timing_by_user = collect_retained_turn_timing_messages(
+        SessionStorage::load_messages(jsonl_path_), retained_prefix, retained_user_uuids);
 
     release_writer_lease_locked();
 
@@ -535,10 +582,18 @@ std::string SessionManager::fork_active_session(const std::vector<ChatMessage>& 
 
     for (const auto& msg : retained_prefix) {
         if (is_file_checkpoint_message(msg)) continue;
+        if (is_turn_timing_message(msg)) continue;
         SessionStorage::append_message(jsonl_path_, msg);
         message_count_++;
         if (is_visible_user_turn_message(msg)) {
             turn_count_++;
+            auto timing_it = timing_by_user.find(msg.uuid);
+            if (timing_it != timing_by_user.end()) {
+                for (const auto& timing_msg : timing_it->second) {
+                    SessionStorage::append_message(jsonl_path_, timing_msg);
+                    message_count_++;
+                }
+            }
         }
     }
     for (const auto& msg : checkpoint_meta) {
@@ -583,6 +638,16 @@ std::string SessionManager::fork_session_to_new_id(
     const std::string new_session_id = SessionStorage::generate_session_id();
     const std::string new_jsonl = SessionStorage::session_path(project_dir_, new_session_id);
     const std::string new_meta  = SessionStorage::meta_path(project_dir_, new_session_id);
+    std::set<std::string> retained_user_uuids;
+    for (const auto& msg : retained_prefix) {
+        if (msg.role == "user" && !msg.uuid.empty()) {
+            retained_user_uuids.insert(msg.uuid);
+        }
+    }
+    auto timing_by_user = collect_retained_turn_timing_messages(
+        jsonl_path_.empty() ? std::vector<ChatMessage>{} : SessionStorage::load_messages(jsonl_path_),
+        retained_prefix,
+        retained_user_uuids);
 
     // 写新 jsonl(过滤 file_checkpoint 元消息;新 session 不继承 checkpoints)
     int count = 0;
@@ -592,10 +657,18 @@ std::string SessionManager::fork_session_to_new_id(
     try {
         for (const auto& msg : retained_prefix) {
             if (is_file_checkpoint_message(msg)) continue;
+            if (is_turn_timing_message(msg)) continue;
             SessionStorage::append_message(new_jsonl, msg);
             count++;
             if (is_visible_user_turn_message(msg)) {
                 turn_count++;
+                auto timing_it = timing_by_user.find(msg.uuid);
+                if (timing_it != timing_by_user.end()) {
+                    for (const auto& timing_msg : timing_it->second) {
+                        SessionStorage::append_message(new_jsonl, timing_msg);
+                        count++;
+                    }
+                }
             }
             if (is_visible_user_turn_message(msg) && !msg.content.empty()) {
                 last_user_summary = extract_summary(msg.content);

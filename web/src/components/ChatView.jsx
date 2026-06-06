@@ -64,6 +64,12 @@ import { buildAssistantRunDirectives } from '../lib/assistantRunDirectives.js';
 import { activityChromeState } from '../lib/assistantAvatarDisplay.js';
 import { notifySessionListChanged } from '../lib/sessionListEvents.js';
 import {
+  CHAT_TAIL_FOLLOW_STATE,
+  chatScrollMetrics,
+  nextChatTailFollowState,
+  shouldAutoFollowChatTail,
+} from '../lib/chatScrollFollow.js';
+import {
   DESKTOP_CONTEXT_ACTION_EVENT,
   DESKTOP_CONTEXT_ACTIONS,
 } from '../lib/desktopContextMenu.js';
@@ -431,6 +437,8 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   const [changeDockBottomPadding, setChangeDockBottomPadding] = useState(0);
   const [expandedActivityKeys, setExpandedActivityKeys] = useState(() => new Set());
   const scrollRef = useRef(null);
+  const tailFollowStateRef = useRef(CHAT_TAIL_FOLLOW_STATE.FOLLOWING);
+  const lastUserTurnKeyRef = useRef('');
   const inputRef = useRef(null);
   const layoutRef = useRef(null);
   const sidePanelResizeActiveRef = useRef(false);
@@ -460,6 +468,15 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     () => projectCollapsedTranscriptItems(rawItems, { deferTrailingToolSummary: busy }),
     [rawItems, busy],
   );
+  const lastUserTurnKey = useMemo(() => {
+    for (let index = rawItems.length - 1; index >= 0; index -= 1) {
+      const item = rawItems[index];
+      if (item?.kind === 'msg' && item.role === 'user') {
+        return String(item.messageId || item.id || index);
+      }
+    }
+    return '';
+  }, [rawItems]);
   // 决定每条 assistant 消息是否需要显示头像 + ACECode 名牌:同一 run 中只首条显示,
   // 空内容(且非 streaming)直接隐藏整行。详见 lib/assistantRunDirectives.js。
   const assistantRunDirectives = useMemo(
@@ -894,6 +911,26 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     });
   }, [measureStickyContext]);
 
+  const setTailFollowFromAction = useCallback((action) => {
+    tailFollowStateRef.current = nextChatTailFollowState(tailFollowStateRef.current, action);
+  }, []);
+
+  const pauseTailFollowForReview = useCallback(() => {
+    if (!busy && transcriptStatus !== 'running') return;
+    setTailFollowFromAction({ type: 'review_pause' });
+  }, [busy, setTailFollowFromAction, transcriptStatus]);
+
+  const handleMessagesScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (el) {
+      setTailFollowFromAction({
+        type: 'scroll',
+        metrics: chatScrollMetrics(el),
+      });
+    }
+    scheduleStickyMeasure();
+  }, [scheduleStickyMeasure, setTailFollowFromAction]);
+
   const jumpToStickyUserSource = useCallback((context) => {
     const el = scrollRef.current;
     const targetId = String(context?.itemId || '');
@@ -937,9 +974,25 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     restoreChatInputFocusSoon(false);
   }, [composerSubmitting, restoreChatInputFocusSoon]);
 
-  // 自动滚到底。审查栏会异步测量高度并给消息区补 bottom padding,
-  // 因此需要在 padding 生效后再补几帧滚动,否则切换会话时会停在底部上方。
   useLayoutEffect(() => {
+    setTailFollowFromAction({ type: 'session_reset' });
+    lastUserTurnKeyRef.current = '';
+  }, [sid, setTailFollowFromAction]);
+
+  useEffect(() => {
+    if (!sid || !lastUserTurnKey) return;
+    const prev = lastUserTurnKeyRef.current;
+    if (!prev || prev !== lastUserTurnKey) {
+      setTailFollowFromAction({ type: 'new_turn' });
+    }
+    lastUserTurnKeyRef.current = lastUserTurnKey;
+  }, [lastUserTurnKey, setTailFollowFromAction, sid]);
+
+  // 只在用户仍跟随底部时自动滚到底。审查栏会异步测量高度并给消息区补
+  // bottom padding,因此跟随模式下仍需在 padding 生效后补几帧滚动。
+  useLayoutEffect(() => {
+    if (!shouldAutoFollowChatTail(tailFollowStateRef.current)) return undefined;
+
     let raf1 = 0;
     let raf2 = 0;
     const scrollToBottom = () => {
@@ -1129,6 +1182,9 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     if (!payload.text.trim() && !hasExtras) return;
     const route = inputRouteForText(payload.text);
     const isBuiltin = !hasExtras && route.kind === 'builtin';
+    if (!isBuiltin || hasExtras) {
+      setTailFollowFromAction({ type: 'new_turn' });
+    }
     if (!sid) {
       // 自动新建会话。普通消息由 daemon auto_start 接管;builtin 先创建
       // 空会话,再走专门 command endpoint。
@@ -1182,7 +1238,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         applyEvent({ type: 'busy_changed', payload: { busy: false } }, { emitEffects: false });
       })
       .finally(() => setComposerSubmitting(false));
-  }, [sid, busy, api, homeSubmitting, recordInputHistory, enqueueInput, applyEvent, setTranscriptTitle, sendInputOrBuiltin, composerSubmitting, clearCurrentSessionDraft, composerAttachments, composerContexts, clearComposerExtras, createHomeComposerSession, restoreChatInputFocusSoon]);
+  }, [sid, busy, api, homeSubmitting, recordInputHistory, enqueueInput, applyEvent, setTranscriptTitle, sendInputOrBuiltin, composerSubmitting, clearCurrentSessionDraft, composerAttachments, composerContexts, clearComposerExtras, createHomeComposerSession, restoreChatInputFocusSoon, setTailFollowFromAction]);
 
   const drainQueuedInput = useCallback(() => {
     const targetSid = sidRef.current;
@@ -1191,6 +1247,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     if (!queuedItem) return;
 
     drainRef.current = true;
+    setTailFollowFromAction({ type: 'new_turn' });
     updateQueueState((prev) => markQueuedInputSending(prev, queuedItem.queued.id));
     const queuedPayload = queuedItem.queued?.payload || queuedItem.content;
     sendInputOrBuiltin(targetSid, queuedPayload)
@@ -1210,7 +1267,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
       .finally(() => {
         drainRef.current = false;
       });
-  }, [applyEvent, busy, sendInputOrBuiltin, updateQueueState]);
+  }, [applyEvent, busy, sendInputOrBuiltin, setTailFollowFromAction, updateQueueState]);
 
   const prevBusyRef = useRef(busy);
   useEffect(() => {
@@ -1482,13 +1539,14 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   }, [sid]);
 
   const toggleActivitySummary = useCallback((key) => {
+    pauseTailFollowForReview();
     setExpandedActivityKeys((prev) => {
       const next = new Set(prev);
       if (next.has(key)) next.delete(key);
       else next.add(key);
       return next;
     });
-  }, []);
+  }, [pauseTailFollowForReview]);
 
   const openReviewPanel = useCallback(() => {
     if (!showSidePanel || !sid) return;
@@ -1701,7 +1759,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
           {...messageContextAttrs(child)}
         >
           {child.kind === 'tool' ? (
-            <ToolBlock entry={child.tool} />
+            <ToolBlock entry={child.tool} onReviewToggle={pauseTailFollowForReview} />
           ) : (
             <Message
               role={child.role}
@@ -1761,7 +1819,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
       <div className="relative flex-1 min-h-0">
         <div
           ref={scrollRef}
-          onScroll={scheduleStickyMeasure}
+          onScroll={handleMessagesScroll}
           className="h-full overflow-y-auto px-3.5 py-3 flex flex-col gap-3"
           style={changeDockBottomPadding > 0 ? { paddingBottom: changeDockBottomPadding } : undefined}
         >
@@ -1844,7 +1902,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
                   {...messageContextAttrs(it)}
                 >
                   {it.kind === 'tool' ? (
-                    <ToolBlock entry={it.tool} />
+                    <ToolBlock entry={it.tool} onReviewToggle={pauseTailFollowForReview} />
                   ) : (
                     <Message
                       role={it.role} content={it.content} ts={it.ts}

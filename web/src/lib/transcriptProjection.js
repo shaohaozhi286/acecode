@@ -249,6 +249,25 @@ function collapsedTimestamps(items, fallbackEndItem) {
   return { startTs, endTs };
 }
 
+function formatPersistedDurationMs(durationMs) {
+  if (!Number.isFinite(durationMs) || durationMs < 0) return '';
+  const seconds = Math.max(0, Math.round(durationMs / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  return `${minutes}m ${rest}s`;
+}
+
+function persistedTurnDurationMs(items) {
+  for (const item of items || []) {
+    const direct = Number(item?.turnDurationMs);
+    if (Number.isFinite(direct) && direct >= 0) return direct;
+    const nested = Number(item?.turnTiming?.durationMs ?? item?.metadata?.turnTiming?.durationMs);
+    if (Number.isFinite(nested) && nested >= 0) return nested;
+  }
+  return null;
+}
+
 function makeToolSummaryItem(items) {
   const { startTs, endTs } = collapsedTimestamps(items);
   return {
@@ -269,7 +288,10 @@ function makeProcessedDetailItems(items) {
 
 function makeProcessedItem(items, endItem) {
   const { startTs, endTs } = collapsedTimestamps(items, endItem);
-  const duration = startTs && endTs ? formatDurationMs(endTs - startTs) : '';
+  const persistedDuration = persistedTurnDurationMs(items);
+  const duration = persistedDuration != null
+    ? formatPersistedDurationMs(persistedDuration)
+    : (startTs && endTs ? formatDurationMs(endTs - startTs) : '');
   return {
     kind: 'activity_summary',
     mode: 'processed',

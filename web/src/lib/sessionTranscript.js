@@ -27,6 +27,18 @@ function cloneToolMap(toolMap) {
   return new Map();
 }
 
+function cloneTurnTimings(turnTimings) {
+  const out = new Map();
+  const entries = turnTimings instanceof Map
+    ? turnTimings.entries()
+    : Object.entries(turnTimings && typeof turnTimings === 'object' ? turnTimings : {});
+  for (const [key, value] of entries) {
+    if (!key || !value || typeof value !== 'object') continue;
+    out.set(String(key), { ...value });
+  }
+  return out;
+}
+
 function cloneTokenUsage(tokenUsage) {
   if (!tokenUsage || typeof tokenUsage !== 'object') return null;
   return { ...tokenUsage };
@@ -78,6 +90,7 @@ function cloneState(state) {
     ...state,
     items: Array.isArray(state.items) ? state.items : [],
     toolMap: cloneToolMap(state.toolMap),
+    turnTimings: cloneTurnTimings(state.turnTimings),
     tokenUsage: cloneTokenUsage(state.tokenUsage),
     goal: cloneGoal(state.goal),
     todos: cloneTodos(state.todos),
@@ -180,6 +193,27 @@ function readRuntimeTurnCount(data) {
   const value = Number(raw);
   if (!Number.isFinite(value)) return null;
   return Math.max(0, Math.trunc(value));
+}
+
+function normalizeTurnTimingRecord(message) {
+  const metadata = message?.metadata;
+  const raw = metadata && typeof metadata === 'object' && !Array.isArray(metadata)
+    ? metadata.turn_timing
+    : null;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const userMessageUuid = String(raw.user_message_uuid || raw.userMessageUuid || '').trim();
+  if (!userMessageUuid) return null;
+  const startedAtMs = Number(raw.started_at_ms ?? raw.startedAtMs);
+  const completedAtMs = Number(raw.completed_at_ms ?? raw.completedAtMs);
+  const durationMs = Number(raw.duration_ms ?? raw.durationMs);
+  const status = String(raw.status || '').trim();
+  return {
+    userMessageUuid,
+    startedAtMs: Number.isFinite(startedAtMs) ? Math.max(0, Math.trunc(startedAtMs)) : 0,
+    completedAtMs: Number.isFinite(completedAtMs) ? Math.max(0, Math.trunc(completedAtMs)) : 0,
+    durationMs: Number.isFinite(durationMs) ? Math.max(0, Math.trunc(durationMs)) : 0,
+    status,
+  };
 }
 
 function normalizePersistedToolHunks(metadata) {
@@ -394,6 +428,43 @@ function visibleTranscriptMessages(messages) {
   return messages.filter((m) => !m?.is_meta && !m?.metadata?.hidden_goal_context);
 }
 
+function splitTranscriptMessages(messages) {
+  const visible = visibleTranscriptMessages(messages);
+  const transcriptMessages = [];
+  const turnTimings = new Map();
+  for (const message of visible) {
+    const timing = normalizeTurnTimingRecord(message);
+    if (timing) {
+      turnTimings.set(timing.userMessageUuid, timing);
+      continue;
+    }
+    transcriptMessages.push(message);
+  }
+  return { messages: transcriptMessages, turnTimings };
+}
+
+function itemUserMessageUuid(item) {
+  return String(item?.messageId || item?.id || item?.metadata?.user_message_uuid || '').trim();
+}
+
+function applyTurnTimingsToItems(items, turnTimings) {
+  if (!(turnTimings instanceof Map) || turnTimings.size === 0) return items;
+  let activeTiming = null;
+  return items.map((item) => {
+    if (item?.kind === 'msg' && item.role === 'user') {
+      activeTiming = turnTimings.get(itemUserMessageUuid(item)) || null;
+      return item;
+    }
+    if (!activeTiming) return item;
+    if (item?.kind !== 'msg' && item?.kind !== 'tool') return item;
+    return {
+      ...item,
+      turnTiming: activeTiming,
+      turnDurationMs: activeTiming.durationMs,
+    };
+  });
+}
+
 function toolKey(payload = {}) {
   if (payload.tool_call_id || payload.call_id || payload.id) {
     return payload.tool_call_id || payload.call_id || payload.id;
@@ -426,6 +497,7 @@ export function createTranscriptState(overrides = {}) {
     loadState: 'idle',
     streamingId: null,
     toolMap: new Map(),
+    turnTimings: new Map(),
     nextItemId: 1,
     error: '',
     tokenUsage: null,
@@ -440,6 +512,7 @@ export function createTranscriptState(overrides = {}) {
     lastAssistantText: '',
     ...overrides,
     toolMap: cloneToolMap(overrides.toolMap),
+    turnTimings: cloneTurnTimings(overrides.turnTimings),
     tokenUsage: cloneTokenUsage(overrides.tokenUsage),
     goal: cloneGoal(overrides.goal),
     todos: cloneTodos(overrides.todos),
@@ -469,8 +542,9 @@ export function reduceTranscriptEvent(state, msg) {
     case 'transcript_replace': {
       finalizeStreaming(next);
       next.toolMap = new Map();
-      const messages = visibleTranscriptMessages(p.messages);
-      next.items = historyItemsFromMessages(next, messages);
+      const { messages, turnTimings } = splitTranscriptMessages(p.messages);
+      next.turnTimings = turnTimings;
+      next.items = applyTurnTimingsToItems(historyItemsFromMessages(next, messages), turnTimings);
       const restoredTitle = titleFromMessages(messages);
       if (restoredTitle) next.title = restoredTitle;
       next.tokenUsage = null;
@@ -495,6 +569,12 @@ export function reduceTranscriptEvent(state, msg) {
     }
     case 'message': {
       const role = p.role || 'system';
+      const timing = normalizeTurnTimingRecord(p);
+      if (timing) {
+        next.turnTimings.set(timing.userMessageUuid, timing);
+        next.items = applyTurnTimingsToItems(next.items, next.turnTimings);
+        break;
+      }
       if (role === 'assistant' && next.streamingId != null) {
         const currentStreamingId = next.streamingId;
         next.streamingId = null;
@@ -729,9 +809,10 @@ export function loadTranscriptHistory(state, data = {}) {
     loadState: 'loaded',
   });
   const effects = [];
-  const msgs = visibleTranscriptMessages(data.messages);
+  const { messages: msgs, turnTimings } = splitTranscriptMessages(data.messages);
 
-  next.items = historyItemsFromMessages(next, msgs);
+  next.turnTimings = turnTimings;
+  next.items = applyTurnTimingsToItems(historyItemsFromMessages(next, msgs), turnTimings);
 
   const restoredTitle = titleFromMessages(msgs);
   if (restoredTitle) next.title = restoredTitle;
