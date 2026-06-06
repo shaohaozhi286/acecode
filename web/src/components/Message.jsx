@@ -1,4 +1,4 @@
-// 单条消息渲染:user 气泡(右)/ assistant 头像+正文(左)/ system 灰条。
+// 单条消息渲染:user 气泡(右)/ assistant 正文(左)/ system 灰条。
 // assistant 走 markdown-it 渲染(见 lib/markdown.js)。
 //
 // hover actions(codex 风格):user 消息和 assistant run 最后一条消息悬停时浮出
@@ -172,8 +172,7 @@ function AssistantBubble({
       toast({ kind: 'err', text: '复制失败:' + (e?.message || '') });
     }
   }, []);
-  // continuation = true: 同一个 assistant run 中的非首条, 不重复显示头像 + ACECode 名牌,
-  // 用一个等宽空白占位让正文与首条对齐(头像宽 6 + gap-2 = 总 32px, 与 flex gap 一致)。
+  // ACECode 头像永久隐藏;保留等宽空白占位,避免消息正文相对旧布局跳动。
   return (
     <div className={`flex ${chrome.gapClass} max-w-[88%] group relative`}>
       {chrome.showAvatarPlaceholder ? (
@@ -273,7 +272,7 @@ export const Message = memo(function Message({
   onFork,
   continuation,
   showFooter = true,
-  showAceCodeAvatar = true,
+  showAceCodeAvatar = false,
 }) {
   if (role === 'user') {
     // expand-webui-skill-commands:daemon 把 /<skill> args 在送给 LLM 前展开为

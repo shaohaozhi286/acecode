@@ -17,6 +17,7 @@ import { QueueCardList } from './QueueCardList.jsx';
 import { QuestionPicker } from './QuestionPicker.jsx';
 import { StickyUserContext } from './StickyUserContext.jsx';
 import { SidePanel } from './SidePanel.jsx';
+import { PreviewDetailsPanel } from './PreviewDetailsPanel.jsx';
 import { StatusBar } from './StatusBar.jsx';
 import { ChangeGlassDock } from './ChangeReview.jsx';
 import { toast } from './Toast.jsx';
@@ -63,6 +64,19 @@ import { fileTreeRefreshKeyFromItems } from '../lib/fileTreeRefresh.js';
 import { buildAssistantRunDirectives } from '../lib/assistantRunDirectives.js';
 import { activityChromeState } from '../lib/assistantAvatarDisplay.js';
 import { notifySessionListChanged } from '../lib/sessionListEvents.js';
+import { MIN_CHAT_WIDTH, solveSingleContentLayout } from '../lib/singleLayout.js';
+import {
+  PREVIEW_TAB_TYPES,
+  activePreviewTab,
+  activatePreviewTab,
+  closePreviewTab,
+  closeVisiblePreviewTabs,
+  openFileTab,
+  openSessionChangesTab,
+  previewScopeKey,
+  updateSessionChangesTab,
+  visiblePreviewTabs,
+} from '../lib/previewTabs.js';
 import {
   CHAT_TAIL_FOLLOW_STATE,
   chatScrollMetrics,
@@ -167,7 +181,7 @@ function formatElapsedSeconds(startedAtMs, nowMs) {
   return `${minutes}m ${rest}s`;
 }
 
-function ActivityIndicator({ activity, showAceCodeAvatar = true }) {
+function ActivityIndicator({ activity, showAceCodeAvatar = false }) {
   const [nowMs, setNowMs] = useState(() => Date.now());
   useEffect(() => {
     setNowMs(Date.now());
@@ -215,41 +229,60 @@ function ActivityIndicator({ activity, showAceCodeAvatar = true }) {
   );
 }
 
-function TodoChecklist({ todos = [], summary = null }) {
+const EMPTY_TODO_SUMMARY = Object.freeze({
+  total: 0,
+  pending: 0,
+  in_progress: 0,
+  completed: 0,
+  cancelled: 0,
+});
+
+function TodoChecklist({ todos = [], summary = null, onClear, clearing = false }) {
   const checklist = todoChecklistPresentation(todos, summary);
   if (!checklist.visible) return null;
 
   return (
-    <div className="border-t border-border bg-surface/95 px-3 py-2 shrink-0">
-      <div className="mx-auto max-w-4xl rounded-md border border-border bg-surface-hi/65 px-2.5 py-2">
-        <div className="flex items-center justify-between gap-3 text-[11px] text-fg-mute mb-1.5">
-          <span className="font-medium text-fg">TodoWrite</span>
-          <span className="tabular-nums">{checklist.done}/{checklist.total}</span>
-        </div>
-        <div className="grid gap-1">
-          {checklist.items.map((item) => {
-            return (
-              <div
-                key={item.key}
-                className="grid grid-cols-[18px_minmax(0,1fr)] items-start gap-2 text-[12px] leading-5"
-                data-todo-status={item.status}
-              >
-                <span
-                  className={clsx('mt-[2px] inline-flex h-[14px] w-[14px] items-center justify-center rounded-sm border', item.markerClassName)}
-                  title={item.markerLabel}
-                  aria-label={item.markerLabel}
+    <div className="ace-todo-glass-wrap shrink-0">
+      <div className="ace-todo-glass-dock" role="group" aria-label={`待办事项 (${checklist.done}/${checklist.total})`}>
+        <div className="ace-todo-glass-content">
+          <div className="ace-todo-glass-title">
+            待办事项 ({checklist.done}/{checklist.total})
+          </div>
+          <div className="ace-todo-glass-list">
+            {checklist.items.map((item) => {
+              return (
+                <div
+                  key={item.key}
+                  className="ace-todo-glass-row"
+                  data-todo-status={item.status}
                 >
-                  {item.icon === 'check' && <VsIcon name="ok" size={10} mono={false} />}
-                  {item.icon === 'dot' && <span className="h-1.5 w-1.5 rounded-full bg-warn" />}
-                  {item.icon === 'dash' && <span className="h-px w-2 bg-fg-mute" />}
-                </span>
-                <span className={clsx('min-w-0 break-words', item.textClassName)}>
-                  {item.content}
-                </span>
-              </div>
-            );
-          })}
+                  <span
+                    className={clsx('ace-todo-glass-marker', item.markerClassName)}
+                    title={item.markerLabel}
+                    aria-label={item.markerLabel}
+                  >
+                    {item.icon === 'check' && <VsIcon name="ok" size={10} mono={false} />}
+                    {item.icon === 'dot' && <span className="h-1.5 w-1.5 rounded-full bg-warn" />}
+                    {item.icon === 'dash' && <span className="h-px w-2 bg-fg-mute" />}
+                  </span>
+                  <span className={clsx('ace-todo-glass-text', item.textClassName)}>
+                    {item.content}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
         </div>
+        <button
+          type="button"
+          className="ace-todo-glass-clear"
+          onClick={onClear}
+          disabled={!onClear || clearing}
+          title="清空待办事项"
+          aria-label="清空待办事项"
+        >
+          <VsIcon name="clearAll" size={16} alt="清空待办事项" />
+        </button>
       </div>
     </div>
   );
@@ -360,7 +393,7 @@ function isRealWorkspaceHash(hash) {
   return !!hash && hash !== '__local__';
 }
 
-export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWorkspaceChange, health, onPermissionRequest, onQuestionRequest, questionRequest, onQuestionResolve, onPermissionModeChanged, showSidePanel = false, sidePanelWidth = 280, onSidePanelResize, sidePanelCollapsed = false, onToggleSidePanel, sidePanelMaximized = false, onToggleSidePanelMaximized, showAceCodeAvatar = true }) {
+export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWorkspaceChange, health, onPermissionRequest, onQuestionRequest, questionRequest, onQuestionResolve, onPermissionModeChanged, showSidePanel = false, sidePanelWidth = 280, onSidePanelResize, previewPanelWidth = 640, onPreviewPanelResize, onPreviewPanelVisibleChange, sidePanelCollapsed = false, onToggleSidePanel, sidePanelMaximized = false, onToggleSidePanelMaximized, showAceCodeAvatar = false }) {
   const ref = useMemo(() => normalizeSessionRef(sessionRef, sessionId), [sessionRef, sessionId]);
   const sid = ref?.sessionId || ref?.id || '';
   const sidRef = useRef(sid);
@@ -427,7 +460,9 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   const [permissionMode, setPermissionMode] = useState('default');
   const [permissionSwitching, setPermissionSwitching] = useState(false);
   const [goalStopping, setGoalStopping] = useState(false);
+  const [todoClearing, setTodoClearing] = useState(false);
   const [reviewRequest, setReviewRequest] = useState(0);
+  const [previewTabState, setPreviewTabState] = useState({});
   const [dismissedDockSignatures, setDismissedDockSignatures] = usePreference(
     CHANGE_DOCK_DISMISSALS_STORAGE_KEY,
     {},
@@ -441,7 +476,9 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   const lastUserTurnKeyRef = useRef('');
   const inputRef = useRef(null);
   const layoutRef = useRef(null);
+  const [layoutWidth, setLayoutWidth] = useState(0);
   const sidePanelResizeActiveRef = useRef(false);
+  const previewPanelResizeActiveRef = useRef(false);
   const [composerValue, setComposerValue] = useState('');
   const [composerAttachments, setComposerAttachments] = useState([]);
   const [composerContexts, setComposerContexts] = useState([]);
@@ -477,8 +514,8 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     }
     return '';
   }, [rawItems]);
-  // 决定每条 assistant 消息是否需要显示头像 + ACECode 名牌:同一 run 中只首条显示,
-  // 空内容(且非 streaming)直接隐藏整行。详见 lib/assistantRunDirectives.js。
+  // 决定每条 assistant 消息的 run 边界;ACECode 头像永久隐藏,空内容(且非
+  // streaming)直接隐藏整行。详见 lib/assistantRunDirectives.js。
   const assistantRunDirectives = useMemo(
     () => buildAssistantRunDirectives(renderedItems),
     [renderedItems],
@@ -1308,6 +1345,37 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     connection.sendAbort(sid);
   }, [applyEvent, sid]);
 
+  const clearSessionTodos = useCallback(async () => {
+    if (!sid || todoClearing) return;
+    const previousTodos = todos;
+    const previousSummary = todoSummary;
+    setTodoClearing(true);
+    applyEvent({
+      type: 'todo_updated',
+      payload: {
+        session_id: sid,
+        todos: [],
+        summary: EMPTY_TODO_SUMMARY,
+      },
+    }, { emitEffects: false });
+
+    try {
+      await api.clearSessionTodos(sid, ref?.workspaceHash || '');
+    } catch (e) {
+      applyEvent({
+        type: 'todo_updated',
+        payload: {
+          session_id: sid,
+          todos: previousTodos,
+          summary: previousSummary,
+        },
+      }, { emitEffects: false });
+      toast({ kind: 'err', text: '清空待办事项失败:' + (e?.message || '') });
+    } finally {
+      setTodoClearing(false);
+    }
+  }, [api, applyEvent, ref?.workspaceHash, sid, todoClearing, todos, todoSummary]);
+
   const goalActive = goal?.status === 'active';
 
   useEffect(() => {
@@ -1372,6 +1440,19 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     }
   }, [api, onPermissionModeChanged, permissionMode, permissionSwitching, sid]);
 
+  useLayoutEffect(() => {
+    const element = layoutRef.current;
+    if (!element) return undefined;
+    const measure = () => {
+      setLayoutWidth(Math.ceil(element.getBoundingClientRect().width || 0));
+    };
+    measure();
+    if (typeof ResizeObserver === 'undefined') return undefined;
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [sid]);
+
   const startSidePanelResize = useCallback((event) => {
     if (!showSidePanel || !sid || !onSidePanelResize) return;
     if (event.button != null && event.button !== 0) return;
@@ -1414,6 +1495,49 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
       onSidePanelResize(sidePanelWidth + delta, contentWidth);
     }
   }, [onSidePanelResize, sidePanelWidth]);
+
+  const startPreviewPanelResize = useCallback((event) => {
+    if (!sid || !onPreviewPanelResize) return;
+    if (event.button != null && event.button !== 0) return;
+    if (previewPanelResizeActiveRef.current) return;
+    previewPanelResizeActiveRef.current = true;
+    event.preventDefault();
+    const contentWidth = layoutRef.current?.getBoundingClientRect().width || 0;
+    const startX = event.clientX;
+    const startWidth = previewPanelWidth;
+    document.body.classList.add('ace-resizing');
+    if (event.pointerId != null) event.currentTarget.setPointerCapture?.(event.pointerId);
+
+    const onMove = (moveEvent) => {
+      onPreviewPanelResize(startWidth + startX - moveEvent.clientX, contentWidth);
+    };
+    const onStop = () => {
+      previewPanelResizeActiveRef.current = false;
+      document.body.classList.remove('ace-resizing');
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onStop);
+      window.removeEventListener('pointercancel', onStop);
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onStop);
+    };
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onStop, { once: true });
+    window.addEventListener('pointercancel', onStop, { once: true });
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onStop, { once: true });
+  }, [onPreviewPanelResize, previewPanelWidth, sid]);
+
+  const onPreviewPanelHandleKeyDown = useCallback((event) => {
+    if (!onPreviewPanelResize) return;
+    const step = event.shiftKey ? 32 : 12;
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+      event.preventDefault();
+      const delta = event.key === 'ArrowLeft' ? step : -step;
+      const contentWidth = layoutRef.current?.getBoundingClientRect().width || 0;
+      onPreviewPanelResize(previewPanelWidth + delta, contentWidth);
+    }
+  }, [onPreviewPanelResize, previewPanelWidth]);
 
   // fork: 调后端 POST /api/sessions/:id/fork,成功后切到新 session(同 ref)。
   // 失败弹 toast 不打断当前 session。新 session 不会自动启 turn,
@@ -1551,12 +1675,8 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   const openReviewPanel = useCallback(() => {
     if (!showSidePanel || !sid) return;
     if (sidePanelCollapsed) onToggleSidePanel?.();
-    if (onSidePanelResize && sidePanelWidth < 500) {
-      const contentWidth = layoutRef.current?.getBoundingClientRect().width || 0;
-      onSidePanelResize(520, contentWidth);
-    }
     setReviewRequest((n) => n + 1);
-  }, [onSidePanelResize, onToggleSidePanel, showSidePanel, sid, sidePanelCollapsed, sidePanelWidth]);
+  }, [onToggleSidePanel, showSidePanel, sid, sidePanelCollapsed]);
 
   const dismissChangeDock = useCallback(() => {
     if (!changeDockDismissalKey || !changeSignature) return;
@@ -1578,6 +1698,108 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     onQuestionResolve?.();
     requestAnimationFrame(() => inputRef.current?.focus());
   }, [onQuestionResolve]);
+
+  const sidePanelCwd = ref?.cwd || health?.cwd || '';
+  const sidePanelMounted = showSidePanel && !!sid;
+  const previewScope = useMemo(
+    () => previewScopeKey({ cwd: sidePanelCwd, workspaceHash: ref?.workspaceHash || '' }),
+    [ref?.workspaceHash, sidePanelCwd],
+  );
+  const previewContext = useMemo(
+    () => ({ scopeKey: previewScope, sessionId: sid }),
+    [previewScope, sid],
+  );
+  const previewTabs = useMemo(
+    () => visiblePreviewTabs(previewTabState, previewContext),
+    [previewContext, previewTabState],
+  );
+  const activePreview = useMemo(
+    () => activePreviewTab(previewTabState, previewContext),
+    [previewContext, previewTabState],
+  );
+  const previewPanelVisible = previewTabs.length > 0;
+  const previewPanelMaximized = sidePanelMaximized && previewPanelVisible;
+  const selectedChangeFile = activePreview?.type === PREVIEW_TAB_TYPES.SESSION_CHANGES
+    ? activePreview.expandedFile || ''
+    : '';
+  const contentLayout = useMemo(() => solveSingleContentLayout({
+    contentWidth: layoutWidth,
+    sidePanelWidth,
+    previewPanelWidth,
+    sidePanelVisible: sidePanelMounted,
+    sidePanelCollapsed,
+    previewPanelVisible,
+    previewPanelMaximized,
+  }), [
+    layoutWidth,
+    previewPanelMaximized,
+    previewPanelVisible,
+    previewPanelWidth,
+    sidePanelCollapsed,
+    sidePanelMounted,
+    sidePanelWidth,
+  ]);
+  const effectiveChatWidth = layoutWidth > 0 ? contentLayout.chatWidth : 0;
+  const effectivePreviewPanelWidth = layoutWidth > 0 ? contentLayout.previewPanelWidth : previewPanelWidth;
+  const effectiveSidePanelWidth = layoutWidth > 0 ? contentLayout.sidePanelWidth : sidePanelWidth;
+
+  useEffect(() => {
+    if (!sid) return;
+    setPreviewTabState((prev) => updateSessionChangesTab(prev, {
+      sessionId: sid,
+      fileCount: changeSummary.fileCount,
+    }));
+  }, [changeSummary.fileCount, sid]);
+
+  useEffect(() => {
+    onPreviewPanelVisibleChange?.(previewPanelVisible);
+  }, [onPreviewPanelVisibleChange, previewPanelVisible]);
+
+  const openFilePreview = useCallback((path) => {
+    if (!sid || !previewScope || !path) return;
+    setPreviewTabState((prev) => openFileTab(prev, {
+      scopeKey: previewScope,
+      sessionId: sid,
+      cwd: sidePanelCwd,
+      path,
+    }));
+  }, [previewScope, sid, sidePanelCwd]);
+
+  const openSessionChangePreview = useCallback((filePath) => {
+    if (!sid || !filePath) return;
+    setPreviewTabState((prev) => openSessionChangesTab(prev, {
+      scopeKey: previewScope,
+      sessionId: sid,
+      expandedFile: filePath,
+      fileCount: changeSummary.fileCount,
+    }));
+  }, [changeSummary.fileCount, previewScope, sid]);
+
+  const activatePreview = useCallback((tabKey) => {
+    setPreviewTabState((prev) => activatePreviewTab(prev, {
+      scopeKey: previewScope,
+      sessionId: sid,
+      tabKey,
+    }));
+  }, [previewScope, sid]);
+
+  const closePreview = useCallback((tabKey) => {
+    const closingLastVisibleTab = previewTabs.length <= 1;
+    setPreviewTabState((prev) => closePreviewTab(prev, {
+      scopeKey: previewScope,
+      sessionId: sid,
+      tabKey,
+    }));
+    if (closingLastVisibleTab && sidePanelMaximized) onToggleSidePanelMaximized?.();
+  }, [onToggleSidePanelMaximized, previewScope, previewTabs.length, sid, sidePanelMaximized]);
+
+  const closePreviewPanel = useCallback(() => {
+    setPreviewTabState((prev) => closeVisiblePreviewTabs(prev, {
+      scopeKey: previewScope,
+      sessionId: sid,
+    }));
+    if (sidePanelMaximized) onToggleSidePanelMaximized?.();
+  }, [onToggleSidePanelMaximized, previewScope, sid, sidePanelMaximized]);
 
   // 空态:没选会话
   if (!sid) {
@@ -1683,10 +1905,6 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     );
   }
 
-  const sidePanelCwd = ref?.cwd || health?.cwd || '';
-
-  const sidePanelMounted = showSidePanel && !!sid;
-
   function renderExpandedActivityItems(children, keyPrefix) {
     const list = Array.isArray(children) ? children : [];
     const directives = buildAssistantRunDirectives(list);
@@ -1780,15 +1998,35 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     });
   }
 
+  const chatColumnStyle = previewPanelMaximized
+    ? undefined
+    : (layoutWidth > 0
+      ? {
+          flex: `0 0 ${Math.max(0, effectiveChatWidth)}px`,
+          width: Math.max(0, effectiveChatWidth),
+          minWidth: Math.min(MIN_CHAT_WIDTH, Math.max(0, effectiveChatWidth)),
+        }
+      : { minWidth: MIN_CHAT_WIDTH });
+  const previewShellStyle = previewPanelMaximized
+    ? {
+        flex: '1 1 auto',
+        width: 'auto',
+      }
+    : {
+        width: Math.max(0, effectivePreviewPanelWidth),
+      };
+  const sidePanelShellStyle = {
+    width: sidePanelCollapsed ? 0 : Math.max(0, effectiveSidePanelWidth),
+  };
+
   return (
     <div ref={layoutRef} className="flex-1 flex min-w-0 ace-chat-layout">
       <div
         className={clsx(
           'flex-1 flex flex-col min-w-0 relative',
-          // 最大化时隐藏整个聊天主区,SidePanel 接管下方 ace-side-panel-shell
-          // 用 inline width:100% 撑满本 layout 的剩余空间。
-          sidePanelMaximized && 'hidden',
+          previewPanelMaximized && 'hidden',
         )}
+        style={chatColumnStyle}
       >
       <div className="h-9 px-3 flex items-center justify-between bg-surface border-b border-border shrink-0 gap-2">
         <div className="flex items-center gap-2 min-w-0">
@@ -1945,7 +2183,12 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         onCancel={cancelQueued}
         onRetry={retryQueued}
       />
-      <TodoChecklist todos={todos} summary={todoSummary} />
+      <TodoChecklist
+        todos={todos}
+        summary={todoSummary}
+        onClear={clearSessionTodos}
+        clearing={todoClearing}
+      />
       <InputBar
         ref={inputRef}
         busy={busy}
@@ -1977,11 +2220,44 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         onPermissionModeChange={switchPermissionMode}
       />
       </div>
+      {previewPanelVisible && !previewPanelMaximized && (
+        <div
+          role="separator"
+          aria-label="调整预览面板宽度"
+          aria-orientation="vertical"
+          tabIndex={0}
+          className="ace-resize-handle ace-resize-handle-preview"
+          onPointerDown={startPreviewPanelResize}
+          onMouseDown={startPreviewPanelResize}
+          onKeyDown={onPreviewPanelHandleKeyDown}
+          title="拖动调整预览面板宽度"
+        />
+      )}
+      {previewPanelVisible && (
+        <div
+          className="ace-preview-details-shell"
+          data-maximized={previewPanelMaximized ? 'true' : 'false'}
+          style={previewShellStyle}
+        >
+          <PreviewDetailsPanel
+            api={api}
+            cwd={sidePanelCwd}
+            tabs={previewTabs}
+            activeTab={activePreview}
+            changeGroups={changeGroups}
+            changeSummary={changeSummary}
+            refreshToken={fileTreeRefreshKey}
+            maximized={previewPanelMaximized}
+            onActivateTab={activatePreview}
+            onCloseTab={closePreview}
+            onCloseAll={closePreviewPanel}
+            onToggleMaximize={onToggleSidePanelMaximized}
+          />
+        </div>
+      )}
       {sidePanelMounted && (
         <>
-          {/* 最大化时:不显示拖拽手柄(没有左侧聊天区可对比着调宽度);
-              折叠时也不显示。 */}
-          {!sidePanelCollapsed && !sidePanelMaximized && (
+          {!sidePanelCollapsed && (
             <div
               role="separator"
               aria-label="调整右侧栏宽度"
@@ -1997,12 +2273,8 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
           <div
             className="ace-side-panel-shell"
             data-collapsed={sidePanelCollapsed ? 'true' : 'false'}
-            data-maximized={sidePanelMaximized ? 'true' : 'false'}
-            style={{
-              width: sidePanelMaximized
-                ? '100%'
-                : (sidePanelCollapsed ? 0 : sidePanelWidth),
-            }}
+            data-maximized="false"
+            style={sidePanelShellStyle}
           >
             <SidePanel
               sessionRef={ref}
@@ -2016,8 +2288,9 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
               width={sidePanelWidth}
               collapsed={sidePanelCollapsed}
               onToggleCollapse={onToggleSidePanel}
-              maximized={sidePanelMaximized}
-              onToggleMaximize={onToggleSidePanelMaximized}
+              onOpenFilePreview={openFilePreview}
+              onOpenSessionChangePreview={openSessionChangePreview}
+              selectedChangeFile={selectedChangeFile}
             />
           </div>
         </>

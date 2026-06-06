@@ -15,36 +15,32 @@ using namespace acecode;
 namespace {
 
 void apply_web_ui_section(const nlohmann::json& j, WebUiPreferencesConfig& out) {
+    (void)out;
     if (!j.contains("web_ui")) return;
     if (!j["web_ui"].is_object()) return;
-    const auto& wuj = j["web_ui"];
-    if (wuj.contains("show_acecode_avatar") &&
-        wuj["show_acecode_avatar"].is_boolean()) {
-        out.show_acecode_avatar = wuj["show_acecode_avatar"].get<bool>();
-    }
 }
 
 } // namespace
 
-TEST(ConfigWebUiPreferencesDefaults, StructDefaultShowsAvatar) {
+TEST(ConfigWebUiPreferencesDefaults, StructDefaultHidesAvatar) {
     WebUiPreferencesConfig prefs;
-    EXPECT_TRUE(prefs.show_acecode_avatar);
+    EXPECT_FALSE(prefs.show_acecode_avatar);
 }
 
-TEST(ConfigWebUiPreferencesDefaults, NestedInAppConfigShowsAvatar) {
+TEST(ConfigWebUiPreferencesDefaults, NestedInAppConfigHidesAvatar) {
     AppConfig cfg;
-    EXPECT_TRUE(cfg.web_ui.show_acecode_avatar);
+    EXPECT_FALSE(cfg.web_ui.show_acecode_avatar);
 }
 
 TEST(ConfigWebUiPreferencesLoader, MissingBlockKeepsDefault) {
     WebUiPreferencesConfig prefs;
     apply_web_ui_section(nlohmann::json::object(), prefs);
-    EXPECT_TRUE(prefs.show_acecode_avatar);
+    EXPECT_FALSE(prefs.show_acecode_avatar);
 }
 
-TEST(ConfigWebUiPreferencesLoader, ExplicitFalseIsRead) {
+TEST(ConfigWebUiPreferencesLoader, LegacyExplicitTrueIsIgnored) {
     WebUiPreferencesConfig prefs;
-    nlohmann::json j = {{"web_ui", {{"show_acecode_avatar", false}}}};
+    nlohmann::json j = {{"web_ui", {{"show_acecode_avatar", true}}}};
     apply_web_ui_section(j, prefs);
     EXPECT_FALSE(prefs.show_acecode_avatar);
 }
@@ -53,10 +49,10 @@ TEST(ConfigWebUiPreferencesLoader, WrongFieldTypeKeepsDefault) {
     WebUiPreferencesConfig prefs;
     nlohmann::json j = {{"web_ui", {{"show_acecode_avatar", "false"}}}};
     apply_web_ui_section(j, prefs);
-    EXPECT_TRUE(prefs.show_acecode_avatar);
+    EXPECT_FALSE(prefs.show_acecode_avatar);
 }
 
-TEST(ConfigWebUiPreferencesSave, PersistsNonDefaultFalse) {
+TEST(ConfigWebUiPreferencesSave, DoesNotPersistDisabledDefault) {
     const auto suffix = std::chrono::steady_clock::now().time_since_epoch().count();
     const auto path = std::filesystem::temp_directory_path() /
         ("acecode-web-ui-prefs-config-test-" + std::to_string(suffix) + ".json");
@@ -70,8 +66,7 @@ TEST(ConfigWebUiPreferencesSave, PersistsNonDefaultFalse) {
     std::ifstream ifs(path);
     ASSERT_TRUE(ifs.is_open());
     const auto j = nlohmann::json::parse(ifs);
-    ASSERT_TRUE(j.contains("web_ui"));
-    EXPECT_EQ(j["web_ui"]["show_acecode_avatar"], false);
+    EXPECT_FALSE(j.contains("web_ui"));
 
     std::filesystem::remove(path, ec);
 }

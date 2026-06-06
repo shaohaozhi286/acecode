@@ -33,6 +33,7 @@ const ICONS = Object.freeze({
   Brain: 'Brain',
   Brightness: 'Light',
   Check: 'Check',
+  ClearAll: 'ClearAll',
   Close: 'CloseSmall',
   Copy: 'Copy',
   DarkTheme: 'Moon',
@@ -87,6 +88,7 @@ const ICONS = Object.freeze({
 });
 
 const CUSTOM_SVGS = Object.freeze({
+  ClearAll: `<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M2.25 2.25L5.25 5.25M5.25 2.25L2.25 5.25" stroke="#333" stroke-width="1.35" stroke-linecap="round"/><path d="M7 3.75H14" stroke="#333" stroke-width="1.35" stroke-linecap="round"/><path d="M2.25 8H14" stroke="#333" stroke-width="1.35" stroke-linecap="round"/><path d="M2.25 12.25H14" stroke="#333" stroke-width="1.35" stroke-linecap="round"/></svg>`,
   Refresh: `<svg width="16" height="16" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M40 20C38.2 12.8 31.7 7.5 24 7.5C18.9 7.5 14.4 9.8 11.3 13.4" stroke="#333" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M11 7.5V14H17.5" stroke="#333" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M8 28C9.8 35.2 16.3 40.5 24 40.5C29.1 40.5 33.6 38.2 36.7 34.6" stroke="#333" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M37 40.5V34H30.5" stroke="#333" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
 });
 

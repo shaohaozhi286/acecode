@@ -98,7 +98,7 @@ struct WebConfig {
 };
 
 struct WebUiPreferencesConfig {
-    bool show_acecode_avatar = true;
+    bool show_acecode_avatar = false;
 };
 
 struct ModelsDevConfig {

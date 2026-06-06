@@ -64,10 +64,11 @@ web/
 | `App.jsx` | 鉴权 gate + 视图切换 + 弹框层 |
 | `TopBar` | logo + 快捷工具(新对话/搜索) + 中央 single/grid4/grid9 pill + 主题切换 + 设置 |
 | `Sidebar` | workspace 分组 + session 列表 + 底部 Skills/MCP tab |
-| `ChatView` | 主聊天区(头部 + 消息流 + InputBar + StatusBar)+ 空态欢迎屏 |
+| `ChatView` | 主聊天区(头部 + 消息流 + InputBar + StatusBar)+ 空态欢迎屏;单会话下持有中间预览详情面板状态 |
 | `Message` | user 气泡 / assistant 头像+markdown / system 灰条;hover 浮出复制 + 分叉 actions |
 | `ToolBlock` | 工具调用三态(进度 / summary chip / 失败折叠);file_edit/file_write 走 diff2html 渲染 hunks |
-| `SidePanel` | 单会话视图右侧 280px 工作区面板,文件 / 变更 / 预览 三 tab。文件 tab lazy 拉 `/api/files`,预览 tab 拉 `/api/files/content` + hljs 高亮,变更 tab 前端聚合 messages.hunks(只覆盖 file_edit/file_write,bash sed 抓不到) |
+| `SidePanel` | 单会话视图右侧工作区面板,只保留 `更改` / `文件` 两 tab。`更改` 显示当前会话结构化 hunks 的紧凑文件列表,`文件` lazy 拉 `/api/files`;点击文件或更改行会打开中间预览详情面板 |
+| `PreviewDetailsPanel` | 位于聊天区和 SidePanel 之间的多 tab 预览面板。文件 tab 拉 `/api/files/content` + hljs/Markdown/图片预览;会话更改 tab 复用当前会话 structured hunks 并只展开被点击文件。最大化时占满聊天工作区,右侧 SidePanel 保持可见 |
 | `InputBar` | 自动撑高 textarea + Enter 发 + ↑/↓ 历史 + 提交按钮 + abort |
 | `StatusBar` | 权限模式下拉 + 模型 tag + 轮次 + 分支 |
 | `ModelPicker` | `/api/models` 下拉 + 切换 |
@@ -111,4 +112,4 @@ bundle 体积 ~461KB(gzip ~156KB)。嵌入二进制约 +600KB(hex 编码 2x)。
 
 ## 历史
 
-本项目 v1 是原生 ES Modules + Custom Elements + Bootstrap,单点 11 个 `<ace-*>` 元素 + 手写 `style.css`。重构 PR 把全部前端换成 React + Vite + Tailwind v4,保留 `lib/api.js` / `lib/auth.js` / `lib/connection.js` 的协议层不变,daemon 端 0 改动。后续 `enhance-webui-chat-rendering` 把 `lib/markdown.js` 从手写极简版升级到 markdown-it 管线,Message 加 hover copy/fork actions,ToolBlock 引入 diff2html 渲染 hunks。再后 `add-webui-side-panel` 在单会话视图右侧加固定 280px 的 SidePanel(文件 / 变更 / 预览 三 tab),后端新增 `GET /api/files` + `GET /api/files/content` 两个端点(`src/web/handlers/files_handler.{hpp,cpp}` 纯函数 + 17 个 unit test),前端抽 `lib/diff.js` / `lib/lang.js` / `lib/sessionChanges.js` 三个共用模块。
+本项目 v1 是原生 ES Modules + Custom Elements + Bootstrap,单点 11 个 `<ace-*>` 元素 + 手写 `style.css`。重构 PR 把全部前端换成 React + Vite + Tailwind v4,保留 `lib/api.js` / `lib/auth.js` / `lib/connection.js` 的协议层不变,daemon 端 0 改动。后续 `enhance-webui-chat-rendering` 把 `lib/markdown.js` 从手写极简版升级到 markdown-it 管线,Message 加 hover copy/fork actions,ToolBlock 引入 diff2html 渲染 hunks。再后 `add-webui-side-panel` 在单会话视图右侧加固定 280px 的 SidePanel(文件 / 变更 / 预览 三 tab),后端新增 `GET /api/files` + `GET /api/files/content` 两个端点(`src/web/handlers/files_handler.{hpp,cpp}` 纯函数 + 17 个 unit test),前端抽 `lib/diff.js` / `lib/lang.js` / `lib/sessionChanges.js` 三个共用模块。当前 SidePanel 已拆成右侧 `更改` / `文件` 导航面板和中间 `PreviewDetailsPanel`:文件 tab 按 workspace/cwd 保留,会话更改 tab 按 session id 保留,关闭整个预览面板会清掉当前可见 tab 集。

@@ -18,6 +18,7 @@ namespace acecode::desktop {
 
 inline constexpr int kDefaultDesktopWindowWidth = 1280;
 inline constexpr int kDefaultDesktopWindowHeight = 820;
+inline constexpr int kMinimumDesktopWindowWidth = 1170;
 
 class WebHostInitializationError : public std::runtime_error {
 public:

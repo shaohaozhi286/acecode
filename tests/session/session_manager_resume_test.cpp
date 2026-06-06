@@ -3,6 +3,7 @@
 #include "provider/llm_provider.hpp"
 #include "session/session_manager.hpp"
 #include "session/session_storage.hpp"
+#include "session/session_usage_ledger.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -131,6 +132,15 @@ TEST(SessionManagerResume, RestoresPersistedRuntimeState) {
     EXPECT_EQ(reader.current_turn_count(), 1);
     EXPECT_EQ(reader.current_last_token_usage().prompt_tokens, 8000);
     EXPECT_EQ(reader.current_session_token_usage().total_tokens, 9200);
+
+    auto usage_records = acecode::load_usage_ledger_records(project_dir);
+    ASSERT_EQ(usage_records.size(), 1u);
+    EXPECT_EQ(usage_records[0].session_id, session_id);
+    EXPECT_EQ(usage_records[0].provider, "test-provider");
+    EXPECT_EQ(usage_records[0].model, "test-model");
+    EXPECT_EQ(usage_records[0].usage.prompt_tokens, 8000);
+    EXPECT_EQ(usage_records[0].usage.total_tokens, 9200);
+    EXPECT_TRUE(usage_records[0].usage.has_data);
 
     fs::remove_all(project_dir);
     fs::remove_all(cwd);

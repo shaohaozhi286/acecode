@@ -8,11 +8,11 @@
 // 已识别的首段命令以原子 token 样式叠加渲染(overlay div 与 textarea 同度量)。
 
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
 import { clsx } from '../lib/format.js';
 import { getGoalStopControlState } from '../lib/goalControl.js';
 import { getInputBarActionState } from '../lib/inputBarState.js';
 import { VsIcon } from './Icon.jsx';
+import { ImageLightbox } from './ImageLightbox.jsx';
 import { SlashDropdown } from './SlashDropdown.jsx';
 import { useSlashCommands } from './SlashCommandsContext.jsx';
 import { deleteLeadingCommandBlock, parseLeadingCommand } from '../lib/slashCommands.js';
@@ -641,33 +641,7 @@ export const InputBar = forwardRef(function InputBar({
       <div className={clsx('mt-1 px-1 text-[10px] text-fg-mute flex justify-between', isHero && 'px-3')}>
         <span>{actionState.helperText}</span>
       </div>
-      {attachmentPreview
-        ? createPortal(
-            <div
-              className="fixed inset-0 z-[80] bg-black/70 flex items-center justify-center p-6"
-              role="dialog"
-              aria-modal="true"
-              onClick={() => setAttachmentPreview(null)}
-            >
-              <button
-                type="button"
-                className="absolute top-3 right-3 w-8 h-8 rounded-md bg-surface text-fg border border-border flex items-center justify-center"
-                aria-label="关闭预览"
-                title="关闭"
-                onClick={() => setAttachmentPreview(null)}
-              >
-                <VsIcon name="close" size={15} />
-              </button>
-              <img
-                src={attachmentPreview.src}
-                alt={attachmentPreview.alt}
-                className="max-w-full max-h-full object-contain shadow-xl"
-                onClick={(event) => event.stopPropagation()}
-              />
-            </div>,
-            document.body,
-          )
-        : null}
+      <ImageLightbox preview={attachmentPreview} onClose={() => setAttachmentPreview(null)} />
     </div>
   );
 });

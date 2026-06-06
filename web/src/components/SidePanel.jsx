@@ -1,14 +1,12 @@
 // 单会话视图右侧固定 280px 工作区面板。设计稿:
 // project/components/single-session.jsx::FilePanel + Wireframes v2.html L185-207。
 //
-// 三个 tab,设计稿原画的"上 tab + 下方共用代码预览区"两段式被用户校正:
-// 不做共用代码区,三个 tab 各自占满下半区。
-//   - 文件: lazy 加载文件树,点击文件 → 自动切预览 tab + load
-//   - 审查: 当前 session 内 tool_end.hunks 前端聚合(file_edit/file_write 才有
-//           hunks,bash sed 抓不到 — 已知 limitation,空态文案要明示)
-//   - 预览: 选中文件 highlight.js 高亮原文,5MB cap / binary 拒绝时友好提示
+// 右侧工作区面板只负责导航和紧凑信息列表。
+//   - 变更: 当前 session 内 tool_end.hunks 前端聚合的紧凑文件列表
+//   - 文件: lazy 加载文件树,点击文件后通知 ChatView 打开中间预览面板
+// bash/shell 直接改文件但没有结构化 hunks 时不会进入"变更"列表,空态文案会明示。
 //
-// 切 session 时面板内部状态(tab/expanded/cache/preview)**保留** — 同一 daemon
+// 切 session 时面板内部状态(tab/expanded/cache)**保留** — 同一 daemon
 // 下所有 session 共享同一个 cwd,文件树没必要重新拉一遍。只有 cwd 真变(典型
 // 场景: desktop 切 workspace → daemon 重启)才整面板 reset。
 //
@@ -16,77 +14,34 @@
 // 整面板不渲染。
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import hljs from 'highlight.js/lib/core';
 import { ApiError, createApi } from '../lib/api.js';
 import { aggregateHunksFromMessages, summarizeChangeGroups } from '../lib/sessionChanges.js';
-import { langForFile } from '../lib/lang.js';
-import { renderMarkdown } from '../lib/markdown.js';
 import {
   containingWorkspacePath,
   DESKTOP_CONTEXT_ACTION_EVENT,
   DESKTOP_CONTEXT_ACTIONS,
   joinWorkspacePath,
 } from '../lib/desktopContextMenu.js';
-import { copyTextToSystemClipboard } from '../lib/systemClipboard.js';
-import { usePreference } from '../lib/usePreference.js';
 import {
   buildReviewStatusMap,
   entriesWithReviewRows,
   fileChangeStatusTitle,
   statusForTreeEntry,
 } from '../lib/fileTreeChangeStatus.js';
-import { clsx, formatBytes } from '../lib/format.js';
-import { CopyableCodeFrame } from './CopyableCodeFrame.jsx';
-import { PanelToggleIcon, VsIcon } from './Icon.jsx';
-import { ChangeReviewPanel } from './ChangeReview.jsx';
-
-const FILE_PREVIEW_WRAP_STORAGE_KEY = 'acecode.filePreviewWrap.v1';
-const MARKDOWN_EXTENSIONS = new Set(['md', 'markdown']);
-const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico', 'svg']);
+import { clsx } from '../lib/format.js';
+import { FileTypeIcon, PanelToggleIcon, VsIcon } from './Icon.jsx';
+import { ChangeCompactList } from './ChangeReview.jsx';
 
 const TABS = [
+  { key: 'changes', label: '变更' },
   { key: 'files',   label: '文件' },
-  { key: 'changes', label: '审查' },
-  { key: 'preview', label: '预览' },
 ];
-
-function extensionForPath(path) {
-  const name = String(path || '').split(/[\\/]/).pop() || '';
-  const dot = name.lastIndexOf('.');
-  if (dot < 0 || dot === name.length - 1) return '';
-  return name.slice(dot + 1).toLowerCase();
-}
-
-function isMarkdownPreview(path) {
-  return MARKDOWN_EXTENSIONS.has(extensionForPath(path));
-}
-
-function isImagePreview(path) {
-  return IMAGE_EXTENSIONS.has(extensionForPath(path));
-}
 
 // 切 cwd / 没有 cwd 时给 FileTree 传一个稳定的空 Map / Set,避免每次渲染
 // 都 new 一份导致 useEffect deps 抖动 / 子组件 useCallback 失效。
 const EMPTY_TREE_CACHE    = new Map();
 const EMPTY_EXPANDED_DIRS = new Set();
 const EMPTY_REVIEW_STATUS = new Map();
-
-function validateBooleanPreference(value) {
-  return typeof value === 'boolean';
-}
-
-function escapeHtml(s) {
-  return String(s)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-}
-
-async function copyWithToast(text, okText) {
-  const result = await copyTextToSystemClipboard(text);
-  if (result.ok) toast({ kind: 'ok', text: okText });
-  else toast({ kind: 'err', text: '复制失败:' + (result.error || '') });
-}
 
 function pathAncestors(path) {
   const parts = String(path || '').split(/[\\/]/).filter(Boolean);
@@ -227,7 +182,7 @@ function FileTree({ api, cwd, treeCache, setTreeCache, expandedDirs, setExpanded
             data-desktop-file-preview={isDir ? undefined : 'true'}
             data-review-status={reviewStatus || undefined}
             className={clsx(
-              'ace-file-row w-full flex items-center gap-1 text-left text-[12px] font-mono py-[3px] pr-2',
+              'ace-file-row w-full flex items-center gap-1 text-left text-[12px] py-[3px] pr-2',
               'hover:bg-surface-hi cursor-pointer',
               isActive && 'bg-accent-soft text-accent',
             )}
@@ -238,7 +193,7 @@ function FileTree({ api, cwd, treeCache, setTreeCache, expandedDirs, setExpanded
             {isDir ? (
               <VsIcon name={isOpen ? 'folderOpen' : 'folder'} size={14} mono={false} />
             ) : (
-              <VsIcon name="file" size={14} mono={false} />
+              <FileTypeIcon path={e.path || e.name} size={20} />
             )}
             <span className="ace-file-name truncate">{e.name}</span>
             {reviewStatus && (
@@ -271,243 +226,18 @@ function FileTree({ api, cwd, treeCache, setTreeCache, expandedDirs, setExpanded
 // ────────────────────────────────────────────────────────────
 // 审查 tab — 聚合 messages.hunks
 // ────────────────────────────────────────────────────────────
-function ChangesList({ messages, groups, summary, cwd }) {
+function ChangesList({ messages, groups, summary, cwd, selectedFile, onOpenFile }) {
   const fallbackGroups = useMemo(() => aggregateHunksFromMessages(messages || []), [messages]);
   const reviewGroups = groups || fallbackGroups;
   const reviewSummary = summary || summarizeChangeGroups(reviewGroups);
-  return <ChangeReviewPanel groups={reviewGroups} summary={reviewSummary} cwd={cwd} />;
-}
-
-// ────────────────────────────────────────────────────────────
-// 预览 tab — Markdown 渲染 / 图片 / 文件原文 + hljs 高亮
-// ────────────────────────────────────────────────────────────
-function PreviewPanel({ api, cwd, path, wrapPreview, onToggleWrapPreview, refreshToken }) {
-  const [state, setState] = useState({
-    status: 'idle',
-    kind: 'text',
-    text: '',
-    error: null,
-    lang: '',
-    size: 0,
-    imageUrl: '',
-    contentType: '',
-  });
-  const [markdownSource, setMarkdownSource] = useState(false);
-
-  useEffect(() => {
-    const handler = (event) => {
-      const detail = event.detail || {};
-      const { action, target } = detail;
-      if (target?.type !== 'preview' || target.path !== path) return;
-      if (action === DESKTOP_CONTEXT_ACTIONS.COPY_PREVIEW_TEXT) {
-        detail.handled = true;
-        if (!state.text) {
-          toast({ kind: 'info', text: '没有可复制的预览文本' });
-          return;
-        }
-        copyWithToast(state.text, '已复制预览内容');
-      } else if (action === DESKTOP_CONTEXT_ACTIONS.COPY_PREVIEW_METADATA) {
-        detail.handled = true;
-        const metadata = [
-          `path: ${path}`,
-          `kind: ${state.kind}`,
-          `size: ${state.size}`,
-          state.contentType ? `content-type: ${state.contentType}` : '',
-          state.lang ? `language: ${state.lang}` : '',
-        ].filter(Boolean).join('\n');
-        copyWithToast(metadata, '已复制预览信息');
-      }
-    };
-    window.addEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
-    return () => window.removeEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
-  }, [path, state.contentType, state.kind, state.lang, state.size, state.text]);
-
-  useEffect(() => {
-    if (!cwd || !path) {
-      setState({ status: 'idle', kind: 'text', text: '', error: null, lang: '', size: 0, imageUrl: '', contentType: '' });
-      return;
-    }
-    let cancelled = false;
-    let objectUrl = '';
-    setMarkdownSource(false);
-    setState({ status: 'loading', kind: 'text', text: '', error: null, lang: '', size: 0, imageUrl: '', contentType: '' });
-
-    if (isImagePreview(path)) {
-      api.readFileBlob(cwd, path).then((blob) => {
-        if (cancelled) return;
-        objectUrl = URL.createObjectURL(blob);
-        setState({
-          status: 'ok',
-          kind: 'image',
-          text: '',
-          error: null,
-          lang: '',
-          size: blob.size || 0,
-          imageUrl: objectUrl,
-          contentType: blob.type || '',
-        });
-      }).catch((err) => {
-        if (cancelled) return;
-        let msg = '读取失败';
-        let extraSize = 0;
-        if (err instanceof ApiError) {
-          const body = err.body;
-          if (body && typeof body === 'object') {
-            if (body.error === 'file too large') {
-              extraSize = Number(body.size || 0);
-              msg = `文件过大 (${formatBytes(extraSize)}),无法在浏览器内预览`;
-            } else if (body.error === 'unsupported file type') msg = '该图片格式暂不支持预览';
-            else if (body.error === 'not found') msg = '文件不存在';
-            else if (body.error) msg = body.error;
-          } else {
-            msg = `读取失败 (HTTP ${err.status})`;
-          }
-        }
-        setState({ status: 'error', kind: 'image', text: '', error: msg, lang: '', size: extraSize, imageUrl: '', contentType: '' });
-      });
-      return () => {
-        cancelled = true;
-        if (objectUrl) URL.revokeObjectURL(objectUrl);
-      };
-    }
-
-    api.readFile(cwd, path).then((text) => {
-      if (cancelled) return;
-      setState({
-        status: 'ok',
-        kind: isMarkdownPreview(path) ? 'markdown' : 'text',
-        text,
-        error: null,
-        lang: langForFile(path),
-        size: text.length,
-        imageUrl: '',
-        contentType: '',
-      });
-    }).catch((err) => {
-      if (cancelled) return;
-      // err.body 可能是 {error, size}
-      let msg = '读取失败';
-      let extraSize = 0;
-      if (err instanceof ApiError) {
-        const body = err.body;
-        if (body && typeof body === 'object') {
-          if (body.error === 'binary')          msg = '二进制文件,无法预览';
-          else if (body.error === 'file too large') {
-            extraSize = Number(body.size || 0);
-            msg = `文件过大 (${formatBytes(extraSize)}),无法在浏览器内预览`;
-          } else if (body.error === 'not found') msg = '文件不存在';
-          else if (body.error)                   msg = body.error;
-        } else {
-          msg = `读取失败 (HTTP ${err.status})`;
-        }
-      }
-      setState({ status: 'error', kind: 'text', text: '', error: msg, lang: '', size: extraSize, imageUrl: '', contentType: '' });
-    });
-    return () => { cancelled = true; };
-  }, [api, cwd, path, refreshToken]);
-
-  if (!path) {
-    return <div className="ace-empty-state">未选中文件,请在「文件」tab 中点击一个文件</div>;
-  }
-  if (state.status === 'loading') {
-    return <div className="ace-empty-state">加载中…</div>;
-  }
-  if (state.status === 'error') {
-    return (
-      <div className="ace-empty-state">
-        <div className="text-danger text-[12px] mb-1">{state.error}</div>
-        <div className="text-fg-mute text-[10px] font-mono opacity-70 break-all">{path}</div>
-      </div>
-    );
-  }
-  if (state.status !== 'ok') return null;
-  const previewAttrs = {
-    'data-desktop-preview-path': path || undefined,
-    'data-desktop-preview-kind': state.kind || undefined,
-    'data-desktop-preview-size': Number.isFinite(state.size) ? String(state.size) : undefined,
-    'data-desktop-preview-content-type': state.contentType || undefined,
-  };
-  if (state.kind === 'image') {
-    return (
-      <div className="flex-1 flex flex-col overflow-hidden" {...previewAttrs}>
-        <div className="px-2 py-1 text-[10px] text-fg-mute font-mono border-b border-border truncate" title={path}>
-          {path} · {formatBytes(state.size)}{state.contentType ? ` · ${state.contentType}` : ''}
-        </div>
-        <div className="ace-side-image-preview">
-          <img src={state.imageUrl} alt={path} draggable="false" />
-        </div>
-      </div>
-    );
-  }
-
-  const lang = state.lang;
-  let html;
-  if (lang && hljs.getLanguage(lang)) {
-    try {
-      html = `<pre class="hljs"><code class="hljs language-${escapeHtml(lang)}">`
-           + hljs.highlight(state.text, { language: lang, ignoreIllegals: true }).value
-           + `</code></pre>`;
-    } catch {
-      html = `<pre><code>${escapeHtml(state.text)}</code></pre>`;
-    }
-  } else {
-    html = `<pre><code>${escapeHtml(state.text)}</code></pre>`;
-  }
-  const wrapTitle = wrapPreview ? '关闭自动换行' : '开启自动换行';
-  const isMarkdown = state.kind === 'markdown';
-  const showMarkdownRendered = isMarkdown && !markdownSource;
-  const markdownToggleTitle = markdownSource ? '渲染 Markdown' : '查看 Markdown 原文';
   return (
-    <div className="flex-1 flex flex-col overflow-hidden" {...previewAttrs}>
-      <div className="px-2 py-1 text-[10px] text-fg-mute font-mono border-b border-border truncate" title={path}>
-        {path} · {formatBytes(state.text.length)}{showMarkdownRendered ? ' · Markdown 预览' : (lang ? ` · ${lang}` : '')}
-      </div>
-      <CopyableCodeFrame
-        text={state.text}
-        className="flex-1 min-h-0 ace-side-preview-code"
-        data-wrap={wrapPreview ? 'true' : 'false'}
-        actions={(
-          <>
-            {isMarkdown && (
-              <button
-                type="button"
-                className={clsx('ace-code-action-btn ace-code-markdown-btn', showMarkdownRendered && 'is-active')}
-                title={markdownToggleTitle}
-                aria-label={markdownToggleTitle}
-                aria-pressed={showMarkdownRendered}
-                onClick={(event) => { event.stopPropagation(); setMarkdownSource((prev) => !prev); }}
-              >
-                <VsIcon name={markdownSource ? 'document' : 'code'} size={14} />
-              </button>
-            )}
-            {!showMarkdownRendered && (
-              <button
-                type="button"
-                className={clsx('ace-code-action-btn ace-code-wrap-btn', wrapPreview && 'is-active')}
-                title={wrapTitle}
-                aria-label={wrapTitle}
-                aria-pressed={wrapPreview}
-                onClick={(event) => { event.stopPropagation(); onToggleWrapPreview?.(); }}
-              >
-                <VsIcon name="wordWrap" size={14} />
-              </button>
-            )}
-          </>
-        )}
-      >
-        {showMarkdownRendered ? (
-          <div
-            className="h-full overflow-auto ace-md ace-side-markdown-preview"
-            dangerouslySetInnerHTML={{ __html: renderMarkdown(state.text) }}
-          />
-        ) : (
-          <div
-            className="h-full overflow-auto text-[11px] ace-preview"
-            dangerouslySetInnerHTML={{ __html: html }}
-          />
-        )}
-      </CopyableCodeFrame>
-    </div>
+    <ChangeCompactList
+      groups={reviewGroups}
+      summary={reviewSummary}
+      cwd={cwd}
+      selectedFile={selectedFile}
+      onOpenFile={onOpenFile}
+    />
   );
 }
 
@@ -526,17 +256,11 @@ export function SidePanel({
   width = 280,
   collapsed = false,
   onToggleCollapse,
-  // 最大化:面板撑满整个聊天区,聊天区被父组件隐藏。再点击切换图标还原。
-  maximized = false,
-  onToggleMaximize,
+  onOpenFilePreview,
+  onOpenSessionChangePreview,
+  selectedChangeFile = '',
 }) {
   const api = useMemo(() => createApi(sessionRef || null), [sessionRef?.port, sessionRef?.token, sessionRef?.workspaceHash]);
-  const [wrapPreview, setWrapPreview] = usePreference(
-    FILE_PREVIEW_WRAP_STORAGE_KEY,
-    false,
-    validateBooleanPreference,
-  );
-
   const [activeTab,    setActiveTab]    = useState('files');
   const [selectedPath, setSelectedPath] = useState(null);
   const [fileRefreshToken, setFileRefreshToken] = useState(0);
@@ -611,7 +335,7 @@ export function SidePanel({
     refreshFileTree();
   }, [fileRefreshKey, refreshFileTree]);
 
-  // cwd 变时 tab 回到「文件」,清选中文件(预览 tab 会自动空)。**不**清 treeCache,
+  // cwd 变时 tab 回到「文件」,清选中文件。**不**清 treeCache,
   // 自然按 cwd-key 隔离即可。
   const lastCwd = useRef('');
   useEffect(() => {
@@ -629,11 +353,8 @@ export function SidePanel({
 
   const onPickFile = useCallback((entry) => {
     setSelectedPath(entry.path);
-    setActiveTab('preview');
-  }, []);
-  const toggleWrapPreview = useCallback(() => {
-    setWrapPreview((prev) => !prev);
-  }, [setWrapPreview]);
+    onOpenFilePreview?.(entry.path);
+  }, [onOpenFilePreview]);
 
   useEffect(() => {
     const handler = (event) => {
@@ -647,7 +368,8 @@ export function SidePanel({
       if (action === DESKTOP_CONTEXT_ACTIONS.PREVIEW_FILE) {
         detail.handled = true;
         setSelectedPath(filePath);
-        setActiveTab('preview');
+        if (target?.type === 'review') onOpenSessionChangePreview?.(filePath);
+        else onOpenFilePreview?.(filePath);
       } else if (action === DESKTOP_CONTEXT_ACTIONS.LOCATE_IN_FILE_TREE) {
         detail.handled = true;
         setSelectedPath(filePath);
@@ -664,7 +386,7 @@ export function SidePanel({
     };
     window.addEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
     return () => window.removeEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
-  }, [refreshFileTree, setExpandedDirs]);
+  }, [onOpenFilePreview, onOpenSessionChangePreview, refreshFileTree, setExpandedDirs]);
 
   return (
     // 宽度由父级 wrapper(.ace-side-panel-shell)控制,这里 100% 占满。width prop
@@ -688,32 +410,18 @@ export function SidePanel({
             </button>
           ))}
         </div>
-        {(activeTab === 'files' || activeTab === 'preview') && (
+        {activeTab === 'files' && (
           <button
             type="button"
             onClick={refreshFileTree}
             className="ace-side-panel-refresh-btn"
-            title="刷新文件列表和预览"
-            aria-label="刷新文件列表和预览"
+            title="刷新文件列表"
+            aria-label="刷新文件列表"
           >
-            <VsIcon name="running" size={14} />
+            <VsIcon name="refresh" size={16} />
           </button>
         )}
-        {/* 最大化按钮放在收起按钮的左侧。最大化时聊天区已隐藏,继续允许"收起"
-            会让整个区域变空,所以最大化态下隐藏收起按钮。 */}
-        {onToggleMaximize && (
-          <button
-            type="button"
-            onClick={onToggleMaximize}
-            className="ace-side-panel-maximize-btn"
-            title={maximized ? '还原右侧面板' : '展开为整屏'}
-            aria-label={maximized ? '还原右侧面板' : '展开为整屏'}
-            aria-pressed={maximized}
-          >
-            <VsIcon name={maximized ? 'screenNormal' : 'screenFull'} size={14} />
-          </button>
-        )}
-        {onToggleCollapse && !maximized && (
+        {onToggleCollapse && (
           <button
             type="button"
             onClick={onToggleCollapse}
@@ -749,16 +457,8 @@ export function SidePanel({
             groups={effectiveChangeGroups}
             summary={effectiveChangeSummary}
             cwd={cwd}
-          />
-        )}
-        {activeTab === 'preview' && (
-          <PreviewPanel
-            api={api}
-            cwd={cwd}
-            path={selectedPath}
-            wrapPreview={wrapPreview}
-            onToggleWrapPreview={toggleWrapPreview}
-            refreshToken={fileRefreshToken}
+            selectedFile={selectedChangeFile}
+            onOpenFile={onOpenSessionChangePreview}
           />
         )}
       </div>

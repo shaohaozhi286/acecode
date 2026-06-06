@@ -8,7 +8,7 @@ export const DEFAULT_UI_PREFS = {
   // 隐藏,只剩左侧 sidebar(若 sidebar 也折叠就是全屏 SidePanel)。再点一
   // 次回到默认布局。跨刷新持久化,符合"用户操作过最大化就保留状态"。
   sidePanelMaximized: false,
-  showAceCodeAvatar: true,
+  showAceCodeAvatar: false,
 };
 
 const ALLOWED_VIEWS = new Set(['single', 'grid4', 'grid9']);
@@ -23,5 +23,5 @@ export function validateUiPrefs(v) {
 }
 
 export function effectiveShowAceCodeAvatar(uiPrefs) {
-  return uiPrefs?.showAceCodeAvatar !== false;
+  return false;
 }

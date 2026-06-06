@@ -1,3 +1,5 @@
+import { fileTypeIconForPath } from '../lib/fileTypeIcons.js';
+
 const ICONS = {
   add: 'Add',
   archive: 'Archive',
@@ -7,6 +9,7 @@ const ICONS = {
   brain: 'Brain',
   brightness: 'Brightness',
   check: 'Check',
+  clearAll: 'ClearAll',
   close: 'Close',
   code: 'Code',
   copy: 'Copy',
@@ -107,6 +110,37 @@ export function VsIcon({
       {...accessibilityProps}
       {...props}
     />
+  );
+}
+
+export function FileTypeIcon({
+  path,
+  size = 20,
+  className = '',
+  fallback = 'file',
+  style,
+  ...props
+}) {
+  const icon = fileTypeIconForPath(path);
+  if (!icon) {
+    return <VsIcon name={fallback} size={size} mono={false} className={className} {...props} />;
+  }
+  return (
+    <span
+      className={['ace-file-type-icon', className].filter(Boolean).join(' ')}
+      aria-hidden="true"
+      data-file-type-icon={icon.id}
+      style={{
+        width: size,
+        height: size,
+        fontSize: size,
+        color: icon.color,
+        ...style,
+      }}
+      {...props}
+    >
+      {icon.glyph}
+    </span>
   );
 }
 

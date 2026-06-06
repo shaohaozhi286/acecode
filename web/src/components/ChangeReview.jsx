@@ -34,7 +34,7 @@ async function copyDiffText(text, okText) {
   else toast({ kind: 'err', text: '复制失败:' + (result.error || '') });
 }
 
-function ChangeTotals({ summary, compact = false }) {
+export function ChangeTotals({ summary, compact = false }) {
   if (!summary?.hasChanges) return null;
   return (
     <span className={clsx('ace-change-totals', compact && 'ace-change-totals-compact')}>
@@ -45,7 +45,7 @@ function ChangeTotals({ summary, compact = false }) {
   );
 }
 
-function DiffPreview({ group, outputFormat = 'line-by-line', className = '' }) {
+export function DiffPreview({ group, outputFormat = 'line-by-line', className = '' }) {
   const diffHtml = useMemo(() => {
     if (!group) return '';
     const unified = hunksToUnifiedDiff(group.hunks, group.file);
@@ -97,6 +97,97 @@ function ChangeFileButton({ group, open, onClick, selected = false, cwd = '' }) 
         {group.totalDeletions > 0 && <span className="ace-change-del">-{group.totalDeletions}</span>}
       </span>
     </button>
+  );
+}
+
+function splitPath(path) {
+  const parts = String(path || '').split(/[\\/]/).filter(Boolean);
+  const name = parts.pop() || String(path || '');
+  return {
+    name,
+    parent: parts.join('/'),
+  };
+}
+
+export function ChangeCompactList({
+  groups,
+  summary,
+  cwd = '',
+  selectedFile = '',
+  onOpenFile,
+}) {
+  const list = safeGroups(groups);
+  const changeSummary = normalizedSummary(list, summary);
+
+  useEffect(() => {
+    const handler = (event) => {
+      const detail = event.detail || {};
+      const { action, target } = detail;
+      if (target?.type !== 'review') return;
+      if (action === DESKTOP_CONTEXT_ACTIONS.PREVIEW_FILE && target.file) {
+        detail.handled = true;
+        onOpenFile?.(target.file);
+      }
+    };
+    window.addEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
+    return () => window.removeEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
+  }, [onOpenFile]);
+
+  if (!changeSummary.hasChanges) {
+    return (
+      <div className="ace-empty-state">
+        <div>本会话暂无可审查的结构化文件变更</div>
+        <div className="text-[10px] opacity-70">shell / script 等无结构化 hunks 的改动可能不会出现在这里</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="ace-change-compact-panel" data-change-region="side-panel">
+      <div
+        className="ace-change-compact-summary"
+        data-desktop-review-kind="summary"
+        data-desktop-review-additions={String(changeSummary.totalAdditions || 0)}
+        data-desktop-review-deletions={String(changeSummary.totalDeletions || 0)}
+        data-desktop-review-file-count={String(changeSummary.fileCount || 0)}
+      >
+        <div className="ace-review-title">
+          <VsIcon name="editWindow" size={15} />
+          <span>变更</span>
+        </div>
+        <ChangeTotals summary={changeSummary} compact />
+      </div>
+      <div className="ace-change-compact-list">
+        {list.map((group) => {
+          const pathParts = splitPath(group.file);
+          const selected = selectedFile === group.file;
+          return (
+            <button
+              key={group.file}
+              type="button"
+              data-desktop-review-kind="file"
+              data-desktop-review-file={group.file || undefined}
+              data-desktop-review-absolute-path={cwd ? joinWorkspacePath(cwd, group.file) : undefined}
+              data-desktop-review-additions={String(group.totalAdditions || 0)}
+              data-desktop-review-deletions={String(group.totalDeletions || 0)}
+              className={clsx('ace-change-compact-row', selected && 'is-selected')}
+              onClick={() => onOpenFile?.(group.file)}
+              title={group.file}
+            >
+              <VsIcon name="file" size={14} mono={false} />
+              <span className="ace-change-compact-file">
+                <span className="ace-change-compact-name">{pathParts.name}</span>
+                {pathParts.parent && <span className="ace-change-compact-parent">{pathParts.parent}</span>}
+              </span>
+              <span className="ace-change-file-counts">
+                {group.totalAdditions > 0 && <span className="ace-change-add">+{group.totalAdditions}</span>}
+                {group.totalDeletions > 0 && <span className="ace-change-del">-{group.totalDeletions}</span>}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
@@ -295,7 +386,7 @@ export function ChangeGlassDock({ summary, onReview, onDismiss, dockRef, scrollR
           title="打开右侧审查面板"
         >
           <ChangeTotals summary={summary} compact />
-          <span className="ace-change-glass-action">查看更改</span>
+          <span className="ace-change-glass-action">查看变更</span>
         </button>
         {onDismiss && (
           <button
@@ -316,10 +407,19 @@ export function ChangeGlassDock({ summary, onReview, onDismiss, dockRef, scrollR
   );
 }
 
-export function ChangeReviewPanel({ groups, summary, cwd = '' }) {
+export function ChangeReviewPanel({
+  groups,
+  summary,
+  cwd = '',
+  initialExpandedFile = '',
+  title = '审查',
+  dataRegion = 'side-panel',
+}) {
   const list = safeGroups(groups);
   const changeSummary = normalizedSummary(list, summary);
-  const [openFiles, setOpenFiles] = useState(() => new Set(list[0]?.file ? [list[0].file] : []));
+  const [openFiles, setOpenFiles] = useState(() => new Set(
+    initialExpandedFile ? [initialExpandedFile] : (list[0]?.file ? [list[0].file] : []),
+  ));
   const panelRef = useRef(null);
   // 面板太窄时双栏 diff 列宽被挤到 ~150px,文本断行严重不可读;低于阈值切回 line-by-line。
   // 默认 line-by-line 是因为 ResizeObserver 第一帧前没数据,先保守渲染避免初始闪烁。
@@ -337,6 +437,11 @@ export function ChangeReviewPanel({ groups, summary, cwd = '' }) {
       return next;
     });
   }, [list]);
+
+  useEffect(() => {
+    if (!initialExpandedFile) return;
+    setOpenFiles(new Set([initialExpandedFile]));
+  }, [initialExpandedFile]);
 
   useEffect(() => {
     const el = panelRef.current;
@@ -399,7 +504,7 @@ export function ChangeReviewPanel({ groups, summary, cwd = '' }) {
   };
 
   return (
-    <div className="ace-review-panel" data-change-region="side-panel" ref={panelRef}>
+    <div className="ace-review-panel" data-change-region={dataRegion} ref={panelRef}>
       <div
         className="ace-review-summary"
         data-desktop-review-kind="summary"
@@ -409,7 +514,7 @@ export function ChangeReviewPanel({ groups, summary, cwd = '' }) {
       >
         <div className="ace-review-title">
           <VsIcon name="editWindow" size={15} />
-          <span>审查</span>
+          <span>{title}</span>
         </div>
         <ChangeTotals summary={changeSummary} />
       </div>
@@ -435,5 +540,18 @@ export function ChangeReviewPanel({ groups, summary, cwd = '' }) {
         })}
       </div>
     </div>
+  );
+}
+
+export function SessionChangeDetails({ groups, summary, cwd = '', expandedFile = '' }) {
+  return (
+    <ChangeReviewPanel
+      groups={groups}
+      summary={summary}
+      cwd={cwd}
+      initialExpandedFile={expandedFile}
+      title="会话变更"
+      dataRegion="preview-panel"
+    />
   );
 }

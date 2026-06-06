@@ -14,7 +14,6 @@ import { usePreference } from './lib/usePreference.js';
 import {
   DEFAULT_UI_PREFS,
   UI_PREFS_STORAGE_KEY,
-  effectiveShowAceCodeAvatar,
   validateUiPrefs,
 } from './lib/uiPrefs.js';
 import { useGlobalShortcut } from './lib/useGlobalShortcut.js';
@@ -30,25 +29,16 @@ import { Toaster, toast } from './components/Toast.jsx';
 import { SlashCommandsProvider } from './components/SlashCommandsContext.jsx';
 import { FramelessResizeHandles } from './components/FramelessResizeHandles.jsx';
 import { GlobalFindOverlay } from './components/GlobalFindOverlay.jsx';
+import {
+  DEFAULT_SINGLE_LAYOUT,
+  LEGACY_DEFAULT_SINGLE_LAYOUT,
+  normalizePreviewPanelWidth,
+  normalizeSidePanelWidth,
+  normalizeSidebarWidth,
+  validateLayoutWidths,
+} from './lib/singleLayout.js';
 
 const SINGLE_LAYOUT_STORAGE_KEY = 'acecode.singleLayoutWidths.v1';
-const LEGACY_DEFAULT_SINGLE_LAYOUT = { sidebar: 200, sidePanel: 280 };
-const DEFAULT_SINGLE_LAYOUT = { sidebar: 270, sidePanel: 280 };
-const MIN_SIDEBAR_WIDTH = 160;
-const MAX_SIDEBAR_WIDTH = 360;
-const MIN_SIDE_PANEL_WIDTH = 240;
-const MAX_SIDE_PANEL_WIDTH = 560;
-const MIN_CHAT_WIDTH = 360;
-
-function clamp(value, min, max) {
-  return Math.min(Math.max(value, min), max);
-}
-
-function validateLayoutWidths(v) {
-  return v && typeof v === 'object'
-    && typeof v.sidebar === 'number' && Number.isFinite(v.sidebar)
-    && typeof v.sidePanel === 'number' && Number.isFinite(v.sidePanel);
-}
 
 function homeRefFromWorkspace(workspace, fallbackRef, health) {
   const source = workspace && typeof workspace === 'object' ? workspace : {};
@@ -90,10 +80,10 @@ export function App() {
   const sidePanelCollapsed = uiPrefs.sidePanelCollapsed;
   const sidePanelMaximized = !!uiPrefs.sidePanelMaximized;
   const projectSidebarCollapsed = !!uiPrefs.sidebarCollapsed;
-  const showAceCodeAvatar = effectiveShowAceCodeAvatar(uiPrefs);
+  const showAceCodeAvatar = false;
   const singleShellRef = useRef(null);
   const sidebarResizeActiveRef = useRef(false);
-  const avatarPrefTouchedRef = useRef(false);
+  const [previewPanelVisible, setPreviewPanelVisible] = useState(false);
   const activeRefRef = useRef(activeRef);
   const navHistoryRef = useRef(navHistory);
 
@@ -148,6 +138,9 @@ export function App() {
           && prev?.sidePanel === LEGACY_DEFAULT_SINGLE_LAYOUT.sidePanel) {
         return DEFAULT_SINGLE_LAYOUT;
       }
+      if (prev && prev.previewPanel == null) {
+        return { ...prev, previewPanel: DEFAULT_SINGLE_LAYOUT.previewPanel };
+      }
       return prev;
     });
   }, [setSingleLayout]);
@@ -157,16 +150,6 @@ export function App() {
       const h = await api.health();
       setHealth(h);
       setAuthState('ok');
-      api.getUiPreferences()
-        .then((prefs) => {
-          if (avatarPrefTouchedRef.current) return;
-          if (typeof prefs?.show_acecode_avatar === 'boolean') {
-            setUiPrefs({ showAceCodeAvatar: prefs.show_acecode_avatar });
-          }
-        })
-        .catch(() => {
-          // localStorage remains the fallback when talking to an older daemon.
-        });
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) {
         setAuthState('need-token');
@@ -175,7 +158,7 @@ export function App() {
         setAuthState('need-token');
       }
     }
-  }, [setUiPrefs]);
+  }, []);
 
   useEffect(() => { probe(); }, [probe]);
 
@@ -322,8 +305,8 @@ export function App() {
     setUiPrefs((prev) => ({ ...prev, sidePanelCollapsed: !prev.sidePanelCollapsed }));
   }, [setUiPrefs]);
 
-  // 最大化 / 还原右侧面板。最大化时强制确保 SidePanel 处于"未折叠"状态,
-  // 否则用户进入最大化后看到一片空白(panel 宽 0 + 聊天区已隐藏)。
+  // 最大化 / 还原中间预览面板。沿用旧字段名保存偏好,但 UI 控件已迁到预览面板。
+  // 最大化时强制确保右侧 SidePanel 未折叠,符合"右侧文件栏仍然可用"的行为。
   const toggleSidePanelMaximized = useCallback(() => {
     setUiPrefs((prev) => {
       const nextMax = !prev.sidePanelMaximized;
@@ -354,16 +337,6 @@ export function App() {
       setUpdateStarting(false);
     }
   }, [updateStarting, updateStatus]);
-
-  const setShowAceCodeAvatar = useCallback((show) => {
-    const next = !!show;
-    avatarPrefTouchedRef.current = true;
-    setUiPrefs({ showAceCodeAvatar: next });
-    api.setUiPreferences({ show_acecode_avatar: next })
-      .catch((e) => {
-        toast({ kind: 'err', text: '头像偏好保存失败:' + (e?.message || '') });
-      });
-  }, [setUiPrefs]);
 
   const openHomeForWorkspace = useCallback((workspace = null) => {
     navigateToRef(homeRefFromWorkspace(workspace, activeRefRef.current, health));
@@ -401,24 +374,41 @@ export function App() {
   const setSidebarWidth = useCallback((nextWidth, shellWidth = 0) => {
     const sidePanelVisible = !!(activeRef?.sessionId || activeRef?.id) && !sidePanelCollapsed;
     setSingleLayout((prev) => {
-      const sidePanelReserve = sidePanelVisible ? prev.sidePanel : 0;
-      const maxByShell = shellWidth > 0
-        ? Math.max(MIN_SIDEBAR_WIDTH, shellWidth - sidePanelReserve - MIN_CHAT_WIDTH)
-        : MAX_SIDEBAR_WIDTH;
-      const sidebar = clamp(Math.round(nextWidth), MIN_SIDEBAR_WIDTH, Math.min(MAX_SIDEBAR_WIDTH, maxByShell));
+      const sidebar = normalizeSidebarWidth(nextWidth, {
+        shellWidth,
+        sidePanelWidth: prev.sidePanel,
+        sidePanelVisible,
+        previewPanelWidth: prev.previewPanel,
+        previewPanelVisible,
+      });
       return sidebar === prev.sidebar ? prev : { ...prev, sidebar };
     });
-  }, [activeRef?.id, activeRef?.sessionId, sidePanelCollapsed, setSingleLayout]);
+  }, [activeRef?.id, activeRef?.sessionId, previewPanelVisible, sidePanelCollapsed, setSingleLayout]);
 
   const setSidePanelWidth = useCallback((nextWidth, contentWidth = 0) => {
     setSingleLayout((prev) => {
-      const maxByContent = contentWidth > 0
-        ? Math.max(MIN_SIDE_PANEL_WIDTH, contentWidth - MIN_CHAT_WIDTH)
-        : MAX_SIDE_PANEL_WIDTH;
-      const sidePanel = clamp(Math.round(nextWidth), MIN_SIDE_PANEL_WIDTH, Math.min(MAX_SIDE_PANEL_WIDTH, maxByContent));
+      const sidePanel = normalizeSidePanelWidth(nextWidth, {
+        contentWidth,
+        previewPanelWidth: prev.previewPanel,
+        previewPanelVisible,
+        previewPanelMaximized: sidePanelMaximized,
+      });
       return sidePanel === prev.sidePanel ? prev : { ...prev, sidePanel };
     });
-  }, [setSingleLayout]);
+  }, [previewPanelVisible, setSingleLayout, sidePanelMaximized]);
+
+  const setPreviewPanelWidth = useCallback((nextWidth, contentWidth = 0) => {
+    const sidePanelVisible = !!(activeRef?.sessionId || activeRef?.id) && !sidePanelCollapsed;
+    setSingleLayout((prev) => {
+      const previewPanel = normalizePreviewPanelWidth(nextWidth, {
+        contentWidth,
+        sidePanelWidth: prev.sidePanel,
+        sidePanelVisible,
+        sidePanelCollapsed,
+      });
+      return previewPanel === prev.previewPanel ? prev : { ...prev, previewPanel };
+    });
+  }, [activeRef?.id, activeRef?.sessionId, setSingleLayout, sidePanelCollapsed]);
 
   const startSidebarResize = useCallback((event) => {
     if (view !== 'single') return;
@@ -563,6 +553,9 @@ export function App() {
               showSidePanel
               sidePanelWidth={singleLayout.sidePanel}
               onSidePanelResize={setSidePanelWidth}
+              previewPanelWidth={singleLayout.previewPanel}
+              onPreviewPanelResize={setPreviewPanelWidth}
+              onPreviewPanelVisibleChange={setPreviewPanelVisible}
               sidePanelCollapsed={sidePanelCollapsed}
               onToggleSidePanel={toggleSidePanel}
               sidePanelMaximized={sidePanelMaximized}
@@ -581,8 +574,6 @@ export function App() {
             health={health}
             activeSessionId={activeId}
             onPermissionModeChanged={handlePermissionModeChanged}
-            showAceCodeAvatar={showAceCodeAvatar}
-            onShowAceCodeAvatarChanged={setShowAceCodeAvatar}
           />
         )}
         <SearchPalette

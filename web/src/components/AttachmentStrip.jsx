@@ -1,5 +1,4 @@
 import { memo, useEffect, useState } from 'react';
-import { createPortal } from 'react-dom';
 import { attachmentsFromContentParts, contextsFromContentParts, isImageAttachment, normalizeAttachmentList } from '../lib/messageAttachments.js';
 import {
   DESKTOP_CONTEXT_ACTION_EVENT,
@@ -7,6 +6,7 @@ import {
 } from '../lib/desktopContextMenu.js';
 import { clsx } from '../lib/format.js';
 import { VsIcon } from './Icon.jsx';
+import { ImageLightbox } from './ImageLightbox.jsx';
 
 function attachmentContextKey(att, index) {
   return String(att?.id || att?.blob_url || att?.preview_url || att?.url || att?.path || att?.name || index);
@@ -112,33 +112,7 @@ export const AttachmentStrip = memo(function AttachmentStrip({
           </div>
         ))}
       </div>
-      {preview
-        ? createPortal(
-            <div
-              className="fixed inset-0 z-[80] bg-black/70 flex items-center justify-center p-6"
-              role="dialog"
-              aria-modal="true"
-              onClick={() => setPreview(null)}
-            >
-              <button
-                type="button"
-                className="absolute top-3 right-3 w-8 h-8 rounded-md bg-surface text-fg border border-border flex items-center justify-center"
-                aria-label="关闭预览"
-                title="关闭"
-                onClick={() => setPreview(null)}
-              >
-                <VsIcon name="close" size={15} />
-              </button>
-              <img
-                src={preview.src}
-                alt={preview.alt}
-                className="max-w-full max-h-full object-contain shadow-xl"
-                onClick={(event) => event.stopPropagation()}
-              />
-            </div>,
-            document.body,
-          )
-        : null}
+      <ImageLightbox preview={preview} onClose={() => setPreview(null)} />
     </>
   );
 });

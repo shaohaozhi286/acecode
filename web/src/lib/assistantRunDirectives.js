@@ -1,11 +1,9 @@
-// 决定 transcript 中每条 assistant 消息是否需要展示「ACECode」头像 + 名牌,
-// 以及同一连续 assistant run 的底部 footer。
+// 决定 transcript 中每条 assistant 消息的连续 run 边界和底部 footer。
 //
-// 规则(对应用户反馈:连续 AI 输出 不需要 ACECode+输出+ACECode+输出, 而应该
-// ACECode+输出+输出):
-// - 用户消息出现 → 重置 run, 下一条 assistant 重新显示头像
+// 规则:
+// - 用户消息出现 → 重置 run
 // - 同一 run 内的多条 assistant 消息(中间穿插 tool 行 / system 行 不影响),
-//   只有第一条显示头像 + "ACECode" 名牌, 其余为 continuation(无头像 / 无名牌)
+//   只有第一条是非 continuation,其余为 continuation
 // - 工具行(kind === 'tool')和折叠活动摘要不影响 run 状态
 // - 空内容(trim 后为空)的 assistant 消息隐藏整行, 且不消耗
 //   header 名额(避免 LLM 仅发起 tool_call 时, 头一个空气泡偷走 header)

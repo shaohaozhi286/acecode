@@ -49,6 +49,17 @@ function sessionsPath(path, opts = {}) {
   return opts && opts.archived ? `${path}?archived=1` : path;
 }
 
+function usagePath(opts = {}) {
+  const qs = new URLSearchParams();
+  if (opts.days != null) qs.set('days', String(opts.days));
+  if (opts.workspace) qs.set('workspace', String(opts.workspace));
+  if (opts.timezoneOffsetMinutes != null) {
+    qs.set('timezone_offset_minutes', String(opts.timezoneOffsetMinutes));
+  }
+  const text = qs.toString();
+  return text ? `/api/usage?${text}` : '/api/usage';
+}
+
 export function sessionDraftPath(id, workspaceHash = '') {
   const sid = encodeURIComponent(id);
   const hash = String(workspaceHash || '').trim();
@@ -56,6 +67,15 @@ export function sessionDraftPath(id, workspaceHash = '') {
     return `/api/workspaces/${encodeURIComponent(hash)}/sessions/${sid}/draft`;
   }
   return `/api/sessions/${sid}/draft`;
+}
+
+export function sessionTodosPath(id, workspaceHash = '') {
+  const sid = encodeURIComponent(id);
+  const hash = String(workspaceHash || '').trim();
+  if (hash) {
+    return `/api/workspaces/${encodeURIComponent(hash)}/sessions/${sid}/todos`;
+  }
+  return `/api/sessions/${sid}/todos`;
 }
 
 async function request(method, path, body, base) {
@@ -83,6 +103,7 @@ async function request(method, path, body, base) {
 export function createApi(base = null) {
   return {
     health:           ()             => request('GET',    '/api/health', undefined, base),
+    getUsageStats:    (opts={})      => request('GET',    usagePath(opts), undefined, base),
     listWorkspaces:   ()             => request('GET',    '/api/workspaces', undefined, base),
     registerWorkspace:(cwd)          => request('POST',   '/api/workspaces', {cwd}, base),
     pickWorkspaceFolder:()           => request('POST',   '/api/workspaces/pick-folder', undefined, base),
@@ -107,6 +128,8 @@ export function createApi(base = null) {
       request('GET', sessionDraftPath(id, workspaceHash), undefined, base),
     setSessionDraft:  (id, text = '', workspaceHash = '') =>
       request('PUT', sessionDraftPath(id, workspaceHash), { text }, base),
+    clearSessionTodos: (id, workspaceHash = '') =>
+      request('DELETE', sessionTodosPath(id, workspaceHash), undefined, base),
     sendInput:        (id, payload)  => {
       const body = payload && typeof payload === 'object' && !Array.isArray(payload)
         ? payload

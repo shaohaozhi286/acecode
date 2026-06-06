@@ -187,7 +187,7 @@ export function StatusBar({
             aria-label="刷新模型列表"
             className="h-[18px] w-[18px] inline-flex items-center justify-center rounded hover:bg-surface-hi text-fg-mute hover:text-fg transition disabled:opacity-50 disabled:cursor-wait"
           >
-            <RefreshIcon size={12} className={modelRefreshing ? 'animate-spin' : ''} />
+            <RefreshIcon size={16} className={modelRefreshing ? 'animate-spin' : ''} />
           </button>
         )}
       </div>

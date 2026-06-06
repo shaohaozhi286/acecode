@@ -15,9 +15,9 @@ function run(name, fn) {
   }
 }
 
-run('DEFAULT_UI_PREFS keeps ACECode avatar visible by default', () => {
-  assert.equal(DEFAULT_UI_PREFS.showAceCodeAvatar, true);
-  assert.equal(effectiveShowAceCodeAvatar(DEFAULT_UI_PREFS), true);
+run('DEFAULT_UI_PREFS keeps ACECode avatar hidden by default', () => {
+  assert.equal(DEFAULT_UI_PREFS.showAceCodeAvatar, false);
+  assert.equal(effectiveShowAceCodeAvatar(DEFAULT_UI_PREFS), false);
 });
 
 run('validateUiPrefs accepts old objects without showAceCodeAvatar', () => {
@@ -29,17 +29,17 @@ run('validateUiPrefs accepts old objects without showAceCodeAvatar', () => {
   }), true);
 });
 
-run('effectiveShowAceCodeAvatar treats missing value as visible', () => {
+run('effectiveShowAceCodeAvatar treats missing value as hidden', () => {
   assert.equal(effectiveShowAceCodeAvatar({
     view: 'single',
     sidePanelCollapsed: false,
-  }), true);
+  }), false);
 });
 
-run('effectiveShowAceCodeAvatar honors explicit false', () => {
+run('effectiveShowAceCodeAvatar ignores explicit true and stays hidden', () => {
   assert.equal(effectiveShowAceCodeAvatar({
     ...DEFAULT_UI_PREFS,
-    showAceCodeAvatar: false,
+    showAceCodeAvatar: true,
   }), false);
 });
 

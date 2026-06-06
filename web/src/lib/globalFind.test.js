@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { findMatchesInText, isFindShortcut } from './globalFind.js';
+import { findMatchesInText, isComposingInputEvent, isFindShortcut } from './globalFind.js';
 
 function run(name, fn) {
   try {
@@ -40,4 +40,11 @@ run('findMatchesInText handles CJK text', () => {
 
 run('findMatchesInText ignores empty query', () => {
   assert.deepEqual(findMatchesInText('abc', ''), []);
+});
+
+run('isComposingInputEvent detects native and ref composition state', () => {
+  assert.equal(isComposingInputEvent({ isComposing: true }, false), true);
+  assert.equal(isComposingInputEvent({ nativeEvent: { isComposing: true } }, false), true);
+  assert.equal(isComposingInputEvent({}, true), true);
+  assert.equal(isComposingInputEvent({}, false), false);
 });

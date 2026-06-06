@@ -1,18 +1,16 @@
-export function assistantChromeState({ showAceCodeAvatar = true, continuation = false } = {}) {
-  const enabled = showAceCodeAvatar !== false;
+export function assistantChromeState() {
   return {
-    showAvatar: enabled && !continuation,
-    showName: enabled && !continuation,
-    showAvatarPlaceholder: continuation || !enabled,
+    showAvatar: false,
+    showName: false,
+    showAvatarPlaceholder: true,
     gapClass: 'gap-2',
   };
 }
 
-export function activityChromeState(showAceCodeAvatar = true) {
-  const enabled = showAceCodeAvatar !== false;
+export function activityChromeState() {
   return {
-    showAvatar: enabled,
-    showAvatarPlaceholder: !enabled,
+    showAvatar: false,
+    showAvatarPlaceholder: true,
     gapClass: 'gap-2',
   };
 }

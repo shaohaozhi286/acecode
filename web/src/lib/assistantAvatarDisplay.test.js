@@ -14,16 +14,16 @@ function run(name, fn) {
   }
 }
 
-run('assistantChromeState shows avatar and name for first assistant message by default', () => {
+run('assistantChromeState hides avatar and name for first assistant message by default', () => {
   assert.deepEqual(assistantChromeState({ continuation: false }), {
-    showAvatar: true,
-    showName: true,
-    showAvatarPlaceholder: false,
+    showAvatar: false,
+    showName: false,
+    showAvatarPlaceholder: true,
     gapClass: 'gap-2',
   });
 });
 
-run('assistantChromeState uses placeholder for continuation when avatar display is enabled', () => {
+run('assistantChromeState uses placeholder for continuation while avatar is hidden', () => {
   assert.deepEqual(assistantChromeState({ continuation: true }), {
     showAvatar: false,
     showName: false,
@@ -32,9 +32,9 @@ run('assistantChromeState uses placeholder for continuation when avatar display 
   });
 });
 
-run('assistantChromeState hides the avatar but preserves the assistant gutter when disabled', () => {
+run('assistantChromeState ignores enabled avatar requests and preserves the gutter', () => {
   assert.deepEqual(assistantChromeState({
-    showAceCodeAvatar: false,
+    showAceCodeAvatar: true,
     continuation: true,
   }), {
     showAvatar: false,
@@ -44,9 +44,9 @@ run('assistantChromeState hides the avatar but preserves the assistant gutter wh
   });
 });
 
-run('assistantChromeState hides the name but preserves the gutter for first message when avatar is disabled', () => {
+run('assistantChromeState hides the name and preserves the gutter for first message', () => {
   assert.deepEqual(assistantChromeState({
-    showAceCodeAvatar: false,
+    showAceCodeAvatar: true,
     continuation: false,
   }), {
     showAvatar: false,
@@ -56,8 +56,8 @@ run('assistantChromeState hides the name but preserves the gutter for first mess
   });
 });
 
-run('activityChromeState hides waiting-state avatar when disabled', () => {
-  assert.deepEqual(activityChromeState(false), {
+run('activityChromeState always hides waiting-state avatar', () => {
+  assert.deepEqual(activityChromeState(true), {
     showAvatar: false,
     showAvatarPlaceholder: true,
     gapClass: 'gap-2',

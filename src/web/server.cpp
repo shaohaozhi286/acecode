@@ -17,6 +17,8 @@
 #include "../session/session_rewind.hpp"
 #include "../session/session_serializer.hpp"
 #include "../session/session_storage.hpp"
+#include "../session/todo_state.hpp"
+#include "../session/session_usage_ledger.hpp"
 #include "../session/session_writer_lease.hpp"
 #include "../daemon/platform.hpp"
 #include "../skills/skill_registry.hpp"
@@ -148,8 +150,8 @@ json chat_message_to_json(const ChatMessage& m) {
     return chat_message_to_payload_json(m);
 }
 
-json ui_preferences_to_json(const WebUiPreferencesConfig& prefs) {
-    return json{{"show_acecode_avatar", prefs.show_acecode_avatar}};
+json ui_preferences_to_json(const WebUiPreferencesConfig&) {
+    return json{{"show_acecode_avatar", false}};
 }
 
 json upgrade_config_to_json(const UpgradeConfig& cfg) {
@@ -463,6 +465,63 @@ struct WebServer::Impl {
         if (!raw) return false;
         const std::string value = ascii_lower(raw);
         return value == "1" || value == "true" || value == "yes";
+    }
+
+    UsageLedgerQuery usage_query_from_request(const crow::request& req) const {
+        UsageLedgerQuery query;
+        if (auto raw_days = req.url_params.get("days")) {
+            try {
+                query.days = std::stoi(raw_days);
+            } catch (...) {
+                query.days = 30;
+            }
+        }
+        if (auto raw_workspace = req.url_params.get("workspace")) {
+            query.workspace_hash = raw_workspace;
+        }
+        if (auto raw_tz = req.url_params.get("timezone_offset_minutes")) {
+            try {
+                query.timezone_offset_minutes = std::clamp(std::stoi(raw_tz), -1440, 1440);
+            } catch (...) {
+                query.timezone_offset_minutes = 0;
+            }
+        }
+        return query;
+    }
+
+    std::vector<UsageLedgerScope> usage_scopes_for_request(
+        const std::string& workspace_hash) const {
+        std::vector<UsageLedgerScope> scopes;
+        std::unordered_set<std::string> seen;
+        auto add = [&](const acecode::desktop::WorkspaceMeta& ws) {
+            if (!workspace_hash.empty() &&
+                workspace_hash != "__local__" &&
+                ws.hash != workspace_hash) {
+                return;
+            }
+            if (ws.hash.empty() || seen.count(ws.hash)) return;
+            seen.insert(ws.hash);
+            scopes.push_back(UsageLedgerScope{
+                SessionStorage::get_project_dir(ws.cwd),
+                ws.hash,
+                ws.name.empty() ? acecode::desktop::default_workspace_name(ws.cwd) : ws.name,
+                ws.cwd,
+            });
+        };
+
+        if (workspace_hash == "__local__") {
+            add(compatibility_workspace());
+            return scopes;
+        }
+
+        add(compatibility_workspace());
+        if (deps.workspace_registry) {
+            deps.workspace_registry->scan(projects_dir());
+            for (const auto& ws : deps.workspace_registry->list()) {
+                add(ws);
+            }
+        }
+        return scopes;
     }
 
     std::vector<std::string> allowed_file_cwds() const {
@@ -781,6 +840,22 @@ struct WebServer::Impl {
         return with_cors(req, std::move(r));
     }
 
+    crow::response session_todos_response(
+        const crow::request& req,
+        const acecode::desktop::WorkspaceMeta& ws,
+        const std::string& id,
+        const std::vector<TodoItem>& todos) {
+        crow::response r(json{
+            {"session_id", id},
+            {"id", id},
+            {"workspace_hash", ws.hash},
+            {"todos", todo_items_to_json(todos)},
+            {"todo_summary", todo_summary_to_json(todos)},
+        }.dump());
+        r.add_header("Content-Type", "application/json");
+        return with_cors(req, std::move(r));
+    }
+
     std::optional<crow::response> parse_session_input_draft_request(
         const crow::request& req,
         std::string& text) {
@@ -857,6 +932,32 @@ struct WebServer::Impl {
         const auto project_dir = SessionStorage::get_project_dir(ws.cwd);
         SessionStorage::write_meta(SessionStorage::meta_path(project_dir, id), meta);
         return session_input_draft_response(req, id, text);
+    }
+
+    crow::response clear_session_todos(
+        const crow::request& req,
+        const acecode::desktop::WorkspaceMeta& ws,
+        const std::string& id) {
+        if (auto* entry = active_session_entry_for_workspace(ws, id)) {
+            if (entry->sm) {
+                entry->sm->set_todos({});
+                return session_todos_response(req, ws, id, entry->sm->current_todos());
+            }
+        }
+
+        auto maybe_meta = find_session_meta_for_workspace(ws, id);
+        if (!maybe_meta.has_value()) {
+            crow::response r(404);
+            r.body = R"({"error":"session not found"})";
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        }
+
+        SessionMeta meta = *maybe_meta;
+        meta.todos.clear();
+        const auto project_dir = SessionStorage::get_project_dir(ws.cwd);
+        SessionStorage::write_meta(SessionStorage::meta_path(project_dir, id), meta);
+        return session_todos_response(req, ws, id, meta.todos);
     }
 
     std::filesystem::path pinned_sessions_path_for_cwd(const std::string& cwd) const {
@@ -1218,6 +1319,7 @@ struct WebServer::Impl {
     // -----------------------------------------------------------------
     void register_routes() {
         register_health();
+        register_usage();
         register_workspaces();
         register_pinned_sessions();
         register_sessions();
@@ -1254,6 +1356,10 @@ struct WebServer::Impl {
             return cors_preflight(req);
         });
         CROW_ROUTE(app, "/api/workspaces/<string>/sessions/<string>/draft").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req, const std::string&, const std::string&) {
+            return cors_preflight(req);
+        });
+        CROW_ROUTE(app, "/api/workspaces/<string>/sessions/<string>/todos").methods(crow::HTTPMethod::Options)
         ([this](const crow::request& req, const std::string&, const std::string&) {
             return cors_preflight(req);
         });
@@ -1515,6 +1621,19 @@ struct WebServer::Impl {
                 return with_cors(req, std::move(r));
             }
             return set_session_input_draft(req, *ws, id);
+        });
+
+        CROW_ROUTE(app, "/api/workspaces/<string>/sessions/<string>/todos").methods(crow::HTTPMethod::Delete)
+        ([this](const crow::request& req, const std::string& hash, const std::string& id) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            auto ws = resolve_workspace(hash);
+            if (!ws.has_value()) {
+                crow::response r(404);
+                r.body = R"({"error":"workspace not found"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            return clear_session_todos(req, *ws, id);
         });
     }
 
@@ -1981,6 +2100,28 @@ struct WebServer::Impl {
         });
     }
 
+    void register_usage() {
+        CROW_ROUTE(app, "/api/usage").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
+
+        CROW_ROUTE(app, "/api/usage").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            auto query = usage_query_from_request(req);
+            auto scopes = usage_scopes_for_request(query.workspace_hash);
+            auto aggregate = aggregate_usage_ledgers(scopes, query);
+            auto body = usage_aggregate_to_json(aggregate);
+            if (!query.workspace_hash.empty()) {
+                body["metadata"]["workspace_filter"] = query.workspace_hash;
+            }
+            crow::response r(body.dump());
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        });
+    }
+
     void register_sessions() {
         CROW_ROUTE(app, "/api/sessions").methods(crow::HTTPMethod::Options)
         ([this](const crow::request& req) {
@@ -2019,6 +2160,10 @@ struct WebServer::Impl {
             return cors_preflight(req);
         });
         CROW_ROUTE(app, "/api/sessions/<string>/draft").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req, const std::string&) {
+            return cors_preflight(req);
+        });
+        CROW_ROUTE(app, "/api/sessions/<string>/todos").methods(crow::HTTPMethod::Options)
         ([this](const crow::request& req, const std::string&) {
             return cors_preflight(req);
         });
@@ -2140,6 +2285,12 @@ struct WebServer::Impl {
         ([this](const crow::request& req, const std::string& id) {
             if (auto rej = require_auth(req)) return std::move(*rej);
             return set_session_input_draft(req, compatibility_workspace(), id);
+        });
+
+        CROW_ROUTE(app, "/api/sessions/<string>/todos").methods(crow::HTTPMethod::Delete)
+        ([this](const crow::request& req, const std::string& id) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            return clear_session_todos(req, compatibility_workspace(), id);
         });
 
         // DELETE /api/sessions/:id: 销毁。spec 9.5
@@ -3559,6 +3710,8 @@ struct WebServer::Impl {
         });
 
         // PUT /api/config/ui-preferences body {show_acecode_avatar:boolean}.
+        // Kept for older web clients; ACECode avatar display is now permanently
+        // disabled and the persisted value is normalized to false.
         CROW_ROUTE(app, "/api/config/ui-preferences").methods(crow::HTTPMethod::PUT)
         ([this](const crow::request& req) {
             if (auto rej = require_auth(req)) return std::move(*rej);
@@ -3584,8 +3737,7 @@ struct WebServer::Impl {
             }
 
             const auto before = deps.app_config->web_ui;
-            deps.app_config->web_ui.show_acecode_avatar =
-                body["show_acecode_avatar"].get<bool>();
+            deps.app_config->web_ui.show_acecode_avatar = false;
             try {
                 if (!deps.config_path.empty()) {
                     save_config(*deps.app_config, deps.config_path);

@@ -26,6 +26,8 @@
 #include "session/session_manager.hpp"
 #include "session/session_registry.hpp"
 #include "session/session_storage.hpp"
+#include "session/todo_state.hpp"
+#include "session/session_usage_ledger.hpp"
 #include "skills/skill_registry.hpp"
 #include "tool/tool_executor.hpp"
 #include "upgrade/manifest.hpp"
@@ -330,6 +332,50 @@ TEST(WebServerHttp, HealthEndpointReturnsBasicMetadata) {
     EXPECT_EQ(j["notifications"]["on_question"], true);
     EXPECT_EQ(j["notifications"]["on_completion"], true);
     EXPECT_EQ(j["notifications"]["suppress_when_focused"], true);
+}
+
+TEST(WebServerHttp, UsageEndpointAggregatesLedgerRecords) {
+    WebServerFixture fx;
+
+    acecode::UsageLedgerRecord first;
+    first.timestamp_ms = acecode::usage_now_unix_ms();
+    first.timestamp = acecode::usage_iso8601_from_unix_ms(first.timestamp_ms);
+    first.session_id = "usage-session-a";
+    first.cwd = fx.cwd;
+    first.provider = "openai";
+    first.model = "gpt-4o";
+    first.model_preset = "gpt-4o";
+    first.surface = "web";
+    first.usage.prompt_tokens = 1000;
+    first.usage.completion_tokens = 250;
+    first.usage.total_tokens = 1250;
+    first.usage.cache_read_tokens = 300;
+    first.usage.has_data = true;
+    acecode::append_usage_ledger_record(fx.project_dir, first);
+
+    acecode::UsageLedgerRecord second = first;
+    second.session_id = "usage-session-b";
+    second.usage.prompt_tokens = 500;
+    second.usage.completion_tokens = 100;
+    second.usage.total_tokens = 600;
+    second.usage.cache_read_tokens = 0;
+    second.usage.has_data = false;
+    acecode::append_usage_ledger_record(fx.project_dir, second);
+
+    auto r = cpr::Get(cpr::Url{fx.url("/api/usage?days=7")});
+    ASSERT_EQ(r.status_code, 200) << r.text;
+    auto j = json::parse(r.text);
+    ASSERT_TRUE(j["summary"].is_object());
+    EXPECT_EQ(j["summary"]["records"], 2);
+    EXPECT_EQ(j["summary"]["estimated_records"], 1);
+    EXPECT_EQ(j["summary"]["session_count"], 2);
+    EXPECT_EQ(j["summary"]["totals"]["total_tokens"], 1850);
+    ASSERT_FALSE(j["daily"].empty());
+    ASSERT_FALSE(j["models"].empty());
+    EXPECT_EQ(j["models"][0]["label"], "gpt-4o");
+    ASSERT_FALSE(j["workspaces"].empty());
+    EXPECT_EQ(j["metadata"]["days"], 7);
+    EXPECT_EQ(j["metadata"]["forward_only"], true);
 }
 
 // 场景: 跨端口 Web/Desktop fetch 只接受 loopback Origin,且不能因为 remote_ip
@@ -1074,6 +1120,41 @@ TEST(WebServerHttp, GetMessagesIncludesCurrentGoalSnapshot) {
     EXPECT_FALSE(j["busy"].get<bool>());
 }
 
+// 场景:桌面 TodoWrite 底栏清空按钮走 workspace-scoped API,必须同时清掉
+// active SessionManager 内存状态和 meta 快照,否则刷新历史后待办事项会回来。
+TEST(WebServerHttp, ClearWorkspaceSessionTodosPersistsEmptyState) {
+    WebServerFixture fx;
+    const std::string hash = acecode::compute_cwd_hash(fx.cwd);
+    auto post = cpr::Post(cpr::Url{fx.url("/api/workspaces/" + hash + "/sessions")},
+                          cpr::Header{{"Content-Type", "application/json"}},
+                          cpr::Body{R"({})"});
+    ASSERT_EQ(post.status_code, 201) << post.text;
+    auto sid = json::parse(post.text)["session_id"].get<std::string>();
+
+    auto* entry = fx.registry->lookup(sid);
+    ASSERT_NE(entry, nullptr);
+    ASSERT_TRUE(entry->sm);
+    entry->sm->set_todos({
+        acecode::TodoItem{"todo-1", "List current folder content", "completed"},
+        acecode::TodoItem{"todo-2", "Summarize result", "pending"},
+    });
+    ASSERT_EQ(entry->sm->current_todos().size(), 2u);
+
+    auto clear = cpr::Delete(cpr::Url{fx.url("/api/workspaces/" + hash + "/sessions/" + sid + "/todos")});
+    ASSERT_EQ(clear.status_code, 200) << clear.text;
+    auto body = json::parse(clear.text);
+    EXPECT_EQ(body["session_id"], sid);
+    ASSERT_TRUE(body["todos"].is_array());
+    EXPECT_TRUE(body["todos"].empty());
+    EXPECT_EQ(body["todo_summary"]["total"], 0);
+    EXPECT_EQ(body["todo_summary"]["completed"], 0);
+    EXPECT_TRUE(entry->sm->current_todos().empty());
+
+    auto meta = acecode::SessionStorage::read_meta(
+        acecode::SessionStorage::meta_path(fx.project_dir, sid));
+    EXPECT_TRUE(meta.todos.empty());
+}
+
 // 场景: GET /api/sessions/:id/messages?since=N 走 replay-only 路径,返回的是
 // 数组(不带 messages 包裹)。SubscribeListener 在事件数=0 时返回空数组 200。
 TEST(WebServerHttp, GetMessagesWithSinceReturnsArrayOnly) {
@@ -1406,20 +1487,20 @@ TEST(WebServerHttp, UnknownRouteReturns404) {
     EXPECT_EQ(r.status_code, 404);
 }
 
-// 场景:GET /api/config/ui-preferences 返回头像显示偏好默认值。
+// 场景:GET /api/config/ui-preferences 返回固定隐藏头像的兼容值。
 TEST(WebServerHttp, GetUiPreferencesReturnsAvatarDefault) {
     WebServerFixture fx;
     auto r = cpr::Get(cpr::Url{fx.url("/api/config/ui-preferences")});
     ASSERT_EQ(r.status_code, 200) << r.text;
     auto j = json::parse(r.text);
     ASSERT_TRUE(j.contains("show_acecode_avatar"));
-    EXPECT_EQ(j["show_acecode_avatar"], true);
+    EXPECT_EQ(j["show_acecode_avatar"], false);
 }
 
-// 场景:PUT /api/config/ui-preferences 更新内存并落盘。
-TEST(WebServerHttp, PutUiPreferencesPersistsAvatarSetting) {
+// 场景:PUT /api/config/ui-preferences 保持兼容,但头像显示固定为 false。
+TEST(WebServerHttp, PutUiPreferencesNormalizesAvatarSettingToFalse) {
     WebServerFixture fx;
-    json req = {{"show_acecode_avatar", false}};
+    json req = {{"show_acecode_avatar", true}};
     auto put = cpr::Put(cpr::Url{fx.url("/api/config/ui-preferences")},
                         cpr::Header{{"Content-Type", "application/json"}},
                         cpr::Body{req.dump()});
@@ -1431,8 +1512,7 @@ TEST(WebServerHttp, PutUiPreferencesPersistsAvatarSetting) {
     std::ifstream ifs(fx.tmp_dir / "config.json");
     ASSERT_TRUE(ifs.is_open());
     auto saved = json::parse(ifs);
-    ASSERT_TRUE(saved.contains("web_ui"));
-    EXPECT_EQ(saved["web_ui"]["show_acecode_avatar"], false);
+    EXPECT_FALSE(saved.contains("web_ui"));
 }
 
 // 场景:PUT /api/config/ui-preferences 非 bool payload 被拒绝且不改 cfg。
@@ -1445,7 +1525,7 @@ TEST(WebServerHttp, PutUiPreferencesRejectsInvalidAvatarPayload) {
     ASSERT_EQ(r.status_code, 400) << r.text;
     auto j = json::parse(r.text);
     EXPECT_EQ(j["error"], "BAD_REQUEST");
-    EXPECT_TRUE(fx.cfg.web_ui.show_acecode_avatar);
+    EXPECT_FALSE(fx.cfg.web_ui.show_acecode_avatar);
 }
 
 // 场景:GET /api/config/upgrade 返回当前升级服务 URL 默认值。

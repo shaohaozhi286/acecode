@@ -79,6 +79,78 @@ Liveness + identity probe. Always available.
 }
 ```
 
+### `GET /api/usage`
+
+Aggregate durable token usage records for the Settings usage page. Records are
+written only for usage observed after the usage ledger feature is installed;
+historical session metadata is not backfilled into daily usage.
+
+Query parameters:
+- `days`: optional number of days to include, default `30`, clamped by the daemon.
+- `workspace`: optional workspace hash. Use `__local__` for the compatibility
+  working directory route.
+- `timezone_offset_minutes`: optional JavaScript-style offset (`Date#getTimezoneOffset()`)
+  used for daily buckets. Defaults to `0`.
+
+**Response 200**:
+```json
+{
+  "summary": {
+    "records": 12,
+    "estimated_records": 2,
+    "session_count": 4,
+    "totals": {
+      "prompt_tokens": 120000,
+      "completion_tokens": 18000,
+      "total_tokens": 138000,
+      "cache_read_tokens": 64000,
+      "cache_write_tokens": 0,
+      "reasoning_tokens": 1200
+    }
+  },
+  "daily": [
+    {
+      "date": "2026-06-06",
+      "tokens": 42000,
+      "records": 3,
+      "estimated_records": 0,
+      "session_count": 1,
+      "totals": { "total_tokens": 42000 }
+    }
+  ],
+  "models": [
+    {
+      "label": "gpt-4o",
+      "provider": "openai",
+      "model": "gpt-4o",
+      "model_preset": "gpt-4o",
+      "records": 8,
+      "estimated_records": 1,
+      "session_count": 3,
+      "totals": { "total_tokens": 110000 }
+    }
+  ],
+  "workspaces": [
+    {
+      "workspace_hash": "abc123",
+      "workspace_name": "repo",
+      "cwd": "C:\\Users\\you\\repo",
+      "records": 12,
+      "estimated_records": 2,
+      "session_count": 4,
+      "totals": { "total_tokens": 138000 }
+    }
+  ],
+  "metadata": {
+    "days": 30,
+    "period_start": "2026-05-08T00:00:00Z",
+    "period_end": "2026-06-06T23:59:59Z",
+    "timezone_offset_minutes": -480,
+    "forward_only": true
+  }
+}
+```
+
 ### `GET /api/sessions`
 
 List active in-memory sessions plus historical sessions on disk for the
@@ -139,6 +211,28 @@ Fetch session content. Two modes by `since`:
 
 If the requested seq predates the ring-buffer start, you'll get an empty list
 and should re-fetch with `since=0`.
+
+### `DELETE /api/sessions/:id/todos`
+
+Clear the current TodoWrite checklist for a session. The workspace-scoped alias
+is `DELETE /api/workspaces/:hash/sessions/:id/todos`.
+
+**Response 200**:
+```json
+{
+  "session_id": "550e8400-...",
+  "id": "550e8400-...",
+  "workspace_hash": "abc123",
+  "todos": [],
+  "todo_summary": {
+    "total": 0,
+    "pending": 0,
+    "in_progress": 0,
+    "completed": 0,
+    "cancelled": 0
+  }
+}
+```
 
 ### `POST /api/sessions/:id/commands`
 
@@ -226,24 +320,27 @@ List skills the daemon registered at startup.
 
 ### `GET /api/config/ui-preferences`
 
-Read non-sensitive Web/Desktop UI preferences from `~/.acecode/config.json`.
-Missing legacy fields default to visible ACECode avatars.
+Read non-sensitive Web/Desktop UI preferences. The legacy ACECode avatar
+preference is retained for wire compatibility, but the current UI always hides
+the ACECode avatar.
 
 **Response 200**:
 ```json
-{ "show_acecode_avatar": true }
+{ "show_acecode_avatar": false }
 ```
 
 ### `PUT /api/config/ui-preferences`
 
-Persist non-sensitive Web/Desktop UI preferences.
+Compatibility endpoint for older Web/Desktop clients. The request body is still
+validated, but `show_acecode_avatar` is normalized to `false` and the avatar
+remains hidden.
 
 **Request body**:
 ```json
 { "show_acecode_avatar": false }
 ```
 
-**Response 200** echoes the persisted value:
+**Response 200** echoes the effective value:
 ```json
 { "show_acecode_avatar": false }
 ```

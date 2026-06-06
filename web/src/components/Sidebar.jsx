@@ -322,6 +322,7 @@ function WorkspaceGroup({
   onTogglePin,
   onArchive,
   pendingQuestionSessionIds,
+  sessionsLoading = false,
 }) {
   const [editing, setEditing] = useState(false);
   const [draft,   setDraft]   = useState(ws.name);
@@ -419,7 +420,7 @@ function WorkspaceGroup({
         <button
           type="button"
           onClick={(e) => { e.stopPropagation(); onNewSession(ws); }}
-          className="w-5 h-5 rounded text-fg-mute hover:text-accent hover:bg-surface-hi flex items-center justify-center shrink-0 transition"
+          className="ace-sidebar-workspace-action w-5 h-5 rounded hover:bg-surface-hi flex items-center justify-center shrink-0 transition"
           title="新增会话"
         ><VsIcon name="editWindow" size={13} /></button>
         {hasUnread && <span className="w-1.5 h-1.5 rounded-full shrink-0 bg-ok shadow-[0_0_4px_var(--ace-ok)]" title="有未读会话" />}
@@ -441,7 +442,9 @@ function WorkspaceGroup({
       {expanded && (
         <div className="my-1">
           {sessions.length === 0 ? (
-            <div className="mx-1.5 ml-[22px] px-2 py-[3px] text-[11px] text-fg-mute italic">暂无对话</div>
+            <div className="mx-1.5 ml-[22px] px-2 py-[3px] text-[11px] text-fg-mute italic">
+              {sessionsLoading ? '加载中...' : '暂无对话'}
+            </div>
           ) : (
             <>
               {projectedSessions.visibleSessions.map((s) => (
@@ -486,6 +489,8 @@ export function Sidebar({
   const [sessions,    setSessions]    = useState([]);
   const [statusBySession, setStatusBySession] = useState(() => new Map());
   const [pinnedByWorkspace, setPinnedByWorkspace] = useState(() => new Map());
+  const [sessionLoadingWorkspaces, setSessionLoadingWorkspaces] = useState(() => new Set());
+  const [sessionLoadedWorkspaces, setSessionLoadedWorkspaces] = useState(() => new Set());
   const [expanded,    setExpanded]    = useState(new Set());
   const [expandedSessionLists, setExpandedSessionLists] = useState(new Set());
   const [activeWorkspaceHash, setActiveWorkspaceHash] = useState('');
@@ -568,6 +573,32 @@ export function Sidebar({
     });
   }, []);
 
+  const setSessionWorkspaceLoading = useCallback((hashes, loading) => {
+    const normalized = Array.from(new Set(Array.from(hashes || []).filter(Boolean)));
+    if (normalized.length === 0) return;
+    setSessionLoadingWorkspaces((prev) => {
+      const next = new Set(prev);
+      for (const hash of normalized) {
+        if (loading) next.add(hash);
+        else next.delete(hash);
+      }
+      return next;
+    });
+  }, []);
+
+  const setSessionWorkspacesLoaded = useCallback((hashes, loaded) => {
+    const normalized = Array.from(new Set(Array.from(hashes || []).filter(Boolean)));
+    if (normalized.length === 0) return;
+    setSessionLoadedWorkspaces((prev) => {
+      const next = new Set(prev);
+      for (const hash of normalized) {
+        if (loaded) next.add(hash);
+        else next.delete(hash);
+      }
+      return next;
+    });
+  }, []);
+
   useEffect(() => {
     const handler = (event) => {
       const detail = event.detail || {};
@@ -620,6 +651,11 @@ export function Sidebar({
       if (chosen) expandedHashes.add(chosen);
       setActiveWorkspaceHash(chosen);
       setWorkspaces(withActive);
+      const earlyVisibleWorkspaceHashes = withActive
+        .filter((w) => w.active || w.hash === '__local__' || expandedHashes.has(w.hash))
+        .map((w) => w.hash)
+        .filter(Boolean);
+      setSessionWorkspaceLoading(earlyVisibleWorkspaceHashes, true);
 
       const pinnedPairs = await Promise.all(withActive.map(async (w) => {
         if (!w.hash) return [w.hash, []];
@@ -648,8 +684,16 @@ export function Sidebar({
         .filter((w) => w.active || w.hash === '__local__' || expandedHashes.has(w.hash) || pinnedWorkspaceHashes.has(w.hash))
         .forEach((w) => connection.subscribeWorkspaceStatus(w.hash));
 
+      const visibleWorkspaces = withActive.filter((w) => w.active || w.hash === '__local__' || expandedHashes.has(w.hash) || pinnedWorkspaceHashes.has(w.hash));
+      const visibleWorkspaceHashes = visibleWorkspaces.map((w) => w.hash).filter(Boolean);
+      const visibleWorkspaceHashSet = new Set(visibleWorkspaceHashes);
+      const hiddenWorkspaceHashes = withActive
+        .map((w) => w.hash)
+        .filter((hash) => hash && !visibleWorkspaceHashSet.has(hash));
+      setSessionWorkspacesLoaded(hiddenWorkspaceHashes, false);
+      setSessionWorkspaceLoading(hiddenWorkspaceHashes, false);
+      setSessionWorkspaceLoading(visibleWorkspaceHashes, true);
       try {
-        const visibleWorkspaces = withActive.filter((w) => w.active || w.hash === '__local__' || expandedHashes.has(w.hash) || pinnedWorkspaceHashes.has(w.hash));
         const perWorkspace = await Promise.all(visibleWorkspaces.map(async (w) => {
           if (w.hash === '__local__') {
             const list = await api.listSessions();
@@ -669,13 +713,17 @@ export function Sidebar({
         syncRetainedSessionIds(arr.filter((s) => s.active && s.id).map((s) => s.id));
       }
       catch { /* 鉴权失败不致命 */ }
+      finally {
+        setSessionWorkspacesLoaded(visibleWorkspaceHashes, true);
+        setSessionWorkspaceLoading(visibleWorkspaceHashes, false);
+      }
     } finally {
       refreshingRef.current = false;
       const pendingHash = pendingRefreshHashRef.current;
       pendingRefreshHashRef.current = '';
       if (pendingHash) setTimeout(() => refresh(pendingHash).catch(() => {}), 0);
     }
-  }, [activeWorkspaceHash, setPinnedMap, syncRetainedSessionIds, updateExpanded]);
+  }, [activeWorkspaceHash, setPinnedMap, setSessionWorkspaceLoading, setSessionWorkspacesLoaded, syncRetainedSessionIds, updateExpanded]);
 
   const archiveSession = useCallback(async (session) => {
     const id = session?.id || session?.sessionId || session?.session_id || '';
@@ -814,14 +862,21 @@ export function Sidebar({
   }, [activeId, sessions, statusBySession, markSessionRead]);
 
   const onToggle = (hash) => {
-    updateExpanded((prev) => {
-      const next = new Set(prev);
-      next.has(hash) ? next.delete(hash) : next.add(hash);
-      return next;
-    });
+    if (!hash) return;
+    const next = new Set(expandedRef.current);
+    const willExpand = !next.has(hash);
+    if (willExpand) next.add(hash);
+    else next.delete(hash);
+    expandedRef.current = next;
+    setExpanded(next);
+    if (willExpand) {
+      setSessionWorkspaceLoading([hash], true);
+      refresh(hash).catch(() => {});
+    }
   };
 
   const onActivate = async (ws) => {
+    setSessionWorkspaceLoading([ws.hash], true);
     setActiveWorkspaceHash(ws.hash);
     updateExpanded((prev) => new Set(prev).add(ws.hash));
     if (!hasDesktopBridge()) {
@@ -1100,6 +1155,7 @@ export function Sidebar({
                   onTogglePin={togglePinnedSession}
                   onArchive={archiveSession}
                   pendingQuestionSessionIds={pendingQuestionSessionIds}
+                  sessionsLoading={sessionLoadingWorkspaces.has(ws.hash) || !sessionLoadedWorkspaces.has(ws.hash)}
                 />
               );
             })}

@@ -3,6 +3,7 @@
 #include "session_rewind.hpp"
 #include "tool_result_storage.hpp"
 #include "turn_timing.hpp"
+#include "session_usage_ledger.hpp"
 #include "../utils/atomic_file.hpp"
 #include "../utils/logger.hpp"
 #include "../utils/utf8_path.hpp"
@@ -1047,6 +1048,18 @@ void SessionManager::record_token_usage(const TokenUsage& usage) {
         ensure_created();
     }
     if (created_) {
+        const auto timestamp_ms = usage_now_unix_ms();
+        UsageLedgerRecord record;
+        record.timestamp_ms = timestamp_ms;
+        record.timestamp = usage_iso8601_from_unix_ms(timestamp_ms);
+        record.session_id = session_id_;
+        record.cwd = cwd_;
+        record.provider = provider_name_;
+        record.model = model_name_;
+        record.model_preset = model_preset_;
+        record.surface = surface_;
+        record.usage = usage;
+        append_usage_ledger_record(project_dir_, record);
         update_meta();
     }
 }

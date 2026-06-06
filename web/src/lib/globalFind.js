@@ -14,6 +14,14 @@ export function isFindShortcut(event) {
   return typeof event.key === 'string' && event.key.toLowerCase() === 'f';
 }
 
+export function isComposingInputEvent(event, composing = false) {
+  return !!(
+    composing ||
+    event?.isComposing ||
+    event?.nativeEvent?.isComposing
+  );
+}
+
 export function findMatchesInText(text, query) {
   const source = String(text || '');
   const needle = String(query || '');

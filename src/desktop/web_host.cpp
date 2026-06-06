@@ -105,7 +105,9 @@ void configure_mac_window_chrome(webview::webview& w) {
     [window setMovableByWindowBackground:NO];
 
     NSSize min_size = [window minSize];
-    min_size.width = std::max(min_size.width, static_cast<CGFloat>(320.0));
+    min_size.width = std::max(
+        min_size.width,
+        static_cast<CGFloat>(kMinimumDesktopWindowWidth));
     min_size.height = std::max(min_size.height, static_cast<CGFloat>(240.0));
     [window setMinSize:min_size];
 
@@ -193,7 +195,9 @@ bool mac_area_uses_bottom_edge(FramelessHitTestArea area) {
 
 NSSize mac_min_window_size(NSWindow* window) {
     NSSize min_size = window ? [window minSize] : NSMakeSize(0, 0);
-    min_size.width = std::max(min_size.width, static_cast<CGFloat>(320.0));
+    min_size.width = std::max(
+        min_size.width,
+        static_cast<CGFloat>(kMinimumDesktopWindowWidth));
     min_size.height = std::max(min_size.height, static_cast<CGFloat>(240.0));
     return min_size;
 }
@@ -367,6 +371,14 @@ UINT focus_existing_instance_msg() {
 
 int dpi_scale(int value, UINT dpi) {
     return static_cast<int>((static_cast<long long>(value) * static_cast<long long>(dpi)) / 96);
+}
+
+void apply_minimum_track_size(HWND hwnd, MINMAXINFO* info) {
+    if (!info) return;
+    const UINT dpi = ::GetDpiForWindow(hwnd);
+    info->ptMinTrackSize.x = std::max<LONG>(
+        info->ptMinTrackSize.x,
+        static_cast<LONG>(dpi_scale(kMinimumDesktopWindowWidth, dpi)));
 }
 
 HMONITOR active_monitor() {
@@ -544,6 +556,9 @@ LRESULT frameless_nc_calc(HWND hwnd, WPARAM wparam, LPARAM lparam) {
 
 LRESULT CALLBACK host_window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     switch (msg) {
+        case WM_GETMINMAXINFO:
+            apply_minimum_track_size(hwnd, reinterpret_cast<MINMAXINFO*>(lparam));
+            return 0;
         case WM_NCCALCSIZE:
             return frameless_nc_calc(hwnd, wparam, lparam);
         case WM_NCHITTEST:

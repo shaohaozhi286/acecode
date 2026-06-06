@@ -27,6 +27,7 @@ import {
 } from '../lib/modelManager.js';
 import { PERMISSION_MODES, normalizePermissionMode } from '../lib/permissionMode.js';
 import { sessionDisplayTitle } from '../lib/sessionTitle.js';
+import { formatUsageTokens, normalizeUsageStats, usageDataNote } from '../lib/usageStats.js';
 import { RefreshIcon, VsIcon } from './Icon.jsx';
 import { toast } from './Toast.jsx';
 import {
@@ -60,8 +61,6 @@ export function SettingsPage({
   health,
   activeSessionId = '',
   onPermissionModeChanged,
-  showAceCodeAvatar = true,
-  onShowAceCodeAvatarChanged,
   initialNavKey = 'general',
 }) {
   const { theme, set: setTheme } = useTheme();
@@ -140,12 +139,7 @@ export function SettingsPage({
           )}
           {activeNavKey === 'appearance' && <SectionAppearance theme={theme} setTheme={setTheme} />}
           {activeNavKey === 'config' && <SectionConfig />}
-          {activeNavKey === 'personalization' && (
-            <SectionPersonalization
-              showAceCodeAvatar={showAceCodeAvatar}
-              onShowAceCodeAvatarChanged={onShowAceCodeAvatarChanged}
-            />
-          )}
+          {activeNavKey === 'personalization' && <SectionPersonalization />}
           {activeNavKey === 'mcp' && <SectionMCP />}
           {activeNavKey === 'models' && <SectionModel />}
           {activeNavKey === 'tools' && <SectionTools />}
@@ -589,7 +583,7 @@ function SectionConfig() {
 // ─── 个性化 ────────────────────────────────────────────────────────────────
 // UI 占位:自定义指令文本框 + 保存按钮。设计 panels.jsx::renderPersonalizationContent。
 
-function SectionPersonalization({ showAceCodeAvatar = true, onShowAceCodeAvatarChanged }) {
+function SectionPersonalization() {
   const [text, setText] = useState('');
   const [saved, setSaved] = useState(false);
 
@@ -602,28 +596,6 @@ function SectionPersonalization({ showAceCodeAvatar = true, onShowAceCodeAvatarC
   return (
     <>
       <h2 className="text-xl font-bold mb-5">个性化</h2>
-
-      <div
-        role="checkbox"
-        aria-checked={showAceCodeAvatar}
-        tabIndex={0}
-        onClick={() => onShowAceCodeAvatarChanged?.(!showAceCodeAvatar)}
-        onKeyDown={(e) => {
-          if (e.key === ' ' || e.key === 'Enter') {
-            e.preventDefault();
-            onShowAceCodeAvatarChanged?.(!showAceCodeAvatar);
-          }
-        }}
-        className="flex items-center justify-between px-3.5 py-2.5 rounded-md bg-surface border border-border mb-5 cursor-pointer hover:bg-surface-hi transition"
-      >
-        <div className="min-w-0 pr-3">
-          <div className="text-[13px] font-medium">ACECode 头像显示</div>
-          <div className="text-[11px] text-fg-mute mt-0.5">控制聊天窗口中 ACECode 头像和名称是否显示</div>
-        </div>
-        <div onClick={(e) => e.stopPropagation()}>
-          <Toggle on={showAceCodeAvatar} onChange={onShowAceCodeAvatarChanged} />
-        </div>
-      </div>
 
       <div className="text-[14px] font-semibold mb-1">自定义指令</div>
       <p className="text-[12px] text-fg-mute mb-3">为你的项目向 ACECode 提供额外说明和上下文</p>
@@ -1002,134 +974,236 @@ function SectionArchived() {
 }
 
 // ─── 使用情况 ──────────────────────────────────────────────────────────────
-// UI 占位:总览卡片 + 每日柱状图 + 模型用量明细。设计 panels.jsx::renderUsageContent。
-// mock 数据,后端 usage 接口接通后切真实数值。
 
-const USAGE_PLACEHOLDER = {
-  period: '2026年5月',
-  totalTokens: 2847563,
-  totalCost: 42.86,
-  models: [
-    { name: 'gpt-4o',             inputTokens: 1245800, outputTokens: 623400, calls: 342, color: 'var(--ace-ok)' },
-    { name: 'claude-3.5-sonnet',  inputTokens: 412300,  outputTokens: 198700, calls: 87,  color: 'var(--ace-accent)' },
-    { name: 'gpt-4o-mini',        inputTokens: 198400,  outputTokens: 89200,  calls: 156, color: 'var(--ace-warn)' },
-    { name: 'deepseek-r1',        inputTokens: 52600,   outputTokens: 27163,  calls: 23,  color: 'var(--ace-danger)' },
-  ],
-  daily: [
-    { day: '5/1', tokens: 82000 },
-    { day: '5/2', tokens: 134000 },
-    { day: '5/3', tokens: 97000 },
-    { day: '5/4', tokens: 210000 },
-    { day: '5/5', tokens: 185000 },
-    { day: '5/6', tokens: 263000 },
-    { day: '5/7', tokens: 198000 },
-    { day: '5/8', tokens: 312000 },
-    { day: '5/9', tokens: 276000 },
-    { day: '5/10', tokens: 145000 },
-  ],
-};
+const USAGE_COLORS = [
+  'var(--ace-accent)',
+  'var(--ace-ok)',
+  'var(--ace-warn)',
+  'var(--ace-danger)',
+  '#8b5cf6',
+  '#06b6d4',
+];
 
-function formatTokens(n) {
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'M';
-  if (n >= 1_000)     return (n / 1_000).toFixed(1) + 'K';
-  return String(n);
+function shortUsageDate(date) {
+  const text = String(date || '');
+  const m = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  return m ? `${Number(m[2])}/${Number(m[3])}` : text;
+}
+
+function UsageEmptyState({ text }) {
+  return (
+    <div className="px-3.5 py-8 rounded-md bg-surface border border-border text-[12px] text-fg-mute text-center">
+      {text}
+    </div>
+  );
 }
 
 function SectionUsage() {
-  const data = USAGE_PLACEHOLDER;
-  const maxDaily       = useMemo(() => Math.max(...data.daily.map((d) => d.tokens)), [data.daily]);
-  const maxModelTotal  = useMemo(() => Math.max(...data.models.map((m) => m.inputTokens + m.outputTokens)), [data.models]);
-  const totalCalls     = useMemo(() => data.models.reduce((a, m) => a + m.calls, 0), [data.models]);
+  const [raw, setRaw] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [reloadKey, setReloadKey] = useState(0);
 
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError('');
+    api.getUsageStats({ days: 30, timezoneOffsetMinutes: new Date().getTimezoneOffset() })
+      .then((data) => {
+        if (!cancelled) setRaw(data || {});
+      })
+      .catch((e) => {
+        if (!cancelled) setError(e.message || String(e));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [reloadKey]);
+
+  const stats = useMemo(() => normalizeUsageStats(raw || {}), [raw]);
+  const note = usageDataNote(stats);
   const summary = [
-    { label: '本月总 Tokens', value: formatTokens(data.totalTokens), sub: data.period },
-    { label: '预估费用',      value: '$' + data.totalCost.toFixed(2), sub: 'USD' },
-    { label: 'API 调用次数',  value: String(totalCalls),              sub: '次请求' },
+    {
+      label: `${stats.metadata.days} 天 Tokens`,
+      value: formatUsageTokens(stats.summary.totals.totalTokens),
+      sub: `${formatUsageTokens(stats.summary.totals.promptTokens)} 输入 / ${formatUsageTokens(stats.summary.totals.completionTokens)} 输出`,
+    },
+    {
+      label: '用量记录',
+      value: String(stats.summary.records),
+      sub: stats.hasEstimates ? `${stats.summary.estimatedRecords} 条估算` : 'provider usage',
+    },
+    {
+      label: '会话',
+      value: String(stats.summary.sessionCount),
+      sub: `${stats.models.length} 个模型`,
+    },
+  ];
+  const tokenDetails = [
+    ['输入', stats.summary.totals.promptTokens],
+    ['输出', stats.summary.totals.completionTokens],
+    ['缓存读', stats.summary.totals.cacheReadTokens],
+    ['缓存写', stats.summary.totals.cacheWriteTokens],
+    ['推理', stats.summary.totals.reasoningTokens],
+    ['总计', stats.summary.totals.totalTokens],
   ];
 
   return (
     <>
-      <h2 className="text-xl font-bold mb-5">使用情况</h2>
+      <div className="flex items-center justify-between mb-5">
+        <h2 className="text-xl font-bold">使用情况</h2>
+        <button
+          type="button"
+          onClick={() => setReloadKey((v) => v + 1)}
+          disabled={loading}
+          className="px-2.5 h-7 rounded-md text-[12px] border border-border bg-surface hover:bg-surface-hi disabled:opacity-60 transition flex items-center gap-1.5"
+        >
+          {loading ? <span className="ace-spinner" /> : <RefreshIcon size={13} />}
+          刷新
+        </button>
+      </div>
 
-      {/* 总览卡片 */}
-      <div className="grid grid-cols-3 gap-3 mb-6">
-        {summary.map((c) => (
-          <div key={c.label} className="px-4 py-3.5 rounded-md bg-surface border border-border">
-            <div className="text-[10px] text-fg-mute uppercase tracking-wider mb-1.5">{c.label}</div>
-            <div className="text-[24px] font-bold text-fg leading-none mb-1">{c.value}</div>
-            <div className="text-[11px] text-fg-mute">{c.sub}</div>
+      {loading && !raw ? (
+        <UsageEmptyState text="加载中" />
+      ) : error ? (
+        <UsageEmptyState text={`加载失败:${error}`} />
+      ) : !stats.hasData ? (
+        <>
+          <div className="grid grid-cols-1 xl:grid-cols-3 gap-3 mb-6">
+            {summary.map((c) => (
+              <div key={c.label} className="px-4 py-3.5 rounded-md bg-surface border border-border">
+                <div className="text-[10px] text-fg-mute uppercase tracking-wider mb-1.5">{c.label}</div>
+                <div className="text-[24px] font-bold text-fg leading-none mb-1">{c.value}</div>
+                <div className="text-[11px] text-fg-mute">{c.sub}</div>
+              </div>
+            ))}
           </div>
-        ))}
-      </div>
+          <UsageEmptyState text={note} />
+        </>
+      ) : (
+        <>
+          <div className="grid grid-cols-1 xl:grid-cols-3 gap-3 mb-6">
+            {summary.map((c) => (
+              <div key={c.label} className="px-4 py-3.5 rounded-md bg-surface border border-border">
+                <div className="text-[10px] text-fg-mute uppercase tracking-wider mb-1.5">{c.label}</div>
+                <div className="text-[24px] font-bold text-fg leading-none mb-1">{c.value}</div>
+                <div className="text-[11px] text-fg-mute truncate">{c.sub}</div>
+              </div>
+            ))}
+          </div>
 
-      {/* 每日趋势柱状图 */}
-      <div className="text-[14px] font-semibold mb-1">每日用量趋势</div>
-      <p className="text-[12px] text-fg-mute mb-3">近 10 天 token 消耗</p>
-      <div className="px-4 pt-4 pb-2 rounded-md bg-surface border border-border mb-6">
-        <div className="flex items-end gap-1.5 h-[120px]">
-          {data.daily.map((d) => {
-            const h = (d.tokens / maxDaily) * 100;
-            return (
-              <div key={d.day} className="flex-1 flex flex-col items-center gap-1.5">
-                <div className="text-[9px] font-mono text-fg-mute opacity-70 whitespace-nowrap">
-                  {formatTokens(d.tokens)}
-                </div>
-                <div
-                  className="w-full rounded-sm bg-accent transition-all"
-                  style={{ height: `${h}%`, minHeight: 4, opacity: 0.85 }}
-                />
-                <div className="text-[10px] text-fg-mute">{d.day}</div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* 模型用量明细 */}
-      <div className="text-[14px] font-semibold mb-1">模型用量明细</div>
-      <p className="text-[12px] text-fg-mute mb-3">每个模型的输入 / 输出 token 与调用次数</p>
-      <div className="rounded-md bg-surface border border-border overflow-hidden">
-        {data.models.map((m, i) => {
-          const total = m.inputTokens + m.outputTokens;
-          const barWidth = (total / maxModelTotal) * 100;
-          const inputPct = (m.inputTokens / total) * 100;
-          return (
-            <div
-              key={m.name}
-              className={clsx(
-                'px-4 py-3.5',
-                i < data.models.length - 1 && 'border-b border-border',
-              )}
-            >
-              <div className="flex items-center justify-between mb-2">
-                <div className="flex items-center gap-2 min-w-0">
-                  <span className="w-2.5 h-2.5 rounded-sm shrink-0" style={{ background: m.color }} />
-                  <span className="text-[13px] font-mono font-semibold truncate">{m.name}</span>
-                </div>
-                <div className="flex items-center gap-4 shrink-0 ml-2">
-                  <span className="text-[12px] text-fg-mute">{m.calls} 次</span>
-                  <span className="text-[13px] font-mono font-semibold">{formatTokens(total)}</span>
-                </div>
-              </div>
-              {/* 输入/输出比例条 */}
-              <div className="h-1.5 rounded-sm bg-surface-hi overflow-hidden mb-1.5">
-                <div className="h-full flex" style={{ width: `${barWidth}%` }}>
-                  <div className="h-full" style={{ width: `${inputPct}%`, background: m.color }} />
-                  <div className="h-full flex-1" style={{ background: m.color, opacity: 0.4 }} />
-                </div>
-              </div>
-              <div className="flex gap-4 text-[11px] text-fg-mute">
-                <span>输入 {formatTokens(m.inputTokens)}</span>
-                <span>输出 {formatTokens(m.outputTokens)}</span>
-              </div>
+          <div className="text-[14px] font-semibold mb-1">每日用量趋势</div>
+          <p className="text-[12px] text-fg-mute mb-3">近 {stats.metadata.days} 天 token 消耗</p>
+          <div className="px-4 pt-4 pb-2 rounded-md bg-surface border border-border mb-6">
+            <div className="flex items-stretch gap-1.5 h-[150px]">
+              {stats.daily.map((d) => {
+                const h = stats.maxDailyTokens > 0 ? (d.tokens / stats.maxDailyTokens) * 100 : 0;
+                return (
+                  <div key={d.date} className="flex-1 min-w-[24px] h-full flex flex-col items-center gap-1.5">
+                    <div className="text-[9px] font-mono text-fg-mute opacity-80 whitespace-nowrap">
+                      {d.tokens > 0 ? formatUsageTokens(d.tokens) : ''}
+                    </div>
+                    <div className="w-full flex-1 flex items-end">
+                      <div
+                        className="w-full rounded-sm bg-accent transition-all"
+                        style={{ height: `${h}%`, minHeight: d.tokens > 0 ? 6 : 2, opacity: d.tokens > 0 ? 0.9 : 0.18 }}
+                      />
+                    </div>
+                    <div className="text-[10px] text-fg-mute whitespace-nowrap">{shortUsageDate(d.date)}</div>
+                  </div>
+                );
+              })}
             </div>
-          );
-        })}
-      </div>
+          </div>
 
-      <div className="mt-4 px-3.5 py-2.5 rounded-md border border-dashed border-border text-[12px] text-fg-mute text-center">
-        数据为示例占位,接入 usage 后端接口后将展示真实数值
-      </div>
+          <div className="grid grid-cols-2 xl:grid-cols-6 gap-2 mb-6">
+            {tokenDetails.map(([label, value]) => (
+              <div key={label} className="px-3 py-2.5 rounded-md bg-surface border border-border">
+                <div className="text-[11px] text-fg-mute mb-1">{label}</div>
+                <div className="text-[14px] font-mono font-semibold">{formatUsageTokens(value)}</div>
+              </div>
+            ))}
+          </div>
+
+          <div className="text-[14px] font-semibold mb-1">模型用量明细</div>
+          <p className="text-[12px] text-fg-mute mb-3">每个模型的输入 / 输出 token 与用量记录</p>
+          <div className="rounded-md bg-surface border border-border overflow-hidden mb-6">
+            {stats.models.length === 0 ? (
+              <div className="px-3.5 py-6 text-[12px] text-fg-mute text-center">暂无模型用量</div>
+            ) : stats.models.map((m, i) => {
+              const total = m.totals.totalTokens;
+              const barWidth = stats.maxModelTokens > 0 ? (total / stats.maxModelTokens) * 100 : 0;
+              const inputPct = total > 0 ? (m.totals.promptTokens / total) * 100 : 0;
+              const color = USAGE_COLORS[i % USAGE_COLORS.length];
+              return (
+                <div
+                  key={`${m.provider}:${m.model}:${m.modelPreset}:${i}`}
+                  className={clsx(
+                    'px-4 py-3.5',
+                    i < stats.models.length - 1 && 'border-b border-border',
+                  )}
+                >
+                  <div className="flex items-center justify-between mb-2 gap-3">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="w-2.5 h-2.5 rounded-sm shrink-0" style={{ background: color }} />
+                      <span className="text-[13px] font-mono font-semibold truncate">{m.label}</span>
+                    </div>
+                    <div className="flex items-center gap-4 shrink-0">
+                      <span className="text-[12px] text-fg-mute">{m.records} 条</span>
+                      <span className="text-[13px] font-mono font-semibold">{formatUsageTokens(total)}</span>
+                    </div>
+                  </div>
+                  <div className="h-1.5 rounded-sm bg-surface-hi overflow-hidden mb-1.5">
+                    <div className="h-full flex" style={{ width: `${barWidth}%`, minWidth: total > 0 ? 6 : 0 }}>
+                      <div className="h-full" style={{ width: `${inputPct}%`, background: color }} />
+                      <div className="h-full flex-1" style={{ background: color, opacity: 0.38 }} />
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-fg-mute">
+                    <span>输入 {formatUsageTokens(m.totals.promptTokens)}</span>
+                    <span>输出 {formatUsageTokens(m.totals.completionTokens)}</span>
+                    <span>{m.sessionCount} 会话</span>
+                    {m.estimatedRecords > 0 && <span>{m.estimatedRecords} 估算</span>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="text-[14px] font-semibold mb-1">工作区用量</div>
+          <p className="text-[12px] text-fg-mute mb-3">按工作区汇总 token 消耗</p>
+          <div className="rounded-md bg-surface border border-border overflow-hidden">
+            {stats.workspaces.length === 0 ? (
+              <div className="px-3.5 py-6 text-[12px] text-fg-mute text-center">暂无工作区用量</div>
+            ) : stats.workspaces.map((w, i) => {
+              const total = w.totals.totalTokens;
+              const width = stats.maxWorkspaceTokens > 0 ? (total / stats.maxWorkspaceTokens) * 100 : 0;
+              return (
+                <div
+                  key={`${w.workspaceHash}:${i}`}
+                  className={clsx('px-4 py-3', i < stats.workspaces.length - 1 && 'border-b border-border')}
+                >
+                  <div className="flex items-center justify-between gap-3 mb-2">
+                    <div className="min-w-0">
+                      <div className="text-[13px] font-medium truncate">{w.workspaceName || 'workspace'}</div>
+                      <div className="text-[11px] text-fg-mute truncate">{w.cwd}</div>
+                    </div>
+                    <div className="text-[13px] font-mono font-semibold shrink-0">{formatUsageTokens(total)}</div>
+                  </div>
+                  <div className="h-1.5 rounded-sm bg-surface-hi overflow-hidden">
+                    <div className="h-full bg-accent" style={{ width: `${width}%`, minWidth: total > 0 ? 6 : 0, opacity: 0.85 }} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="mt-4 px-3.5 py-2.5 rounded-md border border-dashed border-border text-[12px] text-fg-mute text-center">
+            {note}
+          </div>
+        </>
+      )}
     </>
   );
 }

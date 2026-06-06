@@ -5,6 +5,7 @@ import {
   clearFindHighlights,
   clearFindSelection,
   collectFindMatches,
+  isComposingInputEvent,
   isFindShortcut,
   scrollFindMatchIntoView,
   selectFindMatch,
@@ -25,8 +26,29 @@ export function GlobalFindOverlay() {
   const [navigationNonce, setNavigationNonce] = useState(0);
   const inputRef = useRef(null);
   const composingRef = useRef(false);
+  const queryRef = useRef(query);
+  const selectOnFocusRef = useRef(false);
+  const syncValueOnFocusRef = useRef(false);
 
-  const requestInputFocus = useCallback(() => {
+  queryRef.current = query;
+
+  const focusFindInput = useCallback(() => {
+    const input = inputRef.current;
+    if (!input) return;
+    if (syncValueOnFocusRef.current && !composingRef.current && input.value !== queryRef.current) {
+      input.value = queryRef.current;
+    }
+    input.focus({ preventScroll: true });
+    if (selectOnFocusRef.current && !composingRef.current) {
+      input.select();
+    }
+    selectOnFocusRef.current = false;
+    syncValueOnFocusRef.current = false;
+  }, []);
+
+  const requestInputFocus = useCallback(({ select = false, syncValue = false } = {}) => {
+    selectOnFocusRef.current = select;
+    syncValueOnFocusRef.current = syncValue;
     setFocusNonce((value) => value + 1);
   }, []);
 
@@ -39,16 +61,14 @@ export function GlobalFindOverlay() {
 
   useLayoutEffect(() => {
     if (!open) return undefined;
-    const focus = () => {
-      const input = inputRef.current;
-      if (!input) return;
-      input.focus({ preventScroll: true });
-      input.select();
+    focusFindInput();
+    const frame = requestAnimationFrame(focusFindInput);
+    const timer = window.setTimeout(focusFindInput, 80);
+    return () => {
+      cancelAnimationFrame(frame);
+      window.clearTimeout(timer);
     };
-    focus();
-    const frame = requestAnimationFrame(focus);
-    return () => cancelAnimationFrame(frame);
-  }, [focusNonce, open]);
+  }, [focusFindInput, focusNonce, open]);
 
   useEffect(() => {
     const onKeyDown = (event) => {
@@ -59,7 +79,7 @@ export function GlobalFindOverlay() {
       if (selected) setQuery(selected);
       setOpen(true);
       setNavigationNonce(0);
-      requestInputFocus();
+      requestInputFocus({ select: true, syncValue: true });
     };
     window.addEventListener('keydown', onKeyDown, true);
     return () => window.removeEventListener('keydown', onKeyDown, true);
@@ -77,7 +97,9 @@ export function GlobalFindOverlay() {
     if (!open) return undefined;
     if (!query || activeIndex < 0 || matches.length === 0) {
       clearFindHighlights(document);
-      clearFindSelection(document);
+      if (document.activeElement !== inputRef.current) {
+        clearFindSelection(document);
+      }
       return undefined;
     }
     const highlighted = applyFindHighlights(matches, activeIndex, document);
@@ -104,7 +126,7 @@ export function GlobalFindOverlay() {
   }, [matches.length]);
 
   const onInputKeyDown = (event) => {
-    if (event.isComposing || event.nativeEvent?.isComposing || composingRef.current) return;
+    if (isComposingInputEvent(event, composingRef.current)) return;
     if (event.key === 'Escape') {
       event.preventDefault();
       close();
@@ -118,6 +140,11 @@ export function GlobalFindOverlay() {
     event.preventDefault();
   };
 
+  const onInputChange = (event) => {
+    if (isComposingInputEvent(event, composingRef.current)) return;
+    setQuery(event.currentTarget.value);
+  };
+
   if (!open) return null;
 
   const current = activeIndex >= 0 ? activeIndex + 1 : 0;
@@ -128,8 +155,8 @@ export function GlobalFindOverlay() {
       <VsIcon name="search" size={15} className="ace-global-find-search" />
       <input
         ref={inputRef}
-        value={query}
-        onChange={(event) => setQuery(event.target.value)}
+        defaultValue={query}
+        onChange={onInputChange}
         onCompositionStart={() => {
           composingRef.current = true;
         }}
