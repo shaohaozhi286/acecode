@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { usePreference } from '../lib/usePreference.js';
 import { clsx } from '../lib/format.js';
 import { PREVIEW_TAB_TYPES } from '../lib/previewTabs.js';
+import { scrollLeftForVisibleTab } from '../lib/previewTabScroll.js';
 import { FilePreviewContent } from './FilePreviewContent.jsx';
 import { SessionChangeDetails } from './ChangeReview.jsx';
 import { FileTypeIcon, VsIcon } from './Icon.jsx';
@@ -213,6 +214,21 @@ export function PreviewDetailsPanel({
     event.preventDefault();
     el.scrollLeft = next;
   }, []);
+
+  useLayoutEffect(() => {
+    const el = tabListRef.current;
+    if (!el || !active?.key) return;
+    const activeTabEl = el.querySelector('.ace-preview-details-tab[aria-selected="true"]');
+    if (!activeTabEl) return;
+    const next = scrollLeftForVisibleTab({
+      scrollLeft: el.scrollLeft,
+      clientWidth: el.clientWidth,
+      scrollWidth: el.scrollWidth,
+      tabOffsetLeft: activeTabEl.offsetLeft,
+      tabOffsetWidth: activeTabEl.offsetWidth,
+    });
+    if (next !== el.scrollLeft) el.scrollLeft = next;
+  }, [active?.key, tabs]);
 
   if (!active || tabs.length === 0) return null;
 

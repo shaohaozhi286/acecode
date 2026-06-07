@@ -932,10 +932,32 @@ body {
 }
 
 .ace-todo-glass-wrap {
+  --ace-todo-wrap-bg: color-mix(in oklab, var(--ace-surface) 92%, transparent);
+  --ace-todo-dock-bg: color-mix(in oklab, var(--ace-surface-hi) 72%, white 28%);
+  --ace-todo-dock-border: color-mix(in oklab, var(--ace-border) 64%, transparent);
+  --ace-todo-shadow: 0 8px 26px color-mix(in oklab, black 10%, transparent);
+  --ace-todo-title-color: var(--ace-fg);
+  --ace-todo-text-color: var(--ace-fg-2);
+  --ace-todo-active-color: var(--ace-fg);
+  --ace-todo-done-color: color-mix(in oklab, var(--ace-fg-2) 72%, var(--ace-fg-mute) 28%);
+  --ace-todo-cancelled-color: var(--ace-fg-mute);
+  --ace-todo-clear-hover-bg: color-mix(in oklab, var(--ace-surface-hi) 78%, transparent);
   width: 100%;
   padding: 7px 12px 8px;
   border-top: 1px solid color-mix(in oklab, var(--ace-border) 72%, transparent);
-  background: color-mix(in oklab, var(--ace-surface) 92%, transparent);
+  background: var(--ace-todo-wrap-bg);
+}
+[data-theme="dark"] .ace-todo-glass-wrap {
+  --ace-todo-wrap-bg: color-mix(in oklab, var(--ace-surface) 86%, black 14%);
+  --ace-todo-dock-bg: color-mix(in oklab, var(--ace-surface) 88%, black 12%);
+  --ace-todo-dock-border: color-mix(in oklab, var(--ace-border) 78%, var(--ace-fg-mute) 22%);
+  --ace-todo-shadow: 0 12px 30px color-mix(in oklab, black 34%, transparent);
+  --ace-todo-title-color: color-mix(in oklab, var(--ace-fg) 92%, white 8%);
+  --ace-todo-text-color: color-mix(in oklab, var(--ace-fg-2) 76%, var(--ace-fg) 24%);
+  --ace-todo-active-color: color-mix(in oklab, var(--ace-fg) 94%, var(--ace-warn) 6%);
+  --ace-todo-done-color: color-mix(in oklab, var(--ace-fg-2) 82%, var(--ace-fg) 18%);
+  --ace-todo-cancelled-color: color-mix(in oklab, var(--ace-fg-2) 68%, var(--ace-fg-mute) 32%);
+  --ace-todo-clear-hover-bg: color-mix(in oklab, var(--ace-surface-hi) 72%, transparent);
 }
 .ace-todo-glass-dock {
   width: 100%;
@@ -944,11 +966,11 @@ body {
   align-items: flex-start;
   gap: 10px;
   padding: 9px 10px 9px 12px;
-  border: 1px solid color-mix(in oklab, var(--ace-border) 64%, transparent);
+  border: 1px solid var(--ace-todo-dock-border);
   border-radius: 7px;
-  background: color-mix(in oklab, var(--ace-surface-hi) 72%, white 28%);
+  background: var(--ace-todo-dock-bg);
   color: var(--ace-fg);
-  box-shadow: 0 8px 26px color-mix(in oklab, black 10%, transparent);
+  box-shadow: var(--ace-todo-shadow);
   backdrop-filter: blur(12px) saturate(1.08);
   -webkit-backdrop-filter: blur(12px) saturate(1.08);
 }
@@ -958,9 +980,9 @@ body {
 }
 .ace-todo-glass-title {
   margin-bottom: 4px;
-  color: var(--ace-fg);
+  color: var(--ace-todo-title-color);
   font-size: 12px;
-  font-weight: 500;
+  font-weight: 600;
   line-height: 18px;
 }
 .ace-todo-glass-list {
@@ -994,6 +1016,19 @@ body {
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
+  color: var(--ace-todo-text-color);
+  text-decoration-color: currentColor;
+}
+.ace-todo-glass-row[data-todo-status="in_progress"] .ace-todo-glass-text {
+  color: var(--ace-todo-active-color);
+  font-weight: 600;
+}
+.ace-todo-glass-row[data-todo-status="completed"] .ace-todo-glass-text {
+  color: var(--ace-todo-done-color);
+  text-decoration-color: color-mix(in oklab, currentColor 76%, transparent);
+}
+.ace-todo-glass-row[data-todo-status="cancelled"] .ace-todo-glass-text {
+  color: var(--ace-todo-cancelled-color);
 }
 .ace-todo-glass-clear {
   flex: 0 0 auto;
@@ -1009,7 +1044,7 @@ body {
   cursor: pointer;
 }
 .ace-todo-glass-clear:hover:not(:disabled) {
-  background: color-mix(in oklab, var(--ace-surface-hi) 78%, transparent);
+  background: var(--ace-todo-clear-hover-bg);
   color: var(--ace-fg);
 }
 .ace-todo-glass-clear:disabled {

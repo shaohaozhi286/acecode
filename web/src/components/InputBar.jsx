@@ -604,7 +604,7 @@ export const InputBar = forwardRef(function InputBar({
                   disabled={!onMediaFiles}
                 >
                   <VsIcon name="openFile" size={14} />
-                  <span>Media</span>
+                  <span>添加图片或文件</span>
                 </button>
                 <button
                   type="button"
@@ -613,7 +613,7 @@ export const InputBar = forwardRef(function InputBar({
                   disabled={!onAddBrowserContext}
                 >
                   <VsIcon name="search" size={14} />
-                  <span>Browser</span>
+                  <span>浏览器</span>
                 </button>
               </div>
             )}

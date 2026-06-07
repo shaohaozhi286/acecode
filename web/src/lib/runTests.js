@@ -30,6 +30,7 @@ import './usePreference.test.js';
 import './uiPrefs.test.js';
 import './singleLayout.test.js';
 import './previewTabs.test.js';
+import './previewTabScroll.test.js';
 import './api.test.js';
 import './externalUrl.test.js';
 import './systemClipboard.test.js';
