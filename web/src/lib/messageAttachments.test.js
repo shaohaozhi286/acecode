@@ -22,12 +22,16 @@ run('content parts expose image and file attachments', () => {
     { type: 'image', attachment: { id: 'att-img', name: 'screen.png', mime_type: 'image/png' } },
     { type: 'file', attachment: { id: 'att-file', name: 'report.txt', mime_type: 'text/plain' } },
     { type: 'browser_context', context: { id: 'ctx', label: 'Browser' } },
+    { type: 'selection_context', context: { id: 'sel', label: 'README.md:23-24' } },
   ];
   assert.deepEqual(
     attachmentsFromContentParts(parts).map((att) => [att.id, att.type]),
     [['att-img', 'image'], ['att-file', 'file']],
   );
-  assert.deepEqual(contextsFromContentParts(parts), [{ id: 'ctx', label: 'Browser' }]);
+  assert.deepEqual(contextsFromContentParts(parts), [
+    { id: 'ctx', label: 'Browser', type: 'browser' },
+    { id: 'sel', label: 'README.md:23-24', type: 'selection' },
+  ]);
 });
 
 run('attachment normalization accepts records and content part wrappers', () => {

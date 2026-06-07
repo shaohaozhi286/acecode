@@ -4,8 +4,10 @@
 
 #include "worker.hpp"
 #include "../config/config.hpp"
+#include "../hooks/hook_manager.hpp"
 #include "../utils/logger.hpp"
 #include "../utils/paths.hpp"
+#include "../utils/utf8_path.hpp"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #  define WIN32_LEAN_AND_MEAN
@@ -119,6 +121,12 @@ void WINAPI service_main(DWORD /*argc*/, LPWSTR* /*argv*/) {
     LOG_INFO("[service] data_dir = " + get_acecode_dir());
     LOG_INFO("[service] logs_dir = " + get_logs_dir());
     LOG_INFO("[service] state = START_PENDING (checkpoint 1, wait_hint 10s)");
+
+    std::string hook_config_error;
+    dispatch_startup_before_model_load_hooks(current_path_utf8(), &hook_config_error);
+    if (!hook_config_error.empty()) {
+        LOG_WARN("[hooks] " + hook_config_error);
+    }
 
     AppConfig cfg = load_config();
     LOG_INFO("[service] config loaded: web.bind=" + cfg.web.bind +

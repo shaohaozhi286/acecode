@@ -32,7 +32,7 @@ export function TokenBudgetRing({ budget, className = '' }) {
           cy="8"
           r={radius}
           fill="none"
-          stroke="color-mix(in oklab, var(--ace-fg-mute) 28%, transparent)"
+          stroke="rgba(var(--ace-fg-mute-rgb), 0.28)"
           strokeWidth="2"
         />
         {known ? (

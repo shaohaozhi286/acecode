@@ -59,6 +59,19 @@ test('选中文本时显示复制', () => {
   ]);
 });
 
+test('预览选区把引用到聊天放在第一行', () => {
+  const items = buildDesktopContextMenuItems({
+    hasSelection: true,
+    previewTarget: { type: 'preview', path: 'README.md', kind: 'markdown' },
+  });
+  assert.deepEqual(ids(items).slice(0, 3), [
+    DESKTOP_CONTEXT_ACTIONS.ADD_SELECTION_CONTEXT,
+    DESKTOP_CONTEXT_ACTIONS.COPY_PREVIEW_TEXT,
+    DESKTOP_CONTEXT_ACTIONS.COPY_PREVIEW_METADATA,
+  ]);
+  assert.equal(items[0].target.path, 'README.md');
+});
+
 test('文本框显示粘贴和剪切', () => {
   assert.deepEqual(ids(buildDesktopContextMenuItems({ editable: true })), [
     DESKTOP_CONTEXT_ACTIONS.SELECT_ALL,

@@ -83,6 +83,16 @@ const TOOL_ICON_MAP = new Map([
   ['\u26A0\uFE0F', 'warning'],
 ]);
 
+const CSS_MASK_SUPPORTED = (() => {
+  if (typeof CSS === 'undefined' || typeof CSS.supports !== 'function') return false;
+  try {
+    return CSS.supports('-webkit-mask-image', 'url("/vs-icons/Add.svg")')
+      || CSS.supports('mask-image', 'url("/vs-icons/Add.svg")');
+  } catch {
+    return false;
+  }
+})();
+
 export function VsIcon({
   name,
   size = 16,
@@ -93,23 +103,33 @@ export function VsIcon({
   ...props
 }) {
   const file = ICONS[name] || name;
+  const src = `/vs-icons/${file}.svg`;
   const accessibilityProps = alt
     ? { role: 'img', 'aria-label': alt }
     : { 'aria-hidden': 'true' };
   return (
     <span
-      className={['ace-icon', className].filter(Boolean).join(' ')}
+      className={['ace-icon', !CSS_MASK_SUPPORTED && 'ace-icon-fallback', className].filter(Boolean).join(' ')}
       data-icon-name={file}
       data-monochrome={mono ? 'true' : 'false'}
       style={{
         width: size,
         height: size,
-        '--ace-icon-url': `url("/vs-icons/${file}.svg")`,
+        '--ace-icon-url': `url("${src}")`,
         ...style,
       }}
       {...accessibilityProps}
       {...props}
-    />
+    >
+      {!CSS_MASK_SUPPORTED && (
+        <img
+          className="ace-icon-fallback-img"
+          src={src}
+          alt=""
+          draggable="false"
+        />
+      )}
+    </span>
   );
 }
 

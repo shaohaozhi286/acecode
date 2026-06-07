@@ -11,7 +11,7 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRe
 import { clsx } from '../lib/format.js';
 import { getGoalStopControlState } from '../lib/goalControl.js';
 import { getInputBarActionState } from '../lib/inputBarState.js';
-import { VsIcon } from './Icon.jsx';
+import { FileTypeIcon, VsIcon } from './Icon.jsx';
 import { ImageLightbox } from './ImageLightbox.jsx';
 import { SlashDropdown } from './SlashDropdown.jsx';
 import { useSlashCommands } from './SlashCommandsContext.jsx';
@@ -29,6 +29,10 @@ import {
   DESKTOP_CONTEXT_ACTION_EVENT,
   DESKTOP_CONTEXT_ACTIONS,
 } from '../lib/desktopContextMenu.js';
+import {
+  SELECTION_CONTEXT_TYPE,
+  contextPresentation,
+} from '../lib/selectionChatContext.js';
 
 const MAX_ROWS = 8;
 const LINE_HEIGHT = 20; // 与 leading-[20px] 对齐
@@ -48,10 +52,49 @@ function composerAttachmentContext(item, index = 0) {
   };
 }
 
+function composerContextKey(item, index = 0) {
+  return String(item?.local_id || item?.id || item?.type || index);
+}
+
+function ComposerSelectionCard({ item, pinned = false, onPin, onRemove }) {
+  const presentation = contextPresentation(item);
+  const sourcePath = item?.source?.path || item?.path || presentation.label;
+  const actionTitle = pinned ? '移除引用' : '固定引用';
+  const actionLabel = pinned ? '移除引用上下文' : '固定引用上下文';
+  return (
+    <div
+      className={[
+        'group h-6 max-w-[260px] shrink-0 rounded-md border px-1.5 flex items-center gap-1 text-[11px] font-sans leading-none',
+        pinned ? 'border-border bg-surface text-fg' : 'border-accent-soft bg-accent-bg text-fg',
+      ].join(' ')}
+      title={presentation.title}
+    >
+      <button
+        type="button"
+        className="w-[14px] h-[14px] shrink-0 rounded-full flex items-center justify-center hover:bg-surface-hi text-fg-mute hover:text-fg"
+        onMouseDown={(event) => event.preventDefault()}
+        onClick={() => {
+          if (pinned) onRemove?.();
+          else onPin?.();
+        }}
+        title={actionTitle}
+        aria-label={actionLabel}
+      >
+        <VsIcon name={pinned ? 'close' : 'pin'} size={11} className="ace-selection-context-icon" />
+      </button>
+      <FileTypeIcon path={sourcePath} size={11} className="ace-selection-context-icon opacity-90" />
+      <span className={['truncate text-fg', pinned ? '' : 'opacity-80'].filter(Boolean).join(' ')}>
+        {presentation.label}
+      </span>
+    </div>
+  );
+}
+
 export const InputBar = forwardRef(function InputBar({
   disabled, placeholder = '输入消息或 / 命令…', onSubmit, onAbort, busy, goal = null, goalStopping = false, history = [], variant = 'default',
   value: controlledValue, onChange,
   attachments = [], contexts = [], onMediaFiles, onRemoveAttachment, onAddBrowserContext, onRemoveContext,
+  selectionPreview = null, onPinSelectionPreview,
 }, ref) {
   const isControlled = controlledValue != null;
   const [internalValue, setInternalValue] = useState('');
@@ -72,6 +115,8 @@ export const InputBar = forwardRef(function InputBar({
   const isHero = variant === 'hero';
   const attachmentItems = Array.isArray(attachments) ? attachments : [];
   const contextItems = Array.isArray(contexts) ? contexts : [];
+  const selectionContextItems = contextItems.filter((item) => item?.type === SELECTION_CONTEXT_TYPE);
+  const otherContextItems = contextItems.filter((item) => item?.type !== SELECTION_CONTEXT_TYPE);
   const hasExtras = attachmentItems.length > 0 || contextItems.length > 0;
   const hasCapabilityHandlers = !!onMediaFiles || !!onAddBrowserContext;
   const isImageAttachment = (item) => String(item.kind || item.mime_type || '').startsWith('image');
@@ -532,6 +577,30 @@ export const InputBar = forwardRef(function InputBar({
             })}
           </div>
         )}
+        {(selectionPreview || selectionContextItems.length > 0) && (
+          <div className={clsx(
+            'px-3 pt-2 flex flex-wrap items-center gap-1.5',
+            isHero && 'px-4',
+          )}>
+            {selectionPreview ? (
+              <ComposerSelectionCard
+                item={selectionPreview}
+                onPin={() => onPinSelectionPreview?.(selectionPreview)}
+              />
+            ) : null}
+            {selectionContextItems.map((item, index) => {
+              const key = composerContextKey(item, index);
+              return (
+                <ComposerSelectionCard
+                  key={key}
+                  item={item}
+                  pinned
+                  onRemove={() => onRemoveContext?.(key)}
+                />
+              );
+            })}
+          </div>
+        )}
         {/* command overlay: pointer-events:none,与 textarea 使用相同度量。 */}
         {showChip && (
           <div
@@ -619,21 +688,22 @@ export const InputBar = forwardRef(function InputBar({
             )}
           </div>
           <div className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden">
-            {contextItems.map((item) => {
-              const key = item.local_id || item.id || item.type || 'browser';
+            {otherContextItems.map((item, index) => {
+              const key = composerContextKey(item, index);
+              const presentation = contextPresentation(item);
               return (
                 <div
                   key={key}
                   className="group h-7 max-w-[112px] shrink-0 rounded-md px-1.5 flex items-center gap-1 text-[12px] text-fg-mute hover:bg-surface-hi"
-                  title={item.label || '浏览器'}
+                  title={presentation.title}
                 >
-                  <VsIcon name="search" size={13} />
-                  <span className="truncate">浏览器</span>
+                  <VsIcon name={presentation.icon} size={13} />
+                  <span className="truncate">{presentation.label}</span>
                   <button
                     type="button"
                     className="w-4 h-4 rounded-full flex items-center justify-center hover:bg-bg text-fg-mute opacity-0 group-hover:opacity-100 focus:opacity-100"
                     onClick={() => onRemoveContext?.(key)}
-                    aria-label="移除浏览器上下文"
+                    aria-label={presentation.removeLabel}
                   >
                     <VsIcon name="close" size={9} />
                   </button>

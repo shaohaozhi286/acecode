@@ -70,6 +70,9 @@
 #include "skills/skill_registry.hpp"
 #include "skills/skill_commands.hpp"
 #include "skills/default_skill_seeder.hpp"
+#include "hooks/hook_config.hpp"
+#include "hooks/hook_manager.hpp"
+#include "hooks/hook_payload.hpp"
 #include "memory/memory_paths.hpp"
 #include "memory/memory_registry.hpp"
 #include "tool/web_search/runtime.hpp"
@@ -1957,6 +1960,17 @@ static int run_interactive_app(const CliOptions& cli,
         (std::filesystem::path(get_acecode_dir()) / "projects").string(),
         working_dir);
 
+    std::string hook_config_error;
+    HookConfig hook_config = load_hook_config(&hook_config_error);
+    if (!hook_config_error.empty()) {
+        LOG_WARN("[hooks] " + hook_config_error);
+    }
+    HookManager hook_manager(std::move(hook_config));
+    {
+        auto payload = build_startup_before_model_load_payload(working_dir);
+        hook_manager.dispatch(kHookEventStartupBeforeModelLoad, payload, working_dir);
+    }
+
     // ---- Load config ----
     AppConfig config = load_config();
     seed_default_skills_if_first_initialization(argv0_dir);
@@ -1996,6 +2010,11 @@ static int run_interactive_app(const CliOptions& cli,
         } else {
             LOG_WARN("[main] no configured model provider; starting without an active model");
         }
+    }
+    {
+        auto p = provider_accessor();
+        auto payload = build_startup_models_loaded_payload(working_dir, effective_entry, p);
+        hook_manager.dispatch(kHookEventStartupModelsLoaded, payload, working_dir);
     }
 
     // ---- Init web search runtime ----
@@ -2425,6 +2444,7 @@ static int run_interactive_app(const CliOptions& cli,
     agent_loop.set_no_model_config_prompt(
         u8"请先配置大模型服务。TUI 可运行 acecode configure 或使用 /model add 添加模型。");
     agent_loop.set_agent_loop_config(config.agent_loop);
+    agent_loop.set_hook_manager(&hook_manager);
     agent_loop.set_skill_registry(&skill_registry);
     agent_loop.set_memory_registry(&memory_registry);
     agent_loop.set_memory_config(&runtime_memory_cfg);

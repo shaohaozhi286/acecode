@@ -4,8 +4,9 @@ import {
   DESKTOP_CONTEXT_ACTION_EVENT,
   DESKTOP_CONTEXT_ACTIONS,
 } from '../lib/desktopContextMenu.js';
+import { contextPresentation } from '../lib/selectionChatContext.js';
 import { clsx } from '../lib/format.js';
-import { VsIcon } from './Icon.jsx';
+import { FileTypeIcon, VsIcon } from './Icon.jsx';
 import { ImageLightbox } from './ImageLightbox.jsx';
 
 function attachmentContextKey(att, index) {
@@ -102,15 +103,25 @@ export const AttachmentStrip = memo(function AttachmentStrip({
             </button>
           );
         })}
-        {contextItems.map((ctx) => (
-          <div
-            key={ctx.local_id || ctx.id || ctx.type || 'browser'}
-            className="h-7 px-2 rounded-md border border-accent-soft bg-surface flex items-center gap-1.5 text-[12px] text-fg"
-          >
-            <VsIcon name="search" size={12} />
-            <span>{ctx.label || 'Browser'}</span>
-          </div>
-        ))}
+        {contextItems.map((ctx, index) => {
+          const presentation = contextPresentation(ctx);
+          const isSelection = ctx?.type === 'selection';
+          const sourcePath = ctx?.source?.path || ctx?.path || presentation.label;
+          return (
+            <div
+              key={ctx.local_id || ctx.id || ctx.type || index}
+              className="h-6 max-w-[240px] px-2 rounded-md border border-accent-soft bg-surface flex items-center gap-1 text-[11px] font-sans leading-none text-fg"
+              title={presentation.title}
+            >
+              {isSelection ? (
+                <FileTypeIcon path={sourcePath} size={11} className="ace-selection-context-icon opacity-90" />
+              ) : (
+                <VsIcon name={presentation.icon} size={11} className="ace-selection-context-icon" />
+              )}
+              <span className="truncate">{presentation.label}</span>
+            </div>
+          );
+        })}
       </div>
       <ImageLightbox preview={preview} onClose={() => setPreview(null)} />
     </>

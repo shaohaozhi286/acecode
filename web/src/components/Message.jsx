@@ -279,8 +279,9 @@ export const Message = memo(function Message({
     // expand-webui-skill-commands:daemon 把 /<skill> args 在送给 LLM 前展开为
     // 轻量提示;原文存到 metadata.display_text,UI 优先显示原文,不让用户看到
     // 内部展开。
-    const displayContent = (metadata && typeof metadata.display_text === 'string'
-                              && metadata.display_text.length > 0)
+    const hasDisplayText = metadata && typeof metadata.display_text === 'string'
+      && (metadata.display_text.length > 0 || metadata.selection_context_expanded);
+    const displayContent = hasDisplayText
       ? metadata.display_text
       : content;
     return <UserBubble content={displayContent} contentParts={contentParts} ts={ts}

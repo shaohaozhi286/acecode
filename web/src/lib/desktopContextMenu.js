@@ -18,6 +18,7 @@ export const DESKTOP_CONTEXT_ACTIONS = Object.freeze({
   COPY_RELATIVE_PATH: 'copy_relative_path',
   COPY_ABSOLUTE_PATH: 'copy_absolute_path',
   ADD_FILE_CONTEXT: 'add_file_context',
+  ADD_SELECTION_CONTEXT: 'add_selection_context',
   REFRESH_FILE_TREE: 'refresh_file_tree',
   EXPAND_DIRECTORY: 'expand_directory',
   COLLAPSE_DIRECTORY: 'collapse_directory',
@@ -64,6 +65,7 @@ export const CONTEXT_MENU_REOPEN_DELAY_MS = 10;
 const GROUPS = Object.freeze({
   OBJECT: 'object',
   FILE: 'file',
+  SELECTION: 'selection',
   REVIEW: 'review',
   CONTENT: 'content',
   GENERIC: 'generic',
@@ -134,6 +136,11 @@ export function buildDesktopContextMenuItems({
   attachmentTarget = null,
 } = {}) {
   const items = [];
+
+  if (!editable && hasSelection && previewTarget &&
+      (previewTarget.kind === 'text' || previewTarget.kind === 'markdown')) {
+    addAction(items, DESKTOP_CONTEXT_ACTIONS.ADD_SELECTION_CONTEXT, previewTarget, { group: GROUPS.SELECTION });
+  }
 
   if (!editable) {
     if (sessionTarget) {

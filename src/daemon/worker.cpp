@@ -10,6 +10,9 @@
 #include "../provider/copilot_provider.hpp"
 #include "../provider/model_resolver.hpp"
 #include "../provider/provider_factory.hpp"
+#include "../hooks/hook_config.hpp"
+#include "../hooks/hook_manager.hpp"
+#include "../hooks/hook_payload.hpp"
 #include "../session/local_session_client.hpp"
 #include "../session/session_registry.hpp"
 #include "../skills/skill_registry.hpp"
@@ -297,6 +300,13 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     acecode::desktop::WorkspaceRegistry workspace_registry;
     workspace_registry.scan(projects_dir);
 
+    std::string hook_config_error;
+    acecode::HookConfig hook_config = acecode::load_hook_config(&hook_config_error);
+    if (!hook_config_error.empty()) {
+        LOG_WARN("[hooks] " + hook_config_error);
+    }
+    acecode::HookManager hook_manager(std::move(hook_config));
+
     // cfg_mut 已在前面创建(承接 port_override),这里只继续使用,不再重复声明。
     auto cwd_override = acecode::load_cwd_model_override(cwd);
     auto effective_entry = acecode::resolve_effective_model(cfg_mut, cwd_override, std::nullopt);
@@ -308,6 +318,10 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
         if (copilot && !copilot->try_silent_auth()) {
             LOG_WARN("[daemon] Copilot silent auth failed; run `acecode configure` to re-authenticate before using Copilot in Web UI");
         }
+    }
+    {
+        auto payload = acecode::build_startup_models_loaded_payload(cwd, effective_entry, provider);
+        hook_manager.dispatch(acecode::kHookEventStartupModelsLoaded, payload, cwd);
     }
     std::mutex provider_mu;
     auto provider_accessor =
@@ -362,6 +376,7 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     reg_deps.memory_registry      = nullptr;
     reg_deps.memory_cfg           = nullptr;
     reg_deps.project_instructions_cfg = nullptr;
+    reg_deps.hook_manager         = &hook_manager;
     reg_deps.template_permissions = &template_perm;
 
     acecode::SessionRegistry registry(std::move(reg_deps));

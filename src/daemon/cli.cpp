@@ -4,6 +4,7 @@
 #include "runtime_files.hpp"
 #include "worker.hpp"
 #include "../config/config.hpp"
+#include "../hooks/hook_manager.hpp"
 #include "../skills/default_skill_seeder.hpp"
 #include "../utils/logger.hpp"
 #include "../utils/paths.hpp"
@@ -164,6 +165,13 @@ static int do_foreground(const Args& a, const std::string& exe_path) {
     // 路径仍走默认 — 我们只隔离 run/,sessions / memory / config 仍共享。
     if (!a.run_dir_override.empty()) {
         acecode::set_run_dir_override(a.run_dir_override);
+    }
+
+    std::string hook_config_error;
+    acecode::dispatch_startup_before_model_load_hooks(
+        acecode::current_path_utf8(), &hook_config_error);
+    if (!hook_config_error.empty()) {
+        std::cerr << "[hooks] WARNING: " << hook_config_error << "\n";
     }
 
     AppConfig cfg = load_config();

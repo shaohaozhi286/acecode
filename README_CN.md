@@ -296,6 +296,7 @@ MCP servers 可以在运行时添加更多工具。
 - [CLAUDE.md](CLAUDE.md)：当前实现记忆。
 - [docs/user-manual.md](docs/user-manual.md)：用户工作流细节。
 - [docs/daemon-api.md](docs/daemon-api.md)：daemon HTTP/WebSocket API。
+- [docs/hooks.md](docs/hooks.md)：启动和 assistant 消息完成 hook 回调。
 - [docs/model-context-resolution.md](docs/model-context-resolution.md)：模型配置和上下文窗口解析。
 - [docs/skills.md](docs/skills.md)：技能编写和使用。
 - [docs/skills-implementation.md](docs/skills-implementation.md)：技能运行时实现说明。

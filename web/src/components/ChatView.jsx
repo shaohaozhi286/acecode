@@ -89,6 +89,12 @@ import {
   DESKTOP_CONTEXT_ACTION_EVENT,
   DESKTOP_CONTEXT_ACTIONS,
 } from '../lib/desktopContextMenu.js';
+import {
+  normalizeComposerContext,
+  selectionContextFingerprint,
+  selectionContextFromWindowSelection,
+  selectionContextLocationKey,
+} from '../lib/selectionChatContext.js';
 import { getGoalStopControlState } from '../lib/goalControl.js';
 import { todoChecklistPresentation } from '../lib/todoChecklist.js';
 import {
@@ -124,11 +130,7 @@ function normalizeComposerPayload(text, attachments = [], contexts = []) {
     attachments: attachments
       .filter((item) => item && !item.uploading && item.id)
       .map((item) => ({ id: item.id })),
-    contexts: contexts.map((ctx) => ({
-      type: ctx.type || 'browser',
-      label: ctx.label || 'Browser',
-      note: ctx.note || '',
-    })),
+    contexts: contexts.map(normalizeComposerContext).filter(Boolean),
   };
 }
 
@@ -139,6 +141,10 @@ function payloadHasExtras(payload) {
 
 function payloadText(payload) {
   return typeof payload === 'string' ? payload : String(payload?.text || '');
+}
+
+function nextSelectionContextId() {
+  return `selection-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function messageTextForContext(item) {
@@ -485,6 +491,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   const [composerValue, setComposerValue] = useState('');
   const [composerAttachments, setComposerAttachments] = useState([]);
   const [composerContexts, setComposerContexts] = useState([]);
+  const [selectionPreview, setSelectionPreview] = useState(null);
   const [composerSubmitting, setComposerSubmitting] = useState(false);
   const [draftReadyKey, setDraftReadyKey] = useState('');
   const draftEditVersionRef = useRef(0);
@@ -494,6 +501,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   const composerDirtyRef = useRef(false);
   const preserveComposerExtrasOnSessionChangeRef = useRef(false);
   const restoreComposerFocusAfterSubmitRef = useRef(false);
+  const selectionPreviewFingerprintRef = useRef('');
   const [queueState, setQueueState] = useState(() => createChatInputQueueState());
   const queueStateRef = useRef(queueState);
   const drainRef = useRef(false);
@@ -699,20 +707,95 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     setComposerContexts((items) => items.filter((item) => (item.local_id || item.id || item.type) !== key));
   }, []);
 
+  const pinSelectionContext = useCallback((context) => {
+    const localId = context?.local_id || context?.id || nextSelectionContextId();
+    const normalized = normalizeComposerContext({
+      ...context,
+      local_id: localId,
+      id: context?.id || localId,
+    });
+    if (!normalized) return false;
+    const pinned = {
+      ...normalized,
+      local_id: localId,
+      id: normalized.id || localId,
+    };
+    const locationKey = selectionContextLocationKey(pinned);
+    setComposerContexts((items) => {
+      if (
+        locationKey
+        && items.some((item) => selectionContextLocationKey(item) === locationKey)
+      ) {
+        return items;
+      }
+      return [...items, pinned];
+    });
+    selectionPreviewFingerprintRef.current = '';
+    setSelectionPreview(null);
+    requestAnimationFrame(() => inputRef.current?.focus());
+    return true;
+  }, []);
+
+  useEffect(() => {
+    let raf = 0;
+    const updatePreview = () => {
+      raf = 0;
+      const next = selectionContextFromWindowSelection();
+      if (!next) return;
+      const fingerprint = selectionContextFingerprint(next);
+      if (fingerprint === selectionPreviewFingerprintRef.current) return;
+      selectionPreviewFingerprintRef.current = fingerprint;
+      setSelectionPreview(next);
+    };
+    const schedulePreviewUpdate = () => {
+      if (raf) cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(updatePreview);
+    };
+
+    document.addEventListener('selectionchange', schedulePreviewUpdate);
+    document.addEventListener('mouseup', schedulePreviewUpdate, true);
+    document.addEventListener('keyup', schedulePreviewUpdate, true);
+    return () => {
+      if (raf) cancelAnimationFrame(raf);
+      document.removeEventListener('selectionchange', schedulePreviewUpdate);
+      document.removeEventListener('mouseup', schedulePreviewUpdate, true);
+      document.removeEventListener('keyup', schedulePreviewUpdate, true);
+    };
+  }, []);
+
+  const pinnedSelectionLocationKeys = useMemo(() => {
+    const keys = new Set();
+    for (const context of composerContexts) {
+      const key = selectionContextLocationKey(context);
+      if (key) keys.add(key);
+    }
+    return keys;
+  }, [composerContexts]);
+
+  const visibleSelectionPreview = useMemo(() => {
+    if (!selectionPreview) return null;
+    const key = selectionContextLocationKey(selectionPreview);
+    return key && pinnedSelectionLocationKeys.has(key) ? null : selectionPreview;
+  }, [pinnedSelectionLocationKeys, selectionPreview]);
+
   const composerInputProps = useMemo(() => ({
     attachments: composerAttachments,
     contexts: composerContexts,
+    selectionPreview: visibleSelectionPreview,
     onMediaFiles: handleMediaFiles,
     onRemoveAttachment: removeComposerAttachment,
     onAddBrowserContext: addBrowserContext,
     onRemoveContext: removeComposerContext,
+    onPinSelectionPreview: pinSelectionContext,
   }), [
     addBrowserContext,
     composerAttachments,
     composerContexts,
     handleMediaFiles,
+    pinSelectionContext,
     removeComposerAttachment,
     removeComposerContext,
+    visibleSelectionPreview,
   ]);
 
   useEffect(() => {
@@ -1608,6 +1691,27 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     window.addEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
     return () => window.removeEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
   }, [forkAndSwitch]);
+
+  useEffect(() => {
+    const handler = (event) => {
+      const detail = event.detail || {};
+      const { action, target } = detail;
+      if (action !== DESKTOP_CONTEXT_ACTIONS.ADD_SELECTION_CONTEXT) return;
+      const context = detail.selectionContext
+        || selectionContextFromWindowSelection({
+          target,
+          selectedText: detail.selectedText || '',
+        });
+      detail.handled = true;
+      if (!pinSelectionContext(context)) {
+        toast({ kind: 'err', text: '没有可引用的选中文本' });
+        return;
+      }
+      toast({ kind: 'ok', text: '已引用到聊天' });
+    };
+    window.addEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
+    return () => window.removeEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
+  }, [pinSelectionContext]);
 
   const status = useMemo(() => {
     if (!sid) return null;

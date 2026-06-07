@@ -16,6 +16,9 @@
 #include "session/turn_timing.hpp"
 #include "web/message_payload.hpp"
 #include "web/tool_event_payload.hpp"
+#include "hooks/hook_config.hpp"
+#include "hooks/hook_manager.hpp"
+#include "hooks/hook_payload.hpp"
 #include <nlohmann/json.hpp>
 #include <chrono>
 #include <mutex>
@@ -423,6 +426,32 @@ void AgentLoop::append_tool_user_prompt(const std::string& content,
         {"metadata", msg.metadata},
     };
     events_.emit(SessionEventKind::Message, std::move(event));
+}
+
+void AgentLoop::dispatch_assistant_completed_hook(
+    const ChatMessage& assistant_msg,
+    const std::shared_ptr<LlmProvider>& provider_snapshot) {
+    if (!hook_manager_ || assistant_msg.role != "assistant") return;
+
+    std::string session_id;
+    if (session_manager_) {
+        session_id = session_manager_->current_session_id();
+    }
+
+    std::string provider_name;
+    std::string model_name;
+    if (provider_snapshot) {
+        provider_name = provider_snapshot->name();
+        model_name = provider_snapshot->model();
+    }
+
+    auto payload = build_assistant_message_completed_payload(
+        cwd_,
+        session_id,
+        provider_name,
+        model_name,
+        assistant_msg);
+    hook_manager_->dispatch(kHookEventAssistantMessageCompleted, payload, cwd_);
 }
 
 void AgentLoop::abort() {
@@ -1392,6 +1421,7 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
             dispatch_message("assistant", accumulated.content, false,
                              nlohmann::json::object(),
                              accumulated.content_parts);
+            dispatch_assistant_completed_hook(assistant_msg, provider_snapshot);
             break;
         }
 
@@ -1400,6 +1430,7 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
         auto tc_msg = ToolExecutor::format_assistant_tool_calls(accumulated);
         messages_.push_back(tc_msg);
         if (session_manager_) session_manager_->on_message(tc_msg);
+        dispatch_assistant_completed_hook(tc_msg, provider_snapshot);
 
         // Partition tool calls into read-only (parallelizable) and write (serial) groups
         LOG_INFO("Processing " + std::to_string(accumulated.tool_calls.size()) + " tool calls");

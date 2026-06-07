@@ -8,6 +8,7 @@ import {
   DESKTOP_CONTEXT_ACTIONS,
   SESSION_PIN_TOGGLE_EVENT,
 } from '../lib/desktopContextMenu.js';
+import { selectionContextFromWindowSelection } from '../lib/selectionChatContext.js';
 import { copyImageToSystemClipboard, copyTextToSystemClipboard } from '../lib/systemClipboard.js';
 import { toast } from './Toast.jsx';
 
@@ -35,6 +36,7 @@ const ACTION_LABELS = {
   [DESKTOP_CONTEXT_ACTIONS.COPY_RELATIVE_PATH]: '复制相对路径',
   [DESKTOP_CONTEXT_ACTIONS.COPY_ABSOLUTE_PATH]: '复制绝对路径',
   [DESKTOP_CONTEXT_ACTIONS.ADD_FILE_CONTEXT]: '加入输入上下文',
+  [DESKTOP_CONTEXT_ACTIONS.ADD_SELECTION_CONTEXT]: '引用到聊天',
   [DESKTOP_CONTEXT_ACTIONS.REFRESH_FILE_TREE]: '刷新文件树',
   [DESKTOP_CONTEXT_ACTIONS.EXPAND_DIRECTORY]: '展开目录',
   [DESKTOP_CONTEXT_ACTIONS.COLLAPSE_DIRECTORY]: '折叠目录',
@@ -225,17 +227,18 @@ function dispatchSessionPinToggle(sessionPinTarget, nextPinned) {
   }));
 }
 
-function dispatchDesktopContextAction(action, targetPayload) {
+function dispatchDesktopContextAction(action, targetPayload, extra = {}) {
   const detail = {
     action,
     target: targetPayload || null,
     handled: false,
+    ...extra,
   };
   window.dispatchEvent(new CustomEvent(DESKTOP_CONTEXT_ACTION_EVENT, { detail }));
   return !!detail.handled;
 }
 
-async function runAction(item, target, rememberedText = '') {
+async function runAction(item, target, rememberedText = '', rememberedSelectionContext = null) {
   const action = typeof item === 'string' ? item : item?.id;
   const actionTarget = typeof item === 'object' ? item.target : null;
   if (!action) return;
@@ -285,6 +288,14 @@ async function runAction(item, target, rememberedText = '') {
       break;
     case DESKTOP_CONTEXT_ACTIONS.COPY_ATTACHMENT_IMAGE:
       await copyImageWithToast(actionTarget);
+      break;
+    case DESKTOP_CONTEXT_ACTIONS.ADD_SELECTION_CONTEXT:
+      if (!dispatchDesktopContextAction(action, actionTarget, {
+        selectedText: rememberedText,
+        selectionContext: rememberedSelectionContext,
+      })) {
+        toast({ kind: 'err', text: '操作不可用' });
+      }
       break;
     case DESKTOP_CONTEXT_ACTIONS.SELECT_ALL:
       selectAllForTarget(target);
@@ -389,6 +400,9 @@ export function DesktopContextMenu() {
         selectedText = lastSelectionRef.current.text;
       }
       const hasSelection = selectedText.length > 0;
+      const selectionContext = hasSelection
+        ? selectionContextFromWindowSelection({ target, selectedText })
+        : null;
       const debug = !!window.__ACECODE_DESKTOP_DEBUG__;
       const items = buildDesktopContextMenuItems({
         editable,
@@ -405,7 +419,7 @@ export function DesktopContextMenu() {
         viewportWidth: window.innerWidth,
         viewportHeight: window.innerHeight,
       });
-      openWithSwitchGap({ ...pos, items, selectedText });
+      openWithSwitchGap({ ...pos, items, selectedText, selectionContext });
     };
     const onKeyDown = (event) => {
       if (event.key === 'Escape') close();
@@ -458,8 +472,9 @@ export function DesktopContextMenu() {
             if (typeof action === 'object' && action.confirm && !window.confirm(action.confirm)) return;
             const target = targetRef.current;
             const selectedText = menu.selectedText || '';
+            const selectionContext = menu.selectionContext || null;
             close();
-            await runAction(action, target, selectedText);
+            await runAction(action, target, selectedText, selectionContext);
           }}
         >
           {ACTION_LABELS[typeof action === 'string' ? action : action.id] || (typeof action === 'string' ? action : action.id)}

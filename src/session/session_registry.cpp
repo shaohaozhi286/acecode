@@ -585,6 +585,7 @@ SessionRegistry::make_entry_locked(const std::string& id,
         entry->loop->set_agent_loop_config(deps_.config->agent_loop);
     }
     entry->loop->set_session_manager(entry->sm.get());
+    entry->loop->set_hook_manager(deps_.hook_manager);
     entry->loop->set_skill_registry(deps_.skill_registry);
     entry->loop->set_memory_registry(deps_.memory_registry);
     entry->loop->set_memory_config(deps_.memory_cfg);

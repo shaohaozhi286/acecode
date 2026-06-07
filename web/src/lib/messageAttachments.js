@@ -8,8 +8,11 @@ export function attachmentsFromContentParts(contentParts = []) {
 export function contextsFromContentParts(contentParts = []) {
   if (!Array.isArray(contentParts)) return [];
   return contentParts
-    .filter((part) => part && part.type === 'browser_context')
-    .map((part) => part.context || {});
+    .filter((part) => part && (part.type === 'browser_context' || part.type === 'selection_context'))
+    .map((part) => ({
+      ...(part.context || {}),
+      type: part.context?.type || (part.type === 'selection_context' ? 'selection' : 'browser'),
+    }));
 }
 
 export function normalizeAttachmentList(attachments = []) {

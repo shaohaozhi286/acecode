@@ -250,6 +250,137 @@ json ace_browser_bridge_settings_to_json(const AceBrowserBridgeConfig& cfg) {
     return out;
 }
 
+constexpr std::size_t kMaxSelectionContextChars = 40000;
+
+bool has_non_whitespace(const std::string& value) {
+    return std::any_of(value.begin(), value.end(), [](unsigned char c) {
+        return !std::isspace(c);
+    });
+}
+
+std::string json_string_field(const json& object, const char* key) {
+    if (!object.is_object() || !object.contains(key) || !object[key].is_string()) {
+        return {};
+    }
+    return object[key].get<std::string>();
+}
+
+int json_positive_int_field(const json& object, const char* key) {
+    if (!object.is_object() || !object.contains(key)) return 0;
+    const auto& value = object[key];
+    if (value.is_number_integer()) {
+        const int number = value.get<int>();
+        return number > 0 ? number : 0;
+    }
+    if (value.is_number_unsigned()) {
+        const auto number = value.get<unsigned int>();
+        return number > 0 ? static_cast<int>(number) : 0;
+    }
+    return 0;
+}
+
+std::string truncate_selection_context_text(std::string text) {
+    if (text.size() <= kMaxSelectionContextChars) return text;
+    text.resize(kMaxSelectionContextChars);
+    text += "\n[Selection truncated]";
+    return text;
+}
+
+std::string selection_line_suffix(const json& source) {
+    const int start = json_positive_int_field(source, "start_line");
+    const int end = json_positive_int_field(source, "end_line");
+    if (start <= 0) return {};
+    if (end <= 0 || end == start) return ":" + std::to_string(start);
+    return ":" + std::to_string(start) + "-" + std::to_string(end);
+}
+
+std::optional<json> sanitized_selection_context_meta(const json& ctx) {
+    if (!ctx.is_object() || json_string_field(ctx, "type") != "selection") {
+        return std::nullopt;
+    }
+    const std::string text = json_string_field(ctx, "text");
+    if (!has_non_whitespace(text)) return std::nullopt;
+
+    json source = json::object();
+    if (ctx.contains("source") && ctx["source"].is_object()) {
+        const auto& raw_source = ctx["source"];
+        const std::string path = json_string_field(raw_source, "path");
+        const std::string kind = json_string_field(raw_source, "kind");
+        if (!path.empty()) source["path"] = path;
+        if (!kind.empty()) source["kind"] = kind;
+        const int start = json_positive_int_field(raw_source, "start_line");
+        const int end = json_positive_int_field(raw_source, "end_line");
+        const int line_count = json_positive_int_field(raw_source, "line_count");
+        if (start > 0) source["start_line"] = start;
+        if (end > 0) source["end_line"] = end;
+        if (line_count > 0) source["line_count"] = line_count;
+    }
+
+    json meta = json::object();
+    meta["type"] = "selection";
+    const std::string id = json_string_field(ctx, "id");
+    const std::string label = json_string_field(ctx, "label");
+    const std::string note = json_string_field(ctx, "note");
+    if (!id.empty()) meta["id"] = id;
+    if (!label.empty()) meta["label"] = label;
+    if (!note.empty()) meta["note"] = note;
+    if (!source.empty()) meta["source"] = std::move(source);
+    return meta;
+}
+
+struct SelectionPromptContext {
+    json meta = json::array();
+    std::string prompt;
+};
+
+SelectionPromptContext build_selection_prompt_context(const json& contexts) {
+    SelectionPromptContext out;
+    if (!contexts.is_array()) return out;
+
+    std::ostringstream body;
+    int count = 0;
+    for (const auto& ctx : contexts) {
+        auto meta = sanitized_selection_context_meta(ctx);
+        if (!meta.has_value()) continue;
+        std::string text = truncate_selection_context_text(json_string_field(ctx, "text"));
+        if (!has_non_whitespace(text)) continue;
+
+        ++count;
+        out.meta.push_back(*meta);
+        const json source = meta->contains("source") && (*meta)["source"].is_object()
+            ? (*meta)["source"]
+            : json::object();
+        std::string source_label = json_string_field(*meta, "label");
+        if (source_label.empty()) {
+            source_label = json_string_field(source, "path") + selection_line_suffix(source);
+        }
+        body << "[selection " << count << "]\n";
+        if (!source_label.empty()) {
+            body << "Source: " << source_label << "\n";
+        }
+        body << "Text:\n" << text << "\n\n";
+    }
+
+    if (count > 0) {
+        out.prompt =
+            "The user pinned the following selected text as reference context. "
+            "Use it when it is relevant to the request.\n\n" + body.str();
+    }
+    return out;
+}
+
+std::string build_selection_augmented_prompt(const SelectionPromptContext& selection,
+                                             const std::string& original_text) {
+    std::ostringstream out;
+    out << selection.prompt << "User request:\n";
+    if (original_text.empty()) {
+        out << "(no additional typed prompt)";
+    } else {
+        out << original_text;
+    }
+    return out.str();
+}
+
 // SessionEvent → 上行 WS 消息(也用于 /messages 回放)。
 json session_event_to_json(const SessionEvent& evt,
                            const std::string& session_id = {},
@@ -2535,6 +2666,8 @@ struct WebServer::Impl {
             // .display_text)— LLM-prompt 与 UI-display 解耦。未命中透传。
             std::string original_text = text;
             bool expanded = false;
+            SelectionPromptContext selection_context = build_selection_prompt_context(contexts);
+            const bool selection_expanded = !selection_context.prompt.empty();
             if (attachment_refs.empty() && contexts.empty() &&
                 deps.session_registry && deps.app_config) {
                 if (auto* entry = deps.session_registry->lookup(id)) {
@@ -2549,10 +2682,13 @@ struct WebServer::Impl {
                     }
                 }
             }
+            if (selection_expanded) {
+                text = build_selection_augmented_prompt(selection_context, original_text);
+            }
 
             UserInput input;
             input.text = text;
-            if (expanded) input.display_text = original_text;
+            if (expanded || selection_expanded) input.display_text = original_text;
 
             if (!attachment_refs.empty() || !contexts.empty()) {
                 if (!deps.session_registry) {
@@ -2611,9 +2747,18 @@ struct WebServer::Impl {
                     });
                 }
 
+                json context_meta = json::array();
                 for (const auto& ctx : contexts) {
                     if (!ctx.is_object()) continue;
-                    parts.push_back(json{{"type", "browser_context"}, {"context", ctx}});
+                    if (json_string_field(ctx, "type") == "selection") {
+                        auto meta = sanitized_selection_context_meta(ctx);
+                        if (!meta.has_value()) continue;
+                        context_meta.push_back(*meta);
+                        parts.push_back(json{{"type", "selection_context"}, {"context", *meta}});
+                    } else {
+                        context_meta.push_back(ctx);
+                        parts.push_back(json{{"type", "browser_context"}, {"context", ctx}});
+                    }
                 }
 
                 input.content_parts = std::move(parts);
@@ -2621,8 +2766,12 @@ struct WebServer::Impl {
                 if (!attachment_meta.empty()) {
                     input.metadata["attachments"] = std::move(attachment_meta);
                 }
-                if (!contexts.empty()) {
-                    input.metadata["contexts"] = contexts;
+                if (!context_meta.empty()) {
+                    input.metadata["contexts"] = std::move(context_meta);
+                }
+                if (selection_expanded) {
+                    input.metadata["selection_context_expanded"] = true;
+                    input.metadata["display_text"] = original_text;
                 }
             }
 

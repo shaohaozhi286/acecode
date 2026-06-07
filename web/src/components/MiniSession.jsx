@@ -155,7 +155,7 @@ export function MiniSession({ session, compact, onClick }) {
       className={clsx(
         'flex flex-col rounded-lg overflow-hidden text-left transition cursor-pointer',
         'border bg-surface',
-        active ? 'border-accent border-[1.5px] shadow-[0_0_0_1px_var(--ace-accent)/0.15]' : 'border-border ace-shadow hover:border-accent/60',
+        active ? 'border-accent border-[1.5px] ace-mini-session-active-shadow' : 'border-border ace-shadow hover:border-accent/60',
       )}
     >
       <div className={clsx(

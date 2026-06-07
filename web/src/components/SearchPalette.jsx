@@ -136,7 +136,7 @@ export function SearchPalette({ open, onClose, currentWorkspaceHash = '', onSele
       className="fixed inset-0 z-[300] flex items-start justify-center pt-[15vh] px-4"
       onKeyDown={onRootKeyDown}
       onMouseDown={(e) => { if (e.target === e.currentTarget) onClose?.(); }}
-      style={{ background: 'color-mix(in oklab, var(--ace-bg) 50%, transparent)' }}
+      style={{ background: 'rgba(var(--ace-bg-rgb), 0.50)' }}
     >
       <div
         className="bg-surface border border-border rounded-xl ace-shadow-lg overflow-hidden flex flex-col"

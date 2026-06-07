@@ -26,6 +26,7 @@ namespace acecode {
 
 class SkillRegistry;
 class MemoryRegistry;
+class HookManager;
 struct MemoryConfig;
 struct ProjectInstructionsConfig;
 struct CompactResult;
@@ -188,6 +189,7 @@ public:
     void set_agent_loop_config(AgentLoopConfig cfg) { loop_cfg_ = cfg; }
 
     void set_session_manager(SessionManager* sm) { session_manager_ = sm; }
+    void set_hook_manager(HookManager* hm) { hook_manager_ = hm; }
     void restore_goal_runtime();
     void publish_current_goal_state();
     void maybe_continue_goal();
@@ -257,6 +259,8 @@ private:
     void append_tool_user_prompt(const std::string& content,
                                  const std::string& display_text,
                                  const std::string& source_tool);
+    void dispatch_assistant_completed_hook(const ChatMessage& assistant_msg,
+                                           const std::shared_ptr<LlmProvider>& provider_snapshot);
 
     struct WorkerTask {
         enum class Kind { Chat, Shell, Compact };
@@ -287,6 +291,7 @@ private:
     std::atomic<int> last_api_prompt_tokens_{0}; // from most recent API response
     int auto_compact_consecutive_failures_ = 0;
     SessionManager* session_manager_ = nullptr;
+    HookManager* hook_manager_ = nullptr;
     const SkillRegistry* skill_registry_ = nullptr;
     const MemoryRegistry* memory_registry_ = nullptr;
     const MemoryConfig* memory_cfg_ = nullptr;

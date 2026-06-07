@@ -3,7 +3,7 @@
 // 背景:用户在 /model 选模型 / 配 base_url 时经常多打或少打尾部斜杠。早期实现把
 //   base_url 原样存下,拼端点时再固定追加 "/chat/completions"。当用户配成
 //   "http://host/v1/"(带尾斜杠)时,最终 URL 变成 ".../v1//chat/completions",
-//   不少自建网关(实际样本:eip-assistant-python-api-prd.paic.com.cn)对双斜杠
+//   不少自建网关(例如 example.internal)对双斜杠
 //   直接回 404 {"detail":"Not Found"},表现为消息发出去立刻终止、无返回。
 //   修复:存储 base_url 时统一裁掉所有尾部 '/' 与首尾空白,拼接端点时再补一个
 //   前导 '/',使带不带尾斜杠都收敛到同一条合法 URL。

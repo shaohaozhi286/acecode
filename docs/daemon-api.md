@@ -212,6 +212,44 @@ Fetch session content. Two modes by `since`:
 If the requested seq predates the ring-buffer start, you'll get an empty list
 and should re-fetch with `since=0`.
 
+### `POST /api/sessions/:id/messages`
+
+Queue a user input turn for an active session. The desktop/web composer sends
+plain text plus optional uploaded attachment ids and structured contexts.
+
+**Request body**:
+```json
+{
+  "text": "Explain this code",
+  "attachments": [{ "id": "att-..." }],
+  "contexts": [
+    {
+      "type": "selection",
+      "label": "README.md:23-24",
+      "note": "2 lines",
+      "text": "selected text...",
+      "source": {
+        "path": "README.md",
+        "start_line": 23,
+        "end_line": 24,
+        "line_count": 2
+      }
+    }
+  ]
+}
+```
+
+`selection` contexts are model-visible request context, not visible prompt text.
+The daemon expands them into the model input and records `metadata.display_text`
+so the transcript continues to show only the user's typed text plus context
+chips. Unpinned/transient selections are a client-side composer state and MUST
+NOT be sent in `contexts`.
+
+**Response 202**:
+```json
+{ "queued": true }
+```
+
 ### `DELETE /api/sessions/:id/todos`
 
 Clear the current TodoWrite checklist for a session. The workspace-scoped alias

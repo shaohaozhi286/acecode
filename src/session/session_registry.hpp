@@ -35,6 +35,7 @@
 
 namespace acecode {
 
+class HookManager;
 class SkillRegistry;
 class MemoryRegistry;
 
@@ -74,6 +75,7 @@ struct SessionRegistryDeps {
     const MemoryRegistry*            memory_registry = nullptr;
     const MemoryConfig*              memory_cfg = nullptr;
     const ProjectInstructionsConfig* project_instructions_cfg = nullptr;
+    HookManager*                     hook_manager = nullptr;
     // 全局 PermissionManager(用于派生 per-session perm 的 mode + rules
     // 起始值)。每个 session 自己的 PermissionManager 是独立实例,session_allowed_
     // 不串。
