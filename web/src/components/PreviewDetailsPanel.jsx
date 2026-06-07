@@ -278,8 +278,8 @@ export function PreviewDetailsPanel({
             type="button"
             className="ace-preview-details-action"
             onClick={onCloseAll}
-            title="关闭预览面板"
-            aria-label="关闭预览面板"
+            title="关闭全部预览标签页"
+            aria-label="关闭全部预览标签页"
           >
             <VsIcon name="close" size={14} />
           </button>

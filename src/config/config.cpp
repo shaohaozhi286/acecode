@@ -42,6 +42,18 @@ bool is_one_of(const std::string& value, std::initializer_list<const char*> allo
     return false;
 }
 
+std::string normalize_permission_mode_name(std::string value) {
+    if (value == "acceptEdits") value = "accept-edits";
+    if (is_one_of(value, {"default", "accept-edits", "plan", "yolo"})) {
+        return value;
+    }
+    if (!value.empty()) {
+        LOG_WARN("[config] default_permission_mode='" + value +
+                 "' invalid; falling back to 'default'");
+    }
+    return "default";
+}
+
 std::optional<int> parse_positive_int(const std::string& value) {
     const std::string trimmed = trim_ascii_copy(value);
     if (trimmed.empty()) return std::nullopt;
@@ -73,7 +85,8 @@ std::string legacy_model_profile_name(const AppConfig& cfg) {
         }
         return "openai";
     }
-    return "copilot";
+    if (cfg.provider == "copilot") return "copilot";
+    return "";
 }
 
 } // namespace
@@ -108,6 +121,8 @@ ModelProfile legacy_model_profile_from_config(const AppConfig& cfg) {
         profile.models_dev_provider_id = cfg.openai.models_dev_provider_id;
         return profile;
     }
+
+    if (cfg.provider != "copilot") return profile;
 
     CopilotConfig defaults;
     profile.provider = "copilot";
@@ -238,18 +253,15 @@ std::vector<std::string> validate_config(const AppConfig& cfg) {
 
 static void write_default_config(const std::string& config_path) {
     nlohmann::json j;
-    j["provider"] = "copilot";
+    j["provider"] = "";
     j["openai"]["base_url"] = "http://localhost:1234/v1";
     j["openai"]["api_key"] = "";
     j["openai"]["model"] = "local-model";
     j["copilot"]["model"] = "gpt-4o";
     j["codex"]["model"] = "gpt-5.5";
-    j["saved_models"] = nlohmann::json::array({{
-        {"name", "copilot"},
-        {"provider", "copilot"},
-        {"model", "gpt-4o"}
-    }});
-    j["default_model_name"] = "copilot";
+    j["saved_models"] = nlohmann::json::array();
+    j["default_model_name"] = "";
+    j["default_permission_mode"] = "default";
 
     std::ofstream ofs(path_from_utf8(config_path));
     if (ofs.is_open()) {
@@ -257,8 +269,17 @@ static void write_default_config(const std::string& config_path) {
     }
 }
 
-static void synthesize_legacy_saved_model_if_needed(AppConfig& cfg) {
+static void synthesize_legacy_saved_model_if_needed(AppConfig& cfg,
+                                                    bool saved_models_key_present) {
     if (!cfg.saved_models.empty()) return;
+    if (saved_models_key_present) {
+        if (!cfg.default_model_name.empty()) {
+            LOG_WARN("[config] default_model_name ignored because saved_models is empty: " +
+                     cfg.default_model_name);
+            cfg.default_model_name.clear();
+        }
+        return;
+    }
 
     ModelProfile legacy = legacy_model_profile_from_config(cfg);
     std::vector<ModelProfile> candidate{legacy};
@@ -279,14 +300,6 @@ static void synthesize_legacy_saved_model_if_needed(AppConfig& cfg) {
     LOG_WARN("[config] saved_models missing and legacy fields cannot be migrated: " + err);
 }
 
-static bool profile_name_exists(const std::vector<ModelProfile>& entries,
-                                const std::string& name) {
-    for (const auto& entry : entries) {
-        if (entry.name == name) return true;
-    }
-    return false;
-}
-
 static const ModelProfile* find_profile_by_name(const std::vector<ModelProfile>& entries,
                                                 const std::string& name) {
     if (name.empty()) return nullptr;
@@ -303,24 +316,16 @@ static const ModelProfile* first_enabled_profile(const std::vector<ModelProfile>
     return nullptr;
 }
 
-static ModelProfile fallback_copilot_profile(const AppConfig& cfg) {
-    ModelProfile profile;
-    profile.name = "copilot";
-    profile.provider = "copilot";
-    profile.model = cfg.copilot.model.empty() ? CopilotConfig{}.model : cfg.copilot.model;
-    return profile;
-}
-
 static void sanitize_disabled_model_providers(AppConfig& cfg) {
     bool provider_was_disabled = false;
-    if (!is_runtime_model_provider_enabled(cfg.provider)) {
+    if (!cfg.provider.empty() && !is_runtime_model_provider_enabled(cfg.provider)) {
         LOG_WARN(std::string("[config] provider '") + cfg.provider +
                  "' is disabled; falling back to an enabled saved model");
         provider_was_disabled = true;
     }
 
     if (cfg.saved_models.empty()) {
-        if (provider_was_disabled) cfg.provider = "copilot";
+        if (provider_was_disabled) cfg.provider.clear();
         return;
     }
 
@@ -347,22 +352,14 @@ static void sanitize_disabled_model_providers(AppConfig& cfg) {
         return;
     }
 
-    ModelProfile fallback = fallback_copilot_profile(cfg);
-    if (profile_name_exists(cfg.saved_models, fallback.name)) {
-        int suffix = 2;
-        do {
-            fallback.name = "copilot-" + std::to_string(suffix++);
-        } while (profile_name_exists(cfg.saved_models, fallback.name));
-    }
-    LOG_WARN("[config] no enabled saved model profiles; adding fallback '" +
-             fallback.name + "'");
-    cfg.saved_models.push_back(fallback);
-    cfg.default_model_name = cfg.saved_models.back().name;
-    cfg.provider = cfg.saved_models.back().provider;
+    LOG_WARN("[config] no enabled saved model profiles; clearing default model");
+    cfg.default_model_name.clear();
+    cfg.provider.clear();
 }
 
 AppConfig load_config() {
     AppConfig cfg;
+    bool saved_models_key_present = false;
 
     std::string acecode_dir = get_acecode_dir();
     std::string config_path = path_to_utf8(path_from_utf8(acecode_dir) / "config.json");
@@ -429,6 +426,11 @@ AppConfig load_config() {
             }
             if (j.contains("max_sessions") && j["max_sessions"].is_number_integer()) {
                 cfg.max_sessions = j["max_sessions"].get<int>();
+            }
+            if (j.contains("default_permission_mode") &&
+                j["default_permission_mode"].is_string()) {
+                cfg.default_permission_mode = normalize_permission_mode_name(
+                    j["default_permission_mode"].get<std::string>());
             }
             if (j.contains("skills") && j["skills"].is_object()) {
                 const auto& sj = j["skills"];
@@ -863,6 +865,7 @@ AppConfig load_config() {
             // --- model profiles (openspec/changes/model-profiles) ---
             // 缺失视为旧 schema,load_config 末尾会从 legacy provider 字段合成兜底。
             if (j.contains("saved_models")) {
+                saved_models_key_present = true;
                 std::string err;
                 auto parsed = parse_saved_models(j["saved_models"], err);
                 if (!parsed.has_value()) {
@@ -1000,7 +1003,7 @@ AppConfig load_config() {
         cfg.upgrade.base_url = normalize_upgrade_base_url(env);
     }
 
-    synthesize_legacy_saved_model_if_needed(cfg);
+    synthesize_legacy_saved_model_if_needed(cfg, saved_models_key_present);
     if (!cfg.saved_models.empty()) {
         std::string err;
         if (!validate_saved_models(cfg.saved_models, cfg.default_model_name, err)) {
@@ -1013,6 +1016,13 @@ AppConfig load_config() {
         LOG_WARN("[config] default_model_name ignored because saved_models is empty: " +
                  cfg.default_model_name);
         cfg.default_model_name.clear();
+    }
+    if (cfg.saved_models.empty() &&
+        !cfg.provider.empty() &&
+        !is_runtime_model_provider_enabled(cfg.provider)) {
+        LOG_WARN("[config] provider '" + cfg.provider +
+                 "' ignored because no enabled model profiles are configured");
+        cfg.provider.clear();
     }
 
     return cfg;
@@ -1049,6 +1059,10 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
     j["codex"]["model"] = cfg.codex.model;
     j["context_window"] = cfg.context_window;
     j["max_sessions"] = cfg.max_sessions;
+    if (normalize_permission_mode_name(cfg.default_permission_mode) != "default") {
+        j["default_permission_mode"] =
+            normalize_permission_mode_name(cfg.default_permission_mode);
+    }
 
     if (!cfg.skills.disabled.empty() || !cfg.skills.external_dirs.empty()) {
         nlohmann::json sj = nlohmann::json::object();
@@ -1254,32 +1268,34 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
     }
 
     // --- model profiles ---
-    // 仅在非空时写,保持对既有 config.json 的 diff 干净。
-    if (!cfg.saved_models.empty()) {
-        nlohmann::json arr = nlohmann::json::array();
-        for (const auto& e : cfg.saved_models) {
-            nlohmann::json ej = nlohmann::json::object();
-            ej["name"] = e.name;
-            ej["provider"] = e.provider;
-            ej["model"] = e.model;
-            if (!e.base_url.empty()) ej["base_url"] = e.base_url;
-            if (!e.api_key.empty()) ej["api_key"] = e.api_key;
-            if (e.models_dev_provider_id.has_value() && !e.models_dev_provider_id->empty()) {
-                ej["models_dev_provider_id"] = *e.models_dev_provider_id;
-            }
-            if (e.context_window.has_value() && *e.context_window > 0) {
-                ej["context_window"] = *e.context_window;
-            }
-            if (e.stream_timeout_ms.has_value() && *e.stream_timeout_ms > 0) {
-                ej["stream_timeout_ms"] = *e.stream_timeout_ms;
-            }
-            if (!e.capabilities.empty()) {
-                ej["capabilities"] = e.capabilities;
-            }
-            arr.push_back(std::move(ej));
+    nlohmann::json arr = nlohmann::json::array();
+    for (const auto& e : cfg.saved_models) {
+        nlohmann::json ej = nlohmann::json::object();
+        ej["name"] = e.name;
+        ej["provider"] = e.provider;
+        ej["model"] = e.model;
+        if (!e.base_url.empty()) ej["base_url"] = e.base_url;
+        if (!e.api_key.empty()) ej["api_key"] = e.api_key;
+        if (e.models_dev_provider_id.has_value() && !e.models_dev_provider_id->empty()) {
+            ej["models_dev_provider_id"] = *e.models_dev_provider_id;
         }
-        j["saved_models"] = std::move(arr);
+        if (e.context_window.has_value() && *e.context_window > 0) {
+            ej["context_window"] = *e.context_window;
+        }
+        if (e.stream_timeout_ms.has_value() && *e.stream_timeout_ms > 0) {
+            ej["stream_timeout_ms"] = *e.stream_timeout_ms;
+        }
+        if (!e.capabilities.empty()) {
+            ej["capabilities"] = e.capabilities;
+        }
+        if (!e.request_headers.empty()) {
+            nlohmann::json headers = nlohmann::json::object();
+            for (const auto& [k, v] : e.request_headers) headers[k] = v;
+            ej["request_headers"] = std::move(headers);
+        }
+        arr.push_back(std::move(ej));
     }
+    j["saved_models"] = std::move(arr);
     if (!cfg.default_model_name.empty()) {
         j["default_model_name"] = cfg.default_model_name;
     }

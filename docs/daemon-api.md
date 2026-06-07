@@ -286,8 +286,8 @@ one session does not affect other active sessions.
 ### `PUT /api/sessions/:id/permissions`
 
 Switch the active session's permission mode. Valid `mode` values are
-`default`, `accept-edits`, and `yolo`. Switching to `yolo` also resolves any
-already-open permission prompt for that session with `allow`.
+`default`, `accept-edits`, `plan`, and `yolo`. Switching to `yolo` also
+resolves any already-open permission prompt for that session with `allow`.
 
 **Request body**:
 ```json
@@ -318,6 +318,46 @@ List skills the daemon registered at startup.
 }
 ```
 
+### `GET /api/models`
+
+List saved model profiles exposed to Web/Desktop. Responses never include
+`api_key`. OpenAI-compatible entries may include unresolved
+`request_headers` templates for editing.
+
+**Response 200**:
+```json
+[
+  {
+    "name": "gateway",
+    "provider": "openai",
+    "model": "gpt-4o",
+    "base_url": "https://gateway.example.com/v1",
+    "request_headers": {
+      "X-Team": "acecode",
+      "X-Token": "{env:ACE_GATEWAY_TOKEN}"
+    }
+  }
+]
+```
+
+### `POST /api/models` / `PUT /api/models/:name`
+
+Create or update a saved model profile. OpenAI-compatible request bodies may
+include `request_headers`, a JSON object of string header templates. Empty or
+omitted `request_headers` is absent from the stored entry; for `PUT`, omitting
+the field preserves the existing value, while sending `{}` clears it.
+
+`Content-Type` is reserved by ACECode. `Authorization` is allowed and overrides
+the bearer header derived from `api_key` when requests are sent.
+
+### `POST /api/models/probe`
+
+Probe remote model ids. For `provider: "openai"`, the request body accepts the
+same unresolved `request_headers` templates and resolves `{env:NAME}` just
+before sending the upstream `GET /models` request. Missing environment
+variables return `400 {"error":"INVALID_REQUEST_HEADER"}` before any upstream
+request is sent.
+
 ### `GET /api/config/ui-preferences`
 
 Read non-sensitive Web/Desktop UI preferences. The legacy ACECode avatar
@@ -347,6 +387,37 @@ remains hidden.
 
 Errors:
 - `400 {"error":"BAD_REQUEST"}` when `show_acecode_avatar` is missing or not a boolean.
+- `500 {"error":"PERSIST_FAILED"}` when writing `config.json` fails.
+
+### `GET /api/config/default-permission-mode`
+
+Read the daemon default permission mode used by newly-created sessions.
+Existing sessions remain session-scoped.
+
+**Response 200**:
+```json
+{ "mode": "accept-edits", "description": "Auto-allow file edits, prompt for bash" }
+```
+
+### `PUT /api/config/default-permission-mode`
+
+Persist the daemon default permission mode and update the in-memory session
+template used for future new sessions. Valid `mode` values are `default`,
+`accept-edits`, `plan`, and `yolo`.
+
+**Request body**:
+```json
+{ "mode": "accept-edits" }
+```
+
+**Response 200** echoes the effective mode:
+```json
+{ "mode": "accept-edits", "description": "Auto-allow file edits, prompt for bash" }
+```
+
+Errors:
+- `400 {"error":"BAD_REQUEST"}` when `mode` is missing or not a string.
+- `400 {"error":"INVALID_PERMISSION_MODE"}` when `mode` is not recognized.
 - `500 {"error":"PERSIST_FAILED"}` when writing `config.json` fails.
 
 ### `GET /api/mcp` / `PUT /api/mcp`

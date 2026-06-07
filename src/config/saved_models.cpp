@@ -3,6 +3,7 @@
 #include "config/saved_models.hpp"
 
 #include "model_provider_registry.hpp"
+#include "request_headers.hpp"
 
 #include <cctype>
 #include <set>
@@ -113,6 +114,13 @@ std::optional<ModelProfile> parse_one_entry(const nlohmann::json& node, std::siz
     if (node.contains("capabilities")) {
         e.capabilities = parse_capabilities_array(node["capabilities"]);
     }
+    if (node.contains("request_headers")) {
+        std::ostringstream context;
+        context << "saved_models[" << idx << "] (name='" << e.name << "')";
+        auto parsed = parse_request_headers_json(node["request_headers"], context.str(), err);
+        if (!parsed.has_value()) return std::nullopt;
+        e.request_headers = std::move(*parsed);
+    }
 
     return e;
 }
@@ -179,6 +187,12 @@ bool validate_saved_models(const std::vector<ModelProfile>& entries,
                 err = oss.str();
                 return false;
             }
+        } else if (!e.request_headers.empty()) {
+            std::ostringstream oss;
+            oss << "saved_models entry '" << e.name
+                << "' has request_headers but provider is not openai";
+            err = oss.str();
+            return false;
         }
         if (e.context_window.has_value() && *e.context_window <= 0) {
             std::ostringstream oss;
@@ -207,6 +221,16 @@ bool validate_saved_models(const std::vector<ModelProfile>& entries,
                 std::ostringstream oss;
                 oss << "saved_models entry '" << e.name
                     << "' has duplicate capability '" << tag << "'";
+                err = oss.str();
+                return false;
+            }
+        }
+        if (!e.request_headers.empty()) {
+            std::string headers_err;
+            if (!validate_request_headers(e.request_headers, headers_err)) {
+                std::ostringstream oss;
+                oss << "saved_models entry '" << e.name << "' invalid "
+                    << headers_err;
                 err = oss.str();
                 return false;
             }

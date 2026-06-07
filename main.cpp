@@ -1986,12 +1986,16 @@ static int run_interactive_app(const CliOptions& cli,
     };
     {
         auto p = provider_accessor();
-        config.context_window = resolve_model_context_window(
-            config,
-            p->name(),
-            p->model(),
-            config.context_window
-        );
+        if (p) {
+            config.context_window = resolve_model_context_window(
+                config,
+                p->name(),
+                p->model(),
+                config.context_window
+            );
+        } else {
+            LOG_WARN("[main] no configured model provider; starting without an active model");
+        }
     }
 
     // ---- Init web search runtime ----
@@ -2022,7 +2026,9 @@ static int run_interactive_app(const CliOptions& cli,
     TuiState state;
     {
         auto p = provider_accessor();
-        state.status_line = "[" + p->name() + "] model: " + p->model();
+        state.status_line = p
+            ? "[" + p->name() + "] model: " + p->model()
+            : "No model configured";
     }
 
     restore_input_history(state, config, working_dir);
@@ -2186,11 +2192,13 @@ static int run_interactive_app(const CliOptions& cli,
     // ---- Copilot auth flow (background thread) ----
     std::atomic<bool> auth_done{false};
     std::thread auth_thread;
+    bool auth_thread_started = false;
 
-    if (config.provider == "copilot") {
+    {
         auto provider_snapshot = provider_accessor();
         auto* copilot = dynamic_cast<CopilotProvider*>(provider_snapshot.get());
         if (copilot && !copilot->is_authenticated()) {
+            const std::string copilot_model = copilot->model();
             {
                 std::lock_guard<std::mutex> lk(state.mu);
                 state.current_thinking_phrase = get_random_thinking_phrase(is_user_chinese(state));
@@ -2205,7 +2213,8 @@ static int run_interactive_app(const CliOptions& cli,
             }
             screen.PostEvent(Event::Custom);
 
-            auth_thread = std::thread([copilot, &state, &screen, &auth_done, &config] {
+            auth_thread_started = true;
+            auth_thread = std::thread([copilot, &state, &screen, &auth_done, copilot_model] {
                 // Try silent auth first (saved token)
                 if (copilot->try_silent_auth()) {
                     {
@@ -2238,7 +2247,7 @@ static int run_interactive_app(const CliOptions& cli,
                         std::lock_guard<std::mutex> lk(state.mu);
                         state.conversation.push_back({"system", "GitHub Copilot authenticated!", false});
                         state.is_waiting = false;
-                        state.status_line = "[copilot] model: " + config.copilot.model;
+                        state.status_line = "[copilot] model: " + copilot_model;
                     }
                 } else {
                     std::lock_guard<std::mutex> lk(state.mu);
@@ -2248,12 +2257,9 @@ static int run_interactive_app(const CliOptions& cli,
                 auth_done = true;
                 screen.PostEvent(Event::Custom);
             });
-        } else {
-            auth_done = true;
         }
-    } else {
-        auth_done = true;
     }
+    if (!auth_thread_started) auth_done = true;
 
     // ---- Token tracking ----
     TokenTracker token_tracker;
@@ -2416,6 +2422,8 @@ static int run_interactive_app(const CliOptions& cli,
 
     AgentLoop agent_loop(provider_accessor, tools, callbacks, working_dir, permissions);
     agent_loop.set_context_window(config.context_window);
+    agent_loop.set_no_model_config_prompt(
+        u8"请先配置大模型服务。TUI 可运行 acecode configure 或使用 /model add 添加模型。");
     agent_loop.set_agent_loop_config(config.agent_loop);
     agent_loop.set_skill_registry(&skill_registry);
     agent_loop.set_memory_registry(&memory_registry);
@@ -2428,7 +2436,9 @@ static int run_interactive_app(const CliOptions& cli,
     SessionManager session_manager;
     {
         auto p = provider_accessor();
-        session_manager.start_session(working_dir, p->name(), p->model());
+        const std::string provider_name = p ? p->name() : std::string{};
+        const std::string provider_model = p ? p->model() : std::string{};
+        session_manager.start_session(working_dir, provider_name, provider_model);
         session_manager.set_permission_mode(
             PermissionManager::mode_name(permissions.mode()),
             /*persist_immediately=*/false);

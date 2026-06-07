@@ -62,6 +62,7 @@ function HoverActions({ messageId, getCopyText, onFork }) {
 function CommandToken({ token, name, kind, description }) {
   const anchorRef = useRef(null);
   const [tip, setTip] = useState(null);
+  const displayName = String(name || token || '').replace(/^\/+/, '');
 
   const showTip = useCallback(() => {
     if (!description) return;
@@ -89,7 +90,7 @@ function CommandToken({ token, name, kind, description }) {
       onBlur={hideTip}
     >
       <CommandGlyph kind={kind} size={12} className="ace-cmd-token-glyph" />
-      <span className="ace-cmd-token-name">{token}</span>
+      <span className="ace-cmd-token-name">{displayName}</span>
       {tip
         ? createPortal(
             <span
@@ -102,7 +103,7 @@ function CommandToken({ token, name, kind, description }) {
                 bottom: tip.placement === 'above' ? tip.bottom : undefined,
               }}
             >
-              <span className="ace-cmd-token-tip-name">/{name}</span>
+              <span className="ace-cmd-token-tip-name">{displayName}</span>
               <span className="ace-cmd-token-tip-desc">{description}</span>
             </span>,
             document.body,

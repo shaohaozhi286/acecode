@@ -48,6 +48,7 @@ import { maybeNotify } from '../lib/desktopNotify.js';
 import { normalizeTokenBudget } from '../lib/tokenBudget.js';
 import {
   modelDisplayLabel,
+  isEmptyModelState,
   modelSelectValue,
   normalizeModelOptions,
   normalizeModelState,
@@ -71,6 +72,7 @@ import {
   activatePreviewTab,
   closePreviewTab,
   closeVisiblePreviewTabs,
+  closeVisiblePreviewTabsConfirmationMessage,
   openFileTab,
   openSessionChangesTab,
   previewScopeKey,
@@ -452,6 +454,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   const [homeSubmitting, setHomeSubmitting] = useState(false);
   const [projectDropdownOpen, setProjectDropdownOpen] = useState(false);
   const [modelOptions, setModelOptions] = useState([]);
+  const [modelListLoaded, setModelListLoaded] = useState(false);
   const [homeModelName, setHomeModelName] = useState('');
   const [modelState, setModelState] = useState(null);
   const [pendingModelName, setPendingModelName] = useState('');
@@ -816,6 +819,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     setPendingModelName('');
     setModelSwitching(false);
     setModelRefreshing(false);
+    setModelListLoaded(false);
 
     if (!sid) {
       setModelState(null);
@@ -828,6 +832,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
           ? normalizeModelOptions(modelsResult.value)
           : [];
         setModelOptions(options);
+        setModelListLoaded(true);
         const defaultName = defaultResult.status === 'fulfilled'
           ? (defaultResult.value?.name || defaultResult.value?.default_model_name || '')
           : '';
@@ -838,10 +843,16 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
 
     api.listModels()
       .then((list) => {
-        if (!cancelled) setModelOptions(normalizeModelOptions(list));
+        if (!cancelled) {
+          setModelOptions(normalizeModelOptions(list));
+          setModelListLoaded(true);
+        }
       })
       .catch(() => {
-        if (!cancelled) setModelOptions([]);
+        if (!cancelled) {
+          setModelOptions([]);
+          setModelListLoaded(true);
+        }
       });
 
     api.getSessionModel(sid, ref?.workspaceHash || '')
@@ -878,6 +889,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         : modelOptions;
       if (modelsResult.status === 'fulfilled') {
         setModelOptions(nextOptions);
+        setModelListLoaded(true);
       }
       if (targetSid && stateResult.status === 'fulfilled') {
         setModelState(normalizeModelState(stateResult.value));
@@ -1602,11 +1614,17 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     return busy || transcriptStatus === 'running' ? 'running' : 'idle';
   }, [sid, busy, transcriptStatus]);
 
-  const currentModelLabel = modelDisplayLabel(modelState, ref?.model_name || ref?.model_preset || ref?.model || '加载中');
+  const modelListEmptyLoaded = modelListLoaded && modelOptions.length === 0;
+  const noModelLabel = '未配置模型';
+  const currentModelFallback = isEmptyModelState(modelState)
+    ? noModelLabel
+    : (ref?.model_name || ref?.model_preset || ref?.model || (modelListEmptyLoaded ? noModelLabel : '加载中'));
+  const currentModelLabel = modelDisplayLabel(modelState, currentModelFallback);
   const currentModelName = modelSelectValue(modelState, pendingModelName);
+  const homeModelFallback = !homeModelName && modelListEmptyLoaded ? noModelLabel : (homeModelName || '加载中');
   const homeModelLabel = modelDisplayLabel(
     modelOptions.find((option) => option.name === homeModelName) || (homeModelName ? { name: homeModelName } : null),
-    homeModelName || '加载中',
+    homeModelFallback,
   );
   const currentContextWindow = Number(modelState?.contextWindow || ref?.context_window || ref?.contextWindow || 0) || 0;
   const tokenBudget = useMemo(() => normalizeTokenBudget({
@@ -1794,12 +1812,14 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   }, [onToggleSidePanelMaximized, previewScope, previewTabs.length, sid, sidePanelMaximized]);
 
   const closePreviewPanel = useCallback(() => {
+    const confirmMessage = closeVisiblePreviewTabsConfirmationMessage(previewTabs.length);
+    if (confirmMessage && !window.confirm(confirmMessage)) return;
     setPreviewTabState((prev) => closeVisiblePreviewTabs(prev, {
       scopeKey: previewScope,
       sessionId: sid,
     }));
     if (sidePanelMaximized) onToggleSidePanelMaximized?.();
-  }, [onToggleSidePanelMaximized, previewScope, sid, sidePanelMaximized]);
+  }, [onToggleSidePanelMaximized, previewScope, previewTabs.length, sid, sidePanelMaximized]);
 
   // 空态:没选会话
   if (!sid) {

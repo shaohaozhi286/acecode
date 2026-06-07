@@ -143,6 +143,15 @@ bool apply_cwd_override(const std::string& raw, bool foreground) {
     return true;
 }
 
+acecode::PermissionMode permission_mode_from_config(const std::string& mode) {
+    if (mode == "accept-edits" || mode == "acceptEdits") {
+        return acecode::PermissionMode::AcceptEdits;
+    }
+    if (mode == "plan") return acecode::PermissionMode::Plan;
+    if (mode == "yolo") return acecode::PermissionMode::Yolo;
+    return acecode::PermissionMode::Default;
+}
+
 } // namespace
 
 std::string validate_can_start(const WorkerOptions& opts) {
@@ -341,6 +350,7 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     tools.register_tool(acecode::create_skills_list_tool(skill_registry));
     tools.register_tool(acecode::create_skill_view_tool(skill_registry));
     acecode::PermissionManager template_perm;
+    template_perm.set_mode(permission_mode_from_config(cfg_mut.default_permission_mode));
     if (opts.dangerous) template_perm.set_dangerous(true);
 
     acecode::SessionRegistryDeps reg_deps;

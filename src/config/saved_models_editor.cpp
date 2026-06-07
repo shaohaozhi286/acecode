@@ -2,6 +2,7 @@
 #include "saved_models_editor.hpp"
 
 #include "model_provider_registry.hpp"
+#include "request_headers.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -23,6 +24,7 @@ const char* to_string(SavedModelEditError e) {
         case SavedModelEditError::INVALID_CONTEXT_WINDOW: return "INVALID_CONTEXT_WINDOW";
         case SavedModelEditError::INVALID_STREAM_TIMEOUT: return "INVALID_STREAM_TIMEOUT";
         case SavedModelEditError::INVALID_CAPABILITY: return "INVALID_CAPABILITY";
+        case SavedModelEditError::INVALID_REQUEST_HEADER: return "INVALID_REQUEST_HEADER";
         case SavedModelEditError::NOT_FOUND:         return "NOT_FOUND";
         case SavedModelEditError::IN_USE_AS_DEFAULT: return "IN_USE_AS_DEFAULT";
     }
@@ -62,6 +64,13 @@ SavedModelEditError validate_draft_basic(const SavedModelDraft& d) {
         if (!valid_capability_tag(tag)) return SavedModelEditError::INVALID_CAPABILITY;
         if (!seen_capabilities.insert(tag).second) return SavedModelEditError::INVALID_CAPABILITY;
     }
+    if (!d.request_headers.empty()) {
+        if (d.provider != "openai") return SavedModelEditError::INVALID_REQUEST_HEADER;
+        std::string err;
+        if (!validate_request_headers(d.request_headers, err)) {
+            return SavedModelEditError::INVALID_REQUEST_HEADER;
+        }
+    }
     return SavedModelEditError::OK;
 }
 
@@ -82,6 +91,7 @@ ModelProfile to_profile(const SavedModelDraft& d) {
         p.stream_timeout_ms = *d.stream_timeout_ms;
     }
     p.capabilities = d.capabilities;
+    p.request_headers = d.request_headers;
     return p;
 }
 
@@ -121,11 +131,15 @@ SavedModelEditError update_saved_model(AppConfig& cfg,
 }
 
 SavedModelEditError remove_saved_model(AppConfig& cfg, const std::string& name) {
-    if (cfg.default_model_name == name) return SavedModelEditError::IN_USE_AS_DEFAULT;
     auto it = std::find_if(cfg.saved_models.begin(), cfg.saved_models.end(),
                             [&](const ModelProfile& e) { return e.name == name; });
     if (it == cfg.saved_models.end()) return SavedModelEditError::NOT_FOUND;
+    const bool removing_default = cfg.default_model_name == name;
+    if (removing_default && cfg.saved_models.size() > 1) {
+        return SavedModelEditError::IN_USE_AS_DEFAULT;
+    }
     cfg.saved_models.erase(it);
+    if (removing_default) cfg.default_model_name.clear();
     return SavedModelEditError::OK;
 }
 

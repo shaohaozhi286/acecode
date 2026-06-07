@@ -5,8 +5,9 @@
 // 选中后调 onSelect(item) — InputBar 决定是插入文本还是别的。
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { rankCommands } from '../lib/slashCommands.js';
+import { rankCommands, slashCommandKindPresentation } from '../lib/slashCommands.js';
 import { clsx } from '../lib/format.js';
+import { VsIcon } from './Icon.jsx';
 
 const VISIBLE_ROWS = 8;
 const ROW_HEIGHT = 36; // px
@@ -78,7 +79,7 @@ export function SlashDropdown({ items, query, onSelect, onClose }) {
     <div
       role="listbox"
       aria-label="斜杠命令"
-      className="absolute bottom-full left-0 right-0 mb-2 bg-surface border border-border rounded-md ace-shadow-lg overflow-hidden"
+      className="absolute bottom-full left-0 right-0 mb-2 bg-surface border border-border rounded-md ace-shadow-lg overflow-hidden font-sans"
       style={{ zIndex: 60 }}
       onMouseDown={(e) => e.preventDefault()} // 阻止失焦,让 textarea 仍持焦点
     >
@@ -96,22 +97,33 @@ export function SlashDropdown({ items, query, onSelect, onClose }) {
           <div className="px-3 py-3 text-center text-fg-mute text-[12px]">无匹配命令</div>
         ) : ranked.map((it, idx) => {
           const selected = idx === selectedIndex;
+          const presentation = slashCommandKindPresentation(it);
           return (
             <div
               key={it.kind + ':' + it.name}
               ref={(el) => { if (el) rowRefs.current.set(idx, el); else rowRefs.current.delete(idx); }}
               role="option"
               aria-selected={selected}
+              aria-label={`${presentation.label} ${it.name}${it.description ? ' ' + it.description : ''}`}
+              data-command-kind={it.kind}
               onMouseEnter={() => setSelectedIndex(idx)}
               onMouseDown={(e) => { e.preventDefault(); onSelect?.(it); }}
               className={clsx(
-                'flex items-center gap-2 px-3 cursor-pointer text-[13px]',
+                'flex items-center gap-2 px-3 cursor-pointer text-[13px] tracking-normal',
                 selected ? 'bg-surface-hi text-fg' : 'text-fg hover:bg-surface-hi/60',
               )}
               style={{ height: ROW_HEIGHT }}
             >
-              <span className="text-accent font-mono shrink-0 text-[12px]">{it.name}</span>
-              <span className="text-fg-mute truncate text-[12px]">{it.description}</span>
+              <span
+                className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-accent"
+                title={presentation.label}
+                aria-hidden="true"
+                style={{ transform: 'translateY(2px)' }}
+              >
+                <VsIcon name={presentation.icon} size={14} />
+              </span>
+              <span className="min-w-0 max-w-[220px] shrink-0 truncate text-accent font-medium text-[13px]">{it.name}</span>
+              <span className="min-w-0 flex-1 truncate text-fg-mute text-[13px]">{it.description}</span>
             </div>
           );
         })}

@@ -16,6 +16,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -58,6 +59,7 @@ struct ModelProbeRequest {
     std::string provider;
     std::string base_url;
     std::string api_key;
+    std::map<std::string, std::string> request_headers;
 };
 
 std::optional<ModelProbeRequest> parse_model_probe_request(const nlohmann::json& body,

@@ -32,6 +32,7 @@ AppConfig make_cfg_with_two() {
     b.base_url = "http://localhost:1234/v1"; b.api_key = "x";
     b.context_window = 64000;
     b.capabilities = {"vision", "tool_use"};
+    b.request_headers = {{"X-Team", "acecode"}};
     cfg.saved_models.push_back(b);
 
     return cfg;
@@ -51,6 +52,7 @@ TEST(ModelsHandler, ListIncludesAllSavedModels) {
     EXPECT_TRUE(arr[1].contains("base_url"));
     EXPECT_EQ(arr[1]["context_window"], 64000);
     EXPECT_EQ(arr[1]["capabilities"], nlohmann::json::array({"vision", "tool_use"}));
+    EXPECT_EQ(arr[1]["request_headers"]["X-Team"], "acecode");
 }
 
 // 场景:旧配置里遗留 codex saved model 时,Web 模型列表不暴露已屏蔽 provider。
@@ -115,6 +117,17 @@ TEST(ModelsHandler, ModelStateToJsonIncludesCurrentSessionFields) {
     EXPECT_EQ(j["context_window"], 400000);
 }
 
+// 场景: no-model session 也要序列化为空字段,前端用它显示“未配置模型”。
+TEST(ModelsHandler, ModelStateToJsonAllowsEmptyModelState) {
+    SessionModelState state;
+
+    auto j = model_state_to_json(state);
+    EXPECT_EQ(j["name"], "");
+    EXPECT_EQ(j["provider"], "");
+    EXPECT_EQ(j["model"], "");
+    EXPECT_EQ(j["context_window"], 0);
+}
+
 // ------------------- 增删改 helper 测试 -------------------
 
 #include "config/saved_models_editor.hpp"
@@ -145,6 +158,7 @@ TEST(ModelsHandler, ErrorToHttpStatusMapping) {
     EXPECT_EQ(http_status_for_edit_error(SavedModelEditError::MISSING_BASE_URL), 400);
     EXPECT_EQ(http_status_for_edit_error(SavedModelEditError::INVALID_CONTEXT_WINDOW), 400);
     EXPECT_EQ(http_status_for_edit_error(SavedModelEditError::INVALID_CAPABILITY), 400);
+    EXPECT_EQ(http_status_for_edit_error(SavedModelEditError::INVALID_REQUEST_HEADER), 400);
 }
 
 // 触发场景:POST/PUT 成功后把 ModelProfile 序列化回去给前端。api_key 是
@@ -188,6 +202,24 @@ TEST(ModelsHandler, ProfileToSafeJsonIncludesCapabilities) {
     p.capabilities = {"vision", "tool_use"};
     auto j = profile_to_safe_json(p);
     EXPECT_EQ(j["capabilities"], nlohmann::json::array({"vision", "tool_use"}));
+    EXPECT_FALSE(j.contains("api_key"));
+}
+
+// 触发场景:request_headers 是可编辑模板,响应可返回模板但不能解析环境变量。
+TEST(ModelsHandler, ProfileToSafeJsonIncludesRequestHeaders) {
+    ModelProfile p;
+    p.name = "gateway";
+    p.provider = "openai";
+    p.model = "llama-3";
+    p.base_url = "http://localhost/v1";
+    p.api_key = "sk-secret";
+    p.request_headers = {
+        {"Authorization", "Bearer {env:ACE_TOKEN}"},
+        {"X-Team", "acecode"}
+    };
+    auto j = profile_to_safe_json(p);
+    EXPECT_EQ(j["request_headers"]["Authorization"], "Bearer {env:ACE_TOKEN}");
+    EXPECT_EQ(j["request_headers"]["X-Team"], "acecode");
     EXPECT_FALSE(j.contains("api_key"));
 }
 
@@ -255,6 +287,10 @@ TEST(ModelsHandler, ParseDraftAcceptsFullBody) {
         {"api_key", "sk-x"},
         {"context_window", 64000},
         {"capabilities", nlohmann::json::array({"vision", "tool_use"})},
+        {"request_headers", {
+            {"Authorization", "Bearer {env:ACE_TOKEN}"},
+            {"X-Team", "acecode"}
+        }},
     };
     std::string err;
     auto d = parse_model_draft(body, err);
@@ -267,7 +303,27 @@ TEST(ModelsHandler, ParseDraftAcceptsFullBody) {
     ASSERT_TRUE(d->context_window.has_value());
     EXPECT_EQ(*d->context_window, 64000);
     EXPECT_EQ(d->capabilities, (std::vector<std::string>{"vision", "tool_use"}));
+    EXPECT_EQ(d->request_headers.at("Authorization"), "Bearer {env:ACE_TOKEN}");
+    EXPECT_EQ(d->request_headers.at("X-Team"), "acecode");
     EXPECT_TRUE(err.empty());
+}
+
+// 触发场景:request_headers 值必须是字符串模板。
+TEST(ModelsHandler, ParseDraftRejectsNonStringRequestHeaderValue) {
+    nlohmann::json body = {
+        {"name", "local"},
+        {"provider", "openai"},
+        {"model", "llama-3"},
+        {"base_url", "http://localhost/v1"},
+        {"api_key", "sk-x"},
+        {"request_headers", {
+            {"X-Team", 42}
+        }},
+    };
+    std::string err;
+    auto d = parse_model_draft(body, err);
+    EXPECT_FALSE(d.has_value());
+    EXPECT_NE(err.find("request_headers"), std::string::npos);
 }
 
 TEST(ModelsHandler, ParseOpenAiModelIdsAcceptsStandardDataArray) {
@@ -324,12 +380,18 @@ TEST(ModelsHandler, ParseProbeRequestValidatesProviderAndBaseUrl) {
     code.clear();
     err.clear();
     auto ok = parse_model_probe_request(
-        nlohmann::json{{"provider", "openai"}, {"base_url", "http://localhost/v1"}, {"api_key", "sk"}},
+        nlohmann::json{
+            {"provider", "openai"},
+            {"base_url", "http://localhost/v1"},
+            {"api_key", "sk"},
+            {"request_headers", {{"X-Probe", "acecode"}}}
+        },
         code,
         err);
     ASSERT_TRUE(ok.has_value());
     EXPECT_EQ(ok->base_url, "http://localhost/v1");
     EXPECT_EQ(ok->api_key, "sk");
+    EXPECT_EQ(ok->request_headers.at("X-Probe"), "acecode");
 
     code.clear();
     err.clear();
@@ -340,4 +402,35 @@ TEST(ModelsHandler, ParseProbeRequestValidatesProviderAndBaseUrl) {
     ASSERT_TRUE(copilot.has_value());
     EXPECT_EQ(copilot->provider, "copilot");
     EXPECT_TRUE(copilot->base_url.empty());
+}
+
+TEST(ModelsHandler, ParseProbeRequestRejectsRequestHeadersForCopilot) {
+    std::string code;
+    std::string err;
+    auto rejected = parse_model_probe_request(
+        nlohmann::json{
+            {"provider", "copilot"},
+            {"request_headers", {{"X-Team", "acecode"}}}
+        },
+        code,
+        err);
+    EXPECT_FALSE(rejected.has_value());
+    EXPECT_EQ(code, "INVALID_REQUEST_HEADER");
+    EXPECT_NE(err.find("request_headers"), std::string::npos);
+}
+
+TEST(ModelsHandler, ParseProbeRequestRejectsContentTypeRequestHeader) {
+    std::string code;
+    std::string err;
+    auto rejected = parse_model_probe_request(
+        nlohmann::json{
+            {"provider", "openai"},
+            {"base_url", "http://localhost/v1"},
+            {"request_headers", {{"Content-Type", "text/plain"}}}
+        },
+        code,
+        err);
+    EXPECT_FALSE(rejected.has_value());
+    EXPECT_EQ(code, "INVALID_REQUEST_HEADER");
+    EXPECT_NE(err.find("Content-Type"), std::string::npos) << err;
 }

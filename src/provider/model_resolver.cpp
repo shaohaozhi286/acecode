@@ -124,10 +124,8 @@ ModelProfile resolve_effective_model(const AppConfig& cfg,
         return apply_openai_runtime_defaults(cfg, *fallback);
     }
 
-    ModelProfile legacy = legacy_model_profile_from_config(cfg);
-    LOG_WARN("[model_resolver] no saved_models configured; using legacy " +
-             legacy.provider + "/" + legacy.model + " profile '" + legacy.name + "'");
-    return apply_openai_runtime_defaults(cfg, legacy);
+    LOG_WARN("[model_resolver] no saved model profiles configured");
+    return {};
 }
 
 } // namespace acecode

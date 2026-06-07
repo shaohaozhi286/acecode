@@ -41,6 +41,72 @@ function isValidCapabilityTag(tag) {
   return typeof tag === 'string' && tag.length > 0 && !/[\u0000-\u001f\u007f]/.test(tag);
 }
 
+const HEADER_NAME_RE = /^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$/;
+const ENV_NAME_RE = /^[A-Za-z0-9_]+$/;
+
+function hasControlChars(value) {
+  return /[\u0000-\u001f\u007f]/.test(value);
+}
+
+function validateHeaderTemplate(value) {
+  let pos = 0;
+  while (pos < value.length) {
+    const open = value.indexOf('{env:', pos);
+    const closeBeforeOpen = value.indexOf('}', pos);
+    if (open === -1) return closeBeforeOpen === -1;
+    if (closeBeforeOpen !== -1 && closeBeforeOpen < open) return false;
+    const close = value.indexOf('}', open + 5);
+    if (close === -1) return false;
+    const name = value.slice(open + 5, close);
+    if (!ENV_NAME_RE.test(name)) return false;
+    pos = close + 1;
+  }
+  return true;
+}
+
+export function validateRequestHeaders(headers, provider = 'openai') {
+  if (headers === undefined || headers === null) return { ok: true };
+  if (typeof headers !== 'object' || Array.isArray(headers)) {
+    return { ok: false, code: 'INVALID_REQUEST_HEADER' };
+  }
+  const entries = Object.entries(headers);
+  if (entries.length === 0) return { ok: true };
+  if (provider !== 'openai') return { ok: false, code: 'INVALID_REQUEST_HEADER' };
+
+  const seen = new Set();
+  for (const [name, value] of entries) {
+    if (typeof value !== 'string') return { ok: false, code: 'INVALID_REQUEST_HEADER' };
+    if (!name || !HEADER_NAME_RE.test(name)) return { ok: false, code: 'INVALID_REQUEST_HEADER' };
+    const lower = name.toLowerCase();
+    if (seen.has(lower)) return { ok: false, code: 'INVALID_REQUEST_HEADER' };
+    seen.add(lower);
+    if (lower === 'content-type') return { ok: false, code: 'INVALID_REQUEST_HEADER' };
+    if (hasControlChars(value)) return { ok: false, code: 'INVALID_REQUEST_HEADER' };
+    if (!validateHeaderTemplate(value)) return { ok: false, code: 'INVALID_REQUEST_HEADER' };
+  }
+  return { ok: true };
+}
+
+export function parseRequestHeadersJson(value) {
+  const raw = String(value ?? '').trim();
+  if (!raw) return { ok: true, headers: undefined };
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { ok: false, code: 'INVALID_REQUEST_HEADER' };
+  }
+  const valid = validateRequestHeaders(parsed, 'openai');
+  if (!valid.ok) return valid;
+  return { ok: true, headers: parsed };
+}
+
+export function formatRequestHeadersJson(headers) {
+  if (!headers || typeof headers !== 'object' || Array.isArray(headers)) return '';
+  if (Object.keys(headers).length === 0) return '';
+  return JSON.stringify(headers, null, 2);
+}
+
 export function normalizeModelCapabilities(capabilities) {
   if (!Array.isArray(capabilities)) return [];
   const seen = new Set();
@@ -55,7 +121,7 @@ export function normalizeModelCapabilities(capabilities) {
 
 export function validateModelDraft(draft) {
   if (!draft || typeof draft !== 'object') return { ok: false, code: 'BAD_REQUEST' };
-  const { name, provider, model, base_url, api_key, context_window, capabilities } = draft;
+  const { name, provider, model, base_url, api_key, context_window, capabilities, request_headers } = draft;
   if (!name || typeof name !== 'string' || name.length === 0)
     return { ok: false, code: 'INVALID_NAME' };
   if (name.startsWith('(')) return { ok: false, code: 'RESERVED_NAME' };
@@ -79,6 +145,8 @@ export function validateModelDraft(draft) {
       return { ok: false, code: 'INVALID_CAPABILITY' };
     }
   }
+  const requestHeaders = validateRequestHeaders(request_headers, provider);
+  if (!requestHeaders.ok) return requestHeaders;
   return { ok: true };
 }
 
@@ -141,6 +209,14 @@ export function filterSavedModels(models, query) {
     ].filter(Boolean).join(' ').toLowerCase();
     return terms.every((term) => haystack.includes(term));
   });
+}
+
+export function canDeleteSavedModel({ models = [], defaultName = '', name = '', busy = false } = {}) {
+  const target = String(name || '');
+  if (!target || busy) return false;
+  const list = Array.isArray(models) ? models : [];
+  if (target !== String(defaultName || '')) return true;
+  return list.length === 1 && list[0]?.name === target;
 }
 
 export function parseContextWindowK(value) {

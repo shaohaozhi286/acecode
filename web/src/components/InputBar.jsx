@@ -15,7 +15,14 @@ import { VsIcon } from './Icon.jsx';
 import { ImageLightbox } from './ImageLightbox.jsx';
 import { SlashDropdown } from './SlashDropdown.jsx';
 import { useSlashCommands } from './SlashCommandsContext.jsx';
-import { deleteLeadingCommandBlock, parseLeadingCommand } from '../lib/slashCommands.js';
+import {
+  deleteLeadingCommandBlock,
+  moveAcrossLeadingCommandBlock,
+  normalizeLeadingCommandSelection,
+  parseLeadingCommand,
+  resolveLeadingSlashCommand,
+  slashCommandKindPresentation,
+} from '../lib/slashCommands.js';
 import { getNextInputHistoryPointer, shouldNavigateInputHistory } from '../lib/inputHistoryNavigation.js';
 import { filesFromClipboardEvent, filesFromTransfer, hasFileTransfer } from '../lib/composerFileTransfer.js';
 import {
@@ -324,11 +331,59 @@ export const InputBar = forwardRef(function InputBar({
   };
 
   const leading = useMemo(() => parseLeadingCommand(value, knownNames), [value, knownNames]);
-  const showChip = leading.name != null;
+  const leadingCommand = useMemo(() => resolveLeadingSlashCommand(value, commands), [value, commands]);
+  const showChip = leadingCommand != null;
+
+  const setTextareaSelection = useCallback((selectionStart, selectionEnd) => {
+    const el = ta.current;
+    if (!el) return;
+    el.setSelectionRange(selectionStart, selectionEnd);
+  }, []);
+
+  const normalizeCommandSelection = useCallback((target = ta.current) => {
+    if (!showChip || !target) return;
+    const edit = normalizeLeadingCommandSelection(
+      value,
+      leading,
+      target.selectionStart,
+      target.selectionEnd,
+    );
+    if (!edit) return;
+    target.setSelectionRange(edit.selectionStart, edit.selectionEnd);
+  }, [leading, showChip, value]);
+
+  const normalizeCommandSelectionSoon = useCallback(() => {
+    requestAnimationFrame(() => normalizeCommandSelection());
+  }, [normalizeCommandSelection]);
 
   const onKey = (e) => {
     // 下拉打开时,Enter / Tab / Esc / 方向键 由 SlashDropdown 在捕获阶段处理。
     // 这里只处理常规情况。
+    if (showChip) {
+      const boundaryEdit = normalizeLeadingCommandSelection(
+        value,
+        leading,
+        e.currentTarget.selectionStart,
+        e.currentTarget.selectionEnd,
+      );
+      if (boundaryEdit) {
+        e.currentTarget.setSelectionRange(boundaryEdit.selectionStart, boundaryEdit.selectionEnd);
+      }
+    }
+    if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && showChip && !e.shiftKey) {
+      const move = moveAcrossLeadingCommandBlock(
+        value,
+        leading,
+        e.currentTarget.selectionStart,
+        e.currentTarget.selectionEnd,
+        e.key === 'ArrowLeft' ? 'backward' : 'forward',
+      );
+      if (move) {
+        e.preventDefault();
+        setTextareaSelection(move.selectionStart, move.selectionEnd);
+        return;
+      }
+    }
     if ((e.key === 'Backspace' || e.key === 'Delete') && showChip) {
       const edit = deleteLeadingCommandBlock(
         value,
@@ -398,8 +453,15 @@ export const InputBar = forwardRef(function InputBar({
     : (isHero ? 'right-14' : 'right-12');
 
   // 命令 token overlay:首段是已知命令时,textarea 文字透明,由 overlay 负责着色渲染。
-  const chipText = showChip ? value.slice(0, leading.headLength) : '';
-  const restText = showChip ? value.slice(leading.headLength) : '';
+  // SVG 图标是额外视觉层,textarea 的真实 value 仍保持普通 "/command ..." 文本。
+  const chipText = showChip ? leadingCommand.name : '';
+  const restText = showChip ? leadingCommand.rest : '';
+  const chipPresentation = showChip ? slashCommandKindPresentation(leadingCommand) : null;
+  const slashChipStyleVars = showChip
+    ? {
+        '--ace-slash-base-left': isHero ? '16px' : '12px',
+      }
+    : null;
 
   return (
     <div className={clsx(
@@ -474,13 +536,23 @@ export const InputBar = forwardRef(function InputBar({
         {showChip && (
           <div
             aria-hidden="true"
+            data-slash-chip-kind={leadingCommand.kind}
+            data-slash-chip-icon={chipPresentation?.icon || ''}
             className={clsx(
               'absolute inset-0 pointer-events-none whitespace-pre-wrap break-words leading-[20px] font-sans text-fg overflow-hidden',
               isHero ? 'px-4 pt-3 pb-11 text-[14px]' : 'px-3 pt-2 pb-10 text-[13px]',
               inputRightPadding,
             )}
           >
-            <span className="ace-slash-chip">{chipText}</span>
+            <span
+              className="ace-slash-chip-unit"
+              title={chipPresentation?.label || ''}
+            >
+              <span className="ace-slash-chip-icon">
+                <VsIcon name={chipPresentation?.icon || 'lightbulb'} size={14} />
+              </span>
+              <span className="ace-slash-chip">{chipText}</span>
+            </span>
             <span>{restText}</span>
           </div>
         )}
@@ -490,6 +562,10 @@ export const InputBar = forwardRef(function InputBar({
           value={value}
           onChange={handleChange}
           onKeyDown={onKey}
+          onKeyUp={normalizeCommandSelectionSoon}
+          onSelect={(event) => normalizeCommandSelection(event.currentTarget)}
+          onClick={normalizeCommandSelectionSoon}
+          onMouseUp={normalizeCommandSelectionSoon}
           onPaste={handlePaste}
           onCompositionStart={handleCompositionStart}
           onCompositionEnd={handleCompositionEnd}
@@ -498,12 +574,14 @@ export const InputBar = forwardRef(function InputBar({
           className={clsx(
             'relative w-full resize-none bg-transparent border-0 outline-none leading-[20px] font-sans placeholder:text-fg-mute disabled:opacity-50',
             showChip ? 'text-transparent' : 'text-fg',
+            showChip && 'ace-slash-input-with-icon',
             isHero ? 'px-4 pt-3 pb-11 text-[14px]' : 'px-3 pt-2 pb-10 text-[13px]',
             inputRightPadding,
           )}
           style={{
             height: LINE_HEIGHT + (isHero ? 56 : 48),
             caretColor: showChip ? 'var(--ace-fg)' : undefined,
+            ...(slashChipStyleVars || {}),
           }}
         />
         <div className={clsx("absolute left-1.5 flex items-center gap-1 min-w-0 overflow-visible", toolbarRightInset, isHero ? "bottom-2.5" : "bottom-1")}>

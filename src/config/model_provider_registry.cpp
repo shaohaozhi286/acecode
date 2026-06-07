@@ -7,7 +7,7 @@ bool is_known_model_provider(const std::string& provider) {
 }
 
 bool is_runtime_model_provider_enabled(const std::string& provider) {
-    return provider != "codex";
+    return provider == "openai" || provider == "copilot";
 }
 
 const char* disabled_model_provider_reason(const std::string& provider) {

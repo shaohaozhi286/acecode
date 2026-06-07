@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <map>
 #include <string>
 
 namespace acecode {
@@ -14,7 +15,8 @@ public:
     OpenAiCompatProvider(const std::string& base_url,
                          const std::string& api_key,
                          const std::string& model,
-                         int stream_timeout_ms = OpenAiConfig::kDefaultStreamTimeoutMs);
+                         int stream_timeout_ms = OpenAiConfig::kDefaultStreamTimeoutMs,
+                         std::map<std::string, std::string> request_headers = {});
 
     ChatResponse chat(
         const std::vector<ChatMessage>& messages,
@@ -50,12 +52,14 @@ public:
     // 对应 openspec/changes/model-profiles 任务 4.4 与 design.md D4。
     void reconfigure(const std::string& base_url,
                      const std::string& api_key,
-                     int stream_timeout_ms = OpenAiConfig::kDefaultStreamTimeoutMs) {
+                     int stream_timeout_ms = OpenAiConfig::kDefaultStreamTimeoutMs,
+                     std::map<std::string, std::string> request_headers = {}) {
         base_url_ = normalize_base_url(base_url);
         api_key_ = api_key;
         stream_timeout_ms_ = stream_timeout_ms > 0
             ? stream_timeout_ms
             : OpenAiConfig::kDefaultStreamTimeoutMs;
+        request_headers_ = std::move(request_headers);
     }
 
     // 容忍用户配置 base_url 时多打/少打尾部斜杠:统一裁掉所有尾部 '/',
@@ -96,6 +100,7 @@ protected:
     std::string base_url_;
     std::string api_key_;
     std::string model_;
+    std::map<std::string, std::string> request_headers_;
     int stream_timeout_ms_ = OpenAiConfig::kDefaultStreamTimeoutMs;
     bool model_has_vision_ = true;             // fail-open,见 set_vision_routing
     bool any_vision_model_available_ = false;

@@ -12,6 +12,7 @@ const TABLE = {
   INVALID_API_KEY:   'OpenAI 类的 API key 不能为空',
   INVALID_CONTEXT_WINDOW: '上下文窗口必须是大于 0 的数字',
   INVALID_CAPABILITY: '模型能力标签无效',
+  INVALID_REQUEST_HEADER: '自定义请求头 JSON 无效',
   NOT_FOUND:         '该模型已不存在,请刷新',
   IN_USE_AS_DEFAULT: '该条是当前默认,先去改默认再操作',
   PERSIST_FAILED:    '配置写盘失败',

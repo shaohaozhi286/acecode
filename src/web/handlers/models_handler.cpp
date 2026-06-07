@@ -1,6 +1,7 @@
 #include "models_handler.hpp"
 
 #include "../../config/model_provider_registry.hpp"
+#include "../../config/request_headers.hpp"
 
 #include <algorithm>
 #include <set>
@@ -27,6 +28,9 @@ nlohmann::json entry_to_json(const ModelProfile& entry) {
     }
     if (!entry.capabilities.empty()) {
         o["capabilities"] = entry.capabilities;
+    }
+    if (!entry.request_headers.empty()) {
+        o["request_headers"] = entry.request_headers;
     }
     return o;
 }
@@ -93,6 +97,9 @@ nlohmann::json profile_to_safe_json(const ModelProfile& entry) {
     if (!entry.capabilities.empty()) {
         o["capabilities"] = entry.capabilities;
     }
+    if (!entry.request_headers.empty()) {
+        o["request_headers"] = entry.request_headers;
+    }
     // api_key 永不输出 — 安全契约
     return o;
 }
@@ -143,6 +150,13 @@ std::optional<SavedModelDraft> parse_model_draft(const nlohmann::json& body,
             d.capabilities.push_back(std::move(tag));
         }
     }
+    if (body.contains("request_headers")) {
+        auto parsed = parse_request_headers_json(body["request_headers"],
+                                                 "model draft",
+                                                 err);
+        if (!parsed.has_value()) return std::nullopt;
+        d.request_headers = std::move(*parsed);
+    }
     if (!err.empty()) return std::nullopt;
     return d;
 }
@@ -165,6 +179,16 @@ std::optional<ModelProbeRequest> parse_model_probe_request(const nlohmann::json&
     request.provider = string_value("provider");
     request.base_url = string_value("base_url");
     request.api_key = string_value("api_key");
+    if (body.contains("request_headers")) {
+        auto parsed = parse_request_headers_json(body["request_headers"],
+                                                 "model probe",
+                                                 err);
+        if (!parsed.has_value()) {
+            err_code = "BAD_REQUEST";
+            return std::nullopt;
+        }
+        request.request_headers = std::move(*parsed);
+    }
 
     if (request.provider.empty()) request.provider = "openai";
     if (request.provider != "openai" && request.provider != "copilot") {
@@ -176,6 +200,17 @@ std::optional<ModelProbeRequest> parse_model_probe_request(const nlohmann::json&
         err_code = "MISSING_BASE_URL";
         err = "base_url is required";
         return std::nullopt;
+    }
+    if (!request.request_headers.empty()) {
+        if (request.provider != "openai") {
+            err_code = "INVALID_REQUEST_HEADER";
+            err = "request_headers are only supported for provider=openai";
+            return std::nullopt;
+        }
+        if (!validate_request_headers(request.request_headers, err)) {
+            err_code = "INVALID_REQUEST_HEADER";
+            return std::nullopt;
+        }
     }
     return request;
 }

@@ -39,13 +39,14 @@ bool is_transcript_only_message(const ChatMessage& msg) {
 std::pair<std::string, std::string>
 current_provider_model(const SessionRegistryDeps& deps,
                        const std::string& fallback_model) {
+    (void)fallback_model;
     if (deps.provider_accessor) {
         auto provider = deps.provider_accessor();
         if (provider) {
             return {provider->name(), provider->model()};
         }
     }
-    return {"daemon", fallback_model.empty() ? "default" : fallback_model};
+    return {"", ""};
 }
 
 const ModelProfile* find_profile_by_name(const AppConfig& cfg,
@@ -557,6 +558,7 @@ SessionRegistry::make_entry_locked(const std::string& id,
         entry->sm->set_pre_plan_permission_mode(
             PermissionManager::mode_name(entry->perm->pre_plan_mode()),
             /*persist_immediately=*/false);
+        entry->sm->ensure_plan_file_path();
     }
 
     // AgentLoop: 给一个空 callbacks(daemon 全走 events_)
@@ -573,6 +575,8 @@ SessionRegistry::make_entry_locked(const std::string& id,
         std::move(empty_cb),
         entry->cwd,
         *entry->perm);
+    entry->loop->set_no_model_config_prompt(
+        u8"请先配置大模型服务。请打开 设置 > 模型 添加模型。");
 
     if (deps_.config) {
         entry->loop->set_context_window(entry->model_state.context_window > 0
@@ -789,6 +793,20 @@ bool SessionRegistry::set_permission_mode(const std::string& id, PermissionMode 
         it->second->prompter->resolve_all(PermissionDecisionChoice::Allow);
     }
     return true;
+}
+
+PermissionMode SessionRegistry::default_permission_mode() const {
+    if (!deps_.template_permissions) return PermissionMode::Default;
+    return deps_.template_permissions->mode();
+}
+
+void SessionRegistry::set_default_permission_mode(PermissionMode mode) {
+    if (!deps_.template_permissions) return;
+    if (mode == PermissionMode::Plan) {
+        deps_.template_permissions->set_mode(PermissionMode::Default);
+    }
+    deps_.template_permissions->set_mode(mode);
+    deps_.template_permissions->clear_session_allows();
 }
 
 bool SessionRegistry::switch_model(const std::string& id,

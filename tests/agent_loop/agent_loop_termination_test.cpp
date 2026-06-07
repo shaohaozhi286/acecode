@@ -30,6 +30,7 @@
 #include "session/turn_timing.hpp"
 
 #include <nlohmann/json.hpp>
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
@@ -39,6 +40,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 using acecode::AgentLoop;
@@ -172,6 +174,12 @@ public:
         loop_->set_agent_loop_config(cfg);
     }
 
+    void set_no_model_prompt(std::string prompt) {
+        loop_->set_no_model_config_prompt(std::move(prompt));
+    }
+
+    void clear_provider() { provider_.reset(); }
+
     void set_stub_latency_ms(int ms) { provider_->set_latency_ms(ms); }
 
     void push_text(std::string s) { provider_->push_text(std::move(s)); }
@@ -220,7 +228,7 @@ public:
 
     void abort() { loop_->abort(); }
 
-    int turn_count() const { return provider_->turn_count(); }
+    int turn_count() const { return provider_ ? provider_->turn_count() : 0; }
 
     std::vector<ChatMessage> request_messages_for_turn(int zero_based_index) const {
         return provider_->messages_for_turn(zero_based_index);
@@ -723,6 +731,25 @@ TEST(AgentLoopTermination, ProviderErrorDoesNotCreateEmptyAssistantAndNextTurnWo
     ASSERT_TRUE(h.submit_and_wait("second"));
     EXPECT_EQ(h.turn_count(), 2);
     EXPECT_EQ(h.count_by_role("assistant"), 1);
+}
+
+TEST(AgentLoopTermination, NullProviderPromptsUserToConfigureModel) {
+    AgentLoopHarness h;
+    h.set_no_model_prompt(u8"请先配置大模型服务。TUI 可运行 acecode configure 或使用 /model add 添加模型。");
+    h.clear_provider();
+
+    ASSERT_TRUE(h.submit_and_wait("hello"));
+
+    const auto messages = h.snapshot_messages();
+    auto it = std::find_if(messages.begin(), messages.end(), [](const auto& msg) {
+        return msg.role == "error" &&
+               msg.content.find(u8"请先配置大模型服务") != std::string::npos;
+    });
+    EXPECT_NE(it, messages.end());
+    ASSERT_NE(it, messages.end());
+    EXPECT_NE(it->content.find("TUI"), std::string::npos);
+    EXPECT_EQ(it->content.find(u8"设置 > 模型"), std::string::npos);
+    EXPECT_EQ(h.turn_count(), 0);
 }
 
 TEST(AgentLoopTermination, ProviderErrorAfterToolCallDoesNotExecuteOrPersistToolCall) {

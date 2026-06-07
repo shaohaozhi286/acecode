@@ -19,15 +19,22 @@ std::shared_ptr<LlmProvider> create_provider_from_entry(const ModelProfile& entr
             entry.base_url,
             entry.api_key,
             entry.model,
-            entry.stream_timeout_ms.value_or(OpenAiConfig::kDefaultStreamTimeoutMs)
+            entry.stream_timeout_ms.value_or(OpenAiConfig::kDefaultStreamTimeoutMs),
+            entry.request_headers
         );
+    } else if (entry.provider == "copilot") {
+        provider = std::make_shared<CopilotProvider>(entry.model);
     } else if (entry.provider == "codex") {
         LOG_WARN(std::string("[provider_factory] ") +
                  disabled_model_provider_reason(entry.provider));
         return nullptr;
     } else {
-        // 默认走 copilot —— 与旧 create_provider 的 else 分支行为一致。
-        provider = std::make_shared<CopilotProvider>(entry.model);
+        if (entry.provider.empty()) {
+            LOG_WARN("[provider_factory] no model provider configured");
+        } else {
+            LOG_WARN("[provider_factory] unknown model provider '" + entry.provider + "'");
+        }
+        return nullptr;
     }
 
     // 能力路由上下文(route-attachments-by-capability D5)。OpenAI 与 Copilot

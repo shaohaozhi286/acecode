@@ -3,6 +3,7 @@ import {
   activePreviewTab,
   closePreviewTab,
   closeVisiblePreviewTabs,
+  closeVisiblePreviewTabsConfirmationMessage,
   openFileTab,
   openSessionChangesTab,
   updateSessionChangesTab,
@@ -115,6 +116,15 @@ run('closeVisiblePreviewTabs clears current visible scope and session', () => {
   state = closeVisiblePreviewTabs(state, { scopeKey: 'workspace-a', sessionId: 's1' });
   assert.equal(visiblePreviewTabs(state, { scopeKey: 'workspace-a', sessionId: 's1' }).length, 0);
   assert.equal(visiblePreviewTabs(state, { scopeKey: 'workspace-b', sessionId: 's2' }).length, 1);
+});
+
+run('closeVisiblePreviewTabsConfirmationMessage warns about all visible tabs', () => {
+  assert.equal(
+    closeVisiblePreviewTabsConfirmationMessage(3),
+    '关闭预览面板会关闭当前预览区域的全部 3 个标签页。是否继续？',
+  );
+  assert.equal(closeVisiblePreviewTabsConfirmationMessage(0), '');
+  assert.equal(closeVisiblePreviewTabsConfirmationMessage(-1), '');
 });
 
 run('updateSessionChangesTab updates count without replacing expanded file', () => {

@@ -32,6 +32,9 @@ namespace acecode {
 
 namespace {
 
+constexpr const char* kDefaultNoModelConfiguredPrompt =
+    u8"请先配置大模型服务。";
+
 std::int64_t now_epoch_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
@@ -330,6 +333,7 @@ AgentLoop::AgentLoop(ProviderAccessor provider_accessor, ToolExecutor& tools,
     , cwd_(cwd)
     , permissions_(permissions)
     , path_validator_(cwd, permissions.is_dangerous())
+    , no_model_config_prompt_(kDefaultNoModelConfiguredPrompt)
 {
     worker_thread_ = std::thread(&AgentLoop::worker_main, this);
 }
@@ -1237,7 +1241,12 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
         if (!provider_snapshot) {
             LOG_ERROR("provider_accessor returned null; aborting turn");
             turn_timing_status = "error";
-            dispatch_message("error", "[Error] provider unavailable", false);
+            dispatch_message(
+                "error",
+                no_model_config_prompt_.empty()
+                    ? kDefaultNoModelConfiguredPrompt
+                    : no_model_config_prompt_,
+                false);
             break;
         }
         try {

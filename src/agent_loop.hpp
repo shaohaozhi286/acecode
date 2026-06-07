@@ -20,6 +20,7 @@
 #include <condition_variable>
 #include <queue>
 #include <map>
+#include <utility>
 
 namespace acecode {
 
@@ -177,6 +178,9 @@ public:
     const std::string& cwd() const { return cwd_; }
 
     void set_context_window(int cw) { context_window_ = cw; }
+    void set_no_model_config_prompt(std::string prompt) {
+        no_model_config_prompt_ = std::move(prompt);
+    }
 
     // Install / update the agent-loop termination policy. Called once from
     // main.cpp at startup (and could be called again if config reloads).
@@ -276,6 +280,7 @@ private:
     PermissionManager& permissions_;
     PathValidator path_validator_;
     int context_window_ = 128000;
+    std::string no_model_config_prompt_;
     // agent_loop termination policy. Fresh defaults come from AgentLoopConfig
     // until set_agent_loop_config is called from main.cpp.
     AgentLoopConfig loop_cfg_;

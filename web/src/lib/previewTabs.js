@@ -201,6 +201,12 @@ export function closeVisiblePreviewTabs(state, { scopeKey = '', sessionId = '' }
   };
 }
 
+export function closeVisiblePreviewTabsConfirmationMessage(tabCount = 0) {
+  const count = Number(tabCount);
+  if (!Number.isFinite(count) || count <= 0) return '';
+  return `关闭预览面板会关闭当前预览区域的全部 ${count} 个标签页。是否继续？`;
+}
+
 export function activatePreviewTab(state, { scopeKey = '', sessionId = '', tabKey = '' } = {}) {
   if (!tabKey) return state || {};
   const source = state && typeof state === 'object' ? state : {};

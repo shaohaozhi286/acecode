@@ -17,11 +17,14 @@ import {
   DEFAULT_MODEL_CAPABILITIES,
   MODEL_CAPABILITY_OPTIONS,
   buildModelDraftsFromSelection,
+  canDeleteSavedModel,
   filterSavedModels,
   filterModelIds,
+  formatRequestHeadersJson,
   formatContextWindowK,
   normalizeModelCapabilities,
   parseContextWindowK,
+  parseRequestHeadersJson,
   splitModelIds,
   validateModelDraft,
 } from '../lib/modelManager.js';
@@ -152,7 +155,7 @@ export function SettingsPage({
 }
 
 // ─── 常规 ──────────────────────────────────────────────────────────────────
-// 真实接入:权限模式(api.getSessionPermissionMode / setSessionPermissionMode)、
+// 真实接入:默认权限模式(api.getDefaultPermissionMode / setDefaultPermissionMode)、
 // Daemon 状态(/api/health 透传 health prop)。其余字段(工作模式 / 默认打开目标 /
 // 最大轮次)目前是 UI 占位,本地 state。
 
@@ -164,14 +167,9 @@ function SectionGeneral({ health, activeSessionId = '', onPermissionModeChanged 
   const [openTarget, setOpenTarget] = useState('vscode');
 
   useEffect(() => {
-    if (!activeSessionId) {
-      setPermMode('default');
-      setPermBusy(false);
-      return undefined;
-    }
     let cancelled = false;
     setPermBusy(false);
-    api.getSessionPermissionMode(activeSessionId)
+    api.getDefaultPermissionMode()
       .then((state) => {
         if (!cancelled) setPermMode(normalizePermissionMode(state?.mode));
       })
@@ -179,23 +177,31 @@ function SectionGeneral({ health, activeSessionId = '', onPermissionModeChanged 
         if (!cancelled) setPermMode('default');
       });
     return () => { cancelled = true; };
-  }, [activeSessionId]);
+  }, []);
 
   const switchPermissionMode = async (mode) => {
     const nextMode = normalizePermissionMode(mode);
     const previousMode = normalizePermissionMode(permMode);
-    if (!activeSessionId || permBusy || nextMode === previousMode) return;
+    if (permBusy || nextMode === previousMode) return;
     setPermMode(nextMode);
     setPermBusy(true);
     try {
-      const state = await api.setSessionPermissionMode(activeSessionId, nextMode);
+      const state = await api.setDefaultPermissionMode(nextMode);
       const confirmedMode = normalizePermissionMode(state?.mode || nextMode);
       setPermMode(confirmedMode);
-      onPermissionModeChanged?.({ sessionId: activeSessionId, mode: confirmedMode });
-      toast({ kind: 'ok', text: '权限模式已更新' });
+      if (activeSessionId) {
+        try {
+          await api.setSessionPermissionMode(activeSessionId, confirmedMode);
+          onPermissionModeChanged?.({ sessionId: activeSessionId, mode: confirmedMode });
+        } catch (syncError) {
+          toast({ kind: 'err', text: '默认权限模式已更新,当前会话同步失败:' + (syncError?.message || '') });
+          return;
+        }
+      }
+      toast({ kind: 'ok', text: '默认权限模式已更新' });
     } catch (e) {
       setPermMode(previousMode);
-      toast({ kind: 'err', text: '权限模式更新失败:' + (e?.message || '') });
+      toast({ kind: 'err', text: '默认权限模式更新失败:' + (e?.message || '') });
     } finally {
       setPermBusy(false);
     }
@@ -235,26 +241,33 @@ function SectionGeneral({ health, activeSessionId = '', onPermissionModeChanged 
 
       <div className="text-[14px] font-semibold mb-1">权限模式</div>
       <p className="text-[12px] text-fg-mute mb-3">
-        {activeSessionId ? '控制当前会话调用工具时的确认行为' : '请先打开一个会话后再切换权限模式'}
+        {activeSessionId ? '新建会话默认使用此模式,当前会话会同步切换' : '新建会话默认使用此模式'}
       </p>
       {PERMISSION_MODES.map((p, i) => (
         <div
           key={i}
           role="radio"
           aria-checked={permMode === p.id}
-          tabIndex={activeSessionId ? 0 : -1}
+          tabIndex={0}
           onClick={() => switchPermissionMode(p.id)}
           onKeyDown={(e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); switchPermissionMode(p.id); } }}
           className={clsx(
             'flex items-center justify-between px-3.5 py-2.5 rounded-md bg-surface border border-border mb-2 transition',
-            activeSessionId ? 'cursor-pointer hover:bg-surface-hi' : 'opacity-60 cursor-not-allowed',
+            'cursor-pointer hover:bg-surface-hi',
+            permBusy && 'opacity-75 cursor-wait',
           )}
         >
           <div>
             <div className="text-[13px] font-medium">{p.label}</div>
             <div className="text-[11px] text-fg-mute mt-0.5">{p.hint}</div>
           </div>
-          <Toggle on={permMode === p.id} onChange={(v) => { if (v) switchPermissionMode(p.id); }} />
+          <div onClick={(e) => e.stopPropagation()}>
+            <Toggle
+              on={permMode === p.id}
+              disabled={permBusy}
+              onChange={(v) => { if (v) switchPermissionMode(p.id); }}
+            />
+          </div>
         </div>
       ))}
 
@@ -1223,6 +1236,7 @@ const MODEL_NEW_DRAFT_DEFAULT = {
   model: '',
   base_url: 'https://api.openai.com/v1',
   api_key: '',
+  request_headers_json: '',
   context_window_k: '',
   capabilities: DEFAULT_MODEL_CAPABILITIES,
 };
@@ -1235,12 +1249,13 @@ function draftFromModelProfile(m) {
     model: m?.model || '',
     base_url: m?.base_url || '',
     api_key: m?.provider === 'openai' ? MODEL_NEW_API_KEY_MASK : '',
+    request_headers_json: formatRequestHeadersJson(m?.request_headers),
     context_window_k: formatContextWindowK(m?.context_window),
     capabilities: normalizeModelCapabilities(m?.capabilities),
   };
 }
 
-function payloadForModelDraft(draft, { omitApiKey = false } = {}) {
+function payloadForModelDraft(draft, { omitApiKey = false, requestHeaders } = {}) {
   const payload = {
     name: String(draft.name || '').trim(),
     provider: draft.provider || 'openai',
@@ -1249,6 +1264,7 @@ function payloadForModelDraft(draft, { omitApiKey = false } = {}) {
   if (payload.provider === 'openai') {
     payload.base_url = String(draft.base_url || '').trim();
     if (!omitApiKey) payload.api_key = String(draft.api_key || '');
+    if (requestHeaders !== undefined) payload.request_headers = requestHeaders;
   }
   const parsedContext = parseContextWindowK(draft.context_window_k);
   payload.context_window = parsedContext.ok && parsedContext.tokens ? parsedContext.tokens : 0;
@@ -1504,7 +1520,7 @@ function SectionModel() {
 
   const removeOne = async (name) => {
     if (!name || busy) return;
-    if (name === defaultName) {
+    if (!canDeleteSavedModel({ models, defaultName, name, busy: false })) {
       toast({ kind: 'err', text: '默认模型不能删除,请先切换默认模型' });
       return;
     }
@@ -1536,30 +1552,39 @@ function SectionModel() {
       toast({ kind: 'err', text: lookupErrorMessage('MISSING_MODEL') });
       return;
     }
+    const payloads = [];
     for (const item of drafts) {
       const contextWindow = parseContextWindowK(item.context_window_k);
       if (!contextWindow.ok) {
         toast({ kind: 'err', text: lookupErrorMessage(contextWindow.code) });
         return;
       }
-      const payload = payloadForModelDraft(item, { omitApiKey });
+      const requestHeaders = parseRequestHeadersJson(item.request_headers_json);
+      if (!requestHeaders.ok) {
+        toast({ kind: 'err', text: lookupErrorMessage(requestHeaders.code) });
+        return;
+      }
+      const payload = payloadForModelDraft(item, {
+        omitApiKey,
+        requestHeaders: requestHeaders.headers,
+      });
       const validatePayload = omitApiKey ? { ...payload, api_key: '__patch__' } : payload;
       const valid = validateModelDraft(validatePayload);
       if (!valid.ok) {
         toast({ kind: 'err', text: lookupErrorMessage(valid.code) });
         return;
       }
+      payloads.push(payload);
     }
 
     setBusy('submit');
     try {
       if (editing) {
-        const payload = payloadForModelDraft(drafts[0], { omitApiKey });
-        await api.updateModel(editingName, payload);
+        await api.updateModel(editingName, payloads[0]);
         toast({ kind: 'ok', text: '模型已更新' });
       } else {
-        for (const item of drafts) {
-          await api.addModel(payloadForModelDraft(item));
+        for (const payload of payloads) {
+          await api.addModel(payload);
         }
         toast({ kind: 'ok', text: drafts.length > 1 ? `已新增 ${drafts.length} 个模型` : '模型已新增' });
       }
@@ -1637,6 +1662,13 @@ function SectionModel() {
           const isLast = i === visibleModels.length - 1;
           const isEditing = editingName === m.name;
           const isDefault = defaultName === m.name;
+          const isOnlyModel = models.length === 1 && models[0]?.name === m.name;
+          const canDelete = canDeleteSavedModel({
+            models,
+            defaultName,
+            name: m.name,
+            busy: !!busy,
+          });
 
           if (isEditing) {
             return (
@@ -1722,11 +1754,11 @@ function SectionModel() {
                 <button
                   type="button"
                   onClick={() => removeOne(m.name)}
-                  disabled={isDefault || !!busy}
-                  title={isDefault ? '默认模型不能删除' : '删除'}
+                  disabled={!canDelete}
+                  title={isDefault && !isOnlyModel ? '默认模型不能删除' : '删除'}
                   className={clsx(
                     'w-8 h-8 rounded-md flex items-center justify-center transition',
-                    !isDefault
+                    canDelete
                       ? 'text-fg-mute hover:bg-danger-bg hover:text-danger'
                       : 'text-fg-mute opacity-30 cursor-not-allowed',
                   )}
@@ -1930,10 +1962,20 @@ function ModelFormPreview({
     setFetchStatus('fetching');
     setFetchError('');
     try {
+      const requestHeaders = data.provider === 'openai'
+        ? parseRequestHeadersJson(data.request_headers_json)
+        : { ok: true, headers: undefined };
+      if (!requestHeaders.ok) {
+        setAvailable([]);
+        setFetchError(lookupErrorMessage(requestHeaders.code));
+        setFetchStatus('failed');
+        return;
+      }
       const result = await onProbeModels({
         provider: data.provider,
         base_url: data.provider === 'openai' ? data.base_url : '',
         api_key: data.provider === 'openai' && data.api_key !== MODEL_NEW_API_KEY_MASK ? data.api_key : '',
+        request_headers: requestHeaders.headers,
       });
       const ids = Array.isArray(result?.models) ? result.models : [];
       setAvailable(ids);
@@ -2041,6 +2083,7 @@ function ModelFormPreview({
                   provider,
                   base_url: provider === 'openai' ? (data.base_url || 'https://api.openai.com/v1') : '',
                   api_key: provider === 'openai' ? data.api_key : '',
+                  request_headers_json: provider === 'openai' ? (data.request_headers_json || '') : '',
                 });
                 setFetchStatus('idle');
                 setAvailable(null);
@@ -2088,6 +2131,24 @@ function ModelFormPreview({
             onFocus={onApiKeyFocus}
             onChange={onApiKeyChange}
             onBlur={onApiKeyBlur}
+          />
+        </div>
+      )}
+
+      {/* 自定义请求头 */}
+      {data.provider === 'openai' && (
+        <div className="mb-4">
+          <div className="text-[12px] font-medium text-fg-2 mb-1.5">自定义请求头(JSON,可选)</div>
+          <textarea
+            className={clsx(fieldClass, 'min-h-[86px] resize-y font-mono text-[12px] leading-relaxed')}
+            placeholder={'{"X-Team":"acecode","X-Token":"{env:ACE_TOKEN}"}'}
+            value={data.request_headers_json || ''}
+            onChange={(e) => {
+              setData({ request_headers_json: e.target.value });
+              setFetchStatus('idle');
+              setAvailable(null);
+            }}
+            spellCheck={false}
           />
         </div>
       )}

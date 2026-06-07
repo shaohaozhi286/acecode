@@ -186,6 +186,7 @@ await run('probeModels posts draft to model probe endpoint', async () => {
       provider: 'openai',
       base_url: 'http://localhost:1234/v1',
       api_key: 'sk',
+      request_headers: { 'X-Probe': 'acecode' },
     });
     assert.deepEqual(result, { models: ['gpt-4o'] });
     assert.equal(calls.length, 1);
@@ -196,6 +197,7 @@ await run('probeModels posts draft to model probe endpoint', async () => {
       provider: 'openai',
       base_url: 'http://localhost:1234/v1',
       api_key: 'sk',
+      request_headers: { 'X-Probe': 'acecode' },
     });
   } finally {
     globalThis.fetch = previousFetch;
@@ -265,6 +267,36 @@ await run('UI preference API keeps legacy avatar preference endpoint compatible'
     assert.equal(calls[1].url, 'http://127.0.0.1:4567/api/config/ui-preferences');
     assert.equal(calls[1].opts.method, 'PUT');
     assert.deepEqual(JSON.parse(calls[1].opts.body), { show_acecode_avatar: false });
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+await run('Default permission mode API reads and writes config endpoint', async () => {
+  const previousFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    calls.push({ url, opts });
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ mode: 'accept-edits' }),
+    };
+  };
+  try {
+    const client = createApi({ origin: 'http://127.0.0.1:4567', token: 'tok' });
+    const got = await client.getDefaultPermissionMode();
+    const saved = await client.setDefaultPermissionMode('accept-edits');
+
+    assert.deepEqual(got, { mode: 'accept-edits' });
+    assert.deepEqual(saved, { mode: 'accept-edits' });
+    assert.equal(calls[0].url, 'http://127.0.0.1:4567/api/config/default-permission-mode');
+    assert.equal(calls[0].opts.method, 'GET');
+    assert.equal(calls[0].opts.headers['X-ACECode-Token'], 'tok');
+    assert.equal(calls[1].url, 'http://127.0.0.1:4567/api/config/default-permission-mode');
+    assert.equal(calls[1].opts.method, 'PUT');
+    assert.deepEqual(JSON.parse(calls[1].opts.body), { mode: 'accept-edits' });
   } finally {
     globalThis.fetch = previousFetch;
   }

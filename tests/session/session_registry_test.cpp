@@ -24,6 +24,7 @@
 #include "utils/cwd_hash.hpp"
 
 #include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <filesystem>
@@ -657,6 +658,44 @@ TEST(SessionRegistry, SetPermissionModeIsSessionScoped) {
     fx.registry.destroy(b);
 }
 
+// 场景:管理界面的默认权限模式必须更新 daemon session 模板,从而影响后续
+// 新建会话;已经存在的 session 仍保持 session-scoped,不被默认值反向改掉。
+TEST(SessionRegistry, DefaultPermissionModeAppliesToNewSessionsOnly) {
+    TestFixture fx;
+
+    EXPECT_EQ(fx.registry.default_permission_mode(), PermissionMode::Default);
+    fx.registry.set_default_permission_mode(PermissionMode::AcceptEdits);
+    EXPECT_EQ(fx.registry.default_permission_mode(), PermissionMode::AcceptEdits);
+
+    auto first = fx.registry.create(SessionOptions{});
+    ASSERT_TRUE(fx.registry.permission_mode(first).has_value());
+    EXPECT_EQ(*fx.registry.permission_mode(first), PermissionMode::AcceptEdits);
+    auto* first_entry = fx.registry.lookup(first);
+    ASSERT_NE(first_entry, nullptr);
+    ASSERT_NE(first_entry->sm, nullptr);
+    EXPECT_EQ(first_entry->sm->current_permission_mode(), "accept-edits");
+
+    fx.registry.set_default_permission_mode(PermissionMode::Yolo);
+    EXPECT_EQ(*fx.registry.permission_mode(first), PermissionMode::AcceptEdits);
+
+    auto second = fx.registry.create(SessionOptions{});
+    ASSERT_TRUE(fx.registry.permission_mode(second).has_value());
+    EXPECT_EQ(*fx.registry.permission_mode(second), PermissionMode::Yolo);
+
+    fx.registry.set_default_permission_mode(PermissionMode::Plan);
+    auto third = fx.registry.create(SessionOptions{});
+    ASSERT_TRUE(fx.registry.permission_mode(third).has_value());
+    EXPECT_EQ(*fx.registry.permission_mode(third), PermissionMode::Plan);
+    auto* third_entry = fx.registry.lookup(third);
+    ASSERT_NE(third_entry, nullptr);
+    ASSERT_NE(third_entry->perm, nullptr);
+    EXPECT_EQ(third_entry->perm->pre_plan_mode(), PermissionMode::Default);
+
+    fx.registry.destroy(first);
+    fx.registry.destroy(second);
+    fx.registry.destroy(third);
+}
+
 // 场景: 切换权限模式会清掉此前"本次会话允许"的 sticky allow,避免
 // 从 Yolo / AcceptEdits 切回 Default 后仍沿用旧的免确认记录。
 TEST(SessionRegistry, SetPermissionModeClearsSessionAllows) {
@@ -812,6 +851,80 @@ TEST(SessionRegistry, CreateUsesExplicitSessionModelState) {
     EXPECT_EQ(active[0].model_name, "fast");
     EXPECT_EQ(active[0].provider, "copilot");
     EXPECT_EQ(active[0].model, "fast-model");
+
+    std::filesystem::remove_all(project_dir);
+    std::filesystem::remove_all(cwd);
+}
+
+// 场景: 新装无 saved_models 时,session model state 必须保持空,不能暴露
+// daemon/default 或 Copilot 这种假模型给 Web/Desktop。
+TEST(SessionRegistry, CreateWithoutConfiguredModelsExposesEmptyModelState) {
+    auto cwd = temp_cwd("empty_model");
+    auto project_dir = SessionStorage::get_project_dir(cwd.string());
+    std::filesystem::remove_all(project_dir);
+
+    AppConfig cfg;
+    cfg.context_window = 128000;
+    ToolExecutor tools;
+    PermissionManager permissions;
+    SessionRegistryDeps deps;
+    deps.provider_accessor = [] { return std::shared_ptr<acecode::LlmProvider>{}; };
+    deps.tools = &tools;
+    deps.cwd = cwd.string();
+    deps.config = &cfg;
+    deps.template_permissions = &permissions;
+    SessionRegistry registry(std::move(deps));
+
+    auto id = registry.create({});
+
+    auto state = registry.current_model_state(id);
+    ASSERT_TRUE(state.has_value());
+    EXPECT_TRUE(state->name.empty());
+    EXPECT_TRUE(state->provider.empty());
+    EXPECT_TRUE(state->model.empty());
+
+    auto active = registry.list_active();
+    ASSERT_EQ(active.size(), 1u);
+    EXPECT_TRUE(active[0].model_name.empty());
+    EXPECT_TRUE(active[0].provider.empty());
+    EXPECT_TRUE(active[0].model.empty());
+
+    auto* entry = registry.lookup(id);
+    ASSERT_NE(entry, nullptr);
+    ASSERT_TRUE(entry->loop);
+
+    std::mutex event_mu;
+    std::condition_variable event_cv;
+    bool done = false;
+    std::vector<nlohmann::json> message_events;
+    auto sub = entry->loop->events().subscribe(
+        [&](const SessionEvent& evt) {
+            std::lock_guard<std::mutex> lk(event_mu);
+            if (evt.kind == SessionEventKind::Message) {
+                message_events.push_back(evt.payload);
+            }
+            if (evt.kind == SessionEventKind::Done) {
+                done = true;
+                event_cv.notify_all();
+            }
+        });
+
+    entry->loop->submit("hello");
+    {
+        std::unique_lock<std::mutex> lk(event_mu);
+        ASSERT_TRUE(event_cv.wait_for(lk, 5s, [&] { return done; }));
+    }
+    entry->loop->events().unsubscribe(sub);
+
+    auto prompt = std::find_if(message_events.begin(), message_events.end(), [](const auto& msg) {
+        return msg.value("role", "") == "error" &&
+               msg.value("content", "").find(u8"请先配置大模型服务") != std::string::npos;
+    });
+    ASSERT_NE(prompt, message_events.end());
+    const std::string content = prompt->value("content", "");
+    EXPECT_NE(content.find(u8"设置 > 模型"), std::string::npos);
+    EXPECT_EQ(content.find("TUI"), std::string::npos);
+    EXPECT_EQ(content.find("/model add"), std::string::npos);
 
     std::filesystem::remove_all(project_dir);
     std::filesystem::remove_all(cwd);

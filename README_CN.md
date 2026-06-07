@@ -276,7 +276,7 @@ MCP servers 可以在运行时添加更多工具。
 | --- | --- |
 | `provider`, `openai`, `copilot` | 旧式 provider 选择和端点/模型设置。 |
 | `openai.stream_timeout_ms` | OpenAI 兼容流式请求超时，单位毫秒；默认 `180000`，慢网关可调大。 |
-| `saved_models`, `default_model_name` | 命名模型配置和默认模型；OpenAI 条目也可以设置 `stream_timeout_ms`。 |
+| `saved_models`, `default_model_name` | 命名模型配置和默认模型；OpenAI 条目也可以设置 `stream_timeout_ms` 和 `request_headers`。 |
 | `context_window`, `models_dev` | 上下文窗口解析和内置 models.dev 查询行为。 |
 | `skills`, `memory`, `project_instructions` | 可选上下文来源及其限制。 |
 | `agent_loop.max_iterations` | 单次 agent 回合硬上限；`0` 或省略表示无限制。 |

@@ -99,6 +99,13 @@ export function rankCommands(query, items) {
   return scored.map((x) => x.it);
 }
 
+export function slashCommandKindPresentation(item) {
+  if (item && item.kind === 'builtin') {
+    return { icon: 'tool', label: '内置工具' };
+  }
+  return { icon: 'lightbulb', label: 'Skill' };
+}
+
 // 解析输入框值的首段命令名:从首字符 `/` 到第一个空白(或字符串末尾)之间的串,
 // 去掉前导 `/`。返回 {name, headLength}:
 //   - name: 已知命令名(在 knownNames 中)→ 该名;否则 null
@@ -152,6 +159,52 @@ export function deleteLeadingCommandBlock(value, leading, selectionStart, select
     selectionStart: 0,
     selectionEnd: 0,
   };
+}
+
+export function normalizeLeadingCommandSelection(value, leading, selectionStart, selectionEnd) {
+  if (typeof value !== 'string' || !leading?.name) return null;
+  const blockEnd = leadingCommandBlockEnd(value, leading);
+  if (blockEnd <= 0) return null;
+
+  const rawStart = Number.isFinite(selectionStart) ? selectionStart : 0;
+  const rawEnd = Number.isFinite(selectionEnd) ? selectionEnd : rawStart;
+  const start = Math.max(0, Math.min(value.length, Math.min(rawStart, rawEnd)));
+  const end = Math.max(start, Math.min(value.length, Math.max(rawStart, rawEnd)));
+
+  if (start === end) {
+    if (start > 0 && start < blockEnd) {
+      return { selectionStart: blockEnd, selectionEnd: blockEnd };
+    }
+    return null;
+  }
+
+  let nextStart = start;
+  let nextEnd = end;
+  if (nextStart > 0 && nextStart < blockEnd) nextStart = 0;
+  if (nextEnd > 0 && nextEnd < blockEnd) nextEnd = blockEnd;
+
+  if (nextStart === start && nextEnd === end) return null;
+  return { selectionStart: nextStart, selectionEnd: nextEnd };
+}
+
+export function moveAcrossLeadingCommandBlock(value, leading, selectionStart, selectionEnd, direction) {
+  if (typeof value !== 'string' || !leading?.name) return null;
+  const blockEnd = leadingCommandBlockEnd(value, leading);
+  if (blockEnd <= 0) return null;
+
+  const rawStart = Number.isFinite(selectionStart) ? selectionStart : 0;
+  const rawEnd = Number.isFinite(selectionEnd) ? selectionEnd : rawStart;
+  const start = Math.max(0, Math.min(value.length, Math.min(rawStart, rawEnd)));
+  const end = Math.max(start, Math.min(value.length, Math.max(rawStart, rawEnd)));
+  if (start !== end) return null;
+
+  if (direction === 'backward' && start > 0 && start <= blockEnd) {
+    return { selectionStart: 0, selectionEnd: 0 };
+  }
+  if (direction === 'forward' && start >= 0 && start < blockEnd) {
+    return { selectionStart: blockEnd, selectionEnd: blockEnd };
+  }
+  return null;
 }
 
 // 解析一条已落库消息的首段斜杠命令,供 transcript 渲染成徽标(chip)使用。

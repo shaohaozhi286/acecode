@@ -170,7 +170,7 @@ export function RefreshIcon({ size = 16, className = '', ...props }) {
 export function CommandGlyph({ kind = 'skill', size = 12, className = '', ...props }) {
   return (
     <VsIcon
-      name={kind === 'builtin' ? 'terminal' : 'lightbulb'}
+      name={kind === 'builtin' ? 'tool' : 'lightbulb'}
       size={size}
       className={className}
       {...props}

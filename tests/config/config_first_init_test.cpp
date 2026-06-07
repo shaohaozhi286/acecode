@@ -106,20 +106,39 @@ TEST_F(ConfigFirstInitTest, LoadConfigTracksFreshAcecodeHomeCreationOnce) {
 
     EXPECT_FALSE(acecode::consume_acecode_home_created_by_process());
 
-    ASSERT_EQ(cfg.saved_models.size(), 1u);
-    EXPECT_EQ(cfg.saved_models[0].name, "copilot");
-    EXPECT_EQ(cfg.saved_models[0].provider, "copilot");
-    EXPECT_EQ(cfg.saved_models[0].model, "gpt-4o");
-    EXPECT_EQ(cfg.default_model_name, "copilot");
+    EXPECT_TRUE(cfg.provider.empty());
+    EXPECT_TRUE(cfg.saved_models.empty());
+    EXPECT_TRUE(cfg.default_model_name.empty());
+    EXPECT_EQ(cfg.default_permission_mode, "default");
 
     std::ifstream ifs(temp_home / ".acecode" / "config.json");
     ASSERT_TRUE(ifs.is_open());
     auto j = nlohmann::json::parse(ifs);
     ASSERT_TRUE(j.contains("saved_models"));
     ASSERT_TRUE(j["saved_models"].is_array());
-    ASSERT_EQ(j["saved_models"].size(), 1u);
-    EXPECT_EQ(j["saved_models"][0]["name"], "copilot");
-    EXPECT_EQ(j["default_model_name"], "copilot");
+    EXPECT_TRUE(j["saved_models"].empty());
+    EXPECT_EQ(j["provider"], "");
+    EXPECT_EQ(j["default_model_name"], "");
+    EXPECT_EQ(j["default_permission_mode"], "default");
+}
+
+TEST_F(ConfigFirstInitTest, ExplicitEmptySavedModelsDoesNotSynthesizeCopilot) {
+    fs::create_directories(temp_home / ".acecode");
+    {
+        std::ofstream ofs(temp_home / ".acecode" / "config.json");
+        ofs << R"({
+    "provider": "copilot",
+    "copilot": { "model": "gpt-4o" },
+    "saved_models": [],
+    "default_model_name": "copilot"
+})";
+    }
+
+    auto cfg = acecode::load_config();
+
+    EXPECT_EQ(cfg.provider, "copilot");
+    EXPECT_TRUE(cfg.saved_models.empty());
+    EXPECT_TRUE(cfg.default_model_name.empty());
 }
 
 TEST_F(ConfigFirstInitTest, OldSchemaConfigSynthesizesCopilotSavedModel) {
@@ -192,7 +211,7 @@ TEST_F(ConfigFirstInitTest, OpenAiStreamTimeoutEnvOverrideFeedsLegacySavedModel)
     EXPECT_EQ(*cfg.saved_models[0].stream_timeout_ms, 345678);
 }
 
-TEST_F(ConfigFirstInitTest, OldSchemaCodexConfigFallsBackToCopilotSavedModel) {
+TEST_F(ConfigFirstInitTest, OldSchemaCodexConfigDoesNotSynthesizeCopilot) {
     fs::create_directories(temp_home / ".acecode");
     {
         std::ofstream ofs(temp_home / ".acecode" / "config.json");
@@ -210,12 +229,57 @@ TEST_F(ConfigFirstInitTest, OldSchemaCodexConfigFallsBackToCopilotSavedModel) {
 
     auto cfg = acecode::load_config();
 
-    ASSERT_EQ(cfg.saved_models.size(), 1u);
-    EXPECT_EQ(cfg.provider, "copilot");
-    EXPECT_EQ(cfg.saved_models[0].name, "copilot");
-    EXPECT_EQ(cfg.saved_models[0].provider, "copilot");
-    EXPECT_EQ(cfg.saved_models[0].model, "gpt-4o");
-    EXPECT_EQ(cfg.default_model_name, "copilot");
+    EXPECT_TRUE(cfg.provider.empty());
+    EXPECT_TRUE(cfg.saved_models.empty());
+    EXPECT_TRUE(cfg.default_model_name.empty());
+}
+
+TEST_F(ConfigFirstInitTest, SaveConfigPersistsExplicitEmptySavedModels) {
+    acecode::AppConfig cfg;
+    cfg.provider = "";
+    cfg.saved_models.clear();
+    cfg.default_model_name.clear();
+    cfg.default_permission_mode = "accept-edits";
+
+    const fs::path config_path = temp_home / ".acecode" / "config.json";
+    acecode::save_config(cfg, config_path.string());
+
+    std::ifstream ifs(config_path);
+    ASSERT_TRUE(ifs.is_open());
+    auto j = nlohmann::json::parse(ifs);
+    ASSERT_TRUE(j.contains("saved_models"));
+    ASSERT_TRUE(j["saved_models"].is_array());
+    EXPECT_TRUE(j["saved_models"].empty());
+    EXPECT_FALSE(j.contains("default_model_name"));
+    EXPECT_EQ(j["default_permission_mode"], "accept-edits");
+}
+
+TEST_F(ConfigFirstInitTest, DefaultPermissionModeLoadsAndInvalidFallsBack) {
+    fs::create_directories(temp_home / ".acecode");
+    {
+        std::ofstream ofs(temp_home / ".acecode" / "config.json");
+        ofs << R"({
+    "provider": "",
+    "saved_models": [],
+    "default_permission_mode": "plan"
+})";
+    }
+
+    auto cfg = acecode::load_config();
+
+    EXPECT_EQ(cfg.default_permission_mode, "plan");
+
+    {
+        std::ofstream ofs(temp_home / ".acecode" / "config.json");
+        ofs << R"({
+    "provider": "",
+    "saved_models": [],
+    "default_permission_mode": "always"
+})";
+    }
+
+    cfg = acecode::load_config();
+    EXPECT_EQ(cfg.default_permission_mode, "default");
 }
 
 TEST_F(ConfigFirstInitTest, SavedModelsDefaultCodexFallsBackToEnabledModel) {

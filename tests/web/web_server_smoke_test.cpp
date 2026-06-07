@@ -290,6 +290,20 @@ struct ScopedHomeOverride {
     }
 };
 
+struct ScopedEnvOverride {
+    std::string name;
+    std::optional<std::string> old_value;
+
+    ScopedEnvOverride(const char* env_name, const std::optional<std::string>& value)
+        : name(env_name), old_value(get_env_value(env_name)) {
+        set_env_value(name.c_str(), value);
+    }
+
+    ~ScopedEnvOverride() {
+        set_env_value(name.c_str(), old_value);
+    }
+};
+
 std::string lower_ascii(std::string s) {
     std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
         return static_cast<char>(std::tolower(c));
@@ -518,6 +532,65 @@ TEST(WebServerHttp, SessionPermissionModeRejectsInvalidMode) {
     auto mode = fx.registry->permission_mode(sid);
     ASSERT_TRUE(mode.has_value());
     EXPECT_EQ(*mode, acecode::PermissionMode::Default);
+}
+
+// 场景:管理界面的默认权限模式必须持久化到配置,同步 daemon 新会话模板,
+// 并让后续新建 session 继承该模式。
+TEST(WebServerHttp, DefaultPermissionModeEndpointAppliesToNewSessions) {
+    WebServerFixture fx;
+
+    auto initial = cpr::Get(cpr::Url{fx.url("/api/config/default-permission-mode")});
+    ASSERT_EQ(initial.status_code, 200) << initial.text;
+    EXPECT_EQ(json::parse(initial.text)["mode"], "default");
+
+    auto put = cpr::Put(cpr::Url{fx.url("/api/config/default-permission-mode")},
+                        cpr::Header{{"Content-Type", "application/json"}},
+                        cpr::Body{R"({"mode":"accept-edits"})"});
+    ASSERT_EQ(put.status_code, 200) << put.text;
+    EXPECT_EQ(json::parse(put.text)["mode"], "accept-edits");
+    EXPECT_EQ(fx.cfg.default_permission_mode, "accept-edits");
+    EXPECT_EQ(fx.registry->default_permission_mode(), acecode::PermissionMode::AcceptEdits);
+
+    auto created = cpr::Post(cpr::Url{fx.url("/api/sessions")},
+                             cpr::Header{{"Content-Type", "application/json"}},
+                             cpr::Body{R"({})"});
+    ASSERT_EQ(created.status_code, 201) << created.text;
+    auto sid = json::parse(created.text)["session_id"].get<std::string>();
+    auto mode = fx.registry->permission_mode(sid);
+    ASSERT_TRUE(mode.has_value());
+    EXPECT_EQ(*mode, acecode::PermissionMode::AcceptEdits);
+    auto* entry = fx.registry->lookup(sid);
+    ASSERT_NE(entry, nullptr);
+    ASSERT_NE(entry->sm, nullptr);
+    EXPECT_EQ(entry->sm->current_permission_mode(), "accept-edits");
+
+    acecode::ChatMessage msg;
+    msg.role = "user";
+    msg.content = "persist permission mode";
+    entry->sm->on_message(msg);
+
+    auto meta = acecode::SessionStorage::read_meta(
+        acecode::SessionStorage::meta_path(fx.project_dir, sid));
+    EXPECT_EQ(meta.permission_mode, "accept-edits");
+
+    std::ifstream ifs(fx.tmp_dir / "config.json");
+    ASSERT_TRUE(ifs.is_open());
+    auto saved = json::parse(ifs);
+    EXPECT_EQ(saved["default_permission_mode"], "accept-edits");
+}
+
+// 场景:默认权限模式 API 拒绝非法 mode,且不修改内存配置或新会话模板。
+TEST(WebServerHttp, DefaultPermissionModeRejectsInvalidMode) {
+    WebServerFixture fx;
+    fx.cfg.default_permission_mode = "yolo";
+    fx.registry->set_default_permission_mode(acecode::PermissionMode::Yolo);
+
+    auto put = cpr::Put(cpr::Url{fx.url("/api/config/default-permission-mode")},
+                        cpr::Header{{"Content-Type", "application/json"}},
+                        cpr::Body{R"({"mode":"always"})"});
+    EXPECT_EQ(put.status_code, 400) << put.text;
+    EXPECT_EQ(fx.cfg.default_permission_mode, "yolo");
+    EXPECT_EQ(fx.registry->default_permission_mode(), acecode::PermissionMode::Yolo);
 }
 
 // 场景: 共享 daemon 暴露 workspace registry,每个 workspace 有独立 session
@@ -1649,6 +1722,10 @@ TEST(WebServerHttp, PostModelsCreatesSavedEntryWithoutApiKey) {
         {"model", "llama-3"},
         {"base_url", "http://localhost:1234/v1"},
         {"api_key", "sk-secret-do-not-leak"},
+        {"request_headers", {
+            {"Authorization", "Bearer {env:ACE_TOKEN}"},
+            {"X-Team", "acecode"}
+        }},
     };
     auto r = cpr::Post(cpr::Url{fx.url("/api/models")},
                        cpr::Header{{"Content-Type", "application/json"}},
@@ -1659,12 +1736,59 @@ TEST(WebServerHttp, PostModelsCreatesSavedEntryWithoutApiKey) {
     EXPECT_EQ(j["provider"], "openai");
     EXPECT_EQ(j["model"], "llama-3");
     EXPECT_EQ(j["base_url"], "http://localhost:1234/v1");
+    EXPECT_EQ(j["request_headers"]["Authorization"], "Bearer {env:ACE_TOKEN}");
+    EXPECT_EQ(j["request_headers"]["X-Team"], "acecode");
     EXPECT_FALSE(j.contains("api_key")) << "api_key 必须从响应中剥离";
 
     // 落盘后 cfg 内存应已追加此条目
     ASSERT_EQ(fx.cfg.saved_models.size(), 2u);
     EXPECT_EQ(fx.cfg.saved_models.back().name, "smoke-openai");
     EXPECT_EQ(fx.cfg.saved_models.back().api_key, "sk-secret-do-not-leak");
+    EXPECT_EQ(fx.cfg.saved_models.back().request_headers.at("X-Team"), "acecode");
+}
+
+// 场景:PUT /api/models/<name> 省略 request_headers 时保留旧模板,
+// 显式发送 {} 时清空旧模板。
+TEST(WebServerHttp, PutModelsPreservesAndClearsRequestHeaders) {
+    WebServerFixture fx;
+    json create_req = {
+        {"name", "gateway-openai"},
+        {"provider", "openai"},
+        {"model", "llama-3"},
+        {"base_url", "http://localhost:1234/v1"},
+        {"api_key", "sk-secret"},
+        {"request_headers", {{"X-Team", "acecode"}}},
+    };
+    auto create = cpr::Post(cpr::Url{fx.url("/api/models")},
+                            cpr::Header{{"Content-Type", "application/json"}},
+                            cpr::Body{create_req.dump()});
+    ASSERT_EQ(create.status_code, 200) << create.text;
+
+    json preserve_req = {
+        {"name", "gateway-openai"},
+        {"provider", "openai"},
+        {"model", "llama-3.1"},
+        {"base_url", "http://localhost:4321/v1"},
+    };
+    auto preserve = cpr::Put(cpr::Url{fx.url("/api/models/gateway-openai")},
+                             cpr::Header{{"Content-Type", "application/json"}},
+                             cpr::Body{preserve_req.dump()});
+    ASSERT_EQ(preserve.status_code, 200) << preserve.text;
+    auto preserved = json::parse(preserve.text);
+    EXPECT_EQ(preserved["request_headers"]["X-Team"], "acecode");
+    ASSERT_EQ(fx.cfg.saved_models.size(), 2u);
+    EXPECT_EQ(fx.cfg.saved_models.back().api_key, "sk-secret");
+    EXPECT_EQ(fx.cfg.saved_models.back().request_headers.at("X-Team"), "acecode");
+
+    json clear_req = preserve_req;
+    clear_req["request_headers"] = json::object();
+    auto clear = cpr::Put(cpr::Url{fx.url("/api/models/gateway-openai")},
+                          cpr::Header{{"Content-Type", "application/json"}},
+                          cpr::Body{clear_req.dump()});
+    ASSERT_EQ(clear.status_code, 200) << clear.text;
+    auto cleared = json::parse(clear.text);
+    EXPECT_FALSE(cleared.contains("request_headers"));
+    EXPECT_TRUE(fx.cfg.saved_models.back().request_headers.empty());
 }
 
 // 场景:POST /api/models/probe 只接受 OpenAI-compatible 探测参数。这里走
@@ -1681,6 +1805,60 @@ TEST(WebServerHttp, PostModelsProbeRejectsUnsupportedProvider) {
     ASSERT_EQ(r.status_code, 400) << r.text;
     auto j = json::parse(r.text);
     EXPECT_EQ(j["error"], "UNKNOWN_PROVIDER");
+}
+
+// 场景:POST /api/models/probe 对 OpenAI-compatible /models 请求发送自定义 header。
+TEST(WebServerHttp, PostModelsProbeAppliesCustomRequestHeaders) {
+    std::mutex mu;
+    std::string seen_probe_header;
+    LocalUpdateServer upstream([&](httplib::Server& s) {
+        s.Get("/models", [&](const httplib::Request& req, httplib::Response& res) {
+            {
+                std::lock_guard<std::mutex> lk(mu);
+                seen_probe_header = req.get_header_value("X-Probe");
+            }
+            res.set_content(R"({"data":[{"id":"probe-model"}]})", "application/json");
+        });
+    });
+
+    WebServerFixture fx;
+    json req = {
+        {"provider", "openai"},
+        {"base_url", upstream.base_url()},
+        {"api_key", "sk-probe"},
+        {"request_headers", {{"X-Probe", "acecode"}}},
+    };
+    auto r = cpr::Post(cpr::Url{fx.url("/api/models/probe")},
+                       cpr::Header{{"Content-Type", "application/json"}},
+                       cpr::Body{req.dump()});
+    ASSERT_EQ(r.status_code, 200) << r.text;
+    auto j = json::parse(r.text);
+    ASSERT_TRUE(j["models"].is_array());
+    ASSERT_EQ(j["models"].size(), 1u);
+    EXPECT_EQ(j["models"][0], "probe-model");
+
+    std::lock_guard<std::mutex> lk(mu);
+    EXPECT_EQ(seen_probe_header, "acecode");
+}
+
+// 场景:probe header 模板引用不存在的环境变量时,在发网前返回 400。
+TEST(WebServerHttp, PostModelsProbeRejectsMissingRequestHeaderEnv) {
+    ScopedEnvOverride missing("ACE_MISSING_PROBE_HEADER", std::nullopt);
+    WebServerFixture fx;
+    json req = {
+        {"provider", "openai"},
+        {"base_url", "http://127.0.0.1:1/v1"},
+        {"api_key", "sk-probe"},
+        {"request_headers", {{"X-Probe", "{env:ACE_MISSING_PROBE_HEADER}"}}},
+    };
+    auto r = cpr::Post(cpr::Url{fx.url("/api/models/probe")},
+                       cpr::Header{{"Content-Type", "application/json"}},
+                       cpr::Body{req.dump()});
+    ASSERT_EQ(r.status_code, 400) << r.text;
+    auto j = json::parse(r.text);
+    EXPECT_EQ(j["error"], "INVALID_REQUEST_HEADER");
+    EXPECT_NE(j["message"].get<std::string>().find("ACE_MISSING_PROBE_HEADER"),
+              std::string::npos);
 }
 
 // 场景:Copilot 模型探测需要先通过 desktop/web 登录;无 token 时必须走

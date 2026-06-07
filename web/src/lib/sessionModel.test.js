@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {
   buildStatusBarModelMenu,
+  isEmptyModelState,
   modelDisplayLabel,
   modelSelectValue,
   normalizeModelOptions,
@@ -31,6 +32,12 @@ run('session switch refresh can display a different selected model', () => {
   const b = normalizeModelState({ name: 'gpt-5.4', provider: 'copilot', model: 'gpt-5.4' });
   assert.equal(modelDisplayLabel(a), 'gpt-5');
   assert.equal(modelDisplayLabel(b), 'gpt-5.4');
+});
+
+run('empty model state displays unconfigured fallback', () => {
+  const state = normalizeModelState({ name: '', provider: '', model: '' });
+  assert.equal(isEmptyModelState(state), true);
+  assert.equal(modelDisplayLabel(state, '未配置模型'), '未配置模型');
 });
 
 run('model options dedupe by preset name', () => {
@@ -76,6 +83,16 @@ run('status bar model menu uses fallback when no selection exists', () => {
   });
   assert.equal(menu.displayLabel, '加载中');
   assert.equal(menu.items[0].active, false);
+});
+
+run('status bar model menu can display unconfigured fallback with no options', () => {
+  const menu = buildStatusBarModelMenu({
+    selectedModelName: '',
+    modelOptions: [],
+    fallbackLabel: '未配置模型',
+  });
+  assert.equal(menu.displayLabel, '未配置模型');
+  assert.deepEqual(menu.items, []);
 });
 
 run('status bar model menu displays missing selected name without fake option', () => {

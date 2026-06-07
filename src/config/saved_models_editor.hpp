@@ -6,6 +6,7 @@
 #include "config.hpp"
 #include "saved_models.hpp"
 
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -24,6 +25,7 @@ struct SavedModelDraft {
     // 可选 OpenAI stream timeout(ms)。unset = 不覆盖;0 = 清除旧 override。
     std::optional<int> stream_timeout_ms;
     std::vector<std::string> capabilities;
+    std::map<std::string, std::string> request_headers;
 };
 
 enum class SavedModelEditError {
@@ -39,6 +41,7 @@ enum class SavedModelEditError {
     INVALID_CONTEXT_WINDOW, // context_window < 0
     INVALID_STREAM_TIMEOUT, // stream_timeout_ms < 0
     INVALID_CAPABILITY,     // capabilities 含空值/控制字符/重复项
+    INVALID_REQUEST_HEADER, // request_headers 非 openai / 非法 header/template
     NOT_FOUND,            // update/remove 时 name 不存在
     IN_USE_AS_DEFAULT,    // remove/改名时该 name 是 cfg.default_model_name
 };
@@ -55,8 +58,8 @@ SavedModelEditError update_saved_model(AppConfig& cfg,
                                         const std::string& old_name,
                                         const SavedModelDraft& d);
 
-// 删除 cfg.saved_models 里 name == name 的条目。若是 default 返
-// IN_USE_AS_DEFAULT。
+// 删除 cfg.saved_models 里 name == name 的条目。若是 default 且仍有其他
+// model 可选,返 IN_USE_AS_DEFAULT;若是唯一 model,清空 default 后删除。
 SavedModelEditError remove_saved_model(AppConfig& cfg, const std::string& name);
 
 } // namespace acecode

@@ -8,7 +8,8 @@
 //   - 各类无效 draft → 对应错误码 + cfg 不变(回滚验证)
 //   - 成功路径:add / update / remove 后 cfg.saved_models 长度与字段正确
 //   - update 改名走 delete+add;若 old_name 是 default → IN_USE_AS_DEFAULT
-//   - remove default → IN_USE_AS_DEFAULT,cfg 不变
+//   - remove default with multiple models → IN_USE_AS_DEFAULT,cfg 不变
+//   - remove the only default model → OK,清空 default
 
 #include <gtest/gtest.h>
 
@@ -140,6 +141,42 @@ TEST(SavedModelsEditor, AddStoresCapabilities) {
               (std::vector<std::string>{"vision", "tool_use"}));
 }
 
+// 场景:add 带 request_headers → profile 保存模板,不解析环境变量。
+TEST(SavedModelsEditor, AddStoresRequestHeaders) {
+    auto cfg = make_cfg_with_one_default();
+    auto d = good_openai_draft("gateway-lm");
+    d.request_headers = {
+        {"Authorization", "Bearer {env:ACE_TOKEN}"},
+        {"X-Team", "acecode"}
+    };
+    EXPECT_EQ(add_saved_model(cfg, d), SavedModelEditError::OK);
+    ASSERT_EQ(cfg.saved_models.size(), 2u);
+    EXPECT_EQ(cfg.saved_models[1].request_headers.at("Authorization"),
+              "Bearer {env:ACE_TOKEN}");
+    EXPECT_EQ(cfg.saved_models[1].request_headers.at("X-Team"), "acecode");
+}
+
+// 场景:add copilot 带 request_headers → INVALID_REQUEST_HEADER,cfg 不变。
+TEST(SavedModelsEditor, AddRejectsRequestHeadersOnCopilot) {
+    auto cfg = make_cfg_with_one_default();
+    SavedModelDraft d;
+    d.name = "copilot-with-headers";
+    d.provider = "copilot";
+    d.model = "gpt-4o";
+    d.request_headers = {{"X-Team", "acecode"}};
+    EXPECT_EQ(add_saved_model(cfg, d), SavedModelEditError::INVALID_REQUEST_HEADER);
+    EXPECT_EQ(cfg.saved_models.size(), 1u);
+}
+
+// 场景:add request_headers 非法 header 名/保留字段 → INVALID_REQUEST_HEADER。
+TEST(SavedModelsEditor, AddRejectsInvalidRequestHeader) {
+    auto cfg = make_cfg_with_one_default();
+    auto d = good_openai_draft("gateway-lm");
+    d.request_headers = {{"Content-Type", "text/plain"}};
+    EXPECT_EQ(add_saved_model(cfg, d), SavedModelEditError::INVALID_REQUEST_HEADER);
+    EXPECT_EQ(cfg.saved_models.size(), 1u);
+}
+
 // 场景:add context_window 为负数 → INVALID_CONTEXT_WINDOW,cfg 不变。
 TEST(SavedModelsEditor, AddRejectsNegativeContextWindow) {
     auto cfg = make_cfg_with_one_default();
@@ -240,12 +277,36 @@ TEST(SavedModelsEditor, UpdateCanClearCapabilities) {
     EXPECT_TRUE(cfg.saved_models[1].capabilities.empty());
 }
 
-// 场景:remove 默认条目 → IN_USE_AS_DEFAULT,cfg 不变。
-TEST(SavedModelsEditor, RemoveRefusesDefault) {
+// 场景:update request_headers 为空 map 时清除旧请求头模板。
+TEST(SavedModelsEditor, UpdateCanClearRequestHeaders) {
+    auto cfg = make_cfg_with_one_default();
+    auto d = good_openai_draft("gateway-lm");
+    d.request_headers = {{"X-Team", "acecode"}};
+    add_saved_model(cfg, d);
+
+    SavedModelDraft updated = good_openai_draft("gateway-lm");
+    updated.request_headers = {};
+    EXPECT_EQ(update_saved_model(cfg, "gateway-lm", updated), SavedModelEditError::OK);
+    EXPECT_TRUE(cfg.saved_models[1].request_headers.empty());
+}
+
+// 场景:remove 唯一默认条目 → OK,清空 default,允许回到零模型。
+TEST(SavedModelsEditor, RemoveOnlyDefaultClearsDefault) {
     auto cfg = make_cfg_with_one_default();
     EXPECT_EQ(remove_saved_model(cfg, "copilot-fast"),
+              SavedModelEditError::OK);
+    EXPECT_TRUE(cfg.saved_models.empty());
+    EXPECT_TRUE(cfg.default_model_name.empty());
+}
+
+// 场景:remove 多模型里的默认条目 → IN_USE_AS_DEFAULT,cfg 不变。
+TEST(SavedModelsEditor, RemoveRefusesDefaultWhenOtherModelsExist) {
+    auto cfg = make_cfg_with_one_default();
+    add_saved_model(cfg, good_openai_draft("local-lm"));
+    EXPECT_EQ(remove_saved_model(cfg, "copilot-fast"),
               SavedModelEditError::IN_USE_AS_DEFAULT);
-    EXPECT_EQ(cfg.saved_models.size(), 1u);
+    ASSERT_EQ(cfg.saved_models.size(), 2u);
+    EXPECT_EQ(cfg.default_model_name, "copilot-fast");
 }
 
 // 场景:remove 非默认 → 长度 -1。
@@ -343,4 +404,8 @@ TEST(SavedModelsEditor, AddLeavesCfgUnchangedOnAllRejections) {
     auto bad_context = good_openai_draft();
     bad_context.context_window = -1;
     try_reject(bad_context, SavedModelEditError::INVALID_CONTEXT_WINDOW);
+
+    auto bad_headers = good_openai_draft();
+    bad_headers.request_headers = {{"Content-Type", "text/plain"}};
+    try_reject(bad_headers, SavedModelEditError::INVALID_REQUEST_HEADER);
 }

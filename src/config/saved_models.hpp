@@ -2,6 +2,7 @@
 // 对应 openspec/changes/model-profiles 的 Section 1 —— ModelProfile 数据模型。
 #pragma once
 
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -22,6 +23,7 @@ struct ModelProfile {
     std::optional<int> context_window;  // 可选,手动覆盖该模型的上下文窗口(token 数)
     std::optional<int> stream_timeout_ms; // 可选,OpenAI streaming request timeout(ms)
     std::vector<std::string> capabilities; // 用户声明的能力标签,如 vision/tool_use/web_search
+    std::map<std::string, std::string> request_headers; // openai 自定义请求头模板
 };
 
 // 解析失败时的描述。line_hint = -1 表示无具体行号信息。

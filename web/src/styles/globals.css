@@ -1240,14 +1240,41 @@ body {
   border-color: color-mix(in oklab, var(--ace-accent-soft) 70%, var(--ace-border) 30%);
 }
 
-/* SlashDropdown 命令 token:首段命令名以 accent 色文字显示。
-   关键约束:overlay 与 textarea 的字符度量必须 1:1 对齐,不能有任何 padding/
-   margin/font-weight 差异,否则会双层错位重叠(像两个 /init 写在一起)。
-   做法:命令存在时 textarea 文本透明,由 overlay 负责绘制可见文本。 */
+/* SlashDropdown 命令 token:textarea 保留真实 "/command" 值,overlay 负责视觉 token。
+   图标和命令名作为一个 inline-flex 原子块渲染;textarea 左 padding 增加同等
+   图标宽度,让真实 caret 与 overlay 后续正文尽量保持同列。 */
+.ace-slash-input-with-icon {
+  padding-left: calc(var(--ace-slash-base-left, 12px) + 18px) !important;
+}
+.ace-slash-chip-unit {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 20px;
+  line-height: 20px;
+  margin-right: 0.55ch;
+  max-width: 100%;
+  vertical-align: top;
+  white-space: nowrap;
+  color: var(--ace-accent);
+}
+.ace-slash-chip-icon {
+  display: inline-flex;
+  flex: 0 0 14px;
+  width: 14px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  color: var(--ace-accent);
+}
+.ace-slash-chip-icon .ace-icon {
+  display: block;
+}
 .ace-slash-chip {
   display: inline-block;
   color: var(--ace-accent);
   background: transparent;
+  line-height: 20px;
 }
 
 /* transcript 用户气泡里的斜杠命令徽标:skill 图标 + 蓝色命令名,hover 浮出描述。

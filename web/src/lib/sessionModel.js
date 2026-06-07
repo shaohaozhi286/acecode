@@ -16,6 +16,11 @@ export function modelDisplayLabel(state, fallback = '加载中') {
   return normalized.model || fallback;
 }
 
+export function isEmptyModelState(state) {
+  const normalized = normalizeModelState(state);
+  return !!normalized && !normalized.name && !normalized.provider && !normalized.model;
+}
+
 export function selectedModelName(state) {
   return normalizeModelState(state)?.name || '';
 }

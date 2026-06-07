@@ -240,12 +240,15 @@ struct NetworkConfig {
 };
 
 struct AppConfig {
-    std::string provider = "copilot"; // active runtime provider: "copilot" or "openai"
+    std::string provider; // active runtime provider: "copilot" or "openai"; empty = not configured
     OpenAiConfig openai;
     CopilotConfig copilot;
     CodexConfig codex;
     int context_window = 128000; // model context window size in tokens
     int max_sessions = 50;       // max saved sessions per project
+    // Default permission mode for newly-created daemon/Web/Desktop sessions.
+    // Canonical values: default | accept-edits | plan | yolo.
+    std::string default_permission_mode = "default";
     std::map<std::string, McpServerConfig> mcp_servers; // MCP stdio servers (optional)
     SkillsConfig skills;                         // skill system configuration (optional)
     MemoryConfig memory;                         // persistent user memory settings
@@ -271,8 +274,8 @@ struct AppConfig {
 };
 
 // Build a backwards-compatible ModelProfile from the legacy top-level
-// provider/openai/copilot fields. Used when config.json has not been migrated
-// to saved_models yet, so startup can still create a provider.
+// provider/openai/copilot fields. Returns an empty profile when no legacy
+// provider is configured.
 ModelProfile legacy_model_profile_from_config(const AppConfig& cfg);
 
 // Normalize upgrade.base_url by trimming surrounding whitespace and adding a

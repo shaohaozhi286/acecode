@@ -1,5 +1,6 @@
 #include "openai_provider.hpp"
 #include "image/image_processor.hpp"
+#include "config/request_headers.hpp"
 #include "session/attachment_store.hpp"
 #include "utils/logger.hpp"
 #include "utils/base64.hpp"
@@ -15,6 +16,7 @@
 #include <chrono>
 #include <cctype>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace acecode {
@@ -22,10 +24,12 @@ namespace acecode {
 OpenAiCompatProvider::OpenAiCompatProvider(const std::string& base_url,
                                            const std::string& api_key,
                                            const std::string& model,
-                                           int stream_timeout_ms)
+                                           int stream_timeout_ms,
+                                           std::map<std::string, std::string> request_headers)
     : base_url_(normalize_base_url(base_url)),
       api_key_(api_key),
       model_(model),
+      request_headers_(std::move(request_headers)),
       stream_timeout_ms_(stream_timeout_ms > 0
           ? stream_timeout_ms
           : OpenAiConfig::kDefaultStreamTimeoutMs) {}
@@ -721,6 +725,17 @@ ChatResponse OpenAiCompatProvider::chat(
     if (!api_key_.empty()) {
         headers["Authorization"] = "Bearer " + api_key_;
     }
+    std::string header_error;
+    auto resolved_headers = resolve_request_headers(request_headers_, header_error);
+    if (!resolved_headers.has_value()) {
+        ChatResponse resp;
+        resp.content = "[Error] " + header_error;
+        resp.finish_reason = "error";
+        return resp;
+    }
+    for (const auto& [k, v] : *resolved_headers) {
+        headers[k] = v;
+    }
 
     auto proxy_opts = network::proxy_options_for(url);
     cpr::Response r = cpr::Post(
@@ -1267,6 +1282,19 @@ void OpenAiCompatProvider::chat_stream(
     std::map<std::string, std::string> extra_headers;
     if (!api_key_.empty()) {
         extra_headers["Authorization"] = "Bearer " + api_key_;
+    }
+    std::string header_error;
+    auto resolved_headers = resolve_request_headers(request_headers_, header_error);
+    if (!resolved_headers.has_value()) {
+        LOG_ERROR("OpenAI request_headers resolution failed: " + header_error);
+        StreamEvent evt;
+        evt.type = StreamEventType::Error;
+        evt.error = header_error;
+        callback(evt);
+        return;
+    }
+    for (const auto& [k, v] : *resolved_headers) {
+        extra_headers[k] = v;
     }
 
     parse_sse_stream(url, body, extra_headers, callback, abort_flag);

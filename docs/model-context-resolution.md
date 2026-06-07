@@ -76,6 +76,28 @@ Whenever the model changes, acecode now refreshes:
 
 For Web session create/resume, the first reported `context_window` may be the configured fallback if remote metadata is not cached yet; later session-facing resolutions reuse the process-local cache after a background probe succeeds.
 
+## OpenAI-Compatible Custom Request Headers
+
+OpenAI-compatible saved models can include optional `request_headers` metadata:
+
+```json
+{
+  "name": "gateway",
+  "provider": "openai",
+  "base_url": "https://gateway.example.com/v1",
+  "api_key": "sk-placeholder",
+  "model": "gpt-4o",
+  "request_headers": {
+    "X-Team": "acecode",
+    "X-Token": "{env:ACE_GATEWAY_TOKEN}"
+  }
+}
+```
+
+`request_headers` must be a JSON object with string header names and string template values. Templates may contain `{env:NAME}` placeholders; ACECode resolves them immediately before each OpenAI-compatible chat request or `/models` probe. Keep secrets in environment variables instead of writing literal secrets into `config.json`, because the unresolved templates are returned by the Web/Desktop model editor for later editing.
+
+`Content-Type` is controlled by ACECode and cannot be overridden. A custom `Authorization` header is allowed and overrides the built-in bearer header derived from `api_key`.
+
 ## Important Rule
 
 For known providers, do not assume `/models` returns the real context window.

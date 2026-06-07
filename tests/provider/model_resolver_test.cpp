@@ -87,20 +87,20 @@ TEST(ModelResolverTest, DisabledCodexResumeMetaFallsBackToDefault) {
     EXPECT_EQ(got.provider, "openai");
 }
 
-// 7.12 — saved_models 空 + default 空 → 从旧 schema 字段合成 copilot profile,
-// 确保 daemon / desktop 在未迁移配置下也能启动。
-TEST(ModelResolverTest, EmptyConfigUsesLegacyCopilotFallback) {
+// 7.12 — saved_models 空 + default 空 → 返回空 profile。旧 schema 迁移
+// 由 load_config 负责,resolver 不再静默合成 Copilot。
+TEST(ModelResolverTest, EmptyConfigReturnsEmptyProfile) {
     AppConfig cfg;
 
     ModelProfile got = resolve_effective_model(cfg, std::nullopt, std::nullopt);
-    EXPECT_EQ(got.name, "copilot");
-    EXPECT_EQ(got.provider, "copilot");
-    EXPECT_EQ(got.model, "gpt-4o");
+    EXPECT_TRUE(got.name.empty());
+    EXPECT_TRUE(got.provider.empty());
+    EXPECT_TRUE(got.model.empty());
 }
 
-// 额外 — saved_models 为空但旧 openai 字段可用时,直接用旧字段构造临时
-// profile。api_key 允许为空,由 OpenAI-compatible provider 决定是否发送鉴权头。
-TEST(ModelResolverTest, EmptyConfigUsesLegacyOpenAiFields) {
+// 额外 — saved_models 为空但旧 openai 字段可用时,resolver 仍不直接迁移;
+// load_config 会在缺失 saved_models key 时完成兼容迁移。
+TEST(ModelResolverTest, EmptyConfigWithOpenAiProviderReturnsEmptyProfile) {
     AppConfig cfg;
     cfg.provider = "openai";
     cfg.openai.base_url = "http://localhost:1234/v1";
@@ -108,25 +108,21 @@ TEST(ModelResolverTest, EmptyConfigUsesLegacyOpenAiFields) {
     cfg.openai.model = "local-model";
 
     ModelProfile got = resolve_effective_model(cfg, std::nullopt, std::nullopt);
-    EXPECT_EQ(got.name, "openai");
-    EXPECT_EQ(got.provider, "openai");
-    EXPECT_EQ(got.base_url, "http://localhost:1234/v1");
-    EXPECT_EQ(got.api_key, "");
-    EXPECT_EQ(got.model, "local-model");
+    EXPECT_TRUE(got.name.empty());
+    EXPECT_TRUE(got.provider.empty());
+    EXPECT_TRUE(got.model.empty());
 }
 
-// 额外 — saved_models 为空但旧 codex 字段可用时,屏蔽 codex 并回退 copilot。
-TEST(ModelResolverTest, EmptyConfigWithLegacyCodexFallsBackToCopilot) {
+// 额外 — saved_models 为空且旧 codex 字段可用时,也不回退 Copilot。
+TEST(ModelResolverTest, EmptyConfigWithLegacyCodexReturnsEmptyProfile) {
     AppConfig cfg;
     cfg.provider = "codex";
     cfg.codex.model = "gpt-5.5";
 
     ModelProfile got = resolve_effective_model(cfg, std::nullopt, std::nullopt);
-    EXPECT_EQ(got.name, "copilot");
-    EXPECT_EQ(got.provider, "copilot");
-    EXPECT_EQ(got.model, "gpt-4o");
-    EXPECT_TRUE(got.base_url.empty());
-    EXPECT_TRUE(got.api_key.empty());
+    EXPECT_TRUE(got.name.empty());
+    EXPECT_TRUE(got.provider.empty());
+    EXPECT_TRUE(got.model.empty());
 }
 
 // 7.13 — cwd override 指向已删 entry(saved_models 中不存在该 name)→

@@ -130,6 +130,21 @@ bool parse_model_args(const std::string& raw, std::string& flag,
 // announce 都在主线程跑(事件分支调它),因此可以放心读 cfg / state。
 void render_model_picker(CommandContext& ctx) {
     auto options = build_model_picker_options(ctx.config, current_effective_name(ctx));
+    if (options.empty()) {
+        {
+            std::lock_guard<std::mutex> lk(ctx.state.mu);
+            ctx.state.conversation.push_back({
+                "system",
+                u8"没有已配置的模型。请先运行 acecode configure，或使用 /model add 添加模型。",
+                false
+            });
+            ctx.state.chat_follow_tail = true;
+            ctx.state.model_picker_open = false;
+            ctx.state.model_picker_options.clear();
+        }
+        if (ctx.post_event) ctx.post_event();
+        return;
+    }
 
     // 捕获 picker on_pick 需要的所有原始引用 / 指针。
     auto* state_ptr = &ctx.state;

@@ -77,7 +77,7 @@ struct SessionRegistryDeps {
     // 全局 PermissionManager(用于派生 per-session perm 的 mode + rules
     // 起始值)。每个 session 自己的 PermissionManager 是独立实例,session_allowed_
     // 不串。
-    const PermissionManager*         template_permissions = nullptr;
+    PermissionManager*               template_permissions = nullptr;
 };
 
 class SessionRegistry {
@@ -122,6 +122,11 @@ public:
     // session-scoped so Web UI changes do not affect unrelated sessions.
     std::optional<PermissionMode> permission_mode(const std::string& id) const;
     bool set_permission_mode(const std::string& id, PermissionMode mode);
+
+    // Daemon-wide default for sessions created after this call. Existing
+    // sessions remain session-scoped and are not mutated here.
+    PermissionMode default_permission_mode() const;
+    void set_default_permission_mode(PermissionMode mode);
 
     BuiltinCommandResult execute_builtin_command(
         const std::string& id,

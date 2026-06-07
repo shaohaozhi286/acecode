@@ -2,15 +2,19 @@
 import assert from 'node:assert/strict';
 import {
   buildModelDraftsFromSelection,
+  canDeleteSavedModel,
   capabilitySearchText,
   filterSavedModels,
   filterModelIds,
+  formatRequestHeadersJson,
   formatContextWindowK,
   modelNameSlug,
   normalizeModelCapabilities,
   parseContextWindowK,
+  parseRequestHeadersJson,
   splitModelIds,
   validateModelDraft,
+  validateRequestHeaders,
 } from './modelManager.js';
 
 function run(name, fn) {
@@ -68,6 +72,53 @@ run('合法 openai 草稿 → ok', () => {
   }), { ok: true });
 });
 
+run('合法 request_headers 模板 → ok', () => {
+  assert.deepEqual(validateModelDraft({
+    name: 'lm',
+    provider: 'openai',
+    model: 'l',
+    base_url: 'http://x',
+    api_key: 'sk-x',
+    request_headers: {
+      Authorization: 'Bearer {env:ACE_TOKEN}',
+      'X-Team': 'acecode',
+    },
+  }), { ok: true });
+});
+
+run('copilot 不接受非空 request_headers', () => {
+  assert.equal(validateModelDraft({
+    name: 'lm',
+    provider: 'copilot',
+    model: 'gpt-4o',
+    request_headers: { 'X-Team': 'acecode' },
+  }).code, 'INVALID_REQUEST_HEADER');
+});
+
+run('request_headers 拒绝 Content-Type 与重复大小写 header', () => {
+  assert.equal(validateRequestHeaders({ 'Content-Type': 'text/plain' }).code,
+                'INVALID_REQUEST_HEADER');
+  assert.equal(validateRequestHeaders({ 'X-Team': 'a', 'x-team': 'b' }).code,
+                'INVALID_REQUEST_HEADER');
+});
+
+run('request_headers 拒绝非字符串值和 malformed env 占位符', () => {
+  assert.equal(validateRequestHeaders({ 'X-Team': 42 }).code, 'INVALID_REQUEST_HEADER');
+  assert.equal(validateRequestHeaders({ 'X-Token': '{env:}' }).code, 'INVALID_REQUEST_HEADER');
+  assert.equal(validateRequestHeaders({ 'Bad Header': 'x' }).code, 'INVALID_REQUEST_HEADER');
+});
+
+run('parseRequestHeadersJson 区分空输入、{} 和非法 JSON', () => {
+  assert.deepEqual(parseRequestHeadersJson(''), { ok: true, headers: undefined });
+  assert.deepEqual(parseRequestHeadersJson('{}'), { ok: true, headers: {} });
+  assert.equal(parseRequestHeadersJson('{bad').code, 'INVALID_REQUEST_HEADER');
+});
+
+run('formatRequestHeadersJson 格式化已保存模板', () => {
+  assert.equal(formatRequestHeadersJson({ 'X-Team': 'acecode' }), '{\n  "X-Team": "acecode"\n}');
+  assert.equal(formatRequestHeadersJson({}), '');
+});
+
 run('非法 context_window → INVALID_CONTEXT_WINDOW', () => {
   assert.equal(validateModelDraft({
     name: 'lm', provider: 'copilot', model: 'l', context_window: -1,
@@ -121,6 +172,27 @@ run('filterSavedModels 支持按能力标签搜索', () => {
   assert.deepEqual(filterSavedModels(models, 'vision').map((m) => m.name), ['eyes']);
   assert.deepEqual(filterSavedModels(models, 'websearch').map((m) => m.name), ['net']);
   assert.deepEqual(filterSavedModels(models, '联网').map((m) => m.name), ['net']);
+});
+
+run('canDeleteSavedModel 允许删除唯一默认模型', () => {
+  assert.equal(canDeleteSavedModel({
+    models: [{ name: 'only' }],
+    defaultName: 'only',
+    name: 'only',
+  }), true);
+});
+
+run('canDeleteSavedModel 拒绝删除多模型默认项', () => {
+  assert.equal(canDeleteSavedModel({
+    models: [{ name: 'default' }, { name: 'other' }],
+    defaultName: 'default',
+    name: 'default',
+  }), false);
+  assert.equal(canDeleteSavedModel({
+    models: [{ name: 'default' }, { name: 'other' }],
+    defaultName: 'default',
+    name: 'other',
+  }), true);
 });
 
 run('parseContextWindowK 把 K 单位换算为 token 数', () => {

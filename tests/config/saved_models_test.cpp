@@ -236,6 +236,77 @@ TEST(SavedModelsTest, OptionalCapabilitiesParseAndValidate) {
     EXPECT_TRUE(validate_saved_models(*parsed, "vision-lm", err)) << err;
 }
 
+// 额外 — request_headers 是可选 JSON object,值保持模板形态不解析环境变量。
+TEST(SavedModelsTest, OptionalRequestHeadersParseAndValidate) {
+    nlohmann::json j = nlohmann::json::array();
+    j.push_back({
+        {"name", "local-lm"},
+        {"provider", "openai"},
+        {"base_url", "http://localhost:1234/v1"},
+        {"api_key", "x"},
+        {"model", "llama-3"},
+        {"request_headers", {
+            {"X-Team", "acecode"},
+            {"X-Token", "{env:ACE_TOKEN}"}
+        }}
+    });
+
+    std::string err;
+    auto parsed = parse_saved_models(j, err);
+    ASSERT_TRUE(parsed.has_value()) << err;
+    ASSERT_EQ(parsed->size(), 1u);
+    EXPECT_EQ((*parsed)[0].request_headers.at("X-Team"), "acecode");
+    EXPECT_EQ((*parsed)[0].request_headers.at("X-Token"), "{env:ACE_TOKEN}");
+
+    err.clear();
+    EXPECT_TRUE(validate_saved_models(*parsed, "local-lm", err)) << err;
+}
+
+// 额外 — request_headers 不能覆盖 ACECode 固定管理的 Content-Type。
+TEST(SavedModelsTest, RequestHeadersRejectContentType) {
+    ModelProfile e;
+    e.name = "local";
+    e.provider = "openai";
+    e.base_url = "http://localhost:1234/v1";
+    e.api_key = "x";
+    e.model = "llama-3";
+    e.request_headers = {{"Content-Type", "text/plain"}};
+
+    std::string err;
+    EXPECT_FALSE(validate_saved_models({e}, "", err));
+    EXPECT_NE(err.find("request_headers"), std::string::npos) << err;
+    EXPECT_NE(err.find("Content-Type"), std::string::npos) << err;
+}
+
+// 额外 — malformed {env:...} 占位符必须在配置校验阶段拒绝。
+TEST(SavedModelsTest, RequestHeadersRejectMalformedEnvPlaceholder) {
+    ModelProfile e;
+    e.name = "local";
+    e.provider = "openai";
+    e.base_url = "http://localhost:1234/v1";
+    e.api_key = "x";
+    e.model = "llama-3";
+    e.request_headers = {{"X-Token", "{env:}"}};
+
+    std::string err;
+    EXPECT_FALSE(validate_saved_models({e}, "", err));
+    EXPECT_NE(err.find("request_headers"), std::string::npos) << err;
+}
+
+// 额外 — request_headers 只属于 OpenAI-compatible saved model。
+TEST(SavedModelsTest, RequestHeadersRejectNonOpenAiProvider) {
+    ModelProfile e;
+    e.name = "copilot-fast";
+    e.provider = "copilot";
+    e.model = "gpt-4o";
+    e.request_headers = {{"X-Team", "acecode"}};
+
+    std::string err;
+    EXPECT_FALSE(validate_saved_models({e}, "", err));
+    EXPECT_NE(err.find("request_headers"), std::string::npos) << err;
+    EXPECT_NE(err.find("provider"), std::string::npos) << err;
+}
+
 // 额外 — capabilities 内重复标签不通过 validate,避免路由/搜索出现歧义。
 TEST(SavedModelsTest, DuplicateCapabilitiesFailValidation) {
     ModelProfile e;
@@ -394,6 +465,42 @@ TEST(SavedModelsTest, SaveConfigPersistsCapabilities) {
     ASSERT_EQ(saved["saved_models"].size(), 1u);
     EXPECT_EQ(saved["saved_models"][0]["capabilities"],
               nlohmann::json::array({"vision", "tool_use"}));
+
+    std::filesystem::remove(path, ec);
+}
+
+// 额外 — save_config 把 request_headers 模板原样写回 saved_models entry。
+TEST(SavedModelsTest, SaveConfigPersistsRequestHeaders) {
+    const auto suffix = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto path = std::filesystem::temp_directory_path() /
+        ("acecode-request-headers-" + std::to_string(suffix) + ".json");
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+
+    AppConfig cfg;
+    ModelProfile e;
+    e.name = "local";
+    e.provider = "openai";
+    e.base_url = "http://localhost:1234/v1";
+    e.api_key = "sk-test";
+    e.model = "llama-3";
+    e.request_headers = {
+        {"Authorization", "Bearer {env:ACE_TOKEN}"},
+        {"X-Team", "acecode"}
+    };
+    cfg.saved_models.push_back(e);
+    cfg.default_model_name = "local";
+    save_config(cfg, path.string());
+
+    std::ifstream ifs(path);
+    ASSERT_TRUE(ifs.is_open());
+    const auto saved = nlohmann::json::parse(ifs);
+    ASSERT_TRUE(saved.contains("saved_models"));
+    ASSERT_EQ(saved["saved_models"].size(), 1u);
+    ASSERT_TRUE(saved["saved_models"][0].contains("request_headers"));
+    EXPECT_EQ(saved["saved_models"][0]["request_headers"]["Authorization"],
+              "Bearer {env:ACE_TOKEN}");
+    EXPECT_EQ(saved["saved_models"][0]["request_headers"]["X-Team"], "acecode");
 
     std::filesystem::remove(path, ec);
 }

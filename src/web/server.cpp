@@ -6,6 +6,7 @@
 #include "../auth/github_auth.hpp"
 #include "../config/config.hpp"
 #include "../config/saved_models_editor.hpp"
+#include "../config/request_headers.hpp"
 #include "../desktop/workspace_registry.hpp"
 #include "../provider/llm_provider.hpp"
 #include "../session/ask_user_question_prompter.hpp"
@@ -3290,6 +3291,9 @@ struct WebServer::Impl {
                     if (!body.contains("capabilities")) {
                         draft->capabilities = existing->capabilities;
                     }
+                    if (!body.contains("request_headers")) {
+                        draft->request_headers = existing->request_headers;
+                    }
                 }
             }
 
@@ -3329,7 +3333,8 @@ struct WebServer::Impl {
             return with_cors(req, std::move(r));
         });
 
-        // DELETE /api/models/<name>: 删除 saved_models 条目。default 不能删。
+        // DELETE /api/models/<name>: 删除 saved_models 条目。多模型时 default 不能删;
+        // 唯一 default 可删并清空 default_model_name。
         CROW_ROUTE(app, "/api/models/<string>").methods(crow::HTTPMethod::Delete)
         ([this](const crow::request& req, const std::string& url_name) {
             if (auto rej = require_auth(req)) return std::move(*rej);
@@ -3343,6 +3348,7 @@ struct WebServer::Impl {
             };
 
             auto snapshot = deps.app_config->saved_models;
+            auto default_snapshot = deps.app_config->default_model_name;
             auto rc = remove_saved_model(*deps.app_config, url_name);
             if (rc != SavedModelEditError::OK) {
                 return json_err(http_status_for_edit_error(rc),
@@ -3357,6 +3363,7 @@ struct WebServer::Impl {
                 }
             } catch (const std::exception& e) {
                 deps.app_config->saved_models = std::move(snapshot);
+                deps.app_config->default_model_name = std::move(default_snapshot);
                 return json_err(500, "PERSIST_FAILED", e.what());
             }
 
@@ -3425,6 +3432,10 @@ struct WebServer::Impl {
         ([this](const crow::request& req) {
             return cors_preflight(req);
         });
+        CROW_ROUTE(app, "/api/config/default-permission-mode").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
         CROW_ROUTE(app, "/api/update/status").methods(crow::HTTPMethod::Options)
         ([this](const crow::request& req) {
             return cors_preflight(req);
@@ -3446,6 +3457,18 @@ struct WebServer::Impl {
             crow::response r(200);
             r.add_header("Content-Type", "application/json");
             r.body = ui_preferences_to_json(deps.app_config->web_ui).dump();
+            return with_cors(req, std::move(r));
+        });
+
+        // GET /api/config/default-permission-mode: daemon default for new sessions.
+        CROW_ROUTE(app, "/api/config/default-permission-mode").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.app_config) return crow::response(503);
+            auto parsed = parse_permission_mode_name(deps.app_config->default_permission_mode);
+            crow::response r(200);
+            r.add_header("Content-Type", "application/json");
+            r.body = permission_mode_to_json(parsed.value_or(PermissionMode::Default)).dump();
             return with_cors(req, std::move(r));
         });
 
@@ -3511,6 +3534,56 @@ struct WebServer::Impl {
             r.body = json{{"started", true},
                           {"latest_version", result.latest_version},
                           {"message", "acecode update started"}}.dump();
+            return with_cors(req, std::move(r));
+        });
+
+        // PUT /api/config/default-permission-mode body {mode:string}.
+        CROW_ROUTE(app, "/api/config/default-permission-mode").methods(crow::HTTPMethod::PUT)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.app_config) return crow::response(503);
+
+            auto json_err = [&](int status, const char* code, const std::string& msg) {
+                crow::response r(status);
+                r.body = json{{"error", code}, {"message", msg}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            };
+
+            json body;
+            try { body = json::parse(req.body); }
+            catch (const std::exception& e) {
+                return json_err(400, "BAD_JSON", std::string("invalid JSON body: ") + e.what());
+            }
+            if (!body.is_object() ||
+                !body.contains("mode") ||
+                !body["mode"].is_string()) {
+                return json_err(400, "BAD_REQUEST", "expected {mode: string}");
+            }
+            auto mode = parse_permission_mode_name(body["mode"].get<std::string>());
+            if (!mode.has_value()) {
+                return json_err(400, "INVALID_PERMISSION_MODE", "invalid permission mode");
+            }
+
+            const std::string before = deps.app_config->default_permission_mode;
+            deps.app_config->default_permission_mode = PermissionManager::mode_name(*mode);
+            try {
+                if (!deps.config_path.empty()) {
+                    save_config(*deps.app_config, deps.config_path);
+                } else {
+                    save_config(*deps.app_config);
+                }
+            } catch (const std::exception& e) {
+                deps.app_config->default_permission_mode = before;
+                return json_err(500, "PERSIST_FAILED", e.what());
+            }
+            if (deps.session_registry) {
+                deps.session_registry->set_default_permission_mode(*mode);
+            }
+
+            crow::response r(200);
+            r.add_header("Content-Type", "application/json");
+            r.body = permission_mode_to_json(*mode).dump();
             return with_cors(req, std::move(r));
         });
 
@@ -3680,6 +3753,14 @@ struct WebServer::Impl {
             cpr::Header headers = {{"Content-Type", "application/json"}};
             if (!parsed->api_key.empty()) {
                 headers["Authorization"] = "Bearer " + parsed->api_key;
+            }
+            std::string header_error;
+            auto resolved_headers = resolve_request_headers(parsed->request_headers, header_error);
+            if (!resolved_headers.has_value()) {
+                return json_err(400, "INVALID_REQUEST_HEADER", header_error);
+            }
+            for (const auto& [k, v] : *resolved_headers) {
+                headers[k] = v;
             }
             auto proxy_opts = network::proxy_options_for(url);
             cpr::Response response = cpr::Get(

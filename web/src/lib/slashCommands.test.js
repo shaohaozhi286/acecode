@@ -15,8 +15,11 @@ import {
   fallbackCommands,
   parseLeadingCommand,
   deleteLeadingCommandBlock,
+  moveAcrossLeadingCommandBlock,
+  normalizeLeadingCommandSelection,
   parseExecutableBuiltinCommand,
   resolveLeadingSlashCommand,
+  slashCommandKindPresentation,
 } from './slashCommands.js';
 
 function run(name, fn) {
@@ -67,6 +70,26 @@ run('fallbackCommands 返回基础 builtin 命令', () => {
   assert.equal(r[2].name, 'goal');
   assert.equal(r[3].kind, 'builtin');
   assert.equal(r[3].name, 'plan');
+});
+
+run('slashCommandKindPresentation 只返回 glyph 与 label,颜色由 UI 统一处理', () => {
+  const builtin = slashCommandKindPresentation({ kind: 'builtin' });
+  const skill = slashCommandKindPresentation({ kind: 'skill' });
+  const fallback = slashCommandKindPresentation({});
+  assert.deepEqual(builtin, {
+    icon: 'tool',
+    label: '内置工具',
+  });
+  assert.deepEqual(skill, {
+    icon: 'lightbulb',
+    label: 'Skill',
+  });
+  assert.deepEqual(fallback, {
+    icon: 'lightbulb',
+    label: 'Skill',
+  });
+  assert.equal(Object.hasOwn(builtin, 'color'), false);
+  assert.equal(Object.hasOwn(skill, 'className'), false);
 });
 
 run('commandsWithFallback:空响应回退到基础命令', () => {
@@ -258,6 +281,47 @@ run('deleteLeadingCommandBlock:不碰到命令块时返回 null', () => {
   assert.equal(deleteLeadingCommandBlock('plain', { name: null, headLength: 0 }, 1, 1, 'backward'), null);
 });
 
+run('normalizeLeadingCommandSelection:光标落在命令块内部时归到块后', () => {
+  const text = '/init hello';
+  const leading = parseLeadingCommand(text, ['init']);
+  assert.deepEqual(normalizeLeadingCommandSelection(text, leading, 3, 3), {
+    selectionStart: 6,
+    selectionEnd: 6,
+  });
+  assert.equal(normalizeLeadingCommandSelection(text, leading, 0, 0), null);
+  assert.equal(normalizeLeadingCommandSelection(text, leading, 6, 6), null);
+  assert.equal(normalizeLeadingCommandSelection(text, leading, 7, 7), null);
+});
+
+run('normalizeLeadingCommandSelection:选区碰到命令块内部时扩成整块', () => {
+  const text = '/init hello world';
+  const leading = parseLeadingCommand(text, ['init']);
+  assert.deepEqual(normalizeLeadingCommandSelection(text, leading, 0, 3), {
+    selectionStart: 0,
+    selectionEnd: 6,
+  });
+  assert.deepEqual(normalizeLeadingCommandSelection(text, leading, 3, 11), {
+    selectionStart: 0,
+    selectionEnd: 11,
+  });
+  assert.equal(normalizeLeadingCommandSelection(text, leading, 6, 11), null);
+});
+
+run('moveAcrossLeadingCommandBlock:左右方向键一次跨过命令块', () => {
+  const text = '/init hello';
+  const leading = parseLeadingCommand(text, ['init']);
+  assert.deepEqual(moveAcrossLeadingCommandBlock(text, leading, 6, 6, 'backward'), {
+    selectionStart: 0,
+    selectionEnd: 0,
+  });
+  assert.deepEqual(moveAcrossLeadingCommandBlock(text, leading, 0, 0, 'forward'), {
+    selectionStart: 6,
+    selectionEnd: 6,
+  });
+  assert.equal(moveAcrossLeadingCommandBlock(text, leading, 7, 7, 'backward'), null);
+  assert.equal(moveAcrossLeadingCommandBlock(text, leading, 0, 6, 'forward'), null);
+});
+
 // resolveLeadingSlashCommand:transcript 用户气泡把首段命令渲染成徽标的解析层。
 // 触发场景:用户发送 "/<skill> 参数",UI 要把 "/skill" 切出来高亮 + 取描述做 hover。
 run('resolveLeadingSlashCommand:命中 skill,切出 token/rest 并带回 kind 与描述', () => {
@@ -276,6 +340,17 @@ run('resolveLeadingSlashCommand:命中 builtin 也返回 builtin kind', () => {
   assert.equal(r.kind, 'builtin');
   assert.equal(r.token, '/init');
   assert.equal(r.rest, '');
+});
+
+run('resolveLeadingSlashCommand:输入框 chip 可从首段命令取回对应 glyph', () => {
+  const selectedBuiltin = resolveLeadingSlashCommand('/init ', ITEMS);
+  const typedSkill = resolveLeadingSlashCommand('/code-review 看看第三个改动', ITEMS);
+  assert.equal(slashCommandKindPresentation(selectedBuiltin).icon, 'tool');
+  assert.equal(selectedBuiltin.token, '/init');
+  assert.equal(selectedBuiltin.rest, ' ');
+  assert.equal(slashCommandKindPresentation(typedSkill).icon, 'lightbulb');
+  assert.equal(typedSkill.token, '/code-review');
+  assert.equal(typedSkill.rest, ' 看看第三个改动');
 });
 
 // 期望行为:未命中 skill(命令名未知)必须返回 null,UI 据此回退纯文本,
