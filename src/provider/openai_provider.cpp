@@ -64,6 +64,118 @@ std::string provider_error_kind_to_string(ProviderErrorKind kind) {
     return "unknown";
 }
 
+std::optional<std::size_t> find_complete_json_prefix_end(const std::string& value) {
+    std::size_t i = 0;
+    while (i < value.size() &&
+           std::isspace(static_cast<unsigned char>(value[i]))) {
+        ++i;
+    }
+    if (i >= value.size()) return std::nullopt;
+
+    const char first = value[i];
+    if (first != '{' && first != '[') return std::nullopt;
+
+    std::vector<char> stack;
+    bool in_string = false;
+    bool escaped = false;
+    for (; i < value.size(); ++i) {
+        const char c = value[i];
+        if (in_string) {
+            if (escaped) {
+                escaped = false;
+            } else if (c == '\\') {
+                escaped = true;
+            } else if (c == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+
+        if (c == '"') {
+            in_string = true;
+            continue;
+        }
+        if (c == '{') {
+            stack.push_back('}');
+            continue;
+        }
+        if (c == '[') {
+            stack.push_back(']');
+            continue;
+        }
+        if (c == '}' || c == ']') {
+            if (stack.empty() || stack.back() != c) return std::nullopt;
+            stack.pop_back();
+            if (stack.empty()) return i + 1;
+        }
+    }
+    return std::nullopt;
+}
+
+std::string normalize_tool_call_arguments_for_request(
+    const std::string& arguments,
+    const std::string& tool_name,
+    const std::string& tool_call_id,
+    int& repaired_count) {
+    auto parsed = nlohmann::json::parse(arguments, nullptr, false);
+    if (!parsed.is_discarded()) return arguments;
+
+    if (auto prefix_end = find_complete_json_prefix_end(arguments)) {
+        std::string suffix = arguments.substr(*prefix_end);
+        const bool trailing_garbage = std::any_of(
+            suffix.begin(), suffix.end(), [](unsigned char c) {
+                return !std::isspace(c);
+            });
+        if (trailing_garbage) {
+            auto prefix = nlohmann::json::parse(
+                arguments.substr(0, *prefix_end), nullptr, false);
+            if (!prefix.is_discarded()) {
+                ++repaired_count;
+                LOG_WARN("build_request_body: trimmed invalid trailing bytes from "
+                         "tool_call arguments id='" + tool_call_id + "' tool='" +
+                         tool_name + "' raw=" + log_truncate(arguments, 200));
+                return prefix.dump();
+            }
+        }
+    }
+
+    ++repaired_count;
+    LOG_WARN("build_request_body: replaced invalid tool_call arguments with {} "
+             "id='" + tool_call_id + "' tool='" + tool_name +
+             "' raw=" + log_truncate(arguments, 200));
+    return "{}";
+}
+
+nlohmann::json normalize_tool_calls_for_request(const nlohmann::json& tool_calls,
+                                                int& repaired_count) {
+    if (!tool_calls.is_array()) return tool_calls;
+
+    nlohmann::json out = tool_calls;
+    for (auto& tc : out) {
+        if (!tc.is_object() || !tc.contains("function") ||
+            !tc["function"].is_object()) {
+            continue;
+        }
+
+        auto& fn = tc["function"];
+        const std::string tool_name = fn.value("name", std::string{});
+        const std::string tool_call_id = tc.value("id", std::string{});
+        if (fn.contains("arguments") && fn["arguments"].is_string()) {
+            fn["arguments"] = normalize_tool_call_arguments_for_request(
+                fn["arguments"].get<std::string>(),
+                tool_name,
+                tool_call_id,
+                repaired_count);
+        } else {
+            ++repaired_count;
+            LOG_WARN("build_request_body: inserted missing tool_call arguments {} "
+                     "id='" + tool_call_id + "' tool='" + tool_name + "'");
+            fn["arguments"] = "{}";
+        }
+    }
+    return out;
+}
+
 bool parse_json_body(const std::string& body,
                      bool& body_is_json,
                      std::string& pretty_json) {
@@ -550,6 +662,7 @@ nlohmann::json OpenAiCompatProvider::build_request_body(
     // 防止 resume/压缩/旧 session 等路径意外污染 messages_ 时把整个请求打挂。
     nlohmann::json msgs_json = nlohmann::json::array();
     int dropped_invalid_role = 0;
+    int repaired_tool_arguments = 0;
     for (const auto& msg : messages) {
         const bool valid_role = (msg.role == "system" || msg.role == "user" ||
                                  msg.role == "assistant" || msg.role == "tool");
@@ -570,7 +683,8 @@ nlohmann::json OpenAiCompatProvider::build_request_body(
             } else {
                 m["content"] = nullptr;
             }
-            m["tool_calls"] = msg.tool_calls;
+            m["tool_calls"] = normalize_tool_calls_for_request(
+                msg.tool_calls, repaired_tool_arguments);
         } else if (msg.role == "tool") {
             m["content"] = msg.content;
             m["tool_call_id"] = msg.tool_call_id;
@@ -592,6 +706,11 @@ nlohmann::json OpenAiCompatProvider::build_request_body(
     if (dropped_invalid_role > 0) {
         LOG_WARN("build_request_body: total " + std::to_string(dropped_invalid_role) +
                  " message(s) dropped due to invalid role");
+    }
+    if (repaired_tool_arguments > 0) {
+        LOG_WARN("build_request_body: repaired " +
+                 std::to_string(repaired_tool_arguments) +
+                 " tool_call argument payload(s)");
     }
 
     // Orphan tool_call 防御:OpenAI / Chat Completions 严格要求

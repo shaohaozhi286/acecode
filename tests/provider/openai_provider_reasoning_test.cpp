@@ -423,6 +423,73 @@ TEST(OpenAiProviderReasoningTest, MatchedToolCallStaysIntactNoExtraStub) {
     EXPECT_EQ(msgs[1]["content"].get<std::string>(), "real result");
 }
 
+// 用例 8.1(回归测试,2026-06-08 用户真实 session 触发):
+// 历史 assistant.tool_calls 中 memory_read 的 function.arguments 被持久化为
+// `{}""`。多个 OpenAI-compatible 网关都会在恢复后的下一次请求里 400:
+// "unexpected content after document" / "function.arguments ... must be JSON"。
+// 请求出口应把这类"完整 JSON 后面多出尾巴"的历史参数修回合法 JSON。
+TEST(OpenAiProviderReasoningTest, CorruptPersistedToolArgumentsAreTrimmed) {
+    TestableProvider provider("http://example.invalid", "", "test-model");
+
+    ChatMessage assistant_msg;
+    assistant_msg.role = "assistant";
+    assistant_msg.content = "";
+    assistant_msg.tool_calls = nlohmann::json::array({
+        nlohmann::json{
+            {"id", "call_257a67d0f1c64848a236fddb"},
+            {"type", "function"},
+            {"function", {
+                {"name", "memory_read"},
+                {"arguments", "{}\"\""}
+            }}
+        }
+    });
+
+    ChatMessage tool_msg;
+    tool_msg.role = "tool";
+    tool_msg.content = "memory result";
+    tool_msg.tool_call_id = "call_257a67d0f1c64848a236fddb";
+
+    auto body = provider.build_request_body({assistant_msg, tool_msg}, {}, false);
+    const auto& msgs = body["messages"];
+    ASSERT_EQ(msgs.size(), 2u);
+    ASSERT_TRUE(msgs[0].contains("tool_calls"));
+    const auto& tool_calls = msgs[0]["tool_calls"];
+    ASSERT_EQ(tool_calls.size(), 1u);
+    EXPECT_EQ(tool_calls[0]["function"]["arguments"].get<std::string>(), "{}");
+}
+
+// 用例 8.2:健康历史不应被规范化逻辑重写。这里保留空格顺序,证明合法
+// arguments 字符串按原样发给 provider。
+TEST(OpenAiProviderReasoningTest, ValidPersistedToolArgumentsStayUnchanged) {
+    TestableProvider provider("http://example.invalid", "", "test-model");
+
+    const std::string raw_args = "{\"path\": \"D:/1000src/mailsdk\", \"pattern\": \"**/*.md\"}";
+    ChatMessage assistant_msg;
+    assistant_msg.role = "assistant";
+    assistant_msg.content = "";
+    assistant_msg.tool_calls = nlohmann::json::array({
+        nlohmann::json{
+            {"id", "call_valid"},
+            {"type", "function"},
+            {"function", {
+                {"name", "glob"},
+                {"arguments", raw_args}
+            }}
+        }
+    });
+
+    ChatMessage tool_msg;
+    tool_msg.role = "tool";
+    tool_msg.content = "glob result";
+    tool_msg.tool_call_id = "call_valid";
+
+    auto body = provider.build_request_body({assistant_msg, tool_msg}, {}, false);
+    const auto& args =
+        body["messages"][0]["tool_calls"][0]["function"]["arguments"];
+    EXPECT_EQ(args.get<std::string>(), raw_args);
+}
+
 // 用例:ToolExecutor 提供确定性工具顺序,OpenAI-compatible request body
 // 通过 tools array 发送 schema,不依赖 system prompt 里的重复 schema 文本。
 TEST(OpenAiProviderReasoningTest, BuildRequestBodyUsesDeterministicToolsArray) {
