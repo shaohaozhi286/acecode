@@ -101,7 +101,7 @@ struct TuiState {
 
     // Input history for up/down navigation
     std::vector<std::string> input_history;
-    int history_index = -1; // -1 = not browsing history
+    int history_index = -1; // -1 = not browsing history; TUI helpers may use private sentinels
     std::string saved_input; // saved current input when entering history
 
     // Pending message queue

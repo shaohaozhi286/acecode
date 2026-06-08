@@ -9,9 +9,14 @@ function hasFindModifier(event) {
 }
 
 export function isFindShortcut(event) {
+  if (!event || event.altKey) return false;
+  const key = typeof event.key === 'string' ? event.key.toLowerCase() : '';
+  const code = typeof event.code === 'string' ? event.code.toLowerCase() : '';
+  if ((key === 'f3' || code === 'f3') && !event.ctrlKey && !event.metaKey) {
+    return true;
+  }
   if (!hasFindModifier(event)) return false;
-  if (event.altKey) return false;
-  return typeof event.key === 'string' && event.key.toLowerCase() === 'f';
+  return key === 'f';
 }
 
 export function isComposingInputEvent(event, composing = false) {

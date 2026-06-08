@@ -7,6 +7,7 @@ import {
   DESKTOP_CONTEXT_ACTION_EVENT,
   DESKTOP_CONTEXT_ACTIONS,
 } from '../lib/desktopContextMenu.js';
+import { resolveSelectionSourcePath } from '../lib/selectionChatContext.js';
 import { copyTextToSystemClipboard } from '../lib/systemClipboard.js';
 import { clsx, formatBytes } from '../lib/format.js';
 import { CopyableCodeFrame } from './CopyableCodeFrame.jsx';
@@ -45,7 +46,7 @@ async function copyWithToast(text, okText) {
   else toast({ kind: 'err', text: '复制失败:' + (result.error || '') });
 }
 
-export function FilePreviewContent({ api, cwd, path, wrapPreview, onToggleWrapPreview, refreshToken }) {
+export function FilePreviewContent({ api, cwd, path, wrapPreview, onToggleWrapPreview }) {
   const [state, setState] = useState({
     status: 'idle',
     kind: 'text',
@@ -169,7 +170,7 @@ export function FilePreviewContent({ api, cwd, path, wrapPreview, onToggleWrapPr
       setState({ status: 'error', kind: 'text', text: '', error: msg, lang: '', size: extraSize, imageUrl: '', contentType: '' });
     });
     return () => { cancelled = true; };
-  }, [api, cwd, path, refreshToken]);
+  }, [api, cwd, path]);
 
   if (!path) {
     return <div className="ace-empty-state">未选中文件,请在「文件」中点击一个文件</div>;
@@ -186,8 +187,11 @@ export function FilePreviewContent({ api, cwd, path, wrapPreview, onToggleWrapPr
     );
   }
   if (state.status !== 'ok') return null;
+  const sourcePath = resolveSelectionSourcePath({ cwd, path });
   const previewAttrs = {
     'data-desktop-preview-path': path || undefined,
+    'data-desktop-preview-cwd': cwd || undefined,
+    'data-desktop-preview-source-path': sourcePath || path || undefined,
     'data-desktop-preview-kind': state.kind || undefined,
     'data-desktop-preview-size': Number.isFinite(state.size) ? String(state.size) : undefined,
     'data-desktop-preview-content-type': state.contentType || undefined,

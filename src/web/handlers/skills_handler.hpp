@@ -37,7 +37,7 @@ struct SkillRootSelection {
 
 SkillRootSelection select_skill_root(const std::filesystem::path& workspace_cwd,
                                      const std::filesystem::path& global_acecode_skills_root,
-                                     bool create_global_fallback);
+                                     bool create_missing_roots);
 
 SkillRootSelection resolve_skill_root_for_cwd(const std::string& workspace_cwd_utf8);
 

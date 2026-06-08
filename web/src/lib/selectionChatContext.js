@@ -30,6 +30,25 @@ export function basenameForPath(path) {
   return parts.length ? parts[parts.length - 1] : value;
 }
 
+function isAbsolutePath(path) {
+  const value = asString(path);
+  return /^[a-zA-Z]:[\\/]/.test(value) || value.startsWith('\\\\') || value.startsWith('/');
+}
+
+export function resolveSelectionSourcePath({ cwd = '', path = '' } = {}) {
+  const filePath = asString(path);
+  if (!filePath) return '';
+  if (isAbsolutePath(filePath)) return filePath;
+  const base = asString(cwd);
+  if (!base) return filePath;
+  const sep = base.includes('\\') ? '\\' : '/';
+  const cleanBase = base.replace(/[\\/]+$/, '');
+  const cleanPath = filePath.replace(/^[\\/]+/, '');
+  const normalizedPath = sep === '\\' ? cleanPath.replace(/\//g, '\\') : cleanPath.replace(/\\/g, '/');
+  if (!cleanBase) return `${sep}${normalizedPath}`;
+  return `${cleanBase}${sep}${normalizedPath}`;
+}
+
 export function formatSelectionLineRange(source = {}) {
   const start = positiveInt(source.start_line ?? source.startLine);
   const end = positiveInt(source.end_line ?? source.endLine);
@@ -222,7 +241,12 @@ export function selectionContextFromWindowSelection({
   }
   if (!preview) return null;
 
-  const path = preview.getAttribute('data-desktop-preview-path') || '';
+  const displayPath = preview.getAttribute('data-desktop-preview-path') || '';
+  const path = preview.getAttribute('data-desktop-preview-source-path')
+    || resolveSelectionSourcePath({
+      cwd: preview.getAttribute('data-desktop-preview-cwd') || '',
+      path: displayPath,
+    });
   if (!path) return null;
   const kind = preview.getAttribute('data-desktop-preview-kind') || '';
   if (kind === 'image') return null;

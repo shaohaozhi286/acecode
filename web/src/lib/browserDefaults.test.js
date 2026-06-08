@@ -1,9 +1,12 @@
-// Browser default guard tests cover zoom shortcut detection. The listener
-// install path is intentionally small and browser-owned, so pure matching is
-// enough for Node-side coverage.
+// Browser default guard tests cover shortcut detection. The listener install
+// path is intentionally small, so pure matching is enough for Node-side
+// coverage.
 
 import assert from 'node:assert/strict';
-import { isBrowserZoomShortcut } from './browserDefaults.js';
+import {
+  isBlockedBrowserDefaultShortcut,
+  isBrowserZoomShortcut,
+} from './browserDefaults.js';
 
 function run(name, fn) {
   try {
@@ -37,4 +40,12 @@ run('Ctrl+K remains available for app shortcuts', () => {
 
 run('Zoom keys without ctrl/meta are ignored', () => {
   assert.equal(isBrowserZoomShortcut({ key: '+', code: 'Equal' }), false);
+});
+
+run('Ctrl+F native find shortcut is blocked', () => {
+  assert.equal(isBlockedBrowserDefaultShortcut({ key: 'f', ctrlKey: true }), true);
+});
+
+run('F3 native find shortcut is blocked', () => {
+  assert.equal(isBlockedBrowserDefaultShortcut({ key: 'F3' }), true);
 });

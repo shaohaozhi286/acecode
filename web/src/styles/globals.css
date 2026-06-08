@@ -152,6 +152,52 @@ body {
 .ace-shadow    { box-shadow: var(--ace-shadow); }
 .ace-shadow-lg { box-shadow: var(--ace-shadow-lg); }
 
+.ace-token-budget-button {
+  appearance: none;
+  border: 0;
+  border-radius: 999px;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  cursor: help;
+}
+.ace-token-budget-button:hover,
+.ace-token-budget-button:focus-visible {
+  color: var(--ace-fg);
+  outline: none;
+}
+.ace-token-budget-button:focus-visible {
+  box-shadow: 0 0 0 1px rgba(var(--ace-accent-rgb), 0.45);
+}
+.ace-token-budget-tip {
+  position: fixed;
+  z-index: 220;
+  display: block;
+  width: max-content;
+  max-width: min(320px, calc(100vw - 16px));
+  padding: 6px 9px;
+  border-radius: 7px;
+  background: var(--ace-surface);
+  border: 1px solid var(--ace-border);
+  color: var(--ace-fg);
+  font-size: 11px;
+  line-height: 1.45;
+  font-weight: 400;
+  text-align: center;
+  white-space: normal;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+  pointer-events: none;
+  transform: translateX(-50%);
+  animation: ace-token-budget-tip-in 0.12s ease both;
+}
+.ace-token-budget-tip[data-placement="below"] {
+  --ace-tip-from: -3px;
+}
+@keyframes ace-token-budget-tip-in {
+  from { opacity: 0; transform: translateX(-50%) translateY(var(--ace-tip-from, 3px)); }
+  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+
 /* Older Chromium/WebView compatibility.
    Tailwind v4 slash-opacity utilities compile to modern color mixing, which can
    render as solid color blocks in some older embedded browsers. Keep stable

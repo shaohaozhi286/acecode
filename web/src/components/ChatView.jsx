@@ -2370,7 +2370,6 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
             activeTab={activePreview}
             changeGroups={changeGroups}
             changeSummary={changeSummary}
-            refreshToken={fileTreeRefreshKey}
             maximized={previewPanelMaximized}
             onActivateTab={activatePreview}
             onCloseTab={closePreview}

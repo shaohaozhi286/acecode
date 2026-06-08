@@ -4,6 +4,7 @@ import {
   formatSelectionContextLabel,
   formatSelectionContextNote,
   normalizeComposerContext,
+  resolveSelectionSourcePath,
   selectionContextLocationKey,
   selectionLineCount,
   truncateSelectionText,
@@ -23,14 +24,14 @@ run('selection context formats file line ranges and line counts', () => {
   const ctx = createSelectionContext({
     id: 'sel1',
     text: 'first\nsecond',
-    path: 'docs/README.md',
+    path: 'C:/repo/docs/README.md',
     kind: 'markdown',
     startLine: 23,
     endLine: 24,
   });
   assert.equal(formatSelectionContextLabel(ctx), 'README.md:23-24');
   assert.equal(formatSelectionContextNote(ctx), '2 行');
-  assert.equal(ctx.source.path, 'docs/README.md');
+  assert.equal(ctx.source.path, 'C:/repo/docs/README.md');
   assert.equal(ctx.source.line_count, 2);
 });
 
@@ -76,6 +77,21 @@ run('selection location keys match the same file range despite text changes', ()
 
   assert.equal(selectionContextLocationKey(first), selectionContextLocationKey(second));
   assert.notEqual(selectionContextLocationKey(first), selectionContextLocationKey(otherLine));
+});
+
+run('selection source paths resolve preview-relative paths against cwd', () => {
+  assert.equal(
+    resolveSelectionSourcePath({ cwd: 'C:/repo', path: 'src/a.js' }),
+    'C:/repo/src/a.js',
+  );
+  assert.equal(
+    resolveSelectionSourcePath({ cwd: 'C:\\repo\\', path: 'src/a.js' }),
+    'C:\\repo\\src\\a.js',
+  );
+  assert.equal(
+    resolveSelectionSourcePath({ cwd: 'C:/repo', path: 'D:/other/a.js' }),
+    'D:/other/a.js',
+  );
 });
 
 run('non-selection contexts keep the existing browser payload shape', () => {

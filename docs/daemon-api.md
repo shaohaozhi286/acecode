@@ -229,7 +229,7 @@ plain text plus optional uploaded attachment ids and structured contexts.
       "note": "2 lines",
       "text": "selected text...",
       "source": {
-        "path": "README.md",
+        "path": "C:/repo/README.md",
         "start_line": 23,
         "end_line": 24,
         "line_count": 2
@@ -242,8 +242,9 @@ plain text plus optional uploaded attachment ids and structured contexts.
 `selection` contexts are model-visible request context, not visible prompt text.
 The daemon expands them into the model input and records `metadata.display_text`
 so the transcript continues to show only the user's typed text plus context
-chips. Unpinned/transient selections are a client-side composer state and MUST
-NOT be sent in `contexts`.
+chips. `source.path` should be the absolute path used for model/tool
+localization; `label` remains a compact display string. Unpinned/transient
+selections are a client-side composer state and MUST NOT be sent in `contexts`.
 
 **Response 202**:
 ```json

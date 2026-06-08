@@ -2985,6 +2985,9 @@ static int run_interactive_app(const CliOptions& cli,
                 // 已经在确认态再按一次 Ctrl+C —— 不视为确认,保持等用户按 y。
                 if (!state.exit_confirm_pending) {
                     state.exit_confirm_pending = true;
+                    if (acecode::tui::clear_current_input_for_history_restore(state)) {
+                        refresh_slash_dropdown(state, cmd_registry);
+                    }
                 }
             }
             screen.PostEvent(Event::Custom);

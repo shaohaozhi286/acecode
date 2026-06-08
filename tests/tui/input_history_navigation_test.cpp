@@ -12,6 +12,7 @@
 using acecode::InputMode;
 using acecode::TuiState;
 using acecode::prepend_mode_prefix;
+using acecode::tui::clear_current_input_for_history_restore;
 using acecode::tui::navigate_input_history_down;
 using acecode::tui::navigate_input_history_up;
 using acecode::tui::try_cancel_latest_pending_for_history_text;
@@ -117,6 +118,70 @@ TEST(InputHistoryNavigation, ShellHistoryEntryDoesNotCancelQueuedMessage) {
     EXPECT_EQ(state.input_mode, InputMode::Shell);
     EXPECT_EQ(state.input_text, "npm test");
     EXPECT_EQ(pending(state), std::vector<std::string>({"npm test"}));
+}
+
+TEST(InputHistoryNavigation, ClearCurrentInputAllowsArrowUpRestore) {
+    TuiState state;
+    state.input_history = {"older"};
+    state.input_text = "draft";
+    state.input_cursor = 2;
+
+    ASSERT_TRUE(clear_current_input_for_history_restore(state));
+
+    EXPECT_TRUE(state.input_text.empty());
+    EXPECT_EQ(state.input_cursor, 0u);
+    EXPECT_EQ(state.input_mode, InputMode::Normal);
+
+    ASSERT_TRUE(navigate_input_history_up(state));
+
+    EXPECT_EQ(state.input_text, "draft");
+    EXPECT_EQ(state.input_cursor, 5u);
+    EXPECT_EQ(state.input_mode, InputMode::Normal);
+    EXPECT_EQ(state.history_index, -1);
+
+    ASSERT_TRUE(navigate_input_history_up(state));
+    EXPECT_EQ(state.input_text, "older");
+}
+
+TEST(InputHistoryNavigation, ArrowDownAfterClearedInputDoesNothing) {
+    TuiState state;
+    state.input_history = {"older"};
+    state.input_text = "draft";
+
+    ASSERT_TRUE(clear_current_input_for_history_restore(state));
+
+    EXPECT_FALSE(navigate_input_history_down(state));
+    EXPECT_TRUE(state.input_text.empty());
+    EXPECT_EQ(state.input_mode, InputMode::Normal);
+
+    ASSERT_TRUE(navigate_input_history_up(state));
+    EXPECT_EQ(state.input_text, "draft");
+}
+
+TEST(InputHistoryNavigation, ClearCurrentShellInputRestoresShellMode) {
+    TuiState state;
+    state.input_mode = InputMode::Shell;
+    state.input_text = "npm test";
+    state.input_cursor = state.input_text.size();
+
+    ASSERT_TRUE(clear_current_input_for_history_restore(state));
+
+    EXPECT_TRUE(state.input_text.empty());
+    EXPECT_EQ(state.input_mode, InputMode::Normal);
+
+    ASSERT_TRUE(navigate_input_history_up(state));
+
+    EXPECT_EQ(state.input_mode, InputMode::Shell);
+    EXPECT_EQ(state.input_text, "npm test");
+    EXPECT_EQ(state.input_cursor, 8u);
+}
+
+TEST(InputHistoryNavigation, ClearEmptyNormalInputIsNoop) {
+    TuiState state;
+
+    EXPECT_FALSE(clear_current_input_for_history_restore(state));
+    EXPECT_EQ(state.history_index, -1);
+    EXPECT_TRUE(state.saved_input.empty());
 }
 
 // 场景:底层取消 helper 只接受精确尾部匹配。

@@ -23,6 +23,18 @@ run('Alt+F is not treated as find shortcut', () => {
   assert.equal(isFindShortcut({ key: 'f', altKey: true }), false);
 });
 
+run('F3 opens app find overlay', () => {
+  assert.equal(isFindShortcut({ key: 'F3' }), true);
+});
+
+run('Shift+F3 still routes to app find overlay', () => {
+  assert.equal(isFindShortcut({ key: 'F3', shiftKey: true }), true);
+});
+
+run('Alt+F3 is left for the host', () => {
+  assert.equal(isFindShortcut({ key: 'F3', altKey: true }), false);
+});
+
 run('findMatchesInText finds case-insensitive non-overlapping matches', () => {
   assert.deepEqual(findMatchesInText('Green green GREEN', 'green'), [
     { start: 0, end: 5 },

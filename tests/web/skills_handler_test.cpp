@@ -159,12 +159,35 @@ TEST_F(SkillsHandlerTest, SelectSkillRootUsesAgentProjectSkillsWhenAcecodeMissin
     EXPECT_EQ(fs::weakly_canonical(selected.path), fs::weakly_canonical(agent_skills));
 }
 
-TEST_F(SkillsHandlerTest, SelectSkillRootFallsBackToGlobalAcecodeSkillsAndCreatesIt) {
+TEST_F(SkillsHandlerTest, SelectSkillRootCreateModePreservesExistingAgentProjectSkills) {
     const auto project = tmp_root / "project";
+    const auto local_skills = project / ".acecode" / "skills";
+    const auto agent_skills = project / ".agent" / "skills";
+    const auto global_skills = tmp_root / "global" / "skills";
+    fs::create_directories(agent_skills);
+
+    auto selected = acecode::web::select_skill_root(project, global_skills, true);
+    EXPECT_EQ(selected.source, "project_agent");
+    EXPECT_FALSE(fs::exists(local_skills));
+    EXPECT_EQ(fs::weakly_canonical(selected.path), fs::weakly_canonical(agent_skills));
+}
+
+TEST_F(SkillsHandlerTest, SelectSkillRootCreatesWorkspaceAcecodeSkillsBeforeGlobalFallback) {
+    const auto project = tmp_root / "project";
+    const auto local_skills = project / ".acecode" / "skills";
     const auto global_skills = tmp_root / "global" / "skills";
     fs::create_directories(project);
 
     auto selected = acecode::web::select_skill_root(project, global_skills, true);
+    EXPECT_EQ(selected.source, "project_acecode");
+    EXPECT_TRUE(fs::is_directory(local_skills));
+    EXPECT_EQ(fs::weakly_canonical(selected.path), fs::weakly_canonical(local_skills));
+}
+
+TEST_F(SkillsHandlerTest, SelectSkillRootFallsBackToGlobalAcecodeSkillsAndCreatesItWithoutWorkspace) {
+    const auto global_skills = tmp_root / "global" / "skills";
+
+    auto selected = acecode::web::select_skill_root({}, global_skills, true);
     EXPECT_EQ(selected.source, "global_acecode");
     EXPECT_TRUE(fs::is_directory(global_skills));
     EXPECT_EQ(fs::weakly_canonical(selected.path), fs::weakly_canonical(global_skills));

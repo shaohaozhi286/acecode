@@ -4,6 +4,12 @@
 
 namespace acecode::tui {
 
+namespace {
+
+constexpr int kClearedInputRestoreIndex = -2;
+
+} // namespace
+
 bool try_cancel_latest_pending_for_history_text(TuiState& state,
                                                 const std::string& text) {
     if (state.pending_queue.empty() || state.pending_queue.back() != text) {
@@ -17,7 +23,30 @@ bool try_cancel_latest_pending_for_history_text(TuiState& state,
     return true;
 }
 
+bool clear_current_input_for_history_restore(TuiState& state) {
+    if (state.input_text.empty() && state.input_mode == InputMode::Normal) {
+        return false;
+    }
+
+    state.saved_input = prepend_mode_prefix(state.input_text, state.input_mode);
+    state.history_index = kClearedInputRestoreIndex;
+    state.input_mode = InputMode::Normal;
+    state.input_text.clear();
+    state.input_cursor = 0;
+    return true;
+}
+
 bool navigate_input_history_up(TuiState& state) {
+    if (state.history_index == kClearedInputRestoreIndex) {
+        auto [saved_mode, saved_text] = parse_mode_prefix(state.saved_input);
+        state.input_mode = saved_mode;
+        state.input_text = std::move(saved_text);
+        state.input_cursor = state.input_text.size();
+        state.history_index = -1;
+        state.saved_input.clear();
+        return true;
+    }
+
     if (state.input_history.empty()) {
         return false;
     }
@@ -48,7 +77,8 @@ bool navigate_input_history_up(TuiState& state) {
 }
 
 bool navigate_input_history_down(TuiState& state) {
-    if (state.history_index == -1) {
+    if (state.history_index == -1 ||
+        state.history_index == kClearedInputRestoreIndex) {
         return false;
     }
 

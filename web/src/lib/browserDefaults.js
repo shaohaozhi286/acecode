@@ -1,6 +1,8 @@
 // WebView/Chromium defaults that feel like browser chrome rather than app UI.
 // Keep these guards at the document edge so individual controls can stay simple.
 
+import { isFindShortcut } from './globalFind.js';
+
 const ZOOM_SHORTCUT_KEYS = new Set(['+', '=', '-', '_', '0']);
 const ZOOM_SHORTCUT_CODES = new Set([
   'Equal',
@@ -22,6 +24,10 @@ export function isBrowserZoomShortcut(event) {
   return ZOOM_SHORTCUT_KEYS.has(key) || ZOOM_SHORTCUT_CODES.has(code);
 }
 
+export function isBlockedBrowserDefaultShortcut(event) {
+  return isBrowserZoomShortcut(event) || isFindShortcut(event);
+}
+
 export function installBrowserDefaultGuards(target = globalThis.window) {
   if (!target || typeof target.addEventListener !== 'function') {
     return () => {};
@@ -32,7 +38,7 @@ export function installBrowserDefaultGuards(target = globalThis.window) {
     if (hasZoomModifier(event)) event.preventDefault();
   };
   const onKeyDown = (event) => {
-    if (isBrowserZoomShortcut(event)) event.preventDefault();
+    if (isBlockedBrowserDefaultShortcut(event)) event.preventDefault();
   };
 
   const activeCapture = { capture: true, passive: false };

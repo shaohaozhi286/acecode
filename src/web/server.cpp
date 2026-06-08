@@ -350,9 +350,11 @@ SelectionPromptContext build_selection_prompt_context(const json& contexts) {
         const json source = meta->contains("source") && (*meta)["source"].is_object()
             ? (*meta)["source"]
             : json::object();
-        std::string source_label = json_string_field(*meta, "label");
-        if (source_label.empty()) {
-            source_label = json_string_field(source, "path") + selection_line_suffix(source);
+        std::string source_label = json_string_field(source, "path");
+        if (!source_label.empty()) {
+            source_label += selection_line_suffix(source);
+        } else {
+            source_label = json_string_field(*meta, "label");
         }
         body << "[selection " << count << "]\n";
         if (!source_label.empty()) {

@@ -30,6 +30,16 @@ bool existing_directory(const fs::path& path) {
     return fs::is_directory(path, ec) && !ec;
 }
 
+void create_directory_if_requested(const fs::path& path, bool requested) {
+    if (!requested || path.empty()) return;
+
+    std::error_code ec;
+    fs::create_directories(path, ec);
+    if (ec) {
+        LOG_WARN("failed to create skill directory " + path_to_utf8(path) + ": " + ec.message());
+    }
+}
+
 fs::path normalized_path(const fs::path& path) {
     std::error_code ec;
     auto resolved = fs::weakly_canonical(path, ec);
@@ -41,7 +51,7 @@ fs::path normalized_path(const fs::path& path) {
 
 SkillRootSelection select_skill_root(const fs::path& workspace_cwd,
                                      const fs::path& global_acecode_skills_root,
-                                     bool create_global_fallback) {
+                                     bool create_missing_roots) {
     if (!workspace_cwd.empty()) {
         const auto acecode_project_skills = workspace_cwd / ".acecode" / "skills";
         if (existing_directory(acecode_project_skills)) {
@@ -52,12 +62,16 @@ SkillRootSelection select_skill_root(const fs::path& workspace_cwd,
         if (existing_directory(agent_project_skills)) {
             return {normalized_path(agent_project_skills), "project_agent"};
         }
+
+        if (create_missing_roots && existing_directory(workspace_cwd)) {
+            create_directory_if_requested(acecode_project_skills, true);
+            if (existing_directory(acecode_project_skills)) {
+                return {normalized_path(acecode_project_skills), "project_acecode"};
+            }
+        }
     }
 
-    if (create_global_fallback) {
-        std::error_code ec;
-        fs::create_directories(global_acecode_skills_root, ec);
-    }
+    create_directory_if_requested(global_acecode_skills_root, create_missing_roots);
     return {normalized_path(global_acecode_skills_root), "global_acecode"};
 }
 

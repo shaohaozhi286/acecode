@@ -1514,6 +1514,23 @@ TEST(WebServerHttp, SkillRootReturnsProjectAcecodeSkillsForWorkspace) {
               std::filesystem::weakly_canonical(local_skills));
 }
 
+// 场景:首次进入 workspace 时还没有 skill 目录,点击左下角 Skills 入口应先创建
+// 项目级 .acecode/skills,再返回可打开的路径。
+TEST(WebServerHttp, SkillRootCreatesProjectAcecodeSkillsForWorkspace) {
+    WebServerFixture fx;
+    const auto local_skills = fx.cwd_dir / ".acecode" / "skills";
+    const std::string hash = acecode::compute_cwd_hash(fx.cwd);
+    ASSERT_FALSE(std::filesystem::exists(local_skills));
+
+    auto r = cpr::Get(cpr::Url{fx.url("/api/skills/root?workspace=" + hash)});
+    ASSERT_EQ(r.status_code, 200) << r.text;
+    auto body = json::parse(r.text);
+    EXPECT_EQ(body["source"], "project_acecode");
+    EXPECT_TRUE(std::filesystem::is_directory(local_skills));
+    EXPECT_EQ(std::filesystem::weakly_canonical(path_from_utf8(body["path"].get<std::string>())),
+              std::filesystem::weakly_canonical(local_skills));
+}
+
 // 场景:未知 workspace 不能通过 /api/skills/root 获取任意文件系统路径。
 TEST(WebServerHttp, SkillRootRejectsUnknownWorkspace) {
     WebServerFixture fx;

@@ -163,7 +163,6 @@ export function PreviewDetailsPanel({
   activeTab = null,
   changeGroups = [],
   changeSummary = null,
-  refreshToken = 0,
   maximized = false,
   onActivateTab,
   onCloseTab,
@@ -196,10 +195,9 @@ export function PreviewDetailsPanel({
         path={active.path}
         wrapPreview={wrapPreview}
         onToggleWrapPreview={() => setWrapPreview((prev) => !prev)}
-        refreshToken={refreshToken}
       />
     );
-  }, [active, api, changeGroups, changeSummary, cwd, refreshToken, setWrapPreview, wrapPreview]);
+  }, [active, api, changeGroups, changeSummary, cwd, setWrapPreview, wrapPreview]);
 
   const handleTabWheel = useCallback((event) => {
     const el = tabListRef.current;
