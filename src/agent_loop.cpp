@@ -1,4 +1,5 @@
 #include "agent_loop.hpp"
+#include "agent_loop_doom_guard.hpp"
 #include "prompt/system_prompt.hpp"
 #include "utils/encoding.hpp"
 #include "utils/logger.hpp"
@@ -1026,6 +1027,8 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
     int context_rescue_attempts = 0;
     int last_context_rescue_tokens = std::numeric_limits<int>::max();
     bool skip_auto_compact_once = false;
+    AgentLoopDoomGuard doom_guard;
+    std::mutex doom_guard_mu;
 
     std::mutex progress_mu;
     std::string active_progress_key;
@@ -1066,6 +1069,10 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
     while (!abort_requested_ && !terminator_fired &&
            (!has_max_iterations || total_iterations < max_iter)) {
         ++total_iterations;
+        {
+            std::lock_guard<std::mutex> lk(doom_guard_mu);
+            doom_guard.begin_model_turn();
+        }
         LOG_INFO("--- Agent loop turn " + std::to_string(total_iterations) +
                  ", messages: " + std::to_string(messages_.size()));
 
@@ -1514,6 +1521,16 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
             }
         };
 
+        auto maybe_guard_tool = [&](const ToolCall& tc) -> std::optional<ToolResult> {
+            std::lock_guard<std::mutex> lk(doom_guard_mu);
+            return doom_guard.maybe_guard(tc);
+        };
+
+        auto record_doom_guard_result = [&](const ToolCall& tc, const ToolResult& result) {
+            std::lock_guard<std::mutex> lk(doom_guard_mu);
+            doom_guard.record_result(tc, result);
+        };
+
         using ToolRunner = std::function<ToolResult(const ToolContext&,
                                                      const std::string&,
                                                      const std::string&)>;
@@ -1779,39 +1796,54 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
 
             LOG_DEBUG("Parallel execution with max_concurrency=" + std::to_string(max_concurrency));
 
+            struct PendingReadTool {
+                size_t original_index;
+                ToolCall call;
+                std::future<ToolResult> future;
+            };
+
             // Launch async tasks in batches respecting concurrency limit
             size_t i = 0;
             while (i < read_entries.size() && !abort_requested_) {
                 size_t batch_end = std::min(i + max_concurrency, read_entries.size());
-                std::vector<std::future<ToolResult>> futures;
+                std::vector<PendingReadTool> pending;
 
                 for (size_t j = i; j < batch_end; ++j) {
                     const auto& entry = read_entries[j];
                     ToolCall tc_copy = *entry.tc;
                     size_t original_index = entry.original_index;
-                    futures.push_back(std::async(std::launch::async,
+                    pending.push_back(PendingReadTool{
+                        original_index,
+                        tc_copy,
+                        std::async(std::launch::async,
                         [&run_tool_with_lifecycle, &execute_single_tool,
-                         tc_copy, original_index]() {
+                         &maybe_guard_tool, tc_copy, original_index]() {
                             return run_tool_with_lifecycle(
                                 tc_copy, original_index, false,
-                                [&execute_single_tool, &tc_copy](const ToolContext& ctx,
-                                                                  const std::string& ctx_path,
-                                                                  const std::string&) {
+                                [&execute_single_tool, &maybe_guard_tool, &tc_copy](
+                                    const ToolContext& ctx,
+                                    const std::string& ctx_path,
+                                    const std::string&) {
+                                    if (auto guarded = maybe_guard_tool(tc_copy)) {
+                                        return *guarded;
+                                    }
                                     return execute_single_tool(
                                         tc_copy.function_name, tc_copy.function_arguments,
                                         ctx_path, ctx);
                                 });
-                        }));
+                        })
+                    });
                 }
 
-                for (size_t j = 0; j < futures.size(); ++j) {
-                    size_t idx = read_entries[i + j].original_index;
+                for (auto& item : pending) {
+                    size_t idx = item.original_index;
                     try {
-                        results[idx] = futures[j].get();
+                        results[idx] = item.future.get();
                     } catch (const std::exception& e) {
                         results[idx] = ToolResult{"[Error] " + std::string(e.what()), false};
                     }
                     result_ready[idx] = true;
+                    record_doom_guard_result(item.call, results[idx]);
                     account_goal_usage(0, false);
                 }
 
@@ -1834,6 +1866,10 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
                 [&](const ToolContext& tool_ctx,
                     const std::string& ctx_path,
                     const std::string& ctx_command) -> ToolResult {
+                    if (auto guarded = maybe_guard_tool(tc)) {
+                        return *guarded;
+                    }
+
                     const bool targets_active_plan_file =
                         permissions_.mode() == PermissionMode::Plan &&
                         session_manager_ &&
@@ -1953,6 +1989,7 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
                     return tool_result;
             });
             result_ready[entry.original_index] = true;
+            record_doom_guard_result(tc, results[entry.original_index]);
             account_goal_usage(0, false);
         }
 
