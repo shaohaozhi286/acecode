@@ -5,25 +5,59 @@
 #include "../utils/constants.hpp"
 #include "../utils/logger.hpp"
 #include "../utils/utf8_path.hpp"
+#include "platform.hpp"
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
+#include <cerrno>
+#include <cwctype>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
+#include <vector>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
 
 namespace fs = std::filesystem;
 
 namespace acecode::daemon {
+namespace {
 
-std::string ensure_run_dir() {
-    std::string dir = acecode::get_run_dir();
+fs::path effective_run_dir_path(const std::string& run_dir) {
+    return path_from_utf8(run_dir.empty() ? acecode::get_run_dir() : run_dir);
+}
+
+std::string ensure_run_dir_for(const std::string& run_dir) {
+    std::string dir = run_dir.empty() ? acecode::get_run_dir() : run_dir;
     std::error_code ec;
     fs::create_directories(path_from_utf8(dir), ec);
     return dir;
 }
 
-static std::string run_path(const char* fname) {
-    return path_to_utf8(path_from_utf8(acecode::get_run_dir()) / fname);
+std::string run_path_for(const std::string& run_dir, const char* fname) {
+    return path_to_utf8(effective_run_dir_path(run_dir) / fname);
+}
+
+std::string run_path(const char* fname) {
+    return run_path_for(std::string(), fname);
 }
 
 static std::optional<std::string> read_text(const std::string& path) {
@@ -33,6 +67,86 @@ static std::optional<std::string> read_text(const std::string& path) {
                    std::istreambuf_iterator<char>());
     while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
     return s;
+}
+
+std::optional<std::int64_t> read_i64_path(const std::string& path) {
+    auto s = read_text(path);
+    if (!s) return std::nullopt;
+    try { return static_cast<std::int64_t>(std::stoll(*s)); }
+    catch (...) { return std::nullopt; }
+}
+
+std::optional<int> read_int_path(const std::string& path) {
+    auto s = read_text(path);
+    if (!s) return std::nullopt;
+    try { return std::stoi(*s); }
+    catch (...) { return std::nullopt; }
+}
+
+std::optional<Heartbeat> read_heartbeat_path(const std::string& path) {
+    auto s = read_text(path);
+    if (!s || s->empty()) return std::nullopt;
+    try {
+        auto j = nlohmann::json::parse(*s);
+        Heartbeat hb;
+        hb.pid          = j.value("pid", static_cast<std::int64_t>(0));
+        hb.guid         = j.value("guid", std::string{});
+        hb.timestamp_ms = j.value("timestamp_ms", static_cast<std::int64_t>(0));
+        return hb;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+enum class ProcessIdentity {
+    Match,
+    Mismatch,
+    Unknown,
+};
+
+#ifdef _WIN32
+ProcessIdentity daemon_process_identity(std::int64_t pid) {
+    HANDLE h = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,
+                             FALSE,
+                             static_cast<DWORD>(pid));
+    if (!h) return ProcessIdentity::Unknown;
+
+    std::vector<wchar_t> buffer(32768);
+    DWORD size = static_cast<DWORD>(buffer.size());
+    BOOL ok = ::QueryFullProcessImageNameW(h, 0, buffer.data(), &size);
+    ::CloseHandle(h);
+    if (!ok || size == 0) return ProcessIdentity::Unknown;
+
+    fs::path image(std::wstring(buffer.data(), size));
+    std::wstring name = image.filename().wstring();
+    std::transform(name.begin(), name.end(), name.begin(),
+                   [](wchar_t ch) { return static_cast<wchar_t>(std::towlower(ch)); });
+    if (name == L"acecode.exe") return ProcessIdentity::Match;
+    return ProcessIdentity::Mismatch;
+}
+
+struct WsaInit {
+    WsaInit() {
+        WSADATA d{};
+        ::WSAStartup(MAKEWORD(2, 2), &d);
+    }
+};
+
+WsaInit g_wsa_init;
+#else
+ProcessIdentity daemon_process_identity(std::int64_t) {
+    return ProcessIdentity::Unknown;
+}
+#endif
+
+std::string port_desc(int port) {
+    return "port=" + std::to_string(port);
+}
+
+} // namespace
+
+std::string ensure_run_dir() {
+    return ensure_run_dir_for(std::string());
 }
 
 bool write_pid_file(std::int64_t pid) {
@@ -46,16 +160,10 @@ bool write_guid_file(const std::string& guid) {
 }
 
 std::optional<std::int64_t> read_pid_file() {
-    auto s = read_text(run_path(constants::RUN_FILE_PID));
-    if (!s) return std::nullopt;
-    try { return static_cast<std::int64_t>(std::stoll(*s)); }
-    catch (...) { return std::nullopt; }
+    return read_i64_path(run_path(constants::RUN_FILE_PID));
 }
 std::optional<int> read_port_file() {
-    auto s = read_text(run_path(constants::RUN_FILE_PORT));
-    if (!s) return std::nullopt;
-    try { return std::stoi(*s); }
-    catch (...) { return std::nullopt; }
+    return read_int_path(run_path(constants::RUN_FILE_PORT));
 }
 std::optional<std::string> read_guid_file() {
     return read_text(run_path(constants::RUN_FILE_GUID));
@@ -70,18 +178,7 @@ bool write_heartbeat(const Heartbeat& hb) {
 }
 
 std::optional<Heartbeat> read_heartbeat() {
-    auto s = read_text(run_path(constants::RUN_FILE_HEARTBEAT));
-    if (!s || s->empty()) return std::nullopt;
-    try {
-        auto j = nlohmann::json::parse(*s);
-        Heartbeat hb;
-        hb.pid          = j.value("pid", static_cast<std::int64_t>(0));
-        hb.guid         = j.value("guid", std::string{});
-        hb.timestamp_ms = j.value("timestamp_ms", static_cast<std::int64_t>(0));
-        return hb;
-    } catch (...) {
-        return std::nullopt;
-    }
+    return read_heartbeat_path(run_path(constants::RUN_FILE_HEARTBEAT));
 }
 
 bool write_token(const std::string& token) {
@@ -92,6 +189,138 @@ bool write_token(const std::string& token) {
 
 std::optional<std::string> read_token() {
     return read_text(run_path(constants::RUN_FILE_TOKEN));
+}
+
+RuntimeSnapshot read_runtime_snapshot(const std::string& run_dir) {
+    RuntimeSnapshot snapshot;
+    snapshot.pid = read_i64_path(run_path_for(run_dir, constants::RUN_FILE_PID));
+    snapshot.port = read_int_path(run_path_for(run_dir, constants::RUN_FILE_PORT));
+    snapshot.guid = read_text(run_path_for(run_dir, constants::RUN_FILE_GUID));
+    snapshot.heartbeat = read_heartbeat_path(run_path_for(run_dir, constants::RUN_FILE_HEARTBEAT));
+    snapshot.token = read_text(run_path_for(run_dir, constants::RUN_FILE_TOKEN));
+    return snapshot;
+}
+
+RuntimeReuseCheck validate_runtime_snapshot_for_reuse(
+    const RuntimeSnapshot& snapshot,
+    const RuntimeValidationOptions& options) {
+    RuntimeReuseCheck check;
+    if (!snapshot.pid.has_value() || *snapshot.pid <= 0) {
+        check.reason = "missing or invalid daemon.pid";
+        return check;
+    }
+    if (!snapshot.port.has_value() || *snapshot.port <= 0 || *snapshot.port > 65535) {
+        check.reason = "missing or invalid daemon.port";
+        return check;
+    }
+    if (options.require_token && (!snapshot.token.has_value() || snapshot.token->empty())) {
+        check.reason = "missing token";
+        return check;
+    }
+    if (!is_pid_alive(*snapshot.pid)) {
+        check.reason = "recorded pid is not alive";
+        return check;
+    }
+    if (!snapshot.heartbeat.has_value()) {
+        check.reason = "missing heartbeat";
+        return check;
+    }
+    if (snapshot.heartbeat->pid != *snapshot.pid) {
+        std::ostringstream oss;
+        oss << "heartbeat pid mismatch heartbeat=" << snapshot.heartbeat->pid
+            << " pid=" << *snapshot.pid;
+        check.reason = oss.str();
+        return check;
+    }
+    if (snapshot.heartbeat->timestamp_ms <= 0) {
+        check.reason = "invalid heartbeat timestamp";
+        return check;
+    }
+    const std::int64_t now = options.now_ms > 0 ? options.now_ms : now_unix_ms();
+    const std::int64_t age_ms = std::max<std::int64_t>(0, now - snapshot.heartbeat->timestamp_ms);
+    if (options.heartbeat_timeout_ms > 0 && age_ms > options.heartbeat_timeout_ms) {
+        std::ostringstream oss;
+        oss << "stale heartbeat age_ms=" << age_ms
+            << " timeout_ms=" << options.heartbeat_timeout_ms;
+        check.reason = oss.str();
+        return check;
+    }
+    if (options.require_port_probe && !probe_loopback_port(*snapshot.port)) {
+        check.reason = "recorded " + port_desc(*snapshot.port) + " is not reachable";
+        return check;
+    }
+    if (options.require_process_identity) {
+        ProcessIdentity identity = daemon_process_identity(*snapshot.pid);
+        if (identity == ProcessIdentity::Mismatch) {
+            check.reason = "recorded pid is not an acecode daemon process";
+            return check;
+        }
+    }
+
+    check.reusable = true;
+    check.reason = "runtime files describe a reusable daemon";
+    return check;
+}
+
+RuntimeReuseCheck validate_runtime_files_for_reuse(
+    const std::string& run_dir,
+    const RuntimeValidationOptions& options) {
+    return validate_runtime_snapshot_for_reuse(read_runtime_snapshot(run_dir), options);
+}
+
+bool probe_loopback_port(int port) {
+    if (port <= 0 || port > 65535) return false;
+#ifdef _WIN32
+    SOCKET s = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s == INVALID_SOCKET) return false;
+    DWORD tv = 500;
+    ::setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&tv), sizeof(tv));
+    ::setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&tv), sizeof(tv));
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(static_cast<u_short>(port));
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    int rc = ::connect(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+    ::closesocket(s);
+    return rc == 0;
+#else
+    int s = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) return false;
+
+    int flags = ::fcntl(s, F_GETFL, 0);
+    if (flags >= 0) ::fcntl(s, F_SETFL, flags | O_NONBLOCK);
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(static_cast<unsigned short>(port));
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    int rc = ::connect(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+    if (rc == 0) {
+        ::close(s);
+        return true;
+    }
+    if (errno != EINPROGRESS) {
+        ::close(s);
+        return false;
+    }
+
+    fd_set wfds;
+    FD_ZERO(&wfds);
+    FD_SET(s, &wfds);
+    timeval tv{};
+    tv.tv_sec = 0;
+    tv.tv_usec = 500 * 1000;
+    rc = ::select(s + 1, nullptr, &wfds, nullptr, &tv);
+    bool ok = false;
+    if (rc > 0 && FD_ISSET(s, &wfds)) {
+        int err = 0;
+        socklen_t len = sizeof(err);
+        ok = (::getsockopt(s, SOL_SOCKET, SO_ERROR, &err, &len) == 0 && err == 0);
+    }
+    ::close(s);
+    return ok;
+#endif
 }
 
 void cleanup_runtime_files() {

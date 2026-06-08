@@ -33,12 +33,15 @@ public:
         std::atomic<int> stop_calls{0};
         std::atomic<bool> spawn_should_succeed{true};
         std::atomic<bool> ready_should_succeed{true};
+        std::atomic<int> ready_succeeds_on_wait_call{0};
+        std::atomic<bool> running_should_succeed{false};
         // 模拟 spawn 耗时,放大并发竞争窗口。
         std::chrono::milliseconds spawn_delay{0};
         // wait_until_ready 中的延迟,确保等待者真的会进 cv.wait 分支。
         std::chrono::milliseconds wait_delay{0};
         std::mutex mu;
         std::vector<std::string> run_dirs;
+        std::vector<std::chrono::milliseconds> wait_timeouts;
     };
     explicit MockSupervisor(std::shared_ptr<SharedState> s) : state_(std::move(s)) {}
 
@@ -61,16 +64,24 @@ public:
         return r;
     }
 
-    bool wait_until_ready(int, std::chrono::milliseconds) override {
-        state_->wait_calls.fetch_add(1);
+    bool wait_until_ready(int, std::chrono::milliseconds timeout) override {
+        const int wait_call = state_->wait_calls.fetch_add(1) + 1;
+        {
+            std::lock_guard<std::mutex> lk(state_->mu);
+            state_->wait_timeouts.push_back(timeout);
+        }
         if (state_->wait_delay.count() > 0) {
             std::this_thread::sleep_for(state_->wait_delay);
+        }
+        const int success_call = state_->ready_succeeds_on_wait_call.load();
+        if (success_call > 0 && wait_call >= success_call) {
+            return true;
         }
         return state_->ready_should_succeed.load();
     }
 
     void stop() override { state_->stop_calls.fetch_add(1); }
-    bool running() const override { return false; }
+    bool running() const override { return state_->running_should_succeed.load(); }
 
 private:
     std::shared_ptr<SharedState> state_;
@@ -259,6 +270,30 @@ TEST(DaemonPool, ActivateReadyFailureTriggersStop) {
     EXPECT_FALSE(r.ok);
     EXPECT_EQ(pool.lookup("h-not-ready").state, DaemonState::Failed);
     EXPECT_EQ(state->stop_calls.load(), 1) << "失败路径应回收已 spawn 的进程";
+}
+
+// 场景: 首轮 wait_until_ready 超时但子进程仍存活 → 追加慢启动等待并最终成功。
+// 这覆盖 Windows 杀毒/冷启动慢导致 acecode.exe 进程已创建但 daemon 端口晚 listen。
+TEST(DaemonPool, ActivateReadySlowStartupExtendsWaitWhenChildStillRunning) {
+    auto state = std::make_shared<MockSupervisor::SharedState>();
+    state->ready_should_succeed = false;
+    state->ready_succeeds_on_wait_call = 2;
+    state->running_should_succeed = true;
+    DaemonPool pool;
+    pool.set_supervisor_factory_for_test([&] {
+        return std::unique_ptr<IDaemonSupervisor>(new MockSupervisor(state));
+    });
+
+    auto r = pool.activate(make_request("h-slow-start"), std::chrono::milliseconds(10000));
+    EXPECT_TRUE(r.ok) << r.error;
+    EXPECT_EQ(pool.lookup("h-slow-start").state, DaemonState::Running);
+    EXPECT_EQ(state->wait_calls.load(), 2);
+    EXPECT_EQ(state->stop_calls.load(), 0);
+
+    std::lock_guard<std::mutex> lk(state->mu);
+    ASSERT_EQ(state->wait_timeouts.size(), 2u);
+    EXPECT_EQ(state->wait_timeouts[0], std::chrono::milliseconds(10000));
+    EXPECT_EQ(state->wait_timeouts[1], std::chrono::milliseconds(50000));
 }
 
 // 场景: stop_all 调到所有 slot 的 supervisor.stop;失败列表为空表示全部 OK

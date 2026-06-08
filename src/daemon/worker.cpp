@@ -157,9 +157,9 @@ acecode::PermissionMode permission_mode_from_config(const std::string& mode) {
 
 } // namespace
 
-std::string validate_can_start(const WorkerOptions& opts) {
+std::string validate_can_start(const WorkerOptions& opts,
+                               int heartbeat_timeout_ms) {
     auto existing_guid = read_guid_file();
-    auto existing_pid  = read_pid_file();
 
     if (opts.supervised) {
         // launcher 派 GUID 进来。如果磁盘已有 guid 但跟 launcher 派的不一致,
@@ -172,13 +172,20 @@ std::string validate_can_start(const WorkerOptions& opts) {
         return {};
     }
 
-    // standalone: 若已有 guid + pid 文件,且 pid 仍存活,说明已有 daemon 跑。
-    if (existing_guid.has_value() && existing_pid.has_value() &&
-        is_pid_alive(*existing_pid)) {
+    RuntimeValidationOptions validation_options;
+    validation_options.heartbeat_timeout_ms = heartbeat_timeout_ms;
+    RuntimeSnapshot snapshot = read_runtime_snapshot();
+    RuntimeReuseCheck reuse = validate_runtime_snapshot_for_reuse(snapshot, validation_options);
+
+    // standalone: 只有当 runtime file bundle 仍描述一个当前可用 daemon 时拒启。
+    if (existing_guid.has_value() && reuse.reusable && snapshot.pid.has_value()) {
         std::ostringstream oss;
-        oss << "another daemon already running (pid=" << *existing_pid
+        oss << "another daemon already running (pid=" << *snapshot.pid
             << " guid=" << *existing_guid << ")";
         return oss.str();
+    }
+    if ((existing_guid.has_value() || snapshot.pid.has_value()) && !reuse.reusable) {
+        LOG_WARN("[daemon] ignoring stale runtime files during startup: " + reuse.reason);
     }
     return {};
 }
@@ -205,7 +212,7 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
         return 2;
     }
 
-    auto reject = validate_can_start(opts);
+    auto reject = validate_can_start(opts, cfg.daemon.heartbeat_timeout_ms);
     if (!reject.empty()) {
         std::cerr << "[daemon] refuse to start: " << reject << "\n";
         return 3;

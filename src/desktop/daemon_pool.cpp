@@ -1,22 +1,22 @@
 #include "daemon_pool.hpp"
 
+#include "../daemon/runtime_files.hpp"
+#include "../utils/constants.hpp"
 #include "../utils/logger.hpp"
-
-#include <filesystem>
-#include <fstream>
 
 namespace acecode::desktop {
 
 namespace {
 
-// 读 run_dir 下的单个文本文件，去除尾部换行。失败返回空字符串。
-std::string read_run_file(const std::string& dir, const char* fname) {
-    namespace fs = std::filesystem;
-    std::ifstream f(fs::path(dir) / fname, std::ios::binary);
-    if (!f.is_open()) return "";
-    std::string s((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-    while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
-    return s;
+constexpr std::chrono::milliseconds kSlowStartupTotalWait(60000);
+
+std::chrono::milliseconds slow_startup_extra_wait(std::chrono::milliseconds initial_wait) {
+    if (initial_wait >= kSlowStartupTotalWait) return std::chrono::milliseconds(0);
+    return kSlowStartupTotalWait - initial_wait;
+}
+
+std::string ms_count(std::chrono::milliseconds value) {
+    return std::to_string(value.count());
 }
 
 } // namespace
@@ -120,7 +120,24 @@ ActivateResult DaemonPool::activate(const ActivateRequest& req,
             err = sr.error;
         } else {
             ok = slot->sup->wait_until_ready(port, wait_timeout);
-            if (!ok) err = "wait_until_ready timed out / daemon exited early";
+            bool used_slow_startup_fallback = false;
+            if (!ok && slot->sup->running()) {
+                auto extra_wait = slow_startup_extra_wait(wait_timeout);
+                if (extra_wait.count() > 0) {
+                    used_slow_startup_fallback = true;
+                    LOG_WARN("[daemon_pool] daemon still running after " +
+                             ms_count(wait_timeout) +
+                             "ms; extending ready wait by " +
+                             ms_count(extra_wait) + "ms for hash=" + req.hash +
+                             " context=" + context_id);
+                    ok = slot->sup->wait_until_ready(port, extra_wait);
+                }
+            }
+            if (!ok) {
+                err = used_slow_startup_fallback
+                    ? "wait_until_ready timed out after slow-start fallback / daemon exited early"
+                    : "wait_until_ready timed out / daemon exited early";
+            }
         }
     }
 
@@ -130,20 +147,20 @@ ActivateResult DaemonPool::activate(const ActivateRequest& req,
     // 处理:spawn 失败后检查 run_dir 内的 port/token 文件,若原有 daemon 仍
     // 在监听则直接复用(adopt),跳过重新 spawn。
     if (!ok && !req.run_dir.empty()) {
-        std::string rport_s = read_run_file(req.run_dir, "daemon.port");
-        std::string rtoken   = read_run_file(req.run_dir, "token");
-        if (!rport_s.empty() && !rtoken.empty()) {
-            try {
-                int rport = std::stoi(rport_s);
-                if (probe_loopback_port(rport)) {
-                    port  = rport;
-                    token = rtoken;
-                    ok    = true;
-                    err.clear();
-                    LOG_INFO("[daemon_pool] reclaimed existing daemon at port=" +
-                             rport_s + " for hash=" + req.hash);
-                }
-            } catch (...) {}
+        acecode::daemon::RuntimeValidationOptions options;
+        options.heartbeat_timeout_ms = acecode::constants::DEFAULT_HEARTBEAT_TIMEOUT_MS;
+        auto snapshot = acecode::daemon::read_runtime_snapshot(req.run_dir);
+        auto reuse = acecode::daemon::validate_runtime_snapshot_for_reuse(snapshot, options);
+        if (reuse.reusable && snapshot.port.has_value() && snapshot.token.has_value()) {
+            port = *snapshot.port;
+            token = *snapshot.token;
+            ok = true;
+            err.clear();
+            LOG_INFO("[daemon_pool] reclaimed existing daemon at port=" +
+                     std::to_string(port) + " for hash=" + req.hash);
+        } else {
+            LOG_WARN("[daemon_pool] existing daemon runtime not reusable for hash=" +
+                     req.hash + " context=" + context_id + ": " + reuse.reason);
         }
     }
 

@@ -18,6 +18,27 @@ struct Heartbeat {
     std::int64_t timestamp_ms = 0; // unix epoch ms,UTC
 };
 
+struct RuntimeSnapshot {
+    std::optional<std::int64_t> pid;
+    std::optional<int> port;
+    std::optional<std::string> guid;
+    std::optional<Heartbeat> heartbeat;
+    std::optional<std::string> token;
+};
+
+struct RuntimeValidationOptions {
+    int heartbeat_timeout_ms = 15000;
+    bool require_token = true;
+    bool require_port_probe = true;
+    bool require_process_identity = true;
+    std::int64_t now_ms = 0; // 0 = use current time
+};
+
+struct RuntimeReuseCheck {
+    bool reusable = false;
+    std::string reason;
+};
+
 // 创建 ~/.acecode/run/ 目录(若已存在则忽略)。返回目录绝对路径。
 std::string ensure_run_dir();
 
@@ -37,6 +58,18 @@ std::optional<Heartbeat> read_heartbeat();
 // token: 限权写。单独的接口避免误用 atomic_write_file 时忘了 restrict_permissions。
 bool write_token(const std::string& token);
 std::optional<std::string> read_token();
+
+RuntimeSnapshot read_runtime_snapshot(const std::string& run_dir = std::string());
+RuntimeReuseCheck validate_runtime_snapshot_for_reuse(
+    const RuntimeSnapshot& snapshot,
+    const RuntimeValidationOptions& options = RuntimeValidationOptions{});
+RuntimeReuseCheck validate_runtime_files_for_reuse(
+    const std::string& run_dir = std::string(),
+    const RuntimeValidationOptions& options = RuntimeValidationOptions{});
+
+// Single loopback TCP probe used to decide whether recorded daemon.port is
+// still served by a live daemon.
+bool probe_loopback_port(int port);
 
 // daemon stop / 优雅退出时调用: 删 pid/port/heartbeat/token,保留 guid
 // (guid 可用于事后追溯)。删除失败不视为错误。

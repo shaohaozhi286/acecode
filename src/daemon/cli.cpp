@@ -2,6 +2,7 @@
 
 #include "platform.hpp"
 #include "runtime_files.hpp"
+#include "startup_diagnostics.hpp"
 #include "worker.hpp"
 #include "../config/config.hpp"
 #include "../hooks/hook_manager.hpp"
@@ -168,8 +169,17 @@ static int do_foreground(const Args& a, const std::string& exe_path) {
     }
 
     std::string hook_config_error;
+    append_startup_diagnostic(
+        "[daemon] startup.before_model_load dispatch begin cwd=" +
+        acecode::current_path_utf8());
     acecode::dispatch_startup_before_model_load_hooks(
         acecode::current_path_utf8(), &hook_config_error);
+    if (!hook_config_error.empty()) {
+        append_startup_diagnostic("[hooks] WARNING: " + hook_config_error);
+    }
+    append_startup_diagnostic(
+        "[daemon] startup.before_model_load dispatch end" +
+        std::string(hook_config_error.empty() ? "" : " with warnings"));
     if (!hook_config_error.empty()) {
         std::cerr << "[hooks] WARNING: " << hook_config_error << "\n";
     }
@@ -200,11 +210,15 @@ static int do_start(const Args& a, const std::string& exe_path) {
     }
 
     // 检查是否已有 daemon 在跑
-    auto existing_pid = read_pid_file();
-    if (existing_pid.has_value() && is_pid_alive(*existing_pid)) {
-        std::cerr << "daemon already running (pid=" << *existing_pid
+    auto snapshot = read_runtime_snapshot();
+    auto reuse = validate_runtime_snapshot_for_reuse(snapshot);
+    if (reuse.reusable && snapshot.pid.has_value()) {
+        std::cerr << "daemon already running (pid=" << *snapshot.pid
                   << "); stop it first or check `acecode daemon status`\n";
         return 6;
+    }
+    if (snapshot.pid.has_value() || snapshot.heartbeat.has_value()) {
+        std::cerr << "ignoring stale daemon runtime files: " << reuse.reason << "\n";
     }
 
     // 派生自身的 detached 副本: <exe> daemon --foreground
@@ -270,22 +284,23 @@ static int do_stop() {
 }
 
 static int do_status() {
-    auto pid  = read_pid_file();
-    auto port = read_port_file();
-    auto guid = read_guid_file();
-    auto hb   = read_heartbeat();
+    auto snapshot = read_runtime_snapshot();
+    auto reuse = validate_runtime_snapshot_for_reuse(snapshot);
 
-    if (!pid.has_value() || !is_pid_alive(*pid)) {
+    if (!reuse.reusable || !snapshot.pid.has_value()) {
         std::cout << "no daemon running\n";
+        if (!reuse.reason.empty()) {
+            std::cout << "  reason: " << reuse.reason << "\n";
+        }
         return 1;
     }
 
     std::cout << "daemon running\n"
-              << "  pid:  " << *pid << "\n";
-    if (port.has_value()) std::cout << "  port: " << *port << "\n";
-    if (guid.has_value()) std::cout << "  guid: " << *guid << "\n";
-    if (hb.has_value()) {
-        auto age_ms = now_unix_ms() - hb->timestamp_ms;
+              << "  pid:  " << *snapshot.pid << "\n";
+    if (snapshot.port.has_value()) std::cout << "  port: " << *snapshot.port << "\n";
+    if (snapshot.guid.has_value()) std::cout << "  guid: " << *snapshot.guid << "\n";
+    if (snapshot.heartbeat.has_value()) {
+        auto age_ms = now_unix_ms() - snapshot.heartbeat->timestamp_ms;
         std::cout << "  last_heartbeat_age_ms: " << age_ms << "\n";
     }
     return 0;

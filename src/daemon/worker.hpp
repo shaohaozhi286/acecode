@@ -37,10 +37,11 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg);
 
 // 校验"是否可以以新 worker 身份启动":
 //   - supervised: opts.guid 必须与 ~/.acecode/run/daemon.guid 一致(若文件存在)
-//   - standalone: 若 daemon.guid + daemon.pid 都存在且对应进程仍存活 → 拒启
+//   - standalone: 若 runtime file bundle 描述一个当前可用 daemon → 拒启
 //
 // 返回空字符串 = 通过;否则返回人类可读的拒启理由(调用方应打印 + 非零退出)。
-std::string validate_can_start(const WorkerOptions& opts);
+std::string validate_can_start(const WorkerOptions& opts,
+                               int heartbeat_timeout_ms = 15000);
 
 // 触发 worker 优雅退出(从外部线程调,如 ServiceMain 的 SCM 控制 handler)。
 // 内部行为等同于 worker 自己注册的 SIGTERM / Console handler — 唤醒主循环
