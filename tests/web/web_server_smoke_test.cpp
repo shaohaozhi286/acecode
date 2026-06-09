@@ -881,6 +881,31 @@ TEST(WebServerHttp, FilesEndpointAllowsRegisteredWorkspaceCwd) {
     EXPECT_EQ(content.text, "hello from registered workspace");
 }
 
+// 场景:/api/files/blob 除图片外也允许浏览器原生可打开的 PDF,供详情面板内嵌预览。
+TEST(WebServerHttp, FilesBlobEndpointServesPdfPreview) {
+    WebServerFixture fx;
+
+    auto docs_dir = fx.cwd_dir / "docs";
+    std::filesystem::create_directories(docs_dir);
+    const std::string pdf_body = "%PDF-1.7\n1 0 obj\n<<>>\nendobj\n%%EOF\n";
+    {
+        std::ofstream ofs(docs_dir / "manual.pdf", std::ios::binary);
+        ofs << pdf_body;
+    }
+
+    auto pdf = cpr::Get(cpr::Url{fx.url("/api/files/blob")},
+                        cpr::Parameters{{"cwd", fx.cwd}, {"path", "docs/manual.pdf"}});
+    ASSERT_EQ(pdf.status_code, 200) << pdf.text;
+    EXPECT_EQ(pdf.text, pdf_body);
+    const auto lower = pdf.header.find("content-type");
+    const auto upper = pdf.header.find("Content-Type");
+    const std::string content_type =
+        lower != pdf.header.end() ? lower->second :
+        (upper != pdf.header.end() ? upper->second : "");
+    EXPECT_NE(content_type.find("application/pdf"), std::string::npos)
+        << "content-type: " << content_type;
+}
+
 // 场景:/api/files 遇到中文文件夹/文件名时必须返回 UTF-8 JSON,不能抛异常变 500。
 TEST(WebServerHttp, FilesEndpointReturnsUtf8ForChinesePaths) {
     WebServerFixture fx;

@@ -86,6 +86,20 @@ public:
     // 推送的变更事件维护。
     bool is_window_maximized() const;
 
+    struct WebCoreInfo {
+        std::string backend;
+        std::string name;
+        std::string version;
+        std::string detail;
+        std::string runtime_path;
+        std::string wrapper_name;
+        std::string wrapper_version;
+    };
+
+    // 返回当前 desktop shell 使用的 Web 核心运行时信息。Windows 优先报告
+    // 实际 WebView2/Edge runtime;Linux 报告 WebKitGTK;macOS 报告 WKWebView/WebKit。
+    WebCoreInfo web_core_info() const;
+
     // 注册"窗口最大化/还原状态变化" handler。WM_SIZE 时检测 IsZoomed 与上次缓存
     // 是否不同,不同才触发 — SIZE_MINIMIZED → SIZE_RESTORED 之类的中间过渡不会
     // 重复抛事件。非 Windows 平台为 stub。

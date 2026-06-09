@@ -10,28 +10,11 @@ import {
 import { resolveSelectionSourcePath } from '../lib/selectionChatContext.js';
 import { copyTextToSystemClipboard } from '../lib/systemClipboard.js';
 import { clsx, formatBytes } from '../lib/format.js';
+import { filePreviewKind, isBlobFilePreview } from '../lib/filePreviewKind.js';
 import { CopyableCodeFrame } from './CopyableCodeFrame.jsx';
 import { ImageLightbox } from './ImageLightbox.jsx';
 import { VsIcon } from './Icon.jsx';
 import { toast } from './Toast.jsx';
-
-const MARKDOWN_EXTENSIONS = new Set(['md', 'markdown']);
-const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico', 'svg']);
-
-function extensionForPath(path) {
-  const name = String(path || '').split(/[\\/]/).pop() || '';
-  const dot = name.lastIndexOf('.');
-  if (dot < 0 || dot === name.length - 1) return '';
-  return name.slice(dot + 1).toLowerCase();
-}
-
-function isMarkdownPreview(path) {
-  return MARKDOWN_EXTENSIONS.has(extensionForPath(path));
-}
-
-function isImagePreview(path) {
-  return IMAGE_EXTENSIONS.has(extensionForPath(path));
-}
 
 function escapeHtml(s) {
   return String(s)
@@ -54,7 +37,7 @@ export function FilePreviewContent({ api, cwd, path, wrapPreview, onToggleWrapPr
     error: null,
     lang: '',
     size: 0,
-    imageUrl: '',
+    previewUrl: '',
     contentType: '',
   });
   const [markdownSource, setMarkdownSource] = useState(false);
@@ -90,27 +73,28 @@ export function FilePreviewContent({ api, cwd, path, wrapPreview, onToggleWrapPr
 
   useEffect(() => {
     if (!cwd || !path) {
-      setState({ status: 'idle', kind: 'text', text: '', error: null, lang: '', size: 0, imageUrl: '', contentType: '' });
+      setState({ status: 'idle', kind: 'text', text: '', error: null, lang: '', size: 0, previewUrl: '', contentType: '' });
       return undefined;
     }
     let cancelled = false;
     let objectUrl = '';
+    const nextKind = filePreviewKind(path);
     setMarkdownSource(false);
     setImagePreview(null);
-    setState({ status: 'loading', kind: 'text', text: '', error: null, lang: '', size: 0, imageUrl: '', contentType: '' });
+    setState({ status: 'loading', kind: nextKind, text: '', error: null, lang: '', size: 0, previewUrl: '', contentType: '' });
 
-    if (isImagePreview(path)) {
+    if (isBlobFilePreview(path)) {
       api.readFileBlob(cwd, path).then((blob) => {
         if (cancelled) return;
         objectUrl = URL.createObjectURL(blob);
         setState({
           status: 'ok',
-          kind: 'image',
+          kind: nextKind,
           text: '',
           error: null,
           lang: '',
           size: blob.size || 0,
-          imageUrl: objectUrl,
+          previewUrl: objectUrl,
           contentType: blob.type || '',
         });
       }).catch((err) => {
@@ -123,14 +107,14 @@ export function FilePreviewContent({ api, cwd, path, wrapPreview, onToggleWrapPr
             if (body.error === 'file too large') {
               extraSize = Number(body.size || 0);
               msg = `文件过大 (${formatBytes(extraSize)}),无法在浏览器内预览`;
-            } else if (body.error === 'unsupported file type') msg = '该图片格式暂不支持预览';
+            } else if (body.error === 'unsupported file type') msg = '该文件格式暂不支持预览';
             else if (body.error === 'not found') msg = '文件不存在';
             else if (body.error) msg = body.error;
           } else {
             msg = `读取失败 (HTTP ${err.status})`;
           }
         }
-        setState({ status: 'error', kind: 'image', text: '', error: msg, lang: '', size: extraSize, imageUrl: '', contentType: '' });
+        setState({ status: 'error', kind: nextKind, text: '', error: msg, lang: '', size: extraSize, previewUrl: '', contentType: '' });
       });
       return () => {
         cancelled = true;
@@ -142,12 +126,12 @@ export function FilePreviewContent({ api, cwd, path, wrapPreview, onToggleWrapPr
       if (cancelled) return;
       setState({
         status: 'ok',
-        kind: isMarkdownPreview(path) ? 'markdown' : 'text',
+        kind: nextKind,
         text,
         error: null,
         lang: langForFile(path),
         size: text.length,
-        imageUrl: '',
+        previewUrl: '',
         contentType: '',
       });
     }).catch((err) => {
@@ -167,7 +151,7 @@ export function FilePreviewContent({ api, cwd, path, wrapPreview, onToggleWrapPr
           msg = `读取失败 (HTTP ${err.status})`;
         }
       }
-      setState({ status: 'error', kind: 'text', text: '', error: msg, lang: '', size: extraSize, imageUrl: '', contentType: '' });
+      setState({ status: 'error', kind: nextKind, text: '', error: msg, lang: '', size: extraSize, previewUrl: '', contentType: '' });
     });
     return () => { cancelled = true; };
   }, [api, cwd, path]);
@@ -204,11 +188,28 @@ export function FilePreviewContent({ api, cwd, path, wrapPreview, onToggleWrapPr
           className="ace-side-image-preview"
           title="预览图片"
           aria-label="预览图片"
-          onClick={() => setImagePreview({ src: state.imageUrl, alt: path })}
+          onClick={() => setImagePreview({ src: state.previewUrl, alt: path })}
         >
-          <img src={state.imageUrl} alt={path} draggable="false" />
+          <img src={state.previewUrl} alt={path} draggable="false" />
         </button>
         <ImageLightbox preview={imagePreview} onClose={() => setImagePreview(null)} />
+      </div>
+    );
+  }
+  if (state.kind === 'pdf') {
+    return (
+      <div className="flex-1 flex flex-col overflow-hidden" {...previewAttrs}>
+        <object
+          className="ace-side-pdf-preview"
+          data={state.previewUrl}
+          type="application/pdf"
+          title={path}
+        >
+          <div className="ace-empty-state">
+            <div className="text-danger text-[12px] mb-1">当前浏览器无法内嵌预览 PDF</div>
+            <div className="text-fg-mute text-[10px] font-mono opacity-70 break-all">{path}</div>
+          </div>
+        </object>
       </div>
     );
   }

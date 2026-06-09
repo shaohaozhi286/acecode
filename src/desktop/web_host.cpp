@@ -4,6 +4,7 @@
 #include "webview2_runtime_probe.hpp"
 #include "window_chrome.hpp"
 
+#include "../utils/encoding.hpp"
 #include "../utils/logger.hpp"
 
 #include <functional>
@@ -23,6 +24,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <sstream>
 #include <utility>
 
 #ifdef _WIN32
@@ -881,6 +883,164 @@ std::pair<int, int> adjusted_window_size(int width, int height) {
     return {width, height};
 }
 
+std::string join_version(unsigned int major, unsigned int minor, unsigned int micro) {
+    std::ostringstream oss;
+    oss << major << "." << minor << "." << micro;
+    return oss.str();
+}
+
+std::string webview_wrapper_version() {
+    const auto* version = webview_version();
+    if (!version || version->version_number[0] == '\0') return {};
+    return version->version_number;
+}
+
+WebHost::WebCoreInfo make_web_core_info_base() {
+    WebHost::WebCoreInfo info;
+    info.wrapper_name = "webview";
+    info.wrapper_version = webview_wrapper_version();
+    return info;
+}
+
+#ifdef _WIN32
+std::wstring getenv_wide(const wchar_t* name) {
+    DWORD needed = ::GetEnvironmentVariableW(name, nullptr, 0);
+    if (needed == 0) return {};
+    std::wstring value(static_cast<std::size_t>(needed), L'\0');
+    DWORD written = ::GetEnvironmentVariableW(name, value.data(), needed);
+    if (written == 0 || written >= needed) return {};
+    value.resize(static_cast<std::size_t>(written));
+    return value;
+}
+
+std::wstring trim_trailing_path_separators(std::wstring path) {
+    while (!path.empty() && (path.back() == L'\\' || path.back() == L'/')) {
+        path.pop_back();
+    }
+    return path;
+}
+
+std::wstring last_path_component(std::wstring path) {
+    path = trim_trailing_path_separators(std::move(path));
+    const auto pos = path.find_last_of(L"\\/");
+    if (pos == std::wstring::npos) return path;
+    return path.substr(pos + 1);
+}
+
+std::wstring query_registry_string(HKEY root,
+                                   const wchar_t* sub_key,
+                                   const wchar_t* value_name,
+                                   REGSAM view_flags) {
+    HKEY key = nullptr;
+    LONG opened = ::RegOpenKeyExW(root, sub_key, 0, KEY_READ | view_flags, &key);
+    if (opened != ERROR_SUCCESS || !key) return {};
+
+    DWORD type = 0;
+    DWORD bytes = 0;
+    LONG sized = ::RegQueryValueExW(
+        key, value_name, nullptr, &type, nullptr, &bytes);
+    if (sized != ERROR_SUCCESS ||
+        (type != REG_SZ && type != REG_EXPAND_SZ) ||
+        bytes < sizeof(wchar_t)) {
+        ::RegCloseKey(key);
+        return {};
+    }
+
+    std::wstring value(static_cast<std::size_t>(bytes / sizeof(wchar_t)), L'\0');
+    LONG read = ::RegQueryValueExW(
+        key,
+        value_name,
+        nullptr,
+        &type,
+        reinterpret_cast<LPBYTE>(value.data()),
+        &bytes);
+    ::RegCloseKey(key);
+    if (read != ERROR_SUCCESS) return {};
+
+    value.resize(static_cast<std::size_t>(bytes / sizeof(wchar_t)));
+    while (!value.empty() && value.back() == L'\0') value.pop_back();
+    return value;
+}
+
+std::wstring installed_webview2_runtime_folder() {
+    constexpr const wchar_t* kClientStateKey =
+        L"SOFTWARE\\Microsoft\\EdgeUpdate\\ClientState\\"
+        L"{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}";
+    constexpr const wchar_t* kEbWebViewValue = L"EBWebView";
+    const HKEY roots[] = {HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER};
+    const REGSAM views[] = {KEY_WOW64_32KEY, 0};
+    for (HKEY root : roots) {
+        for (REGSAM view : views) {
+            auto value = query_registry_string(root, kClientStateKey, kEbWebViewValue, view);
+            if (!value.empty()) return value;
+        }
+    }
+    return {};
+}
+
+WebHost::WebCoreInfo detect_platform_web_core_info() {
+    auto info = make_web_core_info_base();
+    info.backend = "webview2";
+    info.name = "WebView2";
+
+    const std::wstring env_folder =
+        getenv_wide(L"WEBVIEW2_BROWSER_EXECUTABLE_FOLDER");
+    if (!env_folder.empty()) {
+        info.version = acecode::wide_to_utf8(last_path_component(env_folder));
+        info.detail = "Edge/WebView2 folder runtime";
+        info.runtime_path = acecode::wide_to_utf8(env_folder);
+        return info;
+    }
+
+    const std::wstring runtime_folder = installed_webview2_runtime_folder();
+    if (!runtime_folder.empty()) {
+        info.version = acecode::wide_to_utf8(last_path_component(runtime_folder));
+        info.detail = "Evergreen Runtime";
+        info.runtime_path = acecode::wide_to_utf8(runtime_folder);
+        return info;
+    }
+
+    info.detail = "runtime available";
+    return info;
+}
+#elif defined(__APPLE__)
+std::string nsstring_to_utf8(NSString* value) {
+    if (!value) return {};
+    const char* text = [value UTF8String];
+    return text ? std::string(text) : std::string();
+}
+
+WebHost::WebCoreInfo detect_platform_web_core_info() {
+    auto info = make_web_core_info_base();
+    info.backend = "wkwebview";
+    info.name = "WKWebView";
+    info.detail = "WebKit framework";
+    NSBundle* webkit = [NSBundle bundleWithIdentifier:@"com.apple.WebKit"];
+    if (webkit) {
+        id value = [webkit objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
+        if ([value isKindOfClass:[NSString class]]) {
+            info.version = nsstring_to_utf8((NSString*)value);
+        }
+    }
+    return info;
+}
+#else
+WebHost::WebCoreInfo detect_platform_web_core_info() {
+    auto info = make_web_core_info_base();
+    info.backend = "webkitgtk";
+    info.name = "WebKitGTK";
+    info.version = join_version(
+        webkit_get_major_version(),
+        webkit_get_minor_version(),
+        webkit_get_micro_version());
+    info.detail = "GTK " + join_version(
+        gtk_get_major_version(),
+        gtk_get_minor_version(),
+        gtk_get_micro_version());
+    return info;
+}
+#endif
+
 } // namespace
 
 struct WebHost::Impl {
@@ -1260,6 +1420,10 @@ bool WebHost::is_window_maximized() const {
     return window && [window isZoomed] == YES;
 #endif
 #endif
+}
+WebHost::WebCoreInfo WebHost::web_core_info() const {
+    (void)impl_;
+    return detect_platform_web_core_info();
 }
 void WebHost::set_window_state_change_handler(WindowStateHandler handler) {
 #ifdef _WIN32

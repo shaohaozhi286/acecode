@@ -749,6 +749,21 @@ int main(int argc, char** argv) {
         return nlohmann::json{{"ok", host.open_dev_tools()}}.dump();
     });
 
+    host.bind("aceDesktop_getWebCoreInfo", [&](const std::string& /*req*/) -> std::string {
+        auto info = host.web_core_info();
+        nlohmann::json body{{"ok", true}};
+        auto put = [&](const char* key, const std::string& value) {
+            if (!value.empty()) body[key] = value;
+        };
+        put("backend", info.backend);
+        put("name", info.name);
+        put("version", info.version);
+        put("detail", info.detail);
+        put("wrapper_name", info.wrapper_name);
+        put("wrapper_version", info.wrapper_version);
+        return body.dump();
+    });
+
     host.bind("aceDesktop_openExternalUrl", [&](const std::string& req) -> std::string {
         try {
             auto arr = nlohmann::json::parse(req);

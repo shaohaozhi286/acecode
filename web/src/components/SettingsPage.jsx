@@ -31,6 +31,12 @@ import {
 import { PERMISSION_MODES, normalizePermissionMode } from '../lib/permissionMode.js';
 import { sessionDisplayTitle } from '../lib/sessionTitle.js';
 import { formatUsageTokens, normalizeUsageStats, usageDataNote } from '../lib/usageStats.js';
+import {
+  formatProgramVersion,
+  formatWebCoreDetail,
+  formatWebCoreLabel,
+  getCurrentWebCoreInfo,
+} from '../lib/webCoreInfo.js';
 import { RefreshIcon, VsIcon } from './Icon.jsx';
 import { toast } from './Toast.jsx';
 import {
@@ -141,7 +147,7 @@ export function SettingsPage({
             />
           )}
           {activeNavKey === 'appearance' && <SectionAppearance theme={theme} setTheme={setTheme} />}
-          {activeNavKey === 'config' && <SectionConfig />}
+          {activeNavKey === 'config' && <SectionConfig health={health} />}
           {activeNavKey === 'personalization' && <SectionPersonalization />}
           {activeNavKey === 'mcp' && <SectionMCP />}
           {activeNavKey === 'models' && <SectionModel />}
@@ -359,12 +365,13 @@ function SectionAppearance({ theme, setTheme }) {
 // ─── 配置 ──────────────────────────────────────────────────────────────────
 // 真实接入:升级服务 URL。其余程序版本 / 依赖项 / 诊断 / 重置仍保留占位。
 
-function SectionConfig() {
+function SectionConfig({ health }) {
   const [upgradeUrl, setUpgradeUrl] = useState(DEFAULT_UPGRADE_SERVICE_URL);
   const [upgradeLoading, setUpgradeLoading] = useState(true);
   const [upgradeSaving, setUpgradeSaving] = useState(false);
   const [upgradeSaved, setUpgradeSaved] = useState(false);
   const [upgradeError, setUpgradeError] = useState('');
+  const [webCoreInfo, setWebCoreInfo] = useState(null);
   const [depPython, setDepPython] = useState(true);
   const [depNode, setDepNode] = useState(true);
   const [depCsharp, setDepCsharp] = useState(false);
@@ -384,6 +391,18 @@ function SectionConfig() {
       })
       .finally(() => {
         if (!cancelled) setUpgradeLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    getCurrentWebCoreInfo()
+      .then((info) => {
+        if (!cancelled) setWebCoreInfo(info);
+      })
+      .catch(() => {
+        if (!cancelled) setWebCoreInfo(null);
       });
     return () => { cancelled = true; };
   }, []);
@@ -432,6 +451,9 @@ function SectionConfig() {
     { key: 'node',   label: 'Node.js 工具', desc: 'pnpm / npm / tsx 等',     checked: depNode,   toggle: () => setDepNode((v) => !v) },
     { key: 'csharp', label: 'C# 工具',     desc: 'dotnet SDK / Roslyn 等',  checked: depCsharp, toggle: () => setDepCsharp((v) => !v) },
   ];
+  const programVersionLabel = formatProgramVersion(health?.version);
+  const webCoreLabel = formatWebCoreLabel(webCoreInfo);
+  const webCoreDetail = formatWebCoreDetail(webCoreInfo);
 
   return (
     <>
@@ -511,7 +533,30 @@ function SectionConfig() {
           <div className="text-[13px] font-medium">当前版本</div>
           <div className="text-[11px] text-fg-mute mt-0.5">ACECode 桌面 / TUI / Daemon 同版本号</div>
         </div>
-        <span className="font-mono text-[12px] text-fg-2">dev (placeholder)</span>
+        <span className="font-mono text-[12px] text-fg-2">{programVersionLabel}</span>
+      </div>
+
+      <div className="flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-md bg-surface border border-border mb-2">
+        <div className="min-w-0">
+          <div className="text-[13px] font-medium">Web 核心</div>
+          <div className="text-[11px] text-fg-mute mt-0.5">当前桌面 WebView / 浏览器渲染核心</div>
+        </div>
+        <div className="min-w-0 max-w-[62%] text-right">
+          <div
+            className="font-mono text-[12px] text-fg-2 truncate"
+            title={webCoreLabel}
+          >
+            {webCoreLabel}
+          </div>
+          {webCoreDetail && (
+            <div
+              className="text-[10px] text-fg-mute truncate"
+              title={webCoreDetail}
+            >
+              {webCoreDetail}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* 依赖项 checkbox 组 */}

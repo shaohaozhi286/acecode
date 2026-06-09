@@ -2196,6 +2196,15 @@ body {
   max-height: 100%;
   object-fit: contain;
 }
+.ace-side-pdf-preview {
+  flex: 1 1 auto;
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  border: 0;
+  background: var(--ace-code-bg);
+}
 
 /* Queue card list (above InputBar): 排队中的待发送消息卡片栈。
  * 卡片左侧 3px 的状态指示条用 absolute 定位,颜色由 utility class 提供

@@ -240,8 +240,8 @@ export function createApi(base = null) {
       return resp.text();
     },
 
-    // SidePanel image preview uses an authenticated binary fetch. A plain
-    // <img src="/api/..."> cannot attach the daemon token header.
+    // SidePanel browser-native previews use an authenticated binary fetch. A
+    // plain <img>/<object data="/api/..."> cannot attach the daemon token header.
     readFileBlob: async (cwd, path) => {
       const qs = `?cwd=${encodeURIComponent(cwd)}&path=${encodeURIComponent(path)}`;
       const headers = {};

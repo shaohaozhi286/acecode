@@ -112,7 +112,7 @@ std::string trim_trailing_slash(std::string value) {
     return value;
 }
 
-std::optional<std::string> preview_image_mime(const std::string& path) {
+std::optional<std::string> preview_blob_mime(const std::string& path) {
     auto dot = path.find_last_of('.');
     if (dot == std::string::npos || dot + 1 >= path.size()) return std::nullopt;
     std::string ext = path.substr(dot + 1);
@@ -126,6 +126,7 @@ std::optional<std::string> preview_image_mime(const std::string& path) {
     if (ext == "bmp")  return "image/bmp";
     if (ext == "ico")  return "image/x-icon";
     if (ext == "svg")  return "image/svg+xml";
+    if (ext == "pdf")  return "application/pdf";
     return std::nullopt;
 }
 
@@ -2150,7 +2151,7 @@ struct WebServer::Impl {
                 return with_cors(req, std::move(r));
             }
 
-            auto mime = preview_image_mime(path_q);
+            auto mime = preview_blob_mime(path_q);
             if (!mime.has_value()) {
                 crow::response r(415);
                 r.body = R"({"error":"unsupported file type"})";
@@ -2176,12 +2177,12 @@ struct WebServer::Impl {
             if (ec) {
                 return error_response(req, FileError{FileErrorKind::IoError, 0, ec.message()});
             }
-            constexpr std::uint64_t kMaxImagePreviewBytes = 20ull * 1024 * 1024;
-            if (sz > kMaxImagePreviewBytes) {
+            constexpr std::uint64_t kMaxBlobPreviewBytes = 20ull * 1024 * 1024;
+            if (sz > kMaxBlobPreviewBytes) {
                 return error_response(req, FileError{
                     FileErrorKind::TooLarge,
                     static_cast<std::uint64_t>(sz),
-                    "file exceeds image preview cap",
+                    "file exceeds blob preview cap",
                 });
             }
 
