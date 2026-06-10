@@ -4,6 +4,7 @@ export const DESKTOP_CONTEXT_ACTIONS = Object.freeze({
   PIN_SESSION: 'pin_session',
   UNPIN_SESSION: 'unpin_session',
   OPEN_SESSION: 'open_session',
+  RENAME_SESSION: 'rename_session',
   COPY_SESSION_TITLE: 'copy_session_title',
   COPY_SESSION_ID: 'copy_session_id',
   ARCHIVE_SESSION: 'archive_session',
@@ -145,6 +146,7 @@ export function buildDesktopContextMenuItems({
   if (!editable) {
     if (sessionTarget) {
       addAction(items, DESKTOP_CONTEXT_ACTIONS.OPEN_SESSION, sessionTarget);
+      addAction(items, DESKTOP_CONTEXT_ACTIONS.RENAME_SESSION, sessionTarget);
       addAction(items, DESKTOP_CONTEXT_ACTIONS.COPY_SESSION_TITLE, sessionTarget, { enabled: !!sessionTarget.title });
       addAction(items, DESKTOP_CONTEXT_ACTIONS.COPY_SESSION_ID, sessionTarget);
       addAction(items, sessionTarget.pinned ? DESKTOP_CONTEXT_ACTIONS.UNPIN_SESSION : DESKTOP_CONTEXT_ACTIONS.PIN_SESSION, sessionTarget);

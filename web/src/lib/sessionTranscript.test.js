@@ -118,6 +118,54 @@ run('重复 replay 的 token seq 不会重复追加 streaming 文本', () => {
   assert.deepEqual(state.items.map((item) => item.content), ['work', 'hello!']);
 });
 
+run('home auto_start 竞争:快照已含的 user 消息再经 WS 事件到达不重复(按 id 幂等)', () => {
+  // 回归 bug(dedupe-message-events-by-id):主页发起首条消息时,daemon 的
+  // GET /messages 先收集事件回放、后读消息快照,而回合线程先 append 消息
+  // (中间隔落盘 I/O)、后 emit 事件;交错时响应呈现「messages 已含 user
+  // 消息、events 不含对应事件」,seq 水位未推进,随后该 message 事件经 WS
+  // 送达 → 旧实现无条件追加,用户气泡出现两次。
+  // 期望:按持久消息 id 命中快照条目,原位更新(吸收事件的 metadata),不追加。
+  let state = loadTranscriptHistory(createTranscriptState({ title: 's1' }), {
+    messages: [
+      { id: 'u1', role: 'user', content: 'hello', ts: 1 },
+    ],
+    events: [],
+  }).state;
+  // 竞争窗口的关键前提:快照未带事件,水位仍为 0,后到事件不会被 seq 拦截
+  assert.equal(state.lastSeq, 0);
+
+  state = reduceTranscriptEvent(state, {
+    type: 'message',
+    payload: { id: 'u1', role: 'user', content: 'hello', metadata: { display_text: 'hello' } },
+    seq: 1,
+  }).state;
+
+  assert.equal(state.items.length, 1);
+  assert.equal(state.items[0].messageId, 'u1');
+  assert.equal(state.items[0].content, 'hello');
+  assert.deepEqual(state.items[0].metadata, { display_text: 'hello' });
+});
+
+run('不同 id 的相同文本消息仍是两条(用户故意连发不被误删)', () => {
+  // 触发场景:用户连续发送两条一字不差的消息,daemon 为它们生成不同的
+  // 持久 UUID。期望:id 不同就不去重,transcript 显示两条。
+  const state = reduceMany([
+    { type: 'message', payload: { id: 'u1', role: 'user', content: '重复内容' }, seq: 1 },
+    { type: 'message', payload: { id: 'u2', role: 'user', content: '重复内容' }, seq: 2 },
+  ]);
+  assert.equal(state.items.length, 2);
+  assert.deepEqual(state.items.map((item) => item.messageId), ['u1', 'u2']);
+});
+
+run('无 id 的 message 事件维持追加行为', () => {
+  // 期望行为:本地合成 / 老协议的无 id 消息不参与按 id 去重,照常追加。
+  const state = reduceMany([
+    { type: 'message', payload: { role: 'system', content: 'a' }, seq: 1 },
+    { type: 'message', payload: { role: 'system', content: 'a' }, seq: 2 },
+  ]);
+  assert.equal(state.items.length, 2);
+});
+
 run('无 seq 的本地 transcript 事件仍会正常应用', () => {
   let state = reduceMany([
     { type: 'token', payload: { text: 'hello' }, seq: 1 },
@@ -168,6 +216,15 @@ run('busy done error 状态按事件更新', () => {
   assert.equal(state.error, 'boom');
   assert.equal(state.items.at(-1).kind, 'termination_notice');
   assert.equal(state.items.at(-1).content, '任务已终止：boom');
+});
+
+run('session_updated 更新 transcript title', () => {
+  const state = reduceTranscriptEvent(createTranscriptState({ title: 'Old title' }), {
+    type: 'session_updated',
+    payload: { title: 'New title', title_source: 'generated' },
+    seq: 1,
+  }).state;
+  assert.equal(state.title, 'New title');
 });
 
 run('用户主动终止追加独立红色提示项', () => {

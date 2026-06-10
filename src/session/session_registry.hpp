@@ -30,6 +30,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -125,6 +126,10 @@ public:
     std::optional<PermissionMode> permission_mode(const std::string& id) const;
     bool set_permission_mode(const std::string& id, PermissionMode mode);
 
+    // Fire-and-forget hidden title generation for the first visible user input.
+    // It never writes to transcript or blocks send_input.
+    void maybe_start_auto_title(const std::string& id, const UserInput& input);
+
     // Daemon-wide default for sessions created after this call. Existing
     // sessions remain session-scoped and are not mutated here.
     PermissionMode default_permission_mode() const;
@@ -151,6 +156,8 @@ private:
     SessionRegistryDeps                                          deps_;
     mutable std::mutex                                            mu_;
     std::unordered_map<std::string, std::unique_ptr<SessionEntry>> entries_;
+    mutable std::mutex                                            title_threads_mu_;
+    std::vector<std::thread>                                      title_threads_;
 };
 
 } // namespace acecode

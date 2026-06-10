@@ -638,12 +638,36 @@ export function reduceTranscriptEvent(state, msg) {
         next.turnHadAssistantText = true;
         next.lastAssistantText = incomingContent;
       }
+      // 按持久消息 id 幂等(dedupe-message-events-by-id):home auto_start 流程中
+      // GET /messages 快照与 WS 回放存在竞争窗口 —— daemon 先读事件回放、后读
+      // 消息快照,而回合线程先 append 消息(中间隔落盘 I/O)、后 emit 事件,
+      // 交错时快照已含 user 消息但其 message 事件 seq 高于水位、随后才经 WS
+      // 送达。seq 水位只保证通道内幂等,跨通道要靠消息 id:命中已有条目时
+      // 原位更新(事件可能带更完整的 content_parts / metadata),不追加,
+      // 否则用户气泡出现两次。不同 id 相同文本(用户故意连发)不受影响。
+      const incomingMessageId = p.id || '';
+      const existingIndex = incomingMessageId
+        ? next.items.findIndex((item) => item.kind === 'msg' && item.messageId === incomingMessageId)
+        : -1;
+      if (existingIndex >= 0) {
+        next.items = next.items.map((item, index) => (index === existingIndex
+          ? {
+              ...item,
+              role,
+              content: incomingContent || item.content || '',
+              contentParts: Array.isArray(p.content_parts) ? p.content_parts : item.contentParts,
+              metadata: p.metadata ?? item.metadata,
+              ts: eventTs(msg),
+            }
+          : item));
+        break;
+      }
       next.items = [
         ...next.items,
         {
           kind: 'msg',
           id: allocateItemId(next),
-          messageId: p.id || '',
+          messageId: incomingMessageId,
           role,
           content: incomingContent,
           contentParts: Array.isArray(p.content_parts) ? p.content_parts : [],
@@ -773,6 +797,12 @@ export function reduceTranscriptEvent(state, msg) {
       const todos = normalizeTodos(p.todos);
       next.todos = todos;
       next.todoSummary = normalizeTodoSummary(p.summary, todos);
+      break;
+    }
+    case 'session_updated': {
+      if (Object.prototype.hasOwnProperty.call(p, 'title')) {
+        next.title = p.title || '';
+      }
       break;
     }
     case 'busy_changed': {

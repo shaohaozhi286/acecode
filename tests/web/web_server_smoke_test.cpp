@@ -108,7 +108,8 @@ struct WebServerFixture {
         bool native_folder_picker_enabled = false,
         std::function<std::optional<std::string>()> native_folder_picker = {},
         bool attach_skill_registry = true,
-        std::function<bool(std::string*)> start_update_command = {}) {
+        std::function<bool(std::string*)> start_update_command = {},
+        std::function<std::optional<std::string>(const std::string&)> open_in_explorer = {}) {
         port = pick_test_port();
         web_cfg.bind = "127.0.0.1";
         web_cfg.port = port;
@@ -169,6 +170,7 @@ struct WebServerFixture {
         wdeps.workspace_registry = workspace_registry.get();
         wdeps.native_folder_picker_enabled = native_folder_picker_enabled;
         wdeps.native_folder_picker = std::move(native_folder_picker);
+        wdeps.open_in_explorer = std::move(open_in_explorer);
         wdeps.start_update_command = std::move(start_update_command);
         wdeps.skill_registry = attach_skill_registry ? &skill_registry : nullptr;
         wdeps.dangerous = false;
@@ -747,6 +749,74 @@ TEST(WebServerHttp, NativeFolderPickerEndpointRegistersSelectedFolder) {
     EXPECT_TRUE(found);
 }
 
+// 场景: open-in-explorer 端点与 native folder picker 同款门控 —— 回调未注入
+// (standalone daemon / 非 desktop 启动)时必须 501,不能有任何副作用。
+// 回归: webapp 兼容模式右键菜单「在资源管理器中打开」首次落地(原先只有
+// webview bridge 一条通路,Edge app 模式完全不可用)。
+TEST(WebServerHttp, OpenInExplorerEndpointRejectsWhenUnavailable) {
+    WebServerFixture fx;
+
+    auto r = cpr::Post(cpr::Url{fx.url("/api/open-in-explorer")},
+                       cpr::Header{{"Content-Type", "application/json"}},
+                       cpr::Body{R"({"path":"C:/anywhere"})"});
+    ASSERT_EQ(r.status_code, 501) << r.text;
+    auto body = json::parse(r.text);
+    EXPECT_EQ(body["error"], "open in explorer unavailable");
+}
+
+// 场景: 请求体缺 path(或为空)时 400,回调不能被调用 —— 校验顺序是
+// 门控 → 形参 → 执行,空路径不应该走到执行层。
+TEST(WebServerHttp, OpenInExplorerEndpointRequiresPath) {
+    bool called = false;
+    WebServerFixture fx(true, false, {}, true, {},
+                        [&called](const std::string&) -> std::optional<std::string> {
+                            called = true;
+                            return std::nullopt;
+                        });
+
+    auto r = cpr::Post(cpr::Url{fx.url("/api/open-in-explorer")},
+                       cpr::Header{{"Content-Type", "application/json"}},
+                       cpr::Body{R"({})"});
+    ASSERT_EQ(r.status_code, 400) << r.text;
+    EXPECT_FALSE(called);
+
+    auto bad = cpr::Post(cpr::Url{fx.url("/api/open-in-explorer")},
+                         cpr::Header{{"Content-Type", "application/json"}},
+                         cpr::Body{"not json"});
+    ASSERT_EQ(bad.status_code, 400) << bad.text;
+    EXPECT_FALSE(called);
+}
+
+// 场景: 回调成功(返回 nullopt)→ 200 {"ok":true};回调报错(返回错误串,
+// 例如路径越出已注册 workspace)→ 400 {"ok":false,"error":...}。错误信息
+// 必须原样透传给前端 toast。
+TEST(WebServerHttp, OpenInExplorerEndpointForwardsCallbackResult) {
+    std::string received_path;
+    std::optional<std::string> next_result;
+    WebServerFixture fx(true, false, {}, true, {},
+                        [&](const std::string& path) -> std::optional<std::string> {
+                            received_path = path;
+                            return next_result;
+                        });
+
+    next_result = std::nullopt;
+    auto ok = cpr::Post(cpr::Url{fx.url("/api/open-in-explorer")},
+                        cpr::Header{{"Content-Type", "application/json"}},
+                        cpr::Body{R"({"path":"D:/proj"})"});
+    ASSERT_EQ(ok.status_code, 200) << ok.text;
+    EXPECT_EQ(json::parse(ok.text)["ok"], true);
+    EXPECT_EQ(received_path, "D:/proj");
+
+    next_result = std::string{"path is outside registered workspaces"};
+    auto rejected = cpr::Post(cpr::Url{fx.url("/api/open-in-explorer")},
+                              cpr::Header{{"Content-Type", "application/json"}},
+                              cpr::Body{R"({"path":"D:/elsewhere"})"});
+    ASSERT_EQ(rejected.status_code, 400) << rejected.text;
+    auto body = json::parse(rejected.text);
+    EXPECT_EQ(body["ok"], false);
+    EXPECT_EQ(body["error"], "path is outside registered workspaces");
+}
+
 // 场景:desktop bridge 直接改 workspace.json 后,daemon 的 /api/workspaces
 // 需要重新扫描磁盘,否则左侧项目名会被旧的 daemon 内存值覆盖。
 TEST(WebServerHttp, WorkspaceListRefreshesExternalRename) {
@@ -1063,6 +1133,60 @@ TEST(WebServerHttp, HiddenDefaultWorkspaceNotListedOrResolved) {
 
     auto local_sessions = cpr::Get(cpr::Url{fx.url("/api/sessions")});
     EXPECT_EQ(local_sessions.status_code, 200) << local_sessions.text;
+}
+
+TEST(WebServerHttp, PutSessionTitleRenamesActiveSessionAndPersistsMeta) {
+    WebServerFixture fx;
+    auto create = cpr::Post(cpr::Url{fx.url("/api/sessions")},
+                            cpr::Header{{"Content-Type", "application/json"}},
+                            cpr::Body{R"({})"});
+    ASSERT_EQ(create.status_code, 201) << create.text;
+    const auto sid = json::parse(create.text)["session_id"].get<std::string>();
+
+    auto put = cpr::Put(cpr::Url{fx.url("/api/sessions/" + sid + "/title")},
+                        cpr::Header{{"Content-Type", "application/json"}},
+                        cpr::Body{R"({"title":"Renamed session"})"});
+    ASSERT_EQ(put.status_code, 200) << put.text;
+    auto body = json::parse(put.text);
+    EXPECT_EQ(body["id"], sid);
+    EXPECT_EQ(body["title"], "Renamed session");
+    EXPECT_EQ(body["title_source"], "user");
+
+    auto meta = acecode::SessionStorage::read_meta(
+        acecode::SessionStorage::meta_path(fx.project_dir, sid, 0));
+    EXPECT_EQ(meta.title, "Renamed session");
+    EXPECT_EQ(meta.title_source, "user");
+}
+
+TEST(WebServerHttp, WorkspacePutSessionTitleRenamesInactiveDiskSession) {
+    WebServerFixture fx;
+    const std::string sid = "20260610-030405-abcd";
+    const std::string hash = acecode::compute_cwd_hash(fx.cwd);
+    std::filesystem::create_directories(fx.project_dir);
+
+    acecode::SessionMeta meta;
+    meta.id = sid;
+    meta.cwd = fx.cwd;
+    meta.created_at = "2026-06-10T03:04:05Z";
+    meta.updated_at = meta.created_at;
+    meta.message_count = 1;
+    acecode::SessionStorage::write_meta(
+        acecode::SessionStorage::meta_path(fx.project_dir, sid, 0), meta);
+
+    auto put = cpr::Put(cpr::Url{fx.url("/api/workspaces/" + hash + "/sessions/" + sid + "/title")},
+                        cpr::Header{{"Content-Type", "application/json"}},
+                        cpr::Body{R"({"title":"Disk rename"})"});
+    ASSERT_EQ(put.status_code, 200) << put.text;
+    auto body = json::parse(put.text);
+    EXPECT_EQ(body["id"], sid);
+    EXPECT_EQ(body["active"], false);
+    EXPECT_EQ(body["title"], "Disk rename");
+    EXPECT_EQ(body["title_source"], "user");
+
+    auto out = acecode::SessionStorage::read_meta(
+        acecode::SessionStorage::meta_path(fx.project_dir, sid, 0));
+    EXPECT_EQ(out.title, "Disk rename");
+    EXPECT_EQ(out.title_source, "user");
 }
 
 // 场景: hidden workspace hash 不能通过 workspace-scoped endpoint 被直接访问;

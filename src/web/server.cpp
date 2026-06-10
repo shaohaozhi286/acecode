@@ -31,6 +31,7 @@
 #include "../utils/logger.hpp"
 #include "../utils/base64.hpp"
 #include "../utils/cwd_hash.hpp"
+#include "../utils/terminal_title.hpp"
 #include "handlers/files_handler.hpp"
 #include "handlers/fork_handler.hpp"
 #include "handlers/history_handler.hpp"
@@ -43,6 +44,7 @@
 #include "handlers/skills_handler.hpp"
 #include "../skills/skill_init.hpp"
 #include "message_payload.hpp"
+#include "pty/pty_session_registry.hpp"
 #include "version.hpp"
 
 // Crow 头一定在 ASIO_STANDALONE PUBLIC 定义之后才 include。CMakeLists.txt 已
@@ -733,6 +735,7 @@ struct WebServer::Impl {
         o["workspace_hash"] = !s.workspace_hash.empty() ? s.workspace_hash : (m ? compute_cwd_hash(m->cwd) : "");
         o["cwd"]           = !s.cwd.empty() ? s.cwd : (m ? m->cwd : "");
         o["title"]         = !s.title.empty() ? s.title : (m ? m->title : "");
+        o["title_source"]  = !s.title_source.empty() ? s.title_source : (m ? m->title_source : "");
         o["summary"]       = !s.summary.empty() ? s.summary : (m ? m->summary : "");
         o["created_at"]    = !s.created_at.empty() ? s.created_at : (m ? m->created_at : "");
         o["updated_at"]    = !s.updated_at.empty() ? s.updated_at : (m ? m->updated_at : "");
@@ -774,6 +777,7 @@ struct WebServer::Impl {
         o["workspace_hash"] = workspace_hash;
         o["cwd"]            = m.cwd;
         o["title"]          = m.title;
+        o["title_source"]   = m.title_source;
         o["summary"]        = m.summary;
         o["created_at"]     = m.created_at;
         o["updated_at"]     = m.updated_at;
@@ -936,6 +940,7 @@ struct WebServer::Impl {
                 meta.model_preset = entry->model_state.name;
                 if (entry->sm) {
                     meta.title = entry->sm->current_title();
+                    meta.title_source = entry->sm->current_title_source();
                     meta.input_draft = entry->sm->current_input_draft();
                 }
                 return meta;
@@ -1035,6 +1040,114 @@ struct WebServer::Impl {
         auto* entry = deps.session_registry->lookup(id);
         if (!entry || !session_entry_matches_workspace(*entry, ws)) return nullptr;
         return entry;
+    }
+
+    void emit_session_title_update(SessionEntry& entry) const {
+        if (!entry.loop || !entry.sm) return;
+        entry.loop->events().emit(SessionEventKind::SessionUpdated, json{
+            {"session_id", entry.id},
+            {"workspace_hash", entry.workspace_hash},
+            {"cwd", entry.cwd},
+            {"title", entry.sm->current_title()},
+            {"title_source", entry.sm->current_title_source()},
+        });
+    }
+
+    std::optional<crow::response> parse_session_title_request(
+        const crow::request& req,
+        std::string& title) {
+        try {
+            auto j = json::parse(req.body);
+            if (!j.contains("title") || !j["title"].is_string()) {
+                crow::response r(400);
+                r.body = R"({"error":"title required"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            title = j["title"].get<std::string>();
+        } catch (const std::exception& e) {
+            crow::response r(400);
+            r.body = json{{"error", std::string("bad json: ") + e.what()}}.dump();
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        }
+
+        while (!title.empty() && std::isspace(static_cast<unsigned char>(title.front()))) {
+            title.erase(title.begin());
+        }
+        while (!title.empty() && std::isspace(static_cast<unsigned char>(title.back()))) {
+            title.pop_back();
+        }
+        std::string err;
+        if (!sanitize_title(title, err)) {
+            crow::response r(400);
+            r.body = json{{"error", "invalid title"}, {"message", err}}.dump();
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        }
+        return std::nullopt;
+    }
+
+    crow::response set_session_title_response(
+        const crow::request& req,
+        const acecode::desktop::WorkspaceMeta& ws,
+        const std::string& id) {
+        std::string title;
+        if (auto err = parse_session_title_request(req, title)) return std::move(*err);
+
+        if (auto* entry = active_session_entry_for_workspace(ws, id)) {
+            if (entry->sm) {
+                entry->sm->ensure_active_session_id();
+                entry->sm->set_session_title(title);
+                emit_session_title_update(*entry);
+                if (auto meta = find_session_meta_for_workspace(ws, id)) {
+                    crow::response r(session_info_to_json(
+                        SessionInfo{
+                            id,
+                            entry->cwd,
+                            entry->workspace_hash,
+                            meta->created_at,
+                            meta->updated_at,
+                            meta->summary,
+                            entry->model_state.name,
+                            entry->provider,
+                            entry->model,
+                            entry->model_state.context_window,
+                            entry->model_state.deleted,
+                            entry->sm->current_title(),
+                            entry->sm->current_title_source(),
+                            meta->message_count,
+                            entry->sm->current_turn_count(),
+                            entry->sm->current_permission_mode(),
+                            entry->sm->current_last_token_usage(),
+                            entry->sm->current_session_token_usage(),
+                            true,
+                            entry->loop ? entry->loop->is_busy() : false,
+                        },
+                        &*meta).dump());
+                    r.add_header("Content-Type", "application/json");
+                    return with_cors(req, std::move(r));
+                }
+            }
+        }
+
+        auto maybe_meta = find_session_meta_for_workspace(ws, id);
+        if (!maybe_meta.has_value()) {
+            crow::response r(404);
+            r.body = R"({"error":"session not found"})";
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        }
+
+        SessionMeta meta = *maybe_meta;
+        meta.title = title;
+        meta.title_source = title.empty() ? std::string{} : "user";
+        const auto project_dir = SessionStorage::get_project_dir(ws.cwd);
+        SessionStorage::write_meta(SessionStorage::meta_path(project_dir, id), meta);
+
+        crow::response r(session_meta_to_json(meta, ws.hash).dump());
+        r.add_header("Content-Type", "application/json");
+        return with_cors(req, std::move(r));
     }
 
     crow::response get_session_input_draft(
@@ -1481,6 +1594,7 @@ struct WebServer::Impl {
         register_skills();
         register_commands();
         register_mcp();
+        register_pty();
         register_websocket();
         register_static();
     }
@@ -1503,6 +1617,10 @@ struct WebServer::Impl {
             return cors_preflight(req);
         });
         CROW_ROUTE(app, "/api/workspaces/<string>/sessions/<string>/archive").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req, const std::string&, const std::string&) {
+            return cors_preflight(req);
+        });
+        CROW_ROUTE(app, "/api/workspaces/<string>/sessions/<string>/title").methods(crow::HTTPMethod::Options)
         ([this](const crow::request& req, const std::string&, const std::string&) {
             return cors_preflight(req);
         });
@@ -1605,6 +1723,48 @@ struct WebServer::Impl {
             LOG_INFO("[web] native folder picker registered workspace hash=" + m.hash + " cwd=" + m.cwd);
             crow::response r(200);
             r.body = workspace_to_json(m).dump();
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        });
+
+        // webapp 兼容模式(Edge --app,无 webview bridge)的「在资源管理器中打开」。
+        // 路径校验(绝对路径 / 目录存在 / 在已注册 workspace 内)在回调内完成
+        // (desktop::open_directory_in_file_manager),这里只做形参与门控。
+        CROW_ROUTE(app, "/api/open-in-explorer").methods(crow::HTTPMethod::POST)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.open_in_explorer) {
+                crow::response r(501);
+                r.body = R"({"error":"open in explorer unavailable"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            std::string path;
+            try {
+                auto j = json::parse(req.body);
+                path = j.value("path", std::string{});
+            } catch (const std::exception& e) {
+                crow::response r(400);
+                r.body = json{{"error", std::string("bad json: ") + e.what()}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            if (path.empty()) {
+                crow::response r(400);
+                r.body = R"({"error":"path required"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            auto error = deps.open_in_explorer(path);
+            if (error.has_value()) {
+                crow::response r(400);
+                r.body = json{{"ok", false}, {"error", *error}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            LOG_INFO("[web] open-in-explorer path=" + path);
+            crow::response r(200);
+            r.body = R"({"ok":true})";
             r.add_header("Content-Type", "application/json");
             return with_cors(req, std::move(r));
         });
@@ -1746,6 +1906,19 @@ struct WebServer::Impl {
                 return with_cors(req, std::move(r));
             }
             return set_session_archive_state(req, *ws, id, false);
+        });
+
+        CROW_ROUTE(app, "/api/workspaces/<string>/sessions/<string>/title").methods(crow::HTTPMethod::PUT)
+        ([this](const crow::request& req, const std::string& hash, const std::string& id) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            auto ws = resolve_workspace(hash);
+            if (!ws.has_value()) {
+                crow::response r(404);
+                r.body = R"({"error":"workspace not found"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            return set_session_title_response(req, *ws, id);
         });
 
         CROW_ROUTE(app, "/api/workspaces/<string>/sessions/<string>/draft").methods(crow::HTTPMethod::GET)
@@ -2245,6 +2418,13 @@ struct WebServer::Impl {
                     {"suppress_when_focused", n.suppress_when_focused},
                 };
             }
+            // 控制台 capability(add-console-dock):前端据此显示/隐藏入口,
+            // backend=="pipe" 时显示 legacy 降级提示。
+            j["console"] = {
+                {"available", deps.pty_registry != nullptr},
+                {"backend", deps.pty_registry
+                    ? pty_backend_kind_name(deps.pty_registry->backend()) : ""},
+            };
             crow::response r(j.dump());
             r.add_header("Content-Type", "application/json");
             return r;
@@ -2307,6 +2487,10 @@ struct WebServer::Impl {
             return cors_preflight(req);
         });
         CROW_ROUTE(app, "/api/sessions/<string>/archive").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req, const std::string&) {
+            return cors_preflight(req);
+        });
+        CROW_ROUTE(app, "/api/sessions/<string>/title").methods(crow::HTTPMethod::Options)
         ([this](const crow::request& req, const std::string&) {
             return cors_preflight(req);
         });
@@ -2424,6 +2608,12 @@ struct WebServer::Impl {
         ([this](const crow::request& req, const std::string& id) {
             if (auto rej = require_auth(req)) return std::move(*rej);
             return set_session_archive_state(req, compatibility_workspace(), id, false);
+        });
+
+        CROW_ROUTE(app, "/api/sessions/<string>/title").methods(crow::HTTPMethod::PUT)
+        ([this](const crow::request& req, const std::string& id) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            return set_session_title_response(req, compatibility_workspace(), id);
         });
 
         CROW_ROUTE(app, "/api/sessions/<string>/draft").methods(crow::HTTPMethod::GET)
@@ -4254,6 +4444,211 @@ struct WebServer::Impl {
             r.add_header("Content-Type", "application/json");
             return r;
         });
+    }
+
+    // -----------------------------------------------------------------
+    // 控制台 PTY(add-console-dock):REST 会话管理 + WS 字节直传。
+    // 全部路由 loopback 硬限制 — 终端是无审批命令执行,token 不豁免
+    // (与"非 loopback 拒绝 dangerous mode"同策略,specs/console-pty-backend)。
+    // -----------------------------------------------------------------
+
+    // 返回 nullopt = 放行;否则为拒绝响应。
+    std::optional<crow::response> require_pty_access(const crow::request& req) {
+        if (!deps.pty_registry) {
+            crow::response r(503);
+            r.add_header("Content-Type", "application/json");
+            r.body = json{{"error", "console is not available"}}.dump();
+            add_cors(req, r);
+            return r;
+        }
+        if (!is_loopback_address(req.remote_ip_address)) {
+            log_unauthorized(req.url, req.remote_ip_address, "pty non-loopback");
+            crow::response r(403);
+            r.add_header("Content-Type", "application/json");
+            r.body = json{{"error", "console is loopback-only"}}.dump();
+            add_cors(req, r);
+            return r;
+        }
+        return require_auth(req);  // 跨 origin 的 loopback 请求仍要 token
+    }
+
+    static json pty_info_json(const PtySessionInfo& info) {
+        json j{
+            {"id", info.id},
+            {"title", info.title},
+            {"shell", info.shell},
+            {"cwd", info.cwd},
+            {"status", info.status},
+            {"pid", info.pid},
+            {"backend", pty_backend_kind_name(info.backend)},
+        };
+        if (info.status == "exited") j["exit_code"] = info.exit_code;
+        return j;
+    }
+
+    // /ws/pty/<id> 的 per-connection 状态(onaccept 解析,onclose 释放)。
+    struct PtyWsState {
+        std::string id;
+        std::int64_t cursor = -1;
+    };
+
+    void register_pty() {
+        CROW_ROUTE(app, "/api/pty").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) { return cors_preflight(req); });
+        CROW_ROUTE(app, "/api/pty/<string>").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req, const std::string&) { return cors_preflight(req); });
+        CROW_ROUTE(app, "/api/pty/<string>/resize").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req, const std::string&) { return cors_preflight(req); });
+        CROW_ROUTE(app, "/api/pty/<string>/title").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req, const std::string&) { return cors_preflight(req); });
+
+        // POST /api/pty {cwd?, title?} → 201 session info
+        CROW_ROUTE(app, "/api/pty").methods(crow::HTTPMethod::POST)
+        ([this](const crow::request& req) {
+            if (auto rej = require_pty_access(req)) return std::move(*rej);
+            std::string cwd_override, title;
+            if (!req.body.empty()) {
+                try {
+                    auto body = json::parse(req.body);
+                    cwd_override = body.value("cwd", "");
+                    title = body.value("title", "");
+                } catch (...) {
+                    return with_cors(req, crow::response(400, "bad json"));
+                }
+            }
+            std::string error;
+            auto info = deps.pty_registry->create(cwd_override, title, error);
+            if (!info) {
+                int code = error.find("limit") != std::string::npos ? 429 : 500;
+                crow::response r(code);
+                r.add_header("Content-Type", "application/json");
+                r.body = json{{"error", error}}.dump();
+                return with_cors(req, std::move(r));
+            }
+            crow::response r(201, pty_info_json(*info).dump());
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        });
+
+        // GET /api/pty → {backend, sessions: [...]}
+        CROW_ROUTE(app, "/api/pty").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req) {
+            if (auto rej = require_pty_access(req)) return std::move(*rej);
+            json arr = json::array();
+            for (const auto& info : deps.pty_registry->list()) {
+                arr.push_back(pty_info_json(info));
+            }
+            json out{{"backend", pty_backend_kind_name(deps.pty_registry->backend())},
+                     {"sessions", arr}};
+            crow::response r(out.dump());
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        });
+
+        // DELETE /api/pty/<id> → 204 / 404
+        CROW_ROUTE(app, "/api/pty/<string>").methods(crow::HTTPMethod::Delete)
+        ([this](const crow::request& req, const std::string& id) {
+            if (auto rej = require_pty_access(req)) return std::move(*rej);
+            if (!deps.pty_registry->remove(id)) {
+                return with_cors(req, crow::response(404));
+            }
+            return with_cors(req, crow::response(204));
+        });
+
+        // POST /api/pty/<id>/resize {cols, rows} → 204 / 404
+        CROW_ROUTE(app, "/api/pty/<string>/resize").methods(crow::HTTPMethod::POST)
+        ([this](const crow::request& req, const std::string& id) {
+            if (auto rej = require_pty_access(req)) return std::move(*rej);
+            int cols = 0, rows = 0;
+            try {
+                auto body = json::parse(req.body);
+                cols = body.value("cols", 0);
+                rows = body.value("rows", 0);
+            } catch (...) {
+                return with_cors(req, crow::response(400, "bad json"));
+            }
+            if (cols < 2 || cols > 1000 || rows < 2 || rows > 1000) {
+                return with_cors(req, crow::response(400, "cols/rows out of range"));
+            }
+            if (!deps.pty_registry->resize(id, cols, rows)) {
+                return with_cors(req, crow::response(404));
+            }
+            return with_cors(req, crow::response(204));
+        });
+
+        // POST /api/pty/<id>/title {title} → 204 / 404。终端内程序经 OSC
+        // 设置的标题由前端 xterm onTitleChange 同步回来,刷新恢复不丢。
+        CROW_ROUTE(app, "/api/pty/<string>/title").methods(crow::HTTPMethod::POST)
+        ([this](const crow::request& req, const std::string& id) {
+            if (auto rej = require_pty_access(req)) return std::move(*rej);
+            std::string title;
+            try {
+                auto body = json::parse(req.body);
+                title = body.value("title", "");
+            } catch (...) {
+                return with_cors(req, crow::response(400, "bad json"));
+            }
+            if (!deps.pty_registry->set_title(id, title)) {
+                return with_cors(req, crow::response(404));
+            }
+            return with_cors(req, crow::response(204));
+        });
+
+        // WS /ws/pty/<id>?cursor=N — 原始字节直传 + 0x00 控制帧。
+        CROW_WEBSOCKET_ROUTE(app, "/ws/pty/<string>")
+            .onaccept([this](const crow::request& req, void** userdata) -> bool {
+                if (!deps.pty_registry) return false;
+                if (!is_loopback_address(req.remote_ip_address)) {
+                    log_unauthorized(req.url, req.remote_ip_address, "pty ws non-loopback");
+                    return false;
+                }
+                // Crow 的 WS onopen 拿不到 route 参数,从 url 解出 id 存
+                // userdata("/ws/pty/<id>",query 已被 Crow 剥离到 url_params)。
+                std::string path = req.url;
+                const std::string prefix = "/ws/pty/";
+                auto pos = path.find(prefix);
+                if (pos == std::string::npos) return false;
+                std::string id = path.substr(pos + prefix.size());
+                if (auto qpos = id.find('?'); qpos != std::string::npos) {
+                    id = id.substr(0, qpos);
+                }
+                if (id.empty()) return false;
+                auto* state = new PtyWsState();
+                state->id = id;
+                if (auto c = req.url_params.get("cursor")) {
+                    try { state->cursor = std::stoll(c); } catch (...) {}
+                }
+                *userdata = state;
+                return true;
+            })
+            .onopen([this](crow::websocket::connection& conn) {
+                auto* state = static_cast<PtyWsState*>(conn.userdata());
+                if (!state) { conn.close("no state"); return; }
+                bool ok = deps.pty_registry->connect(
+                    state->id, &conn, state->cursor,
+                    [&conn](const std::string& frame) {
+                        conn.send_binary(frame);
+                    });
+                if (!ok) {
+                    conn.close("unknown pty session");
+                }
+            })
+            .onmessage([this](crow::websocket::connection& conn,
+                              const std::string& data, bool /*is_binary*/) {
+                auto* state = static_cast<PtyWsState*>(conn.userdata());
+                if (!state) return;
+                deps.pty_registry->write_input(state->id, data);
+            })
+            .onclose([this](crow::websocket::connection& conn,
+                            const std::string& /*reason*/, uint16_t /*code*/) {
+                auto* state = static_cast<PtyWsState*>(conn.userdata());
+                if (!state) return;
+                if (deps.pty_registry) {
+                    deps.pty_registry->disconnect(state->id, &conn);
+                }
+                conn.userdata(nullptr);
+                delete state;
+            });
     }
 
     // -----------------------------------------------------------------

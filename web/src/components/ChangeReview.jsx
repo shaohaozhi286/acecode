@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import * as Diff2Html from 'diff2html';
 import { hunksToUnifiedDiff } from '../lib/diff.js';
 import {
@@ -7,6 +7,7 @@ import {
   joinWorkspacePath,
 } from '../lib/desktopContextMenu.js';
 import { summarizeChangeGroups } from '../lib/sessionChanges.js';
+import { reconcileOpenFiles, restoredScrollTop } from '../lib/changeReviewStability.js';
 import { copyTextToSystemClipboard } from '../lib/systemClipboard.js';
 import { clsx } from '../lib/format.js';
 import { VsIcon } from './Icon.jsx';
@@ -61,7 +62,15 @@ export function DiffPreview({ group, outputFormat = 'line-by-line', className = 
     }
   }, [group, outputFormat]);
 
-  if (!diffHtml) {
+  // 防塌缩:流式重算瞬时得到空结果(hunks 异常 / diff2html 解析失败)时,
+  // 若此前渲染过非空 diff 则继续展示上一次内容。空态 div 远矮于 diff 表格,
+  // 塌缩会让滚动容器 overflow 消失、scrollTop 被浏览器钳到 0,内容恢复后
+  // 用户停在顶部(fix-preview-scroll-during-stream 的直接症状之一)。
+  const lastHtmlRef = useRef('');
+  if (diffHtml) lastHtmlRef.current = diffHtml;
+  const html = diffHtml || lastHtmlRef.current;
+
+  if (!html) {
     return (
       <div className="ace-change-empty-diff">
         此文件没有可渲染的 diff 片段
@@ -72,7 +81,7 @@ export function DiffPreview({ group, outputFormat = 'line-by-line', className = 
   return (
     <div
       className={clsx('ace-diff', className)}
-      dangerouslySetInnerHTML={{ __html: diffHtml }}
+      dangerouslySetInnerHTML={{ __html: html }}
     />
   );
 }
@@ -426,16 +435,37 @@ export function ChangeReviewPanel({
   const [outputFormat, setOutputFormat] = useState('line-by-line');
 
   useEffect(() => {
-    if (!list.length) {
-      setOpenFiles(new Set());
-      return;
-    }
-    setOpenFiles((prev) => {
-      const valid = new Set(list.map((g) => g.file));
-      const next = new Set([...prev].filter((file) => valid.has(file)));
-      if (next.size === 0) next.add(list[0].file);
-      return next;
+    // 集合内容不变时 reconcileOpenFiles 返回原 Set 身份,setState 经 Object.is
+    // 直接跳过 —— 流式期间(groups 引用已被上游按签名稳定)不再每帧多渲染一次。
+    setOpenFiles((prev) => reconcileOpenFiles(prev, list.map((g) => g.file)));
+  }, [list]);
+
+  // 滚动位置兜底:diff 内容替换让浏览器钳制了 scrollTop 时(内容瞬时塌缩
+  // 会直接钳到 0),在 paint 与钳制 scroll 事件派发之前恢复到用户位置。
+  // 依赖 [list] 是精确的内容键:groups 引用经上游签名稳定化,只在 diff
+  // 内容真实变化时换引用;本地状态渲染(折叠切换等)不会触发本效应,
+  // 折叠引发的钳制因此被视为用户意图、正常记录。
+  const fileListRef = useRef(null);
+  const savedScrollTopRef = useRef(0);
+  const suppressScrollRecordRef = useRef(false);
+  useLayoutEffect(() => {
+    const el = fileListRef.current;
+    if (!el) return undefined;
+    suppressScrollRecordRef.current = true;
+    const target = restoredScrollTop({
+      savedScrollTop: savedScrollTopRef.current,
+      currentScrollTop: el.scrollTop,
+      scrollHeight: el.scrollHeight,
+      clientHeight: el.clientHeight,
     });
+    if (target != null) el.scrollTop = target;
+    const frame = window.requestAnimationFrame(() => {
+      suppressScrollRecordRef.current = false;
+    });
+    return () => {
+      window.cancelAnimationFrame(frame);
+      suppressScrollRecordRef.current = false;
+    };
   }, [list]);
 
   useEffect(() => {
@@ -518,7 +548,17 @@ export function ChangeReviewPanel({
         </div>
         <ChangeTotals summary={changeSummary} />
       </div>
-      <div className="ace-review-file-list">
+      <div
+        className="ace-review-file-list"
+        ref={fileListRef}
+        onScroll={(event) => {
+          // 内容替换那一帧浏览器钳制/恢复产生的 scroll 事件不算用户意图,
+          // 不写入 savedScrollTopRef,否则用户位置会被钳制值(0)覆盖,
+          // 后续帧就无从恢复了。
+          if (suppressScrollRecordRef.current) return;
+          savedScrollTopRef.current = event.currentTarget.scrollTop;
+        }}
+      >
         {list.map((group) => {
           const open = openFiles.has(group.file);
           return (

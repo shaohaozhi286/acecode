@@ -46,6 +46,17 @@ target_compile_definitions(acecode_unit_tests PRIVATE
     ACECODE_CONCURRENT_SESSION_WRITER_PATH="$<TARGET_FILE:concurrent_session_writer>"
 )
 
+# winpty spike/冒烟测试需要 winpty-agent.exe 在单测 exe 同目录
+# (findAgentProgram 未设置覆盖路径时的 fallback 查找位置)。
+if(WIN32)
+    add_custom_command(TARGET acecode_unit_tests POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:winpty-agent>
+            $<TARGET_FILE_DIR:acecode_unit_tests>
+    )
+    add_dependencies(acecode_unit_tests winpty-agent)
+endif()
+
 include(GoogleTest)
 gtest_discover_tests(acecode_unit_tests
     PROPERTIES LABELS "unit"

@@ -45,6 +45,7 @@ enum class SessionEventKind {
     GoalUpdated,       // payload: {"session_id":"...", "goal": {...}}
     GoalCleared,       // payload: {"session_id":"..."}
     TodoUpdated,       // payload: {"session_id":"...", "todos": [...], "summary": {...}}
+    SessionUpdated,    // payload: {"session_id":"...", "title":"...", ...}
     BusyChanged,       // payload: {"busy": bool}
     Done,              // payload: {} —— 一轮 agent loop 结束
     Error,             // payload: {"reason":"...", "request_id":"..."(可选)}
@@ -139,6 +140,7 @@ struct SessionInfo {
     int         context_window = 0;
     bool        model_deleted = false;
     std::string title;
+    std::string title_source;
     int         message_count = 0;
     int         turn_count = 0;
     std::string permission_mode = "default";
@@ -248,6 +250,7 @@ inline const char* to_string(SessionEventKind k) {
         case SessionEventKind::GoalUpdated:       return "goal_updated";
         case SessionEventKind::GoalCleared:       return "goal_cleared";
         case SessionEventKind::TodoUpdated:       return "todo_updated";
+        case SessionEventKind::SessionUpdated:    return "session_updated";
         case SessionEventKind::BusyChanged:       return "busy_changed";
         case SessionEventKind::Done:              return "done";
         case SessionEventKind::Error:             return "error";

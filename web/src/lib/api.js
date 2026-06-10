@@ -78,6 +78,15 @@ export function sessionTodosPath(id, workspaceHash = '') {
   return `/api/sessions/${sid}/todos`;
 }
 
+export function sessionTitlePath(id, workspaceHash = '') {
+  const sid = encodeURIComponent(id);
+  const hash = String(workspaceHash || '').trim();
+  if (hash) {
+    return `/api/workspaces/${encodeURIComponent(hash)}/sessions/${sid}/title`;
+  }
+  return `/api/sessions/${sid}/title`;
+}
+
 async function request(method, path, body, base) {
   const headers = {};
   const token = baseToken(base);
@@ -103,10 +112,21 @@ async function request(method, path, body, base) {
 export function createApi(base = null) {
   return {
     health:           ()             => request('GET',    '/api/health', undefined, base),
+    // 控制台 PTY(add-console-dock):loopback-only,daemon 端 16 会话上限(429)。
+    createPty:        (opts={})      => request('POST',   '/api/pty', opts, base),
+    listPty:          ()             => request('GET',    '/api/pty', undefined, base),
+    deletePty:        (id)           => request('DELETE', `/api/pty/${encodeURIComponent(id)}`, undefined, base),
+    resizePty:        (id, cols, rows) =>
+      request('POST', `/api/pty/${encodeURIComponent(id)}/resize`, { cols, rows }, base),
+    setPtyTitle:      (id, title) =>
+      request('POST', `/api/pty/${encodeURIComponent(id)}/title`, { title }, base),
     getUsageStats:    (opts={})      => request('GET',    usagePath(opts), undefined, base),
     listWorkspaces:   ()             => request('GET',    '/api/workspaces', undefined, base),
     registerWorkspace:(cwd)          => request('POST',   '/api/workspaces', {cwd}, base),
     pickWorkspaceFolder:()           => request('POST',   '/api/workspaces/pick-folder', undefined, base),
+    // webapp 兼容模式(无 webview bridge)的「在资源管理器中打开」回退通路。
+    // 仅 desktop 壳启动的 daemon 注册该端点(native_folder_picker_enabled 同款门控)。
+    openInExplorer:   (path)         => request('POST',   '/api/open-in-explorer', { path }, base),
     listSessions:     (opts={})      => request('GET',    sessionsPath('/api/sessions', opts), undefined, base),
     createSession:    (opts={})      => request('POST',   '/api/sessions', opts, base),
     resumeSession:    (id)           => request('POST',   `/api/sessions/${encodeURIComponent(id)}/resume`, {}, base),
@@ -128,6 +148,8 @@ export function createApi(base = null) {
       request('GET', sessionDraftPath(id, workspaceHash), undefined, base),
     setSessionDraft:  (id, text = '', workspaceHash = '') =>
       request('PUT', sessionDraftPath(id, workspaceHash), { text }, base),
+    setSessionTitle:  (id, title = '', workspaceHash = '') =>
+      request('PUT', sessionTitlePath(id, workspaceHash), { title }, base),
     clearSessionTodos: (id, workspaceHash = '') =>
       request('DELETE', sessionTodosPath(id, workspaceHash), undefined, base),
     sendInput:        (id, payload)  => {

@@ -224,6 +224,9 @@ static std::string collapse_sidebar_title_whitespace(std::string_view text) {
 }
 
 static std::string first_user_message_title(const acecode::TuiState& state) {
+    std::string explicit_title =
+        collapse_sidebar_title_whitespace(state.current_session_title);
+    if (!explicit_title.empty()) return explicit_title;
     for (const auto& msg : state.conversation) {
         if (msg.role == "user") {
             std::string title = collapse_sidebar_title_whitespace(msg.content);
@@ -232,9 +235,7 @@ static std::string first_user_message_title(const acecode::TuiState& state) {
             }
         }
     }
-    std::string explicit_title =
-        collapse_sidebar_title_whitespace(state.current_session_title);
-    return explicit_title.empty() ? std::string("New session") : explicit_title;
+    return std::string("New session");
 }
 
 static void trim_ascii_space_suffix(std::string& text) {
@@ -4962,16 +4963,16 @@ static int run_interactive_app(const CliOptions& cli,
                 }
                 return true;
             }
-            // Shell-mode trigger: `!` on an empty Normal buffer switches mode
-            // without being inserted. Subsequent `!` characters are literal.
+            const std::string ch = event.character();
+            // Shell-mode trigger on an empty Normal buffer switches mode
+            // without being inserted. Subsequent trigger characters are literal.
             if (state.input_mode == InputMode::Normal &&
                 state.input_text.empty() &&
-                event.character() == "!") {
+                is_shell_mode_trigger_character(ch)) {
                 state.input_mode = InputMode::Shell;
                 state.history_index = -1;
                 return true;
             }
-            const std::string ch = event.character();
             if (state.input_cursor > state.input_text.size()) {
                 state.input_cursor = state.input_text.size();
             }

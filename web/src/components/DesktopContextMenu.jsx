@@ -10,6 +10,8 @@ import {
 } from '../lib/desktopContextMenu.js';
 import { selectionContextFromWindowSelection } from '../lib/selectionChatContext.js';
 import { copyImageToSystemClipboard, copyTextToSystemClipboard } from '../lib/systemClipboard.js';
+import { isDesktopShell, isWebappCompat } from '../lib/desktopShellMode.js';
+import { api } from '../lib/api.js';
 import { toast } from './Toast.jsx';
 
 const MENU_WIDTH = 216;
@@ -22,6 +24,7 @@ const ACTION_LABELS = {
   [DESKTOP_CONTEXT_ACTIONS.PIN_SESSION]: '置顶',
   [DESKTOP_CONTEXT_ACTIONS.UNPIN_SESSION]: '取消置顶',
   [DESKTOP_CONTEXT_ACTIONS.OPEN_SESSION]: '打开会话',
+  [DESKTOP_CONTEXT_ACTIONS.RENAME_SESSION]: '重命名会话',
   [DESKTOP_CONTEXT_ACTIONS.COPY_SESSION_TITLE]: '复制会话标题',
   [DESKTOP_CONTEXT_ACTIONS.COPY_SESSION_ID]: '复制会话 ID',
   [DESKTOP_CONTEXT_ACTIONS.ARCHIVE_SESSION]: '归档会话',
@@ -74,10 +77,6 @@ const TEXT_INPUT_TYPES = new Set([
   'text',
   'url',
 ]);
-
-function isDesktopShell() {
-  return !!(window.__ACECODE_DESKTOP_SHELL__ || window.aceDesktop_openDevTools || window.aceDesktop_openInExplorer);
-}
 
 function parseDesktopResult(value) {
   if (value == null) return value;
@@ -201,19 +200,26 @@ async function pasteIntoTarget(target) {
 }
 
 async function openTargetInExplorer(openTarget) {
-  if (!openTarget?.path || typeof window.aceDesktop_openInExplorer !== 'function') {
-    toast({ kind: 'err', text: '无法打开:desktop bridge 不可用' });
+  if (!openTarget?.path) {
+    toast({ kind: 'err', text: '无法打开:路径为空' });
     return;
   }
   try {
-    const result = parseDesktopResult(await window.aceDesktop_openInExplorer(openTarget.path));
+    let result;
+    if (typeof window.aceDesktop_openInExplorer === 'function') {
+      result = parseDesktopResult(await window.aceDesktop_openInExplorer(openTarget.path));
+    } else {
+      // webapp 兼容模式没有 webview bridge,daemon 就在本机,改走 REST 端点。
+      result = await api.openInExplorer(openTarget.path);
+    }
     if (!result?.ok) {
       toast({ kind: 'err', text: '打开失败:' + (result?.error || '') });
       return;
     }
     toast({ kind: 'ok', text: '已在资源管理器中打开' });
   } catch (e) {
-    toast({ kind: 'err', text: '打开异常:' + (e?.message || '') });
+    const detail = e?.body?.error || e?.message || '';
+    toast({ kind: 'err', text: '打开失败:' + detail });
   }
 }
 
@@ -332,7 +338,9 @@ export function DesktopContextMenu() {
   const reopenTimerRef = useRef(0);
   const targetRef = useRef(null);
   const lastSelectionRef = useRef({ target: null, text: '' });
-  const desktop = useMemo(() => isDesktopShell(), []);
+  // webapp 兼容模式(Edge --app)没有 webview bridge,但定位仍是"桌面应用替身",
+  // 自定义右键菜单照常启用;只有普通浏览器直连保留原生右键。
+  const desktop = useMemo(() => isDesktopShell() || isWebappCompat(), []);
 
   const setMenu = useCallback((nextMenu) => {
     menuRef.current = nextMenu;

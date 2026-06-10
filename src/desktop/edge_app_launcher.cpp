@@ -79,12 +79,58 @@ fs::path known_folder_path(REFKNOWNFOLDERID id) {
     return result;
 }
 
-fs::path edge_user_data_dir() {
+fs::path edge_user_data_dir_root() {
     return acecode::path_from_utf8(acecode::get_acecode_dir()) / "edge-app-profile";
+}
+
+// 准备本次启动专用的干净 user-data-dir:
+//   1. 在 root 下用 PID 命名一个子目录(edge_profile_subdir_name);
+//   2. best-effort 清掉 root 下所有旧子目录 —— 上一轮崩溃残留的、当前没有 msedge
+//      占用的会被删掉;仍被某个残留 msedge 锁着的删不掉也无所谓(我们用的是全新的
+//      PID 子目录,残留进程影响不到本次启动);
+//   3. 创建本次子目录。
+// 返回空 path 表示连本次子目录都建不出来(磁盘满 / 权限),调用方据此报错。
+fs::path prepare_clean_user_data_dir() {
+    fs::path root = edge_user_data_dir_root();
+    std::error_code ec;
+    fs::create_directories(root, ec);
+
+    // 先收集再删除,避免边迭代边删在 Windows 上的未定义行为。
+    std::vector<fs::path> stale;
+    {
+        std::error_code it_ec;
+        fs::directory_iterator it(root, fs::directory_options::skip_permission_denied, it_ec);
+        if (!it_ec) {
+            for (const auto& entry : it) {
+                std::error_code e2;
+                if (entry.is_directory(e2) && !e2) stale.push_back(entry.path());
+            }
+        }
+    }
+    for (const auto& dir : stale) {
+        std::error_code rm_ec;
+        fs::remove_all(dir, rm_ec); // 锁着的删不掉,忽略
+    }
+
+    fs::path mine = root / acecode::path_from_utf8(
+                               edge_profile_subdir_name(::GetCurrentProcessId()));
+    std::error_code mk_ec;
+    fs::create_directories(mine, mk_ec);
+    if (mk_ec) {
+        LOG_WARN("[desktop] failed to create Edge user data dir: " + mk_ec.message());
+        return {};
+    }
+    return mine;
 }
 #endif
 
 } // namespace
+
+std::string edge_profile_subdir_name(unsigned long pid) {
+    // "u" 前缀 + 十进制 PID。前缀避免纯数字目录名在某些工具里被误解析,也便于
+    // 一眼看出是 acecode 造的 per-launch profile。
+    return "u" + std::to_string(pid);
+}
 
 std::optional<fs::path> find_msedge_executable_in(const std::vector<fs::path>& roots) {
     for (const auto& root : roots) {
@@ -128,8 +174,8 @@ std::optional<fs::path> find_msedge_executable() {
     return find_msedge_executable_in(roots);
 }
 
-EdgeAppLaunchResult launch_edge_app_and_wait(const std::string& url) {
-    EdgeAppLaunchResult result;
+EdgeAppLaunchHandle launch_edge_app(const std::string& url) {
+    EdgeAppLaunchHandle result;
     if (url.empty() || url == "about:blank") {
         result.error = "daemon URL is unavailable";
         return result;
@@ -141,11 +187,9 @@ EdgeAppLaunchResult launch_edge_app_and_wait(const std::string& url) {
         return result;
     }
 
-    fs::path user_data_dir = edge_user_data_dir();
-    std::error_code ec;
-    fs::create_directories(user_data_dir, ec);
-    if (ec) {
-        result.error = "failed to create Edge user data dir: " + ec.message();
+    fs::path user_data_dir = prepare_clean_user_data_dir();
+    if (user_data_dir.empty()) {
+        result.error = "failed to prepare Edge user data dir";
         return result;
     }
 
@@ -178,13 +222,29 @@ EdgeAppLaunchResult launch_edge_app_and_wait(const std::string& url) {
         return result;
     }
 
+    result.ok = true;
+    result.process = sei.hProcess;
+    result.pid = ::GetProcessId(sei.hProcess);
+    LOG_INFO("[desktop] Edge app fallback launched (pid=" + std::to_string(result.pid) + ")");
+    return result;
+}
+
+EdgeAppLaunchResult launch_edge_app_and_wait(const std::string& url) {
+    EdgeAppLaunchResult result;
+    auto launched = launch_edge_app(url);
+    if (!launched.ok) {
+        result.error = launched.error;
+        return result;
+    }
+
+    HANDLE process = static_cast<HANDLE>(launched.process);
     LOG_INFO("[desktop] Edge app fallback launched; waiting for app process to exit");
-    ::WaitForSingleObject(sei.hProcess, INFINITE);
+    ::WaitForSingleObject(process, INFINITE);
     DWORD exit_code = 0;
-    if (::GetExitCodeProcess(sei.hProcess, &exit_code)) {
+    if (::GetExitCodeProcess(process, &exit_code)) {
         result.exit_code = static_cast<unsigned long>(exit_code);
     }
-    ::CloseHandle(sei.hProcess);
+    ::CloseHandle(process);
     result.ok = true;
     return result;
 }
@@ -193,6 +253,12 @@ EdgeAppLaunchResult launch_edge_app_and_wait(const std::string& url) {
 
 std::optional<fs::path> find_msedge_executable() {
     return std::nullopt;
+}
+
+EdgeAppLaunchHandle launch_edge_app(const std::string& /*url*/) {
+    EdgeAppLaunchHandle result;
+    result.error = "Edge app fallback is only supported on Windows";
+    return result;
 }
 
 EdgeAppLaunchResult launch_edge_app_and_wait(const std::string& /*url*/) {

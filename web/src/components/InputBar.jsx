@@ -1,7 +1,7 @@
 // 输入框:textarea 自动撑高(最多 8 行) + Enter 发 / Shift+Enter 换行 +
 // 空输入或未编辑的历史项用上下键翻 history。
 //
-// 提交按钮在右侧悬浮(只在有内容时变蓝),空内容时灰色不可点。
+// 底部工具栏单独占一行,提交按钮在右侧(只在有内容时变蓝),空内容时灰色不可点。
 //
 // 斜杠命令:value 以 / 开头且无空白时,SlashDropdown 浮层显示在输入框上方。
 // 选中后插入 `/<name> ` 到输入框,不立即发送(builtin 与 skill 行为统一)。
@@ -113,6 +113,9 @@ export const InputBar = forwardRef(function InputBar({
   const justFinishedCompositionRef = useRef(false);
   const compositionGuardTimerRef = useRef(0);
   const isHero = variant === 'hero';
+  const textareaVerticalPadding = isHero ? 16 : 12;
+  const textareaBaseHeight = LINE_HEIGHT + textareaVerticalPadding;
+  const textareaMaxHeight = LINE_HEIGHT * MAX_ROWS + textareaVerticalPadding;
   const attachmentItems = Array.isArray(attachments) ? attachments : [];
   const contextItems = Array.isArray(contexts) ? contexts : [];
   const selectionContextItems = contextItems.filter((item) => item?.type === SELECTION_CONTEXT_TYPE);
@@ -168,10 +171,11 @@ export const InputBar = forwardRef(function InputBar({
     const el = ta.current;
     if (!el) return;
     el.style.height = 'auto';
-    const h = Math.min(el.scrollHeight, LINE_HEIGHT * MAX_ROWS + (isHero ? 56 : 48));
+    const h = Math.min(el.scrollHeight, textareaMaxHeight);
     el.style.height = h + 'px';
+    el.style.overflowY = el.scrollHeight > textareaMaxHeight ? 'auto' : 'hidden';
   };
-  useEffect(autosize, [isHero, value]);
+  useEffect(autosize, [textareaMaxHeight, value]);
 
   useEffect(() => () => {
     if (compositionGuardTimerRef.current) {
@@ -490,12 +494,7 @@ export const InputBar = forwardRef(function InputBar({
 
   const actionState = getInputBarActionState({ value, disabled, busy, hasExtras });
   const stopControl = getGoalStopControlState({ goal, busy, stopping: goalStopping });
-  const inputRightPadding = stopControl.visible
-    ? (isHero ? 'pr-36' : 'pr-32')
-    : (isHero ? 'pr-14' : 'pr-12');
-  const toolbarRightInset = stopControl.visible || busy
-    ? (isHero ? 'right-36' : 'right-32')
-    : (isHero ? 'right-14' : 'right-12');
+  const textareaSpacingClass = isHero ? 'px-4 pt-3 pb-1 text-[14px]' : 'px-3 pt-2 pb-1 text-[13px]';
 
   // 命令 token overlay:首段是已知命令时,textarea 文字透明,由 overlay 负责着色渲染。
   // SVG 图标是额外视觉层,textarea 的真实 value 仍保持普通 "/command ..." 文本。
@@ -553,7 +552,7 @@ export const InputBar = forwardRef(function InputBar({
                   data-desktop-attachment-path={context.path || undefined}
                   data-desktop-attachment-preview-url={context.url || undefined}
                   data-desktop-attachment-mutable="true"
-                  className="group relative w-36 h-36 sm:w-40 sm:h-40 shrink-0 overflow-hidden rounded-xl border border-border bg-bg"
+                  className="group relative w-[86px] h-[86px] sm:w-24 sm:h-24 shrink-0 overflow-hidden rounded-lg border border-border bg-bg"
                 >
                   {item.preview_url ? (
                     <img
@@ -566,11 +565,11 @@ export const InputBar = forwardRef(function InputBar({
                   )}
                   <button
                     type="button"
-                    className="absolute right-2 top-2 w-7 h-7 rounded-full bg-black/75 hover:bg-black/85 text-white flex items-center justify-center"
+                    className="absolute right-[5px] top-[5px] w-[17px] h-[17px] rounded-full bg-black/75 hover:bg-black/85 text-white flex items-center justify-center"
                     onClick={() => onRemoveAttachment?.(context.key)}
                     aria-label="移除图片"
                   >
-                    <VsIcon name="close" size={13} />
+                    <VsIcon name="close" size={8} />
                   </button>
                 </div>
               );
@@ -601,189 +600,193 @@ export const InputBar = forwardRef(function InputBar({
             })}
           </div>
         )}
-        {/* command overlay: pointer-events:none,与 textarea 使用相同度量。 */}
-        {showChip && (
-          <div
-            aria-hidden="true"
-            data-slash-chip-kind={leadingCommand.kind}
-            data-slash-chip-icon={chipPresentation?.icon || ''}
-            className={clsx(
-              'absolute inset-0 pointer-events-none whitespace-pre-wrap break-words leading-[20px] font-sans text-fg overflow-hidden',
-              isHero ? 'px-4 pt-3 pb-11 text-[14px]' : 'px-3 pt-2 pb-10 text-[13px]',
-              inputRightPadding,
-            )}
-          >
-            <span
-              className="ace-slash-chip-unit"
-              title={chipPresentation?.label || ''}
+        <div className="relative">
+          {/* command overlay: pointer-events:none,与 textarea 使用相同度量。 */}
+          {showChip && (
+            <div
+              aria-hidden="true"
+              data-slash-chip-kind={leadingCommand.kind}
+              data-slash-chip-icon={chipPresentation?.icon || ''}
+              className={clsx(
+                'absolute inset-0 pointer-events-none whitespace-pre-wrap break-words leading-[20px] font-sans text-fg overflow-hidden',
+                textareaSpacingClass,
+              )}
             >
-              <span className="ace-slash-chip-icon">
-                <VsIcon name={chipPresentation?.icon || 'lightbulb'} size={14} />
+              <span
+                className="ace-slash-chip-unit"
+                title={chipPresentation?.label || ''}
+              >
+                <span className="ace-slash-chip-icon">
+                  <VsIcon name={chipPresentation?.icon || 'lightbulb'} size={14} />
+                </span>
+                <span className="ace-slash-chip">{chipText}</span>
               </span>
-              <span className="ace-slash-chip">{chipText}</span>
-            </span>
-            <span>{restText}</span>
-          </div>
-        )}
-        <textarea
-          ref={ta}
-          rows={1}
-          value={value}
-          onChange={handleChange}
-          onKeyDown={onKey}
-          onKeyUp={normalizeCommandSelectionSoon}
-          onSelect={(event) => normalizeCommandSelection(event.currentTarget)}
-          onClick={normalizeCommandSelectionSoon}
-          onMouseUp={normalizeCommandSelectionSoon}
-          onPaste={handlePaste}
-          onCompositionStart={handleCompositionStart}
-          onCompositionEnd={handleCompositionEnd}
-          disabled={disabled}
-          placeholder={placeholder}
-          className={clsx(
-            'relative w-full resize-none bg-transparent border-0 outline-none leading-[20px] font-sans placeholder:text-fg-mute disabled:opacity-50',
-            showChip ? 'text-transparent' : 'text-fg',
-            showChip && 'ace-slash-input-with-icon',
-            isHero ? 'px-4 pt-3 pb-11 text-[14px]' : 'px-3 pt-2 pb-10 text-[13px]',
-            inputRightPadding,
+              <span>{restText}</span>
+            </div>
           )}
-          style={{
-            height: LINE_HEIGHT + (isHero ? 56 : 48),
-            caretColor: showChip ? 'var(--ace-fg)' : undefined,
-            ...(slashChipStyleVars || {}),
-          }}
-        />
-        <div className={clsx("absolute left-1.5 flex items-center gap-1 min-w-0 overflow-visible", toolbarRightInset, isHero ? "bottom-2.5" : "bottom-1")}>
-          <div ref={capabilityMenuRef} className="relative shrink-0 flex items-center">
-            <button
-              type="button"
-              disabled={disabled || !hasCapabilityHandlers}
-              className="w-7 h-7 rounded-full flex items-center justify-center text-fg-mute hover:bg-surface-hi hover:text-fg disabled:opacity-50"
-              onClick={() => setCapabilityOpen((open) => !open)}
-              title="添加上下文"
-            >
-              <VsIcon name="add" size={15} />
-            </button>
-            {capabilityOpen && hasCapabilityHandlers && (
-              <div className="absolute left-0 bottom-8 z-50 w-40 py-1 rounded-lg border border-border bg-surface ace-shadow">
-                <button
-                  type="button"
-                  className="w-full h-8 px-2 flex items-center gap-2 text-left text-[13px] text-fg hover:bg-surface-hi disabled:opacity-50"
-                  onClick={chooseMedia}
-                  disabled={!onMediaFiles}
-                >
-                  <VsIcon name="openFile" size={14} />
-                  <span>添加图片或文件</span>
-                </button>
-                <button
-                  type="button"
-                  className="w-full h-8 px-2 flex items-center gap-2 text-left text-[13px] text-fg hover:bg-surface-hi disabled:opacity-50"
-                  onClick={addBrowser}
-                  disabled={!onAddBrowserContext}
-                >
-                  <VsIcon name="search" size={14} />
-                  <span>浏览器</span>
-                </button>
-              </div>
+          <textarea
+            ref={ta}
+            rows={1}
+            value={value}
+            onChange={handleChange}
+            onKeyDown={onKey}
+            onKeyUp={normalizeCommandSelectionSoon}
+            onSelect={(event) => normalizeCommandSelection(event.currentTarget)}
+            onClick={normalizeCommandSelectionSoon}
+            onMouseUp={normalizeCommandSelectionSoon}
+            onPaste={handlePaste}
+            onCompositionStart={handleCompositionStart}
+            onCompositionEnd={handleCompositionEnd}
+            disabled={disabled}
+            placeholder={placeholder}
+            className={clsx(
+              'relative w-full resize-none bg-transparent border-0 outline-none leading-[20px] font-sans placeholder:text-fg-mute disabled:opacity-50',
+              showChip ? 'text-transparent' : 'text-fg',
+              showChip && 'ace-slash-input-with-icon',
+              textareaSpacingClass,
+            )}
+            style={{
+              height: textareaBaseHeight,
+              maxHeight: textareaMaxHeight,
+              overflowY: 'hidden',
+              caretColor: showChip ? 'var(--ace-fg)' : undefined,
+              ...(slashChipStyleVars || {}),
+            }}
+          />
+        </div>
+        <div className={clsx("relative flex items-center gap-1 min-w-0 overflow-visible", isHero ? "px-2.5 pb-2.5" : "px-1.5 pb-1")}>
+          <div className="flex min-w-0 flex-1 items-center gap-1 overflow-visible">
+            <div ref={capabilityMenuRef} className="relative shrink-0 flex items-center">
+              <button
+                type="button"
+                disabled={disabled || !hasCapabilityHandlers}
+                className="w-7 h-7 rounded-full flex items-center justify-center text-fg-mute hover:bg-surface-hi hover:text-fg disabled:opacity-50"
+                onClick={() => setCapabilityOpen((open) => !open)}
+                title="添加上下文"
+              >
+                <VsIcon name="add" size={15} />
+              </button>
+              {capabilityOpen && hasCapabilityHandlers && (
+                <div className="absolute left-0 bottom-8 z-50 w-40 py-1 rounded-lg border border-border bg-surface ace-shadow">
+                  <button
+                    type="button"
+                    className="w-full h-8 px-2 flex items-center gap-2 text-left text-[13px] text-fg hover:bg-surface-hi disabled:opacity-50"
+                    onClick={chooseMedia}
+                    disabled={!onMediaFiles}
+                  >
+                    <VsIcon name="openFile" size={14} />
+                    <span>添加图片或文件</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="w-full h-8 px-2 flex items-center gap-2 text-left text-[13px] text-fg hover:bg-surface-hi disabled:opacity-50"
+                    onClick={addBrowser}
+                    disabled={!onAddBrowserContext}
+                  >
+                    <VsIcon name="search" size={14} />
+                    <span>浏览器</span>
+                  </button>
+                </div>
+              )}
+            </div>
+            <div className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden">
+              {otherContextItems.map((item, index) => {
+                const key = composerContextKey(item, index);
+                const presentation = contextPresentation(item);
+                return (
+                  <div
+                    key={key}
+                    className="group h-7 max-w-[112px] shrink-0 rounded-md px-1.5 flex items-center gap-1 text-[12px] text-fg-mute hover:bg-surface-hi"
+                    title={presentation.title}
+                  >
+                    <VsIcon name={presentation.icon} size={13} />
+                    <span className="truncate">{presentation.label}</span>
+                    <button
+                      type="button"
+                      className="w-4 h-4 rounded-full flex items-center justify-center hover:bg-bg text-fg-mute opacity-0 group-hover:opacity-100 focus:opacity-100"
+                      onClick={() => onRemoveContext?.(key)}
+                      aria-label={presentation.removeLabel}
+                    >
+                      <VsIcon name="close" size={9} />
+                    </button>
+                  </div>
+                );
+              })}
+              {fileAttachments.map((item, index) => {
+                const context = composerAttachmentContext(item, index);
+                return (
+                  <div
+                    key={context.key}
+                    data-desktop-attachment-id={context.id}
+                    data-desktop-attachment-name={context.name}
+                    data-desktop-attachment-url={context.url || undefined}
+                    data-desktop-attachment-path={context.path || undefined}
+                    data-desktop-attachment-preview-url={context.url || undefined}
+                    data-desktop-attachment-mutable="true"
+                    className="group h-7 max-w-[160px] min-w-0 rounded-md px-1.5 flex items-center gap-1 text-[12px] text-fg-mute hover:bg-surface-hi"
+                    title={item.name}
+                  >
+                    <VsIcon name="file" size={13} />
+                    <span className="truncate">{item.uploading ? `${item.name || '文件'} 上传中` : (item.name || '文件')}</span>
+                    <button
+                      type="button"
+                      className="w-4 h-4 shrink-0 rounded-full flex items-center justify-center hover:bg-bg text-fg-mute opacity-0 group-hover:opacity-100 focus:opacity-100"
+                      onClick={() => onRemoveAttachment?.(context.key)}
+                      aria-label="移除文件"
+                    >
+                      <VsIcon name="close" size={9} />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+          <div className="flex shrink-0 items-center gap-1">
+            {stopControl.visible && (
+              <button
+                type="button"
+                onClick={onAbort}
+                disabled={stopControl.disabled}
+                className="px-2 h-7 rounded-md text-[11px] text-danger border border-danger/40 hover:bg-danger-bg transition flex items-center gap-1 disabled:opacity-50 disabled:cursor-wait"
+                title={stopControl.title}
+              >
+                <VsIcon name="stop" size={12} mono={false} />
+                <span>{stopControl.label}</span>
+              </button>
+            )}
+            {busy ? (
+              <button
+                type="button"
+                onClick={submit}
+                disabled={!actionState.canSubmit}
+                className={clsx(
+                  'px-2 h-7 rounded-md text-[11px] transition flex items-center gap-1',
+                  actionState.canSubmit
+                    ? 'bg-accent text-white hover:opacity-90'
+                    : 'bg-surface-hi text-fg-mute cursor-default',
+                )}
+                title={actionState.submitTitle}
+              >
+                <VsIcon name="send" size={12} mono={false} className={actionState.canSubmit ? 'ace-icon-on-accent' : ''} />
+                <span>{actionState.submitLabel}</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={submit}
+                disabled={!actionState.canSubmit}
+                className={clsx(
+                  'w-7 h-7 rounded-full flex items-center justify-center transition',
+                  actionState.canSubmit
+                    ? 'bg-accent text-white hover:opacity-90'
+                    : 'bg-surface-hi text-fg-mute cursor-default',
+                )}
+                title={actionState.submitTitle}
+              >
+                <VsIcon name="send" size={14} mono={false} className={actionState.canSubmit ? 'ace-icon-on-accent' : ''} />
+              </button>
             )}
           </div>
-          <div className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden">
-            {otherContextItems.map((item, index) => {
-              const key = composerContextKey(item, index);
-              const presentation = contextPresentation(item);
-              return (
-                <div
-                  key={key}
-                  className="group h-7 max-w-[112px] shrink-0 rounded-md px-1.5 flex items-center gap-1 text-[12px] text-fg-mute hover:bg-surface-hi"
-                  title={presentation.title}
-                >
-                  <VsIcon name={presentation.icon} size={13} />
-                  <span className="truncate">{presentation.label}</span>
-                  <button
-                    type="button"
-                    className="w-4 h-4 rounded-full flex items-center justify-center hover:bg-bg text-fg-mute opacity-0 group-hover:opacity-100 focus:opacity-100"
-                    onClick={() => onRemoveContext?.(key)}
-                    aria-label={presentation.removeLabel}
-                  >
-                    <VsIcon name="close" size={9} />
-                  </button>
-                </div>
-              );
-            })}
-            {fileAttachments.map((item, index) => {
-              const context = composerAttachmentContext(item, index);
-              return (
-                <div
-                  key={context.key}
-                  data-desktop-attachment-id={context.id}
-                  data-desktop-attachment-name={context.name}
-                  data-desktop-attachment-url={context.url || undefined}
-                  data-desktop-attachment-path={context.path || undefined}
-                  data-desktop-attachment-preview-url={context.url || undefined}
-                  data-desktop-attachment-mutable="true"
-                  className="group h-7 max-w-[160px] min-w-0 rounded-md px-1.5 flex items-center gap-1 text-[12px] text-fg-mute hover:bg-surface-hi"
-                  title={item.name}
-                >
-                  <VsIcon name="file" size={13} />
-                  <span className="truncate">{item.uploading ? `${item.name || '文件'} 上传中` : (item.name || '文件')}</span>
-                  <button
-                    type="button"
-                    className="w-4 h-4 shrink-0 rounded-full flex items-center justify-center hover:bg-bg text-fg-mute opacity-0 group-hover:opacity-100 focus:opacity-100"
-                    onClick={() => onRemoveAttachment?.(context.key)}
-                    aria-label="移除文件"
-                  >
-                    <VsIcon name="close" size={9} />
-                  </button>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-        <div className={clsx("absolute flex items-center gap-1", isHero ? "right-2.5 bottom-2.5" : "right-1.5 bottom-1")}>
-          {stopControl.visible && (
-            <button
-              type="button"
-              onClick={onAbort}
-              disabled={stopControl.disabled}
-              className="px-2 h-7 rounded-md text-[11px] text-danger border border-danger/40 hover:bg-danger-bg transition flex items-center gap-1 disabled:opacity-50 disabled:cursor-wait"
-              title={stopControl.title}
-            >
-              <VsIcon name="stop" size={12} mono={false} />
-              <span>{stopControl.label}</span>
-            </button>
-          )}
-          {busy ? (
-            <button
-              type="button"
-              onClick={submit}
-              disabled={!actionState.canSubmit}
-              className={clsx(
-                'px-2 h-7 rounded-md text-[11px] transition flex items-center gap-1',
-                actionState.canSubmit
-                  ? 'bg-accent text-white hover:opacity-90'
-                  : 'bg-surface-hi text-fg-mute cursor-default',
-              )}
-              title={actionState.submitTitle}
-            >
-              <VsIcon name="send" size={12} mono={false} className={actionState.canSubmit ? 'ace-icon-on-accent' : ''} />
-              <span>{actionState.submitLabel}</span>
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={submit}
-              disabled={!actionState.canSubmit}
-              className={clsx(
-                'w-7 h-7 rounded-full flex items-center justify-center transition',
-                actionState.canSubmit
-                  ? 'bg-accent text-white hover:opacity-90'
-                  : 'bg-surface-hi text-fg-mute cursor-default',
-              )}
-              title={actionState.submitTitle}
-            >
-              <VsIcon name="send" size={14} mono={false} className={actionState.canSubmit ? 'ace-icon-on-accent' : ''} />
-            </button>
-          )}
         </div>
       </div>
       <div className={clsx('mt-1 px-1 text-[10px] text-fg-mute flex justify-between', isHero && 'px-3')}>

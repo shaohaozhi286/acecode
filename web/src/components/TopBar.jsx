@@ -14,15 +14,27 @@ import {
   useFramelessWindowState,
 } from './WindowControls.jsx';
 
-function QuickBtn({ title, onClick, children, disabled = false, className = '' }) {
+function QuickBtn({
+  title,
+  onClick,
+  children,
+  disabled = false,
+  className = '',
+  pressed = null,
+}) {
+  const isToggle = typeof pressed === 'boolean';
+
   return (
     <button
       type="button"
       title={title}
+      aria-label={title}
+      aria-pressed={isToggle ? pressed : undefined}
       onClick={onClick}
       disabled={disabled}
       className={clsx(
         'w-7 h-7 rounded-md bg-surface-hi/0 text-fg-2 flex items-center justify-center text-[14px] transition',
+        isToggle && 'ace-topbar-toggle-btn',
         disabled ? 'opacity-35 cursor-not-allowed' : 'hover:bg-surface-hi hover:text-fg',
         className,
       )}
@@ -36,6 +48,9 @@ export function TopBar({
   onSettings,
   onNewSession,
   onOpenSearch,
+  onToggleConsole,
+  consoleAvailable = false,
+  consoleOpen = false,
   sidebarCollapsed = false,
   onToggleSidebar,
   onGoBack,
@@ -78,7 +93,11 @@ export function TopBar({
         <span className="text-[15px] font-bold tracking-tight">ACECode</span>
       </div>
 
-      <QuickBtn title={sidebarCollapsed ? '展开项目栏' : '收起项目栏'} onClick={onToggleSidebar}>
+      <QuickBtn
+        title={sidebarCollapsed ? '展开项目栏' : '收起项目栏'}
+        onClick={onToggleSidebar}
+        pressed={!sidebarCollapsed}
+      >
         <PanelToggleIcon side="left" size={16} />
       </QuickBtn>
       <QuickBtn title="后退" onClick={onGoBack} disabled={!canGoBack}>
@@ -113,6 +132,15 @@ export function TopBar({
       </QuickBtn>
 
       <div className="ml-auto flex items-center gap-1">
+        {consoleAvailable && (
+          <QuickBtn
+            title={consoleOpen ? '关闭控制台 (Ctrl+`)' : '打开控制台 (Ctrl+`)'}
+            onClick={onToggleConsole}
+            pressed={consoleOpen}
+          >
+            <VsIcon name="terminal" size={15} />
+          </QuickBtn>
+        )}
         <QuickBtn title={theme === 'dark' ? '切到浅色' : '切到深色'} onClick={toggle}>
           <VsIcon name={theme === 'dark' ? 'brightness' : 'darkTheme'} size={14} />
         </QuickBtn>

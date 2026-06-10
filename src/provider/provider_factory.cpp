@@ -8,6 +8,7 @@
 
 #include <memory>
 #include <string>
+#include <utility>
 
 namespace acecode {
 
@@ -15,12 +16,19 @@ std::shared_ptr<LlmProvider> create_provider_from_entry(const ModelProfile& entr
                                                         const AppConfig* config) {
     std::shared_ptr<LlmProvider> provider;
     if (entry.provider == "openai") {
+        int stream_timeout_ms = entry.stream_timeout_ms.value_or(
+            config ? config->openai.stream_timeout_ms
+                   : OpenAiConfig::kDefaultStreamTimeoutMs);
+        auto request_headers = entry.request_headers;
+        if (request_headers.empty() && config) {
+            request_headers = config->openai.request_headers;
+        }
         provider = std::make_shared<OpenAiCompatProvider>(
             entry.base_url,
             entry.api_key,
             entry.model,
-            entry.stream_timeout_ms.value_or(OpenAiConfig::kDefaultStreamTimeoutMs),
-            entry.request_headers
+            stream_timeout_ms,
+            std::move(request_headers)
         );
     } else if (entry.provider == "copilot") {
         provider = std::make_shared<CopilotProvider>(entry.model);

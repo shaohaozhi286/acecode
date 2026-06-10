@@ -52,6 +52,7 @@ TEST(SessionStorage, MetaRoundtrip) {
     in.model         = "gpt-4o";
     in.model_preset  = "copilot-fast";
     in.title         = "resume bug";
+    in.title_source  = "user";
     in.input_draft   = "continue this refactor";
     in.permission_mode = "plan";
     in.pre_plan_permission_mode = "accept-edits";
@@ -85,6 +86,7 @@ TEST(SessionStorage, MetaRoundtrip) {
     EXPECT_EQ(out.model,         in.model);
     EXPECT_EQ(out.model_preset,  in.model_preset);
     EXPECT_EQ(out.title,         in.title);
+    EXPECT_EQ(out.title_source,  in.title_source);
     EXPECT_EQ(out.input_draft,   in.input_draft);
     EXPECT_EQ(out.permission_mode, in.permission_mode);
     EXPECT_EQ(out.pre_plan_permission_mode, in.pre_plan_permission_mode);
@@ -149,6 +151,29 @@ TEST(SessionStorage, LegacyMetaWithoutTitle) {
         << "legacy meta without 'todos' must deserialize to an empty checklist";
     EXPECT_FALSE(out.archived)
         << "legacy meta without 'archived' must deserialize to false";
+}
+
+TEST(SessionStorage, LegacyMetaWithTitleGetsLegacySource) {
+    auto dir = make_unique_tmp_dir("legacy_title_source");
+    auto meta_path = (dir / "20260419-121212-abcd.meta.json").string();
+    {
+        std::ofstream ofs(meta_path, std::ios::binary);
+        ofs << R"({
+  "id": "20260419-121212-abcd",
+  "cwd": "/tmp/project",
+  "created_at": "2026-04-19T12:12:12Z",
+  "updated_at": "2026-04-19T12:13:12Z",
+  "message_count": 1,
+  "summary": "",
+  "provider": "copilot",
+  "model": "gpt-4o",
+  "title": "old title"
+})";
+    }
+
+    SessionMeta out = SessionStorage::read_meta(meta_path);
+    EXPECT_EQ(out.title, "old title");
+    EXPECT_EQ(out.title_source, "legacy");
 }
 
 // 场景:SessionMeta.title 为空时,write_meta 必须跳过该字段,而不是写成

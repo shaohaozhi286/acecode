@@ -27,6 +27,23 @@ std::optional<std::string> pick_folder(void* /* parent_window */) {
     __block std::optional<std::string> result;
 
     dispatch_block_t work = ^{
+        // daemon 是无 bundle 的后台进程,默认 activation policy 是 Prohibited:
+        // 窗口能创建但进程永远成不了 active app,NSOpenPanel 必然垫在浏览器
+        // 窗口下面(webapp 兼容模式的实际报障)。修法是业界标准组合:
+        //   1. 升级 policy 到 Accessory(不出现在 Dock,但允许拿前台)
+        //   2. activate 当前进程
+        //   3. 抬 panel 的 window level 并 orderFrontRegardless
+        NSApplication* app = [NSApplication sharedApplication];
+        if (app.activationPolicy == NSApplicationActivationPolicyProhibited) {
+            [app setActivationPolicy:NSApplicationActivationPolicyAccessory];
+        }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        // macOS 14 起弃用但仍生效;后台进程没有"前台让渡"语境,新的 cooperative
+        // [NSApp activate] 对这种场景反而不保证生效。
+        [app activateIgnoringOtherApps:YES];
+#pragma clang diagnostic pop
+
         NSOpenPanel* panel = [NSOpenPanel openPanel];
         panel.canChooseDirectories    = YES;
         panel.canChooseFiles          = NO;
@@ -34,6 +51,8 @@ std::optional<std::string> pick_folder(void* /* parent_window */) {
         panel.canCreateDirectories    = YES;
         panel.title  = @"选择项目文件夹";
         panel.prompt = @"选择";
+        panel.level  = NSModalPanelWindowLevel;
+        [panel orderFrontRegardless];
 
         if ([panel runModal] == NSModalResponseOK) {
             NSURL* url = panel.URL;

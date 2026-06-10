@@ -47,6 +47,7 @@ bool session_event_has_user_visible_output(SessionEventKind kind,
             return true;
         case SessionEventKind::Usage:
         case SessionEventKind::AgentProgress:
+        case SessionEventKind::SessionUpdated:
         case SessionEventKind::BusyChanged:
         case SessionEventKind::Done:
             return false;

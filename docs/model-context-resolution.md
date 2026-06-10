@@ -98,6 +98,8 @@ OpenAI-compatible saved models can include optional `request_headers` metadata:
 
 `Content-Type` is controlled by ACECode and cannot be overridden. A custom `Authorization` header is allowed and overrides the built-in bearer header derived from `api_key`.
 
+For legacy configs, the top-level `openai.request_headers` object is also accepted. It is used as a fallback for OpenAI-compatible saved model entries that do not define their own `request_headers`; per-model headers take precedence.
+
 ## Important Rule
 
 For known providers, do not assume `/models` returns the real context window.

@@ -21,6 +21,24 @@ export function unpinSessionId(ids = [], sessionId = '') {
   return normalizePinnedIds(ids).filter((item) => item !== id);
 }
 
+export function reorderPinnedSessionId(ids = [], sourceId = '', targetId = '', placement = 'before') {
+  const source = String(sourceId || '');
+  const target = String(targetId || '');
+  const current = normalizePinnedIds(ids);
+  if (!source || !target || source === target) return current;
+  if (!current.includes(source) || !current.includes(target)) return current;
+
+  const withoutSource = current.filter((id) => id !== source);
+  const targetIndex = withoutSource.indexOf(target);
+  if (targetIndex < 0) return current;
+  const insertIndex = placement === 'after' ? targetIndex + 1 : targetIndex;
+  return [
+    ...withoutSource.slice(0, insertIndex),
+    source,
+    ...withoutSource.slice(insertIndex),
+  ];
+}
+
 function workspaceEntries(pinnedByWorkspace) {
   if (pinnedByWorkspace instanceof Map) return Array.from(pinnedByWorkspace.entries());
   if (pinnedByWorkspace && typeof pinnedByWorkspace === 'object') return Object.entries(pinnedByWorkspace);

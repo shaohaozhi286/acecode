@@ -137,14 +137,14 @@ function FileTree({ api, cwd, treeCache, setTreeCache, expandedDirs, setExpanded
     const err = errors.get(parentPath);
     if (loading.has(parentPath)) {
       return (
-        <div className="px-2 py-1 text-fg-mute text-[11px]" style={{ paddingLeft: 8 + depth * 14 }}>
+        <div className="px-2 py-1 text-fg-mute text-[11px]" style={{ paddingLeft: 12 + depth * 14 }}>
           加载中…
         </div>
       );
     }
     if (err) {
       return (
-        <div className="px-2 py-1 text-danger text-[11px]" style={{ paddingLeft: 8 + depth * 14 }}>
+        <div className="px-2 py-1 text-danger text-[11px]" style={{ paddingLeft: 12 + depth * 14 }}>
           {err}
         </div>
       );
@@ -153,7 +153,7 @@ function FileTree({ api, cwd, treeCache, setTreeCache, expandedDirs, setExpanded
     const displayEntries = entriesWithReviewRows(entries, parentPath, reviewStatusByPath);
     if (displayEntries.length === 0) {
       return (
-        <div className="px-2 py-1 text-fg-mute text-[11px] italic" style={{ paddingLeft: 8 + depth * 14 }}>
+        <div className="px-2 py-1 text-fg-mute text-[11px] italic" style={{ paddingLeft: 12 + depth * 14 }}>
           (空目录)
         </div>
       );
@@ -186,7 +186,7 @@ function FileTree({ api, cwd, treeCache, setTreeCache, expandedDirs, setExpanded
               'hover:bg-surface-hi cursor-pointer',
               isActive && 'bg-accent-soft text-accent',
             )}
-            style={{ paddingLeft: 6 + depth * 14 }}
+            style={{ paddingLeft: 10 + depth * 14 }}
             onClick={() => isDir ? toggleDir(e.path) : onPickFile(e)}
             title={reviewStatus ? `${e.path} - ${statusTitle}` : e.path}
           >

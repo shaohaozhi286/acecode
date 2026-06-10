@@ -119,6 +119,10 @@ set(MCP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(BUILD_MCP_EXAMPLES OFF CACHE BOOL "" FORCE)
 add_subdirectory(external/cpp-mcp EXCLUDE_FROM_ALL)
 
+# winpty(仅 WIN32 内部生效): Win10 < 1809 无 ConPTY 时的 PTY 兜底。
+# 定义 winpty_static(链进 acecode_testable)与 winpty-agent(嵌入释放)。
+include(${CMAKE_SOURCE_DIR}/cmake/acecode_winpty.cmake)
+
 # Gather all sources under src/ once, then split them into:
 #   - ACECODE_TESTABLE_SOURCES: headless logic that unit tests can link against
 #   - ACECODE_TUI_SOURCES     : FTXUI-coupled code (src/tui, src/markdown)
@@ -134,6 +138,11 @@ file(GLOB_RECURSE ACECODE_HEADER_FILES CONFIGURE_DEPENDS
 
 set(ACECODE_TESTABLE_SOURCES ${ACECODE_ALL_SOURCES})
 list(FILTER ACECODE_TESTABLE_SOURCES EXCLUDE REGEX "/src/(tui|markdown)/")
+
+# winpty_agent_location.cpp 属于 winpty_static(需要 winpty 内部 include 路径),
+# 不能同时进 acecode_testable,否则 findAgentProgram 符号重复。
+list(REMOVE_ITEM ACECODE_TESTABLE_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/web/pty/winpty_agent_location.cpp)
 set(ACECODE_TUI_SOURCES ${ACECODE_ALL_SOURCES})
 list(FILTER ACECODE_TUI_SOURCES INCLUDE REGEX "/src/(tui|markdown)/")
 
@@ -219,6 +228,16 @@ if(WIN32)
     # ws2_32: src/desktop/daemon_supervisor.cpp 用 winsock 探测端口连通性。
     # ole32/shell32/user32: src/desktop/folder_picker_win.cpp 的 COM + IFileOpenDialog + owner/foreground handling。
     target_link_libraries(acecode_testable PUBLIC bcrypt advapi32 winhttp ws2_32 ole32 shell32 user32)
+    # winpty 客户端库(< 1809 的 PTY 兜底,cmake/acecode_winpty.cmake)。
+    target_link_libraries(acecode_testable PUBLIC winpty_static)
+endif()
+if(UNIX AND NOT APPLE)
+    # forkpty(src/web/pty/pty_backend_posix.cpp)。glibc 2.34+ 已并入 libc,
+    # 老 glibc / musl 仍需显式链 util;find_library 找不到就交给 libc。
+    find_library(ACECODE_LIBUTIL util)
+    if(ACECODE_LIBUTIL)
+        target_link_libraries(acecode_testable PUBLIC ${ACECODE_LIBUTIL})
+    endif()
 endif()
 
 add_executable(acecode

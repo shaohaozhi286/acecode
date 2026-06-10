@@ -262,6 +262,25 @@ TEST(SavedModelsTest, OptionalRequestHeadersParseAndValidate) {
     EXPECT_TRUE(validate_saved_models(*parsed, "local-lm", err)) << err;
 }
 
+// 额外 — 旧式 openai 段里的 request_headers 迁移到合成的 saved model。
+TEST(SavedModelsTest, LegacyOpenAiProfileCarriesGlobalRequestHeaders) {
+    AppConfig cfg;
+    cfg.provider = "openai";
+    cfg.openai.base_url = "http://localhost:1234/v1";
+    cfg.openai.api_key = "sk-test";
+    cfg.openai.model = "llama-3";
+    cfg.openai.request_headers = {
+        {"X-Team", "acecode"},
+        {"X-Token", "{env:ACE_TOKEN}"}
+    };
+
+    ModelProfile profile = legacy_model_profile_from_config(cfg);
+
+    EXPECT_EQ(profile.provider, "openai");
+    EXPECT_EQ(profile.request_headers.at("X-Team"), "acecode");
+    EXPECT_EQ(profile.request_headers.at("X-Token"), "{env:ACE_TOKEN}");
+}
+
 // 额外 — request_headers 不能覆盖 ACECode 固定管理的 Content-Type。
 TEST(SavedModelsTest, RequestHeadersRejectContentType) {
     ModelProfile e;
@@ -501,6 +520,31 @@ TEST(SavedModelsTest, SaveConfigPersistsRequestHeaders) {
     EXPECT_EQ(saved["saved_models"][0]["request_headers"]["Authorization"],
               "Bearer {env:ACE_TOKEN}");
     EXPECT_EQ(saved["saved_models"][0]["request_headers"]["X-Team"], "acecode");
+
+    std::filesystem::remove(path, ec);
+}
+
+// 额外 — save_config 保留 openai.request_headers,避免配置向导保存后丢全局 header。
+TEST(SavedModelsTest, SaveConfigPersistsGlobalOpenAiRequestHeaders) {
+    const auto suffix = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto path = std::filesystem::temp_directory_path() /
+        ("acecode-global-request-headers-" + std::to_string(suffix) + ".json");
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+
+    AppConfig cfg;
+    cfg.openai.request_headers = {
+        {"X-Team", "acecode"},
+        {"X-Token", "{env:ACE_TOKEN}"}
+    };
+    save_config(cfg, path.string());
+
+    std::ifstream ifs(path);
+    ASSERT_TRUE(ifs.is_open());
+    const auto saved = nlohmann::json::parse(ifs);
+    ASSERT_TRUE(saved["openai"].contains("request_headers"));
+    EXPECT_EQ(saved["openai"]["request_headers"]["X-Team"], "acecode");
+    EXPECT_EQ(saved["openai"]["request_headers"]["X-Token"], "{env:ACE_TOKEN}");
 
     std::filesystem::remove(path, ec);
 }

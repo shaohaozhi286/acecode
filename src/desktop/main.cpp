@@ -47,6 +47,7 @@
 #include <random>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <cpr/cpr.h>
@@ -358,6 +359,186 @@ bool post_workspace_to_daemon(int port, const std::string& token,
     return false;
 }
 
+#ifdef _WIN32
+// 在指定进程的可见顶层窗口里挑一个拉到前台(best-effort)。Edge --app + 干净
+// profile 下,我们启动的 msedge 就是浏览器进程、拥有 app 窗口,按 pid 能找到。
+struct FindWindowByPidCtx {
+    DWORD pid = 0;
+    HWND found = nullptr;
+};
+
+BOOL CALLBACK find_window_by_pid_cb(HWND hwnd, LPARAM lparam) {
+    auto* ctx = reinterpret_cast<FindWindowByPidCtx*>(lparam);
+    DWORD wpid = 0;
+    ::GetWindowThreadProcessId(hwnd, &wpid);
+    if (wpid == ctx->pid && ::IsWindowVisible(hwnd) &&
+        ::GetWindow(hwnd, GW_OWNER) == nullptr) {
+        ctx->found = hwnd;
+        return FALSE; // 找到一个顶层可见窗口就停
+    }
+    return TRUE;
+}
+
+void focus_process_main_window(unsigned long pid) {
+    if (pid == 0) return;
+    FindWindowByPidCtx ctx;
+    ctx.pid = static_cast<DWORD>(pid);
+    ::EnumWindows(find_window_by_pid_cb, reinterpret_cast<LPARAM>(&ctx));
+    if (!ctx.found) return;
+    if (::IsIconic(ctx.found)) ::ShowWindow(ctx.found, SW_RESTORE);
+    ::SetForegroundWindow(ctx.found);
+}
+#endif
+
+// 浏览器兜底宿主:embedded WebView2 用不了时(运行时损坏/缺失/被策略封锁),用
+// 外部浏览器显示 daemon 的 Web UI,并由 desktop 进程在后台托住 daemon。
+//
+// 关键设计(修白屏 + daemon 被提前杀):
+//   - 不再用 WaitForSingleObject(msedge) 当生命周期 —— Chromium 的 single-instance
+//     转交会让被等的进程瞬间退出,导致 daemon 被误杀 → Edge 窗口连不上 → 白屏。
+//   - 改为:启动浏览器(Edge --app 优先,失败再退到系统默认浏览器),然后跑一个带
+//     托盘图标的 Win32 消息循环托住进程;daemon 全程存活。
+//   - Edge --app(有可靠进程句柄 + 干净 profile)额外挂一个 watcher:app 窗口关闭
+//     → 进程退出 → 请求退出循环,保持"关窗即退出"的直觉。
+//   - 默认浏览器那条(拿不到可靠句柄)只能靠托盘"退出"。
+int run_browser_fallback(const std::string& url,
+                         acecode::desktop::SplashScreen& splash,
+                         acecode::desktop::DaemonPool& pool,
+                         const std::string& reason,
+                         const std::string& webview_error) {
+    using namespace acecode::desktop;
+    LOG_WARN("[desktop] starting browser fallback mode: " + reason);
+
+    // daemon 没起来 → 没有可显示的 URL,浏览器也救不了,直接报清楚的错。
+    if (url.empty() || url == onboarding_url()) {
+        LOG_ERROR("[desktop] browser fallback has no daemon URL to show "
+                  "(daemon failed to start)");
+        splash.close();
+#ifdef _WIN32
+        std::string body =
+            "ACECode 无法启动内置 WebView,且后台服务也未能就绪,无法回退到浏览器。\n\n"
+            "原因:\n" + reason;
+        if (!webview_error.empty()) body += "\n\nWebView2 失败:\n" + webview_error;
+        show_error(body);
+#endif
+        auto failures = pool.stop_all();
+        return failures.empty() ? 1 : 100;
+    }
+
+    const std::string browser_url = append_query_param(url, "ace_webapp", "1");
+
+#ifdef _WIN32
+    // 1) 启动浏览器:Edge --app 优先(拿到进程句柄),失败退到默认浏览器。
+    void* edge_process = nullptr;
+    unsigned long edge_pid = 0;
+    bool opened = false;
+    std::string launch_detail;
+
+    auto edge = launch_edge_app(browser_url);
+    if (edge.ok) {
+        edge_process = edge.process;
+        edge_pid = edge.pid;
+        opened = true;
+    } else {
+        launch_detail = "Edge app mode: " + edge.error;
+        LOG_WARN("[desktop] Edge app mode unavailable, trying default browser: " + edge.error);
+        auto ext = acecode::desktop::open_external_url(browser_url);
+        if (ext.ok) {
+            opened = true;
+            LOG_INFO("[desktop] opened daemon UI in default browser");
+        } else {
+            launch_detail += " | default browser: " + ext.error;
+        }
+    }
+
+    splash.close();
+
+    if (!opened) {
+        LOG_ERROR("[desktop] browser fallback failed to open any browser: " + launch_detail);
+        std::string body =
+            "ACECode 无法启动内置 WebView,回退到浏览器也失败了。\n\n"
+            "原因:\n" + reason + "\n\n浏览器失败:\n" + launch_detail;
+        if (!webview_error.empty()) body += "\n\nWebView2 失败:\n" + webview_error;
+        show_error(body);
+        if (edge_process) ::CloseHandle(static_cast<HANDLE>(edge_process));
+        auto failures = pool.stop_all();
+        return failures.empty() ? 1 : 100;
+    }
+
+    // 2) 托盘 + 消息循环托住 daemon 生命周期。
+    const DWORD main_tid = ::GetCurrentThreadId();
+    std::atomic<bool> quit_requested{false};
+    auto request_quit = [&quit_requested, main_tid]() {
+        quit_requested.store(true);
+        ::PostThreadMessageW(main_tid, WM_NULL, 0, 0); // 唤醒阻塞中的 GetMessage
+    };
+
+    void* tray_hwnd = nullptr;
+    bool tray_ok = init_tray_icon(
+        /*on_show=*/[edge_pid]() {
+            if (edge_pid) focus_process_main_window(edge_pid);
+        },
+        /*on_quit=*/[&request_quit]() { request_quit(); },
+        &tray_hwnd);
+    if (!tray_ok) {
+        LOG_WARN("[desktop] tray icon unavailable in browser fallback; "
+                 "window close still quits for Edge app mode");
+    }
+
+    // 3) Edge --app:app 窗口关闭(进程退出)→ 请求退出。stop_event 让 watcher 可被
+    //    join(否则 WaitForMultipleObjects 无法取消)。
+    // 只有 edge_process 和 stop_event 都有效才起 watcher —— 这样 watcher 总能被
+    // stop_event 唤醒后 join,不会在退出时因 WaitForSingleObject 无法取消而卡死。
+    HANDLE stop_event = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    const bool can_autoquit_on_close = (edge_process != nullptr) && (stop_event != nullptr);
+    std::thread watcher;
+    if (can_autoquit_on_close) {
+        watcher = std::thread([edge_process, stop_event, &request_quit]() {
+            HANDLE waits[2] = {static_cast<HANDLE>(edge_process), stop_event};
+            ::WaitForMultipleObjects(2, waits, FALSE, INFINITE);
+            request_quit();
+        });
+    }
+
+    if (!tray_ok && !can_autoquit_on_close) {
+        // 托盘装不上 + 无法在窗口关闭时自动退出 → 没有任何主动退出途径。日志点明,
+        // 避免静默"卡住"难诊断;daemon 会随 desktop 进程被杀而随之退出。
+        LOG_ERROR("[desktop] browser fallback has neither tray nor a process handle "
+                  "to quit on; close the desktop process to stop the daemon");
+    }
+
+    // 4) 消息循环
+    MSG msg;
+    while (!quit_requested.load()) {
+        BOOL got = ::GetMessageW(&msg, nullptr, 0, 0);
+        if (got == 0 || got == -1) break; // WM_QUIT / 错误
+        ::TranslateMessage(&msg);
+        ::DispatchMessageW(&msg);
+    }
+
+    // 5) teardown:先放 watcher,再清托盘,最后停 daemon。
+    if (stop_event) ::SetEvent(stop_event);
+    if (watcher.joinable()) watcher.join();
+    if (stop_event) ::CloseHandle(stop_event);
+    if (edge_process) ::CloseHandle(static_cast<HANDLE>(edge_process));
+    shutdown_tray_icon();
+
+    auto failures = pool.stop_all();
+    return failures.empty() ? 0 : 100;
+#else
+    // 非 Windows:desktop 用 WebKitGTK,几乎不会走到这里。best-effort 开默认浏览器
+    // 后收尾(无托盘宿主)。
+    (void)webview_error;
+    auto ext = acecode::desktop::open_external_url(browser_url);
+    splash.close();
+    if (!ext.ok) {
+        LOG_ERROR("[desktop] browser fallback failed to open default browser: " + ext.error);
+    }
+    auto failures = pool.stop_all();
+    return failures.empty() ? (ext.ok ? 0 : 1) : 100;
+#endif
+}
+
 } // namespace
 
 #ifdef _WIN32
@@ -547,34 +728,8 @@ int main(int argc, char** argv) {
         }
     }
 
-    auto run_edge_app_mode = [&](const std::string& reason,
-                                 const std::string& webview_error = std::string{}) -> int {
-        LOG_WARN("[desktop] starting Edge app mode: " + reason);
-        splash.close();
-        const std::string edge_url = append_query_param(url, "ace_webapp", "1");
-        auto edge_result = launch_edge_app_and_wait(edge_url);
-        if (!edge_result.ok) {
-            LOG_ERROR("[desktop] Edge app mode failed: " + edge_result.error);
-#ifdef _WIN32
-            std::string body = "ACECode Desktop could not launch Microsoft Edge app mode.\n\n"
-                               "Reason:\n" + reason +
-                               "\n\nEdge failure:\n" + edge_result.error;
-            if (!webview_error.empty()) {
-                body += "\n\nWebView2 failure:\n" + webview_error;
-            }
-            show_error(body);
-#endif
-            auto failures = pool.stop_all();
-            return failures.empty() ? 1 : 100;
-        }
-        LOG_INFO("[desktop] Edge app mode exited with code " +
-                 std::to_string(edge_result.exit_code));
-        auto failures = pool.stop_all();
-        return failures.empty() ? 0 : 100;
-    };
-
     if (force_webapp) {
-        return run_edge_app_mode("--webapp requested");
+        return run_browser_fallback(url, splash, pool, "--webapp requested", "");
     }
 
     // 注意:这里不再用全屏 splash 盖主窗口。WebHost 会用自建 Win32
@@ -587,12 +742,12 @@ int main(int argc, char** argv) {
             /*debug=*/desktop_debug,
             WebHost::StartupWindowMode::OffscreenUntilReady);
     } catch (const WebHostInitializationError& e) {
-        return run_edge_app_mode("embedded WebView unavailable", e.what());
+        return run_browser_fallback(url, splash, pool, "embedded WebView unavailable", e.what());
     } catch (const std::exception& e) {
 #ifdef _WIN32
         LOG_WARN(std::string("[desktop] WebHost construction failed with unexpected exception; "
                              "entering Edge app mode: ") + e.what());
-        return run_edge_app_mode("embedded WebView unavailable", e.what());
+        return run_browser_fallback(url, splash, pool, "embedded WebView unavailable", e.what());
 #else
         throw;
 #endif
@@ -600,7 +755,7 @@ int main(int argc, char** argv) {
 #ifdef _WIN32
         LOG_WARN("[desktop] WebHost construction failed with unknown exception; "
                  "entering Edge app mode");
-        return run_edge_app_mode("embedded WebView unavailable", "unknown WebHost initialization error");
+        return run_browser_fallback(url, splash, pool, "embedded WebView unavailable", "unknown WebHost initialization error");
 #else
         throw;
 #endif

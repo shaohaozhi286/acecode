@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {
   SIDEBAR_SESSION_COLLAPSE_LIMIT,
+  reconcileSidebarSessions,
   sidebarSessionProjection,
   sortSidebarSessionsNewestFirst,
   upsertSidebarSession,
@@ -64,13 +65,59 @@ test('upsertSidebarSession inserts new session newest-first', () => {
 
 test('upsertSidebarSession replaces existing session without duplicates', () => {
   const result = upsertSidebarSession([
-    { id: 'same', title: 'old', updated_at: '2026-05-17T01:00:00Z' },
     { id: 'other', updated_at: '2026-05-17T02:00:00Z' },
+    { id: 'same', title: 'old', updated_at: '2026-05-17T01:00:00Z' },
   ], {
     id: 'same',
     title: 'new',
     updated_at: '2026-05-17T03:00:00Z',
   });
+  assert.deepEqual(result.map((s) => s.id), ['other', 'same']);
+  assert.equal(result[1].title, 'new');
+});
+
+test('upsertSidebarSession promotes existing session only when content counters change', () => {
+  const result = upsertSidebarSession([
+    { id: 'other', updated_at: '2026-05-17T02:00:00Z' },
+    { id: 'same', title: 'old', updated_at: '2026-05-17T01:00:00Z', message_count: 2 },
+  ], {
+    id: 'same',
+    title: 'new',
+    updated_at: '2026-05-17T03:00:00Z',
+    message_count: 4,
+  });
   assert.deepEqual(result.map((s) => s.id), ['same', 'other']);
   assert.equal(result[0].title, 'new');
+});
+
+test('reconcileSidebarSessions preserves row order when only updated_at changes', () => {
+  const previous = [
+    { id: 'a', workspace_hash: 'w1', updated_at: '2026-05-17T01:00:00Z', message_count: 2, turn_count: 1 },
+    { id: 'b', workspace_hash: 'w1', updated_at: '2026-05-17T02:00:00Z', message_count: 4, turn_count: 2 },
+    { id: 'c', workspace_hash: 'w1', updated_at: '2026-05-17T03:00:00Z', message_count: 6, turn_count: 3 },
+  ];
+  const incoming = [
+    { id: 'c', workspace_hash: 'w1', updated_at: '2026-05-17T09:00:00Z', message_count: 6, turn_count: 3 },
+    { id: 'b', workspace_hash: 'w1', updated_at: '2026-05-17T02:00:00Z', message_count: 4, turn_count: 2 },
+    { id: 'a', workspace_hash: 'w1', updated_at: '2026-05-17T01:00:00Z', message_count: 2, turn_count: 1 },
+  ];
+  const result = reconcileSidebarSessions(previous, incoming);
+  assert.deepEqual(result.map((s) => s.id), ['a', 'b', 'c']);
+  assert.equal(result[2].updated_at, '2026-05-17T09:00:00Z');
+});
+
+test('reconcileSidebarSessions promotes content changes and new sessions', () => {
+  const previous = [
+    { id: 'a', workspace_hash: 'w1', updated_at: '2026-05-17T01:00:00Z', message_count: 2, turn_count: 1 },
+    { id: 'b', workspace_hash: 'w1', updated_at: '2026-05-17T02:00:00Z', message_count: 4, turn_count: 2 },
+    { id: 'c', workspace_hash: 'w1', updated_at: '2026-05-17T03:00:00Z', message_count: 6, turn_count: 3 },
+  ];
+  const incoming = [
+    { id: 'a', workspace_hash: 'w1', updated_at: '2026-05-17T01:00:00Z', message_count: 2, turn_count: 1 },
+    { id: 'b', workspace_hash: 'w1', updated_at: '2026-05-17T10:00:00Z', message_count: 8, turn_count: 3 },
+    { id: 'c', workspace_hash: 'w1', updated_at: '2026-05-17T03:00:00Z', message_count: 6, turn_count: 3 },
+    { id: 'new', workspace_hash: 'w1', updated_at: '2026-05-17T11:00:00Z', message_count: 0, turn_count: 0 },
+  ];
+  const result = reconcileSidebarSessions(previous, incoming);
+  assert.deepEqual(result.map((s) => s.id), ['new', 'b', 'a', 'c']);
 });

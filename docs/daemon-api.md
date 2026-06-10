@@ -357,6 +357,23 @@ List skills the daemon registered at startup.
 }
 ```
 
+### `POST /api/open-in-explorer`
+
+Open a directory in the OS file manager (Explorer / Finder / xdg-open).
+Used by the web UI context menu in desktop webapp compatibility mode
+(Edge app mode), where no webview bridge is available.
+
+**Request body**: `{"path": "<absolute directory path, UTF-8>"}`
+
+**Response 200**: `{"ok": true}`
+
+**Errors**:
+- `400` — missing/empty `path`, bad JSON, or validation failure
+  (`{"ok": false, "error": "..."}`; e.g. path is not an existing directory,
+  or lies outside registered workspaces and the daemon cwd).
+- `501` — daemon was not started by the desktop shell
+  (`native_folder_picker_enabled` off), endpoint unavailable.
+
 ### `GET /api/models`
 
 List saved model profiles exposed to Web/Desktop. Responses never include
@@ -619,3 +636,67 @@ ws.send(JSON.stringify({
   payload: { session_id: SID, since: lastSeenSeq }
 }));
 ```
+
+## 7. Console PTY — `/api/pty` + `WS /ws/pty/:id`
+
+Interactive terminal sessions hosted by the daemon (openspec change
+`add-console-dock`). **All PTY routes are loopback-only**: requests from
+non-loopback addresses are rejected with 403 regardless of token, because a
+PTY executes commands without permission gating.
+
+`GET /api/health` reports availability:
+
+```json
+"console": { "available": true, "backend": "conpty" }
+```
+
+`backend` is one of `conpty` (Windows 10 1809+), `winpty` (older Windows,
+full TTY semantics via the bundled winpty agent), `pipe` (last-resort
+fallback without TTY semantics — interactive programs do not work), or
+`posix` (`forkpty`, Linux/macOS).
+
+### HTTP endpoints
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| POST | `/api/pty` | `{cwd?, title?}` | `201` session info; `429` at the 16-session limit |
+| GET | `/api/pty` | — | `{backend, sessions: [...]}` |
+| DELETE | `/api/pty/:id` | — | `204`; kills the shell process |
+| POST | `/api/pty/:id/resize` | `{cols, rows}` (2..1000) | `204` |
+| POST | `/api/pty/:id/title` | `{title}` | `204`; blank titles ignored, UTF-8-safe truncation at 200 bytes. The frontend forwards OSC 0/2 titles (xterm `onTitleChange`) here so reload-restored sessions keep their tab titles |
+
+Session info shape:
+
+```json
+{
+  "id": "pty-1", "title": "Terminal 1",
+  "shell": "C:\Windows\system32\cmd.exe", "cwd": "...",
+  "status": "running", "pid": 12345, "backend": "conpty",
+  "exit_code": 0
+}
+```
+
+`exit_code` is present only when `status == "exited"`. The default shell is
+`%COMSPEC%` (cmd) on Windows and `$SHELL` on POSIX; override with the
+`console.shell` config key. A PTY process survives independently of WebSocket
+connections until it exits or is deleted; the daemon kills all sessions on
+shutdown.
+
+### WebSocket — `WS /ws/pty/:id?cursor=N`
+
+Raw byte transport (no JSON envelopes, unlike `/ws/sessions`):
+
+- **Server → client**: binary frames carry raw PTY output (VT byte stream,
+  feed directly to a terminal emulator). Frames whose **first byte is
+  `0x00`** are control frames: the remainder is UTF-8 JSON — `{"cursor": N}`
+  (sent after the replay backlog; sync your local cursor) or
+  `{"exit_code": N}` (process exited).
+- **Client → server**: every frame (text or binary) is written verbatim to
+  the PTY input (keyboard bytes).
+
+Each session keeps a 2 MB rolling output buffer with a monotonically
+increasing byte cursor. Connect with `cursor=N` to replay buffered output
+from that offset (chunked at 64 KB) before the live stream; `cursor=-1`
+skips the backlog. Reconnecting after a page reload with `cursor=0` replays
+whatever the buffer still holds. Resize goes through the REST endpoint, not
+the WebSocket.

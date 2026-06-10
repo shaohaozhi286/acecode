@@ -132,8 +132,11 @@ public:
 
     // Set the in-memory title for the current session. Persisted to .meta.json
     // on the next update_meta() (every 5 messages, or finalize). Pass empty
-    // string to clear.
+    // string to clear. Explicit user titles take precedence over generated
+    // titles.
     void set_session_title(std::string title);
+    bool try_set_generated_session_title(std::string title);
+    bool mark_auto_title_generation_started();
 
     // Set the in-memory archive state for the current session and persist it
     // immediately when metadata already exists.
@@ -141,6 +144,7 @@ public:
 
     // Return the current in-memory title (empty when unset).
     std::string current_title() const;
+    std::string current_title_source() const;
 
     // Persisted unsubmitted chat input draft for the active session.
     void set_input_draft(std::string draft);
@@ -190,6 +194,9 @@ private:
     std::string last_user_summary_;
     std::string created_at_;
     std::string pending_title_;
+    std::string title_source_;
+    bool auto_title_generation_attempted_ = false;
+    bool user_title_touched_ = false;
     std::string input_draft_;
     std::string permission_mode_ = "default";
     std::string pre_plan_permission_mode_;

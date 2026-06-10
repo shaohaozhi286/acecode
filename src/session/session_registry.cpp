@@ -2,6 +2,7 @@
 
 #include "session_rewind.hpp"
 #include "session_storage.hpp"
+#include "session_title_generator.hpp"
 #include "thread_goal_store.hpp"
 #include "../commands/init_command.hpp"
 #include "../provider/apply_model_to_session.hpp"
@@ -20,6 +21,7 @@
 #include <fstream>
 #include <optional>
 #include <sstream>
+#include <thread>
 #include <utility>
 
 namespace acecode {
@@ -229,6 +231,78 @@ PermissionMode permission_mode_from_name(std::string mode) {
     if (mode == "yolo") return PermissionMode::Yolo;
     if (mode == "plan") return PermissionMode::Plan;
     return PermissionMode::Default;
+}
+
+std::string visible_title_input(const UserInput& input) {
+    std::string text = input.display_text.empty() ? input.text : input.display_text;
+    text = trim_ascii(std::move(text));
+    if (!text.empty()) return text;
+    if (!input.content_parts.is_array()) return {};
+    std::ostringstream out;
+    for (const auto& part : input.content_parts) {
+        if (!part.is_object()) continue;
+        const std::string type = part.value("type", std::string{});
+        if (type == "text" && part.contains("text") && part["text"].is_string()) {
+            const std::string piece = trim_ascii(part["text"].get<std::string>());
+            if (!piece.empty()) {
+                if (out.tellp() > 0) out << "\n";
+                out << piece;
+            }
+        }
+    }
+    return trim_ascii(out.str());
+}
+
+std::optional<ModelProfile> title_profile_for_entry(const SessionRegistryDeps& deps,
+                                                    const SessionEntry& entry) {
+    if (!deps.config) return std::nullopt;
+    const auto& cfg = *deps.config;
+    if (!cfg.session_title.model_name.empty()) {
+        if (auto profile = explicit_profile(cfg, cfg.session_title.model_name)) {
+            return profile;
+        }
+        LOG_WARN("[registry] session_title.model_name '" + cfg.session_title.model_name +
+                 "' not found; falling back to current session model");
+    }
+    if (!entry.model_state.name.empty()) {
+        if (auto profile = explicit_profile(cfg, entry.model_state.name)) {
+            return profile;
+        }
+    }
+    std::optional<std::string> cwd_override;
+    if (!entry.cwd.empty()) {
+        cwd_override = load_cwd_model_override(entry.cwd);
+    }
+    return resolve_effective_model(cfg, cwd_override, std::nullopt);
+}
+
+void clamp_title_profile_timeout(ModelProfile& profile, const AppConfig& cfg) {
+    if (profile.provider != "openai") return;
+    const int timeout = cfg.session_title.timeout_ms;
+    if (!profile.stream_timeout_ms.has_value() || *profile.stream_timeout_ms > timeout) {
+        profile.stream_timeout_ms = timeout;
+    }
+}
+
+std::shared_ptr<LlmProvider> create_title_provider(ModelProfile profile,
+                                                   const AppConfig& cfg) {
+    clamp_title_profile_timeout(profile, cfg);
+    auto provider = create_provider_from_entry(profile, &cfg);
+    if (auto copilot = std::dynamic_pointer_cast<CopilotProvider>(provider)) {
+        copilot->try_silent_auth();
+    }
+    return provider;
+}
+
+void emit_session_title_updated(SessionEntry& entry) {
+    if (!entry.loop || !entry.sm) return;
+    entry.loop->events().emit(SessionEventKind::SessionUpdated, nlohmann::json{
+        {"session_id", entry.id},
+        {"workspace_hash", entry.workspace_hash},
+        {"cwd", entry.cwd},
+        {"title", entry.sm->current_title()},
+        {"title_source", entry.sm->current_title_source()},
+    });
 }
 
 struct RegistryGoalArgs {
@@ -508,6 +582,14 @@ SessionRegistry::SessionRegistry(SessionRegistryDeps deps)
     : deps_(std::move(deps)) {}
 
 SessionRegistry::~SessionRegistry() {
+    std::vector<std::thread> threads;
+    {
+        std::lock_guard<std::mutex> lk(title_threads_mu_);
+        threads.swap(title_threads_);
+    }
+    for (auto& t : threads) {
+        if (t.joinable()) t.join();
+    }
     // entries_ 析构会触发每个 SessionEntry 析构 → AgentLoop::shutdown 等等
     // worker thread join。锁不需要 — 此时没人再调 lookup/destroy(daemon
     // 退出路径)。
@@ -521,6 +603,14 @@ std::string SessionRegistry::create(const SessionOptions& opts) {
     {
         std::lock_guard<std::mutex> lk(mu_);
         entries_.emplace(id, std::move(entry));
+    }
+    if (resolved.auto_start && !resolved.initial_user_message.empty()) {
+        UserInput input;
+        input.text = resolved.initial_user_message;
+        maybe_start_auto_title(id, input);
+        if (auto* active = lookup(id)) {
+            if (active->loop) active->loop->submit(input);
+        }
     }
     LOG_INFO("[registry] created session " + id);
     return id;
@@ -625,11 +715,6 @@ SessionRegistry::make_entry_locked(const std::string& id,
     // ToolContext::ask_user_questions 回调注入(set_ask_question_prompter)。
     entry->ask_prompter = std::make_unique<AskUserQuestionPrompter>(entry->loop->events());
     entry->loop->set_ask_question_prompter(entry->ask_prompter.get());
-
-    // 可选 auto_start: 立刻 submit initial_user_message
-    if (opts.auto_start && !opts.initial_user_message.empty()) {
-        entry->loop->submit(opts.initial_user_message);
-    }
 
     return entry;
 }
@@ -824,6 +909,51 @@ bool SessionRegistry::set_permission_mode(const std::string& id, PermissionMode 
     return true;
 }
 
+void SessionRegistry::maybe_start_auto_title(const std::string& id, const UserInput& input) {
+    if (!deps_.config || !deps_.config->session_title.enabled) return;
+    std::string text = visible_title_input(input);
+    if (text.empty()) return;
+
+    std::optional<ModelProfile> profile;
+    std::string session_id;
+    const AppConfig* cfg = deps_.config;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = entries_.find(id);
+        if (it == entries_.end() || !it->second || !it->second->sm) return;
+        auto& entry = *it->second;
+        profile = title_profile_for_entry(deps_, entry);
+        if (!profile.has_value()) return;
+        if (!entry.sm->mark_auto_title_generation_started()) return;
+        session_id = entry.id;
+    }
+
+    std::thread worker([this, cfg, profile = std::move(*profile),
+                        session_id, text = std::move(text)]() mutable {
+        try {
+            auto provider = create_title_provider(std::move(profile), *cfg);
+            if (!provider) return;
+            auto title = generate_session_title(
+                *provider,
+                text,
+                cfg->session_title.max_input_bytes);
+            if (!title.has_value() || title->empty()) return;
+            SessionEntry* entry = lookup(session_id);
+            if (!entry || !entry->sm) return;
+            if (entry->sm->try_set_generated_session_title(*title)) {
+                emit_session_title_updated(*entry);
+            }
+        } catch (const std::exception& e) {
+            LOG_WARN("[registry] auto session title generation failed: " +
+                     std::string(e.what()));
+        } catch (...) {
+            LOG_WARN("[registry] auto session title generation failed");
+        }
+    });
+    std::lock_guard<std::mutex> lk(title_threads_mu_);
+    title_threads_.push_back(std::move(worker));
+}
+
 PermissionMode SessionRegistry::default_permission_mode() const {
     if (!deps_.template_permissions) return PermissionMode::Default;
     return deps_.template_permissions->mode();
@@ -958,6 +1088,7 @@ std::vector<SessionInfo> SessionRegistry::list_active() const {
             // 拿:这里**可选**调 load_session_meta 走磁盘读,有 IO 成本。
             // v1 不读磁盘(list_active 是热路径),只填 id + active + title。
             info.title = entry->sm->current_title();
+            info.title_source = entry->sm->current_title_source();
             info.turn_count = entry->sm->current_turn_count();
             info.last_token_usage = entry->sm->current_last_token_usage();
             info.session_token_usage = entry->sm->current_session_token_usage();

@@ -29,6 +29,11 @@ import { Toaster, toast } from './components/Toast.jsx';
 import { SlashCommandsProvider } from './components/SlashCommandsContext.jsx';
 import { FramelessResizeHandles } from './components/FramelessResizeHandles.jsx';
 import { GlobalFindOverlay } from './components/GlobalFindOverlay.jsx';
+import { ConsoleDock } from './components/ConsoleDock.jsx';
+import {
+  CONSOLE_DOCK_DEFAULT_HEIGHT,
+  clampDockHeight,
+} from './lib/consoleDock.js';
 import {
   DEFAULT_SINGLE_LAYOUT,
   LEGACY_DEFAULT_SINGLE_LAYOUT,
@@ -39,6 +44,15 @@ import {
 } from './lib/singleLayout.js';
 
 const SINGLE_LAYOUT_STORAGE_KEY = 'acecode.singleLayoutWidths.v1';
+
+// 控制台停靠区偏好(add-console-dock):开关 + 高度跨刷新持久化。
+const CONSOLE_DOCK_STORAGE_KEY = 'acecode.consoleDock.v1';
+const DEFAULT_CONSOLE_DOCK = { open: false, height: CONSOLE_DOCK_DEFAULT_HEIGHT };
+function validateConsoleDock(value) {
+  return !!value && typeof value === 'object'
+    && typeof value.open === 'boolean'
+    && Number.isFinite(value.height);
+}
 
 function homeRefFromWorkspace(workspace, fallbackRef, health) {
   const source = workspace && typeof workspace === 'object' ? workspace : {};
@@ -75,6 +89,8 @@ export function App() {
     SINGLE_LAYOUT_STORAGE_KEY, DEFAULT_SINGLE_LAYOUT, validateLayoutWidths);
   const [uiPrefs, setUiPrefs] = usePreference(
     UI_PREFS_STORAGE_KEY, DEFAULT_UI_PREFS, validateUiPrefs);
+  const [consoleDock, setConsoleDock] = usePreference(
+    CONSOLE_DOCK_STORAGE_KEY, DEFAULT_CONSOLE_DOCK, validateConsoleDock);
   // grid4/grid9 入口暂时隐藏:主界面固定单会话,避免旧 localStorage 把用户卡在未完善视图。
   const view = 'single';
   const sidePanelCollapsed = uiPrefs.sidePanelCollapsed;
@@ -237,6 +253,28 @@ export function App() {
     () => setSearchOpen((o) => !o),
     [],
   );
+
+  // Ctrl+` toggle 控制台(终端聚焦时 xterm 的 customKeyEventHandler 放行该
+  // 组合,事件照常冒泡到 window)。后端 console 不可用时快捷键惰化。
+  const consoleAvailable = !!health?.console?.available;
+  const toggleConsoleDock = useCallback(() => {
+    if (!consoleAvailable) return;
+    setConsoleDock((prev) => ({ ...prev, open: !prev.open }));
+  }, [consoleAvailable, setConsoleDock]);
+  useGlobalShortcut(
+    (e) => e.key === '`' && e.ctrlKey && !e.altKey && !e.metaKey,
+    toggleConsoleDock,
+    [toggleConsoleDock],
+  );
+  const setConsoleDockHeight = useCallback((next) => {
+    setConsoleDock((prev) => ({
+      ...prev,
+      height: clampDockHeight(next, window.innerHeight),
+    }));
+  }, [setConsoleDock]);
+  const setConsoleDockOpen = useCallback((open) => {
+    setConsoleDock((prev) => ({ ...prev, open: !!open }));
+  }, [setConsoleDock]);
 
   const handleSelectSession = useCallback(async (session) => {
     if (!session?.id) return;
@@ -510,6 +548,9 @@ export function App() {
         onSettings={() => openSettingsSection('general')}
         onNewSession={() => openHomeForWorkspace()}
         onOpenSearch={() => setSearchOpen(true)}
+        onToggleConsole={toggleConsoleDock}
+        consoleAvailable={consoleAvailable}
+        consoleOpen={consoleDock.open}
         sidebarCollapsed={sidebarCollapsed}
         onToggleSidebar={toggleProjectSidebar}
         onGoBack={goBackActiveRef}
@@ -546,30 +587,41 @@ export function App() {
         )}
         <div
           className={[
-            'flex-1 flex overflow-hidden transition-all duration-200',
+            'flex-1 flex flex-col overflow-hidden transition-all duration-200',
             'opacity-100 scale-100',
           ].join(' ')}
         >
-          {view === 'single' && (
-            <ChatView
-              sessionRef={activeRef}
-              onSessionPromoted={navigateToRef}
-              onCommandWorkspaceChange={setCommandWorkspaceHash}
-              health={health}
-              showSidePanel
-              sidePanelWidth={singleLayout.sidePanel}
-              onSidePanelResize={setSidePanelWidth}
-              previewPanelWidth={singleLayout.previewPanel}
-              onPreviewPanelResize={setPreviewPanelWidth}
-              onPreviewPanelVisibleChange={setPreviewPanelVisible}
-              sidePanelCollapsed={sidePanelCollapsed}
-              onToggleSidePanel={toggleSidePanel}
-              sidePanelMaximized={sidePanelMaximized}
-              onToggleSidePanelMaximized={toggleSidePanelMaximized}
-              showAceCodeAvatar={showAceCodeAvatar}
-              questionRequest={visibleQuestionReq}
-              onQuestionResolve={resolveVisibleQuestion}
-              onPermissionModeChanged={handlePermissionModeChanged}
+          <div className="flex-1 flex overflow-hidden min-h-0">
+            {view === 'single' && (
+              <ChatView
+                sessionRef={activeRef}
+                onSessionPromoted={navigateToRef}
+                onCommandWorkspaceChange={setCommandWorkspaceHash}
+                health={health}
+                showSidePanel
+                sidePanelWidth={singleLayout.sidePanel}
+                onSidePanelResize={setSidePanelWidth}
+                previewPanelWidth={singleLayout.previewPanel}
+                onPreviewPanelResize={setPreviewPanelWidth}
+                onPreviewPanelVisibleChange={setPreviewPanelVisible}
+                sidePanelCollapsed={sidePanelCollapsed}
+                onToggleSidePanel={toggleSidePanel}
+                sidePanelMaximized={sidePanelMaximized}
+                onToggleSidePanelMaximized={toggleSidePanelMaximized}
+                showAceCodeAvatar={showAceCodeAvatar}
+                questionRequest={visibleQuestionReq}
+                onQuestionResolve={resolveVisibleQuestion}
+                onPermissionModeChanged={handlePermissionModeChanged}
+              />
+            )}
+          </div>
+          {consoleAvailable && (
+            <ConsoleDock
+              open={consoleDock.open}
+              height={consoleDock.height}
+              onHeightChange={setConsoleDockHeight}
+              onToggle={setConsoleDockOpen}
+              consoleInfo={health?.console}
             />
           )}
         </div>

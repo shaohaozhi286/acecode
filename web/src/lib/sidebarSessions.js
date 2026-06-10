@@ -4,6 +4,15 @@ function sessionId(session) {
   return String(session?.id || session?.session_id || session?.sessionId || '').trim();
 }
 
+function sessionWorkspace(session) {
+  return String(session?.workspace_hash || session?.workspaceHash || '').trim();
+}
+
+function sessionKey(session) {
+  const id = sessionId(session);
+  return id ? `${sessionWorkspace(session)}\u0000${id}` : '';
+}
+
 function sessionTime(session) {
   const s = session || {};
   const updated = Date.parse(s.updated_at || s.updatedAt || '');
@@ -11,6 +20,28 @@ function sessionTime(session) {
   const created = Date.parse(s.created_at || s.createdAt || '');
   if (Number.isFinite(created)) return created;
   return 0;
+}
+
+function numericCounter(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+function contentCounter(session, snakeName, camelName) {
+  const s = session || {};
+  return numericCounter(s[snakeName] ?? s[camelName]);
+}
+
+function sessionContentChanged(previous, next) {
+  const prevMessages = contentCounter(previous, 'message_count', 'messageCount');
+  const nextMessages = contentCounter(next, 'message_count', 'messageCount');
+  if (prevMessages != null && nextMessages != null && prevMessages !== nextMessages) return true;
+
+  const prevTurns = contentCounter(previous, 'turn_count', 'turnCount');
+  const nextTurns = contentCounter(next, 'turn_count', 'turnCount');
+  if (prevTurns != null && nextTurns != null && prevTurns !== nextTurns) return true;
+
+  return false;
 }
 
 export function sidebarSessionProjection(sessions = [], expanded = false, limit = SIDEBAR_SESSION_COLLAPSE_LIMIT) {
@@ -37,17 +68,65 @@ export function sortSidebarSessionsNewestFirst(sessions = []) {
     .map((item) => item.session);
 }
 
+export function reconcileSidebarSessions(previousSessions = [], incomingSessions = []) {
+  const previous = Array.isArray(previousSessions) ? previousSessions : [];
+  const incoming = Array.isArray(incomingSessions) ? incomingSessions : [];
+  if (previous.length === 0) return sortSidebarSessionsNewestFirst(incoming);
+
+  const previousByKey = new Map();
+  for (const session of previous) {
+    const key = sessionKey(session);
+    if (key && !previousByKey.has(key)) previousByKey.set(key, session);
+  }
+
+  const incomingByKey = new Map();
+  for (const session of incoming) {
+    const key = sessionKey(session);
+    if (key) incomingByKey.set(key, session);
+  }
+
+  const promoted = new Set();
+  const top = [];
+  for (const session of sortSidebarSessionsNewestFirst(incoming)) {
+    const key = sessionKey(session);
+    if (!key || promoted.has(key)) continue;
+    const previousSession = previousByKey.get(key);
+    if (!previousSession || sessionContentChanged(previousSession, session)) {
+      promoted.add(key);
+      top.push(session);
+    }
+  }
+
+  const stable = [];
+  const emitted = new Set(promoted);
+  for (const session of previous) {
+    const key = sessionKey(session);
+    if (!key || emitted.has(key)) continue;
+    const next = incomingByKey.get(key);
+    if (!next) continue;
+    emitted.add(key);
+    stable.push(next);
+  }
+
+  return [...top, ...stable];
+}
+
 export function upsertSidebarSession(sessions = [], nextSession = null) {
   const id = sessionId(nextSession);
   if (!id) return Array.isArray(sessions) ? sessions : [];
 
   const list = Array.isArray(sessions) ? sessions : [];
-  let replaced = false;
-  const merged = list.map((session) => {
-    if (sessionId(session) !== id) return session;
-    replaced = true;
-    return { ...session, ...nextSession, id };
-  });
-  if (!replaced) merged.push({ ...nextSession, id });
-  return sortSidebarSessionsNewestFirst(merged);
+  const nextKey = sessionKey(nextSession);
+  const existingIndex = list.findIndex((session) => sessionKey(session) === nextKey);
+  if (existingIndex < 0) return sortSidebarSessionsNewestFirst([...list, { ...nextSession, id }]);
+
+  const existing = list[existingIndex];
+  const merged = { ...existing, ...nextSession, id };
+  const remaining = list.filter((_, index) => index !== existingIndex);
+  if (sessionContentChanged(existing, merged)) return [merged, ...remaining];
+  return [
+    ...list.slice(0, existingIndex),
+    merged,
+    ...list.slice(existingIndex + 1),
+  ];
 }

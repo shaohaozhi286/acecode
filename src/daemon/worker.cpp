@@ -1,6 +1,7 @@
 #include "worker.hpp"
 
 #include "../desktop/folder_picker.hpp"
+#include "../desktop/open_in_explorer.hpp"
 #include "../desktop/workspace_registry.hpp"
 #include "guid.hpp"
 #include "heartbeat.hpp"
@@ -40,6 +41,7 @@
 #include "../utils/token.hpp"
 #include "../utils/utf8_path.hpp"
 #include "../web/auth.hpp"
+#include "../web/pty/pty_session_registry.hpp"
 #include "../web/server.hpp"
 
 #include <atomic>
@@ -389,6 +391,14 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     acecode::SessionRegistry registry(std::move(reg_deps));
     acecode::LocalSessionClient client(registry);
 
+    // 控制台 PTY 注册表(add-console-dock):启动期探测一次 backend,
+    // 析构时 stop_all 杀掉全部 shell(栈对象,server.run() 返回后回收)。
+    acecode::PtySessionRegistry pty_registry(
+        acecode::detect_pty_backend(), cwd, cfg_mut.console.shell);
+    LOG_INFO(std::string("[daemon] console backend=") +
+             acecode::pty_backend_kind_name(pty_registry.backend()) +
+             " shell=" + pty_registry.shell());
+
     acecode::web::WebServerDeps web_deps;
     web_deps.web_cfg            = &cfg_mut.web;   // 含 port_override 后的 effective port
     web_deps.daemon_cfg         = &cfg_mut.daemon;
@@ -410,11 +420,25 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
         web_deps.native_folder_picker = [] {
             return acecode::desktop::pick_folder(nullptr);
         };
+        // webapp 兼容模式右键菜单的「在资源管理器中打开」。允许范围 = 已注册
+        // workspace + 本 daemon 的 cwd(兜底覆盖 registry 为空的 onboarding 场景)。
+        web_deps.open_in_explorer =
+            [&workspace_registry, cwd](const std::string& path) -> std::optional<std::string> {
+            std::vector<std::string> roots;
+            for (const auto& m : workspace_registry.list()) {
+                if (!m.cwd.empty()) roots.push_back(m.cwd);
+            }
+            roots = acecode::desktop::append_allowed_open_root(std::move(roots), cwd);
+            auto result = acecode::desktop::open_directory_in_file_manager(path, roots);
+            if (result.ok) return std::nullopt;
+            return result.error.empty() ? std::string("failed to open directory") : result.error;
+        };
     }
     web_deps.skill_registry     = &skill_registry;
     web_deps.provider           = &provider;
     web_deps.provider_mu        = &provider_mu;
     web_deps.dangerous          = opts.dangerous;
+    web_deps.pty_registry       = &pty_registry;
 
     acecode::web::WebServer server(std::move(web_deps));
 

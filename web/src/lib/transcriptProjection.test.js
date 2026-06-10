@@ -127,8 +127,27 @@ run('连续工具在 assistant 文本前折叠成一个 activity_summary', () =>
   assert.match(projected[1].title, /已创建 1 个文件/);
   assert.match(projected[1].title, /已编辑 1 个文件/);
   assert.match(projected[1].title, /已运行 1 条命令/);
-  assert.match(projected[1].title, /调用 3 个工具/);
+  assert.match(projected[1].title, /调用 1 个工具/);
   assert.equal(projected[2].content, 'done');
+});
+
+run('文件工具摘要不重复计入调用工具数量', () => {
+  const title = __test__.summarizeToolItems([
+    tool(2, { verb: 'Read', object: 'a.md', name: 'file_read' }),
+    tool(3, { verb: 'Read', object: 'b.md', name: 'file_read' }),
+    tool(4, { verb: 'Edited', object: 'c.md', name: 'file_edit' }),
+  ]);
+
+  assert.equal(title, '已编辑 1 个文件，读取 2 个文件');
+  assert.doesNotMatch(title, /调用/);
+});
+
+run('非文件工具不会仅因 Read 摘要词被当成文件读取', () => {
+  const title = __test__.summarizeToolItems([
+    tool(2, { verb: 'Read', object: 'needle', name: 'grep' }),
+  ]);
+
+  assert.equal(title, '调用 1 个工具');
 });
 
 run('折叠活动摘要使用持久 ISO timestamp', () => {
@@ -363,7 +382,7 @@ run('流式遇到 assistant 文字时立刻合并前面的连续工具', () => {
 
   assert.deepEqual(projected.map((item) => item.kind), ['msg', 'activity_summary', 'msg']);
   assert.equal(projected[1].mode, 'tools');
-  assert.equal(projected[1].title, '已创建 1 个文件，读取 2 个文件，调用 3 个工具');
+  assert.equal(projected[1].title, '已创建 1 个文件，读取 2 个文件');
   assert.deepEqual(projected[1].coveredItemIds, [2, 3, 4]);
   assert.equal(projected[2].content, 'I found the files');
 });
@@ -381,7 +400,7 @@ run('流式工具之间的空白 assistant 占位不会拆分工具摘要', () =
 
   assert.deepEqual(projected.map((item) => item.kind), ['msg', 'activity_summary', 'msg']);
   assert.equal(projected[1].mode, 'tools');
-  assert.equal(projected[1].title, '已创建 1 个文件，读取 2 个文件，调用 3 个工具');
+  assert.equal(projected[1].title, '已创建 1 个文件，读取 2 个文件');
   assert.deepEqual(projected[1].coveredItemIds, [2, 3, 4, 5, 6]);
   assert.equal(projected[2].content, 'Visible answer');
 });
@@ -506,9 +525,9 @@ run('大折叠展开内容保留内部工具小折叠层级', () => {
     processed.detailItems.map((item) => [item.kind, item.mode || item.role, item.title || item.content]),
     [
       ['msg', 'assistant', 'I will inspect first'],
-      ['activity_summary', 'tools', '读取 2 个文件，调用 2 个工具'],
+      ['activity_summary', 'tools', '读取 2 个文件'],
       ['msg', 'assistant', 'I found the files'],
-      ['activity_summary', 'tools', '已创建 1 个文件，调用 1 个工具'],
+      ['activity_summary', 'tools', '已创建 1 个文件'],
     ],
   );
   assert.deepEqual(processed.detailItems[1].coveredItemIds, [3, 4]);

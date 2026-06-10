@@ -27,6 +27,7 @@
 
 namespace acecode {
 class LlmProvider;
+class PtySessionRegistry;
 class SessionClient;
 class SessionRegistry;
 class SkillRegistry;
@@ -66,8 +67,15 @@ struct WebServerDeps {
     std::mutex*                    provider_mu = nullptr;
     bool                       native_folder_picker_enabled = false;
     std::function<std::optional<std::string>()> native_folder_picker;
+    // POST /api/open-in-explorer 的执行回调:输入 UTF-8 绝对路径,成功返回
+    // std::nullopt,失败返回错误信息。null = 端点 501(与 native_folder_picker
+    // 同款门控,仅 desktop 壳启动的 daemon 填入;webapp 兼容模式的右键菜单依赖它)。
+    std::function<std::optional<std::string>(const std::string&)> open_in_explorer;
     std::function<bool(std::string*)> start_update_command;
     bool                       dangerous = false;
+    // Web 控制台 PTY 会话注册表(add-console-dock)。null = 控制台不可用,
+    // /api/health 报 console.available=false,PTY 路由 404。
+    PtySessionRegistry*        pty_registry = nullptr;
 };
 
 class WebServer {

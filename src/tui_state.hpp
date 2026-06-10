@@ -10,6 +10,7 @@
 #include "session/todo_state.hpp"
 
 #include <string>
+#include <string_view>
 #include <vector>
 #include <deque>
 #include <map>
@@ -32,6 +33,10 @@ enum class InputMode {
     Normal,
     Shell,
 };
+
+inline bool is_shell_mode_trigger_character(std::string_view character) {
+    return character == "!" || character == "\xEF\xBC\x81";
+}
 
 // Add the leading mode character back when persisting an entry to input_history
 // so a single history list can round-trip both modes.

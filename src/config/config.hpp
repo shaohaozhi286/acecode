@@ -17,6 +17,10 @@ struct OpenAiConfig {
     std::string api_key;
     std::string model = "local-model";
     int stream_timeout_ms = kDefaultStreamTimeoutMs;
+    // Legacy/global OpenAI-compatible request header templates. Named saved
+    // model entries should prefer ModelProfile::request_headers; provider
+    // construction uses this map as a fallback when an OpenAI entry has none.
+    std::map<std::string, std::string> request_headers;
     // Optional provider id from the bundled models.dev registry (e.g. "anthropic",
     // "openrouter"). Lets resolve_model_context_window() and other catalog-aware
     // call sites pick the correct provider entry even when base_url is a proxy.
@@ -221,6 +225,21 @@ struct DesktopConfig {
     bool close_to_tray = true;
 };
 
+// Web 控制台(ConsoleDock)配置。见 openspec/changes/add-console-dock。
+struct ConsoleConfig {
+    // 终端 shell 覆盖。空 = 平台默认(Windows: %COMSPEC% 即 cmd;POSIX: $SHELL)。
+    // 例:"pwsh" / "powershell" / "/usr/bin/fish"。
+    std::string shell;
+};
+
+struct SessionTitleConfig {
+    bool enabled = true;
+    // Empty = use the current session model. Non-empty = saved_models.name.
+    std::string model_name;
+    int max_input_bytes = 1000;
+    int timeout_ms = 15000;
+};
+
 struct NetworkConfig {
     // "auto"   = Windows: WinHTTP-IE → registry → env → direct;
     //            POSIX: env (HTTPS_PROXY/HTTP_PROXY/ALL_PROXY/NO_PROXY).
@@ -265,6 +284,8 @@ struct AppConfig {
     UpgradeConfig upgrade;                       // explicit self-upgrade command config
     TuiConfig tui;                               // 终端渲染策略(legacy fallback 等)
     DesktopConfig desktop;                       // desktop shell 配置(系统通知等)
+    ConsoleConfig console;                       // Web 控制台(PTY shell 覆盖)
+    SessionTitleConfig session_title;            // hidden auto session title generation
 
     // --- model profiles (openspec/changes/model-profiles) ---
     // 用户维护的命名模型列表。

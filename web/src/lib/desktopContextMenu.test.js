@@ -102,6 +102,7 @@ test('未置顶会话目标显示会话动作', () => {
     sessionTarget: { sessionId: 's1', title: 'T', pinned: false, canArchive: true },
   })), [
     DESKTOP_CONTEXT_ACTIONS.OPEN_SESSION,
+    DESKTOP_CONTEXT_ACTIONS.RENAME_SESSION,
     DESKTOP_CONTEXT_ACTIONS.COPY_SESSION_TITLE,
     DESKTOP_CONTEXT_ACTIONS.COPY_SESSION_ID,
     DESKTOP_CONTEXT_ACTIONS.PIN_SESSION,

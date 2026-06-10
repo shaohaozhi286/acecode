@@ -5,6 +5,7 @@ import {
   pinSessionId,
   pinnedIdSet,
   pinnedSessionsForList,
+  reorderPinnedSessionId,
   unpinSessionId,
 } from './pinnedSessions.js';
 
@@ -29,6 +30,17 @@ test('pinSessionId 将会话移动到置顶列表顶部', () => {
 
 test('unpinSessionId 从置顶列表移除会话', () => {
   assert.deepEqual(unpinSessionId(['a', 'b', 'c'], 'b'), ['a', 'c']);
+});
+
+test('reorderPinnedSessionId 在目标前后移动会话', () => {
+  assert.deepEqual(reorderPinnedSessionId(['a', 'b', 'c'], 'c', 'a', 'before'), ['c', 'a', 'b']);
+  assert.deepEqual(reorderPinnedSessionId(['a', 'b', 'c'], 'a', 'c', 'after'), ['b', 'c', 'a']);
+});
+
+test('reorderPinnedSessionId 对无效拖拽保持原顺序', () => {
+  assert.deepEqual(reorderPinnedSessionId(['a', 'b', 'c'], 'missing', 'a'), ['a', 'b', 'c']);
+  assert.deepEqual(reorderPinnedSessionId(['a', 'b', 'c'], 'a', 'missing'), ['a', 'b', 'c']);
+  assert.deepEqual(reorderPinnedSessionId(['a', 'b', 'c'], 'a', 'a'), ['a', 'b', 'c']);
 });
 
 test('pinnedSessionsForList 按 workspace pin 顺序投影可见会话', () => {

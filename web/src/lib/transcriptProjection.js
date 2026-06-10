@@ -176,12 +176,16 @@ function countTranscriptOnlyTools(items) {
   return items.filter((item) => isToolTranscriptMessage(item)).length;
 }
 
+function isFileToolName(name) {
+  return name === 'file_read' || name === 'file_edit' || name === 'file_write';
+}
+
 function summarizeToolItems(items) {
   const created = new Set();
   const edited = new Set();
   const read = new Set();
   let commands = 0;
-  let totalTools = 0;
+  let nonFileTools = 0;
 
   items.forEach((item, index) => {
     if (!isToolItem(item) || isTaskCompleteTool(item)) return;
@@ -189,14 +193,18 @@ function summarizeToolItems(items) {
     const verb = normalizedVerb(tool);
     const name = normalizedToolName(tool);
     const object = summaryObject(tool, String(item.id || index));
-    totalTools += 1;
+    const mayDescribeFile = !name || isFileToolName(name);
+    let countedAsFile = false;
 
-    if (verb === 'created') {
+    if (mayDescribeFile && verb === 'created') {
       countObject(created, 'created', index, object);
-    } else if (verb === 'wrote' || verb === 'edited' || verb === 'edit') {
+      countedAsFile = true;
+    } else if (mayDescribeFile && (verb === 'wrote' || verb === 'edited' || verb === 'edit')) {
       countObject(edited, 'edited', index, object);
-    } else if (verb === 'read') {
+      countedAsFile = true;
+    } else if (mayDescribeFile && verb === 'read') {
       countObject(read, 'read', index, object);
+      countedAsFile = true;
     } else if (verb === 'ran' || name === 'bash') {
       commands += 1;
     } else if (name === 'file_write') {
@@ -206,15 +214,22 @@ function summarizeToolItems(items) {
       } else {
         countObject(edited, 'edited', index, object);
       }
+      countedAsFile = true;
     } else if (name === 'file_edit') {
       countObject(edited, 'edited', index, object);
+      countedAsFile = true;
     } else if (name === 'file_read') {
       countObject(read, 'read', index, object);
+      countedAsFile = true;
+    }
+
+    if (!countedAsFile && !isFileToolName(name)) {
+      nonFileTools += 1;
     }
   });
 
-  if (totalTools === 0) {
-    totalTools = countTranscriptOnlyTools(items);
+  if (nonFileTools === 0 && created.size === 0 && edited.size === 0 && read.size === 0 && commands === 0) {
+    nonFileTools = countTranscriptOnlyTools(items);
   }
 
   const parts = [];
@@ -222,7 +237,7 @@ function summarizeToolItems(items) {
   if (edited.size > 0) parts.push(`已编辑 ${edited.size} 个文件`);
   if (read.size > 0) parts.push(`读取 ${read.size} 个文件`);
   if (commands > 0) parts.push(`已运行 ${commands} 条命令`);
-  if (totalTools > 0) parts.push(`调用 ${totalTools} 个工具`);
+  if (nonFileTools > 0) parts.push(`调用 ${nonFileTools} 个工具`);
   return parts.length > 0 ? parts.join('，') : '已调用工具';
 }
 

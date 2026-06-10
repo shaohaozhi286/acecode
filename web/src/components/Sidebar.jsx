@@ -20,6 +20,7 @@ import {
   normalizePinnedIds,
   pinSessionId,
   pinnedSessionsForList,
+  reorderPinnedSessionId,
   unpinSessionId,
 } from '../lib/pinnedSessions.js';
 import { sessionDisplayTitle, withNewSessionDisplayTitles } from '../lib/sessionTitle.js';
@@ -40,14 +41,66 @@ import {
   workspaceHasUnread,
 } from '../lib/sessionStatus.js';
 import {
+  reconcileSidebarSessions,
   sidebarSessionProjection,
-  sortSidebarSessionsNewestFirst,
   upsertSidebarSession,
 } from '../lib/sidebarSessions.js';
 import { toast } from './Toast.jsx';
 import { VsIcon } from './Icon.jsx';
 
 const CUSTOM_SECTION_STORAGE_KEY = 'acecode.sidebarCustomSectionExpanded.v1';
+const PINNED_DRAG_START_PX = 5;
+const PINNED_DRAG_EDGE_SCROLL_PX = 34;
+const PINNED_DRAG_EDGE_SCROLL_STEP = 16;
+
+function pinnedSessionKey(workspaceHash, sessionId) {
+  const ws = String(workspaceHash || '');
+  const id = String(sessionId || '');
+  return ws && id ? `${ws}\u0000${id}` : '';
+}
+
+function sameStringArray(a = [], b = []) {
+  if (a.length !== b.length) return false;
+  return a.every((value, index) => value === b[index]);
+}
+
+function pinnedDropTargetForPointer(clientY, workspaceHash) {
+  if (typeof document === 'undefined') return null;
+  const rows = Array.from(document.querySelectorAll('[data-sidebar-pinned-key]'))
+    .filter((el) => el.dataset.sidebarPinnedWorkspace === workspaceHash);
+  if (rows.length === 0) return null;
+
+  const first = rows[0];
+  const last = rows[rows.length - 1];
+  const firstRect = first.getBoundingClientRect();
+  const lastRect = last.getBoundingClientRect();
+  if (clientY <= firstRect.top) {
+    return {
+      targetId: first.dataset.sidebarPinnedId || '',
+      targetKey: first.dataset.sidebarPinnedKey || '',
+      placement: 'before',
+    };
+  }
+  if (clientY >= lastRect.bottom) {
+    return {
+      targetId: last.dataset.sidebarPinnedId || '',
+      targetKey: last.dataset.sidebarPinnedKey || '',
+      placement: 'after',
+    };
+  }
+
+  for (const row of rows) {
+    const rect = row.getBoundingClientRect();
+    if (clientY >= rect.top && clientY <= rect.bottom) {
+      return {
+        targetId: row.dataset.sidebarPinnedId || '',
+        targetKey: row.dataset.sidebarPinnedKey || '',
+        placement: clientY < rect.top + rect.height / 2 ? 'before' : 'after',
+      };
+    }
+  }
+  return null;
+}
 
 function validateBooleanPreference(value) {
   return typeof value === 'boolean';
@@ -206,11 +259,51 @@ function CustomSidebarSection({ activeRef, activeWorkspaceHash, onOpenSettingsSe
   );
 }
 
-function SessionRow({ s, active, pinned = false, pendingQuestion = false, onSelect, onTogglePin, onArchive }) {
+function SessionRow({
+  s,
+  active,
+  pinned = false,
+  pendingQuestion = false,
+  onSelect,
+  onTogglePin,
+  onArchive,
+  onRename,
+  onPinnedPointerDown,
+  dragging = false,
+  dropPlacement = '',
+}) {
   const attention = s.attention_state || s.read_state || 'read';
   const meta = attentionMeta(attention);
   const workspaceHash = s.workspace_hash || s.workspaceHash || '';
+  const rowKey = pinned ? pinnedSessionKey(workspaceHash, s.id) : '';
   const title = sessionDisplayTitle(s, s.name || '');
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(title);
+  const committingRef = useRef(false);
+
+  useEffect(() => {
+    if (!editing) setDraft(title);
+  }, [editing, title]);
+
+  const commitRename = async () => {
+    if (committingRef.current) return;
+    committingRef.current = true;
+    setEditing(false);
+    const nextTitle = draft.trim();
+    if (nextTitle === (s.title || '')) {
+      setDraft(title);
+      committingRef.current = false;
+      return;
+    }
+    try {
+      await onRename?.(s, nextTitle);
+    } catch (e) {
+      toast({ kind: 'err', text: '重命名失败:' + (e.message || '') });
+      setDraft(title);
+    } finally {
+      committingRef.current = false;
+    }
+  };
 
   useEffect(() => {
     const handler = (event) => {
@@ -221,6 +314,10 @@ function SessionRow({ s, active, pinned = false, pendingQuestion = false, onSele
       if (action === DESKTOP_CONTEXT_ACTIONS.OPEN_SESSION) {
         detail.handled = true;
         onSelect?.(s);
+      } else if (action === DESKTOP_CONTEXT_ACTIONS.RENAME_SESSION) {
+        detail.handled = true;
+        setDraft(title);
+        setEditing(true);
       } else if (action === DESKTOP_CONTEXT_ACTIONS.ARCHIVE_SESSION) {
         detail.handled = true;
         onArchive?.(s);
@@ -228,7 +325,7 @@ function SessionRow({ s, active, pinned = false, pendingQuestion = false, onSele
     };
     window.addEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
     return () => window.removeEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
-  }, [onArchive, onSelect, s, workspaceHash]);
+  }, [onArchive, onSelect, s, title, workspaceHash]);
 
   return (
     <div
@@ -237,16 +334,25 @@ function SessionRow({ s, active, pinned = false, pendingQuestion = false, onSele
       data-desktop-session-pinned={pinned ? 'true' : 'false'}
       data-desktop-session-title={title || undefined}
       data-desktop-session-archive="true"
+      data-sidebar-pinned-key={rowKey || undefined}
+      data-sidebar-pinned-id={pinned ? s.id || undefined : undefined}
+      data-sidebar-pinned-workspace={pinned ? workspaceHash || undefined : undefined}
       className={clsx(
-        'group flex items-center gap-1 mx-1.5 my-px pl-1 pr-2 rounded-md text-[12px] transition',
+        'ace-sidebar-session-row group flex items-center gap-1 mx-1.5 my-px pl-1 pr-2 rounded-md text-[12px] transition',
+        pinned && 'ace-sidebar-pinned-session-row',
+        dragging && 'is-dragging',
+        dropPlacement === 'before' && 'is-drop-before',
+        dropPlacement === 'after' && 'is-drop-after',
         active
           ? 'bg-accent-soft/50 text-accent'
           : 'text-fg hover:bg-surface-hi',
         attention === 'unread' && !active && 'font-semibold',
       )}
+      onPointerDown={pinned ? (event) => onPinnedPointerDown?.(event, s, title) : undefined}
     >
       <button
         type="button"
+        data-sidebar-row-control="true"
         onClick={(e) => {
           e.preventDefault();
           e.stopPropagation();
@@ -268,29 +374,52 @@ function SessionRow({ s, active, pinned = false, pendingQuestion = false, onSele
       >
         <VsIcon name="pin" size={12} className="-rotate-45" />
       </button>
+      {editing ? (
+        <form
+          className="flex flex-1 items-center gap-2 min-w-0 py-[3px]"
+          onSubmit={(e) => { e.preventDefault(); commitRename(); }}
+        >
+          <input
+            autoFocus
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onBlur={commitRename}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') {
+                e.preventDefault();
+                setEditing(false);
+                setDraft(title);
+              }
+            }}
+            className="flex-1 min-w-0 h-6 px-1 rounded border border-accent bg-surface text-[12px] outline-none"
+          />
+        </form>
+      ) : (
+        <button
+          type="button"
+          onClick={(e) => { e.preventDefault(); onSelect(s); }}
+          className="flex flex-1 items-center gap-2 min-w-0 py-[5px] bg-transparent text-left cursor-pointer"
+        >
+          {attention === 'in_progress' ? (
+            <span className="ace-session-loading shrink-0" title={meta.label} aria-label={meta.label} />
+          ) : (
+            <span className={clsx('w-1.5 h-1.5 rounded-full shrink-0', meta.dot)} title={meta.label} />
+          )}
+          <span className="flex-1 min-w-0 truncate">{title}</span>
+          {pendingQuestion && (
+            <span
+              className="shrink-0 rounded-full border border-ok-border bg-ok-bg px-2 py-[1px] text-[11px] font-medium leading-[18px] text-ok"
+              title="等待用户回复 AskUserQuestion"
+            >
+              等待回复
+            </span>
+          )}
+          <span className="text-[10px] text-fg-mute shrink-0">{relativeTime(s.updated_at || s.created_at)}</span>
+        </button>
+      )}
       <button
         type="button"
-        onClick={(e) => { e.preventDefault(); onSelect(s); }}
-        className="flex flex-1 items-center gap-2 min-w-0 py-[5px] bg-transparent text-left cursor-pointer"
-      >
-        {attention === 'in_progress' ? (
-          <span className="ace-session-loading shrink-0" title={meta.label} aria-label={meta.label} />
-        ) : (
-          <span className={clsx('w-1.5 h-1.5 rounded-full shrink-0', meta.dot)} title={meta.label} />
-        )}
-        <span className="flex-1 min-w-0 truncate">{title}</span>
-        {pendingQuestion && (
-          <span
-            className="shrink-0 rounded-full border border-ok-border bg-ok-bg px-2 py-[1px] text-[11px] font-medium leading-[18px] text-ok"
-            title="等待用户回复 AskUserQuestion"
-          >
-            等待回复
-          </span>
-        )}
-        <span className="text-[10px] text-fg-mute shrink-0">{relativeTime(s.updated_at || s.created_at)}</span>
-      </button>
-      <button
-        type="button"
+        data-sidebar-row-control="true"
         onClick={(e) => {
           e.preventDefault();
           e.stopPropagation();
@@ -321,6 +450,7 @@ function WorkspaceGroup({
   onRemove,
   onTogglePin,
   onArchive,
+  onRenameSession,
   pendingQuestionSessionIds,
   sessionsLoading = false,
 }) {
@@ -456,6 +586,7 @@ function WorkspaceGroup({
                   onSelect={onSelect}
                   onTogglePin={onTogglePin}
                   onArchive={onArchive}
+                  onRename={onRenameSession}
                 />
               ))}
               {projectedSessions.collapsible && (
@@ -499,6 +630,11 @@ export function Sidebar({
   const expandedRef = useRef(new Set());
   const pinnedByWorkspaceRef = useRef(new Map());
   const retainedSessionIdsRef = useRef(new Set());
+  const sidebarScrollRef = useRef(null);
+  const pinnedDragRef = useRef(null);
+  const suppressPinnedClickRef = useRef(false);
+  const [pinnedDragState, setPinnedDragState] = useState(null);
+  const [pinnedDragGhost, setPinnedDragGhost] = useState(null);
 
   const updateExpanded = useCallback((updater) => {
     setExpanded((prev) => {
@@ -543,6 +679,177 @@ export function Sidebar({
       return next;
     });
   }, [setPinnedMap]);
+
+  const applyPinnedReorder = useCallback(async ({ workspaceHash, sourceId, targetId, placement }) => {
+    if (!workspaceHash || !sourceId || !targetId) return;
+    const previous = normalizePinnedIds(pinnedByWorkspaceRef.current.get(workspaceHash) || []);
+    const next = reorderPinnedSessionId(previous, sourceId, targetId, placement);
+    if (sameStringArray(previous, next)) return;
+
+    setPinnedWorkspaceIds(workspaceHash, next);
+    try {
+      const saved = await api.setPinnedSessions(workspaceHash, next);
+      setPinnedWorkspaceIds(workspaceHash, normalizePinnedIds(saved?.session_ids || next));
+    } catch (e) {
+      setPinnedWorkspaceIds(workspaceHash, previous);
+      toast({ kind: 'err', text: '置顶排序失败:' + (e.message || '') });
+    }
+  }, [setPinnedWorkspaceIds]);
+
+  const updatePinnedDragTarget = useCallback((clientY) => {
+    const drag = pinnedDragRef.current;
+    if (!drag) return;
+    const target = pinnedDropTargetForPointer(clientY, drag.workspaceHash);
+    if (!target) return;
+    drag.targetId = target.targetId;
+    drag.targetKey = target.targetKey;
+    drag.placement = target.placement;
+    setPinnedDragState({
+      sourceKey: drag.sourceKey,
+      targetKey: target.targetKey,
+      placement: target.placement,
+    });
+  }, []);
+
+  const updatePinnedDragScroll = useCallback((clientY) => {
+    const scrollEl = sidebarScrollRef.current;
+    if (!scrollEl) return;
+    const rect = scrollEl.getBoundingClientRect();
+    if (clientY < rect.top + PINNED_DRAG_EDGE_SCROLL_PX) {
+      scrollEl.scrollTop -= PINNED_DRAG_EDGE_SCROLL_STEP;
+    } else if (clientY > rect.bottom - PINNED_DRAG_EDGE_SCROLL_PX) {
+      scrollEl.scrollTop += PINNED_DRAG_EDGE_SCROLL_STEP;
+    }
+  }, []);
+
+  const finishPinnedDrag = useCallback((commit) => {
+    const drag = pinnedDragRef.current;
+    if (!drag) return;
+    drag.cleanup?.();
+    pinnedDragRef.current = null;
+    document.body.classList.remove('ace-sidebar-pinned-reordering');
+    setPinnedDragState(null);
+    setPinnedDragGhost(null);
+    if (drag.dragging) {
+      suppressPinnedClickRef.current = true;
+      window.setTimeout(() => {
+        suppressPinnedClickRef.current = false;
+      }, 80);
+    }
+    if (commit && drag.dragging) {
+      applyPinnedReorder({
+        workspaceHash: drag.workspaceHash,
+        sourceId: drag.sourceId,
+        targetId: drag.targetId,
+        placement: drag.placement || 'before',
+      });
+    }
+  }, [applyPinnedReorder]);
+
+  const handlePinnedPointerDown = useCallback((event, session, title) => {
+    if (event.button !== 0) return;
+    if (pinnedDragRef.current) return;
+    if (event.target?.closest?.('[data-sidebar-row-control="true"], input, textarea, select')) return;
+
+    const workspaceHash = session?.workspace_hash || session?.workspaceHash || '';
+    const sourceId = session?.id || session?.session_id || session?.sessionId || '';
+    const sourceKey = pinnedSessionKey(workspaceHash, sourceId);
+    if (!workspaceHash || !sourceId || !sourceKey) return;
+
+    finishPinnedDrag(false);
+    const pointerId = event.pointerId;
+    const pointerTarget = event.currentTarget;
+    const rect = pointerTarget.getBoundingClientRect();
+    try {
+      pointerTarget.setPointerCapture?.(pointerId);
+    } catch {
+      // Best effort; window-level listeners below still own cleanup.
+    }
+
+    const cleanup = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onCancel);
+      try {
+        pointerTarget.releasePointerCapture?.(pointerId);
+      } catch {
+        // The pointer can already be released if the row unmounted.
+      }
+    };
+
+    const beginDragIfNeeded = (moveEvent) => {
+      const drag = pinnedDragRef.current;
+      if (!drag || drag.dragging) return true;
+      const dx = moveEvent.clientX - drag.startX;
+      const dy = moveEvent.clientY - drag.startY;
+      if (Math.hypot(dx, dy) < PINNED_DRAG_START_PX) return false;
+      drag.dragging = true;
+      document.body.classList.add('ace-sidebar-pinned-reordering');
+      setPinnedDragState({
+        sourceKey: drag.sourceKey,
+        targetKey: drag.sourceKey,
+        placement: 'before',
+      });
+      return true;
+    };
+
+    function onMove(moveEvent) {
+      const drag = pinnedDragRef.current;
+      if (!drag || moveEvent.pointerId !== pointerId) return;
+      if (!beginDragIfNeeded(moveEvent)) return;
+      moveEvent.preventDefault();
+      const nextY = moveEvent.clientY - drag.offsetY;
+      setPinnedDragGhost({
+        left: drag.rect.left,
+        top: nextY,
+        width: drag.rect.width,
+        title: drag.title,
+        timeText: drag.timeText,
+      });
+      updatePinnedDragScroll(moveEvent.clientY);
+      updatePinnedDragTarget(moveEvent.clientY);
+    }
+
+    function onUp(upEvent) {
+      const drag = pinnedDragRef.current;
+      if (!drag || upEvent.pointerId !== pointerId) return;
+      if (drag.dragging) upEvent.preventDefault();
+      finishPinnedDrag(true);
+    }
+
+    function onCancel(cancelEvent) {
+      const drag = pinnedDragRef.current;
+      if (!drag || cancelEvent.pointerId !== pointerId) return;
+      finishPinnedDrag(false);
+    }
+
+    pinnedDragRef.current = {
+      workspaceHash,
+      sourceId,
+      sourceKey,
+      targetId: sourceId,
+      targetKey: sourceKey,
+      placement: 'before',
+      startX: event.clientX,
+      startY: event.clientY,
+      offsetY: event.clientY - rect.top,
+      rect,
+      title,
+      timeText: relativeTime(session.updated_at || session.created_at),
+      dragging: false,
+      cleanup,
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onCancel);
+  }, [finishPinnedDrag, updatePinnedDragScroll, updatePinnedDragTarget]);
+
+  useEffect(() => () => {
+    const drag = pinnedDragRef.current;
+    drag?.cleanup?.();
+    pinnedDragRef.current = null;
+    document.body.classList.remove('ace-sidebar-pinned-reordering');
+  }, []);
 
   const togglePinnedSession = useCallback(async (session, nextPinned) => {
     const id = session?.id || session?.sessionId || session?.session_id || '';
@@ -702,15 +1009,15 @@ export function Sidebar({
           const list = await api.listWorkspaceSessions(w.hash);
           return (Array.isArray(list) ? list : []).map((s) => ({ ...s, workspace_hash: s.workspace_hash || w.hash, cwd: s.cwd || w.cwd }));
         }));
-        const arr = sortSidebarSessionsNewestFirst(perWorkspace.flat());
-        setSessions(arr);
-        setStatusBySession((prev) => arr.reduce((map, s) => applyStatusUpdate(map, {
+        const incoming = perWorkspace.flat();
+        setSessions((prev) => reconcileSidebarSessions(prev, incoming));
+        setStatusBySession((prev) => incoming.reduce((map, s) => applyStatusUpdate(map, {
           ...s,
           session_id: s.id,
           state: s.attention_state || s.read_state,
           cursor: s.status_cursor,
         }), prev));
-        syncRetainedSessionIds(arr.filter((s) => s.active && s.id).map((s) => s.id));
+        syncRetainedSessionIds(incoming.filter((s) => s.active && s.id).map((s) => s.id));
       }
       catch { /* 鉴权失败不致命 */ }
       finally {
@@ -765,6 +1072,34 @@ export function Sidebar({
       toast({ kind: 'err', text: '归档失败:' + (e.message || '') });
     }
   }, [activeId, activeWorkspaceHash, onOpenHome, refresh, setPinnedWorkspaceIds]);
+
+  const renameSession = useCallback(async (session, title) => {
+    const id = session?.id || session?.sessionId || session?.session_id || '';
+    const workspaceHash = session?.workspace_hash || session?.workspaceHash || activeWorkspaceHash || '';
+    if (!id) return;
+
+    const updated = workspaceHash && workspaceHash !== '__local__'
+      ? await api.setSessionTitle(id, title, workspaceHash)
+      : await api.setSessionTitle(id, title);
+    const nextTitle = updated?.title ?? title;
+    const nextSource = updated?.title_source ?? (nextTitle ? 'user' : '');
+    setSessions((prev) => prev.map((item) => {
+      const itemId = item.id || item.session_id || item.sessionId;
+      const itemWorkspace = item.workspace_hash || item.workspaceHash || '';
+      if (itemId !== id) return item;
+      if (workspaceHash && itemWorkspace && itemWorkspace !== workspaceHash) return item;
+      return {
+        ...item,
+        ...updated,
+        id,
+        title: nextTitle,
+        title_source: nextSource,
+        workspace_hash: updated?.workspace_hash || workspaceHash || itemWorkspace,
+      };
+    }));
+    toast({ kind: 'ok', text: title.trim() ? '已重命名' : '已清除标题' });
+    refresh(workspaceHash).catch(() => {});
+  }, [activeWorkspaceHash, refresh]);
 
   useEffect(() => {
     refresh();
@@ -834,6 +1169,22 @@ export function Sidebar({
         setStatusBySession((prev) => applyStatusSnapshot(prev, msg.payload || {}));
       } else if (msg.type === 'session_status' || msg.type === 'mark_session_read_ack') {
         setStatusBySession((prev) => applyStatusUpdate(prev, msg.payload || {}));
+      } else if (msg.type === 'session_updated') {
+        const payload = msg.payload || {};
+        const sid = payload.session_id || msg.session_id || '';
+        if (!sid) return;
+        setSessions((prev) => prev.map((session) => {
+          if ((session.id || session.session_id || session.sessionId) !== sid) return session;
+          return {
+            ...session,
+            title: Object.prototype.hasOwnProperty.call(payload, 'title')
+              ? (payload.title || '')
+              : session.title,
+            title_source: payload.title_source || session.title_source || '',
+            workspace_hash: payload.workspace_hash || session.workspace_hash,
+            cwd: payload.cwd || session.cwd,
+          };
+        }));
       }
     };
     connection.addEventListener('message', handler);
@@ -1124,23 +1475,33 @@ export function Sidebar({
               title="添加项目"
             ><VsIcon name="folderAdd" size={15} /></button>
           </div>
-          <div className="flex-1 overflow-y-auto pb-2">
+          <div ref={sidebarScrollRef} className="flex-1 overflow-y-auto pb-2">
             {pinnedSessions.length > 0 && (
               <div className="mb-2">
                 <div className="px-4 pt-1 pb-1 text-[10px] font-semibold uppercase tracking-wider text-fg-mute">置顶</div>
                 <div className="my-1">
-                  {pinnedSessions.map((s) => (
-                    <SessionRow
-                      key={`pinned-${s.workspace_hash || ''}-${s.id}`}
-                      s={s}
-                      pinned
-                      active={s.id === activeId}
-                      pendingQuestion={sessionHasPendingQuestion(s, pendingQuestionSessionIds)}
-                      onSelect={(session) => selectSession(workspaceForSession(session), session)}
-                      onTogglePin={togglePinnedSession}
-                      onArchive={archiveSession}
-                    />
-                  ))}
+                  {pinnedSessions.map((s) => {
+                    const rowKey = pinnedSessionKey(s.workspace_hash || s.workspaceHash || '', s.id);
+                    return (
+                      <SessionRow
+                        key={`pinned-${s.workspace_hash || ''}-${s.id}`}
+                        s={s}
+                        pinned
+                        active={s.id === activeId}
+                        pendingQuestion={sessionHasPendingQuestion(s, pendingQuestionSessionIds)}
+                        dragging={pinnedDragState?.sourceKey === rowKey}
+                        dropPlacement={pinnedDragState?.targetKey === rowKey ? pinnedDragState.placement : ''}
+                        onPinnedPointerDown={handlePinnedPointerDown}
+                        onSelect={(session) => {
+                          if (suppressPinnedClickRef.current) return;
+                          selectSession(workspaceForSession(session), session);
+                        }}
+                        onTogglePin={togglePinnedSession}
+                        onArchive={archiveSession}
+                        onRename={renameSession}
+                      />
+                    );
+                  })}
                 </div>
               </div>
             )}
@@ -1166,12 +1527,27 @@ export function Sidebar({
                   onRemove={hasDesktopRemoveWorkspace() ? removeWorkspace : undefined}
                   onTogglePin={togglePinnedSession}
                   onArchive={archiveSession}
+                  onRenameSession={renameSession}
                   pendingQuestionSessionIds={pendingQuestionSessionIds}
                   sessionsLoading={sessionLoadingWorkspaces.has(ws.hash) || !sessionLoadedWorkspaces.has(ws.hash)}
                 />
               );
             })}
           </div>
+          {pinnedDragGhost && (
+            <div
+              className="ace-sidebar-pinned-drag-ghost"
+              style={{
+                left: pinnedDragGhost.left,
+                top: pinnedDragGhost.top,
+                width: pinnedDragGhost.width,
+              }}
+            >
+              <span className="w-1.5 h-1.5 rounded-full shrink-0 bg-fg-mute/45" />
+              <span className="flex-1 min-w-0 truncate">{pinnedDragGhost.title}</span>
+              <span className="text-[10px] text-fg-mute shrink-0">{pinnedDragGhost.timeText}</span>
+            </div>
+          )}
         </div>
         <CustomSidebarSection
           activeRef={activeRef}

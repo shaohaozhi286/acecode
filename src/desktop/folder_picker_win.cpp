@@ -67,6 +67,38 @@ struct DialogForegroundState {
     bool found = false;
 };
 
+// 既认标题也认窗口类:IFileDialog 的顶层窗口类固定是 #32770(通用对话框),
+// SetTitle 之后标题应当匹配,但个别 Windows 版本上标题落地有时序窗口,曾导致
+// 仅按标题精确匹配的脉冲整轮扫不到对话框(webapp 模式下对话框永远垫底)。
+// daemon 进程没有其它可见顶层窗口,pid + #32770 足够准确。
+bool is_folder_picker_window(HWND hwnd) {
+    wchar_t title[128] = {0};
+    ::GetWindowTextW(hwnd, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
+    if (std::wcscmp(title, kFolderPickerTitle) == 0) return true;
+
+    wchar_t cls[64] = {0};
+    ::GetClassNameW(hwnd, cls, static_cast<int>(sizeof(cls) / sizeof(cls[0])));
+    return std::wcscmp(cls, L"#32770") == 0;
+}
+
+// 后台进程直接 SetForegroundWindow 大概率被拒(foreground lock)。经典缓解是把
+// 当前线程的输入队列 attach 到前台线程后再调用 —— 此时系统认为调用方"参与"了
+// 前台输入,放行率显著更高(AutoHotkey / 各类 launcher 的常用组合)。失败再退回
+// 裸调用,保底仍有下方的 TOPMOST 脉冲保证 z-order 可见。
+void force_foreground(HWND hwnd) {
+    const DWORD my_tid = ::GetCurrentThreadId();
+    const DWORD fg_tid = ::GetWindowThreadProcessId(::GetForegroundWindow(), nullptr);
+    bool attached = false;
+    if (fg_tid && fg_tid != my_tid) {
+        attached = ::AttachThreadInput(my_tid, fg_tid, TRUE) != 0;
+    }
+    ::BringWindowToTop(hwnd);
+    ::SetForegroundWindow(hwnd);
+    if (attached) {
+        ::AttachThreadInput(my_tid, fg_tid, FALSE);
+    }
+}
+
 BOOL CALLBACK pulse_folder_dialog_proc(HWND hwnd, LPARAM param) {
     auto* state = reinterpret_cast<DialogForegroundState*>(param);
     if (!state || !hwnd || !::IsWindowVisible(hwnd)) return TRUE;
@@ -75,9 +107,7 @@ BOOL CALLBACK pulse_folder_dialog_proc(HWND hwnd, LPARAM param) {
     ::GetWindowThreadProcessId(hwnd, &pid);
     if (pid != state->pid) return TRUE;
 
-    wchar_t title[128] = {0};
-    ::GetWindowTextW(hwnd, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
-    if (std::wcscmp(title, kFolderPickerTitle) != 0) return TRUE;
+    if (!is_folder_picker_window(hwnd)) return TRUE;
 
     if (::IsIconic(hwnd)) {
         ::ShowWindow(hwnd, SW_RESTORE);
@@ -91,8 +121,7 @@ BOOL CALLBACK pulse_folder_dialog_proc(HWND hwnd, LPARAM param) {
     constexpr UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW;
     ::SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, flags);
     ::SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, flags);
-    ::BringWindowToTop(hwnd);
-    ::SetForegroundWindow(hwnd);
+    force_foreground(hwnd);
     state->found = true;
     return TRUE;
 }

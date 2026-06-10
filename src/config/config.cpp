@@ -1,6 +1,7 @@
 #include "config.hpp"
 
 #include "model_provider_registry.hpp"
+#include "request_headers.hpp"
 #include "../utils/constants.hpp"
 #include "../utils/logger.hpp"
 #include "../utils/paths.hpp"
@@ -118,6 +119,7 @@ ModelProfile legacy_model_profile_from_config(const AppConfig& cfg) {
             ? defaults.model
             : cfg.openai.model;
         profile.stream_timeout_ms = cfg.openai.stream_timeout_ms;
+        profile.request_headers = cfg.openai.request_headers;
         profile.models_dev_provider_id = cfg.openai.models_dev_provider_id;
         return profile;
     }
@@ -172,6 +174,18 @@ std::vector<std::string> validate_config(const AppConfig& cfg) {
     }
     if (cfg.openai.stream_timeout_ms <= 0) {
         errors.push_back("openai.stream_timeout_ms must be > 0");
+    }
+    if (cfg.session_title.max_input_bytes < 1 || cfg.session_title.max_input_bytes > 20000) {
+        errors.push_back("session_title.max_input_bytes out of range (1-20000)");
+    }
+    if (cfg.session_title.timeout_ms < 1000 || cfg.session_title.timeout_ms > 120000) {
+        errors.push_back("session_title.timeout_ms out of range (1000-120000)");
+    }
+    if (!cfg.openai.request_headers.empty()) {
+        std::string err;
+        if (!validate_request_headers(cfg.openai.request_headers, err)) {
+            errors.push_back("openai." + err);
+        }
     }
     if (cfg.project_instructions.max_depth < 1) {
         errors.push_back("project_instructions.max_depth must be >= 1");
@@ -409,6 +423,19 @@ AppConfig load_config() {
                     oj["models_dev_provider_id"].is_string()) {
                     cfg.openai.models_dev_provider_id =
                         oj["models_dev_provider_id"].get<std::string>();
+                }
+                if (oj.contains("request_headers")) {
+                    std::string err;
+                    auto parsed = parse_request_headers_json(
+                        oj["request_headers"],
+                        "openai",
+                        err);
+                    if (!parsed.has_value()) {
+                        std::cerr << "[config] fatal: " << err << std::endl;
+                        LOG_ERROR(std::string("[config] openai.request_headers parse failure: ") + err);
+                        std::exit(1);
+                    }
+                    cfg.openai.request_headers = std::move(*parsed);
                 }
             }
             if (j.contains("copilot") && j["copilot"].is_object()) {
@@ -841,6 +868,39 @@ AppConfig load_config() {
                 }
             }
 
+            // Web 控制台(add-console-dock)。目前只有 shell 覆盖一个字段。
+            if (j.contains("console")) {
+                if (!j["console"].is_object()) {
+                    LOG_WARN("[config] 'console' must be an object, ignoring");
+                } else {
+                    const auto& cj = j["console"];
+                    if (cj.contains("shell") && cj["shell"].is_string()) {
+                        cfg.console.shell = cj["shell"].get<std::string>();
+                    }
+                }
+            }
+
+            if (j.contains("session_title")) {
+                if (!j["session_title"].is_object()) {
+                    LOG_WARN("[config] 'session_title' must be an object, ignoring");
+                } else {
+                    const auto& stj = j["session_title"];
+                    if (stj.contains("enabled") && stj["enabled"].is_boolean()) {
+                        cfg.session_title.enabled = stj["enabled"].get<bool>();
+                    }
+                    if (stj.contains("model_name") && stj["model_name"].is_string()) {
+                        cfg.session_title.model_name = stj["model_name"].get<std::string>();
+                    }
+                    if (stj.contains("max_input_bytes") &&
+                        stj["max_input_bytes"].is_number_integer()) {
+                        cfg.session_title.max_input_bytes = stj["max_input_bytes"].get<int>();
+                    }
+                    if (stj.contains("timeout_ms") && stj["timeout_ms"].is_number_integer()) {
+                        cfg.session_title.timeout_ms = stj["timeout_ms"].get<int>();
+                    }
+                }
+            }
+
             if (j.contains("agent_loop") && j["agent_loop"].is_object()) {
                 const auto& alj = j["agent_loop"];
                 // max_iterations = 0 disables the cap. Positive values are
@@ -1055,6 +1115,11 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
         !cfg.openai.models_dev_provider_id->empty()) {
         j["openai"]["models_dev_provider_id"] = *cfg.openai.models_dev_provider_id;
     }
+    if (!cfg.openai.request_headers.empty()) {
+        nlohmann::json headers = nlohmann::json::object();
+        for (const auto& [k, v] : cfg.openai.request_headers) headers[k] = v;
+        j["openai"]["request_headers"] = std::move(headers);
+    }
     j["copilot"]["model"] = cfg.copilot.model;
     j["codex"]["model"] = cfg.codex.model;
     j["context_window"] = cfg.context_window;
@@ -1175,9 +1240,25 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
         if (!dnj.empty()) {
             deskj["notifications"] = dnj;
         }
+        // console:schema sparse — 只有非默认(非空 shell)才落盘。
+        if (!cfg.console.shell.empty()) {
+            j["console"] = nlohmann::json{{"shell", cfg.console.shell}};
+        }
         if (!deskj.empty()) {
             j["desktop"] = deskj;
         }
+
+        SessionTitleConfig st_d;
+        nlohmann::json stj = nlohmann::json::object();
+        if (cfg.session_title.enabled != st_d.enabled)
+            stj["enabled"] = cfg.session_title.enabled;
+        if (cfg.session_title.model_name != st_d.model_name)
+            stj["model_name"] = cfg.session_title.model_name;
+        if (cfg.session_title.max_input_bytes != st_d.max_input_bytes)
+            stj["max_input_bytes"] = cfg.session_title.max_input_bytes;
+        if (cfg.session_title.timeout_ms != st_d.timeout_ms)
+            stj["timeout_ms"] = cfg.session_title.timeout_ms;
+        if (!stj.empty()) j["session_title"] = stj;
 
         NetworkConfig net_d;
         nlohmann::json nj = nlohmann::json::object();

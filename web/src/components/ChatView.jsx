@@ -28,6 +28,7 @@ import {
   collectHunkMessagesFromItems,
   summarizeChangeGroups,
 } from '../lib/sessionChanges.js';
+import { stableBySignature } from '../lib/changeReviewStability.js';
 import {
   buildQueuedMessageItems,
   cancelQueuedInput,
@@ -339,6 +340,17 @@ function normalizeSessionRef(sessionRef, sessionId) {
   if (typeof sessionRef === 'string' && sessionRef) return { sessionId: sessionRef };
   if (sessionId) return { sessionId };
   return null;
+}
+
+function sidebarSessionContextTarget(sessionId = '', workspaceHash = '', fallbackTarget = null) {
+  if (!sessionId || typeof document === 'undefined') return fallbackTarget;
+  const rows = Array.from(document.querySelectorAll('.ace-sidebar-session-row[data-desktop-session-id]'));
+  const exact = rows.find((row) => (
+    row.getAttribute('data-desktop-session-id') === sessionId
+    && (!workspaceHash || row.getAttribute('data-desktop-session-workspace') === workspaceHash)
+  ));
+  if (exact) return exact;
+  return rows.find((row) => row.getAttribute('data-desktop-session-id') === sessionId) || fallbackTarget;
 }
 
 function newSessionRefFrom(ref, sessionId) {
@@ -1719,6 +1731,23 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     if (!sid) return null;
     return busy || transcriptStatus === 'running' ? 'running' : 'idle';
   }, [sid, busy, transcriptStatus]);
+  const sessionWorkspaceHash = ref?.workspaceHash || ref?.workspace_hash || '';
+  const sessionPinned = !!(ref?.pinned || ref?.isPinned || ref?.is_pinned);
+  const openSessionContextMenu = useCallback((event) => {
+    if (!sid || typeof window === 'undefined') return;
+    event.preventDefault();
+    event.stopPropagation();
+    const button = event.currentTarget;
+    const rect = button.getBoundingClientRect();
+    const target = sidebarSessionContextTarget(sid, sessionWorkspaceHash, button);
+    target.dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true,
+      cancelable: true,
+      view: window,
+      clientX: Math.min(window.innerWidth - 8, rect.right - 4),
+      clientY: Math.min(window.innerHeight - 8, rect.bottom + 4),
+    }));
+  }, [sessionWorkspaceHash, sid]);
 
   const modelListEmptyLoaded = modelListLoaded && modelOptions.length === 0;
   const noModelLabel = '未配置模型';
@@ -1747,9 +1776,28 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   // 三处 diff UI 共用同一份数据源:把 items 里 tool 项的 hunks 抽成消息格式。
   // 必须放在 early return 之前,否则空态/有 session 之间 hooks 数量不一致 → React #310。
   const changeMessages = useMemo(() => collectHunkMessagesFromItems(items), [items]);
-  const changeGroups = useMemo(() => aggregateHunksFromMessages(changeMessages), [changeMessages]);
+  const rawChangeGroups = useMemo(() => aggregateHunksFromMessages(changeMessages), [changeMessages]);
+  const changeSignature = useMemo(() => changeGroupsSignature(rawChangeGroups), [rawChangeGroups]);
+  // 引用稳定化:流式期间每个 WS 帧 items 都换新引用,rawChangeGroups 即使内容
+  // 没变也是新数组,会让 DiffPreview 等下游 memo 每帧失效、整棵重建 diff DOM,
+  // 用户在变更视图里的滚动位置因此丢失(fix-preview-scroll-during-stream)。
+  // 签名一致时复用旧数组引用;ref 在渲染期写入是纯缓存,并发渲染丢弃也无害
+  // (签名相同意味着内容相同,最多多算一次)。
+  const changeGroupsStableRef = useRef(null);
+  changeGroupsStableRef.current = stableBySignature(
+    changeGroupsStableRef.current,
+    { signature: changeSignature, value: rawChangeGroups },
+  );
+  const changeGroups = changeGroupsStableRef.current.value;
   const changeSummary = useMemo(() => summarizeChangeGroups(changeGroups), [changeGroups]);
-  const changeSignature = useMemo(() => changeGroupsSignature(changeGroups), [changeGroups]);
+  // changeMessages 同理:groups 由 messages 确定性推导,签名相同即内容相同,
+  // 复用同一签名让 SidePanel 的 fallback 聚合 memo 在流式期间不再每帧失效。
+  const changeMessagesStableRef = useRef(null);
+  changeMessagesStableRef.current = stableBySignature(
+    changeMessagesStableRef.current,
+    { signature: changeSignature, value: changeMessages },
+  );
+  const stableChangeMessages = changeMessagesStableRef.current.value;
   const changeDockDismissalKey = useMemo(
     () => dockDismissalKey(ref, sid),
     [ref?.workspaceHash, sid],
@@ -2177,17 +2225,35 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
             {status === 'running' ? '运行中' : '空闲'}
           </span>
         </div>
-        {sidePanelMounted && sidePanelCollapsed && onToggleSidePanel && (
-          <button
-            type="button"
-            onClick={onToggleSidePanel}
-            className="ace-side-panel-expand-fab"
-            title="展开右侧面板"
-            aria-label="展开右侧面板"
-          >
-            <PanelToggleIcon side="right" size={15} />
-          </button>
-        )}
+        <div className="flex items-center gap-1 shrink-0">
+          {sid && (
+            <button
+              type="button"
+              data-desktop-session-id={sid || undefined}
+              data-desktop-session-workspace={sessionWorkspaceHash || undefined}
+              data-desktop-session-pinned={sessionPinned ? 'true' : 'false'}
+              data-desktop-session-title={title || undefined}
+              data-desktop-session-archive="true"
+              onClick={openSessionContextMenu}
+              className="w-7 h-7 rounded-md bg-surface-hi/0 text-fg-mute flex items-center justify-center transition hover:bg-surface-hi hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/25"
+              title="会话菜单"
+              aria-label="会话菜单"
+            >
+              <VsIcon name="ellipsis" size={15} />
+            </button>
+          )}
+          {sidePanelMounted && sidePanelCollapsed && onToggleSidePanel && (
+            <button
+              type="button"
+              onClick={onToggleSidePanel}
+              className="ace-side-panel-expand-fab"
+              title="展开右侧面板"
+              aria-label="展开右侧面板"
+            >
+              <PanelToggleIcon side="right" size={15} />
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="relative flex-1 min-h-0">
@@ -2416,7 +2482,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
               sessionRef={ref}
               sessionId={sid}
               cwd={sidePanelCwd}
-              messages={changeMessages}
+              messages={stableChangeMessages}
               changeGroups={changeGroups}
               changeSummary={changeSummary}
               fileRefreshKey={fileTreeRefreshKey}

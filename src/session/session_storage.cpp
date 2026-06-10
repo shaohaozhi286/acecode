@@ -199,6 +199,9 @@ void SessionStorage::write_meta(const std::string& meta_path, const SessionMeta&
     }
     if (!meta.title.empty()) {
         j["title"] = meta.title;
+        if (!meta.title_source.empty()) {
+            j["title_source"] = meta.title_source;
+        }
     }
     if (!meta.input_draft.empty()) {
         j["input_draft"] = meta.input_draft;
@@ -251,6 +254,10 @@ SessionMeta SessionStorage::read_meta(const std::string& meta_path) {
         if (j.contains("model"))         meta.model         = j["model"].get<std::string>();
         meta.model_preset    = j.value("model_preset",    std::string{});
         meta.title           = j.value("title",           std::string{});
+        meta.title_source    = j.value("title_source",    std::string{});
+        if (!meta.title.empty() && meta.title_source.empty()) {
+            meta.title_source = "legacy";
+        }
         meta.input_draft     = j.value("input_draft",     std::string{});
         meta.permission_mode = normalize_permission_mode_name(
             j.value("permission_mode", std::string{"default"}));

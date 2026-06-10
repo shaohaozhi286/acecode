@@ -53,6 +53,7 @@ static ModelProfile configured_profile_from_current_fields(const AppConfig& cfg)
         profile.api_key = cfg.openai.api_key;
         profile.model = cfg.openai.model;
         profile.stream_timeout_ms = cfg.openai.stream_timeout_ms;
+        profile.request_headers = cfg.openai.request_headers;
         profile.models_dev_provider_id = cfg.openai.models_dev_provider_id;
     } else if (cfg.provider == "codex") {
         profile.provider = "codex";
@@ -68,6 +69,11 @@ static void upsert_configured_saved_model(AppConfig& cfg) {
     ModelProfile profile = configured_profile_from_current_fields(cfg);
     for (auto& existing : cfg.saved_models) {
         if (existing.name == profile.name) {
+            if (profile.provider == "openai" &&
+                profile.request_headers.empty() &&
+                !existing.request_headers.empty()) {
+                profile.request_headers = existing.request_headers;
+            }
             existing = profile;
             cfg.default_model_name = profile.name;
             return;

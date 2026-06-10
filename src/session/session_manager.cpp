@@ -191,6 +191,9 @@ void SessionManager::start_session(const std::string& cwd,
     last_user_summary_.clear();
     created_at_.clear();
     pending_title_.clear();
+    title_source_.clear();
+    auto_title_generation_attempted_ = false;
+    user_title_touched_ = false;
     input_draft_.clear();
     permission_mode_ = "default";
     pre_plan_permission_mode_.clear();
@@ -243,6 +246,7 @@ bool SessionManager::ensure_created() {
     meta.model = model_name_;
     meta.model_preset = model_preset_;
     meta.title = pending_title_;
+    meta.title_source = title_source_;
     meta.input_draft = input_draft_;
     meta.permission_mode = permission_mode_;
     meta.pre_plan_permission_mode = pre_plan_permission_mode_;
@@ -427,6 +431,8 @@ std::vector<ChatMessage> SessionManager::resume_session(const std::string& sessi
         created_at_ = meta.created_at;
         last_user_summary_ = meta.summary;
         pending_title_ = meta.title;
+        title_source_ = meta.title_source;
+        user_title_touched_ = title_source_ == "user" || title_source_ == "legacy";
         input_draft_ = meta.input_draft;
         permission_mode_ = normalize_permission_mode_name(meta.permission_mode);
         pre_plan_permission_mode_ =
@@ -521,6 +527,9 @@ void SessionManager::end_current_session() {
     last_user_summary_.clear();
     created_at_.clear();
     pending_title_.clear();
+    title_source_.clear();
+    auto_title_generation_attempted_ = false;
+    user_title_touched_ = false;
     input_draft_.clear();
     last_token_usage_ = {};
     session_token_usage_ = {};
@@ -698,6 +707,7 @@ std::string SessionManager::fork_session_to_new_id(
     meta.model           = model_name_;
     meta.model_preset    = model_preset_;
     meta.title           = title;
+    meta.title_source    = title.empty() ? std::string{} : "user";
     meta.input_draft     = std::string{};
     meta.permission_mode = permission_mode_;
     meta.pre_plan_permission_mode = pre_plan_permission_mode_;
@@ -832,6 +842,7 @@ void SessionManager::update_meta() {
     meta.model = model_name_;
     meta.model_preset = model_preset_;
     meta.title = pending_title_;
+    meta.title_source = title_source_;
     meta.input_draft = input_draft_;
     meta.permission_mode = permission_mode_;
     meta.pre_plan_permission_mode = pre_plan_permission_mode_;
@@ -846,9 +857,34 @@ void SessionManager::update_meta() {
 void SessionManager::set_session_title(std::string title) {
     std::lock_guard<std::mutex> lk(mu_);
     pending_title_ = std::move(title);
+    title_source_ = pending_title_.empty() ? std::string{} : "user";
+    user_title_touched_ = true;
     if (created_) {
         update_meta();
     }
+}
+
+bool SessionManager::try_set_generated_session_title(std::string title) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (title.empty()) return false;
+    if (user_title_touched_) return false;
+    if (!pending_title_.empty() && title_source_ != "generated") return false;
+    pending_title_ = std::move(title);
+    title_source_ = "generated";
+    if (created_) {
+        update_meta();
+    }
+    return true;
+}
+
+bool SessionManager::mark_auto_title_generation_started() {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (auto_title_generation_attempted_) return false;
+    if (turn_count_ > 0) return false;
+    if (user_title_touched_) return false;
+    if (!pending_title_.empty() && title_source_ != "generated") return false;
+    auto_title_generation_attempted_ = true;
+    return true;
 }
 
 void SessionManager::set_session_archived(bool archived) {
@@ -862,6 +898,11 @@ void SessionManager::set_session_archived(bool archived) {
 std::string SessionManager::current_title() const {
     std::lock_guard<std::mutex> lk(mu_);
     return pending_title_;
+}
+
+std::string SessionManager::current_title_source() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return title_source_;
 }
 
 void SessionManager::set_input_draft(std::string draft) {
@@ -885,6 +926,7 @@ void SessionManager::set_input_draft(std::string draft) {
         meta.model = model_name_;
         meta.model_preset = model_preset_;
         meta.title = pending_title_;
+        meta.title_source = title_source_;
         meta.permission_mode = permission_mode_;
         meta.pre_plan_permission_mode = pre_plan_permission_mode_;
         meta.last_token_usage = last_token_usage_;
