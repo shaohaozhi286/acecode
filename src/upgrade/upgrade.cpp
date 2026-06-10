@@ -154,6 +154,19 @@ private:
 
 } // namespace
 
+bool apply_upgrade_server_override(AppConfig& config,
+                                   const std::string& server,
+                                   std::string* error) {
+    const std::string normalized = acecode::normalize_upgrade_base_url(server);
+    if (!acecode::is_valid_upgrade_base_url(normalized)) {
+        if (error) *error = "upgrade server must be a non-empty http or https URL";
+        return false;
+    }
+
+    config.upgrade.base_url = normalized;
+    return true;
+}
+
 const char* update_check_status_name(UpdateCheckStatus status) {
     switch (status) {
         case UpdateCheckStatus::UpdateAvailable: return "available";

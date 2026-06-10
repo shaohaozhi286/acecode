@@ -11,6 +11,8 @@
 #include <chrono>
 #include <filesystem>
 #include <functional>
+#include <fstream>
+#include <nlohmann/json.hpp>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -235,4 +237,45 @@ TEST(UpgradeHttp, UpdateCheckReportsManifestFailure) {
 
     EXPECT_EQ(result.status, acecode::upgrade::UpdateCheckStatus::ManifestUnavailable);
     EXPECT_EQ(result.http_status, 404);
+}
+
+TEST(UpgradeHttp, ServerOverrideNormalizesAndPersistsThroughConfigSave) {
+    acecode::AppConfig cfg;
+    cfg.upgrade.base_url = "http://old.example.test/updates/";
+
+    std::string error;
+    ASSERT_TRUE(acecode::upgrade::apply_upgrade_server_override(
+        cfg, " https://updates.example.test/ace ", &error));
+    EXPECT_TRUE(error.empty());
+    EXPECT_EQ(cfg.upgrade.base_url, "https://updates.example.test/ace/");
+
+    const auto output = std::filesystem::temp_directory_path() /
+        ("acecode-upgrade-server-" +
+         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
+         ".json");
+    acecode::save_config(cfg, output.string());
+
+    std::ifstream ifs(output);
+    ASSERT_TRUE(ifs.is_open());
+    auto j = nlohmann::json::parse(ifs);
+    EXPECT_EQ(j["upgrade"]["base_url"], "https://updates.example.test/ace/");
+
+    std::error_code ec;
+    std::filesystem::remove(output, ec);
+}
+
+TEST(UpgradeHttp, ServerOverrideRejectsInvalidUrlWithoutChangingConfig) {
+    acecode::AppConfig cfg;
+    cfg.upgrade.base_url = "http://old.example.test/updates/";
+
+    std::string error;
+    EXPECT_FALSE(acecode::upgrade::apply_upgrade_server_override(
+        cfg, "ftp://updates.example.test/ace", &error));
+    EXPECT_NE(error.find("http or https"), std::string::npos);
+    EXPECT_EQ(cfg.upgrade.base_url, "http://old.example.test/updates/");
+
+    error.clear();
+    EXPECT_FALSE(acecode::upgrade::apply_upgrade_server_override(cfg, "", &error));
+    EXPECT_NE(error.find("http or https"), std::string::npos);
+    EXPECT_EQ(cfg.upgrade.base_url, "http://old.example.test/updates/");
 }

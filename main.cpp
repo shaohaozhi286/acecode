@@ -1436,17 +1436,47 @@ static std::optional<int> dispatch_non_tui_command(int argc, char* argv[]) {
     if (argc >= 2 && (std::string(argv[1]) == "upgrade" ||
                       std::string(argv[1]) == "update")) {
         bool force_update = false;
+        std::optional<std::string> server_override;
         for (int i = 2; i < argc; ++i) {
             const std::string arg = argv[i] ? std::string(argv[i]) : std::string();
             if (arg == "--force") {
                 force_update = true;
                 continue;
             }
+            constexpr const char* kServerPrefix = "--server=";
+            if (arg.rfind(kServerPrefix, 0) == 0) {
+                server_override = arg.substr(std::char_traits<char>::length(kServerPrefix));
+                continue;
+            }
+            if (arg == "--server") {
+                std::cerr << "acecode " << argv[1] << ": missing value for --server\n"
+                          << "usage: acecode " << argv[1]
+                          << " [--force] [--server=<url>]\n";
+                return 64;
+            }
             std::cerr << "acecode " << argv[1] << ": unknown option: " << arg << "\n"
-                      << "usage: acecode " << argv[1] << " [--force]\n";
+                      << "usage: acecode " << argv[1]
+                      << " [--force] [--server=<url>]\n";
             return 64;
         }
         AppConfig config = load_config();
+        if (server_override.has_value()) {
+            std::string server_error;
+            if (!acecode::upgrade::apply_upgrade_server_override(
+                    config, *server_override, &server_error)) {
+                std::cerr << "acecode " << argv[1] << ": " << server_error << "\n"
+                          << "usage: acecode " << argv[1]
+                          << " [--force] [--server=<url>]\n";
+                return 64;
+            }
+            try {
+                save_config(config);
+            } catch (const std::exception& e) {
+                std::cerr << "acecode " << argv[1]
+                          << ": failed to save update server: " << e.what() << "\n";
+                return 1;
+            }
+        }
         return acecode::upgrade::run_upgrade_command(
             config, exe_path, ACECODE_VERSION, std::cout, std::cerr,
             force_update);
