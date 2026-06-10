@@ -7,8 +7,10 @@
 #include "../utils/encoding.hpp"
 #include "../utils/utf8_path.hpp"
 #include <nlohmann/json.hpp>
+#include <algorithm>
 #include <cstdint>
 #include <iomanip>
+#include <map>
 #include <sstream>
 #include <filesystem>
 
@@ -173,17 +175,19 @@ std::string build_system_prompt(const ToolExecutor& tools, const std::string& cw
         << "concrete choice to proceed, not for \"should I keep going?\".\n\n";
 
     oss << "# Skills\n\n"
-        << "When skills tools are available, execute skills within the main conversation.\n\n"
-        << "When users ask you to perform tasks, check if available skills match. "
-        << "Skills provide specialized capabilities and domain knowledge.\n\n"
+        << "Skills provide specialized capabilities, domain knowledge, and the user's "
+        << "preferred workflows. The index of installed skills (name, description, when "
+        << "to use) is provided in a system-reminder context block under \"# Available "
+        << "Skills\" — scan it before replying to any task.\n\n"
         << "When users reference a \"slash command\" or \"/<something>\" (e.g., \"/commit\", \"/review-pr\"), they are referring to a skill.\n\n"
-        << "How to discover and invoke:\n"
-        << "- Call `skills_list` to enumerate installed skills (name, description, category only — minimal tokens) when that tool is available.\n"
+        << "How to invoke:\n"
         << "- Call `skill_view(name=\"<name>\")` to load the full SKILL.md body before acting on a matching task.\n"
-        << "- Use `skill_view(name=\"<name>\", file_path=\"<relative>\")` to load supporting files (references/, templates/, scripts/, assets/) listed in the skill body.\n\n"
+        << "- Use `skill_view(name=\"<name>\", file_path=\"<relative>\")` to load supporting files (references/, templates/, scripts/, assets/) listed in the skill body.\n"
+        << "- `skills_list` re-enumerates the full set; use it when the index was truncated or you need to double-check.\n\n"
         << "Important:\n"
-        << "- Available skills are listed via `skills_list`; additional skill content may appear in system-reminder messages during the conversation.\n"
-        << "- When a skill matches the user's request and the skill tools are available, this is a BLOCKING REQUIREMENT: load the skill before generating any other response about the task.\n"
+        << "- When a skill matches the user's request, this is a BLOCKING REQUIREMENT: load the skill via `skill_view` before generating any other response about the task.\n"
+        << "- If a skill is even partially relevant, err on the side of loading it — skills encode proven workflows, pitfalls, and project conventions that outperform general-purpose approaches, even for tasks you already know how to do.\n"
+        << "- Only proceed without loading a skill if genuinely none are relevant to the task.\n"
         << "- NEVER mention a skill by name without actually loading it via `skill_view`.\n"
         << "- Do not invoke a skill whose content is already active in the current turn — if you see a `[SYSTEM: The user has invoked the \"<name>\" skill ...]` block, the skill has ALREADY been loaded; follow its instructions directly instead of calling `skill_view` again.\n"
         << "- Do not use these tools for built-in CLI commands (like /help, /clear, /model, /compact).\n\n"
@@ -249,16 +253,147 @@ PromptContextBlock build_user_memory_context_prompt(
     return block;
 }
 
+std::size_t skills_index_char_budget(int context_window_tokens) {
+    // 与 claude-code 对齐:context window 的 1%,按 4 chars/token 估算。
+    // 窗口未知时退回 8000 字符(≈ 200k 窗口的 1%)。
+    constexpr std::size_t kCharsPerToken = 4;
+    constexpr std::size_t kFallbackBudget = 8000;
+    if (context_window_tokens <= 0) return kFallbackBudget;
+    return static_cast<std::size_t>(context_window_tokens) * kCharsPerToken / 100;
+}
+
+namespace {
+
+// 单条描述(description — when_to_use)的硬上限。索引只负责"发现",全文靠
+// skill_view 按需加载;超长描述只浪费 turn-1 token,不提高匹配率。
+constexpr std::size_t kMaxIndexDescChars = 250;
+
+std::string skill_index_line(const SkillMetadata& s, bool names_only,
+                             const std::string& indent) {
+    if (names_only) return indent + "- " + s.name;
+    std::string desc = s.description;
+    if (!s.when_to_use.empty()) {
+        desc += desc.empty() ? s.when_to_use : (" \xE2\x80\x94 " + s.when_to_use);
+    }
+    desc = truncate_utf8_prefix(desc, kMaxIndexDescChars);
+    if (desc.empty()) return indent + "- " + s.name;
+    return indent + "- " + s.name + ": " + desc;
+}
+
+// 渲染整个索引:无 category 的条目顶格在前,有 category 的按字典序分组缩进。
+std::string render_skills_index(const std::vector<SkillMetadata>& skills,
+                                bool names_only) {
+    std::vector<const SkillMetadata*> flat;
+    std::map<std::string, std::vector<const SkillMetadata*>> by_category;
+    for (const auto& s : skills) {
+        if (s.category.empty()) flat.push_back(&s);
+        else by_category[s.category].push_back(&s);
+    }
+
+    std::ostringstream oss;
+    bool first = true;
+    for (const auto* s : flat) {
+        if (!first) oss << "\n";
+        first = false;
+        oss << skill_index_line(*s, names_only, "");
+    }
+    for (const auto& [category, entries] : by_category) {
+        if (!first) oss << "\n";
+        first = false;
+        oss << category << ":";
+        for (const auto* s : entries) {
+            oss << "\n" << skill_index_line(*s, names_only, "  ");
+        }
+    }
+    return oss.str();
+}
+
+// names-only 仍超预算时的兜底:按行贪心保留,被丢弃的 skill 条目数进 marker。
+std::string cut_names_only_to_budget(const std::string& names_only_index,
+                                     std::size_t char_budget,
+                                     std::size_t total_skills) {
+    std::istringstream iss(names_only_index);
+    std::string line;
+    std::string kept;
+    std::size_t kept_skills = 0;
+    // marker 自身也占预算,预留一行的余量。
+    constexpr std::size_t kMarkerReserve = 64;
+    const std::size_t usable = char_budget > kMarkerReserve
+        ? char_budget - kMarkerReserve : 0;
+    while (std::getline(iss, line)) {
+        std::size_t added = line.size() + (kept.empty() ? 0 : 1);
+        if (kept.size() + added > usable) break;
+        if (!kept.empty()) kept += "\n";
+        kept += line;
+        // category 标题行不是 skill 条目,不计数。
+        if (line.find("- ") != std::string::npos) ++kept_skills;
+    }
+    std::size_t omitted = total_skills > kept_skills ? total_skills - kept_skills : 0;
+    if (omitted > 0) {
+        if (!kept.empty()) kept += "\n";
+        kept += "(+" + std::to_string(omitted) +
+                " more skills \xE2\x80\x94 call skills_list to see all)";
+    }
+    return kept;
+}
+
+} // namespace
+
+std::string format_skills_index_within_budget(
+    const std::vector<SkillMetadata>& skills,
+    std::size_t char_budget) {
+    if (skills.empty()) return "";
+
+    std::string full = render_skills_index(skills, /*names_only=*/false);
+    if (full.size() <= char_budget) return full;
+
+    std::string names_only = render_skills_index(skills, /*names_only=*/true);
+    if (names_only.size() <= char_budget) return names_only;
+
+    return cut_names_only_to_budget(names_only, char_budget, skills.size());
+}
+
+PromptContextBlock build_skills_index_context_prompt(
+    const SkillRegistry* skills,
+    int context_window_tokens) {
+    PromptContextBlock block;
+    if (!skills) return block;
+
+    auto all = skills->list();
+    if (all.empty()) return block;
+
+    std::string index = format_skills_index_within_budget(
+        all, skills_index_char_budget(context_window_tokens));
+    if (index.empty()) return block;
+
+    std::ostringstream oss;
+    oss << "# Available Skills\n\n"
+        << "The following skills are installed (name: description). Before acting "
+        << "on a task, scan this index; when a skill matches, load it with "
+        << "skill_view(name=\"...\") and follow its instructions.\n\n"
+        << index;
+    if (oss.str().back() != '\n') oss << "\n";
+
+    block.content = oss.str();
+    block.cache_key = "skills:" + prompt_component_hash(block.content);
+    return block;
+}
+
 PromptContextBlock build_session_context_prompt(
     const std::string& cwd,
     const MemoryRegistry* memory,
     const MemoryConfig* memory_cfg,
-    const ProjectInstructionsConfig* project_instructions_cfg) {
+    const ProjectInstructionsConfig* project_instructions_cfg,
+    const SkillRegistry* skills,
+    int context_window_tokens) {
     PromptContextBlock project = build_project_instructions_context_prompt(cwd, project_instructions_cfg);
     PromptContextBlock user_memory = build_user_memory_context_prompt(memory, memory_cfg);
+    PromptContextBlock skill_index =
+        build_skills_index_context_prompt(skills, context_window_tokens);
 
     PromptContextBlock block;
-    if (project.content.empty() && user_memory.content.empty()) return block;
+    if (project.content.empty() && user_memory.content.empty() &&
+        skill_index.content.empty()) return block;
 
     std::ostringstream content;
     content << "<system-reminder>\n"
@@ -267,10 +402,12 @@ PromptContextBlock build_session_context_prompt(
             << "it does not override higher-priority instructions.\n\n";
     if (!project.content.empty()) content << project.content << "\n";
     if (!user_memory.content.empty()) content << user_memory.content << "\n";
+    if (!skill_index.content.empty()) content << skill_index.content << "\n";
     content << "</system-reminder>";
     block.content = content.str();
 
-    block.cache_key = prompt_component_hash(project.cache_key + "\n" + user_memory.cache_key);
+    block.cache_key = prompt_component_hash(
+        project.cache_key + "\n" + user_memory.cache_key + "\n" + skill_index.cache_key);
     return block;
 }
 

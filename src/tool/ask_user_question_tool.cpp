@@ -7,6 +7,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <sstream>
 #include <atomic>
 #include <cstddef>
 #include <set>
@@ -194,6 +195,62 @@ std::string format_ask_answers(
     return out;
 }
 
+nlohmann::json build_ask_user_question_result_metadata(
+    const std::vector<std::string>& question_order,
+    const std::map<std::string, std::string>& answers) {
+    nlohmann::json items = nlohmann::json::array();
+    for (const auto& q : question_order) {
+        auto it = answers.find(q);
+        const std::string& a = (it == answers.end()) ? std::string{} : it->second;
+        items.push_back({
+            {"question", q},
+            {"answer", a},
+        });
+    }
+    return nlohmann::json{
+        {"ask_user_question_result", {
+            {"items", std::move(items)}
+        }}
+    };
+}
+
+std::string format_ask_user_question_result_display(
+    const nlohmann::json& metadata) {
+    if (!metadata.is_object()) return {};
+
+    auto result_it = metadata.find("ask_user_question_result");
+    if (result_it == metadata.end() || !result_it->is_object()) return {};
+
+    auto items_it = result_it->find("items");
+    if (items_it == result_it->end() || !items_it->is_array()) return {};
+
+    std::vector<std::pair<std::string, std::string>> items;
+    items.reserve(items_it->size());
+    for (const auto& item : *items_it) {
+        if (!item.is_object()) continue;
+        auto q_it = item.find("question");
+        auto a_it = item.find("answer");
+        if (q_it == item.end() || a_it == item.end() ||
+            !q_it->is_string() || !a_it->is_string()) {
+            continue;
+        }
+        items.emplace_back(q_it->get<std::string>(),
+                           a_it->get<std::string>());
+    }
+
+    if (items.empty()) return {};
+
+    std::ostringstream out;
+    out << "已确认 " << items.size() << " 项";
+    for (size_t i = 0; i < items.size(); ++i) {
+        out << "\n";
+        if (i > 0) out << "---\n";
+        out << "Q  " << items[i].first << "\n";
+        out << "A  " << items[i].second;
+    }
+    return out.str();
+}
+
 ToolResult make_rejected_ask_result() {
     ToolResult r;
     r.output = "[Error] User declined to answer questions.";
@@ -355,6 +412,7 @@ ToolImpl create_ask_user_question_tool(TuiState& state,
         ToolResult r;
         r.success = true;
         r.output = format_ask_answers(question_order, answers);
+        r.metadata = build_ask_user_question_result_metadata(question_order, answers);
         return r;
     };
 
@@ -545,6 +603,7 @@ ToolImpl create_ask_user_question_tool_async() {
         ToolResult r;
         r.success = true;
         r.output  = format_ask_answers(question_order, answers);
+        r.metadata = build_ask_user_question_result_metadata(question_order, answers);
         return r;
     };
 

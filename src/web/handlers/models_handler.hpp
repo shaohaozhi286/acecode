@@ -47,7 +47,7 @@ nlohmann::json model_state_to_json(const SessionModelState& state);
 //   - 其它(校验失败)   → 400
 int http_status_for_edit_error(SavedModelEditError e);
 
-// 把 ModelProfile 序列化到 JSON 格式(api_key 字段总是省略)。
+// 把 ModelProfile 序列化到模型管理 JSON 格式。
 // 给 POST/PUT 成功响应用。
 nlohmann::json profile_to_safe_json(const ModelProfile& entry);
 

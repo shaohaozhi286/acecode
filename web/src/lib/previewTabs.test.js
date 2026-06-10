@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import {
   activePreviewTab,
+  activatePreviewTab,
   closePreviewTab,
   closeVisiblePreviewTabs,
   closeVisiblePreviewTabsConfirmationMessage,
   openFileTab,
   openSessionChangesTab,
+  reorderPreviewTab,
   updateSessionChangesTab,
   visiblePreviewTabs,
 } from './previewTabs.js';
@@ -139,4 +141,122 @@ run('updateSessionChangesTab updates count without replacing expanded file', () 
   const tab = activePreviewTab(state, { scopeKey: 'workspace-a', sessionId: 's1' });
   assert.equal(tab.fileCount, 4);
   assert.equal(tab.expandedFile, 'src/a.cpp');
+});
+
+run('reorderPreviewTab reorders visible file tabs', () => {
+  let state = {};
+  state = openFileTab(state, { scopeKey: 'workspace-a', sessionId: 's1', cwd: 'C:/a', path: 'a.txt' });
+  state = openFileTab(state, { scopeKey: 'workspace-a', sessionId: 's1', cwd: 'C:/a', path: 'b.txt' });
+  state = openFileTab(state, { scopeKey: 'workspace-a', sessionId: 's1', cwd: 'C:/a', path: 'c.txt' });
+  const tabs = visiblePreviewTabs(state, { scopeKey: 'workspace-a', sessionId: 's1' });
+
+  state = reorderPreviewTab(state, {
+    scopeKey: 'workspace-a',
+    sessionId: 's1',
+    sourceKey: tabs[2].key,
+    targetKey: tabs[0].key,
+    placement: 'before',
+  });
+
+  assert.deepEqual(
+    visiblePreviewTabs(state, { scopeKey: 'workspace-a', sessionId: 's1' }).map((tab) => tab.path),
+    ['c.txt', 'a.txt', 'b.txt'],
+  );
+});
+
+run('reorderPreviewTab lets session-change tab participate in visible order', () => {
+  let state = {};
+  state = openFileTab(state, { scopeKey: 'workspace-a', sessionId: 's1', cwd: 'C:/a', path: 'a.txt' });
+  state = openSessionChangesTab(state, {
+    scopeKey: 'workspace-a',
+    sessionId: 's1',
+    expandedFile: 'a.txt',
+    fileCount: 1,
+  });
+  const tabs = visiblePreviewTabs(state, { scopeKey: 'workspace-a', sessionId: 's1' });
+  const fileTab = tabs.find((tab) => tab.type === 'file');
+  const changeTab = tabs.find((tab) => tab.type === 'session-changes');
+
+  state = reorderPreviewTab(state, {
+    scopeKey: 'workspace-a',
+    sessionId: 's1',
+    sourceKey: changeTab.key,
+    targetKey: fileTab.key,
+    placement: 'before',
+  });
+
+  assert.deepEqual(
+    visiblePreviewTabs(state, { scopeKey: 'workspace-a', sessionId: 's1' }).map((tab) => tab.type),
+    ['session-changes', 'file'],
+  );
+  assert.equal(state.changeTabsBySession.s1.sessionId, 's1');
+});
+
+run('activatePreviewTab preserves reordered visible order', () => {
+  let state = {};
+  state = openFileTab(state, { scopeKey: 'workspace-a', sessionId: 's1', cwd: 'C:/a', path: 'a.txt' });
+  state = openFileTab(state, { scopeKey: 'workspace-a', sessionId: 's1', cwd: 'C:/a', path: 'b.txt' });
+  state = openFileTab(state, { scopeKey: 'workspace-a', sessionId: 's1', cwd: 'C:/a', path: 'c.txt' });
+  const tabs = visiblePreviewTabs(state, { scopeKey: 'workspace-a', sessionId: 's1' });
+  state = reorderPreviewTab(state, {
+    scopeKey: 'workspace-a',
+    sessionId: 's1',
+    sourceKey: tabs[2].key,
+    targetKey: tabs[0].key,
+    placement: 'before',
+  });
+  const bKey = visiblePreviewTabs(state, { scopeKey: 'workspace-a', sessionId: 's1' })
+    .find((tab) => tab.path === 'b.txt').key;
+  state = activatePreviewTab(state, { scopeKey: 'workspace-a', sessionId: 's1', tabKey: bKey });
+
+  assert.equal(activePreviewTab(state, { scopeKey: 'workspace-a', sessionId: 's1' }).path, 'b.txt');
+  assert.deepEqual(
+    visiblePreviewTabs(state, { scopeKey: 'workspace-a', sessionId: 's1' }).map((tab) => tab.path),
+    ['c.txt', 'a.txt', 'b.txt'],
+  );
+});
+
+run('closePreviewTab removes closed keys from stored visible order', () => {
+  let state = {};
+  state = openFileTab(state, { scopeKey: 'workspace-a', sessionId: 's1', cwd: 'C:/a', path: 'a.txt' });
+  state = openFileTab(state, { scopeKey: 'workspace-a', sessionId: 's1', cwd: 'C:/a', path: 'b.txt' });
+  state = openFileTab(state, { scopeKey: 'workspace-a', sessionId: 's1', cwd: 'C:/a', path: 'c.txt' });
+  const tabs = visiblePreviewTabs(state, { scopeKey: 'workspace-a', sessionId: 's1' });
+  state = reorderPreviewTab(state, {
+    scopeKey: 'workspace-a',
+    sessionId: 's1',
+    sourceKey: tabs[2].key,
+    targetKey: tabs[0].key,
+    placement: 'before',
+  });
+
+  state = closePreviewTab(state, { scopeKey: 'workspace-a', sessionId: 's1', tabKey: tabs[2].key });
+
+  assert.deepEqual(
+    visiblePreviewTabs(state, { scopeKey: 'workspace-a', sessionId: 's1' }).map((tab) => tab.path),
+    ['a.txt', 'b.txt'],
+  );
+  assert.equal(
+    Object.values(state.tabOrderByView || {}).some((order) => order.includes(tabs[2].key)),
+    false,
+  );
+});
+
+run('closeVisiblePreviewTabs clears visible order keys', () => {
+  let state = {};
+  state = openFileTab(state, { scopeKey: 'workspace-a', sessionId: 's1', cwd: 'C:/a', path: 'a.txt' });
+  state = openFileTab(state, { scopeKey: 'workspace-a', sessionId: 's1', cwd: 'C:/a', path: 'b.txt' });
+  const tabs = visiblePreviewTabs(state, { scopeKey: 'workspace-a', sessionId: 's1' });
+  state = reorderPreviewTab(state, {
+    scopeKey: 'workspace-a',
+    sessionId: 's1',
+    sourceKey: tabs[1].key,
+    targetKey: tabs[0].key,
+    placement: 'before',
+  });
+
+  state = closeVisiblePreviewTabs(state, { scopeKey: 'workspace-a', sessionId: 's1' });
+
+  assert.equal(visiblePreviewTabs(state, { scopeKey: 'workspace-a', sessionId: 's1' }).length, 0);
+  assert.deepEqual(state.tabOrderByView, {});
 });

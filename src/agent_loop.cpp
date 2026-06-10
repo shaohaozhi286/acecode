@@ -15,6 +15,7 @@
 #include "session/thread_goal_store.hpp"
 #include "session/todo_state.hpp"
 #include "session/turn_timing.hpp"
+#include "tool/ask_user_question_tool.hpp"
 #include "web/message_payload.hpp"
 #include "web/tool_event_payload.hpp"
 #include "hooks/hook_config.hpp"
@@ -94,6 +95,27 @@ nlohmann::json provider_error_to_json(const ProviderErrorInfo& info) {
         {"retry_delay_ms", info.retry_delay_ms},
     };
     return j;
+}
+
+std::string provider_error_summary_for_log(const ProviderErrorInfo& info) {
+    std::string message = info.display_message;
+    if (message.empty()) message = info.pretty_json;
+    if (message.empty()) message = info.raw_body;
+
+    std::ostringstream oss;
+    oss << "kind=" << provider_error_kind_to_json_string(info.kind)
+        << " status=" << info.status_code
+        << " provider=" << info.provider
+        << " model=" << info.model
+        << " request_id=" << info.request_id
+        << " retryable=" << (info.retryable ? "true" : "false")
+        << " retry_attempt=" << info.retry_attempt
+        << " retry_max_attempts=" << info.retry_max_attempts
+        << " retry_delay_ms=" << info.retry_delay_ms
+        << " raw_body_bytes=" << info.raw_body.size()
+        << " pretty_json_bytes=" << info.pretty_json.size()
+        << " message=" << log_truncate(message, 300);
+    return oss.str();
 }
 
 // 人类可读的字节量:< 1KB 显示原始字节,否则进位到 KB / MB(保留一位小数)。
@@ -611,7 +633,11 @@ bool AgentLoop::maybe_run_auto_compact() {
     if (auto_compact_consecutive_failures_ >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES) {
         LOG_WARN("Auto-compact circuit breaker tripped (" +
                  std::to_string(auto_compact_consecutive_failures_) +
-                 " consecutive failures)");
+                 " consecutive failures); messages=" +
+                 std::to_string(messages_.size()) +
+                 " context_window=" + std::to_string(context_window_) +
+                 " last_api_prompt_tokens=" +
+                 std::to_string(last_api_prompt_tokens_.load()));
         dispatch_message("system",
                          "[Auto-compact] Skipped after repeated compaction failures.",
                          false);
@@ -622,6 +648,17 @@ bool AgentLoop::maybe_run_auto_compact() {
     (void)boundary_count;
     int pre_tokens = estimate_message_tokens(
         std::vector<ChatMessage>(messages_.begin() + boundary_start, messages_.end()));
+    const int threshold = get_auto_compact_threshold(context_window_);
+    LOG_INFO("Auto-compact preflight; messages=" + std::to_string(messages_.size()) +
+             " active_start=" + std::to_string(boundary_start) +
+             " active_count=" + std::to_string(boundary_count) +
+             " active_estimated_tokens=" + std::to_string(pre_tokens) +
+             " threshold=" + std::to_string(threshold) +
+             " context_window=" + std::to_string(context_window_) +
+             " last_api_prompt_tokens=" +
+             std::to_string(last_api_prompt_tokens_.load()) +
+             " consecutive_failures=" +
+             std::to_string(auto_compact_consecutive_failures_));
 
     auto micro_result = run_micro_compact(messages_, boundary_start);
     if (micro_result.performed) {
@@ -650,10 +687,29 @@ bool AgentLoop::maybe_run_auto_compact() {
                 " tokens",
             false);
 
-        if (!active_estimate_exceeds_auto_threshold()) {
+        auto [after_start, after_count] = get_messages_after_compact_boundary(messages_);
+        std::vector<ChatMessage> active_after(messages_.begin() + after_start,
+                                              messages_.begin() + after_start + after_count);
+        const int after_tokens = estimate_message_tokens(active_after);
+        const bool still_above_threshold = after_tokens > threshold;
+        LOG_INFO("Auto micro-compact result; cleared_tool_results=" +
+                 std::to_string(micro_result.tool_results_cleared) +
+                 " estimated_tokens_saved=" +
+                 std::to_string(micro_result.estimated_tokens_saved) +
+                 " active_estimated_tokens_before=" + std::to_string(pre_tokens) +
+                 " active_estimated_tokens_after=" + std::to_string(after_tokens) +
+                 " threshold=" + std::to_string(threshold) +
+                 " still_above_threshold=" +
+                 (still_above_threshold ? "true" : "false"));
+
+        if (!still_above_threshold) {
             auto_compact_consecutive_failures_ = 0;
             return true;
         }
+    } else {
+        LOG_INFO("Auto micro-compact skipped; no compactable old tool results" +
+                 std::string(" active_estimated_tokens=") + std::to_string(pre_tokens) +
+                 " threshold=" + std::to_string(threshold));
     }
 
     events_.emit(SessionEventKind::AgentProgress, nlohmann::json{
@@ -669,12 +725,20 @@ bool AgentLoop::maybe_run_auto_compact() {
     if (provider_accessor_) provider_snapshot = provider_accessor_();
     if (!provider_snapshot) {
         auto_compact_consecutive_failures_++;
+        LOG_WARN("Auto-compact failed; provider unavailable" +
+                 std::string(" consecutive_failures=") +
+                 std::to_string(auto_compact_consecutive_failures_) +
+                 " active_estimated_tokens=" + std::to_string(pre_tokens) +
+                 " threshold=" + std::to_string(threshold));
         dispatch_message("system",
                          "[Auto-compact] provider unavailable for compaction",
                          false);
         return false;
     }
 
+    LOG_INFO("Auto full compact starting; messages=" + std::to_string(messages_.size()) +
+             " active_estimated_tokens=" + std::to_string(pre_tokens) +
+             " threshold=" + std::to_string(threshold));
     CompactResult result = compact_messages(
         *provider_snapshot,
         messages_,
@@ -685,10 +749,24 @@ bool AgentLoop::maybe_run_auto_compact() {
 
     if (!result.performed) {
         auto_compact_consecutive_failures_++;
+        LOG_WARN("Auto full compact failed; consecutive_failures=" +
+                 std::to_string(auto_compact_consecutive_failures_) +
+                 " error=" + log_truncate(result.error, 500) +
+                 " active_estimated_tokens=" + std::to_string(pre_tokens) +
+                 " threshold=" + std::to_string(threshold));
         dispatch_message("system", "[Auto-compact] " + result.error, false);
         return false;
     }
 
+    const int compacted_tokens = estimate_message_tokens(result.compacted_messages);
+    LOG_INFO("Auto full compact succeeded; messages_before=" +
+             std::to_string(messages_.size()) +
+             " messages_after=" + std::to_string(result.compacted_messages.size()) +
+             " messages_compressed=" +
+             std::to_string(result.messages_compressed) +
+             " estimated_tokens_saved=" +
+             std::to_string(result.estimated_tokens_saved) +
+             " compacted_estimated_tokens=" + std::to_string(compacted_tokens));
     apply_compact_result(result);
     auto_compact_consecutive_failures_ = 0;
 
@@ -1085,9 +1163,23 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
         // Auto-compact check: prefer API-reported token count, fallback to estimate.
         // A rescue retry skips this once so the retry remains local and bounded.
         if (skip_auto_compact_once) {
+            LOG_INFO("Auto-compact preflight skipped once after context rescue retry; messages=" +
+                     std::to_string(messages_.size()));
             skip_auto_compact_once = false;
         } else if (should_auto_compact(messages_, context_window_, last_api_prompt_tokens_.load())) {
-            LOG_INFO("Auto-compact triggered: estimated tokens exceed threshold (context_window=" + std::to_string(context_window_) + ")");
+            auto [auto_start, auto_count] = get_messages_after_compact_boundary(messages_);
+            std::vector<ChatMessage> active_for_log(messages_.begin() + auto_start,
+                                                    messages_.begin() + auto_start + auto_count);
+            LOG_INFO("Auto-compact triggered: threshold exceeded; context_window=" +
+                     std::to_string(context_window_) +
+                     " threshold=" +
+                     std::to_string(get_auto_compact_threshold(context_window_)) +
+                     " last_api_prompt_tokens=" +
+                     std::to_string(last_api_prompt_tokens_.load()) +
+                     " active_estimated_tokens=" +
+                     std::to_string(estimate_message_tokens(active_for_log)) +
+                     " active_count=" + std::to_string(auto_count) +
+                     " total_messages=" + std::to_string(messages_.size()));
             maybe_run_auto_compact();
         }
 
@@ -1105,7 +1197,8 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
         auto api_messages = normalize_messages_for_api(messages_);
         std::string session_context = cached_context_for_api(
             build_session_context_prompt(
-                cwd_, memory_registry_, memory_cfg_, project_instructions_cfg_),
+                cwd_, memory_registry_, memory_cfg_, project_instructions_cfg_,
+                skill_registry_, context_window_),
             session_context_cache_key_, session_context_cache_content_);
         prepend_session_context_for_api(api_messages, session_context);
         std::string request_context = build_request_context_prompt(cwd_);
@@ -1309,16 +1402,41 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
                 !accumulated.reasoning_content.empty() ||
                 accumulated.has_tool_calls();
             const int request_tokens = estimate_message_tokens(messages_with_system);
+            const bool rescue_attempt_available =
+                context_rescue_attempts < kMaxContextRescueAttempts;
+            const bool rescue_indicated = should_attempt_context_overflow_rescue(
+                provider_error_info,
+                request_tokens,
+                context_window_,
+                model_output_seen);
+            LOG_WARN("Provider error before turn completion; " +
+                     provider_error_summary_for_log(provider_error_info) +
+                     " request_estimated_tokens=" +
+                     std::to_string(request_tokens) +
+                     " context_window=" + std::to_string(context_window_) +
+                     " messages_with_system=" +
+                     std::to_string(messages_with_system.size()) +
+                     " model_output_seen=" +
+                     (model_output_seen ? "true" : "false") +
+                     " rescue_attempts=" +
+                     std::to_string(context_rescue_attempts) + "/" +
+                     std::to_string(kMaxContextRescueAttempts) +
+                     " rescue_attempt_available=" +
+                     (rescue_attempt_available ? "true" : "false") +
+                     " rescue_indicated=" +
+                     (rescue_indicated ? "true" : "false"));
 
-            if (context_rescue_attempts < kMaxContextRescueAttempts &&
-                should_attempt_context_overflow_rescue(
-                    provider_error_info,
-                    request_tokens,
-                    context_window_,
-                    model_output_seen)) {
+            if (rescue_attempt_available && rescue_indicated) {
                 const int preferred_tail_turns =
                     context_rescue_attempts == 0 ? 4 :
                     context_rescue_attempts == 1 ? 2 : 1;
+                LOG_WARN("Context rescue attempt starting; attempt=" +
+                         std::to_string(context_rescue_attempts + 1) +
+                         " preferred_tail_user_turns=" +
+                         std::to_string(preferred_tail_turns) +
+                         " last_context_rescue_tokens=" +
+                         std::to_string(last_context_rescue_tokens) +
+                         " current_messages=" + std::to_string(messages_.size()));
                 auto rescue = rescue_compact_messages(messages_, cwd_, preferred_tail_turns);
                 if (rescue.performed &&
                     rescue.estimated_tokens_after < last_context_rescue_tokens) {
@@ -1338,9 +1456,19 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
                         --total_iterations;
                     }
 
-                    LOG_WARN("Provider context overflow; rescue compacted " +
+                    LOG_WARN("Context rescue accepted; retrying request" +
+                             std::string(" attempt=") +
+                             std::to_string(context_rescue_attempts) +
+                             " messages_removed=" +
                              std::to_string(rescue.messages_removed) +
-                             " messages, retrying request");
+                             " protected_user_turns=" +
+                             std::to_string(rescue.protected_user_turns) +
+                             " estimated_tokens_before=" +
+                             std::to_string(rescue.estimated_tokens_before) +
+                             " estimated_tokens_after=" +
+                             std::to_string(rescue.estimated_tokens_after) +
+                             " request_estimated_tokens_before=" +
+                             std::to_string(request_tokens));
                     dispatch_message(
                         "system",
                         "[Rescue compact] Provider rejected the request as too large; compacted " +
@@ -1352,6 +1480,21 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
                     continue;
                 }
 
+                LOG_WARN("Context rescue rejected; performed=" +
+                         std::string(rescue.performed ? "true" : "false") +
+                         " can_retry=" +
+                         (rescue.can_retry ? "true" : "false") +
+                         " messages_removed=" +
+                         std::to_string(rescue.messages_removed) +
+                         " protected_user_turns=" +
+                         std::to_string(rescue.protected_user_turns) +
+                         " estimated_tokens_before=" +
+                         std::to_string(rescue.estimated_tokens_before) +
+                         " estimated_tokens_after=" +
+                         std::to_string(rescue.estimated_tokens_after) +
+                         " last_context_rescue_tokens=" +
+                         std::to_string(last_context_rescue_tokens) +
+                         " error=" + log_truncate(rescue.error, 500));
                 nlohmann::json metadata;
                 metadata["provider_error"] = provider_error_to_json(provider_error_info);
                 turn_timing_status = "error";
@@ -2035,6 +2178,11 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
 
             if (result_ready[i]) {
                 std::string display_output = results[i].output;
+                std::string ask_display =
+                    format_ask_user_question_result_display(results[i].metadata);
+                if (!ask_display.empty()) {
+                    display_output = std::move(ask_display);
+                }
                 std::string attachment_fallback =
                     output_attachments_fallback_text(results[i].attachments);
                 if (!attachment_fallback.empty()) {

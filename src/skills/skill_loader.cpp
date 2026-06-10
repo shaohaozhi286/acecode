@@ -159,6 +159,12 @@ std::optional<SkillMetadata> load_skill_from_dir(const fs::path& dir,
     if (desc.empty()) desc = first_non_empty_body_line(body);
     meta.description = truncate(desc, 1024);
 
+    // 可选触发条件:写明"什么时候该用这个 skill"。主键 whenToUse 与
+    // claude-code 的 frontmatter 约定一致,snake_case 作别名。
+    std::string when = get_string(fm, "whenToUse");
+    if (when.empty()) when = get_string(fm, "when_to_use");
+    meta.when_to_use = truncate(when, 1024);
+
     meta.category = derive_category(dir, scan_root);
     meta.platforms = get_list(fm, "platforms");
 

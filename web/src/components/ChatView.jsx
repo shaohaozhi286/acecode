@@ -76,6 +76,7 @@ import {
   openFileTab,
   openSessionChangesTab,
   previewScopeKey,
+  reorderPreviewTab,
   updateSessionChangesTab,
   visiblePreviewTabs,
 } from '../lib/previewTabs.js';
@@ -949,12 +950,13 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
             provider: ref?.provider || '',
             model: ref?.model || '',
             context_window: ref?.context_window || 0,
+            deleted: ref?.deleted || ref?.model_deleted || ref?.modelDeleted || false,
           }));
         }
       });
 
     return () => { cancelled = true; };
-  }, [api, ref?.context_window, ref?.model, ref?.model_name, ref?.model_preset, ref?.provider, ref?.workspaceHash, sid]);
+  }, [api, ref?.context_window, ref?.deleted, ref?.model, ref?.modelDeleted, ref?.model_deleted, ref?.model_name, ref?.model_preset, ref?.provider, ref?.workspaceHash, sid]);
 
   const refreshSessionModels = useCallback(async () => {
     if (modelRefreshing) return;
@@ -1925,6 +1927,16 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     if (sidePanelMaximized) onToggleSidePanelMaximized?.();
   }, [onToggleSidePanelMaximized, previewScope, previewTabs.length, sid, sidePanelMaximized]);
 
+  const reorderPreview = useCallback((sourceKey, targetKey, placement) => {
+    setPreviewTabState((prev) => reorderPreviewTab(prev, {
+      scopeKey: previewScope,
+      sessionId: sid,
+      sourceKey,
+      targetKey,
+      placement,
+    }));
+  }, [previewScope, sid]);
+
   // 空态:没选会话
   if (!sid) {
     const homeProjectName = selectedHomeWorkspace?.name || '当前项目';
@@ -2374,6 +2386,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
             onActivateTab={activatePreview}
             onCloseTab={closePreview}
             onCloseAll={closePreviewPanel}
+            onReorderTab={reorderPreview}
             onToggleMaximize={onToggleSidePanelMaximized}
           />
         </div>

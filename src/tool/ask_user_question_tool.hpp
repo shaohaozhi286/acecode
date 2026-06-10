@@ -3,6 +3,7 @@
 #include "tool_executor.hpp"
 
 #include <ftxui/component/screen_interactive.hpp>
+#include <nlohmann/json.hpp>
 
 #include <map>
 #include <optional>
@@ -41,6 +42,18 @@ std::optional<std::vector<AskQuestion>> validate_ask_user_question_args(
 std::string format_ask_answers(
     const std::vector<std::string>& question_order,
     const std::map<std::string, std::string>& answers);
+
+// Build UI-only metadata for answered AskUserQuestion results. The tool output
+// remains the provider-visible text contract; UI surfaces use this structured
+// payload to render compact confirmation cards.
+nlohmann::json build_ask_user_question_result_metadata(
+    const std::vector<std::string>& question_order,
+    const std::map<std::string, std::string>& answers);
+
+// Build a compact UI-only Q/A transcript from ask_user_question_result
+// metadata. Returns empty for missing or malformed metadata.
+std::string format_ask_user_question_result_display(
+    const nlohmann::json& metadata);
 
 // 拒绝路径(Esc / agent abort)的固定 ToolResult:success=false,
 // output="[Error] User declined to answer questions."

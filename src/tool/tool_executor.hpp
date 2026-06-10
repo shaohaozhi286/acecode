@@ -34,6 +34,9 @@ struct ToolResult {
     std::string output;
     bool success = true;
     std::optional<ToolSummary> summary; // populated by tools that opt in
+    // Optional UI/persistence metadata. This is never part of provider-visible
+    // text; AgentLoop stores it on the ChatMessage and web lifecycle payloads.
+    nlohmann::json metadata = nlohmann::json::object();
     // Optional user-role prompt to append after this tool result. This is used
     // for progressive capability disclosure that should affect only the active
     // conversation after a tool is explicitly opened, rather than the global

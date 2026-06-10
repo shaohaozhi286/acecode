@@ -784,7 +784,10 @@ static void do_resume_session(CommandContext& ctx, const std::string& session_id
     // 应用到运行时,经 apply_model_to_session 收口(daemon/TUI 共用)。design D6 / 任务 6.3。
     std::optional<SessionModelState> resumed_model_state;
     std::string ad_hoc_model_warning;
-    if (target && ctx.provider_slot &&
+    if (target) {
+        resumed_model_state = deleted_model_state_from_meta(ctx.config, *target);
+    }
+    if (!resumed_model_state.has_value() && target && ctx.provider_slot &&
         !target->provider.empty() && !target->model.empty()) {
         auto cwd_override = load_cwd_model_override(ctx.cwd);
         ModelProfile resumed_entry = resolve_effective_model(
@@ -927,7 +930,10 @@ static void cmd_resume(CommandContext& ctx, const std::string& args) {
         }
         std::optional<SessionModelState> resumed_model_state;
         std::string ad_hoc_model_warning;
-        if (target && provider_slot && config &&
+        if (target && config) {
+            resumed_model_state = deleted_model_state_from_meta(*config, *target);
+        }
+        if (!resumed_model_state.has_value() && target && provider_slot && config &&
             !target->provider.empty() && !target->model.empty()) {
             auto cwd_override = load_cwd_model_override(cwd);
             ModelProfile resumed_entry = resolve_effective_model(

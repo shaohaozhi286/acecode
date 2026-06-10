@@ -27,6 +27,13 @@ run('footer model label uses session model name instead of placeholder', () => {
   assert.equal(modelDisplayLabel(state, '—'), 'gpt-5');
 });
 
+run('deleted session model labels preserve missing saved model name', () => {
+  const state = normalizeModelState({ name: 'fast', deleted: true, provider: 'copilot', model: 'old-model' });
+  assert.equal(state.deleted, true);
+  assert.equal(modelDisplayLabel(state, '—'), 'fast (deleted)');
+  assert.equal(optionLabel(state), 'fast (deleted)');
+});
+
 run('session switch refresh can display a different selected model', () => {
   const a = normalizeModelState({ name: 'gpt-5', provider: 'copilot', model: 'gpt-5' });
   const b = normalizeModelState({ name: 'gpt-5.4', provider: 'copilot', model: 'gpt-5.4' });
@@ -73,6 +80,23 @@ run('status bar model menu marks selected option active', () => {
     ['slow', false],
   ]);
   assert.equal(menu.widthLabel, 'slow (copilot/gpt-4o)');
+});
+
+run('status bar model menu exposes deleted selected option state', () => {
+  const menu = buildStatusBarModelMenu({
+    selectedModelName: 'fast',
+    modelOptions: [
+      { name: 'fast', deleted: true },
+      { name: 'slow', provider: 'copilot', model: 'gpt-4o' },
+    ],
+    fallbackLabel: '加载中',
+  });
+  assert.equal(menu.displayLabel, 'fast (deleted)');
+  assert.equal(menu.displayDeleted, true);
+  assert.deepEqual(menu.items.map((item) => [item.name, item.label, item.deleted, item.active]), [
+    ['fast', 'fast (deleted)', true, true],
+    ['slow', 'slow (copilot/gpt-4o)', false, false],
+  ]);
 });
 
 run('status bar model menu uses fallback when no selection exists', () => {

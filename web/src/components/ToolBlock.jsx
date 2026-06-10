@@ -28,10 +28,91 @@ function MetricList({ metrics }) {
       {metrics.map((m, i) => (
         <span key={i}>
           {' · '}
-          <span className="font-mono">{m.label}={m.value}</span>
+          <span>{m.label}={m.value}</span>
         </span>
       ))}
     </span>
+  );
+}
+
+function ClampedQuestionText({ children, className = '' }) {
+  const ref = useRef(null);
+  const [clamped, setClamped] = useState(false);
+  const text = String(children || '');
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return undefined;
+    const measure = () => {
+      setClamped((el.scrollHeight - el.clientHeight) > 1);
+    };
+    measure();
+    if (typeof ResizeObserver === 'undefined') return undefined;
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [text]);
+
+  return (
+    <span
+      ref={ref}
+      className={clsx('ace-qa-text-clamp', clamped && 'is-clamped', className)}
+      title={clamped ? text : undefined}
+    >
+      {text}
+    </span>
+  );
+}
+
+function AskUserQuestionResultCard({ result, toolContextAttrs }) {
+  const [collapsed, setCollapsed] = useState(false);
+  const items = Array.isArray(result?.items)
+    ? result.items.filter((item) => item && (item.question || item.answer))
+    : [];
+  if (items.length === 0) return null;
+
+  return (
+    <div className={clsx('ace-qa-card my-0.5', collapsed && 'is-collapsed')} {...toolContextAttrs}>
+      <button
+        type="button"
+        className="ace-qa-card-header"
+        onClick={() => setCollapsed((value) => !value)}
+        aria-expanded={!collapsed}
+        title={collapsed ? '展开' : '收起'}
+      >
+        <span className="ace-qa-card-icon">
+          <VsIcon name="ok" size={14} mono={false} />
+        </span>
+        <span className="ace-qa-card-title">已确认 {items.length} 项</span>
+        <span className="ace-qa-card-spacer" />
+        <span className="ace-qa-card-state">{collapsed ? '展开' : '收起'}</span>
+        <VsIcon
+          name={collapsed ? 'expandRight' : 'expandDown'}
+          size={15}
+          className="ace-qa-card-chevron"
+        />
+      </button>
+      {!collapsed && (
+        <div className="ace-qa-card-body">
+          {items.map((item, index) => (
+            <div key={`${item.question || ''}-${index}`} className="ace-qa-item">
+              <div className="ace-qa-row">
+                <span className="ace-qa-mark ace-qa-mark-q">Q</span>
+                <ClampedQuestionText className="ace-qa-question">
+                  {item.question}
+                </ClampedQuestionText>
+              </div>
+              <div className="ace-qa-row ace-qa-row-answer">
+                <span className="ace-qa-mark ace-qa-mark-a">A</span>
+                <ClampedQuestionText className="ace-qa-answer">
+                  {item.answer}
+                </ClampedQuestionText>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -59,8 +140,14 @@ export const ToolBlock = memo(function ToolBlock({ entry, onReviewToggle }) {
     output = '',
     hunks = [],
     attachments = [],
+    askUserQuestionResult = null,
   } = entry || {};
   const attachmentItems = useMemo(() => normalizeAttachmentList(attachments), [attachments]);
+  const askUserQuestionOutput = useMemo(() => {
+    const items = Array.isArray(askUserQuestionResult?.items) ? askUserQuestionResult.items : [];
+    if (items.length === 0) return '';
+    return items.map((item) => `Q ${item.question || ''}\nA ${item.answer || ''}`).join('\n\n');
+  }, [askUserQuestionResult]);
 
   const [nowMs, setNowMs] = useState(() => Date.now());
   useEffect(() => {
@@ -74,8 +161,8 @@ export const ToolBlock = memo(function ToolBlock({ entry, onReviewToggle }) {
     ? Math.max(Number(elapsed) || 0, Math.max(0, (nowMs - startedAtMs) / 1000))
     : (Number(elapsed) || 0);
   const outputPreview = useMemo(
-    () => compactOneLinePreview(output || currentPartial || tailLines.join('\n') || title || displayOverride || tool),
-    [currentPartial, displayOverride, output, tailLines, title, tool],
+    () => compactOneLinePreview(output || askUserQuestionOutput || currentPartial || tailLines.join('\n') || title || displayOverride || tool),
+    [askUserQuestionOutput, currentPartial, displayOverride, output, tailLines, title, tool],
   );
 
   // diff2html 渲染:先把 hunks 转 unified diff,再交给 diff2html。空 hunks 时
@@ -99,7 +186,7 @@ export const ToolBlock = memo(function ToolBlock({ entry, onReviewToggle }) {
     }
   }, [diffText]);
 
-  const fullOutput = output || diffText || tailLines.join('\n') || currentPartial || '';
+  const fullOutput = output || askUserQuestionOutput || diffText || tailLines.join('\n') || currentPartial || '';
   const visibleOutput = expanded ? fullOutput : (outputPreview || currentPartial || tailLines.join('\n') || '');
   const toolName = title || displayOverride || tool || summary?.object || 'tool';
   const toolContextAttrs = {
@@ -135,11 +222,20 @@ export const ToolBlock = memo(function ToolBlock({ entry, onReviewToggle }) {
     return () => window.removeEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
   }, [onReviewToggle]);
 
+  if (isDone && success !== false && askUserQuestionResult?.items?.length > 0) {
+    return (
+      <AskUserQuestionResultCard
+        result={askUserQuestionResult}
+        toolContextAttrs={toolContextAttrs}
+      />
+    );
+  }
+
   if (isTaskComplete) {
     const text = (summary && summary.object) || '完成';
     return (
       <div
-        className="flex items-center gap-2 px-2.5 py-1 my-0.5 text-[12px] font-medium text-ok"
+        className="ace-tool-call-text flex items-center gap-2 px-2.5 py-1 my-0.5 font-medium text-ok"
         {...toolContextAttrs}
       >
         <VsIcon name="ok" size={13} mono={false} />
@@ -155,7 +251,7 @@ export const ToolBlock = memo(function ToolBlock({ entry, onReviewToggle }) {
       <div
         {...toolContextAttrs}
         className={clsx(
-          'rounded-md font-mono text-[12px] my-0.5 transition',
+          'ace-tool-call-text rounded-md my-0.5 transition',
           ok ? 'bg-ok-bg border border-ok-border text-ok' : 'bg-danger-bg border border-danger/30 text-danger',
         )}
       >
@@ -178,7 +274,7 @@ export const ToolBlock = memo(function ToolBlock({ entry, onReviewToggle }) {
         {expanded && (
           <div className="px-3 pb-2 pt-1">
             {tool === 'bash' && displayOverride && (
-              <div className="text-[11px] text-fg-mute font-mono opacity-70 mb-1">
+              <div className="text-fg-mute opacity-70 mb-1">
                 $ {displayOverride}
               </div>
             )}
@@ -189,7 +285,7 @@ export const ToolBlock = memo(function ToolBlock({ entry, onReviewToggle }) {
               />
             ) : output ? (
               <CopyableCodeFrame text={output}>
-                <pre className="m-0 text-[11px] text-fg-2 whitespace-pre-wrap break-all max-h-[280px] overflow-y-auto" data-code-copy-source="true">{output}</pre>
+                <pre className="m-0 text-fg-2 whitespace-pre-wrap break-all max-h-[280px] overflow-y-auto" data-code-copy-source="true">{output}</pre>
               </CopyableCodeFrame>
             ) : null}
           </div>
@@ -210,7 +306,7 @@ export const ToolBlock = memo(function ToolBlock({ entry, onReviewToggle }) {
       <div
         {...toolContextAttrs}
         className={clsx(
-          'rounded-md font-mono text-[12px] my-0.5 transition',
+          'ace-tool-call-text rounded-md my-0.5 transition',
           ok ? 'bg-ok-bg border border-ok-border text-ok' : 'bg-danger-bg border border-danger/30 text-danger',
         )}
       >
@@ -236,7 +332,7 @@ export const ToolBlock = memo(function ToolBlock({ entry, onReviewToggle }) {
         {expanded && output && (
           <div className="px-3 pb-2 pt-1">
             <CopyableCodeFrame text={output}>
-              <pre className="m-0 text-[11px] text-fg-2 whitespace-pre-wrap break-all max-h-[280px] overflow-y-auto" data-code-copy-source="true">{output}</pre>
+              <pre className="m-0 text-fg-2 whitespace-pre-wrap break-all max-h-[280px] overflow-y-auto" data-code-copy-source="true">{output}</pre>
             </CopyableCodeFrame>
           </div>
         )}
@@ -248,7 +344,7 @@ export const ToolBlock = memo(function ToolBlock({ entry, onReviewToggle }) {
   const hidden = Math.max(0, totalLines - tailLines.length);
   return (
     <div
-      className="rounded-md border border-border bg-surface my-0.5 font-mono text-[11px] overflow-hidden"
+      className="ace-tool-call-text rounded-md border border-border bg-surface my-0.5 overflow-hidden"
       {...toolContextAttrs}
     >
       <button
@@ -260,9 +356,9 @@ export const ToolBlock = memo(function ToolBlock({ entry, onReviewToggle }) {
       >
         <span className="ace-spinner w-3 h-3 shrink-0" />
         <span className="font-semibold flex-1 min-w-0 truncate">{title}</span>
-        <span className="text-fg-mute text-[10px] shrink-0">{totalLines} 行</span>
-        <span className="text-fg-mute text-[10px] shrink-0">{formatBytes(totalBytes)}</span>
-        <span className="text-fg-mute text-[10px] shrink-0">{formatElapsed(liveElapsed)}</span>
+        <span className="text-fg-mute shrink-0">{totalLines} 行</span>
+        <span className="text-fg-mute shrink-0">{formatBytes(totalBytes)}</span>
+        <span className="text-fg-mute shrink-0">{formatElapsed(liveElapsed)}</span>
         <span className="ml-auto opacity-60 flex items-center shrink-0">
           <VsIcon name={expanded ? 'expandUp' : 'expandDown'} size={12} />
         </span>
@@ -270,7 +366,7 @@ export const ToolBlock = memo(function ToolBlock({ entry, onReviewToggle }) {
       {expanded && (
         <div className="px-2.5 pb-1.5">
           {hidden > 0 && (
-            <div className="text-fg-mute text-[10px] mt-1">... +{hidden} 行已折叠</div>
+            <div className="text-fg-mute mt-1">... +{hidden} 行已折叠</div>
           )}
           {tailLines.length > 0 && (
             <CopyableCodeFrame text={tailLines.join('\n')} className="mt-1">

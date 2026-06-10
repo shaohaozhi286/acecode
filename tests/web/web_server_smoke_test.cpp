@@ -1754,16 +1754,16 @@ TEST(WebServerHttp, CreateSessionWithBadJsonReturns400) {
 // 映射,这里补 route-level wiring:鉴权 + 落盘 + JSON 形态。配置文件指向
 // fixture 的 tmp_dir,绝不会污染真实 ~/.acecode/config.json。
 
-// 场景:POST /api/models 成功 → 200 + body 含 name/provider/model,
-// 关键安全契约:**响应里永远不能出现 api_key**(profile_to_safe_json 已剥离)。
-TEST(WebServerHttp, PostModelsCreatesSavedEntryWithoutApiKey) {
+// 场景:POST /api/models 成功 → 200 + body 含 name/provider/model/api_key,
+// 管理界面用 api_key 回填可显隐切换的输入框。
+TEST(WebServerHttp, PostModelsCreatesSavedEntryWithApiKey) {
     WebServerFixture fx;
     json req = {
         {"name", "smoke-openai"},
         {"provider", "openai"},
         {"model", "llama-3"},
         {"base_url", "http://localhost:1234/v1"},
-        {"api_key", "sk-secret-do-not-leak"},
+        {"api_key", "sk-secret"},
         {"request_headers", {
             {"Authorization", "Bearer {env:ACE_TOKEN}"},
             {"X-Team", "acecode"}
@@ -1778,14 +1778,14 @@ TEST(WebServerHttp, PostModelsCreatesSavedEntryWithoutApiKey) {
     EXPECT_EQ(j["provider"], "openai");
     EXPECT_EQ(j["model"], "llama-3");
     EXPECT_EQ(j["base_url"], "http://localhost:1234/v1");
+    EXPECT_EQ(j["api_key"], "sk-secret");
     EXPECT_EQ(j["request_headers"]["Authorization"], "Bearer {env:ACE_TOKEN}");
     EXPECT_EQ(j["request_headers"]["X-Team"], "acecode");
-    EXPECT_FALSE(j.contains("api_key")) << "api_key 必须从响应中剥离";
 
     // 落盘后 cfg 内存应已追加此条目
     ASSERT_EQ(fx.cfg.saved_models.size(), 2u);
     EXPECT_EQ(fx.cfg.saved_models.back().name, "smoke-openai");
-    EXPECT_EQ(fx.cfg.saved_models.back().api_key, "sk-secret-do-not-leak");
+    EXPECT_EQ(fx.cfg.saved_models.back().api_key, "sk-secret");
     EXPECT_EQ(fx.cfg.saved_models.back().request_headers.at("X-Team"), "acecode");
 }
 
@@ -1817,6 +1817,7 @@ TEST(WebServerHttp, PutModelsPreservesAndClearsRequestHeaders) {
                              cpr::Body{preserve_req.dump()});
     ASSERT_EQ(preserve.status_code, 200) << preserve.text;
     auto preserved = json::parse(preserve.text);
+    EXPECT_EQ(preserved["api_key"], "sk-secret");
     EXPECT_EQ(preserved["request_headers"]["X-Team"], "acecode");
     ASSERT_EQ(fx.cfg.saved_models.size(), 2u);
     EXPECT_EQ(fx.cfg.saved_models.back().api_key, "sk-secret");

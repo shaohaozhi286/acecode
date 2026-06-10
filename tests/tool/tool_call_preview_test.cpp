@@ -106,6 +106,36 @@ TEST(ToolCallPreview, SkillViewShowsSupportingFilePath) {
     EXPECT_EQ(preview, "skill_view  openspec-explore references/example.md");
 }
 
+// 场景 4d: AskUserQuestion 工具调用预览显示问题数量与首题摘要,避免
+// TUI/desktop 直接露出完整 JSON 参数。
+TEST(ToolCallPreview, AskUserQuestionShowsReadableQuestionSummary) {
+    nlohmann::json args = {
+        {"questions", nlohmann::json::array({
+            {
+                {"question", "希望我直接修改还是先给出方案让你确认?"},
+                {"header", "方式"},
+                {"options", nlohmann::json::array({
+                    {{"label", "直接修改"}, {"description", ""}},
+                    {{"label", "先给方案"}, {"description", ""}}
+                })}
+            },
+            {
+                {"question", "是否需要兼容旧版 API?"},
+                {"header", "兼容"},
+                {"options", nlohmann::json::array({
+                    {{"label", "需要"}, {"description", ""}},
+                    {{"label", "不需要"}, {"description", ""}}
+                })}
+            }
+        })}
+    };
+    auto preview = ToolExecutor::build_tool_call_preview("AskUserQuestion", args.dump());
+    EXPECT_NE(preview.find("AskUserQuestion"), std::string::npos);
+    EXPECT_NE(preview.find("2"), std::string::npos);
+    EXPECT_NE(preview.find("希望我直接修改"), std::string::npos);
+    EXPECT_TRUE(acecode::is_valid_utf8(preview));
+}
+
 // 场景 5: 未知工具 → 返回空字符串,TUI fallback 到 legacy 渲染。
 TEST(ToolCallPreview, UnknownToolReturnsEmpty) {
     nlohmann::json args = {{"any_field", "value"}};

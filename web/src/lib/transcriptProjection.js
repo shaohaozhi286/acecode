@@ -24,6 +24,12 @@ function isToolItem(item) {
   return item?.kind === 'tool';
 }
 
+function isAskUserQuestionResultTool(item) {
+  return isToolItem(item)
+    && Array.isArray(item.tool?.askUserQuestionResult?.items)
+    && item.tool.askUserQuestionResult.items.length > 0;
+}
+
 function isToolTranscriptMessage(item) {
   if (item?.kind !== 'msg') return false;
   const role = String(item.role || '').toLowerCase();
@@ -88,6 +94,7 @@ function isSuccessfulTaskComplete(item) {
 function isCompletedCollapsibleTool(item) {
   return isToolItem(item)
     && !isTaskCompleteTool(item)
+    && !isAskUserQuestionResultTool(item)
     && item.tool?.isDone === true;
 }
 
@@ -610,16 +617,27 @@ function preservedTurnPrefix(items) {
   return items.filter((item) => isUserMessage(item));
 }
 
-function finalProcessedItemsBefore(items, beforeIndex) {
+function appendFinalProcessedItems(out, items, beforeIndex, endItem) {
   const processed = [];
+  const flushProcessed = () => {
+    pushProcessedSummary(out, processed, endItem);
+    processed.length = 0;
+  };
+
   for (let i = 0; i < beforeIndex; i += 1) {
     const item = items[i];
     if (isUserMessage(item)) continue;
     if (isEmptyAssistantMessage(item)) continue;
     if (isTaskCompleteTool(item) || isTaskCompleteToolCallMessage(item)) continue;
-    processed.push(item);
+    if (isProcessedActivityItem(item)) {
+      processed.push(item);
+    } else {
+      flushProcessed();
+      out.push(item);
+    }
   }
-  return processed;
+
+  flushProcessed();
 }
 
 function pushProcessedSummary(out, processed, endItem) {
@@ -638,10 +656,10 @@ function projectFinalCollapsedTurn(items, options = {}) {
     const previousIndex = findPreviousSignificantIndex(items, lastIndex);
     const previous = previousIndex >= 0 ? items[previousIndex] : null;
     if (assistantHasText(previous)) {
-      pushProcessedSummary(out, finalProcessedItemsBefore(items, previousIndex), last);
+      appendFinalProcessedItems(out, items, previousIndex, last);
       out.push(previous);
     } else {
-      pushProcessedSummary(out, finalProcessedItemsBefore(items, lastIndex), last);
+      appendFinalProcessedItems(out, items, lastIndex, last);
     }
     out.push(makeCompletionSummaryItem(last));
     return out;
@@ -649,7 +667,7 @@ function projectFinalCollapsedTurn(items, options = {}) {
 
   if (!options.deferTrailingToolSummary && assistantHasText(last) && !isStreamingAssistant(last)) {
     const out = preservedTurnPrefix(items);
-    pushProcessedSummary(out, finalProcessedItemsBefore(items, lastIndex), last);
+    appendFinalProcessedItems(out, items, lastIndex, last);
     out.push(last);
     return out;
   }

@@ -169,6 +169,29 @@ TEST(ToolEventPayload, ToolEndSuccessWithoutSummaryFallback) {
     EXPECT_FALSE(p.contains("summary"));
 }
 
+// 场景: ToolResult.metadata 有 UI-only 字段时,tool_end 需要带给前端,
+// 例如 AskUserQuestion 完成后的确认卡片数据。
+TEST(ToolEventPayload, ToolEndCarriesResultMetadata) {
+    ToolResult r;
+    r.success = true;
+    r.metadata = {
+        {"ask_user_question_result", {
+            {"items", nlohmann::json::array({
+                {{"question", "Q?"}, {"answer", "A"}}
+            })}
+        }}
+    };
+
+    auto p = build_tool_end_payload("AskUserQuestion", r, 0.0, "");
+    ASSERT_TRUE(p.contains("metadata"));
+    ASSERT_TRUE(p["metadata"].contains("ask_user_question_result"));
+    const auto& items = p["metadata"]["ask_user_question_result"]["items"];
+    ASSERT_TRUE(items.is_array());
+    ASSERT_EQ(items.size(), 1u);
+    EXPECT_EQ(items[0]["question"], "Q?");
+    EXPECT_EQ(items[0]["answer"], "A");
+}
+
 // 场景: ToolResult.hunks 无值 → payload.hunks 总是空数组(不省略也不 null)。
 // 前端契约: 永远是 array,前端写 if (hunks.length) 不必先 contains 检查。
 TEST(ToolEventPayload, ToolEndAlwaysIncludesHunksField) {

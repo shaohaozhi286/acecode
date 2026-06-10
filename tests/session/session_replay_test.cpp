@@ -10,6 +10,7 @@
 #include "session/session_replay.hpp"
 #include "session/file_checkpoint_store.hpp"
 #include "session/tool_metadata_codec.hpp"
+#include "tool/ask_user_question_tool.hpp"
 #include "tool/tool_executor.hpp"
 #include "tool/diff_utils.hpp"
 #include "provider/llm_provider.hpp"
@@ -24,6 +25,7 @@ using acecode::DiffLineKind;
 using acecode::ToolExecutor;
 using acecode::ToolSummary;
 using acecode::TuiState;
+using acecode::build_ask_user_question_result_metadata;
 using acecode::encode_tool_hunks;
 using acecode::encode_tool_summary;
 using acecode::replay_session_messages;
@@ -252,6 +254,34 @@ TEST(SessionReplay, ToolMessageWithoutMetadataFallsBackToFold) {
     ASSERT_EQ(out.size(), 1u);
     EXPECT_EQ(out[0].role, "tool_result");
     EXPECT_EQ(out[0].content, "raw output");
+    EXPECT_TRUE(out[0].is_tool);
+    EXPECT_FALSE(out[0].summary.has_value());
+    EXPECT_FALSE(out[0].hunks.has_value());
+}
+
+// AskUserQuestion tool output remains provider-facing English, but TUI resume
+// should restore the compact Q/A display from metadata.
+TEST(SessionReplay, AskUserQuestionMetadataRestoresDisplayText) {
+    ChatMessage m;
+    m.role = "tool";
+    m.content = "User has answered your questions: \"Q1?\"=\"A1\"";
+    m.tool_call_id = "ask-1";
+    m.metadata = build_ask_user_question_result_metadata(
+        {"Q1?", "Q2?"},
+        {{"Q1?", "直接修改并补测试"}, {"Q2?", "onBeforeUnmount"}});
+
+    ToolExecutor tools;
+    auto out = replay_session_messages({m}, tools);
+
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_EQ(out[0].role, "tool_result");
+    EXPECT_EQ(out[0].content,
+              "已确认 2 项\n"
+              "Q  Q1?\n"
+              "A  直接修改并补测试\n"
+              "---\n"
+              "Q  Q2?\n"
+              "A  onBeforeUnmount");
     EXPECT_TRUE(out[0].is_tool);
     EXPECT_FALSE(out[0].summary.has_value());
     EXPECT_FALSE(out[0].hunks.has_value());

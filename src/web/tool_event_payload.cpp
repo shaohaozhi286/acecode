@@ -73,6 +73,9 @@ nlohmann::json build_tool_end_payload(
     if (result.summary.has_value()) {
         p["summary"] = tool_summary_to_json(*result.summary);
     }
+    if (result.metadata.is_object() && !result.metadata.empty()) {
+        p["metadata"] = result.metadata;
+    }
     if (!result.success && !output_snippet.empty()) {
         p["output"] = output_snippet;
     }

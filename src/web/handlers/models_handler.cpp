@@ -17,6 +17,7 @@ nlohmann::json entry_to_json(const ModelProfile& entry) {
     o["provider"]  = entry.provider;
     o["model"]     = entry.model;
     if (!entry.base_url.empty()) o["base_url"] = entry.base_url;
+    if (!entry.api_key.empty()) o["api_key"] = entry.api_key;
     if (entry.models_dev_provider_id.has_value()) {
         o["models_dev_provider_id"] = *entry.models_dev_provider_id;
     }
@@ -66,6 +67,7 @@ nlohmann::json model_state_to_json(const SessionModelState& state) {
     o["provider"] = state.provider;
     o["model"] = state.model;
     o["context_window"] = state.context_window;
+    o["deleted"] = state.deleted;
     return o;
 }
 
@@ -85,6 +87,7 @@ nlohmann::json profile_to_safe_json(const ModelProfile& entry) {
     o["provider"]  = entry.provider;
     o["model"]     = entry.model;
     if (!entry.base_url.empty()) o["base_url"] = entry.base_url;
+    if (!entry.api_key.empty()) o["api_key"] = entry.api_key;
     if (entry.models_dev_provider_id.has_value()) {
         o["models_dev_provider_id"] = *entry.models_dev_provider_id;
     }
@@ -100,7 +103,6 @@ nlohmann::json profile_to_safe_json(const ModelProfile& entry) {
     if (!entry.request_headers.empty()) {
         o["request_headers"] = entry.request_headers;
     }
-    // api_key 永不输出 — 安全契约
     return o;
 }
 

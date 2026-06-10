@@ -50,6 +50,7 @@ TEST(ModelsHandler, ListIncludesAllSavedModels) {
     EXPECT_EQ(arr[0]["name"], "copilot-fast");
     EXPECT_EQ(arr[1]["name"], "local-lm");
     EXPECT_TRUE(arr[1].contains("base_url"));
+    EXPECT_EQ(arr[1]["api_key"], "x");
     EXPECT_EQ(arr[1]["context_window"], 64000);
     EXPECT_EQ(arr[1]["capabilities"], nlohmann::json::array({"vision", "tool_use"}));
     EXPECT_EQ(arr[1]["request_headers"]["X-Team"], "acecode");
@@ -115,6 +116,7 @@ TEST(ModelsHandler, ModelStateToJsonIncludesCurrentSessionFields) {
     EXPECT_EQ(j["provider"], "copilot");
     EXPECT_EQ(j["model"], "gpt-5");
     EXPECT_EQ(j["context_window"], 400000);
+    EXPECT_EQ(j["deleted"], false);
 }
 
 // 场景: no-model session 也要序列化为空字段,前端用它显示“未配置模型”。
@@ -126,6 +128,22 @@ TEST(ModelsHandler, ModelStateToJsonAllowsEmptyModelState) {
     EXPECT_EQ(j["provider"], "");
     EXPECT_EQ(j["model"], "");
     EXPECT_EQ(j["context_window"], 0);
+    EXPECT_EQ(j["deleted"], false);
+}
+
+// 场景: saved_models.name 已被删除的 session 仍要把悬空 name 返回给
+// Desktop/Web,并显式标记 deleted 让 UI 显示红色 "(deleted)"。
+TEST(ModelsHandler, ModelStateToJsonIncludesDeletedFlag) {
+    SessionModelState state;
+    state.name = "fast";
+    state.deleted = true;
+
+    auto j = model_state_to_json(state);
+    EXPECT_EQ(j["name"], "fast");
+    EXPECT_EQ(j["provider"], "");
+    EXPECT_EQ(j["model"], "");
+    EXPECT_EQ(j["context_window"], 0);
+    EXPECT_EQ(j["deleted"], true);
 }
 
 // ------------------- 增删改 helper 测试 -------------------
@@ -161,11 +179,9 @@ TEST(ModelsHandler, ErrorToHttpStatusMapping) {
     EXPECT_EQ(http_status_for_edit_error(SavedModelEditError::INVALID_REQUEST_HEADER), 400);
 }
 
-// 触发场景:POST/PUT 成功后把 ModelProfile 序列化回去给前端。api_key 是
-// 敏感字段 — spec 安全契约:api_key 永不出现在 HTTP response 里。
-// 期望行为:profile_to_safe_json 输出永远不含 "api_key" key,即使输入有值。
-// 回归就泄露 api_key 给浏览器(F12 看 Network 直接看到)。
-TEST(ModelsHandler, ProfileToSafeJsonOmitsApiKey) {
+// 触发场景:POST/PUT 成功后把 ModelProfile 序列化回模型管理界面。
+// 期望行为:api_key 回填给管理表单,由前端字段逐字符 mask 并支持显隐切换。
+TEST(ModelsHandler, ProfileToSafeJsonIncludesApiKey) {
     ModelProfile p;
     p.name = "local";
     p.provider = "openai";
@@ -173,7 +189,7 @@ TEST(ModelsHandler, ProfileToSafeJsonOmitsApiKey) {
     p.base_url = "http://localhost/v1";
     p.api_key = "sk-secret";
     auto j = profile_to_safe_json(p);
-    EXPECT_FALSE(j.contains("api_key"));
+    EXPECT_EQ(j["api_key"], "sk-secret");
     EXPECT_EQ(j["base_url"], "http://localhost/v1");
     EXPECT_EQ(j["name"], "local");
 }
@@ -202,7 +218,7 @@ TEST(ModelsHandler, ProfileToSafeJsonIncludesCapabilities) {
     p.capabilities = {"vision", "tool_use"};
     auto j = profile_to_safe_json(p);
     EXPECT_EQ(j["capabilities"], nlohmann::json::array({"vision", "tool_use"}));
-    EXPECT_FALSE(j.contains("api_key"));
+    EXPECT_EQ(j["api_key"], "sk-secret");
 }
 
 // 触发场景:request_headers 是可编辑模板,响应可返回模板但不能解析环境变量。
@@ -220,7 +236,7 @@ TEST(ModelsHandler, ProfileToSafeJsonIncludesRequestHeaders) {
     auto j = profile_to_safe_json(p);
     EXPECT_EQ(j["request_headers"]["Authorization"], "Bearer {env:ACE_TOKEN}");
     EXPECT_EQ(j["request_headers"]["X-Team"], "acecode");
-    EXPECT_FALSE(j.contains("api_key"));
+    EXPECT_EQ(j["api_key"], "sk-secret");
 }
 
 // 触发场景:前端 POST /api/models 漏字段时,后端要给出明确的字段名,

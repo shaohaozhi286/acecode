@@ -67,6 +67,7 @@ export function StatusBar({
     selectedModelName,
     fallbackLabel: model,
   }), [model, modelOptions, selectedModelName]);
+  const modelDeleted = modelMenu.displayDeleted || String(model || '').includes('(deleted)');
   const selectPermissionMode = (nextMode) => {
     const normalized = normalizePermissionMode(nextMode);
     if (onPermissionModeChange) onPermissionModeChange(normalized);
@@ -92,7 +93,10 @@ export function StatusBar({
         title={modelMenu.displayLabel}
         aria-haspopup="listbox"
         aria-expanded={modelOpen}
-        className="h-[18px] px-1.5 py-0 rounded bg-surface-hi border border-transparent text-[10px] text-fg-mute outline-none hover:text-fg focus:border-accent disabled:opacity-60 disabled:cursor-wait inline-flex items-center gap-1"
+        className={clsx(
+          'h-[18px] px-1.5 py-0 rounded bg-surface-hi border border-transparent text-[10px] outline-none focus:border-accent disabled:opacity-60 disabled:cursor-wait inline-flex items-center gap-1',
+          modelDeleted ? 'text-danger hover:text-danger' : 'text-fg-mute hover:text-fg',
+        )}
       >
         <span className="shrink-0 whitespace-nowrap">{modelMenu.displayLabel}</span>
         <VsIcon name="glyphDown" size={9} className="opacity-70 shrink-0" />
@@ -112,7 +116,9 @@ export function StatusBar({
               onClick={() => selectModel(item.name)}
               className={clsx(
                 'w-full text-left px-2.5 py-1.5 rounded transition flex items-center gap-2',
-                item.active ? 'bg-accent-bg text-accent' : 'text-fg hover:bg-surface-hi',
+                item.deleted
+                  ? (item.active ? 'bg-danger-bg text-danger' : 'text-danger hover:bg-danger-bg')
+                  : (item.active ? 'bg-accent-bg text-accent' : 'text-fg hover:bg-surface-hi'),
               )}
               title={item.label}
             >
@@ -126,7 +132,15 @@ export function StatusBar({
       )}
     </div>
   ) : (
-    <span className="px-1.5 py-px rounded bg-surface-hi text-[10px] max-w-[220px] truncate" title={model}>{model}</span>
+    <span
+      className={clsx(
+        'px-1.5 py-px rounded bg-surface-hi text-[10px] max-w-[220px] truncate',
+        modelDeleted && 'text-danger',
+      )}
+      title={model}
+    >
+      {model}
+    </span>
   );
   const goalLabel = goal
     ? `${goal.status || 'goal'}${goal.token_budget ? ` ${goal.tokens_used || 0}/${goal.token_budget}` : ''}`

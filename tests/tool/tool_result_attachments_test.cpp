@@ -31,3 +31,26 @@ TEST(ToolResultAttachments, FormatToolResultCarriesAttachmentContentParts) {
     EXPECT_EQ(msg.content_parts[0]["attachment"]["blob_url"],
               "/api/sessions/sid/attachments/att_img/blob");
 }
+
+TEST(ToolResultAttachments, FormatToolResultCarriesUiMetadata) {
+    acecode::ToolResult result;
+    result.output = "User has answered your questions: \"Q?\"=\"A\"";
+    result.success = true;
+    result.metadata = {
+        {"ask_user_question_result", {
+            {"items", nlohmann::json::array({
+                {{"question", "Q?"}, {"answer", "A"}}
+            })}
+        }}
+    };
+
+    auto msg = acecode::ToolExecutor::format_tool_result("call-ask", result);
+
+    ASSERT_TRUE(msg.metadata.is_object());
+    ASSERT_TRUE(msg.metadata.contains("ask_user_question_result"));
+    const auto& items = msg.metadata["ask_user_question_result"]["items"];
+    ASSERT_TRUE(items.is_array());
+    ASSERT_EQ(items.size(), 1u);
+    EXPECT_EQ(items[0]["question"], "Q?");
+    EXPECT_EQ(items[0]["answer"], "A");
+}

@@ -99,6 +99,35 @@ run('assistant token streaming 被 final message 替换', () => {
   assert.equal(state.streamingId, null);
 });
 
+run('重复 replay 的 token seq 不会重复追加 streaming 文本', () => {
+  let state = loadTranscriptHistory(createTranscriptState({ title: 's1' }), {
+    messages: [
+      { id: 'u1', role: 'user', content: 'work', ts: 1 },
+    ],
+    events: [
+      { type: 'token', payload: { text: 'hel' }, seq: 2 },
+      { type: 'token', payload: { text: 'lo' }, seq: 3 },
+    ],
+  }).state;
+
+  state = reduceTranscriptEvent(state, { type: 'token', payload: { text: 'hel' }, seq: 2 }).state;
+  state = reduceTranscriptEvent(state, { type: 'token', payload: { text: 'lo' }, seq: 3 }).state;
+  state = reduceTranscriptEvent(state, { type: 'token', payload: { text: '!' }, seq: 4 }).state;
+
+  assert.equal(state.lastSeq, 4);
+  assert.deepEqual(state.items.map((item) => item.content), ['work', 'hello!']);
+});
+
+run('无 seq 的本地 transcript 事件仍会正常应用', () => {
+  let state = reduceMany([
+    { type: 'token', payload: { text: 'hello' }, seq: 1 },
+  ]);
+  state = reduceTranscriptEvent(state, { type: 'busy_changed', payload: { busy: true } }).state;
+  assert.equal(state.lastSeq, 1);
+  assert.equal(state.busy, true);
+  assert.equal(state.status, 'running');
+});
+
 run('空 token 不创建 assistant streaming 占位', () => {
   const state = reduceMany([
     { type: 'busy_changed', payload: { busy: true }, seq: 1 },
@@ -438,6 +467,35 @@ run('history load 将带 tool_hunks metadata 的 tool message 恢复为 tool ite
     { label: '-', value: '1' },
   ]);
   assert.deepEqual(loaded.items[1].tool.hunks, [hunk]);
+});
+
+run('history load 将 AskUserQuestion metadata 恢复为确认卡片工具项', () => {
+  const loaded = loadTranscriptHistory(createTranscriptState({ title: 's1' }), {
+    messages: [
+      { id: 'u1', role: 'user', content: 'confirm details', ts: 1 },
+      {
+        id: 't1',
+        role: 'tool',
+        content: 'User has answered your questions: "Q?"="A"',
+        tool_call_id: 'call-ask',
+        ts: 2,
+        metadata: {
+          ask_user_question_result: {
+            items: [
+              { question: '希望我直接修改还是先给出方案让你确认?', answer: '直接修改并补测试' },
+            ],
+          },
+        },
+      },
+    ],
+    events: [],
+  }).state;
+  assert.equal(loaded.items.length, 2);
+  assert.equal(loaded.items[1].kind, 'tool');
+  assert.equal(loaded.items[1].tool.toolCallId, 'call-ask');
+  assert.deepEqual(loaded.items[1].tool.askUserQuestionResult.items, [
+    { question: '希望我直接修改还是先给出方案让你确认?', answer: '直接修改并补测试' },
+  ]);
 });
 
 run('history load 将带 output attachment 的 tool message 恢复为 tool item', () => {
@@ -788,6 +846,35 @@ run('tool lifecycle 保留进度、summary、失败输出、hunks 和附件', ()
   assert.equal(tool.output, 'failed');
   assert.deepEqual(tool.hunks, [hunk]);
   assert.deepEqual(tool.attachments, [attachment]);
+});
+
+run('tool lifecycle 保留 AskUserQuestion 确认结果 metadata', () => {
+  const state = reduceMany([
+    { type: 'tool_start', payload: { tool: 'AskUserQuestion', tool_call_id: 'call-ask' }, seq: 1 },
+    {
+      type: 'tool_end',
+      payload: {
+        tool: 'AskUserQuestion',
+        tool_call_id: 'call-ask',
+        success: true,
+        metadata: {
+          ask_user_question_result: {
+            items: [
+              { question: '是否直接修改?', answer: '直接修改并补测试' },
+              { question: '清理时机?', answer: 'onBeforeUnmount' },
+            ],
+          },
+        },
+      },
+      seq: 2,
+    },
+  ]);
+  assert.equal(state.items.length, 1);
+  const tool = state.items[0].tool;
+  assert.equal(tool.isDone, true);
+  assert.equal(tool.success, true);
+  assert.equal(tool.askUserQuestionResult.items.length, 2);
+  assert.equal(tool.askUserQuestionResult.items[1].answer, 'onBeforeUnmount');
 });
 
 run('agent_progress 更新活动状态且 busy 结束时清理', () => {

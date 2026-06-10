@@ -37,6 +37,10 @@ function wheelDeltaForTabs(event, pageWidth) {
   return delta;
 }
 
+const TAB_DRAG_START_PX = 5;
+const TAB_EDGE_SCROLL_PX = 36;
+const TAB_EDGE_SCROLL_STEP = 16;
+
 function PreviewTabScrollbar({ scrollRef }) {
   const dragRef = useRef(null);
   const cleanupDragRef = useRef(null);
@@ -167,9 +171,14 @@ export function PreviewDetailsPanel({
   onActivateTab,
   onCloseTab,
   onCloseAll,
+  onReorderTab,
   onToggleMaximize,
 }) {
   const tabListRef = useRef(null);
+  const tabDragRef = useRef(null);
+  const tabAutoScrollFrameRef = useRef(null);
+  const suppressTabClickRef = useRef(false);
+  const [tabDragState, setTabDragState] = useState(null);
   const [wrapPreview, setWrapPreview] = usePreference(
     FILE_PREVIEW_WRAP_STORAGE_KEY,
     false,
@@ -213,6 +222,266 @@ export function PreviewDetailsPanel({
     el.scrollLeft = next;
   }, []);
 
+  const stopTabAutoScroll = useCallback(() => {
+    if (tabAutoScrollFrameRef.current != null) {
+      window.cancelAnimationFrame(tabAutoScrollFrameRef.current);
+      tabAutoScrollFrameRef.current = null;
+    }
+  }, []);
+
+  const suppressNextTabClick = useCallback(() => {
+    suppressTabClickRef.current = true;
+    window.setTimeout(() => {
+      suppressTabClickRef.current = false;
+    }, 0);
+  }, []);
+
+  const insertionTargetForPointer = useCallback((clientX) => {
+    const list = tabListRef.current;
+    if (!list) return null;
+    const tabEls = Array.from(list.querySelectorAll('.ace-preview-details-tab[data-preview-tab-key]'));
+    if (tabEls.length === 0) return null;
+
+    const firstRect = tabEls[0].getBoundingClientRect();
+    if (clientX <= firstRect.left) {
+      return { targetKey: tabEls[0].dataset.previewTabKey, placement: 'before' };
+    }
+
+    const lastEl = tabEls[tabEls.length - 1];
+    const lastRect = lastEl.getBoundingClientRect();
+    if (clientX >= lastRect.right) {
+      return { targetKey: lastEl.dataset.previewTabKey, placement: 'after' };
+    }
+
+    for (const tabEl of tabEls) {
+      const rect = tabEl.getBoundingClientRect();
+      if (clientX >= rect.left && clientX <= rect.right) {
+        return {
+          targetKey: tabEl.dataset.previewTabKey,
+          placement: clientX < rect.left + rect.width / 2 ? 'before' : 'after',
+        };
+      }
+    }
+
+    for (const tabEl of tabEls) {
+      const rect = tabEl.getBoundingClientRect();
+      if (clientX < rect.left + rect.width / 2) {
+        return { targetKey: tabEl.dataset.previewTabKey, placement: 'before' };
+      }
+    }
+    return { targetKey: lastEl.dataset.previewTabKey, placement: 'after' };
+  }, []);
+
+  const updateDragTarget = useCallback((clientX) => {
+    const drag = tabDragRef.current;
+    if (!drag) return;
+    const target = insertionTargetForPointer(clientX);
+    if (!target) return;
+    drag.targetKey = target.targetKey;
+    drag.placement = target.placement;
+    setTabDragState({
+      sourceKey: drag.sourceKey,
+      targetKey: target.targetKey,
+      placement: target.placement,
+    });
+  }, [insertionTargetForPointer]);
+
+  const ensureTabAutoScroll = useCallback(() => {
+    if (tabAutoScrollFrameRef.current != null) return;
+    const tick = () => {
+      const drag = tabDragRef.current;
+      if (!drag?.dragging || !drag.autoScrollDir) {
+        tabAutoScrollFrameRef.current = null;
+        return;
+      }
+      const list = tabListRef.current;
+      if (list) {
+        list.scrollLeft += drag.autoScrollDir * TAB_EDGE_SCROLL_STEP;
+        updateDragTarget(drag.lastClientX);
+      }
+      tabAutoScrollFrameRef.current = window.requestAnimationFrame(tick);
+    };
+    tabAutoScrollFrameRef.current = window.requestAnimationFrame(tick);
+  }, [updateDragTarget]);
+
+  const updateTabAutoScroll = useCallback((clientX) => {
+    const drag = tabDragRef.current;
+    const list = tabListRef.current;
+    if (!drag || !list) return;
+    const rect = list.getBoundingClientRect();
+    let dir = 0;
+    if (clientX < rect.left + TAB_EDGE_SCROLL_PX && list.scrollLeft > 0) dir = -1;
+    else if (
+      clientX > rect.right - TAB_EDGE_SCROLL_PX
+      && list.scrollLeft < list.scrollWidth - list.clientWidth - 1
+    ) dir = 1;
+    drag.autoScrollDir = dir;
+    if (dir) ensureTabAutoScroll();
+  }, [ensureTabAutoScroll]);
+
+  const finishTabDrag = useCallback((commit) => {
+    const drag = tabDragRef.current;
+    if (!drag) return;
+    drag.cleanup?.();
+    tabDragRef.current = null;
+    document.body.classList.remove('ace-preview-tab-reordering');
+    setTabDragState(null);
+    if (drag.dragging) suppressNextTabClick();
+    if (commit && drag.dragging && drag.targetKey) {
+      onReorderTab?.(drag.sourceKey, drag.targetKey, drag.placement || 'before');
+    }
+  }, [onReorderTab, suppressNextTabClick]);
+
+  const handleTabPointerDown = useCallback((event, tabKey) => {
+    if (event.button !== 0) return;
+    if (tabDragRef.current) return;
+    if (event.target?.closest?.('.ace-preview-details-tab-close')) return;
+
+    finishTabDrag(false);
+    const pointerId = event.pointerId;
+    const pointerTarget = event.currentTarget;
+    try {
+      pointerTarget.setPointerCapture?.(pointerId);
+    } catch {
+      // Best effort only; window-level listeners below still own the drag.
+    }
+
+    const cleanup = () => {
+      stopTabAutoScroll();
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onCancel);
+      try {
+        pointerTarget.releasePointerCapture?.(pointerId);
+      } catch {
+        // The pointer may already be released if the element unmounted.
+      }
+    };
+
+    const beginDragIfNeeded = (moveEvent) => {
+      const drag = tabDragRef.current;
+      if (!drag || drag.dragging) return true;
+      const dx = moveEvent.clientX - drag.startX;
+      const dy = moveEvent.clientY - drag.startY;
+      if (Math.hypot(dx, dy) < TAB_DRAG_START_PX) return false;
+      drag.dragging = true;
+      document.body.classList.add('ace-preview-tab-reordering');
+      return true;
+    };
+
+    function onMove(moveEvent) {
+      const drag = tabDragRef.current;
+      if (!drag || moveEvent.pointerId !== pointerId) return;
+      drag.lastClientX = moveEvent.clientX;
+      if (!beginDragIfNeeded(moveEvent)) return;
+      moveEvent.preventDefault();
+      updateDragTarget(moveEvent.clientX);
+      updateTabAutoScroll(moveEvent.clientX);
+    }
+
+    function onUp(upEvent) {
+      const drag = tabDragRef.current;
+      if (!drag || upEvent.pointerId !== pointerId) return;
+      if (drag.dragging) upEvent.preventDefault();
+      finishTabDrag(true);
+    }
+
+    function onCancel(cancelEvent) {
+      const drag = tabDragRef.current;
+      if (!drag || cancelEvent.pointerId !== pointerId) return;
+      finishTabDrag(false);
+    }
+
+    tabDragRef.current = {
+      sourceKey: tabKey,
+      targetKey: tabKey,
+      placement: 'before',
+      startX: event.clientX,
+      startY: event.clientY,
+      lastClientX: event.clientX,
+      dragging: false,
+      autoScrollDir: 0,
+      cleanup,
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onCancel);
+  }, [
+    finishTabDrag,
+    stopTabAutoScroll,
+    updateDragTarget,
+    updateTabAutoScroll,
+  ]);
+
+  const handleTabMouseDown = useCallback((event, tabKey) => {
+    if (event.button !== 0) return;
+    if (tabDragRef.current) return;
+    if (event.target?.closest?.('.ace-preview-details-tab-close')) return;
+
+    finishTabDrag(false);
+
+    const cleanup = () => {
+      stopTabAutoScroll();
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+
+    const beginDragIfNeeded = (moveEvent) => {
+      const drag = tabDragRef.current;
+      if (!drag || drag.dragging) return true;
+      const dx = moveEvent.clientX - drag.startX;
+      const dy = moveEvent.clientY - drag.startY;
+      if (Math.hypot(dx, dy) < TAB_DRAG_START_PX) return false;
+      drag.dragging = true;
+      document.body.classList.add('ace-preview-tab-reordering');
+      return true;
+    };
+
+    function onMove(moveEvent) {
+      const drag = tabDragRef.current;
+      if (!drag) return;
+      drag.lastClientX = moveEvent.clientX;
+      if (!beginDragIfNeeded(moveEvent)) return;
+      moveEvent.preventDefault();
+      updateDragTarget(moveEvent.clientX);
+      updateTabAutoScroll(moveEvent.clientX);
+    }
+
+    function onUp(upEvent) {
+      const drag = tabDragRef.current;
+      if (!drag) return;
+      if (drag.dragging) upEvent.preventDefault();
+      finishTabDrag(true);
+    }
+
+    tabDragRef.current = {
+      sourceKey: tabKey,
+      targetKey: tabKey,
+      placement: 'before',
+      startX: event.clientX,
+      startY: event.clientY,
+      lastClientX: event.clientX,
+      dragging: false,
+      autoScrollDir: 0,
+      cleanup,
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }, [
+    finishTabDrag,
+    stopTabAutoScroll,
+    updateDragTarget,
+    updateTabAutoScroll,
+  ]);
+
+  useEffect(() => () => {
+    const drag = tabDragRef.current;
+    drag?.cleanup?.();
+    tabDragRef.current = null;
+    document.body.classList.remove('ace-preview-tab-reordering');
+    stopTabAutoScroll();
+  }, [stopTabAutoScroll]);
+
   useLayoutEffect(() => {
     const el = tabListRef.current;
     if (!el || !active?.key) return;
@@ -245,9 +514,29 @@ export function PreviewDetailsPanel({
                   type="button"
                   role="tab"
                   aria-selected={selected}
-                  className={clsx('ace-preview-details-tab', selected && 'is-active')}
+                  data-preview-tab-key={tab.key}
+                  className={clsx(
+                    'ace-preview-details-tab',
+                    selected && 'is-active',
+                    tabDragState?.sourceKey === tab.key && 'is-dragging',
+                    tabDragState?.targetKey === tab.key
+                      && tabDragState.placement === 'before'
+                      && 'is-drop-before',
+                    tabDragState?.targetKey === tab.key
+                      && tabDragState.placement === 'after'
+                      && 'is-drop-after',
+                  )}
                   title={tab.path || label}
-                  onClick={() => onActivateTab?.(tab.key)}
+                  onPointerDown={(event) => handleTabPointerDown(event, tab.key)}
+                  onMouseDown={(event) => handleTabMouseDown(event, tab.key)}
+                  onClick={(event) => {
+                    if (suppressTabClickRef.current) {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      return;
+                    }
+                    onActivateTab?.(tab.key);
+                  }}
                 >
                   {isFileTab && (
                     <FileTypeIcon
@@ -263,6 +552,12 @@ export function PreviewDetailsPanel({
                     className="ace-preview-details-tab-close"
                     title="关闭标签页"
                     aria-label={`关闭 ${label}`}
+                    onPointerDown={(event) => {
+                      event.stopPropagation();
+                    }}
+                    onMouseDown={(event) => {
+                      event.stopPropagation();
+                    }}
                     onClick={(event) => {
                       event.preventDefault();
                       event.stopPropagation();

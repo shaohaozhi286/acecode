@@ -7,6 +7,7 @@
 #include "tool_result_storage.hpp"
 #include "output_attachments.hpp"
 #include "turn_timing.hpp"
+#include "../tool/ask_user_question_tool.hpp"
 #include "../tool/tool_executor.hpp"
 
 #include <nlohmann/json.hpp>
@@ -97,6 +98,11 @@ std::vector<TuiState::Message> replay_session_messages(
             TuiState::Message tr_row;
             tr_row.role = "tool_result";
             tr_row.content = msg.content;
+            std::string ask_display =
+                format_ask_user_question_result_display(msg.metadata);
+            if (!ask_display.empty()) {
+                tr_row.content = std::move(ask_display);
+            }
             std::string attachment_fallback =
                 output_attachments_fallback_text(msg.content_parts);
             if (!attachment_fallback.empty()) {

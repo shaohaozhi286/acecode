@@ -31,7 +31,7 @@ export function sessionRefFromCreateResponse(response, fallbackRef = {}, health 
   if (r.created_at || fallback.created_at) next.created_at = r.created_at || fallback.created_at;
   if (r.updated_at || fallback.updated_at) next.updated_at = r.updated_at || fallback.updated_at;
 
-  for (const key of ['workspaceName', 'port', 'token', 'context_window', 'model', 'model_name', 'model_preset', 'provider']) {
+  for (const key of ['workspaceName', 'port', 'token', 'context_window', 'model', 'model_name', 'model_preset', 'provider', 'deleted']) {
     if (r[key] != null) next[key] = r[key];
     else if (fallback[key] != null) next[key] = fallback[key];
   }

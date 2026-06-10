@@ -16,6 +16,7 @@
 #include "config/config.hpp"
 #include "config/saved_models.hpp"
 #include "session/local_session_client.hpp"
+#include "session/session_manager.hpp"
 #include "session/session_registry.hpp"
 #include "session/session_storage.hpp"
 #include "session/thread_goal_store.hpp"
@@ -250,6 +251,13 @@ AppConfig make_model_cfg() {
     cfg.saved_models.push_back(fast);
 
     return cfg;
+}
+
+void remove_saved_model(AppConfig& cfg, const std::string& name) {
+    cfg.saved_models.erase(
+        std::remove_if(cfg.saved_models.begin(), cfg.saved_models.end(),
+                       [&](const ModelProfile& entry) { return entry.name == name; }),
+        cfg.saved_models.end());
 }
 
 std::vector<acecode::ChatMessage> load_registry_session_messages(
@@ -856,6 +864,50 @@ TEST(SessionRegistry, CreateUsesExplicitSessionModelState) {
     std::filesystem::remove_all(cwd);
 }
 
+// 场景: active session 只保存 saved_models.name。若全局配置删掉该 name,
+// Web/Desktop 查询当前模型和 active 列表都应得到 deleted 状态,而不是继续
+// 暴露旧 provider/model 当成可用模型。
+TEST(SessionRegistry, ActiveModelStateMarksDeletedWhenSavedModelRemoved) {
+    auto cwd = temp_cwd("active_deleted_model");
+    auto project_dir = SessionStorage::get_project_dir(cwd.string());
+    std::filesystem::remove_all(project_dir);
+
+    auto cfg = make_model_cfg();
+    ToolExecutor tools;
+    PermissionManager permissions;
+    SessionRegistryDeps deps;
+    deps.provider_accessor = [] { return std::shared_ptr<acecode::LlmProvider>{}; };
+    deps.tools = &tools;
+    deps.cwd = cwd.string();
+    deps.config = &cfg;
+    deps.template_permissions = &permissions;
+    SessionRegistry registry(std::move(deps));
+
+    SessionOptions opts;
+    opts.model_name = "fast";
+    auto id = registry.create(opts);
+    remove_saved_model(cfg, "fast");
+
+    auto state = registry.current_model_state(id);
+    ASSERT_TRUE(state.has_value());
+    EXPECT_EQ(state->name, "fast");
+    EXPECT_TRUE(state->deleted);
+    EXPECT_TRUE(state->provider.empty());
+    EXPECT_TRUE(state->model.empty());
+    EXPECT_EQ(state->context_window, 0);
+
+    auto active = registry.list_active();
+    ASSERT_EQ(active.size(), 1u);
+    EXPECT_EQ(active[0].model_name, "fast");
+    EXPECT_TRUE(active[0].model_deleted);
+    EXPECT_TRUE(active[0].provider.empty());
+    EXPECT_TRUE(active[0].model.empty());
+    EXPECT_EQ(active[0].context_window, 0);
+
+    std::filesystem::remove_all(project_dir);
+    std::filesystem::remove_all(cwd);
+}
+
 // 场景: 新装无 saved_models 时,session model state 必须保持空,不能暴露
 // daemon/default 或 Copilot 这种假模型给 Web/Desktop。
 TEST(SessionRegistry, CreateWithoutConfiguredModelsExposesEmptyModelState) {
@@ -988,6 +1040,63 @@ TEST(SessionRegistry, SwitchModelIsSessionScopedAndPersistsMetadata) {
     std::filesystem::remove_all(cwd);
 }
 
+// 场景: inactive disk meta 明确保存了 model_preset,但该 saved model 已被
+// 删除。历史会话查询应返回悬空 name + deleted,不能退回 provider/model。
+TEST(SessionRegistry, ModelStateFromMetaMarksDeletedSavedModelPreset) {
+    auto cfg = make_model_cfg();
+    remove_saved_model(cfg, "fast");
+    ToolExecutor tools;
+    PermissionManager permissions;
+    SessionRegistryDeps deps;
+    deps.provider_accessor = [] { return std::shared_ptr<acecode::LlmProvider>{}; };
+    deps.tools = &tools;
+    deps.cwd = "/tmp/model_state_meta";
+    deps.config = &cfg;
+    deps.template_permissions = &permissions;
+    SessionRegistry registry(std::move(deps));
+
+    acecode::SessionMeta meta;
+    meta.id = "20260609-010203-dead";
+    meta.model_preset = "fast";
+    meta.provider = "copilot";
+    meta.model = "fast-model";
+
+    auto state = registry.model_state_from_meta(meta);
+    ASSERT_TRUE(state.has_value());
+    EXPECT_EQ(state->name, "fast");
+    EXPECT_TRUE(state->deleted);
+    EXPECT_TRUE(state->provider.empty());
+    EXPECT_TRUE(state->model.empty());
+}
+
+// 场景: 老 metadata 没有 model_preset 时仍按 provider/model 构造 ad-hoc
+// 状态,不能因为 saved_models 里没有同名 entry 就误标 deleted。
+TEST(SessionRegistry, LegacyMetaWithoutPresetKeepsAdHocFallback) {
+    auto cfg = make_model_cfg();
+    remove_saved_model(cfg, "fast");
+    ToolExecutor tools;
+    PermissionManager permissions;
+    SessionRegistryDeps deps;
+    deps.provider_accessor = [] { return std::shared_ptr<acecode::LlmProvider>{}; };
+    deps.tools = &tools;
+    deps.cwd = "/tmp/model_state_legacy_meta";
+    deps.config = &cfg;
+    deps.template_permissions = &permissions;
+    SessionRegistry registry(std::move(deps));
+
+    acecode::SessionMeta meta;
+    meta.id = "20260609-020304-beef";
+    meta.provider = "copilot";
+    meta.model = "fast-model";
+
+    auto state = registry.model_state_from_meta(meta);
+    ASSERT_TRUE(state.has_value());
+    EXPECT_EQ(state->name.rfind("(session:", 0), 0u);
+    EXPECT_FALSE(state->deleted);
+    EXPECT_EQ(state->provider, "copilot");
+    EXPECT_EQ(state->model, "fast-model");
+}
+
 // 场景: 同一个共享 daemon registry 可以同时持有不同 workspace 的 active
 // session,且每个 AgentLoop / SessionManager 都保持各自 cwd。
 TEST(SessionRegistry, CreateTwoWorkspaceSessionsKeepSeparateCwds) {
@@ -1092,6 +1201,53 @@ TEST(SessionRegistry, ResumeDiskSessionRestoresLoopHistory) {
 
     EXPECT_TRUE(registry.resume(id)) << "同 daemon 同 id 二次 resume 应复用 active entry";
     EXPECT_EQ(registry.size(), 1u);
+
+    std::filesystem::remove_all(project_dir);
+    std::filesystem::remove_all(cwd);
+}
+
+// 场景: daemon resume 历史会话时,若 meta.model_preset 指向已删除 saved model,
+// registry 应创建悬空 model state,并且不构造旧 provider。
+TEST(SessionRegistry, ResumeDiskSessionMarksDeletedSavedModelPreset) {
+    auto cwd = temp_cwd("resume_deleted_model");
+    auto project_dir = SessionStorage::get_project_dir(cwd.string());
+    std::filesystem::remove_all(project_dir);
+    const std::string id = "20260609-030405-cafe";
+
+    {
+        acecode::SessionManager sm;
+        sm.start_session(cwd.string(), "copilot", "fast-model", id, "fast", "daemon");
+        sm.on_message(registry_msg("user", "remember deleted model"));
+        sm.finalize();
+    }
+
+    auto cfg = make_model_cfg();
+    remove_saved_model(cfg, "fast");
+    ToolExecutor tools;
+    PermissionManager permissions;
+    SessionRegistryDeps deps;
+    deps.provider_accessor = [] { return std::shared_ptr<acecode::LlmProvider>{}; };
+    deps.tools = &tools;
+    deps.cwd = cwd.string();
+    deps.config = &cfg;
+    deps.template_permissions = &permissions;
+    SessionRegistry registry(std::move(deps));
+
+    ASSERT_TRUE(registry.resume(id));
+    auto state = registry.current_model_state(id);
+    ASSERT_TRUE(state.has_value());
+    EXPECT_EQ(state->name, "fast");
+    EXPECT_TRUE(state->deleted);
+    EXPECT_TRUE(state->provider.empty());
+    EXPECT_TRUE(state->model.empty());
+
+    auto* entry = registry.lookup(id);
+    ASSERT_NE(entry, nullptr);
+    ASSERT_TRUE(entry->provider_slot);
+    {
+        std::lock_guard<std::mutex> lk(entry->provider_slot->mu);
+        EXPECT_EQ(entry->provider_slot->provider, nullptr);
+    }
 
     std::filesystem::remove_all(project_dir);
     std::filesystem::remove_all(cwd);

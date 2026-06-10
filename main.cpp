@@ -399,6 +399,12 @@ static Color token_progress_color(int percent) {
     return Color::GreenLight;
 }
 
+static Color status_line_color(const std::string& status_line) {
+    return status_line.find("(deleted)") != std::string::npos
+        ? Color::RedLight
+        : Color::White;
+}
+
 static Element render_token_usage_chip(const acecode::TuiState& state) {
     if (state.token_status.empty()) {
         return text("");
@@ -591,7 +597,8 @@ static Element render_regular_sidebar(const acecode::TuiState& state,
                               color(Color::YellowLight));
     }
     if (!state.status_line.empty()) {
-        bottom_rows.push_back(paragraph(state.status_line) | color(Color::White));
+        bottom_rows.push_back(paragraph(state.status_line) |
+                              color(status_line_color(state.status_line)));
     }
     if (!cwd_display.empty()) {
         bottom_rows.push_back(paragraph(cwd_display) | color(Color::CyanLight) | dim);
@@ -2499,7 +2506,9 @@ static int run_interactive_app(const CliOptions& cli,
             // "(session:..." 开头,触发我们后面的系统消息提示。
             SessionMeta resumed_meta = session_manager.load_session_meta(target_id);
             std::optional<SessionModelState> resumed_model_state;
-            if (!resumed_meta.provider.empty() && !resumed_meta.model.empty()) {
+            if (auto deleted_state = deleted_model_state_from_meta(config, resumed_meta)) {
+                resumed_model_state = deleted_state;
+            } else if (!resumed_meta.provider.empty() && !resumed_meta.model.empty()) {
                 ModelProfile resumed_entry = resolve_effective_model(
                     config, cwd_override, std::optional<SessionMeta>{resumed_meta});
                 ApplyModelDeps deps;
@@ -3862,12 +3871,16 @@ static int run_interactive_app(const CliOptions& cli,
                     screen.PostEvent(Event::Custom);
                     return true;
                 }
-                if (event == Event::Return || event == Event::Tab) {
+                if (event == Event::Tab) {
                     commit_selection();
                     screen.PostEvent(Event::Custom);
                     return true;
                 }
-                if (event == Event::Escape) {
+                if (event == Event::Return) {
+                    commit_selection();
+                    // Let the ordinary Enter handler below submit/dispatch the
+                    // completed slash command.
+                } else if (event == Event::Escape) {
                     state.slash_dropdown_active = false;
                     state.slash_dropdown_items.clear();
                     state.slash_dropdown_selected = 0;
@@ -5043,7 +5056,7 @@ static int run_interactive_app(const CliOptions& cli,
                 state.update_notice.empty()
                     ? emptyElement()
                     : paragraph(state.update_notice) | color(Color::YellowLight),
-                text(state.status_line) | color(Color::White),
+                text(state.status_line) | color(status_line_color(state.status_line)),
                 text(cwd_display) | color(Color::CyanLight) | dim,
             }) | bgcolor(Color::RGB(0, 30, 45));
         } else {
@@ -5073,7 +5086,7 @@ static int run_interactive_app(const CliOptions& cli,
                         state.update_notice.empty()
                             ? emptyElement()
                             : paragraph(state.update_notice) | color(Color::YellowLight),
-                        text(state.status_line) | color(Color::White),
+                        text(state.status_line) | color(status_line_color(state.status_line)),
                         text(cwd_display) | color(Color::CyanLight) | dim,
                     }),
                     text("  "),

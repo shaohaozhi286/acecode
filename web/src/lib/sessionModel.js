@@ -5,12 +5,14 @@ export function normalizeModelState(raw) {
     provider: String(raw.provider || ''),
     model: String(raw.model || ''),
     contextWindow: Number(raw.context_window || raw.contextWindow || 0) || 0,
+    deleted: !!(raw.deleted || raw.model_deleted || raw.modelDeleted),
   };
 }
 
 export function modelDisplayLabel(state, fallback = '加载中') {
   const normalized = normalizeModelState(state);
   if (!normalized) return fallback;
+  if (normalized.deleted && normalized.name) return `${normalized.name} (deleted)`;
   if (normalized.name) return normalized.name;
   if (normalized.provider && normalized.model) return `${normalized.provider}/${normalized.model}`;
   return normalized.model || fallback;
@@ -45,6 +47,7 @@ export function normalizeModelOptions(list) {
 export function optionLabel(option) {
   const state = normalizeModelState(option);
   if (!state) return '';
+  if (state.deleted && state.name) return `${state.name} (deleted)`;
   if (state.name && state.provider && state.model) {
     return `${state.name} (${state.provider}/${state.model})`;
   }
@@ -71,6 +74,7 @@ export function buildStatusBarModelMenu({ modelOptions = [], selectedModelName =
     label: optionLabel(option),
     provider: option.provider,
     model: option.model,
+    deleted: option.deleted,
     active: option.name === selected,
   }));
   const widthLabel = [displayLabel, ...items.map((item) => item.label)]
@@ -79,6 +83,7 @@ export function buildStatusBarModelMenu({ modelOptions = [], selectedModelName =
     ), '');
   return {
     displayLabel,
+    displayDeleted: !!selectedOption?.deleted,
     widthLabel: widthLabel || displayLabel,
     items,
   };

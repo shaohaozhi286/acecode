@@ -113,11 +113,15 @@ struct SessionOptions {
 
 struct SessionModelState {
     // Selected saved_models entry name, or an ad-hoc "(session:...)"
-    // name when a resumed session no longer matches a configured preset.
+    // name for legacy metadata without a saved-model reference.
     std::string name;
     std::string provider;
     std::string model;
     int         context_window = 0;
+    // True when name points to a saved model that no longer exists in global
+    // configuration. provider/model stay empty so callers do not treat it as
+    // a usable provider.
+    bool        deleted = false;
 };
 
 // ----- Session 元数据(给 list_sessions 用) -----
@@ -133,6 +137,7 @@ struct SessionInfo {
     std::string provider;
     std::string model;
     int         context_window = 0;
+    bool        model_deleted = false;
     std::string title;
     int         message_count = 0;
     int         turn_count = 0;

@@ -43,6 +43,10 @@ std::string provider_error_search_text(const acecode::ProviderErrorInfo& info) {
     return ascii_lower(info.display_message + "\n" + info.raw_body + "\n" + info.pretty_json);
 }
 
+std::string compact_trigger_name(bool is_auto) {
+    return is_auto ? "auto" : "manual";
+}
+
 int find_tail_start_for_user_turns(const std::vector<acecode::ChatMessage>& messages, int user_turns) {
     const int target_turns = std::max(1, user_turns);
     int turns_found = 0;
@@ -196,7 +200,11 @@ std::vector<ChatMessage> truncate_head_for_ptl_retry(
     int groups_to_drop
 ) {
     auto groups = group_messages_by_api_round(messages);
-    if (groups.empty()) return messages;
+    if (groups.empty()) {
+        LOG_WARN("Compact PTL retry cannot truncate because no API round groups were found; messages=" +
+                 std::to_string(messages.size()));
+        return messages;
+    }
 
     // Always keep at least 1 group
     int drop = std::min(groups_to_drop, static_cast<int>(groups.size()) - 1);
@@ -204,7 +212,12 @@ std::vector<ChatMessage> truncate_head_for_ptl_retry(
         // Default: drop ~20% of groups
         drop = std::max(1, static_cast<int>(groups.size()) / 5);
     }
-    if (drop <= 0) return messages;
+    if (drop <= 0) {
+        LOG_WARN("Compact PTL retry cannot truncate without dropping the only remaining API round; groups=" +
+                 std::to_string(groups.size()) +
+                 " messages=" + std::to_string(messages.size()));
+        return messages;
+    }
 
     int start_from = groups[drop].start_index;
     std::vector<ChatMessage> result(messages.begin() + start_from, messages.end());
@@ -217,6 +230,13 @@ std::vector<ChatMessage> truncate_head_for_ptl_retry(
         result.insert(result.begin(), std::move(synthetic));
     }
 
+    LOG_WARN("Compact PTL retry truncated oldest API rounds; groups_before=" +
+             std::to_string(groups.size()) +
+             " groups_dropped=" + std::to_string(drop) +
+             " messages_before=" + std::to_string(messages.size()) +
+             " messages_after=" + std::to_string(result.size()) +
+             " estimated_tokens_before=" + std::to_string(estimate_message_tokens(messages)) +
+             " estimated_tokens_after=" + std::to_string(estimate_message_tokens(result)));
     return result;
 }
 
@@ -342,14 +362,26 @@ ContextRescueResult rescue_compact_messages(
     ContextRescueResult result;
     result.estimated_tokens_before = estimate_message_tokens(messages);
 
+    LOG_WARN("Rescue compact start; messages=" + std::to_string(messages.size()) +
+             " estimated_tokens_before=" + std::to_string(result.estimated_tokens_before) +
+             " preferred_tail_user_turns=" + std::to_string(preferred_tail_user_turns) +
+             " cwd=" + log_truncate(cwd, 200));
+
     if (messages.empty()) {
         result.error = "No conversation history to rescue compact.";
+        LOG_WARN("Rescue compact aborted: " + result.error);
         return result;
     }
 
     for (int tail_turns : rescue_tail_candidates(preferred_tail_user_turns)) {
         const int tail_start = find_tail_start_for_user_turns(messages, tail_turns);
+        LOG_WARN("Rescue compact candidate; protected_user_turns=" +
+                 std::to_string(tail_turns) +
+                 " tail_start=" + std::to_string(tail_start) +
+                 " removable_prefix_messages=" + std::to_string(std::max(0, tail_start)));
         if (tail_start <= 0) {
+            LOG_WARN("Rescue compact candidate rejected; no removable prefix for protected_user_turns=" +
+                     std::to_string(tail_turns));
             continue;
         }
 
@@ -382,6 +414,10 @@ ContextRescueResult rescue_compact_messages(
 
         const int after = estimate_message_tokens(compacted);
         if (after >= result.estimated_tokens_before) {
+            LOG_WARN("Rescue compact candidate rejected; estimated tokens did not shrink" +
+                     std::string(" before=") + std::to_string(result.estimated_tokens_before) +
+                     " after=" + std::to_string(after) +
+                     " protected_user_turns=" + std::to_string(tail_turns));
             continue;
         }
 
@@ -392,11 +428,20 @@ ContextRescueResult rescue_compact_messages(
         result.protected_user_turns = tail_turns;
         result.marker_text = summary_msg.content;
         result.compacted_messages = std::move(compacted);
+        LOG_WARN("Rescue compact accepted; messages_removed=" +
+                 std::to_string(result.messages_removed) +
+                 " messages_after=" + std::to_string(result.compacted_messages.size()) +
+                 " estimated_tokens_before=" + std::to_string(result.estimated_tokens_before) +
+                 " estimated_tokens_after=" + std::to_string(result.estimated_tokens_after) +
+                 " protected_user_turns=" + std::to_string(result.protected_user_turns));
         return result;
     }
 
     result.error = "Current request is too large to rescue by compacting earlier history.";
     result.estimated_tokens_after = result.estimated_tokens_before;
+    LOG_WARN("Rescue compact failed; " + result.error +
+             " messages=" + std::to_string(messages.size()) +
+             " estimated_tokens=" + std::to_string(result.estimated_tokens_before));
     return result;
 }
 
@@ -414,8 +459,15 @@ CompactResult compact_messages(
 ) {
     CompactResult result;
 
+    LOG_INFO("Compact start; trigger=" + compact_trigger_name(is_auto) +
+             " messages=" + std::to_string(messages.size()) +
+             " keep_turns=" + std::to_string(keep_turns) +
+             " cwd=" + log_truncate(cwd, 200));
+
     if (messages.empty()) {
         result.error = "No conversation history to compact.";
+        LOG_WARN("Compact aborted; trigger=" + compact_trigger_name(is_auto) +
+                 " error=" + result.error);
         return result;
     }
 
@@ -442,6 +494,11 @@ CompactResult compact_messages(
     // Need at least some messages to compress after the boundary
     if (keep_from <= active_start) {
         result.error = "Not enough conversation history to compact.";
+        LOG_INFO("Compact skipped; trigger=" + compact_trigger_name(is_auto) +
+                 " reason=not_enough_history" +
+                 " active_start=" + std::to_string(active_start) +
+                 " keep_from=" + std::to_string(keep_from) +
+                 " total_messages=" + std::to_string(messages.size()));
         return result;
     }
 
@@ -451,8 +508,21 @@ CompactResult compact_messages(
     int tokens_before = estimate_message_tokens(to_summarize);
     if (tokens_before < kMinimumTokensToCompact) {
         result.error = "Not enough conversation history to compact.";
+        LOG_INFO("Compact skipped; trigger=" + compact_trigger_name(is_auto) +
+                 " reason=below_minimum_tokens" +
+                 " tokens_to_summarize=" + std::to_string(tokens_before) +
+                 " minimum_tokens=" + std::to_string(kMinimumTokensToCompact) +
+                 " messages_to_summarize=" + std::to_string(to_summarize.size()));
         return result;
     }
+
+    LOG_INFO("Compact summarization prepared; trigger=" + compact_trigger_name(is_auto) +
+             " boundary_start=" + std::to_string(boundary_start) +
+             " active_start=" + std::to_string(active_start) +
+             " keep_from=" + std::to_string(keep_from) +
+             " messages_to_summarize=" + std::to_string(to_summarize.size()) +
+             " messages_to_keep=" + std::to_string(messages.size() - keep_from) +
+             " estimated_tokens_to_summarize=" + std::to_string(tokens_before));
 
     // Build the structured compact prompt
     std::string compact_prompt = get_compact_prompt(is_auto);
@@ -495,20 +565,36 @@ CompactResult compact_messages(
         // Check abort before the (potentially long) LLM call
         if (abort_flag && abort_flag->load()) {
             result.error = "Compaction cancelled.";
+            LOG_WARN("Compact cancelled before summarization call; trigger=" +
+                     compact_trigger_name(is_auto) +
+                     " attempt=" + std::to_string(attempt + 1));
             return result;
         }
 
         try {
+            LOG_INFO("Compact summarization call; trigger=" + compact_trigger_name(is_auto) +
+                     " attempt=" + std::to_string(attempt + 1) +
+                     " of=" + std::to_string(MAX_PTL_RETRIES + 1) +
+                     " summarize_messages=" + std::to_string(summarize_input.size()) +
+                     " estimated_tokens=" + std::to_string(estimate_message_tokens(summarize_input)) +
+                     " request_messages=" + std::to_string(summary_messages.size()));
             ChatResponse resp = provider.chat(summary_messages, {});
 
             // Check abort after the LLM call returns
             if (abort_flag && abort_flag->load()) {
                 result.error = "Compaction cancelled.";
+                LOG_WARN("Compact cancelled after summarization call; trigger=" +
+                         compact_trigger_name(is_auto) +
+                         " attempt=" + std::to_string(attempt + 1));
                 return result;
             }
 
             if (resp.finish_reason == "error" && is_ptl_error(resp.content)) {
-                LOG_WARN("Compact: PTL error on attempt " + std::to_string(attempt + 1));
+                LOG_WARN("Compact PTL error; trigger=" + compact_trigger_name(is_auto) +
+                         " attempt=" + std::to_string(attempt + 1) +
+                         " summarize_messages=" + std::to_string(summarize_input.size()) +
+                         " estimated_tokens=" + std::to_string(estimate_message_tokens(summarize_input)) +
+                         " error=" + log_truncate(resp.content, 500));
                 if (attempt < MAX_PTL_RETRIES) {
                     summarize_input = truncate_head_for_ptl_retry(summarize_input);
                     continue;
@@ -520,25 +606,40 @@ CompactResult compact_messages(
 
             if (resp.finish_reason == "error") {
                 result.error = "Summarization failed: " + resp.content;
+                LOG_ERROR("Compact summarization failed; trigger=" + compact_trigger_name(is_auto) +
+                          " attempt=" + std::to_string(attempt + 1) +
+                          " error=" + log_truncate(resp.content, 500));
                 return result;
             }
 
             summary_text = resp.content;
             if (summary_text.empty()) {
                 result.error = "Summarization returned empty response.";
+                LOG_ERROR("Compact summarization returned empty response; trigger=" +
+                          compact_trigger_name(is_auto) +
+                          " attempt=" + std::to_string(attempt + 1));
                 return result;
             }
+            LOG_INFO("Compact summarization succeeded; trigger=" + compact_trigger_name(is_auto) +
+                     " attempt=" + std::to_string(attempt + 1) +
+                     " summary_bytes=" + std::to_string(summary_text.size()));
             ptl_success = true;
             break;
 
         } catch (const std::exception& e) {
             std::string err_msg = e.what();
             if (is_ptl_error(err_msg) && attempt < MAX_PTL_RETRIES) {
-                LOG_WARN("Compact: PTL exception on attempt " + std::to_string(attempt + 1));
+                LOG_WARN("Compact PTL exception; trigger=" + compact_trigger_name(is_auto) +
+                         " attempt=" + std::to_string(attempt + 1) +
+                         " summarize_messages=" + std::to_string(summarize_input.size()) +
+                         " estimated_tokens=" + std::to_string(estimate_message_tokens(summarize_input)) +
+                         " error=" + log_truncate(err_msg, 500));
                 summarize_input = truncate_head_for_ptl_retry(summarize_input);
                 continue;
             }
-            LOG_ERROR("Compact: summarization failed: " + err_msg);
+            LOG_ERROR("Compact summarization threw; trigger=" + compact_trigger_name(is_auto) +
+                      " attempt=" + std::to_string(attempt + 1) +
+                      " error=" + log_truncate(err_msg, 500));
             result.error = "Summarization failed: " + err_msg;
             return result;
         }
@@ -546,6 +647,8 @@ CompactResult compact_messages(
 
     if (!ptl_success) {
         result.error = "Compaction failed after PTL retries.";
+        LOG_ERROR("Compact failed after PTL retries; trigger=" + compact_trigger_name(is_auto) +
+                  " max_retries=" + std::to_string(MAX_PTL_RETRIES));
         return result;
     }
 
@@ -596,6 +699,12 @@ CompactResult compact_messages(
     result.summary_text = summary_text;
     result.compacted_messages = std::move(new_messages);
 
+    LOG_INFO("Compact complete; trigger=" + compact_trigger_name(is_auto) +
+             " messages_compressed=" + std::to_string(result.messages_compressed) +
+             " messages_before=" + std::to_string(messages.size()) +
+             " messages_after=" + std::to_string(result.compacted_messages.size()) +
+             " estimated_tokens_saved=" + std::to_string(result.estimated_tokens_saved) +
+             " summary_bytes=" + std::to_string(result.summary_text.size()));
     return result;
 }
 

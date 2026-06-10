@@ -93,6 +93,9 @@ ChatMessage ToolExecutor::format_tool_result(const std::string& tool_call_id, co
     msg.role = "tool";
     msg.content = ensure_utf8(result.output);
     msg.tool_call_id = tool_call_id;
+    if (result.metadata.is_object() && !result.metadata.empty()) {
+        msg.metadata = result.metadata;
+    }
     if (result.has_attachments()) {
         msg.content_parts = output_attachments_to_content_parts(result.attachments);
     }
@@ -128,6 +131,21 @@ std::string ToolExecutor::build_tool_call_preview(const std::string& tool_name,
                     preview += j["file_path"].get<std::string>();
                 }
                 preview = truncate_utf8_prefix(preview, 80);
+                return tool_name + "  " + preview;
+            }
+        } else if (tool_name == "AskUserQuestion") {
+            if (j.contains("questions") && j["questions"].is_array()) {
+                const auto& questions = j["questions"];
+                std::string preview = "询问 " + std::to_string(questions.size()) + " 个确认项";
+                if (!questions.empty() && questions[0].is_object() &&
+                    questions[0].contains("question") &&
+                    questions[0]["question"].is_string()) {
+                    std::string first = questions[0]["question"].get<std::string>();
+                    first = truncate_utf8_prefix(first, 50);
+                    if (!first.empty()) {
+                        preview += ": " + first;
+                    }
+                }
                 return tool_name + "  " + preview;
             }
         } else if (tool_name.rfind("browser_", 0) == 0) {

@@ -50,6 +50,8 @@ Daemon session multiplexing uses `SessionRegistry`. Each session entry owns its 
 
 [src/skills/](src/skills) discovers `SKILL.md` files from configured global, project, and external skill directories. Skill metadata is read from YAML frontmatter at startup; full bodies are loaded lazily through skill invocation or the `skill_view` tool.
 
+Proactive skill discovery (`inject-skill-index-into-context`): a compact skill index (name + description + optional `whenToUse` frontmatter, grouped by category) is injected each request into the session-context system-reminder built by `build_session_context_prompt` — the same per-request, never-persisted block that carries project instructions and the memory index. Budget is 1% of the context window in chars (4 chars/token, 8000-char fallback), 250 chars per entry (UTF-8-safe truncation); over budget degrades to names-only, then tail-cut with a `(+N more — call skills_list)` marker. The static `# Skills` prompt section points at this index ("err on the side of loading"); `skills_list` remains the fallback enumerator only. Without this index the model has zero visibility into installed skills and never invokes them proactively.
+
 [src/memory/](src/memory) stores Markdown memory entries under `~/.acecode/memory/` and rewrites an index on upsert/remove. `memory_write` is constrained to that directory even under broad permission modes.
 
 [src/project_instructions/](src/project_instructions) loads configured project-instruction filenames from the global config directory and then from the project hierarchy, outer-first, subject to per-file and aggregate byte caps. The repository root intentionally keeps only canonical docs; do not add duplicate root instruction files for this repository.

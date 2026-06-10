@@ -18,7 +18,9 @@
 
 using acecode::AskQuestion;
 using acecode::AskOption;
+using acecode::build_ask_user_question_result_metadata;
 using acecode::format_ask_answers;
+using acecode::format_ask_user_question_result_display;
 using acecode::make_rejected_ask_result;
 using acecode::validate_ask_user_question_args;
 
@@ -180,6 +182,54 @@ TEST(AskUserQuestionFormatTest, SingleQuestionSingleAnswer) {
     std::map<std::string, std::string> ans{{"Which library?", "axios"}};
     EXPECT_EQ(format_ask_answers(order, ans),
               "User has answered your questions: \"Which library?\"=\"axios\"");
+}
+
+// 场景:成功问答的 UI metadata 保留原始问题顺序和最终答案文本,供
+// desktop/web 渲染确认卡片,但不参与 provider-visible output 拼接。
+TEST(AskUserQuestionFormatTest, StructuredResultMetadataKeepsOrderedPairs) {
+    std::vector<std::string> order{"Q1?", "Q2?"};
+    std::map<std::string, std::string> ans{
+        {"Q1?", "直接修改并补测试"},
+        {"Q2?", "onBeforeUnmount"}
+    };
+
+    auto meta = build_ask_user_question_result_metadata(order, ans);
+    ASSERT_TRUE(meta.contains("ask_user_question_result"));
+    const auto& result = meta["ask_user_question_result"];
+    ASSERT_TRUE(result["items"].is_array());
+    ASSERT_EQ(result["items"].size(), 2u);
+    EXPECT_EQ(result["items"][0]["question"], "Q1?");
+    EXPECT_EQ(result["items"][0]["answer"], "直接修改并补测试");
+    EXPECT_EQ(result["items"][1]["question"], "Q2?");
+    EXPECT_EQ(result["items"][1]["answer"], "onBeforeUnmount");
+}
+
+// 场景:TUI 等文本界面可以从同一份 UI metadata 生成紧凑 Q/A 留档,
+// 而不是显示 provider-visible 的英文 tool output。
+TEST(AskUserQuestionFormatTest, StructuredResultMetadataFormatsDisplayText) {
+    std::vector<std::string> order{"Q1?", "Q2?"};
+    std::map<std::string, std::string> ans{
+        {"Q1?", "直接修改并补测试"},
+        {"Q2?", "onBeforeUnmount"}
+    };
+
+    auto meta = build_ask_user_question_result_metadata(order, ans);
+
+    EXPECT_EQ(format_ask_user_question_result_display(meta),
+              "已确认 2 项\n"
+              "Q  Q1?\n"
+              "A  直接修改并补测试\n"
+              "---\n"
+              "Q  Q2?\n"
+              "A  onBeforeUnmount");
+}
+
+// 场景:缺失或畸形 metadata 不应污染 UI,调用方据此回退旧输出。
+TEST(AskUserQuestionFormatTest, MalformedResultMetadataHasNoDisplayText) {
+    EXPECT_TRUE(format_ask_user_question_result_display(nlohmann::json::object()).empty());
+    EXPECT_TRUE(format_ask_user_question_result_display({
+        {"ask_user_question_result", {{"items", nlohmann::json::array({42})}}}
+    }).empty());
 }
 
 // 场景:两题、第二题为 multi-select(调用方已经把多个 label 用 ", "

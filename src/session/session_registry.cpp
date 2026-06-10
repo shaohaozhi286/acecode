@@ -50,7 +50,7 @@ current_provider_model(const SessionRegistryDeps& deps,
 }
 
 const ModelProfile* find_profile_by_name(const AppConfig& cfg,
-                                         const std::string& name) {
+                                          const std::string& name) {
     if (name.empty()) return nullptr;
     for (const auto& entry : cfg.saved_models) {
         if (entry.name == name) return &entry;
@@ -80,6 +80,22 @@ SessionModelState state_from_profile(const AppConfig& cfg,
     state.context_window = resolve_model_profile_context_window_nonblocking(
         cfg, profile, cfg.context_window);
     return state;
+}
+
+SessionModelState deleted_state_from_name(const std::string& name) {
+    SessionModelState state;
+    state.name = name;
+    state.deleted = true;
+    return state;
+}
+
+void mark_deleted_if_model_name_missing(const AppConfig& cfg, SessionModelState& state) {
+    if (state.name.empty() || state.name.rfind("(session:", 0) == 0) return;
+    if (find_profile_by_name(cfg, state.name) != nullptr) return;
+    state.provider.clear();
+    state.model.clear();
+    state.context_window = 0;
+    state.deleted = true;
 }
 
 struct ResolvedSessionModel {
@@ -137,6 +153,14 @@ ResolvedSessionModel resolve_session_model(const SessionRegistryDeps& deps,
                 profile = resolve_effective_model(*deps.config, std::nullopt, std::nullopt);
             }
         } else if (resumed_meta) {
+            if (!resumed_meta->model_preset.empty() &&
+                find_profile_by_name(*deps.config, resumed_meta->model_preset) == nullptr) {
+                LOG_WARN("[registry] session model preset '" + resumed_meta->model_preset +
+                         "' was deleted from saved_models");
+                ResolvedSessionModel deleted;
+                deleted.state = deleted_state_from_name(resumed_meta->model_preset);
+                return deleted;
+            }
             profile = resolve_effective_model(
                 *deps.config, cwd_override, std::optional<SessionMeta>{*resumed_meta});
         } else {
@@ -763,7 +787,11 @@ SessionRegistry::current_model_state(const std::string& id) const {
     std::lock_guard<std::mutex> lk(mu_);
     auto it = entries_.find(id);
     if (it == entries_.end() || !it->second) return std::nullopt;
-    return it->second->model_state;
+    auto state = it->second->model_state;
+    if (deps_.config) {
+        mark_deleted_if_model_name_missing(*deps_.config, state);
+    }
+    return state;
 }
 
 std::optional<PermissionMode>
@@ -887,9 +915,15 @@ bool SessionRegistry::switch_model(const std::string& id,
 std::optional<SessionModelState>
 SessionRegistry::model_state_from_meta(const SessionMeta& meta) const {
     if (meta.id.empty() || !deps_.config) return std::nullopt;
+    if (!meta.model_preset.empty() &&
+        find_profile_by_name(*deps_.config, meta.model_preset) == nullptr) {
+        return deleted_state_from_name(meta.model_preset);
+    }
     auto profile = resolve_effective_model(
         *deps_.config, std::nullopt, std::optional<SessionMeta>{meta});
-    return state_from_profile(*deps_.config, profile);
+    auto state = state_from_profile(*deps_.config, profile);
+    mark_deleted_if_model_name_missing(*deps_.config, state);
+    return state;
 }
 
 void SessionRegistry::destroy(const std::string& id) {
@@ -931,10 +965,15 @@ std::vector<SessionInfo> SessionRegistry::list_active() const {
         if (entry->perm) {
             info.permission_mode = PermissionManager::mode_name(entry->perm->mode());
         }
-        info.provider = entry->provider;
-        info.model = entry->model;
-        info.model_name = entry->model_state.name;
-        info.context_window = entry->model_state.context_window;
+        auto model_state = entry->model_state;
+        if (deps_.config) {
+            mark_deleted_if_model_name_missing(*deps_.config, model_state);
+        }
+        info.provider = model_state.provider;
+        info.model = model_state.model;
+        info.model_name = model_state.name;
+        info.context_window = model_state.context_window;
+        info.model_deleted = model_state.deleted;
         out.push_back(std::move(info));
     }
     return out;

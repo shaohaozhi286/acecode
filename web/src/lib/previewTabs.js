@@ -13,11 +13,42 @@ export function visiblePreviewTabs(state, { scopeKey = '', sessionId = '' } = {}
   const source = state && typeof state === 'object' ? state : {};
   const fileTabs = source.fileTabsByScope?.[scopeKey] || [];
   const changeTab = sessionId ? source.changeTabsBySession?.[sessionId] : null;
-  return changeTab ? [...fileTabs, changeTab] : fileTabs.slice();
+  const naturalTabs = changeTab ? [...fileTabs, changeTab] : fileTabs.slice();
+  return applyVisibleTabOrder(naturalTabs, source.tabOrderByView?.[viewKey(scopeKey, sessionId)]);
 }
 
 function viewKey(scopeKey, sessionId) {
   return `${scopeKey || ''}::${sessionId || ''}`;
+}
+
+function applyVisibleTabOrder(tabs, order) {
+  if (!Array.isArray(order) || order.length === 0 || tabs.length <= 1) return tabs.slice();
+  const tabsByKey = new Map(tabs.map((tab) => [tab.key, tab]));
+  const used = new Set();
+  const ordered = [];
+  order.forEach((key) => {
+    if (used.has(key) || !tabsByKey.has(key)) return;
+    used.add(key);
+    ordered.push(tabsByKey.get(key));
+  });
+  tabs.forEach((tab) => {
+    if (used.has(tab.key)) return;
+    used.add(tab.key);
+    ordered.push(tab);
+  });
+  return ordered;
+}
+
+function removeKeysFromOrders(orderMap, keysToRemove) {
+  const keys = new Set(keysToRemove.filter(Boolean));
+  if (!orderMap || keys.size === 0) return orderMap || {};
+  const next = {};
+  Object.entries(orderMap).forEach(([key, order]) => {
+    if (!Array.isArray(order)) return;
+    const filtered = order.filter((tabKey) => !keys.has(tabKey));
+    if (filtered.length > 0) next[key] = filtered;
+  });
+  return next;
 }
 
 function activeKeyFor(state, scopeKey, sessionId) {
@@ -133,26 +164,63 @@ export function updateSessionChangesTab(state, {
   };
 }
 
+export function reorderPreviewTab(state, {
+  scopeKey = '',
+  sessionId = '',
+  sourceKey = '',
+  targetKey = '',
+  placement = 'before',
+} = {}) {
+  const source = state && typeof state === 'object' ? state : {};
+  if (!sourceKey || !targetKey || sourceKey === targetKey) return source;
+  const tabs = visiblePreviewTabs(source, { scopeKey, sessionId });
+  const keys = tabs.map((tab) => tab.key);
+  if (!keys.includes(sourceKey) || !keys.includes(targetKey)) return source;
+
+  const withoutSource = keys.filter((key) => key !== sourceKey);
+  const targetIndex = withoutSource.indexOf(targetKey);
+  if (targetIndex < 0) return source;
+  const insertIndex = placement === 'after' ? targetIndex + 1 : targetIndex;
+  const nextOrder = [
+    ...withoutSource.slice(0, insertIndex),
+    sourceKey,
+    ...withoutSource.slice(insertIndex),
+  ];
+
+  return {
+    ...source,
+    tabOrderByView: {
+      ...(source.tabOrderByView || {}),
+      [viewKey(scopeKey, sessionId)]: nextOrder,
+    },
+  };
+}
+
 export function closePreviewTab(state, { scopeKey = '', sessionId = '', tabKey = '' } = {}) {
   if (!tabKey) return state || {};
   const source = state && typeof state === 'object' ? state : {};
+  const visibleBeforeClose = visiblePreviewTabs(source, { scopeKey, sessionId });
   if (tabKey.startsWith('file:')) {
     const tabs = source.fileTabsByScope?.[scopeKey] || [];
     const nextTabs = tabs.filter((tab) => tab.key !== tabKey);
     const nextFileTabs = { ...(source.fileTabsByScope || {}) };
     if (nextTabs.length > 0) nextFileTabs[scopeKey] = nextTabs;
     else delete nextFileTabs[scopeKey];
+    const nextVisibleActive = nextActiveAfterClose(visibleBeforeClose, tabKey);
     return {
       ...source,
       fileTabsByScope: nextFileTabs,
       activeTabByScope: {
         ...(source.activeTabByScope || {}),
-        [scopeKey]: nextActiveAfterClose(tabs, tabKey),
+        [scopeKey]: nextVisibleActive.startsWith('file:')
+          ? nextVisibleActive
+          : nextActiveAfterClose(tabs, tabKey),
       },
       activeTabByView: {
         ...(source.activeTabByView || {}),
-        [viewKey(scopeKey, sessionId)]: nextActiveAfterClose(visiblePreviewTabs(source, { scopeKey, sessionId }), tabKey),
+        [viewKey(scopeKey, sessionId)]: nextVisibleActive,
       },
+      tabOrderByView: removeKeysFromOrders(source.tabOrderByView, [tabKey]),
     };
   }
   if (tabKey.startsWith('session-changes:')) {
@@ -162,7 +230,7 @@ export function closePreviewTab(state, { scopeKey = '', sessionId = '', tabKey =
     delete nextActive[sessionId];
     const nextActiveByView = { ...(source.activeTabByView || {}) };
     nextActiveByView[viewKey(scopeKey, sessionId)] = nextActiveAfterClose(
-      visiblePreviewTabs(source, { scopeKey, sessionId }),
+      visibleBeforeClose,
       tabKey,
     );
     return {
@@ -170,6 +238,7 @@ export function closePreviewTab(state, { scopeKey = '', sessionId = '', tabKey =
       changeTabsBySession: nextChangeTabs,
       activeTabBySession: nextActive,
       activeTabByView: nextActiveByView,
+      tabOrderByView: removeKeysFromOrders(source.tabOrderByView, [tabKey]),
     };
   }
   return source;
@@ -177,6 +246,7 @@ export function closePreviewTab(state, { scopeKey = '', sessionId = '', tabKey =
 
 export function closeVisiblePreviewTabs(state, { scopeKey = '', sessionId = '' } = {}) {
   const source = state && typeof state === 'object' ? state : {};
+  const closedKeys = visiblePreviewTabs(source, { scopeKey, sessionId }).map((tab) => tab.key);
   const nextFileTabs = { ...(source.fileTabsByScope || {}) };
   const nextActiveByScope = { ...(source.activeTabByScope || {}) };
   const nextActiveByView = { ...(source.activeTabByView || {}) };
@@ -198,6 +268,7 @@ export function closeVisiblePreviewTabs(state, { scopeKey = '', sessionId = '' }
     changeTabsBySession: nextChangeTabs,
     activeTabBySession: nextActiveBySession,
     activeTabByView: nextActiveByView,
+    tabOrderByView: removeKeysFromOrders(source.tabOrderByView, closedKeys),
   };
 }
 

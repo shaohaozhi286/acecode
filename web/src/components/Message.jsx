@@ -9,7 +9,7 @@ import { memo, useCallback, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { renderMarkdown } from '../lib/markdown.js';
 import { codeTextFromCopyButtonTarget, copyTextToClipboard } from '../lib/codeBlockCopy.js';
-import { relativeTime } from '../lib/format.js';
+import { clsx, relativeTime } from '../lib/format.js';
 import { buildCompactMessagePreview } from '../lib/compactMessagePreview.js';
 import { assistantChromeState } from '../lib/assistantAvatarDisplay.js';
 import { CopyableCodeFrame } from './CopyableCodeFrame.jsx';
@@ -217,13 +217,17 @@ function SystemRow({ role, content, metadata }) {
   const customLabel = metadata && typeof metadata.compact_label === 'string'
     ? metadata.compact_label
     : '';
+  const isToolCompact = role === 'tool_call' || role === 'tool_result' || customLabel === '工具调用 / 返回';
   const { label, text, preview, lineCount, charCount } = useMemo(
     () => buildCompactMessagePreview({ role, content, label: customLabel }),
     [role, content, customLabel],
   );
 
   return (
-    <div className="self-stretch bg-surface-alt border border-dashed border-border rounded-md text-[12px] text-fg-2 overflow-hidden">
+    <div className={clsx(
+      'self-stretch bg-surface-alt border border-dashed border-border rounded-md text-fg-2 overflow-hidden',
+      isToolCompact ? 'ace-tool-call-text' : 'text-[12px]',
+    )}>
       <button
         type="button"
         className="w-full px-3 py-1.5 flex items-center gap-2 text-left text-fg-mute hover:text-fg hover:bg-surface-hi transition"

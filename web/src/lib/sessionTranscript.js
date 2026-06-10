@@ -127,6 +127,22 @@ function eventTs(msg) {
   return transcriptTimestampMs(msg) || Date.now();
 }
 
+function eventSeq(msg) {
+  return typeof msg?.seq === 'number' && Number.isFinite(msg.seq) ? msg.seq : null;
+}
+
+function isStaleSequencedEvent(state, msg) {
+  const seq = eventSeq(msg);
+  return seq !== null && seq <= (state?.lastSeq || 0);
+}
+
+function markEventSeqApplied(state, msg) {
+  const seq = eventSeq(msg);
+  if (seq !== null && seq > (state.lastSeq || 0)) {
+    state.lastSeq = seq;
+  }
+}
+
 function terminationNoticeText(payload = {}) {
   const source = payload.source || '';
   const reason = String(payload.reason || payload.message || '').trim();
@@ -186,6 +202,20 @@ function normalizePersistedToolSummary(metadata) {
     icon: typeof raw.icon === 'string' ? raw.icon : '',
     metrics: normalizeSummaryMetrics(raw.metrics),
   };
+}
+
+function normalizeAskUserQuestionResult(metadataOrResult) {
+  const raw = metadataOrResult?.ask_user_question_result || metadataOrResult?.askUserQuestionResult || metadataOrResult;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const items = Array.isArray(raw.items) ? raw.items : [];
+  const normalized = items
+    .filter((item) => item && typeof item === 'object' && !Array.isArray(item))
+    .map((item) => ({
+      question: String(item.question ?? item.q ?? ''),
+      answer: String(item.answer ?? item.a ?? ''),
+    }))
+    .filter((item) => item.question || item.answer);
+  return normalized.length > 0 ? { items: normalized } : null;
 }
 
 function readRuntimeTurnCount(data) {
@@ -316,8 +346,9 @@ function historyItemFromMessage(next, m) {
   if ((m?.role || '') === 'tool' && metadata) {
     const summary = normalizePersistedToolSummary(metadata);
     const hunks = normalizePersistedToolHunks(metadata);
+    const askUserQuestionResult = normalizeAskUserQuestionResult(metadata);
     const attachments = attachmentsFromContentParts(m.content_parts);
-    if (summary || hunks.length > 0 || attachments.length > 0) {
+    if (summary || hunks.length > 0 || attachments.length > 0 || askUserQuestionResult) {
       return {
         kind: 'tool',
         id: allocateItemId(next),
@@ -341,6 +372,8 @@ function historyItemFromMessage(next, m) {
           output: m.content || '',
           hunks,
           attachments,
+          metadata,
+          askUserQuestionResult,
         },
         ts,
       };
@@ -529,14 +562,17 @@ export function resetTranscriptForSession(state, { title = '', isLive = false } 
 }
 
 export function reduceTranscriptEvent(state, msg) {
-  const next = cloneState(state || createTranscriptState());
+  const current = state || createTranscriptState();
+  if (isStaleSequencedEvent(current, msg)) {
+    return { state: current, effects: [] };
+  }
+
+  const next = cloneState(current);
   const effects = [];
   const t = msg?.type || '';
   const p = msg?.payload || {};
 
-  if (typeof msg?.seq === 'number' && msg.seq > (next.lastSeq || 0)) {
-    next.lastSeq = msg.seq;
-  }
+  markEventSeqApplied(next, msg);
 
   switch (t) {
     case 'transcript_replace': {
@@ -665,6 +701,8 @@ export function reduceTranscriptEvent(state, msg) {
         output: '',
         hunks: [],
         attachments: [],
+        metadata: null,
+        askUserQuestionResult: null,
       };
       next.items = [...next.items, { kind: 'tool', id, tool, ts: eventTs(msg) }];
       break;
@@ -709,6 +747,8 @@ export function reduceTranscriptEvent(state, msg) {
             output: p.output || '',
             hunks: Array.isArray(p.hunks) ? p.hunks : [],
             attachments: normalizeAttachmentList(p.attachments),
+            metadata: p.metadata || item.tool.metadata || null,
+            askUserQuestionResult: normalizeAskUserQuestionResult(p.metadata) || item.tool.askUserQuestionResult || null,
             elapsed: p.elapsed_seconds || item.tool.elapsed,
             toolCallId: p.tool_call_id || item.tool.toolCallId || '',
             toolIndex: p.tool_index ?? item.tool.toolIndex ?? null,
@@ -829,7 +869,7 @@ export function loadTranscriptHistory(state, data = {}) {
   };
 
   for (const ev of (Array.isArray(data.events) ? data.events : [])) {
-    if (typeof ev?.seq === 'number' && ev.seq > (next.lastSeq || 0)) next.lastSeq = ev.seq;
+    if (isStaleSequencedEvent(next, ev)) continue;
     if (ev?.type === 'token' || ev?.type === 'reasoning') {
       pendingStreamEvents.push(ev);
       continue;
@@ -839,6 +879,7 @@ export function loadTranscriptHistory(state, data = {}) {
       const key = messageKey(p.role || 'system', p.content || '');
       if (seenMessages.has(key)) {
         pendingStreamEvents = [];
+        markEventSeqApplied(next, ev);
         continue;
       }
       seenMessages.add(key);

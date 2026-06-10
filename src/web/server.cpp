@@ -712,8 +712,21 @@ struct WebServer::Impl {
         return token_usage_has_values(usage) ? token_usage_to_json(usage) : json(nullptr);
     }
 
+    bool session_model_deleted(const std::string& model_name) const {
+        if (model_name.empty() || model_name.rfind("(session:", 0) == 0 || !deps.app_config) {
+            return false;
+        }
+        for (const auto& entry : deps.app_config->saved_models) {
+            if (entry.name == model_name) return false;
+        }
+        return true;
+    }
+
     json session_info_to_json(const SessionInfo& s, const SessionMeta* m) const {
         json o;
+        const std::string model_name =
+            !s.model_name.empty() ? s.model_name : (m ? m->model_preset : "");
+        const bool model_deleted = s.model_deleted || session_model_deleted(model_name);
         o["id"]            = s.id;
         o["active"]        = true;
         o["status"]        = s.busy ? "running" : "idle";
@@ -723,11 +736,12 @@ struct WebServer::Impl {
         o["summary"]       = !s.summary.empty() ? s.summary : (m ? m->summary : "");
         o["created_at"]    = !s.created_at.empty() ? s.created_at : (m ? m->created_at : "");
         o["updated_at"]    = !s.updated_at.empty() ? s.updated_at : (m ? m->updated_at : "");
-        o["provider"]      = !s.provider.empty() ? s.provider : (m ? m->provider : "");
-        o["model"]         = !s.model.empty() ? s.model : (m ? m->model : "");
-        o["model_name"]    = !s.model_name.empty() ? s.model_name : (m ? m->model_preset : "");
+        o["provider"]      = model_deleted ? "" : (!s.provider.empty() ? s.provider : (m ? m->provider : ""));
+        o["model"]         = model_deleted ? "" : (!s.model.empty() ? s.model : (m ? m->model : ""));
+        o["model_name"]    = model_name;
         o["model_preset"]  = o["model_name"];
         o["context_window"] = s.context_window;
+        o["deleted"]       = model_deleted;
         o["message_count"] = s.message_count > 0 ? s.message_count : (m ? m->message_count : 0);
         o["turn_count"]    = s.turn_count > 0 ? s.turn_count : (m ? m->turn_count : 0);
         o["permission_mode"] = !s.permission_mode.empty()
@@ -753,6 +767,7 @@ struct WebServer::Impl {
 
     json session_meta_to_json(const SessionMeta& m, const std::string& workspace_hash) const {
         json o;
+        const bool model_deleted = session_model_deleted(m.model_preset);
         o["id"]             = m.id;
         o["active"]         = false;
         o["status"]         = "idle";
@@ -762,10 +777,11 @@ struct WebServer::Impl {
         o["summary"]        = m.summary;
         o["created_at"]     = m.created_at;
         o["updated_at"]     = m.updated_at;
-        o["provider"]       = m.provider;
-        o["model"]          = m.model;
+        o["provider"]       = model_deleted ? "" : m.provider;
+        o["model"]          = model_deleted ? "" : m.model;
         o["model_name"]     = m.model_preset;
         o["model_preset"]   = m.model_preset;
+        o["deleted"]        = model_deleted;
         o["message_count"]  = m.message_count;
         o["turn_count"]     = m.turn_count;
         o["permission_mode"] = m.permission_mode.empty() ? "default" : m.permission_mode;
@@ -3422,9 +3438,8 @@ struct WebServer::Impl {
             if (!draft) return json_err(400, "BAD_REQUEST", err);
 
             // patch 语义:body 没显式带 api_key / base_url 时,从 existing 条目
-            // 注入旧值再走校验。这样前端编辑表单不必每次让用户重输 api_key
-            // (api_key 字段本身从不在 GET 响应里返回 — 前端没办法回填真值)。
-            // 也覆盖 base_url 以防偶发未提交;model/provider/name 显式必填,
+            // 注入旧值再走校验。这样旧客户端编辑表单不必每次让用户重输
+            // api_key。也覆盖 base_url 以防偶发未提交;model/provider/name 显式必填,
             // 不参与 patch。
             if (body.is_object()) {
                 const ModelProfile* existing = nullptr;

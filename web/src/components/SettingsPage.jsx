@@ -1285,7 +1285,6 @@ const MODEL_NEW_DRAFT_DEFAULT = {
   context_window_k: '',
   capabilities: DEFAULT_MODEL_CAPABILITIES,
 };
-const MODEL_NEW_API_KEY_MASK = '••••••••';
 
 function draftFromModelProfile(m) {
   return {
@@ -1293,7 +1292,7 @@ function draftFromModelProfile(m) {
     provider: m?.provider || 'openai',
     model: m?.model || '',
     base_url: m?.base_url || '',
-    api_key: m?.provider === 'openai' ? MODEL_NEW_API_KEY_MASK : '',
+    api_key: m?.provider === 'openai' ? (m?.api_key || '') : '',
     request_headers_json: formatRequestHeadersJson(m?.request_headers),
     context_window_k: formatContextWindowK(m?.context_window),
     capabilities: normalizeModelCapabilities(m?.capabilities),
@@ -1375,7 +1374,6 @@ function SectionModel() {
   const [editingName, setEditingName] = useState(null);
   const [showAdd, setShowAdd] = useState(false);
   const [draft, setDraft] = useState(MODEL_NEW_DRAFT_DEFAULT);
-  const [apiKeyTouched, setApiKeyTouched] = useState(false);
   const [savedModelFilter, setSavedModelFilter] = useState('');
   const visibleModels = useMemo(
     () => {
@@ -1532,13 +1530,11 @@ function SectionModel() {
     setEditingName(null);
     setShowAdd(false);
     setDraft(MODEL_NEW_DRAFT_DEFAULT);
-    setApiKeyTouched(false);
   };
 
   const startAdd = () => {
     setEditingName(null);
     setDraft(MODEL_NEW_DRAFT_DEFAULT);
-    setApiKeyTouched(true);
     setShowAdd(true);
   };
 
@@ -1546,7 +1542,6 @@ function SectionModel() {
     setShowAdd(false);
     setEditingName(m.name);
     setDraft(draftFromModelProfile(m));
-    setApiKeyTouched(false);
   };
 
   const saveDefault = async (name) => {
@@ -1591,7 +1586,6 @@ function SectionModel() {
       return;
     }
 
-    const omitApiKey = editing && draft.provider === 'openai' && !apiKeyTouched;
     const drafts = editing ? [draft] : buildModelDraftsFromSelection(draft);
     if (drafts.length === 0) {
       toast({ kind: 'err', text: lookupErrorMessage('MISSING_MODEL') });
@@ -1610,11 +1604,9 @@ function SectionModel() {
         return;
       }
       const payload = payloadForModelDraft(item, {
-        omitApiKey,
         requestHeaders: requestHeaders.headers,
       });
-      const validatePayload = omitApiKey ? { ...payload, api_key: '__patch__' } : payload;
-      const valid = validateModelDraft(validatePayload);
+      const valid = validateModelDraft(payload);
       if (!valid.ok) {
         toast({ kind: 'err', text: lookupErrorMessage(valid.code) });
         return;
@@ -1722,8 +1714,6 @@ function SectionModel() {
                   data={draft}
                   setData={(patch) => setDraft((d) => ({ ...d, ...patch }))}
                   editingName={editingName}
-                  apiKeyTouched={apiKeyTouched}
-                  setApiKeyTouched={setApiKeyTouched}
                   onCancel={resetForm}
                   onSubmit={submitDraft}
                   submitLabel="保存"
@@ -1825,15 +1815,12 @@ function SectionModel() {
             onCancel={() => {
               setShowAdd(false);
               setDraft(MODEL_NEW_DRAFT_DEFAULT);
-              setApiKeyTouched(false);
             }}
             onSubmit={submitDraft}
             submitLabel="新增"
             busy={busy === 'submit'}
             allowMultiple
             onProbeModels={api.probeModels}
-            apiKeyTouched={apiKeyTouched}
-            setApiKeyTouched={setApiKeyTouched}
             copilotAuthenticated={copilotAuth.authenticated}
           />
         </div>
@@ -1977,8 +1964,6 @@ function ModelFormPreview({
   busy = false,
   allowMultiple = true,
   editingName = '',
-  apiKeyTouched = false,
-  setApiKeyTouched = () => {},
   onProbeModels,
   copilotAuthenticated = false,
 }) {
@@ -1991,6 +1976,11 @@ function ModelFormPreview({
   const [available, setAvailable] = useState(null);
   const [customInput, setCustomInput] = useState('');
   const [fetchError, setFetchError] = useState('');
+  const [apiKeyVisible, setApiKeyVisible] = useState(false);
+
+  useEffect(() => {
+    if (data.provider !== 'openai') setApiKeyVisible(false);
+  }, [data.provider]);
 
   const selectedModels = splitModelIds(data.model);
   const modelFilter = customInput.trim();
@@ -2019,7 +2009,7 @@ function ModelFormPreview({
       const result = await onProbeModels({
         provider: data.provider,
         base_url: data.provider === 'openai' ? data.base_url : '',
-        api_key: data.provider === 'openai' && data.api_key !== MODEL_NEW_API_KEY_MASK ? data.api_key : '',
+        api_key: data.provider === 'openai' ? (data.api_key || '') : '',
         request_headers: requestHeaders.headers,
       });
       const ids = Array.isArray(result?.models) ? result.models : [];
@@ -2073,19 +2063,8 @@ function ModelFormPreview({
     setCustomInput('');
   };
 
-  const onApiKeyFocus = () => {
-    if (editingName && !apiKeyTouched && data.api_key === MODEL_NEW_API_KEY_MASK) {
-      setData({ api_key: '' });
-    }
-  };
   const onApiKeyChange = (e) => {
     setData({ api_key: e.target.value });
-    setApiKeyTouched(true);
-  };
-  const onApiKeyBlur = () => {
-    if (editingName && !apiKeyTouched && !data.api_key) {
-      setData({ api_key: MODEL_NEW_API_KEY_MASK });
-    }
   };
 
   const fieldClass =
@@ -2168,15 +2147,36 @@ function ModelFormPreview({
       {data.provider === 'openai' && (
         <div className="mb-4">
           <div className="text-[12px] font-medium text-fg-2 mb-1.5">API Key</div>
-          <input
-            type="password"
-            className={clsx(fieldClass, 'font-mono text-[12px]')}
-            placeholder={editingName ? '聚焦后输入新 API Key,留空则保留旧值' : 'sk-...'}
-            value={data.api_key}
-            onFocus={onApiKeyFocus}
-            onChange={onApiKeyChange}
-            onBlur={onApiKeyBlur}
-          />
+          <div className="relative">
+            <input
+              type={apiKeyVisible ? 'text' : 'password'}
+              className={clsx(fieldClass, 'pr-10 font-mono text-[12px]')}
+              placeholder="sk-..."
+              value={data.api_key || ''}
+              onChange={onApiKeyChange}
+              spellCheck={false}
+              autoComplete="off"
+            />
+            <button
+              type="button"
+              aria-label={apiKeyVisible ? '隐藏 API Key' : '显示 API Key'}
+              aria-pressed={apiKeyVisible}
+              title={apiKeyVisible ? '隐藏 API Key' : '显示 API Key'}
+              onClick={() => setApiKeyVisible((v) => !v)}
+              className="absolute right-2 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-md text-fg-mute transition hover:bg-surface-hi hover:text-fg focus:outline-none focus:ring-1 focus:ring-accent"
+            >
+              <span className="relative flex h-4 w-4 items-center justify-center">
+                <VsIcon name="eye" size={16} />
+                {!apiKeyVisible && (
+                  <span
+                    aria-hidden="true"
+                    data-api-key-eye-slash="true"
+                    className="pointer-events-none absolute left-[1px] right-[1px] top-1/2 h-[1.5px] -rotate-45 rounded-full bg-current"
+                  />
+                )}
+              </span>
+            </button>
+          </div>
         </div>
       )}
 
