@@ -291,6 +291,213 @@ jobs:
           path: build/${{ matrix.executable }}.dSYM
           if-no-files-found: warn
 
+  build-linux-old-package:
+    name: ${{ matrix.id }}
+    runs-on: ${{ matrix.os }}
+    container:
+      image: buildpack-deps:buster
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      VCPKG_BINARY_SOURCES: clear
+      VCPKG_FORCE_SYSTEM_BINARIES: 1
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: linux-old-x64
+            os: ubuntu-22.04
+            triplet: x64-linux
+            executable: acecode
+            archive_extension: tar.gz
+          - id: linux-old-arm64
+            os: ubuntu-22.04-arm
+            triplet: arm64-linux
+            executable: acecode
+            archive_extension: tar.gz
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install old Linux dependencies
+        shell: bash
+        run: |
+          sed -i \
+            -e 's|http://deb.debian.org/debian|http://archive.debian.org/debian|g' \
+            -e 's|http://security.debian.org/debian-security|http://archive.debian.org/debian-security|g' \
+            -e 's|http://deb.debian.org/debian-security|http://archive.debian.org/debian-security|g' \
+            /etc/apt/sources.list
+          printf 'Acquire::Check-Valid-Until "false";\n' > /etc/apt/apt.conf.d/99no-check-valid-until
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            binutils \
+            build-essential \
+            ca-certificates \
+            curl \
+            file \
+            git \
+            libgtk-3-dev \
+            libwebkit2gtk-4.0-dev \
+            ninja-build \
+            perl \
+            pkg-config \
+            python3 \
+            python3-pip \
+            tar \
+            unzip \
+            zip
+          rm -rf /var/lib/apt/lists/*
+
+      - name: Set up CMake
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: '3.29.x'
+
+      - name: Run vcpkg
+        uses: lukka/run-vcpkg@v11
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: '9'
+
+      - name: Build web UI
+        shell: bash
+        run: |
+          cd web
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Configure
+        shell: bash
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_TARGET_TRIPLET="${{ matrix.triplet }}" \
+            -DBUILD_TESTING=OFF \
+            -DACECODE_BUILD_DESKTOP=ON \
+            -DWEBVIEW_WEBKITGTK_API=4.0
+
+      - name: Build
+        shell: bash
+        run: cmake --build build --config Release --target acecode
+
+      - name: Build desktop
+        shell: bash
+        run: cmake --build build --config Release --target acecode-desktop
+
+      - name: Build browser host
+        shell: bash
+        run: cmake --build build --config Release --target ace-browser-host
+
+      - name: Verify old Linux ABI
+        shell: bash
+        run: |
+          max_glibc="$(
+            strings build/acecode build/acecode-desktop build/ace-browser-host |
+              grep -Eo 'GLIBC_[0-9]+\.[0-9]+' |
+              sed 's/GLIBC_//' |
+              sort -Vu |
+              tail -n1
+          )"
+          if [ -z "$max_glibc" ]; then
+            echo "No GLIBC symbol versions found" >&2
+            exit 1
+          fi
+          echo "Max GLIBC symbol: GLIBC_$max_glibc"
+          if [ "$(printf '%s\n%s\n' "$max_glibc" "2.28" | sort -V | tail -n1)" != "2.28" ]; then
+            echo "Old Linux package requires GLIBC_$max_glibc, expected <= GLIBC_2.28" >&2
+            exit 1
+          fi
+
+          ldd build/acecode-desktop | tee build/acecode-desktop.ldd
+          grep -E 'libwebkit2gtk-4\.0\.so\.37' build/acecode-desktop.ldd
+          if grep -E 'libwebkit2gtk-4\.1|libwebkitgtk-6' build/acecode-desktop.ldd; then
+            echo "Old Linux desktop linked against a newer WebKitGTK ABI" >&2
+            exit 1
+          fi
+
+      - name: Extract debug symbols
+        shell: bash
+        run: |
+          objcopy --only-keep-debug "build/${{ matrix.executable }}" "build/${{ matrix.executable }}.debug"
+          strip --strip-debug "build/${{ matrix.executable }}"
+          objcopy --add-gnu-debuglink="build/${{ matrix.executable }}.debug" "build/${{ matrix.executable }}"
+
+          objcopy --only-keep-debug "build/acecode-desktop" "build/acecode-desktop.debug"
+          strip --strip-debug "build/acecode-desktop"
+          objcopy --add-gnu-debuglink="build/acecode-desktop.debug" "build/acecode-desktop"
+
+      - name: Package
+        shell: bash
+        run: |
+          package_dir="dist/acecode-${{ matrix.id }}"
+          mkdir -p "$package_dir"
+
+          if [ ! -f "build/${{ matrix.executable }}" ]; then
+            echo "Missing terminal executable: build/${{ matrix.executable }}" >&2
+            exit 1
+          fi
+          cp "build/${{ matrix.executable }}" "$package_dir/"
+          cp README.md README_CN.md "$package_dir/"
+
+          browser_host=""
+          for candidate in \
+            "build/ace-browser-host" \
+            "build/Release/ace-browser-host" \
+            "build/RelWithDebInfo/ace-browser-host" \
+            "build/MinSizeRel/ace-browser-host" \
+            "build/Debug/ace-browser-host"; do
+            if [ -f "$candidate" ]; then
+              browser_host="$candidate"
+              break
+            fi
+          done
+          if [ -z "$browser_host" ]; then
+            echo "Missing browser host executable: ace-browser-host" >&2
+            find build -type f -name 'ace-browser-host*' -print >&2 || true
+            exit 1
+          fi
+          cp "$browser_host" "$package_dir/"
+
+          if [ ! -f "build/acecode-desktop" ]; then
+            echo "Missing desktop executable: build/acecode-desktop" >&2
+            exit 1
+          fi
+          cp "build/acecode-desktop" "$package_dir/"
+          cp "web/dist/acecode-logo.png" "$package_dir/"
+
+          tar -C dist -czf "acecode-${{ matrix.id }}.tar.gz" "acecode-${{ matrix.id }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: acecode-${{ matrix.id }}
+          path: acecode-${{ matrix.id }}.${{ matrix.archive_extension }}
+          if-no-files-found: error
+
+      - name: Upload debug symbols
+        uses: actions/upload-artifact@v4
+        with:
+          name: acecode-${{ matrix.id }}-debug
+          path: build/${{ matrix.executable }}.debug
+          if-no-files-found: warn
+
+      - name: Upload desktop debug symbols
+        uses: actions/upload-artifact@v4
+        with:
+          name: acecode-${{ matrix.id }}-desktop-debug
+          path: build/acecode-desktop.debug
+          if-no-files-found: warn
+
   package-browser-extension:
     name: ace-browser-bridge
     runs-on: ubuntu-latest
@@ -342,6 +549,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs:
       - build-and-package
+      - build-linux-old-package
       - package-browser-extension
     runs-on: ubuntu-latest
     steps:
