@@ -75,7 +75,8 @@ TEST(UpgradeApply, AppliesStagedUpdateAndKeepsBackup) {
     fs::path staging = root / "staging";
     fs::path backup = root / "backup";
 
-    write_file(install / "old.txt", "old");
+    write_file(install / "acecode.exe", "old exe");
+    write_file(install / "old.txt", "old unrelated");
     write_file(staging / "acecode.exe", "new exe");
     write_file(staging / "share" / "asset.txt", "asset");
 
@@ -83,7 +84,9 @@ TEST(UpgradeApply, AppliesStagedUpdateAndKeepsBackup) {
     ASSERT_TRUE(apply_staged_update(staging, install, backup, "windows-x64", &err)) << err;
     EXPECT_EQ(read_file(install / "acecode.exe"), "new exe");
     EXPECT_EQ(read_file(install / "share" / "asset.txt"), "asset");
-    EXPECT_EQ(read_file(backup / "old.txt"), "old");
+    EXPECT_EQ(read_file(install / "old.txt"), "old unrelated");
+    EXPECT_EQ(read_file(backup / "acecode.exe"), "old exe");
+    EXPECT_FALSE(fs::exists(backup / "old.txt"));
 
     std::error_code ec;
     fs::remove_all(root, ec);
@@ -103,10 +106,40 @@ TEST(UpgradeApply, KeepsRunnerDirectoryInInstallDir) {
     std::string err;
     ASSERT_TRUE(apply_staged_update(staging, install, backup, "windows-x64", &err)) << err;
     EXPECT_EQ(read_file(install / "acecode.exe"), "new exe");
+    EXPECT_EQ(read_file(install / "old.txt"), "old");
     EXPECT_EQ(read_file(install / ".acecode-update-runner" /
                         "acecode-update-runner-1234.exe"), "runner");
     EXPECT_FALSE(fs::exists(backup / ".acecode-update-runner"));
-    EXPECT_EQ(read_file(backup / "old.txt"), "old");
+    EXPECT_FALSE(fs::exists(backup / "old.txt"));
+
+    std::error_code ec;
+    fs::remove_all(root, ec);
+}
+
+TEST(UpgradeApply, ReplacesNestedPackageFilesWithoutMovingUnrelatedSiblings) {
+    fs::path root = temp_root("acecode-apply-nested");
+    fs::path install = root / "install";
+    fs::path staging = root / "staging";
+    fs::path backup = root / "backup";
+
+    write_file(install / "acecode.exe", "old exe");
+    write_file(install / "share" / "asset.txt", "old asset");
+    write_file(install / "share" / "local-only.txt", "keep me");
+    write_file(install / "apikey-generator-rs" / "locked-sentinel.txt", "do not touch");
+    write_file(staging / "acecode.exe", "new exe");
+    write_file(staging / "share" / "asset.txt", "new asset");
+
+    std::string err;
+    ASSERT_TRUE(apply_staged_update(staging, install, backup, "windows-x64", &err)) << err;
+    EXPECT_EQ(read_file(install / "acecode.exe"), "new exe");
+    EXPECT_EQ(read_file(install / "share" / "asset.txt"), "new asset");
+    EXPECT_EQ(read_file(install / "share" / "local-only.txt"), "keep me");
+    EXPECT_EQ(read_file(install / "apikey-generator-rs" / "locked-sentinel.txt"),
+              "do not touch");
+    EXPECT_EQ(read_file(backup / "acecode.exe"), "old exe");
+    EXPECT_EQ(read_file(backup / "share" / "asset.txt"), "old asset");
+    EXPECT_FALSE(fs::exists(backup / "share" / "local-only.txt"));
+    EXPECT_FALSE(fs::exists(backup / "apikey-generator-rs"));
 
     std::error_code ec;
     fs::remove_all(root, ec);

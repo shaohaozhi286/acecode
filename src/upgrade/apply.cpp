@@ -9,6 +9,8 @@
 #include <cctype>
 #include <filesystem>
 #include <iostream>
+#include <algorithm>
+#include <iterator>
 #include <thread>
 #include <vector>
 
@@ -45,38 +47,126 @@ bool is_same_or_inside(const fs::path& maybe_child, const fs::path& maybe_parent
     return true;
 }
 
-bool is_update_runner_entry(const fs::directory_entry& entry) {
-    return entry.path().filename() == kUpdateRunnerDirName;
+struct StagedPathSet {
+    std::vector<fs::path> dirs;
+    std::vector<fs::path> files;
+};
+
+size_t path_depth(const fs::path& path) {
+    return static_cast<size_t>(std::distance(path.begin(), path.end()));
 }
 
-bool remove_directory_contents(const fs::path& dir, std::string* error) {
+void sort_paths_shallow_first(std::vector<fs::path>& paths) {
+    std::sort(paths.begin(), paths.end(), [](const fs::path& a, const fs::path& b) {
+        const size_t da = path_depth(a);
+        const size_t db = path_depth(b);
+        if (da != db) return da < db;
+        return a.generic_string() < b.generic_string();
+    });
+}
+
+bool collect_staged_paths(const fs::path& content_root,
+                          StagedPathSet& out,
+                          std::string* error) {
     std::error_code ec;
-    if (!fs::exists(dir, ec)) return true;
-    for (const auto& entry : fs::directory_iterator(dir, ec)) {
-        if (is_update_runner_entry(entry)) continue;
-        fs::remove_all(entry.path(), ec);
+    for (const auto& entry : fs::recursive_directory_iterator(content_root, ec)) {
         if (ec) {
-            if (error) *error = "failed to remove " + entry.path().string() + ": " + ec.message();
+            if (error) *error = "failed to walk staged files: " + ec.message();
+            return false;
+        }
+        fs::path rel = fs::relative(entry.path(), content_root, ec);
+        if (ec || rel.empty()) {
+            if (error) *error = "failed to compute staged relative path: " + ec.message();
+            return false;
+        }
+        if (entry.is_directory()) {
+            out.dirs.push_back(rel);
+        } else if (entry.is_regular_file()) {
+            out.files.push_back(rel);
+        }
+    }
+    sort_paths_shallow_first(out.dirs);
+    sort_paths_shallow_first(out.files);
+    return true;
+}
+
+bool backup_existing_path(const fs::path& install_dir,
+                          const fs::path& backup_dir,
+                          const fs::path& rel,
+                          std::vector<fs::path>& backed_up,
+                          std::string* error) {
+    std::error_code ec;
+    const fs::path src = install_dir / rel;
+    if (!fs::exists(src, ec)) return true;
+
+    const fs::path dest = backup_dir / rel;
+    fs::create_directories(dest.parent_path(), ec);
+    if (ec) {
+        if (error) *error = "failed to create backup directory " +
+                            dest.parent_path().string() + ": " + ec.message();
+        return false;
+    }
+    fs::remove_all(dest, ec);
+    if (ec) {
+        if (error) *error = "failed to clear backup path " + dest.string() + ": " +
+                            ec.message();
+        return false;
+    }
+    fs::rename(src, dest, ec);
+    if (ec) {
+        if (error) *error = "failed to move " + src.string() + " to " +
+                            dest.string() + ": " + ec.message();
+        return false;
+    }
+    backed_up.push_back(rel);
+    return true;
+}
+
+bool prepare_package_directories(const fs::path& install_dir,
+                                 const fs::path& backup_dir,
+                                 const StagedPathSet& paths,
+                                 std::vector<fs::path>& backed_up,
+                                 std::string* error) {
+    std::error_code ec;
+    for (const auto& rel : paths.dirs) {
+        const fs::path dest = install_dir / rel;
+        if (fs::exists(dest, ec) && !fs::is_directory(dest, ec)) {
+            if (!backup_existing_path(install_dir, backup_dir, rel, backed_up, error)) {
+                return false;
+            }
+        }
+        fs::create_directories(dest, ec);
+        if (ec) {
+            if (error) *error = "failed to create directory " + dest.string() + ": " +
+                                ec.message();
             return false;
         }
     }
     return true;
 }
 
-bool move_directory_contents(const fs::path& from, const fs::path& to, std::string* error) {
+bool copy_package_files(const fs::path& content_root,
+                        const fs::path& install_dir,
+                        const fs::path& backup_dir,
+                        const StagedPathSet& paths,
+                        std::vector<fs::path>& backed_up,
+                        std::string* error) {
     std::error_code ec;
-    fs::create_directories(to, ec);
-    if (ec) {
-        if (error) *error = "failed to create directory " + to.string() + ": " + ec.message();
-        return false;
-    }
-    if (!fs::exists(from, ec)) return true;
-    for (const auto& entry : fs::directory_iterator(from, ec)) {
-        if (is_update_runner_entry(entry)) continue;
-        fs::path dest = to / entry.path().filename();
-        fs::rename(entry.path(), dest, ec);
+    for (const auto& rel : paths.files) {
+        const fs::path src = content_root / rel;
+        const fs::path dest = install_dir / rel;
+        if (!backup_existing_path(install_dir, backup_dir, rel, backed_up, error)) {
+            return false;
+        }
+        fs::create_directories(dest.parent_path(), ec);
         if (ec) {
-            if (error) *error = "failed to move " + entry.path().string() + " to " +
+            if (error) *error = "failed to create directory " +
+                                dest.parent_path().string() + ": " + ec.message();
+            return false;
+        }
+        fs::copy_file(src, dest, fs::copy_options::overwrite_existing, ec);
+        if (ec) {
+            if (error) *error = "failed to copy " + src.string() + " to " +
                                 dest.string() + ": " + ec.message();
             return false;
         }
@@ -84,47 +174,24 @@ bool move_directory_contents(const fs::path& from, const fs::path& to, std::stri
     return true;
 }
 
-bool copy_directory_contents(const fs::path& from, const fs::path& to, std::string* error) {
+void remove_package_targets(const fs::path& install_dir, const StagedPathSet& paths) {
     std::error_code ec;
-    fs::create_directories(to, ec);
-    if (ec) {
-        if (error) *error = "failed to create install directory: " + ec.message();
-        return false;
+    for (const auto& rel : paths.files) {
+        fs::remove_all(install_dir / rel, ec);
     }
+}
 
-    for (const auto& entry : fs::recursive_directory_iterator(from, ec)) {
-        if (ec) {
-            if (error) *error = "failed to walk staged files: " + ec.message();
-            return false;
-        }
-        fs::path rel = fs::relative(entry.path(), from, ec);
-        if (ec) {
-            if (error) *error = "failed to compute staged relative path: " + ec.message();
-            return false;
-        }
-        fs::path dest = to / rel;
-        if (entry.is_directory()) {
-            fs::create_directories(dest, ec);
-            if (ec) {
-                if (error) *error = "failed to create directory " + dest.string() + ": " + ec.message();
-                return false;
-            }
-        } else if (entry.is_regular_file()) {
-            fs::create_directories(dest.parent_path(), ec);
-            if (ec) {
-                if (error) *error = "failed to create directory " +
-                                    dest.parent_path().string() + ": " + ec.message();
-                return false;
-            }
-            fs::copy_file(entry.path(), dest, fs::copy_options::overwrite_existing, ec);
-            if (ec) {
-                if (error) *error = "failed to copy " + entry.path().string() + " to " +
-                                    dest.string() + ": " + ec.message();
-                return false;
-            }
-        }
+void restore_backed_up_paths(const fs::path& install_dir,
+                             const fs::path& backup_dir,
+                             const std::vector<fs::path>& backed_up) {
+    std::error_code ec;
+    for (const auto& rel : backed_up) {
+        const fs::path src = backup_dir / rel;
+        const fs::path dest = install_dir / rel;
+        fs::remove_all(dest, ec);
+        fs::create_directories(dest.parent_path(), ec);
+        fs::rename(src, dest, ec);
     }
-    return true;
 }
 
 void wait_for_parent(unsigned long pid) {
@@ -371,17 +438,19 @@ bool apply_staged_update(const fs::path& staging_dir,
         return false;
     }
 
-    if (!move_directory_contents(install_dir, backup_dir, error)) {
-        std::string ignored;
-        (void)move_directory_contents(backup_dir, install_dir, &ignored);
+    StagedPathSet staged_paths;
+    if (!collect_staged_paths(staged->content_root, staged_paths, error)) {
         return false;
     }
 
-    if (!copy_directory_contents(staged->content_root, install_dir, error) ||
+    std::vector<fs::path> backed_up;
+    if (!prepare_package_directories(install_dir, backup_dir, staged_paths,
+                                     backed_up, error) ||
+        !copy_package_files(staged->content_root, install_dir, backup_dir,
+                            staged_paths, backed_up, error) ||
         !fs::is_regular_file(install_dir / expected_executable_name_for_target(target))) {
-        std::string restore_error;
-        (void)remove_directory_contents(install_dir, &restore_error);
-        (void)move_directory_contents(backup_dir, install_dir, &restore_error);
+        remove_package_targets(install_dir, staged_paths);
+        restore_backed_up_paths(install_dir, backup_dir, backed_up);
         if (error && error->empty()) {
             *error = "failed to verify updated executable";
         }
