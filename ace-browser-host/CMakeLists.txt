@@ -21,6 +21,10 @@ set_target_properties(ace-browser-host PROPERTIES
 target_compile_features(ace-browser-host PRIVATE cxx_std_17)
 target_link_libraries(ace-browser-host PRIVATE nlohmann_json::nlohmann_json)
 
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
+    target_link_libraries(ace-browser-host PRIVATE stdc++fs)
+endif()
+
 if(MSVC)
     target_compile_options(ace-browser-host PRIVATE /utf-8)
 endif()
