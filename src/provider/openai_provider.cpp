@@ -1127,14 +1127,23 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
 
                     if (delta.contains("tool_calls") && delta["tool_calls"].is_array()) {
                         for (const auto& tc_delta : delta["tool_calls"]) {
+                            LOG_DEBUG("tool_call delta: " + log_truncate(tc_delta.dump(), 300));
                             int index = tc_delta.value("index", 0);
                             auto& acc = pending_tools[index];
                             const std::string before_id = acc.id;
                             const std::string before_name = acc.name;
                             const std::size_t before_args_size = acc.arguments.size();
 
-                            const bool has_id = tc_delta.contains("id") && !tc_delta["id"].is_null();
-                            std::string incoming_id = has_id ? tc_delta["id"].get<std::string>() : std::string();
+                            // 只在 id / name 为非空字符串时更新。标准 OpenAI 在续传 delta 里
+                            // 省略 id/name,但部分网关(DeepSeek / wizard-ai code_pilot)会在
+                            // 续传帧里发 "id":"" / "name":""(空字符串,非 null)。旧逻辑只判
+                            // !is_null(),会把首帧捕获到的真实 id/name 覆盖成空 → 工具名丢失
+                            // → agent_loop 报 "Unknown tool" 并空转。空续传帧不应覆盖已累积值。
+                            std::string incoming_id;
+                            if (tc_delta.contains("id") && tc_delta["id"].is_string()) {
+                                incoming_id = tc_delta["id"].get<std::string>();
+                            }
+                            const bool has_id = !incoming_id.empty();
                             const bool is_full_snapshot_resend =
                                 has_id && !acc.id.empty() && acc.id == incoming_id;
 
@@ -1143,8 +1152,9 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
                             }
                             if (tc_delta.contains("function")) {
                                 const auto& fn = tc_delta["function"];
-                                if (fn.contains("name") && !fn["name"].is_null()) {
-                                    acc.name = fn["name"].get<std::string>();
+                                if (fn.contains("name") && fn["name"].is_string()) {
+                                    std::string incoming_name = fn["name"].get<std::string>();
+                                    if (!incoming_name.empty()) acc.name = incoming_name;
                                 }
                                 if (fn.contains("arguments") && !fn["arguments"].is_null()) {
                                     std::string incoming_args = fn["arguments"].get<std::string>();

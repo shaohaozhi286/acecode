@@ -47,6 +47,7 @@ using acecode::ChatResponse;
 using acecode::OpenAiCompatProvider;
 using acecode::StreamEvent;
 using acecode::StreamEventType;
+using acecode::ToolCall;
 using acecode::ToolDef;
 
 // 派生类：把 protected 的 build_request_body / parse_response 暴露成 public，
@@ -182,6 +183,52 @@ TEST(OpenAiProviderReasoningTest, SseRecognizesOpenRouterReasoningAlias) {
 
     EXPECT_EQ(aggregated_reasoning, "alias chunk");
     EXPECT_EQ(reasoning_events, 1);
+}
+
+// 回归:流式 tool_call 的 name/id 不能被空续传帧覆盖。
+//
+// 触发场景:部分网关(DeepSeek / wizard-ai code_pilot,PUB-* 模型)在 tool_call 的
+// 续传 delta 里发 "name":"" / "id":""(空字符串,而非像标准 OpenAI 那样省略)。
+// bug 表现:旧逻辑只判 !is_null,会把首帧捕获到的真实 name/id 覆盖成空 →
+// ChatResponse 的 ToolCall.function_name 为空 → agent_loop 报 "Unknown tool"
+// 并空转(只在用这类网关的机器上复现,gpt-4o/copilot 续传省略 name 故无碍)。
+// 期望:首帧的 name="glob" / id="call_1" 保留,arguments 跨帧正确拼接。
+TEST(OpenAiProviderReasoningTest, SseToolCallNameSurvivesEmptyContinuationFrames) {
+    LocalHttpServer server([](httplib::Server& s) {
+        s.Post("/chat/completions", [](const httplib::Request&, httplib::Response& res) {
+            // 首帧:id+name+空 arguments;续传两帧:name/id 为空串,只续 arguments。
+            std::string body =
+                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"glob\",\"arguments\":\"\"}}]}}]}\n\n"
+                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"\",\"function\":{\"name\":\"\",\"arguments\":\"{\\\"pattern\\\":\\\"*\\\",\"}}]}}]}\n\n"
+                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"\",\"function\":{\"name\":\"\",\"arguments\":\"\\\"path\\\":\\\".\\\"}\"}}]}}]}\n\n"
+                "data: [DONE]\n\n";
+            res.set_content(body, "text/event-stream");
+            res.status = 200;
+        });
+    });
+
+    OpenAiCompatProvider provider(
+        "http://127.0.0.1:" + std::to_string(server.port), "", "test-model");
+    ChatMessage user_msg;
+    user_msg.role = "user";
+    user_msg.content = "list files";
+    std::vector<ChatMessage> messages = {user_msg};
+    std::vector<ToolDef> tools;
+
+    std::vector<ToolCall> tool_calls;
+    std::mutex mu;
+    auto cb = [&](const StreamEvent& evt) {
+        std::lock_guard<std::mutex> lk(mu);
+        if (evt.type == StreamEventType::ToolCall) tool_calls.push_back(evt.tool_call);
+    };
+
+    std::atomic<bool> abort_flag{false};
+    provider.chat_stream(messages, tools, cb, &abort_flag);
+
+    ASSERT_EQ(tool_calls.size(), 1u);
+    EXPECT_EQ(tool_calls[0].function_name, "glob");  // 未被空续传帧覆盖(核心断言)
+    EXPECT_EQ(tool_calls[0].id, "call_1");
+    EXPECT_EQ(tool_calls[0].function_arguments, "{\"pattern\":\"*\",\"path\":\".\"}");
 }
 
 // 用例 3：非流式 parse_response 接住两种字段名。
