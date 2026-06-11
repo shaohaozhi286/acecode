@@ -39,13 +39,21 @@ function(acecode_generate_embedded_assets web_dir out_file version)
 
         # index.html 走模板替换:把 ?v=__VERSION__ 替成 ?v=${version}
         # 其它文件原样读取。
+        #
+        # 关键:必须用 HEX(二进制)模式读,绝不能用文本模式 file(READ ... raw_text)。
+        # 压缩后的前端 bundle 里含真实控制字节(某些库把 ASCII 控制符定义成裸字节,
+        # 如 f.SUB="\x1a"),而 CMake 在 Windows 文本模式下会把 0x1A(Ctrl+Z)当 EOF,
+        # 把 index.html 在该字节处截断 → 嵌入的前端残缺 → 部署机(走嵌入)白屏。
+        # 因此 __VERSION__ 的替换改在 hex 空间做(token 与 version 都是安全 ASCII)。
         if(rel STREQUAL "index.html")
-            file(READ "${src_file}" raw_text)
-            string(REPLACE "__VERSION__" "${version}" patched "${raw_text}")
-            set(tmp_file "${out_file}.${idx}.tmp")
-            file(WRITE "${tmp_file}" "${patched}")
-            file(READ "${tmp_file}" hex_data HEX)
-            file(REMOVE "${tmp_file}")
+            file(READ "${src_file}" hex_data HEX)
+            # "__VERSION__" 的小写 hex(file(READ HEX) 输出小写)
+            set(_token_hex "5f5f56455253494f4e5f5f")
+            set(_ver_tmp "${out_file}.ver.tmp")
+            file(WRITE "${_ver_tmp}" "${version}")
+            file(READ "${_ver_tmp}" _version_hex HEX)
+            file(REMOVE "${_ver_tmp}")
+            string(REPLACE "${_token_hex}" "${_version_hex}" hex_data "${hex_data}")
         else()
             file(READ "${src_file}" hex_data HEX)
         endif()
