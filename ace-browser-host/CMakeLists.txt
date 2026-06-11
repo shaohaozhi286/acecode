@@ -5,6 +5,7 @@ project(ace-browser-host VERSION 0.1.0 LANGUAGES CXX)
 if(NOT TARGET nlohmann_json::nlohmann_json)
     find_package(nlohmann_json CONFIG REQUIRED)
 endif()
+find_package(Threads REQUIRED)
 
 add_executable(ace-browser-host
     src/main.cpp
@@ -19,7 +20,7 @@ set_target_properties(ace-browser-host PROPERTIES
 )
 
 target_compile_features(ace-browser-host PRIVATE cxx_std_17)
-target_link_libraries(ace-browser-host PRIVATE nlohmann_json::nlohmann_json)
+target_link_libraries(ace-browser-host PRIVATE nlohmann_json::nlohmann_json Threads::Threads)
 
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
     target_link_libraries(ace-browser-host PRIVATE stdc++fs)
