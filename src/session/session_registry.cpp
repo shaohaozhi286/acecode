@@ -9,6 +9,7 @@
 #include "../provider/copilot_provider.hpp"
 #include "../provider/cwd_model_override.hpp"
 #include "../provider/model_context_resolver.hpp"
+#include "../provider/model_pool_status.hpp"
 #include "../provider/model_resolver.hpp"
 #include "../provider/provider_factory.hpp"
 #include "../utils/logger.hpp"
@@ -81,6 +82,12 @@ SessionModelState state_from_profile(const AppConfig& cfg,
     state.model = profile.model;
     state.context_window = resolve_model_profile_context_window_nonblocking(
         cfg, profile, cfg.context_window);
+    // PUB 池模型:用监控上报的 0.8 * maxWindowTokens 作为有效上下文窗口(驱动占用%
+    // 与自动压缩)。监控尚无数据时 eff==0,保留上面解析出的默认值。
+    if (is_pub_model(state.model)) {
+        int eff = model_pool_status_service().effective_context_window_for(state.model);
+        if (eff > 0) state.context_window = eff;
+    }
     return state;
 }
 

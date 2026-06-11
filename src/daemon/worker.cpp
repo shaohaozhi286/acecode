@@ -9,6 +9,7 @@
 #include "runtime_files.hpp"
 #include "../provider/cwd_model_override.hpp"
 #include "../provider/copilot_provider.hpp"
+#include "../provider/model_pool_status.hpp"
 #include "../provider/model_resolver.hpp"
 #include "../provider/provider_factory.hpp"
 #include "../hooks/hook_config.hpp"
@@ -247,6 +248,19 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
         }
     }
 
+    // 模型池负载监控:仅当配置里存在 PUB 池模型时才起 30s 轮询,避免在没有这些
+    // 模型的机器上无谓地打外网接口。停在 worker 收尾段(server.run() 返回后)。
+    {
+        bool has_pub = false;
+        for (const auto& m : cfg.saved_models) {
+            if (acecode::is_pub_model(m.model)) { has_pub = true; break; }
+        }
+        if (has_pub) {
+            LOG_INFO("[model_pool] PUB model(s) configured; starting 30s load monitor");
+            acecode::model_pool_status_service().start();
+        }
+    }
+
     ensure_run_dir();
 
     // GUID: supervised 用 launcher 派的;standalone 自己生成。
@@ -456,6 +470,8 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
 
     LOG_INFO("[daemon] worker shutting down");
     if (opts.foreground) std::cerr << "[daemon] shutting down\n";
+
+    acecode::model_pool_status_service().stop(); // 幂等;未 start 过也安全
 
     heartbeat.stop();
     cleanup_runtime_files();

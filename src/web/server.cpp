@@ -9,6 +9,7 @@
 #include "../config/request_headers.hpp"
 #include "../desktop/workspace_registry.hpp"
 #include "../provider/llm_provider.hpp"
+#include "../provider/model_pool_status.hpp"
 #include "../session/ask_user_question_prompter.hpp"
 #include "../session/attachment_store.hpp"
 #include "../session/local_session_client.hpp"
@@ -2425,6 +2426,29 @@ struct WebServer::Impl {
                 {"backend", deps.pty_registry
                     ? pty_backend_kind_name(deps.pty_registry->backend()) : ""},
             };
+            crow::response r(j.dump());
+            r.add_header("Content-Type", "application/json");
+            return r;
+        });
+
+        // GET /api/model-pool-status: PUB 模型池负载快照(load-monitor 缓存)。
+        // 非敏感数据,与 /api/health 一样不强制 token,便于前端轮询展示负载。
+        // 服务未启动 / 尚无数据时 models 为空数组,前端自然不显示负载指示。
+        CROW_ROUTE(app, "/api/model-pool-status").methods(crow::HTTPMethod::GET)
+        ([](const crow::request&) {
+            auto snap = acecode::model_pool_status_service().snapshot();
+            json models = json::array();
+            for (const auto& kv : snap) {
+                json o;
+                o["modelPoolName"]          = kv.first;
+                o["usageRate"]              = kv.second.usage_rate;
+                o["maxWindowTokens"]        = kv.second.max_window_tokens;
+                o["effectiveContextWindow"] =
+                    acecode::effective_context_window(kv.second.max_window_tokens);
+                models.push_back(std::move(o));
+            }
+            json j;
+            j["models"] = std::move(models);
             crow::response r(j.dump());
             r.add_header("Content-Type", "application/json");
             return r;

@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { clsx } from '../lib/format.js';
 import { PERMISSION_MODES, normalizePermissionMode, permissionModeOption } from '../lib/permissionMode.js';
 import { buildStatusBarModelMenu } from '../lib/sessionModel.js';
+import { loadTier, loadTierTextClass } from '../lib/modelLoad.js';
 import { RefreshIcon, VsIcon } from './Icon.jsx';
 import { TokenBudgetRing } from './TokenBudgetRing.jsx';
 
@@ -17,6 +18,7 @@ export function StatusBar({
   modelRefreshing = false,
   onModelChange,
   onRefreshModels,
+  modelLoad = null,
   tokenBudget = null,
   goal = null,
   permissionMode = 'default',
@@ -207,6 +209,7 @@ export function StatusBar({
       </div>
       <span className="flex items-center gap-1.5 shrink-0">
         {modelControl}
+        <ModelLoadChip load={modelLoad} />
         {tokenBudget && <TokenBudgetRing budget={tokenBudget} />}
       </span>
       <span>{turns} 轮次</span>
@@ -221,5 +224,38 @@ export function StatusBar({
       {branch && <span className="ml-auto truncate max-w-[40%]">{branch}</span>}
       {!branch && <span className="ml-auto" />}
     </div>
+  );
+}
+
+// 递增信号格图标(4 根),整体按当前负载档染色(currentColor 继承父级文本色)。
+function SignalBars() {
+  return (
+    <svg width="12" height="11" viewBox="0 0 12 11" aria-hidden="true" className="shrink-0">
+      <rect x="0" y="8" width="2.2" height="3" rx="0.5" fill="currentColor" />
+      <rect x="3.2" y="5.5" width="2.2" height="5.5" rx="0.5" fill="currentColor" />
+      <rect x="6.4" y="3" width="2.2" height="8" rx="0.5" fill="currentColor" />
+      <rect x="9.6" y="0.5" width="2.2" height="10.5" rx="0.5" fill="currentColor" />
+    </svg>
+  );
+}
+
+// 模型池负载指示:仅当当前模型是 PUB 池且有负载数据时显示。颜色:<70 绿 / 70..90 黄
+// / >90 红(见 lib/modelLoad.js)。tooltip 附有效上下文窗口(0.8×maxWindowTokens)。
+function ModelLoadChip({ load }) {
+  if (!load) return null;
+  const tier = loadTier(load.usageRate);
+  if (!tier) return null;
+  const pct = Math.round(load.usageRate);
+  const effK = load.effectiveContextWindow
+    ? `,有效上下文 ${Math.round(load.effectiveContextWindow / 1000)}k`
+    : '';
+  return (
+    <span
+      className={clsx('inline-flex items-center gap-1 shrink-0', loadTierTextClass(tier))}
+      title={`模型池负载 ${pct}%${effK}`}
+    >
+      <SignalBars />
+      <span className="text-[10px] font-medium tabular-nums">{pct}%</span>
+    </span>
   );
 }

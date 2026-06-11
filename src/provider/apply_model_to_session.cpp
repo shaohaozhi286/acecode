@@ -3,6 +3,7 @@
 
 #include "copilot_provider.hpp"
 #include "model_context_resolver.hpp"
+#include "model_pool_status.hpp"
 #include "model_resolver.hpp"
 #include "provider_factory.hpp"
 #include "../agent_loop.hpp"
@@ -25,6 +26,12 @@ SessionModelState state_from_profile(const AppConfig& cfg,
     state.model = profile.model;
     state.context_window = resolve_model_profile_context_window_nonblocking(
         cfg, profile, cfg.context_window);
+    // PUB 池模型:用监控上报的 0.8 * maxWindowTokens 作为有效上下文窗口。监控尚无
+    // 数据时 eff==0,保留默认解析值。覆盖 TUI / daemon 的模型切换与 resume 路径。
+    if (is_pub_model(state.model)) {
+        int eff = model_pool_status_service().effective_context_window_for(state.model);
+        if (eff > 0) state.context_window = eff;
+    }
     return state;
 }
 

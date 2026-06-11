@@ -47,6 +47,7 @@ import { projectCollapsedTranscriptItems } from '../lib/transcriptProjection.js'
 import { usePreference } from '../lib/usePreference.js';
 import { maybeNotify } from '../lib/desktopNotify.js';
 import { normalizeTokenBudget } from '../lib/tokenBudget.js';
+import { pickModelLoad } from '../lib/modelLoad.js';
 import {
   modelDisplayLabel,
   isEmptyModelState,
@@ -419,6 +420,18 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   const sid = ref?.sessionId || ref?.id || '';
   const sidRef = useRef(sid);
   const api = useMemo(() => createApi(ref), [ref?.port, ref?.token, ref?.workspaceHash]);
+  // PUB 模型池负载:每 30s 轮询一次缓存快照,失败静默(监控不可用不影响主流程)。
+  useEffect(() => {
+    let alive = true;
+    const fetchPool = () => {
+      api.modelPoolStatus()
+        .then((r) => { if (alive) setPoolModels(Array.isArray(r?.models) ? r.models : []); })
+        .catch(() => {});
+    };
+    fetchPool();
+    const id = window.setInterval(fetchPool, 30000);
+    return () => { alive = false; window.clearInterval(id); };
+  }, [api]);
   // 桌面通知 — 见 openspec/changes/add-desktop-attention-notifications。
   // transcriptTitleRef 由后面的 effect 与 transcript.title 同步;在 callback 里
   // 通过 ref.current 读最新 title,避免 fireDesktopNotification 进 useCallback deps。
@@ -476,6 +489,8 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   const [modelListLoaded, setModelListLoaded] = useState(false);
   const [homeModelName, setHomeModelName] = useState('');
   const [modelState, setModelState] = useState(null);
+  // PUB 模型池负载快照(每 30s 轮询 /api/model-pool-status)。
+  const [poolModels, setPoolModels] = useState([]);
   const [pendingModelName, setPendingModelName] = useState('');
   const [modelSwitching, setModelSwitching] = useState(false);
   const [modelRefreshing, setModelRefreshing] = useState(false);
@@ -1772,6 +1787,15 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     const normalized = normalizeModelState(modelState);
     return normalized ? [normalized, ...modelOptions] : modelOptions;
   }, [modelOptions, modelState]);
+  // 当前/首屏模型的 PUB 池负载(按 model id 精确匹配 modelPoolName;非 PUB → null)。
+  const currentModelLoad = useMemo(
+    () => pickModelLoad(poolModels, modelState?.model),
+    [poolModels, modelState],
+  );
+  const homeModelLoad = useMemo(() => {
+    const opt = modelOptions.find((option) => option.name === homeModelName);
+    return pickModelLoad(poolModels, opt?.model);
+  }, [poolModels, modelOptions, homeModelName]);
 
   // 三处 diff UI 共用同一份数据源:把 items 里 tool 项的 hunks 抽成消息格式。
   // 必须放在 early return 之前,否则空态/有 session 之间 hooks 数量不一致 → React #310。
@@ -2081,6 +2105,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
           branch={health?.branch || ''}
           modelOptions={modelOptions}
           selectedModelName={homeModelName}
+          modelLoad={homeModelLoad}
           modelRefreshing={modelRefreshing}
           onModelChange={selectHomeModel}
           onRefreshModels={refreshSessionModels}
@@ -2411,6 +2436,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         branch={health?.branch || ''}
         modelOptions={displayedModelOptions}
         selectedModelName={currentModelName}
+        modelLoad={currentModelLoad}
         modelSwitching={modelSwitching}
         modelRefreshing={modelRefreshing}
         onModelChange={switchSessionModel}
