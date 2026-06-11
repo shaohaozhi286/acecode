@@ -401,8 +401,26 @@ jobs:
       - name: Verify old Linux ABI
         shell: bash
         run: |
+          browser_host=""
+          for candidate in \
+            "build/ace-browser-host" \
+            "build/Release/ace-browser-host" \
+            "build/RelWithDebInfo/ace-browser-host" \
+            "build/MinSizeRel/ace-browser-host" \
+            "build/Debug/ace-browser-host"; do
+            if [ -f "$candidate" ]; then
+              browser_host="$candidate"
+              break
+            fi
+          done
+          if [ -z "$browser_host" ]; then
+            echo "Missing browser host executable: ace-browser-host" >&2
+            find build -type f -name 'ace-browser-host*' -print >&2 || true
+            exit 1
+          fi
+
           max_glibc="$(
-            strings build/acecode build/acecode-desktop build/ace-browser-host |
+            strings build/acecode build/acecode-desktop "$browser_host" |
               grep -Eo 'GLIBC_[0-9]+\.[0-9]+' |
               sed 's/GLIBC_//' |
               sort -Vu |
