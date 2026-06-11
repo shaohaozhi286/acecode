@@ -43,6 +43,7 @@
 #include "provider/provider_factory.hpp"
 #include "provider/copilot_provider.hpp"
 #include "provider/model_context_resolver.hpp"
+#include "provider/model_pool_status.hpp"
 #include "provider/models_dev_registry.hpp"
 #include "provider/model_resolver.hpp"
 #include "provider/cwd_model_override.hpp"
@@ -398,6 +399,30 @@ static Color token_progress_color(int percent) {
         return Color::Yellow;
     }
     return Color::GreenLight;
+}
+
+// 当前活动模型的 PUB 池负载百分比(-1 = 未知/非 PUB,不渲染)。由 model-pool 监控
+// 的后台轮询回调写入(atomic,UI 线程 render 读),配套 PostEvent 触发重绘。
+static std::atomic<int> g_model_load_percent{-1};
+
+// 模型池负载色阶(与 web / 后端 model_load_tier 一致):<70 绿 / 70..90 黄 / >90 红。
+static Color model_load_color(int percent) {
+    if (percent < 0) return Color::GrayDark;
+    if (percent > 90) return Color::RedLight;
+    if (percent >= 70) return Color::Yellow;
+    return Color::GreenLight;
+}
+
+// 底部状态栏的模型池负载 chip:递增信号格 + 百分比,按负载档染色。负载未知
+// (g_model_load_percent < 0,即非 PUB 模型或监控无数据)时不渲染。
+static Element render_model_load_chip() {
+    const int percent = g_model_load_percent.load();
+    if (percent < 0) return text("");
+    const Color c = model_load_color(percent);
+    return hbox({
+        text("\xE2\x96\x81\xE2\x96\x83\xE2\x96\x85\xE2\x96\x87") | color(c),  // ▁▃▅▇ 递增信号格
+        text(" " + std::to_string(percent) + "%  ") | color(c),
+    });
 }
 
 static Color status_line_color(const std::string& status_line) {
@@ -2489,6 +2514,49 @@ static int run_interactive_app(const CliOptions& cli,
     agent_loop.set_project_instructions_config(&config.project_instructions);
 
     agent_loop.set_callbacks(callbacks);
+
+    // ---- Model-pool load monitor (PUB 模型) ----
+    // 仅当配置里有 PUB 池模型时才起 30s 轮询(避免在没有这些模型的机器上无谓打外网)。
+    // 负载实时写 g_model_load_percent 供底栏 chip 展示;maxWindowTokens 稳定,故只需在
+    // 每次成功轮询时把 0.8x 有效窗口回灌到 config + agent_loop(UI 线程 Post,改的是 int,
+    // 安全),token% 下个回合自然重算。service 在 run_tui_loop 返回后 stop(),保证回调
+    // 不晚于这些局部变量析构。
+    {
+        bool has_pub = false;
+        for (const auto& m : config.saved_models) {
+            if (acecode::is_pub_model(m.model)) { has_pub = true; break; }
+        }
+        if (has_pub) {
+            auto on_pool_update = [&provider_slot, &config, &agent_loop]() {
+                std::string model_id;
+                {
+                    std::lock_guard<std::mutex> lk(provider_slot.mu);
+                    if (provider_slot.provider) model_id = provider_slot.provider->model();
+                }
+                int pct = -1;
+                int eff = 0;
+                if (acecode::is_pub_model(model_id)) {
+                    if (auto st = acecode::model_pool_status_service().get(model_id)) {
+                        pct = st->usage_rate;
+                        eff = acecode::effective_context_window(st->max_window_tokens);
+                    }
+                }
+                g_model_load_percent.store(pct);
+                auto* scr = g_active_screen.load(std::memory_order_acquire);
+                if (!scr) return;
+                if (eff > 0) {
+                    scr->Post([&config, &agent_loop, eff]() {
+                        if (config.context_window != eff) {
+                            config.context_window = eff;
+                            agent_loop.set_context_window(eff);
+                        }
+                    });
+                }
+                scr->PostEvent(ftxui::Event::Custom);
+            };
+            acecode::model_pool_status_service().start(on_pool_update);
+        }
+    }
 
     // ---- Session manager ----
     SessionManager session_manager;
@@ -5948,6 +6016,7 @@ static int run_interactive_app(const CliOptions& cli,
         // -- Bottom status bar --
         std::string perm_mode_str = std::string("mode: ") + PermissionManager::mode_name(permissions.mode());
         Element token_el = render_token_usage_chip(state);
+        Element load_el = render_model_load_chip();
         Element goal_el = state.goal_status.empty()
             ? text("")
             : text("  " + state.goal_status + "  ") | dim | color(Color::GreenLight);
@@ -6003,6 +6072,7 @@ static int run_interactive_app(const CliOptions& cli,
             }
             status_parts.push_back(goal_el);
             status_parts.push_back(token_el);
+            status_parts.push_back(load_el);
             status_parts.push_back(text(perm_mode_str) | dim | color(Color::GrayDark));
             bottom_bar = hbox(std::move(status_parts));
         } else if (dangerous_mode) {
@@ -6013,6 +6083,7 @@ static int run_interactive_app(const CliOptions& cli,
                 tool_timer_el,
                 goal_el,
                 token_el,
+                load_el,
                 text(perm_mode_str + "  ") | dim | color(Color::GrayDark),
             });
         } else if (state.is_waiting || state.tool_running) {
@@ -6023,6 +6094,7 @@ static int run_interactive_app(const CliOptions& cli,
                 tool_timer_el,
                 goal_el,
                 token_el,
+                load_el,
                 text(perm_mode_str + "  ") | dim | color(Color::GrayDark),
             });
         } else {
@@ -6032,6 +6104,7 @@ static int run_interactive_app(const CliOptions& cli,
                 tool_timer_el,
                 goal_el,
                 token_el,
+                load_el,
                 text(perm_mode_str + "  ") | dim | color(Color::GrayDark),
             });
         }
@@ -6107,6 +6180,10 @@ static int run_interactive_app(const CliOptions& cli,
     });
 
     run_tui_loop(screen, renderer);
+    // 先停 model-pool 轮询线程:它的回调按引用捕获 provider_slot/config/agent_loop,
+    // 必须在这些局部变量析构前 join。g_active_screen 此时已被 run_tui_loop 清空,
+    // 回调不会再 Post 到屏幕。stop() 幂等,未 start 也安全。
+    acecode::model_pool_status_service().stop();
     shutdown_after_tui_loop(state, agent_loop, mcp_manager, running,
                             agent_aborting, anim_thread, auth_thread,
                             update_check_thread,
