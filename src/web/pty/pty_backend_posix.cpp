@@ -21,7 +21,9 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cerrno>
 #include <mutex>
 #include <thread>
@@ -79,6 +81,30 @@ public:
         ws.ws_col = static_cast<unsigned short>(spec.cols);
         ws.ws_row = static_cast<unsigned short>(spec.rows);
 
+        // fork 后子进程只可靠 async-signal-safe 调用,字符串运算全部提前。
+        // argv[0] 前缀 '-' = login shell:读 ~/.bash_profile / ~/.zprofile,
+        // 用户的 PS1 / PATH 才生效(Terminal.app / iTerm / VS Code 在 macOS
+        // 同此行为;Linux 终端惯例是交互非 login,.bashrc 自动生效,不加)。
+        std::string argv0 = spec.shell;
+        if (auto slash = argv0.find_last_of('/'); slash != std::string::npos) {
+            argv0 = argv0.substr(slash + 1);
+        }
+#if defined(__APPLE__)
+        argv0.insert(argv0.begin(), '-');
+#endif
+        // GUI 启动的 daemon 没有 locale 环境,C locale 下 readline 把 UTF-8
+        // 输入回显成 '?';无 UTF-8 locale 时补一个,已配置的不动。
+        auto env_has_utf8 = [](const char* name) {
+            const char* v = ::getenv(name);
+            if (!v) return false;
+            std::string s(v);
+            std::transform(s.begin(), s.end(), s.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            return s.find("utf") != std::string::npos;
+        };
+        const bool need_lang = !env_has_utf8("LC_ALL") && !env_has_utf8("LC_CTYPE") &&
+                               !env_has_utf8("LANG");
+
         pid_t pid = forkpty(&master_fd_, nullptr, nullptr, &ws);
         if (pid < 0) {
             error = std::string("forkpty failed: ") + strerror(errno);
@@ -87,10 +113,11 @@ public:
         if (pid == 0) {
             // 子进程:slave 端已接到 0/1/2,内核 line discipline 就位。
             setenv("TERM", "xterm-256color", 1);
+            if (need_lang) setenv("LANG", "en_US.UTF-8", 1);
             if (!spec.cwd.empty() && chdir(spec.cwd.c_str()) != 0) {
                 // cwd 不可进入时退回继承的目录,shell 仍可用。
             }
-            execlp(spec.shell.c_str(), spec.shell.c_str(), nullptr);
+            execlp(spec.shell.c_str(), argv0.c_str(), nullptr);
             _exit(127);  // exec 失败
         }
         pid_ = pid;

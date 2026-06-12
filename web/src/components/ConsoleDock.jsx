@@ -40,8 +40,13 @@ import { toast } from './Toast.jsx';
 
 const api = createApi();
 
+// Linux 字体必须显式列出:中文 locale 的 fontconfig 常把通用 monospace 映射到
+// CJK 字体(文泉驿 / Noto CJK),拉丁字形变宽 + xterm.js 网格测量错位,光标
+// 漂移到没法打字(VS Code 同理在 Linux 上默认 'Droid Sans Mono' 而非裸 monospace)。
 const TERMINAL_FONT =
-  'ui-monospace, "Cascadia Mono", Consolas, "SF Mono", Menlo, monospace';
+  'ui-monospace, "Cascadia Mono", Consolas, "SF Mono", Menlo, ' +
+  '"DejaVu Sans Mono", "Ubuntu Mono", "Liberation Mono", "Noto Sans Mono", ' +
+  '"Droid Sans Mono", monospace';
 
 const THEMES = {
   dark: {

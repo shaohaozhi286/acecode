@@ -77,7 +77,8 @@ std::unique_ptr<PtyProcess> spawn_pty(PtyBackendKind kind,
                                       std::string& error);
 
 // shell 解析(纯函数,单测覆盖):configured 非空(config console.shell)优先;
-// 否则 Windows 取 %COMSPEC%(空则 "cmd.exe"),POSIX 取 $SHELL(空则 "/bin/sh")。
+// 否则 Windows 取 %COMSPEC%(空则 "cmd.exe"),POSIX 取 $SHELL → passwd 登录
+// shell(getpwuid,GUI 启动的 daemon 没有 $SHELL)→ "/bin/sh"。
 std::string resolve_console_shell(const std::string& configured);
 
 // ── 控制台 shell 目录(plan: 控制台 Shell 选择器)──────────────────────
@@ -99,6 +100,7 @@ struct ShellProbe {
     std::function<bool(const std::string& path)> exists;        // 文件存在?
     std::function<std::string(const std::string& name)> getenv; // 环境变量(UTF-8),无则空
     std::function<std::string()> git_install_path;              // Windows: GitForWindows 注册表 InstallPath,无则空
+    std::function<std::string()> login_shell;                   // POSIX: passwd 登录 shell(getpwuid),无则空;mock 可不设
 };
 ShellProbe default_shell_probe();
 
