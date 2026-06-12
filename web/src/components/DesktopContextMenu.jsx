@@ -388,6 +388,11 @@ export function DesktopContextMenu() {
       close();
     };
     const onContextMenu = (event) => {
+      // 控制台终端区由 ConsoleDock 自己处理右键(VS Code 式 复制/粘贴),这里放行
+      // (不 preventDefault / 不 stopPropagation),让事件继续冒泡到终端的 onContextMenu。
+      const rawTarget = event.target;
+      if (rawTarget instanceof Element && rawTarget.closest('.ace-console-term')) return;
+
       event.preventDefault();
       event.stopPropagation();
 

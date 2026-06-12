@@ -1165,12 +1165,38 @@ int main(int argc, char** argv) {
     // navigate 前注入 JS: hook console + window 错误事件 → 全部转发回 native。
     // 故意不 hook console.log / console.info,避免噪音(可在前端代码里需要时
     // 显式调 aceDesktop_logFromWeb('info', ...))。
+    // 系统文件拖放(plan: 桌面控制台拖放文件 → 插入完整路径)。Windows/macOS 的
+    // native 拦截把拖入文件的路径回传到这里,eval 调前端控制台的全局接收函数;
+    // 落点是否在终端、命中哪个终端由前端判定。Linux 走前端 text/uri-list,不触发。
+    host.set_file_drop_handler([&host](std::vector<std::string> paths) {
+        if (paths.empty()) return;
+        nlohmann::json arr = nlohmann::json::array();
+        for (const auto& p : paths) arr.push_back(p);
+        const std::string js =
+            "(function(){try{if(window.__aceConsoleAcceptFileDrop){"
+            "window.__aceConsoleAcceptFileDrop(" + arr.dump() + ");}}catch(e){}})();";
+        host.eval(js);
+    });
+
     constexpr const char* kFramelessWindowFlag = "true";
+#if defined(_WIN32)
+    constexpr const char* kHostOs = "windows";
+    constexpr const char* kNativeFileDrop = "true";
+#elif defined(__APPLE__)
+    constexpr const char* kHostOs = "macos";
+    constexpr const char* kNativeFileDrop = "true";
+#else
+    constexpr const char* kHostOs = "linux";
+    constexpr const char* kNativeFileDrop = "false";
+#endif
     host.init_script(std::string("window.__ACECODE_DESKTOP_SHELL__=true;\n") +
                                      "window.__ACECODE_DESKTOP_DEBUG__=" +
                                      (desktop_debug ? "true" : "false") + ";\n" +
                                      "window.__ACECODE_FRAMELESS_WINDOW__=" +
-                                     kFramelessWindowFlag + ";\n" + R"JS(
+                                     kFramelessWindowFlag + ";\n" +
+                                     "window.__ACECODE_OS__=\"" + kHostOs + "\";\n" +
+                                     "window.__ACECODE_NATIVE_FILE_DROP__=" +
+                                     kNativeFileDrop + ";\n" + R"JS(
     (function () {
       var notifyReady = function () {
         try {

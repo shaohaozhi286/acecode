@@ -407,8 +407,15 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
 
     // 控制台 PTY 注册表(add-console-dock):启动期探测一次 backend,
     // 析构时 stop_all 杀掉全部 shell(栈对象,server.run() 返回后回收)。
+    // 默认 shell:+ 旁下拉框选中的 default_shell(探测可用)→ 平台默认 → legacy
+    // console.shell。per-create 覆盖由 REST /api/pty 的 shell 参数注入。
+    std::string default_shell_id = acecode::default_console_shell_id(
+        cfg_mut.console.default_shell, cfg_mut.console.git_bash_path);
+    std::string default_shell_cmd =
+        acecode::resolve_shell_command_by_id(default_shell_id, cfg_mut.console.git_bash_path)
+            .value_or(acecode::resolve_console_shell(cfg_mut.console.shell));
     acecode::PtySessionRegistry pty_registry(
-        acecode::detect_pty_backend(), cwd, cfg_mut.console.shell);
+        acecode::detect_pty_backend(), cwd, default_shell_cmd);
     LOG_INFO(std::string("[daemon] console backend=") +
              acecode::pty_backend_kind_name(pty_registry.backend()) +
              " shell=" + pty_registry.shell());

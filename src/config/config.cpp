@@ -868,7 +868,8 @@ AppConfig load_config() {
                 }
             }
 
-            // Web 控制台(add-console-dock)。目前只有 shell 覆盖一个字段。
+            // Web 控制台(add-console-dock):shell 覆盖 + + 旁下拉选择器
+            // (default_shell / git_bash_path,见 控制台 Shell 选择器 plan)。
             if (j.contains("console")) {
                 if (!j["console"].is_object()) {
                     LOG_WARN("[config] 'console' must be an object, ignoring");
@@ -876,6 +877,12 @@ AppConfig load_config() {
                     const auto& cj = j["console"];
                     if (cj.contains("shell") && cj["shell"].is_string()) {
                         cfg.console.shell = cj["shell"].get<std::string>();
+                    }
+                    if (cj.contains("default_shell") && cj["default_shell"].is_string()) {
+                        cfg.console.default_shell = cj["default_shell"].get<std::string>();
+                    }
+                    if (cj.contains("git_bash_path") && cj["git_bash_path"].is_string()) {
+                        cfg.console.git_bash_path = cj["git_bash_path"].get<std::string>();
                     }
                 }
             }
@@ -1240,9 +1247,13 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
         if (!dnj.empty()) {
             deskj["notifications"] = dnj;
         }
-        // console:schema sparse — 只有非默认(非空 shell)才落盘。
-        if (!cfg.console.shell.empty()) {
-            j["console"] = nlohmann::json{{"shell", cfg.console.shell}};
+        // console:schema sparse — 只有非空字段才落盘。
+        {
+            nlohmann::json cj = nlohmann::json::object();
+            if (!cfg.console.shell.empty()) cj["shell"] = cfg.console.shell;
+            if (!cfg.console.default_shell.empty()) cj["default_shell"] = cfg.console.default_shell;
+            if (!cfg.console.git_bash_path.empty()) cj["git_bash_path"] = cfg.console.git_bash_path;
+            if (!cj.empty()) j["console"] = std::move(cj);
         }
         if (!deskj.empty()) {
             j["desktop"] = deskj;

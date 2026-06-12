@@ -60,8 +60,11 @@ public:
 
     // 创建会话并 spawn shell。失败返回 nullopt 并写 error;会话数达上限
     // (kPtyMaxSessions)时同样失败(error 含 "limit")。
+    // shell_override 非空时用它(已解析的完整命令行,见 resolve_shell_command_by_id),
+    // 空则用注册表默认 shell_。
     std::optional<PtySessionInfo> create(const std::string& cwd_override,
                                          const std::string& title,
+                                         const std::string& shell_override,
                                          std::string& error);
 
     std::vector<PtySessionInfo> list() const;

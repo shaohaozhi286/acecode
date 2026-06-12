@@ -26,9 +26,11 @@
 #include <optional>
 #include <sstream>
 #include <utility>
+#include <vector>
 
 #ifdef _WIN32
 #  include <windows.h>
+#  include <wrl.h>  // Microsoft::WRL::Callback,挂 WebView2 事件 handler
 #endif
 #if !defined(_WIN32) && !defined(__APPLE__)
 #  include <dlfcn.h>
@@ -45,6 +47,11 @@ namespace {
 
 // 全局 close_request_handler — 只在主线程上写,窗口回调在同一 GUI 主线程上读。
 std::function<bool()> g_close_handler;
+
+// 系统文件拖放 handler(plan: 桌面控制台拖放文件 → 插入完整路径)。Windows 的
+// WebView2 事件回调 / macOS swizzle 的拖放回调命中文件时调它,把路径交给 main.cpp
+// eval 回前端。主线程 only(WebView2 事件与 AppKit 拖放均在 GUI 主线程)。
+std::function<void(std::vector<std::string>)> g_file_drop_handler;
 
 #ifdef __APPLE__
 std::function<void(bool)> g_mac_window_state_handler;
@@ -341,6 +348,90 @@ void install_mac_edit_menu() {
 
     [NSApp setMainMenu:main_menu];
 }
+
+// ── macOS 系统文件拖放接管 ─────────────────────────────────────────────
+// WKWebView 默认把 Finder 文件拖放当网页内拖放/导航处理,JS 拿不到完整路径。
+// 这里 swizzle WKWebView 类的拖放方法:pasteboard 含 fileURL(Finder 拖来)→
+// 取出本地路径并回传;否则调原实现,不破坏网页内拖放(如把图片拖进编辑区)。
+typedef BOOL (*PerformDragImp)(id, SEL, id);
+typedef NSDragOperation (*DragOpImp)(id, SEL, id);
+static PerformDragImp g_orig_perform_drag = nullptr;
+static DragOpImp g_orig_dragging_entered = nullptr;
+static DragOpImp g_orig_dragging_updated = nullptr;
+
+static bool mac_drag_has_file_urls(id sender) {
+    NSPasteboard* pb = [sender draggingPasteboard];
+    return [pb canReadObjectForClasses:@[ [NSURL class] ]
+                               options:@{NSPasteboardURLReadingFileURLsOnlyKey : @YES}];
+}
+
+static BOOL ace_perform_drag_operation(id self, SEL cmd, id sender) {
+    if (mac_drag_has_file_urls(sender)) {
+        NSArray<NSURL*>* urls = [[sender draggingPasteboard]
+            readObjectsForClasses:@[ [NSURL class] ]
+                          options:@{NSPasteboardURLReadingFileURLsOnlyKey : @YES}];
+        std::vector<std::string> paths;
+        for (NSURL* url in urls) {
+            if (url.path) {
+                const char* p = [url.path UTF8String];
+                if (p) paths.emplace_back(p);
+            }
+        }
+        if (!paths.empty() && g_file_drop_handler) {
+            g_file_drop_handler(paths);
+            return YES;
+        }
+    }
+    if (g_orig_perform_drag) return g_orig_perform_drag(self, cmd, sender);
+    return NO;
+}
+
+static NSDragOperation ace_dragging_entered(id self, SEL cmd, id sender) {
+    if (mac_drag_has_file_urls(sender)) return NSDragOperationCopy;
+    if (g_orig_dragging_entered) return g_orig_dragging_entered(self, cmd, sender);
+    return NSDragOperationNone;
+}
+
+static NSDragOperation ace_dragging_updated(id self, SEL cmd, id sender) {
+    if (mac_drag_has_file_urls(sender)) return NSDragOperationCopy;
+    if (g_orig_dragging_updated) return g_orig_dragging_updated(self, cmd, sender);
+    return NSDragOperationNone;
+}
+
+void install_mac_file_drop(webview::webview& w) {
+    auto widget_result = w.widget();
+    if (!widget_result.ok() || !widget_result.value()) return;
+    NSView* view = static_cast<NSView*>(widget_result.value());
+    if (![view isKindOfClass:[NSView class]]) return;
+    Class cls = object_getClass(view);  // WKWebView 实际类
+    if (!cls) return;
+
+    // 补注册 fileURL 拖放类型(WKWebView 已注册网页拖放类型,合并而非覆盖)。
+    @try {
+        NSMutableArray* types = [[view registeredDraggedTypes] mutableCopy];
+        if (!types) types = [NSMutableArray array];
+        if (![types containsObject:NSPasteboardTypeFileURL]) {
+            [types addObject:NSPasteboardTypeFileURL];
+            [view registerForDraggedTypes:types];
+        }
+    } @catch (...) {
+    }
+
+    auto swizzle = [&](SEL sel, IMP repl, const char* types, IMP* saved_orig) {
+        if (Method m = class_getInstanceMethod(cls, sel)) {
+            if (saved_orig) *saved_orig = method_getImplementation(m);
+            method_setImplementation(m, repl);
+        } else {
+            class_addMethod(cls, sel, repl, types);
+        }
+    };
+    swizzle(@selector(performDragOperation:), (IMP)ace_perform_drag_operation, "c@:@",
+            reinterpret_cast<IMP*>(&g_orig_perform_drag));
+    swizzle(@selector(draggingEntered:), (IMP)ace_dragging_entered, "Q@:@",
+            reinterpret_cast<IMP*>(&g_orig_dragging_entered));
+    swizzle(@selector(draggingUpdated:), (IMP)ace_dragging_updated, "Q@:@",
+            reinterpret_cast<IMP*>(&g_orig_dragging_updated));
+}
 #endif
 
 } // namespace
@@ -496,6 +587,74 @@ void configure_browser_defaults(webview::webview& host) {
     }
 
     settings->Release();
+}
+
+// ── Windows 系统文件拖放接管 ───────────────────────────────────────────
+// 拖文件到非可放下区时,WebView2(默认 AllowExternalDrop)会试图导航 / 新窗口
+// 打开 file://。这里拦截这两条路径:命中 file: scheme → 取消默认动作(防整页
+// 跳转 / 打开文件)+ 把原始 file:// URI 回传给 handler(前端纯函数再归一化)。
+// http(s) 等正常导航放行,不受影响。
+bool win_is_file_uri(const std::wstring& uri) {
+    if (uri.size() < 5) return false;
+    auto lower = [](wchar_t c) { return static_cast<wchar_t>(::towlower(c)); };
+    return lower(uri[0]) == L'f' && lower(uri[1]) == L'i' && lower(uri[2]) == L'l' &&
+           lower(uri[3]) == L'e' && uri[4] == L':';
+}
+
+void dispatch_file_uri(const std::wstring& uri) {
+    if (g_file_drop_handler) {
+        g_file_drop_handler({acecode::wide_to_utf8(uri)});
+    }
+}
+
+void install_win_file_drop(webview::webview& host) {
+    auto controller_result = host.browser_controller();
+    if (!controller_result.ok()) return;
+    auto* controller = static_cast<ICoreWebView2Controller*>(controller_result.value());
+    if (!controller) return;
+    ICoreWebView2* core = nullptr;
+    if (FAILED(controller->get_CoreWebView2(&core)) || !core) return;
+
+    using Microsoft::WRL::Callback;
+    EventRegistrationToken nav_token{};
+    core->add_NavigationStarting(
+        Callback<ICoreWebView2NavigationStartingEventHandler>(
+            [](ICoreWebView2*, ICoreWebView2NavigationStartingEventArgs* args) -> HRESULT {
+                if (!args) return S_OK;
+                LPWSTR uri = nullptr;
+                if (SUCCEEDED(args->get_Uri(&uri)) && uri) {
+                    std::wstring u(uri);
+                    ::CoTaskMemFree(uri);
+                    if (win_is_file_uri(u)) {
+                        args->put_Cancel(TRUE);
+                        dispatch_file_uri(u);
+                    }
+                }
+                return S_OK;
+            })
+            .Get(),
+        &nav_token);
+
+    EventRegistrationToken win_token{};
+    core->add_NewWindowRequested(
+        Callback<ICoreWebView2NewWindowRequestedEventHandler>(
+            [](ICoreWebView2*, ICoreWebView2NewWindowRequestedEventArgs* args) -> HRESULT {
+                if (!args) return S_OK;
+                LPWSTR uri = nullptr;
+                if (SUCCEEDED(args->get_Uri(&uri)) && uri) {
+                    std::wstring u(uri);
+                    ::CoTaskMemFree(uri);
+                    if (win_is_file_uri(u)) {
+                        args->put_Handled(TRUE);
+                        dispatch_file_uri(u);
+                    }
+                }
+                return S_OK;
+            })
+            .Get(),
+        &win_token);
+
+    core->Release();
 }
 
 int win32_hit_test_value(FramelessHitTestArea area) {
@@ -1466,6 +1625,15 @@ bool WebHost::close_window() {
 }
 void WebHost::set_close_request_handler(std::function<bool()> handler) {
     g_close_handler = std::move(handler);
+}
+void WebHost::set_file_drop_handler(FileDropHandler handler) {
+    g_file_drop_handler = std::move(handler);
+#ifdef _WIN32
+    install_win_file_drop(*impl_->w);
+#elif defined(__APPLE__)
+    install_mac_file_drop(*impl_->w);
+#endif
+    // Linux/WebKitGTK:前端经 text/uri-list 处理,native 不安装拦截。
 }
 void WebHost::request_quit() {
 #ifdef _WIN32

@@ -4510,6 +4510,23 @@ struct WebServer::Impl {
         return j;
     }
 
+    // 控制台 shell 目录(+ 旁下拉框):{ shells:[{id,label,available,needs_path}], default }。
+    json console_shells_payload() {
+        json arr = json::array();
+        const std::string git_bash_path =
+            deps.app_config ? deps.app_config->console.git_bash_path : std::string{};
+        const std::string default_id = deps.app_config
+            ? default_console_shell_id(deps.app_config->console.default_shell, git_bash_path)
+            : std::string{};
+        for (const auto& opt : detect_console_shells(git_bash_path)) {
+            arr.push_back({{"id", opt.id},
+                           {"label", opt.label},
+                           {"available", opt.available},
+                           {"needs_path", opt.needs_path}});
+        }
+        return json{{"shells", arr}, {"default", default_id}};
+    }
+
     // /ws/pty/<id> 的 per-connection 状态(onaccept 解析,onclose 释放)。
     struct PtyWsState {
         std::string id;
@@ -4525,23 +4542,53 @@ struct WebServer::Impl {
         ([this](const crow::request& req, const std::string&) { return cors_preflight(req); });
         CROW_ROUTE(app, "/api/pty/<string>/title").methods(crow::HTTPMethod::Options)
         ([this](const crow::request& req, const std::string&) { return cors_preflight(req); });
+        CROW_ROUTE(app, "/api/pty/shells").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) { return cors_preflight(req); });
+        CROW_ROUTE(app, "/api/console/config").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) { return cors_preflight(req); });
 
-        // POST /api/pty {cwd?, title?} → 201 session info
+        // GET /api/pty/shells → { shells:[{id,label,available,needs_path}], default }
+        CROW_ROUTE(app, "/api/pty/shells").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req) {
+            if (auto rej = require_pty_access(req)) return std::move(*rej);
+            crow::response r(console_shells_payload().dump());
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        });
+
+        // POST /api/pty {cwd?, title?, shell?} → 201 session info
+        // shell = shell id(powershell/git-bash/cmd/...);省略 → 默认。id 不可用
+        // (git-bash 需指定路径)→ 400 {error, shell, needs_path}。
         CROW_ROUTE(app, "/api/pty").methods(crow::HTTPMethod::POST)
         ([this](const crow::request& req) {
             if (auto rej = require_pty_access(req)) return std::move(*rej);
-            std::string cwd_override, title;
+            std::string cwd_override, title, shell_id;
             if (!req.body.empty()) {
                 try {
                     auto body = json::parse(req.body);
                     cwd_override = body.value("cwd", "");
                     title = body.value("title", "");
+                    shell_id = body.value("shell", "");
                 } catch (...) {
                     return with_cors(req, crow::response(400, "bad json"));
                 }
             }
+            std::string shell_override;
+            if (!shell_id.empty()) {
+                const std::string git_bash_path =
+                    deps.app_config ? deps.app_config->console.git_bash_path : std::string{};
+                auto cmd = resolve_shell_command_by_id(shell_id, git_bash_path);
+                if (!cmd) {
+                    json e{{"error", "shell unavailable"}, {"shell", shell_id}};
+                    if (shell_id == "git-bash") e["needs_path"] = true;
+                    crow::response r(400, e.dump());
+                    r.add_header("Content-Type", "application/json");
+                    return with_cors(req, std::move(r));
+                }
+                shell_override = *cmd;
+            }
             std::string error;
-            auto info = deps.pty_registry->create(cwd_override, title, error);
+            auto info = deps.pty_registry->create(cwd_override, title, shell_override, error);
             if (!info) {
                 int code = error.find("limit") != std::string::npos ? 429 : 500;
                 crow::response r(code);
@@ -4616,6 +4663,78 @@ struct WebServer::Impl {
                 return with_cors(req, crow::response(404));
             }
             return with_cors(req, crow::response(204));
+        });
+
+        // PUT /api/console/config {default_shell?, git_bash_path?} → 校验 + 持久化
+        // (save_config 原子写,失败回滚)→ 返回刷新后的 shells payload。
+        CROW_ROUTE(app, "/api/console/config").methods(crow::HTTPMethod::PUT)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.app_config) return crow::response(503);
+            auto json_err = [&](int status, const std::string& msg) {
+                crow::response r(status);
+                r.body = json{{"error", msg}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            };
+            json body;
+            try { body = json::parse(req.body); }
+            catch (const std::exception& e) {
+                return json_err(400, std::string("bad json: ") + e.what());
+            }
+
+            const std::string prev_default = deps.app_config->console.default_shell;
+            const std::string prev_bash = deps.app_config->console.git_bash_path;
+
+            if (body.contains("git_bash_path")) {
+                if (!body["git_bash_path"].is_string()) {
+                    return json_err(400, "git_bash_path must be a string");
+                }
+                std::string p = body["git_bash_path"].get<std::string>();
+                // 去掉首尾空白与成对双引号(用户常粘进带引号的路径)。
+                auto trim = [](std::string& s) {
+                    while (!s.empty() && (s.front() == ' ' || s.front() == '\t' ||
+                                          s.front() == '\r' || s.front() == '\n')) s.erase(s.begin());
+                    while (!s.empty() && (s.back() == ' ' || s.back() == '\t' ||
+                                          s.back() == '\r' || s.back() == '\n')) s.pop_back();
+                };
+                trim(p);
+                if (p.size() >= 2 && p.front() == '"' && p.back() == '"') {
+                    p = p.substr(1, p.size() - 2);
+                    trim(p);
+                }
+                if (!p.empty()) {
+                    if (is_wsl_system32_bash(p)) {
+                        return json_err(400, "that looks like WSL bash (System32), not Git Bash");
+                    }
+                    std::error_code ec;
+                    auto fs_path = std::filesystem::u8path(p);
+                    if (!std::filesystem::exists(fs_path, ec) ||
+                            std::filesystem::is_directory(fs_path, ec)) {
+                        return json_err(400, "bash path does not exist");
+                    }
+                }
+                deps.app_config->console.git_bash_path = p;
+            }
+            if (body.contains("default_shell")) {
+                if (!body["default_shell"].is_string()) {
+                    return json_err(400, "default_shell must be a string");
+                }
+                deps.app_config->console.default_shell = body["default_shell"].get<std::string>();
+            }
+
+            try {
+                if (!deps.config_path.empty()) save_config(*deps.app_config, deps.config_path);
+                else save_config(*deps.app_config);
+            } catch (const std::exception& e) {
+                deps.app_config->console.default_shell = prev_default;
+                deps.app_config->console.git_bash_path = prev_bash;
+                return json_err(500, std::string("persist failed: ") + e.what());
+            }
+
+            crow::response r(200, console_shells_payload().dump());
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
         });
 
         // WS /ws/pty/<id>?cursor=N — 原始字节直传 + 0x00 控制帧。

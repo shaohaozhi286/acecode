@@ -8,6 +8,8 @@ import './codeBlockCopy.test.js';
 import './inputHistoryNavigation.test.js';
 import './inputBarState.test.js';
 import './composerFileTransfer.test.js';
+import './consoleDropPaths.test.js';
+import './consoleShells.test.js';
 import './imageNormalize.test.js';
 import './messageAttachments.test.js';
 import './selectionChatContext.test.js';

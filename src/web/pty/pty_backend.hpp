@@ -17,7 +17,9 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
+#include <vector>
 
 namespace acecode {
 
@@ -77,5 +79,52 @@ std::unique_ptr<PtyProcess> spawn_pty(PtyBackendKind kind,
 // shell 解析(纯函数,单测覆盖):configured 非空(config console.shell)优先;
 // 否则 Windows 取 %COMSPEC%(空则 "cmd.exe"),POSIX 取 $SHELL(空则 "/bin/sh")。
 std::string resolve_console_shell(const std::string& configured);
+
+// ── 控制台 shell 目录(plan: 控制台 Shell 选择器)──────────────────────
+// 探测当前 OS 可选的 shell(Windows: PowerShell / Git Bash / cmd;POSIX:
+// 默认 $SHELL / bash / zsh / fish),供前端 + 旁下拉框选择。command 为实际
+// 启动命令行(可带参数,如 git bash 的 "--login -i");available=false 表示
+// 该 shell 不可用,git-bash 探测不到时 needs_path=true(前端提示用户指定
+// bash.exe 路径)。
+struct ConsoleShellOption {
+    std::string id;        // 稳定 id:powershell / git-bash / cmd / shell / bash / zsh / fish
+    std::string label;     // 展示名
+    std::string command;   // 启动命令行(available=false 时可空)
+    bool available = false;
+    bool needs_path = false;
+};
+
+// 注入式探测点(默认实现走真实 FS / env / 注册表),便于单测 mock。
+struct ShellProbe {
+    std::function<bool(const std::string& path)> exists;        // 文件存在?
+    std::function<std::string(const std::string& name)> getenv; // 环境变量(UTF-8),无则空
+    std::function<std::string()> git_install_path;              // Windows: GitForWindows 注册表 InstallPath,无则空
+};
+ShellProbe default_shell_probe();
+
+// configured_git_bash_path = config.console.git_bash_path(用户指定的 bash.exe,可空)。
+std::vector<ConsoleShellOption> detect_console_shells(
+    const std::string& configured_git_bash_path, const ShellProbe& probe);
+std::vector<ConsoleShellOption> detect_console_shells(
+    const std::string& configured_git_bash_path);  // 用 default_shell_probe()
+
+// 按 id 解析启动命令;不存在 / 不可用返回 nullopt。
+std::optional<std::string> resolve_shell_command_by_id(
+    const std::string& id, const std::string& configured_git_bash_path,
+    const ShellProbe& probe);
+std::optional<std::string> resolve_shell_command_by_id(
+    const std::string& id, const std::string& configured_git_bash_path);
+
+// 默认 shell id:configured_default_shell 非空且可用则用之,否则平台默认
+// (Windows="cmd",POSIX="shell")。
+std::string default_console_shell_id(
+    const std::string& configured_default_shell,
+    const std::string& configured_git_bash_path, const ShellProbe& probe);
+std::string default_console_shell_id(
+    const std::string& configured_default_shell,
+    const std::string& configured_git_bash_path);
+
+// bash 路径是否为 WSL 的 System32\bash.exe(需排除,它不是 Git Bash)。
+bool is_wsl_system32_bash(const std::string& path);
 
 } // namespace acecode

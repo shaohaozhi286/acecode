@@ -349,6 +349,11 @@ function SessionRow({
         attention === 'unread' && !active && 'font-semibold',
       )}
       onPointerDown={pinned ? (event) => onPinnedPointerDown?.(event, s, title) : undefined}
+      onClick={pinned ? (event) => {
+        if (event.defaultPrevented) return;
+        if (event.target?.closest?.('[data-sidebar-row-control="true"], input, textarea, select')) return;
+        onSelect?.(s);
+      } : undefined}
     >
       <button
         type="button"

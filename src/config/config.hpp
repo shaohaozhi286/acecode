@@ -227,9 +227,14 @@ struct DesktopConfig {
 
 // Web 控制台(ConsoleDock)配置。见 openspec/changes/add-console-dock。
 struct ConsoleConfig {
-    // 终端 shell 覆盖。空 = 平台默认(Windows: %COMSPEC% 即 cmd;POSIX: $SHELL)。
+    // 终端 shell 覆盖(legacy)。空 = 平台默认(Windows: %COMSPEC% 即 cmd;POSIX: $SHELL)。
     // 例:"pwsh" / "powershell" / "/usr/bin/fish"。
     std::string shell;
+    // + 旁下拉框选中的默认 shell id(powershell / git-bash / cmd / shell / ...)。
+    // 空 = 平台默认。见 detect_console_shells / default_console_shell_id。
+    std::string default_shell;
+    // 用户指定的 Git Bash bash.exe 完整路径(自动探测不到时填,永久记住)。
+    std::string git_bash_path;
 };
 
 struct SessionTitleConfig {

@@ -139,6 +139,52 @@ TEST_F(SkillRegistryCompatTest, PreservesUtf8CategoryDescriptionAndBody) {
     EXPECT_TRUE(acecode::is_valid_utf8(body));
 }
 
+TEST_F(SkillRegistryCompatTest, LargeUtf8SkillNotGarbledWhenReadBudgetSplitsCharacter) {
+    // 触发场景:像 paoffice-im 这类 SKILL.md 把整套 CLI 文档写进 body,文件远超
+    // frontmatter 8KB 读取预算。旧实现在第 8192 字节硬切,常把一个 3 字节中文字符
+    // 切成两半 → ensure_utf8 判整块非法 UTF-8 → 中文 Windows 上按 GBK 重解码 →
+    // 顶部 frontmatter(含 description)从第一个字节起整串乱码。
+    // 期望:description 原样保留、仍是合法 UTF-8。
+    // 回归 bug 表现:WebUI 斜杠命令列表里该 skill 的描述显示为乱码,其余 skill 正常。
+    fs::path root = temp_root / "skills-root";
+    fs::path dir = root / "general" / "big-skill";
+    fs::create_directories(dir);
+
+    const std::string description = u8"快乐平安 IM 聊天 CLI 工具";
+    const std::string header =
+        "---\n"
+        "name: big-skill\n"
+        "description: " + description + "\n"
+        "---\n\n";
+    // 用 3 字节中文字符 "国"(E5 9B BD)铺满 body,凑到远超 8192 字节。
+    std::string cjk_run;
+    while (cjk_run.size() < 9000) cjk_run += u8"国";
+    // 关键:确定性地让第 8192 字节(首个未读字节)落在续字节上,即读取窗口
+    // [0,8191] 必然以残缺字符结尾——这正是旧 bug 的触发条件。用 ASCII 垫片微调对齐。
+    std::string pad;
+    auto build = [&] { return header + "# big-skill " + pad + "\n\n" + cjk_run; };
+    std::string file = build();
+    ASSERT_GT(file.size(), 8192u);
+    auto is_continuation = [](unsigned char b) { return (b & 0xC0) == 0x80; };
+    while (!is_continuation(static_cast<unsigned char>(file[8192]))) {
+        pad += "x";
+        file = build();
+    }
+
+    std::ofstream ofs(dir / "SKILL.md", std::ios::binary);
+    ofs.write(file.data(), static_cast<std::streamsize>(file.size()));
+    ofs.close();
+
+    acecode::SkillRegistry registry;
+    registry.set_scan_roots({root});
+    registry.scan();
+
+    auto found = registry.find("big-skill");
+    ASSERT_TRUE(found.has_value());
+    EXPECT_EQ(found->description, description);
+    EXPECT_TRUE(acecode::is_valid_utf8(found->description));
+}
+
 TEST_F(SkillRegistryCompatTest, LoadsUtf16LegacyHeaderSkill) {
     fs::path root = temp_root / "skills-root";
     fs::path dir = root / "general" / "calculator";

@@ -10,6 +10,7 @@
 // cursor 续传,刷新页面后 listPty 恢复 running 会话并从 cursor=0 回放。
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
@@ -29,8 +30,13 @@ import {
   removeTab,
   renameTab,
 } from '../lib/consoleDock.js';
+import { formatDroppedPaths, parseUriList } from '../lib/consoleDropPaths.js';
+import { copyTextToSystemClipboard, readTextFromSystemClipboard } from '../lib/systemClipboard.js';
+import { normalizeShells, buildShellMenuItems } from '../lib/consoleShells.js';
 import { useTheme } from '../theme.jsx';
 import { VsIcon } from './Icon.jsx';
+import { Modal } from './Modal.jsx';
+import { toast } from './Toast.jsx';
 
 const api = createApi();
 
@@ -48,10 +54,54 @@ const THEMES = {
   },
 };
 
+// 宿主 OS:desktop 壳由 init_script 注入 window.__ACECODE_OS__;浏览器直连兜底
+// 从 userAgent 推断(直连模式拖放拿不到完整路径,功能基本只对 desktop 有意义)。
+function detectHostOs() {
+  if (typeof window !== 'undefined') {
+    const os = window.__ACECODE_OS__;
+    if (os === 'windows' || os === 'macos' || os === 'linux') return os;
+  }
+  const ua = (typeof navigator !== 'undefined' && navigator.userAgent) || '';
+  if (/Windows/i.test(ua)) return 'windows';
+  if (/Mac/i.test(ua)) return 'macos';
+  return 'linux';
+}
+
+// 是否由 native 接管系统文件拖放(Windows/WebView2 + macOS/WKWebView)。
+// 为真:终端区不 preventDefault,让系统拖放下沉到 native 层后回传路径;
+// 为假(Linux/WebKitGTK):走 web drop 直接读 text/uri-list。
+function nativeFileDropEnabled() {
+  return typeof window !== 'undefined' && window.__ACECODE_NATIVE_FILE_DROP__ === true;
+}
+
+// dataTransfer 是否携带文件(区分纯文本拖放,避免对选中文本等误响应)。
+function transferHasFiles(dataTransfer) {
+  if (!dataTransfer) return false;
+  try {
+    const types = dataTransfer.types;
+    return !!types && Array.from(types).includes('Files');
+  } catch {
+    return false;
+  }
+}
+
+const HOST_OS = detectHostOs();
+const NATIVE_DROP = nativeFileDropEnabled();
+
 export function ConsoleDock({ open, height, onHeightChange, onToggle, consoleInfo }) {
   const { theme: mode } = useTheme();
   const [tabsState, setTabsState] = useState(createDockTabs);
   const [creating, setCreating] = useState(false);
+  // + 旁 shell 下拉框(控制台 Shell 选择器):可用 shell 列表 / 默认 id / 菜单开合 /
+  // 「指定 bash 路径」模态状态。
+  const [shells, setShells] = useState([]);
+  const [defaultShellId, setDefaultShellId] = useState('');
+  const [shellMenuOpen, setShellMenuOpen] = useState(false);
+  const [shellMenuPos, setShellMenuPos] = useState(null); // {top,left}:fixed 定位坐标
+  const shellGroupRef = useRef(null);
+  const [bashPrompt, setBashPrompt] = useState(null); // null 或 {} 表示模态打开
+  const [bashPathInput, setBashPathInput] = useState('');
+  const [bashError, setBashError] = useState('');
   const entriesRef = useRef(new Map()); // id → {term, fit, ws, container, cursor, tries, timers, disposed}
   const bodyRef = useRef(null);
   const tabsStateRef = useRef(tabsState);
@@ -240,18 +290,80 @@ export function ConsoleDock({ open, height, onHeightChange, onToggle, consoleInf
 
   // ── 会话操作 ───────────────────────────────────────────────────────
 
-  const createTab = useCallback(async () => {
+  // 新建终端。shellId 省略 → 用默认 shell;指定 → 用该 shell。后端对 git-bash
+  // 未指定路径返回 400 {needs_path} → 弹「指定 bash 路径」模态。
+  const createTab = useCallback(async (shellId) => {
     if (creating) return;
     setCreating(true);
     try {
-      const info = await api.createPty({});
+      const info = await api.createPty(shellId ? { shell: shellId } : {});
       setTabsState((s) => addTab(s, info));
     } catch (err) {
-      console.warn('[console] create pty failed', err);
+      if (err?.body?.needs_path || err?.body?.shell === 'git-bash') {
+        setBashError('');
+        setBashPathInput('');
+        setBashPrompt({ shellId: 'git-bash' });
+      } else {
+        console.warn('[console] create pty failed', err);
+      }
     } finally {
       setCreating(false);
     }
   }, [creating]);
+
+  // 拉取当前 OS 可用 shell(dock 打开时一次)。
+  const loadShells = useCallback(async () => {
+    try {
+      const { shells: ns, defaultId } = normalizeShells(await api.listPtyShells());
+      setShells(ns);
+      setDefaultShellId(defaultId);
+    } catch { /* 列表拉取失败:下拉留空,+ 仍用默认 shell */ }
+  }, []);
+
+  // 开合下拉:打开时按按钮 rect 计算 fixed 坐标(向下弹,逃出 tabbar overflow 裁剪)。
+  const toggleShellMenu = useCallback(() => {
+    if (!shellMenuOpen && shellGroupRef.current) {
+      const r = shellGroupRef.current.getBoundingClientRect();
+      setShellMenuPos({ top: Math.round(r.bottom + 4), left: Math.round(r.left) });
+    }
+    setShellMenuOpen((v) => !v);
+  }, [shellMenuOpen]);
+
+  // 下拉选 shell:可用 → 新建 + 持久化为默认;需指定路径(git-bash)→ 弹模态。
+  const pickShell = useCallback(async (item) => {
+    setShellMenuOpen(false);
+    if (!item) return;
+    if (item.needsPath || !item.available) {
+      setBashError('');
+      setBashPathInput('');
+      setBashPrompt({ shellId: item.id });
+      return;
+    }
+    await createTab(item.id);
+    try {
+      const { shells: ns, defaultId } =
+        normalizeShells(await api.setConsoleShellConfig({ default_shell: item.id }));
+      setShells(ns);
+      setDefaultShellId(defaultId);
+    } catch { /* 默认持久化失败不致命:本次仍以该 shell 打开 */ }
+  }, [createTab]);
+
+  // 提交用户指定的 Git Bash 路径:后端校验 + 持久化 → 刷新列表 → 用 git-bash 新建。
+  const submitBashPath = useCallback(async () => {
+    const path = bashPathInput.trim();
+    if (!path) { setBashError('请输入 bash.exe 完整路径'); return; }
+    try {
+      const { shells: ns, defaultId } = normalizeShells(
+        await api.setConsoleShellConfig({ git_bash_path: path, default_shell: 'git-bash' }));
+      setShells(ns);
+      setDefaultShellId(defaultId);
+      setBashPrompt(null);
+      toast({ kind: 'ok', text: '已记住 Git Bash 路径' });
+      await createTab('git-bash');
+    } catch (err) {
+      setBashError(err?.body?.error || err?.message || '保存失败');
+    }
+  }, [bashPathInput, createTab]);
 
   const closeTab = useCallback((id) => {
     teardownEntry(id);
@@ -289,6 +401,26 @@ export function ConsoleDock({ open, height, onHeightChange, onToggle, consoleInf
     })();
   }, [open, createTab]);
 
+  // dock 打开时拉取可用 shell 列表(+ 旁下拉框)。
+  useEffect(() => {
+    if (open) loadShells();
+  }, [open, loadShells]);
+
+  // shell 下拉菜单:点菜单外关闭。
+  useEffect(() => {
+    if (!shellMenuOpen) return undefined;
+    const onDown = (e) => {
+      // 菜单经 portal 渲染到 body(已脱离 .ace-console-newgroup),需同时放行菜单本身。
+      if (e.target instanceof Element &&
+          (e.target.closest('.ace-console-newgroup') || e.target.closest('.ace-console-shell-menu'))) {
+        return;
+      }
+      setShellMenuOpen(false);
+    };
+    window.addEventListener('mousedown', onDown, true);
+    return () => window.removeEventListener('mousedown', onDown, true);
+  }, [shellMenuOpen]);
+
   // ── 顶边拖拽(startSidebarResize 模式改纵向,只动 dock 高度) ─────────
 
   const dragActiveRef = useRef(false);
@@ -318,6 +450,120 @@ export function ConsoleDock({ open, height, onHeightChange, onToggle, consoleInf
     window.addEventListener('pointerup', onStop, { once: true });
     window.addEventListener('pointercancel', onStop, { once: true });
   }, [height, onHeightChange]);
+
+  // ── 文件拖放注入(plan: 桌面控制台拖放文件 → 插入完整路径)───────────
+  // 把拖入终端的文件完整路径作为输入注入对应终端(等同键入,不自动回车)。
+  // Windows/macOS 由 native 拦截系统拖放后回传(NATIVE_DROP);Linux/WebKitGTK
+  // 直接从 web drop 的 text/uri-list 拿。命中目标终端靠「最近悬停 tab + 时间戳」。
+
+  const [dropHoverTabId, setDropHoverTabId] = useState(null);
+  const dropHoverRef = useRef({ tabId: null, ts: 0 });
+
+  const injectTextToTab = useCallback((tabId, text) => {
+    if (!text) return false;
+    const entry = entriesRef.current.get(tabId);
+    if (entry?.ws && !entry.disposed && entry.ws.readyState === WebSocket.OPEN) {
+      entry.ws.send(text);
+      focusTab(tabId); // 注入后聚焦,用户可直接继续输入 / 回车执行
+      return true;
+    }
+    return false;
+  }, [focusTab]);
+
+  const markDropHover = useCallback((tabId) => {
+    dropHoverRef.current = { tabId, ts: Date.now() };
+    setDropHoverTabId((cur) => (cur === tabId ? cur : tabId));
+  }, []);
+
+  const clearDropHover = useCallback((tabId) => {
+    if (dropHoverRef.current.tabId === tabId) dropHoverRef.current = { tabId: null, ts: 0 };
+    setDropHoverTabId((cur) => (cur === tabId ? null : cur));
+  }, []);
+
+  const handleTermDragEnter = useCallback((tabId, event) => {
+    if (!transferHasFiles(event.dataTransfer)) return;
+    // web 模式(Linux)必须 preventDefault 才会触发后续 drop;native 模式不拦,
+    // 让系统拖放下沉到 WebView native 层去取真实路径。
+    if (!NATIVE_DROP) event.preventDefault();
+    markDropHover(tabId);
+  }, [markDropHover]);
+
+  const handleTermDragOver = useCallback((tabId, event) => {
+    if (!transferHasFiles(event.dataTransfer)) return;
+    if (!NATIVE_DROP) {
+      event.preventDefault();
+      try { event.dataTransfer.dropEffect = 'copy'; } catch { /* 某些环境只读 */ }
+    }
+    markDropHover(tabId);
+  }, [markDropHover]);
+
+  const handleTermDragLeave = useCallback((tabId, event) => {
+    // 仅当真正离开容器(relatedTarget 不在容器内)才清,避免在 xterm 内部子元素
+    // 之间移动时 enter/leave 抖动造成的误清。
+    const to = event.relatedTarget;
+    if (to && event.currentTarget.contains(to)) return;
+    clearDropHover(tabId);
+  }, [clearDropHover]);
+
+  const handleTermDrop = useCallback((tabId, event) => {
+    if (NATIVE_DROP) return; // native 模式下 drop 不会触发,路径走全局回调
+    event.preventDefault();
+    const uris = parseUriList(event.dataTransfer?.getData?.('text/uri-list') || '');
+    clearDropHover(tabId);
+    if (uris.length) injectTextToTab(tabId, formatDroppedPaths(uris, HOST_OS));
+  }, [injectTextToTab, clearDropHover]);
+
+  // VS Code 式终端右键(rightClickBehavior=copyPaste):有选区 → 复制并清选区;
+  // 无选区 → 把剪贴板文本粘进该终端。不弹通用右键菜单(外层 DesktopContextMenu
+  // 已对 .ace-console-term 放行)。粘贴走 term.paste —— 它按 bracketed-paste 模式
+  // 正确包装后经 onData → ws.send,多行粘贴不会被 shell 逐行抢跑(同 xterm Ctrl+V)。
+  const handleTermContextMenu = useCallback((tabId, event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const term = entriesRef.current.get(tabId)?.term;
+    if (!term) return;
+    (async () => {
+      try {
+        if (typeof term.hasSelection === 'function' && term.hasSelection()) {
+          const sel = term.getSelection?.() || '';
+          if (sel) {
+            await copyTextToSystemClipboard(sel);
+            term.clearSelection?.();
+            return;
+          }
+        }
+        const result = await readTextFromSystemClipboard();
+        if (result?.ok && result.text) {
+          term.paste(result.text);
+          focusTab(tabId);
+        }
+      } catch { /* 剪贴板读写失败静默忽略 */ }
+    })();
+  }, [focusTab]);
+
+  // NATIVE_DROP:注册全局回调,native 拦到系统文件拖放后经 host.eval 调它回传路径。
+  useEffect(() => {
+    if (!NATIVE_DROP) return undefined;
+    window.__aceConsoleAcceptFileDrop = (payload) => {
+      let paths = payload;
+      if (typeof payload === 'string') {
+        try { paths = JSON.parse(payload); } catch { return; }
+      }
+      if (!Array.isArray(paths) || paths.length === 0) return;
+      const hover = dropHoverRef.current;
+      // 松手落在终端上 → 该 tab 仍是最近悬停且时间戳新鲜(回传通常几十 ms 内到)。
+      // 否则(拖到非终端区)静默忽略,只让 native 吞掉文件导航即可。
+      if (!hover.tabId || Date.now() - hover.ts > 1500) return;
+      const targetId = hover.tabId;
+      dropHoverRef.current = { tabId: null, ts: 0 };
+      setDropHoverTabId(null);
+      injectTextToTab(targetId, formatDroppedPaths(paths, HOST_OS));
+    };
+    return () => {
+      try { delete window.__aceConsoleAcceptFileDrop; }
+      catch { window.__aceConsoleAcceptFileDrop = undefined; }
+    };
+  }, [injectTextToTab]);
 
   // ── 渲染 ───────────────────────────────────────────────────────────
 
@@ -362,15 +608,58 @@ export function ConsoleDock({ open, height, onHeightChange, onToggle, consoleInf
               </button>
             </div>
           ))}
-          <button
-            type="button"
-            className="ace-console-iconbtn"
-            title="新建终端"
-            disabled={creating}
-            onClick={createTab}
-          >
-            <VsIcon name="add" size={14} />
-          </button>
+          <div className="ace-console-newgroup" ref={shellGroupRef}>
+            <button
+              type="button"
+              className="ace-console-iconbtn"
+              title="新建终端(默认 shell)"
+              disabled={creating}
+              onClick={() => createTab()}
+            >
+              <VsIcon name="add" size={14} />
+            </button>
+            <button
+              type="button"
+              className="ace-console-iconbtn ace-console-shell-caret"
+              title="选择 shell"
+              aria-haspopup="menu"
+              aria-expanded={shellMenuOpen}
+              disabled={creating}
+              onClick={toggleShellMenu}
+            >
+              <VsIcon name="expandDown" size={12} />
+            </button>
+            {shellMenuOpen && shellMenuPos && createPortal(
+              <div
+                className="ace-console-shell-menu"
+                role="menu"
+                style={{ top: shellMenuPos.top, left: shellMenuPos.left }}
+              >
+                {buildShellMenuItems(shells, defaultShellId).map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    role="menuitem"
+                    className="ace-console-shell-item"
+                    data-default={item.isDefault ? 'true' : undefined}
+                    onClick={() => pickShell(item)}
+                  >
+                    <span className="ace-console-shell-label">{item.label}</span>
+                    {item.needsPath && (
+                      <span className="ace-console-shell-tag">需指定路径</span>
+                    )}
+                    {item.isDefault && (
+                      <VsIcon name="check" size={12} className="shrink-0 opacity-70" />
+                    )}
+                  </button>
+                ))}
+                {buildShellMenuItems(shells, defaultShellId).length === 0 && (
+                  <div className="ace-console-shell-empty">无可用 shell</div>
+                )}
+              </div>,
+              document.body,
+            )}
+          </div>
         </div>
         <div className="flex items-center gap-1 shrink-0">
           {backend === 'pipe' && (
@@ -396,8 +685,15 @@ export function ConsoleDock({ open, height, onHeightChange, onToggle, consoleInf
           <div
             key={tab.id}
             className="ace-console-term"
+            data-tab-id={tab.id}
+            data-drop-active={dropHoverTabId === tab.id ? 'true' : undefined}
             style={{ display: tab.id === tabsState.activeId ? 'block' : 'none' }}
             ref={(el) => mountContainer(tab.id, el)}
+            onDragEnter={(e) => handleTermDragEnter(tab.id, e)}
+            onDragOver={(e) => handleTermDragOver(tab.id, e)}
+            onDragLeave={(e) => handleTermDragLeave(tab.id, e)}
+            onDrop={(e) => handleTermDrop(tab.id, e)}
+            onContextMenu={(e) => handleTermContextMenu(tab.id, e)}
           />
         ))}
         {tabsState.tabs.length === 0 && (
@@ -406,6 +702,45 @@ export function ConsoleDock({ open, height, onHeightChange, onToggle, consoleInf
           </div>
         )}
       </div>
+      {bashPrompt && (
+        <Modal onClose={() => setBashPrompt(null)} width={460}>
+          {({ close }) => (
+            <div className="p-4 flex flex-col gap-3">
+              <div className="text-sm font-medium text-fg">指定 Git Bash 路径</div>
+              <div className="text-[12px] text-fg-mute leading-relaxed">
+                未自动找到 Git Bash。请输入 <code>bash.exe</code> 的完整路径
+                (例如 <code>C:\Program Files\Git\bin\bash.exe</code>)。保存后会永久记住。
+              </div>
+              <input
+                type="text"
+                autoFocus
+                className="w-full h-9 px-2.5 rounded-md bg-surface-alt border border-border text-fg text-[13px] outline-none focus:border-accent"
+                placeholder="C:\Program Files\Git\bin\bash.exe"
+                value={bashPathInput}
+                onChange={(e) => { setBashPathInput(e.target.value); setBashError(''); }}
+                onKeyDown={(e) => { if (e.key === 'Enter') submitBashPath(); }}
+              />
+              {bashError && <div className="text-[12px] text-danger">{bashError}</div>}
+              <div className="flex justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  className="h-8 px-3 rounded-md border border-border text-fg text-[12px] hover:bg-surface-hi"
+                  onClick={close}
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  className="h-8 px-3 rounded-md bg-accent text-white text-[12px] font-medium hover:opacity-90"
+                  onClick={submitBashPath}
+                >
+                  保存并打开
+                </button>
+              </div>
+            </div>
+          )}
+        </Modal>
+      )}
     </div>
   );
 }

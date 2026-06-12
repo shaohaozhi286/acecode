@@ -48,6 +48,24 @@ export async function copyTextToSystemClipboard(
   };
 }
 
+// 读系统剪贴板纯文本(控制台右键粘贴用)。右键是用户手势,WebView2 / 浏览器
+// loopback(secure context)下 navigator.clipboard.readText 可直接读。失败返回
+// { ok:false }, 调用方静默降级。
+export async function readTextFromSystemClipboard(
+  win = typeof window !== 'undefined' ? window : undefined,
+) {
+  const clipboard = win?.navigator?.clipboard;
+  if (clipboard && typeof clipboard.readText === 'function') {
+    try {
+      const text = await clipboard.readText();
+      return { ok: true, text: String(text ?? ''), via: 'navigator' };
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) };
+    }
+  }
+  return { ok: false, error: 'clipboard read unavailable' };
+}
+
 async function writeClipboardImage(clipboard, ClipboardItemCtor, mimeType, blob) {
   await clipboard.write([new ClipboardItemCtor({ [mimeType]: blob })]);
 }

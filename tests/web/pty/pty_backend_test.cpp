@@ -15,9 +15,12 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace {
 
@@ -82,6 +85,137 @@ TEST(PtyShellResolveTest, EmptyConfigFallsBackToPlatformDefault) {
     EXPECT_EQ(shell.front(), '/');
 #endif
 }
+
+// ---------------------------------------------------------------------------
+// 控制台 shell 目录(+ 旁下拉框选择器,plan: 控制台 Shell 选择器)
+// 用注入式 ShellProbe mock FS/env/注册表,避免依赖真实安装的 shell。
+// ---------------------------------------------------------------------------
+
+namespace {
+acecode::ShellProbe mock_probe(std::set<std::string> existing,
+                               std::map<std::string, std::string> env,
+                               std::string git_install = "") {
+    acecode::ShellProbe p;
+    p.exists = [existing](const std::string& path) { return existing.count(path) > 0; };
+    p.getenv = [env](const std::string& name) {
+        auto it = env.find(name);
+        return it == env.end() ? std::string{} : it->second;
+    };
+    p.git_install_path = [git_install]() { return git_install; };
+    return p;
+}
+const acecode::ConsoleShellOption* find_shell(
+    const std::vector<acecode::ConsoleShellOption>& v, const std::string& id) {
+    for (const auto& o : v) if (o.id == id) return &o;
+    return nullptr;
+}
+}  // namespace
+
+// 触发场景:WSL 的 System32\bash.exe 必须被识别(它不是 Git Bash)。
+// 回归意义:误把 WSL bash 当 Git Bash 会打开完全不同的环境。
+TEST(ConsoleShellCatalogTest, DetectsWslSystem32Bash) {
+    EXPECT_TRUE(acecode::is_wsl_system32_bash("C:\\Windows\\System32\\bash.exe"));
+    EXPECT_TRUE(acecode::is_wsl_system32_bash("c:/windows/system32/bash.exe"));
+    EXPECT_FALSE(acecode::is_wsl_system32_bash("C:\\Program Files\\Git\\bin\\bash.exe"));
+}
+
+#ifdef _WIN32
+
+// 触发场景:Git 装在 Program Files,bash.exe 存在。
+// 期望:git-bash 可用,命令含 --login -i,且带空格的路径被双引号包裹。
+TEST(ConsoleShellCatalogTest, GitBashDetectedUnderProgramFiles) {
+    auto probe = mock_probe(
+        {"C:\\Program Files\\Git\\bin\\bash.exe"},
+        {{"ProgramFiles", "C:\\Program Files"},
+         {"COMSPEC", "C:\\Windows\\System32\\cmd.exe"}});
+    auto shells = acecode::detect_console_shells("", probe);
+    const auto* gb = find_shell(shells, "git-bash");
+    ASSERT_NE(gb, nullptr);
+    EXPECT_TRUE(gb->available);
+    EXPECT_FALSE(gb->needs_path);
+    EXPECT_NE(gb->command.find("--login -i"), std::string::npos);
+    EXPECT_NE(gb->command.find("\"C:\\Program Files\\Git\\bin\\bash.exe\""),
+              std::string::npos);
+}
+
+// 触发场景:任何位置都找不到 Git Bash。
+// 期望:available=false + needs_path=true(前端据此弹「指定 bash 路径」框);
+// resolve_shell_command_by_id 返回 nullopt。
+TEST(ConsoleShellCatalogTest, GitBashMissingMarksNeedsPath) {
+    auto probe = mock_probe({}, {{"ProgramFiles", "C:\\Program Files"}});
+    auto shells = acecode::detect_console_shells("", probe);
+    const auto* gb = find_shell(shells, "git-bash");
+    ASSERT_NE(gb, nullptr);
+    EXPECT_FALSE(gb->available);
+    EXPECT_TRUE(gb->needs_path);
+    EXPECT_FALSE(acecode::resolve_shell_command_by_id("git-bash", "", probe).has_value());
+}
+
+// 触发场景:用户配置了 git_bash_path;以及配置指向 WSL bash。
+// 期望:有效配置路径优先命中;配置指向 System32\bash.exe(WSL)被排除 → needs_path。
+TEST(ConsoleShellCatalogTest, ConfiguredGitBashWinsAndWslExcluded) {
+    auto ok_probe = mock_probe({"D:\\tools\\Git\\bin\\bash.exe"}, {});
+    auto ok_shells =
+        acecode::detect_console_shells("D:\\tools\\Git\\bin\\bash.exe", ok_probe);
+    const auto* gb = find_shell(ok_shells, "git-bash");
+    ASSERT_NE(gb, nullptr);
+    EXPECT_TRUE(gb->available);
+
+    auto wsl_probe = mock_probe({"C:\\Windows\\System32\\bash.exe"}, {});
+    auto wsl_shells =
+        acecode::detect_console_shells("C:\\Windows\\System32\\bash.exe", wsl_probe);
+    const auto* gb2 = find_shell(wsl_shells, "git-bash");
+    ASSERT_NE(gb2, nullptr);
+    EXPECT_FALSE(gb2->available);
+    EXPECT_TRUE(gb2->needs_path);
+}
+
+// 触发场景:PowerShell 7(pwsh)已安装 vs 未安装。
+// 期望:装了 → 用 pwsh.exe 完整路径;没装 → 回退 powershell.exe(System32 必有)。
+TEST(ConsoleShellCatalogTest, PowerShellPrefersPwshWhenPresent) {
+    auto with_pwsh = mock_probe(
+        {"C:\\Program Files\\PowerShell\\7\\pwsh.exe"},
+        {{"ProgramFiles", "C:\\Program Files"}});
+    auto a = acecode::detect_console_shells("", with_pwsh);
+    const auto* ps = find_shell(a, "powershell");
+    ASSERT_NE(ps, nullptr);
+    EXPECT_TRUE(ps->available);
+    EXPECT_NE(ps->command.find("pwsh.exe"), std::string::npos);
+
+    auto no_pwsh = mock_probe({}, {{"ProgramFiles", "C:\\Program Files"}});
+    auto b = acecode::detect_console_shells("", no_pwsh);
+    const auto* ps2 = find_shell(b, "powershell");
+    ASSERT_NE(ps2, nullptr);
+    EXPECT_EQ(ps2->command, "powershell.exe");
+}
+
+// 触发场景:默认 shell id 解析。
+// 期望:配置空 → 平台默认 cmd;配置 powershell(总可用)→ 用它;配置 git-bash
+// 但探测不到 → 回退 cmd(不返回不可用的默认)。
+TEST(ConsoleShellCatalogTest, DefaultShellIdResolution) {
+    auto probe = mock_probe({}, {{"COMSPEC", "C:\\Windows\\System32\\cmd.exe"}});
+    EXPECT_EQ(acecode::default_console_shell_id("", "", probe), "cmd");
+    EXPECT_EQ(acecode::default_console_shell_id("powershell", "", probe), "powershell");
+    EXPECT_EQ(acecode::default_console_shell_id("git-bash", "", probe), "cmd");
+}
+
+#else  // POSIX
+
+// 触发场景:POSIX 探测默认 $SHELL 与 PATH 上的 bash。
+// 期望:shell 项取 $SHELL;探到的 bash 成独立项;默认 id = "shell"。
+TEST(ConsoleShellCatalogTest, PosixDetectsShellAndBash) {
+    auto probe = mock_probe({"/bin/bash", "/usr/bin/zsh"}, {{"SHELL", "/bin/zsh"}});
+    auto shells = acecode::detect_console_shells("", probe);
+    const auto* def = find_shell(shells, "shell");
+    ASSERT_NE(def, nullptr);
+    EXPECT_EQ(def->command, "/bin/zsh");
+    const auto* bash = find_shell(shells, "bash");
+    ASSERT_NE(bash, nullptr);
+    EXPECT_TRUE(bash->available);
+    EXPECT_EQ(acecode::default_console_shell_id("", "", probe), "shell");
+}
+
+#endif
 
 // 触发场景:kind 枚举 → 协议字符串。
 // 期望:四个字面量永久稳定("conpty"/"winpty"/"pipe"/"posix")。前端

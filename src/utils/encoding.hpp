@@ -66,6 +66,34 @@ inline std::string truncate_utf8_suffix(const std::string& src,
     return prefix + src.substr(start);
 }
 
+// Drop a trailing *incomplete* UTF-8 multi-byte sequence from a buffer. When a
+// file is read with a fixed byte budget the cut can land in the middle of a
+// character; left in place, that lone partial sequence makes is_valid_utf8()
+// reject the whole buffer, and ensure_utf8() then re-decodes valid UTF-8 as the
+// system codepage (GBK on zh-CN Windows) into mojibake. Call this on the raw
+// budget-read bytes before any UTF-8 validity check. No-op when the buffer ends
+// on a clean boundary (i.e. the natural end of a smaller-than-budget file).
+inline void trim_trailing_partial_utf8(std::string& buf) {
+    size_t cont = 0;          // trailing 10xxxxxx continuation bytes seen so far
+    size_t i = buf.size();
+    while (i > 0) {
+        unsigned char b = static_cast<unsigned char>(buf[i - 1]);
+        if ((b & 0xC0) == 0x80) {   // continuation byte: keep walking back
+            if (++cont > 3) return; // more than any lead allows → malformed, leave as-is
+            --i;
+            continue;
+        }
+        size_t need = 0;            // bytes the sequence starting at b requires
+        if (b < 0x80) need = 1;
+        else if ((b & 0xE0) == 0xC0) need = 2;
+        else if ((b & 0xF0) == 0xE0) need = 3;
+        else if ((b & 0xF8) == 0xF0) need = 4;
+        else return;                // invalid lead byte → let ensure_utf8() decide
+        if (cont + 1 < need) buf.resize(i - 1); // trailing sequence is truncated → drop it
+        return;
+    }
+}
+
 // Ensure a string is valid UTF-8. On Windows, tries codepage conversion first.
 // Falls back to replacing invalid bytes with '?'.
 std::string ensure_utf8(const std::string& src);

@@ -122,6 +122,9 @@ export function createApi(base = null) {
       request('POST', `/api/pty/${encodeURIComponent(id)}/resize`, { cols, rows }, base),
     setPtyTitle:      (id, title) =>
       request('POST', `/api/pty/${encodeURIComponent(id)}/title`, { title }, base),
+    // + 旁 shell 下拉框(控制台 Shell 选择器):列出可用 shell / 持久化默认与 git bash 路径。
+    listPtyShells:    ()             => request('GET',    '/api/pty/shells', undefined, base),
+    setConsoleShellConfig: (patch={}) => request('PUT',   '/api/console/config', patch, base),
     getUsageStats:    (opts={})      => request('GET',    usagePath(opts), undefined, base),
     listWorkspaces:   ()             => request('GET',    '/api/workspaces', undefined, base),
     registerWorkspace:(cwd)          => request('POST',   '/api/workspaces', {cwd}, base),

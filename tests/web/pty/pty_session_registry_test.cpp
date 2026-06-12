@@ -106,7 +106,7 @@ TEST(PtyControlFrameTest, ZeroPrefixedJson) {
 TEST(PtySessionRegistryTest, CreateListRemoveLifecycle) {
     acecode::PtySessionRegistry registry(test_backend(), ".", "");
     std::string error;
-    auto info = registry.create("", "我的终端", error);
+    auto info = registry.create("", "我的终端", "", error);
     ASSERT_TRUE(info.has_value()) << error;
     EXPECT_EQ(info->status, "running");
     EXPECT_EQ(info->title, "我的终端");
@@ -129,7 +129,7 @@ TEST(PtySessionRegistryTest, CreateListRemoveLifecycle) {
 TEST(PtySessionRegistryTest, SubscribeReceivesOutputAndCursorFrame) {
     acecode::PtySessionRegistry registry(test_backend(), ".", "");
     std::string error;
-    auto info = registry.create("", "", error);
+    auto info = registry.create("", "", "", error);
     ASSERT_TRUE(info.has_value()) << error;
 
     FrameCollector collector;
@@ -149,7 +149,7 @@ TEST(PtySessionRegistryTest, SubscribeReceivesOutputAndCursorFrame) {
 TEST(PtySessionRegistryTest, ExitBroadcastsControlFrameAndMarksSession) {
     acecode::PtySessionRegistry registry(test_backend(), ".", "");
     std::string error;
-    auto info = registry.create("", "", error);
+    auto info = registry.create("", "", "", error);
     ASSERT_TRUE(info.has_value()) << error;
 
     FrameCollector collector;
@@ -174,7 +174,7 @@ TEST(PtySessionRegistryTest, ExitBroadcastsControlFrameAndMarksSession) {
 TEST(PtySessionRegistryTest, ReconnectAfterExitReplaysBufferAndExitFrame) {
     acecode::PtySessionRegistry registry(test_backend(), ".", "");
     std::string error;
-    auto info = registry.create("", "", error);
+    auto info = registry.create("", "", "", error);
     ASSERT_TRUE(info.has_value()) << error;
 
     // 无订阅者期间产生输出并退出 — 输出只进缓冲。
@@ -202,7 +202,7 @@ TEST(PtySessionRegistryTest, ReconnectAfterExitReplaysBufferAndExitFrame) {
 TEST(PtySessionRegistryTest, DisconnectStopsDelivery) {
     acecode::PtySessionRegistry registry(test_backend(), ".", "");
     std::string error;
-    auto info = registry.create("", "", error);
+    auto info = registry.create("", "", "", error);
     ASSERT_TRUE(info.has_value()) << error;
 
     FrameCollector collector;
@@ -227,7 +227,7 @@ TEST(PtySessionRegistryTest, DisconnectStopsDelivery) {
 TEST(PtySessionRegistryTest, SetTitleTrimsPersistsAndIgnoresBlank) {
     acecode::PtySessionRegistry registry(test_backend(), ".", "");
     std::string error;
-    auto info = registry.create("", "", error);
+    auto info = registry.create("", "", "", error);
     ASSERT_TRUE(info.has_value()) << error;
 
     EXPECT_TRUE(registry.set_title(info->id, "  构建监控  "));
@@ -257,11 +257,11 @@ TEST(PtySessionRegistryTest, SessionLimitRejectsCreation) {
     std::string error;
     std::vector<std::string> ids;
     for (int i = 0; i < acecode::kPtyMaxSessions; ++i) {
-        auto info = registry.create("", "", error);
+        auto info = registry.create("", "", "", error);
         ASSERT_TRUE(info.has_value()) << "i=" << i << ": " << error;
         ids.push_back(info->id);
     }
-    auto overflow = registry.create("", "", error);
+    auto overflow = registry.create("", "", "", error);
     EXPECT_FALSE(overflow.has_value());
     EXPECT_NE(error.find("limit"), std::string::npos);
 
@@ -281,7 +281,7 @@ TEST(PtySessionRegistryTest, SessionLimitRejectsCreation) {
 TEST(PtySessionRegistryTest, EarlyCursorReconnectClampsToBufferStart) {
     acecode::PtySessionRegistry registry(test_backend(), ".", "");
     std::string error;
-    auto info = registry.create("", "", error);
+    auto info = registry.create("", "", "", error);
     ASSERT_TRUE(info.has_value()) << error;
 
     FrameCollector first;

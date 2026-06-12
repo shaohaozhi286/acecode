@@ -24,6 +24,11 @@ std::string read_frontmatter_chunk(const fs::path& path) {
     std::string buf(FRONTMATTER_READ_BUDGET, '\0');
     ifs.read(buf.data(), static_cast<std::streamsize>(FRONTMATTER_READ_BUDGET));
     buf.resize(static_cast<size_t>(ifs.gcount()));
+    // A SKILL.md larger than the read budget gets sliced at an arbitrary byte,
+    // often mid-character. Drop the partial trailing UTF-8 sequence so ensure_utf8
+    // doesn't see "invalid UTF-8" and re-decode the whole (valid UTF-8) chunk as
+    // the system codepage — which would turn the frontmatter into mojibake.
+    trim_trailing_partial_utf8(buf);
     return ensure_utf8(buf);
 }
 

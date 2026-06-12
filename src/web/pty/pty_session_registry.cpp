@@ -43,7 +43,7 @@ PtySessionRegistry::~PtySessionRegistry() { stop_all(); }
 
 std::optional<PtySessionInfo> PtySessionRegistry::create(
     const std::string& cwd_override, const std::string& title,
-    std::string& error) {
+    const std::string& shell_override, std::string& error) {
     std::unique_lock<std::mutex> lock(mu_);
 
     if (sessions_.size() >= static_cast<std::size_t>(kPtyMaxSessions)) {
@@ -52,9 +52,10 @@ std::optional<PtySessionInfo> PtySessionRegistry::create(
     }
 
     std::string id = "pty-" + std::to_string(next_id_++);
+    const std::string shell = shell_override.empty() ? shell_ : shell_override;
 
     PtySpawnSpec spec;
-    spec.shell = shell_;
+    spec.shell = shell;
     spec.cwd = cwd_override.empty() ? default_cwd_ : cwd_override;
 
     PtyCallbacks callbacks;
@@ -79,7 +80,7 @@ std::optional<PtySessionInfo> PtySessionRegistry::create(
     session->info.id = id;
     session->info.title = title.empty()
         ? ("Terminal " + std::to_string(next_id_ - 1)) : title;
-    session->info.shell = shell_;
+    session->info.shell = shell;
     session->info.cwd = spec.cwd;
     session->info.status = "running";
     session->info.pid = process->pid();
@@ -88,7 +89,7 @@ std::optional<PtySessionInfo> PtySessionRegistry::create(
 
     PtySessionInfo info = session->info;
     sessions_[id] = std::move(session);
-    LOG_INFO("[pty] created session " + id + " shell=" + shell_ +
+    LOG_INFO("[pty] created session " + id + " shell=" + shell +
              " backend=" + pty_backend_kind_name(info.backend));
     return info;
 }
