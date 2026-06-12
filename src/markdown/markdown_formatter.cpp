@@ -1,6 +1,7 @@
 #include "markdown_formatter.hpp"
 #include "markdown_lexer.hpp"
 #include "syntax_highlight.hpp"
+#include "tui/theme_palette.hpp"
 #include "utils/logger.hpp"
 #include <sstream>
 #include <algorithm>
@@ -193,21 +194,17 @@ static void flatten_inline(const std::vector<Token>& tokens,
 static Element apply_style(const std::string& txt, const TextStyle& style) {
     Element e = text(txt);
 
+    const auto& md = acecode::tui::theme().markdown;
     if (style.is_code) {
-        // Inline code: yellow (highly visible)
-        e = e | color(Color::Yellow);
+        e = e | color(md.code_span);
     } else if (style.is_link) {
-        // Links: bright blue + underline for readability on black backgrounds.
-        e = e | color(Color::BlueLight) | underlined;
+        e = e | color(md.link) | underlined;
     } else if (style.bold && style.italic) {
-        // Bold+italic: bright white
-        e = e | color(Color::White);
+        e = e | color(md.bold);
     } else if (style.bold) {
-        // Bold text: bright white to distinguish from regular text
-        e = e | color(Color::White);
+        e = e | color(md.bold);
     } else if (style.italic) {
-        // Italic text: slightly dimmer
-        e = e | color(Color::GrayLight);
+        e = e | color(md.italic);
     }
 
     if (style.bold) e = e | bold;
@@ -419,13 +416,13 @@ static Element format_block_token(const Token& token, const FormatContext& ctx) 
         Element content = styled_paragraph(token.children);
         switch (token.depth) {
             case 1:
-                content = content | bold | italic | underlined | color(Color::CyanLight);
+                content = content | bold | italic | underlined | color(acecode::tui::theme().markdown.heading);
                 break;
             case 2:
-                content = content | bold | color(Color::CyanLight);
+                content = content | bold | color(acecode::tui::theme().markdown.heading);
                 break;
             default:
-                content = content | bold | color(Color::White);
+                content = content | bold | color(acecode::tui::theme().ui.text_primary);
                 break;
         }
         return vbox({content, text("")});
@@ -443,7 +440,7 @@ static Element format_block_token(const Token& token, const FormatContext& ctx) 
         // Language label
         if (!token.lang.empty()) {
             code_elements.push_back(
-                text(" " + token.lang + " ") | dim | color(Color::GrayDark)
+                text(" " + token.lang + " ") | dim | color(acecode::tui::theme().ui.text_dim)
             );
         }
 
@@ -458,14 +455,14 @@ static Element format_block_token(const Token& token, const FormatContext& ctx) 
             std::string line;
             while (std::getline(stream, line)) {
                 if (!line.empty() && line.back() == '\r') line.pop_back();
-                code_elements.push_back(hbox({text("  "), text(line) | color(Color::GrayLight)}));
+                code_elements.push_back(hbox({text("  "), text(line) | color(acecode::tui::theme().markdown.block_code_text)}));
             }
         }
 
         // Wrap in a border-left indicator
         auto code_block = vbox(std::move(code_elements));
         return vbox({
-            hbox({text("  ") | color(Color::GrayDark), code_block}),
+            hbox({text("  ") | color(acecode::tui::theme().ui.text_dim), code_block}),
             text("")
         });
     }
@@ -477,7 +474,7 @@ static Element format_block_token(const Token& token, const FormatContext& ctx) 
         Element inner = format_blocks(token.children, bq_ctx);
         // Prefix with dim vertical bar (like claude-code's BLOCKQUOTE_BAR)
         return hbox({
-            text(" | ") | dim | color(Color::GrayDark),
+            text(" | ") | dim | color(acecode::tui::theme().markdown.block_quote),
             inner | italic
         });
     }
@@ -542,7 +539,7 @@ static Element format_block_token(const Token& token, const FormatContext& ctx) 
                            vbox(std::move(content_parts)));
 
         return hbox({
-            text(indent + marker) | color(Color::White),
+            text(indent + marker) | color(acecode::tui::theme().markdown.list_marker),
             content
         });
     }

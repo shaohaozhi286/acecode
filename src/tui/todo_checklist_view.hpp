@@ -2,6 +2,7 @@
 
 #include "session/todo_state.hpp"
 #include "tui/text_truncation.hpp"
+#include "tui/theme_palette.hpp"
 
 #include <ftxui/dom/elements.hpp>
 
@@ -115,22 +116,22 @@ inline ftxui::Element render_todo_checklist_block(
         for (const auto& line : item.content_lines) {
             Element line_el = text(line);
             if (item.row_bright) {
-                line_el = line_el | color(Color::White);
+                line_el = line_el | color(theme().ui.text_primary);
             }
             if (item.strike) {
-                line_el = line_el | strikethrough | color(Color::GrayLight);
+                line_el = line_el | strikethrough | color(theme().ui.text_muted);
             }
             if (item.muted) {
-                line_el = line_el | dim | color(Color::GrayDark);
+                line_el = line_el | dim | color(theme().ui.text_dim);
             }
             content_lines.push_back(std::move(line_el));
         }
         Element content = vbox(std::move(content_lines)) | flex;
         if (item.marker_active) {
-            marker = marker | color(Color::GreenLight);
+            marker = marker | color(theme().semantic.success);
         }
         if (item.muted) {
-            marker = marker | dim | color(Color::GrayDark);
+            marker = marker | dim | color(theme().ui.text_dim);
         }
         Element row = hbox({std::move(marker), std::move(content)});
         rows.push_back(std::move(row));
@@ -140,7 +141,7 @@ inline ftxui::Element render_todo_checklist_block(
         rows.push_back(
             text("+" + std::to_string(todos.size() - kTodoChecklistMaxVisibleItems) +
                  " more") |
-            dim | color(Color::GrayDark));
+            dim | color(theme().ui.text_dim));
     }
     return vbox(std::move(rows));
 }

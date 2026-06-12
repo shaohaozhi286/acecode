@@ -214,6 +214,85 @@ TEST(AgentLoopDoomGuard, SemanticBashRepeatsAgainstSameTargetTriggerCooldown) {
     EXPECT_NE(cooldown_guarded->output.find("bash tool is temporarily cooled down"), std::string::npos);
 }
 
+// 回归测试:file_read 等工具的成功输出就是文件内容本身,内容里出现 "timed out"/
+// "超时" 等词(典型如 i18n 错误文案文件 en.js)不代表调用失败。修复前 classify_result
+// 先做关键词匹配后看 success,一次成功读取被记成 Timeout(low-signal),后续对同一
+// 文件的合法重复读取被整体拦截,模型失去对文件状态的感知,最终任务崩溃。
+// 期望:成功结果一律按 Useful 处理,重复同一调用不会被拦。
+TEST(AgentLoopDoomGuard, SuccessfulOutputWithErrorLikeContentIsNotLowSignal) {
+    AgentLoopDoomGuard guard;
+    ToolCall call = make_call("call-1", "file_read",
+        R"({"file_path":"D:/code/web/src/common/i18n/en.js","start_line":2520,"end_line":2540})");
+
+    ToolResult i18n_read;
+    i18n_read.success = true;
+    i18n_read.output =
+        u8"2531: '文件预览超时，请重试或下载后查看': "
+        u8"'File preview timed out. Please retry or download to view',";
+    guard.record_result(call, i18n_read);
+
+    ToolCall duplicate = make_call("call-2", "file_read",
+        R"({"file_path":"D:/code/web/src/common/i18n/en.js","start_line":2520,"end_line":2540})");
+    EXPECT_FALSE(guard.maybe_guard(duplicate).has_value());
+}
+
+// 守住原有保护:失败结果的关键词细分仍然生效,真正的 "old_string not found"
+// 失败重复一次后第二次同参调用应被拦截。
+TEST(AgentLoopDoomGuard, FailureKeywordsStillTriggerExactRepeatGuard) {
+    AgentLoopDoomGuard guard;
+    ToolCall call = make_call("call-1", "file_edit",
+        R"({"file_path":"src/app.cpp","old_string":"gone","new_string":"x"})");
+
+    ToolResult failure;
+    failure.success = false;
+    failure.output = "[Error] old_string not found in src/app.cpp.";
+    guard.record_result(call, failure);
+
+    ToolCall duplicate = make_call("call-2", "file_edit",
+        R"({"file_path":"src/app.cpp","old_string":"gone","new_string":"x"})");
+    EXPECT_TRUE(guard.maybe_guard(duplicate).has_value());
+}
+
+// 回归测试:old_string 编辑因 "File was only partially read" 失败时,错误信息引导的
+// 恢复路径是"补一次全量 file_read 后原样重试"——重试参数与上一次完全相同。修复前这类
+// 前置条件失败被计入 attempts,同参重试直接被 exact-repeat 拦截,正确的恢复路径被堵死。
+// 期望:此类自带恢复路径的前置条件失败不计入 doom 记录,同参重试放行。
+TEST(AgentLoopDoomGuard, PartiallyReadPreconditionFailureDoesNotArmGuard) {
+    AgentLoopDoomGuard guard;
+    ToolCall call = make_call("call-1", "file_edit",
+        R"({"file_path":"src/i18n/en.js","old_string":"old","new_string":"new"})");
+
+    ToolResult precondition;
+    precondition.success = false;
+    precondition.output =
+        "[Error] File was only partially read. Read the full file with file_read "
+        "before editing it: src/i18n/en.js";
+    guard.record_result(call, precondition);
+
+    ToolCall retry = make_call("call-2", "file_edit",
+        R"({"file_path":"src/i18n/en.js","old_string":"old","new_string":"new"})");
+    EXPECT_FALSE(guard.maybe_guard(retry).has_value());
+}
+
+// 同上一类:range 模式 hash 过期的失败信息里附带了当前 hash 与内容,重试是预期路径,
+// 且 guard 的合成结果反而会丢失这些恢复信息。期望:hash mismatch 失败不计入 doom 记录。
+TEST(AgentLoopDoomGuard, RangeHashMismatchFailureDoesNotArmGuard) {
+    AgentLoopDoomGuard guard;
+    ToolCall call = make_call("call-1", "file_edit",
+        R"({"file_path":"src/i18n/en.js","start_line":2510,"end_line":2515,"expected_hash":"sha256:stale"})");
+
+    ToolResult mismatch;
+    mismatch.success = false;
+    mismatch.output =
+        "[Error] range hash mismatch in src/i18n/en.js. The file changed since it "
+        "was read, or the wrong range was supplied.";
+    guard.record_result(call, mismatch);
+
+    ToolCall retry = make_call("call-2", "file_edit",
+        R"({"file_path":"src/i18n/en.js","start_line":2510,"end_line":2515,"expected_hash":"sha256:stale"})");
+    EXPECT_FALSE(guard.maybe_guard(retry).has_value());
+}
+
 TEST(AgentLoopDoomGuardIntegration, SemanticBashGuardSkipsExecutionAndContinues) {
     DoomGuardHarness h;
     h.push_tool("call-1", R"(findstr /n "Tab" D:\prd\search.md)");

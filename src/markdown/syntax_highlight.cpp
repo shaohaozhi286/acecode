@@ -1,4 +1,5 @@
 #include "syntax_highlight.hpp"
+#include "tui/theme_palette.hpp"
 #include <regex>
 #include <sstream>
 #include <algorithm>
@@ -8,19 +9,6 @@
 using namespace ftxui;
 
 namespace acecode::markdown {
-
-// ---------------------------------------------------------------------------
-// Color scheme (matching claude-code's cli-highlight defaults)
-// ---------------------------------------------------------------------------
-static const Color kKeyword   = Color::BlueLight;
-static const Color kString    = Color::Green;
-static const Color kNumber    = Color::Yellow;
-static const Color kComment   = Color::GrayDark;
-static const Color kType      = Color::Cyan;
-static const Color kPreproc   = Color::MagentaLight;
-static const Color kFunction  = Color::Yellow;
-static const Color kOperator  = Color::White;
-static const Color kDefault   = Color::GrayLight;
 
 // ---------------------------------------------------------------------------
 // Language alias mapping
@@ -207,15 +195,16 @@ struct HLToken {
 };
 
 static Color hl_color(HLTokenType type) {
+    const auto& s = acecode::tui::theme().syntax;
     switch (type) {
-        case HLTokenType::Keyword:  return kKeyword;
-        case HLTokenType::Type:     return kType;
-        case HLTokenType::String:   return kString;
-        case HLTokenType::Number:   return kNumber;
-        case HLTokenType::Comment:  return kComment;
-        case HLTokenType::Preproc:  return kPreproc;
-        case HLTokenType::Operator: return kOperator;
-        default:                    return kDefault;
+        case HLTokenType::Keyword:  return s.keyword;
+        case HLTokenType::Type:     return s.type;
+        case HLTokenType::String:   return s.string;
+        case HLTokenType::Number:   return s.number;
+        case HLTokenType::Comment:  return s.comment;
+        case HLTokenType::Preproc:  return s.preproc;
+        case HLTokenType::Operator: return s.op;
+        default:                    return s.default_text;
     }
 }
 
@@ -491,7 +480,7 @@ std::vector<Element> highlight_code(const std::string& code,
     if (it == defs.end()) {
         // No highlighting available — plain text
         for (const auto& l : lines) {
-            output.push_back(text(l) | color(kDefault));
+            output.push_back(text(l) | color(acecode::tui::theme().syntax.default_text));
         }
         return output;
     }

@@ -1,6 +1,7 @@
 #include "slash_dropdown.hpp"
 #include "../commands/command_registry.hpp"
 #include "picker_scroll.hpp"
+#include "tui/theme_palette.hpp"
 
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/string.hpp>
@@ -197,7 +198,7 @@ ftxui::Element render_slash_dropdown(const TuiState& state,
         } else {
             rows.push_back(
                 text("  \xE2\x86\x91 " + std::to_string(items_above) + " more above")
-                | dim | color(Color::GrayDark));
+                | dim | color(tui::theme().ui.text_dim));
         }
     }
     for (int i = offset; i < offset + visible; ++i) {
@@ -225,14 +226,14 @@ ftxui::Element render_slash_dropdown(const TuiState& state,
             }
             row = hbox({
                 text("  /" + item.name + "  "),
-                text("\xE2\x80\x94 ") | color(Color::GrayDark),
-                text(desc) | color(Color::GrayLight),
+                text("\xE2\x80\x94 ") | color(tui::theme().ui.text_dim),
+                text(desc) | color(tui::theme().ui.text_muted),
             });
         }
         if (selected) {
-            row = row | bold | color(Color::White) | bgcolor(Color::RGB(0, 80, 120));
+            row = row | bold | color(tui::theme().ui.selection_fg) | bgcolor(tui::theme().ui.selection_bg);
         } else {
-            row = row | color(Color::GrayLight);
+            row = row | color(tui::theme().ui.text_muted);
         }
         rows.push_back(row);
     }
@@ -242,7 +243,7 @@ ftxui::Element render_slash_dropdown(const TuiState& state,
         } else {
             rows.push_back(
                 text("  \xE2\x86\x93 " + std::to_string(items_below) + " more below")
-                | dim | color(Color::GrayDark));
+                | dim | color(tui::theme().ui.text_dim));
         }
     }
 
@@ -266,16 +267,16 @@ ftxui::Element render_slash_dropdown(const TuiState& state,
                 row = row | bold | color(Color::White) |
                     bgcolor(Color::RGB(0, 80, 120));
             } else {
-                row = row | color(Color::GrayLight);
+                row = row | color(tui::theme().ui.text_muted);
             }
             compat_elements.push_back(row);
         }
         compat_elements.push_back(text(repeat_utf8(kHorizontalLine, frame_width)));
-        return vbox(std::move(compat_elements)) | color(Color::Cyan);
+        return vbox(std::move(compat_elements)) | color(tui::theme().ui.border);
     }
 
     Element body = vbox(std::move(rows));
-    return body | border | color(Color::Cyan);
+    return body | border | color(tui::theme().ui.border);
 }
 
 } // namespace acecode

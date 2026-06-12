@@ -10,6 +10,7 @@
 #include "resume_state_sync.hpp"
 #include "websearch_command.hpp"
 #include "../config/config.hpp"
+#include "../tui/theme_palette.hpp"
 #include "../config/saved_models.hpp"
 #include "../provider/apply_model_to_session.hpp"
 #include "../provider/cwd_model_override.hpp"
@@ -1201,6 +1202,58 @@ static void cmd_rewind(CommandContext& ctx, const std::string& /*args*/) {
     ctx.state.rewind_mode_active = false;
 }
 
+// /theme: 切换 TUI 配色主题.
+//   /theme              — 显示当前主题
+//   /theme dark          — 深色(适合黑底终端)
+//   /theme light         — 浅色(适合白底终端)
+//   /theme auto          — 下次启动时自动检测终端背景色
+static void cmd_theme(CommandContext& ctx, const std::string& args) {
+    std::string a = trim(args);
+    std::transform(a.begin(), a.end(), a.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+
+    const std::string current = tui::current_theme_name();
+
+    std::lock_guard<std::mutex> lk(ctx.state.mu);
+
+    if (a.empty()) {
+        std::string msg = "Theme: " + current;
+        msg += " (config: " + ctx.config.tui.theme + ")";
+        ctx.state.conversation.push_back({"system", msg, false});
+        ctx.state.chat_follow_tail = true;
+        return;
+    }
+
+    if (a != "dark" && a != "light" && a != "auto") {
+        ctx.state.conversation.push_back(
+            {"system", "Usage: /theme [dark|light|auto]", false});
+        ctx.state.chat_follow_tail = true;
+        return;
+    }
+
+    // auto 只写配置,不立刻切换(需要重启才能重新探测终端背景色)
+    if (a == "auto") {
+        ctx.config.tui.theme = "auto";
+        save_config(ctx.config);
+        ctx.state.conversation.push_back(
+            {"system",
+             "Theme set to auto (will detect terminal background on next launch). "
+             "Current session stays: " + current,
+             false});
+        ctx.state.chat_follow_tail = true;
+        return;
+    }
+
+    // dark / light: 立刻切换 + 持久化
+    tui::swap_theme_palette(a);
+    ctx.config.tui.theme = a;
+    save_config(ctx.config);
+
+    ctx.state.conversation.push_back(
+        {"system", "Theme switched to " + a + " (saved to config.json)", false});
+    ctx.state.chat_follow_tail = true;
+}
+
 void register_builtin_commands(CommandRegistry& registry) {
     registry.register_command({"help", "Show available commands", cmd_help});
     registry.register_command({"clear", "Clear conversation history", cmd_clear});
@@ -1224,6 +1277,7 @@ void register_builtin_commands(CommandRegistry& registry) {
     registry.register_command({"browser", "Show or toggle ACE Browser Bridge tools for this session", cmd_browser});
     registry.register_command({"title", "Set or show the window title for this session", cmd_title});
     registry.register_command({"page-step", "Toggle single-line PgUp/PgDn scrolling (for terminals that swallow Alt+Arrow)", cmd_page_step});
+    registry.register_command({"theme", "Switch TUI color theme (dark/light/auto)", cmd_theme});
     registry.register_command({"exit", "Exit acecode", cmd_exit});
     register_models_command(registry);
 }

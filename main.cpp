@@ -116,6 +116,8 @@
 #include "tui/thick_vscroll_bar.hpp"
 #include "tui/non_selectable.hpp"
 #include "tui/tool_progress.hpp"
+#include "tui/theme_palette.hpp"
+#include "utils/terminal_theme_detect.hpp"
 #include "tui/sidebar_model.hpp"
 #include "tui/todo_checklist_view.hpp"
 #include "tui/input_history_navigation.hpp"
@@ -315,8 +317,8 @@ static std::string truncate_cells_middle_ascii(std::string_view text, int max_ce
 
 static Element sidebar_section_header(const std::string& label, int count) {
     return hbox({
-        text(label) | color(Color::GrayLight) | dim,
-        text(" " + std::to_string(count)) | color(Color::GrayDark) | dim,
+        text(label) | color(tui::theme().ui.text_muted) | dim,
+        text(" " + std::to_string(count)) | color(tui::theme().ui.text_dim) | dim,
     });
 }
 
@@ -345,7 +347,7 @@ static Element render_sidebar_change_row(
     if (change.additions > 0) {
         stats_parts.push_back(
             text("+" + std::to_string(change.additions)) |
-            color(Color::GreenLight));
+            color(tui::theme().semantic.success));
     }
     if (change.deletions > 0) {
         if (!stats_parts.empty()) {
@@ -353,26 +355,26 @@ static Element render_sidebar_change_row(
         }
         stats_parts.push_back(
             text("-" + std::to_string(change.deletions)) |
-            color(Color::RedLight));
+            color(tui::theme().semantic.error));
     }
     if (stats_parts.empty()) {
-        stats_parts.push_back(text("0") | color(Color::GrayDark) | dim);
+        stats_parts.push_back(text("0") | color(tui::theme().ui.text_dim) | dim);
     }
 
     return hbox({
-        text("  ") | color(Color::GrayDark),
+        text("  ") | color(tui::theme().ui.text_dim),
         text(truncate_cells_middle_ascii(
                  change.display_file.empty() ? change.file : change.display_file,
                  file_width)) |
-            color(Color::GrayLight),
+            color(tui::theme().ui.text_muted),
         filler(),
         hbox(std::move(stats_parts)),
     });
 }
 
 static Element queued_badge() {
-    return text(" QUEUED ") | bold | color(Color::White) |
-           bgcolor(Color::RGB(128, 96, 0));
+    return text(" QUEUED ") | bold | color(tui::theme().ui.text_primary) |
+           bgcolor(tui::theme().ui.queued_bg);
 }
 
 static std::string repeat_utf8_glyph(const char* glyph, int count) {
@@ -389,16 +391,11 @@ static std::string repeat_utf8_glyph(const char* glyph, int count) {
 }
 
 static Color token_progress_color(int percent) {
-    if (percent <= 0) {
-        return Color::GrayDark;
-    }
-    if (percent > 90) {
-        return Color::RedLight;
-    }
-    if (percent >= 60) {
-        return Color::Yellow;
-    }
-    return Color::GreenLight;
+    const auto& s = tui::theme().semantic;
+    if (percent <= 0) return tui::theme().ui.text_dim;
+    if (percent > 90) return s.error;
+    if (percent >= 60) return s.warning;
+    return s.success;
 }
 
 // 当前活动模型的 PUB 池负载百分比(-1 = 未知/非 PUB,不渲染)。由 model-pool 监控
@@ -407,10 +404,11 @@ static std::atomic<int> g_model_load_percent{-1};
 
 // 模型池负载色阶(与 web / 后端 model_load_tier 一致):<70 绿 / 70..90 黄 / >90 红。
 static Color model_load_color(int percent) {
-    if (percent < 0) return Color::GrayDark;
-    if (percent > 90) return Color::RedLight;
-    if (percent >= 70) return Color::Yellow;
-    return Color::GreenLight;
+    const auto& s = tui::theme().semantic;
+    if (percent < 0) return tui::theme().ui.text_dim;
+    if (percent > 90) return s.error;
+    if (percent >= 70) return s.warning;
+    return s.success;
 }
 
 // 底部状态栏的模型池负载 chip:递增信号格 + 百分比,按负载档染色。负载未知
@@ -427,8 +425,8 @@ static Element render_model_load_chip() {
 
 static Color status_line_color(const std::string& status_line) {
     return status_line.find("(deleted)") != std::string::npos
-        ? Color::RedLight
-        : Color::White;
+        ? tui::theme().semantic.error
+        : tui::theme().ui.text_primary;
 }
 
 static Element render_token_usage_chip(const acecode::TuiState& state) {
@@ -446,11 +444,11 @@ static Element render_token_usage_chip(const acecode::TuiState& state) {
     const Color progress_color = token_progress_color(percent);
 
     return hbox({
-        text("  " + state.token_status + " ") | dim | color(Color::CyanLight),
-        text("[") | dim | color(Color::GrayDark),
+        text("  " + state.token_status + " ") | dim | color(tui::theme().ui.accent_alt),
+        text("[") | dim | color(tui::theme().ui.text_dim),
         text(repeat_utf8_glyph(kFilled, filled)) | color(progress_color),
-        text(repeat_utf8_glyph(kEmpty, empty)) | dim | color(Color::GrayDark),
-        text("] ") | dim | color(Color::GrayDark),
+        text(repeat_utf8_glyph(kEmpty, empty)) | dim | color(tui::theme().ui.text_dim),
+        text("] ") | dim | color(tui::theme().ui.text_dim),
         text(std::to_string(percent) + "%  ") | dim | color(progress_color),
     });
 }
@@ -476,7 +474,7 @@ static Element render_pending_queue_block(const acecode::TuiState& state,
     if (hidden > 0) {
         rows.push_back(
             text("  +" + std::to_string(hidden) + " more queued") |
-            color(Color::GrayDark) | dim);
+            color(tui::theme().ui.text_dim) | dim);
     }
 
     const std::size_t start = state.pending_queue.size() - visible;
@@ -488,7 +486,7 @@ static Element render_pending_queue_block(const acecode::TuiState& state,
             queued_badge(),
             text(" "),
             text(truncate_cells_middle_ascii(preview, prompt_width)) |
-                color(Color::White),
+                color(tui::theme().ui.text_primary),
         }));
     }
 
@@ -509,10 +507,10 @@ static Element render_pending_attachment_block(const acecode::TuiState& state,
         const std::string prefix = kind == "image" ? " image " : " file ";
         rows.push_back(hbox({
             text(" "),
-            text(prefix) | bold | color(Color::Black) | bgcolor(Color::CyanLight),
+            text(prefix) | bold | color(tui::theme().ui.badge_fg) | bgcolor(tui::theme().ui.badge_bg),
             text(" "),
             text(truncate_cells_middle_ascii(name, label_width)) |
-                color(Color::White),
+                color(tui::theme().ui.text_primary),
         }));
     }
     return vbox(std::move(rows));
@@ -573,7 +571,7 @@ static Element render_regular_sidebar(const acecode::TuiState& state,
     Elements top_rows;
     for (const auto& line : sidebar_title_lines(first_user_message_title(state),
                                                 content_width)) {
-        top_rows.push_back(text(line) | bold | color(Color::White));
+        top_rows.push_back(text(line) | bold | color(tui::theme().ui.text_primary));
     }
 
     const auto file_changes =
@@ -594,7 +592,7 @@ static Element render_regular_sidebar(const acecode::TuiState& state,
         top_rows.push_back(
             text("  +" + std::to_string(file_changes.size() - shown_files) +
                  " more") |
-            color(Color::GrayDark) | dim);
+            color(tui::theme().ui.text_dim) | dim);
     }
 
     Elements bottom_rows;
@@ -614,22 +612,23 @@ static Element render_regular_sidebar(const acecode::TuiState& state,
         bottom_rows.push_back(
             text("  " + truncate_cells_middle_ascii(command,
                                                     std::max(1, content_width - 2))) |
-            color(Color::GrayLight));
+            color(tui::theme().ui.text_muted));
         bottom_rows.push_back(text(""));
     }
-    bottom_rows.push_back(paragraph(version_str) | color(Color::GrayLight) | dim);
+    bottom_rows.push_back(paragraph(version_str) | color(tui::theme().ui.text_muted) | dim);
     if (!state.update_notice.empty()) {
         bottom_rows.push_back(paragraph(state.update_notice) |
-                              color(Color::YellowLight));
+                              color(tui::theme().semantic.warning));
     }
     if (!state.status_line.empty()) {
         bottom_rows.push_back(paragraph(state.status_line) |
                               color(status_line_color(state.status_line)));
     }
     if (!cwd_display.empty()) {
-        bottom_rows.push_back(paragraph(cwd_display) | color(Color::CyanLight) | dim);
+        bottom_rows.push_back(paragraph(cwd_display) | color(tui::theme().ui.accent_alt) | dim);
     }
 
+    const bool is_light = tui::theme().name == "light";
     Element sidebar = hbox({
         text(" "),
         vbox({
@@ -639,7 +638,7 @@ static Element render_regular_sidebar(const acecode::TuiState& state,
         }) | flex,
         text(" "),
     }) | size(WIDTH, EQUAL, sidebar_width) |
-       bgcolor(Color::RGB(18, 18, 20));
+       bgcolor(is_light ? Color::RGB(240, 240, 242) : Color::RGB(18, 18, 20));
     return acecode::tui::non_selectable(std::move(sidebar));
 }
 
@@ -653,7 +652,7 @@ static Element render_tool_result_lines_preserving_breaks(
             ? display_content.substr(pos)
             : display_content.substr(pos, nl - pos);
         Element line_el = line.empty() ? text(" ") : paragraph(line);
-        lines.push_back(line_el | color(Color::GrayLight) | dim);
+        lines.push_back(line_el | color(tui::theme().ui.text_muted) | dim);
         if (nl == std::string::npos) break;
         pos = nl + 1;
     }
@@ -2145,6 +2144,16 @@ static int run_interactive_app(const CliOptions& cli,
     std::vector<int> message_line_counts;
     int message_line_count_width = 0;
 
+    // 主题初始化 — 必须在 FTXUI 接管 stdin 之前完成 OSC 11 探测。
+    {
+        std::string theme_name = config.tui.theme;
+        if (theme_name == "auto") {
+            auto detected = acecode::detect_terminal_theme();
+            theme_name = (detected == acecode::DetectedTheme::light) ? "light" : "dark";
+        }
+        acecode::tui::init_theme_palette(theme_name);
+    }
+
     // 终端能力探测 + render mode 决策。默认 auto 走 Fullscreen,让 TUI
     // 启动时直接撑满终端;config "never" 可回到 TerminalOutput。
     // CLI --alt-screen / -alt-screen 把 effective alt_screen_mode 临时强制为
@@ -2857,7 +2866,7 @@ static int run_interactive_app(const CliOptions& cli,
         if (display_text.empty()) {
             return hbox({
                 text(" ") | focusCursorBar,
-                text("Type your prompt here...") | dim | color(Color::GrayDark),
+                text("Type your prompt here...") | dim | color(tui::theme().ui.text_dim),
             });
         }
         return render_wrapped_input_text(display_text, cursor);
@@ -5148,23 +5157,24 @@ static int run_interactive_app(const CliOptions& cli,
         message_boxes.assign(n_msgs, Box{});
         message_layout_boxes.assign(n_msgs, Box{});
 
+        const bool is_light = acecode::tui::theme().name == "light";
         Element header;
         if (conhost_compat_layout) {
             header = vbox({
-                text(version_str) | color(Color::GrayLight) | dim,
+                text(version_str) | color(tui::theme().ui.text_muted) | dim,
                 state.update_notice.empty()
                     ? emptyElement()
-                    : paragraph(state.update_notice) | color(Color::YellowLight),
+                    : paragraph(state.update_notice) | color(tui::theme().semantic.warning),
                 text(state.status_line) | color(status_line_color(state.status_line)),
-                text(cwd_display) | color(Color::CyanLight) | dim,
-            }) | bgcolor(Color::RGB(0, 30, 45));
+                text(cwd_display) | color(tui::theme().ui.accent_alt) | dim,
+            }) | bgcolor(is_light ? Color::RGB(225, 235, 245) : Color::RGB(0, 30, 45));
         } else {
             // -- Logo --
             auto logo = vbox({
                 text("\xE2\x96\x91\xE2\x96\x88\xE2\x96\x80\xE2\x96\x88\xE2\x96\x91\xE2\x96\x88\xE2\x96\x80\xE2\x96\x80\xE2\x96\x91\xE2\x96\x88\xE2\x96\x80\xE2\x96\x80\xE2"),
                 text("\xE2\x96\x91\xE2\x96\x88\xE2\x96\x80\xE2\x96\x88\xE2\x96\x91\xE2\x96\x88\xE2\x96\x91\xE2\x96\x91\xE2\x96\x91\xE2\x96\x88\xE2\x96\x80\xE2\x96\x80\xE2"),
                 text("\xE2\x96\x91\xE2\x96\x80\xE2\x96\x91\xE2\x96\x80\xE2\x96\x91\xE2\x96\x80\xE2\x96\x80\xE2\x96\x80\xE2\x96\x91\xE2\x96\x80\xE2\x96\x80\xE2\x96\x80\xE2"),
-            }) | color(Color::Cyan) | bold;
+            }) | color(tui::theme().ui.border) | bold;
 
             if (show_regular_sidebar && hide_regular_sidebar_banner) {
                 header = emptyElement();
@@ -5174,22 +5184,22 @@ static int run_interactive_app(const CliOptions& cli,
                     logo,
                     filler(),
                     text("  "),
-                }) | bgcolor(Color::RGB(0, 30, 45));
+                }) | bgcolor(is_light ? Color::RGB(225, 235, 245) : Color::RGB(0, 30, 45));
             } else {
                 header = hbox({
                     text("    "),
                     logo,
                     filler(),
                     vbox({
-                        text(version_str) | color(Color::GrayLight) | dim,
+                        text(version_str) | color(tui::theme().ui.text_muted) | dim,
                         state.update_notice.empty()
                             ? emptyElement()
-                            : paragraph(state.update_notice) | color(Color::YellowLight),
+                            : paragraph(state.update_notice) | color(tui::theme().semantic.warning),
                         text(state.status_line) | color(status_line_color(state.status_line)),
-                        text(cwd_display) | color(Color::CyanLight) | dim,
+                        text(cwd_display) | color(tui::theme().ui.accent_alt) | dim,
                     }),
                     text("  "),
-                }) | bgcolor(Color::RGB(0, 30, 45));
+                }) | bgcolor(is_light ? Color::RGB(225, 235, 245) : Color::RGB(0, 30, 45));
             }
         }
 
@@ -5243,8 +5253,8 @@ static int run_interactive_app(const CliOptions& cli,
 
             if (msg.role == "user") {
                 auto line = hbox({
-                    text(" > ") | bold | color(Color::BlueLight),
-                    paragraph(msg.content) | color(Color::White) | flex,
+                    text(" > ") | bold | color(tui::theme().markdown.link),
+                    paragraph(msg.content) | color(tui::theme().ui.text_primary) | flex,
                 });
                 if (focused_message) {
                     line = line | focus;
@@ -5268,10 +5278,10 @@ static int run_interactive_app(const CliOptions& cli,
                     md_content = acecode::markdown::format_markdown(msg.content, md_opts);
                 } catch (...) {
                     // Fallback: raw paragraph if markdown parsing fails
-                    md_content = paragraph(msg.content) | color(Color::GreenLight);
+                    md_content = paragraph(msg.content) | color(tui::theme().semantic.success);
                 }
                 auto line = hbox({
-                    text(" * ") | bold | color(Color::Green),
+                    text(" * ") | bold | color(tui::theme().semantic.success),
                     md_content | flex,
                 });
                 if (focused_message) {
@@ -5289,8 +5299,8 @@ static int run_interactive_app(const CliOptions& cli,
                     display_text = msg.content;
                 }
                 auto line = hbox({
-                    text("   -> ") | color(Color::MagentaLight),
-                    paragraph(display_text) | color(Color::MagentaLight) | flex,
+                    text("   -> ") | color(tui::theme().syntax.preproc),
+                    paragraph(display_text) | color(tui::theme().syntax.preproc) | flex,
                 });
                 if (focused_message) {
                     line = line | focus;
@@ -5303,7 +5313,7 @@ static int run_interactive_app(const CliOptions& cli,
                 // 这与 LLM 工具结果(role="tool_result")形成对照:LLM 调用的
                 // 工具结果走摘要/diff/fold 三优先级,有 Ctrl+E 展开机制。
                 auto line = hbox({
-                    text("   <- ") | color(Color::GrayDark),
+                    text("   <- ") | color(tui::theme().ui.text_dim),
                     render_tool_result_lines_preserving_breaks(msg.content) | flex,
                 });
                 if (focused_message) {
@@ -5322,8 +5332,8 @@ static int run_interactive_app(const CliOptions& cli,
                     if (msg.summary.has_value()) {
                         const auto& s = *msg.summary;
                         Color row_color = msg.content.find("[Error]") == 0 || !is_success_summary(s)
-                            ? Color::RedLight
-                            : Color::GreenLight;
+                            ? tui::theme().semantic.error
+                            : tui::theme().semantic.success;
                         std::string metric_str;
                         for (const auto& kv : s.metrics) {
                             std::string seg;
@@ -5338,13 +5348,13 @@ static int run_interactive_app(const CliOptions& cli,
                         std::string summary_line = renderable_tool_summary_line(
                             s, metric_str, summary_width);
                         rows.push_back(hbox({
-                            text("   <- ") | color(Color::GrayDark),
+                            text("   <- ") | color(tui::theme().ui.text_dim),
                             text(summary_line) | color(row_color) | flex,
                         }));
                     } else {
                         rows.push_back(hbox({
-                            text("   <- ") | color(Color::GrayDark),
-                            text("diff") | color(Color::GrayLight) | flex,
+                            text("   <- ") | color(tui::theme().ui.text_dim),
+                            text("diff") | color(tui::theme().ui.text_muted) | flex,
                         }));
                     }
 
@@ -5359,8 +5369,8 @@ static int run_interactive_app(const CliOptions& cli,
                                 ? msg.content.substr(pos)
                                 : msg.content.substr(pos, nl - pos);
                             rows.push_back(hbox({
-                                text("      ") | color(Color::GrayDark),
-                                paragraph(line) | color(Color::GrayLight) | dim | flex,
+                                text("      ") | color(tui::theme().ui.text_dim),
+                                paragraph(line) | color(tui::theme().ui.text_muted) | dim | flex,
                             }));
                             if (nl == std::string::npos) break;
                             pos = nl + 1;
@@ -5376,7 +5386,7 @@ static int run_interactive_app(const CliOptions& cli,
                     opts.max_lines_per_hunk = 20;
                     Element diff_el = render_diff_view(*msg.hunks, opts);
                     rows.push_back(hbox({
-                        text("      ") | color(Color::GrayDark),
+                        text("      ") | color(tui::theme().ui.text_dim),
                         diff_el | flex,
                     }));
 
@@ -5390,8 +5400,8 @@ static int run_interactive_app(const CliOptions& cli,
                     // ---- Summary row: single line, icon + verb + object + metrics ----
                     const auto& s = *msg.summary;
                     Color row_color = msg.content.find("[Error]") == 0 || !is_success_summary(s)
-                        ? Color::RedLight
-                        : Color::GreenLight;
+                        ? tui::theme().semantic.error
+                        : tui::theme().semantic.success;
 
                     // Build metric tail: " · k=v · k=v" but drop k for
                     // "time"/"bytes"/"lines"/"size" since the value is self-describing.
@@ -5429,7 +5439,7 @@ static int run_interactive_app(const CliOptions& cli,
 
                     Elements rows;
                     rows.push_back(hbox({
-                        text("   <- ") | color(Color::GrayDark),
+                        text("   <- ") | color(tui::theme().ui.text_dim),
                         text(summary_line) | color(row_color) | flex,
                     }));
 
@@ -5444,8 +5454,8 @@ static int run_interactive_app(const CliOptions& cli,
                                 ? msg.content.substr(pos)
                                 : msg.content.substr(pos, nl - pos);
                             rows.push_back(hbox({
-                                text("      ") | color(Color::GrayDark),
-                                paragraph(line) | color(Color::GrayLight) | dim | flex,
+                                text("      ") | color(tui::theme().ui.text_dim),
+                                paragraph(line) | color(tui::theme().ui.text_muted) | dim | flex,
                             }));
                             if (nl == std::string::npos) break;
                             pos = nl + 1;
@@ -5484,7 +5494,7 @@ static int run_interactive_app(const CliOptions& cli,
                     }
 
                     auto line = hbox({
-                        text("   <- ") | color(Color::GrayDark),
+                        text("   <- ") | color(tui::theme().ui.text_dim),
                         render_tool_result_lines_preserving_breaks(display_content) | flex,
                     });
                     if (focused_message) {
@@ -5495,8 +5505,8 @@ static int run_interactive_app(const CliOptions& cli,
                 }
             } else if (msg.role == "system") {
                 auto line = hbox({
-                    text(" i ") | bold | color(Color::Yellow),
-                    paragraph(msg.content) | color(Color::Yellow) | flex,
+                    text(" i ") | bold | color(tui::theme().ui.accent),
+                    paragraph(msg.content) | color(tui::theme().ui.accent) | flex,
                 });
                 if (focused_message) {
                     line = line | focus;
@@ -5505,8 +5515,8 @@ static int run_interactive_app(const CliOptions& cli,
                     tracked_message(i, line | focus_decorator));
             } else if (msg.role == "error") {
                 auto line = hbox({
-                    text(" ! ") | bold | color(Color::Red),
-                    paragraph(msg.content) | color(Color::RedLight) | flex,
+                    text(" ! ") | bold | color(tui::theme().semantic.error),
+                    paragraph(msg.content) | color(tui::theme().semantic.error) | flex,
                 });
                 if (focused_message) {
                     line = line | focus;
@@ -5550,8 +5560,8 @@ static int run_interactive_app(const CliOptions& cli,
             // mouse-selection-copy: visual feedback for drag-selection. The
             // decorator lives on the message_view so selection can span
             // multiple messages.
-            | selectionBackgroundColor(Color::Blue)
-            | selectionForegroundColor(Color::White);
+            | selectionBackgroundColor(tui::theme().ui.selection_bg)
+            | selectionForegroundColor(tui::theme().ui.selection_fg);
 
         // -- Thinking indicator / tool progress --
         // Priority: if a tool is streaming output, show the live tool-progress
@@ -5586,26 +5596,26 @@ static int run_interactive_app(const CliOptions& cli,
                 if (dist < 0) dist = -dist;
                 Color c;
                 if (dist == 0)
-                    c = Color::Yellow;
+                    c = tui::theme().ui.accent;
                 else if (dist == 1)
-                    c = Color::RGB(180, 180, 60);
+                    c = is_light ? Color::RGB(130, 90, 0) : Color::RGB(180, 180, 60);
                 else if (dist == 2)
-                    c = Color::RGB(120, 120, 40);
+                    c = is_light ? Color::RGB(160, 130, 60) : Color::RGB(120, 120, 40);
                 else
-                    c = Color::GrayDark;
+                    c = tui::theme().ui.text_dim;
                 chars.push_back(text(utf8_chars[i]) | color(c));
             }
 
             // Dots also animate
             for (int i = 0; i < 3; i++) {
                 if (i < dot_count)
-                    chars.push_back(text(".") | color(Color::Yellow));
+                    chars.push_back(text(".") | color(tui::theme().ui.accent));
                 else
-                    chars.push_back(text(".") | color(Color::GrayDark));
+                    chars.push_back(text(".") | color(tui::theme().ui.text_dim));
             }
 
             thinking_element = hbox({
-                text(" \xE2\x97\x8F ") | color(Color::Yellow),
+                text(" \xE2\x97\x8F ") | color(tui::theme().ui.accent),
                 hbox(std::move(chars)),
             });
         }
@@ -5618,7 +5628,7 @@ static int run_interactive_app(const CliOptions& cli,
             Elements picker_rows;
             picker_rows.push_back(
                 text(" Resume a session (Up/Down/PgUp/PgDn/Home/End to navigate, Enter to confirm, Esc to cancel, 1-9 jump):")
-                | bold | color(Color::Cyan));
+                | bold | color(tui::theme().ui.border));
             picker_rows.push_back(text(""));
 
             const int total = static_cast<int>(state.resume_items.size());
@@ -5632,7 +5642,7 @@ static int run_interactive_app(const CliOptions& cli,
             if (items_above > 0) {
                 picker_rows.push_back(
                     text("  \xE2\x86\x91 " + std::to_string(items_above) + " more above")
-                    | dim | color(Color::GrayLight));
+                    | dim | color(tui::theme().ui.text_muted));
             } else {
                 picker_rows.push_back(text(""));
             }
@@ -5641,9 +5651,9 @@ static int run_interactive_app(const CliOptions& cli,
                 bool selected = (i == state.resume_selected);
                 auto row = text("  " + state.resume_items[i].display);
                 if (selected) {
-                    row = row | bold | color(Color::White) | bgcolor(Color::RGB(0, 80, 120));
+                    row = row | bold | color(tui::theme().ui.selection_fg) | bgcolor(tui::theme().ui.selection_bg);
                 } else {
-                    row = row | color(Color::GrayLight);
+                    row = row | color(tui::theme().ui.text_muted);
                 }
                 picker_rows.push_back(row);
             }
@@ -5652,13 +5662,13 @@ static int run_interactive_app(const CliOptions& cli,
             if (items_below > 0) {
                 picker_rows.push_back(
                     text("  \xE2\x86\x93 " + std::to_string(items_below) + " more below")
-                    | dim | color(Color::GrayLight));
+                    | dim | color(tui::theme().ui.text_muted));
             } else {
                 picker_rows.push_back(text(""));
             }
 
             picker_rows.push_back(text(""));
-            resume_picker_element = vbox(std::move(picker_rows)) | border | color(Color::Cyan);
+            resume_picker_element = vbox(std::move(picker_rows)) | border | color(tui::theme().ui.border);
         }
         Element rewind_picker_element = emptyElement();
         if (state.rewind_picker_active && !state.rewind_items.empty()) {
@@ -5670,29 +5680,29 @@ static int run_interactive_app(const CliOptions& cli,
                 const auto& item = state.rewind_items[selected];
                 picker_rows.push_back(
                     text(" Rewind mode (Up/Down to select, Enter to confirm, Esc to go back, or type 1-9):")
-                    | bold | color(Color::Cyan));
-                picker_rows.push_back(text(" Target: " + item.preview) | color(Color::GrayLight));
+                    | bold | color(tui::theme().ui.border));
+                picker_rows.push_back(text(" Target: " + item.preview) | color(tui::theme().ui.text_muted));
                 picker_rows.push_back(text(" Code rewind only covers ACECode file_edit/file_write changes; manual edits, shell commands, MCP tools, git operations, and external side effects are not tracked.")
-                                      | color(Color::Yellow));
+                                      | color(tui::theme().ui.accent));
                 picker_rows.push_back(text(""));
                 for (int i = 0; i < static_cast<int>(state.rewind_modes.size()); ++i) {
                     bool selected_mode = (i == state.rewind_mode_selected);
                     const auto& mode = state.rewind_modes[i];
                     auto row = hbox({
                         text("  [" + std::to_string(i + 1) + "] " + mode.label + "  "),
-                        text(mode.description) | color(Color::GrayLight),
+                        text(mode.description) | color(tui::theme().ui.text_muted),
                     });
                     if (selected_mode) {
-                        row = row | bold | color(Color::White) | bgcolor(Color::RGB(0, 80, 120));
+                        row = row | bold | color(tui::theme().ui.selection_fg) | bgcolor(tui::theme().ui.selection_bg);
                     } else {
-                        row = row | color(Color::GrayLight);
+                        row = row | color(tui::theme().ui.text_muted);
                     }
                     picker_rows.push_back(row);
                 }
             } else {
                 picker_rows.push_back(
                     text(" Rewind to a user turn (Up/Down/PgUp/PgDn/Home/End to navigate, Enter to confirm, Esc to cancel, 1-9 jump):")
-                    | bold | color(Color::Cyan));
+                    | bold | color(tui::theme().ui.border));
                 picker_rows.push_back(text(""));
 
                 const int total = static_cast<int>(state.rewind_items.size());
@@ -5705,7 +5715,7 @@ static int run_interactive_app(const CliOptions& cli,
                 if (items_above > 0) {
                     picker_rows.push_back(
                         text("  \xE2\x86\x91 " + std::to_string(items_above) + " more above")
-                        | dim | color(Color::GrayLight));
+                        | dim | color(tui::theme().ui.text_muted));
                 } else {
                     picker_rows.push_back(text(""));
                 }
@@ -5714,9 +5724,9 @@ static int run_interactive_app(const CliOptions& cli,
                     bool selected = (i == state.rewind_selected);
                     auto row = text("  " + state.rewind_items[i].display);
                     if (selected) {
-                        row = row | bold | color(Color::White) | bgcolor(Color::RGB(0, 80, 120));
+                        row = row | bold | color(tui::theme().ui.selection_fg) | bgcolor(tui::theme().ui.selection_bg);
                     } else {
-                        row = row | color(Color::GrayLight);
+                        row = row | color(tui::theme().ui.text_muted);
                     }
                     picker_rows.push_back(row);
                 }
@@ -5724,13 +5734,13 @@ static int run_interactive_app(const CliOptions& cli,
                 if (items_below > 0) {
                     picker_rows.push_back(
                         text("  \xE2\x86\x93 " + std::to_string(items_below) + " more below")
-                        | dim | color(Color::GrayLight));
+                        | dim | color(tui::theme().ui.text_muted));
                 } else {
                     picker_rows.push_back(text(""));
                 }
             }
             picker_rows.push_back(text(""));
-            rewind_picker_element = vbox(std::move(picker_rows)) | border | color(Color::Cyan);
+            rewind_picker_element = vbox(std::move(picker_rows)) | border | color(tui::theme().ui.border);
         }
         // /model picker overlay。同 resume_picker_element 的视觉风格(青边、
         // 滚动指示、选中行高亮)—— 单纯多一列前缀 "*" 标记当前 effective entry。
@@ -5739,7 +5749,7 @@ static int run_interactive_app(const CliOptions& cli,
             Elements picker_rows;
             picker_rows.push_back(
                 text(" Select a model (Up/Down/PgUp/PgDn/Home/End to navigate, Enter to confirm, Esc to cancel):")
-                | bold | color(Color::Cyan));
+                | bold | color(tui::theme().ui.border));
             picker_rows.push_back(text(""));
 
             const int total = static_cast<int>(state.model_picker_options.size());
@@ -5754,7 +5764,7 @@ static int run_interactive_app(const CliOptions& cli,
             if (items_above > 0) {
                 picker_rows.push_back(
                     text("  \xE2\x86\x91 " + std::to_string(items_above) + " more above")
-                    | dim | color(Color::GrayLight));
+                    | dim | color(tui::theme().ui.text_muted));
             } else {
                 picker_rows.push_back(text(""));
             }
@@ -5767,11 +5777,11 @@ static int run_interactive_app(const CliOptions& cli,
                     "  " + marker + opt.name + "  (" + opt.provider + "/" + opt.model + ")";
                 auto row = text(body);
                 if (selected) {
-                    row = row | bold | color(Color::White) | bgcolor(Color::RGB(0, 80, 120));
+                    row = row | bold | color(tui::theme().ui.selection_fg) | bgcolor(tui::theme().ui.selection_bg);
                 } else if (opt.is_current) {
-                    row = row | color(Color::Yellow);
+                    row = row | color(tui::theme().ui.accent);
                 } else {
-                    row = row | color(Color::GrayLight);
+                    row = row | color(tui::theme().ui.text_muted);
                 }
                 picker_rows.push_back(row);
             }
@@ -5779,13 +5789,13 @@ static int run_interactive_app(const CliOptions& cli,
             if (items_below > 0) {
                 picker_rows.push_back(
                     text("  \xE2\x86\x93 " + std::to_string(items_below) + " more below")
-                    | dim | color(Color::GrayLight));
+                    | dim | color(tui::theme().ui.text_muted));
             } else {
                 picker_rows.push_back(text(""));
             }
 
             picker_rows.push_back(text(""));
-            model_picker_element = vbox(std::move(picker_rows)) | border | color(Color::Cyan);
+            model_picker_element = vbox(std::move(picker_rows)) | border | color(tui::theme().ui.border);
         }
 
         Element slash_dropdown_element =
@@ -5844,24 +5854,24 @@ static int run_interactive_app(const CliOptions& cli,
                 Element el = row.text.empty() ? text("") : text(row.text);
                 switch (row.kind) {
                     case acecode::tui::AskOverlayRowKind::Header:
-                        el = el | bold | color(Color::Cyan);
+                        el = el | bold | color(tui::theme().ui.border);
                         break;
                     case acecode::tui::AskOverlayRowKind::Body:
-                        el = el | color(Color::White);
+                        el = el | color(tui::theme().ui.text_primary);
                         break;
                     case acecode::tui::AskOverlayRowKind::Option:
                         if (row.focused) {
-                            el = el | bold | color(Color::White) |
-                                bgcolor(Color::RGB(0, 60, 100));
+                            el = el | bold | color(tui::theme().ui.text_primary) |
+                                bgcolor(tui::theme().ui.selection_bg);
                         } else {
-                            el = el | color(Color::GrayLight);
+                            el = el | color(tui::theme().ui.text_muted);
                         }
                         break;
                     case acecode::tui::AskOverlayRowKind::Hint:
-                        el = el | dim | color(Color::GrayDark);
+                        el = el | dim | color(tui::theme().ui.text_dim);
                         break;
                     case acecode::tui::AskOverlayRowKind::CustomPrompt:
-                        el = el | color(Color::Yellow);
+                        el = el | color(tui::theme().ui.accent);
                         break;
                     case acecode::tui::AskOverlayRowKind::Blank:
                         break;
@@ -5888,7 +5898,7 @@ static int run_interactive_app(const CliOptions& cli,
                 auto bar = text(in_thumb
                     ? (conhost_compat_layout ? " | " : " \xE2\x94\x83 ")
                     : "   ");
-                bar_rows.push_back(bar | color(in_thumb ? Color::Cyan : Color::GrayDark));
+                bar_rows.push_back(bar | color(in_thumb ? tui::theme().ui.border : tui::theme().ui.text_dim));
             }
 
             Element body = hbox({
@@ -5900,9 +5910,9 @@ static int run_interactive_app(const CliOptions& cli,
                     compat_horizontal_line(),
                     body,
                     compat_horizontal_line(),
-                }) | color(Color::Cyan);
+                }) | color(tui::theme().ui.border);
             } else {
-                ask_overlay_element = body | border | color(Color::Cyan);
+                ask_overlay_element = body | border | color(tui::theme().ui.border);
             }
             ask_overlay_element = ask_overlay_element | reflect(ask_overlay_box);
         }
@@ -5929,10 +5939,10 @@ static int run_interactive_app(const CliOptions& cli,
                     ? title.substr(pos)
                     : title.substr(pos, nl - pos);
                 if (first) {
-                    rows.push_back(text(" " + line) | bold | color(Color::Yellow));
+                    rows.push_back(text(" " + line) | bold | color(tui::theme().ui.accent));
                     first = false;
                 } else {
-                    rows.push_back(text(line) | color(Color::GrayLight));
+                    rows.push_back(text(line) | color(tui::theme().ui.text_muted));
                 }
                 if (nl == std::string::npos) break;
                 pos = nl + 1;
@@ -5950,41 +5960,41 @@ static int run_interactive_app(const CliOptions& cli,
                 std::string prefix = focused ? " \xE2\x9D\xAF " : "   ";
                 auto row = text(prefix + labels[i]);
                 if (focused) {
-                    row = row | bold | color(Color::White) | bgcolor(Color::RGB(0, 60, 100));
+                    row = row | bold | color(tui::theme().ui.text_primary) | bgcolor(tui::theme().ui.selection_bg);
                 } else {
-                    row = row | color(Color::GrayLight);
+                    row = row | color(tui::theme().ui.text_muted);
                 }
                 rows.push_back(row);
             }
             rows.push_back(text(""));
             rows.push_back(
                 text(" \xE2\x86\x91\xE2\x86\x93 move   Enter select   1/2/3 jump   Esc deny")
-                | dim | color(Color::GrayDark));
-            confirm_overlay_element = vbox(std::move(rows)) | border | color(Color::Yellow);
+                | dim | color(tui::theme().ui.text_dim));
+            confirm_overlay_element = vbox(std::move(rows)) | border | color(tui::theme().ui.accent);
         }
 
         if (state.exit_confirm_pending) {
             // 优先级最高:Ctrl+C 退出确认 overlay 可在任何其他状态(ask /
             // confirm / 普通输入)上叠加显示。事件拦截分支也放在最早。
             prompt_line = hbox({
-                text(" Exit acecode? ") | bold | color(Color::Yellow),
-                text("y") | bold | color(Color::Green),
-                text(" / ") | color(Color::YellowLight),
-                text("N") | bold | color(Color::Red),
-                text(" (any other key cancels)") | dim | color(Color::GrayDark),
+                text(" Exit acecode? ") | bold | color(tui::theme().ui.accent),
+                text("y") | bold | color(tui::theme().semantic.success),
+                text(" / ") | color(tui::theme().semantic.warning),
+                text("N") | bold | color(tui::theme().semantic.error),
+                text(" (any other key cancels)") | dim | color(tui::theme().ui.text_dim),
             });
         } else if (state.ask_pending) {
             // ask active 时:把输入框留给 Other 自定义文本态使用;其它状态下
             // 显示静态提示,吞掉字符输入(CatchEvent 不透传非导航键)。
             if (state.ask_other_input_active) {
                 prompt_line = hbox({
-                    text(" ? ") | bold | color(Color::Yellow),
+                    text(" ? ") | bold | color(tui::theme().ui.accent),
                     input_with_esc->Render() | flex,
                 });
             } else {
                 prompt_line = hbox({
-                    text(" ? answering: ") | bold | color(Color::Yellow),
-                    text("use arrows + Enter (Esc to cancel)") | dim | color(Color::GrayDark),
+                    text(" ? answering: ") | bold | color(tui::theme().ui.accent),
+                    text("use arrows + Enter (Esc to cancel)") | dim | color(tui::theme().ui.text_dim),
                 });
             }
         } else if (state.confirm_pending) {
@@ -5993,22 +6003,22 @@ static int run_interactive_app(const CliOptions& cli,
             // 导航键,这里的 hbox 不渲染 input_with_esc 是为了让光标不在输入
             // 框里闪、误导用户去打字)。
             prompt_line = hbox({
-                text(" [" + state.confirm_tool_name + "] ") | bold | color(Color::MagentaLight),
+                text(" [" + state.confirm_tool_name + "] ") | bold | color(tui::theme().syntax.preproc),
                 text("awaiting confirmation \xE2\x80\x94 use \xE2\x86\x91\xE2\x86\x93 + Enter (Esc to deny)")
-                    | dim | color(Color::GrayDark),
+                    | dim | color(tui::theme().ui.text_dim),
             });
         } else {
             Elements prompt_parts;
             if (state.input_mode == InputMode::Shell) {
-                prompt_parts.push_back(text(" ! ") | bold | color(Color::Red));
+                prompt_parts.push_back(text(" ! ") | bold | color(tui::theme().semantic.error));
             } else {
-                prompt_parts.push_back(text(" > ") | bold | color(Color::Cyan));
+                prompt_parts.push_back(text(" > ") | bold | color(tui::theme().ui.border));
             }
             prompt_parts.push_back(input_with_esc->Render() | flex);
             if (!state.pending_queue.empty()) {
                 prompt_parts.push_back(
                     text(" QUEUED " + std::to_string(state.pending_queue.size()) + " ") |
-                    bold | color(Color::White) | bgcolor(Color::RGB(128, 96, 0)));
+                    bold | color(tui::theme().ui.text_primary) | bgcolor(tui::theme().ui.queued_bg));
             }
             prompt_line = hbox(std::move(prompt_parts));
         }
@@ -6019,7 +6029,7 @@ static int run_interactive_app(const CliOptions& cli,
         Element load_el = render_model_load_chip();
         Element goal_el = state.goal_status.empty()
             ? text("")
-            : text("  " + state.goal_status + "  ") | dim | color(Color::GreenLight);
+            : text("  " + state.goal_status + "  ") | dim | color(tui::theme().semantic.success);
         // Tool timer chip — persistent even when the main progress element is
         // obscured by overlays or scrolled out of view. Thinking-timer chip
         // shows elapsed time + live output-token estimate while the agent is
@@ -6039,22 +6049,22 @@ static int run_interactive_app(const CliOptions& cli,
             Elements status_parts;
             if (dangerous_mode) {
                 status_parts.push_back(
-                    text("  [YOLO]  ") | bold | color(Color::Yellow));
+                    text("  [YOLO]  ") | bold | color(tui::theme().ui.accent));
             } else if (state.is_waiting || state.tool_running) {
                 status_parts.push_back(
                     text("  esc / ctrl+c to interrupt  ") | dim |
-                    color(Color::GrayDark));
+                    color(tui::theme().ui.text_dim));
             } else {
                 status_parts.push_back(
                     text("  ctrl+p: cycle permission mode  ") | dim |
-                    color(Color::GrayDark));
+                    color(tui::theme().ui.text_dim));
             }
             if (state.tool_running) {
                 const long secs = elapsed_secs(state.tool_progress.start_time);
                 status_parts.push_back(
                     text("Tool: " + state.tool_progress.tool_name + " " +
                          std::to_string(secs) + "s  ") |
-                    bold | color(Color::Yellow));
+                    bold | color(tui::theme().ui.accent));
             } else if (state.is_waiting) {
                 const long secs = elapsed_secs(state.thinking_start_time);
                 std::string wait = "Thinking " + std::to_string(secs) + "s";
@@ -6068,44 +6078,44 @@ static int run_interactive_app(const CliOptions& cli,
                         " tok";
                 }
                 wait += "  ";
-                status_parts.push_back(text(wait) | bold | color(Color::Yellow));
+                status_parts.push_back(text(wait) | bold | color(tui::theme().ui.accent));
             }
             status_parts.push_back(goal_el);
             status_parts.push_back(token_el);
             status_parts.push_back(load_el);
-            status_parts.push_back(text(perm_mode_str) | dim | color(Color::GrayDark));
+            status_parts.push_back(text(perm_mode_str) | dim | color(tui::theme().ui.text_dim));
             bottom_bar = hbox(std::move(status_parts));
         } else if (dangerous_mode) {
             bottom_bar = hbox({
-                text("  [YOLO]") | bold | color(Color::Yellow),
+                text("  [YOLO]") | bold | color(tui::theme().ui.accent),
                 filler(),
                 thinking_timer_el,
                 tool_timer_el,
                 goal_el,
                 token_el,
                 load_el,
-                text(perm_mode_str + "  ") | dim | color(Color::GrayDark),
+                text(perm_mode_str + "  ") | dim | color(tui::theme().ui.text_dim),
             });
         } else if (state.is_waiting || state.tool_running) {
             bottom_bar = hbox({
-                text("  esc / ctrl+c to interrupt") | dim | color(Color::GrayDark),
+                text("  esc / ctrl+c to interrupt") | dim | color(tui::theme().ui.text_dim),
                 filler(),
                 thinking_timer_el,
                 tool_timer_el,
                 goal_el,
                 token_el,
                 load_el,
-                text(perm_mode_str + "  ") | dim | color(Color::GrayDark),
+                text(perm_mode_str + "  ") | dim | color(tui::theme().ui.text_dim),
             });
         } else {
             bottom_bar = hbox({
-                text("  ctrl+p: cycle permission mode") | dim | color(Color::GrayDark),
+                text("  ctrl+p: cycle permission mode") | dim | color(tui::theme().ui.text_dim),
                 filler(),
                 tool_timer_el,
                 goal_el,
                 token_el,
                 load_el,
-                text(perm_mode_str + "  ") | dim | color(Color::GrayDark),
+                text(perm_mode_str + "  ") | dim | color(tui::theme().ui.text_dim),
             });
         }
 
@@ -6116,8 +6126,8 @@ static int run_interactive_app(const CliOptions& cli,
         // Window) don't work under ConPTY.
 
         Color outer_border_color = (state.input_mode == InputMode::Shell)
-            ? Color::Red
-            : Color::GrayLight;
+            ? acecode::tui::theme().semantic.error
+            : acecode::tui::theme().ui.text_muted;
 
         Element header_separator = hide_regular_sidebar_banner
             ? emptyElement()
@@ -6141,7 +6151,7 @@ static int run_interactive_app(const CliOptions& cli,
 
         Element main_root = vbox({
             header,
-            header_separator | color(Color::GrayDark),
+            header_separator | color(acecode::tui::theme().ui.text_dim),
             message_view,
             resume_picker_element,
             rewind_picker_element,
@@ -6152,7 +6162,7 @@ static int run_interactive_app(const CliOptions& cli,
             thinking_element,
             todo_checklist_element,
             pending_queue_element,
-            prompt_separator | color(Color::GrayDark),
+            prompt_separator | color(acecode::tui::theme().ui.text_dim),
             pending_attachment_element,
             prompt_line,
             bottom_bar,

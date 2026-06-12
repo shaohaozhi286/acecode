@@ -830,6 +830,16 @@ AppConfig load_config() {
                         cfg.tui.page_keys_single_line =
                             tj["page_keys_single_line"].get<bool>();
                     }
+                    if (tj.contains("theme") && tj["theme"].is_string()) {
+                        std::string t = tj["theme"].get<std::string>();
+                        if (t == "auto" || t == "dark" || t == "light") {
+                            cfg.tui.theme = std::move(t);
+                        } else {
+                            LOG_WARN("[config] invalid tui.theme value '" + t +
+                                     "', falling back to 'auto'");
+                            cfg.tui.theme = "auto";
+                        }
+                    }
                 }
             }
 
@@ -1228,6 +1238,8 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
             tj["alt_screen_mode"] = cfg.tui.alt_screen_mode;
         if (cfg.tui.page_keys_single_line != tui_d.page_keys_single_line)
             tj["page_keys_single_line"] = cfg.tui.page_keys_single_line;
+        if (cfg.tui.theme != tui_d.theme)
+            tj["theme"] = cfg.tui.theme;
         if (!tj.empty()) j["tui"] = tj;
 
         DesktopConfig desk_d;

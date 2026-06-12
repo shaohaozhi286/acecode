@@ -152,6 +152,8 @@ struct TuiConfig {
     // 某些远程 SSH 客户端) 吞掉 Alt+方向键序列, 用户拿不到 Alt+Arrow; 默认打开,
     // 需要整页滚动时可通过 /page-step off 写入 tui.page_keys_single_line=false.
     bool page_keys_single_line = true;
+    // TUI 调色板: "auto"(启动时探测终端背景色) / "dark" / "light"。
+    std::string theme = "auto";
 };
 
 // Network / HTTP client tuning. Drives the system-proxy integration —

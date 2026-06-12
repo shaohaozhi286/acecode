@@ -524,6 +524,16 @@ static ToolResult execute_file_edit(const std::string& arguments_json, const Too
         }
 
         std::string normalized_new = normalize_text_to_lf(new_string);
+        // 删除区间包含 end_line 行尾的换行符（end_offset 指向下一行行首），而调用方给出的
+        // new_string 通常不带尾随换行；不补回这个换行会把 end_line 的下一行直接拼接到
+        // 新内容末尾（如 `});` 与 `const foo = ...` 粘成一行）。new_string 为空表示整行
+        // 删除，保持原语义不补。
+        const bool range_has_trailing_newline =
+            end_offset > start_offset && buffer.text[end_offset - 1] == '\n';
+        if (range_has_trailing_newline && !normalized_new.empty() &&
+            normalized_new.back() != '\n') {
+            normalized_new.push_back('\n');
+        }
         std::string new_content = buffer.text;
         new_content.replace(start_offset, end_offset - start_offset, normalized_new);
         if (new_content == buffer.text) {

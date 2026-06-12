@@ -176,6 +176,24 @@ AgentLoopDoomGuard::Operation classify_bash_operation(const std::string& normali
     return AgentLoopDoomGuard::Operation::Unknown;
 }
 
+// 自带明确恢复路径的前置条件失败:错误信息本身就指示"先补一次 file_read /
+// 换正确的 hash,然后原样重试"。模型按提示重试时参数往往与上一次完全相同,
+// 若把这类失败计入 attempts,exact-repeat 拦截会把唯一正确的恢复路径堵死
+// (典型:old_string 编辑因 "only partially read" 失败 → 补全量读取 → 同参重试被 Guarded)。
+bool is_retryable_precondition_failure(const ToolResult& result) {
+    if (result.success) return false;
+    const std::string lower = ascii_lower(result.output);
+    return contains_any(lower, {
+        // ToolErrors::file_not_read_for_edit / file_partially_read_for_edit
+        "read the full file with file_read",
+        // ToolErrors::external_modification
+        "re-read the file before writing",
+        // file_edit range 模式 hash 过期:错误里附带了当前 hash 与内容,重试是预期路径,
+        // 且拦截后给出的合成结果反而丢失这些恢复信息
+        "range hash mismatch"
+    });
+}
+
 std::string operation_name(AgentLoopDoomGuard::Operation op) {
     switch (op) {
     case AgentLoopDoomGuard::Operation::Read: return "read";
@@ -242,6 +260,9 @@ void AgentLoopDoomGuard::record_result(const ToolCall& call, const ToolResult& r
             }),
             attempts_.end());
     }
+    if (is_retryable_precondition_failure(result)) {
+        return;
+    }
     attempts_.push_back(Attempt{std::move(key), result_class, is_low_signal(result_class)});
     constexpr std::size_t kMaxAttempts = 64;
     if (attempts_.size() > kMaxAttempts) {
@@ -286,6 +307,16 @@ AgentLoopDoomGuard::ResultClass AgentLoopDoomGuard::classify_result(const ToolRe
     std::string output = collapse_space(result.output);
     std::string lower = ascii_lower(output);
     if (lower.find("[doom-loop guard]") != std::string::npos) return ResultClass::Guarded;
+    // 成功结果不做关键词细分:file_read/grep 等工具的输出就是文件内容本身,正常内容里
+    // 出现 "timed out"/"超时"/"not found" 等词(典型如 i18n 错误文案文件)不代表调用失败。
+    // 关键词只能用来给"已经失败"的结果分细类,否则一次成功读取会被记成 low-signal,
+    // 后续合法的重复读取被整体拦截,模型失去对文件状态的感知。
+    if (result.success) {
+        if (output.empty() || lower == "(no output)" || lower == "no output") {
+            return ResultClass::Empty;
+        }
+        return ResultClass::Useful;
+    }
     if (contains_any(lower, {
             "access denied", "permission denied",
             "\xE6\x8B\x92\xE7\xBB\x9D\xE8\xAE\xBF\xE9\x97\xAE"
@@ -310,11 +341,8 @@ AgentLoopDoomGuard::ResultClass AgentLoopDoomGuard::classify_result(const ToolRe
         })) {
         return ResultClass::Unchanged;
     }
-    if (!result.success) return ResultClass::Error;
-    if (output.empty() || lower == "(no output)" || lower == "no output") {
-        return ResultClass::Empty;
-    }
-    return ResultClass::Useful;
+    // 走到这里一定是失败结果且未命中任何细分关键词。
+    return ResultClass::Error;
 }
 
 bool AgentLoopDoomGuard::is_low_signal(ResultClass result) const {

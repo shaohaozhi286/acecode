@@ -1638,7 +1638,7 @@ function SectionModel() {
     <>
       <h2 className="text-xl font-bold mb-1">模型</h2>
       <p className="text-[13px] text-fg-mute leading-relaxed mb-6">
-        管理已保存的模型预设。标记 ★ 的为当前默认模型,聊天界面顶栏切换的模型列表来自这里。
+        管理已保存的模型预设。聊天界面顶栏切换的模型列表来自这里。
       </p>
 
       <CopilotAuthPanel
@@ -1739,22 +1739,26 @@ function SectionModel() {
                 }
               }}
               className={clsx(
-                'flex items-center gap-3.5 px-5 py-4 cursor-pointer transition hover:bg-surface-hi',
+                'group/model-row flex items-center gap-3.5 px-5 py-4 cursor-pointer transition hover:bg-surface-hi',
                 !isLast && 'border-b border-border',
               )}
             >
-              <button
-                type="button"
-                onClick={(e) => { e.stopPropagation(); saveDefault(m.name); }}
-                disabled={isDefault || !!busy}
-                title={isDefault ? '当前默认' : '设为默认'}
-                className={clsx(
-                  'w-7 h-7 rounded-md flex items-center justify-center text-[14px] shrink-0 transition',
-                  isDefault ? 'text-warn bg-warn-bg border border-warn' : 'text-fg-mute hover:bg-surface-hi',
-                )}
-              >
-                {isDefault ? '★' : '☆'}
-              </button>
+              {isDefault ? (
+                <span
+                  className="px-2 py-1 rounded-md text-[11px] font-medium shrink-0 text-warn bg-warn-bg border border-warn select-none"
+                >
+                  当前默认
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); saveDefault(m.name); }}
+                  disabled={!!busy}
+                  className="px-2 py-1 rounded-md text-[11px] font-medium shrink-0 transition text-fg-mute opacity-0 group-hover/model-row:opacity-100 hover:bg-surface-hi hover:text-fg"
+                >
+                  设为默认
+                </button>
+              )}
 
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2 mb-1">

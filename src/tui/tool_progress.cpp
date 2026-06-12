@@ -1,4 +1,5 @@
 #include "tool_progress.hpp"
+#include "tui/theme_palette.hpp"
 
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/terminal.hpp>
@@ -46,9 +47,10 @@ ftxui::Element render_tool_progress(const TuiState& state) {
     std::string preview = p.command_preview;
     if (narrow && preview.size() > 20) preview = preview.substr(0, 19) + "\xE2\x80\xA6";
 
+    const auto& th = tui::theme();
     Element header = hbox({
-        text(" \xE2\x96\x8C ") | color(Color::GrayDark),
-        text(p.tool_name + ": ") | bold | color(Color::Yellow),
+        text(" \xE2\x96\x8C ") | color(th.ui.text_dim),
+        text(p.tool_name + ": ") | bold | color(th.ui.accent),
         text(preview) | dim,
     });
 
@@ -58,7 +60,7 @@ ftxui::Element render_tool_progress(const TuiState& state) {
             header,
             hbox({
                 text("   Running\xE2\x80\xA6 ") | dim,
-                text(std::to_string(secs) + "s") | dim | color(Color::CyanLight),
+                text(std::to_string(secs) + "s") | dim | color(th.ui.accent_alt),
             }),
         });
     }
@@ -67,10 +69,10 @@ ftxui::Element render_tool_progress(const TuiState& state) {
     Elements rows;
     rows.push_back(header);
     for (const auto& line : p.tail_lines) {
-        rows.push_back(text("   " + line) | dim | color(Color::GrayLight));
+        rows.push_back(text("   " + line) | dim | color(th.ui.text_muted));
     }
     if (!p.current_partial.empty()) {
-        rows.push_back(text("   " + p.current_partial) | dim | color(Color::GrayLight));
+        rows.push_back(text("   " + p.current_partial) | dim | color(th.ui.text_muted));
     }
 
     // Status line
@@ -81,12 +83,12 @@ ftxui::Element render_tool_progress(const TuiState& state) {
 
     Elements status_row;
     if (!status_left.empty()) {
-        status_row.push_back(text("   " + status_left) | dim | color(Color::GrayDark));
+        status_row.push_back(text("   " + status_left) | dim | color(th.ui.text_dim));
     } else {
         status_row.push_back(text("   ") | dim);
     }
     status_row.push_back(filler());
-    status_row.push_back(text(std::to_string(secs) + "s") | dim | color(Color::CyanLight));
+    status_row.push_back(text(std::to_string(secs) + "s") | dim | color(th.ui.accent_alt));
     if (p.total_bytes > 0) {
         status_row.push_back(text("  " + format_bytes(p.total_bytes)) | dim);
     }
@@ -100,10 +102,11 @@ ftxui::Element render_tool_timer_chip(const TuiState& state) {
     using namespace ftxui;
     if (!state.tool_running) return text("");
     const long secs = elapsed_seconds(state.tool_progress.start_time);
+    const auto& th = tui::theme();
     return hbox({
-        text("  \xE2\x97\x91 ") | color(Color::Yellow),
-        text(state.tool_progress.tool_name) | bold | color(Color::Yellow),
-        text("  " + std::to_string(secs) + "s  ") | dim | color(Color::CyanLight),
+        text("  \xE2\x97\x91 ") | color(th.ui.accent),
+        text(state.tool_progress.tool_name) | bold | color(th.ui.accent),
+        text("  " + std::to_string(secs) + "s  ") | dim | color(th.ui.accent_alt),
     });
 }
 
@@ -132,15 +135,13 @@ ftxui::Element render_thinking_timer_chip(const TuiState& state) {
         }
     }
 
+    const auto& th = tui::theme();
     Elements parts;
-    // Yellow arc glyph to mirror the tool chip's visual weight.
-    parts.push_back(text("  \xE2\x97\x8B ") | color(Color::Yellow));
-    // 底部 chip 强制统一显示 "Thinking"，和聊天区的轮换短语解耦——聊天动画
-    // 仍然读 state.current_thinking_phrase，底部 chip 只认这个静态字面量。
-    parts.push_back(text("Thinking") | bold | color(Color::Yellow));
-    parts.push_back(text(timer_segment) | dim | color(Color::CyanLight));
+    parts.push_back(text("  \xE2\x97\x8B ") | color(th.ui.accent));
+    parts.push_back(text("Thinking") | bold | color(th.ui.accent));
+    parts.push_back(text(timer_segment) | dim | color(th.ui.accent_alt));
     if (!token_segment.empty()) {
-        parts.push_back(text(token_segment) | dim | color(Color::CyanLight));
+        parts.push_back(text(token_segment) | dim | color(th.ui.accent_alt));
     }
     return hbox(std::move(parts));
 }

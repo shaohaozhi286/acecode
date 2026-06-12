@@ -1,5 +1,6 @@
 #include "agent_loop.hpp"
 #include "agent_loop_doom_guard.hpp"
+#include "agent_loop_shell_guard.hpp"
 #include "prompt/system_prompt.hpp"
 #include "utils/encoding.hpp"
 #include "utils/logger.hpp"
@@ -140,37 +141,6 @@ std::string ascii_lower(std::string value) {
         return static_cast<char>(std::tolower(c));
     });
     return value;
-}
-
-std::string normalize_path_for_command_match(std::string value) {
-    std::replace(value.begin(), value.end(), '\\', '/');
-    return ascii_lower(std::move(value));
-}
-
-bool command_mentions_path(const std::string& command, const std::string& path) {
-    std::string cmd = normalize_path_for_command_match(command);
-    std::string normalized_path = normalize_path_for_command_match(path);
-    if (normalized_path.empty()) return false;
-    if (cmd.find(normalized_path) != std::string::npos) return true;
-
-    size_t slash = normalized_path.find_last_of('/');
-    std::string basename = slash == std::string::npos
-        ? normalized_path
-        : normalized_path.substr(slash + 1);
-    return basename.size() >= 4 && cmd.find(basename) != std::string::npos;
-}
-
-bool command_looks_like_file_write(const std::string& command) {
-    std::string cmd = ascii_lower(command);
-    return cmd.find(">") != std::string::npos ||
-           cmd.find("set-content") != std::string::npos ||
-           cmd.find("out-file") != std::string::npos ||
-           cmd.find("add-content") != std::string::npos ||
-           cmd.find("sed -i") != std::string::npos ||
-           cmd.find("python") != std::string::npos ||
-           cmd.find("powershell") != std::string::npos ||
-           cmd.find("copy ") != std::string::npos ||
-           cmd.find("move ") != std::string::npos;
 }
 
 nlohmann::json parse_tool_args_for_permission_payload(const std::string& args_json) {

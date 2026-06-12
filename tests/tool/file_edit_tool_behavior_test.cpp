@@ -352,6 +352,79 @@ TEST(FileEditToolBehavior, RangeEditHashMismatchReturnsCurrentRange) {
     fs::remove(path);
 }
 
+// 回归测试:range 模式的删除区间包含 end_line 行尾的换行符,而模型给出的 new_string
+// 习惯上不带尾随换行。修复前替换后 end_line 的下一行会被直接拼接到新内容末尾,
+// 实际损伤如 `});` 与 `const handleImageLoaded = (ev) => {` 粘连成一行,
+// 模型随后反复修粘连、修的过程中再次触发同一 bug,形成编辑死循环。
+// 期望:工具自动补回被删除区间携带的尾随换行,下一行保持独立。
+TEST(FileEditToolBehavior, RangeEditWithoutTrailingNewlineDoesNotGlueNextLine) {
+    auto path = temp_file(".txt");
+    write_file(path, "const a = 1;\n});\n\nconst next = 2;\n");
+    auto decoded = acecode::read_text_file_buffer(path.string());
+    ASSERT_TRUE(decoded.success) << decoded.error;
+    // 替换 1-3 行(含末尾空行),new_string 刻意不带尾随换行,模拟模型的常见输出
+    std::string hash = acecode::range_hash(decoded.buffer.text, 1, 3);
+
+    ToolResult result = run_edit({
+        {"file_path", path.string()},
+        {"start_line", 1},
+        {"end_line", 3},
+        {"expected_hash", hash},
+        {"new_string", "const a = 42;\n});"}
+    });
+
+    ASSERT_TRUE(result.success) << result.output;
+    EXPECT_EQ(read_file(path), "const a = 42;\n});\nconst next = 2;\n");
+
+    fs::remove(path);
+}
+
+// 场景:new_string 为空表示删除整个行区间。期望:被删行连同其换行符一起移除,
+// 不能因为补换行逻辑而留下一个多余的空行。
+TEST(FileEditToolBehavior, RangeEditEmptyNewStringDeletesWholeLines) {
+    auto path = temp_file(".txt");
+    write_file(path, "a\nb\nc\n");
+    auto decoded = acecode::read_text_file_buffer(path.string());
+    ASSERT_TRUE(decoded.success) << decoded.error;
+    std::string hash = acecode::range_hash(decoded.buffer.text, 2, 2);
+
+    ToolResult result = run_edit({
+        {"file_path", path.string()},
+        {"start_line", 2},
+        {"end_line", 2},
+        {"expected_hash", hash},
+        {"new_string", ""}
+    });
+
+    ASSERT_TRUE(result.success) << result.output;
+    EXPECT_EQ(read_file(path), "a\nc\n");
+
+    fs::remove(path);
+}
+
+// 场景:替换的 end_line 是文件最后一行且文件本身没有尾随换行。
+// 期望:删除区间不含换行符,补换行逻辑不触发,结果同样保持无尾随换行。
+TEST(FileEditToolBehavior, RangeEditAtEofWithoutTrailingNewlineAddsNothing) {
+    auto path = temp_file(".txt");
+    write_file(path, "a\nb");
+    auto decoded = acecode::read_text_file_buffer(path.string());
+    ASSERT_TRUE(decoded.success) << decoded.error;
+    std::string hash = acecode::range_hash(decoded.buffer.text, 2, 2);
+
+    ToolResult result = run_edit({
+        {"file_path", path.string()},
+        {"start_line", 2},
+        {"end_line", 2},
+        {"expected_hash", hash},
+        {"new_string", "B"}
+    });
+
+    ASSERT_TRUE(result.success) << result.output;
+    EXPECT_EQ(read_file(path), "a\nB");
+
+    fs::remove(path);
+}
+
 #ifdef _WIN32
 TEST(FileEditToolBehavior, GbkFileEditPreservesLegacyEncoding) {
     auto path = temp_file(".txt");

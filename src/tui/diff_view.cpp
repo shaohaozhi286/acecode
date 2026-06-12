@@ -2,6 +2,7 @@
 
 #include "tool/diff_view_truncate.hpp"
 #include "tool/word_diff.hpp"
+#include "tui/theme_palette.hpp"
 
 #include <ftxui/dom/elements.hpp>
 
@@ -45,10 +46,10 @@ int visual_width_bytes(const std::string& s) {
 //   - 在黑底终端上足够有辨识度,绿/红色相清楚
 //   - 浅色不至于干扰前景代码颜色,深色用来强调词级变化
 // FTXUI 的 Color::RGB 在不支持真彩的终端会自动落到最接近的基色。
-ftxui::Color bg_added_line()    { return ftxui::Color::RGB(30, 70, 30); }
-ftxui::Color bg_added_word()    { return ftxui::Color::RGB(40, 130, 40); }
-ftxui::Color bg_removed_line()  { return ftxui::Color::RGB(90, 30, 30); }
-ftxui::Color bg_removed_word()  { return ftxui::Color::RGB(180, 40, 40); }
+ftxui::Color bg_added_line()    { return tui::theme().diff.bg_added_line; }
+ftxui::Color bg_added_word()    { return tui::theme().diff.bg_added_word; }
+ftxui::Color bg_removed_line()  { return tui::theme().diff.bg_removed_line; }
+ftxui::Color bg_removed_word()  { return tui::theme().diff.bg_removed_word; }
 
 // 把一行内容按 `available_width` 做右侧空格填充。FTXUI 的 bgcolor 只染
 // Element 覆盖范围,想要"满宽色带"必须自己把 content 补到目标宽度。
@@ -67,7 +68,7 @@ ftxui::Element render_plain_line(const DiffLine& line, int line_no_width,
 
     std::string content = pad_to_width(line.text, available_content_width);
 
-    Element gutter_el = text(gutter) | color(Color::GrayDark);
+    Element gutter_el = text(gutter) | color(tui::theme().diff.gutter);
     Element content_el;
     switch (line.kind) {
         case DiffLineKind::Added:
@@ -77,7 +78,7 @@ ftxui::Element render_plain_line(const DiffLine& line, int line_no_width,
             content_el = text(content) | bgcolor(bg_removed_line());
             break;
         case DiffLineKind::Context:
-            content_el = text(content) | color(Color::GrayLight);
+            content_el = text(content) | color(tui::theme().diff.line_text);
             break;
     }
     return hbox({gutter_el, content_el});
@@ -103,7 +104,7 @@ ftxui::Element render_word_diff_line(
     Elements row_parts;
     std::string gutter = format_gutter(
         line.kind, line.old_line_no, line.new_line_no, line_no_width);
-    row_parts.push_back(text(gutter) | color(Color::GrayDark));
+    row_parts.push_back(text(gutter) | color(tui::theme().diff.gutter));
 
     int consumed = 0;
     for (const auto& s : segs) {
@@ -197,7 +198,7 @@ ftxui::Element render_hunk(const DiffHunk& hunk,
             sep += " lines hidden";
             rows.push_back(hbox({
                 text(std::string(static_cast<size_t>(gutter_w), ' ')),
-                text(sep) | color(Color::GrayDark) | dim,
+                text(sep) | color(tui::theme().diff.gutter) | dim,
             }));
         }
 
@@ -237,7 +238,7 @@ ftxui::Element render_diff_view(
 ) {
     using namespace ftxui;
     if (hunks.empty()) {
-        return text("(no diff)") | color(Color::GrayDark) | dim;
+        return text("(no diff)") | color(tui::theme().diff.gutter) | dim;
     }
 
     int width = opts.width > 0 ? opts.width : 80;
@@ -256,7 +257,7 @@ ftxui::Element render_diff_view(
     for (size_t i = 0; i < td.hunks.size(); ++i) {
         if (i > 0) {
             // hunk 之间的分隔线
-            blocks.push_back(text(hunk_separator_glyph()) | color(Color::GrayDark) | dim);
+            blocks.push_back(text(hunk_separator_glyph()) | color(tui::theme().diff.gutter) | dim);
         }
         int hidden = (i < td.hidden_lines_per_hunk.size())
                          ? td.hidden_lines_per_hunk[i]
@@ -269,7 +270,7 @@ ftxui::Element render_diff_view(
         more += " ";
         more += std::to_string(td.hidden_hunks);
         more += " more hunks";
-        blocks.push_back(text(more) | color(Color::GrayDark) | dim);
+        blocks.push_back(text(more) | color(tui::theme().diff.gutter) | dim);
     }
 
     return vbox(std::move(blocks));
