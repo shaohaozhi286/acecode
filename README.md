@@ -243,6 +243,7 @@ The optional `acecode-desktop` target wraps the web UI in a native desktop shell
 | `/history` | List or clear per-working-directory input history. |
 | `/proxy` | Show, refresh, or override the HTTP proxy for LLM/API requests. |
 | `/websearch` | Show or switch the web-search backend. |
+| `/remote-control` (alias `/rc`) | Hand the current session over to an IM bridge. See [Remote Control](#remote-control-im-bridge). |
 | `/title` | Set or show the terminal title. |
 | `/page-step` | Toggle PgUp/PgDn between default single-line and page scrolling. |
 | `/models` | Inspect the bundled models.dev registry. |
@@ -268,6 +269,59 @@ Installed skills also register slash commands by skill name.
 
 MCP servers can add more tools at runtime.
 
+### Remote Control (IM Bridge)
+
+`/remote-control` (alias `/rc`) hands the current TUI session over to an external IM bridge: messages from your chat app become user turns in this session, and the assistant's replies are pushed back to the chat app. ACECode ships the channel and the protocol; the bridge itself (the program that hooks your IM's incoming messages and its send method) lives outside this repository.
+
+```
+┌─────────────┐  POST /rc/send {"text"}    ┌──────────────────────────┐
+│  IM bridge  │ ─────────────────────────► │ ACECode TUI              │
+│ (your hook) │   X-ACECode-RC-Token       │  loopback HTTP listener  │
+│             │ ◄───────────────────────── │  + outbound webhook POST │
+└─────────────┘  POST <outbound_url>       └──────────────────────────┘
+```
+
+**Enable it:**
+
+1. `/remote-control on` — starts a loopback HTTP listener (default port `28190`). On first use a token is generated and persisted to `~/.acecode/config.json`; the command prints the full pairing info (inbound URL, token header, body shape).
+2. `/remote-control url http://127.0.0.1:<port>/<path>` — points the outbound webhook at your bridge's endpoint (hot-applied while running, persisted to config). Without it, remote control is inbound-only.
+3. `/remote-control` — shows status, pairing info, and traffic counters. `/remote-control off` stops the listener.
+
+**Inbound — bridge → ACECode.** Forward each IM message as:
+
+```bash
+curl -X POST http://127.0.0.1:28190/rc/send \
+  -H "Content-Type: application/json" \
+  -H "X-ACECode-RC-Token: <token>" \
+  -d '{"text": "fix the failing test"}'
+```
+
+From a hooked Electron/web process, a plain `fetch` works; `?token=<token>` is accepted as an alternative to the header when adding headers is inconvenient. Responses: `200 {"ok":true}` accepted; `400` malformed body or text over 64 KB; `401` bad token; `503` remote control is off. `GET /rc/health` is a token-free liveness probe.
+
+Injected text goes through the exact same submit path as typing in the input box: it renders as a user bubble, persists to the session JSONL, queues if a turn is in flight, and is honored by `/rewind` checkpoints.
+
+**Outbound — ACECode → bridge.** At the end of each turn, every new assistant text block is POSTed to `outbound_url` as JSON:
+
+```json
+{
+  "type": "assistant_message",
+  "session_id": "<session-id>",
+  "text": "Done. The test passes now.",
+  "timestamp_ms": 1781253788164,
+  "seq": 7
+}
+```
+
+`seq` increases monotonically per session hand-over; use it for dedup/ordering. Reply with any 2xx to acknowledge. Delivery is asynchronous on a dedicated thread with a bounded queue (256 messages, oldest dropped when your bridge is unreachable); a slow or down bridge never blocks the agent. Streaming deltas are not forwarded — only final per-turn text.
+
+**Security notes:**
+
+- The listener binds `127.0.0.1` only.
+- The token is required even for loopback callers (unlike the daemon's loopback bypass): any local process must not be able to inject prompts into a session that can execute tools.
+- Tool permission prompts and `AskUserQuestion` still need to be answered in the TUI in this version.
+
+Protocol and design details: [openspec/changes/add-remote-control/design.md](openspec/changes/add-remote-control/design.md).
+
 ## Configuration Highlights
 
 Primary config lives at `~/.acecode/config.json`. User data also includes Copilot tokens, session metadata, input history, memory files, runtime daemon files, and state under `~/.acecode/`.
@@ -285,6 +339,7 @@ Important config areas:
 | `daemon`, `web` | Daemon heartbeat, service, bind, port, and static asset settings. |
 | `network` | System/manual proxy behavior, proxy probing, and TLS options. |
 | `web_search` | Web-search tool enablement and backend choice. |
+| `remote_control` | IM bridge hand-over: listener `port` (default `28190`), persisted `token`, outbound `outbound_url`. |
 | `tui.alt_screen_mode` | Terminal rendering mode; `auto` starts fullscreen, `never` restores terminal-output mode. |
 | `desktop.notifications` | Desktop shell notification behavior. |
 | `mcp_servers` | Stdio, SSE, or Streamable HTTP MCP server definitions. |

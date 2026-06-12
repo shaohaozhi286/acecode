@@ -215,18 +215,23 @@ export function FilePreviewContent({ api, cwd, path, wrapPreview, onToggleWrapPr
   }
 
   const lang = state.lang;
-  let html;
+  let codeHtml;
   if (lang && hljs.getLanguage(lang)) {
     try {
-      html = `<pre class="hljs"><code class="hljs language-${escapeHtml(lang)}">`
-           + hljs.highlight(state.text, { language: lang, ignoreIllegals: true }).value
-           + `</code></pre>`;
+      codeHtml = hljs.highlight(state.text, { language: lang, ignoreIllegals: true }).value;
     } catch {
-      html = `<pre><code>${escapeHtml(state.text)}</code></pre>`;
+      codeHtml = escapeHtml(state.text);
     }
   } else {
-    html = `<pre><code>${escapeHtml(state.text)}</code></pre>`;
+    codeHtml = escapeHtml(state.text);
   }
+  const lines = codeHtml.split('\n');
+  const gutterW = String(lines.length).length;
+  const html = `<table class="ace-line-table"><tbody>${
+    lines.map((ln, i) =>
+      `<tr><td class="ace-line-no" style="width:${gutterW + 1}ch">${i + 1}</td><td class="ace-line-code">${ln || ' '}</td></tr>`
+    ).join('')
+  }</tbody></table>`;
   const wrapTitle = wrapPreview ? '关闭自动换行' : '开启自动换行';
   const isMarkdown = state.kind === 'markdown';
   const showMarkdownRendered = isMarkdown && !markdownSource;

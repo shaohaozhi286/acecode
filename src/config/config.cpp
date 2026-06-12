@@ -668,6 +668,25 @@ AppConfig load_config() {
                 }
             }
 
+            if (j.contains("remote_control") && j["remote_control"].is_object()) {
+                const auto& rcj = j["remote_control"];
+                if (rcj.contains("port") && rcj["port"].is_number_integer()) {
+                    int v = rcj["port"].get<int>();
+                    if (v < 1 || v > 65535) {
+                        std::cerr << "[config] fatal: remote_control.port=" << v
+                                  << " out of range (1..65535)" << std::endl;
+                        LOG_ERROR("[config] remote_control.port out of range: " +
+                                  std::to_string(v));
+                        std::exit(1);
+                    }
+                    cfg.remote_control.port = v;
+                }
+                if (rcj.contains("token") && rcj["token"].is_string())
+                    cfg.remote_control.token = rcj["token"].get<std::string>();
+                if (rcj.contains("outbound_url") && rcj["outbound_url"].is_string())
+                    cfg.remote_control.outbound_url = rcj["outbound_url"].get<std::string>();
+            }
+
             // Browser bridge tools. Canonical config key is ace_browser_bridge;
             // accept ace-browser-bridge as a compatibility alias for docs/tools.
             const nlohmann::json* abj_ptr = nullptr;
@@ -1314,6 +1333,16 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
         if (cfg.web_search.timeout_ms != ws_d.timeout_ms)
             wsj["timeout_ms"] = cfg.web_search.timeout_ms;
         if (!wsj.empty()) j["web_search"] = wsj;
+
+        RemoteControlConfig rc_d;
+        nlohmann::json rcj = nlohmann::json::object();
+        if (cfg.remote_control.port != rc_d.port)
+            rcj["port"] = cfg.remote_control.port;
+        if (cfg.remote_control.token != rc_d.token)
+            rcj["token"] = cfg.remote_control.token;
+        if (cfg.remote_control.outbound_url != rc_d.outbound_url)
+            rcj["outbound_url"] = cfg.remote_control.outbound_url;
+        if (!rcj.empty()) j["remote_control"] = rcj;
 
         AceBrowserBridgeConfig ab_d;
         nlohmann::json abj = nlohmann::json::object();

@@ -93,6 +93,7 @@ import {
   DESKTOP_CONTEXT_ACTIONS,
 } from '../lib/desktopContextMenu.js';
 import {
+  createFileContext,
   normalizeComposerContext,
   selectionContextFingerprint,
   selectionContextFromWindowSelection,
@@ -1742,6 +1743,49 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     return () => window.removeEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
   }, [pinSelectionContext]);
 
+  useEffect(() => {
+    const handler = async (event) => {
+      const detail = event.detail || {};
+      const { action, target } = detail;
+      if (action !== DESKTOP_CONTEXT_ACTIONS.ADD_FILE_CONTEXT) return;
+      detail.handled = true;
+      const filePath = target?.relativePath || target?.absolutePath || '';
+      if (!filePath) {
+        toast({ kind: 'err', text: '无法获取文件路径' });
+        return;
+      }
+      const cwd = ref?.cwd || health?.cwd || '';
+      try {
+        const text = await api.readFile(cwd, filePath);
+        const context = createFileContext({
+          path: target?.absolutePath || filePath,
+          kind: 'text',
+          text,
+        });
+        if (!pinSelectionContext(context)) {
+          toast({ kind: 'err', text: '文件内容为空' });
+          return;
+        }
+        toast({ kind: 'ok', text: '已引用到聊天' });
+      } catch (err) {
+        const status = err?.status || 0;
+        const body = err?.body || err?.message || '';
+        const errorStr = typeof body === 'object' ? (body.error || '') : String(body);
+        if (status === 415 && errorStr.includes('binary')) {
+          toast({ kind: 'err', text: '无法引用二进制文件' });
+        } else if (status === 415 && errorStr.includes('too large')) {
+          toast({ kind: 'err', text: '文件过大，无法引用' });
+        } else if (status === 404) {
+          toast({ kind: 'err', text: '文件不存在' });
+        } else {
+          toast({ kind: 'err', text: '读取文件失败' });
+        }
+      }
+    };
+    window.addEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
+    return () => window.removeEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
+  }, [api, ref?.cwd, health?.cwd, pinSelectionContext]);
+
   const status = useMemo(() => {
     if (!sid) return null;
     return busy || transcriptStatus === 'running' ? 'running' : 'idle';
@@ -1913,8 +1957,9 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     () => activePreviewTab(previewTabState, previewContext),
     [previewContext, previewTabState],
   );
-  const previewPanelVisible = previewTabs.length > 0;
-  const previewPanelMaximized = sidePanelMaximized && previewPanelVisible;
+  const previewTabsOpen = previewTabs.length > 0;
+  const previewPanelVisible = previewTabsOpen && !(sidePanelCollapsed && !sidePanelMaximized);
+  const previewPanelMaximized = sidePanelMaximized && previewTabsOpen;
   const selectedChangeFile = activePreview?.type === PREVIEW_TAB_TYPES.SESSION_CHANGES
     ? activePreview.expandedFile || ''
     : '';

@@ -7,6 +7,7 @@
 #include "model_command.hpp"
 #include "models_command.hpp"
 #include "proxy_command.hpp"
+#include "remote_control_command.hpp"
 #include "resume_state_sync.hpp"
 #include "websearch_command.hpp"
 #include "../config/config.hpp"
@@ -1274,6 +1275,7 @@ void register_builtin_commands(CommandRegistry& registry) {
     register_history_command(registry);
     register_proxy_command(registry);
     register_websearch_command(registry);
+    register_remote_control_command(registry);
     registry.register_command({"browser", "Show or toggle ACE Browser Bridge tools for this session", cmd_browser});
     registry.register_command({"title", "Set or show the window title for this session", cmd_title});
     registry.register_command({"page-step", "Toggle single-line PgUp/PgDn scrolling (for terminals that swallow Alt+Arrow)", cmd_page_step});

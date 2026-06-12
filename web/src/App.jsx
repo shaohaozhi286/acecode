@@ -42,6 +42,7 @@ import {
   normalizeSidebarWidth,
   validateLayoutWidths,
 } from './lib/singleLayout.js';
+import { initInactiveSelection } from './lib/inactiveSelection.js';
 
 const SINGLE_LAYOUT_STORAGE_KEY = 'acecode.singleLayoutWidths.v1';
 
@@ -103,6 +104,7 @@ export function App() {
   const activeRefRef = useRef(activeRef);
   const navHistoryRef = useRef(navHistory);
 
+  useEffect(() => initInactiveSelection(), []);
   useEffect(() => { activeRefRef.current = activeRef; }, [activeRef]);
   useEffect(() => { navHistoryRef.current = navHistory; }, [navHistory]);
 

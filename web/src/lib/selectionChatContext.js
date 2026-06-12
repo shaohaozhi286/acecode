@@ -130,6 +130,25 @@ export function createSelectionContext({
   return context;
 }
 
+export function createFileContext({ path = '', kind = '', text = '' } = {}) {
+  const clippedText = truncateSelectionText(text);
+  const safeLineCount = selectionLineCount(clippedText);
+  const fileName = basenameForPath(path);
+  return {
+    type: SELECTION_CONTEXT_TYPE,
+    local_id: '',
+    id: '',
+    text: clippedText,
+    source: {
+      path: asString(path),
+      kind: asString(kind),
+      line_count: safeLineCount,
+    },
+    label: fileName || 'File',
+    note: safeLineCount > 0 ? `${safeLineCount} 行` : '',
+  };
+}
+
 export function normalizeComposerContext(ctx = {}) {
   if (!ctx || typeof ctx !== 'object') return null;
   if ((ctx.type || '') !== SELECTION_CONTEXT_TYPE) {

@@ -148,6 +148,11 @@ body {
 ::-webkit-scrollbar-thumb { background: rgba(150,150,150,.3); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: rgba(150,150,150,.5); }
 
+/* ── Inactive selection (CSS Custom Highlight API) ── */
+::highlight(ace-inactive-selection) {
+  background-color: rgba(var(--ace-accent-rgb), 0.14);
+}
+
 /* 阴影 utility:Tailwind v4 的 shadow-* 需要 inline 表达式,这里用 CSS 变量更灵活 */
 .ace-shadow    { box-shadow: var(--ace-shadow); }
 .ace-shadow-lg { box-shadow: var(--ace-shadow-lg); }
@@ -2246,6 +2251,46 @@ body {
   white-space: inherit;
   overflow-wrap: inherit;
   word-break: inherit;
+}
+
+.ace-line-table {
+  border-collapse: collapse;
+  border-spacing: 0;
+  width: max-content;
+  min-width: 100%;
+  margin-top: 3px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.55;
+  background: var(--ace-code-bg);
+  color: var(--ace-code-fg);
+}
+.ace-line-no {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  padding: 0 10px 0 12px;
+  text-align: right;
+  color: rgba(var(--ace-fg-mute-rgb), 0.65);
+  background: var(--ace-code-bg);
+  user-select: none;
+  vertical-align: top;
+  white-space: nowrap;
+  border-right: 1px solid rgba(var(--ace-fg-mute-rgb), 0.12);
+}
+.ace-line-code {
+  padding: 0 12px 0 10px;
+  white-space: pre;
+  vertical-align: top;
+}
+.ace-side-preview-code[data-wrap="true"] .ace-line-table {
+  width: 100%;
+  min-width: 0;
+}
+.ace-side-preview-code[data-wrap="true"] .ace-line-code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .ace-side-markdown-preview {

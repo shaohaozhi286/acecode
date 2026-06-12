@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {
+  createFileContext,
   createSelectionContext,
   formatSelectionContextLabel,
   formatSelectionContextNote,
@@ -105,4 +106,35 @@ run('non-selection contexts keep the existing browser payload shape', () => {
 run('selection text helpers count and truncate predictably', () => {
   assert.equal(selectionLineCount('a\r\nb\nc'), 3);
   assert.equal(truncateSelectionText('abcdef', 3), 'abc\n[Selection truncated]');
+});
+
+run('createFileContext builds context with file name label and no line range', () => {
+  const ctx = createFileContext({
+    path: 'C:/repo/src/main.cpp',
+    kind: 'text',
+    text: 'int main() {\n  return 0;\n}\n',
+  });
+  assert.equal(ctx.type, 'selection');
+  assert.equal(ctx.label, 'main.cpp');
+  assert.equal(ctx.note, '4 行');
+  assert.equal(ctx.source.path, 'C:/repo/src/main.cpp');
+  assert.equal(ctx.source.kind, 'text');
+  assert.equal(ctx.source.line_count, 4);
+  assert.equal(ctx.source.start_line, undefined);
+  assert.equal(ctx.source.end_line, undefined);
+  assert.equal(ctx.text, 'int main() {\n  return 0;\n}\n');
+});
+
+run('createFileContext truncates large file content', () => {
+  const big = 'x'.repeat(50000);
+  const ctx = createFileContext({ path: 'big.txt', text: big });
+  assert.ok(ctx.text.length <= 40001 + '[Selection truncated]'.length);
+  assert.ok(ctx.text.endsWith('[Selection truncated]'));
+});
+
+run('createFileContext returns empty note for empty content', () => {
+  const ctx = createFileContext({ path: 'empty.txt', text: '' });
+  assert.equal(ctx.text, '');
+  assert.equal(ctx.note, '');
+  assert.equal(ctx.label, 'empty.txt');
 });

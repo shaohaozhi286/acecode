@@ -40,6 +40,7 @@
 #include "version.hpp"
 #include "config/config.hpp"
 #include "network/proxy_resolver.hpp"
+#include "remote_control/remote_control_service.hpp"
 #include "provider/provider_factory.hpp"
 #include "provider/copilot_provider.hpp"
 #include "provider/model_context_resolver.hpp"
@@ -1922,6 +1923,10 @@ static void shutdown_after_tui_loop(TuiState& state,
 
     running = false;
 
+    // 先停 remote-control listener:teardown 期间不再接受 IM 入站,也避免
+    // 静态析构阶段才停 Crow/asio 的顺序问题。
+    acecode::rc::remote_control_service().stop();
+
     // Graceful shutdown: abort agent, unblock confirm_cv / ask_cv, then join worker
     agent_aborting = true;
     agent_loop.abort();
@@ -2740,6 +2745,26 @@ static int run_interactive_app(const CliOptions& cli,
             state.last_completion_tokens_authoritative = 0;
         }
         state.is_waiting = busy;
+        // remote-control 出站:回合结束时把游标之后新增的 assistant 文本逐条
+        // 转发给 IM 桥。挂在回合结束而不是 on_message:流式期间 assistant 气泡
+        // 原地增量更新,逐 delta 转发会把半截文本刷给 IM。游标语义见 hub 注释。
+        if (!busy) {
+            auto& rc_hub = acecode::rc::remote_control_service().hub();
+            if (rc_hub.enabled()) {
+                std::size_t cursor = rc_hub.forward_cursor();
+                // /clear 会缩短 conversation,游标越界时收口,避免越界读。
+                if (cursor > state.conversation.size()) {
+                    cursor = state.conversation.size();
+                }
+                for (std::size_t i = cursor; i < state.conversation.size(); ++i) {
+                    const auto& m = state.conversation[i];
+                    if (m.role == "assistant" && !m.is_tool) {
+                        rc_hub.notify_assistant_text(m.content);
+                    }
+                }
+                rc_hub.set_forward_cursor(state.conversation.size());
+            }
+        }
         if (!busy && !state.pending_queue.empty()) {
             std::string next_prompt = state.pending_queue.front();
             state.pending_queue.erase(state.pending_queue.begin());
@@ -2774,6 +2799,30 @@ static int run_interactive_app(const CliOptions& cli,
         screen.PostEvent(Event::Custom);
     };
     agent_loop.set_callbacks(callbacks);
+
+    // remote-control 入站:IM 桥经 loopback HTTP 送来的文本走输入框同款提交
+    // 路径(busy 排队 / 空闲直接 submit),气泡渲染与会话持久化与手输完全一致。
+    // 该回调由 RC listener 的 Crow worker 线程调用,锁内逻辑与 Enter 提交分支
+    // 保持一字不差。
+    acecode::rc::remote_control_service().hub().set_inbound_submit(
+        [&state, &agent_loop, &screen, &clamp_chat_focus](const std::string& text) {
+            std::lock_guard<std::mutex> lk(state.mu);
+            if (state.is_waiting) {
+                state.pending_queue.push_back(text);
+            } else {
+                state.conversation.push_back({"user", text, false});
+                state.chat_follow_tail = true;
+                clamp_chat_focus();
+                state.current_thinking_phrase =
+                    get_random_thinking_phrase(is_user_chinese(state));
+                state.thinking_start_time = std::chrono::steady_clock::now();
+                state.streaming_output_chars = 0;
+                state.last_completion_tokens_authoritative = 0;
+                state.is_waiting = true;
+                agent_loop.submit(text);
+            }
+            screen.PostEvent(Event::Custom);
+        });
 
     // ---- Animation ticker thread ----
     std::atomic<bool> running{true};

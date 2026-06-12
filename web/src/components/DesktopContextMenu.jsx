@@ -303,6 +303,11 @@ async function runAction(item, target, rememberedText = '', rememberedSelectionC
         toast({ kind: 'err', text: '操作不可用' });
       }
       break;
+    case DESKTOP_CONTEXT_ACTIONS.ADD_FILE_CONTEXT:
+      if (!dispatchDesktopContextAction(action, actionTarget)) {
+        toast({ kind: 'err', text: '操作不可用' });
+      }
+      break;
     case DESKTOP_CONTEXT_ACTIONS.SELECT_ALL:
       selectAllForTarget(target);
       break;

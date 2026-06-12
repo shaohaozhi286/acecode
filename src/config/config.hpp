@@ -174,6 +174,15 @@ struct WebSearchConfig {
     int timeout_ms = 8000;      // 单次 backend HTTP 请求超时
 };
 
+// TUI /remote-control 基座配置(openspec add-remote-control)。
+// token 持久化后,IM 桥跨 ACECode 重启无需重新配对;首次 /remote-control on
+// 自动生成并写回。
+struct RemoteControlConfig {
+    int port = 28190;          // loopback listener 端口(避开 daemon 默认 28080)
+    std::string token;         // 空 = 首次启用时生成并持久化
+    std::string outbound_url;  // 出站 webhook(IM 桥端点);空 = 仅入站
+};
+
 struct AceBrowserPointerCustomConfig {
     int move_duration_ms_min = 180;
     int move_duration_ms_max = 650;
@@ -287,6 +296,7 @@ struct AppConfig {
     AgentLoopConfig agent_loop;                  // agent-loop termination tunables
     NetworkConfig network;                       // proxy / TLS / abort-debug knobs
     WebSearchConfig web_search;                  // 联网搜索工具配置(参见 add-web-search-tool)
+    RemoteControlConfig remote_control;          // TUI /remote-control 基座(IM 托管)
     AceBrowserBridgeConfig ace_browser_bridge;   // browser bridge tools integration
     UpgradeConfig upgrade;                       // explicit self-upgrade command config
     TuiConfig tui;                               // 终端渲染策略(legacy fallback 等)

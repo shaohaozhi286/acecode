@@ -228,6 +228,14 @@ std::optional<std::string> pick_folder(void* parent_hwnd) {
     return result;
 }
 
+FolderPickOutcome pick_folder_outcome(void* parent_hwnd) {
+    // Windows:系统对话框必然弹出过,取消与罕见的 COM 失败折叠为 nullopt
+    // 不影响 UI 反馈,error 恒空。
+    FolderPickOutcome outcome;
+    outcome.path = pick_folder(parent_hwnd);
+    return outcome;
+}
+
 } // namespace acecode::desktop
 
 #elif !defined(__APPLE__) // POSIX stub (Linux etc.)
@@ -247,11 +255,20 @@ namespace acecode::desktop {
 
 namespace {
 
-std::optional<std::string> run_folder_picker_command(const std::vector<const char*>& argv) {
+enum class RunStatus {
+    Picked,       // 用户选中,路径有效
+    Cancelled,    // 工具弹出过但用户取消(zenity/kdialog 取消时 exit 1)
+    ToolMissing,  // execvp ENOENT:工具未安装,可以换下一个候选
+    Failed,       // 其他失败(fork/pipe/异常退出码)
+};
+
+RunStatus run_folder_picker_command(const std::vector<const char*>& argv,
+                                    std::string& out_path) {
+    out_path.clear();
     int pipefd[2] = {-1, -1};
     if (::pipe(pipefd) != 0) {
         LOG_WARN(std::string("[folder_picker] pipe failed: ") + std::strerror(errno));
-        return std::nullopt;
+        return RunStatus::Failed;
     }
 
     pid_t pid = ::fork();
@@ -259,7 +276,7 @@ std::optional<std::string> run_folder_picker_command(const std::vector<const cha
         LOG_WARN(std::string("[folder_picker] fork failed: ") + std::strerror(errno));
         ::close(pipefd[0]);
         ::close(pipefd[1]);
-        return std::nullopt;
+        return RunStatus::Failed;
     }
 
     if (pid == 0) {
@@ -288,45 +305,76 @@ std::optional<std::string> run_folder_picker_command(const std::vector<const cha
     while (::waitpid(pid, &status, 0) < 0) {
         if (errno == EINTR) continue;
         LOG_WARN(std::string("[folder_picker] waitpid failed: ") + std::strerror(errno));
-        return std::nullopt;
+        return RunStatus::Failed;
     }
 
-    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-        return std::nullopt;
+    if (!WIFEXITED(status)) return RunStatus::Failed;
+    const int code = WEXITSTATUS(status);
+    if (code == 127) {
+        // execvp ENOENT —— 工具不存在。这必须与"用户取消"区分:取消可以静默,
+        // 工具缺失必须透传到 UI(否则点"添加项目"毫无反应,用户无从排查;
+        // UOS/DDE 等发行版默认不带 zenity/kdialog,真实踩过)。
+        return RunStatus::ToolMissing;
+    }
+    if (code != 0) {
+        // zenity / kdialog 取消都是 exit 1;其他非零也按取消处理(对话框已
+        // 弹出过,用户有感知,不需要错误提示)。
+        return RunStatus::Cancelled;
     }
     while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) {
         out.pop_back();
     }
-    if (out.empty()) return std::nullopt;
-    return out;
+    if (out.empty()) return RunStatus::Cancelled;
+    out_path = std::move(out);
+    return RunStatus::Picked;
 }
 
 } // namespace
 
-std::optional<std::string> pick_folder(void* /*parent*/) {
+FolderPickOutcome pick_folder_outcome(void* /*parent*/) {
     // Linux best effort without adding a hard GTK dependency to acecode_testable.
-    // Desktop packages can depend on zenity/kdialog for a native folder dialog;
-    // absence or user cancellation both map to nullopt.
-    if (auto picked = run_folder_picker_command({
-            "zenity",
-            "--file-selection",
-            "--directory",
-            "--title=Select project folder",
-            nullptr,
-        })) {
-        return picked;
+    // Desktop packages can depend on zenity/kdialog for a native folder dialog.
+    // 注意:只有 ToolMissing 才落到下一个候选 —— 用户在 zenity 里点了取消,
+    // 不应再被弹一个 kdialog 对话框。
+    FolderPickOutcome outcome;
+    std::string path;
+
+    auto zenity = run_folder_picker_command({
+        "zenity",
+        "--file-selection",
+        "--directory",
+        "--title=Select project folder",
+        nullptr,
+    }, path);
+    if (zenity == RunStatus::Picked) {
+        outcome.path = path;
+        return outcome;
     }
-    if (auto picked = run_folder_picker_command({
-            "kdialog",
-            "--getexistingdirectory",
-            ".",
-            "--title",
-            "Select project folder",
-            nullptr,
-        })) {
-        return picked;
+    if (zenity == RunStatus::Cancelled) return outcome;
+
+    auto kdialog = run_folder_picker_command({
+        "kdialog",
+        "--getexistingdirectory",
+        ".",
+        "--title",
+        "Select project folder",
+        nullptr,
+    }, path);
+    if (kdialog == RunStatus::Picked) {
+        outcome.path = path;
+        return outcome;
     }
-    return std::nullopt;
+    if (kdialog == RunStatus::Cancelled) return outcome;
+
+    LOG_WARN("[folder_picker] no folder picker tool available (tried zenity, kdialog)");
+    outcome.error =
+        u8"未找到目录选择工具:请安装 zenity(如 sudo apt install zenity)"
+        u8"或 kdialog 后重试";
+    return outcome;
+}
+
+std::optional<std::string> pick_folder(void* parent) {
+    return pick_folder_outcome(parent).path;
 }
 
 } // namespace acecode::desktop
