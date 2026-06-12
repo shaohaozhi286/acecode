@@ -262,7 +262,8 @@ export function App() {
     setConsoleDock((prev) => ({ ...prev, open: !prev.open }));
   }, [consoleAvailable, setConsoleDock]);
   useGlobalShortcut(
-    (e) => e.key === '`' && e.ctrlKey && !e.altKey && !e.metaKey,
+    // e.code 是物理键位:中文 IME 下反引号键的 e.key 是 '·',精确匹配 key 会失效。
+    (e) => (e.code === 'Backquote' || e.key === '`') && e.ctrlKey && !e.altKey && !e.metaKey,
     toggleConsoleDock,
     [toggleConsoleDock],
   );

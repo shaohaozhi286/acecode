@@ -236,7 +236,8 @@ export function ConsoleDock({ open, height, onHeightChange, onToggle, consoleInf
     // Ctrl+` 必须放行冒泡到 window(useGlobalShortcut),否则终端聚焦时
     // toggle 失灵 — opencode 同款处理,最易踩的坑。
     term.attachCustomKeyEventHandler((ev) => {
-      if (ev.ctrlKey && !ev.altKey && !ev.metaKey && ev.key === '`') return false;
+      if (ev.ctrlKey && !ev.altKey && !ev.metaKey &&
+          (ev.code === 'Backquote' || ev.key === '`')) return false;
       return true;
     });
     term.onData((data) => {
