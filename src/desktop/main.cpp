@@ -774,6 +774,8 @@ int main(int argc, char** argv) {
             else                  ::ShowWindow(hwnd, SW_SHOW);
             ::SetForegroundWindow(hwnd);
         }
+#elif defined(__APPLE__)
+        mac_bring_window_foreground(host.native_window());
 #else
         (void)host;
 #endif

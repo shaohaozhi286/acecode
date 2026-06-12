@@ -79,4 +79,11 @@ void set_tray_session_click_handler(TraySessionClickHandler handler);
 void set_tray_new_chat_handler(TrayClickHandler handler);
 void set_tray_open_app_handler(TrayClickHandler handler);
 
+#ifdef __APPLE__
+// 激活 App 并把 NSWindow 拉前(取消最小化 + makeKeyAndOrderFront)。
+// ns_window 为 WebHost::native_window() 的返回值;nullptr 时仅激活 App。
+// 实现在 tray_icon_win.cpp(该文件在 mac 上按 ObjC++ 编译)。
+void mac_bring_window_foreground(void* ns_window);
+#endif
+
 } // namespace acecode::desktop
