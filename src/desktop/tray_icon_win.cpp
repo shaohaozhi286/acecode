@@ -793,6 +793,15 @@ void shutdown_tray_icon() {
     reset_tray_state();
 }
 
+void mac_bring_window_foreground(void* ns_window) {
+    // 菜单/状态栏回调都在主线程,可直接打 AppKit。
+    [NSApp activateIgnoringOtherApps:YES];
+    NSWindow* win = static_cast<NSWindow*>(ns_window);
+    if (!win) return;
+    if ([win isMiniaturized]) [win deminiaturize:nil];
+    [win makeKeyAndOrderFront:nil];
+}
+
 #else // other non-Linux platforms
 
 bool init_tray_icon(TrayClickHandler /*on_show*/,

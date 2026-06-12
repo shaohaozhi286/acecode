@@ -17,9 +17,25 @@
 #    define NOMINMAX
 #  endif
 #  include <windows.h>
+#else
+#  include <pwd.h>
+#  include <unistd.h>
 #endif
 
 namespace acecode {
+
+#ifndef _WIN32
+namespace {
+// GUI 启动的 daemon(桌面壳 / launchd)环境里往往没有 $SHELL;
+// 从 passwd 数据库拿用户真正的登录 shell(VS Code 同此回退)。
+std::string posix_login_shell() {
+    if (const struct passwd* pw = getpwuid(getuid()); pw && pw->pw_shell && pw->pw_shell[0]) {
+        return pw->pw_shell;
+    }
+    return {};
+}
+}  // namespace
+#endif
 
 const char* pty_backend_kind_name(PtyBackendKind kind) {
     switch (kind) {
@@ -38,6 +54,8 @@ std::string resolve_console_shell(const std::string& configured) {
     return comspec.empty() ? "cmd.exe" : comspec;
 #else
     std::string shell = getenv_utf8("SHELL");
+    if (!shell.empty()) return shell;
+    shell = posix_login_shell();
     return shell.empty() ? "/bin/sh" : shell;
 #endif
 }
@@ -100,8 +118,10 @@ ShellProbe default_shell_probe() {
     p.getenv = [](const std::string& name) { return getenv_utf8(name.c_str()); };
 #ifdef _WIN32
     p.git_install_path = []() { return win_git_install_path_from_registry(); };
+    p.login_shell = []() { return std::string{}; };
 #else
     p.git_install_path = []() { return std::string{}; };
+    p.login_shell = []() { return posix_login_shell(); };
 #endif
     return p;
 }
@@ -180,12 +200,13 @@ std::vector<ConsoleShellOption> detect_console_shells(
         out.push_back(std::move(c));
     }
 #else
-    // 默认 $SHELL。
+    // 默认 $SHELL → passwd 登录 shell → /bin/sh。
     {
         ConsoleShellOption def;
         def.id = "shell";
         def.label = "Default Shell";
-        const std::string sh = probe.getenv("SHELL");
+        std::string sh = probe.getenv("SHELL");
+        if (sh.empty() && probe.login_shell) sh = probe.login_shell();
         def.command = sh.empty() ? "/bin/sh" : sh;
         def.available = true;
         out.push_back(std::move(def));

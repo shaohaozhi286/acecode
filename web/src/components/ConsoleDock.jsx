@@ -40,8 +40,13 @@ import { toast } from './Toast.jsx';
 
 const api = createApi();
 
+// Linux 字体必须显式列出:中文 locale 的 fontconfig 常把通用 monospace 映射到
+// CJK 字体(文泉驿 / Noto CJK),拉丁字形变宽 + xterm.js 网格测量错位,光标
+// 漂移到没法打字(VS Code 同理在 Linux 上默认 'Droid Sans Mono' 而非裸 monospace)。
 const TERMINAL_FONT =
-  'ui-monospace, "Cascadia Mono", Consolas, "SF Mono", Menlo, monospace';
+  'ui-monospace, "Cascadia Mono", Consolas, "SF Mono", Menlo, ' +
+  '"DejaVu Sans Mono", "Ubuntu Mono", "Liberation Mono", "Noto Sans Mono", ' +
+  '"Droid Sans Mono", monospace';
 
 const THEMES = {
   dark: {
@@ -231,7 +236,8 @@ export function ConsoleDock({ open, height, onHeightChange, onToggle, consoleInf
     // Ctrl+` 必须放行冒泡到 window(useGlobalShortcut),否则终端聚焦时
     // toggle 失灵 — opencode 同款处理,最易踩的坑。
     term.attachCustomKeyEventHandler((ev) => {
-      if (ev.ctrlKey && !ev.altKey && !ev.metaKey && ev.key === '`') return false;
+      if (ev.ctrlKey && !ev.altKey && !ev.metaKey &&
+          (ev.code === 'Backquote' || ev.key === '`')) return false;
       return true;
     });
     term.onData((data) => {
