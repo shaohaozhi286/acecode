@@ -148,9 +148,9 @@ body {
 ::-webkit-scrollbar-thumb { background: rgba(150,150,150,.3); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: rgba(150,150,150,.5); }
 
-/* ── Inactive selection (CSS Custom Highlight API) ── */
+/* ── Inactive selection (CSS Custom Highlight API, 仅文件预览区) ── */
 ::highlight(ace-inactive-selection) {
-  background-color: rgba(var(--ace-accent-rgb), 0.14);
+  background-color: rgba(140, 140, 140, 0.28);
 }
 
 /* 阴影 utility:Tailwind v4 的 shadow-* 需要 inline 表达式,这里用 CSS 变量更灵活 */

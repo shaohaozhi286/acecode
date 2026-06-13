@@ -1422,10 +1422,15 @@ int main(int argc, char** argv) {
 
     // bridge: addWorkspace (folder picker)
     host.bind("aceDesktop_addWorkspace", [&](const std::string& /*req*/) -> std::string {
-        auto picked = pick_folder(host.native_window());
-        if (!picked) return "null";
+        auto outcome = pick_folder_outcome(host.native_window());
+        // 环境缺失选择器工具(Linux 无 zenity/kdialog)必须透传给前端 toast,
+        // 否则"添加项目"按钮表现为点了毫无反应;用户取消才返回 null 静默。
+        if (!outcome.error.empty()) {
+            return nlohmann::json{{"error", outcome.error}}.dump();
+        }
+        if (!outcome.path) return "null";
         // normalize:把反斜杠改成正斜杠,作为 cwd 持久化(与 hash 算法的输入对齐)
-        std::string cwd = *picked;
+        std::string cwd = *outcome.path;
         for (auto& c : cwd) if (c == '\\') c = '/';
         auto m = registry.register_new(proj_dir, cwd);
         nlohmann::json o;

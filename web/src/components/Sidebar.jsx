@@ -1434,6 +1434,12 @@ export function Sidebar({
         ? parseDesktopResult(await window.aceDesktop_addWorkspace())
         : await api.pickWorkspaceFolder();
       if (ws == null) return;
+      // native 报告环境问题(如 Linux 缺 zenity/kdialog):必须可见地提示,
+      // 不能与"用户取消"一样静默 —— 否则按钮表现为点了没反应。
+      if (ws.error) {
+        toast({ kind: 'err', text: '添加项目失败:' + ws.error });
+        return;
+      }
       if (!ws || !ws.hash) return;
       if (hasDesktopBridge()) {
         try { await api.registerWorkspace(ws.cwd); } catch { /* daemon 可能已入册;忽略 */ }

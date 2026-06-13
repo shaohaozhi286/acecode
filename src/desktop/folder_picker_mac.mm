@@ -72,6 +72,14 @@ std::optional<std::string> pick_folder(void* /* parent_window */) {
     return result;
 }
 
+FolderPickOutcome pick_folder_outcome(void* parent_window) {
+    // macOS:NSOpenPanel 是系统组件,不存在"选择器工具缺失"形态;
+    // 取消与选中都由 pick_folder 表达,error 恒空。
+    FolderPickOutcome outcome;
+    outcome.path = pick_folder(parent_window);
+    return outcome;
+}
+
 } // namespace acecode::desktop
 
 #endif // __APPLE__
