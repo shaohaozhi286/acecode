@@ -72,7 +72,9 @@ import {
   PREVIEW_TAB_TYPES,
   activePreviewTab,
   activatePreviewTab,
+  closeOtherPreviewTabs,
   closePreviewTab,
+  closePreviewTabsToRight,
   closeVisiblePreviewTabs,
   closeVisiblePreviewTabsConfirmationMessage,
   openFileTab,
@@ -2044,6 +2046,22 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     if (sidePanelMaximized) onToggleSidePanelMaximized?.();
   }, [onToggleSidePanelMaximized, previewScope, previewTabs.length, sid, sidePanelMaximized]);
 
+  const closeOtherPreviews = useCallback((tabKey) => {
+    setPreviewTabState((prev) => closeOtherPreviewTabs(prev, {
+      scopeKey: previewScope,
+      sessionId: sid,
+      tabKey,
+    }));
+  }, [previewScope, sid]);
+
+  const closePreviewsToRight = useCallback((tabKey) => {
+    setPreviewTabState((prev) => closePreviewTabsToRight(prev, {
+      scopeKey: previewScope,
+      sessionId: sid,
+      tabKey,
+    }));
+  }, [previewScope, sid]);
+
   const reorderPreview = useCallback((sourceKey, targetKey, placement) => {
     setPreviewTabState((prev) => reorderPreviewTab(prev, {
       scopeKey: previewScope,
@@ -2522,6 +2540,8 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
             maximized={previewPanelMaximized}
             onActivateTab={activatePreview}
             onCloseTab={closePreview}
+            onCloseOthers={closeOtherPreviews}
+            onCloseToRight={closePreviewsToRight}
             onCloseAll={closePreviewPanel}
             onReorderTab={reorderPreview}
             onToggleMaximize={onToggleSidePanelMaximized}

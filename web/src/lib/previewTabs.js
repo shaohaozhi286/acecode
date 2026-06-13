@@ -278,6 +278,39 @@ export function closeVisiblePreviewTabsConfirmationMessage(tabCount = 0) {
   return `关闭预览面板会关闭当前预览区域的全部 ${count} 个标签页。是否继续？`;
 }
 
+export function closeOtherPreviewTabs(state, { scopeKey = '', sessionId = '', tabKey = '' } = {}) {
+  if (!tabKey) return state || {};
+  const source = state && typeof state === 'object' ? state : {};
+  const visible = visiblePreviewTabs(source, { scopeKey, sessionId });
+  const closedKeys = visible.filter((tab) => tab.key !== tabKey).map((tab) => tab.key);
+  if (closedKeys.length === 0) return source;
+  let next = source;
+  for (const key of closedKeys) {
+    next = closePreviewTab(next, { scopeKey, sessionId, tabKey: key });
+  }
+  return {
+    ...next,
+    activeTabByView: {
+      ...(next.activeTabByView || {}),
+      [viewKey(scopeKey, sessionId)]: tabKey,
+    },
+  };
+}
+
+export function closePreviewTabsToRight(state, { scopeKey = '', sessionId = '', tabKey = '' } = {}) {
+  if (!tabKey) return state || {};
+  const source = state && typeof state === 'object' ? state : {};
+  const visible = visiblePreviewTabs(source, { scopeKey, sessionId });
+  const index = visible.findIndex((tab) => tab.key === tabKey);
+  if (index < 0 || index >= visible.length - 1) return source;
+  const closedKeys = visible.slice(index + 1).map((tab) => tab.key);
+  let next = source;
+  for (const key of closedKeys) {
+    next = closePreviewTab(next, { scopeKey, sessionId, tabKey: key });
+  }
+  return next;
+}
+
 export function activatePreviewTab(state, { scopeKey = '', sessionId = '', tabKey = '' } = {}) {
   if (!tabKey) return state || {};
   const source = state && typeof state === 'object' ? state : {};

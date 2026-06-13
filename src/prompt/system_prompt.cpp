@@ -137,9 +137,33 @@ std::string build_system_prompt(const ToolExecutor& tools, const std::string& cw
 
     oss << "# Tone and style\n\n"
         << "- Be concise and direct.\n"
-        << "- Lead with the answer or action, not the reasoning.\n"
-        << "- Give short progress updates at natural milestones when doing multi-step work.\n"
         << "- Do not use emojis unless the user explicitly requests them.\n\n";
+
+    oss << "# Sharing progress updates\n\n"
+        << "During multi-step work, you will produce many assistant messages between "
+        << "tool calls. Keep these **extremely short** — 10 words or fewer. Their "
+        << "only purpose is to let the user know what you are doing right now:\n\n"
+        << "  Good: \"Checking the test results.\"\n"
+        << "  Good: \"Found the issue, fixing now.\"\n"
+        << "  Bad:  \"I've analyzed the error in src/foo.cpp and determined that the "
+        << "root cause is a null pointer dereference on line 42. Let me fix that.\"\n\n"
+        << "Do NOT put conclusions, explanations, reasoning, lists of changes, or "
+        << "any substantive content into mid-turn messages. If you discover something "
+        << "important, hold it — put it in your final message after all tool work "
+        << "is complete.\n\n";
+
+    oss << "# Presenting your work and final message\n\n"
+        << "Your final message in a turn — the one right before you stop or call "
+        << "`task_complete` — is the only message the user will read in full. "
+        << "Everything before it is collapsed into a brief summary in the UI.\n\n"
+        << "Therefore:\n"
+        << "- Put ALL substantive content in the final message: what you found, "
+        << "what you changed, what the user needs to know, and any remaining items.\n"
+        << "- Lead with the answer or action, not the reasoning.\n"
+        << "- If you call `task_complete`, the assistant message immediately before "
+        << "it is the one the user sees. Make that message the complete summary.\n"
+        << "- Never split important information across multiple mid-turn messages "
+        << "and assume the user will read all of them — they won't.\n\n";
 
     oss << "# Environment\n\n"
         << "- OS: " << get_os_name() << "\n"

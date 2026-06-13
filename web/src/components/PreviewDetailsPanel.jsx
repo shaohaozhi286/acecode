@@ -3,6 +3,7 @@ import { usePreference } from '../lib/usePreference.js';
 import { clsx } from '../lib/format.js';
 import { PREVIEW_TAB_TYPES } from '../lib/previewTabs.js';
 import { scrollLeftForVisibleTab } from '../lib/previewTabScroll.js';
+import { DESKTOP_CONTEXT_ACTION_EVENT, DESKTOP_CONTEXT_ACTIONS } from '../lib/desktopContextMenu.js';
 import { FilePreviewContent } from './FilePreviewContent.jsx';
 import { SessionChangeDetails } from './ChangeReview.jsx';
 import { FileTypeIcon, VsIcon } from './Icon.jsx';
@@ -170,6 +171,8 @@ export function PreviewDetailsPanel({
   maximized = false,
   onActivateTab,
   onCloseTab,
+  onCloseOthers,
+  onCloseToRight,
   onCloseAll,
   onReorderTab,
   onToggleMaximize,
@@ -185,6 +188,34 @@ export function PreviewDetailsPanel({
     validateBooleanPreference,
   );
   const active = activeTab || tabs[0] || null;
+
+  // 预览标签右键菜单复用全局 DesktopContextMenu:菜单项命中 close_* action 后,
+  // 由 DesktopContextMenu 通过 DESKTOP_CONTEXT_ACTION_EVENT 派发回来,这里执行关闭逻辑。
+  useEffect(() => {
+    const handler = (event) => {
+      const detail = event.detail || {};
+      const { action, target } = detail;
+      if (target?.type !== 'preview-tab') return;
+      const tabKey = target.key;
+      if (!tabKey) return;
+      if (action === DESKTOP_CONTEXT_ACTIONS.CLOSE_PREVIEW_TAB) {
+        detail.handled = true;
+        onCloseTab?.(tabKey);
+      } else if (action === DESKTOP_CONTEXT_ACTIONS.CLOSE_OTHER_PREVIEW_TABS) {
+        detail.handled = true;
+        onCloseOthers?.(tabKey);
+      } else if (action === DESKTOP_CONTEXT_ACTIONS.CLOSE_PREVIEW_TABS_TO_RIGHT) {
+        detail.handled = true;
+        onCloseToRight?.(tabKey);
+      } else if (action === DESKTOP_CONTEXT_ACTIONS.CLOSE_ALL_PREVIEW_TABS) {
+        detail.handled = true;
+        onCloseAll?.();
+      }
+    };
+    window.addEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
+    return () => window.removeEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
+  }, [onCloseAll, onCloseOthers, onCloseTab, onCloseToRight]);
+
   const renderedBody = useMemo(() => {
     if (!active) return null;
     if (active.type === PREVIEW_TAB_TYPES.SESSION_CHANGES) {
@@ -504,10 +535,11 @@ export function PreviewDetailsPanel({
       <div className="ace-preview-details-tabs">
         <div className="ace-preview-details-tab-scroll-shell" onWheel={handleTabWheel}>
           <div ref={tabListRef} className="ace-preview-details-tab-list" role="tablist" aria-label="预览标签页">
-            {tabs.map((tab) => {
+            {tabs.map((tab, tabIndex) => {
               const selected = active.key === tab.key;
               const label = tabLabel(tab);
               const isFileTab = tab.type === PREVIEW_TAB_TYPES.FILE;
+              const tabAbsolutePath = isFileTab ? ((tab.cwd || cwd || '') + '/' + (tab.path || '')) : '';
               return (
                 <button
                   key={tab.key}
@@ -515,6 +547,12 @@ export function PreviewDetailsPanel({
                   role="tab"
                   aria-selected={selected}
                   data-preview-tab-key={tab.key}
+                  data-desktop-preview-tab-key={tab.key}
+                  data-desktop-preview-tab-type={isFileTab ? 'file' : 'session-changes'}
+                  data-desktop-preview-tab-path={isFileTab ? (tab.path || '') : undefined}
+                  data-desktop-preview-tab-absolute-path={isFileTab ? tabAbsolutePath : undefined}
+                  data-desktop-preview-tab-has-others={tabs.length > 1 ? 'true' : 'false'}
+                  data-desktop-preview-tab-has-right={tabIndex < tabs.length - 1 ? 'true' : 'false'}
                   className={clsx(
                     'ace-preview-details-tab',
                     selected && 'is-active',

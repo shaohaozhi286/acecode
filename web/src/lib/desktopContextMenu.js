@@ -16,6 +16,10 @@ export const DESKTOP_CONTEXT_ACTIONS = Object.freeze({
   COPY_WORKSPACE_PATH: 'copy_workspace_path',
   REMOVE_WORKSPACE: 'remove_workspace',
   PREVIEW_FILE: 'preview_file',
+  CLOSE_PREVIEW_TAB: 'close_preview_tab',
+  CLOSE_OTHER_PREVIEW_TABS: 'close_other_preview_tabs',
+  CLOSE_PREVIEW_TABS_TO_RIGHT: 'close_preview_tabs_to_right',
+  CLOSE_ALL_PREVIEW_TABS: 'close_all_preview_tabs',
   COPY_RELATIVE_PATH: 'copy_relative_path',
   COPY_ABSOLUTE_PATH: 'copy_absolute_path',
   ADD_FILE_CONTEXT: 'add_file_context',
@@ -54,6 +58,7 @@ export const SESSION_TARGET_SELECTOR = '[data-desktop-session-id]';
 export const WORKSPACE_TARGET_SELECTOR = '[data-desktop-workspace-id]';
 export const FILE_TARGET_SELECTOR = '[data-desktop-file-path]';
 export const PREVIEW_TARGET_SELECTOR = '[data-desktop-preview-path]';
+export const PREVIEW_TAB_TARGET_SELECTOR = '[data-desktop-preview-tab-key]';
 export const REVIEW_TARGET_SELECTOR = '[data-desktop-review-kind]';
 export const MESSAGE_TARGET_SELECTOR = '[data-desktop-message-role]';
 export const TOOL_TARGET_SELECTOR = '[data-desktop-tool-id]';
@@ -135,8 +140,22 @@ export function buildDesktopContextMenuItems({
   messageTarget = null,
   toolTarget = null,
   attachmentTarget = null,
+  previewTabTarget = null,
 } = {}) {
   const items = [];
+
+  if (!editable && previewTabTarget) {
+    addAction(items, DESKTOP_CONTEXT_ACTIONS.CLOSE_PREVIEW_TAB, previewTabTarget, { group: GROUPS.OBJECT });
+    addAction(items, DESKTOP_CONTEXT_ACTIONS.CLOSE_OTHER_PREVIEW_TABS, previewTabTarget, { group: GROUPS.OBJECT, enabled: previewTabTarget.hasOthers });
+    addAction(items, DESKTOP_CONTEXT_ACTIONS.CLOSE_PREVIEW_TABS_TO_RIGHT, previewTabTarget, { group: GROUPS.OBJECT, enabled: previewTabTarget.hasRight });
+    addAction(items, DESKTOP_CONTEXT_ACTIONS.CLOSE_ALL_PREVIEW_TABS, previewTabTarget, { group: GROUPS.GENERIC });
+    if (previewTabTarget.tabType === 'file') {
+      addAction(items, DESKTOP_CONTEXT_ACTIONS.COPY_ABSOLUTE_PATH, previewTabTarget, { group: GROUPS.FILE, enabled: !!previewTabTarget.absolutePath });
+      addAction(items, DESKTOP_CONTEXT_ACTIONS.COPY_RELATIVE_PATH, previewTabTarget, { group: GROUPS.FILE, enabled: !!previewTabTarget.relativePath });
+      addAction(items, DESKTOP_CONTEXT_ACTIONS.OPEN_IN_EXPLORER, { path: previewTabTarget.absolutePath, kind: 'file' }, { group: GROUPS.CONTENT, enabled: !!previewTabTarget.absolutePath });
+    }
+    return withMenuSeparators(items);
+  }
 
   if (!editable && hasSelection && previewTarget &&
       (previewTarget.kind === 'text' || previewTarget.kind === 'markdown')) {
@@ -355,6 +374,22 @@ export function previewTargetFromElement(target) {
   };
 }
 
+export function previewTabTargetFromElement(target) {
+  const el = closest(target, PREVIEW_TAB_TARGET_SELECTOR);
+  if (!el) return null;
+  const key = getAttr(el, 'data-desktop-preview-tab-key', 'desktopPreviewTabKey');
+  if (!key) return null;
+  return {
+    type: 'preview-tab',
+    key,
+    tabType: getAttr(el, 'data-desktop-preview-tab-type', 'desktopPreviewTabType') || 'file',
+    relativePath: getAttr(el, 'data-desktop-preview-tab-path', 'desktopPreviewTabPath'),
+    absolutePath: getAttr(el, 'data-desktop-preview-tab-absolute-path', 'desktopPreviewTabAbsolutePath'),
+    hasOthers: boolAttr(el, 'data-desktop-preview-tab-has-others', 'desktopPreviewTabHasOthers'),
+    hasRight: boolAttr(el, 'data-desktop-preview-tab-has-right', 'desktopPreviewTabHasRight'),
+  };
+}
+
 export function reviewTargetFromElement(target) {
   const el = closest(target, REVIEW_TARGET_SELECTOR);
   if (!el) return null;
@@ -423,6 +458,7 @@ export function contextTargetsFromElement(target) {
     workspaceTarget: workspaceTargetFromElement(target),
     fileTarget: fileTargetFromElement(target),
     previewTarget: previewTargetFromElement(target),
+    previewTabTarget: previewTabTargetFromElement(target),
     reviewTarget: reviewTargetFromElement(target),
     messageTarget: messageTargetFromElement(target),
     toolTarget: toolTargetFromElement(target),
