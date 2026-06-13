@@ -70,6 +70,9 @@ struct TuiState {
         // 非空时 TUI 走彩色 diff 视图;为空(老会话或非编辑类工具)走灰色 fold 路径。
         // 同样不写入 session JSONL。
         std::optional<std::vector<DiffHunk>> hunks;
+        // Runtime-only image links produced by show_image tool.
+        // Each entry is {display_name, absolute_path}.
+        std::vector<std::pair<std::string, std::string>> image_links;
     };
 
     std::vector<Message> conversation;

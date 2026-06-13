@@ -123,6 +123,7 @@
 #include "tui/input_history_navigation.hpp"
 #include "utils/base64.hpp"
 #include "utils/clipboard.hpp"
+#include "utils/open_file.hpp"
 #include "utils/drag_scroll.hpp"
 #include "utils/terminal_title.hpp"
 #include "session/attachment_store.hpp"
@@ -2431,6 +2432,20 @@ static int run_interactive_app(const CliOptions& cli,
             if (it->role == "tool_result" && !it->summary.has_value()) {
                 it->summary = result.summary;
                 it->hunks = result.hunks;
+                if (result.attachments.is_array()) {
+                    for (const auto& att : result.attachments) {
+                        if (!att.is_object()) continue;
+                        const std::string kind = att.value("kind", "");
+                        const std::string mime = att.value("mime_type", "");
+                        if (kind == "image" || mime.rfind("image/", 0) == 0) {
+                            std::string path = att.value("path", "");
+                            std::string name = att.value("name", "");
+                            if (!path.empty())
+                                it->image_links.emplace_back(
+                                    name.empty() ? path : name, path);
+                        }
+                    }
+                }
                 break;
             }
         }
@@ -4930,6 +4945,20 @@ static int run_interactive_app(const CliOptions& cli,
             }
             // Fall through to end-of-line if nothing to toggle.
         }
+        // Ctrl+O: open the first image of the focused tool_result row with the
+        // system default image viewer (xdg-open / open / ShellExecute).
+        if (event == Event::Special(std::string(1, '\x0F'))) {
+            std::lock_guard<std::mutex> lk(state.mu);
+            if (state.chat_focus_index >= 0 &&
+                state.chat_focus_index < static_cast<int>(state.conversation.size())) {
+                const auto& msg = state.conversation[state.chat_focus_index];
+                if (msg.role == "tool_result" && !msg.image_links.empty()) {
+                    acecode::platform_open_file(msg.image_links[0].second);
+                    return true;
+                }
+            }
+            return false;
+        }
         if (is_end_event(event)) {
             std::lock_guard<std::mutex> lk(state.mu);
             if (state.resume_picker_active) return true;
@@ -5390,6 +5419,17 @@ static int run_interactive_app(const CliOptions& cli,
                         diff_el | flex,
                     }));
 
+                    // Image links from show_image tool
+                    for (const auto& [img_name, img_path] : msg.image_links) {
+                        (void)img_path;
+                        rows.push_back(hbox({
+                            text("      ") | color(tui::theme().ui.text_dim),
+                            text("\xE2\x8A\x9E ") | color(tui::theme().ui.accent),
+                            text(img_name) | color(tui::theme().ui.text_muted) | flex,
+                            text("  Ctrl+O: open") | dim | color(tui::theme().ui.text_dim),
+                        }));
+                    }
+
                     auto block = vbox(std::move(rows));
                     if (focused_message) {
                         block = block | focus;
@@ -5461,6 +5501,17 @@ static int run_interactive_app(const CliOptions& cli,
                             pos = nl + 1;
                             ++shown;
                         }
+                    }
+
+                    // Image links from show_image tool
+                    for (const auto& [img_name, img_path] : msg.image_links) {
+                        (void)img_path;
+                        rows.push_back(hbox({
+                            text("      ") | color(tui::theme().ui.text_dim),
+                            text("\xE2\x8A\x9E ") | color(tui::theme().ui.accent),
+                            text(img_name) | color(tui::theme().ui.text_muted) | flex,
+                            text("  Ctrl+O: open") | dim | color(tui::theme().ui.text_dim),
+                        }));
                     }
 
                     auto block = vbox(std::move(rows));

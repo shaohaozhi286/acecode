@@ -21,6 +21,7 @@ inline std::string tool_icon(const std::string& tool_id) {
         if (tool_id == "task_complete") return "D"; // Done
         if (tool_id == "TodoWrite") return "T";
         if (tool_id == "skill_view") return "S";
+        if (tool_id == "show_image") return "I";
         return "*";
     }
     // Default: Unicode glyphs. Kept simple (single-codepoint arrows / glyphs)
@@ -32,6 +33,7 @@ inline std::string tool_icon(const std::string& tool_id) {
     if (tool_id == "task_complete") return "\xE2\x9C\x93"; // check mark (done)
     if (tool_id == "TodoWrite") return "\xE2\x9C\x93"; // check mark (todo)
     if (tool_id == "skill_view") return "*";
+    if (tool_id == "show_image") return "\xE2\x8A\x9E"; // circled plus / image indicator
     return "*";
 }
 
