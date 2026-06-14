@@ -65,6 +65,15 @@ nlohmann::json build_agent_progress_payload(
     return payload;
 }
 
+std::string build_session_scratch_dir(const std::string& cwd,
+                                      SessionManager* session_manager) {
+    if (cwd.empty() || !session_manager) return {};
+    const std::string session_id = session_manager->ensure_active_session_id();
+    if (session_id.empty()) return {};
+    return path_to_utf8(path_from_utf8(cwd) / ".acecode" / "tmp" /
+                        ("session-" + session_id));
+}
+
 std::string provider_error_kind_to_json_string(ProviderErrorKind kind) {
     switch (kind) {
     case ProviderErrorKind::None:          return "none";
@@ -1721,6 +1730,7 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
             tool_ctx.cwd = cwd_;
             tool_ctx.abort_flag = &abort_requested_;
             tool_ctx.session_manager = session_manager_;
+            tool_ctx.scratch_dir = build_session_scratch_dir(cwd_, session_manager_);
             tool_ctx.preserve_full_output = true;
             tool_ctx.account_goal_usage = [this]() {
                 account_goal_usage(0, true);
@@ -2342,6 +2352,8 @@ void AgentLoop::run_shell(const std::string& command) {
         ToolContext tool_ctx;
         tool_ctx.cwd = cwd_;
         tool_ctx.abort_flag = &abort_requested_;
+        tool_ctx.session_manager = session_manager_;
+        tool_ctx.scratch_dir = build_session_scratch_dir(cwd_, session_manager_);
         if (callbacks_.on_tool_progress_update) {
             auto update_cb = callbacks_.on_tool_progress_update;
             tool_ctx.stream = [prog, update_cb](const std::string& chunk) {

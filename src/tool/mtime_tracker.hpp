@@ -28,15 +28,15 @@ class MtimeTracker {
 public:
     using clock = std::filesystem::file_time_type;
 
-    enum class FullReadStatus {
+    enum class ReadBaselineStatus {
         Ok,
         NotRead,
-        PartialRead,
+        UnsafeRead,
         ExternallyModified
     };
 
-    struct FullReadCheck {
-        FullReadStatus status = FullReadStatus::Ok;
+    struct ReadBaselineCheck {
+        ReadBaselineStatus status = ReadBaselineStatus::Ok;
         bool content_unchanged_after_mtime_change = false;
     };
 
@@ -56,8 +56,10 @@ public:
     // Returns false if no record exists or mtime is unchanged.
     bool was_externally_modified(const std::string& path) const;
 
-    // Require a prior full read before editing and compare stored bytes when mtimes differ.
-    FullReadCheck validate_full_read_for_edit(
+    // Require a prior non-lossy read baseline before editing. Full reads keep content
+    // so timestamp-only churn can still be accepted; ranged reads are accepted only
+    // while the recorded mtime is unchanged.
+    ReadBaselineCheck validate_read_baseline_for_edit(
         const std::string& path,
         const std::string& current_content
     ) const;

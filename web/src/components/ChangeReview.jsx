@@ -8,6 +8,7 @@ import {
 } from '../lib/desktopContextMenu.js';
 import { summarizeChangeGroups } from '../lib/sessionChanges.js';
 import { reconcileOpenFiles, restoredScrollTop } from '../lib/changeReviewStability.js';
+import { normalizeTreePath } from '../lib/fileTreeChangeStatus.js';
 import { copyTextToSystemClipboard } from '../lib/systemClipboard.js';
 import { clsx } from '../lib/format.js';
 import { VsIcon } from './Icon.jsx';
@@ -23,6 +24,13 @@ function normalizedSummary(groups, summary) {
   return summary && typeof summary === 'object'
     ? summary
     : summarizeChangeGroups(groups);
+}
+
+function matchingGroupFile(groups, file) {
+  const target = normalizeTreePath(file);
+  if (!target) return '';
+  const group = safeGroups(groups).find((item) => normalizeTreePath(item?.file) === target);
+  return group?.file || '';
 }
 
 async function copyDiffText(text, okText) {
@@ -123,10 +131,13 @@ export function ChangeCompactList({
   summary,
   cwd = '',
   selectedFile = '',
+  selectedFileRevision = 0,
   onOpenFile,
 }) {
   const list = safeGroups(groups);
   const changeSummary = normalizedSummary(list, summary);
+  const listRef = useRef(null);
+  const selectedNormalizedFile = normalizeTreePath(selectedFile);
 
   useEffect(() => {
     const handler = (event) => {
@@ -141,6 +152,18 @@ export function ChangeCompactList({
     window.addEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
     return () => window.removeEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
   }, [onOpenFile]);
+
+  useLayoutEffect(() => {
+    if (!selectedNormalizedFile) return;
+    const el = listRef.current;
+    if (!el) return;
+    const row = Array.from(el.querySelectorAll('[data-change-compact-file]'))
+      .find((node) => normalizeTreePath(node.getAttribute('data-change-compact-file')) === selectedNormalizedFile);
+    if (!row) return;
+    const listRect = el.getBoundingClientRect();
+    const rowRect = row.getBoundingClientRect();
+    el.scrollTop = Math.max(0, el.scrollTop + rowRect.top - listRect.top);
+  }, [selectedNormalizedFile, selectedFileRevision]);
 
   if (!changeSummary.hasChanges) {
     return (
@@ -166,14 +189,16 @@ export function ChangeCompactList({
         </div>
         <ChangeTotals summary={changeSummary} compact />
       </div>
-      <div className="ace-change-compact-list">
+      <div className="ace-change-compact-list" ref={listRef}>
         {list.map((group) => {
           const pathParts = splitPath(group.file);
-          const selected = selectedFile === group.file;
+          const selected = selectedNormalizedFile
+            && normalizeTreePath(group.file) === selectedNormalizedFile;
           return (
             <button
               key={group.file}
               type="button"
+              data-change-compact-file={group.file}
               data-desktop-review-kind="file"
               data-desktop-review-file={group.file || undefined}
               data-desktop-review-absolute-path={cwd ? joinWorkspacePath(cwd, group.file) : undefined}
@@ -424,22 +449,36 @@ export function ChangeReviewPanel({
   title = '审查',
   dataRegion = 'side-panel',
   initialExpandedFileRevision = 0,
+  onSelectFile,
 }) {
   const list = safeGroups(groups);
   const changeSummary = normalizedSummary(list, summary);
+  const initialOpenFile = matchingGroupFile(list, initialExpandedFile)
+    || (initialExpandedFile ? '' : (list[0]?.file || ''));
   const [openFiles, setOpenFiles] = useState(() => new Set(
-    initialExpandedFile ? [initialExpandedFile] : (list[0]?.file ? [list[0].file] : []),
+    initialOpenFile ? [initialOpenFile] : [],
   ));
+  const [scrollRequest, setScrollRequest] = useState(0);
   const panelRef = useRef(null);
   // 面板太窄时双栏 diff 列宽被挤到 ~150px,文本断行严重不可读;低于阈值切回 line-by-line。
   // 默认 line-by-line 是因为 ResizeObserver 第一帧前没数据,先保守渲染避免初始闪烁。
   const [outputFormat, setOutputFormat] = useState('line-by-line');
 
   useEffect(() => {
-    // 集合内容不变时 reconcileOpenFiles 返回原 Set 身份,setState 经 Object.is
-    // 直接跳过 —— 流式期间(groups 引用已被上游按签名稳定)不再每帧多渲染一次。
-    setOpenFiles((prev) => reconcileOpenFiles(prev, list.map((g) => g.file)));
-  }, [list]);
+    setOpenFiles((prev) => {
+      // 集合内容不变时保留原 Set 身份,setState 经 Object.is
+      // 直接跳过 —— 流式期间(groups 引用已被上游按签名稳定)不再每帧多渲染一次。
+      const files = list.map((g) => g.file);
+      if (!initialExpandedFile) return reconcileOpenFiles(prev, files);
+      const previous = prev instanceof Set ? prev : new Set();
+      const valid = new Set(files.filter(Boolean));
+      const next = new Set([...previous].filter((file) => valid.has(file)));
+      if (next.size === previous.size && [...next].every((file) => previous.has(file))) {
+        return previous;
+      }
+      return next;
+    });
+  }, [initialExpandedFile, list]);
 
   // 滚动位置兜底:diff 内容替换让浏览器钳制了 scrollTop 时(内容瞬时塌缩
   // 会直接钳到 0),在 paint 与钳制 scroll 事件派发之前恢复到用户位置。
@@ -451,6 +490,19 @@ export function ChangeReviewPanel({
   const suppressScrollRecordRef = useRef(false);
   const pendingScrollFileRef = useRef('');
   const syncedExpandedRequestRef = useRef('');
+
+  const requestFileFocus = (file) => {
+    if (!file) return;
+    pendingScrollFileRef.current = file;
+    setOpenFiles((prev) => {
+      const current = prev instanceof Set ? prev : new Set();
+      if (current.has(file)) return current;
+      const next = new Set(current);
+      next.add(file);
+      return next;
+    });
+    setScrollRequest((prev) => prev + 1);
+  };
   useLayoutEffect(() => {
     const el = fileListRef.current;
     if (!el) return undefined;
@@ -471,17 +523,17 @@ export function ChangeReviewPanel({
     };
   }, [list]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const requestKey = `${initialExpandedFile}\u0000${initialExpandedFileRevision}`;
     if (!initialExpandedFile) {
       syncedExpandedRequestRef.current = '';
       return;
     }
     if (syncedExpandedRequestRef.current === requestKey) return;
-    if (!list.some((group) => group.file === initialExpandedFile)) return;
+    const file = matchingGroupFile(list, initialExpandedFile);
+    if (!file) return;
     syncedExpandedRequestRef.current = requestKey;
-    pendingScrollFileRef.current = initialExpandedFile;
-    setOpenFiles(new Set([initialExpandedFile]));
+    requestFileFocus(file);
   }, [initialExpandedFile, initialExpandedFileRevision, list]);
 
   useLayoutEffect(() => {
@@ -493,11 +545,9 @@ export function ChangeReviewPanel({
     if (!target) return;
     pendingScrollFileRef.current = '';
     suppressScrollRecordRef.current = true;
-    try {
-      target.scrollIntoView({ block: 'nearest' });
-    } catch {
-      target.scrollIntoView(false);
-    }
+    const listRect = el.getBoundingClientRect();
+    const targetRect = target.getBoundingClientRect();
+    el.scrollTop = Math.max(0, el.scrollTop + targetRect.top - listRect.top);
     savedScrollTopRef.current = el.scrollTop;
     const frame = window.requestAnimationFrame(() => {
       suppressScrollRecordRef.current = false;
@@ -506,7 +556,7 @@ export function ChangeReviewPanel({
       window.cancelAnimationFrame(frame);
       suppressScrollRecordRef.current = false;
     };
-  }, [openFiles]);
+  }, [openFiles, scrollRequest]);
 
   useEffect(() => {
     const el = panelRef.current;
@@ -559,13 +609,17 @@ export function ChangeReviewPanel({
     );
   }
 
-  const toggleFile = (file) => {
-    setOpenFiles((prev) => {
-      const next = new Set(prev);
-      if (next.has(file)) next.delete(file);
-      else next.add(file);
-      return next;
-    });
+  const toggleFile = (file, currentlyOpen) => {
+    if (currentlyOpen) {
+      setOpenFiles((prev) => {
+        const next = new Set(prev instanceof Set ? prev : []);
+        next.delete(file);
+        return next;
+      });
+      return;
+    }
+    onSelectFile?.(file);
+    requestFileFocus(file);
   };
 
   return (
@@ -607,7 +661,7 @@ export function ChangeReviewPanel({
                 open={open}
                 selected={open}
                 cwd={cwd}
-                onClick={() => toggleFile(group.file)}
+                onClick={() => toggleFile(group.file, open)}
               />
               {open && (
                 <div className="ace-review-diff-scroll">
@@ -628,6 +682,7 @@ export function SessionChangeDetails({
   cwd = '',
   expandedFile = '',
   expandedFileRevision = 0,
+  onSelectFile,
 }) {
   return (
     <ChangeReviewPanel
@@ -636,6 +691,7 @@ export function SessionChangeDetails({
       cwd={cwd}
       initialExpandedFile={expandedFile}
       initialExpandedFileRevision={expandedFileRevision}
+      onSelectFile={onSelectFile}
       title="会话变更"
       dataRegion="preview-panel"
     />

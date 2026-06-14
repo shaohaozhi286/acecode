@@ -49,35 +49,41 @@ bool MtimeTracker::was_externally_modified(const std::string& path) const {
     }
 }
 
-MtimeTracker::FullReadCheck MtimeTracker::validate_full_read_for_edit(
+MtimeTracker::ReadBaselineCheck MtimeTracker::validate_read_baseline_for_edit(
     const std::string& path,
     const std::string& current_content
 ) const {
     std::lock_guard<std::mutex> lk(mu_);
     auto it = records_.find(path);
     if (it == records_.end()) {
-        return {FullReadStatus::NotRead, false};
-    }
-    if (it->second.partial) {
-        return {FullReadStatus::PartialRead, false};
+        return {ReadBaselineStatus::NotRead, false};
     }
 
     try {
         auto current_mtime = std::filesystem::last_write_time(path_from_utf8(path));
         if (current_mtime == it->second.mtime) {
-            return {FullReadStatus::Ok, false};
+            if (it->second.metadata && it->second.metadata->lossy) {
+                return {ReadBaselineStatus::UnsafeRead, false};
+            }
+            return {ReadBaselineStatus::Ok, false};
+        }
+
+        if (it->second.partial) {
+            return it->second.metadata && it->second.metadata->lossy
+                ? ReadBaselineCheck{ReadBaselineStatus::UnsafeRead, false}
+                : ReadBaselineCheck{ReadBaselineStatus::ExternallyModified, false};
         }
 
         // Windows/同步盘/杀毒软件可能只刷新 mtime。全量读过的文件再比一次内容,
         // 内容没变就允许继续写,避免 agent 陷入反复重读/重试。
         if (it->second.content.has_value() && *it->second.content == current_content) {
-            return {FullReadStatus::Ok, true};
+            return {ReadBaselineStatus::Ok, true};
         }
     } catch (...) {
         // Fall through to the conservative conflict path.
     }
 
-    return {FullReadStatus::ExternallyModified, false};
+    return {ReadBaselineStatus::ExternallyModified, false};
 }
 
 void MtimeTracker::record_write(const std::string& path) {

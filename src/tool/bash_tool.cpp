@@ -3,6 +3,7 @@
 #include "utils/logger.hpp"
 #include "utils/encoding.hpp"
 #include "utils/stream_processing.hpp"
+#include "utils/utf8_path.hpp"
 #include <nlohmann/json.hpp>
 #include <string>
 #include <vector>
@@ -11,6 +12,9 @@
 #include <filesystem>
 #include <thread>
 #include <atomic>
+#include <set>
+#include <system_error>
+#include <cstdlib>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -27,6 +31,109 @@ namespace acecode {
 
 static constexpr int DEFAULT_TIMEOUT_MS = 120000;    // 2 minutes
 static constexpr size_t MAX_OUTPUT_SIZE = 100 * 1024; // 100KB
+
+static std::string ascii_lower_copy(std::string value) {
+    for (char& c : value) {
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    }
+    return value;
+}
+
+static bool is_root_script_extension(const std::filesystem::path& path) {
+    std::string ext = ascii_lower_copy(path_to_utf8(path.extension()));
+    return ext == ".py" || ext == ".ps1" || ext == ".js" ||
+           ext == ".bat" || ext == ".cmd";
+}
+
+static std::set<std::string> list_root_script_files(const std::filesystem::path& root) {
+    std::set<std::string> out;
+    std::error_code ec;
+    if (root.empty() || !std::filesystem::is_directory(root, ec) || ec) return out;
+    for (const auto& entry : std::filesystem::directory_iterator(root, ec)) {
+        if (ec) break;
+        if (!entry.is_regular_file(ec) || ec) {
+            ec.clear();
+            continue;
+        }
+        const auto path = entry.path();
+        if (is_root_script_extension(path)) {
+            out.insert(path_to_utf8(path.filename()));
+        }
+    }
+    return out;
+}
+
+static std::vector<std::string> new_root_script_files(
+    const std::set<std::string>& before,
+    const std::set<std::string>& after) {
+    std::vector<std::string> created;
+    for (const auto& name : after) {
+        if (before.find(name) == before.end()) created.push_back(name);
+    }
+    return created;
+}
+
+static void append_root_script_warning(ToolResult& result,
+                                       const std::vector<std::string>& created,
+                                       const std::string& scratch_dir) {
+    if (created.empty()) return;
+    if (!result.output.empty() && result.output.back() != '\n') result.output += "\n";
+    result.output += "[Warning] Shell command created script file(s) in the workspace root: ";
+    for (size_t i = 0; i < created.size(); ++i) {
+        if (i > 0) result.output += ", ";
+        result.output += created[i];
+    }
+    result.output += ". Temporary helper scripts should be written under ACECODE_TMPDIR";
+    if (!scratch_dir.empty()) result.output += " (" + scratch_dir + ")";
+    result.output += ".";
+}
+
+#ifdef _WIN32
+static std::wstring env_name_prefix(const std::wstring& name) {
+    return name + L"=";
+}
+
+static bool starts_with_env_name_ci(const std::wstring& value,
+                                    const std::wstring& prefix) {
+    if (value.size() < prefix.size()) return false;
+    for (size_t i = 0; i < prefix.size(); ++i) {
+        wchar_t a = value[i];
+        wchar_t b = prefix[i];
+        if (a >= L'A' && a <= L'Z') a = static_cast<wchar_t>(a - L'A' + L'a');
+        if (b >= L'A' && b <= L'Z') b = static_cast<wchar_t>(b - L'A' + L'a');
+        if (a != b) return false;
+    }
+    return true;
+}
+
+static std::vector<wchar_t> build_environment_block_with_var(
+    const std::wstring& name,
+    const std::wstring& value) {
+    std::vector<std::wstring> entries;
+    const std::wstring prefix = env_name_prefix(name);
+    LPWCH env = GetEnvironmentStringsW();
+    if (env) {
+        for (LPWCH p = env; *p != L'\0'; ) {
+            std::wstring entry(p);
+            const size_t entry_len = entry.size();
+            if (!starts_with_env_name_ci(entry, prefix)) {
+                entries.push_back(std::move(entry));
+            }
+            p += entry_len + 1;
+        }
+        FreeEnvironmentStringsW(env);
+    }
+    entries.push_back(prefix + value);
+
+    std::vector<wchar_t> block;
+    for (const auto& entry : entries) {
+        block.insert(block.end(), entry.begin(), entry.end());
+        block.push_back(L'\0');
+    }
+    block.push_back(L'\0');
+    return block;
+}
+#endif
 
 // Normalize Windows CRLF to LF before feeding the line state machine, so the
 // \r does not clobber `current_line` mid-way through a proper newline.
@@ -112,6 +219,24 @@ static ToolResult execute_bash(const std::string& arguments_json, const ToolCont
         return r;
     }
 
+    std::error_code cwd_ec;
+    const std::filesystem::path root_for_script_warning = cwd_path.empty()
+        ? std::filesystem::current_path(cwd_ec)
+        : cwd_path;
+    const auto root_scripts_before = list_root_script_files(root_for_script_warning);
+
+    std::string scratch_dir = ctx.scratch_dir;
+    if (!scratch_dir.empty()) {
+        std::error_code ec;
+        std::filesystem::create_directories(path_from_utf8(scratch_dir), ec);
+        if (ec) {
+            ToolResult r{"[Error] Failed to create ACECODE_TMPDIR: " + scratch_dir +
+                         " (" + ec.message() + ")", false};
+            r.summary = make_summary(command, 0, 0, -1, false, false, false, false);
+            return r;
+        }
+    }
+
     // Shared streaming state across both OS branches.
     std::string full_output;
     std::string current_line;
@@ -171,12 +296,20 @@ static ToolResult execute_bash(const std::string& arguments_json, const ToolCont
     }
     const wchar_t* cwd_ptr = wide_cwd.empty() ? nullptr : wide_cwd.c_str();
 
+    std::vector<wchar_t> env_block;
+    void* env_ptr = nullptr;
+    if (!scratch_dir.empty()) {
+        env_block = build_environment_block_with_var(
+            L"ACECODE_TMPDIR", utf8_to_wide(scratch_dir));
+        env_ptr = env_block.data();
+    }
+
     BOOL ok = CreateProcessW(
         nullptr,
         full_cmd_buffer.data(),
         nullptr, nullptr, TRUE,
-        CREATE_NO_WINDOW,
-        nullptr,
+        CREATE_NO_WINDOW | (env_ptr ? CREATE_UNICODE_ENVIRONMENT : 0),
+        env_ptr,
         cwd_ptr,
         &si, &pi
     );
@@ -302,6 +435,9 @@ static ToolResult execute_bash(const std::string& arguments_json, const ToolCont
             if (chdir(cwd.c_str()) != 0) {
                 _exit(127);
             }
+        }
+        if (!scratch_dir.empty()) {
+            setenv("ACECODE_TMPDIR", scratch_dir.c_str(), 1);
         }
 
         execl("/bin/sh", "sh", "-c", command.c_str(), nullptr);
@@ -448,6 +584,10 @@ static ToolResult execute_bash(const std::string& arguments_json, const ToolCont
         ToolResult r{full_output, false};
         r.summary = make_summary(command, duration_ms, raw_bytes, -1, false,
                                  was_truncated, true, false);
+        append_root_script_warning(r,
+            new_root_script_files(root_scripts_before,
+                                  list_root_script_files(root_for_script_warning)),
+            scratch_dir);
         return r;
     }
     if (timed_out) {
@@ -455,6 +595,10 @@ static ToolResult execute_bash(const std::string& arguments_json, const ToolCont
             std::to_string(timeout_ms / 1000) + " seconds.", false};
         r.summary = make_summary(command, duration_ms, raw_bytes, -1, false,
                                  was_truncated, false, true);
+        append_root_script_warning(r,
+            new_root_script_files(root_scripts_before,
+                                  list_root_script_files(root_for_script_warning)),
+            scratch_dir);
         return r;
     }
 
@@ -467,6 +611,10 @@ static ToolResult execute_bash(const std::string& arguments_json, const ToolCont
     r.summary = make_summary(command, duration_ms, raw_bytes,
                              static_cast<int>(exit_code), is_ok,
                              was_truncated, false, false);
+    append_root_script_warning(r,
+        new_root_script_files(root_scripts_before,
+                              list_root_script_files(root_for_script_warning)),
+        scratch_dir);
     return r;
 }
 

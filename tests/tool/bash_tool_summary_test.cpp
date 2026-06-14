@@ -13,6 +13,7 @@
 #include "tool/bash_tool.hpp"
 #include "tool/tool_executor.hpp"
 #include "utils/encoding.hpp"
+#include "utils/utf8_path.hpp"
 
 #include <nlohmann/json.hpp>
 #include <chrono>
@@ -39,6 +40,15 @@ bool has_metric(const acecode::ToolSummary& s, const std::string& k) {
         if (kv.first == k) return true;
     }
     return false;
+}
+
+std::filesystem::path unique_temp_dir(const std::string& name) {
+    const auto unique = std::to_string(
+        std::chrono::steady_clock::now().time_since_epoch().count());
+    auto root = std::filesystem::temp_directory_path() / (name + "_" + unique);
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    return root;
 }
 
 } // namespace
@@ -75,6 +85,88 @@ TEST(BashToolSummary, FailedExitCodeAppearsInMetrics) {
     ASSERT_TRUE(r.summary.has_value());
     EXPECT_FALSE(r.success);
     EXPECT_EQ(get_metric(*r.summary, "exit"), "2");
+}
+
+TEST(BashToolSummary, ExposesAcecodeTmpdirWhenScratchDirProvided) {
+    ToolImpl tool = create_bash_tool();
+    auto root = unique_temp_dir("acecode_bash_scratch_env");
+    auto scratch = root / ".acecode" / "tmp" / "session-test";
+
+#ifdef _WIN32
+    const std::string command = "echo %ACECODE_TMPDIR%";
+#else
+    const std::string command = "printf '%s' \"$ACECODE_TMPDIR\"";
+#endif
+
+    ToolContext ctx;
+    ctx.cwd = acecode::path_to_utf8(root);
+    ctx.scratch_dir = acecode::path_to_utf8(scratch);
+    ToolResult r = tool.execute(nlohmann::json({
+        {"command", command},
+        {"cwd", ctx.cwd},
+    }).dump(), ctx);
+
+    EXPECT_TRUE(r.success) << r.output;
+    EXPECT_TRUE(std::filesystem::is_directory(scratch));
+    EXPECT_NE(r.output.find(ctx.scratch_dir), std::string::npos);
+
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+}
+
+TEST(BashToolSummary, WarnsWhenRootScriptFileIsCreated) {
+    ToolImpl tool = create_bash_tool();
+    auto root = unique_temp_dir("acecode_bash_root_script_warning");
+    auto scratch = root / ".acecode" / "tmp" / "session-test";
+
+#ifdef _WIN32
+    const std::string command = "echo print(1)> temp_helper.py";
+#else
+    const std::string command = "printf 'print(1)\\n' > temp_helper.py";
+#endif
+
+    ToolContext ctx;
+    ctx.cwd = acecode::path_to_utf8(root);
+    ctx.scratch_dir = acecode::path_to_utf8(scratch);
+    ToolResult r = tool.execute(nlohmann::json({
+        {"command", command},
+        {"cwd", ctx.cwd},
+    }).dump(), ctx);
+
+    EXPECT_TRUE(r.success) << r.output;
+    EXPECT_NE(r.output.find("[Warning]"), std::string::npos);
+    EXPECT_NE(r.output.find("temp_helper.py"), std::string::npos);
+    EXPECT_NE(r.output.find("ACECODE_TMPDIR"), std::string::npos);
+
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+}
+
+TEST(BashToolSummary, DoesNotWarnWhenScriptIsCreatedInScratchDir) {
+    ToolImpl tool = create_bash_tool();
+    auto root = unique_temp_dir("acecode_bash_scratch_script");
+    auto scratch = root / ".acecode" / "tmp" / "session-test";
+
+#ifdef _WIN32
+    const std::string command = "echo print(1)> \"%ACECODE_TMPDIR%\\helper.py\"";
+#else
+    const std::string command = "printf 'print(1)\\n' > \"$ACECODE_TMPDIR/helper.py\"";
+#endif
+
+    ToolContext ctx;
+    ctx.cwd = acecode::path_to_utf8(root);
+    ctx.scratch_dir = acecode::path_to_utf8(scratch);
+    ToolResult r = tool.execute(nlohmann::json({
+        {"command", command},
+        {"cwd", ctx.cwd},
+    }).dump(), ctx);
+
+    EXPECT_TRUE(r.success) << r.output;
+    EXPECT_TRUE(std::filesystem::exists(scratch / "helper.py"));
+    EXPECT_EQ(r.output.find("[Warning]"), std::string::npos);
+
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
 }
 
 // 场景 2b: summary.object 对超长中文命令做预览时,必须按 UTF-8 码点边界

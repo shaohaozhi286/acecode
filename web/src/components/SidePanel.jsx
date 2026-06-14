@@ -238,7 +238,15 @@ function FileTree({ api, cwd, treeCache, setTreeCache, expandedDirs, setExpanded
 // ────────────────────────────────────────────────────────────
 // 审查 tab — 聚合 messages.hunks
 // ────────────────────────────────────────────────────────────
-function ChangesList({ messages, groups, summary, cwd, selectedFile, onOpenFile }) {
+function ChangesList({
+  messages,
+  groups,
+  summary,
+  cwd,
+  selectedFile,
+  selectedFileRevision = 0,
+  onOpenFile,
+}) {
   const fallbackGroups = useMemo(() => aggregateHunksFromMessages(messages || []), [messages]);
   const reviewGroups = groups || fallbackGroups;
   const reviewSummary = summary || summarizeChangeGroups(reviewGroups);
@@ -248,6 +256,7 @@ function ChangesList({ messages, groups, summary, cwd, selectedFile, onOpenFile 
       summary={reviewSummary}
       cwd={cwd}
       selectedFile={selectedFile}
+      selectedFileRevision={selectedFileRevision}
       onOpenFile={onOpenFile}
     />
   );
@@ -271,6 +280,7 @@ export function SidePanel({
   onOpenFilePreview,
   onOpenSessionChangePreview,
   selectedChangeFile = '',
+  selectedChangeFileRevision = 0,
 }) {
   const api = useMemo(() => createApi(sessionRef || null), [sessionRef?.port, sessionRef?.token, sessionRef?.workspaceHash]);
   const [activeTab,    setActiveTab]    = useState('files');
@@ -350,6 +360,11 @@ export function SidePanel({
     if (!reviewRequest) return;
     setActiveTab('changes');
   }, [reviewRequest]);
+
+  useEffect(() => {
+    if (!selectedChangeFile) return;
+    setActiveTab('changes');
+  }, [selectedChangeFile, selectedChangeFileRevision]);
 
   const onPickFile = useCallback((entry) => {
     setSelectedPath(entry.path);
@@ -458,6 +473,7 @@ export function SidePanel({
             summary={effectiveChangeSummary}
             cwd={cwd}
             selectedFile={selectedChangeFile}
+            selectedFileRevision={selectedChangeFileRevision}
             onOpenFile={onOpenSessionChangePreview}
           />
         )}

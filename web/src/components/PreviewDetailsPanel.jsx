@@ -177,6 +177,7 @@ export function PreviewDetailsPanel({
   onCloseAll,
   onReorderTab,
   onToggleMaximize,
+  onSelectChangeFile,
 }) {
   const tabListRef = useRef(null);
   const tabDragRef = useRef(null);
@@ -228,6 +229,7 @@ export function PreviewDetailsPanel({
           cwd={cwd}
           expandedFile={active.expandedFile || ''}
           expandedFileRevision={active.expandedFileRevision || 0}
+          onSelectFile={onSelectChangeFile}
         />
       );
     }
@@ -240,7 +242,7 @@ export function PreviewDetailsPanel({
         onToggleWrapPreview={() => setWrapPreview((prev) => !prev)}
       />
     );
-  }, [active, api, changeGroups, changeSummary, cwd, setWrapPreview, wrapPreview]);
+  }, [active, api, changeGroups, changeSummary, cwd, onSelectChangeFile, setWrapPreview, wrapPreview]);
 
   const handleTabWheel = useCallback((event) => {
     const el = tabListRef.current;

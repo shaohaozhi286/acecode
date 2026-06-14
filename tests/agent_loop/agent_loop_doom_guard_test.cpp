@@ -253,11 +253,11 @@ TEST(AgentLoopDoomGuard, FailureKeywordsStillTriggerExactRepeatGuard) {
     EXPECT_TRUE(guard.maybe_guard(duplicate).has_value());
 }
 
-// 回归测试:old_string 编辑因 "File was only partially read" 失败时,错误信息引导的
-// 恢复路径是"补一次全量 file_read 后原样重试"——重试参数与上一次完全相同。修复前这类
+// 回归测试:old_string 编辑因 "File has not been read yet" 失败时,错误信息引导的
+// 恢复路径是"补一次 file_read 后原样重试"——重试参数与上一次完全相同。修复前这类
 // 前置条件失败被计入 attempts,同参重试直接被 exact-repeat 拦截,正确的恢复路径被堵死。
 // 期望:此类自带恢复路径的前置条件失败不计入 doom 记录,同参重试放行。
-TEST(AgentLoopDoomGuard, PartiallyReadPreconditionFailureDoesNotArmGuard) {
+TEST(AgentLoopDoomGuard, UnreadPreconditionFailureDoesNotArmGuard) {
     AgentLoopDoomGuard guard;
     ToolCall call = make_call("call-1", "file_edit",
         R"({"file_path":"src/i18n/en.js","old_string":"old","new_string":"new"})");
@@ -265,7 +265,7 @@ TEST(AgentLoopDoomGuard, PartiallyReadPreconditionFailureDoesNotArmGuard) {
     ToolResult precondition;
     precondition.success = false;
     precondition.output =
-        "[Error] File was only partially read. Read the full file with file_read "
+        "[Error] File has not been read yet. Read the target file with file_read "
         "before editing it: src/i18n/en.js";
     guard.record_result(call, precondition);
 

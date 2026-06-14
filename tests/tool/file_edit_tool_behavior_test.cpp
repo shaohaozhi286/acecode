@@ -55,7 +55,7 @@ ToolResult run_edit(const nlohmann::json& args) {
 
 } // namespace
 
-TEST(FileEditToolBehavior, RejectsExistingFileWithoutFullRead) {
+TEST(FileEditToolBehavior, RejectsExistingFileWithoutReadBaseline) {
     auto path = temp_file(".txt");
     write_file(path, "alpha\nbeta\n");
 
@@ -72,7 +72,7 @@ TEST(FileEditToolBehavior, RejectsExistingFileWithoutFullRead) {
     fs::remove(path);
 }
 
-TEST(FileEditToolBehavior, RejectsPartialReadBeforeEdit) {
+TEST(FileEditToolBehavior, AllowsPartialReadBaselineBeforeOldStringEdit) {
     auto path = temp_file(".txt");
     write_file(path, "alpha\nbeta\ngamma\n");
 
@@ -90,9 +90,37 @@ TEST(FileEditToolBehavior, RejectsPartialReadBeforeEdit) {
         {"new_string", "delta"}
     });
 
+    ASSERT_TRUE(result.success) << result.output;
+    EXPECT_EQ(read_file(path), "alpha\ndelta\ngamma\n");
+
+    fs::remove(path);
+}
+
+TEST(FileEditToolBehavior, RejectsStalePartialReadBeforeOldStringEdit) {
+    auto path = temp_file(".txt");
+    write_file(path, "alpha\nbeta\ngamma\n");
+
+    ToolImpl read_tool = create_file_read_tool();
+    ToolResult read_result = read_tool.execute(nlohmann::json({
+        {"file_path", path.string()},
+        {"start_line", 1},
+        {"end_line", 1}
+    }).dump(), ToolContext{});
+    ASSERT_TRUE(read_result.success);
+
+    auto mtime = fs::last_write_time(path);
+    write_file(path, "alpha\nchanged\ngamma\n");
+    fs::last_write_time(path, mtime + std::chrono::seconds(3));
+
+    ToolResult result = run_edit({
+        {"file_path", path.string()},
+        {"old_string", "changed"},
+        {"new_string", "delta"}
+    });
+
     EXPECT_FALSE(result.success);
-    EXPECT_NE(result.output.find("only partially read"), std::string::npos);
-    EXPECT_EQ(read_file(path), "alpha\nbeta\ngamma\n");
+    EXPECT_NE(result.output.find("modified externally"), std::string::npos);
+    EXPECT_EQ(read_file(path), "alpha\nchanged\ngamma\n");
 
     fs::remove(path);
 }
@@ -520,9 +548,9 @@ TEST(FileEditToolBehavior, LossyReadDoesNotEnableLaterEdit) {
     EXPECT_NE(read_result.output.find("lossy=\"true\""), std::string::npos);
     EXPECT_EQ(read_result.output.find("range_hash=\"sha256:"), std::string::npos);
 
-    auto read_check = acecode::MtimeTracker::instance().validate_full_read_for_edit(
+    auto read_check = acecode::MtimeTracker::instance().validate_read_baseline_for_edit(
         path.string(), std::string(u8"中文\n") + std::string("\xEF\xBF\xBD", 3));
-    EXPECT_EQ(read_check.status, acecode::MtimeTracker::FullReadStatus::PartialRead);
+    EXPECT_EQ(read_check.status, acecode::MtimeTracker::ReadBaselineStatus::UnsafeRead);
 
     ToolResult result = run_edit({
         {"file_path", path.string()},
@@ -531,7 +559,7 @@ TEST(FileEditToolBehavior, LossyReadDoesNotEnableLaterEdit) {
     });
 
     EXPECT_FALSE(result.success);
-    EXPECT_NE(result.output.find("too ambiguous to edit safely"), std::string::npos);
+    EXPECT_NE(result.output.find("not safe enough"), std::string::npos);
     EXPECT_EQ(read_file(path), original);
 
     fs::remove(path);

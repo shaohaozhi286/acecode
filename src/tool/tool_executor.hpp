@@ -83,6 +83,11 @@ struct ToolContext {
     // restore the pre-write state.
     std::function<void(const std::string& path)> track_file_write_before;
 
+    // Per-session scratch directory for temporary helper files. AgentLoop
+    // injects `.acecode/tmp/session-<id>` under the workspace when a session id
+    // is available. Shell tools expose this as ACECODE_TMPDIR.
+    std::string scratch_dir;
+
     // Optional async channel for AskUserQuestion. Daemon path injects an impl
     // backed by AskUserQuestionPrompter; TUI path keeps it null and registers
     // the TUI-flavored AskUserQuestion factory which talks to TuiState directly.

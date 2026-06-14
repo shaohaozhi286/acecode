@@ -519,6 +519,10 @@ static ToolResult execute_file_edit(const std::string& arguments_json, const Too
     if (file_exists) {
         auto read_result = read_text_file_buffer(file_path);
         if (!read_result.success) {
+            auto metadata = MtimeTracker::instance().read_metadata(file_path);
+            if (metadata && metadata->lossy) {
+                return ToolResult{ToolErrors::file_read_not_safe_for_edit(file_path), false};
+            }
             return ToolResult{read_result.error, false};
         }
         buffer = std::move(read_result.buffer);
@@ -576,15 +580,15 @@ static ToolResult execute_file_edit(const std::string& arguments_json, const Too
                                    buffer.metadata, ctx);
     }
 
-    const auto read_check = MtimeTracker::instance().validate_full_read_for_edit(file_path, buffer.text);
+    const auto read_check = MtimeTracker::instance().validate_read_baseline_for_edit(file_path, buffer.text);
     switch (read_check.status) {
-        case MtimeTracker::FullReadStatus::Ok:
+        case MtimeTracker::ReadBaselineStatus::Ok:
             break;
-        case MtimeTracker::FullReadStatus::NotRead:
+        case MtimeTracker::ReadBaselineStatus::NotRead:
             return ToolResult{ToolErrors::file_not_read_for_edit(file_path), false};
-        case MtimeTracker::FullReadStatus::PartialRead:
-            return ToolResult{ToolErrors::file_partially_read_for_edit(file_path), false};
-        case MtimeTracker::FullReadStatus::ExternallyModified:
+        case MtimeTracker::ReadBaselineStatus::UnsafeRead:
+            return ToolResult{ToolErrors::file_read_not_safe_for_edit(file_path), false};
+        case MtimeTracker::ReadBaselineStatus::ExternallyModified:
             return ToolResult{ToolErrors::external_modification(file_path), false};
     }
 
@@ -619,7 +623,7 @@ ToolImpl create_file_edit_tool() {
     ToolDef def;
     def.name = "file_edit";
     def.description = "Edit a file by replacing an exact string with a new string. "
-                      "Read existing non-empty files with file_read before editing. "
+                      "Read existing non-empty files with file_read before editing; a non-lossy ranged read is enough to establish the edit baseline. "
                       "Prefer start_line/end_line/expected_hash from file_read metadata for precise range edits. "
                       "When complete range arguments are present, old_string is treated only as redundant current-range validation. "
                       "The old_string must appear exactly once unless replace_all is true. "

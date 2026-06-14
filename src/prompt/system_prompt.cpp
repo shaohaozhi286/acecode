@@ -60,7 +60,8 @@ static std::string get_shell_guidance() {
            "- Sequencing: `&&` (run if previous succeeded) and `||` (run if previous failed) work. "
            "Use `&` for unconditional sequencing (not `;`).\n"
            "- Lookups: `where X` (not `which`), `dir` (not `ls`), `type` (not `cat`).\n"
-           "- For complex scripts, prefer dropping a `.bat` or `.ps1` via `file_write` and "
+           "- For temporary scripts, use `%ACECODE_TMPDIR%` when it is available; do not drop helper scripts in the workspace root.\n"
+           "- For complex persistent scripts, prefer creating a real `.bat` or `.ps1` via `file_write` and "
            "running that, rather than fighting cmd.exe's quoting in a one-liner.\n\n";
 #else
     return "";
@@ -127,10 +128,11 @@ std::string build_system_prompt(const ToolExecutor& tools, const std::string& cw
         << "- Always use absolute file paths with file tools.\n"
         << "- Built-in file tools decode supported text to UTF-8/LF internally and preserve existing encoding/line endings on write.\n"
         << "- Prefer file_read with start_line/end_line, then file_edit with start_line/end_line/expected_hash for precise edits.\n"
-        << "- Before old_string edits on an existing non-empty file, read the full file first; partial reads are only enough for range edits with expected_hash.\n"
+        << "- Before old_string edits on an existing non-empty file, read the target file first. A non-lossy partial read establishes a baseline; stale files still require re-reading.\n"
         << "- When using old_string, include enough context to uniquely identify the target, or set replace_all=true when every occurrence should change.\n"
         << "- Use file_edit with empty old_string only to create a missing file or fill a blank file.\n"
-        << "- If file_edit reports an encoding or old_string failure, retry with file_read metadata/range edit instead of bypassing with shell, Python, or PowerShell writes.\n"
+        << "- If file_edit reports an encoding, read-baseline, or old_string failure, retry with file_read metadata/range edit instead of bypassing with shell, Python, or PowerShell writes.\n"
+        << "- Temporary helper scripts belong under ACECODE_TMPDIR, which resolves to .acecode/tmp/session-<id> for active sessions. Do not create throwaway scripts in the workspace root.\n"
         << "- Tool results wrapped in <persisted-output> are previews; read the saved path with file_read if you need the full output.\n"
         << "- Avoid interactive shell programs.\n"
         << "- If multiple independent tool calls are needed, make them in parallel.\n\n";

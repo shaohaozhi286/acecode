@@ -45,13 +45,13 @@ public:
     }
 
     static std::string file_not_read_for_edit(const std::string& path) {
-        return "[Error] File has not been read yet. Read the full file with file_read "
+        return "[Error] File has not been read yet. Read the target file with file_read "
                "before editing it: " + path;
     }
 
-    static std::string file_partially_read_for_edit(const std::string& path) {
-        return "[Error] File was only partially read. Read the full file with file_read "
-               "before editing it: " + path;
+    static std::string file_read_not_safe_for_edit(const std::string& path) {
+        return "[Error] File read is not safe enough to edit. Re-read the target file "
+               "with non-lossy text decoding before editing it: " + path;
     }
 
     static std::string no_changes_to_make() {

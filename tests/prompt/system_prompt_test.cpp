@@ -263,6 +263,15 @@ TEST_F(SystemPromptTest, TaskCompletionProtocolAppears) {
               std::string::npos);
 }
 
+TEST_F(SystemPromptTest, PromptAllowsPartialReadBaselinesAndGuidesScratchScripts) {
+    acecode::ToolExecutor tools;
+    std::string out = acecode::build_system_prompt(tools, temp_home.string());
+
+    EXPECT_NE(out.find("A non-lossy partial read establishes a baseline"), std::string::npos);
+    EXPECT_NE(out.find("ACECODE_TMPDIR"), std::string::npos);
+    EXPECT_EQ(out.find("partial reads are only enough for range edits"), std::string::npos);
+}
+
 // 场景:Windows 平台 build prompt 必须注入 "# Shell Command Guidance (Windows)" 段。
 // 回归测试:用户在 acecode 里让 LLM 跑 `mkdir -p testfolder1`,因为 bash_tool
 // 在 Windows 上走 cmd.exe /c,cmd.exe 的 mkdir 不认 -p,把 -p 当成第二个目录名,

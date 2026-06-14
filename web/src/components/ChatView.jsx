@@ -1965,6 +1965,9 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   const selectedChangeFile = activePreview?.type === PREVIEW_TAB_TYPES.SESSION_CHANGES
     ? activePreview.expandedFile || ''
     : '';
+  const selectedChangeFileRevision = activePreview?.type === PREVIEW_TAB_TYPES.SESSION_CHANGES
+    ? activePreview.expandedFileRevision || 0
+    : 0;
   const contentLayout = useMemo(() => solveSingleContentLayout({
     contentWidth: layoutWidth,
     sidePanelWidth,
@@ -2545,6 +2548,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
             onCloseAll={closePreviewPanel}
             onReorderTab={reorderPreview}
             onToggleMaximize={onToggleSidePanelMaximized}
+            onSelectChangeFile={openSessionChangePreview}
           />
         </div>
       )}
@@ -2584,6 +2588,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
               onOpenFilePreview={openFilePreview}
               onOpenSessionChangePreview={openSessionChangePreview}
               selectedChangeFile={selectedChangeFile}
+              selectedChangeFileRevision={selectedChangeFileRevision}
             />
           </div>
         </>
