@@ -1,5 +1,7 @@
 #include "skills_tool.hpp"
 
+#include "../config/config.hpp"
+#include "../skills/skill_init.hpp"
 #include "../skills/skill_registry.hpp"
 #include "../utils/logger.hpp"
 
@@ -7,6 +9,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <memory>
 #include <set>
 
 namespace acecode {
@@ -61,9 +64,19 @@ bool json_array_contains(const nlohmann::json& arr, const std::string& value) {
     return false;
 }
 
+std::unique_ptr<SkillRegistry> workspace_registry_for_context(
+    const AppConfig* config,
+    const ToolContext& ctx) {
+    if (!config || ctx.cwd.empty()) return nullptr;
+    auto scoped = std::make_unique<SkillRegistry>();
+    initialize_skill_registry(*scoped, *config, ctx.cwd);
+    return scoped;
+}
+
 } // namespace
 
-ToolImpl create_skills_list_tool(SkillRegistry& registry) {
+ToolImpl create_skills_list_tool(SkillRegistry& registry,
+                                 const AppConfig* config) {
     ToolDef def;
     def.name = "skills_list";
     def.description = "List available skills (name, description, category). "
@@ -80,7 +93,8 @@ ToolImpl create_skills_list_tool(SkillRegistry& registry) {
         {"required", nlohmann::json::array()}
     });
 
-    auto execute = [&registry](const std::string& arguments_json, const ToolContext& /*ctx*/) -> ToolResult {
+    auto execute = [&registry, config](const std::string& arguments_json,
+                                       const ToolContext& ctx) -> ToolResult {
         std::string requested_category;
         try {
             if (!arguments_json.empty()) {
@@ -91,8 +105,10 @@ ToolImpl create_skills_list_tool(SkillRegistry& registry) {
             return ToolResult{"[Error] Failed to parse tool arguments.", false};
         }
 
+        auto scoped_registry = workspace_registry_for_context(config, ctx);
+        SkillRegistry& active_registry = scoped_registry ? *scoped_registry : registry;
         const std::string normalized_category = trim_ascii(requested_category);
-        const auto all_skills = registry.list();
+        const auto all_skills = active_registry.list();
         const auto available_categories = category_array_from_skills(all_skills);
 
         const bool has_category_filter = !normalized_category.empty();

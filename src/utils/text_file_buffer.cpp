@@ -27,6 +27,22 @@ namespace {
 
 constexpr unsigned int kCodePageGbk = 936;
 constexpr unsigned int kCodePageGb18030 = 54936;
+constexpr size_t kStrongUtf8InvalidByteCap = 4;
+
+struct Utf8ScanStats {
+    size_t total_bytes = 0;
+    size_t valid_non_ascii_codepoints = 0;
+    size_t invalid_bytes = 0;
+    size_t invalid_spans = 0;
+};
+
+struct LossyDecodeCandidate {
+    bool success = true;
+    std::string utf8;
+    TextEncoding encoding = TextEncoding::Utf8;
+    size_t replacement_count = 0;
+    int preference = 0;
+};
 
 bool starts_with_bom(const std::string& bytes,
                      unsigned char a,
@@ -176,6 +192,59 @@ bool next_utf8_codepoint(const std::string& s, size_t& i, unsigned int& cp) {
     return true;
 }
 
+Utf8ScanStats scan_utf8_bytes(const std::string& bytes) {
+    Utf8ScanStats stats;
+    stats.total_bytes = bytes.size();
+    for (size_t i = 0; i < bytes.size();) {
+        const size_t start = i;
+        unsigned int cp = 0;
+        if (next_utf8_codepoint(bytes, i, cp)) {
+            if (cp > 0x7F) {
+                ++stats.valid_non_ascii_codepoints;
+            }
+            continue;
+        }
+        ++stats.invalid_bytes;
+        ++stats.invalid_spans;
+        i = start + 1;
+    }
+    return stats;
+}
+
+bool strongly_looks_like_damaged_utf8(const Utf8ScanStats& stats, bool has_utf8_bom) {
+    if (stats.invalid_bytes == 0) return false;
+    if (!has_utf8_bom && stats.valid_non_ascii_codepoints == 0) return false;
+    if (!has_utf8_bom && stats.valid_non_ascii_codepoints < stats.invalid_spans) {
+        return false;
+    }
+    const bool small_absolute_damage = stats.invalid_bytes <= kStrongUtf8InvalidByteCap;
+    const size_t total = std::max<size_t>(stats.total_bytes, 1);
+    const bool small_ratio_damage = stats.invalid_bytes * 100 <= total;
+    return small_absolute_damage || small_ratio_damage;
+}
+
+LossyDecodeCandidate decode_lossy_utf8(const std::string& bytes,
+                                       TextEncoding encoding = TextEncoding::Utf8,
+                                       int preference = 0) {
+    static const std::string kReplacementUtf8 = "\xEF\xBF\xBD";
+    LossyDecodeCandidate candidate;
+    candidate.encoding = encoding;
+    candidate.preference = preference;
+    candidate.utf8.reserve(bytes.size());
+    for (size_t i = 0; i < bytes.size();) {
+        const size_t start = i;
+        unsigned int cp = 0;
+        if (next_utf8_codepoint(bytes, i, cp)) {
+            candidate.utf8.append(bytes, start, i - start);
+            continue;
+        }
+        candidate.utf8 += kReplacementUtf8;
+        ++candidate.replacement_count;
+        i = start + 1;
+    }
+    return candidate;
+}
+
 TextEncodeResult encode_utf16_bytes(const std::string& utf8,
                                     bool little_endian,
                                     bool with_bom) {
@@ -217,7 +286,8 @@ bool looks_like_binary(const std::string& bytes) {
     for (size_t i = 0; i < sample; ++i) {
         unsigned char c = static_cast<unsigned char>(bytes[i]);
         if (c == 0) return true;
-        if (c < 0x20 && c != '\n' && c != '\r' && c != '\t' && c != '\f' && c != '\b') {
+        if (c < 0x20 && c != '\n' && c != '\r' && c != '\t' &&
+            c != '\f' && c != '\b' && c != 0x1B) {
             ++controls;
         }
     }
@@ -284,6 +354,62 @@ TextEncodeResult decode_codepage(const std::string& bytes,
     return {true, utf8, {}};
 }
 
+LossyDecodeCandidate decode_lossy_codepage(const std::string& bytes,
+                                           unsigned int codepage,
+                                           TextEncoding target_encoding,
+                                           int preference) {
+    LossyDecodeCandidate candidate;
+    candidate.encoding = target_encoding;
+    candidate.preference = preference;
+    if (bytes.empty()) return candidate;
+
+    const bool strict_success =
+        MultiByteToWideChar(codepage, MB_ERR_INVALID_CHARS,
+                            bytes.data(), static_cast<int>(bytes.size()),
+                            nullptr, 0) > 0;
+
+    int wide_len = MultiByteToWideChar(codepage, 0,
+                                       bytes.data(), static_cast<int>(bytes.size()),
+                                       nullptr, 0);
+    if (wide_len <= 0) {
+        candidate.success = false;
+        return candidate;
+    }
+
+    std::wstring wide(static_cast<size_t>(wide_len), L'\0');
+    if (MultiByteToWideChar(codepage, 0,
+                            bytes.data(), static_cast<int>(bytes.size()),
+                            wide.data(), wide_len) <= 0) {
+        candidate.success = false;
+        return candidate;
+    }
+    for (wchar_t ch : wide) {
+        if (ch == static_cast<wchar_t>(0xFFFD)) {
+            ++candidate.replacement_count;
+        }
+    }
+    if (!strict_success && candidate.replacement_count == 0) {
+        candidate.replacement_count = 1;
+    }
+
+    int utf8_len = WideCharToMultiByte(CP_UTF8, 0,
+                                       wide.data(), wide_len,
+                                       nullptr, 0, nullptr, nullptr);
+    if (utf8_len <= 0) {
+        candidate.success = false;
+        return candidate;
+    }
+
+    candidate.utf8.assign(static_cast<size_t>(utf8_len), '\0');
+    if (WideCharToMultiByte(CP_UTF8, 0,
+                            wide.data(), wide_len,
+                            candidate.utf8.data(), utf8_len,
+                            nullptr, nullptr) <= 0) {
+        candidate.success = false;
+    }
+    return candidate;
+}
+
 TextEncodeResult encode_codepage(const std::string& utf8,
                                  unsigned int codepage,
                                  TextEncoding target_encoding) {
@@ -334,14 +460,38 @@ TextEncodeResult encode_codepage(const std::string& utf8,
 }
 #endif
 
+LossyDecodeCandidate decode_lossy_best_fit(const std::string& bytes) {
+    std::vector<LossyDecodeCandidate> candidates;
+    candidates.push_back(decode_lossy_utf8(bytes, TextEncoding::Utf8, 0));
+#ifdef _WIN32
+    auto gbk = decode_lossy_codepage(bytes, kCodePageGbk, TextEncoding::Gbk, 1);
+    if (gbk.success) candidates.push_back(std::move(gbk));
+    auto gb18030 = decode_lossy_codepage(bytes, kCodePageGb18030, TextEncoding::Gb18030, 2);
+    if (gb18030.success) candidates.push_back(std::move(gb18030));
+#endif
+
+    return *std::min_element(
+        candidates.begin(), candidates.end(),
+        [](const LossyDecodeCandidate& a, const LossyDecodeCandidate& b) {
+            if (a.replacement_count != b.replacement_count) {
+                return a.replacement_count < b.replacement_count;
+            }
+            return a.preference < b.preference;
+        });
+}
+
 TextBufferResult make_decoded_result(const std::string& path,
                                      const std::string& raw,
                                      std::string decoded_utf8,
                                      TextEncoding encoding,
-                                     bool has_bom) {
+                                     bool has_bom,
+                                     bool lossy = false,
+                                     size_t lossy_replacement_count = 0) {
     TextFileMetadata metadata;
     metadata.encoding = encoding;
     metadata.has_bom = has_bom;
+    metadata.lossy = lossy;
+    metadata.lossy_replacement_count = lossy ? lossy_replacement_count : 0;
     metadata.line_ending = detect_line_ending_style(decoded_utf8);
     TextFileBuffer buffer;
     buffer.path = path;
@@ -463,12 +613,20 @@ std::string restore_line_endings(const std::string& lf_text, LineEndingStyle sty
     return out;
 }
 
-TextBufferResult decode_text_file_bytes(const std::string& bytes, const std::string& path) {
+TextBufferResult decode_text_file_bytes(const std::string& bytes,
+                                        const std::string& path,
+                                        bool allow_lossy) {
     if (starts_with_bom(bytes, 0xEF, 0xBB, 0xBF, 3)) {
         std::string body = bytes.substr(3);
         if (!text_bytes_are_valid_utf8(body)) {
+            if (allow_lossy && !looks_like_binary(body)) {
+                auto lossy = decode_lossy_utf8(body, TextEncoding::Utf8Bom, 0);
+                return make_decoded_result(path, bytes, std::move(lossy.utf8),
+                                           TextEncoding::Utf8Bom, true, true,
+                                           lossy.replacement_count);
+            }
             return fail_decode(path, bytes, TextEncoding::Unsupported,
-                "[Error] UTF-8 BOM file contains invalid UTF-8 bytes.");
+                "[Error] UTF-8 BOM file can be read with file_read using lossy decoding, but its bytes are too ambiguous to edit safely.");
         }
         return make_decoded_result(path, bytes, body, TextEncoding::Utf8Bom, true);
     }
@@ -512,6 +670,18 @@ TextBufferResult decode_text_file_bytes(const std::string& bytes, const std::str
         return make_decoded_result(path, bytes, bytes, TextEncoding::Utf8, false);
     }
 
+    const Utf8ScanStats utf8_stats = scan_utf8_bytes(bytes);
+    if (strongly_looks_like_damaged_utf8(utf8_stats, false)) {
+        if (allow_lossy) {
+            auto lossy = decode_lossy_utf8(bytes, TextEncoding::Utf8, 0);
+            return make_decoded_result(path, bytes, std::move(lossy.utf8),
+                                       TextEncoding::Utf8, false, true,
+                                       lossy.replacement_count);
+        }
+        return fail_decode(path, bytes, TextEncoding::Unsupported,
+            "[Error] File can be read with file_read using lossy UTF-8 decoding, but its encoding is too ambiguous to edit safely.");
+    }
+
 #ifdef _WIN32
     auto gbk = decode_codepage(bytes, kCodePageGbk, TextEncoding::Gbk);
     if (gbk.success && text_bytes_are_valid_utf8(gbk.bytes)) {
@@ -524,8 +694,15 @@ TextBufferResult decode_text_file_bytes(const std::string& bytes, const std::str
     }
 #endif
 
+    if (allow_lossy) {
+        auto lossy = decode_lossy_best_fit(bytes);
+        return make_decoded_result(path, bytes, std::move(lossy.utf8),
+                                   lossy.encoding, false, true,
+                                   lossy.replacement_count);
+    }
+
     return fail_decode(path, bytes, TextEncoding::Unsupported,
-        "[Error] File encoding is unsupported or ambiguous; refusing text edit to avoid mojibake.");
+        "[Error] File can be read with file_read using lossy decoding, but its encoding is too ambiguous to edit safely.");
 }
 
 TextBufferResult decode_text_file_bytes_with_metadata(const std::string& bytes,
@@ -584,17 +761,21 @@ TextBufferResult decode_text_file_bytes_with_metadata(const std::string& bytes,
         "[Error] Cannot verify bytes with unsupported target encoding.");
 }
 
-TextBufferResult read_text_file_buffer(const std::string& path) {
+TextBufferResult read_text_file_buffer(const std::string& path, bool allow_lossy) {
     std::string raw;
     std::string error;
     if (!read_raw_file(path, raw, error)) {
         return fail_decode(path, raw, TextEncoding::Unsupported, error);
     }
-    return decode_text_file_bytes(raw, path);
+    return decode_text_file_bytes(raw, path, allow_lossy);
 }
 
 TextEncodeResult encode_text_for_write(const std::string& lf_text,
                                        const TextFileMetadata& metadata) {
+    if (metadata.lossy) {
+        return {false, {},
+            "[Error] Target file cannot be safely written as text because it was decoded lossily. Use file_read for inspection and convert the file to a confirmed encoding before editing."};
+    }
     if (metadata.binary || metadata.unsupported ||
         metadata.encoding == TextEncoding::Binary ||
         metadata.encoding == TextEncoding::Unsupported) {

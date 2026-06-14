@@ -7,6 +7,7 @@
 
 #include <gtest/gtest.h>
 
+#include "config/config.hpp"
 #include "skills/skill_registry.hpp"
 #include "tool/skills_tool.hpp"
 #include "tool/tool_executor.hpp"
@@ -161,6 +162,35 @@ TEST_F(SkillsToolTest, InvalidCategoryFallbackIsLogged) {
     EXPECT_NE(body.find("requested_category=':'"), std::string::npos);
     EXPECT_NE(body.find("reason=fallback_from_invalid_filter"), std::string::npos);
     EXPECT_NE(body.find("result_count=2"), std::string::npos);
+}
+
+TEST_F(SkillsToolTest, ToolContextCwdUsesWorkspaceLocalSkills) {
+    fs::path daemon_root = temp_root / "daemon";
+    fs::path workspace = temp_root / "workspace";
+    write_skill(workspace / ".agent" / "skills", "engineering",
+                "workspace-only-skills-list", "workspace desc");
+
+    acecode::SkillRegistry fallback_registry;
+    fallback_registry.set_scan_roots({daemon_root / ".agent" / "skills"});
+    fallback_registry.scan();
+
+    acecode::AppConfig cfg;
+    auto impl = acecode::create_skills_list_tool(fallback_registry, &cfg);
+
+    acecode::ToolContext ctx;
+    ctx.cwd = workspace.string();
+    auto result = impl.execute(nlohmann::json::object().dump(), ctx);
+
+    ASSERT_TRUE(result.success);
+    auto out = nlohmann::json::parse(result.output);
+    bool found = false;
+    for (const auto& skill : out["skills"]) {
+        if (skill["name"].get<std::string>() == "workspace-only-skills-list") {
+            found = true;
+            EXPECT_EQ(skill["description"].get<std::string>(), "workspace desc");
+        }
+    }
+    EXPECT_TRUE(found) << "skills_list should resolve skills from ToolContext.cwd";
 }
 
 } // namespace

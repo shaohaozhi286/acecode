@@ -12,6 +12,7 @@
 #include "tool/tool_executor.hpp"
 
 #include <nlohmann/json.hpp>
+#include <atomic>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -149,6 +150,53 @@ TEST(FileReadToolSummary, OutputIncludesEditMetadataFooter) {
     EXPECT_NE(r.output.find("encoding=\"utf-8\""), std::string::npos);
     EXPECT_NE(r.output.find("line_endings=\"crlf\""), std::string::npos);
     EXPECT_NE(r.output.find("range_hash=\"sha256:"), std::string::npos);
+
+    fs::remove(p);
+}
+
+TEST(FileReadToolSummary, LossyReadReportsReplacementCountAndNoEditHash) {
+    ToolImpl tool = create_file_read_tool();
+
+    std::string body = std::string(u8"中文日志\n");
+    body.push_back(static_cast<char>(0xE4));
+    auto p = make_temp_file(body);
+
+    ToolResult r = tool.execute(nlohmann::json({{"file_path", p.string()}}).dump(),
+                                ToolContext{});
+
+    ASSERT_TRUE(r.success) << r.output;
+    ASSERT_TRUE(r.summary.has_value());
+    EXPECT_NE(r.output.find(std::string(u8"中文日志")), std::string::npos);
+    EXPECT_NE(r.output.find("[note: decoded with 1 replacement(s)"), std::string::npos);
+    EXPECT_NE(r.output.find("encoding=\"utf-8 (lossy)\""), std::string::npos);
+    EXPECT_NE(r.output.find("lossy=\"true\""), std::string::npos);
+    EXPECT_NE(r.output.find("editable=\"false\""), std::string::npos);
+    EXPECT_EQ(r.output.find("range_hash=\"sha256:"), std::string::npos);
+    EXPECT_EQ(get_metric(*r.summary, "enc"), "utf-8 (lossy)");
+    EXPECT_EQ(get_metric(*r.summary, "lossy"), "1");
+
+    fs::remove(p);
+}
+
+TEST(FileReadToolSummary, PartialLossyReadStillAvoidsEditableRangeMetadata) {
+    ToolImpl tool = create_file_read_tool();
+
+    std::string body = std::string(u8"第一行\n第二行\n");
+    body.push_back(static_cast<char>(0xE4));
+    auto p = make_temp_file(body);
+
+    ToolResult r = tool.execute(nlohmann::json({
+        {"file_path", p.string()},
+        {"start_line", 1},
+        {"end_line", 1}
+    }).dump(), ToolContext{});
+
+    ASSERT_TRUE(r.success) << r.output;
+    EXPECT_NE(r.output.find(std::string(u8"1: 第一行\n")), std::string::npos);
+    EXPECT_NE(r.output.find("[note: decoded with 1 replacement(s)"), std::string::npos);
+    EXPECT_NE(r.output.find("lossy=\"true\""), std::string::npos);
+    EXPECT_EQ(r.output.find("range=\"1-1\""), std::string::npos);
+    EXPECT_EQ(r.output.find("range_hash=\"sha256:"), std::string::npos);
 
     fs::remove(p);
 }

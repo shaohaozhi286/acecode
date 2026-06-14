@@ -20,6 +20,7 @@
 #include "../permissions.hpp"
 #include "../provider/llm_provider.hpp"
 #include "../config/saved_models.hpp"
+#include "../skills/skill_registry.hpp"
 #include "../tool/tool_executor.hpp"
 #include "ask_user_question_prompter.hpp"
 #include "permission_prompter.hpp"
@@ -37,7 +38,6 @@
 namespace acecode {
 
 class HookManager;
-class SkillRegistry;
 class MemoryRegistry;
 
 // SessionEntry: 一个 session 的所有 per-session 状态。所有指针成员都是
@@ -55,6 +55,7 @@ struct SessionEntry {
         std::shared_ptr<LlmProvider> provider;
     };
     std::shared_ptr<ProviderSlot> provider_slot;
+    std::unique_ptr<SkillRegistry>       skill_registry;
     std::unique_ptr<SessionManager>     sm;
     std::unique_ptr<PermissionManager>  perm;
     std::unique_ptr<AgentLoop>           loop;

@@ -53,6 +53,10 @@ std::optional<double> parse_osc11_luminance(const std::string& body) {
 // 格式: "fg;bg" 或 "fg;extra;bg" — 取最后一段数字。
 // ANSI 色号 0-6 视为暗色,7-15 视为亮色。
 
+DetectedTheme theme_from_ansi_background_index(unsigned bg) {
+    return bg <= 6 ? DetectedTheme::dark : DetectedTheme::light;
+}
+
 std::optional<DetectedTheme> parse_colorfgbg(const std::string& value) {
     if (value.empty()) return std::nullopt;
 
@@ -76,7 +80,7 @@ std::optional<DetectedTheme> parse_colorfgbg(const std::string& value) {
     }
 
     // ANSI 基色 0-6 暗色,7+ 亮色(7=white/silver 视为亮底)
-    return bg <= 6 ? DetectedTheme::dark : DetectedTheme::light;
+    return theme_from_ansi_background_index(bg);
 }
 
 // ---- 探测链(注入式) ----
@@ -84,7 +88,7 @@ std::optional<DetectedTheme> parse_colorfgbg(const std::string& value) {
 DetectedTheme detect_terminal_theme_with(
     const std::function<std::optional<std::string>()>& osc11_probe,
     const std::function<std::optional<std::string>(const char*)>& env_lookup,
-    const std::function<std::optional<bool>()>& system_dark_mode) {
+    const std::function<std::optional<bool>()>& terminal_background_dark) {
 
     // ① OSC 11
     if (osc11_probe) {
@@ -115,13 +119,13 @@ DetectedTheme detect_terminal_theme_with(
         }
     }
 
-    // ③ 系统暗色模式
-    if (system_dark_mode) {
-        auto sys = system_dark_mode();
-        if (sys) {
-            auto result = *sys ? DetectedTheme::dark : DetectedTheme::light;
-            LOG_INFO("[theme_detect] system dark mode = " +
-                     std::string(*sys ? "true" : "false") + " → " +
+    // ③ 平台终端背景属性
+    if (terminal_background_dark) {
+        auto dark_background = terminal_background_dark();
+        if (dark_background) {
+            auto result = *dark_background ? DetectedTheme::dark : DetectedTheme::light;
+            LOG_INFO("[theme_detect] terminal background dark = " +
+                     std::string(*dark_background ? "true" : "false") + " → " +
                      (result == DetectedTheme::dark ? "dark" : "light"));
             return result;
         }
@@ -132,7 +136,7 @@ DetectedTheme detect_terminal_theme_with(
     return DetectedTheme::dark;
 }
 
-// ---- 平台 I/O(在 _win.cpp / _posix.cpp 中提供 probe_osc11 和 probe_system_dark) ----
+// ---- 平台 I/O(在 _win.cpp / _posix.cpp 中提供 probe_osc11 和背景回退) ----
 
 namespace {
 std::optional<std::string> default_env_lookup(const char* name) {
@@ -144,13 +148,13 @@ std::optional<std::string> default_env_lookup(const char* name) {
 
 // 前向声明(平台文件提供)
 std::optional<std::string> probe_osc11_platform();
-std::optional<bool> probe_system_dark_mode();
+std::optional<bool> probe_terminal_background_dark_mode();
 
 DetectedTheme detect_terminal_theme() {
     return detect_terminal_theme_with(
         probe_osc11_platform,
         default_env_lookup,
-        probe_system_dark_mode);
+        probe_terminal_background_dark_mode);
 }
 
 } // namespace acecode

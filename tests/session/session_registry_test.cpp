@@ -15,6 +15,7 @@
 #include "permissions.hpp"
 #include "config/config.hpp"
 #include "config/saved_models.hpp"
+#include "prompt/system_prompt.hpp"
 #include "session/local_session_client.hpp"
 #include "session/session_manager.hpp"
 #include "session/session_registry.hpp"
@@ -229,6 +230,19 @@ std::filesystem::path temp_cwd(const std::string& hint) {
     std::filesystem::remove_all(dir);
     std::filesystem::create_directories(dir);
     return dir;
+}
+
+void write_workspace_skill(const std::filesystem::path& workspace,
+                           const std::string& name,
+                           const std::string& description) {
+    auto dir = workspace / ".agent" / "skills" / "engineering" / name;
+    std::filesystem::create_directories(dir);
+    std::ofstream ofs(dir / "SKILL.md", std::ios::binary);
+    ofs << "---\n"
+        << "name: " << name << "\n"
+        << "description: " << description << "\n"
+        << "---\n\n"
+        << "# " << name << "\n";
 }
 
 AppConfig make_model_cfg() {
@@ -822,6 +836,43 @@ TEST(SessionRegistry, CreateUsesWorkspaceCwdFromOptions) {
 
     std::filesystem::remove_all(daemon_project_dir);
     std::filesystem::remove_all(workspace_project_dir);
+    std::filesystem::remove_all(daemon_cwd);
+    std::filesystem::remove_all(workspace_cwd);
+}
+
+// 场景:共享 daemon 的启动 cwd 没有某个 skill,但目标 workspace 有。
+// 新建 session 后,AgentLoop 使用的 skill index 必须来自 session workspace。
+TEST(SessionRegistry, CreateInitializesWorkspaceScopedSkillRegistry) {
+    auto daemon_cwd = temp_cwd("daemon_skill_cwd");
+    auto workspace_cwd = temp_cwd("workspace_skill_cwd");
+    write_workspace_skill(workspace_cwd, "workspace-index-only",
+                          "Visible only from workspace cwd");
+
+    ToolExecutor tools;
+    PermissionManager permissions;
+    AppConfig cfg;
+    SessionRegistryDeps deps;
+    deps.provider_accessor = [] { return std::shared_ptr<acecode::LlmProvider>{}; };
+    deps.tools = &tools;
+    deps.cwd = daemon_cwd.string();
+    deps.config = &cfg;
+    deps.template_permissions = &permissions;
+    SessionRegistry registry(std::move(deps));
+
+    SessionOptions opts;
+    opts.cwd = workspace_cwd.string();
+    opts.workspace_hash = compute_cwd_hash(opts.cwd);
+    auto id = registry.create(opts);
+    auto* entry = registry.lookup(id);
+    ASSERT_NE(entry, nullptr);
+    ASSERT_NE(entry->skill_registry, nullptr);
+
+    auto block = acecode::build_skills_index_context_prompt(
+        entry->skill_registry.get(), 128000);
+    EXPECT_NE(block.content.find("workspace-index-only: Visible only from workspace cwd"),
+              std::string::npos);
+
+    std::filesystem::remove_all(SessionStorage::get_project_dir(workspace_cwd.string()));
     std::filesystem::remove_all(daemon_cwd);
     std::filesystem::remove_all(workspace_cwd);
 }

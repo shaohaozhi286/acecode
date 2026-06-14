@@ -11,6 +11,7 @@
 #include "utils/text_file_buffer.hpp"
 
 #include <nlohmann/json.hpp>
+#include <atomic>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -134,6 +135,30 @@ TEST(FileWriteToolSummary, OverwritePreservesUtf16LeEncoding) {
     ASSERT_TRUE(decoded.success) << decoded.error;
     EXPECT_EQ(decoded.buffer.metadata.encoding, acecode::TextEncoding::Utf16Le);
     EXPECT_EQ(decoded.buffer.text, "b\n");
+
+    fs::remove(p);
+}
+
+TEST(FileWriteToolSummary, OverwriteCorruptUtf8RefusesAmbiguousEncoding) {
+    ToolImpl tool = create_file_write_tool();
+
+    auto p = fresh_temp_path(".txt");
+    std::string original = std::string(u8"中文\n");
+    original.push_back(static_cast<char>(0xE4));
+    {
+        std::ofstream ofs(p, std::ios::binary);
+        ofs << original;
+    }
+
+    nlohmann::json args = {
+        {"file_path", p.string()},
+        {"content", std::string(u8"改动\n")}
+    };
+    ToolResult r = tool.execute(args.dump(), ToolContext{});
+
+    EXPECT_FALSE(r.success);
+    EXPECT_NE(r.output.find("too ambiguous to edit safely"), std::string::npos);
+    EXPECT_EQ(read_file(p), original);
 
     fs::remove(p);
 }

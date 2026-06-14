@@ -45,6 +45,7 @@ TEST(TextFileBuffer, DetectsUtf8BomAndNormalizesCrLf) {
     ASSERT_TRUE(decoded.success) << decoded.error;
     EXPECT_EQ(decoded.buffer.metadata.encoding, acecode::TextEncoding::Utf8Bom);
     EXPECT_TRUE(decoded.buffer.metadata.has_bom);
+    EXPECT_FALSE(decoded.buffer.metadata.lossy);
     EXPECT_EQ(decoded.buffer.metadata.line_ending, acecode::LineEndingStyle::CrLf);
     EXPECT_EQ(decoded.buffer.text, "a\nb\n");
 
@@ -60,6 +61,7 @@ TEST(TextFileBuffer, DecodesAndEncodesUtf16LittleEndianWithBom) {
     ASSERT_TRUE(decoded.success) << decoded.error;
     EXPECT_EQ(decoded.buffer.metadata.encoding, acecode::TextEncoding::Utf16Le);
     EXPECT_TRUE(decoded.buffer.metadata.has_bom);
+    EXPECT_FALSE(decoded.buffer.metadata.lossy);
     EXPECT_EQ(decoded.buffer.text, "a\nb");
 
     auto encoded = acecode::encode_text_for_write("x\ny", decoded.buffer.metadata);
@@ -73,6 +75,7 @@ TEST(TextFileBuffer, DecodesAndEncodesUtf16BigEndianWithBom) {
 
     ASSERT_TRUE(decoded.success) << decoded.error;
     EXPECT_EQ(decoded.buffer.metadata.encoding, acecode::TextEncoding::Utf16Be);
+    EXPECT_FALSE(decoded.buffer.metadata.lossy);
     EXPECT_EQ(decoded.buffer.text, "a\nb");
 
     auto encoded = acecode::encode_text_for_write("c\nb", decoded.buffer.metadata);
@@ -86,6 +89,57 @@ TEST(TextFileBuffer, RejectsBinaryInput) {
     EXPECT_FALSE(decoded.success);
     EXPECT_EQ(decoded.buffer.metadata.encoding, acecode::TextEncoding::Binary);
     EXPECT_TRUE(decoded.buffer.metadata.binary);
+}
+
+TEST(TextFileBuffer, LossyUtf8ReadReplacesSingleBadByte) {
+    std::string raw = std::string(u8"中文日志\n");
+    raw.push_back(static_cast<char>(0xE4));
+
+    auto strict = acecode::decode_text_file_bytes(raw);
+    EXPECT_FALSE(strict.success);
+    EXPECT_NE(strict.error.find("file_read"), std::string::npos);
+
+    auto decoded = acecode::decode_text_file_bytes(raw, "", true);
+    ASSERT_TRUE(decoded.success) << decoded.error;
+    EXPECT_EQ(decoded.buffer.metadata.encoding, acecode::TextEncoding::Utf8);
+    EXPECT_TRUE(decoded.buffer.metadata.lossy);
+    EXPECT_EQ(decoded.buffer.metadata.lossy_replacement_count, 1u);
+    EXPECT_EQ(decoded.buffer.text,
+              std::string(u8"中文日志\n") + std::string("\xEF\xBF\xBD", 3));
+
+    auto encoded = acecode::encode_text_for_write("x\n", decoded.buffer.metadata);
+    EXPECT_FALSE(encoded.success);
+    EXPECT_NE(encoded.error.find("decoded lossily"), std::string::npos);
+}
+
+TEST(TextFileBuffer, LossyUtf8BomReadReplacesBadBodyByte) {
+    std::string raw = bytes({0xEF, 0xBB, 0xBF}) + std::string(u8"标题\n");
+    raw.push_back(static_cast<char>(0xE4));
+
+    auto decoded = acecode::decode_text_file_bytes(raw, "", true);
+    ASSERT_TRUE(decoded.success) << decoded.error;
+    EXPECT_EQ(decoded.buffer.metadata.encoding, acecode::TextEncoding::Utf8Bom);
+    EXPECT_TRUE(decoded.buffer.metadata.has_bom);
+    EXPECT_TRUE(decoded.buffer.metadata.lossy);
+    EXPECT_EQ(decoded.buffer.metadata.lossy_replacement_count, 1u);
+    EXPECT_EQ(decoded.buffer.text,
+              std::string(u8"标题\n") + std::string("\xEF\xBF\xBD", 3));
+}
+
+TEST(TextFileBuffer, StrictReadTextFileBufferStillRefusesCorruptUtf8) {
+    auto path = temp_path(".txt");
+    std::string raw = std::string(u8"中文\n");
+    raw.push_back(static_cast<char>(0xE4));
+    write_bytes(path, raw);
+
+    auto strict = acecode::read_text_file_buffer(path.string());
+    EXPECT_FALSE(strict.success);
+
+    auto lossy = acecode::read_text_file_buffer(path.string(), true);
+    ASSERT_TRUE(lossy.success) << lossy.error;
+    EXPECT_TRUE(lossy.buffer.metadata.lossy);
+
+    fs::remove(path);
 }
 
 TEST(TextFileBuffer, SafeWriteRollsBackOnVerificationMismatch) {
@@ -102,6 +156,30 @@ TEST(TextFileBuffer, SafeWriteRollsBackOnVerificationMismatch) {
     fs::remove(path);
 }
 
+TEST(TextFileBuffer, AnsiEscapesDoNotMakeTextLookBinary) {
+    std::string ansi;
+    for (int i = 0; i < 200; ++i) {
+        ansi += "\x1B[31mred\x1B[0m\n";
+    }
+
+    auto decoded = acecode::decode_text_file_bytes(ansi, "", true);
+    ASSERT_TRUE(decoded.success) << decoded.error;
+    EXPECT_EQ(decoded.buffer.metadata.encoding, acecode::TextEncoding::Utf8);
+    EXPECT_FALSE(decoded.buffer.metadata.binary);
+}
+
+TEST(TextFileBuffer, NulAndHighControlFilesStillLookBinary) {
+    auto nul = acecode::decode_text_file_bytes(bytes({0x00, 'a', 'b'}), "", true);
+    EXPECT_FALSE(nul.success);
+    EXPECT_EQ(nul.buffer.metadata.encoding, acecode::TextEncoding::Binary);
+
+    std::string controls(100, static_cast<char>(0x01));
+    controls += "text\n";
+    auto high_control = acecode::decode_text_file_bytes(controls, "", true);
+    EXPECT_FALSE(high_control.success);
+    EXPECT_EQ(high_control.buffer.metadata.encoding, acecode::TextEncoding::Binary);
+}
+
 TEST(TextFileBuffer, RangeHashUsesLfNormalizedContent) {
     const std::string text = "a\nb\nc\n";
     EXPECT_EQ(acecode::line_range_content(text, 2, 3), "b\nc\n");
@@ -115,6 +193,7 @@ TEST(TextFileBuffer, DecodesGbkAndRejectsUnrepresentableText) {
 
     ASSERT_TRUE(decoded.success) << decoded.error;
     EXPECT_EQ(decoded.buffer.metadata.encoding, acecode::TextEncoding::Gbk);
+    EXPECT_FALSE(decoded.buffer.metadata.lossy);
     EXPECT_EQ(decoded.buffer.text, std::string(u8"中文\n"));
 
     auto ok = acecode::encode_text_for_write(std::string(u8"改动\n"), decoded.buffer.metadata);
@@ -133,6 +212,32 @@ TEST(TextFileBuffer, DecodesGb18030WhenCp936Fails) {
 
     ASSERT_TRUE(decoded.success) << decoded.error;
     EXPECT_EQ(decoded.buffer.metadata.encoding, acecode::TextEncoding::Gb18030);
+    EXPECT_FALSE(decoded.buffer.metadata.lossy);
     EXPECT_FALSE(decoded.buffer.text.empty());
+}
+
+TEST(TextFileBuffer, DamagedUtf8BeatsStrictLegacyMojibake) {
+    std::string raw = std::string(u8"中文\n") + bytes({0xC0, 0xAF, '\n'});
+
+    auto strict = acecode::decode_text_file_bytes(raw);
+    EXPECT_FALSE(strict.success);
+
+    auto decoded = acecode::decode_text_file_bytes(raw, "", true);
+    ASSERT_TRUE(decoded.success) << decoded.error;
+    EXPECT_EQ(decoded.buffer.metadata.encoding, acecode::TextEncoding::Utf8);
+    EXPECT_TRUE(decoded.buffer.metadata.lossy);
+    EXPECT_EQ(decoded.buffer.metadata.lossy_replacement_count, 2u);
+    EXPECT_NE(decoded.buffer.text.find(std::string(u8"中文\n")), std::string::npos);
+}
+
+TEST(TextFileBuffer, LossyBestFitChoosesGbkForMostlyGbkBytes) {
+    std::string raw = bytes({0xD6, 0xD0, 0xCE, 0xC4, 0xFF, '\n'});
+    auto decoded = acecode::decode_text_file_bytes(raw, "", true);
+
+    ASSERT_TRUE(decoded.success) << decoded.error;
+    EXPECT_EQ(decoded.buffer.metadata.encoding, acecode::TextEncoding::Gbk);
+    EXPECT_TRUE(decoded.buffer.metadata.lossy);
+    EXPECT_EQ(decoded.buffer.metadata.lossy_replacement_count, 1u);
+    EXPECT_NE(decoded.buffer.text.find(std::string(u8"中文")), std::string::npos);
 }
 #endif

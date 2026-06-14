@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <string>
 #include <chrono>
 #include <map>
@@ -17,6 +18,8 @@ struct FileReadEditMetadata {
     int start_line = 0;
     int end_line = 0;
     std::string range_hash;
+    bool lossy = false;
+    size_t lossy_replacement_count = 0;
 };
 
 // Tracks file modification times to detect concurrent external edits.

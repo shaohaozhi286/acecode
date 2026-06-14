@@ -29,6 +29,11 @@ static std::string format_read_metadata_footer(const FileReadEditMetadata& metad
     if (!metadata.range_hash.empty()) {
         oss << " range_hash=\"" << metadata.range_hash << "\"";
     }
+    if (metadata.lossy) {
+        oss << " lossy=\"true\""
+            << " replacements=\"" << metadata.lossy_replacement_count << "\""
+            << " editable=\"false\"";
+    }
     oss << " />\n";
     return oss.str();
 }
@@ -89,7 +94,7 @@ static ToolResult execute_file_read(const std::string& arguments_json, const Too
         return size_check;
     }
 
-    auto read_result = read_text_file_buffer(file_path);
+    auto read_result = read_text_file_buffer(file_path, true);
     if (!read_result.success) {
         return ToolResult{read_result.error, false};
     }
@@ -101,6 +106,11 @@ static ToolResult execute_file_read(const std::string& arguments_json, const Too
     FileReadEditMetadata metadata;
     metadata.read_id = read_id_for_text_buffer(file_path, buffer.raw_bytes);
     metadata.encoding = text_encoding_label(buffer.metadata.encoding);
+    if (buffer.metadata.lossy) {
+        metadata.encoding += " (lossy)";
+        metadata.lossy = true;
+        metadata.lossy_replacement_count = buffer.metadata.lossy_replacement_count;
+    }
     metadata.line_ending = line_ending_label(buffer.metadata.line_ending);
 
     if (partial_read) {
@@ -116,22 +126,27 @@ static ToolResult execute_file_read(const std::string& arguments_json, const Too
             return ToolResult{ToolErrors::no_lines_in_range(start, end, total_lines), false};
         }
         displayed_line_count = actual_end - actual_start + 1;
-        metadata.start_line = actual_start;
-        metadata.end_line = actual_end;
-        metadata.range_hash = range_hash(buffer.text, actual_start, actual_end);
+        if (!buffer.metadata.lossy) {
+            metadata.start_line = actual_start;
+            metadata.end_line = actual_end;
+            metadata.range_hash = range_hash(buffer.text, actual_start, actual_end);
+        }
     } else {
         content = buffer.text;
         for (char c : content) if (c == '\n') ++displayed_line_count;
         if (!content.empty() && content.back() != '\n') ++displayed_line_count;
-        metadata.start_line = content.empty() ? 0 : 1;
-        metadata.end_line = displayed_line_count;
-        if (displayed_line_count > 0) {
-            metadata.range_hash = range_hash(buffer.text, 1, displayed_line_count);
+        if (!buffer.metadata.lossy) {
+            metadata.start_line = content.empty() ? 0 : 1;
+            metadata.end_line = displayed_line_count;
+            if (displayed_line_count > 0) {
+                metadata.range_hash = range_hash(buffer.text, 1, displayed_line_count);
+            }
         }
     }
 
     // 写入校验基于模型真实看到的 UTF-8/LF 文本,避免拿原始字节和规范化文本比较。
-    MtimeTracker::instance().record_read(file_path, buffer.text, partial_read, metadata);
+    MtimeTracker::instance().record_read(
+        file_path, buffer.text, partial_read || buffer.metadata.lossy, metadata);
 
     // Large-file hint: only when the caller asked for the whole file (both
     // range bounds omitted) and the payload exceeds 200 KB. Appended as a
@@ -146,6 +161,13 @@ static ToolResult execute_file_read(const std::string& arguments_json, const Too
         hint_added = true;
     }
 
+    if (buffer.metadata.lossy) {
+        if (!content.empty() && content.back() != '\n') content += "\n";
+        content += "[note: decoded with " +
+                   std::to_string(buffer.metadata.lossy_replacement_count) +
+                   " replacement(s) (U+FFFD); original encoding could not be fully determined; editing is disabled for this lossy read.]";
+    }
+
     content += format_read_metadata_footer(metadata);
 
     ToolSummary summary;
@@ -155,6 +177,10 @@ static ToolResult execute_file_read(const std::string& arguments_json, const Too
     summary.metrics.emplace_back("size", format_bytes_compact(content.size()));
     summary.metrics.emplace_back("enc", metadata.encoding);
     summary.metrics.emplace_back("eol", metadata.line_ending);
+    if (buffer.metadata.lossy) {
+        summary.metrics.emplace_back("lossy",
+                                     std::to_string(buffer.metadata.lossy_replacement_count));
+    }
     if (hint_added) summary.metrics.emplace_back("hint", "large_file");
     summary.icon = tool_icon("file_read");
 

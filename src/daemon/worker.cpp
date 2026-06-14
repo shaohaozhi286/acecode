@@ -384,8 +384,8 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     // skills_list / skill_view 让 LLM 按需加载 SKILL.md(配合 expand-webui-skill-commands
     // 的轻量提示策略 — daemon expander 不再 inject SKILL.md body,LLM 看到提示后用
     // 这两个 tool 自己取)。
-    tools.register_tool(acecode::create_skills_list_tool(skill_registry));
-    tools.register_tool(acecode::create_skill_view_tool(skill_registry));
+    tools.register_tool(acecode::create_skills_list_tool(skill_registry, &cfg_mut));
+    tools.register_tool(acecode::create_skill_view_tool(skill_registry, &cfg_mut));
     acecode::PermissionManager template_perm;
     template_perm.set_mode(permission_mode_from_config(cfg_mut.default_permission_mode));
     if (opts.dangerous) template_perm.set_dangerous(true);

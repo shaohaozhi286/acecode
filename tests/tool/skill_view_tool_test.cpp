@@ -3,6 +3,7 @@
 
 #include <gtest/gtest.h>
 
+#include "config/config.hpp"
 #include "skills/skill_registry.hpp"
 #include "tool/skill_view_tool.hpp"
 
@@ -97,4 +98,42 @@ TEST_F(SkillViewToolTest, SupportingFileKeepsFullOutputButAddsCompactSummary) {
     EXPECT_TRUE(payload.value("success", false));
     EXPECT_EQ(payload.value("file_path", ""), "references/notes.md");
     EXPECT_EQ(payload.value("content", ""), "supporting reference body\n");
+}
+
+TEST_F(SkillViewToolTest, ToolContextCwdLoadsWorkspaceLocalSkill) {
+    fs::path daemon_root = make_temp_root("daemon-root");
+    fs::path workspace = make_temp_root("workspace-root");
+    fs::path skill_dir = workspace / ".agent" / "skills" /
+                         "engineering" / "workspace-only-skill-view";
+    write_file(skill_dir / "SKILL.md",
+        "---\n"
+        "name: workspace-only-skill-view\n"
+        "description: Workspace only\n"
+        "---\n\n"
+        "# Workspace Skill\n\n"
+        "Workspace-specific instructions.\n");
+    write_file(skill_dir / "references" / "extra.md", "workspace reference\n");
+
+    acecode::SkillRegistry fallback_registry;
+    fallback_registry.set_scan_roots({daemon_root / ".agent" / "skills"});
+    fallback_registry.scan();
+
+    acecode::AppConfig cfg;
+    auto tool = acecode::create_skill_view_tool(fallback_registry, &cfg);
+    acecode::ToolContext ctx;
+    ctx.cwd = workspace.string();
+    auto result = tool.execute(R"({"name":"workspace-only-skill-view"})", ctx);
+
+    ASSERT_TRUE(result.success);
+    auto payload = nlohmann::json::parse(result.output);
+    EXPECT_EQ(payload.value("name", ""), "workspace-only-skill-view");
+    EXPECT_NE(payload.value("content", "").find("Workspace-specific instructions"),
+              std::string::npos);
+    ASSERT_TRUE(payload.contains("linked_files"));
+    ASSERT_EQ(payload["linked_files"].size(), 1u);
+    EXPECT_EQ(payload["linked_files"][0].get<std::string>(), "references/extra.md");
+
+    std::error_code ec;
+    fs::remove_all(daemon_root, ec);
+    fs::remove_all(workspace, ec);
 }

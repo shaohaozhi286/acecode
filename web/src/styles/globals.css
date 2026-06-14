@@ -1741,7 +1741,27 @@ body {
   cursor: grabbing;
 }
 .ace-preview-details-tab.is-dragging {
-  opacity: 0.62;
+  opacity: 0.38;
+}
+.ace-preview-details-tab-drag-ghost {
+  position: fixed;
+  z-index: 90;
+  box-sizing: border-box;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 104px;
+  max-width: 240px;
+  padding: 0 8px;
+  border: 1px solid rgba(var(--ace-border-rgb), 0.92);
+  border-bottom: 2px solid var(--ace-accent);
+  border-radius: 6px 6px 4px 4px;
+  background: var(--ace-surface);
+  color: var(--ace-fg);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.16);
+  pointer-events: none;
+  user-select: none;
 }
 .ace-preview-details-tab.is-drop-before::before,
 .ace-preview-details-tab.is-drop-after::after {

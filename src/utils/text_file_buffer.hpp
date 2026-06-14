@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <functional>
 #include <string>
 #include <vector>
@@ -31,6 +32,8 @@ struct TextFileMetadata {
     bool has_bom = false;
     bool binary = false;
     bool unsupported = false;
+    bool lossy = false;
+    size_t lossy_replacement_count = 0;
     std::string error;
 };
 
@@ -68,9 +71,11 @@ std::string normalize_text_to_lf(std::string text);
 LineEndingStyle detect_line_ending_style(const std::string& text);
 std::string restore_line_endings(const std::string& lf_text, LineEndingStyle style);
 
-TextBufferResult read_text_file_buffer(const std::string& path);
+TextBufferResult read_text_file_buffer(const std::string& path,
+                                       bool allow_lossy = false);
 TextBufferResult decode_text_file_bytes(const std::string& bytes,
-                                        const std::string& path = "");
+                                        const std::string& path = "",
+                                        bool allow_lossy = false);
 TextBufferResult decode_text_file_bytes_with_metadata(const std::string& bytes,
                                                       const TextFileMetadata& metadata,
                                                       const std::string& path = "");

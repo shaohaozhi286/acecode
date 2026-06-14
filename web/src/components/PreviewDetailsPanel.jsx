@@ -182,6 +182,7 @@ export function PreviewDetailsPanel({
   const tabAutoScrollFrameRef = useRef(null);
   const suppressTabClickRef = useRef(false);
   const [tabDragState, setTabDragState] = useState(null);
+  const [tabDragGhost, setTabDragGhost] = useState(null);
   const [wrapPreview, setWrapPreview] = usePreference(
     FILE_PREVIEW_WRAP_STORAGE_KEY,
     false,
@@ -265,6 +266,19 @@ export function PreviewDetailsPanel({
     window.setTimeout(() => {
       suppressTabClickRef.current = false;
     }, 0);
+  }, []);
+
+  const updateTabDragGhost = useCallback((clientX, clientY) => {
+    const drag = tabDragRef.current;
+    if (!drag?.dragging) return;
+    setTabDragGhost({
+      left: clientX - drag.offsetX,
+      top: clientY - drag.offsetY,
+      width: drag.width,
+      label: drag.label,
+      isFileTab: drag.isFileTab,
+      path: drag.path,
+    });
   }, []);
 
   const insertionTargetForPointer = useCallback((clientX) => {
@@ -357,6 +371,7 @@ export function PreviewDetailsPanel({
     tabDragRef.current = null;
     document.body.classList.remove('ace-preview-tab-reordering');
     setTabDragState(null);
+    setTabDragGhost(null);
     if (drag.dragging) suppressNextTabClick();
     if (commit && drag.dragging && drag.targetKey) {
       onReorderTab?.(drag.sourceKey, drag.targetKey, drag.placement || 'before');
@@ -369,8 +384,13 @@ export function PreviewDetailsPanel({
     if (event.target?.closest?.('.ace-preview-details-tab-close')) return;
 
     finishTabDrag(false);
+    const tab = tabs.find((item) => item.key === tabKey);
+    if (!tab) return;
     const pointerId = event.pointerId;
     const pointerTarget = event.currentTarget;
+    const rect = pointerTarget.getBoundingClientRect();
+    const label = tabLabel(tab);
+    const isFileTab = tab.type === PREVIEW_TAB_TYPES.FILE;
     try {
       pointerTarget.setPointerCapture?.(pointerId);
     } catch {
@@ -397,6 +417,12 @@ export function PreviewDetailsPanel({
       if (Math.hypot(dx, dy) < TAB_DRAG_START_PX) return false;
       drag.dragging = true;
       document.body.classList.add('ace-preview-tab-reordering');
+      setTabDragState({
+        sourceKey: drag.sourceKey,
+        targetKey: drag.sourceKey,
+        placement: 'before',
+      });
+      updateTabDragGhost(moveEvent.clientX, moveEvent.clientY);
       return true;
     };
 
@@ -406,6 +432,7 @@ export function PreviewDetailsPanel({
       drag.lastClientX = moveEvent.clientX;
       if (!beginDragIfNeeded(moveEvent)) return;
       moveEvent.preventDefault();
+      updateTabDragGhost(moveEvent.clientX, moveEvent.clientY);
       updateDragTarget(moveEvent.clientX);
       updateTabAutoScroll(moveEvent.clientX);
     }
@@ -430,6 +457,12 @@ export function PreviewDetailsPanel({
       startX: event.clientX,
       startY: event.clientY,
       lastClientX: event.clientX,
+      offsetX: event.clientX - rect.left,
+      offsetY: event.clientY - rect.top,
+      width: Math.max(104, rect.width || (rect.right - rect.left) || 104),
+      label,
+      isFileTab,
+      path: isFileTab ? (tab.path || label) : '',
       dragging: false,
       autoScrollDir: 0,
       cleanup,
@@ -440,7 +473,9 @@ export function PreviewDetailsPanel({
   }, [
     finishTabDrag,
     stopTabAutoScroll,
+    tabs,
     updateDragTarget,
+    updateTabDragGhost,
     updateTabAutoScroll,
   ]);
 
@@ -450,6 +485,11 @@ export function PreviewDetailsPanel({
     if (event.target?.closest?.('.ace-preview-details-tab-close')) return;
 
     finishTabDrag(false);
+    const tab = tabs.find((item) => item.key === tabKey);
+    if (!tab) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const label = tabLabel(tab);
+    const isFileTab = tab.type === PREVIEW_TAB_TYPES.FILE;
 
     const cleanup = () => {
       stopTabAutoScroll();
@@ -465,6 +505,12 @@ export function PreviewDetailsPanel({
       if (Math.hypot(dx, dy) < TAB_DRAG_START_PX) return false;
       drag.dragging = true;
       document.body.classList.add('ace-preview-tab-reordering');
+      setTabDragState({
+        sourceKey: drag.sourceKey,
+        targetKey: drag.sourceKey,
+        placement: 'before',
+      });
+      updateTabDragGhost(moveEvent.clientX, moveEvent.clientY);
       return true;
     };
 
@@ -474,6 +520,7 @@ export function PreviewDetailsPanel({
       drag.lastClientX = moveEvent.clientX;
       if (!beginDragIfNeeded(moveEvent)) return;
       moveEvent.preventDefault();
+      updateTabDragGhost(moveEvent.clientX, moveEvent.clientY);
       updateDragTarget(moveEvent.clientX);
       updateTabAutoScroll(moveEvent.clientX);
     }
@@ -492,6 +539,12 @@ export function PreviewDetailsPanel({
       startX: event.clientX,
       startY: event.clientY,
       lastClientX: event.clientX,
+      offsetX: event.clientX - rect.left,
+      offsetY: event.clientY - rect.top,
+      width: Math.max(104, rect.width || (rect.right - rect.left) || 104),
+      label,
+      isFileTab,
+      path: isFileTab ? (tab.path || label) : '',
       dragging: false,
       autoScrollDir: 0,
       cleanup,
@@ -501,7 +554,9 @@ export function PreviewDetailsPanel({
   }, [
     finishTabDrag,
     stopTabAutoScroll,
+    tabs,
     updateDragTarget,
+    updateTabDragGhost,
     updateTabAutoScroll,
   ]);
 
@@ -635,6 +690,25 @@ export function PreviewDetailsPanel({
       <div className="ace-preview-details-body">
         {renderedBody}
       </div>
+      {tabDragGhost && (
+        <div
+          className="ace-preview-details-tab-drag-ghost"
+          style={{
+            left: tabDragGhost.left,
+            top: tabDragGhost.top,
+            width: tabDragGhost.width,
+          }}
+        >
+          {tabDragGhost.isFileTab && (
+            <FileTypeIcon
+              path={tabDragGhost.path || tabDragGhost.label}
+              size={20}
+              className="ace-preview-details-tab-icon"
+            />
+          )}
+          <span className="ace-preview-details-tab-label">{tabDragGhost.label}</span>
+        </div>
+      )}
     </div>
   );
 }

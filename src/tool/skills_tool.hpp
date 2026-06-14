@@ -4,10 +4,12 @@
 
 namespace acecode {
 
+struct AppConfig;
 class SkillRegistry;
 
 // `skills_list` — tier-1 progressive disclosure. Returns minimal metadata only
 // (name, description, category). Read-only.
-ToolImpl create_skills_list_tool(SkillRegistry& registry);
+ToolImpl create_skills_list_tool(SkillRegistry& registry,
+                                 const AppConfig* config = nullptr);
 
 } // namespace acecode

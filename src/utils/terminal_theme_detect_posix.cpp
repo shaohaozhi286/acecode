@@ -110,8 +110,8 @@ std::optional<std::string> probe_osc11_platform() {
     return response.substr(rgb_pos, end - rgb_pos);
 }
 
-// POSIX 没有统一的系统暗色模式 API(macOS 有 osascript 但太重)。
-std::optional<bool> probe_system_dark_mode() {
+// POSIX 已优先使用 OSC 11 / COLORFGBG,这里没有额外的统一背景属性 API。
+std::optional<bool> probe_terminal_background_dark_mode() {
     return std::nullopt;
 }
 

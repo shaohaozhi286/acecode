@@ -18,7 +18,7 @@ auto no_osc11() {
 auto no_env() {
     return [](const char*) -> std::optional<std::string> { return std::nullopt; };
 }
-auto no_system() {
+auto no_terminal_background() {
     return []() -> std::optional<bool> { return std::nullopt; };
 }
 
@@ -90,6 +90,14 @@ TEST(ParseOsc11, MalformedReturnsNullopt) {
 
 // ---- parse_colorfgbg ----
 
+// 场景:ANSI 背景索引 0-6 算暗色,7-15 算亮色
+TEST(AnsiBackgroundIndex, DarkAndLightBuckets) {
+    EXPECT_EQ(theme_from_ansi_background_index(0), DetectedTheme::dark);
+    EXPECT_EQ(theme_from_ansi_background_index(6), DetectedTheme::dark);
+    EXPECT_EQ(theme_from_ansi_background_index(7), DetectedTheme::light);
+    EXPECT_EQ(theme_from_ansi_background_index(15), DetectedTheme::light);
+}
+
 // 场景:典型暗色终端 COLORFGBG="15;0"(前景白,背景黑=ANSI 0)
 TEST(ParseColorFgBg, DarkBackground) {
     auto result = parse_colorfgbg("15;0");
@@ -138,7 +146,7 @@ TEST(DetectThemeWith, Osc11DarkWins) {
     auto result = detect_terminal_theme_with(
         []() -> std::optional<std::string> { return "rgb:0000/0000/0000"; },
         no_env(),
-        []() -> std::optional<bool> { return false; }  // 系统说亮色 — 应被忽略
+        []() -> std::optional<bool> { return false; }  // 后续说亮色 — 应被忽略
     );
     EXPECT_EQ(result, DetectedTheme::dark);
 }
@@ -148,7 +156,7 @@ TEST(DetectThemeWith, Osc11LightWins) {
     auto result = detect_terminal_theme_with(
         []() -> std::optional<std::string> { return "rgb:ffff/ffff/ffff"; },
         no_env(),
-        no_system()
+        no_terminal_background()
     );
     EXPECT_EQ(result, DetectedTheme::light);
 }
@@ -161,19 +169,29 @@ TEST(DetectThemeWith, FallbackToColorFgBg) {
             if (std::string(name) == "COLORFGBG") return "0;15";
             return std::nullopt;
         },
-        no_system()
+        no_terminal_background()
     );
     EXPECT_EQ(result, DetectedTheme::light);
 }
 
-// 场景:OSC 11 + COLORFGBG 都不可用,回退到系统暗色模式=false(亮色)
-TEST(DetectThemeWith, FallbackToSystemLightMode) {
+// 场景:OSC 11 + COLORFGBG 都不可用,回退到平台终端背景=false(亮色)
+TEST(DetectThemeWith, FallbackToTerminalBackgroundLight) {
     auto result = detect_terminal_theme_with(
         no_osc11(),
         no_env(),
-        []() -> std::optional<bool> { return false; } // 系统亮色模式
+        []() -> std::optional<bool> { return false; } // 终端亮色背景
     );
     EXPECT_EQ(result, DetectedTheme::light);
+}
+
+// 场景:OSC 11 + COLORFGBG 都不可用,平台终端背景为暗色
+TEST(DetectThemeWith, FallbackToTerminalBackgroundDark) {
+    auto result = detect_terminal_theme_with(
+        no_osc11(),
+        no_env(),
+        []() -> std::optional<bool> { return true; } // 终端暗色背景
+    );
+    EXPECT_EQ(result, DetectedTheme::dark);
 }
 
 // 场景:三条路径全失败 → 默认 dark
@@ -181,7 +199,7 @@ TEST(DetectThemeWith, AllFailDefaultDark) {
     auto result = detect_terminal_theme_with(
         no_osc11(),
         no_env(),
-        no_system()
+        no_terminal_background()
     );
     EXPECT_EQ(result, DetectedTheme::dark);
 }
@@ -194,7 +212,7 @@ TEST(DetectThemeWith, Osc11GarbageFallsThrough) {
             if (std::string(name) == "COLORFGBG") return "15;0";
             return std::nullopt;
         },
-        no_system()
+        no_terminal_background()
     );
     EXPECT_EQ(result, DetectedTheme::dark);
 }

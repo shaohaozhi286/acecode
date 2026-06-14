@@ -12,6 +12,7 @@
 #include "../provider/model_pool_status.hpp"
 #include "../provider/model_resolver.hpp"
 #include "../provider/provider_factory.hpp"
+#include "../skills/skill_init.hpp"
 #include "../utils/logger.hpp"
 #include "../utils/cwd_hash.hpp"
 #include "../utils/utf8_path.hpp"
@@ -640,6 +641,10 @@ SessionRegistry::make_entry_locked(const std::string& id,
     entry->model_state = resolved_model.state;
     entry->provider_slot = std::make_shared<SessionEntry::ProviderSlot>();
     entry->provider_slot->provider = std::move(resolved_model.provider);
+    if (deps_.config) {
+        entry->skill_registry = std::make_unique<SkillRegistry>();
+        initialize_skill_registry(*entry->skill_registry, *deps_.config, entry->cwd);
+    }
 
     // SessionManager
     entry->sm = std::make_unique<SessionManager>();
@@ -707,7 +712,9 @@ SessionRegistry::make_entry_locked(const std::string& id,
     }
     entry->loop->set_session_manager(entry->sm.get());
     entry->loop->set_hook_manager(deps_.hook_manager);
-    entry->loop->set_skill_registry(deps_.skill_registry);
+    entry->loop->set_skill_registry(entry->skill_registry
+        ? entry->skill_registry.get()
+        : deps_.skill_registry);
     entry->loop->set_memory_registry(deps_.memory_registry);
     entry->loop->set_memory_config(deps_.memory_cfg);
     entry->loop->set_project_instructions_config(deps_.project_instructions_cfg);

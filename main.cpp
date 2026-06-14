@@ -2094,8 +2094,8 @@ static int run_interactive_app(const CliOptions& cli,
     // ---- Skill registry ----
     SkillRegistry skill_registry;
     initialize_skill_registry(skill_registry, config, working_dir);
-    tools.register_tool(create_skills_list_tool(skill_registry));
-    tools.register_tool(create_skill_view_tool(skill_registry));
+    tools.register_tool(create_skills_list_tool(skill_registry, &config));
+    tools.register_tool(create_skill_view_tool(skill_registry, &config));
 
     // ---- Memory registry ----
     MemoryRegistry memory_registry;

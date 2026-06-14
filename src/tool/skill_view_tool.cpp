@@ -1,5 +1,7 @@
 #include "skill_view_tool.hpp"
 
+#include "../config/config.hpp"
+#include "../skills/skill_init.hpp"
 #include "../skills/skill_registry.hpp"
 #include "tool_icons.hpp"
 #include "../utils/logger.hpp"
@@ -8,6 +10,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <sstream>
 
 namespace fs = std::filesystem;
@@ -39,9 +42,19 @@ ToolSummary make_loaded_summary(const std::string& name,
     return summary;
 }
 
+std::unique_ptr<SkillRegistry> workspace_registry_for_context(
+    const AppConfig* config,
+    const ToolContext& ctx) {
+    if (!config || ctx.cwd.empty()) return nullptr;
+    auto scoped = std::make_unique<SkillRegistry>();
+    initialize_skill_registry(*scoped, *config, ctx.cwd);
+    return scoped;
+}
+
 } // namespace
 
-ToolImpl create_skill_view_tool(SkillRegistry& registry) {
+ToolImpl create_skill_view_tool(SkillRegistry& registry,
+                                const AppConfig* config) {
     ToolDef def;
     def.name = "skill_view";
     def.description = "Load the full content of a skill. Without file_path, returns the SKILL.md body. "
@@ -63,7 +76,8 @@ ToolImpl create_skill_view_tool(SkillRegistry& registry) {
         {"required", nlohmann::json::array({"name"})}
     });
 
-    auto execute = [&registry](const std::string& arguments_json, const ToolContext& /*ctx*/) -> ToolResult {
+    auto execute = [&registry, config](const std::string& arguments_json,
+                                       const ToolContext& ctx) -> ToolResult {
         std::string name;
         std::string file_path;
         try {
@@ -81,12 +95,15 @@ ToolImpl create_skill_view_tool(SkillRegistry& registry) {
             return ToolResult{err.dump(), false};
         }
 
-        auto meta = registry.find(name);
+        auto scoped_registry = workspace_registry_for_context(config, ctx);
+        SkillRegistry& active_registry = scoped_registry ? *scoped_registry : registry;
+
+        auto meta = active_registry.find(name);
         if (!meta) {
             nlohmann::json err;
             err["success"] = false;
             err["error"] = "Skill '" + name + "' not found.";
-            err["available_skills"] = available_skills_list(registry);
+            err["available_skills"] = available_skills_list(active_registry);
             err["hint"] = "Call skills_list to see all installed skills.";
             return ToolResult{err.dump(), false};
         }
@@ -98,12 +115,12 @@ ToolImpl create_skill_view_tool(SkillRegistry& registry) {
                 err["error"] = "Path traversal ('..') is not allowed.";
                 return ToolResult{err.dump(), false};
             }
-            auto resolved = registry.resolve_skill_file(name, file_path);
+            auto resolved = active_registry.resolve_skill_file(name, file_path);
             if (!resolved) {
                 nlohmann::json err;
                 err["success"] = false;
                 err["error"] = "File '" + file_path + "' not found or outside skill directory.";
-                err["supporting_files"] = registry.list_supporting_files(name);
+                err["supporting_files"] = active_registry.list_supporting_files(name);
                 return ToolResult{err.dump(), false};
             }
             std::error_code ec;
@@ -111,7 +128,7 @@ ToolImpl create_skill_view_tool(SkillRegistry& registry) {
                 nlohmann::json err;
                 err["success"] = false;
                 err["error"] = "File '" + file_path + "' does not exist.";
-                err["supporting_files"] = registry.list_supporting_files(name);
+                err["supporting_files"] = active_registry.list_supporting_files(name);
                 return ToolResult{err.dump(), false};
             }
             auto size = fs::file_size(*resolved, ec);
@@ -136,14 +153,14 @@ ToolImpl create_skill_view_tool(SkillRegistry& registry) {
         }
 
         // Main SKILL.md body path.
-        std::string body = registry.read_skill_body(meta->name);
+        std::string body = active_registry.read_skill_body(meta->name);
         if (body.empty()) {
             std::ifstream ifs(meta->skill_md_path, std::ios::binary);
             std::ostringstream oss;
             oss << ifs.rdbuf();
             body = oss.str();
         }
-        auto supporting = registry.list_supporting_files(meta->name);
+        auto supporting = active_registry.list_supporting_files(meta->name);
 
         nlohmann::json out;
         out["success"] = true;

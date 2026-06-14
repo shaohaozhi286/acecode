@@ -113,33 +113,27 @@ std::optional<std::string> probe_osc11_platform() {
     return response.substr(rgb_pos, end - rgb_pos);
 }
 
-// ---- 系统暗色模式(Windows 注册表) ----
-// HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize
-//   AppsUseLightTheme: DWORD, 0=暗色 1=亮色
+// ---- Windows console 背景属性 ----
+// OSC 11 不可用时,用当前 screen buffer 的背景色位作为回退。这个值来自
+// 终端/console 的实际文本背景属性,不要用 Windows 系统 app 主题代替终端背景。
 
-std::optional<bool> probe_system_dark_mode() {
-    HKEY key = nullptr;
-    LSTATUS status = RegOpenKeyExW(
-        HKEY_CURRENT_USER,
-        L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
-        0, KEY_READ, &key);
-    if (status != ERROR_SUCCESS) {
+std::optional<bool> probe_terminal_background_dark_mode() {
+    HANDLE hOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (!hOutput || hOutput == INVALID_HANDLE_VALUE) {
         return std::nullopt;
     }
 
-    DWORD value = 0;
-    DWORD size = sizeof(value);
-    DWORD type = 0;
-    status = RegQueryValueExW(key, L"AppsUseLightTheme", nullptr,
-                              &type, reinterpret_cast<LPBYTE>(&value), &size);
-    RegCloseKey(key);
-
-    if (status != ERROR_SUCCESS || type != REG_DWORD) {
+    CONSOLE_SCREEN_BUFFER_INFO csbi {};
+    if (!GetConsoleScreenBufferInfo(hOutput, &csbi)) {
         return std::nullopt;
     }
 
-    // 0 = dark mode, 1 = light mode → 返回 is_dark
-    return value == 0;
+    const unsigned bg = (static_cast<unsigned>(csbi.wAttributes) >> 4) & 0x0fU;
+    const auto theme = theme_from_ansi_background_index(bg);
+    LOG_INFO("[theme_detect] Windows console background index=" +
+             std::to_string(bg) + " → " +
+             (theme == DetectedTheme::dark ? "dark" : "light"));
+    return theme == DetectedTheme::dark;
 }
 
 } // namespace acecode

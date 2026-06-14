@@ -425,6 +425,36 @@ TEST(FileEditToolBehavior, RangeEditAtEofWithoutTrailingNewlineAddsNothing) {
     fs::remove(path);
 }
 
+TEST(FileEditToolBehavior, LossyReadDoesNotEnableLaterEdit) {
+    auto path = temp_file(".txt");
+    std::string original = std::string(u8"中文\n");
+    original.push_back(static_cast<char>(0xE4));
+    write_file(path, original);
+
+    ToolImpl read_tool = create_file_read_tool();
+    ToolResult read_result = read_tool.execute(
+        nlohmann::json({{"file_path", path.string()}}).dump(), ToolContext{});
+    ASSERT_TRUE(read_result.success) << read_result.output;
+    EXPECT_NE(read_result.output.find("lossy=\"true\""), std::string::npos);
+    EXPECT_EQ(read_result.output.find("range_hash=\"sha256:"), std::string::npos);
+
+    auto read_check = acecode::MtimeTracker::instance().validate_full_read_for_edit(
+        path.string(), std::string(u8"中文\n") + std::string("\xEF\xBF\xBD", 3));
+    EXPECT_EQ(read_check.status, acecode::MtimeTracker::FullReadStatus::PartialRead);
+
+    ToolResult result = run_edit({
+        {"file_path", path.string()},
+        {"old_string", std::string(u8"中文")},
+        {"new_string", std::string(u8"改动")}
+    });
+
+    EXPECT_FALSE(result.success);
+    EXPECT_NE(result.output.find("too ambiguous to edit safely"), std::string::npos);
+    EXPECT_EQ(read_file(path), original);
+
+    fs::remove(path);
+}
+
 #ifdef _WIN32
 TEST(FileEditToolBehavior, GbkFileEditPreservesLegacyEncoding) {
     auto path = temp_file(".txt");
