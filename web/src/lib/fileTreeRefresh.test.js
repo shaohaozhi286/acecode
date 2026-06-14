@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { fileTreeRefreshKeyFromItems } from './fileTreeRefresh.js';
+import { fileTreeRefreshKeyFromItems, fileTreeReloadPaths } from './fileTreeRefresh.js';
 
 function run(name, fn) {
   try {
@@ -58,4 +58,20 @@ run('fileTreeRefreshKeyFromItems: 失败工具也会触发刷新机会', () => {
     },
   ]);
   assert.equal(key, '4:bash:call-2:0:mkdir src:0');
+});
+
+run('fileTreeReloadPaths: 无展开目录时只刷新根目录', () => {
+  assert.deepEqual(fileTreeReloadPaths(null), ['']);
+  assert.deepEqual(fileTreeReloadPaths({}), ['']);
+  assert.deepEqual(fileTreeReloadPaths(new Set()), ['']);
+});
+
+run('fileTreeReloadPaths: 根目录优先,随后按展开顺序刷新子目录', () => {
+  const paths = fileTreeReloadPaths(new Set(['src', 'src/session', 'web']));
+  assert.deepEqual(paths, ['', 'src', 'src/session', 'web']);
+});
+
+run('fileTreeReloadPaths: 去重空路径和重复展开目录', () => {
+  const paths = fileTreeReloadPaths(['', 'src', 'src', 'src/tool']);
+  assert.deepEqual(paths, ['', 'src', 'src/tool']);
 });

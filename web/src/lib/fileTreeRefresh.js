@@ -30,3 +30,16 @@ export function fileTreeRefreshKeyFromItems(items) {
     .filter(Boolean)
     .join('|');
 }
+
+export function fileTreeReloadPaths(expandedDirs) {
+  const paths = [''];
+  const seen = new Set(paths);
+  if (!expandedDirs || typeof expandedDirs[Symbol.iterator] !== 'function') return paths;
+  for (const rawPath of expandedDirs) {
+    const path = safeString(rawPath);
+    if (!path || seen.has(path)) continue;
+    seen.add(path);
+    paths.push(path);
+  }
+  return paths;
+}

@@ -28,6 +28,7 @@ import {
   fileChangeStatusTitle,
   statusForTreeEntry,
 } from '../lib/fileTreeChangeStatus.js';
+import { fileTreeReloadPaths } from '../lib/fileTreeRefresh.js';
 import { clsx } from '../lib/format.js';
 import { FileTypeIcon, PanelToggleIcon, VsIcon } from './Icon.jsx';
 import { ChangeCompactList } from './ChangeReview.jsx';
@@ -65,8 +66,9 @@ function FileTree({ api, cwd, treeCache, setTreeCache, expandedDirs, setExpanded
   const [loading, setLoading] = useState(new Set()); // path 集合,正在请求中
   const [errors, setErrors]   = useState(new Map()); // path → 错误文案
 
-  const loadDir = useCallback(async (path) => {
-    if (treeCache.has(path) || loading.has(path)) return;
+  const loadDir = useCallback(async (path, options = {}) => {
+    const force = !!options.force;
+    if ((!force && treeCache.has(path)) || loading.has(path)) return;
     setLoading(prev => { const n = new Set(prev); n.add(path); return n; });
     try {
       const entries = await api.listFiles(cwd, path);
@@ -80,13 +82,22 @@ function FileTree({ api, cwd, treeCache, setTreeCache, expandedDirs, setExpanded
     }
   }, [api, cwd, treeCache, loading, setTreeCache]);
 
-  // 首次 mount + cwd 变 → 拉根。treeCache 是 cwd 私有的,新 cwd 必然为空 Map,
-  // loadDir 守卫不会命中,所以一定会发请求。
+  // 首次 mount + cwd 变 → 拉根。refreshToken 变时不清 UI 状态,而是后台重拉
+  // 根和已展开目录,避免 agent 飙字 / tool 完成时把深层目录折回初始状态。
+  const lastRefreshToken = useRef(refreshToken);
   useEffect(() => {
+    const force = refreshToken !== lastRefreshToken.current;
+    lastRefreshToken.current = refreshToken;
     if (!cwd) return;
-    loadDir('');
+    const paths = force ? fileTreeReloadPaths(expandedDirs) : [''];
+    for (const path of paths) loadDir(path, { force });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cwd, refreshToken]);
+
+  useEffect(() => {
+    if (!cwd || expandedDirs.size === 0) return;
+    for (const path of expandedDirs) loadDir(path);
+  }, [cwd, expandedDirs, loadDir]);
 
   const toggleDir = useCallback((path) => {
     setExpandedDirs(prev => {
@@ -135,14 +146,14 @@ function FileTree({ api, cwd, treeCache, setTreeCache, expandedDirs, setExpanded
   const renderEntries = (parentPath, depth) => {
     const entries = treeCache.get(parentPath);
     const err = errors.get(parentPath);
-    if (loading.has(parentPath)) {
+    if (!entries && loading.has(parentPath)) {
       return (
         <div className="px-2 py-1 text-fg-mute text-[11px]" style={{ paddingLeft: 12 + depth * 14 }}>
           加载中…
         </div>
       );
     }
-    if (err) {
+    if (!entries && err) {
       return (
         <div className="px-2 py-1 text-danger text-[11px]" style={{ paddingLeft: 12 + depth * 14 }}>
           {err}
@@ -309,18 +320,6 @@ export function SidePanel({
 
   const refreshFileTree = useCallback(() => {
     if (!cwdKey) return;
-    setTreeCacheByCwd(prev => {
-      if (!prev.has(cwdKey)) return prev;
-      const n = new Map(prev);
-      n.delete(cwdKey);
-      return n;
-    });
-    setExpandedDirsByCwd(prev => {
-      if (!prev.has(cwdKey)) return prev;
-      const n = new Map(prev);
-      n.delete(cwdKey);
-      return n;
-    });
     setFileRefreshToken(prev => prev + 1);
   }, [cwdKey]);
 
