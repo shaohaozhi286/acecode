@@ -423,6 +423,7 @@ export function ChangeReviewPanel({
   initialExpandedFile = '',
   title = '审查',
   dataRegion = 'side-panel',
+  initialExpandedFileRevision = 0,
 }) {
   const list = safeGroups(groups);
   const changeSummary = normalizedSummary(list, summary);
@@ -448,6 +449,8 @@ export function ChangeReviewPanel({
   const fileListRef = useRef(null);
   const savedScrollTopRef = useRef(0);
   const suppressScrollRecordRef = useRef(false);
+  const pendingScrollFileRef = useRef('');
+  const syncedExpandedRequestRef = useRef('');
   useLayoutEffect(() => {
     const el = fileListRef.current;
     if (!el) return undefined;
@@ -469,9 +472,41 @@ export function ChangeReviewPanel({
   }, [list]);
 
   useEffect(() => {
-    if (!initialExpandedFile) return;
+    const requestKey = `${initialExpandedFile}\u0000${initialExpandedFileRevision}`;
+    if (!initialExpandedFile) {
+      syncedExpandedRequestRef.current = '';
+      return;
+    }
+    if (syncedExpandedRequestRef.current === requestKey) return;
+    if (!list.some((group) => group.file === initialExpandedFile)) return;
+    syncedExpandedRequestRef.current = requestKey;
+    pendingScrollFileRef.current = initialExpandedFile;
     setOpenFiles(new Set([initialExpandedFile]));
-  }, [initialExpandedFile]);
+  }, [initialExpandedFile, initialExpandedFileRevision, list]);
+
+  useLayoutEffect(() => {
+    const file = pendingScrollFileRef.current;
+    const el = fileListRef.current;
+    if (!file || !el || !openFiles.has(file)) return;
+    const target = Array.from(el.querySelectorAll('[data-review-file-section]'))
+      .find((node) => node.getAttribute('data-review-file-section') === file);
+    if (!target) return;
+    pendingScrollFileRef.current = '';
+    suppressScrollRecordRef.current = true;
+    try {
+      target.scrollIntoView({ block: 'nearest' });
+    } catch {
+      target.scrollIntoView(false);
+    }
+    savedScrollTopRef.current = el.scrollTop;
+    const frame = window.requestAnimationFrame(() => {
+      suppressScrollRecordRef.current = false;
+    });
+    return () => {
+      window.cancelAnimationFrame(frame);
+      suppressScrollRecordRef.current = false;
+    };
+  }, [openFiles]);
 
   useEffect(() => {
     const el = panelRef.current;
@@ -562,7 +597,11 @@ export function ChangeReviewPanel({
         {list.map((group) => {
           const open = openFiles.has(group.file);
           return (
-            <section key={group.file} className="ace-review-file">
+            <section
+              key={group.file}
+              className="ace-review-file"
+              data-review-file-section={group.file}
+            >
               <ChangeFileButton
                 group={group}
                 open={open}
@@ -583,13 +622,20 @@ export function ChangeReviewPanel({
   );
 }
 
-export function SessionChangeDetails({ groups, summary, cwd = '', expandedFile = '' }) {
+export function SessionChangeDetails({
+  groups,
+  summary,
+  cwd = '',
+  expandedFile = '',
+  expandedFileRevision = 0,
+}) {
   return (
     <ChangeReviewPanel
       groups={groups}
       summary={summary}
       cwd={cwd}
       initialExpandedFile={expandedFile}
+      initialExpandedFileRevision={expandedFileRevision}
       title="会话变更"
       dataRegion="preview-panel"
     />

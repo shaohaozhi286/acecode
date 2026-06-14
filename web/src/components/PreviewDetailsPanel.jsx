@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { usePreference } from '../lib/usePreference.js';
 import { clsx } from '../lib/format.js';
 import { PREVIEW_TAB_TYPES } from '../lib/previewTabs.js';
@@ -226,6 +227,7 @@ export function PreviewDetailsPanel({
           summary={changeSummary}
           cwd={cwd}
           expandedFile={active.expandedFile || ''}
+          expandedFileRevision={active.expandedFileRevision || 0}
         />
       );
     }
@@ -690,7 +692,7 @@ export function PreviewDetailsPanel({
       <div className="ace-preview-details-body">
         {renderedBody}
       </div>
-      {tabDragGhost && (
+      {tabDragGhost && createPortal(
         <div
           className="ace-preview-details-tab-drag-ghost"
           style={{
@@ -707,7 +709,8 @@ export function PreviewDetailsPanel({
             />
           )}
           <span className="ace-preview-details-tab-label">{tabDragGhost.label}</span>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );

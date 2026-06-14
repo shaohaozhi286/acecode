@@ -352,6 +352,88 @@ TEST(FileEditToolBehavior, RangeEditHashMismatchReturnsCurrentRange) {
     fs::remove(path);
 }
 
+TEST(FileEditToolBehavior, RangeEditAllowsRedundantOldStringWhenHashMatches) {
+    auto path = temp_file(".txt");
+    write_file(path, "a\nb\nc\n");
+    auto decoded = acecode::read_text_file_buffer(path.string());
+    ASSERT_TRUE(decoded.success) << decoded.error;
+    std::string hash = acecode::range_hash(decoded.buffer.text, 2, 2);
+
+    ToolResult result = run_edit({
+        {"file_path", path.string()},
+        {"start_line", 2},
+        {"end_line", 2},
+        {"expected_hash", hash},
+        {"old_string", "b"},
+        {"new_string", "B"}
+    });
+
+    ASSERT_TRUE(result.success) << result.output;
+    EXPECT_EQ(read_file(path), "a\nB\nc\n");
+
+    fs::remove(path);
+}
+
+TEST(FileEditToolBehavior, RangeEditStaleHashCanUseOldStringAsCurrentRangeGuard) {
+    auto path = temp_file(".txt");
+    write_file(path, "a\nb\nc\n");
+
+    ToolResult result = run_edit({
+        {"file_path", path.string()},
+        {"start_line", 2},
+        {"end_line", 2},
+        {"expected_hash", "sha256:stale"},
+        {"old_string", "b"},
+        {"new_string", "B"}
+    });
+
+    ASSERT_TRUE(result.success) << result.output;
+    EXPECT_EQ(read_file(path), "a\nB\nc\n");
+
+    fs::remove(path);
+}
+
+TEST(FileEditToolBehavior, RangeEditStaleHashAlreadyAppliedSucceedsWithoutWrite) {
+    auto path = temp_file(".txt");
+    write_file(path, "a\nB\nc\n");
+
+    ToolResult result = run_edit({
+        {"file_path", path.string()},
+        {"start_line", 2},
+        {"end_line", 2},
+        {"expected_hash", "sha256:stale"},
+        {"new_string", "B"}
+    });
+
+    ASSERT_TRUE(result.success) << result.output;
+    EXPECT_NE(result.output.find("already applied"), std::string::npos);
+    ASSERT_TRUE(result.summary.has_value());
+    EXPECT_EQ(result.summary->verb, "Already applied");
+    EXPECT_EQ(read_file(path), "a\nB\nc\n");
+
+    fs::remove(path);
+}
+
+TEST(FileEditToolBehavior, RangeEditStaleHashStillRejectsNonMatchingOldString) {
+    auto path = temp_file(".txt");
+    write_file(path, "a\nb\nc\n");
+
+    ToolResult result = run_edit({
+        {"file_path", path.string()},
+        {"start_line", 2},
+        {"end_line", 2},
+        {"expected_hash", "sha256:stale"},
+        {"old_string", "different"},
+        {"new_string", "B"}
+    });
+
+    EXPECT_FALSE(result.success);
+    EXPECT_NE(result.output.find("range hash mismatch"), std::string::npos);
+    EXPECT_EQ(read_file(path), "a\nb\nc\n");
+
+    fs::remove(path);
+}
+
 // 回归测试:range 模式的删除区间包含 end_line 行尾的换行符,而模型给出的 new_string
 // 习惯上不带尾随换行。修复前替换后 end_line 的下一行会被直接拼接到新内容末尾,
 // 实际损伤如 `});` 与 `const handleImageLoaded = (ev) => {` 粘连成一行,

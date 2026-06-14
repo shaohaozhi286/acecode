@@ -405,6 +405,37 @@ static ToolResult make_hash_mismatch_result(const std::string& file_path,
     return result;
 }
 
+static ToolResult make_range_already_applied_result(const std::string& file_path,
+                                                    int start_line,
+                                                    int end_line,
+                                                    const std::string& current_hash) {
+    std::ostringstream oss;
+    oss << "Edit already applied: " << file_path << "\n"
+        << "Range " << start_line << "-" << end_line
+        << " already matches new_string; no write performed.";
+    ToolResult result{oss.str(), true};
+    ToolSummary summary;
+    summary.verb = "Already applied";
+    summary.object = file_path;
+    summary.metrics.emplace_back("range", std::to_string(start_line) + "-" + std::to_string(end_line));
+    summary.metrics.emplace_back("hash", current_hash);
+    summary.metrics.emplace_back("+", "0");
+    summary.metrics.emplace_back("-", "0");
+    summary.icon = tool_icon("file_edit");
+    result.summary = std::move(summary);
+    return result;
+}
+
+static std::string normalize_range_payload(const std::string& value,
+                                           const std::string& current_range) {
+    std::string normalized = normalize_text_to_lf(value);
+    if (!current_range.empty() && current_range.back() == '\n' &&
+        !normalized.empty() && normalized.back() != '\n') {
+        normalized.push_back('\n');
+    }
+    return normalized;
+}
+
 static ToolResult make_old_string_not_found_result(const std::string& file_path,
                                                    const std::string& normalized_content,
                                                    const std::string& requested_old) {
@@ -500,11 +531,6 @@ static ToolResult execute_file_edit(const std::string& arguments_json, const Too
         if (!file_exists) {
             return ToolResult{ToolErrors::file_not_found(file_path, current_path_utf8()), false};
         }
-        if (!old_string.empty()) {
-            return ToolResult{"[Error] Range edit cannot be combined with old_string. "
-                              "Use either old_string/new_string or start_line/end_line/expected_hash.",
-                              false};
-        }
         if (start_line <= 0 || end_line < start_line || expected_hash.empty()) {
             return ToolResult{"[Error] Range edit requires start_line, end_line, and expected_hash.", false};
         }
@@ -519,25 +545,22 @@ static ToolResult execute_file_edit(const std::string& arguments_json, const Too
 
         const std::string current_range = buffer.text.substr(start_offset, end_offset - start_offset);
         const std::string current_hash = range_hash(buffer.text, start_line, end_line);
+        const std::string normalized_new = normalize_range_payload(new_string, current_range);
+        const std::string normalized_old = normalize_range_payload(old_string, current_range);
         if (normalize_expected_hash(expected_hash) != current_hash) {
-            return make_hash_mismatch_result(file_path, current_range, start_line, end_line, current_hash);
+            if (current_range == normalized_new) {
+                return make_range_already_applied_result(file_path, start_line, end_line, current_hash);
+            }
+            if (old_string.empty() || normalized_old != current_range) {
+                return make_hash_mismatch_result(file_path, current_range, start_line, end_line, current_hash);
+            }
+            LOG_DEBUG("file_edit: stale range hash accepted because old_string matches current range");
         }
 
-        std::string normalized_new = normalize_text_to_lf(new_string);
-        // 删除区间包含 end_line 行尾的换行符（end_offset 指向下一行行首），而调用方给出的
-        // new_string 通常不带尾随换行；不补回这个换行会把 end_line 的下一行直接拼接到
-        // 新内容末尾（如 `});` 与 `const foo = ...` 粘成一行）。new_string 为空表示整行
-        // 删除，保持原语义不补。
-        const bool range_has_trailing_newline =
-            end_offset > start_offset && buffer.text[end_offset - 1] == '\n';
-        if (range_has_trailing_newline && !normalized_new.empty() &&
-            normalized_new.back() != '\n') {
-            normalized_new.push_back('\n');
-        }
         std::string new_content = buffer.text;
         new_content.replace(start_offset, end_offset - start_offset, normalized_new);
         if (new_content == buffer.text) {
-            return ToolResult{ToolErrors::no_changes_to_make(), false};
+            return make_range_already_applied_result(file_path, start_line, end_line, current_hash);
         }
 
         return run_validated_write(file_path, true, buffer.text, new_content,
@@ -598,6 +621,7 @@ ToolImpl create_file_edit_tool() {
     def.description = "Edit a file by replacing an exact string with a new string. "
                       "Read existing non-empty files with file_read before editing. "
                       "Prefer start_line/end_line/expected_hash from file_read metadata for precise range edits. "
+                      "When complete range arguments are present, old_string is treated only as redundant current-range validation. "
                       "The old_string must appear exactly once unless replace_all is true. "
                       "Use empty old_string only to create a missing file or fill a blank file. "
                       "Include surrounding context lines to ensure uniqueness. "

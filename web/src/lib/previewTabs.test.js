@@ -74,6 +74,28 @@ run('openSessionChangesTab reuses the same session tab and updates clicked file'
   assert.equal(tabs[0].fileCount, 3);
 });
 
+run('openSessionChangesTab increments expanded file revision for repeated clicks', () => {
+  let state = {};
+  state = openSessionChangesTab(state, {
+    scopeKey: 'workspace-a',
+    sessionId: 's1',
+    expandedFile: 'src/a.cpp',
+    fileCount: 2,
+  });
+  const firstRevision = activePreviewTab(state, { scopeKey: 'workspace-a', sessionId: 's1' }).expandedFileRevision;
+
+  state = openSessionChangesTab(state, {
+    scopeKey: 'workspace-a',
+    sessionId: 's1',
+    expandedFile: 'src/a.cpp',
+    fileCount: 2,
+  });
+
+  const active = activePreviewTab(state, { scopeKey: 'workspace-a', sessionId: 's1' });
+  assert.equal(active.expandedFile, 'src/a.cpp');
+  assert.equal(active.expandedFileRevision, firstRevision + 1);
+});
+
 run('file tab can become active when session change tab also exists', () => {
   let state = {};
   state = openSessionChangesTab(state, {

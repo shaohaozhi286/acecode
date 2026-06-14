@@ -120,11 +120,13 @@ export function openSessionChangesTab(state, {
   if (!sessionId) return state || {};
   const source = state && typeof state === 'object' ? state : {};
   const key = sessionChangesTabKey(sessionId);
+  const previousTab = source.changeTabsBySession?.[sessionId];
   const tab = {
     key,
     type: PREVIEW_TAB_TYPES.SESSION_CHANGES,
     sessionId,
     expandedFile: normalizeTreePath(expandedFile),
+    expandedFileRevision: (Number(previousTab?.expandedFileRevision) || 0) + 1,
     fileCount: Number.isFinite(Number(fileCount)) ? Number(fileCount) : 0,
   };
   return {
