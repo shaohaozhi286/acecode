@@ -612,6 +612,9 @@ std::string SessionRegistry::create(const SessionOptions& opts) {
         std::lock_guard<std::mutex> lk(mu_);
         entries_.emplace(id, std::move(entry));
     }
+    if (auto* active = lookup(id)) {
+        if (active->loop) active->loop->dispatch_session_start_hook("startup");
+    }
     if (resolved.auto_start && !resolved.initial_user_message.empty()) {
         UserInput input;
         input.text = resolved.initial_user_message;
@@ -675,6 +678,15 @@ SessionRegistry::make_entry_locked(const std::string& id,
             entry->perm->set_mode(PermissionMode::Plan);
         } else {
             entry->perm->set_mode(restored_mode);
+        }
+    } else if (!opts.permission_mode.empty()) {
+        const PermissionMode requested_mode =
+            permission_mode_from_name(opts.permission_mode);
+        if (requested_mode == PermissionMode::Plan) {
+            entry->perm->set_mode(PermissionMode::Default);
+            entry->perm->set_mode(PermissionMode::Plan);
+        } else {
+            entry->perm->set_mode(requested_mode);
         }
     }
     entry->sm->set_permission_mode(
@@ -768,9 +780,11 @@ bool SessionRegistry::resume(const std::string& id, const SessionOptions& opts) 
     if (id.empty()) return false;
     SessionOptions resolved = with_resolved_workspace(deps_, opts);
 
-    std::lock_guard<std::mutex> lk(mu_);
-    if (entries_.find(id) != entries_.end()) {
-        return true;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (entries_.find(id) != entries_.end()) {
+            return true;
+        }
     }
 
     SessionManager meta_reader;
@@ -801,8 +815,12 @@ bool SessionRegistry::resume(const std::string& id, const SessionOptions& opts) 
         emit_goal_audit_message(*entry, *goal, "session_resume", "Continuing");
     }
     entry->loop->maybe_continue_goal();
+    entry->loop->dispatch_session_start_hook("resume");
 
-    entries_.emplace(id, std::move(entry));
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        entries_.emplace(id, std::move(entry));
+    }
     LOG_INFO("[registry] resumed session " + id);
     return true;
 }

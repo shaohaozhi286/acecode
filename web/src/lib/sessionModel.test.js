@@ -10,6 +10,7 @@ import {
   resolveHomeModelName,
   selectedModelName,
   withCreateSessionModel,
+  withCreateSessionPreferences,
 } from './sessionModel.js';
 
 function run(name, fn) {
@@ -180,4 +181,27 @@ run('create session options include selected home model without mutating source'
 
 run('create session options omit empty home model', () => {
   assert.deepEqual(withCreateSessionModel({ auto_start: false }, '  '), { auto_start: false });
+});
+
+run('create session preferences include selected model and permission mode', () => {
+  const base = { initial_user_message: 'hello', auto_start: true };
+  const next = withCreateSessionPreferences(base, { modelName: 'fast', permissionMode: 'plan' });
+  assert.deepEqual(next, {
+    initial_user_message: 'hello',
+    auto_start: true,
+    name: 'fast',
+    permission_mode: 'plan',
+  });
+  assert.deepEqual(base, { initial_user_message: 'hello', auto_start: true });
+});
+
+run('create session preferences normalize permission mode aliases', () => {
+  const next = withCreateSessionPreferences({}, { permissionMode: 'acceptEdits' });
+  assert.deepEqual(next, { permission_mode: 'accept-edits' });
+});
+
+run('create session preferences omit empty permission mode', () => {
+  assert.deepEqual(withCreateSessionPreferences({ auto_start: false }, { permissionMode: '  ' }), {
+    auto_start: false,
+  });
 });

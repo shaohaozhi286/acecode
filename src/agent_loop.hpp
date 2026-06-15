@@ -10,6 +10,7 @@
 #include "session/permission_prompter.hpp"
 #include "session/ask_user_question_prompter.hpp"
 #include "config/config.hpp"
+#include "hooks/hook_runtime.hpp"
 
 #include <vector>
 #include <string>
@@ -193,6 +194,7 @@ public:
 
     void set_session_manager(SessionManager* sm) { session_manager_ = sm; }
     void set_hook_manager(HookManager* hm) { hook_manager_ = hm; }
+    void dispatch_session_start_hook(const std::string& source);
     void restore_goal_runtime();
     void publish_current_goal_state();
     void maybe_continue_goal();
@@ -236,7 +238,7 @@ private:
     void run_agent_with_display(const std::string& prompt,
                                 const std::string& display_text,
                                 bool hidden_goal_context = false);
-    void run_shell(const std::string& command);
+    void run_shell(std::string command);
     void run_compact();
     void account_goal_usage(std::int64_t token_delta = 0, bool allow_complete = false);
     void emit_goal_updated(const ThreadGoal& goal);
@@ -264,6 +266,13 @@ private:
                                  const std::string& source_tool);
     void dispatch_assistant_completed_hook(const ChatMessage& assistant_msg,
                                            const std::shared_ptr<LlmProvider>& provider_snapshot);
+    HookCommonPayloadFields build_hook_common_fields(const std::string& event_name) const;
+    void apply_hook_side_effects(const HookAggregateOutcome& outcome,
+                                 bool include_additional_context = true);
+    std::string drain_hook_request_context();
+    HookAggregateOutcome dispatch_codex_hook(const std::string& event_name,
+                                             const std::string& matcher_value,
+                                             const nlohmann::json& payload);
 
     // ---- Refactored sub-methods of run_agent_with_input ----
     // These decompose the monolithic turn function into focused phases.
@@ -377,6 +386,8 @@ private:
     int auto_compact_consecutive_failures_ = 0;
     SessionManager* session_manager_ = nullptr;
     HookManager* hook_manager_ = nullptr;
+    std::vector<std::string> hook_request_context_;
+    bool stop_hook_active_ = false;
     const SkillRegistry* skill_registry_ = nullptr;
     const MemoryRegistry* memory_registry_ = nullptr;
     const MemoryConfig* memory_cfg_ = nullptr;

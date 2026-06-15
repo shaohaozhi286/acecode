@@ -56,7 +56,7 @@ import {
   normalizeModelState,
   resolveHomeModelName,
   selectedModelName,
-  withCreateSessionModel,
+  withCreateSessionPreferences,
 } from '../lib/sessionModel.js';
 import { normalizePermissionMode, permissionModeOption } from '../lib/permissionMode.js';
 import { ATTACHMENT_HARD_LIMIT_BYTES, normalizeImageFile } from '../lib/imageNormalize.js';
@@ -513,6 +513,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   const [expandedActivityKeys, setExpandedActivityKeys] = useState(() => new Set());
   const scrollRef = useRef(null);
   const tailFollowStateRef = useRef(CHAT_TAIL_FOLLOW_STATE.FOLLOWING);
+  const tailFollowScrollRafRef = useRef({ first: 0, second: 0 });
   const lastUserTurnKeyRef = useRef('');
   const inputRef = useRef(null);
   const layoutRef = useRef(null);
@@ -623,7 +624,10 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     if (homeSubmitting) return null;
     const target = selectedHomeWorkspace || fallbackWorkspaceOption(ref, health);
     const targetHash = target?.hash || '';
-    const options = withCreateSessionModel(createOptions || sessionCreateOptionsForText(text), homeModelName);
+    const options = withCreateSessionPreferences(
+      createOptions || sessionCreateOptionsForText(text),
+      { modelName: homeModelName, permissionMode },
+    );
     const create = isRealWorkspaceHash(targetHash)
       ? api.createWorkspaceSession(targetHash, options)
       : api.createSession(options);
@@ -645,7 +649,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     } finally {
       setHomeSubmitting(false);
     }
-  }, [api, health, homeModelName, homeSubmitting, onSessionPromoted, ref, selectedHomeWorkspace]);
+  }, [api, health, homeModelName, homeSubmitting, onSessionPromoted, permissionMode, ref, selectedHomeWorkspace]);
 
   const uploadMediaFilesToSession = useCallback((targetSid, files) => {
     for (const [index, file] of Array.from(files || []).entries()) {
@@ -950,7 +954,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         const defaultName = defaultResult.status === 'fulfilled'
           ? (defaultResult.value?.name || defaultResult.value?.default_model_name || '')
           : '';
-        setHomeModelName((prev) => resolveHomeModelName(options, defaultName, prev));
+        setHomeModelName(resolveHomeModelName(options, defaultName, ''));
       });
       return () => { cancelled = true; };
     }
@@ -996,8 +1000,8 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     try {
       const requests = targetSid
         ? [api.listModels(), api.getSessionModel(targetSid, workspaceHash)]
-        : [api.listModels(), api.getDefaultModel()];
-      const [modelsResult, stateResult] = await Promise.allSettled(requests);
+        : [api.listModels(), api.getDefaultModel(), api.getDefaultPermissionMode()];
+      const [modelsResult, stateResult, permissionResult] = await Promise.allSettled(requests);
       if (targetSid && sidRef.current !== targetSid) return;
       const nextOptions = modelsResult.status === 'fulfilled'
         ? normalizeModelOptions(modelsResult.value)
@@ -1012,7 +1016,10 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         const defaultName = stateResult.status === 'fulfilled'
           ? (stateResult.value?.name || stateResult.value?.default_model_name || '')
           : '';
-        setHomeModelName((prev) => resolveHomeModelName(nextOptions, defaultName, prev));
+        setHomeModelName(resolveHomeModelName(nextOptions, defaultName, ''));
+        if (permissionResult?.status === 'fulfilled') {
+          setPermissionMode(normalizePermissionMode(permissionResult.value?.mode));
+        }
       }
       if (modelsResult.status === 'fulfilled') {
         toast({ kind: 'ok', text: '模型列表已刷新' });
@@ -1026,9 +1033,16 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
 
   useEffect(() => {
     if (!sid) {
-      setPermissionMode('default');
+      let cancelled = false;
       setPermissionSwitching(false);
-      return undefined;
+      api.getDefaultPermissionMode()
+        .then((state) => {
+          if (!cancelled) setPermissionMode(normalizePermissionMode(state?.mode));
+        })
+        .catch(() => {
+          if (!cancelled) setPermissionMode('default');
+        });
+      return () => { cancelled = true; };
     }
     let cancelled = false;
     setPermissionSwitching(false);
@@ -1079,10 +1093,18 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     tailFollowStateRef.current = nextChatTailFollowState(tailFollowStateRef.current, action);
   }, []);
 
+  const cancelTailFollowScroll = useCallback(() => {
+    const pending = tailFollowScrollRafRef.current || {};
+    if (pending.first) cancelAnimationFrame(pending.first);
+    if (pending.second) cancelAnimationFrame(pending.second);
+    tailFollowScrollRafRef.current = { first: 0, second: 0 };
+  }, []);
+
   const pauseTailFollowForReview = useCallback(() => {
+    cancelTailFollowScroll();
     if (!busy && transcriptStatus !== 'running') return;
     setTailFollowFromAction({ type: 'review_pause' });
-  }, [busy, setTailFollowFromAction, transcriptStatus]);
+  }, [busy, cancelTailFollowScroll, setTailFollowFromAction, transcriptStatus]);
 
   const handleMessagesScroll = useCallback(() => {
     const el = scrollRef.current;
@@ -1155,26 +1177,29 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   // 只在用户仍跟随底部时自动滚到底。审查栏会异步测量高度并给消息区补
   // bottom padding,因此跟随模式下仍需在 padding 生效后补几帧滚动。
   useLayoutEffect(() => {
-    if (!shouldAutoFollowChatTail(tailFollowStateRef.current)) return undefined;
+    if (!shouldAutoFollowChatTail(tailFollowStateRef.current)) {
+      cancelTailFollowScroll();
+      return undefined;
+    }
 
-    let raf1 = 0;
-    let raf2 = 0;
     const scrollToBottom = () => {
       const el = scrollRef.current;
       if (el) el.scrollTop = el.scrollHeight;
     };
 
+    cancelTailFollowScroll();
     scrollToBottom();
-    raf1 = requestAnimationFrame(() => {
+    tailFollowScrollRafRef.current.first = requestAnimationFrame(() => {
+      tailFollowScrollRafRef.current.first = 0;
       scrollToBottom();
-      raf2 = requestAnimationFrame(scrollToBottom);
+      tailFollowScrollRafRef.current.second = requestAnimationFrame(() => {
+        tailFollowScrollRafRef.current.second = 0;
+        scrollToBottom();
+      });
     });
 
-    return () => {
-      if (raf1) cancelAnimationFrame(raf1);
-      if (raf2) cancelAnimationFrame(raf2);
-    };
-  }, [renderedItems, busy, changeDockBottomPadding, sid]);
+    return cancelTailFollowScroll;
+  }, [renderedItems, busy, changeDockBottomPadding, sid, cancelTailFollowScroll]);
 
   useEffect(() => {
     let timer = 0;
@@ -1523,11 +1548,24 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
       .finally(() => setGoalStopping(false));
   }, [abort, api, busy, goal, goalStopping, sid]);
 
-  const selectHomeModel = useCallback((name) => {
+  const selectHomeModel = useCallback(async (name) => {
     const nextName = String(name || '');
-    if (!nextName || modelRefreshing) return;
+    const previousName = String(homeModelName || '');
+    if (!nextName || nextName === previousName || modelRefreshing || modelSwitching) return;
     setHomeModelName(nextName);
-  }, [modelRefreshing]);
+    setModelSwitching(true);
+    try {
+      const state = await api.setDefaultModel(nextName);
+      const confirmedName = String(state?.default_model_name || state?.name || nextName);
+      setHomeModelName(confirmedName || nextName);
+      toast({ kind: 'ok', text: '默认模型已设为 ' + (confirmedName || nextName) });
+    } catch (e) {
+      setHomeModelName(previousName);
+      toast({ kind: 'err', text: '默认模型设置失败:' + (e?.message || '') });
+    } finally {
+      setModelSwitching(false);
+    }
+  }, [api, homeModelName, modelRefreshing, modelSwitching]);
 
   const switchSessionModel = useCallback(async (name) => {
     const nextName = String(name || '');
@@ -1546,6 +1584,30 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
       setModelSwitching(false);
     }
   }, [api, modelState, modelSwitching, sid]);
+
+  const changeStatusBarModel = useCallback((name) => {
+    if (sid) void switchSessionModel(name);
+    else void selectHomeModel(name);
+  }, [selectHomeModel, sid, switchSessionModel]);
+
+  const switchHomeDefaultPermissionMode = useCallback(async (mode) => {
+    const nextMode = normalizePermissionMode(mode);
+    const previousMode = normalizePermissionMode(permissionMode);
+    if (nextMode === previousMode || permissionSwitching) return;
+    setPermissionMode(nextMode);
+    setPermissionSwitching(true);
+    try {
+      const state = await api.setDefaultPermissionMode(nextMode);
+      const confirmedMode = normalizePermissionMode(state?.mode || nextMode);
+      setPermissionMode(confirmedMode);
+      toast({ kind: 'ok', text: '默认权限模式已设为 ' + permissionModeOption(confirmedMode).label });
+    } catch (e) {
+      setPermissionMode(previousMode);
+      toast({ kind: 'err', text: '默认权限模式设置失败:' + (e?.message || '') });
+    } finally {
+      setPermissionSwitching(false);
+    }
+  }, [api, permissionMode, permissionSwitching]);
 
   const switchPermissionMode = useCallback(async (mode) => {
     const nextMode = normalizePermissionMode(mode);
@@ -1566,6 +1628,11 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
       setPermissionSwitching(false);
     }
   }, [api, onPermissionModeChanged, permissionMode, permissionSwitching, sid]);
+
+  const changeStatusBarPermissionMode = useCallback((mode) => {
+    if (sid) void switchPermissionMode(mode);
+    else void switchHomeDefaultPermissionMode(mode);
+  }, [sid, switchHomeDefaultPermissionMode, switchPermissionMode]);
 
   useLayoutEffect(() => {
     const element = layoutRef.current;
@@ -2172,9 +2239,13 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
           modelOptions={modelOptions}
           selectedModelName={homeModelName}
           modelLoad={homeModelLoad}
+          modelSwitching={modelSwitching}
           modelRefreshing={modelRefreshing}
-          onModelChange={selectHomeModel}
+          onModelChange={changeStatusBarModel}
           onRefreshModels={refreshSessionModels}
+          permissionMode={permissionMode}
+          permissionSwitching={permissionSwitching}
+          onPermissionModeChange={changeStatusBarPermissionMode}
         />
       </div>
     );
@@ -2505,13 +2576,13 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         modelLoad={currentModelLoad}
         modelSwitching={modelSwitching}
         modelRefreshing={modelRefreshing}
-        onModelChange={switchSessionModel}
+        onModelChange={changeStatusBarModel}
         onRefreshModels={refreshSessionModels}
         tokenBudget={tokenBudget}
         goal={goal}
         permissionMode={permissionMode}
         permissionSwitching={permissionSwitching}
-        onPermissionModeChange={switchPermissionMode}
+        onPermissionModeChange={changeStatusBarPermissionMode}
       />
       </div>
       {previewPanelVisible && !previewPanelMaximized && (

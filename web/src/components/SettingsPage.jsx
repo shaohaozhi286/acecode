@@ -32,6 +32,13 @@ import { PERMISSION_MODES, normalizePermissionMode } from '../lib/permissionMode
 import { sessionDisplayTitle } from '../lib/sessionTitle.js';
 import { formatUsageTokens, normalizeUsageStats, usageDataNote } from '../lib/usageStats.js';
 import {
+  hookActionState,
+  hookEmptyState,
+  hookSettingsErrorMessage,
+  hookStatusLabel,
+  normalizeHookSnapshot,
+} from '../lib/hooksSettings.js';
+import {
   formatProgramVersion,
   formatWebCoreDetail,
   formatWebCoreLabel,
@@ -54,6 +61,7 @@ const NAV = [
   { key: 'mcp', label: 'MCP 服务器', icon: 'mcp' },
   { key: 'models', label: '模型', icon: 'brain' },
   { key: 'tools', label: '工具', icon: 'tool' },
+  { key: 'hooks', label: '钩子', icon: 'extension' },
   { key: 'archived', label: '已归档会话', icon: 'archive' },
   { key: 'usage', label: '使用情况', icon: 'list' },
 ];
@@ -152,6 +160,7 @@ export function SettingsPage({
           {activeNavKey === 'mcp' && <SectionMCP />}
           {activeNavKey === 'models' && <SectionModel />}
           {activeNavKey === 'tools' && <SectionTools />}
+          {activeNavKey === 'hooks' && <SectionHooks />}
           {activeNavKey === 'archived' && <SectionArchived />}
           {activeNavKey === 'usage' && <SectionUsage />}
         </div>
@@ -930,6 +939,260 @@ function SectionTools() {
         更多内置工具即将加入
       </div>
     </>
+  );
+}
+
+// ─── 钩子 ──────────────────────────────────────────────────────────────────
+
+function SectionHooks() {
+  const [snapshot, setSnapshot] = useState(() => normalizeHookSnapshot({ hooks: [] }));
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [busyId, setBusyId] = useState('');
+  const [error, setError] = useState('');
+
+  const applySnapshot = useCallback((data) => {
+    setSnapshot(normalizeHookSnapshot(data || {}));
+  }, []);
+
+  const load = useCallback(async (refresh = false) => {
+    if (refresh) setRefreshing(true); else setLoading(true);
+    setError('');
+    try {
+      const data = refresh ? await api.refreshHooks() : await api.listHooks();
+      applySnapshot(data);
+    } catch (e) {
+      const message = hookSettingsErrorMessage(e);
+      setError(message);
+      toast({ kind: 'err', text: '加载钩子失败:' + message });
+    } finally {
+      if (refresh) setRefreshing(false); else setLoading(false);
+    }
+  }, [applySnapshot]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError('');
+    api.listHooks()
+      .then((data) => {
+        if (!cancelled) applySnapshot(data);
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          const message = hookSettingsErrorMessage(e);
+          setError(message);
+          toast({ kind: 'err', text: '加载钩子失败:' + message });
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [applySnapshot]);
+
+  const runAction = async (hook, action) => {
+    if (!hook?.id) return;
+    const token = `${hook.id}:${action}`;
+    setBusyId(token);
+    setError('');
+    try {
+      let data;
+      if (action === 'trust') data = await api.trustHook(hook.id);
+      else if (action === 'disable') data = await api.disableHook(hook.id);
+      else data = await api.enableHook(hook.id);
+      applySnapshot(data);
+      const label = action === 'trust' ? '已信任钩子' : (action === 'disable' ? '已禁用钩子' : '已启用钩子');
+      toast({ kind: 'ok', text: label });
+    } catch (e) {
+      const message = hookSettingsErrorMessage(e);
+      setError(message);
+      toast({ kind: 'err', text: '钩子操作失败:' + message });
+    } finally {
+      setBusyId('');
+    }
+  };
+
+  const empty = hookEmptyState(snapshot);
+
+  return (
+    <>
+      <div className="flex items-start justify-between gap-4 mb-5">
+        <div>
+          <h2 className="text-xl font-bold mb-2">钩子</h2>
+          <p className="text-[12px] text-fg-mute">
+            通过配置和已启用的插件管理生命周期钩子。
+            <button
+              type="button"
+              onClick={() => openExternalUrl('https://developers.openai.com/codex/hooks')}
+              className="ml-2 text-accent hover:underline"
+            >
+              了解更多
+            </button>
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => load(true)}
+          disabled={loading || refreshing}
+          title="刷新钩子"
+          className="h-8 w-8 inline-flex items-center justify-center rounded-md border border-border bg-surface text-fg-2 hover:bg-surface-hi transition disabled:opacity-50"
+        >
+          <RefreshIcon size={15} className={clsx(refreshing && 'animate-spin')} />
+        </button>
+      </div>
+
+      {error && (
+        <div className="mb-3 px-3 py-2 rounded-md border border-danger bg-surface text-danger text-[12px]">
+          {error}
+        </div>
+      )}
+
+      {loading ? (
+        <div className="px-3.5 py-8 rounded-md bg-surface border border-border text-[12px] text-fg-mute text-center">
+          <span className="ace-spinner mr-2" /> 加载中
+        </div>
+      ) : snapshot.isEmpty ? (
+        <div className="rounded-lg border border-border bg-surface px-4 py-4 max-w-3xl">
+          <div className="text-[14px] font-semibold text-fg mb-1">{empty.title}</div>
+          <div className="text-[12px] text-fg-mute">{empty.body}</div>
+        </div>
+      ) : (
+        <div className="space-y-3 max-w-5xl">
+          {snapshot.hooks.map((hook) => (
+            <HookListItem
+              key={hook.id}
+              hook={hook}
+              busyId={busyId}
+              onTrust={() => runAction(hook, 'trust')}
+              onDisable={() => runAction(hook, 'disable')}
+              onEnable={() => runAction(hook, 'enable')}
+            />
+          ))}
+        </div>
+      )}
+
+      {!loading && snapshot.diagnostics.length > 0 && (
+        <div className="mt-4 rounded-md border border-border bg-surface px-3.5 py-3">
+          <div className="text-[12px] font-semibold text-fg-2 mb-2">发现诊断</div>
+          <div className="space-y-1">
+            {snapshot.diagnostics.slice(0, 8).map((diag, index) => (
+              <div key={`${diag.code}-${index}`} className="text-[11px] text-fg-mute">
+                <span className="font-mono text-fg-2">{diag.code || diag.severity}</span>
+                {diag.message ? ` · ${diag.message}` : ''}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+function HookListItem({ hook, busyId, onTrust, onDisable, onEnable }) {
+  const actions = hookActionState(hook);
+  const busyTrust = busyId === `${hook.id}:trust`;
+  const busyDisable = busyId === `${hook.id}:disable`;
+  const busyEnable = busyId === `${hook.id}:enable`;
+  const sourceLabel = hook.sourcePath || hook.sourceId || '未知来源';
+  const commandText = hook.commandWindows
+    ? `${hook.command} | Windows: ${hook.commandWindows}`
+    : hook.command;
+
+  return (
+    <div className="rounded-lg border border-border bg-surface px-4 py-3">
+      <div className="flex items-start gap-3">
+        <div className="h-9 w-9 rounded-md border border-border bg-surface-alt flex items-center justify-center text-fg-2 shrink-0">
+          <VsIcon name="extension" size={18} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 min-w-0">
+            <div className="text-[13px] font-semibold text-fg truncate">{hook.eventName || 'Hook'}</div>
+            <HookBadge hook={hook} />
+            {hook.managed && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded border border-border text-fg-mute">managed</span>
+            )}
+          </div>
+          <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-fg-mute">
+            <span>匹配: <span className="font-mono text-fg-2">{hook.matcher}</span></span>
+            <span>来源: <span className="font-mono text-fg-2 break-all">{sourceLabel}</span></span>
+            {hook.timeoutSeconds > 0 && <span>超时: {hook.timeoutSeconds}s</span>}
+          </div>
+          {commandText && (
+            <div className="mt-2 rounded-md border border-border bg-code-bg px-2.5 py-1.5 font-mono text-[11px] text-code-fg break-all">
+              {commandText}
+            </div>
+          )}
+          {hook.statusMessage && (
+            <div className="mt-1 text-[11px] text-fg-mute">状态消息: {hook.statusMessage}</div>
+          )}
+          {hook.skipReason && (
+            <div className="mt-1 text-[11px] text-warn">跳过原因: {hook.skipReason}</div>
+          )}
+          {hook.diagnostics.length > 0 && (
+            <div className="mt-2 space-y-1">
+              {hook.diagnostics.map((diag, index) => (
+                <div key={`${diag.code}-${index}`} className="text-[11px] text-fg-mute">
+                  <span className="font-mono text-warn">{diag.code || diag.severity}</span>
+                  {diag.message ? ` · ${diag.message}` : ''}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        <div className="shrink-0 flex items-center gap-2">
+          {actions.canTrust && (
+            <button
+              type="button"
+              onClick={onTrust}
+              disabled={busyTrust || busyDisable || busyEnable}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-accent text-white text-[12px] font-medium hover:opacity-90 transition disabled:opacity-50"
+            >
+              {busyTrust ? <span className="ace-spinner" /> : <VsIcon name="check" size={12} />}
+              信任
+            </button>
+          )}
+          {actions.canEnable && (
+            <button
+              type="button"
+              onClick={onEnable}
+              disabled={busyTrust || busyDisable || busyEnable}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-border text-fg-2 bg-surface-alt text-[12px] hover:bg-surface-hi transition disabled:opacity-50"
+            >
+              {busyEnable ? <span className="ace-spinner" /> : <VsIcon name="run" size={12} />}
+              启用
+            </button>
+          )}
+          {actions.canDisable && (
+            <button
+              type="button"
+              onClick={onDisable}
+              disabled={busyTrust || busyDisable || busyEnable}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-border text-fg-2 bg-surface-alt text-[12px] hover:bg-surface-hi transition disabled:opacity-50"
+            >
+              {busyDisable ? <span className="ace-spinner" /> : <VsIcon name="stop" size={12} />}
+              禁用
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function HookBadge({ hook }) {
+  const label = hookStatusLabel(hook);
+  const cls = hook.disabled
+    ? 'border-danger text-danger'
+    : hook.pendingReview
+      ? 'border-warn text-warn'
+      : hook.trusted || hook.managed
+        ? 'border-ok text-ok'
+        : 'border-border text-fg-mute';
+  return (
+    <span className={clsx('text-[10px] px-1.5 py-0.5 rounded border shrink-0', cls)}>
+      {label}
+    </span>
   );
 }
 

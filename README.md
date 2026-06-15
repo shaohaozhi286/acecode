@@ -353,7 +353,7 @@ Model selection details are documented in [docs/model-context-resolution.md](doc
 - [CLAUDE.md](CLAUDE.md): current implementation memory.
 - [docs/user-manual.md](docs/user-manual.md): user workflow details.
 - [docs/daemon-api.md](docs/daemon-api.md): daemon HTTP/WebSocket API.
-- [docs/hooks.md](docs/hooks.md): startup and assistant-message hook callbacks.
+- [docs/hooks.md](docs/hooks.md): Codex-compatible lifecycle hooks, trust review, and Settings UI management.
 - [docs/model-context-resolution.md](docs/model-context-resolution.md): model profile and context-window resolution.
 - [docs/skills.md](docs/skills.md): skill authoring and usage.
 - [docs/skills-implementation.md](docs/skills-implementation.md): skill runtime implementation notes.

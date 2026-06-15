@@ -9,7 +9,11 @@ import { setToken } from './lib/auth.js';
 import { connection } from './lib/connection.js';
 import { createNewSessionForActiveWorkspace } from './lib/newSession.js';
 import { goBack, goForward, pushNavigation } from './lib/navigationHistory.js';
-import { pendingQuestionSessionIds } from './lib/pendingQuestions.js';
+import {
+  addPendingQuestionRequest,
+  pendingQuestionSessionIds,
+  removePendingQuestionRequest,
+} from './lib/pendingQuestions.js';
 import { usePreference } from './lib/usePreference.js';
 import {
   DEFAULT_UI_PREFS,
@@ -337,7 +341,12 @@ export function App() {
         payload.session_id = current.sessionId || current.id || '';
       }
       if (msg.type === 'permission_request') pushUnique(setPermReqs, payload);
-      if (msg.type === 'question_request') pushUnique(setQuestionReqs, payload);
+      if (msg.type === 'question_request') {
+        setQuestionReqs((prev) => addPendingQuestionRequest(prev, payload));
+      }
+      if (msg.type === 'question_closed') {
+        setQuestionReqs((prev) => removePendingQuestionRequest(prev, payload.request_id));
+      }
     };
     connection.addEventListener('message', handler);
     return () => connection.removeEventListener('message', handler);
@@ -541,7 +550,7 @@ export function App() {
     : null;
   const resolveVisibleQuestion = () => {
     if (!visibleQuestionReq?.request_id) return;
-    setQuestionReqs((prev) => prev.filter((req) => req.request_id !== visibleQuestionReq.request_id));
+    setQuestionReqs((prev) => removePendingQuestionRequest(prev, visibleQuestionReq.request_id));
   };
 
   return (

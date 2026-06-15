@@ -302,6 +302,34 @@ await run('Default permission mode API reads and writes config endpoint', async 
   }
 });
 
+await run('Session model switch and default model use separate endpoints', async () => {
+  const previousFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    calls.push({ url, opts });
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ name: 'fast' }),
+    };
+  };
+  try {
+    const client = createApi({ origin: 'http://127.0.0.1:4567', token: 'tok' });
+    await client.switchModel('sid-1', 'fast');
+    await client.setDefaultModel('slow');
+
+    assert.equal(calls[0].url, 'http://127.0.0.1:4567/api/sessions/sid-1/model');
+    assert.equal(calls[0].opts.method, 'POST');
+    assert.deepEqual(JSON.parse(calls[0].opts.body), { name: 'fast' });
+    assert.equal(calls[1].url, 'http://127.0.0.1:4567/api/config/default-model');
+    assert.equal(calls[1].opts.method, 'POST');
+    assert.deepEqual(JSON.parse(calls[1].opts.body), { name: 'slow' });
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
 await run('Upgrade config API reads and writes daemon-backed base_url', async () => {
   const previousFetch = globalThis.fetch;
   const calls = [];
@@ -421,6 +449,47 @@ await run('getSkillRoot uses workspace query and auth token', async () => {
     assert.equal(calls[0].url, 'http://127.0.0.1:4567/api/skills/root?workspace=workspace%2Fhash');
     assert.equal(calls[0].opts.method, 'GET');
     assert.equal(calls[0].opts.headers['X-ACECode-Token'], 'tok');
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+await run('Hook management API methods use encoded hook ids and expected endpoints', async () => {
+  const previousFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    calls.push({ url, opts });
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ hooks: [], sources: [] }),
+    };
+  };
+  try {
+    const client = createApi({ origin: 'http://127.0.0.1:4567', token: 'tok' });
+    const hookId = 'project_local:codex_json:C:/repo/.codex/hooks.json::PreToolUse#1.1';
+    await client.listHooks();
+    await client.refreshHooks();
+    await client.trustHook(hookId);
+    await client.disableHook(hookId);
+    await client.enableHook(hookId);
+
+    assert.equal(calls.length, 5);
+    assert.equal(calls[0].url, 'http://127.0.0.1:4567/api/hooks');
+    assert.equal(calls[0].opts.method, 'GET');
+    assert.equal(calls[1].url, 'http://127.0.0.1:4567/api/hooks/refresh');
+    assert.equal(calls[1].opts.method, 'POST');
+    const encoded = encodeURIComponent(hookId);
+    assert.equal(calls[2].url, `http://127.0.0.1:4567/api/hooks/${encoded}/trust`);
+    assert.equal(calls[2].opts.method, 'POST');
+    assert.equal(calls[3].url, `http://127.0.0.1:4567/api/hooks/${encoded}/disable`);
+    assert.equal(calls[3].opts.method, 'POST');
+    assert.equal(calls[4].url, `http://127.0.0.1:4567/api/hooks/${encoded}/enable`);
+    assert.equal(calls[4].opts.method, 'POST');
+    for (const call of calls) {
+      assert.equal(call.opts.headers['X-ACECode-Token'], 'tok');
+    }
   } finally {
     globalThis.fetch = previousFetch;
   }

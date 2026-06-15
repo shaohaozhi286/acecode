@@ -5,6 +5,177 @@ namespace acecode::web {
 
 using nlohmann::json;
 
+namespace {
+
+int hex_value(char ch) {
+    if (ch >= '0' && ch <= '9') return ch - '0';
+    if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+    if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+    return -1;
+}
+
+std::string url_decode_component(std::string value) {
+    std::string out;
+    out.reserve(value.size());
+    for (std::size_t i = 0; i < value.size(); ++i) {
+        if (value[i] == '%' && i + 2 < value.size()) {
+            int hi = hex_value(value[i + 1]);
+            int lo = hex_value(value[i + 2]);
+            if (hi >= 0 && lo >= 0) {
+                out.push_back(static_cast<char>((hi << 4) | lo));
+                i += 2;
+                continue;
+            }
+        }
+        out.push_back(value[i]);
+    }
+    return out;
+}
+
+} // namespace
+
+void WebServer::Impl::register_hooks() {
+        auto json_err = [this](const crow::request& req,
+                               int status,
+                               const char* code,
+                               const std::string& msg) {
+            crow::response r(status);
+            r.add_header("Content-Type", "application/json");
+            r.body = json{{"error", code}, {"message", msg}}.dump();
+            return with_cors(req, std::move(r));
+        };
+
+        auto load_store = [](std::string* error) {
+            return acecode::load_hook_trust_store_from_path(
+                acecode::default_hook_trust_state_path(), error);
+        };
+
+        auto reload_snapshot = [this](const acecode::HookTrustStore& store) {
+            acecode::HookLoadOptions options;
+            options.feature_enabled = deps.app_config ? deps.app_config->features.hooks : true;
+            options.cwd = deps.cwd;
+            options.project_trusted = true;
+            return acecode::load_hook_registry(options, &store);
+        };
+
+        auto find_hook = [](const acecode::HookRegistrySnapshot& snapshot,
+                            const std::string& hook_id) -> const acecode::NormalizedHook* {
+            for (const auto& hook : snapshot.hooks) {
+                if (hook.id == hook_id) return &hook;
+            }
+            return nullptr;
+        };
+
+        CROW_ROUTE(app, "/api/hooks").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
+        CROW_ROUTE(app, "/api/hooks/refresh").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
+        CROW_ROUTE(app, "/api/hooks/<string>/trust").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req, const std::string&) {
+            return cors_preflight(req);
+        });
+        CROW_ROUTE(app, "/api/hooks/<string>/disable").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req, const std::string&) {
+            return cors_preflight(req);
+        });
+        CROW_ROUTE(app, "/api/hooks/<string>/enable").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req, const std::string&) {
+            return cors_preflight(req);
+        });
+
+        CROW_ROUTE(app, "/api/hooks").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.hook_manager) return crow::response(503);
+            crow::response r(200);
+            r.add_header("Content-Type", "application/json");
+            r.body = acecode::hook_registry_snapshot_to_json(
+                deps.hook_manager->registry_snapshot()).dump();
+            return with_cors(req, std::move(r));
+        });
+
+        CROW_ROUTE(app, "/api/hooks/refresh").methods(crow::HTTPMethod::POST)
+        ([this, load_store, reload_snapshot, json_err](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.hook_manager) return crow::response(503);
+            std::string error;
+            auto store = load_store(&error);
+            if (!error.empty()) {
+                LOG_WARN("[hooks] " + error);
+            }
+            auto snapshot = reload_snapshot(store);
+            deps.hook_manager->refresh_registry(std::move(snapshot));
+            crow::response r(200);
+            r.add_header("Content-Type", "application/json");
+            r.body = acecode::hook_registry_snapshot_to_json(
+                deps.hook_manager->registry_snapshot()).dump();
+            return with_cors(req, std::move(r));
+        });
+
+        auto mutate_hook = [this, load_store, reload_snapshot, find_hook, json_err](
+            const crow::request& req,
+            const std::string& hook_id,
+            const std::string& action) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.hook_manager) return crow::response(503);
+
+            const auto snapshot = deps.hook_manager->registry_snapshot();
+            const auto decoded_hook_id = url_decode_component(hook_id);
+            const auto* hook = find_hook(snapshot, decoded_hook_id);
+            if (!hook) {
+                return json_err(req, 404, "HOOK_NOT_FOUND", "hook not found");
+            }
+            if ((action == "disable" || action == "enable") &&
+                (hook->managed || hook->trust_status == acecode::HookTrustStatus::ManagedTrusted)) {
+                return json_err(req, 409, "HOOK_MANAGED", "managed hooks cannot be disabled");
+            }
+
+            std::string error;
+            auto store = load_store(&error);
+            if (!error.empty()) {
+                LOG_WARN("[hooks] " + error);
+            }
+
+            if (action == "trust") {
+                acecode::trust_hook_definition(store, *hook);
+            } else if (action == "disable") {
+                acecode::set_hook_disabled(store, *hook, true);
+            } else if (action == "enable") {
+                acecode::set_hook_disabled(store, *hook, false);
+            }
+
+            if (!acecode::save_hook_trust_store_to_path(
+                    store, acecode::default_hook_trust_state_path(), &error)) {
+                return json_err(req, 500, "HOOK_STATE_SAVE_FAILED", error);
+            }
+
+            auto reloaded = reload_snapshot(store);
+            deps.hook_manager->refresh_registry(std::move(reloaded));
+            crow::response r(200);
+            r.add_header("Content-Type", "application/json");
+            r.body = acecode::hook_registry_snapshot_to_json(
+                deps.hook_manager->registry_snapshot()).dump();
+            return with_cors(req, std::move(r));
+        };
+
+        CROW_ROUTE(app, "/api/hooks/<string>/trust").methods(crow::HTTPMethod::POST)
+        ([mutate_hook](const crow::request& req, const std::string& hook_id) {
+            return mutate_hook(req, hook_id, "trust");
+        });
+        CROW_ROUTE(app, "/api/hooks/<string>/disable").methods(crow::HTTPMethod::POST)
+        ([mutate_hook](const crow::request& req, const std::string& hook_id) {
+            return mutate_hook(req, hook_id, "disable");
+        });
+        CROW_ROUTE(app, "/api/hooks/<string>/enable").methods(crow::HTTPMethod::POST)
+        ([mutate_hook](const crow::request& req, const std::string& hook_id) {
+            return mutate_hook(req, hook_id, "enable");
+        });
+}
+
 void WebServer::Impl::register_mcp() {
         // GET /api/mcp: 读 config 当前 mcp_servers 段。spec 9.8
         CROW_ROUTE(app, "/api/mcp").methods(crow::HTTPMethod::GET)
@@ -370,6 +541,7 @@ void WebServer::Impl::register_ui_preferences() {
         ([this](const crow::request& req) {
             if (auto rej = require_auth(req)) return std::move(*rej);
             if (!deps.app_config) return crow::response(503);
+            refresh_default_session_preferences_for_new_session();
             auto parsed = parse_permission_mode_name(deps.app_config->default_permission_mode);
             crow::response r(200);
             r.add_header("Content-Type", "application/json");

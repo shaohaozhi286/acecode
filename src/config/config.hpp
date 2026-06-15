@@ -274,6 +274,12 @@ struct NetworkConfig {
     bool proxy_probe_enabled = true;     // 总开关:false = 完全跳过探测,等价旧行为
 };
 
+struct FeaturesConfig {
+    // Codex-compatible hooks are enabled by default. Users can set
+    // features.hooks=false to disable discovery and execution.
+    bool hooks = true;
+};
+
 struct AppConfig {
     std::string provider; // active runtime provider: "copilot" or "openai"; empty = not configured
     OpenAiConfig openai;
@@ -295,6 +301,7 @@ struct AppConfig {
     InputHistoryConfig input_history;            // per-cwd persistent ↑/↓ history
     AgentLoopConfig agent_loop;                  // agent-loop termination tunables
     NetworkConfig network;                       // proxy / TLS / abort-debug knobs
+    FeaturesConfig features;                     // feature flags
     WebSearchConfig web_search;                  // 联网搜索工具配置(参见 add-web-search-tool)
     RemoteControlConfig remote_control;          // TUI /remote-control 基座(IM 托管)
     AceBrowserBridgeConfig ace_browser_bridge;   // browser bridge tools integration
@@ -342,6 +349,15 @@ void save_config(const AppConfig& cfg);
 // Used by daemon/test code paths that must NOT touch the user's real config —
 // e.g. PUT /api/mcp under WebServerFixture writes to a per-test temp file.
 void save_config(const AppConfig& cfg, const std::string& explicit_path);
+
+// Refresh only the cross-surface defaults used when creating a fresh session.
+// This deliberately does not hot-reload the whole AppConfig: long-lived daemon
+// state such as proxy, hooks, memory, and runtime services remains unchanged.
+// Returns false on parse/validation errors and leaves cfg unchanged.
+bool refresh_default_session_preferences_from_config(
+    AppConfig& cfg,
+    const std::string& explicit_path = {},
+    std::string* error = nullptr);
 
 // Get the path to ~/.acecode/ directory
 std::string get_acecode_dir();

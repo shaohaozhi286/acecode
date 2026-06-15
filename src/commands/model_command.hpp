@@ -7,7 +7,7 @@
 //   /model add name=X provider=Y model=Z base_url=... api_key=...
 //   /model edit <name> [field=value ...]
 //   /model rm <name>
-//   /model set-default <name>
+//   /model set-default [name]
 #pragma once
 
 #include "command_registry.hpp"

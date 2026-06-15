@@ -18,9 +18,11 @@
 #include <httplib.h>
 
 #include "auth/github_auth.hpp"
+#include "config/config.hpp"
 #include "config/saved_models.hpp"
 #include "permissions.hpp"
 #include "desktop/workspace_registry.hpp"
+#include "hooks/hook_manager.hpp"
 #include "provider/cwd_model_override.hpp"
 #include "session/local_session_client.hpp"
 #include "session/session_manager.hpp"
@@ -82,6 +84,33 @@ void write_skill_md(const std::filesystem::path& root,
         << "---\n\n# " << name << "\n";
 }
 
+void write_text(const std::filesystem::path& path, const std::string& text) {
+    std::filesystem::create_directories(path.parent_path());
+    std::ofstream ofs(path, std::ios::binary | std::ios::trunc);
+    ofs << text;
+}
+
+std::string url_encode_component(const std::string& value) {
+    static constexpr char kHex[] = "0123456789ABCDEF";
+    std::string out;
+    out.reserve(value.size());
+    for (unsigned char ch : value) {
+        const bool safe =
+            (ch >= 'A' && ch <= 'Z') ||
+            (ch >= 'a' && ch <= 'z') ||
+            (ch >= '0' && ch <= '9') ||
+            ch == '-' || ch == '_' || ch == '.' || ch == '~';
+        if (safe) {
+            out.push_back(static_cast<char>(ch));
+        } else {
+            out.push_back('%');
+            out.push_back(kHex[ch >> 4]);
+            out.push_back(kHex[ch & 0x0f]);
+        }
+    }
+    return out;
+}
+
 struct WebServerFixture {
     acecode::ToolExecutor tools;
     acecode::PermissionManager template_perm;
@@ -93,6 +122,7 @@ struct WebServerFixture {
 
     std::unique_ptr<acecode::SessionRegistry> registry;
     std::unique_ptr<acecode::LocalSessionClient> client;
+    std::unique_ptr<acecode::HookManager> hook_manager;
     std::unique_ptr<acecode::web::WebServer> server;
 
     std::thread server_thread;
@@ -151,6 +181,7 @@ struct WebServerFixture {
         deps.template_permissions = &template_perm;
         registry = std::make_unique<acecode::SessionRegistry>(std::move(deps));
         client = std::make_unique<acecode::LocalSessionClient>(*registry);
+        hook_manager = std::make_unique<acecode::HookManager>(acecode::HookRegistrySnapshot{});
 
         acecode::web::WebServerDeps wdeps;
         wdeps.web_cfg = &cfg.web;
@@ -166,6 +197,7 @@ struct WebServerFixture {
                 std::chrono::system_clock::now().time_since_epoch()).count();
         wdeps.session_client = client.get();
         wdeps.session_registry = registry.get();
+        wdeps.hook_manager = hook_manager.get();
         wdeps.projects_dir = projects_dir.string();
         wdeps.workspace_registry = workspace_registry.get();
         wdeps.native_folder_picker_enabled = native_folder_picker_enabled;
@@ -430,6 +462,120 @@ TEST(WebServerHttp, LoopbackAliasSamePortDoesNotRequireToken) {
     EXPECT_EQ(response_header(r, "Access-Control-Allow-Origin"), origin);
 }
 
+TEST(WebServerHttp, HooksEndpointListsTrustsDisablesEnablesAndRefreshesProjectHooks) {
+    auto temp_home = std::filesystem::temp_directory_path() /
+                     ("acecode_hooks_api_home_" + std::to_string(std::random_device{}()));
+    RemoveTreeOnExit cleanup{temp_home};
+    ScopedHomeOverride home(temp_home);
+    WebServerFixture fx;
+
+    auto empty = cpr::Get(cpr::Url{fx.url("/api/hooks")});
+    ASSERT_EQ(empty.status_code, 200) << empty.text;
+    EXPECT_TRUE(json::parse(empty.text)["hooks"].empty());
+
+    auto preflight = cpr::Options(
+        cpr::Url{fx.url("/api/hooks")},
+        cpr::Header{{"Origin", "http://localhost:5173"},
+                    {"Access-Control-Request-Method", "GET"}});
+    EXPECT_EQ(preflight.status_code, 204);
+
+    write_text(fx.cwd_dir / ".codex" / "hooks.json", R"({
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": "Bash",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "echo hook",
+                            "timeout": 5,
+                            "statusMessage": "Checking tool"
+                        }
+                    ]
+                }
+            ]
+        }
+    })");
+
+    auto refresh = cpr::Post(cpr::Url{fx.url("/api/hooks/refresh")});
+    ASSERT_EQ(refresh.status_code, 200) << refresh.text;
+    auto body = json::parse(refresh.text);
+    ASSERT_EQ(body["hooks"].size(), 1u);
+    const std::string hook_id = body["hooks"][0]["id"].get<std::string>();
+    const std::string encoded_hook_id = url_encode_component(hook_id);
+    EXPECT_EQ(body["hooks"][0]["event_name"], "PreToolUse");
+    EXPECT_EQ(body["hooks"][0]["matcher"], "Bash");
+    EXPECT_EQ(body["hooks"][0]["command"], "echo hook");
+    EXPECT_EQ(body["hooks"][0]["trust_status"], "pending_review");
+    EXPECT_EQ(body["hooks"][0]["pending_review"], true);
+
+    auto trust = cpr::Post(cpr::Url{fx.url("/api/hooks/" + encoded_hook_id + "/trust")});
+    ASSERT_EQ(trust.status_code, 200) << trust.text;
+    body = json::parse(trust.text);
+    ASSERT_EQ(body["hooks"].size(), 1u);
+    EXPECT_EQ(body["hooks"][0]["trust_status"], "trusted");
+    EXPECT_EQ(body["hooks"][0]["trusted"], true);
+    EXPECT_TRUE(std::filesystem::is_regular_file(temp_home / ".acecode" / "hooks_state.json"));
+
+    auto disable = cpr::Post(cpr::Url{fx.url("/api/hooks/" + encoded_hook_id + "/disable")});
+    ASSERT_EQ(disable.status_code, 200) << disable.text;
+    body = json::parse(disable.text);
+    ASSERT_EQ(body["hooks"].size(), 1u);
+    EXPECT_EQ(body["hooks"][0]["trust_status"], "disabled");
+    EXPECT_EQ(body["hooks"][0]["disabled"], true);
+
+    auto enable = cpr::Post(cpr::Url{fx.url("/api/hooks/" + encoded_hook_id + "/enable")});
+    ASSERT_EQ(enable.status_code, 200) << enable.text;
+    body = json::parse(enable.text);
+    ASSERT_EQ(body["hooks"].size(), 1u);
+    EXPECT_EQ(body["hooks"][0]["trust_status"], "trusted");
+    EXPECT_EQ(body["hooks"][0]["disabled"], false);
+
+    auto reloaded = cpr::Post(cpr::Url{fx.url("/api/hooks/refresh")});
+    ASSERT_EQ(reloaded.status_code, 200) << reloaded.text;
+    body = json::parse(reloaded.text);
+    ASSERT_EQ(body["hooks"].size(), 1u);
+    EXPECT_EQ(body["hooks"][0]["trust_status"], "trusted");
+
+    auto unknown = cpr::Post(cpr::Url{fx.url("/api/hooks/missing-hook/trust")});
+    ASSERT_EQ(unknown.status_code, 404) << unknown.text;
+    EXPECT_EQ(json::parse(unknown.text)["error"], "HOOK_NOT_FOUND");
+}
+
+TEST(WebServerHttp, HooksEndpointRejectsManagedHookDisable) {
+    auto temp_home = std::filesystem::temp_directory_path() /
+                     ("acecode_hooks_managed_home_" + std::to_string(std::random_device{}()));
+    RemoveTreeOnExit cleanup{temp_home};
+    ScopedHomeOverride home(temp_home);
+    WebServerFixture fx;
+
+    acecode::HookSource source;
+    source.scope = acecode::HookSourceScope::Managed;
+    source.format = acecode::HookSourceFormat::CodexJson;
+    source.path = "managed-hooks";
+    source.id = acecode::make_hook_source_id(source.scope, source.format, source.path);
+    source.managed = true;
+
+    auto snapshot = acecode::parse_codex_hooks_json_source(nlohmann::json::parse(R"({
+        "hooks": {
+            "SessionStart": [
+                {"hooks": [{"type": "command", "command": "echo managed"}]}
+            ]
+        }
+    })"), source);
+    acecode::HookTrustStore store;
+    acecode::apply_hook_trust_state(snapshot, store, true);
+    ASSERT_EQ(snapshot.hooks.size(), 1u);
+    const std::string hook_id = snapshot.hooks[0].id;
+    fx.hook_manager->refresh_registry(std::move(snapshot));
+
+    auto r = cpr::Post(cpr::Url{fx.url("/api/hooks/" +
+                                       url_encode_component(hook_id) +
+                                       "/disable")});
+    ASSERT_EQ(r.status_code, 409) << r.text;
+    EXPECT_EQ(json::parse(r.text)["error"], "HOOK_MANAGED");
+}
+
 // 场景: POST /api/sessions 返回 201 + {session_id};立刻 GET /api/sessions
 // 应包含这一条 active=true(spec 9.3 + 9.4)。
 TEST(WebServerHttp, CreateSessionThenListShowsActive) {
@@ -579,6 +725,89 @@ TEST(WebServerHttp, DefaultPermissionModeEndpointAppliesToNewSessions) {
     ASSERT_TRUE(ifs.is_open());
     auto saved = json::parse(ifs);
     EXPECT_EQ(saved["default_permission_mode"], "accept-edits");
+}
+
+// 场景:Desktop/Web 首页状态栏选择的权限模式会作为 create-session 显式输入,
+// 覆盖全局默认值并初始化新 session 的 PermissionManager/metadata。
+TEST(WebServerHttp, CreateSessionAcceptsExplicitPermissionMode) {
+    WebServerFixture fx;
+
+    auto put_default = cpr::Put(cpr::Url{fx.url("/api/config/default-permission-mode")},
+                                cpr::Header{{"Content-Type", "application/json"}},
+                                cpr::Body{R"({"mode":"yolo"})"});
+    ASSERT_EQ(put_default.status_code, 200) << put_default.text;
+
+    auto created = cpr::Post(cpr::Url{fx.url("/api/sessions")},
+                             cpr::Header{{"Content-Type", "application/json"}},
+                             cpr::Body{R"({"permission_mode":"plan"})"});
+    ASSERT_EQ(created.status_code, 201) << created.text;
+    auto sid = json::parse(created.text)["session_id"].get<std::string>();
+
+    auto mode = fx.registry->permission_mode(sid);
+    ASSERT_TRUE(mode.has_value());
+    EXPECT_EQ(*mode, acecode::PermissionMode::Plan);
+    EXPECT_EQ(fx.registry->default_permission_mode(), acecode::PermissionMode::Yolo);
+    auto* entry = fx.registry->lookup(sid);
+    ASSERT_NE(entry, nullptr);
+    ASSERT_NE(entry->perm, nullptr);
+    ASSERT_NE(entry->sm, nullptr);
+    EXPECT_EQ(entry->perm->pre_plan_mode(), acecode::PermissionMode::Default);
+    EXPECT_EQ(entry->sm->current_permission_mode(), "plan");
+    EXPECT_EQ(entry->sm->current_pre_plan_permission_mode(), "default");
+
+    acecode::ChatMessage msg;
+    msg.role = "user";
+    msg.content = "persist explicit permission mode";
+    entry->sm->on_message(msg);
+
+    auto meta = acecode::SessionStorage::read_meta(
+        acecode::SessionStorage::meta_path(fx.project_dir, sid));
+    EXPECT_EQ(meta.permission_mode, "plan");
+    EXPECT_EQ(meta.pre_plan_permission_mode, "default");
+}
+
+// 场景:create-session 请求体中的权限模式 typo 不能静默退回 default。
+TEST(WebServerHttp, CreateSessionRejectsInvalidExplicitPermissionMode) {
+    WebServerFixture fx;
+
+    auto created = cpr::Post(cpr::Url{fx.url("/api/sessions")},
+                             cpr::Header{{"Content-Type", "application/json"}},
+                             cpr::Body{R"({"permission_mode":"always"})"});
+    EXPECT_EQ(created.status_code, 400) << created.text;
+    auto body = json::parse(created.text);
+    EXPECT_EQ(body["error"], "INVALID_PERMISSION_MODE");
+}
+
+// 场景:daemon 运行期间 TUI/其它进程改写 config.json 的默认模型和默认
+// 权限模式,后续 create-session 必须在解析前观察磁盘新值。
+TEST(WebServerHttp, CreateSessionRefreshesExternalDefaultPreferences) {
+    WebServerFixture fx;
+
+    acecode::AppConfig disk = fx.cfg;
+    acecode::ModelProfile slow;
+    slow.name = "slow";
+    slow.provider = "copilot";
+    slow.model = "gpt-slow";
+    disk.saved_models.push_back(slow);
+    disk.default_model_name = "slow";
+    disk.default_permission_mode = "yolo";
+    acecode::save_config(disk, (fx.tmp_dir / "config.json").string());
+
+    auto post = cpr::Post(cpr::Url{fx.url("/api/sessions")},
+                          cpr::Header{{"Content-Type", "application/json"}},
+                          cpr::Body{R"({})"});
+    ASSERT_EQ(post.status_code, 201) << post.text;
+    auto sid = json::parse(post.text)["session_id"].get<std::string>();
+
+    auto* entry = fx.registry->lookup(sid);
+    ASSERT_NE(entry, nullptr);
+    EXPECT_EQ(entry->model_state.name, "slow");
+    EXPECT_EQ(entry->model_state.model, "gpt-slow");
+    auto mode = fx.registry->permission_mode(sid);
+    ASSERT_TRUE(mode.has_value());
+    EXPECT_EQ(*mode, acecode::PermissionMode::Yolo);
+    EXPECT_EQ(fx.cfg.default_model_name, "slow");
+    EXPECT_EQ(fx.cfg.default_permission_mode, "yolo");
 }
 
 // 场景:默认权限模式 API 拒绝非法 mode,且不修改内存配置或新会话模板。

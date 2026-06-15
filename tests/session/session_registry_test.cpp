@@ -718,6 +718,30 @@ TEST(SessionRegistry, DefaultPermissionModeAppliesToNewSessionsOnly) {
     fx.registry.destroy(third);
 }
 
+// 场景:Desktop/Web 首页创建新 session 时可以显式带 permission mode,
+// 这个选择应覆盖全局默认值,但只影响该新 session。
+TEST(SessionRegistry, ExplicitPermissionModeOverridesDefaultForNewSession) {
+    TestFixture fx;
+    fx.registry.set_default_permission_mode(PermissionMode::Yolo);
+
+    SessionOptions opts;
+    opts.permission_mode = "plan";
+    auto id = fx.registry.create(opts);
+
+    ASSERT_TRUE(fx.registry.permission_mode(id).has_value());
+    EXPECT_EQ(*fx.registry.permission_mode(id), PermissionMode::Plan);
+    auto* entry = fx.registry.lookup(id);
+    ASSERT_NE(entry, nullptr);
+    ASSERT_NE(entry->perm, nullptr);
+    ASSERT_NE(entry->sm, nullptr);
+    EXPECT_EQ(entry->perm->pre_plan_mode(), PermissionMode::Default);
+    EXPECT_EQ(entry->sm->current_permission_mode(), "plan");
+    EXPECT_EQ(entry->sm->current_pre_plan_permission_mode(), "default");
+    EXPECT_EQ(fx.registry.default_permission_mode(), PermissionMode::Yolo);
+
+    fx.registry.destroy(id);
+}
+
 // 场景: 切换权限模式会清掉此前"本次会话允许"的 sticky allow,避免
 // 从 Yolo / AcceptEdits 切回 Default 后仍沿用旧的免确认记录。
 TEST(SessionRegistry, SetPermissionModeClearsSessionAllows) {

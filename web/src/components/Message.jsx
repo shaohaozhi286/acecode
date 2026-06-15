@@ -231,11 +231,11 @@ function SystemRow({ role, content, metadata }) {
       <button
         type="button"
         className="w-full px-3 py-1.5 flex items-center gap-2 text-left text-fg-mute hover:text-fg hover:bg-surface-hi transition"
-        title={preview}
+        title={text || preview}
         onClick={() => setExpanded((v) => !v)}
       >
         <span className="font-medium shrink-0">{label}</span>
-        <span className="text-[10px] flex-1 truncate font-mono">{preview}</span>
+        <span className="text-[10px] flex-1 truncate font-mono" title={text || preview}>{preview}</span>
         <span className="text-[10px] shrink-0 opacity-70">
           {lineCount > 1 ? `${lineCount} 行` : `${charCount} 字符`}
         </span>

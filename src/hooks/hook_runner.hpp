@@ -12,7 +12,11 @@ struct HookProcessResult {
     bool timed_out = false;
     int exit_code = -1;
     long long duration_ms = 0;
+    std::string stdout_text;
+    std::string stderr_text;
+    // Legacy combined output for existing diagnostics.
     std::string output;
+    // Process start / runner errors, not child stderr.
     std::string error;
 };
 
@@ -22,5 +26,10 @@ HookProcessResult run_hook_process(const HookCommandSpec& command,
                                    const std::string& stdin_text,
                                    int timeout_ms,
                                    const std::string& cwd);
+
+HookProcessResult run_hook_shell_command(const std::string& command,
+                                         const std::string& stdin_text,
+                                         int timeout_ms,
+                                         const std::string& cwd);
 
 } // namespace acecode

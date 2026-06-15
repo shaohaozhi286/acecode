@@ -114,7 +114,9 @@ TEST(ToolEventPayload, ToolUpdateEmptyTail) {
     EXPECT_EQ(p["total_lines"], 0);
 }
 
-// 场景: 普通成功的 tool_end:success=true,带 summary,不带 output(前端不需要)。
+// 场景: 普通成功的 tool_end:success=true,带 summary,也带 output。
+// Web live 视图的绿色工具块靠这个字段展开正文;切换会话后的历史加载
+// 才能从持久 tool message.content 恢复,所以 live payload 不能省略。
 TEST(ToolEventPayload, ToolEndSuccessWithSummary) {
     ToolResult r;
     r.success = true;
@@ -129,8 +131,8 @@ TEST(ToolEventPayload, ToolEndSuccessWithSummary) {
     EXPECT_DOUBLE_EQ(p["elapsed_seconds"].get<double>(), 0.05);
     ASSERT_TRUE(p.contains("summary"));
     EXPECT_EQ(p["summary"]["verb"], "Read");
-    // success=true 时不应出现 output 字段
-    EXPECT_FALSE(p.contains("output"));
+    ASSERT_TRUE(p.contains("output"));
+    EXPECT_EQ(p["output"], "ok\n");
 }
 
 // 场景: 失败 + output_snippet 非空时,output 字段附在 payload 上(前端 dim 显示前 3 行)。
@@ -167,6 +169,8 @@ TEST(ToolEventPayload, ToolEndSuccessWithoutSummaryFallback) {
     auto p = build_tool_end_payload("grep", r, 0.0, "");
     EXPECT_EQ(p["success"], true);
     EXPECT_FALSE(p.contains("summary"));
+    ASSERT_TRUE(p.contains("output"));
+    EXPECT_EQ(p["output"], "ok");
 }
 
 // 场景: ToolResult.metadata 有 UI-only 字段时,tool_end 需要带给前端,

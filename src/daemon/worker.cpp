@@ -329,6 +329,21 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
         LOG_WARN("[hooks] " + hook_config_error);
     }
     acecode::HookManager hook_manager(std::move(hook_config));
+    {
+        std::string trust_error;
+        acecode::HookTrustStore trust_store =
+            acecode::load_hook_trust_store_from_path(
+                acecode::default_hook_trust_state_path(), &trust_error);
+        if (!trust_error.empty()) {
+            LOG_WARN("[hooks] " + trust_error);
+        }
+        acecode::HookLoadOptions hook_load;
+        hook_load.feature_enabled = cfg.features.hooks;
+        hook_load.cwd = cwd;
+        hook_load.project_trusted = true;
+        hook_manager.refresh_registry(
+            acecode::load_hook_registry(hook_load, &trust_store));
+    }
 
     // cfg_mut 已在前面创建(承接 port_override),这里只继续使用,不再重复声明。
     auto cwd_override = acecode::load_cwd_model_override(cwd);
@@ -434,6 +449,7 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     web_deps.start_time_unix_ms = now_unix_ms();
     web_deps.session_client     = &client;
     web_deps.session_registry   = &registry;
+    web_deps.hook_manager       = &hook_manager;
     web_deps.tools              = &tools;
     web_deps.workspace_registry = &workspace_registry;
     web_deps.native_folder_picker_enabled = opts.native_folder_picker_enabled;

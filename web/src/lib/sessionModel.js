@@ -1,3 +1,5 @@
+import { normalizePermissionMode } from './permissionMode.js';
+
 export function normalizeModelState(raw) {
   if (!raw || typeof raw !== 'object') return null;
   return {
@@ -100,8 +102,14 @@ export function resolveHomeModelName(modelOptions = [], defaultModelName = '', p
 }
 
 export function withCreateSessionModel(options = {}, modelName = '') {
+  return withCreateSessionPreferences(options, { modelName });
+}
+
+export function withCreateSessionPreferences(options = {}, { modelName = '', permissionMode = '' } = {}) {
   const next = { ...(options && typeof options === 'object' ? options : {}) };
   const name = String(modelName || '').trim();
   if (name) next.name = name;
+  const mode = String(permissionMode || '').trim();
+  if (mode) next.permission_mode = normalizePermissionMode(mode);
   return next;
 }

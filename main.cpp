@@ -2216,6 +2216,37 @@ static int run_interactive_app(const CliOptions& cli,
             : 0;
     };
 
+    // Sync row counts from the most recent completed FTXUI layout. Render()
+    // writes message_layout_boxes after the renderer lambda returns, so a
+    // wheel/PgUp event can arrive with fresh boxes but stale line counts.
+    auto sync_chat_line_counts_from_layout =
+        [&state, &chat_box, &message_layout_boxes, &message_line_counts,
+         &message_line_count_width]() {
+            const size_t n_msgs = state.conversation.size();
+            const int current_message_width = chat_box.x_max >= chat_box.x_min
+                ? chat_box.x_max - chat_box.x_min + 1
+                : 0;
+            const bool line_count_width_changed =
+                current_message_width > 0 &&
+                current_message_width != message_line_count_width;
+            if (line_count_width_changed) {
+                message_line_counts.assign(n_msgs, 0);
+                message_line_count_width = current_message_width;
+            }
+            message_line_counts.resize(n_msgs);
+            for (size_t i = 0; i < n_msgs; ++i) {
+                if (!line_count_width_changed && i < message_layout_boxes.size()) {
+                    int h = message_layout_boxes[i].y_max -
+                            message_layout_boxes[i].y_min + 1;
+                    message_line_counts[i] =
+                        acecode::tui::update_chat_line_count_estimate(
+                            message_line_counts[i], h);
+                } else if (message_line_counts[i] <= 0) {
+                    message_line_counts[i] = 1;
+                }
+            }
+        };
+
     auto clamp_chat_focus = [&state, &message_line_counts, &chat_viewport_rows]() {
         if (state.conversation.empty()) {
             state.chat_focus_index = -1;
@@ -3097,7 +3128,7 @@ static int run_interactive_app(const CliOptions& cli,
     };
 
     // Wrap with CatchEvent to handle all keyboard input
-    auto input_with_esc = CatchEvent(input_renderer, [&state, &screen, &clamp_chat_focus, &chat_viewport_rows, &auth_done, &cmd_registry, &agent_loop, &provider_slot, &provider_accessor, &config, &token_tracker, &permissions, &session_manager, &scroll_chat_by_lines, &chat_box, &scrollbar_box, &ask_scrollbar_box, &ask_overlay_box, &message_line_counts, &mcp_manager, &tools, &skill_registry, &memory_registry, &working_dir, &insert_pasted_text_at_cursor, &paste_system_clipboard_text, &paste_system_clipboard_image](Event event) {
+    auto input_with_esc = CatchEvent(input_renderer, [&state, &screen, &clamp_chat_focus, &chat_viewport_rows, &sync_chat_line_counts_from_layout, &auth_done, &cmd_registry, &agent_loop, &provider_slot, &provider_accessor, &config, &token_tracker, &permissions, &session_manager, &scroll_chat_by_lines, &chat_box, &scrollbar_box, &ask_scrollbar_box, &ask_overlay_box, &message_line_counts, &mcp_manager, &tools, &skill_registry, &memory_registry, &working_dir, &insert_pasted_text_at_cursor, &paste_system_clipboard_text, &paste_system_clipboard_image](Event event) {
 #if ACECODE_TUI_INPUT_TRACE
         if (event != Event::Custom &&
             !event.is_cursor_position() &&
@@ -3320,6 +3351,7 @@ static int run_interactive_app(const CliOptions& cli,
                         : std::max(1, chat_viewport_rows() - 2);
                     const int chat_delta =
                         (event == Event::PageUp) ? -chat_step : chat_step;
+                    sync_chat_line_counts_from_layout();
                     if (scroll_chat_by_lines(chat_delta) != 0) {
                         screen.PostEvent(Event::Custom);
                     }
@@ -3330,6 +3362,7 @@ static int run_interactive_app(const CliOptions& cli,
                     event == Event::Special("\x1B[1;3B")) {
                     const int delta =
                         (event == Event::Special("\x1B[1;3A")) ? -1 : 1;
+                    sync_chat_line_counts_from_layout();
                     if (scroll_chat_by_lines(delta) != 0) {
                         screen.PostEvent(Event::Custom);
                     }
@@ -3345,6 +3378,7 @@ static int run_interactive_app(const CliOptions& cli,
                                box.Contain(x, y);
                     };
                     auto scroll_chat_from_ask = [&](int delta) {
+                        sync_chat_line_counts_from_layout();
                         const int actual = scroll_chat_by_lines(delta);
                         if (actual != 0) {
                             screen.PostEvent(Event::Custom);
@@ -3352,6 +3386,7 @@ static int run_interactive_app(const CliOptions& cli,
                         return actual;
                     };
                     auto begin_chat_scrollbar_drag = [&]() {
+                        sync_chat_line_counts_from_layout();
                         state.drag_scrollbar_snapshot = message_line_counts;
                         state.drag_scrollbar_phase =
                             TuiState::DragScrollbarPhase::Dragging;
@@ -4321,6 +4356,7 @@ static int run_interactive_app(const CliOptions& cli,
         }
         if (event == Event::PageUp) {
             std::lock_guard<std::mutex> lk(state.mu);
+            sync_chat_line_counts_from_layout();
             // page_keys_single_line 默认开启:把 PgUp 当作单行滚动,等同 Alt+↑.
             // 适用于吞掉 Alt+方向键序列的终端 (老 conhost / Cmder / 部分 SSH 客户端).
             int step = config.tui.page_keys_single_line
@@ -4356,6 +4392,7 @@ static int run_interactive_app(const CliOptions& cli,
         }
         if (event == Event::PageDown) {
             std::lock_guard<std::mutex> lk(state.mu);
+            sync_chat_line_counts_from_layout();
             int step = config.tui.page_keys_single_line
                 ? 1
                 : std::max(1, (chat_box.y_max - chat_box.y_min + 1) - 2);
@@ -4398,6 +4435,7 @@ static int run_interactive_app(const CliOptions& cli,
             std::lock_guard<std::mutex> lk(state.mu);
             if (state.resume_picker_active) return true;
             if (state.model_picker_open) return true;
+            sync_chat_line_counts_from_layout();
             if (scroll_chat_by_lines(-1) != 0) {
                 screen.PostEvent(Event::Custom);
             }
@@ -4407,6 +4445,7 @@ static int run_interactive_app(const CliOptions& cli,
             std::lock_guard<std::mutex> lk(state.mu);
             if (state.resume_picker_active) return true;
             if (state.model_picker_open) return true;
+            sync_chat_line_counts_from_layout();
             if (scroll_chat_by_lines(1) != 0) {
                 screen.PostEvent(Event::Custom);
             }
@@ -4561,6 +4600,7 @@ static int run_interactive_app(const CliOptions& cli,
             if (mouse.button == Mouse::Left && mouse.motion == Mouse::Pressed &&
                 scrollbar_box.Contain(mouse.x, mouse.y)) {
                 std::lock_guard<std::mutex> lk(state.mu);
+                sync_chat_line_counts_from_layout();
                 // 快照 message_line_counts —— 流式输出追加新行时,拖动期间的
                 // y → line 映射继续按按下瞬间的几何走,不被指针下扯走。
                 state.drag_scrollbar_snapshot = message_line_counts;
@@ -4832,6 +4872,7 @@ static int run_interactive_app(const CliOptions& cli,
             // 鼠标滚轮按行滚动 (3 行/notch, Win 默认值), 长消息不再被一格掠过。
             constexpr int WHEEL_LINES = 3;
             if (mouse.button == Mouse::WheelUp) {
+                sync_chat_line_counts_from_layout();
 #if ACECODE_TUI_INPUT_TRACE
                 const int before_focus = state.chat_focus_index;
                 const int before_offset = state.chat_line_offset;
@@ -4857,6 +4898,7 @@ static int run_interactive_app(const CliOptions& cli,
                 return true;
             }
             if (mouse.button == Mouse::WheelDown) {
+                sync_chat_line_counts_from_layout();
 #if ACECODE_TUI_INPUT_TRACE
                 const int before_focus = state.chat_focus_index;
                 const int before_offset = state.chat_line_offset;
@@ -5161,7 +5203,7 @@ static int run_interactive_app(const CliOptions& cli,
         return false;
     });
 
-    auto renderer = Renderer(input_with_esc, [&state, &screen, &version_str, &cwd_display, &chat_box, &scrollbar_box, &ask_scrollbar_box, &ask_overlay_box, &message_boxes, &message_layout_boxes, &message_line_counts, &message_line_count_width, &anim_tick, &input_with_esc, &permissions, dangerous_mode, conhost_compat_layout, &clamp_chat_focus, &chat_viewport_rows] {
+    auto renderer = Renderer(input_with_esc, [&state, &screen, &version_str, &cwd_display, &chat_box, &scrollbar_box, &ask_scrollbar_box, &ask_overlay_box, &message_boxes, &message_layout_boxes, &message_line_counts, &anim_tick, &input_with_esc, &permissions, dangerous_mode, conhost_compat_layout, &clamp_chat_focus, &chat_viewport_rows, &sync_chat_line_counts_from_layout] {
         std::lock_guard<std::mutex> lk(state.mu);
         auto compat_horizontal_line = [] {
             const int cols = Terminal::Size().dimx;
@@ -5192,25 +5234,7 @@ static int run_interactive_app(const CliOptions& cli,
         const int current_message_width = chat_box.x_max >= chat_box.x_min
             ? chat_box.x_max - chat_box.x_min + 1
             : 0;
-        const bool line_count_width_changed =
-            current_message_width > 0 &&
-            current_message_width != message_line_count_width;
-        if (line_count_width_changed) {
-            message_line_counts.assign(n_msgs, 0);
-            message_line_count_width = current_message_width;
-        }
-        message_line_counts.resize(n_msgs);
-        for (size_t i = 0; i < n_msgs; ++i) {
-            if (!line_count_width_changed && i < message_layout_boxes.size()) {
-                int h = message_layout_boxes[i].y_max -
-                        message_layout_boxes[i].y_min + 1;
-                message_line_counts[i] =
-                    acecode::tui::update_chat_line_count_estimate(
-                        message_line_counts[i], h);
-            } else if (message_line_counts[i] <= 0) {
-                message_line_counts[i] = 1;
-            }
-        }
+        sync_chat_line_counts_from_layout();
         clamp_chat_focus();
 
         // selection-anchor-compensation: 在清空 boxes 之前,先用上一帧 reflect 的

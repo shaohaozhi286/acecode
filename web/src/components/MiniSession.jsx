@@ -28,6 +28,22 @@ function compactText(value, max) {
   return text.slice(0, Math.max(0, max - 1)) + '…';
 }
 
+function askUserQuestionText(result) {
+  const items = Array.isArray(result?.items) ? result.items : [];
+  return items
+    .filter((item) => item && (item.question || item.answer))
+    .map((item) => `Q ${item.question || ''}\nA ${item.answer || ''}`)
+    .join('\n\n');
+}
+
+function joinTooltipParts(...parts) {
+  const text = parts
+    .map((part) => String(part || '').trim())
+    .filter(Boolean)
+    .join('\n\n');
+  return text || undefined;
+}
+
 function MiniMessageItem({ item, compact }) {
   const max = compact ? 42 : 90;
   const content = compactText(item.content || (item.streaming ? '正在输出…' : ''), max);
@@ -61,9 +77,14 @@ function MiniToolItem({ item, compact }) {
   const tool = item.tool || {};
   const running = !tool.isDone && !tool.isTaskComplete;
   const ok = tool.isTaskComplete || tool.success !== false;
-  const tail = Array.isArray(tool.tailLines) ? tool.tailLines.slice(-2).join(' ') : '';
-  const output = !ok && tool.output ? tool.output.split('\n').slice(0, 1).join(' ') : '';
-  const detail = compactText(tool.currentPartial || tail || output, compact ? 44 : 84);
+  const tailText = Array.isArray(tool.tailLines) ? tool.tailLines.join('\n') : '';
+  const tailPreview = tailText.split(/\r\n|\r|\n/).slice(-2).join(' ');
+  const output = !ok && tool.output ? tool.output : '';
+  const askOutput = askUserQuestionText(tool.askUserQuestionResult);
+  const summaryText = toolSummaryText(tool);
+  const detailText = askOutput || joinTooltipParts(tool.currentPartial, tailText, output) || '';
+  const detail = compactText(askOutput || tool.currentPartial || tailPreview || output, compact ? 44 : 84);
+  const tooltip = joinTooltipParts(summaryText, detailText);
   return (
     <div
       className={clsx(
@@ -73,13 +94,13 @@ function MiniToolItem({ item, compact }) {
         !running && ok && 'border-ok-border bg-ok-bg text-ok',
         !running && !ok && 'border-danger/30 bg-danger-bg text-danger',
       )}
-      title={tool.title || tool.displayOverride || tool.tool || ''}
+      title={tooltip || tool.title || tool.displayOverride || tool.tool || ''}
     >
       <div className="flex items-center gap-1 min-w-0">
         {running && <span className="ace-spinner w-2.5 h-2.5 shrink-0" />}
-        <span className="truncate">{compactText(toolSummaryText(tool), compact ? 38 : 76)}</span>
+        <span className="truncate" title={summaryText}>{compactText(summaryText, compact ? 38 : 76)}</span>
       </div>
-      {detail && <div className="text-fg-mute truncate mt-px">{detail}</div>}
+      {detail && <div className="text-fg-mute truncate mt-px" title={detailText}>{detail}</div>}
     </div>
   );
 }

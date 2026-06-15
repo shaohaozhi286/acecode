@@ -25,9 +25,11 @@ AskUserQuestionPrompter::prompt(const nlohmann::json& questions_payload,
     payload["questions"]  = questions_payload;
     events_.emit(SessionEventKind::QuestionRequest, payload);
 
+    const bool has_timeout = timeout_ > std::chrono::milliseconds{0};
     auto deadline = std::chrono::steady_clock::now() + timeout_;
     AskUserQuestionResponse result;
     result.cancelled = true; // 默认值(超时 / abort 时返回)
+    std::string close_reason = "aborted";
 
     while (true) {
         std::unique_lock<std::mutex> lk(pending->mu);
@@ -36,13 +38,16 @@ AskUserQuestionPrompter::prompt(const nlohmann::json& questions_payload,
 
         if (got) {
             result = pending->response;
+            close_reason = result.cancelled ? "cancelled" : "answered";
             break;
         }
         if (abort_flag && abort_flag->load()) {
             // abort_flag 走出循环 = cancelled 默认值生效
+            close_reason = "aborted";
             break;
         }
-        if (std::chrono::steady_clock::now() >= deadline) {
+        if (has_timeout && std::chrono::steady_clock::now() >= deadline) {
+            close_reason = "timeout";
             events_.emit(SessionEventKind::Error, nlohmann::json{
                 {"reason",     "question_timeout"},
                 {"request_id", req_id},
@@ -55,6 +60,10 @@ AskUserQuestionPrompter::prompt(const nlohmann::json& questions_payload,
         std::lock_guard<std::mutex> lk(pending_mu_);
         pending_.erase(req_id);
     }
+    events_.emit(SessionEventKind::QuestionClosed, nlohmann::json{
+        {"request_id", req_id},
+        {"reason", close_reason},
+    });
     return result;
 }
 

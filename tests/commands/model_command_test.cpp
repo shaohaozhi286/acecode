@@ -42,6 +42,14 @@ TEST(ModelCommandParse, ParsesSetDefault) {
     EXPECT_EQ(p.name, "foo");
 }
 
+// 场景:/model set-default 无 name → 打开默认模型 picker。
+TEST(ModelCommandParse, ParsesSetDefaultWithoutName) {
+    acecode::ParsedModelSub p;
+    EXPECT_TRUE(acecode::parse_model_subcommand("set-default", p));
+    EXPECT_EQ(p.sub, "set-default");
+    EXPECT_TRUE(p.name.empty());
+}
+
 // 场景:/model gpt-4o(无 sub) → sub 空,name="gpt-4o"。
 // 与原 model_command.cpp 的 parse_model_args 行为兼容。
 TEST(ModelCommandParse, ParsesBareNameWithoutSubcommand) {

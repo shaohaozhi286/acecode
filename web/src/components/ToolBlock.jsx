@@ -57,11 +57,33 @@ function ClampedQuestionText({ children, className = '' }) {
     <span
       ref={ref}
       className={clsx('ace-qa-text-clamp', clamped && 'is-clamped', className)}
-      title={clamped ? text : undefined}
+      title={text || undefined}
     >
       {text}
     </span>
   );
+}
+
+function askUserQuestionText(result) {
+  const items = Array.isArray(result?.items) ? result.items : [];
+  return items
+    .filter((item) => item && (item.question || item.answer))
+    .map((item) => `Q ${item.question || ''}\nA ${item.answer || ''}`)
+    .join('\n\n');
+}
+
+function joinTooltipParts(...parts) {
+  const text = parts
+    .map((part) => String(part || '').trim())
+    .filter(Boolean)
+    .join('\n\n');
+  return text || undefined;
+}
+
+function stringArg(args, key) {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return '';
+  const value = args[key];
+  return typeof value === 'string' ? value : '';
 }
 
 function AskUserQuestionResultCard({ result, toolContextAttrs }) {
@@ -70,6 +92,7 @@ function AskUserQuestionResultCard({ result, toolContextAttrs }) {
     ? result.items.filter((item) => item && (item.question || item.answer))
     : [];
   if (items.length === 0) return null;
+  const fullText = askUserQuestionText({ items });
 
   return (
     <div className={clsx('ace-qa-card my-0.5', collapsed && 'is-collapsed')} {...toolContextAttrs}>
@@ -78,7 +101,7 @@ function AskUserQuestionResultCard({ result, toolContextAttrs }) {
         className="ace-qa-card-header"
         onClick={() => setCollapsed((value) => !value)}
         aria-expanded={!collapsed}
-        title={collapsed ? '展开' : '收起'}
+        title={collapsed ? fullText : '收起'}
       >
         <span className="ace-qa-card-icon">
           <VsIcon name="ok" size={14} mono={false} />
@@ -130,6 +153,7 @@ export const ToolBlock = memo(function ToolBlock({ entry, onReviewToggle }) {
     title = '',
     tool = '',
     displayOverride = '',
+    args = null,
     tailLines = [],
     currentPartial = '',
     totalLines = 0,
@@ -144,9 +168,7 @@ export const ToolBlock = memo(function ToolBlock({ entry, onReviewToggle }) {
   } = entry || {};
   const attachmentItems = useMemo(() => normalizeAttachmentList(attachments), [attachments]);
   const askUserQuestionOutput = useMemo(() => {
-    const items = Array.isArray(askUserQuestionResult?.items) ? askUserQuestionResult.items : [];
-    if (items.length === 0) return '';
-    return items.map((item) => `Q ${item.question || ''}\nA ${item.answer || ''}`).join('\n\n');
+    return askUserQuestionText(askUserQuestionResult);
   }, [askUserQuestionResult]);
 
   const [nowMs, setNowMs] = useState(() => Date.now());
@@ -160,9 +182,12 @@ export const ToolBlock = memo(function ToolBlock({ entry, onReviewToggle }) {
   const liveElapsed = !isDone && startedAtMs
     ? Math.max(Number(elapsed) || 0, Math.max(0, (nowMs - startedAtMs) / 1000))
     : (Number(elapsed) || 0);
+  const bashCommand = tool === 'bash' ? stringArg(args, 'command') : '';
+  const bashPrompt = bashCommand || (tool === 'bash' ? displayOverride : '');
+  const expandedInvocationText = bashPrompt ? `$ ${bashPrompt}` : '';
   const outputPreview = useMemo(
-    () => compactOneLinePreview(output || askUserQuestionOutput || currentPartial || tailLines.join('\n') || title || displayOverride || tool),
-    [askUserQuestionOutput, currentPartial, displayOverride, output, tailLines, title, tool],
+    () => compactOneLinePreview(output || askUserQuestionOutput || currentPartial || tailLines.join('\n') || bashCommand || title || displayOverride || tool),
+    [askUserQuestionOutput, bashCommand, currentPartial, displayOverride, output, tailLines, title, tool],
   );
 
   // diff2html 渲染:先把 hunks 转 unified diff,再交给 diff2html。空 hunks 时
@@ -187,13 +212,21 @@ export const ToolBlock = memo(function ToolBlock({ entry, onReviewToggle }) {
   }, [diffText]);
 
   const fullOutput = output || askUserQuestionOutput || diffText || tailLines.join('\n') || currentPartial || '';
-  const visibleOutput = expanded ? fullOutput : (outputPreview || currentPartial || tailLines.join('\n') || '');
-  const toolName = title || displayOverride || tool || summary?.object || 'tool';
+  const fullToolOutput = joinTooltipParts(expandedInvocationText, fullOutput) || fullOutput;
+  const visibleOutput = expanded ? fullToolOutput : (outputPreview || currentPartial || tailLines.join('\n') || '');
+  const toolName = bashCommand
+    ? [summary?.verb || title || tool || 'bash', bashCommand].filter(Boolean).join(' · ')
+    : (title || displayOverride || tool || summary?.object || 'tool');
+  const summaryLabel = summary
+    ? [summary.verb, bashCommand || summary.object].filter(Boolean).join(' · ')
+    : '';
+  const summaryObjectTitle = bashCommand || summary?.object || '';
+  const buttonTooltip = joinTooltipParts(summaryLabel || toolName, fullToolOutput);
   const toolContextAttrs = {
     'data-desktop-tool-id': contextIdRef.current,
     'data-desktop-tool-name': toolName,
     'data-desktop-tool-visible-output': visibleOutput || undefined,
-    'data-desktop-tool-full-output': fullOutput || undefined,
+    'data-desktop-tool-full-output': fullToolOutput || undefined,
     'data-desktop-tool-expanded': expanded ? 'true' : 'false',
     'data-desktop-tool-toggle': isTaskComplete ? 'false' : 'true',
   };
@@ -236,6 +269,7 @@ export const ToolBlock = memo(function ToolBlock({ entry, onReviewToggle }) {
     return (
       <div
         className="ace-tool-call-text flex items-center gap-2 px-2.5 py-1 my-0.5 font-medium text-ok"
+        title={joinTooltipParts('Done', text)}
         {...toolContextAttrs}
       >
         <VsIcon name="ok" size={13} mono={false} />
@@ -258,24 +292,24 @@ export const ToolBlock = memo(function ToolBlock({ entry, onReviewToggle }) {
         <button
           type="button"
           className="w-full min-w-0 overflow-hidden text-left flex items-center gap-1.5 px-2.5 py-[5px] cursor-pointer whitespace-nowrap"
-          title={expanded ? '收起' : '展开'}
+          title={buttonTooltip || (expanded ? '收起' : '展开')}
           aria-label={expanded ? '收起' : '展开'}
           onClick={toggleExpanded}
         >
           <ToolSummaryIcon icon={summary.icon} ok={ok} className="shrink-0" />
           <span className="font-medium shrink-0">{summary.verb || ''}</span>
-          {summary.object && <span className="text-fg-2 flex-1 min-w-0 truncate">· {summary.object}</span>}
+          {summary.object && <span className="text-fg-2 flex-1 min-w-0 truncate" title={summaryObjectTitle}>· {summary.object}</span>}
           <MetricList metrics={summary.metrics} />
-          {!ok && output && <span className="text-fg-mute min-w-0 truncate">· {outputPreview}</span>}
+          {!ok && output && <span className="text-fg-mute min-w-0 truncate" title={output}>· {outputPreview}</span>}
           <span className="ml-auto opacity-60 flex items-center shrink-0">
             <VsIcon name={expanded ? 'expandUp' : 'expandDown'} size={12} />
           </span>
         </button>
         {expanded && (
           <div className="px-3 pb-2 pt-1">
-            {tool === 'bash' && displayOverride && (
-              <div className="text-fg-mute opacity-70 mb-1">
-                $ {displayOverride}
+            {tool === 'bash' && bashPrompt && (
+              <div className="text-fg-mute opacity-70 mb-1 break-all" title={bashPrompt}>
+                $ {bashPrompt}
               </div>
             )}
             {diffHtml ? (
@@ -313,13 +347,13 @@ export const ToolBlock = memo(function ToolBlock({ entry, onReviewToggle }) {
         <button
           type="button"
           className="w-full min-w-0 overflow-hidden text-left flex items-center gap-1.5 px-2.5 py-[5px] cursor-pointer whitespace-nowrap"
-          title={outputPreview || (expanded ? '收起' : '展开')}
+          title={buttonTooltip || outputPreview || (expanded ? '收起' : '展开')}
           aria-label={expanded ? '收起' : '展开'}
           onClick={toggleExpanded}
         >
           <VsIcon name={ok ? 'ok' : 'warning'} size={13} mono={false} className="shrink-0" />
-          <span className="font-medium flex-1 min-w-0 truncate">{title || tool || '工具完成'}</span>
-          {output && <span className="text-fg-mute min-w-0 truncate">· {outputPreview}</span>}
+          <span className="font-medium flex-1 min-w-0 truncate" title={toolName}>{title || tool || '工具完成'}</span>
+          {output && <span className="text-fg-mute min-w-0 truncate" title={output}>· {outputPreview}</span>}
           <span className="ml-auto opacity-60 flex items-center shrink-0">
             <VsIcon name={expanded ? 'expandUp' : 'expandDown'} size={12} />
           </span>
@@ -329,11 +363,18 @@ export const ToolBlock = memo(function ToolBlock({ entry, onReviewToggle }) {
             <AttachmentStrip attachments={attachmentItems} align="left" compact />
           </div>
         )}
-        {expanded && output && (
+        {expanded && (output || bashPrompt) && (
           <div className="px-3 pb-2 pt-1">
-            <CopyableCodeFrame text={output}>
-              <pre className="m-0 text-fg-2 whitespace-pre-wrap break-all max-h-[280px] overflow-y-auto" data-code-copy-source="true">{output}</pre>
-            </CopyableCodeFrame>
+            {tool === 'bash' && bashPrompt && (
+              <div className="text-fg-mute opacity-70 mb-1 break-all" title={bashPrompt}>
+                $ {bashPrompt}
+              </div>
+            )}
+            {output && (
+              <CopyableCodeFrame text={output}>
+                <pre className="m-0 text-fg-2 whitespace-pre-wrap break-all max-h-[280px] overflow-y-auto" data-code-copy-source="true">{output}</pre>
+              </CopyableCodeFrame>
+            )}
           </div>
         )}
       </div>
@@ -350,12 +391,12 @@ export const ToolBlock = memo(function ToolBlock({ entry, onReviewToggle }) {
       <button
         type="button"
         className="w-full min-w-0 overflow-hidden px-2.5 py-1.5 flex items-center gap-2 text-left text-fg hover:bg-surface-hi transition whitespace-nowrap"
-        title={outputPreview || (expanded ? '收起' : '展开')}
+        title={buttonTooltip || outputPreview || (expanded ? '收起' : '展开')}
         aria-label={expanded ? '收起' : '展开'}
         onClick={toggleExpanded}
       >
         <span className="ace-spinner w-3 h-3 shrink-0" />
-        <span className="font-semibold flex-1 min-w-0 truncate">{title}</span>
+        <span className="font-semibold flex-1 min-w-0 truncate" title={title}>{title}</span>
         <span className="text-fg-mute shrink-0">{totalLines} 行</span>
         <span className="text-fg-mute shrink-0">{formatBytes(totalBytes)}</span>
         <span className="text-fg-mute shrink-0">{formatElapsed(liveElapsed)}</span>
@@ -365,16 +406,21 @@ export const ToolBlock = memo(function ToolBlock({ entry, onReviewToggle }) {
       </button>
       {expanded && (
         <div className="px-2.5 pb-1.5">
+          {tool === 'bash' && bashPrompt && (
+            <div className="text-fg-mute opacity-70 mt-1 break-all" title={bashPrompt}>
+              $ {bashPrompt}
+            </div>
+          )}
           {hidden > 0 && (
             <div className="text-fg-mute mt-1">... +{hidden} 行已折叠</div>
           )}
           {tailLines.length > 0 && (
             <CopyableCodeFrame text={tailLines.join('\n')} className="mt-1">
-              <pre className="m-0 text-fg-2 whitespace-pre-wrap break-all max-h-[100px] overflow-hidden" data-code-copy-source="true">{tailLines.join('\n')}</pre>
+              <pre className="m-0 text-fg-2 whitespace-pre-wrap break-all max-h-[100px] overflow-hidden" title={tailLines.join('\n')} data-code-copy-source="true">{tailLines.join('\n')}</pre>
             </CopyableCodeFrame>
           )}
           {currentPartial && (
-            <div className="text-fg-mute opacity-70 truncate">{currentPartial}</div>
+            <div className="text-fg-mute opacity-70 truncate" title={currentPartial}>{currentPartial}</div>
           )}
         </div>
       )}

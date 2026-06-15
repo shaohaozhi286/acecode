@@ -4,7 +4,7 @@
 // 一旦回归:
 //   - prompt() 拿不到正确 answers → format_ask_answers 输出错乱,LLM 被骗
 //   - cancelled 不识别 → 工具假装成功,LLM 以为用户答了
-//   - 超时不触发 → worker thread 永远卡住
+//   - 默认被动超时 → 用户未回答时 agent 又擅自继续跑
 //   - abort_flag 不响应 → /abort 后 daemon 不能 stop worker
 //   - notify 用错 request_id → 多并发 prompt(future-proof) 时回流串号
 //   - 与 permission_prompter 的 id 空间打架 → 浏览器回 decision 误触发 question
@@ -19,7 +19,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <future>
 #include <thread>
+#include <vector>
 
 using namespace std::chrono_literals;
 using acecode::AskUserQuestionAnswer;
@@ -43,6 +45,26 @@ struct ResponderState {
     nlohmann::json               questions_seen;
     std::condition_variable      cv;
 };
+
+struct ClosedState {
+    std::mutex                                      mu;
+    std::condition_variable                         cv;
+    std::vector<std::pair<std::string, std::string>> items;
+};
+
+EventDispatcher::SubscriptionId
+subscribe_closed(EventDispatcher& d, ClosedState& state) {
+    return d.subscribe([&](const SessionEvent& e) {
+        if (e.kind != SessionEventKind::QuestionClosed) return;
+        {
+            std::lock_guard<std::mutex> lk(state.mu);
+            state.items.emplace_back(
+                e.payload.value("request_id", std::string{}),
+                e.payload.value("reason", std::string{}));
+        }
+        state.cv.notify_all();
+    });
+}
 
 EventDispatcher::SubscriptionId
 subscribe_responder(EventDispatcher& d, AskUserQuestionPrompter& prompter,
@@ -74,7 +96,7 @@ nlohmann::json sample_questions() {
 // notify_response,prompt 应返回 cancelled=false + 正确 answers。
 TEST(AskUserQuestionPrompter, ResponseUnblocksPrompt) {
     EventDispatcher d;
-    AskUserQuestionPrompter prompter(d, 5s);
+    AskUserQuestionPrompter prompter(d);
 
     AskUserQuestionResponse canned;
     canned.cancelled = false;
@@ -84,7 +106,9 @@ TEST(AskUserQuestionPrompter, ResponseUnblocksPrompt) {
     canned.answers.push_back(ans);
 
     ResponderState state;
+    ClosedState closed;
     auto sub = subscribe_responder(d, prompter, canned, state);
+    auto closed_sub = subscribe_closed(d, closed);
 
     auto resp = prompter.prompt(sample_questions(), nullptr);
     EXPECT_FALSE(resp.cancelled);
@@ -96,34 +120,79 @@ TEST(AskUserQuestionPrompter, ResponseUnblocksPrompt) {
     EXPECT_TRUE(state.got);
     EXPECT_FALSE(state.request_id.empty());
     EXPECT_TRUE(state.questions_seen.is_array());
+    ASSERT_EQ(closed.items.size(), 1u);
+    EXPECT_EQ(closed.items[0].first, state.request_id);
+    EXPECT_EQ(closed.items[0].second, "answered");
     d.unsubscribe(sub);
+    d.unsubscribe(closed_sub);
 }
 
 // 场景: cancelled=true 路径(用户按 ESC / 关浏览器),prompt 必须返回 cancelled=true。
 TEST(AskUserQuestionPrompter, CancelledResponsePropagated) {
     EventDispatcher d;
-    AskUserQuestionPrompter prompter(d, 5s);
+    AskUserQuestionPrompter prompter(d);
 
     AskUserQuestionResponse canned;
     canned.cancelled = true;
 
     ResponderState state;
+    ClosedState closed;
     auto sub = subscribe_responder(d, prompter, canned, state);
+    auto closed_sub = subscribe_closed(d, closed);
 
     auto resp = prompter.prompt(sample_questions(), nullptr);
     EXPECT_TRUE(resp.cancelled);
     EXPECT_EQ(resp.answers.size(), 0u);
+    ASSERT_EQ(closed.items.size(), 1u);
+    EXPECT_EQ(closed.items[0].first, state.request_id);
+    EXPECT_EQ(closed.items[0].second, "cancelled");
+    d.unsubscribe(sub);
+    d.unsubscribe(closed_sub);
+}
+
+// 场景: 默认构造不再有被动超时。无人回答时 prompt 应保持 pending,
+// 直到 abort_flag 显式拉起。
+TEST(AskUserQuestionPrompter, DefaultHasNoPassiveTimeout) {
+    EventDispatcher d;
+    AskUserQuestionPrompter prompter(d);
+    std::atomic<bool> abort_flag{false};
+
+    ResponderState state;
+    auto sub = d.subscribe([&](const SessionEvent& e) {
+        if (e.kind != SessionEventKind::QuestionRequest) return;
+        {
+            std::lock_guard<std::mutex> lk(state.mu);
+            state.request_id = e.payload.value("request_id", std::string{});
+            state.got = true;
+        }
+        state.cv.notify_all();
+    });
+
+    auto future = std::async(std::launch::async, [&] {
+        return prompter.prompt(sample_questions(), &abort_flag);
+    });
+    {
+        std::unique_lock<std::mutex> lk(state.mu);
+        ASSERT_TRUE(state.cv.wait_for(lk, 500ms, [&] { return state.got; }));
+    }
+    EXPECT_EQ(future.wait_for(180ms), std::future_status::timeout);
+
+    abort_flag.store(true);
+    ASSERT_EQ(future.wait_for(500ms), std::future_status::ready);
+    auto resp = future.get();
+    EXPECT_TRUE(resp.cancelled);
     d.unsubscribe(sub);
 }
 
-// 场景: 没有 listener 回应,timeout 必须触发 → cancelled=true 默认值生效,
-// 同时 EventDispatcher 应收到一条 Error(reason=question_timeout)。
-// 用 100ms 超时让测试快。
-TEST(AskUserQuestionPrompter, TimeoutTreatedAsCancelled) {
+// 场景: 显式传入非零 timeout 的调试路径仍可用 → cancelled=true 默认值生效,
+// 同时 EventDispatcher 应收到 Error(reason=question_timeout) 与 QuestionClosed。
+TEST(AskUserQuestionPrompter, ExplicitTimeoutTreatedAsCancelled) {
     EventDispatcher d;
     AskUserQuestionPrompter prompter(d, 100ms);
 
     bool saw_timeout_error = false;
+    ClosedState closed;
+    auto closed_sub = subscribe_closed(d, closed);
     auto sub = d.subscribe([&](const SessionEvent& e) {
         if (e.kind == SessionEventKind::Error
             && e.payload.value("reason", std::string{}) == "question_timeout") {
@@ -134,14 +203,19 @@ TEST(AskUserQuestionPrompter, TimeoutTreatedAsCancelled) {
     auto resp = prompter.prompt(sample_questions(), nullptr);
     EXPECT_TRUE(resp.cancelled);
     EXPECT_TRUE(saw_timeout_error);
+    ASSERT_EQ(closed.items.size(), 1u);
+    EXPECT_EQ(closed.items[0].second, "timeout");
     d.unsubscribe(sub);
+    d.unsubscribe(closed_sub);
 }
 
 // 场景: abort_flag 拉起后,prompt 必须在 ~50ms 内返回 cancelled=true,
-// 不等满 timeout(避免 daemon shutdown 时 worker 卡 5min)。
+// 不依赖任何被动 timeout(避免 daemon shutdown 时 worker 卡住)。
 TEST(AskUserQuestionPrompter, AbortFlagBreaksOutFast) {
     EventDispatcher d;
-    AskUserQuestionPrompter prompter(d, 60s);
+    AskUserQuestionPrompter prompter(d);
+    ClosedState closed;
+    auto closed_sub = subscribe_closed(d, closed);
 
     std::atomic<bool> abort_flag{false};
     auto t0 = std::chrono::steady_clock::now();
@@ -158,6 +232,9 @@ TEST(AskUserQuestionPrompter, AbortFlagBreaksOutFast) {
     EXPECT_TRUE(resp.cancelled);
     // 200ms 是大方的上限 — 50ms 轮询节奏 + abort 设置时机
     EXPECT_LT(elapsed.count(), 500);
+    ASSERT_EQ(closed.items.size(), 1u);
+    EXPECT_EQ(closed.items[0].second, "aborted");
+    d.unsubscribe(closed_sub);
 }
 
 // 场景: AskUserQuestionPrompter 与 AsyncPrompter(permission)用同一个

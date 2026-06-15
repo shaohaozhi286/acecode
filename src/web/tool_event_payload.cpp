@@ -76,8 +76,11 @@ nlohmann::json build_tool_end_payload(
     if (result.metadata.is_object() && !result.metadata.empty()) {
         p["metadata"] = result.metadata;
     }
-    if (!result.success && !output_snippet.empty()) {
-        p["output"] = output_snippet;
+    const std::string& output_payload = result.success
+        ? result.output
+        : output_snippet;
+    if (!output_payload.empty()) {
+        p["output"] = output_payload;
     }
     // hunks 字段总是存在(空数组而不是省略),便于前端写"if (p.hunks.length)"
     // 而不必先 contains 判断。前端 file_edit / file_write 走 diff2html 渲染。

@@ -456,6 +456,77 @@ void AgentLoop::dispatch_assistant_completed_hook(
     hook_manager_->dispatch(kHookEventAssistantMessageCompleted, payload, cwd_);
 }
 
+HookCommonPayloadFields AgentLoop::build_hook_common_fields(
+    const std::string& event_name) const {
+    HookCommonPayloadFields fields;
+    fields.cwd = cwd_;
+    fields.hook_event_name = event_name;
+    fields.permission_mode = PermissionManager::mode_name(permissions_.mode());
+    if (session_manager_) {
+        fields.session_id = session_manager_->current_session_id();
+        if (!fields.session_id.empty()) {
+            fields.transcript_path = SessionStorage::session_path(
+                SessionStorage::get_project_dir(cwd_), fields.session_id);
+        }
+    }
+    if (provider_accessor_) {
+        auto provider = provider_accessor_();
+        if (provider) fields.model = provider->model();
+    }
+    return fields;
+}
+
+void AgentLoop::apply_hook_side_effects(const HookAggregateOutcome& outcome,
+                                        bool include_additional_context) {
+    for (const auto& message : outcome.system_messages) {
+        if (!message.empty()) dispatch_message("system", "[Hook] " + message, false);
+    }
+    if (include_additional_context) {
+        for (const auto& context : outcome.additional_context) {
+            if (!context.empty()) hook_request_context_.push_back(context);
+        }
+    }
+    for (const auto& diagnostic : outcome.diagnostics) {
+        if (diagnostic.severity == HookDiagnosticSeverity::Error ||
+            diagnostic.severity == HookDiagnosticSeverity::Warning) {
+            LOG_WARN("[hooks] " + diagnostic.code + " " + diagnostic.message);
+        }
+    }
+}
+
+std::string AgentLoop::drain_hook_request_context() {
+    if (hook_request_context_.empty()) return {};
+    std::ostringstream oss;
+    oss << "<hook_context>\n";
+    for (const auto& context : hook_request_context_) {
+        if (!context.empty()) oss << context << "\n";
+    }
+    oss << "</hook_context>";
+    hook_request_context_.clear();
+    return oss.str();
+}
+
+HookAggregateOutcome AgentLoop::dispatch_codex_hook(
+    const std::string& event_name,
+    const std::string& matcher_value,
+    const nlohmann::json& payload) {
+    if (!hook_manager_) return {};
+    HookDispatchRequest request;
+    request.event_name = event_name;
+    request.matcher_value = matcher_value;
+    request.cwd = cwd_;
+    request.payload = payload.is_object() ? payload : nlohmann::json::object();
+    return hook_manager_->dispatch_codex(request);
+}
+
+void AgentLoop::dispatch_session_start_hook(const std::string& source) {
+    if (!hook_manager_) return;
+    auto fields = build_hook_common_fields(kCodexHookEventSessionStart);
+    auto payload = build_session_start_hook_payload(fields, source);
+    auto outcome = dispatch_codex_hook(kCodexHookEventSessionStart, source, payload);
+    apply_hook_side_effects(outcome);
+}
+
 void AgentLoop::abort() {
     abort_requested_ = true;
 }
@@ -639,6 +710,19 @@ bool AgentLoop::maybe_run_auto_compact() {
              " consecutive_failures=" +
              std::to_string(auto_compact_consecutive_failures_));
 
+    if (hook_manager_) {
+        auto fields = build_hook_common_fields(kCodexHookEventPreCompact);
+        auto payload = build_compact_hook_payload(fields, "auto");
+        auto outcome = dispatch_codex_hook(kCodexHookEventPreCompact, "auto", payload);
+        apply_hook_side_effects(outcome);
+        if (outcome.continue_false || outcome.blocked || outcome.denied) {
+            dispatch_message("system",
+                             "[Auto-compact] Stopped by hook.",
+                             false);
+            return false;
+        }
+    }
+
     auto micro_result = run_micro_compact(messages_, boundary_start);
     if (micro_result.performed) {
         messages_.push_back(create_microcompact_boundary_message(
@@ -682,6 +766,13 @@ bool AgentLoop::maybe_run_auto_compact() {
                  (still_above_threshold ? "true" : "false"));
 
         if (!still_above_threshold) {
+            if (hook_manager_) {
+                auto fields = build_hook_common_fields(kCodexHookEventPostCompact);
+                auto payload = build_compact_hook_payload(fields, "auto");
+                auto outcome = dispatch_codex_hook(kCodexHookEventPostCompact, "auto", payload);
+                apply_hook_side_effects(outcome);
+                if (outcome.continue_false) return false;
+            }
             auto_compact_consecutive_failures_ = 0;
             return true;
         }
@@ -747,6 +838,13 @@ bool AgentLoop::maybe_run_auto_compact() {
              std::to_string(result.estimated_tokens_saved) +
              " compacted_estimated_tokens=" + std::to_string(compacted_tokens));
     apply_compact_result(result);
+    if (hook_manager_) {
+        auto fields = build_hook_common_fields(kCodexHookEventPostCompact);
+        auto payload = build_compact_hook_payload(fields, "auto");
+        auto outcome = dispatch_codex_hook(kCodexHookEventPostCompact, "auto", payload);
+        apply_hook_side_effects(outcome);
+        if (outcome.continue_false) return false;
+    }
     auto_compact_consecutive_failures_ = 0;
 
     dispatch_message(
@@ -1092,6 +1190,8 @@ AgentLoop::ApiRequestBundle AgentLoop::build_api_request_messages() {
     prepend_session_context_for_api(api_messages, session_context);
     std::string request_context = build_request_context_prompt(cwd_);
     append_request_context_for_api(api_messages, request_context);
+    std::string hook_context = drain_hook_request_context();
+    append_request_context_for_api(api_messages, hook_context);
     std::string plan_mode_context =
         permissions_.mode() == PermissionMode::Plan
             ? build_plan_mode_context_prompt(session_manager_)
@@ -1111,7 +1211,7 @@ AgentLoop::ApiRequestBundle AgentLoop::build_api_request_messages() {
     auto prompt_diag = build_prompt_cache_diagnostics(
         system_prompt,
         session_context + "\n" + request_context + "\n" + plan_mode_context +
-            "\n" + format_todo_injection(todo_context_items),
+            "\n" + hook_context + "\n" + format_todo_injection(todo_context_items),
         bundle.tool_defs);
     bundle.prompt_diag = {
         {"system", prompt_diag.static_system_prompt_hash},
@@ -1541,19 +1641,23 @@ bool AgentLoop::execute_tool_calls(
         } catch (...) {}
     };
 
+    auto is_cwd_validation_exempt = [this](const std::string& tool_name,
+                                           const std::string& path) {
+        if (tool_name == "file_read") return true;
+        if (!session_manager_) return false;
+        return session_manager_->is_plan_file_path(path);
+    };
+
     // Helper: execute a single tool (for both parallel and serial use).
-    auto execute_single_tool = [this](const std::string& tool_name,
-                                      const std::string& tool_args,
-                                      const std::string& ctx_path,
-                                      const ToolContext& tool_ctx = ToolContext{}) -> ToolResult {
+    auto execute_single_tool =
+        [this, &is_cwd_validation_exempt](const std::string& tool_name,
+                                          const std::string& tool_args,
+                                          const std::string& ctx_path,
+                                          const ToolContext& tool_ctx = ToolContext{}) -> ToolResult {
         if (!ctx_path.empty() && tool_name != "bash") {
-            const bool session_artifact_path =
-                session_manager_ &&
-                ((tool_name == "file_read" &&
-                  session_manager_->is_tool_result_artifact_path(ctx_path)) ||
-                 session_manager_->is_plan_file_path(ctx_path));
-            std::string path_error =
-                session_artifact_path ? std::string{} : path_validator_.validate(ctx_path);
+            std::string path_error = is_cwd_validation_exempt(tool_name, ctx_path)
+                ? std::string{}
+                : path_validator_.validate(ctx_path);
             if (!path_error.empty()) {
                 LOG_WARN("Path validation failed: " + path_error);
                 return ToolResult{"[Error] " + path_error, false};
@@ -1586,7 +1690,8 @@ bool AgentLoop::execute_tool_calls(
         doom_guard.record_result(tc, result);
     };
 
-    using ToolRunner = std::function<ToolResult(const ToolContext&,
+    using ToolRunner = std::function<ToolResult(const ToolCall&,
+                                                 const ToolContext&,
                                                  const std::string&,
                                                  const std::string&)>;
 
@@ -1615,10 +1720,33 @@ bool AgentLoop::execute_tool_calls(
             materialized.warnings.end());
     };
 
-    auto run_tool_with_lifecycle = [&](const ToolCall& tc,
+    auto run_tool_with_lifecycle = [&](ToolCall tc,
                                        size_t tool_index,
                                        bool emit_tui_progress,
                                        const ToolRunner& runner) -> ToolResult {
+        if (hook_manager_) {
+            auto fields = build_hook_common_fields(kCodexHookEventPreToolUse);
+            auto payload = build_tool_hook_payload(
+                fields,
+                tc.function_name,
+                parse_tool_args_for_permission_payload(tc.function_arguments));
+            auto outcome = dispatch_codex_hook(
+                kCodexHookEventPreToolUse, tc.function_name, payload);
+            apply_hook_side_effects(outcome);
+            if (outcome.updated_input.has_value()) {
+                const auto& updated = *outcome.updated_input;
+                tc.function_arguments = updated.is_string()
+                    ? updated.get<std::string>()
+                    : updated.dump();
+            }
+            if (outcome.denied || outcome.blocked) {
+                const std::string reason = outcome.reason.empty()
+                    ? "Tool execution denied by hook."
+                    : outcome.reason;
+                return ToolResult{"[Hook denied tool execution] " + reason, false};
+            }
+        }
+
         std::string exec_path, exec_cmd;
         extract_context(tc, exec_path, exec_cmd);
 
@@ -1753,10 +1881,32 @@ bool AgentLoop::execute_tool_calls(
 
         ToolResult result;
         try {
-            result = runner(tool_ctx, exec_path, exec_cmd);
+            result = runner(tc, tool_ctx, exec_path, exec_cmd);
         } catch (const std::exception& e) {
             LOG_ERROR("Tool lifecycle runner error: " + std::string(e.what()));
             result = ToolResult{"[Error] Tool execution failed: " + std::string(e.what()), false};
+        }
+        if (hook_manager_) {
+            nlohmann::json response = {
+                {"success", result.success},
+                {"output", result.output},
+            };
+            auto fields = build_hook_common_fields(kCodexHookEventPostToolUse);
+            auto payload = build_tool_hook_payload(
+                fields,
+                tc.function_name,
+                parse_tool_args_for_permission_payload(tc.function_arguments),
+                response);
+            auto outcome = dispatch_codex_hook(
+                kCodexHookEventPostToolUse, tc.function_name, payload);
+            apply_hook_side_effects(outcome);
+            if (outcome.replacement_output.has_value()) {
+                result.output = *outcome.replacement_output;
+                if (outcome.blocked || outcome.continue_false) result.success = false;
+            } else if ((outcome.blocked || outcome.continue_false) && !outcome.reason.empty()) {
+                result.output = outcome.reason;
+                result.success = false;
+            }
         }
         materialize_result_attachments(result);
 
@@ -1812,15 +1962,16 @@ bool AgentLoop::execute_tool_calls(
                      &maybe_guard_tool, tc_copy, original_index]() {
                         return run_tool_with_lifecycle(
                             tc_copy, original_index, false,
-                            [&execute_single_tool, &maybe_guard_tool, &tc_copy](
+                            [&execute_single_tool, &maybe_guard_tool](
+                                const ToolCall& effective_tc,
                                 const ToolContext& ctx,
                                 const std::string& ctx_path,
                                 const std::string&) {
-                                if (auto guarded = maybe_guard_tool(tc_copy)) {
+                                if (auto guarded = maybe_guard_tool(effective_tc)) {
                                     return *guarded;
                                 }
                                 return execute_single_tool(
-                                    tc_copy.function_name, tc_copy.function_arguments,
+                                    effective_tc.function_name, effective_tc.function_arguments,
                                     ctx_path, ctx);
                             });
                     })
@@ -1855,31 +2006,32 @@ bool AgentLoop::execute_tool_calls(
 
         results[entry.original_index] = run_tool_with_lifecycle(
             tc, entry.original_index, true,
-            [&](const ToolContext& tool_ctx,
+            [&](const ToolCall& effective_tc,
+                const ToolContext& tool_ctx,
                 const std::string& ctx_path,
                 const std::string& ctx_command) -> ToolResult {
-                if (auto guarded = maybe_guard_tool(tc)) {
+                if (auto guarded = maybe_guard_tool(effective_tc)) {
                     return *guarded;
                 }
 
                 const bool targets_active_plan_file =
                     permissions_.mode() == PermissionMode::Plan &&
                     session_manager_ &&
-                    (tc.function_name == "file_write" ||
-                     tc.function_name == "file_edit") &&
+                    (effective_tc.function_name == "file_write" ||
+                     effective_tc.function_name == "file_edit") &&
                     session_manager_->is_plan_file_path(ctx_path);
                 bool auto_allow = permissions_.should_auto_allow(
-                    tc.function_name, false, ctx_path, ctx_command);
+                    effective_tc.function_name, false, ctx_path, ctx_command);
                 if (permissions_.mode() == PermissionMode::Plan &&
                     !permissions_.is_dangerous()) {
-                    auto_allow = targets_active_plan_file || tc.function_name == "TodoWrite";
+                    auto_allow = targets_active_plan_file || effective_tc.function_name == "TodoWrite";
                 }
-                if (tc.function_name == "ExitPlanMode" &&
+                if (effective_tc.function_name == "ExitPlanMode" &&
                     permissions_.mode() != PermissionMode::Plan) {
                     auto_allow = true;
                 }
 
-                if (tc.function_name == "bash" && command_looks_like_file_write(ctx_command)) {
+                if (effective_tc.function_name == "bash" && command_looks_like_file_write(ctx_command)) {
                     const auto now = std::chrono::steady_clock::now();
                     for (auto it = recent_safe_edit_failures_.begin();
                          it != recent_safe_edit_failures_.end();) {
@@ -1903,13 +2055,9 @@ bool AgentLoop::execute_tool_calls(
                     }
                 }
 
-                if (!ctx_path.empty() && tc.function_name != "bash") {
-                    const bool session_artifact_path =
-                        session_manager_ &&
-                        ((tc.function_name == "file_read" &&
-                          session_manager_->is_tool_result_artifact_path(ctx_path)) ||
-                         session_manager_->is_plan_file_path(ctx_path));
-                    std::string path_error = session_artifact_path
+                if (!ctx_path.empty() && effective_tc.function_name != "bash") {
+                    std::string path_error =
+                        is_cwd_validation_exempt(effective_tc.function_name, ctx_path)
                         ? std::string{}
                         : path_validator_.validate(ctx_path);
                     if (!path_error.empty()) {
@@ -1925,31 +2073,53 @@ bool AgentLoop::execute_tool_calls(
                     }
                 }
 
+                if (!auto_allow && hook_manager_) {
+                    auto fields = build_hook_common_fields(kCodexHookEventPermissionRequest);
+                    auto payload = build_tool_hook_payload(
+                        fields,
+                        effective_tc.function_name,
+                        parse_tool_args_for_permission_payload(effective_tc.function_arguments));
+                    auto outcome = dispatch_codex_hook(
+                        kCodexHookEventPermissionRequest,
+                        effective_tc.function_name,
+                        payload);
+                    apply_hook_side_effects(outcome);
+                    if (outcome.denied || outcome.blocked) {
+                        const std::string reason = outcome.reason.empty()
+                            ? "Permission denied by hook."
+                            : outcome.reason;
+                        return ToolResult{"[Hook denied permission] " + reason, false};
+                    }
+                    if (outcome.allowed) {
+                        auto_allow = true;
+                    }
+                }
+
                 if (!auto_allow && (prompter_ || callbacks_.on_tool_confirm)) {
                     emit_progress("permission_waiting", "正在等待权限确认",
-                        tc.function_name, tc.function_name, tc.id,
+                        effective_tc.function_name, effective_tc.function_name, effective_tc.id,
                         static_cast<int>(entry.original_index), true);
                     const std::string permission_args =
                         build_plan_permission_args(
-                            tc.function_name, tc.function_arguments, session_manager_);
+                            effective_tc.function_name, effective_tc.function_arguments, session_manager_);
                     PermissionResult perm = prompter_
-                        ? prompter_->prompt(tc.function_name, permission_args, &abort_requested_)
-                        : callbacks_.on_tool_confirm(tc.function_name, permission_args);
+                        ? prompter_->prompt(effective_tc.function_name, permission_args, &abort_requested_)
+                        : callbacks_.on_tool_confirm(effective_tc.function_name, permission_args);
                     if (perm == PermissionResult::Deny) {
                         return ToolResult{"[User denied tool execution]", false};
                     }
                     if (perm == PermissionResult::AlwaysAllow &&
                         permissions_.mode() != PermissionMode::Plan &&
-                        tc.function_name != "EnterPlanMode" &&
-                        tc.function_name != "ExitPlanMode") {
-                        permissions_.add_session_allow(tc.function_name);
+                        effective_tc.function_name != "EnterPlanMode" &&
+                        effective_tc.function_name != "ExitPlanMode") {
+                        permissions_.add_session_allow(effective_tc.function_name);
                     }
                 }
 
-                ToolResult tool_result = execute_single_tool(tc.function_name, tc.function_arguments,
+                ToolResult tool_result = execute_single_tool(effective_tc.function_name, effective_tc.function_arguments,
                                                              ctx_path, tool_ctx);
 
-                if ((tc.function_name == "file_edit" || tc.function_name == "file_write") &&
+                if ((effective_tc.function_name == "file_edit" || effective_tc.function_name == "file_write") &&
                     !ctx_path.empty() && !tool_result.success) {
                     const std::string lower = ascii_lower(tool_result.output);
                     if (lower.find("encoding") != std::string::npos ||
@@ -1960,7 +2130,7 @@ bool AgentLoop::execute_tool_calls(
                     }
                 }
 
-                if (tc.function_name == "bash" && tool_result.success &&
+                if (effective_tc.function_name == "bash" && tool_result.success &&
                     command_looks_like_file_write(ctx_command)) {
                     for (const auto& [failed_path, when] : recent_safe_edit_failures_) {
                         (void)when;
@@ -2076,6 +2246,27 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
     busy_ = true;
     restore_goal_runtime();
 
+    if (!hidden_goal_context && hook_manager_) {
+        auto fields = build_hook_common_fields(kCodexHookEventUserPromptSubmit);
+        auto payload = build_user_prompt_submit_hook_payload(fields, input.text);
+        auto outcome = dispatch_codex_hook(
+            kCodexHookEventUserPromptSubmit, std::string{}, payload);
+        apply_hook_side_effects(outcome);
+        if (outcome.blocked || outcome.denied) {
+            const std::string reason = outcome.reason.empty()
+                ? "User prompt blocked by hook."
+                : outcome.reason;
+            dispatch_message("error", "[Hook blocked prompt] " + reason, false);
+            account_goal_usage(0, false);
+            if (callbacks_.on_busy_changed) callbacks_.on_busy_changed(false);
+            busy_ = false;
+            events_.emit(SessionEventKind::BusyChanged, nlohmann::json{{"busy", false}});
+            events_.emit(SessionEventKind::Done, nlohmann::json::object());
+            maybe_continue_goal();
+            return;
+        }
+    }
+
     // Phase 1: Build and persist user message, emit events
     auto turn_info = prepare_user_turn(input, hidden_goal_context);
     std::string turn_timing_status = "completed";
@@ -2128,6 +2319,42 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
         opts.buffered = true;
         opts.coalesce_key = "agent_progress";
         events_.emit(SessionEventKind::AgentProgress, std::move(payload), opts);
+    };
+
+    auto append_stop_continuation = [&](const std::string& prompt) {
+        if (prompt.empty()) return;
+        ChatMessage msg;
+        msg.role = "user";
+        msg.content = prompt;
+        msg.metadata = nlohmann::json{
+            {"hidden_hook_stop_continuation", true},
+            {"hidden_goal_context", true},
+        };
+        ensure_user_message_identity(msg);
+        messages_.push_back(msg);
+        if (session_manager_) session_manager_->on_message(msg);
+    };
+
+    auto maybe_continue_from_stop_hook = [&](const std::string& last_assistant_message) {
+        if (!hook_manager_) return false;
+        auto fields = build_hook_common_fields(kCodexHookEventStop);
+        auto payload = build_stop_hook_payload(
+            fields, stop_hook_active_, last_assistant_message);
+        auto outcome = dispatch_codex_hook(kCodexHookEventStop, std::string{}, payload);
+        apply_hook_side_effects(outcome);
+        if (outcome.continue_false) {
+            stop_hook_active_ = false;
+            return false;
+        }
+        if ((outcome.blocked || outcome.denied) &&
+            !stop_hook_active_ &&
+            !outcome.reason.empty()) {
+            stop_hook_active_ = true;
+            append_stop_continuation(outcome.reason);
+            return true;
+        }
+        stop_hook_active_ = false;
+        return false;
     };
 
     // Main agent loop
@@ -2231,6 +2458,9 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
                              nlohmann::json::object(),
                              provider_result.accumulated.content_parts);
             dispatch_assistant_completed_hook(assistant_msg, provider_snapshot);
+            if (maybe_continue_from_stop_hook(provider_result.accumulated.content)) {
+                continue;
+            }
             break;
         }
 
@@ -2239,6 +2469,11 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
             provider_result.accumulated, provider_snapshot,
             emit_agent_progress, doom_guard, doom_guard_mu,
             turn_timing_status);
+        if (terminator_fired &&
+            maybe_continue_from_stop_hook(provider_result.accumulated.content)) {
+            terminator_fired = false;
+            continue;
+        }
     }
 
     // Post-loop cleanup
@@ -2308,6 +2543,18 @@ void AgentLoop::run_compact() {
         events_.emit(SessionEventKind::Done, nlohmann::json::object());
     };
 
+    if (hook_manager_) {
+        auto fields = build_hook_common_fields(kCodexHookEventPreCompact);
+        auto payload = build_compact_hook_payload(fields, "manual");
+        auto outcome = dispatch_codex_hook(kCodexHookEventPreCompact, "manual", payload);
+        apply_hook_side_effects(outcome);
+        if (outcome.continue_false || outcome.blocked || outcome.denied) {
+            dispatch_message("system", "[Compact] Stopped by hook.", false);
+            finish();
+            return;
+        }
+    }
+
     std::shared_ptr<LlmProvider> provider_snapshot;
     if (provider_accessor_) provider_snapshot = provider_accessor_();
     if (!provider_snapshot) {
@@ -2331,6 +2578,16 @@ void AgentLoop::run_compact() {
     }
 
     apply_compact_result(result);
+    if (hook_manager_) {
+        auto fields = build_hook_common_fields(kCodexHookEventPostCompact);
+        auto payload = build_compact_hook_payload(fields, "manual");
+        auto outcome = dispatch_codex_hook(kCodexHookEventPostCompact, "manual", payload);
+        apply_hook_side_effects(outcome);
+        if (outcome.continue_false) {
+            finish();
+            return;
+        }
+    }
 
     dispatch_message(
         "system",
@@ -2341,7 +2598,7 @@ void AgentLoop::run_compact() {
     finish();
 }
 
-void AgentLoop::run_shell(const std::string& command) {
+void AgentLoop::run_shell(std::string command) {
     abort_requested_ = false;
     busy_ = true;
 
@@ -2355,10 +2612,31 @@ void AgentLoop::run_shell(const std::string& command) {
     // the user sees a clear "-> bash command" line followed by its result.
     nlohmann::json args = {{"command", command}};
     std::string args_json = args.dump();
+    bool hook_denied_shell = false;
+    if (hook_manager_) {
+        auto fields = build_hook_common_fields(kCodexHookEventPreToolUse);
+        auto payload = build_tool_hook_payload(fields, "bash", args);
+        auto outcome = dispatch_codex_hook(kCodexHookEventPreToolUse, "bash", payload);
+        apply_hook_side_effects(outcome);
+        if (outcome.updated_input.has_value()) {
+            const auto& updated = *outcome.updated_input;
+            if (updated.is_object() && updated.contains("command") &&
+                updated["command"].is_string()) {
+                command = updated["command"].get<std::string>();
+                args = {{"command", command}};
+                args_json = args.dump();
+            }
+        }
+        if (outcome.denied || outcome.blocked) {
+            hook_denied_shell = true;
+        }
+    }
     dispatch_message("tool_call", "[Tool: bash] " + args_json, true);
 
     ToolResult result{"[Error] bash tool not registered", false};
-    if (tools_.has_tool("bash")) {
+    if (hook_denied_shell) {
+        result = ToolResult{"[Hook denied tool execution]", false};
+    } else if (tools_.has_tool("bash")) {
         // Same progress plumbing as the agent-driven bash path.
         std::string cmd_preview = command;
         cmd_preview = truncate_utf8_prefix(cmd_preview, 60);
@@ -2404,6 +2682,23 @@ void AgentLoop::run_shell(const std::string& command) {
         }
     } else {
         LOG_WARN("Shell mode invoked but `bash` tool is not registered");
+    }
+    if (hook_manager_) {
+        nlohmann::json response = {
+            {"success", result.success},
+            {"output", result.output},
+        };
+        auto fields = build_hook_common_fields(kCodexHookEventPostToolUse);
+        auto payload = build_tool_hook_payload(fields, "bash", args, response);
+        auto outcome = dispatch_codex_hook(kCodexHookEventPostToolUse, "bash", payload);
+        apply_hook_side_effects(outcome);
+        if (outcome.replacement_output.has_value()) {
+            result.output = *outcome.replacement_output;
+            if (outcome.blocked || outcome.continue_false) result.success = false;
+        } else if ((outcome.blocked || outcome.continue_false) && !outcome.reason.empty()) {
+            result.output = outcome.reason;
+            result.success = false;
+        }
     }
 
     // 用户主动 `!cmd` 的输出必须**全量显示**(不折叠、不摘要、不截断)—— 用户

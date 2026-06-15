@@ -10,6 +10,7 @@
 #include "session/event_dispatcher.hpp"
 #include "stub_provider.hpp"
 #include "tool/file_edit_tool.hpp"
+#include "tool/file_read_tool.hpp"
 #include "tool/mtime_tracker.hpp"
 #include "tool/tool_executor.hpp"
 
@@ -278,6 +279,69 @@ TEST(AgentLoopToolLifecycleEvents, ValidationFailureStillEmitsTerminalToolEnd) {
     ASSERT_EQ(ends.size(), 1u);
     EXPECT_EQ(starts[0].payload["tool_call_id"], "call-bad-path");
     EXPECT_EQ(ends[0].payload["tool_call_id"], "call-bad-path");
+    EXPECT_FALSE(ends[0].payload.value("success", true));
+    ASSERT_TRUE(ends[0].payload.contains("output"));
+    EXPECT_NE(ends[0].payload["output"].get<std::string>().find("Path outside working directory"),
+              std::string::npos);
+
+    fs::remove_all(cwd);
+}
+
+TEST(AgentLoopToolLifecycleEvents, FileReadOutsideCwdExecutes) {
+    auto cwd = make_temp_dir("acecode_lifecycle_file_read_outside");
+    const auto outside = cwd.parent_path() /
+        (cwd.filename().string() + "_outside_read.txt");
+    {
+        std::ofstream out(outside);
+        out << "outside file_read content\n";
+    }
+
+    AllowingToolHarness h(cwd.string());
+    h.tools().register_tool(acecode::create_file_read_tool());
+
+    ScriptedResponse tools_turn;
+    tools_turn.tool_calls.push_back({"call-read-outside", "file_read",
+        nlohmann::json{{"file_path", outside.string()}}.dump()});
+    h.provider().push_response(std::move(tools_turn));
+    h.provider().push_text("done");
+
+    ASSERT_TRUE(h.submit_and_wait());
+
+    auto results = h.results();
+    ASSERT_EQ(results.size(), 1u);
+    EXPECT_EQ(results[0].first, "file_read");
+    EXPECT_TRUE(results[0].second.success);
+    EXPECT_NE(results[0].second.output.find("outside file_read content"),
+              std::string::npos);
+
+    fs::remove(outside);
+    fs::remove_all(cwd);
+}
+
+TEST(AgentLoopToolLifecycleEvents, MutationOutsideCwdStillRejectedBeforeExecution) {
+    auto cwd = make_temp_dir("acecode_lifecycle_write_outside");
+    std::atomic<int> calls{0};
+    ToolLifecycleHarness h(cwd.string());
+    h.tools().register_tool(make_probe_tool("write_path_probe", false, &calls));
+
+    const auto outside = cwd.parent_path() /
+        (cwd.filename().string() + "_outside_write.txt");
+    ScriptedResponse tools_turn;
+    tools_turn.tool_calls.push_back({"call-write-outside", "write_path_probe",
+        nlohmann::json{{"file_path", outside.string()}}.dump()});
+    h.provider().push_response(std::move(tools_turn));
+    h.provider().push_text("done");
+
+    ASSERT_TRUE(h.submit_and_wait());
+    EXPECT_EQ(calls.load(), 0);
+    EXPECT_EQ(h.confirm_count().load(), 0);
+
+    auto starts = h.events_of(SessionEventKind::ToolStart);
+    auto ends = h.events_of(SessionEventKind::ToolEnd);
+    ASSERT_EQ(starts.size(), 1u);
+    ASSERT_EQ(ends.size(), 1u);
+    EXPECT_EQ(starts[0].payload["tool_call_id"], "call-write-outside");
+    EXPECT_EQ(ends[0].payload["tool_call_id"], "call-write-outside");
     EXPECT_FALSE(ends[0].payload.value("success", true));
     ASSERT_TRUE(ends[0].payload.contains("output"));
     EXPECT_NE(ends[0].payload["output"].get<std::string>().find("Path outside working directory"),

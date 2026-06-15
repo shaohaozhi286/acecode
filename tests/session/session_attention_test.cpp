@@ -64,3 +64,7 @@ TEST(SessionAttention, InteractiveRequestsAreUserVisible) {
     EXPECT_TRUE(session_event_has_user_visible_output(SessionEventKind::QuestionRequest, nlohmann::json::object()));
     EXPECT_TRUE(session_event_has_user_visible_output(SessionEventKind::Error, nlohmann::json::object()));
 }
+
+TEST(SessionAttention, QuestionClosedIsLifecycleOnly) {
+    EXPECT_FALSE(session_event_has_user_visible_output(SessionEventKind::QuestionClosed, nlohmann::json::object()));
+}

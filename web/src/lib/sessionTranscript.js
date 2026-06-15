@@ -49,6 +49,17 @@ function cloneGoal(goal) {
   return { ...goal };
 }
 
+function cloneJsonLike(value) {
+  if (value == null) return null;
+  if (Array.isArray(value)) return value.map((item) => cloneJsonLike(item));
+  if (typeof value === 'object') {
+    const out = {};
+    for (const [key, item] of Object.entries(value)) out[key] = cloneJsonLike(item);
+    return out;
+  }
+  return value;
+}
+
 function normalizeTodoStatus(status) {
   const value = String(status || '').trim().toLowerCase();
   if (value === 'pending' || value === 'in_progress' || value === 'completed' || value === 'cancelled') return value;
@@ -360,6 +371,7 @@ function historyItemFromMessage(next, m) {
           tool: m.tool || '',
           toolCallId: m.tool_call_id || m.toolCallId || '',
           toolIndex: m.tool_index ?? m.toolIndex ?? null,
+          args: null,
           startedAtMs: ts,
           displayOverride: '',
           title: summary?.object || m.content || '工具调用',
@@ -392,6 +404,7 @@ function historyItemFromMessage(next, m) {
           tool: m.tool || '',
           toolCallId: m.tool_call_id || m.toolCallId || '',
           toolIndex: m.tool_index ?? m.toolIndex ?? null,
+          args: null,
           startedAtMs: ts,
           displayOverride: '',
           title: m.content || attachments[0]?.name || '工具调用',
@@ -713,6 +726,7 @@ export function reduceTranscriptEvent(state, msg) {
         tool: p.tool || '',
         toolCallId: p.tool_call_id || p.call_id || p.id || '',
         toolIndex: p.tool_index ?? null,
+        args: cloneJsonLike(p.args),
         startedAtMs: eventTs(msg),
         displayOverride: p.display_override || '',
         title: p.display_override || p.command_preview || `${p.tool || ''}  ${JSON.stringify(p.args || {})}`,

@@ -459,6 +459,12 @@ AppConfig load_config() {
                 cfg.default_permission_mode = normalize_permission_mode_name(
                     j["default_permission_mode"].get<std::string>());
             }
+            if (j.contains("features") && j["features"].is_object()) {
+                const auto& fj = j["features"];
+                if (fj.contains("hooks") && fj["hooks"].is_boolean()) {
+                    cfg.features.hooks = fj["hooks"].get<bool>();
+                }
+            }
             if (j.contains("skills") && j["skills"].is_object()) {
                 const auto& sj = j["skills"];
                 if (sj.contains("disabled") && sj["disabled"].is_array()) {
@@ -1320,6 +1326,12 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
             nj["proxy_probe_timeout_ms"] = cfg.network.proxy_probe_timeout_ms;
         if (!nj.empty()) j["network"] = nj;
 
+        FeaturesConfig features_d;
+        nlohmann::json featuresj = nlohmann::json::object();
+        if (cfg.features.hooks != features_d.hooks)
+            featuresj["hooks"] = cfg.features.hooks;
+        if (!featuresj.empty()) j["features"] = featuresj;
+
         WebSearchConfig ws_d;
         nlohmann::json wsj = nlohmann::json::object();
         if (cfg.web_search.enabled != ws_d.enabled)
@@ -1510,6 +1522,81 @@ void save_config(const AppConfig& cfg, const std::string& explicit_path) {
     if (ofs.is_open()) {
         ofs << j.dump(2) << std::endl;
     }
+}
+
+bool refresh_default_session_preferences_from_config(
+    AppConfig& cfg,
+    const std::string& explicit_path,
+    std::string* error) {
+    if (error) error->clear();
+
+    std::string config_path = explicit_path;
+    if (config_path.empty()) {
+        config_path = path_to_utf8(path_from_utf8(get_acecode_dir()) / "config.json");
+    }
+
+    fs::path native_path = path_from_utf8(config_path);
+    std::error_code ec;
+    if (!fs::exists(native_path, ec) || ec) {
+        return true;
+    }
+
+    std::ifstream ifs(native_path);
+    if (!ifs.is_open()) {
+        if (error) *error = "failed to open config file: " + config_path;
+        return false;
+    }
+
+    nlohmann::json j;
+    try {
+        j = nlohmann::json::parse(ifs);
+    } catch (const std::exception& e) {
+        if (error) *error = std::string("failed to parse config file: ") + e.what();
+        return false;
+    }
+    if (!j.is_object()) {
+        if (error) *error = "config root must be a JSON object";
+        return false;
+    }
+
+    AppConfig next = cfg;
+    if (j.contains("saved_models")) {
+        std::string err;
+        auto parsed = parse_saved_models(j["saved_models"], err);
+        if (!parsed.has_value()) {
+            if (error) *error = err;
+            return false;
+        }
+        next.saved_models = std::move(*parsed);
+    }
+    if (j.contains("default_model_name") && j["default_model_name"].is_string()) {
+        next.default_model_name = j["default_model_name"].get<std::string>();
+    }
+    if (j.contains("default_permission_mode") &&
+        j["default_permission_mode"].is_string()) {
+        next.default_permission_mode = normalize_permission_mode_name(
+            j["default_permission_mode"].get<std::string>());
+    } else if (!j.contains("default_permission_mode")) {
+        next.default_permission_mode = "default";
+    }
+
+    if (!next.saved_models.empty()) {
+        std::string err;
+        if (!validate_saved_models(next.saved_models, next.default_model_name, err)) {
+            if (error) *error = err;
+            return false;
+        }
+        sanitize_disabled_model_providers(next);
+    } else if (!next.default_model_name.empty()) {
+        LOG_WARN("[config] default_model_name ignored because saved_models is empty: " +
+                 next.default_model_name);
+        next.default_model_name.clear();
+    }
+
+    cfg.saved_models = std::move(next.saved_models);
+    cfg.default_model_name = std::move(next.default_model_name);
+    cfg.default_permission_mode = std::move(next.default_permission_mode);
+    return true;
 }
 
 } // namespace acecode

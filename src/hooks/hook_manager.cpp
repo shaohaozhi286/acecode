@@ -17,6 +17,13 @@ HookProcessResult default_runner(const HookCommandSpec& command,
     return run_hook_process(command, stdin_text, timeout_ms, cwd);
 }
 
+HookProcessResult default_shell_runner(const std::string& command,
+                                       const std::string& stdin_text,
+                                       int timeout_ms,
+                                       const std::string& cwd) {
+    return run_hook_shell_command(command, stdin_text, timeout_ms, cwd);
+}
+
 std::string mode_name(HookMode mode) {
     return mode == HookMode::Async ? "async" : "sync";
 }
@@ -29,6 +36,18 @@ nlohmann::json payload_for_hook(const nlohmann::json& base,
     return payload;
 }
 
+bool trust_status_invokable(HookTrustStatus status) {
+    return status == HookTrustStatus::Trusted ||
+           status == HookTrustStatus::ManagedTrusted;
+}
+
+std::string command_for_current_platform(const NormalizedHook& hook) {
+#ifdef _WIN32
+    if (!hook.command.command_windows.empty()) return hook.command.command_windows;
+#endif
+    return hook.command.command;
+}
+
 } // namespace
 
 HookManager::HookManager()
@@ -37,6 +56,16 @@ HookManager::HookManager()
 HookManager::HookManager(HookConfig config, HookProcessRunner runner)
     : config_(std::move(config)),
       runner_(runner ? std::move(runner) : HookProcessRunner(default_runner)),
+      shell_runner_(HookShellRunner(default_shell_runner)),
+      async_state_(std::make_shared<AsyncState>()) {}
+
+HookManager::HookManager(HookRegistrySnapshot registry,
+                         HookProcessRunner legacy_runner,
+                         HookShellRunner shell_runner)
+    : config_{},
+      registry_(std::move(registry)),
+      runner_(legacy_runner ? std::move(legacy_runner) : HookProcessRunner(default_runner)),
+      shell_runner_(shell_runner ? std::move(shell_runner) : HookShellRunner(default_shell_runner)),
       async_state_(std::make_shared<AsyncState>()) {}
 
 std::size_t dispatch_startup_before_model_load_hooks(const std::string& cwd,
@@ -87,6 +116,103 @@ std::size_t HookManager::dispatch(const std::string& event,
         }
     }
     return count;
+}
+
+HookAggregateOutcome HookManager::dispatch_codex(const HookDispatchRequest& request) {
+    HookAggregateOutcome aggregate;
+    HookRegistrySnapshot registry;
+    {
+        std::lock_guard<std::mutex> lk(registry_mu_);
+        registry = registry_;
+    }
+    if (!registry.feature_enabled) return aggregate;
+
+    std::vector<HookDiagnostic> matcher_diagnostics;
+    const std::string payload_text =
+        request.payload.is_object() ? request.payload.dump() : nlohmann::json::object().dump();
+
+    for (const auto& hook : registry.hooks) {
+        if (!hook_matcher_matches(hook,
+                                  request.event_name,
+                                  request.matcher_value,
+                                  &matcher_diagnostics)) {
+            continue;
+        }
+        ++aggregate.matched_count;
+
+        if (hook.legacy_direct ||
+            hook.kind != HookHandlerKind::Command ||
+            hook.skipped ||
+            !trust_status_invokable(hook.trust_status)) {
+            ++aggregate.skipped_count;
+            continue;
+        }
+
+        const std::string command = command_for_current_platform(hook);
+        if (command.empty()) {
+            ++aggregate.skipped_count;
+            continue;
+        }
+
+        ++aggregate.invoked_count;
+        const int timeout_ms = hook.command.timeout_seconds > 0
+            ? hook.command.timeout_seconds * 1000
+            : 600000;
+
+        LOG_INFO("[hooks] codex start id=" + hook.id +
+                 " event=" + request.event_name +
+                 " command=" + log_truncate(command, 300) +
+                 " timeout_ms=" + std::to_string(timeout_ms));
+        HookProcessResult result = shell_runner_(
+            command,
+            payload_text,
+            timeout_ms,
+            request.cwd);
+
+        const std::string status = result.timed_out ? "timeout" :
+            (result.started && result.exit_code == 0 ? "ok" :
+             (result.exit_code == 2 ? "blocked" : "error"));
+        std::string line = "[hooks] codex finish id=" + hook.id +
+            " event=" + request.event_name +
+            " status=" + status +
+            " exit=" + std::to_string(result.exit_code) +
+            " duration_ms=" + std::to_string(result.duration_ms);
+        if (!result.error.empty()) {
+            line += " error=" + truncate_utf8_prefix(result.error, 300);
+        }
+        if (!result.stdout_text.empty()) {
+            line += " stdout=" + truncate_utf8_prefix(result.stdout_text, 500);
+        }
+        if (!result.stderr_text.empty()) {
+            line += " stderr=" + truncate_utf8_prefix(result.stderr_text, 500);
+        }
+        if (status == "ok") LOG_INFO(line);
+        else LOG_WARN(line);
+
+        HookParsedOutput output = parse_hook_process_output(result, request.event_name);
+        merge_hook_output(aggregate, output, request.event_name, hook);
+    }
+
+    aggregate.diagnostics.insert(aggregate.diagnostics.end(),
+                                 matcher_diagnostics.begin(),
+                                 matcher_diagnostics.end());
+    if (aggregate.denied || aggregate.blocked || aggregate.allowed ||
+        aggregate.continue_false || aggregate.updated_input.has_value() ||
+        aggregate.replacement_output.has_value() ||
+        !aggregate.additional_context.empty()) {
+        aggregate.no_decision = false;
+    }
+    return aggregate;
+}
+
+HookRegistrySnapshot HookManager::registry_snapshot() const {
+    std::lock_guard<std::mutex> lk(registry_mu_);
+    return registry_;
+}
+
+void HookManager::refresh_registry(HookRegistrySnapshot registry) {
+    std::lock_guard<std::mutex> lk(registry_mu_);
+    registry_ = std::move(registry);
 }
 
 void HookManager::shutdown(std::chrono::milliseconds wait_timeout) {

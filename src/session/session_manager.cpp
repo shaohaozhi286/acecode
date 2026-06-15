@@ -10,6 +10,7 @@
 
 #include <filesystem>
 #include <algorithm>
+#include <cctype>
 #include <regex>
 #include <set>
 #include <sstream>
@@ -93,6 +94,21 @@ bool is_visible_user_turn_message(const acecode::ChatMessage& msg) {
     return msg.role == "user" &&
            !msg.is_meta &&
            !is_hidden_goal_context_message(msg);
+}
+
+bool is_generated_error_title(const std::string& title) {
+    std::size_t i = 0;
+    while (i < title.size() &&
+           std::isspace(static_cast<unsigned char>(title[i])) != 0) {
+        ++i;
+    }
+    if (title.compare(i, 7, "[Error]") == 0) return true;
+    if (title.size() - i < 5) return false;
+    return std::tolower(static_cast<unsigned char>(title[i])) == 'e' &&
+           std::tolower(static_cast<unsigned char>(title[i + 1])) == 'r' &&
+           std::tolower(static_cast<unsigned char>(title[i + 2])) == 'r' &&
+           std::tolower(static_cast<unsigned char>(title[i + 3])) == 'o' &&
+           std::tolower(static_cast<unsigned char>(title[i + 4])) == 'r';
 }
 
 std::string turn_timing_dedupe_key(const acecode::ChatMessage& msg) {
@@ -869,6 +885,13 @@ bool SessionManager::try_set_generated_session_title(std::string title) {
     if (title.empty()) return false;
     if (user_title_touched_) return false;
     if (!pending_title_.empty() && title_source_ != "generated") return false;
+    const bool incoming_error = is_generated_error_title(title);
+    const bool current_generated_error =
+        title_source_ == "generated" && is_generated_error_title(pending_title_);
+    if (incoming_error && title_source_ == "generated" &&
+        !pending_title_.empty() && !current_generated_error) {
+        return false;
+    }
     pending_title_ = std::move(title);
     title_source_ = "generated";
     if (created_) {
@@ -879,8 +902,10 @@ bool SessionManager::try_set_generated_session_title(std::string title) {
 
 bool SessionManager::mark_auto_title_generation_started() {
     std::lock_guard<std::mutex> lk(mu_);
-    if (auto_title_generation_attempted_) return false;
-    if (turn_count_ > 0) return false;
+    const bool retry_generated_error =
+        title_source_ == "generated" && is_generated_error_title(pending_title_);
+    if (auto_title_generation_attempted_ && !retry_generated_error) return false;
+    if (turn_count_ > 0 && !retry_generated_error) return false;
     if (user_title_touched_) return false;
     if (!pending_title_.empty() && title_source_ != "generated") return false;
     auto_title_generation_attempted_ = true;

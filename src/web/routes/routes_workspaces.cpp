@@ -215,6 +215,7 @@ void WebServer::Impl::register_workspaces() {
             }
             SessionOptions opts;
             if (auto err = parse_session_options(req, *ws, opts)) return std::move(*err);
+            refresh_default_session_preferences_for_new_session();
             auto id = deps.session_client->create_session(opts);
             LOG_INFO("[web] workspace session created hash=" + ws->hash + " id=" + id);
             crow::response r(201);

@@ -179,6 +179,11 @@ export function createApi(base = null) {
     getMcp:           ()             => request('GET',    '/api/mcp', undefined, base),
     putMcp:           (cfg)          => request('PUT',    '/api/mcp', cfg, base),
     reloadMcp:        ()             => request('POST',   '/api/mcp/reload', undefined, base),
+    listHooks:        ()             => request('GET',    '/api/hooks', undefined, base),
+    refreshHooks:     ()             => request('POST',   '/api/hooks/refresh', undefined, base),
+    trustHook:        (id)           => request('POST',   `/api/hooks/${encodeURIComponent(id)}/trust`, undefined, base),
+    disableHook:      (id)           => request('POST',   `/api/hooks/${encodeURIComponent(id)}/disable`, undefined, base),
+    enableHook:       (id)           => request('POST',   `/api/hooks/${encodeURIComponent(id)}/enable`, undefined, base),
     listModels:       ()             => request('GET',    '/api/models', undefined, base),
     probeModels:      (draft)        => request('POST',   '/api/models/probe', draft, base),
     getSessionModel:  (sid, workspaceHash = '') => {

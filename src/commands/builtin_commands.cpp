@@ -61,6 +61,122 @@ std::string format_goal_status_chip(const ThreadGoal& goal) {
     return oss.str();
 }
 
+std::optional<PermissionMode> parse_permission_mode_arg(std::string mode) {
+    mode = trim_ascii_command(std::move(mode));
+    if (mode == "acceptEdits") mode = "accept-edits";
+    if (mode == "default") return PermissionMode::Default;
+    if (mode == "accept-edits") return PermissionMode::AcceptEdits;
+    if (mode == "plan") return PermissionMode::Plan;
+    if (mode == "yolo") return PermissionMode::Yolo;
+    return std::nullopt;
+}
+
+std::string mode_usage_text() {
+    return "Usage: /mode | /mode <default|accept-edits|plan|yolo>\n"
+           "       /mode default <default|accept-edits|plan|yolo>\n"
+           "       /mode --default <default|accept-edits|plan|yolo>";
+}
+
+void emit_system_message_locked(TuiState& state, std::string content) {
+    state.conversation.push_back({"system", std::move(content), false});
+    state.chat_follow_tail = true;
+}
+
+void set_permission_mode_for_next_session(CommandContext& ctx, PermissionMode mode) {
+    if (ctx.permissions.is_dangerous()) {
+        mode = PermissionMode::Yolo;
+    }
+    if (mode == PermissionMode::Plan) {
+        ctx.permissions.set_mode(PermissionMode::Default);
+    }
+    ctx.permissions.set_mode(mode);
+    ctx.permissions.clear_session_allows();
+    if (!ctx.session_manager) return;
+    ctx.session_manager->set_permission_mode(
+        PermissionManager::mode_name(mode),
+        /*persist_immediately=*/false);
+    if (mode == PermissionMode::Plan) {
+        ctx.session_manager->set_pre_plan_permission_mode(
+            PermissionManager::mode_name(ctx.permissions.pre_plan_mode()),
+            /*persist_immediately=*/false);
+    }
+}
+
+std::string apply_defaults_for_next_session(CommandContext& ctx) {
+    std::vector<std::string> notices;
+
+    std::string refresh_error;
+    if (!refresh_default_session_preferences_from_config(ctx.config, {}, &refresh_error)) {
+        notices.push_back("Default preference refresh failed: " + refresh_error);
+    }
+
+    const auto cwd_override = load_cwd_model_override(ctx.cwd);
+    const ModelProfile entry = resolve_effective_model(
+        ctx.config, cwd_override, std::optional<SessionMeta>{});
+
+    std::optional<SessionModelState> applied_model;
+    if (!entry.provider.empty() && !entry.model.empty() && ctx.provider_slot) {
+        ApplyModelDeps deps;
+        deps.provider_slot = ctx.provider_slot;
+        deps.sm = ctx.session_manager;
+        deps.loop = &ctx.agent_loop;
+        deps.cfg = &ctx.config;
+        try {
+            auto result = apply_model_to_session(entry, deps);
+            ctx.config.context_window = result.state.context_window;
+            applied_model = result.state;
+            if (!result.warning.empty()) {
+                notices.push_back("Default model warning: " + result.warning);
+            }
+        } catch (const std::exception& e) {
+            notices.push_back(std::string("Default model apply failed: ") + e.what());
+        }
+    } else {
+        if (ctx.provider_slot) {
+            std::lock_guard<std::mutex> lk(ctx.provider_slot->mu);
+            ctx.provider_slot->provider.reset();
+        }
+        if (ctx.session_manager) {
+            ctx.session_manager->set_active_provider(std::string{}, std::string{}, std::string{});
+        }
+        notices.push_back("No configured default model for next session.");
+    }
+
+    PermissionMode next_mode = PermissionMode::Default;
+    if (auto parsed = parse_permission_mode_arg(ctx.config.default_permission_mode)) {
+        next_mode = *parsed;
+    }
+    set_permission_mode_for_next_session(ctx, next_mode);
+
+    std::ostringstream summary;
+    summary << "Next session defaults: ";
+    if (applied_model.has_value()) {
+        summary << "model " << applied_model->name << " ("
+                << applied_model->provider << "/" << applied_model->model << ")";
+    } else {
+        summary << "no model";
+    }
+    summary << ", permission " << PermissionManager::mode_name(ctx.permissions.mode());
+    for (const auto& notice : notices) {
+        summary << "\n" << notice;
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(ctx.state.mu);
+        if (applied_model.has_value()) {
+            std::string status = tui_model_status_line(*applied_model);
+            if (!status.empty()) ctx.state.status_line = std::move(status);
+        } else {
+            ctx.state.status_line = "No model configured";
+        }
+        ctx.agent_loop.set_context_window(ctx.config.context_window);
+        ctx.state.token_status = ctx.token_tracker.format_status(ctx.config.context_window);
+        ctx.state.token_percent = ctx.token_tracker.context_percent(ctx.config.context_window);
+    }
+
+    return summary.str();
+}
+
 void publish_goal_state_locked(TuiState& state, AgentLoop& agent_loop, SessionManager* session_manager) {
     if (!session_manager) {
         state.goal_status.clear();
@@ -113,6 +229,7 @@ static void cmd_help(CommandContext& ctx, const std::string& /*args*/) {
         << "  /new      - Alias for /clear\n"
         << "  /compact  - Compress conversation history\n"
         << "  /model    - Show or switch current model\n"
+        << "  /mode     - Show or switch permission mode\n"
         << "  /config   - Show current configuration\n"
         << "  /tokens   - Show session token usage\n"
         << "  /goal     - Create, view, pause, resume, edit, or clear the thread goal\n"
@@ -139,6 +256,100 @@ static void cmd_help(CommandContext& ctx, const std::string& /*args*/) {
     }
     ctx.state.conversation.push_back({"system", oss.str(), false});
     ctx.state.chat_follow_tail = true;
+}
+
+static void cmd_mode(CommandContext& ctx, const std::string& raw_args) {
+    const std::string args = trim_ascii_command(raw_args);
+    if (args.empty()) {
+        std::lock_guard<std::mutex> lk(ctx.state.mu);
+        std::ostringstream oss;
+        oss << "Permission mode:\n"
+            << "  current: " << PermissionManager::mode_name(ctx.permissions.mode())
+            << " - " << PermissionManager::mode_description(ctx.permissions.mode()) << "\n"
+            << "  default: " << ctx.config.default_permission_mode << "\n"
+            << mode_usage_text();
+        emit_system_message_locked(ctx.state, oss.str());
+        return;
+    }
+
+    std::istringstream iss(args);
+    std::string first;
+    std::string second;
+    std::string extra;
+    iss >> first;
+    iss >> second;
+    iss >> extra;
+
+    const bool set_default =
+        first == "default" || first == "--default" || first == "set-default";
+    if (set_default) {
+        if (second.empty() || !extra.empty()) {
+            std::lock_guard<std::mutex> lk(ctx.state.mu);
+            emit_system_message_locked(ctx.state, mode_usage_text());
+            return;
+        }
+        auto parsed = parse_permission_mode_arg(second);
+        if (!parsed.has_value()) {
+            std::lock_guard<std::mutex> lk(ctx.state.mu);
+            emit_system_message_locked(ctx.state,
+                "Invalid permission mode: " + second + "\n" + mode_usage_text());
+            return;
+        }
+
+        const std::string before = ctx.config.default_permission_mode;
+        ctx.config.default_permission_mode = PermissionManager::mode_name(*parsed);
+        try {
+            save_config(ctx.config);
+        } catch (const std::exception& e) {
+            ctx.config.default_permission_mode = before;
+            std::lock_guard<std::mutex> lk(ctx.state.mu);
+            emit_system_message_locked(ctx.state,
+                std::string("/mode default: write failed: ") + e.what());
+            return;
+        }
+
+        std::lock_guard<std::mutex> lk(ctx.state.mu);
+        emit_system_message_locked(ctx.state,
+            "Default permission mode: " + ctx.config.default_permission_mode +
+            " - applies to new sessions");
+        return;
+    }
+
+    if (!second.empty() || !extra.empty()) {
+        std::lock_guard<std::mutex> lk(ctx.state.mu);
+        emit_system_message_locked(ctx.state, mode_usage_text());
+        return;
+    }
+
+    auto parsed = parse_permission_mode_arg(first);
+    if (!parsed.has_value()) {
+        std::lock_guard<std::mutex> lk(ctx.state.mu);
+        emit_system_message_locked(ctx.state,
+            "Invalid permission mode: " + first + "\n" + mode_usage_text());
+        return;
+    }
+
+    const PermissionMode before = ctx.permissions.mode();
+    ctx.permissions.set_mode(*parsed);
+    ctx.permissions.clear_session_allows();
+    if (ctx.session_manager) {
+        ctx.session_manager->set_permission_mode(PermissionManager::mode_name(*parsed));
+        if (*parsed == PermissionMode::Plan) {
+            ctx.session_manager->set_pre_plan_permission_mode(
+                PermissionManager::mode_name(
+                    before == PermissionMode::Plan
+                        ? ctx.permissions.pre_plan_mode()
+                        : before));
+            ctx.session_manager->ensure_plan_file_path();
+        } else {
+            ctx.session_manager->set_pre_plan_permission_mode(std::string{});
+        }
+    }
+
+    std::lock_guard<std::mutex> lk(ctx.state.mu);
+    emit_system_message_locked(ctx.state,
+        std::string("Permission mode: ") + PermissionManager::mode_name(*parsed) +
+        " - " + PermissionManager::mode_description(*parsed));
 }
 
 static void cmd_plan(CommandContext& ctx, const std::string& raw_args) {
@@ -197,16 +408,26 @@ static void cmd_plan(CommandContext& ctx, const std::string& raw_args) {
 }
 
 static void cmd_clear(CommandContext& ctx, const std::string& /*args*/) {
-    std::lock_guard<std::mutex> lk(ctx.state.mu);
-    ctx.state.conversation.clear();
-    ctx.agent_loop.clear_messages();
-    ctx.token_tracker.reset();
-    ctx.state.token_status = ctx.token_tracker.format_status(ctx.config.context_window);
-    ctx.state.token_percent = ctx.token_tracker.context_percent(ctx.config.context_window);
-    ctx.state.goal_status.clear();
     std::string cleared_session_id;
+    bool clear_title = false;
+    {
+        std::lock_guard<std::mutex> lk(ctx.state.mu);
+        ctx.state.conversation.clear();
+        ctx.agent_loop.clear_messages();
+        ctx.token_tracker.reset();
+        ctx.state.token_status = ctx.token_tracker.format_status(ctx.config.context_window);
+        ctx.state.token_percent = ctx.token_tracker.context_percent(ctx.config.context_window);
+        ctx.state.goal_status.clear();
+        if (ctx.session_manager) {
+            cleared_session_id = ctx.session_manager->current_session_id();
+        }
+        if (!ctx.state.current_session_title.empty()) {
+            ctx.state.current_session_title.clear();
+            clear_title = true;
+        }
+    }
+
     if (ctx.session_manager) {
-        cleared_session_id = ctx.session_manager->current_session_id();
         ctx.session_manager->end_current_session();
     }
     if (!cleared_session_id.empty()) {
@@ -214,11 +435,16 @@ static void cmd_clear(CommandContext& ctx, const std::string& /*args*/) {
             nlohmann::json{{"session_id", cleared_session_id}});
         ctx.agent_loop.restore_goal_runtime();
     }
-    if (!ctx.state.current_session_title.empty()) {
-        ctx.state.current_session_title.clear();
+    if (clear_title) {
         clear_terminal_title();
     }
-    ctx.state.conversation.push_back({"system", "Conversation cleared.", false});
+    const std::string default_summary = apply_defaults_for_next_session(ctx);
+
+    std::lock_guard<std::mutex> lk(ctx.state.mu);
+    ctx.state.conversation.push_back({
+        "system",
+        "Conversation cleared.\n" + default_summary,
+        false});
     ctx.state.chat_follow_tail = true;
 }
 
@@ -1260,6 +1486,7 @@ void register_builtin_commands(CommandRegistry& registry) {
     registry.register_command({"clear", "Clear conversation history", cmd_clear});
     registry.register_command({"new", "Alias for /clear", cmd_clear});
     register_model_command(registry);
+    registry.register_command({"mode", "Show or switch permission mode", cmd_mode});
     registry.register_command({"config", "Show current configuration", cmd_config});
     registry.register_command({"tokens", "Show session token usage", cmd_tokens});
     register_goal_command(registry);

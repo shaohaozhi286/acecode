@@ -1393,6 +1393,21 @@ void WebServer::Impl::send_status_snapshot(crow::websocket::connection& conn,
 // Impl member helpers — Session options
 // =====================================================================
 
+void WebServer::Impl::refresh_default_session_preferences_for_new_session() {
+    if (!deps.app_config) return;
+    std::string err;
+    if (!refresh_default_session_preferences_from_config(
+            *deps.app_config, deps.config_path, &err)) {
+        LOG_WARN("[web] failed to refresh default session preferences: " + err);
+        return;
+    }
+    if (deps.session_registry) {
+        auto parsed = parse_permission_mode_name(deps.app_config->default_permission_mode);
+        deps.session_registry->set_default_permission_mode(
+            parsed.value_or(PermissionMode::Default));
+    }
+}
+
 std::optional<crow::response> WebServer::Impl::parse_session_options(
     const crow::request& req,
     const acecode::desktop::WorkspaceMeta& ws,
@@ -1406,6 +1421,23 @@ std::optional<crow::response> WebServer::Impl::parse_session_options(
             opts.model_name = j["model"].get<std::string>();
         if (j.contains("name") && j["name"].is_string())
             opts.model_name = j["name"].get<std::string>();
+        std::string permission_mode_name;
+        if (j.contains("permission_mode") && j["permission_mode"].is_string()) {
+            permission_mode_name = j["permission_mode"].get<std::string>();
+        } else if (j.contains("permissionMode") && j["permissionMode"].is_string()) {
+            permission_mode_name = j["permissionMode"].get<std::string>();
+        }
+        if (!permission_mode_name.empty()) {
+            auto parsed = parse_permission_mode_name(permission_mode_name);
+            if (!parsed.has_value()) {
+                crow::response r(400);
+                r.body = json{{"error", "INVALID_PERMISSION_MODE"},
+                              {"message", "invalid permission mode"}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            opts.permission_mode = PermissionManager::mode_name(*parsed);
+        }
         if (j.contains("initial_user_message") && j["initial_user_message"].is_string())
             opts.initial_user_message = j["initial_user_message"].get<std::string>();
         if (j.contains("auto_start") && j["auto_start"].is_boolean())

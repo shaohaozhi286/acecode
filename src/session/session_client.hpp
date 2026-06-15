@@ -40,6 +40,7 @@ enum class SessionEventKind {
     ToolEnd,           // payload: {"tool":"...", "result_summary": {...}, "ok": bool}
     PermissionRequest, // payload: {"request_id":"...", "tool":"...", "args": {...}}
     QuestionRequest,   // payload: {"request_id":"...", "questions":[...]} (AskUserQuestion 工具)
+    QuestionClosed,    // payload: {"request_id":"...", "reason":"..."} (AskUserQuestion lifecycle)
     Usage,             // payload: {"input": N, "output": N, ...}
     TranscriptReplace, // payload: {"messages": [...]} full visible transcript replacement
     GoalUpdated,       // payload: {"session_id":"...", "goal": {...}}
@@ -101,6 +102,10 @@ struct SessionOptions {
     // 可选 model override(对应 saved_models.name)。
     // 留空 = 用 daemon 启动时的 default。
     std::string model_name;
+
+    // 可选 permission mode override(default / accept-edits / plan / yolo)。
+    // 留空 = 用 daemon/TUI 共享默认值。
+    std::string permission_mode;
 
     // 可选初始系统消息或 prompt 注入。v1 留空。
     std::string initial_user_message;
@@ -245,6 +250,7 @@ inline const char* to_string(SessionEventKind k) {
         case SessionEventKind::ToolEnd:           return "tool_end";
         case SessionEventKind::PermissionRequest: return "permission_request";
         case SessionEventKind::QuestionRequest:   return "question_request";
+        case SessionEventKind::QuestionClosed:    return "question_closed";
         case SessionEventKind::Usage:             return "usage";
         case SessionEventKind::TranscriptReplace: return "transcript_replace";
         case SessionEventKind::GoalUpdated:       return "goal_updated";

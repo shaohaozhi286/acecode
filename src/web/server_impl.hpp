@@ -12,6 +12,7 @@
 #include "../config/saved_models_editor.hpp"
 #include "../config/request_headers.hpp"
 #include "../desktop/workspace_registry.hpp"
+#include "../hooks/hook_manager.hpp"
 #include "../provider/llm_provider.hpp"
 #include "../provider/model_pool_status.hpp"
 #include "../session/ask_user_question_prompter.hpp"
@@ -306,6 +307,7 @@ struct WebServer::Impl {
     // -----------------------------------------------------------------
     // Session options helper  (defined in server_helpers.cpp)
     // -----------------------------------------------------------------
+    void refresh_default_session_preferences_for_new_session();
     std::optional<crow::response> parse_session_options(const crow::request& req,
                                                          const acecode::desktop::WorkspaceMeta& ws,
                                                          SessionOptions& opts);
@@ -330,6 +332,7 @@ struct WebServer::Impl {
     void register_skills();
     void register_commands();
     void register_mcp();
+    void register_hooks();
     void register_pty();
     void register_websocket();
     void register_static();

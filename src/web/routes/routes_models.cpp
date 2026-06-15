@@ -56,6 +56,7 @@ void WebServer::Impl::register_models() {
         ([this](const crow::request& req) {
             if (auto rej = require_auth(req)) return std::move(*rej);
             if (!deps.app_config) return crow::response(503);
+            refresh_default_session_preferences_for_new_session();
             crow::response r(200);
             r.add_header("Content-Type", "application/json");
             r.body = json{{"name", deps.app_config->default_model_name}}.dump();

@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <thread>
 #include <vector>
@@ -200,7 +201,9 @@ HookProcessResult run_hook_process(const HookCommandSpec& command,
     auto started_at = std::chrono::steady_clock::now();
     auto finish = [&]() {
         result.duration_ms = elapsed_ms_since(started_at);
-        result.output = ensure_utf8(result.output);
+        result.stdout_text = ensure_utf8(result.stdout_text);
+        result.stderr_text = ensure_utf8(result.stderr_text);
+        result.output = result.stdout_text + result.stderr_text;
         result.error = ensure_utf8(result.error);
         return result;
     };
@@ -219,14 +222,18 @@ HookProcessResult run_hook_process(const HookCommandSpec& command,
 
     HANDLE child_stdin_read = nullptr;
     HANDLE child_stdin_write = nullptr;
-    HANDLE child_output_read = nullptr;
-    HANDLE child_output_write = nullptr;
+    HANDLE child_stdout_read = nullptr;
+    HANDLE child_stdout_write = nullptr;
+    HANDLE child_stderr_read = nullptr;
+    HANDLE child_stderr_write = nullptr;
 
     auto cleanup = [&]() {
         close_handle(child_stdin_read);
         close_handle(child_stdin_write);
-        close_handle(child_output_read);
-        close_handle(child_output_write);
+        close_handle(child_stdout_read);
+        close_handle(child_stdout_write);
+        close_handle(child_stderr_read);
+        close_handle(child_stderr_write);
     };
 
     if (!CreatePipe(&child_stdin_read, &child_stdin_write, &sa, 0)) {
@@ -238,13 +245,23 @@ HookProcessResult run_hook_process(const HookCommandSpec& command,
         cleanup();
         return finish();
     }
-    if (!CreatePipe(&child_output_read, &child_output_write, &sa, 0)) {
-        result.error = "CreatePipe(output) failed: " + windows_error_message(GetLastError());
+    if (!CreatePipe(&child_stdout_read, &child_stdout_write, &sa, 0)) {
+        result.error = "CreatePipe(stdout) failed: " + windows_error_message(GetLastError());
         cleanup();
         return finish();
     }
-    if (!SetHandleInformation(child_output_read, HANDLE_FLAG_INHERIT, 0)) {
-        result.error = "SetHandleInformation(output) failed: " + windows_error_message(GetLastError());
+    if (!SetHandleInformation(child_stdout_read, HANDLE_FLAG_INHERIT, 0)) {
+        result.error = "SetHandleInformation(stdout) failed: " + windows_error_message(GetLastError());
+        cleanup();
+        return finish();
+    }
+    if (!CreatePipe(&child_stderr_read, &child_stderr_write, &sa, 0)) {
+        result.error = "CreatePipe(stderr) failed: " + windows_error_message(GetLastError());
+        cleanup();
+        return finish();
+    }
+    if (!SetHandleInformation(child_stderr_read, HANDLE_FLAG_INHERIT, 0)) {
+        result.error = "SetHandleInformation(stderr) failed: " + windows_error_message(GetLastError());
         cleanup();
         return finish();
     }
@@ -253,8 +270,8 @@ HookProcessResult run_hook_process(const HookCommandSpec& command,
     si.cb = sizeof(si);
     si.dwFlags = STARTF_USESTDHANDLES;
     si.hStdInput = child_stdin_read;
-    si.hStdOutput = child_output_write;
-    si.hStdError = child_output_write;
+    si.hStdOutput = child_stdout_write;
+    si.hStdError = child_stderr_write;
 
     PROCESS_INFORMATION pi{};
     std::wstring cmdline = build_windows_command_line(argv);
@@ -273,7 +290,8 @@ HookProcessResult run_hook_process(const HookCommandSpec& command,
                              &si,
                              &pi);
     close_handle(child_stdin_read);
-    close_handle(child_output_write);
+    close_handle(child_stdout_write);
+    close_handle(child_stderr_write);
     if (!ok) {
         result.error = "CreateProcess failed: " + windows_error_message(GetLastError());
         cleanup();
@@ -297,20 +315,24 @@ HookProcessResult run_hook_process(const HookCommandSpec& command,
     close_handle(child_stdin_write);
 
     char buffer[4096];
-    auto drain_output = [&]() {
+    auto drain_pipe = [&](HANDLE pipe, std::string& out) {
         for (;;) {
             DWORD avail = 0;
-            if (!PeekNamedPipe(child_output_read, nullptr, 0, nullptr, &avail, nullptr)) break;
+            if (!PeekNamedPipe(pipe, nullptr, 0, nullptr, &avail, nullptr)) break;
             if (avail == 0) break;
             DWORD bytes_read = 0;
-            if (!ReadFile(child_output_read, buffer,
+            if (!ReadFile(pipe, buffer,
                           std::min<DWORD>(avail, static_cast<DWORD>(sizeof(buffer))),
                           &bytes_read, nullptr)) {
                 break;
             }
             if (bytes_read == 0) break;
-            append_capped(result.output, buffer, bytes_read);
+            append_capped(out, buffer, bytes_read);
         }
+    };
+    auto drain_output = [&]() {
+        drain_pipe(child_stdout_read, result.stdout_text);
+        drain_pipe(child_stderr_read, result.stderr_text);
     };
 
     const bool has_timeout = timeout_ms > 0;
@@ -333,21 +355,31 @@ HookProcessResult run_hook_process(const HookCommandSpec& command,
         result.exit_code = static_cast<int>(exit_code);
     }
     close_handle(pi.hProcess);
-    close_handle(child_output_read);
+    close_handle(child_stdout_read);
+    close_handle(child_stderr_read);
     return finish();
 #else
     std::signal(SIGPIPE, SIG_IGN);
 
     int stdin_pipe[2] = {-1, -1};
-    int output_pipe[2] = {-1, -1};
+    int stdout_pipe[2] = {-1, -1};
+    int stderr_pipe[2] = {-1, -1};
     if (pipe(stdin_pipe) != 0) {
         result.error = std::string("pipe(stdin) failed: ") + std::strerror(errno);
         return finish();
     }
-    if (pipe(output_pipe) != 0) {
-        result.error = std::string("pipe(output) failed: ") + std::strerror(errno);
+    if (pipe(stdout_pipe) != 0) {
+        result.error = std::string("pipe(stdout) failed: ") + std::strerror(errno);
         close_fd(stdin_pipe[0]);
         close_fd(stdin_pipe[1]);
+        return finish();
+    }
+    if (pipe(stderr_pipe) != 0) {
+        result.error = std::string("pipe(stderr) failed: ") + std::strerror(errno);
+        close_fd(stdin_pipe[0]);
+        close_fd(stdin_pipe[1]);
+        close_fd(stdout_pipe[0]);
+        close_fd(stdout_pipe[1]);
         return finish();
     }
 
@@ -356,19 +388,23 @@ HookProcessResult run_hook_process(const HookCommandSpec& command,
         result.error = std::string("fork failed: ") + std::strerror(errno);
         close_fd(stdin_pipe[0]);
         close_fd(stdin_pipe[1]);
-        close_fd(output_pipe[0]);
-        close_fd(output_pipe[1]);
+        close_fd(stdout_pipe[0]);
+        close_fd(stdout_pipe[1]);
+        close_fd(stderr_pipe[0]);
+        close_fd(stderr_pipe[1]);
         return finish();
     }
 
     if (pid == 0) {
         dup2(stdin_pipe[0], STDIN_FILENO);
-        dup2(output_pipe[1], STDOUT_FILENO);
-        dup2(output_pipe[1], STDERR_FILENO);
+        dup2(stdout_pipe[1], STDOUT_FILENO);
+        dup2(stderr_pipe[1], STDERR_FILENO);
         close(stdin_pipe[0]);
         close(stdin_pipe[1]);
-        close(output_pipe[0]);
-        close(output_pipe[1]);
+        close(stdout_pipe[0]);
+        close(stdout_pipe[1]);
+        close(stderr_pipe[0]);
+        close(stderr_pipe[1]);
         if (!cwd.empty()) {
             chdir(cwd.c_str());
         }
@@ -385,9 +421,12 @@ HookProcessResult run_hook_process(const HookCommandSpec& command,
 
     result.started = true;
     close_fd(stdin_pipe[0]);
-    close_fd(output_pipe[1]);
-    int flags = fcntl(output_pipe[0], F_GETFL, 0);
-    if (flags >= 0) fcntl(output_pipe[0], F_SETFL, flags | O_NONBLOCK);
+    close_fd(stdout_pipe[1]);
+    close_fd(stderr_pipe[1]);
+    int flags = fcntl(stdout_pipe[0], F_GETFL, 0);
+    if (flags >= 0) fcntl(stdout_pipe[0], F_SETFL, flags | O_NONBLOCK);
+    flags = fcntl(stderr_pipe[0], F_GETFL, 0);
+    if (flags >= 0) fcntl(stderr_pipe[0], F_SETFL, flags | O_NONBLOCK);
 
     if (!stdin_text.empty()) {
         const char* ptr = stdin_text.data();
@@ -402,16 +441,20 @@ HookProcessResult run_hook_process(const HookCommandSpec& command,
     close_fd(stdin_pipe[1]);
 
     char buffer[4096];
-    auto drain_output = [&]() {
+    auto drain_fd = [&](int fd, std::string& out) {
         for (;;) {
-            ssize_t n = read(output_pipe[0], buffer, sizeof(buffer));
+            ssize_t n = read(fd, buffer, sizeof(buffer));
             if (n > 0) {
-                append_capped(result.output, buffer, static_cast<std::size_t>(n));
+                append_capped(out, buffer, static_cast<std::size_t>(n));
                 continue;
             }
             if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) break;
             break;
         }
+    };
+    auto drain_output = [&]() {
+        drain_fd(stdout_pipe[0], result.stdout_text);
+        drain_fd(stderr_pipe[0], result.stderr_text);
     };
 
     int status = 0;
@@ -433,9 +476,27 @@ HookProcessResult run_hook_process(const HookCommandSpec& command,
 
     if (WIFEXITED(status)) result.exit_code = WEXITSTATUS(status);
     else if (WIFSIGNALED(status)) result.exit_code = 128 + WTERMSIG(status);
-    close_fd(output_pipe[0]);
+    close_fd(stdout_pipe[0]);
+    close_fd(stderr_pipe[0]);
     return finish();
 #endif
+}
+
+HookProcessResult run_hook_shell_command(const std::string& command,
+                                         const std::string& stdin_text,
+                                         int timeout_ms,
+                                         const std::string& cwd) {
+    HookCommandSpec spec;
+#ifdef _WIN32
+    const char* comspec = std::getenv("COMSPEC");
+    spec.command = (comspec && *comspec) ? std::string(comspec) : std::string("cmd.exe");
+    spec.args = {"/d", "/s", "/c", command};
+#else
+    const char* shell = std::getenv("SHELL");
+    spec.command = (shell && *shell) ? std::string(shell) : std::string("/bin/sh");
+    spec.args = {"-c", command};
+#endif
+    return run_hook_process(spec, stdin_text, timeout_ms, cwd);
 }
 
 } // namespace acecode

@@ -7,7 +7,7 @@
 // 模式照抄 permission_prompter.cpp::AsyncPrompter:
 //   - prompt() 推一个 QuestionRequest 事件到 EventDispatcher,然后 condvar
 //     等 respond(request_id, response) 到来
-//   - 5 分钟超时视为 cancelled,工具返回 "user cancelled"
+//   - 默认无被动超时;只有用户回答/取消、abort 或 shutdown 才会结束等待
 //   - abort_flag 50ms 轮询(避免 worker thread 卡 5min 无法 join)
 //   - 每次 prompt 生成新 request_id,响应通过 id 路由,与 permission_prompter
 //     的 id 空间互不干扰(各自独立的 unordered_map)
@@ -48,7 +48,7 @@ struct AskUserQuestionResponse {
 class AskUserQuestionPrompter {
 public:
     explicit AskUserQuestionPrompter(EventDispatcher& events,
-                                       std::chrono::milliseconds timeout = std::chrono::minutes(5))
+                                       std::chrono::milliseconds timeout = std::chrono::milliseconds{0})
         : events_(events), timeout_(timeout) {}
 
     // 阻塞调用。questions_payload 是已经拼好的 nlohmann::json 数组(供前端

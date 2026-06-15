@@ -905,6 +905,36 @@ run('tool lifecycle 保留进度、summary、失败输出、hunks 和附件', ()
   assert.deepEqual(tool.attachments, [attachment]);
 });
 
+run('tool_start 保留原始 args 供工具块展开显示完整命令', () => {
+  const command = 'cd C:\\Users\\shao\\acecode && git log --oneline --since="2026-01-01" | wc -l';
+  const state = reduceMany([
+    {
+      type: 'tool_start',
+      payload: {
+        tool: 'bash',
+        args: { command },
+        display_override: 'bash  cd C:\\Users\\sh...',
+        command_preview: 'cd C:\\Users\\sh...',
+      },
+      seq: 1,
+    },
+    {
+      type: 'tool_end',
+      payload: {
+        tool: 'bash',
+        success: false,
+        summary: { verb: 'Ran', object: 'cd C:\\Users\\sh...' },
+        output: "'wc' 不是内部或外部命令",
+      },
+      seq: 2,
+    },
+  ]);
+  const tool = state.items[0].tool;
+  assert.equal(tool.displayOverride, 'bash  cd C:\\Users\\sh...');
+  assert.equal(tool.summary.object, 'cd C:\\Users\\sh...');
+  assert.equal(tool.args.command, command);
+});
+
 run('tool lifecycle 保留 AskUserQuestion 确认结果 metadata', () => {
   const state = reduceMany([
     { type: 'tool_start', payload: { tool: 'AskUserQuestion', tool_call_id: 'call-ask' }, seq: 1 },

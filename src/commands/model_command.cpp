@@ -233,6 +233,74 @@ void render_model_picker(CommandContext& ctx) {
     if (ctx.post_event) ctx.post_event();
 }
 
+void render_default_model_picker(CommandContext& ctx) {
+    auto options = build_model_picker_options(ctx.config, ctx.config.default_model_name);
+    if (options.empty()) {
+        {
+            std::lock_guard<std::mutex> lk(ctx.state.mu);
+            ctx.state.conversation.push_back({
+                "system",
+                u8"没有已配置的模型。请先运行 acecode configure，或使用 /model add 添加模型。",
+                false
+            });
+            ctx.state.chat_follow_tail = true;
+            ctx.state.model_picker_open = false;
+            ctx.state.model_picker_options.clear();
+        }
+        if (ctx.post_event) ctx.post_event();
+        return;
+    }
+
+    auto* state_ptr = &ctx.state;
+    auto* config_ptr = &ctx.config;
+
+    auto callback = [state_ptr, config_ptr](const std::string& name) {
+        bool found = false;
+        for (const auto& e : config_ptr->saved_models) {
+            if (e.name == name && is_runtime_model_provider_enabled(e.provider)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            state_ptr->conversation.push_back(
+                {"system", "Unknown model name: " + name, false});
+            state_ptr->chat_follow_tail = true;
+            return;
+        }
+
+        const std::string before = config_ptr->default_model_name;
+        config_ptr->default_model_name = name;
+        try {
+            save_config(*config_ptr);
+        } catch (const std::exception& e) {
+            config_ptr->default_model_name = before;
+            state_ptr->conversation.push_back(
+                {"system", std::string("/model set-default: write failed: ") + e.what(), false});
+            state_ptr->chat_follow_tail = true;
+            return;
+        }
+        state_ptr->conversation.push_back({"system", "Default: " + name, false});
+        state_ptr->chat_follow_tail = true;
+    };
+
+    {
+        std::lock_guard<std::mutex> lk(ctx.state.mu);
+        ctx.state.model_picker_options = std::move(options);
+        ctx.state.model_picker_selected = 0;
+        ctx.state.model_picker_view_offset = 0;
+        for (std::size_t i = 0; i < ctx.state.model_picker_options.size(); ++i) {
+            if (ctx.state.model_picker_options[i].is_current) {
+                ctx.state.model_picker_selected = static_cast<int>(i);
+                break;
+            }
+        }
+        ctx.state.model_picker_callback = std::move(callback);
+        ctx.state.model_picker_open = true;
+    }
+    if (ctx.post_event) ctx.post_event();
+}
+
 // 把 SavedModelDraft 从 kvs 抽出来。default_name 只在 edit 路径用 ——
 // 用户没显式给 name= 时回落到 sub 后面的 bare name。
 SavedModelDraft draft_from_kvs(const std::map<std::string, std::string>& kvs,
@@ -356,7 +424,7 @@ void cmd_model_rm(CommandContext& ctx, const ParsedModelSub& p) {
 
 void cmd_model_set_default(CommandContext& ctx, const ParsedModelSub& p) {
     if (p.name.empty()) {
-        announce_editor_result(ctx, SavedModelEditError::INVALID_NAME, "");
+        render_default_model_picker(ctx);
         return;
     }
     bool found = false;
@@ -394,7 +462,7 @@ void cmd_model(CommandContext& ctx, const std::string& args) {
             "       /model add name=X provider=openai model=Y base_url=Z api_key=K [context_window=N] [stream_timeout_ms=N]\n"
             "       /model edit <name> [field=value ...]\n"
             "       /model rm <name>\n"
-            "       /model set-default <name>",
+            "       /model set-default [name]",
             false});
         ctx.state.chat_follow_tail = true;
         return;
@@ -490,10 +558,14 @@ bool parse_model_subcommand(const std::string& raw, ParsedModelSub& out) {
                     out.kvs[tok.substr(0, eq)] = tok.substr(eq + 1);
                 }
             } else {
-                // edit/rm/set-default 第一个 token 是 name,后续可选 kv。
+                // edit/rm 要求第一个 token 是 name;set-default 无参打开
+                // 默认模型 picker,有参时第一个 token 是 name。
                 std::istringstream iss(rest);
                 std::string tok;
-                if (!(iss >> tok)) return false;
+                if (!(iss >> tok)) {
+                    if (k == "set-default") return true;
+                    return false;
+                }
                 out.name = tok;
                 while (iss >> tok) {
                     auto eq = tok.find('=');
