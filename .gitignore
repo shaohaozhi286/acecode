@@ -71,3 +71,4 @@ hermes-agent/
 .claude/*
 !.claude/skills/
 .understand-anything
+.acecode

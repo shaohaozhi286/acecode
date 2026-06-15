@@ -552,7 +552,11 @@ export const InputBar = forwardRef(function InputBar({
                   data-desktop-attachment-path={context.path || undefined}
                   data-desktop-attachment-preview-url={context.url || undefined}
                   data-desktop-attachment-mutable="true"
-                  className="group relative w-[86px] h-[86px] sm:w-24 sm:h-24 shrink-0 overflow-hidden rounded-lg border border-border bg-bg"
+                  className={clsx(
+                    'group relative w-[86px] h-[86px] sm:w-24 sm:h-24 shrink-0 overflow-hidden rounded-lg border border-border bg-bg',
+                    context.url ? 'cursor-zoom-in hover:border-accent-soft' : '',
+                  )}
+                  onClick={context.url ? () => setAttachmentPreview({ src: context.url, alt: context.name }) : undefined}
                 >
                   {item.preview_url ? (
                     <img
@@ -566,7 +570,7 @@ export const InputBar = forwardRef(function InputBar({
                   <button
                     type="button"
                     className="absolute right-[5px] top-[5px] w-[17px] h-[17px] rounded-full bg-black/75 hover:bg-black/85 text-white flex items-center justify-center"
-                    onClick={() => onRemoveAttachment?.(context.key)}
+                    onClick={(e) => { e.stopPropagation(); onRemoveAttachment?.(context.key); }}
                     aria-label="移除图片"
                   >
                     <VsIcon name="close" size={8} />

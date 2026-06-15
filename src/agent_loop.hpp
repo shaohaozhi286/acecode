@@ -21,6 +21,8 @@
 #include <queue>
 #include <map>
 #include <utility>
+#include <limits>
+#include <memory>
 
 namespace acecode {
 
@@ -30,6 +32,7 @@ class HookManager;
 struct MemoryConfig;
 struct ProjectInstructionsConfig;
 struct CompactResult;
+class AgentLoopDoomGuard;
 
 // Callbacks for the TUI to observe agent loop events
 struct AgentCallbacks {
@@ -261,6 +264,88 @@ private:
                                  const std::string& source_tool);
     void dispatch_assistant_completed_hook(const ChatMessage& assistant_msg,
                                            const std::shared_ptr<LlmProvider>& provider_snapshot);
+
+    // ---- Refactored sub-methods of run_agent_with_input ----
+    // These decompose the monolithic turn function into focused phases.
+    // Return types are defined in the .cpp anonymous namespace.
+
+    // Type alias for the progress emission callback used across sub-methods.
+    using ProgressEmitter = std::function<void(
+        const std::string& phase, const std::string& label,
+        const std::string& detail, const std::string& tool,
+        const std::string& tool_call_id, int tool_index, bool force)>;
+
+    // Phase 1: Build user message from input, persist, emit events.
+    // Returns turn timing metadata for the orchestrator.
+    struct UserTurnInfo {
+        ChatMessage user_msg;
+        bool visible_timed_turn = false;
+        std::string turn_user_uuid;
+        std::int64_t turn_started_at_ms = 0;
+    };
+    UserTurnInfo prepare_user_turn(const UserInput& input, bool hidden_goal_context);
+
+    // Phase 2: Build the full message list for the LLM provider.
+    struct ApiRequestBundle {
+        std::vector<ChatMessage> messages_with_system;
+        std::vector<ToolDef> tool_defs;
+        nlohmann::json prompt_diag; // simplified: store as raw json
+    };
+    ApiRequestBundle build_api_request_messages();
+
+    // Phase 3: Stream provider response and accumulate.
+    struct ProviderCallResult {
+        ChatResponse accumulated;
+        bool provider_error_seen = false;
+        ProviderErrorInfo provider_error_info;
+        std::shared_ptr<LlmProvider> provider_snapshot;
+    };
+    ProviderCallResult call_provider_and_collect(
+        const std::shared_ptr<LlmProvider>& provider,
+        const ApiRequestBundle& bundle,
+        const ProgressEmitter& emit_progress);
+
+    // Phase 4: Classify provider errors and attempt context rescue.
+    enum class HandleErrorResult { Continue, Break, Proceed };
+    HandleErrorResult handle_provider_error(
+        ProviderCallResult& result,
+        const std::vector<ChatMessage>& messages_with_system,
+        // Mutable state passed by reference from the orchestrator:
+        int& context_rescue_attempts,
+        int& last_context_rescue_tokens,
+        bool& skip_auto_compact_once,
+        int& total_iterations,
+        std::string& turn_timing_status);
+
+    // Phase 5: Execute tool calls (parallel read + serial write).
+    // Returns true if task_complete terminator fired.
+    bool execute_tool_calls(
+        const ChatResponse& accumulated,
+        const std::shared_ptr<LlmProvider>& provider_snapshot,
+        const ProgressEmitter& emit_progress,
+        // Mutable state from the orchestrator:
+        AgentLoopDoomGuard& doom_guard,
+        std::mutex& doom_guard_mu,
+        std::string& turn_timing_status);
+
+    // Helper: construct a ToolContext with all callbacks wired up.
+    ToolContext build_tool_context(
+        const ProgressEmitter& emit_progress,
+        AgentLoopDoomGuard& doom_guard,
+        std::mutex& doom_guard_mu);
+
+    // Helper: emit agent progress with rate-limiting and coalescing.
+    // Uses the progress state passed by reference.
+    void emit_progress_tick(
+        const ProgressEmitter& emit_progress,
+        const std::string& phase, const std::string& label,
+        const std::string& detail, const std::string& tool,
+        const std::string& tool_call_id, int tool_index, bool force,
+        // Mutable progress state:
+        std::mutex& progress_mu,
+        std::string& active_progress_key,
+        std::int64_t& active_progress_started_at_ms,
+        std::chrono::steady_clock::time_point& last_progress_emit_at);
 
     struct WorkerTask {
         enum class Kind { Chat, Shell, Compact };

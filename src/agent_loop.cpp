@@ -1004,18 +1004,17 @@ void AgentLoop::run_agent_with_display(const std::string& user_message,
     run_agent_with_input(input, hidden_goal_context);
 }
 
-void AgentLoop::run_agent_with_input(const UserInput& input,
-                                      bool hidden_goal_context) {
-    abort_requested_ = false;
-    busy_ = true;
-    restore_goal_runtime();
+AgentLoop::UserTurnInfo AgentLoop::prepare_user_turn(const UserInput& input,
+                                                      bool hidden_goal_context) {
+    UserTurnInfo info;
+    info.turn_started_at_ms = now_epoch_ms();
 
     const std::string& user_message = input.text;
     const std::string& display_text = input.display_text;
     LOG_INFO("=== submit() user_message: " + log_truncate(user_message, 200));
 
     // Add user message
-    ChatMessage user_msg;
+    ChatMessage& user_msg = info.user_msg;
     user_msg.role = "user";
     user_msg.content = user_message;
     if (input.has_content_parts()) {
@@ -1035,12 +1034,11 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
         user_msg.metadata["hidden_goal_context"] = true;
     }
     ensure_user_message_identity(user_msg);
-    const bool visible_timed_turn =
+    info.visible_timed_turn =
         !hidden_goal_context &&
         !(user_msg.metadata.is_object() && user_msg.metadata.value("hidden_goal_context", false));
-    const std::string turn_user_uuid = visible_timed_turn ? user_msg.uuid : std::string{};
-    const std::int64_t turn_started_at_ms = now_epoch_ms();
-    std::string turn_timing_status = "completed";
+    info.turn_user_uuid = info.visible_timed_turn ? user_msg.uuid : std::string{};
+
     messages_.push_back(user_msg);
     if (session_manager_) {
         session_manager_->on_message(user_msg);
@@ -1068,15 +1066,1023 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
     }
     events_.emit(SessionEventKind::BusyChanged, nlohmann::json{{"busy", true}});
 
-    // Agent loop termination protocol (see openspec/changes/align-loop-with-hermes):
-    //   - terminator_fired = true → model called task_complete ⇒ exit
-    //   - text-only reply (zero tool calls) ⇒ exit (matches hermes-agent /
-    //     claudecodehaha; the user re-prompts manually if the model hedged)
-    //   - max_iterations > 0 and total_iterations ≥ max → hard cap ⇒ emit system message and exit
-    //   - abort_requested_ ⇒ exit immediately, [Interrupted] system message
+    return info;
+}
+
+AgentLoop::ApiRequestBundle AgentLoop::build_api_request_messages() {
+    ApiRequestBundle bundle;
+
+    // Build the static system prompt each turn. Request-local context such
+    // as current time/CWD is appended near the message tail below so the
+    // system prompt remains cacheable for providers such as DeepSeek.
+    std::string system_prompt = build_system_prompt(
+        tools_, cwd_, skill_registry_, memory_registry_,
+        memory_cfg_, project_instructions_cfg_);
+    LOG_DEBUG("System prompt length: " + std::to_string(system_prompt.size()));
+    bundle.tool_defs = tools_.get_tool_definitions();
+    LOG_DEBUG("Registered tools: " + std::to_string(bundle.tool_defs.size()));
+
+    // Prepare messages with system prompt at front, filtering out meta messages
+    auto api_messages = normalize_messages_for_api(messages_);
+    std::string session_context = cached_context_for_api(
+        build_session_context_prompt(
+            cwd_, memory_registry_, memory_cfg_, project_instructions_cfg_,
+            skill_registry_, context_window_),
+        session_context_cache_key_, session_context_cache_content_);
+    prepend_session_context_for_api(api_messages, session_context);
+    std::string request_context = build_request_context_prompt(cwd_);
+    append_request_context_for_api(api_messages, request_context);
+    std::string plan_mode_context =
+        permissions_.mode() == PermissionMode::Plan
+            ? build_plan_mode_context_prompt(session_manager_)
+            : std::string{};
+    append_plan_mode_context_for_api(api_messages, plan_mode_context);
+    std::vector<TodoItem> todo_context_items =
+        session_manager_ ? session_manager_->current_todos() : std::vector<TodoItem>{};
+    append_todo_context_for_api(api_messages, todo_context_items);
+
+    ChatMessage sys_msg;
+    sys_msg.role = "system";
+    sys_msg.content = system_prompt;
+    bundle.messages_with_system.push_back(sys_msg);
+    bundle.messages_with_system.insert(bundle.messages_with_system.end(),
+                                       api_messages.begin(), api_messages.end());
+
+    auto prompt_diag = build_prompt_cache_diagnostics(
+        system_prompt,
+        session_context + "\n" + request_context + "\n" + plan_mode_context +
+            "\n" + format_todo_injection(todo_context_items),
+        bundle.tool_defs);
+    bundle.prompt_diag = {
+        {"system", prompt_diag.static_system_prompt_hash},
+        {"context", prompt_diag.mutable_context_hash},
+        {"tools", prompt_diag.tool_schema_hash},
+    };
+    LOG_DEBUG("Prompt cache hashes: system=" + prompt_diag.static_system_prompt_hash +
+              " context=" + prompt_diag.mutable_context_hash +
+              " tools=" + prompt_diag.tool_schema_hash);
+
+    return bundle;
+}
+
+AgentLoop::ProviderCallResult AgentLoop::call_provider_and_collect(
+    const std::shared_ptr<LlmProvider>& provider,
+    const ApiRequestBundle& bundle,
+    const ProgressEmitter& emit_progress) {
+    ProviderCallResult result;
+    result.accumulated.finish_reason = "stop";
+    result.provider_snapshot = provider;
+
+    std::mutex resp_mu;
+    std::size_t reasoning_bytes = 0;
+    int reasoning_fragments = 0;
+
+    auto stream_callback = [&result, &resp_mu, &emit_progress,
+                            &reasoning_bytes, &reasoning_fragments,
+                            this](const StreamEvent& evt) {
+        switch (evt.type) {
+        case StreamEventType::Delta:
+            {
+                std::lock_guard<std::mutex> lk(resp_mu);
+                result.accumulated.content += evt.content;
+            }
+            if (callbacks_.on_delta) {
+                callbacks_.on_delta(evt.content);
+            }
+            events_.emit(SessionEventKind::Token, nlohmann::json{{"text", evt.content}});
+            break;
+        case StreamEventType::ReasoningDelta:
+            {
+                std::lock_guard<std::mutex> lk(resp_mu);
+                result.accumulated.reasoning_content += evt.content;
+            }
+            reasoning_bytes += evt.content.size();
+            reasoning_fragments++;
+            emit_progress("reasoning", "正在推理",
+                "片段 " + std::to_string(reasoning_fragments) + ", " +
+                human_bytes(reasoning_bytes),
+                std::string{}, std::string{}, -1, false);
+            events_.emit(SessionEventKind::Reasoning, nlohmann::json{{"text", evt.content}});
+            break;
+        case StreamEventType::ToolCallDelta:
+            {
+                const std::string tool_name = evt.tool_call.function_name;
+                const std::string label = tool_name.empty()
+                    ? "正在准备工具调用"
+                    : "正在准备调用 " + tool_name;
+                emit_progress("tool_planning", label,
+                    format_bytes_detail(evt.tool_call_argument_bytes),
+                    tool_name, evt.tool_call.id, evt.tool_index, false);
+            }
+            break;
+        case StreamEventType::ToolCall:
+            {
+                std::lock_guard<std::mutex> lk(resp_mu);
+                result.accumulated.tool_calls.push_back(evt.tool_call);
+            }
+            break;
+        case StreamEventType::Done:
+            break;
+        case StreamEventType::Usage:
+            last_api_prompt_tokens_.store(evt.usage.prompt_tokens);
+            {
+                std::lock_guard<std::mutex> lk(resp_mu);
+                result.accumulated.usage = evt.usage;
+            }
+            if (evt.usage.has_data) {
+                account_goal_usage(evt.usage.total_tokens, false);
+            }
+            if (callbacks_.on_usage) {
+                callbacks_.on_usage(evt.usage);
+            }
+            if (session_manager_) {
+                session_manager_->record_token_usage(evt.usage);
+            }
+            events_.emit(SessionEventKind::Usage, nlohmann::json{
+                {"prompt_tokens", evt.usage.prompt_tokens},
+                {"completion_tokens", evt.usage.completion_tokens},
+                {"total_tokens", evt.usage.total_tokens},
+                {"cache_read_tokens", evt.usage.cache_read_tokens},
+                {"cache_write_tokens", evt.usage.cache_write_tokens},
+                {"reasoning_tokens", evt.usage.reasoning_tokens},
+                {"has_data", evt.usage.has_data},
+            });
+            break;
+        case StreamEventType::Retry:
+            result.provider_error_info = evt.provider_error;
+            // Drop-partial 重试族:Timeout 与 MalformedSse(SSE 中途断流)。
+            // 两者 provider 端都会重发完整请求,本地必须清空 partial 累积
+            // 否则下一次成功的 stream 会叠加成重复内容(同样的 reasoning /
+            // content 出现两遍)。TranscriptReplace 让前端把 partial 痕迹抹掉。
+            if (evt.provider_error.kind == ProviderErrorKind::Timeout ||
+                evt.provider_error.kind == ProviderErrorKind::MalformedSse) {
+                {
+                    std::lock_guard<std::mutex> lk(resp_mu);
+                    result.accumulated = ChatResponse{};
+                    result.accumulated.finish_reason = "stop";
+                }
+                reasoning_bytes = 0;
+                reasoning_fragments = 0;
+                if (callbacks_.on_stream_retry_reset) {
+                    callbacks_.on_stream_retry_reset();
+                }
+                CompactResult reset_result;
+                events_.emit(SessionEventKind::TranscriptReplace,
+                             build_transcript_replace_payload(messages_, reset_result));
+            }
+            emit_progress(
+                "model_retry",
+                "正在重试模型请求",
+                "第 " + std::to_string(evt.provider_error.retry_attempt + 1) +
+                    " 次请求将在 " +
+                    std::to_string(evt.provider_error.retry_delay_ms) +
+                    " ms 后发起",
+                std::string{}, std::string{}, -1, true);
+            break;
+        case StreamEventType::Error:
+            if ((evt.provider_error.kind == ProviderErrorKind::UserCancelled ||
+                 evt.error == "Request cancelled") &&
+                abort_requested_.load()) {
+                break;
+            }
+            result.provider_error_seen = true;
+            result.provider_error_info = evt.provider_error;
+            if (!result.provider_error_info.has_error()) {
+                result.provider_error_info.kind = ProviderErrorKind::Unknown;
+                result.provider_error_info.display_message = evt.error;
+            }
+            if (result.provider_error_info.display_message.empty()) {
+                result.provider_error_info.display_message = evt.error;
+            }
+            break;
+        }
+    };
+
+    LOG_INFO("Calling chat_stream with " + std::to_string(bundle.messages_with_system.size()) + " messages");
+    try {
+        emit_progress(
+            "model_waiting", "正在等待模型响应",
+            std::string{}, std::string{}, std::string{}, -1, true);
+        provider->chat_stream(bundle.messages_with_system, bundle.tool_defs,
+                              stream_callback, &abort_requested_);
+        LOG_INFO("chat_stream returned. content_len=" +
+                 std::to_string(result.accumulated.content.size()) +
+                 " tool_calls=" + std::to_string(result.accumulated.tool_calls.size()));
+    } catch (const std::exception& e) {
+        LOG_ERROR(std::string("chat_stream exception: ") + e.what());
+        result.provider_error_seen = true;
+        result.provider_error_info.kind = ProviderErrorKind::Unknown;
+        result.provider_error_info.display_message = e.what();
+    }
+
+    return result;
+}
+
+AgentLoop::HandleErrorResult AgentLoop::handle_provider_error(
+    ProviderCallResult& result,
+    const std::vector<ChatMessage>& messages_with_system,
+    int& context_rescue_attempts,
+    int& last_context_rescue_tokens,
+    bool& skip_auto_compact_once,
+    int& total_iterations,
+    std::string& turn_timing_status) {
+    if (!result.provider_error_seen) {
+        return HandleErrorResult::Proceed;
+    }
+
+    if (abort_requested_) {
+        return HandleErrorResult::Break;
+    }
+
+    const bool model_output_seen =
+        !result.accumulated.content.empty() ||
+        !result.accumulated.reasoning_content.empty() ||
+        result.accumulated.has_tool_calls();
+    const int request_tokens = estimate_message_tokens(messages_with_system);
+    constexpr int kMaxContextRescueAttempts = 3;
+    const bool rescue_attempt_available =
+        context_rescue_attempts < kMaxContextRescueAttempts;
+    const bool rescue_indicated = should_attempt_context_overflow_rescue(
+        result.provider_error_info,
+        request_tokens,
+        context_window_,
+        model_output_seen);
+    LOG_WARN("Provider error before turn completion; " +
+             provider_error_summary_for_log(result.provider_error_info) +
+             " request_estimated_tokens=" +
+             std::to_string(request_tokens) +
+             " context_window=" + std::to_string(context_window_) +
+             " messages_with_system=" +
+             std::to_string(messages_with_system.size()) +
+             " model_output_seen=" +
+             (model_output_seen ? "true" : "false") +
+             " rescue_attempts=" +
+             std::to_string(context_rescue_attempts) + "/" +
+             std::to_string(kMaxContextRescueAttempts) +
+             " rescue_attempt_available=" +
+             (rescue_attempt_available ? "true" : "false") +
+             " rescue_indicated=" +
+             (rescue_indicated ? "true" : "false"));
+
+    if (rescue_attempt_available && rescue_indicated) {
+        const int preferred_tail_turns =
+            context_rescue_attempts == 0 ? 4 :
+            context_rescue_attempts == 1 ? 2 : 1;
+        LOG_WARN("Context rescue attempt starting; attempt=" +
+                 std::to_string(context_rescue_attempts + 1) +
+                 " preferred_tail_user_turns=" +
+                 std::to_string(preferred_tail_turns) +
+                 " last_context_rescue_tokens=" +
+                 std::to_string(last_context_rescue_tokens) +
+                 " current_messages=" + std::to_string(messages_.size()));
+        auto rescue = rescue_compact_messages(messages_, cwd_, preferred_tail_turns);
+        if (rescue.performed &&
+            rescue.estimated_tokens_after < last_context_rescue_tokens) {
+            CompactResult replace_result;
+            replace_result.performed = true;
+            replace_result.messages_compressed = rescue.messages_removed;
+            replace_result.estimated_tokens_saved =
+                std::max(0, rescue.estimated_tokens_before - rescue.estimated_tokens_after);
+            replace_result.summary_text = rescue.marker_text;
+            replace_result.compacted_messages = std::move(rescue.compacted_messages);
+            apply_compact_result(replace_result);
+
+            ++context_rescue_attempts;
+            last_context_rescue_tokens = rescue.estimated_tokens_after;
+            skip_auto_compact_once = true;
+            if (total_iterations > 0) {
+                --total_iterations;
+            }
+
+            LOG_WARN("Context rescue accepted; retrying request" +
+                     std::string(" attempt=") +
+                     std::to_string(context_rescue_attempts) +
+                     " messages_removed=" +
+                     std::to_string(rescue.messages_removed) +
+                     " protected_user_turns=" +
+                     std::to_string(rescue.protected_user_turns) +
+                     " estimated_tokens_before=" +
+                     std::to_string(rescue.estimated_tokens_before) +
+                     " estimated_tokens_after=" +
+                     std::to_string(rescue.estimated_tokens_after) +
+                     " request_estimated_tokens_before=" +
+                     std::to_string(request_tokens));
+            dispatch_message(
+                "system",
+                "[Rescue compact] Provider rejected the request as too large; compacted " +
+                    std::to_string(rescue.messages_removed) +
+                    " messages and retrying with the most recent " +
+                    std::to_string(rescue.protected_user_turns) +
+                    " user turn(s).",
+                false);
+            return HandleErrorResult::Continue;
+        }
+
+        LOG_WARN("Context rescue rejected; performed=" +
+                 std::string(rescue.performed ? "true" : "false") +
+                 " can_retry=" +
+                 (rescue.can_retry ? "true" : "false") +
+                 " messages_removed=" +
+                 std::to_string(rescue.messages_removed) +
+                 " protected_user_turns=" +
+                 std::to_string(rescue.protected_user_turns) +
+                 " estimated_tokens_before=" +
+                 std::to_string(rescue.estimated_tokens_before) +
+                 " estimated_tokens_after=" +
+                 std::to_string(rescue.estimated_tokens_after) +
+                 " last_context_rescue_tokens=" +
+                 std::to_string(last_context_rescue_tokens) +
+                 " error=" + log_truncate(rescue.error, 500));
+        nlohmann::json metadata;
+        metadata["provider_error"] = provider_error_to_json(result.provider_error_info);
+        turn_timing_status = "error";
+        dispatch_message(
+            "error",
+            "[Error] Context is too large and cannot be rescued by compacting earlier history. " +
+                result.provider_error_info.display_message,
+            false,
+            std::move(metadata));
+        LOG_WARN("Provider context overflow could not be rescued: " +
+                 log_truncate(rescue.error, 500));
+        return HandleErrorResult::Break;
+    }
+
+    nlohmann::json metadata;
+    metadata["provider_error"] = provider_error_to_json(result.provider_error_info);
+    turn_timing_status = "error";
+    dispatch_message("error", "[Error] " + result.provider_error_info.display_message, false,
+                     std::move(metadata));
+    LOG_WARN("Provider stream failed; ending turn without assistant message: " +
+             log_truncate(result.provider_error_info.display_message, 500));
+    return HandleErrorResult::Break;
+}
+
+ToolContext AgentLoop::build_tool_context(
+    const ProgressEmitter& emit_progress,
+    AgentLoopDoomGuard& doom_guard,
+    std::mutex& doom_guard_mu) {
+    ToolContext tool_ctx;
+    tool_ctx.cwd = cwd_;
+    tool_ctx.abort_flag = &abort_requested_;
+    tool_ctx.session_manager = session_manager_;
+    tool_ctx.scratch_dir = build_session_scratch_dir(cwd_, session_manager_);
+    tool_ctx.preserve_full_output = true;
+    tool_ctx.account_goal_usage = [this]() {
+        account_goal_usage(0, true);
+    };
+    tool_ctx.emit_goal_updated = [this](const nlohmann::json& goal_payload) {
+        if (session_manager_) {
+            const std::string sid = session_manager_->current_session_id();
+            ThreadGoalStore* store = session_manager_->existing_goal_store();
+            if (store && !sid.empty()) {
+                auto goal = store->get_thread_goal(sid);
+                if (goal.has_value()) {
+                    emit_goal_updated(*goal);
+                    return;
+                }
+            }
+            events_.emit(SessionEventKind::GoalUpdated,
+                nlohmann::json{{"session_id", sid}, {"goal", goal_payload}});
+        }
+    };
+    tool_ctx.emit_goal_cleared = [this](const std::string& session_id) {
+        emit_goal_cleared(session_id);
+    };
+    tool_ctx.emit_todo_updated = [this](const nlohmann::json& todo_payload) {
+        emit_todo_updated(todo_payload);
+    };
+    tool_ctx.current_permission_mode = [this]() {
+        return std::string(PermissionManager::mode_name(permissions_.mode()));
+    };
+    tool_ctx.enter_plan_mode = [this]() {
+        permissions_.set_mode(PermissionMode::Plan);
+        permissions_.clear_session_allows();
+        std::string plan_file;
+        if (session_manager_) {
+            session_manager_->set_permission_mode("plan");
+            session_manager_->set_pre_plan_permission_mode(
+                PermissionManager::mode_name(permissions_.pre_plan_mode()));
+            plan_file = session_manager_->ensure_plan_file_path();
+        }
+        return plan_file;
+    };
+    tool_ctx.exit_plan_mode = [this]() {
+        PermissionMode restored = permissions_.restore_pre_plan_mode();
+        const std::string restored_name = PermissionManager::mode_name(restored);
+        if (session_manager_) {
+            session_manager_->set_permission_mode(restored_name);
+            session_manager_->set_pre_plan_permission_mode(std::string{});
+        }
+        return restored_name;
+    };
+    if (session_manager_) {
+        tool_ctx.track_file_write_before = [this](const std::string& path) {
+            if (session_manager_) {
+                session_manager_->track_file_write_before(path);
+            }
+        };
+    }
+    return tool_ctx;
+}
+
+bool AgentLoop::execute_tool_calls(
+    const ChatResponse& accumulated,
+    const std::shared_ptr<LlmProvider>& provider_snapshot,
+    const ProgressEmitter& emit_progress,
+    AgentLoopDoomGuard& doom_guard,
+    std::mutex& doom_guard_mu,
+    std::string& turn_timing_status) {
+    // Record the assistant message with tool_calls in the history
+    auto tc_msg = ToolExecutor::format_assistant_tool_calls(accumulated);
+    messages_.push_back(tc_msg);
+    if (session_manager_) session_manager_->on_message(tc_msg);
+    dispatch_assistant_completed_hook(tc_msg, provider_snapshot);
+
+    // Partition tool calls into read-only (parallelizable) and write (serial) groups
+    LOG_INFO("Processing " + std::to_string(accumulated.tool_calls.size()) + " tool calls");
+
+    struct ToolCallEntry {
+        size_t original_index;
+        const ToolCall* tc;
+        bool is_read_only;
+    };
+
+    std::vector<ToolCallEntry> read_entries, write_entries;
+    for (size_t i = 0; i < accumulated.tool_calls.size(); ++i) {
+        const auto& tc = accumulated.tool_calls[i];
+        bool ro = tools_.is_read_only(tc.function_name);
+        ToolCallEntry entry{i, &tc, ro};
+        if (ro) {
+            read_entries.push_back(entry);
+        } else {
+            write_entries.push_back(entry);
+        }
+    }
+
+    LOG_INFO("Partitioned: " + std::to_string(read_entries.size()) + " read-only, " +
+             std::to_string(write_entries.size()) + " write");
+
+    // Results array indexed by original position
+    std::vector<ToolResult> results(accumulated.tool_calls.size());
+    std::vector<bool> result_ready(accumulated.tool_calls.size(), false);
+
+    // Helper: extract context from a tool call
+    auto extract_context = [](const ToolCall& tc, std::string& ctx_path, std::string& ctx_command) {
+        try {
+            auto args_json = nlohmann::json::parse(tc.function_arguments);
+            if (args_json.contains("file_path") && args_json["file_path"].is_string()) {
+                ctx_path = args_json["file_path"].get<std::string>();
+            } else if (args_json.contains("path") && args_json["path"].is_string()) {
+                ctx_path = args_json["path"].get<std::string>();
+            }
+            if (args_json.contains("command") && args_json["command"].is_string()) {
+                ctx_command = args_json["command"].get<std::string>();
+            }
+        } catch (...) {}
+    };
+
+    // Helper: execute a single tool (for both parallel and serial use).
+    auto execute_single_tool = [this](const std::string& tool_name,
+                                      const std::string& tool_args,
+                                      const std::string& ctx_path,
+                                      const ToolContext& tool_ctx = ToolContext{}) -> ToolResult {
+        if (!ctx_path.empty() && tool_name != "bash") {
+            const bool session_artifact_path =
+                session_manager_ &&
+                ((tool_name == "file_read" &&
+                  session_manager_->is_tool_result_artifact_path(ctx_path)) ||
+                 session_manager_->is_plan_file_path(ctx_path));
+            std::string path_error =
+                session_artifact_path ? std::string{} : path_validator_.validate(ctx_path);
+            if (!path_error.empty()) {
+                LOG_WARN("Path validation failed: " + path_error);
+                return ToolResult{"[Error] " + path_error, false};
+            }
+        }
+        if (tools_.has_tool(tool_name)) {
+            LOG_DEBUG("Executing tool: " + tool_name);
+            try {
+                ToolResult result = tools_.execute(tool_name, tool_args, tool_ctx);
+                LOG_INFO("Tool result: success=" + std::string(result.success ? "true" : "false") +
+                         " output=" + log_truncate(result.output, 300));
+                return result;
+            } catch (const std::exception& e) {
+                LOG_ERROR("Tool execution error: " + std::string(e.what()));
+                return ToolResult{"[Error] Tool execution failed: " + std::string(e.what()), false};
+            }
+        } else {
+            LOG_WARN("Unknown tool: " + tool_name);
+            return ToolResult{"Unknown tool: " + tool_name, false};
+        }
+    };
+
+    auto maybe_guard_tool = [&](const ToolCall& tc) -> std::optional<ToolResult> {
+        std::lock_guard<std::mutex> lk(doom_guard_mu);
+        return doom_guard.maybe_guard(tc);
+    };
+
+    auto record_doom_guard_result = [&](const ToolCall& tc, const ToolResult& result) {
+        std::lock_guard<std::mutex> lk(doom_guard_mu);
+        doom_guard.record_result(tc, result);
+    };
+
+    using ToolRunner = std::function<ToolResult(const ToolContext&,
+                                                 const std::string&,
+                                                 const std::string&)>;
+
+    auto materialize_result_attachments = [this](ToolResult& result) {
+        if (!result.has_attachments()) return;
+        if (!session_manager_) {
+            result.attachment_warnings.push_back(
+                "active session required for output attachments");
+            result.attachments = nlohmann::json::array();
+            return;
+        }
+        const std::string session_id = session_manager_->ensure_active_session_id();
+        const std::string project_dir = SessionStorage::get_project_dir(cwd_);
+        auto materialized = materialize_output_attachments(
+            result.attachments,
+            project_dir,
+            session_id,
+            [this](const std::string& path) {
+                return path_validator_.validate(path);
+            },
+            cwd_);
+        result.attachments = std::move(materialized.attachments);
+        result.attachment_warnings.insert(
+            result.attachment_warnings.end(),
+            materialized.warnings.begin(),
+            materialized.warnings.end());
+    };
+
+    auto run_tool_with_lifecycle = [&](const ToolCall& tc,
+                                       size_t tool_index,
+                                       bool emit_tui_progress,
+                                       const ToolRunner& runner) -> ToolResult {
+        std::string exec_path, exec_cmd;
+        extract_context(tc, exec_path, exec_cmd);
+
+        std::string cmd_preview;
+        if (!exec_cmd.empty()) cmd_preview = exec_cmd;
+        else if (!exec_path.empty()) cmd_preview = exec_path;
+        else cmd_preview = tc.function_name;
+        cmd_preview = truncate_utf8_prefix(cmd_preview, 60);
+
+        std::string display_override =
+            ToolExecutor::build_tool_call_preview(tc.function_name, tc.function_arguments);
+        bool is_task_complete = (tc.function_name == "task_complete");
+
+        auto tool_start_tp = std::chrono::steady_clock::now();
+        const int tool_index_int = static_cast<int>(tool_index);
+
+        {
+            nlohmann::json args_payload;
+            try { args_payload = nlohmann::json::parse(tc.function_arguments); }
+            catch (...) { args_payload = tc.function_arguments; }
+            events_.emit(SessionEventKind::ToolStart,
+                web::build_tool_start_payload(tc.function_name, args_payload,
+                                                cmd_preview, display_override,
+                                                is_task_complete,
+                                                tc.id, tool_index_int));
+        }
+
+        emit_progress("tool_running", "正在调用工具 " + tc.function_name,
+            cmd_preview, tc.function_name, tc.id, tool_index_int, true);
+
+        struct ProgressState {
+            std::mutex mu;
+            std::string current_line;
+            std::deque<std::string> tail_lines;
+            int total_lines = 0;
+            size_t total_bytes = 0;
+            std::chrono::steady_clock::time_point last_emit_at{};
+        };
+        auto prog = std::make_shared<ProgressState>();
+
+        ToolContext tool_ctx = build_tool_context(emit_progress, doom_guard, doom_guard_mu);
+        // Wire up per-call callbacks that aren't in the base context
+        if (ask_prompter_) {
+            AskUserQuestionPrompter* p = ask_prompter_;
+            std::atomic<bool>* abort_flag_ptr = &abort_requested_;
+            const std::string tool_name_for_question = tc.function_name;
+            const std::string tool_call_id_for_question = tc.id;
+            tool_ctx.ask_user_questions =
+                [p, abort_flag_ptr, emit_progress, tool_name_for_question,
+                 tool_call_id_for_question, tool_index_int](const nlohmann::json& questions_payload) -> nlohmann::json {
+                    emit_progress("question_waiting", "正在等待用户回答",
+                        std::string{}, tool_name_for_question,
+                        tool_call_id_for_question, tool_index_int, true);
+                    AskUserQuestionResponse resp = p->prompt(questions_payload, abort_flag_ptr);
+                    nlohmann::json out;
+                    out["cancelled"] = resp.cancelled;
+                    nlohmann::json arr = nlohmann::json::array();
+                    for (const auto& a : resp.answers) {
+                        nlohmann::json item;
+                        item["question_id"] = a.question_id;
+                        item["selected"]    = a.selected;
+                        item["custom_text"] = a.custom_text;
+                        arr.push_back(std::move(item));
+                    }
+                    out["answers"] = std::move(arr);
+                    return out;
+                };
+        }
+
+        std::function<void(const std::vector<std::string>&,
+                           const std::string&,
+                           size_t,
+                           int)> stream_update_cb;
+        if (emit_tui_progress) stream_update_cb = callbacks_.on_tool_progress_update;
+        EventDispatcher* events_ptr = &events_;
+        std::string tool_name_copy = tc.function_name;
+        std::string tool_call_id_copy = tc.id;
+        const std::string update_coalesce_key = "tool_update:" +
+            (!tc.id.empty() ? tc.id : (tc.function_name + ":" + std::to_string(tool_index_int)));
+        tool_ctx.stream = [prog, stream_update_cb, events_ptr, tool_start_tp,
+                            tool_name_copy, tool_call_id_copy, tool_index_int,
+                            update_coalesce_key](const std::string& chunk) {
+            std::vector<std::string> snapshot;
+            std::string current_partial;
+            int total_lines = 0;
+            size_t total_bytes = 0;
+            bool should_emit = false;
+            {
+                std::lock_guard<std::mutex> lk(prog->mu);
+                feed_line_state(chunk, prog->current_line, prog->tail_lines, prog->total_lines);
+                prog->total_bytes += chunk.size();
+                snapshot.assign(prog->tail_lines.begin(), prog->tail_lines.end());
+                current_partial = prog->current_line;
+                total_lines = prog->total_lines;
+                total_bytes = prog->total_bytes;
+                const auto now = std::chrono::steady_clock::now();
+                should_emit = prog->last_emit_at.time_since_epoch().count() == 0 ||
+                    std::chrono::duration_cast<std::chrono::milliseconds>(now - prog->last_emit_at) >=
+                        std::chrono::milliseconds(500);
+                if (should_emit) prog->last_emit_at = now;
+            }
+            if (stream_update_cb) {
+                stream_update_cb(snapshot, current_partial, total_bytes, total_lines);
+            }
+            if (!should_emit) return;
+            auto elapsed_ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - tool_start_tp).count();
+            EventDispatcher::EmitOptions opts;
+            opts.buffered = true;
+            opts.coalesce_key = update_coalesce_key;
+            events_ptr->emit(SessionEventKind::ToolUpdate,
+                web::build_tool_update_payload(tool_name_copy, snapshot,
+                                                 current_partial,
+                                                 total_lines,
+                                                 total_bytes,
+                                                 elapsed_ms / 1000.0,
+                                                 tool_call_id_copy,
+                                                 tool_index_int),
+                opts);
+        };
+
+        struct ProgressGuard {
+            std::function<void()> end_cb;
+            ~ProgressGuard() { if (end_cb) end_cb(); }
+        };
+        ProgressGuard guard;
+        if (emit_tui_progress && callbacks_.on_tool_progress_start) {
+            callbacks_.on_tool_progress_start(tc.function_name, cmd_preview);
+            guard.end_cb = callbacks_.on_tool_progress_end;
+        }
+
+        ToolResult result;
+        try {
+            result = runner(tool_ctx, exec_path, exec_cmd);
+        } catch (const std::exception& e) {
+            LOG_ERROR("Tool lifecycle runner error: " + std::string(e.what()));
+            result = ToolResult{"[Error] Tool execution failed: " + std::string(e.what()), false};
+        }
+        materialize_result_attachments(result);
+
+        auto elapsed_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - tool_start_tp).count();
+        std::string snippet;
+        if (!result.success) {
+            int lines = 0;
+            for (char c : result.output) {
+                snippet.push_back(c);
+                if (c == '\n' && ++lines >= 20) break;
+            }
+        }
+        events_.emit(SessionEventKind::ToolEnd,
+            web::build_tool_end_payload(tc.function_name, result,
+                                          elapsed_ms / 1000.0, snippet,
+                                          tc.id, tool_index_int));
+        return result;
+    };
+
+    // Phase 1: Execute read-only tools in parallel
+    if (!read_entries.empty() && !abort_requested_) {
+        for (const auto& entry : read_entries) {
+            dispatch_message("tool_call",
+                    "[Tool: " + entry.tc->function_name + "] " + entry.tc->function_arguments, true);
+        }
+
+        unsigned int max_concurrency = std::min(
+            static_cast<unsigned int>(4),
+            std::max(static_cast<unsigned int>(1), std::thread::hardware_concurrency()));
+
+        struct PendingReadTool {
+            size_t original_index;
+            ToolCall call;
+            std::future<ToolResult> future;
+        };
+
+        size_t i = 0;
+        while (i < read_entries.size() && !abort_requested_) {
+            size_t batch_end = std::min(i + max_concurrency, read_entries.size());
+            std::vector<PendingReadTool> pending;
+
+            for (size_t j = i; j < batch_end; ++j) {
+                const auto& entry = read_entries[j];
+                ToolCall tc_copy = *entry.tc;
+                size_t original_index = entry.original_index;
+                pending.push_back(PendingReadTool{
+                    original_index,
+                    tc_copy,
+                    std::async(std::launch::async,
+                    [&run_tool_with_lifecycle, &execute_single_tool,
+                     &maybe_guard_tool, tc_copy, original_index]() {
+                        return run_tool_with_lifecycle(
+                            tc_copy, original_index, false,
+                            [&execute_single_tool, &maybe_guard_tool, &tc_copy](
+                                const ToolContext& ctx,
+                                const std::string& ctx_path,
+                                const std::string&) {
+                                if (auto guarded = maybe_guard_tool(tc_copy)) {
+                                    return *guarded;
+                                }
+                                return execute_single_tool(
+                                    tc_copy.function_name, tc_copy.function_arguments,
+                                    ctx_path, ctx);
+                            });
+                    })
+                });
+            }
+
+            for (auto& item : pending) {
+                size_t idx = item.original_index;
+                try {
+                    results[idx] = item.future.get();
+                } catch (const std::exception& e) {
+                    results[idx] = ToolResult{"[Error] " + std::string(e.what()), false};
+                }
+                result_ready[idx] = true;
+                record_doom_guard_result(item.call, results[idx]);
+                account_goal_usage(0, false);
+            }
+
+            i = batch_end;
+        }
+    }
+
+    // Phase 2: Execute write tools sequentially (with permission checks)
+    for (const auto& entry : write_entries) {
+        if (abort_requested_) break;
+
+        const auto& tc = *entry.tc;
+        LOG_INFO("Tool call (write): " + tc.function_name + " id=" + tc.id);
+
+        dispatch_message("tool_call",
+                "[Tool: " + tc.function_name + "] " + tc.function_arguments, true);
+
+        results[entry.original_index] = run_tool_with_lifecycle(
+            tc, entry.original_index, true,
+            [&](const ToolContext& tool_ctx,
+                const std::string& ctx_path,
+                const std::string& ctx_command) -> ToolResult {
+                if (auto guarded = maybe_guard_tool(tc)) {
+                    return *guarded;
+                }
+
+                const bool targets_active_plan_file =
+                    permissions_.mode() == PermissionMode::Plan &&
+                    session_manager_ &&
+                    (tc.function_name == "file_write" ||
+                     tc.function_name == "file_edit") &&
+                    session_manager_->is_plan_file_path(ctx_path);
+                bool auto_allow = permissions_.should_auto_allow(
+                    tc.function_name, false, ctx_path, ctx_command);
+                if (permissions_.mode() == PermissionMode::Plan &&
+                    !permissions_.is_dangerous()) {
+                    auto_allow = targets_active_plan_file || tc.function_name == "TodoWrite";
+                }
+                if (tc.function_name == "ExitPlanMode" &&
+                    permissions_.mode() != PermissionMode::Plan) {
+                    auto_allow = true;
+                }
+
+                if (tc.function_name == "bash" && command_looks_like_file_write(ctx_command)) {
+                    const auto now = std::chrono::steady_clock::now();
+                    for (auto it = recent_safe_edit_failures_.begin();
+                         it != recent_safe_edit_failures_.end();) {
+                        if (now - it->second > std::chrono::minutes(10)) {
+                            it = recent_safe_edit_failures_.erase(it);
+                        } else {
+                            ++it;
+                        }
+                    }
+                    for (const auto& [failed_path, when] : recent_safe_edit_failures_) {
+                        (void)when;
+                        if (command_mentions_path(ctx_command, failed_path) &&
+                            !permissions_.is_dangerous() &&
+                            permissions_.mode() != PermissionMode::Yolo) {
+                            return ToolResult{
+                                "[Error] Shell write blocked for " + failed_path +
+                                " because a recent safe file edit failed. "
+                                "Use file_read metadata plus file_edit range mode, or perform an explicit encoding conversion instead of bypassing text safety.",
+                                false};
+                        }
+                    }
+                }
+
+                if (!ctx_path.empty() && tc.function_name != "bash") {
+                    const bool session_artifact_path =
+                        session_manager_ &&
+                        ((tc.function_name == "file_read" &&
+                          session_manager_->is_tool_result_artifact_path(ctx_path)) ||
+                         session_manager_->is_plan_file_path(ctx_path));
+                    std::string path_error = session_artifact_path
+                        ? std::string{}
+                        : path_validator_.validate(ctx_path);
+                    if (!path_error.empty()) {
+                        LOG_WARN("Path validation failed: " + path_error);
+                        return ToolResult{"[Error] " + path_error, false};
+                    }
+                    if (!targets_active_plan_file &&
+                        path_validator_.is_dangerous_path(ctx_path) && auto_allow &&
+                        !permissions_.is_dangerous() &&
+                        permissions_.mode() != PermissionMode::Yolo) {
+                        LOG_INFO("Dangerous path detected, forcing confirmation: " + ctx_path);
+                        auto_allow = false;
+                    }
+                }
+
+                if (!auto_allow && (prompter_ || callbacks_.on_tool_confirm)) {
+                    emit_progress("permission_waiting", "正在等待权限确认",
+                        tc.function_name, tc.function_name, tc.id,
+                        static_cast<int>(entry.original_index), true);
+                    const std::string permission_args =
+                        build_plan_permission_args(
+                            tc.function_name, tc.function_arguments, session_manager_);
+                    PermissionResult perm = prompter_
+                        ? prompter_->prompt(tc.function_name, permission_args, &abort_requested_)
+                        : callbacks_.on_tool_confirm(tc.function_name, permission_args);
+                    if (perm == PermissionResult::Deny) {
+                        return ToolResult{"[User denied tool execution]", false};
+                    }
+                    if (perm == PermissionResult::AlwaysAllow &&
+                        permissions_.mode() != PermissionMode::Plan &&
+                        tc.function_name != "EnterPlanMode" &&
+                        tc.function_name != "ExitPlanMode") {
+                        permissions_.add_session_allow(tc.function_name);
+                    }
+                }
+
+                ToolResult tool_result = execute_single_tool(tc.function_name, tc.function_arguments,
+                                                             ctx_path, tool_ctx);
+
+                if ((tc.function_name == "file_edit" || tc.function_name == "file_write") &&
+                    !ctx_path.empty() && !tool_result.success) {
+                    const std::string lower = ascii_lower(tool_result.output);
+                    if (lower.find("encoding") != std::string::npos ||
+                        lower.find("old_string") != std::string::npos ||
+                        lower.find("range hash") != std::string::npos ||
+                        lower.find("round-trip") != std::string::npos) {
+                        recent_safe_edit_failures_[ctx_path] = std::chrono::steady_clock::now();
+                    }
+                }
+
+                if (tc.function_name == "bash" && tool_result.success &&
+                    command_looks_like_file_write(ctx_command)) {
+                    for (const auto& [failed_path, when] : recent_safe_edit_failures_) {
+                        (void)when;
+                        if (!command_mentions_path(ctx_command, failed_path)) continue;
+                        auto check = read_text_file_buffer(failed_path);
+                        if (!check.success) {
+                            tool_result.success = false;
+                            if (!tool_result.output.empty() && tool_result.output.back() != '\n') {
+                                tool_result.output += "\n";
+                            }
+                            tool_result.output +=
+                                "[Error] Post-command encoding sanity check failed for " +
+                                failed_path + ": " + check.error;
+                        }
+                    }
+                }
+
+                return tool_result;
+        });
+        result_ready[entry.original_index] = true;
+        record_doom_guard_result(tc, results[entry.original_index]);
+        account_goal_usage(0, false);
+    }
+
+    std::vector<ToolResultReplacementRecord> replacement_records;
+    if (session_manager_) {
+        const std::string tool_results_dir = session_manager_->ensure_tool_results_dir();
+        if (!tool_results_dir.empty()) {
+            auto replacement_state = reconstruct_tool_result_replacement_state(messages_);
+            auto budget_result = enforce_tool_result_budget(
+                accumulated.tool_calls,
+                results,
+                result_ready,
+                tool_results_dir,
+                replacement_state);
+            replacement_records = std::move(budget_result.newly_replaced);
+        }
+    }
+
+    // Phase 3: Record and dispatch all results in original order
+    for (size_t i = 0; i < accumulated.tool_calls.size(); ++i) {
+        const auto& tc = accumulated.tool_calls[i];
+        ChatMessage tool_msg;
+        if (result_ready[i]) {
+            tool_msg = ToolExecutor::format_tool_result(tc.id, results[i]);
+            if (results[i].summary.has_value()) {
+                tool_msg.metadata["tool_summary"] = encode_tool_summary(*results[i].summary);
+            }
+            if (results[i].hunks.has_value()) {
+                tool_msg.metadata["tool_hunks"] = encode_tool_hunks(*results[i].hunks);
+            }
+        } else {
+            tool_msg = ToolExecutor::format_tool_result(tc.id,
+                ToolResult{"[Interrupted]", false});
+        }
+        messages_.push_back(tool_msg);
+        if (session_manager_) session_manager_->on_message(tool_msg);
+
+        if (result_ready[i]) {
+            std::string display_output = results[i].output;
+            std::string ask_display =
+                format_ask_user_question_result_display(results[i].metadata);
+            if (!ask_display.empty()) {
+                display_output = std::move(ask_display);
+            }
+            std::string attachment_fallback =
+                output_attachments_fallback_text(results[i].attachments);
+            if (!attachment_fallback.empty()) {
+                if (!display_output.empty() && display_output.back() != '\n') {
+                    display_output.push_back('\n');
+                }
+                display_output += attachment_fallback;
+            }
+            dispatch_message("tool_result", display_output, true);
+            if (callbacks_.on_tool_result) {
+                ChatMessage call_msg;
+                call_msg.role = "tool_call";
+                call_msg.content = "[Tool: " + tc.function_name + "] " + tc.function_arguments;
+                call_msg.display_override =
+                    ToolExecutor::build_tool_call_preview(tc.function_name, tc.function_arguments);
+                callbacks_.on_tool_result(call_msg, tc.function_name, results[i]);
+            }
+            if (results[i].post_user_prompt.has_value() &&
+                !results[i].post_user_prompt->empty()) {
+                append_tool_user_prompt(
+                    *results[i].post_user_prompt,
+                    results[i].post_user_prompt_display_text,
+                    tc.function_name);
+            }
+        }
+    }
+
+    if (!replacement_records.empty()) {
+        ChatMessage meta_msg = encode_content_replacement_message(replacement_records);
+        messages_.push_back(meta_msg);
+        if (session_manager_) session_manager_->on_message(meta_msg);
+    }
+
+    // Terminator detection. The ONLY terminator tool is task_complete.
+    for (size_t i = 0; i < accumulated.tool_calls.size(); ++i) {
+        const auto& tc = accumulated.tool_calls[i];
+        if (tc.function_name == "task_complete" && result_ready[i] && results[i].success) {
+            LOG_INFO("Terminator fired: task_complete");
+            return true;
+        }
+    }
+    return false;
+}
+
+void AgentLoop::run_agent_with_input(const UserInput& input,
+                                      bool hidden_goal_context) {
+    abort_requested_ = false;
+    busy_ = true;
+    restore_goal_runtime();
+
+    // Phase 1: Build and persist user message, emit events
+    auto turn_info = prepare_user_turn(input, hidden_goal_context);
+    std::string turn_timing_status = "completed";
+
+    // Loop state
     int total_iterations = 0;
     bool terminator_fired = false;
-    std::string terminator_reason;
 
     const int max_iter = loop_cfg_.max_iterations;
     const bool has_max_iterations = max_iter > 0;
@@ -1087,6 +2093,7 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
     AgentLoopDoomGuard doom_guard;
     std::mutex doom_guard_mu;
 
+    // Progress emitter with rate-limiting and coalescing
     std::mutex progress_mu;
     std::string active_progress_key;
     std::int64_t active_progress_started_at_ms = 0;
@@ -1123,6 +2130,7 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
         events_.emit(SessionEventKind::AgentProgress, std::move(payload), opts);
     };
 
+    // Main agent loop
     while (!abort_requested_ && !terminator_fired &&
            (!has_max_iterations || total_iterations < max_iter)) {
         ++total_iterations;
@@ -1139,211 +2147,18 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
             break;
         }
 
-        // Auto-compact check: prefer API-reported token count, fallback to estimate.
-        // A rescue retry skips this once so the retry remains local and bounded.
+        // Auto-compact check
         if (skip_auto_compact_once) {
-            LOG_INFO("Auto-compact preflight skipped once after context rescue retry; messages=" +
-                     std::to_string(messages_.size()));
+            LOG_INFO("Auto-compact preflight skipped once after context rescue retry");
             skip_auto_compact_once = false;
         } else if (should_auto_compact(messages_, context_window_, last_api_prompt_tokens_.load())) {
-            auto [auto_start, auto_count] = get_messages_after_compact_boundary(messages_);
-            std::vector<ChatMessage> active_for_log(messages_.begin() + auto_start,
-                                                    messages_.begin() + auto_start + auto_count);
-            LOG_INFO("Auto-compact triggered: threshold exceeded; context_window=" +
-                     std::to_string(context_window_) +
-                     " threshold=" +
-                     std::to_string(get_auto_compact_threshold(context_window_)) +
-                     " last_api_prompt_tokens=" +
-                     std::to_string(last_api_prompt_tokens_.load()) +
-                     " active_estimated_tokens=" +
-                     std::to_string(estimate_message_tokens(active_for_log)) +
-                     " active_count=" + std::to_string(auto_count) +
-                     " total_messages=" + std::to_string(messages_.size()));
             maybe_run_auto_compact();
         }
 
-        // Build the static system prompt each turn. Request-local context such
-        // as current time/CWD is appended near the message tail below so the
-        // system prompt remains cacheable for providers such as DeepSeek.
-        std::string system_prompt = build_system_prompt(
-            tools_, cwd_, skill_registry_, memory_registry_,
-            memory_cfg_, project_instructions_cfg_);
-        LOG_DEBUG("System prompt length: " + std::to_string(system_prompt.size()));
-        auto tool_defs = tools_.get_tool_definitions();
-        LOG_DEBUG("Registered tools: " + std::to_string(tool_defs.size()));
+        // Phase 2: Build API request messages
+        auto bundle = build_api_request_messages();
 
-        // Prepare messages with system prompt at front, filtering out meta messages
-        auto api_messages = normalize_messages_for_api(messages_);
-        std::string session_context = cached_context_for_api(
-            build_session_context_prompt(
-                cwd_, memory_registry_, memory_cfg_, project_instructions_cfg_,
-                skill_registry_, context_window_),
-            session_context_cache_key_, session_context_cache_content_);
-        prepend_session_context_for_api(api_messages, session_context);
-        std::string request_context = build_request_context_prompt(cwd_);
-        append_request_context_for_api(api_messages, request_context);
-        std::string plan_mode_context =
-            permissions_.mode() == PermissionMode::Plan
-                ? build_plan_mode_context_prompt(session_manager_)
-                : std::string{};
-        append_plan_mode_context_for_api(api_messages, plan_mode_context);
-        std::vector<TodoItem> todo_context_items =
-            session_manager_ ? session_manager_->current_todos() : std::vector<TodoItem>{};
-        append_todo_context_for_api(api_messages, todo_context_items);
-        std::vector<ChatMessage> messages_with_system;
-        ChatMessage sys_msg;
-        sys_msg.role = "system";
-        sys_msg.content = system_prompt;
-        messages_with_system.push_back(sys_msg);
-        messages_with_system.insert(messages_with_system.end(), api_messages.begin(), api_messages.end());
-        auto prompt_diag = build_prompt_cache_diagnostics(
-            system_prompt,
-            session_context + "\n" + request_context + "\n" + plan_mode_context +
-                "\n" + format_todo_injection(todo_context_items),
-            tool_defs);
-        LOG_DEBUG("Prompt cache hashes: system=" + prompt_diag.static_system_prompt_hash +
-                  " context=" + prompt_diag.mutable_context_hash +
-                  " tools=" + prompt_diag.tool_schema_hash);
-
-        // Use streaming API
-        ChatResponse accumulated;
-        accumulated.finish_reason = "stop";
-        std::mutex resp_mu;
-        std::size_t reasoning_bytes = 0;
-        int reasoning_fragments = 0;
-        bool provider_error_seen = false;
-        ProviderErrorInfo provider_error_info;
-
-        auto stream_callback = [&accumulated, &resp_mu, &emit_agent_progress,
-                                &reasoning_bytes, &reasoning_fragments,
-                                &provider_error_seen, &provider_error_info,
-                                this](const StreamEvent& evt) {
-            switch (evt.type) {
-            case StreamEventType::Delta:
-                {
-                    std::lock_guard<std::mutex> lk(resp_mu);
-                    accumulated.content += evt.content;
-                }
-                if (callbacks_.on_delta) {
-                    callbacks_.on_delta(evt.content);
-                }
-                events_.emit(SessionEventKind::Token, nlohmann::json{{"text", evt.content}});
-                break;
-            case StreamEventType::ReasoningDelta:
-                {
-                    std::lock_guard<std::mutex> lk(resp_mu);
-                    accumulated.reasoning_content += evt.content;
-                }
-                reasoning_bytes += evt.content.size();
-                reasoning_fragments++;
-                emit_agent_progress("reasoning", "正在推理",
-                    "片段 " + std::to_string(reasoning_fragments) + ", " +
-                    human_bytes(reasoning_bytes));
-                // Future TUI hook (e.g. a "Thinking..." panel) can subscribe
-                // here. Today we only accumulate so format_assistant_tool_calls
-                // and the empty-turn branch can echo it back to DeepSeek.
-                events_.emit(SessionEventKind::Reasoning, nlohmann::json{{"text", evt.content}});
-                break;
-            case StreamEventType::ToolCallDelta:
-                {
-                    const std::string tool_name = evt.tool_call.function_name;
-                    const std::string label = tool_name.empty()
-                        ? "正在准备工具调用"
-                        : "正在准备调用 " + tool_name;
-                    emit_agent_progress("tool_planning", label,
-                        format_bytes_detail(evt.tool_call_argument_bytes),
-                        tool_name, evt.tool_call.id, evt.tool_index);
-                }
-                break;
-            case StreamEventType::ToolCall:
-                {
-                    std::lock_guard<std::mutex> lk(resp_mu);
-                    accumulated.tool_calls.push_back(evt.tool_call);
-                }
-                break;
-            case StreamEventType::Done:
-                break;
-            case StreamEventType::Usage:
-                last_api_prompt_tokens_.store(evt.usage.prompt_tokens);
-                {
-                    std::lock_guard<std::mutex> lk(resp_mu);
-                    accumulated.usage = evt.usage;
-                }
-                if (evt.usage.has_data) {
-                    account_goal_usage(evt.usage.total_tokens, false);
-                }
-                if (callbacks_.on_usage) {
-                    callbacks_.on_usage(evt.usage);
-                }
-                if (session_manager_) {
-                    session_manager_->record_token_usage(evt.usage);
-                }
-                events_.emit(SessionEventKind::Usage, nlohmann::json{
-                    {"prompt_tokens", evt.usage.prompt_tokens},
-                    {"completion_tokens", evt.usage.completion_tokens},
-                    {"total_tokens", evt.usage.total_tokens},
-                    {"cache_read_tokens", evt.usage.cache_read_tokens},
-                    {"cache_write_tokens", evt.usage.cache_write_tokens},
-                    {"reasoning_tokens", evt.usage.reasoning_tokens},
-                    {"has_data", evt.usage.has_data},
-                });
-                break;
-            case StreamEventType::Retry:
-                provider_error_info = evt.provider_error;
-                // Drop-partial 重试族:Timeout 与 MalformedSse(SSE 中途断流)。
-                // 两者 provider 端都会重发完整请求,本地必须清空 partial 累积
-                // 否则下一次成功的 stream 会叠加成重复内容(同样的 reasoning /
-                // content 出现两遍)。TranscriptReplace 让前端把 partial 痕迹抹掉。
-                if (evt.provider_error.kind == ProviderErrorKind::Timeout ||
-                    evt.provider_error.kind == ProviderErrorKind::MalformedSse) {
-                    {
-                        std::lock_guard<std::mutex> lk(resp_mu);
-                        accumulated = ChatResponse{};
-                        accumulated.finish_reason = "stop";
-                    }
-                    reasoning_bytes = 0;
-                    reasoning_fragments = 0;
-                    if (callbacks_.on_stream_retry_reset) {
-                        callbacks_.on_stream_retry_reset();
-                    }
-                    CompactResult reset_result;
-                    events_.emit(SessionEventKind::TranscriptReplace,
-                                 build_transcript_replace_payload(messages_, reset_result));
-                }
-                emit_agent_progress(
-                    "model_retry",
-                    "正在重试模型请求",
-                    "第 " + std::to_string(evt.provider_error.retry_attempt + 1) +
-                        " 次请求将在 " +
-                        std::to_string(evt.provider_error.retry_delay_ms) +
-                        " ms 后发起",
-                    std::string{},
-                    std::string{},
-                    -1,
-                    true);
-                break;
-            case StreamEventType::Error:
-                if ((evt.provider_error.kind == ProviderErrorKind::UserCancelled ||
-                     evt.error == "Request cancelled") &&
-                    abort_requested_.load()) {
-                    break;
-                }
-                provider_error_seen = true;
-                provider_error_info = evt.provider_error;
-                if (!provider_error_info.has_error()) {
-                    provider_error_info.kind = ProviderErrorKind::Unknown;
-                    provider_error_info.display_message = evt.error;
-                }
-                if (provider_error_info.display_message.empty()) {
-                    provider_error_info.display_message = evt.error;
-                }
-                break;
-            }
-        };
-
-        LOG_INFO("Calling chat_stream with " + std::to_string(messages_with_system.size()) + " messages");
-        // 每轮 turn 开始时拿一份 provider 快照 —— main.cpp 此时可能正在替换 provider,
-        // 但我们这一轮拿到的 shared_ptr 会让老 provider 活到本轮跑完(design D4)。
+        // Get provider snapshot
         std::shared_ptr<LlmProvider> provider_snapshot;
         if (provider_accessor_) provider_snapshot = provider_accessor_();
         if (!provider_snapshot) {
@@ -1357,870 +2172,76 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
                 false);
             break;
         }
-        try {
-            emit_agent_progress(total_iterations == 1 ? "model_waiting" : "model_followup",
-                total_iterations == 1 ? "正在等待模型响应" : "正在等待模型继续响应",
-                std::string{}, std::string{}, std::string{}, -1, true);
-            provider_snapshot->chat_stream(messages_with_system, tool_defs, stream_callback, &abort_requested_);
-            LOG_INFO("chat_stream returned. content_len=" + std::to_string(accumulated.content.size()) + " tool_calls=" + std::to_string(accumulated.tool_calls.size()));
-        } catch (const std::exception& e) {
-            LOG_ERROR(std::string("chat_stream exception: ") + e.what());
-            provider_error_seen = true;
-            provider_error_info.kind = ProviderErrorKind::Unknown;
-            provider_error_info.display_message = e.what();
-        }
+
+        // Phase 3: Call provider and collect response
+        auto provider_result = call_provider_and_collect(
+            provider_snapshot, bundle, emit_agent_progress);
 
         if (abort_requested_) {
             dispatch_message("system", "[Interrupted]", false);
             break;
         }
 
-        if (provider_error_seen) {
-            const bool model_output_seen =
-                !accumulated.content.empty() ||
-                !accumulated.reasoning_content.empty() ||
-                accumulated.has_tool_calls();
-            const int request_tokens = estimate_message_tokens(messages_with_system);
-            const bool rescue_attempt_available =
-                context_rescue_attempts < kMaxContextRescueAttempts;
-            const bool rescue_indicated = should_attempt_context_overflow_rescue(
-                provider_error_info,
-                request_tokens,
-                context_window_,
-                model_output_seen);
-            LOG_WARN("Provider error before turn completion; " +
-                     provider_error_summary_for_log(provider_error_info) +
-                     " request_estimated_tokens=" +
-                     std::to_string(request_tokens) +
-                     " context_window=" + std::to_string(context_window_) +
-                     " messages_with_system=" +
-                     std::to_string(messages_with_system.size()) +
-                     " model_output_seen=" +
-                     (model_output_seen ? "true" : "false") +
-                     " rescue_attempts=" +
-                     std::to_string(context_rescue_attempts) + "/" +
-                     std::to_string(kMaxContextRescueAttempts) +
-                     " rescue_attempt_available=" +
-                     (rescue_attempt_available ? "true" : "false") +
-                     " rescue_indicated=" +
-                     (rescue_indicated ? "true" : "false"));
+        // Phase 4: Handle provider errors (context rescue, fatal errors)
+        auto error_result = handle_provider_error(
+            provider_result, bundle.messages_with_system,
+            context_rescue_attempts, last_context_rescue_tokens,
+            skip_auto_compact_once, total_iterations,
+            turn_timing_status);
+        if (error_result == HandleErrorResult::Continue) continue;
+        if (error_result == HandleErrorResult::Break) break;
 
-            if (rescue_attempt_available && rescue_indicated) {
-                const int preferred_tail_turns =
-                    context_rescue_attempts == 0 ? 4 :
-                    context_rescue_attempts == 1 ? 2 : 1;
-                LOG_WARN("Context rescue attempt starting; attempt=" +
-                         std::to_string(context_rescue_attempts + 1) +
-                         " preferred_tail_user_turns=" +
-                         std::to_string(preferred_tail_turns) +
-                         " last_context_rescue_tokens=" +
-                         std::to_string(last_context_rescue_tokens) +
-                         " current_messages=" + std::to_string(messages_.size()));
-                auto rescue = rescue_compact_messages(messages_, cwd_, preferred_tail_turns);
-                if (rescue.performed &&
-                    rescue.estimated_tokens_after < last_context_rescue_tokens) {
-                    CompactResult replace_result;
-                    replace_result.performed = true;
-                    replace_result.messages_compressed = rescue.messages_removed;
-                    replace_result.estimated_tokens_saved =
-                        std::max(0, rescue.estimated_tokens_before - rescue.estimated_tokens_after);
-                    replace_result.summary_text = rescue.marker_text;
-                    replace_result.compacted_messages = std::move(rescue.compacted_messages);
-                    apply_compact_result(replace_result);
-
-                    ++context_rescue_attempts;
-                    last_context_rescue_tokens = rescue.estimated_tokens_after;
-                    skip_auto_compact_once = true;
-                    if (total_iterations > 0) {
-                        --total_iterations;
-                    }
-
-                    LOG_WARN("Context rescue accepted; retrying request" +
-                             std::string(" attempt=") +
-                             std::to_string(context_rescue_attempts) +
-                             " messages_removed=" +
-                             std::to_string(rescue.messages_removed) +
-                             " protected_user_turns=" +
-                             std::to_string(rescue.protected_user_turns) +
-                             " estimated_tokens_before=" +
-                             std::to_string(rescue.estimated_tokens_before) +
-                             " estimated_tokens_after=" +
-                             std::to_string(rescue.estimated_tokens_after) +
-                             " request_estimated_tokens_before=" +
-                             std::to_string(request_tokens));
-                    dispatch_message(
-                        "system",
-                        "[Rescue compact] Provider rejected the request as too large; compacted " +
-                            std::to_string(rescue.messages_removed) +
-                            " messages and retrying with the most recent " +
-                            std::to_string(rescue.protected_user_turns) +
-                            " user turn(s).",
-                        false);
-                    continue;
-                }
-
-                LOG_WARN("Context rescue rejected; performed=" +
-                         std::string(rescue.performed ? "true" : "false") +
-                         " can_retry=" +
-                         (rescue.can_retry ? "true" : "false") +
-                         " messages_removed=" +
-                         std::to_string(rescue.messages_removed) +
-                         " protected_user_turns=" +
-                         std::to_string(rescue.protected_user_turns) +
-                         " estimated_tokens_before=" +
-                         std::to_string(rescue.estimated_tokens_before) +
-                         " estimated_tokens_after=" +
-                         std::to_string(rescue.estimated_tokens_after) +
-                         " last_context_rescue_tokens=" +
-                         std::to_string(last_context_rescue_tokens) +
-                         " error=" + log_truncate(rescue.error, 500));
-                nlohmann::json metadata;
-                metadata["provider_error"] = provider_error_to_json(provider_error_info);
-                turn_timing_status = "error";
-                dispatch_message(
-                    "error",
-                    "[Error] Context is too large and cannot be rescued by compacting earlier history. " +
-                        provider_error_info.display_message,
-                    false,
-                    std::move(metadata));
-                LOG_WARN("Provider context overflow could not be rescued: " +
-                         log_truncate(rescue.error, 500));
-                break;
-            }
-
-            nlohmann::json metadata;
-            metadata["provider_error"] = provider_error_to_json(provider_error_info);
-            turn_timing_status = "error";
-            dispatch_message("error", "[Error] " + provider_error_info.display_message, false,
-                             std::move(metadata));
-            LOG_WARN("Provider stream failed; ending turn without assistant message: " +
-                     log_truncate(provider_error_info.display_message, 500));
-            break;
-        }
-
-        if (!accumulated.usage.has_data &&
-            (!accumulated.content.empty() || !accumulated.tool_calls.empty())) {
+        // Usage estimation when provider didn't report usage
+        if (!provider_result.accumulated.usage.has_data &&
+            (!provider_result.accumulated.content.empty() || !provider_result.accumulated.has_tool_calls())) {
             TokenUsage estimated_usage;
-            estimated_usage.prompt_tokens = estimate_message_tokens(messages_with_system);
-
+            estimated_usage.prompt_tokens = estimate_message_tokens(bundle.messages_with_system);
             ChatMessage estimated_response;
-            if (accumulated.has_tool_calls()) {
-                estimated_response = ToolExecutor::format_assistant_tool_calls(accumulated);
+            if (provider_result.accumulated.has_tool_calls()) {
+                estimated_response = ToolExecutor::format_assistant_tool_calls(provider_result.accumulated);
             } else {
                 estimated_response.role = "assistant";
-                estimated_response.content = accumulated.content;
-                if (accumulated.content_parts.is_array() && !accumulated.content_parts.empty()) {
-                    estimated_response.content_parts = accumulated.content_parts;
+                estimated_response.content = provider_result.accumulated.content;
+                if (provider_result.accumulated.content_parts.is_array() && !provider_result.accumulated.content_parts.empty()) {
+                    estimated_response.content_parts = provider_result.accumulated.content_parts;
                 }
-                estimated_response.reasoning_content = accumulated.reasoning_content;
+                estimated_response.reasoning_content = provider_result.accumulated.reasoning_content;
             }
-
             estimated_usage.completion_tokens = estimate_message_tokens({estimated_response});
             estimated_usage.total_tokens = estimated_usage.prompt_tokens + estimated_usage.completion_tokens;
             estimated_usage.has_data = false;
-            // Note: don't set last_api_prompt_tokens_ here — keep it 0 so
-            // should_auto_compact knows this is an estimate, not API data.
             account_goal_usage(estimated_usage.total_tokens, false);
-            if (callbacks_.on_usage) {
-                callbacks_.on_usage(estimated_usage);
-            }
-            if (session_manager_) {
-                session_manager_->record_token_usage(estimated_usage);
-            }
+            if (callbacks_.on_usage) callbacks_.on_usage(estimated_usage);
+            if (session_manager_) session_manager_->record_token_usage(estimated_usage);
         }
 
-        if (!accumulated.has_tool_calls()) {
-            // Empty turn: no tool calls → end the loop. This matches
-            // hermes-agent (run_agent.py:9823) and claudecodehaha. When a
-            // non-Claude model hedges with "Would you like me to continue?",
-            // the loop ends and the user re-prompts manually.
-            LOG_INFO("Text-only response; ending loop. content: " + log_truncate(accumulated.content, 300));
+        // Text-only response (no tool calls) → end the loop
+        if (!provider_result.accumulated.has_tool_calls()) {
+            LOG_INFO("Text-only response; ending loop. content: " + log_truncate(provider_result.accumulated.content, 300));
             ChatMessage assistant_msg;
             assistant_msg.role = "assistant";
-            assistant_msg.content = accumulated.content;
-            if (accumulated.content_parts.is_array() && !accumulated.content_parts.empty()) {
-                assistant_msg.content_parts = accumulated.content_parts;
+            assistant_msg.content = provider_result.accumulated.content;
+            if (provider_result.accumulated.content_parts.is_array() && !provider_result.accumulated.content_parts.empty()) {
+                assistant_msg.content_parts = provider_result.accumulated.content_parts;
             }
-            // Echo reasoning back on the next turn so DeepSeek thinking-mode
-            // doesn't 400. Empty for non-reasoning models — no-op.
-            assistant_msg.reasoning_content = accumulated.reasoning_content;
+            assistant_msg.reasoning_content = provider_result.accumulated.reasoning_content;
             messages_.push_back(assistant_msg);
             if (session_manager_) session_manager_->on_message(assistant_msg);
-
-            dispatch_message("assistant", accumulated.content, false,
+            dispatch_message("assistant", provider_result.accumulated.content, false,
                              nlohmann::json::object(),
-                             accumulated.content_parts);
+                             provider_result.accumulated.content_parts);
             dispatch_assistant_completed_hook(assistant_msg, provider_snapshot);
             break;
         }
 
-        // Assistant wants to call tools
-        // Record the assistant message with tool_calls in the history
-        auto tc_msg = ToolExecutor::format_assistant_tool_calls(accumulated);
-        messages_.push_back(tc_msg);
-        if (session_manager_) session_manager_->on_message(tc_msg);
-        dispatch_assistant_completed_hook(tc_msg, provider_snapshot);
-
-        // Partition tool calls into read-only (parallelizable) and write (serial) groups
-        LOG_INFO("Processing " + std::to_string(accumulated.tool_calls.size()) + " tool calls");
-
-        struct ToolCallEntry {
-            size_t original_index;
-            const ToolCall* tc;
-            bool is_read_only;
-        };
-
-        std::vector<ToolCallEntry> read_entries, write_entries;
-        for (size_t i = 0; i < accumulated.tool_calls.size(); ++i) {
-            const auto& tc = accumulated.tool_calls[i];
-            bool ro = tools_.is_read_only(tc.function_name);
-            ToolCallEntry entry{i, &tc, ro};
-            if (ro) {
-                read_entries.push_back(entry);
-            } else {
-                write_entries.push_back(entry);
-            }
-        }
-
-        LOG_INFO("Partitioned: " + std::to_string(read_entries.size()) + " read-only, " +
-                 std::to_string(write_entries.size()) + " write");
-
-        // Results array indexed by original position
-        std::vector<ToolResult> results(accumulated.tool_calls.size());
-        std::vector<bool> result_ready(accumulated.tool_calls.size(), false);
-
-        // Helper: extract context from a tool call
-        auto extract_context = [](const ToolCall& tc, std::string& ctx_path, std::string& ctx_command) {
-            try {
-                auto args_json = nlohmann::json::parse(tc.function_arguments);
-                if (args_json.contains("file_path") && args_json["file_path"].is_string()) {
-                    ctx_path = args_json["file_path"].get<std::string>();
-                } else if (args_json.contains("path") && args_json["path"].is_string()) {
-                    ctx_path = args_json["path"].get<std::string>();
-                }
-                if (args_json.contains("command") && args_json["command"].is_string()) {
-                    ctx_command = args_json["command"].get<std::string>();
-                }
-            } catch (...) {}
-        };
-
-        // Helper: execute a single tool (for both parallel and serial use).
-        // If `tool_ctx` is provided, streaming/abort hooks are forwarded to the tool.
-        auto execute_single_tool = [this](const std::string& tool_name,
-                                          const std::string& tool_args,
-                                          const std::string& ctx_path,
-                                          const ToolContext& tool_ctx = ToolContext{}) -> ToolResult {
-            // Path safety validation (for file tools, not bash)
-            if (!ctx_path.empty() && tool_name != "bash") {
-                const bool session_artifact_path =
-                    session_manager_ &&
-                    ((tool_name == "file_read" &&
-                      session_manager_->is_tool_result_artifact_path(ctx_path)) ||
-                     session_manager_->is_plan_file_path(ctx_path));
-                std::string path_error =
-                    session_artifact_path ? std::string{} : path_validator_.validate(ctx_path);
-                if (!path_error.empty()) {
-                    LOG_WARN("Path validation failed: " + path_error);
-                    return ToolResult{"[Error] " + path_error, false};
-                }
-            }
-
-            // Execute the tool
-            if (tools_.has_tool(tool_name)) {
-                LOG_DEBUG("Executing tool: " + tool_name);
-                try {
-                    ToolResult result = tools_.execute(tool_name, tool_args, tool_ctx);
-                    LOG_INFO("Tool result: success=" + std::string(result.success ? "true" : "false") +
-                             " output=" + log_truncate(result.output, 300));
-                    return result;
-                } catch (const std::exception& e) {
-                    LOG_ERROR("Tool execution error: " + std::string(e.what()));
-                    return ToolResult{"[Error] Tool execution failed: " + std::string(e.what()), false};
-                }
-            } else {
-                LOG_WARN("Unknown tool: " + tool_name);
-                return ToolResult{"Unknown tool: " + tool_name, false};
-            }
-        };
-
-        auto maybe_guard_tool = [&](const ToolCall& tc) -> std::optional<ToolResult> {
-            std::lock_guard<std::mutex> lk(doom_guard_mu);
-            return doom_guard.maybe_guard(tc);
-        };
-
-        auto record_doom_guard_result = [&](const ToolCall& tc, const ToolResult& result) {
-            std::lock_guard<std::mutex> lk(doom_guard_mu);
-            doom_guard.record_result(tc, result);
-        };
-
-        using ToolRunner = std::function<ToolResult(const ToolContext&,
-                                                     const std::string&,
-                                                     const std::string&)>;
-
-        auto materialize_result_attachments = [this](ToolResult& result) {
-            if (!result.has_attachments()) return;
-            if (!session_manager_) {
-                result.attachment_warnings.push_back(
-                    "active session required for output attachments");
-                result.attachments = nlohmann::json::array();
-                return;
-            }
-            const std::string session_id = session_manager_->ensure_active_session_id();
-            const std::string project_dir = SessionStorage::get_project_dir(cwd_);
-            auto materialized = materialize_output_attachments(
-                result.attachments,
-                project_dir,
-                session_id,
-                [this](const std::string& path) {
-                    return path_validator_.validate(path);
-                },
-                cwd_);
-            result.attachments = std::move(materialized.attachments);
-            result.attachment_warnings.insert(
-                result.attachment_warnings.end(),
-                materialized.warnings.begin(),
-                materialized.warnings.end());
-        };
-
-        auto run_tool_with_lifecycle = [&](const ToolCall& tc,
-                                           size_t tool_index,
-                                           bool emit_tui_progress,
-                                           const ToolRunner& runner) -> ToolResult {
-            std::string exec_path, exec_cmd;
-            extract_context(tc, exec_path, exec_cmd);
-
-            std::string cmd_preview;
-            if (!exec_cmd.empty()) cmd_preview = exec_cmd;
-            else if (!exec_path.empty()) cmd_preview = exec_path;
-            else cmd_preview = tc.function_name;
-            cmd_preview = truncate_utf8_prefix(cmd_preview, 60);
-
-            std::string display_override =
-                ToolExecutor::build_tool_call_preview(tc.function_name, tc.function_arguments);
-            bool is_task_complete = (tc.function_name == "task_complete");
-
-            auto tool_start_tp = std::chrono::steady_clock::now();
-            const int tool_index_int = static_cast<int>(tool_index);
-
-            {
-                nlohmann::json args_payload;
-                try { args_payload = nlohmann::json::parse(tc.function_arguments); }
-                catch (...) { args_payload = tc.function_arguments; }
-                events_.emit(SessionEventKind::ToolStart,
-                    web::build_tool_start_payload(tc.function_name, args_payload,
-                                                    cmd_preview, display_override,
-                                                    is_task_complete,
-                                                    tc.id, tool_index_int));
-            }
-
-            emit_agent_progress("tool_running", "正在调用工具 " + tc.function_name,
-                cmd_preview, tc.function_name, tc.id, tool_index_int, true);
-
-            struct ProgressState {
-                std::mutex mu;
-                std::string current_line;
-                std::deque<std::string> tail_lines;
-                int total_lines = 0;
-                size_t total_bytes = 0;
-                std::chrono::steady_clock::time_point last_emit_at{};
-            };
-            auto prog = std::make_shared<ProgressState>();
-
-            ToolContext tool_ctx;
-            tool_ctx.cwd = cwd_;
-            tool_ctx.abort_flag = &abort_requested_;
-            tool_ctx.session_manager = session_manager_;
-            tool_ctx.scratch_dir = build_session_scratch_dir(cwd_, session_manager_);
-            tool_ctx.preserve_full_output = true;
-            tool_ctx.account_goal_usage = [this]() {
-                account_goal_usage(0, true);
-            };
-            tool_ctx.emit_goal_updated = [this](const nlohmann::json& goal_payload) {
-                if (session_manager_) {
-                    const std::string sid = session_manager_->current_session_id();
-                    ThreadGoalStore* store = session_manager_->existing_goal_store();
-                    if (store && !sid.empty()) {
-                        auto goal = store->get_thread_goal(sid);
-                        if (goal.has_value()) {
-                            emit_goal_updated(*goal);
-                            return;
-                        }
-                    }
-                    events_.emit(SessionEventKind::GoalUpdated,
-                        nlohmann::json{{"session_id", sid}, {"goal", goal_payload}});
-                }
-            };
-            tool_ctx.emit_goal_cleared = [this](const std::string& session_id) {
-                emit_goal_cleared(session_id);
-            };
-            tool_ctx.emit_todo_updated = [this](const nlohmann::json& todo_payload) {
-                emit_todo_updated(todo_payload);
-            };
-            tool_ctx.current_permission_mode = [this]() {
-                return std::string(PermissionManager::mode_name(permissions_.mode()));
-            };
-            tool_ctx.enter_plan_mode = [this]() {
-                permissions_.set_mode(PermissionMode::Plan);
-                permissions_.clear_session_allows();
-                std::string plan_file;
-                if (session_manager_) {
-                    session_manager_->set_permission_mode("plan");
-                    session_manager_->set_pre_plan_permission_mode(
-                        PermissionManager::mode_name(permissions_.pre_plan_mode()));
-                    plan_file = session_manager_->ensure_plan_file_path();
-                }
-                return plan_file;
-            };
-            tool_ctx.exit_plan_mode = [this]() {
-                PermissionMode restored = permissions_.restore_pre_plan_mode();
-                const std::string restored_name = PermissionManager::mode_name(restored);
-                if (session_manager_) {
-                    session_manager_->set_permission_mode(restored_name);
-                    session_manager_->set_pre_plan_permission_mode(std::string{});
-                }
-                return restored_name;
-            };
-            if (session_manager_) {
-                tool_ctx.track_file_write_before = [this](const std::string& path) {
-                    if (session_manager_) {
-                        session_manager_->track_file_write_before(path);
-                    }
-                };
-            }
-            if (ask_prompter_) {
-                AskUserQuestionPrompter* p = ask_prompter_;
-                std::atomic<bool>* abort_flag_ptr = &abort_requested_;
-                auto ask_progress = emit_agent_progress;
-                const std::string tool_name_for_question = tc.function_name;
-                const std::string tool_call_id_for_question = tc.id;
-                tool_ctx.ask_user_questions =
-                    [p, abort_flag_ptr, ask_progress, tool_name_for_question,
-                     tool_call_id_for_question, tool_index_int](const nlohmann::json& questions_payload) -> nlohmann::json {
-                        ask_progress("question_waiting", "正在等待用户回答",
-                            std::string{}, tool_name_for_question,
-                            tool_call_id_for_question, tool_index_int, true);
-                        AskUserQuestionResponse resp = p->prompt(questions_payload, abort_flag_ptr);
-                        nlohmann::json out;
-                        out["cancelled"] = resp.cancelled;
-                        nlohmann::json arr = nlohmann::json::array();
-                        for (const auto& a : resp.answers) {
-                            nlohmann::json item;
-                            item["question_id"] = a.question_id;
-                            item["selected"]    = a.selected;
-                            item["custom_text"] = a.custom_text;
-                            arr.push_back(std::move(item));
-                        }
-                        out["answers"] = std::move(arr);
-                        return out;
-                    };
-            }
-
-            std::function<void(const std::vector<std::string>&,
-                               const std::string&,
-                               size_t,
-                               int)> stream_update_cb;
-            if (emit_tui_progress) stream_update_cb = callbacks_.on_tool_progress_update;
-            EventDispatcher* events_ptr = &events_;
-            std::string tool_name_copy = tc.function_name;
-            std::string tool_call_id_copy = tc.id;
-            const std::string update_coalesce_key = "tool_update:" +
-                (!tc.id.empty() ? tc.id : (tc.function_name + ":" + std::to_string(tool_index_int)));
-            tool_ctx.stream = [prog, stream_update_cb, events_ptr, tool_start_tp,
-                                tool_name_copy, tool_call_id_copy, tool_index_int,
-                                update_coalesce_key](const std::string& chunk) {
-                std::vector<std::string> snapshot;
-                std::string current_partial;
-                int total_lines = 0;
-                size_t total_bytes = 0;
-                bool should_emit = false;
-                {
-                    std::lock_guard<std::mutex> lk(prog->mu);
-                    feed_line_state(chunk, prog->current_line, prog->tail_lines, prog->total_lines);
-                    prog->total_bytes += chunk.size();
-                    snapshot.assign(prog->tail_lines.begin(), prog->tail_lines.end());
-                    current_partial = prog->current_line;
-                    total_lines = prog->total_lines;
-                    total_bytes = prog->total_bytes;
-                    const auto now = std::chrono::steady_clock::now();
-                    should_emit = prog->last_emit_at.time_since_epoch().count() == 0 ||
-                        std::chrono::duration_cast<std::chrono::milliseconds>(now - prog->last_emit_at) >=
-                            std::chrono::milliseconds(500);
-                    if (should_emit) prog->last_emit_at = now;
-                }
-                if (stream_update_cb) {
-                    stream_update_cb(snapshot, current_partial, total_bytes, total_lines);
-                }
-                if (!should_emit) return;
-                auto elapsed_ms =
-                    std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now() - tool_start_tp).count();
-                EventDispatcher::EmitOptions opts;
-                opts.buffered = true;
-                opts.coalesce_key = update_coalesce_key;
-                events_ptr->emit(SessionEventKind::ToolUpdate,
-                    web::build_tool_update_payload(tool_name_copy, snapshot,
-                                                     current_partial,
-                                                     total_lines,
-                                                     total_bytes,
-                                                     elapsed_ms / 1000.0,
-                                                     tool_call_id_copy,
-                                                     tool_index_int),
-                    opts);
-            };
-
-            struct ProgressGuard {
-                std::function<void()> end_cb;
-                ~ProgressGuard() { if (end_cb) end_cb(); }
-            };
-            ProgressGuard guard;
-            if (emit_tui_progress && callbacks_.on_tool_progress_start) {
-                callbacks_.on_tool_progress_start(tc.function_name, cmd_preview);
-                guard.end_cb = callbacks_.on_tool_progress_end;
-            }
-
-            ToolResult result;
-            try {
-                result = runner(tool_ctx, exec_path, exec_cmd);
-            } catch (const std::exception& e) {
-                LOG_ERROR("Tool lifecycle runner error: " + std::string(e.what()));
-                result = ToolResult{"[Error] Tool execution failed: " + std::string(e.what()), false};
-            }
-            materialize_result_attachments(result);
-
-            auto elapsed_ms =
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::steady_clock::now() - tool_start_tp).count();
-            std::string snippet;
-            if (!result.success) {
-                int lines = 0;
-                for (char c : result.output) {
-                    snippet.push_back(c);
-                    if (c == '\n' && ++lines >= 20) break;
-                }
-            }
-            events_.emit(SessionEventKind::ToolEnd,
-                web::build_tool_end_payload(tc.function_name, result,
-                                              elapsed_ms / 1000.0, snippet,
-                                              tc.id, tool_index_int));
-            return result;
-        };
-
-        // Phase 1: Execute read-only tools in parallel
-        if (!read_entries.empty() && !abort_requested_) {
-            // Notify TUI about all read-only tool calls
-            for (const auto& entry : read_entries) {
-                dispatch_message("tool_call",
-                        "[Tool: " + entry.tc->function_name + "] " + entry.tc->function_arguments, true);
-            }
-
-            unsigned int max_concurrency = std::min(
-                static_cast<unsigned int>(4),
-                std::max(static_cast<unsigned int>(1), std::thread::hardware_concurrency()));
-
-            LOG_DEBUG("Parallel execution with max_concurrency=" + std::to_string(max_concurrency));
-
-            struct PendingReadTool {
-                size_t original_index;
-                ToolCall call;
-                std::future<ToolResult> future;
-            };
-
-            // Launch async tasks in batches respecting concurrency limit
-            size_t i = 0;
-            while (i < read_entries.size() && !abort_requested_) {
-                size_t batch_end = std::min(i + max_concurrency, read_entries.size());
-                std::vector<PendingReadTool> pending;
-
-                for (size_t j = i; j < batch_end; ++j) {
-                    const auto& entry = read_entries[j];
-                    ToolCall tc_copy = *entry.tc;
-                    size_t original_index = entry.original_index;
-                    pending.push_back(PendingReadTool{
-                        original_index,
-                        tc_copy,
-                        std::async(std::launch::async,
-                        [&run_tool_with_lifecycle, &execute_single_tool,
-                         &maybe_guard_tool, tc_copy, original_index]() {
-                            return run_tool_with_lifecycle(
-                                tc_copy, original_index, false,
-                                [&execute_single_tool, &maybe_guard_tool, &tc_copy](
-                                    const ToolContext& ctx,
-                                    const std::string& ctx_path,
-                                    const std::string&) {
-                                    if (auto guarded = maybe_guard_tool(tc_copy)) {
-                                        return *guarded;
-                                    }
-                                    return execute_single_tool(
-                                        tc_copy.function_name, tc_copy.function_arguments,
-                                        ctx_path, ctx);
-                                });
-                        })
-                    });
-                }
-
-                for (auto& item : pending) {
-                    size_t idx = item.original_index;
-                    try {
-                        results[idx] = item.future.get();
-                    } catch (const std::exception& e) {
-                        results[idx] = ToolResult{"[Error] " + std::string(e.what()), false};
-                    }
-                    result_ready[idx] = true;
-                    record_doom_guard_result(item.call, results[idx]);
-                    account_goal_usage(0, false);
-                }
-
-                i = batch_end;
-            }
-        }
-
-        // Phase 2: Execute write tools sequentially (with permission checks)
-        for (const auto& entry : write_entries) {
-            if (abort_requested_) break;
-
-            const auto& tc = *entry.tc;
-            LOG_INFO("Tool call (write): " + tc.function_name + " id=" + tc.id);
-
-            dispatch_message("tool_call",
-                    "[Tool: " + tc.function_name + "] " + tc.function_arguments, true);
-
-            results[entry.original_index] = run_tool_with_lifecycle(
-                tc, entry.original_index, true,
-                [&](const ToolContext& tool_ctx,
-                    const std::string& ctx_path,
-                    const std::string& ctx_command) -> ToolResult {
-                    if (auto guarded = maybe_guard_tool(tc)) {
-                        return *guarded;
-                    }
-
-                    const bool targets_active_plan_file =
-                        permissions_.mode() == PermissionMode::Plan &&
-                        session_manager_ &&
-                        (tc.function_name == "file_write" ||
-                         tc.function_name == "file_edit") &&
-                        session_manager_->is_plan_file_path(ctx_path);
-                    bool auto_allow = permissions_.should_auto_allow(
-                        tc.function_name, false, ctx_path, ctx_command);
-                    if (permissions_.mode() == PermissionMode::Plan &&
-                        !permissions_.is_dangerous()) {
-                        auto_allow = targets_active_plan_file || tc.function_name == "TodoWrite";
-                    }
-                    if (tc.function_name == "ExitPlanMode" &&
-                        permissions_.mode() != PermissionMode::Plan) {
-                        auto_allow = true;
-                    }
-
-                    if (tc.function_name == "bash" && command_looks_like_file_write(ctx_command)) {
-                        const auto now = std::chrono::steady_clock::now();
-                        for (auto it = recent_safe_edit_failures_.begin();
-                             it != recent_safe_edit_failures_.end();) {
-                            if (now - it->second > std::chrono::minutes(10)) {
-                                it = recent_safe_edit_failures_.erase(it);
-                            } else {
-                                ++it;
-                            }
-                        }
-                        for (const auto& [failed_path, when] : recent_safe_edit_failures_) {
-                            (void)when;
-                            if (command_mentions_path(ctx_command, failed_path) &&
-                                !permissions_.is_dangerous() &&
-                                permissions_.mode() != PermissionMode::Yolo) {
-                                return ToolResult{
-                                    "[Error] Shell write blocked for " + failed_path +
-                                    " because a recent safe file edit failed. "
-                                    "Use file_read metadata plus file_edit range mode, or perform an explicit encoding conversion instead of bypassing text safety.",
-                                    false};
-                            }
-                        }
-                    }
-
-                    if (!ctx_path.empty() && tc.function_name != "bash") {
-                        const bool session_artifact_path =
-                            session_manager_ &&
-                            ((tc.function_name == "file_read" &&
-                              session_manager_->is_tool_result_artifact_path(ctx_path)) ||
-                             session_manager_->is_plan_file_path(ctx_path));
-                        std::string path_error = session_artifact_path
-                            ? std::string{}
-                            : path_validator_.validate(ctx_path);
-                        if (!path_error.empty()) {
-                            LOG_WARN("Path validation failed: " + path_error);
-                            return ToolResult{"[Error] " + path_error, false};
-                        }
-                        if (!targets_active_plan_file &&
-                            path_validator_.is_dangerous_path(ctx_path) && auto_allow &&
-                            !permissions_.is_dangerous() &&
-                            permissions_.mode() != PermissionMode::Yolo) {
-                            LOG_INFO("Dangerous path detected, forcing confirmation: " + ctx_path);
-                            auto_allow = false;
-                        }
-                    }
-
-                    if (!auto_allow && (prompter_ || callbacks_.on_tool_confirm)) {
-                        emit_agent_progress("permission_waiting", "正在等待权限确认",
-                            tc.function_name, tc.function_name, tc.id,
-                            static_cast<int>(entry.original_index), true);
-                        const std::string permission_args =
-                            build_plan_permission_args(
-                                tc.function_name, tc.function_arguments, session_manager_);
-                        PermissionResult perm = prompter_
-                            ? prompter_->prompt(tc.function_name, permission_args, &abort_requested_)
-                            : callbacks_.on_tool_confirm(tc.function_name, permission_args);
-                        if (perm == PermissionResult::Deny) {
-                            return ToolResult{"[User denied tool execution]", false};
-                        }
-                        if (perm == PermissionResult::AlwaysAllow &&
-                            permissions_.mode() != PermissionMode::Plan &&
-                            tc.function_name != "EnterPlanMode" &&
-                            tc.function_name != "ExitPlanMode") {
-                            permissions_.add_session_allow(tc.function_name);
-                        }
-                    }
-
-                    ToolResult tool_result = execute_single_tool(tc.function_name, tc.function_arguments,
-                                                                 ctx_path, tool_ctx);
-
-                    if ((tc.function_name == "file_edit" || tc.function_name == "file_write") &&
-                        !ctx_path.empty() && !tool_result.success) {
-                        const std::string lower = ascii_lower(tool_result.output);
-                        if (lower.find("encoding") != std::string::npos ||
-                            lower.find("old_string") != std::string::npos ||
-                            lower.find("range hash") != std::string::npos ||
-                            lower.find("round-trip") != std::string::npos) {
-                            recent_safe_edit_failures_[ctx_path] = std::chrono::steady_clock::now();
-                        }
-                    }
-
-                    if (tc.function_name == "bash" && tool_result.success &&
-                        command_looks_like_file_write(ctx_command)) {
-                        for (const auto& [failed_path, when] : recent_safe_edit_failures_) {
-                            (void)when;
-                            if (!command_mentions_path(ctx_command, failed_path)) continue;
-                            auto check = read_text_file_buffer(failed_path);
-                            if (!check.success) {
-                                tool_result.success = false;
-                                if (!tool_result.output.empty() && tool_result.output.back() != '\n') {
-                                    tool_result.output += "\n";
-                                }
-                                tool_result.output +=
-                                    "[Error] Post-command encoding sanity check failed for " +
-                                    failed_path + ": " + check.error;
-                            }
-                        }
-                    }
-
-                    return tool_result;
-            });
-            result_ready[entry.original_index] = true;
-            record_doom_guard_result(tc, results[entry.original_index]);
-            account_goal_usage(0, false);
-        }
-
-        std::vector<ToolResultReplacementRecord> replacement_records;
-        if (session_manager_) {
-            const std::string tool_results_dir = session_manager_->ensure_tool_results_dir();
-            if (!tool_results_dir.empty()) {
-                // 从当前 transcript 重建 seen/replacement,再只处理这一批 fresh 结果。
-                // 这样 resume、compact、测试直接注入 messages_ 都不会留下陈旧状态。
-                auto replacement_state = reconstruct_tool_result_replacement_state(messages_);
-                auto budget_result = enforce_tool_result_budget(
-                    accumulated.tool_calls,
-                    results,
-                    result_ready,
-                    tool_results_dir,
-                    replacement_state);
-                replacement_records = std::move(budget_result.newly_replaced);
-            }
-        }
-
-        // Phase 3: Record and dispatch all results in original order
-        for (size_t i = 0; i < accumulated.tool_calls.size(); ++i) {
-            const auto& tc = accumulated.tool_calls[i];
-            ChatMessage tool_msg;
-            if (result_ready[i]) {
-                tool_msg = ToolExecutor::format_tool_result(tc.id, results[i]);
-                // restore-tool-calls-on-resume: 注入视觉字段到 metadata,
-                // 让 --resume 能彩色还原 diff 与摘要(老 session 没有这两个键 → fold 降级)。
-                if (results[i].summary.has_value()) {
-                    tool_msg.metadata["tool_summary"] = encode_tool_summary(*results[i].summary);
-                }
-                if (results[i].hunks.has_value()) {
-                    tool_msg.metadata["tool_hunks"] = encode_tool_hunks(*results[i].hunks);
-                }
-            } else {
-                // Tool was skipped (abort)
-                tool_msg = ToolExecutor::format_tool_result(tc.id,
-                    ToolResult{"[Interrupted]", false});
-                // 中断分支不带 summary/hunks,自然不写 metadata。
-            }
-            messages_.push_back(tool_msg);
-            if (session_manager_) session_manager_->on_message(tool_msg);
-
-            if (result_ready[i]) {
-                std::string display_output = results[i].output;
-                std::string ask_display =
-                    format_ask_user_question_result_display(results[i].metadata);
-                if (!ask_display.empty()) {
-                    display_output = std::move(ask_display);
-                }
-                std::string attachment_fallback =
-                    output_attachments_fallback_text(results[i].attachments);
-                if (!attachment_fallback.empty()) {
-                    if (!display_output.empty() && display_output.back() != '\n') {
-                        display_output.push_back('\n');
-                    }
-                    display_output += attachment_fallback;
-                }
-                dispatch_message("tool_result", display_output, true);
-                if (callbacks_.on_tool_result) {
-                    ChatMessage call_msg;
-                    call_msg.role = "tool_call";
-                    call_msg.content = "[Tool: " + tc.function_name + "] " + tc.function_arguments;
-                    call_msg.display_override =
-                        ToolExecutor::build_tool_call_preview(tc.function_name, tc.function_arguments);
-                    callbacks_.on_tool_result(call_msg, tc.function_name, results[i]);
-                }
-                if (results[i].post_user_prompt.has_value() &&
-                    !results[i].post_user_prompt->empty()) {
-                    append_tool_user_prompt(
-                        *results[i].post_user_prompt,
-                        results[i].post_user_prompt_display_text,
-                        tc.function_name);
-                }
-            }
-        }
-
-        if (!replacement_records.empty()) {
-            ChatMessage meta_msg = encode_content_replacement_message(replacement_records);
-            messages_.push_back(meta_msg);
-            if (session_manager_) session_manager_->on_message(meta_msg);
-        }
-
-        // Terminator detection. The ONLY terminator tool is task_complete.
-        // AskUserQuestion is NOT a terminator — it is a regular tool: the
-        // model asks a multi-choice question, the user's selection is fed
-        // back to the model as a tool_result, and the loop continues on the
-        // next turn (the model then acts on the answer, often calling more
-        // tools). Treating AskUserQuestion as a terminator would mean "every
-        // time the model asks a clarifying question, abandon the task",
-        // which is wrong.
-        for (size_t i = 0; i < accumulated.tool_calls.size(); ++i) {
-            const auto& tc = accumulated.tool_calls[i];
-            if (tc.function_name == "task_complete" && result_ready[i] && results[i].success) {
-                terminator_fired = true;
-                terminator_reason = "task_complete";
-                LOG_INFO("Terminator fired: task_complete");
-                break;
-            }
-        }
-
-        // Loop back to call the provider again with the tool results (unless
-        // terminator_fired or the outer while-condition bails us out).
+        // Phase 5: Execute tool calls
+        terminator_fired = execute_tool_calls(
+            provider_result.accumulated, provider_snapshot,
+            emit_agent_progress, doom_guard, doom_guard_mu,
+            turn_timing_status);
     }
 
-    // Post-loop reason emission. The abort and consecutive-empty branches emit
-    // their own messages inside the loop; only the max_iterations branch lands
-    // here with work still conceptually pending.
+    // Post-loop cleanup
     if (!abort_requested_ && !terminator_fired &&
         has_max_iterations && total_iterations >= max_iter) {
         std::string stop_msg = "Agent loop stopped: reached max_iterations (" +
@@ -2248,9 +2269,10 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
         account_goal_usage(0, false);
     }
 
-    if (visible_timed_turn) {
+    if (turn_info.visible_timed_turn) {
         append_turn_timing_record(
-            turn_user_uuid, turn_started_at_ms, now_epoch_ms(), turn_timing_status);
+            turn_info.turn_user_uuid, turn_info.turn_started_at_ms, now_epoch_ms(),
+            turn_timing_status);
     }
 
     if (callbacks_.on_busy_changed) {
