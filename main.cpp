@@ -1854,8 +1854,18 @@ static void maybe_add_legacy_terminal_hint(
     }
 }
 
+static PermissionMode permission_mode_from_meta_name(std::string mode) {
+    if (mode == "acceptEdits") mode = "accept-edits";
+    if (mode == "accept-edits") return PermissionMode::AcceptEdits;
+    if (mode == "yolo") return PermissionMode::Yolo;
+    if (mode == "plan") return PermissionMode::Plan;
+    return PermissionMode::Default;
+}
+
 static void configure_permissions(PermissionManager& permissions,
-                                  bool dangerous_mode) {
+                                  bool dangerous_mode,
+                                  const std::string& default_permission_mode) {
+    permissions.set_mode(permission_mode_from_meta_name(default_permission_mode));
     if (dangerous_mode) {
         permissions.set_dangerous(true);
         permissions.set_mode(PermissionMode::Yolo);
@@ -1867,13 +1877,6 @@ static void configure_permissions(PermissionManager& permissions,
     permissions.add_rule({"file_write", ".git/**", "", RuleAction::Deny, 100});
     permissions.add_rule({"file_edit", ".git/**", "", RuleAction::Deny, 100});
     permissions.add_rule({"bash", "", "rm -rf /", RuleAction::Deny, 100});
-}
-
-static PermissionMode permission_mode_from_meta_name(std::string mode) {
-    if (mode == "acceptEdits") mode = "accept-edits";
-    if (mode == "accept-edits") return PermissionMode::AcceptEdits;
-    if (mode == "yolo") return PermissionMode::Yolo;
-    return PermissionMode::Default;
 }
 
 static void register_slash_commands(CommandRegistry& cmd_registry,
@@ -2040,6 +2043,19 @@ static int run_interactive_app(const CliOptions& cli,
 
     // ---- Load config ----
     AppConfig config = load_config();
+    {
+        std::string trust_error;
+        HookTrustStore trust_store =
+            load_hook_trust_store_from_path(default_hook_trust_state_path(), &trust_error);
+        if (!trust_error.empty()) {
+            LOG_WARN("[hooks] " + trust_error);
+        }
+        HookLoadOptions hook_load;
+        hook_load.feature_enabled = config.features.hooks;
+        hook_load.cwd = working_dir;
+        hook_load.project_trusted = true;
+        hook_manager.refresh_registry(load_hook_registry(hook_load, &trust_store));
+    }
     seed_default_skills_if_first_initialization(argv0_dir);
 
     // ---- Init proxy resolver ----
@@ -2514,7 +2530,7 @@ static int run_interactive_app(const CliOptions& cli,
     };
 
     PermissionManager permissions;
-    configure_permissions(permissions, dangerous_mode);
+    configure_permissions(permissions, dangerous_mode, config.default_permission_mode);
 
     AgentLoop agent_loop(provider_accessor, tools, callbacks, working_dir, permissions);
     agent_loop.set_context_window(config.context_window);
@@ -2582,6 +2598,11 @@ static int run_interactive_app(const CliOptions& cli,
         session_manager.set_permission_mode(
             PermissionManager::mode_name(permissions.mode()),
             /*persist_immediately=*/false);
+        if (permissions.mode() == PermissionMode::Plan) {
+            session_manager.set_pre_plan_permission_mode(
+                PermissionManager::mode_name(permissions.pre_plan_mode()),
+                /*persist_immediately=*/false);
+        }
     }
     agent_loop.set_session_manager(&session_manager);
 
@@ -2596,6 +2617,7 @@ static int run_interactive_app(const CliOptions& cli,
 #endif
 
     // ---- Handle --resume ----
+    bool resumed_session_success = false;
     if (resume_latest || !resume_session_id.empty()) {
         std::string target_id = resume_session_id;
         std::string resumed_title;
@@ -2658,17 +2680,33 @@ static int run_interactive_app(const CliOptions& cli,
             } else {
                 acecode::append_resumed_session_messages(messages, state, agent_loop, tools);
                 state.todos = session_manager.current_todos();
-                permissions.set_mode(permission_mode_from_meta_name(resumed_meta.permission_mode));
+                const PermissionMode resumed_mode =
+                    permission_mode_from_meta_name(resumed_meta.permission_mode);
+                if (resumed_mode == PermissionMode::Plan) {
+                    permissions.set_mode(permission_mode_from_meta_name(
+                        resumed_meta.pre_plan_permission_mode.empty()
+                            ? std::string{"default"}
+                            : resumed_meta.pre_plan_permission_mode));
+                    permissions.set_mode(PermissionMode::Plan);
+                } else {
+                    permissions.set_mode(resumed_mode);
+                }
                 permissions.clear_session_allows();
                 session_manager.set_permission_mode(
                     PermissionManager::mode_name(permissions.mode()),
                     /*persist_immediately=*/false);
+                if (permissions.mode() == PermissionMode::Plan) {
+                    session_manager.set_pre_plan_permission_mode(
+                        PermissionManager::mode_name(permissions.pre_plan_mode()),
+                        /*persist_immediately=*/false);
+                }
                 token_tracker.restore(resumed_meta.last_token_usage,
                                       resumed_meta.session_token_usage);
                 sync_tui_resume_runtime_state(state, config, token_tracker,
                                               resumed_model_state);
                 state.conversation.push_back({"system",
                     "Resumed session " + target_id + " (" + std::to_string(messages.size()) + " messages)", false});
+                resumed_session_success = true;
                 agent_loop.publish_current_goal_state();
                 agent_loop.maybe_continue_goal();
                 if (!resumed_title.empty()) {
@@ -2685,6 +2723,8 @@ static int run_interactive_app(const CliOptions& cli,
             }
         }
     }
+    agent_loop.dispatch_session_start_hook(
+        resumed_session_success ? std::string{"resume"} : std::string{"startup"});
 
     // Slash command registry
     CommandRegistry cmd_registry;
@@ -4456,8 +4496,17 @@ static int run_interactive_app(const CliOptions& cli,
         if (event == Event::Special(std::string(1, '\x10'))) {
             std::lock_guard<std::mutex> lk(state.mu);
             if (!state.is_waiting && !state.confirm_pending) {
+                const PermissionMode before = permissions.mode();
                 auto new_mode = permissions.cycle_mode();
                 session_manager.set_permission_mode(PermissionManager::mode_name(new_mode));
+                if (new_mode == PermissionMode::Plan) {
+                    session_manager.set_pre_plan_permission_mode(
+                        PermissionManager::mode_name(
+                            before == PermissionMode::Plan
+                                ? permissions.pre_plan_mode()
+                                : before));
+                    session_manager.ensure_plan_file_path();
+                }
                 state.conversation.push_back({"system",
                     std::string("Permission mode: ") + PermissionManager::mode_name(new_mode) +
                     " - " + PermissionManager::mode_description(new_mode), false});
