@@ -121,6 +121,10 @@ TEST(CompactCore, ContextOverflowClassificationHandlesCommonProviderShapes) {
     ambiguous_large_request.display_message = "Bad Request";
     EXPECT_TRUE(acecode::should_attempt_context_overflow_rescue(
         ambiguous_large_request, 64000, 64000, false));
+    EXPECT_TRUE(acecode::should_attempt_context_overflow_rescue(
+        ambiguous_large_request, 64000, 200000, false));
+    EXPECT_FALSE(acecode::should_attempt_context_overflow_rescue(
+        ambiguous_large_request, 1000, 200000, false));
 
     acecode::ProviderErrorInfo network;
     network.kind = acecode::ProviderErrorKind::Network;

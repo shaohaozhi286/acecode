@@ -350,7 +350,16 @@ bool should_attempt_context_overflow_rescue(
     }
 
     const int auto_threshold = get_auto_compact_threshold(context_window);
-    const int fallback_threshold = std::max(auto_threshold, 32000);
+    int fallback_threshold = 32000;
+    if (auto_threshold > 0) {
+        // Ambiguous 400s from OpenAI-compatible gateways often hide the real
+        // context limit. Do not trust an optimistic catalog/config window here:
+        // if the request is already above a 32k-class size, rescue is safer
+        // than replaying the same oversized history forever.
+        fallback_threshold = std::min(auto_threshold, fallback_threshold);
+    } else if (context_window > 0) {
+        fallback_threshold = std::min(context_window, fallback_threshold);
+    }
     return estimated_request_tokens > fallback_threshold;
 }
 

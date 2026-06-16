@@ -209,6 +209,43 @@ TEST(OpenAiProviderErrorRecovery, Http200SseErrorPayloadWithEmptyChoicesIsPrinte
     EXPECT_EQ(count_events(events, StreamEventType::Done), 0);
 }
 
+TEST(OpenAiProviderErrorRecovery, SseKeepaliveCommentsDoNotTriggerRetry) {
+    std::atomic<int> calls{0};
+    LocalHttpServer server([&](httplib::Server& s) {
+        s.Post("/chat/completions", [&](const httplib::Request&, httplib::Response& res) {
+            ++calls;
+            res.status = 200;
+            res.set_chunked_content_provider(
+                "text/event-stream",
+                [step = 0](size_t, httplib::DataSink& sink) mutable {
+                    if (step < 5) {
+                        ++step;
+                        const std::string keepalive = ": PROCESSING\n\n";
+                        sink.write(keepalive.data(), keepalive.size());
+                        std::this_thread::sleep_for(50ms);
+                        return true;
+                    }
+                    const std::string done =
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n"
+                        "data: [DONE]\n\n";
+                    sink.write(done.data(), done.size());
+                    sink.done();
+                    return false;
+                });
+        });
+    });
+
+    OpenAiCompatProvider provider(
+        "http://127.0.0.1:" + std::to_string(server.port), "", "test-model", 100);
+
+    const auto events = collect_events(provider);
+    EXPECT_EQ(calls.load(), 1);
+    EXPECT_EQ(last_error_event(events), nullptr);
+    EXPECT_EQ(count_events(events, StreamEventType::Retry), 0);
+    EXPECT_EQ(count_events(events, StreamEventType::Done), 1);
+    EXPECT_EQ(count_events(events, StreamEventType::Delta), 1);
+}
+
 TEST(OpenAiProviderErrorRecovery, Http200PartialSseThenTransportTimeoutRetriesUntilSuccess) {
     std::atomic<int> calls{0};
     LocalHttpServer server([&](httplib::Server& s) {
@@ -255,7 +292,7 @@ TEST(OpenAiProviderErrorRecovery, TimeoutBeforeAnySseDataRetriesUntilSuccess) {
             const int call = ++calls;
             res.status = 200;
             if (call < 3) {
-                std::this_thread::sleep_for(300ms);
+                std::this_thread::sleep_for(1500ms);
                 res.set_content("data: [DONE]\n\n", "text/event-stream");
                 return;
             }
@@ -267,7 +304,7 @@ TEST(OpenAiProviderErrorRecovery, TimeoutBeforeAnySseDataRetriesUntilSuccess) {
     });
 
     OpenAiCompatProvider provider(
-        "http://127.0.0.1:" + std::to_string(server.port), "", "test-model", 100);
+        "http://127.0.0.1:" + std::to_string(server.port), "", "test-model", 200);
 
     const auto events = collect_events(provider);
     EXPECT_EQ(calls.load(), 3);
@@ -281,14 +318,14 @@ TEST(OpenAiProviderErrorRecovery, RepeatedTimeoutRetryStopsOnUserAbort) {
     LocalHttpServer server([&](httplib::Server& s) {
         s.Post("/chat/completions", [&](const httplib::Request&, httplib::Response& res) {
             ++calls;
-            std::this_thread::sleep_for(300ms);
+            std::this_thread::sleep_for(1500ms);
             res.status = 200;
             res.set_content("data: [DONE]\n\n", "text/event-stream");
         });
     });
 
     OpenAiCompatProvider provider(
-        "http://127.0.0.1:" + std::to_string(server.port), "", "test-model", 100);
+        "http://127.0.0.1:" + std::to_string(server.port), "", "test-model", 200);
 
     std::atomic<bool> abort_flag{false};
     std::atomic<int> retry_events{0};

@@ -16,7 +16,11 @@ std::string serialize_message(const ChatMessage& msg) {
     }
 
     if (!msg.tool_calls.is_null() && !msg.tool_calls.empty()) {
-        j["tool_calls"] = msg.tool_calls;
+        if (msg.tool_calls.is_object()) {
+            j["tool_calls"] = nlohmann::json::array({msg.tool_calls});
+        } else if (msg.tool_calls.is_array()) {
+            j["tool_calls"] = msg.tool_calls;
+        }
     }
 
     if (!msg.tool_call_id.empty()) {
@@ -70,8 +74,12 @@ ChatMessage deserialize_message(const std::string& line) {
         msg.content_parts = j["content_parts"];
     }
 
-    if (j.contains("tool_calls") && j["tool_calls"].is_array()) {
-        msg.tool_calls = j["tool_calls"];
+    if (j.contains("tool_calls")) {
+        if (j["tool_calls"].is_array()) {
+            msg.tool_calls = j["tool_calls"];
+        } else if (j["tool_calls"].is_object()) {
+            msg.tool_calls = nlohmann::json::array({j["tool_calls"]});
+        }
     }
 
     if (j.contains("tool_call_id") && j["tool_call_id"].is_string()) {

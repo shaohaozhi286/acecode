@@ -42,6 +42,12 @@ constexpr int kStreamRetryBaseDelayMs = 100;
 // 有足够空间避免雪崩式重试。指数退避总是 ≤ 这个上限。
 constexpr int kStreamRetryMaxDelayMs = 15000;
 constexpr int kStreamRetrySleepSliceMs = 50;
+constexpr int kStreamConnectTimeoutCapMs = 15000;
+
+std::int64_t steady_now_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 
 std::string ascii_lower(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
@@ -149,11 +155,18 @@ std::string normalize_tool_call_arguments_for_request(
 nlohmann::json normalize_tool_calls_for_request(const nlohmann::json& tool_calls,
                                                 int& repaired_count,
                                                 int& dropped_malformed_count) {
-    if (!tool_calls.is_array()) return nlohmann::json::array();
+    nlohmann::json tool_call_items;
+    if (tool_calls.is_array()) {
+        tool_call_items = tool_calls;
+    } else if (tool_calls.is_object()) {
+        tool_call_items = nlohmann::json::array({tool_calls});
+    } else {
+        return nlohmann::json::array();
+    }
 
     nlohmann::json out = nlohmann::json::array();
     std::unordered_set<std::string> emitted_ids;
-    for (const auto& raw_tc : tool_calls) {
+    for (const auto& raw_tc : tool_call_items) {
         if (!raw_tc.is_object()) {
             ++dropped_malformed_count;
             LOG_WARN("build_request_body: dropped malformed tool_call (not object)");
@@ -1115,13 +1128,33 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
         headers[k] = v;
     }
 
+    std::atomic<std::int64_t> last_stream_activity_ms{steady_now_ms()};
+    std::atomic<bool> stream_idle_timed_out{false};
+    const int stream_idle_timeout_ms = (std::max)(1, stream_timeout_ms_);
+
     // libcurl invokes this ~1 Hz regardless of whether bytes are flowing, so it
     // is the only path that can cancel during a model's silent reasoning phase.
+    // Do not use cpr::Timeout for streaming: that is a total request duration
+    // cap and will kill healthy SSE streams that send keepalive comments such
+    // as ": PROCESSING", causing a replay while the server may still be
+    // working on the original request.
     auto progress_cb = cpr::ProgressCallback{
-        [abort_flag](cpr::cpr_off_t /*dl_total*/, cpr::cpr_off_t /*dl_now*/,
-                     cpr::cpr_off_t /*ul_total*/, cpr::cpr_off_t /*ul_now*/,
-                     intptr_t /*userdata*/) -> bool {
-            return !(abort_flag && abort_flag->load());
+        [abort_flag, &last_stream_activity_ms, &stream_idle_timed_out,
+         stream_idle_timeout_ms](cpr::cpr_off_t /*dl_total*/,
+                                 cpr::cpr_off_t /*dl_now*/,
+                                 cpr::cpr_off_t /*ul_total*/,
+                                 cpr::cpr_off_t /*ul_now*/,
+                                 intptr_t /*userdata*/) -> bool {
+            if (abort_flag && abort_flag->load()) {
+                return false;
+            }
+            const std::int64_t idle_ms =
+                steady_now_ms() - last_stream_activity_ms.load();
+            if (idle_ms >= stream_idle_timeout_ms) {
+                stream_idle_timed_out.store(true);
+                return false;
+            }
+            return true;
         }
     };
 
@@ -1137,6 +1170,9 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
     last_accumulated.finish_reason = "stop";
 
     for (int attempt = 1; ; ++attempt) {
+        last_stream_activity_ms.store(steady_now_ms());
+        stream_idle_timed_out.store(false);
+
         ChatResponse accumulated;
         accumulated.finish_reason = "stop";
         std::string sse_buffer;
@@ -1205,6 +1241,9 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
                 return false; // cancel request
             }
 
+            if (!data.empty()) {
+                last_stream_activity_ms.store(steady_now_ms());
+            }
             raw_body_capture.append(data.data(), data.size());
             sse_buffer += std::string(data);
 
@@ -1388,10 +1427,11 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
             cpr::Url{url},
             headers,
             cpr::Body{body.dump()},
+            cpr::ConnectTimeout{
+                (std::min)(stream_idle_timeout_ms, kStreamConnectTimeoutCapMs)},
             network::build_ssl_options(proxy_opts),
             proxy_opts.proxies,
             proxy_opts.auth,
-            cpr::Timeout{stream_timeout_ms_},
             write_cb,
             progress_cb
         );
@@ -1419,8 +1459,10 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
 
         ProviderErrorInfo error_info;
         const std::string request_id = extract_request_id(r.header);
+        const bool idle_timeout = stream_idle_timed_out.load();
         const bool transport_failed = static_cast<bool>(r.error);
-        const ProviderErrorKind transport_kind = classify_cpr_error(r.error);
+        const ProviderErrorKind transport_kind =
+            idle_timeout ? ProviderErrorKind::Timeout : classify_cpr_error(r.error);
         if (saw_payload_error) {
             const ProviderErrorKind kind = payload_error_status_code > 0
                 ? ProviderErrorKind::Http
@@ -1437,9 +1479,17 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
                     : payload_error_message,
                 payload_error_status_code > 0 &&
                     is_retryable_http_status(payload_error_status_code, payload_error_body));
-        } else if (transport_failed && transport_kind == ProviderErrorKind::Timeout) {
+        } else if (idle_timeout ||
+                   (transport_failed && transport_kind == ProviderErrorKind::Timeout)) {
             const int status_code = r.status_code == 0 ? 0 : static_cast<int>(r.status_code);
-            LOG_ERROR("SSE connection timed out: " + r.error.message +
+            const std::string timeout_message = idle_timeout
+                ? "stream idle timeout after " +
+                    std::to_string(stream_idle_timeout_ms) +
+                    " ms without data"
+                : (r.error.message.empty()
+                    ? std::string("request timed out")
+                    : r.error.message);
+            LOG_ERROR("SSE connection timed out: " + timeout_message +
                       " body=" + log_truncate(raw_body_capture, 2000));
             error_info = make_provider_error(
                 ProviderErrorKind::Timeout,
@@ -1448,7 +1498,7 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
                 model_,
                 request_id,
                 raw_body_capture,
-                r.error.message.empty() ? std::string("request timed out") : r.error.message,
+                timeout_message,
                 true);
         } else if (r.status_code != 0 && r.status_code != 200) {
             const std::string err_body = r.text.empty() ? raw_body_capture : r.text;

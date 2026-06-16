@@ -544,6 +544,32 @@ TEST(OpenAiProviderReasoningTest, ValidPersistedToolArgumentsStayUnchanged) {
     EXPECT_EQ(args.get<std::string>(), raw_args);
 }
 
+TEST(OpenAiProviderReasoningTest, LegacySingleToolCallObjectIsWrappedForRequest) {
+    TestableProvider provider("http://example.invalid", "", "test-model");
+
+    ChatMessage assistant_msg;
+    assistant_msg.role = "assistant";
+    assistant_msg.tool_calls = nlohmann::json{
+        {"id", "call_legacy"},
+        {"type", "function"},
+        {"function", {{"name", "file_read"}, {"arguments", "{}"}}}
+    };
+
+    ChatMessage tool_msg;
+    tool_msg.role = "tool";
+    tool_msg.content = "file contents";
+    tool_msg.tool_call_id = "call_legacy";
+
+    auto body = provider.build_request_body({assistant_msg, tool_msg}, {}, false);
+    const auto& msgs = body["messages"];
+    ASSERT_EQ(msgs.size(), 2u);
+    ASSERT_TRUE(msgs[0].contains("tool_calls"));
+    ASSERT_TRUE(msgs[0]["tool_calls"].is_array());
+    ASSERT_EQ(msgs[0]["tool_calls"].size(), 1u);
+    EXPECT_EQ(msgs[0]["tool_calls"][0]["id"].get<std::string>(), "call_legacy");
+    EXPECT_EQ(msgs[1].value("tool_call_id", std::string{}), "call_legacy");
+}
+
 // 用例:ToolExecutor 提供确定性工具顺序,OpenAI-compatible request body
 // 通过 tools array 发送 schema,不依赖 system prompt 里的重复 schema 文本。
 TEST(OpenAiProviderReasoningTest, BuildRequestBodyUsesDeterministicToolsArray) {

@@ -153,6 +153,24 @@ TEST(SessionSerializer, AssistantWithToolCalls) {
     EXPECT_EQ(out.tool_calls[0]["function"]["arguments"], "{\"command\":\"ls\"}");
 }
 
+TEST(SessionSerializer, LegacySingleToolCallObjectIsNormalizedToArray) {
+    std::string legacy_line =
+        R"({"role":"assistant","content":"\n","tool_calls":{"id":"call_legacy","type":"function","function":{"name":"file_read","arguments":"{\"file_path\":\"a.txt\"}"}}})";
+
+    ChatMessage out = deserialize_message(legacy_line);
+
+    ASSERT_TRUE(out.tool_calls.is_array());
+    ASSERT_EQ(out.tool_calls.size(), 1u);
+    EXPECT_EQ(out.tool_calls[0]["id"], "call_legacy");
+    EXPECT_EQ(out.tool_calls[0]["function"]["name"], "file_read");
+
+    auto normalized_line = serialize_message(out);
+    auto normalized = nlohmann::json::parse(normalized_line);
+    ASSERT_TRUE(normalized["tool_calls"].is_array());
+    ASSERT_EQ(normalized["tool_calls"].size(), 1u);
+    EXPECT_EQ(normalized["tool_calls"][0]["id"], "call_legacy");
+}
+
 // 场景:工具结果消息(role=tool + tool_call_id)roundtrip,tool_call_id
 // 必须被保留,否则后续 LLM 请求无法把结果关联回对应的 tool_call。
 TEST(SessionSerializer, ToolResultRoundtrip) {
