@@ -147,19 +147,63 @@ std::string normalize_tool_call_arguments_for_request(
 }
 
 nlohmann::json normalize_tool_calls_for_request(const nlohmann::json& tool_calls,
-                                                int& repaired_count) {
-    if (!tool_calls.is_array()) return tool_calls;
+                                                int& repaired_count,
+                                                int& dropped_malformed_count) {
+    if (!tool_calls.is_array()) return nlohmann::json::array();
 
-    nlohmann::json out = tool_calls;
-    for (auto& tc : out) {
-        if (!tc.is_object() || !tc.contains("function") ||
-            !tc["function"].is_object()) {
+    nlohmann::json out = nlohmann::json::array();
+    std::unordered_set<std::string> emitted_ids;
+    for (const auto& raw_tc : tool_calls) {
+        if (!raw_tc.is_object()) {
+            ++dropped_malformed_count;
+            LOG_WARN("build_request_body: dropped malformed tool_call (not object)");
             continue;
         }
 
+        std::string tool_call_id;
+        if (raw_tc.contains("id") && raw_tc["id"].is_string()) {
+            tool_call_id = raw_tc["id"].get<std::string>();
+        }
+        if (tool_call_id.empty()) {
+            ++dropped_malformed_count;
+            LOG_WARN("build_request_body: dropped malformed tool_call with empty id");
+            continue;
+        }
+        if (emitted_ids.count(tool_call_id)) {
+            ++dropped_malformed_count;
+            LOG_WARN("build_request_body: dropped duplicate tool_call id='" +
+                     tool_call_id + "'");
+            continue;
+        }
+
+        if (!raw_tc.contains("function") || !raw_tc["function"].is_object()) {
+            ++dropped_malformed_count;
+            LOG_WARN("build_request_body: dropped malformed tool_call without function "
+                     "id='" + tool_call_id + "'");
+            continue;
+        }
+
+        nlohmann::json tc = raw_tc;
+        if (!tc.contains("type") || !tc["type"].is_string() ||
+            tc["type"].get<std::string>().empty()) {
+            tc["type"] = "function";
+            ++repaired_count;
+            LOG_WARN("build_request_body: inserted missing tool_call type=function "
+                     "id='" + tool_call_id + "'");
+        }
+
         auto& fn = tc["function"];
-        const std::string tool_name = fn.value("name", std::string{});
-        const std::string tool_call_id = tc.value("id", std::string{});
+        std::string tool_name;
+        if (fn.contains("name") && fn["name"].is_string()) {
+            tool_name = fn["name"].get<std::string>();
+        }
+        if (tool_name.empty()) {
+            ++dropped_malformed_count;
+            LOG_WARN("build_request_body: dropped malformed tool_call without function.name "
+                     "id='" + tool_call_id + "'");
+            continue;
+        }
+
         if (fn.contains("arguments") && fn["arguments"].is_string()) {
             fn["arguments"] = normalize_tool_call_arguments_for_request(
                 fn["arguments"].get<std::string>(),
@@ -172,8 +216,83 @@ nlohmann::json normalize_tool_calls_for_request(const nlohmann::json& tool_calls
                      "id='" + tool_call_id + "' tool='" + tool_name + "'");
             fn["arguments"] = "{}";
         }
+        out.push_back(std::move(tc));
+        emitted_ids.insert(tool_call_id);
     }
     return out;
+}
+
+std::string system_message_content_for_request(const nlohmann::json& message) {
+    if (!message.is_object() || !message.contains("content")) return {};
+
+    const auto& content = message["content"];
+    if (content.is_null()) return {};
+    if (content.is_string()) return content.get<std::string>();
+    if (!content.is_array()) return content.dump();
+
+    std::ostringstream oss;
+    bool first = true;
+    for (const auto& part : content) {
+        std::string text;
+        if (part.is_object() && part.value("type", std::string{}) == "text" &&
+            part.contains("text") && part["text"].is_string()) {
+            text = part["text"].get<std::string>();
+        } else if (part.is_string()) {
+            text = part.get<std::string>();
+        } else if (!part.is_null()) {
+            text = part.dump();
+        }
+        if (text.empty()) continue;
+        if (!first) oss << "\n\n";
+        first = false;
+        oss << text;
+    }
+    return oss.str();
+}
+
+nlohmann::json coalesce_system_messages_at_front(const nlohmann::json& messages,
+                                                 int& moved_count,
+                                                 int& merged_count) {
+    std::vector<nlohmann::json> system_messages;
+    std::vector<nlohmann::json> non_system_messages;
+    bool seen_non_system = false;
+
+    for (const auto& message : messages) {
+        if (message.is_object() && message.value("role", std::string{}) == "system") {
+            if (seen_non_system) {
+                ++moved_count;
+            }
+            system_messages.push_back(message);
+            continue;
+        }
+
+        seen_non_system = true;
+        non_system_messages.push_back(message);
+    }
+
+    if (system_messages.empty() ||
+        (system_messages.size() == 1 && moved_count == 0)) {
+        return messages;
+    }
+
+    std::string combined_content;
+    for (const auto& system_message : system_messages) {
+        const std::string content = system_message_content_for_request(system_message);
+        if (content.empty()) continue;
+        if (!combined_content.empty()) combined_content += "\n\n";
+        combined_content += content;
+    }
+
+    nlohmann::json normalized = nlohmann::json::array();
+    normalized.push_back(nlohmann::json{
+        {"role", "system"},
+        {"content", combined_content},
+    });
+    for (auto& message : non_system_messages) {
+        normalized.push_back(std::move(message));
+    }
+    merged_count += static_cast<int>(system_messages.size()) - 1;
+    return normalized;
 }
 
 bool parse_json_body(const std::string& body,
@@ -663,6 +782,8 @@ nlohmann::json OpenAiCompatProvider::build_request_body(
     nlohmann::json msgs_json = nlohmann::json::array();
     int dropped_invalid_role = 0;
     int repaired_tool_arguments = 0;
+    int dropped_malformed_tool_calls = 0;
+    int dropped_empty_assistant_tool_messages = 0;
     for (const auto& msg : messages) {
         const bool valid_role = (msg.role == "system" || msg.role == "user" ||
                                  msg.role == "assistant" || msg.role == "tool");
@@ -677,14 +798,24 @@ nlohmann::json OpenAiCompatProvider::build_request_body(
         m["role"] = msg.role;
 
         if (msg.role == "assistant" && !msg.tool_calls.is_null() && !msg.tool_calls.empty()) {
-            // Assistant message with tool calls
-            if (!msg.content.empty()) {
-                m["content"] = msg.content;
+            nlohmann::json normalized_tool_calls = normalize_tool_calls_for_request(
+                msg.tool_calls, repaired_tool_arguments, dropped_malformed_tool_calls);
+            if (!normalized_tool_calls.empty()) {
+                // Assistant message with tool calls
+                if (!msg.content.empty()) {
+                    m["content"] = msg.content;
+                } else {
+                    m["content"] = nullptr;
+                }
+                m["tool_calls"] = std::move(normalized_tool_calls);
+            } else if (msg.content.empty() && msg.reasoning_content.empty()) {
+                ++dropped_empty_assistant_tool_messages;
+                LOG_WARN("build_request_body: dropped assistant message whose tool_calls "
+                         "were all malformed and whose content was empty");
+                continue;
             } else {
-                m["content"] = nullptr;
+                m["content"] = msg.content;
             }
-            m["tool_calls"] = normalize_tool_calls_for_request(
-                msg.tool_calls, repaired_tool_arguments);
         } else if (msg.role == "tool") {
             m["content"] = msg.content;
             m["tool_call_id"] = msg.tool_call_id;
@@ -710,7 +841,26 @@ nlohmann::json OpenAiCompatProvider::build_request_body(
     if (repaired_tool_arguments > 0) {
         LOG_WARN("build_request_body: repaired " +
                  std::to_string(repaired_tool_arguments) +
-                 " tool_call argument payload(s)");
+                 " tool_call payload field(s)");
+    }
+    if (dropped_malformed_tool_calls > 0) {
+        LOG_WARN("build_request_body: dropped " +
+                 std::to_string(dropped_malformed_tool_calls) +
+                 " malformed tool_call payload(s)");
+    }
+    if (dropped_empty_assistant_tool_messages > 0) {
+        LOG_WARN("build_request_body: dropped " +
+                 std::to_string(dropped_empty_assistant_tool_messages) +
+                 " empty assistant message(s) after tool_call normalization");
+    }
+    int moved_system_messages = 0;
+    int merged_system_messages = 0;
+    msgs_json = coalesce_system_messages_at_front(
+        msgs_json, moved_system_messages, merged_system_messages);
+    if (moved_system_messages > 0 || merged_system_messages > 0) {
+        LOG_WARN("build_request_body: normalized system message placement "
+                 "moved=" + std::to_string(moved_system_messages) +
+                 " merged=" + std::to_string(merged_system_messages));
     }
 
     // Orphan tool_call 防御:OpenAI / Chat Completions 严格要求
@@ -725,27 +875,56 @@ nlohmann::json OpenAiCompatProvider::build_request_body(
     // 一条供排查。msgs_ 内存与 session jsonl 都不动 — 只在序列化层补洞。
     nlohmann::json patched = nlohmann::json::array();
     int synthesized_stubs = 0;
+    int dropped_orphan_tool_messages = 0;
+    int dropped_unexpected_tool_messages = 0;
+    int dropped_duplicate_tool_messages = 0;
     {
         size_t n = msgs_json.size();
         for (size_t i = 0; i < n; ) {
             const auto& cur = msgs_json[i];
-            patched.push_back(cur);
             const std::string role = cur.value("role", std::string{});
+            if (role == "tool") {
+                ++dropped_orphan_tool_messages;
+                const std::string id = cur.value("tool_call_id", std::string{});
+                LOG_WARN("build_request_body: dropped standalone tool message "
+                         "tool_call_id='" + id + "'");
+                ++i;
+                continue;
+            }
+
+            patched.push_back(cur);
             if (role == "assistant" && cur.contains("tool_calls") &&
                 cur["tool_calls"].is_array() && !cur["tool_calls"].empty()) {
                 std::vector<std::string> needed_ids;
+                std::unordered_set<std::string> needed_set;
                 for (const auto& tc : cur["tool_calls"]) {
                     if (tc.contains("id") && tc["id"].is_string()) {
-                        needed_ids.push_back(tc["id"].get<std::string>());
+                        std::string id = tc["id"].get<std::string>();
+                        if (!id.empty() && !needed_set.count(id)) {
+                            needed_ids.push_back(id);
+                            needed_set.insert(id);
+                        }
                     }
                 }
                 std::unordered_set<std::string> seen_ids;
                 size_t j = i + 1;
                 while (j < n && msgs_json[j].value("role", std::string{}) == "tool") {
-                    patched.push_back(msgs_json[j]);
+                    std::string tool_call_id;
                     if (msgs_json[j].contains("tool_call_id") &&
                         msgs_json[j]["tool_call_id"].is_string()) {
-                        seen_ids.insert(msgs_json[j]["tool_call_id"].get<std::string>());
+                        tool_call_id = msgs_json[j]["tool_call_id"].get<std::string>();
+                    }
+                    if (tool_call_id.empty() || !needed_set.count(tool_call_id)) {
+                        ++dropped_unexpected_tool_messages;
+                        LOG_WARN("build_request_body: dropped unexpected tool message "
+                                 "tool_call_id='" + tool_call_id + "'");
+                    } else if (seen_ids.count(tool_call_id)) {
+                        ++dropped_duplicate_tool_messages;
+                        LOG_WARN("build_request_body: dropped duplicate tool message "
+                                 "tool_call_id='" + tool_call_id + "'");
+                    } else {
+                        patched.push_back(msgs_json[j]);
+                        seen_ids.insert(tool_call_id);
                     }
                     ++j;
                 }
@@ -771,6 +950,14 @@ nlohmann::json OpenAiCompatProvider::build_request_body(
         LOG_WARN("build_request_body: synthesized " + std::to_string(synthesized_stubs) +
                  " placeholder tool message(s) for orphan tool_call(s) "
                  "(likely from interrupted prior turns; session will continue)");
+    }
+    if (dropped_orphan_tool_messages > 0 ||
+        dropped_unexpected_tool_messages > 0 ||
+        dropped_duplicate_tool_messages > 0) {
+        LOG_WARN("build_request_body: dropped invalid tool message(s) "
+                 "standalone=" + std::to_string(dropped_orphan_tool_messages) +
+                 " unexpected=" + std::to_string(dropped_unexpected_tool_messages) +
+                 " duplicate=" + std::to_string(dropped_duplicate_tool_messages));
     }
     body["messages"] = patched;
 

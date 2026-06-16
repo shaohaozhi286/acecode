@@ -122,6 +122,7 @@
 #include "tui/sidebar_model.hpp"
 #include "tui/todo_checklist_view.hpp"
 #include "tui/input_history_navigation.hpp"
+#include "tui/ctrl_c_exit.hpp"
 #include "utils/base64.hpp"
 #include "utils/clipboard.hpp"
 #include "utils/drag_scroll.hpp"
@@ -1041,7 +1042,7 @@ static void prepare_windows_ctrl_c_handling_after_ftxui_install() {
         // FTXUI preserves ENABLE_PROCESSED_INPUT from the original console
         // mode. When it stays enabled, Windows turns Ctrl+C into a console
         // control event instead of a stdin byte, and FTXUI's SIGINT handler can
-        // exit before our Event::CtrlC branch gets a chance to show the prompt.
+        // exit before our Event::CtrlC branch can handle double-press exit.
         SetConsoleMode(stdin_handle, in_mode & ~ENABLE_PROCESSED_INPUT);
     }
 
@@ -2917,11 +2918,16 @@ static int run_interactive_app(const CliOptions& cli,
             bool needs_post = false;
             {
                 std::lock_guard<std::mutex> lk(state.mu);
+                const auto now = std::chrono::steady_clock::now();
                 if (state.status_line_clear_at.time_since_epoch().count() != 0 &&
-                    std::chrono::steady_clock::now() >= state.status_line_clear_at) {
+                    now >= state.status_line_clear_at) {
                     state.status_line = state.status_line_saved;
                     state.status_line_saved.clear();
                     state.status_line_clear_at = {};
+                    needs_post = true;
+                }
+                if (acecode::tui::expire_ctrl_c_exit_state(
+                        state.ctrl_c_armed, state.last_ctrl_c_time, now)) {
                     needs_post = true;
                 }
 
@@ -2930,7 +2936,6 @@ static int run_interactive_app(const CliOptions& cli,
                 // anim_thread 直接改 FTXUI selection_data_ 与 HandleSelection 撞车.
                 if (state.drag_phase == drag_scroll::Phase::ScrollingUp ||
                     state.drag_phase == drag_scroll::Phase::ScrollingDown) {
-                    auto now = std::chrono::steady_clock::now();
                     if (drag_scroll::should_tick(now, state.last_drag_scroll_at,
                                                   std::chrono::milliseconds(60))) {
                         int dy = (state.drag_phase == drag_scroll::Phase::ScrollingUp) ? -1 : 1;
@@ -2992,10 +2997,20 @@ static int run_interactive_app(const CliOptions& cli,
         return render_wrapped_input_text(display_text, cursor);
     });
 
+    // Must be called with state.mu held.
+    auto cancel_ctrl_c_exit_locked = [&state]() {
+        acecode::tui::clear_ctrl_c_exit_state(
+            state.ctrl_c_armed, state.last_ctrl_c_time);
+    };
+
     // 把已归一化的 paste 文本插入到 state.input_cursor。短文本 inline，超阈值
     // 或多行折叠为 [Pasted text #N (+M lines)] 并把原文存到 pasted_texts。
     // 调用前必须持有 state.mu。
-    auto insert_pasted_text_at_cursor = [&state](const std::string& normalized) {
+    auto insert_pasted_text_at_cursor = [
+        &state,
+        &cancel_ctrl_c_exit_locked
+    ](const std::string& normalized) {
+        cancel_ctrl_c_exit_locked();
         if (state.input_cursor > state.input_text.size()) {
             state.input_cursor = state.input_text.size();
         }
@@ -3016,7 +3031,6 @@ static int run_interactive_app(const CliOptions& cli,
     auto can_accept_clipboard_paste_locked = [&state]() {
         return !state.ask_pending &&
                !state.confirm_pending &&
-               !state.exit_confirm_pending &&
                !state.rewind_picker_active &&
                !state.resume_picker_active &&
                !state.model_picker_open;
@@ -3073,7 +3087,8 @@ static int run_interactive_app(const CliOptions& cli,
         &screen,
         &session_manager,
         &working_dir,
-        &can_accept_clipboard_paste_locked
+        &can_accept_clipboard_paste_locked,
+        &cancel_ctrl_c_exit_locked
     ]() {
         {
             std::lock_guard<std::mutex> lk(state.mu);
@@ -3118,6 +3133,7 @@ static int run_interactive_app(const CliOptions& cli,
                 screen.PostEvent(Event::Custom);
                 return true;
             }
+            cancel_ctrl_c_exit_locked();
             state.pending_attachments.push_back(attachment_to_json(*record));
             set_transient_status_line_locked(
                 state,
@@ -3128,7 +3144,7 @@ static int run_interactive_app(const CliOptions& cli,
     };
 
     // Wrap with CatchEvent to handle all keyboard input
-    auto input_with_esc = CatchEvent(input_renderer, [&state, &screen, &clamp_chat_focus, &chat_viewport_rows, &sync_chat_line_counts_from_layout, &auth_done, &cmd_registry, &agent_loop, &provider_slot, &provider_accessor, &config, &token_tracker, &permissions, &session_manager, &scroll_chat_by_lines, &chat_box, &scrollbar_box, &ask_scrollbar_box, &ask_overlay_box, &message_line_counts, &mcp_manager, &tools, &skill_registry, &memory_registry, &working_dir, &insert_pasted_text_at_cursor, &paste_system_clipboard_text, &paste_system_clipboard_image](Event event) {
+    auto input_with_esc = CatchEvent(input_renderer, [&state, &screen, &clamp_chat_focus, &chat_viewport_rows, &sync_chat_line_counts_from_layout, &auth_done, &cmd_registry, &agent_loop, &provider_slot, &provider_accessor, &config, &token_tracker, &permissions, &session_manager, &scroll_chat_by_lines, &chat_box, &scrollbar_box, &ask_scrollbar_box, &ask_overlay_box, &message_line_counts, &mcp_manager, &tools, &skill_registry, &memory_registry, &working_dir, &insert_pasted_text_at_cursor, &paste_system_clipboard_text, &paste_system_clipboard_image, &cancel_ctrl_c_exit_locked](Event event) {
 #if ACECODE_TUI_INPUT_TRACE
         if (event != Event::Custom &&
             !event.is_cursor_position() &&
@@ -3139,7 +3155,7 @@ static int run_interactive_app(const CliOptions& cli,
                 state_snapshot =
                     " ask=" + std::string(state.ask_pending ? "1" : "0") +
                     " confirm=" + std::string(state.confirm_pending ? "1" : "0") +
-                    " exit_confirm=" + std::string(state.exit_confirm_pending ? "1" : "0") +
+                    " ctrl_c_armed=" + std::string(state.ctrl_c_armed ? "1" : "0") +
                     " resume=" + std::string(state.resume_picker_active ? "1" : "0") +
                     " model=" + std::string(state.model_picker_open ? "1" : "0") +
                     " waiting=" + std::string(state.is_waiting ? "1" : "0") +
@@ -3175,6 +3191,14 @@ static int run_interactive_app(const CliOptions& cli,
                 screen.ShiftSelection(0, dy);
             }
         }
+        if (event != Event::CtrlC &&
+            event != Event::Custom &&
+            !event.is_mouse() &&
+            !event.is_cursor_position() &&
+            !event.is_cursor_shape()) {
+            std::lock_guard<std::mutex> lk(state.mu);
+            cancel_ctrl_c_exit_locked();
+        }
         // 多行粘贴折叠（fix-multiline-paste-input change）：把所有事件先喂进
         // bracketed paste 状态机。begin marker 进入 in-paste，期间所有事件
         // （含 Return / Tab / 字符 / 内嵌 CSI bytes）都聚合到 buffer 而不下发到
@@ -3203,10 +3227,12 @@ static int run_interactive_app(const CliOptions& cli,
         }
         if (event == Event::CtrlC) {
             // If an operation is active, Ctrl+C behaves like Escape: cancel the
-            // current work instead of entering the exit-confirm prompt.
+            // current work instead of arming the double-press exit shortcut.
+            bool should_exit = false;
             {
                 std::lock_guard<std::mutex> lk(state.mu);
                 if (state.is_compacting) {
+                    cancel_ctrl_c_exit_locked();
                     state.compact_abort_requested.store(true);
                     state.conversation.push_back({"system", "Cancelling compaction...", false});
                     state.chat_follow_tail = true;
@@ -3216,50 +3242,28 @@ static int run_interactive_app(const CliOptions& cli,
                 }
                 if (state.ask_pending || state.confirm_pending ||
                     state.is_waiting || state.tool_running) {
+                    cancel_ctrl_c_exit_locked();
                     screen.PostEvent(Event::Escape);
                     return true;
                 }
-                // 已经在确认态再按一次 Ctrl+C —— 不视为确认,保持等用户按 y。
-                if (!state.exit_confirm_pending) {
-                    state.exit_confirm_pending = true;
+                const auto action = acecode::tui::record_ctrl_c_exit_press(
+                    state.ctrl_c_armed,
+                    state.last_ctrl_c_time,
+                    std::chrono::steady_clock::now());
+                if (action == acecode::tui::CtrlCExitAction::Exit) {
+                    should_exit = true;
+                } else {
                     if (acecode::tui::clear_current_input_for_history_restore(state)) {
                         refresh_slash_dropdown(state, cmd_registry);
                     }
                 }
             }
-            screen.PostEvent(Event::Custom);
-            return true;
-        }
-
-        // Ctrl+C 退出确认 overlay:state.exit_confirm_pending=true 时拦截
-        // 字符键 / Esc / Enter,'y'/'Y' 退出,其它都视为取消。鼠标 / resize
-        // / custom 事件不拦截,否则 UI 卡死。Ctrl+C 已在上面单独处理。
-        if (state.exit_confirm_pending) {
-            const bool is_char = event.is_character();
-            const bool is_cancel = (event == Event::Escape || event == Event::Return);
-            if (is_char || is_cancel) {
-                bool yes = false;
-                if (is_char) {
-                    const std::string& c = event.character();
-                    yes = (c == "y" || c == "Y");
-                }
-                {
-                    std::lock_guard<std::mutex> lk(state.mu);
-                    state.exit_confirm_pending = false;
-                    if (!yes) {
-                        state.conversation.push_back({"system", "Exit cancelled.", false});
-                        state.chat_follow_tail = true;
-                        clamp_chat_focus();
-                    }
-                }
-                if (yes) {
-                    screen.Exit();
-                } else {
-                    screen.PostEvent(Event::Custom);
-                }
-                return true;
+            if (should_exit) {
+                screen.Exit();
+            } else {
+                screen.PostEvent(Event::Custom);
             }
-            // 非字符且非 Esc/Enter:不拦截(让鼠标 / 方向键等正常处理)。
+            return true;
         }
 
         // AskUserQuestion overlay guard:active 时抢占键盘,所有非导航键被吞掉,
@@ -4515,12 +4519,14 @@ static int run_interactive_app(const CliOptions& cli,
             // over `is_waiting` abort so typing Esc in shell mode never fires
             // an unintended cancel on a pending agent turn.
             if (state.input_mode == InputMode::Shell) {
+                cancel_ctrl_c_exit_locked();
                 state.input_mode = InputMode::Normal;
                 state.input_text.clear(); state.pasted_texts.clear();
                 state.input_cursor = 0;
                 return true;
             }
             if (!state.pending_attachments.empty() && state.input_text.empty()) {
+                cancel_ctrl_c_exit_locked();
                 state.pending_attachments.clear();
                 set_transient_status_line_locked(state, "Cleared pending attachments");
                 screen.PostEvent(Event::Custom);
@@ -6095,17 +6101,7 @@ static int run_interactive_app(const CliOptions& cli,
             confirm_overlay_element = vbox(std::move(rows)) | border | color(tui::theme().ui.accent);
         }
 
-        if (state.exit_confirm_pending) {
-            // 优先级最高:Ctrl+C 退出确认 overlay 可在任何其他状态(ask /
-            // confirm / 普通输入)上叠加显示。事件拦截分支也放在最早。
-            prompt_line = hbox({
-                text(" Exit acecode? ") | bold | color(tui::theme().ui.accent),
-                text("y") | bold | color(tui::theme().semantic.success),
-                text(" / ") | color(tui::theme().semantic.warning),
-                text("N") | bold | color(tui::theme().semantic.error),
-                text(" (any other key cancels)") | dim | color(tui::theme().ui.text_dim),
-            });
-        } else if (state.ask_pending) {
+        if (state.ask_pending) {
             // ask active 时:把输入框留给 Other 自定义文本态使用;其它状态下
             // 显示静态提示,吞掉字符输入(CatchEvent 不透传非导航键)。
             if (state.ask_other_input_active) {
@@ -6169,7 +6165,13 @@ static int run_interactive_app(const CliOptions& cli,
             };
 
             Elements status_parts;
-            if (dangerous_mode) {
+            const bool show_ctrl_c_exit_hint =
+                state.ctrl_c_armed && !state.is_waiting && !state.tool_running;
+            if (show_ctrl_c_exit_hint) {
+                status_parts.push_back(
+                    text("  Press ctrl+c again to exit  ") | dim |
+                    color(tui::theme().ui.text_dim));
+            } else if (dangerous_mode) {
                 status_parts.push_back(
                     text("  [YOLO]  ") | bold | color(tui::theme().ui.accent));
             } else if (state.is_waiting || state.tool_running) {
@@ -6207,6 +6209,16 @@ static int run_interactive_app(const CliOptions& cli,
             status_parts.push_back(load_el);
             status_parts.push_back(text(perm_mode_str) | dim | color(tui::theme().ui.text_dim));
             bottom_bar = hbox(std::move(status_parts));
+        } else if (state.ctrl_c_armed && !state.is_waiting && !state.tool_running) {
+            bottom_bar = hbox({
+                text("  Press ctrl+c again to exit") | dim | color(tui::theme().ui.text_dim),
+                filler(),
+                tool_timer_el,
+                goal_el,
+                token_el,
+                load_el,
+                text(perm_mode_str + "  ") | dim | color(tui::theme().ui.text_dim),
+            });
         } else if (dangerous_mode) {
             bottom_bar = hbox({
                 text("  [YOLO]") | bold | color(tui::theme().ui.accent),

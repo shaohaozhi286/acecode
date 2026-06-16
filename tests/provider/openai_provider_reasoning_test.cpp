@@ -308,6 +308,13 @@ TEST(OpenAiProviderReasoningTest, BuildRequestBodyOmitsEmptyReasoning) {
     ChatMessage assistant_msg;
     assistant_msg.role = "assistant";
     assistant_msg.content = "plain reply";
+    assistant_msg.tool_calls = nlohmann::json::array({
+        nlohmann::json{
+            {"id", "call_1"},
+            {"type", "function"},
+            {"function", {{"name", "file_read"}, {"arguments", "{}"}}}
+        }
+    });
     // reasoning_content 默认为 ""
 
     ChatMessage tool_msg;
@@ -626,6 +633,251 @@ TEST(OpenAiProviderReasoningTest, PartialOrphanInParallelToolCalls) {
     EXPECT_EQ(msgs[2].value("tool_call_id", std::string{}), "call_b");
     // call_b 的 content 应该是 stub(非空)。
     EXPECT_FALSE(msgs[2].value("content", std::string{}).empty());
+}
+
+// 用例 10:历史里存在游离的 role=tool 消息。
+//
+// 这类消息可能来自旧版本伪角色持久化、手工拼接 JSONL、或截断恢复。OpenAI
+// Chat Completions 要求 tool 消息必须紧跟在带同 id tool_calls 的 assistant
+// 后面；游离 tool 若原样发出会让后续每次 user 继续都 400。
+TEST(OpenAiProviderReasoningTest, StandaloneToolMessageIsDropped) {
+    TestableProvider provider("http://example.invalid", "", "test-model");
+
+    ChatMessage u1;
+    u1.role = "user";
+    u1.content = "first";
+
+    ChatMessage tool_msg;
+    tool_msg.role = "tool";
+    tool_msg.content = "stale result";
+    tool_msg.tool_call_id = "call_stale";
+
+    ChatMessage u2;
+    u2.role = "user";
+    u2.content = "continue";
+
+    auto body = provider.build_request_body({u1, tool_msg, u2}, {}, false);
+    const auto& msgs = body["messages"];
+    ASSERT_EQ(msgs.size(), 2u);
+    EXPECT_EQ(msgs[0].value("role", std::string{}), "user");
+    EXPECT_EQ(msgs[0]["content"].get<std::string>(), "first");
+    EXPECT_EQ(msgs[1].value("role", std::string{}), "user");
+    EXPECT_EQ(msgs[1]["content"].get<std::string>(), "continue");
+}
+
+// 用例 11:assistant 后的 tool block 含有未被请求的额外 tool_call_id。
+//
+// 修复前出口会把连续 tool 消息全部保留,即使 id 不在前一条 assistant.tool_calls
+// 中。严格后端会把这条 extra tool 当成非法历史并返回 400。
+TEST(OpenAiProviderReasoningTest, UnexpectedToolResultAfterAssistantIsDropped) {
+    TestableProvider provider("http://example.invalid", "", "test-model");
+
+    ChatMessage assistant_msg;
+    assistant_msg.role = "assistant";
+    assistant_msg.tool_calls = nlohmann::json::array({
+        nlohmann::json{
+            {"id", "call_expected"},
+            {"type", "function"},
+            {"function", {{"name", "grep"}, {"arguments", "{}"}}}
+        }
+    });
+
+    ChatMessage expected_tool;
+    expected_tool.role = "tool";
+    expected_tool.content = "expected result";
+    expected_tool.tool_call_id = "call_expected";
+
+    ChatMessage extra_tool;
+    extra_tool.role = "tool";
+    extra_tool.content = "extra result";
+    extra_tool.tool_call_id = "call_extra";
+
+    auto body = provider.build_request_body(
+        {assistant_msg, expected_tool, extra_tool}, {}, false);
+    const auto& msgs = body["messages"];
+    ASSERT_EQ(msgs.size(), 2u);
+    EXPECT_EQ(msgs[0].value("role", std::string{}), "assistant");
+    EXPECT_EQ(msgs[1].value("role", std::string{}), "tool");
+    EXPECT_EQ(msgs[1].value("tool_call_id", std::string{}), "call_expected");
+    EXPECT_EQ(msgs[1]["content"].get<std::string>(), "expected result");
+}
+
+// 用例 12:同一个 tool_call_id 被重复写入两条 tool 结果。
+//
+// 请求出口保留第一条真实结果并丢弃后续重复项,避免一条 tool_call 被回答多次。
+TEST(OpenAiProviderReasoningTest, DuplicateToolResultKeepsFirstResult) {
+    TestableProvider provider("http://example.invalid", "", "test-model");
+
+    ChatMessage assistant_msg;
+    assistant_msg.role = "assistant";
+    assistant_msg.tool_calls = nlohmann::json::array({
+        nlohmann::json{
+            {"id", "call_dupe"},
+            {"type", "function"},
+            {"function", {{"name", "file_read"}, {"arguments", "{}"}}}
+        }
+    });
+
+    ChatMessage first_tool;
+    first_tool.role = "tool";
+    first_tool.content = "first result";
+    first_tool.tool_call_id = "call_dupe";
+
+    ChatMessage second_tool;
+    second_tool.role = "tool";
+    second_tool.content = "second result";
+    second_tool.tool_call_id = "call_dupe";
+
+    auto body = provider.build_request_body(
+        {assistant_msg, first_tool, second_tool}, {}, false);
+    const auto& msgs = body["messages"];
+    ASSERT_EQ(msgs.size(), 2u);
+    EXPECT_EQ(msgs[1].value("tool_call_id", std::string{}), "call_dupe");
+    EXPECT_EQ(msgs[1]["content"].get<std::string>(), "first result");
+}
+
+// 用例 13:assistant.tool_calls 数组里混入无 id 的坏条目。
+//
+// 坏条目无法在 Chat Completions 协议中被 tool 结果引用,必须在请求出口丢弃；
+// 同一数组里的健康 tool_call 仍应保留并正常匹配 tool result。
+TEST(OpenAiProviderReasoningTest, MalformedToolCallWithoutIdIsDropped) {
+    TestableProvider provider("http://example.invalid", "", "test-model");
+
+    ChatMessage assistant_msg;
+    assistant_msg.role = "assistant";
+    assistant_msg.tool_calls = nlohmann::json::array({
+        nlohmann::json{
+            {"type", "function"},
+            {"function", {{"name", "grep"}, {"arguments", "{}"}}}
+        },
+        nlohmann::json{
+            {"id", "call_valid"},
+            {"type", "function"},
+            {"function", {{"name", "glob"}, {"arguments", "{}"}}}
+        }
+    });
+
+    ChatMessage tool_msg;
+    tool_msg.role = "tool";
+    tool_msg.content = "valid result";
+    tool_msg.tool_call_id = "call_valid";
+
+    auto body = provider.build_request_body({assistant_msg, tool_msg}, {}, false);
+    const auto& msgs = body["messages"];
+    ASSERT_EQ(msgs.size(), 2u);
+    ASSERT_TRUE(msgs[0].contains("tool_calls"));
+    const auto& tool_calls = msgs[0]["tool_calls"];
+    ASSERT_EQ(tool_calls.size(), 1u);
+    EXPECT_EQ(tool_calls[0]["id"].get<std::string>(), "call_valid");
+    EXPECT_EQ(msgs[1].value("tool_call_id", std::string{}), "call_valid");
+    EXPECT_EQ(msgs[1]["content"].get<std::string>(), "valid result");
+}
+
+// 用例 14:assistant.tool_calls 数组里重复声明同一个 id。
+//
+// 重复 id 无法和 tool 结果形成一一对应关系；请求出口保留第一条声明并丢弃后续
+// 重复项，避免 provider 看到同一 tool_call_id 被声明多次。
+TEST(OpenAiProviderReasoningTest, DuplicateAssistantToolCallIdIsDropped) {
+    TestableProvider provider("http://example.invalid", "", "test-model");
+
+    ChatMessage assistant_msg;
+    assistant_msg.role = "assistant";
+    assistant_msg.tool_calls = nlohmann::json::array({
+        nlohmann::json{
+            {"id", "call_same"},
+            {"type", "function"},
+            {"function", {{"name", "grep"}, {"arguments", "{}"}}}
+        },
+        nlohmann::json{
+            {"id", "call_same"},
+            {"type", "function"},
+            {"function", {{"name", "glob"}, {"arguments", "{}"}}}
+        }
+    });
+
+    ChatMessage tool_msg;
+    tool_msg.role = "tool";
+    tool_msg.content = "first call result";
+    tool_msg.tool_call_id = "call_same";
+
+    auto body = provider.build_request_body({assistant_msg, tool_msg}, {}, false);
+    const auto& msgs = body["messages"];
+    ASSERT_EQ(msgs.size(), 2u);
+    ASSERT_TRUE(msgs[0].contains("tool_calls"));
+    const auto& tool_calls = msgs[0]["tool_calls"];
+    ASSERT_EQ(tool_calls.size(), 1u);
+    EXPECT_EQ(tool_calls[0]["id"].get<std::string>(), "call_same");
+    EXPECT_EQ(tool_calls[0]["function"]["name"].get<std::string>(), "grep");
+    EXPECT_EQ(msgs[1]["content"].get<std::string>(), "first call result");
+}
+
+TEST(OpenAiProviderReasoningTest, SystemMessagesAreCoalescedAtRequestStart) {
+    TestableProvider provider("http://example.invalid", "", "test-model");
+
+    ChatMessage static_system;
+    static_system.role = "system";
+    static_system.content = "static instructions";
+
+    ChatMessage session_context;
+    session_context.role = "user";
+    session_context.content = "session context";
+
+    ChatMessage compact_summary;
+    compact_summary.role = "system";
+    compact_summary.content = "compact summary";
+    compact_summary.is_compact_summary = true;
+
+    ChatMessage user_msg;
+    user_msg.role = "user";
+    user_msg.content = "continue";
+
+    auto body = provider.build_request_body(
+        {static_system, session_context, compact_summary, user_msg}, {}, false);
+    const auto& msgs = body["messages"];
+
+    ASSERT_EQ(msgs.size(), 3u);
+    ASSERT_EQ(msgs[0]["role"].get<std::string>(), "system");
+    const auto system_content = msgs[0]["content"].get<std::string>();
+    EXPECT_NE(system_content.find("static instructions"), std::string::npos);
+    EXPECT_NE(system_content.find("compact summary"), std::string::npos);
+    EXPECT_EQ(msgs[1]["role"].get<std::string>(), "user");
+    EXPECT_EQ(msgs[1]["content"].get<std::string>(), "session context");
+    EXPECT_EQ(msgs[2]["role"].get<std::string>(), "user");
+    EXPECT_EQ(msgs[2]["content"].get<std::string>(), "continue");
+}
+
+TEST(OpenAiProviderReasoningTest, SystemMessageBetweenAssistantAndToolKeepsToolResult) {
+    TestableProvider provider("http://example.invalid", "", "test-model");
+
+    ChatMessage assistant_msg;
+    assistant_msg.role = "assistant";
+    assistant_msg.tool_calls = nlohmann::json::array({
+        nlohmann::json{
+            {"id", "call_1"},
+            {"type", "function"},
+            {"function", {{"name", "file_read"}, {"arguments", "{}"}}}
+        }
+    });
+
+    ChatMessage injected_system;
+    injected_system.role = "system";
+    injected_system.content = "late system note";
+
+    ChatMessage tool_msg;
+    tool_msg.role = "tool";
+    tool_msg.content = "real output";
+    tool_msg.tool_call_id = "call_1";
+
+    auto body = provider.build_request_body(
+        {assistant_msg, injected_system, tool_msg}, {}, false);
+    const auto& msgs = body["messages"];
+
+    ASSERT_EQ(msgs.size(), 3u);
+    EXPECT_EQ(msgs[0]["role"].get<std::string>(), "system");
+    EXPECT_EQ(msgs[1]["role"].get<std::string>(), "assistant");
+    EXPECT_EQ(msgs[2]["role"].get<std::string>(), "tool");
+    EXPECT_EQ(msgs[2]["tool_call_id"].get<std::string>(), "call_1");
+    EXPECT_EQ(msgs[2]["content"].get<std::string>(), "real output");
 }
 
 TEST(OpenAiProviderReasoningTest, ImageContentPartSerializesAsDataUrl) {
