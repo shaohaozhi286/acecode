@@ -104,6 +104,15 @@ struct TuiState {
     std::string goal_status; // compact goal status chip
     std::vector<TodoItem> todos; // visible TodoWrite checklist
 
+    struct McpSidebarServer {
+        std::string name;
+        std::string state;
+        std::string transport;
+        std::string error;
+        size_t tool_count = 0;
+    };
+    std::vector<McpSidebarServer> mcp_sidebar_servers;
+
     // Input history for up/down navigation
     std::vector<std::string> input_history;
     int history_index = -1; // -1 = not browsing history; TUI helpers may use private sentinels

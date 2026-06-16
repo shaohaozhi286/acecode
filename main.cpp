@@ -60,6 +60,7 @@
 #include "tool/task_complete_tool.hpp"
 #include "tool/goal_tool.hpp"
 #include "tool/mcp_manager.hpp"
+#include "tool/mcp_startup_coordination.hpp"
 #include "tool/skills_tool.hpp"
 #include "tool/skill_view_tool.hpp"
 #include "tool/memory_read_tool.hpp"
@@ -374,6 +375,172 @@ static Element render_sidebar_change_row(
     });
 }
 
+static std::string mcp_state_label(McpServerState state) {
+    switch (state) {
+        case McpServerState::Starting:  return "starting";
+        case McpServerState::Connected: return "connected";
+        case McpServerState::Disabled:  return "disabled";
+        case McpServerState::Failed:    return "failed";
+        case McpServerState::Cancelled: return "cancelled";
+        case McpServerState::TimedOut:  return "timed_out";
+    }
+    return "unknown";
+}
+
+static Color mcp_sidebar_state_color(const std::string& state) {
+    if (state == "connected") return tui::theme().semantic.success;
+    if (state == "starting") return Color::White;
+    if (state == "failed" || state == "timed_out") return tui::theme().semantic.error;
+    if (state == "cancelled") return tui::theme().semantic.warning;
+    return tui::theme().ui.text_dim;
+}
+
+static bool mcp_sidebar_has_loading(
+    const std::vector<acecode::TuiState::McpSidebarServer>& servers) {
+    for (const auto& server : servers) {
+        if (server.state == "starting") return true;
+    }
+    return false;
+}
+
+static bool mcp_sidebar_has_loading(const acecode::TuiState& state) {
+    return mcp_sidebar_has_loading(state.mcp_sidebar_servers);
+}
+
+static Element render_white_shimmer_text(const std::string& label,
+                                         int anim_tick,
+                                         bool with_dots = true) {
+    std::vector<std::string> glyphs = ftxui::Utf8ToGlyphs(label);
+    const int total = static_cast<int>(glyphs.size());
+    const int wave_pos = std::max(0, anim_tick) % (total > 0 ? total + 2 : 8);
+
+    Elements parts;
+    for (int i = 0; i < total; ++i) {
+        int dist = i - wave_pos;
+        if (dist < 0) dist = -dist;
+        Color c;
+        if (dist == 0) {
+            c = Color::White;
+        } else if (dist == 1) {
+            c = Color::GrayLight;
+        } else if (dist == 2) {
+            c = Color::GrayDark;
+        } else {
+            c = tui::theme().ui.text_dim;
+        }
+        parts.push_back(text(glyphs[static_cast<std::size_t>(i)]) | color(c));
+    }
+
+    if (with_dots) {
+        const int dot_count = (std::max(0, anim_tick) % 3) + 1;
+        for (int i = 0; i < 3; ++i) {
+            parts.push_back(
+                text(".") |
+                color(i < dot_count ? Color::White : tui::theme().ui.text_dim));
+        }
+    }
+
+    return hbox(std::move(parts));
+}
+
+static std::string format_tool_count(size_t tool_count) {
+    return std::to_string(tool_count) + (tool_count == 1 ? " tool" : " tools");
+}
+
+static std::string uppercase_ascii(std::string text) {
+    for (char& c : text) {
+        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    }
+    return text;
+}
+
+static std::vector<acecode::TuiState::McpSidebarServer>
+build_mcp_sidebar_servers(const McpManager& manager) {
+    auto server_infos = manager.list_servers();
+    std::vector<acecode::TuiState::McpSidebarServer> out;
+    out.reserve(server_infos.size());
+    for (const auto& info : server_infos) {
+        acecode::TuiState::McpSidebarServer server;
+        server.name = info.name;
+        server.state = mcp_state_label(info.state);
+        server.transport = info.transport;
+        server.error = info.error;
+        server.tool_count = info.tool_count;
+        out.push_back(std::move(server));
+    }
+    return out;
+}
+
+static void set_mcp_sidebar_servers_locked(
+    acecode::TuiState& state,
+    std::vector<acecode::TuiState::McpSidebarServer> servers) {
+    state.mcp_sidebar_servers = std::move(servers);
+}
+
+static Element render_mcp_sidebar_section(
+    const std::vector<acecode::TuiState::McpSidebarServer>& servers,
+    int content_width,
+    int anim_tick) {
+    if (servers.empty()) {
+        return emptyElement();
+    }
+
+    Elements rows;
+    rows.push_back(text("MCP") | bold | color(tui::theme().ui.text_primary));
+
+    constexpr std::size_t kMaxServers = 8;
+    std::size_t shown_servers = 0;
+
+    for (const auto& server : servers) {
+        if (shown_servers >= kMaxServers) {
+            break;
+        }
+        ++shown_servers;
+
+        const Color state_color = mcp_sidebar_state_color(server.state);
+        const bool server_loading = server.state == "starting";
+        const bool server_connected = server.state == "connected";
+        const bool server_failed =
+            server.state == "failed" || server.state == "timed_out";
+        const std::string bullet = "\xE2\x80\xA2"; // bullet
+
+        Element status;
+        if (server_loading) {
+            status = render_white_shimmer_text("Loading", anim_tick);
+        } else if (server_connected) {
+            status = text("Connected (" + format_tool_count(server.tool_count) + ")") |
+                     color(tui::theme().ui.text_muted);
+        } else if (server_failed && !server.error.empty()) {
+            status = hbox({
+                text(uppercase_ascii(server.transport) + " error: ") |
+                    color(tui::theme().semantic.error),
+                paragraph(server.error) |
+                    color(tui::theme().ui.text_muted) | dim | flex,
+            });
+        } else {
+            status = text(server.state) | color(state_color) | dim;
+        }
+
+        const int name_width = std::max(1, content_width / 2);
+        rows.push_back(hbox({
+            text("  " + bullet + " ") | color(state_color),
+            text(truncate_cells_middle_ascii(server.name, name_width)) |
+                bold | color(tui::theme().ui.text_primary),
+            text(" "),
+            status | flex,
+        }));
+    }
+
+    if (servers.size() > shown_servers) {
+        rows.push_back(
+            text("  +" + std::to_string(servers.size() - shown_servers) +
+                 " more servers") |
+            color(tui::theme().ui.text_dim) | dim);
+    }
+
+    return vbox(std::move(rows));
+}
+
 static Element queued_badge() {
     return text(" QUEUED ") | bold | color(tui::theme().ui.text_primary) |
            bgcolor(tui::theme().ui.queued_bg);
@@ -568,12 +735,20 @@ static std::vector<std::string> sidebar_title_lines(const std::string& title,
 static Element render_regular_sidebar(const acecode::TuiState& state,
                                       const std::string& version_str,
                                       const std::string& cwd_display,
-                                      int sidebar_width) {
+                                      int sidebar_width,
+                                      int anim_tick) {
     const int content_width = std::max(1, sidebar_width - 2);
     Elements top_rows;
     for (const auto& line : sidebar_title_lines(first_user_message_title(state),
                                                 content_width)) {
         top_rows.push_back(text(line) | bold | color(tui::theme().ui.text_primary));
+    }
+
+    Element mcp_section = render_mcp_sidebar_section(
+        state.mcp_sidebar_servers, content_width, anim_tick);
+    if (!state.mcp_sidebar_servers.empty()) {
+        top_rows.push_back(text(""));
+        top_rows.push_back(std::move(mcp_section));
     }
 
     const auto file_changes =
@@ -1772,7 +1947,6 @@ static MemoryConfig initialize_memory_registry(MemoryRegistry& memory_registry,
 }
 
 static void initialize_mcp_servers(McpManager& mcp_manager,
-                                   ToolExecutor& tools,
                                    const AppConfig& config) {
     const size_t configured = config.mcp_servers.size();
     if (configured == 0) {
@@ -1780,12 +1954,8 @@ static void initialize_mcp_servers(McpManager& mcp_manager,
     }
 
     mcp_manager.connect_all(config);
-    mcp_manager.register_tools(tools);
-    const size_t connected = mcp_manager.connected_server_count();
-    const size_t tool_count = mcp_manager.discovered_tool_count();
-    LOG_INFO("[mcp] Connected " + std::to_string(connected) + "/" +
-             std::to_string(configured) + " servers, registered " +
-             std::to_string(tool_count) + " tools");
+    LOG_INFO("[mcp] Configured " + std::to_string(configured) +
+             " server(s); startup will run in the background");
 }
 
 static void restore_input_history(TuiState& state,
@@ -1824,12 +1994,35 @@ static void add_startup_messages(TuiState& state,
             false});
     }
 
-    if (mcp_manager.connected_server_count() > 0) {
+    const size_t configured = mcp_manager.configured_server_count();
+    if (configured > 0) {
         state.conversation.push_back({"system",
-            "[MCP] Connected " + std::to_string(mcp_manager.connected_server_count()) +
-            " server(s), registered " + std::to_string(mcp_manager.discovered_tool_count()) +
-            " external tool(s).", false});
+            acecode::mcp_background_start_message(configured),
+            false});
     }
+}
+
+static void start_mcp_servers_async(McpManager& mcp_manager,
+                                    ToolExecutor& tools,
+                                    TuiState& state,
+                                    ftxui::ScreenInteractive& screen) {
+    if (mcp_manager.configured_server_count() == 0) {
+        return;
+    }
+
+    mcp_manager.set_status_callback([&mcp_manager, &state, &screen](const McpServerInfo& info) {
+        auto sidebar_servers = build_mcp_sidebar_servers(mcp_manager);
+        auto message = acecode::mcp_status_message(info);
+        {
+            std::lock_guard<std::mutex> lk(state.mu);
+            set_mcp_sidebar_servers_locked(state, std::move(sidebar_servers));
+            if (message.has_value()) {
+                state.conversation.push_back({"system", *message, false});
+            }
+        }
+        screen.PostEvent(ftxui::Event::Custom);
+    });
+    mcp_manager.start_async(tools);
 }
 
 static void maybe_add_legacy_terminal_hint(
@@ -2123,10 +2316,11 @@ static int run_interactive_app(const CliOptions& cli,
 
     // ---- MCP servers ----
     McpManager mcp_manager;
-    initialize_mcp_servers(mcp_manager, tools, config);
+    initialize_mcp_servers(mcp_manager, config);
 
     // ---- TUI state ----
     TuiState state;
+    set_mcp_sidebar_servers_locked(state, build_mcp_sidebar_servers(mcp_manager));
     {
         auto p = provider_accessor();
         state.status_line = p
@@ -2210,6 +2404,22 @@ static int run_interactive_app(const CliOptions& cli,
     // AskUserQuestion 依赖 TuiState + ScreenInteractive 才能发起阻塞 overlay,
     // 所以和其它无依赖的内置工具分开、等 `state` / `screen` 就绪之后再注册。
     tools.register_tool(create_ask_user_question_tool(state, screen));
+    start_mcp_servers_async(mcp_manager, tools, state, screen);
+
+    std::atomic<bool> mcp_first_turn_wait_done{false};
+    auto coordinate_mcp_before_first_turn = [&]() {
+        auto result = acecode::coordinate_mcp_before_first_turn(
+            mcp_manager,
+            mcp_first_turn_wait_done,
+            std::chrono::milliseconds(1500));
+        if (result.should_warn) {
+            std::lock_guard<std::mutex> lk(state.mu);
+            state.conversation.push_back({"system",
+                acecode::mcp_first_turn_still_starting_warning(),
+                false});
+            screen.PostEvent(Event::Custom);
+        }
+    };
 
     auto chat_viewport_rows = [&chat_box]() -> int {
         return chat_box.y_max >= chat_box.y_min
@@ -2808,8 +3018,9 @@ static int run_interactive_app(const CliOptions& cli,
     };
 
     // Now that agent_loop exists, update on_busy_changed to drain pending queue
-    callbacks.on_busy_changed = [&state, &clamp_chat_focus, &agent_loop, &screen](bool busy) {
-        std::lock_guard<std::mutex> lk(state.mu);
+    callbacks.on_busy_changed = [&state, &clamp_chat_focus, &agent_loop, &screen,
+                                 &coordinate_mcp_before_first_turn](bool busy) {
+        std::unique_lock<std::mutex> lk(state.mu);
         if (busy && !state.is_waiting) {
             state.current_thinking_phrase = get_random_thinking_phrase(is_user_chinese(state));
             state.thinking_start_time = std::chrono::steady_clock::now();
@@ -2862,6 +3073,9 @@ static int run_interactive_app(const CliOptions& cli,
             state.streaming_output_chars = 0;
             state.last_completion_tokens_authoritative = 0;
             state.is_waiting = true;
+            lk.unlock();
+            coordinate_mcp_before_first_turn();
+            lk.lock();
             if (has_structured_input) {
                 agent_loop.submit(next_input);
             } else {
@@ -2877,8 +3091,9 @@ static int run_interactive_app(const CliOptions& cli,
     // 该回调由 RC listener 的 Crow worker 线程调用,锁内逻辑与 Enter 提交分支
     // 保持一字不差。
     acecode::rc::remote_control_service().hub().set_inbound_submit(
-        [&state, &agent_loop, &screen, &clamp_chat_focus](const std::string& text) {
-            std::lock_guard<std::mutex> lk(state.mu);
+        [&state, &agent_loop, &screen, &clamp_chat_focus,
+         &coordinate_mcp_before_first_turn](const std::string& text) {
+            std::unique_lock<std::mutex> lk(state.mu);
             if (state.is_waiting) {
                 state.pending_queue.push_back(text);
             } else {
@@ -2891,6 +3106,9 @@ static int run_interactive_app(const CliOptions& cli,
                 state.streaming_output_chars = 0;
                 state.last_completion_tokens_authoritative = 0;
                 state.is_waiting = true;
+                lk.unlock();
+                coordinate_mcp_before_first_turn();
+                lk.lock();
                 agent_loop.submit(text);
             }
             screen.PostEvent(Event::Custom);
@@ -2928,6 +3146,9 @@ static int run_interactive_app(const CliOptions& cli,
                 }
                 if (acecode::tui::expire_ctrl_c_exit_state(
                         state.ctrl_c_armed, state.last_ctrl_c_time, now)) {
+                    needs_post = true;
+                }
+                if (mcp_sidebar_has_loading(state)) {
                     needs_post = true;
                 }
 
@@ -3144,7 +3365,7 @@ static int run_interactive_app(const CliOptions& cli,
     };
 
     // Wrap with CatchEvent to handle all keyboard input
-    auto input_with_esc = CatchEvent(input_renderer, [&state, &screen, &clamp_chat_focus, &chat_viewport_rows, &sync_chat_line_counts_from_layout, &auth_done, &cmd_registry, &agent_loop, &provider_slot, &provider_accessor, &config, &token_tracker, &permissions, &session_manager, &scroll_chat_by_lines, &chat_box, &scrollbar_box, &ask_scrollbar_box, &ask_overlay_box, &message_line_counts, &mcp_manager, &tools, &skill_registry, &memory_registry, &working_dir, &insert_pasted_text_at_cursor, &paste_system_clipboard_text, &paste_system_clipboard_image, &cancel_ctrl_c_exit_locked](Event event) {
+    auto input_with_esc = CatchEvent(input_renderer, [&state, &screen, &clamp_chat_focus, &chat_viewport_rows, &sync_chat_line_counts_from_layout, &auth_done, &cmd_registry, &agent_loop, &provider_slot, &provider_accessor, &config, &token_tracker, &permissions, &session_manager, &scroll_chat_by_lines, &chat_box, &scrollbar_box, &ask_scrollbar_box, &ask_overlay_box, &message_line_counts, &mcp_manager, &tools, &skill_registry, &memory_registry, &working_dir, &insert_pasted_text_at_cursor, &paste_system_clipboard_text, &paste_system_clipboard_image, &cancel_ctrl_c_exit_locked, &coordinate_mcp_before_first_turn](Event event) {
 #if ACECODE_TUI_INPUT_TRACE
         if (event != Event::Custom &&
             !event.is_cursor_position() &&
@@ -4293,6 +4514,9 @@ static int run_interactive_app(const CliOptions& cli,
                             expanded_prompt, display_prompt, attachments));
                 }
             } else {
+                lk.unlock();
+                coordinate_mcp_before_first_turn();
+                lk.lock();
                 state.conversation.push_back({"user", display_prompt, false});
                 state.chat_follow_tail = true;
                 clamp_chat_focus();
@@ -5748,6 +5972,14 @@ static int run_interactive_app(const CliOptions& cli,
             });
         }
 
+        Element mcp_loading_element = emptyElement();
+        if (!show_regular_sidebar && mcp_sidebar_has_loading(state)) {
+            mcp_loading_element = hbox({
+                text(" i ") | bold | color(Color::White),
+                render_white_shimmer_text("MCP loading", anim_tick.load()),
+            });
+        }
+
         // -- Prompt line --
         Element prompt_line;
         // Resume picker overlay above the prompt
@@ -6287,6 +6519,7 @@ static int run_interactive_app(const CliOptions& cli,
             header,
             header_separator | color(acecode::tui::theme().ui.text_dim),
             message_view,
+            mcp_loading_element,
             resume_picker_element,
             rewind_picker_element,
             model_picker_element,
@@ -6312,7 +6545,11 @@ static int run_interactive_app(const CliOptions& cli,
 
         if (show_regular_sidebar) {
             Element sidebar = render_regular_sidebar(
-                state, version_str, cwd_display, kRegularSidebarWidthCols);
+                state,
+                version_str,
+                cwd_display,
+                kRegularSidebarWidthCols,
+                anim_tick.load());
             return hbox({
                 main_root | flex,
                 separator() | color(outer_border_color),

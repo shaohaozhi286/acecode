@@ -7,11 +7,13 @@
 #include "provider/provider_factory.hpp"
 #include "session/session_manager.hpp"
 #include "session/session_storage.hpp"
+#include "tool/mcp_manager.hpp"
 #include "tool/tool_executor.hpp"
 #include "utils/token_tracker.hpp"
 #include "utils/paths.hpp"
 
 #include <cstdlib>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -207,6 +209,80 @@ private:
     }
 };
 
+std::vector<std::string> mcp_helper_args(std::initializer_list<std::string> args) {
+    return std::vector<std::string>(args.begin(), args.end());
+}
+
+acecode::AppConfig mcp_config_with_stdio_server(const std::string& name,
+                                                std::vector<std::string> args) {
+    acecode::AppConfig cfg;
+    acecode::McpServerConfig server;
+    server.transport = acecode::McpTransport::Stdio;
+    server.command = ACECODE_MCP_STDIO_TEST_SERVER_PATH;
+    server.args = std::move(args);
+    cfg.mcp_servers[name] = std::move(server);
+    return cfg;
+}
+
+class McpCommandHarness {
+public:
+    explicit McpCommandHarness(const std::string& hint)
+        : cwd_(temp_cwd(hint))
+        , loop_([this] {
+                    std::lock_guard<std::mutex> lk(provider_slot_.mu);
+                    return provider_slot_.provider;
+                },
+                tools_,
+                acecode::AgentCallbacks{},
+                cwd_.string(),
+                perms_) {
+        acecode::register_builtin_commands(registry_);
+    }
+
+    ~McpCommandHarness() {
+        mcp_.shutdown();
+        loop_.shutdown();
+        fs::remove_all(cwd_);
+    }
+
+    acecode::CommandContext context() {
+        acecode::CommandContext ctx{
+            state_,
+            loop_,
+            &provider_slot_,
+            config_,
+            tracker_,
+            perms_,
+        };
+        ctx.mcp_manager = &mcp_;
+        ctx.tools = &tools_;
+        ctx.command_registry = &registry_;
+        ctx.cwd = cwd_.string();
+        return ctx;
+    }
+
+    bool dispatch(const std::string& text) {
+        auto ctx = context();
+        return registry_.dispatch(text, ctx);
+    }
+
+    std::string last_system_message() const {
+        if (state_.conversation.empty()) return "";
+        return state_.conversation.back().content;
+    }
+
+    acecode::TuiState state_;
+    acecode::CommandRegistry registry_;
+    acecode::SessionEntry::ProviderSlot provider_slot_;
+    acecode::ToolExecutor tools_;
+    acecode::McpManager mcp_;
+    acecode::PermissionManager perms_;
+    acecode::AppConfig config_;
+    acecode::TokenTracker tracker_;
+    fs::path cwd_;
+    acecode::AgentLoop loop_;
+};
+
 } // namespace
 
 TEST(BuiltinCommands, NewIsRegisteredAsClearAlias) {
@@ -217,6 +293,91 @@ TEST(BuiltinCommands, NewIsRegisteredAsClearAlias) {
     ASSERT_TRUE(registry.has_command("clear"));
     ASSERT_TRUE(registry.has_command("new"));
     EXPECT_EQ(registry.commands().at("new").description, "Alias for /clear");
+}
+
+TEST(BuiltinCommands, McpCommandShowsStartingState) {
+    McpCommandHarness h("mcp_starting");
+    auto cfg = mcp_config_with_stdio_server(
+        "slow",
+        mcp_helper_args({"--delay-ms", "400", "--tool", "echo"}));
+    ASSERT_TRUE(h.mcp_.connect_all(cfg));
+    h.mcp_.start_async(h.tools_);
+    ASSERT_TRUE(h.mcp_.has_starting_servers());
+
+    ASSERT_TRUE(h.dispatch("/mcp"));
+
+    const std::string out = h.last_system_message();
+    EXPECT_NE(out.find("slow"), std::string::npos);
+    EXPECT_NE(out.find("[starting]"), std::string::npos);
+}
+
+TEST(BuiltinCommands, McpCommandShowsFailedStateAndError) {
+    McpCommandHarness h("mcp_failed");
+    auto cfg = mcp_config_with_stdio_server(
+        "bad",
+        mcp_helper_args({"--fail-initialize"}));
+    ASSERT_TRUE(h.mcp_.connect_all(cfg));
+    h.mcp_.start_async(h.tools_);
+    ASSERT_TRUE(h.mcp_.wait_for_startup_settled(std::chrono::seconds(5)));
+
+    ASSERT_TRUE(h.dispatch("/mcp"));
+
+    const std::string out = h.last_system_message();
+    EXPECT_NE(out.find("bad"), std::string::npos);
+    EXPECT_NE(out.find("[failed]"), std::string::npos);
+    EXPECT_NE(out.find("error=initialization failed"), std::string::npos);
+}
+
+TEST(BuiltinCommands, McpCommandShowsDisabledState) {
+    McpCommandHarness h("mcp_disabled");
+    auto cfg = mcp_config_with_stdio_server(
+        "off",
+        mcp_helper_args({"--no-tools"}));
+    ASSERT_TRUE(h.mcp_.connect_all(cfg));
+    h.mcp_.start_async(h.tools_);
+    ASSERT_TRUE(h.mcp_.wait_for_startup_settled(std::chrono::seconds(5)));
+    ASSERT_TRUE(h.mcp_.disable("off", h.tools_));
+
+    ASSERT_TRUE(h.dispatch("/mcp"));
+
+    const std::string out = h.last_system_message();
+    EXPECT_NE(out.find("off"), std::string::npos);
+    EXPECT_NE(out.find("[disabled]"), std::string::npos);
+}
+
+TEST(BuiltinCommands, McpDisableDoesNotDeadlockWithStatusCallback) {
+    McpCommandHarness h("mcp_disable_callback");
+    auto cfg = mcp_config_with_stdio_server(
+        "off",
+        mcp_helper_args({"--no-tools"}));
+    ASSERT_TRUE(h.mcp_.connect_all(cfg));
+    h.mcp_.start_async(h.tools_);
+    ASSERT_TRUE(h.mcp_.wait_for_startup_settled(std::chrono::seconds(5)));
+    h.mcp_.set_status_callback([&h](const acecode::McpServerInfo&) {
+        std::lock_guard<std::mutex> lk(h.state_.mu);
+        h.state_.chat_follow_tail = true;
+    });
+
+    ASSERT_TRUE(h.dispatch("/mcp disable off"));
+
+    const std::string out = h.last_system_message();
+    EXPECT_NE(out.find("Disabled MCP server 'off'."), std::string::npos);
+}
+
+TEST(BuiltinCommands, McpListShowsNoToolsForConnectedEmptyServer) {
+    McpCommandHarness h("mcp_no_tools");
+    auto cfg = mcp_config_with_stdio_server(
+        "empty",
+        mcp_helper_args({"--no-tools"}));
+    ASSERT_TRUE(h.mcp_.connect_all(cfg));
+    h.mcp_.start_async(h.tools_);
+    ASSERT_TRUE(h.mcp_.wait_for_startup_settled(std::chrono::seconds(5)));
+
+    ASSERT_TRUE(h.dispatch("/mcp list"));
+
+    const std::string out = h.last_system_message();
+    EXPECT_NE(out.find("empty  [connected]"), std::string::npos);
+    EXPECT_NE(out.find("(no tools registered)"), std::string::npos);
 }
 
 TEST(BuiltinCommands, PlanCommandEntersPlanModeAndCreatesPlanFile) {

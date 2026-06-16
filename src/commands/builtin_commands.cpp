@@ -539,14 +539,18 @@ static void cmd_compact(CommandContext& ctx, const std::string& /*args*/) {
 
 static const char* mcp_state_label(McpServerState s) {
     switch (s) {
+        case McpServerState::Starting:  return "starting";
         case McpServerState::Connected: return "connected";
         case McpServerState::Disabled:  return "disabled";
         case McpServerState::Failed:    return "failed";
+        case McpServerState::Cancelled: return "cancelled";
+        case McpServerState::TimedOut:  return "timed_out";
     }
     return "unknown";
 }
 
 static void mcp_push(CommandContext& ctx, const std::string& msg) {
+    std::lock_guard<std::mutex> lk(ctx.state.mu);
     ctx.state.conversation.push_back({"system", msg, false});
     ctx.state.chat_follow_tail = true;
 }
@@ -563,8 +567,6 @@ static std::string mcp_known_servers(const McpManager& mgr) {
 }
 
 static void cmd_mcp(CommandContext& ctx, const std::string& args) {
-    std::lock_guard<std::mutex> lk(ctx.state.mu);
-
     if (!ctx.mcp_manager || !ctx.tools) {
         mcp_push(ctx, "MCP manager is not available in this session.");
         return;
@@ -610,6 +612,9 @@ static void cmd_mcp(CommandContext& ctx, const std::string& args) {
                 << "  [" << s.transport << "]"
                 << "  tools=" << s.tool_count
                 << "  at=" << s.command_line;
+            if (!s.error.empty()) {
+                oss << "  error=" << s.error;
+            }
         }
         mcp_push(ctx, oss.str());
         return;
@@ -682,7 +687,7 @@ static void cmd_mcp(CommandContext& ctx, const std::string& args) {
         } else if (sub == "enable") {
             changed = mgr.enable(name, tools);
             if (changed) {
-                mcp_push(ctx, "Enabled MCP server '" + name + "'.");
+                mcp_push(ctx, "Starting MCP server '" + name + "' in the background.");
             } else {
                 // Distinguish already-connected vs failed.
                 auto servers = mgr.list_servers();
@@ -690,6 +695,8 @@ static void cmd_mcp(CommandContext& ctx, const std::string& args) {
                     if (s.name == name) {
                         if (s.state == McpServerState::Connected) {
                             mcp_push(ctx, "MCP server '" + name + "' is already connected.");
+                        } else if (s.state == McpServerState::Starting) {
+                            mcp_push(ctx, "MCP server '" + name + "' is already starting.");
                         } else {
                             mcp_push(ctx, "Failed to enable MCP server '" + name + "'. Check logs for details.");
                         }
@@ -700,7 +707,7 @@ static void cmd_mcp(CommandContext& ctx, const std::string& args) {
         } else { // reconnect
             changed = mgr.reconnect(name, tools);
             if (changed) {
-                mcp_push(ctx, "Reconnected MCP server '" + name + "'.");
+                mcp_push(ctx, "Reconnecting MCP server '" + name + "' in the background.");
             } else {
                 mcp_push(ctx, "Failed to reconnect MCP server '" + name + "'. Check logs for details.");
             }

@@ -5,6 +5,7 @@
 #include "../desktop/workspace_registry.hpp"
 #include "guid.hpp"
 #include "heartbeat.hpp"
+#include "mcp_runtime.hpp"
 #include "platform.hpp"
 #include "runtime_files.hpp"
 #include "../provider/cwd_model_override.hpp"
@@ -401,6 +402,10 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     // 这两个 tool 自己取)。
     tools.register_tool(acecode::create_skills_list_tool(skill_registry, &cfg_mut));
     tools.register_tool(acecode::create_skill_view_tool(skill_registry, &cfg_mut));
+
+    acecode::daemon::DaemonMcpRuntime mcp_runtime;
+    mcp_runtime.start(cfg_mut, tools);
+
     acecode::PermissionManager template_perm;
     template_perm.set_mode(permission_mode_from_config(cfg_mut.default_permission_mode));
     if (opts.dangerous) template_perm.set_dangerous(true);
@@ -494,6 +499,7 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     LOG_INFO("[daemon] worker shutting down");
     if (opts.foreground) std::cerr << "[daemon] shutting down\n";
 
+    mcp_runtime.shutdown();
     acecode::model_pool_status_service().stop(); // 幂等;未 start 过也安全
 
     heartbeat.stop();

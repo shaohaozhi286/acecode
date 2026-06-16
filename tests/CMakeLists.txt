@@ -41,9 +41,20 @@ target_include_directories(concurrent_session_writer PRIVATE
 )
 add_dependencies(acecode_unit_tests concurrent_session_writer)
 
+# 测试辅助 MCP stdio server: 用于 McpManager 异步启动测试走真实
+# stdio JSON-RPC 路径,避免依赖外部 node/python。
+add_executable(mcp_stdio_test_server
+    ${CMAKE_CURRENT_SOURCE_DIR}/tool/helpers/mcp_stdio_test_server.cpp
+)
+target_link_libraries(mcp_stdio_test_server PRIVATE
+    nlohmann_json::nlohmann_json
+)
+add_dependencies(acecode_unit_tests mcp_stdio_test_server)
+
 # 注入 helper 绝对路径给测试代码(避免 ctest cwd 不确定问题)
 target_compile_definitions(acecode_unit_tests PRIVATE
     ACECODE_CONCURRENT_SESSION_WRITER_PATH="$<TARGET_FILE:concurrent_session_writer>"
+    ACECODE_MCP_STDIO_TEST_SERVER_PATH="$<TARGET_FILE:mcp_stdio_test_server>"
 )
 
 # winpty spike/冒烟测试需要 winpty-agent.exe 在单测 exe 同目录

@@ -24,8 +24,10 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <exception>
 #include <sstream>
+#include <thread>
 #include <utility>
 
 namespace acecode {
@@ -125,9 +127,41 @@ mcp::json std_to_mcp(const nlohmann::json& j) {
     return mcp::json::parse(j.dump());
 }
 
+void configure_cpp_mcp_logger() {
+    // cpp-mcp logs info-level process lifecycle messages directly to stderr.
+    // During TUI startup those bytes corrupt the already-rendered input area.
+    // ACECode emits its own MCP status/log messages, so keep the vendored logger
+    // quiet for normal lifecycle chatter.
+    mcp::set_log_level(mcp::log_level::error);
+}
+
+McpServerState failure_state_for_message(const std::string& message) {
+    std::string lower = message;
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    if (lower.find("timeout") != std::string::npos ||
+        lower.find("timed out") != std::string::npos) {
+        return McpServerState::TimedOut;
+    }
+    return McpServerState::Failed;
+}
+
 } // namespace
 
-McpManager::McpManager() = default;
+struct McpManager::State {
+    mutable std::mutex mu;
+    mutable std::condition_variable cv;
+    std::vector<ServerEntry> servers;
+    std::vector<DiscoveredTool> discovered_tools;
+    bool shutdown_done = false;
+    StatusCallback status_callback;
+};
+
+McpManager::McpManager()
+    : state_(std::make_shared<State>()) {
+    configure_cpp_mcp_logger();
+}
 
 McpManager::~McpManager() {
     shutdown();
@@ -146,138 +180,231 @@ std::string McpManager::sanitize(const std::string& s) {
     return out;
 }
 
+void McpManager::set_status_callback(StatusCallback callback) {
+    auto state = state_;
+    std::lock_guard<std::mutex> lk(state->mu);
+    state->status_callback = std::move(callback);
+}
+
 McpManager::ServerEntry* McpManager::find_entry_locked(const std::string& name) {
-    for (auto& e : servers_) {
+    for (auto& e : state_->servers) {
         if (e.name == name) return &e;
     }
     return nullptr;
 }
 
-bool McpManager::connect_entry_locked(ServerEntry& entry, ToolExecutor& executor) {
-    const std::string tag = std::string("[mcp:") + transport_tag(entry.cfg.transport) + "] ";
-    LOG_INFO(tag + "Connecting to server '" + entry.name + "': " + entry.command_line);
+McpManager::ConnectionSnapshot McpManager::snapshot_for_start_locked(ServerEntry& entry) {
+    entry.generation++;
+    entry.state = McpServerState::Starting;
+    entry.error.clear();
+    entry.client.reset();
+    return ConnectionSnapshot{entry.name, entry.cfg, entry.command_line, entry.generation};
+}
 
-    std::shared_ptr<mcp::client> client;
+McpManager::ConnectionResult McpManager::connect_entry(ConnectionSnapshot snapshot) {
+    ConnectionResult result;
+    result.server_name = snapshot.server_name;
+    result.generation = snapshot.generation;
+
+    const std::string tag = std::string("[mcp:") + transport_tag(snapshot.cfg.transport) + "] ";
+    LOG_INFO(tag + "Connecting to server '" + snapshot.server_name + "': " + snapshot.command_line);
+
     try {
-        if (entry.cfg.transport == McpTransport::Stdio) {
-            client = std::make_shared<mcp::stdio_client>(
-                entry.command_line,
-                env_map_to_mcp_json(entry.cfg.env));
-        } else if (entry.cfg.transport == McpTransport::Sse) {
+        if (snapshot.cfg.transport == McpTransport::Stdio) {
+            result.client = std::make_shared<mcp::stdio_client>(
+                snapshot.command_line,
+                env_map_to_mcp_json(snapshot.cfg.env));
+        } else if (snapshot.cfg.transport == McpTransport::Sse) {
             auto sse = std::make_shared<mcp::sse_client>(
-                entry.cfg.url,
-                entry.cfg.sse_endpoint,
-                entry.cfg.validate_certificates,
-                entry.cfg.ca_cert_path);
-            for (const auto& [k, v] : entry.cfg.headers) {
+                snapshot.cfg.url,
+                snapshot.cfg.sse_endpoint,
+                snapshot.cfg.validate_certificates,
+                snapshot.cfg.ca_cert_path);
+            for (const auto& [k, v] : snapshot.cfg.headers) {
                 sse->set_header(k, v);
             }
-            if (!entry.cfg.auth_token.empty()) {
-                sse->set_auth_token(entry.cfg.auth_token);
+            if (!snapshot.cfg.auth_token.empty()) {
+                sse->set_auth_token(snapshot.cfg.auth_token);
             }
-            if (entry.cfg.timeout_seconds > 0) {
-                sse->set_timeout(entry.cfg.timeout_seconds);
+            if (snapshot.cfg.timeout_seconds > 0) {
+                sse->set_timeout(snapshot.cfg.timeout_seconds);
             }
-            if (!entry.cfg.validate_certificates) {
-                LOG_WARN(tag + "WARNING: certificate validation disabled for '" + entry.name + "'");
+            if (!snapshot.cfg.validate_certificates) {
+                LOG_WARN(tag + "WARNING: certificate validation disabled for '" + snapshot.server_name + "'");
             }
-            const std::string auth_state = entry.cfg.auth_token.empty() ? "none" : "present";
-            std::string hdr_keys = header_keys_summary(entry.cfg.headers);
-            LOG_INFO(tag + "sse config for '" + entry.name +
+            const std::string auth_state = snapshot.cfg.auth_token.empty() ? "none" : "present";
+            std::string hdr_keys = header_keys_summary(snapshot.cfg.headers);
+            LOG_INFO(tag + "sse config for '" + snapshot.server_name +
                      "' auth=" + auth_state +
                      (hdr_keys.empty() ? "" : (" header_keys=" + hdr_keys)));
-            client = std::move(sse);
+            result.client = std::move(sse);
         } else {
-            // Streamable HTTP (2025-03-26): single POST endpoint, typically /mcp.
-            // Reuse sse_endpoint field as the endpoint path; default to "/mcp"
-            // when the user didn't customize it.
-            std::string ep = entry.cfg.sse_endpoint;
+            std::string ep = snapshot.cfg.sse_endpoint;
             if (ep.empty() || ep == "/sse") {
                 ep = "/mcp";
             }
             auto h = std::make_shared<mcp::streamable_http_client>(
-                entry.cfg.url,
+                snapshot.cfg.url,
                 ep,
-                entry.cfg.validate_certificates,
-                entry.cfg.ca_cert_path);
-            for (const auto& [k, v] : entry.cfg.headers) {
+                snapshot.cfg.validate_certificates,
+                snapshot.cfg.ca_cert_path);
+            for (const auto& [k, v] : snapshot.cfg.headers) {
                 h->set_header(k, v);
             }
-            if (!entry.cfg.auth_token.empty()) {
-                h->set_auth_token(entry.cfg.auth_token);
+            if (!snapshot.cfg.auth_token.empty()) {
+                h->set_auth_token(snapshot.cfg.auth_token);
             }
-            if (entry.cfg.timeout_seconds > 0) {
-                h->set_timeout(entry.cfg.timeout_seconds);
+            if (snapshot.cfg.timeout_seconds > 0) {
+                h->set_timeout(snapshot.cfg.timeout_seconds);
             }
-            if (!entry.cfg.validate_certificates) {
-                LOG_WARN(tag + "WARNING: certificate validation disabled for '" + entry.name + "'");
+            if (!snapshot.cfg.validate_certificates) {
+                LOG_WARN(tag + "WARNING: certificate validation disabled for '" + snapshot.server_name + "'");
             }
-            const std::string auth_state = entry.cfg.auth_token.empty() ? "none" : "present";
-            std::string hdr_keys = header_keys_summary(entry.cfg.headers);
-            LOG_INFO(tag + "http (streamable) config for '" + entry.name +
+            const std::string auth_state = snapshot.cfg.auth_token.empty() ? "none" : "present";
+            std::string hdr_keys = header_keys_summary(snapshot.cfg.headers);
+            LOG_INFO(tag + "http (streamable) config for '" + snapshot.server_name +
                      "' endpoint=" + ep +
                      " auth=" + auth_state +
                      (hdr_keys.empty() ? "" : (" header_keys=" + hdr_keys)));
-            client = std::move(h);
+            result.client = std::move(h);
         }
     } catch (const std::exception& e) {
-        LOG_ERROR(tag + "Failed to construct client for '" + entry.name + "': " + e.what());
-        entry.state = McpServerState::Failed;
-        return false;
+        result.error = e.what();
+        result.state = failure_state_for_message(result.error);
+        LOG_ERROR(tag + "Failed to construct client for '" + snapshot.server_name + "': " + result.error);
+        return result;
     }
 
     bool initialized = false;
     try {
-        initialized = client->initialize("acecode", "0.1.1");
+        initialized = result.client->initialize("acecode", "0.1.1");
     } catch (const std::exception& e) {
-        LOG_ERROR(tag + "initialize() threw for '" + entry.name + "': " + e.what());
-        initialized = false;
+        result.error = e.what();
+        result.state = failure_state_for_message(result.error);
+        LOG_ERROR(tag + "initialize() threw for '" + snapshot.server_name + "': " + result.error);
+        return result;
     }
 
     if (!initialized) {
-        LOG_WARN(tag + "Skipping server '" + entry.name + "' (initialization failed)");
-        entry.state = McpServerState::Failed;
-        return false;
+        result.error = "initialization failed";
+        result.state = McpServerState::Failed;
+        LOG_WARN(tag + "Skipping server '" + snapshot.server_name + "' (initialization failed)");
+        return result;
     }
 
     std::vector<mcp::tool> tools;
     try {
-        tools = client->get_tools();
+        tools = result.client->get_tools();
     } catch (const std::exception& e) {
-        LOG_WARN(tag + "get_tools() threw for '" + entry.name + "': " + e.what());
+        result.error = e.what();
+        result.state = failure_state_for_message(result.error);
+        LOG_WARN(tag + "get_tools() threw for '" + snapshot.server_name + "': " + result.error);
+        return result;
     }
 
     if (tools.empty()) {
-        LOG_INFO(tag + "Server '" + entry.name + "' connected but exposed no tools");
+        LOG_INFO(tag + "Server '" + snapshot.server_name + "' connected but exposed no tools");
     }
 
+    result.tools.reserve(tools.size());
     for (const auto& t : tools) {
         DiscoveredTool dt;
-        dt.server_name = entry.name;
+        dt.server_name = snapshot.server_name;
         dt.original_tool_name = t.name;
-        dt.qualified_name = "mcp_" + sanitize(entry.name) + "_" + t.name;
+        dt.qualified_name = "mcp_" + sanitize(snapshot.server_name) + "_" + t.name;
         dt.definition.name = dt.qualified_name;
         dt.definition.description = t.description;
         dt.definition.parameters = mcp_to_std(t.parameters_schema);
-        discovered_tools_.push_back(dt);
-
-        ToolImpl impl;
-        impl.definition = dt.definition;
-        impl.is_read_only = false;
-        impl.source = ToolSource::Mcp;
-        const std::string server_name = dt.server_name;
-        const std::string tool_name = dt.original_tool_name;
-        impl.execute = [this, server_name, tool_name](const std::string& args_json, const ToolContext& /*ctx*/) {
-            return invoke(server_name, tool_name, args_json);
-        };
-        executor.register_tool(impl);
+        result.tools.push_back(std::move(dt));
     }
 
-    entry.client = std::move(client);
-    entry.state = McpServerState::Connected;
-    LOG_INFO(tag + "Server '" + entry.name + "' connected with " +
+    result.state = McpServerState::Connected;
+    LOG_INFO(tag + "Server '" + snapshot.server_name + "' connected with " +
              std::to_string(tools.size()) + " tool(s)");
-    return true;
+    return result;
+}
+
+void McpManager::publish_connection_result(const std::shared_ptr<State>& state,
+                                           ConnectionResult result,
+                                           ToolExecutor& executor) {
+    StatusCallback callback;
+    McpServerInfo info;
+    bool should_notify = false;
+    {
+        std::lock_guard<std::mutex> lk(state->mu);
+        if (state->shutdown_done) {
+            return;
+        }
+
+        auto it = std::find_if(state->servers.begin(), state->servers.end(), [&](const ServerEntry& entry) {
+            return entry.name == result.server_name;
+        });
+        if (it == state->servers.end() || it->generation != result.generation ||
+            it->state != McpServerState::Starting) {
+            return;
+        }
+
+        auto dt = state->discovered_tools.begin();
+        while (dt != state->discovered_tools.end()) {
+            if (dt->server_name == it->name) {
+                executor.unregister_tool(dt->qualified_name);
+                dt = state->discovered_tools.erase(dt);
+            } else {
+                ++dt;
+            }
+        }
+
+        it->client.reset();
+        it->state = result.state;
+        it->error = result.state == McpServerState::Connected ? std::string{} : result.error;
+
+        if (result.state == McpServerState::Connected) {
+            it->client = std::move(result.client);
+            std::weak_ptr<State> weak_state = state;
+            for (const auto& tool : result.tools) {
+                ToolImpl impl;
+                impl.definition = tool.definition;
+                impl.is_read_only = false;
+                impl.source = ToolSource::Mcp;
+                const std::string server_name = tool.server_name;
+                const std::string tool_name = tool.original_tool_name;
+                impl.execute = [weak_state, server_name, tool_name](
+                                   const std::string& args_json,
+                                   const ToolContext& /*ctx*/) {
+                    return McpManager::invoke(weak_state, server_name, tool_name, args_json);
+                };
+                executor.register_tool(impl);
+                state->discovered_tools.push_back(tool);
+            }
+        }
+
+        size_t tool_count = 0;
+        for (const auto& tool : state->discovered_tools) {
+            if (tool.server_name == it->name) ++tool_count;
+        }
+        info = McpServerInfo{
+            it->name,
+            it->state,
+            tool_count,
+            transport_tag(it->cfg.transport),
+            it->command_line,
+            it->error,
+        };
+        callback = state->status_callback;
+        should_notify = true;
+        state->cv.notify_all();
+    }
+    if (should_notify && callback) {
+        callback(info);
+    }
+}
+
+void McpManager::start_entry_async(ConnectionSnapshot snapshot, ToolExecutor& executor) {
+    auto state = state_;
+    std::thread([state, snapshot = std::move(snapshot), &executor]() mutable {
+        ConnectionResult result = connect_entry(std::move(snapshot));
+        publish_connection_result(state, std::move(result), executor);
+    }).detach();
 }
 
 bool McpManager::connect_all(const AppConfig& cfg) {
@@ -286,32 +413,64 @@ bool McpManager::connect_all(const AppConfig& cfg) {
         return false;
     }
 
-    std::lock_guard<std::mutex> lk(mu_);
+    auto state = state_;
+    std::lock_guard<std::mutex> lk(state->mu);
+    if (!state->servers.empty()) {
+        return true;
+    }
     for (const auto& [name, srv_cfg] : cfg.mcp_servers) {
         ServerEntry entry;
         entry.name = name;
         entry.cfg = srv_cfg;
         entry.command_line = build_locator(srv_cfg);
-        entry.state = McpServerState::Failed; // upgraded by connect_entry_locked on success
-        servers_.push_back(std::move(entry));
+        entry.state = McpServerState::Failed;
+        state->servers.push_back(std::move(entry));
     }
 
-    // Connection requires running the same path as enable/reconnect, but
-    // connect_all is called before tools are wired. We deliberately defer
-    // tool registration until register_tools(executor) is invoked, matching
-    // the existing main.cpp two-phase startup. So we only construct entries
-    // here; actual connection happens in register_tools.
-    return !servers_.empty();
+    return !state->servers.empty();
 }
 
 void McpManager::register_tools(ToolExecutor& executor) {
-    std::lock_guard<std::mutex> lk(mu_);
-    for (auto& entry : servers_) {
-        // Only attempt to connect entries we haven't already brought up.
-        if (entry.state == McpServerState::Connected && entry.client) {
-            continue;
+    start_async(executor);
+}
+
+void McpManager::start_async(ToolExecutor& executor) {
+    std::vector<ConnectionSnapshot> snapshots;
+    std::vector<McpServerInfo> updates;
+    StatusCallback callback;
+    {
+        auto state = state_;
+        std::lock_guard<std::mutex> lk(state->mu);
+        if (state->shutdown_done) {
+            return;
         }
-        connect_entry_locked(entry, executor);
+        for (auto& entry : state->servers) {
+            if (entry.state == McpServerState::Connected ||
+                entry.state == McpServerState::Disabled ||
+                entry.state == McpServerState::Starting) {
+                continue;
+            }
+            snapshots.push_back(snapshot_for_start_locked(entry));
+            updates.push_back(McpServerInfo{
+                entry.name,
+                entry.state,
+                0,
+                transport_tag(entry.cfg.transport),
+                entry.command_line,
+                entry.error,
+            });
+        }
+        callback = state->status_callback;
+        state->cv.notify_all();
+    }
+
+    if (callback) {
+        for (const auto& update : updates) {
+            callback(update);
+        }
+    }
+    for (auto& snapshot : snapshots) {
+        start_entry_async(std::move(snapshot), executor);
     }
 }
 
@@ -319,16 +478,13 @@ void McpManager::teardown_locked(ServerEntry& entry, ToolExecutor& executor) {
     if (entry.client) {
         const std::string tag = std::string("[mcp:") + transport_tag(entry.cfg.transport) + "] ";
         LOG_INFO(tag + "Tearing down server '" + entry.name + "'");
-        // stdio_client destructor force-kills the child; sse_client destructor
-        // stops the SSE reader thread and closes the HTTP connection.
         entry.client.reset();
     }
-    // Drop tools owned by this server from both our cache and the executor.
-    auto it = discovered_tools_.begin();
-    while (it != discovered_tools_.end()) {
+    auto it = state_->discovered_tools.begin();
+    while (it != state_->discovered_tools.end()) {
         if (it->server_name == entry.name) {
             executor.unregister_tool(it->qualified_name);
-            it = discovered_tools_.erase(it);
+            it = state_->discovered_tools.erase(it);
         } else {
             ++it;
         }
@@ -336,55 +492,127 @@ void McpManager::teardown_locked(ServerEntry& entry, ToolExecutor& executor) {
 }
 
 bool McpManager::disable(const std::string& name, ToolExecutor& executor) {
-    std::lock_guard<std::mutex> lk(mu_);
-    auto* entry = find_entry_locked(name);
-    if (!entry) return false;
-    if (entry->state == McpServerState::Disabled) return false;
-    teardown_locked(*entry, executor);
-    entry->state = McpServerState::Disabled;
+    StatusCallback callback;
+    McpServerInfo info;
+    {
+        auto state = state_;
+        std::lock_guard<std::mutex> lk(state->mu);
+        auto* entry = find_entry_locked(name);
+        if (!entry) return false;
+        if (entry->state == McpServerState::Disabled) return false;
+        teardown_locked(*entry, executor);
+        entry->generation++;
+        entry->state = McpServerState::Disabled;
+        entry->error.clear();
+        info = McpServerInfo{
+            entry->name,
+            entry->state,
+            0,
+            transport_tag(entry->cfg.transport),
+            entry->command_line,
+            entry->error,
+        };
+        callback = state->status_callback;
+        state->cv.notify_all();
+    }
+    if (callback) {
+        callback(info);
+    }
     return true;
 }
 
 bool McpManager::enable(const std::string& name, ToolExecutor& executor) {
-    std::lock_guard<std::mutex> lk(mu_);
-    auto* entry = find_entry_locked(name);
-    if (!entry) return false;
-    if (entry->state == McpServerState::Connected && entry->client) {
-        return false;
+    ConnectionSnapshot snapshot;
+    McpServerInfo info;
+    StatusCallback callback;
+    bool should_start = false;
+    {
+        auto state = state_;
+        std::lock_guard<std::mutex> lk(state->mu);
+        auto* entry = find_entry_locked(name);
+        if (!entry) return false;
+        if (entry->state == McpServerState::Connected || entry->state == McpServerState::Starting) {
+            return false;
+        }
+        snapshot = snapshot_for_start_locked(*entry);
+        info = McpServerInfo{
+            entry->name,
+            entry->state,
+            0,
+            transport_tag(entry->cfg.transport),
+            entry->command_line,
+            entry->error,
+        };
+        callback = state->status_callback;
+        should_start = true;
+        state->cv.notify_all();
     }
-    return connect_entry_locked(*entry, executor);
+    if (should_start) {
+        if (callback) {
+            callback(info);
+        }
+        start_entry_async(std::move(snapshot), executor);
+    }
+    return should_start;
 }
 
 bool McpManager::reconnect(const std::string& name, ToolExecutor& executor) {
-    std::lock_guard<std::mutex> lk(mu_);
-    auto* entry = find_entry_locked(name);
-    if (!entry) return false;
-    teardown_locked(*entry, executor);
-    return connect_entry_locked(*entry, executor);
+    ConnectionSnapshot snapshot;
+    McpServerInfo info;
+    StatusCallback callback;
+    bool should_start = false;
+    {
+        auto state = state_;
+        std::lock_guard<std::mutex> lk(state->mu);
+        auto* entry = find_entry_locked(name);
+        if (!entry) return false;
+        teardown_locked(*entry, executor);
+        snapshot = snapshot_for_start_locked(*entry);
+        info = McpServerInfo{
+            entry->name,
+            entry->state,
+            0,
+            transport_tag(entry->cfg.transport),
+            entry->command_line,
+            entry->error,
+        };
+        callback = state->status_callback;
+        should_start = true;
+        state->cv.notify_all();
+    }
+    if (should_start) {
+        if (callback) {
+            callback(info);
+        }
+        start_entry_async(std::move(snapshot), executor);
+    }
+    return should_start;
 }
 
 std::vector<McpServerInfo> McpManager::list_servers() const {
-    std::lock_guard<std::mutex> lk(mu_);
+    auto state = state_;
+    std::lock_guard<std::mutex> lk(state->mu);
     std::vector<McpServerInfo> out;
-    out.reserve(servers_.size());
-    for (const auto& e : servers_) {
+    out.reserve(state->servers.size());
+    for (const auto& e : state->servers) {
         size_t tc = 0;
-        for (const auto& dt : discovered_tools_) {
+        for (const auto& dt : state->discovered_tools) {
             if (dt.server_name == e.name) ++tc;
         }
-        out.push_back({e.name, e.state, tc, transport_tag(e.cfg.transport), e.command_line});
+        out.push_back({e.name, e.state, tc, transport_tag(e.cfg.transport), e.command_line, e.error});
     }
     return out;
 }
 
 std::vector<std::pair<std::string, std::vector<ToolDef>>>
 McpManager::list_tools_by_server() const {
-    std::lock_guard<std::mutex> lk(mu_);
+    auto state = state_;
+    std::lock_guard<std::mutex> lk(state->mu);
     std::vector<std::pair<std::string, std::vector<ToolDef>>> out;
-    out.reserve(servers_.size());
-    for (const auto& e : servers_) {
+    out.reserve(state->servers.size());
+    for (const auto& e : state->servers) {
         std::vector<ToolDef> defs;
-        for (const auto& dt : discovered_tools_) {
+        for (const auto& dt : state->discovered_tools) {
             if (dt.server_name == e.name) defs.push_back(dt.definition);
         }
         out.emplace_back(e.name, std::move(defs));
@@ -393,38 +621,80 @@ McpManager::list_tools_by_server() const {
 }
 
 bool McpManager::has_server(const std::string& name) const {
-    std::lock_guard<std::mutex> lk(mu_);
-    for (const auto& e : servers_) {
+    auto state = state_;
+    std::lock_guard<std::mutex> lk(state->mu);
+    for (const auto& e : state->servers) {
         if (e.name == name) return true;
     }
     return false;
 }
 
 std::vector<std::string> McpManager::server_names() const {
-    std::lock_guard<std::mutex> lk(mu_);
+    auto state = state_;
+    std::lock_guard<std::mutex> lk(state->mu);
     std::vector<std::string> out;
-    out.reserve(servers_.size());
-    for (const auto& e : servers_) out.push_back(e.name);
+    out.reserve(state->servers.size());
+    for (const auto& e : state->servers) out.push_back(e.name);
     return out;
 }
 
 size_t McpManager::connected_server_count() const {
-    std::lock_guard<std::mutex> lk(mu_);
+    auto state = state_;
+    std::lock_guard<std::mutex> lk(state->mu);
     size_t n = 0;
-    for (const auto& e : servers_) {
+    for (const auto& e : state->servers) {
         if (e.state == McpServerState::Connected) ++n;
     }
     return n;
 }
 
-ToolResult McpManager::invoke(const std::string& server_name,
+size_t McpManager::configured_server_count() const {
+    auto state = state_;
+    std::lock_guard<std::mutex> lk(state->mu);
+    return state->servers.size();
+}
+
+size_t McpManager::discovered_tool_count() const {
+    auto state = state_;
+    std::lock_guard<std::mutex> lk(state->mu);
+    return state->discovered_tools.size();
+}
+
+bool McpManager::has_starting_servers() const {
+    auto state = state_;
+    std::lock_guard<std::mutex> lk(state->mu);
+    for (const auto& e : state->servers) {
+        if (e.state == McpServerState::Starting) return true;
+    }
+    return false;
+}
+
+bool McpManager::wait_for_startup_settled(std::chrono::milliseconds timeout) const {
+    auto state = state_;
+    std::unique_lock<std::mutex> lk(state->mu);
+    return state->cv.wait_for(lk, timeout, [&]() {
+        if (state->shutdown_done) return true;
+        for (const auto& e : state->servers) {
+            if (e.state == McpServerState::Starting) return false;
+        }
+        return true;
+    });
+}
+
+ToolResult McpManager::invoke(const std::weak_ptr<State>& weak_state,
+                              const std::string& server_name,
                               const std::string& tool_name,
                               const std::string& arguments_json) {
+    auto state = weak_state.lock();
+    if (!state) {
+        return ToolResult{"[Error] MCP manager is no longer available", false};
+    }
+
     std::shared_ptr<mcp::client> client;
     std::string tag = "[mcp] ";
     {
-        std::lock_guard<std::mutex> lk(mu_);
-        for (const auto& s : servers_) {
+        std::lock_guard<std::mutex> lk(state->mu);
+        for (const auto& s : state->servers) {
             if (s.name == server_name) {
                 client = s.client;
                 tag = std::string("[mcp:") + transport_tag(s.cfg.transport) + "] ";
@@ -496,10 +766,11 @@ ToolResult McpManager::invoke(const std::string& server_name,
 }
 
 void McpManager::shutdown() {
-    std::lock_guard<std::mutex> lk(mu_);
-    if (shutdown_done_) return;
-    shutdown_done_ = true;
-    for (auto& s : servers_) {
+    auto state = state_;
+    std::lock_guard<std::mutex> lk(state->mu);
+    if (state->shutdown_done) return;
+    state->shutdown_done = true;
+    for (auto& s : state->servers) {
         const std::string tag = std::string("[mcp:") + transport_tag(s.cfg.transport) + "] ";
         try {
             if (s.client) {
@@ -512,15 +783,17 @@ void McpManager::shutdown() {
             LOG_WARN(tag + "Unknown exception while killing server '" + s.name + "'");
         }
     }
-    servers_.clear();
-    discovered_tools_.clear();
+    state->servers.clear();
+    state->discovered_tools.clear();
+    state->cv.notify_all();
 }
 
 std::vector<ToolDef> McpManager::get_tool_definitions() const {
-    std::lock_guard<std::mutex> lk(mu_);
+    auto state = state_;
+    std::lock_guard<std::mutex> lk(state->mu);
     std::vector<ToolDef> defs;
-    defs.reserve(discovered_tools_.size());
-    for (const auto& dt : discovered_tools_) {
+    defs.reserve(state->discovered_tools.size());
+    for (const auto& dt : state->discovered_tools) {
         defs.push_back(dt.definition);
     }
     return defs;
