@@ -148,6 +148,10 @@ export function createApi(base = null) {
       request('GET', `/api/workspaces/${encodeURIComponent(hash)}/pinned-sessions`, undefined, base),
     setPinnedSessions: (hash, sessionIds=[]) =>
       request('PUT', `/api/workspaces/${encodeURIComponent(hash)}/pinned-sessions`, { session_ids: sessionIds }, base),
+    getPinnedSessionOrder: () =>
+      request('GET', '/api/pinned-sessions/order', undefined, base),
+    setPinnedSessionOrder: (items=[]) =>
+      request('PUT', '/api/pinned-sessions/order', { items }, base),
     destroySession:   (id)           => request('DELETE', `/api/sessions/${encodeURIComponent(id)}`, undefined, base),
     getSessionDraft:  (id, workspaceHash = '') =>
       request('GET', sessionDraftPath(id, workspaceHash), undefined, base),

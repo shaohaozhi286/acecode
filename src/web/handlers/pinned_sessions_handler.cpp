@@ -12,6 +12,25 @@ namespace acecode::web {
 namespace fs = std::filesystem;
 using nlohmann::json;
 
+namespace {
+
+std::string pinned_order_key(const PinnedSessionOrderItem& item) {
+    return item.workspace_hash + '\0' + item.session_id;
+}
+
+} // namespace
+
+bool operator==(const PinnedSessionOrderItem& lhs,
+                const PinnedSessionOrderItem& rhs) {
+    return lhs.workspace_hash == rhs.workspace_hash &&
+           lhs.session_id == rhs.session_id;
+}
+
+bool operator!=(const PinnedSessionOrderItem& lhs,
+                const PinnedSessionOrderItem& rhs) {
+    return !(lhs == rhs);
+}
+
 std::vector<std::string> normalize_pinned_session_ids(
     const std::vector<std::string>& ids) {
     std::vector<std::string> out;
@@ -95,6 +114,114 @@ bool write_pinned_sessions_state(const fs::path& path,
     const auto ids = normalize_pinned_session_ids(state.session_ids);
     json root;
     root["session_ids"] = ids;
+
+    auto tmp = path;
+    tmp += ".tmp";
+    {
+        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            if (error) *error = "cannot open state file for write";
+            return false;
+        }
+        out << root.dump(2);
+        out << '\n';
+        if (!out) {
+            if (error) *error = "failed to write state file";
+            return false;
+        }
+    }
+
+    fs::remove(path, ec);
+    ec.clear();
+    fs::rename(tmp, path, ec);
+    if (ec) {
+        fs::remove(tmp);
+        if (error) *error = ec.message();
+        return false;
+    }
+    return true;
+}
+
+std::vector<PinnedSessionOrderItem> normalize_pinned_session_order_items(
+    const std::vector<PinnedSessionOrderItem>& items) {
+    std::vector<PinnedSessionOrderItem> out;
+    std::unordered_set<std::string> seen;
+    out.reserve(items.size());
+    for (const auto& item : items) {
+        if (item.workspace_hash.empty() || item.session_id.empty()) continue;
+        const auto key = pinned_order_key(item);
+        if (seen.count(key)) continue;
+        seen.insert(key);
+        out.push_back(item);
+    }
+    return out;
+}
+
+std::vector<PinnedSessionOrderItem> prune_pinned_session_order_items(
+    const std::vector<PinnedSessionOrderItem>& items,
+    const std::vector<PinnedSessionOrderItem>& available_items) {
+    std::unordered_set<std::string> available;
+    for (const auto& item : available_items) {
+        if (item.workspace_hash.empty() || item.session_id.empty()) continue;
+        available.insert(pinned_order_key(item));
+    }
+
+    std::vector<PinnedSessionOrderItem> out;
+    for (const auto& item : normalize_pinned_session_order_items(items)) {
+        if (available.count(pinned_order_key(item))) out.push_back(item);
+    }
+    return out;
+}
+
+PinnedSessionOrderState read_pinned_session_order_state(const fs::path& path) {
+    std::ifstream in(path);
+    if (!in) return {};
+
+    try {
+        auto root = json::parse(in, nullptr, true, true);
+        if (!root.is_object() || !root.contains("items") ||
+            !root["items"].is_array()) {
+            return {};
+        }
+
+        std::vector<PinnedSessionOrderItem> items;
+        for (const auto& raw : root["items"]) {
+            if (!raw.is_object()) continue;
+            PinnedSessionOrderItem item;
+            if (raw.contains("workspace_hash") && raw["workspace_hash"].is_string()) {
+                item.workspace_hash = raw["workspace_hash"].get<std::string>();
+            }
+            if (raw.contains("session_id") && raw["session_id"].is_string()) {
+                item.session_id = raw["session_id"].get<std::string>();
+            }
+            items.push_back(std::move(item));
+        }
+        return {normalize_pinned_session_order_items(items)};
+    } catch (...) {
+        return {};
+    }
+}
+
+bool write_pinned_session_order_state(const fs::path& path,
+                                      const PinnedSessionOrderState& state,
+                                      std::string* error) {
+    std::error_code ec;
+    if (!path.parent_path().empty()) {
+        fs::create_directories(path.parent_path(), ec);
+        if (ec) {
+            if (error) *error = ec.message();
+            return false;
+        }
+    }
+
+    json root;
+    root["items"] = json::array();
+    for (const auto& item : normalize_pinned_session_order_items(state.items)) {
+        root["items"].push_back(json{
+            {"workspace_hash", item.workspace_hash},
+            {"session_id", item.session_id},
+        });
+    }
 
     auto tmp = path;
     tmp += ".tmp";

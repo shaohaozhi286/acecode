@@ -272,6 +272,38 @@ await run('UI preference API keeps legacy avatar preference endpoint compatible'
   }
 });
 
+await run('Pinned session visual order API reads and writes global order endpoint', async () => {
+  const previousFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    calls.push({ url, opts });
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ items: [{ workspace_hash: 'w1', session_id: 'a' }] }),
+    };
+  };
+  try {
+    const client = createApi({ origin: 'http://127.0.0.1:4567', token: 'tok' });
+    const got = await client.getPinnedSessionOrder();
+    const saved = await client.setPinnedSessionOrder([{ workspace_hash: 'w2', session_id: 'b' }]);
+
+    assert.deepEqual(got, { items: [{ workspace_hash: 'w1', session_id: 'a' }] });
+    assert.deepEqual(saved, { items: [{ workspace_hash: 'w1', session_id: 'a' }] });
+    assert.equal(calls[0].url, 'http://127.0.0.1:4567/api/pinned-sessions/order');
+    assert.equal(calls[0].opts.method, 'GET');
+    assert.equal(calls[0].opts.headers['X-ACECode-Token'], 'tok');
+    assert.equal(calls[1].url, 'http://127.0.0.1:4567/api/pinned-sessions/order');
+    assert.equal(calls[1].opts.method, 'PUT');
+    assert.deepEqual(JSON.parse(calls[1].opts.body), {
+      items: [{ workspace_hash: 'w2', session_id: 'b' }],
+    });
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
 await run('Default permission mode API reads and writes config endpoint', async () => {
   const previousFetch = globalThis.fetch;
   const calls = [];

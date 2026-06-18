@@ -1275,6 +1275,74 @@ TEST(WebServerHttp, WorkspacePinnedSessionsPersistAndPruneIds) {
     EXPECT_EQ(get_body["session_ids"][0], session_id);
 }
 
+// 场景:全局 pinned 视觉顺序可跨 workspace 保存,并按当前 pinned 状态裁剪旧项。
+TEST(WebServerHttp, PinnedSessionVisualOrderPersistsAcrossWorkspacesAndPrunes) {
+    WebServerFixture fx;
+    const std::string hash1 = acecode::compute_cwd_hash(fx.cwd);
+
+    const auto other_dir = fx.tmp_dir / "other-workspace";
+    std::filesystem::create_directories(other_dir);
+    auto post_ws = cpr::Post(cpr::Url{fx.url("/api/workspaces")},
+                             cpr::Header{{"Content-Type", "application/json"}},
+                             cpr::Body{json{{"cwd", other_dir.string()}}.dump()});
+    ASSERT_EQ(post_ws.status_code, 201) << post_ws.text;
+    const std::string hash2 = json::parse(post_ws.text).value("hash", std::string{});
+    ASSERT_FALSE(hash2.empty());
+
+    auto create1 = cpr::Post(cpr::Url{fx.url("/api/workspaces/" + hash1 + "/sessions")},
+                             cpr::Header{{"Content-Type", "application/json"}},
+                             cpr::Body{R"({})"});
+    ASSERT_EQ(create1.status_code, 201) << create1.text;
+    const std::string session1 = json::parse(create1.text).value("session_id", std::string{});
+    ASSERT_FALSE(session1.empty());
+
+    auto create2 = cpr::Post(cpr::Url{fx.url("/api/workspaces/" + hash2 + "/sessions")},
+                             cpr::Header{{"Content-Type", "application/json"}},
+                             cpr::Body{R"({})"});
+    ASSERT_EQ(create2.status_code, 201) << create2.text;
+    const std::string session2 = json::parse(create2.text).value("session_id", std::string{});
+    ASSERT_FALSE(session2.empty());
+
+    auto pin1 = cpr::Put(cpr::Url{fx.url("/api/workspaces/" + hash1 + "/pinned-sessions")},
+                         cpr::Header{{"Content-Type", "application/json"}},
+                         cpr::Body{json{{"session_ids", json::array({session1})}}.dump()});
+    ASSERT_EQ(pin1.status_code, 200) << pin1.text;
+    auto pin2 = cpr::Put(cpr::Url{fx.url("/api/workspaces/" + hash2 + "/pinned-sessions")},
+                         cpr::Header{{"Content-Type", "application/json"}},
+                         cpr::Body{json{{"session_ids", json::array({session2})}}.dump()});
+    ASSERT_EQ(pin2.status_code, 200) << pin2.text;
+
+    json order = {
+        {"items", json::array({
+            json{{"workspace_hash", hash2}, {"session_id", session2}},
+            json{{"workspace_hash", hash1}, {"session_id", session1}},
+            json{{"workspace_hash", "missing"}, {"session_id", "missing"}},
+        })},
+    };
+    auto put_order = cpr::Put(cpr::Url{fx.url("/api/pinned-sessions/order")},
+                              cpr::Header{{"Content-Type", "application/json"}},
+                              cpr::Body{order.dump()});
+    ASSERT_EQ(put_order.status_code, 200) << put_order.text;
+    auto put_body = json::parse(put_order.text);
+    ASSERT_EQ(put_body["items"].size(), 2u);
+    EXPECT_EQ(put_body["items"][0]["workspace_hash"], hash2);
+    EXPECT_EQ(put_body["items"][0]["session_id"], session2);
+    EXPECT_EQ(put_body["items"][1]["workspace_hash"], hash1);
+    EXPECT_EQ(put_body["items"][1]["session_id"], session1);
+
+    auto unpin1 = cpr::Put(cpr::Url{fx.url("/api/workspaces/" + hash1 + "/pinned-sessions")},
+                           cpr::Header{{"Content-Type", "application/json"}},
+                           cpr::Body{json{{"session_ids", json::array()}}.dump()});
+    ASSERT_EQ(unpin1.status_code, 200) << unpin1.text;
+
+    auto get_order = cpr::Get(cpr::Url{fx.url("/api/pinned-sessions/order")});
+    ASSERT_EQ(get_order.status_code, 200) << get_order.text;
+    auto get_body = json::parse(get_order.text);
+    ASSERT_EQ(get_body["items"].size(), 1u);
+    EXPECT_EQ(get_body["items"][0]["workspace_hash"], hash2);
+    EXPECT_EQ(get_body["items"][0]["session_id"], session2);
+}
+
 // 场景:归档 workspace 会话后,默认列表隐藏它;专用 archived 查询能看到,
 // 取消归档后恢复到默认列表。
 TEST(WebServerHttp, WorkspaceArchiveSessionHidesFromDefaultList) {

@@ -10,11 +10,17 @@
 namespace fs = std::filesystem;
 
 using acecode::web::PinnedSessionsState;
+using acecode::web::PinnedSessionOrderItem;
+using acecode::web::PinnedSessionOrderState;
 using acecode::web::normalize_pinned_session_ids;
+using acecode::web::normalize_pinned_session_order_items;
 using acecode::web::pin_session_id;
+using acecode::web::prune_pinned_session_order_items;
 using acecode::web::prune_pinned_session_ids;
+using acecode::web::read_pinned_session_order_state;
 using acecode::web::read_pinned_sessions_state;
 using acecode::web::unpin_session_id;
+using acecode::web::write_pinned_session_order_state;
 using acecode::web::write_pinned_sessions_state;
 
 namespace {
@@ -78,4 +84,46 @@ TEST(PinnedSessionsHandler, WritesAndReadsState) {
 
     auto state = read_pinned_sessions_state(path);
     EXPECT_EQ(state.session_ids, (std::vector<std::string>{"a", "b"}));
+}
+
+TEST(PinnedSessionsHandler, NormalizesPinnedVisualOrderItems) {
+    auto items = normalize_pinned_session_order_items({
+        {"w1", "a"},
+        {"w1", "a"},
+        {"", "missing"},
+        {"w2", ""},
+        {"w2", "x"},
+    });
+    EXPECT_EQ(items, (std::vector<PinnedSessionOrderItem>{{"w1", "a"}, {"w2", "x"}}));
+}
+
+TEST(PinnedSessionsHandler, PrunesPinnedVisualOrderItems) {
+    auto items = prune_pinned_session_order_items(
+        {{"w1", "a"}, {"w2", "x"}, {"w1", "b"}, {"w1", "a"}},
+        {{"w2", "x"}, {"w1", "b"}});
+    EXPECT_EQ(items, (std::vector<PinnedSessionOrderItem>{{"w2", "x"}, {"w1", "b"}}));
+}
+
+TEST(PinnedSessionsHandler, MissingOrMalformedVisualOrderFileReadsAsEmpty) {
+    TempDir tmp;
+    auto missing = read_pinned_session_order_state(tmp.path / "missing_order.json");
+    EXPECT_TRUE(missing.items.empty());
+
+    auto malformed_path = tmp.path / "bad_order.json";
+    std::ofstream(malformed_path) << "{not json";
+    auto malformed = read_pinned_session_order_state(malformed_path);
+    EXPECT_TRUE(malformed.items.empty());
+}
+
+TEST(PinnedSessionsHandler, WritesAndReadsVisualOrderState) {
+    TempDir tmp;
+    auto path = tmp.path / "pins" / "pinned_sessions_order.json";
+    std::string error;
+    ASSERT_TRUE(write_pinned_session_order_state(
+        path,
+        PinnedSessionOrderState{{{"w1", "a"}, {"w2", "x"}, {"w1", "a"}}},
+        &error)) << error;
+
+    auto state = read_pinned_session_order_state(path);
+    EXPECT_EQ(state.items, (std::vector<PinnedSessionOrderItem>{{"w1", "a"}, {"w2", "x"}}));
 }

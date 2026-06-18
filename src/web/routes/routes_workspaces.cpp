@@ -369,6 +369,78 @@ void WebServer::Impl::register_workspaces() {
     }
 
 void WebServer::Impl::register_pinned_sessions() {
+        CROW_ROUTE(app, "/api/pinned-sessions/order").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
+
+        CROW_ROUTE(app, "/api/pinned-sessions/order").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+
+            const auto path = pinned_session_order_path();
+            auto state = read_pinned_session_order_state(path);
+            const auto pruned = prune_pinned_session_order_items(
+                state.items, available_pinned_session_order_items());
+            if (pruned != state.items) {
+                std::string ignored;
+                write_pinned_session_order_state(path, PinnedSessionOrderState{pruned}, &ignored);
+            }
+
+            crow::response r(pinned_session_order_to_json(pruned).dump());
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        });
+
+        CROW_ROUTE(app, "/api/pinned-sessions/order").methods(crow::HTTPMethod::PUT)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+
+            std::vector<PinnedSessionOrderItem> items;
+            try {
+                auto body = json::parse(req.body.empty() ? "{}" : req.body);
+                if (!body.contains("items") || !body["items"].is_array()) {
+                    crow::response r(400);
+                    r.body = R"({"error":"items array required"})";
+                    r.add_header("Content-Type", "application/json");
+                    return with_cors(req, std::move(r));
+                }
+                for (const auto& raw : body["items"]) {
+                    if (!raw.is_object()) continue;
+                    PinnedSessionOrderItem item;
+                    if (raw.contains("workspace_hash") && raw["workspace_hash"].is_string()) {
+                        item.workspace_hash = raw["workspace_hash"].get<std::string>();
+                    }
+                    if (raw.contains("session_id") && raw["session_id"].is_string()) {
+                        item.session_id = raw["session_id"].get<std::string>();
+                    }
+                    items.push_back(std::move(item));
+                }
+            } catch (const std::exception& e) {
+                crow::response r(400);
+                r.body = json{{"error", std::string("bad json: ") + e.what()}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            const auto next = prune_pinned_session_order_items(
+                normalize_pinned_session_order_items(items),
+                available_pinned_session_order_items());
+            std::string error;
+            if (!write_pinned_session_order_state(pinned_session_order_path(),
+                                                  PinnedSessionOrderState{next}, &error)) {
+                crow::response r(500);
+                r.body = json{{"error", "failed to write pinned session order"},
+                              {"detail", error}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            crow::response r(pinned_session_order_to_json(next).dump());
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        });
+
         CROW_ROUTE(app, "/api/workspaces/<string>/pinned-sessions").methods(crow::HTTPMethod::Options)
         ([this](const crow::request& req, const std::string&) {
             return cors_preflight(req);

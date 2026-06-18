@@ -1101,6 +1101,10 @@ std::filesystem::path WebServer::Impl::pinned_sessions_path_for_cwd(const std::s
            "pinned_sessions.json";
 }
 
+std::filesystem::path WebServer::Impl::pinned_session_order_path() const {
+    return path_from_utf8(projects_dir()) / "pinned_sessions_order.json";
+}
+
 std::vector<std::string> WebServer::Impl::session_ids_for_workspace(
     const acecode::desktop::WorkspaceMeta& ws) const {
     std::vector<std::string> out;
@@ -1136,6 +1140,52 @@ std::vector<std::string> WebServer::Impl::session_ids_for_workspace(
 json WebServer::Impl::pinned_sessions_to_json(const acecode::desktop::WorkspaceMeta& ws,
                                                  const std::vector<std::string>& session_ids) const {
     return json{{"workspace_hash", ws.hash}, {"cwd", ws.cwd}, {"session_ids", session_ids}};
+}
+
+std::vector<PinnedSessionOrderItem> WebServer::Impl::available_pinned_session_order_items() const {
+    std::vector<PinnedSessionOrderItem> out;
+    std::unordered_set<std::string> seen;
+
+    auto add_workspace = [&](const acecode::desktop::WorkspaceMeta& ws) {
+        if (ws.hash.empty()) return;
+        const auto path = pinned_sessions_path_for_cwd(ws.cwd);
+        auto state = read_pinned_sessions_state(path);
+        const auto pruned = prune_pinned_session_ids(
+            state.session_ids, session_ids_for_workspace(ws));
+        if (pruned != state.session_ids) {
+            std::string ignored;
+            write_pinned_sessions_state(path, PinnedSessionsState{pruned}, &ignored);
+        }
+        for (const auto& id : pruned) {
+            if (id.empty()) continue;
+            const auto key = ws.hash + '\0' + id;
+            if (seen.count(key)) continue;
+            seen.insert(key);
+            out.push_back(PinnedSessionOrderItem{ws.hash, id});
+        }
+    };
+
+    if (deps.workspace_registry) {
+        deps.workspace_registry->scan(projects_dir());
+        for (const auto& ws : deps.workspace_registry->list()) {
+            add_workspace(ws);
+        }
+    } else {
+        add_workspace(compatibility_workspace());
+    }
+    return out;
+}
+
+json WebServer::Impl::pinned_session_order_to_json(
+    const std::vector<PinnedSessionOrderItem>& items) const {
+    json arr = json::array();
+    for (const auto& item : items) {
+        arr.push_back(json{
+            {"workspace_hash", item.workspace_hash},
+            {"session_id", item.session_id},
+        });
+    }
+    return json{{"items", arr}};
 }
 
 // =====================================================================

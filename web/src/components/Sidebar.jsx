@@ -18,9 +18,13 @@ import { relativeTime, clsx } from '../lib/format.js';
 import {
   filterPinnedSessions,
   normalizePinnedIds,
+  normalizePinnedOrderItems,
   pinSessionId,
+  pinPinnedOrderItem,
   pinnedSessionsForList,
+  reorderPinnedOrderItems,
   reorderPinnedSessionId,
+  unpinPinnedOrderItem,
   unpinSessionId,
 } from '../lib/pinnedSessions.js';
 import { sessionDisplayTitle, withNewSessionDisplayTitles } from '../lib/sessionTitle.js';
@@ -64,10 +68,19 @@ function sameStringArray(a = [], b = []) {
   return a.every((value, index) => value === b[index]);
 }
 
-function pinnedDropTargetForPointer(clientY, workspaceHash) {
+function samePinnedOrderItems(a = [], b = []) {
+  const left = normalizePinnedOrderItems(a);
+  const right = normalizePinnedOrderItems(b);
+  if (left.length !== right.length) return false;
+  return left.every((value, index) => (
+    value.workspace_hash === right[index].workspace_hash &&
+    value.session_id === right[index].session_id
+  ));
+}
+
+function pinnedDropTargetForPointer(clientY) {
   if (typeof document === 'undefined') return null;
-  const rows = Array.from(document.querySelectorAll('[data-sidebar-pinned-key]'))
-    .filter((el) => el.dataset.sidebarPinnedWorkspace === workspaceHash);
+  const rows = Array.from(document.querySelectorAll('[data-sidebar-pinned-key]'));
   if (rows.length === 0) return null;
 
   const first = rows[0];
@@ -76,6 +89,7 @@ function pinnedDropTargetForPointer(clientY, workspaceHash) {
   const lastRect = last.getBoundingClientRect();
   if (clientY <= firstRect.top) {
     return {
+      targetWorkspaceHash: first.dataset.sidebarPinnedWorkspace || '',
       targetId: first.dataset.sidebarPinnedId || '',
       targetKey: first.dataset.sidebarPinnedKey || '',
       placement: 'before',
@@ -83,6 +97,7 @@ function pinnedDropTargetForPointer(clientY, workspaceHash) {
   }
   if (clientY >= lastRect.bottom) {
     return {
+      targetWorkspaceHash: last.dataset.sidebarPinnedWorkspace || '',
       targetId: last.dataset.sidebarPinnedId || '',
       targetKey: last.dataset.sidebarPinnedKey || '',
       placement: 'after',
@@ -93,6 +108,7 @@ function pinnedDropTargetForPointer(clientY, workspaceHash) {
     const rect = row.getBoundingClientRect();
     if (clientY >= rect.top && clientY <= rect.bottom) {
       return {
+        targetWorkspaceHash: row.dataset.sidebarPinnedWorkspace || '',
         targetId: row.dataset.sidebarPinnedId || '',
         targetKey: row.dataset.sidebarPinnedKey || '',
         placement: clientY < rect.top + rect.height / 2 ? 'before' : 'after',
@@ -100,6 +116,14 @@ function pinnedDropTargetForPointer(clientY, workspaceHash) {
     }
   }
   return null;
+}
+
+function pinnedOrderItemsFromDom() {
+  if (typeof document === 'undefined') return [];
+  return normalizePinnedOrderItems(Array.from(document.querySelectorAll('[data-sidebar-pinned-key]')).map((row) => ({
+    workspace_hash: row.dataset.sidebarPinnedWorkspace || '',
+    session_id: row.dataset.sidebarPinnedId || '',
+  })));
 }
 
 function validateBooleanPreference(value) {
@@ -625,6 +649,7 @@ export function Sidebar({
   const [sessions,    setSessions]    = useState([]);
   const [statusBySession, setStatusBySession] = useState(() => new Map());
   const [pinnedByWorkspace, setPinnedByWorkspace] = useState(() => new Map());
+  const [pinnedOrderItems, setPinnedOrderItems] = useState([]);
   const [sessionLoadingWorkspaces, setSessionLoadingWorkspaces] = useState(() => new Set());
   const [sessionLoadedWorkspaces, setSessionLoadedWorkspaces] = useState(() => new Set());
   const [expanded,    setExpanded]    = useState(new Set());
@@ -634,6 +659,7 @@ export function Sidebar({
   const pendingRefreshHashRef = useRef('');
   const expandedRef = useRef(new Set());
   const pinnedByWorkspaceRef = useRef(new Map());
+  const pinnedOrderItemsRef = useRef([]);
   const retainedSessionIdsRef = useRef(new Set());
   const sidebarScrollRef = useRef(null);
   const pinnedDragRef = useRef(null);
@@ -674,6 +700,15 @@ export function Sidebar({
     });
   }, []);
 
+  const setPinnedOrder = useCallback((updater) => {
+    setPinnedOrderItems((prev) => {
+      const rawNext = typeof updater === 'function' ? updater(prev) : updater;
+      const next = normalizePinnedOrderItems(rawNext);
+      pinnedOrderItemsRef.current = next;
+      return next;
+    });
+  }, []);
+
   const setPinnedWorkspaceIds = useCallback((workspaceHash, ids) => {
     if (!workspaceHash) return;
     const normalized = normalizePinnedIds(ids);
@@ -685,27 +720,59 @@ export function Sidebar({
     });
   }, [setPinnedMap]);
 
-  const applyPinnedReorder = useCallback(async ({ workspaceHash, sourceId, targetId, placement }) => {
-    if (!workspaceHash || !sourceId || !targetId) return;
-    const previous = normalizePinnedIds(pinnedByWorkspaceRef.current.get(workspaceHash) || []);
-    const next = reorderPinnedSessionId(previous, sourceId, targetId, placement);
-    if (sameStringArray(previous, next)) return;
+  const applyPinnedReorder = useCallback(async ({
+    workspaceHash,
+    sourceId,
+    targetWorkspaceHash,
+    targetId,
+    placement,
+  }) => {
+    if (!workspaceHash || !sourceId || !targetWorkspaceHash || !targetId) return;
+    const previousPinned = normalizePinnedIds(pinnedByWorkspaceRef.current.get(workspaceHash) || []);
+    const previousOrder = normalizePinnedOrderItems(pinnedOrderItemsRef.current);
+    const baseOrder = pinnedOrderItemsFromDom();
+    const currentOrder = baseOrder.length ? baseOrder : previousOrder;
+    const sourceItem = { workspace_hash: workspaceHash, session_id: sourceId };
+    const targetItem = { workspace_hash: targetWorkspaceHash, session_id: targetId };
+    const nextOrder = reorderPinnedOrderItems(currentOrder, sourceItem, targetItem, placement);
 
-    setPinnedWorkspaceIds(workspaceHash, next);
+    const sameWorkspace = workspaceHash === targetWorkspaceHash;
+    const nextPinned = sameWorkspace
+      ? reorderPinnedSessionId(previousPinned, sourceId, targetId, placement)
+      : previousPinned;
+    const pinnedChanged = !sameStringArray(previousPinned, nextPinned);
+    const orderChanged = !samePinnedOrderItems(currentOrder, nextOrder);
+    if (!pinnedChanged && !orderChanged) return;
+
+    if (pinnedChanged) setPinnedWorkspaceIds(workspaceHash, nextPinned);
+    if (orderChanged) setPinnedOrder(nextOrder);
     try {
-      const saved = await api.setPinnedSessions(workspaceHash, next);
-      setPinnedWorkspaceIds(workspaceHash, normalizePinnedIds(saved?.session_ids || next));
+      const saves = [];
+      if (pinnedChanged) saves.push(api.setPinnedSessions(workspaceHash, nextPinned));
+      if (orderChanged) saves.push(api.setPinnedSessionOrder(nextOrder));
+      const results = await Promise.all(saves);
+      let resultIndex = 0;
+      if (pinnedChanged) {
+        const saved = results[resultIndex++];
+        setPinnedWorkspaceIds(workspaceHash, normalizePinnedIds(saved?.session_ids || nextPinned));
+      }
+      if (orderChanged) {
+        const saved = results[resultIndex++];
+        setPinnedOrder(normalizePinnedOrderItems(saved?.items || nextOrder));
+      }
     } catch (e) {
-      setPinnedWorkspaceIds(workspaceHash, previous);
+      if (pinnedChanged) setPinnedWorkspaceIds(workspaceHash, previousPinned);
+      if (orderChanged) setPinnedOrder(previousOrder);
       toast({ kind: 'err', text: '置顶排序失败:' + (e.message || '') });
     }
-  }, [setPinnedWorkspaceIds]);
+  }, [setPinnedOrder, setPinnedWorkspaceIds]);
 
   const updatePinnedDragTarget = useCallback((clientY) => {
     const drag = pinnedDragRef.current;
     if (!drag) return;
-    const target = pinnedDropTargetForPointer(clientY, drag.workspaceHash);
+    const target = pinnedDropTargetForPointer(clientY);
     if (!target) return;
+    drag.targetWorkspaceHash = target.targetWorkspaceHash;
     drag.targetId = target.targetId;
     drag.targetKey = target.targetKey;
     drag.placement = target.placement;
@@ -745,6 +812,7 @@ export function Sidebar({
       applyPinnedReorder({
         workspaceHash: drag.workspaceHash,
         sourceId: drag.sourceId,
+        targetWorkspaceHash: drag.targetWorkspaceHash || drag.workspaceHash,
         targetId: drag.targetId,
         placement: drag.placement || 'before',
       });
@@ -832,6 +900,7 @@ export function Sidebar({
       workspaceHash,
       sourceId,
       sourceKey,
+      targetWorkspaceHash: workspaceHash,
       targetId: sourceId,
       targetKey: sourceKey,
       placement: 'before',
@@ -864,17 +933,28 @@ export function Sidebar({
     const previous = normalizePinnedIds(pinnedByWorkspaceRef.current.get(workspaceHash) || []);
     const shouldPin = typeof nextPinned === 'boolean' ? nextPinned : !previous.includes(id);
     const next = shouldPin ? pinSessionId(previous, id) : unpinSessionId(previous, id);
+    const previousOrder = normalizePinnedOrderItems(pinnedOrderItemsRef.current);
+    const orderItem = { workspace_hash: workspaceHash, session_id: id };
+    const nextOrder = shouldPin
+      ? pinPinnedOrderItem(previousOrder, orderItem)
+      : unpinPinnedOrderItem(previousOrder, orderItem);
     setPinnedWorkspaceIds(workspaceHash, next);
+    setPinnedOrder(nextOrder);
 
     try {
-      const saved = await api.setPinnedSessions(workspaceHash, next);
+      const [saved, savedOrder] = await Promise.all([
+        api.setPinnedSessions(workspaceHash, next),
+        api.setPinnedSessionOrder(nextOrder),
+      ]);
       setPinnedWorkspaceIds(workspaceHash, normalizePinnedIds(saved?.session_ids || next));
+      setPinnedOrder(normalizePinnedOrderItems(savedOrder?.items || nextOrder));
       toast({ kind: 'ok', text: shouldPin ? '已置顶' : '已取消置顶' });
     } catch (e) {
       setPinnedWorkspaceIds(workspaceHash, previous);
+      setPinnedOrder(previousOrder);
       toast({ kind: 'err', text: (shouldPin ? '置顶失败:' : '取消置顶失败:') + (e.message || '') });
     }
-  }, [activeWorkspaceHash, setPinnedWorkspaceIds]);
+  }, [activeWorkspaceHash, setPinnedOrder, setPinnedWorkspaceIds]);
 
   const toggleSessionListExpanded = useCallback((hash) => {
     if (!hash) return;
@@ -983,6 +1063,12 @@ export function Sidebar({
         if (hash && ids.length) nextPinnedMap.set(hash, ids);
       }
       setPinnedMap(nextPinnedMap);
+      try {
+        const orderState = await api.getPinnedSessionOrder();
+        setPinnedOrder(normalizePinnedOrderItems(orderState?.items || []));
+      } catch {
+        setPinnedOrder(pinnedOrderItemsRef.current);
+      }
       const pinnedWorkspaceHashes = new Set(Array.from(nextPinnedMap.entries())
         .filter(([, ids]) => ids.length > 0)
         .map(([hash]) => hash));
@@ -1035,7 +1121,7 @@ export function Sidebar({
       pendingRefreshHashRef.current = '';
       if (pendingHash) setTimeout(() => refresh(pendingHash).catch(() => {}), 0);
     }
-  }, [activeWorkspaceHash, setPinnedMap, setSessionWorkspaceLoading, setSessionWorkspacesLoaded, syncRetainedSessionIds, updateExpanded]);
+  }, [activeWorkspaceHash, setPinnedMap, setPinnedOrder, setSessionWorkspaceLoading, setSessionWorkspacesLoaded, syncRetainedSessionIds, updateExpanded]);
 
   const archiveSession = useCallback(async (session) => {
     const id = session?.id || session?.sessionId || session?.session_id || '';
@@ -1052,10 +1138,17 @@ export function Sidebar({
       const previousPinned = normalizePinnedIds(pinnedByWorkspaceRef.current.get(workspaceHash) || []);
       if (workspaceHash && previousPinned.includes(id)) {
         const nextPinned = unpinSessionId(previousPinned, id);
+        const previousOrder = normalizePinnedOrderItems(pinnedOrderItemsRef.current);
+        const nextOrder = unpinPinnedOrderItem(previousOrder, { workspace_hash: workspaceHash, session_id: id });
         setPinnedWorkspaceIds(workspaceHash, nextPinned);
+        setPinnedOrder(nextOrder);
         try {
-          const saved = await api.setPinnedSessions(workspaceHash, nextPinned);
+          const [saved, savedOrder] = await Promise.all([
+            api.setPinnedSessions(workspaceHash, nextPinned),
+            api.setPinnedSessionOrder(nextOrder),
+          ]);
           setPinnedWorkspaceIds(workspaceHash, normalizePinnedIds(saved?.session_ids || nextPinned));
+          setPinnedOrder(normalizePinnedOrderItems(savedOrder?.items || nextOrder));
         } catch {
           // Archiving already succeeded; stale pinned state will be pruned on next refresh.
         }
@@ -1076,7 +1169,7 @@ export function Sidebar({
     } catch (e) {
       toast({ kind: 'err', text: '归档失败:' + (e.message || '') });
     }
-  }, [activeId, activeWorkspaceHash, onOpenHome, refresh, setPinnedWorkspaceIds]);
+  }, [activeId, activeWorkspaceHash, onOpenHome, refresh, setPinnedOrder, setPinnedWorkspaceIds]);
 
   const renameSession = useCallback(async (session, title) => {
     const id = session?.id || session?.sessionId || session?.session_id || '';
@@ -1455,7 +1548,7 @@ export function Sidebar({
     }
   };
 
-  const pinnedSessions = pinnedSessionsForList(renderedSessions, pinnedByWorkspace);
+  const pinnedSessions = pinnedSessionsForList(renderedSessions, pinnedByWorkspace, pinnedOrderItems);
   const workspaceForSession = (session) => {
     const hash = session.workspace_hash || session.workspaceHash || '';
     return workspaces.find((w) => w.hash === hash) || {

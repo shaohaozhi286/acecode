@@ -264,10 +264,14 @@ struct WebServer::Impl {
                                         const acecode::desktop::WorkspaceMeta& ws,
                                         const std::string& id);
     std::filesystem::path pinned_sessions_path_for_cwd(const std::string& cwd) const;
+    std::filesystem::path pinned_session_order_path() const;
     std::vector<std::string> session_ids_for_workspace(
         const acecode::desktop::WorkspaceMeta& ws) const;
     nlohmann::json pinned_sessions_to_json(const acecode::desktop::WorkspaceMeta& ws,
                                             const std::vector<std::string>& session_ids) const;
+    std::vector<PinnedSessionOrderItem> available_pinned_session_order_items() const;
+    nlohmann::json pinned_session_order_to_json(
+        const std::vector<PinnedSessionOrderItem>& items) const;
 
     // -----------------------------------------------------------------
     // Attention state helper  (defined in server_helpers.cpp)
