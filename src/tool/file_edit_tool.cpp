@@ -498,8 +498,8 @@ static ToolResult execute_file_edit(const std::string& arguments_json, const Too
 ToolImpl create_file_edit_tool() {
     ToolDef def;
     def.name = "file_edit";
-    def.description = "Edit a file by replacing an exact string with a new string. "
-                      "Read existing non-empty files with file_read before editing; a non-lossy ranged read is enough to establish the edit baseline. "
+    def.description = "Performs exact string replacements in files. "
+                      "You must use your file_read tool at least once in the conversation before editing. This tool will error if you attempt an edit without reading the file. "
                       "The old_string must appear exactly once unless replace_all is true. "
                       "Use empty old_string only to create a missing file or fill a blank file. "
                       "Include surrounding context lines to ensure uniqueness. "

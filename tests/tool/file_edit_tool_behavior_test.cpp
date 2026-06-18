@@ -55,6 +55,17 @@ ToolResult run_edit(const nlohmann::json& args) {
 
 } // namespace
 
+TEST(FileEditToolBehavior, DescriptionUsesClaudeStyleReadFailureGuidance) {
+    ToolImpl tool = create_file_edit_tool();
+
+    EXPECT_NE(tool.definition.description.find(
+                  "This tool will error if you attempt an edit without reading the file"),
+              std::string::npos);
+    EXPECT_EQ(tool.definition.description.find(
+                  "Read existing non-empty files with file_read before editing"),
+              std::string::npos);
+}
+
 TEST(FileEditToolBehavior, RejectsExistingFileWithoutReadBaseline) {
     auto path = temp_file(".txt");
     write_file(path, "alpha\nbeta\n");

@@ -3,11 +3,16 @@
 #include "ftxui/dom/elements.hpp"
 #include "ftxui/dom/node.hpp"
 #include "ftxui/screen/screen.hpp"
+#include "tui/chat_line_measure.hpp"
 #include "tui/chat_render_window.hpp"
 
+using acecode::tui::ChatLineMeasure;
 using acecode::tui::chat_render_window;
+using acecode::tui::chat_line_counts_from_measures;
 using acecode::tui::default_chat_render_overscan_rows;
 using acecode::tui::full_chat_render_window;
+using acecode::tui::invalidate_chat_line_measure;
+using acecode::tui::sync_chat_line_measure;
 using ftxui::EQUAL;
 using ftxui::Element;
 using ftxui::HEIGHT;
@@ -111,6 +116,23 @@ TEST(ChatRenderWindow, DefaultOverscanUsesTwoViewportsWithMinimum) {
     EXPECT_EQ(default_chat_render_overscan_rows(0), 0);
     EXPECT_EQ(default_chat_render_overscan_rows(5), 24);
     EXPECT_EQ(default_chat_render_overscan_rows(20), 40);
+}
+
+TEST(ChatRenderWindow, FoldedToolResultShrinkRemovesStaleSpacerGap) {
+    std::vector<ChatLineMeasure> measures(1);
+    ASSERT_TRUE(sync_chat_line_measure(measures[0], true, 1000, 100, 1));
+
+    invalidate_chat_line_measure(measures, 0);
+    ASSERT_TRUE(sync_chat_line_measure(measures[0], true, 1, 100, 2));
+    auto counts = chat_line_counts_from_measures(measures, 1);
+
+    auto window = chat_render_window(counts, 1, 500, 20, 0);
+
+    EXPECT_EQ(window.total_rows, 2);
+    EXPECT_EQ(window.first_message, 0);
+    EXPECT_EQ(window.last_message_exclusive, 1);
+    EXPECT_EQ(window.top_spacer_rows, 0);
+    EXPECT_EQ(window.bottom_spacer_rows, 0);
 }
 
 TEST(ChatRenderWindow, FtxuiFixedHeightSpacerPreservesRows) {

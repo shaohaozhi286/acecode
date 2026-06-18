@@ -53,6 +53,17 @@ void mark_full_read(const fs::path& path) {
 
 } // namespace
 
+TEST(FileWriteToolSummary, DescriptionUsesClaudeStyleReadFailureGuidance) {
+    ToolImpl tool = create_file_write_tool();
+
+    EXPECT_NE(tool.definition.description.find(
+                  "This tool will fail if you did not read the file first"),
+              std::string::npos);
+    EXPECT_EQ(tool.definition.description.find(
+                  "overwrites it if it does after the existing file has been read"),
+              std::string::npos);
+}
+
 // 场景 1: 往一个不存在的路径写 100 行,summary.verb 应为 Created,
 // metrics 的 "+" 应等于 100。
 TEST(FileWriteToolSummary, CreatedFileReportsLineCount) {

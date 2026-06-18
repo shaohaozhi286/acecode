@@ -8,6 +8,7 @@
 #include <mutex>
 #include <filesystem>
 #include <optional>
+#include <tuple>
 #include <vector>
 
 namespace acecode {
@@ -52,6 +53,26 @@ public:
         bool content_unchanged_after_mtime_change = false;
     };
 
+    struct ReadObservationKey {
+        std::string path;
+        int start_line = 0;
+        int end_line = 0;
+
+        bool operator<(const ReadObservationKey& other) const {
+            return std::tie(path, start_line, end_line) <
+                   std::tie(other.path, other.start_line, other.end_line);
+        }
+        bool operator==(const ReadObservationKey& other) const {
+            return path == other.path &&
+                   start_line == other.start_line &&
+                   end_line == other.end_line;
+        }
+    };
+
+    struct ReadObservation {
+        clock mtime;
+    };
+
     // Record the mtime of a file at the time it was read or observed by the agent.
     void record_read(const std::string& path);
 
@@ -62,6 +83,24 @@ public:
                      const std::string& normalized_content,
                      bool partial,
                      const FileReadEditMetadata& metadata);
+
+    // Seed a full-file baseline from resumed transcript history. The stored
+    // mtime is intentionally stale so validation re-checks current content
+    // before allowing a write.
+    void seed_transcript_read_baseline(const std::string& path,
+                                       const std::string& normalized_content,
+                                       const FileReadEditMetadata& metadata);
+
+    // Claude Code style read-observation cache: repeated file_read calls for
+    // the same requested range can return a compact unchanged stub when the
+    // file mtime has not changed since the previous actual read.
+    bool has_unchanged_read_observation(
+        const std::string& path,
+        int start_line,
+        int end_line
+    ) const;
+    void record_read_observation(const std::string& path, int start_line, int end_line);
+    void invalidate_read_observations(const std::string& path);
 
     // Check if a file has been externally modified since the last recorded read.
     // Returns true if the file was modified externally (mtime changed).
@@ -98,6 +137,8 @@ private:
 
     mutable std::mutex mu_;
     std::map<std::string, Record> records_;
+    std::map<ReadObservationKey, ReadObservation> read_observations_;
+    std::vector<ReadObservationKey> read_observation_lru_;
     std::map<std::string, std::weak_ptr<std::mutex>> file_locks_;
 };
 

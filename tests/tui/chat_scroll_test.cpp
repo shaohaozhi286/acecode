@@ -161,6 +161,15 @@ TEST(ChatScroll, ScrollTopClampsToTranscriptRange) {
     EXPECT_EQ(clamp_chat_scroll_top_row(99, {4, 3}, 2, 5), 4);
 }
 
+TEST(ChatScroll, ScrollTopClampsAfterTranscriptHeightShrinks) {
+    EXPECT_EQ(chat_max_scroll_top_row({1000}, 1, 20), 981);
+    EXPECT_EQ(chat_max_scroll_top_row({1}, 1, 20), 0);
+    EXPECT_EQ(clamp_chat_scroll_top_row(500, {1}, 1, 20), 0);
+    EXPECT_EQ(chat_focus_from_display_row({1}, 1, 500),
+              std::make_pair(0, 0));
+    EXPECT_TRUE(is_chat_tail_position(0, 0, 1, {1}));
+}
+
 TEST(ChatScroll, ScrollbarMapsMouseYToViewportTop) {
     EXPECT_EQ(chat_scrollbar_y_to_top_row(10, 10, 5, {10, 10}, 2, 6), 0);
     EXPECT_EQ(chat_scrollbar_y_to_top_row(14, 10, 5, {10, 10}, 2, 6), 16);

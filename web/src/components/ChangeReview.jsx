@@ -10,6 +10,7 @@ import { summarizeChangeGroups } from '../lib/sessionChanges.js';
 import { reconcileOpenFiles, restoredScrollTop } from '../lib/changeReviewStability.js';
 import { normalizeTreePath } from '../lib/fileTreeChangeStatus.js';
 import { copyTextToSystemClipboard } from '../lib/systemClipboard.js';
+import { todoChecklistPresentation } from '../lib/todoChecklist.js';
 import { clsx } from '../lib/format.js';
 import { VsIcon } from './Icon.jsx';
 import { toast } from './Toast.jsx';
@@ -51,6 +52,73 @@ export function ChangeTotals({ summary, compact = false }) {
       <span className="ace-change-add">+{summary.totalAdditions}</span>
       <span className="ace-change-del">-{summary.totalDeletions}</span>
     </span>
+  );
+}
+
+function TodoProgressInline({ checklist }) {
+  if (!checklist?.visible) return null;
+  const hasActive = checklist.items.some((item) => item.status === 'in_progress');
+  const currentStep = Math.min(
+    checklist.total,
+    Math.max(hasActive ? 1 : 0, checklist.done + (hasActive ? 1 : 0)),
+  );
+  const label = currentStep > 0
+    ? `第 ${currentStep} / ${checklist.total} 步`
+    : `0 / ${checklist.total} 步`;
+  return (
+    <span className="ace-change-glass-todo-progress">
+      <span className="ace-change-glass-todo-spinner" aria-hidden="true" />
+      <span>{label}</span>
+    </span>
+  );
+}
+
+function TodoChecklistPopover({ checklist, onClear, clearing = false }) {
+  if (!checklist?.visible) return null;
+  return (
+    <div className="ace-change-glass-todo-popover">
+      <div className="ace-todo-glass-dock" role="group" aria-label={`待办事项 (${checklist.done}/${checklist.total})`}>
+        <div className="ace-todo-glass-content">
+          <div className="ace-todo-glass-title">
+            待办事项 ({checklist.done}/{checklist.total})
+          </div>
+          <div className="ace-todo-glass-list">
+            {checklist.items.map((item) => {
+              return (
+                <div
+                  key={item.key}
+                  className="ace-todo-glass-row"
+                  data-todo-status={item.status}
+                >
+                  <span
+                    className={clsx('ace-todo-glass-marker', item.markerClassName)}
+                    title={item.markerLabel}
+                    aria-label={item.markerLabel}
+                  >
+                    {item.icon === 'check' && <VsIcon name="ok" size={10} mono={false} />}
+                    {item.icon === 'dot' && <span className="h-1.5 w-1.5 rounded-full bg-warn" />}
+                    {item.icon === 'dash' && <span className="h-px w-2 bg-fg-mute" />}
+                  </span>
+                  <span className={clsx('ace-todo-glass-text', item.textClassName)}>
+                    {item.content}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+        <button
+          type="button"
+          className="ace-todo-glass-clear"
+          onClick={onClear}
+          disabled={!onClear || clearing}
+          title="清空待办事项"
+          aria-label="清空待办事项"
+        >
+          <VsIcon name="clearAll" size={16} alt="清空待办事项" />
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -314,10 +382,21 @@ export function ChangeConversationCard({
   );
 }
 
-export function ChangeGlassDock({ summary, onReview, onDismiss, dockRef, scrollRef }) {
+export function ChangeGlassDock({
+  summary,
+  onReview,
+  onDismiss,
+  dockRef,
+  scrollRef,
+  todos = [],
+  todoSummary = null,
+  onClearTodos,
+  todoClearing = false,
+}) {
   const localDockRef = useRef(null);
   const rootRef = dockRef || localDockRef;
   const backdropRef = useRef(null);
+  const todoChecklist = todoChecklistPresentation(todos, todoSummary);
 
   useEffect(() => {
     const source = scrollRef?.current;
@@ -419,9 +498,17 @@ export function ChangeGlassDock({ summary, onReview, onDismiss, dockRef, scrollR
           }}
           title="打开右侧审查面板"
         >
-          <ChangeTotals summary={summary} compact />
+          <span className="ace-change-glass-summary">
+            <TodoProgressInline checklist={todoChecklist} />
+            <ChangeTotals summary={summary} compact />
+          </span>
           <span className="ace-change-glass-action">查看变更</span>
         </button>
+        <TodoChecklistPopover
+          checklist={todoChecklist}
+          onClear={onClearTodos}
+          clearing={todoClearing}
+        />
         {onDismiss && (
           <button
             type="button"

@@ -18,6 +18,8 @@ class AgentLoop;
 class ToolExecutor;
 struct TuiState;
 
+void restore_file_tool_state_from_messages(const std::vector<ChatMessage>& messages);
+
 void append_resumed_session_messages(const std::vector<ChatMessage>& messages,
                                      TuiState& state,
                                      AgentLoop& agent_loop,

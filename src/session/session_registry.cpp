@@ -1,6 +1,7 @@
 #include "session_registry.hpp"
 
 #include "session_rewind.hpp"
+#include "session_resume_restore.hpp"
 #include "session_storage.hpp"
 #include "session_title_generator.hpp"
 #include "thread_goal_store.hpp"
@@ -749,6 +750,7 @@ void SessionRegistry::restore_loop_history(
     SessionEntry& entry,
     const std::vector<ChatMessage>& messages) const {
     if (!entry.loop) return;
+    restore_file_tool_state_from_messages(messages);
     entry.loop->clear_messages();
 
     for (std::size_t i = 0; i < messages.size(); ++i) {

@@ -1013,13 +1013,38 @@ body {
 }
 
 .ace-change-glass-wrap {
+  --ace-todo-wrap-bg: rgba(var(--ace-surface-rgb), 0.92);
+  --ace-todo-dock-bg: var(--ace-surface-hi);
+  --ace-todo-dock-border: rgba(var(--ace-border-rgb), 0.64);
+  --ace-todo-shadow: 0 12px 34px rgba(0, 0, 0, 0.14);
+  --ace-todo-title-color: var(--ace-fg);
+  --ace-todo-text-color: var(--ace-fg-2);
+  --ace-todo-active-color: var(--ace-fg);
+  --ace-todo-done-color: var(--ace-fg-2);
+  --ace-todo-cancelled-color: var(--ace-fg-mute);
+  --ace-todo-clear-hover-bg: rgba(var(--ace-surface-hi-rgb), 0.78);
   position: absolute;
   left: 0;
   right: 0;
   bottom: 0;
-  z-index: 5;
-  padding: 0 12px 9px;
+  z-index: 7;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 0 12px 8px;
   pointer-events: none;
+}
+[data-theme="dark"] .ace-change-glass-wrap {
+  --ace-todo-wrap-bg: var(--ace-surface);
+  --ace-todo-dock-bg: var(--ace-surface-alt);
+  --ace-todo-dock-border: rgba(var(--ace-border-rgb), 0.78);
+  --ace-todo-shadow: 0 16px 36px rgba(0, 0, 0, 0.38);
+  --ace-todo-title-color: var(--ace-fg);
+  --ace-todo-text-color: var(--ace-fg-2);
+  --ace-todo-active-color: var(--ace-fg);
+  --ace-todo-done-color: var(--ace-fg-2);
+  --ace-todo-cancelled-color: var(--ace-fg-mute);
+  --ace-todo-clear-hover-bg: rgba(var(--ace-surface-hi-rgb), 0.72);
 }
 .ace-change-glass-wrap + .border-t {
   border-top-color: transparent;
@@ -1027,19 +1052,20 @@ body {
 }
 .ace-change-glass-dock {
   position: relative;
-  width: 100%;
-  min-height: 50px;
-  display: flex;
+  width: auto;
+  max-width: calc(100% - 24px);
+  min-height: 36px;
+  display: inline-flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  padding: 0 10px 0 18px;
+  gap: 6px;
+  padding: 0 7px 0 13px;
   border: 1px solid rgba(var(--ace-border-rgb), 0.58);
   border-radius: 999px;
   background: var(--ace-surface);
   color: var(--ace-fg);
   box-shadow: var(--ace-shadow);
-  overflow: hidden;
+  overflow: visible;
   isolation: isolate;
   transform: translateZ(0);
   pointer-events: auto;
@@ -1089,20 +1115,56 @@ body {
 }
 .ace-change-glass-main {
   position: relative;
-  z-index: 1;
-  flex: 1;
+  z-index: 2;
+  flex: 0 1 auto;
   min-width: 0;
-  min-height: 46px;
+  min-height: 34px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 12px;
+  padding: 0 2px;
   border: 0;
   background: transparent;
   color: inherit;
   cursor: pointer;
   text-align: left;
   pointer-events: auto;
+}
+.ace-change-glass-summary {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+.ace-change-glass-summary .ace-change-totals {
+  flex: 0 0 auto;
+}
+.ace-change-glass-todo-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex: 0 0 auto;
+  color: var(--ace-fg-2);
+  font-size: 12px;
+  line-height: 18px;
+}
+.ace-change-glass-todo-progress::after {
+  content: "";
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: .45;
+}
+.ace-change-glass-todo-spinner {
+  width: 13px;
+  height: 13px;
+  border: 2px solid rgba(var(--ace-accent-rgb), 0.24);
+  border-top-color: var(--ace-accent);
+  border-radius: 50%;
+  animation: ace-spin .8s linear infinite;
 }
 .ace-change-glass-action {
   display: inline-flex;
@@ -1117,7 +1179,7 @@ body {
 }
 .ace-change-glass-close {
   position: relative;
-  z-index: 1;
+  z-index: 2;
   flex: 0 0 auto;
   width: 26px;
   height: 26px;
@@ -1134,6 +1196,39 @@ body {
 .ace-change-glass-close:hover {
   background: rgba(var(--ace-surface-hi-rgb), 0.62);
   color: var(--ace-fg);
+}
+.ace-change-glass-todo-popover {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 5px);
+  z-index: 4;
+  width: 700px;
+  max-width: calc(100vw - 48px);
+  opacity: 0;
+  visibility: hidden;
+  transform: translateX(-50%) translateY(4px);
+  transition: opacity .14s ease, transform .14s ease, visibility 0s linear .14s;
+  pointer-events: none;
+}
+.ace-change-glass-todo-popover::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -8px;
+  height: 8px;
+}
+.ace-change-glass-dock:hover .ace-change-glass-todo-popover,
+.ace-change-glass-todo-popover:hover {
+  opacity: 1;
+  visibility: visible;
+  transform: translateX(-50%) translateY(0);
+  transition-delay: 0s;
+  pointer-events: auto;
+}
+.ace-change-glass-todo-popover .ace-todo-glass-dock {
+  max-height: 360px;
+  overflow-y: auto;
 }
 
 .ace-todo-glass-wrap {

@@ -304,6 +304,9 @@ AgentLoopDoomGuard::ResultClass AgentLoopDoomGuard::classify_result(const ToolRe
     std::string output = collapse_space(result.output);
     std::string lower = ascii_lower(output);
     if (lower.find("[doom-loop guard]") != std::string::npos) return ResultClass::Guarded;
+    if (lower.rfind("file unchanged since last read.", 0) == 0) {
+        return ResultClass::Unchanged;
+    }
     // 成功结果不做关键词细分:file_read/grep 等工具的输出就是文件内容本身,正常内容里
     // 出现 "timed out"/"超时"/"not found" 等词(典型如 i18n 错误文案文件)不代表调用失败。
     // 关键词只能用来给"已经失败"的结果分细类,否则一次成功读取会被记成 low-signal,

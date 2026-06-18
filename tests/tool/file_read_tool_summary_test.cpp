@@ -8,17 +8,22 @@
 
 #include <gtest/gtest.h>
 
+#include "tool/file_edit_tool.hpp"
 #include "tool/file_read_tool.hpp"
+#include "tool/file_write_tool.hpp"
 #include "tool/tool_executor.hpp"
 
 #include <nlohmann/json.hpp>
 #include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <string>
 
 namespace fs = std::filesystem;
 using acecode::create_file_read_tool;
+using acecode::create_file_edit_tool;
+using acecode::create_file_write_tool;
 using acecode::ToolContext;
 using acecode::ToolImpl;
 using acecode::ToolResult;
@@ -51,6 +56,15 @@ std::string get_metric(const acecode::ToolSummary& s, const std::string& k) {
 }
 
 } // namespace
+
+TEST(FileReadToolSummary, DescriptionWarnsAgainstRedundantSameRangeReads) {
+    ToolImpl tool = create_file_read_tool();
+
+    EXPECT_NE(tool.definition.description.find("Do not re-read the same file/range"),
+              std::string::npos);
+    EXPECT_NE(tool.definition.description.find("repeated unchanged reads return a compact stub"),
+              std::string::npos);
+}
 
 // 场景 1: 读几百字节的小文件,summary 应有 verb/object/lines/size,但没有 hint。
 TEST(FileReadToolSummary, SmallFileNoHint) {
@@ -131,6 +145,153 @@ TEST(FileReadToolSummary, MissingFileDoesNotCrash) {
     ToolResult r = tool.execute(args.dump(), ToolContext{});
 
     EXPECT_FALSE(r.success);
+}
+
+TEST(FileReadToolSummary, DuplicateFullReadReturnsUnchangedStub) {
+    ToolImpl tool = create_file_read_tool();
+
+    auto p = make_temp_file("alpha\nbeta\n");
+    nlohmann::json args = {{"file_path", p.string()}};
+
+    ToolResult first = tool.execute(args.dump(), ToolContext{});
+    ASSERT_TRUE(first.success) << first.output;
+    EXPECT_NE(first.output.find("alpha\nbeta\n"), std::string::npos);
+
+    ToolResult second = tool.execute(args.dump(), ToolContext{});
+    ASSERT_TRUE(second.success) << second.output;
+    EXPECT_NE(second.output.find("File unchanged since last read"), std::string::npos);
+    EXPECT_EQ(second.output.find("alpha\nbeta\n"), std::string::npos);
+    ASSERT_TRUE(second.summary.has_value());
+    EXPECT_EQ(get_metric(*second.summary, "cache"), "unchanged");
+
+    fs::remove(p);
+}
+
+TEST(FileReadToolSummary, DifferentRequestedRangeDoesNotDeduplicate) {
+    ToolImpl tool = create_file_read_tool();
+
+    auto p = make_temp_file("alpha\nbeta\ngamma\n");
+    ToolResult first = tool.execute(nlohmann::json({
+        {"file_path", p.string()},
+        {"start_line", 1},
+        {"end_line", 1}
+    }).dump(), ToolContext{});
+    ASSERT_TRUE(first.success) << first.output;
+    EXPECT_NE(first.output.find("1: alpha\n"), std::string::npos);
+
+    ToolResult second = tool.execute(nlohmann::json({
+        {"file_path", p.string()},
+        {"start_line", 2},
+        {"end_line", 2}
+    }).dump(), ToolContext{});
+    ASSERT_TRUE(second.success) << second.output;
+    EXPECT_NE(second.output.find("2: beta\n"), std::string::npos);
+    EXPECT_EQ(second.output.find("File unchanged since last read"), std::string::npos);
+
+    fs::remove(p);
+}
+
+TEST(FileReadToolSummary, ChangedFileFallsBackToCurrentContent) {
+    ToolImpl tool = create_file_read_tool();
+
+    auto p = make_temp_file("old\n");
+    ToolResult first = tool.execute(nlohmann::json({{"file_path", p.string()}}).dump(),
+                                    ToolContext{});
+    ASSERT_TRUE(first.success) << first.output;
+
+    {
+        std::ofstream ofs(p, std::ios::binary | std::ios::trunc);
+        ofs << "new\n";
+    }
+    auto previous_time = fs::last_write_time(p);
+    fs::last_write_time(p, previous_time + std::chrono::seconds(2));
+
+    ToolResult second = tool.execute(nlohmann::json({{"file_path", p.string()}}).dump(),
+                                     ToolContext{});
+    ASSERT_TRUE(second.success) << second.output;
+    EXPECT_NE(second.output.find("new\n"), std::string::npos);
+    EXPECT_EQ(second.output.find("File unchanged since last read"), std::string::npos);
+
+    fs::remove(p);
+}
+
+TEST(FileReadToolSummary, EquivalentPathSpellingUsesSameReadObservation) {
+    ToolImpl tool = create_file_read_tool();
+
+    auto p = make_temp_file("same\n");
+    ToolResult first = tool.execute(nlohmann::json({{"file_path", p.string()}}).dump(),
+                                    ToolContext{});
+    ASSERT_TRUE(first.success) << first.output;
+
+    fs::path variant = p.parent_path() / "." / p.filename();
+    ToolResult second = tool.execute(nlohmann::json({{"file_path", variant.string()}}).dump(),
+                                     ToolContext{});
+    ASSERT_TRUE(second.success) << second.output;
+    EXPECT_NE(second.output.find("File unchanged since last read"), std::string::npos);
+    EXPECT_EQ(second.output.find("same\n"), std::string::npos);
+
+    fs::remove(p);
+}
+
+TEST(FileReadToolSummary, FileWriteInvalidatesPriorReadObservation) {
+    ToolImpl read_tool = create_file_read_tool();
+    ToolImpl write_tool = create_file_write_tool();
+
+    auto p = make_temp_file("old\n");
+    ToolResult first = read_tool.execute(nlohmann::json({{"file_path", p.string()}}).dump(),
+                                         ToolContext{});
+    ASSERT_TRUE(first.success) << first.output;
+
+    ToolResult write = write_tool.execute(nlohmann::json({
+        {"file_path", p.string()},
+        {"content", "new\n"}
+    }).dump(), ToolContext{});
+    ASSERT_TRUE(write.success) << write.output;
+
+    ToolResult after_write = read_tool.execute(nlohmann::json({{"file_path", p.string()}}).dump(),
+                                               ToolContext{});
+    ASSERT_TRUE(after_write.success) << after_write.output;
+    EXPECT_NE(after_write.output.find("new\n"), std::string::npos);
+    EXPECT_EQ(after_write.output.find("File unchanged since last read"), std::string::npos);
+
+    ToolResult repeated = read_tool.execute(nlohmann::json({{"file_path", p.string()}}).dump(),
+                                            ToolContext{});
+    ASSERT_TRUE(repeated.success) << repeated.output;
+    EXPECT_NE(repeated.output.find("File unchanged since last read"), std::string::npos);
+    EXPECT_EQ(repeated.output.find("new\n"), std::string::npos);
+
+    fs::remove(p);
+}
+
+TEST(FileReadToolSummary, FileEditInvalidatesPriorReadObservation) {
+    ToolImpl read_tool = create_file_read_tool();
+    ToolImpl edit_tool = create_file_edit_tool();
+
+    auto p = make_temp_file("alpha\nbeta\n");
+    ToolResult first = read_tool.execute(nlohmann::json({{"file_path", p.string()}}).dump(),
+                                         ToolContext{});
+    ASSERT_TRUE(first.success) << first.output;
+
+    ToolResult edit = edit_tool.execute(nlohmann::json({
+        {"file_path", p.string()},
+        {"old_string", "beta"},
+        {"new_string", "delta"}
+    }).dump(), ToolContext{});
+    ASSERT_TRUE(edit.success) << edit.output;
+
+    ToolResult after_edit = read_tool.execute(nlohmann::json({{"file_path", p.string()}}).dump(),
+                                              ToolContext{});
+    ASSERT_TRUE(after_edit.success) << after_edit.output;
+    EXPECT_NE(after_edit.output.find("alpha\ndelta\n"), std::string::npos);
+    EXPECT_EQ(after_edit.output.find("File unchanged since last read"), std::string::npos);
+
+    ToolResult repeated = read_tool.execute(nlohmann::json({{"file_path", p.string()}}).dump(),
+                                            ToolContext{});
+    ASSERT_TRUE(repeated.success) << repeated.output;
+    EXPECT_NE(repeated.output.find("File unchanged since last read"), std::string::npos);
+    EXPECT_EQ(repeated.output.find("alpha\ndelta\n"), std::string::npos);
+
+    fs::remove(p);
 }
 
 TEST(FileReadToolSummary, OutputIncludesReadMetadataFooterWithoutEditHashes) {

@@ -102,7 +102,6 @@ import {
   selectionContextLocationKey,
 } from '../lib/selectionChatContext.js';
 import { getGoalStopControlState } from '../lib/goalControl.js';
-import { todoChecklistPresentation } from '../lib/todoChecklist.js';
 import {
   CHANGE_DOCK_DISMISSALS_STORAGE_KEY,
   dismissChangeDockSignature,
@@ -250,57 +249,6 @@ const EMPTY_TODO_SUMMARY = Object.freeze({
   completed: 0,
   cancelled: 0,
 });
-
-function TodoChecklist({ todos = [], summary = null, onClear, clearing = false }) {
-  const checklist = todoChecklistPresentation(todos, summary);
-  if (!checklist.visible) return null;
-
-  return (
-    <div className="ace-todo-glass-wrap shrink-0">
-      <div className="ace-todo-glass-dock" role="group" aria-label={`待办事项 (${checklist.done}/${checklist.total})`}>
-        <div className="ace-todo-glass-content">
-          <div className="ace-todo-glass-title">
-            待办事项 ({checklist.done}/{checklist.total})
-          </div>
-          <div className="ace-todo-glass-list">
-            {checklist.items.map((item) => {
-              return (
-                <div
-                  key={item.key}
-                  className="ace-todo-glass-row"
-                  data-todo-status={item.status}
-                >
-                  <span
-                    className={clsx('ace-todo-glass-marker', item.markerClassName)}
-                    title={item.markerLabel}
-                    aria-label={item.markerLabel}
-                  >
-                    {item.icon === 'check' && <VsIcon name="ok" size={10} mono={false} />}
-                    {item.icon === 'dot' && <span className="h-1.5 w-1.5 rounded-full bg-warn" />}
-                    {item.icon === 'dash' && <span className="h-px w-2 bg-fg-mute" />}
-                  </span>
-                  <span className={clsx('ace-todo-glass-text', item.textClassName)}>
-                    {item.content}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-        <button
-          type="button"
-          className="ace-todo-glass-clear"
-          onClick={onClear}
-          disabled={!onClear || clearing}
-          title="清空待办事项"
-          aria-label="清空待办事项"
-        >
-          <VsIcon name="clearAll" size={16} alt="清空待办事项" />
-        </button>
-      </div>
-    </div>
-  );
-}
 
 function ActivitySummaryBlock({ item, expanded, onToggle }) {
   return (
@@ -2534,6 +2482,10 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
             summary={changeSummary}
             onReview={openReviewPanel}
             onDismiss={dismissChangeDock}
+            todos={todos}
+            todoSummary={todoSummary}
+            onClearTodos={clearSessionTodos}
+            todoClearing={todoClearing}
           />
         )}
       </div>
@@ -2546,12 +2498,6 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         items={visibleQueuedItems}
         onCancel={cancelQueued}
         onRetry={retryQueued}
-      />
-      <TodoChecklist
-        todos={todos}
-        summary={todoSummary}
-        onClear={clearSessionTodos}
-        clearing={todoClearing}
       />
       <InputBar
         ref={inputRef}

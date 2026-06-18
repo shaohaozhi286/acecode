@@ -236,6 +236,25 @@ TEST(AgentLoopDoomGuard, SuccessfulOutputWithErrorLikeContentIsNotLowSignal) {
     EXPECT_FALSE(guard.maybe_guard(duplicate).has_value());
 }
 
+TEST(AgentLoopDoomGuard, FileReadUnchangedStubArmsExactRepeatGuard) {
+    AgentLoopDoomGuard guard;
+    ToolCall call = make_call("call-1", "file_read",
+        R"({"file_path":"D:/code/src/app.cpp"})");
+
+    ToolResult unchanged_stub;
+    unchanged_stub.success = true;
+    unchanged_stub.output =
+        "File unchanged since last read. The content from the earlier file_read tool result in this conversation is still current; refer to that instead of re-reading.";
+    guard.record_result(call, unchanged_stub);
+
+    ToolCall duplicate = make_call("call-2", "file_read",
+        R"({"file_path":"D:/code/src/app.cpp"})");
+    auto guarded = guard.maybe_guard(duplicate);
+    ASSERT_TRUE(guarded.has_value());
+    EXPECT_FALSE(guarded->success);
+    EXPECT_NE(guarded->output.find("[Doom-loop guard]"), std::string::npos);
+}
+
 // 守住原有保护:失败结果的关键词细分仍然生效,真正的 "old_string not found"
 // 失败重复一次后第二次同参调用应被拦截。
 TEST(AgentLoopDoomGuard, FailureKeywordsStillTriggerExactRepeatGuard) {

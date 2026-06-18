@@ -14,6 +14,8 @@
 namespace acecode {
 
 static constexpr size_t FILE_READ_LARGE_HINT_THRESHOLD = 200 * 1024; // 200 KB
+static constexpr const char* FILE_UNCHANGED_STUB =
+    "File unchanged since last read. The content from the earlier file_read tool result in this conversation is still current; refer to that instead of re-reading.";
 
 namespace {
 
@@ -90,6 +92,18 @@ static ToolResult execute_file_read(const std::string& arguments_json, const Too
         return size_check;
     }
 
+    if (MtimeTracker::instance().has_unchanged_read_observation(file_path, start_line, end_line)) {
+        ToolSummary summary;
+        summary.verb = "Read";
+        summary.object = file_path;
+        summary.metrics.emplace_back("cache", "unchanged");
+        summary.icon = tool_icon("file_read");
+
+        ToolResult r{FILE_UNCHANGED_STUB, true};
+        r.summary = std::move(summary);
+        return r;
+    }
+
     auto read_result = read_text_file_buffer(file_path, true);
     if (!read_result.success) {
         return ToolResult{read_result.error, false};
@@ -138,6 +152,7 @@ static ToolResult execute_file_read(const std::string& arguments_json, const Too
     // 写入校验基于模型真实看到的 UTF-8/LF 文本,避免拿原始字节和规范化文本比较。
     MtimeTracker::instance().record_read(
         file_path, buffer.text, partial_read || buffer.metadata.lossy, metadata);
+    MtimeTracker::instance().record_read_observation(file_path, start_line, end_line);
 
     // Large-file hint: only when the caller asked for the whole file (both
     // range bounds omitted) and the payload exceeds 200 KB. Appended as a
@@ -184,6 +199,7 @@ ToolImpl create_file_read_tool() {
     ToolDef def;
     def.name = "file_read";
     def.description = "Read the contents of a file. Use start_line/end_line for partial reads. "
+                      "Do not re-read the same file/range if its contents are already current in the conversation; repeated unchanged reads return a compact stub. "
                       "Always use absolute paths.";
     def.parameters = nlohmann::json({
         {"type", "object"},

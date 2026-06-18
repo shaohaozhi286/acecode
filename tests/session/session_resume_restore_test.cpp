@@ -7,13 +7,19 @@
 #include "agent_loop.hpp"
 #include "permissions.hpp"
 #include "session/session_resume_restore.hpp"
+#include "tool/mtime_tracker.hpp"
 #include "tool/tool_executor.hpp"
 #include "tui_state.hpp"
 #include "../agent_loop/stub_provider.hpp"
 
+#include <atomic>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 
 namespace {
+
+namespace fs = std::filesystem;
 
 nlohmann::json one_tool_call(const std::string& id,
                              const std::string& name,
@@ -28,6 +34,32 @@ nlohmann::json one_tool_call(const std::string& id,
             }}
         }
     });
+}
+
+fs::path make_temp_file(const std::string& body) {
+    static std::atomic<int> seq{0};
+    fs::path p = fs::temp_directory_path() /
+                 ("acecode_resume_file_state_" + std::to_string(++seq) + ".txt");
+    std::ofstream ofs(p, std::ios::binary);
+    ofs << body;
+    return p;
+}
+
+acecode::ChatMessage assistant_call(const std::string& id,
+                                    const std::string& name,
+                                    const nlohmann::json& args) {
+    acecode::ChatMessage assistant;
+    assistant.role = "assistant";
+    assistant.tool_calls = one_tool_call(id, name, args.dump());
+    return assistant;
+}
+
+acecode::ChatMessage tool_result(const std::string& id, const std::string& content) {
+    acecode::ChatMessage tool;
+    tool.role = "tool";
+    tool.tool_call_id = id;
+    tool.content = content;
+    return tool;
 }
 
 class ResumeRestoreHarness {
@@ -162,4 +194,104 @@ TEST(SessionResumeRestore, ReplaysTranscriptOnlyMessagesWithoutProviderHistory) 
     EXPECT_EQ(h.state.conversation[0].role, "system");
     EXPECT_EQ(h.state.conversation[0].content, "[Goal] Continuing: visible context");
     EXPECT_TRUE(h.loop_.messages().empty());
+}
+
+TEST(SessionResumeRestore, RestoresFullFileReadBaselineFromTranscript) {
+    ResumeRestoreHarness h;
+    auto p = make_temp_file("alpha\nbeta\n");
+
+    auto assistant = assistant_call("read-1", "file_read",
+                                   nlohmann::json{{"file_path", p.string()}});
+    auto tool = tool_result(
+        "read-1",
+        "alpha\nbeta\n\n<acecode-read-metadata encoding=\"utf-8\" line_endings=\"lf\" range=\"1-2\" />\n");
+
+    acecode::append_resumed_session_messages({assistant, tool}, h.state, h.loop_, h.tools_);
+
+    auto check = acecode::MtimeTracker::instance().validate_read_baseline_for_edit(
+        p.string(), "alpha\nbeta\n");
+    EXPECT_EQ(check.status, acecode::MtimeTracker::ReadBaselineStatus::Ok);
+    EXPECT_TRUE(check.content_unchanged_after_mtime_change);
+
+    fs::remove(p);
+}
+
+TEST(SessionResumeRestore, DoesNotRestorePartialReadAsFullBaseline) {
+    ResumeRestoreHarness h;
+    auto p = make_temp_file("alpha\nbeta\n");
+
+    auto assistant = assistant_call("read-partial", "file_read",
+                                   nlohmann::json{
+                                       {"file_path", p.string()},
+                                       {"start_line", 1},
+                                       {"end_line", 1}});
+    auto tool = tool_result(
+        "read-partial",
+        "1: alpha\n<acecode-read-metadata encoding=\"utf-8\" line_endings=\"lf\" range=\"1-1\" />\n");
+
+    acecode::append_resumed_session_messages({assistant, tool}, h.state, h.loop_, h.tools_);
+
+    auto check = acecode::MtimeTracker::instance().validate_read_baseline_for_edit(
+        p.string(), "alpha\nbeta\n");
+    EXPECT_EQ(check.status, acecode::MtimeTracker::ReadBaselineStatus::NotRead);
+
+    fs::remove(p);
+}
+
+TEST(SessionResumeRestore, RestoresFileWriteBaselineFromTranscript) {
+    ResumeRestoreHarness h;
+    auto p = make_temp_file("new\n");
+
+    auto assistant = assistant_call("write-1", "file_write",
+                                   nlohmann::json{
+                                       {"file_path", p.string()},
+                                       {"content", "new\n"}});
+    auto tool = tool_result("write-1", "Updated file: " + p.string());
+
+    acecode::append_resumed_session_messages({assistant, tool}, h.state, h.loop_, h.tools_);
+
+    auto check = acecode::MtimeTracker::instance().validate_read_baseline_for_edit(
+        p.string(), "new\n");
+    EXPECT_EQ(check.status, acecode::MtimeTracker::ReadBaselineStatus::Ok);
+
+    fs::remove(p);
+}
+
+TEST(SessionResumeRestore, RestoresFileEditBaselineFromCurrentDisk) {
+    ResumeRestoreHarness h;
+    auto p = make_temp_file("alpha\ndelta\n");
+
+    auto assistant = assistant_call("edit-1", "file_edit",
+                                   nlohmann::json{
+                                       {"file_path", p.string()},
+                                       {"old_string", "beta"},
+                                       {"new_string", "delta"}});
+    auto tool = tool_result("edit-1", "Edited " + p.string());
+
+    acecode::append_resumed_session_messages({assistant, tool}, h.state, h.loop_, h.tools_);
+
+    auto check = acecode::MtimeTracker::instance().validate_read_baseline_for_edit(
+        p.string(), "alpha\ndelta\n");
+    EXPECT_EQ(check.status, acecode::MtimeTracker::ReadBaselineStatus::Ok);
+
+    fs::remove(p);
+}
+
+TEST(SessionResumeRestore, IgnoresUnchangedReadStubDuringBaselineRestore) {
+    ResumeRestoreHarness h;
+    auto p = make_temp_file("alpha\n");
+
+    auto assistant = assistant_call("read-stub", "file_read",
+                                   nlohmann::json{{"file_path", p.string()}});
+    auto tool = tool_result(
+        "read-stub",
+        "File unchanged since last read. The content from the earlier file_read tool result in this conversation is still current; refer to that instead of re-reading.");
+
+    acecode::append_resumed_session_messages({assistant, tool}, h.state, h.loop_, h.tools_);
+
+    auto check = acecode::MtimeTracker::instance().validate_read_baseline_for_edit(
+        p.string(), "alpha\n");
+    EXPECT_EQ(check.status, acecode::MtimeTracker::ReadBaselineStatus::NotRead);
+
+    fs::remove(p);
 }

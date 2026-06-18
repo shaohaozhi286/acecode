@@ -124,8 +124,10 @@ static ToolResult execute_file_write(const std::string& arguments_json, const To
 ToolImpl create_file_write_tool() {
     ToolDef def;
     def.name = "file_write";
-    def.description = "Write content to a file. Creates the file if it doesn't exist, "
-                      "or overwrites it if it does after the existing file has been read with file_read. Creates parent directories as needed. "
+    def.description = "Writes a file to the local filesystem. "
+                      "This tool will overwrite the existing file if there is one at the provided path. "
+                      "If this is an existing file, you MUST use the file_read tool first to read the file's contents. This tool will fail if you did not read the file first. "
+                      "Creates parent directories as needed. "
                       "When overwriting an existing text file, preserves its detected encoding and line endings; "
                       "new files default to UTF-8 without BOM. "
                       "Always use absolute paths.";

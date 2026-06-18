@@ -263,12 +263,16 @@ TEST_F(SystemPromptTest, TaskCompletionProtocolAppears) {
               std::string::npos);
 }
 
-TEST_F(SystemPromptTest, PromptAllowsPartialReadBaselinesAndGuidesScratchScripts) {
+TEST_F(SystemPromptTest, PromptUsesClaudeStyleReadFailureGuidanceAndGuidesScratchScripts) {
     acecode::ToolExecutor tools;
     std::string out = acecode::build_system_prompt(tools, temp_home.string());
 
-    EXPECT_NE(out.find("A non-lossy partial read establishes a baseline"), std::string::npos);
+    EXPECT_NE(out.find("file_edit will error if you attempt an edit without reading the file"), std::string::npos);
+    EXPECT_NE(out.find("file_write will fail if you did not read the file first"), std::string::npos);
+    EXPECT_NE(out.find("Do not call file_read again for the same file/range"), std::string::npos);
+    EXPECT_NE(out.find("Do not re-read a file only to verify a successful edit/write"), std::string::npos);
     EXPECT_NE(out.find("ACECODE_TMPDIR"), std::string::npos);
+    EXPECT_EQ(out.find("Before editing or overwriting an existing non-empty file, read the target file first"), std::string::npos);
     EXPECT_EQ(out.find("partial reads are only enough for range edits"), std::string::npos);
     EXPECT_EQ(out.find("start_line/end_line/expected_hash"), std::string::npos);
     EXPECT_EQ(out.find("metadata/range edit"), std::string::npos);
