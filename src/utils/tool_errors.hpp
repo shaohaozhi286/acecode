@@ -68,9 +68,16 @@ public:
 
     static std::string string_not_found(const std::string& file_path) {
         return "[Error] old_string not found in " + file_path +
-               ". Re-read the relevant lines with file_read start_line/end_line "
-               "and retry with start_line/end_line/expected_hash, or use an exact "
-               "old_string including whitespace and indentation.";
+               ". Re-read the current file content with file_read and retry with "
+               "an exact old_string including enough surrounding whitespace and "
+               "indentation to identify the target.";
+    }
+
+    static std::string legacy_range_edit_arguments(const std::string& file_path) {
+        return "[Error] file_edit no longer supports start_line, end_line, "
+               "expected_hash, or read_id arguments. Read the current file content "
+               "with file_read and retry with an exact old_string replacement: " +
+               file_path;
     }
 
     static std::string string_not_unique(size_t count, const std::string& file_path) {

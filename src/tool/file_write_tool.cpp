@@ -5,7 +5,6 @@
 #include "utils/logger.hpp"
 #include "utils/tool_args_parser.hpp"
 #include "utils/tool_errors.hpp"
-#include "utils/file_operations.hpp"
 #include "utils/text_file_buffer.hpp"
 #include "utils/utf8_path.hpp"
 #include <nlohmann/json.hpp>
@@ -30,15 +29,8 @@ static ToolResult execute_file_write(const std::string& arguments_json, const To
 
     LOG_DEBUG("file_write: path=" + file_path + " content_len=" + std::to_string(content.size()));
 
+    auto write_guard = MtimeTracker::instance().acquire_write_guard(file_path);
     bool file_exists = std::filesystem::exists(path_from_utf8(file_path));
-
-    // Mtime conflict check for existing files
-    if (file_exists) {
-        auto conflict_check = FileOperations::check_mtime_conflict(file_path);
-        if (!conflict_check.success) {
-            return conflict_check;
-        }
-    }
 
     // Read old content for diff (if overwriting)
     std::string old_content;
@@ -46,10 +38,27 @@ static ToolResult execute_file_write(const std::string& arguments_json, const To
     if (file_exists) {
         auto read_result = read_text_file_buffer(file_path);
         if (!read_result.success) {
+            auto metadata = MtimeTracker::instance().read_metadata(file_path);
+            if (metadata && metadata->lossy) {
+                return ToolResult{ToolErrors::file_read_not_safe_for_edit(file_path), false};
+            }
             return ToolResult{read_result.error, false};
         }
         old_content = read_result.buffer.text;
         write_metadata = read_result.buffer.metadata;
+
+        const auto read_check =
+            MtimeTracker::instance().validate_read_baseline_for_edit(file_path, old_content);
+        switch (read_check.status) {
+            case MtimeTracker::ReadBaselineStatus::Ok:
+                break;
+            case MtimeTracker::ReadBaselineStatus::NotRead:
+                return ToolResult{ToolErrors::file_not_read_for_edit(file_path), false};
+            case MtimeTracker::ReadBaselineStatus::UnsafeRead:
+                return ToolResult{ToolErrors::file_read_not_safe_for_edit(file_path), false};
+            case MtimeTracker::ReadBaselineStatus::ExternallyModified:
+                return ToolResult{ToolErrors::external_modification(file_path), false};
+        }
     }
 
     auto before_write = [&](const std::string& path) {
@@ -116,7 +125,7 @@ ToolImpl create_file_write_tool() {
     ToolDef def;
     def.name = "file_write";
     def.description = "Write content to a file. Creates the file if it doesn't exist, "
-                      "or overwrites it if it does. Creates parent directories as needed. "
+                      "or overwrites it if it does after the existing file has been read with file_read. Creates parent directories as needed. "
                       "When overwriting an existing text file, preserves its detected encoding and line endings; "
                       "new files default to UTF-8 without BOM. "
                       "Always use absolute paths.";

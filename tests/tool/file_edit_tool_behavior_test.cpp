@@ -339,72 +339,24 @@ TEST(FileEditToolBehavior, AsciiQuoteAnchorMatchesCurlyQuoteFile) {
     fs::remove(path);
 }
 
-TEST(FileEditToolBehavior, RangeEditUsesHashAndPreservesCrLf) {
-    auto path = temp_file(".txt");
-    write_file(path, "a\r\nb\r\nc\r\n");
-    auto decoded = acecode::read_text_file_buffer(path.string());
-    ASSERT_TRUE(decoded.success) << decoded.error;
-    std::string hash = acecode::range_hash(decoded.buffer.text, 2, 2);
+TEST(FileEditToolBehavior, ToolSchemaOmitsRangeEditFields) {
+    ToolImpl tool = create_file_edit_tool();
 
-    ToolResult result = run_edit({
-        {"file_path", path.string()},
-        {"start_line", 2},
-        {"end_line", 2},
-        {"expected_hash", hash},
-        {"new_string", "B\n"}
-    });
-
-    ASSERT_TRUE(result.success) << result.output;
-    EXPECT_EQ(read_file(path), "a\r\nB\r\nc\r\n");
-
-    fs::remove(path);
+    const auto& properties = tool.definition.parameters["properties"];
+    EXPECT_TRUE(properties.contains("file_path"));
+    EXPECT_TRUE(properties.contains("old_string"));
+    EXPECT_TRUE(properties.contains("new_string"));
+    EXPECT_TRUE(properties.contains("replace_all"));
+    EXPECT_FALSE(properties.contains("start_line"));
+    EXPECT_FALSE(properties.contains("end_line"));
+    EXPECT_FALSE(properties.contains("expected_hash"));
+    EXPECT_FALSE(properties.contains("read_id"));
 }
 
-TEST(FileEditToolBehavior, RangeEditHashMismatchReturnsCurrentRange) {
+TEST(FileEditToolBehavior, RejectsLegacyRangeEditArguments) {
     auto path = temp_file(".txt");
     write_file(path, "a\nb\nc\n");
-
-    ToolResult result = run_edit({
-        {"file_path", path.string()},
-        {"start_line", 2},
-        {"end_line", 2},
-        {"expected_hash", "sha256:wrong"},
-        {"new_string", "B\n"}
-    });
-
-    EXPECT_FALSE(result.success);
-    EXPECT_NE(result.output.find("range hash mismatch"), std::string::npos);
-    EXPECT_NE(result.output.find("b\n"), std::string::npos);
-    EXPECT_EQ(read_file(path), "a\nb\nc\n");
-
-    fs::remove(path);
-}
-
-TEST(FileEditToolBehavior, RangeEditAllowsRedundantOldStringWhenHashMatches) {
-    auto path = temp_file(".txt");
-    write_file(path, "a\nb\nc\n");
-    auto decoded = acecode::read_text_file_buffer(path.string());
-    ASSERT_TRUE(decoded.success) << decoded.error;
-    std::string hash = acecode::range_hash(decoded.buffer.text, 2, 2);
-
-    ToolResult result = run_edit({
-        {"file_path", path.string()},
-        {"start_line", 2},
-        {"end_line", 2},
-        {"expected_hash", hash},
-        {"old_string", "b"},
-        {"new_string", "B"}
-    });
-
-    ASSERT_TRUE(result.success) << result.output;
-    EXPECT_EQ(read_file(path), "a\nB\nc\n");
-
-    fs::remove(path);
-}
-
-TEST(FileEditToolBehavior, RangeEditStaleHashCanUseOldStringAsCurrentRangeGuard) {
-    auto path = temp_file(".txt");
-    write_file(path, "a\nb\nc\n");
+    mark_full_read(path);
 
     ToolResult result = run_edit({
         {"file_path", path.string()},
@@ -415,122 +367,34 @@ TEST(FileEditToolBehavior, RangeEditStaleHashCanUseOldStringAsCurrentRangeGuard)
         {"new_string", "B"}
     });
 
-    ASSERT_TRUE(result.success) << result.output;
-    EXPECT_EQ(read_file(path), "a\nB\nc\n");
-
-    fs::remove(path);
-}
-
-TEST(FileEditToolBehavior, RangeEditStaleHashAlreadyAppliedSucceedsWithoutWrite) {
-    auto path = temp_file(".txt");
-    write_file(path, "a\nB\nc\n");
-
-    ToolResult result = run_edit({
-        {"file_path", path.string()},
-        {"start_line", 2},
-        {"end_line", 2},
-        {"expected_hash", "sha256:stale"},
-        {"new_string", "B"}
-    });
-
-    ASSERT_TRUE(result.success) << result.output;
-    EXPECT_NE(result.output.find("already applied"), std::string::npos);
-    ASSERT_TRUE(result.summary.has_value());
-    EXPECT_EQ(result.summary->verb, "Already applied");
-    EXPECT_EQ(read_file(path), "a\nB\nc\n");
-
-    fs::remove(path);
-}
-
-TEST(FileEditToolBehavior, RangeEditStaleHashStillRejectsNonMatchingOldString) {
-    auto path = temp_file(".txt");
-    write_file(path, "a\nb\nc\n");
-
-    ToolResult result = run_edit({
-        {"file_path", path.string()},
-        {"start_line", 2},
-        {"end_line", 2},
-        {"expected_hash", "sha256:stale"},
-        {"old_string", "different"},
-        {"new_string", "B"}
-    });
-
     EXPECT_FALSE(result.success);
-    EXPECT_NE(result.output.find("range hash mismatch"), std::string::npos);
+    EXPECT_NE(result.output.find("no longer supports"), std::string::npos);
+    EXPECT_NE(result.output.find("old_string"), std::string::npos);
     EXPECT_EQ(read_file(path), "a\nb\nc\n");
 
     fs::remove(path);
 }
 
-// 回归测试:range 模式的删除区间包含 end_line 行尾的换行符,而模型给出的 new_string
-// 习惯上不带尾随换行。修复前替换后 end_line 的下一行会被直接拼接到新内容末尾,
-// 实际损伤如 `});` 与 `const handleImageLoaded = (ev) => {` 粘连成一行,
-// 模型随后反复修粘连、修的过程中再次触发同一 bug,形成编辑死循环。
-// 期望:工具自动补回被删除区间携带的尾随换行,下一行保持独立。
-TEST(FileEditToolBehavior, RangeEditWithoutTrailingNewlineDoesNotGlueNextLine) {
+TEST(FileEditToolBehavior, SuccessfulEditUpdatesBaselineForNextEdit) {
     auto path = temp_file(".txt");
-    write_file(path, "const a = 1;\n});\n\nconst next = 2;\n");
-    auto decoded = acecode::read_text_file_buffer(path.string());
-    ASSERT_TRUE(decoded.success) << decoded.error;
-    // 替换 1-3 行(含末尾空行),new_string 刻意不带尾随换行,模拟模型的常见输出
-    std::string hash = acecode::range_hash(decoded.buffer.text, 1, 3);
+    write_file(path, "alpha\nbeta\ngamma\n");
+    mark_full_read(path);
 
-    ToolResult result = run_edit({
+    ToolResult first = run_edit({
         {"file_path", path.string()},
-        {"start_line", 1},
-        {"end_line", 3},
-        {"expected_hash", hash},
-        {"new_string", "const a = 42;\n});"}
+        {"old_string", "beta"},
+        {"new_string", "delta"}
+    });
+    ASSERT_TRUE(first.success) << first.output;
+
+    ToolResult second = run_edit({
+        {"file_path", path.string()},
+        {"old_string", "gamma"},
+        {"new_string", "omega"}
     });
 
-    ASSERT_TRUE(result.success) << result.output;
-    EXPECT_EQ(read_file(path), "const a = 42;\n});\nconst next = 2;\n");
-
-    fs::remove(path);
-}
-
-// 场景:new_string 为空表示删除整个行区间。期望:被删行连同其换行符一起移除,
-// 不能因为补换行逻辑而留下一个多余的空行。
-TEST(FileEditToolBehavior, RangeEditEmptyNewStringDeletesWholeLines) {
-    auto path = temp_file(".txt");
-    write_file(path, "a\nb\nc\n");
-    auto decoded = acecode::read_text_file_buffer(path.string());
-    ASSERT_TRUE(decoded.success) << decoded.error;
-    std::string hash = acecode::range_hash(decoded.buffer.text, 2, 2);
-
-    ToolResult result = run_edit({
-        {"file_path", path.string()},
-        {"start_line", 2},
-        {"end_line", 2},
-        {"expected_hash", hash},
-        {"new_string", ""}
-    });
-
-    ASSERT_TRUE(result.success) << result.output;
-    EXPECT_EQ(read_file(path), "a\nc\n");
-
-    fs::remove(path);
-}
-
-// 场景:替换的 end_line 是文件最后一行且文件本身没有尾随换行。
-// 期望:删除区间不含换行符,补换行逻辑不触发,结果同样保持无尾随换行。
-TEST(FileEditToolBehavior, RangeEditAtEofWithoutTrailingNewlineAddsNothing) {
-    auto path = temp_file(".txt");
-    write_file(path, "a\nb");
-    auto decoded = acecode::read_text_file_buffer(path.string());
-    ASSERT_TRUE(decoded.success) << decoded.error;
-    std::string hash = acecode::range_hash(decoded.buffer.text, 2, 2);
-
-    ToolResult result = run_edit({
-        {"file_path", path.string()},
-        {"start_line", 2},
-        {"end_line", 2},
-        {"expected_hash", hash},
-        {"new_string", "B"}
-    });
-
-    ASSERT_TRUE(result.success) << result.output;
-    EXPECT_EQ(read_file(path), "a\nB");
+    ASSERT_TRUE(second.success) << second.output;
+    EXPECT_EQ(read_file(path), "alpha\ndelta\nomega\n");
 
     fs::remove(path);
 }
@@ -547,6 +411,7 @@ TEST(FileEditToolBehavior, LossyReadDoesNotEnableLaterEdit) {
     ASSERT_TRUE(read_result.success) << read_result.output;
     EXPECT_NE(read_result.output.find("lossy=\"true\""), std::string::npos);
     EXPECT_EQ(read_result.output.find("range_hash=\"sha256:"), std::string::npos);
+    EXPECT_EQ(read_result.output.find("read_id=\""), std::string::npos);
 
     auto read_check = acecode::MtimeTracker::instance().validate_read_baseline_for_edit(
         path.string(), std::string(u8"中文\n") + std::string("\xEF\xBF\xBD", 3));

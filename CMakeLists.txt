@@ -165,6 +165,7 @@ set(ACECODE_TESTABLE_TUI_SOURCES
     ${CMAKE_SOURCE_DIR}/src/tui/ask_question_overlay.cpp
     ${CMAKE_SOURCE_DIR}/src/tui/text_truncation.cpp
     ${CMAKE_SOURCE_DIR}/src/tui/paste_handler.cpp
+    ${CMAKE_SOURCE_DIR}/src/tui/pending_attachment_selection.cpp
     ${CMAKE_SOURCE_DIR}/src/tui/confirm_question.cpp
     ${CMAKE_SOURCE_DIR}/src/tui/model_picker.cpp
     ${CMAKE_SOURCE_DIR}/src/tui/input_history_navigation.cpp

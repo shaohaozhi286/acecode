@@ -133,7 +133,7 @@ TEST(FileReadToolSummary, MissingFileDoesNotCrash) {
     EXPECT_FALSE(r.success);
 }
 
-TEST(FileReadToolSummary, OutputIncludesEditMetadataFooter) {
+TEST(FileReadToolSummary, OutputIncludesReadMetadataFooterWithoutEditHashes) {
     ToolImpl tool = create_file_read_tool();
 
     auto p = make_temp_file("line1\r\nline2\r\n");
@@ -146,10 +146,12 @@ TEST(FileReadToolSummary, OutputIncludesEditMetadataFooter) {
 
     ASSERT_TRUE(r.success) << r.output;
     EXPECT_NE(r.output.find("2: line2\n"), std::string::npos);
-    EXPECT_NE(r.output.find("acecode-edit-metadata"), std::string::npos);
+    EXPECT_NE(r.output.find("acecode-read-metadata"), std::string::npos);
     EXPECT_NE(r.output.find("encoding=\"utf-8\""), std::string::npos);
     EXPECT_NE(r.output.find("line_endings=\"crlf\""), std::string::npos);
-    EXPECT_NE(r.output.find("range_hash=\"sha256:"), std::string::npos);
+    EXPECT_NE(r.output.find("range=\"2-2\""), std::string::npos);
+    EXPECT_EQ(r.output.find("range_hash=\"sha256:"), std::string::npos);
+    EXPECT_EQ(r.output.find("read_id=\""), std::string::npos);
 
     fs::remove(p);
 }

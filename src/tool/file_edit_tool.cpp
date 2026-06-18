@@ -348,102 +348,14 @@ static ToolResult run_validated_write(
     return r;
 }
 
-static std::string normalize_expected_hash(std::string hash) {
-    while (!hash.empty() && std::isspace(static_cast<unsigned char>(hash.front()))) hash.erase(hash.begin());
-    while (!hash.empty() && std::isspace(static_cast<unsigned char>(hash.back()))) hash.pop_back();
-    if (hash.rfind("sha256:", 0) == 0) return hash;
-    return "sha256:" + hash;
-}
-
-static bool find_line_range_offsets(const std::string& lf_text,
-                                    int start_line,
-                                    int end_line,
-                                    size_t& start_offset,
-                                    size_t& end_offset,
-                                    int& total_lines) {
-    start_offset = 0;
-    end_offset = 0;
-    total_lines = 0;
-    if (start_line <= 0 || end_line < start_line) return false;
-
-    std::vector<size_t> starts;
-    if (!lf_text.empty()) starts.push_back(0);
-    for (size_t i = 0; i < lf_text.size(); ++i) {
-        if (lf_text[i] == '\n' && i + 1 < lf_text.size()) {
-            starts.push_back(i + 1);
-        }
-    }
-    total_lines = static_cast<int>(starts.size());
-    if (total_lines == 0 || start_line > total_lines) return false;
-
-    const int clamped_end = std::min(end_line, total_lines);
-    start_offset = starts[static_cast<size_t>(start_line - 1)];
-    end_offset = clamped_end < total_lines
-        ? starts[static_cast<size_t>(clamped_end)]
-        : lf_text.size();
-    return true;
-}
-
-static ToolResult make_hash_mismatch_result(const std::string& file_path,
-                                            const std::string& content,
-                                            int start_line,
-                                            int end_line,
-                                            const std::string& current_hash) {
-    std::ostringstream oss;
-    oss << "[Error] range hash mismatch in " << file_path << ". The file changed "
-        << "since it was read, or the wrong range was supplied.\n"
-        << "Retry with expected_hash=\"" << current_hash << "\" and this current range:\n"
-        << "```text\n" << content << "```\n";
-    ToolResult result{oss.str(), false};
-    ToolSummary summary;
-    summary.verb = "Edit failed";
-    summary.object = file_path;
-    summary.metrics.emplace_back("range", std::to_string(start_line) + "-" + std::to_string(end_line));
-    summary.metrics.emplace_back("hash", current_hash);
-    summary.icon = tool_icon("file_edit");
-    result.summary = std::move(summary);
-    return result;
-}
-
-static ToolResult make_range_already_applied_result(const std::string& file_path,
-                                                    int start_line,
-                                                    int end_line,
-                                                    const std::string& current_hash) {
-    std::ostringstream oss;
-    oss << "Edit already applied: " << file_path << "\n"
-        << "Range " << start_line << "-" << end_line
-        << " already matches new_string; no write performed.";
-    ToolResult result{oss.str(), true};
-    ToolSummary summary;
-    summary.verb = "Already applied";
-    summary.object = file_path;
-    summary.metrics.emplace_back("range", std::to_string(start_line) + "-" + std::to_string(end_line));
-    summary.metrics.emplace_back("hash", current_hash);
-    summary.metrics.emplace_back("+", "0");
-    summary.metrics.emplace_back("-", "0");
-    summary.icon = tool_icon("file_edit");
-    result.summary = std::move(summary);
-    return result;
-}
-
-static std::string normalize_range_payload(const std::string& value,
-                                           const std::string& current_range) {
-    std::string normalized = normalize_text_to_lf(value);
-    if (!current_range.empty() && current_range.back() == '\n' &&
-        !normalized.empty() && normalized.back() != '\n') {
-        normalized.push_back('\n');
-    }
-    return normalized;
-}
-
 static ToolResult make_old_string_not_found_result(const std::string& file_path,
                                                    const std::string& normalized_content,
                                                    const std::string& requested_old) {
     std::ostringstream oss;
     oss << ToolErrors::string_not_found(file_path) << "\n"
         << "ACECode matches old_string against UTF-8 text with LF line endings. "
-        << "Prefer retrying with file_read start_line/end_line metadata and "
-        << "file_edit start_line/end_line/expected_hash instead of shell or Python writes.";
+        << "Re-read the relevant lines and retry with the exact current text "
+        << "instead of shell or Python writes.";
 
     std::string first_line = normalize_text_to_lf(requested_old);
     size_t nl = first_line.find('\n');
@@ -459,7 +371,7 @@ static ToolResult make_old_string_not_found_result(const std::string& file_path,
                 if (normalized_content[i] == '\n') ++line;
             }
             oss << "\nA substring from old_string appears near line " << line
-                << ". Re-read a narrow range around that line and use the returned range_hash.";
+                << ". Re-read a narrow range around that line and include more surrounding text.";
         }
     }
     return ToolResult{oss.str(), false};
@@ -478,17 +390,20 @@ static ToolResult execute_file_edit(const std::string& arguments_json, const Too
     std::string old_string = parser.get_or<std::string>("old_string", "");
     std::string new_string = parser.get_or<std::string>("new_string", "");
     bool replace_all = parse_semantic_bool(arguments_json, "replace_all", false);
-    int start_line = parser.get_or<int>("start_line", 0);
-    int end_line = parser.get_or<int>("end_line", 0);
-    std::string expected_hash = parser.get_or<std::string>("expected_hash", "");
-    std::string read_id = parser.get_or<std::string>("read_id", "");
-    const bool range_mode = start_line > 0 || end_line > 0 ||
-                            !expected_hash.empty() || !read_id.empty();
+    const auto raw_args = nlohmann::json::parse(arguments_json, nullptr, false);
+    const bool has_legacy_range_args = raw_args.is_object() &&
+        (raw_args.contains("start_line") ||
+         raw_args.contains("end_line") ||
+         raw_args.contains("expected_hash") ||
+         raw_args.contains("read_id"));
 
     if (file_path.empty()) {
         return ToolResult{ToolErrors::missing_parameter("file_path"), false};
     }
-    if (!range_mode && old_string == new_string) {
+    if (has_legacy_range_args) {
+        return ToolResult{ToolErrors::legacy_range_edit_arguments(file_path), false};
+    }
+    if (old_string == new_string) {
         return ToolResult{ToolErrors::no_changes_to_make(), false};
     }
     if (ends_with_ipynb(file_path)) {
@@ -499,6 +414,7 @@ static ToolResult execute_file_edit(const std::string& arguments_json, const Too
               " new_len=" + std::to_string(new_string.size()) +
               " replace_all=" + (replace_all ? "true" : "false"));
 
+    auto write_guard = MtimeTracker::instance().acquire_write_guard(file_path);
     const bool file_exists = std::filesystem::exists(path_from_utf8(file_path));
 
     if (!file_exists && !old_string.empty()) {
@@ -529,46 +445,6 @@ static ToolResult execute_file_edit(const std::string& arguments_json, const Too
     } else {
         buffer.path = file_path;
         buffer.metadata = default_new_file_text_metadata();
-    }
-
-    if (range_mode) {
-        if (!file_exists) {
-            return ToolResult{ToolErrors::file_not_found(file_path, current_path_utf8()), false};
-        }
-        if (start_line <= 0 || end_line < start_line || expected_hash.empty()) {
-            return ToolResult{"[Error] Range edit requires start_line, end_line, and expected_hash.", false};
-        }
-
-        size_t start_offset = 0;
-        size_t end_offset = 0;
-        int total_lines = 0;
-        if (!find_line_range_offsets(buffer.text, start_line, end_line,
-                                     start_offset, end_offset, total_lines)) {
-            return ToolResult{ToolErrors::no_lines_in_range(start_line, end_line, total_lines), false};
-        }
-
-        const std::string current_range = buffer.text.substr(start_offset, end_offset - start_offset);
-        const std::string current_hash = range_hash(buffer.text, start_line, end_line);
-        const std::string normalized_new = normalize_range_payload(new_string, current_range);
-        const std::string normalized_old = normalize_range_payload(old_string, current_range);
-        if (normalize_expected_hash(expected_hash) != current_hash) {
-            if (current_range == normalized_new) {
-                return make_range_already_applied_result(file_path, start_line, end_line, current_hash);
-            }
-            if (old_string.empty() || normalized_old != current_range) {
-                return make_hash_mismatch_result(file_path, current_range, start_line, end_line, current_hash);
-            }
-            LOG_DEBUG("file_edit: stale range hash accepted because old_string matches current range");
-        }
-
-        std::string new_content = buffer.text;
-        new_content.replace(start_offset, end_offset - start_offset, normalized_new);
-        if (new_content == buffer.text) {
-            return make_range_already_applied_result(file_path, start_line, end_line, current_hash);
-        }
-
-        return run_validated_write(file_path, true, buffer.text, new_content,
-                                   buffer.metadata, ctx);
     }
 
     if (old_string.empty()) {
@@ -624,8 +500,6 @@ ToolImpl create_file_edit_tool() {
     def.name = "file_edit";
     def.description = "Edit a file by replacing an exact string with a new string. "
                       "Read existing non-empty files with file_read before editing; a non-lossy ranged read is enough to establish the edit baseline. "
-                      "Prefer start_line/end_line/expected_hash from file_read metadata for precise range edits. "
-                      "When complete range arguments are present, old_string is treated only as redundant current-range validation. "
                       "The old_string must appear exactly once unless replace_all is true. "
                       "Use empty old_string only to create a missing file or fill a blank file. "
                       "Include surrounding context lines to ensure uniqueness. "
@@ -650,25 +524,9 @@ ToolImpl create_file_edit_tool() {
                 {"type", "boolean"},
                 {"description", "Replace all occurrences of old_string. Defaults to false."},
                 {"default", false}
-            }},
-            {"start_line", {
-                {"type", "integer"},
-                {"description", "Range edit start line (1-indexed, inclusive). Use with end_line and expected_hash instead of old_string."}
-            }},
-            {"end_line", {
-                {"type", "integer"},
-                {"description", "Range edit end line (1-indexed, inclusive). Use with start_line and expected_hash instead of old_string."}
-            }},
-            {"expected_hash", {
-                {"type", "string"},
-                {"description", "Range hash returned by file_read metadata. Required for range edits."}
-            }},
-            {"read_id", {
-                {"type", "string"},
-                {"description", "Optional read_id returned by file_read for traceability."}
             }}
         }},
-        {"required", nlohmann::json::array({"file_path", "new_string"})}
+        {"required", nlohmann::json::array({"file_path", "old_string", "new_string"})}
     });
 
     return ToolImpl{def, execute_file_edit, /*is_read_only=*/false};

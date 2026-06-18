@@ -19,15 +19,11 @@ namespace {
 
 static std::string format_read_metadata_footer(const FileReadEditMetadata& metadata) {
     std::ostringstream oss;
-    oss << "\n<acecode-edit-metadata"
-        << " read_id=\"" << metadata.read_id << "\""
+    oss << "\n<acecode-read-metadata"
         << " encoding=\"" << metadata.encoding << "\""
         << " line_endings=\"" << metadata.line_ending << "\"";
     if (metadata.start_line > 0 && metadata.end_line > 0) {
         oss << " range=\"" << metadata.start_line << "-" << metadata.end_line << "\"";
-    }
-    if (!metadata.range_hash.empty()) {
-        oss << " range_hash=\"" << metadata.range_hash << "\"";
     }
     if (metadata.lossy) {
         oss << " lossy=\"true\""
@@ -104,7 +100,6 @@ static ToolResult execute_file_read(const std::string& arguments_json, const Too
     const bool partial_read = (start_line > 0 || end_line > 0);
     int displayed_line_count = 0;
     FileReadEditMetadata metadata;
-    metadata.read_id = read_id_for_text_buffer(file_path, buffer.raw_bytes);
     metadata.encoding = text_encoding_label(buffer.metadata.encoding);
     if (buffer.metadata.lossy) {
         metadata.encoding += " (lossy)";
@@ -129,7 +124,6 @@ static ToolResult execute_file_read(const std::string& arguments_json, const Too
         if (!buffer.metadata.lossy) {
             metadata.start_line = actual_start;
             metadata.end_line = actual_end;
-            metadata.range_hash = range_hash(buffer.text, actual_start, actual_end);
         }
     } else {
         content = buffer.text;
@@ -138,9 +132,6 @@ static ToolResult execute_file_read(const std::string& arguments_json, const Too
         if (!buffer.metadata.lossy) {
             metadata.start_line = content.empty() ? 0 : 1;
             metadata.end_line = displayed_line_count;
-            if (displayed_line_count > 0) {
-                metadata.range_hash = range_hash(buffer.text, 1, displayed_line_count);
-            }
         }
     }
 

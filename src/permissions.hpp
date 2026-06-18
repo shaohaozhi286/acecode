@@ -26,7 +26,7 @@ struct PermissionRule {
 enum class PermissionMode {
     Default,      // Prompt for write/exec tools, auto-allow read-only
     AcceptEdits,  // Also auto-allow file_write, file_edit (still ask for bash)
-    Yolo,         // Auto-allow everything (dangerous)
+    Yolo,         // Auto-allow tools; first external file write still confirms
     Plan          // Explore and write only the active plan file before approval
 };
 
@@ -42,6 +42,9 @@ class PermissionManager {
 public:
     void set_mode(PermissionMode mode) {
         const PermissionMode current = mode_.load(std::memory_order_relaxed);
+        if (mode != PermissionMode::Yolo || current != PermissionMode::Yolo) {
+            yolo_external_file_write_confirmed_.store(false, std::memory_order_relaxed);
+        }
         if (mode == PermissionMode::Plan) {
             if (current != PermissionMode::Plan) {
                 pre_plan_mode_.store(current, std::memory_order_relaxed);
@@ -80,6 +83,18 @@ public:
     void set_dangerous(bool enabled) { dangerous_mode_.store(enabled, std::memory_order_relaxed); }
     bool is_dangerous() const { return dangerous_mode_.load(std::memory_order_relaxed); }
 
+    bool yolo_external_file_write_confirmed() const {
+        return yolo_external_file_write_confirmed_.load(std::memory_order_relaxed);
+    }
+
+    void mark_yolo_external_file_write_confirmed() {
+        yolo_external_file_write_confirmed_.store(true, std::memory_order_relaxed);
+    }
+
+    void clear_yolo_external_file_write_confirmation() {
+        yolo_external_file_write_confirmed_.store(false, std::memory_order_relaxed);
+    }
+
     // Add a permission rule
     void add_rule(const PermissionRule& rule) {
         std::lock_guard<std::mutex> lk(mu_);
@@ -113,7 +128,8 @@ public:
             }
         }
 
-        // Yolo mode: everything is auto-allowed
+        // Yolo mode: tools are auto-allowed by default. AgentLoop may still
+        // force one confirmation before the first external file write.
         if (mode_.load(std::memory_order_relaxed) == PermissionMode::Yolo) return true;
 
         // Read-only tools are always auto-allowed
@@ -175,6 +191,7 @@ public:
     void clear_session_allows() {
         std::lock_guard<std::mutex> lk(mu_);
         session_allowed_.clear();
+        clear_yolo_external_file_write_confirmation();
     }
 
     // Cycle to next permission mode
@@ -205,7 +222,7 @@ public:
         switch (m) {
             case PermissionMode::Default:     return "Prompt for write/exec tools";
             case PermissionMode::AcceptEdits: return "Auto-allow file edits, prompt for bash";
-            case PermissionMode::Yolo:        return "Auto-allow everything (dangerous!)";
+            case PermissionMode::Yolo:        return "Auto-allow tools; confirm first external file write";
             case PermissionMode::Plan:        return "Plan first, approve before coding";
         }
         return "";
@@ -294,6 +311,7 @@ private:
     std::atomic<PermissionMode> pre_plan_mode_{PermissionMode::Default};
     std::atomic<bool> has_pre_plan_mode_{false};
     std::atomic<bool> dangerous_mode_{false};
+    std::atomic<bool> yolo_external_file_write_confirmed_{false};
     mutable std::mutex mu_;
     std::set<std::string> session_allowed_;
     std::vector<PermissionRule> rules_;

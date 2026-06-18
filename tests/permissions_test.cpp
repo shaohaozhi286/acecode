@@ -30,14 +30,35 @@ TEST(Permissions, DefaultModeAllowsReadOnlyTools) {
     EXPECT_FALSE(pm.should_auto_allow("bash",       /*is_read_only=*/false));
 }
 
-// 场景:Yolo 模式所有工具自动放行,包括 bash、file_write 这类高风险项;
-// 这是 --dangerous / yolo 模式下"不问直接跑"的契约。
+// 场景:Yolo 模式默认自动放行工具权限,包括 bash、file_write 这类高风险项;
+// AgentLoop 可以在这之上对首次外部文件写入加一道确认门。
 TEST(Permissions, YoloModeAllowsAll) {
     PermissionManager pm;
     pm.set_mode(PermissionMode::Yolo);
     EXPECT_TRUE(pm.should_auto_allow("bash",       false));
     EXPECT_TRUE(pm.should_auto_allow("file_write", false));
     EXPECT_TRUE(pm.should_auto_allow("file_edit",  false));
+}
+
+TEST(Permissions, YoloExternalFileWriteConfirmationResetsWithSessionAllowsAndMode) {
+    PermissionManager pm;
+    pm.set_mode(PermissionMode::Yolo);
+    EXPECT_FALSE(pm.yolo_external_file_write_confirmed());
+
+    pm.mark_yolo_external_file_write_confirmed();
+    EXPECT_TRUE(pm.yolo_external_file_write_confirmed());
+
+    pm.clear_session_allows();
+    EXPECT_FALSE(pm.yolo_external_file_write_confirmed());
+
+    pm.mark_yolo_external_file_write_confirmed();
+    EXPECT_TRUE(pm.yolo_external_file_write_confirmed());
+
+    pm.set_mode(PermissionMode::Default);
+    EXPECT_FALSE(pm.yolo_external_file_write_confirmed());
+
+    pm.set_mode(PermissionMode::Yolo);
+    EXPECT_FALSE(pm.yolo_external_file_write_confirmed());
 }
 
 // 场景:AcceptEdits 模式自动放行 file_write / file_edit,但仍然拦截 bash;

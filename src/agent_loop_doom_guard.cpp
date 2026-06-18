@@ -176,8 +176,8 @@ AgentLoopDoomGuard::Operation classify_bash_operation(const std::string& normali
     return AgentLoopDoomGuard::Operation::Unknown;
 }
 
-// 自带明确恢复路径的前置条件失败:错误信息本身就指示"先补一次 file_read /
-// 换正确的 hash,然后原样重试"。模型按提示重试时参数往往与上一次完全相同,
+// 自带明确恢复路径的前置条件失败:错误信息本身就指示"先补一次 file_read,
+// 然后原样重试"。模型按提示重试时参数往往与上一次完全相同,
 // 若把这类失败计入 attempts,exact-repeat 拦截会把唯一正确的恢复路径堵死
 // (典型:old_string 编辑因 "not read yet" 失败 → 补读取 → 同参重试被 Guarded)。
 bool is_retryable_precondition_failure(const ToolResult& result) {
@@ -187,10 +187,7 @@ bool is_retryable_precondition_failure(const ToolResult& result) {
         // ToolErrors::file_not_read_for_edit
         "read the target file with file_read",
         // ToolErrors::external_modification
-        "re-read the file before writing",
-        // file_edit range 模式 hash 过期:错误里附带了当前 hash 与内容,重试是预期路径,
-        // 且拦截后给出的合成结果反而丢失这些恢复信息
-        "range hash mismatch"
+        "re-read the file before writing"
     });
 }
 

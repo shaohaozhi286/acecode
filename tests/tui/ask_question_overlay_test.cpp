@@ -169,6 +169,14 @@ TEST(AskQuestionOverlayTest, ScrollMathClampsAndMapsTrackY) {
     EXPECT_EQ(acecode::tui::scroll_offset_for_track_y(9, 0, 10, 100, 20), 80);
 }
 
+// 场景:ask overlay 可见高度只受终端可用高度约束,不再被固定 14 行上限卡住。
+// 同时小终端仍保留可操作的最小可见行数。
+TEST(AskQuestionOverlayTest, VisibleRowsUseTerminalHeightWithoutFixedFourteenCap) {
+    EXPECT_EQ(acecode::tui::ask_overlay_visible_rows_for_terminal(40), 28);
+    EXPECT_GT(acecode::tui::ask_overlay_visible_rows_for_terminal(40), 14);
+    EXPECT_EQ(acecode::tui::ask_overlay_visible_rows_for_terminal(10), 4);
+}
+
 // 场景:焦点移动到当前 viewport 外时,ensure helper 把 wrapped option 行滚进来。
 TEST(AskQuestionOverlayTest, FocusRangeIsKeptVisible) {
     EXPECT_EQ(acecode::tui::ensure_row_range_visible(0, 5, 20, 12, 14), 10);

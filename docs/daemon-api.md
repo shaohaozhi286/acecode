@@ -325,8 +325,11 @@ one session does not affect other active sessions.
 ### `PUT /api/sessions/:id/permissions`
 
 Switch the active session's permission mode. Valid `mode` values are
-`default`, `accept-edits`, `plan`, and `yolo`. Switching to `yolo` also
-resolves any already-open permission prompt for that session with `allow`.
+`default`, `accept-edits`, `plan`, and `yolo`. Session `yolo` auto-allows
+normal tool permissions and allows local file tools to target paths outside the
+workspace, but the first external file mutation in that session still requires
+permission confirmation. Switching to `yolo` also resolves any already-open
+permission prompt for that session with `allow`.
 
 **Request body**:
 ```json
@@ -335,7 +338,7 @@ resolves any already-open permission prompt for that session with `allow`.
 
 **Response 200**:
 ```json
-{ "mode": "yolo", "description": "Auto-allow everything (dangerous!)" }
+{ "mode": "yolo", "description": "Auto-allow tools; confirm first external file write" }
 ```
 
 ### `GET /api/skills`

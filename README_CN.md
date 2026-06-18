@@ -179,6 +179,7 @@ TUI 启动后，输入需求并回车：
 
 ```bash
 ./acecode                     # 在当前目录启动新的 TUI 会话
+./acecode -r                  # 启动 TUI 并立即打开会话选择器
 ./acecode --resume            # 恢复当前项目最近一次会话
 ./acecode --resume <id>       # 恢复指定会话
 ./acecode configure           # 运行配置向导

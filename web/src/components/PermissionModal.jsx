@@ -161,7 +161,7 @@ export function PermissionModal({ request, onResolve }) {
           </div>
           {!hideAllowSession && (
             <div className="px-4.5 pb-3.5 text-[11px] text-fg-mute">
-              提示:可在设置中切换为 Yolo 模式跳过所有确认。
+              提示:可在设置中切换为 Yolo 模式跳过常规确认；首次外部文件写入仍会确认。
             </div>
           )}
         </>

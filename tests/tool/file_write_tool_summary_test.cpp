@@ -7,11 +7,13 @@
 #include <gtest/gtest.h>
 
 #include "tool/file_write_tool.hpp"
+#include "tool/mtime_tracker.hpp"
 #include "tool/tool_executor.hpp"
 #include "utils/text_file_buffer.hpp"
 
 #include <nlohmann/json.hpp>
 #include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -41,6 +43,12 @@ std::string read_file(const fs::path& path) {
     std::ifstream ifs(path, std::ios::binary);
     return std::string(std::istreambuf_iterator<char>(ifs),
                        std::istreambuf_iterator<char>());
+}
+
+void mark_full_read(const fs::path& path) {
+    auto decoded = acecode::read_text_file_buffer(path.string());
+    ASSERT_TRUE(decoded.success) << decoded.error;
+    acecode::MtimeTracker::instance().record_read(path.string(), decoded.buffer.text, false);
 }
 
 } // namespace
@@ -81,6 +89,7 @@ TEST(FileWriteToolSummary, OverwriteReportsDiffStats) {
         std::ofstream ofs(p, std::ios::binary);
         ofs << "a\nb\nc\n";
     }
+    mark_full_read(p);
 
     nlohmann::json args = {
         {"file_path", p.string()},
@@ -93,6 +102,79 @@ TEST(FileWriteToolSummary, OverwriteReportsDiffStats) {
     EXPECT_EQ(r.summary->verb, "Wrote");
     EXPECT_EQ(get_metric(*r.summary, "+"), "2");
     EXPECT_EQ(get_metric(*r.summary, "-"), "1");
+
+    fs::remove(p);
+}
+
+TEST(FileWriteToolSummary, OverwriteExistingFileRequiresReadBaseline) {
+    ToolImpl tool = create_file_write_tool();
+
+    auto p = fresh_temp_path(".txt");
+    {
+        std::ofstream ofs(p, std::ios::binary);
+        ofs << "a\n";
+    }
+
+    nlohmann::json args = {
+        {"file_path", p.string()},
+        {"content", "b\n"}
+    };
+    ToolResult r = tool.execute(args.dump(), ToolContext{});
+
+    EXPECT_FALSE(r.success);
+    EXPECT_NE(r.output.find("not been read"), std::string::npos);
+    EXPECT_EQ(read_file(p), "a\n");
+
+    fs::remove(p);
+}
+
+TEST(FileWriteToolSummary, AllowsTimestampOnlyChangeWhenContentUnchanged) {
+    ToolImpl tool = create_file_write_tool();
+
+    auto p = fresh_temp_path(".txt");
+    {
+        std::ofstream ofs(p, std::ios::binary);
+        ofs << "a\n";
+    }
+    mark_full_read(p);
+    auto mtime = fs::last_write_time(p);
+    fs::last_write_time(p, mtime + std::chrono::seconds(3));
+
+    ToolResult r = tool.execute(nlohmann::json({
+        {"file_path", p.string()},
+        {"content", "b\n"}
+    }).dump(), ToolContext{});
+
+    ASSERT_TRUE(r.success) << r.output;
+    EXPECT_EQ(read_file(p), "b\n");
+
+    fs::remove(p);
+}
+
+TEST(FileWriteToolSummary, RejectsExternalContentChangeAfterRead) {
+    ToolImpl tool = create_file_write_tool();
+
+    auto p = fresh_temp_path(".txt");
+    {
+        std::ofstream ofs(p, std::ios::binary);
+        ofs << "a\n";
+    }
+    mark_full_read(p);
+    auto mtime = fs::last_write_time(p);
+    {
+        std::ofstream ofs(p, std::ios::binary);
+        ofs << "external\n";
+    }
+    fs::last_write_time(p, mtime + std::chrono::seconds(3));
+
+    ToolResult r = tool.execute(nlohmann::json({
+        {"file_path", p.string()},
+        {"content", "b\n"}
+    }).dump(), ToolContext{});
+
+    EXPECT_FALSE(r.success);
+    EXPECT_NE(r.output.find("modified externally"), std::string::npos);
+    EXPECT_EQ(read_file(p), "external\n");
 
     fs::remove(p);
 }
@@ -119,6 +201,7 @@ TEST(FileWriteToolSummary, OverwritePreservesUtf16LeEncoding) {
         };
         ofs.write(raw, sizeof(raw));
     }
+    mark_full_read(p);
 
     nlohmann::json args = {
         {"file_path", p.string()},
@@ -173,6 +256,7 @@ TEST(FileWriteToolSummary, OverwriteGbkRejectsUnrepresentableText) {
         std::ofstream ofs(p, std::ios::binary);
         ofs << original;
     }
+    mark_full_read(p);
 
     nlohmann::json args = {
         {"file_path", p.string()},

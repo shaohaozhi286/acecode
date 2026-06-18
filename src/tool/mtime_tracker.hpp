@@ -4,6 +4,7 @@
 #include <string>
 #include <chrono>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <filesystem>
 #include <optional>
@@ -12,12 +13,10 @@
 namespace acecode {
 
 struct FileReadEditMetadata {
-    std::string read_id;
     std::string encoding;
     std::string line_ending;
     int start_line = 0;
     int end_line = 0;
-    std::string range_hash;
     bool lossy = false;
     size_t lossy_replacement_count = 0;
 };
@@ -27,6 +26,19 @@ struct FileReadEditMetadata {
 class MtimeTracker {
 public:
     using clock = std::filesystem::file_time_type;
+
+    class FileWriteGuard {
+    public:
+        explicit FileWriteGuard(std::shared_ptr<std::mutex> mutex);
+        FileWriteGuard(FileWriteGuard&&) noexcept = default;
+        FileWriteGuard& operator=(FileWriteGuard&&) noexcept = delete;
+        FileWriteGuard(const FileWriteGuard&) = delete;
+        FileWriteGuard& operator=(const FileWriteGuard&) = delete;
+
+    private:
+        std::shared_ptr<std::mutex> mutex_;
+        std::unique_lock<std::mutex> lock_;
+    };
 
     enum class ReadBaselineStatus {
         Ok,
@@ -70,6 +82,10 @@ public:
 
     std::optional<FileReadEditMetadata> read_metadata(const std::string& path) const;
 
+    // Serialize validate-and-write sections per file so concurrent tool calls cannot
+    // interleave after the stale-file check.
+    FileWriteGuard acquire_write_guard(const std::string& path);
+
     static MtimeTracker& instance();
 
 private:
@@ -82,6 +98,7 @@ private:
 
     mutable std::mutex mu_;
     std::map<std::string, Record> records_;
+    std::map<std::string, std::weak_ptr<std::mutex>> file_locks_;
 };
 
 } // namespace acecode

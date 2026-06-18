@@ -1,7 +1,12 @@
 #include "mtime_tracker.hpp"
 #include "utils/utf8_path.hpp"
 
+#include <utility>
+
 namespace acecode {
+
+MtimeTracker::FileWriteGuard::FileWriteGuard(std::shared_ptr<std::mutex> mutex)
+    : mutex_(std::move(mutex)), lock_(*mutex_) {}
 
 MtimeTracker& MtimeTracker::instance() {
     static MtimeTracker tracker;
@@ -27,8 +32,7 @@ void MtimeTracker::record_read(const std::string& path,
             mtime,
             partial,
             partial ? std::optional<std::string>{} : std::optional<std::string>{normalized_content},
-            metadata.read_id.empty() ? std::optional<FileReadEditMetadata>{}
-                                     : std::optional<FileReadEditMetadata>{metadata}
+            std::optional<FileReadEditMetadata>{metadata}
         };
     } catch (...) {
         // File may not exist yet; that's OK
@@ -107,6 +111,20 @@ std::optional<FileReadEditMetadata> MtimeTracker::read_metadata(const std::strin
     auto it = records_.find(path);
     if (it == records_.end()) return std::nullopt;
     return it->second.metadata;
+}
+
+MtimeTracker::FileWriteGuard MtimeTracker::acquire_write_guard(const std::string& path) {
+    std::shared_ptr<std::mutex> file_mutex;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto& weak = file_locks_[path];
+        file_mutex = weak.lock();
+        if (!file_mutex) {
+            file_mutex = std::make_shared<std::mutex>();
+            weak = file_mutex;
+        }
+    }
+    return FileWriteGuard{std::move(file_mutex)};
 }
 
 } // namespace acecode

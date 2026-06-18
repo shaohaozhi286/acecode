@@ -360,7 +360,7 @@ Both `main.cpp` and `daemon/worker.cpp` call `proxy_resolver().init(cfg.network)
 
 ### Model profile resolution
 
-At startup and on every `--resume` / `/resume`, `src/provider/model_resolver.cpp` resolves the effective `ModelEntry` in three layers:
+At startup and on every `--resume` / `/resume`, `src/provider/model_resolver.cpp` resolves the effective `ModelEntry` in three layers. CLI `-r` is not a `--resume` short alias; it starts the TUI normally, runs the startup hook path, then opens the same `/resume` picker immediately.
 1. `cfg.default_model_name` if found in `saved_models`
 2. `<cwd_hash>/model_override.json` if present
 3. Resumed `SessionMeta.provider` + `SessionMeta.model` (resume only) — matched by tuple, not name. No match builds an ad-hoc `(session:<id>)` entry borrowing from `cfg.openai`, plus a resumed-with-ad-hoc-model system message.

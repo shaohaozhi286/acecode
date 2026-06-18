@@ -181,6 +181,7 @@ Read-only tools normally run automatically. File writes, edits, and shell comman
 
 ```bash
 ./acecode                     # Start a fresh TUI session in the current directory
+./acecode -r                  # Start TUI and open the session picker immediately
 ./acecode --resume            # Resume the latest session for this project
 ./acecode --resume <id>       # Resume a specific session
 ./acecode configure           # Run the setup wizard

@@ -274,23 +274,20 @@ TEST(AgentLoopDoomGuard, UnreadPreconditionFailureDoesNotArmGuard) {
     EXPECT_FALSE(guard.maybe_guard(retry).has_value());
 }
 
-// 同上一类:range 模式 hash 过期的失败信息里附带了当前 hash 与内容,重试是预期路径,
-// 且 guard 的合成结果反而会丢失这些恢复信息。期望:hash mismatch 失败不计入 doom 记录。
-TEST(AgentLoopDoomGuard, RangeHashMismatchFailureDoesNotArmGuard) {
+TEST(AgentLoopDoomGuard, LegacyRangeArgumentsFailureArmsGuard) {
     AgentLoopDoomGuard guard;
     ToolCall call = make_call("call-1", "file_edit",
         R"({"file_path":"src/i18n/en.js","start_line":2510,"end_line":2515,"expected_hash":"sha256:stale"})");
 
-    ToolResult mismatch;
-    mismatch.success = false;
-    mismatch.output =
-        "[Error] range hash mismatch in src/i18n/en.js. The file changed since it "
-        "was read, or the wrong range was supplied.";
-    guard.record_result(call, mismatch);
+    ToolResult legacy_range_failure;
+    legacy_range_failure.success = false;
+    legacy_range_failure.output =
+        "[Error] file_edit no longer supports start_line, end_line, expected_hash, or read_id arguments.";
+    guard.record_result(call, legacy_range_failure);
 
     ToolCall retry = make_call("call-2", "file_edit",
         R"({"file_path":"src/i18n/en.js","start_line":2510,"end_line":2515,"expected_hash":"sha256:stale"})");
-    EXPECT_FALSE(guard.maybe_guard(retry).has_value());
+    EXPECT_TRUE(guard.maybe_guard(retry).has_value());
 }
 
 TEST(AgentLoopDoomGuardIntegration, SemanticBashGuardSkipsExecutionAndContinues) {

@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <optional>
 #include <unordered_set>
+#include <cstddef>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -85,6 +86,7 @@
 #include "utils/logger.hpp"
 #include "permissions.hpp"
 #include "agent_loop.hpp"
+#include "cli/interactive_options.hpp"
 #include "commands/configure.hpp"
 #include "daemon/cli.hpp"
 #ifdef _WIN32
@@ -108,6 +110,7 @@
 #include "tui/diff_view.hpp"
 #include "tui/unclipped_reflect.hpp"
 #include "tui/paste_handler.hpp"
+#include "tui/pending_attachment_selection.hpp"
 #include "tui/ask_question_overlay.hpp"
 #include "tui/picker_scroll.hpp"
 #include "tui/render_mode_factory.hpp"
@@ -670,18 +673,36 @@ static Element render_pending_attachment_block(const acecode::TuiState& state,
 
     Elements rows;
     const int label_width = std::max(12, available_width - 18);
-    for (const auto& attachment : state.pending_attachments) {
+    const bool attachment_focus = acecode::tui::has_pending_attachment_focus(
+        state.pending_attachment_focus,
+        state.pending_attachments.size());
+    for (std::size_t i = 0; i < state.pending_attachments.size(); ++i) {
+        const auto& attachment = state.pending_attachments[i];
+        const bool focused = attachment_focus &&
+            state.pending_attachment_focus == static_cast<int>(i);
         const std::string kind = attachment.value("kind", std::string{"file"});
         const std::string name = attachment.value("name", std::string{"attachment"});
         const std::string prefix = kind == "image" ? " image " : " file ";
-        rows.push_back(hbox({
-            text(" "),
-            text(prefix) | bold | color(tui::theme().ui.badge_fg) | bgcolor(tui::theme().ui.badge_bg),
+        Element row = hbox({
+            text(focused ? ">" : " "),
+            text(prefix) | bold |
+                color(focused ? tui::theme().ui.selection_fg : tui::theme().ui.badge_fg) |
+                bgcolor(focused ? tui::theme().ui.selection_bg : tui::theme().ui.badge_bg),
             text(" "),
             text(truncate_cells_middle_ascii(name, label_width)) |
-                color(tui::theme().ui.text_primary),
-        }));
+                color(focused ? tui::theme().ui.selection_fg : tui::theme().ui.text_primary),
+        });
+        if (focused) {
+            row = row | bgcolor(tui::theme().ui.selection_bg);
+        }
+        rows.push_back(std::move(row));
     }
+    const std::string hint = attachment_focus
+        ? "  Up/Down: select  Delete/Backspace: remove  Esc/Alt+A: input"
+        : "  Alt+A: select attachments";
+    rows.push_back(
+        text(truncate_cells_middle_ascii(hint, std::max(12, available_width - 2))) |
+        dim | color(tui::theme().ui.text_dim));
     return vbox(std::move(rows));
 }
 
@@ -1514,6 +1535,11 @@ static bool is_alt_v_event(const Event& event) {
            event == Event::Special("\x1BV");
 }
 
+static bool is_alt_a_event(const Event& event) {
+    return event == Event::Special("\x1B" "a") ||
+           event == Event::Special("\x1B" "A");
+}
+
 static std::string attachment_name_from_json(const nlohmann::json& attachment) {
     return attachment.value("name", std::string{"attachment"});
 }
@@ -1587,16 +1613,7 @@ static std::string clipboard_copy_status_message(
     }
 }
 
-struct CliOptions {
-    bool dangerous_mode = false;
-    bool run_configure_cmd = false;
-    bool validate_models_registry_cmd = false;
-    bool resume_latest = false;
-    bool force_alt_screen = false;
-    std::string resume_session_id;
-};
-
-static int run_interactive_app(const CliOptions& cli,
+static int run_interactive_app(const InteractiveCliOptions& cli,
                                const std::string& argv0_dir);
 
 static void configure_process_environment() {
@@ -1734,30 +1751,6 @@ static std::optional<int> dispatch_non_tui_command(int argc, char* argv[]) {
     return std::nullopt;
 }
 
-static CliOptions parse_cli_options(int argc, char* argv[]) {
-    CliOptions cli;
-    for (int i = 1; i < argc; ++i) {
-        std::string arg(argv[i]);
-        if (arg == "-dangerous" || arg == "--dangerous" ||
-            arg == "-yolo" || arg == "--yolo") {
-            cli.dangerous_mode = true;
-        } else if (arg == "configure") {
-            cli.run_configure_cmd = true;
-        } else if (arg == "--validate-models-registry") {
-            cli.validate_models_registry_cmd = true;
-        } else if (arg == "-alt-screen" || arg == "--alt-screen") {
-            cli.force_alt_screen = true;
-        } else if (arg == "--resume") {
-            if (i + 1 < argc && argv[i + 1][0] != '-') {
-                cli.resume_session_id = argv[++i];
-            } else {
-                cli.resume_latest = true;
-            }
-        }
-    }
-    return cli;
-}
-
 static int validate_models_registry_command(const std::string& argv0_dir) {
     AppConfig config = load_config();
     seed_default_skills_if_first_initialization(argv0_dir);
@@ -1792,7 +1785,7 @@ static int validate_models_registry_command(const std::string& argv0_dir) {
     return 0;
 }
 
-static std::optional<int> run_pre_tui_command(const CliOptions& cli,
+static std::optional<int> run_pre_tui_command(const InteractiveCliOptions& cli,
                                               const std::string& argv0_dir) {
     if (cli.run_configure_cmd) {
         AppConfig config = load_config();
@@ -1984,12 +1977,13 @@ static void restore_input_history(TuiState& state,
 static void add_startup_messages(TuiState& state,
                                  bool dangerous_mode,
                                  const McpManager& mcp_manager) {
-    // If YOLO mode is forced from CLI, show startup warning. Note: this skips permission
-    // confirmations but does NOT suppress AskUserQuestion overlays (those are a
-    // legitimate LLM-driven request for input).
+    // If dangerous YOLO mode is forced from CLI, show startup warning. Note:
+    // this skips permission and path-safety checks but does NOT suppress
+    // AskUserQuestion overlays (those are a legitimate LLM-driven request for
+    // input).
     if (dangerous_mode) {
         state.conversation.push_back({"system",
-            "[YOLO MODE] All permission checks are bypassed. Use with caution. "
+            "[DANGEROUS YOLO MODE] Permission and path-safety checks are bypassed. Use with caution. "
             "(AskUserQuestion overlays are still shown when the model needs input.)",
             false});
     }
@@ -2192,7 +2186,7 @@ int main(int argc, char* argv[]) {
     }
 
     std::string argv0_dir = get_executable_dir_from_argv(argc, argv);
-    CliOptions cli = parse_cli_options(argc, argv);
+    InteractiveCliOptions cli = parse_interactive_cli_options(argc, argv);
 
     if (auto exit_code = run_pre_tui_command(cli, argv0_dir)) {
         return *exit_code;
@@ -2201,10 +2195,12 @@ int main(int argc, char* argv[]) {
     return run_interactive_app(cli, argv0_dir);
 }
 
-static int run_interactive_app(const CliOptions& cli,
+static int run_interactive_app(const InteractiveCliOptions& cli,
                                const std::string& argv0_dir) {
     const bool dangerous_mode = cli.dangerous_mode;
     const bool resume_latest = cli.resume_latest;
+    const bool resume_picker_on_startup =
+        cli.resume_picker_on_startup && !cli.direct_resume_requested();
     const bool force_alt_screen = cli.force_alt_screen;
     const std::string resume_session_id = cli.resume_session_id;
 
@@ -2972,6 +2968,24 @@ static int run_interactive_app(const CliOptions& cli,
     CommandRegistry cmd_registry;
     register_slash_commands(cmd_registry, skill_registry);
 
+    if (resume_picker_on_startup) {
+        CommandContext cmd_ctx{
+            state, agent_loop, &provider_slot,
+            config, token_tracker,
+            permissions,
+            [&screen]() { screen.Exit(); },
+            &session_manager,
+            [&screen]() { screen.PostEvent(Event::Custom); },
+            &mcp_manager,
+            &tools,
+            &skill_registry,
+            &memory_registry,
+            &cmd_registry,
+            working_dir
+        };
+        cmd_registry.dispatch("/resume", cmd_ctx);
+    }
+
     // --- Tool progress callbacks (streaming-tool-progress change) ---
     callbacks.on_tool_progress_start = [&state, &screen](
         const std::string& tool_name, const std::string& cmd_preview) {
@@ -3235,6 +3249,8 @@ static int run_interactive_app(const CliOptions& cli,
         if (state.input_cursor > state.input_text.size()) {
             state.input_cursor = state.input_text.size();
         }
+        state.pending_attachment_focus =
+            acecode::tui::kNoPendingAttachmentFocus;
         std::string to_insert;
         if (acecode::tui::should_fold_to_placeholder(normalized)) {
             const int id = state.next_paste_id++;
@@ -3356,6 +3372,9 @@ static int run_interactive_app(const CliOptions& cli,
             }
             cancel_ctrl_c_exit_locked();
             state.pending_attachments.push_back(attachment_to_json(*record));
+            acecode::tui::clamp_pending_attachment_focus(
+                state.pending_attachment_focus,
+                state.pending_attachments.size());
             set_transient_status_line_locked(
                 state,
                 "Attached image: " + record->name);
@@ -3364,8 +3383,89 @@ static int run_interactive_app(const CliOptions& cli,
         return true;
     };
 
+    auto handle_pending_attachment_focus_event = [
+        &state,
+        &screen
+    ](const Event& event) {
+        std::lock_guard<std::mutex> lk(state.mu);
+
+        const bool unavailable =
+            state.ask_pending ||
+            state.confirm_pending ||
+            state.resume_picker_active ||
+            state.rewind_picker_active ||
+            state.model_picker_open;
+
+        if (is_alt_a_event(event)) {
+            if (unavailable) {
+                return true;
+            }
+            if (state.pending_attachments.empty()) {
+                state.pending_attachment_focus =
+                    acecode::tui::kNoPendingAttachmentFocus;
+                set_transient_status_line_locked(state, "No pending attachments");
+            } else {
+                acecode::tui::toggle_pending_attachment_focus(
+                    state.pending_attachment_focus,
+                    state.pending_attachments.size());
+            }
+            screen.PostEvent(Event::Custom);
+            return true;
+        }
+
+        if (unavailable ||
+            !acecode::tui::has_pending_attachment_focus(
+                state.pending_attachment_focus,
+                state.pending_attachments.size())) {
+            return false;
+        }
+
+        if (event == Event::Escape) {
+            state.pending_attachment_focus =
+                acecode::tui::kNoPendingAttachmentFocus;
+            screen.PostEvent(Event::Custom);
+            return true;
+        }
+        if (event == Event::ArrowUp || event == Event::ArrowDown) {
+            const int delta = (event == Event::ArrowUp) ? -1 : 1;
+            acecode::tui::move_pending_attachment_focus(
+                state.pending_attachment_focus,
+                state.pending_attachments.size(),
+                delta);
+            screen.PostEvent(Event::Custom);
+            return true;
+        }
+        if (event == Event::Backspace || event == Event::Delete) {
+            auto removed_index =
+                acecode::tui::remove_focused_pending_attachment_index(
+                    state.pending_attachment_focus,
+                    state.pending_attachments.size());
+            if (removed_index.has_value()) {
+                const auto index = *removed_index;
+                const nlohmann::json removed = state.pending_attachments[index];
+                const std::string kind =
+                    removed.value("kind", std::string{"attachment"});
+                const std::string label =
+                    kind == "image" ? "Removed image: " : "Removed attachment: ";
+                state.pending_attachments.erase(
+                    state.pending_attachments.begin() +
+                    static_cast<std::ptrdiff_t>(index));
+                set_transient_status_line_locked(
+                    state,
+                    label + attachment_name_from_json(removed));
+            }
+            screen.PostEvent(Event::Custom);
+            return true;
+        }
+        if (event.is_character()) {
+            state.pending_attachment_focus =
+                acecode::tui::kNoPendingAttachmentFocus;
+        }
+        return false;
+    };
+
     // Wrap with CatchEvent to handle all keyboard input
-    auto input_with_esc = CatchEvent(input_renderer, [&state, &screen, &clamp_chat_focus, &chat_viewport_rows, &sync_chat_line_counts_from_layout, &auth_done, &cmd_registry, &agent_loop, &provider_slot, &provider_accessor, &config, &token_tracker, &permissions, &session_manager, &scroll_chat_by_lines, &chat_box, &scrollbar_box, &ask_scrollbar_box, &ask_overlay_box, &message_line_counts, &mcp_manager, &tools, &skill_registry, &memory_registry, &working_dir, &insert_pasted_text_at_cursor, &paste_system_clipboard_text, &paste_system_clipboard_image, &cancel_ctrl_c_exit_locked, &coordinate_mcp_before_first_turn](Event event) {
+    auto input_with_esc = CatchEvent(input_renderer, [&state, &screen, &clamp_chat_focus, &chat_viewport_rows, &sync_chat_line_counts_from_layout, &auth_done, &cmd_registry, &agent_loop, &provider_slot, &provider_accessor, &config, &token_tracker, &permissions, &session_manager, &scroll_chat_by_lines, &chat_box, &scrollbar_box, &ask_scrollbar_box, &ask_overlay_box, &message_line_counts, &mcp_manager, &tools, &skill_registry, &memory_registry, &working_dir, &insert_pasted_text_at_cursor, &paste_system_clipboard_text, &paste_system_clipboard_image, &handle_pending_attachment_focus_event, &cancel_ctrl_c_exit_locked, &coordinate_mcp_before_first_turn](Event event) {
 #if ACECODE_TUI_INPUT_TRACE
         if (event != Event::Custom &&
             !event.is_cursor_position() &&
@@ -3484,6 +3584,10 @@ static int run_interactive_app(const CliOptions& cli,
             } else {
                 screen.PostEvent(Event::Custom);
             }
+            return true;
+        }
+
+        if (handle_pending_attachment_focus_event(event)) {
             return true;
         }
 
@@ -4417,6 +4521,8 @@ static int run_interactive_app(const CliOptions& cli,
                 display_prompt_with_attachments(expanded_prompt, attachments);
             state.input_text.clear(); state.pasted_texts.clear();
             state.pending_attachments.clear();
+            state.pending_attachment_focus =
+                acecode::tui::kNoPendingAttachmentFocus;
             state.input_cursor = 0;
             refresh_slash_dropdown(state, cmd_registry);
 
@@ -4449,6 +4555,9 @@ static int run_interactive_app(const CliOptions& cli,
                     state.input_text = expanded_prompt;
                     state.input_cursor = state.input_text.size();
                     state.pending_attachments = attachments;
+                    acecode::tui::clamp_pending_attachment_focus(
+                        state.pending_attachment_focus,
+                        state.pending_attachments.size());
                     screen.PostEvent(Event::Custom);
                     return true;
                 }
@@ -4752,6 +4861,8 @@ static int run_interactive_app(const CliOptions& cli,
             if (!state.pending_attachments.empty() && state.input_text.empty()) {
                 cancel_ctrl_c_exit_locked();
                 state.pending_attachments.clear();
+                state.pending_attachment_focus =
+                    acecode::tui::kNoPendingAttachmentFocus;
                 set_transient_status_line_locked(state, "Cleared pending attachments");
                 screen.PostEvent(Event::Custom);
                 return true;
@@ -6175,7 +6286,8 @@ static int run_interactive_app(const CliOptions& cli,
             const auto terminal_size = Terminal::Size();
             const int content_width = std::max(20, terminal_size.dimx - 10);
             const int max_visible_rows =
-                std::max(4, std::min(14, terminal_size.dimy - 12));
+                acecode::tui::ask_overlay_visible_rows_for_terminal(
+                    terminal_size.dimy);
 
             acecode::tui::AskOverlayLayoutInput layout_input;
             layout_input.question = &q;

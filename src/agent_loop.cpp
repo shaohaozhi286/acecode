@@ -17,6 +17,7 @@
 #include "session/todo_state.hpp"
 #include "session/turn_timing.hpp"
 #include "tool/ask_user_question_tool.hpp"
+#include "tool/mtime_tracker.hpp"
 #include "web/message_payload.hpp"
 #include "web/tool_event_payload.hpp"
 #include "hooks/hook_config.hpp"
@@ -190,6 +191,7 @@ std::string build_plan_mode_context_prompt(SessionManager* session_manager) {
     const std::string plan_file = session_manager->ensure_plan_file_path();
     if (plan_file.empty()) return {};
     const std::string existing_plan = session_manager->read_plan_file();
+    MtimeTracker::instance().record_read(plan_file, existing_plan, false);
 
     std::ostringstream oss;
     oss << "<plan_mode>\n"
@@ -1644,20 +1646,38 @@ bool AgentLoop::execute_tool_calls(
     auto is_cwd_validation_exempt = [this](const std::string& tool_name,
                                            const std::string& path) {
         if (tool_name == "file_read") return true;
+        if (permissions_.mode() == PermissionMode::Yolo &&
+            !permissions_.is_dangerous()) {
+            return true;
+        }
         if (!session_manager_) return false;
         return session_manager_->is_plan_file_path(path);
     };
 
+    auto path_validation_error = [this, &is_cwd_validation_exempt](
+                                     const std::string& tool_name,
+                                     const std::string& path) -> std::string {
+        if (path.empty() || tool_name == "bash") return {};
+        return is_cwd_validation_exempt(tool_name, path)
+            ? std::string{}
+            : path_validator_.validate(path);
+    };
+
+    auto is_yolo_external_file_path = [this](const std::string& path) {
+        if (path.empty()) return false;
+        if (permissions_.is_dangerous()) return false;
+        if (permissions_.mode() != PermissionMode::Yolo) return false;
+        return !path_validator_.validate(path).empty();
+    };
+
     // Helper: execute a single tool (for both parallel and serial use).
     auto execute_single_tool =
-        [this, &is_cwd_validation_exempt](const std::string& tool_name,
-                                          const std::string& tool_args,
-                                          const std::string& ctx_path,
-                                          const ToolContext& tool_ctx = ToolContext{}) -> ToolResult {
+        [this, &path_validation_error](const std::string& tool_name,
+                                       const std::string& tool_args,
+                                       const std::string& ctx_path,
+                                       const ToolContext& tool_ctx = ToolContext{}) -> ToolResult {
         if (!ctx_path.empty() && tool_name != "bash") {
-            std::string path_error = is_cwd_validation_exempt(tool_name, ctx_path)
-                ? std::string{}
-                : path_validator_.validate(ctx_path);
+            std::string path_error = path_validation_error(tool_name, ctx_path);
             if (!path_error.empty()) {
                 LOG_WARN("Path validation failed: " + path_error);
                 return ToolResult{"[Error] " + path_error, false};
@@ -2049,17 +2069,25 @@ bool AgentLoop::execute_tool_calls(
                             return ToolResult{
                                 "[Error] Shell write blocked for " + failed_path +
                                 " because a recent safe file edit failed. "
-                                "Use file_read metadata plus file_edit range mode, or perform an explicit encoding conversion instead of bypassing text safety.",
+                                "Re-read the file and retry with an exact file_edit old_string, or perform an explicit encoding conversion instead of bypassing text safety.",
                                 false};
                         }
                     }
                 }
 
+                const bool needs_yolo_external_write_confirmation =
+                    effective_tc.function_name != "bash" &&
+                    !ctx_path.empty() &&
+                    is_yolo_external_file_path(ctx_path) &&
+                    !permissions_.yolo_external_file_write_confirmed();
+                if (needs_yolo_external_write_confirmation) {
+                    LOG_INFO("Yolo external file write requires first confirmation: " + ctx_path);
+                    auto_allow = false;
+                }
+
                 if (!ctx_path.empty() && effective_tc.function_name != "bash") {
                     std::string path_error =
-                        is_cwd_validation_exempt(effective_tc.function_name, ctx_path)
-                        ? std::string{}
-                        : path_validator_.validate(ctx_path);
+                        path_validation_error(effective_tc.function_name, ctx_path);
                     if (!path_error.empty()) {
                         LOG_WARN("Path validation failed: " + path_error);
                         return ToolResult{"[Error] " + path_error, false};
@@ -2092,6 +2120,9 @@ bool AgentLoop::execute_tool_calls(
                     }
                     if (outcome.allowed) {
                         auto_allow = true;
+                        if (needs_yolo_external_write_confirmation) {
+                            permissions_.mark_yolo_external_file_write_confirmed();
+                        }
                     }
                 }
 
@@ -2114,6 +2145,16 @@ bool AgentLoop::execute_tool_calls(
                         effective_tc.function_name != "ExitPlanMode") {
                         permissions_.add_session_allow(effective_tc.function_name);
                     }
+                    if (needs_yolo_external_write_confirmation) {
+                        permissions_.mark_yolo_external_file_write_confirmed();
+                    }
+                }
+
+                if (needs_yolo_external_write_confirmation &&
+                    !permissions_.yolo_external_file_write_confirmed()) {
+                    return ToolResult{
+                        "[Error] External file write in yolo mode requires permission confirmation before execution.",
+                        false};
                 }
 
                 ToolResult tool_result = execute_single_tool(effective_tc.function_name, effective_tc.function_arguments,
@@ -2124,7 +2165,6 @@ bool AgentLoop::execute_tool_calls(
                     const std::string lower = ascii_lower(tool_result.output);
                     if (lower.find("encoding") != std::string::npos ||
                         lower.find("old_string") != std::string::npos ||
-                        lower.find("range hash") != std::string::npos ||
                         lower.find("round-trip") != std::string::npos) {
                         recent_safe_edit_failures_[ctx_path] = std::chrono::steady_clock::now();
                     }

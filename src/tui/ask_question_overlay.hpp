@@ -44,6 +44,8 @@ int display_width_cells(const std::string& text);
 
 AskOverlayLayout build_ask_overlay_layout(const AskOverlayLayoutInput& input);
 
+int ask_overlay_visible_rows_for_terminal(int terminal_rows);
+
 int clamp_scroll_offset(int offset, int total_rows, int visible_rows);
 int scroll_offset_by_lines(int offset, int delta, int total_rows, int visible_rows);
 int ensure_row_range_visible(int offset,

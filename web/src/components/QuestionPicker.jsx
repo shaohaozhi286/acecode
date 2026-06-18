@@ -15,6 +15,8 @@ import {
   toggleAnswerSelection,
 } from '../lib/questionPicker.js';
 
+const READABLE_TEXT_STYLE = { overflowWrap: 'anywhere', wordBreak: 'break-word' };
+
 function focusSoon(ref) {
   requestAnimationFrame(() => ref.current?.focus());
 }
@@ -164,23 +166,29 @@ export function QuestionPicker({ request, onResolve }) {
       tabIndex={-1}
       onKeyDown={onKeyDown}
       aria-label="AskUserQuestion"
-      className="mx-2.5 mb-2 shrink-0 rounded-xl border border-border bg-surface ace-shadow-lg outline-none overflow-hidden"
+      className="mx-2.5 mb-2 shrink min-h-0 rounded-xl border border-border bg-surface ace-shadow-lg outline-none overflow-hidden flex flex-col"
     >
-      <div className="min-h-10 px-3 py-2 border-b border-border bg-surface-alt flex items-center gap-2">
+      <div className="min-h-10 shrink-0 px-3 py-2 border-b border-border bg-surface-alt flex items-start gap-2">
         <div className="min-w-0 flex-1">
           {question.header && (
-            <div className="text-[10px] uppercase tracking-wide text-accent font-semibold truncate">
+            <div
+              className="text-[10px] uppercase tracking-wide text-accent font-semibold whitespace-pre-wrap break-words"
+              style={READABLE_TEXT_STYLE}
+            >
               {question.header}
             </div>
           )}
-          <div className="text-[13px] font-semibold text-fg truncate">
+          <div
+            className="text-[13px] leading-[17px] font-semibold text-fg whitespace-pre-wrap break-words"
+            style={READABLE_TEXT_STYLE}
+          >
             {question.text}
           </div>
         </div>
         <button
           type="button"
           onClick={() => setCollapsed((value) => !value)}
-          className="w-7 h-7 rounded-md flex items-center justify-center text-fg-2 hover:bg-surface-hi transition"
+          className="mt-0.5 w-7 h-7 shrink-0 rounded-md flex items-center justify-center text-fg-2 hover:bg-surface-hi transition"
           title={collapsed ? '展开' : '折叠'}
         >
           <VsIcon name={collapsed ? 'expandRight' : 'expandDown'} size={14} />
@@ -188,7 +196,7 @@ export function QuestionPicker({ request, onResolve }) {
         <button
           type="button"
           onClick={cancel}
-          className="w-7 h-7 rounded-md flex items-center justify-center text-fg-2 hover:bg-danger-bg hover:text-danger transition"
+          className="mt-0.5 w-7 h-7 shrink-0 rounded-md flex items-center justify-center text-fg-2 hover:bg-danger-bg hover:text-danger transition"
           title="取消回答"
         >
           <VsIcon name="close" size={14} />
@@ -196,13 +204,13 @@ export function QuestionPicker({ request, onResolve }) {
       </div>
 
       {collapsed ? (
-        <div className="px-3 py-2 text-[12px] text-fg-2 flex items-center justify-between gap-3">
+        <div className="shrink-0 px-3 py-2 text-[12px] text-fg-2 flex items-center justify-between gap-3">
           <span className="truncate">已折叠,继续等待回答。</span>
           <span className="shrink-0 text-fg-mute">{nav.current}/{nav.total}</span>
         </div>
       ) : (
         <>
-          <div className="p-2.5 max-h-[42vh] overflow-y-auto flex flex-col gap-1.5">
+          <div className="p-2.5 min-h-0 flex-1 overflow-y-auto flex flex-col gap-1.5">
             {question.options.map((opt, index) => {
               const selected = answer.selected?.includes(opt.value);
               const focused = focusIndex === index;
@@ -214,25 +222,33 @@ export function QuestionPicker({ request, onResolve }) {
                   onFocus={() => setFocusIndex(index)}
                   aria-pressed={selected}
                   className={clsx(
-                    'w-full text-left rounded-lg border px-2.5 py-2 flex items-center gap-2 transition outline-none',
+                    'w-full text-left rounded-lg border px-2.5 py-2 flex items-start gap-2 transition outline-none',
                     selected
                       ? 'bg-accent-bg border-accent text-fg'
                       : 'bg-surface-alt border-border hover:bg-surface-hi',
                     focused && 'ring-2 ring-accent/20 border-accent',
                   )}
                 >
-                  <span className="w-5 shrink-0 text-[12px] font-semibold text-fg-mute tabular-nums">
+                  <span className="w-5 shrink-0 pt-0.5 text-[12px] font-semibold text-fg-mute tabular-nums">
                     {index + 1}
                   </span>
                   <span className="min-w-0 flex-1">
-                    <span className="block text-[12px] font-medium text-fg break-words">{opt.label}</span>
+                    <span
+                      className="block text-[12px] font-medium text-fg whitespace-pre-wrap break-words"
+                      style={READABLE_TEXT_STYLE}
+                    >
+                      {opt.label}
+                    </span>
                     {opt.description && (
-                      <span className="block mt-0.5 text-[11px] leading-[15px] text-fg-mute break-words">
+                      <span
+                        className="block mt-0.5 text-[11px] leading-[15px] text-fg-mute whitespace-pre-wrap break-words"
+                        style={READABLE_TEXT_STYLE}
+                      >
                         {opt.description}
                       </span>
                     )}
                   </span>
-                  <span className="w-5 h-5 shrink-0 flex items-center justify-center">
+                  <span className="w-5 h-5 shrink-0 mt-0.5 flex items-center justify-center">
                     {selected ? (
                       <VsIcon name="ok" size={14} mono={false} />
                     ) : (
@@ -277,7 +293,7 @@ export function QuestionPicker({ request, onResolve }) {
             </label>
           </div>
 
-          <div className="px-3 py-2 border-t border-border bg-surface-alt flex items-center gap-2">
+          <div className="shrink-0 px-3 py-2 border-t border-border bg-surface-alt flex items-center gap-2">
             <button
               type="button"
               onClick={goPrev}

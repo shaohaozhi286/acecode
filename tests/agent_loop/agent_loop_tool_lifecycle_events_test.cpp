@@ -11,6 +11,7 @@
 #include "stub_provider.hpp"
 #include "tool/file_edit_tool.hpp"
 #include "tool/file_read_tool.hpp"
+#include "tool/file_write_tool.hpp"
 #include "tool/mtime_tracker.hpp"
 #include "tool/tool_executor.hpp"
 
@@ -29,6 +30,7 @@
 using acecode::AgentCallbacks;
 using acecode::AgentLoop;
 using acecode::PermissionManager;
+using acecode::PermissionMode;
 using acecode::PermissionResult;
 using acecode::SessionEvent;
 using acecode::SessionEventKind;
@@ -100,7 +102,9 @@ fs::path make_temp_dir(const std::string& name) {
 
 class ToolLifecycleHarness {
 public:
-    explicit ToolLifecycleHarness(std::string cwd)
+    explicit ToolLifecycleHarness(std::string cwd,
+                                  PermissionMode mode = PermissionMode::Default,
+                                  PermissionResult confirm_result = PermissionResult::Deny)
         : cwd_(std::move(cwd)) {
         AgentCallbacks cb;
         cb.on_busy_changed = [this](bool busy) {
@@ -108,11 +112,12 @@ public:
             busy_ = busy;
             if (!busy) busy_cv_.notify_all();
         };
-        cb.on_tool_confirm = [this](const std::string&, const std::string&) {
+        cb.on_tool_confirm = [this, confirm_result](const std::string&, const std::string&) {
             confirm_count_.fetch_add(1);
-            return PermissionResult::Deny;
+            return confirm_result;
         };
         auto accessor = [this]() -> std::shared_ptr<acecode::LlmProvider> { return provider_; };
+        perms_.set_mode(mode);
         loop_ = std::make_unique<AgentLoop>(accessor, tools_, cb, cwd_, perms_);
         sub_ = loop_->events().subscribe([this](const SessionEvent& e) {
             std::lock_guard<std::mutex> lk(events_mu_);
@@ -345,6 +350,124 @@ TEST(AgentLoopToolLifecycleEvents, MutationOutsideCwdStillRejectedBeforeExecutio
     EXPECT_FALSE(ends[0].payload.value("success", true));
     ASSERT_TRUE(ends[0].payload.contains("output"));
     EXPECT_NE(ends[0].payload["output"].get<std::string>().find("Path outside working directory"),
+              std::string::npos);
+
+    fs::remove_all(cwd);
+}
+
+TEST(AgentLoopToolLifecycleEvents, YoloReadOnlyPathToolOutsideCwdExecutes) {
+    auto cwd = make_temp_dir("acecode_lifecycle_yolo_read_outside");
+    std::atomic<int> calls{0};
+    ToolLifecycleHarness h(cwd.string(), PermissionMode::Yolo);
+    h.tools().register_tool(make_probe_tool("ro_path_probe", true, &calls));
+
+    const auto outside = cwd.parent_path() /
+        (cwd.filename().string() + "_outside_ro_probe.txt");
+    ScriptedResponse tools_turn;
+    tools_turn.tool_calls.push_back({"call-yolo-read-outside", "ro_path_probe",
+        nlohmann::json{{"file_path", outside.string()}}.dump()});
+    h.provider().push_response(std::move(tools_turn));
+    h.provider().push_text("done");
+
+    ASSERT_TRUE(h.submit_and_wait());
+    EXPECT_EQ(calls.load(), 1);
+    EXPECT_EQ(h.confirm_count().load(), 0);
+
+    auto ends = h.events_of(SessionEventKind::ToolEnd);
+    ASSERT_EQ(ends.size(), 1u);
+    EXPECT_EQ(ends[0].payload["tool_call_id"], "call-yolo-read-outside");
+    EXPECT_TRUE(ends[0].payload.value("success", false));
+
+    fs::remove_all(cwd);
+}
+
+TEST(AgentLoopToolLifecycleEvents, YoloExternalMutationPromptsOnceThenExecutes) {
+    auto cwd = make_temp_dir("acecode_lifecycle_yolo_write_outside");
+    std::atomic<int> calls{0};
+    ToolLifecycleHarness h(cwd.string(), PermissionMode::Yolo, PermissionResult::Allow);
+    h.tools().register_tool(make_probe_tool("write_path_probe", false, &calls));
+
+    const auto outside_a = cwd.parent_path() /
+        (cwd.filename().string() + "_outside_write_a.txt");
+    const auto outside_b = cwd.parent_path() /
+        (cwd.filename().string() + "_outside_write_b.txt");
+    ScriptedResponse tools_turn;
+    tools_turn.tool_calls.push_back({"call-yolo-write-a", "write_path_probe",
+        nlohmann::json{{"file_path", outside_a.string()}}.dump()});
+    tools_turn.tool_calls.push_back({"call-yolo-write-b", "write_path_probe",
+        nlohmann::json{{"file_path", outside_b.string()}}.dump()});
+    h.provider().push_response(std::move(tools_turn));
+    h.provider().push_text("done");
+
+    ASSERT_TRUE(h.submit_and_wait());
+    EXPECT_EQ(calls.load(), 2);
+    EXPECT_EQ(h.confirm_count().load(), 1);
+
+    auto ends = h.events_of(SessionEventKind::ToolEnd);
+    ASSERT_EQ(ends.size(), 2u);
+    EXPECT_TRUE(ends[0].payload.value("success", false));
+    EXPECT_TRUE(ends[1].payload.value("success", false));
+
+    fs::remove_all(cwd);
+}
+
+TEST(AgentLoopToolLifecycleEvents, YoloFileWriteOutsideCwdWritesAfterConfirmation) {
+    auto cwd = make_temp_dir("acecode_lifecycle_yolo_file_write");
+    const auto outside = cwd.parent_path() /
+        (cwd.filename().string() + "_outside_file_write.txt");
+
+    ToolLifecycleHarness h(cwd.string(), PermissionMode::Yolo, PermissionResult::Allow);
+    h.tools().register_tool(acecode::create_file_write_tool());
+
+    ScriptedResponse tools_turn;
+    tools_turn.tool_calls.push_back({"call-yolo-file-write", "file_write",
+        nlohmann::json{
+            {"file_path", outside.string()},
+            {"content", "external yolo write\n"},
+        }.dump()});
+    h.provider().push_response(std::move(tools_turn));
+    h.provider().push_text("done");
+
+    ASSERT_TRUE(h.submit_and_wait());
+    EXPECT_EQ(h.confirm_count().load(), 1);
+    ASSERT_TRUE(fs::exists(outside));
+
+    std::string content;
+    {
+        std::ifstream in(outside, std::ios::binary);
+        content.assign(std::istreambuf_iterator<char>(in),
+                       std::istreambuf_iterator<char>());
+    }
+    EXPECT_EQ(content, "external yolo write\n");
+
+    fs::remove(outside);
+    fs::remove_all(cwd);
+}
+
+TEST(AgentLoopToolLifecycleEvents, YoloExternalMutationDenialSkipsExecution) {
+    auto cwd = make_temp_dir("acecode_lifecycle_yolo_write_deny");
+    std::atomic<int> calls{0};
+    ToolLifecycleHarness h(cwd.string(), PermissionMode::Yolo, PermissionResult::Deny);
+    h.tools().register_tool(make_probe_tool("write_path_probe", false, &calls));
+
+    const auto outside = cwd.parent_path() /
+        (cwd.filename().string() + "_outside_write_deny.txt");
+    ScriptedResponse tools_turn;
+    tools_turn.tool_calls.push_back({"call-yolo-write-deny", "write_path_probe",
+        nlohmann::json{{"file_path", outside.string()}}.dump()});
+    h.provider().push_response(std::move(tools_turn));
+    h.provider().push_text("done");
+
+    ASSERT_TRUE(h.submit_and_wait());
+    EXPECT_EQ(calls.load(), 0);
+    EXPECT_EQ(h.confirm_count().load(), 1);
+
+    auto ends = h.events_of(SessionEventKind::ToolEnd);
+    ASSERT_EQ(ends.size(), 1u);
+    EXPECT_EQ(ends[0].payload["tool_call_id"], "call-yolo-write-deny");
+    EXPECT_FALSE(ends[0].payload.value("success", true));
+    ASSERT_TRUE(ends[0].payload.contains("output"));
+    EXPECT_NE(ends[0].payload["output"].get<std::string>().find("User denied"),
               std::string::npos);
 
     fs::remove_all(cwd);

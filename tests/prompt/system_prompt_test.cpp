@@ -270,6 +270,8 @@ TEST_F(SystemPromptTest, PromptAllowsPartialReadBaselinesAndGuidesScratchScripts
     EXPECT_NE(out.find("A non-lossy partial read establishes a baseline"), std::string::npos);
     EXPECT_NE(out.find("ACECODE_TMPDIR"), std::string::npos);
     EXPECT_EQ(out.find("partial reads are only enough for range edits"), std::string::npos);
+    EXPECT_EQ(out.find("start_line/end_line/expected_hash"), std::string::npos);
+    EXPECT_EQ(out.find("metadata/range edit"), std::string::npos);
 }
 
 // 场景:Windows 平台 build prompt 必须注入 "# Shell Command Guidance (Windows)" 段。

@@ -9,6 +9,9 @@
 namespace acecode::tui {
 namespace {
 
+constexpr int kAskOverlayReservedTerminalRows = 12;
+constexpr int kAskOverlayMinimumVisibleRows = 4;
+
 bool is_utf8_continuation(unsigned char c) {
     return (c & 0xC0) == 0x80;
 }
@@ -236,6 +239,11 @@ AskOverlayLayout build_ask_overlay_layout(const AskOverlayLayoutInput& input) {
     }
 
     return layout;
+}
+
+int ask_overlay_visible_rows_for_terminal(int terminal_rows) {
+    return std::max(kAskOverlayMinimumVisibleRows,
+                    terminal_rows - kAskOverlayReservedTerminalRows);
 }
 
 int clamp_scroll_offset(int offset, int total_rows, int visible_rows) {

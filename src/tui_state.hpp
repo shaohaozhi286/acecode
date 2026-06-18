@@ -4,6 +4,7 @@
 #include "provider/llm_provider.hpp"
 #include "tui/paste_handler.hpp"
 #include "tui/model_picker.hpp"
+#include "tui/pending_attachment_selection.hpp"
 #include "utils/drag_scroll.hpp"
 #include "tool/tool_executor.hpp"
 #include "tool/ask_user_question_tool.hpp"
@@ -122,6 +123,9 @@ struct TuiState {
     std::vector<std::string> pending_queue;
     std::deque<UserInput> pending_structured_queue;
     std::vector<nlohmann::json> pending_attachments;
+    // -1 means the prompt text is focused. Non-negative values select a
+    // pending attachment row for keyboard navigation/deletion.
+    int pending_attachment_focus = acecode::tui::kNoPendingAttachmentFocus;
 
     // Tool confirmation state.
     //   confirm_focus —— overlay 当前焦点的选项下标:
