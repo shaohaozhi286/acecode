@@ -295,6 +295,18 @@ TEST(BuiltinCommands, NewIsRegisteredAsClearAlias) {
     EXPECT_EQ(registry.commands().at("new").description, "Alias for /clear");
 }
 
+TEST(BuiltinCommands, FeedbackRejectsInvalidUpgradeUrlLocally) {
+    ResumeCommandHarness harness("feedback_invalid_upgrade_url");
+    harness.config_.upgrade.base_url = "ftp://bad.example.test/";
+
+    EXPECT_TRUE(harness.dispatch("/feedback upload failed after resume"));
+    ASSERT_FALSE(harness.state_.conversation.empty());
+    const auto& msg = harness.state_.conversation.back();
+    EXPECT_EQ(msg.role, "system");
+    EXPECT_NE(msg.content.find("upgrade.base_url"), std::string::npos);
+    EXPECT_NE(msg.content.find("http or https"), std::string::npos);
+}
+
 TEST(BuiltinCommands, McpCommandShowsStartingState) {
     McpCommandHarness h("mcp_starting");
     auto cfg = mcp_config_with_stdio_server(

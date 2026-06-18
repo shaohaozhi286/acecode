@@ -16,6 +16,7 @@
 #include "../provider/apply_model_to_session.hpp"
 #include "../provider/cwd_model_override.hpp"
 #include "../provider/model_resolver.hpp"
+#include "../feedback/feedback_upload.hpp"
 #include "../tool/mcp_manager.hpp"
 #include "../tool/ace_browser_bridge/browser_tools.hpp"
 #include "../tool/tool_executor.hpp"
@@ -27,9 +28,13 @@
 #include "../session/thread_goal_store.hpp"
 #include "../utils/logger.hpp"
 #include "../utils/terminal_title.hpp"
+#include "../utils/utf8_path.hpp"
+#include "version.hpp"
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <mutex>
 #include <optional>
@@ -39,6 +44,8 @@
 #include <nlohmann/json.hpp>
 
 namespace acecode {
+
+namespace fs = std::filesystem;
 
 namespace {
 
@@ -241,6 +248,7 @@ static void cmd_help(CommandContext& ctx, const std::string& /*args*/) {
         << "  /memory   - List, view, edit, forget, or reload persistent user memory\n"
         << "  /init     - Generate an ACECODE.md skeleton in the current directory\n"
         << "  /history  - List or clear the per-working-directory input history\n"
+        << "  /feedback - Upload current session diagnostics to the configured upgrade service\n"
         << "  /models   - Inspect bundled models.dev registry\n"
         << "  /browser  - Show or toggle ACE Browser Bridge tools for this session\n"
         << "  /proxy    - Show or switch the HTTP proxy used for LLM/API requests\n"
@@ -256,6 +264,119 @@ static void cmd_help(CommandContext& ctx, const std::string& /*args*/) {
     }
     ctx.state.conversation.push_back({"system", oss.str(), false});
     ctx.state.chat_follow_tail = true;
+}
+
+static bool ensure_empty_file_exists(const fs::path& path, std::string* error) {
+    std::error_code ec;
+    fs::create_directories(path.parent_path(), ec);
+    if (ec) {
+        if (error) *error = "failed to create session directory: " + ec.message();
+        return false;
+    }
+    if (fs::exists(path, ec)) return true;
+    std::ofstream ofs(path, std::ios::binary | std::ios::app);
+    if (!ofs) {
+        if (error) *error = "failed to create session JSONL file: " + path_to_utf8(path);
+        return false;
+    }
+    return true;
+}
+
+static std::string feedback_error_with_package(const std::string& error,
+                                               const std::string& upload_url,
+                                               const fs::path& package_path) {
+    std::ostringstream oss;
+    oss << "Feedback upload failed: " << error
+        << "\nUpload URL: " << upload_url;
+    if (!package_path.empty()) {
+        oss << "\nPackage retained: " << path_to_utf8(package_path);
+    }
+    return oss.str();
+}
+
+static void cmd_feedback(CommandContext& ctx, const std::string& raw_args) {
+    const std::string feedback_text = trim_ascii_command(raw_args);
+
+    if (!ctx.session_manager) {
+        std::lock_guard<std::mutex> lk(ctx.state.mu);
+        emit_system_message_locked(ctx.state, "Feedback upload failed: session persistence is not available.");
+        return;
+    }
+
+    if (!is_valid_upgrade_base_url(ctx.config.upgrade.base_url)) {
+        std::lock_guard<std::mutex> lk(ctx.state.mu);
+        emit_system_message_locked(
+            ctx.state,
+            "Feedback upload failed: upgrade.base_url must be a non-empty http or https URL.");
+        return;
+    }
+
+    const std::string upload_url = normalize_upgrade_base_url(ctx.config.upgrade.base_url);
+    const std::string session_id = ctx.session_manager->ensure_active_session_id();
+    if (session_id.empty()) {
+        std::lock_guard<std::mutex> lk(ctx.state.mu);
+        emit_system_message_locked(ctx.state, "Feedback upload failed: active session is not available.");
+        return;
+    }
+
+    const std::string project_dir = SessionStorage::get_project_dir(ctx.cwd);
+    const fs::path session_jsonl =
+        path_from_utf8(SessionStorage::session_path(project_dir, session_id));
+    std::string session_file_error;
+    if (!ensure_empty_file_exists(session_jsonl, &session_file_error)) {
+        std::lock_guard<std::mutex> lk(ctx.state.mu);
+        emit_system_message_locked(ctx.state, "Feedback upload failed: " + session_file_error);
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(ctx.state.mu);
+        emit_system_message_locked(
+            ctx.state,
+            "Preparing feedback package for upload to " + upload_url);
+    }
+    if (ctx.post_event) ctx.post_event();
+
+    const fs::path log_path = path_from_utf8(ctx.cwd) / "acecode.log";
+    acecode::feedback::FeedbackPackageRequest package_req;
+    package_req.feedback_text = feedback_text;
+    package_req.session_id = session_id;
+    package_req.session_jsonl_path = session_jsonl;
+    package_req.log_path = log_path;
+    package_req.acecode_version = ACECODE_VERSION;
+
+    auto package = acecode::feedback::build_feedback_package(package_req);
+    if (!package.ok) {
+        {
+            std::lock_guard<std::mutex> lk(ctx.state.mu);
+            emit_system_message_locked(ctx.state, "Feedback upload failed: " + package.error);
+        }
+        if (ctx.post_event) ctx.post_event();
+        return;
+    }
+
+    acecode::feedback::FeedbackUploadRequest upload_req;
+    upload_req.upload_url = upload_url;
+    upload_req.package_path = package.package_path;
+    upload_req.package_filename = package.package_filename;
+    upload_req.timeout_ms = ctx.config.upgrade.timeout_ms;
+
+    auto upload = acecode::feedback::upload_feedback_package(upload_req);
+    {
+        std::lock_guard<std::mutex> lk(ctx.state.mu);
+        if (upload.ok) {
+            std::error_code ec;
+            fs::remove(package.package_path, ec);
+            emit_system_message_locked(
+                ctx.state,
+                "Feedback uploaded: " + package.package_filename);
+        } else {
+            emit_system_message_locked(
+                ctx.state,
+                feedback_error_with_package(upload.error, upload_url, package.package_path));
+        }
+    }
+    if (ctx.post_event) ctx.post_event();
 }
 
 static void cmd_mode(CommandContext& ctx, const std::string& raw_args) {
@@ -1510,6 +1631,7 @@ void register_builtin_commands(CommandRegistry& registry) {
     register_proxy_command(registry);
     register_websearch_command(registry);
     register_remote_control_command(registry);
+    registry.register_command({"feedback", "Upload current session diagnostics to the configured upgrade service", cmd_feedback});
     registry.register_command({"browser", "Show or toggle ACE Browser Bridge tools for this session", cmd_browser});
     registry.register_command({"title", "Set or show the window title for this session", cmd_title});
     registry.register_command({"page-step", "Toggle single-line PgUp/PgDn scrolling (for terminals that swallow Alt+Arrow)", cmd_page_step});
