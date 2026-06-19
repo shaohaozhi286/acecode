@@ -1,13 +1,5 @@
 #include "web_host.hpp"
 
-#ifdef _WIN32
-#  include "acrylic_backdrop_win.hpp"
-
-#  ifndef ACECODE_DESKTOP_ACRYLIC_DEBUG_HOST_FILL
-#    define ACECODE_DESKTOP_ACRYLIC_DEBUG_HOST_FILL 0
-#  endif
-#endif
-
 #include "web_host_close_policy.hpp"
 #include "webview2_runtime_probe.hpp"
 #include "window_chrome.hpp"
@@ -741,32 +733,7 @@ LRESULT frameless_nc_calc(HWND hwnd, WPARAM wparam, LPARAM lparam) {
 }
 
 LRESULT CALLBACK host_window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
-    handle_desktop_sidebar_acrylic_message(hwnd, msg, wparam, lparam);
     switch (msg) {
-#if ACECODE_DESKTOP_ACRYLIC_DEBUG_HOST_FILL
-        case WM_ERASEBKGND: {
-            HDC dc = reinterpret_cast<HDC>(wparam);
-            RECT client{};
-            if (dc && ::GetClientRect(hwnd, &client)) {
-                HBRUSH brush = ::CreateSolidBrush(RGB(0, 180, 255));
-                ::FillRect(dc, &client, brush);
-                ::DeleteObject(brush);
-            }
-            return 1;
-        }
-        case WM_PAINT: {
-            PAINTSTRUCT ps{};
-            HDC dc = ::BeginPaint(hwnd, &ps);
-            RECT client{};
-            if (dc && ::GetClientRect(hwnd, &client)) {
-                HBRUSH brush = ::CreateSolidBrush(RGB(0, 180, 255));
-                ::FillRect(dc, &client, brush);
-                ::DeleteObject(brush);
-            }
-            ::EndPaint(hwnd, &ps);
-            return 0;
-        }
-#endif
         case WM_GETMINMAXINFO:
             apply_minimum_track_size(hwnd, reinterpret_cast<MINMAXINFO*>(lparam));
             return 0;
@@ -903,25 +870,6 @@ HWND create_offscreen_host_window(RECT& target_monitor) {
         ::UpdateWindow(hwnd);
     }
     return hwnd;
-}
-
-void park_window_offscreen(HWND hwnd, RECT& target_monitor) {
-    if (!hwnd || !::IsWindow(hwnd)) return;
-    target_monitor = active_monitor_work_rect();
-    RECT rect{};
-    if (!::GetWindowRect(hwnd, &rect)) {
-        rect.right = rect.left + kDefaultDesktopWindowWidth;
-        rect.bottom = rect.top + kDefaultDesktopWindowHeight;
-    }
-    const int width = std::max(1L, rect.right - rect.left);
-    const int height = std::max(1L, rect.bottom - rect.top);
-    ::SetWindowPos(hwnd,
-                   nullptr,
-                   target_monitor.right + 10000,
-                   target_monitor.bottom + 10000,
-                   width,
-                   height,
-                   SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
 void center_window_on_monitor(HWND hwnd, const RECT& monitor) {
@@ -1307,15 +1255,10 @@ struct WebHost::Impl {
     explicit Impl(bool debug, StartupWindowMode startup_mode)
 #ifdef _WIN32
         : custom_window(startup_mode == StartupWindowMode::OffscreenUntilReady
-                            && !desktop_sidebar_acrylic_prefers_webview_owned_window()
                             ? create_offscreen_host_window(target_monitor)
                             : nullptr),
           offscreen_until_ready(custom_window != nullptr),
           com(custom_window != nullptr) {
-        if (!::SetEnvironmentVariableW(L"WEBVIEW2_DEFAULT_BACKGROUND_COLOR", L"00FFFFFF")) {
-            LOG_WARN("[desktop] SetEnvironmentVariableW(WEBVIEW2_DEFAULT_BACKGROUND_COLOR) failed, last_error=" +
-                     std::to_string(::GetLastError()));
-        }
         // 三段式构造:
         //   (1) 默认 Loader 路径,优先 offscreen custom_window;失败 → 切
         //       自管 nullptr 父窗口再试一次(沿用现有降级)。
@@ -1384,11 +1327,6 @@ struct WebHost::Impl {
         } else if (w) {
             HWND owned_window = hwnd();
             install_host_window_proc(owned_window);
-            if (startup_mode == StartupWindowMode::OffscreenUntilReady &&
-                desktop_sidebar_acrylic_prefers_webview_owned_window()) {
-                park_window_offscreen(owned_window, target_monitor);
-                offscreen_until_ready = true;
-            }
         }
         if (w) {
             configure_browser_defaults(*w);
@@ -1436,8 +1374,6 @@ struct WebHost::Impl {
     RECT target_monitor{};
     HWND custom_window = nullptr;
     bool offscreen_until_ready = false;
-    bool sidebar_acrylic_requested = false;
-    DesktopAcrylicStatus acrylic_status{};
     ComApartment com{false};
 
     HWND hwnd() const {
@@ -1445,22 +1381,6 @@ struct WebHost::Impl {
         if (!w) return nullptr;
         auto r = w->window();
         return r.ok() ? static_cast<HWND>(r.value()) : nullptr;
-    }
-
-    bool apply_sidebar_acrylic() {
-        HWND host_hwnd = hwnd();
-        auto controller_result = w->browser_controller();
-        std::string error;
-        if (!controller_result.ok() ||
-            !set_webview_default_background_transparent(controller_result.value(), &error)) {
-            if (error.empty()) error = "browser controller unavailable";
-            LOG_WARN("[desktop] sidebar acrylic disabled: " + error);
-            acrylic_status = DesktopAcrylicStatus{};
-            return false;
-        }
-
-        acrylic_status = enable_desktop_sidebar_acrylic(host_hwnd);
-        return acrylic_status.enabled;
     }
 #endif
     std::unique_ptr<webview::webview> w;
@@ -1509,9 +1429,6 @@ void WebHost::set_visible(bool visible) {
     }
     ::ShowWindow(hwnd, visible ? SW_SHOW : SW_HIDE);
     if (visible) {
-        if (impl_->sidebar_acrylic_requested) {
-            (void)impl_->apply_sidebar_acrylic();
-        }
         ::UpdateWindow(hwnd);
         ::SetForegroundWindow(hwnd);
     }
@@ -1718,22 +1635,6 @@ bool WebHost::is_window_maximized() const {
 WebHost::WebCoreInfo WebHost::web_core_info() const {
     (void)impl_;
     return detect_platform_web_core_info();
-}
-bool WebHost::enable_sidebar_acrylic() {
-#ifdef _WIN32
-    impl_->sidebar_acrylic_requested = true;
-    return impl_->apply_sidebar_acrylic();
-#else
-    return false;
-#endif
-}
-bool WebHost::refresh_sidebar_acrylic() {
-#ifdef _WIN32
-    if (!impl_->sidebar_acrylic_requested) return false;
-    return impl_->apply_sidebar_acrylic();
-#else
-    return false;
-#endif
 }
 void WebHost::set_window_state_change_handler(WindowStateHandler handler) {
 #ifdef _WIN32

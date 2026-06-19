@@ -252,14 +252,6 @@ function ActivityIndicator({ activity, showAceCodeAvatar = false }) {
   );
 }
 
-const EMPTY_TODO_SUMMARY = Object.freeze({
-  total: 0,
-  pending: 0,
-  in_progress: 0,
-  completed: 0,
-  cancelled: 0,
-});
-
 function ActivitySummaryBlock({ item, expanded, onToggle }) {
   return (
     <div className="ml-8 my-1 max-w-[88%]">
@@ -463,7 +455,6 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   const [permissionMode, setPermissionMode] = useState('default');
   const [permissionSwitching, setPermissionSwitching] = useState(false);
   const [goalStopping, setGoalStopping] = useState(false);
-  const [todoClearing, setTodoClearing] = useState(false);
   const [reviewRequest, setReviewRequest] = useState(0);
   const [previewTabState, setPreviewTabState] = useState({});
   const [dismissedDockSignatures, setDismissedDockSignatures] = usePreference(
@@ -1491,37 +1482,6 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     }, { emitEffects: false });
     connection.sendAbort(sid);
   }, [applyEvent, sid]);
-
-  const clearSessionTodos = useCallback(async () => {
-    if (!sid || todoClearing) return;
-    const previousTodos = todos;
-    const previousSummary = todoSummary;
-    setTodoClearing(true);
-    applyEvent({
-      type: 'todo_updated',
-      payload: {
-        session_id: sid,
-        todos: [],
-        summary: EMPTY_TODO_SUMMARY,
-      },
-    }, { emitEffects: false });
-
-    try {
-      await api.clearSessionTodos(sid, ref?.workspaceHash || '');
-    } catch (e) {
-      applyEvent({
-        type: 'todo_updated',
-        payload: {
-          session_id: sid,
-          todos: previousTodos,
-          summary: previousSummary,
-        },
-      }, { emitEffects: false });
-      toast({ kind: 'err', text: '清空待办事项失败:' + (e?.message || '') });
-    } finally {
-      setTodoClearing(false);
-    }
-  }, [api, applyEvent, ref?.workspaceHash, sid, todoClearing, todos, todoSummary]);
 
   const goalActive = goal?.status === 'active';
 
@@ -2562,8 +2522,6 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
             onDismiss={dismissChangeDock}
             todos={todos}
             todoSummary={todoSummary}
-            onClearTodos={clearSessionTodos}
-            todoClearing={todoClearing}
           />
         )}
       </div>

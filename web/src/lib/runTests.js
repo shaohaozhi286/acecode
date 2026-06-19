@@ -52,7 +52,6 @@ import './builtinCommandRouting.test.js';
 import './slashCommandWorkspace.test.js';
 import './desktopNotify.test.js';
 import './desktopShellMode.test.js';
-import './desktopAcrylicSettings.test.js';
 import './desktopTrayMenu.test.js';
 import './newSession.test.js';
 import './navigationHistory.test.js';

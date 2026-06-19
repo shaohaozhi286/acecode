@@ -16,12 +16,6 @@ installBrowserDefaultGuards();
 if (installWebappCompatFlag()) {
   document.title = compatTitle;
 }
-if (window.__ACECODE_DESKTOP_SIDEBAR_ACRYLIC__ === true) {
-  document.documentElement.classList.add('ace-desktop-shell-acrylic-root');
-  if (window.__ACECODE_DESKTOP_SIDEBAR_ACRYLIC_COLORKEY__ === true) {
-    document.documentElement.classList.add('ace-desktop-shell-acrylic-colorkey');
-  }
-}
 
 createRoot(document.getElementById('root')).render(
   <StrictMode>

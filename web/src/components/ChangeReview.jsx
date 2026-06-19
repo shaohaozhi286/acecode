@@ -73,7 +73,7 @@ function TodoProgressInline({ checklist }) {
   );
 }
 
-function TodoChecklistPopover({ checklist, onClear, clearing = false }) {
+function TodoChecklistPopover({ checklist }) {
   if (!checklist?.visible) return null;
   return (
     <div className="ace-change-glass-todo-popover">
@@ -107,16 +107,6 @@ function TodoChecklistPopover({ checklist, onClear, clearing = false }) {
             })}
           </div>
         </div>
-        <button
-          type="button"
-          className="ace-todo-glass-clear"
-          onClick={onClear}
-          disabled={!onClear || clearing}
-          title="清空待办事项"
-          aria-label="清空待办事项"
-        >
-          <VsIcon name="clearAll" size={16} alt="清空待办事项" />
-        </button>
       </div>
     </div>
   );
@@ -390,8 +380,6 @@ export function ChangeGlassDock({
   scrollRef,
   todos = [],
   todoSummary = null,
-  onClearTodos,
-  todoClearing = false,
 }) {
   const localDockRef = useRef(null);
   const rootRef = dockRef || localDockRef;
@@ -504,11 +492,7 @@ export function ChangeGlassDock({
           </span>
           <span className="ace-change-glass-action">查看变更</span>
         </button>
-        <TodoChecklistPopover
-          checklist={todoChecklist}
-          onClear={onClearTodos}
-          clearing={todoClearing}
-        />
+        <TodoChecklistPopover checklist={todoChecklist} />
         {onDismiss && (
           <button
             type="button"

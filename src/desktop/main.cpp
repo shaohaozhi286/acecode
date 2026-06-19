@@ -27,9 +27,6 @@
 #include "url_builder.hpp"
 #include "web_host.hpp"
 #include "workspace_registry.hpp"
-#ifdef _WIN32
-#  include "acrylic_backdrop_win.hpp"
-#endif
 
 #include "../config/config.hpp"
 #include "../utils/clipboard.hpp"
@@ -42,7 +39,6 @@
 #include <nlohmann/json.hpp>
 
 #include <atomic>
-#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
@@ -149,99 +145,6 @@ std::string desktop_exe_dir() {
 void show_error(const std::string& msg) {
     std::wstring w = acecode::utf8_to_wide(msg);
     ::MessageBoxW(nullptr, w.c_str(), L"ACECode Desktop", MB_ICONERROR | MB_OK);
-}
-
-int clamp_byte(int value) {
-    if (value < 0) return 0;
-    if (value > 255) return 255;
-    return value;
-}
-
-int hex_digit_value(char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
-}
-
-bool parse_hex_color(const std::string& text, int& red, int& green, int& blue) {
-    std::string value = text;
-    if (!value.empty() && value[0] == '#') value.erase(value.begin());
-    if (value.size() != 6) return false;
-    int digits[6]{};
-    for (size_t i = 0; i < value.size(); ++i) {
-        digits[i] = hex_digit_value(value[i]);
-        if (digits[i] < 0) return false;
-    }
-    red = digits[0] * 16 + digits[1];
-    green = digits[2] * 16 + digits[3];
-    blue = digits[4] * 16 + digits[5];
-    return true;
-}
-
-nlohmann::json sidebar_acrylic_options_payload(bool enabled) {
-    auto options = acecode::desktop::desktop_sidebar_acrylic_options();
-    char color[8]{};
-    std::snprintf(color,
-                  sizeof(color),
-                  "#%02x%02x%02x",
-                  clamp_byte(options.tint_red),
-                  clamp_byte(options.tint_green),
-                  clamp_byte(options.tint_blue));
-    return {
-        {"ok", true},
-        {"enabled", enabled},
-        {"tintColor", std::string(color)},
-        {"tintAlpha", clamp_byte(options.tint_alpha)},
-        {"tintOpacity", static_cast<double>(clamp_byte(options.tint_alpha)) / 255.0}
-    };
-}
-
-bool apply_sidebar_acrylic_json(const nlohmann::json& value, std::string& error) {
-    if (!value.is_object()) {
-        error = "expected settings object";
-        return false;
-    }
-
-    auto options = acecode::desktop::desktop_sidebar_acrylic_options();
-    auto color_it = value.find("tintColor");
-    if (color_it != value.end()) {
-        if (!color_it->is_string()) {
-            error = "tintColor must be a string";
-            return false;
-        }
-        if (!parse_hex_color(color_it->get<std::string>(),
-                             options.tint_red,
-                             options.tint_green,
-                             options.tint_blue)) {
-            error = "tintColor must be #RRGGBB";
-            return false;
-        }
-    }
-
-    auto alpha_it = value.find("tintAlpha");
-    if (alpha_it != value.end()) {
-        if (!alpha_it->is_number_integer()) {
-            error = "tintAlpha must be an integer";
-            return false;
-        }
-        options.tint_alpha = clamp_byte(alpha_it->get<int>());
-    } else {
-        auto opacity_it = value.find("tintOpacity");
-        if (opacity_it != value.end()) {
-            if (!opacity_it->is_number()) {
-                error = "tintOpacity must be a number";
-                return false;
-            }
-            double opacity = opacity_it->get<double>();
-            if (opacity < 0.0) opacity = 0.0;
-            if (opacity > 1.0) opacity = 1.0;
-            options.tint_alpha = clamp_byte(static_cast<int>(opacity * 255.0 + 0.5));
-        }
-    }
-
-    acecode::desktop::set_desktop_sidebar_acrylic_options(options);
-    return true;
 }
 #endif
 
@@ -859,7 +762,6 @@ int main(int argc, char** argv) {
     WebHost& host = *host_storage;
     host.set_title("ACECode");
     host.set_size(kDefaultDesktopWindowWidth, kDefaultDesktopWindowHeight);
-    const bool desktop_sidebar_acrylic = host.enable_sidebar_acrylic();
 
     // 系统托盘 + 通知 — 见 openspec/changes/add-desktop-attention-notifications。
     // 必须在 host.run() 之前 init,失败 → 主流程不阻断,只是没有托盘 / 通知。
@@ -1261,33 +1163,6 @@ int main(int argc, char** argv) {
         }
     });
 
-#ifdef _WIN32
-    host.bind("aceDesktop_getSidebarAcrylicSettings", [&](const std::string& /*req*/) -> std::string {
-        return sidebar_acrylic_options_payload(desktop_sidebar_acrylic).dump();
-    });
-
-    host.bind("aceDesktop_setSidebarAcrylicSettings", [&](const std::string& req) -> std::string {
-        try {
-            auto arr = nlohmann::json::parse(req);
-            if (!arr.is_array() || arr.empty()) {
-                return nlohmann::json{{"ok", false}, {"error", "expect [settings]"}}.dump();
-            }
-
-            std::string error;
-            if (!apply_sidebar_acrylic_json(arr[0], error)) {
-                return nlohmann::json{{"ok", false}, {"error", error}}.dump();
-            }
-
-            const bool refreshed = host.refresh_sidebar_acrylic();
-            nlohmann::json payload = sidebar_acrylic_options_payload(desktop_sidebar_acrylic);
-            payload["applied"] = refreshed;
-            return payload.dump();
-        } catch (const std::exception& e) {
-            return nlohmann::json{{"ok", false}, {"error", std::string("parse: ") + e.what()}}.dump();
-        }
-    });
-#endif
-
     // navigate 前注入 JS: hook console + window 错误事件 → 全部转发回 native。
     // 故意不 hook console.log / console.info,避免噪音(可在前端代码里需要时
     // 显式调 aceDesktop_logFromWeb('info', ...))。
@@ -1318,18 +1193,6 @@ int main(int argc, char** argv) {
     host.init_script(std::string("window.__ACECODE_DESKTOP_SHELL__=true;\n") +
                                      "window.__ACECODE_DESKTOP_DEBUG__=" +
                                      (desktop_debug ? "true" : "false") + ";\n" +
-                                     "window.__ACECODE_DESKTOP_SIDEBAR_ACRYLIC__=" +
-                                     (desktop_sidebar_acrylic ? "true" : "false") + ";\n" +
-                                     "window.__ACECODE_DESKTOP_SIDEBAR_ACRYLIC_COLORKEY__=" +
-#ifdef _WIN32
-                                     (desktop_sidebar_acrylic &&
-                                              acecode::desktop::desktop_sidebar_acrylic_uses_layered_colorkey()
-                                          ? "true"
-                                          : "false") +
-#else
-                                     std::string("false") +
-#endif
-                                     ";\n" +
                                      "window.__ACECODE_FRAMELESS_WINDOW__=" +
                                      kFramelessWindowFlag + ";\n" +
                                      "window.__ACECODE_OS__=\"" + kHostOs + "\";\n" +

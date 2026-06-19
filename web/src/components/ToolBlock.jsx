@@ -314,7 +314,7 @@ export const ToolBlock = memo(function ToolBlock({ entry, onReviewToggle }) {
             )}
             {diffHtml ? (
               <div
-                className="ace-diff"
+                className="ace-diff ace-tool-diff"
                 dangerouslySetInnerHTML={{ __html: diffHtml }}
               />
             ) : output ? (
