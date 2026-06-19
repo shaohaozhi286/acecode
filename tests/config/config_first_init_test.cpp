@@ -122,6 +122,48 @@ TEST_F(ConfigFirstInitTest, LoadConfigTracksFreshAcecodeHomeCreationOnce) {
     EXPECT_EQ(j["default_permission_mode"], "default");
 }
 
+TEST_F(ConfigFirstInitTest, LegacyTlsPolicyKeysAreIgnoredAndNotPersisted) {
+    fs::create_directories(temp_home / ".acecode");
+    const fs::path config_path = temp_home / ".acecode" / "config.json";
+    {
+        std::ofstream ofs(config_path);
+        ofs << R"({
+    "network": {
+        "proxy_mode": "off",
+        "proxy_ca_bundle": "C:\\tmp\\capture.pem",
+        "proxy_insecure_skip_verify": true
+    },
+    "mcp_servers": {
+        "remote": {
+            "transport": "sse",
+            "url": "https://mcp.example.com",
+            "validate_certificates": false,
+            "ca_cert_path": "C:\\tmp\\mcp-ca.pem",
+            "timeout_seconds": 12
+        }
+    }
+})";
+    }
+
+    auto cfg = acecode::load_config();
+    EXPECT_EQ(cfg.network.proxy_mode, "off");
+    ASSERT_EQ(cfg.mcp_servers.size(), 1u);
+    EXPECT_EQ(cfg.mcp_servers["remote"].url, "https://mcp.example.com");
+    EXPECT_EQ(cfg.mcp_servers["remote"].timeout_seconds, 12);
+
+    acecode::save_config(cfg, config_path.string());
+
+    std::ifstream ifs(config_path);
+    ASSERT_TRUE(ifs.is_open());
+    auto saved = nlohmann::json::parse(ifs);
+    ASSERT_TRUE(saved["network"].is_object());
+    EXPECT_FALSE(saved["network"].contains("proxy_ca_bundle"));
+    EXPECT_FALSE(saved["network"].contains("proxy_insecure_skip_verify"));
+    ASSERT_TRUE(saved["mcp_servers"]["remote"].is_object());
+    EXPECT_FALSE(saved["mcp_servers"]["remote"].contains("validate_certificates"));
+    EXPECT_FALSE(saved["mcp_servers"]["remote"].contains("ca_cert_path"));
+}
+
 TEST_F(ConfigFirstInitTest, ExplicitEmptySavedModelsDoesNotSynthesizeCopilot) {
     fs::create_directories(temp_home / ".acecode");
     {

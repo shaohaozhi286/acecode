@@ -217,9 +217,7 @@ McpManager::ConnectionResult McpManager::connect_entry(ConnectionSnapshot snapsh
         } else if (snapshot.cfg.transport == McpTransport::Sse) {
             auto sse = std::make_shared<mcp::sse_client>(
                 snapshot.cfg.url,
-                snapshot.cfg.sse_endpoint,
-                snapshot.cfg.validate_certificates,
-                snapshot.cfg.ca_cert_path);
+                snapshot.cfg.sse_endpoint);
             for (const auto& [k, v] : snapshot.cfg.headers) {
                 sse->set_header(k, v);
             }
@@ -228,9 +226,6 @@ McpManager::ConnectionResult McpManager::connect_entry(ConnectionSnapshot snapsh
             }
             if (snapshot.cfg.timeout_seconds > 0) {
                 sse->set_timeout(snapshot.cfg.timeout_seconds);
-            }
-            if (!snapshot.cfg.validate_certificates) {
-                LOG_WARN(tag + "WARNING: certificate validation disabled for '" + snapshot.server_name + "'");
             }
             const std::string auth_state = snapshot.cfg.auth_token.empty() ? "none" : "present";
             std::string hdr_keys = header_keys_summary(snapshot.cfg.headers);
@@ -245,9 +240,7 @@ McpManager::ConnectionResult McpManager::connect_entry(ConnectionSnapshot snapsh
             }
             auto h = std::make_shared<mcp::streamable_http_client>(
                 snapshot.cfg.url,
-                ep,
-                snapshot.cfg.validate_certificates,
-                snapshot.cfg.ca_cert_path);
+                ep);
             for (const auto& [k, v] : snapshot.cfg.headers) {
                 h->set_header(k, v);
             }
@@ -256,9 +249,6 @@ McpManager::ConnectionResult McpManager::connect_entry(ConnectionSnapshot snapsh
             }
             if (snapshot.cfg.timeout_seconds > 0) {
                 h->set_timeout(snapshot.cfg.timeout_seconds);
-            }
-            if (!snapshot.cfg.validate_certificates) {
-                LOG_WARN(tag + "WARNING: certificate validation disabled for '" + snapshot.server_name + "'");
             }
             const std::string auth_state = snapshot.cfg.auth_token.empty() ? "none" : "present";
             std::string hdr_keys = header_keys_summary(snapshot.cfg.headers);

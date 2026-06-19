@@ -113,10 +113,6 @@ void initialize_proxy_runtime(const AppConfig& config) {
                                    : network::redact_credentials(resolved.url);
         banner = "Proxy: " + url_disp + " (" + resolved.source + ")";
     }
-    if (config.network.proxy_insecure_skip_verify) {
-        banner += "  \x1b[1;31m[INSECURE: TLS verification disabled]\x1b[0m";
-        LOG_WARN("[proxy] insecure_skip_verify is enabled");
-    }
     std::cerr << banner << std::endl;
     LOG_INFO("[proxy] effective=" +
              (resolved.url.empty() ? "direct" : network::redact_credentials(resolved.url)) +

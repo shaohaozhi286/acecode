@@ -161,7 +161,7 @@ After editing MCP config, restart ACECode (TUI) or `PUT /api/mcp` followed by `d
 - **Models picker is empty** — configure at least one `saved_models` entry; normal model selection no longer synthesizes a fallback from top-level provider fields.
 - **`(session:<id>)` ad-hoc entry on resume** — resumed session's `provider`+`model` tuple isn't in `saved_models`; the entry borrows from `cfg.openai`. Add a matching entry to silence the warning.
 - **Banner stacks / viewport drifts on Windows** — legacy conhost or ConEmu/Cmder; pass `-alt-screen` once or set `tui.alt_screen_mode = "always"`.
-- **Proxy shows `[INSECURE]`** — `network.proxy_insecure_skip_verify = true`. Prefer `network.proxy_ca_bundle` (PEM path) when trusting Fiddler/Charles roots.
+- **HTTPS certificate errors while capturing traffic** — install the capture proxy root certificate into the OS trust store visible to the ACECode process. ACECode does not provide TLS verification bypass or custom CA settings.
 - **Web search returns no results** — backend may be regionally blocked. `/websearch refresh` reprobes; `/websearch use bing_cn` forces the China-side backend.
 - **Daemon won't start, "address in use"** — port 28080 is busy. Change `web.port` or stop the other process; ACECode does not fall back to a different port.
 - **First-run seed skills missing on upgrade** — seed install only runs when `~/.acecode/` is created by the current process. Already-initialized homes don't auto-pick-up new seed skills; copy them manually from `<install-prefix>/share/acecode/seed/skills/` if needed.

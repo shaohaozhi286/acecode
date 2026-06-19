@@ -599,12 +599,6 @@ AppConfig load_config() {
                     cfg.network.proxy_url = nj["proxy_url"].get<std::string>();
                 if (nj.contains("proxy_no_proxy") && nj["proxy_no_proxy"].is_string())
                     cfg.network.proxy_no_proxy = nj["proxy_no_proxy"].get<std::string>();
-                if (nj.contains("proxy_ca_bundle") && nj["proxy_ca_bundle"].is_string())
-                    cfg.network.proxy_ca_bundle = nj["proxy_ca_bundle"].get<std::string>();
-                if (nj.contains("proxy_insecure_skip_verify") &&
-                    nj["proxy_insecure_skip_verify"].is_boolean())
-                    cfg.network.proxy_insecure_skip_verify =
-                        nj["proxy_insecure_skip_verify"].get<bool>();
                 if (nj.contains("proxy_probe_enabled") &&
                     nj["proxy_probe_enabled"].is_boolean())
                     cfg.network.proxy_probe_enabled =
@@ -1055,12 +1049,6 @@ AppConfig load_config() {
                             int t = sj["timeout_seconds"].get<int>();
                             if (t > 0) mcfg.timeout_seconds = t;
                         }
-                        if (sj.contains("validate_certificates") && sj["validate_certificates"].is_boolean()) {
-                            mcfg.validate_certificates = sj["validate_certificates"].get<bool>();
-                        }
-                        if (sj.contains("ca_cert_path") && sj["ca_cert_path"].is_string()) {
-                            mcfg.ca_cert_path = sj["ca_cert_path"].get<std::string>();
-                        }
                     }
 
                     cfg.mcp_servers[server_name] = std::move(mcfg);
@@ -1316,10 +1304,6 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
             nj["proxy_url"] = cfg.network.proxy_url;
         if (cfg.network.proxy_no_proxy != net_d.proxy_no_proxy)
             nj["proxy_no_proxy"] = cfg.network.proxy_no_proxy;
-        if (cfg.network.proxy_ca_bundle != net_d.proxy_ca_bundle)
-            nj["proxy_ca_bundle"] = cfg.network.proxy_ca_bundle;
-        if (cfg.network.proxy_insecure_skip_verify != net_d.proxy_insecure_skip_verify)
-            nj["proxy_insecure_skip_verify"] = cfg.network.proxy_insecure_skip_verify;
         if (cfg.network.proxy_probe_enabled != net_d.proxy_probe_enabled)
             nj["proxy_probe_enabled"] = cfg.network.proxy_probe_enabled;
         if (cfg.network.proxy_probe_timeout_ms != net_d.proxy_probe_timeout_ms)
@@ -1477,12 +1461,6 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
                 }
                 if (srv.timeout_seconds != 30) {
                     sj["timeout_seconds"] = srv.timeout_seconds;
-                }
-                if (!srv.validate_certificates) {
-                    sj["validate_certificates"] = false;
-                }
-                if (!srv.ca_cert_path.empty()) {
-                    sj["ca_cert_path"] = srv.ca_cert_path;
                 }
             }
             mj[name] = sj;

@@ -38,8 +38,6 @@ ProxyDisplaySnapshot snapshot_for_display(const AppConfig& cfg) {
     snap.effective_url = resolved.url;
     snap.source = resolved.source;
     snap.mode = cfg.network.proxy_mode;
-    snap.ca_bundle = cfg.network.proxy_ca_bundle;
-    snap.insecure = cfg.network.proxy_insecure_skip_verify;
 
     auto fb = network::proxy_resolver().fallback_info_snapshot();
     snap.reachable = !fb.active;
@@ -112,8 +110,6 @@ std::string format_proxy_display(const ProxyDisplaySnapshot& snap) {
     }
     oss << "\nSource          : " << snap.source
         << "\nMode (config)   : " << snap.mode
-        << "\nCA bundle       : " << (snap.ca_bundle.empty() ? "(none)" : snap.ca_bundle)
-        << "\nSkip TLS verify : " << (snap.insecure ? "yes" : "no")
         << "\nReachable       : "
         << (snap.reachable ? std::string("yes")
                            : "no (" + snap.reachable_reason + ")");

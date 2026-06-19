@@ -4,7 +4,7 @@
 //
 // 职责:把 NetworkConfig + 平台代理来源(Windows: WinHTTP/注册表/env;
 // POSIX: env)折叠成 cpr::Proxies / cpr::ProxyAuthentication / SslOptions,
-// 让所有 cpr 调用站点一行代码就能让 Fiddler/Charles/mitmproxy 拦截到流量。
+// 让所有 cpr 调用站点统一继承当前代理策略。证书信任策略不在这里配置。
 //
 // 调用约定:
 //   network::proxy_resolver().init(cfg.network)   // 启动一次
@@ -19,7 +19,6 @@
 #include <cpr/ssl_options.h>
 
 #include <mutex>
-#include <optional>
 #include <string>
 #include <vector>
 
@@ -37,8 +36,6 @@ struct ResolvedProxy {
 struct ProxyOptions {
     cpr::Proxies proxies;             // 空 = 直连
     cpr::ProxyAuthentication auth;    // 空 = 无 user:pass
-    bool insecure = false;             // 仅在代理生效且配置开启时为 true
-    std::optional<std::string> ca_bundle; // 可选 PEM 路径
     ResolvedProxy resolved;            // 调试用:实际生效的代理
 };
 
@@ -103,8 +100,6 @@ public:
 
     // 调试 / `/proxy` 命令使用的快照。
     NetworkConfig config_snapshot() const;
-    bool insecure_skip_verify() const;
-    std::optional<std::string> ca_bundle() const;
 
 private:
     enum class SessionOverride { None, ForceOff, ForceManual };
@@ -147,8 +142,7 @@ inline ProxyOptions proxy_options_for(const std::string& url) {
 }
 
 // 把 ProxyOptions 翻译成 cpr::SslOptions。保留既有 NoRevoke{true};
-// insecure=true → 关闭 VerifyPeer/VerifyHost;ca_bundle 有值 → 注入 CaInfo。
-// 注意:insecure 的 verify-skip 仅在 opts.proxies 非空时生效(由调用方保证)。
+// ACECode 不暴露 TLS 校验绕过或 CA 注入配置。
 cpr::SslOptions build_ssl_options(const ProxyOptions& opts);
 
 // --- 仅为 Windows 平台暴露,Linux/macOS 上看不见也用不到 ---

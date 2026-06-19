@@ -219,8 +219,6 @@ void WebServer::Impl::register_mcp() {
                     if (!srv.headers.empty()) o["headers"] = srv.headers;
                     // auth_token 不回写,避免日志 / 浏览器缓存泄漏
                     o["timeout_seconds"]      = srv.timeout_seconds;
-                    o["validate_certificates"] = srv.validate_certificates;
-                    if (!srv.ca_cert_path.empty()) o["ca_cert_path"] = srv.ca_cert_path;
                     out[name] = std::move(o);
                 }
             }
@@ -262,8 +260,6 @@ void WebServer::Impl::register_mcp() {
                         cfg.headers = v["headers"].get<std::map<std::string,std::string>>();
                     cfg.auth_token   = v.value("auth_token", std::string{});
                     cfg.timeout_seconds = v.value("timeout_seconds", 30);
-                    cfg.validate_certificates = v.value("validate_certificates", true);
-                    cfg.ca_cert_path = v.value("ca_cert_path", std::string{});
                     new_servers.emplace(it.key(), std::move(cfg));
                 }
                 deps.app_config->mcp_servers = std::move(new_servers);

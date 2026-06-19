@@ -223,7 +223,7 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     }
 
     // 代理解析器初始化 —— 必须在第一个 cpr 调用前完成。daemon 路径无 TUI,
-    // 横幅写到日志(LOG_INFO),insecure 仍走 LOG_WARN(高优先级)。
+    // 横幅写到日志(LOG_INFO)。
     network::proxy_resolver().init(cfg.network);
     network::proxy_resolver().probe_and_maybe_fallback();
     {
@@ -241,12 +241,6 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
         }
         LOG_INFO(oss.str());
         if (opts.foreground) std::cerr << oss.str() << "\n";
-        if (cfg.network.proxy_insecure_skip_verify) {
-            LOG_WARN("[proxy] insecure_skip_verify is enabled — TLS chain validation off");
-            if (opts.foreground) {
-                std::cerr << "[proxy] WARNING: TLS verification disabled for proxied requests\n";
-            }
-        }
     }
 
     // 模型池负载监控:仅当配置里存在 PUB 池模型时才起 30s 轮询,避免在没有这些

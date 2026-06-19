@@ -251,7 +251,7 @@ daemon 侧 `src/web/pty/`:`PtyBackend` 四实现 — **ConPty**(1809+,GetProcAdd
 - `"off"` — force direct, ignore system/env.
 - `"manual"` — use `proxy_url` (auto-prefixes `http://` if missing).
 
-Both `main.cpp` and `daemon/worker.cpp` call `proxy_resolver().init(cfg.network)` and print `Proxy: <url-redacted-or-direct> (<source>)` (credentials masked). `proxy_insecure_skip_verify=true` adds a red `[INSECURE]` banner and disables `cpr::ssl::VerifyPeer/VerifyHost` only on proxied requests; direct requests stay strict. Safer alternative: `proxy_ca_bundle` PEM path via `cpr::ssl::CaInfo` for trusting Fiddler/Charles roots.
+Both `main.cpp` and `daemon/worker.cpp` call `proxy_resolver().init(cfg.network)` and print `Proxy: <url-redacted-or-direct> (<source>)` (credentials masked). ACECode does not expose TLS verification bypass or custom CA bundle settings; certificate trust is owned by the OS / TLS backend.
 
 `/proxy` slash command: bare = show effective state; `refresh` = reprobe; `off` / `set <url>` / `reset` = session-level override (not persisted).
 
@@ -319,8 +319,6 @@ Both `main.cpp` and `daemon/worker.cpp` call `proxy_resolver().init(cfg.network)
     "proxy_mode": "auto",
     "proxy_url": "",
     "proxy_no_proxy": "",
-    "proxy_ca_bundle": "",
-    "proxy_insecure_skip_verify": false,
     "proxy_probe_enabled": true,
     "proxy_probe_timeout_ms": 1500
   },

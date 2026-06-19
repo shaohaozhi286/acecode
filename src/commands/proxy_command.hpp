@@ -23,8 +23,6 @@ struct ProxyDisplaySnapshot {
     std::string effective_url; // 空 = 直连
     std::string source;        // ResolvedProxy::source
     std::string mode;          // cfg.network.proxy_mode
-    std::string ca_bundle;     // 空 = 未配置
-    bool insecure = false;
 
     // openspec/changes/proxy-fallback-on-unreachable: fallback 状态显示。
     // active 为 false → Reachable 行显示 "yes";true → "no (<reason>)" + 多一行

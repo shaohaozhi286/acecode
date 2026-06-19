@@ -11,7 +11,6 @@
 
 #include <algorithm>
 #include <cctype>
-#include <filesystem>
 #include <regex>
 #include <sstream>
 
@@ -293,17 +292,6 @@ NetworkConfig ProxyResolver::config_snapshot() const {
     return cfg_;
 }
 
-bool ProxyResolver::insecure_skip_verify() const {
-    std::lock_guard<std::mutex> lk(mu_);
-    return cfg_.proxy_insecure_skip_verify;
-}
-
-std::optional<std::string> ProxyResolver::ca_bundle() const {
-    std::lock_guard<std::mutex> lk(mu_);
-    if (cfg_.proxy_ca_bundle.empty()) return std::nullopt;
-    return cfg_.proxy_ca_bundle;
-}
-
 ResolvedProxy ProxyResolver::resolve_auto_unlocked(const std::string& target_url) const {
     // auto_detect 是 platform-specific 实现;mu_ 必须已经 lock。
     // 这里不缓存 target_url,因为 host_of(target_url) 已被剥离 + 之后做 NO_PROXY 过滤,
@@ -392,12 +380,6 @@ ProxyOptions ProxyResolver::options_for(const std::string& target_url) const {
     opts.resolved = const_cast<ProxyResolver*>(this)->effective_for_use(target_url);
 
     if (opts.resolved.url.empty()) {
-        // 直连:可选 ca_bundle 仍可生效(用户可能配了自定义企业 CA)
-        std::lock_guard<std::mutex> lk(mu_);
-        if (!cfg_.proxy_ca_bundle.empty() &&
-            std::filesystem::exists(acecode::path_from_utf8(cfg_.proxy_ca_bundle))) {
-            opts.ca_bundle = cfg_.proxy_ca_bundle;
-        }
         return opts;
     }
 
@@ -416,19 +398,6 @@ ProxyOptions ProxyResolver::options_for(const std::string& target_url) const {
         };
     }
 
-    {
-        std::lock_guard<std::mutex> lk(mu_);
-        if (cfg_.proxy_insecure_skip_verify) {
-            opts.insecure = true;
-        }
-        if (!cfg_.proxy_ca_bundle.empty() &&
-            std::filesystem::exists(acecode::path_from_utf8(cfg_.proxy_ca_bundle))) {
-            opts.ca_bundle = cfg_.proxy_ca_bundle;
-        } else if (!cfg_.proxy_ca_bundle.empty()) {
-            LOG_WARN("[proxy] proxy_ca_bundle not found on disk: " + cfg_.proxy_ca_bundle);
-        }
-    }
-
     return opts;
 }
 
@@ -438,24 +407,8 @@ ProxyResolver& proxy_resolver() {
 }
 
 cpr::SslOptions build_ssl_options(const ProxyOptions& opts) {
-    // 既有所有调用站点都用 cpr::Ssl(cpr::ssl::NoRevoke{true}) — 保留这个语义。
-    // insecure=true(代理生效 + 用户开启逃生口) → 关闭 peer/host 校验。
-    // ca_bundle 有值 → 注入 CaInfo,信任 Fiddler 等抓包工具的 root cert。
-    if (opts.insecure) {
-        if (opts.ca_bundle) {
-            return cpr::Ssl(cpr::ssl::NoRevoke{true},
-                            cpr::ssl::VerifyPeer{false},
-                            cpr::ssl::VerifyHost{false},
-                            cpr::ssl::CaInfo{std::string(*opts.ca_bundle)});
-        }
-        return cpr::Ssl(cpr::ssl::NoRevoke{true},
-                        cpr::ssl::VerifyPeer{false},
-                        cpr::ssl::VerifyHost{false});
-    }
-    if (opts.ca_bundle) {
-        return cpr::Ssl(cpr::ssl::NoRevoke{true},
-                        cpr::ssl::CaInfo{std::string(*opts.ca_bundle)});
-    }
+    (void)opts;
+    // 保留既有 cpr::ssl::NoRevoke{true} 语义;证书链与主机名校验交给 TLS 后端。
     return cpr::Ssl(cpr::ssl::NoRevoke{true});
 }
 

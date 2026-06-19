@@ -16,15 +16,13 @@ TEST(ProxyDisplay, DirectConnectionShowsDirectKeyword) {
     snap.effective_url = "";
     snap.source = "mode=off";
     snap.mode = "off";
-    snap.ca_bundle = "";
-    snap.insecure = false;
 
     std::string out = format_proxy_display(snap);
     EXPECT_NE(out.find("Effective proxy : direct"), std::string::npos);
     EXPECT_NE(out.find("Source          : mode=off"), std::string::npos);
     EXPECT_NE(out.find("Mode (config)   : off"), std::string::npos);
-    EXPECT_NE(out.find("CA bundle       : (none)"), std::string::npos);
-    EXPECT_NE(out.find("Skip TLS verify : no"), std::string::npos);
+    EXPECT_EQ(out.find("CA bundle"), std::string::npos);
+    EXPECT_EQ(out.find("Skip TLS verify"), std::string::npos);
 }
 
 // 场景:有代理 + 凭据。密码必须被 *** 替换,user 名保留。
@@ -37,32 +35,6 @@ TEST(ProxyDisplay, RedactsPasswordsInEffectiveUrl) {
     std::string out = format_proxy_display(snap);
     EXPECT_NE(out.find("alice:***@proxy.corp:8080"), std::string::npos);
     EXPECT_EQ(out.find("secret"), std::string::npos);
-}
-
-// 场景:insecure_skip_verify=true 在 display 文案里要显示 "yes",方便用户
-// 立刻看出"哎我开了 TLS 跳过校验"。
-TEST(ProxyDisplay, InsecureFlagShowsYes) {
-    ProxyDisplaySnapshot snap;
-    snap.effective_url = "http://127.0.0.1:8888";
-    snap.source = "windows-system";
-    snap.mode = "auto";
-    snap.insecure = true;
-
-    std::string out = format_proxy_display(snap);
-    EXPECT_NE(out.find("Skip TLS verify : yes"), std::string::npos);
-}
-
-// 场景:CA bundle 路径。非空时直接展示路径(让用户检查路径是否正确)。
-TEST(ProxyDisplay, ShowsCaBundlePathWhenSet) {
-    ProxyDisplaySnapshot snap;
-    snap.effective_url = "http://127.0.0.1:8888";
-    snap.source = "manual";
-    snap.mode = "manual";
-    snap.ca_bundle = "C:\\Users\\me\\FiddlerRoot.pem";
-
-    std::string out = format_proxy_display(snap);
-    EXPECT_NE(out.find("CA bundle       : C:\\Users\\me\\FiddlerRoot.pem"),
-              std::string::npos);
 }
 
 // 场景(proxy-fallback-on-unreachable):reachable=true 时显示 "Reachable : yes"

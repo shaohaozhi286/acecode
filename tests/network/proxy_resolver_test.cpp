@@ -260,7 +260,6 @@ TEST(ProxyResolver, OptionsForDirectGivesEmptyProxies) {
     auto opts = r.options_for("https://api.example.com");
     EXPECT_FALSE(opts.proxies.has("http"));
     EXPECT_FALSE(opts.proxies.has("https"));
-    EXPECT_FALSE(opts.insecure);
     // resolved 字段保留来源,方便 /proxy 命令显示。
     EXPECT_EQ(opts.resolved.source, "mode=off");
 }
@@ -275,29 +274,22 @@ TEST(ProxyResolver, OptionsForManualPopulatesBothSchemes) {
     auto opts = r.options_for("https://api.example.com");
     EXPECT_TRUE(opts.proxies.has("http"));
     EXPECT_TRUE(opts.proxies.has("https"));
-    EXPECT_FALSE(opts.insecure); // 默认不开 insecure_skip_verify
     EXPECT_EQ(opts.resolved.url, "http://127.0.0.1:8888");
 }
 
-TEST(ProxyResolver, InsecureSkipVerifyOnlyAppliesWhenProxyActive) {
+TEST(ProxyResolver, NoProxyBypassStillRemovesProxyOptions) {
     acecode::NetworkConfig cfg;
     cfg.proxy_mode = "manual";
     cfg.proxy_url = "http://127.0.0.1:8888";
     cfg.proxy_probe_enabled = false;
-    cfg.proxy_insecure_skip_verify = true;
+    cfg.proxy_no_proxy = "api.example.com";
     ProxyResolver r;
     r.init(cfg);
 
-    auto opts_proxied = r.options_for("https://api.example.com");
-    EXPECT_TRUE(opts_proxied.insecure);
-
-    // 同样的 cfg,但 NO_PROXY 让该请求绕过代理 → insecure 不应生效。
-    cfg.proxy_no_proxy = "api.example.com";
-    r.init(cfg);
-    auto opts_bypass = r.options_for("https://api.example.com");
-    EXPECT_FALSE(opts_bypass.proxies.has("http"));
-    EXPECT_FALSE(opts_bypass.proxies.has("https"));
-    EXPECT_FALSE(opts_bypass.insecure);
+    auto opts = r.options_for("https://api.example.com");
+    EXPECT_FALSE(opts.proxies.has("http"));
+    EXPECT_FALSE(opts.proxies.has("https"));
+    EXPECT_EQ(opts.resolved.source, "no_proxy");
 }
 
 // `parse_winhttp_proxy_string` 是 WinHTTP / 注册表 ProxyServer 字段格式解析,

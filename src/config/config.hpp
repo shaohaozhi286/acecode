@@ -55,8 +55,6 @@ struct McpServerConfig {
     std::map<std::string, std::string> headers;  // optional extra request headers
     std::string auth_token;                      // optional bearer token (never logged)
     int timeout_seconds = 30;
-    bool validate_certificates = true;
-    std::string ca_cert_path;                    // optional CA bundle for self-signed TLS
 };
 
 struct SkillsConfig {
@@ -264,8 +262,6 @@ struct NetworkConfig {
     std::string proxy_mode = "auto";
     std::string proxy_url;        // required when proxy_mode == "manual"
     std::string proxy_no_proxy;   // comma-separated; merged with env NO_PROXY
-    std::string proxy_ca_bundle;  // PEM path; trusts MITM certs (Fiddler/Charles)
-    bool proxy_insecure_skip_verify = false; // 调试逃生口,开启时启动横幅 + LOG_WARN
 
     // openspec/changes/proxy-fallback-on-unreachable:启动时对解析出的代理做
     // 一次同步 TCP probe,connect 失败就把进程级 fallback flag 置位、横幅显示
