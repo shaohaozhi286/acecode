@@ -193,6 +193,38 @@ TEST(HookRegistry, KeepsLegacyDirectCommandSemantics) {
     EXPECT_EQ(hook.trust_status, acecode::HookTrustStatus::Trusted);
 }
 
+TEST(HookRegistry, DisabledLegacyConfigStillSurfacesHooksAsDisabled) {
+    auto j = nlohmann::json::parse(R"({
+        "enabled": false,
+        "events": {
+            "startup.before_model_load": [
+                {
+                    "id": "legacy-startup",
+                    "command": "node",
+                    "args": ["hook.js"]
+                }
+            ]
+        }
+    })");
+
+    auto registry = acecode::parse_hook_source_json(
+        j,
+        source_for("C:/Users/me/.acecode/hooks.json",
+                   acecode::HookSourceScope::Legacy,
+                   acecode::HookSourceFormat::Unknown),
+        true);
+    acecode::HookTrustStore store;
+    acecode::apply_hook_trust_state(registry, store, true);
+
+    ASSERT_EQ(registry.hooks.size(), 1u);
+    EXPECT_EQ(registry.hooks[0].trust_status, acecode::HookTrustStatus::Disabled);
+    bool saw_disabled_diag = false;
+    for (const auto& d : registry.diagnostics) {
+        if (d.code == "LEGACY_DISABLED") saw_disabled_diag = true;
+    }
+    EXPECT_TRUE(saw_disabled_diag);
+}
+
 TEST(HookRegistry, SourceDiscoveryMergesGlobalAndTrustedProjectSources) {
     TempTree tmp;
     const fs::path ace_home = tmp.root / "ace-home";

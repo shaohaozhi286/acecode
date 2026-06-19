@@ -56,11 +56,36 @@ const CUSTOM_SECTION_STORAGE_KEY = 'acecode.sidebarCustomSectionExpanded.v1';
 const PINNED_DRAG_START_PX = 5;
 const PINNED_DRAG_EDGE_SCROLL_PX = 34;
 const PINNED_DRAG_EDGE_SCROLL_STEP = 16;
+const NO_WORKSPACE_SESSION_LIST_KEY = '__no_workspace__';
 
 function pinnedSessionKey(workspaceHash, sessionId) {
   const ws = String(workspaceHash || '');
   const id = String(sessionId || '');
   return ws && id ? `${ws}\u0000${id}` : '';
+}
+
+function isNoWorkspaceSession(session) {
+  return !!(session?.noWorkspace || session?.no_workspace);
+}
+
+function normalizeNoWorkspaceSession(session = {}) {
+  return {
+    ...session,
+    noWorkspace: true,
+    no_workspace: true,
+    workspace_hash: '',
+    workspaceHash: '',
+    cwd: '',
+  };
+}
+
+function normalizeWorkspaceSession(session = {}, workspace = {}) {
+  if (isNoWorkspaceSession(session)) return normalizeNoWorkspaceSession(session);
+  return {
+    ...session,
+    workspace_hash: session.workspace_hash || session.workspaceHash || workspace.hash || '',
+    cwd: session.cwd || workspace.cwd || '',
+  };
 }
 
 function sameStringArray(a = [], b = []) {
@@ -228,8 +253,9 @@ function CustomSidebarSection({ activeRef, activeWorkspaceHash, onOpenSettingsSe
   }, [refreshCounts]);
 
   const openSkills = async () => {
-    const workspaceHash =
-      activeRef?.workspaceHash || activeRef?.workspace_hash || activeWorkspaceHash || '';
+    const workspaceHash = activeRef?.noWorkspace || activeRef?.no_workspace
+      ? ''
+      : (activeRef?.workspaceHash || activeRef?.workspace_hash || activeWorkspaceHash || '');
     try {
       const root = await api.getSkillRoot(workspaceHash);
       const path = root?.path || '';
@@ -252,7 +278,7 @@ function CustomSidebarSection({ activeRef, activeWorkspaceHash, onOpenSettingsSe
   };
 
   return (
-    <div className="border-t border-border shrink-0 py-2">
+    <div className="ace-sidebar-custom-section border-t border-border shrink-0 py-2">
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
@@ -262,7 +288,7 @@ function CustomSidebarSection({ activeRef, activeWorkspaceHash, onOpenSettingsSe
         <VsIcon name={expanded ? 'expandDown' : 'expandRight'} size={12} />
       </button>
       {expanded && (
-        <div className="pt-1">
+        <div className="ace-sidebar-custom-list pt-1">
           <CustomSidebarItem icon="lightbulb" label="技能" count={counts.skills} onClick={openSkills} />
           <CustomSidebarItem
             icon="mcp"
@@ -287,6 +313,7 @@ function SessionRow({
   s,
   active,
   pinned = false,
+  pinEnabled = true,
   pendingQuestion = false,
   onSelect,
   onTogglePin,
@@ -379,30 +406,34 @@ function SessionRow({
         onSelect?.(s);
       } : undefined}
     >
-      <button
-        type="button"
-        data-sidebar-row-control="true"
-        onClick={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          onTogglePin?.(s, !pinned);
-        }}
-        className={clsx(
-          'ace-session-pin-btn w-5 h-6 rounded flex items-center justify-center shrink-0 transition-colors',
-          // 未 pin: 默认软灰(text-fg-mute),hover 走 text-fg —— 亮色模式下
-          // 颜色加深(灰→近黑),暗色模式下变亮(深灰→近白),符合"hover
-          // 增强对比"的双向语义。
-          // 已 pin: 用 text-accent(蓝)区别于普通可 hover 状态;它本身已经
-          // 是激活态,不再做颜色 hover,避免大幅 hue 跳动。
-          pinned
-            ? 'opacity-100 text-accent'
-            : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 text-fg-mute hover:text-fg',
-        )}
-        title={pinned ? '取消置顶' : '置顶'}
-        aria-label={pinned ? '取消置顶' : '置顶'}
-      >
-        <VsIcon name="pin" size={12} className="-rotate-45" />
-      </button>
+      {pinEnabled ? (
+        <button
+          type="button"
+          data-sidebar-row-control="true"
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            onTogglePin?.(s, !pinned);
+          }}
+          className={clsx(
+            'ace-session-pin-btn w-5 h-6 rounded flex items-center justify-center shrink-0 transition-colors',
+            // 未 pin: 默认软灰(text-fg-mute),hover 走 text-fg —— 亮色模式下
+            // 颜色加深(灰→近黑),暗色模式下变亮(深灰→近白),符合"hover
+            // 增强对比"的双向语义。
+            // 已 pin: 用 text-accent(蓝)区别于普通可 hover 状态;它本身已经
+            // 是激活态,不再做颜色 hover,避免大幅 hue 跳动。
+            pinned
+              ? 'opacity-100 text-accent'
+              : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 text-fg-mute hover:text-fg',
+          )}
+          title={pinned ? '取消置顶' : '置顶'}
+          aria-label={pinned ? '取消置顶' : '置顶'}
+        >
+          <VsIcon name="pin" size={12} className="-rotate-45" />
+        </button>
+      ) : (
+        <span className="w-5 h-6 shrink-0" />
+      )}
       {editing ? (
         <form
           className="flex flex-1 items-center gap-2 min-w-0 py-[3px]"
@@ -631,6 +662,57 @@ function WorkspaceGroup({
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+function NoWorkspaceSessionGroup({
+  sessions,
+  sessionsLoading = false,
+  sessionListExpanded,
+  onToggleSessionList,
+  activeId,
+  onSelect,
+  onArchive,
+  onRenameSession,
+  pendingQuestionSessionIds,
+}) {
+  const projectedSessions = sidebarSessionProjection(sessions, sessionListExpanded);
+
+  return (
+    <div className="mb-2">
+      <div className="px-4 pt-1 pb-1 text-[10px] font-semibold uppercase tracking-wider text-fg-mute">对话</div>
+      <div className="my-1">
+        {sessions.length === 0 ? (
+          <div className="mx-1.5 ml-[22px] px-2 py-[3px] text-[11px] text-fg-mute italic">
+            {sessionsLoading ? '加载中...' : '暂无对话'}
+          </div>
+        ) : (
+          <>
+            {projectedSessions.visibleSessions.map((s) => (
+              <SessionRow
+                key={`no-workspace-${s.id}`}
+                s={s}
+                active={s.id === activeId}
+                pinEnabled={false}
+                pendingQuestion={sessionHasPendingQuestion(s, pendingQuestionSessionIds)}
+                onSelect={onSelect}
+                onArchive={onArchive}
+                onRename={onRenameSession}
+              />
+            ))}
+            {projectedSessions.collapsible && (
+              <button
+                type="button"
+                onClick={() => onToggleSessionList?.(NO_WORKSPACE_SESSION_LIST_KEY)}
+                className="block w-[calc(100%-28px)] mx-1.5 ml-[22px] px-2 py-[5px] rounded-md text-left text-[12px] text-fg-mute hover:text-fg hover:bg-surface-hi transition"
+              >
+                {projectedSessions.action === 'expand' ? '展开显示' : '折叠显示'}
+              </button>
+            )}
+          </>
+        )}
+      </div>
     </div>
   );
 }
@@ -1003,13 +1085,15 @@ export function Sidebar({
     return () => window.removeEventListener(SESSION_PIN_TOGGLE_EVENT, handler);
   }, [togglePinnedSession]);
 
-  const refresh = useCallback(async (preferredHash = activeWorkspaceHash) => {
+  const refresh = useCallback(async (preferredHash = null) => {
+    const requestedHash = preferredHash == null ? activeWorkspaceHash : preferredHash;
     if (refreshingRef.current) {
-      pendingRefreshHashRef.current = preferredHash || activeWorkspaceHash || pendingRefreshHashRef.current;
+      pendingRefreshHashRef.current = requestedHash || activeWorkspaceHash || pendingRefreshHashRef.current;
       return;
     }
     refreshingRef.current = true;
     try {
+      const activeNoWorkspace = !!(activeRef?.noWorkspace || activeRef?.no_workspace) && !requestedHash;
       let workspaceArr = [];
       try {
         const list = await api.listWorkspaces();
@@ -1035,10 +1119,12 @@ export function Sidebar({
       }
 
       const availableHashes = new Set(workspaceArr.map((w) => w.hash).filter(Boolean));
-      const chosen = (preferredHash && availableHashes.has(preferredHash))
-        ? preferredHash
-        : (workspaceArr.find((w) => w.active)?.hash || workspaceArr[0]?.hash || '');
-      const withActive = workspaceArr.map((w) => ({ ...w, active: w.hash === chosen }));
+      const chosen = activeNoWorkspace
+        ? ''
+        : ((requestedHash && availableHashes.has(requestedHash))
+          ? requestedHash
+          : (workspaceArr.find((w) => w.active)?.hash || workspaceArr[0]?.hash || ''));
+      const withActive = workspaceArr.map((w) => ({ ...w, active: !!chosen && w.hash === chosen }));
       const expandedHashes = new Set(expandedRef.current);
       if (chosen) expandedHashes.add(chosen);
       setActiveWorkspaceHash(chosen);
@@ -1092,15 +1178,27 @@ export function Sidebar({
       setSessionWorkspaceLoading(hiddenWorkspaceHashes, false);
       setSessionWorkspaceLoading(visibleWorkspaceHashes, true);
       try {
+        const noWorkspaceListPromise = api.listSessions().catch(() => []);
         const perWorkspace = await Promise.all(visibleWorkspaces.map(async (w) => {
           if (w.hash === '__local__') {
             const list = await api.listSessions();
-            return (Array.isArray(list) ? list : []).map((s) => ({ ...s, workspace_hash: s.workspace_hash || w.hash, cwd: s.cwd || w.cwd }));
+            return (Array.isArray(list) ? list : [])
+              .filter((s) => !isNoWorkspaceSession(s))
+              .map((s) => normalizeWorkspaceSession(s, w));
           }
           const list = await api.listWorkspaceSessions(w.hash);
-          return (Array.isArray(list) ? list : []).map((s) => ({ ...s, workspace_hash: s.workspace_hash || w.hash, cwd: s.cwd || w.cwd }));
+          return (Array.isArray(list) ? list : [])
+            .filter((s) => !isNoWorkspaceSession(s))
+            .map((s) => normalizeWorkspaceSession(s, w));
         }));
-        const incoming = perWorkspace.flat();
+        const noWorkspaceRaw = await noWorkspaceListPromise;
+        const noWorkspaceIncoming = (Array.isArray(noWorkspaceRaw) ? noWorkspaceRaw : [])
+          .filter(isNoWorkspaceSession)
+          .map(normalizeNoWorkspaceSession);
+        const incoming = [
+          ...perWorkspace.flat().filter((s) => !isNoWorkspaceSession(s)),
+          ...noWorkspaceIncoming,
+        ];
         setSessions((prev) => reconcileSidebarSessions(prev, incoming));
         setStatusBySession((prev) => incoming.reduce((map, s) => applyStatusUpdate(map, {
           ...s,
@@ -1121,11 +1219,12 @@ export function Sidebar({
       pendingRefreshHashRef.current = '';
       if (pendingHash) setTimeout(() => refresh(pendingHash).catch(() => {}), 0);
     }
-  }, [activeWorkspaceHash, setPinnedMap, setPinnedOrder, setSessionWorkspaceLoading, setSessionWorkspacesLoaded, syncRetainedSessionIds, updateExpanded]);
+  }, [activeRef, activeWorkspaceHash, setPinnedMap, setPinnedOrder, setSessionWorkspaceLoading, setSessionWorkspacesLoaded, syncRetainedSessionIds, updateExpanded]);
 
   const archiveSession = useCallback(async (session) => {
     const id = session?.id || session?.sessionId || session?.session_id || '';
-    const workspaceHash = session?.workspace_hash || session?.workspaceHash || activeWorkspaceHash || '';
+    const noWorkspace = isNoWorkspaceSession(session);
+    const workspaceHash = noWorkspace ? '' : (session?.workspace_hash || session?.workspaceHash || activeWorkspaceHash || '');
     if (!id) return;
 
     try {
@@ -1156,12 +1255,14 @@ export function Sidebar({
 
       setSessions((prev) => prev.filter((item) => (item.id || item.session_id || item.sessionId) !== id));
       if (id === activeId) {
-        onOpenHome?.({
-          hash: workspaceHash,
-          workspaceHash,
-          cwd: session.cwd || '',
-          name: session.workspaceName || session.workspace_name || '',
-        });
+        onOpenHome?.(noWorkspace
+          ? { noWorkspace: true, name: '不使用工作区' }
+          : {
+              hash: workspaceHash,
+              workspaceHash,
+              cwd: session.cwd || '',
+              name: session.workspaceName || session.workspace_name || '',
+            });
       }
       toast({ kind: 'ok', text: '已归档' });
       window.dispatchEvent(new Event('ace-session-archive-changed'));
@@ -1173,7 +1274,8 @@ export function Sidebar({
 
   const renameSession = useCallback(async (session, title) => {
     const id = session?.id || session?.sessionId || session?.session_id || '';
-    const workspaceHash = session?.workspace_hash || session?.workspaceHash || activeWorkspaceHash || '';
+    const noWorkspace = isNoWorkspaceSession(session);
+    const workspaceHash = noWorkspace ? '' : (session?.workspace_hash || session?.workspaceHash || activeWorkspaceHash || '');
     if (!id) return;
 
     const updated = workspaceHash && workspaceHash !== '__local__'
@@ -1214,16 +1316,21 @@ export function Sidebar({
   useEffect(() => {
     const handler = (event) => {
       const detail = normalizeSessionListChangedDetail(event.detail || {});
-      const workspaceHash = detail.workspaceHash || activeWorkspaceHash;
+      const noWorkspace = !!(
+        detail.noWorkspace || detail.session?.noWorkspace || detail.session?.no_workspace
+      );
+      const workspaceHash = noWorkspace ? '' : (detail.workspaceHash || activeWorkspaceHash);
       if (workspaceHash) {
         updateExpanded((prev) => new Set(prev).add(workspaceHash));
         connection.subscribeWorkspaceStatus(workspaceHash);
       }
       if (detail.session) {
-        const session = {
-          ...detail.session,
-          workspace_hash: detail.session.workspace_hash || detail.session.workspaceHash || workspaceHash,
-        };
+        const session = noWorkspace
+          ? normalizeNoWorkspaceSession(detail.session)
+          : {
+              ...detail.session,
+              workspace_hash: detail.session.workspace_hash || detail.session.workspaceHash || workspaceHash,
+            };
         setSessions((prev) => upsertSidebarSession(prev, session));
         setStatusBySession((prev) => applyStatusUpdate(prev, {
           ...session,
@@ -1241,6 +1348,14 @@ export function Sidebar({
     () => withNewSessionDisplayTitles(mergeSessionsWithStatus(sessions, statusBySession)),
     [sessions, statusBySession],
   );
+  const noWorkspaceSessions = useMemo(
+    () => renderedSessions.filter(isNoWorkspaceSession).map(normalizeNoWorkspaceSession),
+    [renderedSessions],
+  );
+  const workspaceSessions = useMemo(
+    () => renderedSessions.filter((session) => !isNoWorkspaceSession(session)),
+    [renderedSessions],
+  );
 
   // 把 active workspace 的 sessions / pinned ids / workspaceName 推到桌面 tray 菜单。
   // pushTrayMenu 内部 100ms debounce + 无 bridge 时 no-op。
@@ -1248,7 +1363,7 @@ export function Sidebar({
   useEffect(() => {
     const activeWs = workspaces.find((w) => w.hash === activeWorkspaceHash);
     const activeSessions = activeWorkspaceHash
-      ? renderedSessions.filter((s) => (s.workspace_hash || s.workspaceHash) === activeWorkspaceHash)
+      ? workspaceSessions.filter((s) => (s.workspace_hash || s.workspaceHash) === activeWorkspaceHash)
       : [];
     const pinnedIds = activeWorkspaceHash
       ? normalizePinnedIds(pinnedByWorkspace.get(activeWorkspaceHash) || [])
@@ -1258,7 +1373,7 @@ export function Sidebar({
       pinnedSessionIds: pinnedIds,
       workspaceName: activeWs?.name || '',
     });
-  }, [renderedSessions, pinnedByWorkspace, activeWorkspaceHash, workspaces]);
+  }, [workspaceSessions, pinnedByWorkspace, activeWorkspaceHash, workspaces]);
 
   useEffect(() => {
     const handler = (e) => {
@@ -1349,16 +1464,19 @@ export function Sidebar({
 
   const selectSession = async (ws, session) => {
     if (!session?.id) return;
+    const noWorkspace = isNoWorkspaceSession(session) || !!ws?.noWorkspace;
     if (!session.active) {
       try {
-        if (ws?.hash && ws.hash !== '__local__') {
+        if (noWorkspace) {
+          await api.resumeSession(session.id);
+        } else if (ws?.hash && ws.hash !== '__local__') {
           await api.resumeWorkspaceSession(ws.hash, session.id);
         } else {
           await api.resumeSession(session.id);
         }
         refresh().catch(() => {});
       } catch (e) {
-        if (hasDesktopBridge() && ws?.hash) {
+        if (!noWorkspace && hasDesktopBridge() && ws?.hash) {
           try {
             const r = parseDesktopResult(await window.aceDesktop_resumeSession(ws.hash, session.id));
             if (r.error) { toast({ kind: 'err', text: '恢复失败:' + r.error }); return; }
@@ -1399,15 +1517,21 @@ export function Sidebar({
         }
       }
     }
-    markSessionRead(session);
+    const selectedSession = noWorkspace ? normalizeNoWorkspaceSession(session) : session;
+    if (noWorkspace) {
+      setActiveWorkspaceHash('');
+      setWorkspaces((prev) => prev.map((item) => ({ ...item, active: false })));
+    }
+    markSessionRead(selectedSession);
     onSelect?.({
-      workspaceHash: session.workspace_hash || ws?.hash,
+      workspaceHash: noWorkspace ? '' : (session.workspace_hash || ws?.hash),
+      noWorkspace,
       contextId: 'default',
       sessionId: session.id,
       displayTitle: session.displayTitle || session.display_title,
       port: ws?.port,
       token: ws?.token,
-      cwd: session.cwd || ws?.cwd,
+      cwd: noWorkspace ? '' : (session.cwd || ws?.cwd),
       title: session.title,
       summary: session.summary,
       provider: session.provider,
@@ -1548,7 +1672,9 @@ export function Sidebar({
     }
   };
 
-  const pinnedSessions = pinnedSessionsForList(renderedSessions, pinnedByWorkspace, pinnedOrderItems);
+  const pinnedSessions = pinnedSessionsForList(workspaceSessions, pinnedByWorkspace, pinnedOrderItems);
+  const showNoWorkspaceSessions =
+    noWorkspaceSessions.length > 0 || !!(activeRef?.noWorkspace || activeRef?.no_workspace);
   const workspaceForSession = (session) => {
     const hash = session.workspace_hash || session.workspaceHash || '';
     return workspaces.find((w) => w.hash === hash) || {
@@ -1568,9 +1694,9 @@ export function Sidebar({
       ].join(' ')}
       style={collapsed ? undefined : { width, minWidth: width }}
     >
-      <div className="flex-1 flex flex-col min-h-0">
-        <div className="flex-1 flex flex-col min-h-0">
-          <div className="flex items-center justify-between px-2 pt-2.5 pb-1 text-[10px] font-semibold uppercase tracking-wider text-fg-mute">
+      <div className="ace-sidebar-content flex-1 flex flex-col min-h-0">
+        <div className="ace-sidebar-main flex-1 flex flex-col min-h-0">
+          <div className="ace-sidebar-heading flex items-center justify-between px-2 pt-2.5 pb-1 text-[10px] font-semibold uppercase tracking-wider text-fg-mute">
             <span>项目</span>
             <button
               type="button"
@@ -1579,7 +1705,7 @@ export function Sidebar({
               title="添加项目"
             ><VsIcon name="folderAdd" size={15} /></button>
           </div>
-          <div ref={sidebarScrollRef} className="flex-1 overflow-y-auto pb-2">
+          <div ref={sidebarScrollRef} className="ace-sidebar-scroll flex-1 overflow-y-auto pb-2">
             {pinnedSessions.length > 0 && (
               <div className="mb-2">
                 <div className="px-4 pt-1 pb-1 text-[10px] font-semibold uppercase tracking-wider text-fg-mute">置顶</div>
@@ -1609,9 +1735,22 @@ export function Sidebar({
                 </div>
               </div>
             )}
+            {showNoWorkspaceSessions && (
+              <NoWorkspaceSessionGroup
+                sessions={noWorkspaceSessions}
+                sessionsLoading={false}
+                sessionListExpanded={expandedSessionLists.has(NO_WORKSPACE_SESSION_LIST_KEY)}
+                onToggleSessionList={toggleSessionListExpanded}
+                activeId={activeId}
+                onSelect={(session) => selectSession({ noWorkspace: true }, session)}
+                onArchive={archiveSession}
+                onRenameSession={renameSession}
+                pendingQuestionSessionIds={pendingQuestionSessionIds}
+              />
+            )}
             {workspaces.map((ws) => {
               const items = filterPinnedSessions(
-                renderedSessions.filter((s) => s.workspace_hash ? s.workspace_hash === ws.hash : !!ws.active),
+                workspaceSessions.filter((s) => s.workspace_hash ? s.workspace_hash === ws.hash : !!ws.active),
                 pinnedByWorkspace,
               );
               return (

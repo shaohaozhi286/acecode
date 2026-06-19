@@ -196,6 +196,10 @@ SessionOptions with_resolved_workspace(const SessionRegistryDeps& deps,
     if (out.cwd.empty()) {
         out.cwd = deps.cwd;
     }
+    if (out.no_workspace) {
+        out.workspace_hash.clear();
+        return out;
+    }
     if (out.workspace_hash.empty() && !out.cwd.empty()) {
         out.workspace_hash = compute_cwd_hash(out.cwd);
     }
@@ -637,9 +641,12 @@ SessionRegistry::make_entry_locked(const std::string& id,
     auto entry = std::make_unique<SessionEntry>();
     entry->id = id;
     entry->cwd = opts.cwd.empty() ? deps_.cwd : opts.cwd;
-    entry->workspace_hash = opts.workspace_hash.empty()
+    entry->no_workspace = opts.no_workspace || (resumed_meta && resumed_meta->no_workspace);
+    entry->workspace_hash = entry->no_workspace
+        ? std::string{}
+        : (opts.workspace_hash.empty()
         ? compute_cwd_hash(entry->cwd)
-        : opts.workspace_hash;
+        : opts.workspace_hash);
     entry->provider = resolved_model.state.provider;
     entry->model = resolved_model.state.model;
     entry->model_state = resolved_model.state;
@@ -657,7 +664,8 @@ SessionRegistry::make_entry_locked(const std::string& id,
                              entry->model_state.model,
                              id,
                              entry->model_state.name,
-                             "daemon");
+                             "daemon",
+                             entry->no_workspace);
 
     // PermissionManager: 复制 mode + dangerous flag,rules 由调用方在初始化
     // template_permissions 时设好。session_allowed_ 不复制,各 session 独立。
@@ -804,7 +812,8 @@ bool SessionRegistry::resume(const std::string& id, const SessionOptions& opts) 
 
     SessionOptions entry_opts;
     entry_opts.cwd = resolved.cwd;
-    entry_opts.workspace_hash = resolved.workspace_hash;
+    entry_opts.no_workspace = meta.no_workspace || resolved.no_workspace;
+    entry_opts.workspace_hash = entry_opts.no_workspace ? std::string{} : resolved.workspace_hash;
     auto entry = make_entry_locked(id, entry_opts, &meta);
     auto messages = entry->sm->resume_session(id);
     if (!entry->sm->last_error().empty()) {
@@ -1116,6 +1125,7 @@ std::vector<SessionInfo> SessionRegistry::list_active() const {
         info.cwd = entry->cwd;
         info.workspace_hash = entry->workspace_hash;
         info.active = true;
+        info.no_workspace = entry->no_workspace;
         if (entry->loop) info.busy = entry->loop->is_busy();
         if (entry->sm) {
             // SessionManager 没有公开的 created_at / updated_at 接口,从 meta

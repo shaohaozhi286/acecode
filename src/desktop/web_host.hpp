@@ -101,6 +101,12 @@ public:
     // 实际 WebView2/Edge runtime;Linux 报告 WebKitGTK;macOS 报告 WKWebView/WebKit。
     WebCoreInfo web_core_info() const;
 
+    // Windows-only visual enhancement: enable native acrylic behind the left
+    // sidebar and make WebView2 capable of exposing that host content. Other
+    // platforms return false and keep existing styling.
+    bool enable_sidebar_acrylic();
+    bool refresh_sidebar_acrylic();
+
     // 注册"窗口最大化/还原状态变化" handler。WM_SIZE 时检测 IsZoomed 与上次缓存
     // 是否不同,不同才触发 — SIZE_MINIMIZED → SIZE_RESTORED 之类的中间过渡不会
     // 重复抛事件。非 Windows 平台为 stub。

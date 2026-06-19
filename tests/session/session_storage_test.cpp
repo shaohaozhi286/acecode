@@ -72,6 +72,7 @@ TEST(SessionStorage, MetaRoundtrip) {
         {"2", "Wire checklist UI", "in_progress"},
     };
     in.archived      = true;
+    in.no_workspace  = true;
 
     SessionStorage::write_meta(meta_path, in);
     SessionMeta out = SessionStorage::read_meta(meta_path);
@@ -105,6 +106,7 @@ TEST(SessionStorage, MetaRoundtrip) {
     EXPECT_EQ(out.todos[0].content, "Inspect Hermes");
     EXPECT_EQ(out.todos[1].status, "in_progress");
     EXPECT_EQ(out.archived,      in.archived);
+    EXPECT_EQ(out.no_workspace,  in.no_workspace);
 }
 
 // 场景:手造一份老版本 .meta.json(完全不含 title 字段),read_meta 必须

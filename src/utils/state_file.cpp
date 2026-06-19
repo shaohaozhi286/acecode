@@ -182,4 +182,15 @@ void write_last_active_workspace_hash(const std::string& hash) {
     write_state_value("last_active_workspace_hash", hash);
 }
 
+std::string read_last_home_workspace_hash() {
+    auto j = load_state_or_empty();
+    if (!j.contains("last_home_workspace_hash")) return "";
+    if (!j["last_home_workspace_hash"].is_string()) return "";
+    return j["last_home_workspace_hash"].get<std::string>();
+}
+
+void write_last_home_workspace_hash(const std::string& hash) {
+    write_state_value("last_home_workspace_hash", hash);
+}
+
 } // namespace acecode

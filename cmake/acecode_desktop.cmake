@@ -42,6 +42,11 @@ set(ACECODE_DESKTOP_SOURCES
     ${CMAKE_SOURCE_DIR}/src/desktop/splash_screen.cpp
     ${CMAKE_SOURCE_DIR}/src/desktop/web_host.cpp
 )
+if(WIN32)
+    list(APPEND ACECODE_DESKTOP_SOURCES
+        ${CMAKE_SOURCE_DIR}/src/desktop/acrylic_backdrop_win.cpp
+    )
+endif()
 # 注:notifications_win.cpp / tray_icon_win.cpp 的 Windows 路径走 Shell_NotifyIcon
 # / RegisterClassEx,Linux tray 路径运行时 dlopen GTK3,因此仍不直接依赖
 # webview/webview 头或 link target。它们走 acecode_testable 路径(根 CMakeLists.txt
@@ -92,7 +97,24 @@ endif()
 # folder_picker_win.cpp 在 acecode_testable 里,所以这里不必单独 link;但为了让
 # acecode_unit_tests 也能链通,再在 acecode_testable 一侧添加(见根 CMakeLists)。
 if(WIN32)
-    target_link_libraries(acecode-desktop PRIVATE ole32 shell32 user32 gdi32)
+    set(ACECODE_DESKTOP_ACRYLIC_BACKEND "ACECODE_DESKTOP_ACRYLIC_BACKEND_AUTO" CACHE STRING
+        "Desktop sidebar acrylic backend: AUTO tries accent first, or force _ACCENT, _SYSTEM, _DEMO, or _OFF")
+    set(ACECODE_DESKTOP_ACRYLIC_USE_FRAMELESS_POPUP "0" CACHE STRING
+        "Desktop sidebar acrylic: reshape the WebView-owned host as a frameless popup window")
+    set(ACECODE_DESKTOP_ACRYLIC_USE_LAYERED_COLORKEY "0" CACHE STRING
+        "Desktop sidebar acrylic: use a layered-window color key for WebView2 sidebar transparency")
+    set(ACECODE_DESKTOP_ACRYLIC_DEBUG_HOST_FILL "0" CACHE STRING
+        "Desktop sidebar acrylic diagnostic: paint the host HWND client area with a solid color")
+    target_compile_definitions(acecode-desktop PRIVATE
+        ACECODE_DESKTOP_ACRYLIC_BACKEND=${ACECODE_DESKTOP_ACRYLIC_BACKEND}
+        ACECODE_DESKTOP_ACRYLIC_USE_FRAMELESS_POPUP=${ACECODE_DESKTOP_ACRYLIC_USE_FRAMELESS_POPUP}
+        ACECODE_DESKTOP_ACRYLIC_USE_LAYERED_COLORKEY=${ACECODE_DESKTOP_ACRYLIC_USE_LAYERED_COLORKEY}
+        ACECODE_DESKTOP_ACRYLIC_DEBUG_HOST_FILL=${ACECODE_DESKTOP_ACRYLIC_DEBUG_HOST_FILL}
+    )
+    target_link_libraries(acecode-desktop PRIVATE
+        ole32 shell32 user32 gdi32
+        dwmapi dcomp d3d11 d2d1 dxgi
+    )
 endif()
 
 if(APPLE)

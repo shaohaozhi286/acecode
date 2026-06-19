@@ -13,7 +13,7 @@
 // 仅在 single 视图挂载(由 ChatView 的 showSidePanel prop 控制),grid 视图
 // 整面板不渲染。
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, createApi } from '../lib/api.js';
 import { aggregateHunksFromMessages, summarizeChangeGroups } from '../lib/sessionChanges.js';
 import {
@@ -26,6 +26,7 @@ import {
   buildReviewStatusMap,
   entriesWithReviewRows,
   fileChangeStatusTitle,
+  normalizeTreePath,
   statusForTreeEntry,
 } from '../lib/fileTreeChangeStatus.js';
 import { fileTreeReloadPaths } from '../lib/fileTreeRefresh.js';
@@ -45,7 +46,7 @@ const EMPTY_EXPANDED_DIRS = new Set();
 const EMPTY_REVIEW_STATUS = new Map();
 
 function pathAncestors(path) {
-  const parts = String(path || '').split(/[\\/]/).filter(Boolean);
+  const parts = normalizeTreePath(path).split('/').filter(Boolean);
   const result = [];
   for (let i = 1; i < parts.length; i += 1) {
     result.push(parts.slice(0, i).join('/'));
@@ -65,6 +66,8 @@ function FileTree({ api, cwd, treeCache, setTreeCache, expandedDirs, setExpanded
                     selectedPath, onPickFile, onRefreshTree, refreshToken, reviewStatusByPath }) {
   const [loading, setLoading] = useState(new Set()); // path 集合,正在请求中
   const [errors, setErrors]   = useState(new Map()); // path → 错误文案
+  const treeRef = useRef(null);
+  const selectedNormalizedPath = normalizeTreePath(selectedPath);
 
   const loadDir = useCallback(async (path, options = {}) => {
     const force = !!options.force;
@@ -142,6 +145,23 @@ function FileTree({ api, cwd, treeCache, setTreeCache, expandedDirs, setExpanded
     return () => window.removeEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
   }, [loadDir, onPickFile, onRefreshTree, setExpandedDirs]);
 
+  useLayoutEffect(() => {
+    if (!selectedNormalizedPath) return;
+    const tree = treeRef.current;
+    if (!tree) return;
+    const row = Array.from(tree.querySelectorAll('[data-desktop-file-path]'))
+      .find((node) => normalizeTreePath(node.getAttribute('data-desktop-file-path')) === selectedNormalizedPath);
+    if (!row) return;
+    const treeRect = tree.getBoundingClientRect();
+    const rowRect = row.getBoundingClientRect();
+    const margin = 8;
+    if (rowRect.top < treeRect.top) {
+      tree.scrollTop = Math.max(0, tree.scrollTop + rowRect.top - treeRect.top - margin);
+    } else if (rowRect.bottom > treeRect.bottom) {
+      tree.scrollTop = Math.max(0, tree.scrollTop + rowRect.bottom - treeRect.bottom + margin);
+    }
+  }, [selectedNormalizedPath, treeCache, expandedDirs]);
+
   // 递归渲染 — 每个目录的子项展开时插入到该目录节点之后
   const renderEntries = (parentPath, depth) => {
     const entries = treeCache.get(parentPath);
@@ -172,7 +192,8 @@ function FileTree({ api, cwd, treeCache, setTreeCache, expandedDirs, setExpanded
     return displayEntries.map((e) => {
       const isDir = e.kind === 'dir';
       const isOpen = isDir && expandedDirs.has(e.path);
-      const isActive = !isDir && selectedPath === e.path;
+      const isActive = !isDir && selectedNormalizedPath
+        && normalizeTreePath(e.path) === selectedNormalizedPath;
       const absolutePath = joinWorkspacePath(cwd, e.path);
       const explorerPath = isDir ? absolutePath : '';
       const locatePath = isDir ? '' : containingWorkspacePath(cwd, e.path);
@@ -229,7 +250,7 @@ function FileTree({ api, cwd, treeCache, setTreeCache, expandedDirs, setExpanded
     return <div className="ace-empty-state">无 cwd,请先选择会话</div>;
   }
   return (
-    <div className="ace-file-tree flex-1 overflow-y-auto py-1">
+    <div className="ace-file-tree flex-1 overflow-y-auto py-1" ref={treeRef}>
       {renderEntries('', 0)}
     </div>
   );
@@ -274,6 +295,7 @@ export function SidePanel({
   changeSummary = null,
   fileRefreshKey = '',
   reviewRequest = 0,
+  filesEnabled = true,
   width = 280,
   collapsed = false,
   onToggleCollapse,
@@ -283,9 +305,13 @@ export function SidePanel({
   selectedChangeFileRevision = 0,
 }) {
   const api = useMemo(() => createApi(sessionRef || null), [sessionRef?.port, sessionRef?.token, sessionRef?.workspaceHash]);
-  const [activeTab,    setActiveTab]    = useState('files');
+  const [activeTab,    setActiveTab]    = useState(filesEnabled ? 'files' : 'changes');
   const [selectedPath, setSelectedPath] = useState(null);
   const [fileRefreshToken, setFileRefreshToken] = useState(0);
+  const visibleTabs = useMemo(
+    () => TABS.filter((tab) => filesEnabled || tab.key !== 'files'),
+    [filesEnabled],
+  );
 
   // 按 cwd 隔离的文件树缓存:cwd → Map<path, entries[]>。每个 cwd 一份独立缓存,
   // 切 cwd 时新 cwd 自动 .get() 取不到,FileTree 守卫不会误命中旧数据,也不需要
@@ -329,11 +355,15 @@ export function SidePanel({
   }, [cwdKey]);
 
   const refreshFileTree = useCallback(() => {
-    if (!cwdKey) return;
+    if (!filesEnabled || !cwdKey) return;
     setFileRefreshToken(prev => prev + 1);
-  }, [cwdKey]);
+  }, [cwdKey, filesEnabled]);
 
   const lastFileRefreshKey = useRef('');
+  useEffect(() => {
+    if (!filesEnabled && activeTab === 'files') setActiveTab('changes');
+  }, [activeTab, filesEnabled]);
+
   useEffect(() => {
     const nextKey = String(fileRefreshKey || '');
     if (!nextKey) {
@@ -352,9 +382,9 @@ export function SidePanel({
     const c = cwd || '';
     if (c === lastCwd.current) return;
     lastCwd.current = c;
-    setActiveTab('files');
+    setActiveTab(filesEnabled ? 'files' : 'changes');
     setSelectedPath(null);
-  }, [cwd]);
+  }, [cwd, filesEnabled]);
 
   useEffect(() => {
     if (!reviewRequest) return;
@@ -367,9 +397,10 @@ export function SidePanel({
   }, [selectedChangeFile, selectedChangeFileRevision]);
 
   const onPickFile = useCallback((entry) => {
+    if (!filesEnabled) return;
     setSelectedPath(entry.path);
     onOpenFilePreview?.(entry.path);
-  }, [onOpenFilePreview]);
+  }, [filesEnabled, onOpenFilePreview]);
 
   useEffect(() => {
     const handler = (event) => {
@@ -378,30 +409,34 @@ export function SidePanel({
       const filePath = target?.type === 'review'
         ? target.file
         : (target?.type === 'file' ? (target.relativePath || target.path) : '');
-      if (!filePath) return;
+      const normalizedFilePath = normalizeTreePath(filePath);
+      if (!normalizedFilePath) return;
 
-      if (action === DESKTOP_CONTEXT_ACTIONS.PREVIEW_FILE) {
+      if (action === DESKTOP_CONTEXT_ACTIONS.PREVIEW_FILE && target?.type === 'review') {
         detail.handled = true;
-        setSelectedPath(filePath);
-        if (target?.type === 'review') onOpenSessionChangePreview?.(filePath);
-        else onOpenFilePreview?.(filePath);
-      } else if (action === DESKTOP_CONTEXT_ACTIONS.LOCATE_IN_FILE_TREE) {
+        setSelectedPath(normalizedFilePath);
+        onOpenSessionChangePreview?.(filePath);
+      } else if (filesEnabled && action === DESKTOP_CONTEXT_ACTIONS.PREVIEW_FILE) {
         detail.handled = true;
-        setSelectedPath(filePath);
+        setSelectedPath(normalizedFilePath);
+        onOpenFilePreview?.(filePath);
+      } else if (filesEnabled && action === DESKTOP_CONTEXT_ACTIONS.LOCATE_IN_FILE_TREE) {
+        detail.handled = true;
+        setSelectedPath(normalizedFilePath);
         setExpandedDirs((prev) => {
           const next = new Set(prev);
-          for (const dir of pathAncestors(filePath)) next.add(dir);
+          for (const dir of pathAncestors(normalizedFilePath)) next.add(dir);
           return next;
         });
         setActiveTab('files');
-      } else if (action === DESKTOP_CONTEXT_ACTIONS.REFRESH_FILE_TREE && target?.type === 'file') {
+      } else if (filesEnabled && action === DESKTOP_CONTEXT_ACTIONS.REFRESH_FILE_TREE && target?.type === 'file') {
         detail.handled = true;
         refreshFileTree();
       }
     };
     window.addEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
     return () => window.removeEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
-  }, [onOpenFilePreview, onOpenSessionChangePreview, refreshFileTree, setExpandedDirs]);
+  }, [filesEnabled, onOpenFilePreview, onOpenSessionChangePreview, refreshFileTree, setExpandedDirs]);
 
   return (
     // 宽度由父级 wrapper(.ace-side-panel-shell)控制,这里 100% 占满。width prop
@@ -409,7 +444,7 @@ export function SidePanel({
     <div className="ace-side-panel" style={{ width: '100%', minWidth: 0 }}>
       <div className="ace-side-tabs">
         <div className="ace-side-tabs-list">
-          {TABS.map((t) => (
+          {visibleTabs.map((t) => (
             <button
               key={t.key}
               type="button"
@@ -425,7 +460,7 @@ export function SidePanel({
             </button>
           ))}
         </div>
-        {activeTab === 'files' && (
+        {filesEnabled && activeTab === 'files' && (
           <button
             type="button"
             onClick={refreshFileTree}
@@ -451,7 +486,7 @@ export function SidePanel({
       </div>
 
       <div className="flex-1 flex flex-col overflow-hidden">
-        {activeTab === 'files' && (
+        {filesEnabled && activeTab === 'files' && (
           <FileTree
             api={api}
             cwd={cwd}

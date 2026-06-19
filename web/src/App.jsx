@@ -15,6 +15,7 @@ import {
   removePendingQuestionRequest,
 } from './lib/pendingQuestions.js';
 import { usePreference } from './lib/usePreference.js';
+import { useTheme } from './theme.jsx';
 import {
   DEFAULT_UI_PREFS,
   UI_PREFS_STORAGE_KEY,
@@ -34,6 +35,8 @@ import { SlashCommandsProvider } from './components/SlashCommandsContext.jsx';
 import { FramelessResizeHandles } from './components/FramelessResizeHandles.jsx';
 import { GlobalFindOverlay } from './components/GlobalFindOverlay.jsx';
 import { ConsoleDock } from './components/ConsoleDock.jsx';
+import { AcrylicSettingsPanel } from './components/AcrylicSettingsPanel.jsx';
+import { useFramelessWindowState } from './components/WindowControls.jsx';
 import {
   CONSOLE_DOCK_DEFAULT_HEIGHT,
   clampDockHeight,
@@ -47,6 +50,11 @@ import {
   validateLayoutWidths,
 } from './lib/singleLayout.js';
 import { initInactiveSelection } from './lib/inactiveSelection.js';
+import {
+  applyDesktopAcrylicCssVariables,
+  applyNativeDesktopAcrylicSettings,
+  loadInitialDesktopAcrylicSettings,
+} from './lib/desktopAcrylicSettings.js';
 
 const SINGLE_LAYOUT_STORAGE_KEY = 'acecode.singleLayoutWidths.v1';
 
@@ -61,10 +69,18 @@ function validateConsoleDock(value) {
 
 function homeRefFromWorkspace(workspace, fallbackRef, health) {
   const source = workspace && typeof workspace === 'object' ? workspace : {};
+  const explicitWorkspace = !!(workspace && typeof workspace === 'object');
   const fallback = fallbackRef && typeof fallbackRef === 'object' ? fallbackRef : {};
+  const noWorkspace = !!(source.noWorkspace || source.no_workspace);
   const workspaceHash = source.workspaceHash || source.workspace_hash || source.hash || fallback.workspaceHash || fallback.workspace_hash || '';
   const cwd = source.cwd || fallback.cwd || health?.cwd || '';
-  const next = { home: true };
+  const next = { home: true, homeWorkspaceExplicit: explicitWorkspace };
+  if (noWorkspace) {
+    next.noWorkspace = true;
+    next.workspaceHash = '';
+    next.cwd = '';
+    return next;
+  }
   if (workspaceHash) next.workspaceHash = workspaceHash;
   if (cwd) next.cwd = cwd;
   if (source.name || source.workspaceName) next.workspaceName = source.name || source.workspaceName;
@@ -77,6 +93,8 @@ function homeRefFromWorkspace(workspace, fallbackRef, health) {
 }
 
 export function App() {
+  const { theme } = useTheme();
+  const { isMaximized: desktopWindowMaximized } = useFramelessWindowState();
   const [authState, setAuthState] = useState('checking'); // 'checking' | 'ok' | 'need-token'
   const [health,    setHealth]    = useState(null);
 
@@ -88,6 +106,7 @@ export function App() {
   const [permReqs,     setPermReqs]     = useState([]);
   const [questionReqs, setQuestionReqs] = useState([]);
   const [searchOpen,   setSearchOpen]   = useState(false);
+  const [acrylicPanelOpen, setAcrylicPanelOpen] = useState(false);
   const [updateStatus, setUpdateStatus] = useState(null);
   const [updateStarting, setUpdateStarting] = useState(false);
   const [singleLayout, setSingleLayout] = usePreference(
@@ -101,6 +120,8 @@ export function App() {
   const sidePanelCollapsed = uiPrefs.sidePanelCollapsed;
   const sidePanelMaximized = !!uiPrefs.sidePanelMaximized;
   const projectSidebarCollapsed = !!uiPrefs.sidebarCollapsed;
+  const desktopSidebarAcrylic = typeof window !== 'undefined'
+    && window.__ACECODE_DESKTOP_SIDEBAR_ACRYLIC__ === true;
   const showAceCodeAvatar = false;
   const singleShellRef = useRef(null);
   const sidebarResizeActiveRef = useRef(false);
@@ -111,6 +132,21 @@ export function App() {
   useEffect(() => initInactiveSelection(), []);
   useEffect(() => { activeRefRef.current = activeRef; }, [activeRef]);
   useEffect(() => { navHistoryRef.current = navHistory; }, [navHistory]);
+
+  useEffect(() => {
+    if (!desktopSidebarAcrylic || typeof window === 'undefined') return undefined;
+    let cancelled = false;
+    loadInitialDesktopAcrylicSettings(window, window.localStorage, theme)
+      .then((settings) => {
+        if (cancelled) return;
+        applyDesktopAcrylicCssVariables(document.documentElement, settings);
+        void applyNativeDesktopAcrylicSettings(settings);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [desktopSidebarAcrylic, theme]);
 
   const replaceActiveRef = useCallback((nextRefOrUpdater) => {
     const current = activeRefRef.current;
@@ -260,6 +296,18 @@ export function App() {
     [],
   );
 
+  useGlobalShortcut(
+    (e) => desktopSidebarAcrylic
+      && e.key
+      && e.key.toLowerCase() === 'o'
+      && e.ctrlKey
+      && e.shiftKey
+      && !e.altKey
+      && !e.metaKey,
+    () => setAcrylicPanelOpen((open) => !open),
+    [desktopSidebarAcrylic],
+  );
+
   // Ctrl+` toggle 控制台(终端聚焦时 xterm 的 customKeyEventHandler 放行该
   // 组合,事件照常冒泡到 window)。后端 console 不可用时快捷键惰化。
   const consoleAvailable = !!health?.console?.available;
@@ -286,8 +334,9 @@ export function App() {
   const handleSelectSession = useCallback(async (session) => {
     if (!session?.id) return;
     setSearchOpen(false);
-    const targetHash = session.workspace_hash || '';
-    const sameWorkspace = !targetHash || targetHash === activeRefRef.current?.workspaceHash;
+    const noWorkspace = !!(session.noWorkspace || session.no_workspace);
+    const targetHash = noWorkspace ? '' : (session.workspace_hash || '');
+    const sameWorkspace = noWorkspace || !targetHash || targetHash === activeRefRef.current?.workspaceHash;
 
     if (!sameWorkspace
         && typeof window !== 'undefined'
@@ -307,10 +356,11 @@ export function App() {
 
     navigateToRef({
       workspaceHash: targetHash,
+      noWorkspace,
       contextId: 'default',
       sessionId: session.id,
       displayTitle: session.displayTitle || session.display_title,
-      cwd: session.cwd || '',
+      cwd: noWorkspace ? '' : (session.cwd || ''),
       title: session.title,
       summary: session.summary,
       provider: session.provider,
@@ -555,7 +605,13 @@ export function App() {
 
   return (
     <SlashCommandsProvider workspaceHash={commandWorkspaceHash}>
-    <div className="h-full w-full flex flex-col bg-bg text-fg font-sans">
+    <div
+      className={[
+        'h-full w-full flex flex-col text-fg font-sans',
+        desktopSidebarAcrylic ? 'ace-desktop-shell-acrylic bg-transparent' : 'bg-bg',
+        desktopSidebarAcrylic && desktopWindowMaximized ? 'ace-desktop-shell-maximized' : '',
+      ].join(' ')}
+    >
       <TopBar
         onSettings={() => openSettingsSection('general')}
         onNewSession={() => openHomeForWorkspace()}
@@ -601,6 +657,7 @@ export function App() {
           className={[
             'flex-1 flex flex-col overflow-hidden transition-all duration-200',
             'opacity-100 scale-100',
+            desktopSidebarAcrylic ? 'bg-bg' : '',
           ].join(' ')}
         >
           <div className="flex-1 flex overflow-hidden min-h-0">
@@ -652,6 +709,9 @@ export function App() {
           currentWorkspaceHash={activeRef?.workspaceHash || ''}
           onSelectSession={handleSelectSession}
         />
+        {desktopSidebarAcrylic && acrylicPanelOpen && (
+          <AcrylicSettingsPanel theme={theme} onClose={() => setAcrylicPanelOpen(false)} />
+        )}
         {permReq      && (
           <PermissionModal
             request={permReq}

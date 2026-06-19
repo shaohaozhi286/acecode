@@ -9,8 +9,19 @@ function pickWorkspaceHash(source) {
   return source.workspaceHash || source.workspace_hash || source.hash || '';
 }
 
+function hasExplicitHomeWorkspaceSelection(source) {
+  if (!source || typeof source !== 'object') return false;
+  return source.noWorkspace === true
+    || Object.prototype.hasOwnProperty.call(source, 'hash')
+    || Object.prototype.hasOwnProperty.call(source, 'workspaceHash')
+    || Object.prototype.hasOwnProperty.call(source, 'workspace_hash');
+}
+
 export function commandWorkspaceHashForInput({ activeRef, selectedHomeWorkspace, hasSession }) {
   const activeHash = pickWorkspaceHash(activeRef);
   if (hasSession) return activeHash;
-  return pickWorkspaceHash(selectedHomeWorkspace) || activeHash;
+  if (hasExplicitHomeWorkspaceSelection(selectedHomeWorkspace)) {
+    return pickWorkspaceHash(selectedHomeWorkspace);
+  }
+  return activeHash;
 }

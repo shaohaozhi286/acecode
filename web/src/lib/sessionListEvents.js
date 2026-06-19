@@ -4,12 +4,18 @@ export function normalizeSessionListChangedDetail(detail = {}) {
   const source = detail && typeof detail === 'object' ? detail : {};
   const session = source.session && typeof source.session === 'object' ? source.session : null;
   const sessionId = String(source.sessionId || source.session_id || session?.id || session?.session_id || '').trim();
-  const workspaceHash = String(
-    source.workspaceHash || source.workspace_hash || session?.workspace_hash || session?.workspaceHash || '',
-  ).trim();
+  const noWorkspace = !!(
+    source.noWorkspace || source.no_workspace || session?.noWorkspace || session?.no_workspace
+  );
+  const workspaceHash = noWorkspace
+    ? ''
+    : String(
+        source.workspaceHash || source.workspace_hash || session?.workspace_hash || session?.workspaceHash || '',
+      ).trim();
   return {
     sessionId,
     workspaceHash,
+    noWorkspace,
     reason: String(source.reason || '').trim(),
     session,
   };

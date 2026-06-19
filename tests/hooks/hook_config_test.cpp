@@ -1,11 +1,44 @@
 #include <gtest/gtest.h>
 
 #include "hooks/hook_config.hpp"
+#include "utils/utf8_path.hpp"
 
+#include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <nlohmann/json.hpp>
+#include <string>
 
 using acecode::HookMode;
 using acecode::HookPlatform;
+
+namespace {
+
+struct TempHookConfigFile {
+    std::filesystem::path root;
+    std::filesystem::path path;
+
+    TempHookConfigFile() {
+        const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+        root = std::filesystem::temp_directory_path() /
+               ("acecode-hook-config-test-" + std::to_string(stamp));
+        path = root / "hooks.json";
+        std::filesystem::create_directories(root);
+    }
+
+    ~TempHookConfigFile() {
+        std::error_code ec;
+        std::filesystem::remove_all(root, ec);
+    }
+};
+
+void write_text(const std::filesystem::path& path, const std::string& text) {
+    std::filesystem::create_directories(path.parent_path());
+    std::ofstream ofs(path, std::ios::binary | std::ios::trunc);
+    ofs << text;
+}
+
+} // namespace
 
 TEST(HookConfig, ParsesEventsAndPlatformCommands) {
     auto j = nlohmann::json::parse(R"({
@@ -80,3 +113,31 @@ TEST(HookConfig, SpecificPlatformBeatsUnixAndPosix) {
     EXPECT_EQ(linux_cmd->args[0], "unix.sh");
 }
 
+TEST(HookConfig, WritesEnabledFlagPreservingLegacyEvents) {
+    TempHookConfigFile tmp;
+    write_text(tmp.path, R"({
+        "version": 1,
+        "enabled": true,
+        "events": {
+            "startup.before_model_load": [
+                {"id": "startup", "command": "node", "args": ["hook.js"]}
+            ]
+        }
+    })");
+
+    std::string error;
+    const std::string path = acecode::path_to_utf8(tmp.path);
+    ASSERT_TRUE(acecode::set_hook_config_enabled_in_path(path, false, &error)) << error;
+
+    auto disabled = acecode::load_hook_config_from_path(path, &error);
+    EXPECT_TRUE(error.empty());
+    EXPECT_FALSE(disabled.enabled);
+    ASSERT_EQ(disabled.events["startup.before_model_load"].size(), 1u);
+    EXPECT_EQ(disabled.events["startup.before_model_load"][0].command.command, "node");
+
+    ASSERT_TRUE(acecode::set_hook_config_enabled_in_path(path, true, &error)) << error;
+    auto enabled = acecode::load_hook_config_from_path(path, &error);
+    EXPECT_TRUE(error.empty());
+    EXPECT_TRUE(enabled.enabled);
+    ASSERT_EQ(enabled.events["startup.before_model_load"].size(), 1u);
+}

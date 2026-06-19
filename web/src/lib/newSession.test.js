@@ -86,6 +86,35 @@ await run('createNewSessionForActiveWorkspace 无真实 workspace 时创建兼�
   assert.equal(ref.displayTitle, '新会话1');
 });
 
+await run('createNewSessionForActiveWorkspace 当前无工作区时创建 no_workspace session', async () => {
+  const calls = [];
+  const api = {
+    createSession: async (opts) => {
+      calls.push(['createSession', opts]);
+      return { id: 's3', no_workspace: true, created_at: '2026-05-08T01:00:00Z' };
+    },
+    createWorkspaceSession: async (hash) => {
+      calls.push(['createWorkspaceSession', hash]);
+      return { session_id: 'wrong' };
+    },
+    listSessions: async () => {
+      calls.push(['listSessions']);
+      return [{ id: 's3', no_workspace: true, created_at: '2026-05-08T01:00:00Z' }];
+    },
+  };
+
+  const ref = await createNewSessionForActiveWorkspace(api, { noWorkspace: true, cwd: 'C:/repo' }, null);
+
+  assert.deepEqual(calls, [
+    ['createSession', { no_workspace: true }],
+    ['listSessions'],
+  ]);
+  assert.equal(ref.sessionId, 's3');
+  assert.equal(ref.noWorkspace, true);
+  assert.equal(ref.workspaceHash, undefined);
+  assert.equal(ref.cwd, '');
+});
+
 await run('sessionRefFromCreateResponse 缺 session id 时抛错', () => {
   assert.throws(
     () => sessionRefFromCreateResponse({ workspace_hash: 'w1' }, {}, null),

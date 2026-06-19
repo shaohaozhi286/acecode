@@ -47,6 +47,7 @@ struct SessionEntry {
     std::string id;
     std::string cwd;
     std::string workspace_hash;
+    bool no_workspace = false;
     std::string provider;
     std::string model;
     SessionModelState model_state;

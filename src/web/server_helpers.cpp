@@ -597,11 +597,17 @@ json WebServer::Impl::session_info_to_json(const SessionInfo& s, const SessionMe
     const std::string model_name =
         !s.model_name.empty() ? s.model_name : (m ? m->model_preset : "");
     const bool model_deleted = s.model_deleted || session_model_deleted(model_name);
+    const bool no_workspace = s.no_workspace || (m && m->no_workspace);
+    const std::string workspace_hash = no_workspace
+        ? std::string{}
+        : (!s.workspace_hash.empty() ? s.workspace_hash : (m ? compute_cwd_hash(m->cwd) : ""));
+    const std::string cwd = no_workspace ? std::string{} : (!s.cwd.empty() ? s.cwd : (m ? m->cwd : ""));
     o["id"]            = s.id;
     o["active"]        = true;
     o["status"]        = s.busy ? "running" : "idle";
-    o["workspace_hash"] = !s.workspace_hash.empty() ? s.workspace_hash : (m ? compute_cwd_hash(m->cwd) : "");
-    o["cwd"]           = !s.cwd.empty() ? s.cwd : (m ? m->cwd : "");
+    o["workspace_hash"] = workspace_hash;
+    o["cwd"]           = cwd;
+    o["no_workspace"]  = no_workspace;
     o["title"]         = !s.title.empty() ? s.title : (m ? m->title : "");
     o["title_source"]  = !s.title_source.empty() ? s.title_source : (m ? m->title_source : "");
     o["summary"]       = !s.summary.empty() ? s.summary : (m ? m->summary : "");
@@ -631,19 +637,21 @@ json WebServer::Impl::session_info_to_json(const SessionInfo& s, const SessionMe
         o["todo_summary"] = todo_summary_to_json(m->todos);
     }
     o["archived"]      = m ? m->archived : false;
-    append_attention_fields(o, s.id, o.value("workspace_hash", std::string{}),
-                            o.value("cwd", std::string{}), s.busy);
+    append_attention_fields(o, s.id, workspace_hash, cwd, s.busy);
     return o;
 }
 
 json WebServer::Impl::session_meta_to_json(const SessionMeta& m, const std::string& workspace_hash) const {
     json o;
     const bool model_deleted = session_model_deleted(m.model_preset);
+    const std::string effective_workspace_hash = m.no_workspace ? std::string{} : workspace_hash;
+    const std::string effective_cwd = m.no_workspace ? std::string{} : m.cwd;
     o["id"]             = m.id;
     o["active"]         = false;
     o["status"]         = "idle";
-    o["workspace_hash"] = workspace_hash;
-    o["cwd"]            = m.cwd;
+    o["workspace_hash"] = effective_workspace_hash;
+    o["cwd"]            = effective_cwd;
+    o["no_workspace"]   = m.no_workspace;
     o["title"]          = m.title;
     o["title_source"]   = m.title_source;
     o["summary"]        = m.summary;
@@ -664,7 +672,7 @@ json WebServer::Impl::session_meta_to_json(const SessionMeta& m, const std::stri
         o["todo_summary"] = todo_summary_to_json(m.todos);
     }
     o["archived"]       = m.archived;
-    append_attention_fields(o, m.id, workspace_hash, m.cwd, false);
+    append_attention_fields(o, m.id, effective_workspace_hash, effective_cwd, false);
     return o;
 }
 
@@ -675,6 +683,11 @@ void WebServer::Impl::append_session_runtime_snapshot(json& wrapper,
     bool have_meta = false;
     if (deps.session_registry) {
         if (auto* entry = deps.session_registry->lookup(session_id)) {
+            if (entry->no_workspace) {
+                wrapper["no_workspace"] = true;
+                wrapper["workspace_hash"] = "";
+                wrapper["cwd"] = "";
+            }
             if (entry->loop) {
                 wrapper["busy"] = entry->loop->is_busy();
             }
@@ -702,6 +715,11 @@ void WebServer::Impl::append_session_runtime_snapshot(json& wrapper,
         have_meta = !meta.id.empty();
     }
     if (have_meta) {
+        if (meta.no_workspace) {
+            wrapper["no_workspace"] = true;
+            wrapper["workspace_hash"] = "";
+            wrapper["cwd"] = "";
+        }
         if (!wrapper.contains("turn_count")) wrapper["turn_count"] = meta.turn_count;
         if (!wrapper.contains("permission_mode")) {
             wrapper["permission_mode"] = meta.permission_mode.empty() ? "default" : meta.permission_mode;
@@ -738,7 +756,8 @@ void WebServer::Impl::append_session_runtime_snapshot(json& wrapper,
 }
 
 json WebServer::Impl::sessions_for_workspace(const acecode::desktop::WorkspaceMeta& ws,
-                                               bool archived_only) const {
+                                               bool archived_only,
+                                               bool include_no_workspace) const {
     std::vector<SessionInfo> active;
     if (deps.session_client) active = deps.session_client->list_sessions();
 
@@ -753,7 +772,11 @@ json WebServer::Impl::sessions_for_workspace(const acecode::desktop::WorkspaceMe
     std::unordered_set<std::string> seen;
     json arr = json::array();
     for (const auto& s : active) {
-        if (s.workspace_hash != ws.hash) continue;
+        if (s.no_workspace) {
+            if (!include_no_workspace) continue;
+        } else if (s.workspace_hash != ws.hash) {
+            continue;
+        }
         seen.insert(s.id);
         auto meta_it = disk_by_id.find(s.id);
         const SessionMeta* m = meta_it == disk_by_id.end() ? nullptr : &meta_it->second;
@@ -764,13 +787,15 @@ json WebServer::Impl::sessions_for_workspace(const acecode::desktop::WorkspaceMe
     for (const auto& m : disk) {
         if (seen.count(m.id)) continue;
         if (m.archived != archived_only) continue;
-        arr.push_back(session_meta_to_json(m, ws.hash));
+        if (m.no_workspace && !include_no_workspace) continue;
+        arr.push_back(session_meta_to_json(m, m.no_workspace ? std::string{} : ws.hash));
     }
     return arr;
 }
 
 bool WebServer::Impl::session_entry_matches_workspace(const SessionEntry& entry,
                                                         const acecode::desktop::WorkspaceMeta& ws) const {
+    if (entry.no_workspace) return false;
     if (!entry.workspace_hash.empty()) return entry.workspace_hash == ws.hash;
     return entry.cwd == ws.cwd;
 }
@@ -806,6 +831,7 @@ std::optional<SessionMeta> WebServer::Impl::find_session_meta_for_workspace(
             meta.provider = entry->provider;
             meta.model = entry->model;
             meta.model_preset = entry->model_state.name;
+            meta.no_workspace = entry->no_workspace;
             if (entry->sm) {
                 meta.title = entry->sm->current_title();
                 meta.title_source = entry->sm->current_title_source();
@@ -1318,6 +1344,11 @@ std::optional<acecode::desktop::WorkspaceMeta> WebServer::Impl::resolve_session_
     if (!session_id.empty() && deps.session_registry) {
         if (auto* entry = deps.session_registry->lookup(session_id)) {
             acecode::desktop::WorkspaceMeta ws;
+            if (entry->no_workspace) {
+                ws.cwd = entry->cwd;
+                ws.name = "";
+                return ws;
+            }
             ws.hash = !entry->workspace_hash.empty() ? entry->workspace_hash : compute_cwd_hash(entry->cwd);
             ws.cwd = entry->cwd;
             ws.name = acecode::desktop::default_workspace_name(entry->cwd);
@@ -1356,7 +1387,7 @@ void WebServer::Impl::note_session_event_for_attention(
     const std::string& workspace_hash,
     const std::string& cwd,
     const SessionEvent& evt) {
-    if (session_id.empty() || workspace_hash.empty()) return;
+    if (session_id.empty()) return;
     json payload;
     bool changed = false;
     {
@@ -1492,6 +1523,13 @@ std::optional<crow::response> WebServer::Impl::parse_session_options(
             opts.initial_user_message = j["initial_user_message"].get<std::string>();
         if (j.contains("auto_start") && j["auto_start"].is_boolean())
             opts.auto_start = j["auto_start"].get<bool>();
+        const bool no_workspace =
+            (j.contains("no_workspace") && j["no_workspace"].is_boolean() && j["no_workspace"].get<bool>()) ||
+            (j.contains("noWorkspace") && j["noWorkspace"].is_boolean() && j["noWorkspace"].get<bool>());
+        if (no_workspace) {
+            opts.no_workspace = true;
+            opts.workspace_hash.clear();
+        }
     } catch (const std::exception& e) {
         crow::response r(400);
         r.body = json{{"error", std::string("bad json: ") + e.what()}}.dump();

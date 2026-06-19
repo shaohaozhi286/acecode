@@ -98,6 +98,7 @@ struct SessionOptions {
     // derived from cwd by the registry.
     std::string cwd;
     std::string workspace_hash;
+    bool no_workspace = false;
 
     // 可选 model override(对应 saved_models.name)。
     // 留空 = 用 daemon 启动时的 default。
@@ -153,6 +154,7 @@ struct SessionInfo {
     TokenUsage  session_token_usage;
     bool        active = false;   // 是否在 SessionRegistry 内存活
     bool        busy = false;     // 是否正在处理当前轮
+    bool        no_workspace = false;
 };
 
 // ----- AskUserQuestion 回应(client→server) -----

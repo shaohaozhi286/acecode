@@ -864,6 +864,48 @@ TEST(SessionRegistry, CreateUsesWorkspaceCwdFromOptions) {
     std::filesystem::remove_all(workspace_cwd);
 }
 
+// 场景:用户选择"不使用工作区"时,session 仍用 daemon cwd 执行/存储,
+// 但对 Web/Sidebar 暴露为空 workspace_hash,避免左侧误高亮某个工作区。
+TEST(SessionRegistry, CreateNoWorkspaceKeepsWorkspaceHashEmpty) {
+    auto daemon_cwd = temp_cwd("daemon_no_workspace");
+    auto project_dir = SessionStorage::get_project_dir(daemon_cwd.string());
+    std::filesystem::remove_all(project_dir);
+
+    ToolExecutor tools;
+    PermissionManager permissions;
+    SessionRegistryDeps deps;
+    deps.provider_accessor = [] { return std::shared_ptr<acecode::LlmProvider>{}; };
+    deps.tools = &tools;
+    deps.cwd = daemon_cwd.string();
+    deps.template_permissions = &permissions;
+    SessionRegistry registry(std::move(deps));
+
+    SessionOptions opts;
+    opts.no_workspace = true;
+    auto id = registry.create(opts);
+    auto* entry = registry.lookup(id);
+    ASSERT_NE(entry, nullptr);
+    EXPECT_EQ(entry->cwd, daemon_cwd.string());
+    EXPECT_TRUE(entry->workspace_hash.empty());
+    EXPECT_TRUE(entry->no_workspace);
+    ASSERT_NE(entry->loop, nullptr);
+    EXPECT_EQ(entry->loop->cwd(), daemon_cwd.string());
+
+    ASSERT_NE(entry->sm, nullptr);
+    EXPECT_EQ(entry->sm->ensure_active_session_id(), id);
+    auto meta = SessionStorage::read_meta(SessionStorage::meta_path(project_dir, id));
+    EXPECT_EQ(meta.id, id);
+    EXPECT_TRUE(meta.no_workspace);
+
+    auto active = registry.list_active();
+    ASSERT_EQ(active.size(), 1u);
+    EXPECT_TRUE(active[0].workspace_hash.empty());
+    EXPECT_TRUE(active[0].no_workspace);
+
+    std::filesystem::remove_all(project_dir);
+    std::filesystem::remove_all(daemon_cwd);
+}
+
 // 场景:共享 daemon 的启动 cwd 没有某个 skill,但目标 workspace 有。
 // 新建 session 后,AgentLoop 使用的 skill index 必须来自 session workspace。
 TEST(SessionRegistry, CreateInitializesWorkspaceScopedSkillRegistry) {

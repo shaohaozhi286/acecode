@@ -25,6 +25,16 @@ test('normalizeSessionListChangedDetail reads session and workspace aliases', ()
   assert.equal(detail.reason, 'fork');
 });
 
+test('normalizeSessionListChangedDetail keeps no-workspace sessions unscoped', () => {
+  const detail = normalizeSessionListChangedDetail({
+    workspace_hash: 'w1',
+    session: { id: 's1', workspace_hash: 'w1', no_workspace: true },
+  });
+  assert.equal(detail.sessionId, 's1');
+  assert.equal(detail.workspaceHash, '');
+  assert.equal(detail.noWorkspace, true);
+});
+
 test('notifySessionListChanged dispatches normalized detail', () => {
   const seen = [];
   const target = {

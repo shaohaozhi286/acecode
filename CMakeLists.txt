@@ -146,13 +146,15 @@ list(REMOVE_ITEM ACECODE_TESTABLE_SOURCES
 set(ACECODE_TUI_SOURCES ${ACECODE_ALL_SOURCES})
 list(FILTER ACECODE_TUI_SOURCES INCLUDE REGEX "/src/(tui|markdown)/")
 
-# desktop 二进制专属(main.cpp / web_host.cpp 用 webview/webview)从 testable
-# 里剔除。desktop/url_builder.cpp 和 desktop/daemon_supervisor.cpp 是纯逻辑或
-# 系统调用,留在 testable 里给 acecode_unit_tests 用。
+# desktop 二进制专属(main.cpp / web_host.cpp 用 webview/webview, acrylic helper
+# 用 WebView2/DComp)从 testable 里剔除。desktop/url_builder.cpp 和
+# desktop/daemon_supervisor.cpp 是纯逻辑或系统调用,留在 testable 里给
+# acecode_unit_tests 用。
 set(ACECODE_DESKTOP_BINARY_ONLY_SOURCES
     ${CMAKE_SOURCE_DIR}/src/desktop/main.cpp
     ${CMAKE_SOURCE_DIR}/src/desktop/splash_screen.cpp
     ${CMAKE_SOURCE_DIR}/src/desktop/web_host.cpp
+    ${CMAKE_SOURCE_DIR}/src/desktop/acrylic_backdrop_win.cpp
 )
 foreach(_f IN LISTS ACECODE_DESKTOP_BINARY_ONLY_SOURCES)
     list(REMOVE_ITEM ACECODE_TESTABLE_SOURCES ${_f})

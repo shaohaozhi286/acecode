@@ -222,7 +222,8 @@ struct WebServer::Impl {
     nlohmann::json session_meta_to_json(const SessionMeta& m, const std::string& workspace_hash) const;
     void append_session_runtime_snapshot(nlohmann::json& wrapper, const std::string& session_id) const;
     nlohmann::json sessions_for_workspace(const acecode::desktop::WorkspaceMeta& ws,
-                                           bool archived_only = false) const;
+                                          bool archived_only = false,
+                                          bool include_no_workspace = false) const;
     bool session_entry_matches_workspace(const SessionEntry& entry,
                                           const acecode::desktop::WorkspaceMeta& ws) const;
     std::optional<SessionMeta> find_session_meta_for_workspace(

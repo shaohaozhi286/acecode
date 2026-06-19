@@ -542,6 +542,57 @@ TEST(WebServerHttp, HooksEndpointListsTrustsDisablesEnablesAndRefreshesProjectHo
     EXPECT_EQ(json::parse(unknown.text)["error"], "HOOK_NOT_FOUND");
 }
 
+TEST(WebServerHttp, HooksEndpointTogglesLegacyConfigEnabledFlag) {
+    auto temp_home = std::filesystem::temp_directory_path() /
+                     ("acecode_hooks_legacy_home_" + std::to_string(std::random_device{}()));
+    RemoveTreeOnExit cleanup{temp_home};
+    ScopedHomeOverride home(temp_home);
+
+    const auto hooks_path = temp_home / ".acecode" / "hooks.json";
+    write_text(hooks_path, R"({
+        "version": 1,
+        "enabled": true,
+        "events": {
+            "startup.before_model_load": [
+                {"id": "legacy-startup", "command": "node", "args": ["hook.js"]}
+            ]
+        }
+    })");
+
+    WebServerFixture fx;
+
+    auto refresh = cpr::Post(cpr::Url{fx.url("/api/hooks/refresh")});
+    ASSERT_EQ(refresh.status_code, 200) << refresh.text;
+    auto body = json::parse(refresh.text);
+    ASSERT_EQ(body["hooks"].size(), 1u);
+    const std::string hook_id = body["hooks"][0]["id"].get<std::string>();
+    const std::string encoded_hook_id = url_encode_component(hook_id);
+    EXPECT_EQ(body["hooks"][0]["legacy_direct"], true);
+    EXPECT_EQ(body["hooks"][0]["trust_status"], "trusted");
+
+    auto disable = cpr::Post(cpr::Url{fx.url("/api/hooks/" + encoded_hook_id + "/disable")});
+    ASSERT_EQ(disable.status_code, 200) << disable.text;
+    body = json::parse(disable.text);
+    ASSERT_EQ(body["hooks"].size(), 1u);
+    EXPECT_EQ(body["hooks"][0]["trust_status"], "disabled");
+    {
+        std::ifstream ifs(hooks_path, std::ios::binary);
+        auto disk = json::parse(ifs);
+        EXPECT_FALSE(disk["enabled"].get<bool>());
+    }
+
+    auto enable = cpr::Post(cpr::Url{fx.url("/api/hooks/" + encoded_hook_id + "/enable")});
+    ASSERT_EQ(enable.status_code, 200) << enable.text;
+    body = json::parse(enable.text);
+    ASSERT_EQ(body["hooks"].size(), 1u);
+    EXPECT_EQ(body["hooks"][0]["trust_status"], "trusted");
+    {
+        std::ifstream ifs(hooks_path, std::ios::binary);
+        auto disk = json::parse(ifs);
+        EXPECT_TRUE(disk["enabled"].get<bool>());
+    }
+}
+
 TEST(WebServerHttp, HooksEndpointRejectsManagedHookDisable) {
     auto temp_home = std::filesystem::temp_directory_path() /
                      ("acecode_hooks_managed_home_" + std::to_string(std::random_device{}()));
@@ -776,6 +827,51 @@ TEST(WebServerHttp, CreateSessionRejectsInvalidExplicitPermissionMode) {
     EXPECT_EQ(created.status_code, 400) << created.text;
     auto body = json::parse(created.text);
     EXPECT_EQ(body["error"], "INVALID_PERMISSION_MODE");
+}
+
+// 场景:首页选择"不使用工作区"创建的 session 要出现在兼容会话列表,
+// 但不能出现在任何 workspace-scoped 会话列表里。
+TEST(WebServerHttp, CreateNoWorkspaceSessionIsListedOutsideWorkspaces) {
+    WebServerFixture fx;
+    const std::string default_hash = acecode::compute_cwd_hash(fx.cwd);
+
+    auto created = cpr::Post(cpr::Url{fx.url("/api/sessions")},
+                             cpr::Header{{"Content-Type", "application/json"}},
+                             cpr::Body{R"({"no_workspace":true})"});
+    ASSERT_EQ(created.status_code, 201) << created.text;
+    auto body = json::parse(created.text);
+    const auto sid = body["session_id"].get<std::string>();
+    EXPECT_EQ(body["workspace_hash"], "");
+    EXPECT_EQ(body["cwd"], "");
+    EXPECT_EQ(body["no_workspace"], true);
+
+    auto* entry = fx.registry->lookup(sid);
+    ASSERT_NE(entry, nullptr);
+    EXPECT_TRUE(entry->no_workspace);
+    EXPECT_TRUE(entry->workspace_hash.empty());
+    ASSERT_NE(entry->sm, nullptr);
+    EXPECT_EQ(entry->sm->ensure_active_session_id(), sid);
+    auto meta = acecode::SessionStorage::read_meta(
+        acecode::SessionStorage::meta_path(fx.project_dir, sid));
+    EXPECT_TRUE(meta.no_workspace);
+
+    auto compat_list = cpr::Get(cpr::Url{fx.url("/api/sessions")});
+    ASSERT_EQ(compat_list.status_code, 200) << compat_list.text;
+    auto compat = json::parse(compat_list.text);
+    auto compat_it = std::find_if(compat.begin(), compat.end(), [&](const auto& item) {
+        return item.value("id", std::string{}) == sid;
+    });
+    ASSERT_NE(compat_it, compat.end());
+    EXPECT_EQ((*compat_it)["workspace_hash"], "");
+    EXPECT_EQ((*compat_it)["cwd"], "");
+    EXPECT_EQ((*compat_it)["no_workspace"], true);
+
+    auto workspace_list = cpr::Get(cpr::Url{fx.url("/api/workspaces/" + default_hash + "/sessions")});
+    ASSERT_EQ(workspace_list.status_code, 200) << workspace_list.text;
+    auto scoped = json::parse(workspace_list.text);
+    EXPECT_TRUE(std::none_of(scoped.begin(), scoped.end(), [&](const auto& item) {
+        return item.value("id", std::string{}) == sid;
+    }));
 }
 
 // 场景:daemon 运行期间 TUI/其它进程改写 config.json 的默认模型和默认

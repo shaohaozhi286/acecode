@@ -45,6 +45,16 @@ import { findStickyUserContext, sameStickyUserContext, scrollTopForStickySourceR
 import { useSessionTranscript } from '../lib/sessionTranscript.js';
 import { projectCollapsedTranscriptItems } from '../lib/transcriptProjection.js';
 import { usePreference } from '../lib/usePreference.js';
+import {
+  DEFAULT_HOME_WORKSPACE_SELECTION,
+  HOME_WORKSPACE_SELECTION_STORAGE_KEY,
+  homeWorkspaceOptionForHash,
+  noHomeWorkspaceOption,
+  readDesktopHomeWorkspaceHash,
+  resolveHomeWorkspaceHash,
+  validateHomeWorkspaceSelection,
+  writeDesktopHomeWorkspaceHash,
+} from '../lib/homeWorkspaceSelection.js';
 import { maybeNotify } from '../lib/desktopNotify.js';
 import { normalizeTokenBudget } from '../lib/tokenBudget.js';
 import { pickModelLoad } from '../lib/modelLoad.js';
@@ -434,6 +444,11 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   const [history,  setHistory]  = useState([]);
   const [homeWorkspaces, setHomeWorkspaces] = useState([]);
   const [homeWorkspaceHash, setHomeWorkspaceHash] = useState('');
+  const [homeWorkspaceSelection, setHomeWorkspaceSelection] = usePreference(
+    HOME_WORKSPACE_SELECTION_STORAGE_KEY,
+    DEFAULT_HOME_WORKSPACE_SELECTION,
+    validateHomeWorkspaceSelection,
+  );
   const [homeSubmitting, setHomeSubmitting] = useState(false);
   const [projectDropdownOpen, setProjectDropdownOpen] = useState(false);
   const [modelOptions, setModelOptions] = useState([]);
@@ -526,11 +541,16 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   const stickyRafRef = useRef(0);
   const [stickyUserContext, setStickyUserContext] = useState(null);
 
+  const homeWorkspacePreferenceHash = homeWorkspaceSelection?.workspaceHash || '';
+  const persistHomeWorkspaceHash = useCallback((hash = '') => {
+    const workspaceHash = String(hash || '');
+    setHomeWorkspaceSelection({ workspaceHash });
+    writeDesktopHomeWorkspaceHash(workspaceHash).catch(() => {});
+  }, [setHomeWorkspaceSelection]);
+
   const selectedHomeWorkspace = useMemo(() => {
-    return homeWorkspaces.find((w) => w.hash === homeWorkspaceHash)
-      || homeWorkspaces[0]
-      || fallbackWorkspaceOption(ref, health);
-  }, [health, homeWorkspaceHash, homeWorkspaces, ref]);
+    return homeWorkspaceOptionForHash(homeWorkspaces, homeWorkspaceHash);
+  }, [homeWorkspaceHash, homeWorkspaces]);
 
   const commandWorkspaceHash = useMemo(() => commandWorkspaceHashForInput({
     activeRef: ref,
@@ -572,10 +592,14 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     if (homeSubmitting) return null;
     const target = selectedHomeWorkspace || fallbackWorkspaceOption(ref, health);
     const targetHash = target?.hash || '';
-    const options = withCreateSessionPreferences(
+    const targetNoWorkspace = !!target?.noWorkspace;
+    const baseOptions = withCreateSessionPreferences(
       createOptions || sessionCreateOptionsForText(text),
       { modelName: homeModelName, permissionMode },
     );
+    const options = targetNoWorkspace
+      ? { ...baseOptions, no_workspace: true, noWorkspace: true }
+      : baseOptions;
     const create = isRealWorkspaceHash(targetHash)
       ? api.createWorkspaceSession(targetHash, options)
       : api.createSession(options);
@@ -585,11 +609,16 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
       const id = r && (r.session_id || r.id);
       if (!id) throw new Error('missing session id');
       const next = newSessionRefFrom(ref, id);
-      if (r.workspace_hash || isRealWorkspaceHash(targetHash)) {
+      if (targetNoWorkspace) {
+        next.noWorkspace = true;
+        next.workspaceHash = '';
+        next.workspaceName = '';
+        next.cwd = '';
+      } else if (r.workspace_hash || isRealWorkspaceHash(targetHash)) {
         next.workspaceHash = r.workspace_hash || targetHash;
+        next.workspaceName = target?.name || ref?.workspaceName;
+        next.cwd = r.cwd || target?.cwd || ref?.cwd;
       }
-      next.workspaceName = target?.name || ref?.workspaceName;
-      next.cwd = r.cwd || target?.cwd || ref?.cwd;
       next.title = title || text;
       if (preserveExtras) preserveComposerExtrasOnSessionChangeRef.current = true;
       onSessionPromoted?.(next);
@@ -1223,10 +1252,24 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   }, [sid, scheduleStickyMeasure]);
 
   useEffect(() => {
+    if (sid || !ref?.homeWorkspaceExplicit) return;
+    persistHomeWorkspaceHash(ref?.workspaceHash || '');
+  }, [persistHomeWorkspaceHash, ref?.homeWorkspaceExplicit, ref?.workspaceHash, sid]);
+
+  useEffect(() => {
     if (sid) return undefined;
     let cancelled = false;
 
     const load = async () => {
+      let preferredHash = homeWorkspacePreferenceHash;
+      const desktopHash = await readDesktopHomeWorkspaceHash();
+      if (desktopHash !== null) {
+        preferredHash = desktopHash;
+        if (desktopHash !== homeWorkspacePreferenceHash) {
+          setHomeWorkspaceSelection({ workspaceHash: desktopHash });
+        }
+      }
+
       let options = [];
       try {
         const list = await api.listWorkspaces();
@@ -1257,15 +1300,19 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
       if (cancelled) return;
       setHomeWorkspaces(options);
       setHomeWorkspaceHash((prev) => {
-        if (ref?.workspaceHash && options.some((w) => w.hash === ref.workspaceHash)) return ref.workspaceHash;
-        if (prev && options.some((w) => w.hash === prev)) return prev;
-        return options.find((w) => w.active)?.hash || options[0]?.hash || '';
+        const explicitHash = ref?.homeWorkspaceExplicit ? (ref?.workspaceHash || '') : '';
+        return resolveHomeWorkspaceHash({
+          preferredHash,
+          explicitHash,
+          previousHash: prev,
+          options,
+        });
       });
     };
 
     load();
     return () => { cancelled = true; };
-  }, [api, health, ref, sid]);
+  }, [api, health, homeWorkspacePreferenceHash, ref, setHomeWorkspaceSelection, sid]);
 
   // 拉 history(per-cwd)
   useEffect(() => {
@@ -1692,8 +1739,9 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         toast({ kind: 'err', text: '分叉失败:无 session_id' });
         return;
       }
-      const workspaceHash = r.workspace_hash || ref?.workspaceHash || '';
-      const cwd = r.cwd || ref?.cwd || '';
+      const noWorkspace = !!(ref?.noWorkspace || r?.no_workspace || r?.noWorkspace);
+      const workspaceHash = noWorkspace ? '' : (r.workspace_hash || ref?.workspaceHash || '');
+      const cwd = noWorkspace ? '' : (r.cwd || ref?.cwd || '');
       const now = new Date().toISOString();
       const forkedSession = {
         ...r,
@@ -1702,6 +1750,8 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         status: 'idle',
         attention_state: 'read',
         read_state: 'read',
+        no_workspace: noWorkspace,
+        noWorkspace,
         workspace_hash: workspaceHash,
         cwd,
         title: r.title,
@@ -1713,11 +1763,13 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         title: r.title,
         workspaceHash,
         cwd,
+        noWorkspace,
       });
       notifySessionListChanged({
         reason: 'fork',
         sessionId: r.session_id,
         workspaceHash,
+        noWorkspace,
         session: forkedSession,
       });
       toast({ kind: 'ok', text: '已分叉到 ' + (r.title || r.session_id) });
@@ -1956,11 +2008,15 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     requestAnimationFrame(() => inputRef.current?.focus());
   }, [onQuestionResolve]);
 
-  const sidePanelCwd = ref?.cwd || health?.cwd || '';
+  const sidePanelFilesEnabled = !(ref?.noWorkspace || ref?.no_workspace);
+  const sidePanelCwd = sidePanelFilesEnabled ? (ref?.cwd || health?.cwd || '') : '';
   const sidePanelMounted = showSidePanel && !!sid;
   const previewScope = useMemo(
-    () => previewScopeKey({ cwd: sidePanelCwd, workspaceHash: ref?.workspaceHash || '' }),
-    [ref?.workspaceHash, sidePanelCwd],
+    () => previewScopeKey({
+      cwd: sidePanelCwd,
+      workspaceHash: sidePanelFilesEnabled ? (ref?.workspaceHash || '') : '',
+    }),
+    [ref?.workspaceHash, sidePanelCwd, sidePanelFilesEnabled],
   );
   const previewContext = useMemo(
     () => ({ scopeKey: previewScope, sessionId: sid }),
@@ -2017,14 +2073,14 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   }, [onPreviewPanelVisibleChange, previewPanelVisible]);
 
   const openFilePreview = useCallback((path) => {
-    if (!sid || !previewScope || !path) return;
+    if (!sidePanelFilesEnabled || !sid || !previewScope || !path) return;
     setPreviewTabState((prev) => openFileTab(prev, {
       scopeKey: previewScope,
       sessionId: sid,
       cwd: sidePanelCwd,
       path,
     }));
-  }, [previewScope, sid, sidePanelCwd]);
+  }, [previewScope, sid, sidePanelCwd, sidePanelFilesEnabled]);
 
   const openSessionChangePreview = useCallback((filePath) => {
     if (!sid || !filePath) return;
@@ -2093,6 +2149,12 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   // 空态:没选会话
   if (!sid) {
     const homeProjectName = selectedHomeWorkspace?.name || '当前项目';
+    const homeProjectTitle = selectedHomeWorkspace?.noWorkspace
+      ? '我们该做什么？'
+      : `我们该在 ${homeProjectName} 中做什么？`;
+    const homeProjectLabel = homeWorkspaces.find(w => w.hash === homeWorkspaceHash)?.name
+      || selectedHomeWorkspace?.name
+      || '当前项目';
     const homeHints = [
       { icon: 'edit', title: '编辑代码', desc: '让 Agent 帮你重构、修 bug、加测试' },
       { icon: 'searchSparkle', title: '探索代码库', desc: '问“这个函数在哪里被调用”' },
@@ -2107,7 +2169,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         <div className="ace-home-panel flex-1">
           <div className="ace-home-content">
             <img src="/acecode-logo.png" alt="ACECode" width="64" height="64" className="ace-home-logo select-none" draggable="false" />
-            <h1 className="ace-home-title">我们该在 {homeProjectName} 中做什么？</h1>
+            <h1 className="ace-home-title">{homeProjectTitle}</h1>
             <InputBar
               ref={inputRef}
               variant="hero"
@@ -2127,7 +2189,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
                 <VsIcon name="folder" size={15} />
                 <span className="text-fg-mute">项目</span>
                 <span className="ace-home-project-select truncate">
-                  {homeWorkspaces.find(w => w.hash === homeWorkspaceHash)?.name || selectedHomeWorkspace?.name || '当前项目'}
+                  {homeProjectLabel}
                 </span>
                 <VsIcon name="expandDown" size={14} className="opacity-50 group-hover:opacity-100 transition-opacity -ml-[2px]" />
                 {homeSubmitting && <span className="ace-spinner w-3 h-3 ml-1" />}
@@ -2153,6 +2215,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
                         )}
                         onClick={() => {
                           setHomeWorkspaceHash(w.hash);
+                          persistHomeWorkspaceHash(w.hash);
                           setProjectDropdownOpen(false);
                         }}
                       >
@@ -2162,6 +2225,21 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
                         </div>
                       </button>
                     ))}
+                    <div className="my-1 border-t border-border/50" aria-hidden="true" />
+                    <button
+                      type="button"
+                      className={clsx(
+                        "w-full text-left px-3 py-2 text-[13px] transition-colors",
+                        !homeWorkspaceHash ? "bg-accent/10 text-accent font-medium" : "text-fg hover:bg-surface-hi"
+                      )}
+                      onClick={() => {
+                        setHomeWorkspaceHash('');
+                        persistHomeWorkspaceHash('');
+                        setProjectDropdownOpen(false);
+                      }}
+                    >
+                      <div className="truncate leading-tight">{noHomeWorkspaceOption().name}</div>
+                    </button>
                   </div>
                 </>
               )}
@@ -2599,6 +2677,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
               changeSummary={changeSummary}
               fileRefreshKey={fileTreeRefreshKey}
               reviewRequest={reviewRequest}
+              filesEnabled={sidePanelFilesEnabled}
               width={sidePanelWidth}
               collapsed={sidePanelCollapsed}
               onToggleCollapse={onToggleSidePanel}

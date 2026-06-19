@@ -59,6 +59,9 @@ std::optional<HookCommandSpec> resolve_hook_command(const HookDefinition& hook,
 HookConfig parse_hook_config_json(const nlohmann::json& j, std::string* error = nullptr);
 HookConfig load_hook_config_from_path(const std::string& path, std::string* error = nullptr);
 HookConfig load_hook_config(std::string* error = nullptr);
+bool set_hook_config_enabled_in_path(const std::string& path,
+                                     bool enabled,
+                                     std::string* error = nullptr);
 
 std::string default_hook_config_path();
 

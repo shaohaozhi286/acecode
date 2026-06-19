@@ -1,6 +1,7 @@
 #include "hook_config.hpp"
 
 #include "../config/config.hpp"
+#include "../utils/atomic_file.hpp"
 #include "../utils/encoding.hpp"
 #include "../utils/utf8_path.hpp"
 
@@ -205,6 +206,50 @@ std::string default_hook_config_path() {
 
 HookConfig load_hook_config(std::string* error) {
     return load_hook_config_from_path(default_hook_config_path(), error);
+}
+
+bool set_hook_config_enabled_in_path(const std::string& path,
+                                     bool enabled,
+                                     std::string* error) {
+    if (error) error->clear();
+    if (path.empty()) {
+        if (error) *error = "hooks config path is empty";
+        return false;
+    }
+
+    fs::path native = path_from_utf8(path);
+    std::error_code ec;
+    if (!fs::is_regular_file(native, ec)) {
+        if (error) *error = "hooks config not found: " + path;
+        return false;
+    }
+
+    nlohmann::json j;
+    {
+        std::ifstream ifs(native, std::ios::binary);
+        if (!ifs.is_open()) {
+            if (error) *error = "failed to open hooks config: " + path;
+            return false;
+        }
+        try {
+            j = nlohmann::json::parse(ifs);
+        } catch (const std::exception& e) {
+            if (error) *error = std::string("failed to parse hooks config: ") + e.what();
+            return false;
+        }
+    }
+
+    if (!j.is_object()) {
+        if (error) *error = "hooks config root must be an object";
+        return false;
+    }
+
+    j["enabled"] = enabled;
+    if (!atomic_write_file(path, j.dump(2))) {
+        if (error) *error = "failed to write hooks config: " + path;
+        return false;
+    }
+    return true;
 }
 
 } // namespace acecode

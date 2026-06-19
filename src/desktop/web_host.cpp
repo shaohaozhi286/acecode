@@ -1,5 +1,13 @@
 #include "web_host.hpp"
 
+#ifdef _WIN32
+#  include "acrylic_backdrop_win.hpp"
+
+#  ifndef ACECODE_DESKTOP_ACRYLIC_DEBUG_HOST_FILL
+#    define ACECODE_DESKTOP_ACRYLIC_DEBUG_HOST_FILL 0
+#  endif
+#endif
+
 #include "web_host_close_policy.hpp"
 #include "webview2_runtime_probe.hpp"
 #include "window_chrome.hpp"
@@ -440,6 +448,7 @@ void install_mac_file_drop(webview::webview& w) {
 namespace {
 
 constexpr wchar_t kHostWindowClassName[] = L"ACECodeDesktopHostWindow";
+constexpr wchar_t kHostWindowPreviousProcProperty[] = L"ACECodeDesktopHostPreviousProc";
 constexpr int kFramelessDragHeightDip = 44;
 
 // WM_USER 区私有消息:绕过 close_request_handler 直接走 DestroyWindow。
@@ -460,6 +469,17 @@ bool g_last_known_maximized = false;
 UINT focus_existing_instance_msg() {
     static UINT id = ::RegisterWindowMessageW(L"ACECode_FocusExistingInstance_v1");
     return id;
+}
+
+WNDPROC previous_host_window_proc(HWND hwnd) {
+    return reinterpret_cast<WNDPROC>(::GetPropW(hwnd, kHostWindowPreviousProcProperty));
+}
+
+LRESULT call_host_default_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    if (WNDPROC previous = previous_host_window_proc(hwnd)) {
+        return ::CallWindowProcW(previous, hwnd, msg, wparam, lparam);
+    }
+    return ::DefWindowProcW(hwnd, msg, wparam, lparam);
 }
 
 int dpi_scale(int value, UINT dpi) {
@@ -699,6 +719,11 @@ LRESULT frameless_hit_test(HWND hwnd, LPARAM lparam) {
 LRESULT frameless_nc_calc(HWND hwnd, WPARAM wparam, LPARAM lparam) {
     if (!wparam || !lparam) return ::DefWindowProcW(hwnd, WM_NCCALCSIZE, wparam, lparam);
 
+    LONG_PTR style = ::GetWindowLongPtrW(hwnd, GWL_STYLE);
+    if ((style & WS_THICKFRAME) == 0) {
+        return 0;
+    }
+
     const UINT dpi = ::GetDpiForWindow(hwnd);
     const int frame_x = ::GetSystemMetricsForDpi(SM_CXFRAME, dpi);
     const int frame_y = ::GetSystemMetricsForDpi(SM_CYFRAME, dpi);
@@ -716,7 +741,32 @@ LRESULT frameless_nc_calc(HWND hwnd, WPARAM wparam, LPARAM lparam) {
 }
 
 LRESULT CALLBACK host_window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    handle_desktop_sidebar_acrylic_message(hwnd, msg, wparam, lparam);
     switch (msg) {
+#if ACECODE_DESKTOP_ACRYLIC_DEBUG_HOST_FILL
+        case WM_ERASEBKGND: {
+            HDC dc = reinterpret_cast<HDC>(wparam);
+            RECT client{};
+            if (dc && ::GetClientRect(hwnd, &client)) {
+                HBRUSH brush = ::CreateSolidBrush(RGB(0, 180, 255));
+                ::FillRect(dc, &client, brush);
+                ::DeleteObject(brush);
+            }
+            return 1;
+        }
+        case WM_PAINT: {
+            PAINTSTRUCT ps{};
+            HDC dc = ::BeginPaint(hwnd, &ps);
+            RECT client{};
+            if (dc && ::GetClientRect(hwnd, &client)) {
+                HBRUSH brush = ::CreateSolidBrush(RGB(0, 180, 255));
+                ::FillRect(dc, &client, brush);
+                ::DeleteObject(brush);
+            }
+            ::EndPaint(hwnd, &ps);
+            return 0;
+        }
+#endif
         case WM_GETMINMAXINFO:
             apply_minimum_track_size(hwnd, reinterpret_cast<MINMAXINFO*>(lparam));
             return 0;
@@ -733,8 +783,11 @@ LRESULT CALLBACK host_window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpa
                     g_window_state_handler(maximized);
                 }
             }
-            break;
+            return call_host_default_proc(hwnd, msg, wparam, lparam);
         case WM_DPICHANGED:
+            if (previous_host_window_proc(hwnd)) {
+                ::CallWindowProcW(previous_host_window_proc(hwnd), hwnd, msg, wparam, lparam);
+            }
             if (lparam) {
                 const auto* suggested = reinterpret_cast<const RECT*>(lparam);
                 ::SetWindowPos(hwnd,
@@ -753,11 +806,24 @@ LRESULT CALLBACK host_window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpa
             if (dispatch_wm_close(g_close_handler) == CloseDispatch::ConsumedByHandler) {
                 return 0;
             }
+            if (previous_host_window_proc(hwnd)) {
+                return ::CallWindowProcW(previous_host_window_proc(hwnd), hwnd, msg, wparam, lparam);
+            }
             ::DestroyWindow(hwnd);
             return 0;
         case WM_DESTROY:
+            if (previous_host_window_proc(hwnd)) {
+                LRESULT result = ::CallWindowProcW(previous_host_window_proc(hwnd), hwnd, msg, wparam, lparam);
+                ::PostQuitMessage(0);
+                return result;
+            }
             ::PostQuitMessage(0);
             return 0;
+        case WM_NCDESTROY: {
+            LRESULT result = call_host_default_proc(hwnd, msg, wparam, lparam);
+            ::RemovePropW(hwnd, kHostWindowPreviousProcProperty);
+            return result;
+        }
         default:
             if (msg == kRequestQuitMsg) {
                 // 来自 WebHost::request_quit 的真正退出信号 — 绕过 close handler。
@@ -778,7 +844,23 @@ LRESULT CALLBACK host_window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpa
             }
             break;
     }
-    return ::DefWindowProcW(hwnd, msg, wparam, lparam);
+    return call_host_default_proc(hwnd, msg, wparam, lparam);
+}
+
+void install_host_window_proc(HWND hwnd) {
+    if (!hwnd || !::IsWindow(hwnd) || previous_host_window_proc(hwnd)) return;
+    ::SetLastError(ERROR_SUCCESS);
+    LONG_PTR previous = ::SetWindowLongPtrW(
+        hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(host_window_proc));
+    if (previous == 0 && ::GetLastError() != ERROR_SUCCESS) {
+        LOG_WARN("[desktop] failed to subclass webview-owned host window, last_error=" +
+                 std::to_string(::GetLastError()));
+        return;
+    }
+    ::SetPropW(hwnd,
+               kHostWindowPreviousProcProperty,
+               reinterpret_cast<HANDLE>(previous));
+    refresh_non_client_frame(hwnd);
 }
 
 bool register_host_window_class(HINSTANCE instance) {
@@ -803,7 +885,7 @@ HWND create_offscreen_host_window(RECT& target_monitor) {
         WS_EX_APPWINDOW,
         kHostWindowClassName,
         L"ACECode",
-        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+        WS_OVERLAPPEDWINDOW,
         x,
         y,
         kDefaultDesktopWindowWidth,
@@ -821,6 +903,25 @@ HWND create_offscreen_host_window(RECT& target_monitor) {
         ::UpdateWindow(hwnd);
     }
     return hwnd;
+}
+
+void park_window_offscreen(HWND hwnd, RECT& target_monitor) {
+    if (!hwnd || !::IsWindow(hwnd)) return;
+    target_monitor = active_monitor_work_rect();
+    RECT rect{};
+    if (!::GetWindowRect(hwnd, &rect)) {
+        rect.right = rect.left + kDefaultDesktopWindowWidth;
+        rect.bottom = rect.top + kDefaultDesktopWindowHeight;
+    }
+    const int width = std::max(1L, rect.right - rect.left);
+    const int height = std::max(1L, rect.bottom - rect.top);
+    ::SetWindowPos(hwnd,
+                   nullptr,
+                   target_monitor.right + 10000,
+                   target_monitor.bottom + 10000,
+                   width,
+                   height,
+                   SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
 void center_window_on_monitor(HWND hwnd, const RECT& monitor) {
@@ -1206,10 +1307,15 @@ struct WebHost::Impl {
     explicit Impl(bool debug, StartupWindowMode startup_mode)
 #ifdef _WIN32
         : custom_window(startup_mode == StartupWindowMode::OffscreenUntilReady
+                            && !desktop_sidebar_acrylic_prefers_webview_owned_window()
                             ? create_offscreen_host_window(target_monitor)
                             : nullptr),
           offscreen_until_ready(custom_window != nullptr),
           com(custom_window != nullptr) {
+        if (!::SetEnvironmentVariableW(L"WEBVIEW2_DEFAULT_BACKGROUND_COLOR", L"00FFFFFF")) {
+            LOG_WARN("[desktop] SetEnvironmentVariableW(WEBVIEW2_DEFAULT_BACKGROUND_COLOR) failed, last_error=" +
+                     std::to_string(::GetLastError()));
+        }
         // 三段式构造:
         //   (1) 默认 Loader 路径,优先 offscreen custom_window;失败 → 切
         //       自管 nullptr 父窗口再试一次(沿用现有降级)。
@@ -1275,6 +1381,14 @@ struct WebHost::Impl {
         }
         if (custom_window) {
             resize_webview_widget(custom_window);
+        } else if (w) {
+            HWND owned_window = hwnd();
+            install_host_window_proc(owned_window);
+            if (startup_mode == StartupWindowMode::OffscreenUntilReady &&
+                desktop_sidebar_acrylic_prefers_webview_owned_window()) {
+                park_window_offscreen(owned_window, target_monitor);
+                offscreen_until_ready = true;
+            }
         }
         if (w) {
             configure_browser_defaults(*w);
@@ -1322,6 +1436,8 @@ struct WebHost::Impl {
     RECT target_monitor{};
     HWND custom_window = nullptr;
     bool offscreen_until_ready = false;
+    bool sidebar_acrylic_requested = false;
+    DesktopAcrylicStatus acrylic_status{};
     ComApartment com{false};
 
     HWND hwnd() const {
@@ -1329,6 +1445,22 @@ struct WebHost::Impl {
         if (!w) return nullptr;
         auto r = w->window();
         return r.ok() ? static_cast<HWND>(r.value()) : nullptr;
+    }
+
+    bool apply_sidebar_acrylic() {
+        HWND host_hwnd = hwnd();
+        auto controller_result = w->browser_controller();
+        std::string error;
+        if (!controller_result.ok() ||
+            !set_webview_default_background_transparent(controller_result.value(), &error)) {
+            if (error.empty()) error = "browser controller unavailable";
+            LOG_WARN("[desktop] sidebar acrylic disabled: " + error);
+            acrylic_status = DesktopAcrylicStatus{};
+            return false;
+        }
+
+        acrylic_status = enable_desktop_sidebar_acrylic(host_hwnd);
+        return acrylic_status.enabled;
     }
 #endif
     std::unique_ptr<webview::webview> w;
@@ -1377,6 +1509,9 @@ void WebHost::set_visible(bool visible) {
     }
     ::ShowWindow(hwnd, visible ? SW_SHOW : SW_HIDE);
     if (visible) {
+        if (impl_->sidebar_acrylic_requested) {
+            (void)impl_->apply_sidebar_acrylic();
+        }
         ::UpdateWindow(hwnd);
         ::SetForegroundWindow(hwnd);
     }
@@ -1583,6 +1718,22 @@ bool WebHost::is_window_maximized() const {
 WebHost::WebCoreInfo WebHost::web_core_info() const {
     (void)impl_;
     return detect_platform_web_core_info();
+}
+bool WebHost::enable_sidebar_acrylic() {
+#ifdef _WIN32
+    impl_->sidebar_acrylic_requested = true;
+    return impl_->apply_sidebar_acrylic();
+#else
+    return false;
+#endif
+}
+bool WebHost::refresh_sidebar_acrylic() {
+#ifdef _WIN32
+    if (!impl_->sidebar_acrylic_requested) return false;
+    return impl_->apply_sidebar_acrylic();
+#else
+    return false;
+#endif
 }
 void WebHost::set_window_state_change_handler(WindowStateHandler handler) {
 #ifdef _WIN32

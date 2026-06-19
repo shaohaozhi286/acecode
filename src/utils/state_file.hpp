@@ -55,4 +55,9 @@ void clear_web_search_region_cache();
 std::string read_last_active_workspace_hash();
 void write_last_active_workspace_hash(const std::string& hash);
 
+// desktop home page: 首页新建会话选择器上次选中的 workspace cwd_hash。
+// 空字符串是有效值,表示"不使用工作区"。
+std::string read_last_home_workspace_hash();
+void write_last_home_workspace_hash(const std::string& hash);
+
 } // namespace acecode

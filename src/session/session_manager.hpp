@@ -22,7 +22,8 @@ public:
                        const std::string& model,
                        const std::string& preset_session_id = "",
                        const std::string& model_preset = "",
-                       const std::string& surface = "tui");
+                       const std::string& surface = "tui",
+                       bool no_workspace = false);
 
     // Called for each message produced during conversation.
     // Appends to JSONL and periodically updates metadata.
@@ -180,6 +181,7 @@ private:
     std::string model_name_;
     std::string model_preset_;
     std::string surface_ = "tui";
+    bool no_workspace_ = false;
     std::string project_dir_;
     std::string session_id_;
     std::string jsonl_path_;

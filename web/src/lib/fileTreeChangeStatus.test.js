@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {
   buildReviewStatusMap,
   entriesWithReviewRows,
+  normalizeTreePath,
   reviewStatusForGroup,
   statusForTreeEntry,
 } from './fileTreeChangeStatus.js';
@@ -51,6 +52,11 @@ run('statusForTreeEntry: 文件 exact match,目录聚合子级状态', () => {
 
   assert.equal(statusForTreeEntry({ path: 'src', kind: 'dir' }, statuses), 'M');
   assert.equal(statusForTreeEntry({ path: 'src/new.txt', kind: 'file' }, statuses), 'U');
+});
+
+run('normalizeTreePath: 定位路径与文件树路径使用同一形态', () => {
+  assert.equal(normalizeTreePath('.\\src\\deep\\main.cpp'), 'src/deep/main.cpp');
+  assert.equal(normalizeTreePath('./src//deep/main.cpp/'), 'src/deep/main.cpp');
 });
 
 run('entriesWithReviewRows: 审查里有但文件列表未返回的直接子项会补行', () => {

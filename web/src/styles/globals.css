@@ -54,8 +54,8 @@
   --ace-fg-rgb:       26, 26, 26;
   --ace-fg-2:         #6b6b6b;
   --ace-fg-2-rgb:     107, 107, 107;
-  --ace-fg-mute:      #999999;
-  --ace-fg-mute-rgb:  153, 153, 153;
+  --ace-fg-mute:      #606060;
+  --ace-fg-mute-rgb:  96, 96, 96;
   --ace-accent:       #2563eb;
   --ace-accent-rgb:   37, 99, 235;
   --ace-accent-bg:    #eff6ff;
@@ -91,12 +91,12 @@
   --ace-border:       #333333;
   --ace-border-rgb:   51, 51, 51;
   --ace-border-soft:  #2a2a2a;
-  --ace-fg:           #e4e4e4;
-  --ace-fg-rgb:       228, 228, 228;
+  --ace-fg:           #bfbfbf;
+  --ace-fg-rgb:       191, 191, 191;
   --ace-fg-2:         #999999;
   --ace-fg-2-rgb:     153, 153, 153;
-  --ace-fg-mute:      #666666;
-  --ace-fg-mute-rgb:  102, 102, 102;
+  --ace-fg-mute:      #8c8c8c;
+  --ace-fg-mute-rgb:  140, 140, 140;
   --ace-accent:       #3b82f6;
   --ace-accent-rgb:   59, 130, 246;
   --ace-accent-bg:    #172554;
@@ -140,6 +140,13 @@ body {
   font-size: 14px;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+}
+
+html.ace-desktop-shell-acrylic-root,
+html.ace-desktop-shell-acrylic-root body,
+html.ace-desktop-shell-acrylic-root #root {
+  background: transparent !important;
+  background-color: transparent !important;
 }
 
 /* ── Custom thin scrollbar ── */
@@ -232,8 +239,8 @@ body {
 .border-danger\/40 { border-color: rgba(var(--ace-danger-rgb), 0.40); }
 .border-warn\/50 { border-color: rgba(var(--ace-warn-rgb), 0.50); }
 .text-accent\/60 { color: rgba(var(--ace-accent-rgb), 0.60); }
-.text-fg-mute\/70 { color: rgba(var(--ace-fg-mute-rgb), 0.70); }
-.text-fg-mute\/80 { color: rgba(var(--ace-fg-mute-rgb), 0.80); }
+.text-fg-mute\/70 { color: var(--ace-fg-mute); }
+.text-fg-mute\/80 { color: var(--ace-fg-mute); }
 .focus-within\:ring-accent\/15:focus-within { --tw-ring-color: rgba(var(--ace-accent-rgb), 0.15); }
 .focus-within\:ring-accent\/20:focus-within { --tw-ring-color: rgba(var(--ace-accent-rgb), 0.20); }
 .focus\:ring-accent\/20:focus { --tw-ring-color: rgba(var(--ace-accent-rgb), 0.20); }
@@ -408,6 +415,242 @@ body {
 }
 .ace-sidebar-session-row {
   position: relative;
+}
+.ace-desktop-shell-acrylic .ace-single-shell {
+  background: transparent !important;
+  background-color: transparent !important;
+}
+.ace-desktop-shell-acrylic .ace-sidebar {
+  background: rgba(var(--ace-sidebar-acrylic-tint-rgb, var(--ace-surface-alt-rgb)), var(--ace-sidebar-acrylic-tint-alpha, 0)) !important;
+  background-color: rgba(var(--ace-sidebar-acrylic-tint-rgb, var(--ace-surface-alt-rgb)), var(--ace-sidebar-acrylic-tint-alpha, 0)) !important;
+  border-right-color: rgba(var(--ace-border-rgb), 0.56) !important;
+}
+html.ace-desktop-shell-acrylic-colorkey .ace-desktop-shell-acrylic .ace-sidebar {
+  background: rgb(1, 2, 3) !important;
+  background-color: rgb(1, 2, 3) !important;
+}
+html:not(.ace-desktop-shell-acrylic-colorkey)[data-theme="dark"] .ace-desktop-shell-acrylic .ace-sidebar {
+  background: rgba(var(--ace-sidebar-acrylic-tint-rgb, var(--ace-surface-alt-rgb)), var(--ace-sidebar-acrylic-tint-alpha, 0.34)) !important;
+  background-color: rgba(var(--ace-sidebar-acrylic-tint-rgb, var(--ace-surface-alt-rgb)), var(--ace-sidebar-acrylic-tint-alpha, 0.34)) !important;
+  border-right-color: rgba(var(--ace-border-rgb), 0.64) !important;
+}
+.ace-desktop-shell-acrylic .ace-sidebar .ace-sidebar-content,
+.ace-desktop-shell-acrylic .ace-sidebar .ace-sidebar-main,
+.ace-desktop-shell-acrylic .ace-sidebar .ace-sidebar-heading,
+.ace-desktop-shell-acrylic .ace-sidebar .ace-sidebar-scroll,
+.ace-desktop-shell-acrylic .ace-sidebar .ace-sidebar-custom-section,
+.ace-desktop-shell-acrylic .ace-sidebar .ace-sidebar-custom-list {
+  background: transparent !important;
+}
+.ace-desktop-shell-acrylic .ace-sidebar [data-desktop-workspace-id]:hover,
+.ace-desktop-shell-acrylic .ace-sidebar .ace-sidebar-session-row:hover,
+.ace-desktop-shell-acrylic .ace-sidebar .ace-sidebar-workspace-action:hover,
+.ace-desktop-shell-acrylic .ace-sidebar .ace-session-pin-btn:hover,
+.ace-desktop-shell-acrylic .ace-sidebar .hover\:bg-surface-hi:hover {
+  background: rgba(var(--ace-surface-hi-rgb), var(--ace-sidebar-acrylic-hover-alpha, 0.46)) !important;
+}
+.ace-desktop-shell-acrylic .ace-sidebar .hover\:bg-danger-bg:hover {
+  background: rgba(var(--ace-danger-rgb), 0.10) !important;
+}
+.ace-desktop-shell-acrylic .ace-sidebar [data-desktop-workspace-active="true"],
+.ace-desktop-shell-acrylic .ace-sidebar .ace-sidebar-session-row.text-accent {
+  background: rgba(var(--ace-accent-rgb), var(--ace-sidebar-acrylic-active-alpha, 0.12)) !important;
+}
+.ace-desktop-shell-acrylic .ace-sidebar .border-border {
+  border-color: rgba(var(--ace-border-rgb), 0.52) !important;
+}
+
+html[data-theme] .ace-desktop-shell-acrylic.ace-desktop-shell-maximized {
+  background: var(--ace-bg) !important;
+  background-color: var(--ace-bg) !important;
+}
+html[data-theme] .ace-desktop-shell-acrylic.ace-desktop-shell-maximized .ace-single-shell {
+  background: var(--ace-bg) !important;
+  background-color: var(--ace-bg) !important;
+}
+html[data-theme] .ace-desktop-shell-acrylic.ace-desktop-shell-maximized .ace-sidebar {
+  background: var(--ace-surface-alt) !important;
+  background-color: var(--ace-surface-alt) !important;
+  border-right-color: var(--ace-border) !important;
+}
+html[data-theme] .ace-desktop-shell-acrylic.ace-desktop-shell-maximized .ace-sidebar [data-desktop-workspace-id]:hover,
+html[data-theme] .ace-desktop-shell-acrylic.ace-desktop-shell-maximized .ace-sidebar .ace-sidebar-session-row:hover,
+html[data-theme] .ace-desktop-shell-acrylic.ace-desktop-shell-maximized .ace-sidebar .ace-sidebar-workspace-action:hover,
+html[data-theme] .ace-desktop-shell-acrylic.ace-desktop-shell-maximized .ace-sidebar .ace-session-pin-btn:hover,
+html[data-theme] .ace-desktop-shell-acrylic.ace-desktop-shell-maximized .ace-sidebar .hover\:bg-surface-hi:hover {
+  background: var(--ace-surface-hi) !important;
+}
+html[data-theme] .ace-desktop-shell-acrylic.ace-desktop-shell-maximized .ace-sidebar .hover\:bg-danger-bg:hover {
+  background: var(--ace-danger-bg) !important;
+}
+html[data-theme] .ace-desktop-shell-acrylic.ace-desktop-shell-maximized .ace-sidebar [data-desktop-workspace-active="true"],
+html[data-theme] .ace-desktop-shell-acrylic.ace-desktop-shell-maximized .ace-sidebar .ace-sidebar-session-row.text-accent {
+  background: var(--ace-accent-bg) !important;
+}
+html[data-theme] .ace-desktop-shell-acrylic.ace-desktop-shell-maximized .ace-sidebar .border-border {
+  border-color: var(--ace-border) !important;
+}
+
+.ace-acrylic-settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 58px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--ace-border);
+}
+.ace-acrylic-settings-title {
+  color: var(--ace-fg);
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1.25;
+}
+.ace-acrylic-settings-subtitle {
+  margin-top: 2px;
+  color: var(--ace-fg-mute);
+  font-size: 12px;
+  line-height: 1.3;
+}
+.ace-acrylic-settings-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ace-fg-2);
+  cursor: default;
+}
+.ace-acrylic-settings-icon-btn:hover,
+.ace-acrylic-settings-icon-btn:focus-visible {
+  outline: none;
+  background: var(--ace-surface-hi);
+  color: var(--ace-fg);
+}
+.ace-acrylic-settings-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  gap: 14px;
+  overflow: auto;
+  padding: 14px;
+}
+.ace-acrylic-settings-row {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-height: 34px;
+}
+.ace-acrylic-settings-label {
+  color: var(--ace-fg-2);
+  font-size: 12px;
+}
+.ace-acrylic-settings-control,
+.ace-acrylic-settings-color-control {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+.ace-acrylic-settings-control {
+  gap: 8px;
+}
+.ace-acrylic-settings-color-control {
+  gap: 9px;
+}
+.ace-acrylic-settings-range {
+  min-width: 0;
+  flex: 1;
+  accent-color: var(--ace-accent);
+}
+.ace-acrylic-settings-number {
+  width: 52px;
+  height: 28px;
+  padding: 0 6px;
+  border: 1px solid var(--ace-border);
+  border-radius: 6px;
+  background: var(--ace-bg);
+  color: var(--ace-fg);
+  font: inherit;
+  text-align: right;
+}
+.ace-acrylic-settings-number:focus,
+.ace-acrylic-settings-hex:focus {
+  outline: none;
+  border-color: rgba(var(--ace-accent-rgb), 0.55);
+  box-shadow: 0 0 0 2px rgba(var(--ace-accent-rgb), 0.12);
+}
+.ace-acrylic-settings-percent {
+  width: 14px;
+  color: var(--ace-fg-mute);
+  font-size: 12px;
+}
+.ace-acrylic-settings-color {
+  width: 34px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--ace-border);
+  border-radius: 6px;
+  background: transparent;
+}
+.ace-acrylic-settings-hex {
+  min-width: 0;
+  flex: 1;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--ace-border);
+  border-radius: 6px;
+  background: var(--ace-bg);
+  color: var(--ace-fg);
+  font: inherit;
+}
+.ace-acrylic-settings-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 78px;
+  padding: 8px;
+  border: 1px solid var(--ace-border);
+  border-radius: 8px;
+}
+.ace-acrylic-settings-preview-row {
+  display: flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 9px;
+  border-radius: 6px;
+  color: var(--ace-fg);
+  font-size: 12px;
+}
+.ace-acrylic-settings-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 2px;
+}
+.ace-acrylic-settings-btn {
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--ace-border);
+  border-radius: 7px;
+  background: var(--ace-surface);
+  color: var(--ace-fg);
+  font: inherit;
+  cursor: default;
+}
+.ace-acrylic-settings-btn:hover,
+.ace-acrylic-settings-btn:focus-visible {
+  outline: none;
+  background: var(--ace-surface-hi);
+}
+.ace-acrylic-settings-btn-primary {
+  border-color: rgba(var(--ace-accent-rgb), 0.45);
+  background: var(--ace-accent-soft);
+  color: var(--ace-accent);
 }
 .ace-sidebar-pinned-session-row {
   cursor: grab;
@@ -2236,6 +2479,13 @@ body {
 .ace-file-row[data-review-status="D"] {
   color: var(--ace-danger);
   font-weight: 700;
+}
+.ace-file-row[data-desktop-file-selected="true"] {
+  background: rgba(var(--ace-accent-rgb), 0.16);
+  box-shadow: inset 2px 0 0 var(--ace-accent);
+}
+.ace-file-row[data-desktop-file-selected="true"]:not([data-review-status]) {
+  color: var(--ace-accent);
 }
 .ace-file-name {
   flex: 1 1 auto;

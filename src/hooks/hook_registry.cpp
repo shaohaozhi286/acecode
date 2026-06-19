@@ -482,12 +482,12 @@ HookRegistrySnapshot parse_legacy_hooks_json_source(const nlohmann::json& root,
         snapshot.diagnostics.push_back(std::move(d));
         return snapshot;
     }
-    if (!cfg.enabled) {
+    const bool config_enabled = cfg.enabled;
+    if (!config_enabled) {
         auto d = diag(HookDiagnosticSeverity::Info, "LEGACY_DISABLED",
                       "legacy ACECode hooks are disabled by config", source);
         snapshot.sources.back().diagnostics.push_back(d);
         snapshot.diagnostics.push_back(std::move(d));
-        return snapshot;
     }
 
     for (const auto& [event_name, hooks] : cfg.events) {
@@ -510,8 +510,10 @@ HookRegistrySnapshot parse_legacy_hooks_json_source(const nlohmann::json& root,
             hook.id = hook_id_from_config_or_fallback(
                 source, legacy.id, event_name, 1, handler_index);
             finalize_hook(hook);
-            if (source_is_auto_trusted_legacy_user(hook,
-                                                   auto_trust_user_legacy_hooks)) {
+            if (!config_enabled) {
+                hook.trust_status = HookTrustStatus::Disabled;
+            } else if (source_is_auto_trusted_legacy_user(
+                           hook, auto_trust_user_legacy_hooks)) {
                 hook.trust_status = HookTrustStatus::Trusted;
             }
             snapshot.hooks.push_back(std::move(hook));
@@ -689,6 +691,9 @@ void apply_hook_trust_state(HookRegistrySnapshot& snapshot,
         }
         if (hook.managed) {
             hook.trust_status = HookTrustStatus::ManagedTrusted;
+            continue;
+        }
+        if (hook.legacy_direct && hook.trust_status == HookTrustStatus::Disabled) {
             continue;
         }
         if (hook_is_disabled(store, hook)) {

@@ -215,6 +215,8 @@ void WebServer::Impl::register_workspaces() {
             }
             SessionOptions opts;
             if (auto err = parse_session_options(req, *ws, opts)) return std::move(*err);
+            opts.no_workspace = false;
+            opts.workspace_hash = ws->hash;
             refresh_default_session_preferences_for_new_session();
             auto id = deps.session_client->create_session(opts);
             LOG_INFO("[web] workspace session created hash=" + ws->hash + " id=" + id);
@@ -250,6 +252,13 @@ void WebServer::Impl::register_workspaces() {
             opts.cwd = ws->cwd;
             opts.workspace_hash = ws->hash;
             auto project_dir = SessionStorage::get_project_dir(ws->cwd);
+            auto meta = SessionStorage::read_meta(SessionStorage::meta_path(project_dir, id));
+            if (meta.no_workspace) {
+                crow::response r(404);
+                r.body = R"({"error":"session not found"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
             if (auto lease = SessionWriterLease::read(project_dir, id)) {
                 const bool other_pid = lease->pid != 0 && lease->pid != daemon::current_pid();
                 const auto age_ms = SessionWriterLease::now_ms() - lease->updated_at_ms;

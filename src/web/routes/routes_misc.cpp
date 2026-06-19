@@ -140,17 +140,38 @@ void WebServer::Impl::register_hooks() {
                 LOG_WARN("[hooks] " + error);
             }
 
+            const bool legacy_config_toggle =
+                (action == "disable" || action == "enable") &&
+                hook->legacy_direct &&
+                hook->source_format == acecode::HookSourceFormat::AceCodeLegacyJson &&
+                !hook->source_path.empty();
+
             if (action == "trust") {
                 acecode::trust_hook_definition(store, *hook);
             } else if (action == "disable") {
-                acecode::set_hook_disabled(store, *hook, true);
+                if (legacy_config_toggle) {
+                    if (!acecode::set_hook_config_enabled_in_path(
+                            hook->source_path, false, &error)) {
+                        return json_err(req, 500, "HOOK_CONFIG_SAVE_FAILED", error);
+                    }
+                } else {
+                    acecode::set_hook_disabled(store, *hook, true);
+                }
             } else if (action == "enable") {
                 acecode::set_hook_disabled(store, *hook, false);
             }
 
-            if (!acecode::save_hook_trust_store_to_path(
-                    store, acecode::default_hook_trust_state_path(), &error)) {
-                return json_err(req, 500, "HOOK_STATE_SAVE_FAILED", error);
+            if (!legacy_config_toggle || action == "enable") {
+                if (!acecode::save_hook_trust_store_to_path(
+                        store, acecode::default_hook_trust_state_path(), &error)) {
+                    return json_err(req, 500, "HOOK_STATE_SAVE_FAILED", error);
+                }
+            }
+
+            if (legacy_config_toggle && action == "enable" &&
+                !acecode::set_hook_config_enabled_in_path(
+                    hook->source_path, true, &error)) {
+                return json_err(req, 500, "HOOK_CONFIG_SAVE_FAILED", error);
             }
 
             auto reloaded = reload_snapshot(store);

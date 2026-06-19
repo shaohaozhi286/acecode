@@ -124,3 +124,24 @@ TEST_F(StateFileTest, LastActiveWrongTypeReadsEmpty) {
     write_raw(path_, R"({"last_active_workspace_hash": 12345})");
     EXPECT_EQ(acecode::read_last_active_workspace_hash(), "");
 }
+
+// 场景:首页 workspace 选择器跨 desktop 启动保存上次选择。
+// 空字符串是有效选择,表示"不使用工作区"。
+TEST_F(StateFileTest, LastHomeWorkspaceHashRoundTripAllowsEmpty) {
+    EXPECT_EQ(acecode::read_last_home_workspace_hash(), "");
+    acecode::write_last_home_workspace_hash("abc1234567890def");
+    EXPECT_EQ(acecode::read_last_home_workspace_hash(), "abc1234567890def");
+
+    acecode::write_last_home_workspace_hash("");
+    EXPECT_EQ(acecode::read_last_home_workspace_hash(), "");
+
+    acecode::write_state_flag("some_flag", true);
+    EXPECT_EQ(acecode::read_last_home_workspace_hash(), "");
+    EXPECT_TRUE(acecode::read_state_flag("some_flag"));
+}
+
+// 场景:last_home_workspace_hash 字段类型不对 → read 返回空字符串而不是抛。
+TEST_F(StateFileTest, LastHomeWorkspaceWrongTypeReadsEmpty) {
+    write_raw(path_, R"({"last_home_workspace_hash": 12345})");
+    EXPECT_EQ(acecode::read_last_home_workspace_hash(), "");
+}

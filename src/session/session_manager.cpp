@@ -186,7 +186,8 @@ void SessionManager::start_session(const std::string& cwd,
                                    const std::string& model,
                                    const std::string& preset_session_id,
                                    const std::string& model_preset,
-                                   const std::string& surface) {
+                                   const std::string& surface,
+                                   bool no_workspace) {
     std::lock_guard<std::mutex> lk(mu_);
     release_writer_lease_locked();
     cwd_ = cwd;
@@ -194,6 +195,7 @@ void SessionManager::start_session(const std::string& cwd,
     model_name_ = model;
     model_preset_ = model_preset;
     surface_ = surface.empty() ? "unknown" : surface;
+    no_workspace_ = no_workspace;
     project_dir_ = SessionStorage::get_project_dir(cwd);
     goal_store_ = std::make_unique<ThreadGoalStore>(project_dir_);
     session_id_ = preset_session_id;
@@ -271,6 +273,7 @@ bool SessionManager::ensure_created() {
     meta.session_token_usage = session_token_usage_;
     meta.todos = todos_;
     meta.archived = archived_;
+    meta.no_workspace = no_workspace_;
     SessionStorage::write_meta(meta_path_str_, meta);
     return true;
 }
@@ -458,6 +461,7 @@ std::vector<ChatMessage> SessionManager::resume_session(const std::string& sessi
         session_token_usage_ = meta.session_token_usage;
         todos_ = meta.todos;
         archived_ = meta.archived;
+        no_workspace_ = meta.no_workspace;
         if (model_preset_.empty()) {
             model_preset_ = meta.model_preset;
         }
@@ -729,6 +733,7 @@ std::string SessionManager::fork_session_to_new_id(
     meta.pre_plan_permission_mode = pre_plan_permission_mode_;
     meta.forked_from     = forked_from_id;
     meta.fork_message_id = fork_message_id;
+    meta.no_workspace    = no_workspace_;
     SessionStorage::write_meta(new_meta, meta);
     if (goal_store_ && !forked_from_id.empty()) {
         std::string goal_error;
@@ -866,6 +871,7 @@ void SessionManager::update_meta() {
     meta.session_token_usage = session_token_usage_;
     meta.todos = todos_;
     meta.archived = archived_;
+    meta.no_workspace = no_workspace_;
     SessionStorage::write_meta(meta_path_str_, meta);
     refresh_writer_lease_locked();
 }
@@ -958,6 +964,7 @@ void SessionManager::set_input_draft(std::string draft) {
         meta.session_token_usage = session_token_usage_;
         meta.todos = todos_;
         meta.archived = archived_;
+        meta.no_workspace = no_workspace_;
     }
     meta.input_draft = input_draft_;
     SessionStorage::write_meta(meta_path_str_, meta);

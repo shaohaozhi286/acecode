@@ -19,6 +19,10 @@ add_executable(${PROJECT_NAME} WIN32 MACOSX_BUNDLE src/main.cpp)
 # handles all the platform-specific linking (Edge/WebView2, WebKit, GTK)
 target_link_libraries(${PROJECT_NAME} PRIVATE webview::core_static)
 
+if(WIN32)
+    target_link_libraries(${PROJECT_NAME} PRIVATE dwmapi)
+endif()
+
 if(MSVC)
     # Treat our source as UTF-8 (we have Chinese comments).
     target_compile_options(${PROJECT_NAME} PRIVATE /utf-8)

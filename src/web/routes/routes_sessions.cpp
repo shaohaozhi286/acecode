@@ -68,7 +68,10 @@ void WebServer::Impl::register_sessions() {
         ([this](const crow::request& req) {
             if (auto rej = require_auth(req)) return std::move(*rej);
             LOG_INFO("[web] compatibility /api/sessions list for cwd=" + deps.cwd);
-            auto arr = sessions_for_workspace(compatibility_workspace(), archived_query_requested(req));
+            auto arr = sessions_for_workspace(
+                compatibility_workspace(),
+                archived_query_requested(req),
+                /*include_no_workspace=*/true);
             crow::response r(arr.dump());
             r.add_header("Content-Type", "application/json");
             return with_cors(req, std::move(r));
@@ -93,7 +96,13 @@ void WebServer::Impl::register_sessions() {
             auto id = deps.session_client->create_session(opts);
             LOG_INFO("[web] compatibility /api/sessions create id=" + id + " cwd=" + ws.cwd);
             crow::response r(201);
-            r.body = json{{"session_id", id}, {"id", id}, {"workspace_hash", ws.hash}, {"cwd", ws.cwd}}.dump();
+            r.body = json{
+                {"session_id", id},
+                {"id", id},
+                {"workspace_hash", opts.no_workspace ? std::string{} : ws.hash},
+                {"cwd", opts.no_workspace ? std::string{} : ws.cwd},
+                {"no_workspace", opts.no_workspace}
+            }.dump();
             r.add_header("Content-Type", "application/json");
             return with_cors(req, std::move(r));
         });
@@ -113,6 +122,11 @@ void WebServer::Impl::register_sessions() {
             opts.cwd = ws.cwd;
             opts.workspace_hash = ws.hash;
             auto project_dir = SessionStorage::get_project_dir(ws.cwd);
+            auto meta = SessionStorage::read_meta(SessionStorage::meta_path(project_dir, id));
+            if (meta.no_workspace) {
+                opts.no_workspace = true;
+                opts.workspace_hash.clear();
+            }
             if (auto lease = SessionWriterLease::read(project_dir, id)) {
                 const bool other_pid = lease->pid != 0 && lease->pid != daemon::current_pid();
                 const auto age_ms = SessionWriterLease::now_ms() - lease->updated_at_ms;
@@ -146,7 +160,14 @@ void WebServer::Impl::register_sessions() {
                 return with_cors(req, std::move(r));
             }
             crow::response r(200);
-            r.body = json{{"session_id", id}, {"id", id}, {"active", true}, {"workspace_hash", ws.hash}, {"cwd", ws.cwd}}.dump();
+            r.body = json{
+                {"session_id", id},
+                {"id", id},
+                {"active", true},
+                {"workspace_hash", opts.no_workspace ? std::string{} : ws.hash},
+                {"cwd", opts.no_workspace ? std::string{} : ws.cwd},
+                {"no_workspace", opts.no_workspace}
+            }.dump();
             r.add_header("Content-Type", "application/json");
             return with_cors(req, std::move(r));
         });
@@ -835,7 +856,8 @@ void WebServer::Impl::register_sessions() {
             // resume 不会自动启动 turn,符合 spec "不自动启动 turn"。
             SessionOptions resume_opts;
             resume_opts.cwd = entry->cwd;
-            resume_opts.workspace_hash = entry->workspace_hash;
+            resume_opts.no_workspace = entry->no_workspace;
+            resume_opts.workspace_hash = entry->no_workspace ? std::string{} : entry->workspace_hash;
             if (!deps.session_registry->resume(new_id, resume_opts)) {
                 LOG_WARN("[web] fork: new session " + new_id +
                          " written to disk but registry resume failed");
@@ -846,8 +868,9 @@ void WebServer::Impl::register_sessions() {
             resp["title"]           = title;
             resp["forked_from"]     = id;
             resp["fork_message_id"] = at_message_id;
-            resp["workspace_hash"]   = entry->workspace_hash;
-            resp["cwd"]              = entry->cwd;
+            resp["workspace_hash"]   = entry->no_workspace ? std::string{} : entry->workspace_hash;
+            resp["cwd"]              = entry->no_workspace ? std::string{} : entry->cwd;
+            resp["no_workspace"]     = entry->no_workspace;
             crow::response r(resp.dump());
             r.add_header("Content-Type", "application/json");
             return with_cors(req, std::move(r));

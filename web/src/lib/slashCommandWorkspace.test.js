@@ -31,6 +31,15 @@ run('无 session 且选择器尚未加载时回退 activeRef workspace', () => {
   assert.equal(hash, 'ws-active');
 });
 
+run('无 session 且显式选择不使用工作区时不回退 activeRef workspace', () => {
+  const hash = commandWorkspaceHashForInput({
+    activeRef: { workspaceHash: 'ws-active' },
+    selectedHomeWorkspace: { hash: '', noWorkspace: true },
+    hasSession: false,
+  });
+  assert.equal(hash, '');
+});
+
 run('有 session 时锁定会话 workspace,避免被首页选择器旧状态污染', () => {
   const hash = commandWorkspaceHashForInput({
     activeRef: { workspaceHash: 'ws-session' },

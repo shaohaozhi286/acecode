@@ -37,6 +37,11 @@ struct SessionMeta {
 
     // Sidebar archive state. Missing field in legacy metadata is false.
     bool archived = false;
+
+    // Session was intentionally created outside the workspace list. It still
+    // has a cwd for tool execution/storage, but UI should not bind it to a
+    // workspace.
+    bool no_workspace = false;
 };
 
 class SessionStorage {

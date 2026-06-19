@@ -18,12 +18,14 @@ export function sessionRefFromCreateResponse(response, fallbackRef = {}, health 
   }
 
   const workspaceHash = r.workspace_hash || pickWorkspaceHash(fallback);
+  const noWorkspace = !!(r.no_workspace || r.noWorkspace || fallback.no_workspace || fallback.noWorkspace);
   const next = {
     sessionId,
     contextId: r.context_id || fallback.contextId || 'default',
-    cwd: r.cwd || fallback.cwd || health?.cwd || '',
+    cwd: noWorkspace ? '' : (r.cwd || fallback.cwd || health?.cwd || ''),
   };
-  if (workspaceHash) next.workspaceHash = workspaceHash;
+  if (noWorkspace) next.noWorkspace = true;
+  else if (workspaceHash) next.workspaceHash = workspaceHash;
   if (r.title || fallback.title) next.title = r.title || fallback.title;
   if (r.summary || fallback.summary) next.summary = r.summary || fallback.summary;
   if (r.message_count != null) next.message_count = r.message_count;
@@ -69,10 +71,11 @@ export async function createNewSessionForActiveWorkspace(apiClient, activeRef = 
     throw new Error('api client unavailable');
   }
 
-  const workspaceHash = pickWorkspaceHash(activeRef);
+  const noWorkspace = !!(activeRef?.noWorkspace || activeRef?.no_workspace);
+  const workspaceHash = noWorkspace ? '' : pickWorkspaceHash(activeRef);
   const response = isRealWorkspaceHash(workspaceHash)
     ? await apiClient.createWorkspaceSession(workspaceHash, {})
-    : await apiClient.createSession({});
+    : await apiClient.createSession(noWorkspace ? { no_workspace: true } : {});
   const ref = sessionRefFromCreateResponse(response, activeRef, health);
   try {
     const displayTitle = await resolveDisplayTitle(apiClient, ref);
