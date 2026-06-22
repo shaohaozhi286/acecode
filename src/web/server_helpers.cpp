@@ -160,6 +160,10 @@ json ace_browser_bridge_settings_to_json(const AceBrowserBridgeConfig& cfg) {
     return out;
 }
 
+json custom_instructions_to_json(const CustomInstructionsConfig& cfg) {
+    return json{{"text", cfg.text_snapshot()}};
+}
+
 bool has_non_whitespace(const std::string& value) {
     return std::any_of(value.begin(), value.end(), [](unsigned char c) {
         return !std::isspace(c);
@@ -586,6 +590,7 @@ bool WebServer::Impl::session_model_deleted(const std::string& model_name) const
     if (model_name.empty() || model_name.rfind("(session:", 0) == 0 || !deps.app_config) {
         return false;
     }
+    std::lock_guard<std::mutex> config_lock(app_config_mu);
     for (const auto& entry : deps.app_config->saved_models) {
         if (entry.name == model_name) return false;
     }
@@ -682,7 +687,7 @@ void WebServer::Impl::append_session_runtime_snapshot(json& wrapper,
     SessionMeta meta;
     bool have_meta = false;
     if (deps.session_registry) {
-        if (auto* entry = deps.session_registry->lookup(session_id)) {
+        if (auto entry = deps.session_registry->acquire(session_id)) {
             if (entry->no_workspace) {
                 wrapper["no_workspace"] = true;
                 wrapper["workspace_hash"] = "";
@@ -737,7 +742,7 @@ void WebServer::Impl::append_session_runtime_snapshot(json& wrapper,
     }
 
     if (!deps.session_registry) return;
-    auto* entry = deps.session_registry->lookup(session_id);
+    auto entry = deps.session_registry->acquire(session_id);
     if (!entry) return;
 
     if (entry->sm) {
@@ -820,7 +825,7 @@ std::optional<SessionMeta> WebServer::Impl::find_session_meta_for_workspace(
     }
 
     if (deps.session_registry) {
-        if (auto* entry = deps.session_registry->lookup(id)) {
+        if (auto entry = deps.session_registry->acquire(id)) {
             if (!session_entry_matches_workspace(*entry, ws)) return std::nullopt;
             const auto now = SessionStorage::now_iso8601();
             SessionMeta meta;
@@ -867,7 +872,7 @@ crow::response WebServer::Impl::set_session_archive_state(
         const auto reread = find_session_meta_for_workspace(ws, id);
         if (reread.has_value()) meta = *reread;
     } else if (!archived && deps.session_registry) {
-        if (auto* entry = deps.session_registry->lookup(id)) {
+        if (auto entry = deps.session_registry->acquire(id)) {
             if (session_entry_matches_workspace(*entry, ws) && entry->sm) {
                 entry->sm->set_session_archived(false);
                 const auto reread = find_session_meta_for_workspace(ws, id);
@@ -931,11 +936,11 @@ std::optional<crow::response> WebServer::Impl::parse_session_input_draft_request
     }
 }
 
-SessionEntry* WebServer::Impl::active_session_entry_for_workspace(
+std::shared_ptr<SessionEntry> WebServer::Impl::active_session_entry_for_workspace(
     const acecode::desktop::WorkspaceMeta& ws,
     const std::string& id) const {
     if (!deps.session_registry) return nullptr;
-    auto* entry = deps.session_registry->lookup(id);
+    auto entry = deps.session_registry->acquire(id);
     if (!entry || !session_entry_matches_workspace(*entry, ws)) return nullptr;
     return entry;
 }
@@ -993,7 +998,7 @@ crow::response WebServer::Impl::set_session_title_response(
     std::string title;
     if (auto err = parse_session_title_request(req, title)) return std::move(*err);
 
-    if (auto* entry = active_session_entry_for_workspace(ws, id)) {
+    if (auto entry = active_session_entry_for_workspace(ws, id)) {
         if (entry->sm) {
             entry->sm->ensure_active_session_id();
             entry->sm->set_session_title(title);
@@ -1052,7 +1057,7 @@ crow::response WebServer::Impl::get_session_input_draft(
     const crow::request& req,
     const acecode::desktop::WorkspaceMeta& ws,
     const std::string& id) {
-    if (auto* entry = active_session_entry_for_workspace(ws, id)) {
+    if (auto entry = active_session_entry_for_workspace(ws, id)) {
         const std::string text = entry->sm ? entry->sm->current_input_draft() : std::string{};
         return session_input_draft_response(req, id, text);
     }
@@ -1074,7 +1079,7 @@ crow::response WebServer::Impl::set_session_input_draft(
     std::string text;
     if (auto err = parse_session_input_draft_request(req, text)) return std::move(*err);
 
-    if (auto* entry = active_session_entry_for_workspace(ws, id)) {
+    if (auto entry = active_session_entry_for_workspace(ws, id)) {
         if (entry->sm) {
             entry->sm->set_input_draft(text);
             return session_input_draft_response(req, id, entry->sm->current_input_draft());
@@ -1100,7 +1105,7 @@ crow::response WebServer::Impl::clear_session_todos(
     const crow::request& req,
     const acecode::desktop::WorkspaceMeta& ws,
     const std::string& id) {
-    if (auto* entry = active_session_entry_for_workspace(ws, id)) {
+    if (auto entry = active_session_entry_for_workspace(ws, id)) {
         if (entry->sm) {
             entry->sm->set_todos({});
             return session_todos_response(req, ws, id, entry->sm->current_todos());
@@ -1342,7 +1347,7 @@ std::optional<acecode::desktop::WorkspaceMeta> WebServer::Impl::resolve_session_
     const std::string& session_id,
     const std::string& workspace_hash_hint) const {
     if (!session_id.empty() && deps.session_registry) {
-        if (auto* entry = deps.session_registry->lookup(session_id)) {
+        if (auto entry = deps.session_registry->acquire(session_id)) {
             acecode::desktop::WorkspaceMeta ws;
             if (entry->no_workspace) {
                 ws.cwd = entry->cwd;
@@ -1422,7 +1427,7 @@ json WebServer::Impl::mark_session_read_status(
     bool changed = false;
     bool current_busy = false;
     if (deps.session_registry) {
-        if (auto* entry = deps.session_registry->lookup(session_id)) {
+        if (auto entry = deps.session_registry->acquire(session_id)) {
             current_busy = entry->loop && entry->loop->is_busy();
         }
     }
@@ -1475,6 +1480,11 @@ void WebServer::Impl::send_status_snapshot(crow::websocket::connection& conn,
 // =====================================================================
 
 void WebServer::Impl::refresh_default_session_preferences_for_new_session() {
+    std::lock_guard<std::mutex> config_lock(app_config_mu);
+    refresh_default_session_preferences_for_new_session_locked();
+}
+
+void WebServer::Impl::refresh_default_session_preferences_for_new_session_locked() {
     if (!deps.app_config) return;
     std::string err;
     if (!refresh_default_session_preferences_from_config(

@@ -10,6 +10,7 @@ namespace acecode {
 class SkillRegistry;
 class MemoryRegistry;
 struct ProjectInstructionsConfig;
+struct CustomInstructionsConfig;
 struct MemoryConfig;
 struct SkillMetadata;
 
@@ -47,6 +48,8 @@ PromptContextBlock build_project_instructions_context_prompt(
 PromptContextBlock build_user_memory_context_prompt(
     const MemoryRegistry* memory,
     const MemoryConfig* cfg);
+PromptContextBlock build_custom_instructions_context_prompt(
+    const CustomInstructionsConfig* cfg);
 
 // Skill index injection (openspec/changes/inject-skill-index-into-context):
 // push a compact name+description index into the per-request session context
@@ -78,7 +81,8 @@ PromptContextBlock build_session_context_prompt(
     const MemoryConfig* memory_cfg,
     const ProjectInstructionsConfig* project_instructions_cfg,
     const SkillRegistry* skills = nullptr,
-    int context_window_tokens = 0);
+    int context_window_tokens = 0,
+    const CustomInstructionsConfig* custom_instructions_cfg = nullptr);
 
 // Build dynamic request-local context. This is sent near the end of the
 // messages array for the current provider call only; it must not be persisted

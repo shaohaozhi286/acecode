@@ -502,6 +502,41 @@ TEST(AgentLoopToolLifecycleEvents, PermissionDenialStillEmitsTerminalToolEnd) {
     fs::remove_all(cwd);
 }
 
+TEST(AgentLoopToolLifecycleEvents, PermissionAllowRestoresToolRunningProgress) {
+    auto cwd = make_temp_dir("acecode_lifecycle_permission_allow_progress");
+    std::atomic<int> calls{0};
+    ToolLifecycleHarness h(cwd.string(), PermissionMode::Default, PermissionResult::Allow);
+    h.tools().register_tool(make_probe_tool("write_probe", false, &calls));
+
+    ScriptedResponse tools_turn;
+    tools_turn.tool_calls.push_back({"call-allow", "write_probe", "{}"});
+    h.provider().push_response(std::move(tools_turn));
+    h.provider().push_text("done");
+
+    ASSERT_TRUE(h.submit_and_wait());
+    EXPECT_EQ(calls.load(), 1);
+    EXPECT_EQ(h.confirm_count().load(), 1);
+
+    auto progresses = h.events_of(SessionEventKind::AgentProgress);
+    bool saw_waiting = false;
+    bool saw_running_after_waiting = false;
+    for (const auto& event : progresses) {
+        if (event.payload.value("tool_call_id", std::string{}) != "call-allow") continue;
+        const std::string phase = event.payload.value("phase", std::string{});
+        if (phase == "permission_waiting") {
+            saw_waiting = true;
+        } else if (saw_waiting && phase == "tool_running") {
+            saw_running_after_waiting = true;
+            EXPECT_EQ(event.payload.value("label", std::string{}), "正在调用工具 write_probe");
+            break;
+        }
+    }
+    EXPECT_TRUE(saw_waiting);
+    EXPECT_TRUE(saw_running_after_waiting);
+
+    fs::remove_all(cwd);
+}
+
 TEST(AgentLoopToolLifecycleEvents, ShellWriteAfterSafeEditFailureIsBlocked) {
     auto cwd = make_temp_dir("acecode_shell_guard");
     auto target = cwd / "target.txt";

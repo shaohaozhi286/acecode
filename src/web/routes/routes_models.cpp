@@ -44,6 +44,7 @@ void WebServer::Impl::register_models() {
         ([this](const crow::request& req) {
             if (auto rej = require_auth(req)) return std::move(*rej);
             if (!deps.app_config) return crow::response(503);
+            std::lock_guard<std::mutex> config_lock(app_config_mu);
             auto arr = list_models(*deps.app_config);
             crow::response r(arr.dump());
             r.add_header("Content-Type", "application/json");
@@ -56,7 +57,8 @@ void WebServer::Impl::register_models() {
         ([this](const crow::request& req) {
             if (auto rej = require_auth(req)) return std::move(*rej);
             if (!deps.app_config) return crow::response(503);
-            refresh_default_session_preferences_for_new_session();
+            std::lock_guard<std::mutex> config_lock(app_config_mu);
+            refresh_default_session_preferences_for_new_session_locked();
             crow::response r(200);
             r.add_header("Content-Type", "application/json");
             r.body = json{{"name", deps.app_config->default_model_name}}.dump();
@@ -218,7 +220,7 @@ void WebServer::Impl::register_models() {
             if (!deps.session_registry) return crow::response(503);
 
             // 校验 session 存在
-            if (!deps.session_registry->lookup(sid)) {
+            if (!deps.session_registry->acquire(sid)) {
                 crow::response r(404);
                 r.body = R"({"error":"session not found"})";
                 r.add_header("Content-Type", "application/json");
@@ -242,7 +244,11 @@ void WebServer::Impl::register_models() {
                 return with_cors(req, std::move(r));
             }
 
-            auto entry = find_model_by_name(*deps.app_config, name);
+            std::optional<ModelProfile> entry;
+            {
+                std::lock_guard<std::mutex> config_lock(app_config_mu);
+                entry = find_model_by_name(*deps.app_config, name);
+            }
             if (!entry.has_value()) {
                 crow::response r(400);
                 r.body = json{{"error", "Unknown model name: " + name}}.dump();
@@ -287,6 +293,7 @@ void WebServer::Impl::register_models() {
             auto draft = parse_model_draft(body, err);
             if (!draft) return json_err(400, "BAD_REQUEST", err);
 
+            std::lock_guard<std::mutex> config_lock(app_config_mu);
             auto rc = add_saved_model(*deps.app_config, *draft);
             if (rc != SavedModelEditError::OK) {
                 return json_err(http_status_for_edit_error(rc),
@@ -332,6 +339,7 @@ void WebServer::Impl::register_models() {
             auto draft = parse_model_draft(body, err);
             if (!draft) return json_err(400, "BAD_REQUEST", err);
 
+            std::lock_guard<std::mutex> config_lock(app_config_mu);
             // patch 语义:body 没显式带 api_key / base_url 时,从 existing 条目
             // 注入旧值再走校验。这样旧客户端编辑表单不必每次让用户重输
             // api_key。也覆盖 base_url 以防偶发未提交;model/provider/name 显式必填,
@@ -409,6 +417,7 @@ void WebServer::Impl::register_models() {
                 return with_cors(req, std::move(r));
             };
 
+            std::lock_guard<std::mutex> config_lock(app_config_mu);
             auto snapshot = deps.app_config->saved_models;
             auto default_snapshot = deps.app_config->default_model_name;
             auto rc = remove_saved_model(*deps.app_config, url_name);
@@ -459,6 +468,7 @@ void WebServer::Impl::register_models() {
             }
             std::string name = body["name"].get<std::string>();
 
+            std::lock_guard<std::mutex> config_lock(app_config_mu);
             bool found = false;
             for (const auto& e : deps.app_config->saved_models) {
                 if (e.name == name) { found = true; break; }

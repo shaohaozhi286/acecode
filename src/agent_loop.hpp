@@ -205,6 +205,9 @@ public:
     void set_project_instructions_config(const ProjectInstructionsConfig* cfg) {
         project_instructions_cfg_ = cfg;
     }
+    void set_custom_instructions_config(const CustomInstructionsConfig* cfg) {
+        custom_instructions_cfg_ = cfg;
+    }
 
     // ---- 事件流(Section 7 SessionClient)----
     // 老的 AgentCallbacks 路径**完全不动**:TUI 仍然用 callbacks。
@@ -392,6 +395,7 @@ private:
     const MemoryRegistry* memory_registry_ = nullptr;
     const MemoryConfig* memory_cfg_ = nullptr;
     const ProjectInstructionsConfig* project_instructions_cfg_ = nullptr;
+    const CustomInstructionsConfig* custom_instructions_cfg_ = nullptr;
     std::string session_context_cache_key_;
     std::string session_context_cache_content_;
     std::string goal_accounting_thread_id_;

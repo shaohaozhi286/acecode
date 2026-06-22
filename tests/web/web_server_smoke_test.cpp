@@ -2160,6 +2160,50 @@ TEST(WebServerHttp, PutUiPreferencesRejectsInvalidAvatarPayload) {
     EXPECT_FALSE(fx.cfg.web_ui.show_acecode_avatar);
 }
 
+TEST(WebServerHttp, GetCustomInstructionsReturnsCurrentText) {
+    WebServerFixture fx;
+    fx.cfg.custom_instructions.set_text("Prefer concise Chinese.");
+
+    auto r = cpr::Get(cpr::Url{fx.url("/api/config/custom-instructions")});
+    ASSERT_EQ(r.status_code, 200) << r.text;
+    auto j = json::parse(r.text);
+    ASSERT_TRUE(j.contains("text"));
+    EXPECT_EQ(j["text"], "Prefer concise Chinese.");
+}
+
+TEST(WebServerHttp, PutCustomInstructionsPersistsText) {
+    WebServerFixture fx;
+    json req = {{"text", "Use project-specific terminology."}};
+    auto put = cpr::Put(cpr::Url{fx.url("/api/config/custom-instructions")},
+                        cpr::Header{{"Content-Type", "application/json"}},
+                        cpr::Body{req.dump()});
+    ASSERT_EQ(put.status_code, 200) << put.text;
+    auto body = json::parse(put.text);
+    EXPECT_EQ(body["text"], "Use project-specific terminology.");
+    EXPECT_EQ(fx.cfg.custom_instructions.text_snapshot(),
+              "Use project-specific terminology.");
+
+    std::ifstream ifs(fx.tmp_dir / "config.json");
+    ASSERT_TRUE(ifs.is_open());
+    auto saved = json::parse(ifs);
+    ASSERT_TRUE(saved.contains("custom_instructions"));
+    EXPECT_EQ(saved["custom_instructions"]["text"],
+              "Use project-specific terminology.");
+}
+
+TEST(WebServerHttp, PutCustomInstructionsRejectsInvalidPayload) {
+    WebServerFixture fx;
+    fx.cfg.custom_instructions.set_text("keep me");
+    json req = {{"text", false}};
+    auto r = cpr::Put(cpr::Url{fx.url("/api/config/custom-instructions")},
+                      cpr::Header{{"Content-Type", "application/json"}},
+                      cpr::Body{req.dump()});
+    ASSERT_EQ(r.status_code, 400) << r.text;
+    auto j = json::parse(r.text);
+    EXPECT_EQ(j["error"], "BAD_REQUEST");
+    EXPECT_EQ(fx.cfg.custom_instructions.text_snapshot(), "keep me");
+}
+
 // 场景:GET /api/config/upgrade 返回当前升级服务 URL 默认值。
 TEST(WebServerHttp, GetUpgradeConfigReturnsDefaultBaseUrl) {
     WebServerFixture fx;

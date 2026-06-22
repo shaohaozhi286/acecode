@@ -1187,7 +1187,7 @@ AgentLoop::ApiRequestBundle AgentLoop::build_api_request_messages() {
     std::string session_context = cached_context_for_api(
         build_session_context_prompt(
             cwd_, memory_registry_, memory_cfg_, project_instructions_cfg_,
-            skill_registry_, context_window_),
+            skill_registry_, context_window_, custom_instructions_cfg_),
         session_context_cache_key_, session_context_cache_content_);
     prepend_session_context_for_api(api_messages, session_context);
     std::string request_context = build_request_context_prompt(cwd_);
@@ -2139,6 +2139,9 @@ bool AgentLoop::execute_tool_calls(
                     if (perm == PermissionResult::Deny) {
                         return ToolResult{"[User denied tool execution]", false};
                     }
+                    emit_progress("tool_running", "正在调用工具 " + effective_tc.function_name,
+                        effective_tc.function_name, effective_tc.function_name, effective_tc.id,
+                        static_cast<int>(entry.original_index), true);
                     if (perm == PermissionResult::AlwaysAllow &&
                         permissions_.mode() != PermissionMode::Plan &&
                         effective_tc.function_name != "EnterPlanMode" &&

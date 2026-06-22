@@ -617,14 +617,14 @@ std::string SessionRegistry::create(const SessionOptions& opts) {
         std::lock_guard<std::mutex> lk(mu_);
         entries_.emplace(id, std::move(entry));
     }
-    if (auto* active = lookup(id)) {
+    if (auto active = acquire(id)) {
         if (active->loop) active->loop->dispatch_session_start_hook("startup");
     }
     if (resolved.auto_start && !resolved.initial_user_message.empty()) {
         UserInput input;
         input.text = resolved.initial_user_message;
         maybe_start_auto_title(id, input);
-        if (auto* active = lookup(id)) {
+        if (auto active = acquire(id)) {
             if (active->loop) active->loop->submit(input);
         }
     }
@@ -632,13 +632,13 @@ std::string SessionRegistry::create(const SessionOptions& opts) {
     return id;
 }
 
-std::unique_ptr<SessionEntry>
+std::shared_ptr<SessionEntry>
 SessionRegistry::make_entry_locked(const std::string& id,
                                    const SessionOptions& opts,
                                    const SessionMeta* resumed_meta) {
     auto resolved_model = resolve_session_model(deps_, opts, resumed_meta);
 
-    auto entry = std::make_unique<SessionEntry>();
+    auto entry = std::make_shared<SessionEntry>();
     entry->id = id;
     entry->cwd = opts.cwd.empty() ? deps_.cwd : opts.cwd;
     entry->no_workspace = opts.no_workspace || (resumed_meta && resumed_meta->no_workspace);
@@ -739,6 +739,7 @@ SessionRegistry::make_entry_locked(const std::string& id,
     entry->loop->set_memory_registry(deps_.memory_registry);
     entry->loop->set_memory_config(deps_.memory_cfg);
     entry->loop->set_project_instructions_config(deps_.project_instructions_cfg);
+    entry->loop->set_custom_instructions_config(deps_.custom_instructions_cfg);
 
     // PermissionPrompter: 异步 — 触发 PermissionRequest 事件,等浏览器 decision
     auto prompter = std::make_unique<AsyncPrompter>(entry->loop->events());
@@ -836,10 +837,15 @@ bool SessionRegistry::resume(const std::string& id, const SessionOptions& opts) 
     return true;
 }
 
-SessionEntry* SessionRegistry::lookup(const std::string& id) {
+std::shared_ptr<SessionEntry> SessionRegistry::acquire(const std::string& id) {
     std::lock_guard<std::mutex> lk(mu_);
     auto it = entries_.find(id);
-    return it == entries_.end() ? nullptr : it->second.get();
+    return it == entries_.end() ? nullptr : it->second;
+}
+
+SessionEntry* SessionRegistry::lookup(const std::string& id) {
+    auto entry = acquire(id);
+    return entry ? entry.get() : nullptr;
 }
 
 BuiltinCommandResult SessionRegistry::execute_builtin_command(
@@ -850,7 +856,7 @@ BuiltinCommandResult SessionRegistry::execute_builtin_command(
         return {BuiltinCommandStatus::UnsupportedCommand, "unsupported command"};
     }
 
-    SessionEntry* entry = lookup(id);
+    auto entry = acquire(id);
     if (!entry || !entry->loop) {
         return {BuiltinCommandStatus::UnknownSession, "unknown session"};
     }
@@ -981,7 +987,7 @@ void SessionRegistry::maybe_start_auto_title(const std::string& id, const UserIn
                 text,
                 cfg->session_title.max_input_bytes);
             if (!title.has_value() || title->empty()) return;
-            SessionEntry* entry = lookup(session_id);
+            auto entry = acquire(session_id);
             if (!entry || !entry->sm) return;
             if (entry->sm->try_set_generated_session_title(*title)) {
                 emit_session_title_updated(*entry);
@@ -1026,6 +1032,7 @@ bool SessionRegistry::switch_model(const std::string& id,
     // exchange, set_active_provider meta write). Holding mu_ across that
     // would block list_active / lookup / other switch_model calls in
     // every active session.
+    std::shared_ptr<SessionEntry> entry;
     std::shared_ptr<SessionEntry::ProviderSlot> slot;
     SessionManager* sm = nullptr;
     AgentLoop* loop = nullptr;
@@ -1036,13 +1043,13 @@ bool SessionRegistry::switch_model(const std::string& id,
             if (error) *error = "session not found";
             return false;
         }
-        auto& entry = *it->second;
-        if (!entry.provider_slot) {
-            entry.provider_slot = std::make_shared<SessionEntry::ProviderSlot>();
+        entry = it->second;
+        if (!entry->provider_slot) {
+            entry->provider_slot = std::make_shared<SessionEntry::ProviderSlot>();
         }
-        slot = entry.provider_slot;
-        sm = entry.sm.get();
-        loop = entry.loop.get();
+        slot = entry->provider_slot;
+        sm = entry->sm.get();
+        loop = entry->loop.get();
     }
 
     // Phase 2: lock-free helper call. provider_slot has its own internal
@@ -1100,7 +1107,7 @@ SessionRegistry::model_state_from_meta(const SessionMeta& meta) const {
 }
 
 void SessionRegistry::destroy(const std::string& id) {
-    std::unique_ptr<SessionEntry> moved;
+    std::shared_ptr<SessionEntry> moved;
     {
         std::lock_guard<std::mutex> lk(mu_);
         auto it = entries_.find(id);

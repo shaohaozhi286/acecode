@@ -271,6 +271,7 @@ void WebServer::Impl::register_skills() {
                 // 同时把 cfg.skills.disabled 中的条目也列出(状态=false),让前端
                 // 看见所有可切换的 skill。
                 if (deps.app_config) {
+                    std::lock_guard<std::mutex> config_lock(app_config_mu);
                     for (const auto& name : deps.app_config->skills.disabled) {
                         json o;
                         o["name"]        = name;
@@ -310,9 +311,10 @@ void WebServer::Impl::register_skills() {
                 return r;
             }
 
+            std::lock_guard<std::mutex> config_lock(app_config_mu);
             auto result = set_skill_enabled(name, enabled,
-                                              *deps.app_config,
-                                              *deps.skill_registry,
+                                               *deps.app_config,
+                                               *deps.skill_registry,
                                               deps.config_path);
             crow::response r(result.http_status);
             r.body = result.body.dump();
@@ -356,7 +358,11 @@ void WebServer::Impl::register_commands() {
             }
             SkillRegistry empty_registry;
             const auto& registry = deps.skill_registry ? *deps.skill_registry : empty_registry;
-            auto payload = build_commands_payload(registry, workspace_cwd, deps.app_config);
+            json payload;
+            {
+                std::lock_guard<std::mutex> config_lock(app_config_mu);
+                payload = build_commands_payload(registry, workspace_cwd, deps.app_config);
+            }
             crow::response r(payload.dump());
             r.add_header("Content-Type", "application/json");
             return with_cors(req, std::move(r));

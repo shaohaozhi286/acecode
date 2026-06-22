@@ -81,6 +81,7 @@ void WebServer::Impl::register_pty() {
         CROW_ROUTE(app, "/api/pty/shells").methods(crow::HTTPMethod::GET)
         ([this](const crow::request& req) {
             if (auto rej = require_pty_access(req)) return std::move(*rej);
+            std::lock_guard<std::mutex> config_lock(app_config_mu);
             crow::response r(console_shells_payload().dump());
             r.add_header("Content-Type", "application/json");
             return with_cors(req, std::move(r));
@@ -105,8 +106,11 @@ void WebServer::Impl::register_pty() {
             }
             std::string shell_override;
             if (!shell_id.empty()) {
-                const std::string git_bash_path =
-                    deps.app_config ? deps.app_config->console.git_bash_path : std::string{};
+                std::string git_bash_path;
+                if (deps.app_config) {
+                    std::lock_guard<std::mutex> config_lock(app_config_mu);
+                    git_bash_path = deps.app_config->console.git_bash_path;
+                }
                 auto cmd = resolve_shell_command_by_id(shell_id, git_bash_path);
                 if (!cmd) {
                     json e{{"error", "shell unavailable"}, {"shell", shell_id}};
@@ -213,6 +217,7 @@ void WebServer::Impl::register_pty() {
                 return json_err(400, std::string("bad json: ") + e.what());
             }
 
+            std::lock_guard<std::mutex> config_lock(app_config_mu);
             const std::string prev_default = deps.app_config->console.default_shell;
             const std::string prev_bash = deps.app_config->console.git_bash_path;
 

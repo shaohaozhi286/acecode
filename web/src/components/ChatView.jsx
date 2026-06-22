@@ -1904,9 +1904,11 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     [changeDockDismissalKey, dismissedDockSignatures],
   );
   const fileTreeRefreshKey = useMemo(() => fileTreeRefreshKeyFromItems(items), [items]);
-  const showChangeDock = changeSummary.hasChanges
+  const hasVisibleTodos = Array.isArray(todos) && todos.length > 0;
+  const showChangeDetails = changeSummary.hasChanges
     && !!changeSignature
     && dismissedDockSignature !== changeSignature;
+  const showChangeDock = showChangeDetails || hasVisibleTodos;
 
   useLayoutEffect(() => {
     if (!showChangeDock) {
@@ -1925,7 +1927,14 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     const observer = new ResizeObserver(measure);
     observer.observe(element);
     return () => observer.disconnect();
-  }, [showChangeDock, changeSummary.fileCount, changeSummary.totalAdditions, changeSummary.totalDeletions]);
+  }, [
+    showChangeDock,
+    showChangeDetails,
+    hasVisibleTodos,
+    changeSummary.fileCount,
+    changeSummary.totalAdditions,
+    changeSummary.totalDeletions,
+  ]);
 
   useEffect(() => {
     setExpandedActivityKeys(new Set());
@@ -2309,7 +2318,11 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
           {...messageContextAttrs(child)}
         >
           {child.kind === 'tool' ? (
-            <ToolBlock entry={child.tool} onReviewToggle={pauseTailFollowForReview} />
+            <ToolBlock
+              entry={child.tool}
+              onReviewToggle={pauseTailFollowForReview}
+              sessionRunning={status === 'running'}
+            />
           ) : (
             <Message
               role={child.role}
@@ -2490,7 +2503,11 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
                   {...messageContextAttrs(it)}
                 >
                   {it.kind === 'tool' ? (
-                    <ToolBlock entry={it.tool} onReviewToggle={pauseTailFollowForReview} />
+                    <ToolBlock
+                      entry={it.tool}
+                      onReviewToggle={pauseTailFollowForReview}
+                      sessionRunning={status === 'running'}
+                    />
                   ) : (
                     <Message
                       role={it.role} content={it.content} ts={it.ts}
@@ -2518,6 +2535,8 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
             dockRef={changeDockRef}
             scrollRef={scrollRef}
             summary={changeSummary}
+            showChanges={showChangeDetails}
+            running={status === 'running'}
             onReview={openReviewPanel}
             onDismiss={dismissChangeDock}
             todos={todos}

@@ -91,9 +91,13 @@ void WebServer::Impl::register_sessions() {
             auto ws = compatibility_workspace();
             SessionOptions opts;
             if (auto err = parse_session_options(req, ws, opts)) return std::move(*err);
-            refresh_default_session_preferences_for_new_session();
 
-            auto id = deps.session_client->create_session(opts);
+            std::string id;
+            {
+                std::lock_guard<std::mutex> config_lock(app_config_mu);
+                refresh_default_session_preferences_for_new_session_locked();
+                id = deps.session_client->create_session(opts);
+            }
             LOG_INFO("[web] compatibility /api/sessions create id=" + id + " cwd=" + ws.cwd);
             crow::response r(201);
             r.body = json{
@@ -144,7 +148,12 @@ void WebServer::Impl::register_sessions() {
                     return with_cors(req, std::move(r));
                 }
             }
-            if (!deps.session_client->resume_session(id, opts)) {
+            bool resumed = false;
+            {
+                std::lock_guard<std::mutex> config_lock(app_config_mu);
+                resumed = deps.session_client->resume_session(id, opts);
+            }
+            if (!resumed) {
                 if (SessionStorage::has_incompatible_pid_session_files(project_dir, id)) {
                     crow::response r(409);
                     r.body = json{
@@ -238,7 +247,7 @@ void WebServer::Impl::register_sessions() {
             std::string workspace_hash;
             std::string session_cwd;
             if (deps.session_registry) {
-                if (auto* entry = deps.session_registry->lookup(id)) {
+                if (auto entry = deps.session_registry->acquire(id)) {
                     workspace_hash = entry->workspace_hash;
                     session_cwd = entry->cwd;
                 }
@@ -255,7 +264,7 @@ void WebServer::Impl::register_sessions() {
             // 同时附加磁盘 ChatMessage 历史(供首次连接补齐 LLM 上下文)
             // 仅当 since=0 时返回,避免重连时重复推。
             if (since == 0 && deps.session_registry) {
-                if (auto* entry = deps.session_registry->lookup(id)) {
+                if (auto entry = deps.session_registry->acquire(id)) {
                     if (entry->loop) {
                         json msgs = json::array();
                         for (const auto& m : entry->loop->messages()) {
@@ -308,7 +317,7 @@ void WebServer::Impl::register_sessions() {
                 r.add_header("Content-Type", "application/json");
                 return with_cors(req, std::move(r));
             }
-            auto* entry = deps.session_registry->lookup(id);
+            auto entry = deps.session_registry->acquire(id);
             if (!entry) {
                 crow::response r(404);
                 r.body = R"({"error":"unknown session"})";
@@ -370,7 +379,7 @@ void WebServer::Impl::register_sessions() {
                 r.add_header("Content-Type", "application/json");
                 return with_cors(req, std::move(r));
             }
-            auto* entry = deps.session_registry->lookup(id);
+            auto entry = deps.session_registry->acquire(id);
             if (!entry) {
                 crow::response r(404);
                 r.body = R"({"error":"unknown session"})";
@@ -453,9 +462,10 @@ void WebServer::Impl::register_sessions() {
             const bool selection_expanded = !selection_context.prompt.empty();
             if (attachment_refs.empty() && contexts.empty() &&
                 deps.session_registry && deps.app_config) {
-                if (auto* entry = deps.session_registry->lookup(id)) {
+                if (auto entry = deps.session_registry->acquire(id)) {
                     if (!entry->cwd.empty()) {
                         SkillRegistry tmp_skills;
+                        std::lock_guard<std::mutex> config_lock(app_config_mu);
                         initialize_skill_registry(tmp_skills, *deps.app_config, entry->cwd);
                         auto exp = web::try_expand_skill_command(text, tmp_skills);
                         if (exp.expanded) {
@@ -480,7 +490,7 @@ void WebServer::Impl::register_sessions() {
                     r.add_header("Content-Type", "application/json");
                     return with_cors(req, std::move(r));
                 }
-                auto* entry = deps.session_registry->lookup(id);
+                auto entry = deps.session_registry->acquire(id);
                 if (!entry) {
                     crow::response r(404);
                     r.body = R"({"error":"unknown session"})";
@@ -715,7 +725,7 @@ void WebServer::Impl::register_sessions() {
                 return with_cors(req, std::move(r));
             }
 
-            auto* entry = deps.session_registry->lookup(id);
+            auto entry = deps.session_registry->acquire(id);
             if (!entry || !entry->sm) {
                 crow::response r(404);
                 r.body = R"({"error":"unknown session"})";
@@ -800,7 +810,7 @@ void WebServer::Impl::register_sessions() {
                 return with_cors(req, std::move(r));
             }
 
-            auto* entry = deps.session_registry->lookup(id);
+            auto entry = deps.session_registry->acquire(id);
             if (!entry || !entry->loop || !entry->sm) {
                 crow::response r(404);
                 r.body = R"({"error":"unknown session"})";

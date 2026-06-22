@@ -204,6 +204,7 @@ void WebServer::Impl::register_mcp() {
             if (auto rej = require_auth(req)) return std::move(*rej);
             json out = json::object();
             if (deps.app_config) {
+                std::lock_guard<std::mutex> config_lock(app_config_mu);
                 for (const auto& [name, srv] : deps.app_config->mcp_servers) {
                     json o;
                     switch (srv.transport) {
@@ -262,6 +263,7 @@ void WebServer::Impl::register_mcp() {
                     cfg.timeout_seconds = v.value("timeout_seconds", 30);
                     new_servers.emplace(it.key(), std::move(cfg));
                 }
+                std::lock_guard<std::mutex> config_lock(app_config_mu);
                 deps.app_config->mcp_servers = std::move(new_servers);
                 if (!deps.config_path.empty()) {
                     save_config(*deps.app_config, deps.config_path);
@@ -311,6 +313,7 @@ void WebServer::Impl::register_health() {
             // (见 openspec/changes/add-desktop-attention-notifications)。
             // 浏览器直连 daemon 模式没有桌面壳桥,前端会自然 no-op,这里始终输出。
             if (deps.app_config) {
+                std::lock_guard<std::mutex> config_lock(app_config_mu);
                 const auto& n = deps.app_config->desktop.notifications;
                 j["notifications"] = {
                     {"enabled", n.enabled},
@@ -401,7 +404,12 @@ void WebServer::Impl::register_history() {
             if (auto m = req.url_params.get("max")) {
                 try { max = std::stoi(m); } catch (...) { max = 0; }
             }
-            auto arr = load_history(cwd, max, deps.app_config->input_history);
+            InputHistoryConfig input_history;
+            {
+                std::lock_guard<std::mutex> config_lock(app_config_mu);
+                input_history = deps.app_config->input_history;
+            }
+            auto arr = load_history(cwd, max, input_history);
             crow::response r(arr.dump());
             r.add_header("Content-Type", "application/json");
             return with_cors(req, std::move(r));
@@ -424,7 +432,12 @@ void WebServer::Impl::register_history() {
                 r.add_header("Content-Type", "application/json");
                 return with_cors(req, std::move(r));
             }
-            append_history(deps.cwd, text, deps.app_config->input_history);
+            InputHistoryConfig input_history;
+            {
+                std::lock_guard<std::mutex> config_lock(app_config_mu);
+                input_history = deps.app_config->input_history;
+            }
+            append_history(deps.cwd, text, input_history);
             return with_cors(req, crow::response(204));
         });
     }
@@ -521,6 +534,10 @@ void WebServer::Impl::register_ui_preferences() {
         ([this](const crow::request& req) {
             return cors_preflight(req);
         });
+        CROW_ROUTE(app, "/api/config/custom-instructions").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
         CROW_ROUTE(app, "/api/config/upgrade").methods(crow::HTTPMethod::Options)
         ([this](const crow::request& req) {
             return cors_preflight(req);
@@ -547,9 +564,23 @@ void WebServer::Impl::register_ui_preferences() {
         ([this](const crow::request& req) {
             if (auto rej = require_auth(req)) return std::move(*rej);
             if (!deps.app_config) return crow::response(503);
+            std::lock_guard<std::mutex> config_lock(app_config_mu);
             crow::response r(200);
             r.add_header("Content-Type", "application/json");
             r.body = ui_preferences_to_json(deps.app_config->web_ui).dump();
+            return with_cors(req, std::move(r));
+        });
+
+        // GET /api/config/custom-instructions: user-authored prompt context.
+        CROW_ROUTE(app, "/api/config/custom-instructions").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.app_config) return crow::response(503);
+            std::lock_guard<std::mutex> config_lock(app_config_mu);
+            crow::response r(200);
+            r.add_header("Content-Type", "application/json");
+            r.body = custom_instructions_to_json(
+                deps.app_config->custom_instructions).dump();
             return with_cors(req, std::move(r));
         });
 
@@ -558,7 +589,8 @@ void WebServer::Impl::register_ui_preferences() {
         ([this](const crow::request& req) {
             if (auto rej = require_auth(req)) return std::move(*rej);
             if (!deps.app_config) return crow::response(503);
-            refresh_default_session_preferences_for_new_session();
+            std::lock_guard<std::mutex> config_lock(app_config_mu);
+            refresh_default_session_preferences_for_new_session_locked();
             auto parsed = parse_permission_mode_name(deps.app_config->default_permission_mode);
             crow::response r(200);
             r.add_header("Content-Type", "application/json");
@@ -571,6 +603,7 @@ void WebServer::Impl::register_ui_preferences() {
         ([this](const crow::request& req) {
             if (auto rej = require_auth(req)) return std::move(*rej);
             if (!deps.app_config) return crow::response(503);
+            std::lock_guard<std::mutex> config_lock(app_config_mu);
             crow::response r(200);
             r.add_header("Content-Type", "application/json");
             r.body = upgrade_config_to_json(deps.app_config->upgrade).dump();
@@ -583,6 +616,7 @@ void WebServer::Impl::register_ui_preferences() {
             if (auto rej = require_auth(req)) return std::move(*rej);
             if (!deps.app_config) return crow::response(503);
 
+            std::lock_guard<std::mutex> config_lock(app_config_mu);
             auto result = acecode::upgrade::check_for_update(*deps.app_config,
                                                              ACECODE_VERSION);
             crow::response r(200);
@@ -604,8 +638,12 @@ void WebServer::Impl::register_ui_preferences() {
                 return with_cors(req, std::move(r));
             };
 
-            auto result = acecode::upgrade::check_for_update(*deps.app_config,
-                                                             ACECODE_VERSION);
+            acecode::upgrade::UpdateCheckResult result;
+            {
+                std::lock_guard<std::mutex> config_lock(app_config_mu);
+                result = acecode::upgrade::check_for_update(*deps.app_config,
+                                                            ACECODE_VERSION);
+            }
             if (!result.update_available()) {
                 crow::response r(409);
                 r.add_header("Content-Type", "application/json");
@@ -628,6 +666,58 @@ void WebServer::Impl::register_ui_preferences() {
             r.body = json{{"started", true},
                           {"latest_version", result.latest_version},
                           {"message", "acecode update started"}}.dump();
+            return with_cors(req, std::move(r));
+        });
+
+        // PUT /api/config/custom-instructions body {text:string}.
+        CROW_ROUTE(app, "/api/config/custom-instructions").methods(crow::HTTPMethod::PUT)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.app_config) return crow::response(503);
+
+            auto json_err = [&](int status, const char* code, const std::string& msg) {
+                crow::response r(status);
+                r.body = json{{"error", code}, {"message", msg}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            };
+
+            json body;
+            try { body = json::parse(req.body); }
+            catch (const std::exception& e) {
+                return json_err(400, "BAD_JSON", std::string("invalid JSON body: ") + e.what());
+            }
+            if (!body.is_object() ||
+                !body.contains("text") ||
+                !body["text"].is_string()) {
+                return json_err(400, "BAD_REQUEST", "expected {text: string}");
+            }
+
+            const std::string text = body["text"].get<std::string>();
+            if (text.size() > kCustomInstructionsMaxBytes) {
+                return json_err(400, "BAD_REQUEST",
+                                "custom instructions exceed " +
+                                std::to_string(kCustomInstructionsMaxBytes) + " bytes");
+            }
+
+            std::lock_guard<std::mutex> config_lock(app_config_mu);
+            const auto before = deps.app_config->custom_instructions;
+            deps.app_config->custom_instructions.set_text(text);
+            try {
+                if (!deps.config_path.empty()) {
+                    save_config(*deps.app_config, deps.config_path);
+                } else {
+                    save_config(*deps.app_config);
+                }
+            } catch (const std::exception& e) {
+                deps.app_config->custom_instructions = before;
+                return json_err(500, "PERSIST_FAILED", e.what());
+            }
+
+            crow::response r(200);
+            r.add_header("Content-Type", "application/json");
+            r.body = custom_instructions_to_json(
+                deps.app_config->custom_instructions).dump();
             return with_cors(req, std::move(r));
         });
 
@@ -659,6 +749,7 @@ void WebServer::Impl::register_ui_preferences() {
                 return json_err(400, "INVALID_PERMISSION_MODE", "invalid permission mode");
             }
 
+            std::lock_guard<std::mutex> config_lock(app_config_mu);
             const std::string before = deps.app_config->default_permission_mode;
             deps.app_config->default_permission_mode = PermissionManager::mode_name(*mode);
             try {
@@ -712,6 +803,7 @@ void WebServer::Impl::register_ui_preferences() {
                                 "upgrade.base_url must be a non-empty http or https URL");
             }
 
+            std::lock_guard<std::mutex> config_lock(app_config_mu);
             const auto before = deps.app_config->upgrade;
             deps.app_config->upgrade.base_url = normalized;
             try {
@@ -736,6 +828,7 @@ void WebServer::Impl::register_ui_preferences() {
         ([this](const crow::request& req) {
             if (auto rej = require_auth(req)) return std::move(*rej);
             if (!deps.app_config) return crow::response(503);
+            std::lock_guard<std::mutex> config_lock(app_config_mu);
             crow::response r(200);
             r.add_header("Content-Type", "application/json");
             r.body = ace_browser_bridge_settings_to_json(
@@ -767,6 +860,7 @@ void WebServer::Impl::register_ui_preferences() {
                 return json_err(400, "BAD_REQUEST", "expected {enabled: boolean}");
             }
 
+            std::lock_guard<std::mutex> config_lock(app_config_mu);
             const auto before = deps.app_config->ace_browser_bridge;
             deps.app_config->ace_browser_bridge.enabled = body["enabled"].get<bool>();
             try {
@@ -911,6 +1005,7 @@ void WebServer::Impl::register_ui_preferences() {
                                 "expected {show_acecode_avatar: boolean}");
             }
 
+            std::lock_guard<std::mutex> config_lock(app_config_mu);
             const auto before = deps.app_config->web_ui;
             deps.app_config->web_ui.show_acecode_avatar = false;
             try {

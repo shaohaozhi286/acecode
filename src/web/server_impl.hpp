@@ -134,6 +134,7 @@ nlohmann::json session_event_to_json(const SessionEvent& evt,
 
 nlohmann::json chat_message_to_json(const ChatMessage& m);
 nlohmann::json ui_preferences_to_json(const WebUiPreferencesConfig& cfg);
+nlohmann::json custom_instructions_to_json(const CustomInstructionsConfig& cfg);
 nlohmann::json upgrade_config_to_json(const UpgradeConfig& cfg);
 nlohmann::json update_check_to_json(const acecode::upgrade::UpdateCheckResult& result);
 nlohmann::json ace_browser_bridge_settings_to_json(const AceBrowserBridgeConfig& cfg);
@@ -178,7 +179,11 @@ struct WebServer::Impl {
 
     // ws 注册表: 把 listener / state 与 connection 绑定,断开时清理。
     std::mutex                                                      ws_mu;
-    std::unordered_map<crow::websocket::connection*, std::unique_ptr<WsConnState>> ws_connections;
+    std::unordered_map<crow::websocket::connection*, std::shared_ptr<WsConnState>> ws_connections;
+
+    // Crow runs HTTP handlers on multiple worker threads. deps.app_config is a
+    // shared mutable object, so every web-side read/write must go through this.
+    mutable std::mutex app_config_mu;
 
     mutable std::mutex attention_mu;
     mutable std::unordered_set<std::string> loaded_attention_workspaces;
@@ -246,7 +251,7 @@ struct WebServer::Impl {
                                            const std::vector<TodoItem>& todos);
     std::optional<crow::response> parse_session_input_draft_request(const crow::request& req,
                                                                      std::string& text);
-    SessionEntry* active_session_entry_for_workspace(
+    std::shared_ptr<SessionEntry> active_session_entry_for_workspace(
         const acecode::desktop::WorkspaceMeta& ws,
         const std::string& id) const;
     void emit_session_title_update(SessionEntry& entry) const;
@@ -313,6 +318,7 @@ struct WebServer::Impl {
     // Session options helper  (defined in server_helpers.cpp)
     // -----------------------------------------------------------------
     void refresh_default_session_preferences_for_new_session();
+    void refresh_default_session_preferences_for_new_session_locked();
     std::optional<crow::response> parse_session_options(const crow::request& req,
                                                          const acecode::desktop::WorkspaceMeta& ws,
                                                          SessionOptions& opts);

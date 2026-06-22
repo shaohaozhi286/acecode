@@ -30,7 +30,7 @@ void WebServer::Impl::register_websocket() {
                 // 客户端 onopen 后立刻发 {type:"hello", payload:{session_id, since}},
                 // handle_ws_message 完成 SessionClient::subscribe 绑定。
                 std::lock_guard<std::mutex> lk(ws_mu);
-                ws_connections.emplace(&conn, std::make_unique<WsConnState>());
+                ws_connections.emplace(&conn, std::make_shared<WsConnState>());
                 LOG_INFO("[ws] connection opened");
             })
             .onmessage([this](crow::websocket::connection& conn,
@@ -54,11 +54,11 @@ void WebServer::Impl::handle_ws_message(crow::websocket::connection& conn, const
     auto type = msg.value("type", std::string{});
     const auto& payload = msg.contains("payload") ? msg["payload"] : json::object();
 
-    WsConnState* state = nullptr;
+    std::shared_ptr<WsConnState> state;
     {
         std::lock_guard<std::mutex> lk(ws_mu);
         auto it = ws_connections.find(&conn);
-        if (it != ws_connections.end()) state = it->second.get();
+        if (it != ws_connections.end()) state = it->second;
     }
     if (!state) {
         conn.send_text(R"({"type":"error","payload":{"reason":"no connection state"}})");
@@ -132,7 +132,7 @@ void WebServer::Impl::handle_ws_message(crow::websocket::connection& conn, const
             std::string workspace_hash;
             std::string session_cwd;
             if (deps.session_registry) {
-                if (auto* entry = deps.session_registry->lookup(sid)) {
+                if (auto entry = deps.session_registry->acquire(sid)) {
                     workspace_hash = entry->workspace_hash;
                     session_cwd = entry->cwd;
                 }
@@ -150,15 +150,19 @@ void WebServer::Impl::handle_ws_message(crow::websocket::connection& conn, const
         std::string workspace_hash;
         std::string session_cwd;
         if (deps.session_registry) {
-            if (auto* entry = deps.session_registry->lookup(sid)) {
+            if (auto entry = deps.session_registry->acquire(sid)) {
                 workspace_hash = entry->workspace_hash;
                 session_cwd = entry->cwd;
             }
         }
         auto sub = deps.session_client->subscribe(sid,
             [this, conn_ptr, sid_copy, workspace_hash, session_cwd](const SessionEvent& evt) {
+                const auto text = session_event_to_json(evt, sid_copy, workspace_hash, session_cwd).dump();
                 try {
-                    conn_ptr->send_text(session_event_to_json(evt, sid_copy, workspace_hash, session_cwd).dump());
+                    std::lock_guard<std::mutex> lk(ws_mu);
+                    if (ws_connections.find(conn_ptr) != ws_connections.end()) {
+                        conn_ptr->send_text(text);
+                    }
                 } catch (...) {
                 }
                 note_session_event_for_attention(sid_copy, workspace_hash, session_cwd, evt);
@@ -297,7 +301,7 @@ void WebServer::Impl::handle_ws_message(crow::websocket::connection& conn, const
 }
 
 void WebServer::Impl::handle_ws_close(crow::websocket::connection& conn, const std::string& reason) {
-    std::unique_ptr<WsConnState> state;
+    std::shared_ptr<WsConnState> state;
     {
         std::lock_guard<std::mutex> lk(ws_mu);
         auto it = ws_connections.find(&conn);

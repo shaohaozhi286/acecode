@@ -55,9 +55,10 @@ export function ChangeTotals({ summary, compact = false }) {
   );
 }
 
-function TodoProgressInline({ checklist }) {
+function TodoProgressInline({ checklist, running = true }) {
   if (!checklist?.visible) return null;
   const hasActive = checklist.items.some((item) => item.status === 'in_progress');
+  const spinning = !!running && hasActive;
   const currentStep = Math.min(
     checklist.total,
     Math.max(hasActive ? 1 : 0, checklist.done + (hasActive ? 1 : 0)),
@@ -67,7 +68,10 @@ function TodoProgressInline({ checklist }) {
     : `0 / ${checklist.total} 步`;
   return (
     <span className="ace-change-glass-todo-progress">
-      <span className="ace-change-glass-todo-spinner" aria-hidden="true" />
+      <span
+        className={clsx('ace-change-glass-todo-spinner', !spinning && 'is-static')}
+        aria-hidden="true"
+      />
       <span>{label}</span>
     </span>
   );
@@ -374,17 +378,20 @@ export function ChangeConversationCard({
 
 export function ChangeGlassDock({
   summary,
+  showChanges = true,
   onReview,
   onDismiss,
   dockRef,
   scrollRef,
   todos = [],
   todoSummary = null,
+  running = true,
 }) {
   const localDockRef = useRef(null);
   const rootRef = dockRef || localDockRef;
   const backdropRef = useRef(null);
   const todoChecklist = todoChecklistPresentation(todos, todoSummary);
+  const hasVisibleChanges = !!showChanges && !!summary?.hasChanges;
 
   useEffect(() => {
     const source = scrollRef?.current;
@@ -470,30 +477,39 @@ export function ChangeGlassDock({
     };
   }, [rootRef, scrollRef, summary?.fileCount, summary?.totalAdditions, summary?.totalDeletions]);
 
-  if (!summary?.hasChanges) return null;
+  if (!hasVisibleChanges && !todoChecklist.visible) return null;
+  const summaryContent = (
+    <span className="ace-change-glass-summary">
+      <TodoProgressInline checklist={todoChecklist} running={running} />
+      {hasVisibleChanges && <ChangeTotals summary={summary} compact />}
+    </span>
+  );
   return (
     <div ref={rootRef} className="ace-change-glass-wrap" data-change-region="composer">
       <div className="ace-change-glass-dock">
         <div ref={backdropRef} className="ace-change-glass-blur-backdrop" aria-hidden="true">
           <div className="ace-change-glass-blur-crop" />
         </div>
-        <button
-          type="button"
-          className="ace-change-glass-main"
-          onClick={(event) => {
-            event.stopPropagation();
-            onReview?.();
-          }}
-          title="打开右侧审查面板"
-        >
-          <span className="ace-change-glass-summary">
-            <TodoProgressInline checklist={todoChecklist} />
-            <ChangeTotals summary={summary} compact />
-          </span>
-          <span className="ace-change-glass-action">查看变更</span>
-        </button>
+        {hasVisibleChanges ? (
+          <button
+            type="button"
+            className="ace-change-glass-main"
+            onClick={(event) => {
+              event.stopPropagation();
+              onReview?.();
+            }}
+            title="打开右侧审查面板"
+          >
+            {summaryContent}
+            <span className="ace-change-glass-action">查看变更</span>
+          </button>
+        ) : (
+          <div className="ace-change-glass-main ace-change-glass-main-static" role="status">
+            {summaryContent}
+          </div>
+        )}
         <TodoChecklistPopover checklist={todoChecklist} />
-        {onDismiss && (
+        {hasVisibleChanges && onDismiss && (
           <button
             type="button"
             className="ace-change-glass-close"

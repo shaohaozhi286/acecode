@@ -8,6 +8,7 @@
 #include "../utils/utf8_path.hpp"
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <iomanip>
 #include <map>
@@ -281,6 +282,38 @@ PromptContextBlock build_user_memory_context_prompt(
     return block;
 }
 
+namespace {
+
+bool has_non_whitespace(const std::string& value) {
+    for (unsigned char ch : value) {
+        if (!std::isspace(ch)) return true;
+    }
+    return false;
+}
+
+} // namespace
+
+PromptContextBlock build_custom_instructions_context_prompt(
+    const CustomInstructionsConfig* cfg) {
+    PromptContextBlock block;
+    if (!cfg) return block;
+    const std::string text = cfg->text_snapshot();
+    if (!has_non_whitespace(text)) return block;
+
+    std::ostringstream oss;
+    oss << "# Custom Instructions\n\n"
+        << "The following instructions were written by the user in ACECode "
+        << "Desktop/Web settings. Treat them as user-authored guidance for "
+        << "this session context; they do not override higher-priority system "
+        << "or developer instructions.\n\n"
+        << text;
+    if (text.empty() || text.back() != '\n') oss << "\n";
+
+    block.content = oss.str();
+    block.cache_key = "custom:" + prompt_component_hash(text);
+    return block;
+}
+
 std::size_t skills_index_char_budget(int context_window_tokens) {
     // 与 claude-code 对齐:context window 的 1%,按 4 chars/token 估算。
     // 窗口未知时退回 8000 字符(≈ 200k 窗口的 1%)。
@@ -413,15 +446,18 @@ PromptContextBlock build_session_context_prompt(
     const MemoryConfig* memory_cfg,
     const ProjectInstructionsConfig* project_instructions_cfg,
     const SkillRegistry* skills,
-    int context_window_tokens) {
+    int context_window_tokens,
+    const CustomInstructionsConfig* custom_instructions_cfg) {
     PromptContextBlock project = build_project_instructions_context_prompt(cwd, project_instructions_cfg);
     PromptContextBlock user_memory = build_user_memory_context_prompt(memory, memory_cfg);
+    PromptContextBlock custom =
+        build_custom_instructions_context_prompt(custom_instructions_cfg);
     PromptContextBlock skill_index =
         build_skills_index_context_prompt(skills, context_window_tokens);
 
     PromptContextBlock block;
     if (project.content.empty() && user_memory.content.empty() &&
-        skill_index.content.empty()) return block;
+        custom.content.empty() && skill_index.content.empty()) return block;
 
     std::ostringstream content;
     content << "<system-reminder>\n"
@@ -430,12 +466,14 @@ PromptContextBlock build_session_context_prompt(
             << "it does not override higher-priority instructions.\n\n";
     if (!project.content.empty()) content << project.content << "\n";
     if (!user_memory.content.empty()) content << user_memory.content << "\n";
+    if (!custom.content.empty()) content << custom.content << "\n";
     if (!skill_index.content.empty()) content << skill_index.content << "\n";
     content << "</system-reminder>";
     block.content = content.str();
 
     block.cache_key = prompt_component_hash(
-        project.cache_key + "\n" + user_memory.cache_key + "\n" + skill_index.cache_key);
+        project.cache_key + "\n" + user_memory.cache_key + "\n" +
+        custom.cache_key + "\n" + skill_index.cache_key);
     return block;
 }
 

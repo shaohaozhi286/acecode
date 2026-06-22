@@ -217,8 +217,12 @@ void WebServer::Impl::register_workspaces() {
             if (auto err = parse_session_options(req, *ws, opts)) return std::move(*err);
             opts.no_workspace = false;
             opts.workspace_hash = ws->hash;
-            refresh_default_session_preferences_for_new_session();
-            auto id = deps.session_client->create_session(opts);
+            std::string id;
+            {
+                std::lock_guard<std::mutex> config_lock(app_config_mu);
+                refresh_default_session_preferences_for_new_session_locked();
+                id = deps.session_client->create_session(opts);
+            }
             LOG_INFO("[web] workspace session created hash=" + ws->hash + " id=" + id);
             crow::response r(201);
             r.body = json{{"session_id", id}, {"id", id}, {"workspace_hash", ws->hash}, {"cwd", ws->cwd}}.dump();
@@ -276,7 +280,12 @@ void WebServer::Impl::register_workspaces() {
                     return with_cors(req, std::move(r));
                 }
             }
-            if (!deps.session_client->resume_session(id, opts)) {
+            bool resumed = false;
+            {
+                std::lock_guard<std::mutex> config_lock(app_config_mu);
+                resumed = deps.session_client->resume_session(id, opts);
+            }
+            if (!resumed) {
                 if (SessionStorage::has_incompatible_pid_session_files(project_dir, id)) {
                     crow::response r(409);
                     r.body = json{

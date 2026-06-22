@@ -73,9 +73,11 @@ function toolSummaryText(tool) {
   return [summary.verb, summary.object].filter(Boolean).join(' · ') || tool.title || tool.tool || '工具完成';
 }
 
-function MiniToolItem({ item, compact }) {
+function MiniToolItem({ item, compact, sessionRunning = true }) {
   const tool = item.tool || {};
-  const running = !tool.isDone && !tool.isTaskComplete;
+  const unfinished = !tool.isDone && !tool.isTaskComplete;
+  const running = unfinished && sessionRunning;
+  const unresolved = unfinished && !sessionRunning;
   const ok = tool.isTaskComplete || tool.success !== false;
   const tailText = Array.isArray(tool.tailLines) ? tool.tailLines.join('\n') : '';
   const tailPreview = tailText.split(/\r\n|\r|\n/).slice(-2).join(' ');
@@ -90,14 +92,16 @@ function MiniToolItem({ item, compact }) {
       className={clsx(
         'w-full rounded border px-1 py-0.5 font-mono leading-tight',
         compact ? 'text-[7px]' : 'text-[8px]',
-        running && 'border-border bg-surface-alt text-fg-2',
-        !running && ok && 'border-ok-border bg-ok-bg text-ok',
-        !running && !ok && 'border-danger/30 bg-danger-bg text-danger',
+        (running || unresolved) && 'border-border bg-surface-alt text-fg-2',
+        !unfinished && ok && 'border-ok-border bg-ok-bg text-ok',
+        !unfinished && !ok && 'border-danger/30 bg-danger-bg text-danger',
       )}
       title={tooltip || tool.title || tool.displayOverride || tool.tool || ''}
     >
       <div className="flex items-center gap-1 min-w-0">
-        {running && <span className="ace-spinner w-2.5 h-2.5 shrink-0" />}
+        {unfinished && (
+          <span className={clsx('ace-spinner w-2.5 h-2.5 shrink-0', unresolved && 'ace-spinner-static')} />
+        )}
         <span className="truncate" title={summaryText}>{compactText(summaryText, compact ? 38 : 76)}</span>
       </div>
       {detail && <div className="text-fg-mute truncate mt-px" title={detailText}>{detail}</div>}
@@ -105,8 +109,8 @@ function MiniToolItem({ item, compact }) {
   );
 }
 
-function MiniTranscriptItem({ item, compact }) {
-  if (item.kind === 'tool') return <MiniToolItem item={item} compact={compact} />;
+function MiniTranscriptItem({ item, compact, sessionRunning }) {
+  if (item.kind === 'tool') return <MiniToolItem item={item} compact={compact} sessionRunning={sessionRunning} />;
   return <MiniMessageItem item={item} compact={compact} />;
 }
 
@@ -201,7 +205,7 @@ export function MiniSession({ session, compact, onClick }) {
           </>
         ) : (
           shownItems.map((item) => (
-            <MiniTranscriptItem key={item.id} item={item} compact={compact} />
+            <MiniTranscriptItem key={item.id} item={item} compact={compact} sessionRunning={active} />
           ))
         )}
         {active && (

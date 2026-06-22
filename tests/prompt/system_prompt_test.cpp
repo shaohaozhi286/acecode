@@ -198,6 +198,50 @@ TEST_F(SystemPromptTest, ProjectInstructionsDisabledByCfg) {
     EXPECT_TRUE(context.content.empty());
 }
 
+TEST_F(SystemPromptTest, CustomInstructionsContextAppearsWhenNonEmpty) {
+    acecode::ToolExecutor tools;
+    acecode::CustomInstructionsConfig custom_cfg;
+    custom_cfg.text = "Always answer in concise Chinese.";
+
+    std::string out = acecode::build_system_prompt(tools, temp_home.string());
+    EXPECT_EQ(out.find("# Custom Instructions"), std::string::npos);
+    EXPECT_EQ(out.find("concise Chinese"), std::string::npos);
+
+    auto context = acecode::build_custom_instructions_context_prompt(&custom_cfg);
+    EXPECT_NE(context.content.find("# Custom Instructions"), std::string::npos);
+    EXPECT_NE(context.content.find("concise Chinese"), std::string::npos);
+    EXPECT_NE(context.content.find("do not override"), std::string::npos);
+    EXPECT_FALSE(context.cache_key.empty());
+}
+
+TEST_F(SystemPromptTest, CustomInstructionsOmittedWhenWhitespaceOnly) {
+    acecode::CustomInstructionsConfig custom_cfg;
+    custom_cfg.text = " \n\t ";
+
+    auto context = acecode::build_custom_instructions_context_prompt(&custom_cfg);
+    EXPECT_TRUE(context.content.empty());
+    EXPECT_TRUE(context.cache_key.empty());
+}
+
+TEST_F(SystemPromptTest, SessionContextIncludesCustomInstructions) {
+    acecode::CustomInstructionsConfig custom_cfg;
+    custom_cfg.text = "Use repository-specific wording.";
+
+    auto context = acecode::build_session_context_prompt(
+        temp_home.string(),
+        /*memory=*/nullptr,
+        /*memory_cfg=*/nullptr,
+        /*project_instructions_cfg=*/nullptr,
+        /*skills=*/nullptr,
+        /*context_window_tokens=*/0,
+        &custom_cfg);
+
+    EXPECT_NE(context.content.find("<system-reminder>"), std::string::npos);
+    EXPECT_NE(context.content.find("# Custom Instructions"), std::string::npos);
+    EXPECT_NE(context.content.find("repository-specific wording"), std::string::npos);
+    EXPECT_FALSE(context.cache_key.empty());
+}
+
 // 场景:full tool schema 不再重复塞进静态 system prompt,避免工具 schema 变化
 // 打穿前缀缓存。结构化 schema 仍由 provider tools array 发送。
 TEST_F(SystemPromptTest, StaticPromptDoesNotDuplicateToolSchemas) {

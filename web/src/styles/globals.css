@@ -500,6 +500,10 @@ body {
   animation: ace-spin .8s linear infinite;
   vertical-align: -0.125em;
 }
+.ace-spinner-static {
+  animation: none;
+  border-top-color: rgba(var(--ace-fg-mute-rgb), 0.40);
+}
 .ace-session-loading {
   display: inline-block;
   width: 10px;
@@ -1165,6 +1169,9 @@ body {
   text-align: left;
   pointer-events: auto;
 }
+.ace-change-glass-main-static {
+  cursor: default;
+}
 .ace-change-glass-summary {
   min-width: 0;
   display: inline-flex;
@@ -1199,6 +1206,10 @@ body {
   border-top-color: var(--ace-accent);
   border-radius: 50%;
   animation: ace-spin .8s linear infinite;
+}
+.ace-change-glass-todo-spinner.is-static {
+  animation: none;
+  border-top-color: rgba(var(--ace-accent-rgb), 0.24);
 }
 .ace-change-glass-action {
   display: inline-flex;

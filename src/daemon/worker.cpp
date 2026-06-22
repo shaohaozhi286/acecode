@@ -413,6 +413,7 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     reg_deps.memory_registry      = nullptr;
     reg_deps.memory_cfg           = nullptr;
     reg_deps.project_instructions_cfg = nullptr;
+    reg_deps.custom_instructions_cfg = &cfg_mut.custom_instructions;
     reg_deps.hook_manager         = &hook_manager;
     reg_deps.template_permissions = &template_perm;
 

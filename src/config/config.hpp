@@ -2,7 +2,9 @@
 
 #include "saved_models.hpp"
 
+#include <cstddef>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -81,6 +83,36 @@ struct ProjectInstructionsConfig {
     // effective search list at runtime (overriding its presence in filenames).
     bool read_agent_md = true;
     bool read_claude_md = true;
+};
+
+inline constexpr std::size_t kCustomInstructionsMaxBytes = 64 * 1024;
+
+struct CustomInstructionsConfig {
+    std::string text;
+
+    CustomInstructionsConfig() = default;
+    CustomInstructionsConfig(const CustomInstructionsConfig& other) {
+        std::lock_guard<std::mutex> lock(other.mu_);
+        text = other.text;
+    }
+    CustomInstructionsConfig& operator=(const CustomInstructionsConfig& other) {
+        if (this == &other) return *this;
+        std::scoped_lock lock(mu_, other.mu_);
+        text = other.text;
+        return *this;
+    }
+
+    std::string text_snapshot() const {
+        std::lock_guard<std::mutex> lock(mu_);
+        return text;
+    }
+    void set_text(std::string value) {
+        std::lock_guard<std::mutex> lock(mu_);
+        text = std::move(value);
+    }
+
+private:
+    mutable std::mutex mu_;
 };
 
 struct DaemonConfig {
@@ -290,6 +322,7 @@ struct AppConfig {
     SkillsConfig skills;                         // skill system configuration (optional)
     MemoryConfig memory;                         // persistent user memory settings
     ProjectInstructionsConfig project_instructions; // ACECODE.md / AGENT.md / CLAUDE.md loader
+    CustomInstructionsConfig custom_instructions; // Desktop/Web user-authored prompt context
     DaemonConfig daemon;                         // daemon process supervision settings
     WebConfig web;                               // HTTP/WebSocket server settings
     WebUiPreferencesConfig web_ui;               // Web/Desktop UI-only preferences

@@ -196,6 +196,10 @@ std::vector<std::string> validate_config(const AppConfig& cfg) {
     if (cfg.project_instructions.max_total_bytes < cfg.project_instructions.max_bytes) {
         errors.push_back("project_instructions.max_total_bytes must be >= max_bytes");
     }
+    if (cfg.custom_instructions.text_snapshot().size() > kCustomInstructionsMaxBytes) {
+        errors.push_back("custom_instructions.text exceeds " +
+                         std::to_string(kCustomInstructionsMaxBytes) + " bytes");
+    }
     if (!is_one_of(cfg.ace_browser_bridge.tool_mode, {"progressive", "compact", "full"})) {
         errors.push_back("ace_browser_bridge.tool_mode invalid: " +
                          cfg.ace_browser_bridge.tool_mode);
@@ -519,6 +523,12 @@ AppConfig load_config() {
                     cfg.project_instructions.read_agent_md = pj["read_agent_md"].get<bool>();
                 if (pj.contains("read_claude_md") && pj["read_claude_md"].is_boolean())
                     cfg.project_instructions.read_claude_md = pj["read_claude_md"].get<bool>();
+            }
+            if (j.contains("custom_instructions") && j["custom_instructions"].is_object()) {
+                const auto& cj = j["custom_instructions"];
+                if (cj.contains("text") && cj["text"].is_string()) {
+                    cfg.custom_instructions.set_text(cj["text"].get<std::string>());
+                }
             }
             if (j.contains("daemon") && j["daemon"].is_object()) {
                 const auto& dj = j["daemon"];
@@ -1219,6 +1229,13 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
         if (cfg.project_instructions.read_claude_md != pi_d.read_claude_md)
             pij["read_claude_md"] = cfg.project_instructions.read_claude_md;
         if (!pij.empty()) j["project_instructions"] = pij;
+
+        CustomInstructionsConfig ci_d;
+        nlohmann::json cij = nlohmann::json::object();
+        const std::string custom_text = cfg.custom_instructions.text_snapshot();
+        if (custom_text != ci_d.text)
+            cij["text"] = custom_text;
+        if (!cij.empty()) j["custom_instructions"] = cij;
 
         ModelsDevConfig md;
         nlohmann::json mdj = nlohmann::json::object();

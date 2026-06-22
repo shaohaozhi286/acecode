@@ -272,6 +272,36 @@ await run('UI preference API keeps legacy avatar preference endpoint compatible'
   }
 });
 
+await run('Custom instructions API reads and writes daemon-backed text', async () => {
+  const previousFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    calls.push({ url, opts });
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ text: 'Prefer Chinese replies.' }),
+    };
+  };
+  try {
+    const client = createApi({ origin: 'http://127.0.0.1:4567', token: 'tok' });
+    const got = await client.getCustomInstructions();
+    const saved = await client.setCustomInstructions({ text: 'Prefer Chinese replies.' });
+
+    assert.deepEqual(got, { text: 'Prefer Chinese replies.' });
+    assert.deepEqual(saved, { text: 'Prefer Chinese replies.' });
+    assert.equal(calls[0].url, 'http://127.0.0.1:4567/api/config/custom-instructions');
+    assert.equal(calls[0].opts.method, 'GET');
+    assert.equal(calls[0].opts.headers['X-ACECode-Token'], 'tok');
+    assert.equal(calls[1].url, 'http://127.0.0.1:4567/api/config/custom-instructions');
+    assert.equal(calls[1].opts.method, 'PUT');
+    assert.deepEqual(JSON.parse(calls[1].opts.body), { text: 'Prefer Chinese replies.' });
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
 await run('Pinned session visual order API reads and writes global order endpoint', async () => {
   const previousFetch = globalThis.fetch;
   const calls = [];

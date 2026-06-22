@@ -139,7 +139,7 @@ function AskUserQuestionResultCard({ result, toolContextAttrs }) {
   );
 }
 
-export const ToolBlock = memo(function ToolBlock({ entry, onReviewToggle }) {
+export const ToolBlock = memo(function ToolBlock({ entry, onReviewToggle, sessionRunning = true }) {
   const [expanded, setExpanded] = useState(false);
   const contextIdRef = useRef('');
   if (!contextIdRef.current) {
@@ -172,16 +172,24 @@ export const ToolBlock = memo(function ToolBlock({ entry, onReviewToggle }) {
   }, [askUserQuestionResult]);
 
   const [nowMs, setNowMs] = useState(() => Date.now());
+  const liveProgress = !isDone && !!sessionRunning;
+  const wasLiveProgressRef = useRef(false);
+  if (liveProgress) wasLiveProgressRef.current = true;
+
   useEffect(() => {
-    if (isDone || !startedAtMs) return undefined;
+    if (!liveProgress || !startedAtMs) return undefined;
     setNowMs(Date.now());
     const id = window.setInterval(() => setNowMs(Date.now()), 1000);
     return () => window.clearInterval(id);
-  }, [isDone, startedAtMs]);
+  }, [liveProgress, startedAtMs]);
 
-  const liveElapsed = !isDone && startedAtMs
-    ? Math.max(Number(elapsed) || 0, Math.max(0, (nowMs - startedAtMs) / 1000))
-    : (Number(elapsed) || 0);
+  const elapsedSeconds = Number(elapsed) || 0;
+  const computedElapsed = startedAtMs
+    ? Math.max(0, (nowMs - startedAtMs) / 1000)
+    : 0;
+  const liveElapsed = liveProgress && startedAtMs
+    ? Math.max(elapsedSeconds, computedElapsed)
+    : (elapsedSeconds || (wasLiveProgressRef.current ? computedElapsed : 0));
   const bashCommand = tool === 'bash' ? stringArg(args, 'command') : '';
   const bashPrompt = bashCommand || (tool === 'bash' ? displayOverride : '');
   const expandedInvocationText = bashPrompt ? `$ ${bashPrompt}` : '';
@@ -395,7 +403,7 @@ export const ToolBlock = memo(function ToolBlock({ entry, onReviewToggle }) {
         aria-label={expanded ? '收起' : '展开'}
         onClick={toggleExpanded}
       >
-        <span className="ace-spinner w-3 h-3 shrink-0" />
+        <span className={clsx('ace-spinner w-3 h-3 shrink-0', !liveProgress && 'ace-spinner-static')} />
         <span className="font-semibold flex-1 min-w-0 truncate" title={title}>{title}</span>
         <span className="text-fg-mute shrink-0">{totalLines} 行</span>
         <span className="text-fg-mute shrink-0">{formatBytes(totalBytes)}</span>

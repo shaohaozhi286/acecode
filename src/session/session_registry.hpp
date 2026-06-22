@@ -78,6 +78,7 @@ struct SessionRegistryDeps {
     const MemoryRegistry*            memory_registry = nullptr;
     const MemoryConfig*              memory_cfg = nullptr;
     const ProjectInstructionsConfig* project_instructions_cfg = nullptr;
+    const CustomInstructionsConfig*  custom_instructions_cfg = nullptr;
     HookManager*                     hook_manager = nullptr;
     // 全局 PermissionManager(用于派生 per-session perm 的 mode + rules
     // 起始值)。每个 session 自己的 PermissionManager 是独立实例,session_allowed_
@@ -102,10 +103,12 @@ public:
     // 返回 true;若磁盘没有该 id,返回 false。同一 daemon 不允许同 id 双上下文。
     bool resume(const std::string& id, const SessionOptions& opts = {});
 
-    // 找一个 entry。返回 nullptr 表示不存在。返回 raw 指针由调用者立刻使用,
-    // **不要存储**(随时可能被 destroy)。线程安全:加锁拷贝 raw 指针,但
-    // entry 自身 lifetime 不在锁内保证 — 设计上 destroy 是显式的,客户代码
-    // 不应在调 destroy 时同时持指针。
+    // 找一个 entry 并延长其生命周期。HTTP/WS handler 等跨锁使用 entry 的
+    // 调用方应使用 acquire(),避免 destroy() 并发释放对象。
+    std::shared_ptr<SessionEntry> acquire(const std::string& id);
+
+    // 兼容旧测试/少量即时读取路径。返回 raw 指针由调用者立刻使用,不要存储;
+    // 需要跨锁使用时必须改用 acquire()。
     SessionEntry* lookup(const std::string& id);
 
     // 销毁 session。abort 当前 LLM/tool + join worker + 移出 map。
@@ -149,7 +152,7 @@ public:
     std::size_t size() const;
 
 private:
-    std::unique_ptr<SessionEntry> make_entry_locked(const std::string& id,
+    std::shared_ptr<SessionEntry> make_entry_locked(const std::string& id,
                                                      const SessionOptions& opts,
                                                      const SessionMeta* resumed_meta);
     void restore_loop_history(SessionEntry& entry,
@@ -157,7 +160,7 @@ private:
 
     SessionRegistryDeps                                          deps_;
     mutable std::mutex                                            mu_;
-    std::unordered_map<std::string, std::unique_ptr<SessionEntry>> entries_;
+    std::unordered_map<std::string, std::shared_ptr<SessionEntry>> entries_;
     mutable std::mutex                                            title_threads_mu_;
     std::vector<std::thread>                                      title_threads_;
 };

@@ -1,8 +1,8 @@
 // 全屏设置页:左栏导航 + 右栏内容(Codex 风格)。
 //
 // 设计来源:Claude Design 高保真原型 (panels.jsx)。NAV 顺序与设计稿一致。
-// 后端真实接入的 section:常规 (权限模式) / 外观 (主题) / 配置 / 模型 / 工具。
-// 其余 section (个性化 / MCP / 已归档会话 / 使用情况) 当前部分为 UI 占位
+// 后端真实接入的 section:常规 (权限模式) / 外观 (主题) / 配置 / 个性化 / 模型 / 工具。
+// 其余 section (MCP / 已归档会话 / 使用情况) 当前部分为 UI 占位
 // — 状态走本地 useState,提交按钮无网络副作用,待后端接口就绪后接入。
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -648,16 +648,45 @@ function SectionConfig({ health }) {
 }
 
 // ─── 个性化 ────────────────────────────────────────────────────────────────
-// UI 占位:自定义指令文本框 + 保存按钮。设计 panels.jsx::renderPersonalizationContent。
-
 function SectionPersonalization() {
   const [text, setText] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
 
-  const save = () => {
-    setSaved(true);
-    toast({ kind: 'ok', text: '已保存(占位)' });
-    setTimeout(() => setSaved(false), 1500);
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    api.getCustomInstructions()
+      .then((cfg) => {
+        if (!cancelled) setText(typeof cfg?.text === 'string' ? cfg.text : '');
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          toast({ kind: 'err', text: '加载自定义指令失败:' + (e?.message || '') });
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  const save = async () => {
+    if (saving || loading) return;
+    setSaving(true);
+    setSaved(false);
+    try {
+      const result = await api.setCustomInstructions({ text });
+      if (typeof result?.text === 'string') setText(result.text);
+      setSaved(true);
+      toast({ kind: 'ok', text: '自定义指令已保存' });
+      setTimeout(() => setSaved(false), 1500);
+    } catch (e) {
+      toast({ kind: 'err', text: '保存自定义指令失败:' + (e?.message || '') });
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -666,13 +695,17 @@ function SectionPersonalization() {
 
       <div className="text-[14px] font-semibold mb-1">自定义指令</div>
       <p className="text-[12px] text-fg-mute mb-3">为你的项目向 ACECode 提供额外说明和上下文</p>
+      <p className="text-[12px] text-fg-mute mb-3">
+        提示:自定义指令会参与每次请求的提示词上下文,频繁修改可能降低提示词缓存命中率。
+      </p>
 
       <textarea
         value={text}
         onChange={(e) => { setText(e.target.value); setSaved(false); }}
+        disabled={loading || saving}
         placeholder="例如:这个项目使用 React 18 + Vite,组件库选 Tailwind 风格,提交信息用中文..."
         rows={10}
-        className="w-full px-3 py-2.5 text-[13px] rounded-md border border-border bg-surface text-fg outline-none focus:border-accent transition leading-relaxed resize-y"
+        className="w-full px-3 py-2.5 text-[13px] rounded-md border border-border bg-surface text-fg outline-none focus:border-accent transition leading-relaxed resize-y disabled:opacity-70"
         style={{ minHeight: 240 }}
       />
 
@@ -680,12 +713,14 @@ function SectionPersonalization() {
         <button
           type="button"
           onClick={save}
+          disabled={loading || saving}
           className={clsx(
             'px-4 py-1.5 rounded-md text-[12px] font-medium transition',
             saved ? 'bg-ok text-white' : 'bg-accent text-white hover:opacity-90',
+            (loading || saving) && 'opacity-60 cursor-not-allowed',
           )}
         >
-          {saved ? '✓ 已保存' : '保存'}
+          {saving ? '保存中...' : saved ? '已保存' : '保存'}
         </button>
       </div>
     </>

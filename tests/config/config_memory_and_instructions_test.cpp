@@ -10,6 +10,9 @@
 
 #include <nlohmann/json.hpp>
 
+#include <filesystem>
+#include <fstream>
+
 using namespace acecode;
 
 namespace {
@@ -55,6 +58,11 @@ void apply_project_instructions_section(const nlohmann::json& pj,
         out.read_agent_md = pj["read_agent_md"].get<bool>();
     if (pj.contains("read_claude_md") && pj["read_claude_md"].is_boolean())
         out.read_claude_md = pj["read_claude_md"].get<bool>();
+}
+
+nlohmann::json read_json_file(const std::filesystem::path& path) {
+    std::ifstream ifs(path, std::ios::binary);
+    return nlohmann::json::parse(ifs);
 }
 
 } // namespace
@@ -180,6 +188,50 @@ TEST(ConfigValidation, ProjectInstructionsFilenamesMustNotBeEmpty) {
     bool found = false;
     for (const auto& e : errs) {
         if (e.find("empty entry") != std::string::npos) found = true;
+    }
+    EXPECT_TRUE(found);
+}
+
+TEST(ConfigCustomInstructions, DefaultsToEmptyText) {
+    AppConfig cfg;
+    EXPECT_TRUE(cfg.custom_instructions.text.empty());
+}
+
+TEST(ConfigCustomInstructions, SaveOmitsEmptyAndPersistsNonEmptyText) {
+    auto dir = std::filesystem::temp_directory_path() / "acecode-custom-instructions-config-test";
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir);
+    auto path = dir / "config.json";
+
+    AppConfig cfg;
+    save_config(cfg, path.string());
+    auto empty_json = read_json_file(path);
+    EXPECT_FALSE(empty_json.contains("custom_instructions"));
+
+    cfg.custom_instructions.text = "Prefer concise Chinese replies.";
+    save_config(cfg, path.string());
+    auto saved_json = read_json_file(path);
+    ASSERT_TRUE(saved_json.contains("custom_instructions"));
+    ASSERT_TRUE(saved_json["custom_instructions"].contains("text"));
+    EXPECT_EQ(saved_json["custom_instructions"]["text"].get<std::string>(),
+              "Prefer concise Chinese replies.");
+
+    cfg.custom_instructions.text.clear();
+    save_config(cfg, path.string());
+    auto cleared_json = read_json_file(path);
+    EXPECT_FALSE(cleared_json.contains("custom_instructions"));
+
+    std::filesystem::remove_all(dir, ec);
+}
+
+TEST(ConfigValidation, CustomInstructionsTextHasByteCap) {
+    AppConfig cfg;
+    cfg.custom_instructions.text.assign(kCustomInstructionsMaxBytes + 1, 'x');
+    auto errs = validate_config(cfg);
+    bool found = false;
+    for (const auto& e : errs) {
+        if (e.find("custom_instructions.text") != std::string::npos) found = true;
     }
     EXPECT_TRUE(found);
 }
