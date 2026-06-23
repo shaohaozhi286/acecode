@@ -889,7 +889,7 @@ export function loadTranscriptHistory(state, data = {}) {
     title: current.title || '',
     status: current.status || 'idle',
     isLive: !!current.isLive,
-    lastSeq: current.lastSeq || 0,
+    lastSeq: 0,
     loadState: 'loaded',
   });
   const effects = [];
@@ -1037,6 +1037,7 @@ export function useSessionTranscript(sessionRef, options = {}) {
     let off = false;
     api.getMessages(sid, 0).then((data) => {
       if (off) return;
+      const seqBeforeLoad = stateRef.current?.lastSeq || 0;
       const loaded = loadTranscriptHistory(stateRef.current, data || {});
       const nextState = {
         ...loaded.state,
@@ -1046,6 +1047,41 @@ export function useSessionTranscript(sessionRef, options = {}) {
       stateRef.current = nextState;
       setState(nextState);
       dispatchEffects(loaded.effects, sid, optionsRef.current);
+
+      const loadedSeq = nextState.lastSeq || 0;
+      const needsReplay = isLive && (loadedSeq > 0 || seqBeforeLoad > loadedSeq);
+      if (needsReplay) {
+        api.getMessages(sid, loadedSeq).then((replayData) => {
+          if (off) return;
+          const replayEvents = Array.isArray(replayData)
+            ? replayData
+            : (Array.isArray(replayData?.events) ? replayData.events : []);
+          if (replayEvents.length > 0) {
+            let replayState = stateRef.current;
+            const effects = [];
+            for (const ev of replayEvents) {
+              const reduced = reduceTranscriptEvent(replayState, ev);
+              replayState = reduced.state;
+              effects.push(...reduced.effects);
+            }
+            stateRef.current = replayState;
+            setState(replayState);
+            dispatchEffects(effects, sid, optionsRef.current);
+            return;
+          }
+          if (loadedSeq === 0 && Array.isArray(replayData?.messages)) {
+            const refreshed = loadTranscriptHistory(stateRef.current, replayData);
+            const refreshedState = {
+              ...refreshed.state,
+              isLive,
+              loadState: 'loaded',
+            };
+            stateRef.current = refreshedState;
+            setState(refreshedState);
+            dispatchEffects(refreshed.effects, sid, optionsRef.current);
+          }
+        }).catch(() => {});
+      }
     }).catch((error) => {
       if (off) return;
       const nextState = {
@@ -1064,7 +1100,6 @@ export function useSessionTranscript(sessionRef, options = {}) {
   useEffect(() => {
     if (!sid || !isLive) return undefined;
     connection.reconfigure({ port: ref?.port || '', token: ref?.token || '' });
-    connection.retainSession(sid);
     const handler = (event) => {
       const msg = event.detail || {};
       const msgSid = msg.session_id || msg.payload?.session_id || '';
@@ -1072,6 +1107,7 @@ export function useSessionTranscript(sessionRef, options = {}) {
       applyEvent(msg);
     };
     connection.addEventListener('message', handler);
+    connection.retainSession(sid);
     return () => {
       connection.removeEventListener('message', handler);
       connection.releaseSession(sid);

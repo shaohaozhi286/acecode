@@ -118,6 +118,28 @@ run('重复 replay 的 token seq 不会重复追加 streaming 文本', () => {
   assert.deepEqual(state.items.map((item) => item.content), ['work', 'hello!']);
 });
 
+run('history load 不继承被旧快照覆盖的 live seq 水位', () => {
+  const live = reduceMany([
+    { type: 'message', payload: { id: 'u1', role: 'user', content: 'work' }, seq: 1 },
+    { type: 'token', payload: { text: 'partial' }, seq: 2 },
+  ]);
+
+  const loaded = loadTranscriptHistory(live, {
+    messages: [
+      { id: 'u1', role: 'user', content: 'work', ts: 1 },
+    ],
+    events: [],
+  }).state;
+
+  assert.equal(loaded.lastSeq, 0);
+  const final = reduceTranscriptEvent(loaded, {
+    type: 'message',
+    payload: { id: 'a1', role: 'assistant', content: 'final answer' },
+    seq: 2,
+  }).state;
+  assert.deepEqual(final.items.map((item) => item.content), ['work', 'final answer']);
+});
+
 run('home auto_start 竞争:快照已含的 user 消息再经 WS 事件到达不重复(按 id 幂等)', () => {
   // 回归 bug(dedupe-message-events-by-id):主页发起首条消息时,daemon 的
   // GET /messages 先收集事件回放、后读消息快照,而回合线程先 append 消息

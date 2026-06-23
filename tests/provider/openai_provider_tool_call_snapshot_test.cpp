@@ -490,4 +490,48 @@ TEST(OpenAiProviderToolCallSnapshotTest, MultipleIndicesAccumulateIndependently)
     EXPECT_EQ(col.error_events, 0);
 }
 
+TEST(OpenAiProviderToolCallSnapshotTest, MissingToolCallIdSynthesizesStableId) {
+    const std::string args = R"({"command":"pwd"})";
+
+    LocalHttpServer server([&](httplib::Server& s) {
+        s.Post("/chat/completions", [&](const httplib::Request&, httplib::Response& res) {
+            nlohmann::json j;
+            nlohmann::json choice;
+            choice["index"] = 0;
+            choice["delta"]["tool_calls"] = nlohmann::json::array();
+            nlohmann::json tc;
+            tc["type"] = "function";
+            tc["index"] = 0;
+            tc["function"]["name"] = "bash";
+            tc["function"]["arguments"] = args;
+            choice["delta"]["tool_calls"].push_back(tc);
+            j["choices"].push_back(choice);
+
+            std::string body;
+            body += "data: " + j.dump() + "\n\n";
+            body += "data: {\"choices\":[{\"delta\":{},\"index\":0,\"finish_reason\":\"tool_calls\"}]}\n\n";
+            body += "data: [DONE]\n\n";
+            res.set_content(body, "text/event-stream");
+            res.status = 200;
+        });
+    });
+
+    OpenAiCompatProvider provider(
+        "http://127.0.0.1:" + std::to_string(server.port), "", "test-model");
+
+    ChatMessage user_msg;
+    user_msg.role = "user";
+    user_msg.content = "x";
+
+    StreamCollector col;
+    std::atomic<bool> abort_flag{false};
+    provider.chat_stream({user_msg}, {}, col.callback(), &abort_flag);
+
+    ASSERT_EQ(col.tool_calls.size(), 1u);
+    EXPECT_EQ(col.tool_calls[0].id.rfind("call_ace_", 0), 0u);
+    EXPECT_EQ(col.tool_calls[0].function_name, "bash");
+    EXPECT_EQ(col.tool_calls[0].function_arguments, args);
+    EXPECT_EQ(col.error_events, 0);
+}
+
 } // namespace

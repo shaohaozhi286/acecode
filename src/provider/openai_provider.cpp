@@ -4,6 +4,7 @@
 #include "session/attachment_store.hpp"
 #include "utils/logger.hpp"
 #include "utils/base64.hpp"
+#include "utils/sha1.hpp"
 #include "network/proxy_resolver.hpp"
 #include <cpr/cpr.h>
 #include <cpr/ssl_options.h>
@@ -68,6 +69,24 @@ std::string provider_error_kind_to_string(ProviderErrorKind kind) {
     case ProviderErrorKind::Unknown:      return "unknown";
     }
     return "unknown";
+}
+
+std::string synthesize_tool_call_id(int index,
+                                    const std::string& name,
+                                    const std::string& arguments) {
+    std::string fingerprint = std::to_string(index);
+    fingerprint.push_back('\n');
+    fingerprint.append(name);
+    fingerprint.push_back('\n');
+    fingerprint.append(arguments);
+    return "call_ace_" + sha1_hex(fingerprint).substr(0, 24);
+}
+
+std::string json_string_or_empty(const nlohmann::json& value, const char* key) {
+    if (!value.is_object() || !value.contains(key) || !value[key].is_string()) {
+        return {};
+    }
+    return value[key].get<std::string>();
 }
 
 std::optional<std::size_t> find_complete_json_prefix_end(const std::string& value) {
@@ -1018,12 +1037,21 @@ ChatResponse OpenAiCompatProvider::parse_response(const nlohmann::json& j) {
     }
 
     if (message.contains("tool_calls") && message["tool_calls"].is_array()) {
+        int index = 0;
         for (const auto& tc : message["tool_calls"]) {
             ToolCall call;
-            call.id = tc["id"].get<std::string>();
-            call.function_name = tc["function"]["name"].get<std::string>();
-            call.function_arguments = tc["function"]["arguments"].get<std::string>();
+            call.id = json_string_or_empty(tc, "id");
+            if (tc.contains("function") && tc["function"].is_object()) {
+                call.function_name = json_string_or_empty(tc["function"], "name");
+                call.function_arguments = json_string_or_empty(tc["function"], "arguments");
+            }
+            if (call.id.empty()) {
+                call.id = synthesize_tool_call_id(index, call.function_name, call.function_arguments);
+                LOG_WARN("parse_response: synthesized missing tool_call id index=" +
+                         std::to_string(index) + " tool='" + call.function_name + "'");
+            }
             resp.tool_calls.push_back(call);
+            ++index;
         }
     }
 
@@ -1190,9 +1218,15 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
         auto flush_pending_tools = [&]() {
             for (auto& [idx, tc] : pending_tools) {
                 ToolCall call;
-                call.id = tc.id;
+                call.id = tc.id.empty()
+                    ? synthesize_tool_call_id(idx, tc.name, tc.arguments)
+                    : tc.id;
                 call.function_name = tc.name;
                 call.function_arguments = tc.arguments;
+                if (tc.id.empty()) {
+                    LOG_WARN("chat_stream: synthesized missing tool_call id index=" +
+                             std::to_string(idx) + " tool='" + tc.name + "'");
+                }
                 accumulated.tool_calls.push_back(call);
 
                 StreamEvent evt;
