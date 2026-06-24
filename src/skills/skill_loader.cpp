@@ -149,7 +149,6 @@ std::optional<SkillMetadata> load_skill_from_dir(const fs::path& dir,
     std::string fm_name = get_string(fm, "name");
     if (fm_name.empty()) {
         meta.name = path_to_utf8(dir.filename());
-        LOG_WARN("[skills] " + path_to_utf8(skill_md) + " missing frontmatter 'name'; using dir name '" + meta.name + "'");
     } else {
         meta.name = fm_name;
     }

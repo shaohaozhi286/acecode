@@ -356,6 +356,18 @@ bool SessionManager::replace_active_messages(const std::vector<ChatMessage>& mes
     return true;
 }
 
+bool SessionManager::append_compact_checkpoint(const CompactCheckpoint& checkpoint) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!started_) return false;
+    if (!ensure_created()) return false;
+    if (!created_) return false;
+
+    SessionStorage::append_message(jsonl_path_, encode_compact_checkpoint(checkpoint));
+    message_count_++;
+    update_meta();
+    return true;
+}
+
 void SessionManager::begin_user_turn_checkpoint(const std::string& user_message_uuid) {
     std::lock_guard<std::mutex> lk(mu_);
     if (!started_ || user_message_uuid.empty()) return;

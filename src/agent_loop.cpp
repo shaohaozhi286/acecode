@@ -8,6 +8,7 @@
 #include "utils/text_file_buffer.hpp"
 #include "commands/compact.hpp"
 #include "commands/micro_compact.hpp"
+#include "session/compact_checkpoint.hpp"
 #include "session/tool_metadata_codec.hpp"
 #include "session/tool_result_storage.hpp"
 #include "session/output_attachments.hpp"
@@ -267,6 +268,11 @@ nlohmann::json build_transcript_replace_payload(
     const CompactResult& result) {
     nlohmann::json arr = nlohmann::json::array();
     for (const auto& msg : messages) {
+        if (is_file_checkpoint_message(msg)) continue;
+        if (is_compact_checkpoint_message(msg)) continue;
+        if (is_content_replacement_message(msg)) continue;
+        if (is_turn_timing_message(msg)) continue;
+        if (web::is_hidden_goal_context_message(msg)) continue;
         arr.push_back(web::chat_message_to_payload_json(msg));
     }
     return nlohmann::json{
@@ -661,24 +667,29 @@ void AgentLoop::emit_transcript_system_message(const std::string& content,
 }
 
 bool AgentLoop::active_estimate_exceeds_auto_threshold() const {
-    auto [start, count] = get_messages_after_compact_boundary(messages_);
-    std::vector<ChatMessage> active(messages_.begin() + start,
-                                    messages_.begin() + start + count);
-    return estimate_message_tokens(active) > get_auto_compact_threshold(context_window_);
+    return estimate_message_tokens(provider_relevant_messages(messages_)) >
+           get_auto_compact_threshold(context_window_);
 }
 
-void AgentLoop::apply_compact_result(const CompactResult& result) {
-    messages_ = result.compacted_messages;
+void AgentLoop::apply_compact_result(const CompactResult& result, const std::string& trigger) {
+    const int pre_tokens = estimate_message_tokens(provider_relevant_messages(messages_));
+    std::vector<ChatMessage> replacement_history =
+        provider_relevant_messages(result.compacted_messages);
+    const int post_tokens = estimate_message_tokens(replacement_history);
+
     last_api_prompt_tokens_.store(0);
     if (session_manager_) {
-        session_manager_->replace_active_messages(messages_);
+        CompactCheckpoint checkpoint;
+        checkpoint.trigger = trigger;
+        checkpoint.summary = result.summary_text;
+        checkpoint.messages_compressed = result.messages_compressed;
+        checkpoint.estimated_tokens_saved = result.estimated_tokens_saved;
+        checkpoint.pre_tokens = pre_tokens;
+        checkpoint.post_tokens = post_tokens;
+        checkpoint.replacement_history = replacement_history;
+        session_manager_->append_compact_checkpoint(checkpoint);
     }
-
-    events_.emit(SessionEventKind::TranscriptReplace,
-                 build_transcript_replace_payload(messages_, result));
-    if (callbacks_.on_transcript_replace) {
-        callbacks_.on_transcript_replace(messages_, result);
-    }
+    messages_ = std::move(replacement_history);
 }
 
 bool AgentLoop::maybe_run_auto_compact() {
@@ -690,16 +701,15 @@ bool AgentLoop::maybe_run_auto_compact() {
                  " context_window=" + std::to_string(context_window_) +
                  " last_api_prompt_tokens=" +
                  std::to_string(last_api_prompt_tokens_.load()));
-        dispatch_message("system",
-                         "[Auto-compact] Skipped after repeated compaction failures.",
-                         false);
+        emit_transcript_system_message(
+            "[Auto-compact] Skipped after repeated compaction failures.");
         return false;
     }
 
-    auto [boundary_start, boundary_count] = get_messages_after_compact_boundary(messages_);
-    (void)boundary_count;
-    int pre_tokens = estimate_message_tokens(
-        std::vector<ChatMessage>(messages_.begin() + boundary_start, messages_.end()));
+    const int boundary_start = 0;
+    const auto active_for_estimate = provider_relevant_messages(messages_);
+    const int boundary_count = static_cast<int>(active_for_estimate.size());
+    int pre_tokens = estimate_message_tokens(active_for_estimate);
     const int threshold = get_auto_compact_threshold(context_window_);
     LOG_INFO("Auto-compact preflight; messages=" + std::to_string(messages_.size()) +
              " active_start=" + std::to_string(boundary_start) +
@@ -718,9 +728,7 @@ bool AgentLoop::maybe_run_auto_compact() {
         auto outcome = dispatch_codex_hook(kCodexHookEventPreCompact, "auto", payload);
         apply_hook_side_effects(outcome);
         if (outcome.continue_false || outcome.blocked || outcome.denied) {
-            dispatch_message("system",
-                             "[Auto-compact] Stopped by hook.",
-                             false);
+            emit_transcript_system_message("[Auto-compact] Stopped by hook.");
             return false;
         }
     }
@@ -732,30 +740,22 @@ bool AgentLoop::maybe_run_auto_compact() {
             micro_result.estimated_tokens_saved,
             micro_result.cleared_tool_call_ids));
         last_api_prompt_tokens_.store(0);
-        if (session_manager_) {
-            session_manager_->replace_active_messages(messages_);
-        }
-
         CompactResult replace_result;
         replace_result.performed = true;
+        replace_result.messages_compressed = micro_result.tool_results_cleared;
         replace_result.estimated_tokens_saved = micro_result.estimated_tokens_saved;
+        replace_result.summary_text = "[Micro-compact] Cleared old tool results.";
         replace_result.compacted_messages = messages_;
-        events_.emit(SessionEventKind::TranscriptReplace,
-                     build_transcript_replace_payload(messages_, replace_result));
+        apply_compact_result(replace_result, "auto");
 
-        dispatch_message(
-            "system",
+        emit_transcript_system_message(
             "[Micro-compact] Cleared " +
                 std::to_string(micro_result.tool_results_cleared) +
                 " old tool results, saved ~" +
                 TokenTracker::format_tokens(micro_result.estimated_tokens_saved) +
-                " tokens",
-            false);
+                " tokens");
 
-        auto [after_start, after_count] = get_messages_after_compact_boundary(messages_);
-        std::vector<ChatMessage> active_after(messages_.begin() + after_start,
-                                              messages_.begin() + after_start + after_count);
-        const int after_tokens = estimate_message_tokens(active_after);
+        const int after_tokens = estimate_message_tokens(provider_relevant_messages(messages_));
         const bool still_above_threshold = after_tokens > threshold;
         LOG_INFO("Auto micro-compact result; cleared_tool_results=" +
                  std::to_string(micro_result.tool_results_cleared) +
@@ -789,9 +789,8 @@ bool AgentLoop::maybe_run_auto_compact() {
         {"label", "Compacting conversation"},
         {"started_at_ms", now_epoch_ms()},
     });
-    dispatch_message("system",
-                     "[Auto-compact] Context approaching limit, compacting...",
-                     false);
+    emit_transcript_system_message(
+        "[Auto-compact] Context approaching limit, compacting...");
 
     std::shared_ptr<LlmProvider> provider_snapshot;
     if (provider_accessor_) provider_snapshot = provider_accessor_();
@@ -802,9 +801,8 @@ bool AgentLoop::maybe_run_auto_compact() {
                  std::to_string(auto_compact_consecutive_failures_) +
                  " active_estimated_tokens=" + std::to_string(pre_tokens) +
                  " threshold=" + std::to_string(threshold));
-        dispatch_message("system",
-                         "[Auto-compact] provider unavailable for compaction",
-                         false);
+        emit_transcript_system_message(
+            "[Auto-compact] provider unavailable for compaction");
         return false;
     }
 
@@ -826,7 +824,7 @@ bool AgentLoop::maybe_run_auto_compact() {
                  " error=" + log_truncate(result.error, 500) +
                  " active_estimated_tokens=" + std::to_string(pre_tokens) +
                  " threshold=" + std::to_string(threshold));
-        dispatch_message("system", "[Auto-compact] " + result.error, false);
+        emit_transcript_system_message("[Auto-compact] " + result.error);
         return false;
     }
 
@@ -839,7 +837,7 @@ bool AgentLoop::maybe_run_auto_compact() {
              " estimated_tokens_saved=" +
              std::to_string(result.estimated_tokens_saved) +
              " compacted_estimated_tokens=" + std::to_string(compacted_tokens));
-    apply_compact_result(result);
+    apply_compact_result(result, "auto");
     if (hook_manager_) {
         auto fields = build_hook_common_fields(kCodexHookEventPostCompact);
         auto payload = build_compact_hook_payload(fields, "auto");
@@ -849,12 +847,10 @@ bool AgentLoop::maybe_run_auto_compact() {
     }
     auto_compact_consecutive_failures_ = 0;
 
-    dispatch_message(
-        "system",
+    emit_transcript_system_message(
         "[Auto-compact] Compacted " + std::to_string(result.messages_compressed) +
             " messages, saved ~" +
-            TokenTracker::format_tokens(result.estimated_tokens_saved) + " tokens",
-        false);
+            TokenTracker::format_tokens(result.estimated_tokens_saved) + " tokens");
     return true;
 }
 
@@ -1182,8 +1178,8 @@ AgentLoop::ApiRequestBundle AgentLoop::build_api_request_messages() {
     bundle.tool_defs = tools_.get_tool_definitions();
     LOG_DEBUG("Registered tools: " + std::to_string(bundle.tool_defs.size()));
 
-    // Prepare messages with system prompt at front, filtering out meta messages
-    auto api_messages = normalize_messages_for_api(messages_);
+    // Prepare provider-facing messages with system prompt at front.
+    auto api_messages = provider_relevant_messages(messages_);
     std::string session_context = cached_context_for_api(
         build_session_context_prompt(
             cwd_, memory_registry_, memory_cfg_, project_instructions_cfg_,
@@ -1329,8 +1325,10 @@ AgentLoop::ProviderCallResult AgentLoop::call_provider_and_collect(
                     callbacks_.on_stream_retry_reset();
                 }
                 CompactResult reset_result;
+                std::vector<ChatMessage> visible_reset_messages =
+                    session_manager_ ? session_manager_->load_active_messages() : messages_;
                 events_.emit(SessionEventKind::TranscriptReplace,
-                             build_transcript_replace_payload(messages_, reset_result));
+                             build_transcript_replace_payload(visible_reset_messages, reset_result));
             }
             emit_progress(
                 "model_retry",
@@ -1447,7 +1445,7 @@ AgentLoop::HandleErrorResult AgentLoop::handle_provider_error(
                 std::max(0, rescue.estimated_tokens_before - rescue.estimated_tokens_after);
             replace_result.summary_text = rescue.marker_text;
             replace_result.compacted_messages = std::move(rescue.compacted_messages);
-            apply_compact_result(replace_result);
+            apply_compact_result(replace_result, "rescue");
 
             ++context_rescue_attempts;
             last_context_rescue_tokens = rescue.estimated_tokens_after;
@@ -1469,14 +1467,12 @@ AgentLoop::HandleErrorResult AgentLoop::handle_provider_error(
                      std::to_string(rescue.estimated_tokens_after) +
                      " request_estimated_tokens_before=" +
                      std::to_string(request_tokens));
-            dispatch_message(
-                "system",
+            emit_transcript_system_message(
                 "[Rescue compact] Provider rejected the request as too large; compacted " +
                     std::to_string(rescue.messages_removed) +
                     " messages and retrying with the most recent " +
                     std::to_string(rescue.protected_user_turns) +
-                    " user turn(s).",
-                false);
+                    " user turn(s).");
             return HandleErrorResult::Continue;
         }
 
@@ -2575,7 +2571,7 @@ void AgentLoop::run_compact() {
         {"label", "Compacting conversation"},
         {"started_at_ms", now_epoch_ms()},
     });
-    dispatch_message("system", "Compacting conversation...", false);
+    emit_transcript_system_message("Compacting conversation...");
 
     auto finish = [this]() {
         if (callbacks_.on_busy_changed) {
@@ -2592,7 +2588,7 @@ void AgentLoop::run_compact() {
         auto outcome = dispatch_codex_hook(kCodexHookEventPreCompact, "manual", payload);
         apply_hook_side_effects(outcome);
         if (outcome.continue_false || outcome.blocked || outcome.denied) {
-            dispatch_message("system", "[Compact] Stopped by hook.", false);
+            emit_transcript_system_message("[Compact] Stopped by hook.");
             finish();
             return;
         }
@@ -2620,7 +2616,7 @@ void AgentLoop::run_compact() {
         return;
     }
 
-    apply_compact_result(result);
+    apply_compact_result(result, "manual");
     if (hook_manager_) {
         auto fields = build_hook_common_fields(kCodexHookEventPostCompact);
         auto payload = build_compact_hook_payload(fields, "manual");
@@ -2632,12 +2628,10 @@ void AgentLoop::run_compact() {
         }
     }
 
-    dispatch_message(
-        "system",
+    emit_transcript_system_message(
         "Compacted " + std::to_string(result.messages_compressed) +
             " messages, saved ~" +
-            std::to_string(result.estimated_tokens_saved) + " tokens.",
-        false);
+            std::to_string(result.estimated_tokens_saved) + " tokens.");
     finish();
 }
 

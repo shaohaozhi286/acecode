@@ -1,6 +1,7 @@
 #pragma once
 
 #include "file_checkpoint_store.hpp"
+#include "compact_checkpoint.hpp"
 #include "session_storage.hpp"
 #include "session_writer_lease.hpp"
 #include "thread_goal_store.hpp"
@@ -32,6 +33,10 @@ public:
     // Replace the current active JSONL transcript, preserving checkpoint
     // metadata for user turns that remain in the supplied message list.
     bool replace_active_messages(const std::vector<ChatMessage>& messages);
+
+    // Append a compact checkpoint to the current JSONL transcript without
+    // rewriting older human-visible rows.
+    bool append_compact_checkpoint(const CompactCheckpoint& checkpoint);
 
     // File checkpoint integration for /rewind. begin_user_turn_checkpoint()
     // creates the per-user snapshot; track_file_write_before() updates that

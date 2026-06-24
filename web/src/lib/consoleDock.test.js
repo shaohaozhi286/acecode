@@ -9,10 +9,12 @@ import {
   activateTab,
   addTab,
   clampDockHeight,
+  consoleCwdForContext,
   createDockTabs,
   markTabExited,
   nextReconnectDelay,
   parsePtyFrame,
+  ptyCreateOptions,
   ptyWsUrl,
   removeTab,
   renameTab,
@@ -161,6 +163,41 @@ run('ptyWsUrl builds same-origin url with cursor and token', () => {
 run('ptyWsUrl honours explicit origin and defaults cursor to -1', () => {
   const url = ptyWsUrl({ id: 'pty-1', origin: 'http://127.0.0.1:36000' });
   assert.equal(url, 'ws://127.0.0.1:36000/ws/pty/pty-1?cursor=-1');
+});
+
+run('consoleCwdForContext prefers current session cwd', () => {
+  const cwd = consoleCwdForContext({
+    activeRef: { sessionId: 's1', cwd: ' C:/repo/session ' },
+    selectedHomeWorkspace: { cwd: 'C:/repo/project' },
+    health: { cwd: 'C:/repo/default' },
+  });
+  assert.equal(cwd, 'C:/repo/session');
+});
+
+run('consoleCwdForContext uses selected project cwd when no session is active', () => {
+  const cwd = consoleCwdForContext({
+    activeRef: { home: true, cwd: 'C:/repo/active' },
+    selectedHomeWorkspace: { hash: 'w1', cwd: 'C:/repo/project' },
+    health: { cwd: 'C:/repo/default' },
+  });
+  assert.equal(cwd, 'C:/repo/project');
+});
+
+run('consoleCwdForContext falls back to default cwd without session or project', () => {
+  const cwd = consoleCwdForContext({
+    activeRef: { home: true, cwd: 'C:/repo/active' },
+    selectedHomeWorkspace: { hash: '', noWorkspace: true, cwd: '' },
+    health: { cwd: 'C:/repo/default' },
+  });
+  assert.equal(cwd, 'C:/repo/default');
+});
+
+run('ptyCreateOptions includes cwd and shell only when present', () => {
+  assert.deepEqual(ptyCreateOptions({ shellId: ' powershell ', cwd: ' C:/repo ' }), {
+    shell: 'powershell',
+    cwd: 'C:/repo',
+  });
+  assert.deepEqual(ptyCreateOptions({}), {});
 });
 
 console.log('consoleDock.test.js: all tests passed');

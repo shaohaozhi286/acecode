@@ -7,7 +7,7 @@
 // 选中后插入 `/<name> ` 到输入框,不立即发送(builtin 与 skill 行为统一)。
 // 已识别的首段命令以原子 token 样式叠加渲染(overlay div 与 textarea 同度量)。
 
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { clsx } from '../lib/format.js';
 import { getGoalStopControlState } from '../lib/goalControl.js';
 import { getInputBarActionState } from '../lib/inputBarState.js';
@@ -25,6 +25,11 @@ import {
 } from '../lib/slashCommands.js';
 import { getNextInputHistoryPointer, shouldNavigateInputHistory } from '../lib/inputHistoryNavigation.js';
 import { filesFromClipboardEvent, filesFromTransfer, hasFileTransfer } from '../lib/composerFileTransfer.js';
+import {
+  captureComposerTextareaSelection,
+  requestDesktopWindowFocus,
+  restoreComposerTextareaCaret,
+} from '../lib/composerCaretRestore.js';
 import {
   DESKTOP_CONTEXT_ACTION_EVENT,
   DESKTOP_CONTEXT_ACTIONS,
@@ -106,12 +111,16 @@ export const InputBar = forwardRef(function InputBar({
   const [dragActive, setDragActive] = useState(false);
   const [attachmentPreview, setAttachmentPreview] = useState(null);
   const ta = useRef(null);
+  const rootRef = useRef(null);
   const fileInputRef = useRef(null);
   const capabilityMenuRef = useRef(null);
   const dragDepthRef = useRef(0);
   const composingRef = useRef(false);
   const justFinishedCompositionRef = useRef(false);
   const compositionGuardTimerRef = useRef(0);
+  const caretRestoreUntilRef = useRef(0);
+  const caretRestoreSelectionRef = useRef(null);
+  const caretRestoreScheduleRef = useRef({ firstRaf: 0, secondRaf: 0, timeout: 0 });
   const isHero = variant === 'hero';
   const textareaVerticalPadding = isHero ? 16 : 12;
   const textareaBaseHeight = LINE_HEIGHT + textareaVerticalPadding;
@@ -125,6 +134,19 @@ export const InputBar = forwardRef(function InputBar({
   const isImageAttachment = (item) => String(item.kind || item.mime_type || '').startsWith('image');
   const imageAttachments = attachmentItems.filter(isImageAttachment);
   const fileAttachments = attachmentItems.filter((item) => !isImageAttachment(item));
+  const composerLayoutSignature = useMemo(() => [
+    ...attachmentItems.map((item, index) => [
+      composerAttachmentKey(item, index),
+      item?.id || '',
+      item?.uploading ? 'uploading' : 'ready',
+      item?.preview_url || '',
+    ].join(':')),
+    ...contextItems.map((item, index) => [
+      composerContextKey(item, index),
+      item?.type || '',
+      item?.id || '',
+    ].join(':')),
+  ].join('\n'), [attachmentItems, contextItems]);
 
   useEffect(() => {
     const handler = (event) => {
@@ -182,6 +204,65 @@ export const InputBar = forwardRef(function InputBar({
       window.clearTimeout(compositionGuardTimerRef.current);
     }
   }, []);
+
+  const clearCaretRestoreSchedule = useCallback(() => {
+    const schedule = caretRestoreScheduleRef.current;
+    if (schedule.firstRaf) window.cancelAnimationFrame(schedule.firstRaf);
+    if (schedule.secondRaf) window.cancelAnimationFrame(schedule.secondRaf);
+    if (schedule.timeout) window.clearTimeout(schedule.timeout);
+    caretRestoreScheduleRef.current = { firstRaf: 0, secondRaf: 0, timeout: 0 };
+  }, []);
+
+  useEffect(() => () => {
+    clearCaretRestoreSchedule();
+  }, [clearCaretRestoreSchedule]);
+
+  const restoreComposerCaretIfPending = useCallback(() => {
+    const until = caretRestoreUntilRef.current;
+    if (!until || Date.now() > until) return false;
+    return restoreComposerTextareaCaret({
+      textareaElement: ta.current,
+      rootElement: rootRef.current,
+      selection: caretRestoreSelectionRef.current,
+      documentRef: typeof document === 'undefined' ? null : document,
+    });
+  }, []);
+
+  const scheduleComposerCaretRestore = useCallback(() => {
+    if (!caretRestoreUntilRef.current) return;
+    clearCaretRestoreSchedule();
+    caretRestoreScheduleRef.current.firstRaf = window.requestAnimationFrame(() => {
+      caretRestoreScheduleRef.current.firstRaf = 0;
+      restoreComposerCaretIfPending();
+      caretRestoreScheduleRef.current.secondRaf = window.requestAnimationFrame(() => {
+        caretRestoreScheduleRef.current.secondRaf = 0;
+        restoreComposerCaretIfPending();
+      });
+      caretRestoreScheduleRef.current.timeout = window.setTimeout(() => {
+        caretRestoreScheduleRef.current.timeout = 0;
+        restoreComposerCaretIfPending();
+      }, 80);
+    });
+  }, [clearCaretRestoreSchedule, restoreComposerCaretIfPending]);
+
+  const requestComposerCaretRestore = useCallback(() => {
+    caretRestoreUntilRef.current = Date.now() + 1500;
+    caretRestoreSelectionRef.current = captureComposerTextareaSelection(ta.current);
+    requestDesktopWindowFocus();
+    restoreComposerTextareaCaret({
+      textareaElement: ta.current,
+      rootElement: rootRef.current,
+      selection: caretRestoreSelectionRef.current,
+      documentRef: typeof document === 'undefined' ? null : document,
+      allowExternalFocus: true,
+    });
+    scheduleComposerCaretRestore();
+  }, [scheduleComposerCaretRestore]);
+
+  useLayoutEffect(() => {
+    if (!caretRestoreUntilRef.current) return;
+    scheduleComposerCaretRestore();
+  }, [composerLayoutSignature, scheduleComposerCaretRestore]);
 
   const clearCompositionEndGuard = () => {
     if (compositionGuardTimerRef.current) {
@@ -265,10 +346,10 @@ export const InputBar = forwardRef(function InputBar({
     const fileList = Array.from(files || []).filter(Boolean);
     if (disabled || !onMediaFiles || fileList.length === 0) return false;
     setCapabilityOpen(false);
+    requestComposerCaretRestore();
     onMediaFiles(fileList);
-    focusTextareaSoon();
     return true;
-  }, [disabled, focusTextareaSoon, onMediaFiles]);
+  }, [disabled, onMediaFiles, requestComposerCaretRestore]);
 
   const chooseMedia = () => {
     setCapabilityOpen(false);
@@ -523,6 +604,7 @@ export const InputBar = forwardRef(function InputBar({
         isHero ? 'ace-inputbar-hero-card rounded-2xl' : 'rounded-xl',
         dragActive && 'border-accent ring-2 ring-accent/20',
       )}
+      ref={rootRef}
       onDragEnter={handleDragEnter}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}

@@ -1,5 +1,6 @@
 #include "session_resume_restore.hpp"
 
+#include "compact_checkpoint.hpp"
 #include "session_replay.hpp"
 #include "session_rewind.hpp"
 #include "tool_result_storage.hpp"
@@ -27,6 +28,45 @@ bool is_llm_role(const std::string& role) {
 bool is_transcript_only_message(const ChatMessage& msg) {
     return msg.metadata.is_object() &&
            msg.metadata.value("transcript_only", false);
+}
+
+std::optional<std::pair<std::size_t, CompactCheckpoint>>
+latest_valid_compact_checkpoint(const std::vector<ChatMessage>& messages) {
+    for (std::size_t i = messages.size(); i > 0; --i) {
+        auto checkpoint = decode_compact_checkpoint(messages[i - 1]);
+        if (checkpoint.has_value()) {
+            return std::make_pair(i - 1, std::move(*checkpoint));
+        }
+    }
+    return std::nullopt;
+}
+
+void append_agent_model_messages(const std::vector<ChatMessage>& messages,
+                                 AgentLoop& agent_loop) {
+    for (std::size_t i = 0; i < messages.size(); ++i) {
+        const auto& msg = messages[i];
+        if (is_file_checkpoint_message(msg)) continue;
+        if (is_content_replacement_message(msg)) continue;
+        if (is_turn_timing_message(msg)) continue;
+        if (is_compact_checkpoint_message(msg)) continue;
+
+        const bool is_shell_user =
+            (msg.role == "user" && !msg.content.empty() && msg.content[0] == '!');
+        const bool next_is_result =
+            (i + 1 < messages.size() && messages[i + 1].role == "tool_result");
+        if (is_shell_user && next_is_result) {
+            agent_loop.inject_shell_turn(msg.content.substr(1),
+                                         messages[i + 1].content,
+                                         "",
+                                         0);
+            ++i;
+            continue;
+        }
+
+        if (is_llm_role(msg.role) && !is_transcript_only_message(msg)) {
+            agent_loop.push_message(msg);
+        }
+    }
 }
 
 struct FileToolUse {
@@ -176,6 +216,19 @@ void append_resumed_session_messages(const std::vector<ChatMessage>& messages,
                                      const ToolExecutor& tools) {
     restore_file_tool_state_from_messages(messages);
 
+    agent_loop.clear_messages();
+    if (auto checkpoint = latest_valid_compact_checkpoint(messages)) {
+        append_agent_model_messages(checkpoint->second.replacement_history, agent_loop);
+        if (checkpoint->first + 1 < messages.size()) {
+            std::vector<ChatMessage> suffix(
+                messages.begin() + static_cast<std::ptrdiff_t>(checkpoint->first + 1),
+                messages.end());
+            append_agent_model_messages(suffix, agent_loop);
+        }
+    } else {
+        append_agent_model_messages(messages, agent_loop);
+    }
+
     std::vector<ChatMessage> replay_buffer;
     auto flush_replay = [&]() {
         if (replay_buffer.empty()) return;
@@ -192,10 +245,12 @@ void append_resumed_session_messages(const std::vector<ChatMessage>& messages,
             continue;
         }
         if (is_content_replacement_message(msg)) {
-            agent_loop.push_message(msg);
             continue;
         }
         if (is_turn_timing_message(msg)) {
+            continue;
+        }
+        if (is_compact_checkpoint_message(msg)) {
             continue;
         }
 
@@ -218,19 +273,10 @@ void append_resumed_session_messages(const std::vector<ChatMessage>& messages,
             shell_row.content = messages[i + 1].content;
             shell_row.is_tool = true;
             state.conversation.push_back(std::move(shell_row));
-            agent_loop.inject_shell_turn(msg.content.substr(1),
-                                         messages[i + 1].content,
-                                         "",
-                                         0);
             ++i;
             continue;
         }
 
-        // Keep provider-facing history canonical. UI-only pseudo-roles such as
-        // standalone `tool_result` are rendered, but not sent to providers.
-        if (is_llm_role(msg.role) && !is_transcript_only_message(msg)) {
-            agent_loop.push_message(msg);
-        }
         replay_buffer.push_back(msg);
     }
 

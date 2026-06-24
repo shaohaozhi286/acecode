@@ -2,6 +2,57 @@
 // tab 状态机 / WS 帧分流 / 重连退避 / 高度 clamp / WS URL 构建。
 // DOM/xterm/WebSocket 接线在 components/ConsoleDock.jsx;这里只做可单测的数据塑形。
 
+function stringValue(value) {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function hasSession(ref) {
+  return !!(ref && typeof ref === 'object' && (ref.sessionId || ref.session_id || ref.id));
+}
+
+function isNoWorkspace(ref) {
+  return !!(ref && typeof ref === 'object' && (ref.noWorkspace || ref.no_workspace));
+}
+
+function hasExplicitProjectSelection(ref) {
+  if (!ref || typeof ref !== 'object') return false;
+  return isNoWorkspace(ref)
+    || Object.prototype.hasOwnProperty.call(ref, 'hash')
+    || Object.prototype.hasOwnProperty.call(ref, 'workspaceHash')
+    || Object.prototype.hasOwnProperty.call(ref, 'workspace_hash');
+}
+
+export function consoleCwdForContext({ activeRef = null, selectedHomeWorkspace = null, health = null } = {}) {
+  const activeHasSession = hasSession(activeRef);
+  if (activeHasSession && !isNoWorkspace(activeRef)) {
+    const cwd = stringValue(activeRef?.cwd);
+    if (cwd) return cwd;
+  }
+
+  if (!activeHasSession) {
+    const selectedProjectExplicit = hasExplicitProjectSelection(selectedHomeWorkspace);
+    if (!isNoWorkspace(selectedHomeWorkspace)) {
+      const selectedCwd = stringValue(selectedHomeWorkspace?.cwd);
+      if (selectedCwd) return selectedCwd;
+    }
+    if (!selectedProjectExplicit && !isNoWorkspace(activeRef)) {
+      const activeCwd = stringValue(activeRef?.cwd);
+      if (activeCwd) return activeCwd;
+    }
+  }
+
+  return stringValue(health?.cwd);
+}
+
+export function ptyCreateOptions({ shellId = '', cwd = '' } = {}) {
+  const out = {};
+  const cleanShell = stringValue(shellId);
+  const cleanCwd = stringValue(cwd);
+  if (cleanShell) out.shell = cleanShell;
+  if (cleanCwd) out.cwd = cleanCwd;
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // tab 状态机:{tabs: [{id, title, status, exitCode}], activeId}
 // ---------------------------------------------------------------------------

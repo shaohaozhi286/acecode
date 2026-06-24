@@ -4,14 +4,21 @@
 #include "commands/compact.hpp"
 #include "permissions.hpp"
 #include "provider/llm_provider.hpp"
+#include "session/compact_checkpoint.hpp"
+#include "session/session_manager.hpp"
+#include "session/session_storage.hpp"
 #include "tool/tool_executor.hpp"
 #include "stub_provider.hpp"
 
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <filesystem>
 #include <functional>
 #include <mutex>
+#include <random>
+#include <string>
+#include <system_error>
 
 using namespace std::chrono_literals;
 
@@ -118,6 +125,14 @@ bool request_contains(const std::vector<acecode::ChatMessage>& messages,
     return false;
 }
 
+std::filesystem::path make_temp_cwd(const std::string& name) {
+    auto path = std::filesystem::temp_directory_path() /
+                ("acecode_" + name + "_" + std::to_string(std::random_device{}()));
+    std::filesystem::remove_all(path);
+    std::filesystem::create_directories(path);
+    return path;
+}
+
 std::vector<acecode::SessionEvent> wait_for_done(
     acecode::AgentLoop& loop,
     std::function<void()> action) {
@@ -144,7 +159,7 @@ std::vector<acecode::SessionEvent> wait_for_done(
 
 } // namespace
 
-TEST(AgentLoopCompactEvents, QueuedCompactEmitsTranscriptReplacement) {
+TEST(AgentLoopCompactEvents, QueuedCompactAppendsMarkerWithoutTranscriptReplacement) {
     auto provider = std::make_shared<CompactEventProvider>();
     acecode::ToolExecutor tools;
     acecode::PermissionManager permissions;
@@ -196,10 +211,6 @@ TEST(AgentLoopCompactEvents, QueuedCompactEmitsTranscriptReplacement) {
     for (const auto& evt : snapshot) {
         if (evt.kind == acecode::SessionEventKind::TranscriptReplace) {
             saw_replace = true;
-            ASSERT_TRUE(evt.payload.contains("messages"));
-            ASSERT_TRUE(evt.payload["messages"].is_array());
-            EXPECT_GE(evt.payload["messages"].size(), 4u);
-            EXPECT_EQ(evt.payload["messages_compressed"], 2);
         }
         if (evt.kind == acecode::SessionEventKind::Message &&
             evt.payload.value("role", "") == "system" &&
@@ -208,9 +219,69 @@ TEST(AgentLoopCompactEvents, QueuedCompactEmitsTranscriptReplacement) {
         }
     }
 
-    EXPECT_TRUE(saw_replace);
+    EXPECT_FALSE(saw_replace);
     EXPECT_TRUE(saw_completion);
+    EXPECT_TRUE(request_contains(loop.messages(), "Compacted event summary"));
+    EXPECT_FALSE(request_contains(loop.messages(), std::string(900, 'a')));
     loop.events().unsubscribe(sub);
+}
+
+TEST(AgentLoopCompactEvents, ManualCompactAppendsCheckpointWithoutRewritingSessionTranscript) {
+    auto provider = std::make_shared<CompactEventProvider>();
+    acecode::ToolExecutor tools;
+    acecode::PermissionManager permissions;
+    acecode::AgentCallbacks cb;
+    auto cwd = make_temp_cwd("manual_compact_checkpoint");
+    const std::string project_dir = acecode::SessionStorage::get_project_dir(cwd.string());
+    std::filesystem::remove_all(project_dir);
+
+    acecode::SessionManager sm;
+    const std::string session_id = acecode::SessionStorage::generate_session_id();
+    sm.start_session(cwd.string(), "stub", "stub-model", session_id);
+
+    acecode::AgentLoop loop(
+        [&]() -> std::shared_ptr<acecode::LlmProvider> { return provider; },
+        tools,
+        cb,
+        cwd.string(),
+        permissions);
+    loop.set_session_manager(&sm);
+
+    auto add = [&](acecode::ChatMessage message) {
+        loop.push_message(message);
+        sm.on_message(message);
+    };
+    add(loop_msg("user", std::string(900, 'a'), "u-old"));
+    add(loop_msg("assistant", std::string(900, 'b')));
+    for (int i = 0; i < 4; ++i) {
+        add(loop_msg("user", "keep " + std::to_string(i), "u-keep-" + std::to_string(i)));
+        add(loop_msg("assistant", "kept " + std::to_string(i)));
+    }
+
+    wait_for_done(loop, [&] {
+        loop.submit_compact();
+    });
+
+    auto stored = sm.load_active_messages();
+    EXPECT_TRUE(request_contains(stored, std::string(900, 'a')));
+    int checkpoint_count = 0;
+    std::vector<acecode::ChatMessage> replacement_history;
+    for (const auto& message : stored) {
+        auto checkpoint = acecode::decode_compact_checkpoint(message);
+        if (!checkpoint.has_value()) continue;
+        checkpoint_count++;
+        replacement_history = checkpoint->replacement_history;
+    }
+
+    EXPECT_EQ(checkpoint_count, 1);
+    EXPECT_TRUE(request_contains(replacement_history, "Compacted event summary"));
+    EXPECT_FALSE(request_contains(replacement_history, std::string(900, 'a')));
+    EXPECT_TRUE(request_contains(loop.messages(), "Compacted event summary"));
+    EXPECT_FALSE(request_contains(loop.messages(), std::string(900, 'a')));
+
+    std::error_code ec;
+    std::filesystem::remove_all(project_dir, ec);
+    std::filesystem::remove_all(cwd, ec);
 }
 
 TEST(AgentLoopCompactEvents, AutoCompactRunsWithoutCallbackBeforeChatStream) {
@@ -242,7 +313,6 @@ TEST(AgentLoopCompactEvents, AutoCompactRunsWithoutCallbackBeforeChatStream) {
     for (const auto& evt : events) {
         if (evt.kind == acecode::SessionEventKind::TranscriptReplace) {
             saw_replace = true;
-            EXPECT_TRUE(evt.payload.contains("messages"));
         }
         if (evt.kind == acecode::SessionEventKind::Message &&
             evt.payload.value("role", "") == "system" &&
@@ -250,7 +320,7 @@ TEST(AgentLoopCompactEvents, AutoCompactRunsWithoutCallbackBeforeChatStream) {
             saw_completion = true;
         }
     }
-    EXPECT_TRUE(saw_replace);
+    EXPECT_FALSE(saw_replace);
     EXPECT_TRUE(saw_completion);
 }
 
@@ -375,7 +445,7 @@ TEST(AgentLoopCompactEvents, ContextOverflowRescueCompactsAndRetriesRequest) {
             saw_rescue_message = true;
         }
     }
-    EXPECT_TRUE(saw_replace);
+    EXPECT_FALSE(saw_replace);
     EXPECT_TRUE(saw_rescue_message);
 }
 

@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
 import {
+  applyTranscriptReplayEvents,
   canLiveMonitorSession,
   createTranscriptState,
   loadTranscriptHistory,
   projectCompactTranscriptItems,
   reduceTranscriptEvent,
+  replaySinceForLiveCatchup,
 } from './sessionTranscript.js';
 import { projectCollapsedTranscriptItems } from './transcriptProjection.js';
 
@@ -99,6 +101,45 @@ run('assistant token streaming 被 final message 替换', () => {
   assert.equal(state.streamingId, null);
 });
 
+run('assistant final message 覆盖尾部已结束的 stream draft', () => {
+  const draft = reduceMany([
+    { type: 'token', payload: { text: '### 2直接挂\n```' }, seq: 1 },
+    { type: 'done', payload: {}, seq: 2 },
+  ]);
+  assert.equal(draft.streamingId, null);
+  assert.equal(draft.items[0].streamDraft, true);
+  assert.equal(draft.items[0].streaming, false);
+
+  const state = reduceTranscriptEvent(draft, {
+    type: 'message',
+    payload: {
+      id: 'a1',
+      role: 'assistant',
+      content: '2. `mkdir && move` 一步执行直接挂\n\n```cmd\nmkdir docs && move file docs\n```',
+    },
+    seq: 3,
+  }).state;
+
+  assert.equal(state.items.length, 1);
+  assert.equal(state.items[0].messageId, 'a1');
+  assert.equal(state.items[0].streamDraft, false);
+  assert.equal(state.items[0].content, '2. `mkdir && move` 一步执行直接挂\n\n```cmd\nmkdir docs && move file docs\n```');
+});
+
+run('assistant final message 不跨 tool 边界替换旧 stream draft', () => {
+  const state = reduceMany([
+    { type: 'token', payload: { text: '先检查' }, seq: 1 },
+    { type: 'tool_start', payload: { tool: 'bash', tool_call_id: 'call-1', args: { cmd: 'pwd' } }, seq: 2 },
+    { type: 'message', payload: { id: 'a1', role: 'assistant', content: '最终答案' }, seq: 3 },
+  ]);
+
+  assert.equal(state.items.length, 3);
+  assert.equal(state.items[0].content, '先检查');
+  assert.equal(state.items[0].streaming, false);
+  assert.equal(state.items[1].kind, 'tool');
+  assert.equal(state.items[2].content, '最终答案');
+});
+
 run('重复 replay 的 token seq 不会重复追加 streaming 文本', () => {
   let state = loadTranscriptHistory(createTranscriptState({ title: 's1' }), {
     messages: [
@@ -138,6 +179,30 @@ run('history load 不继承被旧快照覆盖的 live seq 水位', () => {
     seq: 2,
   }).state;
   assert.deepEqual(final.items.map((item) => item.content), ['work', 'final answer']);
+});
+
+run('live 首次加载后从 1 补拉事件缓冲,避开 since=0 不回放', () => {
+  assert.equal(replaySinceForLiveCatchup({ isLive: false, loadedSeq: 0 }), null);
+  assert.equal(replaySinceForLiveCatchup({ isLive: true, loadedSeq: 0 }), 1);
+  assert.equal(replaySinceForLiveCatchup({ isLive: true, loadedSeq: 42 }), 42);
+});
+
+run('live catch-up replay 丢弃已持久化 message 前的旧 token', () => {
+  const loaded = loadTranscriptHistory(createTranscriptState({ title: 's1' }), {
+    messages: [
+      { id: 'u1', role: 'user', content: 'work', ts: 1 },
+      { id: 'a1', role: 'assistant', content: 'final persisted', ts: 2 },
+    ],
+    events: [],
+  }).state;
+
+  const replayed = applyTranscriptReplayEvents(loaded, [
+    { type: 'token', payload: { text: 'partial stale ' }, seq: 2 },
+    { type: 'message', payload: { id: 'a1', role: 'assistant', content: 'final persisted' }, seq: 3 },
+  ]).state;
+
+  assert.deepEqual(replayed.items.map((item) => item.content), ['work', 'final persisted']);
+  assert.equal(replayed.lastSeq, 3);
 });
 
 run('home auto_start 竞争:快照已含的 user 消息再经 WS 事件到达不重复(按 id 幂等)', () => {
@@ -1042,7 +1107,7 @@ run('reasoning 事件不追加到可见 assistant 消息', () => {
   assert.equal(state.items[0].content, 'visible');
 });
 
-run('transcript_replace 替换 compact 前旧消息并清理 token usage', () => {
+run('transcript_replace 替换可见 transcript 并清理 token usage', () => {
   const previous = reduceMany([
     { type: 'message', payload: { id: 'u-old', role: 'user', content: 'old prompt' }, seq: 1 },
     { type: 'usage', payload: { prompt_tokens: 1000, total_tokens: 1000, has_data: true }, seq: 2 },
@@ -1080,6 +1145,32 @@ run('transcript_replace 替换 compact 前旧消息并清理 token usage', () =>
   assert.equal(state.tokenUsage, null);
   assert.equal(state.busy, false);
   assert.equal(state.status, 'idle');
+});
+
+run('compact marker 追加后保留旧消息', () => {
+  const previous = reduceMany([
+    { type: 'message', payload: { id: 'u-old', role: 'user', content: 'old prompt' }, seq: 1 },
+    { type: 'message', payload: { id: 'a-old', role: 'assistant', content: 'old response' }, seq: 2 },
+  ]);
+
+  const state = reduceMany([
+    {
+      type: 'message',
+      payload: {
+        id: 'compact-marker',
+        role: 'system',
+        content: 'Compacted 2 messages, saved ~400 tokens.',
+        metadata: { transcript_only: true },
+      },
+      seq: 3,
+    },
+  ], previous);
+
+  assert.deepEqual(state.items.map((item) => item.content), [
+    'old prompt',
+    'old response',
+    'Compacted 2 messages, saved ~400 tokens.',
+  ]);
 });
 
 run('transcript_replace 清理正在流式输出和活动工具映射', () => {

@@ -26,6 +26,8 @@
 #  import <AppKit/AppKit.h>
 #endif
 
+#include <algorithm>
+#include <memory>
 #include <mutex>
 #include <cstdint>
 #include <utility>
@@ -156,6 +158,167 @@ HWND g_tray_window = nullptr;
 NOTIFYICONDATAW g_nid{};
 bool g_icon_added = false;
 
+struct Win32MenuDrawMetrics {
+    int item_width = 316;
+    int item_height = 32;
+    int right_column_width = 80;
+};
+
+struct Win32MenuDrawItem {
+    TrayMenuEntryKind kind = TrayMenuEntryKind::RecentItem;
+    std::wstring title;
+    std::wstring subtitle;
+    Win32MenuDrawMetrics metrics;
+};
+
+struct Win32MenuBuildContext {
+    std::vector<std::unique_ptr<Win32MenuDrawItem>> draw_items;
+};
+
+bool is_session_entry_kind(TrayMenuEntryKind kind) {
+    return kind == TrayMenuEntryKind::PinnedItem ||
+           kind == TrayMenuEntryKind::RecentItem ||
+           kind == TrayMenuEntryKind::MoreSubmenuItem;
+}
+
+int scale_px(int value, int dpi) {
+    return ::MulDiv(value, dpi > 0 ? dpi : 96, 96);
+}
+
+int hdc_dpi(HDC hdc) {
+    const int dpi = hdc ? ::GetDeviceCaps(hdc, LOGPIXELSX) : 96;
+    return dpi > 0 ? dpi : 96;
+}
+
+HFONT create_menu_font() {
+    NONCLIENTMETRICSW ncm{};
+    ncm.cbSize = sizeof(ncm);
+    if (::SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, ncm.cbSize, &ncm, 0)) {
+        return ::CreateFontIndirectW(&ncm.lfMenuFont);
+    }
+    return static_cast<HFONT>(::GetStockObject(DEFAULT_GUI_FONT));
+}
+
+int measure_text_width(HDC hdc, const std::wstring& text) {
+    if (!hdc || text.empty()) return 0;
+    SIZE size{};
+    if (::GetTextExtentPoint32W(hdc, text.c_str(), static_cast<int>(text.size()), &size)) {
+        return size.cx;
+    }
+    RECT rc{0, 0, 0, 0};
+    ::DrawTextW(hdc,
+                text.c_str(),
+                static_cast<int>(text.size()),
+                &rc,
+                DT_SINGLELINE | DT_CALCRECT | DT_NOPREFIX);
+    return rc.right - rc.left;
+}
+
+Win32MenuDrawMetrics compute_draw_metrics(const TrayMenuLayout& layout) {
+    HDC hdc = ::GetDC(nullptr);
+    const int dpi = hdc_dpi(hdc);
+    HFONT font = create_menu_font();
+    HGDIOBJ old_font = nullptr;
+    if (hdc && font) old_font = ::SelectObject(hdc, font);
+
+    int max_title_width = 0;
+    int max_subtitle_width = 0;
+    for (const auto& e : layout.entries) {
+        if (!is_session_entry_kind(e.kind)) continue;
+        max_title_width = std::max(max_title_width, measure_text_width(hdc, utf8_to_wide(e.title)));
+        max_subtitle_width = std::max(max_subtitle_width, measure_text_width(hdc, utf8_to_wide(e.subtitle)));
+    }
+
+    if (old_font) ::SelectObject(hdc, old_font);
+    if (font && font != ::GetStockObject(DEFAULT_GUI_FONT)) ::DeleteObject(font);
+    if (hdc) ::ReleaseDC(nullptr, hdc);
+
+    Win32MenuDrawMetrics metrics;
+    metrics.item_height = std::max(scale_px(32, dpi), ::GetSystemMetrics(SM_CYMENU));
+    metrics.right_column_width = std::clamp(max_subtitle_width, scale_px(52, dpi), scale_px(104, dpi));
+
+    const int pad = scale_px(14, dpi);
+    const int gap = scale_px(14, dpi);
+    const int natural_width = pad * 2 + max_title_width + gap + metrics.right_column_width;
+    metrics.item_width = std::clamp(
+        std::max(scale_px(316, dpi), natural_width),
+        scale_px(280, dpi),
+        scale_px(380, dpi));
+    return metrics;
+}
+
+Win32MenuDrawItem* add_owner_draw_item(Win32MenuBuildContext& ctx,
+                                       const TrayMenuEntry& entry,
+                                       const Win32MenuDrawMetrics& metrics) {
+    auto item = std::make_unique<Win32MenuDrawItem>();
+    item->kind = entry.kind;
+    item->title = utf8_to_wide(entry.title.empty() ? entry.label : entry.title);
+    item->subtitle = utf8_to_wide(entry.subtitle);
+    item->metrics = metrics;
+    Win32MenuDrawItem* raw = item.get();
+    ctx.draw_items.push_back(std::move(item));
+    return raw;
+}
+
+void measure_owner_draw_menu_item(MEASUREITEMSTRUCT* mis) {
+    if (!mis || mis->CtlType != ODT_MENU || !mis->itemData) return;
+    auto* item = reinterpret_cast<Win32MenuDrawItem*>(mis->itemData);
+    mis->itemWidth = static_cast<UINT>(item->metrics.item_width);
+    mis->itemHeight = static_cast<UINT>(item->metrics.item_height);
+}
+
+void draw_owner_draw_menu_item(const DRAWITEMSTRUCT* dis) {
+    if (!dis || dis->CtlType != ODT_MENU || !dis->itemData || !dis->hDC) return;
+    const auto* item = reinterpret_cast<const Win32MenuDrawItem*>(dis->itemData);
+    HDC hdc = dis->hDC;
+    const int dpi = hdc_dpi(hdc);
+
+    RECT rc = dis->rcItem;
+    const bool selected = (dis->itemState & ODS_SELECTED) != 0;
+    const int bg_index = selected ? COLOR_MENUHILIGHT : COLOR_MENU;
+    HBRUSH bg = ::CreateSolidBrush(::GetSysColor(bg_index));
+    ::FillRect(hdc, &rc, bg);
+    ::DeleteObject(bg);
+
+    HFONT font = create_menu_font();
+    HGDIOBJ old_font = font ? ::SelectObject(hdc, font) : nullptr;
+    const int old_bk_mode = ::SetBkMode(hdc, TRANSPARENT);
+
+    const COLORREF title_color = ::GetSysColor(selected ? COLOR_HIGHLIGHTTEXT : COLOR_MENUTEXT);
+    const COLORREF subtitle_color = ::GetSysColor(selected ? COLOR_HIGHLIGHTTEXT : COLOR_GRAYTEXT);
+
+    const int pad_x = scale_px(14, dpi);
+    const int gap = scale_px(14, dpi);
+    RECT text_rc = rc;
+    text_rc.left += pad_x;
+    text_rc.right -= pad_x;
+
+    RECT title_rc = text_rc;
+    if (!item->subtitle.empty()) {
+        RECT subtitle_rc = text_rc;
+        subtitle_rc.left = std::max(subtitle_rc.left,
+                                    subtitle_rc.right - item->metrics.right_column_width);
+        ::SetTextColor(hdc, subtitle_color);
+        ::DrawTextW(hdc,
+                    item->subtitle.c_str(),
+                    static_cast<int>(item->subtitle.size()),
+                    &subtitle_rc,
+                    DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_END_ELLIPSIS | DT_NOPREFIX);
+        title_rc.right = std::max(title_rc.left, subtitle_rc.left - gap);
+    }
+
+    ::SetTextColor(hdc, title_color);
+    ::DrawTextW(hdc,
+                item->title.c_str(),
+                static_cast<int>(item->title.size()),
+                &title_rc,
+                DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX);
+
+    ::SetBkMode(hdc, old_bk_mode);
+    if (old_font) ::SelectObject(hdc, old_font);
+    if (font && font != ::GetStockObject(DEFAULT_GUI_FONT)) ::DeleteObject(font);
+}
+
 HICON load_app_icon_for_tray() {
     // acecode.rc.in 把 acecode.ico 编成 IDI_ICON1。旧构建里 IDI_ICON1 可能是
     // 命名资源,新构建里是数字资源(1),所以两种都试一遍。
@@ -201,11 +364,13 @@ HICON load_app_icon_for_tray() {
     return ::LoadIconW(nullptr, MAKEINTRESOURCEW(32512));
 }
 
-// 把 layout 翻译成 AppendMenuW 的实际调用。MoreSubmenuItem 收进 popup,
-// 其余在顶层 menu 上 append。
-void append_layout_to_menu(HMENU menu, const TrayMenuLayout& layout) {
-    HMENU more_submenu = nullptr;
-    bool more_root_inserted = false;
+// 把 layout 翻译成 AppendMenuW 的实际调用。每个 MoreSubmenuRoot 都创建一个
+// 独立 popup,随后连续的 MoreSubmenuItem 收进该 popup。
+void append_layout_to_menu(HMENU menu,
+                           const TrayMenuLayout& layout,
+                           Win32MenuBuildContext& ctx) {
+    HMENU current_more_submenu = nullptr;
+    const Win32MenuDrawMetrics metrics = compute_draw_metrics(layout);
     for (const auto& e : layout.entries) {
         switch (e.kind) {
             case TrayMenuEntryKind::PinnedHeader:
@@ -215,7 +380,11 @@ void append_layout_to_menu(HMENU menu, const TrayMenuLayout& layout) {
                 break;
             }
             case TrayMenuEntryKind::PinnedItem:
-            case TrayMenuEntryKind::RecentItem:
+            case TrayMenuEntryKind::RecentItem: {
+                Win32MenuDrawItem* item = add_owner_draw_item(ctx, e, metrics);
+                ::AppendMenuW(menu, MF_OWNERDRAW, e.id, reinterpret_cast<LPCWSTR>(item));
+                break;
+            }
             case TrayMenuEntryKind::NewChat:
             case TrayMenuEntryKind::OpenApp:
             case TrayMenuEntryKind::Quit: {
@@ -225,26 +394,26 @@ void append_layout_to_menu(HMENU menu, const TrayMenuLayout& layout) {
             }
             case TrayMenuEntryKind::Separator:
                 ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+                current_more_submenu = nullptr;
                 break;
             case TrayMenuEntryKind::MoreSubmenuRoot: {
-                if (!more_submenu) more_submenu = ::CreatePopupMenu();
+                current_more_submenu = ::CreatePopupMenu();
                 std::wstring w = utf8_to_wide(e.label);
                 ::AppendMenuW(menu,
                               MF_POPUP | MF_STRING,
-                              reinterpret_cast<UINT_PTR>(more_submenu),
+                              reinterpret_cast<UINT_PTR>(current_more_submenu),
                               w.c_str());
-                more_root_inserted = true;
                 break;
             }
             case TrayMenuEntryKind::MoreSubmenuItem: {
-                if (!more_submenu) more_submenu = ::CreatePopupMenu();
-                std::wstring w = utf8_to_wide(e.label);
-                ::AppendMenuW(more_submenu, MF_STRING, e.id, w.c_str());
+                if (!current_more_submenu) current_more_submenu = ::CreatePopupMenu();
+                Win32MenuDrawItem* item = add_owner_draw_item(ctx, e, metrics);
+                ::AppendMenuW(current_more_submenu, MF_OWNERDRAW, e.id, reinterpret_cast<LPCWSTR>(item));
                 break;
             }
         }
     }
-    (void)more_root_inserted; // 避免 unused 警告;子菜单的句柄交给 menu 拥有,DestroyMenu 时连带回收
+    // 子菜单的句柄交给 menu 拥有,DestroyMenu 时连带回收。
 }
 
 void show_context_menu(HWND hwnd) {
@@ -253,7 +422,8 @@ void show_context_menu(HWND hwnd) {
 
     HMENU menu = ::CreatePopupMenu();
     if (!menu) return;
-    append_layout_to_menu(menu, layout);
+    Win32MenuBuildContext build_ctx;
+    append_layout_to_menu(menu, layout, build_ctx);
 
     POINT pt{};
     ::GetCursorPos(&pt);
@@ -269,6 +439,14 @@ void show_context_menu(HWND hwnd) {
 }
 
 LRESULT CALLBACK tray_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    if (msg == WM_MEASUREITEM) {
+        measure_owner_draw_menu_item(reinterpret_cast<MEASUREITEMSTRUCT*>(lparam));
+        return TRUE;
+    }
+    if (msg == WM_DRAWITEM) {
+        draw_owner_draw_menu_item(reinterpret_cast<const DRAWITEMSTRUCT*>(lparam));
+        return TRUE;
+    }
     if (msg == g_tray_callback_msg && g_tray_callback_msg != 0) {
         // tray icon 事件。lparam 低 WORD 是事件类型 (WM_LBUTTONUP / WM_RBUTTONUP /
         // NIN_BALLOONUSERCLICK 等)。具体见 Shell_NotifyIcon 文档。

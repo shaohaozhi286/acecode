@@ -6,6 +6,7 @@
 
 #include "agent_loop.hpp"
 #include "permissions.hpp"
+#include "session/compact_checkpoint.hpp"
 #include "session/session_resume_restore.hpp"
 #include "tool/mtime_tracker.hpp"
 #include "tool/tool_executor.hpp"
@@ -16,6 +17,7 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <vector>
 
 namespace {
 
@@ -194,6 +196,53 @@ TEST(SessionResumeRestore, ReplaysTranscriptOnlyMessagesWithoutProviderHistory) 
     EXPECT_EQ(h.state.conversation[0].role, "system");
     EXPECT_EQ(h.state.conversation[0].content, "[Goal] Continuing: visible context");
     EXPECT_TRUE(h.loop_.messages().empty());
+}
+
+TEST(SessionResumeRestore, CompactCheckpointKeepsFullTuiTranscriptButRestoresEffectiveHistory) {
+    ResumeRestoreHarness h;
+
+    acecode::ChatMessage old_user;
+    old_user.role = "user";
+    old_user.content = "old prompt";
+
+    acecode::ChatMessage old_assistant;
+    old_assistant.role = "assistant";
+    old_assistant.content = "old response";
+
+    acecode::ChatMessage marker;
+    marker.role = "system";
+    marker.content = "Compacted 2 messages, saved ~100 tokens.";
+    marker.metadata = nlohmann::json{{"transcript_only", true}};
+
+    acecode::CompactCheckpoint checkpoint;
+    checkpoint.trigger = "manual";
+    checkpoint.summary = "old prompt summarized";
+    checkpoint.replacement_history = [] {
+        acecode::ChatMessage summary;
+        summary.role = "system";
+        summary.content = "[Conversation summary]\nold prompt summarized";
+        return std::vector<acecode::ChatMessage>{summary};
+    }();
+
+    acecode::ChatMessage after;
+    after.role = "user";
+    after.content = "new prompt";
+
+    acecode::append_resumed_session_messages(
+        {old_user, old_assistant, marker, acecode::encode_compact_checkpoint(checkpoint), after},
+        h.state,
+        h.loop_,
+        h.tools_);
+
+    ASSERT_EQ(h.state.conversation.size(), 4u);
+    EXPECT_EQ(h.state.conversation[0].content, "old prompt");
+    EXPECT_EQ(h.state.conversation[1].content, "old response");
+    EXPECT_EQ(h.state.conversation[2].content, "Compacted 2 messages, saved ~100 tokens.");
+    EXPECT_EQ(h.state.conversation[3].content, "new prompt");
+
+    ASSERT_EQ(h.loop_.messages().size(), 2u);
+    EXPECT_EQ(h.loop_.messages()[0].content, "[Conversation summary]\nold prompt summarized");
+    EXPECT_EQ(h.loop_.messages()[1].content, "new prompt");
 }
 
 TEST(SessionResumeRestore, RestoresFullFileReadBaselineFromTranscript) {

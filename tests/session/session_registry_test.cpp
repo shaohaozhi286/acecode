@@ -16,6 +16,7 @@
 #include "config/config.hpp"
 #include "config/saved_models.hpp"
 #include "prompt/system_prompt.hpp"
+#include "session/compact_checkpoint.hpp"
 #include "session/local_session_client.hpp"
 #include "session/session_manager.hpp"
 #include "session/session_registry.hpp"
@@ -566,7 +567,7 @@ TEST(LocalSessionClient, DaemonSessionAutoCompactsWithEmptyCallbacks) {
 
     EXPECT_GE(provider->compact_calls, 1);
     EXPECT_TRUE(provider->stream_saw_summary);
-    EXPECT_TRUE(saw_replace);
+    EXPECT_FALSE(saw_replace);
 
     client.unsubscribe(id, sub);
     fx.registry.destroy(id);
@@ -1318,6 +1319,57 @@ TEST(SessionRegistry, ResumeDiskSessionRestoresLoopHistory) {
 
     EXPECT_TRUE(registry.resume(id)) << "同 daemon 同 id 二次 resume 应复用 active entry";
     EXPECT_EQ(registry.size(), 1u);
+
+    std::filesystem::remove_all(project_dir);
+    std::filesystem::remove_all(cwd);
+}
+
+TEST(SessionRegistry, ResumeDiskSessionUsesCompactCheckpointForLoopHistory) {
+    auto cwd = temp_cwd("resume_compact_checkpoint");
+    auto project_dir = SessionStorage::get_project_dir(cwd.string());
+    std::filesystem::remove_all(project_dir);
+    const std::string id = "20260624-010203-c0de";
+
+    {
+        acecode::SessionManager sm;
+        sm.start_session(cwd.string(), "test-provider", "test-model", id);
+        sm.on_message(registry_msg("user", "old prompt"));
+        sm.on_message(registry_msg("assistant", "old response"));
+
+        acecode::CompactCheckpoint checkpoint;
+        checkpoint.trigger = "manual";
+        checkpoint.summary = "old prompt summarized";
+        checkpoint.replacement_history = {
+            registry_msg("system", "[Conversation summary]\nold prompt summarized")
+        };
+        ASSERT_TRUE(sm.append_compact_checkpoint(checkpoint));
+        sm.on_message(registry_msg("user", "new prompt"));
+        sm.finalize();
+    }
+
+    ToolExecutor tools;
+    PermissionManager permissions;
+    SessionRegistryDeps deps;
+    deps.provider_accessor = [] { return std::shared_ptr<acecode::LlmProvider>{}; };
+    deps.tools = &tools;
+    deps.cwd = cwd.string();
+    deps.template_permissions = &permissions;
+    SessionRegistry registry(std::move(deps));
+
+    ASSERT_TRUE(registry.resume(id));
+    auto* entry = registry.lookup(id);
+    ASSERT_NE(entry, nullptr);
+    ASSERT_NE(entry->loop, nullptr);
+    ASSERT_NE(entry->sm, nullptr);
+
+    ASSERT_EQ(entry->loop->messages().size(), 2u);
+    EXPECT_EQ(entry->loop->messages()[0].content, "[Conversation summary]\nold prompt summarized");
+    EXPECT_EQ(entry->loop->messages()[1].content, "new prompt");
+
+    auto transcript = entry->sm->load_active_messages();
+    ASSERT_EQ(transcript.size(), 4u);
+    EXPECT_EQ(transcript[0].content, "old prompt");
+    EXPECT_TRUE(acecode::is_compact_checkpoint_message(transcript[2]));
 
     std::filesystem::remove_all(project_dir);
     std::filesystem::remove_all(cwd);

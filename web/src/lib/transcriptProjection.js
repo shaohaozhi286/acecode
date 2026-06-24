@@ -153,6 +153,25 @@ function cleanSummaryText(value) {
   return String(value ?? '').replace(/\s+/g, ' ').trim();
 }
 
+function rawSummaryText(value) {
+  return String(value ?? '').trim();
+}
+
+function metricMarkdownText(metrics, label) {
+  if (!Array.isArray(metrics)) return '';
+  const wanted = String(label || '').toLowerCase();
+  for (const metric of metrics) {
+    if (Array.isArray(metric) && String(metric[0] || '').toLowerCase() === wanted) {
+      return rawSummaryText(metric[1]);
+    }
+    if (metric && typeof metric === 'object') {
+      const key = String(metric.label || metric.key || metric.name || '').toLowerCase();
+      if (key === wanted) return rawSummaryText(metric.value);
+    }
+  }
+  return '';
+}
+
 function normalizedVerb(tool) {
   return String(tool?.summary?.verb || '').trim().toLowerCase();
 }
@@ -327,30 +346,35 @@ function makeProcessedItem(items, endItem) {
 }
 
 function taskCompleteSummaryText(item) {
+  return cleanSummaryText(taskCompleteSummaryMarkdownText(item)) || '已完成';
+}
+
+function taskCompleteSummaryMarkdownText(item) {
   const tool = item?.tool || {};
   const summary = tool.summary || {};
-  const metricSummary = metricText(summary.metrics, 'summary');
+  const metricSummary = metricMarkdownText(summary.metrics, 'summary');
   if (metricSummary) return metricSummary;
 
-  const object = cleanSummaryText(summary.object);
-  if (object && object.toLowerCase() !== 'task') return object;
+  const object = rawSummaryText(summary.object);
+  if (object && cleanSummaryText(object).toLowerCase() !== 'task') return object;
 
-  const output = cleanSummaryText(tool.output);
+  const output = rawSummaryText(tool.output);
   if (output) return output;
 
-  const title = cleanSummaryText(tool.title || tool.displayOverride);
-  if (title && title.toLowerCase() !== 'task_complete') return title;
+  const title = rawSummaryText(tool.title || tool.displayOverride);
+  if (title && cleanSummaryText(title).toLowerCase() !== 'task_complete') return title;
 
   return '已完成';
 }
 
 function makeCompletionSummaryItem(item) {
-  const summary = taskCompleteSummaryText(item);
+  const summary = taskCompleteSummaryMarkdownText(item);
+  const titleSummary = cleanSummaryText(summary) || '已完成';
   const id = item?.id ?? (itemTimestamp(item) || 'unknown');
   return {
     kind: 'completion_summary',
     id: `completion:${id}`,
-    title: `总结：${summary}`,
+    title: `总结：${titleSummary}`,
     summary,
     sourceItem: item,
     coveredItemIds: coveredIds([item]),

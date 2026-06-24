@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include "session/compact_checkpoint.hpp"
 #include "session/file_checkpoint_store.hpp"
 #include "session/session_manager.hpp"
 #include "session/session_storage.hpp"
@@ -85,6 +86,50 @@ TEST(SessionManagerCompactReplace, RewritesJsonlAndKeepsRetainedCheckpointsOnly)
     auto meta = acecode::SessionStorage::read_meta(candidates.front().meta_path);
     EXPECT_EQ(meta.message_count, static_cast<int>(stored.size()));
     EXPECT_EQ(meta.summary, "kept prompt");
+
+    std::error_code ec;
+    std::filesystem::remove_all(project_dir, ec);
+    std::filesystem::remove_all(cwd, ec);
+}
+
+TEST(SessionManagerCompactReplace, AppendCompactCheckpointKeepsFullTranscript) {
+    auto cwd = make_temp_cwd();
+    const std::string project_dir = acecode::SessionStorage::get_project_dir(cwd.string());
+    std::filesystem::remove_all(project_dir);
+
+    acecode::SessionManager sm;
+    const std::string session_id = acecode::SessionStorage::generate_session_id();
+    sm.start_session(cwd.string(), "stub", "stub-model", session_id);
+
+    auto old_user = make_message("user", "old prompt", "u-old");
+    auto old_assistant = make_message("assistant", "old response");
+    sm.on_message(old_user);
+    sm.on_message(old_assistant);
+
+    acecode::CompactCheckpoint checkpoint;
+    checkpoint.trigger = "manual";
+    checkpoint.summary = "old prompt summarized";
+    checkpoint.messages_compressed = 2;
+    checkpoint.estimated_tokens_saved = 42;
+    checkpoint.replacement_history = {make_message("system", "summary")};
+    ASSERT_TRUE(sm.append_compact_checkpoint(checkpoint));
+
+    auto candidates = acecode::SessionStorage::find_session_files(project_dir, session_id);
+    ASSERT_FALSE(candidates.empty());
+    auto stored = acecode::SessionStorage::load_messages(candidates.front().jsonl_path);
+
+    ASSERT_EQ(stored.size(), 3u);
+    EXPECT_EQ(stored[0].content, "old prompt");
+    EXPECT_EQ(stored[1].content, "old response");
+    EXPECT_TRUE(acecode::is_compact_checkpoint_message(stored[2]));
+    auto decoded = acecode::decode_compact_checkpoint(stored[2]);
+    ASSERT_TRUE(decoded.has_value());
+    ASSERT_EQ(decoded->replacement_history.size(), 1u);
+    EXPECT_EQ(decoded->replacement_history[0].content, "summary");
+
+    auto meta = acecode::SessionStorage::read_meta(candidates.front().meta_path);
+    EXPECT_EQ(meta.message_count, static_cast<int>(stored.size()));
+    EXPECT_EQ(meta.summary, "old prompt");
 
     std::error_code ec;
     std::filesystem::remove_all(project_dir, ec);

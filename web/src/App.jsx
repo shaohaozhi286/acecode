@@ -37,6 +37,7 @@ import { ConsoleDock } from './components/ConsoleDock.jsx';
 import {
   CONSOLE_DOCK_DEFAULT_HEIGHT,
   clampDockHeight,
+  consoleCwdForContext,
 } from './lib/consoleDock.js';
 import {
   DEFAULT_SINGLE_LAYOUT,
@@ -91,6 +92,7 @@ export function App() {
   const [activeRef,    setActiveRef]    = useState(null);
   const [navHistory, setNavHistory] = useState({ back: [], forward: [] });
   const [commandWorkspaceHash, setCommandWorkspaceHash] = useState('');
+  const [consoleCwd, setConsoleCwd] = useState('');
   const [showSettings, setShowSettings] = useState(false);
   const [settingsNavKey, setSettingsNavKey] = useState('general');
   const [permReqs,     setPermReqs]     = useState([]);
@@ -520,6 +522,8 @@ export function App() {
   }, [setSidebarWidth, singleLayout.sidebar, view]);
 
   const activeId = activeRef?.sessionId || activeRef?.id || '';
+  const activeRefConsoleCwd = consoleCwdForContext({ activeRef, health });
+  const preferredConsoleCwd = activeId ? activeRefConsoleCwd : (consoleCwd || activeRefConsoleCwd);
   const pendingQuestionSessionIdsForSidebar = useMemo(
     () => pendingQuestionSessionIds(questionReqs, activeId),
     [questionReqs, activeId],
@@ -623,6 +627,7 @@ export function App() {
                 sessionRef={activeRef}
                 onSessionPromoted={navigateToRef}
                 onCommandWorkspaceChange={setCommandWorkspaceHash}
+                onConsoleCwdChange={setConsoleCwd}
                 health={health}
                 showSidePanel
                 sidePanelWidth={singleLayout.sidePanel}
@@ -648,6 +653,7 @@ export function App() {
               onHeightChange={setConsoleDockHeight}
               onToggle={setConsoleDockOpen}
               consoleInfo={health?.console}
+              preferredCwd={preferredConsoleCwd}
             />
           )}
         </div>

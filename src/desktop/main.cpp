@@ -23,6 +23,7 @@
 #include "pick_active.hpp"
 #include "single_instance.hpp"
 #include "splash_screen.hpp"
+#include "tray_menu_bridge.hpp"
 #include "tray_icon_win.hpp"
 #include "url_builder.hpp"
 #include "web_host.hpp"
@@ -1028,6 +1029,10 @@ int main(int argc, char** argv) {
     host.bind("aceDesktop_closeWindow", [&](const std::string& /*req*/) -> std::string {
         return nlohmann::json{{"ok", host.close_window()}}.dump();
     });
+    host.bind("aceDesktop_focusWindow", [&](const std::string& /*req*/) -> std::string {
+        bring_window_foreground();
+        return nlohmann::json{{"ok", true}}.dump();
+    });
 
     // WM_SIZE 时如果最大化状态变化(被 web_host.cpp 内部 g_last_known_maximized 去重过),
     // eval 一段 JS 调前端 window.aceDesktop_onMaximizeStateChanged(bool),让 TopBar 切换
@@ -1104,35 +1109,7 @@ int main(int argc, char** argv) {
     // 见 openspec/changes/enhance-desktop-tray-menu。
     host.bind("aceDesktop_setTrayMenu", [&](const std::string& req) -> std::string {
         try {
-            auto arr = nlohmann::json::parse(req);
-            if (!arr.is_array() || arr.empty() || !arr[0].is_object()) {
-                return nlohmann::json{{"ok", false}, {"error", "expect [{workspace_name, pinned, recent}]"}}.dump();
-            }
-            const auto& p = arr[0];
-            TrayMenuPayload payload;
-            if (p.contains("workspace_name") && p["workspace_name"].is_string()) {
-                payload.workspace_name = p["workspace_name"].get<std::string>();
-            }
-            auto fill = [](const nlohmann::json& src, std::vector<TrayMenuItem>& dst) {
-                if (!src.is_array()) return;
-                for (const auto& it : src) {
-                    if (!it.is_object()) continue;
-                    TrayMenuItem item;
-                    if (it.contains("session_id") && it["session_id"].is_string())
-                        item.session_id = it["session_id"].get<std::string>();
-                    if (it.contains("workspace_hash") && it["workspace_hash"].is_string())
-                        item.workspace_hash = it["workspace_hash"].get<std::string>();
-                    if (it.contains("title") && it["title"].is_string())
-                        item.title = it["title"].get<std::string>();
-                    if (it.contains("subtitle") && it["subtitle"].is_string())
-                        item.subtitle = it["subtitle"].get<std::string>();
-                    if (item.session_id.empty()) continue; // 没有 session_id 的项无意义,跳过
-                    dst.push_back(std::move(item));
-                }
-            };
-            if (p.contains("pinned")) fill(p["pinned"], payload.pinned);
-            if (p.contains("recent")) fill(p["recent"], payload.recent);
-            set_tray_menu_payload(std::move(payload));
+            set_tray_menu_payload(tray_menu_payload_from_bridge_request(req));
             return nlohmann::json{{"ok", true}}.dump();
         } catch (const std::exception& e) {
             return nlohmann::json{{"ok", false}, {"error", std::string("parse: ") + e.what()}}.dump();

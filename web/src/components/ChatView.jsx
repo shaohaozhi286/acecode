@@ -10,6 +10,8 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createApi } from '../lib/api.js';
 import { connection } from '../lib/connection.js';
+import { renderMarkdown } from '../lib/markdown.js';
+import { codeTextFromCopyButtonTarget, copyTextToClipboard } from '../lib/codeBlockCopy.js';
 import { Message } from './Message.jsx';
 import { ToolBlock } from './ToolBlock.jsx';
 import { InputBar } from './InputBar.jsx';
@@ -72,6 +74,7 @@ import { normalizePermissionMode, permissionModeOption } from '../lib/permission
 import { ATTACHMENT_HARD_LIMIT_BYTES, normalizeImageFile } from '../lib/imageNormalize.js';
 import { PanelToggleIcon, VsIcon } from './Icon.jsx';
 import { commandWorkspaceHashForInput } from '../lib/slashCommandWorkspace.js';
+import { consoleCwdForContext } from '../lib/consoleDock.js';
 import { inputRouteForText, sessionCreateOptionsForText } from '../lib/builtinCommandRouting.js';
 import { fileTreeRefreshKeyFromItems } from '../lib/fileTreeRefresh.js';
 import { buildAssistantRunDirectives } from '../lib/assistantRunDirectives.js';
@@ -273,10 +276,40 @@ function ActivitySummaryBlock({ item, expanded, onToggle }) {
   );
 }
 
+function completionSummaryText(item) {
+  if (typeof item?.summary === 'string' && item.summary.trim()) return item.summary;
+  const title = typeof item?.title === 'string' ? item.title.trim() : '';
+  if (!title) return '已完成';
+  return title.replace(/^总结[:：]\s*/, '') || title;
+}
+
 function CompletionSummaryBlock({ item }) {
+  const summaryText = completionSummaryText(item);
+  const html = useMemo(() => ({ __html: renderMarkdown(summaryText) }), [summaryText]);
+  const handleMarkdownClick = useCallback(async (event) => {
+    const text = codeTextFromCopyButtonTarget(event.target);
+    if (text == null) return;
+    event.preventDefault();
+    event.stopPropagation();
+    try {
+      await copyTextToClipboard(text);
+      toast({ kind: 'ok', text: '已复制代码' });
+    } catch (e) {
+      toast({ kind: 'err', text: '复制失败:' + (e?.message || '') });
+    }
+  }, []);
+
   return (
-    <div className="max-w-[88%] ml-8 px-1 py-0.5 text-[12px] leading-5 italic text-fg whitespace-pre-wrap break-words">
-      {item?.title || '总结：已完成'}
+    <div
+      className="max-w-[88%] ml-8 px-1 py-0.5 text-[12px] leading-5 text-fg break-words"
+      title={item?.title || `总结：${summaryText}`}
+    >
+      <span className="ace-completion-summary-prefix">总结：</span>
+      <div
+        className="ace-md ace-completion-summary-md"
+        onClick={handleMarkdownClick}
+        dangerouslySetInnerHTML={html}
+      />
     </div>
   );
 }
@@ -368,7 +401,7 @@ function isRealWorkspaceHash(hash) {
   return !!hash && hash !== '__local__';
 }
 
-export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWorkspaceChange, health, onPermissionRequest, onQuestionRequest, questionRequest, onQuestionResolve, onPermissionModeChanged, showSidePanel = false, sidePanelWidth = 280, onSidePanelResize, previewPanelWidth = 640, onPreviewPanelResize, onPreviewPanelVisibleChange, sidePanelCollapsed = false, onToggleSidePanel, sidePanelMaximized = false, onToggleSidePanelMaximized, showAceCodeAvatar = false }) {
+export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWorkspaceChange, onConsoleCwdChange, health, onPermissionRequest, onQuestionRequest, questionRequest, onQuestionResolve, onPermissionModeChanged, showSidePanel = false, sidePanelWidth = 280, onSidePanelResize, previewPanelWidth = 640, onPreviewPanelResize, onPreviewPanelVisibleChange, sidePanelCollapsed = false, onToggleSidePanel, sidePanelMaximized = false, onToggleSidePanelMaximized, showAceCodeAvatar = false }) {
   const ref = useMemo(() => normalizeSessionRef(sessionRef, sessionId), [sessionRef, sessionId]);
   const sid = ref?.sessionId || ref?.id || '';
   const sidRef = useRef(sid);
@@ -548,10 +581,18 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     selectedHomeWorkspace,
     hasSession: !!sid,
   }), [ref, selectedHomeWorkspace, sid]);
+  const consoleCwd = useMemo(() => consoleCwdForContext({
+    activeRef: ref,
+    selectedHomeWorkspace,
+    health,
+  }), [health?.cwd, ref, selectedHomeWorkspace]);
 
   useEffect(() => {
     onCommandWorkspaceChange?.(commandWorkspaceHash);
   }, [commandWorkspaceHash, onCommandWorkspaceChange]);
+  useEffect(() => {
+    onConsoleCwdChange?.(consoleCwd);
+  }, [consoleCwd, onConsoleCwdChange]);
 
   useEffect(() => { sidRef.current = sid; }, [sid]);
   useEffect(() => { draftSessionKeyRef.current = draftSessionKey; }, [draftSessionKey]);

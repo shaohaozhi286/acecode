@@ -7,7 +7,10 @@
 
 #include <gtest/gtest.h>
 
+#include "desktop/tray_menu_bridge.hpp"
 #include "desktop/tray_icon_win.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <atomic>
 #include <thread>
@@ -89,4 +92,73 @@ TEST(TrayMenuPayload, NullHandlersAccepted) {
     set_tray_new_chat_handler(nullptr);
     set_tray_open_app_handler(nullptr);
     SUCCEED();
+}
+
+TEST(TrayMenuPayloadBridge, ParsesObjectArgument) {
+    const auto payload = tray_menu_payload_from_bridge_request(R"([{
+        "workspace_name": "ws",
+        "pinned": [
+            {"session_id": "p1", "workspace_hash": "wh", "title": "Pinned", "subtitle": "Project"}
+        ],
+        "recent": [
+            {"session_id": "r1", "workspace_hash": "wh", "title": "Recent", "subtitle": "Project"}
+        ]
+    }])");
+
+    EXPECT_EQ(payload.workspace_name, "ws");
+    ASSERT_EQ(payload.pinned.size(), 1u);
+    EXPECT_EQ(payload.pinned[0].session_id, "p1");
+    EXPECT_EQ(payload.pinned[0].workspace_hash, "wh");
+    EXPECT_EQ(payload.pinned[0].title, "Pinned");
+    EXPECT_EQ(payload.pinned[0].subtitle, "Project");
+    ASSERT_EQ(payload.recent.size(), 1u);
+    EXPECT_EQ(payload.recent[0].session_id, "r1");
+}
+
+TEST(TrayMenuPayloadBridge, ParsesStringifiedObjectArgument) {
+    const nlohmann::json inner{
+        {"workspace_name", "ws"},
+        {"pinned", nlohmann::json::array({{
+            {"session_id", "p1"},
+            {"workspace_hash", "wh"},
+            {"title", "Pinned"},
+            {"subtitle", "Project"},
+        }})},
+        {"recent", nlohmann::json::array({{
+            {"session_id", "r1"},
+            {"workspace_hash", "wh"},
+            {"title", "Recent"},
+            {"subtitle", "Project"},
+        }})},
+    };
+
+    const auto payload = tray_menu_payload_from_bridge_request(nlohmann::json::array({inner.dump()}).dump());
+
+    EXPECT_EQ(payload.workspace_name, "ws");
+    ASSERT_EQ(payload.pinned.size(), 1u);
+    EXPECT_EQ(payload.pinned[0].session_id, "p1");
+    ASSERT_EQ(payload.recent.size(), 1u);
+    EXPECT_EQ(payload.recent[0].session_id, "r1");
+}
+
+TEST(TrayMenuPayloadBridge, SkipsItemsWithoutSessionId) {
+    const auto payload = tray_menu_payload_from_bridge_request(R"([{
+        "workspace_name": "ws",
+        "pinned": [
+            {"workspace_hash": "wh", "title": "Missing id"},
+            {"session_id": "p1", "title": "Pinned"}
+        ],
+        "recent": [
+            {"title": "Missing id"}
+        ]
+    }])");
+
+    ASSERT_EQ(payload.pinned.size(), 1u);
+    EXPECT_EQ(payload.pinned[0].session_id, "p1");
+    EXPECT_TRUE(payload.recent.empty());
+}
+
+TEST(TrayMenuPayloadBridge, RejectsNonObjectPayload) {
+    EXPECT_THROW((void)tray_menu_payload_from_bridge_request(R"(["not-json"])"), nlohmann::json::parse_error);
+    EXPECT_THROW((void)tray_menu_payload_from_bridge_request(R"([123])"), std::invalid_argument);
 }

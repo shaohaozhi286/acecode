@@ -70,9 +70,8 @@ struct AgentCallbacks {
     // The payload shape matches the todo_updated session event.
     std::function<void(const nlohmann::json& payload)> on_todo_updated;
 
-    // Called after the shared AgentLoop compact path has replaced model
-    // history. TUI uses this as a display observer; daemon/Web consumers use
-    // the TranscriptReplace event stream instead.
+    // Legacy display observer for replacement-style transcript updates. Normal
+    // compact success appends marker messages and no longer calls this hook.
     std::function<void(const std::vector<ChatMessage>& messages,
                        const CompactResult& result)> on_transcript_replace;
 
@@ -250,7 +249,7 @@ private:
     std::string build_goal_context_prompt(const ThreadGoal& goal) const;
     bool maybe_run_auto_compact();
     bool active_estimate_exceeds_auto_threshold() const;
-    void apply_compact_result(const CompactResult& result);
+    void apply_compact_result(const CompactResult& result, const std::string& trigger);
 
     // Section 7: 同时调老 on_message callback(若 TUI 挂了)和新事件流
     // (events_)。所有 on_message 触发点都该走这个 helper,确保 daemon

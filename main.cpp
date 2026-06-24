@@ -4680,25 +4680,8 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
             return;
         }
         std::lock_guard<std::mutex> lk(state.mu);
-        int tui_keep = 0;
-        int tui_turns = 0;
-        for (int i = static_cast<int>(state.conversation.size()) - 1; i >= 0; --i) {
-            if (state.conversation[i].role == "user") {
-                tui_turns++;
-                if (tui_turns >= 4) {
-                    tui_keep = i;
-                    break;
-                }
-            }
-        }
-        std::vector<TuiState::Message> new_conv;
-        new_conv.reserve(state.conversation.size() - tui_keep + 2);
-        new_conv.push_back({"system", "--- [Compact Boundary] ---", false});
-        new_conv.push_back({"system", "[Conversation summary]\n" + result.summary_text, false});
-        new_conv.insert(new_conv.end(),
-                        state.conversation.begin() + tui_keep,
-                        state.conversation.end());
-        state.conversation = std::move(new_conv);
+        state.conversation.push_back({"system", "--- [Compact Checkpoint] ---", false});
+        state.conversation.push_back({"system", "[Conversation summary]\n" + result.summary_text, false});
         reset_chat_line_measure_state();
         state.chat_follow_tail = true;
         clamp_chat_focus();

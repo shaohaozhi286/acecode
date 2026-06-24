@@ -531,6 +531,94 @@ function finalizeStreaming(next) {
   return next;
 }
 
+function trailingAssistantDraftIndex(items) {
+  if (!Array.isArray(items)) return -1;
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (!item) continue;
+    if (item.kind === 'msg' && item.role === 'assistant') {
+      return item.streamDraft && !item.messageId ? index : -1;
+    }
+    if (item.kind === 'msg' || item.kind === 'tool' || item.kind === 'termination_notice') {
+      return -1;
+    }
+  }
+  return -1;
+}
+
+function replaceAssistantItemWithFinal(item, payload, msg) {
+  return {
+    ...item,
+    role: 'assistant',
+    content: payload.content || item.content || '',
+    contentParts: Array.isArray(payload.content_parts) ? payload.content_parts : item.contentParts,
+    messageId: payload.id || item.messageId || '',
+    metadata: payload.metadata ?? item.metadata,
+    ts: eventTs(msg),
+    streaming: false,
+    streamDraft: false,
+  };
+}
+
+export function replaySinceForLiveCatchup({ isLive = false, loadedSeq = 0 } = {}) {
+  if (!isLive) return null;
+  return loadedSeq > 0 ? loadedSeq : 1;
+}
+
+export function applyTranscriptReplayEvents(state, events = []) {
+  let next = cloneState(state || createTranscriptState());
+  const effects = [];
+  const seenMessageIds = new Set(next.items
+    .filter((item) => item?.kind === 'msg' && item.messageId)
+    .map((item) => item.messageId));
+  const seenMessages = new Set(next.items
+    .filter((item) => item?.kind === 'msg')
+    .map((item) => messageKey(item.role || 'system', item.content || '')));
+  let pendingStreamEvents = [];
+  const flushPendingStreamEvents = () => {
+    for (const ev of pendingStreamEvents) {
+      const reduced = reduceTranscriptEvent(next, ev);
+      next = reduced.state;
+      effects.push(...reduced.effects);
+    }
+    pendingStreamEvents = [];
+  };
+
+  for (const ev of (Array.isArray(events) ? events : [])) {
+    if (isStaleSequencedEvent(next, ev)) continue;
+    if (ev?.type === 'token' || ev?.type === 'reasoning') {
+      pendingStreamEvents.push(ev);
+      continue;
+    }
+    if (ev?.type === 'message') {
+      const p = ev.payload || {};
+      const incomingMessageId = p.id || '';
+      if (incomingMessageId && seenMessageIds.has(incomingMessageId)) {
+        pendingStreamEvents = [];
+        const reduced = reduceTranscriptEvent(next, ev);
+        next = reduced.state;
+        effects.push(...reduced.effects);
+        continue;
+      }
+      const key = messageKey(p.role || 'system', p.content || '');
+      if (seenMessages.has(key)) {
+        pendingStreamEvents = [];
+        markEventSeqApplied(next, ev);
+        continue;
+      }
+      if (incomingMessageId) seenMessageIds.add(incomingMessageId);
+      seenMessages.add(key);
+    }
+    flushPendingStreamEvents();
+    const reduced = reduceTranscriptEvent(next, ev);
+    next = reduced.state;
+    effects.push(...reduced.effects);
+  }
+  flushPendingStreamEvents();
+
+  return { state: next, effects };
+}
+
 export function createTranscriptState(overrides = {}) {
   return {
     items: [],
@@ -633,17 +721,18 @@ export function reduceTranscriptEvent(state, msg) {
           next.lastAssistantText = finalContent;
         }
         next.items = next.items.map((item) => item.id === currentStreamingId
-          ? {
-              ...item,
-              role: 'assistant',
-              content: finalContent || item.content || '',
-              contentParts: Array.isArray(p.content_parts) ? p.content_parts : item.contentParts,
-              messageId: p.id || item.messageId || '',
-              ts: eventTs(msg),
-              streaming: false,
-            }
+          ? replaceAssistantItemWithFinal(item, p, msg)
           : item);
         break;
+      }
+      if (role === 'assistant' && (p.content || '').trim()) {
+        const draftIndex = trailingAssistantDraftIndex(next.items);
+        if (draftIndex >= 0) {
+          next.items = next.items.map((item, index) => (index === draftIndex
+            ? replaceAssistantItemWithFinal(item, p, msg)
+            : item));
+          break;
+        }
       }
       finalizeStreaming(next);
       const incomingContent = p.content || '';
@@ -701,7 +790,15 @@ export function reduceTranscriptEvent(state, msg) {
         next.streamingId = id;
         next.items = [
           ...next.items,
-          { kind: 'msg', id, role: 'assistant', content: text, ts: eventTs(msg), streaming: true },
+          {
+            kind: 'msg',
+            id,
+            role: 'assistant',
+            content: text,
+            ts: eventTs(msg),
+            streaming: true,
+            streamDraft: true,
+          },
         ];
         next.lastAssistantText = text;
       } else {
@@ -716,7 +813,7 @@ export function reduceTranscriptEvent(state, msg) {
       break;
     }
     case 'tool_start': {
-      next.streamingId = null;
+      finalizeStreaming(next);
       const id = allocateItemId(next);
       next.toolMap.set(toolKey(p), id);
       const tool = {
@@ -1037,7 +1134,6 @@ export function useSessionTranscript(sessionRef, options = {}) {
     let off = false;
     api.getMessages(sid, 0).then((data) => {
       if (off) return;
-      const seqBeforeLoad = stateRef.current?.lastSeq || 0;
       const loaded = loadTranscriptHistory(stateRef.current, data || {});
       const nextState = {
         ...loaded.state,
@@ -1049,24 +1145,19 @@ export function useSessionTranscript(sessionRef, options = {}) {
       dispatchEffects(loaded.effects, sid, optionsRef.current);
 
       const loadedSeq = nextState.lastSeq || 0;
-      const needsReplay = isLive && (loadedSeq > 0 || seqBeforeLoad > loadedSeq);
-      if (needsReplay) {
-        api.getMessages(sid, loadedSeq).then((replayData) => {
+      const replaySince = replaySinceForLiveCatchup({ isLive, loadedSeq });
+      if (replaySince !== null) {
+        api.getMessages(sid, replaySince).then((replayData) => {
           if (off) return;
           const replayEvents = Array.isArray(replayData)
             ? replayData
             : (Array.isArray(replayData?.events) ? replayData.events : []);
           if (replayEvents.length > 0) {
-            let replayState = stateRef.current;
-            const effects = [];
-            for (const ev of replayEvents) {
-              const reduced = reduceTranscriptEvent(replayState, ev);
-              replayState = reduced.state;
-              effects.push(...reduced.effects);
-            }
+            const replayed = applyTranscriptReplayEvents(stateRef.current, replayEvents);
+            const replayState = replayed.state;
             stateRef.current = replayState;
             setState(replayState);
-            dispatchEffects(effects, sid, optionsRef.current);
+            dispatchEffects(replayed.effects, sid, optionsRef.current);
             return;
           }
           if (loadedSeq === 0 && Array.isArray(replayData?.messages)) {

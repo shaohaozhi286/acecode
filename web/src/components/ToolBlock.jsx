@@ -12,6 +12,8 @@ import { clsx, formatBytes, formatElapsed } from '../lib/format.js';
 import { hunksToUnifiedDiff } from '../lib/diff.js';
 import { compactOneLinePreview } from '../lib/compactMessagePreview.js';
 import { normalizeAttachmentList } from '../lib/messageAttachments.js';
+import { renderMarkdown } from '../lib/markdown.js';
+import { codeTextFromCopyButtonTarget, copyTextToClipboard } from '../lib/codeBlockCopy.js';
 import {
   DESKTOP_CONTEXT_ACTION_EVENT,
   DESKTOP_CONTEXT_ACTIONS,
@@ -19,6 +21,7 @@ import {
 import { AttachmentStrip } from './AttachmentStrip.jsx';
 import { CopyableCodeFrame } from './CopyableCodeFrame.jsx';
 import { ToolSummaryIcon, VsIcon } from './Icon.jsx';
+import { toast } from './Toast.jsx';
 import * as Diff2Html from 'diff2html';
 
 function MetricList({ metrics }) {
@@ -84,6 +87,30 @@ function stringArg(args, key) {
   if (!args || typeof args !== 'object' || Array.isArray(args)) return '';
   const value = args[key];
   return typeof value === 'string' ? value : '';
+}
+
+function metricText(metrics, label) {
+  if (!Array.isArray(metrics)) return '';
+  const wanted = String(label || '').toLowerCase();
+  for (const metric of metrics) {
+    if (Array.isArray(metric) && String(metric[0] || '').toLowerCase() === wanted) {
+      return String(metric[1] ?? '').trim();
+    }
+    if (metric && typeof metric === 'object') {
+      const key = String(metric.label || metric.key || metric.name || '').toLowerCase();
+      if (key === wanted) return String(metric.value ?? '').trim();
+    }
+  }
+  return '';
+}
+
+function taskCompleteDisplayText(summary, output) {
+  const metricSummary = metricText(summary?.metrics, 'summary');
+  if (metricSummary) return metricSummary;
+  const object = String(summary?.object ?? '').trim();
+  if (object && object.toLowerCase() !== 'task') return object;
+  const outputText = String(output ?? '').trim();
+  return outputText || '完成';
 }
 
 function AskUserQuestionResultCard({ result, toolContextAttrs }) {
@@ -222,6 +249,11 @@ export const ToolBlock = memo(function ToolBlock({ entry, onReviewToggle, sessio
   const fullOutput = output || askUserQuestionOutput || diffText || tailLines.join('\n') || currentPartial || '';
   const fullToolOutput = joinTooltipParts(expandedInvocationText, fullOutput) || fullOutput;
   const visibleOutput = expanded ? fullToolOutput : (outputPreview || currentPartial || tailLines.join('\n') || '');
+  const taskCompleteText = isTaskComplete ? taskCompleteDisplayText(summary, output) : '';
+  const taskCompleteHtml = useMemo(
+    () => ({ __html: renderMarkdown(taskCompleteText) }),
+    [taskCompleteText],
+  );
   const toolName = bashCommand
     ? [summary?.verb || title || tool || 'bash', bashCommand].filter(Boolean).join(' · ')
     : (title || displayOverride || tool || summary?.object || 'tool');
@@ -243,6 +275,19 @@ export const ToolBlock = memo(function ToolBlock({ entry, onReviewToggle, sessio
     onReviewToggle?.();
     setExpanded((v) => !v);
   }, [onReviewToggle]);
+
+  const handleMarkdownCodeCopy = useCallback(async (event) => {
+    const text = codeTextFromCopyButtonTarget(event.target);
+    if (text == null) return;
+    event.preventDefault();
+    event.stopPropagation();
+    try {
+      await copyTextToClipboard(text);
+      toast({ kind: 'ok', text: '已复制代码' });
+    } catch (e) {
+      toast({ kind: 'err', text: '复制失败:' + (e?.message || '') });
+    }
+  }, []);
 
   useEffect(() => {
     const handler = (event) => {
@@ -273,15 +318,19 @@ export const ToolBlock = memo(function ToolBlock({ entry, onReviewToggle, sessio
   }
 
   if (isTaskComplete) {
-    const text = (summary && summary.object) || '完成';
     return (
       <div
-        className="ace-tool-call-text flex items-center gap-2 px-2.5 py-1 my-0.5 font-medium text-ok"
-        title={joinTooltipParts('Done', text)}
+        className="ace-tool-call-text flex items-start gap-2 px-2.5 py-1 my-0.5 font-medium text-ok"
+        title={joinTooltipParts('Done', taskCompleteText)}
         {...toolContextAttrs}
       >
-        <VsIcon name="ok" size={13} mono={false} />
-        <span>Done · {text}</span>
+        <VsIcon name="ok" size={13} mono={false} className="mt-[3px] shrink-0" />
+        <span className="shrink-0">Done ·</span>
+        <div
+          className="ace-md ace-task-complete-md min-w-0 flex-1"
+          onClick={handleMarkdownCodeCopy}
+          dangerouslySetInnerHTML={taskCompleteHtml}
+        />
       </div>
     );
   }

@@ -307,10 +307,12 @@ Errors:
 `/init` with a provider enqueues the same init prompt used by the TUI while
 displaying `/init` in the transcript. Without a provider it writes the offline
 `ACECODE.md` skeleton and emits a visible system message. `/compact` runs on the
-AgentLoop worker queue, emits progress/completion/error messages, rewrites the
-active JSONL transcript on success, and emits a `transcript_replace` event with
-the compacted message list plus `messages_compressed` and
-`estimated_tokens_saved`.
+AgentLoop worker queue and emits progress/completion/error messages. On success
+it appends a hidden compact checkpoint to the session JSONL plus visible system
+marker messages; older user-visible transcript rows remain available in history.
+The checkpoint carries the provider-facing replacement history used for later
+model requests and resume/fork reconstruction. Normal manual, auto, and rescue
+compact success does not emit `transcript_replace`.
 
 ### `GET /api/sessions/:id/permissions`
 
@@ -537,7 +539,7 @@ server          : unsubscribes from EventDispatcher; AgentLoop keeps running
 | `ToolEnd`          | Tool finished | `{ "tool": "...", "ok": true, "summary": ToolSummary?, "hunks": ToolHunks?, "output_tail": "..." }` |
 | `PermissionRequest`| Tool needs user confirmation | `{ "request_id": "...", "tool": "...", "args": {...}, "options": ["allow","deny","allow_session"] }` |
 | `Usage`            | LLM reported token usage | `{ "prompt_tokens": N, "completion_tokens": N, "total_tokens": N }` |
-| `TranscriptReplace`| `/compact` replaced the visible transcript | `{ "messages": ChatMessage[], "messages_compressed": N, "estimated_tokens_saved": N }` |
+| `TranscriptReplace`| The server must replace the visible transcript for recovery/cleanup, such as retry or partial-stream cleanup; normal compact success does not use this event | `{ "messages": ChatMessage[] }` plus cleanup-specific fields |
 | `BusyChanged`      | Transition between idle / waiting / running | `{ "busy": true, "reason": "waiting_llm"|"running_tool" }` |
 | `Done`             | Agent loop reached a terminator (text reply / `task_complete` / max_iterations / abort) | `{ "reason": "text"|"task_complete"|"abort"|"max_iters", "summary": "..."? }` |
 | `Error`            | Something failed (provider error / tool exception / permission timeout) | `{ "code": "...", "message": "..." }` |

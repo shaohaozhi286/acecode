@@ -581,6 +581,18 @@ run('没有 final assistant text 时 task_complete 保留可展开处理摘要',
   assert.equal(projected.some((item) => item.kind === 'tool' && item.tool?.isTaskComplete), false);
 });
 
+run('task_complete markdown 摘要保留原文给渲染层', () => {
+  const summary = '**完成**\n\n- `README.md`\n- docs 已更新';
+  const projected = projectCollapsedTranscriptItems([
+    user(1),
+    taskComplete(2, summary),
+  ]);
+
+  assert.equal(projected[1].kind, 'completion_summary');
+  assert.equal(projected[1].summary, summary);
+  assert.equal(projected[1].title, '总结：**完成** - `README.md` - docs 已更新');
+});
+
 run('complete task 摘要形态不计入工具并显示 summary metric', () => {
   const projected = projectCollapsedTranscriptItems([
     user(1),

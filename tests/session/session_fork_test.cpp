@@ -13,6 +13,7 @@
 #include "session/session_manager.hpp"
 #include "session/session_storage.hpp"
 #include "session/session_serializer.hpp"
+#include "session/compact_checkpoint.hpp"
 #include "session/file_checkpoint_store.hpp"
 #include "session/tool_metadata_codec.hpp"
 #include "session/turn_timing.hpp"
@@ -313,6 +314,40 @@ TEST(SessionFork, FileCheckpointMessagesFiltered) {
     EXPECT_EQ(loaded.size(), 2u);  // 只剩 user + assistant
     EXPECT_EQ(loaded[0].role, "user");
     EXPECT_EQ(loaded[1].role, "assistant");
+}
+
+TEST(SessionFork, CompactCheckpointMessagesPreservedForEffectiveHistory) {
+    TempCwd cwd;
+    SessionManager sm;
+    sm.start_session(cwd.path(), "openai", "gpt-4");
+
+    acecode::CompactCheckpoint checkpoint;
+    checkpoint.trigger = "manual";
+    checkpoint.summary = "old summarized";
+    checkpoint.replacement_history = {make_assistant("[Conversation summary]\nold summarized")};
+    auto checkpoint_msg = acecode::encode_compact_checkpoint(checkpoint);
+
+    std::vector<ChatMessage> prefix = {
+        make_user("old prompt", "u-old"),
+        checkpoint_msg,
+        make_user("new prompt", "u-new"),
+    };
+    auto new_id = sm.fork_session_to_new_id(prefix, "T", "src", "u-new");
+    ASSERT_FALSE(new_id.empty());
+
+    auto pdir = SessionStorage::get_project_dir(cwd.path());
+    auto cands = SessionStorage::find_session_files(pdir, new_id);
+    ASSERT_FALSE(cands.empty());
+    auto loaded = SessionStorage::load_messages(cands.front().jsonl_path);
+    ASSERT_EQ(loaded.size(), 3u);
+    EXPECT_EQ(loaded[0].content, "old prompt");
+    EXPECT_TRUE(acecode::is_compact_checkpoint_message(loaded[1]));
+    EXPECT_EQ(loaded[2].content, "new prompt");
+
+    auto effective = acecode::reconstruct_effective_model_history(loaded);
+    ASSERT_EQ(effective.size(), 2u);
+    EXPECT_EQ(effective[0].content, "[Conversation summary]\nold summarized");
+    EXPECT_EQ(effective[1].content, "new prompt");
 }
 
 // 场景:start_session 没调过(manager 未 started)→ fork 返回空字符串,不写文件。

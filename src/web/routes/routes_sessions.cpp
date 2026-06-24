@@ -1,5 +1,6 @@
 // routes_sessions.cpp — Route registrations extracted from server.cpp
 #include "../server_impl.hpp"
+#include "../../session/compact_checkpoint.hpp"
 
 namespace acecode::web {
 
@@ -67,7 +68,6 @@ void WebServer::Impl::register_sessions() {
         CROW_ROUTE(app, "/api/sessions").methods(crow::HTTPMethod::GET)
         ([this](const crow::request& req) {
             if (auto rej = require_auth(req)) return std::move(*rej);
-            LOG_INFO("[web] compatibility /api/sessions list for cwd=" + deps.cwd);
             auto arr = sessions_for_workspace(
                 compatibility_workspace(),
                 archived_query_requested(req),
@@ -265,9 +265,11 @@ void WebServer::Impl::register_sessions() {
             // 仅当 since=0 时返回,避免重连时重复推。
             if (since == 0 && deps.session_registry) {
                 if (auto entry = deps.session_registry->acquire(id)) {
-                    if (entry->loop) {
+                    if (entry->sm) {
                         json msgs = json::array();
-                        for (const auto& m : entry->loop->messages()) {
+                        for (const auto& m : entry->sm->load_active_messages()) {
+                            if (is_file_checkpoint_message(m)) continue;
+                            if (is_compact_checkpoint_message(m)) continue;
                             if (is_hidden_goal_context_message(m)) continue;
                             msgs.push_back(chat_message_to_json(m));
                         }
@@ -287,6 +289,7 @@ void WebServer::Impl::register_sessions() {
                     json msgs = json::array();
                     for (const auto& m : SessionStorage::load_messages(candidates.front().jsonl_path)) {
                         if (is_file_checkpoint_message(m)) continue;
+                        if (is_compact_checkpoint_message(m)) continue;
                         if (is_hidden_goal_context_message(m)) continue;
                         msgs.push_back(chat_message_to_json(m));
                     }
@@ -818,8 +821,9 @@ void WebServer::Impl::register_sessions() {
                 return with_cors(req, std::move(r));
             }
 
-            // 拷一份 messages(后续算 prefix 不动 entry->loop 内部)
-            auto messages = entry->loop->messages();
+            // Fork from the durable human transcript, not the compacted
+            // effective model history held by AgentLoop.
+            auto messages = entry->sm->load_active_messages();
 
             auto idx = find_message_index_by_id(messages, at_message_id);
             if (!idx.has_value()) {

@@ -26,6 +26,7 @@ import {
   markTabExited,
   nextReconnectDelay,
   parsePtyFrame,
+  ptyCreateOptions,
   ptyWsUrl,
   removeTab,
   renameTab,
@@ -93,7 +94,7 @@ function transferHasFiles(dataTransfer) {
 const HOST_OS = detectHostOs();
 const NATIVE_DROP = nativeFileDropEnabled();
 
-export function ConsoleDock({ open, height, onHeightChange, onToggle, consoleInfo }) {
+export function ConsoleDock({ open, height, onHeightChange, onToggle, consoleInfo, preferredCwd = '' }) {
   const { theme: mode } = useTheme();
   const [tabsState, setTabsState] = useState(createDockTabs);
   const [creating, setCreating] = useState(false);
@@ -302,7 +303,7 @@ export function ConsoleDock({ open, height, onHeightChange, onToggle, consoleInf
     if (creating) return;
     setCreating(true);
     try {
-      const info = await api.createPty(shellId ? { shell: shellId } : {});
+      const info = await api.createPty(ptyCreateOptions({ shellId, cwd: preferredCwd }));
       setTabsState((s) => addTab(s, info));
     } catch (err) {
       if (err?.body?.needs_path || err?.body?.shell === 'git-bash') {
@@ -315,7 +316,7 @@ export function ConsoleDock({ open, height, onHeightChange, onToggle, consoleInf
     } finally {
       setCreating(false);
     }
-  }, [creating]);
+  }, [creating, preferredCwd]);
 
   // 拉取当前 OS 可用 shell(dock 打开时一次)。
   const loadShells = useCallback(async () => {

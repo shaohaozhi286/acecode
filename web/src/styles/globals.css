@@ -724,6 +724,36 @@ body {
 .ace-md em     { font-style: italic; }
 .ace-md hr     { border: 0; border-top: 1px solid var(--ace-border); margin: 8px 0; }
 
+.ace-completion-summary-prefix {
+  color: var(--ace-fg-mute);
+  font-style: italic;
+}
+.ace-completion-summary-md,
+.ace-task-complete-md {
+  display: inline;
+}
+.ace-completion-summary-md > :first-child,
+.ace-task-complete-md > :first-child {
+  margin-top: 0;
+}
+.ace-completion-summary-md > :last-child,
+.ace-task-complete-md > :last-child {
+  margin-bottom: 0;
+}
+.ace-completion-summary-md > p:first-child,
+.ace-task-complete-md > p:first-child {
+  display: inline;
+  margin: 0;
+}
+.ace-completion-summary-md > p:first-child + *,
+.ace-task-complete-md > p:first-child + * {
+  margin-top: 4px;
+}
+.ace-completion-summary-md pre,
+.ace-task-complete-md pre {
+  font-size: 12px;
+}
+
 /* 主题切换全局过渡(只过渡颜色相关属性,避免影响动画) */
 :where(html, body, *) {
   transition: background-color .25s ease, border-color .25s ease, color .2s ease;

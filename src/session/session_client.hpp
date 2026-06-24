@@ -42,7 +42,9 @@ enum class SessionEventKind {
     QuestionRequest,   // payload: {"request_id":"...", "questions":[...]} (AskUserQuestion 工具)
     QuestionClosed,    // payload: {"request_id":"...", "reason":"..."} (AskUserQuestion lifecycle)
     Usage,             // payload: {"input": N, "output": N, ...}
-    TranscriptReplace, // payload: {"messages": [...]} full visible transcript replacement
+    // Full visible transcript replacement for retry/recovery cleanup. Normal
+    // compact success appends marker messages and a hidden checkpoint instead.
+    TranscriptReplace, // payload: {"messages": [...]}
     GoalUpdated,       // payload: {"session_id":"...", "goal": {...}}
     GoalCleared,       // payload: {"session_id":"..."}
     TodoUpdated,       // payload: {"session_id":"...", "todos": [...], "summary": {...}}

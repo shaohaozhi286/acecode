@@ -1,10 +1,13 @@
 #include "session_registry.hpp"
 
+#include "compact_checkpoint.hpp"
 #include "session_rewind.hpp"
 #include "session_resume_restore.hpp"
 #include "session_storage.hpp"
 #include "session_title_generator.hpp"
 #include "thread_goal_store.hpp"
+#include "tool_result_storage.hpp"
+#include "turn_timing.hpp"
 #include "../commands/init_command.hpp"
 #include "../provider/apply_model_to_session.hpp"
 #include "../provider/copilot_provider.hpp"
@@ -39,6 +42,45 @@ bool is_llm_role(const std::string& role) {
 bool is_transcript_only_message(const ChatMessage& msg) {
     return msg.metadata.is_object() &&
            msg.metadata.value("transcript_only", false);
+}
+
+std::optional<std::pair<std::size_t, CompactCheckpoint>>
+latest_valid_compact_checkpoint(const std::vector<ChatMessage>& messages) {
+    for (std::size_t i = messages.size(); i > 0; --i) {
+        auto checkpoint = decode_compact_checkpoint(messages[i - 1]);
+        if (checkpoint.has_value()) {
+            return std::make_pair(i - 1, std::move(*checkpoint));
+        }
+    }
+    return std::nullopt;
+}
+
+void append_model_messages_to_loop(AgentLoop& loop,
+                                   const std::vector<ChatMessage>& messages) {
+    for (std::size_t i = 0; i < messages.size(); ++i) {
+        const auto& msg = messages[i];
+        if (is_file_checkpoint_message(msg)) continue;
+        if (is_content_replacement_message(msg)) continue;
+        if (is_turn_timing_message(msg)) continue;
+        if (is_compact_checkpoint_message(msg)) continue;
+
+        const bool is_shell_user =
+            (msg.role == "user" && !msg.content.empty() && msg.content[0] == '!');
+        const bool next_is_result =
+            (i + 1 < messages.size() && messages[i + 1].role == "tool_result");
+        if (is_shell_user && next_is_result) {
+            loop.inject_shell_turn(msg.content.substr(1),
+                                   messages[i + 1].content,
+                                   "",
+                                   0);
+            ++i;
+            continue;
+        }
+
+        if (is_llm_role(msg.role) && !is_transcript_only_message(msg)) {
+            loop.push_message(msg);
+        }
+    }
 }
 
 std::pair<std::string, std::string>
@@ -762,28 +804,16 @@ void SessionRegistry::restore_loop_history(
     restore_file_tool_state_from_messages(messages);
     entry.loop->clear_messages();
 
-    for (std::size_t i = 0; i < messages.size(); ++i) {
-        const auto& msg = messages[i];
-        if (is_file_checkpoint_message(msg)) {
-            continue;
+    if (auto checkpoint = latest_valid_compact_checkpoint(messages)) {
+        append_model_messages_to_loop(*entry.loop, checkpoint->second.replacement_history);
+        if (checkpoint->first + 1 < messages.size()) {
+            std::vector<ChatMessage> suffix(
+                messages.begin() + static_cast<std::ptrdiff_t>(checkpoint->first + 1),
+                messages.end());
+            append_model_messages_to_loop(*entry.loop, suffix);
         }
-
-        const bool is_shell_user =
-            (msg.role == "user" && !msg.content.empty() && msg.content[0] == '!');
-        const bool next_is_result =
-            (i + 1 < messages.size() && messages[i + 1].role == "tool_result");
-        if (is_shell_user && next_is_result) {
-            entry.loop->inject_shell_turn(msg.content.substr(1),
-                                          messages[i + 1].content,
-                                          "",
-                                          0);
-            ++i;
-            continue;
-        }
-
-        if (is_llm_role(msg.role) && !is_transcript_only_message(msg)) {
-            entry.loop->push_message(msg);
-        }
+    } else {
+        append_model_messages_to_loop(*entry.loop, messages);
     }
 }
 

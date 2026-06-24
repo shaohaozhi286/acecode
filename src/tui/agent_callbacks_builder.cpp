@@ -112,16 +112,8 @@ void setup_agent_callbacks(TuiContext& ctx) {
     callbacks.on_transcript_replace = [&state, &screen](const std::vector<ChatMessage>&, const CompactResult& result) {
         if (!result.performed || result.summary_text.empty()) return;
         std::lock_guard<std::mutex> lk(state.mu);
-        int tui_keep = 0, tui_turns = 0;
-        for (int i = static_cast<int>(state.conversation.size()) - 1; i >= 0; --i) {
-            if (state.conversation[i].role == "user") { tui_turns++; if (tui_turns >= 4) { tui_keep = i; break; } }
-        }
-        std::vector<TuiState::Message> new_conv;
-        new_conv.reserve(state.conversation.size() - tui_keep + 2);
-        new_conv.push_back({"system", "--- [Compact Boundary] ---", false});
-        new_conv.push_back({"system", "[Conversation summary]\n" + result.summary_text, false});
-        new_conv.insert(new_conv.end(), state.conversation.begin() + tui_keep, state.conversation.end());
-        state.conversation = std::move(new_conv);
+        state.conversation.push_back({"system", "--- [Compact Checkpoint] ---", false});
+        state.conversation.push_back({"system", "[Conversation summary]\n" + result.summary_text, false});
         state.chat_follow_tail = true;
         screen.PostEvent(ftxui::Event::Custom);
     };

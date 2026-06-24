@@ -1357,23 +1357,19 @@ export function Sidebar({
     [renderedSessions],
   );
 
-  // 把 active workspace 的 sessions / pinned ids / workspaceName 推到桌面 tray 菜单。
+  // 把已加载的跨 workspace sessions / pinned order / workspaceName 推到桌面 tray 菜单。
   // pushTrayMenu 内部 100ms debounce + 无 bridge 时 no-op。
   // 设计:openspec/changes/enhance-desktop-tray-menu。
   useEffect(() => {
     const activeWs = workspaces.find((w) => w.hash === activeWorkspaceHash);
-    const activeSessions = activeWorkspaceHash
-      ? workspaceSessions.filter((s) => (s.workspace_hash || s.workspaceHash) === activeWorkspaceHash)
-      : [];
-    const pinnedIds = activeWorkspaceHash
-      ? normalizePinnedIds(pinnedByWorkspace.get(activeWorkspaceHash) || [])
-      : [];
     pushTrayMenu({
-      sessions: activeSessions,
-      pinnedSessionIds: pinnedIds,
+      sessions: workspaceSessions,
+      pinnedByWorkspace,
+      pinnedOrderItems,
       workspaceName: activeWs?.name || '',
+      workspaces,
     });
-  }, [workspaceSessions, pinnedByWorkspace, activeWorkspaceHash, workspaces]);
+  }, [workspaceSessions, pinnedByWorkspace, pinnedOrderItems, activeWorkspaceHash, workspaces]);
 
   useEffect(() => {
     const handler = (e) => {

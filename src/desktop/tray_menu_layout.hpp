@@ -2,7 +2,7 @@
 
 // Codex 风格 tray 菜单 layout 的纯函数版本。
 // 把 TrayMenuPayload 转成一份"按顺序 Append 的 item list",让单测能不依赖 Win32
-// 直接断言菜单结构(空状态、仅 pinned、超过 More 阈值等)。
+// 直接断言菜单结构(空状态、Pinned/Recent 各自 More 等)。
 //
 // 真正的 AppendMenuW / TrackPopupMenu 调用在 tray_icon_win.cpp,根据这里产出的
 // MenuLayout 一一映射。
@@ -11,38 +11,35 @@
 
 #include "tray_icon_win.hpp"
 
-#include <algorithm>
 #include <cstddef>
 #include <string>
+#include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace acecode::desktop {
 
-// 菜单 ID 编码方案。1..49 留给固定项,100..199 pinned,200..299 recent 可见区,
-// 300..399 More 子菜单中的 recent overflow。详见 design.md。
-inline constexpr unsigned kMenuIdShow         = 1;  // 历史保留:行为等价 OpenApp
-inline constexpr unsigned kMenuIdQuit         = 2;
-inline constexpr unsigned kMenuIdNewChat      = 3;
-inline constexpr unsigned kMenuIdOpenApp      = 4;
-inline constexpr unsigned kMenuIdPinnedBase   = 100;
-inline constexpr unsigned kMenuIdRecentBase   = 200;
-inline constexpr unsigned kMenuIdMoreBase     = 300;
+// 菜单 ID 编码方案。1..49 留给固定项;session 项从 100 起按 layout 顺序分配,
+// 点击派发时用 layout 里的 id -> session 元数据反查,避免 Pinned More 和
+// Recent More 共用旧固定区间。
+inline constexpr unsigned kMenuIdShow        = 1;  // 历史保留:行为等价 OpenApp
+inline constexpr unsigned kMenuIdQuit        = 2;
+inline constexpr unsigned kMenuIdNewChat     = 3;
+inline constexpr unsigned kMenuIdOpenApp     = 4;
+inline constexpr unsigned kMenuIdSessionBase = 100;
 
-// 上限(决策 3):pinned 最多 5 个、recent 顶层可见 6 个、Recent 总数(含 More 子菜单)
-// 不超过 14 个。subtitle 单行截断到 40 codepoint(简化:这里按 byte 截断,实现期
-// 若发现 CJK 截断丑陋再切到 codepoint 安全版本)。
-inline constexpr std::size_t kPinnedMax            = 5;
-inline constexpr std::size_t kRecentVisible        = 6;
-inline constexpr std::size_t kRecentMaxIncludingMore = 14;
-inline constexpr std::size_t kSubtitleMaxBytes     = 40;
+// 顶层每段最多显示 3 条;超过的条目进入本段自己的 More 子菜单。payload 不做
+// 产品级总数截断,让 More 能显示全部剩余会话。
+inline constexpr std::size_t kTraySectionVisibleLimit = 3;
+inline constexpr std::size_t kSubtitleMaxBytes        = 40;
 
 enum class TrayMenuEntryKind {
     PinnedHeader,    // disabled 灰色 "Pinned"
-    PinnedItem,      // 一条 pinned session
+    PinnedItem,      // 一条 pinned session(顶层可见)
     RecentHeader,    // disabled 灰色 "Recent"
     RecentItem,      // 一条 recent session(顶层可见)
-    MoreSubmenuRoot, // "More ›" 入口(打开 More 子菜单)
-    MoreSubmenuItem, // More 子菜单内一条 recent overflow(layout 中扁平列出,渲染时收进 popup)
+    MoreSubmenuRoot, // "More >" 入口(打开当前 section 的 More 子菜单)
+    MoreSubmenuItem, // More 子菜单内一条 overflow session(layout 中扁平列出)
     Separator,
     NewChat,
     OpenApp,
@@ -51,9 +48,13 @@ enum class TrayMenuEntryKind {
 
 struct TrayMenuEntry {
     TrayMenuEntryKind kind;
-    unsigned id = 0;        // 仅 *Item / NewChat / OpenApp / Quit / MoreSubmenuRoot 有意义
-    std::string label;      // 渲染文本(显示用)— Header / Separator / MoreSubmenuRoot 走预设字串
-    // 当 kind ∈ {PinnedItem, RecentItem, MoreSubmenuItem} 时,这两个字段引用 payload 里的 session
+    unsigned id = 0;        // 仅 session item / NewChat / OpenApp / Quit 有意义
+    std::string label;      // 普通菜单后端使用的渲染文本
+    // session item 的两列显示文本。Win32 owner-draw 用 title/subtitle 分列绘制,
+    // 其它后端继续用 label 退化为单行 "<title>  <subtitle>"。
+    std::string title;
+    std::string subtitle;
+    // 当 kind 属于 session item 时,这两个字段引用 payload 里的 session。
     std::string session_id;
     std::string workspace_hash;
 };
@@ -64,25 +65,96 @@ struct TrayMenuLayout {
 
 namespace detail {
 
-// subtitle 截断:超过 kSubtitleMaxBytes 时切到 limit-3 byte 后追加 "..."。
-// 用 ASCII "..." 而非 U+2026 "…" 让 byte boundary 与 codepoint 边界对齐(避开 UTF-8
-// 截半字符的视觉异常);Win32 菜单字体里 "..." 视觉补救已足够。
+inline std::string session_key(const TrayMenuItem& it) {
+    if (it.session_id.empty()) return {};
+    return it.workspace_hash + '\0' + it.session_id;
+}
+
+inline std::vector<TrayMenuItem> unique_items(const std::vector<TrayMenuItem>& items,
+                                              const std::unordered_set<std::string>& excluded = {}) {
+    std::vector<TrayMenuItem> out;
+    std::unordered_set<std::string> seen;
+    for (const auto& it : items) {
+        const std::string key = session_key(it);
+        if (key.empty() || excluded.find(key) != excluded.end() || seen.find(key) != seen.end()) {
+            continue;
+        }
+        seen.insert(key);
+        out.push_back(it);
+    }
+    return out;
+}
+
+inline bool is_utf8_continuation_byte(unsigned char ch) {
+    return (ch & 0xC0u) == 0x80u;
+}
+
+// subtitle 截断:超过 kSubtitleMaxBytes 时切到合法 UTF-8 边界后追加 "..."。
 inline std::string truncate_subtitle(std::string s, std::size_t limit_bytes = kSubtitleMaxBytes) {
     if (s.size() <= limit_bytes) return s;
     if (limit_bytes <= 3) return std::string("...").substr(0, limit_bytes);
-    s.resize(limit_bytes - 3);
+    std::size_t cut = limit_bytes - 3;
+    while (cut > 0 && is_utf8_continuation_byte(static_cast<unsigned char>(s[cut]))) {
+        --cut;
+    }
+    s.resize(cut);
     s += "...";
     return s;
 }
 
-// 单条 session 渲染成菜单 label:"<title> · <subtitle>"(subtitle 空时只 title)。
+// 单条 session 渲染成菜单 label:"<title>  <subtitle>"(subtitle 空时只 title)。
 inline std::string format_session_label(const TrayMenuItem& it) {
-    std::string label = it.title;
+    std::string label = it.title.empty() ? std::string("新会话1") : it.title;
     if (!it.subtitle.empty()) {
         label += "  ";
         label += truncate_subtitle(it.subtitle);
     }
     return label;
+}
+
+inline void append_session_item(std::vector<TrayMenuEntry>& out,
+                                TrayMenuEntryKind kind,
+                                const TrayMenuItem& it,
+                                unsigned& next_session_id) {
+    const std::string title = it.title.empty() ? std::string("新会话1") : it.title;
+    const std::string subtitle = it.subtitle.empty() ? std::string{} : truncate_subtitle(it.subtitle);
+    TrayMenuEntry e;
+    e.kind = kind;
+    e.id = next_session_id++;
+    e.label = title;
+    if (!subtitle.empty()) {
+        e.label += "  ";
+        e.label += subtitle;
+    }
+    e.title = title;
+    e.subtitle = subtitle;
+    e.session_id = it.session_id;
+    e.workspace_hash = it.workspace_hash;
+    out.push_back(std::move(e));
+}
+
+inline void append_section(std::vector<TrayMenuEntry>& out,
+                           TrayMenuEntryKind header_kind,
+                           TrayMenuEntryKind visible_kind,
+                           const std::string& header_label,
+                           const std::vector<TrayMenuItem>& items,
+                           unsigned& next_session_id) {
+    if (items.empty()) return;
+    out.push_back({header_kind, 0, header_label, {}, {}});
+
+    const std::size_t visible = items.size() < kTraySectionVisibleLimit
+        ? items.size()
+        : kTraySectionVisibleLimit;
+    for (std::size_t i = 0; i < visible; ++i) {
+        append_session_item(out, visible_kind, items[i], next_session_id);
+    }
+
+    if (items.size() > visible) {
+        out.push_back({TrayMenuEntryKind::MoreSubmenuRoot, 0, "More", {}, {}});
+        for (std::size_t i = visible; i < items.size(); ++i) {
+            append_session_item(out, TrayMenuEntryKind::MoreSubmenuItem, items[i], next_session_id);
+        }
+    }
 }
 
 } // namespace detail
@@ -92,60 +164,35 @@ inline std::string format_session_label(const TrayMenuItem& it) {
 inline TrayMenuLayout compute_menu_layout(const TrayMenuPayload& payload) {
     TrayMenuLayout layout;
     auto& out = layout.entries;
+    unsigned next_session_id = kMenuIdSessionBase;
 
-    const std::size_t pinned_n = std::min(payload.pinned.size(), kPinnedMax);
-    const std::size_t recent_total = std::min(payload.recent.size(), kRecentMaxIncludingMore);
-    const std::size_t recent_visible = std::min(recent_total, kRecentVisible);
-    const std::size_t recent_overflow =
-        recent_total > recent_visible ? recent_total - recent_visible : 0;
+    const std::vector<TrayMenuItem> pinned = detail::unique_items(payload.pinned);
+    std::unordered_set<std::string> pinned_keys;
+    for (const auto& it : pinned) pinned_keys.insert(detail::session_key(it));
+    const std::vector<TrayMenuItem> recent = detail::unique_items(payload.recent, pinned_keys);
 
-    const bool has_any_session = (pinned_n + recent_total) > 0;
-
-    if (pinned_n > 0) {
-        out.push_back({TrayMenuEntryKind::PinnedHeader, 0, "Pinned", {}, {}});
-        for (std::size_t i = 0; i < pinned_n; ++i) {
-            const auto& it = payload.pinned[i];
-            TrayMenuEntry e;
-            e.kind = TrayMenuEntryKind::PinnedItem;
-            e.id = static_cast<unsigned>(kMenuIdPinnedBase + i);
-            e.label = detail::format_session_label(it);
-            e.session_id = it.session_id;
-            e.workspace_hash = it.workspace_hash;
-            out.push_back(std::move(e));
-        }
+    if (!pinned.empty()) {
+        detail::append_section(out,
+                               TrayMenuEntryKind::PinnedHeader,
+                               TrayMenuEntryKind::PinnedItem,
+                               "Pinned",
+                               pinned,
+                               next_session_id);
     }
 
-    if (recent_total > 0) {
-        if (pinned_n > 0) {
+    if (!recent.empty()) {
+        if (!pinned.empty()) {
             out.push_back({TrayMenuEntryKind::Separator, 0, {}, {}, {}});
         }
-        out.push_back({TrayMenuEntryKind::RecentHeader, 0, "Recent", {}, {}});
-        for (std::size_t i = 0; i < recent_visible; ++i) {
-            const auto& it = payload.recent[i];
-            TrayMenuEntry e;
-            e.kind = TrayMenuEntryKind::RecentItem;
-            e.id = static_cast<unsigned>(kMenuIdRecentBase + i);
-            e.label = detail::format_session_label(it);
-            e.session_id = it.session_id;
-            e.workspace_hash = it.workspace_hash;
-            out.push_back(std::move(e));
-        }
-        if (recent_overflow > 0) {
-            out.push_back({TrayMenuEntryKind::MoreSubmenuRoot, 0, "More", {}, {}});
-            for (std::size_t i = 0; i < recent_overflow; ++i) {
-                const auto& it = payload.recent[recent_visible + i];
-                TrayMenuEntry e;
-                e.kind = TrayMenuEntryKind::MoreSubmenuItem;
-                e.id = static_cast<unsigned>(kMenuIdMoreBase + i);
-                e.label = detail::format_session_label(it);
-                e.session_id = it.session_id;
-                e.workspace_hash = it.workspace_hash;
-                out.push_back(std::move(e));
-            }
-        }
+        detail::append_section(out,
+                               TrayMenuEntryKind::RecentHeader,
+                               TrayMenuEntryKind::RecentItem,
+                               "Recent",
+                               recent,
+                               next_session_id);
     }
 
-    if (has_any_session) {
+    if (!pinned.empty() || !recent.empty()) {
         out.push_back({TrayMenuEntryKind::Separator, 0, {}, {}, {}});
     }
     out.push_back({TrayMenuEntryKind::NewChat, kMenuIdNewChat, "新建会话", {}, {}});

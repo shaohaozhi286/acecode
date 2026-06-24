@@ -89,13 +89,10 @@ void SkillRegistry::refresh_from_disk() const {
         return a.name < b.name;
     });
 
-    const auto found_count = found.size();
     {
         std::lock_guard<std::mutex> lk(mu_);
         skills_ = std::move(found);
     }
-    LOG_DEBUG("[skills] Loaded " + std::to_string(found_count) + " skills from " +
-              std::to_string(roots.size()) + " root(s)");
 }
 
 void SkillRegistry::scan() {

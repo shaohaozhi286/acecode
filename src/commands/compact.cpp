@@ -1,6 +1,7 @@
 #include "compact.hpp"
 #include "compact_prompt.hpp"
 #include "../agent_loop.hpp"
+#include "../session/compact_checkpoint.hpp"
 #include "../utils/logger.hpp"
 #include "../utils/uuid.hpp"
 
@@ -140,17 +141,7 @@ std::pair<int, int> get_messages_after_compact_boundary(const std::vector<ChatMe
 // ============================================================
 
 std::vector<ChatMessage> normalize_messages_for_api(const std::vector<ChatMessage>& messages) {
-    std::vector<ChatMessage> result;
-    result.reserve(messages.size());
-    for (const auto& msg : messages) {
-        if (msg.metadata.is_object() && msg.metadata.value("transcript_only", false)) {
-            continue;
-        }
-        if (!msg.is_meta) {
-            result.push_back(msg);
-        }
-    }
-    return result;
+    return provider_relevant_messages(messages);
 }
 
 // ============================================================
@@ -259,10 +250,8 @@ bool should_auto_compact(const std::vector<ChatMessage>& messages, int context_w
     if (last_api_prompt_tokens > 0) {
         return last_api_prompt_tokens > threshold;
     }
-    // Fallback: estimate from message content (chars/4 heuristic)
-    auto [start, count] = get_messages_after_compact_boundary(messages);
-    std::vector<ChatMessage> active(messages.begin() + start, messages.begin() + start + count);
-    int estimated = estimate_message_tokens(active);
+    // Fallback: estimate from provider-visible content (chars/4 heuristic).
+    int estimated = estimate_message_tokens(provider_relevant_messages(messages));
     return estimated > threshold;
 }
 
@@ -667,18 +656,9 @@ CompactResult compact_messages(
     // Build the final summary user message
     std::string final_summary = get_compact_user_summary_message(summary_text);
 
-    // Build new message list:
-    // [messages before boundary] + [boundary marker] + [summary msg] + [cwd msg] + [kept messages]
+    // Build the replacement model history:
+    // [boundary marker] + [summary msg] + [cwd msg] + [kept messages]
     std::vector<ChatMessage> new_messages;
-
-    // Preserve everything before the active region (including old boundaries/summaries)
-    for (int i = 0; i < boundary_start; ++i) {
-        new_messages.push_back(messages[i]);
-    }
-    // If old boundary existed, preserve it too
-    if (last_boundary_index >= 0) {
-        new_messages.push_back(messages[last_boundary_index]);
-    }
 
     // Insert new compact boundary
     std::string trigger = is_auto ? "auto" : "manual";
@@ -737,30 +717,13 @@ CompactResult compact_context(
         return result;
     }
 
-    agent_loop.messages_mut() = result.compacted_messages;
+    agent_loop.messages_mut() = provider_relevant_messages(result.compacted_messages);
 
-    // Update TUI conversation display
+    // Append a visible marker without removing earlier human transcript rows.
     {
         std::lock_guard<std::mutex> lk(state.mu);
-        int tui_keep = 0;
-        int tui_turns = 0;
-        for (int i = static_cast<int>(state.conversation.size()) - 1; i >= 0; --i) {
-            if (state.conversation[i].role == "user") {
-                tui_turns++;
-                if (tui_turns >= keep_turns) {
-                    tui_keep = i;
-                    break;
-                }
-            }
-        }
-        std::vector<TuiState::Message> new_conv;
-        new_conv.reserve(state.conversation.size() - tui_keep + 2);
-        new_conv.push_back({"system", "--- [Compact Boundary] ---", false});
-        new_conv.push_back({"system", "[Conversation summary]\n" + result.summary_text, false});
-        new_conv.insert(new_conv.end(),
-                        state.conversation.begin() + tui_keep,
-                        state.conversation.end());
-        state.conversation = std::move(new_conv);
+        state.conversation.push_back({"system", "--- [Compact Checkpoint] ---", false});
+        state.conversation.push_back({"system", "[Conversation summary]\n" + result.summary_text, false});
         state.chat_follow_tail = true;
     }
 
