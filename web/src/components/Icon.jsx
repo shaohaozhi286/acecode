@@ -12,6 +12,7 @@ const ICONS = {
   clearAll: 'ClearAll',
   close: 'Close',
   code: 'Code',
+  collapseAll: 'CollapseAll',
   copy: 'Copy',
   darkTheme: 'DarkTheme',
   delete: 'Delete',

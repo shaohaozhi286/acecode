@@ -20,8 +20,8 @@ namespace acecode::rc {
 
 namespace {
 
-// OutboundSender 默认实现:HTTP POST 到 IM 桥暴露的 webhook。
-// 显式禁用代理(CURLOPT_PROXY=""):IM 桥在本机 loopback,走系统代理只会把
+// OutboundSender 默认实现:HTTP POST 到 channel bridge 暴露的 webhook。
+// 显式禁用代理(CURLOPT_PROXY=""):channel bridge 在本机 loopback,走系统代理只会把
 // 消息送出内网或撞上代理不可达;这里不复用 ProxyResolver。
 class WebhookSender : public OutboundSender {
 public:

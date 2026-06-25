@@ -19,7 +19,7 @@
 namespace acecode::rc {
 
 struct RemoteControlOptions {
-    int port = 28190;          // listener 端口,固定默认值便于 IM 桥配对
+    int port = 28190;          // listener 端口,固定默认值便于 channel 配对
     std::string token;         // 必填(由命令层生成或读配置)
     std::string outbound_url;  // 空 = 出站未配置,仅入站
     std::string session_id;    // 出站 payload 的 session 标识

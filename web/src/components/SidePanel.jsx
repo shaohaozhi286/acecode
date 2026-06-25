@@ -45,6 +45,60 @@ const EMPTY_TREE_CACHE    = new Map();
 const EMPTY_EXPANDED_DIRS = new Set();
 const EMPTY_REVIEW_STATUS = new Map();
 
+function treeParentPath(path) {
+  const normalized = normalizeTreePath(path);
+  const idx = normalized.lastIndexOf('/');
+  return idx < 0 ? '' : normalized.slice(0, idx);
+}
+
+function isPathWithinTreeBranch(path, parentPath) {
+  const normalized = normalizeTreePath(path);
+  const parent = normalizeTreePath(parentPath);
+  if (!normalized) return false;
+  if (!parent) return false;
+  return normalized === parent || normalized.startsWith(`${parent}/`);
+}
+
+function TreeIndent({ depth, activeGuideIndex = -1 }) {
+  const count = Math.max(0, Number(depth) || 0);
+  if (count === 0) return null;
+  return (
+    <span className="ace-file-tree-indent" aria-hidden="true">
+      {Array.from({ length: count }, (_, index) => (
+        <span
+          key={index}
+          className={clsx(
+            'ace-file-tree-guide',
+            index === activeGuideIndex && 'ace-file-tree-guide-active',
+          )}
+        />
+      ))}
+    </span>
+  );
+}
+
+function TreeArrowIcon({ open }) {
+  return (
+    <svg
+      className="ace-file-tree-arrow"
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path
+        d={open ? 'M6 9L12 15L18 9' : 'M9 18L15 12L9 6'}
+        stroke="currentColor"
+        strokeWidth="1"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 function pathAncestors(path) {
   const parts = normalizeTreePath(path).split('/').filter(Boolean);
   const result = [];
@@ -68,6 +122,10 @@ function FileTree({ api, cwd, treeCache, setTreeCache, expandedDirs, setExpanded
   const [errors, setErrors]   = useState(new Map()); // path → 错误文案
   const treeRef = useRef(null);
   const selectedNormalizedPath = normalizeTreePath(selectedPath);
+  const selectedParentPath = selectedNormalizedPath ? treeParentPath(selectedNormalizedPath) : '';
+  const selectedParentGuideIndex = selectedParentPath
+    ? selectedParentPath.split('/').filter(Boolean).length - 1
+    : -1;
 
   const loadDir = useCallback(async (path, options = {}) => {
     const force = !!options.force;
@@ -168,15 +226,19 @@ function FileTree({ api, cwd, treeCache, setTreeCache, expandedDirs, setExpanded
     const err = errors.get(parentPath);
     if (!entries && loading.has(parentPath)) {
       return (
-        <div className="px-2 py-1 text-fg-mute text-[11px]" style={{ paddingLeft: 12 + depth * 14 }}>
-          加载中…
+        <div className="ace-file-tree-message text-fg-mute">
+          <TreeIndent depth={depth} />
+          <span className="ace-file-tree-arrow-spacer" aria-hidden="true" />
+          <span>加载中…</span>
         </div>
       );
     }
     if (!entries && err) {
       return (
-        <div className="px-2 py-1 text-danger text-[11px]" style={{ paddingLeft: 12 + depth * 14 }}>
-          {err}
+        <div className="ace-file-tree-message text-danger">
+          <TreeIndent depth={depth} />
+          <span className="ace-file-tree-arrow-spacer" aria-hidden="true" />
+          <span>{err}</span>
         </div>
       );
     }
@@ -184,8 +246,10 @@ function FileTree({ api, cwd, treeCache, setTreeCache, expandedDirs, setExpanded
     const displayEntries = entriesWithReviewRows(entries, parentPath, reviewStatusByPath);
     if (displayEntries.length === 0) {
       return (
-        <div className="px-2 py-1 text-fg-mute text-[11px] italic" style={{ paddingLeft: 12 + depth * 14 }}>
-          (空目录)
+        <div className="ace-file-tree-message text-fg-mute italic">
+          <TreeIndent depth={depth} />
+          <span className="ace-file-tree-arrow-spacer" aria-hidden="true" />
+          <span>(空目录)</span>
         </div>
       );
     }
@@ -199,6 +263,11 @@ function FileTree({ api, cwd, treeCache, setTreeCache, expandedDirs, setExpanded
       const locatePath = isDir ? '' : containingWorkspacePath(cwd, e.path);
       const reviewStatus = e.review_status || statusForTreeEntry(e, reviewStatusByPath);
       const statusTitle = fileChangeStatusTitle(reviewStatus, isDir);
+      const activeGuideIndex = selectedParentGuideIndex >= 0
+        && depth > selectedParentGuideIndex
+        && isPathWithinTreeBranch(e.path, selectedParentPath)
+        ? selectedParentGuideIndex
+        : -1;
       return (
         <div key={e.path}>
           <button
@@ -219,16 +288,23 @@ function FileTree({ api, cwd, treeCache, setTreeCache, expandedDirs, setExpanded
               'hover:bg-surface-hi cursor-pointer',
               isActive && 'bg-accent-soft text-accent',
             )}
-            style={{ paddingLeft: 10 + depth * 14 }}
             onClick={() => isDir ? toggleDir(e.path) : onPickFile(e)}
             title={reviewStatus ? `${e.path} - ${statusTitle}` : e.path}
           >
+            <TreeIndent depth={depth} activeGuideIndex={activeGuideIndex} />
             {isDir ? (
-              <VsIcon name={isOpen ? 'folderOpen' : 'folder'} size={14} mono={false} />
+              <TreeArrowIcon open={isOpen} />
             ) : (
-              <FileTypeIcon path={e.path || e.name} size={20} />
+              <span className="ace-file-tree-arrow-spacer" aria-hidden="true" />
             )}
-            <span className="ace-file-name truncate">{e.name}</span>
+            {isDir ? (
+              <span className="ace-file-name truncate">{e.name}</span>
+            ) : (
+              <span className="ace-file-leaf-content">
+                <FileTypeIcon path={e.path || e.name} size={20} />
+                <span className="ace-file-name truncate">{e.name}</span>
+              </span>
+            )}
             {reviewStatus && (
               <span
                 className="ace-file-status-badge"
@@ -358,6 +434,10 @@ export function SidePanel({
     if (!filesEnabled || !cwdKey) return;
     setFileRefreshToken(prev => prev + 1);
   }, [cwdKey, filesEnabled]);
+  const collapseFileTree = useCallback(() => {
+    if (!filesEnabled || !cwdKey) return;
+    setExpandedDirs((prev) => (prev.size === 0 ? prev : new Set()));
+  }, [cwdKey, filesEnabled, setExpandedDirs]);
 
   const lastFileRefreshKey = useRef('');
   useEffect(() => {
@@ -469,6 +549,17 @@ export function SidePanel({
             aria-label="刷新文件列表"
           >
             <VsIcon name="refresh" size={16} />
+          </button>
+        )}
+        {filesEnabled && activeTab === 'files' && (
+          <button
+            type="button"
+            onClick={collapseFileTree}
+            className="ace-side-panel-collapse-tree-btn"
+            title="全部折叠文件树"
+            aria-label="全部折叠文件树"
+          >
+            <VsIcon name="collapseAll" size={16} />
           </button>
         )}
         {onToggleCollapse && (

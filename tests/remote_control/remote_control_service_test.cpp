@@ -51,7 +51,7 @@ std::string base_url(int port) {
 //   - /rc/health 无 token 可达(仅活性探测)
 //   - 正确 token 的 /rc/send → 200,文本到达 inbound_submit
 //   - 错误 token → 401;缺 text 字段 → 400
-//   - ?token= 查询参数与 header 等效(IM 桥侧 fetch 不便加 header 时的备选)
+//   - ?token= 查询参数与 header 等效(channel bridge fetch 不便加 header 时的备选)
 TEST(RemoteControlService, ServesHealthAndInboundSend) {
     RemoteControlService service;
     SubmitCapture capture;
@@ -71,11 +71,11 @@ TEST(RemoteControlService, ServesHealthAndInboundSend) {
     auto ok = cpr::Post(cpr::Url{base_url(opts.port) + "/rc/send"},
                         cpr::Header{{"Content-Type", "application/json"},
                                     {"X-ACECode-RC-Token", "tok-123"}},
-                        cpr::Body{nlohmann::json{{"text", u8"来自IM的消息"}}.dump()},
+                        cpr::Body{nlohmann::json{{"text", u8"来自channel的消息"}}.dump()},
                         cpr::Timeout{2000});
     EXPECT_EQ(ok.status_code, 200);
     ASSERT_TRUE(capture.wait_for_count(1, std::chrono::seconds(5)));
-    EXPECT_EQ(capture.received[0], u8"来自IM的消息");
+    EXPECT_EQ(capture.received[0], u8"来自channel的消息");
 
     auto bad_token = cpr::Post(cpr::Url{base_url(opts.port) + "/rc/send"},
                                cpr::Header{{"Content-Type", "application/json"},
@@ -98,6 +98,38 @@ TEST(RemoteControlService, ServesHealthAndInboundSend) {
         cpr::Timeout{2000});
     EXPECT_EQ(query_token.status_code, 200);
     ASSERT_TRUE(capture.wait_for_count(2, std::chrono::seconds(5)));
+
+    service.stop();
+}
+
+TEST(RemoteControlService, PluginSubmittedUserTextUsesTokenProtectedSessionInputPath) {
+    RemoteControlService service;
+    SubmitCapture capture;
+    service.hub().set_inbound_submit([&](const std::string& t) { capture.push(t); });
+
+    RemoteControlOptions opts;
+    opts.port = next_port();
+    opts.token = "active-token";
+    opts.session_id = "session-from-plugin";
+    std::string error;
+    ASSERT_TRUE(service.start(opts, &error)) << error;
+
+    auto accepted = cpr::Post(cpr::Url{base_url(opts.port) + "/rc/send"},
+                              cpr::Header{{"Content-Type", "application/json"},
+                                          {"X-ACECode-RC-Token", "active-token"}},
+                              cpr::Body{R"({"text":"from plugin"})"},
+                              cpr::Timeout{2000});
+    EXPECT_EQ(accepted.status_code, 200);
+    ASSERT_TRUE(capture.wait_for_count(1, std::chrono::seconds(5)));
+    EXPECT_EQ(capture.received[0], "from plugin");
+
+    auto rejected = cpr::Post(cpr::Url{base_url(opts.port) + "/rc/send"},
+                              cpr::Header{{"Content-Type", "application/json"},
+                                          {"X-ACECode-RC-Token", "stale-token"}},
+                              cpr::Body{R"({"text":"should not arrive"})"},
+                              cpr::Timeout{2000});
+    EXPECT_EQ(rejected.status_code, 401);
+    EXPECT_FALSE(capture.wait_for_count(2, std::chrono::milliseconds(200)));
 
     service.stop();
 }

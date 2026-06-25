@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import * as Diff2Html from 'diff2html';
 import { hunksToUnifiedDiff } from '../lib/diff.js';
 import {
@@ -77,10 +78,57 @@ function TodoProgressInline({ checklist, running = true }) {
   );
 }
 
-function TodoChecklistPopover({ checklist }) {
-  if (!checklist?.visible) return null;
-  return (
-    <div className="ace-change-glass-todo-popover">
+function TodoChecklistPopover({ checklist, anchorRef, open, onPointerEnter, onPointerLeave }) {
+  const [position, setPosition] = useState(null);
+
+  useLayoutEffect(() => {
+    if (!open || !checklist?.visible || typeof window === 'undefined') {
+      setPosition(null);
+      return undefined;
+    }
+
+    const updatePosition = () => {
+      const anchor = anchorRef?.current;
+      if (!anchor) return;
+      const rect = anchor.getBoundingClientRect();
+      const viewportWidth = window.innerWidth || 0;
+      const viewportHeight = window.innerHeight || 0;
+      const width = Math.min(700, Math.max(280, viewportWidth - 48));
+      const center = rect.left + (rect.width / 2);
+      const left = Math.round(Math.min(
+        viewportWidth - 24 - (width / 2),
+        Math.max(24 + (width / 2), center),
+      ));
+      setPosition({
+        left,
+        bottom: Math.max(8, Math.round(viewportHeight - rect.top + 5)),
+        width: Math.round(width),
+        maxHeight: `${Math.max(96, Math.round(rect.top - 16))}px`,
+      });
+    };
+
+    updatePosition();
+    window.addEventListener('resize', updatePosition);
+    document.addEventListener('scroll', updatePosition, true);
+    return () => {
+      window.removeEventListener('resize', updatePosition);
+      document.removeEventListener('scroll', updatePosition, true);
+    };
+  }, [anchorRef, checklist?.total, checklist?.done, checklist?.items?.length, checklist?.visible, open]);
+
+  if (!checklist?.visible || !open || !position || typeof document === 'undefined') return null;
+  return createPortal(
+    <div
+      className="ace-change-glass-todo-popover is-open"
+      onPointerEnter={onPointerEnter}
+      onPointerLeave={onPointerLeave}
+      style={{
+        left: position.left,
+        bottom: position.bottom,
+        width: position.width,
+        '--ace-change-todo-popover-max-height': position.maxHeight,
+      }}
+    >
       <div className="ace-todo-glass-dock" role="group" aria-label={`待办事项 (${checklist.done}/${checklist.total})`}>
         <div className="ace-todo-glass-content">
           <div className="ace-todo-glass-title">
@@ -112,7 +160,8 @@ function TodoChecklistPopover({ checklist }) {
           </div>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -389,9 +438,47 @@ export function ChangeGlassDock({
 }) {
   const localDockRef = useRef(null);
   const rootRef = dockRef || localDockRef;
+  const glassDockRef = useRef(null);
   const backdropRef = useRef(null);
+  const todoPopoverCloseTimerRef = useRef(null);
+  const [todoPopoverOpen, setTodoPopoverOpen] = useState(false);
   const todoChecklist = todoChecklistPresentation(todos, todoSummary);
   const hasVisibleChanges = !!showChanges && !!summary?.hasChanges;
+
+  const clearTodoPopoverCloseTimer = () => {
+    if (!todoPopoverCloseTimerRef.current) return;
+    window.clearTimeout(todoPopoverCloseTimerRef.current);
+    todoPopoverCloseTimerRef.current = null;
+  };
+
+  const openTodoPopover = () => {
+    if (!todoChecklist.visible) return;
+    clearTodoPopoverCloseTimer();
+    setTodoPopoverOpen(true);
+  };
+
+  const scheduleTodoPopoverClose = () => {
+    clearTodoPopoverCloseTimer();
+    todoPopoverCloseTimerRef.current = window.setTimeout(() => {
+      todoPopoverCloseTimerRef.current = null;
+      setTodoPopoverOpen(false);
+    }, 140);
+  };
+
+  useEffect(() => {
+    if (todoChecklist.visible) return undefined;
+    setTodoPopoverOpen(false);
+    return undefined;
+  }, [todoChecklist.visible]);
+
+  useEffect(() => {
+    return () => {
+      if (todoPopoverCloseTimerRef.current) {
+        window.clearTimeout(todoPopoverCloseTimerRef.current);
+        todoPopoverCloseTimerRef.current = null;
+      }
+    };
+  }, []);
 
   useEffect(() => {
     const source = scrollRef?.current;
@@ -486,7 +573,12 @@ export function ChangeGlassDock({
   );
   return (
     <div ref={rootRef} className="ace-change-glass-wrap" data-change-region="composer">
-      <div className="ace-change-glass-dock">
+      <div
+        ref={glassDockRef}
+        className="ace-change-glass-dock"
+        onPointerEnter={openTodoPopover}
+        onPointerLeave={scheduleTodoPopoverClose}
+      >
         <div ref={backdropRef} className="ace-change-glass-blur-backdrop" aria-hidden="true">
           <div className="ace-change-glass-blur-crop" />
         </div>
@@ -508,7 +600,13 @@ export function ChangeGlassDock({
             {summaryContent}
           </div>
         )}
-        <TodoChecklistPopover checklist={todoChecklist} />
+        <TodoChecklistPopover
+          checklist={todoChecklist}
+          anchorRef={glassDockRef}
+          open={todoPopoverOpen}
+          onPointerEnter={openTodoPopover}
+          onPointerLeave={scheduleTodoPopoverClose}
+        />
         {hasVisibleChanges && onDismiss && (
           <button
             type="button"

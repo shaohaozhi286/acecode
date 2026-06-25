@@ -2462,7 +2462,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         <div
           ref={scrollRef}
           onScroll={handleMessagesScroll}
-          className="h-full overflow-y-auto px-3.5 py-3 flex flex-col gap-3"
+          className="ace-chat-transcript-scroll h-full overflow-y-auto px-3.5 py-3 flex flex-col gap-3"
           style={changeDockBottomPadding > 0 ? { paddingBottom: changeDockBottomPadding } : undefined}
         >
           {renderedItems.map((it) => {

@@ -3,14 +3,14 @@
 // Remote control 基座的核心状态机(openspec add-remote-control)。
 //
 // 职责边界:
-//   - 入站(IM → ACECode):校验 token / 文本,合法则转交 inbound_submit 回调。
+//   - 入站(channel → ACECode):校验 token / 文本,合法则转交 inbound_submit 回调。
 //     回调由 main.cpp 接到输入框同款的提交路径(busy 时排队,空闲时 submit)。
-//   - 出站(ACECode → IM):assistant 回合产出经 notify_assistant_text 进有界
+//   - 出站(ACECode → channel):assistant 回合产出经 notify_assistant_text 进有界
 //     队列,由 hub 自有 worker 线程异步调 OutboundSender 投递 —— 投递阻塞或
 //     失败都不影响 agent / UI 线程。
 //
 // 本类零网络依赖,网络面(loopback HTTP listener / webhook POST)在
-// remote_control_service 中组装。换 IM 通道时实现新的 OutboundSender 即可,
+// remote_control_service 中组装。换 channel 通道时实现新的 OutboundSender 即可,
 // hub 不动。
 //
 // 线程模型:
@@ -38,12 +38,12 @@ struct OutboundMessage {
     std::string session_id;
     std::string text;
     std::int64_t timestamp_ms = 0;
-    std::uint64_t seq = 0;   // hub 内单调递增;IM 桥可据此去重/排序
+    std::uint64_t seq = 0;   // hub 内单调递增;channel bridge 可据此去重/排序
 };
 
 nlohmann::json outbound_message_to_json(const OutboundMessage& msg);
 
-// 出站投递抽象 —— "已 hook 的 IM 发送方法"的接缝。默认实现是
+// 出站投递抽象 —— "已 hook 的 channel 发送方法"的接缝。默认实现是
 // remote_control_service 里的 webhook POST;接入其它通道时实现本接口。
 class OutboundSender {
 public:
@@ -57,7 +57,7 @@ struct RemoteControlStats {
     std::uint64_t inbound_rejected = 0;
     std::uint64_t outbound_sent = 0;
     std::uint64_t outbound_failed = 0;
-    std::uint64_t outbound_dropped = 0;  // 队列满被丢弃(IM 桥长时间不可达)
+    std::uint64_t outbound_dropped = 0;  // 队列满被丢弃(channel bridge 长时间不可达)
 };
 
 struct InboundResult {
@@ -77,7 +77,7 @@ public:
     RemoteControlHub(const RemoteControlHub&) = delete;
     RemoteControlHub& operator=(const RemoteControlHub&) = delete;
 
-    // main.cpp 启动期注册一次;把 IM 来的文本注入当前 TUI 会话。
+    // main.cpp 启动期注册一次;把 channel 来的文本注入当前 TUI 会话。
     void set_inbound_submit(InboundSubmit fn);
 
     // 启用:记录 token / session,启动出站 worker。sender 允许为 null(仅入站,
@@ -109,9 +109,9 @@ public:
 
     RemoteControlStats stats() const;
 
-    // 入站文本上限。IM 消息正常远小于此;上限只防恶意/失控的超大 payload。
+    // 入站文本上限。channel 消息正常远小于此;上限只防恶意/失控的超大 payload。
     static constexpr std::size_t kMaxInboundBytes = 64 * 1024;
-    // 出站队列上限。IM 桥不可达时丢最旧的而不是无界堆积。
+    // 出站队列上限。channel bridge 不可达时丢最旧的而不是无界堆积。
     static constexpr std::size_t kMaxQueue = 256;
 
 private:

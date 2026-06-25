@@ -205,12 +205,20 @@ struct WebSearchConfig {
 };
 
 // TUI /remote-control 基座配置(openspec add-remote-control)。
-// token 持久化后,IM 桥跨 ACECode 重启无需重新配对;首次 /remote-control on
-// 自动生成并写回。
+// token 持久化后,channel bridge 跨 ACECode 重启无需重新配对;首次
+// /remote-control on 或默认 channel 激活时自动生成并写回。
 struct RemoteControlConfig {
+    struct ChannelPluginConfig {
+        std::string manifest_path;                 // 外部 channel 插件 manifest
+        int timeout_ms = 10000;                    // 激活/解除绑定进程超时
+        nlohmann::json settings = nlohmann::json::object(); // 透传给插件
+    };
+
     int port = 28190;          // loopback listener 端口(避开 daemon 默认 28080)
     std::string token;         // 空 = 首次启用时生成并持久化
-    std::string outbound_url;  // 出站 webhook(IM 桥端点);空 = 仅入站
+    std::string outbound_url;  // manual 出站 webhook;空 = 仅入站/等待插件
+    std::string default_channel;
+    std::map<std::string, ChannelPluginConfig> channels;
 };
 
 struct AceBrowserPointerCustomConfig {
@@ -332,7 +340,7 @@ struct AppConfig {
     NetworkConfig network;                       // proxy / TLS / abort-debug knobs
     FeaturesConfig features;                     // feature flags
     WebSearchConfig web_search;                  // 联网搜索工具配置(参见 add-web-search-tool)
-    RemoteControlConfig remote_control;          // TUI /remote-control 基座(IM 托管)
+    RemoteControlConfig remote_control;          // TUI /remote-control channel 托管
     AceBrowserBridgeConfig ace_browser_bridge;   // browser bridge tools integration
     UpgradeConfig upgrade;                       // explicit self-upgrade command config
     TuiConfig tui;                               // 终端渲染策略(legacy fallback 等)

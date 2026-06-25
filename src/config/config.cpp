@@ -256,6 +256,46 @@ std::vector<std::string> validate_config(const AppConfig& cfg) {
         errors.push_back("upgrade.timeout_ms out of range (1000-120000): " +
                          std::to_string(cfg.upgrade.timeout_ms));
     }
+    if (cfg.remote_control.port < 1 || cfg.remote_control.port > 65535) {
+        errors.push_back("remote_control.port out of range (1-65535): " +
+                         std::to_string(cfg.remote_control.port));
+    }
+    if (!cfg.remote_control.default_channel.empty() &&
+        cfg.remote_control.channels.find(cfg.remote_control.default_channel) ==
+            cfg.remote_control.channels.end()) {
+        errors.push_back("remote_control.default_channel references an undefined channel: " +
+                         cfg.remote_control.default_channel);
+    }
+    for (const auto& [name, channel] : cfg.remote_control.channels) {
+        if (name.empty()) {
+            errors.push_back("remote_control.channels contains an empty channel name");
+            continue;
+        }
+        bool bad_name = false;
+        for (unsigned char ch : name) {
+            if (std::isspace(ch) || ch == '/' || ch == '\\') {
+                bad_name = true;
+                break;
+            }
+        }
+        if (bad_name) {
+            errors.push_back("remote_control.channels." + name +
+                             " must not contain whitespace or path separators");
+        }
+        if (channel.manifest_path.empty()) {
+            errors.push_back("remote_control.channels." + name +
+                             ".manifest_path must not be empty");
+        }
+        if (channel.timeout_ms < 1000 || channel.timeout_ms > 120000) {
+            errors.push_back("remote_control.channels." + name +
+                             ".timeout_ms out of range (1000-120000): " +
+                             std::to_string(channel.timeout_ms));
+        }
+        if (!channel.settings.is_object()) {
+            errors.push_back("remote_control.channels." + name +
+                             ".settings must be a JSON object");
+        }
+    }
     for (const auto& fn : cfg.project_instructions.filenames) {
         if (fn.empty()) {
             errors.push_back("project_instructions.filenames contains empty entry");
@@ -695,6 +735,23 @@ AppConfig load_config() {
                     cfg.remote_control.token = rcj["token"].get<std::string>();
                 if (rcj.contains("outbound_url") && rcj["outbound_url"].is_string())
                     cfg.remote_control.outbound_url = rcj["outbound_url"].get<std::string>();
+                if (rcj.contains("default_channel") && rcj["default_channel"].is_string())
+                    cfg.remote_control.default_channel =
+                        rcj["default_channel"].get<std::string>();
+                if (rcj.contains("channels") && rcj["channels"].is_object()) {
+                    for (const auto& item : rcj["channels"].items()) {
+                        if (!item.value().is_object()) continue;
+                        RemoteControlConfig::ChannelPluginConfig channel;
+                        const auto& cj = item.value();
+                        if (cj.contains("manifest_path") && cj["manifest_path"].is_string())
+                            channel.manifest_path = cj["manifest_path"].get<std::string>();
+                        if (cj.contains("timeout_ms") && cj["timeout_ms"].is_number_integer())
+                            channel.timeout_ms = cj["timeout_ms"].get<int>();
+                        if (cj.contains("settings"))
+                            channel.settings = cj["settings"];
+                        cfg.remote_control.channels[item.key()] = std::move(channel);
+                    }
+                }
             }
 
             // Browser bridge tools. Canonical config key is ace_browser_bridge;
@@ -1355,6 +1412,23 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
             rcj["token"] = cfg.remote_control.token;
         if (cfg.remote_control.outbound_url != rc_d.outbound_url)
             rcj["outbound_url"] = cfg.remote_control.outbound_url;
+        if (cfg.remote_control.default_channel != rc_d.default_channel)
+            rcj["default_channel"] = cfg.remote_control.default_channel;
+        if (!cfg.remote_control.channels.empty()) {
+            nlohmann::json channels = nlohmann::json::object();
+            for (const auto& [name, channel] : cfg.remote_control.channels) {
+                RemoteControlConfig::ChannelPluginConfig channel_d;
+                nlohmann::json cj = nlohmann::json::object();
+                if (channel.manifest_path != channel_d.manifest_path)
+                    cj["manifest_path"] = channel.manifest_path;
+                if (channel.timeout_ms != channel_d.timeout_ms)
+                    cj["timeout_ms"] = channel.timeout_ms;
+                if (channel.settings.is_object() && !channel.settings.empty())
+                    cj["settings"] = channel.settings;
+                channels[name] = std::move(cj);
+            }
+            rcj["channels"] = std::move(channels);
+        }
         if (!rcj.empty()) j["remote_control"] = rcj;
 
         AceBrowserBridgeConfig ab_d;

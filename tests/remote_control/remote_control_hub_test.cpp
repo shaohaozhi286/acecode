@@ -180,7 +180,7 @@ TEST(RemoteControlHub, OutboundWithoutSenderOrBlankTextIsNoop) {
     hub.disable();
 }
 
-// 场景:IM 桥长时间不可达(sender 阻塞),出站持续堆积超过 kMaxQueue。
+// 场景:channel bridge 长时间不可达(sender 阻塞),出站持续堆积超过 kMaxQueue。
 // 期望:丢最旧的并计入 outbound_dropped,而不是无界占用内存。
 TEST(RemoteControlHub, OutboundQueueOverflowDropsOldest) {
     RemoteControlHub hub;
@@ -202,7 +202,7 @@ TEST(RemoteControlHub, OutboundQueueOverflowDropsOldest) {
     hub.disable();
 }
 
-// 场景:投递失败(IM 桥返回错误)。期望:计入 outbound_failed,worker 继续
+// 场景:投递失败(channel bridge 返回错误)。期望:计入 outbound_failed,worker 继续
 // 处理后续消息而不是停摆。
 TEST(RemoteControlHub, OutboundFailureCountedAndWorkerContinues) {
     RemoteControlHub hub;

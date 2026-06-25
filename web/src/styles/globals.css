@@ -148,6 +148,26 @@ body {
 ::-webkit-scrollbar-thumb { background: rgba(150,150,150,.3); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: rgba(150,150,150,.5); }
 
+.ace-chat-transcript-scroll {
+  scrollbar-color: rgba(150,150,150,.34) transparent;
+}
+.ace-chat-transcript-scroll::-webkit-scrollbar {
+  width: 10px;
+}
+.ace-chat-transcript-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.ace-chat-transcript-scroll::-webkit-scrollbar-thumb {
+  background: rgba(150,150,150,.34);
+  background-clip: padding-box;
+  border: 1px solid transparent;
+  border-radius: 999px;
+}
+.ace-chat-transcript-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(150,150,150,.52);
+  background-clip: padding-box;
+}
+
 /* ── Inactive selection (CSS Custom Highlight API, 仅文件预览区) ── */
 ::highlight(ace-inactive-selection) {
   background-color: rgba(140, 140, 140, 0.28);
@@ -295,7 +315,7 @@ body {
   height: 14px;
   fill: none;
   stroke: currentColor;
-  stroke-width: 1.55;
+  stroke-width: 1;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
@@ -1273,10 +1293,17 @@ body {
   color: var(--ace-fg);
 }
 .ace-change-glass-todo-popover {
-  position: absolute;
-  left: 50%;
-  bottom: calc(100% + 5px);
-  z-index: 4;
+  --ace-todo-dock-bg: var(--ace-surface-hi);
+  --ace-todo-dock-border: rgba(var(--ace-border-rgb), 0.64);
+  --ace-todo-shadow: 0 12px 34px rgba(0, 0, 0, 0.14);
+  --ace-todo-title-color: var(--ace-fg);
+  --ace-todo-text-color: var(--ace-fg-2);
+  --ace-todo-active-color: var(--ace-fg);
+  --ace-todo-done-color: var(--ace-fg-2);
+  --ace-todo-cancelled-color: var(--ace-fg-mute);
+  --ace-todo-clear-hover-bg: rgba(var(--ace-surface-hi-rgb), 0.78);
+  position: fixed;
+  z-index: 200;
   width: 700px;
   max-width: calc(100vw - 48px);
   opacity: 0;
@@ -1284,6 +1311,17 @@ body {
   transform: translateX(-50%) translateY(4px);
   transition: opacity .14s ease, transform .14s ease, visibility 0s linear .14s;
   pointer-events: none;
+}
+[data-theme="dark"] .ace-change-glass-todo-popover {
+  --ace-todo-dock-bg: var(--ace-surface-alt);
+  --ace-todo-dock-border: rgba(var(--ace-border-rgb), 0.78);
+  --ace-todo-shadow: 0 16px 36px rgba(0, 0, 0, 0.38);
+  --ace-todo-title-color: var(--ace-fg);
+  --ace-todo-text-color: var(--ace-fg-2);
+  --ace-todo-active-color: var(--ace-fg);
+  --ace-todo-done-color: var(--ace-fg-2);
+  --ace-todo-cancelled-color: var(--ace-fg-mute);
+  --ace-todo-clear-hover-bg: rgba(var(--ace-surface-hi-rgb), 0.72);
 }
 .ace-change-glass-todo-popover::after {
   content: "";
@@ -1293,8 +1331,7 @@ body {
   bottom: -8px;
   height: 8px;
 }
-.ace-change-glass-dock:hover .ace-change-glass-todo-popover,
-.ace-change-glass-todo-popover:hover {
+.ace-change-glass-todo-popover.is-open {
   opacity: 1;
   visibility: visible;
   transform: translateX(-50%) translateY(0);
@@ -1302,7 +1339,7 @@ body {
   pointer-events: auto;
 }
 .ace-change-glass-todo-popover .ace-todo-glass-dock {
-  max-height: 360px;
+  max-height: min(360px, var(--ace-change-todo-popover-max-height, 360px));
   overflow-y: auto;
 }
 
@@ -2094,6 +2131,7 @@ body {
 
 /* tab 行右端的刷新/折叠按钮,vsCode 风格的 splitter icon。 */
 .ace-side-panel-collapse-btn,
+.ace-side-panel-collapse-tree-btn,
 .ace-side-panel-refresh-btn {
   width: 28px;
   height: 24px;
@@ -2108,11 +2146,13 @@ body {
   transition: color .15s ease, background .15s ease;
 }
 .ace-side-panel-collapse-btn:hover,
+.ace-side-panel-collapse-tree-btn:hover,
 .ace-side-panel-refresh-btn:hover {
   color: var(--ace-fg);
   background: var(--ace-surface-alt);
 }
 .ace-side-panel-collapse-btn:focus-visible,
+.ace-side-panel-collapse-tree-btn:focus-visible,
 .ace-side-panel-refresh-btn:focus-visible {
   outline: 2px solid var(--ace-accent);
   outline-offset: -2px;
@@ -2294,12 +2334,68 @@ body {
 /* 文件树 — 与左侧 Sidebar 使用同一套列表字体。 */
 .ace-file-tree {
   font-family: var(--font-sans);
+  --ace-file-tree-guide-color: rgba(var(--ace-fg-mute-rgb), 0.24);
+  --ace-file-tree-guide-active-color: rgba(var(--ace-fg-mute-rgb), 0.42);
 }
 .ace-file-row {
   border: none;
   background: transparent;
+  min-height: 24px;
+  padding-left: 8px;
 }
 .ace-file-row:hover { background: var(--ace-surface-hi); }
+.ace-file-tree-message {
+  min-height: 24px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  font-size: 11px;
+}
+.ace-file-tree-indent {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-self: stretch;
+  margin-top: -3px;
+  margin-bottom: -3px;
+  min-height: 18px;
+}
+.ace-file-tree-guide {
+  position: relative;
+  flex: 0 0 14px;
+  width: 14px;
+  align-self: stretch;
+}
+.ace-file-tree-guide::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 7px;
+  width: 1px;
+  background-color: var(--ace-file-tree-guide-color);
+  opacity: 0;
+}
+.ace-file-tree-guide-active::before {
+  background-color: var(--ace-file-tree-guide-active-color);
+  opacity: 1;
+}
+.ace-side-panel:hover .ace-file-tree-guide::before {
+  opacity: 1;
+}
+.ace-file-tree-arrow,
+.ace-file-tree-arrow-spacer {
+  flex: 0 0 14px;
+  width: 14px;
+  height: 14px;
+}
+.ace-file-tree-arrow {
+  color: var(--ace-fg-mute);
+}
+.ace-file-row:hover .ace-file-tree-arrow,
+.ace-file-row[data-desktop-file-expanded="true"] .ace-file-tree-arrow {
+  color: var(--ace-fg);
+}
 .ace-file-row[data-review-status="M"] {
   color: var(--ace-warn);
   font-weight: 700;
@@ -2322,6 +2418,19 @@ body {
 .ace-file-name {
   flex: 1 1 auto;
   min-width: 0;
+}
+.ace-file-leaf-content {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: -26px;
+}
+.ace-file-leaf-content .ace-icon,
+.ace-file-leaf-content img,
+.ace-file-leaf-content svg {
+  flex: 0 0 auto;
 }
 .ace-file-row[data-review-status] .ace-file-name {
   color: inherit;
