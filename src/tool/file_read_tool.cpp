@@ -15,7 +15,7 @@ namespace acecode {
 
 static constexpr size_t FILE_READ_LARGE_HINT_THRESHOLD = 200 * 1024; // 200 KB
 static constexpr const char* FILE_UNCHANGED_STUB =
-    "File unchanged since last read. The content from the earlier file_read tool result in this conversation is still current; refer to that instead of re-reading.";
+    "File unchanged since last read.";
 
 namespace {
 
@@ -33,6 +33,23 @@ static std::string format_read_metadata_footer(const FileReadEditMetadata& metad
             << " editable=\"false\"";
     }
     oss << " />\n";
+    return oss.str();
+}
+
+static std::string format_file_unchanged_stub(
+    const MtimeTracker::ReadObservation& observation
+) {
+    std::ostringstream oss;
+    oss << FILE_UNCHANGED_STUB
+        << " The previous file_read result for this same file/range is still current.";
+    if (!observation.tool_call_id.empty()) {
+        oss << "\nPrevious file_read tool_call_id: " << observation.tool_call_id;
+    }
+    if (!observation.persisted_output_path.empty()) {
+        oss << "\nFull previous output path: " << observation.persisted_output_path
+            << "\nIf full content is needed, call file_read on that saved output path.";
+    }
+    oss << "\nDo not call file_read on the original file/range again unless the file changed or a different range is needed.";
     return oss.str();
 }
 
@@ -92,14 +109,16 @@ static ToolResult execute_file_read(const std::string& arguments_json, const Too
         return size_check;
     }
 
-    if (MtimeTracker::instance().has_unchanged_read_observation(file_path, start_line, end_line)) {
+    auto unchanged_observation =
+        MtimeTracker::instance().unchanged_read_observation(file_path, start_line, end_line);
+    if (unchanged_observation.has_value()) {
         ToolSummary summary;
         summary.verb = "Read";
         summary.object = file_path;
         summary.metrics.emplace_back("cache", "unchanged");
         summary.icon = tool_icon("file_read");
 
-        ToolResult r{FILE_UNCHANGED_STUB, true};
+        ToolResult r{format_file_unchanged_stub(*unchanged_observation), true};
         r.summary = std::move(summary);
         return r;
     }

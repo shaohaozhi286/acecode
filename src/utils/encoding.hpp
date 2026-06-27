@@ -98,4 +98,48 @@ inline void trim_trailing_partial_utf8(std::string& buf) {
 // Falls back to replacing invalid bytes with '?'.
 std::string ensure_utf8(const std::string& src);
 
+// Incremental, never-throwing decoder for subprocess output streams.
+//
+// Subprocess stdout/stderr arrives in arbitrary byte chunks: a single multibyte
+// character (UTF-8 up to 4 bytes, GBK/DBCS 2 bytes) can be split across two
+// reads. Decoding each chunk independently would corrupt the split character or
+// — worse for ACECode — leave a stray byte like 0xF7 that makes nlohmann::json
+// throw type_error.316 when the tool result is serialized.
+//
+// This is the C++ analogue of Node's StringDecoder (which Claude Code relies on
+// for free), plus a Windows codepage fallback the JS runtime does not need:
+//   1. prefer UTF-8 (modern toolchains, git-bash, PowerShell Core);
+//   2. on Windows, fall back to the console output codepage (e.g. CP936/GBK)
+//      so legacy cmd.exe output decodes to the correct characters, not '?'.
+//      It holds back a trailing partial lead byte so a split DBCS pair is not
+//      decoded until its second byte arrives;
+//   3. last resort, replace undecodable bytes with '?' — it NEVER throws and
+//      NEVER emits invalid UTF-8.
+//
+// Output of push()/flush() is always valid UTF-8 and safe to hand to JSON, the
+// TUI, and the model context.
+class IncrementalTextDecoder {
+public:
+    // Default: on Windows uses GetConsoleOutputCP() for the codepage fallback.
+    IncrementalTextDecoder();
+    // Force a specific codepage fallback (Windows only; ignored elsewhere).
+    explicit IncrementalTextDecoder(unsigned int codepage);
+
+    // Feed raw bytes; returns the decoded valid-UTF-8 text that is safe to emit
+    // now. Bytes that may belong to an incomplete trailing character are kept
+    // internally until the next push()/flush().
+    std::string push(const char* data, size_t len);
+
+    // Decode and return any bytes still buffered (lossy). Call once at EOF.
+    std::string flush();
+
+    // Drop buffered bytes without decoding (e.g. when reusing the decoder).
+    void reset();
+
+private:
+    std::string pending_;
+    unsigned int codepage_ = 0;
+    bool bom_checked_ = false;
+};
+
 } // namespace acecode

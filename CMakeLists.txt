@@ -126,7 +126,7 @@ include(${CMAKE_SOURCE_DIR}/cmake/acecode_winpty.cmake)
 # Gather all sources under src/ once, then split them into:
 #   - ACECODE_TESTABLE_SOURCES: headless logic that unit tests can link against
 #   - ACECODE_TUI_SOURCES     : FTXUI-coupled code (src/tui, src/markdown)
-# main.cpp always stays out of acecode_testable so tests never drag in the
+# src/main.cpp always stays out of acecode_testable so tests never drag in the
 # full TUI entry point.
 file(GLOB_RECURSE ACECODE_ALL_SOURCES CONFIGURE_DEPENDS
     ${CMAKE_SOURCE_DIR}/src/*.cpp
@@ -137,6 +137,8 @@ file(GLOB_RECURSE ACECODE_HEADER_FILES CONFIGURE_DEPENDS
 )
 
 set(ACECODE_TESTABLE_SOURCES ${ACECODE_ALL_SOURCES})
+list(REMOVE_ITEM ACECODE_TESTABLE_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/main.cpp)
 list(FILTER ACECODE_TESTABLE_SOURCES EXCLUDE REGEX "/src/(tui|markdown)/")
 
 # winpty_agent_location.cpp 属于 winpty_static(需要 winpty 内部 include 路径),
@@ -244,7 +246,7 @@ if(UNIX AND NOT APPLE)
 endif()
 
 add_executable(acecode
-    ${CMAKE_SOURCE_DIR}/main.cpp
+    ${CMAKE_SOURCE_DIR}/src/main.cpp
     ${ACECODE_TUI_SOURCES}
     ${ACECODE_WINDOWS_RESOURCES}
 )
@@ -259,7 +261,7 @@ target_compile_definitions(acecode PRIVATE
 )
 
 source_group(TREE ${CMAKE_SOURCE_DIR} FILES
-    ${CMAKE_SOURCE_DIR}/main.cpp
+    ${CMAKE_SOURCE_DIR}/src/main.cpp
     ${ACECODE_ALL_SOURCES}
     ${ACECODE_HEADER_FILES}
     ${CMAKE_SOURCE_DIR}/src/version.hpp.in

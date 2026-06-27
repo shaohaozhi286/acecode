@@ -240,23 +240,38 @@ static ToolResult execute_bash(const std::string& arguments_json, const ToolCont
     // Shared streaming state across both OS branches.
     std::string full_output;
     std::string current_line;
-    std::string utf8_pending;
     std::deque<std::string> tail_lines;
     int total_lines = 0;
 
-    auto process_raw = [&](const char* data, size_t len) {
-        if (len == 0) return;
-        utf8_pending.append(data, len);
-        size_t safe_end = utf8_safe_boundary(utf8_pending);
-        std::string safe_part = utf8_pending.substr(0, safe_end);
-        utf8_pending.erase(0, safe_end);
+    // Incremental decoder: turns raw subprocess bytes into valid UTF-8, holding
+    // back any trailing partial character across chunk boundaries. On Windows it
+    // falls back to the console codepage (e.g. GBK/CP936) so legacy cmd.exe
+    // output decodes correctly instead of corrupting JSON serialization with a
+    // stray byte like 0xF7. Output here is always safe to stream and to embed in
+    // the tool result JSON.
+    IncrementalTextDecoder decoder;
+
+    // Emit already-decoded UTF-8 text into the output/stream pipeline.
+    auto emit_text = [&](std::string text) {
+        if (text.empty()) return;
 #ifdef _WIN32
-        safe_part = normalize_crlf(safe_part);
+        text = normalize_crlf(text);
 #endif
-        std::string clean = strip_ansi(safe_part);
+        std::string clean = strip_ansi(text);
+        if (clean.empty()) return;
         full_output += clean;
         feed_line_state(clean, current_line, tail_lines, total_lines);
-        if (ctx.stream && !clean.empty()) ctx.stream(clean);
+        if (ctx.stream) ctx.stream(clean);
+    };
+
+    auto process_raw = [&](const char* data, size_t len) {
+        if (len == 0) return;
+        emit_text(decoder.push(data, len));
+    };
+
+    // Drain any bytes the decoder is still holding (called once after EOF).
+    auto flush_decoder = [&]() {
+        emit_text(decoder.flush());
     };
 
     bool aborted = false;
@@ -539,6 +554,10 @@ static ToolResult execute_bash(const std::string& arguments_json, const ToolCont
 
     int exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 #endif
+
+    // EOF reached: drain any bytes the decoder held back (incomplete trailing
+    // character or undecodable tail) so they are not silently dropped.
+    flush_decoder();
 
     // Flush any trailing partial line into full_output and tail_lines so it's
     // visible even without a trailing newline.

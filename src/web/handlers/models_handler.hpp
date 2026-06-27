@@ -66,6 +66,12 @@ std::optional<ModelProbeRequest> parse_model_probe_request(const nlohmann::json&
                                                            std::string& err_code,
                                                            std::string& err);
 
+struct ParsedOpenAiModels {
+    std::vector<std::string> ids;
+    std::map<std::string, int> context_windows;
+};
+
+ParsedOpenAiModels parse_openai_models(const nlohmann::json& body);
 std::vector<std::string> parse_openai_model_ids(const nlohmann::json& body);
 
 } // namespace acecode::web

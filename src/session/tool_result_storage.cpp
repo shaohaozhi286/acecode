@@ -53,8 +53,18 @@ std::size_t replacement_size_after_persist_estimate(std::size_t preview_bytes) {
 struct Candidate {
     std::size_t index = 0;
     std::string tool_call_id;
+    std::string tool_name;
     std::size_t size = 0;
 };
+
+std::size_t per_result_threshold_for_tool(const std::string& tool_name,
+                                          const ToolResultBudgetOptions& options) {
+    auto it = options.per_tool_result_threshold_bytes.find(tool_name);
+    if (it != options.per_tool_result_threshold_bytes.end()) {
+        return it->second;
+    }
+    return options.per_result_default_threshold_bytes;
+}
 
 } // namespace
 
@@ -68,6 +78,22 @@ std::string tool_results_dir_for_session(const std::string& project_dir,
 
 bool is_persisted_output_message(const std::string& content) {
     return content.rfind(PERSISTED_OUTPUT_TAG, 0) == 0;
+}
+
+std::string persisted_output_filepath(const std::string& content) {
+    if (!is_persisted_output_message(content)) return {};
+    constexpr const char* marker = "Full output saved to: ";
+    const std::string::size_type start = content.find(marker);
+    if (start == std::string::npos) return {};
+    std::string::size_type value_start = start + std::string(marker).size();
+    std::string::size_type value_end = content.find('\n', value_start);
+    if (value_end == std::string::npos) value_end = content.size();
+    while (value_end > value_start &&
+           (content[value_end - 1] == '\r' || content[value_end - 1] == ' ' ||
+            content[value_end - 1] == '\t')) {
+        --value_end;
+    }
+    return content.substr(value_start, value_end - value_start);
 }
 
 PersistedToolResult persist_tool_result(const std::string& content,
@@ -147,14 +173,18 @@ ToolResultBudgetResult enforce_tool_result_budget(
         auto replacement_it = state.replacements.find(id);
         if (replacement_it != state.replacements.end()) {
             results[i].output = replacement_it->second;
-            visible_size += replacement_it->second.size();
+            const std::size_t replacement_size = replacement_it->second.size();
+            frozen_size += replacement_size;
+            visible_size += replacement_size;
             continue;
         }
 
         if (is_persisted_output_message(results[i].output)) {
             state.seen_ids.insert(id);
             state.replacements[id] = results[i].output;
-            visible_size += results[i].output.size();
+            const std::size_t replacement_size = results[i].output.size();
+            frozen_size += replacement_size;
+            visible_size += replacement_size;
             continue;
         }
 
@@ -165,28 +195,64 @@ ToolResultBudgetResult enforce_tool_result_budget(
             continue;
         }
 
-        fresh.push_back(Candidate{i, id, size});
+        fresh.push_back(Candidate{i, id, tool_calls[i].function_name, size});
         visible_size += size;
     }
 
+    std::vector<Candidate> aggregate_fresh;
+    aggregate_fresh.reserve(fresh.size());
+
+    for (const auto& candidate : fresh) {
+        const std::size_t threshold =
+            per_result_threshold_for_tool(candidate.tool_name, options);
+        if (candidate.size <= threshold) {
+            aggregate_fresh.push_back(candidate);
+            continue;
+        }
+
+        PersistedToolResult persisted = persist_tool_result(
+            results[candidate.index].output,
+            candidate.tool_call_id,
+            tool_results_dir,
+            options.preview_bytes);
+
+        state.seen_ids.insert(candidate.tool_call_id);
+        if (persisted.filepath.empty()) {
+            frozen_size += candidate.size;
+            continue;
+        }
+
+        const std::string replacement =
+            build_large_tool_result_message(persisted, options.preview_bytes);
+        results[candidate.index].output = replacement;
+        state.replacements[candidate.tool_call_id] = replacement;
+        budget.newly_replaced.push_back(
+            ToolResultReplacementRecord{candidate.tool_call_id, replacement});
+        budget.replaced_size_bytes += candidate.size;
+
+        visible_size -= candidate.size;
+        visible_size += replacement.size();
+        frozen_size += replacement.size();
+    }
+
     if (visible_size <= options.per_batch_budget_bytes) {
-        for (const auto& candidate : fresh) {
+        for (const auto& candidate : aggregate_fresh) {
             state.seen_ids.insert(candidate.tool_call_id);
         }
         return budget;
     }
 
-    std::sort(fresh.begin(), fresh.end(), [](const Candidate& a, const Candidate& b) {
+    std::sort(aggregate_fresh.begin(), aggregate_fresh.end(), [](const Candidate& a, const Candidate& b) {
         return a.size > b.size;
     });
 
     std::set<std::string> selected_ids;
     std::size_t remaining = frozen_size;
-    for (const auto& candidate : fresh) remaining += candidate.size;
+    for (const auto& candidate : aggregate_fresh) remaining += candidate.size;
 
     // 只替换 fresh 结果:旧结果一旦被模型见过,命运就冻结,避免 resume 或
     // 后续 turn 改变 prompt 前缀导致缓存失效。
-    for (const auto& candidate : fresh) {
+    for (const auto& candidate : aggregate_fresh) {
         if (remaining <= options.per_batch_budget_bytes) break;
         selected_ids.insert(candidate.tool_call_id);
         if (candidate.size > replacement_size_after_persist_estimate(options.preview_bytes)) {
@@ -195,7 +261,7 @@ ToolResultBudgetResult enforce_tool_result_budget(
         }
     }
 
-    for (const auto& candidate : fresh) {
+    for (const auto& candidate : aggregate_fresh) {
         if (!selected_ids.count(candidate.tool_call_id)) {
             state.seen_ids.insert(candidate.tool_call_id);
             continue;

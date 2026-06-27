@@ -438,8 +438,10 @@ function objectMetadata(item) {
 
 function suppressStructuredToolWrappers(items) {
   const structuredById = new Map();
+  const structuredIndexes = [];
   items.forEach((item, index) => {
     if (!isToolItem(item)) return;
+    structuredIndexes.push(index);
     const id = toolCallIdForItem(item);
     if (!id) return;
     const indexes = structuredById.get(id) || [];
@@ -487,6 +489,39 @@ function suppressStructuredToolWrappers(items) {
       hideWrapperForTool(nextIndex, index);
     }
   });
+
+  const claimStructuredTool = (usedIndexes, name) => {
+    const wanted = String(name || '').trim().toLowerCase();
+    const fallback = [];
+    for (const index of structuredIndexes) {
+      if (usedIndexes.has(index)) continue;
+      const toolName = normalizedToolName(items[index]?.tool);
+      if (wanted && toolName === wanted) return index;
+      if (!wanted || !toolName) fallback.push(index);
+    }
+    return fallback.length > 0 ? fallback[0] : -1;
+  };
+
+  if (structuredIndexes.length > 0) {
+    const usedCallTools = new Set();
+    const matchedCallTools = [];
+    items.forEach((item, index) => {
+      if (!isToolCallTranscriptMessage(item) || toolCallIdForItem(item)) return;
+      const toolIndex = claimStructuredTool(usedCallTools, transcriptToolName(item));
+      if (toolIndex < 0) return;
+      usedCallTools.add(toolIndex);
+      matchedCallTools.push(toolIndex);
+      hideWrapperForTool(index, toolIndex);
+    });
+
+    let resultOrdinal = 0;
+    items.forEach((item, index) => {
+      if (!isToolTranscriptResultMessage(item) || toolCallIdForItem(item)) return;
+      if (resultOrdinal >= matchedCallTools.length) return;
+      hideWrapperForTool(index, matchedCallTools[resultOrdinal]);
+      resultOrdinal += 1;
+    });
+  }
 
   if (hiddenIndexes.size === 0 && coveredExtras.size === 0) return items;
 

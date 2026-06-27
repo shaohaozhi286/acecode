@@ -56,21 +56,19 @@ export function ChangeTotals({ summary, compact = false }) {
   );
 }
 
-function TodoProgressInline({ checklist, running = true }) {
+function TodoProgressInline({ checklist }) {
   if (!checklist?.visible) return null;
-  const hasActive = checklist.items.some((item) => item.status === 'in_progress');
-  const spinning = !!running && hasActive;
-  const currentStep = Math.min(
-    checklist.total,
-    Math.max(hasActive ? 1 : 0, checklist.done + (hasActive ? 1 : 0)),
-  );
+  const currentStep = checklist.currentStep ?? 0;
+  const progressRatio = Math.max(0, Math.min(1, Number(checklist.progressRatio) || 0));
+  const progressDegrees = `${Math.round(progressRatio * 360)}deg`;
   const label = currentStep > 0
     ? `第 ${currentStep} / ${checklist.total} 步`
     : `0 / ${checklist.total} 步`;
   return (
     <span className="ace-change-glass-todo-progress">
       <span
-        className={clsx('ace-change-glass-todo-spinner', !spinning && 'is-static')}
+        className="ace-change-glass-todo-ring"
+        style={{ '--ace-todo-progress-deg': progressDegrees }}
         aria-hidden="true"
       />
       <span>{label}</span>
@@ -434,7 +432,6 @@ export function ChangeGlassDock({
   scrollRef,
   todos = [],
   todoSummary = null,
-  running = true,
 }) {
   const localDockRef = useRef(null);
   const rootRef = dockRef || localDockRef;
@@ -567,7 +564,7 @@ export function ChangeGlassDock({
   if (!hasVisibleChanges && !todoChecklist.visible) return null;
   const summaryContent = (
     <span className="ace-change-glass-summary">
-      <TodoProgressInline checklist={todoChecklist} running={running} />
+      <TodoProgressInline checklist={todoChecklist} />
       {hasVisibleChanges && <ChangeTotals summary={summary} compact />}
     </span>
   );

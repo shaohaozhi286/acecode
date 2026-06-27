@@ -225,6 +225,29 @@ run('流式尾部结构化工具隐藏冗余 tool_call 和 tool_result 包装行
   assert.equal(projected[2].tool.summary.object, 'app/index.html');
 });
 
+run('并行只读工具批量包装行不会误报旧记录缺少请求参数', () => {
+  const projected = projectCollapsedTranscriptItems([
+    user(1),
+    toolWrapper(2, 'tool_call', '[Tool: file_read] {"file_path":"a.cpp"}'),
+    toolWrapper(3, 'tool_call', '[Tool: file_read] {"file_path":"b.cpp"}'),
+    toolWrapper(4, 'tool_call', '[Tool: grep] {"pattern":"needle"}'),
+    tool(5, { verb: 'Read', object: 'a.cpp', name: 'file_read', toolCallId: 'call-a' }),
+    tool(6, { verb: 'Read', object: 'b.cpp', name: 'file_read', toolCallId: 'call-b' }),
+    tool(7, { verb: 'Read', object: 'grep results', name: 'grep', toolCallId: 'call-grep' }),
+    toolWrapper(8, 'tool_result', 'A result'),
+    toolWrapper(9, 'tool_result', 'B result'),
+    toolWrapper(10, 'tool_result', 'grep result'),
+    assistant(11, 'continue'),
+  ], { deferTrailingToolSummary: true });
+
+  assert.deepEqual(projected.map((item) => item.kind), ['msg', 'activity_summary', 'msg']);
+  assert.equal(projected[1].mode, 'tools');
+  assert.equal(projected[1].collapsedItems.length, 3);
+  assert.equal(projected[1].collapsedItems.some((item) => item.role === 'tool_result'), false);
+  assert.equal(JSON.stringify(projected).includes('请求未记录'), false);
+  assert.deepEqual(projected[1].collapsedItems.map((item) => item.tool.toolCallId), ['call-a', 'call-b', 'call-grep']);
+});
+
 run('没有结构化工具时保留 legacy tool wrapper 行', () => {
   const projected = projectCollapsedTranscriptItems([
     user(1),

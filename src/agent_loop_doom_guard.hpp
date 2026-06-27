@@ -61,9 +61,11 @@ private:
     CallKey build_key(const ToolCall& call) const;
     ResultClass classify_result(const ToolResult& result) const;
     bool is_low_signal(ResultClass result) const;
+    ToolResult make_cached_read_result(const CallKey& key) const;
     ToolResult make_synthetic_result(const CallKey& key,
                                      const std::string& reason,
                                      bool cooldown_active) const;
+    int exact_result_count(const CallKey& key, ResultClass result) const;
     int low_signal_exact_count(const CallKey& key) const;
     int low_signal_semantic_count(const CallKey& key) const;
     void start_cooldown(const std::string& tool, int turns);

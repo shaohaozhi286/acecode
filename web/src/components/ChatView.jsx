@@ -2577,7 +2577,6 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
             scrollRef={scrollRef}
             summary={changeSummary}
             showChanges={showChangeDetails}
-            running={status === 'running'}
             onReview={openReviewPanel}
             onDismiss={dismissChangeDock}
             todos={todos}

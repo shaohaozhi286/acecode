@@ -34,10 +34,16 @@ function numericOrNull(value) {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
+function progressCurrentStep(done, total, hasActive) {
+  if (total <= 0) return 0;
+  const activeStep = hasActive ? 1 : 0;
+  return Math.min(total, Math.max(activeStep, done + activeStep));
+}
+
 export function todoChecklistPresentation(todos = [], summary = null) {
   const sourceItems = Array.isArray(todos) ? todos : [];
   if (sourceItems.length === 0) {
-    return { visible: false, done: 0, total: 0, items: [] };
+    return { visible: false, done: 0, total: 0, currentStep: 0, progressRatio: 0, items: [] };
   }
 
   const items = sourceItems.map((item, index) => {
@@ -53,10 +59,16 @@ export function todoChecklistPresentation(todos = [], summary = null) {
 
   const completedFromSummary = numericOrNull(summary?.completed);
   const totalFromSummary = numericOrNull(summary?.total);
+  const done = completedFromSummary ?? items.filter((item) => item.status === 'completed').length;
+  const total = totalFromSummary ?? items.length;
+  const hasActive = items.some((item) => item.status === 'in_progress');
+  const currentStep = progressCurrentStep(done, total, hasActive);
   return {
     visible: true,
-    done: completedFromSummary ?? items.filter((item) => item.status === 'completed').length,
-    total: totalFromSummary ?? items.length,
+    done,
+    total,
+    currentStep,
+    progressRatio: total > 0 ? currentStep / total : 0,
     items,
   };
 }

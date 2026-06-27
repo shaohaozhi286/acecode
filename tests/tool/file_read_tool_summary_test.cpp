@@ -11,6 +11,7 @@
 #include "tool/file_edit_tool.hpp"
 #include "tool/file_read_tool.hpp"
 #include "tool/file_write_tool.hpp"
+#include "tool/mtime_tracker.hpp"
 #include "tool/tool_executor.hpp"
 
 #include <nlohmann/json.hpp>
@@ -163,6 +164,32 @@ TEST(FileReadToolSummary, DuplicateFullReadReturnsUnchangedStub) {
     EXPECT_EQ(second.output.find("alpha\nbeta\n"), std::string::npos);
     ASSERT_TRUE(second.summary.has_value());
     EXPECT_EQ(get_metric(*second.summary, "cache"), "unchanged");
+
+    fs::remove(p);
+}
+
+TEST(FileReadToolSummary, DuplicateReadStubIncludesPreviousPersistedReference) {
+    ToolImpl tool = create_file_read_tool();
+
+    auto p = make_temp_file("alpha\nbeta\n");
+    nlohmann::json args = {{"file_path", p.string()}};
+
+    ToolResult first = tool.execute(args.dump(), ToolContext{});
+    ASSERT_TRUE(first.success) << first.output;
+    acecode::MtimeTracker::instance().record_read_observation_result(
+        p.string(), 0, 0, "call-read-original",
+        "C:\\Users\\shao\\.acecode\\projects\\hash\\sid\\tool-results\\call-read-original.txt");
+
+    ToolResult second = tool.execute(args.dump(), ToolContext{});
+    ASSERT_TRUE(second.success) << second.output;
+    EXPECT_NE(second.output.find("File unchanged since last read"), std::string::npos);
+    EXPECT_NE(second.output.find("Previous file_read tool_call_id: call-read-original"),
+              std::string::npos);
+    EXPECT_NE(second.output.find("Full previous output path: C:\\Users\\shao\\.acecode"),
+              std::string::npos);
+    EXPECT_NE(second.output.find("call file_read on that saved output path"),
+              std::string::npos);
+    EXPECT_EQ(second.output.find("alpha\nbeta\n"), std::string::npos);
 
     fs::remove(p);
 }

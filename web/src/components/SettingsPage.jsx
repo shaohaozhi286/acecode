@@ -5,7 +5,7 @@
 // 其余 section (MCP / 已归档会话 / 使用情况) 当前部分为 UI 占位
 // — 状态走本地 useState,提交按钮无网络副作用,待后端接口就绪后接入。
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTheme } from '../theme.jsx';
 import { api } from '../lib/api.js';
 import { openExternalUrl } from '../lib/externalUrl.js';
@@ -23,6 +23,7 @@ import {
   formatRequestHeadersJson,
   formatContextWindowK,
   normalizeModelCapabilities,
+  normalizeModelProbeResult,
   parseContextWindowK,
   parseRequestHeadersJson,
   splitModelIds,
@@ -1669,18 +1670,24 @@ function SectionModel() {
   });
   const [copilotBusy, setCopilotBusy] = useState('');
   const [copilotFlow, setCopilotFlow] = useState(null);
-  const [editingName, setEditingName] = useState(null);
   const [showAdd, setShowAdd] = useState(false);
-  const [draft, setDraft] = useState(MODEL_NEW_DRAFT_DEFAULT);
+  const [addDraft, setAddDraft] = useState(MODEL_NEW_DRAFT_DEFAULT);
+  const [expandedModelNames, setExpandedModelNames] = useState(() => new Set());
+  const [editDrafts, setEditDrafts] = useState({});
   const [savedModelFilter, setSavedModelFilter] = useState('');
+  const addModelTitleRef = useRef(null);
+  const pendingAddScrollRef = useRef(false);
+  const filteredModels = useMemo(
+    () => filterSavedModels(models, savedModelFilter),
+    [models, savedModelFilter],
+  );
   const visibleModels = useMemo(
     () => {
-      const filtered = filterSavedModels(models, savedModelFilter);
-      if (!editingName || filtered.some((m) => m?.name === editingName)) return filtered;
-      const editingModel = models.find((m) => m?.name === editingName);
-      return editingModel ? [editingModel, ...filtered] : filtered;
+      if (expandedModelNames.size === 0) return filteredModels;
+      const filteredNames = new Set(filteredModels.map((m) => m?.name).filter(Boolean));
+      return models.filter((m) => filteredNames.has(m?.name) || expandedModelNames.has(m?.name));
     },
-    [editingName, models, savedModelFilter],
+    [expandedModelNames, filteredModels, models],
   );
 
   const refreshCopilotAuth = useCallback(async () => {
@@ -1712,6 +1719,12 @@ function SectionModel() {
       setLoading(false);
     }
   }, []);
+
+  const refreshAndCollapseModels = useCallback(() => {
+    setExpandedModelNames((prev) => (prev.size > 0 ? new Set() : prev));
+    setEditDrafts((prev) => (Object.keys(prev).length > 0 ? {} : prev));
+    void refresh();
+  }, [refresh]);
 
   useEffect(() => {
     refresh();
@@ -1824,22 +1837,95 @@ function SectionModel() {
     }
   };
 
-  const resetForm = () => {
-    setEditingName(null);
+  useEffect(() => {
+    const knownNames = new Set(models.map((m) => m?.name).filter(Boolean));
+    setExpandedModelNames((prev) => {
+      const next = new Set([...prev].filter((name) => knownNames.has(name)));
+      return next.size === prev.size ? prev : next;
+    });
+    setEditDrafts((prev) => {
+      let changed = false;
+      const next = {};
+      for (const [name, draft] of Object.entries(prev)) {
+        if (knownNames.has(name)) {
+          next[name] = draft;
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [models]);
+
+  const resetAddForm = () => {
     setShowAdd(false);
-    setDraft(MODEL_NEW_DRAFT_DEFAULT);
+    setAddDraft(MODEL_NEW_DRAFT_DEFAULT);
   };
+
+  const collapseModel = (name, { discardDraft = false } = {}) => {
+    if (!name) return;
+    setExpandedModelNames((prev) => {
+      if (!prev.has(name)) return prev;
+      const next = new Set(prev);
+      next.delete(name);
+      return next;
+    });
+    if (discardDraft) {
+      setEditDrafts((prev) => {
+        if (!Object.prototype.hasOwnProperty.call(prev, name)) return prev;
+        const next = { ...prev };
+        delete next[name];
+        return next;
+      });
+    }
+  };
+
+  const expandModel = (m) => {
+    if (!m?.name) return;
+    setExpandedModelNames((prev) => {
+      if (prev.has(m.name)) return prev;
+      const next = new Set(prev);
+      next.add(m.name);
+      return next;
+    });
+    setEditDrafts((prev) => (
+      prev[m.name] ? prev : { ...prev, [m.name]: draftFromModelProfile(m) }
+    ));
+  };
+
+  const toggleModelExpansion = (m) => {
+    if (!m?.name) return;
+    if (expandedModelNames.has(m.name)) {
+      collapseModel(m.name);
+    } else {
+      expandModel(m);
+    }
+  };
+
+  const scrollAddModelTitleIntoView = useCallback(() => {
+    window.requestAnimationFrame(() => {
+      addModelTitleRef.current?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'start',
+        inline: 'nearest',
+      });
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!showAdd || !pendingAddScrollRef.current) return;
+    pendingAddScrollRef.current = false;
+    scrollAddModelTitleIntoView();
+  }, [scrollAddModelTitleIntoView, showAdd]);
 
   const startAdd = () => {
-    setEditingName(null);
-    setDraft(MODEL_NEW_DRAFT_DEFAULT);
+    if (showAdd) {
+      scrollAddModelTitleIntoView();
+      return;
+    }
+    setAddDraft(MODEL_NEW_DRAFT_DEFAULT);
+    pendingAddScrollRef.current = true;
     setShowAdd(true);
-  };
-
-  const startEdit = (m) => {
-    setShowAdd(false);
-    setEditingName(m.name);
-    setDraft(draftFromModelProfile(m));
   };
 
   const saveDefault = async (name) => {
@@ -1865,7 +1951,7 @@ function SectionModel() {
     setBusy(`delete:${name}`);
     try {
       await api.removeModel(name);
-      if (editingName === name) resetForm();
+      collapseModel(name, { discardDraft: true });
       await refresh();
       toast({ kind: 'ok', text: '模型已删除' });
     } catch (err) {
@@ -1875,31 +1961,18 @@ function SectionModel() {
     }
   };
 
-  const submitDraft = async () => {
-    if (busy) return;
-    const editing = !!editingName;
-    const selected = splitModelIds(draft.model);
-    if (editing && selected.length !== 1) {
-      toast({ kind: 'err', text: '编辑模式只能保存一个 Model ID' });
-      return;
-    }
-
-    const drafts = editing ? [draft] : buildModelDraftsFromSelection(draft);
-    if (drafts.length === 0) {
-      toast({ kind: 'err', text: lookupErrorMessage('MISSING_MODEL') });
-      return;
-    }
+  const buildPayloads = (drafts) => {
     const payloads = [];
     for (const item of drafts) {
       const contextWindow = parseContextWindowK(item.context_window_k);
       if (!contextWindow.ok) {
         toast({ kind: 'err', text: lookupErrorMessage(contextWindow.code) });
-        return;
+        return null;
       }
       const requestHeaders = parseRequestHeadersJson(item.request_headers_json);
       if (!requestHeaders.ok) {
         toast({ kind: 'err', text: lookupErrorMessage(requestHeaders.code) });
-        return;
+        return null;
       }
       const payload = payloadForModelDraft(item, {
         requestHeaders: requestHeaders.headers,
@@ -1907,23 +1980,54 @@ function SectionModel() {
       const valid = validateModelDraft(payload);
       if (!valid.ok) {
         toast({ kind: 'err', text: lookupErrorMessage(valid.code) });
-        return;
+        return null;
       }
       payloads.push(payload);
     }
+    return payloads;
+  };
 
-    setBusy('submit');
+  const submitAddDraft = async () => {
+    if (busy) return;
+    const drafts = buildModelDraftsFromSelection(addDraft);
+    if (drafts.length === 0) {
+      toast({ kind: 'err', text: lookupErrorMessage('MISSING_MODEL') });
+      return;
+    }
+    const payloads = buildPayloads(drafts);
+    if (!payloads) return;
+
+    setBusy('submit:add');
     try {
-      if (editing) {
-        await api.updateModel(editingName, payloads[0]);
-        toast({ kind: 'ok', text: '模型已更新' });
-      } else {
-        for (const payload of payloads) {
-          await api.addModel(payload);
-        }
-        toast({ kind: 'ok', text: drafts.length > 1 ? `已新增 ${drafts.length} 个模型` : '模型已新增' });
+      for (const payload of payloads) {
+        await api.addModel(payload);
       }
-      resetForm();
+      toast({ kind: 'ok', text: drafts.length > 1 ? `已新增 ${drafts.length} 个模型` : '模型已新增' });
+      resetAddForm();
+      await refresh();
+    } catch (err) {
+      toast({ kind: 'err', text: lookupErrorMessage(err?.code, err?.message) });
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const submitEditDraft = async (name, fallbackModel) => {
+    if (!name || busy) return;
+    const draft = editDrafts[name] || draftFromModelProfile(fallbackModel);
+    const selected = splitModelIds(draft.model);
+    if (selected.length !== 1) {
+      toast({ kind: 'err', text: '编辑模式只能保存一个 Model ID' });
+      return;
+    }
+    const payloads = buildPayloads([draft]);
+    if (!payloads) return;
+
+    setBusy(`submit:${name}`);
+    try {
+      await api.updateModel(name, payloads[0]);
+      toast({ kind: 'ok', text: '模型已更新' });
+      collapseModel(name, { discardDraft: true });
       await refresh();
     } catch (err) {
       toast({ kind: 'err', text: lookupErrorMessage(err?.code, err?.message) });
@@ -1955,18 +2059,28 @@ function SectionModel() {
         <div className="text-[12px] text-fg-mute">
           {loading ? '正在加载...' : (
             savedModelFilter.trim()
-              ? `${models.length} 个已保存模型 · 匹配 ${visibleModels.length} 个`
+              ? `${models.length} 个已保存模型 · 匹配 ${filteredModels.length} 个`
               : `${models.length} 个已保存模型`
           )}
         </div>
-        <button
-          type="button"
-          onClick={refresh}
-          disabled={loading || !!busy}
-          className="px-3 py-1.5 rounded-md border border-border text-[12px] text-fg-2 hover:bg-surface-hi transition disabled:opacity-50 disabled:cursor-wait"
-        >
-          刷新
-        </button>
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={startAdd}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-accent-soft bg-accent-bg text-[12px] font-medium text-accent hover:border-accent hover:bg-surface-hi transition"
+          >
+            <VsIcon name="add" size={13} />
+            新增模型
+          </button>
+          <button
+            type="button"
+            onClick={refreshAndCollapseModels}
+            disabled={loading || !!busy}
+            className="px-3 py-1.5 rounded-md border border-border text-[12px] text-fg-2 hover:bg-surface-hi transition disabled:opacity-50 disabled:cursor-wait"
+          >
+            刷新
+          </button>
+        </div>
       </div>
 
       {models.length > 0 && (
@@ -1995,7 +2109,8 @@ function SectionModel() {
         )}
         {visibleModels.map((m, i) => {
           const isLast = i === visibleModels.length - 1;
-          const isEditing = editingName === m.name;
+          const isExpanded = expandedModelNames.has(m.name);
+          const editDraft = editDrafts[m.name] || draftFromModelProfile(m);
           const isDefault = defaultName === m.name;
           const isOnlyModel = models.length === 1 && models[0]?.name === m.name;
           const canDelete = canDeleteSavedModel({
@@ -2005,104 +2120,118 @@ function SectionModel() {
             busy: !!busy,
           });
 
-          if (isEditing) {
-            return (
-              <div key={m.name} className={clsx(!isLast && 'border-b border-border')}>
-                <ModelFormPreview
-                  data={draft}
-                  setData={(patch) => setDraft((d) => ({ ...d, ...patch }))}
-                  editingName={editingName}
-                  onCancel={resetForm}
-                  onSubmit={submitDraft}
-                  submitLabel="保存"
-                  busy={busy === 'submit'}
-                  allowMultiple={false}
-                  onProbeModels={api.probeModels}
-                  copilotAuthenticated={copilotAuth.authenticated}
-                />
-              </div>
-            );
-          }
-
           return (
             <div
               key={m.name}
-              role="button"
-              tabIndex={0}
-              onClick={() => startEdit(m)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                  e.preventDefault();
-                  startEdit(m);
-                }
-              }}
-              className={clsx(
-                'group/model-row flex items-center gap-3.5 px-5 py-4 cursor-pointer transition hover:bg-surface-hi',
-                !isLast && 'border-b border-border',
-              )}
+              className={clsx(!isLast && 'border-b border-border')}
             >
-              {isDefault ? (
-                <span
-                  className="px-2 py-1 rounded-md text-[11px] font-medium shrink-0 text-warn bg-warn-bg border border-warn select-none"
-                >
-                  当前默认
-                </span>
-              ) : (
-                <button
-                  type="button"
-                  onClick={(e) => { e.stopPropagation(); saveDefault(m.name); }}
-                  disabled={!!busy}
-                  className="px-2 py-1 rounded-md text-[11px] font-medium shrink-0 transition text-fg-mute opacity-0 group-hover/model-row:opacity-100 hover:bg-surface-hi hover:text-fg"
-                >
-                  设为默认
-                </button>
-              )}
-
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2 mb-1">
-                  <span className="text-[14px] font-semibold truncate">{m.name}</span>
+              <div
+                role="button"
+                tabIndex={0}
+                aria-expanded={isExpanded}
+                onClick={() => toggleModelExpansion(m)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    toggleModelExpansion(m);
+                  }
+                }}
+                className={clsx(
+                  'group/model-row flex items-center gap-3.5 px-5 py-4 cursor-pointer transition hover:bg-surface-hi',
+                  isExpanded && 'bg-surface-alt',
+                )}
+              >
+                {isDefault ? (
                   <span
+                    className="px-2 py-1 rounded-md text-[11px] font-medium shrink-0 text-warn bg-warn-bg border border-warn select-none"
+                  >
+                    当前默认
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); saveDefault(m.name); }}
+                    disabled={!!busy}
+                    className="px-2 py-1 rounded-md text-[11px] font-medium shrink-0 transition text-fg-mute opacity-0 group-hover/model-row:opacity-100 hover:bg-surface-hi hover:text-fg"
+                  >
+                    设为默认
+                  </button>
+                )}
+
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="text-[14px] font-semibold truncate">{m.name}</span>
+                    <span
+                      className={clsx(
+                        'px-2 py-[2px] rounded text-[10px] font-medium uppercase tracking-wide',
+                        MODEL_NEW_PROVIDER_PILL[m.provider] || 'text-fg-2 bg-surface-hi border border-border',
+                      )}
+                    >
+                      {providerLabel(m.provider)}
+                    </span>
+                    <CapabilityBadges capabilities={m.capabilities} compact />
+                  </div>
+                  <div className="text-[12px] text-fg-mute font-mono truncate">
+                    {m.model}
+                    {m.context_window ? (
+                      <span className="font-sans"> · 上下文 {formatContextWindowK(m.context_window)}k</span>
+                    ) : null}
+                  </div>
+                </div>
+
+                <div className="flex gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
+                  <button
+                    type="button"
+                    onClick={() => expandModel(m)}
+                    title="编辑"
+                    className="w-8 h-8 rounded-md flex items-center justify-center text-fg-mute hover:bg-surface-hi transition"
+                  >
+                    <VsIcon name="edit" size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => removeOne(m.name)}
+                    disabled={!canDelete}
+                    title={isDefault && !isOnlyModel ? '默认模型不能删除' : '删除'}
                     className={clsx(
-                      'px-2 py-[2px] rounded text-[10px] font-medium uppercase tracking-wide',
-                      MODEL_NEW_PROVIDER_PILL[m.provider] || 'text-fg-2 bg-surface-hi border border-border',
+                      'w-8 h-8 rounded-md flex items-center justify-center transition',
+                      canDelete
+                        ? 'text-fg-mute hover:bg-danger-bg hover:text-danger'
+                        : 'text-fg-mute opacity-30 cursor-not-allowed',
                     )}
                   >
-                    {providerLabel(m.provider)}
-                  </span>
-                  <CapabilityBadges capabilities={m.capabilities} compact />
-                </div>
-                <div className="text-[12px] text-fg-mute font-mono truncate">
-                  {m.model}
-                  {m.context_window ? (
-                    <span className="font-sans"> · 上下文 {formatContextWindowK(m.context_window)}k</span>
-                  ) : null}
+                    <VsIcon name="delete" size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => toggleModelExpansion(m)}
+                    title={isExpanded ? '折叠' : '展开'}
+                    aria-expanded={isExpanded}
+                    className="w-8 h-8 rounded-md flex items-center justify-center text-fg-mute hover:bg-surface-hi hover:text-fg transition"
+                  >
+                    <VsIcon name={isExpanded ? 'expandDown' : 'expandRight'} size={15} />
+                  </button>
                 </div>
               </div>
-
-              <div className="flex gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
-                <button
-                  type="button"
-                  onClick={() => startEdit(m)}
-                  title="编辑"
-                  className="w-8 h-8 rounded-md flex items-center justify-center text-fg-mute hover:bg-surface-hi transition"
-                >
-                  <VsIcon name="edit" size={14} />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => removeOne(m.name)}
-                  disabled={!canDelete}
-                  title={isDefault && !isOnlyModel ? '默认模型不能删除' : '删除'}
-                  className={clsx(
-                    'w-8 h-8 rounded-md flex items-center justify-center transition',
-                    canDelete
-                      ? 'text-fg-mute hover:bg-danger-bg hover:text-danger'
-                      : 'text-fg-mute opacity-30 cursor-not-allowed',
-                  )}
-                >
-                  <VsIcon name="delete" size={14} />
-                </button>
-              </div>
+              {isExpanded && (
+                <div className="px-5 pb-5 pt-1 bg-surface">
+                  <ModelFormPreview
+                    data={editDraft}
+                    setData={(patch) => setEditDrafts((drafts) => ({
+                      ...drafts,
+                      [m.name]: { ...(drafts[m.name] || draftFromModelProfile(m)), ...patch },
+                    }))}
+                    editingName={m.name}
+                    onCancel={() => collapseModel(m.name, { discardDraft: true })}
+                    onSubmit={() => submitEditDraft(m.name, m)}
+                    submitLabel="保存"
+                    busy={!!busy}
+                    allowMultiple={false}
+                    onProbeModels={api.probeModels}
+                    copilotAuthenticated={copilotAuth.authenticated}
+                  />
+                </div>
+              )}
             </div>
           );
         })}
@@ -2110,17 +2239,17 @@ function SectionModel() {
 
       {showAdd ? (
         <div className="mt-4">
-          <div className="text-[14px] font-semibold mb-3">新增模型</div>
+          <div ref={addModelTitleRef} className="text-[14px] font-semibold mb-3 scroll-mt-6">新增模型</div>
           <ModelFormPreview
-            data={draft}
-            setData={(patch) => setDraft((d) => ({ ...d, ...patch }))}
+            data={addDraft}
+            setData={(patch) => setAddDraft((d) => ({ ...d, ...patch }))}
             onCancel={() => {
               setShowAdd(false);
-              setDraft(MODEL_NEW_DRAFT_DEFAULT);
+              setAddDraft(MODEL_NEW_DRAFT_DEFAULT);
             }}
-            onSubmit={submitDraft}
+            onSubmit={submitAddDraft}
             submitLabel="新增"
-            busy={busy === 'submit'}
+            busy={!!busy}
             allowMultiple
             onProbeModels={api.probeModels}
             copilotAuthenticated={copilotAuth.authenticated}

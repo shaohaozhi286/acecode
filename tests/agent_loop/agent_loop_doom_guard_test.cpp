@@ -236,7 +236,7 @@ TEST(AgentLoopDoomGuard, SuccessfulOutputWithErrorLikeContentIsNotLowSignal) {
     EXPECT_FALSE(guard.maybe_guard(duplicate).has_value());
 }
 
-TEST(AgentLoopDoomGuard, FileReadUnchangedStubArmsExactRepeatGuard) {
+TEST(AgentLoopDoomGuard, FileReadUnchangedStubUsesCachedReadGuard) {
     AgentLoopDoomGuard guard;
     ToolCall call = make_call("call-1", "file_read",
         R"({"file_path":"D:/code/src/app.cpp"})");
@@ -252,7 +252,10 @@ TEST(AgentLoopDoomGuard, FileReadUnchangedStubArmsExactRepeatGuard) {
     auto guarded = guard.maybe_guard(duplicate);
     ASSERT_TRUE(guarded.has_value());
     EXPECT_FALSE(guarded->success);
-    EXPECT_NE(guarded->output.find("[Doom-loop guard]"), std::string::npos);
+    EXPECT_NE(guarded->output.find("[Cached read guard]"), std::string::npos);
+    EXPECT_EQ(guarded->output.find("[Doom-loop guard]"), std::string::npos);
+    ASSERT_TRUE(guarded->summary.has_value());
+    EXPECT_EQ(guarded->summary->verb, "Cached");
 }
 
 // 守住原有保护:失败结果的关键词细分仍然生效,真正的 "old_string not found"

@@ -4,11 +4,89 @@
 #include "../../config/request_headers.hpp"
 
 #include <algorithm>
+#include <cctype>
+#include <cmath>
+#include <limits>
 #include <set>
+#include <string>
 
 namespace acecode::web {
 
 namespace {
+
+std::optional<int> positive_int_from_json(const nlohmann::json& value) {
+    long long parsed = 0;
+    if (value.is_number_integer() || value.is_number_unsigned()) {
+        parsed = value.get<long long>();
+    } else if (value.is_number_float()) {
+        const double d = value.get<double>();
+        if (!std::isfinite(d)) return std::nullopt;
+        parsed = static_cast<long long>(std::llround(d));
+        if (std::fabs(d - static_cast<double>(parsed)) > 0.000001) return std::nullopt;
+    } else if (value.is_string()) {
+        const std::string s = value.get<std::string>();
+        std::size_t start = 0;
+        while (start < s.size() && std::isspace(static_cast<unsigned char>(s[start]))) ++start;
+        std::size_t end = s.size();
+        while (end > start && std::isspace(static_cast<unsigned char>(s[end - 1]))) --end;
+        if (start == end) return std::nullopt;
+        long long acc = 0;
+        for (std::size_t i = start; i < end; ++i) {
+            unsigned char ch = static_cast<unsigned char>(s[i]);
+            if (!std::isdigit(ch)) return std::nullopt;
+            acc = acc * 10 + static_cast<long long>(ch - '0');
+            if (acc > std::numeric_limits<int>::max()) return std::nullopt;
+        }
+        parsed = acc;
+    } else {
+        return std::nullopt;
+    }
+    if (parsed <= 0 || parsed > std::numeric_limits<int>::max()) return std::nullopt;
+    return static_cast<int>(parsed);
+}
+
+int context_window_from_model_item(const nlohmann::json& item) {
+    if (!item.is_object()) return 0;
+    static constexpr const char* kContextKeys[] = {
+        "context_window",
+        "contextWindow",
+        "context_length",
+        "contextLength",
+        "max_context",
+        "maxContext",
+        "max_context_length",
+        "maxContextLength",
+        "max_context_tokens",
+        "maxContextTokens",
+        "max_input_tokens",
+        "maxInputTokens",
+        "input_token_limit",
+        "inputTokenLimit",
+        "max_window_tokens",
+        "maxWindowTokens",
+        "max_model_len",
+        "maxModelLen",
+        "n_ctx",
+    };
+
+    auto scan_object = [&](const nlohmann::json& obj) -> int {
+        if (!obj.is_object()) return 0;
+        for (const char* key : kContextKeys) {
+            auto it = obj.find(key);
+            if (it == obj.end()) continue;
+            if (auto parsed = positive_int_from_json(*it)) return *parsed;
+        }
+        return 0;
+    };
+
+    if (int parsed = scan_object(item); parsed > 0) return parsed;
+    for (const char* nested_key : {"metadata", "meta", "model_info", "modelInfo", "limits"}) {
+        auto it = item.find(nested_key);
+        if (it == item.end()) continue;
+        if (int parsed = scan_object(*it); parsed > 0) return parsed;
+    }
+    return 0;
+}
 
 // 构造单个条目的 JSON。base_url / models_dev_provider_id 可选,有值才输出。
 nlohmann::json entry_to_json(const ModelProfile& entry) {
@@ -217,7 +295,7 @@ std::optional<ModelProbeRequest> parse_model_probe_request(const nlohmann::json&
     return request;
 }
 
-std::vector<std::string> parse_openai_model_ids(const nlohmann::json& body) {
+ParsedOpenAiModels parse_openai_models(const nlohmann::json& body) {
     const nlohmann::json* list = nullptr;
     if (body.is_object()) {
         if (body.contains("data") && body["data"].is_array()) {
@@ -231,19 +309,32 @@ std::vector<std::string> parse_openai_model_ids(const nlohmann::json& body) {
     if (!list) return {};
 
     std::set<std::string> unique;
+    std::map<std::string, int> context_windows;
     for (const auto& item : *list) {
+        std::string value;
         if (item.is_string()) {
-            auto value = item.get<std::string>();
-            if (!value.empty()) unique.insert(std::move(value));
-            continue;
+            value = item.get<std::string>();
+        } else if (item.is_object()) {
+            for (const char* key : {"id", "model", "name"}) {
+                auto it = item.find(key);
+                if (it != item.end() && it->is_string()) {
+                    value = it->get<std::string>();
+                    break;
+                }
+            }
         }
-        if (!item.is_object() || !item.contains("id") || !item["id"].is_string()) {
-            continue;
+        if (value.empty()) continue;
+        unique.insert(value);
+        if (item.is_object()) {
+            int context_window = context_window_from_model_item(item);
+            if (context_window > 0) context_windows[value] = context_window;
         }
-        auto value = item["id"].get<std::string>();
-        if (!value.empty()) unique.insert(std::move(value));
     }
-    return {unique.begin(), unique.end()};
+    return {{unique.begin(), unique.end()}, std::move(context_windows)};
+}
+
+std::vector<std::string> parse_openai_model_ids(const nlohmann::json& body) {
+    return parse_openai_models(body).ids;
 }
 
 } // namespace acecode::web

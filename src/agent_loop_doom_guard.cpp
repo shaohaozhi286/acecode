@@ -225,6 +225,10 @@ std::optional<ToolResult> AgentLoopDoomGuard::maybe_guard(const ToolCall& call) 
             true);
     }
 
+    if (key.tool == "file_read" && exact_result_count(key, ResultClass::Unchanged) >= 1) {
+        return make_cached_read_result(key);
+    }
+
     if (low_signal_exact_count(key) >= 1) {
         return make_synthetic_result(
             key,
@@ -304,6 +308,7 @@ AgentLoopDoomGuard::ResultClass AgentLoopDoomGuard::classify_result(const ToolRe
     std::string output = collapse_space(result.output);
     std::string lower = ascii_lower(output);
     if (lower.find("[doom-loop guard]") != std::string::npos) return ResultClass::Guarded;
+    if (lower.find("[cached read guard]") != std::string::npos) return ResultClass::Guarded;
     if (lower.rfind("file unchanged since last read.", 0) == 0) {
         return ResultClass::Unchanged;
     }
@@ -349,6 +354,26 @@ bool AgentLoopDoomGuard::is_low_signal(ResultClass result) const {
     return result != ResultClass::Useful;
 }
 
+ToolResult AgentLoopDoomGuard::make_cached_read_result(const CallKey& key) const {
+    std::ostringstream oss;
+    oss << "[Cached read guard] Skipped repeated file_read: the same file/range was already reported unchanged.";
+    if (!key.target.empty()) {
+        oss << "\nTarget: " << key.target;
+    }
+    oss << "\nUse the previous file_read result. If that result was a <persisted-output> preview, read its saved output path instead of reading the original file/range again.";
+
+    ToolResult result;
+    result.output = oss.str();
+    result.success = false;
+    ToolSummary summary;
+    summary.verb = "Cached";
+    summary.object = key.target.empty() ? "file_read" : key.target;
+    summary.metrics.push_back({"reason", "unchanged"});
+    summary.icon = "!";
+    result.summary = std::move(summary);
+    return result;
+}
+
 ToolResult AgentLoopDoomGuard::make_synthetic_result(const CallKey& key,
                                                      const std::string& reason,
                                                      bool cooldown_active_flag) const {
@@ -376,6 +401,18 @@ ToolResult AgentLoopDoomGuard::make_synthetic_result(const CallKey& key,
     summary.icon = "!";
     result.summary = std::move(summary);
     return result;
+}
+
+int AgentLoopDoomGuard::exact_result_count(const CallKey& key, ResultClass result) const {
+    int count = 0;
+    for (const Attempt& attempt : attempts_) {
+        if (attempt.key.tool == key.tool &&
+            attempt.key.exact == key.exact &&
+            attempt.result == result) {
+            ++count;
+        }
+    }
+    return count;
 }
 
 int AgentLoopDoomGuard::low_signal_exact_count(const CallKey& key) const {

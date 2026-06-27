@@ -240,6 +240,51 @@ export function formatContextWindowK(tokens) {
   return Number.isInteger(k) ? String(k) : String(Number(k.toFixed(3)));
 }
 
+function positiveContextWindow(value) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0 || parsed > 2147483647) return 0;
+  return parsed;
+}
+
+export function normalizeModelProbeResult(result) {
+  const models = [];
+  const seen = new Set();
+  const contextWindows = {};
+  const addContext = (id, tokens) => {
+    const key = String(id || '').trim();
+    if (!key) return;
+    const parsed = positiveContextWindow(tokens);
+    if (parsed > 0) contextWindows[key] = parsed;
+  };
+  const addModel = (id, tokens) => {
+    const key = String(id || '').trim();
+    if (!key) return;
+    if (!seen.has(key)) {
+      seen.add(key);
+      models.push(key);
+    }
+    addContext(key, tokens);
+  };
+
+  const rawModels = Array.isArray(result?.models) ? result.models : [];
+  rawModels.forEach((item) => {
+    if (typeof item === 'string') {
+      addModel(item, result?.model_context_windows?.[item]);
+      return;
+    }
+    if (!item || typeof item !== 'object') return;
+    const id = item.id || item.model || item.name;
+    addModel(id, item.context_window || item.contextWindow);
+  });
+
+  const map = result?.model_context_windows;
+  if (map && typeof map === 'object' && !Array.isArray(map)) {
+    Object.entries(map).forEach(([id, tokens]) => addContext(id, tokens));
+  }
+
+  return { models, contextWindows };
+}
+
 export function modelNameSlug(value, fallback = 'model') {
   const cleaned = String(value || '')
     .trim()

@@ -138,18 +138,26 @@ std::string build_system_prompt(const ToolExecutor& tools, const std::string& cw
         << "- Temporary helper scripts belong under ACECODE_TMPDIR, which resolves to .acecode/tmp/session-<id> for active sessions. Do not create throwaway scripts in the workspace root.\n"
         << "- Tool results wrapped in <persisted-output> are previews; read the saved path with file_read if you need the full output.\n"
         << "- Avoid interactive shell programs.\n"
-        << "- If multiple independent tool calls are needed, make them in parallel.\n\n";
+        << "- When multiple independent tool calls are useful, especially read-only calls such as file_read, grep, or glob, batch them in the same assistant message so they can run in parallel.\n"
+        << "- Do not add a progress sentence before each individual tool call. If a batch is obvious, emit the tool calls without preceding text.\n"
+        << "  Good: emit file_read for several files plus one grep in the same assistant message, with no narration before each call.\n"
+        << "  Bad:  \"Let me read this file.\" then exactly one file_read, then \"Now let me search.\" then exactly one grep.\n\n";
 
     oss << "# Tone and style\n\n"
         << "- Be concise and direct.\n"
         << "- Do not use emojis unless the user explicitly requests them.\n\n";
 
     oss << "# Sharing progress updates\n\n"
-        << "During multi-step work, you will produce many assistant messages between "
-        << "tool calls. Keep these **extremely short** — 10 words or fewer. Their "
-        << "only purpose is to let the user know what you are doing right now:\n\n"
+        << "Do not narrate every tool call. During multi-step work, prefer silent "
+        << "batches of tool calls over alternating short text and one tool call. "
+        << "Only emit a progress update when it helps the user understand a "
+        << "long-running transition, a meaningful phase change, or why you are "
+        << "about to perform a non-obvious action. Keep progress updates "
+        << "**extremely short** - 10 words or fewer:\n\n"
+        << "  Good: emit several independent file_read/grep/glob calls together with no preceding text.\n"
         << "  Good: \"Checking the test results.\"\n"
         << "  Good: \"Found the issue, fixing now.\"\n"
+        << "  Bad:  \"Let me read this file.\" followed by one file_read, then another progress sentence before the next read.\n"
         << "  Bad:  \"I've analyzed the error in src/foo.cpp and determined that the "
         << "root cause is a null pointer dereference on line 42. Let me fix that.\"\n\n"
         << "Do NOT put conclusions, explanations, reasoning, lists of changes, or "

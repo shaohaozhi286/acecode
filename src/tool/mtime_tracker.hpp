@@ -71,6 +71,8 @@ public:
 
     struct ReadObservation {
         clock mtime;
+        std::string tool_call_id;
+        std::string persisted_output_path;
     };
 
     // Record the mtime of a file at the time it was read or observed by the agent.
@@ -99,7 +101,17 @@ public:
         int start_line,
         int end_line
     ) const;
+    std::optional<ReadObservation> unchanged_read_observation(
+        const std::string& path,
+        int start_line,
+        int end_line
+    ) const;
     void record_read_observation(const std::string& path, int start_line, int end_line);
+    void record_read_observation_result(const std::string& path,
+                                        int start_line,
+                                        int end_line,
+                                        const std::string& tool_call_id,
+                                        const std::string& persisted_output_path);
     void invalidate_read_observations(const std::string& path);
 
     // Check if a file has been externally modified since the last recorded read.

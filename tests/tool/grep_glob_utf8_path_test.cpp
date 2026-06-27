@@ -5,6 +5,8 @@
 #include "utils/encoding.hpp"
 #include "utils/utf8_path.hpp"
 
+#include <nlohmann/json.hpp>
+
 #include <filesystem>
 #include <fstream>
 #include <random>
@@ -67,4 +69,26 @@ TEST(GrepGlobUtf8PathTest, GrepReturnsUtf8PathsAndLines) {
     EXPECT_NE(result.output.find(u8"资料/笔记.txt"), std::string::npos);
     EXPECT_NE(result.output.find(u8"关键词在这里"), std::string::npos);
     EXPECT_TRUE(acecode::is_valid_utf8(result.output));
+}
+
+TEST(GrepGlobUtf8PathTest, GrepAcceptsFilePath) {
+    TempTree tmp;
+    fs::path root = tmp.path / "project";
+    write_file(root / "CMakeLists.txt", "add_executable(acecode src/main.cpp)\n");
+    write_file(root / "other.txt", "src/main.cpp\n");
+
+    acecode::ToolContext ctx;
+    ctx.cwd = acecode::path_to_utf8(root);
+
+    auto args = nlohmann::json({
+        {"pattern", "main\\.cpp"},
+        {"path", acecode::path_to_utf8(root / "CMakeLists.txt")},
+    }).dump();
+
+    auto tool = acecode::create_grep_tool();
+    auto result = tool.execute(args, ctx);
+
+    ASSERT_TRUE(result.success) << result.output;
+    EXPECT_NE(result.output.find("CMakeLists.txt:1:add_executable"), std::string::npos);
+    EXPECT_EQ(result.output.find("other.txt"), std::string::npos);
 }

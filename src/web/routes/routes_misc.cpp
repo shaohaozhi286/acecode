@@ -969,8 +969,13 @@ void WebServer::Impl::register_ui_preferences() {
             }
 
             try {
-                auto ids = parse_openai_model_ids(json::parse(response.text));
-                crow::response r(json{{"models", ids}}.dump());
+                auto parsed = parse_openai_models(json::parse(response.text));
+                json out;
+                out["models"] = parsed.ids;
+                if (!parsed.context_windows.empty()) {
+                    out["model_context_windows"] = parsed.context_windows;
+                }
+                crow::response r(out.dump());
                 r.add_header("Content-Type", "application/json");
                 return with_cors(req, std::move(r));
             } catch (const std::exception& e) {

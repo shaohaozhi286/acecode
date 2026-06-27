@@ -1249,17 +1249,14 @@ body {
   background: currentColor;
   opacity: .45;
 }
-.ace-change-glass-todo-spinner {
-  width: 13px;
-  height: 13px;
-  border: 2px solid rgba(var(--ace-accent-rgb), 0.24);
-  border-top-color: var(--ace-accent);
+.ace-change-glass-todo-ring {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
   border-radius: 50%;
-  animation: ace-spin .8s linear infinite;
-}
-.ace-change-glass-todo-spinner.is-static {
-  animation: none;
-  border-top-color: rgba(var(--ace-accent-rgb), 0.24);
+  background:
+    radial-gradient(farthest-side, var(--ace-todo-dock-bg) calc(100% - 2px), transparent 0),
+    conic-gradient(var(--ace-accent) var(--ace-todo-progress-deg, 0deg), rgba(var(--ace-accent-rgb), 0.22) 0);
 }
 .ace-change-glass-action {
   display: inline-flex;

@@ -307,6 +307,26 @@ TEST_F(SystemPromptTest, TaskCompletionProtocolAppears) {
               std::string::npos);
 }
 
+// 场景:工具使用与进度更新文案应鼓励同一 assistant turn 中批量发出独立工具调用,
+// 而不是形成一句旁白配一个工具调用的低密度交替模式。
+TEST_F(SystemPromptTest, PromptEncouragesBatchedToolCallsWithoutPerCallNarration) {
+    acecode::ToolExecutor tools;
+    std::string out = acecode::build_system_prompt(tools, temp_home.string());
+
+    EXPECT_NE(out.find("batch them in the same assistant message"),
+              std::string::npos);
+    EXPECT_NE(out.find("Do not add a progress sentence before each individual tool call"),
+              std::string::npos);
+    EXPECT_NE(out.find("Do not narrate every tool call"),
+              std::string::npos);
+    EXPECT_NE(out.find("prefer silent batches of tool calls"),
+              std::string::npos);
+    EXPECT_NE(out.find("\"Let me read this file.\" followed by one file_read"),
+              std::string::npos);
+    EXPECT_EQ(out.find("you will produce many assistant messages between tool calls"),
+              std::string::npos);
+}
+
 TEST_F(SystemPromptTest, PromptUsesClaudeStyleReadFailureGuidanceAndGuidesScratchScripts) {
     acecode::ToolExecutor tools;
     std::string out = acecode::build_system_prompt(tools, temp_home.string());

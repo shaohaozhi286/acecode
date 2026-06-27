@@ -2209,6 +2209,36 @@ bool AgentLoop::execute_tool_calls(
         }
     }
 
+    auto record_file_read_result_reference = [](const ToolCall& tc, const ToolResult& result) {
+        if (!result.success || tc.function_name != "file_read") return;
+        if (result.output.rfind("File unchanged since last read.", 0) == 0) return;
+
+        auto args = nlohmann::json::parse(tc.function_arguments, nullptr, false);
+        if (!args.is_object() ||
+            !args.contains("file_path") ||
+            !args["file_path"].is_string()) {
+            return;
+        }
+
+        auto int_arg = [&args](const char* key) -> int {
+            if (!args.contains(key) || !args[key].is_number_integer()) return 0;
+            return args[key].get<int>();
+        };
+
+        MtimeTracker::instance().record_read_observation_result(
+            args["file_path"].get<std::string>(),
+            int_arg("start_line"),
+            int_arg("end_line"),
+            tc.id,
+            persisted_output_filepath(result.output));
+    };
+
+    for (size_t i = 0; i < accumulated.tool_calls.size() && i < results.size(); ++i) {
+        if (i < result_ready.size() && result_ready[i]) {
+            record_file_read_result_reference(accumulated.tool_calls[i], results[i]);
+        }
+    }
+
     // Phase 3: Record and dispatch all results in original order
     for (size_t i = 0; i < accumulated.tool_calls.size(); ++i) {
         const auto& tc = accumulated.tool_calls[i];

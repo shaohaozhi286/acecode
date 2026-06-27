@@ -130,16 +130,26 @@ bool MtimeTracker::has_unchanged_read_observation(
     int start_line,
     int end_line
 ) const {
+    return unchanged_read_observation(path, start_line, end_line).has_value();
+}
+
+std::optional<MtimeTracker::ReadObservation> MtimeTracker::unchanged_read_observation(
+    const std::string& path,
+    int start_line,
+    int end_line
+) const {
     const auto key = make_read_observation_key(path, start_line, end_line);
     std::lock_guard<std::mutex> lk(mu_);
     auto it = read_observations_.find(key);
-    if (it == read_observations_.end()) return false;
+    if (it == read_observations_.end()) return std::nullopt;
     try {
         auto current_mtime = std::filesystem::last_write_time(path_from_utf8(key.path));
-        return current_mtime == it->second.mtime;
+        if (current_mtime == it->second.mtime) {
+            return it->second;
+        }
     } catch (...) {
-        return false;
     }
+    return std::nullopt;
 }
 
 void MtimeTracker::record_read_observation(const std::string& path, int start_line, int end_line) {
@@ -147,10 +157,28 @@ void MtimeTracker::record_read_observation(const std::string& path, int start_li
         auto key = make_read_observation_key(path, start_line, end_line);
         auto mtime = std::filesystem::last_write_time(path_from_utf8(key.path));
         std::lock_guard<std::mutex> lk(mu_);
-        read_observations_[key] = ReadObservation{mtime};
+        read_observations_[key] = ReadObservation{mtime, {}, {}};
         touch_read_observation_lru_locked(read_observations_, read_observation_lru_, key);
     } catch (...) {
         // File may not exist or may be inaccessible; dedup is optional.
+    }
+}
+
+void MtimeTracker::record_read_observation_result(
+    const std::string& path,
+    int start_line,
+    int end_line,
+    const std::string& tool_call_id,
+    const std::string& persisted_output_path
+) {
+    if (tool_call_id.empty() && persisted_output_path.empty()) return;
+    const auto key = make_read_observation_key(path, start_line, end_line);
+    std::lock_guard<std::mutex> lk(mu_);
+    auto it = read_observations_.find(key);
+    if (it == read_observations_.end()) return;
+    if (!tool_call_id.empty()) it->second.tool_call_id = tool_call_id;
+    if (!persisted_output_path.empty()) {
+        it->second.persisted_output_path = persisted_output_path;
     }
 }
 

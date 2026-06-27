@@ -15,6 +15,8 @@ inline constexpr const char* TOOL_RESULTS_SUBDIR = "tool-results";
 inline constexpr const char* PERSISTED_OUTPUT_TAG = "<persisted-output>";
 inline constexpr const char* PERSISTED_OUTPUT_CLOSING_TAG = "</persisted-output>";
 inline constexpr std::size_t TOOL_RESULT_PREVIEW_BYTES = 2000;
+inline constexpr std::size_t TOOL_RESULT_DEFAULT_MAX_BYTES = 50000;
+inline constexpr std::size_t TOOL_RESULT_BASH_MAX_BYTES = 30000;
 inline constexpr std::size_t TOOL_RESULTS_PER_BATCH_BUDGET_BYTES = 200000;
 
 struct PersistedToolResult {
@@ -35,6 +37,10 @@ struct ToolResultReplacementState {
 };
 
 struct ToolResultBudgetOptions {
+    std::size_t per_result_default_threshold_bytes = TOOL_RESULT_DEFAULT_MAX_BYTES;
+    std::map<std::string, std::size_t> per_tool_result_threshold_bytes = {
+        {"bash", TOOL_RESULT_BASH_MAX_BYTES},
+    };
     std::size_t per_batch_budget_bytes = TOOL_RESULTS_PER_BATCH_BUDGET_BYTES;
     std::size_t preview_bytes = TOOL_RESULT_PREVIEW_BYTES;
 };
@@ -48,6 +54,7 @@ std::string tool_results_dir_for_session(const std::string& project_dir,
                                          const std::string& session_id);
 
 bool is_persisted_output_message(const std::string& content);
+std::string persisted_output_filepath(const std::string& content);
 
 PersistedToolResult persist_tool_result(const std::string& content,
                                         const std::string& tool_call_id,
