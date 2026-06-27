@@ -142,6 +142,25 @@ jobs:
           dsymutil "build/${{ matrix.executable }}" -o "build/${{ matrix.executable }}.dSYM"
           strip "build/${{ matrix.executable }}"
 
+      - name: Extract desktop debug symbols (macOS)
+        if: runner.os == 'macOS' && matrix.build_desktop
+        shell: bash
+        run: |
+          app_exec="build/ACECode.app/Contents/MacOS/ACECode"
+          app_daemon="build/ACECode.app/Contents/MacOS/acecode-daemon"
+          if [ ! -f "$app_exec" ]; then
+            echo "Missing desktop app executable: $app_exec" >&2
+            exit 1
+          fi
+          if [ ! -f "$app_daemon" ]; then
+            echo "Missing desktop app daemon: $app_daemon" >&2
+            exit 1
+          fi
+          dsymutil "$app_exec" -o "build/ACECode.app.dSYM"
+          strip "$app_exec"
+          dsymutil "$app_daemon" -o "build/acecode-daemon.dSYM"
+          strip "$app_daemon"
+
       - name: Package (Unix)
         if: runner.os != 'Windows'
         shell: bash
@@ -289,6 +308,16 @@ jobs:
         with:
           name: acecode-${{ matrix.id }}-dsym
           path: build/${{ matrix.executable }}.dSYM
+          if-no-files-found: warn
+
+      - name: Upload desktop dSYM (macOS)
+        if: runner.os == 'macOS' && matrix.build_desktop
+        uses: actions/upload-artifact@v4
+        with:
+          name: acecode-${{ matrix.id }}-desktop-dsym
+          path: |
+            build/ACECode.app.dSYM
+            build/acecode-daemon.dSYM
           if-no-files-found: warn
 
   build-linux-old-package:

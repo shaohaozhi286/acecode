@@ -34,6 +34,20 @@ if(MSVC)
     )
 endif()
 
+if(NOT MSVC)
+    add_compile_options(
+        "$<$<AND:$<COMPILE_LANGUAGE:C>,$<NOT:$<CONFIG:Debug>>>:-ffunction-sections>"
+        "$<$<AND:$<COMPILE_LANGUAGE:C>,$<NOT:$<CONFIG:Debug>>>:-fdata-sections>"
+        "$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<NOT:$<CONFIG:Debug>>>:-ffunction-sections>"
+        "$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<NOT:$<CONFIG:Debug>>>:-fdata-sections>"
+    )
+    if(APPLE)
+        add_link_options("$<$<NOT:$<CONFIG:Debug>>:-Wl,-dead_strip>")
+    elseif(UNIX)
+        add_link_options("$<$<NOT:$<CONFIG:Debug>>:-Wl,--gc-sections>")
+    endif()
+endif()
+
 # Generate version header from CMake project version
 configure_file(
     ${CMAKE_SOURCE_DIR}/src/version.hpp.in
@@ -123,11 +137,9 @@ add_subdirectory(external/cpp-mcp EXCLUDE_FROM_ALL)
 # 定义 winpty_static(链进 acecode_testable)与 winpty-agent(嵌入释放)。
 include(${CMAKE_SOURCE_DIR}/cmake/acecode_winpty.cmake)
 
-# Gather all sources under src/ once, then split them into:
-#   - ACECODE_TESTABLE_SOURCES: headless logic that unit tests can link against
-#   - ACECODE_TUI_SOURCES     : FTXUI-coupled code (src/tui, src/markdown)
-# src/main.cpp always stays out of acecode_testable so tests never drag in the
-# full TUI entry point.
+# Gather all sources under src/ once, then split them into focused build
+# boundaries. Desktop and daemon share a few native bridge helpers, but the
+# desktop shell must not link the broad acecode_testable object set.
 file(GLOB_RECURSE ACECODE_ALL_SOURCES CONFIGURE_DEPENDS
     ${CMAKE_SOURCE_DIR}/src/*.cpp
 )
@@ -148,16 +160,52 @@ list(REMOVE_ITEM ACECODE_TESTABLE_SOURCES
 set(ACECODE_TUI_SOURCES ${ACECODE_ALL_SOURCES})
 list(FILTER ACECODE_TUI_SOURCES INCLUDE REGEX "/src/(tui|markdown)/")
 
+set(ACECODE_NATIVE_BRIDGE_SUPPORT_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/config/config.cpp
+    ${CMAKE_SOURCE_DIR}/src/config/model_provider_registry.cpp
+    ${CMAKE_SOURCE_DIR}/src/config/request_headers.cpp
+    ${CMAKE_SOURCE_DIR}/src/config/saved_models.cpp
+    ${CMAKE_SOURCE_DIR}/src/daemon/platform_posix.cpp
+    ${CMAKE_SOURCE_DIR}/src/daemon/platform_windows.cpp
+    ${CMAKE_SOURCE_DIR}/src/daemon/runtime_files.cpp
+    ${CMAKE_SOURCE_DIR}/src/desktop/folder_picker_win.cpp
+    ${CMAKE_SOURCE_DIR}/src/desktop/open_in_explorer.cpp
+    ${CMAKE_SOURCE_DIR}/src/desktop/workspace_registry.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/clipboard.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/cwd_hash.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/encoding.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/paths.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/state_file.cpp
+)
+
+set(ACECODE_DESKTOP_SUPPORT_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/desktop/daemon_pool.cpp
+    ${CMAKE_SOURCE_DIR}/src/desktop/daemon_supervisor.cpp
+    ${CMAKE_SOURCE_DIR}/src/desktop/dpi_win.cpp
+    ${CMAKE_SOURCE_DIR}/src/desktop/edge_app_launcher.cpp
+    ${CMAKE_SOURCE_DIR}/src/desktop/external_url.cpp
+    ${CMAKE_SOURCE_DIR}/src/desktop/notifications_win.cpp
+    ${CMAKE_SOURCE_DIR}/src/desktop/pick_active.cpp
+    ${CMAKE_SOURCE_DIR}/src/desktop/single_instance_posix.cpp
+    ${CMAKE_SOURCE_DIR}/src/desktop/single_instance_win.cpp
+    ${CMAKE_SOURCE_DIR}/src/desktop/tray_icon_win.cpp
+    ${CMAKE_SOURCE_DIR}/src/desktop/url_builder.cpp
+    ${CMAKE_SOURCE_DIR}/src/desktop/webview2_runtime_probe.cpp
+    ${CMAKE_SOURCE_DIR}/src/desktop/window_chrome.cpp
+)
+
 # desktop 二进制专属(main.cpp / web_host.cpp 用 webview/webview)从 testable
-# 里剔除。desktop/url_builder.cpp 和
-# desktop/daemon_supervisor.cpp 是纯逻辑或系统调用,留在 testable 里给
-# acecode_unit_tests 用。
+# 里剔除。desktop/native helper 源文件改由 focused support target 拥有,
+# 这样 acecode-desktop 不需要链接 acecode_testable。
 set(ACECODE_DESKTOP_BINARY_ONLY_SOURCES
     ${CMAKE_SOURCE_DIR}/src/desktop/main.cpp
     ${CMAKE_SOURCE_DIR}/src/desktop/splash_screen.cpp
     ${CMAKE_SOURCE_DIR}/src/desktop/web_host.cpp
 )
 foreach(_f IN LISTS ACECODE_DESKTOP_BINARY_ONLY_SOURCES)
+    list(REMOVE_ITEM ACECODE_TESTABLE_SOURCES ${_f})
+endforeach()
+foreach(_f IN LISTS ACECODE_NATIVE_BRIDGE_SUPPORT_SOURCES ACECODE_DESKTOP_SUPPORT_SOURCES)
     list(REMOVE_ITEM ACECODE_TESTABLE_SOURCES ${_f})
 endforeach()
 
@@ -178,6 +226,65 @@ set(ACECODE_TESTABLE_TUI_SOURCES
 list(APPEND ACECODE_TESTABLE_SOURCES ${ACECODE_TESTABLE_TUI_SOURCES})
 list(REMOVE_ITEM ACECODE_TUI_SOURCES ${ACECODE_TESTABLE_TUI_SOURCES})
 
+add_library(acecode_native_bridge_support STATIC
+    ${ACECODE_NATIVE_BRIDGE_SUPPORT_SOURCES}
+)
+target_include_directories(acecode_native_bridge_support PUBLIC
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_BINARY_DIR}/generated
+)
+target_link_libraries(acecode_native_bridge_support PUBLIC
+    nlohmann_json::nlohmann_json
+)
+if(APPLE)
+    enable_language(OBJCXX)
+    target_sources(acecode_native_bridge_support PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/desktop/folder_picker_mac.mm
+    )
+    target_link_libraries(acecode_native_bridge_support PUBLIC "-framework AppKit")
+endif()
+if(WIN32)
+    # advapi32: restrictive ACL writes in utils/atomic_file.hpp.
+    # ws2_32: daemon/runtime_files.cpp port probes.
+    # ole32/shell32/user32: native folder picker and clipboard integration.
+    target_link_libraries(acecode_native_bridge_support PUBLIC
+        advapi32 ws2_32 ole32 shell32 user32
+    )
+endif()
+
+add_library(acecode_desktop_support STATIC
+    ${ACECODE_DESKTOP_SUPPORT_SOURCES}
+)
+target_include_directories(acecode_desktop_support PUBLIC
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_BINARY_DIR}/generated
+)
+target_link_libraries(acecode_desktop_support PUBLIC
+    acecode_native_bridge_support
+)
+if(APPLE)
+    enable_language(OBJCXX)
+    set_source_files_properties(
+        ${CMAKE_SOURCE_DIR}/src/desktop/tray_icon_win.cpp
+        ${CMAKE_SOURCE_DIR}/src/desktop/web_host.cpp
+        PROPERTIES LANGUAGE OBJCXX
+    )
+    set_source_files_properties(
+        ${CMAKE_SOURCE_DIR}/src/desktop/web_host.cpp
+        PROPERTIES COMPILE_OPTIONS "-Wno-auto-var-id"
+    )
+    target_link_libraries(acecode_desktop_support PUBLIC "-framework AppKit")
+elseif(UNIX)
+    target_link_libraries(acecode_desktop_support PUBLIC ${CMAKE_DL_LIBS})
+endif()
+if(WIN32)
+    # bcrypt: desktop/daemon_supervisor.cpp generates daemon auth tokens.
+    # ws2_32: readiness probes; shell/user/gdi: Edge/tray/window helpers.
+    target_link_libraries(acecode_desktop_support PUBLIC
+        bcrypt ws2_32 ole32 shell32 user32 gdi32
+    )
+endif()
+
 # Shared OBJECT library: one compile per source, consumed by both acecode
 # (production binary) and acecode_unit_tests (test binary). PUBLIC link deps
 # propagate to consumers so they get the right include dirs + libraries.
@@ -189,21 +296,6 @@ add_library(acecode_testable OBJECT
 )
 if(APPLE)
     enable_language(OBJCXX)
-    # folder_picker_mac.mm 是 Objective-C++,不在 *.cpp GLOB 里。
-    # acecode_testable 里的 worker.cpp 会调用 pick_folder,所以需在此层提供实现。
-    set_source_files_properties(
-        ${CMAKE_SOURCE_DIR}/src/desktop/tray_icon_win.cpp
-        ${CMAKE_SOURCE_DIR}/src/desktop/web_host.cpp
-        PROPERTIES LANGUAGE OBJCXX
-    )
-    set_source_files_properties(
-        ${CMAKE_SOURCE_DIR}/src/desktop/web_host.cpp
-        PROPERTIES COMPILE_OPTIONS "-Wno-auto-var-id"
-    )
-    target_sources(acecode_testable PRIVATE
-        ${CMAKE_SOURCE_DIR}/src/desktop/folder_picker_mac.mm
-    )
-    target_link_libraries(acecode_testable PUBLIC "-framework AppKit")
 endif()
 target_include_directories(acecode_testable PUBLIC
     ${CMAKE_SOURCE_DIR}/src
@@ -230,8 +322,6 @@ if(Crow_FOUND)
     target_compile_definitions(acecode_testable PUBLIC ASIO_STANDALONE)
 endif()
 if(WIN32)
-    # ws2_32: src/desktop/daemon_supervisor.cpp 用 winsock 探测端口连通性。
-    # ole32/shell32/user32: src/desktop/folder_picker_win.cpp 的 COM + IFileOpenDialog + owner/foreground handling。
     target_link_libraries(acecode_testable PUBLIC bcrypt advapi32 winhttp ws2_32 ole32 shell32 user32)
     # winpty 客户端库(< 1809 的 PTY 兜底,cmake/acecode_winpty.cmake)。
     target_link_libraries(acecode_testable PUBLIC winpty_static)
@@ -252,6 +342,7 @@ add_executable(acecode
 )
 target_link_libraries(acecode PRIVATE
     acecode_testable
+    acecode_native_bridge_support
     ftxui::screen
     ftxui::dom
     ftxui::component

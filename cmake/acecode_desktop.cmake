@@ -34,20 +34,14 @@ set(WEBVIEW_USE_STATIC_BUILD ON CACHE BOOL "" FORCE)
 
 FetchContent_MakeAvailable(webview)
 
-# desktop 目标自身的源文件 — 跨平台部分 + Windows-only 实现。
-# 其它纯逻辑(workspace_registry / daemon_pool / url_builder / pick_active /
-# daemon_supervisor / folder_picker_win)都在 acecode_testable 里,这里不重复列。
+# desktop 目标自身只保留入口、splash 和 WebView host。其它 desktop/native
+# helper 由根 CMakeLists.txt 里的 focused support target 提供,避免链接
+# acecode_testable 把 agent/TUI/web assets 全部拖入桌面壳。
 set(ACECODE_DESKTOP_SOURCES
     ${CMAKE_SOURCE_DIR}/src/desktop/main.cpp
     ${CMAKE_SOURCE_DIR}/src/desktop/splash_screen.cpp
     ${CMAKE_SOURCE_DIR}/src/desktop/web_host.cpp
 )
-# 注:notifications_win.cpp / tray_icon_win.cpp 的 Windows 路径走 Shell_NotifyIcon
-# / RegisterClassEx,Linux tray 路径运行时 dlopen GTK3,因此仍不直接依赖
-# webview/webview 头或 link target。它们走 acecode_testable 路径(根 CMakeLists.txt
-# 的 ACECODE_ALL_SOURCES GLOB 会拾取),acecode-desktop 通过 target_link_libraries
-# 继承。这样 acecode_unit_tests 也能跑相关纯逻辑测试。
-# 设计:openspec/changes/add-desktop-attention-notifications。
 
 # Windows 上,acecode-desktop 用 WIN32 子系统(无 console 黑窗)。
 # 同时挂上顶层 CMakeLists.txt 生成的 acecode.rc(已在 ACECODE_WINDOWS_RESOURCES 里),
@@ -68,17 +62,13 @@ target_include_directories(acecode-desktop PRIVATE
     ${CMAKE_BINARY_DIR}/generated
 )
 
-# 链 acecode_testable 共用 url_builder / daemon_supervisor / utils 等。
 # webview::core_static 提供 WebView2 wrapper(Windows 路径)。
-# ftxui 三件套: 即使 desktop 自身不用 FTXUI,acecode_testable 里 ask_user_question_tool
-# 等 TU 引用了 ftxui::Event,linker 仍需要解析这些符号(参考 tests/CMakeLists.txt
-# 里 concurrent_session_writer 的相同处理)。
 target_link_libraries(acecode-desktop PRIVATE
-    acecode_testable
+    acecode_desktop_support
+    acecode_native_bridge_support
     webview::core
-    ftxui::screen
-    ftxui::dom
-    ftxui::component
+    cpr::cpr
+    nlohmann_json::nlohmann_json
 )
 
 if(NOT APPLE)
@@ -88,9 +78,6 @@ if(NOT APPLE)
     add_dependencies(acecode-desktop acecode)
 endif()
 
-# ole32 / shell32: folder_picker_win.cpp 用 IFileOpenDialog 的 COM 路径需要它们。
-# folder_picker_win.cpp 在 acecode_testable 里,所以这里不必单独 link;但为了让
-# acecode_unit_tests 也能链通,再在 acecode_testable 一侧添加(见根 CMakeLists)。
 if(WIN32)
     target_link_libraries(acecode-desktop PRIVATE
         ole32 shell32 user32 gdi32
@@ -138,7 +125,7 @@ if(APPLE)
 endif()
 
 if(MSVC)
-    # MultiThreaded 与 acecode_testable 的运行时一致(MT/MTd)。
+    # MultiThreaded 与 vcpkg static triplet 运行时一致(MT/MTd)。
     set_target_properties(acecode-desktop PROPERTIES
         MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
     )
