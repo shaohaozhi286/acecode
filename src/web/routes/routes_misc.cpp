@@ -321,6 +321,11 @@ void WebServer::Impl::register_health() {
                     {"on_completion", n.on_completion},
                     {"suppress_when_focused", n.suppress_when_focused},
                 };
+                j["features"] = {
+                    {"completed_turn_self_heal", {
+                        {"enabled", deps.app_config->features.completed_turn_self_heal},
+                    }},
+                };
             }
             // 控制台 capability(add-console-dock):前端据此显示/隐藏入口,
             // backend=="pipe" 时显示 legacy 降级提示。

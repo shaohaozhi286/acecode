@@ -380,6 +380,23 @@ TEST(WebServerHttp, HealthEndpointReturnsBasicMetadata) {
     EXPECT_EQ(j["notifications"]["on_question"], true);
     EXPECT_EQ(j["notifications"]["on_completion"], true);
     EXPECT_EQ(j["notifications"]["suppress_when_focused"], true);
+
+    ASSERT_TRUE(j.contains("features"));
+    ASSERT_TRUE(j["features"].contains("completed_turn_self_heal"));
+    EXPECT_EQ(j["features"]["completed_turn_self_heal"]["enabled"], true);
+}
+
+TEST(WebServerHttp, HealthReportsCompletedTurnSelfHealFeatureWhenDisabled) {
+    WebServerFixture fx;
+    fx.cfg.features.completed_turn_self_heal = false;
+
+    auto r = cpr::Get(cpr::Url{fx.url("/api/health")});
+    ASSERT_EQ(r.status_code, 200) << r.text;
+    auto j = json::parse(r.text);
+
+    ASSERT_TRUE(j.contains("features"));
+    ASSERT_TRUE(j["features"].contains("completed_turn_self_heal"));
+    EXPECT_EQ(j["features"]["completed_turn_self_heal"]["enabled"], false);
 }
 
 TEST(WebServerHttp, UsageEndpointAggregatesLedgerRecords) {

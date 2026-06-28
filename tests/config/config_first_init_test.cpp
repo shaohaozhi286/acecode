@@ -329,6 +329,39 @@ TEST_F(ConfigFirstInitTest, HooksFeatureFlagLoadsExplicitDisabled) {
     EXPECT_FALSE(cfg.features.hooks);
 }
 
+TEST_F(ConfigFirstInitTest, CompletedTurnSelfHealFeatureFlagDefaultsEnabled) {
+    fs::create_directories(temp_home / ".acecode");
+    {
+        std::ofstream ofs(temp_home / ".acecode" / "config.json");
+        ofs << R"({
+    "provider": "",
+    "saved_models": []
+})";
+    }
+
+    auto cfg = acecode::load_config();
+
+    EXPECT_TRUE(cfg.features.completed_turn_self_heal);
+}
+
+TEST_F(ConfigFirstInitTest, CompletedTurnSelfHealFeatureFlagLoadsExplicitDisabled) {
+    fs::create_directories(temp_home / ".acecode");
+    {
+        std::ofstream ofs(temp_home / ".acecode" / "config.json");
+        ofs << R"({
+    "provider": "",
+    "saved_models": [],
+    "features": {
+        "completed_turn_self_heal": false
+    }
+})";
+    }
+
+    auto cfg = acecode::load_config();
+
+    EXPECT_FALSE(cfg.features.completed_turn_self_heal);
+}
+
 TEST_F(ConfigFirstInitTest, SaveConfigPersistsOnlyNonDefaultHooksFeatureFlag) {
     acecode::AppConfig cfg;
     cfg.provider = "";
@@ -354,6 +387,33 @@ TEST_F(ConfigFirstInitTest, SaveConfigPersistsOnlyNonDefaultHooksFeatureFlag) {
     auto j = nlohmann::json::parse(ifs);
     ASSERT_TRUE(j.contains("features"));
     EXPECT_EQ(j["features"]["hooks"], false);
+}
+
+TEST_F(ConfigFirstInitTest, SaveConfigPersistsOnlyDisabledCompletedTurnSelfHealFeatureFlag) {
+    acecode::AppConfig cfg;
+    cfg.provider = "";
+    cfg.saved_models.clear();
+    cfg.default_model_name.clear();
+
+    const fs::path default_path = temp_home / ".acecode" / "self-heal-default-config.json";
+    acecode::save_config(cfg, default_path.string());
+
+    {
+        std::ifstream ifs(default_path);
+        ASSERT_TRUE(ifs.is_open());
+        auto j = nlohmann::json::parse(ifs);
+        EXPECT_FALSE(j.contains("features"));
+    }
+
+    cfg.features.completed_turn_self_heal = false;
+    const fs::path disabled_path = temp_home / ".acecode" / "self-heal-disabled-config.json";
+    acecode::save_config(cfg, disabled_path.string());
+
+    std::ifstream ifs(disabled_path);
+    ASSERT_TRUE(ifs.is_open());
+    auto j = nlohmann::json::parse(ifs);
+    ASSERT_TRUE(j.contains("features"));
+    EXPECT_EQ(j["features"]["completed_turn_self_heal"], false);
 }
 
 TEST_F(ConfigFirstInitTest, DefaultPermissionModeLoadsAndInvalidFallsBack) {

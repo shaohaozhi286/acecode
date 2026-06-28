@@ -44,8 +44,13 @@ import {
   retryQueuedInput,
 } from '../lib/chatInputQueue.js';
 import { findStickyUserContext, sameStickyUserContext, scrollTopForStickySourceRow } from '../lib/stickyUserContext.js';
-import { useSessionTranscript } from '../lib/sessionTranscript.js';
+import { loadTranscriptHistory, useSessionTranscript } from '../lib/sessionTranscript.js';
 import { projectCollapsedTranscriptItems } from '../lib/transcriptProjection.js';
+import {
+  completedTurnSelfHealEnabled,
+  createCompletedTurnSelfHealScheduler,
+  reconcileLatestCompletedTurn,
+} from '../lib/transcriptSelfHeal.js';
 import { usePreference } from '../lib/usePreference.js';
 import {
   DEFAULT_HOME_WORKSPACE_SELECTION,
@@ -445,6 +450,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
       cfg,
     });
   }, [health?.notifications, ref?.sessionId, ref?.workspaceHash, sid]);
+  const completedTurnSelfHealScheduleRef = useRef(null);
 
   const transcript = useSessionTranscript(ref, {
     live: true,
@@ -455,6 +461,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     },
     onTurnCompleted: (payload) => {
       fireDesktopNotification('completion', payload);
+      completedTurnSelfHealScheduleRef.current?.schedule();
     },
     onError: (reason) => toast({
       kind: 'err',
@@ -466,6 +473,60 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   const { items, busy, turns, title, status: transcriptStatus, streamingId, tokenUsage, goal, todos, todoSummary, activity, applyEvent, setTitle: setTranscriptTitle } = transcript;
   // 让 fireDesktopNotification 拿到最新 title,无需进入它的 useCallback deps。
   useEffect(() => { transcriptTitleRef.current = title || ''; }, [title]);
+  const selfHealEnabled = completedTurnSelfHealEnabled(health);
+  const selfHealRuntimeRef = useRef({
+    sid: '',
+    api: null,
+    enabled: false,
+    isLive: false,
+  });
+  const selfHealTranscriptRef = useRef({
+    getState: null,
+    updateState: null,
+  });
+  const selfHealSchedulerRef = useRef(null);
+  if (!selfHealSchedulerRef.current) {
+    selfHealSchedulerRef.current = createCompletedTurnSelfHealScheduler({
+      getEnabled: () => selfHealRuntimeRef.current.enabled === true,
+      getSessionId: () => selfHealRuntimeRef.current.sid,
+      getIsLive: () => selfHealRuntimeRef.current.isLive === true,
+      getState: () => selfHealTranscriptRef.current.getState?.() || null,
+      isVisible: () => (
+        typeof document === 'undefined' || document.visibilityState !== 'hidden'
+      ),
+      fetchCanonicalHistory: (sessionId) => (
+        selfHealRuntimeRef.current.api?.getMessages(sessionId, 0)
+      ),
+      applyCanonicalHistory: (data, snapshot) => {
+        const current = selfHealTranscriptRef.current.getState?.();
+        if (!current) return { replaced: false, reason: 'missing_state', state: current };
+        const canonical = loadTranscriptHistory(current, data || {}).state;
+        const result = reconcileLatestCompletedTurn(current, canonical, snapshot);
+        if (result.replaced) {
+          selfHealTranscriptRef.current.updateState?.(result.state);
+        }
+        return result;
+      },
+    });
+  }
+  completedTurnSelfHealScheduleRef.current = selfHealSchedulerRef.current;
+  useEffect(() => {
+    selfHealRuntimeRef.current = {
+      sid,
+      api,
+      enabled: selfHealEnabled,
+      isLive: transcript.isLive === true,
+    };
+  }, [api, selfHealEnabled, sid, transcript.isLive]);
+  useEffect(() => {
+    selfHealTranscriptRef.current = {
+      getState: transcript.getState,
+      updateState: transcript.updateState,
+    };
+  }, [transcript.getState, transcript.updateState]);
+  useEffect(() => () => {
+    selfHealSchedulerRef.current?.cancel();
+  }, [sid]);
   const [history,  setHistory]  = useState([]);
   const [homeWorkspaces, setHomeWorkspaces] = useState([]);
   const [homeWorkspaceHash, setHomeWorkspaceHash] = useState('');
@@ -1416,15 +1477,20 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
           if (isBuiltin) {
             await api.executeCommand(id, route.command);
           } else if (hasExtras) {
+            applyEvent({ type: 'busy_changed', payload: { busy: true } }, { emitEffects: false });
             await sendInputOrBuiltin(id, payload);
           }
           if (payload.text.trim()) recordInputHistory(payload.text);
           if (hasExtras) {
             clearComposerExtras();
-            applyEvent({ type: 'busy_changed', payload: { busy: true } }, { emitEffects: false });
           }
         })
-        .catch((e) => toast({ kind: 'err', text: '新建会话失败:' + (e.message || '') }))
+        .catch((e) => {
+          if (hasExtras) {
+            applyEvent({ type: 'busy_changed', payload: { busy: false } }, { emitEffects: false });
+          }
+          toast({ kind: 'err', text: '新建会话失败:' + (e.message || '') });
+        })
         .finally(() => restoreChatInputFocusSoon(false));
       return;
     }
@@ -1439,15 +1505,15 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     const targetSid = sid;
     restoreComposerFocusAfterSubmitRef.current = true;
     setComposerSubmitting(true);
+    if (!isBuiltin) {
+      applyEvent({ type: 'busy_changed', payload: { busy: true } }, { emitEffects: false });
+    }
     sendInputOrBuiltin(targetSid, payload)
       .then(() => {
         if (payload.text.trim()) recordInputHistory(payload.text);
         if (!ref?.title) setTranscriptTitle(payload.text || composerAttachments[0]?.name || '附件消息');
         clearCurrentSessionDraft();
         clearComposerExtras();
-        if (!isBuiltin) {
-          applyEvent({ type: 'busy_changed', payload: { busy: true } }, { emitEffects: false });
-        }
       })
       .catch((e) => {
         toast({ kind: 'err', text: '发送失败:' + (e.message || '') });
@@ -1466,17 +1532,17 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     setTailFollowFromAction({ type: 'new_turn' });
     updateQueueState((prev) => markQueuedInputSending(prev, queuedItem.queued.id));
     const queuedPayload = queuedItem.queued?.payload || queuedItem.content;
+    const queuedIsBuiltin = !payloadHasExtras(queuedPayload) &&
+      inputRouteForText(payloadText(queuedPayload)).kind === 'builtin';
+    if (!queuedIsBuiltin) {
+      applyEvent({ type: 'busy_changed', payload: { busy: true } }, { emitEffects: false });
+    }
     sendInputOrBuiltin(targetSid, queuedPayload)
-      .then(() => {
-        if (sidRef.current === targetSid) {
-          if (inputRouteForText(payloadText(queuedPayload)).kind !== 'builtin' ||
-              payloadHasExtras(queuedPayload)) {
-            applyEvent({ type: 'busy_changed', payload: { busy: true } }, { emitEffects: false });
-          }
-        }
-      })
       .catch((e) => {
         const message = e?.message || '发送失败';
+        if (!queuedIsBuiltin && sidRef.current === targetSid) {
+          applyEvent({ type: 'busy_changed', payload: { busy: false } }, { emitEffects: false });
+        }
         updateQueueState((prev) => markQueuedInputFailed(prev, queuedItem.queued.id, message));
         toast({ kind: 'err', text: '排队发送失败:' + message });
       })

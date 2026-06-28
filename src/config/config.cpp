@@ -508,6 +508,11 @@ AppConfig load_config() {
                 if (fj.contains("hooks") && fj["hooks"].is_boolean()) {
                     cfg.features.hooks = fj["hooks"].get<bool>();
                 }
+                if (fj.contains("completed_turn_self_heal") &&
+                    fj["completed_turn_self_heal"].is_boolean()) {
+                    cfg.features.completed_turn_self_heal =
+                        fj["completed_turn_self_heal"].get<bool>();
+                }
             }
             if (j.contains("skills") && j["skills"].is_object()) {
                 const auto& sj = j["skills"];
@@ -1388,6 +1393,8 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
         nlohmann::json featuresj = nlohmann::json::object();
         if (cfg.features.hooks != features_d.hooks)
             featuresj["hooks"] = cfg.features.hooks;
+        if (cfg.features.completed_turn_self_heal != features_d.completed_turn_self_heal)
+            featuresj["completed_turn_self_heal"] = cfg.features.completed_turn_self_heal;
         if (!featuresj.empty()) j["features"] = featuresj;
 
         WebSearchConfig ws_d;

@@ -21,13 +21,15 @@ Skills live under built-in roots `~/.acecode/skills/` and compatible `~/.agent/s
 
 ## Default first-run skills
 
-On the first ACECode initialization, ACECode installs a small offline seed bundle into `~/.acecode/skills/` if the ACECode home directory is being created for the first time. The default bundle contains only:
+On the first ACECode initialization, ACECode installs a small offline seed bundle into `~/.acecode/skills/` if the ACECode home directory is being created for the first time. The default bundle contains:
 
 - `find-skills`
 - `skill-installer`
 - `skill-creator`
 - `native-mcp`
 - `mcporter`
+- `acecode-usage`
+- `vision-image-reader`
 
 Existing skill directories are never overwritten. ACECode records the install result in `~/.acecode/.seed_skills_state.json`.
 

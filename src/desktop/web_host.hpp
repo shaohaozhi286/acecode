@@ -42,7 +42,8 @@ public:
         OffscreenUntilReady,
     };
 
-    // debug=true 时启用 WebView2 DevTools(F12 / 右键检查可用)。MVP 默认 true。
+    // debug=true 时启用 WebView2 默认 DevTools 入口(F12 / 右键检查)。
+    // ACECode 另行保留 F11/on-demand DevTools,用于 release desktop 诊断。
     explicit WebHost(bool debug = true,
                      StartupWindowMode startup_mode = StartupWindowMode::DefaultVisible);
     ~WebHost();
@@ -65,7 +66,8 @@ public:
     // 当 webview run 中时,在主线程上 eval 一段 JS。线程安全(底层 webview_dispatch)。
     void eval(const std::string& js);
 
-    // debug 模式下打开 WebView 开发者工具。非 WebView2 平台返回 false。
+    // 打开 WebView 开发者工具。Windows 会按需启用 DevTools;非 WebView2
+    // 平台目前返回 false。
     bool open_dev_tools();
 
     // Frameless desktop chrome helpers. Windows uses native non-client messages,

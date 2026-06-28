@@ -902,7 +902,6 @@ int main(int argc, char** argv) {
     });
 
     host.bind("aceDesktop_openDevTools", [&](const std::string& /*req*/) -> std::string {
-        if (!desktop_debug) return nlohmann::json{{"ok", false}, {"error", "debug only"}}.dump();
         return nlohmann::json{{"ok", host.open_dev_tools()}}.dump();
     });
 
@@ -1198,6 +1197,16 @@ int main(int argc, char** argv) {
         window.addEventListener('DOMContentLoaded', notifyReady, { once: true });
         window.addEventListener('load', notifyReady, { once: true });
       }
+      window.addEventListener('keydown', function (event) {
+        try {
+          if (!event || event.key !== 'F11') return;
+          event.preventDefault();
+          event.stopPropagation();
+          if (window.aceDesktop_openDevTools) {
+            Promise.resolve(window.aceDesktop_openDevTools()).catch(function () {});
+          }
+        } catch (e) {}
+      }, true);
       if (!window.aceDesktop_logFromWeb) return;
       var send = function (level, args) {
         try {

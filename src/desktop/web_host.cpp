@@ -544,6 +544,72 @@ void log_webview_setting_failure(const char* operation, HRESULT hr) {
              " failed, hr=" + std::to_string(static_cast<long>(hr)));
 }
 
+bool set_dev_tools_enabled(ICoreWebView2* core, BOOL enabled) {
+    if (!core) return false;
+    ICoreWebView2Settings* settings = nullptr;
+    HRESULT hr = core->get_Settings(&settings);
+    if (FAILED(hr) || !settings) {
+        log_webview_setting_failure("get_Settings for DevTools", hr);
+        return false;
+    }
+    hr = settings->put_AreDevToolsEnabled(enabled);
+    settings->Release();
+    if (FAILED(hr)) {
+        log_webview_setting_failure("put_AreDevToolsEnabled", hr);
+        return false;
+    }
+    return true;
+}
+
+bool open_dev_tools_for_core(ICoreWebView2* core) {
+    if (!core) return false;
+    // webview/webview disables DevTools when constructed with debug=false.
+    // Re-enable it only for ACECode's explicit F11/bridge entry point.
+    if (!set_dev_tools_enabled(core, TRUE)) return false;
+    HRESULT hr = core->OpenDevToolsWindow();
+    if (FAILED(hr)) {
+        log_webview_setting_failure("OpenDevToolsWindow", hr);
+        return false;
+    }
+    return true;
+}
+
+void install_dev_tools_shortcut(ICoreWebView2Controller* controller) {
+    if (!controller) return;
+    using Microsoft::WRL::Callback;
+    EventRegistrationToken token{};
+    HRESULT hr = controller->add_AcceleratorKeyPressed(
+        Callback<ICoreWebView2AcceleratorKeyPressedEventHandler>(
+            [](ICoreWebView2Controller* sender,
+               ICoreWebView2AcceleratorKeyPressedEventArgs* args) -> HRESULT {
+                if (!sender || !args) return S_OK;
+
+                COREWEBVIEW2_KEY_EVENT_KIND kind{};
+                UINT virtual_key = 0;
+                if (FAILED(args->get_KeyEventKind(&kind)) ||
+                    FAILED(args->get_VirtualKey(&virtual_key))) {
+                    return S_OK;
+                }
+                const bool key_down =
+                    kind == COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN ||
+                    kind == COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN;
+                if (!key_down || virtual_key != VK_F11) return S_OK;
+
+                args->put_Handled(TRUE);
+                ICoreWebView2* core = nullptr;
+                if (SUCCEEDED(sender->get_CoreWebView2(&core)) && core) {
+                    open_dev_tools_for_core(core);
+                    core->Release();
+                }
+                return S_OK;
+            })
+            .Get(),
+        &token);
+    if (FAILED(hr)) {
+        log_webview_setting_failure("add_AcceleratorKeyPressed for F11 DevTools", hr);
+    }
+}
+
 void configure_browser_defaults(webview::webview& host) {
     auto controller_result = host.browser_controller();
     if (!controller_result.ok()) {
@@ -564,6 +630,7 @@ void configure_browser_defaults(webview::webview& host) {
         log_webview_setting_failure("get_CoreWebView2", hr);
         return;
     }
+    install_dev_tools_shortcut(controller);
 
     ICoreWebView2Settings* settings = nullptr;
     hr = core->get_Settings(&settings);
@@ -1478,9 +1545,9 @@ bool WebHost::open_dev_tools() {
     ICoreWebView2* webview = nullptr;
     HRESULT hr = controller->get_CoreWebView2(&webview);
     if (FAILED(hr) || !webview) return false;
-    hr = webview->OpenDevToolsWindow();
+    const bool ok = open_dev_tools_for_core(webview);
     webview->Release();
-    return SUCCEEDED(hr);
+    return ok;
 #else
     return false;
 #endif

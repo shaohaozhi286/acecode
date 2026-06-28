@@ -1120,6 +1120,17 @@ export function useSessionTranscript(sessionRef, options = {}) {
     setState(nextState);
   }, []);
 
+  const getState = useCallback(() => stateRef.current, []);
+
+  const updateState = useCallback((producer) => {
+    const currentState = stateRef.current;
+    const nextState = typeof producer === 'function' ? producer(currentState) : producer;
+    if (!nextState || nextState === currentState) return currentState;
+    stateRef.current = nextState;
+    setState(nextState);
+    return nextState;
+  }, []);
+
   useEffect(() => {
     const baseTitle = sid ? sessionDisplayTitle(ref) : '';
     const reset = createTranscriptState({
@@ -1212,5 +1223,7 @@ export function useSessionTranscript(sessionRef, options = {}) {
     loadState: state.loadState,
     applyEvent,
     setTitle,
+    getState,
+    updateState,
   };
 }

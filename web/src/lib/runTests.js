@@ -20,6 +20,7 @@ import './chatScrollFollow.test.js';
 import './queueCardItem.test.js';
 import './sessionSubscription.test.js';
 import './sessionTranscript.test.js';
+import './transcriptSelfHeal.test.js';
 import './sessionChanges.test.js';
 import './changeReviewStability.test.js';
 import './changeDockDismissal.test.js';

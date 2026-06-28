@@ -67,6 +67,17 @@ run('session reset and new turn initialize tail follow', () => {
   );
 });
 
+run('self-heal replacement preserves the current tail-follow mode', () => {
+  assert.equal(
+    nextChatTailFollowState(CHAT_TAIL_FOLLOW_STATE.REVIEWING, { type: 'self_heal_replace' }),
+    CHAT_TAIL_FOLLOW_STATE.REVIEWING,
+  );
+  assert.equal(
+    nextChatTailFollowState(CHAT_TAIL_FOLLOW_STATE.FOLLOWING, { type: 'self_heal_replace' }),
+    CHAT_TAIL_FOLLOW_STATE.FOLLOWING,
+  );
+});
+
 run('scroll metrics normalize invalid values', () => {
   assert.deepEqual(chatScrollMetrics({ scrollTop: -1, clientHeight: 'abc', scrollHeight: 120 }), {
     scrollTop: 0,

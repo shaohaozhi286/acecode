@@ -314,6 +314,9 @@ struct FeaturesConfig {
     // Codex-compatible hooks are enabled by default. Users can set
     // features.hooks=false to disable discovery and execution.
     bool hooks = true;
+    // Static, global switch for Web/Desktop completed-turn transcript self-heal.
+    // Missing or invalid config keeps this enabled; users can set it false.
+    bool completed_turn_self_heal = true;
 };
 
 struct AppConfig {

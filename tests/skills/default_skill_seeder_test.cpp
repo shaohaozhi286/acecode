@@ -91,7 +91,7 @@ TEST_F(DefaultSkillSeederTest, InstallsAllDefaultSeedsIntoGlobalSkillRoot) {
     }
 
     auto state = nlohmann::json::parse(read_file(acecode::default_skill_seed_state_path(home)));
-    EXPECT_EQ(state["bundle_version"], "2026-05-01.1");
+    EXPECT_EQ(state["bundle_version"], "2026-06-28.1");
     ASSERT_TRUE(state["skills"].is_array());
     EXPECT_EQ(state["skills"].size(), acecode::default_skill_seeds().size());
 }
