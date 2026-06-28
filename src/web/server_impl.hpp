@@ -344,6 +344,7 @@ struct WebServer::Impl {
     void register_commands();
     void register_mcp();
     void register_hooks();
+    void register_feedback();
     void register_pty();
     void register_websocket();
     void register_static();

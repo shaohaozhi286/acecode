@@ -60,6 +60,11 @@ function usagePath(opts = {}) {
   return text ? `/api/usage?${text}` : '/api/usage';
 }
 
+function desktopFeedbackSessionsPath(limit = 20) {
+  const n = Number.isFinite(Number(limit)) ? Math.max(1, Math.min(100, Number(limit))) : 20;
+  return `/api/feedback/desktop/recent-sessions?limit=${encodeURIComponent(String(n))}`;
+}
+
 export function sessionDraftPath(id, workspaceHash = '') {
   const sid = encodeURIComponent(id);
   const hash = String(workspaceHash || '').trim();
@@ -216,6 +221,8 @@ export function createApi(base = null) {
     setUpgradeConfig: (cfg)          => request('PUT',    '/api/config/upgrade', cfg, base),
     getUpdateStatus: ()              => request('GET',    '/api/update/status', undefined, base),
     startUpdate: ()                  => request('POST',   '/api/update/start', undefined, base),
+    listDesktopFeedbackSessions: (limit=20) => request('GET', desktopFeedbackSessionsPath(limit), undefined, base),
+    submitDesktopFeedback: (payload={}) => request('POST', '/api/feedback/desktop', payload, base),
     getAceBrowserBridge: ()          => request('GET',    '/api/config/ace-browser-bridge', undefined, base),
     setAceBrowserBridge: (cfg)       => request('PUT',    '/api/config/ace-browser-bridge', cfg, base),
     getHistory:       (cwd, max=100) => request('GET',    `/api/history?cwd=${encodeURIComponent(cwd)}&max=${max}`, undefined, base),

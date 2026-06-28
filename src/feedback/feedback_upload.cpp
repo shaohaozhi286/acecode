@@ -190,6 +190,14 @@ void append_filename_component(std::string& out, const std::string& value) {
     out += sanitize_feedback_filename_component(trimmed);
 }
 
+bool is_desktop_log_filename(const fs::path& path) {
+    const std::string name = path.filename().string();
+    return name.rfind("desktop-", 0) == 0 &&
+           name.size() > std::string("desktop-.log").size() &&
+           name.size() >= 4 &&
+           name.substr(name.size() - 4) == ".log";
+}
+
 } // namespace
 
 std::string sanitize_feedback_filename_component(const std::string& value) {
@@ -231,18 +239,42 @@ std::string make_feedback_package_filename(const std::string& session_id,
     return filename;
 }
 
+std::optional<fs::path> latest_desktop_log_path(const fs::path& logs_dir) {
+    std::error_code ec;
+    if (!fs::is_directory(logs_dir, ec)) return std::nullopt;
+
+    std::optional<fs::path> best;
+    fs::file_time_type best_time{};
+    for (const auto& entry : fs::directory_iterator(logs_dir, ec)) {
+        if (ec) break;
+        std::error_code stat_ec;
+        if (!entry.is_regular_file(stat_ec) || stat_ec) continue;
+        const auto path = entry.path();
+        if (!is_desktop_log_filename(path)) continue;
+        const auto modified = entry.last_write_time(stat_ec);
+        if (stat_ec) continue;
+        if (!best || modified > best_time) {
+            best = path;
+            best_time = modified;
+        }
+    }
+    return best;
+}
+
 FeedbackPackageResult build_feedback_package(const FeedbackPackageRequest& request) {
     FeedbackPackageResult result;
-    if (request.session_id.empty()) {
+    const bool has_session = !request.session_id.empty() ||
+                             !request.session_jsonl_path.empty();
+    if (has_session && request.session_id.empty()) {
         result.error = "missing session id";
         return result;
     }
-    if (request.session_jsonl_path.empty()) {
+    if (has_session && request.session_jsonl_path.empty()) {
         result.error = "missing session JSONL path";
         return result;
     }
     std::error_code ec;
-    if (!fs::is_regular_file(request.session_jsonl_path, ec)) {
+    if (has_session && !fs::is_regular_file(request.session_jsonl_path, ec)) {
         result.error = "session JSONL file not found: " +
                        path_to_utf8(request.session_jsonl_path);
         return result;
@@ -260,9 +292,12 @@ FeedbackPackageResult build_feedback_package(const FeedbackPackageRequest& reque
     const std::string login_name = request.login_name.empty()
         ? current_login_name()
         : request.login_name;
+    const std::string package_id = !request.session_id.empty()
+        ? request.session_id
+        : (!request.source.empty() ? request.source : "diagnostics");
     const std::string package_filename =
         make_feedback_package_filename(
-            request.session_id, created_at, platform, computer_name, login_name);
+            package_id, created_at, platform, computer_name, login_name);
     const fs::path output_dir = request.output_dir.empty()
         ? path_from_utf8(default_output_dir())
         : request.output_dir;
@@ -283,15 +318,24 @@ FeedbackPackageResult build_feedback_package(const FeedbackPackageRequest& reque
         read_tail(request.log_path, request.max_log_bytes, &log_tail, &log_tail_bytes);
 
     std::vector<std::string> included_files;
-    const std::string session_entry =
-        "session/" + sanitize_feedback_filename_component(request.session_id) + ".jsonl";
-    included_files.push_back(session_entry);
-    if (log_included) included_files.push_back("logs/acecode.log.tail.txt");
+    std::string session_entry;
+    if (has_session) {
+        session_entry =
+            "session/" + sanitize_feedback_filename_component(request.session_id) + ".jsonl";
+        included_files.push_back(session_entry);
+    }
+    const std::string log_entry_name = request.log_entry_name.empty()
+        ? "logs/acecode.log.tail.txt"
+        : request.log_entry_name;
+    if (log_included) included_files.push_back(log_entry_name);
     included_files.push_back("feedback.json");
 
     nlohmann::json metadata = {
+        {"source", request.source.empty() ? "tui" : request.source},
         {"feedback_text", request.feedback_text},
-        {"session_id", request.session_id},
+        {"session_id", has_session ? nlohmann::json(request.session_id) : nlohmann::json(nullptr)},
+        {"selected_session_id", has_session ? nlohmann::json(request.session_id) : nlohmann::json(nullptr)},
+        {"workspace_hash", request.workspace_hash},
         {"created_at", created_at},
         {"acecode_version", request.acecode_version},
         {"platform", platform},
@@ -316,9 +360,12 @@ FeedbackPackageResult build_feedback_package(const FeedbackPackageRequest& reque
     }
 
     std::string entry_error;
-    bool ok = add_file_entry(archive, session_entry, request.session_jsonl_path, &entry_error);
+    bool ok = true;
+    if (has_session) {
+        ok = add_file_entry(archive, session_entry, request.session_jsonl_path, &entry_error);
+    }
     if (ok && log_included) {
-        ok = add_buffer_entry(archive, "logs/acecode.log.tail.txt", log_tail, &entry_error);
+        ok = add_buffer_entry(archive, log_entry_name, log_tail, &entry_error);
     }
     if (ok) {
         ok = add_buffer_entry(archive, "feedback.json", metadata_text, &entry_error);

@@ -314,6 +314,73 @@ The checkpoint carries the provider-facing replacement history used for later
 model requests and resume/fork reconstruction. Normal manual, auto, and rescue
 compact success does not emit `transcript_replace`.
 
+### `GET /api/feedback/desktop/recent-sessions?limit=N`
+
+List recent sessions that the Desktop settings feedback card may optionally
+attach. The list is sorted by `updated_at` descending and capped by `limit`
+(default `20`, clamp `1..100`). Selecting nothing remains valid and means the
+feedback upload will include desktop logs only.
+
+**Response 200**:
+```json
+{
+  "sessions": [
+    {
+      "id": "20260618-030000-abcd",
+      "session_id": "20260618-030000-abcd",
+      "title": "Investigate desktop issue",
+      "updated_at": "2026-06-18T03:00:00Z",
+      "cwd": "C:\\Users\\you\\repo",
+      "workspace_hash": "abc123"
+    }
+  ]
+}
+```
+
+### `POST /api/feedback/desktop`
+
+Submit Desktop settings feedback. This endpoint is separate from
+`POST /api/sessions/:id/messages` and `POST /api/sessions/:id/commands`; the
+feedback text is not sent to the agent loop and no chat transcript row is
+created. The package always attempts to include the latest
+`<data_dir>/logs/desktop-*.log` tail as `logs/desktop.log.tail.txt`. Session
+JSONL is included only when `session_id` is supplied.
+
+**Request body**:
+```json
+{
+  "feedback_text": "Settings page froze after resume",
+  "session_id": "20260618-030000-abcd",
+  "workspace_hash": "abc123"
+}
+```
+
+`session_id` and `workspace_hash` are optional. If `session_id` is omitted or
+empty, the upload is log-only and contains no `session/*.jsonl` entry.
+
+**Response 200**:
+```json
+{
+  "ok": true,
+  "package_filename": "acecode-feedback-desktop-20260618-030102-windows-x64.zip",
+  "log_included": true,
+  "log_tail_bytes": 4312,
+  "included_files": ["logs/desktop.log.tail.txt", "feedback.json"],
+  "selected_session_id": null,
+  "workspace_hash": ""
+}
+```
+
+Errors:
+- `400 {"error":"BAD_REQUEST"}` for invalid JSON, invalid field types, or an
+  invalid `upgrade.base_url`.
+- `404 {"error":"SESSION_NOT_FOUND"}` when a supplied selected session cannot
+  be resolved to exactly one session JSONL file in the requested workspace.
+- `500 {"error":"PACKAGE_FAILED"}` when the local feedback package cannot be
+  created.
+- `502 {"error":"UPLOAD_FAILED","package_path":"..."}` when the upload request
+  fails; the package path is retained for manual inspection.
+
 ### `GET /api/sessions/:id/permissions`
 
 Return the active session's permission mode. This is session-scoped; changing

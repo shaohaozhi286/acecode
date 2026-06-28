@@ -31,6 +31,7 @@ import './permissionMode.test.js';
 import './permissionRequestPresentation.test.js';
 import './tokenBudget.test.js';
 import './usageStats.test.js';
+import './desktopFeedback.test.js';
 import './pinnedSessions.test.js';
 import './usePreference.test.js';
 import './uiPrefs.test.js';

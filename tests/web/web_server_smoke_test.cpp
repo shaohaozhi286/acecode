@@ -35,6 +35,7 @@
 #include "upgrade/manifest.hpp"
 #include "utils/encoding.hpp"
 #include "utils/cwd_hash.hpp"
+#include "utils/utf8_path.hpp"
 #include "web/server.hpp"
 
 #include <algorithm>
@@ -50,6 +51,7 @@
 #include <optional>
 #include <random>
 #include <thread>
+#include <zip.h>
 
 using namespace std::chrono_literals;
 using nlohmann::json;
@@ -111,6 +113,47 @@ std::string url_encode_component(const std::string& value) {
     return out;
 }
 
+std::string read_zip_entry(const std::filesystem::path& zip_path,
+                           const std::string& entry) {
+    int err = 0;
+    zip_t* archive = zip_open(acecode::path_to_utf8(zip_path).c_str(), ZIP_RDONLY, &err);
+    if (!archive) return {};
+    zip_int64_t index = zip_name_locate(archive, entry.c_str(), ZIP_FL_ENC_UTF_8);
+    if (index < 0) {
+        zip_close(archive);
+        return {};
+    }
+    zip_stat_t st;
+    zip_stat_init(&st);
+    if (zip_stat_index(archive, static_cast<zip_uint64_t>(index), 0, &st) != 0) {
+        zip_close(archive);
+        return {};
+    }
+    zip_file_t* file = zip_fopen_index(archive, static_cast<zip_uint64_t>(index), 0);
+    if (!file) {
+        zip_close(archive);
+        return {};
+    }
+    std::string out(static_cast<std::size_t>(st.size), '\0');
+    zip_int64_t read = zip_fread(file, out.data(), out.size());
+    zip_fclose(file);
+    zip_close(archive);
+    if (read < 0) return {};
+    out.resize(static_cast<std::size_t>(read));
+    return out;
+}
+
+bool zip_entry_exists(const std::filesystem::path& zip_path,
+                      const std::string& entry) {
+    int err = 0;
+    zip_t* archive = zip_open(acecode::path_to_utf8(zip_path).c_str(), ZIP_RDONLY, &err);
+    if (!archive) return false;
+    const bool exists =
+        zip_name_locate(archive, entry.c_str(), ZIP_FL_ENC_UTF_8) >= 0;
+    zip_close(archive);
+    return exists;
+}
+
 struct WebServerFixture {
     acecode::ToolExecutor tools;
     acecode::PermissionManager template_perm;
@@ -130,6 +173,8 @@ struct WebServerFixture {
     std::filesystem::path tmp_dir;
     std::filesystem::path cwd_dir;
     std::filesystem::path projects_dir;
+    std::filesystem::path logs_dir;
+    std::filesystem::path feedback_dir;
     std::string cwd;
     std::string project_dir;
 
@@ -162,6 +207,10 @@ struct WebServerFixture {
         std::filesystem::create_directories(cwd_dir);
         projects_dir = tmp_dir / "projects";
         std::filesystem::create_directories(projects_dir);
+        logs_dir = tmp_dir / "logs";
+        std::filesystem::create_directories(logs_dir);
+        feedback_dir = tmp_dir / "feedback";
+        std::filesystem::create_directories(feedback_dir);
         cwd = cwd_dir.string();
         workspace_registry = std::make_unique<acecode::desktop::WorkspaceRegistry>();
         if (register_default_workspace) {
@@ -190,6 +239,8 @@ struct WebServerFixture {
         wdeps.config_path = (tmp_dir / "config.json").string();
         wdeps.cwd = cwd;
         wdeps.token = "smoke-token";
+        wdeps.logs_dir = logs_dir.string();
+        wdeps.feedback_output_dir = feedback_dir.string();
         wdeps.guid = "test-guid-aaaa-bbbb";
         wdeps.pid = 12345;
         wdeps.start_time_unix_ms =
@@ -2262,6 +2313,192 @@ TEST(WebServerHttp, PutUpgradeConfigRejectsInvalidBaseUrl) {
     auto j = json::parse(r.text);
     EXPECT_EQ(j["error"], "BAD_REQUEST");
     EXPECT_EQ(fx.cfg.upgrade.base_url, before);
+}
+
+TEST(WebServerHttp, DesktopFeedbackRecentSessionsReturnsNewestFirst) {
+    WebServerFixture fx;
+    const std::string older_id = "20260618-010000-abcd";
+    const std::string newer_id = "20260618-020000-abce";
+
+    acecode::SessionMeta older;
+    older.id = older_id;
+    older.cwd = fx.cwd;
+    older.created_at = "2026-06-18T01:00:00Z";
+    older.updated_at = "2026-06-18T01:00:00Z";
+    older.title = "Older";
+    acecode::SessionMeta newer;
+    newer.id = newer_id;
+    newer.cwd = fx.cwd;
+    newer.created_at = "2026-06-18T02:00:00Z";
+    newer.updated_at = "2026-06-18T02:00:00Z";
+    newer.title = "Newer";
+    acecode::SessionStorage::write_meta(
+        acecode::SessionStorage::meta_path(fx.project_dir, older_id), older);
+    acecode::SessionStorage::write_meta(
+        acecode::SessionStorage::meta_path(fx.project_dir, newer_id), newer);
+    write_text(path_from_utf8(acecode::SessionStorage::session_path(fx.project_dir, older_id)), "{}\n");
+    write_text(path_from_utf8(acecode::SessionStorage::session_path(fx.project_dir, newer_id)), "{}\n");
+
+    auto r = cpr::Get(cpr::Url{fx.url("/api/feedback/desktop/recent-sessions?limit=1")});
+    ASSERT_EQ(r.status_code, 200) << r.text;
+    auto body = json::parse(r.text);
+    ASSERT_TRUE(body["sessions"].is_array());
+    ASSERT_EQ(body["sessions"].size(), 1u);
+    EXPECT_EQ(body["sessions"][0]["id"], newer_id);
+}
+
+TEST(WebServerHttp, DesktopFeedbackUploadsLogOnlyWithoutSession) {
+    std::filesystem::path received_zip;
+    LocalUpdateServer upload_server([&](httplib::Server& s) {
+        s.Post("/", [&](const httplib::Request& req, httplib::Response& res) {
+            EXPECT_TRUE(req.is_multipart_form_data());
+            auto file = req.get_file_value("file");
+            received_zip = std::filesystem::temp_directory_path() /
+                           ("acecode_desktop_feedback_log_only_" +
+                            std::to_string(std::chrono::steady_clock::now()
+                                               .time_since_epoch()
+                                               .count()) + ".zip");
+            write_text(received_zip, file.content);
+            res.set_content(R"({"success":true})", "application/json");
+        });
+    });
+
+    WebServerFixture fx;
+    fx.cfg.upgrade.base_url = upload_server.base_url();
+    write_text(fx.logs_dir / "desktop-2026-06-18.log", "desktop latest log");
+
+    auto r = cpr::Post(cpr::Url{fx.url("/api/feedback/desktop")},
+                       cpr::Header{{"Content-Type", "application/json"}},
+                       cpr::Body{json{{"feedback_text", "desktop froze"}}.dump()});
+    ASSERT_EQ(r.status_code, 200) << r.text;
+    auto body = json::parse(r.text);
+    EXPECT_TRUE(body["ok"].get<bool>());
+    EXPECT_TRUE(body["selected_session_id"].is_null());
+    EXPECT_EQ(read_zip_entry(received_zip, "logs/desktop.log.tail.txt"),
+              "desktop latest log");
+    EXPECT_FALSE(zip_entry_exists(received_zip, "session/session.jsonl"));
+    auto metadata = json::parse(read_zip_entry(received_zip, "feedback.json"));
+    EXPECT_EQ(metadata["source"], "desktop");
+    EXPECT_EQ(metadata["feedback_text"], "desktop froze");
+    EXPECT_TRUE(metadata["session_id"].is_null());
+    EXPECT_TRUE(metadata["selected_session_id"].is_null());
+    EXPECT_TRUE(metadata["log_available"].get<bool>());
+    std::error_code ec;
+    std::filesystem::remove(received_zip, ec);
+}
+
+TEST(WebServerHttp, DesktopFeedbackUploadsSelectedSessionOnly) {
+    const std::string sid = "20260618-030000-abcf";
+    std::filesystem::path received_zip;
+    LocalUpdateServer upload_server([&](httplib::Server& s) {
+        s.Post("/", [&](const httplib::Request& req, httplib::Response& res) {
+            auto file = req.get_file_value("file");
+            received_zip = std::filesystem::temp_directory_path() /
+                           ("acecode_desktop_feedback_selected_" +
+                            std::to_string(std::chrono::steady_clock::now()
+                                               .time_since_epoch()
+                                               .count()) + ".zip");
+            write_text(received_zip, file.content);
+            res.set_content(R"({"success":true})", "application/json");
+        });
+    });
+
+    WebServerFixture fx;
+    fx.cfg.upgrade.base_url = upload_server.base_url();
+    write_text(fx.logs_dir / "desktop-2026-06-18.log", "desktop log");
+    write_text(path_from_utf8(acecode::SessionStorage::session_path(fx.project_dir, sid)),
+               "{\"role\":\"user\",\"content\":\"selected\"}\n");
+    acecode::SessionMeta meta;
+    meta.id = sid;
+    meta.cwd = fx.cwd;
+    meta.created_at = "2026-06-18T03:00:00Z";
+    meta.updated_at = "2026-06-18T03:00:00Z";
+    acecode::SessionStorage::write_meta(
+        acecode::SessionStorage::meta_path(fx.project_dir, sid), meta);
+
+    auto r = cpr::Post(cpr::Url{fx.url("/api/feedback/desktop")},
+                       cpr::Header{{"Content-Type", "application/json"}},
+                       cpr::Body{json{{"feedback_text", "with selected session"},
+                                      {"session_id", sid},
+                                      {"workspace_hash", acecode::compute_cwd_hash(fx.cwd)}}.dump()});
+    ASSERT_EQ(r.status_code, 200) << r.text;
+    auto body = json::parse(r.text);
+    EXPECT_EQ(body["selected_session_id"], sid);
+    EXPECT_EQ(read_zip_entry(received_zip, "session/" + sid + ".jsonl"),
+              "{\"role\":\"user\",\"content\":\"selected\"}\n");
+    EXPECT_FALSE(zip_entry_exists(received_zip, "session/other.jsonl"));
+    auto metadata = json::parse(read_zip_entry(received_zip, "feedback.json"));
+    EXPECT_EQ(metadata["source"], "desktop");
+    EXPECT_EQ(metadata["selected_session_id"], sid);
+    EXPECT_EQ(metadata["workspace_hash"], acecode::compute_cwd_hash(fx.cwd));
+    std::error_code ec;
+    std::filesystem::remove(received_zip, ec);
+}
+
+TEST(WebServerHttp, DesktopFeedbackSucceedsWithoutDesktopLog) {
+    std::filesystem::path received_zip;
+    LocalUpdateServer upload_server([&](httplib::Server& s) {
+        s.Post("/", [&](const httplib::Request& req, httplib::Response& res) {
+            auto file = req.get_file_value("file");
+            received_zip = std::filesystem::temp_directory_path() /
+                           ("acecode_desktop_feedback_missing_log_" +
+                            std::to_string(std::chrono::steady_clock::now()
+                                               .time_since_epoch()
+                                               .count()) + ".zip");
+            write_text(received_zip, file.content);
+            res.set_content(R"({"success":true})", "application/json");
+        });
+    });
+
+    WebServerFixture fx;
+    fx.cfg.upgrade.base_url = upload_server.base_url();
+
+    auto r = cpr::Post(cpr::Url{fx.url("/api/feedback/desktop")},
+                       cpr::Header{{"Content-Type", "application/json"}},
+                       cpr::Body{json{{"feedback_text", "no log"}}.dump()});
+    ASSERT_EQ(r.status_code, 200) << r.text;
+    EXPECT_FALSE(zip_entry_exists(received_zip, "logs/desktop.log.tail.txt"));
+    auto metadata = json::parse(read_zip_entry(received_zip, "feedback.json"));
+    EXPECT_FALSE(metadata["log_available"].get<bool>());
+    std::error_code ec;
+    std::filesystem::remove(received_zip, ec);
+}
+
+TEST(WebServerHttp, DesktopFeedbackRejectsInvalidUpgradeUrlBeforeUpload) {
+    WebServerFixture fx;
+    fx.cfg.upgrade.base_url = "file:///tmp/feedback";
+    write_text(fx.logs_dir / "desktop-2026-06-18.log", "desktop log");
+
+    auto r = cpr::Post(cpr::Url{fx.url("/api/feedback/desktop")},
+                       cpr::Header{{"Content-Type", "application/json"}},
+                       cpr::Body{json{{"feedback_text", "bad config"}}.dump()});
+    ASSERT_EQ(r.status_code, 400) << r.text;
+    auto body = json::parse(r.text);
+    EXPECT_EQ(body["error"], "BAD_REQUEST");
+    EXPECT_TRUE(std::filesystem::is_empty(fx.feedback_dir));
+}
+
+TEST(WebServerHttp, DesktopFeedbackUploadFailureReturnsRetainedPackagePath) {
+    LocalUpdateServer upload_server([](httplib::Server& s) {
+        s.Post("/", [](const httplib::Request&, httplib::Response& res) {
+            res.status = 500;
+            res.set_content("nope", "text/plain");
+        });
+    });
+
+    WebServerFixture fx;
+    fx.cfg.upgrade.base_url = upload_server.base_url();
+    write_text(fx.logs_dir / "desktop-2026-06-18.log", "desktop log");
+
+    auto r = cpr::Post(cpr::Url{fx.url("/api/feedback/desktop")},
+                       cpr::Header{{"Content-Type", "application/json"}},
+                       cpr::Body{json{{"feedback_text", "upload fails"}}.dump()});
+    ASSERT_EQ(r.status_code, 502) << r.text;
+    auto body = json::parse(r.text);
+    EXPECT_EQ(body["error"], "UPLOAD_FAILED");
+    ASSERT_TRUE(body.contains("package_path"));
+    const auto retained = path_from_utf8(body["package_path"].get<std::string>());
+    EXPECT_TRUE(std::filesystem::is_regular_file(retained));
 }
 
 // 场景:GET /api/update/status 只检查 manifest,返回有新版状态。

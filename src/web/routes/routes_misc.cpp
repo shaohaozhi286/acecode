@@ -1,7 +1,10 @@
 // routes_misc.cpp — Route registrations extracted from server.cpp
 #include "../server_impl.hpp"
+#include "../../feedback/feedback_upload.hpp"
 
 namespace acecode::web {
+
+namespace fs = std::filesystem;
 
 using nlohmann::json;
 
@@ -195,7 +198,271 @@ void WebServer::Impl::register_hooks() {
         ([mutate_hook](const crow::request& req, const std::string& hook_id) {
             return mutate_hook(req, hook_id, "enable");
         });
-}
+    }
+
+void WebServer::Impl::register_feedback() {
+        auto json_err = [this](const crow::request& req,
+                               int status,
+                               const char* code,
+                               const std::string& msg,
+                               json extra = json::object()) {
+            crow::response r(status);
+            r.add_header("Content-Type", "application/json");
+            json body = {{"error", code}, {"message", msg}};
+            if (extra.is_object()) {
+                for (auto it = extra.begin(); it != extra.end(); ++it) {
+                    body[it.key()] = it.value();
+                }
+            }
+            r.body = body.dump();
+            return with_cors(req, std::move(r));
+        };
+
+        auto candidate_workspaces = [this]() {
+            std::vector<acecode::desktop::WorkspaceMeta> workspaces;
+            std::unordered_set<std::string> seen;
+            auto add = [&](const acecode::desktop::WorkspaceMeta& ws) {
+                const std::string key = ws.hash.empty() ? ws.cwd : ws.hash;
+                if (key.empty() || seen.count(key)) return;
+                seen.insert(key);
+                workspaces.push_back(ws);
+            };
+
+            add(compatibility_workspace());
+            if (deps.workspace_registry) {
+                deps.workspace_registry->scan(projects_dir());
+                for (const auto& ws : deps.workspace_registry->list()) {
+                    add(ws);
+                }
+            }
+            return workspaces;
+        };
+
+        auto session_sort_key = [](const json& item) {
+            std::string key = item.value("updated_at", std::string{});
+            if (key.empty()) key = item.value("created_at", std::string{});
+            return key;
+        };
+
+        auto find_selected_session = [this, candidate_workspaces](
+            const std::string& session_id,
+            const std::string& workspace_hash,
+            acecode::desktop::WorkspaceMeta* out_ws,
+            SessionMeta* out_meta,
+            fs::path* out_jsonl) -> std::optional<std::string> {
+            if (session_id.empty()) return std::string{"missing session id"};
+
+            std::vector<acecode::desktop::WorkspaceMeta> workspaces;
+            if (!workspace_hash.empty()) {
+                auto ws = resolve_workspace(workspace_hash);
+                if (!ws) return std::string{"workspace not found"};
+                workspaces.push_back(*ws);
+            } else {
+                workspaces = candidate_workspaces();
+            }
+
+            struct Match {
+                acecode::desktop::WorkspaceMeta ws;
+                SessionMeta meta;
+                fs::path jsonl;
+            };
+            std::vector<Match> matches;
+            for (const auto& ws : workspaces) {
+                const std::string project_dir = SessionStorage::get_project_dir(ws.cwd);
+                auto candidates = SessionStorage::find_session_files(project_dir, session_id);
+                if (candidates.empty() || candidates.front().jsonl_path.empty()) continue;
+
+                SessionMeta meta = SessionStorage::read_meta(
+                    candidates.front().meta_path.empty()
+                        ? SessionStorage::meta_path(project_dir, session_id)
+                        : candidates.front().meta_path);
+                if (meta.id.empty()) meta.id = session_id;
+                if (!workspace_hash.empty() && meta.no_workspace) {
+                    return std::string{"session does not belong to requested workspace"};
+                }
+                matches.push_back(Match{
+                    ws,
+                    std::move(meta),
+                    path_from_utf8(candidates.front().jsonl_path),
+                });
+            }
+
+            if (matches.empty()) return std::string{"session JSONL not found"};
+            if (matches.size() > 1) {
+                return std::string{
+                    "session id exists in multiple workspaces; workspace_hash is required"};
+            }
+            *out_ws = matches.front().ws;
+            *out_meta = std::move(matches.front().meta);
+            *out_jsonl = std::move(matches.front().jsonl);
+            return std::nullopt;
+        };
+
+        CROW_ROUTE(app, "/api/feedback/desktop/recent-sessions").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
+        CROW_ROUTE(app, "/api/feedback/desktop").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
+
+        CROW_ROUTE(app, "/api/feedback/desktop/recent-sessions").methods(crow::HTTPMethod::GET)
+        ([this, candidate_workspaces, session_sort_key](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+
+            int limit = 20;
+            if (auto raw = req.url_params.get("limit")) {
+                try {
+                    limit = std::clamp(std::stoi(raw), 1, 100);
+                } catch (...) {
+                    limit = 20;
+                }
+            }
+
+            std::vector<json> sessions;
+            std::unordered_set<std::string> seen;
+            for (const auto& ws : candidate_workspaces()) {
+                auto arr = sessions_for_workspace(ws, /*archived_only=*/false,
+                                                  /*include_no_workspace=*/true);
+                if (!arr.is_array()) continue;
+                for (auto item : arr) {
+                    const std::string id = item.value("id", item.value("session_id", std::string{}));
+                    if (id.empty()) continue;
+                    const std::string hash = item.value("workspace_hash", std::string{});
+                    const std::string key = hash + "::" + id;
+                    if (seen.count(key)) continue;
+                    seen.insert(key);
+                    if (!item.contains("session_id")) item["session_id"] = id;
+                    sessions.push_back(std::move(item));
+                }
+            }
+
+            std::sort(sessions.begin(), sessions.end(),
+                      [session_sort_key](const json& a, const json& b) {
+                          return session_sort_key(a) > session_sort_key(b);
+                      });
+            if (sessions.size() > static_cast<std::size_t>(limit)) {
+                sessions.resize(static_cast<std::size_t>(limit));
+            }
+
+            crow::response r(200);
+            r.add_header("Content-Type", "application/json");
+            r.body = json{{"sessions", sessions}}.dump();
+            return with_cors(req, std::move(r));
+        });
+
+        CROW_ROUTE(app, "/api/feedback/desktop").methods(crow::HTTPMethod::POST)
+        ([this, find_selected_session, json_err](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.app_config) return crow::response(503);
+
+            json body = json::object();
+            if (!req.body.empty()) {
+                try { body = json::parse(req.body); }
+                catch (const std::exception& e) {
+                    return json_err(req, 400, "BAD_JSON",
+                                    std::string("invalid JSON body: ") + e.what());
+                }
+                if (!body.is_object()) {
+                    return json_err(req, 400, "BAD_REQUEST", "expected JSON object");
+                }
+            }
+
+            auto optional_string = [&](const char* key) -> std::optional<std::string> {
+                if (!body.contains(key) || body[key].is_null()) return std::string{};
+                if (!body[key].is_string()) return std::nullopt;
+                return body[key].get<std::string>();
+            };
+            auto feedback_text = optional_string("feedback_text");
+            auto session_id = optional_string("session_id");
+            auto workspace_hash = optional_string("workspace_hash");
+            if (!feedback_text || !session_id || !workspace_hash) {
+                return json_err(req, 400, "BAD_REQUEST",
+                                "expected string feedback_text, session_id, and workspace_hash fields");
+            }
+
+            UpgradeConfig upgrade_cfg;
+            {
+                std::lock_guard<std::mutex> config_lock(app_config_mu);
+                upgrade_cfg = deps.app_config->upgrade;
+            }
+            const std::string upload_url = normalize_upgrade_base_url(upgrade_cfg.base_url);
+            if (!is_valid_upgrade_base_url(upload_url)) {
+                return json_err(req, 400, "BAD_REQUEST",
+                                "upgrade.base_url must be a non-empty http or https URL");
+            }
+
+            acecode::feedback::FeedbackPackageRequest package_req;
+            package_req.source = "desktop";
+            package_req.feedback_text = *feedback_text;
+            package_req.acecode_version = ACECODE_VERSION;
+            package_req.log_entry_name = "logs/desktop.log.tail.txt";
+            if (!deps.feedback_output_dir.empty()) {
+                package_req.output_dir = path_from_utf8(deps.feedback_output_dir);
+            }
+
+            const fs::path logs_dir = deps.logs_dir.empty()
+                ? path_from_utf8(get_logs_dir())
+                : path_from_utf8(deps.logs_dir);
+            if (auto log_path = acecode::feedback::latest_desktop_log_path(logs_dir)) {
+                package_req.log_path = *log_path;
+            }
+
+            std::string selected_session_id = *session_id;
+            std::string selected_workspace_hash = *workspace_hash;
+            if (!selected_session_id.empty()) {
+                acecode::desktop::WorkspaceMeta ws;
+                SessionMeta meta;
+                fs::path session_jsonl;
+                if (auto error = find_selected_session(
+                        selected_session_id, selected_workspace_hash, &ws, &meta, &session_jsonl)) {
+                    return json_err(req, 404, "SESSION_NOT_FOUND", *error);
+                }
+                package_req.session_id = selected_session_id;
+                package_req.session_jsonl_path = session_jsonl;
+                package_req.workspace_hash = meta.no_workspace ? std::string{} : ws.hash;
+                selected_workspace_hash = package_req.workspace_hash;
+            }
+
+            auto package = acecode::feedback::build_feedback_package(package_req);
+            if (!package.ok) {
+                return json_err(req, 500, "PACKAGE_FAILED", package.error);
+            }
+
+            acecode::feedback::FeedbackUploadRequest upload_req;
+            upload_req.upload_url = upload_url;
+            upload_req.package_path = package.package_path;
+            upload_req.package_filename = package.package_filename;
+            upload_req.timeout_ms = upgrade_cfg.timeout_ms;
+
+            auto upload = acecode::feedback::upload_feedback_package(upload_req);
+            if (!upload.ok) {
+                return json_err(req, 502, "UPLOAD_FAILED", upload.error,
+                                json{{"upload_url", upload_url},
+                                     {"package_path", path_to_utf8(package.package_path)},
+                                     {"package_filename", package.package_filename}});
+            }
+
+            std::error_code ec;
+            fs::remove(package.package_path, ec);
+
+            crow::response r(200);
+            r.add_header("Content-Type", "application/json");
+            r.body = json{
+                {"ok", true},
+                {"package_filename", package.package_filename},
+                {"log_included", package.log_included},
+                {"log_tail_bytes", static_cast<std::uint64_t>(package.log_tail_bytes)},
+                {"included_files", package.included_files},
+                {"selected_session_id", selected_session_id.empty()
+                    ? json(nullptr)
+                    : json(selected_session_id)},
+                {"workspace_hash", selected_workspace_hash},
+            }.dump();
+            return with_cors(req, std::move(r));
+        });
+    }
 
 void WebServer::Impl::register_mcp() {
         // GET /api/mcp: 读 config 当前 mcp_servers 段。spec 9.8

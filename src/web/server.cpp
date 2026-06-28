@@ -27,6 +27,7 @@ void WebServer::Impl::register_routes() {
     register_commands();
     register_mcp();
     register_hooks();
+    register_feedback();
     register_pty();
     register_websocket();
     register_static();

@@ -490,6 +490,51 @@ await run('ACE Browser Bridge API reads and writes daemon-backed enabled flag', 
   }
 });
 
+await run('Desktop feedback API methods use dedicated feedback endpoints', async () => {
+  const previousFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    calls.push({ url, opts });
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => 'application/json' },
+      json: async () => (
+        url.includes('recent-sessions')
+          ? { sessions: [{ id: 's1' }] }
+          : { ok: true, package_filename: 'feedback.zip' }
+      ),
+    };
+  };
+  try {
+    const client = createApi({ origin: 'http://127.0.0.1:4567', token: 'tok' });
+    const sessions = await client.listDesktopFeedbackSessions(25);
+    const submitted = await client.submitDesktopFeedback({
+      feedback_text: 'desktop issue',
+      session_id: 's1',
+      workspace_hash: 'w1',
+    });
+
+    assert.deepEqual(sessions, { sessions: [{ id: 's1' }] });
+    assert.deepEqual(submitted, { ok: true, package_filename: 'feedback.zip' });
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0].url, 'http://127.0.0.1:4567/api/feedback/desktop/recent-sessions?limit=25');
+    assert.equal(calls[0].opts.method, 'GET');
+    assert.equal(calls[0].opts.headers['X-ACECode-Token'], 'tok');
+    assert.equal(calls[1].url, 'http://127.0.0.1:4567/api/feedback/desktop');
+    assert.equal(calls[1].opts.method, 'POST');
+    assert.equal(calls[1].opts.headers['X-ACECode-Token'], 'tok');
+    assert.deepEqual(JSON.parse(calls[1].opts.body), {
+      feedback_text: 'desktop issue',
+      session_id: 's1',
+      workspace_hash: 'w1',
+    });
+    assert.ok(!calls.some((call) => call.url.includes('/messages') || call.url.includes('/commands')));
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
 await run('getSkillRoot uses workspace query and auth token', async () => {
   const previousFetch = globalThis.fetch;
   const calls = [];

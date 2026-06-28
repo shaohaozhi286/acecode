@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -10,10 +11,13 @@ namespace acecode::feedback {
 constexpr std::size_t kDefaultLogTailBytes = 512 * 1024;
 
 struct FeedbackPackageRequest {
+    std::string source;
     std::string feedback_text;
     std::string session_id;
     std::filesystem::path session_jsonl_path;
+    std::string workspace_hash;
     std::filesystem::path log_path;
+    std::string log_entry_name;
     std::filesystem::path output_dir;
     std::string created_at;
     std::string acecode_version;
@@ -53,6 +57,8 @@ std::string make_feedback_package_filename(const std::string& session_id,
                                            const std::string& platform = {},
                                            const std::string& computer_name = {},
                                            const std::string& login_name = {});
+std::optional<std::filesystem::path> latest_desktop_log_path(
+    const std::filesystem::path& logs_dir);
 
 FeedbackPackageResult build_feedback_package(const FeedbackPackageRequest& request);
 FeedbackUploadResult upload_feedback_package(const FeedbackUploadRequest& request);

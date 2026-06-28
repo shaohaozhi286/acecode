@@ -33,6 +33,13 @@ import { PERMISSION_MODES, normalizePermissionMode } from '../lib/permissionMode
 import { sessionDisplayTitle } from '../lib/sessionTitle.js';
 import { formatUsageTokens, normalizeUsageStats, usageDataNote } from '../lib/usageStats.js';
 import {
+  NO_FEEDBACK_SESSION_KEY,
+  buildDesktopFeedbackPayload,
+  feedbackSessionKey,
+  normalizeDesktopFeedbackSessions,
+  selectedFeedbackSessionFromKey,
+} from '../lib/desktopFeedback.js';
+import {
   hookActionState,
   hookEmptyState,
   hookSettingsErrorMessage,
@@ -65,6 +72,7 @@ const NAV = [
   { key: 'hooks', label: '钩子', icon: 'extension' },
   { key: 'archived', label: '已归档会话', icon: 'archive' },
   { key: 'usage', label: '使用情况', icon: 'list' },
+  { key: 'feedback', label: '问题反馈', icon: 'help' },
 ];
 
 const DEFAULT_UPGRADE_SERVICE_URL = 'http://2017studio.imwork.net:82/aupdate/';
@@ -164,6 +172,7 @@ export function SettingsPage({
           {activeNavKey === 'hooks' && <SectionHooks />}
           {activeNavKey === 'archived' && <SectionArchived />}
           {activeNavKey === 'usage' && <SectionUsage />}
+          {activeNavKey === 'feedback' && <SectionFeedback />}
         </div>
       </div>
     </div>
@@ -1561,6 +1570,190 @@ function SectionUsage() {
           </div>
         </>
       )}
+    </>
+  );
+}
+
+// ─── 问题反馈 ──────────────────────────────────────────────────────────────
+
+function feedbackSessionOptionLabel(item) {
+  const title = sessionDisplayTitle(item, item?.title || item?.summary || item?.id || '');
+  const when = relativeTime(item?.updated_at || item?.created_at);
+  const workspace = item?.workspaceName || item?.cwd || item?.workspace_hash || '';
+  return [title, when, workspace].filter(Boolean).join(' · ');
+}
+
+function SectionFeedback() {
+  const [feedbackText, setFeedbackText] = useState('');
+  const [sessionsRaw, setSessionsRaw] = useState(null);
+  const [selectedKey, setSelectedKey] = useState(NO_FEEDBACK_SESSION_KEY);
+  const [loadingSessions, setLoadingSessions] = useState(true);
+  const [sessionsError, setSessionsError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [status, setStatus] = useState(null);
+
+  const sessions = useMemo(
+    () => normalizeDesktopFeedbackSessions(sessionsRaw || {}),
+    [sessionsRaw],
+  );
+  const selectedSession = useMemo(
+    () => selectedFeedbackSessionFromKey(sessions, selectedKey),
+    [sessions, selectedKey],
+  );
+
+  const loadSessions = useCallback(() => {
+    let cancelled = false;
+    setLoadingSessions(true);
+    setSessionsError('');
+    api.listDesktopFeedbackSessions(20)
+      .then((data) => {
+        if (!cancelled) setSessionsRaw(data || {});
+      })
+      .catch((e) => {
+        if (!cancelled) setSessionsError(e?.message || String(e));
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingSessions(false);
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => loadSessions(), [loadSessions]);
+
+  const submit = async () => {
+    if (submitting) return;
+    setSubmitting(true);
+    setStatus(null);
+    try {
+      const payload = buildDesktopFeedbackPayload({
+        feedbackText,
+        selectedSession,
+      });
+      const result = await api.submitDesktopFeedback(payload);
+      const filename = result?.package_filename || 'feedback package';
+      setStatus({
+        kind: 'ok',
+        text: `反馈已上传:${filename}`,
+      });
+      toast({ kind: 'ok', text: '问题反馈已上传' });
+      setFeedbackText('');
+      setSelectedKey(NO_FEEDBACK_SESSION_KEY);
+    } catch (e) {
+      const body = e?.body && typeof e.body === 'object' ? e.body : {};
+      const message = lookupErrorMessage(e?.code, body.message || e?.message || String(e));
+      setStatus({
+        kind: 'err',
+        text: `上传失败:${message}`,
+        packagePath: body.package_path || '',
+      });
+      toast({ kind: 'err', text: '问题反馈上传失败' });
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <>
+      <h2 className="text-xl font-bold mb-5">问题反馈</h2>
+
+      <div className="rounded-md bg-surface border border-border overflow-hidden">
+        <div className="px-4 py-3.5 border-b border-border">
+          <div className="text-[14px] font-semibold mb-1">提交反馈</div>
+          <p className="text-[12px] text-fg-mute">
+            默认只附带最近 desktop 日志;选择会话后才会附带对应会话记录。
+          </p>
+        </div>
+
+        <div className="px-4 py-4 space-y-4">
+          <label className="block">
+            <span className="block text-[12px] font-medium text-fg-2 mb-1.5">反馈内容</span>
+            <textarea
+              value={feedbackText}
+              onChange={(e) => setFeedbackText(e.target.value)}
+              rows={5}
+              placeholder="描述你遇到的问题"
+              className="w-full resize-y min-h-[112px] rounded-md bg-bg border border-border px-3 py-2 text-[13px] text-fg outline-none focus:border-accent focus:ring-1 focus:ring-accent"
+            />
+          </label>
+
+          <div>
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-[12px] font-medium text-fg-2">最近会话记录</span>
+              <button
+                type="button"
+                onClick={loadSessions}
+                disabled={loadingSessions || submitting}
+                className="h-6 px-2 rounded-md text-[11px] text-fg-2 bg-surface-hi hover:bg-surface-alt border border-border disabled:opacity-60 transition flex items-center gap-1"
+              >
+                {loadingSessions ? <span className="ace-spinner" /> : <RefreshIcon size={12} />}
+                刷新
+              </button>
+            </div>
+            <div className="flex gap-2">
+              <select
+                value={selectedKey}
+                onChange={(e) => setSelectedKey(e.target.value)}
+                disabled={loadingSessions || submitting}
+                className="min-w-0 flex-1 h-8 rounded-md bg-bg border border-border px-2 text-[13px] text-fg outline-none focus:border-accent"
+              >
+                <option value={NO_FEEDBACK_SESSION_KEY}>不附带会话</option>
+                {sessions.map((item) => (
+                  <option key={feedbackSessionKey(item)} value={feedbackSessionKey(item)}>
+                    {feedbackSessionOptionLabel(item)}
+                  </option>
+                ))}
+              </select>
+              {selectedKey !== NO_FEEDBACK_SESSION_KEY && (
+                <button
+                  type="button"
+                  onClick={() => setSelectedKey(NO_FEEDBACK_SESSION_KEY)}
+                  disabled={submitting}
+                  className="shrink-0 h-8 px-2.5 rounded-md text-[12px] border border-border bg-surface hover:bg-surface-hi disabled:opacity-60 transition"
+                >
+                  清除
+                </button>
+              )}
+            </div>
+            {sessionsError ? (
+              <div className="mt-2 text-[12px] text-danger">加载会话失败:{sessionsError}</div>
+            ) : (
+              <div className="mt-2 text-[12px] text-fg-mute">
+                {selectedSession
+                  ? `将附带:${feedbackSessionOptionLabel(selectedSession)}`
+                  : '不会附带会话数据库或会话记录。'}
+              </div>
+            )}
+          </div>
+
+          {status && (
+            <div
+              className={clsx(
+                'rounded-md border px-3 py-2 text-[12px]',
+                status.kind === 'ok'
+                  ? 'border-ok-border bg-ok-bg text-ok'
+                  : 'border-danger bg-surface text-danger',
+              )}
+            >
+              <div>{status.text}</div>
+              {status.packagePath && (
+                <div className="mt-1 font-mono text-[11px] break-all">{status.packagePath}</div>
+              )}
+            </div>
+          )}
+
+          <div className="flex items-center justify-end">
+            <button
+              type="button"
+              onClick={submit}
+              disabled={submitting}
+              className="h-8 px-3 rounded-md text-[13px] font-medium bg-accent text-white hover:opacity-95 disabled:opacity-60 transition flex items-center gap-1.5"
+            >
+              {submitting ? <span className="ace-spinner" /> : <VsIcon name="send" size={13} />}
+              提交反馈
+            </button>
+          </div>
+        </div>
+      </div>
     </>
   );
 }
