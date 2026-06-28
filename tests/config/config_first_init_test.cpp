@@ -311,6 +311,39 @@ TEST_F(ConfigFirstInitTest, HooksFeatureFlagDefaultsEnabled) {
     EXPECT_TRUE(cfg.features.hooks);
 }
 
+TEST_F(ConfigFirstInitTest, ReuseOpencodeSkillsDefaultsEnabled) {
+    fs::create_directories(temp_home / ".acecode");
+    {
+        std::ofstream ofs(temp_home / ".acecode" / "config.json");
+        ofs << R"({
+    "provider": "",
+    "saved_models": []
+})";
+    }
+
+    auto cfg = acecode::load_config();
+
+    EXPECT_TRUE(cfg.skills.reuse_opencode);
+}
+
+TEST_F(ConfigFirstInitTest, ReuseOpencodeSkillsLoadsExplicitDisabled) {
+    fs::create_directories(temp_home / ".acecode");
+    {
+        std::ofstream ofs(temp_home / ".acecode" / "config.json");
+        ofs << R"({
+    "provider": "",
+    "saved_models": [],
+    "skills": {
+        "reuse_opencode": false
+    }
+})";
+    }
+
+    auto cfg = acecode::load_config();
+
+    EXPECT_FALSE(cfg.skills.reuse_opencode);
+}
+
 TEST_F(ConfigFirstInitTest, HooksFeatureFlagLoadsExplicitDisabled) {
     fs::create_directories(temp_home / ".acecode");
     {
@@ -414,6 +447,39 @@ TEST_F(ConfigFirstInitTest, SaveConfigPersistsOnlyDisabledCompletedTurnSelfHealF
     auto j = nlohmann::json::parse(ifs);
     ASSERT_TRUE(j.contains("features"));
     EXPECT_EQ(j["features"]["completed_turn_self_heal"], false);
+}
+
+TEST_F(ConfigFirstInitTest, SaveConfigOmitsDefaultReuseOpencodeSkillsFlag) {
+    acecode::AppConfig cfg;
+    cfg.provider = "";
+    cfg.saved_models.clear();
+    cfg.default_model_name.clear();
+    cfg.skills.reuse_opencode = true;
+
+    const fs::path config_path = temp_home / ".acecode" / "reuse-opencode-default.json";
+    acecode::save_config(cfg, config_path.string());
+
+    std::ifstream ifs(config_path);
+    ASSERT_TRUE(ifs.is_open());
+    auto j = nlohmann::json::parse(ifs);
+    EXPECT_FALSE(j.contains("skills"));
+}
+
+TEST_F(ConfigFirstInitTest, SaveConfigPersistsDisabledReuseOpencodeSkillsFlag) {
+    acecode::AppConfig cfg;
+    cfg.provider = "";
+    cfg.saved_models.clear();
+    cfg.default_model_name.clear();
+    cfg.skills.reuse_opencode = false;
+
+    const fs::path config_path = temp_home / ".acecode" / "reuse-opencode-disabled.json";
+    acecode::save_config(cfg, config_path.string());
+
+    std::ifstream ifs(config_path);
+    ASSERT_TRUE(ifs.is_open());
+    auto j = nlohmann::json::parse(ifs);
+    ASSERT_TRUE(j.contains("skills"));
+    EXPECT_EQ(j["skills"]["reuse_opencode"], false);
 }
 
 TEST_F(ConfigFirstInitTest, DefaultPermissionModeLoadsAndInvalidFallsBack) {

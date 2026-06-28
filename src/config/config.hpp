@@ -62,6 +62,7 @@ struct McpServerConfig {
 struct SkillsConfig {
     std::vector<std::string> disabled;       // skill names to hide even if present on disk
     std::vector<std::string> external_dirs;  // extra directories to scan (supports ~ and ${ENV})
+    bool reuse_opencode = true;              // reuse opencode-compatible skill roots by default
 };
 
 struct MemoryConfig {

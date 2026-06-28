@@ -6,9 +6,11 @@
 // 扫描根顺序(first-wins by skill name):
 //   1) project walk — <cwd...>/.acecode/skills,深度优先回溯到 HOME
 //   2) project walk — <cwd...>/.agent/skills,深度优先回溯到 HOME
-//   3) user global  — ~/.acecode/skills(自动创建)
-//   4) user global  — ~/.agent/skills(兼容根)
-//   5) external dirs — config.skills.external_dirs
+//   3) opencode project compat roots — when config.skills.reuse_opencode is true
+//   4) user global  — ~/.acecode/skills(自动创建)
+//   5) user global  — ~/.agent/skills(兼容根)
+//   6) opencode global/cache compat roots — when config.skills.reuse_opencode is true
+//   7) external dirs — config.skills.external_dirs
 
 #include <string>
 

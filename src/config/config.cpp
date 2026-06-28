@@ -526,6 +526,9 @@ AppConfig load_config() {
                         if (v.is_string()) cfg.skills.external_dirs.push_back(v.get<std::string>());
                     }
                 }
+                if (sj.contains("reuse_opencode") && sj["reuse_opencode"].is_boolean()) {
+                    cfg.skills.reuse_opencode = sj["reuse_opencode"].get<bool>();
+                }
             }
             if (j.contains("memory") && j["memory"].is_object()) {
                 const auto& mj = j["memory"];
@@ -1231,10 +1234,15 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
             normalize_permission_mode_name(cfg.default_permission_mode);
     }
 
-    if (!cfg.skills.disabled.empty() || !cfg.skills.external_dirs.empty()) {
+    SkillsConfig skills_d;
+    if (!cfg.skills.disabled.empty() ||
+        !cfg.skills.external_dirs.empty() ||
+        cfg.skills.reuse_opencode != skills_d.reuse_opencode) {
         nlohmann::json sj = nlohmann::json::object();
         if (!cfg.skills.disabled.empty()) sj["disabled"] = cfg.skills.disabled;
         if (!cfg.skills.external_dirs.empty()) sj["external_dirs"] = cfg.skills.external_dirs;
+        if (cfg.skills.reuse_opencode != skills_d.reuse_opencode)
+            sj["reuse_opencode"] = cfg.skills.reuse_opencode;
         j["skills"] = sj;
     }
 
