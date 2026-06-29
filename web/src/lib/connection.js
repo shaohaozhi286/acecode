@@ -190,6 +190,16 @@ export class AceConnection extends EventTarget {
       if (sid) msg.session_id = sid;
       if (sid && typeof msg.seq === 'number') {
         const state = this.sessions.get(sid) || { lastSeq: 0 };
+        // 乱序探针:正常情况下同一连接内 seq 严格递增(服务端先按序补发历史、
+        // 再切实时)。一旦收到 seq < 已见最大值,说明实时帧抢在历史回放之前
+        // 送达 —— 这正是 EventDispatcher::subscribe 有序补发修复要消灭的现象,
+        // 也是 "消息显示不全" 的根因信号。留作回归告警(低噪声,只在异常时打)。
+        if (state.lastSeq && msg.seq < state.lastSeq) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            `[ace-ws] out-of-order event sid=${sid} seq=${msg.seq} < lastSeq=${state.lastSeq} type=${msg.type || msg.payload?.role || '?'}`,
+          );
+        }
         if (msg.seq > state.lastSeq) {
           state.lastSeq = msg.seq;
           this.sessions.set(sid, state);

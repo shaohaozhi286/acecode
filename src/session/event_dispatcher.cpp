@@ -1,5 +1,7 @@
 #include "event_dispatcher.hpp"
 
+#include "../utils/logger.hpp"
+
 #include <chrono>
 #include <utility>
 
@@ -21,18 +23,27 @@ std::uint64_t EventDispatcher::emit(SessionEventKind kind, nlohmann::json payloa
         std::chrono::system_clock::now().time_since_epoch()).count();
     evt.payload      = std::move(payload);
 
-    // 关键: 把 listener 复制出来再调,避免在持锁状态下调用客户代码
-    // (listener 可能跨网络发包阻塞)。
-    std::vector<EventListener> snapshot;
+    // 关键: 把要投递的事件 / listener 复制出来在锁外调用,避免在持锁状态下
+    // 调用客户代码(listener 可能跨网络发包阻塞)。处于 catch-up 阶段的订阅
+    // 不直投,而是把事件按序压入它的 pending,交由 subscribe 线程稍后 flush —
+    // 防止实时新帧抢在历史回放之前送达、被客户端按 seq 误判为过期而丢弃。
+    std::vector<EventListener> direct_targets;
     {
         std::lock_guard<std::mutex> lk(mu_);
         if (options.buffered) {
             push_to_buffer(evt, options.coalesce_key);
         }
-        snapshot.reserve(listeners_.size());
-        for (auto& [_, l] : listeners_) snapshot.push_back(l);
+        direct_targets.reserve(subscriptions_.size());
+        for (auto& [_, sub] : subscriptions_) {
+            if (!sub) continue;
+            if (sub->catching_up) {
+                sub->pending.push_back(evt);
+            } else if (sub->listener) {
+                direct_targets.push_back(sub->listener);
+            }
+        }
     }
-    for (auto& l : snapshot) {
+    for (auto& l : direct_targets) {
         if (l) l(evt);
     }
     return evt.seq;
@@ -42,9 +53,12 @@ EventDispatcher::SubscriptionId
 EventDispatcher::subscribe(EventListener listener, std::uint64_t since_seq) {
     SubscriptionId id = next_sub_id_.fetch_add(1);
 
-    // 回放缓存里 seq > since_seq 的事件,然后再把 listener 注册进去。
-    // 必须在同一把锁内完成 replay → register,否则 emit 可能在两步之间
-    // 插入新事件导致 listener 漏看 / 重复看。
+    auto sub = std::make_shared<Subscription>();
+    sub->listener     = listener;
+    sub->catching_up  = true;
+
+    // 第一步(持锁): 快照需要回放的历史事件 + 把订阅注册为 catch-up 态。
+    // 注册后,emit() 会把实时事件压进 sub->pending 而非直投。
     std::vector<SessionEvent> to_replay;
     {
         std::lock_guard<std::mutex> lk(mu_);
@@ -53,22 +67,58 @@ EventDispatcher::subscribe(EventListener listener, std::uint64_t since_seq) {
                 if (evt.seq > since_seq) to_replay.push_back(evt);
             }
         }
-        listeners_[id] = listener;
+        subscriptions_[id] = sub;
     }
+
+    // 第二步(锁外): 按 seq 顺序回放历史事件。期间产生的实时事件都进了 pending。
     if (listener) {
         for (const auto& evt : to_replay) listener(evt);
     }
+
+    // 第三步: 按序 flush catch-up 期间累积的实时事件;在 pending 清空的同一把锁内
+    // 翻转 catching_up=false 切到直投。emit 与本步竞争同一把锁来决定走 pending 还是
+    // 直投,因此不存在 "pending 已空" 与 "切直投" 之间漏接实时事件的窗口。
+    std::size_t live_buffered = 0;
+    while (true) {
+        std::vector<SessionEvent> batch;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            auto it = subscriptions_.find(id);
+            if (it == subscriptions_.end()) break;   // 回放途中被 unsubscribe
+            if (it->second->pending.empty()) {
+                it->second->catching_up = false;
+                break;
+            }
+            batch.swap(it->second->pending);
+        }
+        if (listener) {
+            for (const auto& evt : batch) listener(evt);
+        }
+        live_buffered += batch.size();
+    }
+
+    // 只在真正触发了回放 / catch-up 排队时记一条 —— 平时(since=0 且无并发)零噪声。
+    // live_buffered>0 即命中了 "实时事件与历史回放并发" 的窗口,正是过去导致
+    // 乱序丢帧的场景,现在被有序补发正确吸收;留作回归观测信号。
+    if (since_seq > 0 || live_buffered > 0) {
+        LOG_DEBUG("[event_dispatcher] subscribe id=" + std::to_string(id) +
+                  " since=" + std::to_string(since_seq) +
+                  " replayed=" + std::to_string(to_replay.size()) +
+                  " live_buffered=" + std::to_string(live_buffered) +
+                  " current_seq=" + std::to_string(seq_counter_.load()));
+    }
+
     return id;
 }
 
 void EventDispatcher::unsubscribe(SubscriptionId id) {
     std::lock_guard<std::mutex> lk(mu_);
-    listeners_.erase(id);
+    subscriptions_.erase(id);
 }
 
 std::size_t EventDispatcher::listener_count() const {
     std::lock_guard<std::mutex> lk(mu_);
-    return listeners_.size();
+    return subscriptions_.size();
 }
 
 void EventDispatcher::push_to_buffer(const SessionEvent& evt, const std::string& coalesce_key) {

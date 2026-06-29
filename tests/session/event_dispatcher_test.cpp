@@ -8,6 +8,7 @@
 #include "session/event_dispatcher.hpp"
 
 #include <atomic>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -174,6 +175,58 @@ TEST(EventDispatcher, MultipleListenersAllReceiveEvent) {
     EXPECT_EQ(a, 1);
     EXPECT_EQ(b, 1);
     EXPECT_EQ(d.listener_count(), 2u);
+}
+
+// 回归: subscribe 回放历史事件期间,并发到达的实时事件必须排在历史事件之后、
+// 按 seq 顺序投递,不得乱序 / 丢失 / 重复。
+//
+// bug 表现(修复前): EventDispatcher::subscribe 在锁外才回放历史事件,而 listener
+// 一注册进活跃列表,worker 线程的 emit 就能并发直投实时帧。于是实时新帧(seq 大)
+// 可能抢在历史旧帧(seq 小)之前送达 listener。客户端按 seq 单调收,先收到大 seq
+// 会把 lastSeq 顶高,随后到的小 seq(恰好可能是那条 "assistant 最终完整消息" 帧)
+// 被判为过期直接丢弃 —— 表现为 desktop 上消息显示不全(如 "我发," 截断),切换
+// 会话走 REST 重拉才恢复。修复后 subscribe 让该 listener 先进 catch-up 态,回放期间
+// 的实时帧入 pending,回放完再按序 flush,故此处必得 2,3,4。
+//
+// 注:本用例用 listener 在收到 seq=2 时阻塞、主线程趁机 emit seq=4 的方式,确定性地
+// 制造 "实时帧与历史回放并发" 的窗口;修复前会得到乱序的 {2,4,3}。
+TEST(EventDispatcher, ConcurrentEmitDuringReplayPreservesSeqOrder) {
+    EventDispatcher d;
+    d.emit(SessionEventKind::Token, {{"i", 1}}); // seq=1
+    d.emit(SessionEventKind::Token, {{"i", 2}}); // seq=2
+    d.emit(SessionEventKind::Token, {{"i", 3}}); // seq=3
+
+    std::vector<std::uint64_t> got;
+    std::mutex got_mu;
+    std::atomic<bool> in_replay{false};
+    std::atomic<bool> live_emit_done{false};
+
+    auto listener = [&](const SessionEvent& e) {
+        {
+            std::lock_guard<std::mutex> lk(got_mu);
+            got.push_back(e.seq);
+        }
+        if (e.seq == 2u) {
+            // 进入回放 → 通知主线程趁机 emit 实时帧,并等它 emit 完成,
+            // 模拟实时帧与历史回放真实并发。注意此刻 subscribe 未持 mu_,无死锁。
+            in_replay.store(true);
+            while (!live_emit_done.load()) std::this_thread::yield();
+        }
+    };
+
+    std::thread sub_thread([&] {
+        d.subscribe(listener, /*since_seq=*/1);
+    });
+
+    while (!in_replay.load()) std::this_thread::yield();
+    d.emit(SessionEventKind::Token, {{"i", 4}}); // seq=4,回放进行中到达
+    live_emit_done.store(true);
+    sub_thread.join();
+
+    ASSERT_EQ(got.size(), 3u) << "应收到回放的 2,3 + 实时的 4,无丢失无重复";
+    EXPECT_EQ(got[0], 2u);
+    EXPECT_EQ(got[1], 3u);
+    EXPECT_EQ(got[2], 4u) << "实时帧必须排在历史回放之后,严格 seq 递增";
 }
 
 // 场景: 多线程并发 emit 时,seq 仍然单调且无重复(用 atomic counter 防并发)。
