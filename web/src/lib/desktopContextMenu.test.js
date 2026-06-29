@@ -19,6 +19,7 @@ import {
   joinWorkspacePath,
   openInExplorerTargetFromElement,
   sessionPinTargetFromElement,
+  workspaceTargetFromElement,
 } from './desktopContextMenu.js';
 
 function test(name, fn) {
@@ -167,6 +168,32 @@ test('workspace 目标显示项目动作', () => {
     DESKTOP_CONTEXT_ACTIONS.REMOVE_WORKSPACE,
     DESKTOP_CONTEXT_ACTIONS.SELECT_ALL,
   ]);
+});
+
+test('workspace 有 opencode import count 时显示导入动作', () => {
+  const items = buildDesktopContextMenuItems({
+    workspaceTarget: {
+      workspaceHash: 'w1',
+      path: 'C:/repo',
+      active: false,
+      expanded: false,
+      opencodeImportCount: 3,
+    },
+  });
+  assert.deepEqual(ids(items).slice(0, 4), [
+    DESKTOP_CONTEXT_ACTIONS.ACTIVATE_WORKSPACE,
+    DESKTOP_CONTEXT_ACTIONS.EXPAND_WORKSPACE,
+    DESKTOP_CONTEXT_ACTIONS.NEW_WORKSPACE_SESSION,
+    DESKTOP_CONTEXT_ACTIONS.IMPORT_OPENCODE_SESSIONS,
+  ]);
+});
+
+test('workspace target parses opencode import count attribute', () => {
+  const target = workspaceTargetFromElement(elementFor(WORKSPACE_TARGET_SELECTOR, {
+    'data-desktop-workspace-id': 'w1',
+    'data-desktop-workspace-opencode-import-count': '28',
+  }));
+  assert.equal(target.opencodeImportCount, 28);
 });
 
 test('file and directory targets build expected actions', () => {

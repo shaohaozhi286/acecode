@@ -3,7 +3,9 @@ import {
   applyTranscriptReplayEvents,
   canLiveMonitorSession,
   createTranscriptState,
+  lastAssistantText,
   loadTranscriptHistory,
+  preserveLiveAssistantTailOnLoad,
   projectCompactTranscriptItems,
   reduceTranscriptEvent,
   replaySinceForLiveCatchup,
@@ -1241,4 +1243,72 @@ run('live/static 判定区分 active running 与磁盘历史', () => {
   assert.equal(canLiveMonitorSession({ id: 's1', status: 'idle', active: false }), false);
   assert.equal(canLiveMonitorSession({ id: 's1' }, true), true);
   assert.equal(canLiveMonitorSession({ id: 's1', active: true }, false), false);
+});
+
+// 回归: "desktop 消息显示不全" —— 实时 WS 已流式累积到完整 assistant 文本,
+// 但晚解析的 REST 初始快照(messages 尚未含进行中的 assistant、events 只回放
+// 了部分 token,seq 落后)会整体覆盖,把界面截断成半截;切会话(重新挂载
+// 走完整 REST)才恢复。preserveLiveAssistantTailOnLoad 在快照比实时旧且实时
+// 尾巴更完整时保留实时文本,杜绝这种回退。
+run('防回退: 更旧的 REST 快照不得截断实时已累积的 assistant 尾巴', () => {
+  // 实时态: WS 已收到完整文本,seq 推进到 12。
+  const live = createTranscriptState({
+    lastSeq: 12,
+    streamingId: 7,
+    items: [
+      { kind: 'msg', id: 1, role: 'user', content: '问题', messageId: 'u1' },
+      { kind: 'msg', id: 7, role: 'assistant', content: '我发现了根本差异：A 与 B 不同', streaming: true, streamDraft: true },
+    ],
+    nextItemId: 8,
+  });
+  // 快照: assistant 尚未落库(messages 无),events 只回放了 2 个 token,seq=2。
+  const loaded = createTranscriptState({
+    lastSeq: 2,
+    streamingId: 99,
+    items: [
+      { kind: 'msg', id: 1, role: 'user', content: '问题', messageId: 'u1' },
+      { kind: 'msg', id: 99, role: 'assistant', content: '我发', streaming: true, streamDraft: true },
+    ],
+    nextItemId: 100,
+  });
+  const merged = preserveLiveAssistantTailOnLoad(loaded, live);
+  assert.equal(lastAssistantText(merged), '我发现了根本差异：A 与 B 不同', '应保留更完整的实时文本');
+  assert.ok((merged.lastSeq || 0) >= 12, 'lastSeq 不得回退到快照的低水位');
+});
+
+// 场景: 快照不比实时旧(seq >= 实时)时直接采用快照,不做任何保留 —— 这是
+// 已完成回合 / 首次加载的正常路径,快照才是权威。
+run('防回退: 快照较新或首次加载时原样采用快照', () => {
+  const liveEmpty = createTranscriptState();
+  const loaded = createTranscriptState({
+    lastSeq: 5,
+    items: [{ kind: 'msg', id: 1, role: 'assistant', content: '完整内容', messageId: 'a1' }],
+    nextItemId: 2,
+  });
+  // 首次加载: 实时态为空 → 原样返回快照对象。
+  assert.equal(preserveLiveAssistantTailOnLoad(loaded, liveEmpty), loaded);
+
+  // 实时 seq 不超过快照 → 用快照(快照含已落库的完整 assistant)。
+  const liveBehind = createTranscriptState({
+    lastSeq: 3,
+    items: [{ kind: 'msg', id: 9, role: 'assistant', content: '半截', streamDraft: true }],
+    nextItemId: 10,
+  });
+  assert.equal(preserveLiveAssistantTailOnLoad(loaded, liveBehind), loaded);
+});
+
+// 场景: 实时更长但快照同样更新(seq 更高)时不抢 —— 防止保护逻辑误伤
+// 正常的快照权威路径(只在快照确实更旧时才介入)。
+run('防回退: 快照 seq 更高时即便实时文本更长也以快照为准', () => {
+  const live = createTranscriptState({
+    lastSeq: 4,
+    items: [{ kind: 'msg', id: 1, role: 'assistant', content: '很长很长的旧内容', streamDraft: true }],
+    nextItemId: 2,
+  });
+  const loaded = createTranscriptState({
+    lastSeq: 9,
+    items: [{ kind: 'msg', id: 1, role: 'assistant', content: '短', messageId: 'a1' }],
+    nextItemId: 2,
+  });
+  assert.equal(preserveLiveAssistantTailOnLoad(loaded, live), loaded);
 });

@@ -5,6 +5,48 @@ namespace acecode::web {
 
 using nlohmann::json;
 
+namespace {
+
+json opencode_import_status_to_json(const OpencodeImportJobStatus& status) {
+    return json{
+        {"job_id", status.job_id},
+        {"workspace_hash", status.workspace_hash},
+        {"state", status.state},
+        {"imported", status.imported},
+        {"total", status.total},
+        {"failed", status.failed},
+        {"skipped", status.skipped},
+        {"current_title", status.current_title},
+        {"error", status.error},
+        {"session_ids", status.session_ids},
+    };
+}
+
+json opencode_import_preview_to_json(const OpencodeImportPreview& preview) {
+    json sessions = json::array();
+    for (const auto& session : preview.sessions) {
+        sessions.push_back(json{
+            {"id", session.opencode_session_id},
+            {"title", session.title},
+            {"directory", session.directory},
+            {"provider", session.provider},
+            {"model", session.model},
+            {"message_count", session.message_count},
+            {"part_count", session.part_count},
+            {"source_database", session.source_database},
+        });
+    }
+    return json{
+        {"available", preview.available},
+        {"count", preview.count},
+        {"source_database", preview.source_database},
+        {"error", preview.error},
+        {"sessions", sessions},
+    };
+}
+
+} // namespace
+
 void WebServer::Impl::register_workspaces() {
         CROW_ROUTE(app, "/api/workspaces").methods(crow::HTTPMethod::Options)
         ([this](const crow::request& req) {
@@ -16,6 +58,14 @@ void WebServer::Impl::register_workspaces() {
         });
         CROW_ROUTE(app, "/api/workspaces/<string>/sessions").methods(crow::HTTPMethod::Options)
         ([this](const crow::request& req, const std::string&) {
+            return cors_preflight(req);
+        });
+        CROW_ROUTE(app, "/api/workspaces/<string>/opencode-import").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req, const std::string&) {
+            return cors_preflight(req);
+        });
+        CROW_ROUTE(app, "/api/workspaces/<string>/opencode-import/<string>").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req, const std::string&, const std::string&) {
             return cors_preflight(req);
         });
         CROW_ROUTE(app, "/api/workspaces/<string>/sessions/<string>/resume").methods(crow::HTTPMethod::Options)
@@ -171,6 +221,92 @@ void WebServer::Impl::register_workspaces() {
             LOG_INFO("[web] open-in-explorer path=" + path);
             crow::response r(200);
             r.body = R"({"ok":true})";
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        });
+
+        CROW_ROUTE(app, "/api/workspaces/<string>/opencode-import").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req, const std::string& hash) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            auto ws = resolve_workspace(hash);
+            if (!ws.has_value()) {
+                crow::response r(404);
+                r.body = R"({"error":"workspace not found"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            const std::string project_dir = SessionStorage::get_project_dir(ws->cwd);
+            auto preview = preview_opencode_import(ws->cwd, project_dir);
+            crow::response r(opencode_import_preview_to_json(preview).dump());
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        });
+
+        CROW_ROUTE(app, "/api/workspaces/<string>/opencode-import").methods(crow::HTTPMethod::POST)
+        ([this](const crow::request& req, const std::string& hash) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            auto ws = resolve_workspace(hash);
+            if (!ws.has_value()) {
+                crow::response r(404);
+                r.body = R"({"error":"workspace not found"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            const std::string job_id = SessionStorage::generate_session_id();
+            OpencodeImportJobStatus initial;
+            initial.job_id = job_id;
+            initial.workspace_hash = ws->hash;
+            initial.state = "pending";
+            {
+                std::lock_guard<std::mutex> lk(opencode_import_mu);
+                opencode_import_jobs[job_id] = initial;
+            }
+
+            OpencodeImportOptions opts;
+            opts.workspace_hash = ws->hash;
+            opts.cwd = ws->cwd;
+            opts.project_dir = SessionStorage::get_project_dir(ws->cwd);
+
+            std::thread([this, job_id, opts]() {
+                auto publish = [this, job_id](const OpencodeImportJobStatus& next) {
+                    auto copy = next;
+                    copy.job_id = job_id;
+                    if (copy.workspace_hash.empty()) copy.workspace_hash = next.workspace_hash;
+                    std::lock_guard<std::mutex> lk(opencode_import_mu);
+                    opencode_import_jobs[job_id] = std::move(copy);
+                };
+                auto final_status = import_opencode_sessions(opts, publish);
+                final_status.job_id = job_id;
+                final_status.workspace_hash = opts.workspace_hash;
+                publish(final_status);
+            }).detach();
+
+            crow::response r(202);
+            r.body = opencode_import_status_to_json(initial).dump();
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        });
+
+        CROW_ROUTE(app, "/api/workspaces/<string>/opencode-import/<string>").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req, const std::string& hash, const std::string& job_id) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            auto ws = resolve_workspace(hash);
+            if (!ws.has_value()) {
+                crow::response r(404);
+                r.body = R"({"error":"workspace not found"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            std::lock_guard<std::mutex> lk(opencode_import_mu);
+            auto it = opencode_import_jobs.find(job_id);
+            if (it == opencode_import_jobs.end() || it->second.workspace_hash != ws->hash) {
+                crow::response r(404);
+                r.body = R"({"error":"import job not found"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            crow::response r(opencode_import_status_to_json(it->second).dump());
             r.add_header("Content-Type", "application/json");
             return with_cors(req, std::move(r));
         });

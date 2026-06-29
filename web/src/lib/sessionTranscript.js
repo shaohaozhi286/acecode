@@ -565,6 +565,89 @@ export function replaySinceForLiveCatchup({ isLive = false, loadedSeq = 0 } = {}
   return loadedSeq > 0 ? loadedSeq : 1;
 }
 
+// 末尾 assistant 消息的文本(从尾部往前找第一条 assistant msg)。用于
+// "内容回退" 探测与防回退保护:实时流式累积到完整内容后,任何把它替换成
+// 更短文本的状态变更都是可疑的截断。
+export function lastAssistantText(state) {
+  const items = Array.isArray(state?.items) ? state.items : [];
+  for (let i = items.length - 1; i >= 0; i -= 1) {
+    const it = items[i];
+    if (it?.kind === 'msg' && it.role === 'assistant') return String(it.content || '');
+  }
+  return '';
+}
+
+// 内容回退探测器(防回归诊断):某次状态变更把末尾 assistant 文本变短时报警,
+// 标明来源路径、长度、前后预览,方便定位 "消息显示不全" 究竟由哪条路径造成。
+// transcript_replace(重试/compact 的有意重置)会合法地变短,调用方应跳过。
+// 低噪声:只在真的变短时打。
+export function detectAssistantTailRegression(source, prevState, nextState) {
+  const prev = lastAssistantText(prevState);
+  const next = lastAssistantText(nextState);
+  if (prev.length > next.length) {
+    const tail = (s) => (s.length > 24 ? `${s.slice(0, 12)}…${s.slice(-12)}` : s);
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[ace-transcript] assistant tail shrank via ${source}: ${prev.length}→${next.length} chars`
+      + ` lastSeq ${Number(prevState?.lastSeq) || 0}→${Number(nextState?.lastSeq) || 0}`
+      + ` | was "${tail(prev)}" now "${tail(next)}"`,
+    );
+    return true;
+  }
+  return false;
+}
+
+// 防回退保护:REST 历史快照(loadedState)可能比实时 WS 已累积的当前回合更旧
+// —— 快照里 messages 尚未含进行中的 assistant、events 只回放了部分 token。
+// 当实时态(liveState)seq 不落后于快照、且末尾 assistant 文本更完整时,保留
+// 实时文本,不让更旧的快照把界面截断。只增不减:返回值的末尾 assistant 文本
+// 长度永远 >= 二者中较长的那个,因此即便误判也不会比直接用快照更差。
+export function preserveLiveAssistantTailOnLoad(loadedState, liveState) {
+  if (!loadedState) return loadedState;
+  const liveItems = Array.isArray(liveState?.items) ? liveState.items : [];
+  if (liveItems.length === 0) return loadedState;
+  const liveSeq = Number(liveState?.lastSeq) || 0;
+  const loadedSeq = Number(loadedState?.lastSeq) || 0;
+  if (liveSeq <= loadedSeq) return loadedState; // 快照不比实时旧 → 用快照
+  const liveTail = lastAssistantText(liveState);
+  const loadedTail = lastAssistantText(loadedState);
+  if (!liveTail || liveTail.length <= loadedTail.length) return loadedState;
+
+  const items = loadedState.items.slice();
+  let idx = -1;
+  for (let i = items.length - 1; i >= 0; i -= 1) {
+    if (items[i]?.kind === 'msg' && items[i].role === 'assistant') { idx = i; break; }
+    if (items[i]?.kind === 'msg' || items[i]?.kind === 'tool') break;
+  }
+  if (idx >= 0) {
+    items[idx] = { ...items[idx], content: liveTail };
+  } else {
+    const liveDraft = liveItems[liveItems.length - 1];
+    const nextId = Number(loadedState.nextItemId) || 1;
+    items.push({
+      kind: 'msg',
+      id: nextId,
+      role: 'assistant',
+      content: liveTail,
+      contentParts: Array.isArray(liveDraft?.contentParts) ? liveDraft.contentParts : [],
+      ts: liveDraft?.ts || Date.now(),
+      streaming: liveState?.streamingId != null,
+      streamDraft: true,
+    });
+    return {
+      ...loadedState,
+      items,
+      nextItemId: nextId + 1,
+      lastSeq: Math.max(loadedSeq, liveSeq),
+    };
+  }
+  return {
+    ...loadedState,
+    items,
+    lastSeq: Math.max(loadedSeq, liveSeq),
+  };
+}
+
 export function applyTranscriptReplayEvents(state, events = []) {
   let next = cloneState(state || createTranscriptState());
   const effects = [];
@@ -1107,7 +1190,12 @@ export function useSessionTranscript(sessionRef, options = {}) {
   useEffect(() => { stateRef.current = state; }, [state]);
 
   const applyEvent = useCallback((msg, { emitEffects = true } = {}) => {
-    const reduced = reduceTranscriptEvent(stateRef.current, msg);
+    const prevState = stateRef.current;
+    const reduced = reduceTranscriptEvent(prevState, msg);
+    // transcript_replace 是重试/compact 的有意重置,合法变短,不报警。
+    if (msg?.type !== 'transcript_replace') {
+      detectAssistantTailRegression(`event:${msg?.type || '?'}`, prevState, reduced.state);
+    }
     stateRef.current = reduced.state;
     setState(reduced.state);
     if (emitEffects) dispatchEffects(reduced.effects, sid, optionsRef.current);
@@ -1146,11 +1234,16 @@ export function useSessionTranscript(sessionRef, options = {}) {
     api.getMessages(sid, 0).then((data) => {
       if (off) return;
       const loaded = loadTranscriptHistory(stateRef.current, data || {});
+      // 防回退:实时 WS 可能在 getMessages(0) 解析期间已累积了更完整的当前
+      // 回合内容,而这份 REST 快照更旧(messages 尚未含进行中的 assistant)。
+      // 直接覆盖会把界面截断,这里保留更完整的实时尾巴。
+      const guarded = preserveLiveAssistantTailOnLoad(loaded.state, stateRef.current);
       const nextState = {
-        ...loaded.state,
+        ...guarded,
         isLive,
         loadState: 'loaded',
       };
+      detectAssistantTailRegression('load', stateRef.current, nextState);
       stateRef.current = nextState;
       setState(nextState);
       dispatchEffects(loaded.effects, sid, optionsRef.current);
@@ -1166,6 +1259,7 @@ export function useSessionTranscript(sessionRef, options = {}) {
           if (replayEvents.length > 0) {
             const replayed = applyTranscriptReplayEvents(stateRef.current, replayEvents);
             const replayState = replayed.state;
+            detectAssistantTailRegression('catchup', stateRef.current, replayState);
             stateRef.current = replayState;
             setState(replayState);
             dispatchEffects(replayed.effects, sid, optionsRef.current);
@@ -1178,6 +1272,7 @@ export function useSessionTranscript(sessionRef, options = {}) {
               isLive,
               loadState: 'loaded',
             };
+            detectAssistantTailRegression('refresh', stateRef.current, refreshedState);
             stateRef.current = refreshedState;
             setState(refreshedState);
             dispatchEffects(refreshed.effects, sid, optionsRef.current);

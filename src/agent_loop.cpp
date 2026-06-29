@@ -1596,6 +1596,29 @@ bool AgentLoop::execute_tool_calls(
     if (session_manager_) session_manager_->on_message(tc_msg);
     dispatch_assistant_completed_hook(tc_msg, provider_snapshot);
 
+    // Web: 工具调用回合的 assistant 文本此前只通过 token 流下发,没有一条权威的
+    // Message 帧。文本-only 回合靠末尾那条 assistant Message 事件整体替换流式草稿
+    // 来兜底(见 run_agent 的 text-only 分支),工具回合缺这一步 —— 一旦流式 token
+    // 在传输/竞态中丢了一段,前端草稿就停在半截,且因为没有权威帧,生成结束也无法
+    // 自愈(磁盘已落全量,所以切会话重载才恢复)。这里补发一条 assistant 文本的
+    // Message 事件让前端用完整文本整体替换草稿。仅走 web 的 events_,不经
+    // dispatch_message 的 on_message 回调,避免改变 TUI 的流式渲染行为。
+    if (!accumulated.content.empty()) {
+        ChatMessage id_basis;
+        id_basis.role = "assistant";
+        id_basis.content = accumulated.content;
+        nlohmann::json assistant_event = {
+            {"role", "assistant"},
+            {"content", accumulated.content},
+            {"is_tool", false},
+            {"id", web::compute_message_id(id_basis)},
+        };
+        if (accumulated.content_parts.is_array() && !accumulated.content_parts.empty()) {
+            assistant_event["content_parts"] = accumulated.content_parts;
+        }
+        events_.emit(SessionEventKind::Message, std::move(assistant_event));
+    }
+
     // Partition tool calls into read-only (parallelizable) and write (serial) groups
     LOG_INFO("Processing " + std::to_string(accumulated.tool_calls.size()) + " tool calls");
 

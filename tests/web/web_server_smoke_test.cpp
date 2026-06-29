@@ -16,6 +16,7 @@
 
 #include <gtest/gtest.h>
 #include <httplib.h>
+#include <sqlite3.h>
 
 #include "auth/github_auth.hpp"
 #include "config/config.hpp"
@@ -435,6 +436,53 @@ TEST(WebServerHttp, HealthEndpointReturnsBasicMetadata) {
     ASSERT_TRUE(j.contains("features"));
     ASSERT_TRUE(j["features"].contains("completed_turn_self_heal"));
     EXPECT_EQ(j["features"]["completed_turn_self_heal"]["enabled"], true);
+}
+
+void create_opencode_import_db(const std::filesystem::path& db_path,
+                               const std::string& cwd) {
+    std::filesystem::create_directories(db_path.parent_path());
+    sqlite3* db = nullptr;
+    ASSERT_EQ(sqlite3_open_v2(acecode::path_to_utf8(db_path).c_str(),
+                              &db,
+                              SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+                              nullptr), SQLITE_OK);
+    auto exec = [&](const char* sql) {
+        char* raw_error = nullptr;
+        int rc = sqlite3_exec(db, sql, nullptr, nullptr, &raw_error);
+        std::string error = raw_error ? raw_error : "";
+        sqlite3_free(raw_error);
+        ASSERT_EQ(rc, SQLITE_OK) << error;
+    };
+    exec(
+        "CREATE TABLE project (id TEXT PRIMARY KEY, worktree TEXT);"
+        "CREATE TABLE session ("
+        "id TEXT PRIMARY KEY, project_id TEXT, directory TEXT, title TEXT,"
+        "time_created INTEGER, time_updated INTEGER, model TEXT"
+        ");"
+        "CREATE TABLE message ("
+        "id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT"
+        ");"
+        "CREATE TABLE part ("
+        "id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT"
+        ");"
+        "INSERT INTO project(id, worktree) VALUES('proj', '');");
+
+    sqlite3_stmt* stmt = nullptr;
+    ASSERT_EQ(sqlite3_prepare_v2(db,
+        "INSERT INTO session(id, project_id, directory, title, time_created, time_updated, model) "
+        "VALUES('ses-route', 'proj', ?, 'Route import', 1700000000000, 1700000010000, "
+        "'{\"providerID\":\"opencode\",\"modelID\":\"big-pickle\"}');",
+        -1, &stmt, nullptr), SQLITE_OK);
+    ASSERT_EQ(sqlite3_bind_text(stmt, 1, cwd.c_str(), -1, SQLITE_TRANSIENT), SQLITE_OK);
+    ASSERT_EQ(sqlite3_step(stmt), SQLITE_DONE);
+    sqlite3_finalize(stmt);
+    exec(
+        "INSERT INTO message(id, session_id, time_created, time_updated, data) "
+        "VALUES('msg-route', 'ses-route', 1700000000000, 1700000000000, '{\"role\":\"user\"}');"
+        "INSERT INTO part(id, message_id, session_id, time_created, time_updated, data) "
+        "VALUES('prt-route', 'msg-route', 'ses-route', 1700000000000, 1700000000000, "
+        "'{\"type\":\"text\",\"text\":\"hello from opencode\"}');");
+    sqlite3_close(db);
 }
 
 TEST(WebServerHttp, HealthReportsCompletedTurnSelfHealFeatureWhenDisabled) {
@@ -1031,6 +1079,59 @@ TEST(WebServerHttp, WorkspaceScopedSessionLifecycle) {
     EXPECT_EQ(sessions[0]["id"], created["session_id"]);
     EXPECT_EQ(sessions[0]["workspace_hash"], other_hash);
     EXPECT_EQ(sessions[0]["cwd"], other_cwd);
+}
+
+TEST(WebServerHttp, OpencodeImportRoutesPreviewStartPollAndRejectUnknownWorkspace) {
+    auto db_root = std::filesystem::temp_directory_path() /
+                   ("acecode_opencode_route_" + std::to_string(std::random_device{}()));
+    RemoveTreeOnExit cleanup{db_root};
+    const auto db_path = db_root / "opencode.db";
+
+    WebServerFixture fx;
+    create_opencode_import_db(db_path, fx.cwd);
+    ScopedEnvOverride opencode_db("OPENCODE_DB", acecode::path_to_utf8(db_path));
+
+    auto workspaces_response = cpr::Get(cpr::Url{fx.url("/api/workspaces")});
+    ASSERT_EQ(workspaces_response.status_code, 200) << workspaces_response.text;
+    auto workspaces = json::parse(workspaces_response.text);
+    ASSERT_FALSE(workspaces.empty());
+    const std::string hash = workspaces[0]["hash"].get<std::string>();
+    const std::string encoded_hash = url_encode_component(hash);
+
+    auto preview = cpr::Get(cpr::Url{fx.url("/api/workspaces/" + encoded_hash + "/opencode-import")});
+    ASSERT_EQ(preview.status_code, 200) << preview.text;
+    auto preview_json = json::parse(preview.text);
+    EXPECT_EQ(preview_json["available"], true);
+    EXPECT_EQ(preview_json["count"], 1);
+
+    auto unknown_preview = cpr::Get(cpr::Url{fx.url("/api/workspaces/missing/opencode-import")});
+    EXPECT_EQ(unknown_preview.status_code, 404);
+
+    auto started = cpr::Post(cpr::Url{fx.url("/api/workspaces/" + encoded_hash + "/opencode-import")},
+                             cpr::Header{{"Content-Type", "application/json"}},
+                             cpr::Body{R"({})"});
+    ASSERT_EQ(started.status_code, 202) << started.text;
+    const std::string job_id = json::parse(started.text)["job_id"].get<std::string>();
+    ASSERT_FALSE(job_id.empty());
+
+    json status;
+    for (int i = 0; i < 20; ++i) {
+        std::this_thread::sleep_for(50ms);
+        auto poll = cpr::Get(cpr::Url{fx.url("/api/workspaces/" + encoded_hash +
+                                             "/opencode-import/" + url_encode_component(job_id))});
+        ASSERT_EQ(poll.status_code, 200) << poll.text;
+        status = json::parse(poll.text);
+        if (status["state"] == "complete" || status["state"] == "failed") break;
+    }
+    EXPECT_EQ(status["state"], "complete") << status.dump();
+    EXPECT_EQ(status["imported"], 1);
+    EXPECT_EQ(status["total"], 1);
+
+    auto sessions_response = cpr::Get(cpr::Url{fx.url("/api/workspaces/" + encoded_hash + "/sessions")});
+    ASSERT_EQ(sessions_response.status_code, 200) << sessions_response.text;
+    auto session_list = json::parse(sessions_response.text);
+    ASSERT_FALSE(session_list.empty());
+    EXPECT_EQ(session_list[0]["title"], "Route import");
 }
 
 // 场景:workspace 下有 .agent/skills 时,GET /api/commands?workspace=<hash>

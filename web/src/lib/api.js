@@ -143,6 +143,12 @@ export function createApi(base = null) {
     listWorkspaceSessions:  (hash, opts={}) => request('GET',  sessionsPath(`/api/workspaces/${encodeURIComponent(hash)}/sessions`, opts), undefined, base),
     createWorkspaceSession: (hash, opts={}) => request('POST', `/api/workspaces/${encodeURIComponent(hash)}/sessions`, opts, base),
     resumeWorkspaceSession: (hash, id)    => request('POST', `/api/workspaces/${encodeURIComponent(hash)}/sessions/${encodeURIComponent(id)}/resume`, {}, base),
+    getOpencodeImportPreview: (hash) =>
+      request('GET', `/api/workspaces/${encodeURIComponent(hash)}/opencode-import`, undefined, base),
+    startOpencodeImport: (hash) =>
+      request('POST', `/api/workspaces/${encodeURIComponent(hash)}/opencode-import`, {}, base),
+    getOpencodeImportJob: (hash, jobId) =>
+      request('GET', `/api/workspaces/${encodeURIComponent(hash)}/opencode-import/${encodeURIComponent(jobId)}`, undefined, base),
     archiveSession:   (id)           => request('PUT',    `/api/sessions/${encodeURIComponent(id)}/archive`, {}, base),
     unarchiveSession: (id)           => request('DELETE', `/api/sessions/${encodeURIComponent(id)}/archive`, undefined, base),
     archiveWorkspaceSession: (hash, id) =>

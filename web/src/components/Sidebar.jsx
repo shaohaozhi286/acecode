@@ -52,6 +52,11 @@ import {
   sidebarSessionProjection,
   upsertSidebarSession,
 } from '../lib/sidebarSessions.js';
+import {
+  normalizeOpencodeImportPreview,
+  opencodeImportConfirmationText,
+  opencodeImportProgress,
+} from '../lib/opencodeImport.js';
 import { toast } from './Toast.jsx';
 import { VsIcon } from './Icon.jsx';
 
@@ -498,6 +503,77 @@ function SessionRow({
   );
 }
 
+function OpencodeImportDialog({ dialog, onCancel, onConfirm, onClose }) {
+  if (!dialog) return null;
+  const phase = dialog.phase || 'confirm';
+  const status = dialog.status || {};
+  const progress = opencodeImportProgress({
+    total: status.total ?? dialog.count,
+    imported: status.imported,
+    failed: status.failed,
+    skipped: status.skipped,
+  });
+  const running = phase === 'running';
+  const done = phase === 'complete';
+  const errored = phase === 'error';
+
+  return (
+    <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-[rgba(0,0,0,0.2)]">
+      <div className="w-[min(360px,calc(100vw-32px))] rounded-lg border border-border bg-surface shadow-xl px-5 py-4">
+        <div className="text-[14px] font-medium text-fg">
+          {opencodeImportConfirmationText(dialog.count)}
+        </div>
+        {(running || done || errored) && (
+          <div className="mt-4">
+            <div className="h-2 rounded-full bg-surface-hi overflow-hidden">
+              <div
+                className={clsx('h-full transition-all', errored ? 'bg-danger' : 'bg-accent')}
+                style={{ width: `${progress.percent}%` }}
+              />
+            </div>
+            <div className="mt-2 flex items-center justify-between text-[12px] text-fg-mute">
+              <span>{progress.imported}/{progress.total}</span>
+              <span>{errored ? (dialog.error || status.error || '导入失败') : `${progress.percent}%`}</span>
+            </div>
+            {status.current_title && running && (
+              <div className="mt-2 text-[12px] text-fg-mute truncate">{status.current_title}</div>
+            )}
+          </div>
+        )}
+        <div className="mt-5 flex items-center justify-end gap-2">
+          {phase === 'confirm' && (
+            <>
+              <button
+                type="button"
+                onClick={onCancel}
+                className="px-3 py-1.5 rounded-md text-[12px] text-fg-mute hover:text-fg hover:bg-surface-hi"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={onConfirm}
+                className="px-3 py-1.5 rounded-md text-[12px] bg-accent text-white hover:opacity-90"
+              >
+                确认导入
+              </button>
+            </>
+          )}
+          {(done || errored) && (
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-3 py-1.5 rounded-md text-[12px] bg-accent text-white hover:opacity-90"
+            >
+              完成
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function WorkspaceGroup({
   ws,
   expanded,
@@ -511,12 +587,14 @@ function WorkspaceGroup({
   onRename,
   onActivate,
   onNewSession,
+  onImportOpencode,
   onRemove,
   onTogglePin,
   onArchive,
   onRenameSession,
   pendingQuestionSessionIds,
   sessionsLoading = false,
+  opencodeImportCount = 0,
 }) {
   const [editing, setEditing] = useState(false);
   const [draft,   setDraft]   = useState(ws.name);
@@ -549,6 +627,10 @@ function WorkspaceGroup({
           detail.handled = true;
           onNewSession?.(ws);
           break;
+        case DESKTOP_CONTEXT_ACTIONS.IMPORT_OPENCODE_SESSIONS:
+          detail.handled = true;
+          onImportOpencode?.(ws);
+          break;
         case DESKTOP_CONTEXT_ACTIONS.RENAME_WORKSPACE:
           detail.handled = true;
           setEditing(true);
@@ -563,7 +645,7 @@ function WorkspaceGroup({
     };
     window.addEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
     return () => window.removeEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
-  }, [expanded, onActivate, onNewSession, onRemove, onToggle, ws]);
+  }, [expanded, onActivate, onImportOpencode, onNewSession, onRemove, onToggle, ws]);
 
   const commit = async () => {
     setEditing(false);
@@ -588,6 +670,7 @@ function WorkspaceGroup({
         data-desktop-workspace-expanded={expanded ? 'true' : 'false'}
         data-desktop-workspace-rename="true"
         data-desktop-workspace-remove={onRemove ? 'true' : undefined}
+        data-desktop-workspace-opencode-import-count={opencodeImportCount > 0 ? String(opencodeImportCount) : undefined}
         className={clsx(
           'group flex items-center gap-2 mx-1.5 px-2.5 py-[6px] rounded-md text-[12px] cursor-pointer transition',
           ws.active ? 'bg-accent-bg text-fg' : 'text-fg hover:bg-surface-hi',
@@ -753,6 +836,10 @@ export function Sidebar({
   const suppressPinnedClickRef = useRef(false);
   const [pinnedDragState, setPinnedDragState] = useState(null);
   const [pinnedDragGhost, setPinnedDragGhost] = useState(null);
+  const [opencodeImportPreviews, setOpencodeImportPreviews] = useState(() => new Map());
+  const opencodeImportPreviewsRef = useRef(new Map());
+  const [opencodeImportDialog, setOpencodeImportDialog] = useState(null);
+  const opencodeImportPollRef = useRef(0);
   const revealTarget = useMemo(() => sidebarRevealTarget(activeRef), [activeRef]);
 
   const updateExpanded = useCallback((updater) => {
@@ -786,6 +873,37 @@ export function Sidebar({
       pinnedByWorkspaceRef.current = next;
       return next;
     });
+  }, []);
+
+  const setOpencodeImportPreview = useCallback((hash, preview) => {
+    if (!hash) return;
+    const normalized = normalizeOpencodeImportPreview(preview || {});
+    setOpencodeImportPreviews((prev) => {
+      const next = new Map(prev);
+      next.set(hash, normalized);
+      opencodeImportPreviewsRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const refreshOpencodeImportPreview = useCallback(async (ws) => {
+    if (!ws?.hash || ws.hash === '__local__') return null;
+    try {
+      const preview = normalizeOpencodeImportPreview(await api.getOpencodeImportPreview(ws.hash));
+      setOpencodeImportPreview(ws.hash, preview);
+      return preview;
+    } catch {
+      const preview = normalizeOpencodeImportPreview({ available: false, count: 0 });
+      setOpencodeImportPreview(ws.hash, preview);
+      return preview;
+    }
+  }, [setOpencodeImportPreview]);
+
+  useEffect(() => () => {
+    if (opencodeImportPollRef.current) {
+      window.clearTimeout(opencodeImportPollRef.current);
+      opencodeImportPollRef.current = 0;
+    }
   }, []);
 
   const setPinnedOrder = useCallback((updater) => {
@@ -1139,6 +1257,9 @@ export function Sidebar({
       if (revealWorkspaceHash && availableHashes.has(revealWorkspaceHash)) expandedHashes.add(revealWorkspaceHash);
       setActiveWorkspaceHash(chosen);
       setWorkspaces(withActive);
+      withActive
+        .filter((w) => w.hash && w.hash !== '__local__')
+        .forEach((w) => refreshOpencodeImportPreview(w).catch(() => {}));
       const earlyVisibleWorkspaceHashes = withActive
         .filter((w) => w.active || w.hash === '__local__' || expandedHashes.has(w.hash) || w.hash === revealWorkspaceHash)
         .map((w) => w.hash)
@@ -1230,7 +1351,7 @@ export function Sidebar({
       pendingRefreshHashRef.current = '';
       if (pendingHash) setTimeout(() => refresh(pendingHash).catch(() => {}), 0);
     }
-  }, [activeWorkspaceHash, revealTarget, setPinnedMap, setPinnedOrder, setSessionWorkspaceLoading, setSessionWorkspacesLoaded, syncRetainedSessionIds, updateExpanded]);
+  }, [activeWorkspaceHash, refreshOpencodeImportPreview, revealTarget, setPinnedMap, setPinnedOrder, setSessionWorkspaceLoading, setSessionWorkspacesLoaded, syncRetainedSessionIds, updateExpanded]);
 
   const archiveSession = useCallback(async (session) => {
     const id = session?.id || session?.sessionId || session?.session_id || '';
@@ -1513,6 +1634,95 @@ export function Sidebar({
     } catch (e) { toast({ kind: 'err', text: '切换异常:' + (e.message || '') }); }
   };
 
+  const openOpencodeImportDialog = useCallback(async (ws) => {
+    if (!ws?.hash) return;
+    let preview = opencodeImportPreviewsRef.current.get(ws.hash);
+    if (!preview) {
+      preview = await refreshOpencodeImportPreview(ws);
+    }
+    const count = Number(preview?.count || 0);
+    if (count <= 0) {
+      toast({ kind: 'info', text: '没有可导入的 opencode 会话' });
+      return;
+    }
+    setOpencodeImportDialog({
+      workspace: ws,
+      count,
+      phase: 'confirm',
+      status: { total: count, imported: 0, failed: 0, skipped: 0 },
+      error: '',
+    });
+  }, [refreshOpencodeImportPreview]);
+
+  const pollOpencodeImportJob = useCallback((ws, jobId) => {
+    if (!ws?.hash || !jobId) return;
+    if (opencodeImportPollRef.current) {
+      window.clearTimeout(opencodeImportPollRef.current);
+      opencodeImportPollRef.current = 0;
+    }
+
+    const tick = async () => {
+      try {
+        const status = await api.getOpencodeImportJob(ws.hash, jobId);
+        const state = status?.state || 'running';
+        setOpencodeImportDialog((prev) => prev
+          ? {
+              ...prev,
+              phase: state === 'complete' ? 'complete' : (state === 'failed' ? 'error' : 'running'),
+              status,
+              error: status?.error || '',
+            }
+          : prev);
+        if (state === 'pending' || state === 'running') {
+          opencodeImportPollRef.current = window.setTimeout(tick, 400);
+          return;
+        }
+        if (state === 'complete') {
+          toast({ kind: 'ok', text: 'opencode 会话导入完成' });
+        } else {
+          toast({ kind: 'err', text: 'opencode 会话导入失败:' + (status?.error || '') });
+        }
+        await refresh(ws.hash);
+        await refreshOpencodeImportPreview(ws);
+      } catch (e) {
+        setOpencodeImportDialog((prev) => prev
+          ? { ...prev, phase: 'error', error: e.message || '导入失败' }
+          : prev);
+      }
+    };
+
+    tick();
+  }, [refresh, refreshOpencodeImportPreview]);
+
+  const confirmOpencodeImport = useCallback(async () => {
+    const ws = opencodeImportDialog?.workspace;
+    if (!ws?.hash) return;
+    if (opencodeImportPollRef.current) {
+      window.clearTimeout(opencodeImportPollRef.current);
+      opencodeImportPollRef.current = 0;
+    }
+    setOpencodeImportDialog((prev) => prev ? { ...prev, phase: 'running', error: '' } : prev);
+    try {
+      const status = await api.startOpencodeImport(ws.hash);
+      const jobId = status?.job_id;
+      if (!jobId) throw new Error('missing import job id');
+      setOpencodeImportDialog((prev) => prev ? { ...prev, status: status || prev.status } : prev);
+      pollOpencodeImportJob(ws, jobId);
+    } catch (e) {
+      setOpencodeImportDialog((prev) => prev
+        ? { ...prev, phase: 'error', error: e.message || '启动导入失败' }
+        : prev);
+    }
+  }, [opencodeImportDialog, pollOpencodeImportJob]);
+
+  const closeOpencodeImportDialog = useCallback(() => {
+    if (opencodeImportPollRef.current) {
+      window.clearTimeout(opencodeImportPollRef.current);
+      opencodeImportPollRef.current = 0;
+    }
+    setOpencodeImportDialog(null);
+  }, []);
+
   const selectSession = async (ws, session) => {
     if (!session?.id) return;
     const noWorkspace = isNoWorkspaceSession(session) || !!ws?.noWorkspace;
@@ -1737,14 +1947,15 @@ export function Sidebar({
   };
 
   return (
-    <aside
-      className={[
-        'ace-sidebar bg-surface-alt border-r border-border flex flex-col font-sans shrink-0 overflow-hidden',
-        'transition-[width,min-width] duration-250',
-        collapsed ? 'w-0 min-w-0' : '',
-      ].join(' ')}
-      style={collapsed ? undefined : { width, minWidth: width }}
-    >
+    <>
+      <aside
+        className={[
+          'ace-sidebar bg-surface-alt border-r border-border flex flex-col font-sans shrink-0 overflow-hidden',
+          'transition-[width,min-width] duration-250',
+          collapsed ? 'w-0 min-w-0' : '',
+        ].join(' ')}
+        style={collapsed ? undefined : { width, minWidth: width }}
+      >
       <div className="ace-sidebar-content flex-1 flex flex-col min-h-0">
         <div className="ace-sidebar-main flex-1 flex flex-col min-h-0">
           <div className="ace-sidebar-heading flex items-center justify-between px-2 pt-2.5 pb-1 text-[10px] font-semibold uppercase tracking-wider text-fg-mute">
@@ -1820,12 +2031,14 @@ export function Sidebar({
                   onRename={onRename}
                   onActivate={onActivate}
                   onNewSession={createSessionInWorkspace}
+                  onImportOpencode={openOpencodeImportDialog}
                   onRemove={hasDesktopRemoveWorkspace() ? removeWorkspace : undefined}
                   onTogglePin={togglePinnedSession}
                   onArchive={archiveSession}
                   onRenameSession={renameSession}
                   pendingQuestionSessionIds={pendingQuestionSessionIds}
                   sessionsLoading={sessionLoadingWorkspaces.has(ws.hash) || !sessionLoadedWorkspaces.has(ws.hash)}
+                  opencodeImportCount={opencodeImportPreviews.get(ws.hash)?.count || 0}
                 />
               );
             })}
@@ -1851,6 +2064,13 @@ export function Sidebar({
           onOpenSettingsSection={onOpenSettingsSection}
         />
       </div>
-    </aside>
+      </aside>
+      <OpencodeImportDialog
+        dialog={opencodeImportDialog}
+        onCancel={closeOpencodeImportDialog}
+        onConfirm={confirmOpencodeImport}
+        onClose={closeOpencodeImportDialog}
+      />
+    </>
   );
 }

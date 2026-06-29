@@ -262,6 +262,75 @@ TEST(AgentLoopToolLifecycleEvents, ReadOnlySameNameParallelToolsEmitKeyedStartAn
     fs::remove_all(cwd);
 }
 
+// 回归: 工具调用回合的 assistant 文本必须作为 Message 事件下发,给前端一个
+// 权威帧整体替换流式草稿。
+//
+// bug 表现(修复前): execute_tool_calls 只把带 tool_calls 的 assistant 消息
+// push 进 messages_ + 落库,却从不 emit Message 事件 —— 与文本-only 回合
+// (run_agent 末尾 dispatch_message)不同。于是工具回合的 assistant 文本只靠
+// token 流下发,没有权威帧兜底:流式 token 一旦在传输/竞态中丢一段,前端草稿
+// 就停在半截,且因为没有 Message 帧来整体替换,生成结束也无法自愈(磁盘已落
+// 全量,所以切会话重载才恢复)。文本-only 回合靠末尾 Message 帧修复,所以这个
+// 缺陷只在工具回合暴露,表现为 desktop "消息显示不全"。
+TEST(AgentLoopToolLifecycleEvents, ToolCallTurnEmitsAssistantTextMessageEvent) {
+    auto cwd = make_temp_dir("acecode_toolturn_assistant_msg");
+    std::atomic<int> calls{0};
+    ToolLifecycleHarness h(cwd.string());
+    h.tools().register_tool(make_probe_tool("ro_probe", true, &calls));
+
+    const std::string analysis = u8"我发现了根本差异：A 与 B 不同";
+    ScriptedResponse tools_turn;
+    tools_turn.text = analysis;                                   // 先输出分析文本
+    tools_turn.tool_calls.push_back({"call-x", "ro_probe", "{}"}); // 再调工具
+    h.provider().push_response(std::move(tools_turn));
+    h.provider().push_text(u8"最终答复");                          // 下一轮文本-only 收尾
+
+    ASSERT_TRUE(h.submit_and_wait());
+    EXPECT_EQ(calls.load(), 1);
+
+    auto messages = h.events_of(SessionEventKind::Message);
+    bool saw_analysis = false;
+    for (const auto& e : messages) {
+        if (e.payload.value("role", std::string{}) == "assistant"
+            && e.payload.value("content", std::string{}) == analysis) {
+            saw_analysis = true;
+            EXPECT_FALSE(e.payload.value("is_tool", true));
+            EXPECT_FALSE(e.payload.value("id", std::string{}).empty())
+                << "Message 事件须带稳定 id 供前端去重/替换";
+        }
+    }
+    EXPECT_TRUE(saw_analysis)
+        << "工具调用回合应补发 assistant 文本的 Message 事件作为权威帧";
+
+    fs::remove_all(cwd);
+}
+
+// 场景: 工具调用回合若 assistant 没有文本(直接调工具),不应补发空 Message
+// 事件(避免前端多出一个空 assistant 气泡)。
+TEST(AgentLoopToolLifecycleEvents, ToolCallTurnWithoutTextEmitsNoAssistantMessageEvent) {
+    auto cwd = make_temp_dir("acecode_toolturn_no_text");
+    std::atomic<int> calls{0};
+    ToolLifecycleHarness h(cwd.string());
+    h.tools().register_tool(make_probe_tool("ro_probe", true, &calls));
+
+    ScriptedResponse tools_turn;                                   // text 为空
+    tools_turn.tool_calls.push_back({"call-y", "ro_probe", "{}"});
+    h.provider().push_response(std::move(tools_turn));
+    h.provider().push_text(u8"收尾");
+
+    ASSERT_TRUE(h.submit_and_wait());
+
+    auto messages = h.events_of(SessionEventKind::Message);
+    int assistant_msgs = 0;
+    for (const auto& e : messages) {
+        if (e.payload.value("role", std::string{}) == "assistant") assistant_msgs += 1;
+    }
+    // 只应有收尾那一条文本-only 回合的 assistant Message,工具回合不补发空帧。
+    EXPECT_EQ(assistant_msgs, 1);
+
+    fs::remove_all(cwd);
+}
+
 TEST(AgentLoopToolLifecycleEvents, ValidationFailureStillEmitsTerminalToolEnd) {
     auto cwd = make_temp_dir("acecode_lifecycle_validation");
     std::atomic<int> calls{0};

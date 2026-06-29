@@ -12,6 +12,7 @@ export const DESKTOP_CONTEXT_ACTIONS = Object.freeze({
   EXPAND_WORKSPACE: 'expand_workspace',
   COLLAPSE_WORKSPACE: 'collapse_workspace',
   NEW_WORKSPACE_SESSION: 'new_workspace_session',
+  IMPORT_OPENCODE_SESSIONS: 'import_opencode_sessions',
   RENAME_WORKSPACE: 'rename_workspace',
   COPY_WORKSPACE_PATH: 'copy_workspace_path',
   REMOVE_WORKSPACE: 'remove_workspace',
@@ -87,6 +88,11 @@ function getAttr(el, name, datasetName = '') {
 
 function boolAttr(el, name, datasetName = '') {
   return getAttr(el, name, datasetName) === 'true';
+}
+
+function numberAttr(el, name, datasetName = '') {
+  const n = Number(getAttr(el, name, datasetName));
+  return Number.isFinite(n) ? n : 0;
 }
 
 function closest(target, selector) {
@@ -184,6 +190,9 @@ export function buildDesktopContextMenuItems({
       addAction(items, DESKTOP_CONTEXT_ACTIONS.ACTIVATE_WORKSPACE, workspaceTarget, { enabled: !workspaceTarget.active });
       addAction(items, workspaceTarget.expanded ? DESKTOP_CONTEXT_ACTIONS.COLLAPSE_WORKSPACE : DESKTOP_CONTEXT_ACTIONS.EXPAND_WORKSPACE, workspaceTarget);
       addAction(items, DESKTOP_CONTEXT_ACTIONS.NEW_WORKSPACE_SESSION, workspaceTarget);
+      if (workspaceTarget.opencodeImportCount > 0) {
+        addAction(items, DESKTOP_CONTEXT_ACTIONS.IMPORT_OPENCODE_SESSIONS, workspaceTarget);
+      }
       addAction(items, DESKTOP_CONTEXT_ACTIONS.RENAME_WORKSPACE, workspaceTarget, { enabled: workspaceTarget.canRename !== false });
       addAction(items, DESKTOP_CONTEXT_ACTIONS.COPY_WORKSPACE_PATH, workspaceTarget, { enabled: !!workspaceTarget.path });
       if (workspaceTarget.path) {
@@ -339,6 +348,7 @@ export function workspaceTargetFromElement(target) {
     expanded: boolAttr(el, 'data-desktop-workspace-expanded', 'desktopWorkspaceExpanded'),
     canRename: getAttr(el, 'data-desktop-workspace-rename', 'desktopWorkspaceRename') !== 'false',
     canRemove: boolAttr(el, 'data-desktop-workspace-remove', 'desktopWorkspaceRemove'),
+    opencodeImportCount: numberAttr(el, 'data-desktop-workspace-opencode-import-count', 'desktopWorkspaceOpencodeImportCount'),
   };
 }
 

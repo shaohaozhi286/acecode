@@ -18,6 +18,7 @@
 #include "../session/ask_user_question_prompter.hpp"
 #include "../session/attachment_store.hpp"
 #include "../session/local_session_client.hpp"
+#include "../session/opencode_import.hpp"
 #include "../session/session_attention.hpp"
 #include "../session/session_client.hpp"
 #include "../session/session_registry.hpp"
@@ -71,6 +72,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -189,6 +191,9 @@ struct WebServer::Impl {
     mutable std::unordered_set<std::string> loaded_attention_workspaces;
     mutable std::unordered_map<std::string, std::string> attention_workspace_cwds;
     mutable std::unordered_map<std::string, std::unordered_map<std::string, SessionAttentionRecord>> attention_by_workspace;
+
+    mutable std::mutex opencode_import_mu;
+    mutable std::unordered_map<std::string, OpencodeImportJobStatus> opencode_import_jobs;
 
     explicit Impl(WebServerDeps d) : deps(std::move(d)) {}
 

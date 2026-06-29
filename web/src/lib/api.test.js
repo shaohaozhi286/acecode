@@ -168,6 +168,36 @@ await run('executeCommand posts to builtin command endpoint', async () => {
   }
 });
 
+await run('opencode import API uses workspace-scoped endpoints', async () => {
+  const previousFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    calls.push({ url, opts });
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ ok: true, job_id: 'job/1' }),
+    };
+  };
+  try {
+    const client = createApi({ origin: 'http://127.0.0.1:4567', token: 'tok' });
+    await client.getOpencodeImportPreview('w/a');
+    await client.startOpencodeImport('w/a');
+    await client.getOpencodeImportJob('w/a', 'job/1');
+
+    assert.equal(calls[0].url, 'http://127.0.0.1:4567/api/workspaces/w%2Fa/opencode-import');
+    assert.equal(calls[0].opts.method, 'GET');
+    assert.equal(calls[1].url, 'http://127.0.0.1:4567/api/workspaces/w%2Fa/opencode-import');
+    assert.equal(calls[1].opts.method, 'POST');
+    assert.deepEqual(JSON.parse(calls[1].opts.body), {});
+    assert.equal(calls[2].url, 'http://127.0.0.1:4567/api/workspaces/w%2Fa/opencode-import/job%2F1');
+    assert.equal(calls[2].opts.method, 'GET');
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
 await run('probeModels posts draft to model probe endpoint', async () => {
   const previousFetch = globalThis.fetch;
   const calls = [];
