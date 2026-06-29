@@ -4,7 +4,7 @@
 // + 22px StatusBar。所有面板/弹框作为 overlay 渲染在主区之上。
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api, ApiError } from './lib/api.js';
+import { api, ApiError, createApi } from './lib/api.js';
 import { setToken } from './lib/auth.js';
 import { connection } from './lib/connection.js';
 import { createNewSessionForActiveWorkspace } from './lib/newSession.js';
@@ -48,6 +48,15 @@ import {
   validateLayoutWidths,
 } from './lib/singleLayout.js';
 import { initInactiveSelection } from './lib/inactiveSelection.js';
+import {
+  desktopOpenSessionUrl,
+  openSessionTargetFromSearch,
+  sessionJumpId,
+  sessionJumpNoWorkspace,
+  sessionJumpWorkspaceHash,
+  sessionRefFromJumpTarget,
+  stripOpenSessionParams,
+} from './lib/sessionJump.js';
 
 const SINGLE_LAYOUT_STORAGE_KEY = 'acecode.singleLayoutWidths.v1';
 
@@ -58,6 +67,12 @@ function validateConsoleDock(value) {
   return !!value && typeof value === 'object'
     && typeof value.open === 'boolean'
     && Number.isFinite(value.height);
+}
+
+function parseDesktopBridgeResult(raw) {
+  if (!raw) return null;
+  if (typeof raw === 'string') return JSON.parse(raw);
+  return raw;
 }
 
 function homeRefFromWorkspace(workspace, fallbackRef, health) {
@@ -159,6 +174,67 @@ export function App() {
     setActiveRef(result.activeRef);
   }, []);
 
+  const resumeAndOpenSession = useCallback(async (target, options = {}) => {
+    const sessionId = sessionJumpId(target);
+    if (!sessionId) return false;
+    const noWorkspace = sessionJumpNoWorkspace(target);
+    const targetHash = sessionJumpWorkspaceHash(target);
+    const shouldResume = options.forceResume || target?.active !== true;
+    const commitRef = options.replace ? replaceActiveRef : navigateToRef;
+    const resumeWith = async (client, workspaceHash) => {
+      if (!shouldResume) return {};
+      if (noWorkspace || !workspaceHash) return client.resumeSession(sessionId);
+      return client.resumeWorkspaceSession(workspaceHash, sessionId);
+    };
+
+    if (!noWorkspace
+        && targetHash
+        && options.allowDesktopActivate !== false
+        && targetHash !== activeRefRef.current?.workspaceHash
+        && typeof window !== 'undefined'
+        && typeof window.aceDesktop_activateWorkspace === 'function') {
+      try {
+        const r = parseDesktopBridgeResult(await window.aceDesktop_activateWorkspace(targetHash));
+        if (r && !r.error && r.port && r.token) {
+          let resumed = {};
+          try {
+            resumed = await resumeWith(createApi({ port: r.port, token: r.token }), targetHash);
+          } catch (e) {
+            toast({ kind: 'err', text: '恢复失败:' + (e.message || '') });
+            return false;
+          }
+          const url = desktopOpenSessionUrl({
+            port: r.port,
+            token: r.token,
+            sessionId,
+            workspaceHash: targetHash,
+            protocol: window.location?.protocol || 'http:',
+          });
+          if (url) {
+            window.location.href = url;
+            return true;
+          }
+          commitRef(sessionRefFromJumpTarget(target, resumed, { workspaceHash: targetHash }));
+          return true;
+        }
+      } catch {
+        // Bridge 不可用或返回格式异常时，降级到当前 daemon 的 workspace-scoped resume。
+      }
+    }
+
+    try {
+      const resumed = await resumeWith(api, targetHash);
+      commitRef(sessionRefFromJumpTarget(target, resumed, {
+        workspaceHash: targetHash,
+        noWorkspace,
+      }));
+      return true;
+    } catch (e) {
+      toast({ kind: 'err', text: '恢复失败:' + (e.message || '') });
+      return false;
+    }
+  }, [navigateToRef, replaceActiveRef]);
+
   const openSettingsSection = useCallback((key = 'general') => {
     setSettingsNavKey(key || 'general');
     setShowSettings(true);
@@ -209,47 +285,42 @@ export function App() {
     };
   }, [authState]);
 
-  // 解析 URL 上的 ?open=<sessionId>(SearchPalette 跨 workspace 跳转后落地用)。
+  // 解析 URL 上的 ?open=<sessionId>&workspace=<hash>(跨 workspace 跳转后落地用)。
   // 解析后立即从 URL 抹掉,避免刷新二次触发。
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    const params = new URLSearchParams(window.location.search);
-    const openId = params.get('open');
-    if (!openId) return;
-    replaceActiveRef((prev) => ({ ...(prev || {}), sessionId: openId }));
-    params.delete('open');
-    const qs = params.toString();
+    const target = openSessionTargetFromSearch(window.location.search);
+    if (!target) return;
+    const qs = stripOpenSessionParams(window.location.search);
     const newUrl = window.location.pathname + (qs ? '?' + qs : '');
     window.history.replaceState(null, '', newUrl);
-  }, [replaceActiveRef]);
+    resumeAndOpenSession(target, { replace: true, allowDesktopActivate: false }).catch(() => {});
+  }, [resumeAndOpenSession]);
 
   // 桌面壳通知 click_handler 走 webview eval 调这两个 window 全局函数,见
   // openspec/changes/add-desktop-attention-notifications。
-  // 同 workspace:focusSessionFromBridge → setActiveRef
-  // 跨 workspace:activateAndOpenSession → 复用 SearchPalette 已有的整页 navigate 逻辑
+  // 同 workspace:focusSessionFromBridge → resume + setActiveRef
+  // 跨 workspace:activateAndOpenSession → 激活 workspace 后 resume + 整页 navigate
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    window.aceDesktop_focusSessionFromBridge = (sessionId) => {
+    window.aceDesktop_focusSessionFromBridge = function focusSessionFromBridge(sessionId, workspaceHash) {
       if (!sessionId) return;
-      navigateToRef((prev) => ({ ...(prev || {}), sessionId: String(sessionId) }));
+      const hasWorkspaceArg = workspaceHash !== undefined;
+      const targetHash = hasWorkspaceArg ? String(workspaceHash || '') : (activeRefRef.current?.workspaceHash || '');
+      resumeAndOpenSession({
+        sessionId: String(sessionId),
+        workspaceHash: targetHash,
+        noWorkspace: hasWorkspaceArg && !targetHash,
+      }, { allowDesktopActivate: false }).catch(() => {});
     };
     window.aceDesktop_activateAndOpenSession = async (workspaceHash, sessionId) => {
       if (!sessionId) return;
-      const targetHash = workspaceHash || '';
-      if (targetHash && typeof window.aceDesktop_activateWorkspace === 'function') {
-        try {
-          const raw = await window.aceDesktop_activateWorkspace(targetHash);
-          const r = typeof raw === 'string' ? JSON.parse(raw) : raw;
-          if (r && !r.error && r.port && r.token) {
-            const url = `http://127.0.0.1:${r.port}/?token=${encodeURIComponent(r.token)}&open=${encodeURIComponent(sessionId)}`;
-            window.location.href = url;
-            return;
-          }
-        } catch {
-          // 降级:直接在当前前端状态中打开
-        }
-      }
-      navigateToRef({ workspaceHash: targetHash, sessionId: String(sessionId) });
+      const targetHash = String(workspaceHash || '');
+      await resumeAndOpenSession({
+        sessionId: String(sessionId),
+        workspaceHash: targetHash,
+        noWorkspace: !targetHash,
+      });
     };
     return () => {
       try {
@@ -261,7 +332,7 @@ export function App() {
         window.aceDesktop_activateAndOpenSession = undefined;
       }
     };
-  }, [navigateToRef]);
+  }, [resumeAndOpenSession]);
 
   // 全局 Ctrl/Cmd+K 切换搜索面板。matchShortcut 处理大小写与修饰键。
   useGlobalShortcut(
@@ -296,46 +367,8 @@ export function App() {
   const handleSelectSession = useCallback(async (session) => {
     if (!session?.id) return;
     setSearchOpen(false);
-    const noWorkspace = !!(session.noWorkspace || session.no_workspace);
-    const targetHash = noWorkspace ? '' : (session.workspace_hash || '');
-    const sameWorkspace = noWorkspace || !targetHash || targetHash === activeRefRef.current?.workspaceHash;
-
-    if (!sameWorkspace
-        && typeof window !== 'undefined'
-        && typeof window.aceDesktop_activateWorkspace === 'function') {
-      try {
-        const raw = await window.aceDesktop_activateWorkspace(targetHash);
-        const r = typeof raw === 'string' ? JSON.parse(raw) : raw;
-        if (r && !r.error && r.port && r.token) {
-          const url = `http://127.0.0.1:${r.port}/?token=${encodeURIComponent(r.token)}&open=${encodeURIComponent(session.id)}`;
-          window.location.href = url;
-          return;
-        }
-      } catch {
-        // 降级:无 bridge 或 bridge 失败时按浏览器直访模式跳。
-      }
-    }
-
-    navigateToRef({
-      workspaceHash: targetHash,
-      noWorkspace,
-      contextId: 'default',
-      sessionId: session.id,
-      displayTitle: session.displayTitle || session.display_title,
-      cwd: noWorkspace ? '' : (session.cwd || ''),
-      title: session.title,
-      summary: session.summary,
-      provider: session.provider,
-      model: session.model,
-      model_name: session.model_name,
-      model_preset: session.model_preset,
-      context_window: session.context_window,
-      deleted: session.deleted || session.model_deleted || session.modelDeleted || false,
-      message_count: session.message_count,
-      created_at: session.created_at,
-      updated_at: session.updated_at,
-    });
-  }, [navigateToRef]);
+    await resumeAndOpenSession(session);
+  }, [resumeAndOpenSession]);
 
   useEffect(() => {
     const pushUnique = (setter, payload) => {

@@ -829,7 +829,7 @@ int main(int argc, char** argv) {
                                      workspace_hash == current_active);
         if (same_workspace) {
             js = "(function(){try{if(window.aceDesktop_focusSessionFromBridge){"
-                 "window.aceDesktop_focusSessionFromBridge(" + sid_lit + ");}"
+                 "window.aceDesktop_focusSessionFromBridge(" + sid_lit + "," + ws_lit + ");}"
                  "}catch(e){}})();";
         } else {
             js = "(function(){try{if(window.aceDesktop_activateAndOpenSession){"
@@ -1092,7 +1092,7 @@ int main(int argc, char** argv) {
             std::string sid_lit = nlohmann::json(sid).dump();
             std::string js = same_workspace
                 ? "(function(){try{if(window.aceDesktop_focusSessionFromBridge){"
-                  "window.aceDesktop_focusSessionFromBridge(" + sid_lit + ");}}catch(e){}})();"
+                  "window.aceDesktop_focusSessionFromBridge(" + sid_lit + "," + ws_lit + ");}}catch(e){}})();"
                 : "(function(){try{if(window.aceDesktop_activateAndOpenSession){"
                   "window.aceDesktop_activateAndOpenSession(" + ws_lit + "," + sid_lit + ");}}catch(e){}})();";
             host.eval(js);

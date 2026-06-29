@@ -2,6 +2,9 @@ import assert from 'node:assert/strict';
 import {
   SIDEBAR_SESSION_COLLAPSE_LIMIT,
   reconcileSidebarSessions,
+  sessionListNeedsRevealExpansion,
+  sessionMatchesRevealTarget,
+  sidebarRevealTarget,
   sidebarSessionProjection,
   sortSidebarSessionsNewestFirst,
   upsertSidebarSession,
@@ -41,6 +44,61 @@ test('expanded sidebar sessions show all rows and collapse action', () => {
   assert.equal(result.action, 'collapse');
   assert.equal(result.hiddenCount, 0);
   assert.deepEqual(result.visibleSessions.map((s) => s.id), ['0', '1', '2', '3', '4', '5', '6']);
+});
+
+test('sidebarRevealTarget keeps workspace session identity', () => {
+  assert.deepEqual(sidebarRevealTarget({
+    sessionId: 's1',
+    workspaceHash: 'w1',
+  }), {
+    sessionId: 's1',
+    workspaceHash: 'w1',
+    noWorkspace: false,
+  });
+});
+
+test('sidebarRevealTarget marks no-workspace sessions without workspace hash', () => {
+  assert.deepEqual(sidebarRevealTarget({
+    session_id: 's1',
+    workspace_hash: 'w1',
+    no_workspace: true,
+  }), {
+    sessionId: 's1',
+    workspaceHash: '',
+    noWorkspace: true,
+  });
+});
+
+test('sessionListNeedsRevealExpansion expands when target row is hidden', () => {
+  const sessions = Array.from({ length: 7 }, (_, i) => ({
+    id: String(i),
+    workspace_hash: 'w1',
+  }));
+  assert.equal(sessionListNeedsRevealExpansion(sessions, {
+    sessionId: '6',
+    workspaceHash: 'w1',
+  }, false), true);
+  assert.equal(sessionListNeedsRevealExpansion(sessions, {
+    sessionId: '3',
+    workspaceHash: 'w1',
+  }, false), false);
+});
+
+test('sessionMatchesRevealTarget separates workspace and no-workspace rows', () => {
+  assert.equal(sessionMatchesRevealTarget({
+    id: 's1',
+    workspace_hash: 'w1',
+  }, {
+    sessionId: 's1',
+    workspaceHash: 'w1',
+  }), true);
+  assert.equal(sessionMatchesRevealTarget({
+    id: 's1',
+    workspace_hash: 'w1',
+  }, {
+    sessionId: 's1',
+    noWorkspace: true,
+  }), false);
 });
 
 test('sortSidebarSessionsNewestFirst orders by updated then created time', () => {

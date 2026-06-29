@@ -1660,7 +1660,7 @@ function SectionFeedback() {
         <div className="px-4 py-3.5 border-b border-border">
           <div className="text-[14px] font-semibold mb-1">提交反馈</div>
           <p className="text-[12px] text-fg-mute">
-            默认只附带最近 desktop 日志;选择会话后才会附带对应会话记录。
+            默认只附带最近 desktop 日志。关联某个具体的会话记录将更有助于我们帮您排查问题。
           </p>
         </div>
 

@@ -60,6 +60,7 @@ import './newSession.test.js';
 import './navigationHistory.test.js';
 import './gridPinnedSessions.test.js';
 import './sidebarSessions.test.js';
+import './sessionJump.test.js';
 import './sessionListEvents.test.js';
 import './errors.test.js';
 import './modelPicker.test.js';

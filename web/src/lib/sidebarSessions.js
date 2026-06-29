@@ -8,6 +8,10 @@ function sessionWorkspace(session) {
   return String(session?.workspace_hash || session?.workspaceHash || '').trim();
 }
 
+function isNoWorkspaceSession(session) {
+  return !!(session?.noWorkspace || session?.no_workspace);
+}
+
 function sessionKey(session) {
   const id = sessionId(session);
   return id ? `${sessionWorkspace(session)}\u0000${id}` : '';
@@ -55,6 +59,36 @@ export function sidebarSessionProjection(sessions = [], expanded = false, limit 
     action: collapsible ? (expanded ? 'collapse' : 'expand') : '',
     hiddenCount: collapsible && !expanded ? list.length - max : 0,
   };
+}
+
+export function sidebarRevealTarget(activeRef = {}) {
+  const id = sessionId(activeRef);
+  if (!id) return { sessionId: '', workspaceHash: '', noWorkspace: false };
+  const noWorkspace = isNoWorkspaceSession(activeRef);
+  return {
+    sessionId: id,
+    workspaceHash: noWorkspace ? '' : sessionWorkspace(activeRef),
+    noWorkspace,
+  };
+}
+
+export function sessionMatchesRevealTarget(session = {}, target = {}) {
+  const targetId = String(target?.sessionId || target?.id || target?.session_id || '').trim();
+  if (!targetId || sessionId(session) !== targetId) return false;
+  const targetNoWorkspace = !!(target?.noWorkspace || target?.no_workspace);
+  if (targetNoWorkspace) return isNoWorkspaceSession(session) || !sessionWorkspace(session);
+  const targetWorkspace = String(target?.workspaceHash || target?.workspace_hash || '').trim();
+  if (!targetWorkspace) return !isNoWorkspaceSession(session);
+  return sessionWorkspace(session) === targetWorkspace;
+}
+
+export function sessionListNeedsRevealExpansion(sessions = [], target = {}, expanded = false, limit = SIDEBAR_SESSION_COLLAPSE_LIMIT) {
+  if (expanded || !target?.sessionId) return false;
+  const projection = sidebarSessionProjection(sessions, false, limit);
+  if (!projection.collapsible) return false;
+  const hasTarget = sessions.some((session) => sessionMatchesRevealTarget(session, target));
+  if (!hasTarget) return false;
+  return !projection.visibleSessions.some((session) => sessionMatchesRevealTarget(session, target));
 }
 
 export function sortSidebarSessionsNewestFirst(sessions = []) {
