@@ -1,4 +1,4 @@
-# ACECODE.md
+# AGENT.md
 
 This file provides guidance to acecode (https://github.com/tmoonlight/acecode) when working with code in this repository.
 

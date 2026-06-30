@@ -34,7 +34,7 @@ function run(name, fn) {
 
 const ITEMS = flattenCommands({
   builtins: [
-    { name: 'init', description: 'Generate ACECODE.md' },
+    { name: 'init', description: 'Generate AGENT.md' },
     { name: 'compact', description: 'Compress conversation history' },
     { name: 'goal', description: 'Manage thread goal' },
     { name: 'plan', description: 'Enter plan mode' },
@@ -102,7 +102,7 @@ run('commandsWithFallback:空响应回退到基础命令', () => {
 run('commandsWithFallback:后端返回 skills 时保留 skill + builtin 组合', () => {
   const r = commandsWithFallback({
     builtins: [
-      { name: 'init', description: 'Generate ACECODE.md' },
+      { name: 'init', description: 'Generate AGENT.md' },
       { name: 'compact', description: 'Compress conversation history' },
       { name: 'goal', description: 'Manage thread goal' },
       { name: 'plan', description: 'Enter plan mode' },

@@ -31,6 +31,10 @@ import {
 } from '../lib/fileTreeChangeStatus.js';
 import { fileTreeReloadPaths } from '../lib/fileTreeRefresh.js';
 import { clsx } from '../lib/format.js';
+import {
+  SIDE_PANEL_CONTEXT_EFFECTS,
+  sidePanelContextActionEffect,
+} from '../lib/sidePanelContextActions.js';
 import { FileTypeIcon, PanelToggleIcon, VsIcon } from './Icon.jsx';
 import { ChangeCompactList } from './ChangeReview.jsx';
 
@@ -486,37 +490,30 @@ export function SidePanel({
     const handler = (event) => {
       const detail = event.detail || {};
       const { action, target } = detail;
-      const filePath = target?.type === 'review'
-        ? target.file
-        : (target?.type === 'file' ? (target.relativePath || target.path) : '');
-      const normalizedFilePath = normalizeTreePath(filePath);
-      if (!normalizedFilePath) return;
+      const effect = sidePanelContextActionEffect({ action, target, filesEnabled });
+      if (!effect) return;
 
-      if (action === DESKTOP_CONTEXT_ACTIONS.PREVIEW_FILE && target?.type === 'review') {
+      if (effect.type === SIDE_PANEL_CONTEXT_EFFECTS.OPEN_FILE_PREVIEW) {
         detail.handled = true;
-        setSelectedPath(normalizedFilePath);
-        onOpenSessionChangePreview?.(filePath);
-      } else if (filesEnabled && action === DESKTOP_CONTEXT_ACTIONS.PREVIEW_FILE) {
+        setSelectedPath(effect.normalizedFilePath);
+        onOpenFilePreview?.(effect.filePath);
+      } else if (effect.type === SIDE_PANEL_CONTEXT_EFFECTS.LOCATE_IN_FILE_TREE) {
         detail.handled = true;
-        setSelectedPath(normalizedFilePath);
-        onOpenFilePreview?.(filePath);
-      } else if (filesEnabled && action === DESKTOP_CONTEXT_ACTIONS.LOCATE_IN_FILE_TREE) {
-        detail.handled = true;
-        setSelectedPath(normalizedFilePath);
+        setSelectedPath(effect.normalizedFilePath);
         setExpandedDirs((prev) => {
           const next = new Set(prev);
-          for (const dir of pathAncestors(normalizedFilePath)) next.add(dir);
+          for (const dir of pathAncestors(effect.normalizedFilePath)) next.add(dir);
           return next;
         });
         setActiveTab('files');
-      } else if (filesEnabled && action === DESKTOP_CONTEXT_ACTIONS.REFRESH_FILE_TREE && target?.type === 'file') {
+      } else if (effect.type === SIDE_PANEL_CONTEXT_EFFECTS.REFRESH_FILE_TREE) {
         detail.handled = true;
         refreshFileTree();
       }
     };
     window.addEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
     return () => window.removeEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
-  }, [filesEnabled, onOpenFilePreview, onOpenSessionChangePreview, refreshFileTree, setExpandedDirs]);
+  }, [filesEnabled, onOpenFilePreview, refreshFileTree, setExpandedDirs]);
 
   return (
     // 宽度由父级 wrapper(.ace-side-panel-shell)控制,这里 100% 占满。width prop

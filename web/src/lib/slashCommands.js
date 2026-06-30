@@ -15,7 +15,7 @@ const FALLBACK_BUILTINS = Object.freeze([
   Object.freeze({
     kind: 'builtin',
     name: 'init',
-    description: 'Analyze this codebase and generate (or improve) ACECODE.md',
+    description: 'Analyze this codebase and generate (or improve) AGENT.md',
   }),
   Object.freeze({
     kind: 'builtin',

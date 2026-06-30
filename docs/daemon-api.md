@@ -306,7 +306,7 @@ Errors:
 
 `/init` with a provider enqueues the same init prompt used by the TUI while
 displaying `/init` in the transcript. Without a provider it writes the offline
-`ACECODE.md` skeleton and emits a visible system message. `/compact` runs on the
+`AGENT.md` skeleton and emits a visible system message. `/compact` runs on the
 AgentLoop worker queue and emits progress/completion/error messages. On success
 it appends a hidden compact checkpoint to the session JSONL plus visible system
 marker messages; older user-visible transcript rows remain available in history.
@@ -421,7 +421,7 @@ List skills the daemon registered at startup.
     {
       "name": "init",
       "command_key": "/init",
-      "description": "Initialize ACECODE.md ...",
+      "description": "Initialize AGENT.md ...",
       "category": "builtin",
       "enabled": true
     }

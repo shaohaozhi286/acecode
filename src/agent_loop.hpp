@@ -385,6 +385,7 @@ private:
     // until set_agent_loop_config is called from main.cpp.
     AgentLoopConfig loop_cfg_;
     std::atomic<int> last_api_prompt_tokens_{0}; // from most recent API response
+    std::atomic<int> compact_generation_{0};
     int auto_compact_consecutive_failures_ = 0;
     SessionManager* session_manager_ = nullptr;
     HookManager* hook_manager_ = nullptr;

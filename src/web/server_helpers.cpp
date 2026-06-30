@@ -38,6 +38,9 @@ std::optional<std::string> preview_blob_mime(const std::string& path) {
     if (ext == "ico")  return "image/x-icon";
     if (ext == "svg")  return "image/svg+xml";
     if (ext == "pdf")  return "application/pdf";
+    if (ext == "docx") return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    if (ext == "xlsx") return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+    if (ext == "xlsm") return "application/vnd.ms-excel.sheet.macroEnabled.12";
     return std::nullopt;
 }
 

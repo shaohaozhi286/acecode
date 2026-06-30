@@ -248,20 +248,6 @@ export function ChangeCompactList({
   const listRef = useRef(null);
   const selectedNormalizedFile = normalizeTreePath(selectedFile);
 
-  useEffect(() => {
-    const handler = (event) => {
-      const detail = event.detail || {};
-      const { action, target } = detail;
-      if (target?.type !== 'review') return;
-      if (action === DESKTOP_CONTEXT_ACTIONS.PREVIEW_FILE && target.file) {
-        detail.handled = true;
-        onOpenFile?.(target.file);
-      }
-    };
-    window.addEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
-    return () => window.removeEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
-  }, [onOpenFile]);
-
   useLayoutEffect(() => {
     if (!selectedNormalizedFile) return;
     const el = listRef.current;

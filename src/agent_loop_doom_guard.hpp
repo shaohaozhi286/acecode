@@ -35,6 +35,7 @@ public:
     // turn-based so several tool calls in the same assistant response share the
     // same guard state, while a later model turn can recover after using other tools.
     void begin_model_turn();
+    void reset();
 
     // Returns a synthetic tool result when the call should be skipped. A null
     // result means the real tool should run.

@@ -35,6 +35,7 @@ const ICONS = {
   glyphUp: 'GlyphUp',
   globe: 'Globe',
   help: 'StatusHelp',
+  hook: 'FishHook',
   info: 'StatusInformation',
   leftBar: 'LeftBar',
   lightbulb: 'IntellisenseLightBulbSparkle',

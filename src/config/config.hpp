@@ -78,11 +78,10 @@ struct ProjectInstructionsConfig {
     std::size_t max_bytes = 256 * 1024;        // per-file cap
     std::size_t max_total_bytes = 1024 * 1024; // aggregate cap for merged text
     // Priority order. Each directory contributes at most the first filename that
-    // exists. ACECODE.md is native; AGENT.md and CLAUDE.md are compat.
-    std::vector<std::string> filenames = {"ACECODE.md", "AGENT.md", "CLAUDE.md"};
-    // Per-filename gates. Setting either to false removes that name from the
+    // exists. AGENT.md is native; CLAUDE.md is compat.
+    std::vector<std::string> filenames = {"AGENT.md", "CLAUDE.md"};
+    // Per-filename gate. Setting this to false removes CLAUDE.md from the
     // effective search list at runtime (overriding its presence in filenames).
-    bool read_agent_md = true;
     bool read_claude_md = true;
 };
 
@@ -114,6 +113,13 @@ struct CustomInstructionsConfig {
 
 private:
     mutable std::mutex mu_;
+};
+
+struct ConnectorConfig {
+    std::string id;
+    std::string name;
+    std::string description;
+    bool enabled = true;
 };
 
 struct DaemonConfig {
@@ -333,8 +339,9 @@ struct AppConfig {
     std::map<std::string, McpServerConfig> mcp_servers; // MCP stdio servers (optional)
     SkillsConfig skills;                         // skill system configuration (optional)
     MemoryConfig memory;                         // persistent user memory settings
-    ProjectInstructionsConfig project_instructions; // ACECODE.md / AGENT.md / CLAUDE.md loader
+    ProjectInstructionsConfig project_instructions; // AGENT.md / CLAUDE.md loader
     CustomInstructionsConfig custom_instructions; // Desktop/Web user-authored prompt context
+    std::vector<ConnectorConfig> connectors;      // user-configured desktop connectors
     DaemonConfig daemon;                         // daemon process supervision settings
     WebConfig web;                               // HTTP/WebSocket server settings
     WebUiPreferencesConfig web_ui;               // Web/Desktop UI-only preferences
@@ -370,6 +377,11 @@ std::string normalize_upgrade_base_url(std::string raw);
 
 // Returns true for non-empty http/https URLs after normalization.
 bool is_valid_upgrade_base_url(const std::string& raw);
+
+nlohmann::json connectors_to_json(const std::vector<ConnectorConfig>& connectors);
+bool parse_connectors_json(const nlohmann::json& value,
+                           std::vector<ConnectorConfig>& out,
+                           std::string* error = nullptr);
 
 // Load config from ~/.acecode/config.json, with env var overrides.
 // Creates default config if missing.

@@ -194,6 +194,34 @@ TEST(FileReadToolSummary, DuplicateReadStubIncludesPreviousPersistedReference) {
     fs::remove(p);
 }
 
+TEST(FileReadToolSummary, ClearingReadObservationsPreservesEditBaselineAndAllowsRealRead) {
+    ToolImpl tool = create_file_read_tool();
+
+    auto p = make_temp_file("alpha\nbeta\n");
+    nlohmann::json args = {{"file_path", p.string()}};
+
+    ToolResult first = tool.execute(args.dump(), ToolContext{});
+    ASSERT_TRUE(first.success) << first.output;
+    EXPECT_NE(first.output.find("alpha\nbeta\n"), std::string::npos);
+
+    ToolResult cached = tool.execute(args.dump(), ToolContext{});
+    ASSERT_TRUE(cached.success) << cached.output;
+    EXPECT_NE(cached.output.find("File unchanged since last read"), std::string::npos);
+
+    acecode::MtimeTracker::instance().clear_read_observations();
+
+    auto baseline = acecode::MtimeTracker::instance().validate_read_baseline_for_edit(
+        p.string(), "alpha\nbeta\n");
+    EXPECT_EQ(baseline.status, acecode::MtimeTracker::ReadBaselineStatus::Ok);
+
+    ToolResult after_clear = tool.execute(args.dump(), ToolContext{});
+    ASSERT_TRUE(after_clear.success) << after_clear.output;
+    EXPECT_NE(after_clear.output.find("alpha\nbeta\n"), std::string::npos);
+    EXPECT_EQ(after_clear.output.find("File unchanged since last read"), std::string::npos);
+
+    fs::remove(p);
+}
+
 TEST(FileReadToolSummary, DifferentRequestedRangeDoesNotDeduplicate) {
     ToolImpl tool = create_file_read_tool();
 

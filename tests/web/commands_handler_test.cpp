@@ -172,7 +172,7 @@ TEST_F(CommandsHandlerTest, BuiltinDescriptionsMatchTuiRegistration) {
     auto payload = acecode::web::build_commands_payload(registry);
 
     EXPECT_EQ(payload["builtins"][0]["description"].get<std::string>(),
-              "Analyze this codebase and generate (or improve) ACECODE.md");
+              "Analyze this codebase and generate (or improve) AGENT.md");
     EXPECT_EQ(payload["builtins"][1]["description"].get<std::string>(),
               "Compress conversation history");
     EXPECT_EQ(payload["builtins"][2]["description"].get<std::string>(),

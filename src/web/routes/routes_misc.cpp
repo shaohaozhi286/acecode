@@ -810,6 +810,10 @@ void WebServer::Impl::register_ui_preferences() {
         ([this](const crow::request& req) {
             return cors_preflight(req);
         });
+        CROW_ROUTE(app, "/api/config/connectors").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
         CROW_ROUTE(app, "/api/config/upgrade").methods(crow::HTTPMethod::Options)
         ([this](const crow::request& req) {
             return cors_preflight(req);
@@ -853,6 +857,19 @@ void WebServer::Impl::register_ui_preferences() {
             r.add_header("Content-Type", "application/json");
             r.body = custom_instructions_to_json(
                 deps.app_config->custom_instructions).dump();
+            return with_cors(req, std::move(r));
+        });
+
+        // GET /api/config/connectors: configured desktop connectors.
+        CROW_ROUTE(app, "/api/config/connectors").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.app_config) return crow::response(503);
+            std::lock_guard<std::mutex> config_lock(app_config_mu);
+            crow::response r(200);
+            r.add_header("Content-Type", "application/json");
+            r.body = json{{"connectors", connectors_to_json(
+                deps.app_config->connectors)}}.dump();
             return with_cors(req, std::move(r));
         });
 
@@ -990,6 +1007,55 @@ void WebServer::Impl::register_ui_preferences() {
             r.add_header("Content-Type", "application/json");
             r.body = custom_instructions_to_json(
                 deps.app_config->custom_instructions).dump();
+            return with_cors(req, std::move(r));
+        });
+
+        // PUT /api/config/connectors body {connectors:[...]}.
+        CROW_ROUTE(app, "/api/config/connectors").methods(crow::HTTPMethod::PUT)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.app_config) return crow::response(503);
+
+            auto json_err = [&](int status, const char* code, const std::string& msg) {
+                crow::response r(status);
+                r.body = json{{"error", code}, {"message", msg}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            };
+
+            json body;
+            try { body = json::parse(req.body); }
+            catch (const std::exception& e) {
+                return json_err(400, "BAD_JSON", std::string("invalid JSON body: ") + e.what());
+            }
+            if (!body.is_object() || !body.contains("connectors")) {
+                return json_err(400, "BAD_REQUEST", "expected {connectors: array}");
+            }
+
+            std::vector<ConnectorConfig> parsed;
+            std::string parse_error;
+            if (!parse_connectors_json(body["connectors"], parsed, &parse_error)) {
+                return json_err(400, "BAD_REQUEST", parse_error);
+            }
+
+            std::lock_guard<std::mutex> config_lock(app_config_mu);
+            const auto before = deps.app_config->connectors;
+            deps.app_config->connectors = std::move(parsed);
+            try {
+                if (!deps.config_path.empty()) {
+                    save_config(*deps.app_config, deps.config_path);
+                } else {
+                    save_config(*deps.app_config);
+                }
+            } catch (const std::exception& e) {
+                deps.app_config->connectors = before;
+                return json_err(500, "PERSIST_FAILED", e.what());
+            }
+
+            crow::response r(200);
+            r.add_header("Content-Type", "application/json");
+            r.body = json{{"connectors", connectors_to_json(
+                deps.app_config->connectors)}}.dump();
             return with_cors(req, std::move(r));
         });
 

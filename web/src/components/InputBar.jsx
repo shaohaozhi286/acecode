@@ -1,11 +1,11 @@
-// 输入框:textarea 自动撑高(最多 8 行) + Enter 发 / Shift+Enter 换行 +
+// 输入框:富文本 composer 自动撑高(最多 8 行) + Enter 发 / Shift+Enter 换行 +
 // 空输入或未编辑的历史项用上下键翻 history。
 //
 // 底部工具栏单独占一行,提交按钮在右侧(只在有内容时变蓝),空内容时灰色不可点。
 //
 // 斜杠命令:value 以 / 开头且无空白时,SlashDropdown 浮层显示在输入框上方。
 // 选中后插入 `/<name> ` 到输入框,不立即发送(builtin 与 skill 行为统一)。
-// 已识别的首段命令以原子 token 样式叠加渲染(overlay div 与 textarea 同度量)。
+// 已识别的首段命令以原子 token 样式在同一 editable layout 内渲染。
 
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { clsx } from '../lib/format.js';
@@ -13,18 +13,11 @@ import { getGoalStopControlState } from '../lib/goalControl.js';
 import { getInputBarActionState } from '../lib/inputBarState.js';
 import { FileTypeIcon, VsIcon } from './Icon.jsx';
 import { ImageLightbox } from './ImageLightbox.jsx';
+import { RichComposer } from './RichComposer.jsx';
 import { SlashDropdown } from './SlashDropdown.jsx';
 import { useSlashCommands } from './SlashCommandsContext.jsx';
-import {
-  deleteLeadingCommandBlock,
-  moveAcrossLeadingCommandBlock,
-  normalizeLeadingCommandSelection,
-  parseLeadingCommand,
-  resolveLeadingSlashCommand,
-  slashCommandKindPresentation,
-} from '../lib/slashCommands.js';
 import { getNextInputHistoryPointer, shouldNavigateInputHistory } from '../lib/inputHistoryNavigation.js';
-import { filesFromClipboardEvent, filesFromTransfer, hasFileTransfer } from '../lib/composerFileTransfer.js';
+import { filesFromTransfer, hasFileTransfer } from '../lib/composerFileTransfer.js';
 import {
   captureComposerTextareaSelection,
   requestDesktopWindowFocus,
@@ -178,8 +171,6 @@ export const InputBar = forwardRef(function InputBar({
 
   const slashCtx = useSlashCommands();
   const commands = slashCtx?.commands || [];
-  const knownNames = useMemo(() => commands.map((c) => c.name), [commands]);
-
   useImperativeHandle(ref, () => ({
     focus: () => ta.current?.focus(),
     clear: () => {
@@ -188,16 +179,6 @@ export const InputBar = forwardRef(function InputBar({
       setEditedSinceHistory(false);
     },
   }), [updateValue]);
-
-  const autosize = () => {
-    const el = ta.current;
-    if (!el) return;
-    el.style.height = 'auto';
-    const h = Math.min(el.scrollHeight, textareaMaxHeight);
-    el.style.height = h + 'px';
-    el.style.overflowY = el.scrollHeight > textareaMaxHeight ? 'auto' : 'hidden';
-  };
-  useEffect(autosize, [textareaMaxHeight, value]);
 
   useEffect(() => () => {
     if (compositionGuardTimerRef.current) {
@@ -403,14 +384,6 @@ export const InputBar = forwardRef(function InputBar({
     resetDragState();
   }, [addMediaFiles, disabled, onMediaFiles, resetDragState]);
 
-  const handlePaste = useCallback((event) => {
-    const files = disabled || !onMediaFiles ? [] : filesFromClipboardEvent(event);
-    if (files.length === 0) return;
-    event.preventDefault();
-    event.stopPropagation();
-    addMediaFiles(files);
-  }, [addMediaFiles, disabled, onMediaFiles]);
-
   useEffect(() => {
     if (!dragActive) return undefined;
     window.addEventListener('dragend', resetDragState);
@@ -454,96 +427,14 @@ export const InputBar = forwardRef(function InputBar({
     };
   }, [capabilityOpen]);
 
-  const handleChange = (e) => {
-    const next = e.target.value;
+  const handleComposerChange = (next) => {
     updateValue(next);
     setEditedSinceHistory(next.length > 0);
   };
 
-  const leading = useMemo(() => parseLeadingCommand(value, knownNames), [value, knownNames]);
-  const leadingCommand = useMemo(() => resolveLeadingSlashCommand(value, commands), [value, commands]);
-  const showChip = leadingCommand != null;
-
-  const setTextareaSelection = useCallback((selectionStart, selectionEnd) => {
-    const el = ta.current;
-    if (!el) return;
-    el.setSelectionRange(selectionStart, selectionEnd);
-  }, []);
-
-  const normalizeCommandSelection = useCallback((target = ta.current) => {
-    if (!showChip || !target) return;
-    const edit = normalizeLeadingCommandSelection(
-      value,
-      leading,
-      target.selectionStart,
-      target.selectionEnd,
-    );
-    if (!edit) return;
-    target.setSelectionRange(edit.selectionStart, edit.selectionEnd);
-  }, [leading, showChip, value]);
-
-  const normalizeCommandSelectionSoon = useCallback(() => {
-    requestAnimationFrame(() => normalizeCommandSelection());
-  }, [normalizeCommandSelection]);
-
   const onKey = (e) => {
     // 下拉打开时,Enter / Tab / Esc / 方向键 由 SlashDropdown 在捕获阶段处理。
     // 这里只处理常规情况。
-    if (showChip) {
-      const boundaryEdit = normalizeLeadingCommandSelection(
-        value,
-        leading,
-        e.currentTarget.selectionStart,
-        e.currentTarget.selectionEnd,
-      );
-      if (boundaryEdit) {
-        e.currentTarget.setSelectionRange(boundaryEdit.selectionStart, boundaryEdit.selectionEnd);
-      }
-    }
-    if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && showChip && !e.shiftKey) {
-      const move = moveAcrossLeadingCommandBlock(
-        value,
-        leading,
-        e.currentTarget.selectionStart,
-        e.currentTarget.selectionEnd,
-        e.key === 'ArrowLeft' ? 'backward' : 'forward',
-      );
-      if (move) {
-        e.preventDefault();
-        setTextareaSelection(move.selectionStart, move.selectionEnd);
-        return;
-      }
-    }
-    if ((e.key === 'Backspace' || e.key === 'Delete') && showChip) {
-      const edit = deleteLeadingCommandBlock(
-        value,
-        leading,
-        e.currentTarget.selectionStart,
-        e.currentTarget.selectionEnd,
-        e.key === 'Delete' ? 'forward' : 'backward',
-      );
-      if (edit) {
-        e.preventDefault();
-        updateValue(edit.value);
-        setEditedSinceHistory(edit.value.length > 0);
-        setHistPtr(-1);
-        setDropdownClosed(false);
-        requestAnimationFrame(() => {
-          const el = ta.current;
-          if (el) {
-            el.focus();
-            el.setSelectionRange(edit.selectionStart, edit.selectionEnd);
-          }
-        });
-        return;
-      }
-    }
-    if (e.key === 'Enter' && !e.shiftKey) {
-      if (isComposingKeyEvent(e)) return;
-      e.preventDefault();
-      submit();
-      return;
-    }
     if (shouldNavigateInputHistory({
       key: e.key,
       value,
@@ -575,18 +466,7 @@ export const InputBar = forwardRef(function InputBar({
 
   const actionState = getInputBarActionState({ value, disabled, busy, hasExtras });
   const stopControl = getGoalStopControlState({ goal, busy, stopping: goalStopping });
-  const textareaSpacingClass = isHero ? 'px-4 pt-3 pb-1 text-[14px]' : 'px-3 pt-2 pb-1 text-[13px]';
-
-  // 命令 token overlay:首段是已知命令时,textarea 文字透明,由 overlay 负责着色渲染。
-  // SVG 图标是额外视觉层,textarea 的真实 value 仍保持普通 "/command ..." 文本。
-  const chipText = showChip ? leadingCommand.name : '';
-  const restText = showChip ? leadingCommand.rest : '';
-  const chipPresentation = showChip ? slashCommandKindPresentation(leadingCommand) : null;
-  const slashChipStyleVars = showChip
-    ? {
-        '--ace-slash-base-left': isHero ? '16px' : '12px',
-      }
-    : null;
+  const composerSpacingClass = isHero ? 'px-4 pt-3 pb-1 text-[14px]' : 'px-3 pt-2 pb-1 text-[13px]';
 
   return (
     <div className={clsx(
@@ -687,56 +567,28 @@ export const InputBar = forwardRef(function InputBar({
           </div>
         )}
         <div className="relative">
-          {/* command overlay: pointer-events:none,与 textarea 使用相同度量。 */}
-          {showChip && (
-            <div
-              aria-hidden="true"
-              data-slash-chip-kind={leadingCommand.kind}
-              data-slash-chip-icon={chipPresentation?.icon || ''}
-              className={clsx(
-                'absolute inset-0 pointer-events-none whitespace-pre-wrap break-words leading-[20px] font-sans text-fg overflow-hidden',
-                textareaSpacingClass,
-              )}
-            >
-              <span
-                className="ace-slash-chip-unit"
-                title={chipPresentation?.label || ''}
-              >
-                <span className="ace-slash-chip-icon">
-                  <VsIcon name={chipPresentation?.icon || 'lightbulb'} size={14} />
-                </span>
-                <span className="ace-slash-chip">{chipText}</span>
-              </span>
-              <span>{restText}</span>
-            </div>
-          )}
-          <textarea
+          <RichComposer
             ref={ta}
-            rows={1}
             value={value}
-            onChange={handleChange}
+            commands={commands}
+            onChange={handleComposerChange}
             onKeyDown={onKey}
-            onKeyUp={normalizeCommandSelectionSoon}
-            onSelect={(event) => normalizeCommandSelection(event.currentTarget)}
-            onClick={normalizeCommandSelectionSoon}
-            onMouseUp={normalizeCommandSelectionSoon}
-            onPaste={handlePaste}
             onCompositionStart={handleCompositionStart}
             onCompositionEnd={handleCompositionEnd}
+            isComposingKeyEvent={isComposingKeyEvent}
+            onSubmit={submit}
+            onPasteFiles={addMediaFiles}
             disabled={disabled}
             placeholder={placeholder}
             className={clsx(
-              'relative w-full resize-none bg-transparent border-0 outline-none leading-[20px] font-sans placeholder:text-fg-mute disabled:opacity-50',
-              showChip ? 'text-transparent' : 'text-fg',
-              showChip && 'ace-slash-input-with-icon',
-              textareaSpacingClass,
+              'ace-rich-composer-input relative w-full bg-transparent border-0 outline-none leading-[20px] font-sans text-fg disabled:opacity-50 whitespace-pre-wrap break-words',
+              composerSpacingClass,
             )}
+            placeholderClassName={composerSpacingClass}
             style={{
-              height: textareaBaseHeight,
+              minHeight: textareaBaseHeight,
               maxHeight: textareaMaxHeight,
-              overflowY: 'hidden',
-              caretColor: showChip ? 'var(--ace-fg)' : undefined,
-              ...(slashChipStyleVars || {}),
+              overflowY: 'auto',
             }}
           />
         </div>

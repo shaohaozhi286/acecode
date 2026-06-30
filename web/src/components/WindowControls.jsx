@@ -18,7 +18,7 @@ export function isFramelessDesktop() {
 }
 
 export function isInteractiveTarget(target) {
-  return !!target?.closest?.('button,a,input,textarea,select,[role="button"],[data-ace-no-window-drag="true"]');
+  return !!target?.closest?.('button,a,input,textarea,select,[contenteditable="true"],[role="button"],[data-ace-no-window-drag="true"]');
 }
 
 export function nativePointerEvent(event) {

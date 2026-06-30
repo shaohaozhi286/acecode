@@ -55,7 +55,7 @@ Important `config.json` areas:
 - `saved_models` and `default_model_name` - named model profiles. OpenAI-compatible entries can set `base_url`, `api_key`, `model`, `stream_timeout_ms`, and `request_headers`; `{env:NAME}` placeholders are resolved at request time.
 - `context_window` and `models_dev` - context-window resolution. Known providers prefer bundled `models.dev` metadata; generic OpenAI-compatible endpoints may warm `/models` metadata in the background.
 - `default_permission_mode` - default for new daemon/Web/Desktop sessions: `default`, `accept-edits`, `plan`, or `yolo`.
-- `custom_instructions` and `project_instructions` - request-local prompt context. Project instructions load `ACECODE.md`, `AGENT.md`, and `CLAUDE.md` according to configured filename priority and byte caps.
+- `custom_instructions` and `project_instructions` - request-local prompt context. Project instructions load `AGENT.md` first and `CLAUDE.md` as a compatibility fallback according to configured filename priority and byte caps.
 - `skills.disabled` and `skills.external_dirs` - hide skills or add extra scan roots.
 - `features.hooks` - enable/disable Codex-compatible hooks; legacy startup hooks keep their compatibility behavior.
 - `mcp_servers` - MCP server definitions using `stdio`, `sse`, or Streamable HTTP `http`.
@@ -116,7 +116,7 @@ Startup `--yolo` / `--dangerous` is not the same as session `/mode yolo`: it byp
 | `/mcp` | List/enable/disable/reconnect MCP servers and list their tools |
 | `/skills` | List installed skills; `/skills reload` rescans disk |
 | `/memory` | Manage persistent memory: list/view/edit/forget/reload |
-| `/init` | Generate or improve `ACECODE.md` in the current directory |
+| `/init` | Generate or improve `AGENT.md` in the current directory |
 | `/history` | List or clear per-cwd input history |
 | `/proxy` | Show, refresh, disable, set, or reset HTTP proxy settings |
 | `/websearch` | Show, refresh, or switch DuckDuckGo/Bing-CN search backend |
@@ -232,7 +232,7 @@ Current caveat: memory is wired into the TUI path. If the user asks whether Web/
 ACECode builds request-local prompt context from:
 
 - configured custom instructions (`custom_instructions.text`, also editable through Web/Desktop Settings)
-- global and project instruction files (`ACECODE.md`, optionally `AGENT.md` and `CLAUDE.md`)
+- global and project instruction files (`AGENT.md`, optionally `CLAUDE.md` as a fallback)
 - the proactive skill index
 - the memory index when memory is enabled and wired
 - hook-provided request context

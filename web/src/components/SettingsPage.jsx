@@ -67,9 +67,10 @@ const NAV = [
   { key: 'config', label: '配置', icon: 'terminal' },
   { key: 'personalization', label: '个性化', icon: 'eye' },
   { key: 'mcp', label: 'MCP 服务器', icon: 'mcp' },
+  { key: 'connectors', label: '连接器', icon: 'extension' },
   { key: 'models', label: '模型', icon: 'brain' },
   { key: 'tools', label: '工具', icon: 'tool' },
-  { key: 'hooks', label: '钩子', icon: 'extension' },
+  { key: 'hooks', label: '钩子', icon: 'hook' },
   { key: 'archived', label: '已归档会话', icon: 'archive' },
   { key: 'usage', label: '使用情况', icon: 'list' },
   { key: 'feedback', label: '问题反馈', icon: 'help' },
@@ -167,6 +168,7 @@ export function SettingsPage({
           {activeNavKey === 'config' && <SectionConfig health={health} />}
           {activeNavKey === 'personalization' && <SectionPersonalization />}
           {activeNavKey === 'mcp' && <SectionMCP />}
+          {activeNavKey === 'connectors' && <SectionConnectors />}
           {activeNavKey === 'models' && <SectionModel />}
           {activeNavKey === 'tools' && <SectionTools />}
           {activeNavKey === 'hooks' && <SectionHooks />}
@@ -894,6 +896,161 @@ function SectionMCP() {
   );
 }
 
+function normalizeConnectorList(data) {
+  const raw = Array.isArray(data?.connectors) ? data.connectors : [];
+  return raw
+    .map((item) => ({
+      id: typeof item?.id === 'string' ? item.id.trim() : '',
+      name: typeof item?.name === 'string' ? item.name : '',
+      description: typeof item?.description === 'string' ? item.description : '',
+      enabled: !!item?.enabled,
+    }))
+    .filter((item) => item.id);
+}
+
+function SectionConnectors() {
+  const [connectors, setConnectors] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [savingId, setSavingId] = useState('');
+  const [error, setError] = useState('');
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const data = await api.getConnectors();
+      setConnectors(normalizeConnectorList(data));
+    } catch (e) {
+      const message = e?.message || String(e);
+      setError(message);
+      toast({ kind: 'err', text: '加载连接器失败:' + message });
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError('');
+    api.getConnectors()
+      .then((data) => {
+        if (!cancelled) setConnectors(normalizeConnectorList(data));
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          const message = e?.message || String(e);
+          setError(message);
+          toast({ kind: 'err', text: '加载连接器失败:' + message });
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  const toggleConnector = async (connector, enabled) => {
+    if (!connector?.id || savingId) return;
+    const before = connectors;
+    const next = connectors.map((item) => (
+      item.id === connector.id ? { ...item, enabled } : item
+    ));
+    setConnectors(next);
+    setSavingId(connector.id);
+    setError('');
+    try {
+      const result = await api.setConnectors({ connectors: next });
+      setConnectors(normalizeConnectorList(result));
+      toast({ kind: 'ok', text: enabled ? '连接器已启用' : '连接器已关闭' });
+    } catch (e) {
+      const message = e?.message || String(e);
+      setConnectors(before);
+      setError(message);
+      toast({ kind: 'err', text: '连接器保存失败:' + message });
+    } finally {
+      setSavingId('');
+    }
+  };
+
+  return (
+    <>
+      <div className="flex items-start justify-between gap-4 mb-5">
+        <div>
+          <h2 className="text-xl font-bold mb-2">连接器</h2>
+          <p className="text-[12px] text-fg-mute">config.json 中配置的连接器</p>
+        </div>
+        <button
+          type="button"
+          onClick={load}
+          disabled={loading || !!savingId}
+          title="刷新连接器"
+          className="h-8 w-8 inline-flex items-center justify-center rounded-md border border-border bg-surface text-fg-2 hover:bg-surface-hi transition disabled:opacity-50"
+        >
+          <RefreshIcon size={15} className={clsx(loading && 'animate-spin')} />
+        </button>
+      </div>
+
+      {error && (
+        <div className="mb-3 px-3 py-2 rounded-md border border-danger bg-surface text-danger text-[12px]">
+          {error}
+        </div>
+      )}
+
+      {loading ? (
+        <div className="px-3.5 py-8 rounded-md bg-surface border border-border text-[12px] text-fg-mute text-center">
+          <span className="ace-spinner mr-2" /> 加载中
+        </div>
+      ) : connectors.length === 0 ? (
+        <div className="rounded-lg border border-border bg-surface px-4 py-4 max-w-3xl">
+          <div className="text-[14px] font-semibold text-fg mb-1">暂无已配置连接器</div>
+          <div className="text-[12px] text-fg-mute">没有可显示的连接器。</div>
+        </div>
+      ) : (
+        <div className="space-y-3 max-w-5xl">
+          {connectors.map((connector) => (
+            <div
+              key={connector.id}
+              className="rounded-lg border border-border bg-surface px-4 py-3"
+            >
+              <div className="flex items-start gap-3">
+                <div className="h-9 w-9 rounded-md border border-border bg-surface-alt flex items-center justify-center text-fg-2 shrink-0">
+                  <VsIcon name="extension" size={18} />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <div className="text-[13px] font-semibold text-fg truncate">
+                      {connector.name || '未命名连接器'}
+                    </div>
+                    <span
+                      className={clsx(
+                        'text-[10px] px-1.5 py-0.5 rounded border shrink-0',
+                        connector.enabled
+                          ? 'border-ok-border bg-ok-bg text-ok'
+                          : 'border-border text-fg-mute',
+                      )}
+                    >
+                      {connector.enabled ? '已启用' : '已关闭'}
+                    </span>
+                  </div>
+                  <div className="mt-1 text-[11px] text-fg-mute break-words">
+                    {connector.description || '无描述'}
+                  </div>
+                </div>
+                <Toggle
+                  on={connector.enabled}
+                  onChange={(next) => toggleConnector(connector, next)}
+                  disabled={loading || !!savingId}
+                />
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
 // ─── 工具 ──────────────────────────────────────────────────────────────────
 
 function SectionTools() {
@@ -1148,7 +1305,7 @@ function HookListItem({ hook, busyId, onTrust, onDisable, onEnable }) {
     <div className="rounded-lg border border-border bg-surface px-4 py-3">
       <div className="flex items-start gap-3">
         <div className="h-9 w-9 rounded-md border border-border bg-surface-alt flex items-center justify-center text-fg-2 shrink-0">
-          <VsIcon name="extension" size={18} />
+          <VsIcon name="hook" size={18} />
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 min-w-0">

@@ -33,10 +33,11 @@ ctest --test-dir build --output-on-failure
 - When touching tests: every TEST body gets a Chinese comment explaining the scenario.
 
 <!--
-Tip: acecode reads ACECODE.md, AGENT.md, and CLAUDE.md in priority order and only picks
-one per directory. You can drop a matching file in subdirectories for module-specific
-overrides (outer-first in the merged prompt, so inner directories can tighten outer rules).
+Tip: acecode reads AGENT.md first and CLAUDE.md as a compatibility fallback, picking
+only one project-instructions file per directory. You can drop AGENT.md in
+subdirectories for module-specific overrides (outer-first in the merged prompt, so
+inner directories can tighten outer rules).
 
-Toggle read_agent_md / read_claude_md in ~/.acecode/config.json if you want to ignore
-one of the legacy names.
+Toggle read_claude_md in ~/.acecode/config.json to ignore CLAUDE.md, or override
+project_instructions.filenames when you need a custom filename order.
 -->

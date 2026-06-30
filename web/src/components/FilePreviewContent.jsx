@@ -1,8 +1,12 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import hljs from 'highlight.js/lib/core';
+import { renderAsync } from 'docx-preview';
+import 'x-data-spreadsheet/dist/xspreadsheet.css';
+import 'x-data-spreadsheet/dist/xspreadsheet.js';
 import { ApiError } from '../lib/api.js';
 import { langForFile } from '../lib/lang.js';
 import { renderMarkdown } from '../lib/markdown.js';
+import { parseWorkbookArrayBuffer } from '../lib/officePreview.js';
 import {
   DESKTOP_CONTEXT_ACTION_EVENT,
   DESKTOP_CONTEXT_ACTIONS,
@@ -39,6 +43,7 @@ export function FilePreviewContent({ api, cwd, path, wrapPreview, onToggleWrapPr
     size: 0,
     previewUrl: '',
     contentType: '',
+    blob: null,
   });
   const [markdownSource, setMarkdownSource] = useState(false);
   const [imagePreview, setImagePreview] = useState(null);
@@ -73,7 +78,7 @@ export function FilePreviewContent({ api, cwd, path, wrapPreview, onToggleWrapPr
 
   useEffect(() => {
     if (!cwd || !path) {
-      setState({ status: 'idle', kind: 'text', text: '', error: null, lang: '', size: 0, previewUrl: '', contentType: '' });
+      setState({ status: 'idle', kind: 'text', text: '', error: null, lang: '', size: 0, previewUrl: '', contentType: '', blob: null });
       return undefined;
     }
     let cancelled = false;
@@ -81,12 +86,31 @@ export function FilePreviewContent({ api, cwd, path, wrapPreview, onToggleWrapPr
     const nextKind = filePreviewKind(path);
     setMarkdownSource(false);
     setImagePreview(null);
-    setState({ status: 'loading', kind: nextKind, text: '', error: null, lang: '', size: 0, previewUrl: '', contentType: '' });
+    setState({ status: 'loading', kind: nextKind, text: '', error: null, lang: '', size: 0, previewUrl: '', contentType: '', blob: null });
+
+    if (nextKind === 'unsupported') {
+      setState({
+        status: 'error',
+        kind: nextKind,
+        text: '',
+        error: '该文件格式暂不支持预览',
+        lang: '',
+        size: 0,
+        previewUrl: '',
+        contentType: '',
+        blob: null,
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
 
     if (isBlobFilePreview(path)) {
       api.readFileBlob(cwd, path).then((blob) => {
         if (cancelled) return;
-        objectUrl = URL.createObjectURL(blob);
+        if (nextKind === 'image' || nextKind === 'pdf') {
+          objectUrl = URL.createObjectURL(blob);
+        }
         setState({
           status: 'ok',
           kind: nextKind,
@@ -96,6 +120,7 @@ export function FilePreviewContent({ api, cwd, path, wrapPreview, onToggleWrapPr
           size: blob.size || 0,
           previewUrl: objectUrl,
           contentType: blob.type || '',
+          blob,
         });
       }).catch((err) => {
         if (cancelled) return;
@@ -114,7 +139,7 @@ export function FilePreviewContent({ api, cwd, path, wrapPreview, onToggleWrapPr
             msg = `读取失败 (HTTP ${err.status})`;
           }
         }
-        setState({ status: 'error', kind: nextKind, text: '', error: msg, lang: '', size: extraSize, previewUrl: '', contentType: '' });
+        setState({ status: 'error', kind: nextKind, text: '', error: msg, lang: '', size: extraSize, previewUrl: '', contentType: '', blob: null });
       });
       return () => {
         cancelled = true;
@@ -133,6 +158,7 @@ export function FilePreviewContent({ api, cwd, path, wrapPreview, onToggleWrapPr
         size: text.length,
         previewUrl: '',
         contentType: '',
+        blob: null,
       });
     }).catch((err) => {
       if (cancelled) return;
@@ -151,7 +177,7 @@ export function FilePreviewContent({ api, cwd, path, wrapPreview, onToggleWrapPr
           msg = `读取失败 (HTTP ${err.status})`;
         }
       }
-      setState({ status: 'error', kind: nextKind, text: '', error: msg, lang: '', size: extraSize, previewUrl: '', contentType: '' });
+      setState({ status: 'error', kind: nextKind, text: '', error: msg, lang: '', size: extraSize, previewUrl: '', contentType: '', blob: null });
     });
     return () => { cancelled = true; };
   }, [api, cwd, path]);
@@ -210,6 +236,20 @@ export function FilePreviewContent({ api, cwd, path, wrapPreview, onToggleWrapPr
             <div className="text-fg-mute text-[10px] font-mono opacity-70 break-all">{path}</div>
           </div>
         </object>
+      </div>
+    );
+  }
+  if (state.kind === 'word') {
+    return (
+      <div className="flex-1 flex flex-col overflow-hidden" {...previewAttrs}>
+        <WordPreview blob={state.blob} path={path} />
+      </div>
+    );
+  }
+  if (state.kind === 'spreadsheet') {
+    return (
+      <div className="flex-1 flex flex-col overflow-hidden" {...previewAttrs}>
+        <SpreadsheetPreview blob={state.blob} path={path} />
       </div>
     );
   }
@@ -285,4 +325,121 @@ export function FilePreviewContent({ api, cwd, path, wrapPreview, onToggleWrapPr
       </CopyableCodeFrame>
     </div>
   );
+}
+
+function WordPreview({ blob, path }) {
+  const hostRef = useRef(null);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host || !blob) return undefined;
+    let cancelled = false;
+    setError('');
+    host.replaceChildren();
+    renderAsync(blob, host, host, {
+      className: 'ace-docx-preview-doc',
+      inWrapper: true,
+      ignoreWidth: false,
+      ignoreHeight: false,
+      breakPages: true,
+      renderHeaders: true,
+      renderFooters: true,
+      renderFootnotes: true,
+      renderEndnotes: true,
+    }).catch((err) => {
+      if (cancelled) return;
+      setError(err?.message || 'Word 文件预览失败');
+    });
+    return () => {
+      cancelled = true;
+      host.replaceChildren();
+    };
+  }, [blob]);
+
+  if (error) {
+    return (
+      <div className="ace-empty-state">
+        <div className="text-danger text-[12px] mb-1">{error}</div>
+        <div className="text-fg-mute text-[10px] font-mono opacity-70 break-all">{path}</div>
+      </div>
+    );
+  }
+
+  return <div ref={hostRef} className="ace-side-docx-preview" />;
+}
+
+function SpreadsheetPreview({ blob, path }) {
+  const hostRef = useRef(null);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host || !blob) return undefined;
+    let cancelled = false;
+    let resizeObserver = null;
+    let spreadsheet = null;
+    setError('');
+    host.replaceChildren();
+
+    const render = async () => {
+      try {
+        const buffer = await blob.arrayBuffer();
+        if (cancelled) return;
+        const data = parseWorkbookArrayBuffer(buffer);
+        const factory = window.x_spreadsheet;
+        if (typeof factory !== 'function') {
+          throw new Error('x-spreadsheet renderer unavailable');
+        }
+        spreadsheet = factory(host, {
+          mode: 'read',
+          showToolbar: false,
+          showGrid: true,
+          showContextmenu: false,
+          showBottomBar: data.length > 1,
+          view: {
+            height: () => Math.max(240, host.clientHeight || 0),
+            width: () => Math.max(320, host.clientWidth || 0),
+          },
+          row: {
+            len: 100,
+            height: 24,
+          },
+          col: {
+            len: 26,
+            width: 100,
+            indexWidth: 46,
+            minWidth: 60,
+          },
+        });
+        spreadsheet.loadData(data);
+        if (typeof ResizeObserver !== 'undefined') {
+          resizeObserver = new ResizeObserver(() => spreadsheet?.reRender?.());
+          resizeObserver.observe(host);
+        }
+      } catch (err) {
+        if (cancelled) return;
+        setError(err?.message || 'Excel 文件预览失败');
+      }
+    };
+    render();
+
+    return () => {
+      cancelled = true;
+      resizeObserver?.disconnect();
+      host.replaceChildren();
+      spreadsheet = null;
+    };
+  }, [blob]);
+
+  if (error) {
+    return (
+      <div className="ace-empty-state">
+        <div className="text-danger text-[12px] mb-1">{error}</div>
+        <div className="text-fg-mute text-[10px] font-mono opacity-70 break-all">{path}</div>
+      </div>
+    );
+  }
+
+  return <div ref={hostRef} className="ace-side-spreadsheet-preview" />;
 }

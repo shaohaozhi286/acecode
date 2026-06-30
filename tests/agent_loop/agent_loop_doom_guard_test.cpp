@@ -258,6 +258,35 @@ TEST(AgentLoopDoomGuard, FileReadUnchangedStubUsesCachedReadGuard) {
     EXPECT_EQ(guarded->summary->verb, "Cached");
 }
 
+TEST(AgentLoopDoomGuard, ResetClearsCachedReadAndLowSignalState) {
+    AgentLoopDoomGuard guard;
+    ToolCall read_call = make_call("call-1", "file_read",
+        R"({"file_path":"D:/code/src/app.cpp"})");
+
+    ToolResult unchanged_stub;
+    unchanged_stub.success = true;
+    unchanged_stub.output =
+        "File unchanged since last read. The previous file_read result for this same file/range is still current.";
+    guard.record_result(read_call, unchanged_stub);
+
+    ToolCall duplicate_read = make_call("call-2", "file_read",
+        R"({"file_path":"D:/code/src/app.cpp"})");
+    ASSERT_TRUE(guard.maybe_guard(duplicate_read).has_value());
+
+    ToolCall grep_call = make_call("call-3", "grep",
+        R"({"pattern":"needle","path":"src/app.cpp"})");
+    guard.record_result(grep_call, low_signal_result("not found"));
+
+    ToolCall duplicate_grep = make_call("call-4", "grep",
+        R"({"pattern":"needle","path":"src/app.cpp"})");
+    ASSERT_TRUE(guard.maybe_guard(duplicate_grep).has_value());
+
+    guard.reset();
+
+    EXPECT_FALSE(guard.maybe_guard(duplicate_read).has_value());
+    EXPECT_FALSE(guard.maybe_guard(duplicate_grep).has_value());
+}
+
 // 守住原有保护:失败结果的关键词细分仍然生效,真正的 "old_string not found"
 // 失败重复一次后第二次同参调用应被拦截。
 TEST(AgentLoopDoomGuard, FailureKeywordsStillTriggerExactRepeatGuard) {

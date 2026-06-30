@@ -20,22 +20,15 @@ void emit(CommandContext& ctx, const std::string& msg) {
     ctx.state.chat_follow_tail = true;
 }
 
-std::string skeleton_body_internal(bool claude_exists, bool agent_exists) {
+std::string skeleton_body_internal(bool claude_exists) {
     std::ostringstream oss;
-    if (claude_exists || agent_exists) {
-        // Prefer mentioning the file that actually exists so the example
-        // command is immediately copy-paste-runnable.
-        const char* rename_target = claude_exists ? "CLAUDE.md" : "AGENT.md";
+    if (claude_exists) {
         oss << "<!--\n"
-            << "  acecode already auto-reads the following files it found in this\n"
-            << "  directory: "
-            << (claude_exists ? "CLAUDE.md" : "")
-            << ((claude_exists && agent_exists) ? ", " : "")
-            << (agent_exists ? "AGENT.md" : "")
-            << ".\n"
-            << "  If you want acecode's native semantics, you can rename it:\n"
-            << "    mv " << rename_target << " ACECODE.md\n"
-            << "  ACECODE.md wins over AGENT.md and CLAUDE.md when all three are present.\n"
+            << "  acecode found CLAUDE.md in this directory. AGENT.md is the\n"
+            << "  native project-instructions file; CLAUDE.md is read only as a\n"
+            << "  compatibility fallback when AGENT.md is absent.\n"
+            << "  If you want to migrate the legacy file, you can rename it:\n"
+            << "    mv CLAUDE.md AGENT.md\n"
             << "-->\n\n";
     }
     oss << "# Project Overview\n\n"
@@ -53,13 +46,13 @@ std::string skeleton_body_internal(bool claude_exists, bool agent_exists) {
 // comprehensive auth probe — false positives just reach AgentLoop which
 // surfaces the HTTP error normally. Rationale in design.md D4.
 // Body adapted from claudecodehaha/src/commands/init.ts OLD_INIT_PROMPT with
-// CLAUDE.md → ACECODE.md, Claude Code → acecode, and an acecode-specific file
-// prefix. The wording ("not obvious instructions", "avoid listing every
+// Claude Code → acecode and an acecode-specific AGENT.md file prefix. The
+// wording ("not obvious instructions", "avoid listing every
 // component") carries over verbatim because it is the load-bearing part that
 // keeps the LLM from producing boilerplate.
 std::string build_init_prompt_body() {
     return
-        "Please analyze this codebase and create an ACECODE.md file, which "
+        "Please analyze this codebase and create an AGENT.md file, which "
         "will be given to future instances of acecode to operate in this "
         "repository.\n"
         "\n"
@@ -73,8 +66,8 @@ std::string build_init_prompt_body() {
         "understand.\n"
         "\n"
         "Usage notes:\n"
-        "- If there's already an ACECODE.md, suggest improvements to it.\n"
-        "- When you make the initial ACECODE.md, do not repeat yourself and "
+        "- If there's already an AGENT.md, suggest improvements to it.\n"
+        "- When you make the initial AGENT.md, do not repeat yourself and "
         "do not include obvious instructions like \"Provide helpful error "
         "messages to users\", \"Write unit tests for all new utilities\", "
         "\"Never include sensitive information (API keys, tokens) in code or "
@@ -93,7 +86,7 @@ std::string build_init_prompt_body() {
         "- Be sure to prefix the file with the following text:\n"
         "\n"
         "```\n"
-        "# ACECODE.md\n"
+        "# AGENT.md\n"
         "\n"
         "This file provides guidance to acecode "
         "(https://github.com/tmoonlight/acecode) when working with code in "
@@ -104,7 +97,7 @@ std::string build_init_prompt_body() {
 std::string improvement_suffix() {
     return
         "\n"
-        "NOTE: ACECODE.md already exists in this directory. Read it first "
+        "NOTE: AGENT.md already exists in this directory. Read it first "
         "with the file_read tool, identify specific gaps against what the "
         "codebase actually shows, and apply targeted edits via the "
         "file_edit_tool. If the file is already accurate and well-written, "
@@ -112,50 +105,35 @@ std::string improvement_suffix() {
         "silently.\n";
 }
 
-std::string migration_suffix(bool claude_exists, bool agent_exists) {
+std::string migration_suffix(bool claude_exists) {
     std::ostringstream oss;
     oss << "\n"
         << "NOTE: ";
-    if (claude_exists && agent_exists) {
-        // Match the project_instructions default filenames priority
-        // ["ACECODE.md", "AGENT.md", "CLAUDE.md"] so `/init` does not reverse
-        // the precedence the loader would honor at read time.
-        oss << "Both AGENT.md and CLAUDE.md already exist in this directory "
-               "but ACECODE.md does not. Prefer AGENT.md as the primary base "
-               "— read it first and adapt its content into a new ACECODE.md "
-               "via the file_write_tool. Cross-check CLAUDE.md for any "
-               "additional information not already present in AGENT.md. ";
-    } else if (agent_exists) {
-        oss << "AGENT.md already exists in this directory but ACECODE.md does "
-               "not. Read AGENT.md first and adapt its content into a new "
-               "ACECODE.md via the file_write_tool rather than writing from "
-               "scratch. ";
-    } else {
-        oss << "CLAUDE.md already exists in this directory but ACECODE.md "
+    if (claude_exists) {
+        oss << "CLAUDE.md already exists in this directory but AGENT.md "
                "does not. Read CLAUDE.md first and adapt its content into a "
-               "new ACECODE.md via the file_write_tool rather than writing "
+               "new AGENT.md via the file_write_tool rather than writing "
                "from scratch. ";
     }
-    oss << "Do not delete or modify the legacy file(s) on disk — leave them "
-           "alone. After writing ACECODE.md, tell the user that ACECODE.md "
-           "now takes precedence so they can delete the legacy file(s) or "
-           "keep them (acecode reads them as a fallback either way).\n";
+    oss << "Do not delete or modify CLAUDE.md on disk — leave it alone. After "
+           "writing AGENT.md, tell the user that AGENT.md now takes precedence "
+           "so they can delete CLAUDE.md or keep it as a fallback.\n";
     return oss.str();
 }
 
 void cmd_init(CommandContext& ctx, const std::string& /*args*/) {
     fs::path cwd = path_from_utf8(ctx.agent_loop.cwd());
     std::error_code ec;
-    bool acecode_exists = fs::exists(cwd / "ACECODE.md", ec);
+    bool agent_exists = fs::exists(cwd / "AGENT.md", ec);
 
     if (!has_usable_init_provider(ctx.config)) {
         // Offline fallback: write the static skeleton, same refuse-on-exists
         // behavior as the pre-LLM implementation. The skeleton helper already
         // tolerates the case where neither legacy file is present.
-        fs::path target = cwd / "ACECODE.md";
-        if (acecode_exists) {
+        fs::path target = cwd / "AGENT.md";
+        if (agent_exists) {
             emit(ctx,
-                 "ACECODE.md already exists at " + path_to_utf8_generic(target) +
+                 "AGENT.md already exists at " + path_to_utf8_generic(target) +
                  " — no model is configured, so /init cannot propose "
                  "improvements. Edit it by hand, or run /configure first and "
                  "re-run /init to get an LLM-driven improvement pass.");
@@ -169,7 +147,7 @@ void cmd_init(CommandContext& ctx, const std::string& /*args*/) {
                  " for writing.");
             return;
         }
-        ofs << build_acecode_md_skeleton(cwd);
+        ofs << build_agent_md_skeleton(cwd);
         emit(ctx,
              "Created " + path_to_utf8_generic(target) +
              " (offline skeleton — no model is configured, run /configure to "
@@ -181,7 +159,7 @@ void cmd_init(CommandContext& ctx, const std::string& /*args*/) {
     std::string prompt = build_init_prompt(cwd);
 
     const std::string ack =
-        "[Invoking /init — analyzing codebase and authoring ACECODE.md...]";
+        "[Invoking /init — analyzing codebase and authoring AGENT.md...]";
 
     {
         std::lock_guard<std::mutex> lk(ctx.state.mu);
@@ -205,24 +183,29 @@ void cmd_init(CommandContext& ctx, const std::string& /*args*/) {
 
 } // namespace
 
-std::string build_acecode_md_skeleton(const fs::path& cwd) {
+std::string build_agent_md_skeleton(const fs::path& cwd) {
     std::error_code ec;
     bool claude = fs::exists(cwd / "CLAUDE.md", ec);
-    bool agent = fs::exists(cwd / "AGENT.md", ec);
-    return skeleton_body_internal(claude, agent);
+    return skeleton_body_internal(claude);
 }
 
 std::string build_init_prompt(const fs::path& cwd) {
     std::error_code ec;
-    bool acecode_exists = fs::exists(cwd / "ACECODE.md", ec);
-    bool claude_exists = fs::exists(cwd / "CLAUDE.md", ec);
     bool agent_exists = fs::exists(cwd / "AGENT.md", ec);
+    bool claude_exists = fs::exists(cwd / "CLAUDE.md", ec);
 
     std::string out = build_init_prompt_body();
-    if (acecode_exists) {
+    if (agent_exists) {
         out += improvement_suffix();
-    } else if (claude_exists || agent_exists) {
-        out += migration_suffix(claude_exists, agent_exists);
+        if (claude_exists) {
+            out +=
+                "\nAlso read CLAUDE.md and cross-check it for additional "
+                "project guidance not already present in AGENT.md. Preserve "
+                "AGENT.md as the file you edit; do not delete or modify "
+                "CLAUDE.md.\n";
+        }
+    } else if (claude_exists) {
+        out += migration_suffix(claude_exists);
     }
     return out;
 }
@@ -242,7 +225,7 @@ bool has_usable_init_provider(const AppConfig& cfg) {
 void register_init_command(CommandRegistry& registry) {
     registry.register_command(
         {"init",
-         "Analyze this codebase and generate (or improve) ACECODE.md",
+         "Analyze this codebase and generate (or improve) AGENT.md",
          cmd_init});
 }
 

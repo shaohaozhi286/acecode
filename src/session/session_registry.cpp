@@ -905,7 +905,7 @@ BuiltinCommandResult SessionRegistry::execute_builtin_command(
     }
 
     const std::filesystem::path cwd = path_from_utf8(entry->cwd);
-    const std::filesystem::path target = cwd / "ACECODE.md";
+    const std::filesystem::path target = cwd / "AGENT.md";
 
     bool provider_usable = false;
     if (entry->provider_slot) {
@@ -916,7 +916,7 @@ BuiltinCommandResult SessionRegistry::execute_builtin_command(
         std::error_code ec;
         if (std::filesystem::exists(target, ec)) {
             entry->loop->emit_system_message(
-                "ACECODE.md already exists at " + path_to_utf8_generic(target) +
+                "AGENT.md already exists at " + path_to_utf8_generic(target) +
                 " - no model is configured, so /init cannot propose improvements. "
                 "Edit it by hand, or run /configure first and re-run /init to get "
                 "an LLM-driven improvement pass.");
@@ -927,9 +927,9 @@ BuiltinCommandResult SessionRegistry::execute_builtin_command(
         if (!ofs.is_open()) {
             entry->loop->emit_system_message(
                 "Failed to open " + path_to_utf8_generic(target) + " for writing.");
-            return {BuiltinCommandStatus::Failed, "failed to open ACECODE.md for writing"};
+            return {BuiltinCommandStatus::Failed, "failed to open AGENT.md for writing"};
         }
-        ofs << build_acecode_md_skeleton(cwd);
+        ofs << build_agent_md_skeleton(cwd);
         entry->loop->emit_system_message(
             "Created " + path_to_utf8_generic(target) +
             " (offline skeleton - no model is configured, run /configure to get "
@@ -938,7 +938,7 @@ BuiltinCommandResult SessionRegistry::execute_builtin_command(
     }
 
     entry->loop->emit_system_message(
-        "[Invoking /init - analyzing codebase and authoring ACECODE.md...]");
+        "[Invoking /init - analyzing codebase and authoring AGENT.md...]");
     const std::string display = request.display_text.empty()
         ? std::string{"/init"}
         : request.display_text;

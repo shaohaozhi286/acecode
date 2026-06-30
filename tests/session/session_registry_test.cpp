@@ -30,6 +30,7 @@
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <filesystem>
 #include <functional>
 #include <fstream>
@@ -62,6 +63,39 @@ using acecode::ToolExecutor;
 using acecode::compute_cwd_hash;
 
 namespace {
+
+#ifdef _WIN32
+constexpr const char* kHomeEnvName = "USERPROFILE";
+void set_home_env(const std::string& value) { _putenv_s(kHomeEnvName, value.c_str()); }
+void clear_home_env() { _putenv_s(kHomeEnvName, ""); }
+#else
+constexpr const char* kHomeEnvName = "HOME";
+void set_home_env(const std::string& value) { setenv(kHomeEnvName, value.c_str(), 1); }
+void clear_home_env() { unsetenv(kHomeEnvName); }
+#endif
+
+class ScopedHomeOverride {
+public:
+    explicit ScopedHomeOverride(const std::filesystem::path& home) {
+        if (const char* current = std::getenv(kHomeEnvName)) {
+            had_old_ = true;
+            old_ = current;
+        }
+        set_home_env(home.string());
+    }
+
+    ~ScopedHomeOverride() {
+        if (had_old_) {
+            set_home_env(old_);
+        } else {
+            clear_home_env();
+        }
+    }
+
+private:
+    bool had_old_ = false;
+    std::string old_;
+};
 
 // 构造一个最小的 SessionRegistry: provider_accessor 返回 nullptr(任何 LLM
 // 调用会立刻退出),tools 是空的 ToolExecutor,permissions 是默认实例。
@@ -141,6 +175,64 @@ public:
     bool is_authenticated() override { return true; }
     std::string model() const override { return "auto-compact-stub"; }
     void set_model(const std::string&) override {}
+};
+
+class CaptureRequestProvider : public acecode::LlmProvider {
+public:
+    acecode::ChatResponse chat(
+        const std::vector<acecode::ChatMessage>& messages,
+        const std::vector<acecode::ToolDef>&) override {
+        record(messages);
+        acecode::ChatResponse resp;
+        resp.content = "ok";
+        resp.finish_reason = "stop";
+        return resp;
+    }
+
+    void chat_stream(const std::vector<acecode::ChatMessage>& messages,
+                     const std::vector<acecode::ToolDef>&,
+                     const acecode::StreamCallback& callback,
+                     std::atomic<bool>* = nullptr) override {
+        record(messages);
+
+        acecode::StreamEvent delta;
+        delta.type = acecode::StreamEventType::Delta;
+        delta.content = "ok";
+        callback(delta);
+
+        acecode::StreamEvent done;
+        done.type = acecode::StreamEventType::Done;
+        callback(done);
+    }
+
+    bool wait_for_request(std::chrono::milliseconds timeout) const {
+        std::unique_lock<std::mutex> lk(mu_);
+        return cv_.wait_for(lk, timeout, [&] { return !requests_.empty(); });
+    }
+
+    std::vector<acecode::ChatMessage> first_request() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (requests_.empty()) return {};
+        return requests_.front();
+    }
+
+    std::string name() const override { return "capture-request-stub"; }
+    bool is_authenticated() override { return true; }
+    std::string model() const override { return "capture-request-stub"; }
+    void set_model(const std::string&) override {}
+
+private:
+    void record(const std::vector<acecode::ChatMessage>& messages) {
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            requests_.push_back(messages);
+        }
+        cv_.notify_all();
+    }
+
+    mutable std::mutex mu_;
+    mutable std::condition_variable cv_;
+    std::vector<std::vector<acecode::ChatMessage>> requests_;
 };
 
 class CompleteGoalStubProvider : public acecode::LlmProvider {
@@ -447,7 +539,7 @@ TEST(LocalSessionClient, InitBuiltinNoProviderWritesSkeletonWithoutUserMessage) 
     auto result = client.execute_builtin_command(id, req);
 
     EXPECT_EQ(result.status, acecode::BuiltinCommandStatus::Accepted);
-    EXPECT_TRUE(std::filesystem::exists(cwd / "ACECODE.md"));
+    EXPECT_TRUE(std::filesystem::exists(cwd / "AGENT.md"));
 
     auto* entry = fx.registry.lookup(id);
     ASSERT_NE(entry, nullptr);
@@ -575,10 +667,57 @@ TEST(LocalSessionClient, DaemonSessionAutoCompactsWithEmptyCallbacks) {
     std::filesystem::remove_all(cwd, ec);
 }
 
-TEST(LocalSessionClient, InitBuiltinNoProviderRefusesExistingAcecode) {
+TEST(LocalSessionClient, DaemonSessionInjectsAgentMdProjectInstructions) {
+    auto home = temp_cwd("project_instructions_home");
+    ScopedHomeOverride scoped_home(home);
+    auto cwd = home / "repo";
+    std::filesystem::create_directories(cwd);
+    {
+        std::ofstream ofs(cwd / "AGENT.md", std::ios::binary);
+        ofs << "# daemon rules\nprefer session registry\n";
+    }
+
+    ToolExecutor tools;
+    PermissionManager permissions;
+    acecode::ProjectInstructionsConfig project_cfg;
+    auto provider = std::make_shared<CaptureRequestProvider>();
+
+    SessionRegistryDeps deps;
+    deps.provider_accessor = [provider] { return provider; };
+    deps.tools = &tools;
+    deps.cwd = cwd.string();
+    deps.project_instructions_cfg = &project_cfg;
+    deps.template_permissions = &permissions;
+    SessionRegistry registry(deps);
+    LocalSessionClient client(registry);
+
+    SessionOptions opts;
+    opts.cwd = cwd.string();
+    auto id = client.create_session(opts);
+
+    EXPECT_TRUE(client.send_input(id, "follow repo rules"));
+    ASSERT_TRUE(provider->wait_for_request(5s));
+
+    auto request = provider->first_request();
+    bool saw_project_context = false;
+    for (const auto& msg : request) {
+        if (msg.content.find("# Project Instructions") != std::string::npos &&
+            msg.content.find("AGENT.md") != std::string::npos &&
+            msg.content.find("prefer session registry") != std::string::npos) {
+            saw_project_context = true;
+        }
+    }
+    EXPECT_TRUE(saw_project_context);
+
+    registry.destroy(id);
+    std::error_code ec;
+    std::filesystem::remove_all(home, ec);
+}
+
+TEST(LocalSessionClient, InitBuiltinNoProviderRefusesExistingAgentMd) {
     auto cwd = temp_cwd("init_builtin_existing");
-    const auto target = cwd / "ACECODE.md";
-    const std::string original = "# ACECODE.md\n\nExisting guidance.\n";
+    const auto target = cwd / "AGENT.md";
+    const std::string original = "# AGENT.md\n\nExisting guidance.\n";
     {
         std::ofstream ofs(target, std::ios::binary);
         ofs << original;

@@ -305,9 +305,8 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     // ----- 装配 daemon-side 的 Provider / Tools / SessionRegistry -----
     // 这一段重现了 main.cpp 在 TUI 路径下的初始化,但缩到 daemon 必要项:
     //   - LlmProvider (与 TUI 等价的三层解析)
-    //   - 7 个内置工具 + skills / memory 工具暂留(配置上 v1 daemon 不暴露
-    //     skill/memory 命令行入口,工具由 LLM 通过 tool_calls 间接调用 — 留
-    //     给后续 change 加 SkillRegistry / MemoryRegistry 真接入)
+    //   - 7 个内置工具 + skills 工具; project instructions 通过 SessionRegistry
+    //     接到每个 AgentLoop,与 TUI 保持一致
     //   - PermissionManager (template,SessionRegistry 给每个 session 复制 mode)
     //   - SessionRegistry + LocalSessionClient
     //   - WebServer (HTTP + WebSocket)
@@ -412,7 +411,7 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     reg_deps.skill_registry       = &skill_registry;
     reg_deps.memory_registry      = nullptr;
     reg_deps.memory_cfg           = nullptr;
-    reg_deps.project_instructions_cfg = nullptr;
+    reg_deps.project_instructions_cfg = &cfg_mut.project_instructions;
     reg_deps.custom_instructions_cfg = &cfg_mut.custom_instructions;
     reg_deps.hook_manager         = &hook_manager;
     reg_deps.template_permissions = &template_perm;

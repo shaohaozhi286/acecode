@@ -2,7 +2,7 @@
 
 // 模型池负载监控(model-pool load monitor)。
 //
-// 背景:平安 wizard-ai code_pilot 的 PUB 模型池有一个负载查询接口
+// 背景:wizard-ai code_pilot 的 PUB 模型池有一个负载查询接口
 //   GET https://wizard-ai.paic.com.cn/code_pilot/api/monitor/getModelPoolStatus
 // 返回每个池的实时 usageRate(0..100 负载百分比)和 maxWindowTokens(池窗口)。
 // 本服务每 30s 轮询一次,缓存结果供 TUI / daemon / web 展示负载,并把

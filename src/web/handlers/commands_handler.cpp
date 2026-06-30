@@ -35,7 +35,7 @@ nlohmann::json build_commands_payload(const SkillRegistry& global_skills,
     nlohmann::json builtins = nlohmann::json::array();
     builtins.push_back({
         {"name", "init"},
-        {"description", "Analyze this codebase and generate (or improve) ACECODE.md"},
+        {"description", "Analyze this codebase and generate (or improve) AGENT.md"},
     });
     builtins.push_back({
         {"name", "compact"},

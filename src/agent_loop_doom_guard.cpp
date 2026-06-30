@@ -216,6 +216,11 @@ void AgentLoopDoomGuard::begin_model_turn() {
     }
 }
 
+void AgentLoopDoomGuard::reset() {
+    attempts_.clear();
+    cooldown_turns_.clear();
+}
+
 std::optional<ToolResult> AgentLoopDoomGuard::maybe_guard(const ToolCall& call) {
     CallKey key = build_key(call);
     if (cooldown_active(key.tool)) {

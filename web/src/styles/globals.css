@@ -1684,13 +1684,19 @@ body {
   border-color: var(--ace-accent-soft);
 }
 
-/* SlashDropdown 命令 token:textarea 保留真实 "/command" 值,overlay 负责视觉 token。
-   图标和命令名作为一个 inline-flex 原子块渲染;textarea 左 padding 增加同等
-   图标宽度,让真实 caret 与 overlay 后续正文尽量保持同列。 */
-.ace-slash-input-with-icon {
-  padding-left: calc(var(--ace-slash-base-left, 12px) + 18px) !important;
+/* Rich composer command token: token and plain text live in the same editable
+   layout, so wrapped lines use one browser caret/text model. */
+.ace-rich-composer-input {
+  display: block;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  scrollbar-width: thin;
 }
-.ace-slash-chip-unit {
+.ace-rich-composer-input:empty::before {
+  content: "";
+}
+.ace-rich-command-token {
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -1702,23 +1708,22 @@ body {
   white-space: nowrap;
   color: var(--ace-accent);
 }
-.ace-slash-chip-icon {
-  display: inline-flex;
+.ace-rich-command-token::before {
+  content: "";
+  display: inline-block;
   flex: 0 0 14px;
   width: 14px;
-  height: 20px;
-  align-items: center;
-  justify-content: center;
-  color: var(--ace-accent);
-}
-.ace-slash-chip-icon .ace-icon {
-  display: block;
-}
-.ace-slash-chip {
-  display: inline-block;
-  color: var(--ace-accent);
-  background: transparent;
-  line-height: 20px;
+  min-width: 14px;
+  height: 14px;
+  background-color: currentColor;
+  -webkit-mask-image: var(--ace-rich-command-token-icon-url);
+  mask-image: var(--ace-rich-command-token-icon-url);
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: contain;
+  mask-size: contain;
 }
 
 /* transcript 用户气泡里的斜杠命令徽标:skill 图标 + 蓝色命令名,hover 浮出描述。
@@ -2639,6 +2644,33 @@ body {
   min-height: 0;
   border: 0;
   background: var(--ace-code-bg);
+}
+.ace-side-docx-preview,
+.ace-side-spreadsheet-preview {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+  overflow: auto;
+  background: var(--ace-surface);
+  color: var(--ace-fg);
+}
+.ace-side-docx-preview {
+  padding: 16px;
+}
+.ace-side-docx-preview .docx-wrapper {
+  background: var(--ace-surface-alt);
+  padding: 16px 0;
+}
+.ace-side-docx-preview .docx {
+  box-shadow: 0 1px 8px rgba(15, 23, 42, 0.16);
+}
+.ace-side-spreadsheet-preview {
+  position: relative;
+  background: #fff;
+}
+.ace-side-spreadsheet-preview .x-spreadsheet {
+  color: #111827;
 }
 
 /* Queue card list (above InputBar): 排队中的待发送消息卡片栈。

@@ -297,8 +297,7 @@ Both `main.cpp` and `daemon/worker.cpp` call `proxy_resolver().init(cfg.network)
     "max_depth": 8,
     "max_bytes": 262144,
     "max_total_bytes": 1048576,
-    "filenames": ["ACECODE.md", "AGENT.md", "CLAUDE.md"],
-    "read_agent_md": true,
+    "filenames": ["AGENT.md", "CLAUDE.md"],
     "read_claude_md": true
   },
   "models_dev": {

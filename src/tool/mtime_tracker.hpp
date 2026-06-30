@@ -113,6 +113,7 @@ public:
                                         const std::string& tool_call_id,
                                         const std::string& persisted_output_path);
     void invalidate_read_observations(const std::string& path);
+    void clear_read_observations();
 
     // Check if a file has been externally modified since the last recorded read.
     // Returns true if the file was modified externally (mtime changed).

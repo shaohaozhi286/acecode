@@ -1470,6 +1470,61 @@ TEST(WebServerHttp, FilesBlobEndpointServesPdfPreview) {
         << "content-type: " << content_type;
 }
 
+// /api/files/blob serves modern Office files for browser rendering while
+// keeping legacy binary doc/xls formats unsupported.
+TEST(WebServerHttp, FilesBlobEndpointServesModernOfficePreviewOnly) {
+    WebServerFixture fx;
+
+    auto docs_dir = fx.cwd_dir / "docs";
+    std::filesystem::create_directories(docs_dir);
+    const std::vector<std::pair<std::string, std::string>> supported = {
+        {
+            "proposal.docx",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        },
+        {
+            "report.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        },
+        {
+            "macro.xlsm",
+            "application/vnd.ms-excel.sheet.macroEnabled.12",
+        },
+    };
+
+    for (const auto& [name, expected_type] : supported) {
+        const std::string body = "office-bytes:" + name;
+        {
+            std::ofstream ofs(docs_dir / name, std::ios::binary);
+            ofs << body;
+        }
+
+        auto resp = cpr::Get(cpr::Url{fx.url("/api/files/blob")},
+                             cpr::Parameters{{"cwd", fx.cwd}, {"path", "docs/" + name}});
+        ASSERT_EQ(resp.status_code, 200) << resp.text;
+        EXPECT_EQ(resp.text, body);
+        const auto lower = resp.header.find("content-type");
+        const auto upper = resp.header.find("Content-Type");
+        const std::string content_type =
+            lower != resp.header.end() ? lower->second :
+            (upper != resp.header.end() ? upper->second : "");
+        EXPECT_NE(content_type.find(expected_type), std::string::npos)
+            << name << " content-type: " << content_type;
+    }
+
+    for (const auto& name : {"legacy.doc", "legacy.xls"}) {
+        {
+            std::ofstream ofs(docs_dir / name, std::ios::binary);
+            ofs << "legacy-office-bytes";
+        }
+        auto resp = cpr::Get(cpr::Url{fx.url("/api/files/blob")},
+                             cpr::Parameters{{"cwd", fx.cwd}, {"path", std::string("docs/") + name}});
+        ASSERT_EQ(resp.status_code, 415) << resp.text;
+        auto body = json::parse(resp.text);
+        EXPECT_EQ(body["error"], "unsupported file type");
+    }
+}
+
 // 场景:/api/files 遇到中文文件夹/文件名时必须返回 UTF-8 JSON,不能抛异常变 500。
 TEST(WebServerHttp, FilesEndpointReturnsUtf8ForChinesePaths) {
     WebServerFixture fx;
@@ -2371,6 +2426,78 @@ TEST(WebServerHttp, PutCustomInstructionsRejectsInvalidPayload) {
     auto j = json::parse(r.text);
     EXPECT_EQ(j["error"], "BAD_REQUEST");
     EXPECT_EQ(fx.cfg.custom_instructions.text_snapshot(), "keep me");
+}
+
+TEST(WebServerHttp, GetConnectorsReturnsConfiguredList) {
+    WebServerFixture fx;
+    fx.cfg.connectors.push_back({
+        "alpha-connector",
+        "Alpha Connector",
+        "Connect alpha providers",
+        true,
+    });
+
+    auto r = cpr::Get(cpr::Url{fx.url("/api/config/connectors")});
+    ASSERT_EQ(r.status_code, 200) << r.text;
+    auto j = json::parse(r.text);
+    ASSERT_TRUE(j.contains("connectors"));
+    ASSERT_EQ(j["connectors"].size(), 1u);
+    EXPECT_EQ(j["connectors"][0]["id"], "alpha-connector");
+    EXPECT_EQ(j["connectors"][0]["name"], "Alpha Connector");
+    EXPECT_EQ(j["connectors"][0]["enabled"], true);
+}
+
+TEST(WebServerHttp, PutConnectorsPersistsConfiguredList) {
+    WebServerFixture fx;
+    json req = {{"connectors", json::array({
+        {
+            {"id", "alpha-connector"},
+            {"name", "Alpha Connector"},
+            {"description", "Connect alpha providers"},
+            {"enabled", true},
+        },
+        {
+            {"id", "beta-connector"},
+            {"name", "Beta Connector"},
+            {"description", "Remote conversation channel"},
+            {"enabled", false},
+        },
+    })}};
+
+    auto put = cpr::Put(cpr::Url{fx.url("/api/config/connectors")},
+                        cpr::Header{{"Content-Type", "application/json"}},
+                        cpr::Body{req.dump()});
+    ASSERT_EQ(put.status_code, 200) << put.text;
+    auto body = json::parse(put.text);
+    ASSERT_EQ(body["connectors"].size(), 2u);
+    ASSERT_EQ(fx.cfg.connectors.size(), 2u);
+    EXPECT_EQ(fx.cfg.connectors[1].id, "beta-connector");
+    EXPECT_FALSE(fx.cfg.connectors[1].enabled);
+
+    std::ifstream ifs(fx.tmp_dir / "config.json");
+    ASSERT_TRUE(ifs.is_open());
+    auto saved = json::parse(ifs);
+    ASSERT_TRUE(saved.contains("connectors"));
+    EXPECT_EQ(saved["connectors"][1]["id"], "beta-connector");
+    EXPECT_EQ(saved["connectors"][1]["enabled"], false);
+}
+
+TEST(WebServerHttp, PutConnectorsRejectsDuplicateIds) {
+    WebServerFixture fx;
+    fx.cfg.connectors.push_back({"keep", "Keep", "Existing connector", true});
+    json req = {{"connectors", json::array({
+        {{"id", "same"}, {"name", "One"}, {"description", ""}, {"enabled", true}},
+        {{"id", "same"}, {"name", "Two"}, {"description", ""}, {"enabled", false}},
+    })}};
+
+    auto r = cpr::Put(cpr::Url{fx.url("/api/config/connectors")},
+                      cpr::Header{{"Content-Type", "application/json"}},
+                      cpr::Body{req.dump()});
+    ASSERT_EQ(r.status_code, 400) << r.text;
+    auto j = json::parse(r.text);
+    EXPECT_EQ(j["error"], "BAD_REQUEST");
+    ASSERT_EQ(fx.cfg.connectors.size(), 1u);
+    EXPECT_EQ(fx.cfg.connectors[0].id, "keep");
 }
 
 // 场景:GET /api/config/upgrade 返回当前升级服务 URL 默认值。

@@ -54,8 +54,6 @@ void apply_project_instructions_section(const nlohmann::json& pj,
         }
         if (!fns.empty()) out.filenames = std::move(fns);
     }
-    if (pj.contains("read_agent_md") && pj["read_agent_md"].is_boolean())
-        out.read_agent_md = pj["read_agent_md"].get<bool>();
     if (pj.contains("read_claude_md") && pj["read_claude_md"].is_boolean())
         out.read_claude_md = pj["read_claude_md"].get<bool>();
 }
@@ -78,12 +76,10 @@ TEST(ConfigMemoryDefaults, StructDefaults) {
     EXPECT_EQ(pi.max_depth, 8);
     EXPECT_EQ(pi.max_bytes, 256u * 1024);
     EXPECT_EQ(pi.max_total_bytes, 1024u * 1024);
-    // 默认 filenames 顺序明确 ACECODE > AGENT > CLAUDE
-    ASSERT_EQ(pi.filenames.size(), 3u);
-    EXPECT_EQ(pi.filenames[0], "ACECODE.md");
-    EXPECT_EQ(pi.filenames[1], "AGENT.md");
-    EXPECT_EQ(pi.filenames[2], "CLAUDE.md");
-    EXPECT_TRUE(pi.read_agent_md);
+    // 默认 filenames 顺序明确 AGENT > CLAUDE
+    ASSERT_EQ(pi.filenames.size(), 2u);
+    EXPECT_EQ(pi.filenames[0], "AGENT.md");
+    EXPECT_EQ(pi.filenames[1], "CLAUDE.md");
     EXPECT_TRUE(pi.read_claude_md);
 }
 
@@ -96,34 +92,33 @@ TEST(ConfigMemoryParse, ExplicitFieldsAccepted) {
     EXPECT_EQ(mem.max_index_bytes, 65536u);
 }
 
-// 场景:project_instructions 段可以关掉 AGENT.md / CLAUDE.md 读取开关
+// 场景:project_instructions 段可以关掉 CLAUDE.md fallback 读取开关
 TEST(ConfigProjectInstructionsParse, ToggleSwitches) {
-    auto j = nlohmann::json::parse(R"({"read_agent_md":false,"read_claude_md":false})");
+    auto j = nlohmann::json::parse(R"({"read_claude_md":false})");
     ProjectInstructionsConfig pi;
     apply_project_instructions_section(j, pi);
-    EXPECT_FALSE(pi.read_agent_md);
     EXPECT_FALSE(pi.read_claude_md);
-    // filenames 数组没有显式传入,应保持默认三项
-    EXPECT_EQ(pi.filenames.size(), 3u);
+    // filenames 数组没有显式传入,应保持默认两项
+    EXPECT_EQ(pi.filenames.size(), 2u);
 }
 
 // 场景:自定义 filenames 顺序生效(例如团队想让 CLAUDE.md 优先)
 TEST(ConfigProjectInstructionsParse, CustomFilenamesOrder) {
-    auto j = nlohmann::json::parse(R"({"filenames":["CLAUDE.md","ACECODE.md"]})");
+    auto j = nlohmann::json::parse(R"({"filenames":["CLAUDE.md","AGENT.md"]})");
     ProjectInstructionsConfig pi;
     apply_project_instructions_section(j, pi);
     ASSERT_EQ(pi.filenames.size(), 2u);
     EXPECT_EQ(pi.filenames[0], "CLAUDE.md");
-    EXPECT_EQ(pi.filenames[1], "ACECODE.md");
+    EXPECT_EQ(pi.filenames[1], "AGENT.md");
 }
 
-// 场景:显式给了空数组时回退到默认三项(避免 misconfig 把项目指令完全关闭)
+// 场景:显式给了空数组时回退到默认两项(避免 misconfig 把项目指令完全关闭)
 TEST(ConfigProjectInstructionsParse, EmptyFilenamesFallsBackToDefault) {
     auto j = nlohmann::json::parse(R"({"filenames":[]})");
     ProjectInstructionsConfig pi;
     apply_project_instructions_section(j, pi);
-    ASSERT_EQ(pi.filenames.size(), 3u);
-    EXPECT_EQ(pi.filenames[0], "ACECODE.md");
+    ASSERT_EQ(pi.filenames.size(), 2u);
+    EXPECT_EQ(pi.filenames[0], "AGENT.md");
 }
 
 // 场景:filenames 里混入空字符串时,空项被忽略,非空项正常进入
@@ -172,7 +167,7 @@ TEST(ConfigValidation, ProjectInstructionsTotalMustNotBeLessThanPerFile) {
 
 TEST(ConfigValidation, ProjectInstructionsFilenamesMustNotContainSeparators) {
     AppConfig cfg;
-    cfg.project_instructions.filenames = {"ACECODE.md", "sub/AGENT.md"};
+    cfg.project_instructions.filenames = {"AGENT.md", "sub/CLAUDE.md"};
     auto errs = validate_config(cfg);
     bool found = false;
     for (const auto& e : errs) {

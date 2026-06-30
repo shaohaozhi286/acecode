@@ -150,7 +150,7 @@ TEST_F(SkillRegistryCompatTest, LargeUtf8SkillNotGarbledWhenReadBudgetSplitsChar
     fs::path dir = root / "general" / "big-skill";
     fs::create_directories(dir);
 
-    const std::string description = u8"快乐平安 IM 聊天 CLI 工具";
+    const std::string description = u8"企业 IM 聊天 CLI 工具";
     const std::string header =
         "---\n"
         "name: big-skill\n"

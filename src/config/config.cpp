@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <initializer_list>
 #include <limits>
+#include <set>
 
 namespace fs = std::filesystem;
 
@@ -103,6 +104,111 @@ std::string normalize_upgrade_base_url(std::string raw) {
 bool is_valid_upgrade_base_url(const std::string& raw) {
     const std::string url = normalize_upgrade_base_url(raw);
     return url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0;
+}
+
+nlohmann::json connectors_to_json(const std::vector<ConnectorConfig>& connectors) {
+    nlohmann::json items = nlohmann::json::array();
+    for (const auto& connector : connectors) {
+        items.push_back({
+            {"id", connector.id},
+            {"name", connector.name},
+            {"description", connector.description},
+            {"enabled", connector.enabled},
+        });
+    }
+    return items;
+}
+
+bool parse_connectors_json(const nlohmann::json& value,
+                           std::vector<ConnectorConfig>& out,
+                           std::string* error) {
+    if (!value.is_array()) {
+        if (error) *error = "connectors must be an array";
+        return false;
+    }
+
+    std::vector<ConnectorConfig> parsed;
+    std::set<std::string> seen_ids;
+    parsed.reserve(value.size());
+    for (std::size_t i = 0; i < value.size(); ++i) {
+        const auto& item = value[i];
+        auto fail = [&](const std::string& message) {
+            if (error) {
+                *error = "connectors[" + std::to_string(i) + "] " + message;
+            }
+            return false;
+        };
+        if (!item.is_object()) return fail("must be an object");
+        if (!item.contains("id") || !item["id"].is_string()) {
+            return fail("must contain string id");
+        }
+        if (!item.contains("name") || !item["name"].is_string()) {
+            return fail("must contain string name");
+        }
+        if (!item.contains("description") || !item["description"].is_string()) {
+            return fail("must contain string description");
+        }
+        if (!item.contains("enabled") || !item["enabled"].is_boolean()) {
+            return fail("must contain boolean enabled");
+        }
+
+        ConnectorConfig connector;
+        connector.id = trim_ascii_copy(item["id"].get<std::string>());
+        connector.name = item["name"].get<std::string>();
+        connector.description = item["description"].get<std::string>();
+        connector.enabled = item["enabled"].get<bool>();
+        if (connector.id.empty()) return fail("id must not be empty");
+        if (connector.name.empty()) return fail("name must not be empty");
+        if (!seen_ids.insert(connector.id).second) {
+            return fail("id must be unique: " + connector.id);
+        }
+        parsed.push_back(std::move(connector));
+    }
+
+    out = std::move(parsed);
+    return true;
+}
+
+void load_connectors_lenient(const nlohmann::json& value,
+                             std::vector<ConnectorConfig>& out) {
+    if (!value.is_array()) {
+        LOG_WARN("[config] 'connectors' must be an array, ignoring");
+        return;
+    }
+
+    std::set<std::string> seen_ids;
+    std::vector<ConnectorConfig> parsed;
+    parsed.reserve(value.size());
+    for (std::size_t i = 0; i < value.size(); ++i) {
+        const auto& item = value[i];
+        if (!item.is_object() ||
+            !item.contains("id") || !item["id"].is_string() ||
+            !item.contains("name") || !item["name"].is_string() ||
+            !item.contains("description") || !item["description"].is_string()) {
+            LOG_WARN("[config] connectors[" + std::to_string(i) +
+                     "] missing required id/name/description strings, skipping");
+            continue;
+        }
+
+        ConnectorConfig connector;
+        connector.id = trim_ascii_copy(item["id"].get<std::string>());
+        connector.name = item["name"].get<std::string>();
+        connector.description = item["description"].get<std::string>();
+        connector.enabled = item.contains("enabled") && item["enabled"].is_boolean()
+            ? item["enabled"].get<bool>()
+            : true;
+        if (connector.id.empty() || connector.name.empty()) {
+            LOG_WARN("[config] connectors[" + std::to_string(i) +
+                     "] has empty id or name, skipping");
+            continue;
+        }
+        if (!seen_ids.insert(connector.id).second) {
+            LOG_WARN("[config] duplicate connector id '" + connector.id + "', skipping");
+            continue;
+        }
+        parsed.push_back(std::move(connector));
+    }
+    out = std::move(parsed);
 }
 
 ModelProfile legacy_model_profile_from_config(const AppConfig& cfg) {
@@ -199,6 +305,18 @@ std::vector<std::string> validate_config(const AppConfig& cfg) {
     if (cfg.custom_instructions.text_snapshot().size() > kCustomInstructionsMaxBytes) {
         errors.push_back("custom_instructions.text exceeds " +
                          std::to_string(kCustomInstructionsMaxBytes) + " bytes");
+    }
+    std::set<std::string> connector_ids;
+    for (const auto& connector : cfg.connectors) {
+        if (trim_ascii_copy(connector.id).empty()) {
+            errors.push_back("connectors.id must not be empty");
+        } else if (!connector_ids.insert(trim_ascii_copy(connector.id)).second) {
+            errors.push_back("connectors.id must be unique: " + connector.id);
+        }
+        if (connector.name.empty()) {
+            errors.push_back("connectors.name must not be empty for id: " +
+                             connector.id);
+        }
     }
     if (!is_one_of(cfg.ace_browser_bridge.tool_mode, {"progressive", "compact", "full"})) {
         errors.push_back("ace_browser_bridge.tool_mode invalid: " +
@@ -563,12 +681,10 @@ AppConfig load_config() {
                             if (!s.empty()) fns.push_back(std::move(s));
                         }
                     }
-                    // Empty array -> keep the struct's default list so ACECODE.md
-                    // / AGENT.md / CLAUDE.md still work out of the box.
+                    // Empty array -> keep the struct's default list so
+                    // AGENT.md / CLAUDE.md still work out of the box.
                     if (!fns.empty()) cfg.project_instructions.filenames = std::move(fns);
                 }
-                if (pj.contains("read_agent_md") && pj["read_agent_md"].is_boolean())
-                    cfg.project_instructions.read_agent_md = pj["read_agent_md"].get<bool>();
                 if (pj.contains("read_claude_md") && pj["read_claude_md"].is_boolean())
                     cfg.project_instructions.read_claude_md = pj["read_claude_md"].get<bool>();
             }
@@ -577,6 +693,9 @@ AppConfig load_config() {
                 if (cj.contains("text") && cj["text"].is_string()) {
                     cfg.custom_instructions.set_text(cj["text"].get<std::string>());
                 }
+            }
+            if (j.contains("connectors")) {
+                load_connectors_lenient(j["connectors"], cfg.connectors);
             }
             if (j.contains("daemon") && j["daemon"].is_object()) {
                 const auto& dj = j["daemon"];
@@ -1294,8 +1413,6 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
             pij["max_total_bytes"] = cfg.project_instructions.max_total_bytes;
         if (cfg.project_instructions.filenames != pi_d.filenames)
             pij["filenames"] = cfg.project_instructions.filenames;
-        if (cfg.project_instructions.read_agent_md != pi_d.read_agent_md)
-            pij["read_agent_md"] = cfg.project_instructions.read_agent_md;
         if (cfg.project_instructions.read_claude_md != pi_d.read_claude_md)
             pij["read_claude_md"] = cfg.project_instructions.read_claude_md;
         if (!pij.empty()) j["project_instructions"] = pij;
@@ -1306,6 +1423,10 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
         if (custom_text != ci_d.text)
             cij["text"] = custom_text;
         if (!cij.empty()) j["custom_instructions"] = cij;
+
+        if (!cfg.connectors.empty()) {
+            j["connectors"] = connectors_to_json(cfg.connectors);
+        }
 
         ModelsDevConfig md;
         nlohmann::json mdj = nlohmann::json::object();

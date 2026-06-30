@@ -690,6 +690,8 @@ void AgentLoop::apply_compact_result(const CompactResult& result, const std::str
         session_manager_->append_compact_checkpoint(checkpoint);
     }
     messages_ = std::move(replacement_history);
+    MtimeTracker::instance().clear_read_observations();
+    compact_generation_.fetch_add(1, std::memory_order_relaxed);
 }
 
 bool AgentLoop::maybe_run_auto_compact() {
@@ -2375,6 +2377,18 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
     bool skip_auto_compact_once = false;
     AgentLoopDoomGuard doom_guard;
     std::mutex doom_guard_mu;
+    int observed_compact_generation = compact_generation_.load(std::memory_order_relaxed);
+    auto reset_doom_guard_after_compact = [&]() {
+        const int current_generation = compact_generation_.load(std::memory_order_relaxed);
+        if (current_generation == observed_compact_generation) return;
+        {
+            std::lock_guard<std::mutex> lk(doom_guard_mu);
+            doom_guard.reset();
+        }
+        observed_compact_generation = current_generation;
+        LOG_INFO("Doom guard reset after compact generation " +
+                 std::to_string(current_generation));
+    };
 
     // Progress emitter with rate-limiting and coalescing
     std::mutex progress_mu;
@@ -2457,6 +2471,7 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
             std::lock_guard<std::mutex> lk(doom_guard_mu);
             doom_guard.begin_model_turn();
         }
+        reset_doom_guard_after_compact();
         LOG_INFO("--- Agent loop turn " + std::to_string(total_iterations) +
                  ", messages: " + std::to_string(messages_.size()));
 
@@ -2472,6 +2487,7 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
             skip_auto_compact_once = false;
         } else if (should_auto_compact(messages_, context_window_, last_api_prompt_tokens_.load())) {
             maybe_run_auto_compact();
+            reset_doom_guard_after_compact();
         }
 
         // Phase 2: Build API request messages
@@ -2507,6 +2523,7 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
             context_rescue_attempts, last_context_rescue_tokens,
             skip_auto_compact_once, total_iterations,
             turn_timing_status);
+        reset_doom_guard_after_compact();
         if (error_result == HandleErrorResult::Continue) continue;
         if (error_result == HandleErrorResult::Break) break;
 

@@ -246,7 +246,7 @@ static void cmd_help(CommandContext& ctx, const std::string& /*args*/) {
         << "  /mcp      - Manage MCP servers\n"
         << "  /skills   - List, invoke, or reload installed skills\n"
         << "  /memory   - List, view, edit, forget, or reload persistent user memory\n"
-        << "  /init     - Generate an ACECODE.md skeleton in the current directory\n"
+        << "  /init     - Generate an AGENT.md skeleton in the current directory\n"
         << "  /history  - List or clear the per-working-directory input history\n"
         << "  /feedback - Upload current session diagnostics to the configured upgrade service\n"
         << "  /models   - Inspect bundled models.dev registry\n"
