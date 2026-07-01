@@ -42,6 +42,25 @@ TEST(PlanModeTool, EnterPlanModeUsesRuntimeCallback) {
     EXPECT_NE(result.output.find("DO NOT write or edit"), std::string::npos);
 }
 
+TEST(PlanModeTool, EnterPlanModeNoOpsInYoloMode) {
+    auto tool = acecode::create_enter_plan_mode_tool();
+    bool called = false;
+
+    acecode::ToolContext ctx;
+    ctx.current_permission_mode = [] { return std::string{"yolo"}; };
+    ctx.enter_plan_mode = [&] {
+        called = true;
+        return std::string{"C:/tmp/plan.md"};
+    };
+
+    auto result = tool.execute("{}", ctx);
+
+    ASSERT_TRUE(result.success) << result.output;
+    EXPECT_FALSE(called);
+    EXPECT_NE(result.output.find("kept the session in yolo mode"), std::string::npos);
+    EXPECT_EQ(result.output.find("Entered plan mode"), std::string::npos);
+}
+
 TEST(PlanModeTool, ExitPlanModeFailsOutsidePlanMode) {
     auto tool = acecode::create_exit_plan_mode_tool();
 

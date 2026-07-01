@@ -1552,9 +1552,17 @@ ToolContext AgentLoop::build_tool_context(
         emit_todo_updated(todo_payload);
     };
     tool_ctx.current_permission_mode = [this]() {
+        if (permissions_.is_dangerous() ||
+            permissions_.mode() == PermissionMode::Yolo) {
+            return std::string{"yolo"};
+        }
         return std::string(PermissionManager::mode_name(permissions_.mode()));
     };
     tool_ctx.enter_plan_mode = [this]() {
+        if (permissions_.is_dangerous() ||
+            permissions_.mode() == PermissionMode::Yolo) {
+            return std::string{};
+        }
         permissions_.set_mode(PermissionMode::Plan);
         permissions_.clear_session_allows();
         std::string plan_file;

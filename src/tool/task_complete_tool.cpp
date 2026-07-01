@@ -21,8 +21,9 @@ constexpr const char* kToolDescription =
     "- Ask the user to verify your work (the user can verify the visible "
     "tool results on their own)\n"
     "\n"
-    "The `summary` parameter must be a non-empty string describing what you "
-    "accomplished, suitable for the user to read at a glance.";
+    "The `summary` parameter must be a non-empty Markdown string describing "
+    "what you accomplished. Use short paragraphs or bullets for multi-part "
+    "results instead of collapsing everything into one long line.";
 
 static ToolResult execute_task_complete(const std::string& arguments_json,
                                         const ToolContext& /*ctx*/) {
@@ -79,8 +80,9 @@ ToolImpl create_task_complete_tool() {
                 {"type", "string"},
                 {"minLength", 1},
                 {"description",
-                 "Short description of what the agent accomplished in this task. "
-                 "Non-empty; shown to the user as the completion message."}
+                 "Markdown completion summary describing what the agent accomplished. "
+                 "Use bullets or short paragraphs for multi-part results; non-empty "
+                 "and shown to the user as the completion message."}
             }}
         }}
     };

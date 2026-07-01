@@ -14,6 +14,7 @@ import { compactOneLinePreview } from '../lib/compactMessagePreview.js';
 import { normalizeAttachmentList } from '../lib/messageAttachments.js';
 import { renderMarkdown } from '../lib/markdown.js';
 import { codeTextFromCopyButtonTarget, copyTextToClipboard } from '../lib/codeBlockCopy.js';
+import { normalizeTaskCompleteMarkdown } from '../lib/taskCompleteSummary.js';
 import {
   DESKTOP_CONTEXT_ACTION_EVENT,
   DESKTOP_CONTEXT_ACTIONS,
@@ -249,7 +250,9 @@ export const ToolBlock = memo(function ToolBlock({ entry, onReviewToggle, sessio
   const fullOutput = output || askUserQuestionOutput || diffText || tailLines.join('\n') || currentPartial || '';
   const fullToolOutput = joinTooltipParts(expandedInvocationText, fullOutput) || fullOutput;
   const visibleOutput = expanded ? fullToolOutput : (outputPreview || currentPartial || tailLines.join('\n') || '');
-  const taskCompleteText = isTaskComplete ? taskCompleteDisplayText(summary, output) : '';
+  const taskCompleteText = isTaskComplete
+    ? normalizeTaskCompleteMarkdown(taskCompleteDisplayText(summary, output), '完成')
+    : '';
   const taskCompleteHtml = useMemo(
     () => ({ __html: renderMarkdown(taskCompleteText) }),
     [taskCompleteText],

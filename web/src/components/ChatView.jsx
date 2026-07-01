@@ -86,6 +86,7 @@ import { buildAssistantRunDirectives } from '../lib/assistantRunDirectives.js';
 import { activityChromeState } from '../lib/assistantAvatarDisplay.js';
 import { notifySessionListChanged } from '../lib/sessionListEvents.js';
 import { MIN_CHAT_WIDTH, solveSingleContentLayout } from '../lib/singleLayout.js';
+import { completionSummaryMarkdown } from '../lib/taskCompleteSummary.js';
 import {
   PREVIEW_TAB_TYPES,
   activePreviewTab,
@@ -282,10 +283,7 @@ function ActivitySummaryBlock({ item, expanded, onToggle }) {
 }
 
 function completionSummaryText(item) {
-  if (typeof item?.summary === 'string' && item.summary.trim()) return item.summary;
-  const title = typeof item?.title === 'string' ? item.title.trim() : '';
-  if (!title) return '已完成';
-  return title.replace(/^总结[:：]\s*/, '') || title;
+  return completionSummaryMarkdown(item, '已完成');
 }
 
 function CompletionSummaryBlock({ item }) {
@@ -306,12 +304,12 @@ function CompletionSummaryBlock({ item }) {
 
   return (
     <div
-      className="max-w-[88%] ml-8 px-1 py-0.5 text-[12px] leading-5 text-fg break-words"
+      className="max-w-[88%] ml-8 px-1 py-0.5 text-fg break-words"
       title={item?.title || `总结：${summaryText}`}
     >
-      <span className="ace-completion-summary-prefix">总结：</span>
+      <div className="text-[12px] font-semibold text-fg-mute mb-0.5">总结</div>
       <div
-        className="ace-md ace-completion-summary-md"
+        className="ace-md ace-completion-summary-md text-[13px] leading-[1.6]"
         onClick={handleMarkdownClick}
         dangerouslySetInnerHTML={html}
       />

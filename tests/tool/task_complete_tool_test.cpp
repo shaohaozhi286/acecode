@@ -118,6 +118,8 @@ TEST(TaskCompleteTool, SchemaShape) {
     ToolImpl impl = create_task_complete_tool();
     EXPECT_EQ(impl.definition.name, "task_complete");
     EXPECT_FALSE(impl.definition.description.empty());
+    EXPECT_NE(impl.definition.description.find("Markdown"), std::string::npos);
+    EXPECT_NE(impl.definition.description.find("one long line"), std::string::npos);
 
     const auto& params = impl.definition.parameters;
     ASSERT_TRUE(params.contains("required"));
@@ -137,4 +139,7 @@ TEST(TaskCompleteTool, SchemaShape) {
     EXPECT_EQ(summary_schema["type"], "string");
     EXPECT_TRUE(summary_schema.contains("minLength"));
     EXPECT_GE(summary_schema["minLength"].get<int>(), 1);
+    ASSERT_TRUE(summary_schema.contains("description"));
+    EXPECT_NE(summary_schema["description"].get<std::string>().find("Markdown"),
+              std::string::npos);
 }

@@ -300,6 +300,8 @@ TEST_F(SystemPromptTest, TaskCompletionProtocolAppears) {
     EXPECT_NE(out.find("# Task completion protocol"), std::string::npos);
     EXPECT_NE(out.find("task_complete"), std::string::npos);
     EXPECT_NE(out.find("AskUserQuestion"), std::string::npos);
+    EXPECT_NE(out.find("The summary is rendered as Markdown"), std::string::npos);
+    EXPECT_NE(out.find("collapsing everything into one long line"), std::string::npos);
     // 反对 "should I proceed?" 类 prose 问题
     EXPECT_NE(out.find("Should I proceed"), std::string::npos);
     // 必须说清 AskUserQuestion 不是终止器,是辅助决策工具

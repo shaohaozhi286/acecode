@@ -69,6 +69,13 @@ std::string plan_mode_enter_result(const std::string& plan_file) {
     return oss.str();
 }
 
+std::string plan_mode_yolo_noop_result() {
+    return
+        "Plan mode request acknowledged. Current permission mode is yolo, "
+        "so ACECode kept the session in yolo mode and did not enter plan mode. "
+        "Continue in yolo mode; do not call ExitPlanMode for approval.";
+}
+
 } // namespace
 
 ToolImpl create_enter_plan_mode_tool() {
@@ -78,6 +85,12 @@ ToolImpl create_enter_plan_mode_tool() {
     impl.execute = [](const std::string&, const ToolContext& ctx) -> ToolResult {
         if (!ctx.enter_plan_mode) {
             return tool_error("plan mode is not available in this context");
+        }
+        const std::string mode = ctx.current_permission_mode
+            ? ctx.current_permission_mode()
+            : std::string{};
+        if (mode == "yolo") {
+            return ToolResult{plan_mode_yolo_noop_result(), true};
         }
         std::string plan_file = ctx.enter_plan_mode();
         return ToolResult{plan_mode_enter_result(plan_file), true};

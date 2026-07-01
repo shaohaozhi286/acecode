@@ -25,6 +25,7 @@ import './transcriptSelfHeal.test.js';
 import './sessionChanges.test.js';
 import './changeReviewStability.test.js';
 import './changeDockDismissal.test.js';
+import './taskCompleteSummary.test.js';
 import './sessionTitle.test.js';
 import './sessionModel.test.js';
 import './compactMessagePreview.test.js';
