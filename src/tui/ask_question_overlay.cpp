@@ -3,6 +3,7 @@
 #include <ftxui/screen/string.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <string>
 
@@ -154,6 +155,44 @@ void append_blank(AskOverlayLayout& layout) {
     layout.rows.push_back({"", AskOverlayRowKind::Blank, -1, false, false});
 }
 
+std::string ask_page_indicator(int current_page,
+                               int total_questions,
+                               const std::vector<bool>& answered_questions) {
+    const int question_count = std::max(1, total_questions);
+    const int total_pages = question_count + 1;
+    current_page = std::clamp(current_page, 0, total_pages - 1);
+
+    std::string markers = "[";
+    for (int i = 0; i < total_pages; ++i) {
+        if (i == current_page) {
+            markers += "#";
+        } else if (i == question_count) {
+            markers += "S";
+        } else if (i < static_cast<int>(answered_questions.size()) &&
+                   answered_questions[i]) {
+            markers += "*";
+        } else {
+            markers += ".";
+        }
+    }
+    markers += "]";
+
+    return std::to_string(current_page + 1) + "/" +
+        std::to_string(total_pages) + " " + markers;
+}
+
+std::string header_with_indicator(const std::string& left,
+                                  const std::string& indicator,
+                                  int content_width) {
+    const int left_width = display_width_cells(left);
+    const int indicator_width = display_width_cells(indicator);
+    if (left_width + 2 + indicator_width <= content_width) {
+        return left + spaces_for_width(content_width - left_width - indicator_width) +
+            indicator;
+    }
+    return left + "  " + indicator;
+}
+
 } // namespace
 
 int display_width_cells(const std::string& text) {
@@ -162,20 +201,72 @@ int display_width_cells(const std::string& text) {
 
 AskOverlayLayout build_ask_overlay_layout(const AskOverlayLayoutInput& input) {
     AskOverlayLayout layout;
-    if (input.question == nullptr) {
+    if (!input.submit_page && input.question == nullptr) {
+        return layout;
+    }
+
+    const int content_width = std::max(8, input.content_width);
+    const int question_count = std::max(1, input.total_questions);
+    const int current_page = input.submit_page
+        ? question_count
+        : std::clamp(input.current_question_index, 0, question_count - 1);
+    const std::string indicator =
+        ask_page_indicator(current_page, question_count,
+                           input.answered_questions);
+
+    if (input.submit_page) {
+        const std::string header =
+            header_with_indicator(" Submit", indicator, content_width);
+        append_wrapped_rows(layout, AskOverlayRowKind::Header, header, "", "",
+                            content_width, -1, false);
+        append_wrapped_rows(layout, AskOverlayRowKind::Body,
+                            "Ready to submit?", " ", " ", content_width,
+                            -1, false);
+        append_blank(layout);
+
+        const std::array<std::string, 2> labels = {
+            "Submit answers",
+            "Cancel",
+        };
+        const int focus = std::clamp(input.submit_focus, 0, 1);
+        for (int i = 0; i < static_cast<int>(labels.size()); ++i) {
+            const bool focused = (i == focus);
+            const std::string marker = std::to_string(i + 1) + ". ";
+            const std::string first_prefix = focused
+                ? " \xE2\x96\xB8 " + marker
+                : "   " + marker;
+            const std::string continuation_prefix =
+                spaces_for_width(display_width_cells(first_prefix));
+
+            const int row_begin = static_cast<int>(layout.rows.size());
+            append_wrapped_rows(layout, AskOverlayRowKind::Option, labels[i],
+                                first_prefix, continuation_prefix,
+                                content_width, i, focused);
+            const int row_end = static_cast<int>(layout.rows.size()) - 1;
+            if (focused) {
+                layout.focused_row_begin = row_begin;
+                layout.focused_row_end = row_end;
+            }
+        }
+
+        append_blank(layout);
+        append_wrapped_rows(layout, AskOverlayRowKind::Hint,
+                            " \xE2\x86\x91\xE2\x86\x93 move   Enter select   Esc cancel",
+                            "", "", content_width, -1, false);
         return layout;
     }
 
     const AskQuestion& q = *input.question;
-    const int content_width = std::max(8, input.content_width);
     const int option_count = static_cast<int>(q.options.size());
     const int total_rows = option_count + 1;
     const int focus = std::clamp(input.option_focus, 0, std::max(0, total_rows - 1));
 
-    const std::string header = " Question " +
+    const std::string header_left = " Question " +
         std::to_string(input.current_question_index + 1) + "/" +
         std::to_string(std::max(1, input.total_questions)) +
         "  [" + q.header + "]";
+    const std::string header =
+        header_with_indicator(header_left, indicator, content_width);
     append_wrapped_rows(layout, AskOverlayRowKind::Header, header, "", "",
                         content_width, -1, false);
     append_wrapped_rows(layout, AskOverlayRowKind::Body, q.question, " ", " ",
@@ -188,11 +279,17 @@ AskOverlayLayout build_ask_overlay_layout(const AskOverlayLayoutInput& input) {
         std::string marker;
         if (q.multi_select) {
             const bool checked =
-                !is_other && i < static_cast<int>(input.multi_selected.size()) &&
-                input.multi_selected[i];
+                is_other
+                    ? (input.question_answered &&
+                       input.selected_option == i)
+                    : (i < static_cast<int>(input.multi_selected.size()) &&
+                       input.multi_selected[i]);
             marker = checked ? "[x] " : "[ ] ";
         } else {
-            marker = focused ? "(\xE2\x97\x8F) " : "( ) ";
+            const bool selected = input.question_answered
+                ? input.selected_option == i
+                : focused;
+            marker = selected ? "(\xE2\x97\x8F) " : "( ) ";
         }
 
         const std::string first_prefix = focused

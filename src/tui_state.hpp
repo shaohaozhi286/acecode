@@ -155,8 +155,15 @@ struct TuiState {
     //   ask_cv               — 工具线程 wait,事件线程 notify
     // 下面是 overlay 内部的 navigation 状态,仅在 ask_pending=true 期间有效:
     //   ask_current_question — 当前正在作答的题目下标
+    //   ask_submit_page      — true 时显示最终提交确认页,而非某个问题页
+    //   ask_submit_focus     — 提交页焦点:0 = Submit answers,1 = Cancel
     //   ask_option_focus     — 当前题目的焦点选项下标([options.size()] 表示 "Other")
+    //   ask_question_option_focus — 每题最近焦点,用于左右换页后恢复
+    //   ask_answered_questions — 每题是否已通过 Enter/Other 正式提交过答案
+    //   ask_selected_options — 单选题已提交的选项下标;options.size() 表示 Other
     //   ask_multi_selected   — 当前题目多选勾选标记(大小等于该题 options 数)
+    //   ask_multi_selected_by_question — 每题多选勾选状态,用于换页保持
+    //   ask_custom_answer_selected / ask_custom_answers — Other 已提交答案
     //   ask_other_input_active — true 时输入框为 "Other" 自定义文本模式
     bool ask_pending = false;
     std::string ask_payload_json;
@@ -166,8 +173,16 @@ struct TuiState {
     bool ask_result_ok = false;
     std::condition_variable ask_cv;
     int ask_current_question = 0;
+    bool ask_submit_page = false;
+    int ask_submit_focus = 0;
     int ask_option_focus = 0;
+    std::vector<int> ask_question_option_focus;
+    std::vector<bool> ask_answered_questions;
+    std::vector<int> ask_selected_options;
     std::vector<bool> ask_multi_selected;
+    std::vector<std::vector<bool>> ask_multi_selected_by_question;
+    std::vector<bool> ask_custom_answer_selected;
+    std::vector<std::string> ask_custom_answers;
     bool ask_other_input_active = false;
     int ask_scroll_offset = 0;
     int ask_scroll_total_rows = 0;

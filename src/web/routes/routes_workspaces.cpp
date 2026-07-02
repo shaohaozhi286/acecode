@@ -31,6 +31,10 @@ json opencode_import_preview_to_json(const OpencodeImportPreview& preview) {
             {"directory", session.directory},
             {"provider", session.provider},
             {"model", session.model},
+            {"archived", session.archived},
+            {"time_created_ms", session.time_created_ms},
+            {"time_updated_ms", session.time_updated_ms},
+            {"time_archived_ms", session.time_archived_ms},
             {"message_count", session.message_count},
             {"part_count", session.part_count},
             {"source_database", session.source_database},
@@ -253,20 +257,49 @@ void WebServer::Impl::register_workspaces() {
                 return with_cors(req, std::move(r));
             }
 
+            OpencodeImportOptions opts;
+            opts.workspace_hash = ws->hash;
+            opts.cwd = ws->cwd;
+            opts.project_dir = SessionStorage::get_project_dir(ws->cwd);
+            try {
+                const auto body = json::parse(req.body.empty() ? "{}" : req.body);
+                if (auto it = body.find("session_ids"); it != body.end()) {
+                    if (!it->is_array()) {
+                        crow::response r(400);
+                        r.body = R"({"error":"session_ids array required"})";
+                        r.add_header("Content-Type", "application/json");
+                        return with_cors(req, std::move(r));
+                    }
+                    opts.selected_session_ids_provided = true;
+                    for (const auto& item : *it) {
+                        if (!item.is_string()) {
+                            crow::response r(400);
+                            r.body = R"({"error":"session_ids must contain strings"})";
+                            r.add_header("Content-Type", "application/json");
+                            return with_cors(req, std::move(r));
+                        }
+                        opts.selected_session_ids.push_back(item.get<std::string>());
+                    }
+                }
+            } catch (const std::exception& e) {
+                crow::response r(400);
+                r.body = json{{"error", std::string("bad json: ") + e.what()}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
             const std::string job_id = SessionStorage::generate_session_id();
             OpencodeImportJobStatus initial;
             initial.job_id = job_id;
             initial.workspace_hash = ws->hash;
             initial.state = "pending";
+            if (opts.selected_session_ids_provided) {
+                initial.total = static_cast<int>(opts.selected_session_ids.size());
+            }
             {
                 std::lock_guard<std::mutex> lk(opencode_import_mu);
                 opencode_import_jobs[job_id] = initial;
             }
-
-            OpencodeImportOptions opts;
-            opts.workspace_hash = ws->hash;
-            opts.cwd = ws->cwd;
-            opts.project_dir = SessionStorage::get_project_dir(ws->cwd);
 
             std::thread([this, job_id, opts]() {
                 auto publish = [this, job_id](const OpencodeImportJobStatus& next) {

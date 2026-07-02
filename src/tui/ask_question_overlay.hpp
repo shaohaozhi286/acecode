@@ -26,11 +26,16 @@ struct AskOverlayRow {
 
 struct AskOverlayLayoutInput {
     const AskQuestion*       question = nullptr;
+    bool                     submit_page = false;
     int                      current_question_index = 0;
     int                      total_questions = 1;
     int                      option_focus = 0;
+    int                      selected_option = -1;
+    bool                     question_answered = false;
     std::vector<bool>        multi_selected;
+    std::vector<bool>        answered_questions;
     bool                     other_input_active = false;
+    int                      submit_focus = 0;
     int                      content_width = 80;
 };
 

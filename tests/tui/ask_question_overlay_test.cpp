@@ -177,6 +177,51 @@ TEST(AskQuestionOverlayTest, VisibleRowsUseTerminalHeightWithoutFixedFourteenCap
     EXPECT_EQ(acecode::tui::ask_overlay_visible_rows_for_terminal(10), 4);
 }
 
+// 场景:问题页 header 在右侧渲染包含提交页的页码与 ASCII 进度指示。
+TEST(AskQuestionOverlayTest, QuestionHeaderShowsPageIndicator) {
+    AskQuestion q = make_question();
+    auto input = input_for(q, 64);
+    input.total_questions = 3;
+    input.answered_questions = {false, true, false};
+
+    auto layout = acecode::tui::build_ask_overlay_layout(input);
+    const auto header_rows = rows_of_kind(layout, AskOverlayRowKind::Header);
+    ASSERT_FALSE(header_rows.empty());
+    EXPECT_NE(header_rows[0].find("Question 1/3"), std::string::npos);
+    EXPECT_NE(header_rows[0].find("1/4 [#*.S]"), std::string::npos);
+    EXPECT_LE(acecode::tui::display_width_cells(header_rows[0]), 64);
+}
+
+// 场景:提交页复用 ask overlay layout,只提供 Submit answers 和 Cancel 两个选择。
+TEST(AskQuestionOverlayTest, SubmitPageShowsReadyPromptAndTwoChoices) {
+    AskOverlayLayoutInput input;
+    input.submit_page = true;
+    input.total_questions = 3;
+    input.submit_focus = 1;
+    input.answered_questions = {true, true, true};
+    input.content_width = 64;
+
+    auto layout = acecode::tui::build_ask_overlay_layout(input);
+    const auto header_rows = rows_of_kind(layout, AskOverlayRowKind::Header);
+    ASSERT_FALSE(header_rows.empty());
+    EXPECT_NE(header_rows[0].find("Submit"), std::string::npos);
+    EXPECT_NE(header_rows[0].find("4/4 [***#]"), std::string::npos);
+
+    const auto body_rows = rows_of_kind(layout, AskOverlayRowKind::Body);
+    ASSERT_FALSE(body_rows.empty());
+    EXPECT_NE(body_rows[0].find("Ready to submit?"), std::string::npos);
+
+    const auto option_rows = rows_of_kind(layout, AskOverlayRowKind::Option);
+    ASSERT_EQ(option_rows.size(), 2u);
+    EXPECT_NE(option_rows[0].find("1. Submit answers"), std::string::npos);
+    EXPECT_NE(option_rows[1].find("2. Cancel"), std::string::npos);
+    EXPECT_EQ(option_rows[0].find("Other"), std::string::npos);
+    EXPECT_EQ(option_rows[1].find("Other"), std::string::npos);
+    EXPECT_EQ(layout.focused_row_begin, layout.focused_row_end);
+    ASSERT_GE(layout.focused_row_begin, 0);
+    EXPECT_EQ(layout.rows[layout.focused_row_begin].option_index, 1);
+}
+
 // 场景:焦点移动到当前 viewport 外时,ensure helper 把 wrapped option 行滚进来。
 TEST(AskQuestionOverlayTest, FocusRangeIsKeptVisible) {
     EXPECT_EQ(acecode::tui::ensure_row_range_visible(0, 5, 20, 12, 14), 10);

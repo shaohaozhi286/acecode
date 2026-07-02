@@ -31,9 +31,9 @@ public:
         Guarded,
     };
 
-    // Called at the beginning of each provider turn. Cooldowns are intentionally
-    // turn-based so several tool calls in the same assistant response share the
-    // same guard state, while a later model turn can recover after using other tools.
+    // Called at the beginning of each provider turn. Several tool calls in the
+    // same assistant response share guard state; later assistant responses start
+    // with a clean repeat window.
     void begin_model_turn();
     void reset();
 

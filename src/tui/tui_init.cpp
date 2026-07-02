@@ -322,6 +322,14 @@ void shutdown_after_tui_loop(TuiState& state, AgentLoop& agent_loop,
         if (state.ask_pending) {
             state.ask_pending = false;
             state.ask_result_ok = false;
+            state.ask_submit_page = false;
+            state.ask_submit_focus = 0;
+            state.ask_question_option_focus.clear();
+            state.ask_answered_questions.clear();
+            state.ask_selected_options.clear();
+            state.ask_multi_selected_by_question.clear();
+            state.ask_custom_answer_selected.clear();
+            state.ask_custom_answers.clear();
             state.ask_scroll_offset = 0;
             state.ask_scroll_total_rows = 0;
             state.ask_scroll_visible_rows = 0;

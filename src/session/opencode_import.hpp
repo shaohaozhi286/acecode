@@ -20,6 +20,8 @@ struct OpencodeSourceSession {
     std::string model;
     std::int64_t time_created_ms = 0;
     std::int64_t time_updated_ms = 0;
+    std::int64_t time_archived_ms = 0;
+    bool archived = false;
     int message_count = 0;
     int part_count = 0;
 };
@@ -59,6 +61,8 @@ struct OpencodeImportOptions {
     std::string cwd;
     std::string project_dir;
     std::string source_database_override;
+    bool selected_session_ids_provided = false;
+    std::vector<std::string> selected_session_ids;
 };
 
 using OpencodeImportProgress = std::function<void(const OpencodeImportJobStatus&)>;

@@ -364,7 +364,20 @@ ToolImpl create_ask_user_question_tool(TuiState& state,
             state.ask_result_answers.clear();
             state.ask_result_ok = false;
             state.ask_current_question = 0;
+            state.ask_submit_page = false;
+            state.ask_submit_focus = 0;
             state.ask_option_focus = 0;
+            state.ask_question_option_focus.assign(parsed->size(), 0);
+            state.ask_answered_questions.assign(parsed->size(), false);
+            state.ask_selected_options.assign(parsed->size(), -1);
+            state.ask_multi_selected_by_question.clear();
+            state.ask_multi_selected_by_question.reserve(parsed->size());
+            for (const auto& q : *parsed) {
+                state.ask_multi_selected_by_question.emplace_back(
+                    q.options.size(), false);
+            }
+            state.ask_custom_answer_selected.assign(parsed->size(), false);
+            state.ask_custom_answers.assign(parsed->size(), std::string{});
             state.ask_multi_selected.assign(
                 (*parsed)[0].options.size(), false);
             state.ask_other_input_active = false;
@@ -392,8 +405,16 @@ ToolImpl create_ask_user_question_tool(TuiState& state,
             state.ask_questions.clear();
             state.ask_question_order.clear();
             state.ask_multi_selected.clear();
+            state.ask_multi_selected_by_question.clear();
+            state.ask_question_option_focus.clear();
+            state.ask_answered_questions.clear();
+            state.ask_selected_options.clear();
+            state.ask_custom_answer_selected.clear();
+            state.ask_custom_answers.clear();
             state.ask_other_input_active = false;
             state.ask_current_question = 0;
+            state.ask_submit_page = false;
+            state.ask_submit_focus = 0;
             state.ask_option_focus = 0;
             state.ask_scroll_offset = 0;
             state.ask_scroll_total_rows = 0;

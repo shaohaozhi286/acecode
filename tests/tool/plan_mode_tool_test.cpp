@@ -57,8 +57,25 @@ TEST(PlanModeTool, EnterPlanModeNoOpsInYoloMode) {
 
     ASSERT_TRUE(result.success) << result.output;
     EXPECT_FALSE(called);
-    EXPECT_NE(result.output.find("kept the session in yolo mode"), std::string::npos);
-    EXPECT_EQ(result.output.find("Entered plan mode"), std::string::npos);
+    EXPECT_EQ(result.output, "OK");
+}
+
+TEST(PlanModeTool, ExitPlanModeNoOpsInYoloMode) {
+    auto tool = acecode::create_exit_plan_mode_tool();
+    bool called = false;
+
+    acecode::ToolContext ctx;
+    ctx.current_permission_mode = [] { return std::string{"yolo"}; };
+    ctx.exit_plan_mode = [&] {
+        called = true;
+        return std::string{"default"};
+    };
+
+    auto result = tool.execute("{}", ctx);
+
+    ASSERT_TRUE(result.success) << result.output;
+    EXPECT_FALSE(called);
+    EXPECT_EQ(result.output, "OK");
 }
 
 TEST(PlanModeTool, ExitPlanModeFailsOutsidePlanMode) {

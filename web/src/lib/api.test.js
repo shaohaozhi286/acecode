@@ -183,14 +183,14 @@ await run('opencode import API uses workspace-scoped endpoints', async () => {
   try {
     const client = createApi({ origin: 'http://127.0.0.1:4567', token: 'tok' });
     await client.getOpencodeImportPreview('w/a');
-    await client.startOpencodeImport('w/a');
+    await client.startOpencodeImport('w/a', ['ses/1', 'ses-2']);
     await client.getOpencodeImportJob('w/a', 'job/1');
 
     assert.equal(calls[0].url, 'http://127.0.0.1:4567/api/workspaces/w%2Fa/opencode-import');
     assert.equal(calls[0].opts.method, 'GET');
     assert.equal(calls[1].url, 'http://127.0.0.1:4567/api/workspaces/w%2Fa/opencode-import');
     assert.equal(calls[1].opts.method, 'POST');
-    assert.deepEqual(JSON.parse(calls[1].opts.body), {});
+    assert.deepEqual(JSON.parse(calls[1].opts.body), { session_ids: ['ses/1', 'ses-2'] });
     assert.equal(calls[2].url, 'http://127.0.0.1:4567/api/workspaces/w%2Fa/opencode-import/job%2F1');
     assert.equal(calls[2].opts.method, 'GET');
   } finally {

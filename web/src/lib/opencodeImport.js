@@ -1,12 +1,50 @@
+function numeric(value, fallback = 0) {
+  return Number.isFinite(Number(value)) ? Number(value) : fallback;
+}
+
+export function normalizeOpencodeImportSession(session = {}) {
+  const id = String(session?.id || session?.opencode_session_id || '').trim();
+  const title = String(session?.title || id || '未命名会话');
+  const archived = !!session?.archived || numeric(session?.time_archived_ms, 0) > 0;
+  return {
+    ...session,
+    id,
+    title,
+    archived,
+    model: String(session?.model || ''),
+    provider: String(session?.provider || ''),
+    message_count: Math.max(0, numeric(session?.message_count, 0)),
+    part_count: Math.max(0, numeric(session?.part_count, 0)),
+    time_updated_ms: Math.max(0, numeric(session?.time_updated_ms, 0)),
+  };
+}
+
 export function normalizeOpencodeImportPreview(preview = {}) {
+  const sessions = Array.isArray(preview?.sessions)
+    ? preview.sessions.map(normalizeOpencodeImportSession).filter((session) => session.id)
+    : [];
   const count = Number.isFinite(Number(preview?.count))
     ? Math.max(0, Number(preview.count))
-    : 0;
+    : sessions.length;
   return {
     ...preview,
+    sessions,
     count,
     available: !!preview?.available && count > 0,
   };
+}
+
+export function defaultOpencodeImportSelection(sessions = []) {
+  return sessions
+    .filter((session) => !session.archived)
+    .map((session) => session.id);
+}
+
+export function toggleAllOpencodeImportSelection(sessions = [], selectedIds = []) {
+  const ids = sessions.map((session) => session.id).filter(Boolean);
+  const selected = new Set(selectedIds);
+  const allSelected = ids.length > 0 && ids.every((id) => selected.has(id));
+  return allSelected ? [] : ids;
 }
 
 export function opencodeImportConfirmationText(count) {

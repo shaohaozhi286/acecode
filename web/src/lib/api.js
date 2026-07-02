@@ -145,8 +145,10 @@ export function createApi(base = null) {
     resumeWorkspaceSession: (hash, id)    => request('POST', `/api/workspaces/${encodeURIComponent(hash)}/sessions/${encodeURIComponent(id)}/resume`, {}, base),
     getOpencodeImportPreview: (hash) =>
       request('GET', `/api/workspaces/${encodeURIComponent(hash)}/opencode-import`, undefined, base),
-    startOpencodeImport: (hash) =>
-      request('POST', `/api/workspaces/${encodeURIComponent(hash)}/opencode-import`, {}, base),
+    startOpencodeImport: (hash, sessionIds = null) => {
+      const body = Array.isArray(sessionIds) ? { session_ids: sessionIds } : {};
+      return request('POST', `/api/workspaces/${encodeURIComponent(hash)}/opencode-import`, body, base);
+    },
     getOpencodeImportJob: (hash, jobId) =>
       request('GET', `/api/workspaces/${encodeURIComponent(hash)}/opencode-import/${encodeURIComponent(jobId)}`, undefined, base),
     archiveSession:   (id)           => request('PUT',    `/api/sessions/${encodeURIComponent(id)}/archive`, {}, base),

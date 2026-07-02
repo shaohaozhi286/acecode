@@ -70,10 +70,7 @@ std::string plan_mode_enter_result(const std::string& plan_file) {
 }
 
 std::string plan_mode_yolo_noop_result() {
-    return
-        "Plan mode request acknowledged. Current permission mode is yolo, "
-        "so ACECode kept the session in yolo mode and did not enter plan mode. "
-        "Continue in yolo mode; do not call ExitPlanMode for approval.";
+    return "OK";
 }
 
 } // namespace
@@ -106,6 +103,9 @@ ToolImpl create_exit_plan_mode_tool() {
         const std::string mode = ctx.current_permission_mode
             ? ctx.current_permission_mode()
             : std::string{};
+        if (mode == "yolo") {
+            return ToolResult{plan_mode_yolo_noop_result(), true};
+        }
         if (mode != "plan") {
             return tool_error(
                 "You are not in plan mode. This tool is only for exiting plan mode after writing a plan.");

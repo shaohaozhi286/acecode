@@ -53,9 +53,11 @@ import {
   upsertSidebarSession,
 } from '../lib/sidebarSessions.js';
 import {
+  defaultOpencodeImportSelection,
   normalizeOpencodeImportPreview,
   opencodeImportConfirmationText,
   opencodeImportProgress,
+  toggleAllOpencodeImportSelection,
 } from '../lib/opencodeImport.js';
 import { toast } from './Toast.jsx';
 import { VsIcon } from './Icon.jsx';
@@ -503,12 +505,41 @@ function SessionRow({
   );
 }
 
-function OpencodeImportDialog({ dialog, onCancel, onConfirm, onClose }) {
+function OpencodeImportSelectAllCheckbox({ checked, indeterminate, disabled, onChange }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    if (ref.current) ref.current.indeterminate = !!indeterminate;
+  }, [indeterminate]);
+  return (
+    <input
+      ref={ref}
+      type="checkbox"
+      checked={checked}
+      disabled={disabled}
+      onChange={onChange}
+      className="mt-[2px] h-4 w-4 shrink-0 accent-accent"
+      aria-label="全选"
+    />
+  );
+}
+
+function OpencodeImportDialog({
+  dialog,
+  onCancel,
+  onConfirm,
+  onClose,
+  onToggleSession,
+  onToggleAll,
+}) {
   if (!dialog) return null;
   const phase = dialog.phase || 'confirm';
   const status = dialog.status || {};
+  const sessions = Array.isArray(dialog.sessions) ? dialog.sessions : [];
+  const selectedIds = Array.isArray(dialog.selectedSessionIds) ? dialog.selectedSessionIds : [];
+  const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+  const selectedCount = selectedIds.filter((id) => sessions.some((session) => session.id === id)).length;
   const progress = opencodeImportProgress({
-    total: status.total ?? dialog.count,
+    total: status.total ?? selectedCount,
     imported: status.imported,
     failed: status.failed,
     skipped: status.skipped,
@@ -516,12 +547,57 @@ function OpencodeImportDialog({ dialog, onCancel, onConfirm, onClose }) {
   const running = phase === 'running';
   const done = phase === 'complete';
   const errored = phase === 'error';
+  const selectionDisabled = running || done || errored;
+  const allSelected = sessions.length > 0 && sessions.every((session) => selectedSet.has(session.id));
+  const partlySelected = !allSelected && sessions.some((session) => selectedSet.has(session.id));
 
   return (
     <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-[rgba(0,0,0,0.2)]">
-      <div className="w-[min(360px,calc(100vw-32px))] rounded-lg border border-border bg-surface shadow-xl px-5 py-4">
+      <div className="w-[min(520px,calc(100vw-32px))] rounded-lg border border-border bg-surface shadow-xl px-5 py-4">
         <div className="text-[14px] font-medium text-fg">
-          {opencodeImportConfirmationText(dialog.count)}
+          {opencodeImportConfirmationText(selectedCount)}
+        </div>
+        <div className="mt-3 h-64 overflow-y-auto rounded-md border border-border bg-surface-alt">
+          <label className="sticky top-0 z-10 flex cursor-pointer items-start gap-3 border-b border-border bg-surface-alt px-3 py-2 text-[12px] text-fg">
+            <OpencodeImportSelectAllCheckbox
+              checked={allSelected}
+              indeterminate={partlySelected}
+              disabled={selectionDisabled || sessions.length === 0}
+              onChange={onToggleAll}
+            />
+            <span className="flex-1 min-w-0 font-medium">全选</span>
+            <span className="shrink-0 tabular-nums text-fg-mute">{selectedCount}/{sessions.length}</span>
+          </label>
+          {sessions.map((session) => {
+            const detail = [
+              session.model || session.provider || '',
+              session.message_count > 0 ? `${session.message_count} 条消息` : '',
+            ].filter(Boolean).join(' · ');
+            return (
+              <label
+                key={session.id}
+                className={clsx(
+                  'flex cursor-pointer items-start gap-3 border-b border-border px-3 py-2 text-[12px] last:border-b-0',
+                  selectionDisabled ? 'cursor-default opacity-80' : 'hover:bg-surface-hi',
+                )}
+              >
+                <input
+                  type="checkbox"
+                  checked={selectedSet.has(session.id)}
+                  disabled={selectionDisabled}
+                  onChange={() => onToggleSession?.(session.id)}
+                  className="mt-[2px] h-4 w-4 shrink-0 accent-accent"
+                />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-fg">
+                    {session.title}
+                    {session.archived ? <span className="ml-1 text-fg-mute">[已归档]</span> : null}
+                  </span>
+                  {detail ? <span className="mt-0.5 block truncate text-[11px] text-fg-mute">{detail}</span> : null}
+                </span>
+              </label>
+            );
+          })}
         </div>
         {(running || done || errored) && (
           <div className="mt-4">
@@ -553,7 +629,11 @@ function OpencodeImportDialog({ dialog, onCancel, onConfirm, onClose }) {
               <button
                 type="button"
                 onClick={onConfirm}
-                className="px-3 py-1.5 rounded-md text-[12px] bg-accent text-white hover:opacity-90"
+                disabled={selectedCount <= 0}
+                className={clsx(
+                  'px-3 py-1.5 rounded-md text-[12px] bg-accent text-white hover:opacity-90',
+                  selectedCount <= 0 && 'cursor-not-allowed opacity-50 hover:opacity-50',
+                )}
               >
                 确认导入
               </button>
@@ -1645,14 +1725,51 @@ export function Sidebar({
       toast({ kind: 'info', text: '没有可导入的 opencode 会话' });
       return;
     }
+    const sessions = Array.isArray(preview?.sessions) ? preview.sessions : [];
+    const selectedSessionIds = defaultOpencodeImportSelection(sessions);
     setOpencodeImportDialog({
       workspace: ws,
-      count,
+      count: selectedSessionIds.length,
+      sessions,
+      selectedSessionIds,
       phase: 'confirm',
-      status: { total: count, imported: 0, failed: 0, skipped: 0 },
+      status: { total: selectedSessionIds.length, imported: 0, failed: 0, skipped: 0 },
       error: '',
     });
   }, [refreshOpencodeImportPreview]);
+
+  const toggleOpencodeImportSession = useCallback((sessionId) => {
+    if (!sessionId) return;
+    setOpencodeImportDialog((prev) => {
+      if (!prev || prev.phase !== 'confirm') return prev;
+      const selected = new Set(Array.isArray(prev.selectedSessionIds) ? prev.selectedSessionIds : []);
+      if (selected.has(sessionId)) selected.delete(sessionId);
+      else selected.add(sessionId);
+      const selectedSessionIds = Array.from(selected);
+      return {
+        ...prev,
+        count: selectedSessionIds.length,
+        selectedSessionIds,
+        status: { ...(prev.status || {}), total: selectedSessionIds.length },
+      };
+    });
+  }, []);
+
+  const toggleAllOpencodeImportSessions = useCallback(() => {
+    setOpencodeImportDialog((prev) => {
+      if (!prev || prev.phase !== 'confirm') return prev;
+      const selectedSessionIds = toggleAllOpencodeImportSelection(
+        Array.isArray(prev.sessions) ? prev.sessions : [],
+        Array.isArray(prev.selectedSessionIds) ? prev.selectedSessionIds : [],
+      );
+      return {
+        ...prev,
+        count: selectedSessionIds.length,
+        selectedSessionIds,
+        status: { ...(prev.status || {}), total: selectedSessionIds.length },
+      };
+    });
+  }, []);
 
   const pollOpencodeImportJob = useCallback((ws, jobId) => {
     if (!ws?.hash || !jobId) return;
@@ -1697,13 +1814,20 @@ export function Sidebar({
   const confirmOpencodeImport = useCallback(async () => {
     const ws = opencodeImportDialog?.workspace;
     if (!ws?.hash) return;
+    const selectedSessionIds = Array.isArray(opencodeImportDialog?.selectedSessionIds)
+      ? opencodeImportDialog.selectedSessionIds
+      : [];
+    if (selectedSessionIds.length <= 0) {
+      toast({ kind: 'info', text: '请选择要导入的 opencode 会话' });
+      return;
+    }
     if (opencodeImportPollRef.current) {
       window.clearTimeout(opencodeImportPollRef.current);
       opencodeImportPollRef.current = 0;
     }
     setOpencodeImportDialog((prev) => prev ? { ...prev, phase: 'running', error: '' } : prev);
     try {
-      const status = await api.startOpencodeImport(ws.hash);
+      const status = await api.startOpencodeImport(ws.hash, selectedSessionIds);
       const jobId = status?.job_id;
       if (!jobId) throw new Error('missing import job id');
       setOpencodeImportDialog((prev) => prev ? { ...prev, status: status || prev.status } : prev);
@@ -2070,6 +2194,8 @@ export function Sidebar({
         onCancel={closeOpencodeImportDialog}
         onConfirm={confirmOpencodeImport}
         onClose={closeOpencodeImportDialog}
+        onToggleSession={toggleOpencodeImportSession}
+        onToggleAll={toggleAllOpencodeImportSessions}
       />
     </>
   );

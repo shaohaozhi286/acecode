@@ -69,6 +69,7 @@ void create_schema(sqlite3* db) {
         "title TEXT,"
         "time_created INTEGER,"
         "time_updated INTEGER,"
+        "time_archived INTEGER,"
         "model TEXT"
         ");"
         "CREATE TABLE message ("
@@ -92,18 +93,20 @@ void create_schema(sqlite3* db) {
 void insert_session(sqlite3* db,
                     const std::string& id,
                     const std::string& directory,
-                    const std::string& title = "Imported title") {
+                    const std::string& title = "Imported title",
+                    std::int64_t archived_ms = 0) {
     sqlite3_stmt* stmt = nullptr;
     ASSERT_EQ(sqlite3_prepare_v2(db,
-        "INSERT INTO session(id, project_id, directory, title, time_created, time_updated, model) "
-        "VALUES(?, 'proj', ?, ?, ?, ?, ?);",
+        "INSERT INTO session(id, project_id, directory, title, time_created, time_updated, time_archived, model) "
+        "VALUES(?, 'proj', ?, ?, ?, ?, ?, ?);",
         -1, &stmt, nullptr), SQLITE_OK);
     bind_text(stmt, 1, id);
     bind_text(stmt, 2, directory);
     bind_text(stmt, 3, title);
     bind_i64(stmt, 4, 1700000000000);
     bind_i64(stmt, 5, 1700000010000);
-    bind_text(stmt, 6, R"({"providerID":"opencode","modelID":"big-pickle"})");
+    bind_i64(stmt, 6, archived_ms);
+    bind_text(stmt, 7, R"({"providerID":"opencode","modelID":"big-pickle"})");
     ASSERT_EQ(sqlite3_step(stmt), SQLITE_DONE);
     sqlite3_finalize(stmt);
 }
@@ -290,6 +293,61 @@ TEST(OpencodeImport, FiltersWorkspacePathsAndImportsOnce) {
         acecode::path_to_utf8(project_dir));
     EXPECT_FALSE(repeated.available);
     EXPECT_EQ(repeated.count, 0);
+}
+
+TEST(OpencodeImport, ReportsArchivedStateAndImportsSelectedSessions) {
+    auto root = temp_dir("select");
+    auto workspace = root / "workspace";
+    auto project_dir = root / "ace-project";
+    fs::create_directories(workspace);
+    fs::create_directories(project_dir);
+    auto db_path = create_db(root / "data");
+
+    sqlite3* db = open_db_rw(db_path);
+    ASSERT_NE(db, nullptr);
+    insert_session(db, "ses-active", acecode::path_to_utf8(workspace), "Active");
+    insert_message(db, "ses-active", "msg-active", R"({"role":"user"})");
+    insert_part(db, "ses-active", "msg-active", "prt-active", R"({"type":"text","text":"active"})");
+    insert_session(db, "ses-archived", acecode::path_to_utf8(workspace), "Archived", 1700000020000);
+    insert_message(db, "ses-archived", "msg-archived", R"({"role":"user"})");
+    insert_part(db, "ses-archived", "msg-archived", "prt-archived", R"({"type":"text","text":"archived"})");
+    sqlite3_close(db);
+
+    auto preview = acecode::preview_opencode_import_from_database(
+        acecode::path_to_utf8(db_path),
+        acecode::path_to_utf8(workspace),
+        acecode::path_to_utf8(project_dir));
+    ASSERT_TRUE(preview.available) << preview.error;
+    ASSERT_EQ(preview.count, 2);
+    auto archived = std::find_if(preview.sessions.begin(), preview.sessions.end(), [](const auto& session) {
+        return session.opencode_session_id == "ses-archived";
+    });
+    ASSERT_NE(archived, preview.sessions.end());
+    EXPECT_TRUE(archived->archived);
+
+    acecode::OpencodeImportOptions options;
+    options.workspace_hash = "hash";
+    options.cwd = acecode::path_to_utf8(workspace);
+    options.project_dir = acecode::path_to_utf8(project_dir);
+    options.selected_session_ids_provided = true;
+    options.selected_session_ids = {"ses-archived"};
+    auto status = acecode::import_opencode_sessions_from_database(
+        acecode::path_to_utf8(db_path), options);
+    EXPECT_EQ(status.state, "complete");
+    EXPECT_EQ(status.total, 1);
+    EXPECT_EQ(status.imported, 1);
+    ASSERT_EQ(status.session_ids.size(), 1u);
+
+    auto meta = acecode::SessionStorage::read_meta(
+        acecode::SessionStorage::meta_path(acecode::path_to_utf8(project_dir), status.session_ids.front()));
+    EXPECT_TRUE(meta.archived);
+
+    auto repeated = acecode::preview_opencode_import_from_database(
+        acecode::path_to_utf8(db_path),
+        acecode::path_to_utf8(workspace),
+        acecode::path_to_utf8(project_dir));
+    ASSERT_EQ(repeated.count, 1);
+    EXPECT_EQ(repeated.sessions.front().opencode_session_id, "ses-active");
 }
 
 TEST(OpencodeImport, ConvertsTextReasoningToolsAndUnsupportedParts) {

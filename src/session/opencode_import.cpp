@@ -357,18 +357,21 @@ std::vector<OpencodeSourceSession> query_source_sessions(sqlite3* db,
                                                          const std::string& cwd,
                                                          const std::string& project_dir) {
     validate_opencode_schema(db);
+    const bool has_time_archived = table_columns(db, "session").count("time_archived") > 0;
     const std::string source_identity = source_identity_for_path(database_path);
     const json manifest = read_manifest(project_dir);
 
-    Statement stmt(db,
+    const std::string query =
         "SELECT s.id, COALESCE(NULLIF(s.directory, ''), p.worktree, ''), "
         "COALESCE(s.title, ''), COALESCE(s.model, ''), "
-        "s.time_created, s.time_updated, "
+        "s.time_created, s.time_updated, " +
+        std::string(has_time_archived ? "COALESCE(s.time_archived, 0), " : "0, ") +
         "(SELECT COUNT(*) FROM message m WHERE m.session_id = s.id), "
         "(SELECT COUNT(*) FROM part pr WHERE pr.session_id = s.id) "
         "FROM session s "
         "LEFT JOIN project p ON p.id = s.project_id "
-        "ORDER BY s.time_updated DESC, s.id DESC;");
+        "ORDER BY s.time_updated DESC, s.id DESC;";
+    Statement stmt(db, query.c_str());
 
     std::vector<OpencodeSourceSession> sessions;
     while (stmt.step()) {
@@ -381,8 +384,10 @@ std::vector<OpencodeSourceSession> query_source_sessions(sqlite3* db,
         extract_model_fields(stmt.text(3), session.provider, session.model);
         session.time_created_ms = stmt.i64(4);
         session.time_updated_ms = stmt.i64(5);
-        session.message_count = stmt.integer(6);
-        session.part_count = stmt.integer(7);
+        session.time_archived_ms = stmt.i64(6);
+        session.archived = session.time_archived_ms > 0;
+        session.message_count = stmt.integer(7);
+        session.part_count = stmt.integer(8);
         if (session.opencode_session_id.empty()) continue;
         if (session.message_count <= 0 && session.part_count <= 0) continue;
         if (!path_matches_workspace(session.directory, cwd)) continue;
@@ -658,6 +663,7 @@ OpencodeImportSessionResult import_one_session(const OpencodeImportOptions& opti
         meta.summary = first_user_summary(messages);
         meta.provider = source.provider;
         meta.model = source.model;
+        meta.archived = source.archived;
         meta.title = source.title.empty()
             ? (meta.summary.empty() ? source.opencode_session_id : meta.summary)
             : source.title;
@@ -698,6 +704,20 @@ OpencodeImportPreview preview_from_candidates(const std::vector<std::string>& ca
     result.available = result.count > 0;
     if (!result.available) result.error = first_error;
     return result;
+}
+
+std::vector<OpencodeSourceSession> selected_source_sessions(
+    const std::vector<OpencodeSourceSession>& sessions,
+    const OpencodeImportOptions& options) {
+    if (!options.selected_session_ids_provided) return sessions;
+    std::unordered_set<std::string> selected(options.selected_session_ids.begin(),
+                                             options.selected_session_ids.end());
+    std::vector<OpencodeSourceSession> out;
+    out.reserve(sessions.size());
+    for (const auto& session : sessions) {
+        if (selected.count(session.opencode_session_id)) out.push_back(session);
+    }
+    return out;
 }
 
 } // namespace
@@ -777,7 +797,8 @@ OpencodeImportJobStatus import_opencode_sessions(
     status.state = "running";
 
     const auto preview = preview_opencode_import(options.cwd, options.project_dir);
-    status.total = preview.count;
+    const auto sessions = selected_source_sessions(preview.sessions, options);
+    status.total = static_cast<int>(sessions.size());
     if (status.total <= 0) {
         if (!preview.error.empty()) {
             status.state = "failed";
@@ -790,7 +811,7 @@ OpencodeImportJobStatus import_opencode_sessions(
     }
 
     if (progress) progress(status);
-    for (const auto& source : preview.sessions) {
+    for (const auto& source : sessions) {
         status.current_title = source.title.empty() ? source.opencode_session_id : source.title;
         if (progress) progress(status);
         auto result = import_one_session(options, source);
@@ -821,7 +842,8 @@ OpencodeImportJobStatus import_opencode_sessions_from_database(
 
     const auto preview = preview_opencode_import_from_database(
         database_path, options.cwd, options.project_dir);
-    status.total = preview.count;
+    const auto sessions = selected_source_sessions(preview.sessions, options);
+    status.total = static_cast<int>(sessions.size());
     if (status.total <= 0) {
         if (!preview.error.empty()) {
             status.state = "failed";
@@ -834,7 +856,7 @@ OpencodeImportJobStatus import_opencode_sessions_from_database(
     }
 
     if (progress) progress(status);
-    for (const auto& source : preview.sessions) {
+    for (const auto& source : sessions) {
         status.current_title = source.title.empty() ? source.opencode_session_id : source.title;
         if (progress) progress(status);
         auto result = import_one_session(options, source);

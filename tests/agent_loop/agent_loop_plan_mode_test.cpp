@@ -123,6 +123,7 @@ public:
         };
 
         tools_.register_tool(acecode::create_enter_plan_mode_tool());
+        tools_.register_tool(acecode::create_exit_plan_mode_tool());
         auto accessor = [this]() -> std::shared_ptr<acecode::LlmProvider> { return provider_; };
         loop_ = std::make_unique<acecode::AgentLoop>(accessor, tools_, callbacks_, cwd_, perms_);
         sm_.start_session(cwd_, "stub", "stub-model", "sid-agent-yolo-plan-mode");
@@ -210,6 +211,20 @@ TEST(AgentLoopPlanMode, EnterPlanModeToolDoesNotLeaveYoloMode) {
     YoloEnterPlanHarness h(cwd.string());
 
     h.provider().push_tool_call("EnterPlanMode", "{}", "enter-plan");
+    h.provider().push_text("done");
+
+    ASSERT_TRUE(h.submit_and_wait());
+    EXPECT_EQ(h.confirm_count(), 0);
+    EXPECT_EQ(h.permission_mode(), acecode::PermissionMode::Yolo);
+    EXPECT_EQ(h.session_permission_mode(), "yolo");
+    EXPECT_TRUE(h.session_pre_plan_mode().empty());
+}
+
+TEST(AgentLoopPlanMode, ExitPlanModeToolDoesNotLeaveYoloMode) {
+    auto cwd = make_temp_dir("acecode_agent_yolo_exit_plan_noop");
+    YoloEnterPlanHarness h(cwd.string());
+
+    h.provider().push_tool_call("ExitPlanMode", "{}", "exit-plan");
     h.provider().push_text("done");
 
     ASSERT_TRUE(h.submit_and_wait());

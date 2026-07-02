@@ -29,6 +29,7 @@ using acecode::ToolResult;
 using acecode::ToolSource;
 using acecode::ToolCall;
 using acecode_test::StubLlmProvider;
+using acecode_test::ScriptedResponse;
 
 namespace {
 
@@ -124,6 +125,12 @@ public:
         provider_->push_tool_call("bash", bash_args(command), std::move(id));
     }
 
+    void push_tools(std::vector<ToolCall> calls) {
+        ScriptedResponse r;
+        r.tool_calls = std::move(calls);
+        provider_->push_response(std::move(r));
+    }
+
     void push_text(std::string text) {
         provider_->push_text(std::move(text));
     }
@@ -172,11 +179,29 @@ TEST(AgentLoopDoomGuard, ExactDuplicateLowSignalCallGetsSyntheticResult) {
     EXPECT_FALSE(guard.maybe_guard(call).has_value());
     guard.record_result(call, low_signal_result());
 
-    ToolCall duplicate = make_call("call-2", "grep", R"({"pattern":"needle","path":"src/app.cpp"})");
-    auto guarded = guard.maybe_guard(duplicate);
+    ToolCall duplicate_2 = make_call("call-2", "grep", R"({"pattern":"needle","path":"src/app.cpp"})");
+    EXPECT_FALSE(guard.maybe_guard(duplicate_2).has_value());
+    guard.record_result(duplicate_2, low_signal_result());
+
+    ToolCall duplicate_3 = make_call("call-3", "grep", R"({"pattern":"needle","path":"src/app.cpp"})");
+    auto guarded = guard.maybe_guard(duplicate_3);
     ASSERT_TRUE(guarded.has_value());
     EXPECT_FALSE(guarded->success);
     EXPECT_NE(guarded->output.find("[Doom-loop guard]"), std::string::npos);
+}
+
+TEST(AgentLoopDoomGuard, BeginModelTurnClearsExactRepeatWindow) {
+    AgentLoopDoomGuard guard;
+    ToolCall first = make_call("call-1", "grep", R"({"pattern":"needle","path":"src/app.cpp"})");
+    ToolCall second = make_call("call-2", "grep", R"({"pattern":"needle","path":"src/app.cpp"})");
+    ToolCall third = make_call("call-3", "grep", R"({"pattern":"needle","path":"src/app.cpp"})");
+
+    guard.record_result(first, low_signal_result("not found"));
+    guard.record_result(second, low_signal_result("not found"));
+
+    guard.begin_model_turn();
+
+    EXPECT_FALSE(guard.maybe_guard(third).has_value());
 }
 
 TEST(AgentLoopDoomGuard, UsefulRepeatedCallIsNotGuarded) {
@@ -212,6 +237,10 @@ TEST(AgentLoopDoomGuard, SemanticBashRepeatsAgainstSameTargetTriggerCooldown) {
     auto cooldown_guarded = guard.maybe_guard(cooled);
     ASSERT_TRUE(cooldown_guarded.has_value());
     EXPECT_NE(cooldown_guarded->output.find("bash tool is temporarily cooled down"), std::string::npos);
+
+    guard.begin_model_turn();
+
+    EXPECT_FALSE(guard.maybe_guard(cooled).has_value());
 }
 
 // 回归测试:file_read 等工具的成功输出就是文件内容本身,内容里出现 "timed out"/
@@ -249,7 +278,12 @@ TEST(AgentLoopDoomGuard, FileReadUnchangedStubUsesCachedReadGuard) {
 
     ToolCall duplicate = make_call("call-2", "file_read",
         R"({"file_path":"D:/code/src/app.cpp"})");
-    auto guarded = guard.maybe_guard(duplicate);
+    EXPECT_FALSE(guard.maybe_guard(duplicate).has_value());
+    guard.record_result(duplicate, unchanged_stub);
+
+    ToolCall third = make_call("call-3", "file_read",
+        R"({"file_path":"D:/code/src/app.cpp"})");
+    auto guarded = guard.maybe_guard(third);
     ASSERT_TRUE(guarded.has_value());
     EXPECT_FALSE(guarded->success);
     EXPECT_NE(guarded->output.find("[Cached read guard]"), std::string::npos);
@@ -271,24 +305,34 @@ TEST(AgentLoopDoomGuard, ResetClearsCachedReadAndLowSignalState) {
 
     ToolCall duplicate_read = make_call("call-2", "file_read",
         R"({"file_path":"D:/code/src/app.cpp"})");
-    ASSERT_TRUE(guard.maybe_guard(duplicate_read).has_value());
+    ASSERT_FALSE(guard.maybe_guard(duplicate_read).has_value());
+    guard.record_result(duplicate_read, unchanged_stub);
 
-    ToolCall grep_call = make_call("call-3", "grep",
+    ToolCall third_read = make_call("call-3", "file_read",
+        R"({"file_path":"D:/code/src/app.cpp"})");
+    ASSERT_TRUE(guard.maybe_guard(third_read).has_value());
+
+    ToolCall grep_call = make_call("call-4", "grep",
         R"({"pattern":"needle","path":"src/app.cpp"})");
     guard.record_result(grep_call, low_signal_result("not found"));
 
-    ToolCall duplicate_grep = make_call("call-4", "grep",
+    ToolCall duplicate_grep = make_call("call-5", "grep",
         R"({"pattern":"needle","path":"src/app.cpp"})");
-    ASSERT_TRUE(guard.maybe_guard(duplicate_grep).has_value());
+    ASSERT_FALSE(guard.maybe_guard(duplicate_grep).has_value());
+    guard.record_result(duplicate_grep, low_signal_result("not found"));
+
+    ToolCall third_grep = make_call("call-6", "grep",
+        R"({"pattern":"needle","path":"src/app.cpp"})");
+    ASSERT_TRUE(guard.maybe_guard(third_grep).has_value());
 
     guard.reset();
 
-    EXPECT_FALSE(guard.maybe_guard(duplicate_read).has_value());
-    EXPECT_FALSE(guard.maybe_guard(duplicate_grep).has_value());
+    EXPECT_FALSE(guard.maybe_guard(third_read).has_value());
+    EXPECT_FALSE(guard.maybe_guard(third_grep).has_value());
 }
 
 // 守住原有保护:失败结果的关键词细分仍然生效,真正的 "old_string not found"
-// 失败重复一次后第二次同参调用应被拦截。
+// 失败在同一个 assistant message 内重复到第三次同参调用应被拦截。
 TEST(AgentLoopDoomGuard, FailureKeywordsStillTriggerExactRepeatGuard) {
     AgentLoopDoomGuard guard;
     ToolCall call = make_call("call-1", "file_edit",
@@ -301,7 +345,12 @@ TEST(AgentLoopDoomGuard, FailureKeywordsStillTriggerExactRepeatGuard) {
 
     ToolCall duplicate = make_call("call-2", "file_edit",
         R"({"file_path":"src/app.cpp","old_string":"gone","new_string":"x"})");
-    EXPECT_TRUE(guard.maybe_guard(duplicate).has_value());
+    EXPECT_FALSE(guard.maybe_guard(duplicate).has_value());
+    guard.record_result(duplicate, failure);
+
+    ToolCall third = make_call("call-3", "file_edit",
+        R"({"file_path":"src/app.cpp","old_string":"gone","new_string":"x"})");
+    EXPECT_TRUE(guard.maybe_guard(third).has_value());
 }
 
 // 回归测试:old_string 编辑因 "File has not been read yet" 失败时,错误信息引导的
@@ -338,21 +387,28 @@ TEST(AgentLoopDoomGuard, LegacyRangeArgumentsFailureArmsGuard) {
 
     ToolCall retry = make_call("call-2", "file_edit",
         R"({"file_path":"src/i18n/en.js","start_line":2510,"end_line":2515,"expected_hash":"sha256:stale"})");
-    EXPECT_TRUE(guard.maybe_guard(retry).has_value());
+    EXPECT_FALSE(guard.maybe_guard(retry).has_value());
+    guard.record_result(retry, legacy_range_failure);
+
+    ToolCall third = make_call("call-3", "file_edit",
+        R"({"file_path":"src/i18n/en.js","start_line":2510,"end_line":2515,"expected_hash":"sha256:stale"})");
+    EXPECT_TRUE(guard.maybe_guard(third).has_value());
 }
 
 TEST(AgentLoopDoomGuardIntegration, SemanticBashGuardSkipsExecutionAndContinues) {
     DoomGuardHarness h;
-    h.push_tool("call-1", R"(findstr /n "Tab" D:\prd\search.md)");
-    h.push_tool("call-2", R"(powershell -Command "Get-Content D:\prd\search.md | Select-String 'Tab'")");
-    h.push_tool("call-3", R"(powershell -Command "Select-String -Path D:\prd\search.md -Pattern Tab")");
-    h.push_tool("call-4", R"(type D:\prd\other.md)");
+    h.push_tools({
+        make_call("call-1", "bash", bash_args(R"(findstr /n "Tab" D:\prd\search.md)")),
+        make_call("call-2", "bash", bash_args(R"(powershell -Command "Get-Content D:\prd\search.md | Select-String 'Tab'")")),
+        make_call("call-3", "bash", bash_args(R"(powershell -Command "Select-String -Path D:\prd\search.md -Pattern Tab")")),
+        make_call("call-4", "bash", bash_args(R"(type D:\prd\other.md)"))
+    });
     h.push_text("Done with available evidence.");
 
     ASSERT_TRUE(h.submit_and_wait());
     EXPECT_EQ(h.bash_executions(), 2);
     EXPECT_EQ(h.permission_prompts(), 2);
-    EXPECT_EQ(h.turn_count(), 5);
+    EXPECT_EQ(h.turn_count(), 2);
 
     bool saw_guard_result = false;
     bool saw_final_text = false;

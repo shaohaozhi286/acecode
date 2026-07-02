@@ -457,7 +457,7 @@ void create_opencode_import_db(const std::filesystem::path& db_path,
         "CREATE TABLE project (id TEXT PRIMARY KEY, worktree TEXT);"
         "CREATE TABLE session ("
         "id TEXT PRIMARY KEY, project_id TEXT, directory TEXT, title TEXT,"
-        "time_created INTEGER, time_updated INTEGER, model TEXT"
+        "time_created INTEGER, time_updated INTEGER, time_archived INTEGER, model TEXT"
         ");"
         "CREATE TABLE message ("
         "id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT"
@@ -469,8 +469,17 @@ void create_opencode_import_db(const std::filesystem::path& db_path,
 
     sqlite3_stmt* stmt = nullptr;
     ASSERT_EQ(sqlite3_prepare_v2(db,
-        "INSERT INTO session(id, project_id, directory, title, time_created, time_updated, model) "
-        "VALUES('ses-route', 'proj', ?, 'Route import', 1700000000000, 1700000010000, "
+        "INSERT INTO session(id, project_id, directory, title, time_created, time_updated, time_archived, model) "
+        "VALUES('ses-route', 'proj', ?, 'Route import', 1700000000000, 1700000010000, 0, "
+        "'{\"providerID\":\"opencode\",\"modelID\":\"big-pickle\"}');",
+        -1, &stmt, nullptr), SQLITE_OK);
+    ASSERT_EQ(sqlite3_bind_text(stmt, 1, cwd.c_str(), -1, SQLITE_TRANSIENT), SQLITE_OK);
+    ASSERT_EQ(sqlite3_step(stmt), SQLITE_DONE);
+    sqlite3_finalize(stmt);
+    stmt = nullptr;
+    ASSERT_EQ(sqlite3_prepare_v2(db,
+        "INSERT INTO session(id, project_id, directory, title, time_created, time_updated, time_archived, model) "
+        "VALUES('ses-route-archived', 'proj', ?, 'Archived route import', 1700000000000, 1700000020000, 1700000030000, "
         "'{\"providerID\":\"opencode\",\"modelID\":\"big-pickle\"}');",
         -1, &stmt, nullptr), SQLITE_OK);
     ASSERT_EQ(sqlite3_bind_text(stmt, 1, cwd.c_str(), -1, SQLITE_TRANSIENT), SQLITE_OK);
@@ -481,7 +490,12 @@ void create_opencode_import_db(const std::filesystem::path& db_path,
         "VALUES('msg-route', 'ses-route', 1700000000000, 1700000000000, '{\"role\":\"user\"}');"
         "INSERT INTO part(id, message_id, session_id, time_created, time_updated, data) "
         "VALUES('prt-route', 'msg-route', 'ses-route', 1700000000000, 1700000000000, "
-        "'{\"type\":\"text\",\"text\":\"hello from opencode\"}');");
+        "'{\"type\":\"text\",\"text\":\"hello from opencode\"}');"
+        "INSERT INTO message(id, session_id, time_created, time_updated, data) "
+        "VALUES('msg-route-archived', 'ses-route-archived', 1700000000000, 1700000000000, '{\"role\":\"user\"}');"
+        "INSERT INTO part(id, message_id, session_id, time_created, time_updated, data) "
+        "VALUES('prt-route-archived', 'msg-route-archived', 'ses-route-archived', 1700000000000, 1700000000000, "
+        "'{\"type\":\"text\",\"text\":\"hello from archived opencode\"}');");
     sqlite3_close(db);
 }
 
@@ -1102,16 +1116,25 @@ TEST(WebServerHttp, OpencodeImportRoutesPreviewStartPollAndRejectUnknownWorkspac
     ASSERT_EQ(preview.status_code, 200) << preview.text;
     auto preview_json = json::parse(preview.text);
     EXPECT_EQ(preview_json["available"], true);
-    EXPECT_EQ(preview_json["count"], 1);
+    EXPECT_EQ(preview_json["count"], 2);
+    ASSERT_TRUE(preview_json["sessions"].is_array());
+    ASSERT_EQ(preview_json["sessions"].size(), 2u);
+    auto archived = std::find_if(preview_json["sessions"].begin(), preview_json["sessions"].end(), [](const auto& session) {
+        return session.value("id", std::string{}) == "ses-route-archived";
+    });
+    ASSERT_NE(archived, preview_json["sessions"].end());
+    EXPECT_EQ((*archived)["archived"], true);
 
     auto unknown_preview = cpr::Get(cpr::Url{fx.url("/api/workspaces/missing/opencode-import")});
     EXPECT_EQ(unknown_preview.status_code, 404);
 
     auto started = cpr::Post(cpr::Url{fx.url("/api/workspaces/" + encoded_hash + "/opencode-import")},
                              cpr::Header{{"Content-Type", "application/json"}},
-                             cpr::Body{R"({})"});
+                             cpr::Body{json{{"session_ids", json::array({"ses-route"})}}.dump()});
     ASSERT_EQ(started.status_code, 202) << started.text;
-    const std::string job_id = json::parse(started.text)["job_id"].get<std::string>();
+    auto started_json = json::parse(started.text);
+    EXPECT_EQ(started_json["total"], 1);
+    const std::string job_id = started_json["job_id"].get<std::string>();
     ASSERT_FALSE(job_id.empty());
 
     json status;

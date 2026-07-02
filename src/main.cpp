@@ -2938,6 +2938,14 @@ static void shutdown_after_tui_loop(TuiState& state,
             // agent_loop.abort() 已经置 abort_flag,工具的 wait 谓词因此成立。
             state.ask_pending = false;
             state.ask_result_ok = false;
+            state.ask_submit_page = false;
+            state.ask_submit_focus = 0;
+            state.ask_question_option_focus.clear();
+            state.ask_answered_questions.clear();
+            state.ask_selected_options.clear();
+            state.ask_multi_selected_by_question.clear();
+            state.ask_custom_answer_selected.clear();
+            state.ask_custom_answers.clear();
             state.ask_scroll_offset = 0;
             state.ask_scroll_total_rows = 0;
             state.ask_scroll_visible_rows = 0;
@@ -3926,10 +3934,13 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
     ask_scrollbar_box = Box{};
     ask_overlay_box = Box{};
     if (state.ask_pending && !state.ask_questions.empty() &&
-        state.ask_current_question >= 0 &&
-        state.ask_current_question <
-            static_cast<int>(state.ask_questions.size())) {
-        const auto& q = state.ask_questions[state.ask_current_question];
+        (state.ask_submit_page ||
+         (state.ask_current_question >= 0 &&
+          state.ask_current_question <
+              static_cast<int>(state.ask_questions.size())))) {
+        const AskQuestion* q = state.ask_submit_page
+            ? nullptr
+            : &state.ask_questions[state.ask_current_question];
         const auto terminal_size = Terminal::Size();
         const int content_width = std::max(20, terminal_size.dimx - 10);
         const int max_visible_rows =
@@ -3937,13 +3948,32 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
                 terminal_size.dimy);
 
         acecode::tui::AskOverlayLayoutInput layout_input;
-        layout_input.question = &q;
-        layout_input.current_question_index = state.ask_current_question;
+        layout_input.question = q;
+        layout_input.submit_page = state.ask_submit_page;
+        layout_input.current_question_index = state.ask_submit_page
+            ? static_cast<int>(state.ask_questions.size())
+            : state.ask_current_question;
         layout_input.total_questions =
             static_cast<int>(state.ask_questions.size());
         layout_input.option_focus = state.ask_option_focus;
+        if (!state.ask_submit_page &&
+            state.ask_current_question >= 0 &&
+            state.ask_current_question <
+                static_cast<int>(state.ask_selected_options.size())) {
+            layout_input.selected_option =
+                state.ask_selected_options[state.ask_current_question];
+        }
+        if (!state.ask_submit_page &&
+            state.ask_current_question >= 0 &&
+            state.ask_current_question <
+                static_cast<int>(state.ask_answered_questions.size())) {
+            layout_input.question_answered =
+                state.ask_answered_questions[state.ask_current_question];
+        }
         layout_input.multi_selected = state.ask_multi_selected;
+        layout_input.answered_questions = state.ask_answered_questions;
         layout_input.other_input_active = state.ask_other_input_active;
+        layout_input.submit_focus = state.ask_submit_focus;
         layout_input.content_width = content_width;
 
         auto layout = acecode::tui::build_ask_overlay_layout(layout_input);
@@ -5328,9 +5358,11 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                     return false;
                 }
 
-                auto& q = state.ask_questions[state.ask_current_question];
-                const int option_count = static_cast<int>(q.options.size());
-                const int total_rows = option_count + 1; // + "Other..."
+                const int question_count =
+                    static_cast<int>(state.ask_questions.size());
+                auto valid_question_index = [&](int index) {
+                    return index >= 0 && index < question_count;
+                };
 
                 auto reset_ask_scroll_state = [&]() {
                     state.ask_scroll_offset = 0;
@@ -5340,12 +5372,157 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                     state.ask_scroll_to_focus_requested = false;
                 };
 
+                auto reset_ask_page_scroll_state = [&]() {
+                    state.ask_scroll_offset = 0;
+                    state.ask_scroll_total_rows = 0;
+                    state.ask_scroll_visible_rows = 0;
+                    state.ask_scrollbar_dragging = false;
+                    state.ask_scroll_to_focus_requested = true;
+                };
+
                 auto clamp_ask_scroll = [&]() {
                     state.ask_scroll_offset = acecode::tui::clamp_scroll_offset(
                         state.ask_scroll_offset,
                         state.ask_scroll_total_rows,
                         state.ask_scroll_visible_rows);
                 };
+
+                auto ensure_ask_page_state_vectors = [&]() {
+                    if (state.ask_question_option_focus.size() <
+                        state.ask_questions.size()) {
+                        state.ask_question_option_focus.resize(
+                            state.ask_questions.size(), 0);
+                    }
+                    if (state.ask_answered_questions.size() <
+                        state.ask_questions.size()) {
+                        state.ask_answered_questions.resize(
+                            state.ask_questions.size(), false);
+                    }
+                    if (state.ask_selected_options.size() <
+                        state.ask_questions.size()) {
+                        state.ask_selected_options.resize(
+                            state.ask_questions.size(), -1);
+                    }
+                    if (state.ask_multi_selected_by_question.size() <
+                        state.ask_questions.size()) {
+                        state.ask_multi_selected_by_question.resize(
+                            state.ask_questions.size());
+                    }
+                    if (state.ask_custom_answer_selected.size() <
+                        state.ask_questions.size()) {
+                        state.ask_custom_answer_selected.resize(
+                            state.ask_questions.size(), false);
+                    }
+                    if (state.ask_custom_answers.size() <
+                        state.ask_questions.size()) {
+                        state.ask_custom_answers.resize(
+                            state.ask_questions.size());
+                    }
+                    for (int i = 0; i < question_count; ++i) {
+                        const auto option_size =
+                            state.ask_questions[i].options.size();
+                        if (state.ask_multi_selected_by_question[i].size() !=
+                            option_size) {
+                            state.ask_multi_selected_by_question[i].assign(
+                                option_size, false);
+                        }
+                    }
+                };
+
+                auto save_current_question_state = [&]() {
+                    if (!valid_question_index(state.ask_current_question)) {
+                        return;
+                    }
+                    ensure_ask_page_state_vectors();
+                    const int option_count_for_current = static_cast<int>(
+                        state.ask_questions[state.ask_current_question]
+                            .options.size());
+                    state.ask_question_option_focus[state.ask_current_question] =
+                        std::clamp(state.ask_option_focus, 0,
+                                   option_count_for_current);
+                    if (state.ask_questions[state.ask_current_question]
+                            .multi_select) {
+                        if (static_cast<int>(state.ask_multi_selected.size()) <
+                            option_count_for_current) {
+                            state.ask_multi_selected.resize(
+                                option_count_for_current, false);
+                        }
+                        state.ask_multi_selected_by_question
+                            [state.ask_current_question] =
+                                state.ask_multi_selected;
+                    }
+                };
+
+                auto load_question_page = [&](int index) {
+                    if (!valid_question_index(index)) {
+                        return;
+                    }
+                    if (!state.ask_submit_page) {
+                        save_current_question_state();
+                    }
+                    ensure_ask_page_state_vectors();
+                    state.ask_submit_page = false;
+                    state.ask_submit_focus = 0;
+                    state.ask_current_question = index;
+                    const int option_count_for_page = static_cast<int>(
+                        state.ask_questions[index].options.size());
+                    state.ask_option_focus = std::clamp(
+                        state.ask_question_option_focus[index], 0,
+                        option_count_for_page);
+                    state.ask_multi_selected =
+                        state.ask_multi_selected_by_question[index];
+                    if (static_cast<int>(state.ask_multi_selected.size()) <
+                        option_count_for_page) {
+                        state.ask_multi_selected.resize(
+                            option_count_for_page, false);
+                    }
+                    state.ask_other_input_active = false;
+                    state.input_text.clear();
+                    state.pasted_texts.clear();
+                    state.input_cursor = 0;
+                    reset_ask_page_scroll_state();
+                    clamp_ask_scroll();
+                };
+
+                auto show_submit_page = [&]() {
+                    if (!state.ask_submit_page) {
+                        save_current_question_state();
+                    }
+                    state.ask_submit_page = true;
+                    state.ask_submit_focus =
+                        std::clamp(state.ask_submit_focus, 0, 1);
+                    state.ask_other_input_active = false;
+                    state.input_text.clear();
+                    state.pasted_texts.clear();
+                    state.input_cursor = 0;
+                    reset_ask_page_scroll_state();
+                    clamp_ask_scroll();
+                };
+
+                auto close_ask_overlay = [&](bool ok) {
+                    state.ask_result_ok = ok;
+                    state.ask_pending = false;
+                    state.ask_submit_page = false;
+                    state.ask_submit_focus = 0;
+                    state.ask_other_input_active = false;
+                    reset_ask_scroll_state();
+                    state.ask_cv.notify_one();
+                };
+
+                if (!state.ask_submit_page &&
+                    !valid_question_index(state.ask_current_question)) {
+                    close_ask_overlay(false);
+                    screen.PostEvent(Event::Custom);
+                    return true;
+                }
+
+                AskQuestion* q = state.ask_submit_page
+                    ? nullptr
+                    : &state.ask_questions[state.ask_current_question];
+                const int option_count = q == nullptr
+                    ? 0
+                    : static_cast<int>(q->options.size());
+                const int total_rows = option_count + 1; // + "Other..."
 
                 auto scroll_ask_by_lines = [&](int delta) {
                     const int before = state.ask_scroll_offset;
@@ -5365,24 +5542,47 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                         state.ask_scroll_visible_rows);
                 };
 
-                auto advance_or_finish_question = [&]() {
-                    state.ask_current_question++;
-                    if (state.ask_current_question >=
-                        static_cast<int>(state.ask_questions.size())) {
-                        state.ask_result_ok = true;
-                        state.ask_pending = false;
-                        reset_ask_scroll_state();
-                        state.ask_cv.notify_one();
+                auto commit_current_answer = [&](const std::string& answer,
+                                                 bool custom_answer) {
+                    if (q == nullptr) {
+                        return;
+                    }
+                    ensure_ask_page_state_vectors();
+                    const int index = state.ask_current_question;
+                    state.ask_result_answers[q->question] = answer;
+                    state.ask_answered_questions[index] = true;
+                    if (custom_answer) {
+                        state.ask_custom_answer_selected[index] = true;
+                        state.ask_custom_answers[index] = answer;
+                        state.ask_selected_options[index] = option_count;
+                        state.ask_question_option_focus[index] = option_count;
+                    } else if (q->multi_select) {
+                        state.ask_custom_answer_selected[index] = false;
+                        state.ask_custom_answers[index].clear();
+                        state.ask_selected_options[index] = -1;
+                        if (static_cast<int>(state.ask_multi_selected.size()) <
+                            option_count) {
+                            state.ask_multi_selected.resize(
+                                option_count, false);
+                        }
+                        state.ask_multi_selected_by_question[index] =
+                            state.ask_multi_selected;
                     } else {
-                        state.ask_option_focus = 0;
-                        state.ask_multi_selected.assign(
-                            state.ask_questions[state.ask_current_question]
-                                .options.size(), false);
-                        state.ask_other_input_active = false;
-                        state.ask_scroll_offset = 0;
-                        state.ask_scrollbar_dragging = false;
-                        state.ask_scroll_to_focus_requested = true;
-                        clamp_ask_scroll();
+                        state.ask_custom_answer_selected[index] = false;
+                        state.ask_custom_answers[index].clear();
+                        state.ask_selected_options[index] =
+                            state.ask_option_focus;
+                        state.ask_question_option_focus[index] =
+                            state.ask_option_focus;
+                    }
+                };
+
+                auto advance_to_next_page = [&]() {
+                    const int next = state.ask_current_question + 1;
+                    if (next >= question_count) {
+                        show_submit_page();
+                    } else {
+                        load_question_page(next);
                     }
                 };
 
@@ -5737,12 +5937,51 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                         state.input_text.clear(); state.pasted_texts.clear();
                         state.input_cursor = 0;
                     } else {
-                        state.ask_result_ok = false;
-                        state.ask_pending = false;
-                        reset_ask_scroll_state();
-                        state.ask_cv.notify_one();
+                        close_ask_overlay(false);
                     }
                     screen.PostEvent(Event::Custom);
+                    return true;
+                }
+
+                if (state.ask_submit_page) {
+                    if (event == Event::ArrowLeft &&
+                        question_count > 0) {
+                        load_question_page(question_count - 1);
+                        screen.PostEvent(Event::Custom);
+                        return true;
+                    }
+                    if (event == Event::ArrowRight) {
+                        return true;
+                    }
+                    if (event == Event::ArrowUp ||
+                        event == Event::Character('k')) {
+                        state.ask_submit_focus =
+                            (state.ask_submit_focus + 1) % 2;
+                        state.ask_scroll_to_focus_requested = true;
+                        screen.PostEvent(Event::Custom);
+                        return true;
+                    }
+                    if (event == Event::ArrowDown ||
+                        event == Event::Character('j')) {
+                        state.ask_submit_focus =
+                            (state.ask_submit_focus + 1) % 2;
+                        state.ask_scroll_to_focus_requested = true;
+                        screen.PostEvent(Event::Custom);
+                        return true;
+                    }
+                    if (event == Event::Character('1') ||
+                        event == Event::Character('2')) {
+                        state.ask_submit_focus =
+                            (event == Event::Character('1')) ? 0 : 1;
+                        close_ask_overlay(state.ask_submit_focus == 0);
+                        screen.PostEvent(Event::Custom);
+                        return true;
+                    }
+                    if (event == Event::Return) {
+                        close_ask_overlay(state.ask_submit_focus == 0);
+                        screen.PostEvent(Event::Custom);
+                        return true;
+                    }
                     return true;
                 }
 
@@ -5752,10 +5991,10 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                         state.input_text.clear(); state.pasted_texts.clear();
                         state.input_cursor = 0;
                         state.ask_other_input_active = false;
-                        state.ask_result_answers[q.question] = answer;
+                        commit_current_answer(answer, true);
 
-                        // 推进到下一题或提交。
-                        advance_or_finish_question();
+                        // 推进到下一题或提交页。
+                        advance_to_next_page();
                         screen.PostEvent(Event::Custom);
                         return true;
                     }
@@ -5773,11 +6012,36 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                     return true;
                 }
 
+                if (event == Event::ArrowLeft) {
+                    if (state.ask_current_question > 0) {
+                        load_question_page(state.ask_current_question - 1);
+                        screen.PostEvent(Event::Custom);
+                    }
+                    return true;
+                }
+                if (event == Event::ArrowRight) {
+                    if (state.ask_current_question + 1 < question_count) {
+                        load_question_page(state.ask_current_question + 1);
+                    } else {
+                        show_submit_page();
+                    }
+                    screen.PostEvent(Event::Custom);
+                    return true;
+                }
+
                 // 方向键 / j k 上下移动焦点。
                 if (event == Event::ArrowUp ||
                     event == Event::Character('k')) {
                     state.ask_option_focus =
                         (state.ask_option_focus - 1 + total_rows) % total_rows;
+                    if (state.ask_current_question >= 0 &&
+                        state.ask_current_question <
+                            static_cast<int>(
+                                state.ask_question_option_focus.size())) {
+                        state.ask_question_option_focus
+                            [state.ask_current_question] =
+                                state.ask_option_focus;
+                    }
                     state.ask_scroll_to_focus_requested = true;
                     screen.PostEvent(Event::Custom);
                     return true;
@@ -5786,6 +6050,14 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                     event == Event::Character('j')) {
                     state.ask_option_focus =
                         (state.ask_option_focus + 1) % total_rows;
+                    if (state.ask_current_question >= 0 &&
+                        state.ask_current_question <
+                            static_cast<int>(
+                                state.ask_question_option_focus.size())) {
+                        state.ask_question_option_focus
+                            [state.ask_current_question] =
+                                state.ask_option_focus;
+                    }
                     state.ask_scroll_to_focus_requested = true;
                     screen.PostEvent(Event::Custom);
                     return true;
@@ -5794,13 +6066,21 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                 // Space —— 仅 multi-select 下对当前焦点项切换勾选;焦点落在
                 // "Other..." 行时 Space 不作响应(Other 需要 Enter 进入文本态)。
                 if (event == Event::Character(' ')) {
-                    if (q.multi_select && state.ask_option_focus < option_count) {
+                    if (q->multi_select && state.ask_option_focus < option_count) {
                         if (static_cast<int>(state.ask_multi_selected.size()) <=
                             state.ask_option_focus) {
                             state.ask_multi_selected.resize(option_count, false);
                         }
                         state.ask_multi_selected[state.ask_option_focus] =
                             !state.ask_multi_selected[state.ask_option_focus];
+                        if (state.ask_current_question >= 0 &&
+                            state.ask_current_question <
+                                static_cast<int>(
+                                    state.ask_multi_selected_by_question.size())) {
+                            state.ask_multi_selected_by_question
+                                [state.ask_current_question] =
+                                    state.ask_multi_selected;
+                        }
                         screen.PostEvent(Event::Custom);
                     }
                     return true;
@@ -5819,22 +6099,22 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                     }
 
                     std::string answer;
-                    if (q.multi_select) {
+                    if (q->multi_select) {
                         for (int i = 0; i < option_count; ++i) {
                             if (i < static_cast<int>(state.ask_multi_selected.size()) &&
                                 state.ask_multi_selected[i]) {
                                 if (!answer.empty()) answer += ", ";
-                                answer += q.options[i].label;
+                                answer += q->options[i].label;
                             }
                         }
                         // 允许空选 —— 上游 schema 没强制,把空字符串交回给模型。
                     } else {
-                        answer = q.options[state.ask_option_focus].label;
+                        answer = q->options[state.ask_option_focus].label;
                     }
-                    state.ask_result_answers[q.question] = answer;
+                    commit_current_answer(answer, false);
 
-                    // 推进或提交。
-                    advance_or_finish_question();
+                    // 推进或进入提交页。
+                    advance_to_next_page();
                     screen.PostEvent(Event::Custom);
                     return true;
                 }

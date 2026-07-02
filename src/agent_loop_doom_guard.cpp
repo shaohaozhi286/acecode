@@ -202,18 +202,13 @@ std::string operation_name(AgentLoopDoomGuard::Operation op) {
     return "unknown";
 }
 
+constexpr int kGuardAttemptThreshold = 3;
+constexpr int kPriorAttemptsBeforeGuard = kGuardAttemptThreshold - 1;
+
 } // namespace
 
 void AgentLoopDoomGuard::begin_model_turn() {
-    for (auto it = cooldown_turns_.begin(); it != cooldown_turns_.end();) {
-        if (it->second <= 0) {
-            it = cooldown_turns_.erase(it);
-            continue;
-        }
-        --it->second;
-        if (it->second <= 0) it = cooldown_turns_.erase(it);
-        else ++it;
-    }
+    reset();
 }
 
 void AgentLoopDoomGuard::reset() {
@@ -230,11 +225,12 @@ std::optional<ToolResult> AgentLoopDoomGuard::maybe_guard(const ToolCall& call) 
             true);
     }
 
-    if (key.tool == "file_read" && exact_result_count(key, ResultClass::Unchanged) >= 1) {
+    if (key.tool == "file_read" &&
+        exact_result_count(key, ResultClass::Unchanged) >= kPriorAttemptsBeforeGuard) {
         return make_cached_read_result(key);
     }
 
-    if (low_signal_exact_count(key) >= 1) {
+    if (low_signal_exact_count(key) >= kPriorAttemptsBeforeGuard) {
         return make_synthetic_result(
             key,
             "the exact same tool call already produced a low-signal result",
@@ -244,7 +240,7 @@ std::optional<ToolResult> AgentLoopDoomGuard::maybe_guard(const ToolCall& call) 
     if (key.tool == "bash" &&
         key.operation != Operation::Write &&
         !key.semantic.empty() &&
-        low_signal_semantic_count(key) >= 2) {
+        low_signal_semantic_count(key) >= kPriorAttemptsBeforeGuard) {
         start_cooldown("bash", 2);
         return make_synthetic_result(
             key,
