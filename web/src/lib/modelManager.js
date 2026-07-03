@@ -211,12 +211,10 @@ export function filterSavedModels(models, query) {
   });
 }
 
-export function canDeleteSavedModel({ models = [], defaultName = '', name = '', busy = false } = {}) {
+export function canDeleteSavedModel({ name = '', busy = false } = {}) {
   const target = String(name || '');
   if (!target || busy) return false;
-  const list = Array.isArray(models) ? models : [];
-  if (target !== String(defaultName || '')) return true;
-  return list.length === 1 && list[0]?.name === target;
+  return true;
 }
 
 export function parseContextWindowK(value) {

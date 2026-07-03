@@ -2295,7 +2295,7 @@ function SectionModel() {
   const removeOne = async (name) => {
     if (!name || busy) return;
     if (!canDeleteSavedModel({ models, defaultName, name, busy: false })) {
-      toast({ kind: 'err', text: '默认模型不能删除,请先切换默认模型' });
+      toast({ kind: 'err', text: '模型暂时不能删除' });
       return;
     }
     setBusy(`delete:${name}`);
@@ -2462,7 +2462,6 @@ function SectionModel() {
           const isExpanded = expandedModelNames.has(m.name);
           const editDraft = editDrafts[m.name] || draftFromModelProfile(m);
           const isDefault = defaultName === m.name;
-          const isOnlyModel = models.length === 1 && models[0]?.name === m.name;
           const canDelete = canDeleteSavedModel({
             models,
             defaultName,
@@ -2542,7 +2541,7 @@ function SectionModel() {
                     type="button"
                     onClick={() => removeOne(m.name)}
                     disabled={!canDelete}
-                    title={isDefault && !isOnlyModel ? '默认模型不能删除' : '删除'}
+                    title="删除"
                     className={clsx(
                       'w-8 h-8 rounded-md flex items-center justify-center transition',
                       canDelete

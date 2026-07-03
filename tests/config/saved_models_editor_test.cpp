@@ -7,9 +7,9 @@
 // 触发场景 / 期望:
 //   - 各类无效 draft → 对应错误码 + cfg 不变(回滚验证)
 //   - 成功路径:add / update / remove 后 cfg.saved_models 长度与字段正确
-//   - update 改名走 delete+add;若 old_name 是 default → IN_USE_AS_DEFAULT
-//   - remove default with multiple models → IN_USE_AS_DEFAULT,cfg 不变
-//   - remove the only default model → OK,清空 default
+//   - update 改名走 delete+add;若 old_name 是 default,同步改 default_model_name
+//   - remove default with multiple models → OK,清空 default_model_name
+//   - remove the only default model → OK,清空 default_model_name
 
 #include <gtest/gtest.h>
 
@@ -229,16 +229,17 @@ TEST(SavedModelsEditor, UpdateRejectsNotFound) {
     EXPECT_EQ(cfg.saved_models.size(), before.size());
 }
 
-// 场景:update 改名时旧名是默认 → IN_USE_AS_DEFAULT。
-TEST(SavedModelsEditor, UpdateRefusesRenamingDefault) {
+// 场景:update 改名时旧名是默认 → OK,default_model_name 同步指向新名。
+TEST(SavedModelsEditor, UpdateRenamesDefaultAndUpdatesDefaultName) {
     auto cfg = make_cfg_with_one_default();  // default = copilot-fast
     auto d = good_openai_draft("copilot-fast-v2");
     d.provider = "copilot";
     d.base_url.clear();
     d.api_key.clear();
     EXPECT_EQ(update_saved_model(cfg, "copilot-fast", d),
-              SavedModelEditError::IN_USE_AS_DEFAULT);
-    EXPECT_EQ(cfg.saved_models[0].name, "copilot-fast");  // 未变
+              SavedModelEditError::OK);
+    EXPECT_EQ(cfg.saved_models[0].name, "copilot-fast-v2");
+    EXPECT_EQ(cfg.default_model_name, "copilot-fast-v2");
 }
 
 // 场景:update 同名改字段(非 default 条目) → 字段被替换。
@@ -299,14 +300,15 @@ TEST(SavedModelsEditor, RemoveOnlyDefaultClearsDefault) {
     EXPECT_TRUE(cfg.default_model_name.empty());
 }
 
-// 场景:remove 多模型里的默认条目 → IN_USE_AS_DEFAULT,cfg 不变。
-TEST(SavedModelsEditor, RemoveRefusesDefaultWhenOtherModelsExist) {
+// 场景:remove 多模型里的默认条目 → OK,删除条目并清空 default。
+TEST(SavedModelsEditor, RemoveDefaultWhenOtherModelsExistClearsDefault) {
     auto cfg = make_cfg_with_one_default();
     add_saved_model(cfg, good_openai_draft("local-lm"));
     EXPECT_EQ(remove_saved_model(cfg, "copilot-fast"),
-              SavedModelEditError::IN_USE_AS_DEFAULT);
-    ASSERT_EQ(cfg.saved_models.size(), 2u);
-    EXPECT_EQ(cfg.default_model_name, "copilot-fast");
+              SavedModelEditError::OK);
+    ASSERT_EQ(cfg.saved_models.size(), 1u);
+    EXPECT_EQ(cfg.saved_models[0].name, "local-lm");
+    EXPECT_TRUE(cfg.default_model_name.empty());
 }
 
 // 场景:remove 非默认 → 长度 -1。

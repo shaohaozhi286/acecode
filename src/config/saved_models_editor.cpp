@@ -116,17 +116,16 @@ SavedModelEditError update_saved_model(AppConfig& cfg,
                             [&](const ModelProfile& e) { return e.name == old_name; });
     if (it == cfg.saved_models.end()) return SavedModelEditError::NOT_FOUND;
 
-    // 改名:必须不与 default 冲突,新名也要走完整校验且不能撞别的现有 name。
     const bool renaming = d.name != old_name;
-    if (renaming && cfg.default_model_name == old_name) {
-        return SavedModelEditError::IN_USE_AS_DEFAULT;
-    }
     if (auto err = validate_draft_basic(d); err != SavedModelEditError::OK) return err;
     if (renaming) {
         if (name_exists(cfg, d.name)) return SavedModelEditError::NAME_TAKEN;
     }
 
     *it = to_profile(d);
+    if (renaming && cfg.default_model_name == old_name) {
+        cfg.default_model_name = d.name;
+    }
     return SavedModelEditError::OK;
 }
 
@@ -135,9 +134,6 @@ SavedModelEditError remove_saved_model(AppConfig& cfg, const std::string& name) 
                             [&](const ModelProfile& e) { return e.name == name; });
     if (it == cfg.saved_models.end()) return SavedModelEditError::NOT_FOUND;
     const bool removing_default = cfg.default_model_name == name;
-    if (removing_default && cfg.saved_models.size() > 1) {
-        return SavedModelEditError::IN_USE_AS_DEFAULT;
-    }
     cfg.saved_models.erase(it);
     if (removing_default) cfg.default_model_name.clear();
     return SavedModelEditError::OK;

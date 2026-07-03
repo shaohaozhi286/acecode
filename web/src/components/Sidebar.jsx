@@ -53,8 +53,11 @@ import {
   upsertSidebarSession,
 } from '../lib/sidebarSessions.js';
 import {
+  OPENCODE_IMPORT_HIGHLIGHT_MS,
   defaultOpencodeImportSelection,
   normalizeOpencodeImportPreview,
+  opencodeImportedSessionHighlightKey,
+  opencodeImportedSessionHighlightKeys,
   opencodeImportConfirmationText,
   opencodeImportProgress,
   toggleAllOpencodeImportSelection,
@@ -332,6 +335,7 @@ function SessionRow({
   onPinnedPointerDown,
   dragging = false,
   dropPlacement = '',
+  importHighlighted = false,
 }) {
   const attention = s.attention_state || s.read_state || 'read';
   const meta = attentionMeta(attention);
@@ -404,6 +408,7 @@ function SessionRow({
         dragging && 'is-dragging',
         dropPlacement === 'before' && 'is-drop-before',
         dropPlacement === 'after' && 'is-drop-after',
+        !pinned && importHighlighted && 'is-opencode-import-highlight',
         active
           ? 'bg-accent-soft/50 text-accent'
           : 'text-fg hover:bg-surface-hi',
@@ -675,6 +680,7 @@ function WorkspaceGroup({
   pendingQuestionSessionIds,
   sessionsLoading = false,
   opencodeImportCount = 0,
+  opencodeImportedHighlightKeys = new Set(),
 }) {
   const [editing, setEditing] = useState(false);
   const [draft,   setDraft]   = useState(ws.name);
@@ -814,6 +820,7 @@ function WorkspaceGroup({
                   onTogglePin={onTogglePin}
                   onArchive={onArchive}
                   onRename={onRenameSession}
+                  importHighlighted={opencodeImportedHighlightKeys.has(opencodeImportedSessionHighlightKey(ws.hash, s.id))}
                 />
               ))}
               {projectedSessions.collapsible && (
@@ -920,6 +927,8 @@ export function Sidebar({
   const opencodeImportPreviewsRef = useRef(new Map());
   const [opencodeImportDialog, setOpencodeImportDialog] = useState(null);
   const opencodeImportPollRef = useRef(0);
+  const [opencodeImportedHighlightKeys, setOpencodeImportedHighlightKeys] = useState(() => new Set());
+  const opencodeImportedHighlightTimersRef = useRef(new Map());
   const revealTarget = useMemo(() => sidebarRevealTarget(activeRef), [activeRef]);
 
   const updateExpanded = useCallback((updater) => {
@@ -984,6 +993,13 @@ export function Sidebar({
       window.clearTimeout(opencodeImportPollRef.current);
       opencodeImportPollRef.current = 0;
     }
+  }, []);
+
+  useEffect(() => () => {
+    for (const timer of opencodeImportedHighlightTimersRef.current.values()) {
+      window.clearTimeout(timer);
+    }
+    opencodeImportedHighlightTimersRef.current.clear();
   }, []);
 
   const setPinnedOrder = useCallback((updater) => {
@@ -1771,6 +1787,32 @@ export function Sidebar({
     });
   }, []);
 
+  const flashOpencodeImportedSessions = useCallback((workspaceHash, sessionIds) => {
+    const keys = opencodeImportedSessionHighlightKeys(workspaceHash, sessionIds);
+    if (keys.length === 0) return;
+
+    setOpencodeImportedHighlightKeys((prev) => {
+      const next = new Set(prev);
+      for (const key of keys) next.add(key);
+      return next;
+    });
+
+    for (const key of keys) {
+      const existing = opencodeImportedHighlightTimersRef.current.get(key);
+      if (existing) window.clearTimeout(existing);
+      const timer = window.setTimeout(() => {
+        opencodeImportedHighlightTimersRef.current.delete(key);
+        setOpencodeImportedHighlightKeys((prev) => {
+          if (!prev.has(key)) return prev;
+          const next = new Set(prev);
+          next.delete(key);
+          return next;
+        });
+      }, OPENCODE_IMPORT_HIGHLIGHT_MS);
+      opencodeImportedHighlightTimersRef.current.set(key, timer);
+    }
+  }, []);
+
   const pollOpencodeImportJob = useCallback((ws, jobId) => {
     if (!ws?.hash || !jobId) return;
     if (opencodeImportPollRef.current) {
@@ -1800,6 +1842,9 @@ export function Sidebar({
           toast({ kind: 'err', text: 'opencode 会话导入失败:' + (status?.error || '') });
         }
         await refresh(ws.hash);
+        if (state === 'complete') {
+          flashOpencodeImportedSessions(ws.hash, status?.session_ids || []);
+        }
         await refreshOpencodeImportPreview(ws);
       } catch (e) {
         setOpencodeImportDialog((prev) => prev
@@ -1809,7 +1854,7 @@ export function Sidebar({
     };
 
     tick();
-  }, [refresh, refreshOpencodeImportPreview]);
+  }, [flashOpencodeImportedSessions, refresh, refreshOpencodeImportPreview]);
 
   const confirmOpencodeImport = useCallback(async () => {
     const ws = opencodeImportDialog?.workspace;
@@ -2163,6 +2208,7 @@ export function Sidebar({
                   pendingQuestionSessionIds={pendingQuestionSessionIds}
                   sessionsLoading={sessionLoadingWorkspaces.has(ws.hash) || !sessionLoadedWorkspaces.has(ws.hash)}
                   opencodeImportCount={opencodeImportPreviews.get(ws.hash)?.count || 0}
+                  opencodeImportedHighlightKeys={opencodeImportedHighlightKeys}
                 />
               );
             })}

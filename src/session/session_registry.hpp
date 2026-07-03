@@ -121,6 +121,7 @@ public:
     // affects future turns for that session only; an in-flight turn keeps the
     // provider shared_ptr snapshot it already captured.
     std::optional<SessionModelState> current_model_state(const std::string& id) const;
+    bool model_profile_used_by_busy_session(const std::string& model_name) const;
     bool switch_model(const std::string& id,
                       const ModelProfile& profile,
                       SessionModelState* out = nullptr,

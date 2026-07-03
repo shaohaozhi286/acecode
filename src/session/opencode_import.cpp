@@ -654,11 +654,12 @@ OpencodeImportSessionResult import_one_session(const OpencodeImportOptions& opti
         }
 
         const std::string id = unique_acecode_session_id(options.project_dir);
+        const std::string import_time = SessionStorage::now_iso8601();
         SessionMeta meta;
         meta.id = id;
         meta.cwd = options.cwd;
-        meta.created_at = iso8601_from_unix_ms(source.time_created_ms);
-        meta.updated_at = iso8601_from_unix_ms(source.time_updated_ms);
+        meta.created_at = import_time;
+        meta.updated_at = import_time;
         meta.message_count = static_cast<int>(messages.size());
         meta.summary = first_user_summary(messages);
         meta.provider = source.provider;

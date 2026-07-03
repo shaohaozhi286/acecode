@@ -2,6 +2,27 @@ function numeric(value, fallback = 0) {
   return Number.isFinite(Number(value)) ? Number(value) : fallback;
 }
 
+export const OPENCODE_IMPORT_HIGHLIGHT_MS = 1800;
+
+export function opencodeImportedSessionHighlightKey(workspaceHash, sessionId) {
+  const hash = String(workspaceHash || '').trim();
+  const id = String(sessionId || '').trim();
+  return hash && id ? `${hash}\u0000${id}` : '';
+}
+
+export function opencodeImportedSessionHighlightKeys(workspaceHash, sessionIds = []) {
+  if (!Array.isArray(sessionIds)) return [];
+  const keys = [];
+  const seen = new Set();
+  for (const sessionId of sessionIds) {
+    const key = opencodeImportedSessionHighlightKey(workspaceHash, sessionId);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    keys.push(key);
+  }
+  return keys;
+}
+
 export function normalizeOpencodeImportSession(session = {}) {
   const id = String(session?.id || session?.opencode_session_id || '').trim();
   const title = String(session?.title || id || '未命名会话');

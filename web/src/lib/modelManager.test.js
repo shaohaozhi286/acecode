@@ -182,17 +182,22 @@ run('canDeleteSavedModel 允许删除唯一默认模型', () => {
   }), true);
 });
 
-run('canDeleteSavedModel 拒绝删除多模型默认项', () => {
+run('canDeleteSavedModel 允许删除多模型默认项', () => {
   assert.equal(canDeleteSavedModel({
     models: [{ name: 'default' }, { name: 'other' }],
     defaultName: 'default',
     name: 'default',
-  }), false);
+  }), true);
   assert.equal(canDeleteSavedModel({
     models: [{ name: 'default' }, { name: 'other' }],
     defaultName: 'default',
     name: 'other',
   }), true);
+});
+
+run('canDeleteSavedModel 仅在缺少 name 或 busy 时拒绝', () => {
+  assert.equal(canDeleteSavedModel({ name: '', busy: false }), false);
+  assert.equal(canDeleteSavedModel({ name: 'fast', busy: true }), false);
 });
 
 run('parseContextWindowK 把 K 单位换算为 token 数', () => {

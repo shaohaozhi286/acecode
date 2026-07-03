@@ -958,6 +958,17 @@ SessionRegistry::current_model_state(const std::string& id) const {
     return state;
 }
 
+bool SessionRegistry::model_profile_used_by_busy_session(const std::string& model_name) const {
+    if (model_name.empty()) return false;
+    std::lock_guard<std::mutex> lk(mu_);
+    for (const auto& [id, entry] : entries_) {
+        (void)id;
+        if (!entry || entry->model_state.name != model_name || !entry->loop) continue;
+        if (entry->loop->is_busy()) return true;
+    }
+    return false;
+}
+
 std::optional<PermissionMode>
 SessionRegistry::permission_mode(const std::string& id) const {
     std::lock_guard<std::mutex> lk(mu_);

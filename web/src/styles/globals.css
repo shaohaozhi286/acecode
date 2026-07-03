@@ -429,6 +429,23 @@ body {
 .ace-sidebar-session-row {
   position: relative;
 }
+@keyframes ace-opencode-import-session-flash {
+  0% {
+    background-color: rgba(var(--ace-accent-rgb), 0.26);
+    box-shadow: inset 0 0 0 1px rgba(var(--ace-accent-rgb), 0.48);
+  }
+  52% {
+    background-color: rgba(var(--ace-accent-rgb), 0.18);
+    box-shadow: inset 0 0 0 1px rgba(var(--ace-accent-rgb), 0.34);
+  }
+  100% {
+    background-color: transparent;
+    box-shadow: inset 0 0 0 1px transparent;
+  }
+}
+.ace-sidebar-session-row.is-opencode-import-highlight {
+  animation: ace-opencode-import-session-flash 1800ms ease-out 1;
+}
 .ace-sidebar-pinned-session-row {
   cursor: grab;
   user-select: none;

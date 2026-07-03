@@ -368,6 +368,7 @@ void WebServer::Impl::register_models() {
             }
 
             auto snapshot = deps.app_config->saved_models;
+            auto default_snapshot = deps.app_config->default_model_name;
             auto rc = update_saved_model(*deps.app_config, url_name, *draft);
             if (rc != SavedModelEditError::OK) {
                 return json_err(http_status_for_edit_error(rc),
@@ -382,6 +383,7 @@ void WebServer::Impl::register_models() {
                 }
             } catch (const std::exception& e) {
                 deps.app_config->saved_models = std::move(snapshot);
+                deps.app_config->default_model_name = std::move(default_snapshot);
                 return json_err(500, "PERSIST_FAILED", e.what());
             }
 
@@ -403,8 +405,8 @@ void WebServer::Impl::register_models() {
             return with_cors(req, std::move(r));
         });
 
-        // DELETE /api/models/<name>: 删除 saved_models 条目。多模型时 default 不能删;
-        // 唯一 default 可删并清空 default_model_name。
+        // DELETE /api/models/<name>: 删除 saved_models 条目。若删除 default,
+        // 清空 default_model_name;若 busy active session 正在使用则拒绝。
         CROW_ROUTE(app, "/api/models/<string>").methods(crow::HTTPMethod::Delete)
         ([this](const crow::request& req, const std::string& url_name) {
             if (auto rej = require_auth(req)) return std::move(*rej);
@@ -416,6 +418,13 @@ void WebServer::Impl::register_models() {
                 r.add_header("Content-Type", "application/json");
                 return with_cors(req, std::move(r));
             };
+
+            if (deps.session_registry &&
+                deps.session_registry->model_profile_used_by_busy_session(url_name)) {
+                return json_err(409,
+                                "MODEL_IN_USE",
+                                "model is used by a busy active session");
+            }
 
             std::lock_guard<std::mutex> config_lock(app_config_mu);
             auto snapshot = deps.app_config->saved_models;

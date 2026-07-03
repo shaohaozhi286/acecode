@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import {
   defaultOpencodeImportSelection,
   normalizeOpencodeImportPreview,
+  opencodeImportedSessionHighlightKey,
+  opencodeImportedSessionHighlightKeys,
   opencodeImportConfirmationText,
   opencodeImportProgress,
   toggleAllOpencodeImportSelection,
@@ -65,6 +67,20 @@ test('toggle all selects all then clears all', () => {
 
   assert.deepEqual(toggleAllOpencodeImportSelection(sessions, ['ses-a']), ['ses-a', 'ses-b']);
   assert.deepEqual(toggleAllOpencodeImportSelection(sessions, ['ses-a', 'ses-b']), []);
+});
+
+test('imported highlight keys are workspace-scoped and deduplicated', () => {
+  assert.equal(opencodeImportedSessionHighlightKey('workspace-a', 'session-1'), 'workspace-a\u0000session-1');
+  assert.equal(opencodeImportedSessionHighlightKey('', 'session-1'), '');
+  assert.deepEqual(opencodeImportedSessionHighlightKeys('workspace-a', [
+    'session-1',
+    'session-1',
+    'session-2',
+    '',
+  ]), [
+    'workspace-a\u0000session-1',
+    'workspace-a\u0000session-2',
+  ]);
 });
 
 test('progress uses processed count over total', () => {

@@ -235,6 +235,56 @@ private:
     std::vector<std::vector<acecode::ChatMessage>> requests_;
 };
 
+class BlockingProvider : public acecode::LlmProvider {
+public:
+    acecode::ChatResponse chat(const std::vector<acecode::ChatMessage>&,
+                               const std::vector<acecode::ToolDef>&) override {
+        acecode::ChatResponse resp;
+        resp.content = "unused";
+        resp.finish_reason = "stop";
+        return resp;
+    }
+
+    void chat_stream(const std::vector<acecode::ChatMessage>&,
+                     const std::vector<acecode::ToolDef>&,
+                     const acecode::StreamCallback&,
+                     std::atomic<bool>* abort_flag = nullptr) override {
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            started_ = true;
+        }
+        cv_.notify_all();
+        std::unique_lock<std::mutex> lk(mu_);
+        cv_.wait(lk, [&] {
+            return released_ || (abort_flag && abort_flag->load());
+        });
+    }
+
+    bool wait_for_started(std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lk(mu_);
+        return cv_.wait_for(lk, timeout, [&] { return started_; });
+    }
+
+    void release() {
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            released_ = true;
+        }
+        cv_.notify_all();
+    }
+
+    std::string name() const override { return "blocking-stub"; }
+    bool is_authenticated() override { return true; }
+    std::string model() const override { return "blocking-stub"; }
+    void set_model(const std::string&) override {}
+
+private:
+    std::mutex mu_;
+    std::condition_variable cv_;
+    bool started_ = false;
+    bool released_ = false;
+};
+
 class CompleteGoalStubProvider : public acecode::LlmProvider {
 public:
     acecode::ChatResponse chat(
@@ -1160,6 +1210,54 @@ TEST(SessionRegistry, ActiveModelStateMarksDeletedWhenSavedModelRemoved) {
     EXPECT_TRUE(active[0].provider.empty());
     EXPECT_TRUE(active[0].model.empty());
     EXPECT_EQ(active[0].context_window, 0);
+
+    std::filesystem::remove_all(project_dir);
+    std::filesystem::remove_all(cwd);
+}
+
+// 场景: active session 正在处理 turn 且使用某个 saved model 时,registry 能
+// 查出该 model 暂时不能删除;turn 结束后同一 model 不再被 busy session 占用。
+TEST(SessionRegistry, ModelProfileBusyUseReflectsActiveLoopBusyState) {
+    auto cwd = temp_cwd("busy_model_profile");
+    auto project_dir = SessionStorage::get_project_dir(cwd.string());
+    std::filesystem::remove_all(project_dir);
+
+    auto cfg = make_model_cfg();
+    ToolExecutor tools;
+    PermissionManager permissions;
+    SessionRegistryDeps deps;
+    deps.provider_accessor = [] { return std::shared_ptr<acecode::LlmProvider>{}; };
+    deps.tools = &tools;
+    deps.cwd = cwd.string();
+    deps.config = &cfg;
+    deps.template_permissions = &permissions;
+    SessionRegistry registry(std::move(deps));
+
+    SessionOptions opts;
+    opts.model_name = "fast";
+    auto id = registry.create(opts);
+    EXPECT_FALSE(registry.model_profile_used_by_busy_session("fast"));
+
+    auto entry = registry.acquire(id);
+    ASSERT_TRUE(entry);
+    auto blocker = std::make_shared<BlockingProvider>();
+    {
+        ASSERT_TRUE(entry->provider_slot);
+        std::lock_guard<std::mutex> lk(entry->provider_slot->mu);
+        entry->provider_slot->provider = blocker;
+    }
+
+    entry->loop->submit("hold provider");
+    ASSERT_TRUE(blocker->wait_for_started(2s));
+    EXPECT_TRUE(registry.model_profile_used_by_busy_session("fast"));
+    EXPECT_FALSE(registry.model_profile_used_by_busy_session("slow"));
+
+    blocker->release();
+    for (int i = 0; i < 100 && entry->loop->is_busy(); ++i) {
+        std::this_thread::sleep_for(10ms);
+    }
+    EXPECT_FALSE(entry->loop->is_busy());
+    EXPECT_FALSE(registry.model_profile_used_by_busy_session("fast"));
 
     std::filesystem::remove_all(project_dir);
     std::filesystem::remove_all(cwd);

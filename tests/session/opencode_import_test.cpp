@@ -350,6 +350,62 @@ TEST(OpencodeImport, ReportsArchivedStateAndImportsSelectedSessions) {
     EXPECT_EQ(repeated.sessions.front().opencode_session_id, "ses-active");
 }
 
+TEST(OpencodeImport, ImportedMetadataUsesImportTimeAndPreservesMessageTimestamps) {
+    auto root = temp_dir("recent");
+    auto workspace = root / "workspace";
+    auto project_dir = root / "ace-project";
+    fs::create_directories(workspace);
+    fs::create_directories(project_dir);
+    auto db_path = create_db(root / "data");
+
+    const std::string old_id = acecode::SessionStorage::generate_session_id();
+    acecode::SessionMeta old_meta;
+    old_meta.id = old_id;
+    old_meta.cwd = acecode::path_to_utf8(workspace);
+    old_meta.created_at = "2000-01-01T00:00:00Z";
+    old_meta.updated_at = "2000-01-01T00:00:00Z";
+    old_meta.title = "Existing old session";
+    old_meta.title_source = "user";
+    acecode::SessionStorage::write_messages(
+        acecode::SessionStorage::session_path(acecode::path_to_utf8(project_dir), old_id),
+        {});
+    acecode::SessionStorage::write_meta(
+        acecode::SessionStorage::meta_path(acecode::path_to_utf8(project_dir), old_id),
+        old_meta);
+
+    sqlite3* db = open_db_rw(db_path);
+    ASSERT_NE(db, nullptr);
+    insert_session(db, "ses-old-source", acecode::path_to_utf8(workspace), "Imported old source");
+    insert_message(db, "ses-old-source", "msg-old-source", R"({"role":"user"})");
+    insert_part(db, "ses-old-source", "msg-old-source", "prt-old-source", R"({"type":"text","text":"old source"})");
+    sqlite3_close(db);
+
+    acecode::OpencodeImportOptions options;
+    options.workspace_hash = "hash";
+    options.cwd = acecode::path_to_utf8(workspace);
+    options.project_dir = acecode::path_to_utf8(project_dir);
+    auto status = acecode::import_opencode_sessions_from_database(
+        acecode::path_to_utf8(db_path), options);
+    ASSERT_EQ(status.state, "complete");
+    ASSERT_EQ(status.imported, 1);
+    ASSERT_EQ(status.session_ids.size(), 1u);
+
+    auto imported_meta = acecode::SessionStorage::read_meta(
+        acecode::SessionStorage::meta_path(acecode::path_to_utf8(project_dir), status.session_ids.front()));
+    EXPECT_NE(imported_meta.created_at, "2023-11-14T22:13:20Z");
+    EXPECT_NE(imported_meta.updated_at, "2023-11-14T22:13:30Z");
+    EXPECT_EQ(imported_meta.created_at, imported_meta.updated_at);
+
+    auto listed = acecode::SessionStorage::list_sessions(acecode::path_to_utf8(project_dir));
+    ASSERT_GE(listed.size(), 2u);
+    EXPECT_EQ(listed.front().id, status.session_ids.front());
+
+    auto messages = acecode::SessionStorage::load_messages(
+        acecode::SessionStorage::session_path(acecode::path_to_utf8(project_dir), status.session_ids.front()));
+    ASSERT_FALSE(messages.empty());
+    EXPECT_EQ(messages.front().timestamp, "2023-11-14T22:13:20Z");
+}
+
 TEST(OpencodeImport, ConvertsTextReasoningToolsAndUnsupportedParts) {
     auto root = temp_dir("convert");
     auto workspace = root / "workspace";

@@ -42,6 +42,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cpr/cpr.h>
 #include <cctype>
 #include <cstdlib>
@@ -154,6 +155,56 @@ bool zip_entry_exists(const std::filesystem::path& zip_path,
     zip_close(archive);
     return exists;
 }
+
+class BlockingProvider : public acecode::LlmProvider {
+public:
+    acecode::ChatResponse chat(const std::vector<acecode::ChatMessage>&,
+                               const std::vector<acecode::ToolDef>&) override {
+        acecode::ChatResponse resp;
+        resp.content = "unused";
+        resp.finish_reason = "stop";
+        return resp;
+    }
+
+    void chat_stream(const std::vector<acecode::ChatMessage>&,
+                     const std::vector<acecode::ToolDef>&,
+                     const acecode::StreamCallback&,
+                     std::atomic<bool>* abort_flag = nullptr) override {
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            started_ = true;
+        }
+        cv_.notify_all();
+        std::unique_lock<std::mutex> lk(mu_);
+        cv_.wait(lk, [&] {
+            return released_ || (abort_flag && abort_flag->load());
+        });
+    }
+
+    bool wait_for_started(std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lk(mu_);
+        return cv_.wait_for(lk, timeout, [&] { return started_; });
+    }
+
+    void release() {
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            released_ = true;
+        }
+        cv_.notify_all();
+    }
+
+    std::string name() const override { return "blocking-stub"; }
+    bool is_authenticated() override { return true; }
+    std::string model() const override { return "blocking-stub"; }
+    void set_model(const std::string&) override {}
+
+private:
+    std::mutex mu_;
+    std::condition_variable cv_;
+    bool started_ = false;
+    bool released_ = false;
+};
 
 struct WebServerFixture {
     acecode::ToolExecutor tools;
@@ -2900,6 +2951,27 @@ TEST(WebServerHttp, PutModelsPreservesAndClearsRequestHeaders) {
     EXPECT_TRUE(fx.cfg.saved_models.back().request_headers.empty());
 }
 
+// 场景: PUT 重命名当前默认 saved model 时,default_model_name 同步改到新名。
+TEST(WebServerHttp, PutModelsRenamingDefaultUpdatesDefaultName) {
+    WebServerFixture fx;
+    fx.cfg.default_model_name = "fixture-copilot";
+
+    json req = {
+        {"name", "fixture-copilot-v2"},
+        {"provider", "copilot"},
+        {"model", "gpt-5"},
+    };
+    auto r = cpr::Put(cpr::Url{fx.url("/api/models/fixture-copilot")},
+                      cpr::Header{{"Content-Type", "application/json"}},
+                      cpr::Body{req.dump()});
+    ASSERT_EQ(r.status_code, 200) << r.text;
+    auto j = json::parse(r.text);
+    EXPECT_EQ(j["name"], "fixture-copilot-v2");
+    EXPECT_EQ(fx.cfg.default_model_name, "fixture-copilot-v2");
+    ASSERT_EQ(fx.cfg.saved_models.size(), 1u);
+    EXPECT_EQ(fx.cfg.saved_models[0].name, "fixture-copilot-v2");
+}
+
 // 场景:POST /api/models/probe 只接受 OpenAI-compatible 探测参数。这里走
 // 400 分支,不发真实网络请求,用于固定 route wiring + 错误码。
 TEST(WebServerHttp, PostModelsProbeRejectsUnsupportedProvider) {
@@ -3060,4 +3132,88 @@ TEST(WebServerHttp, PostDefaultModelUnknownNameReturns404) {
     EXPECT_EQ(j["error"], "NOT_FOUND");
     EXPECT_EQ(fx.cfg.default_model_name, "previous-default")
         << "校验失败时不应改 default_model_name";
+}
+
+// 场景: DELETE 默认 saved model 不再被 default 指针保护;删除成功后同步清空
+// default_model_name,避免配置里留下悬空默认指针。
+TEST(WebServerHttp, DeleteDefaultModelClearsDefaultModelName) {
+    WebServerFixture fx;
+    fx.cfg.default_model_name = "fixture-copilot";
+
+    auto r = cpr::Delete(cpr::Url{fx.url("/api/models/fixture-copilot")});
+    ASSERT_EQ(r.status_code, 200) << r.text;
+    EXPECT_TRUE(fx.cfg.saved_models.empty());
+    EXPECT_TRUE(fx.cfg.default_model_name.empty());
+}
+
+// 场景: active idle session 引用的 saved model 被删除时,删除成功;随后
+// session model state 暴露 deleted=true,让 UI 显示 name (deleted)。
+TEST(WebServerHttp, DeleteIdleActiveSessionModelReturnsDeletedState) {
+    WebServerFixture fx;
+    acecode::ModelProfile fast;
+    fast.name = "fast";
+    fast.provider = "copilot";
+    fast.model = "fast-model";
+    fx.cfg.saved_models.push_back(fast);
+
+    acecode::SessionOptions opts;
+    opts.model_name = "fast";
+    const std::string id = fx.registry->create(opts);
+
+    auto r = cpr::Delete(cpr::Url{fx.url("/api/models/fast")});
+    ASSERT_EQ(r.status_code, 200) << r.text;
+    ASSERT_EQ(fx.cfg.saved_models.size(), 1u);
+    EXPECT_EQ(fx.cfg.saved_models[0].name, "fixture-copilot");
+
+    auto state = cpr::Get(cpr::Url{fx.url("/api/sessions/" + id + "/model")});
+    ASSERT_EQ(state.status_code, 200) << state.text;
+    auto j = json::parse(state.text);
+    EXPECT_EQ(j["name"], "fast");
+    EXPECT_EQ(j["deleted"], true);
+    EXPECT_EQ(j["provider"], "");
+    EXPECT_EQ(j["model"], "");
+}
+
+// 场景: active busy session 正在使用某 saved model 时,DELETE 返回 409 且
+// 不删除 profile,也不改 default_model_name。
+TEST(WebServerHttp, DeleteBusyActiveSessionModelReturnsConflict) {
+    WebServerFixture fx;
+    acecode::ModelProfile busy;
+    busy.name = "busy-fast";
+    busy.provider = "copilot";
+    busy.model = "busy-model";
+    fx.cfg.saved_models.push_back(busy);
+    fx.cfg.default_model_name = "busy-fast";
+
+    acecode::SessionOptions opts;
+    opts.model_name = "busy-fast";
+    const std::string id = fx.registry->create(opts);
+    auto entry = fx.registry->acquire(id);
+    ASSERT_TRUE(entry);
+    auto blocker = std::make_shared<BlockingProvider>();
+    {
+        ASSERT_TRUE(entry->provider_slot);
+        std::lock_guard<std::mutex> lk(entry->provider_slot->mu);
+        entry->provider_slot->provider = blocker;
+    }
+
+    entry->loop->submit("hold provider");
+    ASSERT_TRUE(blocker->wait_for_started(2s));
+
+    auto r = cpr::Delete(cpr::Url{fx.url("/api/models/busy-fast")});
+    blocker->release();
+    for (int i = 0; i < 100 && entry->loop->is_busy(); ++i) {
+        std::this_thread::sleep_for(10ms);
+    }
+
+    ASSERT_EQ(r.status_code, 409) << r.text;
+    auto j = json::parse(r.text);
+    EXPECT_EQ(j["error"], "MODEL_IN_USE");
+    EXPECT_NE(std::find_if(fx.cfg.saved_models.begin(),
+                           fx.cfg.saved_models.end(),
+                           [](const acecode::ModelProfile& p) {
+                               return p.name == "busy-fast";
+                           }),
+              fx.cfg.saved_models.end());
+    EXPECT_EQ(fx.cfg.default_model_name, "busy-fast");
 }

@@ -43,7 +43,7 @@ enum class SavedModelEditError {
     INVALID_CAPABILITY,     // capabilities 含空值/控制字符/重复项
     INVALID_REQUEST_HEADER, // request_headers 非 openai / 非法 header/template
     NOT_FOUND,            // update/remove 时 name 不存在
-    IN_USE_AS_DEFAULT,    // remove/改名时该 name 是 cfg.default_model_name
+    IN_USE_AS_DEFAULT,    // 调用层可用于表示运行中 session 正在使用该 name
 };
 
 const char* to_string(SavedModelEditError e);
@@ -53,13 +53,13 @@ const char* to_string(SavedModelEditError e);
 SavedModelEditError add_saved_model(AppConfig& cfg, const SavedModelDraft& d);
 
 // 替换 cfg.saved_models 里 name == old_name 的条目为 d。改名(d.name !=
-// old_name)走 delete + add 语义;若 old_name 是 default,返 IN_USE_AS_DEFAULT。
+// old_name)走 delete + add 语义;若 old_name 是 default,同步更新 default_model_name。
 SavedModelEditError update_saved_model(AppConfig& cfg,
                                         const std::string& old_name,
                                         const SavedModelDraft& d);
 
-// 删除 cfg.saved_models 里 name == name 的条目。若是 default 且仍有其他
-// model 可选,返 IN_USE_AS_DEFAULT;若是唯一 model,清空 default 后删除。
+// 删除 cfg.saved_models 里 name == name 的条目。若是 default,清空
+// default_model_name 后删除。
 SavedModelEditError remove_saved_model(AppConfig& cfg, const std::string& name);
 
 } // namespace acecode
