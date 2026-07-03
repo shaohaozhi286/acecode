@@ -1039,4 +1039,72 @@ TEST(OpenAiProviderReasoningTest, MissingImageContentPartSerializesFallbackText)
     fs::remove_all(dir);
 }
 
+// ============ finish_reason 随 Done 事件透传(fix-glm-empty-response-turn-end)============
+//
+// 回归背景:火山引擎 GLM 深度思考把输出 token 预算耗尽时,服务端在最后一个
+// chunk 上报 finish_reason="length",但旧 StreamEvent 没有该字段,AgentLoop
+// 侧永远只看到硬编码的 "stop",无法区分「正常收尾」与「被 token 上限截断」。
+// 新行为:Done 事件携带服务端真实上报的 finish_reason;从未上报时保持空串
+// (部分兼容网关会整个省略该字段,消费方必须容忍空值)。
+
+// 场景:仅 reasoning、无 content,最后 chunk 报 finish_reason="length"
+// (火山 GLM 思考截断的线上形态)。期望 Done 事件带 "length"。
+TEST(OpenAiProviderReasoningTest, DoneEventCarriesLengthFinishReason) {
+    LocalHttpServer server([](httplib::Server& s) {
+        s.Post("/chat/completions", [](const httplib::Request&, httplib::Response& res) {
+            std::string body =
+                "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking...\"}}]}\n\n"
+                "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n"
+                "data: [DONE]\n\n";
+            res.set_content(body, "text/event-stream");
+            res.status = 200;
+        });
+    });
+
+    OpenAiCompatProvider provider(
+        "http://127.0.0.1:" + std::to_string(server.port), "", "test-model");
+    ChatMessage user_msg;
+    user_msg.role = "user";
+    user_msg.content = "hi";
+
+    std::string done_finish_reason = "unset";
+    auto cb = [&](const StreamEvent& evt) {
+        if (evt.type == StreamEventType::Done) done_finish_reason = evt.finish_reason;
+    };
+    std::atomic<bool> abort_flag{false};
+    provider.chat_stream({user_msg}, {}, cb, &abort_flag);
+
+    EXPECT_EQ(done_finish_reason, "length");
+}
+
+// 场景:网关从头到尾不上报 finish_reason(部分 one-api / 私有部署的真实行为),
+// 只发 content chunk + [DONE]。期望 Done 事件的 finish_reason 为空串 ——
+// 不能猜一个 "stop" 出来,消费方(AgentLoop 空回复兜底)不依赖它。
+TEST(OpenAiProviderReasoningTest, DoneEventFinishReasonEmptyWhenGatewayOmitsIt) {
+    LocalHttpServer server([](httplib::Server& s) {
+        s.Post("/chat/completions", [](const httplib::Request&, httplib::Response& res) {
+            std::string body =
+                "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n"
+                "data: [DONE]\n\n";
+            res.set_content(body, "text/event-stream");
+            res.status = 200;
+        });
+    });
+
+    OpenAiCompatProvider provider(
+        "http://127.0.0.1:" + std::to_string(server.port), "", "test-model");
+    ChatMessage user_msg;
+    user_msg.role = "user";
+    user_msg.content = "hi";
+
+    std::string done_finish_reason = "unset";
+    auto cb = [&](const StreamEvent& evt) {
+        if (evt.type == StreamEventType::Done) done_finish_reason = evt.finish_reason;
+    };
+    std::atomic<bool> abort_flag{false};
+    provider.chat_stream({user_msg}, {}, cb, &abort_flag);
+
+    EXPECT_EQ(done_finish_reason, "");
+}
+
 } // namespace

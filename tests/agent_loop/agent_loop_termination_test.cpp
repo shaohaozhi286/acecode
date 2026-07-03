@@ -800,11 +800,187 @@ TEST(AgentLoopTermination, TimeoutAfterPartialToolCallIsNotReplayedAsOrphan) {
     }
 }
 
-TEST(AgentLoopTermination, SuccessfulEmptyResponseIsStillPersistedAsAssistant) {
+// ============ 空回复兜底(fix-glm-empty-response-turn-end)============
+//
+// 回归背景(用户反馈会话 20260703-022813-6f8f,火山引擎 GLM):模型把整个回合
+// 的输出 token 预算全部耗在深度思考上(reasoning_content 9932 字符),之后
+// HTTP 200 + [DONE] 正常收尾,但 content 与 tool_calls 全空。旧行为把这种
+// 「成功但空」的响应当作正常 text-only 回复静默终止回合,用户看到"思考了半天
+// 然后什么都没说就停了"(反馈原文:"没有完成任务就停止了")。
+// 新行为:空回复触发自动重试 —— 注入 hidden user 提示(hidden_goal_context,
+// 进 API 但 TUI/Web 不显示),最多 kMaxEmptyResponseRetries=2 次;耗尽后以显式
+// error 结束回合,绝不静默终止。finish_reason 由 Done 事件透传,可能为空
+// (部分兼容网关不上报),兜底逻辑不依赖它,只用它增强提示语。
+
+// 构造「仅思考无正文」的空回复事件脚本,贴近火山 GLM 实测形态。
+// finish_reason 为空 = 网关未上报(必须也能触发兜底,这是主防线语义)。
+static std::vector<acecode::StreamEvent> make_reasoning_only_response(
+    const std::string& reasoning, const std::string& finish_reason = {}) {
+    acecode::StreamEvent think;
+    think.type = acecode::StreamEventType::ReasoningDelta;
+    think.content = reasoning;
+    acecode::StreamEvent done;
+    done.type = acecode::StreamEventType::Done;
+    done.finish_reason = finish_reason;
+    return {think, done};
+}
+
+// 场景:第 1 轮空回复(仅 reasoning,无 finish_reason)→ 注入重试提示 →
+// 第 2 轮模型恢复正常文本 → 回合正常完成,无 error。
+// 同时验证:空 assistant 消息持久化留档但不 dispatch 到实时流(不出空气泡);
+// 注入提示对 API 可见、带 empty_response_retry 标记;不走已移除的
+// [acecode:auto-continue] nudge 旧路径(防回归断言)。
+TEST(AgentLoopTermination, EmptyResponseInjectsRetryPromptAndRecovers) {
+    AgentLoopHarness h;
+    h.push_events(make_reasoning_only_response("长篇思考后忘了说话"));
+    h.push_text("恢复后的正常回答");
+
+    ASSERT_TRUE(h.submit_and_wait("分析这个项目"));
+    EXPECT_EQ(h.turn_count(), 2);
+    EXPECT_EQ(h.count_by_role("error"), 0);
+    EXPECT_EQ(h.count_nudges(), 0);  // 绝不复活旧 auto-continue 路径
+
+    // 实时流:只有第 2 轮的非空 assistant 被 dispatch(空回复不出气泡)。
+    EXPECT_EQ(h.count_by_role("assistant"), 1);
+
+    // 持久历史:空 assistant(带 reasoning)与正常 assistant 都留档。
+    const auto persisted = h.persisted_messages();
+    int persisted_assistant = 0;
+    bool saw_empty_with_reasoning = false;
+    bool saw_retry_marker = false;
+    for (const auto& msg : persisted) {
+        if (msg.role == "assistant") {
+            ++persisted_assistant;
+            if (msg.content.empty() && !msg.reasoning_content.empty()) {
+                saw_empty_with_reasoning = true;
+            }
+        }
+        if (msg.role == "user" && msg.metadata.is_object() &&
+            msg.metadata.value("empty_response_retry", false)) {
+            saw_retry_marker = true;
+            EXPECT_TRUE(msg.metadata.value("hidden_goal_context", false));
+        }
+    }
+    EXPECT_EQ(persisted_assistant, 2);
+    EXPECT_TRUE(saw_empty_with_reasoning);
+    EXPECT_TRUE(saw_retry_marker);
+
+    // 注入提示必须进第 2 轮 API 请求,模型才可能自我纠正。
+    const auto second_request = h.request_messages_for_turn(1);
+    bool prompt_in_request = false;
+    for (const auto& msg : second_request) {
+        if (msg.role == "user" &&
+            msg.content.find("[SYSTEM NOTE]") != std::string::npos &&
+            msg.content.find("empty") != std::string::npos) {
+            prompt_in_request = true;
+        }
+    }
+    EXPECT_TRUE(prompt_in_request);
+
+    // 用户可见的 transcript 系统提示(告知发生了自动重试)。
+    const auto messages = h.snapshot_messages();
+    bool saw_notice = false;
+    for (const auto& m : messages) {
+        if (m.role == "system" &&
+            m.content.find(u8"[空回复]") != std::string::npos) {
+            saw_notice = true;
+        }
+    }
+    EXPECT_TRUE(saw_notice);
+}
+
+// 场景:模型连续 3 轮(首轮 + 2 次重试)都返回空回复 → 重试耗尽,回合以显式
+// error 结束,turn timing 状态为 "error"。
+// 回归断言:旧行为在第 1 轮就静默"正常完成"(反馈用户看到的 bug 表现);
+// 新行为必须把失败暴露出来。stub 脚本耗尽后恰好每轮都只发 Done,天然模拟
+// 连续空回复。
+TEST(AgentLoopTermination, EmptyResponseExhaustsRetriesEndsWithError) {
     AgentLoopHarness h;
 
     ASSERT_TRUE(h.submit_and_wait("empty"));
-    EXPECT_EQ(h.turn_count(), 1);
+    EXPECT_EQ(h.turn_count(), 3);  // 1 首轮 + 2 次重试
+    EXPECT_EQ(h.count_by_role("error"), 1);
+
+    // error 文案要说清楚发生了什么(空回复),不能是笼统的失败。
+    bool saw_empty_error = false;
+    for (const auto& m : h.snapshot_messages()) {
+        if (m.role == "error" &&
+            m.content.find(u8"空回复") != std::string::npos) {
+            saw_empty_error = true;
+        }
+    }
+    EXPECT_TRUE(saw_empty_error);
+
+    // 每一轮的空 assistant 都持久化留档(诊断证据),但实时流零空气泡。
+    EXPECT_EQ(h.count_by_role("assistant"), 0);
+    int persisted_assistant = 0;
+    for (const auto& msg : h.persisted_messages()) {
+        if (msg.role == "assistant") ++persisted_assistant;
+    }
+    EXPECT_EQ(persisted_assistant, 3);
+
+    // turn timing 必须记为 error,不能伪装成 completed。
+    auto timings = turn_timings_from(h.persisted_messages());
+    ASSERT_EQ(timings.size(), 1u);
+    EXPECT_EQ(timings[0].status, "error");
+}
+
+// 场景:空回复且 Done 事件带 finish_reason="length"(思考耗尽输出 token 预算,
+// 即火山 GLM 反馈会话的推断根因)→ 注入提示与用户提示都应点明「token 上限
+// 截断」,引导模型下一轮压缩思考。
+TEST(AgentLoopTermination, LengthTruncatedEmptyResponseMentionsTokenLimit) {
+    AgentLoopHarness h;
+    h.push_events(make_reasoning_only_response("超长思考直到被截断", "length"));
+    h.push_text("ok");
+
+    ASSERT_TRUE(h.submit_and_wait("go"));
+    EXPECT_EQ(h.turn_count(), 2);
+    EXPECT_EQ(h.count_by_role("error"), 0);
+
+    const auto second_request = h.request_messages_for_turn(1);
+    bool prompt_mentions_limit = false;
+    for (const auto& msg : second_request) {
+        if (msg.role == "user" &&
+            msg.content.find("finish_reason=length") != std::string::npos) {
+            prompt_mentions_limit = true;
+        }
+    }
+    EXPECT_TRUE(prompt_mentions_limit);
+
+    bool notice_mentions_limit = false;
+    for (const auto& m : h.snapshot_messages()) {
+        if (m.role == "system" &&
+            m.content.find(u8"token 上限截断") != std::string::npos) {
+            notice_mentions_limit = true;
+        }
+    }
+    EXPECT_TRUE(notice_mentions_limit);
+}
+
+// 场景:非空文本回复但 finish_reason="length"(答案写到一半被截)→ 回合照常
+// 结束(不重试 —— 已有部分内容,重发只会浪费且可能重复),但必须给用户一条
+// [输出截断] 系统提示,不能假装回复完整。
+TEST(AgentLoopTermination, LengthTruncatedNonEmptyTextEndsTurnWithNotice) {
+    AgentLoopHarness h;
+    acecode::StreamEvent partial_text;
+    partial_text.type = acecode::StreamEventType::Delta;
+    partial_text.content = "部分回答被截";
+    acecode::StreamEvent done;
+    done.type = acecode::StreamEventType::Done;
+    done.finish_reason = "length";
+    h.push_events({partial_text, done});
+
+    ASSERT_TRUE(h.submit_and_wait("answer me"));
+    EXPECT_EQ(h.turn_count(), 1);  // 无重试
     EXPECT_EQ(h.count_by_role("error"), 0);
     EXPECT_EQ(h.count_by_role("assistant"), 1);
+
+    bool saw_truncation_notice = false;
+    for (const auto& m : h.snapshot_messages()) {
+        if (m.role == "system" &&
+            m.content.find(u8"[输出截断]") != std::string::npos) {
+            saw_truncation_notice = true;
+        }
+    }
+    EXPECT_TRUE(saw_truncation_notice);
 }

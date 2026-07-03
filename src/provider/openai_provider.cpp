@@ -1203,6 +1203,10 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
 
         ChatResponse accumulated;
         accumulated.finish_reason = "stop";
+        // 服务端真实上报的 finish_reason。与 accumulated.finish_reason 分开存:
+        // 后者有 "stop" 兜底默认值,区分不了「真 stop」与「网关从未上报」。
+        // Done 事件只透传这个原始值,空 = 上游没发(部分兼容网关会省略)。
+        std::string reported_finish_reason;
         std::string sse_buffer;
         std::string raw_body_capture;
         std::map<int, ToolCallAccumulator> pending_tools;
@@ -1249,6 +1253,7 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
 
             StreamEvent done_evt;
             done_evt.type = StreamEventType::Done;
+            done_evt.finish_reason = reported_finish_reason;
             callback(done_evt);
             saw_done = true;
         };
@@ -1351,6 +1356,7 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
                     const auto& choice = j["choices"][0];
                     if (choice.contains("finish_reason") && !choice["finish_reason"].is_null()) {
                         accumulated.finish_reason = choice["finish_reason"].get<std::string>();
+                        reported_finish_reason = accumulated.finish_reason;
                     }
 
                     if (!choice.contains("delta")) continue;

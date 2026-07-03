@@ -147,6 +147,14 @@ public:
                      const std::vector<acecode::ToolDef>&,
                      const acecode::StreamCallback& callback,
                      std::atomic<bool>* = nullptr) override {
+        // 必须发非空文本:纯 Done 的空响应会触发 AgentLoop 的空回复兜底重试
+        // (fix-glm-empty-response-turn-end),一个 turn 变成 1+2 轮,导致
+        // AutoPreCompactContinueFalse 的 pre-compact hook 计数从 1 变 3。
+        // 本 stub 只服务 compact-hook 断言,turn 正文内容无关紧要。
+        acecode::StreamEvent delta;
+        delta.type = acecode::StreamEventType::Delta;
+        delta.content = "ok";
+        callback(delta);
         acecode::StreamEvent done;
         done.type = acecode::StreamEventType::Done;
         callback(done);

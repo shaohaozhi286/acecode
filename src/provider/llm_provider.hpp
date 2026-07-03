@@ -148,6 +148,10 @@ struct StreamEvent {
     std::string error;          // Error: description
     ProviderErrorInfo provider_error; // Error/Retry: structured provider failure
     TokenUsage usage;           // Usage: token counts from server
+    // Done: finish_reason as reported by the server ("stop"/"length"/"tool_calls"...).
+    // Empty when the upstream never reported one — some OpenAI-compatible gateways
+    // omit it entirely, so consumers must treat it as a best-effort signal.
+    std::string finish_reason;
 };
 
 using StreamCallback = std::function<void(const StreamEvent&)>;

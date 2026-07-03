@@ -1282,6 +1282,12 @@ AgentLoop::ProviderCallResult AgentLoop::call_provider_and_collect(
             }
             break;
         case StreamEventType::Done:
+            // 透传服务端上报的 finish_reason(可能为空 — 部分兼容网关不发)。
+            // 非空才覆盖,保持 "stop" 兜底默认值。
+            if (!evt.finish_reason.empty()) {
+                std::lock_guard<std::mutex> lk(resp_mu);
+                result.accumulated.finish_reason = evt.finish_reason;
+            }
             break;
         case StreamEventType::Usage:
             last_api_prompt_tokens_.store(evt.usage.prompt_tokens);
@@ -2383,6 +2389,14 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
     int context_rescue_attempts = 0;
     int last_context_rescue_tokens = std::numeric_limits<int>::max();
     bool skip_auto_compact_once = false;
+    // 空回复兜底重试(fix-glm-empty-response-turn-end):HTTP 200 + [DONE] 正常
+    // 收尾、但 content/tool_calls 全空的「成功空响应」。实测形态:火山引擎 GLM
+    // 深度思考把输出 token 预算全部耗在 reasoning 上(finish_reason=length,
+    // 但部分网关不上报该字段,因此不能依赖它触发),正文与工具调用没机会输出,
+    // 旧行为被 text-only 分支当作正常回复静默终止回合。连续空回复才累计,
+    // 一旦某轮产出有效输出(文本或工具调用)即清零。
+    constexpr int kMaxEmptyResponseRetries = 2;
+    int empty_response_retries = 0;
     AgentLoopDoomGuard doom_guard;
     std::mutex doom_guard_mu;
     int observed_compact_generation = compact_generation_.load(std::memory_order_relaxed);
@@ -2561,6 +2575,94 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
 
         // Text-only response (no tool calls) → end the loop
         if (!provider_result.accumulated.has_tool_calls()) {
+            const bool has_content_parts =
+                provider_result.accumulated.content_parts.is_array() &&
+                !provider_result.accumulated.content_parts.empty();
+            const bool response_is_blank =
+                !has_content_parts &&
+                provider_result.accumulated.content.find_first_not_of(" \t\r\n") ==
+                    std::string::npos;
+            const bool truncated_by_length =
+                provider_result.accumulated.finish_reason == "length";
+
+            if (response_is_blank) {
+                // 「成功但空」的回复是异常,不能当正常 text-only 终止。空 assistant
+                // 消息仍然入历史:reasoning 回传能让模型看到自己上一轮的思考直接续
+                // 上,同时给事后诊断留证据。不 dispatch 到实时流,避免空气泡。
+                ChatMessage empty_msg;
+                empty_msg.role = "assistant";
+                empty_msg.content = provider_result.accumulated.content;
+                empty_msg.reasoning_content =
+                    provider_result.accumulated.reasoning_content;
+                messages_.push_back(empty_msg);
+                if (session_manager_) session_manager_->on_message(empty_msg);
+
+                if (empty_response_retries < kMaxEmptyResponseRetries) {
+                    ++empty_response_retries;
+                    LOG_WARN("Empty assistant response (no content, no tool_calls); "
+                             "retrying " + std::to_string(empty_response_retries) +
+                             "/" + std::to_string(kMaxEmptyResponseRetries) +
+                             " finish_reason=" +
+                             provider_result.accumulated.finish_reason +
+                             " reasoning_bytes=" +
+                             std::to_string(
+                                 provider_result.accumulated.reasoning_content.size()));
+
+                    // 与 stop-hook continuation 同款注入机制:role=user +
+                    // hidden_goal_context,进 API、持久化,但 TUI/Web 不显示。
+                    ChatMessage nudge;
+                    nudge.role = "user";
+                    nudge.content = truncated_by_length
+                        ? "[SYSTEM NOTE] Your previous reply was cut off by the "
+                          "output token limit (finish_reason=length) before any "
+                          "answer text or tool call was produced. Keep internal "
+                          "reasoning brief this time and continue the task now: "
+                          "either call the next tool or reply with your answer "
+                          "text directly."
+                        : "[SYSTEM NOTE] Your previous reply was empty: it "
+                          "contained no answer text and no tool calls. Continue "
+                          "the task now: either call the next tool or reply with "
+                          "your answer text directly.";
+                    nudge.metadata = nlohmann::json{
+                        {"hidden_goal_context", true},
+                        {"empty_response_retry", true},
+                    };
+                    ensure_user_message_identity(nudge);
+                    messages_.push_back(nudge);
+                    if (session_manager_) session_manager_->on_message(nudge);
+
+                    emit_transcript_system_message(
+                        std::string(u8"[空回复] 模型返回了空回复(") +
+                        (truncated_by_length
+                             ? u8"输出被 token 上限截断,思考耗尽了输出预算"
+                             : u8"无正文也无工具调用") +
+                        u8"),自动重试 " +
+                        std::to_string(empty_response_retries) + "/" +
+                        std::to_string(kMaxEmptyResponseRetries) + u8"…");
+
+                    if (total_iterations > 0) {
+                        --total_iterations; // 空轮不计入 max_iterations
+                    }
+                    continue;
+                }
+
+                LOG_ERROR("Empty assistant response persisted after " +
+                          std::to_string(kMaxEmptyResponseRetries) +
+                          " retries; ending turn with error");
+                turn_timing_status = "error";
+                dispatch_message(
+                    "error",
+                    std::string(u8"[Error] 模型连续 ") +
+                        std::to_string(kMaxEmptyResponseRetries + 1) +
+                        u8" 次返回空回复(无正文也无工具调用" +
+                        (truncated_by_length
+                             ? std::string(u8",输出被 token 上限截断")
+                             : std::string{}) +
+                        u8")。任务未完成,请重试或换用其它模型。",
+                    false);
+                break;
+            }
+
             LOG_INFO("Text-only response; ending loop. content: " + log_truncate(provider_result.accumulated.content, 300));
             ChatMessage assistant_msg;
             assistant_msg.role = "assistant";
@@ -2574,12 +2676,19 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
             dispatch_message("assistant", provider_result.accumulated.content, false,
                              nlohmann::json::object(),
                              provider_result.accumulated.content_parts);
+            if (truncated_by_length) {
+                emit_transcript_system_message(
+                    u8"[输出截断] 本回复因输出 token 上限被截断,内容可能不完整。");
+            }
             dispatch_assistant_completed_hook(assistant_msg, provider_snapshot);
             if (maybe_continue_from_stop_hook(provider_result.accumulated.content)) {
                 continue;
             }
             break;
         }
+
+        // 本轮产出了有效输出(工具调用),连续空回复计数清零。
+        empty_response_retries = 0;
 
         // Phase 5: Execute tool calls
         terminator_fired = execute_tool_calls(
