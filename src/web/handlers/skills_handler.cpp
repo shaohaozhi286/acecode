@@ -89,11 +89,14 @@ SkillToggleResult set_skill_enabled(const std::string& name,
                                        bool enabled,
                                        AppConfig& cfg,
                                        SkillRegistry& registry,
-                                       const std::string& config_path) {
+                                       const std::string& config_path,
+                                       const SkillRegistry* lookup_registry) {
     SkillToggleResult out;
 
-    // 校验 name 是 "已知的":要么当前在 registry(enabled),要么在 disabled list。
-    bool currently_enabled  = registry.find(name).has_value();
+    // 校验 name 是 "已知的":要么当前在 lookup registry(enabled),要么在
+    // disabled list。lookup 缺省 = daemon 全局 registry。
+    const SkillRegistry& lookup = lookup_registry ? *lookup_registry : registry;
+    bool currently_enabled  = lookup.find(name).has_value();
     bool currently_disabled = is_in_disabled(cfg.skills.disabled, name);
     if (!currently_enabled && !currently_disabled) {
         out.ok = false;

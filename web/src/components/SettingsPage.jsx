@@ -56,10 +56,13 @@ import {
   getCurrentWebCoreInfo,
 } from '../lib/webCoreInfo.js';
 import {
+  enabledRatioLabel,
   filterSkills,
   groupSkillsBySource,
   normalizeSkillList,
+  normalizeWorkspaceList,
   skillsEnabledSummary,
+  workspaceAutoExpand,
 } from '../lib/skillsSettings.js';
 import { useSlashCommands } from './SlashCommandsContext.jsx';
 import { RefreshIcon, VsIcon } from './Icon.jsx';
@@ -789,8 +792,12 @@ function SectionPersonalization() {
 }
 
 // ─── 技能 ──────────────────────────────────────────────────────────────────
-// 真实接入:GET /api/skills(带 source/enabled 全量元数据)、PUT /api/skills/:name、
-// GET /api/skills/:name/body、GET /api/skills/root(global_path 供「打开全局目录」)。
+// 真实接入:GET /api/skills(?workspace= 可选,带 source/enabled 全量元数据)、
+// PUT /api/skills/:name(?workspace= 供跨工作区校验)、GET /api/skills/root
+// (path / global_path)、GET /api/workspaces。
+// 结构:顶部全局技能(扁平列表 + 打开全局目录按钮),下方「工作区 Skill 目录」
+// 每个已注册工作区一个折叠组,默认折叠;mount 后台预取各工作区技能做计数,
+// 展开即渲染缓存,避免一次性渲染全部工作区的技能行。
 // 过滤 / 分组 / 计数逻辑在 lib/skillsSettings.js(有 Node 单测)。
 
 function parseDesktopBridgeResult(value) {
@@ -802,7 +809,7 @@ function parseDesktopBridgeResult(value) {
   return JSON.parse(text);
 }
 
-function SkillRow({ skill, busy, onToggle, onView }) {
+function SkillRow({ skill, busy, onToggle }) {
   return (
     <div className="flex items-center gap-3 px-3.5 py-2.5 rounded-md bg-surface border border-border mb-2">
       <div
@@ -817,22 +824,89 @@ function SkillRow({ skill, busy, onToggle, onView }) {
       </div>
       <div className="flex-1 min-w-0">
         <div className="text-[13px] font-medium truncate">{skill.name}</div>
-        <div className="text-[11px] text-fg-mute mt-0.5 truncate">{skill.description || '—'}</div>
+        <div className="text-[11px] text-fg-mute mt-0.5 truncate" title={skill.description || ''}>
+          {skill.description || '—'}
+        </div>
       </div>
-      <button
-        type="button"
-        onClick={() => onView(skill.name)}
-        className="px-1.5 py-0.5 text-[11px] text-accent hover:underline shrink-0"
-      >
-        查看
-      </button>
       <Toggle on={skill.enabled} disabled={busy} onChange={(v) => onToggle(skill.name, v)} />
     </div>
   );
 }
 
+// 单个工作区的折叠组:头行(展开箭头 + 名称/cwd + N/M 计数 + 打开目录)+
+// 展开后的技能行列表。skills 为 null/undefined 表示尚未加载完成。
+function WorkspaceSkillGroup({
+  ws,
+  skills,
+  expanded,
+  onToggleExpand,
+  query,
+  busy,
+  onToggleSkill,
+  onOpenDir,
+  openingDir,
+}) {
+  const loaded = Array.isArray(skills);
+  const shown = loaded ? filterSkills(skills, query) : [];
+  const hasQuery = !!String(query || '').trim();
+  return (
+    <div className="mb-2">
+      <div
+        role="button"
+        tabIndex={0}
+        aria-expanded={expanded}
+        onClick={onToggleExpand}
+        onKeyDown={(e) => {
+          if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); onToggleExpand(); }
+        }}
+        className="flex items-center gap-2.5 px-3.5 py-2.5 rounded-md bg-surface border border-border cursor-pointer hover:bg-surface-hi transition"
+      >
+        <VsIcon name={expanded ? 'expandDown' : 'expandRight'} size={12} className="shrink-0 text-fg-mute" />
+        <VsIcon name="folder" size={15} className="shrink-0 text-fg-2" />
+        <div className="flex-1 min-w-0">
+          <div className="text-[13px] font-medium truncate">{ws.name}</div>
+          <div className="text-[11px] text-fg-mute font-mono truncate">{ws.cwd}</div>
+        </div>
+        <span className="text-[11px] text-fg-mute tabular-nums shrink-0">
+          {loaded ? enabledRatioLabel(skills) : '…'}
+        </span>
+        <button
+          type="button"
+          title="打开该工作区的 Skill 目录"
+          onClick={(e) => { e.stopPropagation(); onOpenDir(); }}
+          disabled={!!openingDir}
+          className="w-7 h-7 inline-flex items-center justify-center rounded text-fg-mute hover:text-fg hover:bg-surface-alt transition shrink-0 disabled:opacity-50"
+        >
+          <VsIcon name="folderOpen" size={14} />
+        </button>
+      </div>
+      {expanded && (
+        <div className="mt-2 pl-6">
+          {!loaded && (
+            <div className="px-3.5 py-3 rounded-md bg-surface border border-border text-[12px] text-fg-mute text-center mb-2">
+              <span className="ace-spinner mr-2" /> 加载中
+            </div>
+          )}
+          {loaded && shown.length === 0 && (
+            <div className="px-3.5 py-3 rounded-md border border-dashed border-border text-[12px] text-fg-mute text-center mb-2">
+              {hasQuery ? '无匹配技能' : '该工作区没有技能;放到项目的 .acecode/skills 目录即可被发现'}
+            </div>
+          )}
+          {shown.map((s) => (
+            <SkillRow key={s.name} skill={s} busy={busy} onToggle={onToggleSkill} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SectionSkills() {
-  const [skills, setSkills] = useState([]);
+  const [globalSkills, setGlobalSkills] = useState([]);
+  const [workspaces, setWorkspaces] = useState([]);
+  // hash -> 该工作区的项目技能数组;键缺失 = 还没加载完。
+  const [wsSkills, setWsSkills] = useState({});
+  const [expanded, setExpanded] = useState({});
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [search, setSearch] = useState('');
@@ -843,70 +917,83 @@ function SectionSkills() {
   const load = useCallback(async (refresh = false) => {
     if (refresh) setRefreshing(true); else setLoading(true);
     try {
-      const list = await api.listSkills();
-      setSkills(normalizeSkillList(list));
-    } catch (e) {
-      toast({ kind: 'err', text: '加载技能失败:' + (e?.message || '') });
+      const [skillsRes, wsRes] = await Promise.allSettled([
+        api.listSkills(),
+        api.listWorkspaces(),
+      ]);
+      if (skillsRes.status === 'fulfilled') {
+        setGlobalSkills(groupSkillsBySource(normalizeSkillList(skillsRes.value)).global);
+      } else if (!refresh) {
+        toast({ kind: 'err', text: '加载技能失败:' + (skillsRes.reason?.message || '') });
+      }
+      let wsList = wsRes.status === 'fulfilled' ? normalizeWorkspaceList(wsRes.value) : [];
+      if (wsList.length === 0 && typeof window.aceDesktop_listWorkspaces === 'function') {
+        try {
+          wsList = normalizeWorkspaceList(
+            parseDesktopBridgeResult(await window.aceDesktop_listWorkspaces()),
+          );
+        } catch { /* bridge 兜底失败就当没有工作区 */ }
+      }
+      setWorkspaces(wsList);
+      if (refresh) setWsSkills({});
+      // 后台预取各工作区的项目技能:折叠行的 N/M 计数需要它,展开时也能
+      // 即刻渲染。逐个到达逐个填充,失败置空数组避免计数一直显示省略号。
+      wsList.forEach((ws) => {
+        api.listSkills(ws.hash)
+          .then((list) => {
+            const project = groupSkillsBySource(normalizeSkillList(list)).project;
+            setWsSkills((prev) => ({ ...prev, [ws.hash]: project }));
+          })
+          .catch(() => {
+            setWsSkills((prev) => ({ ...prev, [ws.hash]: [] }));
+          });
+      });
     } finally {
       if (refresh) setRefreshing(false); else setLoading(false);
     }
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    api.listSkills()
-      .then((list) => { if (!cancelled) setSkills(normalizeSkillList(list)); })
-      .catch((e) => {
-        if (!cancelled) toast({ kind: 'err', text: '加载技能失败:' + (e?.message || '') });
-      })
-      .finally(() => { if (!cancelled) setLoading(false); });
-    return () => { cancelled = true; };
-  }, []);
+  useEffect(() => { load(); }, [load]);
 
-  const summary = useMemo(() => skillsEnabledSummary(skills), [skills]);
-  const groups = useMemo(
-    () => groupSkillsBySource(filterSkills(skills, search)),
-    [skills, search],
+  const summary = useMemo(() => skillsEnabledSummary(globalSkills), [globalSkills]);
+  const filteredGlobal = useMemo(
+    () => filterSkills(globalSkills, search),
+    [globalSkills, search],
   );
   const hasQuery = !!search.trim();
 
-  const toggle = async (name, next) => {
+  // 启停对 disabled 是全局生效的:同名技能出现在全局列表和多个工作区列表时
+  // 一起翻转,失败整体回滚。
+  const toggle = async (name, next, wsHash = '') => {
     if (savingName) return;
-    const before = skills;
-    setSkills((prev) => prev.map((s) => (s.name === name ? { ...s, enabled: next } : s)));
+    const beforeGlobal = globalSkills;
+    const beforeWs = wsSkills;
+    const flip = (list) => list.map((s) => (s.name === name ? { ...s, enabled: next } : s));
+    setGlobalSkills(flip(globalSkills));
+    setWsSkills((prev) => {
+      const out = {};
+      for (const [hash, list] of Object.entries(prev)) out[hash] = flip(list);
+      return out;
+    });
     setSavingName(name);
     try {
-      await api.setSkillEnabled(name, next);
+      await api.setSkillEnabled(name, next, wsHash);
       slashCommandsCtx.invalidate?.();
     } catch (e) {
-      setSkills(before);
+      setGlobalSkills(beforeGlobal);
+      setWsSkills(beforeWs);
       toast({ kind: 'err', text: '切换技能失败:' + (e?.message || '') });
     } finally {
       setSavingName('');
     }
   };
 
-  const view = async (name) => {
-    try {
-      const body = await api.getSkillBody(name);
-      const w = window.open('', '_blank', 'width=720,height=600');
-      if (w) {
-        w.document.title = name;
-        w.document.body.style.cssText = 'font-family:monospace;padding:20px;white-space:pre-wrap;line-height:1.5;';
-        w.document.body.textContent = body;
-      }
-    } catch (e) {
-      toast({ kind: 'err', text: '查看技能失败:' + (e?.message || '') });
-    }
-  };
-
   // 打开技能目录:desktop bridge 优先;webapp 兼容模式走 REST;都不可用时复制路径。
-  const openDir = async (scope) => {
+  const openDir = async (scope, wsHash = '') => {
     if (openingDir) return;
-    setOpeningDir(scope);
+    setOpeningDir(scope + wsHash);
     try {
-      const root = await api.getSkillRoot();
+      const root = await api.getSkillRoot(wsHash);
       const path = scope === 'global' ? (root?.global_path || '') : (root?.path || '');
       if (!path) throw new Error('目录路径为空');
       if (typeof window.aceDesktop_openInExplorer === 'function') {
@@ -935,24 +1022,6 @@ function SectionSkills() {
       setOpeningDir('');
     }
   };
-
-  const renderGroup = (title, items, emptyText) => (
-    <>
-      <div className="text-[14px] font-semibold mb-1">{title}</div>
-      <p className="text-[12px] text-fg-mute mb-3">
-        {items.length > 0 ? `${items.length} 个技能` : emptyText}
-      </p>
-      {items.map((s) => (
-        <SkillRow
-          key={s.name}
-          skill={s}
-          busy={!!savingName}
-          onToggle={toggle}
-          onView={view}
-        />
-      ))}
-    </>
-  );
 
   return (
     <>
@@ -998,40 +1067,59 @@ function SectionSkills() {
         </div>
       ) : (
         <>
-          {renderGroup(
-            '项目技能',
-            groups.project,
-            hasQuery ? '无匹配的项目技能' : '当前项目没有技能;放到项目的 .acecode/skills 目录即可被发现',
+          {filteredGlobal.length === 0 && (
+            <div className="px-3.5 py-3 rounded-md border border-dashed border-border text-[12px] text-fg-mute text-center mb-2">
+              {hasQuery ? '无匹配的全局技能' : '暂无全局技能'}
+            </div>
           )}
+          {filteredGlobal.map((s) => (
+            <SkillRow key={s.name} skill={s} busy={!!savingName} onToggle={toggle} />
+          ))}
+          <button
+            type="button"
+            onClick={() => openDir('global')}
+            disabled={!!openingDir}
+            className="w-full h-10 mt-2 inline-flex items-center justify-center gap-2 rounded-md border border-border bg-surface text-[13px] text-fg hover:bg-surface-hi transition disabled:opacity-60"
+          >
+            <VsIcon name="folder" size={15} />
+            打开全局 Skill 目录
+          </button>
+
           <div className="h-px bg-border my-5" />
-          {renderGroup(
-            '全局技能',
-            groups.global,
-            hasQuery ? '无匹配的全局技能' : '暂无全局技能',
+
+          <div className="text-[14px] font-semibold mb-1">工作区 Skill 目录</div>
+          <p className="text-[12px] text-fg-mute mb-3">
+            每个工作区可拥有独立的 Skill,仅在该工作区的会话中生效。
+          </p>
+          {workspaces.length === 0 && (
+            <div className="px-3.5 py-3 rounded-md border border-dashed border-border text-[12px] text-fg-mute text-center">
+              暂无已注册的工作区
+            </div>
           )}
+          {workspaces.map((ws) => {
+            const skills = wsSkills[ws.hash];
+            const isExpanded = hasQuery
+              ? workspaceAutoExpand(skills, search)
+              : !!expanded[ws.hash];
+            return (
+              <WorkspaceSkillGroup
+                key={ws.hash}
+                ws={ws}
+                skills={skills}
+                expanded={isExpanded}
+                onToggleExpand={() =>
+                  setExpanded((prev) => ({ ...prev, [ws.hash]: !prev[ws.hash] }))
+                }
+                query={search}
+                busy={!!savingName}
+                onToggleSkill={(name, v) => toggle(name, v, ws.hash)}
+                onOpenDir={() => openDir('workspace', ws.hash)}
+                openingDir={openingDir}
+              />
+            );
+          })}
         </>
       )}
-
-      <div className="grid grid-cols-2 gap-3 mt-6">
-        <button
-          type="button"
-          onClick={() => openDir('global')}
-          disabled={!!openingDir}
-          className="h-10 inline-flex items-center justify-center gap-2 rounded-md border border-border bg-surface text-[13px] text-fg hover:bg-surface-hi transition disabled:opacity-60"
-        >
-          <VsIcon name="folder" size={15} />
-          打开全局 Skill 目录
-        </button>
-        <button
-          type="button"
-          onClick={() => openDir('project')}
-          disabled={!!openingDir}
-          className="h-10 inline-flex items-center justify-center gap-2 rounded-md border border-border bg-surface text-[13px] text-fg hover:bg-surface-hi transition disabled:opacity-60"
-        >
-          <VsIcon name="folderOpen" size={15} />
-          打开项目级 Skill 目录
-        </button>
-      </div>
     </>
   );
 }

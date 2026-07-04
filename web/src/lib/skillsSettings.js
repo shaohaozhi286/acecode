@@ -41,3 +41,30 @@ export function skillsEnabledSummary(skills) {
   const enabled = skills.reduce((n, s) => n + (s.enabled ? 1 : 0), 0);
   return { enabled, total, label: `${enabled} / ${total} 已启用` };
 }
+
+// 工作区折叠行右侧的紧凑计数,如 "1/2"。
+export function enabledRatioLabel(skills) {
+  const list = Array.isArray(skills) ? skills : [];
+  const enabled = list.reduce((n, s) => n + (s.enabled ? 1 : 0), 0);
+  return `${enabled}/${list.length}`;
+}
+
+// 归一化 GET /api/workspaces 的返回:丢掉无 hash/cwd 的条目。该端点只返回
+// 已注册(desktop_visible)的工作区,无工作区会话的临时项天然不在其中。
+export function normalizeWorkspaceList(data) {
+  if (!Array.isArray(data)) return [];
+  return data
+    .map((w) => ({
+      hash: typeof w?.hash === 'string' ? w.hash : '',
+      cwd: typeof w?.cwd === 'string' ? w.cwd : '',
+      name: typeof w?.name === 'string' && w.name ? w.name : (w?.cwd || ''),
+    }))
+    .filter((w) => w.hash && w.cwd);
+}
+
+// 搜索态下某工作区是否应自动展开:已加载且有命中。未加载(skills 为 null)
+// 时不展开 — 展开与否由用户点击决定。
+export function workspaceAutoExpand(skills, query) {
+  if (!Array.isArray(skills)) return false;
+  return filterSkills(skills, query).length > 0;
+}

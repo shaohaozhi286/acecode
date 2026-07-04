@@ -79,9 +79,19 @@ std::vector<std::string> get_project_dirs_up_to_home(const std::string& cwd) {
 
     // Walk up from cwd; stop at/above HOME (the user-global root is added
     // separately) or once we hit a filesystem root. Deepest first.
+    //
+    // HOME 比较除了字面相等还做一次物理等价判定(fs::equivalent):subst /
+    // 网络映射盘会让同一物理目录出现两个字面路径(如 N:\Users\shao ↔
+    // C:\Users\shao)。cwd 走映射盘视图时若只做字符串比较,项目链会越过
+    // HOME 一路冲到盘根,把 HOME 级目录(~/.claude 等)全部卷成"项目链",
+    // 技能/项目指令的 project vs global 归类随之全错。
     fs::path cur = abs;
     while (true) {
-        if (!home_path.empty() && cur == home_path) break;
+        if (!home_path.empty()) {
+            if (cur == home_path) break;
+            std::error_code eqec;
+            if (fs::equivalent(cur, home_path, eqec) && !eqec) break;
+        }
         dirs.push_back(path_to_utf8(cur));
         fs::path parent = cur.parent_path();
         if (parent == cur) break;

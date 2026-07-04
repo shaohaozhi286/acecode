@@ -385,8 +385,10 @@ Body:
 ```
 
 Opens an absolute directory in Explorer/Finder/xdg-open. The desktop callback
-validates that the path exists and is within an allowed workspace or daemon
-cwd. Returns `{"ok":true}`. Returns `501` when the daemon has no desktop
+validates that the path exists and is within an allowed root: a registered
+workspace, the daemon cwd, or the user-global skills directory
+(`~/.acecode/skills`, for the settings page "open global skills directory"
+button). Returns `{"ok":true}`. Returns `501` when the daemon has no desktop
 callback.
 
 ### `GET /api/workspaces/:hash/sessions?archived=1`
@@ -878,7 +880,7 @@ Disabled config entries whose skill no longer exists on disk (ghost
 entries) are still included with `enabled:false` and `source:""` so the UI
 can release them from `config.skills.disabled`.
 
-### `PUT /api/skills/:name`
+### `PUT /api/skills/:name?workspace=<hash>`
 
 Body:
 
@@ -887,6 +889,12 @@ Body:
 ```
 
 Returns `{"name":"skill-name","enabled":false}`.
+
+`workspace` is optional and only affects the "known skill" validation: the
+daemon's global registry only scans the daemon cwd's project chain, so
+toggling a project skill that belongs to another workspace requires passing
+that workspace's hash (the handler rescans that workspace's cwd to find the
+skill). The disabled list itself is global config either way.
 
 ### `GET /api/skills/:name/body`
 

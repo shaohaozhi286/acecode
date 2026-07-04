@@ -1,5 +1,6 @@
 // routes_files.cpp — Route registrations extracted from server.cpp
 #include "../server_impl.hpp"
+#include "../../skills/skill_init.hpp"
 
 namespace acecode::web {
 
@@ -283,7 +284,10 @@ void WebServer::Impl::register_skills() {
             return r;
         });
 
-        // PUT /api/skills/<name> body {enabled: bool}: 切启停
+        // PUT /api/skills/<name>?workspace=<hash> body {enabled: bool}: 切启停。
+        // workspace 参数用于"已知性"校验:daemon 全局 registry 只扫 daemon cwd
+        // 的项目链,其它 workspace 的项目 skill 需要按该 workspace cwd 临时扫描
+        // 才能 find 到,否则误报 404。
         CROW_ROUTE(app, "/api/skills/<string>").methods(crow::HTTPMethod::PUT)
         ([this](const crow::request& req, const std::string& name) {
             if (auto rej = require_auth(req)) return std::move(*rej);
@@ -306,11 +310,31 @@ void WebServer::Impl::register_skills() {
                 return r;
             }
 
+            std::optional<acecode::desktop::WorkspaceMeta> ws;
+            const char* workspace_q = req.url_params.get("workspace");
+            if (workspace_q && *workspace_q) {
+                ws = resolve_workspace(workspace_q);
+                if (!ws.has_value()) {
+                    crow::response r(404);
+                    r.body = R"({"error":"workspace not found"})";
+                    r.add_header("Content-Type", "application/json");
+                    return r;
+                }
+            }
+
             std::lock_guard<std::mutex> config_lock(app_config_mu);
+            std::optional<acecode::SkillRegistry> workspace_lookup;
+            if (ws.has_value() && !ws->cwd.empty()) {
+                workspace_lookup.emplace();
+                acecode::initialize_skill_registry(*workspace_lookup,
+                                                   *deps.app_config, ws->cwd);
+            }
             auto result = set_skill_enabled(name, enabled,
                                                *deps.app_config,
                                                *deps.skill_registry,
-                                              deps.config_path);
+                                              deps.config_path,
+                                              workspace_lookup ? &*workspace_lookup
+                                                               : nullptr);
             crow::response r(result.http_status);
             r.body = result.body.dump();
             r.add_header("Content-Type", "application/json");

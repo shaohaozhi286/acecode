@@ -9,10 +9,13 @@
 
 import assert from 'node:assert/strict';
 import {
+  enabledRatioLabel,
   filterSkills,
   groupSkillsBySource,
   normalizeSkillList,
+  normalizeWorkspaceList,
   skillsEnabledSummary,
+  workspaceAutoExpand,
 } from './skillsSettings.js';
 
 function run(name, fn) {
@@ -88,4 +91,36 @@ run('skillsEnabledSummary 统计全量启用数(图稿右上角 N/M 已启用)',
 
 run('skillsEnabledSummary 空列表', () => {
   assert.equal(skillsEnabledSummary([]).label, '0 / 0 已启用');
+});
+
+run('enabledRatioLabel 工作区折叠行紧凑计数(启用/总数)', () => {
+  assert.equal(enabledRatioLabel(SKILLS.filter((s) => s.source === 'global')), '1/2');
+  assert.equal(enabledRatioLabel([]), '0/0');
+  // 未加载(非数组)按空处理,不抛异常
+  assert.equal(enabledRatioLabel(null), '0/0');
+});
+
+run('normalizeWorkspaceList 丢掉缺 hash/cwd 的条目,name 空时回退 cwd', () => {
+  const out = normalizeWorkspaceList([
+    { hash: 'h1', cwd: 'N:/repo', name: 'repo' },
+    { hash: 'h2', cwd: 'N:/other', name: '' },
+    { hash: '', cwd: 'N:/ghost' },
+    { cwd: 'N:/nohash' },
+    null,
+  ]);
+  assert.deepEqual(out, [
+    { hash: 'h1', cwd: 'N:/repo', name: 'repo' },
+    { hash: 'h2', cwd: 'N:/other', name: 'N:/other' },
+  ]);
+  assert.deepEqual(normalizeWorkspaceList(null), []);
+});
+
+run('workspaceAutoExpand 搜索命中已加载的工作区才自动展开', () => {
+  const wsSkills = normalizeSkillList([
+    { name: 'rail-analyzer', description: '铁路数据分析', source: 'project', enabled: true },
+  ]);
+  assert.equal(workspaceAutoExpand(wsSkills, '铁路'), true);
+  assert.equal(workspaceAutoExpand(wsSkills, 'no-hit'), false);
+  // 未加载(null)不展开 — 防止搜索时所有工作区无脑弹开
+  assert.equal(workspaceAutoExpand(null, '铁路'), false);
 });

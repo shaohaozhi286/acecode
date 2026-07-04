@@ -117,3 +117,87 @@ TEST_F(PathsTest, ResetClearsBothModeAndOnceFlag) {
     acecode::set_run_mode(acecode::RunMode::Service);
     EXPECT_EQ(acecode::get_run_mode(), acecode::RunMode::Service);
 }
+
+// ─── get_project_dirs_up_to_home:映射盘视图下的 HOME 判定 ─────────────────
+//
+// 背景 bug:用户把工作区放在 subst/映射盘(如 N: → C:\ 的视图)时,daemon 的
+// cwd 是 N:\Users\me\repo 而 USERPROFILE 是 C:\Users\me。旧实现只做字面路径
+// 比较,项目链越过 HOME 一路冲到 N:\ 盘根 —— HOME 级目录(~/.claude 等)被
+// 卷成"项目链",Web 设置页里全局技能清零、全部错标成项目技能(实测复现)。
+// 修复 = 比较时补一次 fs::equivalent 物理等价判定。
+//
+// Windows 上用 directory junction(mklink /J,无需管理员)模拟映射盘视图;
+// POSIX 上用符号链接。创建失败(权限/文件系统不支持)则 SKIP。
+
+#include "utils/utf8_path.hpp"
+
+#include <cstdlib>
+#include <filesystem>
+#include <random>
+
+namespace {
+
+namespace fs = std::filesystem;
+
+// 场景: HOME=<root>/real-home,cwd=<root>/link-home/work/repo,其中 link-home
+// 是指向 real-home 的 junction/symlink(字面不同、物理相同)。期望项目链在
+// link-home 处停下:包含 repo 与 work,不包含 link-home 本身及更上层。
+TEST_F(PathsTest, ProjectDirsStopAtHomeThroughDirectoryJunction) {
+    std::random_device rd;
+    fs::path root = fs::temp_directory_path() /
+                    ("acecode_paths_junction_" + std::to_string(rd()));
+    fs::path real_home = root / "real-home";
+    fs::path link_home = root / "link-home";
+    std::error_code ec;
+    fs::create_directories(real_home / "work" / "repo", ec);
+    ASSERT_FALSE(ec);
+
+#ifdef _WIN32
+    // mklink /J 创建 directory junction,普通用户权限即可。
+    std::string cmd = "mklink /J \"" + acecode::path_to_utf8(link_home) + "\" \"" +
+                      acecode::path_to_utf8(real_home) + "\" >NUL 2>&1";
+    if (std::system(("cmd /c " + cmd).c_str()) != 0) {
+        fs::remove_all(root, ec);
+        GTEST_SKIP() << "cannot create directory junction here";
+    }
+#else
+    fs::create_directory_symlink(real_home, link_home, ec);
+    if (ec) {
+        fs::remove_all(root, ec);
+        GTEST_SKIP() << "cannot create directory symlink here";
+    }
+#endif
+
+#ifdef _WIN32
+    const char* home_var = "USERPROFILE";
+#else
+    const char* home_var = "HOME";
+#endif
+    std::string saved_home;
+    if (const char* prev = std::getenv(home_var)) saved_home = prev;
+#ifdef _WIN32
+    _putenv_s(home_var, acecode::path_to_utf8(real_home).c_str());
+#else
+    setenv(home_var, acecode::path_to_utf8(real_home).c_str(), 1);
+#endif
+
+    auto dirs = acecode::get_project_dirs_up_to_home(
+        acecode::path_to_utf8(link_home / "work" / "repo"));
+
+    // 恢复环境变量再断言,避免失败时污染后续测试
+#ifdef _WIN32
+    _putenv_s(home_var, saved_home.c_str());
+#else
+    if (saved_home.empty()) unsetenv(home_var); else setenv(home_var, saved_home.c_str(), 1);
+#endif
+
+    ASSERT_EQ(dirs.size(), 2u)
+        << "项目链应止于 HOME 的 junction 视图(repo + work),实际: "
+        << [&] { std::string s; for (auto& d : dirs) { s += d; s += " | "; } return s; }();
+    EXPECT_NE(dirs[0].find("repo"), std::string::npos);
+    EXPECT_NE(dirs[1].find("work"), std::string::npos);
+
+    fs::remove_all(root, ec);
+}
+
+} // namespace

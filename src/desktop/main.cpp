@@ -1125,9 +1125,12 @@ int main(int argc, char** argv) {
             for (const auto& m : registry.list()) {
                 if (!m.cwd.empty()) roots.push_back(m.cwd);
             }
-            if (roots.empty()) {
-                return nlohmann::json{{"ok", false}, {"error", "no registered workspaces"}}.dump();
-            }
+            // 全局 skills 目录不属于任何 workspace,但设置页「打开全局 Skill
+            // 目录」按钮需要打开它 — 恒加入白名单(也保证 roots 非空)。
+            roots = acecode::desktop::append_allowed_open_root(
+                std::move(roots),
+                acecode::path_to_utf8(
+                    acecode::path_from_utf8(acecode::get_acecode_dir()) / "skills"));
             auto result = acecode::desktop::open_directory_in_file_manager(
                 arr[0].get<std::string>(), roots);
             if (!result.ok) {

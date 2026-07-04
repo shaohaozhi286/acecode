@@ -457,7 +457,8 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
             return acecode::desktop::pick_folder(nullptr);
         };
         // webapp 兼容模式右键菜单的「在资源管理器中打开」。允许范围 = 已注册
-        // workspace + 本 daemon 的 cwd(兜底覆盖 registry 为空的 onboarding 场景)。
+        // workspace + 本 daemon 的 cwd(兜底覆盖 registry 为空的 onboarding 场景)
+        // + 全局 skills 目录(设置页「打开全局 Skill 目录」按钮的目标)。
         web_deps.open_in_explorer =
             [&workspace_registry, cwd](const std::string& path) -> std::optional<std::string> {
             std::vector<std::string> roots;
@@ -465,6 +466,10 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
                 if (!m.cwd.empty()) roots.push_back(m.cwd);
             }
             roots = acecode::desktop::append_allowed_open_root(std::move(roots), cwd);
+            roots = acecode::desktop::append_allowed_open_root(
+                std::move(roots),
+                acecode::path_to_utf8(
+                    acecode::path_from_utf8(acecode::get_acecode_dir()) / "skills"));
             auto result = acecode::desktop::open_directory_in_file_manager(path, roots);
             if (result.ok) return std::nullopt;
             return result.error.empty() ? std::string("failed to open directory") : result.error;

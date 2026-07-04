@@ -115,6 +115,37 @@ TEST_F(SkillsHandlerTest, UnknownSkillReturns404) {
     EXPECT_TRUE(cfg.skills.disabled.empty());
 }
 
+// 场景: 别的 workspace 的项目 skill 不在 daemon 全局 registry 里 —— 传入
+// lookup_registry(按该 workspace 扫描的临时 registry)后校验通过,禁用
+// 写入 cfg。回归表现(修复前):设置页里切换非 daemon-cwd 工作区的技能
+// 一律 404。
+TEST_F(SkillsHandlerTest, LookupRegistryAllowsForeignWorkspaceSkill) {
+    // daemon 全局 registry:只有 daemon-skill
+    acecode::SkillRegistry daemon_registry;
+    populate_registry_with_skill(daemon_registry, tmp_root / "daemon-ws", "daemon-skill");
+
+    // 另一个 workspace 的临时 lookup registry:只有 foreign-skill
+    acecode::SkillRegistry lookup_registry;
+    populate_registry_with_skill(lookup_registry, tmp_root / "other-ws", "foreign-skill");
+
+    acecode::AppConfig cfg;
+
+    // 不传 lookup → daemon registry 找不到 foreign-skill → 404
+    auto r404 = acecode::web::set_skill_enabled("foreign-skill", /*enabled=*/false,
+                                                   cfg, daemon_registry, cfg_path);
+    EXPECT_EQ(r404.http_status, 404);
+    EXPECT_TRUE(cfg.skills.disabled.empty());
+
+    // 传 lookup → 校验通过,disabled 落到全局 cfg
+    auto r = acecode::web::set_skill_enabled("foreign-skill", /*enabled=*/false,
+                                                cfg, daemon_registry, cfg_path,
+                                                &lookup_registry);
+    EXPECT_TRUE(r.ok);
+    EXPECT_EQ(r.http_status, 200);
+    ASSERT_EQ(cfg.skills.disabled.size(), 1u);
+    EXPECT_EQ(cfg.skills.disabled[0], "foreign-skill");
+}
+
 // 场景: get_skill_body 返回 SKILL.md 完整内容(含 frontmatter)。
 // SkillRegistry::read_skill_body 实现是去掉 frontmatter 的正文 — 该函数文档
 // 写"含 frontmatter",这里检查至少返回非空。如果 read_skill_body 实现变化,

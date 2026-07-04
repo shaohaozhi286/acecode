@@ -44,11 +44,16 @@ SkillRootSelection select_skill_root(const std::filesystem::path& workspace_cwd,
 SkillRootSelection resolve_skill_root_for_cwd(const std::string& workspace_cwd_utf8);
 
 // 切换 skill 启停。config_path 空 = 用 save_config 默认路径(~/.acecode/config.json)。
+// lookup_registry:可选的"已知性"校验 registry(如某个 workspace 的临时扫描
+// 结果)— daemon 全局 registry 只扫 daemon cwd 的项目链,其它 workspace 的
+// skill 在其中 find 不到;不传时用 registry 本身校验。disabled 同步始终打在
+// registry(daemon 全局)上。
 SkillToggleResult set_skill_enabled(const std::string& name,
                                        bool enabled,
                                        AppConfig& cfg,
                                        SkillRegistry& registry,
-                                       const std::string& config_path);
+                                       const std::string& config_path,
+                                       const SkillRegistry* lookup_registry = nullptr);
 
 // 读 SKILL.md 全文。返回 nullopt = 该 name 未注册(404)。
 std::optional<std::string> get_skill_body(const std::string& name,
