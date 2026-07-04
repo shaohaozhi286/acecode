@@ -1,7 +1,7 @@
 #include "codex_app_server_client.hpp"
 #include "codex_model_catalog.hpp"
 
-#include "../utils/logger.hpp"
+#include "../../utils/logger.hpp"
 
 #include <algorithm>
 #include <cctype>

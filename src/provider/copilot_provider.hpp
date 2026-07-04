@@ -1,7 +1,7 @@
 #pragma once
 
 #include "openai_provider.hpp"
-#include "../auth/github_auth.hpp"
+#include "auth/github_auth.hpp"
 
 #include <chrono>
 

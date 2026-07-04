@@ -1,6 +1,6 @@
 #include "codex_provider.hpp"
 
-#include "../codex/codex_app_server_client.hpp"
+#include "codex/codex_app_server_client.hpp"
 #include "../utils/logger.hpp"
 #include "../utils/utf8_path.hpp"
 

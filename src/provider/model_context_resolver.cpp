@@ -2,7 +2,7 @@
 
 #include "../network/proxy_resolver.hpp"
 #include "../utils/logger.hpp"
-#include "../codex/codex_model_catalog.hpp"
+#include "codex/codex_model_catalog.hpp"
 #include "models_dev_registry.hpp"
 
 #include <cpr/cpr.h>

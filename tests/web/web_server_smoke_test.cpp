@@ -18,7 +18,7 @@
 #include <httplib.h>
 #include <sqlite3.h>
 
-#include "auth/github_auth.hpp"
+#include "provider/auth/github_auth.hpp"
 #include "config/config.hpp"
 #include "config/saved_models.hpp"
 #include "permissions.hpp"
