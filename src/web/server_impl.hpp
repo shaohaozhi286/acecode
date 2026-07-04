@@ -239,6 +239,9 @@ struct WebServer::Impl {
     std::optional<SessionMeta> find_session_meta_for_workspace(
         const acecode::desktop::WorkspaceMeta& ws,
         const std::string& id) const;
+    std::string no_workspace_cache_root() const;
+    std::vector<SessionMeta> no_workspace_disk_sessions() const;
+    std::optional<SessionMeta> find_no_workspace_session_meta(const std::string& id) const;
 
     // -----------------------------------------------------------------
     // Session draft/title/todo/response helper  (defined in server_helpers.cpp)

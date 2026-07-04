@@ -127,8 +127,20 @@ void WebServer::Impl::register_sessions() {
             opts.workspace_hash = ws.hash;
             auto project_dir = SessionStorage::get_project_dir(ws.cwd);
             auto meta = SessionStorage::read_meta(SessionStorage::meta_path(project_dir, id));
+            if (meta.id.empty()) {
+                if (auto no_workspace_meta = find_no_workspace_session_meta(id)) {
+                    meta = *no_workspace_meta;
+                    opts.cwd = meta.cwd.empty()
+                        ? no_workspace_session_cwd(id, no_workspace_cache_root())
+                        : meta.cwd;
+                    project_dir = SessionStorage::get_project_dir(opts.cwd);
+                    opts.no_workspace = true;
+                    opts.workspace_hash.clear();
+                }
+            }
             if (meta.no_workspace) {
                 opts.no_workspace = true;
+                if (!meta.cwd.empty()) opts.cwd = meta.cwd;
                 opts.workspace_hash.clear();
             }
             if (auto lease = SessionWriterLease::read(project_dir, id)) {
@@ -283,23 +295,37 @@ void WebServer::Impl::register_sessions() {
                     }
                 }
 
-                auto project_dir = SessionStorage::get_project_dir(deps.cwd);
-                auto candidates = SessionStorage::find_session_files(project_dir, id);
-                if (!candidates.empty()) {
-                    json msgs = json::array();
-                    for (const auto& m : SessionStorage::load_messages(candidates.front().jsonl_path)) {
-                        if (is_file_checkpoint_message(m)) continue;
-                        if (is_compact_checkpoint_message(m)) continue;
-                        if (is_hidden_goal_context_message(m)) continue;
-                        msgs.push_back(chat_message_to_json(m));
+                std::vector<std::string> project_dirs{
+                    SessionStorage::get_project_dir(deps.cwd),
+                };
+                if (auto no_workspace_meta = find_no_workspace_session_meta(id)) {
+                    if (!no_workspace_meta->cwd.empty()) {
+                        const auto no_workspace_project_dir =
+                            SessionStorage::get_project_dir(no_workspace_meta->cwd);
+                        if (std::find(project_dirs.begin(), project_dirs.end(),
+                                      no_workspace_project_dir) == project_dirs.end()) {
+                            project_dirs.push_back(no_workspace_project_dir);
+                        }
                     }
-                    json wrapper;
-                    wrapper["events"]   = std::move(arr);
-                    wrapper["messages"] = std::move(msgs);
-                    append_session_runtime_snapshot(wrapper, id);
-                    crow::response r(wrapper.dump());
-                    r.add_header("Content-Type", "application/json");
-                    return with_cors(req, std::move(r));
+                }
+                for (const auto& project_dir : project_dirs) {
+                    auto candidates = SessionStorage::find_session_files(project_dir, id);
+                    if (!candidates.empty()) {
+                        json msgs = json::array();
+                        for (const auto& m : SessionStorage::load_messages(candidates.front().jsonl_path)) {
+                            if (is_file_checkpoint_message(m)) continue;
+                            if (is_compact_checkpoint_message(m)) continue;
+                            if (is_hidden_goal_context_message(m)) continue;
+                            msgs.push_back(chat_message_to_json(m));
+                        }
+                        json wrapper;
+                        wrapper["events"]   = std::move(arr);
+                        wrapper["messages"] = std::move(msgs);
+                        append_session_runtime_snapshot(wrapper, id);
+                        crow::response r(wrapper.dump());
+                        r.add_header("Content-Type", "application/json");
+                        return with_cors(req, std::move(r));
+                    }
                 }
             }
 

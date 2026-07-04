@@ -17,6 +17,9 @@ import {
 import { usePreference } from './lib/usePreference.js';
 import {
   DEFAULT_UI_PREFS,
+  DEFAULT_FONT_SIZE,
+  effectiveFontSize,
+  FONT_SIZE_VALUES,
   UI_PREFS_STORAGE_KEY,
   validateUiPrefs,
 } from './lib/uiPrefs.js';
@@ -123,6 +126,7 @@ export function App() {
     CONSOLE_DOCK_STORAGE_KEY, DEFAULT_CONSOLE_DOCK, validateConsoleDock);
   // grid4/grid9 入口暂时隐藏:主界面固定单会话,避免旧 localStorage 把用户卡在未完善视图。
   const view = 'single';
+  const fontSize = effectiveFontSize(uiPrefs);
   const sidePanelCollapsed = uiPrefs.sidePanelCollapsed;
   const sidePanelMaximized = !!uiPrefs.sidePanelMaximized;
   const projectSidebarCollapsed = !!uiPrefs.sidebarCollapsed;
@@ -134,6 +138,9 @@ export function App() {
   const navHistoryRef = useRef(navHistory);
 
   useEffect(() => initInactiveSelection(), []);
+  useEffect(() => {
+    document.documentElement.setAttribute('data-font-size', fontSize);
+  }, [fontSize]);
   useEffect(() => { activeRefRef.current = activeRef; }, [activeRef]);
   useEffect(() => { navHistoryRef.current = navHistory; }, [navHistory]);
 
@@ -426,6 +433,13 @@ export function App() {
     }));
   }, [setUiPrefs]);
 
+  const setFontSize = useCallback((nextFontSize) => {
+    setUiPrefs((prev) => ({
+      ...prev,
+      fontSize: FONT_SIZE_VALUES.includes(nextFontSize) ? nextFontSize : DEFAULT_FONT_SIZE,
+    }));
+  }, [setUiPrefs]);
+
   const startUpdate = useCallback(async () => {
     if (!updateStatus?.update_available || updateStarting) return;
     setUpdateStarting(true);
@@ -697,6 +711,8 @@ export function App() {
             health={health}
             activeSessionId={activeId}
             onPermissionModeChanged={handlePermissionModeChanged}
+            fontSize={fontSize}
+            onFontSizeChange={setFontSize}
           />
         )}
         <SearchPalette

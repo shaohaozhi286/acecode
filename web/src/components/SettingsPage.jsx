@@ -77,6 +77,11 @@ const NAV = [
 ];
 
 const DEFAULT_UPGRADE_SERVICE_URL = 'http://2017studio.imwork.net:82/aupdate/';
+const FONT_SIZE_OPTIONS = [
+  { key: 'small', label: '小' },
+  { key: 'medium', label: '中' },
+  { key: 'large', label: '大' },
+];
 
 function navIndexForKey(key) {
   const idx = NAV.findIndex((item) => item.key === key);
@@ -89,6 +94,8 @@ export function SettingsPage({
   activeSessionId = '',
   onPermissionModeChanged,
   initialNavKey = 'general',
+  fontSize = 'medium',
+  onFontSizeChange = () => {},
 }) {
   const { theme, set: setTheme } = useTheme();
   const [activeNav, setActiveNav] = useState(() => navIndexForKey(initialNavKey));
@@ -164,7 +171,14 @@ export function SettingsPage({
               onPermissionModeChanged={onPermissionModeChanged}
             />
           )}
-          {activeNavKey === 'appearance' && <SectionAppearance theme={theme} setTheme={setTheme} />}
+          {activeNavKey === 'appearance' && (
+            <SectionAppearance
+              theme={theme}
+              setTheme={setTheme}
+              fontSize={fontSize}
+              onFontSizeChange={onFontSizeChange}
+            />
+          )}
           {activeNavKey === 'config' && <SectionConfig health={health} />}
           {activeNavKey === 'personalization' && <SectionPersonalization />}
           {activeNavKey === 'mcp' && <SectionMCP />}
@@ -343,7 +357,7 @@ function SectionGeneral({ health, activeSessionId = '', onPermissionModeChanged 
 
 // ─── 外观 ──────────────────────────────────────────────────────────────────
 
-function SectionAppearance({ theme, setTheme }) {
+function SectionAppearance({ theme, setTheme, fontSize, onFontSizeChange }) {
   return (
     <>
       <h2 className="text-xl font-bold mb-5">外观</h2>
@@ -375,6 +389,29 @@ function SectionAppearance({ theme, setTheme }) {
               </div>
               <div className="text-[13px] font-semibold">{opt.label}</div>
               {active && <span className="absolute top-2 right-2 w-2.5 h-2.5 rounded-full bg-accent" />}
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="mt-7 text-[14px] font-semibold mb-1">字体大小</div>
+      <div className="grid grid-cols-3 gap-1 p-1 rounded-lg border border-border bg-surface max-w-[240px]">
+        {FONT_SIZE_OPTIONS.map((opt) => {
+          const active = fontSize === opt.key;
+          return (
+            <button
+              key={opt.key}
+              type="button"
+              aria-pressed={active}
+              onClick={() => onFontSizeChange(opt.key)}
+              className={clsx(
+                'h-8 rounded-md text-[13px] font-medium transition',
+                active
+                  ? 'bg-accent text-white shadow-sm'
+                  : 'text-fg-2 hover:bg-surface-hi hover:text-fg',
+              )}
+            >
+              {opt.label}
             </button>
           );
         })}

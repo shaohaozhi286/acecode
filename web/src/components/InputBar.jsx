@@ -16,7 +16,7 @@ import { ImageLightbox } from './ImageLightbox.jsx';
 import { RichComposer } from './RichComposer.jsx';
 import { SlashDropdown } from './SlashDropdown.jsx';
 import { useSlashCommands } from './SlashCommandsContext.jsx';
-import { getNextInputHistoryPointer, shouldNavigateInputHistory } from '../lib/inputHistoryNavigation.js';
+import { getNextInputHistoryPointer, isUserComposerEdit, shouldNavigateInputHistory } from '../lib/inputHistoryNavigation.js';
 import { filesFromTransfer, hasFileTransfer } from '../lib/composerFileTransfer.js';
 import {
   captureComposerTextareaSelection,
@@ -428,6 +428,9 @@ export const InputBar = forwardRef(function InputBar({
   }, [capabilityOpen]);
 
   const handleComposerChange = (next) => {
+    // Lexical 的 onChange 回声(程序化设值同步 / 光标移动)文本与当前 value 相同,
+    // 不算用户编辑 —— 否则历史导航刚填入的文本会被误标为已编辑,上下键随即失效。
+    if (!isUserComposerEdit({ nextValue: next, currentValue: value })) return;
     updateValue(next);
     setEditedSinceHistory(next.length > 0);
   };

@@ -1,4 +1,6 @@
 export const UI_PREFS_STORAGE_KEY = 'acecode.uiPrefs.v1';
+export const DEFAULT_FONT_SIZE = 'medium';
+export const FONT_SIZE_VALUES = ['small', 'medium', 'large'];
 
 export const DEFAULT_UI_PREFS = {
   view: 'single',
@@ -9,9 +11,11 @@ export const DEFAULT_UI_PREFS = {
   // 次回到默认布局。跨刷新持久化,符合"用户操作过最大化就保留状态"。
   sidePanelMaximized: false,
   showAceCodeAvatar: false,
+  fontSize: DEFAULT_FONT_SIZE,
 };
 
 const ALLOWED_VIEWS = new Set(['single', 'grid4', 'grid9']);
+const ALLOWED_FONT_SIZES = new Set(FONT_SIZE_VALUES);
 
 export function validateUiPrefs(v) {
   return v && typeof v === 'object'
@@ -19,9 +23,16 @@ export function validateUiPrefs(v) {
     && typeof v.sidePanelCollapsed === 'boolean'
     && (v.sidebarCollapsed == null || typeof v.sidebarCollapsed === 'boolean')
     && (v.sidePanelMaximized == null || typeof v.sidePanelMaximized === 'boolean')
-    && (v.showAceCodeAvatar == null || typeof v.showAceCodeAvatar === 'boolean');
+    && (v.showAceCodeAvatar == null || typeof v.showAceCodeAvatar === 'boolean')
+    && (v.fontSize == null || ALLOWED_FONT_SIZES.has(v.fontSize));
 }
 
 export function effectiveShowAceCodeAvatar(uiPrefs) {
   return false;
+}
+
+export function effectiveFontSize(uiPrefs) {
+  return ALLOWED_FONT_SIZES.has(uiPrefs?.fontSize)
+    ? uiPrefs.fontSize
+    : DEFAULT_FONT_SIZE;
 }

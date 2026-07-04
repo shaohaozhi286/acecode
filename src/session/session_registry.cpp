@@ -27,12 +27,26 @@
 #include <fstream>
 #include <optional>
 #include <sstream>
+#include <system_error>
 #include <thread>
 #include <utility>
 
 namespace acecode {
 
 namespace {
+
+std::string session_dir_name_from_id(const std::string& session_id) {
+    std::string out;
+    out.reserve(session_id.size());
+    for (unsigned char ch : session_id) {
+        if (std::isalnum(ch) || ch == '-' || ch == '_') {
+            out.push_back(static_cast<char>(ch));
+        } else {
+            out.push_back('_');
+        }
+    }
+    return out.empty() ? "session" : out;
+}
 
 bool is_llm_role(const std::string& role) {
     return role == "user" || role == "assistant" ||
@@ -233,14 +247,18 @@ ResolvedSessionModel resolve_session_model(const SessionRegistryDeps& deps,
 }
 
 SessionOptions with_resolved_workspace(const SessionRegistryDeps& deps,
-                                       const SessionOptions& in) {
+                                       const SessionOptions& in,
+                                       const std::string& session_id = {}) {
     SessionOptions out = in;
-    if (out.cwd.empty()) {
-        out.cwd = deps.cwd;
-    }
     if (out.no_workspace) {
+        if (out.cwd.empty()) {
+            out.cwd = no_workspace_session_cwd(session_id, deps.no_workspace_cache_root);
+        }
         out.workspace_hash.clear();
         return out;
+    }
+    if (out.cwd.empty()) {
+        out.cwd = deps.cwd;
     }
     if (out.workspace_hash.empty() && !out.cwd.empty()) {
         out.workspace_hash = compute_cwd_hash(out.cwd);
@@ -633,6 +651,34 @@ BuiltinCommandResult execute_plan_builtin(SessionEntry& entry,
 
 } // namespace
 
+std::string default_no_workspace_cache_root() {
+    return path_to_utf8(path_from_utf8(get_acecode_dir()) / "cache" / "no-workspace");
+}
+
+std::string no_workspace_session_cwd(const std::string& session_id,
+                                     const std::string& cache_root) {
+    const std::string root = cache_root.empty() ? default_no_workspace_cache_root() : cache_root;
+    return path_to_utf8(path_from_utf8(root) / session_dir_name_from_id(session_id));
+}
+
+std::vector<std::string> list_no_workspace_session_cwds(const std::string& cache_root) {
+    namespace fs = std::filesystem;
+    std::vector<std::string> out;
+    const fs::path root = path_from_utf8(cache_root.empty()
+        ? default_no_workspace_cache_root()
+        : cache_root);
+    std::error_code ec;
+    if (!fs::exists(root, ec) || !fs::is_directory(root, ec)) return out;
+
+    for (fs::directory_iterator it(root, ec), end; !ec && it != end; it.increment(ec)) {
+        std::error_code item_ec;
+        if (!it->is_directory(item_ec) || item_ec) continue;
+        out.push_back(path_to_utf8(it->path()));
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
 SessionRegistry::SessionRegistry(SessionRegistryDeps deps)
     : deps_(std::move(deps)) {}
 
@@ -652,7 +698,9 @@ SessionRegistry::~SessionRegistry() {
 
 std::string SessionRegistry::create(const SessionOptions& opts) {
     std::string id = SessionStorage::generate_session_id();
-    SessionOptions resolved = with_resolved_workspace(deps_, opts);
+    SessionOptions create_opts = opts;
+    if (create_opts.no_workspace) create_opts.cwd.clear();
+    SessionOptions resolved = with_resolved_workspace(deps_, create_opts, id);
 
     auto entry = make_entry_locked(id, resolved, nullptr);
     {
@@ -684,6 +732,14 @@ SessionRegistry::make_entry_locked(const std::string& id,
     entry->id = id;
     entry->cwd = opts.cwd.empty() ? deps_.cwd : opts.cwd;
     entry->no_workspace = opts.no_workspace || (resumed_meta && resumed_meta->no_workspace);
+    if (entry->no_workspace && !entry->cwd.empty()) {
+        std::error_code ec;
+        std::filesystem::create_directories(path_from_utf8(entry->cwd), ec);
+        if (ec) {
+            LOG_WARN("[registry] failed to create no-workspace cwd " +
+                     entry->cwd + ": " + ec.message());
+        }
+    }
     entry->workspace_hash = entry->no_workspace
         ? std::string{}
         : (opts.workspace_hash.empty()
@@ -819,7 +875,7 @@ void SessionRegistry::restore_loop_history(
 
 bool SessionRegistry::resume(const std::string& id, const SessionOptions& opts) {
     if (id.empty()) return false;
-    SessionOptions resolved = with_resolved_workspace(deps_, opts);
+    SessionOptions resolved = with_resolved_workspace(deps_, opts, id);
 
     {
         std::lock_guard<std::mutex> lk(mu_);

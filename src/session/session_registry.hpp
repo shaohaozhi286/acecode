@@ -40,6 +40,11 @@ namespace acecode {
 class HookManager;
 class MemoryRegistry;
 
+std::string default_no_workspace_cache_root();
+std::string no_workspace_session_cwd(const std::string& session_id,
+                                     const std::string& cache_root = {});
+std::vector<std::string> list_no_workspace_session_cwds(const std::string& cache_root = {});
+
 // SessionEntry: 一个 session 的所有 per-session 状态。所有指针成员都是
 // unique_ptr,SessionEntry 析构时按相反顺序销毁(AgentLoop 先 shutdown
 // worker thread,再销毁 prompter,再销毁 SessionManager)。
@@ -84,6 +89,9 @@ struct SessionRegistryDeps {
     // 起始值)。每个 session 自己的 PermissionManager 是独立实例,session_allowed_
     // 不串。
     PermissionManager*               template_permissions = nullptr;
+    // Empty = ~/.acecode/cache/no-workspace. Tests may override to avoid
+    // creating cache directories in the real user home.
+    std::string                      no_workspace_cache_root;
 };
 
 class SessionRegistry {

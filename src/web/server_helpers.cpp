@@ -447,6 +447,12 @@ std::string WebServer::Impl::projects_dir() const {
     return path_to_utf8(path_from_utf8(get_acecode_dir()) / "projects");
 }
 
+std::string WebServer::Impl::no_workspace_cache_root() const {
+    return deps.no_workspace_cache_root.empty()
+        ? default_no_workspace_cache_root()
+        : deps.no_workspace_cache_root;
+}
+
 acecode::desktop::WorkspaceMeta WebServer::Impl::compatibility_workspace() const {
     acecode::desktop::WorkspaceMeta m;
     m.cwd = deps.cwd;
@@ -721,6 +727,13 @@ void WebServer::Impl::append_session_runtime_snapshot(json& wrapper,
         auto meta_path = SessionStorage::meta_path(project_dir, session_id);
         meta = SessionStorage::read_meta(meta_path);
         have_meta = !meta.id.empty();
+        if (!have_meta) {
+            auto no_workspace_meta = find_no_workspace_session_meta(session_id);
+            if (no_workspace_meta.has_value()) {
+                meta = *no_workspace_meta;
+                have_meta = true;
+            }
+        }
     }
     if (have_meta) {
         if (meta.no_workspace) {
@@ -771,6 +784,14 @@ json WebServer::Impl::sessions_for_workspace(const acecode::desktop::WorkspaceMe
 
     auto project_dir = SessionStorage::get_project_dir(ws.cwd);
     auto disk = SessionStorage::list_sessions(project_dir);
+    if (include_no_workspace) {
+        auto no_workspace_disk = no_workspace_disk_sessions();
+        disk.insert(disk.end(), no_workspace_disk.begin(), no_workspace_disk.end());
+        std::sort(disk.begin(), disk.end(),
+                  [](const SessionMeta& a, const SessionMeta& b) {
+                      return a.updated_at > b.updated_at;
+                  });
+    }
 
     std::unordered_map<std::string, SessionMeta> disk_by_id;
     for (const auto& m : disk) {
@@ -801,6 +822,33 @@ json WebServer::Impl::sessions_for_workspace(const acecode::desktop::WorkspaceMe
     return arr;
 }
 
+std::vector<SessionMeta> WebServer::Impl::no_workspace_disk_sessions() const {
+    std::vector<SessionMeta> out;
+    for (const auto& cwd : list_no_workspace_session_cwds(no_workspace_cache_root())) {
+        for (const auto& meta : SessionStorage::list_sessions(SessionStorage::get_project_dir(cwd))) {
+            if (meta.no_workspace) out.push_back(meta);
+        }
+    }
+    return out;
+}
+
+std::optional<SessionMeta>
+WebServer::Impl::find_no_workspace_session_meta(const std::string& id) const {
+    if (id.empty()) return std::nullopt;
+    const auto direct_cwd = no_workspace_session_cwd(id, no_workspace_cache_root());
+    auto direct_meta = SessionStorage::read_meta(
+        SessionStorage::meta_path(SessionStorage::get_project_dir(direct_cwd), id));
+    if (!direct_meta.id.empty() && direct_meta.no_workspace) return direct_meta;
+
+    for (const auto& cwd : list_no_workspace_session_cwds(no_workspace_cache_root())) {
+        if (cwd == direct_cwd) continue;
+        auto meta = SessionStorage::read_meta(
+            SessionStorage::meta_path(SessionStorage::get_project_dir(cwd), id));
+        if (!meta.id.empty() && meta.no_workspace) return meta;
+    }
+    return std::nullopt;
+}
+
 bool WebServer::Impl::session_entry_matches_workspace(const SessionEntry& entry,
                                                         const acecode::desktop::WorkspaceMeta& ws) const {
     if (entry.no_workspace) return false;
@@ -825,6 +873,10 @@ std::optional<SessionMeta> WebServer::Impl::find_session_meta_for_workspace(
     if (!candidates.empty() && !candidates.front().meta_path.empty()) {
         auto meta = SessionStorage::read_meta(candidates.front().meta_path);
         if (!meta.id.empty()) return meta;
+    }
+
+    if (auto meta = find_no_workspace_session_meta(id)) {
+        return meta;
     }
 
     if (deps.session_registry) {
@@ -885,7 +937,8 @@ crow::response WebServer::Impl::set_session_archive_state(
     }
 
     meta.archived = archived;
-    const auto project_dir = SessionStorage::get_project_dir(ws.cwd);
+    const auto project_dir = SessionStorage::get_project_dir(
+        meta.no_workspace && !meta.cwd.empty() ? meta.cwd : ws.cwd);
     SessionStorage::write_meta(SessionStorage::meta_path(project_dir, id), meta);
 
     crow::response r(session_meta_to_json(meta, ws.hash).dump());
@@ -1048,7 +1101,8 @@ crow::response WebServer::Impl::set_session_title_response(
     SessionMeta meta = *maybe_meta;
     meta.title = title;
     meta.title_source = title.empty() ? std::string{} : "user";
-    const auto project_dir = SessionStorage::get_project_dir(ws.cwd);
+    const auto project_dir = SessionStorage::get_project_dir(
+        meta.no_workspace && !meta.cwd.empty() ? meta.cwd : ws.cwd);
     SessionStorage::write_meta(SessionStorage::meta_path(project_dir, id), meta);
 
     crow::response r(session_meta_to_json(meta, ws.hash).dump());
@@ -1099,7 +1153,8 @@ crow::response WebServer::Impl::set_session_input_draft(
 
     SessionMeta meta = *maybe_meta;
     meta.input_draft = text;
-    const auto project_dir = SessionStorage::get_project_dir(ws.cwd);
+    const auto project_dir = SessionStorage::get_project_dir(
+        meta.no_workspace && !meta.cwd.empty() ? meta.cwd : ws.cwd);
     SessionStorage::write_meta(SessionStorage::meta_path(project_dir, id), meta);
     return session_input_draft_response(req, id, text);
 }
@@ -1125,7 +1180,8 @@ crow::response WebServer::Impl::clear_session_todos(
 
     SessionMeta meta = *maybe_meta;
     meta.todos.clear();
-    const auto project_dir = SessionStorage::get_project_dir(ws.cwd);
+    const auto project_dir = SessionStorage::get_project_dir(
+        meta.no_workspace && !meta.cwd.empty() ? meta.cwd : ws.cwd);
     SessionStorage::write_meta(SessionStorage::meta_path(project_dir, id), meta);
     return session_todos_response(req, ws, id, meta.todos);
 }
@@ -1589,6 +1645,11 @@ std::optional<SessionModelState> WebServer::Impl::current_model_state_for_sessio
         auto meta = SessionStorage::read_meta(candidates.front().meta_path);
         if (meta.id.empty()) continue;
         if (auto state = deps.session_registry->model_state_from_meta(meta)) {
+            return state;
+        }
+    }
+    if (auto meta = find_no_workspace_session_meta(session_id)) {
+        if (auto state = deps.session_registry->model_state_from_meta(*meta)) {
             return state;
         }
     }

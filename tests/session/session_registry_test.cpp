@@ -1054,12 +1054,14 @@ TEST(SessionRegistry, CreateUsesWorkspaceCwdFromOptions) {
     std::filesystem::remove_all(workspace_cwd);
 }
 
-// 场景:用户选择"不使用工作区"时,session 仍用 daemon cwd 执行/存储,
+// 场景:用户选择"不使用工作区"时,每个 session 使用全局 cache 下的独立 cwd,
 // 但对 Web/Sidebar 暴露为空 workspace_hash,避免左侧误高亮某个工作区。
 TEST(SessionRegistry, CreateNoWorkspaceKeepsWorkspaceHashEmpty) {
+    auto temp_home = temp_cwd("home_no_workspace");
+    ScopedHomeOverride home(temp_home);
     auto daemon_cwd = temp_cwd("daemon_no_workspace");
-    auto project_dir = SessionStorage::get_project_dir(daemon_cwd.string());
-    std::filesystem::remove_all(project_dir);
+    auto daemon_project_dir = SessionStorage::get_project_dir(daemon_cwd.string());
+    std::filesystem::remove_all(daemon_project_dir);
 
     ToolExecutor tools;
     PermissionManager permissions;
@@ -1075,25 +1077,44 @@ TEST(SessionRegistry, CreateNoWorkspaceKeepsWorkspaceHashEmpty) {
     auto id = registry.create(opts);
     auto* entry = registry.lookup(id);
     ASSERT_NE(entry, nullptr);
-    EXPECT_EQ(entry->cwd, daemon_cwd.string());
+    const std::string expected_cwd = acecode::no_workspace_session_cwd(id);
+    const auto expected_project_dir = SessionStorage::get_project_dir(expected_cwd);
+    EXPECT_EQ(entry->cwd, expected_cwd);
     EXPECT_TRUE(entry->workspace_hash.empty());
     EXPECT_TRUE(entry->no_workspace);
+    EXPECT_TRUE(std::filesystem::is_directory(expected_cwd));
+    EXPECT_EQ(std::filesystem::path(expected_cwd).parent_path().filename().string(), "no-workspace");
     ASSERT_NE(entry->loop, nullptr);
-    EXPECT_EQ(entry->loop->cwd(), daemon_cwd.string());
+    EXPECT_EQ(entry->loop->cwd(), expected_cwd);
 
     ASSERT_NE(entry->sm, nullptr);
     EXPECT_EQ(entry->sm->ensure_active_session_id(), id);
-    auto meta = SessionStorage::read_meta(SessionStorage::meta_path(project_dir, id));
+    auto meta = SessionStorage::read_meta(SessionStorage::meta_path(expected_project_dir, id));
     EXPECT_EQ(meta.id, id);
     EXPECT_TRUE(meta.no_workspace);
+    EXPECT_EQ(meta.cwd, expected_cwd);
+    EXPECT_TRUE(SessionStorage::list_sessions(daemon_project_dir).empty());
+
+    auto second_id = registry.create(opts);
+    auto* second = registry.lookup(second_id);
+    ASSERT_NE(second, nullptr);
+    EXPECT_NE(second->cwd, entry->cwd);
+    EXPECT_EQ(second->cwd, acecode::no_workspace_session_cwd(second_id));
+    EXPECT_TRUE(second->workspace_hash.empty());
+    EXPECT_TRUE(second->no_workspace);
 
     auto active = registry.list_active();
-    ASSERT_EQ(active.size(), 1u);
-    EXPECT_TRUE(active[0].workspace_hash.empty());
-    EXPECT_TRUE(active[0].no_workspace);
+    ASSERT_EQ(active.size(), 2u);
+    for (const auto& item : active) {
+        EXPECT_TRUE(item.workspace_hash.empty());
+        EXPECT_TRUE(item.no_workspace);
+    }
 
-    std::filesystem::remove_all(project_dir);
+    std::filesystem::remove_all(expected_project_dir);
+    std::filesystem::remove_all(SessionStorage::get_project_dir(second->cwd));
+    std::filesystem::remove_all(daemon_project_dir);
     std::filesystem::remove_all(daemon_cwd);
+    std::filesystem::remove_all(temp_home);
 }
 
 // 场景:共享 daemon 的启动 cwd 没有某个 skill,但目标 workspace 有。

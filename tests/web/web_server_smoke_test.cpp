@@ -225,6 +225,7 @@ struct WebServerFixture {
     std::filesystem::path tmp_dir;
     std::filesystem::path cwd_dir;
     std::filesystem::path projects_dir;
+    std::filesystem::path no_workspace_cache_root;
     std::filesystem::path logs_dir;
     std::filesystem::path feedback_dir;
     std::string cwd;
@@ -259,6 +260,8 @@ struct WebServerFixture {
         std::filesystem::create_directories(cwd_dir);
         projects_dir = tmp_dir / "projects";
         std::filesystem::create_directories(projects_dir);
+        no_workspace_cache_root = tmp_dir / "cache" / "no-workspace";
+        std::filesystem::create_directories(no_workspace_cache_root);
         logs_dir = tmp_dir / "logs";
         std::filesystem::create_directories(logs_dir);
         feedback_dir = tmp_dir / "feedback";
@@ -278,6 +281,7 @@ struct WebServerFixture {
         deps.provider_accessor = [] { return std::shared_ptr<acecode::LlmProvider>{}; };
         deps.tools = &tools;
         deps.cwd = cwd;
+        deps.no_workspace_cache_root = no_workspace_cache_root.string();
         deps.config = &cfg;
         deps.template_permissions = &template_perm;
         registry = std::make_unique<acecode::SessionRegistry>(std::move(deps));
@@ -290,6 +294,7 @@ struct WebServerFixture {
         wdeps.app_config = &cfg;
         wdeps.config_path = (tmp_dir / "config.json").string();
         wdeps.cwd = cwd;
+        wdeps.no_workspace_cache_root = no_workspace_cache_root.string();
         wdeps.token = "smoke-token";
         wdeps.logs_dir = logs_dir.string();
         wdeps.feedback_output_dir = feedback_dir.string();
@@ -1028,13 +1033,21 @@ TEST(WebServerHttp, CreateNoWorkspaceSessionIsListedOutsideWorkspaces) {
 
     auto* entry = fx.registry->lookup(sid);
     ASSERT_NE(entry, nullptr);
+    const std::string expected_cwd =
+        acecode::no_workspace_session_cwd(sid, fx.no_workspace_cache_root.string());
     EXPECT_TRUE(entry->no_workspace);
     EXPECT_TRUE(entry->workspace_hash.empty());
+    EXPECT_EQ(entry->cwd, expected_cwd);
+    EXPECT_TRUE(std::filesystem::is_directory(expected_cwd));
     ASSERT_NE(entry->sm, nullptr);
     EXPECT_EQ(entry->sm->ensure_active_session_id(), sid);
+    const auto no_workspace_project_dir =
+        acecode::SessionStorage::get_project_dir(expected_cwd);
     auto meta = acecode::SessionStorage::read_meta(
-        acecode::SessionStorage::meta_path(fx.project_dir, sid));
+        acecode::SessionStorage::meta_path(no_workspace_project_dir, sid));
     EXPECT_TRUE(meta.no_workspace);
+    EXPECT_EQ(meta.cwd, expected_cwd);
+    EXPECT_TRUE(acecode::SessionStorage::list_sessions(fx.project_dir).empty());
 
     auto compat_list = cpr::Get(cpr::Url{fx.url("/api/sessions")});
     ASSERT_EQ(compat_list.status_code, 200) << compat_list.text;
@@ -1053,6 +1066,34 @@ TEST(WebServerHttp, CreateNoWorkspaceSessionIsListedOutsideWorkspaces) {
     EXPECT_TRUE(std::none_of(scoped.begin(), scoped.end(), [&](const auto& item) {
         return item.value("id", std::string{}) == sid;
     }));
+
+    fx.client->destroy_session(sid);
+    auto inactive_list = cpr::Get(cpr::Url{fx.url("/api/sessions")});
+    ASSERT_EQ(inactive_list.status_code, 200) << inactive_list.text;
+    auto inactive = json::parse(inactive_list.text);
+    auto inactive_it = std::find_if(inactive.begin(), inactive.end(), [&](const auto& item) {
+        return item.value("id", std::string{}) == sid;
+    });
+    ASSERT_NE(inactive_it, inactive.end());
+    EXPECT_EQ((*inactive_it)["active"], false);
+    EXPECT_EQ((*inactive_it)["workspace_hash"], "");
+    EXPECT_EQ((*inactive_it)["cwd"], "");
+    EXPECT_EQ((*inactive_it)["no_workspace"], true);
+
+    auto resumed = cpr::Post(cpr::Url{fx.url("/api/sessions/" + sid + "/resume")},
+                             cpr::Header{{"Content-Type", "application/json"}},
+                             cpr::Body{R"({})"});
+    ASSERT_EQ(resumed.status_code, 200) << resumed.text;
+    auto resumed_body = json::parse(resumed.text);
+    EXPECT_EQ(resumed_body["workspace_hash"], "");
+    EXPECT_EQ(resumed_body["cwd"], "");
+    EXPECT_EQ(resumed_body["no_workspace"], true);
+    auto* resumed_entry = fx.registry->lookup(sid);
+    ASSERT_NE(resumed_entry, nullptr);
+    EXPECT_TRUE(resumed_entry->no_workspace);
+    EXPECT_EQ(resumed_entry->cwd, expected_cwd);
+
+    std::filesystem::remove_all(no_workspace_project_dir);
 }
 
 // 场景:daemon 运行期间 TUI/其它进程改写 config.json 的默认模型和默认

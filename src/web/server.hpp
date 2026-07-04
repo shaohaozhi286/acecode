@@ -51,6 +51,7 @@ struct WebServerDeps {
     std::string                config_path;
     std::string                cwd;
     std::string                projects_dir;
+    std::string                no_workspace_cache_root;
     std::string                logs_dir;
     std::string                feedback_output_dir;
     std::string                token;                  // 启动期生成,空 = 不强制 (loopback only)

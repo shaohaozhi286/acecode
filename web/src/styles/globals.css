@@ -77,6 +77,21 @@
   --ace-code-line:    #6272a4;
   --ace-shadow:       0 1px 3px rgba(0,0,0,.06);
   --ace-shadow-lg:    0 4px 12px rgba(0,0,0,.08);
+  --ace-font-size-body: 14px;
+  --ace-font-size-9: 9px;
+  --ace-font-size-10: 11px;
+  --ace-font-size-11: 12px;
+  --ace-font-size-12: 13px;
+  --ace-font-size-12-5: 12.5px;
+  --ace-font-size-13: 14px;
+  --ace-font-size-14: 15px;
+  --ace-font-size-20: 20px;
+  --ace-font-size-24: 24px;
+  --ace-font-size-xs: 13px;
+  --ace-font-size-sm: 14px;
+  --ace-font-size-xl: 20px;
+  --ace-font-size-code: 13px;
+  --ace-font-size-code-compact: 11px;
 }
 
 [data-theme="dark"] {
@@ -122,6 +137,42 @@
   color-scheme: dark;
 }
 
+[data-font-size="small"] {
+  --ace-font-size-body: 13px;
+  --ace-font-size-9: 8px;
+  --ace-font-size-10: 10px;
+  --ace-font-size-11: 11px;
+  --ace-font-size-12: 12px;
+  --ace-font-size-12-5: 11.5px;
+  --ace-font-size-13: 13px;
+  --ace-font-size-14: 14px;
+  --ace-font-size-20: 19px;
+  --ace-font-size-24: 22px;
+  --ace-font-size-xs: 12px;
+  --ace-font-size-sm: 13px;
+  --ace-font-size-xl: 19px;
+  --ace-font-size-code: 12px;
+  --ace-font-size-code-compact: 10px;
+}
+
+[data-font-size="large"] {
+  --ace-font-size-body: 15px;
+  --ace-font-size-9: 10px;
+  --ace-font-size-10: 12px;
+  --ace-font-size-11: 13px;
+  --ace-font-size-12: 14px;
+  --ace-font-size-12-5: 13.5px;
+  --ace-font-size-13: 15px;
+  --ace-font-size-14: 16px;
+  --ace-font-size-20: 21px;
+  --ace-font-size-24: 26px;
+  --ace-font-size-xs: 14px;
+  --ace-font-size-sm: 15px;
+  --ace-font-size-xl: 21px;
+  --ace-font-size-code: 14px;
+  --ace-font-size-code-compact: 12px;
+}
+
 * { box-sizing: border-box; }
 html,
 body,
@@ -137,7 +188,7 @@ body {
   font-family: var(--font-sans);
   background: var(--ace-bg);
   color: var(--ace-fg);
-  font-size: 14px;
+  font-size: var(--ace-font-size-body);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
@@ -205,7 +256,7 @@ body {
   background: var(--ace-surface);
   border: 1px solid var(--ace-border);
   color: var(--ace-fg);
-  font-size: 11px;
+  font-size: var(--ace-font-size-code-compact);
   line-height: 1.45;
   font-weight: 400;
   text-align: center;
@@ -641,7 +692,7 @@ body {
   border-radius: 6px;
   overflow-x: auto;
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: var(--ace-font-size-code);
   line-height: 1.55;
   margin: 6px 0;
 }
@@ -2531,7 +2582,7 @@ body {
   background: var(--ace-code-bg);
   color: var(--ace-code-fg);
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: var(--ace-font-size-code);
   line-height: 1.55;
   white-space: pre;
   overflow: auto;
@@ -2573,7 +2624,7 @@ body {
   min-width: 100%;
   margin-top: 3px;
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--ace-font-size-code-compact);
   line-height: 1.55;
   background: var(--ace-code-bg);
   color: var(--ace-code-fg);
@@ -2692,13 +2743,17 @@ body {
 }
 
 /* App typography scale — align desktop readability with Codex-like UI. */
-.text-\[10px\] { font-size: 11px !important; }
-.text-\[11px\] { font-size: 12px !important; }
-.text-\[12px\] { font-size: 13px !important; }
-.text-\[13px\] { font-size: 14px !important; }
-.text-\[14px\] { font-size: 15px !important; }
-.text-xs { font-size: 13px !important; line-height: 1.45 !important; }
-.text-sm { font-size: 14px !important; line-height: 1.5 !important; }
+.text-\[9px\] { font-size: var(--ace-font-size-9) !important; }
+.text-\[10px\] { font-size: var(--ace-font-size-10) !important; }
+.text-\[11px\] { font-size: var(--ace-font-size-11) !important; }
+.text-\[12px\] { font-size: var(--ace-font-size-12) !important; }
+.text-\[13px\] { font-size: var(--ace-font-size-13) !important; }
+.text-\[14px\] { font-size: var(--ace-font-size-14) !important; }
+.text-\[20px\] { font-size: var(--ace-font-size-20) !important; }
+.text-\[24px\] { font-size: var(--ace-font-size-24) !important; }
+.text-xs { font-size: var(--ace-font-size-xs) !important; line-height: 1.45 !important; }
+.text-sm { font-size: var(--ace-font-size-sm) !important; line-height: 1.5 !important; }
+.text-xl { font-size: var(--ace-font-size-xl) !important; line-height: 1.75rem !important; }
 
 /* Tool transcript chrome uses the body face at a fixed compact size. */
 .ace-tool-call-text,
@@ -2710,7 +2765,7 @@ body {
 .ace-tool-call-text .ace-diff *,
 .ace-tool-call-text span:not(.ace-icon):not(.ace-file-type-icon) {
   font-family: var(--font-sans) !important;
-  font-size: 11px !important;
+  font-size: var(--ace-font-size-code-compact) !important;
   line-height: 1.45 !important;
 }
 
@@ -2753,7 +2808,7 @@ body {
   flex: 0 0 auto;
 }
 .ace-qa-card-title {
-  font-size: 12px;
+  font-size: var(--ace-font-size-12);
   line-height: 1.35;
   font-weight: 600;
   color: var(--ace-fg);
@@ -2763,7 +2818,7 @@ body {
   min-width: 8px;
 }
 .ace-qa-card-state {
-  font-size: 11px;
+  font-size: var(--ace-font-size-11);
   line-height: 1.35;
   font-weight: 400;
   color: var(--ace-fg-mute);
@@ -2792,7 +2847,7 @@ body {
 }
 .ace-qa-mark {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--ace-font-size-11);
   line-height: 1.5;
   font-weight: 700;
 }
@@ -2814,13 +2869,13 @@ body {
   cursor: help;
 }
 .ace-qa-question {
-  font-size: 12px;
+  font-size: var(--ace-font-size-12);
   line-height: 1.45;
   font-weight: 400;
   color: var(--ace-fg-2);
 }
 .ace-qa-answer {
-  font-size: 12.5px;
+  font-size: var(--ace-font-size-12-5);
   line-height: 1.45;
   font-weight: 600;
   color: var(--ace-fg);
