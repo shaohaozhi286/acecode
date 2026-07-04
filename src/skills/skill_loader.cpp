@@ -145,6 +145,7 @@ std::optional<SkillMetadata> load_skill_from_dir(const fs::path& dir,
     SkillMetadata meta;
     meta.skill_md_path = skill_md;
     meta.skill_dir = dir;
+    meta.scan_root = scan_root;
 
     std::string fm_name = get_string(fm, "name");
     if (fm_name.empty()) {

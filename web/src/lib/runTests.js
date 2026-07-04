@@ -50,6 +50,7 @@ import './useGlobalShortcut.test.js';
 import './browserCompatibility.test.js';
 import './browserDefaults.test.js';
 import './hooksSettings.test.js';
+import './skillsSettings.test.js';
 import './webCoreInfo.test.js';
 import './globalFind.test.js';
 import './fileTypeIcons.test.js';

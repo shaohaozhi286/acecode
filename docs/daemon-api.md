@@ -838,14 +838,18 @@ Returns the effective skill directory:
 {
   "path": "C:/repo/.acecode/skills",
   "source": "project_acecode",
+  "global_path": "C:/Users/me/.acecode/skills",
   "workspace_hash": "abc123",
   "cwd": "C:/repo"
 }
 ```
 
 `source` is `project_acecode`, `project_agent`, or `global_acecode`.
+`global_path` always points at the user-global skills root
+(`~/.acecode/skills`) regardless of which root was selected as `path`;
+the settings page "open global skills directory" button relies on it.
 
-### `GET /api/skills`
+### `GET /api/skills?workspace=<hash>`
 
 Returns an array, not a wrapper:
 
@@ -856,12 +860,23 @@ Returns an array, not a wrapper:
     "command_key": "/skill-name",
     "description": "...",
     "category": "custom",
-    "enabled": true
+    "enabled": true,
+    "source": "project"
   }
 ]
 ```
 
-Disabled config entries are included with `enabled:false`.
+The list is a full rescan of the workspace's project scan roots plus the
+global scan roots, so disabled skills keep their real `description` and
+`source`. `source` is `"project"` (discovered under the workspace's project
+chain — `.acecode/skills` / `.agent/skills` walking up to, but not
+including, HOME) or `"global"` (user-global roots and
+`config.skills.external_dirs`). `workspace` is optional; without it the
+daemon's compatibility workspace (its own cwd) is used.
+
+Disabled config entries whose skill no longer exists on disk (ghost
+entries) are still included with `enabled:false` and `source:""` so the UI
+can release them from `config.skills.disabled`.
 
 ### `PUT /api/skills/:name`
 

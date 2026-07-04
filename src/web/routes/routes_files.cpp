@@ -245,6 +245,7 @@ void WebServer::Impl::register_skills() {
             json body{
                 {"path", path_to_utf8(selected.path)},
                 {"source", selected.source},
+                {"global_path", path_to_utf8(selected.global_path)},
                 {"workspace_hash", ws->hash},
                 {"cwd", ws->cwd},
             };
@@ -253,35 +254,29 @@ void WebServer::Impl::register_skills() {
             return with_cors(req, std::move(r));
         });
 
-        // GET /api/skills: spec 9.7
+        // GET /api/skills?workspace=<hash>: spec 9.7 + 设置页技能 tab。
+        // 全量扫描(含禁用中的 skill,带完整元数据),每条带 enabled 与
+        // source("project"/"global")。workspace 缺省 = daemon 兼容 workspace。
         CROW_ROUTE(app, "/api/skills").methods(crow::HTTPMethod::GET)
         ([this](const crow::request& req) {
             if (auto rej = require_auth(req)) return std::move(*rej);
             json arr = json::array();
-            if (deps.skill_registry) {
-                for (const auto& s : deps.skill_registry->list()) {
-                    json o;
-                    o["name"]        = s.name;
-                    o["command_key"] = s.command_key;
-                    o["description"] = s.description;
-                    o["category"]    = s.category;
-                    o["enabled"]     = true; // disabled 已经在 list 里被过滤
-                    arr.push_back(std::move(o));
-                }
-                // 同时把 cfg.skills.disabled 中的条目也列出(状态=false),让前端
-                // 看见所有可切换的 skill。
-                if (deps.app_config) {
-                    std::lock_guard<std::mutex> config_lock(app_config_mu);
-                    for (const auto& name : deps.app_config->skills.disabled) {
-                        json o;
-                        o["name"]        = name;
-                        o["command_key"] = name;
-                        o["description"] = "";
-                        o["category"]    = "";
-                        o["enabled"]     = false;
-                        arr.push_back(std::move(o));
+            if (deps.app_config) {
+                std::optional<acecode::desktop::WorkspaceMeta> ws;
+                const char* workspace_q = req.url_params.get("workspace");
+                if (workspace_q && *workspace_q) {
+                    ws = resolve_workspace(workspace_q);
+                    if (!ws.has_value()) {
+                        crow::response r(404);
+                        r.body = R"({"error":"workspace not found"})";
+                        r.add_header("Content-Type", "application/json");
+                        return r;
                     }
+                } else {
+                    ws = compatibility_workspace();
                 }
+                std::lock_guard<std::mutex> config_lock(app_config_mu);
+                arr = build_skills_payload(*deps.app_config, ws->cwd);
             }
             crow::response r(arr.dump());
             r.add_header("Content-Type", "application/json");

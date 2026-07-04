@@ -1,7 +1,7 @@
 // SlashCommandsContext:跨组件共享 GET /api/commands 的结果。
 // Provider 接收 workspaceHash,workspace 切换时自动 refetch(workspace 项目里的
 // .agent/skills 才能跟着切到的 workspace 一起出现)。
-// SkillsPanel 启停 skill 后调 invalidate() 触发 refetch。
+// 设置页技能 tab(SettingsPage.jsx SectionSkills)启停 skill 后调 invalidate() 触发 refetch。
 
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api.js';

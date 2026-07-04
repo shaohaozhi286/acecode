@@ -14,6 +14,7 @@ struct SkillMetadata {
     std::string category;          // First-level directory under skills root, or "" if flat
     std::filesystem::path skill_md_path; // Absolute path to SKILL.md
     std::filesystem::path skill_dir;     // Absolute path to the skill directory
+    std::filesystem::path scan_root;     // The scan root this skill was discovered under
     std::vector<std::string> platforms;  // Empty = all platforms
     std::vector<std::string> tags;
 };

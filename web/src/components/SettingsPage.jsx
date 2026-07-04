@@ -1,7 +1,7 @@
 // 全屏设置页:左栏导航 + 右栏内容(Codex 风格)。
 //
 // 设计来源:Claude Design 高保真原型 (panels.jsx)。NAV 顺序与设计稿一致。
-// 后端真实接入的 section:常规 (权限模式) / 外观 (主题) / 配置 / 个性化 / 模型 / 工具。
+// 后端真实接入的 section:常规 (权限模式) / 外观 (主题) / 配置 / 个性化 / 技能 / 模型 / 工具。
 // 其余 section (MCP / 已归档会话 / 使用情况) 当前部分为 UI 占位
 // — 状态走本地 useState,提交按钮无网络副作用,待后端接口就绪后接入。
 
@@ -55,6 +55,13 @@ import {
   formatWebCoreLabel,
   getCurrentWebCoreInfo,
 } from '../lib/webCoreInfo.js';
+import {
+  filterSkills,
+  groupSkillsBySource,
+  normalizeSkillList,
+  skillsEnabledSummary,
+} from '../lib/skillsSettings.js';
+import { useSlashCommands } from './SlashCommandsContext.jsx';
 import { RefreshIcon, VsIcon } from './Icon.jsx';
 import { toast } from './Toast.jsx';
 import {
@@ -69,6 +76,7 @@ const NAV = [
   { key: 'appearance', label: '外观', icon: 'brightness' },
   { key: 'config', label: '配置', icon: 'terminal' },
   { key: 'personalization', label: '个性化', icon: 'eye' },
+  { key: 'skills', label: '技能', icon: 'lightbulb' },
   { key: 'mcp', label: 'MCP 服务器', icon: 'mcp' },
   { key: 'connectors', label: '连接器', icon: 'extension' },
   { key: 'models', label: '模型', icon: 'brain' },
@@ -184,6 +192,7 @@ export function SettingsPage({
           )}
           {activeNavKey === 'config' && <SectionConfig health={health} />}
           {activeNavKey === 'personalization' && <SectionPersonalization />}
+          {activeNavKey === 'skills' && <SectionSkills />}
           {activeNavKey === 'mcp' && <SectionMCP />}
           {activeNavKey === 'connectors' && <SectionConnectors />}
           {activeNavKey === 'models' && <SectionModel />}
@@ -773,6 +782,254 @@ function SectionPersonalization() {
           )}
         >
           {saving ? '保存中...' : saved ? '已保存' : '保存'}
+        </button>
+      </div>
+    </>
+  );
+}
+
+// ─── 技能 ──────────────────────────────────────────────────────────────────
+// 真实接入:GET /api/skills(带 source/enabled 全量元数据)、PUT /api/skills/:name、
+// GET /api/skills/:name/body、GET /api/skills/root(global_path 供「打开全局目录」)。
+// 过滤 / 分组 / 计数逻辑在 lib/skillsSettings.js(有 Node 单测)。
+
+function parseDesktopBridgeResult(value) {
+  // webview native binding 通常返回已解析的 JS 值;调试 shim 可能给原始字符串。
+  if (value == null) return value;
+  if (typeof value !== 'string') return value;
+  const text = value.trim();
+  if (!text || text === 'null') return null;
+  return JSON.parse(text);
+}
+
+function SkillRow({ skill, busy, onToggle, onView }) {
+  return (
+    <div className="flex items-center gap-3 px-3.5 py-2.5 rounded-md bg-surface border border-border mb-2">
+      <div
+        className={clsx(
+          'w-9 h-9 rounded-md border flex items-center justify-center shrink-0 transition',
+          skill.enabled
+            ? 'bg-accent-bg border-accent/40 text-accent'
+            : 'bg-surface-alt border-border text-fg-mute',
+        )}
+      >
+        <VsIcon name="lightbulb" size={18} />
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="text-[13px] font-medium truncate">{skill.name}</div>
+        <div className="text-[11px] text-fg-mute mt-0.5 truncate">{skill.description || '—'}</div>
+      </div>
+      <button
+        type="button"
+        onClick={() => onView(skill.name)}
+        className="px-1.5 py-0.5 text-[11px] text-accent hover:underline shrink-0"
+      >
+        查看
+      </button>
+      <Toggle on={skill.enabled} disabled={busy} onChange={(v) => onToggle(skill.name, v)} />
+    </div>
+  );
+}
+
+function SectionSkills() {
+  const [skills, setSkills] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [search, setSearch] = useState('');
+  const [savingName, setSavingName] = useState('');
+  const [openingDir, setOpeningDir] = useState('');
+  const slashCommandsCtx = useSlashCommands();
+
+  const load = useCallback(async (refresh = false) => {
+    if (refresh) setRefreshing(true); else setLoading(true);
+    try {
+      const list = await api.listSkills();
+      setSkills(normalizeSkillList(list));
+    } catch (e) {
+      toast({ kind: 'err', text: '加载技能失败:' + (e?.message || '') });
+    } finally {
+      if (refresh) setRefreshing(false); else setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    api.listSkills()
+      .then((list) => { if (!cancelled) setSkills(normalizeSkillList(list)); })
+      .catch((e) => {
+        if (!cancelled) toast({ kind: 'err', text: '加载技能失败:' + (e?.message || '') });
+      })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, []);
+
+  const summary = useMemo(() => skillsEnabledSummary(skills), [skills]);
+  const groups = useMemo(
+    () => groupSkillsBySource(filterSkills(skills, search)),
+    [skills, search],
+  );
+  const hasQuery = !!search.trim();
+
+  const toggle = async (name, next) => {
+    if (savingName) return;
+    const before = skills;
+    setSkills((prev) => prev.map((s) => (s.name === name ? { ...s, enabled: next } : s)));
+    setSavingName(name);
+    try {
+      await api.setSkillEnabled(name, next);
+      slashCommandsCtx.invalidate?.();
+    } catch (e) {
+      setSkills(before);
+      toast({ kind: 'err', text: '切换技能失败:' + (e?.message || '') });
+    } finally {
+      setSavingName('');
+    }
+  };
+
+  const view = async (name) => {
+    try {
+      const body = await api.getSkillBody(name);
+      const w = window.open('', '_blank', 'width=720,height=600');
+      if (w) {
+        w.document.title = name;
+        w.document.body.style.cssText = 'font-family:monospace;padding:20px;white-space:pre-wrap;line-height:1.5;';
+        w.document.body.textContent = body;
+      }
+    } catch (e) {
+      toast({ kind: 'err', text: '查看技能失败:' + (e?.message || '') });
+    }
+  };
+
+  // 打开技能目录:desktop bridge 优先;webapp 兼容模式走 REST;都不可用时复制路径。
+  const openDir = async (scope) => {
+    if (openingDir) return;
+    setOpeningDir(scope);
+    try {
+      const root = await api.getSkillRoot();
+      const path = scope === 'global' ? (root?.global_path || '') : (root?.path || '');
+      if (!path) throw new Error('目录路径为空');
+      if (typeof window.aceDesktop_openInExplorer === 'function') {
+        const result = parseDesktopBridgeResult(await window.aceDesktop_openInExplorer(path));
+        if (!result?.ok) throw new Error(result?.error || 'open failed');
+        toast({ kind: 'ok', text: '已打开技能目录' });
+        return;
+      }
+      try {
+        const result = await api.openInExplorer(path);
+        if (!result?.ok) throw new Error(result?.error || 'open failed');
+        toast({ kind: 'ok', text: '已打开技能目录' });
+      } catch {
+        // REST 不可用(非 desktop 环境)→ 复制路径;复制也失败(如页面失焦)
+        // 时直接把路径显示出来,不要报"失败"把路径吞掉。
+        try {
+          await navigator.clipboard.writeText(path);
+          toast({ kind: 'ok', text: '技能目录路径已复制:' + path });
+        } catch {
+          toast({ kind: 'info', text: path });
+        }
+      }
+    } catch (e) {
+      toast({ kind: 'err', text: '打开技能目录失败:' + (e?.message || '') });
+    } finally {
+      setOpeningDir('');
+    }
+  };
+
+  const renderGroup = (title, items, emptyText) => (
+    <>
+      <div className="text-[14px] font-semibold mb-1">{title}</div>
+      <p className="text-[12px] text-fg-mute mb-3">
+        {items.length > 0 ? `${items.length} 个技能` : emptyText}
+      </p>
+      {items.map((s) => (
+        <SkillRow
+          key={s.name}
+          skill={s}
+          busy={!!savingName}
+          onToggle={toggle}
+          onView={view}
+        />
+      ))}
+    </>
+  );
+
+  return (
+    <>
+      <div className="flex items-start justify-between gap-4 mb-5">
+        <div>
+          <h2 className="text-xl font-bold mb-2">技能</h2>
+          <p className="text-[12px] text-fg-mute">
+            管理 ACECode 可调用的技能模块。启用后 Agent 在任务中可自动使用。
+          </p>
+        </div>
+        <div className="flex items-center gap-3 shrink-0">
+          <span className="text-[12px] text-fg-mute tabular-nums">{summary.label}</span>
+          <button
+            type="button"
+            onClick={() => load(true)}
+            disabled={loading || refreshing}
+            title="刷新技能列表"
+            className="h-8 w-8 inline-flex items-center justify-center rounded-md border border-border bg-surface text-fg-2 hover:bg-surface-hi transition disabled:opacity-50"
+          >
+            <RefreshIcon size={15} className={clsx(refreshing && 'animate-spin')} />
+          </button>
+        </div>
+      </div>
+
+      <div className="relative mb-5">
+        <VsIcon
+          name="search"
+          size={14}
+          className="absolute left-3 top-1/2 -translate-y-1/2 text-fg-mute pointer-events-none"
+        />
+        <input
+          type="text"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="搜索技能名称或描述..."
+          className="w-full h-9 pl-9 pr-3 text-[13px] rounded-md border border-border bg-surface text-fg outline-none focus:border-accent transition"
+        />
+      </div>
+
+      {loading ? (
+        <div className="px-3.5 py-8 rounded-md bg-surface border border-border text-[12px] text-fg-mute text-center">
+          <span className="ace-spinner mr-2" /> 加载中
+        </div>
+      ) : (
+        <>
+          {renderGroup(
+            '项目技能',
+            groups.project,
+            hasQuery ? '无匹配的项目技能' : '当前项目没有技能;放到项目的 .acecode/skills 目录即可被发现',
+          )}
+          <div className="h-px bg-border my-5" />
+          {renderGroup(
+            '全局技能',
+            groups.global,
+            hasQuery ? '无匹配的全局技能' : '暂无全局技能',
+          )}
+        </>
+      )}
+
+      <div className="grid grid-cols-2 gap-3 mt-6">
+        <button
+          type="button"
+          onClick={() => openDir('global')}
+          disabled={!!openingDir}
+          className="h-10 inline-flex items-center justify-center gap-2 rounded-md border border-border bg-surface text-[13px] text-fg hover:bg-surface-hi transition disabled:opacity-60"
+        >
+          <VsIcon name="folder" size={15} />
+          打开全局 Skill 目录
+        </button>
+        <button
+          type="button"
+          onClick={() => openDir('project')}
+          disabled={!!openingDir}
+          className="h-10 inline-flex items-center justify-center gap-2 rounded-md border border-border bg-surface text-[13px] text-fg hover:bg-surface-hi transition disabled:opacity-60"
+        >
+          <VsIcon name="folderOpen" size={15} />
+          打开项目级 Skill 目录
         </button>
       </div>
     </>

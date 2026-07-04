@@ -59,11 +59,9 @@ void append_opencode_global_skill_roots(std::vector<fs::path>& roots) {
 
 } // namespace
 
-void initialize_skill_registry(SkillRegistry& skill_registry,
-                                 const AppConfig& config,
-                                 const std::string& working_dir) {
+std::vector<std::filesystem::path> project_skill_scan_roots(
+    const AppConfig& config, const std::string& working_dir) {
     std::vector<std::filesystem::path> roots;
-    std::error_code ec;
 
     for (const auto& dir : get_project_dirs_up_to_home(working_dir)) {
         roots.emplace_back(path_from_utf8(dir) / ".acecode" / "skills");
@@ -76,16 +74,14 @@ void initialize_skill_registry(SkillRegistry& skill_registry,
             append_opencode_project_skill_roots(roots, path_from_utf8(dir));
         }
     }
+    return roots;
+}
 
-    std::filesystem::path default_acecode_skills_dir =
-        path_from_utf8(get_acecode_dir()) / "skills";
-    if (!std::filesystem::exists(default_acecode_skills_dir, ec)) {
-        std::filesystem::create_directories(default_acecode_skills_dir, ec);
-    }
-    roots.emplace_back(default_acecode_skills_dir);
+std::vector<std::filesystem::path> global_skill_scan_roots(const AppConfig& config) {
+    std::vector<std::filesystem::path> roots;
 
-    std::string default_agent_skills_dir = expand_path("~/.agent/skills");
-    roots.emplace_back(path_from_utf8(default_agent_skills_dir));
+    roots.emplace_back(path_from_utf8(get_acecode_dir()) / "skills");
+    roots.emplace_back(path_from_utf8(expand_path("~/.agent/skills")));
 
     if (config.skills.reuse_opencode) {
         append_opencode_global_skill_roots(roots);
@@ -94,6 +90,27 @@ void initialize_skill_registry(SkillRegistry& skill_registry,
     for (const auto& raw : config.skills.external_dirs) {
         std::string expanded = expand_path(raw);
         if (!expanded.empty()) roots.emplace_back(path_from_utf8(expanded));
+    }
+    return roots;
+}
+
+void initialize_skill_registry(SkillRegistry& skill_registry,
+                                 const AppConfig& config,
+                                 const std::string& working_dir) {
+    std::error_code ec;
+
+    std::vector<std::filesystem::path> roots =
+        project_skill_scan_roots(config, working_dir);
+
+    // ~/.acecode/skills 是历史上自动创建的全局根,保持行为不变。
+    std::filesystem::path default_acecode_skills_dir =
+        path_from_utf8(get_acecode_dir()) / "skills";
+    if (!std::filesystem::exists(default_acecode_skills_dir, ec)) {
+        std::filesystem::create_directories(default_acecode_skills_dir, ec);
+    }
+
+    for (auto& root : global_skill_scan_roots(config)) {
+        roots.emplace_back(std::move(root));
     }
 
     skill_registry.set_scan_roots(std::move(roots));

@@ -294,6 +294,7 @@ body {
 .hover\:bg-surface-hi\/60:hover { background-color: rgba(var(--ace-surface-hi-rgb), 0.60); }
 .bg-warn\/10 { background-color: var(--ace-warn-bg); }
 .bg-warning-soft\/30 { background-color: var(--ace-warn-bg); }
+.border-accent\/40 { border-color: rgba(var(--ace-accent-rgb), 0.40); }
 .border-accent\/60 { border-color: rgba(var(--ace-accent-rgb), 0.60); }
 .hover\:border-accent\/50:hover { border-color: rgba(var(--ace-accent-rgb), 0.50); }
 .hover\:border-accent\/60:hover { border-color: rgba(var(--ace-accent-rgb), 0.60); }

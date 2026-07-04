@@ -238,7 +238,7 @@ function CustomSidebarItem({ icon, label, count = null, warning = false, onClick
   );
 }
 
-function CustomSidebarSection({ activeRef, activeWorkspaceHash, onOpenSettingsSection }) {
+function CustomSidebarSection({ onOpenSettingsSection }) {
   const [expanded, setExpanded] = usePreference(
     CUSTOM_SECTION_STORAGE_KEY,
     true,
@@ -265,31 +265,6 @@ function CustomSidebarSection({ activeRef, activeWorkspaceHash, onOpenSettingsSe
     return () => clearInterval(timer);
   }, [refreshCounts]);
 
-  const openSkills = async () => {
-    const workspaceHash = activeRef?.noWorkspace || activeRef?.no_workspace
-      ? ''
-      : (activeRef?.workspaceHash || activeRef?.workspace_hash || activeWorkspaceHash || '');
-    try {
-      const root = await api.getSkillRoot(workspaceHash);
-      const path = root?.path || '';
-      if (!path) throw new Error('empty path');
-      if (typeof window.aceDesktop_openInExplorer === 'function') {
-        const result = parseDesktopResult(await window.aceDesktop_openInExplorer(path));
-        if (!result?.ok) throw new Error(result?.error || 'open failed');
-        toast({ kind: 'ok', text: '已打开技能目录' });
-        return;
-      }
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(path);
-        toast({ kind: 'ok', text: '技能目录路径已复制' });
-      } else {
-        toast({ kind: 'info', text: path });
-      }
-    } catch (e) {
-      toast({ kind: 'err', text: '打开技能目录失败:' + (e?.message || '') });
-    }
-  };
-
   return (
     <div className="ace-sidebar-custom-section border-t border-border shrink-0 py-2">
       <button
@@ -302,7 +277,12 @@ function CustomSidebarSection({ activeRef, activeWorkspaceHash, onOpenSettingsSe
       </button>
       {expanded && (
         <div className="ace-sidebar-custom-list pt-1">
-          <CustomSidebarItem icon="lightbulb" label="技能" count={counts.skills} onClick={openSkills} />
+          <CustomSidebarItem
+            icon="lightbulb"
+            label="技能"
+            count={counts.skills}
+            onClick={() => onOpenSettingsSection?.('skills')}
+          />
           <CustomSidebarItem
             icon="mcp"
             label="MCP 服务器"
@@ -2228,11 +2208,7 @@ export function Sidebar({
             </div>
           )}
         </div>
-        <CustomSidebarSection
-          activeRef={activeRef}
-          activeWorkspaceHash={activeWorkspaceHash}
-          onOpenSettingsSection={onOpenSettingsSection}
-        />
+        <CustomSidebarSection onOpenSettingsSection={onOpenSettingsSection} />
       </div>
       </aside>
       <OpencodeImportDialog

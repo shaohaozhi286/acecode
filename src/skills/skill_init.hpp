@@ -12,7 +12,9 @@
 //   6) opencode global/cache compat roots — when config.skills.reuse_opencode is true
 //   7) external dirs — config.skills.external_dirs
 
+#include <filesystem>
 #include <string>
+#include <vector>
 
 namespace acecode {
 
@@ -22,5 +24,14 @@ struct AppConfig;
 void initialize_skill_registry(SkillRegistry& skill_registry,
                                  const AppConfig& config,
                                  const std::string& working_dir);
+
+// 项目链扫描根(上表 1-3 段):working_dir 沿目录树向上(不含 HOME 本身)。
+// 命中这些根的 skill 在 web UI 里归类为「项目技能」。纯枚举,不创建目录。
+std::vector<std::filesystem::path> project_skill_scan_roots(
+    const AppConfig& config, const std::string& working_dir);
+
+// 全局扫描根(上表 4-7 段):用户全局目录 + opencode 全局兼容根 + external_dirs。
+// 纯枚举,不创建目录(~/.acecode/skills 的自动创建留在 initialize_skill_registry)。
+std::vector<std::filesystem::path> global_skill_scan_roots(const AppConfig& config);
 
 } // namespace acecode

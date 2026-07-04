@@ -190,4 +190,35 @@ TEST_F(SkillInitOpencodeTest, NativeProjectSkillWinsOverOpencodeProjectSkill) {
     EXPECT_EQ(found->description, "from native acecode");
 }
 
+// 场景: project_skill_scan_roots / global_skill_scan_roots 的分界 ——
+// 项目链根只覆盖 workspace 向上到 HOME(不含 HOME 本身),HOME 下的
+// ~/.acecode/skills 与 external_dirs 只出现在全局根里。web 端
+// build_skills_payload 用「scan_root ∈ project roots」判定分组,一旦
+// HOME 根混进项目链,全局技能会被错标成「项目技能」。
+TEST_F(SkillInitOpencodeTest, ProjectAndGlobalScanRootsAreDisjoint) {
+    acecode::AppConfig cfg;
+    cfg.skills.external_dirs = {(root / "external-skills").string()};
+
+    auto project_roots = acecode::project_skill_scan_roots(cfg, workspace.string());
+    auto global_roots  = acecode::global_skill_scan_roots(cfg);
+
+    auto contains = [](const std::vector<fs::path>& roots, const fs::path& p) {
+        for (const auto& r : roots) {
+            if (r.lexically_normal() == p.lexically_normal()) return true;
+        }
+        return false;
+    };
+
+    // 项目链:workspace 与其父目录(不含 HOME 本身)
+    EXPECT_TRUE(contains(project_roots, workspace / ".acecode" / "skills"));
+    EXPECT_TRUE(contains(project_roots, workspace.parent_path() / ".acecode" / "skills"));
+    EXPECT_FALSE(contains(project_roots, home / ".acecode" / "skills"));
+
+    // 全局:HOME 下的 acecode/agent 根 + external_dirs
+    EXPECT_TRUE(contains(global_roots, home / ".acecode" / "skills"));
+    EXPECT_TRUE(contains(global_roots, home / ".agent" / "skills"));
+    EXPECT_TRUE(contains(global_roots, root / "external-skills"));
+    EXPECT_FALSE(contains(global_roots, workspace / ".acecode" / "skills"));
+}
+
 } // namespace

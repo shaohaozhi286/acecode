@@ -40,7 +40,7 @@ export function Modal({ children, onClose, width = 460, dismissOnBackdrop = true
   );
 }
 
-// 右侧滑出面板(SkillsPanel / MCPPanel 用)
+// 右侧滑出面板(MCPPanel 用)
 export function SlideOver({ children, onClose, width = 380 }) {
   const [show, setShow] = useState(false);
 

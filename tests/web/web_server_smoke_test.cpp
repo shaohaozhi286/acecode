@@ -4,7 +4,7 @@
 //   - POST /api/sessions 创建 session + GET 看到它
 //   - DELETE 后 GET 看不到
 //   - GET /api/sessions/<id>/messages 返回 events+messages
-//   - GET /api/skills 返回空数组(daemon 路径不 scan skills)
+//   - GET /api/skills 全量扫描 workspace 项目链 + 全局根,项目 skill 带 source
 //   - GET /api/mcp 返回当前 mcp_servers
 //   - POST /api/mcp/reload 返回 501
 //   - 远程 IP(非 loopback)模拟 → 这里用 cpr 走 127.0.0.1 不容易模拟,所以
@@ -2368,15 +2368,34 @@ TEST(WebServerHttp, ResumeDiskSessionActivatesIt) {
     EXPECT_TRUE(found);
 }
 
-// 场景: /api/skills 在 daemon 模式不 scan skills,返回空数组(spec 9.7)。
-// 后续 daemon 接入 SkillRegistry::scan 时,这个测试需更新但不该破坏。
-TEST(WebServerHttp, SkillsReturnsEmptyArrayWhenNotScanned) {
+// 场景: /api/skills 对 daemon workspace 做全量扫描:workspace 项目链下的
+// skill 出现在结果里,带 source="project" 与 enabled=true(设置页技能 tab
+// 的「项目技能」分组依赖它)。全局根扫的是真实用户目录,内容因机器而异,
+// 所以这里只断言项目 skill 的存在与元数据,不断言数组总量。
+TEST(WebServerHttp, SkillsListsProjectSkillWithSource) {
     WebServerFixture fx;
+    // 在 fixture workspace 的项目链根放一个 skill
+    const auto skill_dir = fx.cwd_dir / ".acecode" / "skills" / "fixture-skill";
+    std::filesystem::create_directories(skill_dir);
+    {
+        std::ofstream ofs(skill_dir / "SKILL.md", std::ios::binary);
+        ofs << "---\nname: fixture-skill\ndescription: fixture description\n---\n\nbody\n";
+    }
+
     auto r = cpr::Get(cpr::Url{fx.url("/api/skills")});
     ASSERT_EQ(r.status_code, 200);
     auto j = json::parse(r.text);
-    EXPECT_TRUE(j.is_array());
-    EXPECT_EQ(j.size(), 0u);
+    ASSERT_TRUE(j.is_array());
+
+    bool found = false;
+    for (const auto& o : j) {
+        if (o.value("name", "") != "fixture-skill") continue;
+        found = true;
+        EXPECT_EQ(o["source"], "project");
+        EXPECT_TRUE(o["enabled"].get<bool>());
+        EXPECT_EQ(o["description"], "fixture description");
+    }
+    EXPECT_TRUE(found);
 }
 
 // 场景: GET /api/skills/root 返回选中 workspace 的有效 skill 目录。

@@ -192,3 +192,118 @@ TEST_F(SkillsHandlerTest, SelectSkillRootFallsBackToGlobalAcecodeSkillsAndCreate
     EXPECT_TRUE(fs::is_directory(global_skills));
     EXPECT_EQ(fs::weakly_canonical(selected.path), fs::weakly_canonical(global_skills));
 }
+
+// 场景: select_skill_root 无论选中项目根还是全局根,global_path 都指向
+// 传入的全局根 —— 设置页「打开全局 Skill 目录」按钮依赖这个字段,一旦
+// 回归成空/项目路径,按钮会打开错误目录。
+TEST_F(SkillsHandlerTest, SelectSkillRootAlwaysReportsGlobalPath) {
+    const auto project = tmp_root / "project";
+    const auto local_skills = project / ".acecode" / "skills";
+    const auto global_skills = tmp_root / "global" / "skills";
+    fs::create_directories(local_skills);
+
+    auto selected = acecode::web::select_skill_root(project, global_skills, false);
+    EXPECT_EQ(selected.source, "project_acecode");
+    EXPECT_EQ(fs::weakly_canonical(selected.global_path),
+              fs::weakly_canonical(global_skills));
+
+    auto fallback = acecode::web::select_skill_root({}, global_skills, false);
+    EXPECT_EQ(fallback.source, "global_acecode");
+    EXPECT_EQ(fs::weakly_canonical(fallback.global_path),
+              fs::weakly_canonical(global_skills));
+}
+
+// ─── build_skills_payload_with_roots ────────────────────────────────────────
+
+namespace {
+
+// 在 payload 数组里按 name 找条目;找不到返回 nullptr。
+const nlohmann::json* find_entry(const nlohmann::json& arr, const std::string& name) {
+    for (const auto& o : arr) {
+        if (o.value("name", "") == name) return &o;
+    }
+    return nullptr;
+}
+
+} // namespace
+
+// 场景: 项目根与全局根各有一个 skill → source 分别标记 "project"/"global",
+// 未禁用时 enabled=true。设置页「本地/全局分组」依赖 source 字段,一旦
+// 回归(全部标成 global)项目技能会掉进全局列表。
+TEST_F(SkillsHandlerTest, BuildSkillsPayloadClassifiesProjectAndGlobalSources) {
+    const auto project_root = tmp_root / "proj" / ".acecode" / "skills";
+    const auto global_root  = tmp_root / "home" / ".acecode" / "skills";
+    write_skill(project_root, "proj-skill", "project scoped");
+    write_skill(global_root, "glob-skill", "globally scoped");
+
+    auto arr = acecode::web::build_skills_payload_with_roots(
+        {project_root}, {global_root}, /*disabled=*/{});
+
+    const auto* proj = find_entry(arr, "proj-skill");
+    ASSERT_NE(proj, nullptr);
+    EXPECT_EQ((*proj)["source"], "project");
+    EXPECT_TRUE((*proj)["enabled"].get<bool>());
+    EXPECT_EQ((*proj)["description"], "project scoped");
+
+    const auto* glob = find_entry(arr, "glob-skill");
+    ASSERT_NE(glob, nullptr);
+    EXPECT_EQ((*glob)["source"], "global");
+    EXPECT_TRUE((*glob)["enabled"].get<bool>());
+}
+
+// 场景: 已禁用的 skill 磁盘上仍存在 → enabled=false 但保留完整
+// description/source。回归表现(旧实现):禁用条目只剩名字,设置页里
+// 描述变成空、分组信息丢失。
+TEST_F(SkillsHandlerTest, BuildSkillsPayloadKeepsMetadataForDisabledSkills) {
+    const auto global_root = tmp_root / "home" / ".acecode" / "skills";
+    write_skill(global_root, "off-skill", "still has description");
+
+    auto arr = acecode::web::build_skills_payload_with_roots(
+        {}, {global_root}, /*disabled=*/{"off-skill"});
+
+    const auto* off = find_entry(arr, "off-skill");
+    ASSERT_NE(off, nullptr);
+    EXPECT_FALSE((*off)["enabled"].get<bool>());
+    EXPECT_EQ((*off)["description"], "still has description");
+    EXPECT_EQ((*off)["source"], "global");
+}
+
+// 场景: disabled 列表里残留一个磁盘上已删除的名字(幽灵条目)→ 仍列出
+// (enabled=false、source=""),这样用户能在 UI 里把它从禁用列表放出来,
+// 而不是永远卡在 config.json 里。
+TEST_F(SkillsHandlerTest, BuildSkillsPayloadListsGhostDisabledEntries) {
+    const auto global_root = tmp_root / "home" / ".acecode" / "skills";
+    write_skill(global_root, "real-skill", "exists on disk");
+
+    auto arr = acecode::web::build_skills_payload_with_roots(
+        {}, {global_root}, /*disabled=*/{"deleted-skill"});
+
+    const auto* ghost = find_entry(arr, "deleted-skill");
+    ASSERT_NE(ghost, nullptr);
+    EXPECT_FALSE((*ghost)["enabled"].get<bool>());
+    EXPECT_EQ((*ghost)["source"], "");
+    EXPECT_EQ((*ghost)["description"], "");
+}
+
+// 场景: 项目根与全局根有同名 skill → first-wins(项目优先),payload 里只
+// 出现一次且 source="project"。与 SkillRegistry 的去重语义保持一致;一旦
+// 回归成出现两次,设置页 toggle 会同时打到两行。
+TEST_F(SkillsHandlerTest, BuildSkillsPayloadDeduplicatesByNameProjectWins) {
+    const auto project_root = tmp_root / "proj" / ".acecode" / "skills";
+    const auto global_root  = tmp_root / "home" / ".acecode" / "skills";
+    write_skill(project_root, "same-skill", "project copy");
+    write_skill(global_root, "same-skill", "global copy");
+
+    auto arr = acecode::web::build_skills_payload_with_roots(
+        {project_root}, {global_root}, /*disabled=*/{});
+
+    int count = 0;
+    for (const auto& o : arr) {
+        if (o.value("name", "") == "same-skill") ++count;
+    }
+    EXPECT_EQ(count, 1);
+    const auto* entry = find_entry(arr, "same-skill");
+    ASSERT_NE(entry, nullptr);
+    EXPECT_EQ((*entry)["source"], "project");
+    EXPECT_EQ((*entry)["description"], "project copy");
+}
