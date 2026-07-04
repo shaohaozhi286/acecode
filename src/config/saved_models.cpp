@@ -68,7 +68,7 @@ std::optional<ModelProfile> parse_one_entry(const nlohmann::json& node, std::siz
         std::ostringstream oss;
         oss << "saved_models[" << idx << "] (name='" << e.name
             << "') has unknown provider '" << e.provider
-            << "' (expected 'openai', 'copilot', or 'codex')";
+            << "' (expected 'openai', 'anthropic', 'copilot', or 'codex')";
         err = oss.str();
         return std::nullopt;
     }
@@ -80,7 +80,7 @@ std::optional<ModelProfile> parse_one_entry(const nlohmann::json& node, std::siz
         return std::nullopt;
     }
 
-    // base_url / api_key:openai 必填;copilot/codex 忽略(允许字段缺失或为空)。
+    // base_url / api_key:openai/anthropic 必填;copilot/codex 忽略(允许字段缺失或为空)。
     get_str("base_url", e.base_url);
     get_str("api_key", e.api_key);
 
@@ -172,25 +172,25 @@ bool validate_saved_models(const std::vector<ModelProfile>& entries,
         }
         seen_names.insert(e.name);
 
-        if (e.provider == "openai") {
+        if (e.provider == "openai" || e.provider == "anthropic") {
             if (e.base_url.empty()) {
                 std::ostringstream oss;
                 oss << "saved_models entry '" << e.name
-                    << "' (provider=openai) requires non-empty base_url";
+                    << "' (provider=" << e.provider << ") requires non-empty base_url";
                 err = oss.str();
                 return false;
             }
             if (e.api_key.empty()) {
                 std::ostringstream oss;
                 oss << "saved_models entry '" << e.name
-                    << "' (provider=openai) requires non-empty api_key";
+                    << "' (provider=" << e.provider << ") requires non-empty api_key";
                 err = oss.str();
                 return false;
             }
         } else if (!e.request_headers.empty()) {
             std::ostringstream oss;
             oss << "saved_models entry '" << e.name
-                << "' has request_headers but provider is not openai";
+                << "' has request_headers but provider is not openai or anthropic";
             err = oss.str();
             return false;
         }

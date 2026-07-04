@@ -134,6 +134,45 @@ TEST(SavedModelsTest, CopilotEntryWithoutBaseUrlPasses) {
     EXPECT_TRUE(validate_saved_models(entries, "copilot-fast", err)) << err;
 }
 
+// 额外 — Anthropic entry 与 OpenAI 一样需要 base_url / api_key,并允许请求头模板。
+TEST(SavedModelsTest, AnthropicEntryWithRequestHeadersPasses) {
+    nlohmann::json j = nlohmann::json::array();
+    j.push_back({
+        {"name", "claude"},
+        {"provider", "anthropic"},
+        {"base_url", "https://api.anthropic.com/v1"},
+        {"api_key", "sk-ant-test"},
+        {"model", "claude-test"},
+        {"request_headers", {
+            {"anthropic-beta", "prompt-caching-2024-07-31"},
+            {"X-Team", "acecode"}
+        }}
+    });
+
+    std::string err;
+    auto parsed = parse_saved_models(j, err);
+    ASSERT_TRUE(parsed.has_value()) << err;
+    ASSERT_EQ(parsed->size(), 1u);
+    EXPECT_EQ((*parsed)[0].provider, "anthropic");
+    EXPECT_EQ((*parsed)[0].request_headers.at("X-Team"), "acecode");
+
+    err.clear();
+    EXPECT_TRUE(validate_saved_models(*parsed, "claude", err)) << err;
+}
+
+// 额外 — Anthropic entry 缺 api_key 不能通过 validate。
+TEST(SavedModelsTest, AnthropicMissingApiKeyFails) {
+    ModelProfile e;
+    e.name = "claude";
+    e.provider = "anthropic";
+    e.base_url = "https://api.anthropic.com/v1";
+    e.model = "claude-test";
+
+    std::string err;
+    EXPECT_FALSE(validate_saved_models({e}, "", err));
+    EXPECT_NE(err.find("api_key"), std::string::npos) << err;
+}
+
 // 额外 — codex entry 与 copilot 一样不需要 base_url / api_key。
 TEST(SavedModelsTest, CodexEntryWithoutBaseUrlPasses) {
     nlohmann::json j = nlohmann::json::array();
@@ -312,8 +351,8 @@ TEST(SavedModelsTest, RequestHeadersRejectMalformedEnvPlaceholder) {
     EXPECT_NE(err.find("request_headers"), std::string::npos) << err;
 }
 
-// 额外 — request_headers 只属于 OpenAI-compatible saved model。
-TEST(SavedModelsTest, RequestHeadersRejectNonOpenAiProvider) {
+// 额外 — request_headers 只属于 HTTP API saved model。
+TEST(SavedModelsTest, RequestHeadersRejectCopilotProvider) {
     ModelProfile e;
     e.name = "copilot-fast";
     e.provider = "copilot";

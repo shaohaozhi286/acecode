@@ -637,6 +637,7 @@ export function App() {
         updateStatus={updateStatus}
         updateStarting={updateStarting}
         onStartUpdate={startUpdate}
+        appVersion={health?.version || ''}
       />
       <div ref={singleShellRef} className="flex-1 flex overflow-hidden relative min-h-0 ace-single-shell">
         <Sidebar

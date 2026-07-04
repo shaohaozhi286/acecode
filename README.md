@@ -13,7 +13,7 @@
 
 English | [中文](README_CN.md)
 
-ACECode is a C++17 AI coding agent for the terminal. It provides an FTXUI-based TUI, provider support for GitHub Copilot and OpenAI-compatible APIs, tool calling for repository work, session persistence, a daemon HTTP/WebSocket API, a React web UI, and an optional desktop shell.
+ACECode is a C++17 AI coding agent for the terminal. It provides an FTXUI-based TUI, provider support for GitHub Copilot, OpenAI-compatible APIs, and Anthropic, tool calling for repository work, session persistence, a daemon HTTP/WebSocket API, a React web UI, and an optional desktop shell.
 
 ![ACE Code](https://2017studio.oss-cn-beijing.aliyuncs.com/acecode.jpg)
 
@@ -21,7 +21,7 @@ ACECode is a C++17 AI coding agent for the terminal. It provides an FTXUI-based 
 
 - Interactive terminal UI with streaming responses, input history, scrollable chat, markdown rendering, and live tool progress.
 - Multi-turn agent loop with tool calls, permission prompts, cancellation, compaction, rewind, and resumable sessions.
-- Provider support for GitHub Copilot device-flow auth and OpenAI-compatible Chat Completions endpoints.
+- Provider support for GitHub Copilot device-flow auth, OpenAI-compatible Chat Completions endpoints, and Anthropic Messages API.
 - Built-in repository tools for shell execution, file reads/writes/edits, search, globbing, user questions, skills, memory, and optional web search.
 - Daemon mode with HTTP/WebSocket endpoints, token-protected non-loopback access, and a bundled React/Vite web UI.
 - Optional desktop shell that can manage multiple workspaces through separate daemon processes.
@@ -165,7 +165,7 @@ cd /path/to/your/project
 ./acecode
 ```
 
-The setup wizard creates `~/.acecode/config.json`. Choose GitHub Copilot for device-flow login, or choose an OpenAI-compatible endpoint and provide `base_url`, `api_key`, and model name.
+The setup wizard creates `~/.acecode/config.json`. Choose GitHub Copilot for device-flow login, choose an OpenAI-compatible endpoint, or choose Anthropic and provide `base_url`, `api_key`, and model name.
 
 Once the TUI starts, type a request and press Enter:
 
@@ -333,8 +333,8 @@ Important config areas:
 | Area | Purpose |
 | --- | --- |
 | `provider`, `openai`, `copilot` | Legacy provider selection and endpoint/model settings. |
-| `openai.stream_timeout_ms` | OpenAI-compatible streaming timeout in milliseconds; default `180000`, raise it for slow gateways. |
-| `saved_models`, `default_model_name` | Named model profiles and defaults; OpenAI entries can also set `stream_timeout_ms` and `request_headers`. |
+| `openai.stream_timeout_ms` | HTTP provider streaming timeout in milliseconds; default `666000`, raise it for slow gateways. |
+| `saved_models`, `default_model_name` | Named model profiles and defaults; OpenAI and Anthropic entries can also set `stream_timeout_ms` and `request_headers`. |
 | `context_window`, `models_dev` | Context-window resolution and bundled models.dev lookup behavior. |
 | `skills`, `memory`, `project_instructions` | Optional context sources and their limits. |
 | `agent_loop.max_iterations` | Hard cap for one agent turn; `0` or omitted means unlimited. |

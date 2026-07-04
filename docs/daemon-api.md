@@ -1,233 +1,537 @@
-# ACECode Daemon API
+# ACECode Daemon Web API
 
-Reference for the HTTP and WebSocket protocol exposed by `acecode daemon` /
-`acecode service`. Audience: front-end (`add-web-chat-ui` change), CLI
-integrators, monitoring scripts.
+This document describes the HTTP and WebSocket protocol exposed by
+`acecode daemon` / `acecode service` for the Web and Desktop frontends.
 
-> **Spec source of truth**: `openspec/changes/add-web-daemon/`
-> (`design.md` Decisions 2 / 3 / 7 / 8, `specs/daemon-http/spec.md`).
+Source of truth for this document:
+
+- Route registration: `src/web/routes/routes_*.cpp`
+- Shared response helpers: `src/web/server_helpers.cpp`
+- Frontend callers: `web/src/lib/api.js`, `web/src/lib/connection.js`,
+  `web/src/lib/consoleDock.js`
+
+`OPTIONS` routes are CORS preflight helpers and are not listed as first-class
+endpoints below.
 
 ---
 
 ## 1. Connecting
 
-### Discovering address & token
+### Runtime files
 
-After `acecode daemon start` (or `acecode service start`), runtime files are
-written to `<data_dir>/run/`:
+After the daemon starts, runtime files are written to `<data_dir>/run/`:
 
 | File | Content |
 |---|---|
-| `daemon.pid`  | numeric pid (one line) |
-| `daemon.port` | numeric port (one line) |
-| `daemon.guid` | UUID v4 (one line) |
-| `heartbeat`   | JSON `{pid, guid, timestamp_ms}` (rewritten every 2 s) |
-| `token`       | URL-safe base64 string (~43 chars), file mode 0600 |
+| `daemon.pid` | numeric pid |
+| `daemon.port` | numeric port |
+| `daemon.guid` | UUID v4 |
+| `heartbeat` | JSON `{pid, guid, timestamp_ms}` refreshed periodically |
+| `token` | URL-safe daemon token |
 
-`<data_dir>` is `~/.acecode/` for standalone daemons (`acecode daemon ...`)
-and `%PROGRAMDATA%\acecode\` (Windows) /
-`/Library/Application Support/acecode/` (macOS) /
-`/var/lib/acecode/` (Linux) for SCM-installed services. The daemon's own
-process picks the right root via `RunMode` (see CLAUDE.md →
-`src/utils/paths.{hpp,cpp}`).
+`<data_dir>` is `~/.acecode/` for standalone daemons and the platform service
+data directory for installed services.
 
-### Bind address & port
+### Bind and auth
 
-Default `127.0.0.1:28080` (`config.web.bind` / `config.web.port`). Daemon is
-**fail-fast on port collision** — it logs the error and exits with code 3, no
-fallback / no retry. If the port is occupied, change `web.port` in
-`config.json` or stop the conflicting process.
-
-### Authentication
+Default bind is `127.0.0.1:28080` (`config.web.bind` / `config.web.port`).
+The daemon is fail-fast on port collision.
 
 | Bind | Token required? |
 |---|---|
-| `127.0.0.1` / `::1` (loopback) | Optional (loopback is the trust boundary) |
-| Anything else | **Required** — startup is rejected without one |
+| Loopback (`127.0.0.1`, `localhost`, `::1`) | Optional for same-origin loopback requests |
+| Non-loopback | Required; startup is rejected without a token |
+| Cross-origin loopback | Explicit token required |
 
-Pass the token in either of:
-- HTTP header: `X-ACECode-Token: <token>`
-- WebSocket connect URL: `?token=<token>`
+Token locations:
 
-Reject paths return:
-- HTTP: `401` + body `{"error": "no token"}` or `{"error": "bad token"}`
-- WebSocket: handshake refused at `.onaccept()` (Crow returns HTTP 400)
+- HTTP: `X-ACECode-Token: <token>`
+- WebSocket: `?token=<token>`; browsers cannot set custom WS headers reliably
 
-`-dangerous + non-loopback` is a hard preflight reject (rc=2 at startup) —
-the daemon will not run that combination at all.
+Auth failures return HTTP `401` with `{"error":"no token"}` or
+`{"error":"bad token"}`. WebSocket handshakes are rejected.
+
+### CORS
+
+Loopback origins receive:
+
+- `Access-Control-Allow-Origin: <origin>`
+- `Access-Control-Allow-Headers: Content-Type, X-ACECode-Token`
+- `Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS`
 
 ---
 
-## 2. HTTP endpoints
+## 2. Common Shapes
 
-All responses are `application/json` unless noted. Schemas use
-abbreviated TypeScript-like notation.
+### Error body
+
+Most JSON errors are one of:
+
+```json
+{"error":"BAD_REQUEST","message":"human readable text"}
+```
+
+or:
+
+```json
+{"error":"human readable text"}
+```
+
+### Workspace
+
+```json
+{
+  "hash": "16-char-cwd-hash",
+  "cwd": "C:/repo",
+  "name": "repo",
+  "available": true
+}
+```
+
+`__local__` is a compatibility workspace hash for the daemon cwd.
+
+### Session summary
+
+Session list endpoints return arrays of objects shaped like:
+
+```json
+{
+  "id": "session-id",
+  "active": true,
+  "status": "idle",
+  "workspace_hash": "abc123",
+  "cwd": "C:/repo",
+  "no_workspace": false,
+  "title": "Investigate daemon routes",
+  "title_source": "user",
+  "summary": "latest user summary",
+  "created_at": "2026-07-04T01:23:45Z",
+  "updated_at": "2026-07-04T01:25:00Z",
+  "provider": "openai",
+  "model": "gpt-4.1",
+  "model_name": "work-gpt",
+  "model_preset": "work-gpt",
+  "context_window": 128000,
+  "deleted": false,
+  "message_count": 12,
+  "turn_count": 4,
+  "permission_mode": "default",
+  "token_usage": null,
+  "session_token_usage": null,
+  "todos": [],
+  "todo_summary": {"total":0,"pending":0,"in_progress":0,"completed":0,"cancelled":0},
+  "archived": false,
+  "attention_state": "read",
+  "read_state": "read",
+  "busy": false,
+  "status_cursor": 0,
+  "update_cursor": 0,
+  "read_cursor": 0
+}
+```
+
+Some fields are omitted when empty, especially `todos` and token usage.
+
+### Token usage
+
+```json
+{
+  "prompt_tokens": 0,
+  "completion_tokens": 0,
+  "total_tokens": 0,
+  "cache_read_tokens": 0,
+  "cache_write_tokens": 0,
+  "reasoning_tokens": 0,
+  "has_data": false
+}
+```
+
+### Session event
+
+Server event frames and replayed events use:
+
+```json
+{
+  "type": "message",
+  "seq": 42,
+  "timestamp_ms": 1783152000000,
+  "session_id": "session-id",
+  "workspace_hash": "abc123",
+  "payload": {}
+}
+```
+
+`payload.session_id`, `payload.workspace_hash`, and `payload.cwd` are injected
+when known.
+
+---
+
+## 3. HTTP Endpoint Index
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/health` | daemon liveness and capabilities |
+| GET | `/api/model-pool-status` | model pool load snapshot |
+| GET | `/api/usage` | token usage aggregation |
+| GET | `/api/history` | input history by cwd |
+| POST | `/api/history` | append input history |
+| GET | `/api/workspaces` | list registered workspaces |
+| POST | `/api/workspaces` | register cwd as workspace |
+| POST | `/api/workspaces/pick-folder` | desktop native folder picker |
+| POST | `/api/open-in-explorer` | open folder in OS file manager |
+| GET | `/api/workspaces/:hash/sessions` | list sessions in workspace |
+| POST | `/api/workspaces/:hash/sessions` | create workspace session |
+| POST | `/api/workspaces/:hash/sessions/:id/resume` | resume workspace session |
+| PUT | `/api/workspaces/:hash/sessions/:id/archive` | archive workspace session |
+| DELETE | `/api/workspaces/:hash/sessions/:id/archive` | unarchive workspace session |
+| PUT | `/api/workspaces/:hash/sessions/:id/title` | set session title |
+| GET | `/api/workspaces/:hash/sessions/:id/draft` | read composer draft |
+| PUT | `/api/workspaces/:hash/sessions/:id/draft` | write composer draft |
+| DELETE | `/api/workspaces/:hash/sessions/:id/todos` | clear session todos |
+| GET | `/api/workspaces/:hash/opencode-import` | preview opencode import |
+| POST | `/api/workspaces/:hash/opencode-import` | start opencode import job |
+| GET | `/api/workspaces/:hash/opencode-import/:job_id` | poll opencode import job |
+| GET | `/api/workspaces/:hash/pinned-sessions` | list pinned session ids |
+| PUT | `/api/workspaces/:hash/pinned-sessions` | set pinned session ids |
+| GET | `/api/pinned-sessions/order` | read cross-workspace pin order |
+| PUT | `/api/pinned-sessions/order` | set cross-workspace pin order |
+| GET | `/api/sessions` | compatibility session list |
+| POST | `/api/sessions` | compatibility session create |
+| POST | `/api/sessions/:id/resume` | compatibility session resume |
+| DELETE | `/api/sessions/:id` | destroy active session |
+| PUT | `/api/sessions/:id/archive` | archive compatibility session |
+| DELETE | `/api/sessions/:id/archive` | unarchive compatibility session |
+| PUT | `/api/sessions/:id/title` | set compatibility session title |
+| GET | `/api/sessions/:id/draft` | read compatibility draft |
+| PUT | `/api/sessions/:id/draft` | write compatibility draft |
+| DELETE | `/api/sessions/:id/todos` | clear compatibility todos |
+| GET | `/api/sessions/:id/messages` | transcript snapshot or event replay |
+| POST | `/api/sessions/:id/messages` | queue user input |
+| POST | `/api/sessions/:id/attachments` | upload session attachment |
+| GET | `/api/sessions/:id/attachments/:attachment_id/blob` | download attachment bytes |
+| POST | `/api/sessions/:id/commands` | run daemon builtin slash command |
+| GET | `/api/sessions/:id/permissions` | read session permission mode |
+| PUT | `/api/sessions/:id/permissions` | set session permission mode |
+| GET | `/api/sessions/:id/model` | read session model state |
+| POST | `/api/sessions/:id/model` | switch session model |
+| POST | `/api/sessions/:id/fork` | fork a transcript prefix |
+| POST | `/api/sessions/:id/file-checkpoints/:message_id/restore` | restore files to checkpoint |
+| GET | `/api/files` | list directory |
+| GET | `/api/files/content` | read text file |
+| GET | `/api/files/blob` | read previewable binary file |
+| GET | `/api/commands` | list slash commands |
+| GET | `/api/skills/root` | resolve effective skills directory |
+| GET | `/api/skills` | list registered skills |
+| PUT | `/api/skills/:name` | enable or disable skill |
+| GET | `/api/skills/:name/body` | read `SKILL.md` body |
+| GET | `/api/hooks` | list hooks snapshot |
+| POST | `/api/hooks/refresh` | reload hook registry |
+| POST | `/api/hooks/:id/trust` | trust hook |
+| POST | `/api/hooks/:id/disable` | disable hook |
+| POST | `/api/hooks/:id/enable` | enable hook |
+| GET | `/api/models` | list saved model profiles |
+| POST | `/api/models` | add saved model profile |
+| PUT | `/api/models/:name` | update saved model profile |
+| DELETE | `/api/models/:name` | remove saved model profile |
+| POST | `/api/models/probe` | probe provider model ids |
+| GET | `/api/config/default-model` | read default saved model name |
+| POST | `/api/config/default-model` | set default saved model |
+| GET | `/api/copilot/auth` | read Copilot auth status |
+| DELETE | `/api/copilot/auth` | delete saved GitHub token |
+| POST | `/api/copilot/auth/device` | start GitHub device flow |
+| POST | `/api/copilot/auth/device/poll` | poll device flow |
+| GET | `/api/config/ui-preferences` | read UI preferences |
+| PUT | `/api/config/ui-preferences` | write UI preferences |
+| GET | `/api/config/custom-instructions` | read custom instructions |
+| PUT | `/api/config/custom-instructions` | write custom instructions |
+| GET | `/api/config/connectors` | read connector settings |
+| PUT | `/api/config/connectors` | write connector settings |
+| GET | `/api/config/default-permission-mode` | read default permission mode |
+| PUT | `/api/config/default-permission-mode` | write default permission mode |
+| GET | `/api/config/upgrade` | read update service config |
+| PUT | `/api/config/upgrade` | write update service config |
+| GET | `/api/update/status` | check update availability |
+| POST | `/api/update/start` | start explicit self-update |
+| GET | `/api/config/ace-browser-bridge` | read browser bridge settings |
+| PUT | `/api/config/ace-browser-bridge` | write browser bridge settings |
+| GET | `/api/mcp` | read MCP config |
+| PUT | `/api/mcp` | write MCP config |
+| POST | `/api/mcp/reload` | currently returns 501 |
+| GET | `/api/feedback/desktop/recent-sessions` | list sessions for feedback attachment |
+| POST | `/api/feedback/desktop` | package and upload desktop feedback |
+| GET | `/api/pty/shells` | list console shell choices |
+| GET | `/api/pty` | list PTY sessions |
+| POST | `/api/pty` | create PTY session |
+| DELETE | `/api/pty/:id` | remove PTY session |
+| POST | `/api/pty/:id/resize` | resize PTY |
+| POST | `/api/pty/:id/title` | set PTY title |
+| PUT | `/api/console/config` | write console shell config |
+
+---
+
+## 4. Health, Usage, and History
 
 ### `GET /api/health`
 
-Liveness + identity probe. Always available.
+No auth requirement. Returns daemon identity and non-sensitive frontend
+capabilities.
 
-**Response 200**:
 ```json
 {
   "guid": "ea86842a-fb1c-4242-b2b4-74be2aff1058",
   "pid": 18204,
   "port": 28080,
-  "version": "0.1.2",
-  "cwd": "C:\\Users\\you\\projects\\foo",
-  "uptime_seconds": 423
-}
-```
-
-### `GET /api/usage`
-
-Aggregate durable token usage records for the Settings usage page. Records are
-written only for usage observed after the usage ledger feature is installed;
-historical session metadata is not backfilled into daily usage.
-
-Query parameters:
-- `days`: optional number of days to include, default `30`, clamped by the daemon.
-- `workspace`: optional workspace hash. Use `__local__` for the compatibility
-  working directory route.
-- `timezone_offset_minutes`: optional JavaScript-style offset (`Date#getTimezoneOffset()`)
-  used for daily buckets. Defaults to `0`.
-
-**Response 200**:
-```json
-{
-  "summary": {
-    "records": 12,
-    "estimated_records": 2,
-    "session_count": 4,
-    "totals": {
-      "prompt_tokens": 120000,
-      "completion_tokens": 18000,
-      "total_tokens": 138000,
-      "cache_read_tokens": 64000,
-      "cache_write_tokens": 0,
-      "reasoning_tokens": 1200
-    }
+  "version": "0.5.10",
+  "cwd": "C:/repo",
+  "uptime_seconds": 423,
+  "notifications": {
+    "enabled": true,
+    "on_question": true,
+    "on_completion": true,
+    "suppress_when_focused": true
   },
-  "daily": [
-    {
-      "date": "2026-06-06",
-      "tokens": 42000,
-      "records": 3,
-      "estimated_records": 0,
-      "session_count": 1,
-      "totals": { "total_tokens": 42000 }
-    }
-  ],
-  "models": [
-    {
-      "label": "gpt-4o",
-      "provider": "openai",
-      "model": "gpt-4o",
-      "model_preset": "gpt-4o",
-      "records": 8,
-      "estimated_records": 1,
-      "session_count": 3,
-      "totals": { "total_tokens": 110000 }
-    }
-  ],
-  "workspaces": [
-    {
-      "workspace_hash": "abc123",
-      "workspace_name": "repo",
-      "cwd": "C:\\Users\\you\\repo",
-      "records": 12,
-      "estimated_records": 2,
-      "session_count": 4,
-      "totals": { "total_tokens": 138000 }
-    }
-  ],
-  "metadata": {
-    "days": 30,
-    "period_start": "2026-05-08T00:00:00Z",
-    "period_end": "2026-06-06T23:59:59Z",
-    "timezone_offset_minutes": -480,
-    "forward_only": true
+  "features": {
+    "completed_turn_self_heal": {"enabled": true}
+  },
+  "console": {
+    "available": true,
+    "backend": "conpty"
   }
 }
 ```
 
-### `GET /api/sessions`
+`console.backend` is `conpty`, `winpty`, `pipe`, or `posix`.
 
-List active in-memory sessions plus historical sessions on disk for the
-daemon's working directory. Active sessions are flagged.
+### `GET /api/model-pool-status`
 
-**Response 200**:
+No auth requirement. Used by the chat UI to show model pool load.
+
 ```json
 {
-  "sessions": [
+  "models": [
     {
-      "id": "550e8400-...",
-      "title": "first 30 chars of first user msg",
-      "created_at_unix_ms": 1700000000000,
-      "active": true,
-      "model": "gpt-4o",
-      "provider": "copilot"
+      "modelPoolName": "pool-a",
+      "usageRate": 0.42,
+      "maxWindowTokens": 128000,
+      "effectiveContextWindow": 128000
     }
   ]
 }
 ```
 
-### `POST /api/sessions`
+### `GET /api/usage`
 
-Create a new session. Body fields are optional; omitted fields fall back to
-the daemon's defaults from `config.json` and the resolved `ModelEntry`.
+Query parameters:
 
-**Request body**:
+- `days`: optional, defaults to `30`
+- `workspace`: optional workspace hash; `__local__` means daemon cwd
+- `timezone_offset_minutes`: optional JS `Date#getTimezoneOffset()` value
+
+Returns usage summary, daily buckets, model buckets, workspace buckets, and
+metadata. Durable usage is forward-only; older session metadata is not
+backfilled.
+
+### `GET /api/history?cwd=<cwd>&max=N`
+
+Returns an array of input history strings for `cwd`.
+
+### `POST /api/history`
+
+Body:
+
+```json
+{"text":"last prompt"}
+```
+
+Appends to the daemon cwd input history. Returns `204`. If input history is
+disabled, the write is silently ignored.
+
+---
+
+## 5. Workspaces and Sessions
+
+### `GET /api/workspaces`
+
+Returns `Workspace[]`. The registry is scanned before listing. If no registry
+is available, the compatibility workspace may be returned.
+
+### `POST /api/workspaces`
+
+Body:
+
+```json
+{"cwd":"C:/repo"}
+```
+
+Registers the cwd and returns `201` plus a `Workspace`. Errors:
+
+- `400` bad JSON or missing `cwd`
+- `503` workspace registry unavailable
+
+### `POST /api/workspaces/pick-folder`
+
+Desktop-only native folder picker. Returns a registered `Workspace` or `null`
+when the user cancels. Errors:
+
+- `501` native folder picker unavailable
+- `503` registry or callback unavailable
+
+### `POST /api/open-in-explorer`
+
+Body:
+
+```json
+{"path":"C:/repo"}
+```
+
+Opens an absolute directory in Explorer/Finder/xdg-open. The desktop callback
+validates that the path exists and is within an allowed workspace or daemon
+cwd. Returns `{"ok":true}`. Returns `501` when the daemon has no desktop
+callback.
+
+### `GET /api/workspaces/:hash/sessions?archived=1`
+
+Returns `SessionSummary[]` for a workspace. Without `archived=1`, active and
+unarchived disk sessions are returned. With `archived=1`, only archived disk
+sessions are returned.
+
+### `POST /api/workspaces/:hash/sessions`
+
+Creates a session in the workspace. Body fields are optional:
+
 ```json
 {
-  "model": "gpt-4o",                 // optional override
-  "initial_user_message": "...",     // optional; if present, kicks off the agent loop immediately
-  "auto_start": true                 // default true; if false, session waits for user_input over WS
+  "model": "saved-model-name",
+  "name": "saved-model-name",
+  "permission_mode": "default",
+  "permissionMode": "default",
+  "initial_user_message": "hello",
+  "auto_start": true,
+  "no_workspace": false,
+  "noWorkspace": false
 }
 ```
 
-**Response 201**:
+`model` and `name` are aliases. `permission_mode` and `permissionMode` are
+aliases. `auto_start` defaults to `false`; it only starts a turn when an
+`initial_user_message` is present. Returns:
+
 ```json
-{ "session_id": "550e8400-..." }
+{
+  "session_id": "sid",
+  "id": "sid",
+  "workspace_hash": "abc123",
+  "cwd": "C:/repo"
+}
+```
+
+Errors include `404` unknown workspace, `409` workspace path unavailable,
+`400` invalid permission mode, and `503` session client unavailable.
+
+### `POST /api/workspaces/:hash/sessions/:id/resume`
+
+Loads an existing disk session into the current daemon registry. Returns
+`{"session_id","id","active":true,"workspace_hash","cwd"}`. Errors:
+
+- `404` workspace or session not found
+- `409` session is active in another live process, old incompatible PID data,
+  or workspace path unavailable
+- `503` session client unavailable
+
+### Compatibility session routes
+
+The following routes operate on the daemon compatibility workspace:
+
+- `GET /api/sessions?archived=1`
+- `POST /api/sessions`
+- `POST /api/sessions/:id/resume`
+- `PUT /api/sessions/:id/archive`
+- `DELETE /api/sessions/:id/archive`
+- `PUT /api/sessions/:id/title`
+- `GET /api/sessions/:id/draft`
+- `PUT /api/sessions/:id/draft`
+- `DELETE /api/sessions/:id/todos`
+
+`GET /api/sessions` returns `SessionSummary[]`, not a wrapper object. The
+compatibility `POST /api/sessions` response includes:
+
+```json
+{
+  "session_id": "sid",
+  "id": "sid",
+  "workspace_hash": "abc123",
+  "cwd": "C:/repo",
+  "no_workspace": false
+}
 ```
 
 ### `DELETE /api/sessions/:id`
 
-Aborts any in-flight tool / LLM call, joins the worker thread, removes the
-session from the registry.
+Destroys an active in-memory session: aborts the current turn, joins the worker
+thread, and removes it from the registry. It does not delete disk history.
+Returns `204`; returns `503` when the session client is unavailable.
 
-**Response 204** on success; 404 if no such id.
+### Archive, title, draft, and todos
+
+Workspace-scoped and compatibility paths share the same behavior:
+
+| Method | Path shape | Body | Response |
+|---|---|---|---|
+| PUT | `.../sessions/:id/archive` | ignored | updated `SessionSummary` |
+| DELETE | `.../sessions/:id/archive` | none | updated `SessionSummary` |
+| PUT | `.../sessions/:id/title` | `{"title":"..."}` | updated `SessionSummary` |
+| GET | `.../sessions/:id/draft` | none | `{"session_id","id","text"}` |
+| PUT | `.../sessions/:id/draft` | `{"text":"..."}` | `{"session_id","id","text"}` |
+| DELETE | `.../sessions/:id/todos` | none | `{"session_id","id","workspace_hash","todos":[],"todo_summary":{...}}` |
+
+Title writes trim whitespace and validate with `sanitize_title`.
 
 ### `GET /api/sessions/:id/messages?since=N`
 
-Fetch session content. Two modes by `since`:
+When `since=0` or omitted, returns a full snapshot object:
 
-- `since=0` (default) → full snapshot: `{messages: ChatMessage[], events: SessionEvent[]}`.
-  `messages` is the canonical OpenAI-format history loaded from disk; `events`
-  is whatever's still in the in-memory ring buffer (last 1024 events).
-- `since=N` (N > 0) → reconnect-replay: just `{events: SessionEvent[]}` where
-  every event has `seq > N`. Used by clients that already have history and
-  only need the gap.
+```json
+{
+  "events": [],
+  "messages": [],
+  "busy": false,
+  "turn_count": 4,
+  "permission_mode": "default",
+  "token_usage": null,
+  "session_token_usage": null,
+  "todos": [],
+  "todo_summary": {},
+  "goal": null
+}
+```
 
-If the requested seq predates the ring-buffer start, you'll get an empty list
-and should re-fetch with `since=0`.
+Hidden file checkpoints, compact checkpoints, and hidden goal context messages
+are filtered from `messages`.
+
+When `since>0`, returns an event array directly:
+
+```json
+[
+  {"type":"message","seq":43,"timestamp_ms":1783152000000,"payload":{}}
+]
+```
+
+If the requested sequence predates the in-memory replay ring, the array can be
+empty. The frontend should fall back to `since=0`.
 
 ### `POST /api/sessions/:id/messages`
 
-Queue a user input turn for an active session. The desktop/web composer sends
-plain text plus optional uploaded attachment ids and structured contexts.
+Queues a user input turn. Body:
 
-**Request body**:
 ```json
 {
   "text": "Explain this code",
-  "attachments": [{ "id": "att-..." }],
+  "attachments": [{"id":"att-..."}],
   "contexts": [
     {
       "type": "selection",
       "label": "README.md:23-24",
-      "note": "2 lines",
-      "text": "selected text...",
+      "text": "selected text",
       "source": {
         "path": "C:/repo/README.md",
         "start_line": 23,
@@ -239,536 +543,1056 @@ plain text plus optional uploaded attachment ids and structured contexts.
 }
 ```
 
-`selection` contexts are model-visible request context, not visible prompt text.
-The daemon expands them into the model input and records `metadata.display_text`
-so the transcript continues to show only the user's typed text plus context
-chips. `source.path` should be the absolute path used for model/tool
-localization; `label` remains a compact display string. Unpinned/transient
-selections are a client-side composer state and MUST NOT be sent in `contexts`.
+`attachments` may contain strings or objects with an `id` field. `contexts`
+with `type:"selection"` are sanitized and expanded into model-visible context
+while preserving the user's original display text. Other context objects are
+passed as browser context content parts.
 
-**Response 202**:
-```json
-{ "queued": true }
-```
+If the text is a skill slash command for the session workspace, the daemon
+expands it to the skill invocation prompt and records `metadata.display_text`.
+Returns `202 {"queued":true}`.
 
-### `DELETE /api/sessions/:id/todos`
+### `POST /api/sessions/:id/attachments`
 
-Clear the current TodoWrite checklist for a session. The workspace-scoped alias
-is `DELETE /api/workspaces/:hash/sessions/:id/todos`.
+Uploads bytes into the session attachment store. Body:
 
-**Response 200**:
 ```json
 {
-  "session_id": "550e8400-...",
-  "id": "550e8400-...",
-  "workspace_hash": "abc123",
-  "todos": [],
-  "todo_summary": {
-    "total": 0,
-    "pending": 0,
-    "in_progress": 0,
-    "completed": 0,
-    "cancelled": 0
+  "name": "screenshot.png",
+  "mime_type": "image/png",
+  "data_base64": "..."
+}
+```
+
+Returns `201`:
+
+```json
+{
+  "attachment": {
+    "id": "att-...",
+    "session_id": "sid",
+    "name": "screenshot.png",
+    "kind": "image",
+    "mime_type": "image/png",
+    "path": "...",
+    "blob_url": "/api/sessions/sid/attachments/att-.../blob",
+    "size_bytes": 12345
   }
 }
 ```
 
+### `GET /api/sessions/:id/attachments/:attachment_id/blob`
+
+Returns raw attachment bytes with the stored MIME type and
+`Cache-Control: private, max-age=3600`.
+
 ### `POST /api/sessions/:id/commands`
 
-Execute daemon-owned builtin slash commands. This endpoint is intentionally
-separate from `POST /api/sessions/:id/messages`: commands are not skill-expanded
-and are not submitted as literal user messages. Supported command names are
-limited to `init` and `compact`.
+Runs daemon-owned builtin slash commands. Body:
 
-**Request body**:
+```json
+{"command":"compact","args":"","display_text":"/compact"}
+```
+
+`command` can also be slash text like `"/compact"`. Supported commands are
+the daemon builtin commands accepted by `parse_builtin_command_request`:
+`init`, `compact`, `goal`, and `plan`. Skill slash commands must use
+`POST /api/sessions/:id/messages`.
+
+Returns `202 {"queued":true,"command":"compact"}`. Errors:
+
+- `400 {"error":"unsupported command","command":"..."}`
+- `404 {"error":"unknown session"}`
+- `500 {"error":"command failed"}`
+
+### `GET /api/sessions/:id/permissions`
+
+Returns the active or persisted session permission mode:
+
+```json
+{"mode":"default","description":"Prompt for write/exec tools"}
+```
+
+### `PUT /api/sessions/:id/permissions`
+
+Body:
+
+```json
+{"mode":"yolo"}
+```
+
+Valid modes are `default`, `accept-edits`, `plan`, and `yolo`. Switching to
+`yolo` also resolves any open permission prompt with allow. Returns the same
+shape as `GET`.
+
+### `POST /api/sessions/:id/fork`
+
+Copies the source session prefix through `at_message_id` into a new session and
+resumes it into the current daemon. It does not start a new turn.
+
+Body:
+
+```json
+{"at_message_id":"msg-123","title":"optional title"}
+```
+
+Response:
+
 ```json
 {
-  "command": "init",
-  "args": "",
-  "display_text": "/init"
+  "session_id": "new-sid",
+  "title": "Fork title",
+  "forked_from": "source-sid",
+  "fork_message_id": "msg-123",
+  "workspace_hash": "abc123",
+  "cwd": "C:/repo",
+  "no_workspace": false
 }
 ```
 
-`command` may also be sent as slash text such as `"/compact"`. `display_text`
-is preserved for the visible user-facing command label when the command enqueues
-an LLM turn.
+### `POST /api/sessions/:id/file-checkpoints/:message_id/restore`
 
-**Response 202**:
-```json
-{ "queued": true, "command": "compact" }
-```
+Restores workspace files to the checkpoint captured for that user turn. Chat
+history is not rewound. Refuses while the session is busy.
 
-Errors:
-- `400 {"error":"unsupported command","command":"..."}` for names other than
-  `init` or `compact`.
-- `404 {"error":"unknown session"}` when the session is not active in the
-  daemon registry.
+Response:
 
-`/init` with a provider enqueues the same init prompt used by the TUI while
-displaying `/init` in the transcript. Without a provider it writes the offline
-`AGENT.md` skeleton and emits a visible system message. `/compact` runs on the
-AgentLoop worker queue and emits progress/completion/error messages. On success
-it appends a hidden compact checkpoint to the session JSONL plus visible system
-marker messages; older user-visible transcript rows remain available in history.
-The checkpoint carries the provider-facing replacement history used for later
-model requests and resume/fork reconstruction. Normal manual, auto, and rescue
-compact success does not emit `transcript_replace`.
-
-### `GET /api/feedback/desktop/recent-sessions?limit=N`
-
-List recent sessions that the Desktop settings feedback card may optionally
-attach. The list is sorted by `updated_at` descending and capped by `limit`
-(default `20`, clamp `1..100`). Selecting nothing remains valid and means the
-feedback upload will include desktop logs only.
-
-**Response 200**:
 ```json
 {
+  "ok": true,
+  "session_id": "sid",
+  "message_id": "msg-123",
+  "files_changed": 3,
+  "errors": []
+}
+```
+
+---
+
+## 6. Opencode Import and Pins
+
+### `GET /api/workspaces/:hash/opencode-import`
+
+Previews importable opencode sessions:
+
+```json
+{
+  "available": true,
+  "count": 2,
+  "source_database": "...",
+  "error": "",
   "sessions": [
     {
-      "id": "20260618-030000-abcd",
-      "session_id": "20260618-030000-abcd",
-      "title": "Investigate desktop issue",
-      "updated_at": "2026-06-18T03:00:00Z",
-      "cwd": "C:\\Users\\you\\repo",
-      "workspace_hash": "abc123"
+      "id": "opencode-id",
+      "title": "Title",
+      "directory": "C:/repo",
+      "provider": "openai",
+      "model": "gpt-4.1",
+      "archived": false,
+      "time_created_ms": 0,
+      "time_updated_ms": 0,
+      "time_archived_ms": 0,
+      "message_count": 10,
+      "part_count": 20,
+      "source_database": "..."
     }
   ]
 }
 ```
 
-### `POST /api/feedback/desktop`
+### `POST /api/workspaces/:hash/opencode-import`
 
-Submit Desktop settings feedback. This endpoint is separate from
-`POST /api/sessions/:id/messages` and `POST /api/sessions/:id/commands`; the
-feedback text is not sent to the agent loop and no chat transcript row is
-created. The package always attempts to include the latest
-`<data_dir>/logs/desktop-*.log` tail as `logs/desktop.log.tail.txt`. Session
-JSONL is included only when `session_id` is supplied.
+Starts an async import. Body is optional:
 
-**Request body**:
+```json
+{"session_ids":["opencode-id-1","opencode-id-2"]}
+```
+
+Returns `202` job status:
+
 ```json
 {
-  "feedback_text": "Settings page froze after resume",
-  "session_id": "20260618-030000-abcd",
+  "job_id": "job-id",
+  "workspace_hash": "abc123",
+  "state": "pending",
+  "imported": 0,
+  "total": 2,
+  "failed": 0,
+  "skipped": 0,
+  "current_title": "",
+  "error": "",
+  "session_ids": []
+}
+```
+
+### `GET /api/workspaces/:hash/opencode-import/:job_id`
+
+Polls the same status object. Returns `404` for unknown workspace or job.
+
+### `GET /api/workspaces/:hash/pinned-sessions`
+
+Returns:
+
+```json
+{"workspace_hash":"abc123","cwd":"C:/repo","session_ids":["sid-1"]}
+```
+
+The daemon prunes ids that no longer exist or are archived.
+
+### `PUT /api/workspaces/:hash/pinned-sessions`
+
+Body:
+
+```json
+{"session_ids":["sid-1","sid-2"]}
+```
+
+Normalizes, prunes, persists, and echoes the same shape as `GET`.
+
+### `GET /api/pinned-sessions/order`
+
+Returns cross-workspace ordering:
+
+```json
+{"items":[{"workspace_hash":"abc123","session_id":"sid-1"}]}
+```
+
+### `PUT /api/pinned-sessions/order`
+
+Body:
+
+```json
+{"items":[{"workspace_hash":"abc123","session_id":"sid-1"}]}
+```
+
+Normalizes, prunes unavailable pinned items, persists, and echoes the same
+shape as `GET`.
+
+---
+
+## 7. Files
+
+All file routes validate `cwd` against the daemon cwd and registered workspace
+cwds. `path` is relative to `cwd` and must stay within it.
+
+### `GET /api/files?cwd=<abs>&path=<rel>&show_hidden=1`
+
+Lists direct children:
+
+```json
+[
+  {"name":"src","path":"src","kind":"directory","modified_ms":1783152000000},
+  {"name":"README.md","path":"README.md","kind":"file","size":1234}
+]
+```
+
+### `GET /api/files/content?cwd=<abs>&path=<rel>`
+
+Returns `text/plain; charset=utf-8` file content. Error status examples:
+
+- `400` unknown workspace or outside workspace
+- `404` not found
+- `415` binary or too large
+- `500` IO error
+
+### `GET /api/files/blob?cwd=<abs>&path=<rel>`
+
+Returns raw bytes for browser-native preview types:
+
+- images: `png`, `jpg`, `jpeg`, `gif`, `webp`, `bmp`, `ico`, `svg`
+- documents: `pdf`, `docx`, `xlsx`, `xlsm`
+
+The route caps preview bytes at 20 MB and sets `X-Content-Type-Options:
+nosniff`.
+
+---
+
+## 8. Commands, Skills, and Hooks
+
+### `GET /api/commands?workspace=<hash>`
+
+Returns builtin slash commands and, when `workspace` is supplied, merged
+workspace/global skills:
+
+```json
+{
+  "builtins": [
+    {"name":"init","description":"Analyze this codebase and generate (or improve) AGENT.md"},
+    {"name":"compact","description":"Compress conversation history"},
+    {"name":"goal","description":"Create, view, pause, resume, edit, or clear the thread goal"},
+    {"name":"plan","description":"Enter plan mode or start planning a described task"}
+  ],
+  "skills": [
+    {"name":"my-skill","description":"..."}
+  ]
+}
+```
+
+The `skills` field is omitted when no workspace cwd is provided.
+
+### `GET /api/skills/root?workspace=<hash>`
+
+Returns the effective skill directory:
+
+```json
+{
+  "path": "C:/repo/.acecode/skills",
+  "source": "project_acecode",
+  "workspace_hash": "abc123",
+  "cwd": "C:/repo"
+}
+```
+
+`source` is `project_acecode`, `project_agent`, or `global_acecode`.
+
+### `GET /api/skills`
+
+Returns an array, not a wrapper:
+
+```json
+[
+  {
+    "name": "skill-name",
+    "command_key": "/skill-name",
+    "description": "...",
+    "category": "custom",
+    "enabled": true
+  }
+]
+```
+
+Disabled config entries are included with `enabled:false`.
+
+### `PUT /api/skills/:name`
+
+Body:
+
+```json
+{"enabled":false}
+```
+
+Returns `{"name":"skill-name","enabled":false}`.
+
+### `GET /api/skills/:name/body`
+
+Returns `text/markdown; charset=utf-8` containing `SKILL.md`. Returns `404`
+when the skill is not enabled/registered.
+
+### Hook routes
+
+| Method | Path | Behavior |
+|---|---|---|
+| GET | `/api/hooks` | returns current hook registry snapshot |
+| POST | `/api/hooks/refresh` | reloads hook trust store and hook registry |
+| POST | `/api/hooks/:id/trust` | persists trust for the hook definition |
+| POST | `/api/hooks/:id/disable` | disables hook unless it is managed |
+| POST | `/api/hooks/:id/enable` | enables hook |
+
+Mutating hook routes return the refreshed hook registry snapshot. Managed hooks
+cannot be disabled and return `409 {"error":"HOOK_MANAGED"}`.
+
+---
+
+## 9. Models and Copilot Auth
+
+### `GET /api/models`
+
+Returns an array of runtime-enabled saved model profiles. Editable fields such
+as `base_url`, `api_key`, `request_headers`, `context_window`,
+`stream_timeout_ms`, and `capabilities` are included when present.
+
+### `POST /api/models`
+
+Adds a saved model profile. Body is the saved model draft:
+
+```json
+{
+  "name": "gateway-gpt",
+  "provider": "openai",
+  "model": "gpt-4.1",
+  "base_url": "https://example.com/v1",
+  "api_key": "{env:OPENAI_API_KEY}",
+  "request_headers": {"X-Team":"acecode"},
+  "context_window": 128000,
+  "stream_timeout_ms": 600000,
+  "capabilities": {}
+}
+```
+
+Returns the saved profile. Validation errors use `BAD_JSON`, `BAD_REQUEST`, or
+the `SavedModelEditError` string. Persistence failures roll back memory and
+return `500 PERSIST_FAILED`.
+
+### `PUT /api/models/:name`
+
+Updates a saved model profile and may rename it. Missing `api_key`,
+`base_url`, `context_window`, `stream_timeout_ms`, `capabilities`, or
+`request_headers` preserve the existing values. Sending empty
+`request_headers` clears them. Returns the updated profile.
+
+### `DELETE /api/models/:name`
+
+Removes a saved model profile. If a busy active session is using the profile,
+returns `409 MODEL_IN_USE`. On success:
+
+```json
+{"ok":true}
+```
+
+### `POST /api/models/probe`
+
+Probes provider model ids. OpenAI-compatible providers call upstream
+`GET /models`; Copilot uses saved GitHub auth. Anthropic model ids are entered
+manually and are not probed.
+
+Success:
+
+```json
+{
+  "models": ["gpt-4.1"],
+  "model_context_windows": {"gpt-4.1": 1047576}
+}
+```
+
+Errors include `COPILOT_AUTH_REQUIRED`, `INVALID_REQUEST_HEADER`,
+`PROBE_FAILED`, `PROBE_HTTP_ERROR`, and `PROBE_BAD_JSON`.
+
+### `GET /api/config/default-model`
+
+Returns:
+
+```json
+{"name":"saved-model-name"}
+```
+
+### `POST /api/config/default-model`
+
+Body:
+
+```json
+{"name":"saved-model-name"}
+```
+
+The name must exist in `saved_models`. Success returns:
+
+```json
+{"default_model_name":"saved-model-name"}
+```
+
+### `GET /api/sessions/:id/model?workspace=<hash>`
+
+Returns current session model state:
+
+```json
+{
+  "name": "saved-model-name",
+  "provider": "openai",
+  "model": "gpt-4.1",
+  "context_window": 128000,
+  "deleted": false
+}
+```
+
+### `POST /api/sessions/:id/model`
+
+Body:
+
+```json
+{"name":"saved-model-name"}
+```
+
+Switches the active session to that saved model profile and returns model
+state. Returns `404` when the session is not active in the registry.
+
+### Copilot auth routes
+
+| Method | Path | Response |
+|---|---|---|
+| GET | `/api/copilot/auth` | `{"provider":"copilot","has_token":true,"authenticated":true}` |
+| DELETE | `/api/copilot/auth` | deletes saved GitHub token, returns auth false |
+| POST | `/api/copilot/auth/device` | starts GitHub device flow |
+| POST | `/api/copilot/auth/device/poll` | polls one device-flow tick |
+
+`POST /api/copilot/auth/device` response:
+
+```json
+{
+  "status": "pending",
+  "provider": "copilot",
+  "device_code": "...",
+  "user_code": "ABCD-1234",
+  "verification_uri": "https://github.com/login/device",
+  "interval": 5,
+  "expires_in": 900,
+  "expires_at_unix_ms": 1783152000000
+}
+```
+
+Polling success returns `status:"authenticated"`. Pending, slow-down, and
+failure states return `status`, `error`, `message`, and
+`interval_delta_seconds`.
+
+---
+
+## 10. Config, MCP, Update, and Feedback
+
+### `GET /api/config/ui-preferences`
+
+Returns:
+
+```json
+{"show_acecode_avatar":false}
+```
+
+The avatar preference is kept for compatibility and is always normalized to
+`false`.
+
+### `PUT /api/config/ui-preferences`
+
+Body:
+
+```json
+{"show_acecode_avatar":false}
+```
+
+Validates the field, persists config, and echoes the normalized response.
+
+### `GET /api/config/custom-instructions`
+
+Returns:
+
+```json
+{"text":"custom prompt text"}
+```
+
+### `PUT /api/config/custom-instructions`
+
+Body:
+
+```json
+{"text":"custom prompt text"}
+```
+
+The text is byte-limited by `kCustomInstructionsMaxBytes`. Existing sessions
+pick up changes on later turns through the daemon config pointer.
+
+### `GET /api/config/connectors`
+
+Returns:
+
+```json
+{"connectors":[]}
+```
+
+### `PUT /api/config/connectors`
+
+Body:
+
+```json
+{"connectors":[]}
+```
+
+Parses connector config, persists, and echoes `{"connectors":[...]}`.
+
+### `GET /api/config/default-permission-mode`
+
+Returns the permission mode used by newly-created sessions:
+
+```json
+{"mode":"accept-edits","description":"Auto-allow file edits, prompt for bash"}
+```
+
+### `PUT /api/config/default-permission-mode`
+
+Body:
+
+```json
+{"mode":"accept-edits"}
+```
+
+Persists the default and updates the in-memory session registry default.
+
+### `GET /api/config/upgrade`
+
+Returns:
+
+```json
+{"base_url":"https://example.com/acecode"}
+```
+
+### `PUT /api/config/upgrade`
+
+Body:
+
+```json
+{"base_url":"https://example.com/acecode"}
+```
+
+Normalizes and validates a non-empty HTTP(S) base URL.
+
+### `GET /api/update/status`
+
+Checks the update manifest and returns:
+
+```json
+{
+  "status": "ok",
+  "update_available": true,
+  "current_version": "0.5.10",
+  "latest_version": "0.5.11",
+  "target": "windows-x64",
+  "manifest_url": "https://example.com/manifest.json",
+  "package_file": "acecode.zip",
+  "package_url": "https://example.com/acecode.zip",
+  "package_size": 123456
+}
+```
+
+`http_status` and `error` are included when present.
+
+### `POST /api/update/start`
+
+Checks for an update and starts `acecode update` or a desktop-provided update
+command. Returns `202`:
+
+```json
+{"started":true,"latest_version":"0.5.11","message":"acecode update started"}
+```
+
+Returns `409 NO_UPDATE` when no compatible update is available.
+
+### `GET /api/config/ace-browser-bridge`
+
+Returns browser bridge tool settings:
+
+```json
+{
+  "enabled": true,
+  "tool_mode": "native",
+  "default_mode": "auto",
+  "pointer_speed": 1.0,
+  "status_cache_ttl_ms": 1000,
+  "tool_timeout_ms": 60000,
+  "os_pointer_enabled": true,
+  "tab_group_enabled": true,
+  "operation_overlay_enabled": true,
+  "operation_overlay_watchdog_ms": 10000,
+  "pointer_custom": {
+    "move_duration_ms_min": 80,
+    "move_duration_ms_max": 240,
+    "click_hold_ms_min": 40,
+    "click_hold_ms_max": 120,
+    "typing_delay_ms_min": 0,
+    "typing_delay_ms_max": 20,
+    "jitter_px": 1,
+    "max_path_points": 48
+  }
+}
+```
+
+### `PUT /api/config/ace-browser-bridge`
+
+Body:
+
+```json
+{"enabled":true}
+```
+
+Persists `enabled`, unregisters existing bridge tools, and registers them again
+when enabled. The response is the full bridge settings object.
+
+### `GET /api/mcp`
+
+Reads `mcp_servers` from config. `auth_token` is intentionally not returned.
+
+```json
+{
+  "server-name": {
+    "transport": "stdio",
+    "command": "node",
+    "args": ["server.js"],
+    "env": {},
+    "url": "",
+    "sse_endpoint": "/sse",
+    "headers": {},
+    "timeout_seconds": 30
+  }
+}
+```
+
+### `PUT /api/mcp`
+
+Overwrites `mcp_servers`. Body is an object keyed by server name. Success:
+
+```json
+{"saved":true,"reload_required":true}
+```
+
+### `POST /api/mcp/reload`
+
+Currently returns `501`:
+
+```json
+{"error":"mcp reload not implemented in v1; restart daemon to pick up changes"}
+```
+
+### `GET /api/feedback/desktop/recent-sessions?limit=N`
+
+Returns recent sessions for optional feedback attachment. `limit` defaults to
+`20` and is clamped to `1..100`.
+
+```json
+{"sessions":[{"id":"sid","session_id":"sid","title":"...","workspace_hash":"abc123"}]}
+```
+
+### `POST /api/feedback/desktop`
+
+Body fields are optional strings:
+
+```json
+{
+  "feedback_text": "Settings page froze",
+  "session_id": "sid",
   "workspace_hash": "abc123"
 }
 ```
 
-`session_id` and `workspace_hash` are optional. If `session_id` is omitted or
-empty, the upload is log-only and contains no `session/*.jsonl` entry.
+If `session_id` is empty, the package contains desktop logs only. The upload
+target is derived from `upgrade.base_url`.
 
-**Response 200**:
+Success:
+
 ```json
 {
   "ok": true,
-  "package_filename": "acecode-feedback-desktop-20260618-030102-windows-x64.zip",
+  "package_filename": "acecode-feedback-desktop-....zip",
   "log_included": true,
   "log_tail_bytes": 4312,
-  "included_files": ["logs/desktop.log.tail.txt", "feedback.json"],
+  "included_files": ["logs/desktop.log.tail.txt","feedback.json"],
   "selected_session_id": null,
   "workspace_hash": ""
 }
 ```
 
-Errors:
-- `400 {"error":"BAD_REQUEST"}` for invalid JSON, invalid field types, or an
-  invalid `upgrade.base_url`.
-- `404 {"error":"SESSION_NOT_FOUND"}` when a supplied selected session cannot
-  be resolved to exactly one session JSONL file in the requested workspace.
-- `500 {"error":"PACKAGE_FAILED"}` when the local feedback package cannot be
-  created.
-- `502 {"error":"UPLOAD_FAILED","package_path":"..."}` when the upload request
-  fails; the package path is retained for manual inspection.
+Errors include `SESSION_NOT_FOUND`, `PACKAGE_FAILED`, and `UPLOAD_FAILED`.
 
-### `GET /api/sessions/:id/permissions`
+---
 
-Return the active session's permission mode. This is session-scoped; changing
-one session does not affect other active sessions.
+## 11. Console PTY
 
-**Response 200**:
-```json
-{ "mode": "default", "description": "Prompt for write/exec tools" }
-```
+PTY endpoints are loopback-only because they execute shell input without the
+agent tool permission gate. Non-loopback requests return `403` even with a
+token.
 
-### `PUT /api/sessions/:id/permissions`
+### `GET /api/pty/shells`
 
-Switch the active session's permission mode. Valid `mode` values are
-`default`, `accept-edits`, `plan`, and `yolo`. Session `yolo` auto-allows
-normal tool permissions and allows local file tools to target paths outside the
-workspace, but the first external file mutation in that session still requires
-permission confirmation. Switching to `yolo` also resolves any already-open
-permission prompt for that session with `allow`.
+Returns detected shell choices and the configured default:
 
-**Request body**:
-```json
-{ "mode": "yolo" }
-```
-
-**Response 200**:
-```json
-{ "mode": "yolo", "description": "Auto-allow tools; confirm first external file write" }
-```
-
-### `GET /api/skills`
-
-List skills the daemon registered at startup.
-
-**Response 200**:
 ```json
 {
-  "skills": [
-    {
-      "name": "init",
-      "command_key": "/init",
-      "description": "Initialize AGENT.md ...",
-      "category": "builtin",
-      "enabled": true
-    }
-  ]
+  "shells": [
+    {"id":"powershell","label":"PowerShell","available":true,"needs_path":false}
+  ],
+  "default": "powershell"
 }
 ```
 
-### `POST /api/open-in-explorer`
+### `PUT /api/console/config`
 
-Open a directory in the OS file manager (Explorer / Finder / xdg-open).
-Used by the web UI context menu in desktop webapp compatibility mode
-(Edge app mode), where no webview bridge is available.
+Body:
 
-**Request body**: `{"path": "<absolute directory path, UTF-8>"}`
-
-**Response 200**: `{"ok": true}`
-
-**Errors**:
-- `400` — missing/empty `path`, bad JSON, or validation failure
-  (`{"ok": false, "error": "..."}`; e.g. path is not an existing directory,
-  or lies outside registered workspaces and the daemon cwd).
-- `501` — daemon was not started by the desktop shell
-  (`native_folder_picker_enabled` off), endpoint unavailable.
-
-### `GET /api/models`
-
-List saved model profiles exposed to Web/Desktop. Responses never include
-`api_key`. OpenAI-compatible entries may include unresolved
-`request_headers` templates for editing.
-
-**Response 200**:
 ```json
-[
-  {
-    "name": "gateway",
-    "provider": "openai",
-    "model": "gpt-4o",
-    "base_url": "https://gateway.example.com/v1",
-    "request_headers": {
-      "X-Team": "acecode",
-      "X-Token": "{env:ACE_GATEWAY_TOKEN}"
-    }
-  }
-]
+{"default_shell":"powershell","git_bash_path":"C:/Program Files/Git/bin/bash.exe"}
 ```
 
-### `POST /api/models` / `PUT /api/models/:name`
+Both fields are optional. `git_bash_path` is trimmed, dequoted, checked for WSL
+System32 bash, and validated if non-empty. Returns the same payload as
+`GET /api/pty/shells`.
 
-Create or update a saved model profile. OpenAI-compatible request bodies may
-include `request_headers`, a JSON object of string header templates. Empty or
-omitted `request_headers` is absent from the stored entry; for `PUT`, omitting
-the field preserves the existing value, while sending `{}` clears it.
+### `POST /api/pty`
 
-`Content-Type` is reserved by ACECode. `Authorization` is allowed and overrides
-the bearer header derived from `api_key` when requests are sent.
+Body:
 
-### `POST /api/models/probe`
-
-Probe remote model ids. For `provider: "openai"`, the request body accepts the
-same unresolved `request_headers` templates and resolves `{env:NAME}` just
-before sending the upstream `GET /models` request. Missing environment
-variables return `400 {"error":"INVALID_REQUEST_HEADER"}` before any upstream
-request is sent.
-
-### `GET /api/config/ui-preferences`
-
-Read non-sensitive Web/Desktop UI preferences. The legacy ACECode avatar
-preference is retained for wire compatibility, but the current UI always hides
-the ACECode avatar.
-
-**Response 200**:
 ```json
-{ "show_acecode_avatar": false }
+{"cwd":"C:/repo","title":"Terminal","shell":"powershell"}
 ```
 
-### `PUT /api/config/ui-preferences`
+`shell` is a shell id from `/api/pty/shells`. The daemon enforces a 16-session
+limit and returns `429` when exceeded.
 
-Compatibility endpoint for older Web/Desktop clients. The request body is still
-validated, but `show_acecode_avatar` is normalized to `false` and the avatar
-remains hidden.
-
-**Request body**:
-```json
-{ "show_acecode_avatar": false }
-```
-
-**Response 200** echoes the effective value:
-```json
-{ "show_acecode_avatar": false }
-```
-
-Errors:
-- `400 {"error":"BAD_REQUEST"}` when `show_acecode_avatar` is missing or not a boolean.
-- `500 {"error":"PERSIST_FAILED"}` when writing `config.json` fails.
-
-### `GET /api/config/default-permission-mode`
-
-Read the daemon default permission mode used by newly-created sessions.
-Existing sessions remain session-scoped.
-
-**Response 200**:
-```json
-{ "mode": "accept-edits", "description": "Auto-allow file edits, prompt for bash" }
-```
-
-### `PUT /api/config/default-permission-mode`
-
-Persist the daemon default permission mode and update the in-memory session
-template used for future new sessions. Valid `mode` values are `default`,
-`accept-edits`, `plan`, and `yolo`.
-
-**Request body**:
-```json
-{ "mode": "accept-edits" }
-```
-
-**Response 200** echoes the effective mode:
-```json
-{ "mode": "accept-edits", "description": "Auto-allow file edits, prompt for bash" }
-```
-
-Errors:
-- `400 {"error":"BAD_REQUEST"}` when `mode` is missing or not a string.
-- `400 {"error":"INVALID_PERMISSION_MODE"}` when `mode` is not recognized.
-- `500 {"error":"PERSIST_FAILED"}` when writing `config.json` fails.
-
-### `GET /api/mcp` / `PUT /api/mcp`
-
-Read / write the `mcp_servers` segment of `~/.acecode/config.json`. GET
-**redacts** `auth_token` fields (returns `"***"`) so the daemon never leaks
-secrets through the wire. PUT validates schema, writes the file, but does
-NOT auto-reload connected MCP clients — response includes
-`{"reload_required": true}`.
-
-### `POST /api/mcp/reload`
-
-v1: returns **501 Not Implemented**. Restart the daemon to pick up MCP
-config changes. Full hot-reload is a follow-up change.
-
----
-
-## 3. WebSocket protocol — `WS /ws/sessions/:id`
-
-### Envelope
-
-Every server→client AND client→server frame is a single JSON object:
+Session info:
 
 ```json
 {
-  "type": "<kind>",
-  "seq": 42,                  // monotonic per session, server-assigned
-  "timestamp_ms": 1700000000000,
-  "payload": { /* type-specific */ }
-}
-```
-
-`seq` lets clients track ordering and request replay on reconnect.
-
-### Connection lifecycle
-
-```
-client → server : WS handshake (with ?token=... if non-loopback)
-server checks auth in .onaccept()
-client → server : { "type": "hello", "payload": { "session_id": "...", "since": 0 } }
-server          : (optional) replays events with seq > since from ring buffer
-                  then registers the connection as a live listener
-client ↔ server : full duplex traffic (events / inputs / decisions / pings)
-client → server : close OR abrupt disconnect
-server          : unsubscribes from EventDispatcher; AgentLoop keeps running
-                  (registry holds the session); next reconnect can resume
-```
-
-### Server → client message types
-
-| `type` | When | `payload` |
-|---|---|---|
-| `Token`            | LLM streamed a content delta | `{ "delta": "..." }` |
-| `ReasoningDelta`   | LLM streamed a reasoning_content fragment (DeepSeek thinking, OpenRouter `reasoning`, Qwen) | `{ "delta": "..." }` |
-| `Message`          | A complete `ChatMessage` was added to history | `{ "message": ChatMessage }` |
-| `ToolStart`        | `bash_tool` / `file_*` etc. started executing | `{ "tool": "bash", "args": {...}, "preview": "..." }` |
-| `ToolUpdate`       | Streaming output from a long tool (mostly `bash_tool`) | `{ "chunk": "..." }` |
-| `ToolEnd`          | Tool finished | `{ "tool": "...", "ok": true, "summary": ToolSummary?, "hunks": ToolHunks?, "output_tail": "..." }` |
-| `PermissionRequest`| Tool needs user confirmation | `{ "request_id": "...", "tool": "...", "args": {...}, "options": ["allow","deny","allow_session"] }` |
-| `Usage`            | LLM reported token usage | `{ "prompt_tokens": N, "completion_tokens": N, "total_tokens": N }` |
-| `TranscriptReplace`| The server must replace the visible transcript for recovery/cleanup, such as retry or partial-stream cleanup; normal compact success does not use this event | `{ "messages": ChatMessage[] }` plus cleanup-specific fields |
-| `BusyChanged`      | Transition between idle / waiting / running | `{ "busy": true, "reason": "waiting_llm"|"running_tool" }` |
-| `Done`             | Agent loop reached a terminator (text reply / `task_complete` / max_iterations / abort) | `{ "reason": "text"|"task_complete"|"abort"|"max_iters", "summary": "..."? }` |
-| `Error`            | Something failed (provider error / tool exception / permission timeout) | `{ "code": "...", "message": "..." }` |
-
-Permission timeout is special: `AsyncPrompter` waits 5 minutes; on timeout it
-emits an `Error` event AND treats the request as deny, then the agent loop
-continues with the deny result.
-
-### Client → server message types
-
-| `type` | When | `payload` | Notes |
-|---|---|---|---|
-| `hello`      | First frame after connect | `{ "session_id": "...", "since": 0 }` | Required; server ignores all other types until hello binds the session |
-| `user_input` | Send a user message | `{ "text": "..." }` | Triggers a new agent-loop turn |
-| `decision`   | Respond to a `PermissionRequest` | `{ "request_id": "...", "decision": "allow"|"deny"|"allow_session" }` | Unblocks the worker; ignored if request_id unknown / already answered |
-| `abort`      | Cancel current turn | `{}` | Equivalent to TUI Esc — interrupts streaming + tool execution |
-| `ping`       | Keep-alive | `{}` | Server replies `{ "type": "pong", ... }` |
-
-Unknown `type` values get an `Error` reply — `{"code": "unknown_type", "message": "...""}`.
-
-### Reconnect strategy
-
-1. Save the highest `seq` you've processed
-2. On reconnect, send `hello` with `since: <last_seq>`
-3. Server replays buffered events with `seq > since` (up to 1024)
-4. If the gap is bigger than the ring buffer, you'll get nothing for the
-   gap — fall back to `GET /api/sessions/:id/messages?since=0` for full
-   snapshot, then resume WS from the new tail seq
-
----
-
-## 4. Error codes (HTTP)
-
-| Status | Meaning |
-|---|---|
-| 200 | OK |
-| 201 | Created (POST /api/sessions) |
-| 204 | No Content (DELETE /api/sessions/:id) |
-| 400 | Malformed JSON body, missing required field, bad config write |
-| 401 | Auth missing/invalid |
-| 404 | Unknown session id / route |
-| 501 | Not Implemented (currently `/api/mcp/reload` only) |
-
-Error bodies are `{"error": "human-readable string"}`.
-
----
-
-## 5. Process exit codes
-
-Useful for monitoring / supervisor scripts:
-
-| rc | Where | Meaning |
-|---|---|---|
-| 0 | any | Normal exit |
-| 1 | various CLI | Generic failure ("no daemon running" etc.) |
-| 2 | `worker.cpp` | `preflight_bind_check` rejected (non-loopback without token, or `-dangerous + non-loopback`) |
-| 3 | `worker.cpp` / `server.cpp` | Crow `app.run()` threw — typically port already in use |
-| 4 | `worker.cpp` | Failed to write a runtime file (pid/port/guid/token) |
-| 5 | `cli.cpp foreground` | `validate_config` returned errors |
-| 6 | `cli.cpp start` | Another daemon already running (GUID mutex) |
-| 7 | `cli.cpp start` | `spawn_detached` failed |
-| 8 | `cli.cpp start` | Detached worker didn't write `daemon.pid` within 5 s |
-| 9 | `cli.cpp stop` | `terminate_pid` didn't succeed within 10 s |
-| 10 | `cli.cpp` / `service_win.cpp` | Unknown subcommand |
-| 11 | `cli.cpp` / `service_win.cpp` | No subcommand passed (help printed) |
-| 21 | `service_win.cpp` | `--service-main` invoked outside SCM context |
-| 22 | `service_win.cpp` | `StartServiceCtrlDispatcher` failed (other error) |
-| 24 | `service_win.cpp` | Access denied (need elevated PowerShell for install/uninstall/start/stop) |
-| 25-33 | `service_win.cpp` | Other SCM API failures (see source for exact mapping) |
-| 64 | `main.cpp` | `--service-main` on non-Windows |
-| 65 | `main.cpp` | `service` subcommand on non-Windows (use systemd/launchd) |
-
----
-
-## 6. Examples
-
-### Health check
-```bash
-curl -s http://127.0.0.1:28080/api/health | jq
-```
-
-### Create session and send first message
-```bash
-TOKEN=$(cat ~/.acecode/run/token)        # or %PROGRAMDATA%\acecode\run\token in service mode
-
-SID=$(curl -s -X POST http://127.0.0.1:28080/api/sessions \
-  -H "X-ACECode-Token: $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"initial_user_message":"hi"}' | jq -r .session_id)
-
-# then connect WS to ws://127.0.0.1:28080/ws/sessions/$SID
-# (use websocat / wscat / browser DevTools)
-```
-
-### Reconnect with replay
-```js
-ws.send(JSON.stringify({
-  type: "hello",
-  payload: { session_id: SID, since: lastSeenSeq }
-}));
-```
-
-## 7. Console PTY — `/api/pty` + `WS /ws/pty/:id`
-
-Interactive terminal sessions hosted by the daemon (openspec change
-`add-console-dock`). **All PTY routes are loopback-only**: requests from
-non-loopback addresses are rejected with 403 regardless of token, because a
-PTY executes commands without permission gating.
-
-`GET /api/health` reports availability:
-
-```json
-"console": { "available": true, "backend": "conpty" }
-```
-
-`backend` is one of `conpty` (Windows 10 1809+), `winpty` (older Windows,
-full TTY semantics via the bundled winpty agent), `pipe` (last-resort
-fallback without TTY semantics — interactive programs do not work), or
-`posix` (`forkpty`, Linux/macOS).
-
-### HTTP endpoints
-
-| Method | Path | Body | Response |
-|---|---|---|---|
-| POST | `/api/pty` | `{cwd?, title?}` | `201` session info; `429` at the 16-session limit |
-| GET | `/api/pty` | — | `{backend, sessions: [...]}` |
-| DELETE | `/api/pty/:id` | — | `204`; kills the shell process |
-| POST | `/api/pty/:id/resize` | `{cols, rows}` (2..1000) | `204` |
-| POST | `/api/pty/:id/title` | `{title}` | `204`; blank titles ignored, UTF-8-safe truncation at 200 bytes. The frontend forwards OSC 0/2 titles (xterm `onTitleChange`) here so reload-restored sessions keep their tab titles |
-
-Session info shape:
-
-```json
-{
-  "id": "pty-1", "title": "Terminal 1",
-  "shell": "C:\Windows\system32\cmd.exe", "cwd": "...",
-  "status": "running", "pid": 12345, "backend": "conpty",
+  "id": "pty-1",
+  "title": "Terminal 1",
+  "shell": "C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe",
+  "cwd": "C:/repo",
+  "status": "running",
+  "pid": 12345,
+  "backend": "conpty",
   "exit_code": 0
 }
 ```
 
-`exit_code` is present only when `status == "exited"`. The default shell is
-`%COMSPEC%` (cmd) on Windows and `$SHELL` on POSIX; override with the
-`console.shell` config key. A PTY process survives independently of WebSocket
-connections until it exits or is deleted; the daemon kills all sessions on
-shutdown.
+`exit_code` appears only when `status == "exited"`.
 
-### WebSocket — `WS /ws/pty/:id?cursor=N`
+### `GET /api/pty`
 
-Raw byte transport (no JSON envelopes, unlike `/ws/sessions`):
+Returns:
 
-- **Server → client**: binary frames carry raw PTY output (VT byte stream,
-  feed directly to a terminal emulator). Frames whose **first byte is
-  `0x00`** are control frames: the remainder is UTF-8 JSON — `{"cursor": N}`
-  (sent after the replay backlog; sync your local cursor) or
-  `{"exit_code": N}` (process exited).
-- **Client → server**: every frame (text or binary) is written verbatim to
-  the PTY input (keyboard bytes).
+```json
+{"backend":"conpty","sessions":[]}
+```
 
-Each session keeps a 2 MB rolling output buffer with a monotonically
-increasing byte cursor. Connect with `cursor=N` to replay buffered output
-from that offset (chunked at 64 KB) before the live stream; `cursor=-1`
-skips the backlog. Reconnecting after a page reload with `cursor=0` replays
-whatever the buffer still holds. Resize goes through the REST endpoint, not
-the WebSocket.
+### `DELETE /api/pty/:id`
+
+Kills/removes the PTY session. Returns `204` or `404`.
+
+### `POST /api/pty/:id/resize`
+
+Body:
+
+```json
+{"cols":120,"rows":30}
+```
+
+`cols` and `rows` must be in `2..1000`. Returns `204`.
+
+### `POST /api/pty/:id/title`
+
+Body:
+
+```json
+{"title":"npm run dev"}
+```
+
+Used by the frontend to persist xterm OSC title changes. Returns `204`.
+
+---
+
+## 12. Session WebSocket
+
+Route:
+
+```text
+WS /ws/sessions/:route?token=<token>
+```
+
+The frontend currently connects to `/ws/sessions/_multiplex`. The route
+parameter is not the session id; sessions are bound by JSON messages after the
+socket opens.
+
+### Server event envelope
+
+Session events are JSON objects:
+
+```json
+{
+  "type": "token",
+  "seq": 1,
+  "timestamp_ms": 1783152000000,
+  "session_id": "sid",
+  "workspace_hash": "abc123",
+  "payload": {}
+}
+```
+
+Session event `type` values from `SessionEventKind`:
+
+- `token`
+- `reasoning`
+- `agent_progress`
+- `message`
+- `tool_start`
+- `tool_update`
+- `tool_end`
+- `permission_request`
+- `question_request`
+- `question_closed`
+- `usage`
+- `transcript_replace`
+- `goal_updated`
+- `goal_cleared`
+- `todo_updated`
+- `session_updated`
+- `busy_changed`
+- `done`
+- `error`
+
+`transcript_replace` is for retry/recovery cleanup. Normal compact success
+appends visible marker messages and a hidden checkpoint instead.
+
+### Client messages
+
+All client frames are JSON:
+
+```json
+{"type":"subscribe","payload":{"session_id":"sid","since":42}}
+```
+
+| Type | Payload | Behavior |
+|---|---|---|
+| `hello` | `{session_id,since}` | legacy bind; ack is `hello_ack` |
+| `subscribe` | `{session_id,since}` | subscribes one session; ack is `subscribe_ack` |
+| `unsubscribe` | `{session_id}` | unsubscribes; ack is `unsubscribe_ack` |
+| `status_subscribe` | `{workspace_hash}` or `{session_id}` | subscribes workspace attention status and sends snapshot |
+| `status_unsubscribe` | `{workspace_hash}` | unsubscribes; ack is `status_unsubscribe_ack` |
+| `mark_session_read` | `{session_id,workspace_hash,cursor}` | persists read cursor; ack is `mark_session_read_ack` |
+| `user_input` | `{session_id,text}` | queues plain user input |
+| `decision` | `{session_id,request_id,choice}` | responds to permission request; `choice` is `allow`, `deny`, or `allow_session` |
+| `question_answer` | `{session_id,request_id,cancelled,answers}` | responds to AskUserQuestion |
+| `abort` | `{session_id}` | aborts current turn |
+| `ping` | `{}` | replies `{"type":"pong"}` |
+
+`decision` uses `choice`, not `decision`, in the payload.
+
+`question_answer.answers[]` entries are:
+
+```json
+{
+  "question_id": "q1",
+  "selected": ["option-id"],
+  "custom_text": "free form"
+}
+```
+
+When more than one session is subscribed, session-targeted messages should
+include `payload.session_id`.
+
+### Acks and status messages
+
+Subscribe ack:
+
+```json
+{
+  "type": "subscribe_ack",
+  "session_id": "sid",
+  "workspace_hash": "abc123",
+  "payload": {"session_id":"sid","workspace_hash":"abc123","cwd":"C:/repo"}
+}
+```
+
+Workspace status snapshot:
+
+```json
+{
+  "type": "session_status_snapshot",
+  "timestamp_ms": 1783152000000,
+  "workspace_hash": "abc123",
+  "payload": {
+    "workspace_hash": "abc123",
+    "sessions": [
+      {
+        "session_id": "sid",
+        "workspace_hash": "abc123",
+        "cwd": "C:/repo",
+        "state": "read",
+        "attention_state": "read",
+        "read_state": "read",
+        "busy": false,
+        "cursor": 0,
+        "update_cursor": 0,
+        "read_cursor": 0
+      }
+    ]
+  }
+}
+```
+
+Live attention updates use `type:"session_status"` with the same payload shape
+for one session.
+
+### Reconnect strategy
+
+1. Store the highest processed `seq` per session.
+2. Reconnect and send `subscribe` with `since:<lastSeq>`.
+3. The daemon replays buffered events with `seq > since`.
+4. If the replay gap is too old, fall back to
+   `GET /api/sessions/:id/messages?since=0`.
+
+---
+
+## 13. PTY WebSocket
+
+Route:
+
+```text
+WS /ws/pty/:id?cursor=N&token=<token>
+```
+
+This socket is loopback-only. Unlike the session socket, it is a raw byte
+transport, not JSON envelopes.
+
+Server to client:
+
+- Binary frames are PTY output bytes.
+- Frames whose first byte is `0x00` are UTF-8 JSON control frames, such as
+  `{"cursor":123}` after backlog replay or `{"exit_code":0}` on exit.
+
+Client to server:
+
+- Text or binary frames are written verbatim to PTY stdin.
+
+Each PTY session keeps a 2 MB rolling output buffer with a monotonic byte
+cursor. `cursor=N` replays from that offset; `cursor=-1` skips backlog.
+Resize uses `POST /api/pty/:id/resize`, not the WebSocket.
+
+---
+
+## 14. Static Web App
+
+The daemon also serves the built frontend:
+
+- `GET /` serves the SPA entry.
+- `GET /<path>` up to four path segments serves static files or falls back to
+  the SPA entry.
+- `/api/*` and `/ws/*` never fall back to the SPA; unmatched API/WS paths are
+  `404`.
+
+---
+
+## 15. HTTP Status Summary
+
+| Status | Meaning |
+|---|---|
+| 200 | OK |
+| 201 | Created |
+| 202 | Accepted/queued |
+| 204 | No content |
+| 400 | Bad JSON, missing field, validation failure |
+| 401 | Missing or bad daemon token |
+| 403 | PTY non-loopback access |
+| 404 | Unknown route, workspace, session, attachment, skill, or job |
+| 409 | Conflict, busy session, active writer, no update, model in use |
+| 415 | File preview unsupported, binary, or too large |
+| 429 | PTY session limit |
+| 500 | Persistence, command, package, restore, or internal failure |
+| 501 | Feature unavailable or not implemented |
+| 502 | Upstream probe, upload, or auth exchange failure |
+| 503 | Required daemon subsystem unavailable |
+
+---
+
+## 16. Process Exit Codes
+
+| rc | Where | Meaning |
+|---|---|---|
+| 0 | any | Normal exit |
+| 1 | various CLI | Generic failure |
+| 2 | `worker.cpp` | preflight bind check rejected |
+| 3 | `worker.cpp` / `server.cpp` | Crow `app.run()` failed, usually port in use |
+| 4 | `worker.cpp` | failed to write runtime file |
+| 5 | `cli.cpp foreground` | config validation failed |
+| 6 | `cli.cpp start` | another daemon already running |
+| 7 | `cli.cpp start` | detached spawn failed |
+| 8 | `cli.cpp start` | detached worker did not write pid in time |
+| 9 | `cli.cpp stop` | terminate pid did not complete |
+| 10 | `cli.cpp` / `service_win.cpp` | unknown subcommand |
+| 11 | `cli.cpp` / `service_win.cpp` | missing subcommand |
+| 21 | `service_win.cpp` | `--service-main` invoked outside SCM |
+| 22 | `service_win.cpp` | `StartServiceCtrlDispatcher` failed |
+| 24 | `service_win.cpp` | access denied, admin required |
+| 25-33 | `service_win.cpp` | other SCM API failures |
+| 64 | `main.cpp` | `--service-main` on non-Windows |
+| 65 | `main.cpp` | `service` subcommand on non-Windows |

@@ -127,9 +127,47 @@ TEST(ProviderFactory, OpenAiProfileInheritsGlobalRequestHeadersWhenEntryOmitsThe
 
 TEST(ProviderFactory, UnknownProviderReturnsNull) {
     ModelProfile profile;
-    profile.name = "anthropic";
-    profile.provider = "anthropic";
-    profile.model = "claude";
+    profile.name = "unknown";
+    profile.provider = "unknown";
+    profile.model = "model";
 
     EXPECT_EQ(create_provider_from_entry(profile), nullptr);
+}
+
+TEST(ProviderFactory, AnthropicProfileRequestHeadersReachProvider) {
+    std::mutex mu;
+    std::string seen_api_key;
+    std::string seen_header;
+
+    LocalHttpServer server([&](httplib::Server& s) {
+        s.Post("/messages", [&](const httplib::Request& req, httplib::Response& res) {
+            {
+                std::lock_guard<std::mutex> lk(mu);
+                seen_api_key = req.get_header_value("x-api-key");
+                seen_header = req.get_header_value("X-Factory");
+            }
+            res.set_content(
+                R"({"id":"msg_1","type":"message","role":"assistant","model":"claude-test","stop_reason":"end_turn","content":[{"type":"text","text":"ok"}]})",
+                "application/json");
+        });
+    });
+
+    ModelProfile profile;
+    profile.name = "claude";
+    profile.provider = "anthropic";
+    profile.base_url = server.base_url();
+    profile.api_key = "sk-ant-test";
+    profile.model = "claude-test";
+    profile.request_headers = {{"X-Factory", "profile"}};
+
+    auto provider = create_provider_from_entry(profile);
+    ASSERT_TRUE(provider);
+    EXPECT_EQ(provider->name(), "anthropic");
+
+    auto response = provider->chat({user_message()}, {});
+    EXPECT_EQ(response.content, "ok");
+
+    std::lock_guard<std::mutex> lk(mu);
+    EXPECT_EQ(seen_api_key, "sk-ant-test");
+    EXPECT_EQ(seen_header, "profile");
 }

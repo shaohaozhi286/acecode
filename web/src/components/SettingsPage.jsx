@@ -16,6 +16,9 @@ import { lookupErrorMessage } from '../lib/errors.js';
 import {
   DEFAULT_MODEL_CAPABILITIES,
   MODEL_CAPABILITY_OPTIONS,
+  ANTHROPIC_DEFAULT_BASE_URL,
+  OPENAI_DEFAULT_BASE_URL,
+  baseUrlForProviderSwitch,
   buildModelDraftsFromSelection,
   canDeleteSavedModel,
   filterSavedModels,
@@ -1958,6 +1961,7 @@ function SectionFeedback() {
 
 const MODEL_NEW_PROVIDER_PILL = {
   openai:    'text-ok bg-ok-bg border border-ok-border',
+  anthropic: 'text-warn bg-warn-bg border border-warn',
   copilot:   'text-accent bg-accent-bg border border-accent-soft',
 };
 
@@ -1965,7 +1969,7 @@ const MODEL_NEW_DRAFT_DEFAULT = {
   name: '',
   provider: 'openai',
   model: '',
-  base_url: 'https://api.openai.com/v1',
+  base_url: OPENAI_DEFAULT_BASE_URL,
   api_key: '',
   request_headers_json: '',
   context_window_k: '',
@@ -1978,7 +1982,7 @@ function draftFromModelProfile(m) {
     provider: m?.provider || 'openai',
     model: m?.model || '',
     base_url: m?.base_url || '',
-    api_key: m?.provider === 'openai' ? (m?.api_key || '') : '',
+    api_key: (m?.provider === 'openai' || m?.provider === 'anthropic') ? (m?.api_key || '') : '',
     request_headers_json: formatRequestHeadersJson(m?.request_headers),
     context_window_k: formatContextWindowK(m?.context_window),
     capabilities: normalizeModelCapabilities(m?.capabilities),
@@ -1991,7 +1995,7 @@ function payloadForModelDraft(draft, { omitApiKey = false, requestHeaders } = {}
     provider: draft.provider || 'openai',
     model: String(draft.model || '').trim(),
   };
-  if (payload.provider === 'openai') {
+  if (payload.provider === 'openai' || payload.provider === 'anthropic') {
     payload.base_url = String(draft.base_url || '').trim();
     if (!omitApiKey) payload.api_key = String(draft.api_key || '');
     if (requestHeaders !== undefined) payload.request_headers = requestHeaders;
@@ -2003,7 +2007,9 @@ function payloadForModelDraft(draft, { omitApiKey = false, requestHeaders } = {}
 }
 
 function providerLabel(provider) {
-  return provider === 'copilot' ? 'Copilot' : 'OpenAI';
+  if (provider === 'copilot') return 'Copilot';
+  if (provider === 'anthropic') return 'Anthropic';
+  return 'OpenAI';
 }
 
 function capabilityLabel(id) {
@@ -2356,7 +2362,7 @@ function SectionModel() {
         toast({ kind: 'err', text: lookupErrorMessage(contextWindow.code) });
         return null;
       }
-      const requestHeaders = parseRequestHeadersJson(item.request_headers_json);
+      const requestHeaders = parseRequestHeadersJson(item.request_headers_json, item.provider);
       if (!requestHeaders.ok) {
         toast({ kind: 'err', text: lookupErrorMessage(requestHeaders.code) });
         return null;
@@ -2794,9 +2800,17 @@ function ModelFormPreview({
   const [customInput, setCustomInput] = useState('');
   const [fetchError, setFetchError] = useState('');
   const [apiKeyVisible, setApiKeyVisible] = useState(false);
+  const providerUsesHttpApi = data.provider === 'openai' || data.provider === 'anthropic';
 
   useEffect(() => {
-    if (data.provider !== 'openai') setApiKeyVisible(false);
+    if (!providerUsesHttpApi) setApiKeyVisible(false);
+  }, [providerUsesHttpApi]);
+
+  useEffect(() => {
+    if (data.provider === 'anthropic') {
+      setFetchStatus('idle');
+      setAvailable(null);
+    }
   }, [data.provider]);
 
   const selectedModels = splitModelIds(data.model);
@@ -2814,8 +2828,8 @@ function ModelFormPreview({
     setFetchStatus('fetching');
     setFetchError('');
     try {
-      const requestHeaders = data.provider === 'openai'
-        ? parseRequestHeadersJson(data.request_headers_json)
+      const requestHeaders = providerUsesHttpApi
+        ? parseRequestHeadersJson(data.request_headers_json, data.provider)
         : { ok: true, headers: undefined };
       if (!requestHeaders.ok) {
         setAvailable([]);
@@ -2922,15 +2936,18 @@ function ModelFormPreview({
                 const provider = e.target.value;
                 setData({
                   provider,
-                  base_url: provider === 'openai' ? (data.base_url || 'https://api.openai.com/v1') : '',
-                  api_key: provider === 'openai' ? data.api_key : '',
-                  request_headers_json: provider === 'openai' ? (data.request_headers_json || '') : '',
+                  base_url: baseUrlForProviderSwitch(provider, data.base_url),
+                  api_key: (provider === 'openai' || provider === 'anthropic') ? data.api_key : '',
+                  request_headers_json: (provider === 'openai' || provider === 'anthropic')
+                    ? (data.request_headers_json || '')
+                    : '',
                 });
                 setFetchStatus('idle');
                 setAvailable(null);
               }}
             >
               <option value="openai">OpenAI</option>
+              <option value="anthropic">Anthropic</option>
               <option value="copilot">Copilot</option>
             </select>
             <VsIcon
@@ -2943,13 +2960,13 @@ function ModelFormPreview({
       </div>
 
       {/* Base URL */}
-      {data.provider === 'openai' && (
+      {providerUsesHttpApi && (
         <div className="mb-4">
           <div className="text-[12px] font-medium text-fg-2 mb-1.5">Base URL</div>
           <input
             type="text"
             className={clsx(fieldClass, 'font-mono text-[12px]')}
-            placeholder="https://api.openai.com/v1"
+            placeholder={data.provider === 'anthropic' ? ANTHROPIC_DEFAULT_BASE_URL : OPENAI_DEFAULT_BASE_URL}
             value={data.base_url}
             onChange={(e) => {
               setData({ base_url: e.target.value });
@@ -2961,14 +2978,14 @@ function ModelFormPreview({
       )}
 
       {/* API Key */}
-      {data.provider === 'openai' && (
+      {providerUsesHttpApi && (
         <div className="mb-4">
           <div className="text-[12px] font-medium text-fg-2 mb-1.5">API Key</div>
           <div className="relative">
             <input
               type={apiKeyVisible ? 'text' : 'password'}
               className={clsx(fieldClass, 'pr-10 font-mono text-[12px]')}
-              placeholder="sk-..."
+              placeholder={data.provider === 'anthropic' ? 'sk-ant-...' : 'sk-...'}
               value={data.api_key || ''}
               onChange={onApiKeyChange}
               spellCheck={false}
@@ -2998,7 +3015,7 @@ function ModelFormPreview({
       )}
 
       {/* 自定义请求头 */}
-      {data.provider === 'openai' && (
+      {providerUsesHttpApi && (
         <div className="mb-4">
           <div className="text-[12px] font-medium text-fg-2 mb-1.5">自定义请求头(JSON,可选)</div>
           <textarea
@@ -3114,6 +3131,7 @@ function ModelFormPreview({
               <span className="text-[11px] text-fg-mute">
                 {data.provider === 'copilot' && fetchStatus === 'idle' && (copilotAuthenticated ? '尚未获取 Copilot 模型列表' : '请先登录 Copilot,也可手动输入')}
                 {data.provider === 'openai' && fetchStatus === 'idle' && (data.base_url ? '尚未获取模型列表' : '请先填写 Base URL')}
+                {data.provider === 'anthropic' && fetchStatus === 'idle' && 'Anthropic 暂不查询模型列表,请手动输入'}
                 {fetchStatus === 'fetching' && '正在获取...'}
                 {fetchStatus === 'success' && (
                   modelFilter && available?.length
@@ -3126,7 +3144,11 @@ function ModelFormPreview({
                 type="button"
                 onClick={refresh}
                 disabled={!canProbeModels || fetchStatus === 'fetching'}
-                title={canProbeModels ? '刷新模型列表' : (data.provider === 'copilot' ? '请先登录 Copilot' : '请先填写 Base URL')}
+                title={canProbeModels ? '刷新模型列表' : (
+                  data.provider === 'copilot'
+                    ? '请先登录 Copilot'
+                    : (data.provider === 'anthropic' ? 'Anthropic 暂不支持模型列表查询' : '请先填写 Base URL')
+                )}
                 className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] text-fg-2 rounded hover:bg-surface-hi transition disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 <RefreshIcon size={11} className={clsx(fetchStatus === 'fetching' && 'animate-spin')} />

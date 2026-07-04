@@ -6,6 +6,7 @@
 #include "config/config.hpp"
 #include "auth/github_auth.hpp"
 #include "network/proxy_resolver.hpp"
+#include "provider/anthropic_provider.hpp"
 #include "utils/logger.hpp"
 #include "utils/models_dev_catalog.hpp"
 #include "utils/terminal_input.hpp"
@@ -18,6 +19,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
+#include <optional>
 #include <utility>
 #include <cpr/cpr.h>
 #include <cpr/ssl_options.h>
@@ -69,7 +71,7 @@ static void upsert_configured_saved_model(AppConfig& cfg) {
     ModelProfile profile = configured_profile_from_current_fields(cfg);
     for (auto& existing : cfg.saved_models) {
         if (existing.name == profile.name) {
-            if (profile.provider == "openai" &&
+            if ((profile.provider == "openai" || profile.provider == "anthropic") &&
                 profile.request_headers.empty() &&
                 !existing.request_headers.empty()) {
                 profile.request_headers = existing.request_headers;
@@ -81,6 +83,56 @@ static void upsert_configured_saved_model(AppConfig& cfg) {
     }
     cfg.saved_models.push_back(profile);
     cfg.default_model_name = profile.name;
+}
+
+static void upsert_saved_model_profile(AppConfig& cfg, ModelProfile profile) {
+    for (auto& existing : cfg.saved_models) {
+        if (existing.name == profile.name) {
+            if ((profile.provider == "openai" || profile.provider == "anthropic") &&
+                profile.request_headers.empty() &&
+                !existing.request_headers.empty()) {
+                profile.request_headers = existing.request_headers;
+            }
+            existing = profile;
+            cfg.default_model_name = profile.name;
+            return;
+        }
+    }
+    cfg.saved_models.push_back(profile);
+    cfg.default_model_name = profile.name;
+}
+
+static ModelProfile default_anthropic_profile(const AppConfig& cfg) {
+    ModelProfile fallback;
+    fallback.name = "anthropic";
+    fallback.provider = "anthropic";
+    fallback.base_url = AnthropicProvider::kDefaultBaseUrl;
+    fallback.model = "";
+    fallback.models_dev_provider_id = "anthropic";
+
+    const ModelProfile* candidate = nullptr;
+    for (const auto& entry : cfg.saved_models) {
+        if (entry.provider == "anthropic" && entry.name == cfg.default_model_name) {
+            candidate = &entry;
+            break;
+        }
+    }
+    if (!candidate) {
+        for (const auto& entry : cfg.saved_models) {
+            if (entry.provider == "anthropic") {
+                candidate = &entry;
+                break;
+            }
+        }
+    }
+    if (!candidate) return fallback;
+
+    ModelProfile profile = *candidate;
+    if (profile.base_url.empty()) profile.base_url = AnthropicProvider::kDefaultBaseUrl;
+    if (!profile.models_dev_provider_id.has_value()) {
+        profile.models_dev_provider_id = "anthropic";
+    }
+    return profile;
 }
 
 static void configure_copilot(AppConfig& cfg) {
@@ -433,6 +485,34 @@ static void configure_openai(AppConfig& cfg) {
     }
 }
 
+static ModelProfile configure_anthropic(const AppConfig& cfg) {
+    std::cout << "\n--- Anthropic Configuration ---\n" << std::endl;
+    std::cout << "Anthropic model listing is not probed yet; enter the model id manually."
+              << std::endl;
+
+    ModelProfile profile = default_anthropic_profile(cfg);
+    profile.name = read_line("Profile name", profile.name);
+    if (profile.name.empty()) profile.name = "anthropic";
+    profile.base_url = read_line("Base URL", profile.base_url.empty()
+        ? std::string(AnthropicProvider::kDefaultBaseUrl)
+        : profile.base_url);
+    do {
+        profile.api_key = read_password("API Key", profile.api_key);
+        if (profile.api_key.empty()) {
+            std::cerr << "API Key is required." << std::endl;
+        }
+    } while (profile.api_key.empty());
+    do {
+        profile.model = read_line("Model", profile.model);
+        if (profile.model.empty()) {
+            std::cerr << "Model is required." << std::endl;
+        }
+    } while (profile.model.empty());
+    profile.provider = "anthropic";
+    profile.models_dev_provider_id = "anthropic";
+    return profile;
+}
+
 static void configure_upgrade_service(AppConfig& cfg) {
     std::cout << "\n--- Upgrade Service Configuration ---\n" << std::endl;
 
@@ -466,15 +546,19 @@ int run_configure(const AppConfig& current_config) {
     int default_provider = 0;
     if (cfg.provider == "openai") {
         default_provider = (cfg.openai.models_dev_provider_id.has_value() && catalog_ready) ? 1 : 2;
+    } else if (cfg.provider == "anthropic") {
+        default_provider = 3;
     }
 
+    std::optional<ModelProfile> configured_profile_override;
     while (true) {
         std::vector<std::string> options = {
             "Copilot (GitHub)",
             catalog_ready ? ("Browse models.dev catalog (" +
                              std::to_string(compat_providers.size()) + " providers)")
                           : "Browse models.dev catalog (unavailable: no bundled snapshot found)",
-            "Custom OpenAI compatible"
+            "Custom OpenAI compatible",
+            "Anthropic"
         };
         int choice = read_choice("Select provider:", options, default_provider);
 
@@ -495,13 +579,23 @@ int run_configure(const AppConfig& current_config) {
             // user backed out — re-show menu
             continue;
         }
+        if (choice == 3) {
+            cfg.provider = "anthropic";
+            cfg.openai.models_dev_provider_id.reset();
+            configured_profile_override = configure_anthropic(cfg);
+            break;
+        }
         cfg.provider = "openai";
         cfg.openai.models_dev_provider_id.reset();
         configure_openai(cfg);
         break;
     }
 
-    upsert_configured_saved_model(cfg);
+    if (configured_profile_override.has_value()) {
+        upsert_saved_model_profile(cfg, *configured_profile_override);
+    } else {
+        upsert_configured_saved_model(cfg);
+    }
     configure_upgrade_service(cfg);
 
     // Configuration summary
@@ -510,6 +604,10 @@ int run_configure(const AppConfig& current_config) {
     std::cout << "  Provider: " << cfg.provider << std::endl;
     if (cfg.provider == "copilot") {
         std::cout << "  Model:    " << cfg.copilot.model << std::endl;
+    } else if (cfg.provider == "anthropic" && configured_profile_override.has_value()) {
+        std::cout << "  Base URL: " << configured_profile_override->base_url << std::endl;
+        std::cout << "  API Key:  " << mask_key(configured_profile_override->api_key) << std::endl;
+        std::cout << "  Model:    " << configured_profile_override->model << std::endl;
     } else {
         std::cout << "  Base URL: " << cfg.openai.base_url << std::endl;
         std::cout << "  API Key:  " << mask_key(cfg.openai.api_key) << std::endl;
@@ -528,7 +626,9 @@ int run_configure(const AppConfig& current_config) {
         LOG_INFO(std::string("configure: saved (") + format_source_line(cfg) +
                  ", model=" + (cfg.provider == "copilot"
                      ? cfg.copilot.model
-                     : cfg.openai.model) + ")");
+                     : (cfg.provider == "anthropic" && configured_profile_override.has_value()
+                         ? configured_profile_override->model
+                         : cfg.openai.model)) + ")");
         std::cout << "Configuration saved!" << std::endl;
     } else {
         std::cout << "Configuration cancelled." << std::endl;

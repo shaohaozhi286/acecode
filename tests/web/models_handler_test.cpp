@@ -56,6 +56,32 @@ TEST(ModelsHandler, ListIncludesAllSavedModels) {
     EXPECT_EQ(arr[1]["request_headers"]["X-Team"], "acecode");
 }
 
+// 场景:Anthropic 是可运行 provider,Web 模型列表必须暴露完整配置字段。
+TEST(ModelsHandler, ListAndFindIncludeAnthropicProvider) {
+    auto cfg = make_cfg_with_two();
+    ModelProfile c;
+    c.name = "claude";
+    c.provider = "anthropic";
+    c.model = "claude-test";
+    c.base_url = "https://api.anthropic.com/v1";
+    c.api_key = "sk-ant-test";
+    c.request_headers = {{"anthropic-beta", "prompt-caching-2024-07-31"}};
+    cfg.saved_models.push_back(c);
+
+    auto arr = list_models(cfg);
+    ASSERT_EQ(arr.size(), 3u);
+    EXPECT_EQ(arr[2]["name"], "claude");
+    EXPECT_EQ(arr[2]["provider"], "anthropic");
+    EXPECT_EQ(arr[2]["base_url"], "https://api.anthropic.com/v1");
+    EXPECT_EQ(arr[2]["api_key"], "sk-ant-test");
+    EXPECT_EQ(arr[2]["request_headers"]["anthropic-beta"],
+              "prompt-caching-2024-07-31");
+
+    auto found = find_model_by_name(cfg, "claude");
+    ASSERT_TRUE(found.has_value());
+    EXPECT_EQ(found->provider, "anthropic");
+}
+
 // 场景:旧配置里遗留 codex saved model 时,Web 模型列表不暴露已屏蔽 provider。
 TEST(ModelsHandler, ListAndFindSkipDisabledCodexProvider) {
     auto cfg = make_cfg_with_two();
@@ -321,6 +347,30 @@ TEST(ModelsHandler, ParseDraftAcceptsFullBody) {
     EXPECT_EQ(d->capabilities, (std::vector<std::string>{"vision", "tool_use"}));
     EXPECT_EQ(d->request_headers.at("Authorization"), "Bearer {env:ACE_TOKEN}");
     EXPECT_EQ(d->request_headers.at("X-Team"), "acecode");
+    EXPECT_TRUE(err.empty());
+}
+
+// 触发场景:Desktop/Web 保存 Anthropic profile 时走同一个 parse_model_draft。
+TEST(ModelsHandler, ParseDraftAcceptsAnthropicBody) {
+    nlohmann::json body = {
+        {"name", "claude"},
+        {"provider", "anthropic"},
+        {"model", "claude-test"},
+        {"base_url", "https://api.anthropic.com/v1"},
+        {"api_key", "sk-ant-x"},
+        {"request_headers", {
+            {"anthropic-beta", "prompt-caching-2024-07-31"}
+        }},
+    };
+    std::string err;
+    auto d = parse_model_draft(body, err);
+    ASSERT_TRUE(d.has_value()) << err;
+    EXPECT_EQ(d->name, "claude");
+    EXPECT_EQ(d->provider, "anthropic");
+    EXPECT_EQ(d->base_url, "https://api.anthropic.com/v1");
+    EXPECT_EQ(d->api_key, "sk-ant-x");
+    EXPECT_EQ(d->request_headers.at("anthropic-beta"),
+              "prompt-caching-2024-07-31");
     EXPECT_TRUE(err.empty());
 }
 

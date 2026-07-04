@@ -14,6 +14,7 @@
 #include <exception>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <thread>
@@ -282,6 +283,11 @@ AppConfig config_for_profile_context(const AppConfig& cfg,
         context_cfg.openai.api_key = profile.api_key;
         context_cfg.openai.model = profile.model;
         context_cfg.openai.models_dev_provider_id = profile.models_dev_provider_id;
+    } else if (profile.provider == "anthropic") {
+        context_cfg.openai.models_dev_provider_id =
+            profile.models_dev_provider_id.has_value()
+                ? profile.models_dev_provider_id
+                : std::optional<std::string>{"anthropic"};
     } else if (profile.provider == "codex") {
         context_cfg.codex.model = profile.model;
     } else {

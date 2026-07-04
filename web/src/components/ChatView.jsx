@@ -46,6 +46,7 @@ import {
 import { findStickyUserContext, sameStickyUserContext, scrollTopForStickySourceRow } from '../lib/stickyUserContext.js';
 import { loadTranscriptHistory, useSessionTranscript } from '../lib/sessionTranscript.js';
 import { projectCollapsedTranscriptItems } from '../lib/transcriptProjection.js';
+import { buildComposerHistory } from '../lib/inputHistoryNavigation.js';
 import {
   completedTurnSelfHealEnabled,
   createCompletedTurnSelfHealScheduler,
@@ -590,6 +591,11 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   const draftSessionKey = sid ? `${draftWorkspaceHash}:${sid}` : '';
   composerValueRef.current = composerValue;
   const rawItems = items;
+  // 上下键翻的历史:per-cwd 输入历史 + 当前 transcript 会话中用户发过的消息
+  const composerHistory = useMemo(
+    () => buildComposerHistory({ cwdHistory: history, transcriptItems: rawItems }),
+    [history, rawItems],
+  );
   const renderedItems = useMemo(
     () => projectCollapsedTranscriptItems(rawItems, { deferTrailingToolSummary: busy }),
     [rawItems, busy],
@@ -2247,7 +2253,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
             <InputBar
               ref={inputRef}
               variant="hero"
-              history={history}
+              history={composerHistory}
               onSubmit={submit}
               disabled={!!questionForView || homeSubmitting}
               placeholder="向 ACECode 描述任务，或输入 / 命令..."
@@ -2663,7 +2669,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         busy={busy}
         goal={goal}
         goalStopping={goalStopping}
-        history={history}
+        history={composerHistory}
         value={composerValue}
         onChange={handleComposerChange}
         onSubmit={submit}

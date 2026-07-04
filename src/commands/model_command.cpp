@@ -459,7 +459,7 @@ void cmd_model(CommandContext& ctx, const std::string& args) {
         std::lock_guard<std::mutex> lk(ctx.state.mu);
         ctx.state.conversation.push_back({"system",
             "Usage: /model | /model <name> | /model --cwd <name> | /model --default <name>\n"
-            "       /model add name=X provider=openai model=Y base_url=Z api_key=K [context_window=N] [stream_timeout_ms=N]\n"
+            "       /model add name=X provider=openai|anthropic model=Y base_url=Z api_key=K [context_window=N] [stream_timeout_ms=N]\n"
             "       /model edit <name> [field=value ...]\n"
             "       /model rm <name>\n"
             "       /model set-default [name]",

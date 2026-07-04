@@ -9,6 +9,44 @@ export function isUserComposerEdit({ nextValue = '', currentValue = '' } = {}) {
   return String(nextValue ?? '') !== String(currentValue ?? '');
 }
 
+// 从 transcript item 提取用户原始输入文本。skill 命令等场景下落库的 content 是
+// 展开后的注入提示,原文存在 metadata.display_text,翻历史时必须优先取原文。
+export function userInputTextFromTranscriptItem(item) {
+  if (item?.kind !== 'msg' || item?.role !== 'user') return '';
+  const displayText = item?.metadata?.display_text;
+  if (typeof displayText === 'string' && displayText.trim()) return displayText;
+  return String(item?.content || '');
+}
+
+const MAX_COMPOSER_HISTORY = 500;
+
+// 上下键翻的历史 = per-cwd 输入历史(与 TUI 共享,受 max_entries 截断)+ 当前
+// transcript 会话中用户发过的消息。会话消息排在尾部,↑ 优先翻到当前会话的输入,
+// 翻完再进入 per-cwd 更早的历史;同文本去重保留最后一次出现。
+export function buildComposerHistory({ cwdHistory = [], transcriptItems = [] } = {}) {
+  const cwdEntries = Array.isArray(cwdHistory) ? cwdHistory : [];
+  const items = Array.isArray(transcriptItems) ? transcriptItems : [];
+  const merged = [];
+  for (const entry of cwdEntries) {
+    const text = String(entry ?? '');
+    if (text.trim()) merged.push(text);
+  }
+  for (const item of items) {
+    const text = userInputTextFromTranscriptItem(item);
+    if (text.trim()) merged.push(text);
+  }
+  const seen = new Set();
+  const deduped = [];
+  for (let index = merged.length - 1; index >= 0; index -= 1) {
+    const text = merged[index];
+    if (seen.has(text)) continue;
+    seen.add(text);
+    deduped.push(text);
+  }
+  deduped.reverse();
+  return deduped.length > MAX_COMPOSER_HISTORY ? deduped.slice(-MAX_COMPOSER_HISTORY) : deduped;
+}
+
 export function shouldNavigateInputHistory({
   key,
   value = '',

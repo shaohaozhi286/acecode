@@ -2947,6 +2947,37 @@ TEST(WebServerHttp, PostModelsCreatesSavedEntryWithApiKey) {
     EXPECT_EQ(fx.cfg.saved_models.back().request_headers.at("X-Team"), "acecode");
 }
 
+// 场景:POST /api/models 创建 Anthropic saved model。
+TEST(WebServerHttp, PostModelsCreatesAnthropicEntry) {
+    WebServerFixture fx;
+    json req = {
+        {"name", "smoke-claude"},
+        {"provider", "anthropic"},
+        {"model", "claude-test"},
+        {"base_url", "https://api.anthropic.com/v1"},
+        {"api_key", "sk-ant-secret"},
+        {"request_headers", {
+            {"anthropic-beta", "prompt-caching-2024-07-31"}
+        }},
+    };
+    auto r = cpr::Post(cpr::Url{fx.url("/api/models")},
+                       cpr::Header{{"Content-Type", "application/json"}},
+                       cpr::Body{req.dump()});
+    ASSERT_EQ(r.status_code, 200) << r.text;
+    auto j = json::parse(r.text);
+    EXPECT_EQ(j["name"], "smoke-claude");
+    EXPECT_EQ(j["provider"], "anthropic");
+    EXPECT_EQ(j["base_url"], "https://api.anthropic.com/v1");
+    EXPECT_EQ(j["api_key"], "sk-ant-secret");
+    EXPECT_EQ(j["request_headers"]["anthropic-beta"],
+              "prompt-caching-2024-07-31");
+
+    ASSERT_EQ(fx.cfg.saved_models.size(), 2u);
+    EXPECT_EQ(fx.cfg.saved_models.back().provider, "anthropic");
+    EXPECT_EQ(fx.cfg.saved_models.back().request_headers.at("anthropic-beta"),
+              "prompt-caching-2024-07-31");
+}
+
 // 场景:PUT /api/models/<name> 省略 request_headers 时保留旧模板,
 // 显式发送 {} 时清空旧模板。
 TEST(WebServerHttp, PutModelsPreservesAndClearsRequestHeaders) {

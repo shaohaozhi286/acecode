@@ -1,4 +1,5 @@
 #include "provider_factory.hpp"
+#include "anthropic_provider.hpp"
 #include "openai_provider.hpp"
 #include "copilot_provider.hpp"
 #include "vision_capability.hpp"
@@ -29,6 +30,17 @@ std::shared_ptr<LlmProvider> create_provider_from_entry(const ModelProfile& entr
             entry.model,
             stream_timeout_ms,
             std::move(request_headers)
+        );
+    } else if (entry.provider == "anthropic") {
+        int stream_timeout_ms = entry.stream_timeout_ms.value_or(
+            config ? config->openai.stream_timeout_ms
+                   : OpenAiConfig::kDefaultStreamTimeoutMs);
+        provider = std::make_shared<AnthropicProvider>(
+            entry.base_url,
+            entry.api_key,
+            entry.model,
+            stream_timeout_ms,
+            entry.request_headers
         );
     } else if (entry.provider == "copilot") {
         provider = std::make_shared<CopilotProvider>(entry.model);

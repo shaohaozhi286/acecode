@@ -36,6 +36,24 @@ export const MODEL_CAPABILITY_OPTIONS = [
 ];
 
 export const DEFAULT_MODEL_CAPABILITIES = ['tool_use'];
+export const OPENAI_DEFAULT_BASE_URL = 'https://api.openai.com/v1';
+export const ANTHROPIC_DEFAULT_BASE_URL = 'https://api.anthropic.com/v1';
+
+export function defaultBaseUrlForProvider(provider) {
+  if (provider === 'openai') return OPENAI_DEFAULT_BASE_URL;
+  if (provider === 'anthropic') return ANTHROPIC_DEFAULT_BASE_URL;
+  return '';
+}
+
+export function baseUrlForProviderSwitch(provider, currentBaseUrl = '') {
+  const current = String(currentBaseUrl || '').trim();
+  const defaultUrl = defaultBaseUrlForProvider(provider);
+  if (!defaultUrl) return '';
+  if (!current) return defaultUrl;
+  if (provider === 'openai' && current === ANTHROPIC_DEFAULT_BASE_URL) return defaultUrl;
+  if (provider === 'anthropic' && current === OPENAI_DEFAULT_BASE_URL) return defaultUrl;
+  return current;
+}
 
 function isValidCapabilityTag(tag) {
   return typeof tag === 'string' && tag.length > 0 && !/[\u0000-\u001f\u007f]/.test(tag);
@@ -71,7 +89,9 @@ export function validateRequestHeaders(headers, provider = 'openai') {
   }
   const entries = Object.entries(headers);
   if (entries.length === 0) return { ok: true };
-  if (provider !== 'openai') return { ok: false, code: 'INVALID_REQUEST_HEADER' };
+  if (provider !== 'openai' && provider !== 'anthropic') {
+    return { ok: false, code: 'INVALID_REQUEST_HEADER' };
+  }
 
   const seen = new Set();
   for (const [name, value] of entries) {
@@ -87,7 +107,7 @@ export function validateRequestHeaders(headers, provider = 'openai') {
   return { ok: true };
 }
 
-export function parseRequestHeadersJson(value) {
+export function parseRequestHeadersJson(value, provider = 'openai') {
   const raw = String(value ?? '').trim();
   if (!raw) return { ok: true, headers: undefined };
   let parsed;
@@ -96,7 +116,7 @@ export function parseRequestHeadersJson(value) {
   } catch {
     return { ok: false, code: 'INVALID_REQUEST_HEADER' };
   }
-  const valid = validateRequestHeaders(parsed, 'openai');
+  const valid = validateRequestHeaders(parsed, provider);
   if (!valid.ok) return valid;
   return { ok: true, headers: parsed };
 }
@@ -125,10 +145,10 @@ export function validateModelDraft(draft) {
   if (!name || typeof name !== 'string' || name.length === 0)
     return { ok: false, code: 'INVALID_NAME' };
   if (name.startsWith('(')) return { ok: false, code: 'RESERVED_NAME' };
-  if (provider !== 'openai' && provider !== 'copilot')
+  if (provider !== 'openai' && provider !== 'anthropic' && provider !== 'copilot')
     return { ok: false, code: 'UNKNOWN_PROVIDER' };
   if (!model) return { ok: false, code: 'MISSING_MODEL' };
-  if (provider === 'openai') {
+  if (provider === 'openai' || provider === 'anthropic') {
     if (!base_url) return { ok: false, code: 'MISSING_BASE_URL' };
     if (!api_key) return { ok: false, code: 'INVALID_API_KEY' };
   }

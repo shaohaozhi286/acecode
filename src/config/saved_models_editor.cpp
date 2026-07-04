@@ -49,7 +49,7 @@ SavedModelEditError validate_draft_basic(const SavedModelDraft& d) {
     if (!is_runtime_model_provider_enabled(d.provider))
         return SavedModelEditError::PROVIDER_DISABLED;
     if (d.model.empty()) return SavedModelEditError::MISSING_MODEL;
-    if (d.provider == "openai") {
+    if (d.provider == "openai" || d.provider == "anthropic") {
         if (d.base_url.empty()) return SavedModelEditError::MISSING_BASE_URL;
         if (d.api_key.empty()) return SavedModelEditError::INVALID_API_KEY;
     }
@@ -65,7 +65,9 @@ SavedModelEditError validate_draft_basic(const SavedModelDraft& d) {
         if (!seen_capabilities.insert(tag).second) return SavedModelEditError::INVALID_CAPABILITY;
     }
     if (!d.request_headers.empty()) {
-        if (d.provider != "openai") return SavedModelEditError::INVALID_REQUEST_HEADER;
+        if (d.provider != "openai" && d.provider != "anthropic") {
+            return SavedModelEditError::INVALID_REQUEST_HEADER;
+        }
         std::string err;
         if (!validate_request_headers(d.request_headers, err)) {
             return SavedModelEditError::INVALID_REQUEST_HEADER;
@@ -79,7 +81,7 @@ ModelProfile to_profile(const SavedModelDraft& d) {
     p.name = d.name;
     p.provider = d.provider;
     p.model = d.model;
-    if (d.provider == "openai") {
+    if (d.provider == "openai" || d.provider == "anthropic") {
         p.base_url = d.base_url;
         p.api_key = d.api_key;
     }

@@ -219,6 +219,20 @@ bool has_usable_init_provider(const AppConfig& cfg) {
     if (cfg.provider == "openai") {
         return !cfg.openai.api_key.empty();
     }
+    if (cfg.provider == "anthropic") {
+        for (const auto& entry : cfg.saved_models) {
+            if (entry.provider == "anthropic" &&
+                entry.name == cfg.default_model_name &&
+                !entry.api_key.empty()) {
+                return true;
+            }
+        }
+        for (const auto& entry : cfg.saved_models) {
+            if (entry.provider == "anthropic" && !entry.api_key.empty()) {
+                return true;
+            }
+        }
+    }
     return false;
 }
 

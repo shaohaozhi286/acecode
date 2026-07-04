@@ -1,6 +1,9 @@
 // web/src/lib/modelManager.test.js
 import assert from 'node:assert/strict';
 import {
+  ANTHROPIC_DEFAULT_BASE_URL,
+  OPENAI_DEFAULT_BASE_URL,
+  baseUrlForProviderSwitch,
   buildModelDraftsFromSelection,
   canDeleteSavedModel,
   capabilitySearchText,
@@ -38,7 +41,7 @@ run('保留前缀 → RESERVED_NAME', () => {
 });
 
 run('未知 provider → UNKNOWN_PROVIDER', () => {
-  assert.equal(validateModelDraft({ name: 'a', provider: 'anthropic', model: 'x' }).code,
+  assert.equal(validateModelDraft({ name: 'a', provider: 'unknown', model: 'x' }).code,
                 'UNKNOWN_PROVIDER');
 });
 
@@ -70,6 +73,41 @@ run('合法 openai 草稿 → ok', () => {
     name: 'lm', provider: 'openai', model: 'l',
     base_url: 'http://x', api_key: 'sk-x',
   }), { ok: true });
+});
+
+run('合法 anthropic 草稿 → ok', () => {
+  assert.deepEqual(validateModelDraft({
+    name: 'claude',
+    provider: 'anthropic',
+    model: 'claude-test',
+    base_url: 'https://api.anthropic.com/v1',
+    api_key: 'sk-ant-x',
+    request_headers: {
+      'anthropic-beta': 'prompt-caching-2024-07-31',
+    },
+  }), { ok: true });
+});
+
+run('provider 切到 anthropic 时替换 OpenAI 默认 Base URL', () => {
+  assert.equal(
+    baseUrlForProviderSwitch('anthropic', OPENAI_DEFAULT_BASE_URL),
+    ANTHROPIC_DEFAULT_BASE_URL,
+  );
+  assert.equal(
+    baseUrlForProviderSwitch('anthropic', ''),
+    ANTHROPIC_DEFAULT_BASE_URL,
+  );
+});
+
+run('provider 切换保留自定义 Base URL', () => {
+  assert.equal(
+    baseUrlForProviderSwitch('anthropic', 'https://proxy.example.test/v1'),
+    'https://proxy.example.test/v1',
+  );
+  assert.equal(
+    baseUrlForProviderSwitch('openai', 'https://proxy.example.test/v1'),
+    'https://proxy.example.test/v1',
+  );
 });
 
 run('合法 request_headers 模板 → ok', () => {
@@ -112,6 +150,10 @@ run('parseRequestHeadersJson 区分空输入、{} 和非法 JSON', () => {
   assert.deepEqual(parseRequestHeadersJson(''), { ok: true, headers: undefined });
   assert.deepEqual(parseRequestHeadersJson('{}'), { ok: true, headers: {} });
   assert.equal(parseRequestHeadersJson('{bad').code, 'INVALID_REQUEST_HEADER');
+  assert.deepEqual(
+    parseRequestHeadersJson('{"anthropic-beta":"x"}', 'anthropic'),
+    { ok: true, headers: { 'anthropic-beta': 'x' } },
+  );
 });
 
 run('formatRequestHeadersJson 格式化已保存模板', () => {

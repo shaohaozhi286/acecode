@@ -51,6 +51,16 @@ SavedModelDraft good_openai_draft(const std::string& name = "local-lm") {
     return d;
 }
 
+SavedModelDraft good_anthropic_draft(const std::string& name = "claude") {
+    SavedModelDraft d;
+    d.name = name;
+    d.provider = "anthropic";
+    d.model = "claude-test";
+    d.base_url = "https://api.anthropic.com/v1";
+    d.api_key = "sk-ant-test";
+    return d;
+}
+
 } // namespace
 
 // 场景:add 一个空名字 → INVALID_NAME,cfg 不变。
@@ -80,7 +90,7 @@ TEST(SavedModelsEditor, AddRejectsNameTaken) {
 TEST(SavedModelsEditor, AddRejectsUnknownProvider) {
     auto cfg = make_cfg_with_one_default();
     auto d = good_openai_draft();
-    d.provider = "anthropic";
+    d.provider = "unknown";
     EXPECT_EQ(add_saved_model(cfg, d), SavedModelEditError::UNKNOWN_PROVIDER);
 }
 
@@ -117,6 +127,20 @@ TEST(SavedModelsEditor, AddAppendsValidDraft) {
     EXPECT_EQ(cfg.saved_models[1].name, "local-lm");
     EXPECT_EQ(cfg.saved_models[1].base_url, "http://localhost:1234/v1");
     EXPECT_EQ(cfg.saved_models[1].api_key, "sk-x");
+}
+
+// 场景:add Anthropic 成功 → 保存 base_url/api_key/request_headers。
+TEST(SavedModelsEditor, AddAppendsValidAnthropicDraft) {
+    auto cfg = make_cfg_with_one_default();
+    auto d = good_anthropic_draft("claude");
+    d.request_headers = {{"anthropic-beta", "prompt-caching-2024-07-31"}};
+    EXPECT_EQ(add_saved_model(cfg, d), SavedModelEditError::OK);
+    ASSERT_EQ(cfg.saved_models.size(), 2u);
+    EXPECT_EQ(cfg.saved_models[1].provider, "anthropic");
+    EXPECT_EQ(cfg.saved_models[1].base_url, "https://api.anthropic.com/v1");
+    EXPECT_EQ(cfg.saved_models[1].api_key, "sk-ant-test");
+    EXPECT_EQ(cfg.saved_models[1].request_headers.at("anthropic-beta"),
+              "prompt-caching-2024-07-31");
 }
 
 // 场景:add 带 context_window → profile 保存该手动上下文窗口。
@@ -384,7 +408,7 @@ TEST(SavedModelsEditor, AddLeavesCfgUnchangedOnAllRejections) {
     try_reject(taken, SavedModelEditError::NAME_TAKEN);
 
     auto bad_provider = good_openai_draft();
-    bad_provider.provider = "anthropic";
+    bad_provider.provider = "unknown";
     try_reject(bad_provider, SavedModelEditError::UNKNOWN_PROVIDER);
 
     auto disabled_provider = good_openai_draft();

@@ -5,6 +5,7 @@
 import { useTheme } from '../theme.jsx';
 import { toast } from './Toast.jsx';
 import { clsx } from '../lib/format.js';
+import { formatProgramVersion } from '../lib/webCoreInfo.js';
 import { NavigationArrowIcon, PanelToggleIcon, VsIcon } from './Icon.jsx';
 import {
   WindowControls,
@@ -60,6 +61,7 @@ export function TopBar({
   updateStatus = null,
   updateStarting = false,
   onStartUpdate,
+  appVersion = '',
 }) {
   const { theme, toggle } = useTheme();
   const { framelessDesktop, isMaximized } = useFramelessWindowState();
@@ -69,6 +71,8 @@ export function TopBar({
   const updateTitle = updateAvailable
     ? `发现新版 v${updateStatus.latest_version || ''}, 点击升级`
     : '';
+  const cleanAppVersion = typeof appVersion === 'string' ? appVersion.trim() : '';
+  const appVersionLabel = cleanAppVersion ? formatProgramVersion(cleanAppVersion) : '';
 
   const onTopBarMouseDown = (event) => {
     if (!framelessDesktop || event.button !== 0 || isInteractiveTarget(event.target)) return;
@@ -91,6 +95,11 @@ export function TopBar({
       <div className="flex items-center gap-1.5 select-none mr-1">
         <img src="/acecode-logo.png" alt="" width="20" height="20" className="block" draggable="false" />
         <span className="text-[15px] font-bold tracking-tight">ACECode</span>
+        {appVersionLabel && (
+          <span className="text-[11px] font-medium leading-none text-fg-mute opacity-75 tabular-nums">
+            {appVersionLabel}
+          </span>
+        )}
       </div>
 
       <QuickBtn
