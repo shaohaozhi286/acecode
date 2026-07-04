@@ -731,6 +731,7 @@ SessionRegistry::make_entry_locked(const std::string& id,
     auto entry = std::make_shared<SessionEntry>();
     entry->id = id;
     entry->cwd = opts.cwd.empty() ? deps_.cwd : opts.cwd;
+    entry->subagent_depth = opts.subagent_depth;
     entry->no_workspace = opts.no_workspace || (resumed_meta && resumed_meta->no_workspace);
     if (entry->no_workspace && !entry->cwd.empty()) {
         std::error_code ec;

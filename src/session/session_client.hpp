@@ -116,6 +116,11 @@ struct SessionOptions {
     // 是否在 session 创建后立刻启动 agent loop 处理 initial_user_message。
     // 留 false 让客户端控制时机。
     bool auto_start = false;
+
+    // 子代理派生深度:0 = 普通会话,1 = spawn_subagent 创建的子会话。
+    // 子代理不允许再派生(spawn_subagent 工具按此拒绝),防递归失控。
+    // 运行时字段,不持久化 —— daemon 重启后子会话恢复为普通会话。
+    int subagent_depth = 0;
 };
 
 // ----- Current session model state -----

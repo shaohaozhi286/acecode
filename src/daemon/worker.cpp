@@ -2,6 +2,7 @@
 
 #include "../desktop/folder_picker.hpp"
 #include "../desktop/open_in_explorer.hpp"
+#include "../tool/spawn_subagent_tool.hpp"
 #include "../desktop/workspace_registry.hpp"
 #include "guid.hpp"
 #include "heartbeat.hpp"
@@ -396,6 +397,13 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     tools.register_tool(acecode::create_skills_list_tool(skill_registry, &cfg_mut));
     tools.register_tool(acecode::create_skill_view_tool(skill_registry, &cfg_mut));
 
+    // spawn_subagent / wait_subagent:daemon 专属(TUI 无 SessionRegistry 不注册)。
+    // ToolExecutor 先于 SessionRegistry 构造,deps 用 shared_ptr 延迟回填 —— 回填
+    // 发生在 server 启动前,不存在工具已被调用的并发窗口。
+    auto subagent_deps = std::make_shared<acecode::SubagentToolDeps>();
+    tools.register_tool(acecode::create_spawn_subagent_tool(subagent_deps));
+    tools.register_tool(acecode::create_wait_subagent_tool(subagent_deps));
+
     acecode::daemon::DaemonMcpRuntime mcp_runtime;
     mcp_runtime.start(cfg_mut, tools);
 
@@ -418,6 +426,9 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
 
     acecode::SessionRegistry registry(std::move(reg_deps));
     acecode::LocalSessionClient client(registry);
+    subagent_deps->registry = &registry;
+    subagent_deps->client   = &client;
+    subagent_deps->config   = &cfg_mut;
 
     // 控制台 PTY 注册表(add-console-dock):启动期探测一次 backend,
     // 析构时 stop_all 杀掉全部 shell(栈对象,server.run() 返回后回收)。

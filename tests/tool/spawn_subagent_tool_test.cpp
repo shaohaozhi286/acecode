@@ -1,0 +1,220 @@
+// 覆盖 src/tool/spawn_subagent_tool.cpp。
+//
+// spawn_subagent / wait_subagent 是 daemon 的子代理工具:在 SessionRegistry
+// 里创建独立子会话并注入首条消息,父会话上下文只吃回最终摘要。一旦回归:
+//   - 深度限制失效 → 子代理递归派生,会话数失控
+//   - wait 判定失效 → 父会话死等 / 提前返回空结果
+//   - deps 未回填时崩溃(而不是报"仅 daemon 可用")
+//
+// 测试不真跑 LLM:EchoStreamProvider 的 chat_stream 立即产出固定文本,
+// 让子会话 turn 有真实的 assistant 消息可供 wait 逻辑取回。
+
+#include <gtest/gtest.h>
+
+#include "config/config.hpp"
+#include "permissions.hpp"
+#include "session/local_session_client.hpp"
+#include "session/session_registry.hpp"
+#include "tool/spawn_subagent_tool.hpp"
+#include "tool/tool_executor.hpp"
+
+#include <chrono>
+#include <filesystem>
+#include <memory>
+#include <random>
+
+using namespace std::chrono_literals;
+namespace fs = std::filesystem;
+
+namespace {
+
+// 立即回复固定文本的 stub:子会话 turn 会产生一条 assistant 消息。
+class EchoStreamProvider : public acecode::LlmProvider {
+public:
+    acecode::ChatResponse chat(
+        const std::vector<acecode::ChatMessage>&,
+        const std::vector<acecode::ToolDef>&) override {
+        acecode::ChatResponse resp;
+        resp.content = "subagent-final-reply";
+        resp.finish_reason = "stop";
+        return resp;
+    }
+
+    void chat_stream(const std::vector<acecode::ChatMessage>&,
+                     const std::vector<acecode::ToolDef>&,
+                     const acecode::StreamCallback& callback,
+                     std::atomic<bool>* = nullptr) override {
+        acecode::StreamEvent delta;
+        delta.type = acecode::StreamEventType::Delta;
+        delta.content = "subagent-final-reply";
+        callback(delta);
+        acecode::StreamEvent done;
+        done.type = acecode::StreamEventType::Done;
+        callback(done);
+    }
+
+    std::string name() const override { return "echo-stub"; }
+    bool is_authenticated() override { return true; }
+    std::string model() const override { return "echo-stub"; }
+    void set_model(const std::string&) override {}
+};
+
+struct SubagentFixture {
+    acecode::ToolExecutor tools;
+    acecode::PermissionManager permissions;
+    std::shared_ptr<acecode::LlmProvider> provider;
+    acecode::SessionRegistry registry;
+    acecode::LocalSessionClient client;
+    std::shared_ptr<acecode::SubagentToolDeps> deps;
+    fs::path cwd;
+
+    SubagentFixture()
+        : registry(make_deps(*this)), client(registry) {
+        std::random_device rd;
+        cwd = fs::temp_directory_path() /
+              ("acecode_subagent_test_" + std::to_string(rd()));
+        fs::create_directories(cwd);
+        deps = std::make_shared<acecode::SubagentToolDeps>();
+        deps->registry = &registry;
+        deps->client = &client;
+        tools.register_tool(acecode::create_spawn_subagent_tool(deps));
+        tools.register_tool(acecode::create_wait_subagent_tool(deps));
+    }
+
+    ~SubagentFixture() {
+        std::error_code ec;
+        fs::remove_all(cwd, ec);
+    }
+
+    static acecode::SessionRegistryDeps make_deps(SubagentFixture& self) {
+        acecode::SessionRegistryDeps d;
+        d.provider_accessor = [&self] { return self.provider; };
+        d.tools = &self.tools;
+        d.cwd = "/tmp/subagent_test_registry";
+        d.template_permissions = &self.permissions;
+        return d;
+    }
+
+    acecode::ToolContext ctx_for(const std::string& session_id) {
+        acecode::ToolContext ctx;
+        ctx.cwd = cwd.string();
+        if (!session_id.empty()) {
+            if (auto entry = registry.acquire(session_id)) {
+                ctx.session_manager = entry->sm.get();
+            }
+        }
+        return ctx;
+    }
+};
+
+} // namespace
+
+// 场景: deps 未回填(TUI / registry 尚未构造)→ 报"仅 daemon 可用"而不是
+// 解引用空指针崩溃。
+TEST(SpawnSubagentTool, RejectsWhenDepsMissing) {
+    auto empty = std::make_shared<acecode::SubagentToolDeps>();
+    auto tool = acecode::create_spawn_subagent_tool(empty);
+    auto r = tool.execute(R"({"prompt":"hi"})", acecode::ToolContext{});
+    EXPECT_FALSE(r.success);
+    EXPECT_NE(r.output.find("daemon"), std::string::npos);
+}
+
+// 场景: prompt 缺失 → 参数错误,不创建任何会话。
+TEST(SpawnSubagentTool, RejectsEmptyPrompt) {
+    SubagentFixture fx;
+    auto r = fx.tools.execute("spawn_subagent", R"({})", fx.ctx_for(""));
+    EXPECT_FALSE(r.success);
+    EXPECT_EQ(fx.registry.size(), 0u);
+}
+
+// 场景: wait=false 点火即返 —— 返回 subagent_session_id,registry 里能找到
+// 该会话且 subagent_depth=1(供后续深度限制判定)。这是流水线接力的形态。
+TEST(SpawnSubagentTool, FireAndForgetCreatesIsolatedSession) {
+    SubagentFixture fx;
+    fx.provider = std::make_shared<EchoStreamProvider>();
+
+    auto r = fx.tools.execute("spawn_subagent",
+                              R"({"prompt":"stage two go","wait":false})",
+                              fx.ctx_for(""));
+    ASSERT_TRUE(r.success) << r.output;
+    ASSERT_TRUE(r.metadata.contains("subagent_session_id"));
+    const std::string child_id = r.metadata["subagent_session_id"].get<std::string>();
+    ASSERT_FALSE(child_id.empty());
+
+    auto child = fx.registry.acquire(child_id);
+    ASSERT_NE(child, nullptr);
+    EXPECT_EQ(child->subagent_depth, 1);
+    fx.registry.destroy(child_id);
+}
+
+// 场景: 子代理不能再派生子代理 —— 用子会话自己的 SessionManager 作为调用
+// 上下文再次 spawn,必须被拒绝且不产生新会话。回归表现:递归派生失控。
+TEST(SpawnSubagentTool, SubagentCannotSpawnFurther) {
+    SubagentFixture fx;
+    fx.provider = std::make_shared<EchoStreamProvider>();
+
+    auto first = fx.tools.execute("spawn_subagent",
+                                  R"({"prompt":"child","wait":false})",
+                                  fx.ctx_for(""));
+    ASSERT_TRUE(first.success) << first.output;
+    const std::string child_id =
+        first.metadata["subagent_session_id"].get<std::string>();
+    const std::size_t before = fx.registry.size();
+
+    auto nested = fx.tools.execute("spawn_subagent",
+                                   R"({"prompt":"grandchild","wait":false})",
+                                   fx.ctx_for(child_id));
+    EXPECT_FALSE(nested.success);
+    EXPECT_NE(nested.output.find("cannot spawn"), std::string::npos);
+    EXPECT_EQ(fx.registry.size(), before) << "被拒绝时不应创建新会话";
+    fx.registry.destroy(child_id);
+}
+
+// 场景: wait=true(默认)阻塞至子会话本轮结束,并把最终 assistant 答复带回
+// 父上下文。EchoStreamProvider 立即完成,wait 逻辑要能在"从未观测到 busy"
+// (turn 快于轮询间隔)的情况下靠新消息判定完成,而不是死等。
+TEST(SpawnSubagentTool, WaitReturnsFinalAssistantReply) {
+    SubagentFixture fx;
+    fx.provider = std::make_shared<EchoStreamProvider>();
+
+    auto r = fx.tools.execute("spawn_subagent",
+                              R"({"prompt":"do the work","timeout_seconds":30})",
+                              fx.ctx_for(""));
+    ASSERT_TRUE(r.success) << r.output;
+    EXPECT_NE(r.output.find("subagent-final-reply"), std::string::npos)
+        << "父上下文应拿到子会话的最终答复,实际: " << r.output;
+    ASSERT_TRUE(r.metadata.contains("subagent_session_id"));
+    fx.registry.destroy(r.metadata["subagent_session_id"].get<std::string>());
+}
+
+// 场景: wait_subagent 对不存在的 session id → 明确报错,不阻塞。
+TEST(WaitSubagentTool, UnknownSessionRejected) {
+    SubagentFixture fx;
+    auto r = fx.tools.execute("wait_subagent",
+                              R"({"session_id":"nope-123"})",
+                              fx.ctx_for(""));
+    EXPECT_FALSE(r.success);
+    EXPECT_NE(r.output.find("unknown session"), std::string::npos);
+}
+
+// 场景: wait_subagent 对已完成的子会话 → 直接取回其最新答复(配合
+// spawn(wait=false) 的 fan-out / join 用法)。
+TEST(WaitSubagentTool, CollectsReplyFromFinishedSubagent) {
+    SubagentFixture fx;
+    fx.provider = std::make_shared<EchoStreamProvider>();
+
+    auto spawned = fx.tools.execute("spawn_subagent",
+                                    R"({"prompt":"go","wait":false})",
+                                    fx.ctx_for(""));
+    ASSERT_TRUE(spawned.success) << spawned.output;
+    const std::string child_id =
+        spawned.metadata["subagent_session_id"].get<std::string>();
+
+    auto r = fx.tools.execute(
+        "wait_subagent",
+        std::string(R"({"session_id":")") + child_id + R"(","timeout_seconds":30})",
+        fx.ctx_for(""));
+    ASSERT_TRUE(r.success) << r.output;
+    EXPECT_NE(r.output.find("subagent-final-reply"), std::string::npos);
+    fx.registry.destroy(child_id);
+}

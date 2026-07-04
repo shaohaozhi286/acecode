@@ -32,6 +32,8 @@ Use the command set in [AGENTS.md](AGENTS.md) as the source of truth. Important 
 
 Core tools are registered for both TUI and daemon paths: `bash`, `file_read`, `file_write`, `file_edit`, `grep`, `glob`, `task_complete`, `AskUserQuestion`, skill tools, memory tools, optional `web_search`, and MCP tools. `ToolResult` can carry summaries and hunks so TUI/web resume can render useful compact rows instead of raw output folds.
 
+`spawn_subagent` / `wait_subagent` are daemon-only (registered in `worker.cpp`, not in TUI): a sub-agent is a normal SessionRegistry session (isolated context, visible in the sidebar) created with the parent's cwd and permission mode. `spawn_subagent(prompt, wait=true)` blocks until the child turn finishes and returns its final assistant reply into the parent context; `wait=false` is fire-and-forget for pipeline handoff, joined later via `wait_subagent(session_id)`. Prompts starting with `/` go through the same skill-command expansion as Web input. Sub-agents cannot spawn further sub-agents (`SessionEntry::subagent_depth`, runtime-only, not persisted). Implementation: [src/tool/spawn_subagent_tool.cpp](src/tool/spawn_subagent_tool.cpp); deps are late-bound via shared_ptr because ToolExecutor is constructed before SessionRegistry in worker.cpp.
+
 `bash_tool` streams cleaned output, polls abort state, truncates very large output, and supports POSIX `stdin_inputs`. File tools should preserve checkpoint hooks by calling `track_file_write_before` before mutating files.
 
 ## Sessions And Persistence
