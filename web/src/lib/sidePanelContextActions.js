@@ -1,5 +1,5 @@
 import { DESKTOP_CONTEXT_ACTIONS } from './desktopContextMenu.js';
-import { normalizeTreePath } from './fileTreeChangeStatus.js';
+import { normalizeWorkspaceRelativePath } from './fileTreeChangeStatus.js';
 
 export const SIDE_PANEL_CONTEXT_EFFECTS = Object.freeze({
   OPEN_FILE_PREVIEW: 'open_file_preview',
@@ -11,15 +11,15 @@ export function sidePanelContextActionEffect({
   action = '',
   target = null,
   filesEnabled = true,
+  cwd = '',
 } = {}) {
   const filePath = target?.type === 'review'
     ? target.file
     : (target?.type === 'file' ? (target.relativePath || target.path) : '');
-  const normalizedFilePath = normalizeTreePath(filePath);
+  const normalizedFilePath = normalizeWorkspaceRelativePath(filePath, cwd);
   if (!normalizedFilePath) return null;
 
   if (action === DESKTOP_CONTEXT_ACTIONS.PREVIEW_FILE) {
-    if (!filesEnabled) return null;
     return {
       type: SIDE_PANEL_CONTEXT_EFFECTS.OPEN_FILE_PREVIEW,
       filePath,

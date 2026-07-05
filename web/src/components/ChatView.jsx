@@ -102,6 +102,7 @@ import {
   closeVisiblePreviewTabsConfirmationMessage,
   openFileTab,
   openSessionChangesTab,
+  previewFileLocation,
   previewScopeKey,
   reorderPreviewTab,
   updateSessionChangesTab,
@@ -205,6 +206,15 @@ function collectRowMetrics(container) {
       bottom: rect.bottom - containerRect.top + container.scrollTop,
     };
   });
+}
+
+function chatRowClassName(item, extra = '') {
+  const role = item?.kind === 'msg' ? (item.role || '') : (item?.kind || '');
+  return clsx(
+    'ace-chat-row flex flex-col',
+    (item?.kind === 'tool' || role === 'system') && 'ace-chat-row-assistant-gutter',
+    extra,
+  );
 }
 
 function formatElapsedSeconds(startedAtMs, nowMs) {
@@ -2122,11 +2132,14 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   const sidePanelCwd = sidePanelFilesEnabled ? (ref?.cwd || health?.cwd || '') : '';
   const sidePanelMounted = showSidePanel && !!sid;
   const previewScope = useMemo(
-    () => previewScopeKey({
-      cwd: sidePanelCwd,
-      workspaceHash: sidePanelFilesEnabled ? (ref?.workspaceHash || '') : '',
-    }),
-    [ref?.workspaceHash, sidePanelCwd, sidePanelFilesEnabled],
+    () => {
+      if (!sidePanelFilesEnabled) return sid || '';
+      return previewScopeKey({
+        cwd: sidePanelCwd,
+        workspaceHash: ref?.workspaceHash || '',
+      });
+    },
+    [ref?.workspaceHash, sid, sidePanelCwd, sidePanelFilesEnabled],
   );
   const previewContext = useMemo(
     () => ({ scopeKey: previewScope, sessionId: sid }),
@@ -2183,14 +2196,15 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   }, [onPreviewPanelVisibleChange, previewPanelVisible]);
 
   const openFilePreview = useCallback((path) => {
-    if (!sidePanelFilesEnabled || !sid || !previewScope || !path) return;
+    const location = previewFileLocation({ cwd: sidePanelCwd, path });
+    if (!sid || !previewScope || !location.cwd || !location.path) return;
     setPreviewTabState((prev) => openFileTab(prev, {
       scopeKey: previewScope,
       sessionId: sid,
-      cwd: sidePanelCwd,
-      path,
+      cwd: location.cwd,
+      path: location.path,
     }));
-  }, [previewScope, sid, sidePanelCwd, sidePanelFilesEnabled]);
+  }, [previewScope, sid, sidePanelCwd]);
 
   const openSessionChangePreview = useCallback((filePath) => {
     if (!sid || !filePath) return;
@@ -2591,7 +2605,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
               return (
                 <div
                   key={it.id}
-                  className="ace-chat-row flex flex-col"
+                  className={chatRowClassName(it)}
                   data-chat-row="true"
                   data-chat-item-id={String(it.id)}
                   data-chat-kind={it.kind || ''}
@@ -2606,7 +2620,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
               return (
                 <div
                   key={it.id}
-                  className="ace-chat-row flex flex-col"
+                  className={chatRowClassName(it)}
                   data-chat-row="true"
                   data-chat-item-id={String(it.id)}
                   data-chat-kind={it.kind || ''}
@@ -2623,7 +2637,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
               return (
                 <Fragment key={it.id}>
                   <div
-                    className="ace-chat-row flex flex-col"
+                    className={chatRowClassName(it)}
                     data-chat-row="true"
                     data-chat-item-id={String(it.id)}
                     data-chat-kind={it.kind || ''}
@@ -2655,7 +2669,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
             return (
               <Fragment key={it.id}>
                 <div
-                  className="ace-chat-row flex flex-col"
+                  className={chatRowClassName(it)}
                   data-chat-row="true"
                   data-chat-item-id={String(it.id)}
                   data-chat-kind={it.kind || ''}

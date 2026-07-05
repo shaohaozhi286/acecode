@@ -1,3 +1,5 @@
+import { normalizeTreePath } from './fileTreeChangeStatus.js';
+
 export const DESKTOP_CONTEXT_ACTIONS = Object.freeze({
   OPEN_IN_EXPLORER: 'open_in_explorer',
   LOCATE_FILE: 'locate_file',
@@ -478,7 +480,10 @@ export function contextTargetsFromElement(target) {
 
 export function joinWorkspacePath(cwd = '', relativePath = '') {
   const base = String(cwd || '').replace(/\\/g, '/').replace(/[\\/]+$/g, '');
-  const rel = String(relativePath || '').replace(/\\/g, '/').replace(/^[\\/]+/g, '');
+  const rawRel = String(relativePath || '').replace(/\\/g, '/');
+  const normalizedRel = normalizeTreePath(rawRel);
+  if (/^[A-Za-z]:\//.test(normalizedRel)) return normalizedRel;
+  const rel = rawRel.replace(/^[\\/]+/g, '');
   if (!base) return rel;
   return rel ? `${base}/${rel}` : base;
 }

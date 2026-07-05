@@ -233,10 +233,11 @@ export function PreviewDetailsPanel({
         />
       );
     }
+    const activeCwd = active.type === PREVIEW_TAB_TYPES.FILE ? (active.cwd || cwd) : cwd;
     return (
       <FilePreviewContent
         api={api}
-        cwd={cwd}
+        cwd={activeCwd}
         path={active.path}
         wrapPreview={wrapPreview}
         onToggleWrapPreview={() => setWrapPreview((prev) => !prev)}

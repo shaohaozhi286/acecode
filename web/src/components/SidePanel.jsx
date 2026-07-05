@@ -27,6 +27,7 @@ import {
   entriesWithReviewRows,
   fileChangeStatusTitle,
   normalizeTreePath,
+  normalizeWorkspaceRelativePath,
   statusForTreeEntry,
 } from '../lib/fileTreeChangeStatus.js';
 import { fileTreeReloadPaths } from '../lib/fileTreeRefresh.js';
@@ -411,8 +412,8 @@ export function SidePanel({
   const effectiveChangeGroups = changeGroups || fallbackChangeGroups || [];
   const effectiveChangeSummary = changeSummary || summarizeChangeGroups(effectiveChangeGroups);
   const reviewStatusByPath = useMemo(
-    () => buildReviewStatusMap(effectiveChangeGroups),
-    [effectiveChangeGroups],
+    () => buildReviewStatusMap(effectiveChangeGroups, cwd),
+    [effectiveChangeGroups, cwd],
   );
 
   const setTreeCache = useCallback((updater) => {
@@ -490,19 +491,20 @@ export function SidePanel({
     const handler = (event) => {
       const detail = event.detail || {};
       const { action, target } = detail;
-      const effect = sidePanelContextActionEffect({ action, target, filesEnabled });
+      const effect = sidePanelContextActionEffect({ action, target, filesEnabled, cwd });
       if (!effect) return;
 
       if (effect.type === SIDE_PANEL_CONTEXT_EFFECTS.OPEN_FILE_PREVIEW) {
         detail.handled = true;
         setSelectedPath(effect.normalizedFilePath);
-        onOpenFilePreview?.(effect.filePath);
+        onOpenFilePreview?.(effect.normalizedFilePath);
       } else if (effect.type === SIDE_PANEL_CONTEXT_EFFECTS.LOCATE_IN_FILE_TREE) {
         detail.handled = true;
-        setSelectedPath(effect.normalizedFilePath);
+        const relativeFilePath = normalizeWorkspaceRelativePath(effect.normalizedFilePath, cwd);
+        setSelectedPath(relativeFilePath);
         setExpandedDirs((prev) => {
           const next = new Set(prev);
-          for (const dir of pathAncestors(effect.normalizedFilePath)) next.add(dir);
+          for (const dir of pathAncestors(relativeFilePath)) next.add(dir);
           return next;
         });
         setActiveTab('files');
@@ -513,7 +515,7 @@ export function SidePanel({
     };
     window.addEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
     return () => window.removeEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
-  }, [filesEnabled, onOpenFilePreview, refreshFileTree, setExpandedDirs]);
+  }, [cwd, filesEnabled, onOpenFilePreview, refreshFileTree, setExpandedDirs]);
 
   return (
     // 宽度由父级 wrapper(.ace-side-panel-shell)控制,这里 100% 占满。width prop

@@ -7,6 +7,7 @@ import {
   closeVisiblePreviewTabsConfirmationMessage,
   openFileTab,
   openSessionChangesTab,
+  previewFileLocation,
   reorderPreviewTab,
   updateSessionChangesTab,
   visiblePreviewTabs,
@@ -31,6 +32,21 @@ run('openFileTab scopes files by workspace and reuses duplicate paths', () => {
   assert.equal(visiblePreviewTabs(state, { scopeKey: 'workspace-a', sessionId: 's1' }).length, 1);
   assert.equal(visiblePreviewTabs(state, { scopeKey: 'workspace-b', sessionId: 's2' }).length, 1);
   assert.equal(activePreviewTab(state, { scopeKey: 'workspace-a', sessionId: 's1' }).path, 'src/main.cpp');
+});
+
+run('previewFileLocation splits absolute Windows paths when cwd is unavailable', () => {
+  assert.deepEqual(
+    previewFileLocation({ cwd: '', path: 'C:\\Users\\shao\\ttt\\hello.txt' }),
+    { cwd: 'C:/Users/shao/ttt', path: 'hello.txt' },
+  );
+  assert.deepEqual(
+    previewFileLocation({ cwd: 'C:/repo', path: 'src/main.cpp' }),
+    { cwd: 'C:/repo', path: 'src/main.cpp' },
+  );
+  assert.deepEqual(
+    previewFileLocation({ cwd: '/home/shao/repo/', path: 'src/main.cpp' }),
+    { cwd: '/home/shao/repo', path: 'src/main.cpp' },
+  );
 });
 
 run('openSessionChangesTab scopes change tab by session id', () => {

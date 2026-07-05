@@ -395,6 +395,7 @@ test('workspace 路径和相对目录拼接', () => {
   assert.equal(joinWorkspacePath('C:/repo', ''), 'C:/repo');
   assert.equal(joinWorkspacePath('C:/repo/', 'src/tool'), 'C:/repo/src/tool');
   assert.equal(joinWorkspacePath('C:/repo\\', '\\src\\tool'), 'C:/repo/src/tool');
+  assert.equal(joinWorkspacePath('C:/repo', 'C:\\repo\\src\\tool'), 'C:/repo/src/tool');
   assert.equal(containingWorkspacePath('C:/repo', 'src/tool/a.cpp'), 'C:/repo/src/tool');
   assert.equal(containingWorkspacePath('C:/repo', 'a.cpp'), 'C:/repo');
 });

@@ -2891,6 +2891,18 @@ body {
   color: var(--ace-fg);
 }
 
+.ace-chat-row {
+  min-width: 0;
+}
+.ace-chat-row-assistant-gutter {
+  align-items: flex-start;
+}
+.ace-chat-row-assistant-gutter > * {
+  margin-left: 32px;
+  width: calc(100% - 32px);
+  max-width: 88%;
+}
+
 /* ── 控制台停靠区(add-console-dock) ──────────────────────────────── */
 /* 折叠 = 高度归 0 + 透明度过渡,xterm 实例与 WS 保活(SidePanel 同模式)。 */
 .ace-console-dock {

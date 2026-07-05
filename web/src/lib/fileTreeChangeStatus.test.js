@@ -3,6 +3,7 @@ import {
   buildReviewStatusMap,
   entriesWithReviewRows,
   normalizeTreePath,
+  normalizeWorkspaceRelativePath,
   reviewStatusForGroup,
   statusForTreeEntry,
 } from './fileTreeChangeStatus.js';
@@ -57,6 +58,25 @@ run('statusForTreeEntry: 文件 exact match,目录聚合子级状态', () => {
 run('normalizeTreePath: 定位路径与文件树路径使用同一形态', () => {
   assert.equal(normalizeTreePath('.\\src\\deep\\main.cpp'), 'src/deep/main.cpp');
   assert.equal(normalizeTreePath('./src//deep/main.cpp/'), 'src/deep/main.cpp');
+});
+
+run('normalizeWorkspaceRelativePath: 绝对路径按 cwd 裁成文件树相对路径', () => {
+  assert.equal(
+    normalizeWorkspaceRelativePath('C:\\Users\\shao\\acecode\\web\\src\\InputBar.jsx', 'c:/users/shao/acecode'),
+    'web/src/InputBar.jsx',
+  );
+  assert.equal(
+    normalizeWorkspaceRelativePath('\\\\?\\C:\\Users\\shao\\acecode\\src\\main.cpp', 'C:/Users/shao/acecode'),
+    'src/main.cpp',
+  );
+});
+
+run('buildReviewStatusMap: 绝对路径变更状态映射到相对文件树路径', () => {
+  const statuses = buildReviewStatusMap([
+    { file: 'C:/repo/src/deep/main.cpp', totalAdditions: 1, totalDeletions: 1, hunks: [{ old_count: 1, new_count: 1 }] },
+  ], 'c:/repo');
+
+  assert.equal(statuses.get('src/deep/main.cpp'), 'M');
 });
 
 run('entriesWithReviewRows: 审查里有但文件列表未返回的直接子项会补行', () => {

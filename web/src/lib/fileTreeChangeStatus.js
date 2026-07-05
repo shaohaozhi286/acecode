@@ -18,10 +18,25 @@ function finiteNumber(value) {
 export function normalizeTreePath(path) {
   return String(path || '')
     .replace(/\\/g, '/')
+    .replace(/^\/\/\?\//, '')
     .replace(/^\.\/+/, '')
     .replace(/\/+/g, '/')
     .replace(/^\/+/, '')
     .replace(/\/+$/, '');
+}
+
+export function normalizeWorkspaceRelativePath(path, cwd = '') {
+  const normalized = normalizeTreePath(path);
+  const root = normalizeTreePath(cwd);
+  if (!normalized || !root) return normalized;
+
+  const normalizedLower = normalized.toLowerCase();
+  const rootLower = root.toLowerCase();
+  if (normalizedLower === rootLower) return '';
+  if (normalizedLower.startsWith(`${rootLower}/`)) {
+    return normalized.slice(root.length + 1);
+  }
+  return normalized;
 }
 
 function normalizeStatus(status) {
@@ -84,11 +99,11 @@ export function reviewStatusForGroup(group) {
   return '';
 }
 
-export function buildReviewStatusMap(groups) {
+export function buildReviewStatusMap(groups, cwd = '') {
   const statuses = new Map();
   if (!Array.isArray(groups)) return statuses;
   for (const group of groups) {
-    const path = normalizeTreePath(group?.file);
+    const path = normalizeWorkspaceRelativePath(group?.file, cwd);
     const status = reviewStatusForGroup(group);
     if (!path || !status) continue;
     statuses.set(path, strongerStatus(statuses.get(path), status));

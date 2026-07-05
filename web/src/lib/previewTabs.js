@@ -9,6 +9,32 @@ export function previewScopeKey({ cwd = '', workspaceHash = '' } = {}) {
   return workspaceHash || cwd || '';
 }
 
+function normalizePreviewCwd(cwd = '') {
+  return String(cwd || '')
+    .replace(/\\/g, '/')
+    .replace(/^\/\/\?\//, '')
+    .replace(/\/+$/g, '');
+}
+
+export function previewFileLocation({ cwd = '', path = '' } = {}) {
+  const normalizedCwd = normalizePreviewCwd(cwd);
+  const normalizedPath = normalizeTreePath(path);
+  if (!normalizedPath) return { cwd: normalizedCwd, path: '' };
+  if (normalizedCwd) return { cwd: normalizedCwd, path: normalizedPath };
+
+  if (/^[A-Za-z]:\//.test(normalizedPath)) {
+    const slash = normalizedPath.lastIndexOf('/');
+    if (slash > 2 && slash < normalizedPath.length - 1) {
+      return {
+        cwd: normalizedPath.slice(0, slash),
+        path: normalizedPath.slice(slash + 1),
+      };
+    }
+  }
+
+  return { cwd: normalizedCwd, path: normalizedPath };
+}
+
 export function visiblePreviewTabs(state, { scopeKey = '', sessionId = '' } = {}) {
   const source = state && typeof state === 'object' ? state : {};
   const fileTabs = source.fileTabsByScope?.[scopeKey] || [];
