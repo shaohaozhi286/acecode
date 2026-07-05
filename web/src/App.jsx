@@ -115,6 +115,10 @@ export function App() {
   const [settingsNavKey, setSettingsNavKey] = useState('general');
   const [permReqs,     setPermReqs]     = useState([]);
   const [questionReqs, setQuestionReqs] = useState([]);
+  // 当前主会话的后台任务(spawn_subagent 子会话)索引,由 ChatView 上报。
+  // 用于:1) 子任务的 question_request 在主会话可见;2) 权限/问题弹窗的
+  // 「来自后台任务」来源标记。
+  const [subagentIndex, setSubagentIndex] = useState({ parentId: '', titles: {} });
   const [searchOpen,   setSearchOpen]   = useState(false);
   const [updateStatus, setUpdateStatus] = useState(null);
   const [updateStarting, setUpdateStarting] = useState(false);
@@ -466,6 +470,13 @@ export function App() {
     }
   }, [health, navigateToRef]);
 
+  const handleSubagentTasksChange = useCallback((info) => {
+    setSubagentIndex({
+      parentId: info?.parentId || '',
+      titles: info?.titles && typeof info.titles === 'object' ? info.titles : {},
+    });
+  }, []);
+
   const handlePermissionModeChanged = useCallback(({ sessionId, mode }) => {
     if (mode !== 'yolo' || !sessionId) return;
     setPermReqs((prev) => prev.filter((req) => {
@@ -606,7 +617,11 @@ export function App() {
   const visibleQuestionReq = !permReq
     ? questionReqs.find((req) => {
         const reqSid = req?.session_id || '';
-        return !reqSid || (activeId && reqSid === activeId);
+        if (!reqSid || (activeId && reqSid === activeId)) return true;
+        // 后台任务子会话的提问在其父会话(当前主会话)里显示与回答。
+        return !!(activeId &&
+                  subagentIndex.parentId === activeId &&
+                  subagentIndex.titles[reqSid]);
       }) || null
     : null;
   const resolveVisibleQuestion = () => {
@@ -691,6 +706,7 @@ export function App() {
                 questionRequest={visibleQuestionReq}
                 onQuestionResolve={resolveVisibleQuestion}
                 onPermissionModeChanged={handlePermissionModeChanged}
+                onSubagentTasksChange={handleSubagentTasksChange}
               />
             )}
           </div>
@@ -725,6 +741,9 @@ export function App() {
         {permReq      && (
           <PermissionModal
             request={permReq}
+            originLabel={permReq.session_id && subagentIndex.titles[permReq.session_id]
+              ? `来自后台任务:${subagentIndex.titles[permReq.session_id]}`
+              : ''}
             onResolve={() => setPermReqs((prev) => prev.slice(1))}
           />
         )}

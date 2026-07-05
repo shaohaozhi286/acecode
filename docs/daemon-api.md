@@ -454,8 +454,23 @@ The following routes operate on the daemon compatibility workspace:
 - `PUT /api/sessions/:id/draft`
 - `DELETE /api/sessions/:id/todos`
 
-`GET /api/sessions` returns `SessionSummary[]`, not a wrapper object. The
-compatibility `POST /api/sessions` response includes:
+`GET /api/sessions` returns `SessionSummary[]`, not a wrapper object.
+
+Sub-agent sessions (created by the `spawn_subagent` tool; their meta carries a
+persisted `parent_session_id`) are excluded from session lists by default so
+they never appear in the sidebar or the global search. Query them explicitly:
+
+- `GET /api/sessions?parent=<session_id>` — only the sub-agent sessions spawned
+  by that parent (background-tasks panel data source). The active part of the
+  merge skips workspace filtering; the disk part still scans the requested
+  workspace's project directory.
+- `GET /api/workspaces/:hash/sessions?parent=<session_id>` — same semantics on
+  the workspace-scoped route.
+
+`SessionSummary` includes a `parent_session_id` field (empty string for normal
+sessions).
+
+The compatibility `POST /api/sessions` response includes:
 
 ```json
 {
@@ -472,6 +487,16 @@ compatibility `POST /api/sessions` response includes:
 Destroys an active in-memory session: aborts the current turn, joins the worker
 thread, and removes it from the registry. It does not delete disk history.
 Returns `204`; returns `503` when the session client is unavailable.
+
+`DELETE /api/sessions/:id?purge=1` is the background-tasks "clear" action:
+destroy plus permanent deletion of the session's disk data (`<id>.jsonl`,
+`<id>.meta.json`, and the per-session `<id>/` directory holding persisted tool
+results). Guard rails:
+
+- `400 {"error":"only subagent sessions can be purged"}` when the target has no
+  `parent_session_id` — main sessions cannot be purged through this path.
+- `409 {"error":"session is busy; abort it first"}` while the sub-agent is
+  running a turn.
 
 ### Archive, title, draft, and todos
 

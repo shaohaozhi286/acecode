@@ -651,6 +651,9 @@ json WebServer::Impl::session_info_to_json(const SessionInfo& s, const SessionMe
         o["todo_summary"] = todo_summary_to_json(m->todos);
     }
     o["archived"]      = m ? m->archived : false;
+    o["parent_session_id"] = !s.parent_session_id.empty()
+        ? s.parent_session_id
+        : (m ? m->parent_session_id : std::string{});
     append_attention_fields(o, s.id, workspace_hash, cwd, s.busy);
     return o;
 }
@@ -686,6 +689,7 @@ json WebServer::Impl::session_meta_to_json(const SessionMeta& m, const std::stri
         o["todo_summary"] = todo_summary_to_json(m.todos);
     }
     o["archived"]       = m.archived;
+    o["parent_session_id"] = m.parent_session_id;
     append_attention_fields(o, m.id, effective_workspace_hash, effective_cwd, false);
     return o;
 }
@@ -778,7 +782,8 @@ void WebServer::Impl::append_session_runtime_snapshot(json& wrapper,
 
 json WebServer::Impl::sessions_for_workspace(const acecode::desktop::WorkspaceMeta& ws,
                                                bool archived_only,
-                                               bool include_no_workspace) const {
+                                               bool include_no_workspace,
+                                               const std::string& parent_filter) const {
     std::vector<SessionInfo> active;
     if (deps.session_client) active = deps.session_client->list_sessions();
 
@@ -798,13 +803,25 @@ json WebServer::Impl::sessions_for_workspace(const acecode::desktop::WorkspaceMe
         disk_by_id[m.id] = m;
     }
 
+    // 子会话过滤:常规列表(parent_filter 空)隐藏所有后台任务子会话;
+    // 后台任务查询(parent_filter 非空)只保留指定父会话的子会话。
+    const auto parent_mismatch = [&](const std::string& parent_id) {
+        if (parent_filter.empty()) return !parent_id.empty();
+        return parent_id != parent_filter;
+    };
+
     std::unordered_set<std::string> seen;
     json arr = json::array();
     for (const auto& s : active) {
-        if (s.no_workspace) {
-            if (!include_no_workspace) continue;
-        } else if (s.workspace_hash != ws.hash) {
-            continue;
+        if (parent_mismatch(s.parent_session_id)) continue;
+        if (parent_filter.empty()) {
+            // 常规列表按 workspace 归属过滤;后台任务查询跳过该过滤
+            // (子会话跟随父会话归属,包括 no-workspace 父的子会话)。
+            if (s.no_workspace) {
+                if (!include_no_workspace) continue;
+            } else if (s.workspace_hash != ws.hash) {
+                continue;
+            }
         }
         seen.insert(s.id);
         auto meta_it = disk_by_id.find(s.id);
@@ -815,6 +832,7 @@ json WebServer::Impl::sessions_for_workspace(const acecode::desktop::WorkspaceMe
     }
     for (const auto& m : disk) {
         if (seen.count(m.id)) continue;
+        if (parent_mismatch(m.parent_session_id)) continue;
         if (m.archived != archived_only) continue;
         if (m.no_workspace && !include_no_workspace) continue;
         arr.push_back(session_meta_to_json(m, m.no_workspace ? std::string{} : ws.hash));
@@ -892,6 +910,7 @@ std::optional<SessionMeta> WebServer::Impl::find_session_meta_for_workspace(
             meta.model = entry->model;
             meta.model_preset = entry->model_state.name;
             meta.no_workspace = entry->no_workspace;
+            meta.parent_session_id = entry->parent_session_id;
             if (entry->sm) {
                 meta.title = entry->sm->current_title();
                 meta.title_source = entry->sm->current_title_source();

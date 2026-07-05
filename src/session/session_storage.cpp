@@ -228,6 +228,9 @@ void SessionStorage::write_meta(const std::string& meta_path, const SessionMeta&
     if (!meta.fork_message_id.empty()) {
         j["fork_message_id"] = meta.fork_message_id;
     }
+    if (!meta.parent_session_id.empty()) {
+        j["parent_session_id"] = meta.parent_session_id;
+    }
     if (meta.archived) {
         j["archived"] = true;
     }
@@ -278,6 +281,7 @@ SessionMeta SessionStorage::read_meta(const std::string& meta_path) {
         }
         meta.forked_from     = j.value("forked_from",     std::string{});
         meta.fork_message_id = j.value("fork_message_id", std::string{});
+        meta.parent_session_id = j.value("parent_session_id", std::string{});
         meta.archived        = j.value("archived",        false);
         meta.no_workspace    = j.value("no_workspace",    false);
     } catch (...) {

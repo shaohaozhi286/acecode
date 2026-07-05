@@ -171,9 +171,9 @@ ToolImpl create_spawn_subagent_tool(std::shared_ptr<SubagentToolDeps> deps) {
     tool.definition.name = "spawn_subagent";
     tool.definition.description =
         "Start a sub-agent in a NEW isolated session (its own context window, "
-        "visible in the session sidebar). Use it to delegate a self-contained "
-        "task without polluting the current context, or to kick off the next "
-        "stage of a pipeline. The prompt may be a skill command like "
+        "shown in this session's background-tasks panel). Use it to delegate a "
+        "self-contained task without polluting the current context, or to kick "
+        "off the next stage of a pipeline. The prompt may be a skill command like "
         "'/my-skill args'. With wait=true (default) this blocks until the "
         "sub-agent finishes its turn and returns its final reply; with "
         "wait=false it returns immediately with the new session_id "
@@ -253,6 +253,9 @@ ToolImpl create_spawn_subagent_tool(std::shared_ptr<SubagentToolDeps> deps) {
         opts.model_name = model_name;
         opts.permission_mode = parent_permission_mode;
         opts.subagent_depth = 1;
+        // 父会话 id 持久化到子会话 meta:子会话从常规列表隐藏,归入父会话
+        // 的「后台任务」面板;daemon 重启后依然识别为后台任务。
+        opts.parent_session_id = parent_id;
 
         std::string child_id;
         try {
@@ -285,9 +288,9 @@ ToolImpl create_spawn_subagent_tool(std::shared_ptr<SubagentToolDeps> deps) {
             r.success = true;
             r.metadata["subagent_session_id"] = child_id;
             r.output = "Subagent session started: " + child_id +
-                       "\nIt runs in its own isolated session (visible in the "
-                       "sidebar). Use wait_subagent with this session_id if you "
-                       "need its result later.";
+                       "\nIt runs in its own isolated session (shown in the "
+                       "background-tasks panel). Use wait_subagent with this "
+                       "session_id if you need its result later.";
             return r;
         }
 

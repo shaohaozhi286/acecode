@@ -73,6 +73,7 @@ TEST(SessionStorage, MetaRoundtrip) {
     };
     in.archived      = true;
     in.no_workspace  = true;
+    in.parent_session_id = "20260419-110000-ffff";
 
     SessionStorage::write_meta(meta_path, in);
     SessionMeta out = SessionStorage::read_meta(meta_path);
@@ -107,6 +108,30 @@ TEST(SessionStorage, MetaRoundtrip) {
     EXPECT_EQ(out.todos[1].status, "in_progress");
     EXPECT_EQ(out.archived,      in.archived);
     EXPECT_EQ(out.no_workspace,  in.no_workspace);
+    EXPECT_EQ(out.parent_session_id, in.parent_session_id);
+}
+
+// 场景:普通会话(非 spawn_subagent 子会话)的 parent_session_id 为空,
+// write_meta 必须省略该字段而不是写 ""。一旦回归:老版本读到多余字段无碍,
+// 但「常规列表排除子会话」的判断依赖"空 = 主会话",序列化空串本身没错,
+// 省略是为了保持老 meta 文件 byte-byte 兼容(与 forked_from 同一约定)。
+TEST(SessionStorage, EmptyParentSessionIdIsOmittedOnWrite) {
+    auto dir = make_unique_tmp_dir("parent_omit");
+    auto meta_path = (dir / "20260419-120000-abcd.meta.json").string();
+
+    SessionMeta in;
+    in.id = "20260419-120000-abcd";
+    in.cwd = "/tmp/x";
+    SessionStorage::write_meta(meta_path, in);
+
+    std::ifstream ifs(meta_path);
+    std::string raw((std::istreambuf_iterator<char>(ifs)),
+                    std::istreambuf_iterator<char>());
+    EXPECT_EQ(raw.find("parent_session_id"), std::string::npos)
+        << "空 parent_session_id 不应出现在序列化输出中";
+
+    SessionMeta out = SessionStorage::read_meta(meta_path);
+    EXPECT_TRUE(out.parent_session_id.empty());
 }
 
 // 场景:手造一份老版本 .meta.json(完全不含 title 字段),read_meta 必须

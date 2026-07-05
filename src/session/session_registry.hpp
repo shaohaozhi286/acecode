@@ -55,6 +55,8 @@ struct SessionEntry {
     bool no_workspace = false;
     // spawn_subagent 派生深度(0 = 普通会话)。见 SessionOptions::subagent_depth。
     int subagent_depth = 0;
+    // 非空 = spawn_subagent 子会话的父会话 id(随 meta 持久化,resume 恢复)。
+    std::string parent_session_id;
     std::string provider;
     std::string model;
     SessionModelState model_state;

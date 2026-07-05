@@ -119,8 +119,11 @@ struct SessionOptions {
 
     // 子代理派生深度:0 = 普通会话,1 = spawn_subagent 创建的子会话。
     // 子代理不允许再派生(spawn_subagent 工具按此拒绝),防递归失控。
-    // 运行时字段,不持久化 —— daemon 重启后子会话恢复为普通会话。
     int subagent_depth = 0;
+
+    // spawn_subagent 派生时的父会话 id。非空 → 写入 meta 持久化,子会话
+    // 从常规列表隐藏、归入父会话的「后台任务」面板;daemon 重启后依然生效。
+    std::string parent_session_id;
 };
 
 // ----- Current session model state -----
@@ -162,6 +165,7 @@ struct SessionInfo {
     bool        active = false;   // 是否在 SessionRegistry 内存活
     bool        busy = false;     // 是否正在处理当前轮
     bool        no_workspace = false;
+    std::string parent_session_id; // 非空 = spawn_subagent 子会话(后台任务)
 };
 
 // ----- AskUserQuestion 回应(client→server) -----

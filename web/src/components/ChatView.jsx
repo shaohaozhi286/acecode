@@ -19,6 +19,7 @@ import { QueueCardList } from './QueueCardList.jsx';
 import { QuestionPicker } from './QuestionPicker.jsx';
 import { StickyUserContext } from './StickyUserContext.jsx';
 import { SidePanel } from './SidePanel.jsx';
+import { SubagentPanel } from './SubagentPanel.jsx';
 import { PreviewDetailsPanel } from './PreviewDetailsPanel.jsx';
 import { StatusBar } from './StatusBar.jsx';
 import { ChangeGlassDock } from './ChangeReview.jsx';
@@ -64,6 +65,8 @@ import {
   writeDesktopHomeWorkspaceHash,
 } from '../lib/homeWorkspaceSelection.js';
 import { maybeNotify } from '../lib/desktopNotify.js';
+import { useSubagentTasks } from '../lib/useSubagentTasks.js';
+import { taskDisplayTitle } from '../lib/subagentTasks.js';
 import { normalizeTokenBudget } from '../lib/tokenBudget.js';
 import { pickModelLoad } from '../lib/modelLoad.js';
 import {
@@ -405,7 +408,7 @@ function isRealWorkspaceHash(hash) {
   return !!hash && hash !== '__local__';
 }
 
-export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWorkspaceChange, onConsoleCwdChange, health, onPermissionRequest, onQuestionRequest, questionRequest, onQuestionResolve, onPermissionModeChanged, showSidePanel = false, sidePanelWidth = 280, onSidePanelResize, previewPanelWidth = 640, onPreviewPanelResize, onPreviewPanelVisibleChange, sidePanelCollapsed = false, onToggleSidePanel, sidePanelMaximized = false, onToggleSidePanelMaximized, showAceCodeAvatar = false }) {
+export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWorkspaceChange, onConsoleCwdChange, health, onPermissionRequest, onQuestionRequest, questionRequest, onQuestionResolve, onPermissionModeChanged, onSubagentTasksChange, showSidePanel = false, sidePanelWidth = 280, onSidePanelResize, previewPanelWidth = 640, onPreviewPanelResize, onPreviewPanelVisibleChange, sidePanelCollapsed = false, onToggleSidePanel, sidePanelMaximized = false, onToggleSidePanelMaximized, showAceCodeAvatar = false }) {
   const ref = useMemo(() => normalizeSessionRef(sessionRef, sessionId), [sessionRef, sessionId]);
   const sid = ref?.sessionId || ref?.id || '';
   const sidRef = useRef(sid);
@@ -470,6 +473,23 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     }),
   });
   const { items, busy, turns, title, status: transcriptStatus, streamingId, tokenUsage, goal, todos, todoSummary, activity, applyEvent, setTitle: setTranscriptTitle } = transcript;
+
+  // 后台任务(spawn_subagent 子会话):数据 hook 常驻(运行中任务保持 WS
+  // 订阅,权限/问题请求才能冒泡到主会话 UI),面板本身按需打开。
+  const subagentTasks = useSubagentTasks(sid);
+  const [subagentPanelOpen, setSubagentPanelOpen] = useState(false);
+  useEffect(() => { setSubagentPanelOpen(false); }, [sid]);
+  // 上报给 App:子任务 id → 标题映射,用于 question 请求的可见性放宽与
+  // 权限/问题弹窗的「来自后台任务」来源标记。
+  const onSubagentTasksChangeRef = useRef(onSubagentTasksChange);
+  useEffect(() => { onSubagentTasksChangeRef.current = onSubagentTasksChange; }, [onSubagentTasksChange]);
+  useEffect(() => {
+    onSubagentTasksChangeRef.current?.({
+      parentId: sid,
+      titles: Object.fromEntries(
+        subagentTasks.tasks.map((t) => [t.id, taskDisplayTitle(t)])),
+    });
+  }, [sid, subagentTasks.tasks]);
   // 让 fireDesktopNotification 拿到最新 title,无需进入它的 useCallback deps。
   useEffect(() => { transcriptTitleRef.current = title || ''; }, [title]);
   const selfHealEnabled = completedTurnSelfHealEnabled(health);
@@ -2079,9 +2099,19 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   const questionForView = useMemo(() => {
     if (!questionRequest) return null;
     const reqSid = questionRequest.session_id || '';
-    if (reqSid && (!sid || reqSid !== sid)) return null;
-    return questionRequest;
-  }, [questionRequest, sid]);
+    if (!reqSid || (sid && reqSid === sid)) return questionRequest;
+    // 后台任务(spawn_subagent 子会话)的 AskUserQuestion 冒泡到主会话回答,
+    // transcript 窄条不承载交互(答案 payload 自带 session_id,路由回子会话)。
+    if (sid && subagentTasks.tasks.some((t) => t.id === reqSid)) return questionRequest;
+    return null;
+  }, [questionRequest, sid, subagentTasks.tasks]);
+
+  const questionOriginLabel = useMemo(() => {
+    const reqSid = questionForView?.session_id || '';
+    if (!reqSid || reqSid === sid) return '';
+    const task = subagentTasks.tasks.find((t) => t.id === reqSid);
+    return task ? `来自后台任务:${taskDisplayTitle(task)}` : '';
+  }, [questionForView, sid, subagentTasks.tasks]);
 
   const resolveQuestion = useCallback(() => {
     onQuestionResolve?.();
@@ -2525,6 +2555,27 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
               <PanelToggleIcon side="right" size={15} />
             </button>
           )}
+          {sid && (subagentTasks.tasks.length > 0 || subagentPanelOpen) && (
+            <button
+              type="button"
+              onClick={() => setSubagentPanelOpen((v) => !v)}
+              className={clsx(
+                'relative w-7 h-7 rounded-md flex items-center justify-center transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/25',
+                subagentPanelOpen || subagentTasks.runningCount > 0
+                  ? 'bg-accent-bg text-accent hover:bg-accent-bg'
+                  : 'text-fg-mute hover:bg-surface-hi hover:text-fg',
+              )}
+              title="后台任务"
+              aria-label="后台任务"
+            >
+              <VsIcon name="embedding" size={15} />
+              {subagentTasks.runningCount > 0 && (
+                <span className="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-0.5 rounded-full bg-accent text-white text-[9px] leading-[14px] text-center font-semibold">
+                  {subagentTasks.runningCount}
+                </span>
+              )}
+            </button>
+          )}
         </div>
       </div>
 
@@ -2653,10 +2704,26 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
             todoSummary={todoSummary}
           />
         )}
+        <SubagentPanel
+          open={subagentPanelOpen}
+          onClose={() => setSubagentPanelOpen(false)}
+          tasks={subagentTasks.tasks}
+          onAbort={(task) => subagentTasks.abortTask(task.id)}
+          onClearSettled={async () => {
+            const result = await subagentTasks.clearSettled();
+            if (result?.failed > 0) {
+              toast({ kind: 'err', text: `有 ${result.failed} 个任务清除失败(可能仍在运行)` });
+            }
+          }}
+        />
       </div>
 
       {questionForView && (
-        <QuestionPicker request={questionForView} onResolve={resolveQuestion} />
+        <QuestionPicker
+          request={questionForView}
+          onResolve={resolveQuestion}
+          originLabel={questionOriginLabel}
+        />
       )}
 
       <QueueCardList

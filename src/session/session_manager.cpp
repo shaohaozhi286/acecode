@@ -221,6 +221,7 @@ void SessionManager::start_session(const std::string& cwd,
     last_error_.clear();
     writer_lease_active_ = false;
     archived_ = false;
+    parent_session_id_.clear();
     checkpoint_store_.reset();
     checkpoint_store_.set_session(project_dir_, session_id_);
 }
@@ -274,6 +275,7 @@ bool SessionManager::ensure_created() {
     meta.todos = todos_;
     meta.archived = archived_;
     meta.no_workspace = no_workspace_;
+    meta.parent_session_id = parent_session_id_;
     SessionStorage::write_meta(meta_path_str_, meta);
     return true;
 }
@@ -474,6 +476,7 @@ std::vector<ChatMessage> SessionManager::resume_session(const std::string& sessi
         todos_ = meta.todos;
         archived_ = meta.archived;
         no_workspace_ = meta.no_workspace;
+        parent_session_id_ = meta.parent_session_id;
         if (model_preset_.empty()) {
             model_preset_ = meta.model_preset;
         }
@@ -884,6 +887,7 @@ void SessionManager::update_meta() {
     meta.todos = todos_;
     meta.archived = archived_;
     meta.no_workspace = no_workspace_;
+    meta.parent_session_id = parent_session_id_;
     SessionStorage::write_meta(meta_path_str_, meta);
     refresh_writer_lease_locked();
 }
@@ -936,6 +940,19 @@ void SessionManager::set_session_archived(bool archived) {
     if (created_) {
         update_meta();
     }
+}
+
+void SessionManager::set_parent_session_id(std::string parent_id) {
+    std::lock_guard<std::mutex> lk(mu_);
+    parent_session_id_ = std::move(parent_id);
+    if (created_) {
+        update_meta();
+    }
+}
+
+std::string SessionManager::current_parent_session_id() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return parent_session_id_;
 }
 
 std::string SessionManager::current_title() const {

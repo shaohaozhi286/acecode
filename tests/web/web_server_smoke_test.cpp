@@ -2029,6 +2029,87 @@ TEST(WebServerHttp, DeleteSessionRemovesFromList) {
     }
 }
 
+// 场景: spawn_subagent 子会话(meta 带 parent_session_id)不出现在常规
+// GET /api/sessions 列表;GET /api/sessions?parent=<id> 反查只返回该父会话
+// 的子任务。一旦回归:子会话泄漏进侧栏,或「后台任务」面板拿不到数据。
+TEST(WebServerHttp, SubagentSessionsHiddenFromListAndQueryableByParent) {
+    WebServerFixture fx;
+    const std::string parent_id = "20260705-090000-aaaa";
+    const std::string child_id  = "20260705-090100-bbbb";
+
+    // 手造磁盘持久化数据:父会话普通 meta,子会话 meta 带 parent_session_id。
+    for (const auto& [id, parent] :
+         std::vector<std::pair<std::string, std::string>>{
+             {parent_id, ""}, {child_id, parent_id}}) {
+        acecode::SessionMeta meta;
+        meta.id = id;
+        meta.cwd = fx.cwd;
+        meta.updated_at = "2026-07-05T09:00:00Z";
+        meta.parent_session_id = parent;
+        acecode::SessionStorage::write_meta(
+            acecode::SessionStorage::meta_path(fx.project_dir, id), meta);
+        write_text(path_from_utf8(
+            acecode::SessionStorage::session_path(fx.project_dir, id)), "");
+    }
+
+    auto list = cpr::Get(cpr::Url{fx.url("/api/sessions")});
+    ASSERT_EQ(list.status_code, 200);
+    auto arr = json::parse(list.text);
+    bool saw_parent = false;
+    for (const auto& s : arr) {
+        if (s["id"] == parent_id) saw_parent = true;
+        EXPECT_NE(s["id"], child_id) << "子会话不应出现在常规列表";
+    }
+    EXPECT_TRUE(saw_parent);
+
+    auto children = cpr::Get(cpr::Url{fx.url("/api/sessions?parent=" + parent_id)});
+    ASSERT_EQ(children.status_code, 200);
+    auto child_arr = json::parse(children.text);
+    ASSERT_EQ(child_arr.size(), 1u) << child_arr.dump();
+    EXPECT_EQ(child_arr[0]["id"], child_id);
+    EXPECT_EQ(child_arr[0]["parent_session_id"], parent_id);
+}
+
+// 场景: DELETE /api/sessions/:id?purge=1 是「后台任务-清除」——只允许子会话,
+// 成功后磁盘 jsonl/meta 永久删除;对主会话 purge 必须 400 拒绝(防误删)。
+TEST(WebServerHttp, PurgeDeletesSubagentDiskDataAndRejectsMainSession) {
+    WebServerFixture fx;
+    const std::string parent_id = "20260705-091000-cccc";
+    const std::string child_id  = "20260705-091100-dddd";
+    for (const auto& [id, parent] :
+         std::vector<std::pair<std::string, std::string>>{
+             {parent_id, ""}, {child_id, parent_id}}) {
+        acecode::SessionMeta meta;
+        meta.id = id;
+        meta.cwd = fx.cwd;
+        meta.parent_session_id = parent;
+        acecode::SessionStorage::write_meta(
+            acecode::SessionStorage::meta_path(fx.project_dir, id), meta);
+        write_text(path_from_utf8(
+            acecode::SessionStorage::session_path(fx.project_dir, id)), "");
+    }
+
+    // 主会话 purge → 400,文件原地不动。
+    auto bad = cpr::Delete(cpr::Url{fx.url("/api/sessions/" + parent_id + "?purge=1")});
+    EXPECT_EQ(bad.status_code, 400);
+    EXPECT_TRUE(std::filesystem::exists(path_from_utf8(
+        acecode::SessionStorage::meta_path(fx.project_dir, parent_id))));
+
+    // 子会话 purge → 204,jsonl + meta 都消失。
+    auto ok = cpr::Delete(cpr::Url{fx.url("/api/sessions/" + child_id + "?purge=1")});
+    EXPECT_EQ(ok.status_code, 204);
+    EXPECT_FALSE(std::filesystem::exists(path_from_utf8(
+        acecode::SessionStorage::meta_path(fx.project_dir, child_id))));
+    EXPECT_FALSE(std::filesystem::exists(path_from_utf8(
+        acecode::SessionStorage::session_path(fx.project_dir, child_id))));
+
+    // 不带 purge 的 DELETE 语义不变:对磁盘数据无破坏。
+    auto plain = cpr::Delete(cpr::Url{fx.url("/api/sessions/" + parent_id)});
+    EXPECT_EQ(plain.status_code, 204);
+    EXPECT_TRUE(std::filesystem::exists(path_from_utf8(
+        acecode::SessionStorage::meta_path(fx.project_dir, parent_id))));
+}
+
 // 场景: GET /api/sessions/:id/messages 第一次(无 since)返回 {events:[], messages:[]}。
 // 测试不真跑 LLM,所以两个数组都是空 — 但 wire format 必须正确(spec 9.6)。
 TEST(WebServerHttp, GetMessagesReturnsEventsAndMessagesSchema) {

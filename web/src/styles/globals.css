@@ -302,6 +302,7 @@ body {
 .border-border\/70 { border-color: rgba(var(--ace-border-rgb), 0.70); }
 .border-danger\/30 { border-color: rgba(var(--ace-danger-rgb), 0.30); }
 .border-danger\/40 { border-color: rgba(var(--ace-danger-rgb), 0.40); }
+.hover\:border-danger\/40:hover { border-color: rgba(var(--ace-danger-rgb), 0.40); }
 .border-warn\/50 { border-color: rgba(var(--ace-warn-rgb), 0.50); }
 .text-accent\/60 { color: rgba(var(--ace-accent-rgb), 0.60); }
 .text-fg-mute\/70 { color: var(--ace-fg-mute); }
@@ -312,6 +313,14 @@ body {
 .ring-accent\/20 { --tw-ring-color: rgba(var(--ace-accent-rgb), 0.20); }
 .ace-mini-session-active-shadow {
   box-shadow: 0 0 0 1px rgba(var(--ace-accent-rgb), 0.15);
+}
+
+/* 后台任务 transcript 窄条:复用主会话 Message/ToolBlock,整体缩一档 */
+.ace-subagent-transcript {
+  font-size: 12px;
+}
+.ace-subagent-transcript [data-chat-row] {
+  min-width: 0;
 }
 
 /* Desktop frameless window chrome */

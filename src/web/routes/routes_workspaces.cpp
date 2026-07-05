@@ -354,7 +354,11 @@ void WebServer::Impl::register_workspaces() {
                 r.add_header("Content-Type", "application/json");
                 return with_cors(req, std::move(r));
             }
-            auto arr = sessions_for_workspace(*ws, archived_query_requested(req));
+            const char* parent_raw = req.url_params.get("parent");
+            auto arr = sessions_for_workspace(
+                *ws, archived_query_requested(req),
+                /*include_no_workspace=*/false,
+                parent_raw ? std::string(parent_raw) : std::string{});
             crow::response r(arr.dump());
             r.add_header("Content-Type", "application/json");
             return with_cors(req, std::move(r));

@@ -35,6 +35,12 @@ struct SessionMeta {
     std::string forked_from;       // 源 session id
     std::string fork_message_id;   // 在源 session 哪条消息上分叉(含此条)
 
+    // spawn_subagent 派生的子代理会话:记录父会话 id。非空 = 子会话,
+    // 不出现在常规会话列表/侧栏,只出现在父会话的「后台任务」面板。
+    // 持久化(与 subagent_depth 的 runtime-only 语义不同):daemon 重启后
+    // 子会话依然被识别为后台任务,而不是泄漏进侧栏。空时序列化省略。
+    std::string parent_session_id;
+
     // Sidebar archive state. Missing field in legacy metadata is false.
     bool archived = false;
 

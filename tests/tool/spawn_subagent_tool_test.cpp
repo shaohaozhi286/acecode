@@ -15,11 +15,13 @@
 #include "permissions.hpp"
 #include "session/local_session_client.hpp"
 #include "session/session_registry.hpp"
+#include "session/session_storage.hpp"
 #include "tool/spawn_subagent_tool.hpp"
 #include "tool/tool_executor.hpp"
 
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <random>
 
@@ -185,6 +187,78 @@ TEST(SpawnSubagentTool, WaitReturnsFinalAssistantReply) {
         << "父上下文应拿到子会话的最终答复,实际: " << r.output;
     ASSERT_TRUE(r.metadata.contains("subagent_session_id"));
     fx.registry.destroy(r.metadata["subagent_session_id"].get<std::string>());
+}
+
+// 场景: 有父会话上下文的 spawn → 子会话 entry 与持久化 meta 都记录
+// parent_session_id(「后台任务」面板/列表过滤的数据源)。用 wait=true
+// 保证子会话 turn 已结束、meta 已落盘。一旦回归:子会话泄漏进侧栏列表。
+TEST(SpawnSubagentTool, ChildRecordsParentSessionId) {
+    SubagentFixture fx;
+    fx.provider = std::make_shared<EchoStreamProvider>();
+
+    acecode::SessionOptions parent_opts;
+    parent_opts.cwd = fx.cwd.string();
+    const std::string parent_id = fx.registry.create(parent_opts);
+    ASSERT_FALSE(parent_id.empty());
+
+    auto r = fx.tools.execute("spawn_subagent",
+                              R"({"prompt":"go","timeout_seconds":30})",
+                              fx.ctx_for(parent_id));
+    ASSERT_TRUE(r.success) << r.output;
+    const std::string child_id =
+        r.metadata["subagent_session_id"].get<std::string>();
+
+    auto child = fx.registry.acquire(child_id);
+    ASSERT_NE(child, nullptr);
+    EXPECT_EQ(child->parent_session_id, parent_id);
+    ASSERT_NE(child->sm, nullptr);
+    auto meta = child->sm->load_session_meta(child_id);
+    ASSERT_EQ(meta.id, child_id) << "子会话 meta 应已落盘";
+    EXPECT_EQ(meta.parent_session_id, parent_id)
+        << "parent_session_id 必须持久化,否则 daemon 重启后子会话泄漏进侧栏";
+
+    fx.registry.destroy(child_id);
+    fx.registry.destroy(parent_id);
+}
+
+// 场景: daemon 重启(registry 冷启动)后 resume 一个带 parent_session_id
+// 的子会话 → 子会话身份(parent_session_id + subagent_depth=1)从 meta 恢复,
+// 深度限制继续生效。一旦回归:重启后的子会话能再派生孙代理。
+TEST(SpawnSubagentTool, ResumeRestoresSubagentIdentityFromMeta) {
+    SubagentFixture fx;
+    fx.provider = std::make_shared<EchoStreamProvider>();
+
+    const std::string child_id = "20260705-010203-beef";
+    const auto project_dir =
+        acecode::SessionStorage::get_project_dir(fx.cwd.string());
+    fs::create_directories(project_dir);
+    {
+        // 手造持久化数据:meta 带 parent_session_id,jsonl 只需存在。
+        acecode::SessionMeta meta;
+        meta.id = child_id;
+        meta.cwd = fx.cwd.string();
+        meta.parent_session_id = "20260705-010000-cafe";
+        acecode::SessionStorage::write_meta(
+            acecode::SessionStorage::meta_path(project_dir, child_id), meta);
+        std::ofstream jsonl(
+            acecode::SessionStorage::session_path(project_dir, child_id));
+        jsonl << "";
+    }
+
+    acecode::SessionOptions opts;
+    opts.cwd = fx.cwd.string();
+    ASSERT_TRUE(fx.registry.resume(child_id, opts));
+    auto entry = fx.registry.acquire(child_id);
+    ASSERT_NE(entry, nullptr);
+    EXPECT_EQ(entry->parent_session_id, "20260705-010000-cafe");
+    EXPECT_EQ(entry->subagent_depth, 1)
+        << "深度限制必须随 meta 恢复,防重启后递归派生";
+
+    auto nested = fx.tools.execute("spawn_subagent",
+                                   R"({"prompt":"grandchild","wait":false})",
+                                   fx.ctx_for(child_id));
+    EXPECT_FALSE(nested.success);
+    fx.registry.destroy(child_id);
 }
 
 // 场景: wait_subagent 对不存在的 session id → 明确报错,不阻塞。

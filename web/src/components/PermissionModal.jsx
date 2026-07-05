@@ -56,7 +56,7 @@ function formatArgsPreview(args) {
   return truncateText(text, MAX_PREVIEW_CHARS);
 }
 
-export function PermissionModal({ request, onResolve }) {
+export function PermissionModal({ request, onResolve, originLabel = '' }) {
   const preview = useMemo(() => formatArgsPreview(request?.args), [request?.args]);
   const resolvedRef = useRef(false);
   const {
@@ -97,6 +97,11 @@ export function PermissionModal({ request, onResolve }) {
             </h3>
           </div>
           <div className="px-4.5 py-4 flex flex-col gap-3">
+            {originLabel && (
+              <div className="text-[11px] text-fg-mute -mt-1" title={originLabel}>
+                {originLabel}
+              </div>
+            )}
             <p className="text-[13px] text-fg-2 leading-relaxed">
               {body}
             </p>

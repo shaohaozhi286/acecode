@@ -148,6 +148,12 @@ public:
     // immediately when metadata already exists.
     void set_session_archived(bool archived);
 
+    // Mark the current session as a spawn_subagent child of parent_id.
+    // Persisted to .meta.json (immediately when metadata already exists,
+    // otherwise on lazy creation). Pass empty string to clear.
+    void set_parent_session_id(std::string parent_id);
+    std::string current_parent_session_id() const;
+
     // Return the current in-memory title (empty when unset).
     std::string current_title() const;
     std::string current_title_source() const;
@@ -213,6 +219,7 @@ private:
     std::string last_error_;
     bool writer_lease_active_ = false;
     bool archived_ = false;
+    std::string parent_session_id_;
     FileCheckpointStore checkpoint_store_;
     std::unique_ptr<ThreadGoalStore> goal_store_;
 

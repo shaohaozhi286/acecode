@@ -46,7 +46,12 @@ function fullUrl(path, base) {
 }
 
 function sessionsPath(path, opts = {}) {
-  return opts && opts.archived ? `${path}?archived=1` : path;
+  const qs = new URLSearchParams();
+  if (opts && opts.archived) qs.set('archived', '1');
+  // 后台任务反查:只返回该父会话派生的 spawn_subagent 子会话。
+  if (opts && opts.parent) qs.set('parent', String(opts.parent));
+  const text = qs.toString();
+  return text ? `${path}?${text}` : path;
 }
 
 function usagePath(opts = {}) {
@@ -166,6 +171,8 @@ export function createApi(base = null) {
     setPinnedSessionOrder: (items=[]) =>
       request('PUT', '/api/pinned-sessions/order', { items }, base),
     destroySession:   (id)           => request('DELETE', `/api/sessions/${encodeURIComponent(id)}`, undefined, base),
+    // 后台任务「清除」:销毁 + 永久删除磁盘数据。daemon 仅对子会话放行(400 拒主会话)。
+    purgeSession:     (id)           => request('DELETE', `/api/sessions/${encodeURIComponent(id)}?purge=1`, undefined, base),
     getSessionDraft:  (id, workspaceHash = '') =>
       request('GET', sessionDraftPath(id, workspaceHash), undefined, base),
     setSessionDraft:  (id, text = '', workspaceHash = '') =>

@@ -65,13 +65,17 @@ void WebServer::Impl::register_sessions() {
         });
 
         // GET /api/sessions: 内存活跃 + 磁盘历史合并去重。spec 9.3
+        // 默认排除 spawn_subagent 子会话;?parent=<id> 反向查询——只返回该
+        // 父会话派生的后台任务子会话(「后台任务」面板数据源)。
         CROW_ROUTE(app, "/api/sessions").methods(crow::HTTPMethod::GET)
         ([this](const crow::request& req) {
             if (auto rej = require_auth(req)) return std::move(*rej);
+            const char* parent_raw = req.url_params.get("parent");
             auto arr = sessions_for_workspace(
                 compatibility_workspace(),
                 archived_query_requested(req),
-                /*include_no_workspace=*/true);
+                /*include_no_workspace=*/true,
+                parent_raw ? std::string(parent_raw) : std::string{});
             crow::response r(arr.dump());
             r.add_header("Content-Type", "application/json");
             return with_cors(req, std::move(r));
@@ -229,15 +233,70 @@ void WebServer::Impl::register_sessions() {
             return clear_session_todos(req, compatibility_workspace(), id);
         });
 
-        // DELETE /api/sessions/:id: 销毁。spec 9.5
+        // DELETE /api/sessions/:id: 销毁(内存)。spec 9.5
+        // ?purge=1: 后台任务「清除」——销毁 + 永久删除磁盘数据。仅允许
+        // spawn_subagent 子会话(parent_session_id 非空),防止误删主会话;
+        // 运行中(busy)拒绝,需先中止。
         // 注意: 用 Delete(混合大小写)避免 Windows <windows.h> 把 DELETE 宏化掉。
         CROW_ROUTE(app, "/api/sessions/<string>").methods(crow::HTTPMethod::Delete)
         ([this](const crow::request& req, const std::string& id) {
             if (auto rej = require_auth(req)) return std::move(*rej);
             if (!deps.session_client) {
-                return crow::response(503);
+                return with_cors(req, crow::response(503));
             }
+            const char* purge_raw = req.url_params.get("purge");
+            const bool purge = purge_raw &&
+                (std::string(purge_raw) == "1" || std::string(purge_raw) == "true");
+            if (!purge) {
+                deps.session_client->destroy_session(id);
+                return with_cors(req, crow::response(204));
+            }
+
+            const auto ws = compatibility_workspace();
+            std::string parent_id;
+            std::string session_cwd;
+            bool busy = false;
+            if (deps.session_registry) {
+                if (auto entry = deps.session_registry->acquire(id)) {
+                    parent_id = entry->parent_session_id;
+                    session_cwd = entry->cwd;
+                    busy = entry->loop && entry->loop->is_busy();
+                }
+            }
+            if (parent_id.empty()) {
+                if (auto meta = find_session_meta_for_workspace(ws, id)) {
+                    parent_id = meta->parent_session_id;
+                    if (session_cwd.empty()) session_cwd = meta->cwd;
+                }
+            }
+            if (parent_id.empty()) {
+                crow::response r(400);
+                r.body = R"({"error":"only subagent sessions can be purged"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            if (busy) {
+                crow::response r(409);
+                r.body = R"({"error":"session is busy; abort it first"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            // destroy 会 finalize SessionManager(flush + 释放 writer lease),
+            // 之后再删文件不会与写入方竞争。
             deps.session_client->destroy_session(id);
+            const auto project_dir =
+                SessionStorage::get_project_dir(session_cwd.empty() ? ws.cwd : session_cwd);
+            std::error_code ec;
+            std::filesystem::remove(
+                path_from_utf8(SessionStorage::session_path(project_dir, id)), ec);
+            std::filesystem::remove(
+                path_from_utf8(SessionStorage::meta_path(project_dir, id)), ec);
+            // per-session 目录(持久化 tool results 等)一并清掉。
+            std::filesystem::remove_all(
+                path_from_utf8(project_dir) / id, ec);
+            LOG_INFO("[web] purged subagent session " + id +
+                     " (parent=" + parent_id + ")");
             return with_cors(req, crow::response(204));
         });
 

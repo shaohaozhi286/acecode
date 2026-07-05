@@ -231,9 +231,13 @@ struct WebServer::Impl {
     nlohmann::json session_info_to_json(const SessionInfo& s, const SessionMeta* m) const;
     nlohmann::json session_meta_to_json(const SessionMeta& m, const std::string& workspace_hash) const;
     void append_session_runtime_snapshot(nlohmann::json& wrapper, const std::string& session_id) const;
+    // parent_filter 语义:空 = 常规列表,排除所有 spawn_subagent 子会话;
+    // 非空 = 后台任务查询,只返回 parent_session_id == parent_filter 的子会话
+    // (active 部分不做 workspace 过滤,子会话跟随父会话归属)。
     nlohmann::json sessions_for_workspace(const acecode::desktop::WorkspaceMeta& ws,
                                           bool archived_only = false,
-                                          bool include_no_workspace = false) const;
+                                          bool include_no_workspace = false,
+                                          const std::string& parent_filter = {}) const;
     bool session_entry_matches_workspace(const SessionEntry& entry,
                                           const acecode::desktop::WorkspaceMeta& ws) const;
     std::optional<SessionMeta> find_session_meta_for_workspace(

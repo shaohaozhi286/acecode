@@ -21,7 +21,7 @@ function focusSoon(ref) {
   requestAnimationFrame(() => ref.current?.focus());
 }
 
-export function QuestionPicker({ request, onResolve }) {
+export function QuestionPicker({ request, onResolve, originLabel = '' }) {
   const normalized = useMemo(() => normalizeQuestionRequest(request), [request]);
   const { questions } = normalized;
   const [answers, setAnswers] = useState(() => makeInitialAnswers(questions));
@@ -170,6 +170,11 @@ export function QuestionPicker({ request, onResolve }) {
     >
       <div className="min-h-10 shrink-0 px-3 py-2 border-b border-border bg-surface-alt flex items-start gap-2">
         <div className="min-w-0 flex-1">
+          {originLabel && (
+            <div className="text-[10px] text-fg-mute mb-0.5 truncate" title={originLabel}>
+              {originLabel}
+            </div>
+          )}
           {question.header && (
             <div
               className="text-[10px] uppercase tracking-wide text-accent font-semibold whitespace-pre-wrap break-words"

@@ -732,6 +732,14 @@ SessionRegistry::make_entry_locked(const std::string& id,
     entry->id = id;
     entry->cwd = opts.cwd.empty() ? deps_.cwd : opts.cwd;
     entry->subagent_depth = opts.subagent_depth;
+    entry->parent_session_id = opts.parent_session_id;
+    if (resumed_meta && !resumed_meta->parent_session_id.empty()) {
+        // resume 路径:子会话身份从持久化 meta 恢复,深度限制随之生效。
+        entry->parent_session_id = resumed_meta->parent_session_id;
+    }
+    if (!entry->parent_session_id.empty() && entry->subagent_depth < 1) {
+        entry->subagent_depth = 1;
+    }
     entry->no_workspace = opts.no_workspace || (resumed_meta && resumed_meta->no_workspace);
     if (entry->no_workspace && !entry->cwd.empty()) {
         std::error_code ec;
@@ -765,6 +773,10 @@ SessionRegistry::make_entry_locked(const std::string& id,
                              entry->model_state.name,
                              "daemon",
                              entry->no_workspace);
+    if (!entry->parent_session_id.empty()) {
+        // 子会话身份写进 meta(lazy:首条消息落盘时随初始 meta 一起写)。
+        entry->sm->set_parent_session_id(entry->parent_session_id);
+    }
 
     // PermissionManager: 复制 mode + dangerous flag,rules 由调用方在初始化
     // template_permissions 时设好。session_allowed_ 不复制,各 session 独立。
@@ -1231,6 +1243,7 @@ std::vector<SessionInfo> SessionRegistry::list_active() const {
         info.workspace_hash = entry->workspace_hash;
         info.active = true;
         info.no_workspace = entry->no_workspace;
+        info.parent_session_id = entry->parent_session_id;
         if (entry->loop) info.busy = entry->loop->is_busy();
         if (entry->sm) {
             // SessionManager 没有公开的 created_at / updated_at 接口,从 meta
