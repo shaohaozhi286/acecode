@@ -365,6 +365,147 @@ run('同名并行工具按 tool_call_id 各自归并包装行', () => {
   assert.equal(projected[1].collapsedItems.some((item) => item.role === 'tool_call' || item.role === 'tool_result'), false);
 });
 
+// ── 子代理调用分组 ───────────────────────────────────────────────
+// spawn_subagent / wait_subagent 工具项。metadata.subagent_session_id 是
+// 子会话跳转钥匙;wait_subagent 额外把 session_id 放在 args。
+function subagentTool(id, {
+  name = 'spawn_subagent',
+  sessionId = '',
+  prompt = '',
+  isDone = true,
+  ts = id * 1000,
+} = {}) {
+  return {
+    kind: 'tool',
+    id,
+    ts,
+    tool: {
+      isDone,
+      success: true,
+      tool: name,
+      summary: { verb: '子代理', object: prompt, metrics: [] },
+      args: { prompt, session_id: name === 'wait_subagent' ? sessionId : undefined },
+      metadata: sessionId ? { subagent_session_id: sessionId } : null,
+      output: '',
+    },
+  };
+}
+
+run('groupSubagentTools 把 spawn/wait 按子会话 id 去重合并成一个分组', () => {
+  // 触发场景:fan-out —— 3 次 spawn(wait=false)+ 3 次 wait,共 6 个工具项。
+  // 期望行为:按 subagent_session_id 去重成 3 个智能体条目,wait 折叠进来不单列;
+  // prompt 由 spawn 提供,coveredItemIds 覆盖全部 6 项。
+  const grouped = __test__.groupSubagentTools([
+    subagentTool(2, { name: 'spawn_subagent', sessionId: 'A', prompt: '查看 random-fun' }),
+    subagentTool(3, { name: 'spawn_subagent', sessionId: 'B', prompt: '查看 cpp_project' }),
+    subagentTool(4, { name: 'spawn_subagent', sessionId: 'C', prompt: '查看 random_e6391db9' }),
+    subagentTool(5, { name: 'wait_subagent', sessionId: 'A' }),
+    subagentTool(6, { name: 'wait_subagent', sessionId: 'B' }),
+    subagentTool(7, { name: 'wait_subagent', sessionId: 'C' }),
+  ]);
+
+  assert.equal(grouped.length, 1);
+  assert.equal(grouped[0].kind, 'subagent_group');
+  assert.deepEqual(grouped[0].agents.map((a) => a.sessionId), ['A', 'B', 'C']);
+  assert.equal(grouped[0].agents[0].prompt, '查看 random-fun');
+  assert.deepEqual(grouped[0].coveredItemIds, [2, 3, 4, 5, 6, 7]);
+});
+
+run('groupSubagentTools 不改动非子代理工具，整轮子代理项并成一个分组', () => {
+  // 触发场景:bash 工具 + spawn A + assistant 文本 + spawn B。
+  // 期望行为:bash 原样;A、B 即便被 assistant 文本隔开也整轮合并成一个分组,
+  // 落在第一个子代理项位置,assistant 文本保留在原相对位置之后。
+  const grouped = __test__.groupSubagentTools([
+    tool(2, { name: 'bash', verb: 'Ran', object: 'ls' }),
+    subagentTool(3, { sessionId: 'A', prompt: 'p' }),
+    assistant(4, 'mid'),
+    subagentTool(5, { sessionId: 'B', prompt: 'q' }),
+  ]);
+
+  assert.deepEqual(grouped.map((i) => i.kind), ['tool', 'subagent_group', 'msg']);
+  assert.deepEqual(grouped[1].agents.map((a) => a.sessionId), ['A', 'B']);
+  assert.equal(grouped[2].content, 'mid');
+});
+
+run('spawn 点火与 wait 收结果被推理隔开时仍合并成同一个分组', () => {
+  // 回归(截图问题):fan-out 4 个子 agent —— 4 次 spawn(wait=false)点火,
+  // 中间一段 assistant 推理,再 4 次 wait 收结果。spawn 与 wait 指向同一批
+  // 子会话,期望合并成**一个**「调用了 4 个智能体」,而不是先后两个各 4 个。
+  const grouped = __test__.groupSubagentTools([
+    subagentTool(2, { name: 'spawn_subagent', sessionId: 'A', prompt: '看 animal_cat' }),
+    subagentTool(3, { name: 'spawn_subagent', sessionId: 'B', prompt: '看 drink_oolong_tea' }),
+    subagentTool(4, { name: 'spawn_subagent', sessionId: 'C', prompt: '看 place_kyoto' }),
+    subagentTool(5, { name: 'spawn_subagent', sessionId: 'D', prompt: '看 random' }),
+    assistant(6, '现在等待四个子代理返回'),
+    subagentTool(7, { name: 'wait_subagent', sessionId: 'A' }),
+    subagentTool(8, { name: 'wait_subagent', sessionId: 'B' }),
+    subagentTool(9, { name: 'wait_subagent', sessionId: 'C' }),
+    subagentTool(10, { name: 'wait_subagent', sessionId: 'D' }),
+  ]);
+
+  const groups = grouped.filter((i) => i.kind === 'subagent_group');
+  assert.equal(groups.length, 1);
+  assert.deepEqual(groups[0].agents.map((a) => a.sessionId), ['A', 'B', 'C', 'D']);
+  assert.equal(groups[0].agents[0].prompt, '看 animal_cat');
+  // 中间的 assistant 推理仍保留一行
+  assert.equal(grouped.some((i) => i.kind === 'msg' && i.content === '现在等待四个子代理返回'), true);
+});
+
+run('唯一尚未拿到子会话 id 的 spawn 不分组（避免「0 个智能体」）', () => {
+  // 触发场景:wait=true 阻塞中,spawn 还没 tool_end,metadata 为空。
+  // 期望行为:不聚成 subagent_group,原样保留工具项,等 id 就绪后再分组。
+  const running = subagentTool(2, { sessionId: '', prompt: 'p', isDone: false });
+  const grouped = __test__.groupSubagentTools([running]);
+
+  assert.equal(grouped.length, 1);
+  assert.equal(grouped[0].kind, 'tool');
+});
+
+run('reload 后工具名丢失也能靠 metadata.subagent_session_id 识别并分组', () => {
+  // 回归:持久化的 tool_result 消息不带工具名字段,重建出 tool.tool=''。
+  // 期望行为:仍按 metadata.subagent_session_id 识别为子代理项并分组,标题退到
+  // 落盘的 summary.object(spawn 时的 prompt)。
+  const reloaded = (id, sessionId, promptObject) => ({
+    kind: 'tool',
+    id,
+    ts: id * 1000,
+    tool: {
+      isDone: true,
+      success: true,
+      tool: '',
+      args: null,
+      summary: { verb: '子代理', object: promptObject, metrics: [] },
+      metadata: { subagent_session_id: sessionId },
+      output: '',
+    },
+  });
+  const grouped = __test__.groupSubagentTools([
+    reloaded(2, 'A', '查看 random-fun'),
+    reloaded(3, 'B', '查看 cpp_project'),
+  ]);
+
+  assert.equal(grouped.length, 1);
+  assert.equal(grouped[0].kind, 'subagent_group');
+  assert.deepEqual(grouped[0].agents.map((a) => a.sessionId), ['A', 'B']);
+  assert.equal(grouped[0].agents[0].prompt, '查看 random-fun');
+});
+
+run('projectCollapsedTranscriptItems 把子代理调用聚成独立 subagent_group 行', () => {
+  // 触发场景:一轮里 spawn A/B 后跟一段 assistant 汇总文本。
+  // 期望行为:子代理项聚成 subagent_group 独立成行,不被折进「调用 N 个工具」,
+  // 汇总文本照常单独渲染。
+  const projected = projectCollapsedTranscriptItems([
+    user(1),
+    subagentTool(2, { sessionId: 'A', prompt: '查看 random-fun' }),
+    subagentTool(3, { sessionId: 'B', prompt: '查看 cpp_project' }),
+    assistant(4, '汇总完成'),
+  ], { deferTrailingToolSummary: false });
+
+  assert.deepEqual(projected.map((i) => i.kind), ['msg', 'subagent_group', 'msg']);
+  assert.equal(projected[1].agents.length, 2);
+  assert.equal(projected[2].content, '汇总完成');
+});
+
 run('相邻 legacy 调用和返回折叠时保持为一个详情项', () => {
   const projected = projectCollapsedTranscriptItems([
     user(1),

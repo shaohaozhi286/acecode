@@ -5,6 +5,7 @@
 #include "../session/session_registry.hpp"
 #include "../skills/skill_init.hpp"
 #include "../skills/skill_registry.hpp"
+#include "../utils/encoding.hpp"
 #include "../utils/logger.hpp"
 #include "../web/handlers/skill_command_expander.hpp"
 
@@ -22,6 +23,22 @@ ToolResult error_result(const std::string& message) {
     r.success = false;
     r.output = message;
     return r;
+}
+
+// 子代理工具的视觉摘要。作用有二:
+//   1. 让工具结果带 tool_summary 落盘 —— resume/reload 时前端才能把这条
+//      tool_result 重建成 kind:'tool' 项(否则 spawn 结果退化成灰色系统行,
+//      「调用了 N 个智能体」分组就抓不到它)。
+//   2. object 兜底子会话标题:前端优先用后台任务列表里的实时标题,拿不到时
+//      退到这里的 prompt 摘要。
+// icon="agent" 与前端后台任务面板的智能体语义对齐(前端分组不走 ToolBlock,
+// 该图标仅在极端兜底渲染时可见)。
+ToolSummary subagent_summary(const std::string& object_text) {
+    ToolSummary s;
+    s.icon = "agent";
+    s.verb = "子代理";
+    s.object = truncate_utf8_prefix(object_text, 80);
+    return s;
 }
 
 // 从子会话的持久化消息里取最后一条非空 assistant 答复。
@@ -298,6 +315,7 @@ ToolImpl create_spawn_subagent_tool(std::shared_ptr<SubagentToolDeps> deps) {
             ToolResult r;
             r.success = true;
             r.metadata["subagent_session_id"] = child_id;
+            r.summary = subagent_summary(prompt);
             r.output = "Subagent session started: " + child_id +
                        "\nIt runs in its own isolated session (shown in the "
                        "background-tasks panel). Use wait_subagent with this "
@@ -308,7 +326,9 @@ ToolImpl create_spawn_subagent_tool(std::shared_ptr<SubagentToolDeps> deps) {
         auto outcome = wait_for_subagent(*deps->registry, child_id,
                                          ctx.abort_flag, timeout_seconds,
                                          baseline);
-        return describe_wait_outcome(outcome, child_id);
+        ToolResult r = describe_wait_outcome(outcome, child_id);
+        r.summary = subagent_summary(prompt);
+        return r;
     };
     return tool;
 }
@@ -359,7 +379,10 @@ ToolImpl create_wait_subagent_tool(std::shared_ptr<SubagentToolDeps> deps) {
         auto outcome = wait_for_subagent(*deps->registry, session_id,
                                          ctx.abort_flag, timeout_seconds,
                                          /*baseline_message_count=*/0);
-        return describe_wait_outcome(outcome, session_id);
+        ToolResult r = describe_wait_outcome(outcome, session_id);
+        // object 留空:等待某个已知子会话,标题由前端从后台任务列表解析。
+        r.summary = subagent_summary("");
+        return r;
     };
     return tool;
 }

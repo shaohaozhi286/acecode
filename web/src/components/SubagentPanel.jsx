@@ -151,7 +151,7 @@ function SubagentTranscriptView({ task }) {
   );
 }
 
-export function SubagentPanel({ open, onClose, tasks, onAbort, onClearSettled }) {
+export function SubagentPanel({ open, focus, onClose, tasks, onAbort, onClearSettled }) {
   const [transcriptTaskId, setTranscriptTaskId] = useState('');
   const [clearing, setClearing] = useState(false);
 
@@ -160,9 +160,18 @@ export function SubagentPanel({ open, onClose, tasks, onAbort, onClearSettled })
     if (!open) setTranscriptTaskId('');
   }, [open]);
 
+  // 外部(聊天流「调用了 N 个智能体」分组点某个智能体)请求定位到某子会话。
+  // focus.n 单调递增,同一 id 的重复点击也会重新触发。
+  useEffect(() => {
+    if (focus?.id) setTranscriptTaskId(focus.id);
+  }, [focus?.n, focus?.id]);
+
   const groups = useMemo(() => subagentTaskGroups(tasks), [tasks]);
+  // 目标任务不在列表(如已清除但聊天流仍留有分组项)时,合成一个最小任务对象,
+  // transcript 仍能按 session_id 拉取展示。
   const transcriptTask = transcriptTaskId
-    ? tasks.find((t) => t.id === transcriptTaskId) || null
+    ? (tasks.find((t) => t.id === transcriptTaskId)
+       || { id: transcriptTaskId, status: SUBAGENT_TASK_STATUS.COMPLETED, title: '', summary: '' })
     : null;
 
   // 运行中卡片的耗时每秒 tick(仅面板打开且列表视图有运行中任务时)。

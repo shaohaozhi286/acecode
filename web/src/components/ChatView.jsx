@@ -20,6 +20,7 @@ import { QuestionPicker } from './QuestionPicker.jsx';
 import { StickyUserContext } from './StickyUserContext.jsx';
 import { SidePanel } from './SidePanel.jsx';
 import { SubagentPanel } from './SubagentPanel.jsx';
+import { SubagentGroupBlock } from './SubagentGroupBlock.jsx';
 import { PreviewDetailsPanel } from './PreviewDetailsPanel.jsx';
 import { StatusBar } from './StatusBar.jsx';
 import { ChangeGlassDock } from './ChangeReview.jsx';
@@ -488,7 +489,19 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   // 订阅,权限/问题请求才能冒泡到主会话 UI),面板本身按需打开。
   const subagentTasks = useSubagentTasks(sid);
   const [subagentPanelOpen, setSubagentPanelOpen] = useState(false);
-  useEffect(() => { setSubagentPanelOpen(false); }, [sid]);
+  // 聊天流「调用了 N 个智能体」分组点某个智能体 → 打开面板并定位其 transcript。
+  // focus.n 单调递增,让同一 sessionId 的重复点击也能触发 SubagentPanel 内 effect。
+  const [subagentFocus, setSubagentFocus] = useState(null);
+  useEffect(() => { setSubagentPanelOpen(false); setSubagentFocus(null); }, [sid]);
+  const openSubagentTranscript = useCallback((sessionId) => {
+    if (!sessionId) return;
+    setSubagentPanelOpen(true);
+    setSubagentFocus((prev) => ({ id: sessionId, n: (prev?.n || 0) + 1 }));
+  }, []);
+  // sessionId → 任务,给分组卡片解析实时标题/运行态。
+  const subagentTasksById = useMemo(
+    () => new Map(subagentTasks.tasks.map((t) => [t.id, t])),
+    [subagentTasks.tasks]);
   // 上报给 App:子任务 id → 标题映射,用于 question 请求的可见性放宽与
   // 权限/问题弹窗的「来自后台任务」来源标记。
   const onSubagentTasksChangeRef = useRef(onSubagentTasksChange);
@@ -2445,6 +2458,23 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         );
       }
 
+      if (child.kind === 'subagent_group') {
+        return (
+          <div
+            key={key}
+            className="flex flex-col"
+            data-chat-kind={child.kind || ''}
+            data-chat-role="subagent_group"
+          >
+            <SubagentGroupBlock
+              agents={child.agents}
+              tasksById={subagentTasksById}
+              onOpen={openSubagentTranscript}
+            />
+          </div>
+        );
+      }
+
       if (child.kind === 'termination_notice') {
         return (
           <div
@@ -2631,6 +2661,25 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
               );
             }
 
+            if (it.kind === 'subagent_group') {
+              return (
+                <div
+                  key={it.id}
+                  className={chatRowClassName(it)}
+                  data-chat-row="true"
+                  data-chat-item-id={String(it.id)}
+                  data-chat-kind={it.kind || ''}
+                  data-chat-role="subagent_group"
+                >
+                  <SubagentGroupBlock
+                    agents={it.agents}
+                    tasksById={subagentTasksById}
+                    onOpen={openSubagentTranscript}
+                  />
+                </div>
+              );
+            }
+
             if (it.kind === 'activity_summary') {
               const expanded = expandedActivityKeys.has(it.id);
               const detailItems = it.detailItems || it.collapsedItems || [];
@@ -2720,6 +2769,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         )}
         <SubagentPanel
           open={subagentPanelOpen}
+          focus={subagentFocus}
           onClose={() => setSubagentPanelOpen(false)}
           tasks={subagentTasks.tasks}
           onAbort={(task) => subagentTasks.abortTask(task.id)}

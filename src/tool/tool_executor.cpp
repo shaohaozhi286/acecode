@@ -133,6 +133,14 @@ std::string ToolExecutor::build_tool_call_preview(const std::string& tool_name,
                 preview = truncate_utf8_prefix(preview, 80);
                 return tool_name + "  " + preview;
             }
+        } else if (tool_name == "spawn_subagent") {
+            if (j.contains("prompt") && j["prompt"].is_string()) {
+                std::string prompt = truncate_utf8_prefix(j["prompt"].get<std::string>(), 60);
+                return std::string("启动子代理  ") + prompt;
+            }
+            return "启动子代理";
+        } else if (tool_name == "wait_subagent") {
+            return "等待子代理";
         } else if (tool_name == "AskUserQuestion") {
             if (j.contains("questions") && j["questions"].is_array()) {
                 const auto& questions = j["questions"];
