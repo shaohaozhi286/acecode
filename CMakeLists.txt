@@ -173,6 +173,7 @@ set(ACECODE_TESTABLE_TUI_SOURCES
     ${CMAKE_SOURCE_DIR}/src/tui/model_picker.cpp
     ${CMAKE_SOURCE_DIR}/src/tui/input_history_navigation.cpp
     ${CMAKE_SOURCE_DIR}/src/tui/sidebar_model.cpp
+    ${CMAKE_SOURCE_DIR}/src/tui/subagent_host.cpp
     ${CMAKE_SOURCE_DIR}/src/tui/theme_palette.cpp
 )
 list(APPEND ACECODE_TESTABLE_SOURCES ${ACECODE_TESTABLE_TUI_SOURCES})

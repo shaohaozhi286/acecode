@@ -114,6 +114,40 @@ struct TuiState {
     };
     std::vector<McpSidebarServer> mcp_sidebar_servers;
 
+    // 子代理(spawn_subagent)右侧栏快照。由 SubagentHost 的 publish 回调
+    // 写入(mu 保护),render_regular_sidebar 渲染成「Background Tasks」行。
+    // 按用户决策只含运行中任务,本轮结束即被 host 移除。
+    struct SubagentSidebarTask {
+        std::string id;
+        std::string title;   // auto-title;为空时退到 prompt 摘要
+        std::string prompt;
+        std::chrono::steady_clock::time_point started{};
+    };
+    std::vector<SubagentSidebarTask> subagent_tasks;
+
+    // 子会话的 permission_request 冒泡队列:host 回调入队(mu 保护),
+    // 事件线程在 confirm/ask overlay 空闲时弹出占用 confirm overlay。
+    struct RemoteConfirmRequest {
+        std::string session_id;
+        std::string request_id;
+        std::string tool;
+        std::string args_preview;
+        std::string origin_label;  // 「来自子任务:<标题>」
+    };
+    std::deque<RemoteConfirmRequest> remote_confirm_queue;
+    // 非空 = 当前 confirm overlay 展示的是子会话的远程请求:用户选择经
+    // SubagentHost::respond_permission 路由回子会话,不 notify confirm_cv
+    // (本地无等待线程)。
+    std::string confirm_remote_session_id;
+    std::string confirm_remote_request_id;
+    std::string confirm_origin_label;
+    // AskUserQuestion overlay 的来源标注(子会话与主会话共享 TUI 版工具,
+    // 子会话占用 overlay 时非空)。
+    std::string ask_origin_label;
+    // confirm / ask overlay 释放时 notify_all:排队占用者(主会话工具确认、
+    // 子会话 ask 工具、远程 confirm 泵)以此感知「overlay 空闲」。
+    std::condition_variable overlay_cv;
+
     // Input history for up/down navigation
     std::vector<std::string> input_history;
     int history_index = -1; // -1 = not browsing history; TUI helpers may use private sentinels

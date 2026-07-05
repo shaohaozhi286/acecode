@@ -235,8 +235,10 @@ ToolImpl create_spawn_subagent_tool(std::shared_ptr<SubagentToolDeps> deps) {
         std::string parent_id;
         if (ctx.session_manager) parent_id = ctx.session_manager->current_session_id();
         std::string parent_permission_mode;
+        bool parent_in_registry = false;
         if (!parent_id.empty()) {
             if (auto parent = deps->registry->acquire(parent_id)) {
+                parent_in_registry = true;
                 if (parent->subagent_depth >= 1) {
                     return error_result(
                         "sub-agents cannot spawn further sub-agents");
@@ -246,6 +248,12 @@ ToolImpl create_spawn_subagent_tool(std::shared_ptr<SubagentToolDeps> deps) {
                         PermissionManager::mode_name(parent->perm->mode());
                 }
             }
+        }
+        if (!parent_in_registry && deps->fallback_permissions) {
+            // TUI 主会话不在 registry 里:权限模式从进程级 PermissionManager
+            // 继承(与 daemon 的父会话继承语义一致)。
+            parent_permission_mode = PermissionManager::mode_name(
+                deps->fallback_permissions->mode());
         }
 
         SessionOptions opts;
@@ -282,6 +290,9 @@ ToolImpl create_spawn_subagent_tool(std::shared_ptr<SubagentToolDeps> deps) {
         }
         LOG_INFO("[subagent] spawned session " + child_id + " (wait=" +
                  (wait ? std::string("true") : std::string("false")) + ")");
+        if (deps->on_spawn) {
+            deps->on_spawn(child_id, prompt);
+        }
 
         if (!wait) {
             ToolResult r;

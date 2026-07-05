@@ -19,18 +19,21 @@
 // 深度限制:子代理不能再派生子代理(与 Claude Code 一致)—— 通过
 // SessionEntry::subagent_depth 判定,防止失控的递归派生。
 //
-// 仅 daemon 路径注册(TUI 单 session 无 SessionRegistry)。deps 用
-// shared_ptr 延迟回填:worker.cpp 里 ToolExecutor 先于 SessionRegistry
-// 构造,注册时字段为空,registry/client 就绪后填入(发生在 server 启动前,
-// 无并发窗口)。
+// daemon 与 TUI 共用:daemon 在 worker.cpp 注册(deps 用 shared_ptr 延迟
+// 回填,ToolExecutor 先于 SessionRegistry 构造);TUI 通过
+// tui::SubagentHost 提供进程内 SessionRegistry 后同样注册。TUI 主会话
+// 不在 registry 里,权限模式经 fallback_permissions 继承。
 
 #include "tool_executor.hpp"
 
+#include <functional>
 #include <memory>
+#include <string>
 
 namespace acecode {
 
 struct AppConfig;
+class PermissionManager;
 class SessionRegistry;
 class SessionClient;
 
@@ -38,6 +41,12 @@ struct SubagentToolDeps {
     SessionRegistry* registry = nullptr;
     SessionClient*   client   = nullptr;
     const AppConfig* config   = nullptr;
+    // 父会话不在 registry 中(TUI 主会话)时,子会话权限模式从这里继承。
+    const PermissionManager* fallback_permissions = nullptr;
+    // spawn 成功后回调(child_id, 原始 prompt)。TUI 用它登记右侧任务列
+    // 并订阅子会话事件;daemon 留空(Web 走 tool_end metadata + 事件流)。
+    std::function<void(const std::string& child_id,
+                       const std::string& prompt)> on_spawn;
 };
 
 ToolImpl create_spawn_subagent_tool(std::shared_ptr<SubagentToolDeps> deps);

@@ -287,14 +287,7 @@ void WebServer::Impl::register_sessions() {
             deps.session_client->destroy_session(id);
             const auto project_dir =
                 SessionStorage::get_project_dir(session_cwd.empty() ? ws.cwd : session_cwd);
-            std::error_code ec;
-            std::filesystem::remove(
-                path_from_utf8(SessionStorage::session_path(project_dir, id)), ec);
-            std::filesystem::remove(
-                path_from_utf8(SessionStorage::meta_path(project_dir, id)), ec);
-            // per-session 目录(持久化 tool results 等)一并清掉。
-            std::filesystem::remove_all(
-                path_from_utf8(project_dir) / id, ec);
+            SessionStorage::purge_session_files(project_dir, id);
             LOG_INFO("[web] purged subagent session " + id +
                      " (parent=" + parent_id + ")");
             return with_cors(req, crow::response(204));

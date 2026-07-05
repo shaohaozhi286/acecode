@@ -126,6 +126,8 @@
 #include "tui/theme_palette.hpp"
 #include "utils/terminal_theme_detect.hpp"
 #include "tui/sidebar_model.hpp"
+#include "tui/subagent_host.hpp"
+#include "tool/spawn_subagent_tool.hpp"
 #include "tui/todo_checklist_view.hpp"
 #include "tui/input_history_navigation.hpp"
 #include "tui/ctrl_c_exit.hpp"
@@ -804,15 +806,42 @@ static Element render_regular_sidebar(const acecode::TuiState& state,
     }
     const bool show_bash_task =
         state.tool_running && state.tool_progress.tool_name == "bash";
-    if (show_bash_task) {
-        bottom_rows.push_back(sidebar_section_header("Background Tasks", 1));
-        std::string command = state.tool_progress.command_preview.empty()
-            ? std::string("bash")
-            : state.tool_progress.command_preview;
-        bottom_rows.push_back(
-            text("  " + truncate_cells_middle_ascii(command,
-                                                    std::max(1, content_width - 2))) |
-            color(tui::theme().ui.text_muted));
+    const auto& subagents = state.subagent_tasks;
+    if (show_bash_task || !subagents.empty()) {
+        const int task_count =
+            (show_bash_task ? 1 : 0) + static_cast<int>(subagents.size());
+        bottom_rows.push_back(sidebar_section_header("Background Tasks", task_count));
+        if (show_bash_task) {
+            std::string command = state.tool_progress.command_preview.empty()
+                ? std::string("bash")
+                : state.tool_progress.command_preview;
+            bottom_rows.push_back(
+                text("  " + truncate_cells_middle_ascii(command,
+                                                        std::max(1, content_width - 2))) |
+                color(tui::theme().ui.text_muted));
+        }
+        // 子代理(spawn_subagent)运行中任务:● 标题(auto-title 未生成前
+        // 显示 prompt 摘要)+ 耗时。本轮结束由 SubagentHost 即时移除。
+        const auto now = std::chrono::steady_clock::now();
+        for (const auto& task : subagents) {
+            const auto secs = std::chrono::duration_cast<std::chrono::seconds>(
+                now - task.started).count();
+            const std::string elapsed =
+                secs < 60 ? std::to_string(secs) + "s"
+                          : std::to_string(secs / 60) + "m" +
+                            std::to_string(secs % 60) + "s";
+            const std::string label =
+                task.title.empty() ? task.prompt : task.title;
+            const int label_width =
+                std::max(1, content_width - 4 - static_cast<int>(elapsed.size()));
+            bottom_rows.push_back(hbox({
+                text("  ") ,
+                text("\xE2\x97\x8F ") | color(tui::theme().semantic.success),
+                text(acecode::tui::truncate_end(label, label_width)) |
+                    color(tui::theme().ui.text_muted) | flex,
+                text(" " + elapsed) | dim | color(tui::theme().ui.text_dim),
+            }));
+        }
         bottom_rows.push_back(text(""));
     }
     bottom_rows.push_back(paragraph(version_str) | color(tui::theme().ui.text_muted) | dim);
@@ -2071,9 +2100,16 @@ static bool handle_pending_attachment_focus_event(TuiState& state,
 }
 
 // 权限确认框独占键盘，负责把用户选择唤醒给 agent 线程。
-static bool handle_confirm_overlay_event(TuiState& state,
-                                         ScreenInteractive& screen,
-                                         const Event& event) {
+// respond_remote 非空且当前请求来自子会话(confirm_remote_session_id 非空)
+// 时,用户选择改经它路由回子会话(SubagentHost::respond_permission),
+// 本地 confirm_cv 无等待者,不 notify。
+static bool handle_confirm_overlay_event(
+    TuiState& state,
+    ScreenInteractive& screen,
+    const Event& event,
+    const std::function<void(const std::string& session_id,
+                             const std::string& request_id,
+                             PermissionResult r)>& respond_remote = nullptr) {
     std::unique_lock<std::mutex> lk(state.mu);
     if (!state.confirm_pending) {
         return false;
@@ -2083,9 +2119,20 @@ static bool handle_confirm_overlay_event(TuiState& state,
         state.input_text.clear();
         state.pasted_texts.clear();
         state.input_cursor = 0;
-        state.confirm_result = r;
         state.confirm_pending = false;
-        state.confirm_cv.notify_one();
+        if (!state.confirm_remote_session_id.empty()) {
+            const std::string sid = state.confirm_remote_session_id;
+            const std::string rid = state.confirm_remote_request_id;
+            state.confirm_remote_session_id.clear();
+            state.confirm_remote_request_id.clear();
+            state.confirm_origin_label.clear();
+            if (respond_remote) respond_remote(sid, rid, r);
+        } else {
+            state.confirm_result = r;
+            state.confirm_cv.notify_one();
+        }
+        // overlay 释放:唤醒排队占用者(主会话确认 / 子会话 ask 工具)。
+        state.overlay_cv.notify_all();
         screen.PostEvent(Event::Custom);
     };
 
@@ -2953,6 +3000,10 @@ static void shutdown_after_tui_loop(TuiState& state,
             state.ask_scroll_to_focus_requested = false;
             state.ask_cv.notify_one();
         }
+        // 子代理排队占用者(等 overlay 空闲的工具线程)也要放行:它们的
+        // 等待谓词含各自的 abort_flag,notify 后自行走拒绝分支。
+        state.remote_confirm_queue.clear();
+        state.overlay_cv.notify_all();
     }
     agent_loop.shutdown();
 
@@ -4076,6 +4127,11 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
     Element confirm_overlay_element = emptyElement();
     if (state.confirm_pending) {
         Elements rows;
+        if (!state.confirm_origin_label.empty()) {
+            // 子会话的远程权限请求:标注来源,避免用户误以为是主会话工具。
+            rows.push_back(text(" " + state.confirm_origin_label) |
+                           dim | color(tui::theme().ui.text_dim));
+        }
         std::string title = acecode::tui::build_confirm_question(
             state.confirm_tool_name, state.confirm_tool_args);
         // build_confirm_question 可能返回多行(bash 把 command 附在第二行),
@@ -4131,10 +4187,17 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
                 input_with_esc->Render() | flex,
             });
         } else {
-            prompt_line = hbox({
-                text(" ? answering: ") | bold | color(tui::theme().ui.accent),
-                text("use arrows + Enter (Esc to cancel)") | dim | color(tui::theme().ui.text_dim),
-            });
+            Elements ask_prompt_parts;
+            ask_prompt_parts.push_back(
+                text(" ? answering: ") | bold | color(tui::theme().ui.accent));
+            if (!state.ask_origin_label.empty()) {
+                ask_prompt_parts.push_back(
+                    text(state.ask_origin_label + "  ") |
+                    color(tui::theme().ui.text_muted));
+            }
+            ask_prompt_parts.push_back(
+                text("use arrows + Enter (Esc to cancel)") | dim | color(tui::theme().ui.text_dim));
+            prompt_line = hbox(std::move(ask_prompt_parts));
         }
     } else if (state.confirm_pending) {
         // overlay 已经把选项画在 message_view 之上,prompt_line 仅作静态
@@ -4616,10 +4679,21 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
     };
     callbacks.on_tool_confirm = [&state, &screen, &agent_aborting](const std::string& tool_name, const std::string& args) -> PermissionResult {
         {
-            std::lock_guard<std::mutex> lk(state.mu);
+            // 子代理并发后 confirm/ask overlay 可能被别的请求占用(子会话的
+            // AskUserQuestion 或远程权限确认)。占用前排队等 overlay 空闲,
+            // 100ms 超时轮询让 agent_aborting 有机会打断。
+            std::unique_lock<std::mutex> lk(state.mu);
+            while (!agent_aborting.load() &&
+                   (state.confirm_pending || state.ask_pending)) {
+                state.overlay_cv.wait_for(lk, std::chrono::milliseconds(100));
+            }
+            if (agent_aborting.load()) return PermissionResult::Deny;
             state.confirm_pending = true;
             state.confirm_tool_name = tool_name;
             state.confirm_tool_args = args;
+            state.confirm_remote_session_id.clear();
+            state.confirm_remote_request_id.clear();
+            state.confirm_origin_label.clear();
             // 每次新确认都把焦点复位到 "No",避免上一次留下的焦点泄漏到下一次,
             // 同时安全的默认是 Deny —— 用户随手 Enter 不会误授权。
             state.confirm_focus = 2;
@@ -4806,6 +4880,79 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
         }
     }
     agent_loop.set_session_manager(&session_manager);
+
+    // ---- 子代理宿主(spawn_subagent / wait_subagent)----
+    // SessionRegistry / LocalSessionClient 不依赖 web 层,TUI 进程内直接
+    // 实例化;子会话与主会话共享 ToolExecutor(深度限制阻止孙代理)。
+    acecode::tui::SubagentHost::Deps subagent_host_deps;
+    {
+        SessionRegistryDeps rd;
+        rd.provider_accessor = provider_accessor;
+        rd.tools = &tools;
+        rd.cwd = working_dir;
+        rd.config = &config;
+        rd.skill_registry = &skill_registry;
+        rd.memory_registry = &memory_registry;
+        rd.memory_cfg = &runtime_memory_cfg;
+        rd.project_instructions_cfg = &config.project_instructions;
+        rd.custom_instructions_cfg = &config.custom_instructions;
+        rd.hook_manager = &hook_manager;
+        rd.template_permissions = &permissions;
+        subagent_host_deps.registry_deps = std::move(rd);
+    }
+    subagent_host_deps.parent_session_id = [&session_manager]() {
+        return session_manager.current_session_id();
+    };
+    subagent_host_deps.publish_tasks =
+        [&state, &screen](std::vector<acecode::tui::SubagentTaskSnapshot> tasks) {
+            {
+                std::lock_guard<std::mutex> lk(state.mu);
+                state.subagent_tasks.clear();
+                state.subagent_tasks.reserve(tasks.size());
+                for (auto& t : tasks) {
+                    state.subagent_tasks.push_back(
+                        {t.id, t.title, t.prompt, t.started});
+                }
+            }
+            screen.PostEvent(Event::Custom);
+        };
+    subagent_host_deps.on_permission_request =
+        [&state, &screen](const std::string& session_id,
+                          const std::string& task_title,
+                          nlohmann::json payload) {
+            TuiState::RemoteConfirmRequest req;
+            req.session_id = session_id;
+            req.request_id = payload.value("request_id", std::string{});
+            req.tool = payload.value("tool", std::string{});
+            if (payload.contains("args")) {
+                req.args_preview = payload["args"].is_string()
+                    ? payload["args"].get<std::string>()
+                    : payload["args"].dump(2);
+            }
+            req.origin_label = "[subagent] " +
+                (task_title.empty() ? session_id : task_title);
+            {
+                std::lock_guard<std::mutex> lk(state.mu);
+                state.remote_confirm_queue.push_back(std::move(req));
+            }
+            // Custom 事件驱动 CatchEvent 入口的泵,在 overlay 空闲时弹出展示。
+            screen.PostEvent(Event::Custom);
+        };
+    acecode::tui::SubagentHost subagent_host(std::move(subagent_host_deps));
+    {
+        auto subagent_deps = std::make_shared<SubagentToolDeps>();
+        subagent_deps->registry = &subagent_host.registry();
+        subagent_deps->client = &subagent_host.client();
+        subagent_deps->config = &config;
+        subagent_deps->fallback_permissions = &permissions;
+        subagent_deps->on_spawn =
+            [&subagent_host](const std::string& child_id,
+                             const std::string& prompt) {
+                subagent_host.on_spawned(child_id, prompt);
+            };
+        tools.register_tool(create_spawn_subagent_tool(subagent_deps));
+        tools.register_tool(create_wait_subagent_tool(subagent_deps));
+    }
 
     // Register session finalization for clean shutdown
     g_session_manager = &session_manager;
@@ -5167,8 +5314,16 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
             }
             // Drive re-render while waiting on LLM OR while a tool is running
             // (so the tool-timer chip in the status bar updates every second),
-            // or when we just cleared a pending status confirmation.
-            if (needs_post || state.is_waiting || state.tool_running) {
+            // or when we just cleared a pending status confirmation. 子代理
+            // 运行中同样持续 tick —— wait=false 点火后主会话 idle,右侧
+            // Background Tasks 的耗时要靠这里刷新。
+            bool has_subagent_tasks = false;
+            {
+                std::lock_guard<std::mutex> lk(state.mu);
+                has_subagent_tasks = !state.subagent_tasks.empty();
+            }
+            if (needs_post || state.is_waiting || state.tool_running ||
+                has_subagent_tasks) {
                 screen.PostEvent(Event::Custom);
             }
         }
@@ -5216,7 +5371,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
         };
 
     // Wrap with CatchEvent to handle all keyboard input
-    auto input_with_esc = CatchEvent(input_renderer, [&state, &screen, &clamp_chat_focus, &chat_viewport_rows, &sync_chat_line_counts_from_layout, &reset_chat_line_measure_state, &invalidate_chat_line_measure_at, &auth_done, &cmd_registry, &agent_loop, &provider_slot, &provider_accessor, &config, &token_tracker, &permissions, &session_manager, &scroll_chat_by_lines, &chat_box, &scrollbar_box, &ask_scrollbar_box, &ask_overlay_box, &message_line_counts, &mcp_manager, &tools, &skill_registry, &memory_registry, &working_dir, &insert_pasted_text_at_cursor, &paste_system_clipboard_text, &paste_system_clipboard_image, &handle_pending_attachment_focus_event, &cancel_ctrl_c_exit_locked, &coordinate_mcp_before_first_turn](Event event) {
+    auto input_with_esc = CatchEvent(input_renderer, [&state, &screen, &clamp_chat_focus, &chat_viewport_rows, &sync_chat_line_counts_from_layout, &reset_chat_line_measure_state, &invalidate_chat_line_measure_at, &auth_done, &cmd_registry, &agent_loop, &provider_slot, &provider_accessor, &config, &token_tracker, &permissions, &session_manager, &scroll_chat_by_lines, &chat_box, &scrollbar_box, &ask_scrollbar_box, &ask_overlay_box, &message_line_counts, &mcp_manager, &tools, &skill_registry, &memory_registry, &working_dir, &insert_pasted_text_at_cursor, &paste_system_clipboard_text, &paste_system_clipboard_image, &handle_pending_attachment_focus_event, &cancel_ctrl_c_exit_locked, &coordinate_mcp_before_first_turn, &subagent_host](Event event) {
 #if ACECODE_TUI_INPUT_TRACE
         if (event != Event::Custom &&
             !event.is_cursor_position() &&
@@ -6125,7 +6280,37 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
             }
         }
 
-        if (handle_confirm_overlay_event(state, screen, event)) {
+        // 远程确认泵:confirm/ask overlay 空闲时弹出子会话的权限请求占用
+        // confirm overlay(带来源标注)。入队方 PostEvent(Custom) 保证本泵
+        // 在请求到达后至少跑一次;overlay 释放时的 PostEvent 驱动下一条。
+        {
+            std::lock_guard<std::mutex> lk(state.mu);
+            if (!state.confirm_pending && !state.ask_pending &&
+                !state.remote_confirm_queue.empty()) {
+                auto req = std::move(state.remote_confirm_queue.front());
+                state.remote_confirm_queue.pop_front();
+                state.confirm_pending = true;
+                state.confirm_tool_name = req.tool;
+                state.confirm_tool_args = req.args_preview;
+                state.confirm_remote_session_id = req.session_id;
+                state.confirm_remote_request_id = req.request_id;
+                state.confirm_origin_label = req.origin_label;
+                state.confirm_focus = 2;
+            }
+        }
+
+        if (handle_confirm_overlay_event(
+                state, screen, event,
+                [&subagent_host](const std::string& sid,
+                                 const std::string& rid,
+                                 PermissionResult r) {
+                    const char* choice = (r == PermissionResult::Allow)
+                        ? "allow"
+                        : (r == PermissionResult::AlwaysAllow)
+                            ? "allow_session"
+                            : "deny";
+                    subagent_host.respond_permission(sid, rid, choice);
+                })) {
             return true;
         }
 
@@ -6287,7 +6472,8 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                     &skill_registry,
                     &memory_registry,
                     &cmd_registry,
-                    working_dir
+                    working_dir,
+                    &subagent_host
                 };
                 const size_t before_command_messages =
                     state.conversation.size();

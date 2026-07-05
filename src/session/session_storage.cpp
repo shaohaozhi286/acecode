@@ -486,6 +486,15 @@ std::string SessionStorage::meta_path(const std::string& project_dir,
     return make_session_path(project_dir, session_id, ".meta.json", pid);
 }
 
+void SessionStorage::purge_session_files(const std::string& project_dir,
+                                         const std::string& session_id) {
+    if (project_dir.empty() || session_id.empty()) return;
+    std::error_code ec;
+    fs::remove(path_from_utf8(session_path(project_dir, session_id)), ec);
+    fs::remove(path_from_utf8(meta_path(project_dir, session_id)), ec);
+    fs::remove_all(path_from_utf8(project_dir) / session_id, ec);
+}
+
 std::string SessionStorage::now_iso8601() {
     auto now = std::chrono::system_clock::now();
     auto time_t_now = std::chrono::system_clock::to_time_t(now);

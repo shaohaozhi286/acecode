@@ -22,6 +22,7 @@ class ToolExecutor;
 class SkillRegistry;
 class MemoryRegistry;
 class CommandRegistry;
+namespace tui { class SubagentHost; }
 
 struct CommandContext {
     TuiState& state;
@@ -42,6 +43,7 @@ struct CommandContext {
     MemoryRegistry* memory = nullptr;  // memory registry for /memory commands
     CommandRegistry* command_registry = nullptr; // self-reference for /skills reload
     std::string cwd;                   // working directory for cwd-scoped operations
+    tui::SubagentHost* subagent_host = nullptr; // /tasks 的子代理宿主(仅斜杠 dispatch 路径注入)
 };
 
 struct SlashCommand {

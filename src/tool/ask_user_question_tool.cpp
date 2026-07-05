@@ -1,5 +1,6 @@
 #include "ask_user_question_tool.hpp"
 
+#include "../session/session_manager.hpp"
 #include "../tui_state.hpp"
 #include "../utils/logger.hpp"
 
@@ -9,6 +10,7 @@
 #include <algorithm>
 #include <sstream>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <set>
 #include <string>
@@ -357,6 +359,30 @@ ToolImpl create_ask_user_question_tool(TuiState& state,
 
         {
             std::unique_lock<std::mutex> lk(state.mu);
+            // 子代理并发后 overlay 可能被占用(主会话确认 / 另一个子会话的
+            // 提问)。占用前排队等空闲;100ms 轮询保证 abort 可打断。
+            while (!(abort && abort->load()) &&
+                   (state.ask_pending || state.confirm_pending)) {
+                state.overlay_cv.wait_for(lk, std::chrono::milliseconds(100));
+            }
+            if (abort && abort->load()) {
+                return make_rejected_ask_result();
+            }
+            // 来源标注:子会话(spawn_subagent)与主会话共享本工具;
+            // parent_session_id 非空即子会话,标注让用户知道谁在提问。
+            state.ask_origin_label.clear();
+            if (ctx.session_manager) {
+                const std::string parent =
+                    ctx.session_manager->current_parent_session_id();
+                if (!parent.empty()) {
+                    const std::string child_title =
+                        ctx.session_manager->current_title();
+                    state.ask_origin_label = "[subagent] " +
+                        (child_title.empty()
+                             ? ctx.session_manager->current_session_id()
+                             : child_title);
+                }
+            }
             state.ask_pending = true;
             state.ask_payload_json = arguments_json;
             state.ask_questions = *parsed;
@@ -421,6 +447,9 @@ ToolImpl create_ask_user_question_tool(TuiState& state,
             state.ask_scroll_visible_rows = 0;
             state.ask_scrollbar_dragging = false;
             state.ask_scroll_to_focus_requested = false;
+            state.ask_origin_label.clear();
+            // overlay 释放:唤醒排队占用者(主会话确认 / 其它子会话提问)。
+            state.overlay_cv.notify_all();
         }
         screen.PostEvent(ftxui::Event::Custom);
 

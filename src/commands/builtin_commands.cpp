@@ -24,6 +24,8 @@
 #include "../skills/skill_commands.hpp"
 #include "../session/session_manager.hpp"
 #include "../session/session_resume_restore.hpp"
+#include "../session/session_storage.hpp"
+#include "../tui/subagent_host.hpp"
 #include "../session/session_rewind.hpp"
 #include "../session/thread_goal_store.hpp"
 #include "../utils/logger.hpp"
@@ -1609,6 +1611,78 @@ static void cmd_theme(CommandContext& ctx, const std::string& args) {
     ctx.state.chat_follow_tail = true;
 }
 
+// /tasks — 子代理(spawn_subagent)后台任务的操作入口。右侧栏只展示
+// 运行中任务且不可交互;list/abort/clear 由本命令承担(与 Web 的后台
+// 任务面板同一数据:parent_session_id 归属当前主会话)。
+static void cmd_tasks(CommandContext& ctx, const std::string& args) {
+    auto push_system = [&](const std::string& text) {
+        std::lock_guard<std::mutex> lk(ctx.state.mu);
+        ctx.state.conversation.push_back({"system", text, false});
+        ctx.state.chat_follow_tail = true;
+    };
+    if (!ctx.subagent_host) {
+        push_system("/tasks is unavailable in this context.");
+        return;
+    }
+    const std::string project_dir = SessionStorage::get_project_dir(ctx.cwd);
+    std::istringstream iss(args);
+    std::string sub;
+    iss >> sub;
+
+    if (sub.empty() || sub == "list") {
+        auto entries = ctx.subagent_host->list_tasks(project_dir);
+        if (entries.empty()) {
+            push_system("No subagent tasks for this session.");
+            return;
+        }
+        std::ostringstream oss;
+        oss << "Subagent tasks (" << entries.size() << "):";
+        for (const auto& e : entries) {
+            oss << "\n  " << (e.running ? "\xE2\x97\x8F running " : "\xE2\x9C\x93 settled ")
+                << e.id;
+            if (!e.title.empty()) oss << "  " << e.title;
+        }
+        oss << "\n\nUse /tasks abort <id> to stop a running task, "
+               "/tasks clear to permanently delete settled ones.";
+        push_system(oss.str());
+        return;
+    }
+    if (sub == "abort") {
+        std::string id;
+        iss >> id;
+        if (id.empty()) {
+            push_system("Usage: /tasks abort <session-id>");
+            return;
+        }
+        // 支持 id 前缀:唯一命中时展开。
+        if (!ctx.subagent_host->abort_task(id)) {
+            std::string matched;
+            for (const auto& t : ctx.subagent_host->running_tasks()) {
+                if (t.id.rfind(id, 0) == 0) {
+                    if (!matched.empty()) { matched.clear(); break; }
+                    matched = t.id;
+                }
+            }
+            if (matched.empty() || !ctx.subagent_host->abort_task(matched)) {
+                push_system("No running subagent task matches: " + id);
+                return;
+            }
+            id = matched;
+        }
+        push_system("Abort requested for subagent task " + id + ".");
+        return;
+    }
+    if (sub == "clear") {
+        const int removed = ctx.subagent_host->clear_settled(project_dir);
+        push_system(removed > 0
+            ? "Cleared " + std::to_string(removed) +
+              " settled subagent task(s) (disk data permanently deleted)."
+            : "No settled subagent tasks to clear.");
+        return;
+    }
+    push_system("Usage: /tasks [list|abort <id>|clear]");
+}
+
 void register_builtin_commands(CommandRegistry& registry) {
     registry.register_command({"help", "Show available commands", cmd_help});
     registry.register_command({"clear", "Clear conversation history", cmd_clear});
@@ -1633,6 +1707,7 @@ void register_builtin_commands(CommandRegistry& registry) {
     register_remote_control_command(registry);
     registry.register_command({"feedback", "Upload current session diagnostics to the configured upgrade service", cmd_feedback});
     registry.register_command({"browser", "Show or toggle ACE Browser Bridge tools for this session", cmd_browser});
+    registry.register_command({"tasks", "List, abort, or clear subagent background tasks", cmd_tasks});
     registry.register_command({"title", "Set or show the window title for this session", cmd_title});
     registry.register_command({"page-step", "Toggle single-line PgUp/PgDn scrolling (for terminals that swallow Alt+Arrow)", cmd_page_step});
     registry.register_command({"theme", "Switch TUI color theme (dark/light/auto)", cmd_theme});
