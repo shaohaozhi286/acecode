@@ -2623,7 +2623,8 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         </div>
       </div>
 
-      <div className="relative flex-1 min-h-0">
+      <div className="relative flex-1 min-h-0 flex">
+        <div className="relative flex-1 min-w-0 h-full">
         <div
           ref={scrollRef}
           onScroll={handleMessagesScroll}
@@ -2767,6 +2768,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
             todoSummary={todoSummary}
           />
         )}
+        </div>
         <SubagentPanel
           open={subagentPanelOpen}
           focus={subagentFocus}

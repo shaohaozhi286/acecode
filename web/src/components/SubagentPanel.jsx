@@ -1,8 +1,10 @@
-// 「后台任务」浮层面板(spawn_subagent 子会话)。
+// 「后台任务」面板(spawn_subagent 子会话)。
 //
-// 归属主会话窗口:挂在 ChatView 消息区容器内,absolute 浮在右侧,不挤压
-// 消息区、不影响 Sidebar/SidePanel。数据与操作全部来自 useSubagentTasks
-// (ChatView 持有),本组件只渲染。
+// 归属主会话窗口:作为 ChatView transcript 区(flex 行)的一个静态 flex 兄弟项,
+// 打开时**挤压**聊天消息区(而非浮层遮挡),关闭时返回 null 不占位;只影响
+// 聊天会话区,不动 Sidebar/右侧文件预览面板、也不压输入框(输入框在 transcript
+// 区之外仍占满宽)。数据与操作全部来自 useSubagentTasks(ChatView 持有),
+// 本组件只渲染。
 //
 // 两个视图:
 //   - 列表:运行中 / 已完成 分组卡片。运行中卡片右上有中止(stop);
@@ -196,7 +198,7 @@ export function SubagentPanel({ open, focus, onClose, tasks, onAbort, onClearSet
 
   return (
     <div
-      className="absolute inset-y-0 right-0 z-30 w-[380px] max-w-[85%] flex flex-col bg-surface border-l border-border shadow-[-8px_0_24px_rgba(0,0,0,0.12)]"
+      className="shrink-0 w-[380px] max-w-[85%] h-full flex flex-col bg-surface border-l border-border"
       data-subagent-panel="true"
     >
       <div className="h-10 px-3 flex items-center gap-2 border-b border-border shrink-0">
