@@ -588,6 +588,9 @@ BuiltinCommandResult execute_goal_builtin(SessionEntry& entry,
         auto goal = store->get_thread_goal(sid);
         if (goal.has_value()) emit_updated(*goal);
         entry.loop->emit_system_message(goal.has_value() ? format_registry_goal_summary(*goal) : "Goal updated.");
+        // 回合运行中时把新 objective 通知给正在跑的模型(objective_updated
+        // steering);空闲时 no-op,下一次 continuation 自然携带新 objective。
+        entry.loop->notify_goal_objective_updated();
         return {BuiltinCommandStatus::Accepted, "completed"};
     }
 

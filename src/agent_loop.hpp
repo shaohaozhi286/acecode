@@ -198,6 +198,17 @@ public:
     void publish_current_goal_state();
     void maybe_continue_goal();
 
+    // Goal 无人值守模式:当前会话(或子代理的父会话)存在 Active goal 且不在
+    // Plan mode 时为 true。此时所有需要用户确认的过程自动进行 —— 写工具权限
+    // 自动放行,AskUserQuestion 返回自动应答 —— goal 运行绝不弹确认窗。
+    bool goal_unattended_active();
+
+    // /goal edit 修改了 active goal 的 objective 时调用。回合运行中则在下一次
+    // 模型请求前注入 objective_updated steering(对齐 Codex ext/goal 的
+    // inject_active_turn_steering);空闲时为 no-op(下一次 continuation 自然
+    // 带新 objective)。
+    void notify_goal_objective_updated();
+
     void set_skill_registry(const SkillRegistry* sr) { skill_registry_ = sr; }
     void set_memory_registry(const MemoryRegistry* mr) { memory_registry_ = mr; }
     void set_memory_config(const MemoryConfig* cfg) { memory_cfg_ = cfg; }
@@ -247,6 +258,15 @@ private:
     void emit_goal_cleared(const std::string& session_id);
     void emit_todo_updated(const nlohmann::json& payload);
     std::string build_goal_context_prompt(const ThreadGoal& goal) const;
+    std::string build_goal_budget_limit_prompt(const ThreadGoal& goal) const;
+    std::string build_goal_objective_updated_prompt(const ThreadGoal& goal) const;
+    // 回合失败(provider 终止错误 / 连续空回复 / provider 缺失)时停止 Active
+    // goal:HTTP 429 → usage_limited,其余 → blocked。对齐 Codex ext/goal 的
+    // on_turn_error,防止 maybe_continue_goal 对着同一个错误无限重试烧 token。
+    void stop_active_goal_after_turn_error(const ProviderErrorInfo& info);
+    // 在每次模型请求前消费 pending steering 标记,把 budget_limit /
+    // objective_updated 提示以 hidden_goal_context user 消息注入。
+    void maybe_inject_goal_steering();
     bool maybe_run_auto_compact();
     bool active_estimate_exceeds_auto_threshold() const;
     void apply_compact_result(const CompactResult& result, const std::string& trigger);
@@ -402,6 +422,11 @@ private:
     std::string goal_accounting_goal_id_;
     std::string budget_notice_goal_id_;
     std::chrono::steady_clock::time_point goal_time_checkpoint_{};
+    // Goal steering pending 标记。atomic:budget 标记可能从并行读工具批次的
+    // 线程置位,objective 标记从 TUI/daemon 命令线程置位;消费固定在 worker
+    // 线程的模型请求前。回合开始时清零 = Codex inject_if_running 失败即丢弃。
+    std::atomic<bool> pending_goal_budget_limit_steering_{false};
+    std::atomic<bool> pending_goal_objective_steering_{false};
     std::map<std::string, std::chrono::steady_clock::time_point> recent_safe_edit_failures_;
 
     // Worker thread and task queue

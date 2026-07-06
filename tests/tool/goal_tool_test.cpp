@@ -103,3 +103,35 @@ TEST(GoalTool, UpdateGoalAllowsCompleteAndBlocked) {
     ASSERT_TRUE(goal.has_value());
     EXPECT_EQ(goal->status, acecode::ThreadGoalStatus::Complete);
 }
+
+// 场景:带 token_budget 的 goal 被标记 complete。期望:工具输出 JSON 携带
+// completion_budget_report 指令,提示模型向用户汇报最终用量(对齐 Codex
+// 的 completion_budget_report 行为);blocked 收尾不带该字段。
+// 回归:此前完成 goal 后模型常常静默结束,用户看不到 goal 消耗了多少预算。
+TEST(GoalTool, UpdateGoalCompleteWithBudgetIncludesUsageReportInstruction) {
+    auto cwd = temp_cwd("budget_report");
+    acecode::SessionManager sm;
+    sm.start_session(cwd.string(), "test", "model", "sid-goal-report");
+    ASSERT_FALSE(sm.ensure_active_session_id().empty());
+    ASSERT_TRUE(sm.goal_store()->replace_thread_goal(
+        sm.current_session_id(), "finish with budget", 5000,
+        acecode::ThreadGoalStatus::Active));
+
+    auto ctx = context_for(sm);
+    auto update = acecode::create_update_goal_tool();
+    auto done = update.execute(R"({"status":"complete"})", ctx);
+    ASSERT_TRUE(done.success) << done.output;
+    auto json = nlohmann::json::parse(done.output);
+    ASSERT_TRUE(json.contains("completion_budget_report"));
+    EXPECT_NE(json["completion_budget_report"].get<std::string>().find("tokens_used"),
+              std::string::npos);
+
+    // blocked 收尾:goal 未完成,不应指示汇报「最终用量」。
+    ASSERT_TRUE(sm.goal_store()->replace_thread_goal(
+        sm.current_session_id(), "second run", 5000,
+        acecode::ThreadGoalStatus::Active));
+    auto blocked = update.execute(R"({"status":"blocked"})", ctx);
+    ASSERT_TRUE(blocked.success) << blocked.output;
+    auto blocked_json = nlohmann::json::parse(blocked.output);
+    EXPECT_FALSE(blocked_json.contains("completion_budget_report"));
+}

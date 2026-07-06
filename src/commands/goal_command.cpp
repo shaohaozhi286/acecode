@@ -282,6 +282,9 @@ void cmd_goal(CommandContext& ctx, const std::string& raw_args) {
         auto goal = store->get_thread_goal(sid);
         if (goal.has_value()) emit_goal_updated(ctx, *goal);
         push_goal_message(ctx, goal.has_value() ? format_goal_summary(*goal) : "Goal updated.");
+        // 回合运行中时把新 objective 通知给正在跑的模型(objective_updated
+        // steering);空闲时 no-op,下一次 continuation 自然携带新 objective。
+        ctx.agent_loop.notify_goal_objective_updated();
         return;
     }
 

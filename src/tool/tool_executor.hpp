@@ -114,6 +114,12 @@ struct ToolContext {
     std::function<void(const std::string& session_id)> emit_goal_cleared;
     std::function<void(const nlohmann::json& todo_payload)> emit_todo_updated;
 
+    // Goal 无人值守模式探针(AgentLoop 注入)。true = 当前会话(或父会话)
+    // 有 Active goal 且非 Plan mode,所有需要用户确认的交互必须自动进行:
+    // AskUserQuestion 不弹 UI,直接返回「自行决策并继续」的自动应答。
+    // 空函数 = 正常交互模式。
+    std::function<bool()> goal_unattended_active;
+
     // Plan-mode tools use these callbacks to mutate the active AgentLoop's
     // permission state. They are callbacks rather than direct PermissionManager
     // references so the tool layer stays independent of the TUI/daemon runtime.

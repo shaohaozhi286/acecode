@@ -260,6 +260,24 @@ ToolResult make_rejected_ask_result() {
     return r;
 }
 
+// Goal 无人值守模式:不弹任何 UI,直接告知模型自行决策。success=true 避免
+// 模型把它当失败反复重问;文案明确指示优先选推荐项并继续推进 goal。
+ToolResult make_goal_unattended_ask_result() {
+    ToolResult r;
+    r.success = true;
+    r.output =
+        "[Unattended goal mode] The user is not available to answer questions "
+        "while the goal runs. Do not wait and do not ask again. Decide "
+        "autonomously: pick the recommended option if one exists, otherwise "
+        "the most reasonable option, note the decision briefly in your "
+        "response, and continue working toward the goal.";
+    return r;
+}
+
+static bool goal_unattended(const ToolContext& ctx) {
+    return ctx.goal_unattended_active && ctx.goal_unattended_active();
+}
+
 ToolImpl create_ask_user_question_tool(TuiState& state,
                                         ftxui::ScreenInteractive& screen) {
     ToolDef def;
@@ -343,6 +361,12 @@ ToolImpl create_ask_user_question_tool(TuiState& state,
         auto parsed = validate_ask_user_question_args(arguments_json, err);
         if (!parsed.has_value()) {
             return ToolResult{err, false};
+        }
+
+        // Goal 无人值守:绝不占用 TUI overlay,自动应答让模型自行决策。
+        if (goal_unattended(ctx)) {
+            LOG_INFO("[AskUserQuestion] auto-answered (unattended goal mode)");
+            return make_goal_unattended_ask_result();
         }
 
         // 记录 question 的原始顺序,供 format 拼接 + 防止 std::map 里乱序。
@@ -621,6 +645,12 @@ ToolImpl create_ask_user_question_tool_async() {
         auto parsed = validate_ask_user_question_args(arguments_json, err);
         if (!parsed.has_value()) {
             return ToolResult{err, false};
+        }
+
+        // Goal 无人值守:不经 prompter 弹前端问答面板,自动应答。
+        if (goal_unattended(ctx)) {
+            LOG_INFO("[AskUserQuestion] auto-answered (unattended goal mode)");
+            return make_goal_unattended_ask_result();
         }
 
         // ctx.ask_user_questions 为空 → daemon 没装 prompter,工具不可用。

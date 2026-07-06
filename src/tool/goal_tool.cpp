@@ -230,6 +230,17 @@ ToolImpl create_update_goal_tool() {
             out["tokens_used"] = updated->tokens_used;
             out["remaining_tokens"] = std::max<std::int64_t>(0, *updated->token_budget - updated->tokens_used);
         }
+        // 对齐 Codex completion_budget_report:完成时明确指示模型向用户汇报
+        // 最终用量,否则模型常常静默结束,用户看不到 goal 花了多少预算。
+        if (*target_status == ThreadGoalStatus::Complete && updated.has_value() &&
+            (updated->token_budget.has_value() || updated->time_used_seconds > 0)) {
+            out["completion_budget_report"] =
+                "Goal achieved. Report final usage from this tool result's goal "
+                "fields: include token usage from tokens_used and token_budget "
+                "when token_budget is present, and summarize time_used_seconds "
+                "in a concise, human-friendly form appropriate to the response "
+                "language.";
+        }
         return ToolResult{out.dump(2), true};
     };
     return impl;

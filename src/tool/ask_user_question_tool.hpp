@@ -59,6 +59,11 @@ std::string format_ask_user_question_result_display(
 // output="[Error] User declined to answer questions."
 ToolResult make_rejected_ask_result();
 
+// Goal 无人值守模式的自动应答 ToolResult:success=true,文案指示模型
+// 自行决策并继续推进 goal(不弹 UI、不等待用户)。TUI 与 daemon 两个
+// AskUserQuestion 实现共用。
+ToolResult make_goal_unattended_ask_result();
+
 // 工厂函数:新建 AskUserQuestion 工具。TuiState 引用用于发起阻塞 overlay,
 // screen 引用用于 PostEvent 唤醒渲染线程。工具内部通过 ToolContext::abort_flag
 // 感知 agent 中止。

@@ -263,3 +263,55 @@ TEST(AskUserQuestionRejectedTest, ConstantRejectedResult) {
     EXPECT_FALSE(r.success);
     EXPECT_EQ(r.output, "[Error] User declined to answer questions.");
 }
+
+// 场景:goal 无人值守模式的自动应答 —— success=true(避免模型把它当失败
+// 反复重问),文案指示模型自行决策并继续推进 goal。
+TEST(AskUserQuestionUnattendedTest, AutoAnswerResultTellsModelToDecide) {
+    auto r = acecode::make_goal_unattended_ask_result();
+    EXPECT_TRUE(r.success);
+    EXPECT_NE(r.output.find("Unattended goal mode"), std::string::npos);
+    EXPECT_NE(r.output.find("Decide"), std::string::npos);
+}
+
+// 场景:daemon 版 AskUserQuestion 在 goal 无人值守模式下不走 prompter。
+// 回归:此前 goal 回合里模型调 AskUserQuestion 会弹出前端问答面板,goal
+// 运行被打断;修复后 ctx.goal_unattended_active()==true 时直接返回自动应答,
+// 即使 ask_user_questions 通道存在也不触碰。
+TEST(AskUserQuestionUnattendedTest, AsyncToolSkipsPrompterWhenGoalUnattended) {
+    auto tool = acecode::create_ask_user_question_tool_async();
+    acecode::ToolContext ctx;
+    bool prompter_called = false;
+    ctx.ask_user_questions = [&](const nlohmann::json&) {
+        prompter_called = true;
+        return nlohmann::json{{"cancelled", true}};
+    };
+    ctx.goal_unattended_active = [] { return true; };
+
+    const std::string args = R"({"questions":[{"question":"Pick one?",
+        "header":"choice","options":[{"label":"A","description":"a"},
+        {"label":"B","description":"b"}]}]})";
+    auto r = tool.execute(args, ctx);
+    EXPECT_TRUE(r.success) << r.output;
+    EXPECT_FALSE(prompter_called);
+    EXPECT_NE(r.output.find("Unattended goal mode"), std::string::npos);
+}
+
+// 场景:非 goal 模式(探针缺省 / 返回 false)行为不变 —— 仍走 prompter。
+// 这里 prompter 返回 cancelled=true,期望拿到既有的拒绝结果。
+TEST(AskUserQuestionUnattendedTest, AsyncToolStillPromptsWithoutActiveGoal) {
+    auto tool = acecode::create_ask_user_question_tool_async();
+    acecode::ToolContext ctx;
+    bool prompter_called = false;
+    ctx.ask_user_questions = [&](const nlohmann::json&) {
+        prompter_called = true;
+        return nlohmann::json{{"cancelled", true}};
+    };
+    ctx.goal_unattended_active = [] { return false; };
+
+    const std::string args = R"({"questions":[{"question":"Pick one?",
+        "header":"choice","options":[{"label":"A","description":"a"},
+        {"label":"B","description":"b"}]}]})";
+    auto r = tool.execute(args, ctx);
+    EXPECT_TRUE(prompter_called);
+    EXPECT_FALSE(r.success);
+}

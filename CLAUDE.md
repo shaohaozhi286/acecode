@@ -42,6 +42,16 @@ Sub-agent sessions are **hidden from normal session lists** and surfaced only in
 
 `bash_tool` streams cleaned output, polls abort state, truncates very large output, and supports POSIX `stdin_inputs`. File tools should preserve checkpoint hooks by calling `track_file_write_before` before mutating files.
 
+### Thread Goals(/goal,复刻 Codex ext/goal)
+
+每 session 至多一个 goal,存项目级 `state.sqlite3`(`src/session/thread_goal_store.cpp`)。状态机:`active / paused / blocked / usage_limited / budget_limited / complete`,仅 `active` 参与自动 continuation(`AgentLoop::maybe_continue_goal`,空闲时注入 hidden `goal_context` user 消息开新回合;Plan mode 下不触发)。模型工具 `get_goal` / `create_goal` / `update_goal(complete|blocked)`;`/goal` 命令双端注册(TUI `goal_command.cpp`,daemon builtin 在 `session_registry.cpp`)。
+
+**Unattended goal mode(核心承诺:goal 运行绝无确认弹窗)**:`AgentLoop::goal_unattended_active()` = 当前会话(或子代理的父会话)有 `active` goal 且非 Plan mode。为 true 时写工具权限门自动放行(含 yolo 外部写首确认),AskUserQuestion 直接返回自动应答(`make_goal_unattended_ask_result`,经 `ToolContext::goal_unattended_active` 探针,TUI/daemon 两实现共用)。Plan mode 只读约束优先。
+
+**Turn error 停 goal**:provider 终止错误 / 连续空回复耗尽 / provider 缺失 → `stop_active_goal_after_turn_error`(429 → `usage_limited`,其余 → `blocked`),防止 continuation 对同一错误无限重试烧 token;`/goal resume` 恢复。用户 abort → `paused`。
+
+**In-turn steering**:budget 耗尽转 `budget_limited` 时与 `/goal edit` 改 objective 时,置 pending 标记,worker 在下一次模型请求前(`maybe_inject_goal_steering`)注入 budget_limit wrap-up / objective_updated 提示(hidden_goal_context user 消息);回合外的 pending 标记在下一回合开始时丢弃。无 provider usage 时估算入账覆盖所有轮(含纯工具调用轮),否则 budget_limited 永不触发。
+
 ## Sessions And Persistence
 
 [src/session/](src/session) persists canonical conversation messages as one `<session-id>.jsonl` file with one `<session-id>.meta.json` sidecar per session. Runtime-only display fields are not serialized. Resume paths adopt the canonical JSONL directly and rebuild TUI pseudo-rows, tool previews, summaries, and diffs from persisted messages and metadata; they must not copy history into PID-suffixed files.
