@@ -100,7 +100,7 @@ jobs:
         shell: bash
         run: |
           cmake -S . -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_BUILD_TYPE=MinSizeRel \
             -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
             -DVCPKG_TARGET_TRIPLET="${{ matrix.triplet }}" \
             -DBUILD_TESTING=OFF \
@@ -108,23 +108,23 @@ jobs:
 
       - name: Build
         shell: bash
-        run: cmake --build build --config Release --target acecode
+        run: cmake --build build --config MinSizeRel --target acecode
 
       - name: Build desktop
         if: matrix.build_desktop
         shell: bash
-        run: cmake --build build --config Release --target acecode-desktop
+        run: cmake --build build --config MinSizeRel --target acecode-desktop
 
       - name: Build browser host
         shell: bash
-        run: cmake --build build --config Release --target ace-browser-host
+        run: cmake --build build --config MinSizeRel --target ace-browser-host
 
       - name: Extract debug symbols (Linux)
         if: runner.os == 'Linux'
         shell: bash
         run: |
           objcopy --only-keep-debug "build/${{ matrix.executable }}" "build/${{ matrix.executable }}.debug"
-          strip --strip-debug "build/${{ matrix.executable }}"
+          strip --strip-unneeded "build/${{ matrix.executable }}"
           objcopy --add-gnu-debuglink="build/${{ matrix.executable }}.debug" "build/${{ matrix.executable }}"
 
       - name: Extract desktop debug symbols (Linux)
@@ -132,7 +132,7 @@ jobs:
         shell: bash
         run: |
           objcopy --only-keep-debug "build/acecode-desktop" "build/acecode-desktop.debug"
-          strip --strip-debug "build/acecode-desktop"
+          strip --strip-unneeded "build/acecode-desktop"
           objcopy --add-gnu-debuglink="build/acecode-desktop.debug" "build/acecode-desktop"
 
       - name: Extract debug symbols (macOS)
@@ -141,6 +141,25 @@ jobs:
         run: |
           dsymutil "build/${{ matrix.executable }}" -o "build/${{ matrix.executable }}.dSYM"
           strip "build/${{ matrix.executable }}"
+
+      - name: Extract desktop debug symbols (macOS)
+        if: runner.os == 'macOS' && matrix.build_desktop
+        shell: bash
+        run: |
+          app_exec="build/ACECode.app/Contents/MacOS/ACECode"
+          app_daemon="build/ACECode.app/Contents/MacOS/acecode-daemon"
+          if [ ! -f "$app_exec" ]; then
+            echo "Missing desktop app executable: $app_exec" >&2
+            exit 1
+          fi
+          if [ ! -f "$app_daemon" ]; then
+            echo "Missing desktop app daemon: $app_daemon" >&2
+            exit 1
+          fi
+          dsymutil "$app_exec" -o "build/ACECode.app.dSYM"
+          strip "$app_exec"
+          dsymutil "$app_daemon" -o "build/acecode-daemon.dSYM"
+          strip "$app_daemon"
 
       - name: Package (Unix)
         if: runner.os != 'Windows'
@@ -291,6 +310,16 @@ jobs:
           path: build/${{ matrix.executable }}.dSYM
           if-no-files-found: warn
 
+      - name: Upload desktop dSYM (macOS)
+        if: runner.os == 'macOS' && matrix.build_desktop
+        uses: actions/upload-artifact@v4
+        with:
+          name: acecode-${{ matrix.id }}-desktop-dsym
+          path: |
+            build/ACECode.app.dSYM
+            build/acecode-daemon.dSYM
+          if-no-files-found: warn
+
   build-linux-old-package:
     name: ${{ matrix.id }}
     runs-on: ${{ matrix.os }}
@@ -379,7 +408,7 @@ jobs:
         shell: bash
         run: |
           cmake -S . -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_BUILD_TYPE=MinSizeRel \
             -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
             -DVCPKG_TARGET_TRIPLET="${{ matrix.triplet }}" \
             -DBUILD_TESTING=OFF \
@@ -388,15 +417,15 @@ jobs:
 
       - name: Build
         shell: bash
-        run: cmake --build build --config Release --target acecode
+        run: cmake --build build --config MinSizeRel --target acecode
 
       - name: Build desktop
         shell: bash
-        run: cmake --build build --config Release --target acecode-desktop
+        run: cmake --build build --config MinSizeRel --target acecode-desktop
 
       - name: Build browser host
         shell: bash
-        run: cmake --build build --config Release --target ace-browser-host
+        run: cmake --build build --config MinSizeRel --target ace-browser-host
 
       - name: Verify old Linux ABI
         shell: bash
@@ -447,11 +476,11 @@ jobs:
         shell: bash
         run: |
           objcopy --only-keep-debug "build/${{ matrix.executable }}" "build/${{ matrix.executable }}.debug"
-          strip --strip-debug "build/${{ matrix.executable }}"
+          strip --strip-unneeded "build/${{ matrix.executable }}"
           objcopy --add-gnu-debuglink="build/${{ matrix.executable }}.debug" "build/${{ matrix.executable }}"
 
           objcopy --only-keep-debug "build/acecode-desktop" "build/acecode-desktop.debug"
-          strip --strip-debug "build/acecode-desktop"
+          strip --strip-unneeded "build/acecode-desktop"
           objcopy --add-gnu-debuglink="build/acecode-desktop.debug" "build/acecode-desktop"
 
       - name: Package
@@ -609,4 +638,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
           files: release-assets/*
