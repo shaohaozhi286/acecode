@@ -83,4 +83,8 @@ void WebServer::stop() {
     if (impl_) impl_->app.stop();
 }
 
+void WebServer::track_subagent(const std::string& child_session_id) {
+    if (impl_) impl_->track_subagent(child_session_id);
+}
+
 } // namespace acecode::web

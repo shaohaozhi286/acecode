@@ -494,6 +494,15 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
 
     acecode::web::WebServer server(std::move(web_deps));
 
+    // 子会话 spawn 后登记到 WebServer,给它挂常驻状态监听器,使其 busy 能广播
+    // session_status(否则未被 WS 订阅的子会话永不广播,父会话前端在 wait=true
+    // 阻塞期间发现不了它,子代理的权限请求冒泡不到主会话)。on_spawn 只在 turn
+    // 内(server.run() 之后)被调,捕获 &server 安全。
+    subagent_deps->on_spawn =
+        [&server](const std::string& child_id, const std::string& /*prompt*/) {
+            server.track_subagent(child_id);
+        };
+
     // 信号 / 终止 → 主循环退出。Crow app.run() 阻塞跑;另起个观察线程在
     // term 信号时调 server.stop() 让 Crow 退出。这样我们就在主线程上 join。
     std::thread watcher([&server] {

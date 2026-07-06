@@ -319,6 +319,12 @@ struct WebServer::Impl {
                                            const std::string& workspace_hash,
                                            const std::string& cwd,
                                            const SessionEvent& evt);
+    // 见 WebServer::track_subagent。给子会话挂一个常驻(不随 WS 连接生灭)的
+    // 事件监听器,把它的事件喂给 note_session_event_for_attention,从而在没有
+    // 任何 WS 客户端订阅该子会话时也能广播其 session_status(打破「广播需订阅、
+    // 订阅需发现、发现需广播」的死锁)。监听器随子会话 EventDispatcher 生命周期,
+    // 子会话销毁即自动清理;捕获 this(Impl 存活至进程退出),安全。
+    void track_subagent(const std::string& child_session_id);
     nlohmann::json mark_session_read_status(const std::string& session_id,
                                              const std::string& workspace_hash,
                                              const std::string& cwd,

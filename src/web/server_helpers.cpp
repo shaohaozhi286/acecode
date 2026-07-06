@@ -1465,6 +1465,26 @@ void WebServer::Impl::broadcast_session_status(const json& payload) {
     }
 }
 
+void WebServer::Impl::track_subagent(const std::string& child_id) {
+    if (child_id.empty() || !deps.session_client || !deps.session_registry) return;
+    std::string ws_hash;
+    std::string cwd;
+    if (auto e = deps.session_registry->acquire(child_id)) {
+        ws_hash = e->workspace_hash;
+        cwd = e->cwd;
+    }
+    // since=0:只关心从现在起的实时事件(子会话刚 spawn,还没历史)。回调仅把
+    // 事件喂给 attention/status 广播,不向任何 WS 连接直发(那由各自的订阅负责)。
+    // 不保存 SubscriptionId:该监听器与子会话 EventDispatcher 同生命周期,子会话
+    // 销毁时随之释放,无需显式 unsubscribe。
+    deps.session_client->subscribe(child_id,
+        [this, child_id, ws_hash, cwd](const SessionEvent& evt) {
+            note_session_event_for_attention(child_id, ws_hash, cwd, evt);
+        },
+        /*since_seq=*/0);
+    LOG_INFO("[web] track_subagent " + child_id + " ws=" + ws_hash);
+}
+
 void WebServer::Impl::note_session_event_for_attention(
     const std::string& session_id,
     const std::string& workspace_hash,

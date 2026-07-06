@@ -147,6 +147,54 @@ TEST(AsyncPrompter, NotifyUnknownRequestIdIsNoOp) {
                                               PermissionDecisionChoice::Allow));
 }
 
+// 场景(子代理权限冒泡修复):子代理刚起步就要权限时,前端可能晚于
+// permission_request emit 才订阅子会话,而 EventDispatcher since=0 订阅不重放
+// ring —— 那条挂起的请求会永久丢失,子代理干等到 5 分钟超时被 Deny(用户实测
+// 4m57s / [User denied])。修复靠 WS subscribe 时补发未决请求,数据源即
+// snapshot_pending_requests()。本用例验证:prompt 阻塞期间快照能返回该请求的
+// request_id / tool / args;应答后快照清空(不补发已决请求,避免弹重复/过时框)。
+TEST(AsyncPrompter, SnapshotReturnsPendingRequestUntilResolved) {
+    EventDispatcher d;
+    AsyncPrompter prompter(d, 5s);
+
+    ResponderState state;
+    auto sub = d.subscribe([&](const SessionEvent& e) {
+        if (e.kind != SessionEventKind::PermissionRequest) return;
+        std::lock_guard<std::mutex> lk(state.mu);
+        state.request_id = e.payload.value("request_id", std::string{});
+        state.got = true;
+        state.cv.notify_all();
+    });
+
+    std::thread worker([&] {
+        prompter.prompt("bash", "{\"command\":\"ls -la\"}", nullptr);
+    });
+
+    // 等到 prompt 已 emit(请求已进入 pending_ 表)。
+    std::string req_id;
+    {
+        std::unique_lock<std::mutex> lk(state.mu);
+        ASSERT_TRUE(state.cv.wait_for(lk, 2s, [&] { return state.got; }));
+        req_id = state.request_id;
+    }
+
+    auto pending = prompter.snapshot_pending_requests();
+    ASSERT_EQ(pending.size(), 1u) << "阻塞中的权限请求必须能被补发采集到";
+    EXPECT_EQ(pending[0].value("request_id", std::string{}), req_id);
+    EXPECT_EQ(pending[0].value("tool", std::string{}), "bash");
+    ASSERT_TRUE(pending[0].contains("args"));
+    EXPECT_EQ(pending[0]["args"].value("command", std::string{}), "ls -la")
+        << "补发要带原始 tool/args,前端才能渲染出有意义的确认框";
+
+    // 应答后不再挂起 → 快照清空。
+    prompter.notify_decision(req_id, PermissionDecisionChoice::Allow);
+    worker.join();
+    EXPECT_TRUE(prompter.snapshot_pending_requests().empty())
+        << "已决请求不应再被补发";
+
+    d.unsubscribe(sub);
+}
+
 // 场景: 用户在权限弹窗已经出现时切换到 Yolo,daemon 会批量 Allow 所有
 // pending prompt,worker 不应继续卡在旧确认框上。
 TEST(AsyncPrompter, ResolveAllAllowsPendingPrompt) {

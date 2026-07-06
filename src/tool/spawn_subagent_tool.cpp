@@ -50,7 +50,7 @@ std::string last_assistant_text(SessionManager& sm) {
     return {};
 }
 
-enum class WaitKind { Completed, Aborted, Timeout, Gone };
+enum class WaitKind { Completed, Aborted, Timeout, Gone, ChildInterrupted };
 
 struct WaitOutcome {
     WaitKind    kind = WaitKind::Completed;
@@ -91,16 +91,26 @@ WaitOutcome wait_for_subagent(SessionRegistry& registry,
 
         const auto elapsed = clock::now() - started;
         if (!busy) {
+            // 子会话在自己的回合结束后仍处于 abort 请求态(abort_requested_ 只在
+            // 下次 submit 时清)→ 说明它是被中断的(如用户在后台任务面板点「中止」,
+            // 或权限被中止),而非正常跑完。此时不能报 Completed/success,要给父会话
+            // 一条明确的「被中断」信号,由父 agent loop 决定重派/换法/上报用户。
+            const bool child_interrupted = entry->loop->is_aborting();
             const bool grace_passed = elapsed >= std::chrono::seconds(2);
             if (observed_busy) {
                 // 曾观测到运行、现已空闲 → 本轮结束。final_text 可能为空
                 // (turn 失败或被 UI 中止),由调用方给出对应文案,不死等。
+                if (child_interrupted) {
+                    return {WaitKind::ChildInterrupted, last_assistant_text(*entry->sm)};
+                }
                 return {WaitKind::Completed, last_assistant_text(*entry->sm)};
             }
             if (grace_passed) {
                 // 从未观测到 busy:要么 turn 快到在轮询间隙内完成(有新消息),
-                // 要么 submit 后压根没跑起来。有新消息 → 完成;持续无消息
-                // 超过 60 秒 → 放弃等待(不销毁子会话)。
+                // 要么 submit 后压根没跑起来,要么在观测到 busy 前就被中止。
+                if (child_interrupted) {
+                    return {WaitKind::ChildInterrupted, last_assistant_text(*entry->sm)};
+                }
                 if (entry->sm->load_active_messages().size() > baseline_message_count) {
                     return {WaitKind::Completed, last_assistant_text(*entry->sm)};
                 }
@@ -164,6 +174,20 @@ ToolResult describe_wait_outcome(const WaitOutcome& outcome,
             r.output = "[subagent " + session_id +
                        "] wait aborted; the subagent session was asked to stop "
                        "but is preserved in the session list.";
+            return r;
+        case WaitKind::ChildInterrupted:
+            r.success = false;
+            if (outcome.final_text.empty()) {
+                r.output = "[subagent " + session_id +
+                           "] was interrupted before finishing and produced no "
+                           "final reply. Decide whether to retry it, continue "
+                           "differently, or report the interruption to the user.";
+            } else {
+                r.output = "[subagent " + session_id +
+                           "] was interrupted before finishing. Its partial "
+                           "output follows; decide how to proceed:\n\n" +
+                           outcome.final_text;
+            }
             return r;
         case WaitKind::Timeout:
             r.success = false;

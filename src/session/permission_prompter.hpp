@@ -28,6 +28,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace acecode {
 
@@ -85,6 +86,14 @@ public:
     // should not stay blocked after the user asked to skip confirmations.
     void resolve_all(PermissionDecisionChoice choice);
 
+    // 快照当前仍未应答的权限请求(线程安全),形如
+    //   [{ "request_id": ..., "tool": ..., "args": ... }, ...]
+    // 用途:一个客户端**晚于** permission_request emit 才订阅子会话时,
+    // EventDispatcher 的 since=0 订阅不重放 ring(见 event_dispatcher.cpp),
+    // 那条挂起的请求就永久丢失。WS subscribe 成功后调本函数把未决请求补发给
+    // 新连接,前端按 request_id 去重(App.jsx pushUnique)与实时帧不冲突。
+    std::vector<nlohmann::json> snapshot_pending_requests();
+
 private:
     static std::string make_request_id();
 
@@ -96,6 +105,8 @@ private:
         std::condition_variable     cv;
         bool                        responded = false;
         PermissionDecisionChoice    choice = PermissionDecisionChoice::Deny;
+        std::string                 tool_name;  // 补发用:重建 permission_request
+        nlohmann::json              args;       // 补发用
     };
 
     std::mutex                                                pending_mu_;

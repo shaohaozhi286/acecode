@@ -180,6 +180,26 @@ void WebServer::Impl::handle_ws_message(crow::websocket::connection& conn, const
         if (!workspace_hash.empty()) ack["workspace_hash"] = workspace_hash;
         ack["payload"]    = json{{"session_id", sid}, {"workspace_hash", workspace_hash}, {"cwd", session_cwd}};
         conn.send_text(ack.dump());
+
+        // 补发子会话当前仍挂起的权限请求。EventDispatcher 的 since=0 订阅不重放
+        // ring(event_dispatcher.cpp),若某条 permission_request 在本次 subscribe
+        // 之前就已 emit(如子代理刚起步就要权限、前端刚发现它才来订阅),不补发
+        // 前端就永远看不到 → 子代理干等到 5 分钟超时被 Deny(本次修复的核心症状)。
+        // 前端按 request_id 去重(App.jsx pushUnique),与实时帧不冲突;刻意不带
+        // seq 字段,避免触发 connection.js 的乱序告警 / 干扰 lastSeq 游标。
+        if (deps.session_registry) {
+            if (auto pending_entry = deps.session_registry->acquire(sid);
+                pending_entry && pending_entry->prompter) {
+                for (auto& req : pending_entry->prompter->snapshot_pending_requests()) {
+                    json pm;
+                    pm["type"]              = to_string(SessionEventKind::PermissionRequest);
+                    pm["session_id"]        = sid;
+                    req["session_id"]       = sid;  // 决策按 session_id 路由回子会话
+                    pm["payload"]           = std::move(req);
+                    try { conn.send_text(pm.dump()); } catch (...) {}
+                }
+            }
+        }
         return;
     }
 
