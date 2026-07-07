@@ -222,6 +222,7 @@ void SessionManager::start_session(const std::string& cwd,
     writer_lease_active_ = false;
     archived_ = false;
     parent_session_id_.clear();
+    worktree_ = {};
     checkpoint_store_.reset();
     checkpoint_store_.set_session(project_dir_, session_id_);
 }
@@ -276,6 +277,7 @@ bool SessionManager::ensure_created() {
     meta.archived = archived_;
     meta.no_workspace = no_workspace_;
     meta.parent_session_id = parent_session_id_;
+    meta.worktree = worktree_;
     SessionStorage::write_meta(meta_path_str_, meta);
     return true;
 }
@@ -477,6 +479,7 @@ std::vector<ChatMessage> SessionManager::resume_session(const std::string& sessi
         archived_ = meta.archived;
         no_workspace_ = meta.no_workspace;
         parent_session_id_ = meta.parent_session_id;
+        worktree_ = meta.worktree;
         if (model_preset_.empty()) {
             model_preset_ = meta.model_preset;
         }
@@ -888,6 +891,7 @@ void SessionManager::update_meta() {
     meta.archived = archived_;
     meta.no_workspace = no_workspace_;
     meta.parent_session_id = parent_session_id_;
+    meta.worktree = worktree_;
     SessionStorage::write_meta(meta_path_str_, meta);
     refresh_writer_lease_locked();
 }
@@ -953,6 +957,27 @@ void SessionManager::set_parent_session_id(std::string parent_id) {
 std::string SessionManager::current_parent_session_id() const {
     std::lock_guard<std::mutex> lk(mu_);
     return parent_session_id_;
+}
+
+void SessionManager::set_active_worktree(const WorktreeSessionInfo& info) {
+    std::lock_guard<std::mutex> lk(mu_);
+    worktree_ = info;
+    if (created_) {
+        update_meta();
+    }
+}
+
+void SessionManager::clear_active_worktree() {
+    std::lock_guard<std::mutex> lk(mu_);
+    worktree_ = {};
+    if (created_) {
+        update_meta();
+    }
+}
+
+WorktreeSessionInfo SessionManager::active_worktree() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return worktree_;
 }
 
 std::string SessionManager::current_title() const {

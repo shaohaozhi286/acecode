@@ -107,6 +107,8 @@
 #include "session/session_manager.hpp"
 #include "session/session_registry.hpp"
 #include "session/session_resume_restore.hpp"
+#include "worktree/worktree_core.hpp"
+#include "worktree/worktree_manager.hpp"
 #include "tui/chat_line_measure.hpp"
 #include "tui/chat_scroll.hpp"
 #include "tui/chat_render_window.hpp"
@@ -3038,6 +3040,40 @@ static void shutdown_after_tui_loop(TuiState& state,
         update_check_thread.join();
     }
 
+    // Worktree 会话收尾(对齐 Claude Code 退出流的静默清理分支):
+    // 无变更 → 直接删掉 worktree + 分支;有变更或状态数不清(fail-closed)
+    // → 保留并提示位置,meta 里的 worktree 状态留着,--resume 会恢复进去。
+    // 交互式 keep/remove 对话框留待后续;保留是零数据损失的安全默认。
+    {
+        const WorktreeSessionInfo exit_worktree = session_manager.active_worktree();
+        if (exit_worktree.active()) {
+            const auto changes = acecode::worktree::count_worktree_changes(
+                exit_worktree.worktree_path, exit_worktree.original_head_commit);
+            if (changes && changes->changed_files == 0 && changes->commits == 0) {
+                // 先把进程 cwd 挪回原目录:Windows 上删除当前所在目录会失败
+                std::error_code wt_ec;
+                std::filesystem::current_path(
+                    path_from_utf8(exit_worktree.original_cwd), wt_ec);
+                std::string repo_root = acecode::worktree::find_canonical_git_root(
+                    exit_worktree.original_cwd);
+                if (repo_root.empty()) repo_root = exit_worktree.original_cwd;
+                if (acecode::worktree::remove_worktree(repo_root,
+                                                       exit_worktree.worktree_path,
+                                                       exit_worktree.worktree_branch)) {
+                    session_manager.clear_active_worktree();
+                    std::cerr << "\nacecode: worktree removed (no changes)." << std::endl;
+                }
+            } else {
+                std::cerr << "\nacecode: worktree kept at " << exit_worktree.worktree_path
+                          << (exit_worktree.worktree_branch.empty()
+                                  ? std::string{}
+                                  : " on branch " + exit_worktree.worktree_branch)
+                          << ". Resume this session to continue working there."
+                          << std::endl;
+            }
+        }
+    }
+
     // Finalize session before exit
     session_manager.finalize();
     session_manager.cleanup_old_sessions(config.max_sessions);
@@ -3051,13 +3087,94 @@ static void shutdown_after_tui_loop(TuiState& state,
     }
 }
 
+// --worktree 启动引导:在主仓 .acecode/worktrees/ 下创建(或复用)worktree,
+// 把进程 cwd 与 working_dir 都切进去。失败打 stderr 并返回 false(直接退出)。
+// 语义对齐 Claude Code setup.ts 的 --worktree 分支:--worktree 意味着
+// worktree 就是本次会话的项目根 —— 日志 / workspace 注册 / 会话存储全部
+// 落在 worktree 里(EnterWorktree 工具中途进入的 throwaway worktree 则
+// 相反,项目身份保持在原目录)。
+static bool bootstrap_startup_worktree(const InteractiveCliOptions& cli,
+                                       std::string& working_dir,
+                                       WorktreeSessionInfo& out_info,
+                                       std::string& out_banner) {
+    namespace wt = acecode::worktree;
+
+    std::string slug = cli.worktree_name;
+    std::optional<int> pr_number;
+    if (!slug.empty()) {
+        // "#123" / GitHub PR URL → 基于 PR head 建 worktree,slug 记为 pr-<N>
+        if (auto pr = wt::parse_pr_reference(slug)) {
+            pr_number = pr;
+            slug = "pr-" + std::to_string(*pr);
+        }
+    } else {
+        slug = wt::generate_worktree_slug(std::random_device{}());
+    }
+    if (std::string err = wt::validate_worktree_slug(slug); !err.empty()) {
+        std::cerr << "acecode: " << err << std::endl;
+        return false;
+    }
+
+    const std::string repo_root = wt::find_canonical_git_root(working_dir);
+    if (repo_root.empty()) {
+        std::cerr << "acecode: --worktree requires a git repository, but "
+                  << working_dir << " is not inside one." << std::endl;
+        return false;
+    }
+
+    // 配置在这里提前读一次(正式加载在 load_tui_config_and_runtime):
+    // worktree 创建需要 worktree.sparse_paths / symlink_directories。
+    AppConfig early_cfg = load_config();
+    wt::WorktreeCreateOptions options;
+    options.pr_number = pr_number;
+    options.sparse_paths = early_cfg.worktree.sparse_paths;
+    auto created = wt::get_or_create_worktree(repo_root, slug, options);
+    if (!created.ok) {
+        std::cerr << "acecode: error creating worktree: " << created.error << std::endl;
+        return false;
+    }
+    if (!created.existed) {
+        wt::PostCreationOptions post;
+        post.symlink_directories = early_cfg.worktree.symlink_directories;
+        wt::perform_post_creation_setup(repo_root, created.worktree_path, post);
+    }
+
+    std::error_code ec;
+    std::filesystem::current_path(path_from_utf8(created.worktree_path), ec);
+    if (ec) {
+        std::cerr << "acecode: cannot enter worktree " << created.worktree_path
+                  << ": " << ec.message() << std::endl;
+        return false;
+    }
+
+    out_info.original_cwd = working_dir;
+    out_info.worktree_path = created.worktree_path;
+    out_info.worktree_name = slug;
+    out_info.worktree_branch = created.worktree_branch;
+    out_info.original_head_commit = created.head_commit;
+    out_banner = (created.existed ? std::string("Resumed existing worktree at ")
+                                  : std::string("Created worktree at ")) +
+                 created.worktree_path + " (branch " + created.worktree_branch + ")";
+    working_dir = created.worktree_path;
+    return true;
+}
+
 // 准备 TUI 启动的最外层环境：终端、标题、cwd、日志和工作区索引。
-static bool initialize_tui_startup_environment(std::string& working_dir) {
+// --worktree 时先切进 worktree,再以 worktree 为根初始化其余环境。
+static bool initialize_tui_startup_environment(std::string& working_dir,
+                                               const InteractiveCliOptions& cli,
+                                               WorktreeSessionInfo& startup_worktree,
+                                               std::string& startup_worktree_banner) {
     if (!ensure_interactive_terminal()) {
         return false;
     }
     set_startup_terminal_title();
     working_dir = get_cwd();
+    if (cli.worktree_enabled &&
+        !bootstrap_startup_worktree(cli, working_dir, startup_worktree,
+                                    startup_worktree_banner)) {
+        return false;
+    }
     initialize_logger_for_working_dir(working_dir);
     acecode::desktop::ensure_workspace_metadata(
         (std::filesystem::path(get_acecode_dir()) / "projects").string(),
@@ -4448,7 +4565,10 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
     const std::string resume_session_id = cli.resume_session_id;
 
     std::string working_dir;
-    if (!initialize_tui_startup_environment(working_dir)) {
+    WorktreeSessionInfo startup_worktree;
+    std::string startup_worktree_banner;
+    if (!initialize_tui_startup_environment(working_dir, cli, startup_worktree,
+                                            startup_worktree_banner)) {
         return 1;
     }
     HookConfig hook_config = load_tui_hook_config();
@@ -4479,6 +4599,9 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
     TuiState state;
     initialize_tui_state_before_screen(state, config, working_dir, dangerous_mode,
                                        mcp_manager, provider_accessor());
+    if (!startup_worktree_banner.empty()) {
+        state.conversation.push_back({"system", startup_worktree_banner, false});
+    }
 
     // Version and working directory strings for TUI header
     std::string version_str = "acecode v" ACECODE_VERSION;
@@ -4887,6 +5010,11 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                 PermissionManager::mode_name(permissions.pre_plan_mode()),
                 /*persist_immediately=*/false);
         }
+        // --worktree 启动:worktree 会话状态挂到 SessionManager 并随 meta
+        // 持久化,ExitWorktree 工具与退出时的收尾逻辑都以它为准。
+        if (startup_worktree.active()) {
+            session_manager.set_active_worktree(startup_worktree);
+        }
     }
     agent_loop.set_session_manager(&session_manager);
 
@@ -5037,6 +5165,35 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
             } else {
                 acecode::append_resumed_session_messages(messages, state, agent_loop, tools);
                 state.todos = session_manager.current_todos();
+                // worktree 会话恢复:meta 记录的 worktree 还在就把会话 cwd
+                // 切回去;目录已被外部删除则清状态,避免 ExitWorktree 之后
+                // 操作幽灵路径。
+                {
+                    const WorktreeSessionInfo resumed_worktree =
+                        session_manager.active_worktree();
+                    if (resumed_worktree.active()) {
+                        std::error_code wt_ec;
+                        if (std::filesystem::exists(
+                                path_from_utf8(resumed_worktree.worktree_path), wt_ec)) {
+                            agent_loop.set_cwd(resumed_worktree.worktree_path);
+                            std::filesystem::current_path(
+                                path_from_utf8(resumed_worktree.worktree_path), wt_ec);
+                            state.conversation.push_back({"system",
+                                "Resumed inside worktree " +
+                                    resumed_worktree.worktree_path +
+                                    (resumed_worktree.worktree_branch.empty()
+                                         ? std::string{}
+                                         : " (branch " + resumed_worktree.worktree_branch + ")"),
+                                false});
+                        } else {
+                            session_manager.clear_active_worktree();
+                            state.conversation.push_back({"system",
+                                "Worktree " + resumed_worktree.worktree_path +
+                                    " no longer exists; resumed in " + working_dir + ".",
+                                false});
+                        }
+                    }
+                }
                 const PermissionMode resumed_mode =
                     permission_mode_from_meta_name(resumed_meta.permission_mode);
                 if (resumed_mode == PermissionMode::Plan) {

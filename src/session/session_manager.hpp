@@ -154,6 +154,12 @@ public:
     void set_parent_session_id(std::string parent_id);
     std::string current_parent_session_id() const;
 
+    // 会话当前的 worktree 状态(enter_worktree / --worktree 写入,
+    // exit_worktree 清空)。持久化到 .meta.json,resume 时恢复。
+    void set_active_worktree(const WorktreeSessionInfo& info);
+    void clear_active_worktree();
+    WorktreeSessionInfo active_worktree() const;
+
     // Return the current in-memory title (empty when unset).
     std::string current_title() const;
     std::string current_title_source() const;
@@ -220,6 +226,7 @@ private:
     bool writer_lease_active_ = false;
     bool archived_ = false;
     std::string parent_session_id_;
+    WorktreeSessionInfo worktree_;
     FileCheckpointStore checkpoint_store_;
     std::unique_ptr<ThreadGoalStore> goal_store_;
 

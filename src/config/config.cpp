@@ -845,6 +845,28 @@ AppConfig load_config() {
                 }
             }
 
+            // Worktree 段。缺省 → 默认值(不 symlink、完整 checkout)。
+            // 非法条目(非字符串)静默跳过,不阻塞启动。
+            if (j.contains("worktree") && j["worktree"].is_object()) {
+                const auto& wtj = j["worktree"];
+                if (wtj.contains("symlink_directories") &&
+                    wtj["symlink_directories"].is_array()) {
+                    for (const auto& item : wtj["symlink_directories"]) {
+                        if (item.is_string()) {
+                            cfg.worktree.symlink_directories.push_back(
+                                item.get<std::string>());
+                        }
+                    }
+                }
+                if (wtj.contains("sparse_paths") && wtj["sparse_paths"].is_array()) {
+                    for (const auto& item : wtj["sparse_paths"]) {
+                        if (item.is_string()) {
+                            cfg.worktree.sparse_paths.push_back(item.get<std::string>());
+                        }
+                    }
+                }
+            }
+
             if (j.contains("remote_control") && j["remote_control"].is_object()) {
                 const auto& rcj = j["remote_control"];
                 if (rcj.contains("port") && rcj["port"].is_number_integer()) {
@@ -1539,6 +1561,13 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
         if (cfg.web_search.timeout_ms != ws_d.timeout_ms)
             wsj["timeout_ms"] = cfg.web_search.timeout_ms;
         if (!wsj.empty()) j["web_search"] = wsj;
+
+        nlohmann::json wtj = nlohmann::json::object();
+        if (!cfg.worktree.symlink_directories.empty())
+            wtj["symlink_directories"] = cfg.worktree.symlink_directories;
+        if (!cfg.worktree.sparse_paths.empty())
+            wtj["sparse_paths"] = cfg.worktree.sparse_paths;
+        if (!wtj.empty()) j["worktree"] = wtj;
 
         RemoteControlConfig rc_d;
         nlohmann::json rcj = nlohmann::json::object();

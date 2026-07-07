@@ -211,6 +211,17 @@ struct WebSearchConfig {
     int timeout_ms = 8000;      // 单次 backend HTTP 请求超时
 };
 
+// Worktree 隔离配置(enter_worktree 工具 / --worktree 启动),对齐
+// Claude Code settings.json 的 worktree 段。两个字段都是显式配置才生效。
+struct WorktreeConfig {
+    // 从主仓 symlink 进新 worktree 的目录(如 "node_modules" ".cache"),
+    // 避免每个 worktree 重复占磁盘。默认不做任何 symlink。
+    std::vector<std::string> symlink_directories;
+    // 创建 worktree 时走 git sparse-checkout(cone 模式)只落盘这些路径,
+    // 大型 monorepo 明显更快。默认空 = 完整 checkout。
+    std::vector<std::string> sparse_paths;
+};
+
 // TUI /remote-control 基座配置(openspec add-remote-control)。
 // token 持久化后,channel bridge 跨 ACECode 重启无需重新配对;首次
 // /remote-control on 或默认 channel 激活时自动生成并写回。
@@ -351,6 +362,7 @@ struct AppConfig {
     NetworkConfig network;                       // proxy / TLS / abort-debug knobs
     FeaturesConfig features;                     // feature flags
     WebSearchConfig web_search;                  // 联网搜索工具配置(参见 add-web-search-tool)
+    WorktreeConfig worktree;                     // worktree 隔离(enter_worktree / --worktree)
     RemoteControlConfig remote_control;          // TUI /remote-control channel 托管
     AceBrowserBridgeConfig ace_browser_bridge;   // browser bridge tools integration
     UpgradeConfig upgrade;                       // explicit self-upgrade command config

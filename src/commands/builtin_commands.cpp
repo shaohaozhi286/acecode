@@ -1186,6 +1186,32 @@ static void do_resume_session(CommandContext& ctx, const std::string& session_id
         ToolExecutor fallback_tools;
         const ToolExecutor& replay_tools = ctx.tools ? *ctx.tools : fallback_tools;
         append_resumed_session_messages(messages, ctx.state, ctx.agent_loop, replay_tools);
+        // worktree 会话恢复/复位:目标会话在 worktree 里且目录还在 → 把
+        // AgentLoop cwd 切进去;目录没了 → 清状态回工作区根;目标是普通
+        // 会话 → 同样复位(上一个会话可能把 loop cwd 留在 worktree 里)。
+        {
+            const WorktreeSessionInfo wt = ctx.session_manager->active_worktree();
+            std::error_code wt_ec;
+            if (wt.active() &&
+                std::filesystem::exists(path_from_utf8(wt.worktree_path), wt_ec)) {
+                ctx.agent_loop.set_cwd(wt.worktree_path);
+                ctx.state.conversation.push_back({"system",
+                    "Resumed inside worktree " + wt.worktree_path +
+                        (wt.worktree_branch.empty()
+                             ? std::string{}
+                             : " (branch " + wt.worktree_branch + ")"),
+                    false});
+            } else {
+                if (wt.active()) {
+                    ctx.session_manager->clear_active_worktree();
+                    ctx.state.conversation.push_back({"system",
+                        "Worktree " + wt.worktree_path +
+                            " no longer exists; resumed in " + ctx.cwd + ".",
+                        false});
+                }
+                ctx.agent_loop.set_cwd(ctx.cwd);
+            }
+        }
         if (target) {
             ctx.token_tracker.restore(target->last_token_usage,
                                       target->session_token_usage);

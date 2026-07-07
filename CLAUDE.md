@@ -64,6 +64,14 @@ Rewind support uses per-user-turn checkpoints. `SessionManager::track_file_write
 
 Daemon session multiplexing uses `SessionRegistry`. Each session entry owns its own `SessionManager`, `PermissionManager`, `AgentLoop`, async permission prompter, and question prompter. `EventDispatcher` gives each emitted event a monotonic sequence number and keeps a bounded replay ring.
 
+### Worktree 隔离(EnterWorktree / ExitWorktree / --worktree,复刻 Claude Code)
+
+worktree 落在**主仓根**的 `.acecode/worktrees/<slug>`,分支 `worktree-<flatten(slug)>`(嵌套 slug `a/b` 扁平化成 `a+b`,避免 git ref D/F 冲突与目录嵌套删除)。基线:origin/<默认分支> 本地已有直接用(大仓库不白跑 fetch),否则 fetch(`GIT_TERMINAL_PROMPT=0` 防凭据挂死),再回退当前 HEAD;`git worktree add -B` 顺带复位孤儿分支。同名 worktree fast-resume 复用。分层:[src/worktree/worktree_core.{hpp,cpp}](src/worktree/worktree_core.hpp) 纯逻辑(slug 校验/命名/PR 引用解析/.worktreeinclude gitignore 子集匹配器,无 git 依赖可单测),[src/worktree/worktree_manager.{hpp,cpp}](src/worktree/worktree_manager.hpp) git 子进程层(复用 `run_hook_process`)。
+
+工具 `EnterWorktree` / `ExitWorktree`([src/tool/worktree_tool.cpp](src/tool/worktree_tool.cpp))经 `builtin_tool_registry` 双端注册;工具描述写死"仅用户明确提到 worktree 才可调用"。会话切换 = `AgentLoop::set_cwd`(经 `ToolContext::switch_session_cwd` 回调注入,重建 PathValidator;**会话存储位置不动** —— worktree 是同一项目的临时工作区)。状态 `WorktreeSessionInfo` 挂在 `SessionManager` 并持久化到 meta 的 `worktree_session` 字段(inactive 省略,老 meta 兼容);TUI/daemon resume 都会恢复进 worktree(目录已被外部删除则清状态)。`ExitWorktree remove` 的安全门 fail-closed:`count_worktree_changes` 数不清(git 失败/缺基线)或有未提交文件/新提交时拒绝,必须 `discard_changes:true`。
+
+CLI `--worktree [name]` / `-w`(TUI):启动即建 worktree,name 可为 PR 引用(`#123` / GitHub PR URL → fetch `pull/N/head`,slug=`pr-N`);此时 worktree 就是项目根(日志/workspace/会话存储都在里面),与工具中途进入的 throwaway 语义不同。TUI 退出时:无变更静默删除,有变更(或数不清)保留并提示,`--resume` 恢复进去。新建 worktree 的后处理:`core.hooksPath` 指回主仓(.husky 优先)、`config.worktree.symlink_directories` symlink、`.worktreeinclude`(gitignore 语法)声明的 gitignored 文件拷贝(`ls-files --directory` 折叠目录 + 按需展开,防大仓库全量遍历)。`config.worktree.sparse_paths` 走 sparse-checkout cone 模式。**未复刻**(有意偏离):tmux 集成(POSIX-only)、WorktreeCreate/Remove hook 替换 VCS、交互式退出对话框(现为"有变更即保留"的安全默认)、spawn_subagent 的 worktree 隔离。测试:[tests/worktree/](tests/worktree/)(core 纯逻辑 + 真实 git 集成 + 工具端到端)。
+
 ## Skills, Memory, And Project Instructions
 
 [src/skills/](src/skills) discovers `SKILL.md` files from configured global, project, and external skill directories. Skill metadata is read from YAML frontmatter at startup; full bodies are loaded lazily through skill invocation or the `skill_view` tool.
@@ -345,6 +353,10 @@ Both `main.cpp` and `daemon/worker.cpp` call `proxy_resolver().init(cfg.network)
     "api_key": "",
     "max_results": 5,
     "timeout_ms": 8000
+  },
+  "worktree": {
+    "symlink_directories": ["node_modules"],
+    "sparse_paths": []
   },
   "tui": { "alt_screen_mode": "auto" },
   "desktop": {

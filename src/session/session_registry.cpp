@@ -924,6 +924,24 @@ bool SessionRegistry::resume(const std::string& id, const SessionOptions& opts) 
         return false;
     }
     restore_loop_history(*entry, messages);
+    // worktree 会话恢复:meta 记录的 worktree 目录还在就把 AgentLoop 的
+    // 工作目录切回去(SessionEntry::cwd / 会话存储位置不动 —— worktree
+    // 是同一个项目的临时工作区);目录已被外部删除则清状态,避免
+    // ExitWorktree 操作幽灵路径。
+    {
+        const WorktreeSessionInfo resumed_worktree = entry->sm->active_worktree();
+        if (resumed_worktree.active()) {
+            std::error_code wt_ec;
+            if (std::filesystem::exists(
+                    path_from_utf8(resumed_worktree.worktree_path), wt_ec)) {
+                entry->loop->set_cwd(resumed_worktree.worktree_path);
+            } else {
+                entry->sm->clear_active_worktree();
+                LOG_WARN("[registry] resume " + id + " worktree missing: " +
+                         resumed_worktree.worktree_path + "; cleared worktree state");
+            }
+        }
+    }
     entry->loop->publish_current_goal_state();
     if (auto goal = current_active_goal(*entry)) {
         emit_goal_audit_message(*entry, *goal, "session_resume", "Continuing");
