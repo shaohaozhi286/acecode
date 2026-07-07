@@ -94,15 +94,15 @@ TEST_F(CommandsHandlerTest, NoWorkspaceCwdOmitsSkillsField) {
     EXPECT_FALSE(payload.contains("skills")) << "缺 workspace_cwd 不应输出 skills 字段";
     EXPECT_FALSE(payload.contains("commands")) << "缺 workspace_cwd 不应输出 commands 字段";
 
-    ASSERT_EQ(payload["builtins"].size(), 4u);
+    ASSERT_EQ(payload["builtins"].size(), 5u);
     EXPECT_EQ(payload["builtins"][0]["name"].get<std::string>(), "init");
     EXPECT_EQ(payload["builtins"][1]["name"].get<std::string>(), "compact");
     EXPECT_EQ(payload["builtins"][2]["name"].get<std::string>(), "goal");
     EXPECT_EQ(payload["builtins"][3]["name"].get<std::string>(), "plan");
-    EXPECT_FALSE(payload["builtins"][0]["description"].get<std::string>().empty());
-    EXPECT_FALSE(payload["builtins"][1]["description"].get<std::string>().empty());
-    EXPECT_FALSE(payload["builtins"][2]["description"].get<std::string>().empty());
-    EXPECT_FALSE(payload["builtins"][3]["description"].get<std::string>().empty());
+    EXPECT_EQ(payload["builtins"][4]["name"].get<std::string>(), "lsp");
+    for (const auto& builtin : payload["builtins"]) {
+        EXPECT_FALSE(builtin["description"].get<std::string>().empty());
+    }
 }
 
 TEST_F(CommandsHandlerTest, WorkspaceCwdIncludesOpencodeCommandsField) {
@@ -213,6 +213,8 @@ TEST_F(CommandsHandlerTest, BuiltinDescriptionsMatchTuiRegistration) {
               "Create, view, pause, resume, edit, or clear the thread goal");
     EXPECT_EQ(payload["builtins"][3]["description"].get<std::string>(),
               "Enter plan mode or start planning a described task");
+    EXPECT_EQ(payload["builtins"][4]["description"].get<std::string>(),
+              "Show LSP server status (connected/broken/not installed)");
 }
 
 // 场景:workspace_cwd 指向某项目时,该项目 .agent/skills 下的 SKILL.md 出现在响应。

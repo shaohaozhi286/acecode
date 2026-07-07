@@ -74,7 +74,8 @@ BuiltinCommandHttpParseResult parse_command_text(
 } // namespace
 
 bool is_supported_builtin_command(const std::string& name) {
-    return name == "init" || name == "compact" || name == "goal" || name == "plan";
+    return name == "init" || name == "compact" || name == "goal" || name == "plan" ||
+           name == "lsp";
 }
 
 BuiltinCommandHttpParseResult parse_builtin_command_request(const std::string& body) {

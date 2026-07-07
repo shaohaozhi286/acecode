@@ -34,6 +34,7 @@
 #include "../tool/skills_tool.hpp"
 #include "../tool/task_complete_tool.hpp"
 #include "../tool/tool_executor.hpp"
+#include "../lsp/lsp_service.hpp"
 #include "../tool/web_search/runtime.hpp"
 #include "../tool/web_search/backend_router.hpp"
 #include "../tool/web_search/region_detector.hpp"
@@ -363,6 +364,10 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
             return provider;
         };
 
+    // ---- Init LSP runtime (daemon path, openspec add-lsp-service) ----
+    // 惰性子系统:init 本身不 spawn 任何进程,首个匹配文件的编辑/查询才会。
+    acecode::lsp::init(cfg.lsp, cwd);
+
     // ---- Init web search runtime (daemon path) ----
     // 与 TUI 共用同一份 state.json 的 region 缓存,所以两侧探测结果互通。
     acecode::web_search::init(cfg.web_search);
@@ -519,6 +524,7 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     if (opts.foreground) std::cerr << "[daemon] shutting down\n";
 
     mcp_runtime.shutdown();
+    acecode::lsp::shutdown(); // 逐 client 协议级退出,超时强杀
     acecode::model_pool_status_service().stop(); // 幂等;未 start 过也安全
 
     heartbeat.stop();

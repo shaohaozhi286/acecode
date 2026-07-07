@@ -24,6 +24,7 @@
 #include "tui/pending_attachment_selection.hpp"
 #include "tui/todo_checklist_view.hpp"
 #include "tool/mcp_manager.hpp"
+#include "lsp/lsp_service.hpp"
 
 using namespace ftxui;
 
@@ -663,6 +664,25 @@ Element render_regular_sidebar(const TuiState& state,
     if (!state.mcp_sidebar_servers.empty()) {
         top_rows.push_back(text(""));
         top_rows.push_back(std::move(mcp_section));
+    }
+
+    // LSP 状态节(openspec add-lsp-service):有已连接 server 才渲染。
+    // connected_snapshot 只做锁 + 小拷贝,每帧调用安全(不做 which 探测)。
+    if (lsp::is_initialized()) {
+        const auto lsp_servers = lsp::service().connected_snapshot();
+        if (!lsp_servers.empty()) {
+            top_rows.push_back(text(""));
+            top_rows.push_back(sidebar_section_header(
+                "LSP", static_cast<int>(lsp_servers.size())));
+            for (const auto& server : lsp_servers) {
+                std::string row = server.server_id + " (" +
+                                  std::to_string(server.open_files) + " files)";
+                top_rows.push_back(
+                    text("  ● " + truncate_cells_middle_ascii(
+                                      row, std::max(1, content_width - 4))) |
+                    color(theme().semantic.success));
+            }
+        }
     }
 
     const auto file_changes =

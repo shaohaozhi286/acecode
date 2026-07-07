@@ -81,6 +81,7 @@
 #include "hooks/hook_payload.hpp"
 #include "memory/memory_paths.hpp"
 #include "memory/memory_registry.hpp"
+#include "lsp/lsp_service.hpp"
 #include "tool/web_search/runtime.hpp"
 #include "tool/web_search/backend_router.hpp"
 #include "tool/web_search/region_detector.hpp"
@@ -3020,6 +3021,9 @@ static void shutdown_after_tui_loop(TuiState& state,
     // in-flight tool calls can race with the clients being destroyed.
     mcp_manager.shutdown();
 
+    // LSP server 子进程同理:agent worker 已停,不会再有工具调用打进来。
+    lsp::shutdown();
+
     // Abort and join any in-progress compact thread
     state.compact_abort_requested.store(true);
     if (state.compact_thread.joinable()) {
@@ -3141,6 +3145,8 @@ static MemoryConfig initialize_tui_tools_and_registries(
     const AppConfig& config,
     const std::string& working_dir) {
     initialize_web_search_runtime(config);
+    // LSP runtime(openspec add-lsp-service):惰性子系统,init 不 spawn 进程。
+    lsp::init(config.lsp, working_dir);
     register_session_builtin_tools(tools, config);
 
     initialize_skill_registry(skill_registry, config, working_dir);

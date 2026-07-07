@@ -2,6 +2,7 @@
 #include "mtime_tracker.hpp"
 #include "diff_utils.hpp"
 #include "tool_icons.hpp"
+#include "lsp/lsp_diagnostics.hpp"
 #include "utils/logger.hpp"
 #include "utils/tool_args_parser.hpp"
 #include "utils/tool_errors.hpp"
@@ -100,6 +101,8 @@ static ToolResult execute_file_write(const std::string& arguments_json, const To
         ToolResult r{"Created file: " + file_path, true};
         r.summary = std::move(summary);
         r.hunks = std::move(structured);
+        // LSP 编辑后诊断(openspec add-lsp-service);无匹配 server 零开销。
+        lsp::append_diagnostics_block(r.output, file_path, ctx.abort_flag);
         return r;
     }
 
@@ -118,6 +121,8 @@ static ToolResult execute_file_write(const std::string& arguments_json, const To
     ToolResult r{"Updated file: " + file_path + "\n\n" + diff, true};
     r.summary = std::move(summary);
     r.hunks = std::move(structured);
+    // LSP 编辑后诊断(openspec add-lsp-service);无匹配 server 零开销。
+    lsp::append_diagnostics_block(r.output, file_path, ctx.abort_flag);
     return r;
 }
 

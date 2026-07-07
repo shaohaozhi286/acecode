@@ -3,6 +3,7 @@
 #include "history_command.hpp"
 #include "goal_command.hpp"
 #include "init_command.hpp"
+#include "lsp_command.hpp"
 #include "memory_command.hpp"
 #include "model_command.hpp"
 #include "models_command.hpp"
@@ -1704,6 +1705,7 @@ void register_builtin_commands(CommandRegistry& registry) {
     register_history_command(registry);
     register_proxy_command(registry);
     register_websearch_command(registry);
+    register_lsp_command(registry);
     register_remote_control_command(registry);
     registry.register_command({"feedback", "Upload current session diagnostics to the configured upgrade service", cmd_feedback});
     registry.register_command({"browser", "Show or toggle ACE Browser Bridge tools for this session", cmd_browser});

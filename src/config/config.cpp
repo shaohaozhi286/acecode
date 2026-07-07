@@ -845,6 +845,59 @@ AppConfig load_config() {
                 }
             }
 
+            // LSP 段(openspec add-lsp-service)。缺省 → enabled=true、无覆盖。
+            // 自定义 server(名字不在内置集合)的 command 校验推迟到注册表合并层
+            // (config 层不感知内置名单,避免双份清单漂移)。
+            if (j.contains("lsp") && j["lsp"].is_object()) {
+                const auto& lspj = j["lsp"];
+                if (lspj.contains("enabled") && lspj["enabled"].is_boolean())
+                    cfg.lsp.enabled = lspj["enabled"].get<bool>();
+                if (lspj.contains("servers") && lspj["servers"].is_object()) {
+                    for (const auto& [name, sj] : lspj["servers"].items()) {
+                        if (!sj.is_object()) {
+                            std::cerr << "[config] fatal: lsp.servers." << name
+                                      << " must be an object" << std::endl;
+                            LOG_ERROR("[config] lsp.servers entry not object: " + name);
+                            std::exit(1);
+                        }
+                        LspServerOverride entry;
+                        if (sj.contains("disabled") && sj["disabled"].is_boolean())
+                            entry.disabled = sj["disabled"].get<bool>();
+                        if (sj.contains("command")) {
+                            if (!sj["command"].is_array()) {
+                                std::cerr << "[config] fatal: lsp.servers." << name
+                                          << ".command must be a string array" << std::endl;
+                                LOG_ERROR("[config] lsp command not array: " + name);
+                                std::exit(1);
+                            }
+                            for (const auto& item : sj["command"]) {
+                                if (!item.is_string()) {
+                                    std::cerr << "[config] fatal: lsp.servers." << name
+                                              << ".command items must be strings" << std::endl;
+                                    LOG_ERROR("[config] lsp command item not string: " + name);
+                                    std::exit(1);
+                                }
+                                entry.command.push_back(item.get<std::string>());
+                            }
+                        }
+                        if (sj.contains("extensions") && sj["extensions"].is_array()) {
+                            for (const auto& item : sj["extensions"]) {
+                                if (item.is_string())
+                                    entry.extensions.push_back(item.get<std::string>());
+                            }
+                        }
+                        if (sj.contains("env") && sj["env"].is_object()) {
+                            for (const auto& [k, v] : sj["env"].items()) {
+                                if (v.is_string()) entry.env[k] = v.get<std::string>();
+                            }
+                        }
+                        if (sj.contains("initialization") && sj["initialization"].is_object())
+                            entry.initialization = sj["initialization"];
+                        cfg.lsp.servers[name] = std::move(entry);
+                    }
+                }
+            }
+
             if (j.contains("remote_control") && j["remote_control"].is_object()) {
                 const auto& rcj = j["remote_control"];
                 if (rcj.contains("port") && rcj["port"].is_number_integer()) {
@@ -1539,6 +1592,24 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
         if (cfg.web_search.timeout_ms != ws_d.timeout_ms)
             wsj["timeout_ms"] = cfg.web_search.timeout_ms;
         if (!wsj.empty()) j["web_search"] = wsj;
+
+        nlohmann::json lspj = nlohmann::json::object();
+        if (!cfg.lsp.enabled) lspj["enabled"] = false;
+        if (!cfg.lsp.servers.empty()) {
+            nlohmann::json serversj = nlohmann::json::object();
+            for (const auto& [name, entry] : cfg.lsp.servers) {
+                nlohmann::json sj = nlohmann::json::object();
+                if (entry.disabled) sj["disabled"] = true;
+                if (!entry.command.empty()) sj["command"] = entry.command;
+                if (!entry.extensions.empty()) sj["extensions"] = entry.extensions;
+                if (!entry.env.empty()) sj["env"] = entry.env;
+                if (entry.initialization.is_object() && !entry.initialization.empty())
+                    sj["initialization"] = entry.initialization;
+                serversj[name] = sj;
+            }
+            lspj["servers"] = serversj;
+        }
+        if (!lspj.empty()) j["lsp"] = lspj;
 
         RemoteControlConfig rc_d;
         nlohmann::json rcj = nlohmann::json::object();

@@ -9,6 +9,7 @@
 #include "tool_result_storage.hpp"
 #include "turn_timing.hpp"
 #include "../commands/init_command.hpp"
+#include "../commands/lsp_command.hpp"
 #include "../provider/apply_model_to_session.hpp"
 #include "../provider/copilot_provider.hpp"
 #include "../provider/cwd_model_override.hpp"
@@ -954,7 +955,8 @@ BuiltinCommandResult SessionRegistry::execute_builtin_command(
     const std::string& id,
     const BuiltinCommandRequest& request) {
     if (request.name != "init" && request.name != "compact" &&
-        request.name != "goal" && request.name != "plan") {
+        request.name != "goal" && request.name != "plan" &&
+        request.name != "lsp") {
         return {BuiltinCommandStatus::UnsupportedCommand, "unsupported command"};
     }
 
@@ -974,6 +976,15 @@ BuiltinCommandResult SessionRegistry::execute_builtin_command(
 
     if (request.name == "plan") {
         return execute_plan_builtin(*entry, request);
+    }
+
+    if (request.name == "lsp") {
+        // 与 TUI /lsp 共用同一份文本(dispatch_lsp_subcommand),经会话
+        // system message 透出到 Web 聊天流。
+        if (!entry->loop) return {BuiltinCommandStatus::Failed, "session unavailable"};
+        entry->loop->emit_system_message(
+            dispatch_lsp_subcommand(trim_ascii(request.args)));
+        return {BuiltinCommandStatus::Accepted, "ok"};
     }
 
     const std::filesystem::path cwd = path_from_utf8(entry->cwd);

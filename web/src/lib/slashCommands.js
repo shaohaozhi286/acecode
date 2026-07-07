@@ -32,6 +32,11 @@ const FALLBACK_BUILTINS = Object.freeze([
     name: 'plan',
     description: 'Enter plan mode or start planning a described task',
   }),
+  Object.freeze({
+    kind: 'builtin',
+    name: 'lsp',
+    description: 'Show LSP server status (connected/broken/not installed)',
+  }),
 ]);
 
 export function fallbackCommands() {
@@ -243,7 +248,7 @@ export function resolveLeadingSlashCommand(text, commands = []) {
 
 export function parseExecutableBuiltinCommand(value) {
   const text = typeof value === 'string' ? value.trim() : '';
-  const leading = parseLeadingCommand(text, ['init', 'compact', 'goal', 'plan']);
+  const leading = parseLeadingCommand(text, ['init', 'compact', 'goal', 'plan', 'lsp']);
   if (!leading.name) return null;
   return {
     name: leading.name,

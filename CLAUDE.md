@@ -293,6 +293,20 @@ Both `main.cpp` and `daemon/worker.cpp` call `proxy_resolver().init(cfg.network)
 
 `config.web_search` 可选字段:`enabled`(默认 true)、`backend`(`auto` / `duckduckgo` / `bing_cn` / `bochaai` / `tavily`,后两个本期未实现)、`api_key`(future)、`max_results`(1..10,默认 5)、`timeout_ms`(1000..30000,默认 8000)。`enabled = false` 时工具完全不注册到 ToolExecutor,LLM 看不到。Bing CN 的 `bing.com/ck/a?u=a1<base64>` 跳转链会自动 base64 解码到真实 URL,decode 失败或非 http(s) 静默回退到原 href。Daemon 与 TUI 共享同一份 state.json 缓存。
 
+### LSP(openspec add-lsp-service,仿 opencode)
+
+`src/lsp/` 是自写的 LSP 客户端子系统(零新第三方库;进程段架构同 `codex_app_server_client`,分帧换成 `Content-Length`)。三个能力面:
+
+1. **`lsp` 工具**(9 操作:goToDefinition / findReferences / hover / documentSymbol / workspaceSymbol / goToImplementation / prepareCallHierarchy / incomingCalls / outgoingCalls),`is_read_only=true` 免确认,入参 1-based 行列,结果原样 LSP JSON(0-based)。`config.lsp.enabled=false` 时不注册。
+2. **编辑后诊断注入**:file_edit / file_write 成功落盘后 `lsp::append_diagnostics_block`(`src/lsp/lsp_diagnostics.cpp`)—— touch + 等 document 诊断(5s 总超时、150ms push debounce、50ms 粒度轮询 abort),把 **ERROR 级**诊断以 `<diagnostics file=...>` 块(≤20 条)附加到工具输出。未初始化 / disabled / 无匹配 server 零延迟。WARN 以下刻意不透出(避免模型跑偏修风格)。
+3. **状态表面**:`/lsp` 双端命令(TUI builtin_commands + daemon `execute_builtin_command` 白名单 + Web 斜杠下拉,三处文本共用 `dispatch_lsp_subcommand`);TUI 侧边栏有连接时渲染 LSP 节(走 `connected_snapshot()`,廉价锁拷贝;完整 `status_snapshot()` 含 which 探测只给 /lsp 用)。
+
+结构:`lsp_frame`(分帧纯状态机)→ `lsp_process`(spawn;**Windows 上 argv[0] 为 .cmd/.bat 时自动经 `cmd.exe /d /c`**,npm shim 必需;探测走 `lsp_which` 的 PATHEXT 逻辑)→ `lsp_client`(reader 线程 + pending map;push/pull 双通道诊断缓存,key 经 `lsp_uri::normalize_path_key` 归一 —— **clangd 会把盘符改小写回推,不归一就永远等不到诊断**)→ `lsp_server_registry`(内置 clangd/typescript-language-server/pyright/gopls/rust-analyzer 定义 + config 合并;root markers 对照 opencode server.ts;ts 需向上找到 `node_modules/typescript/lib/tsserver.js` 否则跳过;rust-analyzer 无 Cargo.toml 判不适用)→ `lsp_service`((server_id,root) 客户端池、per-key slot 锁单飞、broken 集合本进程内不重试)→ 进程级单例 `lsp::init/shutdown/service()`(web_search runtime 同套路;main.cpp 与 worker.cpp 各接一次,退出路径在 mcp shutdown 之后调 `lsp::shutdown()`)。
+
+原则:**只探测已安装的 server(PATH / 项目内),绝不自动下载,server 不进安装包**;探测不到静默跳过零开销。集成测试用 `tests/lsp/helpers/fake_lsp_server.cpp`(BUILD_TESTING 编译,同 mcp_stdio_test_server 思路),不依赖 node / 真实 clangd。
+
+`config.lsp`:`enabled`(默认 true)+ `servers`(按名合并:内置名可 `{"disabled":true}` 或覆盖 command/extensions/env/initialization;新名 = 自定义 server,command 必填,root 恒为 workspace cwd)。
+
 ### Config Schema
 
 `~/.acecode/config.json`:
@@ -345,6 +359,13 @@ Both `main.cpp` and `daemon/worker.cpp` call `proxy_resolver().init(cfg.network)
     "api_key": "",
     "max_results": 5,
     "timeout_ms": 8000
+  },
+  "lsp": {
+    "enabled": true,
+    "servers": {
+      "clangd": { "disabled": true },
+      "ocaml": { "command": ["ocamllsp"], "extensions": [".ml", ".mli"] }
+    }
   },
   "tui": { "alt_screen_mode": "auto" },
   "desktop": {

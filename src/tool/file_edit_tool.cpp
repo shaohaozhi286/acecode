@@ -2,6 +2,7 @@
 #include "mtime_tracker.hpp"
 #include "diff_utils.hpp"
 #include "tool_icons.hpp"
+#include "lsp/lsp_diagnostics.hpp"
 #include "utils/logger.hpp"
 #include "utils/tool_args_parser.hpp"
 #include "utils/tool_errors.hpp"
@@ -345,6 +346,9 @@ static ToolResult run_validated_write(
     ToolResult r{(file_existed ? "Edited " : "Created file: ") + file_path + "\n\n" + diff, true};
     r.summary = std::move(summary);
     r.hunks = std::move(structured);
+    // LSP 编辑后诊断:未启用/无匹配 server 时零开销;有 ERROR 时把
+    // <diagnostics> 块附加到输出,模型当场看到并修复(openspec add-lsp-service)。
+    lsp::append_diagnostics_block(r.output, file_path, ctx.abort_flag);
     return r;
 }
 

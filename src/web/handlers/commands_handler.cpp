@@ -50,6 +50,10 @@ nlohmann::json build_commands_payload(const SkillRegistry& global_skills,
         {"name", "plan"},
         {"description", "Enter plan mode or start planning a described task"},
     });
+    builtins.push_back({
+        {"name", "lsp"},
+        {"description", "Show LSP server status (connected/broken/not installed)"},
+    });
     out["builtins"] = std::move(builtins);
 
     // Skills:仅在调用方传 workspace_cwd 时返回 `skills` 字段;缺省 → 不输出

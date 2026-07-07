@@ -9,6 +9,7 @@
 #include "glob_tool.hpp"
 #include "goal_tool.hpp"
 #include "grep_tool.hpp"
+#include "lsp_tool.hpp"
 #include "plan_mode_tool.hpp"
 #include "task_complete_tool.hpp"
 #include "todo_write_tool.hpp"
@@ -37,6 +38,9 @@ inline void register_session_builtin_tools(ToolExecutor& tools, const AppConfig&
     if (config.web_search.enabled) {
         tools.register_tool(web_search::create_web_search_tool(
             web_search::runtime().router(), web_search::runtime().cfg()));
+    }
+    if (config.lsp.enabled) {
+        tools.register_tool(create_lsp_tool());
     }
     ace_browser_bridge::register_ace_browser_bridge_tools(
         tools, config.ace_browser_bridge);

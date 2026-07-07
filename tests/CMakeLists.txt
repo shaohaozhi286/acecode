@@ -54,10 +54,21 @@ target_link_libraries(mcp_stdio_test_server PRIVATE
 )
 add_dependencies(acecode_unit_tests mcp_stdio_test_server)
 
+# 测试辅助 LSP stdio server: LspClient 集成测试走真实进程/管道/
+# Content-Length 分帧路径,不依赖外部 node / 真实 clangd。
+add_executable(fake_lsp_server
+    ${CMAKE_CURRENT_SOURCE_DIR}/lsp/helpers/fake_lsp_server.cpp
+)
+target_link_libraries(fake_lsp_server PRIVATE
+    nlohmann_json::nlohmann_json
+)
+add_dependencies(acecode_unit_tests fake_lsp_server)
+
 # 注入 helper 绝对路径给测试代码(避免 ctest cwd 不确定问题)
 target_compile_definitions(acecode_unit_tests PRIVATE
     ACECODE_CONCURRENT_SESSION_WRITER_PATH="$<TARGET_FILE:concurrent_session_writer>"
     ACECODE_MCP_STDIO_TEST_SERVER_PATH="$<TARGET_FILE:mcp_stdio_test_server>"
+    ACECODE_FAKE_LSP_SERVER_PATH="$<TARGET_FILE:fake_lsp_server>"
 )
 
 # winpty spike/冒烟测试需要 winpty-agent.exe 在单测 exe 同目录

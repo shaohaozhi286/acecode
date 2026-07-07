@@ -211,6 +211,25 @@ struct WebSearchConfig {
     int timeout_ms = 8000;      // 单次 backend HTTP 请求超时
 };
 
+// 单个 LSP server 的 config 条目(openspec add-lsp-service)。
+// 名字命中内置 server(clangd / typescript-language-server / pyright /
+// gopls / rust-analyzer)时按字段覆盖内置定义;新名字 = 纯自定义 server,
+// 此时 command 必填(argv 形式),extensions 建议提供(空 = 匹配所有文件)。
+struct LspServerOverride {
+    bool disabled = false;
+    std::vector<std::string> command;      // argv;空 = 沿用内置 spawn 逻辑
+    std::vector<std::string> extensions;   // 形如 ".rs";空 = 沿用内置定义
+    std::map<std::string, std::string> env;
+    nlohmann::json initialization;         // initializationOptions 原样透传
+};
+
+// LSP 集成总配置。enabled=false 时:lsp 工具不注册、编辑后不注入诊断、
+// 不 spawn 任何 server 进程 —— 行为与引入 LSP 前完全一致。
+struct LspConfig {
+    bool enabled = true;
+    std::map<std::string, LspServerOverride> servers;
+};
+
 // TUI /remote-control 基座配置(openspec add-remote-control)。
 // token 持久化后,channel bridge 跨 ACECode 重启无需重新配对;首次
 // /remote-control on 或默认 channel 激活时自动生成并写回。
@@ -351,6 +370,7 @@ struct AppConfig {
     NetworkConfig network;                       // proxy / TLS / abort-debug knobs
     FeaturesConfig features;                     // feature flags
     WebSearchConfig web_search;                  // 联网搜索工具配置(参见 add-web-search-tool)
+    LspConfig lsp;                               // LSP 集成(参见 add-lsp-service)
     RemoteControlConfig remote_control;          // TUI /remote-control channel 托管
     AceBrowserBridgeConfig ace_browser_bridge;   // browser bridge tools integration
     UpgradeConfig upgrade;                       // explicit self-upgrade command config
