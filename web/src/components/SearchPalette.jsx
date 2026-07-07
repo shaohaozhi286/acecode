@@ -6,7 +6,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../lib/api.js';
 import { connection } from '../lib/connection.js';
-import { rankSessions, searchRelativeTime } from '../lib/searchSessions.js';
+import {
+  mergeSessionContentMatches,
+  rankSessions,
+  searchRelativeTime,
+  shouldSearchUserMessages,
+} from '../lib/searchSessions.js';
 import { sessionDisplayTitle, withNewSessionDisplayTitles } from '../lib/sessionTitle.js';
 import { clsx } from '../lib/format.js';
 import { VsIcon } from './Icon.jsx';
@@ -29,15 +34,24 @@ function invalidateCache() {
   cache.ts = 0;
 }
 
+function searchMatchContext(match) {
+  if (!match || match.kind !== 'user_message') return '';
+  const attachments = Array.isArray(match.attachments) ? match.attachments.filter(Boolean) : [];
+  if (attachments.length > 0) return `附件: ${attachments.slice(0, 2).join(', ')}`;
+  return String(match.snippet || '');
+}
+
 export function SearchPalette({ open, onClose, currentWorkspaceHash = '', onSelectSession }) {
   const [query, setQuery] = useState('');
   const [loadState, setLoadState] = useState('idle'); // 'idle' | 'loading' | 'ready'
   const [data, setData] = useState(cache.data);
+  const [contentSearch, setContentSearch] = useState({ query: '', matches: [] });
   const [selectedIndex, setSelectedIndex] = useState(0);
   const inputRef = useRef(null);
   const listRef = useRef(null);
   const rowRefs = useRef(new Map());
   const reqIdRef = useRef(0);
+  const contentReqIdRef = useRef(0);
 
   // WS 事件 invalidate 缓存(关闭面板时也监听,确保下次打开拿新数据)。
   useEffect(() => {
@@ -55,6 +69,7 @@ export function SearchPalette({ open, onClose, currentWorkspaceHash = '', onSele
   useEffect(() => {
     if (!open) return;
     setQuery('');
+    setContentSearch({ query: '', matches: [] });
     setSelectedIndex(0);
     requestAnimationFrame(() => inputRef.current?.focus());
 
@@ -77,16 +92,45 @@ export function SearchPalette({ open, onClose, currentWorkspaceHash = '', onSele
     });
   }, [open]);
 
+  useEffect(() => {
+    if (!open) return;
+    const q = query.trim();
+    if (!shouldSearchUserMessages(q)) {
+      contentReqIdRef.current++;
+      setContentSearch({ query: '', matches: [] });
+      return;
+    }
+    const reqId = ++contentReqIdRef.current;
+    const timer = setTimeout(() => {
+      api.searchSessionUserMessages(q, 50).then((result) => {
+        if (reqId !== contentReqIdRef.current) return;
+        const matches = Array.isArray(result?.matches) ? result.matches : [];
+        setContentSearch({ query: q, matches });
+      }).catch(() => {
+        if (reqId !== contentReqIdRef.current) return;
+        setContentSearch({ query: q, matches: [] });
+      });
+    }, 160);
+    return () => clearTimeout(timer);
+  }, [open, query]);
+
   // 排序后的可见列表;空查询时取最近 50 条。
   const items = useMemo(() => {
-    const ranked = rankSessions(withNewSessionDisplayTitles(data.sessions || []), query, Date.now());
+    const baseSessions = withNewSessionDisplayTitles(data.sessions || []);
+    const q = query.trim();
+    const matches = shouldSearchUserMessages(q) && contentSearch.query === q
+      ? contentSearch.matches
+      : [];
+    const merged = mergeSessionContentMatches(baseSessions, matches);
+    const ranked = rankSessions(merged, query, Date.now());
     return query.trim() ? ranked : ranked.slice(0, MAX_EMPTY_RESULTS);
-  }, [data, query]);
+  }, [data, query, contentSearch]);
 
   // query / items 变化时把 selectedIndex 钉到 0(避免滑出范围)。
+  // contentSearch 到达会重排列表,与 data 刷新同样处理。
   useEffect(() => {
     setSelectedIndex(0);
-  }, [query, data]);
+  }, [query, data, contentSearch]);
 
   // 选中项滚动到可视区。
   useEffect(() => {
@@ -185,6 +229,7 @@ export function SearchPalette({ open, onClose, currentWorkspaceHash = '', onSele
             const selected = idx === selectedIndex;
             const showWsName = (s.workspace_hash || '') !== currentWorkspaceHash;
             const rel = searchRelativeTime(s.updated_at || s.created_at);
+            const matchContext = searchMatchContext(s.search_match);
             const right = [
               selected && 'Enter',
               showWsName && (s.workspaceName || ''),
@@ -199,12 +244,17 @@ export function SearchPalette({ open, onClose, currentWorkspaceHash = '', onSele
                 onMouseEnter={() => setSelectedIndex(idx)}
                 onMouseDown={(e) => { e.preventDefault(); commit(idx); }}
                 className={clsx(
-                  'h-12 px-3 flex items-center gap-3 cursor-pointer text-[13px]',
+                  'min-h-12 px-3 py-2 flex items-center gap-3 cursor-pointer text-[13px]',
                   selected ? 'bg-surface-hi text-fg' : 'text-fg hover:bg-surface-hi/60',
                 )}
               >
                 <VsIcon name="code" size={16} className="text-fg-mute shrink-0" />
-                <span className="flex-1 truncate">{sessionDisplayTitle(s)}</span>
+                <span className="min-w-0 flex-1 flex flex-col gap-0.5">
+                  <span className="truncate">{sessionDisplayTitle(s)}</span>
+                  {matchContext ? (
+                    <span className="truncate text-[11px] text-fg-mute">{matchContext}</span>
+                  ) : null}
+                </span>
                 <span className="text-[12px] text-fg-mute shrink-0">{right}</span>
               </div>
             );

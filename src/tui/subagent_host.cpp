@@ -3,6 +3,7 @@
 #include "../agent_loop.hpp"
 #include "../session/session_manager.hpp"
 #include "../session/session_storage.hpp"
+#include "../session/session_user_message_search.hpp"
 #include "../utils/logger.hpp"
 
 #include <algorithm>
@@ -116,6 +117,7 @@ int SubagentHost::clear_settled(const std::string& project_dir) {
         for (const auto& t : running_) running_ids.push_back(t.id);
     }
     int removed = 0;
+    SessionUserMessageIndex search_index(project_dir);
     for (const auto& meta : SessionStorage::list_sessions(project_dir)) {
         if (meta.parent_session_id != parent) continue;
         if (std::find(running_ids.begin(), running_ids.end(), meta.id) !=
@@ -124,6 +126,15 @@ int SubagentHost::clear_settled(const std::string& project_dir) {
         }
         registry_.destroy(meta.id);  // 不在 registry 时是 no-op
         SessionStorage::purge_session_files(project_dir, meta.id);
+        {
+            // 与 Web 端 purge 一致:永久删除必须连用户消息搜索索引一起清,
+            // 否则子会话的用户输入全文残留在索引数据库。
+            std::string index_error;
+            if (!search_index.remove_session(meta.id, &index_error)) {
+                LOG_WARN("[subagent] purge failed to remove search index for " +
+                         meta.id + ": " + index_error);
+            }
+        }
         ++removed;
         LOG_INFO("[subagent] purged settled task " + meta.id);
     }

@@ -4,6 +4,7 @@
 //   title 子串 + 前缀匹配:+1000
 //   title 包含子串(非前缀):+500
 //   summary 包含子串:+200
+//   user-message content match:+150
 //   workspaceName 包含子串:+100
 //   title 中所有查询字符按顺序出现(fuzzy 兜底):+50
 //   同档内按 updated_at 时间衰减加 0~50 浮动(越新越高)
@@ -14,6 +15,42 @@ import { sessionDisplayTitle } from './sessionTitle.js';
 
 function lower(s) {
   return typeof s === 'string' ? s.toLowerCase() : '';
+}
+
+// no_workspace 会话的 key 只用 id:后端搜索结果里它们的 cwd/workspace_hash
+// 被有意置空,而 mergeAllWorkspaceSessions 会给列表数据注入 w.cwd/w.hash,
+// 两侧字段值不同 —— 掺入 cwd 会让同一会话算出两个 key、在面板里重复出现。
+function sessionMergeKey(session = {}) {
+  const workspace = session.no_workspace ? 'no-workspace' : (session.workspace_hash || '');
+  return `${workspace}::${session.id || ''}`;
+}
+
+export function shouldSearchUserMessages(query) {
+  return lower(query || '').trim().length > 0;
+}
+
+export function mergeSessionContentMatches(sessions = [], matches = []) {
+  const merged = [];
+  const byKey = new Map();
+  for (const session of sessions || []) {
+    const copy = { ...session };
+    const key = sessionMergeKey(copy);
+    byKey.set(key, copy);
+    merged.push(copy);
+  }
+  for (const match of matches || []) {
+    if (!match || !match.id) continue;
+    const key = sessionMergeKey(match);
+    const existing = byKey.get(key);
+    if (existing) {
+      existing.search_match = match.search_match || null;
+      continue;
+    }
+    const copy = { ...match };
+    byKey.set(key, copy);
+    merged.push(copy);
+  }
+  return merged;
 }
 
 // fuzzy:query 中的每个字符按顺序在 target 中出现一次即可。
@@ -48,6 +85,7 @@ export function scoreSession(session, query, now = Date.now()) {
   const title = lower(session?.title || sessionDisplayTitle(session, ''));
   const summary = lower(session?.summary);
   const wsName = lower(session?.workspaceName);
+  const searchMatch = session?.search_match;
   const fresh = freshnessScore(session?.updated_at || session?.created_at, now);
 
   if (!query) {
@@ -61,6 +99,15 @@ export function scoreSession(session, query, now = Date.now()) {
     else if (fuzzyHit(title, query)) s = Math.max(s, 50);
   }
   if (summary && summary.includes(query)) s = Math.max(s, 200);
+  if (searchMatch && searchMatch.kind === 'user_message') {
+    const snippet = lower(searchMatch.snippet);
+    const attachments = Array.isArray(searchMatch.attachments)
+      ? lower(searchMatch.attachments.join('\n'))
+      : '';
+    if (!snippet || snippet.includes(query) || attachments.includes(query)) {
+      s = Math.max(s, 150);
+    }
+  }
   if (wsName && wsName.includes(query)) s = Math.max(s, 100);
 
   return s > 0 ? s + fresh : 0;

@@ -856,6 +856,129 @@ TEST(WebServerHttp, CreateSessionThenListShowsActive) {
     EXPECT_EQ(occurrences, 1) << "active 与 disk meta 必须合并为同一条";
 }
 
+TEST(WebServerHttp, SessionUserMessageSearchFindsTextAndAttachmentNames) {
+    WebServerFixture fx;
+
+    const std::string sid = "20260708-000000-0abc";
+    acecode::ChatMessage user;
+    user.role = "user";
+    user.content = "请帮我设计 sqlite索引 的方案";
+    user.uuid = "u1";
+    acecode::ChatMessage hidden;
+    hidden.role = "user";
+    hidden.content = "quarterly-secret";
+    hidden.metadata = json{{"hidden_goal_context", true}};
+    acecode::ChatMessage attachment;
+    attachment.role = "user";
+    attachment.content = "";
+    attachment.uuid = "u2";
+    attachment.content_parts = json::array({
+        json{{"type", "file"},
+             {"attachment", json{{"id", "att1"},
+                                  {"name", "report-final.pdf"},
+                                  {"path", "C:/private/report-final.pdf"}}}},
+    });
+    acecode::SessionStorage::write_messages(
+        acecode::SessionStorage::session_path(fx.project_dir, sid),
+        {user, hidden, attachment});
+
+    acecode::SessionMeta meta;
+    meta.id = sid;
+    meta.cwd = fx.cwd;
+    meta.created_at = "2026-07-08T00:00:00Z";
+    meta.updated_at = "2026-07-08T00:01:00Z";
+    meta.message_count = 3;
+    meta.turn_count = 2;
+    meta.title = "unrelated title";
+    meta.summary = "unrelated summary";
+    acecode::SessionStorage::write_meta(
+        acecode::SessionStorage::meta_path(fx.project_dir, sid), meta);
+
+    auto text = cpr::Get(
+        cpr::Url{fx.url("/api/session-search/user-messages")},
+        cpr::Parameters{{"q", "sqlite索引"}});
+    ASSERT_EQ(text.status_code, 200) << text.text;
+    auto text_body = json::parse(text.text);
+    ASSERT_TRUE(text_body["matches"].is_array());
+    ASSERT_EQ(text_body["matches"].size(), 1u);
+    EXPECT_EQ(text_body["matches"][0]["id"], sid);
+    EXPECT_EQ(text_body["matches"][0]["workspace_hash"], acecode::compute_cwd_hash(fx.cwd));
+    EXPECT_TRUE(text_body["matches"][0].contains("search_match"));
+    EXPECT_NE(text_body["matches"][0]["search_match"]["snippet"].get<std::string>().find("sqlite索引"),
+              std::string::npos);
+    EXPECT_FALSE(text_body["matches"][0].contains("messages"));
+
+    auto file = cpr::Get(
+        cpr::Url{fx.url("/api/session-search/user-messages")},
+        cpr::Parameters{{"q", "report-final"}});
+    ASSERT_EQ(file.status_code, 200) << file.text;
+    auto file_body = json::parse(file.text);
+    ASSERT_EQ(file_body["matches"].size(), 1u);
+    ASSERT_TRUE(file_body["matches"][0]["search_match"]["attachments"].is_array());
+    ASSERT_EQ(file_body["matches"][0]["search_match"]["attachments"].size(), 1u);
+    EXPECT_EQ(file_body["matches"][0]["search_match"]["attachments"][0], "report-final.pdf");
+    EXPECT_EQ(file_body["matches"][0]["search_match"]["snippet"].get<std::string>().find("C:/private"),
+              std::string::npos);
+
+    auto hidden_result = cpr::Get(
+        cpr::Url{fx.url("/api/session-search/user-messages")},
+        cpr::Parameters{{"q", "quarterly-secret"}});
+    ASSERT_EQ(hidden_result.status_code, 200) << hidden_result.text;
+    EXPECT_TRUE(json::parse(hidden_result.text)["matches"].empty());
+}
+
+TEST(WebServerHttp, SessionUserMessageSearchReturnsNoMatchesForEmptyQuery) {
+    WebServerFixture fx;
+    auto empty = cpr::Get(
+        cpr::Url{fx.url("/api/session-search/user-messages")},
+        cpr::Parameters{{"q", "   "}});
+    ASSERT_EQ(empty.status_code, 200) << empty.text;
+    auto body = json::parse(empty.text);
+    ASSERT_TRUE(body["matches"].is_array());
+    EXPECT_TRUE(body["matches"].empty());
+}
+
+// 回归:Crow 的 url_params.get() 返回值已做过一次 URL decode('+'→空格、
+// %xx 解码)。修复前路由里又手写 decode 了一遍,查询里的字面 '+' 被二次
+// 解码成空格("C++"→"C  ")、'%' 序列被错误展开,内容明明存在却搜不到。
+TEST(WebServerHttp, SessionUserMessageSearchKeepsLiteralPlusAndPercent) {
+    WebServerFixture fx;
+
+    const std::string sid = "20260708-000001-0abd";
+    acecode::ChatMessage user;
+    user.role = "user";
+    user.content = "帮我优化 C++ 模板,目标覆盖率 95%";
+    user.uuid = "u1";
+    acecode::SessionStorage::write_messages(
+        acecode::SessionStorage::session_path(fx.project_dir, sid), {user});
+
+    acecode::SessionMeta meta;
+    meta.id = sid;
+    meta.cwd = fx.cwd;
+    meta.created_at = "2026-07-08T00:00:00Z";
+    meta.updated_at = "2026-07-08T00:01:00Z";
+    meta.message_count = 1;
+    meta.turn_count = 1;
+    meta.title = "unrelated title";
+    acecode::SessionStorage::write_meta(
+        acecode::SessionStorage::meta_path(fx.project_dir, sid), meta);
+
+    // cpr 会把 "C++" 编码为 q=C%2B%2B,服务端只应 decode 一次。
+    auto plus = cpr::Get(
+        cpr::Url{fx.url("/api/session-search/user-messages")},
+        cpr::Parameters{{"q", "C++"}});
+    ASSERT_EQ(plus.status_code, 200) << plus.text;
+    ASSERT_EQ(json::parse(plus.text)["matches"].size(), 1u)
+        << "字面 '+' 被二次解码成空格,导致查询不命中";
+
+    auto percent = cpr::Get(
+        cpr::Url{fx.url("/api/session-search/user-messages")},
+        cpr::Parameters{{"q", "95%"}});
+    ASSERT_EQ(percent.status_code, 200) << percent.text;
+    ASSERT_EQ(json::parse(percent.text)["matches"].size(), 1u)
+        << "字面 '%' 被二次解码,导致查询不命中";
+}
+
 // 场景: Web 状态栏/设置页切换权限模式走真实 daemon API,必须立即更新
 // 当前 active session 的 PermissionManager,否则 Yolo/Plan 会停留在旧状态。
 TEST(WebServerHttp, SessionPermissionModeEndpointUpdatesActiveSession) {

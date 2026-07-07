@@ -9,7 +9,14 @@
 //   - searchRelativeTime 的日历分桶(今天/昨天/本周/上周/上月/更早)边界
 
 import assert from 'node:assert/strict';
-import { rankSessions, scoreSession, searchRelativeTime, freshnessScore } from './searchSessions.js';
+import {
+  freshnessScore,
+  mergeSessionContentMatches,
+  rankSessions,
+  scoreSession,
+  searchRelativeTime,
+  shouldSearchUserMessages,
+} from './searchSessions.js';
 
 function run(name, fn) {
   try {
@@ -73,6 +80,60 @@ run('summary 命中分数低于 title 命中', () => {
   ];
   const r = rankSessions(sessions, 'pdf', NOW);
   assert.deepEqual(r.map((x) => x.id), ['t', 's']);
+});
+
+run('user message content match 排在 workspaceName 命中之前但低于 summary 命中', () => {
+  const sessions = [
+    {
+      id: 'content',
+      title: '其它',
+      summary: '其它',
+      workspaceName: 'none',
+      updated_at: iso(NOW),
+      search_match: { kind: 'user_message', snippet: 'sqlite索引 方案', attachments: [] },
+    },
+    { id: 'workspace', title: '其它', summary: '其它', workspaceName: 'sqlite索引', updated_at: iso(NOW) },
+    { id: 'summary', title: '其它', summary: 'sqlite索引 summary', workspaceName: 'none', updated_at: iso(NOW) },
+  ];
+  const r = rankSessions(sessions, 'sqlite索引', NOW);
+  assert.deepEqual(r.map((x) => x.id), ['summary', 'content', 'workspace']);
+});
+
+run('mergeSessionContentMatches 合并已有 session 并追加内容-only session', () => {
+  const sessions = [
+    { id: 'a', workspace_hash: 'w1', title: 'A' },
+  ];
+  const matches = [
+    { id: 'a', workspace_hash: 'w1', search_match: { kind: 'user_message', snippet: 'hit' } },
+    { id: 'b', workspace_hash: 'w1', title: 'B', search_match: { kind: 'user_message', snippet: 'only hit' } },
+  ];
+  const merged = mergeSessionContentMatches(sessions, matches);
+  assert.equal(merged.length, 2);
+  assert.equal(merged[0].id, 'a');
+  assert.equal(merged[0].search_match.snippet, 'hit');
+  assert.equal(merged[1].id, 'b');
+});
+
+// 回归:no_workspace 会话在列表数据里带 mergeAllWorkspaceSessions 注入的
+// cwd/workspace_hash,而后端搜索结果里这两个字段被置空 —— 修复前 merge key
+// 掺 cwd 导致同一会话算出两个 key,面板里重复出现两行。
+run('mergeSessionContentMatches 对 no_workspace 会话按 id 合并,不因 cwd 差异重复', () => {
+  const sessions = [
+    { id: 'nw1', no_workspace: true, workspace_hash: 'w1', cwd: 'C:/proj', title: 'NW' },
+  ];
+  const matches = [
+    { id: 'nw1', no_workspace: true, workspace_hash: '', cwd: '', search_match: { kind: 'user_message', snippet: 'hit' } },
+  ];
+  const merged = mergeSessionContentMatches(sessions, matches);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].id, 'nw1');
+  assert.equal(merged[0].search_match.snippet, 'hit');
+});
+
+run('shouldSearchUserMessages 只允许非空 query 触发内容搜索', () => {
+  assert.equal(shouldSearchUserMessages(''), false);
+  assert.equal(shouldSearchUserMessages('   '), false);
+  assert.equal(shouldSearchUserMessages('sqlite'), true);
 });
 
 run('workspaceName 命中,无 title/summary 命中也能出现在结果中', () => {

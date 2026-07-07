@@ -1,13 +1,65 @@
 // routes_sessions.cpp — Route registrations extracted from server.cpp
 #include "../server_impl.hpp"
 #include "../../session/compact_checkpoint.hpp"
+#include "../../session/session_user_message_search.hpp"
+
+#include <algorithm>
+#include <cctype>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace acecode::web {
 
 using nlohmann::json;
 
+namespace {
+
+// Crow 的 url_params.get() 返回值已经过一次 qs_decode('+'→空格、%xx 解码),
+// 这里绝不能再 decode 一遍:查询里的字面 '+' / '%'(如 "C++")会被二次解码破坏。
+std::string trim_query_param(const char* raw) {
+    if (!raw) return {};
+    std::string value(raw);
+    std::size_t first = 0;
+    while (first < value.size() &&
+           std::isspace(static_cast<unsigned char>(value[first])) != 0) {
+        ++first;
+    }
+    std::size_t last = value.size();
+    while (last > first &&
+           std::isspace(static_cast<unsigned char>(value[last - 1])) != 0) {
+        --last;
+    }
+    return value.substr(first, last - first);
+}
+
+int parse_search_limit(const char* raw) {
+    if (!raw || !*raw) return 30;
+    try {
+        int value = std::stoi(raw);
+        if (value < 1) return 1;
+        if (value > 100) return 100;
+        return value;
+    } catch (...) {
+        return 30;
+    }
+}
+
+struct UserMessageSearchScope {
+    std::string project_dir;
+    std::string workspace_hash;
+    std::string workspace_name;
+    std::string cwd;
+    bool no_workspace = false;
+};
+
+} // namespace
+
 void WebServer::Impl::register_sessions() {
         CROW_ROUTE(app, "/api/sessions").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
+        CROW_ROUTE(app, "/api/session-search/user-messages").methods(crow::HTTPMethod::Options)
         ([this](const crow::request& req) {
             return cors_preflight(req);
         });
@@ -77,6 +129,120 @@ void WebServer::Impl::register_sessions() {
                 /*include_no_workspace=*/true,
                 parent_raw ? std::string(parent_raw) : std::string{});
             crow::response r(arr.dump());
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        });
+
+        CROW_ROUTE(app, "/api/session-search/user-messages").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+
+            const std::string query = trim_query_param(req.url_params.get("q"));
+            const int limit = parse_search_limit(req.url_params.get("limit"));
+            if (query.empty()) {
+                crow::response r(json{{"matches", json::array()}}.dump());
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            if (query.size() > 512) {
+                crow::response r(400);
+                r.body = R"({"error":"query too long"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            std::vector<UserMessageSearchScope> scopes;
+            std::unordered_set<std::string> seen_scope_keys;
+            auto add_scope = [&](UserMessageSearchScope scope) {
+                if (scope.project_dir.empty()) return;
+                const std::string key = scope.project_dir + "|" + scope.workspace_hash +
+                    "|" + (scope.no_workspace ? "no-workspace" : "workspace");
+                if (!seen_scope_keys.insert(key).second) return;
+                scopes.push_back(std::move(scope));
+            };
+
+            std::vector<acecode::desktop::WorkspaceMeta> workspaces;
+            if (deps.workspace_registry) {
+                workspaces = deps.workspace_registry->list();
+            }
+            if (workspaces.empty()) {
+                workspaces.push_back(compatibility_workspace());
+            }
+            for (const auto& ws : workspaces) {
+                if (ws.cwd.empty()) continue;
+                add_scope(UserMessageSearchScope{
+                    SessionStorage::get_project_dir(ws.cwd),
+                    ws.hash,
+                    ws.name.empty() ? ws.cwd : ws.name,
+                    ws.cwd,
+                    false,
+                });
+            }
+            for (const auto& meta : no_workspace_disk_sessions()) {
+                if (meta.cwd.empty()) continue;
+                add_scope(UserMessageSearchScope{
+                    SessionStorage::get_project_dir(meta.cwd),
+                    std::string{},
+                    std::string{},
+                    meta.cwd,
+                    true,
+                });
+            }
+
+            json matches = json::array();
+            std::unordered_set<std::string> seen_sessions;
+            for (const auto& scope : scopes) {
+                SessionUserMessageIndex index(scope.project_dir);
+                std::string index_error;
+                if (!index.ensure_project_indexed(&index_error)) {
+                    LOG_WARN("[web] session user-message index refresh failed: " + index_error);
+                    continue;
+                }
+                auto scoped_matches = index.search(query, limit, &index_error);
+                if (!index_error.empty()) {
+                    LOG_WARN("[web] session user-message search failed: " + index_error);
+                    continue;
+                }
+
+                std::unordered_map<std::string, SessionMeta> metas;
+                for (const auto& meta : SessionStorage::list_sessions(scope.project_dir)) {
+                    if (meta.archived) continue;
+                    if (!meta.parent_session_id.empty()) continue;
+                    if (scope.no_workspace != meta.no_workspace) continue;
+                    metas.emplace(meta.id, meta);
+                }
+
+                for (const auto& match : scoped_matches) {
+                    auto meta_it = metas.find(match.session_id);
+                    if (meta_it == metas.end()) continue;
+                    const std::string session_key =
+                        (scope.no_workspace ? ("no:" + scope.project_dir) : scope.workspace_hash) +
+                        "|" + match.session_id;
+                    if (!seen_sessions.insert(session_key).second) continue;
+                    json item = session_meta_to_json(meta_it->second, scope.workspace_hash);
+                    item["workspaceName"] = scope.workspace_name;
+                    item["search_match"] = json{
+                        {"kind", "user_message"},
+                        {"score", match.score},
+                        {"message_ordinal", match.message_ordinal},
+                        {"snippet", match.snippet},
+                        {"attachments", match.matched_attachment_names},
+                    };
+                    matches.push_back(std::move(item));
+                }
+            }
+
+            std::sort(matches.begin(), matches.end(), [](const json& a, const json& b) {
+                const int as = a.value("search_match", json::object()).value("score", 0);
+                const int bs = b.value("search_match", json::object()).value("score", 0);
+                if (as != bs) return as > bs;
+                return a.value("updated_at", std::string{}) > b.value("updated_at", std::string{});
+            });
+            if (static_cast<int>(matches.size()) > limit) {
+                matches.erase(matches.begin() + limit, matches.end());
+            }
+
+            crow::response r(json{{"matches", matches}}.dump());
             r.add_header("Content-Type", "application/json");
             return with_cors(req, std::move(r));
         });
@@ -288,6 +454,16 @@ void WebServer::Impl::register_sessions() {
             const auto project_dir =
                 SessionStorage::get_project_dir(session_cwd.empty() ? ws.cwd : session_cwd);
             SessionStorage::purge_session_files(project_dir, id);
+            {
+                // 「清除」= 永久删除磁盘数据:用户消息搜索索引里的全文投影
+                // 也必须删,不能残留在索引数据库。
+                SessionUserMessageIndex search_index(project_dir);
+                std::string index_error;
+                if (!search_index.remove_session(id, &index_error)) {
+                    LOG_WARN("[web] purge failed to remove search index for " + id +
+                             ": " + index_error);
+                }
+            }
             LOG_INFO("[web] purged subagent session " + id +
                      " (parent=" + parent_id + ")");
             return with_cors(req, crow::response(204));
