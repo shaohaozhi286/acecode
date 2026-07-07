@@ -56,7 +56,9 @@ void configure_permissions(PermissionManager& permissions,
 
 // Slash commands
 void register_slash_commands(CommandRegistry& cmd_registry,
-                             SkillRegistry& skill_registry);
+                             SkillRegistry& skill_registry,
+                             const AppConfig& config,
+                             const std::string& working_dir);
 
 // TUI loop
 void run_tui_loop(ftxui::ScreenInteractive& screen,

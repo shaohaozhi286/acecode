@@ -325,15 +325,15 @@ ToolImpl create_spawn_subagent_tool(std::shared_ptr<SubagentToolDeps> deps) {
         std::string send_text = prompt;
         std::string display_text;
         expand_skill_prompt(*deps, ctx.cwd, send_text, display_text);
+        if (deps->on_spawn) {
+            deps->on_spawn(child_id, prompt);
+        }
         if (!deps->client->send_input(child_id, send_text, display_text)) {
             return error_result("failed to send prompt to subagent session " +
                                 child_id);
         }
         LOG_INFO("[subagent] spawned session " + child_id + " (wait=" +
                  (wait ? std::string("true") : std::string("false")) + ")");
-        if (deps->on_spawn) {
-            deps->on_spawn(child_id, prompt);
-        }
 
         if (!wait) {
             ToolResult r;

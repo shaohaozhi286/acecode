@@ -43,8 +43,8 @@ struct SubagentToolDeps {
     const AppConfig* config   = nullptr;
     // 父会话不在 registry 中(TUI 主会话)时,子会话权限模式从这里继承。
     const PermissionManager* fallback_permissions = nullptr;
-    // spawn 成功后回调(child_id, 原始 prompt)。TUI 用它登记右侧任务列
-    // 并订阅子会话事件;daemon 留空(Web 走 tool_end metadata + 事件流)。
+    // 子会话创建后、首条输入入队前回调(child_id, 原始 prompt)。TUI 用它
+    // 登记右侧任务列并订阅子会话事件;daemon 用它安装后台任务 tracking。
     std::function<void(const std::string& child_id,
                        const std::string& prompt)> on_spawn;
 };

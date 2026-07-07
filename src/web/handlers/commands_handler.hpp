@@ -3,12 +3,15 @@
 // /api/commands 端点的纯逻辑(可单测)。HTTP 路由注册在 server.cpp。
 //
 // 该端点只读,只暴露 web 端有意义的命令清单 — 当前白名单 = init + compact
-// + 所有已启用的 skill。其它 builtin(model/resume/rewind/clear 等)与 web 多
-// 会话语义冲突或已有专门 UI,故不暴露。
+// + goal + plan + opencode markdown commands + 所有已启用的 skill。其它
+// builtin(model/resume/rewind/clear 等)与 web 多会话语义冲突或已有专门 UI,
+// 故不暴露。
 //
 // 选中后**不**触发后端执行(选中只插入 textarea)。提交时,前端会把 init /
-// compact 路由到 `POST /api/sessions/:id/commands`,skills 和未知 slash 文本
-// 继续走普通消息路径。详见 openspec/changes/add-webui-slash-commands。
+// compact/goal/plan 路由到 `POST /api/sessions/:id/commands`,opencode commands
+// 与 skills 继续走普通消息路径,由 daemon sendInput expansion 展开。详见
+// openspec/changes/add-webui-slash-commands 与
+// openspec/changes/support-opencode-command-folders。
 
 #include <nlohmann/json.hpp>
 
@@ -23,8 +26,8 @@ struct AppConfig;
 namespace acecode::web {
 
 // 拼装 GET /api/commands 响应:
-//   {builtins: [{name,description}], skills: [{name,description}]}
-// builtins 顺序固定 init→compact;skills 按 name 字典序。
+//   {builtins: [{name,description}], commands: [{name,description}], skills: [...]}
+// builtins 顺序固定 init→compact→goal→plan;commands/skills 按 name 字典序。
 //
 // workspace_cwd:可选。若非空 + cfg 非空,会按该 workspace cwd 走一次 skill
 // 扫描根计算(.acecode/skills、.agent/skills 项目链 + 全局根),与 global_skills

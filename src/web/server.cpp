@@ -10,6 +10,28 @@ namespace acecode::web {
 
 using nlohmann::json;
 
+WebServer::Impl::~Impl() {
+    if (subagent_tracker_state) {
+        std::lock_guard<std::mutex> lk(subagent_tracker_state->mu);
+        subagent_tracker_state->impl = nullptr;
+    }
+
+    std::vector<std::pair<std::string, SessionClient::SubscriptionId>> subs;
+    {
+        std::lock_guard<std::mutex> lk(tracked_subagents_mu);
+        subs.reserve(tracked_subagent_subscriptions.size());
+        for (const auto& [sid, sub] : tracked_subagent_subscriptions) {
+            subs.emplace_back(sid, sub);
+        }
+        tracked_subagent_subscriptions.clear();
+    }
+    if (deps.session_client) {
+        for (const auto& [sid, sub] : subs) {
+            deps.session_client->unsubscribe(sid, sub);
+        }
+    }
+}
+
 // =====================================================================
 // register_routes — dispatches to each domain's register_*()
 // =====================================================================

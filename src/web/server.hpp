@@ -101,8 +101,8 @@ public:
     // 监听器,使其 busy/idle 转换能广播 session_status —— 否则未被任何 WS 连接
     // 订阅的子会话永不广播状态,父会话前端(useSubagentTasks)在 spawn_subagent
     // wait=true 阻塞期间发现不了它(既无 tool_end 也无 status),子代理的权限请求
-    // 永远冒泡不到主会话 UI。daemon 的 SubagentToolDeps.on_spawn 在子会话创建后
-    // 调用本方法。线程安全(可由 agent worker 线程调用)。
+    // 永远冒泡不到主会话 UI。daemon 的 SubagentToolDeps.on_spawn 在子会话创建后、
+    // 首条输入入队前调用本方法。线程安全(可由 agent worker 线程调用)。
     void track_subagent(const std::string& child_session_id);
 
 private:

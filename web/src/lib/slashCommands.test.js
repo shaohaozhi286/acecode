@@ -74,11 +74,16 @@ run('fallbackCommands 返回基础 builtin 命令', () => {
 
 run('slashCommandKindPresentation 只返回 glyph 与 label,颜色由 UI 统一处理', () => {
   const builtin = slashCommandKindPresentation({ kind: 'builtin' });
+  const command = slashCommandKindPresentation({ kind: 'command' });
   const skill = slashCommandKindPresentation({ kind: 'skill' });
   const fallback = slashCommandKindPresentation({});
   assert.deepEqual(builtin, {
     icon: 'tool',
     label: '内置工具',
+  });
+  assert.deepEqual(command, {
+    icon: 'command',
+    label: 'Command',
   });
   assert.deepEqual(skill, {
     icon: 'lightbulb',
@@ -89,7 +94,21 @@ run('slashCommandKindPresentation 只返回 glyph 与 label,颜色由 UI 统一�
     label: 'Skill',
   });
   assert.equal(Object.hasOwn(builtin, 'color'), false);
+  assert.equal(Object.hasOwn(command, 'color'), false);
   assert.equal(Object.hasOwn(skill, 'className'), false);
+});
+
+run('flattenCommands 把 opencode commands 放在 builtin 和 skill 之间', () => {
+  const items = flattenCommands({
+    builtins: [{ name: 'init', description: 'Generate AGENT.md' }],
+    commands: [{ name: 'opsx-apply', description: 'Apply OpenSpec change' }],
+    skills: [{ name: 'openspec-apply-change', description: 'Apply change skill' }],
+  });
+  assert.deepEqual(items.map((x) => `${x.kind}:${x.name}`), [
+    'builtin:init',
+    'command:opsx-apply',
+    'skill:openspec-apply-change',
+  ]);
 });
 
 run('commandsWithFallback:空响应回退到基础命令', () => {
@@ -114,6 +133,21 @@ run('commandsWithFallback:后端返回 skills 时保留 skill + builtin 组合',
     'builtin:compact',
     'builtin:goal',
     'builtin:plan',
+    'skill:calculator',
+  ]);
+});
+
+run('commandsWithFallback:保留 command kind 并放在基础 builtin 后', () => {
+  const r = commandsWithFallback({
+    commands: [{ name: 'opsx-apply', description: 'Apply OpenSpec change' }],
+    skills: [{ name: 'calculator', description: 'Exact math' }],
+  });
+  assert.deepEqual(r.map((x) => `${x.kind}:${x.name}`), [
+    'builtin:init',
+    'builtin:compact',
+    'builtin:goal',
+    'builtin:plan',
+    'command:opsx-apply',
     'skill:calculator',
   ]);
 });
@@ -340,6 +374,17 @@ run('resolveLeadingSlashCommand:命中 builtin 也返回 builtin kind', () => {
   assert.equal(r.kind, 'builtin');
   assert.equal(r.token, '/init');
   assert.equal(r.rest, '');
+});
+
+run('resolveLeadingSlashCommand:命中 opencode command 返回 command kind', () => {
+  const items = flattenCommands({
+    commands: [{ name: 'opsx-apply', description: 'Apply OpenSpec change' }],
+  });
+  const r = resolveLeadingSlashCommand('/opsx-apply change-123', items);
+  assert.equal(r.name, 'opsx-apply');
+  assert.equal(r.kind, 'command');
+  assert.equal(r.token, '/opsx-apply');
+  assert.equal(slashCommandKindPresentation(r).icon, 'command');
 });
 
 run('resolveLeadingSlashCommand:输入框 chip 可从首段命令取回对应 glyph', () => {

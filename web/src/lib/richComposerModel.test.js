@@ -20,6 +20,7 @@ function run(name, fn) {
 
 const COMMANDS = flattenCommands({
   builtins: [{ name: 'init', description: 'Generate AGENT.md' }],
+  commands: [{ name: 'opsx-apply', description: 'Apply OpenSpec change' }],
   skills: [{ name: 'openspec-explore', description: 'Explore a change' }],
 });
 
@@ -46,6 +47,14 @@ run('recognized leading command becomes command model and serializes with slash'
   assert.equal(model.command.name, 'openspec-explore');
   assert.equal(model.rest, ' investigate input');
   assert.equal(richComposerTextFromModel(model), '/openspec-explore investigate input');
+});
+
+run('recognized opencode command keeps command kind', () => {
+  const model = richComposerModelFromText('/opsx-apply change-123', COMMANDS);
+  assert.equal(model.kind, 'command');
+  assert.equal(model.command.name, 'opsx-apply');
+  assert.equal(model.command.kind, 'command');
+  assert.equal(model.rest, ' change-123');
 });
 
 run('unknown leading command remains plain text', () => {

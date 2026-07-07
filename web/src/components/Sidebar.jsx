@@ -765,7 +765,7 @@ function WorkspaceGroup({
           onClick={(e) => { e.stopPropagation(); onNewSession(ws); }}
           className="ace-sidebar-workspace-action w-5 h-5 rounded hover:bg-surface-hi flex items-center justify-center shrink-0 transition"
           title="新增会话"
-        ><VsIcon name="editWindow" size={13} /></button>
+        ><VsIcon name="newSession" size={13} /></button>
         {hasUnread && <span className="w-1.5 h-1.5 rounded-full shrink-0 bg-ok shadow-[0_0_4px_var(--ace-ok)]" title="有未读会话" />}
         <button
           type="button"

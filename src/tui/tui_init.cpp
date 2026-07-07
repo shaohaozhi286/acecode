@@ -49,6 +49,7 @@
 #include "skills/skill_registry.hpp"
 #include "skills/skill_commands.hpp"
 #include "skills/default_skill_seeder.hpp"
+#include "commands/opencode_command_registry.hpp"
 #include "memory/memory_paths.hpp"
 #include "memory/memory_registry.hpp"
 #include "upgrade/check.hpp"
@@ -276,8 +277,16 @@ void configure_permissions(PermissionManager& permissions,
 }
 
 void register_slash_commands(CommandRegistry& cmd_registry,
-                             SkillRegistry& skill_registry) {
+                             SkillRegistry& skill_registry,
+                             const AppConfig& config,
+                             const std::string& working_dir) {
     acecode::register_builtin_commands(cmd_registry);
+    auto command_keys = acecode::register_opencode_commands_tracked(
+        cmd_registry, config, working_dir);
+    if (!command_keys.empty()) {
+        LOG_INFO("[commands] Registered " + std::to_string(command_keys.size()) +
+                 " opencode command slash command(s)");
+    }
     auto keys = acecode::register_skill_commands_tracked(cmd_registry, skill_registry);
     if (!keys.empty()) {
         LOG_INFO("[skills] Registered " + std::to_string(keys.size()) + " skill slash command(s)");

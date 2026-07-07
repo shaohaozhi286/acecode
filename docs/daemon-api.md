@@ -1446,6 +1446,13 @@ Session events are JSON objects:
 }
 ```
 
+Most session event frames include a per-session `seq` and `timestamp_ms`.
+One exception is the `permission_request` snapshot frame that can be sent
+immediately after `subscribe_ack` when a permission request is already pending;
+that replay frame intentionally has no `seq` so clients do not advance or warn
+on the reconnect cursor. Clients should de-duplicate permission prompts by
+`payload.request_id`.
+
 Session event `type` values from `SessionEventKind`:
 
 - `token`
@@ -1482,7 +1489,7 @@ All client frames are JSON:
 | Type | Payload | Behavior |
 |---|---|---|
 | `hello` | `{session_id,since}` | legacy bind; ack is `hello_ack` |
-| `subscribe` | `{session_id,since}` | subscribes one session; ack is `subscribe_ack` |
+| `subscribe` | `{session_id,since}` | subscribes one session; ack is `subscribe_ack`; may then send seq-less pending `permission_request` snapshots |
 | `unsubscribe` | `{session_id}` | unsubscribes; ack is `unsubscribe_ack` |
 | `status_subscribe` | `{workspace_hash}` or `{session_id}` | subscribes workspace attention status and sends snapshot |
 | `status_unsubscribe` | `{workspace_hash}` | unsubscribes; ack is `status_unsubscribe_ack` |
@@ -1558,6 +1565,9 @@ for one session.
 3. The daemon replays buffered events with `seq > since`.
 4. If the replay gap is too old, fall back to
    `GET /api/sessions/:id/messages?since=0`.
+
+Seq-less pending `permission_request` snapshots do not affect the reconnect
+cursor; handle them by `request_id`.
 
 ---
 

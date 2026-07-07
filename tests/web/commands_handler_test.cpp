@@ -37,6 +37,18 @@ void write_skill_md(const fs::path& root, const std::string& name,
         << "---\n\n# " << name << "\n";
 }
 
+void write_command_md(const fs::path& root, const std::string& name,
+                      const std::string& description,
+                      const std::string& body) {
+    fs::path path = root / ".opencode" / "commands" / (name + ".md");
+    fs::create_directories(path.parent_path());
+    std::ofstream ofs(path, std::ios::binary);
+    ofs << "---\n"
+        << "description: " << description << "\n"
+        << "---\n"
+        << body << "\n";
+}
+
 void append_utf16le(std::string& out, char16_t ch) {
     out.push_back(static_cast<char>(ch & 0xFF));
     out.push_back(static_cast<char>((ch >> 8) & 0xFF));
@@ -80,6 +92,7 @@ TEST_F(CommandsHandlerTest, NoWorkspaceCwdOmitsSkillsField) {
 
     ASSERT_TRUE(payload.contains("builtins"));
     EXPECT_FALSE(payload.contains("skills")) << "缺 workspace_cwd 不应输出 skills 字段";
+    EXPECT_FALSE(payload.contains("commands")) << "缺 workspace_cwd 不应输出 commands 字段";
 
     ASSERT_EQ(payload["builtins"].size(), 4u);
     EXPECT_EQ(payload["builtins"][0]["name"].get<std::string>(), "init");
@@ -90,6 +103,27 @@ TEST_F(CommandsHandlerTest, NoWorkspaceCwdOmitsSkillsField) {
     EXPECT_FALSE(payload["builtins"][1]["description"].get<std::string>().empty());
     EXPECT_FALSE(payload["builtins"][2]["description"].get<std::string>().empty());
     EXPECT_FALSE(payload["builtins"][3]["description"].get<std::string>().empty());
+}
+
+TEST_F(CommandsHandlerTest, WorkspaceCwdIncludesOpencodeCommandsField) {
+    write_command_md(tmp_root, "opsx-apply", "Apply OpenSpec change", "Apply $ARGUMENTS");
+
+    acecode::SkillRegistry global;
+    acecode::AppConfig cfg;
+    auto payload = acecode::web::build_commands_payload(
+        global, std::optional<std::string>{tmp_root.string()}, &cfg);
+
+    ASSERT_TRUE(payload.contains("commands"));
+    ASSERT_TRUE(payload["commands"].is_array());
+    bool found = false;
+    for (const auto& c : payload["commands"]) {
+        if (c["name"].get<std::string>() == "opsx-apply") {
+            found = true;
+            EXPECT_EQ(c["description"].get<std::string>(), "Apply OpenSpec change");
+            EXPECT_FALSE(c["subtask"].get<bool>());
+        }
+    }
+    EXPECT_TRUE(found);
 }
 
 // 测试 helper:在 payload.skills 中按 name 找,返回 description(找不到 → nullopt)

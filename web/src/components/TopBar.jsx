@@ -116,22 +116,23 @@ export function TopBar({
         <NavigationArrowIcon direction="forward" size={16} />
       </QuickBtn>
       {updateAvailable && (
-        <QuickBtn
+        <button
+          type="button"
           title={updateTitle}
+          aria-label={updateTitle || '更新'}
           onClick={onStartUpdate}
           disabled={updateStarting}
-          className="rounded-full bg-accent text-white hover:bg-accent hover:text-white hover:opacity-90"
+          className={clsx(
+            'h-7 min-w-[44px] px-3 rounded-full bg-accent text-white text-[12px] font-semibold leading-none shadow-sm transition',
+            'hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/20',
+            updateStarting && 'opacity-60 cursor-not-allowed hover:opacity-60',
+          )}
         >
-          <VsIcon
-            name={updateStarting ? 'running' : 'glyphDown'}
-            size={14}
-            mono={false}
-            className="ace-icon-on-accent"
-          />
-        </QuickBtn>
+          更新
+        </button>
       )}
       <QuickBtn title="新对话" onClick={onNewSession}>
-        <VsIcon name="editWindow" size={16} />
+        <VsIcon name="newSession" size={16} />
       </QuickBtn>
       <QuickBtn title={searchHotkeyHint} onClick={onOpenSearch}>
         <VsIcon name="search" size={14} />

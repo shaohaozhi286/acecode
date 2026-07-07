@@ -15,6 +15,7 @@ import './consoleShells.test.js';
 import './imageNormalize.test.js';
 import './messageAttachments.test.js';
 import './selectionChatContext.test.js';
+import './inactiveSelection.test.js';
 import './goalControl.test.js';
 import './chatInputQueue.test.js';
 import './chatScrollFollow.test.js';

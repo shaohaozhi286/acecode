@@ -1,4 +1,5 @@
 #include "command_registry.hpp"
+#include "opencode_command_registry.hpp"
 #include "../skills/skill_activation.hpp"
 #include "../skills/skill_commands.hpp"
 #include "../skills/skill_registry.hpp"
@@ -38,6 +39,14 @@ bool CommandRegistry::dispatch(const std::string& input, CommandContext& ctx) {
 
     auto it = commands_.find(cmd_name);
     if (it == commands_.end()) {
+        if (!ctx.cwd.empty()) {
+            reload_opencode_commands(*this, ctx.config, ctx.cwd);
+            it = commands_.find(cmd_name);
+            if (it != commands_.end()) {
+                it->second.execute(ctx, args);
+                return true;
+            }
+        }
         // 未命中:先就着磁盘重扫一次并重绑 skill 斜杠命令(会话进行中新写到磁盘的
         // skill 才能第一次敲就用上,且回填 commands_ 让后续自动补全/`/help` 列得出),
         // 然后再查一次。reload 走已测过的 reload_skill_commands(只动 skill key,

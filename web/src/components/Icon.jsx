@@ -12,6 +12,7 @@ const ICONS = {
   clearAll: 'ClearAll',
   close: 'Close',
   code: 'Code',
+  command: 'TerminalReadWrite',
   collapseAll: 'CollapseAll',
   copy: 'Copy',
   darkTheme: 'DarkTheme',
@@ -42,6 +43,7 @@ const ICONS = {
   list: 'List',
   lock: 'Lock',
   mcp: 'MCP',
+  newSession: 'NewSession',
   ok: 'StatusOK',
   openFile: 'OpenFile',
   panelLeft: 'PanelLeft',
@@ -190,9 +192,10 @@ export function RefreshIcon({ size = 16, className = '', ...props }) {
 
 // Slash-command badge icon. It inherits currentColor inside the accent badge.
 export function CommandGlyph({ kind = 'skill', size = 12, className = '', ...props }) {
+  const name = kind === 'builtin' ? 'tool' : kind === 'command' ? 'command' : 'lightbulb';
   return (
     <VsIcon
-      name={kind === 'builtin' ? 'tool' : 'lightbulb'}
+      name={name}
       size={size}
       className={className}
       {...props}

@@ -533,15 +533,28 @@ void WebServer::Impl::register_sessions() {
                 return with_cors(req, std::move(r));
             }
 
-            // openspec/changes/expand-webui-skill-commands:Daemon 端 skill 命令展开。
-            // 若 text 是 `/<skill-name> args` 形式且对应 session 所属 workspace 内
-            // 有这个 skill,把 text 替换成轻量调用提示;UI 仍显示原文(走 metadata
-            // .display_text)— LLM-prompt 与 UI-display 解耦。未命中透传。
+            // Daemon 端 slash expansion。opencode markdown commands 优先于
+            // skill(但 builtin 已由前端/commands endpoint 走专门路径),命中后
+            // UI 仍显示原文(走 metadata.display_text)。
             std::string original_text = text;
             bool expanded = false;
             SelectionPromptContext selection_context = build_selection_prompt_context(contexts);
             const bool selection_expanded = !selection_context.prompt.empty();
             if (attachment_refs.empty() && contexts.empty() &&
+                deps.session_registry && deps.app_config) {
+                if (auto entry = deps.session_registry->acquire(id)) {
+                    if (!entry->cwd.empty()) {
+                        std::lock_guard<std::mutex> config_lock(app_config_mu);
+                        auto cmd_exp = web::try_expand_opencode_command(
+                            text, *deps.app_config, entry->cwd);
+                        if (cmd_exp.expanded) {
+                            text = std::move(cmd_exp.text);
+                            expanded = true;
+                        }
+                    }
+                }
+            }
+            if (!expanded && attachment_refs.empty() && contexts.empty() &&
                 deps.session_registry && deps.app_config) {
                 if (auto entry = deps.session_registry->acquire(id)) {
                     if (!entry->cwd.empty()) {

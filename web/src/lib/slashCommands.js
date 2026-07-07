@@ -38,13 +38,18 @@ export function fallbackCommands() {
   return FALLBACK_BUILTINS.map((c) => ({ ...c }));
 }
 
-// 把后端返回的 {builtins, skills} 拍平成统一项数组,加 kind 字段以备扩展。
-// 顺序:builtins 先(后端固定 init→compact→goal→plan),skills 后(后端按字典序)。
+// 把后端返回的 {builtins, commands, skills} 拍平成统一项数组,加 kind 字段以备扩展。
+// 顺序:builtins 先(后端固定 init→compact→goal→plan),opencode command 后,skills 后。
 export function flattenCommands(payload) {
   const out = [];
   if (payload && Array.isArray(payload.builtins)) {
     for (const c of payload.builtins) {
       if (c && c.name) out.push({ kind: 'builtin', name: c.name, description: c.description || '' });
+    }
+  }
+  if (payload && Array.isArray(payload.commands)) {
+    for (const c of payload.commands) {
+      if (c && c.name) out.push({ kind: 'command', name: c.name, description: c.description || '' });
     }
   }
   if (payload && Array.isArray(payload.skills)) {
@@ -102,6 +107,9 @@ export function rankCommands(query, items) {
 export function slashCommandKindPresentation(item) {
   if (item && item.kind === 'builtin') {
     return { icon: 'tool', label: '内置工具' };
+  }
+  if (item && item.kind === 'command') {
+    return { icon: 'command', label: 'Command' };
   }
   return { icon: 'lightbulb', label: 'Skill' };
 }

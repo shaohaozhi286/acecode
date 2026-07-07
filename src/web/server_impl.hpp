@@ -47,6 +47,7 @@
 #include "handlers/pinned_sessions_handler.hpp"
 #include "handlers/builtin_command_handler.hpp"
 #include "handlers/commands_handler.hpp"
+#include "handlers/opencode_command_expander.hpp"
 #include "handlers/skill_command_expander.hpp"
 #include "handlers/skills_handler.hpp"
 #include "../skills/skill_init.hpp"
@@ -192,10 +193,22 @@ struct WebServer::Impl {
     mutable std::unordered_map<std::string, std::string> attention_workspace_cwds;
     mutable std::unordered_map<std::string, std::unordered_map<std::string, SessionAttentionRecord>> attention_by_workspace;
 
+    struct SubagentTrackerState {
+        std::mutex mu;
+        Impl* impl = nullptr;
+    };
+    std::shared_ptr<SubagentTrackerState> subagent_tracker_state =
+        std::make_shared<SubagentTrackerState>();
+    mutable std::mutex tracked_subagents_mu;
+    std::unordered_map<std::string, SessionClient::SubscriptionId> tracked_subagent_subscriptions;
+
     mutable std::mutex opencode_import_mu;
     mutable std::unordered_map<std::string, OpencodeImportJobStatus> opencode_import_jobs;
 
-    explicit Impl(WebServerDeps d) : deps(std::move(d)) {}
+    explicit Impl(WebServerDeps d) : deps(std::move(d)) {
+        subagent_tracker_state->impl = this;
+    }
+    ~Impl();
 
     // -----------------------------------------------------------------
     // 鉴权 helper  (defined in server_helpers.cpp)
@@ -322,8 +335,8 @@ struct WebServer::Impl {
     // 见 WebServer::track_subagent。给子会话挂一个常驻(不随 WS 连接生灭)的
     // 事件监听器,把它的事件喂给 note_session_event_for_attention,从而在没有
     // 任何 WS 客户端订阅该子会话时也能广播其 session_status(打破「广播需订阅、
-    // 订阅需发现、发现需广播」的死锁)。监听器随子会话 EventDispatcher 生命周期,
-    // 子会话销毁即自动清理;捕获 this(Impl 存活至进程退出),安全。
+    // 订阅需发现、发现需广播」的死锁)。订阅 id 保存在 Impl 中并在析构时
+    // 显式 unsubscribe,避免 WebServer 先于 SessionRegistry 析构时留下悬空回调。
     void track_subagent(const std::string& child_session_id);
     nlohmann::json mark_session_read_status(const std::string& session_id,
                                              const std::string& workspace_hash,

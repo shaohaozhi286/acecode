@@ -36,7 +36,9 @@ import { slashCommandKindPresentation } from '../lib/slashCommands.js';
 
 function commandIconFile(command) {
   const presentation = slashCommandKindPresentation(command);
-  return presentation.icon === 'tool' ? 'Tool' : 'IntellisenseLightBulbSparkle';
+  if (presentation.icon === 'tool') return 'Tool';
+  if (presentation.icon === 'command') return 'TerminalReadWrite';
+  return 'IntellisenseLightBulbSparkle';
 }
 
 function applyCommandTokenDom(dom, command) {

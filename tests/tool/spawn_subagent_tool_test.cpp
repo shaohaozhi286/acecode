@@ -61,6 +61,52 @@ public:
     void set_model(const std::string&) override {}
 };
 
+class RecordingSessionClient : public acecode::SessionClient {
+public:
+    const bool* on_spawn_seen = nullptr;
+    bool send_saw_on_spawn = false;
+    std::string sent_session_id;
+    std::string sent_text;
+    std::string sent_display_text;
+
+    std::string create_session(const acecode::SessionOptions&) override { return {}; }
+    bool resume_session(const std::string&, const acecode::SessionOptions& = {}) override {
+        return false;
+    }
+    std::vector<acecode::SessionInfo> list_sessions() override { return {}; }
+    void destroy_session(const std::string&) override {}
+    SubscriptionId subscribe(const std::string&,
+                             EventListener,
+                             std::uint64_t = 0) override {
+        return 0;
+    }
+    void unsubscribe(const std::string&, SubscriptionId) override {}
+    bool send_input(const std::string& session_id,
+                    const std::string& text) override {
+        return send_input(session_id, text, std::string{});
+    }
+    bool send_input(const std::string& session_id,
+                    const std::string& text,
+                    const std::string& display_text) override {
+        send_saw_on_spawn = on_spawn_seen && *on_spawn_seen;
+        sent_session_id = session_id;
+        sent_text = text;
+        sent_display_text = display_text;
+        return true;
+    }
+    acecode::BuiltinCommandResult execute_builtin_command(
+        const std::string&,
+        const acecode::BuiltinCommandRequest&) override {
+        return {};
+    }
+    void respond_permission(const std::string&,
+                            const acecode::PermissionDecision&) override {}
+    void respond_question(const std::string&,
+                          const std::string&,
+                          const acecode::AskUserQuestionResponse&) override {}
+    void abort(const std::string&) override {}
+};
+
 struct SubagentFixture {
     acecode::ToolExecutor tools;
     acecode::PermissionManager permissions;
@@ -146,6 +192,37 @@ TEST(SpawnSubagentTool, FireAndForgetCreatesIsolatedSession) {
     auto child = fx.registry.acquire(child_id);
     ASSERT_NE(child, nullptr);
     EXPECT_EQ(child->subagent_depth, 1);
+    fx.registry.destroy(child_id);
+}
+
+// 场景: daemon 要在子会话首条输入入队前安装 tracking 监听器,否则 child
+// worker 可能抢先 emit busy=true / permission_request,主会话 UI 仍然发现不了
+// 这个后台任务。用 fake SessionClient 确定性验证 on_spawn 早于 send_input。
+TEST(SpawnSubagentTool, CallsOnSpawnBeforeSendingFirstInput) {
+    SubagentFixture fx;
+    RecordingSessionClient recording_client;
+    bool on_spawn_seen = false;
+    std::string spawned_child_id;
+    recording_client.on_spawn_seen = &on_spawn_seen;
+    fx.deps->client = &recording_client;
+    fx.deps->on_spawn = [&](const std::string& child_id,
+                            const std::string& /*prompt*/) {
+        spawned_child_id = child_id;
+        on_spawn_seen = true;
+    };
+
+    auto r = fx.tools.execute("spawn_subagent",
+                              R"({"prompt":"stage two go","wait":false})",
+                              fx.ctx_for(""));
+    ASSERT_TRUE(r.success) << r.output;
+    ASSERT_TRUE(r.metadata.contains("subagent_session_id"));
+    const std::string child_id =
+        r.metadata["subagent_session_id"].get<std::string>();
+
+    EXPECT_EQ(spawned_child_id, child_id);
+    EXPECT_EQ(recording_client.sent_session_id, child_id);
+    EXPECT_TRUE(recording_client.send_saw_on_spawn)
+        << "tracking must be installed before the first child input is queued";
     fx.registry.destroy(child_id);
 }
 

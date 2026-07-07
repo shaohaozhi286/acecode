@@ -1,5 +1,6 @@
 #include "commands_handler.hpp"
 
+#include "../../commands/opencode_command.hpp"
 #include "../../config/config.hpp"
 #include "../../skills/skill_init.hpp"
 #include "../../skills/skill_registry.hpp"
@@ -55,6 +56,22 @@ nlohmann::json build_commands_payload(const SkillRegistry& global_skills,
     // 该字段(向后兼容 add-webui-slash-commands v1)。这样旧客户端零变化,新
     // 客户端拿到 workspace 定向 skills。
     if (workspace_cwd && !workspace_cwd->empty() && cfg) {
+        auto commands = load_opencode_commands(*cfg, *workspace_cwd);
+        std::sort(commands.begin(), commands.end(),
+                  [](const OpencodeCommandInfo& a, const OpencodeCommandInfo& b) {
+                      return a.name < b.name;
+                  });
+        nlohmann::json command_arr = nlohmann::json::array();
+        for (const auto& c : commands) {
+            if (is_web_reserved_builtin_command(c.name)) continue;
+            command_arr.push_back({
+                {"name", ensure_utf8(c.name)},
+                {"description", ensure_utf8(c.description)},
+                {"subtask", c.subtask},
+            });
+        }
+        out["commands"] = std::move(command_arr);
+
         std::vector<SkillMetadata> entries;
         std::unordered_set<std::string> seen;
 
