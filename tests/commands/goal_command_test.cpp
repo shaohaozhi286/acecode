@@ -37,6 +37,10 @@ public:
                 acecode::AgentCallbacks{},
                 cwd_.string(),
                 perms_) {
+        // These tests exercise command parsing/state updates, not unattended
+        // continuation. Plan mode keeps maybe_continue_goal() idle and avoids
+        // racing /goal pause against a background turn on faster CI hosts.
+        perms_.set_mode(acecode::PermissionMode::Plan);
         sm_.start_session(cwd_.string(), "stub", "model", "sid-" + hint);
         loop_.set_session_manager(&sm_);
         acecode::register_goal_command(registry_);
