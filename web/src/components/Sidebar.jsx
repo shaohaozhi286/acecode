@@ -895,6 +895,7 @@ export function Sidebar({
   const refreshingRef = useRef(false);
   const pendingRefreshHashRef = useRef('');
   const expandedRef = useRef(new Set());
+  const workspaceCollapseAllRef = useRef(false);
   const pinnedByWorkspaceRef = useRef(new Map());
   const pinnedOrderItemsRef = useRef([]);
   const retainedSessionIdsRef = useRef(new Set());
@@ -1322,6 +1323,7 @@ export function Sidebar({
       }
 
       const availableHashes = new Set(workspaceArr.map((w) => w.hash).filter(Boolean));
+      const shouldAutoExpandWorkspace = !workspaceCollapseAllRef.current;
       const chosen = activeNoWorkspace
         ? ''
         : ((requestedHash && availableHashes.has(requestedHash))
@@ -1329,8 +1331,10 @@ export function Sidebar({
           : (workspaceArr.find((w) => w.active)?.hash || workspaceArr[0]?.hash || ''));
       const withActive = workspaceArr.map((w) => ({ ...w, active: !!chosen && w.hash === chosen }));
       const expandedHashes = new Set(expandedRef.current);
-      if (chosen) expandedHashes.add(chosen);
-      if (revealWorkspaceHash && availableHashes.has(revealWorkspaceHash)) expandedHashes.add(revealWorkspaceHash);
+      if (shouldAutoExpandWorkspace && chosen) expandedHashes.add(chosen);
+      if (shouldAutoExpandWorkspace && revealWorkspaceHash && availableHashes.has(revealWorkspaceHash)) {
+        expandedHashes.add(revealWorkspaceHash);
+      }
       setActiveWorkspaceHash(chosen);
       setWorkspaces(withActive);
       withActive
@@ -1368,8 +1372,10 @@ export function Sidebar({
 
       updateExpanded((prev) => {
         const next = new Set(prev);
-        for (const w of withActive) if (w.active) next.add(w.hash);
-        if (revealWorkspaceHash && availableHashes.has(revealWorkspaceHash)) next.add(revealWorkspaceHash);
+        if (shouldAutoExpandWorkspace) {
+          for (const w of withActive) if (w.active) next.add(w.hash);
+          if (revealWorkspaceHash && availableHashes.has(revealWorkspaceHash)) next.add(revealWorkspaceHash);
+        }
         return next;
       });
       withActive
@@ -1679,6 +1685,7 @@ export function Sidebar({
     const willExpand = !next.has(hash);
     if (willExpand) next.add(hash);
     else next.delete(hash);
+    if (willExpand) workspaceCollapseAllRef.current = false;
     expandedRef.current = next;
     setExpanded(next);
     if (willExpand) {
@@ -1688,6 +1695,7 @@ export function Sidebar({
   };
 
   const onActivate = async (ws) => {
+    workspaceCollapseAllRef.current = false;
     setSessionWorkspaceLoading([ws.hash], true);
     setActiveWorkspaceHash(ws.hash);
     updateExpanded((prev) => new Set(prev).add(ws.hash));
@@ -1875,6 +1883,7 @@ export function Sidebar({
   const selectSession = async (ws, session) => {
     if (!session?.id) return;
     const noWorkspace = isNoWorkspaceSession(session) || !!ws?.noWorkspace;
+    if (!noWorkspace) workspaceCollapseAllRef.current = false;
     if (!session.active) {
       try {
         if (noWorkspace) {
@@ -2001,6 +2010,7 @@ export function Sidebar({
 
   const createSessionInWorkspace = async (ws) => {
     if (!ws?.hash) return;
+    workspaceCollapseAllRef.current = false;
     try {
       const r = ws.hash === '__local__'
         ? await api.createSession({})
@@ -2082,6 +2092,11 @@ export function Sidebar({
     }
   };
 
+  const collapseAllWorkspaces = useCallback(() => {
+    workspaceCollapseAllRef.current = true;
+    updateExpanded(new Set());
+  }, [updateExpanded]);
+
   const pinnedSessions = pinnedSessionsForList(workspaceSessions, pinnedByWorkspace, pinnedOrderItems);
   const showNoWorkspaceSessions =
     noWorkspaceSessions.length > 0 || !!(activeRef?.noWorkspace || activeRef?.no_workspace);
@@ -2109,12 +2124,23 @@ export function Sidebar({
         <div className="ace-sidebar-main flex-1 flex flex-col min-h-0">
           <div className="ace-sidebar-heading flex items-center justify-between px-2 pt-2.5 pb-1 text-[10px] font-semibold uppercase tracking-wider text-fg-mute">
             <span>项目</span>
-            <button
-              type="button"
-              onClick={onAddWorkspace}
-              className="w-5 h-5 rounded text-fg-mute hover:text-fg hover:bg-surface-hi text-[14px] leading-none flex items-center justify-center"
-              title="添加项目"
-            ><VsIcon name="folderAdd" size={15} /></button>
+            <div className="flex items-center">
+              <button
+                type="button"
+                onClick={collapseAllWorkspaces}
+                className="ace-sidebar-heading-collapse-btn"
+                title="全部折叠项目"
+                aria-label="全部折叠项目"
+              >
+                <VsIcon name="collapseAll" size={16} />
+              </button>
+              <button
+                type="button"
+                onClick={onAddWorkspace}
+                className="w-5 h-5 rounded text-fg-mute hover:text-fg hover:bg-surface-hi text-[14px] leading-none flex items-center justify-center"
+                title="添加项目"
+              ><VsIcon name="folderAdd" size={15} /></button>
+            </div>
           </div>
           <div ref={sidebarScrollRef} className="ace-sidebar-scroll flex-1 overflow-y-auto pb-2">
             {pinnedSessions.length > 0 && (

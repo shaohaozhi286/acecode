@@ -2197,7 +2197,8 @@ body {
   outline-offset: 1px;
 }
 
-/* tab 行右端的刷新/折叠按钮,vsCode 风格的 splitter icon。 */
+/* tab/侧边栏右端的刷新/折叠按钮,vsCode 风格的 splitter icon。 */
+.ace-sidebar-heading-collapse-btn,
 .ace-side-panel-collapse-btn,
 .ace-side-panel-collapse-tree-btn,
 .ace-side-panel-refresh-btn {
@@ -2213,12 +2214,14 @@ body {
   flex-shrink: 0;
   transition: color .15s ease, background .15s ease;
 }
+.ace-sidebar-heading-collapse-btn:hover,
 .ace-side-panel-collapse-btn:hover,
 .ace-side-panel-collapse-tree-btn:hover,
 .ace-side-panel-refresh-btn:hover {
   color: var(--ace-fg);
   background: var(--ace-surface-alt);
 }
+.ace-sidebar-heading-collapse-btn:focus-visible,
 .ace-side-panel-collapse-btn:focus-visible,
 .ace-side-panel-collapse-tree-btn:focus-visible,
 .ace-side-panel-refresh-btn:focus-visible {
