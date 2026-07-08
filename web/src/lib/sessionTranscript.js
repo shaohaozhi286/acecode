@@ -324,6 +324,22 @@ function messageToolCallFields(m) {
   return { toolCallId, hasToolIndex, toolIndex };
 }
 
+function messageOrdinalValue(value, fallback = null) {
+  if (value !== undefined && value !== null && value !== '') {
+    const n = Number(value);
+    if (Number.isInteger(n) && n >= 0) return n;
+  }
+  if (fallback !== undefined && fallback !== null && fallback !== '') {
+    const f = Number(fallback);
+    if (Number.isInteger(f) && f >= 0) return f;
+  }
+  return null;
+}
+
+function messageOrdinal(m, fallback = null) {
+  return messageOrdinalValue(m?.__messageOrdinal ?? m?.message_ordinal ?? m?.messageOrdinal, fallback);
+}
+
 function genericHistoryMessageItem(next, m, extra = {}) {
   const fields = messageToolCallFields(m);
   const item = {
@@ -336,6 +352,8 @@ function genericHistoryMessageItem(next, m, extra = {}) {
     metadata: extra.metadata ?? m?.metadata,
     ts: extra.ts || transcriptTimestampMs(m) || Date.now(),
   };
+  const ordinal = messageOrdinalValue(extra.messageOrdinal, messageOrdinal(m));
+  if (ordinal !== null) item.messageOrdinal = ordinal;
   const toolCallId = extra.toolCallId ?? fields.toolCallId;
   const hasToolCallId = Object.prototype.hasOwnProperty.call(extra, 'toolCallId') || !!fields.toolCallId;
   const hasToolIndex = Object.prototype.hasOwnProperty.call(extra, 'toolIndex') || fields.hasToolIndex;
@@ -351,7 +369,7 @@ function genericHistoryMessageItem(next, m, extra = {}) {
   return item;
 }
 
-function historyItemFromMessage(next, m) {
+function historyItemFromMessage(next, m, messageOrdinal = null) {
   const metadata = m?.metadata && typeof m.metadata === 'object' ? m.metadata : null;
   const ts = transcriptTimestampMs(m) || Date.now();
   if ((m?.role || '') === 'tool' && metadata) {
@@ -423,21 +441,22 @@ function historyItemFromMessage(next, m) {
     }
   }
 
-  return genericHistoryMessageItem(next, m, { ts });
+  return genericHistoryMessageItem(next, m, { ts, messageOrdinal });
 }
 
 function historyItemsFromMessage(next, m, messageIndex) {
   const role = m?.role || '';
-  if (role !== 'assistant') return [historyItemFromMessage(next, m)];
+  const rawOrdinal = messageOrdinal(m, messageIndex);
+  if (role !== 'assistant') return [historyItemFromMessage(next, m, rawOrdinal)];
 
   const toolCalls = Array.isArray(m?.tool_calls) ? m.tool_calls : [];
-  if (toolCalls.length === 0) return [historyItemFromMessage(next, m)];
+  if (toolCalls.length === 0) return [historyItemFromMessage(next, m, rawOrdinal)];
 
   const items = [];
   const content = m?.content ?? '';
   const contentParts = Array.isArray(m?.content_parts) ? m.content_parts : [];
   if (String(content || '').trim() || contentParts.length > 0) {
-    items.push(historyItemFromMessage(next, m));
+    items.push(historyItemFromMessage(next, m, rawOrdinal));
   }
 
   for (let i = 0; i < toolCalls.length; i += 1) {
@@ -455,6 +474,7 @@ function historyItemsFromMessage(next, m, messageIndex) {
       ts: transcriptTimestampMs(m) || Date.now(),
       toolCallId: call.toolCallId,
       toolIndex: call.toolIndex,
+      messageOrdinal: rawOrdinal,
     }));
   }
 
@@ -471,7 +491,9 @@ function historyItemsFromMessages(next, messages) {
 
 function visibleTranscriptMessages(messages) {
   if (!Array.isArray(messages)) return [];
-  return messages.filter((m) => !m?.is_meta && !m?.metadata?.hidden_goal_context);
+  return messages
+    .map((m, index) => (m && typeof m === 'object' ? { ...m, __messageOrdinal: index } : m))
+    .filter((m) => !m?.is_meta && !m?.metadata?.hidden_goal_context);
 }
 
 function splitTranscriptMessages(messages) {

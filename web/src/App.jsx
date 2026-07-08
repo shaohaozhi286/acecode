@@ -55,6 +55,7 @@ import {
   desktopOpenSessionUrl,
   openSessionTargetFromSearch,
   sessionJumpId,
+  sessionJumpMessageOrdinal,
   sessionJumpNoWorkspace,
   sessionJumpWorkspaceHash,
   sessionRefFromJumpTarget,
@@ -219,6 +220,7 @@ export function App() {
             token: r.token,
             sessionId,
             workspaceHash: targetHash,
+            messageOrdinal: sessionJumpMessageOrdinal(target),
             protocol: window.location?.protocol || 'http:',
           });
           if (url) {

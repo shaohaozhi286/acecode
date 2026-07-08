@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {
   desktopOpenSessionUrl,
   openSessionTargetFromSearch,
+  sessionJumpMessageOrdinal,
   sessionRefFromJumpTarget,
   stripOpenSessionParams,
 } from './sessionJump.js';
@@ -50,6 +51,7 @@ test('session ref from jump target merges resume result and search metadata', ()
       workspace_hash: 'w-search',
       display_title: 'Search title',
       message_count: 3,
+      search_match: { kind: 'user_message', message_ordinal: 7, snippet: 'needle' },
     },
     {
       session_id: 's1',
@@ -64,4 +66,28 @@ test('session ref from jump target merges resume result and search metadata', ()
   assert.equal(ref.displayTitle, 'Search title');
   assert.equal(ref.message_count, 3);
   assert.equal(ref.contextId, 'default');
+  assert.equal(ref.searchMatch.messageOrdinal, 7);
+  assert.equal(ref.searchMatch.message_ordinal, 7);
+  assert.equal(ref.searchMatch.snippet, 'needle');
+});
+
+test('desktop open session URL preserves matched message ordinal', () => {
+  const url = desktopOpenSessionUrl({
+    port: 4567,
+    token: 'tok',
+    sessionId: 's1',
+    workspaceHash: 'w1',
+    messageOrdinal: 12,
+  });
+  assert.equal(url, 'http://127.0.0.1:4567/?token=tok&open=s1&workspace=w1&message_ordinal=12');
+
+  const target = openSessionTargetFromSearch('?open=s1&workspace=w1&message_ordinal=12');
+  assert.equal(sessionJumpMessageOrdinal(target), 12);
+  assert.deepEqual(target, {
+    sessionId: 's1',
+    workspaceHash: 'w1',
+    noWorkspace: false,
+    search_match: { kind: 'user_message', message_ordinal: 12, messageOrdinal: 12 },
+  });
+  assert.equal(stripOpenSessionParams('?token=t1&open=s1&workspace=w1&message_ordinal=12'), 'token=t1');
 });

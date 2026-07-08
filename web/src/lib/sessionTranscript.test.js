@@ -963,6 +963,27 @@ run('history load 不显示隐藏 goal context 消息', () => {
   assert.deepEqual(loaded.items.map((item) => item.content), ['visible prompt', 'visible answer']);
 });
 
+run('history load 保留原始 message ordinal 供搜索结果定位', () => {
+  const loaded = loadTranscriptHistory(createTranscriptState({ title: 's1' }), {
+    messages: [
+      { id: 'u1', role: 'user', content: 'first visible prompt' },
+      {
+        id: 'g1',
+        role: 'user',
+        content: '<goal_context>continue</goal_context>',
+        metadata: { hidden_goal_context: true },
+      },
+      { id: 'u2', role: 'user', content: 'matched visible prompt' },
+    ],
+    events: [],
+  }).state;
+
+  assert.deepEqual(
+    loaded.items.filter((item) => item.role === 'user').map((item) => item.messageOrdinal),
+    [0, 2],
+  );
+});
+
 run('新 transcript token usage 默认为 unknown 且不跨 session 继承', () => {
   const previous = reduceMany([
     { type: 'usage', payload: { prompt_tokens: 8000, completion_tokens: 1, total_tokens: 8001, has_data: true }, seq: 1 },

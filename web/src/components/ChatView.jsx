@@ -196,6 +196,31 @@ function messageContextAttrs(item) {
   };
 }
 
+function finiteMessageOrdinal(value) {
+  const n = Number(value);
+  return Number.isInteger(n) && n >= 0 ? n : null;
+}
+
+function searchJumpOrdinalFromRef(ref) {
+  const match = ref?.searchMatch || ref?.search_match || null;
+  return finiteMessageOrdinal(
+    match?.messageOrdinal ??
+    match?.message_ordinal ??
+    ref?.messageOrdinal ??
+    ref?.message_ordinal,
+  );
+}
+
+function scrollTopForCenteredRow(container, row) {
+  if (!container || !row) return 0;
+  const containerRect = container.getBoundingClientRect();
+  const rowRect = row.getBoundingClientRect();
+  const target = container.scrollTop +
+    rowRect.top - containerRect.top -
+    Math.max(0, (container.clientHeight - rowRect.height) / 2);
+  return Math.max(0, target);
+}
+
 function collectRowMetrics(container) {
   if (!container) return [];
   const containerRect = container.getBoundingClientRect();
@@ -671,7 +696,9 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   ), [renderedItems, streamingId]);
   const itemsRef = useRef(renderedItems);
   const stickyRafRef = useRef(0);
+  const lastSearchJumpRef = useRef({ key: '', match: null });
   const [stickyUserContext, setStickyUserContext] = useState(null);
+  const searchJumpOrdinal = useMemo(() => searchJumpOrdinalFromRef(ref), [ref]);
 
   const homeWorkspacePreferenceHash = homeWorkspaceSelection?.workspaceHash || '';
   const persistHomeWorkspaceHash = useCallback((hash = '') => {
@@ -893,7 +920,11 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     const updatePreview = () => {
       raf = 0;
       const next = selectionContextFromWindowSelection();
-      if (!next) return;
+      if (!next) {
+        selectionPreviewFingerprintRef.current = '';
+        setSelectionPreview((prev) => (prev ? null : prev));
+        return;
+      }
       const fingerprint = selectionContextFingerprint(next);
       if (fingerprint === selectionPreviewFingerprintRef.current) return;
       selectionPreviewFingerprintRef.current = fingerprint;
@@ -1317,6 +1348,37 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
 
     return cancelTailFollowScroll;
   }, [renderedItems, busy, changeDockBottomPadding, sid, cancelTailFollowScroll]);
+
+  useLayoutEffect(() => {
+    if (!sid || searchJumpOrdinal === null) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    const targetRow = Array.from(el.querySelectorAll('[data-chat-row="true"][data-chat-user-message="true"]'))
+      .find((row) => row.getAttribute('data-chat-message-ordinal') === String(searchJumpOrdinal));
+    if (!targetRow) return;
+
+    const match = ref?.searchMatch || ref?.search_match || null;
+    const key = `${sid}:${searchJumpOrdinal}`;
+    if (lastSearchJumpRef.current.key === key && lastSearchJumpRef.current.match === match) return;
+    lastSearchJumpRef.current = { key, match };
+
+    cancelTailFollowScroll();
+    setTailFollowFromAction({ type: 'review_pause' });
+    el.scrollTo({
+      top: scrollTopForCenteredRow(el, targetRow),
+      behavior: 'smooth',
+    });
+    requestAnimationFrame(scheduleStickyMeasure);
+    window.setTimeout(scheduleStickyMeasure, 220);
+  }, [
+    cancelTailFollowScroll,
+    ref,
+    renderedItems,
+    scheduleStickyMeasure,
+    searchJumpOrdinal,
+    setTailFollowFromAction,
+    sid,
+  ]);
 
   useEffect(() => {
     let timer = 0;
@@ -2725,6 +2787,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
                   data-chat-kind={it.kind || ''}
                   data-chat-role={it.kind === 'msg' ? (it.role || '') : (it.kind || '')}
                   data-chat-user-message={it.kind === 'msg' && it.role === 'user' ? 'true' : undefined}
+                  data-chat-message-ordinal={it.kind === 'msg' && it.messageOrdinal != null ? String(it.messageOrdinal) : undefined}
                   data-chat-assistant-continuation={continuation ? 'true' : undefined}
                   {...messageContextAttrs(it)}
                 >
