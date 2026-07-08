@@ -241,6 +241,14 @@ struct WorktreeConfig {
     std::vector<std::string> sparse_paths;
 };
 
+// git 感知配置(openspec add-git-context)。enabled=false 时不采集/不注入
+// gitStatus 快照,/api/git/* 端点按非仓库处理;系统提示的 git repo 标识行
+// 保留(零成本且不泄露仓库状态)。
+struct GitContextConfig {
+    bool enabled = true;
+    int timeout_ms = 3000; // 单条 git 命令超时,clamp [500, 30000]
+};
+
 // TUI /remote-control 基座配置(openspec add-remote-control)。
 // token 持久化后,channel bridge 跨 ACECode 重启无需重新配对;首次
 // /remote-control on 或默认 channel 激活时自动生成并写回。
@@ -383,6 +391,7 @@ struct AppConfig {
     WebSearchConfig web_search;                  // 联网搜索工具配置(参见 add-web-search-tool)
     LspConfig lsp;                               // LSP 集成(参见 add-lsp-service)
     WorktreeConfig worktree;                     // worktree 隔离(enter_worktree / --worktree)
+    GitContextConfig git_context;                // git 感知(参见 add-git-context)
     RemoteControlConfig remote_control;          // TUI /remote-control channel 托管
     AceBrowserBridgeConfig ace_browser_bridge;   // browser bridge tools integration
     UpgradeConfig upgrade;                       // explicit self-upgrade command config

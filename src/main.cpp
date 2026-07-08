@@ -4955,6 +4955,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
     agent_loop.set_memory_config(&runtime_memory_cfg);
     agent_loop.set_project_instructions_config(&config.project_instructions);
     agent_loop.set_custom_instructions_config(&config.custom_instructions);
+    agent_loop.set_git_context_config(&config.git_context);
 
     agent_loop.set_callbacks(callbacks);
 

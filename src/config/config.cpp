@@ -920,6 +920,22 @@ AppConfig load_config() {
                 }
             }
 
+            // git 感知段(openspec add-git-context)。缺省 → enabled=true、
+            // timeout 3000ms。timeout 越界不 fatal,静默 clamp —— 该值只影响
+            // best-effort 的采集行为,不值得阻塞启动。
+            if (j.contains("git_context") && j["git_context"].is_object()) {
+                const auto& gcj = j["git_context"];
+                if (gcj.contains("enabled") && gcj["enabled"].is_boolean())
+                    cfg.git_context.enabled = gcj["enabled"].get<bool>();
+                if (gcj.contains("timeout_ms") &&
+                    gcj["timeout_ms"].is_number_integer()) {
+                    int v = gcj["timeout_ms"].get<int>();
+                    if (v < 500) v = 500;
+                    if (v > 30000) v = 30000;
+                    cfg.git_context.timeout_ms = v;
+                }
+            }
+
             if (j.contains("remote_control") && j["remote_control"].is_object()) {
                 const auto& rcj = j["remote_control"];
                 if (rcj.contains("port") && rcj["port"].is_number_integer()) {
@@ -1639,6 +1655,14 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
         if (!cfg.worktree.sparse_paths.empty())
             wtj["sparse_paths"] = cfg.worktree.sparse_paths;
         if (!wtj.empty()) j["worktree"] = wtj;
+
+        GitContextConfig gc_d;
+        nlohmann::json gcj = nlohmann::json::object();
+        if (cfg.git_context.enabled != gc_d.enabled)
+            gcj["enabled"] = cfg.git_context.enabled;
+        if (cfg.git_context.timeout_ms != gc_d.timeout_ms)
+            gcj["timeout_ms"] = cfg.git_context.timeout_ms;
+        if (!gcj.empty()) j["git_context"] = gcj;
 
         RemoteControlConfig rc_d;
         nlohmann::json rcj = nlohmann::json::object();

@@ -1,6 +1,7 @@
 #include "system_prompt.hpp"
 #include "system_datetime.hpp"
 #include "../config/config.hpp"
+#include "../gitinfo/git_context_collector.hpp"
 #include "../memory/memory_registry.hpp"
 #include "../project_instructions/instructions_loader.hpp"
 #include "../skills/skill_registry.hpp"
@@ -180,7 +181,9 @@ std::string build_system_prompt(const ToolExecutor& tools, const std::string& cw
 
     oss << "# Environment\n\n"
         << "- OS: " << get_os_name() << "\n"
-        << "- Shell: " << get_default_shell() << "\n\n";
+        << "- Shell: " << get_default_shell() << "\n"
+        << "- Is directory a git repo: "
+        << (gitinfo::is_inside_git_repo(cwd) ? "Yes" : "No") << "\n\n";
 
     oss << get_shell_guidance();
 
@@ -449,6 +452,20 @@ PromptContextBlock build_skills_index_context_prompt(
     return block;
 }
 
+PromptContextBlock build_git_status_context_prompt(
+    const std::string& snapshot_text) {
+    PromptContextBlock block;
+    if (snapshot_text.empty()) return block;
+
+    std::ostringstream oss;
+    oss << "# Git Status\n\n" << snapshot_text;
+    if (snapshot_text.back() != '\n') oss << "\n";
+
+    block.content = oss.str();
+    block.cache_key = "git:" + prompt_component_hash(block.content);
+    return block;
+}
+
 PromptContextBlock build_session_context_prompt(
     const std::string& cwd,
     const MemoryRegistry* memory,
@@ -456,17 +473,21 @@ PromptContextBlock build_session_context_prompt(
     const ProjectInstructionsConfig* project_instructions_cfg,
     const SkillRegistry* skills,
     int context_window_tokens,
-    const CustomInstructionsConfig* custom_instructions_cfg) {
+    const CustomInstructionsConfig* custom_instructions_cfg,
+    const std::string& git_status_snapshot) {
     PromptContextBlock project = build_project_instructions_context_prompt(cwd, project_instructions_cfg);
     PromptContextBlock user_memory = build_user_memory_context_prompt(memory, memory_cfg);
     PromptContextBlock custom =
         build_custom_instructions_context_prompt(custom_instructions_cfg);
     PromptContextBlock skill_index =
         build_skills_index_context_prompt(skills, context_window_tokens);
+    PromptContextBlock git_status =
+        build_git_status_context_prompt(git_status_snapshot);
 
     PromptContextBlock block;
     if (project.content.empty() && user_memory.content.empty() &&
-        custom.content.empty() && skill_index.content.empty()) return block;
+        custom.content.empty() && skill_index.content.empty() &&
+        git_status.content.empty()) return block;
 
     std::ostringstream content;
     content << "<system-reminder>\n"
@@ -477,12 +498,14 @@ PromptContextBlock build_session_context_prompt(
     if (!user_memory.content.empty()) content << user_memory.content << "\n";
     if (!custom.content.empty()) content << custom.content << "\n";
     if (!skill_index.content.empty()) content << skill_index.content << "\n";
+    if (!git_status.content.empty()) content << git_status.content << "\n";
     content << "</system-reminder>";
     block.content = content.str();
 
     block.cache_key = prompt_component_hash(
         project.cache_key + "\n" + user_memory.cache_key + "\n" +
-        custom.cache_key + "\n" + skill_index.cache_key);
+        custom.cache_key + "\n" + skill_index.cache_key + "\n" +
+        git_status.cache_key);
     return block;
 }
 

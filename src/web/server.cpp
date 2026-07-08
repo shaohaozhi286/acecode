@@ -45,6 +45,7 @@ void WebServer::Impl::register_routes() {
     register_ui_preferences();
     register_history();
     register_files();
+    register_git();
     register_skills();
     register_commands();
     register_mcp();

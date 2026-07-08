@@ -75,6 +75,12 @@ PromptContextBlock build_skills_index_context_prompt(
     const SkillRegistry* skills,
     int context_window_tokens);
 
+// gitStatus 快照块(openspec add-git-context):把 collector 采集的快照文本
+// 包成带缓存 key 的块。空文本(非仓库/采集失败/disabled)→ 空块不发送。
+// 快照按会话缓存由调用方(AgentLoop)负责,这里只做包装。
+PromptContextBlock build_git_status_context_prompt(
+    const std::string& snapshot_text);
+
 PromptContextBlock build_session_context_prompt(
     const std::string& cwd,
     const MemoryRegistry* memory,
@@ -82,7 +88,8 @@ PromptContextBlock build_session_context_prompt(
     const ProjectInstructionsConfig* project_instructions_cfg,
     const SkillRegistry* skills = nullptr,
     int context_window_tokens = 0,
-    const CustomInstructionsConfig* custom_instructions_cfg = nullptr);
+    const CustomInstructionsConfig* custom_instructions_cfg = nullptr,
+    const std::string& git_status_snapshot = std::string());
 
 // Build dynamic request-local context. This is sent near the end of the
 // messages array for the current provider call only; it must not be persisted

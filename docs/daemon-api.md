@@ -219,6 +219,10 @@ when known.
 | GET | `/api/files` | list directory |
 | GET | `/api/files/content` | read text file |
 | GET | `/api/files/blob` | read previewable binary file |
+| GET | `/api/git/info` | git repo info for a workspace |
+| POST | `/api/git/checkout` | switch branch (stash-aware) |
+| GET | `/api/git/changes` | working tree changes vs base |
+| GET | `/api/git/diff` | single-file patch vs base |
 | GET | `/api/commands` | list slash commands |
 | GET | `/api/skills/root` | resolve effective skills directory |
 | GET | `/api/skills` | list registered skills |
@@ -579,6 +583,22 @@ If the text is a skill slash command for the session workspace, the daemon
 expands it to the skill invocation prompt and records `metadata.display_text`.
 Returns `202 {"queued":true}`.
 
+Optional `worktree` field for the **first** message of a session (openspec
+`add-webui-git-session-pill`):
+
+```json
+{"text": "...", "worktree": {"create": true, "base": "master"}}
+```
+
+Before enqueuing, the daemon creates (or fast-resumes) a worktree named
+`ses-<session id>` based on `base` (a local branch; empty
+falls back to the default `origin/<default-branch>` baseline) via the same
+machinery as the `EnterWorktree` tool, then switches the session cwd into it.
+Session storage location does not move. Failures abort the request without
+enqueuing: `404` unknown session, `409` session busy, `400` session already
+has messages / already in a worktree / invalid or missing base branch,
+`500` git errors.
+
 ### `POST /api/sessions/:id/attachments`
 
 Uploads bytes into the session attachment store. Body:
@@ -831,6 +851,91 @@ Returns raw bytes for browser-native preview types:
 
 The route caps preview bytes at 20 MB and sets `X-Content-Type-Options:
 nosniff`.
+
+### `GET /api/git/info?cwd=<abs>`
+
+Returns git repository info for a workspace cwd (openspec `add-git-context`).
+`cwd` must be an allowed workspace path (same whitelist as `/api/files`);
+unknown cwd yields `400 {"error":"unknown workspace"}`.
+
+Non-repo cwd (or `config.git_context.enabled=false`):
+
+```json
+{"is_repo": false}
+```
+
+Git repository:
+
+```json
+{
+  "is_repo": true,
+  "branch": "master",
+  "default_branch": "master",
+  "branches": ["master", "dev"],
+  "dirty": false
+}
+```
+
+- `branch` is `"HEAD"` when detached.
+- `dirty` reflects tracked changes only (`status --porcelain -uno`);
+  untracked files do not set it.
+- All git subprocesses are read-only, use `--no-optional-locks`, and honor
+  `config.git_context.timeout_ms` (timeout degrades to `{"is_repo": false}`
+  semantics for the failing fields rather than erroring).
+
+### `POST /api/git/checkout`
+
+Body `{"cwd": "<abs>", "branch": "<local branch>", "stash": false}`
+(openspec `add-webui-git-session-pill`). Safety gates, in order:
+
+- `400` unknown workspace / git context disabled / invalid branch name
+- `409 {"error":"busy"}` — any session of that workspace has a turn running;
+  no git mutation happens
+- `409 {"error":"dirty","files":[...]}` — tracked changes exist and `stash`
+  is not true; the client should confirm with the user then retry with
+  `stash: true`
+- `stash: true` runs `git stash push --include-untracked -m "ACECode
+  auto-stash"` before checkout (untracked files are preserved in the stash)
+- `409 {"error":"checkout failed","detail":...}` — git refused (conflicts);
+  stashed changes stay in the stash
+- `200 {"ok":true,"branch":...}` — success; cached gitStatus prompt
+  snapshots of that workspace's sessions are invalidated
+
+### `GET /api/git/changes?cwd=<abs>&base=<ref>`
+
+Working tree (including uncommitted changes) vs `base`
+(openspec `redesign-sidepanel-git-changes`). `base` must be `HEAD` or an
+allowlist-safe ref name that resolves via `rev-parse --verify`; anything else
+is `400 {"error":"invalid base"}`.
+
+```json
+{
+  "branch": "master",
+  "base": "origin/master",
+  "files": [
+    {"path":"src/a.cpp","status":"M","additions":95,"deletions":36},
+    {"path":"new.txt","status":"A"},
+    {"path":"img.png","status":"M","binary":true}
+  ],
+  "total_additions": 314,
+  "total_deletions": 47,
+  "total_count": 5,
+  "truncated": false
+}
+```
+
+- Combines `diff --numstat` + `diff --name-status` (joined by path; renames
+  reported at the new path) plus untracked files (status `A`, no counts).
+- The list caps at 200 entries; `truncated: true` with the full
+  `total_count` when exceeded. Totals always reflect the full diff.
+- `504 {"error":"git timeout"}` when git exceeds 2× `git_context.timeout_ms`.
+
+### `GET /api/git/diff?cwd=<abs>&path=<rel>&base=<ref>`
+
+Single-file unified patch (`git diff <base> -- <path>`); untracked files get
+a synthesized new-file patch via `diff --no-index`. `path` is canonicalized
+and prefix-checked against `cwd` (`400` outside the workspace). Patches over
+1 MB return `413 {"error":"diff too large"}`. Response: `{"patch": "..."}`.
 
 ---
 

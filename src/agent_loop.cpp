@@ -2,6 +2,7 @@
 #include "agent_loop_doom_guard.hpp"
 #include "agent_loop_shell_guard.hpp"
 #include "prompt/system_prompt.hpp"
+#include "gitinfo/git_context_collector.hpp"
 #include "utils/encoding.hpp"
 #include "utils/logger.hpp"
 #include "utils/stream_processing.hpp"
@@ -358,6 +359,9 @@ AgentLoop::~AgentLoop() {
 void AgentLoop::set_cwd(const std::string& new_cwd) {
     cwd_ = new_cwd;
     path_validator_ = PathValidator(new_cwd, permissions_.is_dangerous());
+    // cwd 变了(EnterWorktree/ExitWorktree),旧 gitStatus 快照作废,
+    // 下一次模型请求按新 cwd 重采(openspec add-git-context)。
+    git_snapshot_cache_.reset();
 }
 
 void AgentLoop::dispatch_message(const std::string& role,
@@ -1393,12 +1397,28 @@ AgentLoop::ApiRequestBundle AgentLoop::build_api_request_messages() {
     bundle.tool_defs = tools_.get_tool_definitions();
     LOG_DEBUG("Registered tools: " + std::to_string(bundle.tool_defs.size()));
 
+    // gitStatus 快照:每会话激活惰性采集一次,cwd 切换或外部失效(Web UI
+    // checkout)时重采(openspec add-git-context)。采集失败/非仓库/disabled
+    // → 空串不注入。
+    if (git_snapshot_stale_.exchange(false)) git_snapshot_cache_.reset();
+    if (!git_snapshot_cache_.has_value()) {
+        const bool git_ctx_enabled = !git_context_cfg_ || git_context_cfg_->enabled;
+        const int git_timeout_ms = git_context_cfg_
+                                       ? git_context_cfg_->timeout_ms
+                                       : gitinfo::kDefaultGitTimeoutMs;
+        git_snapshot_cache_ =
+            git_ctx_enabled
+                ? gitinfo::collect_git_status_snapshot(cwd_, git_timeout_ms)
+                : std::string();
+    }
+
     // Prepare provider-facing messages with system prompt at front.
     auto api_messages = provider_relevant_messages(messages_);
     std::string session_context = cached_context_for_api(
         build_session_context_prompt(
             cwd_, memory_registry_, memory_cfg_, project_instructions_cfg_,
-            skill_registry_, context_window_, custom_instructions_cfg_),
+            skill_registry_, context_window_, custom_instructions_cfg_,
+            *git_snapshot_cache_),
         session_context_cache_key_, session_context_cache_content_);
     prepend_session_context_for_api(api_messages, session_context);
     std::string request_context = build_request_context_prompt(cwd_);

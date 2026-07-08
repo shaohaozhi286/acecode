@@ -219,9 +219,24 @@ body {
   background-clip: padding-box;
 }
 
-/* ── Inactive selection (CSS Custom Highlight API, 仅文件预览区) ── */
-::highlight(ace-inactive-selection) {
+/* DOM-backed text marks for browsers without CSS Custom Highlight API. */
+.ace-inactive-selection-mark,
+.ace-global-find-match {
+  padding: 0;
+  border-radius: 2px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+.ace-inactive-selection-mark {
   background-color: rgba(140, 140, 140, 0.28);
+}
+.ace-global-find-match {
+  background-color: rgba(var(--ace-accent-rgb), 0.24);
+}
+.ace-global-find-active {
+  background-color: rgba(var(--ace-accent-rgb), 0.82);
+  color: #fff;
 }
 
 /* 阴影 utility:Tailwind v4 的 shadow-* 需要 inline 表达式,这里用 CSS 变量更灵活 */
@@ -3085,3 +3100,26 @@ body {
   pointer-events: none;
   z-index: 5;
 }
+
+/* GitSessionPill(add-webui-git-session-pill):新会话的分支 + worktree 胶囊。
+   视觉与「项目」pill 同族:圆角边框 + surface 底 + hover 提亮。 */
+.ace-git-pill { line-height: 1.2; }
+.ace-git-pill-checkbox {
+  width: 13px;
+  height: 13px;
+  accent-color: var(--ace-accent);
+  cursor: inherit;
+}
+
+/* GitChangesPanel(redesign-sidepanel-git-changes):行内展开的懒加载 diff。
+   面板宽度有限,diff 容器自己横向滚动,不撑破面板。 */
+.ace-git-inline-diff {
+  max-height: 320px;
+  overflow: auto;
+  border-top: 1px solid var(--ace-border);
+  border-bottom: 1px solid var(--ace-border);
+  background: var(--ace-surface);
+  font-size: 11px;
+}
+.ace-git-inline-diff .ace-diff { min-width: 0; }
+.ace-git-inline-diff .d2h-file-header { display: none; } /* 行内场景文件名已在行上 */

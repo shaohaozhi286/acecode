@@ -371,6 +371,7 @@ struct WebServer::Impl {
     void register_ui_preferences();
     void register_history();
     void register_files();
+    void register_git();
     void register_skills();
     void register_commands();
     void register_mcp();

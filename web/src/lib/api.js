@@ -254,6 +254,15 @@ export function createApi(base = null) {
     submitDesktopFeedback: (payload={}) => request('POST', '/api/feedback/desktop', payload, base),
     getAceBrowserBridge: ()          => request('GET',    '/api/config/ace-browser-bridge', undefined, base),
     setAceBrowserBridge: (cfg)       => request('PUT',    '/api/config/ace-browser-bridge', cfg, base),
+    // git 感知(add-git-context / add-webui-git-session-pill /
+    // redesign-sidepanel-git-changes)。失败(4xx/5xx)抛 ApiError,
+    // 调用方经 .status/.body 分派(如 checkout 的 409 dirty 往返)。
+    gitInfo:          (cwd)          => request('GET',    `/api/git/info?cwd=${encodeURIComponent(cwd)}`, undefined, base),
+    gitCheckout:      (cwd, branch, stash=false) =>
+      request('POST', '/api/git/checkout', { cwd, branch, stash }, base),
+    gitChanges:       (cwd, gitBase) => request('GET',    `/api/git/changes?cwd=${encodeURIComponent(cwd)}&base=${encodeURIComponent(gitBase)}`, undefined, base),
+    gitFileDiff:      (cwd, path, gitBase) =>
+      request('GET', `/api/git/diff?cwd=${encodeURIComponent(cwd)}&path=${encodeURIComponent(path)}&base=${encodeURIComponent(gitBase)}`, undefined, base),
     getHistory:       (cwd, max=100) => request('GET',    `/api/history?cwd=${encodeURIComponent(cwd)}&max=${max}`, undefined, base),
     appendHistory:    (text)         => request('POST',   '/api/history', {text}, base),
     forkSession:      (sid, atMessageId, title) =>

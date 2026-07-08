@@ -45,6 +45,10 @@ std::string default_branch(const std::string& repo_root);
 struct WorktreeCreateOptions {
     std::optional<int> pr_number;           // 有值 = 基于 origin PR head 创建
     std::vector<std::string> sparse_paths;  // 非空 = sparse-checkout cone 模式
+    // 非空 = 基于指定的本地分支创建(webui git session pill 的用户选择),
+    // 分支必须存在(rev-parse --verify refs/heads/<name>),否则创建失败。
+    // 与 pr_number 互斥,pr_number 优先。空 = 默认 origin/<默认分支> 策略。
+    std::string base_branch;
 };
 
 struct WorktreeCreateResult {

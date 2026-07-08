@@ -18,6 +18,9 @@
 #include "../provider/model_resolver.hpp"
 #include "../provider/provider_factory.hpp"
 #include "../skills/skill_init.hpp"
+#include "../gitinfo/git_context_core.hpp"
+#include "../worktree/worktree_core.hpp"
+#include "../worktree/worktree_manager.hpp"
 #include "../utils/logger.hpp"
 #include "../utils/cwd_hash.hpp"
 #include "../utils/utf8_path.hpp"
@@ -855,6 +858,9 @@ SessionRegistry::make_entry_locked(const std::string& id,
     entry->loop->set_memory_config(deps_.memory_cfg);
     entry->loop->set_project_instructions_config(deps_.project_instructions_cfg);
     entry->loop->set_custom_instructions_config(deps_.custom_instructions_cfg);
+    if (deps_.config) {
+        entry->loop->set_git_context_config(&deps_.config->git_context);
+    }
 
     // PermissionPrompter: 异步 — 触发 PermissionRequest 事件,等浏览器 decision
     auto prompter = std::make_unique<AsyncPrompter>(entry->loop->events());
@@ -1307,6 +1313,129 @@ std::vector<SessionInfo> SessionRegistry::list_active() const {
 std::size_t SessionRegistry::size() const {
     std::lock_guard<std::mutex> lk(mu_);
     return entries_.size();
+}
+
+namespace {
+
+// workspace cwd 判等:两侧 weakly_canonical 后比较(junction 教训 —— 本机
+// C:\Users\x 与 N:\Users\x 是同一目录的两个形态,字符串直比会漏)。
+bool same_workspace_cwd(const std::string& a, const std::string& b) {
+    if (a.empty() || b.empty()) return a == b;
+    std::error_code ec;
+    auto ca = std::filesystem::weakly_canonical(path_from_utf8(a), ec);
+    if (ec) return a == b;
+    auto cb = std::filesystem::weakly_canonical(path_from_utf8(b), ec);
+    if (ec) return a == b;
+    return ca == cb;
+}
+
+} // namespace
+
+bool SessionRegistry::any_busy_in_cwd(const std::string& cwd) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    for (const auto& [id, entry] : entries_) {
+        if (!entry || !entry->loop) continue;
+        if (entry->loop->is_busy() && same_workspace_cwd(entry->cwd, cwd)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void SessionRegistry::invalidate_git_snapshots_in_cwd(const std::string& cwd) {
+    std::lock_guard<std::mutex> lk(mu_);
+    for (const auto& [id, entry] : entries_) {
+        if (!entry || !entry->loop) continue;
+        if (same_workspace_cwd(entry->cwd, cwd)) {
+            entry->loop->invalidate_git_snapshot();
+        }
+    }
+}
+
+SessionRegistry::WebWorktreeResult SessionRegistry::enter_worktree_for_web(
+    const std::string& id, const std::string& base_branch) {
+    WebWorktreeResult result;
+
+    auto entry = acquire(id);
+    if (!entry || !entry->loop || !entry->sm) {
+        result.http_status = 404;
+        result.error = "unknown session";
+        return result;
+    }
+    if (entry->loop->is_busy()) {
+        result.http_status = 409;
+        result.error = "session busy";
+        return result;
+    }
+    // 仅"尚无消息"的新会话允许:该字段是首条消息的伴随意图,已开聊的
+    // 会话中途切 worktree 归 EnterWorktree 工具管,UI 不提供第二条路径。
+    if (!entry->loop->messages().empty()) {
+        result.http_status = 400;
+        result.error = "session already has messages";
+        return result;
+    }
+    if (entry->sm->active_worktree().active()) {
+        result.http_status = 400;
+        result.error = "session is already in a worktree";
+        return result;
+    }
+    if (!base_branch.empty() && !gitinfo::is_safe_ref_name(base_branch)) {
+        result.http_status = 400;
+        result.error = "invalid base branch name";
+        return result;
+    }
+
+    const std::string session_cwd = entry->cwd.empty() ? deps_.cwd : entry->cwd;
+    const std::string repo_root = worktree::find_canonical_git_root(session_cwd);
+    if (repo_root.empty()) {
+        result.http_status = 400;
+        result.error = "workspace is not a git repository";
+        return result;
+    }
+
+    // 命名用完整会话 id(YYYYMMDD-HHMMSS-xxxx,24 字符 < 64 上限):此刻
+    // 会话还没有标题,id 稳定且可反查。不能只取前缀 —— id 前 8 位是日期,
+    // 同一天创建的会话会 slug 撞车,第二个会话 fast-resume 复用第一个的
+    // worktree(集成测试实际踩到)。
+    const std::string slug = "ses-" + id;
+
+    worktree::WorktreeCreateOptions options;
+    options.base_branch = base_branch;
+    if (deps_.config) options.sparse_paths = deps_.config->worktree.sparse_paths;
+    auto created = worktree::get_or_create_worktree(repo_root, slug, options);
+    if (!created.ok) {
+        result.http_status = 500;
+        // 基线分支不存在是 4xx 语义(用户输入问题),其余按 500。
+        if (created.error.find("does not exist") != std::string::npos) {
+            result.http_status = 400;
+        }
+        result.error = created.error;
+        return result;
+    }
+    if (!created.existed) {
+        worktree::PostCreationOptions post;
+        if (deps_.config) {
+            post.symlink_directories = deps_.config->worktree.symlink_directories;
+        }
+        worktree::perform_post_creation_setup(repo_root, created.worktree_path, post);
+    }
+
+    WorktreeSessionInfo info;
+    info.original_cwd = session_cwd;
+    info.worktree_path = created.worktree_path;
+    info.worktree_name = slug;
+    info.worktree_branch = created.worktree_branch;
+    info.original_head_commit = created.head_commit;
+    entry->sm->set_active_worktree(info);
+    // set_cwd 同时失效 gitStatus 快照;entry->cwd(workspace 归属 / 会话
+    // 存储位置)有意不动 —— 与 EnterWorktree 工具同语义。
+    entry->loop->set_cwd(created.worktree_path);
+
+    result.ok = true;
+    result.http_status = 200;
+    result.worktree_path = created.worktree_path;
+    result.worktree_branch = created.worktree_branch;
+    return result;
 }
 
 } // namespace acecode

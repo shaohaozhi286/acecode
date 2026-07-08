@@ -16,6 +16,7 @@ import { Message } from './Message.jsx';
 import { ToolBlock } from './ToolBlock.jsx';
 import { InputBar } from './InputBar.jsx';
 import { QueueCardList } from './QueueCardList.jsx';
+import { GitSessionPill } from './GitSessionPill.jsx';
 import { QuestionPicker } from './QuestionPicker.jsx';
 import { StickyUserContext } from './StickyUserContext.jsx';
 import { SidePanel } from './SidePanel.jsx';
@@ -86,6 +87,7 @@ import { PanelToggleIcon, VsIcon } from './Icon.jsx';
 import { commandWorkspaceHashForInput } from '../lib/slashCommandWorkspace.js';
 import { consoleCwdForContext } from '../lib/consoleDock.js';
 import { inputRouteForText, sessionCreateOptionsForText } from '../lib/builtinCommandRouting.js';
+import { buildWorktreeIntent } from '../lib/gitSessionPill.js';
 import { fileTreeRefreshKeyFromItems } from '../lib/fileTreeRefresh.js';
 import { buildAssistantRunDirectives } from '../lib/assistantRunDirectives.js';
 import { activityChromeState } from '../lib/assistantAvatarDisplay.js';
@@ -219,6 +221,12 @@ function scrollTopForCenteredRow(container, row) {
     rowRect.top - containerRect.top -
     Math.max(0, (container.clientHeight - rowRect.height) / 2);
   return Math.max(0, target);
+}
+
+function searchJumpTargetRow(container, ordinal) {
+  if (!container || ordinal === null) return null;
+  return Array.from(container.querySelectorAll('[data-chat-row="true"][data-chat-user-message="true"]'))
+    .find((row) => row.getAttribute('data-chat-message-ordinal') === String(ordinal)) || null;
 }
 
 function collectRowMetrics(container) {
@@ -651,6 +659,14 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   const selectionPreviewFingerprintRef = useRef('');
   const [queueState, setQueueState] = useState(() => createChatInputQueueState());
   const queueStateRef = useRef(queueState);
+  // GitSessionPill 的待生效意图(worktree 勾选 + 基线分支)。ref 不入 dep:
+  // 只在发送首条消息那一刻读取,不驱动渲染。
+  const gitPillIntentRef = useRef({ worktreeChecked: false, selectedBase: '' });
+  const handleGitPillIntentChange = useCallback((intent) => {
+    gitPillIntentRef.current = intent || { worktreeChecked: false, selectedBase: '' };
+  }, []);
+  // 本会话经首条消息创建的 worktree(客户端态,刷新后回落为分支展示)。
+  const [localWorktree, setLocalWorktree] = useState(null); // {sid, name}
   const drainRef = useRef(false);
   // 排队消息从 transcript 中分离出来,只喂给 InputBar 上方的 QueueCardList。
   // transcript 只渲染后端真实落库的消息,避免把"草稿/未发送"和"已发送"混在一起。
@@ -659,6 +675,9 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   const draftSessionKey = sid ? `${draftWorkspaceHash}:${sid}` : '';
   composerValueRef.current = composerValue;
   const rawItems = items;
+  // GitSessionPill 的 sessionStarted 判定在 submit 回调里读(ref 免 dep churn)。
+  const rawItemsLengthRef = useRef(0);
+  rawItemsLengthRef.current = rawItems.length;
   // 上下键翻的历史:per-cwd 输入历史 + 当前 transcript 会话中用户发过的消息
   const composerHistory = useMemo(
     () => buildComposerHistory({ cwdHistory: history, transcriptItems: rawItems }),
@@ -696,7 +715,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   ), [renderedItems, streamingId]);
   const itemsRef = useRef(renderedItems);
   const stickyRafRef = useRef(0);
-  const lastSearchJumpRef = useRef({ key: '', match: null });
+  const searchJumpRetryRef = useRef({ frame: 0, timer: 0 });
   const [stickyUserContext, setStickyUserContext] = useState(null);
   const searchJumpOrdinal = useMemo(() => searchJumpOrdinalFromRef(ref), [ref]);
 
@@ -1350,28 +1369,60 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   }, [renderedItems, busy, changeDockBottomPadding, sid, cancelTailFollowScroll]);
 
   useLayoutEffect(() => {
-    if (!sid || searchJumpOrdinal === null) return;
-    const el = scrollRef.current;
-    if (!el) return;
-    const targetRow = Array.from(el.querySelectorAll('[data-chat-row="true"][data-chat-user-message="true"]'))
-      .find((row) => row.getAttribute('data-chat-message-ordinal') === String(searchJumpOrdinal));
-    if (!targetRow) return;
+    const previous = searchJumpRetryRef.current || {};
+    if (previous.frame) cancelAnimationFrame(previous.frame);
+    if (previous.timer) window.clearTimeout(previous.timer);
+    searchJumpRetryRef.current = { frame: 0, timer: 0 };
 
-    const match = ref?.searchMatch || ref?.search_match || null;
-    const key = `${sid}:${searchJumpOrdinal}`;
-    if (lastSearchJumpRef.current.key === key && lastSearchJumpRef.current.match === match) return;
-    lastSearchJumpRef.current = { key, match };
+    if (!sid || searchJumpOrdinal === null) return undefined;
 
-    cancelTailFollowScroll();
-    setTailFollowFromAction({ type: 'review_pause' });
-    el.scrollTo({
-      top: scrollTopForCenteredRow(el, targetRow),
-      behavior: 'smooth',
-    });
-    requestAnimationFrame(scheduleStickyMeasure);
-    window.setTimeout(scheduleStickyMeasure, 220);
+    let cancelled = false;
+    const task = { frame: 0, timer: 0, attempts: 0, settled: 0 };
+    searchJumpRetryRef.current = task;
+
+    const scheduleRetry = (delay) => {
+      task.timer = window.setTimeout(() => {
+        task.timer = 0;
+        task.frame = requestAnimationFrame(run);
+      }, delay);
+    };
+
+    const run = () => {
+      task.frame = 0;
+      if (cancelled || searchJumpRetryRef.current !== task) return;
+      task.attempts += 1;
+
+      const el = scrollRef.current;
+      const targetRow = searchJumpTargetRow(el, searchJumpOrdinal);
+      if (el && targetRow) {
+        cancelTailFollowScroll();
+        setTailFollowFromAction({ type: 'review_pause' });
+        el.scrollTop = scrollTopForCenteredRow(el, targetRow);
+        scheduleStickyMeasure();
+        task.settled += 1;
+      }
+
+      if (task.settled >= 3 || task.attempts >= 12) {
+        if (searchJumpRetryRef.current === task) {
+          searchJumpRetryRef.current = { frame: 0, timer: 0 };
+        }
+        return;
+      }
+      scheduleRetry(targetRow ? 70 : 90);
+    };
+
+    run();
+    return () => {
+      cancelled = true;
+      if (task.frame) cancelAnimationFrame(task.frame);
+      if (task.timer) window.clearTimeout(task.timer);
+      if (searchJumpRetryRef.current === task) {
+        searchJumpRetryRef.current = { frame: 0, timer: 0 };
+      }
+    };
   }, [
     cancelTailFollowScroll,
+    changeDockBottomPadding,
     ref,
     renderedItems,
     scheduleStickyMeasure,
@@ -1576,7 +1627,13 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
       // 空会话,再走专门 command endpoint。
       const trimmed = String(payload.text || '').trim();
       if ((!trimmed && !hasExtras) || homeSubmitting) return;
-      const createOptions = hasExtras
+      // GitSessionPill 的 worktree 意图:命中时改走 auto_start:false +
+      // 首条消息携带 worktree 字段(daemon 在入队前创建并切 cwd)。
+      // builtin(/init 等)不带 worktree —— 意图只作用于普通消息。
+      const worktreeIntent = !isBuiltin
+        ? buildWorktreeIntent({ ...gitPillIntentRef.current, sessionStarted: false })
+        : null;
+      const createOptions = hasExtras || worktreeIntent
         ? { auto_start: false }
         : sessionCreateOptionsForText(payload.text);
       createHomeComposerSession(payload.text, { createOptions })
@@ -1585,9 +1642,15 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
           if (!id) return;
           if (isBuiltin) {
             await api.executeCommand(id, route.command);
-          } else if (hasExtras) {
+          } else if (hasExtras || worktreeIntent) {
             applyEvent({ type: 'busy_changed', payload: { busy: true } }, { emitEffects: false });
-            await sendInputOrBuiltin(id, payload);
+            const sendPayload = worktreeIntent
+              ? { ...payload, worktree: worktreeIntent }
+              : payload;
+            await sendInputOrBuiltin(id, sendPayload);
+            if (worktreeIntent) {
+              setLocalWorktree({ sid: id, name: `ses-${id}` });
+            }
           }
           if (payload.text.trim()) recordInputHistory(payload.text);
           if (hasExtras) {
@@ -1595,7 +1658,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
           }
         })
         .catch((e) => {
-          if (hasExtras) {
+          if (hasExtras || worktreeIntent) {
             applyEvent({ type: 'busy_changed', payload: { busy: false } }, { emitEffects: false });
           }
           toast({ kind: 'err', text: '新建会话失败:' + (e.message || '') });
@@ -1617,8 +1680,21 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     if (!isBuiltin) {
       applyEvent({ type: 'busy_changed', payload: { busy: true } }, { emitEffects: false });
     }
-    sendInputOrBuiltin(targetSid, payload)
+    // 空会话的首条消息:GitSessionPill 勾了 worktree 时随消息带创建意图。
+    const sessionWorktreeIntent = !isBuiltin
+      ? buildWorktreeIntent({
+          ...gitPillIntentRef.current,
+          sessionStarted: rawItemsLengthRef.current > 0,
+        })
+      : null;
+    const sessionSendPayload = sessionWorktreeIntent
+      ? { ...payload, worktree: sessionWorktreeIntent }
+      : payload;
+    sendInputOrBuiltin(targetSid, sessionSendPayload)
       .then(() => {
+        if (sessionWorktreeIntent) {
+          setLocalWorktree({ sid: targetSid, name: `ses-${targetSid}` });
+        }
         if (payload.text.trim()) recordInputHistory(payload.text);
         if (!ref?.title) setTranscriptTitle(payload.text || composerAttachments[0]?.name || '附件消息');
         clearCurrentSessionDraft();
@@ -2378,7 +2454,8 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
               placeholder="向 ACECode 描述任务，或输入 / 命令..."
               {...composerInputProps}
             />
-            <div className="relative mr-auto ml-0">
+            <div className="flex items-center gap-2 mr-auto ml-0">
+            <div className="relative">
               <button
                 type="button"
                 className="ace-home-project-row group"
@@ -2442,6 +2519,15 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
                   </div>
                 </>
               )}
+            </div>
+            <GitSessionPill
+              key={`home-${homeWorkspaceHash}`}
+              api={api}
+              cwd={selectedHomeWorkspace?.cwd || ''}
+              variant="hero"
+              busy={homeSubmitting}
+              onIntentChange={handleGitPillIntentChange}
+            />
             </div>
             <div className="ace-home-hints">
               {homeHints.map((c) => (
@@ -2855,6 +2941,18 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         />
       )}
 
+      <GitSessionPill
+        key={`session-${sid}`}
+        api={api}
+        cwd={ref?.cwd || health?.cwd || ''}
+        variant="bar"
+        sessionStarted={rawItems.length > 0}
+        worktreeSession={localWorktree && localWorktree.sid === sid
+          ? { name: localWorktree.name }
+          : (ref?.worktree || null)}
+        busy={busy}
+        onIntentChange={handleGitPillIntentChange}
+      />
       <QueueCardList
         items={visibleQueuedItems}
         onCancel={cancelQueued}
@@ -2963,6 +3061,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
               filesEnabled={sidePanelFilesEnabled}
               width={sidePanelWidth}
               collapsed={sidePanelCollapsed}
+              busy={busy}
               onToggleCollapse={onToggleSidePanel}
               onOpenFilePreview={openFilePreview}
               onOpenSessionChangePreview={openSessionChangePreview}

@@ -164,6 +164,29 @@ public:
     // 当前活跃 session 数(测试 / 监控用)。
     std::size_t size() const;
 
+    // ---- git 感知辅助(openspec add-webui-git-session-pill)----
+
+    // workspace cwd 下是否有会话正在跑回合。checkout 安全门:agent 写文件
+    // 写一半被切分支是数据灾难,保守到整个 workspace 粒度。
+    bool any_busy_in_cwd(const std::string& cwd) const;
+
+    // checkout 成功后标记该 workspace 全部会话的 gitStatus 快照过期
+    // (AgentLoop::invalidate_git_snapshot,线程安全)。
+    void invalidate_git_snapshots_in_cwd(const std::string& cwd);
+
+    // Web 首条消息的 worktree 前置步骤:为"尚无消息"的会话创建(或复用)
+    // `ses-<id前8位>` worktree(基线 = base_branch,空 = 默认 origin/<默认分支>
+    // 策略)并切会话 cwd。会话存储位置不动(与 EnterWorktree 工具同语义)。
+    struct WebWorktreeResult {
+        bool ok = false;
+        int http_status = 500;     // 失败时给路由层的语义状态码
+        std::string error;
+        std::string worktree_path;
+        std::string worktree_branch;
+    };
+    WebWorktreeResult enter_worktree_for_web(const std::string& id,
+                                             const std::string& base_branch);
+
 private:
     std::shared_ptr<SessionEntry> make_entry_locked(const std::string& id,
                                                      const SessionOptions& opts,

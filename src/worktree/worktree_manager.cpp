@@ -228,6 +228,19 @@ WorktreeCreateResult get_or_create_worktree(const std::string& repo_root,
             return result;
         }
         base_ref = "FETCH_HEAD";
+    } else if (!options.base_branch.empty()) {
+        // 用户显式选择的本地基线分支(webui git session pill):必须真实
+        // 存在,否则报错而不是静默回退 —— 用户点名的基线被换掉是惊吓。
+        auto verify = run_git({"rev-parse", "--verify", "--quiet",
+                               "refs/heads/" + options.base_branch},
+                              repo_root);
+        if (!verify.ok()) {
+            result.error = "Base branch \"" + options.base_branch +
+                           "\" does not exist in this repository";
+            return result;
+        }
+        base_ref = options.base_branch;
+        base_sha = trim(verify.out);
     } else {
         // origin/<默认分支> 本地已有就不 fetch:大仓库 fetch 动辄数秒,
         // 略旧的基线可以接受(用户可以在 worktree 里自己 pull)。

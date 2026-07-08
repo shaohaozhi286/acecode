@@ -685,6 +685,8 @@ void WebServer::Impl::register_sessions() {
             std::string text;
             json attachment_refs = json::array();
             json contexts = json::array();
+            bool worktree_create = false;
+            std::string worktree_base;
             try {
                 auto j = json::parse(req.body);
                 if (j.contains("text") && j["text"].is_string()) {
@@ -695,6 +697,16 @@ void WebServer::Impl::register_sessions() {
                 }
                 if (j.contains("contexts") && j["contexts"].is_array()) {
                     contexts = j["contexts"];
+                }
+                // 首条消息的 worktree 意图(openspec add-webui-git-session-pill):
+                // {create:true, base:"<branch>"}。随消息原子处理,避免"先建
+                // worktree 再发消息"两次往返的中间态。
+                if (j.contains("worktree") && j["worktree"].is_object()) {
+                    const auto& wt = j["worktree"];
+                    if (wt.contains("create") && wt["create"].is_boolean())
+                        worktree_create = wt["create"].get<bool>();
+                    if (wt.contains("base") && wt["base"].is_string())
+                        worktree_base = wt["base"].get<std::string>();
                 }
             } catch (const std::exception& e) {
                 crow::response r(400);
@@ -707,6 +719,25 @@ void WebServer::Impl::register_sessions() {
                 r.body = R"({"error":"text or attachment required"})";
                 r.add_header("Content-Type", "application/json");
                 return with_cors(req, std::move(r));
+            }
+
+            // worktree 前置步骤:失败则整个请求失败,消息不入队(用户的
+            // 隔离意图落空后静默跑在主仓里是惊吓)。
+            if (worktree_create) {
+                if (!deps.session_registry) {
+                    crow::response r(503);
+                    r.body = R"({"error":"session registry unavailable"})";
+                    r.add_header("Content-Type", "application/json");
+                    return with_cors(req, std::move(r));
+                }
+                auto wt_result = deps.session_registry->enter_worktree_for_web(
+                    id, worktree_base);
+                if (!wt_result.ok) {
+                    crow::response r(wt_result.http_status);
+                    r.body = json{{"error", wt_result.error}}.dump();
+                    r.add_header("Content-Type", "application/json");
+                    return with_cors(req, std::move(r));
+                }
             }
 
             // Daemon 端 slash expansion。opencode markdown commands 优先于

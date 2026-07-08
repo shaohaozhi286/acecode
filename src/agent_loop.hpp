@@ -21,6 +21,7 @@
 #include <condition_variable>
 #include <queue>
 #include <map>
+#include <optional>
 #include <utility>
 #include <limits>
 #include <memory>
@@ -224,6 +225,13 @@ public:
     void set_custom_instructions_config(const CustomInstructionsConfig* cfg) {
         custom_instructions_cfg_ = cfg;
     }
+    void set_git_context_config(const GitContextConfig* cfg) {
+        git_context_cfg_ = cfg;
+    }
+    // 外部 git 状态变更(如 Web UI checkout 分支)后标记快照过期。线程安全:
+    // 任意线程可调;worker 在下一次模型请求前消费标记并重采。正在跑的 turn
+    // 继续用旧快照 —— 快照本身声明为 point-in-time,一回合的陈旧无害。
+    void invalidate_git_snapshot() { git_snapshot_stale_.store(true); }
 
     // ---- 事件流(Section 7 SessionClient)----
     // 老的 AgentCallbacks 路径**完全不动**:TUI 仍然用 callbacks。
@@ -422,6 +430,15 @@ private:
     const MemoryConfig* memory_cfg_ = nullptr;
     const ProjectInstructionsConfig* project_instructions_cfg_ = nullptr;
     const CustomInstructionsConfig* custom_instructions_cfg_ = nullptr;
+    const GitContextConfig* git_context_cfg_ = nullptr;
+    // gitStatus 快照缓存(openspec add-git-context):nullopt = 尚未采集,
+    // 空串 = 已采集但非仓库/失败/disabled(不注入)。只在 worker 线程读写
+    // (build_api_request_messages 惰性采集,set_cwd 经工具回调在同线程重置),
+    // 与 cwd_ 本身的线程假设一致。
+    std::optional<std::string> git_snapshot_cache_;
+    // 跨线程失效信号(invalidate_git_snapshot):worker 在模型请求前 exchange
+    // 消费,避免 HTTP 线程直接 reset optional 造成数据竞争。
+    std::atomic<bool> git_snapshot_stale_{false};
     std::string session_context_cache_key_;
     std::string session_context_cache_content_;
     std::string goal_accounting_thread_id_;

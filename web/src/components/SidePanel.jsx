@@ -38,6 +38,8 @@ import {
 } from '../lib/sidePanelContextActions.js';
 import { FileTypeIcon, PanelToggleIcon, VsIcon } from './Icon.jsx';
 import { ChangeCompactList } from './ChangeReview.jsx';
+import { GitChangesPanel } from './GitChangesPanel.jsx';
+import { GIT_STATE_CHANGED_EVENT } from '../lib/gitSessionPill.js';
 
 const TABS = [
   { key: 'changes', label: '变更' },
@@ -379,6 +381,7 @@ export function SidePanel({
   filesEnabled = true,
   width = 280,
   collapsed = false,
+  busy = false,
   onToggleCollapse,
   onOpenFilePreview,
   onOpenSessionChangePreview,
@@ -389,6 +392,30 @@ export function SidePanel({
   const [activeTab,    setActiveTab]    = useState(filesEnabled ? 'files' : 'changes');
   const [selectedPath, setSelectedPath] = useState(null);
   const [fileRefreshToken, setFileRefreshToken] = useState(0);
+  // git 仓库检测(redesign-sidepanel-git-changes):is_repo 时「变更」tab
+  // 整体切到 git 级视图;非仓库保留会话级 hunks 聚合。按 cwd 拉一次;
+  // checkout 事件(分支可能变)时重拉。
+  const [gitInfo, setGitInfo] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    setGitInfo(null);
+    if (!cwd) return undefined;
+    const load = () => {
+      api.gitInfo(cwd)
+        .then((info) => { if (!cancelled) setGitInfo(info); })
+        .catch(() => { if (!cancelled) setGitInfo(null); });
+    };
+    load();
+    const handler = (event) => {
+      const changedCwd = event?.detail?.cwd || '';
+      if (!changedCwd || changedCwd === cwd) load();
+    };
+    window.addEventListener(GIT_STATE_CHANGED_EVENT, handler);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(GIT_STATE_CHANGED_EVENT, handler);
+    };
+  }, [api, cwd]);
   const visibleTabs = useMemo(
     () => TABS.filter((tab) => filesEnabled || tab.key !== 'files'),
     [filesEnabled],
@@ -591,7 +618,15 @@ export function SidePanel({
             reviewStatusByPath={reviewStatusByPath || EMPTY_REVIEW_STATUS}
           />
         )}
-        {activeTab === 'changes' && (
+        {activeTab === 'changes' && (gitInfo?.is_repo ? (
+          <GitChangesPanel
+            api={api}
+            cwd={cwd}
+            gitInfo={gitInfo}
+            busy={busy}
+            visible={!collapsed && activeTab === 'changes'}
+          />
+        ) : (
           <ChangesList
             messages={messages}
             groups={effectiveChangeGroups}
@@ -601,7 +636,7 @@ export function SidePanel({
             selectedFileRevision={selectedChangeFileRevision}
             onOpenFile={onOpenSessionChangePreview}
           />
-        )}
+        ))}
       </div>
     </div>
   );
