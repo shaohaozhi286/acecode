@@ -14,38 +14,11 @@ using nlohmann::json;
 
 namespace {
 
-int hex_value(char ch) {
-    if (ch >= '0' && ch <= '9') return ch - '0';
-    if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
-    if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
-    return -1;
-}
-
-std::string url_decode_query_component(std::string value) {
-    std::string out;
-    out.reserve(value.size());
-    for (std::size_t i = 0; i < value.size(); ++i) {
-        if (value[i] == '+') {
-            out.push_back(' ');
-            continue;
-        }
-        if (value[i] == '%' && i + 2 < value.size()) {
-            int hi = hex_value(value[i + 1]);
-            int lo = hex_value(value[i + 2]);
-            if (hi >= 0 && lo >= 0) {
-                out.push_back(static_cast<char>((hi << 4) | lo));
-                i += 2;
-                continue;
-            }
-        }
-        out.push_back(value[i]);
-    }
-    return out;
-}
-
+// Crow 的 url_params.get() 返回值已经过一次 qs_decode('+'→空格、%xx 解码),
+// 这里绝不能再 decode 一遍:查询里的字面 '+' / '%'(如 "C++")会被二次解码破坏。
 std::string trim_query_param(const char* raw) {
     if (!raw) return {};
-    std::string value = url_decode_query_component(raw);
+    std::string value(raw);
     std::size_t first = 0;
     while (first < value.size() &&
            std::isspace(static_cast<unsigned char>(value[first])) != 0) {
@@ -481,6 +454,16 @@ void WebServer::Impl::register_sessions() {
             const auto project_dir =
                 SessionStorage::get_project_dir(session_cwd.empty() ? ws.cwd : session_cwd);
             SessionStorage::purge_session_files(project_dir, id);
+            {
+                // 「清除」= 永久删除磁盘数据:用户消息搜索索引里的全文投影
+                // 也必须删,不能残留在索引数据库。
+                SessionUserMessageIndex search_index(project_dir);
+                std::string index_error;
+                if (!search_index.remove_session(id, &index_error)) {
+                    LOG_WARN("[web] purge failed to remove search index for " + id +
+                             ": " + index_error);
+                }
+            }
             LOG_INFO("[web] purged subagent session " + id +
                      " (parent=" + parent_id + ")");
             return with_cors(req, crow::response(204));

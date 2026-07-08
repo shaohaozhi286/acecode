@@ -17,8 +17,11 @@ function lower(s) {
   return typeof s === 'string' ? s.toLowerCase() : '';
 }
 
+// no_workspace 会话的 key 只用 id:后端搜索结果里它们的 cwd/workspace_hash
+// 被有意置空,而 mergeAllWorkspaceSessions 会给列表数据注入 w.cwd/w.hash,
+// 两侧字段值不同 —— 掺入 cwd 会让同一会话算出两个 key、在面板里重复出现。
 function sessionMergeKey(session = {}) {
-  const workspace = session.no_workspace ? `no:${session.cwd || session.workspaceName || ''}` : (session.workspace_hash || '');
+  const workspace = session.no_workspace ? 'no-workspace' : (session.workspace_hash || '');
   return `${workspace}::${session.id || ''}`;
 }
 

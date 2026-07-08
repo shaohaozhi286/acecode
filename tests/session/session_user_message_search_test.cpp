@@ -194,3 +194,84 @@ TEST(SessionUserMessageIndex, SearchLimitCountsSessionsNotRawMatchingMessages) {
     EXPECT_EQ(matches[0].session_id, busy_sid);
     EXPECT_EQ(matches[1].session_id, other_sid);
 }
+
+// 回归:索引最初复用 goal 的 state.sqlite3,而 SessionManager::existing_goal_store()
+// 以「state.sqlite3 文件存在」为惰性打开条件 —— 索引一建库,每个普通会话的
+// goal store 都会打开常驻连接,Windows 上锁住项目目录(表现:AgentLoopPlanMode
+// 系列在析构 remove_all(project_dir) 时抛 filesystem_error → noexcept 析构
+// terminate,进程退出码 3)。期望:索引使用独立数据库文件,绝不创建
+// state.sqlite3;索引对象析构后项目目录可完整删除(无残留文件句柄)。
+TEST(SessionUserMessageIndex, DoesNotCreateGoalStateDbAndReleasesHandles) {
+    auto dir = temp_dir("handles");
+    const std::string project_dir = dir.string();
+    const std::string sid = "session-handle";
+    const std::string jsonl = acecode::SessionStorage::session_path(project_dir, sid);
+    acecode::SessionStorage::write_messages(jsonl, {user_message("handle probe")});
+
+    {
+        acecode::SessionUserMessageIndex index(project_dir);
+        std::string error;
+        ASSERT_TRUE(index.rebuild_session(sid, jsonl, &error)) << error;
+        ASSERT_EQ(index.search("handle probe", 10, &error).size(), 1u);
+        EXPECT_FALSE(fs::exists(dir / "state.sqlite3"))
+            << "索引不能创建 goal 的 state.sqlite3(existing_goal_store 以其存在为打开条件)";
+    }
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    EXPECT_FALSE(static_cast<bool>(ec))
+        << "索引析构后项目目录必须可删除: " << ec.message();
+    EXPECT_FALSE(fs::exists(dir));
+}
+
+// 触发场景:用户在 Web「后台任务」面板或 TUI /tasks clear 点「清除」
+// (purge = 永久删除磁盘数据)。期望:remove_session 后该会话的用户消息
+// 全文从 state.sqlite3 彻底消失,不能因为索引残留而继续被搜到。
+TEST(SessionUserMessageIndex, RemoveSessionDeletesIndexedContent) {
+    auto dir = temp_dir("remove");
+    const std::string project_dir = dir.string();
+    const std::string sid = "session-purged";
+    const std::string other_sid = "session-kept";
+    const std::string jsonl = acecode::SessionStorage::session_path(project_dir, sid);
+    const std::string other_jsonl = acecode::SessionStorage::session_path(project_dir, other_sid);
+
+    acecode::SessionStorage::write_messages(jsonl, {user_message("private purge target")});
+    acecode::SessionStorage::write_messages(other_jsonl, {user_message("keep this session")});
+
+    acecode::SessionUserMessageIndex index(project_dir);
+    std::string error;
+    ASSERT_TRUE(index.rebuild_session(sid, jsonl, &error)) << error;
+    ASSERT_TRUE(index.rebuild_session(other_sid, other_jsonl, &error)) << error;
+    ASSERT_EQ(index.search("purge target", 10, &error).size(), 1u);
+
+    ASSERT_TRUE(index.remove_session(sid, &error)) << error;
+
+    EXPECT_TRUE(index.search("purge target", 10, &error).empty())
+        << "purge 后索引残留了已删除会话的用户消息";
+    // 只删目标会话,其它会话不受影响。
+    EXPECT_EQ(index.search("keep this", 10, &error).size(), 1u);
+}
+
+// 回归:purge_session_files 只删 JSONL/meta 文件,不碰 state.sqlite3。
+// 修复前,通过任何绕过 remove_session 的删除路径(手工删文件、旧版本
+// purge)删掉的会话,其用户消息全文会永久残留在索引里。期望:
+// ensure_project_indexed 的孤儿回收发现 JSONL 已不存在时清掉对应行。
+TEST(SessionUserMessageIndex, EnsureProjectIndexedPrunesDeletedSessions) {
+    auto dir = temp_dir("prune");
+    const std::string project_dir = dir.string();
+    const std::string sid = "session-deleted";
+    const std::string jsonl = acecode::SessionStorage::session_path(project_dir, sid);
+
+    acecode::SessionStorage::write_messages(jsonl, {user_message("orphan secret text")});
+
+    acecode::SessionUserMessageIndex index(project_dir);
+    std::string error;
+    ASSERT_TRUE(index.rebuild_session(sid, jsonl, &error)) << error;
+    ASSERT_EQ(index.search("orphan secret", 10, &error).size(), 1u);
+
+    fs::remove(jsonl);
+    ASSERT_TRUE(index.ensure_project_indexed(&error)) << error;
+
+    EXPECT_TRUE(index.search("orphan secret", 10, &error).empty())
+        << "JSONL 已删除的会话内容仍留在索引里";
+}

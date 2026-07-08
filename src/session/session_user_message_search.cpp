@@ -293,7 +293,13 @@ bool SessionUserMessageIndex::open(std::string* error) {
         set_error(error, "failed to create project directory: " + ec.message());
         return false;
     }
-    const std::string db_path = path_to_utf8(path_from_utf8(project_dir_) / "state.sqlite3");
+    // 独立于 goal 的 state.sqlite3:SessionManager::existing_goal_store() 以
+    // 「state.sqlite3 文件存在」作为 goal store 的惰性打开条件。如果索引也
+    // 写进 state.sqlite3,每个普通会话的第一条消息就会把文件造出来,goal
+    // store 随之在每个 turn 打开常驻连接(Windows 下还会锁住项目目录)。
+    // 索引连接是栈对象短开短关,单独一个 db 文件不改变任何既有约定。
+    const std::string db_path =
+        path_to_utf8(path_from_utf8(project_dir_) / "user_message_search.sqlite3");
     if (sqlite3_open_v2(db_path.c_str(), &db_,
                         SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
                         nullptr) != SQLITE_OK) {
@@ -536,15 +542,68 @@ bool SessionUserMessageIndex::ensure_session_indexed(
     return rebuild_session(session_id, jsonl_path, error);
 }
 
+bool SessionUserMessageIndex::remove_session(const std::string& session_id,
+                                             std::string* error) {
+    if (session_id.empty()) return true;
+    if (!initialize(error)) return false;
+    constexpr const char* sqls[] = {
+        "DELETE FROM session_user_message_index WHERE session_id = ?;",
+        "DELETE FROM session_user_message_sources WHERE session_id = ?;",
+    };
+    for (const char* sql : sqls) {
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+            set_error(error, sqlite_error(db_, "prepare session index removal failed"));
+            return false;
+        }
+        bool ok = bind_text(stmt, 1, session_id) &&
+                  sqlite3_step(stmt) == SQLITE_DONE;
+        if (!ok) set_error(error, sqlite_error(db_, "session index removal failed"));
+        sqlite3_finalize(stmt);
+        if (!ok) return false;
+    }
+    return true;
+}
+
+void SessionUserMessageIndex::prune_removed_sessions() {
+    // 孤儿回收:sources 里记录的 JSONL 已从磁盘消失(purge / 手工删除),
+    // 索引里的消息全文必须跟着删,否则已删除会话的用户输入会残留在
+    // state.sqlite3 且永远不会被重建逻辑清理。
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_,
+                           "SELECT session_id, jsonl_path FROM session_user_message_sources;",
+                           -1, &stmt, nullptr) != SQLITE_OK) {
+        return;
+    }
+    std::vector<std::string> removed;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const std::string session_id = column_text(stmt, 0);
+        const std::string jsonl_path = column_text(stmt, 1);
+        if (!session_user_message_file_signature(jsonl_path).exists) {
+            removed.push_back(session_id);
+        }
+    }
+    sqlite3_finalize(stmt);
+    for (const auto& session_id : removed) {
+        std::string ignored;
+        remove_session(session_id, &ignored);
+    }
+}
+
 bool SessionUserMessageIndex::ensure_project_indexed(std::string* error) {
     if (!initialize(error)) return false;
     for (const auto& meta : SessionStorage::list_sessions(project_dir_)) {
         auto candidates = SessionStorage::find_session_files(project_dir_, meta.id);
         if (candidates.empty()) continue;
-        if (!ensure_session_indexed(meta.id, candidates.front().jsonl_path, error)) {
-            return false;
+        std::string session_error;
+        if (!ensure_session_indexed(meta.id, candidates.front().jsonl_path,
+                                    &session_error)) {
+            // 单个 session 的失败(文件被锁/损坏)不挡其它 session 的搜索。
+            LOG_WARN("[session-search] index refresh skipped session " + meta.id +
+                     ": " + session_error);
         }
     }
+    prune_removed_sessions();
     return true;
 }
 

@@ -114,6 +114,22 @@ run('mergeSessionContentMatches 合并已有 session 并追加内容-only sessio
   assert.equal(merged[1].id, 'b');
 });
 
+// 回归:no_workspace 会话在列表数据里带 mergeAllWorkspaceSessions 注入的
+// cwd/workspace_hash,而后端搜索结果里这两个字段被置空 —— 修复前 merge key
+// 掺 cwd 导致同一会话算出两个 key,面板里重复出现两行。
+run('mergeSessionContentMatches 对 no_workspace 会话按 id 合并,不因 cwd 差异重复', () => {
+  const sessions = [
+    { id: 'nw1', no_workspace: true, workspace_hash: 'w1', cwd: 'C:/proj', title: 'NW' },
+  ];
+  const matches = [
+    { id: 'nw1', no_workspace: true, workspace_hash: '', cwd: '', search_match: { kind: 'user_message', snippet: 'hit' } },
+  ];
+  const merged = mergeSessionContentMatches(sessions, matches);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].id, 'nw1');
+  assert.equal(merged[0].search_match.snippet, 'hit');
+});
+
 run('shouldSearchUserMessages 只允许非空 query 触发内容搜索', () => {
   assert.equal(shouldSearchUserMessages(''), false);
   assert.equal(shouldSearchUserMessages('   '), false);

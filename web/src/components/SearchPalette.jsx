@@ -127,9 +127,10 @@ export function SearchPalette({ open, onClose, currentWorkspaceHash = '', onSele
   }, [data, query, contentSearch]);
 
   // query / items 变化时把 selectedIndex 钉到 0(避免滑出范围)。
+  // contentSearch 到达会重排列表,与 data 刷新同样处理。
   useEffect(() => {
     setSelectedIndex(0);
-  }, [query, data]);
+  }, [query, data, contentSearch]);
 
   // 选中项滚动到可视区。
   useEffect(() => {
