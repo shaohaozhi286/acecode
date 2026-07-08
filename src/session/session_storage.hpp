@@ -7,6 +7,19 @@
 
 namespace acecode {
 
+// Worktree 会话状态(enter_worktree 工具 / --worktree 启动写入)。
+// worktree_path 非空 = 该会话当前工作在 linked worktree 里;resume 时恢复
+// (worktree 目录已被外部删除则清空)。老 meta 没有该字段时读出为全空。
+struct WorktreeSessionInfo {
+    std::string original_cwd;          // 进 worktree 前的会话 cwd
+    std::string worktree_path;         // <主仓根>/.acecode/worktrees/<slug>
+    std::string worktree_name;         // slug(用户名或随机生成)
+    std::string worktree_branch;       // worktree-<slug>
+    std::string original_head_commit;  // 创建基线 SHA;exit 时变更计数的比较基点
+
+    bool active() const { return !worktree_path.empty(); }
+};
+
 struct SessionMeta {
     std::string id;
     std::string cwd;
@@ -48,6 +61,9 @@ struct SessionMeta {
     // has a cwd for tool execution/storage, but UI should not bind it to a
     // workspace.
     bool no_workspace = false;
+
+    // 会话当前的 worktree 状态。inactive(worktree_path 为空)时序列化省略。
+    WorktreeSessionInfo worktree;
 };
 
 class SessionStorage {

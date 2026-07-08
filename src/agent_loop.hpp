@@ -181,6 +181,12 @@ public:
 
     const std::string& cwd() const { return cwd_; }
 
+    // 切换会话工作目录(enter_worktree / exit_worktree / worktree resume 恢复)。
+    // 更新 cwd_ 并以新根重建 PathValidator;会话存储位置(SessionManager 的
+    // project dir)不动 —— worktree 是同一个项目会话的临时工作区,不是新项目。
+    // 只应在工具执行线程(turn 内)或会话未运行时调用。
+    void set_cwd(const std::string& new_cwd);
+
     void set_context_window(int cw) { context_window_ = cw; }
     void set_no_model_config_prompt(std::string prompt) {
         no_model_config_prompt_ = std::move(prompt);

@@ -355,6 +355,11 @@ AgentLoop::~AgentLoop() {
     shutdown();
 }
 
+void AgentLoop::set_cwd(const std::string& new_cwd) {
+    cwd_ = new_cwd;
+    path_validator_ = PathValidator(new_cwd, permissions_.is_dangerous());
+}
+
 void AgentLoop::dispatch_message(const std::string& role,
                                   const std::string& content,
                                   bool is_tool,
@@ -1801,6 +1806,9 @@ ToolContext AgentLoop::build_tool_context(
             session_manager_->set_pre_plan_permission_mode(std::string{});
         }
         return restored_name;
+    };
+    tool_ctx.switch_session_cwd = [this](const std::string& new_cwd) {
+        set_cwd(new_cwd);
     };
     if (session_manager_) {
         tool_ctx.track_file_write_before = [this](const std::string& path) {

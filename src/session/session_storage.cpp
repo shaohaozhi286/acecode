@@ -231,6 +231,16 @@ void SessionStorage::write_meta(const std::string& meta_path, const SessionMeta&
     if (!meta.parent_session_id.empty()) {
         j["parent_session_id"] = meta.parent_session_id;
     }
+    // worktree 会话状态:inactive 时省略,保持老 meta 文件 byte-byte 不变。
+    if (meta.worktree.active()) {
+        j["worktree_session"] = {
+            {"original_cwd", meta.worktree.original_cwd},
+            {"worktree_path", meta.worktree.worktree_path},
+            {"worktree_name", meta.worktree.worktree_name},
+            {"worktree_branch", meta.worktree.worktree_branch},
+            {"original_head_commit", meta.worktree.original_head_commit},
+        };
+    }
     if (meta.archived) {
         j["archived"] = true;
     }
@@ -282,6 +292,15 @@ SessionMeta SessionStorage::read_meta(const std::string& meta_path) {
         meta.forked_from     = j.value("forked_from",     std::string{});
         meta.fork_message_id = j.value("fork_message_id", std::string{});
         meta.parent_session_id = j.value("parent_session_id", std::string{});
+        if (j.contains("worktree_session") && j["worktree_session"].is_object()) {
+            const auto& wt = j["worktree_session"];
+            meta.worktree.original_cwd  = wt.value("original_cwd",  std::string{});
+            meta.worktree.worktree_path = wt.value("worktree_path", std::string{});
+            meta.worktree.worktree_name = wt.value("worktree_name", std::string{});
+            meta.worktree.worktree_branch = wt.value("worktree_branch", std::string{});
+            meta.worktree.original_head_commit =
+                wt.value("original_head_commit", std::string{});
+        }
         meta.archived        = j.value("archived",        false);
         meta.no_workspace    = j.value("no_workspace",    false);
     } catch (...) {

@@ -17,6 +17,7 @@
 #include "vision_subagent_tool.hpp"
 #include "web_search/runtime.hpp"
 #include "web_search/web_search_tool.hpp"
+#include "worktree_tool.hpp"
 
 namespace acecode {
 
@@ -34,6 +35,8 @@ inline void register_session_builtin_tools(ToolExecutor& tools, const AppConfig&
     tools.register_tool(create_update_goal_tool());
     tools.register_tool(create_enter_plan_mode_tool());
     tools.register_tool(create_exit_plan_mode_tool());
+    tools.register_tool(create_enter_worktree_tool(config.worktree));
+    tools.register_tool(create_exit_worktree_tool());
     tools.register_tool(create_vision_analyze_tool(config));
     if (config.web_search.enabled) {
         tools.register_tool(web_search::create_web_search_tool(

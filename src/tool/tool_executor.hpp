@@ -127,6 +127,12 @@ struct ToolContext {
     std::function<std::string()> enter_plan_mode;
     std::function<std::string()> exit_plan_mode;
 
+    // Worktree 工具回调(AgentLoop 注入):把会话工作目录切到 new_cwd,
+    // 并以新根重建路径校验器。enter_worktree / exit_worktree 用它在
+    // worktree 与原目录之间切换;空函数 = 当前 runtime 不支持切换
+    // (独立 ToolExecutor 调用),工具会拒绝执行。
+    std::function<void(const std::string& new_cwd)> switch_session_cwd;
+
     // Runtime access to the active executor. Tools that intentionally change
     // the available tool set can use this to register additional tools for the
     // next model request.
