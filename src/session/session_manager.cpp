@@ -1,6 +1,7 @@
 #include "session_manager.hpp"
 #include "session_serializer.hpp"
 #include "session_rewind.hpp"
+#include "session_user_message_search.hpp"
 #include "tool_result_storage.hpp"
 #include "turn_timing.hpp"
 #include "session_usage_ledger.hpp"
@@ -94,6 +95,14 @@ bool is_visible_user_turn_message(const acecode::ChatMessage& msg) {
     return msg.role == "user" &&
            !msg.is_meta &&
            !is_hidden_goal_context_message(msg);
+}
+
+void log_user_message_index_error(const std::string& action,
+                                  const std::string& session_id,
+                                  const std::string& error) {
+    if (error.empty()) return;
+    LOG_WARN("[session-search] " + action +
+             " failed for session " + session_id + ": " + error);
 }
 
 bool is_generated_error_title(const std::string& title) {
@@ -286,11 +295,28 @@ void SessionManager::on_message(const ChatMessage& msg) {
 
     if (!ensure_created()) return;
 
+    const int message_ordinal = message_count_;
+    const auto before_index_signature =
+        session_user_message_file_signature(jsonl_path_);
+
     // Append message to JSONL
     SessionStorage::append_message(jsonl_path_, msg);
     message_count_++;
     if (is_visible_user_turn_message(msg)) {
         turn_count_++;
+    }
+
+    {
+        std::string index_error;
+        SessionUserMessageIndex index(project_dir_);
+        if (!index.index_appended_message(session_id_,
+                                          message_ordinal,
+                                          msg,
+                                          jsonl_path_,
+                                          before_index_signature,
+                                          &index_error)) {
+            log_user_message_index_error("append index", session_id_, index_error);
+        }
     }
 
     // Track last user message for summary
@@ -354,6 +380,13 @@ bool SessionManager::replace_active_messages(const std::vector<ChatMessage>& mes
     SessionStorage::write_messages(jsonl_path_, rewritten);
     checkpoint_store_.load_from_messages(project_dir_, session_id_, rewritten);
     message_count_ = static_cast<int>(rewritten.size());
+    {
+        std::string index_error;
+        SessionUserMessageIndex index(project_dir_);
+        if (!index.rebuild_session(session_id_, jsonl_path_, rewritten, &index_error)) {
+            log_user_message_index_error("rebuild after replace", session_id_, index_error);
+        }
+    }
     update_meta();
     return true;
 }
@@ -645,6 +678,13 @@ std::string SessionManager::fork_active_session(const std::vector<ChatMessage>& 
         SessionStorage::append_message(jsonl_path_, msg);
         message_count_++;
     }
+    {
+        std::string index_error;
+        SessionUserMessageIndex index(project_dir_);
+        if (!index.rebuild_session(session_id_, jsonl_path_, &index_error)) {
+            log_user_message_index_error("rebuild after fork", session_id_, index_error);
+        }
+    }
     update_meta();
     if (goal_store_ && !previous_session_id.empty()) {
         std::string goal_error;
@@ -750,6 +790,13 @@ std::string SessionManager::fork_session_to_new_id(
     meta.fork_message_id = fork_message_id;
     meta.no_workspace    = no_workspace_;
     SessionStorage::write_meta(new_meta, meta);
+    {
+        std::string index_error;
+        SessionUserMessageIndex index(project_dir_);
+        if (!index.rebuild_session(new_session_id, new_jsonl, &index_error)) {
+            log_user_message_index_error("rebuild after session fork", new_session_id, index_error);
+        }
+    }
     if (goal_store_ && !forked_from_id.empty()) {
         std::string goal_error;
         if (!goal_store_->copy_goal_reset_usage(forked_from_id, new_session_id, &goal_error)) {

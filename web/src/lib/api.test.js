@@ -134,6 +134,32 @@ await run('getUsageStats uses usage endpoint query params and auth token', async
   }
 });
 
+await run('searchSessionUserMessages uses bounded content search endpoint', async () => {
+  const previousFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    calls.push({ url, opts });
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ matches: [{ id: 's1' }] }),
+    };
+  };
+  try {
+    const client = createApi({ origin: 'http://127.0.0.1:4567', token: 'tok' });
+    const result = await client.searchSessionUserMessages('sqlite 索引', 200);
+
+    assert.deepEqual(result, { matches: [{ id: 's1' }] });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, 'http://127.0.0.1:4567/api/session-search/user-messages?q=sqlite+%E7%B4%A2%E5%BC%95&limit=100');
+    assert.equal(calls[0].opts.method, 'GET');
+    assert.equal(calls[0].opts.headers['X-ACECode-Token'], 'tok');
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
 await run('executeCommand posts to builtin command endpoint', async () => {
   const previousFetch = globalThis.fetch;
   const calls = [];

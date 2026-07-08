@@ -70,6 +70,14 @@ function desktopFeedbackSessionsPath(limit = 20) {
   return `/api/feedback/desktop/recent-sessions?limit=${encodeURIComponent(String(n))}`;
 }
 
+function sessionUserMessageSearchPath(query = '', limit = 50) {
+  const qs = new URLSearchParams();
+  qs.set('q', String(query || ''));
+  const n = Number.isFinite(Number(limit)) ? Math.max(1, Math.min(100, Number(limit))) : 50;
+  qs.set('limit', String(n));
+  return `/api/session-search/user-messages?${qs.toString()}`;
+}
+
 export function sessionDraftPath(id, workspaceHash = '') {
   const sid = encodeURIComponent(id);
   const hash = String(workspaceHash || '').trim();
@@ -270,6 +278,8 @@ export function createApi(base = null) {
       listSessions: (hash) => request('GET',
         `/api/workspaces/${encodeURIComponent(hash)}/sessions?archived=1`, undefined, base),
     }),
+    searchSessionUserMessages: (query, limit = 50) =>
+      request('GET', sessionUserMessageSearchPath(query, limit), undefined, base),
 
     // SidePanel "文件" tab — 列指定目录的直接子项(不递归)。
     // path='' 列 cwd 根本身。showHidden=true 透出 dot 文件,但 noise 黑名单
