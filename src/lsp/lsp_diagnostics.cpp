@@ -66,19 +66,20 @@ std::string report_block(const std::string& display_path,
 
 void append_diagnostics_block(std::string& output,
                               const std::string& utf8_path,
-                              const std::atomic<bool>* abort_flag) {
+                              const std::atomic<bool>* abort_flag,
+                              const std::string& session_cwd) {
     if (!is_initialized()) return;
     auto& svc = service();
     if (!svc.enabled()) return;
     // 廉价前置:无匹配 server(含未安装/broken)时零延迟返回。
-    if (!svc.has_server_for(utf8_path)) return;
+    if (!svc.has_server_for(utf8_path, session_cwd)) return;
 
     AbortProbe should_abort;
     if (abort_flag) {
         should_abort = [abort_flag] { return abort_flag->load(); };
     }
-    const auto diagnostics =
-        svc.collect_diagnostics_after_write(utf8_path, kEditWaitTimeout, should_abort);
+    const auto diagnostics = svc.collect_diagnostics_after_write(
+        utf8_path, kEditWaitTimeout, should_abort, session_cwd);
     const std::string block = report_block(utf8_path, diagnostics);
     if (block.empty()) return;
     output += "\n\nLSP errors detected in this file, please fix:\n" + block;

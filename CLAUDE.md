@@ -311,6 +311,8 @@ Both `main.cpp` and `daemon/worker.cpp` call `proxy_resolver().init(cfg.network)
 
 结构:`lsp_frame`(分帧纯状态机)→ `lsp_process`(spawn;**Windows 上 argv[0] 为 .cmd/.bat 时自动经 `cmd.exe /d /c`**,npm shim 必需;探测走 `lsp_which` 的 PATHEXT 逻辑)→ `lsp_client`(reader 线程 + pending map;push/pull 双通道诊断缓存,key 经 `lsp_uri::normalize_path_key` 归一 —— **clangd 会把盘符改小写回推,不归一就永远等不到诊断**)→ `lsp_server_registry`(内置 clangd/typescript-language-server/pyright/gopls/rust-analyzer 定义 + config 合并;root markers 对照 opencode server.ts;ts 需向上找到 `node_modules/typescript/lib/tsserver.js` 否则跳过;rust-analyzer 无 Cargo.toml 判不适用)→ `lsp_service`((server_id,root) 客户端池、per-key slot 锁单飞、broken 集合本进程内不重试)→ 进程级单例 `lsp::init/shutdown/service()`(web_search runtime 同套路;main.cpp 与 worker.cpp 各接一次,退出路径在 mcp shutdown 之后调 `lsp::shutdown()`)。
 
+**workspace 边界两条铁律**(2026-07-08 线上排障后立的,回归测试在 `tests/lsp/lsp_service_test.cpp`):(1) 所有查询/诊断入口按**调用传入的 session_cwd**(`ToolContext::cwd`)判 workspace 边界,空串才回退进程 init cwd —— daemon 单进程经 routes_workspaces 服务多 workspace 会话后,进程 cwd ≠ 会话 cwd,只认进程 cwd 会让其它 workspace 的文件恒报 "No LSP server available"、server 永不 spawn;(2) 边界比较/root 探测/slot key/URI 全部先 `weakly_canonical` 归一 —— 用户目录是 junction 时(实测 `C:\Users\x` → `N:\Users\x`),lsp 工具入口 canonical 过、诊断注入路径没 canonical 过,两形态前缀互不匹配,表现为「编辑后诊断能连上 server,查询却报无 server」。
+
 原则:**只探测已安装的 server(PATH / 项目内),绝不自动下载,server 不进安装包**;探测不到静默跳过零开销。集成测试用 `tests/lsp/helpers/fake_lsp_server.cpp`(BUILD_TESTING 编译,同 mcp_stdio_test_server 思路),不依赖 node / 真实 clangd。
 
 `config.lsp`:`enabled`(默认 true)+ `servers`(按名合并:内置名可 `{"disabled":true}` 或覆盖 command/extensions/env/initialization;新名 = 自定义 server,command 必填,root 恒为 workspace cwd)。

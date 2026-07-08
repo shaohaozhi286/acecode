@@ -104,7 +104,8 @@ ToolResult execute_lsp(const std::string& arguments_json, const ToolContext& ctx
     if (!fs::is_regular_file(path_from_utf8(file), ec) || ec) {
         return ToolResult{"File not found: " + file, false};
     }
-    if (!svc.has_server_for(file)) {
+    // workspace 边界用会话 cwd(daemon 多 workspace 下进程 cwd ≠ 会话 cwd)。
+    if (!svc.has_server_for(file, base)) {
         return ToolResult{"No LSP server available for this file type.", false};
     }
 
@@ -128,37 +129,37 @@ ToolResult execute_lsp(const std::string& arguments_json, const ToolContext& ctx
     std::vector<nlohmann::json> results;
     if (args.operation == "goToDefinition") {
         results = svc.request_for_file(file, "textDocument/definition", loc_params,
-                                       kRequestTimeout, should_abort);
+                                       kRequestTimeout, should_abort, base);
     } else if (args.operation == "findReferences") {
         nlohmann::json params = loc_params;
         params["context"] = {{"includeDeclaration", true}};
         results = svc.request_for_file(file, "textDocument/references", params,
-                                       kRequestTimeout, should_abort);
+                                       kRequestTimeout, should_abort, base);
     } else if (args.operation == "hover") {
         results = svc.request_for_file(file, "textDocument/hover", loc_params,
-                                       kRequestTimeout, should_abort);
+                                       kRequestTimeout, should_abort, base);
     } else if (args.operation == "documentSymbol") {
         results = svc.request_for_file(file, "textDocument/documentSymbol",
                                        {{"textDocument", text_document}},
-                                       kRequestTimeout, should_abort);
+                                       kRequestTimeout, should_abort, base);
     } else if (args.operation == "workspaceSymbol") {
         results = svc.request_for_file(file, "workspace/symbol",
                                        {{"query", args.query}},
-                                       kRequestTimeout, should_abort);
+                                       kRequestTimeout, should_abort, base);
     } else if (args.operation == "goToImplementation") {
         results = svc.request_for_file(file, "textDocument/implementation", loc_params,
-                                       kRequestTimeout, should_abort);
+                                       kRequestTimeout, should_abort, base);
     } else if (args.operation == "prepareCallHierarchy") {
         results = svc.request_for_file(file, "textDocument/prepareCallHierarchy",
-                                       loc_params, kRequestTimeout, should_abort);
+                                       loc_params, kRequestTimeout, should_abort, base);
     } else if (args.operation == "incomingCalls") {
         results = svc.call_hierarchy_for_file(file, loc_params,
                                               "callHierarchy/incomingCalls",
-                                              kRequestTimeout, should_abort);
+                                              kRequestTimeout, should_abort, base);
     } else if (args.operation == "outgoingCalls") {
         results = svc.call_hierarchy_for_file(file, loc_params,
                                               "callHierarchy/outgoingCalls",
-                                              kRequestTimeout, should_abort);
+                                              kRequestTimeout, should_abort, base);
     }
 
     nlohmann::json combined = flatten_results(results);

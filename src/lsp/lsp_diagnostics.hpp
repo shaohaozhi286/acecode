@@ -28,8 +28,11 @@ std::string report_block(const std::string& display_path,
 // file_edit / file_write 成功落盘后调用:LSP 未初始化 / 禁用 / 无匹配
 // server 时立即返回(零延迟);否则 touch + 等 document 诊断(默认 5s,
 // abort 以 ≤50ms 粒度生效),有 ERROR 则把提示块追加到 output 尾部。
+// session_cwd = 会话工作目录(ToolContext::cwd),作为 workspace 边界;
+// 空串回退 LSP init 时的进程 cwd(daemon 多 workspace 下两者不一定相同)。
 void append_diagnostics_block(std::string& output,
                               const std::string& utf8_path,
-                              const std::atomic<bool>* abort_flag);
+                              const std::atomic<bool>* abort_flag,
+                              const std::string& session_cwd);
 
 } // namespace acecode::lsp

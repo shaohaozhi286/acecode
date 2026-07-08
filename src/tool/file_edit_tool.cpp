@@ -348,7 +348,7 @@ static ToolResult run_validated_write(
     r.hunks = std::move(structured);
     // LSP 编辑后诊断:未启用/无匹配 server 时零开销;有 ERROR 时把
     // <diagnostics> 块附加到输出,模型当场看到并修复(openspec add-lsp-service)。
-    lsp::append_diagnostics_block(r.output, file_path, ctx.abort_flag);
+    lsp::append_diagnostics_block(r.output, file_path, ctx.abort_flag, ctx.cwd);
     return r;
 }
 

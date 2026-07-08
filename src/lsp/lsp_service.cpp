@@ -42,7 +42,21 @@ std::string absolutize(const std::string& utf8_path, const std::string& workspac
     return path_to_utf8(path_from_utf8(workspace) / p);
 }
 
+// junction/symlink 归一:C:\Users\x 是 N:\Users\x 的 junction 时,调用方
+// 可能任意一种形态传入(lsp 工具 weakly_canonical 过、文件工具没过),
+// 不归一则 within_workspace 前缀比较假性失败、slot key 分裂。失败时原样返回。
+std::string canonicalize_path(const std::string& utf8_path) {
+    if (utf8_path.empty()) return utf8_path;
+    std::error_code ec;
+    const fs::path canon = fs::weakly_canonical(path_from_utf8(utf8_path), ec);
+    if (ec || canon.empty()) return utf8_path;
+    return path_to_utf8(canon);
+}
+
 std::string display_root(const std::string& root, const std::string& workspace) {
+    // 跨 workspace 的 root(多 workspace 会话)不做相对化,直接显示绝对路径,
+    // 避免出现一长串 "../.." 的展示噪声。
+    if (!within_workspace(root, workspace)) return root;
     std::error_code ec;
     const fs::path rel = fs::relative(path_from_utf8(root), path_from_utf8(workspace), ec);
     if (ec || rel.empty()) return root;
@@ -53,7 +67,7 @@ std::string display_root(const std::string& root, const std::string& workspace) 
 } // namespace
 
 LspService::LspService(const LspConfig& cfg, std::string workspace_cwd)
-    : enabled_(cfg.enabled), workspace_cwd_(std::move(workspace_cwd)) {
+    : enabled_(cfg.enabled), workspace_cwd_(canonicalize_path(workspace_cwd)) {
     if (enabled_) {
         defs_ = merge_server_defs(cfg);
     }
@@ -76,16 +90,24 @@ std::shared_ptr<LspService::Slot> LspService::slot_for(const std::string& key,
     return slot;
 }
 
-std::vector<std::shared_ptr<LspClient>> LspService::clients_for(const std::string& utf8_path) {
+LspService::ResolvedPath LspService::resolve_path(const std::string& utf8_path,
+                                                  const std::string& session_cwd) const {
+    ResolvedPath rp;
+    rp.workspace = session_cwd.empty() ? workspace_cwd_ : canonicalize_path(session_cwd);
+    rp.abs = canonicalize_path(absolutize(utf8_path, rp.workspace));
+    return rp;
+}
+
+std::vector<std::shared_ptr<LspClient>> LspService::clients_for(const ResolvedPath& rp) {
     std::vector<std::shared_ptr<LspClient>> out;
     if (!enabled_ || shutting_down_.load()) return out;
 
-    const std::string abs = absolutize(utf8_path, workspace_cwd_);
-    if (!within_workspace(abs, workspace_cwd_)) return out;
+    const std::string& abs = rp.abs;
+    if (!within_workspace(abs, rp.workspace)) return out;
 
     for (const auto& def : defs_) {
         if (!extensions_match(def, abs)) continue;
-        auto root = detect_root(def, abs, workspace_cwd_, real_file_exists);
+        auto root = detect_root(def, abs, rp.workspace, real_file_exists);
         if (!root.has_value()) continue;
 
         const std::string key = def.id + "\n" + normalize_path_key(*root);
@@ -108,7 +130,7 @@ std::vector<std::shared_ptr<LspClient>> LspService::clients_for(const std::strin
         }
         if (shutting_down_.load()) continue;
 
-        auto resolved = resolve_spawn(def, *root, workspace_cwd_);
+        auto resolved = resolve_spawn(def, *root, rp.workspace);
         if (!resolved.has_value()) {
             slot->broken = true; // 可执行探测失败,本进程内不再尝试
             continue;
@@ -133,14 +155,16 @@ std::vector<std::shared_ptr<LspClient>> LspService::clients_for(const std::strin
     return out;
 }
 
-bool LspService::has_server_for(const std::string& utf8_path) {
+bool LspService::has_server_for(const std::string& utf8_path,
+                                const std::string& session_cwd) {
     if (!enabled_) return false;
-    const std::string abs = absolutize(utf8_path, workspace_cwd_);
-    if (!within_workspace(abs, workspace_cwd_)) return false;
+    const ResolvedPath rp = resolve_path(utf8_path, session_cwd);
+    const std::string& abs = rp.abs;
+    if (!within_workspace(abs, rp.workspace)) return false;
 
     for (const auto& def : defs_) {
         if (!extensions_match(def, abs)) continue;
-        auto root = detect_root(def, abs, workspace_cwd_, real_file_exists);
+        auto root = detect_root(def, abs, rp.workspace, real_file_exists);
         if (!root.has_value()) continue;
         const std::string key = def.id + "\n" + normalize_path_key(*root);
         {
@@ -163,12 +187,14 @@ bool LspService::has_server_for(const std::string& utf8_path) {
 std::vector<nlohmann::json> LspService::collect_diagnostics_after_write(
     const std::string& utf8_path,
     std::chrono::milliseconds wait_timeout,
-    const AbortProbe& should_abort) {
+    const AbortProbe& should_abort,
+    const std::string& session_cwd) {
     std::vector<nlohmann::json> merged;
     if (!enabled_) return merged;
 
-    const std::string abs = absolutize(utf8_path, workspace_cwd_);
-    auto clients = clients_for(abs);
+    const ResolvedPath rp = resolve_path(utf8_path, session_cwd);
+    const std::string& abs = rp.abs;
+    auto clients = clients_for(rp);
     if (clients.empty()) return merged;
 
     // 所有 client 共享一个总 deadline:多 server 命中同一文件时编辑
@@ -194,12 +220,14 @@ std::vector<nlohmann::json> LspService::request_for_file(const std::string& utf8
                                                          const std::string& method,
                                                          const nlohmann::json& params,
                                                          std::chrono::milliseconds timeout,
-                                                         const AbortProbe& should_abort) {
+                                                         const AbortProbe& should_abort,
+                                                         const std::string& session_cwd) {
     std::vector<nlohmann::json> out;
     if (!enabled_) return out;
 
-    const std::string abs = absolutize(utf8_path, workspace_cwd_);
-    auto clients = clients_for(abs);
+    const ResolvedPath rp = resolve_path(utf8_path, session_cwd);
+    const std::string& abs = rp.abs;
+    auto clients = clients_for(rp);
     for (const auto& client : clients) {
         if (should_abort && should_abort()) break;
         // 查询前确保 server 已加载该文件;短等诊断给 server 索引留时间。
@@ -221,12 +249,14 @@ std::vector<nlohmann::json> LspService::call_hierarchy_for_file(
     const nlohmann::json& prepare_params,
     const std::string& direction_method,
     std::chrono::milliseconds timeout,
-    const AbortProbe& should_abort) {
+    const AbortProbe& should_abort,
+    const std::string& session_cwd) {
     std::vector<nlohmann::json> out;
     if (!enabled_) return out;
 
-    const std::string abs = absolutize(utf8_path, workspace_cwd_);
-    auto clients = clients_for(abs);
+    const ResolvedPath rp = resolve_path(utf8_path, session_cwd);
+    const std::string& abs = rp.abs;
+    auto clients = clients_for(rp);
     for (const auto& client : clients) {
         if (should_abort && should_abort()) break;
         auto version = client->touch_file(abs);

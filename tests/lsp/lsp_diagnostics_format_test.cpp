@@ -85,7 +85,7 @@ TEST(LspDiagnosticsFormat, ReportTruncatesAtTwenty) {
 TEST(LspDiagnosticsFormat, AppendIsNoopWithoutRuntime) {
     lsp::set_service_for_test(nullptr); // 确保单例为空
     std::string output = "Edited a.cpp";
-    lsp::append_diagnostics_block(output, "a.cpp", nullptr);
+    lsp::append_diagnostics_block(output, "a.cpp", nullptr, "");
     EXPECT_EQ(output, "Edited a.cpp");
 }
 
@@ -95,7 +95,7 @@ TEST(LspDiagnosticsFormat, AppendIsNoopWhenDisabled) {
     cfg.enabled = false;
     lsp::set_service_for_test(std::make_unique<lsp::LspService>(cfg, "."));
     std::string output = "Edited a.cpp";
-    lsp::append_diagnostics_block(output, "a.cpp", nullptr);
+    lsp::append_diagnostics_block(output, "a.cpp", nullptr, "");
     EXPECT_EQ(output, "Edited a.cpp");
     lsp::set_service_for_test(nullptr);
 }

@@ -102,7 +102,7 @@ static ToolResult execute_file_write(const std::string& arguments_json, const To
         r.summary = std::move(summary);
         r.hunks = std::move(structured);
         // LSP 编辑后诊断(openspec add-lsp-service);无匹配 server 零开销。
-        lsp::append_diagnostics_block(r.output, file_path, ctx.abort_flag);
+        lsp::append_diagnostics_block(r.output, file_path, ctx.abort_flag, ctx.cwd);
         return r;
     }
 
@@ -122,7 +122,7 @@ static ToolResult execute_file_write(const std::string& arguments_json, const To
     r.summary = std::move(summary);
     r.hunks = std::move(structured);
     // LSP 编辑后诊断(openspec add-lsp-service);无匹配 server 零开销。
-    lsp::append_diagnostics_block(r.output, file_path, ctx.abort_flag);
+    lsp::append_diagnostics_block(r.output, file_path, ctx.abort_flag, ctx.cwd);
     return r;
 }
 
