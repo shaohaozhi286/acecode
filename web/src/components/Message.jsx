@@ -7,7 +7,7 @@
 
 import { memo, useCallback, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { renderMarkdown } from '../lib/markdown.js';
+import { renderMarkdownBlocks } from '../lib/markdown.js';
 import { codeTextFromCopyButtonTarget, copyTextToClipboard } from '../lib/codeBlockCopy.js';
 import { clsx, relativeTime } from '../lib/format.js';
 import { buildCompactMessagePreview } from '../lib/compactMessagePreview.js';
@@ -159,7 +159,11 @@ function AssistantBubble({
   showFooter,
   showAceCodeAvatar,
 }) {
-  const html = { __html: renderMarkdown(content || '') };
+  // 按块渲染(而非全文一次 dangerouslySetInnerHTML):流式追加时只有尾部
+  // 块的 HTML 字符串变化,前缀块被 React 的字符串比较跳过,DOM 保持不动。
+  // 整树替换会销毁浏览器滚动锚点并造成高度瞬时振荡 —— 那是 desktop
+  // (WebView2)上流式出字时消息区上下跳动的主要来源。
+  const blocks = useMemo(() => renderMarkdownBlocks(content || ''), [content]);
   const chrome = assistantChromeState({ showAceCodeAvatar, continuation });
   const handleMarkdownClick = useCallback(async (event) => {
     const text = codeTextFromCopyButtonTarget(event.target);
@@ -192,8 +196,15 @@ function AssistantBubble({
         <div
           className="ace-md text-[13px] text-fg leading-[1.6] py-0.5"
           onClick={handleMarkdownClick}
-          dangerouslySetInnerHTML={html}
-        />
+        >
+          {blocks.map((block) => (
+            <div
+              key={block.key}
+              className="ace-md-block"
+              dangerouslySetInnerHTML={{ __html: block.html }}
+            />
+          ))}
+        </div>
         <AttachmentStrip contentParts={contentParts} align="left" />
         {showFooter && (
           <div className="min-h-6 flex items-center gap-1">

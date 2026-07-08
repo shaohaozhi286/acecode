@@ -193,6 +193,8 @@ web/
 
 `lib/markdown.js` 收紧 URL scheme 白名单(只放 `http(s)` / `mailto:` / `/` / `./` / `../` / `#`),关闭 raw HTML(`html: false`),外链自动 `target=_blank rel=noreferrer`。`renderMarkdown(src) -> string` 签名稳定。
 
+**流式渲染防跳动**(fix desktop 流式出字时消息区上下跳动,参考 assistant-ui 的 block memoization):assistant 正文走 `renderMarkdownBlocks(src) -> [{key, html}]`(同文件)—— 全文 parse 一次、按 top-level token 组分别 render(共享 env,reference link 跨块有效,块 HTML 拼接与全文渲染逐字节一致,有单测不变量守护),Message.jsx 按块包 `.ace-md-block`(`display:contents`,不影响 margin 折叠/后代选择器)`dangerouslySetInnerHTML`;流式 append 时前缀块 HTML 字符串不变 → React 跳过 DOM 更新,滚动锚点不被整树替换销毁。配套:`.ace-chat-transcript-scroll` 设 `overflow-anchor:none`(浏览器原生 scroll anchoring 会跟 ChatView 的滚到底逻辑打架);`chatScrollFollow.js::isUserScrollAway` 只把「scrollHeight 稳定 + scrollTop 减小」或 userGesture(滚轮上滚 / 指针按住拖动,ChatView 挂 onWheel/onPointerDown)判为用户上滚,内容高度回落引起的 scrollTop clamp 位移不再误切 REVIEWING;highlight 结果按 `lang+源码` 缓存(128 条,满清空),已定稿代码块不重复高亮。
+
 `lib/usePreference.js` 是 UI 偏好读写的统一入口(`usePreference(key, defaults, validator?)` 返回 `[value, setValue]`,setter 接受 partial 浅合并 / 函数式更新,localStorage 写失败静默吞)。当前订阅:`ace.theme`(由 `theme.jsx::ThemeProvider`)、`acecode.singleLayoutWidths.v1`(由 `App.jsx`,`{sidebar, sidePanel}` 像素宽)、`acecode.uiPrefs.v1`(由 `App.jsx`,`{view: 'single'|'grid4'|'grid9', sidePanelCollapsed: boolean}` — view 模式与 SidePanel 折叠态跨刷新持久化)。同一 key 在整个 App 内只允许一个 hook 实例订阅,避免多 useState 之间互覆盖。
 
 SidePanel 折叠 UI:`ChatView` 把 `SidePanel` 包到 `<div class="ace-side-panel-shell" style={{width: collapsed ? 0 : sidePanelWidth}} data-collapsed={...}>`,折叠态宽度归 0 + opacity 过渡 200ms,SidePanel 仍 mount(tab/cache/preview 内部 state 保留)。SidePanel tab 行右端有 `.ace-side-panel-collapse-btn`(展开态),折叠态时 ChatView 顶部 header 内显示 `.ace-side-panel-expand-fab` 让用户重新展开。

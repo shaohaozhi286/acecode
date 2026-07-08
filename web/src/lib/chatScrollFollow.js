@@ -32,6 +32,23 @@ export function isChatNearTail(metrics = {}, thresholdPx = CHAT_TAIL_FOLLOW_THRE
   return chatTailDistance(metrics) <= threshold;
 }
 
+// 离开尾部的 scroll 事件里,只有"真实的用户上滚"才应该暂停跟随。流式渲染
+// 替换 DOM 时,内容高度瞬时回落会让浏览器 clamp/调整 scrollTop 并触发
+// scroll 事件 —— 把它误判成用户滚动会让跟随模式反复开关,消息区上下跳动。
+// 判据(参考 assistant-ui useThreadViewportAutoScroll):
+//   - userGesture(滚轮 / 按住拖动期间)→ 无条件视为用户意图;
+//   - 内容高度与上一次 scroll 事件相同且 scrollTop 减小 → 用户上滚;
+//   - 其余(高度变化伴随的位移、程序滚动)→ 保持现态。
+export function isUserScrollAway(action = {}) {
+  if (action?.userGesture) return true;
+  const prev = action?.prevMetrics;
+  if (!prev) return false;
+  const prevMetrics = chatScrollMetrics(prev);
+  const metrics = chatScrollMetrics(action?.metrics);
+  return metrics.scrollHeight === prevMetrics.scrollHeight
+    && metrics.scrollTop < prevMetrics.scrollTop;
+}
+
 export function nextChatTailFollowState(currentState = CHAT_TAIL_FOLLOW_STATE.FOLLOWING, action = {}) {
   const current = currentState === CHAT_TAIL_FOLLOW_STATE.REVIEWING
     ? CHAT_TAIL_FOLLOW_STATE.REVIEWING
@@ -42,9 +59,10 @@ export function nextChatTailFollowState(currentState = CHAT_TAIL_FOLLOW_STATE.FO
     case 'new_turn':
       return CHAT_TAIL_FOLLOW_STATE.FOLLOWING;
     case 'scroll':
-      return isChatNearTail(action.metrics, action.thresholdPx)
-        ? CHAT_TAIL_FOLLOW_STATE.FOLLOWING
-        : CHAT_TAIL_FOLLOW_STATE.REVIEWING;
+      if (isChatNearTail(action.metrics, action.thresholdPx)) {
+        return CHAT_TAIL_FOLLOW_STATE.FOLLOWING;
+      }
+      return isUserScrollAway(action) ? CHAT_TAIL_FOLLOW_STATE.REVIEWING : current;
     case 'review_pause':
       return CHAT_TAIL_FOLLOW_STATE.REVIEWING;
     default:
