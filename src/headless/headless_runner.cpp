@@ -49,6 +49,7 @@
 #  include <windows.h>
 #  include <io.h>
 #else
+#  include <poll.h>
 #  include <unistd.h>
 #endif
 
@@ -74,6 +75,38 @@ bool stdin_is_tty() {
 #endif
 }
 
+// 等待 stdin 出现首个可读字节,最多 timeout_ms。true = 有数据(或已 EOF /
+// 非管道句柄,可安全阻塞读);false = 超时,一个字节都没来。
+//
+// 为什么需要它:父进程若把 stdin 接成"打开但从不写也从不关"的继承管道
+// (CI runner、后台 spawn 的子进程都常见),`stdin 非 TTY → 阻塞读到 EOF`
+// 会让 acecode -p 无限挂死。对齐 claude -p 的做法(main.tsx
+// peekForStdinData,3s):超时后警告并放弃 stdin,只用位置参数 prompt。
+bool wait_for_stdin_first_byte(int timeout_ms) {
+#ifdef _WIN32
+    HANDLE h = ::GetStdHandle(STD_INPUT_HANDLE);
+    if (h == INVALID_HANDLE_VALUE || h == nullptr) return false;
+    // 只有匿名/命名管道才有"挂起不写"的问题;磁盘文件重定向读到 EOF 立即
+    // 返回,直接放行阻塞读。
+    if (::GetFileType(h) != FILE_TYPE_PIPE) return true;
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(timeout_ms);
+    for (;;) {
+        DWORD avail = 0;
+        if (!::PeekNamedPipe(h, nullptr, 0, nullptr, &avail, nullptr)) {
+            return true; // 管道已断(写端关闭)= EOF,读会立即返回
+        }
+        if (avail > 0) return true;
+        if (std::chrono::steady_clock::now() >= deadline) return false;
+        ::Sleep(50);
+    }
+#else
+    struct pollfd pfd{STDIN_FILENO, POLLIN, 0};
+    int rc = ::poll(&pfd, 1, timeout_ms);
+    return rc > 0; // POLLIN 或 POLLHUP(EOF)都能立即读;0 = 超时
+#endif
+}
+
 // 管道输入:读完 stdin 全部字节(按 UTF-8 处理)。
 std::string read_all_stdin() {
     std::ostringstream oss;
@@ -90,11 +123,19 @@ std::string trim_copy(std::string s) {
 
 // prompt 组装:stdin(管道)与位置参数可同时给,拼成
 // "<stdin>\n\n<arg>" —— 支持 `git diff | acecode -p "review this diff"`
-// 的经典管道用法(与 claude -p 语义一致)。
+// 的经典管道用法(与 claude -p 语义一致)。stdin 首字节等待上限 3s,
+// 超时警告并放弃(防父进程继承的死管道把进程挂死),3s 覆盖 curl / 大文件
+// jq 这类慢生产者的启动延迟。
 std::string build_effective_prompt(const std::string& arg_prompt) {
     std::string piped;
     if (!stdin_is_tty()) {
-        piped = trim_copy(read_all_stdin());
+        if (wait_for_stdin_first_byte(3000)) {
+            piped = trim_copy(read_all_stdin());
+        } else {
+            std::cerr << "acecode -p: warning: no stdin data received in 3s, "
+                         "proceeding without it (redirect stdin explicitly with "
+                         "< /dev/null or NUL to skip this wait)\n";
+        }
     }
     std::string arg = trim_copy(arg_prompt);
     if (piped.empty()) return arg;
