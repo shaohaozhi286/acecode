@@ -164,6 +164,51 @@ TEST_F(ConfigFirstInitTest, LegacyTlsPolicyKeysAreIgnoredAndNotPersisted) {
     EXPECT_FALSE(saved["mcp_servers"]["remote"].contains("ca_cert_path"));
 }
 
+// 触发场景:一个 mcp server 配了 disabled:true,另一个没配(启用)。
+// 期望:load 把 disabled 读进 McpServerConfig;save 只对禁用的 server 写出
+// disabled 键(启用态保持稀疏,与其它布尔字段一致),重载后状态不丢。
+// 回归:设置页开关落盘依赖这条 round-trip,漏写字段会让重启后开关状态还原。
+TEST_F(ConfigFirstInitTest, McpDisabledFlagRoundTripsAndStaysSparse) {
+    fs::create_directories(temp_home / ".acecode");
+    const fs::path config_path = temp_home / ".acecode" / "config.json";
+    {
+        std::ofstream ofs(config_path);
+        ofs << R"({
+    "mcp_servers": {
+        "off_server": {
+            "command": "npx",
+            "args": ["-y", "@mcp/server-fs", "/path"],
+            "disabled": true
+        },
+        "on_server": {
+            "transport": "http",
+            "url": "https://mcp.example.com"
+        }
+    }
+})";
+    }
+
+    auto cfg = acecode::load_config();
+    ASSERT_EQ(cfg.mcp_servers.size(), 2u);
+    EXPECT_TRUE(cfg.mcp_servers["off_server"].disabled);
+    EXPECT_FALSE(cfg.mcp_servers["on_server"].disabled);
+
+    acecode::save_config(cfg, config_path.string());
+
+    std::ifstream ifs(config_path);
+    ASSERT_TRUE(ifs.is_open());
+    auto saved = nlohmann::json::parse(ifs);
+    ASSERT_TRUE(saved["mcp_servers"].is_object());
+    // 禁用 server 写出 disabled:true;启用 server 不带该键。
+    EXPECT_TRUE(saved["mcp_servers"]["off_server"].value("disabled", false));
+    EXPECT_FALSE(saved["mcp_servers"]["on_server"].contains("disabled"));
+
+    // 重新加载后状态保持一致。
+    auto reloaded = acecode::load_config();
+    EXPECT_TRUE(reloaded.mcp_servers["off_server"].disabled);
+    EXPECT_FALSE(reloaded.mcp_servers["on_server"].disabled);
+}
+
 TEST_F(ConfigFirstInitTest, ExplicitEmptySavedModelsDoesNotSynthesizeCopilot) {
     fs::create_directories(temp_home / ".acecode");
     {

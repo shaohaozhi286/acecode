@@ -4,7 +4,7 @@
 #include "session_rewind.hpp"
 #include "session_resume_restore.hpp"
 #include "session_storage.hpp"
-#include "session_title_generator.hpp"
+#include "session_auto_title.hpp"
 #include "thread_goal_store.hpp"
 #include "tool_result_storage.hpp"
 #include "turn_timing.hpp"
@@ -308,67 +308,6 @@ PermissionMode permission_mode_from_name(std::string mode) {
     if (mode == "yolo") return PermissionMode::Yolo;
     if (mode == "plan") return PermissionMode::Plan;
     return PermissionMode::Default;
-}
-
-std::string visible_title_input(const UserInput& input) {
-    std::string text = input.display_text.empty() ? input.text : input.display_text;
-    text = trim_ascii(std::move(text));
-    if (!text.empty()) return text;
-    if (!input.content_parts.is_array()) return {};
-    std::ostringstream out;
-    for (const auto& part : input.content_parts) {
-        if (!part.is_object()) continue;
-        const std::string type = part.value("type", std::string{});
-        if (type == "text" && part.contains("text") && part["text"].is_string()) {
-            const std::string piece = trim_ascii(part["text"].get<std::string>());
-            if (!piece.empty()) {
-                if (out.tellp() > 0) out << "\n";
-                out << piece;
-            }
-        }
-    }
-    return trim_ascii(out.str());
-}
-
-std::optional<ModelProfile> title_profile_for_entry(const SessionRegistryDeps& deps,
-                                                    const SessionEntry& entry) {
-    if (!deps.config) return std::nullopt;
-    const auto& cfg = *deps.config;
-    if (!cfg.session_title.model_name.empty()) {
-        if (auto profile = explicit_profile(cfg, cfg.session_title.model_name)) {
-            return profile;
-        }
-        LOG_WARN("[registry] session_title.model_name '" + cfg.session_title.model_name +
-                 "' not found; falling back to current session model");
-    }
-    if (!entry.model_state.name.empty()) {
-        if (auto profile = explicit_profile(cfg, entry.model_state.name)) {
-            return profile;
-        }
-    }
-    std::optional<std::string> cwd_override;
-    if (!entry.cwd.empty()) {
-        cwd_override = load_cwd_model_override(entry.cwd);
-    }
-    return resolve_effective_model(cfg, cwd_override, std::nullopt);
-}
-
-void clamp_title_profile_timeout(ModelProfile& profile, const AppConfig& cfg) {
-    if (profile.provider != "openai") return;
-    const int timeout = cfg.session_title.timeout_ms;
-    if (!profile.stream_timeout_ms.has_value() || *profile.stream_timeout_ms > timeout) {
-        profile.stream_timeout_ms = timeout;
-    }
-}
-
-std::shared_ptr<LlmProvider> create_title_provider(ModelProfile profile,
-                                                   const AppConfig& cfg) {
-    clamp_title_profile_timeout(profile, cfg);
-    auto provider = create_provider_from_entry(profile, &cfg);
-    if (auto copilot = std::dynamic_pointer_cast<CopilotProvider>(provider)) {
-        copilot->try_silent_auth();
-    }
-    return provider;
 }
 
 void emit_session_title_updated(SessionEntry& entry) {
@@ -1108,7 +1047,7 @@ bool SessionRegistry::set_permission_mode(const std::string& id, PermissionMode 
 
 void SessionRegistry::maybe_start_auto_title(const std::string& id, const UserInput& input) {
     if (!deps_.config || !deps_.config->session_title.enabled) return;
-    std::string text = visible_title_input(input);
+    std::string text = visible_auto_title_input(input);
     if (text.empty()) return;
 
     std::optional<ModelProfile> profile;
@@ -1119,7 +1058,9 @@ void SessionRegistry::maybe_start_auto_title(const std::string& id, const UserIn
         auto it = entries_.find(id);
         if (it == entries_.end() || !it->second || !it->second->sm) return;
         auto& entry = *it->second;
-        profile = title_profile_for_entry(deps_, entry);
+        profile = resolve_auto_title_profile(*deps_.config,
+                                             entry.model_state.name,
+                                             entry.cwd);
         if (!profile.has_value()) return;
         if (!entry.sm->mark_auto_title_generation_started()) return;
         session_id = entry.id;
@@ -1128,12 +1069,9 @@ void SessionRegistry::maybe_start_auto_title(const std::string& id, const UserIn
     std::thread worker([this, cfg, profile = std::move(*profile),
                         session_id, text = std::move(text)]() mutable {
         try {
-            auto provider = create_title_provider(std::move(profile), *cfg);
+            auto provider = create_auto_title_provider(std::move(profile), *cfg);
             if (!provider) return;
-            auto title = generate_session_title(
-                *provider,
-                text,
-                cfg->session_title.max_input_bytes);
+            auto title = generate_auto_session_title(*provider, text, *cfg);
             if (!title.has_value() || title->empty()) return;
             auto entry = acquire(session_id);
             if (!entry || !entry->sm) return;

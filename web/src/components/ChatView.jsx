@@ -17,6 +17,7 @@ import { ToolBlock } from './ToolBlock.jsx';
 import { InputBar } from './InputBar.jsx';
 import { QueueCardList } from './QueueCardList.jsx';
 import { GitSessionPill } from './GitSessionPill.jsx';
+import { LspIndicator } from './LspIndicator.jsx';
 import { QuestionPicker } from './QuestionPicker.jsx';
 import { StickyUserContext } from './StickyUserContext.jsx';
 import { SidePanel } from './SidePanel.jsx';
@@ -104,10 +105,12 @@ import {
   closeVisiblePreviewTabs,
   closeVisiblePreviewTabsConfirmationMessage,
   openFileTab,
+  openGitChangesTab,
   openSessionChangesTab,
   previewFileLocation,
   previewScopeKey,
   reorderPreviewTab,
+  updateGitChangesTab,
   updateSessionChangesTab,
   visiblePreviewTabs,
 } from '../lib/previewTabs.js';
@@ -1514,12 +1517,15 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     let cancelled = false;
 
     const load = async () => {
-      let preferredHash = homeWorkspacePreferenceHash;
-      const desktopHash = await readDesktopHomeWorkspaceHash();
-      if (desktopHash !== null) {
-        preferredHash = desktopHash;
-        if (desktopHash !== homeWorkspacePreferenceHash) {
-          setHomeWorkspaceSelection({ workspaceHash: desktopHash });
+      const explicitHomeWorkspace = !!ref?.homeWorkspaceExplicit;
+      let preferredHash = explicitHomeWorkspace ? '' : homeWorkspacePreferenceHash;
+      if (!explicitHomeWorkspace) {
+        const desktopHash = await readDesktopHomeWorkspaceHash();
+        if (desktopHash !== null) {
+          preferredHash = desktopHash;
+          if (desktopHash !== homeWorkspacePreferenceHash) {
+            setHomeWorkspaceSelection({ workspaceHash: desktopHash });
+          }
         }
       }
 
@@ -1557,6 +1563,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         return resolveHomeWorkspaceHash({
           preferredHash,
           explicitHash,
+          explicitHashSet: explicitHomeWorkspace,
           previousHash: prev,
           options,
         });
@@ -2313,6 +2320,9 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   const selectedChangeFileRevision = activePreview?.type === PREVIEW_TAB_TYPES.SESSION_CHANGES
     ? activePreview.expandedFileRevision || 0
     : 0;
+  const selectedGitChangeFile = activePreview?.type === PREVIEW_TAB_TYPES.GIT_CHANGES
+    ? activePreview.expandedFile || ''
+    : '';
   const contentLayout = useMemo(() => solveSingleContentLayout({
     contentWidth: layoutWidth,
     sidePanelWidth,
@@ -2366,6 +2376,27 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
       fileCount: changeSummary.fileCount,
     }));
   }, [changeSummary.fileCount, previewScope, sid]);
+
+  // git 变更点击文件 → 在中间详情栏开/聚焦「变更」页签(复刻会话级变更旧行为)。
+  // gitBase 只有从 SidePanel 导航列表点击时才带;详情栏内点文件不带,由
+  // openGitChangesTab 保留页签原 base。
+  const openGitChangePreview = useCallback((filePath, gitBase, gitFileCount) => {
+    if (!sid || !filePath) return;
+    setPreviewTabState((prev) => openGitChangesTab(prev, {
+      scopeKey: previewScope,
+      sessionId: sid,
+      cwd: sidePanelCwd,
+      base: gitBase,
+      expandedFile: filePath,
+      fileCount: gitFileCount,
+    }));
+  }, [previewScope, sid, sidePanelCwd]);
+
+  // SidePanel 切基线时,若「变更」页签已打开则同步其 base(详情栏跟着换比较对象)。
+  const updateGitChangeBase = useCallback((gitBase) => {
+    if (!sid) return;
+    setPreviewTabState((prev) => updateGitChangesTab(prev, { sessionId: sid, base: gitBase || '' }));
+  }, [sid]);
 
   const activatePreview = useCallback((tabKey) => {
     setPreviewTabState((prev) => activatePreviewTab(prev, {
@@ -2721,6 +2752,13 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         </div>
         <div className="flex items-center gap-1 shrink-0">
           {sid && (
+            <LspIndicator
+              api={api}
+              cwd={ref?.cwd || health?.cwd || ''}
+              refreshKey={`${turns}:${busy ? 1 : 0}`}
+            />
+          )}
+          {sid && (
             <button
               type="button"
               data-desktop-session-id={sid || undefined}
@@ -2941,18 +2979,6 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         />
       )}
 
-      <GitSessionPill
-        key={`session-${sid}`}
-        api={api}
-        cwd={ref?.cwd || health?.cwd || ''}
-        variant="bar"
-        sessionStarted={rawItems.length > 0}
-        worktreeSession={localWorktree && localWorktree.sid === sid
-          ? { name: localWorktree.name }
-          : (ref?.worktree || null)}
-        busy={busy}
-        onIntentChange={handleGitPillIntentChange}
-      />
       <QueueCardList
         items={visibleQueuedItems}
         onCancel={cancelQueued}
@@ -2971,6 +2997,18 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         {...composerInputProps}
         disabled={!!questionForView || composerSubmitting}
         placeholder={questionForView ? '请先回答上方问题…' : undefined}
+      />
+      <GitSessionPill
+        key={`session-${sid}`}
+        api={api}
+        cwd={ref?.cwd || health?.cwd || ''}
+        variant="bar"
+        sessionStarted={rawItems.length > 0}
+        worktreeSession={localWorktree && localWorktree.sid === sid
+          ? { name: localWorktree.name }
+          : (ref?.worktree || null)}
+        busy={busy}
+        onIntentChange={handleGitPillIntentChange}
       />
       <StatusBar
         model={currentModelLabel}
@@ -3017,6 +3055,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
             changeGroups={changeGroups}
             changeSummary={changeSummary}
             maximized={previewPanelMaximized}
+            busy={busy}
             onActivateTab={activatePreview}
             onCloseTab={closePreview}
             onCloseOthers={closeOtherPreviews}
@@ -3025,6 +3064,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
             onReorderTab={reorderPreview}
             onToggleMaximize={onToggleSidePanelMaximized}
             onSelectChangeFile={openSessionChangePreview}
+            onSelectGitChangeFile={openGitChangePreview}
           />
         </div>
       )}
@@ -3065,8 +3105,11 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
               onToggleCollapse={onToggleSidePanel}
               onOpenFilePreview={openFilePreview}
               onOpenSessionChangePreview={openSessionChangePreview}
+              onOpenGitChangePreview={openGitChangePreview}
+              onGitBaseChange={updateGitChangeBase}
               selectedChangeFile={selectedChangeFile}
               selectedChangeFileRevision={selectedChangeFileRevision}
+              selectedGitChangeFile={selectedGitChangeFile}
             />
           </div>
         </>

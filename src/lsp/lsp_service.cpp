@@ -309,6 +309,29 @@ std::vector<LspService::StatusEntry> LspService::connected_snapshot() {
     return connected;
 }
 
+std::vector<LspService::StatusEntry> LspService::connected_for_cwd(
+    const std::string& session_cwd) {
+    std::vector<StatusEntry> connected;
+    if (!enabled_) return connected;
+    // 会话 workspace 边界:空 → 进程级 init cwd。两侧都 canonical 化,
+    // 与 slot->root(由 canonical 路径推导)落在同一形态才能正确前缀匹配。
+    const std::string boundary =
+        session_cwd.empty() ? workspace_cwd_ : canonicalize_path(session_cwd);
+    if (boundary.empty()) return connected;
+    std::lock_guard<std::mutex> lk(slots_mu_);
+    for (const auto& [key, slot] : slots_) {
+        if (slot->client && slot->client->alive() &&
+            within_workspace(slot->root, boundary)) {
+            StatusEntry entry;
+            entry.server_id = slot->server_id;
+            entry.root = display_root(slot->root, boundary);
+            entry.open_files = slot->client->open_file_count();
+            connected.push_back(std::move(entry));
+        }
+    }
+    return connected;
+}
+
 LspService::Status LspService::status_snapshot() {
     Status status;
     status.enabled = enabled_;

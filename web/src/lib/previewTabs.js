@@ -3,6 +3,7 @@ import { normalizeTreePath } from './fileTreeChangeStatus.js';
 export const PREVIEW_TAB_TYPES = Object.freeze({
   FILE: 'file',
   SESSION_CHANGES: 'session-changes',
+  GIT_CHANGES: 'git-changes',
 });
 
 export function previewScopeKey({ cwd = '', workspaceHash = '' } = {}) {
@@ -99,6 +100,19 @@ function sessionChangesTabKey(sessionId) {
   return `session-changes:${sessionId}`;
 }
 
+function gitChangesTabKey(sessionId) {
+  return `git-changes:${sessionId}`;
+}
+
+// session-changes 与 git-changes 是同一个「变更」概念的两种数据源(非 git
+// 仓库走会话内 hunks 聚合,git 仓库走 numstat/diff),同一 session 二选一,
+// 因此共用 `changeTabsBySession` 这一个槽位。close / activate 只需按 tab.key
+// 的前缀区分,存储/查询逻辑不必翻倍。
+function isChangeTabKey(tabKey) {
+  return typeof tabKey === 'string'
+    && (tabKey.startsWith('session-changes:') || tabKey.startsWith('git-changes:'));
+}
+
 function nextActiveAfterClose(tabs, closedKey) {
   const index = tabs.findIndex((tab) => tab.key === closedKey);
   if (index < 0) return tabs[0]?.key || '';
@@ -172,6 +186,79 @@ export function openSessionChangesTab(state, {
   };
 }
 
+// git 级变更详情页签(仿 openSessionChangesTab):同一 session 单页签,
+// 点不同文件只更新 expandedFile + 自增 revision(触发详情栏滚动/展开),
+// cwd/base 决定详情栏拉哪一份 diff。
+export function openGitChangesTab(state, {
+  scopeKey = '',
+  sessionId = '',
+  cwd = '',
+  base,
+  expandedFile = '',
+  fileCount,
+} = {}) {
+  if (!sessionId) return state || {};
+  const source = state && typeof state === 'object' ? state : {};
+  const key = gitChangesTabKey(sessionId);
+  const previousTab = source.changeTabsBySession?.[sessionId];
+  const previousIsGit = previousTab?.type === PREVIEW_TAB_TYPES.GIT_CHANGES;
+  // base 缺省(在详情栏内点文件仅换展开文件时)保留页签原 base,别把比较基线清空。
+  const nextBase = base !== undefined ? base : (previousIsGit ? previousTab?.base : '') || '';
+  const nextFileCount = fileCount !== undefined
+    ? (Number.isFinite(Number(fileCount)) ? Number(fileCount) : 0)
+    : (previousIsGit ? (previousTab?.fileCount || 0) : 0);
+  const tab = {
+    key,
+    type: PREVIEW_TAB_TYPES.GIT_CHANGES,
+    sessionId,
+    cwd: cwd || (previousIsGit ? previousTab?.cwd : '') || '',
+    base: nextBase,
+    expandedFile: normalizeTreePath(expandedFile),
+    expandedFileRevision: (Number(previousIsGit ? previousTab?.expandedFileRevision : 0) || 0) + 1,
+    fileCount: nextFileCount,
+  };
+  return {
+    ...source,
+    changeTabsBySession: {
+      ...(source.changeTabsBySession || {}),
+      [sessionId]: tab,
+    },
+    activeTabBySession: {
+      ...(source.activeTabBySession || {}),
+      [sessionId]: key,
+    },
+    activeTabByView: {
+      ...(source.activeTabByView || {}),
+      [viewKey(scopeKey, sessionId)]: key,
+    },
+  };
+}
+
+// 更新已打开的 git 变更页签的 base / fileCount,不动 expandedFile / revision
+// (基线切换或文件数刷新时用)。页签不存在或不是 git 类型则原样返回。
+export function updateGitChangesTab(state, {
+  sessionId = '',
+  base,
+  fileCount,
+} = {}) {
+  if (!sessionId) return state || {};
+  const source = state && typeof state === 'object' ? state : {};
+  const existing = source.changeTabsBySession?.[sessionId];
+  if (!existing || existing.type !== PREVIEW_TAB_TYPES.GIT_CHANGES) return source;
+  const nextTab = { ...existing };
+  if (base !== undefined) nextTab.base = base;
+  if (fileCount !== undefined) {
+    nextTab.fileCount = Number.isFinite(Number(fileCount)) ? Number(fileCount) : existing.fileCount;
+  }
+  return {
+    ...source,
+    changeTabsBySession: {
+      ...(source.changeTabsBySession || {}),
+      [sessionId]: nextTab,
+    },
+  };
+}
+
 export function updateSessionChangesTab(state, {
   sessionId = '',
   fileCount = 0,
@@ -179,7 +266,9 @@ export function updateSessionChangesTab(state, {
   if (!sessionId) return state || {};
   const source = state && typeof state === 'object' ? state : {};
   const existing = source.changeTabsBySession?.[sessionId];
-  if (!existing) return source;
+  // 只更新会话级 hunks 页签;git 页签共用同一槽位,别被会话变更计数误改
+  // (git 文件数由 GitChangesPanel 自己经 updateGitChangesTab 推送)。
+  if (!existing || existing.type !== PREVIEW_TAB_TYPES.SESSION_CHANGES) return source;
   return {
     ...source,
     changeTabsBySession: {
@@ -251,7 +340,7 @@ export function closePreviewTab(state, { scopeKey = '', sessionId = '', tabKey =
       tabOrderByView: removeKeysFromOrders(source.tabOrderByView, [tabKey]),
     };
   }
-  if (tabKey.startsWith('session-changes:')) {
+  if (isChangeTabKey(tabKey)) {
     const nextChangeTabs = { ...(source.changeTabsBySession || {}) };
     delete nextChangeTabs[sessionId];
     const nextActive = { ...(source.activeTabBySession || {}) };
@@ -342,7 +431,7 @@ export function closePreviewTabsToRight(state, { scopeKey = '', sessionId = '', 
 export function activatePreviewTab(state, { scopeKey = '', sessionId = '', tabKey = '' } = {}) {
   if (!tabKey) return state || {};
   const source = state && typeof state === 'object' ? state : {};
-  if (tabKey.startsWith('session-changes:') && sessionId) {
+  if (isChangeTabKey(tabKey) && sessionId) {
     return {
       ...source,
       activeTabBySession: {

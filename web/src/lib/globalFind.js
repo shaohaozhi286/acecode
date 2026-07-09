@@ -1,6 +1,7 @@
+import { markTextMatches, unwrapMarks } from './domTextMarks.js';
+
 const FIND_HIGHLIGHT = 'ace-global-find-match';
 const FIND_ACTIVE_HIGHLIGHT = 'ace-global-find-active';
-const FIND_HIGHLIGHT_STYLE_ID = 'ace-global-find-highlight-style';
 
 const SKIP_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE']);
 
@@ -53,6 +54,7 @@ function isHiddenElement(element, root) {
   for (let el = element; el && el !== root?.parentElement; el = el.parentElement) {
     if (el.nodeType !== 1) continue;
     if (el.classList?.contains('ace-global-find')) return true;
+    if (el.classList?.contains(FIND_HIGHLIGHT)) return true;
     if (SKIP_TAGS.has(el.tagName)) return true;
     if (el.hidden || el.getAttribute?.('aria-hidden') === 'true') return true;
     if (!view?.getComputedStyle) continue;
@@ -107,51 +109,22 @@ function rangeForMatch(match, doc = globalThis.document) {
 }
 
 export function clearFindHighlights(doc = globalThis.document) {
-  const registry = doc?.defaultView?.CSS?.highlights;
-  if (!registry) return;
-  registry.delete(FIND_HIGHLIGHT);
-  registry.delete(FIND_ACTIVE_HIGHLIGHT);
-}
-
-function ensureFindHighlightStyle(doc) {
-  if (!doc?.head || doc.getElementById(FIND_HIGHLIGHT_STYLE_ID)) return;
-  const style = doc.createElement('style');
-  style.id = FIND_HIGHLIGHT_STYLE_ID;
-  style.textContent = `
-::highlight(${FIND_HIGHLIGHT}) {
-  background: rgba(37, 99, 235, 0.22);
-  color: inherit;
-}
-::highlight(${FIND_ACTIVE_HIGHLIGHT}) {
-  background: rgba(37, 99, 235, 0.82);
-  color: #fff;
-}
-`;
-  doc.head.appendChild(style);
+  unwrapMarks(doc?.body || doc, FIND_HIGHLIGHT);
 }
 
 export function applyFindHighlights(matches, activeIndex, doc = globalThis.document) {
-  const view = doc?.defaultView;
-  const registry = view?.CSS?.highlights;
-  const Highlight = view?.Highlight;
-  if (!registry || !Highlight) return false;
-
-  ensureFindHighlightStyle(doc);
-  clearFindHighlights(doc);
-  const ranges = matches
-    .map((match) => rangeForMatch(match, doc))
-    .filter(Boolean);
-  if (ranges.length > 0) {
-    registry.set(FIND_HIGHLIGHT, new Highlight(...ranges));
-  }
-  const activeRange = activeIndex >= 0 ? rangeForMatch(matches[activeIndex], doc) : null;
-  if (activeRange) {
-    registry.set(FIND_ACTIVE_HIGHLIGHT, new Highlight(activeRange));
-  }
-  return true;
+  return markTextMatches(matches, {
+    className: FIND_HIGHLIGHT,
+    activeClassName: FIND_ACTIVE_HIGHLIGHT,
+    activeIndex,
+  });
 }
 
 export function scrollFindMatchIntoView(match, doc = globalThis.document) {
+  if (match?.mark?.isConnected) {
+    match.mark.scrollIntoView?.({ block: 'center', inline: 'nearest' });
+    return;
+  }
   const range = rangeForMatch(match, doc);
   if (!range) return;
   const rect = range.getBoundingClientRect();
@@ -168,7 +141,10 @@ export function scrollFindMatchIntoView(match, doc = globalThis.document) {
 }
 
 export function selectFindMatch(match, doc = globalThis.document) {
-  const range = rangeForMatch(match, doc);
+  const range = match?.mark?.isConnected && doc?.createRange
+    ? doc.createRange()
+    : rangeForMatch(match, doc);
+  if (match?.mark?.isConnected && range) range.selectNodeContents(match.mark);
   const selection = doc?.defaultView?.getSelection?.();
   if (!range || !selection) return;
   selection.removeAllRanges();

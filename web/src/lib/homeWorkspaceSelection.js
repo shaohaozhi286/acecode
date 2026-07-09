@@ -12,7 +12,7 @@ export function noHomeWorkspaceOption() {
   return {
     hash: '',
     cwd: '',
-    name: '不使用工作区',
+    name: '无工作区',
     noWorkspace: true,
     active: false,
     contextId: 'default',
@@ -28,11 +28,15 @@ function optionHashes(options = []) {
 export function resolveHomeWorkspaceHash({
   preferredHash = '',
   explicitHash = '',
+  explicitHashSet = !!explicitHash,
   previousHash = '',
   options = [],
 } = {}) {
   const hashes = optionHashes(options);
-  if (explicitHash && hashes.has(explicitHash)) return explicitHash;
+  if (explicitHashSet) {
+    if (!explicitHash) return '';
+    return hashes.has(explicitHash) ? explicitHash : '';
+  }
   if (preferredHash && hashes.has(preferredHash)) return preferredHash;
   if (previousHash && hashes.has(previousHash)) return previousHash;
   return '';

@@ -215,6 +215,7 @@ export function createApi(base = null) {
     getMcp:           ()             => request('GET',    '/api/mcp', undefined, base),
     putMcp:           (cfg)          => request('PUT',    '/api/mcp', cfg, base),
     reloadMcp:        ()             => request('POST',   '/api/mcp/reload', undefined, base),
+    toggleMcpServer:  (name, enabled) => request('POST',  '/api/mcp/toggle', {name, enabled}, base),
     listHooks:        ()             => request('GET',    '/api/hooks', undefined, base),
     refreshHooks:     ()             => request('POST',   '/api/hooks/refresh', undefined, base),
     trustHook:        (id)           => request('POST',   `/api/hooks/${encodeURIComponent(id)}/trust`, undefined, base),
@@ -263,6 +264,7 @@ export function createApi(base = null) {
     gitChanges:       (cwd, gitBase) => request('GET',    `/api/git/changes?cwd=${encodeURIComponent(cwd)}&base=${encodeURIComponent(gitBase)}`, undefined, base),
     gitFileDiff:      (cwd, path, gitBase) =>
       request('GET', `/api/git/diff?cwd=${encodeURIComponent(cwd)}&path=${encodeURIComponent(path)}&base=${encodeURIComponent(gitBase)}`, undefined, base),
+    lspStatus:        (cwd)          => request('GET',    `/api/lsp/status?cwd=${encodeURIComponent(cwd)}`, undefined, base),
     getHistory:       (cwd, max=100) => request('GET',    `/api/history?cwd=${encodeURIComponent(cwd)}&max=${max}`, undefined, base),
     appendHistory:    (text)         => request('POST',   '/api/history', {text}, base),
     forkSession:      (sid, atMessageId, title) =>

@@ -140,6 +140,37 @@ TEST(McpManagerAsync, DisableDuringStartupPreventsStaleToolRegistration) {
     EXPECT_EQ(manager.discovered_tool_count(), 0u);
 }
 
+// 触发场景:config.mcp_servers['alpha'].disabled=true(用户在设置页关掉了它)。
+// 期望:connect_all 把它记成 Disabled 态,start_async 跳过它 —— 全 app 不连接、
+// 不注册工具;随后运行时 enable() 能把同一 entry 拉起来并注册工具(免重启)。
+// 这是「设置页开关影响整个 app」承诺的后端回归点。
+TEST(McpManagerAsync, DisabledConfigServerSkipsStartupUntilRuntimeEnable) {
+    auto cfg = config_with_stdio_server("alpha", helper_args({"--tool", "echo"}));
+    cfg.mcp_servers["alpha"].disabled = true;
+    acecode::ToolExecutor tools;
+    acecode::McpManager manager;
+    ASSERT_TRUE(manager.connect_all(cfg));
+
+    // 配置态 disabled → entry 建成 Disabled,start_async 不应把它排进连接。
+    {
+        auto servers = manager.list_servers();
+        ASSERT_EQ(servers.size(), 1u);
+        EXPECT_EQ(servers[0].state, acecode::McpServerState::Disabled);
+    }
+
+    manager.start_async(tools);
+    // Disabled 态不参与启动:没有 starting server,也不会注册工具。
+    EXPECT_FALSE(manager.has_starting_servers());
+    EXPECT_FALSE(tools.has_tool("mcp_alpha_echo"));
+    EXPECT_EQ(manager.discovered_tool_count(), 0u);
+
+    // 运行时开关打开:entry 仍在册,enable 应拉起并最终注册工具。
+    ASSERT_TRUE(manager.enable("alpha", tools));
+    ASSERT_TRUE(manager.wait_for_startup_settled(std::chrono::seconds(5)));
+    EXPECT_EQ(manager.connected_server_count(), 1u);
+    EXPECT_TRUE(tools.has_tool("mcp_alpha_echo"));
+}
+
 TEST(McpManagerAsync, DisableConnectedServerUnregistersToolsAndSnapshots) {
     auto cfg = config_with_stdio_server("alpha", helper_args({"--tool", "echo"}));
     acecode::ToolExecutor tools;

@@ -1,9 +1,12 @@
-// CSS Custom Highlight API: 文件预览区选区失焦后保留为暗淡高亮，新选区出现时清除。
+import { unwrapMarks, wrapTextNodeRange } from './domTextMarks.js';
 
 export const PREVIEW_SELECTOR = '.ace-side-preview-code';
 
+const INACTIVE_SELECTION_MARK = 'ace-inactive-selection-mark';
+
 let savedRanges = [];
-let activeHighlight = null;
+let activeMarks = [];
+let activeDocument = null;
 
 function elementFromNode(node) {
   if (!node) return null;
@@ -23,11 +26,86 @@ function isInPreview(sel) {
   return !!previewElementFromTarget(sel.anchorNode);
 }
 
-function clearHighlight() {
-  if (activeHighlight) {
-    CSS.highlights.delete('ace-inactive-selection');
-    activeHighlight = null;
+function docForRange(range) {
+  return (
+    range?.startContainer?.ownerDocument ||
+    range?.endContainer?.ownerDocument ||
+    range?.commonAncestorContainer?.ownerDocument ||
+    globalThis.document ||
+    null
+  );
+}
+
+function rootForRange(range) {
+  return (
+    previewElementFromTarget(range?.commonAncestorContainer) ||
+    previewElementFromTarget(range?.startContainer) ||
+    previewElementFromTarget(range?.endContainer)
+  );
+}
+
+function rangeIntersectsTextNode(range, node) {
+  if (!range || !node) return false;
+  if (typeof range.intersectsNode === 'function') {
+    try {
+      return range.intersectsNode(node);
+    } catch {
+      return false;
+    }
   }
+  const doc = node.ownerDocument || globalThis.document;
+  if (!doc?.createRange || typeof range.compareBoundaryPoints !== 'function') return false;
+  const nodeRange = doc.createRange();
+  nodeRange.selectNodeContents(node);
+  try {
+    return (
+      range.compareBoundaryPoints(3, nodeRange) > 0 &&
+      range.compareBoundaryPoints(1, nodeRange) < 0
+    );
+  } catch {
+    return false;
+  } finally {
+    nodeRange.detach?.();
+  }
+}
+
+function textPartsForRange(range) {
+  const root = rootForRange(range);
+  const doc = docForRange(range);
+  if (!root || !doc?.createTreeWalker) return [];
+  const view = doc.defaultView || globalThis.window || {};
+  const nodeFilter = view.NodeFilter || globalThis.NodeFilter || {};
+  const walker = doc.createTreeWalker(
+    root,
+    nodeFilter.SHOW_TEXT || 4,
+    {
+      acceptNode(node) {
+        if (!String(node.nodeValue || '')) return nodeFilter.FILTER_REJECT || 2;
+        return rangeIntersectsTextNode(range, node)
+          ? (nodeFilter.FILTER_ACCEPT || 1)
+          : (nodeFilter.FILTER_REJECT || 2);
+      },
+    },
+  );
+  const parts = [];
+  let node = walker.nextNode();
+  while (node) {
+    const length = String(node.nodeValue || '').length;
+    const start = range.startContainer === node ? range.startOffset : 0;
+    const end = range.endContainer === node ? range.endOffset : length;
+    if (end > start) {
+      parts.push({ node, start, end });
+    }
+    node = walker.nextNode();
+  }
+  return parts;
+}
+
+function clearHighlight() {
+  const doc = activeDocument || globalThis.document;
+  unwrapMarks(doc?.body || doc, INACTIVE_SELECTION_MARK);
+  activeMarks = [];
+  activeDocument = null;
 }
 
 export function shouldClearPreviewSelectionOnMouseDown(event, {
@@ -43,14 +121,14 @@ export function shouldClearPreviewSelectionOnMouseDown(event, {
 function clearSelection() {
   savedRanges = [];
   clearHighlight();
-  window.getSelection?.()?.removeAllRanges?.();
+  globalThis.window?.getSelection?.()?.removeAllRanges?.();
 }
 
 function onPreviewMouseDown(event) {
   if (!shouldClearPreviewSelectionOnMouseDown(event, {
     hasSavedRanges: savedRanges.length > 0,
-    hasActiveHighlight: !!activeHighlight,
-    selection: window.getSelection?.(),
+    hasActiveHighlight: activeMarks.length > 0,
+    selection: globalThis.window?.getSelection?.(),
   })) {
     return;
   }
@@ -59,15 +137,28 @@ function onPreviewMouseDown(event) {
 
 function promote() {
   if (savedRanges.length === 0) return;
-  try {
-    activeHighlight = new Highlight(...savedRanges);
-    CSS.highlights.set('ace-inactive-selection', activeHighlight);
-  } catch { /* ranges detached */ }
+  clearHighlight();
+
+  const marks = [];
+  for (const range of savedRanges) {
+    try {
+      const parts = textPartsForRange(range);
+      for (const part of parts.reverse()) {
+        const mark = wrapTextNodeRange(part.node, part.start, part.end, INACTIVE_SELECTION_MARK);
+        if (mark) marks.push(mark);
+      }
+    } catch {
+      // Ignore detached ranges from a preview that rerendered before selectionchange.
+    }
+  }
+
+  activeMarks = marks;
+  activeDocument = marks[0]?.ownerDocument || docForRange(savedRanges[0]) || null;
   savedRanges = [];
 }
 
 function onSelectionChange() {
-  const sel = window.getSelection();
+  const sel = globalThis.window?.getSelection?.();
   const hasContent = sel && sel.rangeCount > 0 && !sel.isCollapsed;
 
   if (hasContent && isInPreview(sel)) {
@@ -82,7 +173,7 @@ function onSelectionChange() {
 }
 
 export function initInactiveSelection() {
-  if (typeof CSS === 'undefined' || !CSS.highlights) return () => {};
+  if (!globalThis.document?.addEventListener || !globalThis.window?.getSelection) return () => {};
   document.addEventListener('mousedown', onPreviewMouseDown, true);
   document.addEventListener('selectionchange', onSelectionChange);
   return () => {

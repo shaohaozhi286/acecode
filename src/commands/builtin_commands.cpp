@@ -526,7 +526,7 @@ static void cmd_plan(CommandContext& ctx, const std::string& raw_args) {
     }
 
     if (!prompt_to_submit.empty()) {
-        ctx.agent_loop.submit(prompt_to_submit, display_to_submit);
+        submit_user_text(ctx, prompt_to_submit, display_to_submit);
     }
     if (ctx.post_event) ctx.post_event();
 }

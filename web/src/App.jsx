@@ -42,6 +42,7 @@ import {
   clampDockHeight,
   consoleCwdForContext,
 } from './lib/consoleDock.js';
+import { noHomeWorkspaceOption } from './lib/homeWorkspaceSelection.js';
 import {
   DEFAULT_SINGLE_LAYOUT,
   LEGACY_DEFAULT_SINGLE_LAYOUT,
@@ -460,7 +461,8 @@ export function App() {
   }, [updateStarting, updateStatus]);
 
   const openHomeForWorkspace = useCallback((workspace = null) => {
-    navigateToRef(homeRefFromWorkspace(workspace, activeRefRef.current, health));
+    const target = workspace == null ? noHomeWorkspaceOption() : workspace;
+    navigateToRef(homeRefFromWorkspace(target, activeRefRef.current, health));
   }, [health, navigateToRef]);
 
   const createDesktopTraySession = useCallback(async () => {

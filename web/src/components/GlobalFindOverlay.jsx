@@ -87,6 +87,7 @@ export function GlobalFindOverlay() {
 
   useEffect(() => {
     if (!open) return;
+    clearFindHighlights(document);
     const nextMatches = collectFindMatches(document.body, query);
     setMatches(nextMatches);
     setActiveIndex(nextMatches.length > 0 ? 0 : -1);

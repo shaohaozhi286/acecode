@@ -29,18 +29,40 @@ function run(name, fn) {
   }
 }
 
-run('基线候选:有默认分支 → origin/<def> 优先,HEAD 兜底', () => {
+run('基线候选:后端已验证的 default_base 优先,HEAD 兜底', () => {
   const { candidates, initial } = buildBaseCandidates({
-    is_repo: true, default_branch: 'master',
+    is_repo: true, default_branch: 'master', default_base: 'origin/master',
   });
   assert.deepEqual(candidates, ['origin/master', 'HEAD']);
   assert.equal(initial, 'origin/master');
 });
 
-run('基线候选:非仓库 / 无默认分支 → 只有 HEAD', () => {
+run('基线候选:非仓库 / 无 default_base → 只有 HEAD', () => {
   assert.deepEqual(buildBaseCandidates(null).candidates, ['HEAD']);
-  const noDef = buildBaseCandidates({ is_repo: true, default_branch: '' });
-  assert.deepEqual(noDef.candidates, ['HEAD']);
+  const noBase = buildBaseCandidates({ is_repo: true, default_base: '' });
+  assert.deepEqual(noBase.candidates, ['HEAD']);
+});
+
+// 回归:纯本地仓库(无 origin remote / 从未 fetch)。后端 default_branch
+// 兜底 "main" 但 default_base 为空 —— 修复前前端用 default_branch 自拼
+// origin/main 当初始基线,/api/git/changes 对不存在的 ref 报 400,变更
+// 面板整体「加载失败:invalid base」。期望:忽略 default_branch,基线
+// 退回 HEAD。
+run('基线候选:default_branch 兜底值不得被拼成 origin/<def>', () => {
+  const { candidates, initial } = buildBaseCandidates({
+    is_repo: true, default_branch: 'main', default_base: '',
+  });
+  assert.deepEqual(candidates, ['HEAD']);
+  assert.equal(initial, 'HEAD');
+});
+
+// 回归:老后端(无 default_base 字段)混新前端。期望:字段缺失按无
+// remote 处理退回 HEAD,不猜不拼。
+run('基线候选:info 缺 default_base 字段 → 退回 HEAD', () => {
+  const { initial } = buildBaseCandidates({
+    is_repo: true, default_branch: 'main',
+  });
+  assert.equal(initial, 'HEAD');
 });
 
 run('列表缓存:put 后命中,markStale 后 miss 但 stale 旧数据可读', () => {

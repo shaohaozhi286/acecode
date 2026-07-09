@@ -2,40 +2,26 @@
 //
 // git 仓库会话下整体替换旧的会话级 hunks 聚合(用户拍板"彻底替换"):
 //   - 头部:变更 <branch> → <base ▾> · N 个文件已更改 +A -D + 手动刷新
-//   - 列表:numstat 文件行(状态徽标 + ±行数);点击行内展开懒加载的 diff
+//   - 列表:numstat 文件行(状态徽标 + ±行数);点击 → 在中间预览详情栏开
+//     / 聚焦「变更」页签并展开该文件的 diff(GitChangeReview),而不是行内展开。
+//     这是复刻会话级变更旧行为(点击进详情栏页签),与 file 预览一致。
 //   - 基线 ▾ 只切换比较对象(查看用,绝不 checkout)
-// 性能(design D1/D5):列表一条 numstat;diff 正文点谁拉谁;结果按 (cwd,base)
-// 缓存,失效 = 回合结束 / checkout 成功事件 / 手动刷新 / 基线切换;面板隐藏
-// 时只标脏不请求。
-// 纯状态逻辑在 lib/gitChanges.js(Node 单测),这里做编排与渲染。
+// 性能(design D1/D5):列表一条 numstat;diff 正文由详情栏点谁拉谁;结果按
+// (cwd,base) 缓存在共享的 changesCache(与详情栏 GitChangeReview 复用同一份),
+// 失效 = 回合结束 / checkout 成功事件 / 手动刷新 / 基线切换;面板隐藏时只标脏
+// 不请求。纯状态逻辑在 lib/gitChanges.js(Node 单测),这里做编排与渲染。
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import * as Diff2Html from 'diff2html';
 import {
   buildBaseCandidates,
   buildChangeRow,
   buildSummaryLabel,
-  createChangesCache,
 } from '../lib/gitChanges.js';
+import { changesCache } from '../lib/gitChangesCache.js';
 import { GIT_STATE_CHANGED_EVENT } from '../lib/gitSessionPill.js';
+import { normalizeTreePath } from '../lib/fileTreeChangeStatus.js';
 import { clsx } from '../lib/format.js';
 import { VsIcon } from './Icon.jsx';
-
-// 模块级缓存:SidePanel 卸载/重挂(视图切换)不丢;markStale 按 cwd 收口。
-const changesCache = createChangesCache();
-
-function renderPatchHtml(patch) {
-  if (!patch) return '';
-  try {
-    return Diff2Html.html(patch, {
-      drawFileList: false,
-      outputFormat: 'line-by-line',
-      matching: 'lines',
-    });
-  } catch {
-    return '';
-  }
-}
 
 function statusBadgeClass(status) {
   switch (status) {
@@ -46,7 +32,16 @@ function statusBadgeClass(status) {
   }
 }
 
-export function GitChangesPanel({ api, cwd, gitInfo, busy = false, visible = true }) {
+export function GitChangesPanel({
+  api,
+  cwd,
+  gitInfo,
+  busy = false,
+  visible = true,
+  selectedFile = '',
+  onOpenFile,
+  onBaseChange,
+}) {
   const { candidates, initial } = useMemo(
     () => buildBaseCandidates(gitInfo),
     [gitInfo],
@@ -56,17 +51,18 @@ export function GitChangesPanel({ api, cwd, gitInfo, busy = false, visible = tru
   const [list, setList] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');      // 'timeout' | 其它文案
-  const [expandedPath, setExpandedPath] = useState('');
-  const [patchState, setPatchState] = useState(null); // {path, html?, error?}
   const cwdRef = useRef(cwd);
   cwdRef.current = cwd;
   const baseRef = useRef(base);
   baseRef.current = base;
+  const listRef = useRef(list);
+  listRef.current = list;
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
+  const selectedNormalized = normalizeTreePath(selectedFile);
 
   // cwd / gitInfo 变化时重置基线选择。
-  useEffect(() => { setBase(initial); setExpandedPath(''); }, [cwd, initial]);
+  useEffect(() => { setBase(initial); }, [cwd, initial]);
 
   const fetchList = useCallback((force = false) => {
     const targetCwd = cwdRef.current;
@@ -76,9 +72,11 @@ export function GitChangesPanel({ api, cwd, gitInfo, busy = false, visible = tru
       const cached = changesCache.getList(targetCwd, targetBase);
       if (cached) { setList(cached); setError(''); return; }
     }
-    // 重拉期间先展示 stale 旧数据,避免闪空白。
+    // 重拉期间先展示同 (cwd,base) 的 stale 旧数据,避免闪空白;该键从未
+    // 成功拉过则清空 —— 否则基线切换失败时,上一个基线的列表/汇总行会和
+    // 新基线的错误文案混排(「6 个文件已更改」+「加载失败」同屏)。
     const staleData = changesCache.getListEvenIfStale(targetCwd, targetBase);
-    if (staleData) setList(staleData);
+    setList(staleData || null);
     setLoading(true);
     api.gitChanges(targetCwd, targetBase)
       .then((data) => {
@@ -108,8 +106,6 @@ export function GitChangesPanel({ api, cwd, gitInfo, busy = false, visible = tru
     if (!was || busy) return;
     if (!cwdRef.current) return;
     changesCache.markStale(cwdRef.current);
-    setExpandedPath('');
-    setPatchState(null);
     if (visibleRef.current) fetchList(true);
   }, [busy, fetchList]);
 
@@ -119,44 +115,25 @@ export function GitChangesPanel({ api, cwd, gitInfo, busy = false, visible = tru
       const changedCwd = event?.detail?.cwd || '';
       if (changedCwd && changedCwd !== cwdRef.current) return;
       changesCache.markStale(cwdRef.current);
-      setExpandedPath('');
-      setPatchState(null);
       if (visibleRef.current) fetchList(true);
     };
     window.addEventListener(GIT_STATE_CHANGED_EVENT, handler);
     return () => window.removeEventListener(GIT_STATE_CHANGED_EVENT, handler);
   }, [fetchList]);
 
-  const toggleFile = useCallback((path) => {
-    if (expandedPath === path) {
-      setExpandedPath('');
-      setPatchState(null);
-      return;
-    }
-    setExpandedPath(path);
-    const targetCwd = cwdRef.current;
-    const targetBase = baseRef.current;
-    const cached = changesCache.getPatch(targetCwd, targetBase, path);
-    if (cached != null) {
-      setPatchState({ path, html: renderPatchHtml(cached) });
-      return;
-    }
-    setPatchState({ path });
-    api.gitFileDiff(targetCwd, path, targetBase)
-      .then((r) => {
-        const patch = r?.patch || '';
-        changesCache.putPatch(targetCwd, targetBase, path, patch);
-        setPatchState((prev) => (prev?.path === path
-          ? { path, html: renderPatchHtml(patch) }
-          : prev));
-      })
-      .catch((e) => {
-        const msg = e?.status === 413 ? 'diff 过大,请在终端查看'
-          : e?.status === 504 ? 'git 超时,点击重试'
-          : '加载 diff 失败';
-        setPatchState((prev) => (prev?.path === path ? { path, error: msg } : prev));
-      });
-  }, [api, expandedPath]);
+  // 点击文件行 → 在中间详情栏打开/聚焦「变更」页签并展开该文件的 diff。
+  // 一并带当前基线与文件总数,让页签标签显示「变更(N 文件)」。
+  const openFile = useCallback((path) => {
+    const l = listRef.current;
+    const fileCount = l?.total_count ?? (l?.files?.length ?? 0);
+    onOpenFile?.(path, baseRef.current, fileCount);
+  }, [onOpenFile]);
+
+  const selectBase = useCallback((next) => {
+    setBaseOpen(false);
+    setBase(next);
+    onBaseChange?.(next);
+  }, [onBaseChange]);
 
   if (!gitInfo?.is_repo) return null;
 
@@ -195,7 +172,7 @@ export function GitChangesPanel({ api, cwd, gitInfo, busy = false, visible = tru
                         'w-full text-left px-2.5 py-1 text-[12px] transition-colors',
                         c === base ? 'bg-accent/10 text-accent font-medium' : 'text-fg hover:bg-surface-hi',
                       )}
-                      onClick={() => { setBaseOpen(false); setBase(c); setExpandedPath(''); setPatchState(null); }}
+                      onClick={() => selectBase(c)}
                     >
                       {c}
                     </button>
@@ -249,50 +226,39 @@ export function GitChangesPanel({ api, cwd, gitInfo, busy = false, visible = tru
           <div className="ace-empty-state">工作区相对 {base} 无变更</div>
         )}
         {!error && rows.map((row) => (
-          <div key={row.path}>
-            <button
-              type="button"
-              data-change-compact-file={row.path}
-              className={clsx('ace-change-compact-row', expandedPath === row.path && 'is-selected')}
-              onClick={() => toggleFile(row.path)}
-              title={row.path}
-            >
-              <span className={clsx('text-[10px] font-bold w-3 shrink-0', statusBadgeClass(row.status))}>
-                {row.status}
-              </span>
-              <span className="ace-change-compact-file">
-                <span className="ace-change-compact-name">{row.path.split(/[\\/]/).pop()}</span>
-                {row.path.includes('/') && (
-                  <span className="ace-change-compact-parent">
-                    {row.path.slice(0, row.path.lastIndexOf('/'))}
-                  </span>
-                )}
-              </span>
-              <span className="ace-change-file-counts">
-                {row.statLabel.startsWith('+')
-                  ? (
-                    <>
-                      <span className="ace-change-add">{row.statLabel.split(' ')[0]}</span>
-                      <span className="ace-change-del">{row.statLabel.split(' ')[1]}</span>
-                    </>
-                  )
-                  : <span className="text-fg-mute">{row.statLabel}</span>}
-              </span>
-            </button>
-            {expandedPath === row.path && (
-              <div className="ace-git-inline-diff">
-                {patchState?.path === row.path && patchState.html && (
-                  <div className="ace-diff" dangerouslySetInnerHTML={{ __html: patchState.html }} />
-                )}
-                {patchState?.path === row.path && patchState.error && (
-                  <div className="ace-empty-state text-danger text-[11px]">{patchState.error}</div>
-                )}
-                {patchState?.path === row.path && !patchState.html && !patchState.error && (
-                  <div className="ace-empty-state text-[11px]">加载 diff 中…</div>
-                )}
-              </div>
+          <button
+            key={row.path}
+            type="button"
+            data-change-compact-file={row.path}
+            className={clsx(
+              'ace-change-compact-row',
+              selectedNormalized && normalizeTreePath(row.path) === selectedNormalized && 'is-selected',
             )}
-          </div>
+            onClick={() => openFile(row.path)}
+            title={row.path}
+          >
+            <span className={clsx('text-[10px] font-bold w-3 shrink-0', statusBadgeClass(row.status))}>
+              {row.status}
+            </span>
+            <span className="ace-change-compact-file">
+              <span className="ace-change-compact-name">{row.path.split(/[\\/]/).pop()}</span>
+              {row.path.includes('/') && (
+                <span className="ace-change-compact-parent">
+                  {row.path.slice(0, row.path.lastIndexOf('/'))}
+                </span>
+              )}
+            </span>
+            <span className="ace-change-file-counts">
+              {row.statLabel.startsWith('+')
+                ? (
+                  <>
+                    <span className="ace-change-add">{row.statLabel.split(' ')[0]}</span>
+                    <span className="ace-change-del">{row.statLabel.split(' ')[1]}</span>
+                  </>
+                )
+                : <span className="text-fg-mute">{row.statLabel}</span>}
+            </span>
+          </button>
         ))}
       </div>
     </div>

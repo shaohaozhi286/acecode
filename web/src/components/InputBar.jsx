@@ -730,9 +730,6 @@ export const InputBar = forwardRef(function InputBar({
           </div>
         </div>
       </div>
-      <div className={clsx('mt-1 px-1 text-[10px] text-fg-mute flex justify-between', isHero && 'px-3')}>
-        <span>{actionState.helperText}</span>
-      </div>
       <ImageLightbox preview={attachmentPreview} onClose={() => setAttachmentPreview(null)} />
     </div>
   );

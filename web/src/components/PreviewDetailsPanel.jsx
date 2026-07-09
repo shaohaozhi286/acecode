@@ -7,6 +7,7 @@ import { scrollLeftForVisibleTab } from '../lib/previewTabScroll.js';
 import { DESKTOP_CONTEXT_ACTION_EVENT, DESKTOP_CONTEXT_ACTIONS } from '../lib/desktopContextMenu.js';
 import { FilePreviewContent } from './FilePreviewContent.jsx';
 import { SessionChangeDetails } from './ChangeReview.jsx';
+import { GitChangeDetails } from './GitChangeReview.jsx';
 import { FileTypeIcon, VsIcon } from './Icon.jsx';
 
 const FILE_PREVIEW_WRAP_STORAGE_KEY = 'acecode.filePreviewWrap.v1';
@@ -25,6 +26,10 @@ function tabLabel(tab) {
   if (tab.type === PREVIEW_TAB_TYPES.SESSION_CHANGES) {
     const count = Number(tab.fileCount || 0);
     return `会话变更(${count} 文件)`;
+  }
+  if (tab.type === PREVIEW_TAB_TYPES.GIT_CHANGES) {
+    const count = Number(tab.fileCount || 0);
+    return count > 0 ? `变更(${count} 文件)` : '变更';
   }
   return tab.title || fileName(tab.path);
 }
@@ -170,6 +175,7 @@ export function PreviewDetailsPanel({
   changeGroups = [],
   changeSummary = null,
   maximized = false,
+  busy = false,
   onActivateTab,
   onCloseTab,
   onCloseOthers,
@@ -178,6 +184,7 @@ export function PreviewDetailsPanel({
   onReorderTab,
   onToggleMaximize,
   onSelectChangeFile,
+  onSelectGitChangeFile,
 }) {
   const tabListRef = useRef(null);
   const tabDragRef = useRef(null);
@@ -233,6 +240,19 @@ export function PreviewDetailsPanel({
         />
       );
     }
+    if (active.type === PREVIEW_TAB_TYPES.GIT_CHANGES) {
+      return (
+        <GitChangeDetails
+          api={api}
+          cwd={active.cwd || cwd}
+          base={active.base || ''}
+          expandedFile={active.expandedFile || ''}
+          expandedFileRevision={active.expandedFileRevision || 0}
+          busy={busy}
+          onSelectFile={onSelectGitChangeFile}
+        />
+      );
+    }
     const activeCwd = active.type === PREVIEW_TAB_TYPES.FILE ? (active.cwd || cwd) : cwd;
     return (
       <FilePreviewContent
@@ -243,7 +263,7 @@ export function PreviewDetailsPanel({
         onToggleWrapPreview={() => setWrapPreview((prev) => !prev)}
       />
     );
-  }, [active, api, changeGroups, changeSummary, cwd, onSelectChangeFile, setWrapPreview, wrapPreview]);
+  }, [active, api, busy, changeGroups, changeSummary, cwd, onSelectChangeFile, onSelectGitChangeFile, setWrapPreview, wrapPreview]);
 
   const handleTabWheel = useCallback((event) => {
     const el = tabListRef.current;
@@ -608,7 +628,7 @@ export function PreviewDetailsPanel({
                   aria-selected={selected}
                   data-preview-tab-key={tab.key}
                   data-desktop-preview-tab-key={tab.key}
-                  data-desktop-preview-tab-type={isFileTab ? 'file' : 'session-changes'}
+                  data-desktop-preview-tab-type={isFileTab ? 'file' : tab.type}
                   data-desktop-preview-tab-path={isFileTab ? (tab.path || '') : undefined}
                   data-desktop-preview-tab-absolute-path={isFileTab ? tabAbsolutePath : undefined}
                   data-desktop-preview-tab-has-others={tabs.length > 1 ? 'true' : 'false'}

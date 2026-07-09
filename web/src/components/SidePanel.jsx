@@ -385,8 +385,11 @@ export function SidePanel({
   onToggleCollapse,
   onOpenFilePreview,
   onOpenSessionChangePreview,
+  onOpenGitChangePreview,
+  onGitBaseChange,
   selectedChangeFile = '',
   selectedChangeFileRevision = 0,
+  selectedGitChangeFile = '',
 }) {
   const api = useMemo(() => createApi(sessionRef || null), [sessionRef?.port, sessionRef?.token, sessionRef?.workspaceHash]);
   const [activeTab,    setActiveTab]    = useState(filesEnabled ? 'files' : 'changes');
@@ -625,6 +628,9 @@ export function SidePanel({
             gitInfo={gitInfo}
             busy={busy}
             visible={!collapsed && activeTab === 'changes'}
+            selectedFile={selectedGitChangeFile}
+            onOpenFile={onOpenGitChangePreview}
+            onBaseChange={onGitBaseChange}
           />
         ) : (
           <ChangesList

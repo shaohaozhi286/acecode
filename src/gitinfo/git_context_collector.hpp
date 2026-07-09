@@ -23,7 +23,12 @@ std::string collect_git_status_snapshot(const std::string& cwd,
 struct GitInfo {
     bool is_repo = false;
     std::string branch;          // detached / 失败 → "HEAD"
-    std::string default_branch;  // 解析失败 → "main"
+    std::string default_branch;  // 解析失败 → "main"(prompt 快照渲染需要一个名字)
+    std::string default_base;    // 已验证存在的 "origin/<默认分支>";无 origin
+                                 // remote / 从未 fetch → 空串。变更面板的基线
+                                 // 候选只能用这个字段 —— default_branch 的
+                                 // "main" 兜底是猜的,拼成 origin/main 喂给
+                                 // /api/git/changes 会 invalid_base
     std::vector<std::string> branches; // 本地分支短名(for-each-ref 顺序)
     bool dirty = false;          // tracked 改动(status --porcelain -uno 非空)
 };

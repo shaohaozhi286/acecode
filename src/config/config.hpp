@@ -57,6 +57,11 @@ struct McpServerConfig {
     std::map<std::string, std::string> headers;  // optional extra request headers
     std::string auth_token;                      // optional bearer token (never logged)
     int timeout_seconds = 30;
+
+    // true = 用户在设置页关掉了这个 server:全 app(所有会话)不连接、不注册它的
+    // 工具。持久化到 config.json(仅 true 时写出),daemon 启动时 connect_all 把它
+    // 建成 Disabled 态、start_async 跳过;运行时经 /api/mcp/toggle 热切换。
+    bool disabled = false;
 };
 
 struct SkillsConfig {

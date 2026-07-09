@@ -1,6 +1,7 @@
 // routes_misc.cpp — Route registrations extracted from server.cpp
 #include "../server_impl.hpp"
 #include "../../feedback/feedback_upload.hpp"
+#include "../../tool/mcp_manager.hpp"  // /api/mcp/toggle 运行时 enable/disable
 
 namespace acecode::web {
 
@@ -487,6 +488,8 @@ void WebServer::Impl::register_mcp() {
                     if (!srv.headers.empty()) o["headers"] = srv.headers;
                     // auth_token 不回写,避免日志 / 浏览器缓存泄漏
                     o["timeout_seconds"]      = srv.timeout_seconds;
+                    // 仅禁用时透出,启用态保持字段稀疏(前端 enabled = !disabled)。
+                    if (srv.disabled) o["disabled"] = true;
                     out[name] = std::move(o);
                 }
             }
@@ -528,6 +531,7 @@ void WebServer::Impl::register_mcp() {
                         cfg.headers = v["headers"].get<std::map<std::string,std::string>>();
                     cfg.auth_token   = v.value("auth_token", std::string{});
                     cfg.timeout_seconds = v.value("timeout_seconds", 30);
+                    cfg.disabled     = v.value("disabled", false);
                     new_servers.emplace(it.key(), std::move(cfg));
                 }
                 std::lock_guard<std::mutex> config_lock(app_config_mu);
@@ -560,6 +564,61 @@ void WebServer::Impl::register_mcp() {
             r.body = R"({"error":"mcp reload not implemented in v1; restart daemon to pick up changes"})";
             r.add_header("Content-Type", "application/json");
             return r;
+        });
+
+        // POST /api/mcp/toggle body {name, enabled}: 单个 server 的启用开关。
+        // 落盘 config.disabled(重启后仍生效)+ 运行时经 McpManager 免重启热切换
+        // (整个 app 的所有会话共享同一 ToolExecutor,disable 会立刻注销其工具)。
+        CROW_ROUTE(app, "/api/mcp/toggle").methods(crow::HTTPMethod::POST)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.app_config) return crow::response(503);
+
+            auto reply = [](int code, const json& body) {
+                crow::response r(code);
+                r.body = body.dump();
+                r.add_header("Content-Type", "application/json");
+                return r;
+            };
+
+            try {
+                auto j = json::parse(req.body);
+                if (!j.is_object() || !j.contains("name") || !j["name"].is_string()) {
+                    return reply(400, json{{"error", "expected {name, enabled}"}});
+                }
+                const std::string name = j["name"].get<std::string>();
+                const bool enabled = j.value("enabled", true);
+
+                bool found = false;
+                {
+                    std::lock_guard<std::mutex> config_lock(app_config_mu);
+                    auto it = deps.app_config->mcp_servers.find(name);
+                    if (it != deps.app_config->mcp_servers.end()) {
+                        found = true;
+                        it->second.disabled = !enabled;
+                        if (!deps.config_path.empty()) {
+                            save_config(*deps.app_config, deps.config_path);
+                        } else {
+                            save_config(*deps.app_config);
+                        }
+                    }
+                }
+                if (!found) {
+                    return reply(404, json{{"error", "unknown mcp server"}});
+                }
+
+                // 运行时热切换:锁外调用,避免持 app_config_mu 期间进 manager 锁。
+                // manager 缺失(测试 fixture)或未登记该 server 时降级为仅落盘,
+                // 前端据 applied=false 提示需重启。
+                bool applied = false;
+                if (deps.mcp_manager && deps.tools && deps.mcp_manager->has_server(name)) {
+                    applied = enabled ? deps.mcp_manager->enable(name, *deps.tools)
+                                      : deps.mcp_manager->disable(name, *deps.tools);
+                }
+                return reply(200, json{{"name", name}, {"enabled", enabled}, {"applied", applied}});
+            } catch (const std::exception& e) {
+                return reply(400, json{{"error", std::string("bad json: ") + e.what()}});
+            }
         });
     }
 

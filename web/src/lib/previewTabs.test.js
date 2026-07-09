@@ -6,9 +6,11 @@ import {
   closeVisiblePreviewTabs,
   closeVisiblePreviewTabsConfirmationMessage,
   openFileTab,
+  openGitChangesTab,
   openSessionChangesTab,
   previewFileLocation,
   reorderPreviewTab,
+  updateGitChangesTab,
   updateSessionChangesTab,
   visiblePreviewTabs,
 } from './previewTabs.js';
@@ -179,6 +181,110 @@ run('updateSessionChangesTab updates count without replacing expanded file', () 
   const tab = activePreviewTab(state, { scopeKey: 'workspace-a', sessionId: 's1' });
   assert.equal(tab.fileCount, 4);
   assert.equal(tab.expandedFile, 'src/a.cpp');
+});
+
+// ── git 级「变更」页签(git-changes 类型)──────────────────────────
+// 场景:git 仓库会话点变更文件,应在中间详情栏开一个 git 变更页签,
+// 携带 cwd/base/expandedFile,行为对齐 openSessionChangesTab。
+
+run('openGitChangesTab 创建携带 cwd/base/expandedFile 的 git 变更页签', () => {
+  let state = {};
+  state = openGitChangesTab(state, {
+    scopeKey: 'workspace-a',
+    sessionId: 's1',
+    cwd: 'C:/repo',
+    base: 'origin/main',
+    expandedFile: 'src/a.cpp',
+    fileCount: 5,
+  });
+  const tab = activePreviewTab(state, { scopeKey: 'workspace-a', sessionId: 's1' });
+  assert.equal(tab.type, 'git-changes');
+  assert.equal(tab.key, 'git-changes:s1');
+  assert.equal(tab.cwd, 'C:/repo');
+  assert.equal(tab.base, 'origin/main');
+  assert.equal(tab.expandedFile, 'src/a.cpp');
+  assert.equal(tab.fileCount, 5);
+  assert.equal(tab.expandedFileRevision, 1);
+});
+
+run('openGitChangesTab 重复点击自增 revision 触发详情栏滚动/展开', () => {
+  let state = {};
+  state = openGitChangesTab(state, {
+    scopeKey: 'workspace-a', sessionId: 's1', cwd: 'C:/repo', base: 'HEAD', expandedFile: 'a.cpp',
+  });
+  const first = activePreviewTab(state, { scopeKey: 'workspace-a', sessionId: 's1' }).expandedFileRevision;
+  state = openGitChangesTab(state, {
+    scopeKey: 'workspace-a', sessionId: 's1', cwd: 'C:/repo', base: 'HEAD', expandedFile: 'a.cpp',
+  });
+  const tab = activePreviewTab(state, { scopeKey: 'workspace-a', sessionId: 's1' });
+  assert.equal(tab.expandedFileRevision, first + 1);
+});
+
+// 场景:详情栏内点另一个文件时只带 expandedFile、不带 base(undefined),
+// 必须保留页签原比较基线,否则详情栏会拿空 base 去拉 diff 而崩。
+run('openGitChangesTab base 缺省时保留页签原有 base', () => {
+  let state = {};
+  state = openGitChangesTab(state, {
+    scopeKey: 'workspace-a', sessionId: 's1', cwd: 'C:/repo', base: 'origin/main', expandedFile: 'a.cpp',
+  });
+  state = openGitChangesTab(state, {
+    scopeKey: 'workspace-a', sessionId: 's1', expandedFile: 'b.cpp', // 不传 base/cwd
+  });
+  const tab = activePreviewTab(state, { scopeKey: 'workspace-a', sessionId: 's1' });
+  assert.equal(tab.base, 'origin/main');
+  assert.equal(tab.cwd, 'C:/repo');
+  assert.equal(tab.expandedFile, 'b.cpp');
+});
+
+// 场景:SidePanel 切基线,已打开的 git 页签同步 base,但不改 expandedFile/revision。
+run('updateGitChangesTab 只换 base 不动 expandedFile 与 revision', () => {
+  let state = {};
+  state = openGitChangesTab(state, {
+    scopeKey: 'workspace-a', sessionId: 's1', cwd: 'C:/repo', base: 'HEAD', expandedFile: 'a.cpp',
+  });
+  const rev = activePreviewTab(state, { scopeKey: 'workspace-a', sessionId: 's1' }).expandedFileRevision;
+  state = updateGitChangesTab(state, { sessionId: 's1', base: 'origin/dev' });
+  const tab = activePreviewTab(state, { scopeKey: 'workspace-a', sessionId: 's1' });
+  assert.equal(tab.base, 'origin/dev');
+  assert.equal(tab.expandedFile, 'a.cpp');
+  assert.equal(tab.expandedFileRevision, rev);
+});
+
+// 回归:session-changes 与 git-changes 共用 changeTabsBySession 槽位,
+// 每回合触发的 updateSessionChangesTab(会话 hunks 计数)绝不能误改 git 页签,
+// 否则 git 页签 fileCount 会被会话计数覆盖、类型语义被污染。
+run('updateSessionChangesTab 不污染同槽位的 git 页签', () => {
+  let state = {};
+  state = openGitChangesTab(state, {
+    scopeKey: 'workspace-a', sessionId: 's1', cwd: 'C:/repo', base: 'HEAD', expandedFile: 'a.cpp', fileCount: 7,
+  });
+  state = updateSessionChangesTab(state, { sessionId: 's1', fileCount: 99 });
+  const tab = activePreviewTab(state, { scopeKey: 'workspace-a', sessionId: 's1' });
+  assert.equal(tab.type, 'git-changes');
+  assert.equal(tab.fileCount, 7);
+});
+
+run('closePreviewTab 关闭 git 变更页签后详情栏清空', () => {
+  let state = {};
+  state = openGitChangesTab(state, {
+    scopeKey: 'workspace-a', sessionId: 's1', cwd: 'C:/repo', base: 'HEAD', expandedFile: 'a.cpp',
+  });
+  const key = activePreviewTab(state, { scopeKey: 'workspace-a', sessionId: 's1' }).key;
+  state = closePreviewTab(state, { scopeKey: 'workspace-a', sessionId: 's1', tabKey: key });
+  assert.equal(visiblePreviewTabs(state, { scopeKey: 'workspace-a', sessionId: 's1' }).length, 0);
+  assert.equal(activePreviewTab(state, { scopeKey: 'workspace-a', sessionId: 's1' }), null);
+});
+
+run('activatePreviewTab 能在 file 页签之外重新激活 git 变更页签', () => {
+  let state = {};
+  state = openGitChangesTab(state, {
+    scopeKey: 'workspace-a', sessionId: 's1', cwd: 'C:/repo', base: 'HEAD', expandedFile: 'a.cpp',
+  });
+  const gitKey = activePreviewTab(state, { scopeKey: 'workspace-a', sessionId: 's1' }).key;
+  state = openFileTab(state, { scopeKey: 'workspace-a', sessionId: 's1', cwd: 'C:/repo', path: 'README.md' });
+  assert.equal(activePreviewTab(state, { scopeKey: 'workspace-a', sessionId: 's1' }).type, 'file');
+  state = activatePreviewTab(state, { scopeKey: 'workspace-a', sessionId: 's1', tabKey: gitKey });
+  assert.equal(activePreviewTab(state, { scopeKey: 'workspace-a', sessionId: 's1' }).type, 'git-changes');
 });
 
 run('reorderPreviewTab reorders visible file tabs', () => {

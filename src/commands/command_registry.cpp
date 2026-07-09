@@ -77,7 +77,7 @@ bool CommandRegistry::dispatch(const std::string& input, CommandContext& ctx) {
                     ctx.state.last_completion_tokens_authoritative = 0;
                     ctx.state.is_waiting = true;
                 }
-                ctx.agent_loop.submit(message);
+                submit_user_text(ctx, message);
                 return true;
             }
         }

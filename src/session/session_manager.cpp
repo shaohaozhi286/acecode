@@ -581,6 +581,11 @@ void SessionManager::set_active_provider(const std::string& provider,
     }
 }
 
+std::string SessionManager::current_model_preset() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return model_preset_;
+}
+
 void SessionManager::end_current_session() {
     std::lock_guard<std::mutex> lk(mu_);
     if (created_ && !finalized_) {
@@ -955,6 +960,18 @@ void SessionManager::set_session_title(std::string title) {
 
 bool SessionManager::try_set_generated_session_title(std::string title) {
     std::lock_guard<std::mutex> lk(mu_);
+    return try_set_generated_session_title_locked(std::move(title));
+}
+
+bool SessionManager::try_set_generated_session_title_for_session(
+    const std::string& session_id,
+    std::string title) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (session_id.empty() || session_id_ != session_id) return false;
+    return try_set_generated_session_title_locked(std::move(title));
+}
+
+bool SessionManager::try_set_generated_session_title_locked(std::string title) {
     if (title.empty()) return false;
     if (user_title_touched_) return false;
     if (!pending_title_.empty() && title_source_ != "generated") return false;

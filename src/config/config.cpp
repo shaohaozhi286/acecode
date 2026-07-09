@@ -1271,6 +1271,11 @@ AppConfig load_config() {
 
                     McpServerConfig mcfg;
 
+                    // 设置页开关持久化字段:true = 全 app 禁用。缺省视为启用。
+                    if (sj.contains("disabled") && sj["disabled"].is_boolean()) {
+                        mcfg.disabled = sj["disabled"].get<bool>();
+                    }
+
                     // Determine transport. Missing field defaults to stdio so
                     // pre-existing configs keep working unchanged.
                     std::string transport_str = "stdio";
@@ -1813,6 +1818,10 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
                 if (srv.timeout_seconds != 30) {
                     sj["timeout_seconds"] = srv.timeout_seconds;
                 }
+            }
+            // 仅在禁用时写出,启用态保持配置稀疏(与其它布尔字段一致)。
+            if (srv.disabled) {
+                sj["disabled"] = true;
             }
             mj[name] = sj;
         }

@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "session/session_manager.hpp"
+#include "session/session_auto_title.hpp"
 #include "session/session_storage.hpp"
 #include "session/session_title_generator.hpp"
 
@@ -62,6 +63,25 @@ TEST(SessionTitle, UserTitleBlocksGeneratedOverwrite) {
     EXPECT_EQ(sm.current_title(), "");
     EXPECT_EQ(sm.current_title_source(), "");
     EXPECT_FALSE(sm.try_set_generated_session_title("Generated after clear"));
+}
+
+TEST(SessionTitle, GeneratedTitleForSessionRequiresActiveSessionMatch) {
+    const auto cwd = temp_cwd("session_match");
+    ProjectCleanup cleanup(cwd.string());
+
+    acecode::SessionManager sm;
+    sm.start_session(cwd.string(), "test-provider", "test-model", "20260610-020405-abcd");
+    ASSERT_EQ(sm.ensure_active_session_id(), "20260610-020405-abcd");
+    ASSERT_TRUE(sm.mark_auto_title_generation_started());
+
+    EXPECT_FALSE(sm.try_set_generated_session_title_for_session(
+        "other-session", "Wrong session title"));
+    EXPECT_EQ(sm.current_title(), "");
+
+    EXPECT_TRUE(sm.try_set_generated_session_title_for_session(
+        "20260610-020405-abcd", "Matched session title"));
+    EXPECT_EQ(sm.current_title(), "Matched session title");
+    EXPECT_EQ(sm.current_title_source(), "generated");
 }
 
 TEST(SessionTitle, GeneratedErrorTitleCanBeCorrectedOnLaterTurn) {
@@ -133,4 +153,23 @@ TEST(SessionTitle, SanitizesJsonTitleOutput) {
               "Build web session title API");
     EXPECT_TRUE(acecode::sanitize_generated_session_title(
         std::string("bad") + static_cast<char>(1) + "line").empty());
+}
+
+TEST(SessionTitle, VisibleAutoTitleInputPrefersDisplayText) {
+    acecode::UserInput input;
+    input.text = "raw model prompt";
+    input.display_text = "  /plan user visible prompt  ";
+
+    EXPECT_EQ(acecode::visible_auto_title_input(input), "/plan user visible prompt");
+}
+
+TEST(SessionTitle, VisibleAutoTitleInputFallsBackToTextContentParts) {
+    acecode::UserInput input;
+    input.content_parts = nlohmann::json::array({
+        {{"type", "image_url"}, {"image_url", "ignored"}},
+        {{"type", "text"}, {"text", "  first line  "}},
+        {{"type", "text"}, {"text", "\nsecond line\n"}},
+    });
+
+    EXPECT_EQ(acecode::visible_auto_title_input(input), "first line\nsecond line");
 }

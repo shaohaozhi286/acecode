@@ -2674,6 +2674,50 @@ TEST(WebServerHttp, McpReloadIsNotImplemented) {
     EXPECT_EQ(r.status_code, 501);
 }
 
+// 场景: POST /api/mcp/toggle 翻转某 server 的启用态。fixture 未挂 McpManager,
+// 所以 applied=false(仅落盘,不热切换),但配置 disabled 应立刻反映到 GET。
+// 期望:关闭 → GET 带 disabled:true;再启用 → GET 不带 disabled 键(稀疏)。
+// 回归:设置页开关经此端点持久化,漏落盘会让重启后开关状态还原。
+TEST(WebServerHttp, McpToggleFlipsDisabledFlag) {
+    WebServerFixture fx;
+    json req;
+    req["toggle-server"] = {{"transport", "stdio"},
+                            {"command", "/usr/bin/python3"},
+                            {"args", json::array({"-m", "myserver"})}};
+    auto put = cpr::Put(cpr::Url{fx.url("/api/mcp")},
+                        cpr::Header{{"Content-Type", "application/json"}},
+                        cpr::Body{req.dump()});
+    ASSERT_EQ(put.status_code, 200);
+
+    // 关闭:落盘 disabled=true,无 manager 时 applied=false。
+    auto off = cpr::Post(cpr::Url{fx.url("/api/mcp/toggle")},
+                         cpr::Header{{"Content-Type", "application/json"}},
+                         cpr::Body{json{{"name", "toggle-server"}, {"enabled", false}}.dump()});
+    ASSERT_EQ(off.status_code, 200) << off.text;
+    auto off_body = json::parse(off.text);
+    EXPECT_EQ(off_body["enabled"], false);
+    EXPECT_EQ(off_body["applied"], false);
+
+    auto get_off = cpr::Get(cpr::Url{fx.url("/api/mcp")});
+    ASSERT_EQ(get_off.status_code, 200);
+    EXPECT_TRUE(json::parse(get_off.text)["toggle-server"].value("disabled", false));
+
+    // 再启用:disabled 键消失。
+    auto on = cpr::Post(cpr::Url{fx.url("/api/mcp/toggle")},
+                        cpr::Header{{"Content-Type", "application/json"}},
+                        cpr::Body{json{{"name", "toggle-server"}, {"enabled", true}}.dump()});
+    ASSERT_EQ(on.status_code, 200);
+    auto get_on = cpr::Get(cpr::Url{fx.url("/api/mcp")});
+    ASSERT_EQ(get_on.status_code, 200);
+    EXPECT_FALSE(json::parse(get_on.text)["toggle-server"].contains("disabled"));
+
+    // 未知 server → 404。
+    auto missing = cpr::Post(cpr::Url{fx.url("/api/mcp/toggle")},
+                             cpr::Header{{"Content-Type", "application/json"}},
+                             cpr::Body{json{{"name", "nope"}, {"enabled", false}}.dump()});
+    EXPECT_EQ(missing.status_code, 404);
+}
+
 // 场景: 未知路由返回 404(Crow 默认行为,这里只是验证我们没把 / 放飞)。
 TEST(WebServerHttp, UnknownRouteReturns404) {
     WebServerFixture fx;

@@ -178,7 +178,7 @@ void cmd_init(CommandContext& ctx, const std::string& /*args*/) {
         ctx.state.is_waiting = true;
     }
 
-    ctx.agent_loop.submit(prompt);
+    submit_user_text(ctx, prompt);
 }
 
 } // namespace

@@ -28,6 +28,7 @@
 namespace acecode {
 class LlmProvider;
 class HookManager;
+class McpManager;
 class PtySessionRegistry;
 class SessionClient;
 class SessionRegistry;
@@ -62,6 +63,9 @@ struct WebServerDeps {
     SessionRegistry*           session_registry = nullptr;
     HookManager*               hook_manager = nullptr;
     ToolExecutor*              tools = nullptr;
+    // MCP 运行时管理器(daemon 持有)。/api/mcp/toggle 用它做免重启的运行时
+    // enable/disable;null(测试 fixture / 无 MCP)时 toggle 只落盘配置。
+    McpManager*                mcp_manager = nullptr;
     acecode::desktop::WorkspaceRegistry* workspace_registry = nullptr;
     // 非 const:PUT /api/skills/:name 要写 cfg.skills.disabled 后调 set_disabled + reload。
     SkillRegistry*             skill_registry = nullptr;

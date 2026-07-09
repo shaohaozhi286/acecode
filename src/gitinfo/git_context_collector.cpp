@@ -45,6 +45,22 @@ std::string resolve_default_branch(const std::string& cwd, int timeout_ms) {
     return "main";
 }
 
+// 已验证存在的默认比较基线("origin/<默认分支>")。与 resolve_default_branch
+// 的分工:那边为 prompt 快照服务,解析失败仍兜底 "main"(快照渲染层需要一个
+// 名字,错了也只是提示文案);这边为变更面板的基线候选服务,ref 必须真实
+// 存在 —— 无 origin remote / 从未 fetch 的仓库返回空串,前端据此把基线
+// 退回 HEAD,而不是拼一个不存在的 origin/main 出来触发 invalid_base。
+std::string resolve_verified_default_base(const std::string& cwd,
+                                          const std::string& default_branch,
+                                          int timeout_ms) {
+    if (default_branch.empty()) return "";
+    auto check = run({"show-ref", "--verify", "--quiet",
+                      "refs/remotes/origin/" + default_branch},
+                     cwd, timeout_ms);
+    if (!check.ok()) return "";
+    return "origin/" + default_branch;
+}
+
 // 当前分支(rev-parse --abbrev-ref HEAD)。detached → "HEAD";失败/不安全 → ""。
 std::string resolve_current_branch(const std::string& cwd, int timeout_ms) {
     auto res = run({"rev-parse", "--abbrev-ref", "HEAD"}, cwd, timeout_ms);
@@ -318,6 +334,8 @@ GitInfo collect_git_info(const std::string& cwd, int timeout_ms) {
     std::string branch = resolve_current_branch(cwd, timeout_ms);
     info.branch = branch.empty() ? std::string("HEAD") : branch;
     info.default_branch = resolve_default_branch(cwd, timeout_ms);
+    info.default_base =
+        resolve_verified_default_base(cwd, info.default_branch, timeout_ms);
 
     auto refs = run({"for-each-ref", "--format=%(refname:short)", "refs/heads"},
                     cwd, timeout_ms);

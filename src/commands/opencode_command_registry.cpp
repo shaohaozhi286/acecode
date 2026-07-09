@@ -43,7 +43,7 @@ void submit_opencode_command(CommandContext& ctx,
         ctx.state.is_waiting = true;
     }
 
-    ctx.agent_loop.submit(prompt, display);
+    submit_user_text(ctx, prompt, display);
 }
 
 std::mutex g_tracked_mu;

@@ -26,11 +26,12 @@ const options = [
   { hash: 'ws-b', name: 'bbb', cwd: 'C:/bbb' },
 ];
 
-await run('默认偏好为空 hash,表示不使用工作区', () => {
+await run('默认偏好为空 hash,表示无工作区', () => {
   assert.deepEqual(DEFAULT_HOME_WORKSPACE_SELECTION, { workspaceHash: '' });
   assert.equal(validateHomeWorkspaceSelection(DEFAULT_HOME_WORKSPACE_SELECTION), true);
   assert.equal(resolveHomeWorkspaceHash({ options }), '');
   assert.equal(homeWorkspaceOptionForHash(options, '').noWorkspace, true);
+  assert.equal(homeWorkspaceOptionForHash(options, '').name, '无工作区');
 });
 
 await run('已保存 workspace 存在时优先使用保存值', () => {
@@ -51,7 +52,17 @@ await run('显式打开某 workspace 时优先于保存值', () => {
   }), 'ws-a');
 });
 
-await run('保存的 workspace 不存在时回到不使用工作区', () => {
+await run('显式打开无工作区时优先于保存值', () => {
+  assert.equal(resolveHomeWorkspaceHash({
+    preferredHash: 'ws-b',
+    explicitHash: '',
+    explicitHashSet: true,
+    previousHash: '',
+    options,
+  }), '');
+});
+
+await run('保存的 workspace 不存在时回到无工作区', () => {
   assert.equal(resolveHomeWorkspaceHash({
     preferredHash: 'missing',
     explicitHash: '',
@@ -60,7 +71,7 @@ await run('保存的 workspace 不存在时回到不使用工作区', () => {
   }), '');
 });
 
-await run('按 hash 解析选项,空 hash 返回不使用工作区选项', () => {
+await run('按 hash 解析选项,空 hash 返回无工作区选项', () => {
   assert.equal(homeWorkspaceOptionForHash(options, 'ws-a').name, 'aaa');
   assert.deepEqual(noHomeWorkspaceOption(), homeWorkspaceOptionForHash(options, ''));
 });

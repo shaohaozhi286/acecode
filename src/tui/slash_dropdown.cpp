@@ -264,8 +264,8 @@ ftxui::Element render_slash_dropdown(const TuiState& state,
                 item_index == state.slash_dropdown_selected;
             Element row = text(truncate_cells(compat_rows[i], frame_width));
             if (selected) {
-                row = row | bold | color(Color::White) |
-                    bgcolor(Color::RGB(0, 80, 120));
+                row = row | bold | color(tui::theme().ui.selection_fg) |
+                    bgcolor(tui::theme().ui.selection_bg);
             } else {
                 row = row | color(tui::theme().ui.text_muted);
             }

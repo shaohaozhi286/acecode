@@ -90,6 +90,10 @@ public:
     };
     // 廉价快照:只读 slots(锁 + 小拷贝),TUI 侧边栏每帧调用安全。
     std::vector<StatusEntry> connected_snapshot();
+    // 同 connected_snapshot,但只返回 root 落在 session_cwd(会话 workspace)
+    // 之内的已连接 server —— Web 每会话 LSP 指示器用。session_cwd 空则回退
+    // 进程级 workspace_cwd_;比较前统一 weakly_canonical 归一(消 junction 差异)。
+    std::vector<StatusEntry> connected_for_cwd(const std::string& session_cwd);
     // 完整快照:额外做 which() 可执行探测(文件系统访问),仅 /lsp 命令用。
     Status status_snapshot();
 

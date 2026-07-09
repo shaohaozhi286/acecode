@@ -413,7 +413,11 @@ bool McpManager::connect_all(const AppConfig& cfg) {
         entry.name = name;
         entry.cfg = srv_cfg;
         entry.command_line = build_locator(srv_cfg);
-        entry.state = McpServerState::Failed;
+        // 配置里 disabled=true 的 server 建成 Disabled 态,start_async 会跳过它
+        // (全 app 不连接、不注册工具);entry 仍在册,便于 /api/mcp/toggle 运行时
+        // enable 把它拉起来,无需重启 daemon。
+        entry.state = srv_cfg.disabled ? McpServerState::Disabled
+                                       : McpServerState::Failed;
         state->servers.push_back(std::move(entry));
     }
 

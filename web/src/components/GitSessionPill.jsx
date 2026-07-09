@@ -1,8 +1,9 @@
 // 新会话的分支 + worktree pill(openspec add-webui-git-session-pill)。
 //
 // 两个挂载点(variant):
-//   hero — 首页欢迎视图,「项目」pill 右侧
-//   bar  — 聊天布局 InputBar 上方(会话尚无消息时可交互,开始后只读)
+//   hero — 首页新对话视图,「项目」pill 右侧(始终显示)
+//   bar  — 聊天布局 InputBar 下方,仅「未开始的新会话」显示;会话一旦有消息
+//          (或已运行在 worktree)即整体隐藏 —— 切到已有会话不再显示分支/worktree。
 //
 // 交互语义(上游对话拍板):
 //   - 未勾 worktree 时选非当前分支 = 立即 POST /api/git/checkout;409 dirty
@@ -10,7 +11,6 @@
 //     提示稍后再试。
 //   - 勾了 worktree 后分支下拉的含义变为「worktree 基线」,不动主仓;真正
 //     创建发生在首条消息发送时(父组件经 onIntentChange 拿到意图)。
-//   - 会话开始后退化为只读徽标。
 // 纯状态逻辑在 lib/gitSessionPill.js(Node 单测),这里只做 DOM 映射。
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -70,6 +70,9 @@ export function GitSessionPill({
     gitInfo, worktreeChecked, sessionStarted, worktreeSession, busy, checkingOut,
   });
   if (!model.visible) return null;
+  // bar 变体只在"未开始的新会话"露出分支/worktree 选择;会话一旦开始
+  // (有消息 / 已在 worktree)即整体隐藏。hero(新对话界面)始终显示。
+  if (variant !== 'hero' && model.started) return null;
 
   const doCheckout = (branch, stash) => {
     setCheckingOut(true);
@@ -111,7 +114,9 @@ export function GitSessionPill({
   return (
     <div className={clsx(
       'relative flex items-center',
-      variant === 'hero' ? '' : 'px-3 pb-1',
+      // bar:与 InputBar dock 同色(bg-surface,消色差),-mt-1.5 向上贴近输入框 6px。
+      // hero(新对话界面):沿用首页布局,无背景/偏移。
+      variant === 'hero' ? '' : 'px-3 pb-1 -mt-1.5 bg-surface',
     )}>
       <div
         className={clsx(

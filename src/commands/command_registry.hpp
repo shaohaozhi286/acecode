@@ -14,6 +14,7 @@
 #include <map>
 #include <vector>
 #include <functional>
+#include <utility>
 
 namespace acecode {
 
@@ -44,7 +45,25 @@ struct CommandContext {
     CommandRegistry* command_registry = nullptr; // self-reference for /skills reload
     std::string cwd;                   // working directory for cwd-scoped operations
     tui::SubagentHost* subagent_host = nullptr; // /tasks 的子代理宿主(仅斜杠 dispatch 路径注入)
+    std::function<void(const UserInput&)> submit_user_input; // optional TUI submit wrapper
 };
+
+inline void submit_user_input(CommandContext& ctx, UserInput input) {
+    if (ctx.submit_user_input) {
+        ctx.submit_user_input(input);
+    } else {
+        ctx.agent_loop.submit(input);
+    }
+}
+
+inline void submit_user_text(CommandContext& ctx,
+                             const std::string& text,
+                             const std::string& display_text = std::string{}) {
+    UserInput input;
+    input.text = text;
+    input.display_text = display_text;
+    submit_user_input(ctx, std::move(input));
+}
 
 struct SlashCommand {
     std::string name;

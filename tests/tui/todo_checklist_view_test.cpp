@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include "tui/theme_palette.hpp"
 #include "tui/todo_checklist_view.hpp"
 
 #include <ftxui/dom/elements.hpp>
@@ -67,7 +68,11 @@ TEST(TodoChecklistView, CompletedStrikeAppliesOnlyToMutedText) {
     ASSERT_GE(text_x, 0);
     EXPECT_FALSE(screen.CellAt(marker_x, 0).strikethrough);
     EXPECT_TRUE(screen.CellAt(text_x, 0).strikethrough);
-    EXPECT_EQ(screen.CellAt(text_x, 0).foreground_color, ftxui::Color::GrayLight);
+    // 已完成条目正文用当前主题的 text_muted 弱化色。断言跟随 palette 而
+    // 不硬编码具体色值 —— Tokyo Night 调色板重构(text_muted 从 GrayLight
+    // 换成 #a9b1d6)时这里曾因硬编码断言失败。
+    EXPECT_EQ(screen.CellAt(text_x, 0).foreground_color,
+              acecode::tui::theme().ui.text_muted);
 }
 
 TEST(TodoChecklistView, WrapsLongItemsToAtMostTwoTailTruncatedLines) {

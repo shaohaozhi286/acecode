@@ -106,8 +106,11 @@ TEST_F(GitContextCollectorTest, SnapshotEmptyOutsideRepo) {
 
 // ---- collect_git_info --------------------------------------------------------
 
-// 场景:干净仓库查询 info。
-// 期望:is_repo=true、branch=main、branches 含 main、dirty=false。
+// 场景:干净仓库查询 info。fixture 仓库是纯本地 init,没有 origin remote。
+// 期望:is_repo=true、branch=main、branches 含 main、dirty=false;
+// default_branch 兜底 "main"(prompt 快照要用),但 default_base 必须为
+// 空串 —— 修复前它没有这个字段,前端拿 default_branch 拼出不存在的
+// origin/main 当基线,变更面板报「加载失败:invalid base」(线上截图)。
 TEST_F(GitContextCollectorTest, InfoOnCleanRepo) {
     GitInfo info = collect_git_info(repo_utf8_);
     EXPECT_TRUE(info.is_repo);
@@ -116,6 +119,26 @@ TEST_F(GitContextCollectorTest, InfoOnCleanRepo) {
     EXPECT_NE(std::find(info.branches.begin(), info.branches.end(), "main"),
               info.branches.end());
     EXPECT_FALSE(info.dirty);
+    EXPECT_EQ(info.default_branch, "main");
+    EXPECT_TRUE(info.default_base.empty());
+}
+
+// 场景:仓库存在 origin/main 远程跟踪分支(用 update-ref 直接伪造,免建
+// 真实 remote / 免 fetch)。
+// 期望:default_base = "origin/main"(经 show-ref 验证存在后才返回)。
+TEST_F(GitContextCollectorTest, InfoDefaultBaseWhenOriginRefExists) {
+    auto head = worktree::run_git({"rev-parse", "HEAD"}, repo_utf8_);
+    ASSERT_TRUE(head.ok());
+    std::string sha = head.out;
+    while (!sha.empty() && (sha.back() == '\n' || sha.back() == '\r')) {
+        sha.pop_back();
+    }
+    ASSERT_TRUE(worktree::run_git(
+        {"update-ref", "refs/remotes/origin/main", sha}, repo_utf8_).ok());
+
+    GitInfo info = collect_git_info(repo_utf8_);
+    EXPECT_EQ(info.default_branch, "main");
+    EXPECT_EQ(info.default_base, "origin/main");
 }
 
 // 场景:tracked 文件被修改(dirty 的定义 = checkout 会被拦的改动);

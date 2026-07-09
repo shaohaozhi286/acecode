@@ -81,6 +81,7 @@ public:
     void set_active_provider(const std::string& provider,
                              const std::string& model,
                              const std::string& model_preset);
+    std::string current_model_preset() const;
 
     // End current session (mark it done) so next on_message starts a new one.
     void end_current_session();
@@ -142,6 +143,8 @@ public:
     // titles.
     void set_session_title(std::string title);
     bool try_set_generated_session_title(std::string title);
+    bool try_set_generated_session_title_for_session(const std::string& session_id,
+                                                     std::string title);
     bool mark_auto_title_generation_started();
 
     // Set the in-memory archive state for the current session and persist it
@@ -188,6 +191,7 @@ public:
 private:
     bool ensure_created();  // Lazy creation of session files on first message
     void update_meta();     // Write current metadata to disk
+    bool try_set_generated_session_title_locked(std::string title);
     std::string extract_summary(const std::string& content) const;
     bool acquire_writer_lease_locked();
     void refresh_writer_lease_locked();

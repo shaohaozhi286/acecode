@@ -13,6 +13,7 @@ import { copyTextToSystemClipboard } from '../lib/systemClipboard.js';
 import { Toggle } from './Modal.jsx';
 import { clsx, relativeTime } from '../lib/format.js';
 import { lookupErrorMessage } from '../lib/errors.js';
+import { buildMcpServerList, countEnabledMcp, applyMcpToggle } from '../lib/mcpServers.js';
 import {
   DEFAULT_MODEL_CAPABILITIES,
   MODEL_CAPABILITY_OPTIONS,
@@ -1130,6 +1131,21 @@ function SectionMCP() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [togglingName, setTogglingName] = useState('');
+
+  // 从 JSON 编辑器文本派生开关列表:文本合法且是对象时才有内容,否则空数组。
+  // 直接读文本(而非独立请求)保证开关与 JSON 编辑器永远同步。
+  const { serverList, parsedOk } = useMemo(() => {
+    try {
+      const parsed = JSON.parse(text);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        return { serverList: [], parsedOk: false };
+      }
+      return { serverList: buildMcpServerList(parsed), parsedOk: true };
+    } catch {
+      return { serverList: [], parsedOk: false };
+    }
+  }, [text]);
 
   const load = async () => {
     setLoading(true);
@@ -1214,6 +1230,40 @@ function SectionMCP() {
     }
   };
 
+  // 开关某个 server:先把 disabled 写回 JSON 文本(编辑器同步),再调 toggle
+  // 端点落盘 + 运行时热切换。失败回滚文本。applied=false 说明 daemon 未热应用,
+  // 提示需重启。
+  const toggleServer = async (name, enabled) => {
+    if (togglingName) return;
+    let nextText = text;
+    try {
+      const parsed = JSON.parse(text);
+      nextText = JSON.stringify(applyMcpToggle(parsed, name, enabled), null, 2);
+    } catch {
+      toast({ kind: 'err', text: 'JSON 无效,无法切换' });
+      return;
+    }
+    const prevText = text;
+    setText(nextText);
+    setSaved(false);
+    setTogglingName(name);
+    try {
+      const res = await api.toggleMcpServer(name, enabled);
+      if (res && res.applied === false) {
+        toast({ kind: 'ok', text: `${name} 已${enabled ? '启用' : '关闭'};重启 daemon 后生效` });
+      } else {
+        toast({ kind: 'ok', text: `${name} 已${enabled ? '启用' : '关闭'}` });
+      }
+    } catch (e) {
+      setText(prevText);
+      toast({ kind: 'err', text: '切换失败:' + (e?.message || '') });
+    } finally {
+      setTogglingName('');
+    }
+  };
+
+  const enabledCount = countEnabledMcp(serverList);
+
   return (
     <>
       <h2 className="text-xl font-bold mb-5">MCP 服务器</h2>
@@ -1276,6 +1326,64 @@ function SectionMCP() {
         >
           {saving ? '保存中...' : (saved ? '✓ 已保存' : '保存')}
         </button>
+      </div>
+
+      <div className="mt-8 pt-6 border-t border-border">
+        <div className="flex items-center justify-between mb-4">
+          <div className="text-[15px] font-bold">启用服务器</div>
+          {parsedOk && serverList.length > 0 && (
+            <div className="text-[12px] text-fg-mute">
+              {enabledCount} / {serverList.length} 已启用
+            </div>
+          )}
+        </div>
+
+        {loading ? (
+          <div className="rounded-lg border border-border bg-surface px-4 py-4 text-[12px] text-fg-mute">
+            <span className="ace-spinner mr-2" /> 加载中
+          </div>
+        ) : !parsedOk ? (
+          <div className="rounded-lg border border-border bg-surface px-4 py-4 text-[12px] text-fg-mute">
+            JSON 无效,修正后可在此逐个开关服务器。
+          </div>
+        ) : serverList.length === 0 ? (
+          <div className="rounded-lg border border-border bg-surface px-4 py-4 text-[12px] text-fg-mute">
+            暂无已配置的 MCP 服务器。
+          </div>
+        ) : (
+          <div className="space-y-2 max-w-3xl">
+            {serverList.map((server) => (
+              <div
+                key={server.name}
+                className="rounded-lg border border-border bg-surface px-4 py-3 flex items-center gap-3"
+              >
+                <div className="h-9 w-9 rounded-md border border-border bg-surface-alt flex items-center justify-center text-fg-2 shrink-0">
+                  <VsIcon name="mcp" size={18} />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <div className="text-[13px] font-semibold text-fg truncate">
+                      {server.name}
+                    </div>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded border border-border text-fg-mute shrink-0">
+                      {server.transportLabel}
+                    </span>
+                  </div>
+                  {server.commandLine && (
+                    <div className="mt-0.5 text-[11px] text-fg-mute font-mono break-all">
+                      {server.commandLine}
+                    </div>
+                  )}
+                </div>
+                <Toggle
+                  on={server.enabled}
+                  onChange={(next) => toggleServer(server.name, next)}
+                  disabled={!!togglingName || saving}
+                />
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </>
   );
