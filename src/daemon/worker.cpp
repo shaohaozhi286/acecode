@@ -42,6 +42,7 @@
 #include "../network/proxy_resolver.hpp"
 #include "../utils/logger.hpp"
 #include "../utils/paths.hpp"
+#include "../utils/power_inhibitor.hpp"
 #include "../utils/token.hpp"
 #include "../utils/utf8_path.hpp"
 #include "../web/auth.hpp"
@@ -428,6 +429,7 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     reg_deps.custom_instructions_cfg = &cfg_mut.custom_instructions;
     reg_deps.hook_manager         = &hook_manager;
     reg_deps.template_permissions = &template_perm;
+    reg_deps.power_guard          = &acecode::process_power_guard();
 
     acecode::SessionRegistry registry(std::move(reg_deps));
     acecode::LocalSessionClient client(registry);

@@ -23,6 +23,7 @@
 #include "../worktree/worktree_manager.hpp"
 #include "../utils/logger.hpp"
 #include "../utils/cwd_hash.hpp"
+#include "../utils/power_inhibitor.hpp"
 #include "../utils/utf8_path.hpp"
 
 #include <algorithm>
@@ -629,6 +630,12 @@ SessionRegistry::SessionRegistry(SessionRegistryDeps deps)
     : deps_(std::move(deps)) {}
 
 SessionRegistry::~SessionRegistry() {
+    if (deps_.power_guard) {
+        std::lock_guard<std::mutex> lk(mu_);
+        for (const auto& [id, _entry] : entries_) {
+            deps_.power_guard->release_session(id);
+        }
+    }
     std::vector<std::thread> threads;
     {
         std::lock_guard<std::mutex> lk(title_threads_mu_);
@@ -771,8 +778,15 @@ SessionRegistry::make_entry_locked(const std::string& id,
         entry->sm->ensure_plan_file_path();
     }
 
-    // AgentLoop: 给一个空 callbacks(daemon 全走 events_)
+    // AgentLoop: daemon 全走 events_,but busy transitions still feed the
+    // process power guard so web/desktop/background sessions keep the host awake.
     AgentCallbacks empty_cb;
+    if (deps_.power_guard) {
+        auto* power_guard = deps_.power_guard;
+        empty_cb.on_busy_changed = [power_guard, id](bool busy) {
+            power_guard->set_busy(id, busy);
+        };
+    }
     auto slot = entry->provider_slot;
     AgentLoop::ProviderAccessor provider_accessor = [slot]() -> std::shared_ptr<LlmProvider> {
         if (!slot) return {};
@@ -1212,6 +1226,7 @@ void SessionRegistry::destroy(const std::string& id) {
         moved = std::move(it->second);
         entries_.erase(it);
     }
+    if (deps_.power_guard) deps_.power_guard->release_session(id);
     // 析构走出锁外: AgentLoop::shutdown 会 join worker,可能耗时(等当前
     // tool 跑完)。在锁内会阻塞所有别的 create/lookup/destroy。
     if (moved && moved->loop) moved->loop->abort();

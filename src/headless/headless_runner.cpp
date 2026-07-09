@@ -25,6 +25,7 @@
 #include "../tool/web_search/runtime.hpp"
 #include "../utils/logger.hpp"
 #include "../utils/paths.hpp"
+#include "../utils/power_inhibitor.hpp"
 #include "../utils/utf8_path.hpp"
 #include "../web/handlers/skill_command_expander.hpp"
 
@@ -332,6 +333,7 @@ int run_print_mode(const HeadlessCliOptions& opts) {
         reg_deps.custom_instructions_cfg  = &cfg.custom_instructions;
         reg_deps.hook_manager             = &hook_manager;
         reg_deps.template_permissions     = &template_perm;
+        reg_deps.power_guard              = &acecode::process_power_guard();
 
         acecode::SessionRegistry registry(std::move(reg_deps));
         acecode::LocalSessionClient client(registry);
