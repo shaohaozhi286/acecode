@@ -360,8 +360,11 @@ void McpManager::publish_connection_result(const std::shared_ptr<State>& state,
                 const std::string tool_name = tool.original_tool_name;
                 impl.execute = [weak_state, server_name, tool_name](
                                    const std::string& args_json,
-                                   const ToolContext& /*ctx*/) {
-                    return McpManager::invoke(weak_state, server_name, tool_name, args_json);
+                                   const ToolContext& ctx) {
+                    // ctx.abort_flag 指向 AgentLoop::abort_requested_,让用户的
+                    // Esc/停止能打断阻塞中的 MCP 调用(invoke 内 100ms 轮询)。
+                    return McpManager::invoke(weak_state, server_name, tool_name,
+                                              args_json, ctx.abort_flag);
                 };
                 executor.register_tool(impl);
                 state->discovered_tools.push_back(tool);
@@ -678,7 +681,8 @@ bool McpManager::wait_for_startup_settled(std::chrono::milliseconds timeout) con
 ToolResult McpManager::invoke(const std::weak_ptr<State>& weak_state,
                               const std::string& server_name,
                               const std::string& tool_name,
-                              const std::string& arguments_json) {
+                              const std::string& arguments_json,
+                              const std::atomic<bool>* abort_flag) {
     auto state = weak_state.lock();
     if (!state) {
         return ToolResult{"[Error] MCP manager is no longer available", false};
@@ -711,52 +715,96 @@ ToolResult McpManager::invoke(const std::weak_ptr<State>& weak_state,
         return ToolResult{std::string("[Error] Invalid arguments JSON: ") + e.what(), false};
     }
 
-    try {
-        mcp::json result = client->call_tool(tool_name, args_mcp);
-        bool is_error = false;
-        if (result.contains("isError") && result["isError"].is_boolean()) {
-            is_error = result["isError"].get<bool>();
-        }
-        std::string out;
-        nlohmann::json attachments = nlohmann::json::array();
-        if (result.contains("content") && result["content"].is_array()) {
-            std::ostringstream oss;
-            int image_index = 1;
-            for (const auto& item : result["content"]) {
-                if (item.is_object() && item.contains("type") && item["type"] == "text" &&
-                    item.contains("text") && item["text"].is_string()) {
-                    if (!oss.str().empty()) oss << '\n';
-                    oss << item["text"].get<std::string>();
-                } else if (item.is_object() && item.contains("type") && item["type"] == "image" &&
-                           item.contains("data") && item["data"].is_string()) {
-                    const std::string mime = item.value("mimeType", item.value("mime_type", std::string{"image/png"}));
-                    std::string name = item.value("name", std::string{});
-                    if (name.empty()) {
-                        name = "mcp-image-" + std::to_string(image_index) + extension_for_mcp_mime(mime);
-                    }
-                    attachments.push_back(nlohmann::json{
-                        {"name", name},
-                        {"mime_type", mime},
-                        {"data_url", "data:" + mime + ";base64," + item["data"].get<std::string>()},
-                    });
-                    image_index++;
-                }
+    // 阻塞的 JSON-RPC 调用 + 结果整形,在 detached 工作线程里执行。
+    // cpp-mcp 的 send_request 是单次 60s 硬等,若在本线程直接调用,用户的
+    // Esc/停止在整个工具调用期间完全失效(实测 windows-mcp 的 Snapshot 一次
+    // 30+ 秒:daemon 表现为「点停止提示已终止,busy 却持续到工具自己返回」,
+    // 2026-07-10 日志复盘)。本线程 100ms 粒度轮询 abort_flag,置位立即返回
+    // [Aborted];迟到的响应写进 box 后被整体丢弃(shared_ptr 保活,工作线程
+    // 最多再活到库内 60s 超时,有界)。MCP 协议的 notifications/cancelled
+    // 需要拿到请求 id,cpp-mcp 不暴露,server 端任其自然跑完。
+    auto blocking_call = [client, server_name, tool_name, args_mcp, tag]() -> ToolResult {
+        try {
+            mcp::json result = client->call_tool(tool_name, args_mcp);
+            bool is_error = false;
+            if (result.contains("isError") && result["isError"].is_boolean()) {
+                is_error = result["isError"].get<bool>();
             }
-            out = oss.str();
-            if (out.empty()) out = result.dump();
-        } else {
-            out = result.dump();
+            std::string out;
+            nlohmann::json attachments = nlohmann::json::array();
+            if (result.contains("content") && result["content"].is_array()) {
+                std::ostringstream oss;
+                int image_index = 1;
+                for (const auto& item : result["content"]) {
+                    if (item.is_object() && item.contains("type") && item["type"] == "text" &&
+                        item.contains("text") && item["text"].is_string()) {
+                        if (!oss.str().empty()) oss << '\n';
+                        oss << item["text"].get<std::string>();
+                    } else if (item.is_object() && item.contains("type") && item["type"] == "image" &&
+                               item.contains("data") && item["data"].is_string()) {
+                        const std::string mime = item.value("mimeType", item.value("mime_type", std::string{"image/png"}));
+                        std::string name = item.value("name", std::string{});
+                        if (name.empty()) {
+                            name = "mcp-image-" + std::to_string(image_index) + extension_for_mcp_mime(mime);
+                        }
+                        attachments.push_back(nlohmann::json{
+                            {"name", name},
+                            {"mime_type", mime},
+                            {"data_url", "data:" + mime + ";base64," + item["data"].get<std::string>()},
+                        });
+                        image_index++;
+                    }
+                }
+                out = oss.str();
+                if (out.empty()) out = result.dump();
+            } else {
+                out = result.dump();
+            }
+            ToolResult tool_result{out, !is_error};
+            if (!attachments.empty()) tool_result.attachments = std::move(attachments);
+            return tool_result;
+        } catch (const mcp::mcp_exception& e) {
+            LOG_ERROR(tag + "call_tool('" + server_name + "', '" + tool_name + "') mcp_exception: " + e.what());
+            return ToolResult{std::string("[Error] MCP call failed: ") + e.what(), false};
+        } catch (const std::exception& e) {
+            LOG_ERROR(tag + "call_tool('" + server_name + "', '" + tool_name + "') exception: " + e.what());
+            return ToolResult{std::string("[Error] MCP call failed: ") + e.what(), false};
         }
-        ToolResult tool_result{out, !is_error};
-        if (!attachments.empty()) tool_result.attachments = std::move(attachments);
-        return tool_result;
-    } catch (const mcp::mcp_exception& e) {
-        LOG_ERROR(tag + "call_tool('" + server_name + "', '" + tool_name + "') mcp_exception: " + e.what());
-        return ToolResult{std::string("[Error] MCP call failed: ") + e.what(), false};
-    } catch (const std::exception& e) {
-        LOG_ERROR(tag + "call_tool('" + server_name + "', '" + tool_name + "') exception: " + e.what());
-        return ToolResult{std::string("[Error] MCP call failed: ") + e.what(), false};
+    };
+
+    // 无 abort 通道(如启动期内部调用)时保持原地同步执行,零额外线程。
+    if (!abort_flag) {
+        return blocking_call();
     }
+
+    struct ResultBox {
+        std::mutex mu;
+        std::condition_variable cv;
+        bool done = false;
+        ToolResult result{"", false};
+    };
+    auto box = std::make_shared<ResultBox>();
+    std::thread([blocking_call = std::move(blocking_call), box]() {
+        ToolResult r = blocking_call();
+        std::lock_guard<std::mutex> lk(box->mu);
+        box->result = std::move(r);
+        box->done = true;
+        box->cv.notify_all();
+    }).detach();
+
+    std::unique_lock<std::mutex> lk(box->mu);
+    while (!box->done) {
+        box->cv.wait_for(lk, std::chrono::milliseconds(100));
+        if (!box->done && abort_flag->load()) {
+            LOG_INFO(tag + "call_tool('" + server_name + "', '" + tool_name +
+                     "') abandoned by user abort");
+            return ToolResult{
+                "[Aborted] MCP tool call abandoned because the user aborted the "
+                "turn; the server may still finish it in the background.",
+                false};
+        }
+    }
+    return std::move(box->result);
 }
 
 void McpManager::shutdown() {

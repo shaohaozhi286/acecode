@@ -175,11 +175,14 @@ private:
     static std::string sanitize(const std::string& s);
 
     // Invoke a tool via the owning server. Thread-safe with respect to other
-    // invocations of the same server (cpp-mcp handles the pipe locking).
+    // invocations of the same server (cpp-mcp handles the pipe locking)。
+    // abort_flag 非空时 100ms 粒度轮询:置位立即返回 [Aborted],阻塞中的
+    // JSON-RPC 调用留给 detached 工作线程收尾(迟到结果整体丢弃)。
     static ToolResult invoke(const std::weak_ptr<State>& state,
                              const std::string& server_name,
                              const std::string& tool_name,
-                             const std::string& arguments_json);
+                             const std::string& arguments_json,
+                             const std::atomic<bool>* abort_flag = nullptr);
 
     // Locate an entry by name. Returns nullptr if missing. Caller must hold
     // state_->mu.

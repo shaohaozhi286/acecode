@@ -5,6 +5,7 @@
 #include "tool/tool_executor.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <iostream>
 #include <mutex>
@@ -228,6 +229,52 @@ TEST(McpManagerAsync, ConnectedNoToolServerHasEmptyToolSnapshot) {
     ASSERT_EQ(grouped.size(), 1u);
     EXPECT_EQ(grouped[0].first, "empty");
     EXPECT_TRUE(grouped[0].second.empty());
+}
+
+// 触发场景:MCP 工具单次调用耗时很长(实测 windows-mcp 的 Snapshot 30+ 秒),
+// 用户点停止/Esc。修复前 invoke 在本线程硬等 cpp-mcp 的 60s 超时,abort 标志
+// 只能等工具自己返回才被检查 —— daemon 表现为「点停止提示已终止,busy 却持续
+// 到工具返回,切走再切回看到任务还在跑」(2026-07-10 daemon 日志复盘)。
+// 期望:abort 置位后 invoke 在百毫秒级返回 [Aborted] 失败结果,不等服务器;
+// 迟到的真实响应由 detached 工作线程收下后整体丢弃。
+// 阈值说明:服务器 call 延迟 3000ms,300ms 后置 abort;断言总耗时 < 2000ms
+// —— 远小于服务器延迟即证明没有等到真实响应,又给轮询(100ms 粒度)和线程
+// 调度留足余量,CI 慢机不至于假红。
+TEST(McpManagerAsync, AbortDuringSlowToolCallReturnsQuickly) {
+    auto cfg = config_with_stdio_server(
+        "slow",
+        helper_args({"--call-delay-ms", "3000", "--tool", "echo"}));
+    acecode::ToolExecutor tools;
+    acecode::McpManager manager;
+    ASSERT_TRUE(manager.connect_all(cfg));
+
+    manager.start_async(tools);
+    ASSERT_TRUE(manager.wait_for_startup_settled(std::chrono::seconds(5)));
+    ASSERT_TRUE(tools.has_tool("mcp_slow_echo"));
+
+    std::atomic<bool> abort_flag{false};
+    acecode::ToolContext ctx;
+    ctx.abort_flag = &abort_flag;
+
+    std::thread aborter([&abort_flag]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        abort_flag = true;
+    });
+
+    const auto start = std::chrono::steady_clock::now();
+    auto result = tools.execute("mcp_slow_echo", R"({"text":"hi"})", ctx);
+    const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start).count();
+    aborter.join();
+
+    EXPECT_FALSE(result.success);
+    EXPECT_EQ(result.output.rfind("[Aborted]", 0), 0u) << result.output;
+    EXPECT_LT(elapsed_ms, 2000) << "abort 应在百毫秒级打断慢工具调用";
+
+    // 给 detached 工作线程留时间收下迟到响应,再拆 manager —— 避免测试进程
+    // 退出时工作线程还握着 client 引用(生产环境无此约束,shared_ptr 保活)。
+    std::this_thread::sleep_for(std::chrono::milliseconds(3200));
+    manager.shutdown();
 }
 
 TEST(McpManagerAsync, FailedStartupRecordsFailureText) {

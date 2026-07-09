@@ -11,6 +11,7 @@ namespace {
 
 struct Options {
     int delay_ms = 0;
+    int call_delay_ms = 0;  // 仅延迟 tools/call 响应,模拟慢工具(abort 测试用)
     bool no_tools = false;
     bool fail_initialize = false;
     std::string tool_name = "echo";
@@ -22,6 +23,8 @@ Options parse_options(int argc, char** argv) {
         std::string arg = argv[i];
         if (arg == "--delay-ms" && i + 1 < argc) {
             opts.delay_ms = std::atoi(argv[++i]);
+        } else if (arg == "--call-delay-ms" && i + 1 < argc) {
+            opts.call_delay_ms = std::atoi(argv[++i]);
         } else if (arg == "--no-tools") {
             opts.no_tools = true;
         } else if (arg == "--fail-initialize") {
@@ -123,6 +126,10 @@ int main(int argc, char** argv) {
                 }}
             });
         } else if (method == "tools/call") {
+            if (opts.call_delay_ms > 0) {
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(opts.call_delay_ms));
+            }
             const auto params = request.value("params", nlohmann::json::object());
             const auto args = params.value("arguments", nlohmann::json::object());
             const std::string text = args.value("text", "ok");

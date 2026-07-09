@@ -427,12 +427,16 @@ void show_context_menu(HWND hwnd) {
 
     POINT pt{};
     ::GetCursorPos(&pt);
-    // SetForegroundWindow 是 Win32 文档规定的 trick,让 popup menu 在 click-away 时
-    // 正确关闭。不调的话菜单显示后单击它处不会消失。
+    // KB135788 经典配方:SetForegroundWindow 让 popup menu 拿到正确的
+    // z-order(否则被置顶任务栏挡住)并在 click-away 时正确关闭。前提是
+    // hwnd 具备前台资格 —— 见 init_tray_icon 里"不能用 HWND_MESSAGE"的注释。
     ::SetForegroundWindow(hwnd);
     UINT cmd = ::TrackPopupMenu(menu,
                                 TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN,
                                 pt.x, pt.y, 0, hwnd, nullptr);
+    // 配方的后半段:菜单关闭后给自己发一个空消息,促使菜单模式立即退出,
+    // 否则下一次右键有概率立刻自动收起。
+    ::PostMessageW(hwnd, WM_NULL, 0, 0);
     ::DestroyMenu(menu);
 
     dispatch_menu_command(layout, cmd);
@@ -511,13 +515,21 @@ bool init_tray_icon(TrayClickHandler on_show,
         return false;
     }
 
+    // 真实的隐藏顶层窗口,**不能**用 HWND_MESSAGE(message-only):
+    // message-only 窗口永远没有前台资格,show_context_menu 里的
+    // SetForegroundWindow 会静默失败,TrackPopupMenu 的菜单 z-order 输给
+    // 置顶的任务栏 —— 表现为「右键菜单有时被任务栏挡住/点外面不消失」,
+    // 是否复现取决于当时进程里有没有别的可见前台窗口兜底(主窗口
+    // close-to-tray 隐藏后必现)。Chromium status_icon_win / Qt
+    // QSystemTrayIconSys 同样用真实隐藏窗口。无 WS_VISIBLE 永不显示;
+    // WS_EX_TOOLWINDOW 兜底保证它绝不出现在任务栏/Alt+Tab。
     g_tray_window = ::CreateWindowExW(
-        0,
+        WS_EX_TOOLWINDOW,
         kTrayWndClass,
         L"ACECode Tray",
-        0,
+        WS_POPUP,
         0, 0, 0, 0,
-        HWND_MESSAGE,  // message-only 窗口,不进 z-order
+        nullptr,
         nullptr,
         hinst,
         nullptr);
