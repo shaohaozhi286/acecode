@@ -317,7 +317,7 @@ std::string mcp_state_label(McpServerState state) {
 
 Color mcp_sidebar_state_color(const std::string& state) {
     if (state == "connected") return theme().semantic.success;
-    if (state == "starting") return theme().ui.text_primary;
+    if (state == "starting") return Color::White;
     if (state == "failed" || state == "timed_out") return theme().semantic.error;
     if (state == "cancelled") return theme().semantic.warning;
     return theme().ui.text_dim;
@@ -348,11 +348,11 @@ Element render_white_shimmer_text(const std::string& label,
         if (dist < 0) dist = -dist;
         Color c;
         if (dist == 0) {
-            c = theme().ui.text_primary;
+            c = Color::White;
         } else if (dist == 1) {
-            c = theme().ui.text_muted;
+            c = Color::GrayLight;
         } else if (dist == 2) {
-            c = theme().ui.text_dim;
+            c = Color::GrayDark;
         } else {
             c = theme().ui.text_dim;
         }
@@ -364,8 +364,7 @@ Element render_white_shimmer_text(const std::string& label,
         for (int i = 0; i < 3; ++i) {
             parts.push_back(
                 text(".") |
-                color(i < dot_count ? theme().ui.text_primary
-                                    : theme().ui.text_dim));
+                color(i < dot_count ? Color::White : theme().ui.text_dim));
         }
     }
 
@@ -735,7 +734,7 @@ Element render_regular_sidebar(const TuiState& state,
                               color(status_line_color(state.status_line)));
     }
     if (!cwd_display.empty()) {
-        bottom_rows.push_back(paragraph(cwd_display) | color(theme().ui.accent) | dim);
+        bottom_rows.push_back(paragraph(cwd_display) | color(theme().ui.accent_alt) | dim);
     }
 
     const bool is_light = theme().name == "light";
@@ -748,7 +747,7 @@ Element render_regular_sidebar(const TuiState& state,
         }) | flex,
         text(" "),
     }) | size(WIDTH, EQUAL, sidebar_width) |
-       bgcolor(is_light ? Color::RGB(246, 248, 250) : Color::RGB(22, 22, 30));
+       bgcolor(is_light ? Color::RGB(240, 240, 242) : Color::RGB(18, 18, 20));
     return non_selectable(std::move(sidebar));
 }
 
