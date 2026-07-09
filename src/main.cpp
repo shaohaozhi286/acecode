@@ -405,7 +405,7 @@ static std::string mcp_state_label(McpServerState state) {
 
 static Color mcp_sidebar_state_color(const std::string& state) {
     if (state == "connected") return tui::theme().semantic.success;
-    if (state == "starting") return tui::theme().ui.text_primary;
+    if (state == "starting") return Color::White;
     if (state == "failed" || state == "timed_out") return tui::theme().semantic.error;
     if (state == "cancelled") return tui::theme().semantic.warning;
     return tui::theme().ui.text_dim;
@@ -436,11 +436,11 @@ static Element render_white_shimmer_text(const std::string& label,
         if (dist < 0) dist = -dist;
         Color c;
         if (dist == 0) {
-            c = tui::theme().ui.text_primary;
+            c = Color::White;
         } else if (dist == 1) {
-            c = tui::theme().ui.text_muted;
+            c = Color::GrayLight;
         } else if (dist == 2) {
-            c = tui::theme().ui.text_dim;
+            c = Color::GrayDark;
         } else {
             c = tui::theme().ui.text_dim;
         }
@@ -452,8 +452,7 @@ static Element render_white_shimmer_text(const std::string& label,
         for (int i = 0; i < 3; ++i) {
             parts.push_back(
                 text(".") |
-                color(i < dot_count ? tui::theme().ui.text_primary
-                                    : tui::theme().ui.text_dim));
+                color(i < dot_count ? Color::White : tui::theme().ui.text_dim));
         }
     }
 
@@ -864,7 +863,7 @@ static Element render_regular_sidebar(const acecode::TuiState& state,
                               color(status_line_color(state.status_line)));
     }
     if (!cwd_display.empty()) {
-        bottom_rows.push_back(paragraph(cwd_display) | color(tui::theme().ui.accent) | dim);
+        bottom_rows.push_back(paragraph(cwd_display) | color(tui::theme().ui.accent_alt) | dim);
     }
 
     const bool is_light = tui::theme().name == "light";
@@ -877,7 +876,7 @@ static Element render_regular_sidebar(const acecode::TuiState& state,
         }) | flex,
         text(" "),
     }) | size(WIDTH, EQUAL, sidebar_width) |
-       bgcolor(is_light ? Color::RGB(246, 248, 250) : Color::RGB(22, 22, 30));
+       bgcolor(is_light ? Color::RGB(240, 240, 242) : Color::RGB(18, 18, 20));
     return acecode::tui::non_selectable(std::move(sidebar));
 }
 
@@ -3544,8 +3543,8 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
                 ? emptyElement()
                 : paragraph(state.update_notice) | color(tui::theme().semantic.warning),
             text(state.status_line) | color(status_line_color(state.status_line)),
-            text(cwd_display) | color(tui::theme().ui.accent) | dim,
-        }) | bgcolor(is_light ? Color::RGB(221, 244, 255) : Color::RGB(28, 28, 38));
+            text(cwd_display) | color(tui::theme().ui.accent_alt) | dim,
+        }) | bgcolor(is_light ? Color::RGB(225, 235, 245) : Color::RGB(0, 30, 45));
     } else {
         // -- Logo --
         auto logo = vbox({
@@ -3562,7 +3561,7 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
                 logo,
                 filler(),
                 text("  "),
-            }) | bgcolor(is_light ? Color::RGB(221, 244, 255) : Color::RGB(28, 28, 38));
+            }) | bgcolor(is_light ? Color::RGB(225, 235, 245) : Color::RGB(0, 30, 45));
         } else {
             header = hbox({
                 text("    "),
@@ -3574,10 +3573,10 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
                         ? emptyElement()
                         : paragraph(state.update_notice) | color(tui::theme().semantic.warning),
                     text(state.status_line) | color(status_line_color(state.status_line)),
-                    text(cwd_display) | color(tui::theme().ui.accent) | dim,
+                    text(cwd_display) | color(tui::theme().ui.accent_alt) | dim,
                 }),
                 text("  "),
-            }) | bgcolor(is_light ? Color::RGB(221, 244, 255) : Color::RGB(28, 28, 38));
+            }) | bgcolor(is_light ? Color::RGB(225, 235, 245) : Color::RGB(0, 30, 45));
         }
     }
 
@@ -3636,10 +3635,15 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
         Decorator focus_decorator = nothing;
 
         if (msg.role == "user") {
+            // 用户消息整块加灰底高亮,把每一轮对话与助手/工具输出区分开。
+            // flex 让内容撑满行宽,背景色铺满整块。
+            const Color user_bg = (tui::theme().name == "light")
+                ? Color::RGB(232, 232, 235)
+                : Color::RGB(48, 48, 54);
             auto line = hbox({
                 text(" > ") | bold | color(tui::theme().markdown.link),
                 paragraph(msg.content) | color(tui::theme().ui.text_primary) | flex,
-            });
+            }) | bgcolor(user_bg);
             if (focused_message) {
                 line = line | focus;
             }
@@ -3697,7 +3701,7 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
             // 这与 LLM 工具结果(role="tool_result")形成对照:LLM 调用的
             // 工具结果走摘要/diff/fold 三优先级,有 Ctrl+E 展开机制。
             auto line = hbox({
-                text("   <- ") | color(tui::theme().semantic.info),
+                text("   <- ") | color(tui::theme().ui.text_dim),
                 render_tool_result_lines_preserving_breaks(msg.content) | flex,
             });
             if (focused_message) {
@@ -3732,12 +3736,12 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
                     std::string summary_line = renderable_tool_summary_line(
                         s, metric_str, summary_width);
                     rows.push_back(hbox({
-                        text("   <- ") | color(tui::theme().semantic.info),
+                        text("   <- ") | color(tui::theme().ui.text_dim),
                         text(summary_line) | color(row_color) | flex,
                     }));
                 } else {
                     rows.push_back(hbox({
-                        text("   <- ") | color(tui::theme().semantic.info),
+                        text("   <- ") | color(tui::theme().ui.text_dim),
                         text("diff") | color(tui::theme().ui.text_muted) | flex,
                     }));
                 }
@@ -3823,7 +3827,7 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
 
                 Elements rows;
                 rows.push_back(hbox({
-                    text("   <- ") | color(tui::theme().semantic.info),
+                    text("   <- ") | color(tui::theme().ui.text_dim),
                     text(summary_line) | color(row_color) | flex,
                 }));
 
@@ -3878,7 +3882,7 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
                 }
 
                 auto line = hbox({
-                    text("   <- ") | color(tui::theme().semantic.info),
+                    text("   <- ") | color(tui::theme().ui.text_dim),
                     render_tool_result_lines_preserving_breaks(display_content) | flex,
                 });
                 if (focused_message) {
@@ -3982,9 +3986,9 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
             if (dist == 0)
                 c = tui::theme().ui.accent;
             else if (dist == 1)
-                c = tui::theme().ui.text_muted;
+                c = is_light ? Color::RGB(130, 90, 0) : Color::RGB(180, 180, 60);
             else if (dist == 2)
-                c = tui::theme().ui.text_dim;
+                c = is_light ? Color::RGB(160, 130, 60) : Color::RGB(120, 120, 40);
             else
                 c = tui::theme().ui.text_dim;
             chars.push_back(text(utf8_chars[i]) | color(c));
@@ -4007,7 +4011,7 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
     Element mcp_loading_element = emptyElement();
     if (!show_regular_sidebar && mcp_sidebar_has_loading(state)) {
         mcp_loading_element = hbox({
-            text(" i ") | bold | color(tui::theme().ui.accent),
+            text(" i ") | bold | color(Color::White),
             render_white_shimmer_text("MCP loading", anim_tick.load()),
         });
     }
@@ -4479,7 +4483,7 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
                 color(tui::theme().ui.text_dim));
         } else {
             status_parts.push_back(
-                text("  ctrl+p: cycle permission mode  ") | dim |
+                text("  shift+tab: cycle permission mode  ") | dim |
                 color(tui::theme().ui.text_dim));
         }
         if (state.tool_running) {
@@ -4542,7 +4546,7 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
         });
     } else {
         bottom_bar = hbox({
-            text("  ctrl+p: cycle permission mode") | dim | color(tui::theme().ui.text_dim),
+            text("  shift+tab: cycle permission mode") | dim | color(tui::theme().ui.text_dim),
             filler(),
             tool_timer_el,
             goal_el,
@@ -7081,8 +7085,8 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                 return true;
             }
         }
-        // Ctrl+P: cycle permission mode
-        if (event == Event::Special(std::string(1, '\x10'))) {
+        // Shift+Tab: cycle permission mode
+        if (event == Event::TabReverse) {
             std::lock_guard<std::mutex> lk(state.mu);
             if (!state.is_waiting && !state.confirm_pending) {
                 const PermissionMode before = permissions.mode();

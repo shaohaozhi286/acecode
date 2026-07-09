@@ -39,7 +39,7 @@ ThemePalette make_dark_palette() {
         /* number       */ Color::Yellow,
         /* comment      */ Color::GrayDark,
         /* type         */ Color::Cyan,
-        /* preproc      */ Color::MagentaLight,
+        /* preproc      */ Color::Cyan,       // 工具发起行 → 与 ACE logo 同青蓝
         /* function     */ Color::Yellow,
         /* op           */ Color::White,
         /* default_text */ Color::GrayLight,
@@ -103,7 +103,7 @@ ThemePalette make_light_palette() {
         /* number       */ Color::RGB(170, 100, 0),
         /* comment      */ Color::RGB(0, 128, 0),
         /* type         */ Color::RGB(0, 110, 150),
-        /* preproc      */ Color::RGB(140, 0, 140),
+        /* preproc      */ Color::RGB(0, 100, 140),  // 工具发起行 → 与 ACE logo 同青蓝
         /* function     */ Color::RGB(120, 80, 0),
         /* op           */ Color::Black,
         /* default_text */ Color::RGB(60, 60, 60),
