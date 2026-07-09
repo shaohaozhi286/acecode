@@ -327,6 +327,49 @@ TEST(SessionStorage, ListSessionsBackfillsSummaryAndCountFromJsonl) {
     EXPECT_EQ(sessions[0].turn_count, 1);
 }
 
+// 场景:headless `-p --session-id` 允许调用方自定 id(如 "ci-run-42"),
+// 文件名不再是 YYYYMMDD-HHMMSS-XXXX 形状。回归背景:list_sessions 原来只认
+// 自动生成形状,自定 id 会话在 TUI /resume、Web 列表与 `-p -c` 里全部隐身
+//(实测 `-p --session-id cc-cont-test` 后 `-p -c` 报 no previous session)。
+// 期望:自定 id 与自动生成 id 同场可见,仍按 updated_at 新前旧后排序;
+// 旧 PID 后缀 meta(<canonical>-<pid>.meta.json)继续被当 legacy 数据排除,
+// 不能因为宽字符集正则被误吞进列表。
+TEST(SessionStorage, ListSessionsIncludesCustomIdSessions) {
+    auto dir = make_unique_tmp_dir("custom-id");
+
+    SessionMeta custom;
+    custom.id = "ci-run-42";
+    custom.cwd = dir.string();
+    custom.created_at = "2026-07-09T10:00:00Z";
+    custom.updated_at = "2026-07-09T10:00:00Z";
+    custom.message_count = 1;
+    SessionStorage::write_meta(
+        SessionStorage::meta_path(dir.string(), custom.id), custom);
+
+    SessionMeta canonical;
+    canonical.id = "20260709-110000-abcd";
+    canonical.cwd = dir.string();
+    canonical.created_at = "2026-07-09T11:00:00Z";
+    canonical.updated_at = "2026-07-09T11:00:00Z";
+    canonical.message_count = 1;
+    SessionStorage::write_meta(
+        SessionStorage::meta_path(dir.string(), canonical.id), canonical);
+
+    // 旧 PID 后缀 meta:文件名匹配宽正则的字符集,但必须被 legacy 分支排除。
+    SessionMeta legacy;
+    legacy.id = "20260426-100000-abcd";
+    legacy.cwd = dir.string();
+    legacy.created_at = "2026-04-26T10:00:00Z";
+    legacy.updated_at = "2026-04-26T10:00:00Z";
+    SessionStorage::write_meta(
+        SessionStorage::meta_path(dir.string(), legacy.id, 9999), legacy);
+
+    auto sessions = SessionStorage::list_sessions(dir.string());
+    ASSERT_EQ(sessions.size(), 2u);
+    EXPECT_EQ(sessions[0].id, canonical.id);  // updated_at 新的在前
+    EXPECT_EQ(sessions[1].id, custom.id);
+}
+
 // 场景:JSONL 可能因为异常退出留下坏行或未以换行结尾的半行。
 // load_messages 只能返回完整、可解析的记录,不能抛异常。
 TEST(SessionStorage, LoadMessagesSkipsMalformedAndTrailingPartialLines) {

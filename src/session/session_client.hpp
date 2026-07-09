@@ -124,6 +124,11 @@ struct SessionOptions {
     // spawn_subagent 派生时的父会话 id。非空 → 写入 meta 持久化,子会话
     // 从常规列表隐藏、归入父会话的「后台任务」面板;daemon 重启后依然生效。
     std::string parent_session_id;
+
+    // 可选调用方自定的新会话 id(headless -p --session-id:脚本免解析
+    // stdout 即可确定性地 --resume)。留空 = registry 自动生成。调用方
+    // 负责保证 id 文件名安全且未被占用;registry 不做碰撞检查。
+    std::string preset_session_id;
 };
 
 // ----- Current session model state -----

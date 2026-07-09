@@ -1,10 +1,15 @@
 #pragma once
 
-// acecode -p / --print 无头运行器(openspec add-headless-print-mode,阶段 1)。
+// acecode -p / --print 无头运行器(openspec add-headless-print-mode)。
 //
-// 复刻 claude -p 的第 1 层能力:跑完一个 agent 回合,stdout 打印最终 assistant
-// 文本,退出码表示成败。会话经 SessionRegistry 正常落盘(canonical JSONL +
-// meta),事后可用 `acecode --resume <id>` 或 Web UI 接管。
+// 复刻 claude -p:跑完一个 agent 回合,stdout 打印最终 assistant 文本,退出码
+// 表示成败。会话经 SessionRegistry 正常落盘(canonical JSONL + meta),事后可
+// 用 `acecode --resume <id>` 或 Web UI 接管。
+//
+// 连续对话(每轮一个新进程,磁盘续接):`-c/--continue` 接当前 cwd 最近会话;
+// `--resume <id>` 接指定会话(--model/--permission-mode 显式给出时覆盖会话保
+// 存值);`--session-id <id>` 让脚本自定新会话 id 免解析 stdout;
+// `--output-format json` 输出单个 result 对象(含 session_id)。
 //
 // bootstrap 是 daemon worker.cpp 的精简版:同一套 provider 解析 / 工具注册 /
 // MCP / LSP / web_search / hooks / SessionRegistry,但不写 run/ 运行时文件、

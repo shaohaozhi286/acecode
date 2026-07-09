@@ -28,6 +28,8 @@
 #include "../utils/utf8_path.hpp"
 #include "../web/handlers/skill_command_expander.hpp"
 
+#include <nlohmann/json.hpp>
+
 #include <atomic>
 #include <cctype>
 #include <chrono>
@@ -188,8 +190,7 @@ int run_print_mode(const HeadlessCliOptions& opts) {
     if (prompt.empty()) {
         std::cerr << "acecode -p: input must be provided either through stdin or "
                      "as a prompt argument\n"
-                     "usage: acecode -p [--yolo] [--permission-mode <m>] "
-                     "[--model <name>] [--max-turns <n>] \"<prompt>\"\n";
+                  << print_mode_usage_line();
         return 64;
     }
 
@@ -306,8 +307,11 @@ int run_print_mode(const HeadlessCliOptions& opts) {
     acecode::daemon::DaemonMcpRuntime mcp_runtime;
     mcp_runtime.start(cfg, tools);
 
-    int exit_code = 1;
-    {
+    // 会话流程收进 lambda:它内部的所有早退(参数/会话错误 return)都必须
+    // 落回下方的 mcp/lsp shutdown —— 直接 return 跳过收尾会让 MCP 子进程 /
+    // LSP reader 线程在 static 析构期触发 fail-fast(实测 0xC0000409),
+    // 退出码被吃掉。registry 在 lambda 内构造,先于 shutdown 析构。
+    const int exit_code = [&]() -> int {
         // ---- 权限模板:默认跟随配置;--yolo = dangerous(全放行) ----
         acecode::PermissionManager template_perm;
         template_perm.set_mode(
@@ -341,12 +345,55 @@ int run_print_mode(const HeadlessCliOptions& opts) {
         session_opts.permission_mode = opts.permission_mode;
         session_opts.auto_start      = false;
 
+        // meta 探针:--continue 找最近会话 / --session-id 查碰撞都只读磁盘,
+        // 复用 registry resume 的同款惰性 SessionManager 用法(不落任何文件)。
+        SessionManager meta_probe;
+        meta_probe.start_session(cwd, "", "", "", "", "headless");
+
         std::string session_id;
-        try {
-            session_id = client.create_session(session_opts);
-        } catch (const std::exception& e) {
-            std::cerr << "acecode -p: failed to create session: " << e.what() << "\n";
-            return 1;
+        const bool resuming = opts.continue_latest || !opts.resume_session_id.empty();
+        if (resuming) {
+            std::string target = opts.resume_session_id;
+            if (target.empty()) {
+                // --continue:当前 cwd 项目目录里最近的普通会话(list 最近在前;
+                // 跳过 spawn_subagent 子会话 —— 它们不是用户可续接的对话)。
+                for (const auto& meta : meta_probe.list_sessions()) {
+                    if (meta.parent_session_id.empty()) {
+                        target = meta.id;
+                        break;
+                    }
+                }
+                if (target.empty()) {
+                    std::cerr << "acecode -p: no previous session to continue in "
+                                 "this directory (start one without -c first)\n";
+                    return 1;
+                }
+            }
+            if (!client.resume_session(target, session_opts)) {
+                std::cerr << "acecode -p: cannot resume session '" << target
+                          << "': not found in this directory's session store\n";
+                return 1;
+            }
+            session_id = target;
+        } else {
+            if (!opts.session_id.empty()) {
+                // 碰撞即报错而不是静默续写:--session-id 的契约是"创建新会话",
+                // 撞上已有 id 十有八九是脚本想 --resume 却写错了 flag。
+                if (meta_probe.has_session_file(opts.session_id) ||
+                    !meta_probe.load_session_meta(opts.session_id).id.empty()) {
+                    std::cerr << "acecode -p: session id '" << opts.session_id
+                              << "' already exists; use --resume " << opts.session_id
+                              << " to continue it\n";
+                    return 1;
+                }
+                session_opts.preset_session_id = opts.session_id;
+            }
+            try {
+                session_id = client.create_session(session_opts);
+            } catch (const std::exception& e) {
+                std::cerr << "acecode -p: failed to create session: " << e.what() << "\n";
+                return 1;
+            }
         }
 
         // provider 兜底检查:没有可用模型配置时 fail fast,而不是让回合
@@ -437,6 +484,7 @@ int run_print_mode(const HeadlessCliOptions& opts) {
             final_text = last_assistant_text_after(*entry->sm, baseline);
         }
 
+        int exit_code = 1;
         if (aborted) {
             exit_code = 130;
         } else if (final_text.empty()) {
@@ -447,17 +495,37 @@ int run_print_mode(const HeadlessCliOptions& opts) {
                       << "\n";
             exit_code = 1;
         } else {
+            exit_code = 0;
+        }
+
+        if (opts.output_format == "json") {
+            // 脚本消费面:成功失败都输出单个 result 对象(含 session_id 供
+            // 下一轮 --resume 链式调用),诊断细节仍走上面的 stderr。
+            nlohmann::json out{
+                {"type", "result"},
+                {"session_id", session_id},
+                {"is_error", exit_code != 0},
+                {"result", final_text},
+            };
+            if (aborted) {
+                out["error"] = "interrupted";
+            } else if (exit_code != 0) {
+                out["error"] = last_error_reason.empty() ? "no assistant reply"
+                                                         : last_error_reason;
+            }
+            const std::string dumped = out.dump();
+            std::fwrite(dumped.data(), 1, dumped.size(), stdout);
+            std::fputc('\n', stdout);
+            std::fflush(stdout);
+        } else if (exit_code == 0) {
             std::fwrite(final_text.data(), 1, final_text.size(), stdout);
             if (final_text.empty() || final_text.back() != '\n') {
                 std::fputc('\n', stdout);
             }
             std::fflush(stdout);
-            exit_code = 0;
         }
-
-        std::cerr << "[acecode] session " << session_id
-                  << " saved; resume with: acecode --resume " << session_id << "\n";
-    } // registry 析构:abort + join 所有 AgentLoop worker 线程,释放 writer lease
+        return exit_code;
+    }(); // registry 析构:abort + join 所有 AgentLoop worker 线程,释放 writer lease
 
     mcp_runtime.shutdown();
     acecode::lsp::shutdown();

@@ -643,7 +643,9 @@ SessionRegistry::~SessionRegistry() {
 }
 
 std::string SessionRegistry::create(const SessionOptions& opts) {
-    std::string id = SessionStorage::generate_session_id();
+    std::string id = opts.preset_session_id.empty()
+        ? SessionStorage::generate_session_id()
+        : opts.preset_session_id;
     SessionOptions create_opts = opts;
     if (create_opts.no_workspace) create_opts.cwd.clear();
     SessionOptions resolved = with_resolved_workspace(deps_, create_opts, id);
@@ -733,7 +735,20 @@ SessionRegistry::make_entry_locked(const std::string& id,
         // 注意: rules 当前没有 copy 接口 — v1 暂不复制 rules,daemon 路径
         // 自己装(后续 Section 9 落 HTTP 时一起补)。TUI 路径不受影响。
     }
-    if (resumed_meta) {
+    // 显式传入的 permission_mode 优先于 resume meta 恢复值:headless
+    // `-p --resume <id> --permission-mode accept-edits` 若被静默忽略,脚本
+    // 会在 default 模式下被写权限门自动拒绝,极难排查。web resume 不传该
+    // 字段(entry_opts 为空串),仍走 meta 恢复分支。
+    if (!opts.permission_mode.empty()) {
+        const PermissionMode requested_mode =
+            permission_mode_from_name(opts.permission_mode);
+        if (requested_mode == PermissionMode::Plan) {
+            entry->perm->set_mode(PermissionMode::Default);
+            entry->perm->set_mode(PermissionMode::Plan);
+        } else {
+            entry->perm->set_mode(requested_mode);
+        }
+    } else if (resumed_meta) {
         const PermissionMode restored_mode =
             permission_mode_from_name(resumed_meta->permission_mode);
         if (restored_mode == PermissionMode::Plan) {
@@ -744,15 +759,6 @@ SessionRegistry::make_entry_locked(const std::string& id,
             entry->perm->set_mode(PermissionMode::Plan);
         } else {
             entry->perm->set_mode(restored_mode);
-        }
-    } else if (!opts.permission_mode.empty()) {
-        const PermissionMode requested_mode =
-            permission_mode_from_name(opts.permission_mode);
-        if (requested_mode == PermissionMode::Plan) {
-            entry->perm->set_mode(PermissionMode::Default);
-            entry->perm->set_mode(PermissionMode::Plan);
-        } else {
-            entry->perm->set_mode(requested_mode);
         }
     }
     entry->sm->set_permission_mode(
@@ -863,6 +869,11 @@ bool SessionRegistry::resume(const std::string& id, const SessionOptions& opts) 
     entry_opts.cwd = resolved.cwd;
     entry_opts.no_workspace = meta.no_workspace || resolved.no_workspace;
     entry_opts.workspace_hash = entry_opts.no_workspace ? std::string{} : resolved.workspace_hash;
+    // headless -p --resume 允许 --model / --permission-mode 覆盖会话保存值
+    //(resolve_session_model 与 make_entry_locked 都是"显式指定优先于 meta");
+    // web resume 不传这两个字段,行为不变。
+    entry_opts.model_name = resolved.model_name;
+    entry_opts.permission_mode = resolved.permission_mode;
     auto entry = make_entry_locked(id, entry_opts, &meta);
     auto messages = entry->sm->resume_session(id);
     if (!entry->sm->last_error().empty()) {

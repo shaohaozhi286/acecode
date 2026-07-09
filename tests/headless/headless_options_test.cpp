@@ -150,3 +150,128 @@ TEST(HeadlessOptions, AllowsEmptyPromptForStdinPiping) {
     EXPECT_TRUE(o.print_mode);
     EXPECT_TRUE(o.prompt.empty());
 }
+
+// ---- 连续对话 flags(-c / --resume / --session-id / --output-format) ----
+
+// 场景:-c / --continue 两种写法,接当前目录最近会话。
+// 期望:continue_latest 置位,prompt 不受影响。
+TEST(HeadlessOptions, ParsesContinueAliases) {
+    for (const char* alias : {"-c", "--continue"}) {
+        auto o = parse_headless_cli_options({"-p", alias, "next step"});
+        EXPECT_TRUE(o.error.empty()) << alias << ": " << o.error;
+        EXPECT_TRUE(o.continue_latest) << alias;
+        EXPECT_EQ(o.prompt, "next step") << alias;
+    }
+}
+
+// 场景:--resume 的空格 / 等号两种形式。
+// 期望:resume_session_id 落位,prompt 仍取位置参数。
+TEST(HeadlessOptions, ParsesResumeWithId) {
+    auto space = parse_headless_cli_options(
+        {"-p", "--resume", "20260709-134637-3400", "go on"});
+    EXPECT_TRUE(space.error.empty()) << space.error;
+    EXPECT_EQ(space.resume_session_id, "20260709-134637-3400");
+    EXPECT_EQ(space.prompt, "go on");
+
+    auto eq = parse_headless_cli_options({"-p", "--resume=my-task", "go on"});
+    EXPECT_TRUE(eq.error.empty()) << eq.error;
+    EXPECT_EQ(eq.resume_session_id, "my-task");
+}
+
+// 场景:--resume 不带 id(print 模式有位置参数 prompt,裸 --resume 会把
+// prompt 吞成 id,所以这里与 TUI 语义刻意不同 —— id 必填,"最近会话"独立
+// 给 -c/--continue)。
+// 期望:--resume 是最后一个 token 时报 requires;--resume 后面跟 prompt
+// (含空格/标点,不满足 id 字符集)时报 invalid,两种手滑都拦下来。
+TEST(HeadlessOptions, ResumeRequiresValidId) {
+    auto missing = parse_headless_cli_options({"-p", "--resume"});
+    EXPECT_FALSE(missing.error.empty());
+    EXPECT_NE(missing.error.find("requires"), std::string::npos) << missing.error;
+
+    auto swallowed = parse_headless_cli_options({"-p", "--resume", "fix the bug"});
+    EXPECT_FALSE(swallowed.error.empty());
+    EXPECT_NE(swallowed.error.find("invalid"), std::string::npos) << swallowed.error;
+}
+
+// 场景:--session-id 自定新会话 id(脚本免解析 stdout 即可 --resume)。
+// 期望:合法 id 落位;含路径分隔符 / 点号 / 超长(>64)的 id 全部报错 ——
+// id 直接成为 <id>.jsonl 文件名,必须挡住路径穿越。
+TEST(HeadlessOptions, ParsesAndValidatesSessionId) {
+    auto ok = parse_headless_cli_options({"-p", "--session-id", "ci_run-42", "go"});
+    EXPECT_TRUE(ok.error.empty()) << ok.error;
+    EXPECT_EQ(ok.session_id, "ci_run-42");
+
+    for (const char* bad : {"../evil", "a/b", "a.b", "with space"}) {
+        auto o = parse_headless_cli_options({"-p", "--session-id", bad, "go"});
+        EXPECT_FALSE(o.error.empty()) << "value: '" << bad << "'";
+    }
+    auto too_long = parse_headless_cli_options(
+        {"-p", std::string("--session-id=") + std::string(65, 'a'), "go"});
+    EXPECT_FALSE(too_long.error.empty());
+}
+
+// 场景:互斥组合 —— --continue 与 --resume 同给;--session-id(新建)与
+// --resume/--continue(续接)同给。
+// 期望:全部硬报错,不做静默取舍(脚本里的矛盾参数几乎必是 bug)。
+TEST(HeadlessOptions, RejectsConflictingContinuationFlags) {
+    auto both = parse_headless_cli_options({"-p", "-c", "--resume", "id-1", "go"});
+    EXPECT_FALSE(both.error.empty());
+
+    auto mix1 = parse_headless_cli_options(
+        {"-p", "--session-id", "new-1", "--resume", "id-1", "go"});
+    EXPECT_FALSE(mix1.error.empty());
+
+    auto mix2 = parse_headless_cli_options({"-p", "--session-id", "new-1", "-c", "go"});
+    EXPECT_FALSE(mix2.error.empty());
+}
+
+// 场景:--output-format 的合法值(text/json,空格 / 等号形式)与非法值。
+// 期望:合法值透传;非法值报错且消息带上原值。
+TEST(HeadlessOptions, ParsesAndValidatesOutputFormat) {
+    auto js = parse_headless_cli_options({"-p", "--output-format", "json", "go"});
+    EXPECT_TRUE(js.error.empty()) << js.error;
+    EXPECT_EQ(js.output_format, "json");
+
+    auto txt = parse_headless_cli_options({"-p", "--output-format=text", "go"});
+    EXPECT_TRUE(txt.error.empty()) << txt.error;
+    EXPECT_EQ(txt.output_format, "text");
+
+    auto bad = parse_headless_cli_options({"-p", "--output-format", "yaml", "go"});
+    EXPECT_FALSE(bad.error.empty());
+    EXPECT_NE(bad.error.find("yaml"), std::string::npos);
+}
+
+// 场景:-p 模式里的 -h / --help。
+// 期望:show_help 置位且无解析错误(main.cpp 对 show_help 优先出帮助)。
+TEST(HeadlessOptions, ParsesHelpFlag) {
+    for (const char* alias : {"-h", "--help"}) {
+        auto o = parse_headless_cli_options({"-p", alias});
+        EXPECT_TRUE(o.error.empty()) << alias << ": " << o.error;
+        EXPECT_TRUE(o.show_help) << alias;
+    }
+}
+
+// 场景:--session-id 传入形如 <YYYYMMDD-HHMMSS-XXXX>-<digits> 的 id。这种
+// 文件名与旧 PID 后缀实验数据无法区分,SessionStorage::list_sessions 会把
+// 它当 legacy 数据隐藏 —— 创建出来的会话在所有列表里隐身。
+// 期望:解析层直接拒绝;字符集相同但不含 canonical 前缀的 id(foo-123)
+// 不受影响。
+TEST(HeadlessOptions, RejectsSessionIdShapedLikeLegacyPidFile) {
+    auto bad = parse_headless_cli_options(
+        {"-p", "--session-id", "20260426-100000-abcd-9999", "go"});
+    EXPECT_FALSE(bad.error.empty());
+    EXPECT_NE(bad.error.find("legacy"), std::string::npos) << bad.error;
+
+    auto ok = parse_headless_cli_options({"-p", "--session-id", "foo-123", "go"});
+    EXPECT_TRUE(ok.error.empty()) << ok.error;
+    EXPECT_EQ(ok.session_id, "foo-123");
+}
+
+// 场景:is_valid_session_id_token 的边界 —— 恰好 64 字符(合法上限)与
+// 65 字符(超限);空串。
+// 期望:64 过,65 与空串拒。上限防的是把整段 prompt 误传成 id 的极端场景。
+TEST(HeadlessOptions, SessionIdTokenBoundaries) {
+    EXPECT_TRUE(acecode::headless::is_valid_session_id_token(std::string(64, 'x')));
+    EXPECT_FALSE(acecode::headless::is_valid_session_id_token(std::string(65, 'x')));
+    EXPECT_FALSE(acecode::headless::is_valid_session_id_token(""));
+}

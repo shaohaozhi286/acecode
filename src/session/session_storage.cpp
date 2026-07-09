@@ -317,9 +317,15 @@ static const std::regex& session_filename_regex() {
     return re;
 }
 
+// 自动生成的 id 是 YYYYMMDD-HHMMSS-XXXX,但 headless `-p --session-id`
+// 允许调用方自定 [A-Za-z0-9_-]{1,64} 的 id(否则自定 id 会话在 TUI /resume、
+// Web 列表与 -p -c 里全部隐身)。匹配放宽到同一字符集;PID 后缀的旧实验
+// 数据(<canonical>-<pid>.meta.json)会被这个宽正则误吞,调用方必须先用
+// pid_meta_filename_regex 排除。workspace.json / model_override.json 等
+// 邻居文件没有 .meta.json 后缀,不会被误认。
 static const std::regex& meta_filename_regex() {
     static const std::regex re(
-        R"(^(\d{8}-\d{6}-[0-9a-f]{4})\.meta\.json$)");
+        R"(^([A-Za-z0-9_-]{1,64})\.meta\.json$)");
     return re;
 }
 
@@ -460,10 +466,14 @@ std::vector<SessionMeta> SessionStorage::list_sessions(const std::string& projec
     }
 
     const auto& re = meta_filename_regex();
+    const auto& pid_re = pid_meta_filename_regex();
     for (const auto& entry : fs::directory_iterator(project_path)) {
         if (!entry.is_regular_file()) continue;
         std::string fname = path_to_utf8(entry.path().filename());
         std::smatch m;
+        // PID 后缀的旧实验数据不进列表(项目不支持迁移,只提示用户删除);
+        // 必须先于宽正则判断,否则 <canonical>-<pid> 会被当成普通会话 id。
+        if (std::regex_match(fname, m, pid_re)) continue;
         if (!std::regex_match(fname, m, re)) continue;
         std::string id = m[1].str();
 

@@ -2511,11 +2511,53 @@ static bool is_version_command_arg(const std::string& arg) {
            arg == "/version";
 }
 
+static bool is_help_command_arg(const std::string& arg) {
+    return arg == "help" || arg == "-h" || arg == "--help" || arg == "/?";
+}
+
+// 顶层 `acecode --help`。各子命令的完整帮助由子命令自己出
+// (`acecode -p --help` / `acecode daemon help`),这里只给导航级概览。
+static void print_top_level_help() {
+    std::cout <<
+        "ACECode v" ACECODE_VERSION " - terminal coding agent\n"
+        "\n"
+        "Usage:\n"
+        "  acecode [options]                  Start the interactive TUI\n"
+        "  acecode -p [options] \"<prompt>\"    Headless print mode (acecode -p --help)\n"
+        "  acecode configure                  Interactive provider/model setup\n"
+        "  acecode daemon <subcommand>        Background daemon + Web UI (acecode daemon help)\n"
+#ifdef _WIN32
+        "  acecode service <subcommand>       Windows service management (acecode service help)\n"
+#endif
+        "  acecode upgrade [--force]          Self-update to the latest release\n"
+        "  acecode version                    Print version and exit\n"
+        "\n"
+        "Interactive (TUI) options:\n"
+        "  --resume [id]          Resume a session (no id = most recent)\n"
+        "  -r                     Open the resume picker on startup\n"
+        "  -w, --worktree [name]  Work inside an isolated git worktree\n"
+        "                         (name may also be a PR ref: #123 / GitHub PR URL)\n"
+        "  --yolo, --dangerous    Skip all permission confirmations\n"
+        "  --alt-screen           Force alternate-screen rendering (legacy terminals)\n"
+        "\n"
+        "Headless print mode (full reference: acecode -p --help):\n"
+        "  acecode -p \"prompt\"                Run one turn, print the reply to stdout\n"
+        "  echo \"...\" | acecode -p            Prompt from stdin (pipe-friendly)\n"
+        "  acecode -p -c \"...\"                Continue this directory's latest session\n"
+        "  acecode -p --resume <id> \"...\"     Continue a specific session\n"
+        "  acecode -p --output-format json    Structured result with session_id\n";
+}
+
 static std::optional<int> dispatch_non_tui_command(int argc, char* argv[]) {
     const std::string exe_path = executable_path_from_argv(argc, argv);
 
     if (argc >= 2 && is_version_command_arg(argv[1] ? std::string(argv[1]) : std::string())) {
         std::cout << "acecode v" ACECODE_VERSION << "\n";
+        return 0;
+    }
+
+    if (argc >= 2 && is_help_command_arg(argv[1] ? std::string(argv[1]) : std::string())) {
+        print_top_level_help();
         return 0;
     }
 
@@ -2622,10 +2664,14 @@ static std::optional<int> dispatch_non_tui_command(int argc, char* argv[]) {
 #endif
         if (acecode::headless::should_enter_print_mode(tokens)) {
             auto opts = acecode::headless::parse_headless_cli_options(tokens);
+            // --help 优先于用法报错:`-p --help` 后面跟什么都先出帮助。
+            if (opts.show_help) {
+                std::cout << acecode::headless::print_mode_help();
+                return 0;
+            }
             if (!opts.error.empty()) {
                 std::cerr << "acecode -p: " << opts.error << "\n"
-                          << "usage: acecode -p [--yolo] [--permission-mode <m>] "
-                             "[--model <name>] [--max-turns <n>] \"<prompt>\"\n";
+                          << acecode::headless::print_mode_usage_line();
                 return 64;
             }
             return acecode::headless::run_print_mode(opts);
