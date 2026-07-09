@@ -8,6 +8,7 @@
 
 #include "agent_loop.hpp"
 #include "commands/compact.hpp"
+#include "tui/tool_row_format.hpp"
 #include "tui/tui_helpers.hpp"
 #include "tui/clipboard_helpers.hpp"
 #include "session/todo_state.hpp"
@@ -30,7 +31,17 @@ void setup_agent_callbacks(TuiContext& ctx) {
             !state.conversation.back().is_tool) {
             state.conversation.back().content = content;
         } else {
-            state.conversation.push_back({role, content, is_tool});
+            TuiState::Message m{role, content, is_tool};
+            if (role == "tool_call") {
+                // 与 main.cpp on_message 一致:push 时算好紧凑预览,执行中
+                // 的工具行即显示 `● Bash(args)` 而非原始 JSON。
+                const auto parts = parse_tool_row(content, std::string());
+                if (!parts.name.empty()) {
+                    m.display_override = ToolExecutor::build_tool_call_preview(
+                        parts.name, parts.args);
+                }
+            }
+            state.conversation.push_back(std::move(m));
         }
         state.chat_follow_tail = true;
         screen.PostEvent(ftxui::Event::Custom);

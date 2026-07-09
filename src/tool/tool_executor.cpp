@@ -123,6 +123,22 @@ std::string ToolExecutor::build_tool_call_preview(const std::string& tool_name,
                 p = truncate_utf8_suffix(p, 40);
                 return tool_name + "  " + p;
             }
+        } else if (tool_name == "grep" || tool_name == "glob") {
+            if (j.contains("pattern") && j["pattern"].is_string()) {
+                std::string preview = j["pattern"].get<std::string>();
+                if (j.contains("path") && j["path"].is_string() &&
+                    !j["path"].get<std::string>().empty()) {
+                    preview += " " + j["path"].get<std::string>();
+                }
+                preview = truncate_utf8_prefix(preview, 60);
+                return tool_name + "  " + preview;
+            }
+        } else if (tool_name == "web_search") {
+            if (j.contains("query") && j["query"].is_string()) {
+                std::string q = truncate_utf8_prefix(
+                    j["query"].get<std::string>(), 60);
+                return tool_name + "  " + q;
+            }
         } else if (tool_name == "skill_view") {
             if (j.contains("name") && j["name"].is_string()) {
                 std::string preview = j["name"].get<std::string>();
@@ -183,12 +199,12 @@ std::string ToolExecutor::build_tool_call_preview(const std::string& tool_name,
                 value = value_for("target");
                 std::string fill_value = value_for("value");
                 if (!fill_value.empty()) {
-                    value += " <- " + truncate_utf8_prefix(fill_value, 40);
+                    value += " = " + truncate_utf8_prefix(fill_value, 40);
                 }
             } else if (tool_name == "browser_type") {
                 value = value_for("target");
                 std::string text = value_for("text");
-                if (!text.empty()) value += " <- " + truncate_utf8_prefix(text, 40);
+                if (!text.empty()) value += " = " + truncate_utf8_prefix(text, 40);
             } else if (tool_name == "browser_evaluate") {
                 value = truncate_utf8_prefix(value_for("code"), 60);
             } else if (tool_name == "browser_network") {

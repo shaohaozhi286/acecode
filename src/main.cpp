@@ -132,6 +132,7 @@
 #include "tui/thick_vscroll_bar.hpp"
 #include "tui/non_selectable.hpp"
 #include "tui/tool_progress.hpp"
+#include "tui/tool_row_format.hpp"
 #include "tui/theme_palette.hpp"
 #include "utils/terminal_theme_detect.hpp"
 #include "tui/sidebar_model.hpp"
@@ -217,7 +218,9 @@ static bool is_success_summary(const acecode::ToolSummary& s) {
 static std::string renderable_tool_summary_line(const acecode::ToolSummary& s,
                                                 const std::string& metric_str,
                                                 int max_visual_width) {
-    const std::string prefix = s.icon + " " + s.verb + " \xC2\xB7 ";
+    // 不带图标(与 tui_helpers.cpp 的同名实现保持一致):工具名已在上方的
+    // `● ToolName(args)` 行加粗展示,这里的图标只是噪音。
+    const std::string prefix = s.verb + " \xC2\xB7 ";
     const std::string suffix = metric_str.empty()
         ? std::string()
         : " \xC2\xB7 " + metric_str;
@@ -1679,7 +1682,10 @@ static std::size_t combine_render_hash(std::size_t seed,
 }
 
 // 给消息生成渲染版本号；影响高度的字段变了就会重新测量。
-static std::size_t message_render_revision(const TuiState::Message& msg) {
+// transcript_expanded(Ctrl+O 全局展开)也参与哈希:开关翻转时所有消息的
+// revision 一起失配,自动触发整批重测量,不需要单独的失效通道。
+static std::size_t message_render_revision(const TuiState::Message& msg,
+                                           bool transcript_expanded) {
     std::size_t seed = 0;
     auto add_string = [&seed](const std::string& value) {
         seed = combine_render_hash(seed, std::hash<std::string>{}(value));
@@ -1692,6 +1698,7 @@ static std::size_t message_render_revision(const TuiState::Message& msg) {
     add_size(msg.is_tool ? 1u : 0u);
     add_string(msg.display_override);
     add_size(msg.expanded ? 1u : 0u);
+    add_size(transcript_expanded ? 1u : 0u);
     add_size(msg.summary.has_value() ? 1u : 0u);
     if (msg.summary.has_value()) {
         add_string(msg.summary->verb);
@@ -1776,7 +1783,8 @@ static void sync_chat_line_counts_from_layout_runtime(ChatScrollRuntime& scroll,
         scroll.message_line_count_width = current_message_width;
     }
     for (size_t i = 0; i < n_msgs; ++i) {
-        const std::size_t revision = message_render_revision(state.conversation[i]);
+        const std::size_t revision = message_render_revision(
+            state.conversation[i], state.transcript_expanded);
         const bool has_valid_layout =
             !line_count_width_changed &&
             i < scroll.message_layout_boxes.size() &&
@@ -3615,8 +3623,8 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
     auto tracked_message = [&](size_t index, Element element) -> Element {
         if (index < message_layout_valid.size()) {
             message_layout_valid[index] = 1;
-            message_layout_revisions[index] =
-                message_render_revision(state.conversation[index]);
+            message_layout_revisions[index] = message_render_revision(
+                state.conversation[index], state.transcript_expanded);
             message_layout_widths[index] = current_message_width;
         }
         return std::move(element)
@@ -3629,6 +3637,10 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
         state.conversation.size(),
         static_cast<size_t>(std::max(0,
             render_window.last_message_exclusive)));
+    // 工具行指示灯:FIFO 配对 tool_call ↔ tool_result 得到 灰/绿/红 三态。
+    // O(n) 纯角色字符串扫描,逐帧重算即可,不值得做增量缓存。
+    const auto tool_dots =
+        acecode::tui::compute_tool_call_dots(state.conversation);
     for (size_t i = render_first; i < render_last; ++i) {
         const auto& msg = state.conversation[i];
         bool focused_message = static_cast<int>(i) == state.chat_focus_index;
@@ -3678,18 +3690,35 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
             message_elements.push_back(
                 tracked_message(i, line | focus_decorator));
         } else if (msg.role == "tool_call") {
-            // Prefer the compact one-line preview (→ bash  npm install) when
-            // agent_loop supplied one; fall back to the legacy full-JSON row.
-            std::string display_text;
-            if (!msg.display_override.empty()) {
-                display_text = "\xE2\x86\x92 " + msg.display_override; // "→ "
-            } else {
-                display_text = msg.content;
+            // Claude Code 风格工具行:` ● ToolName(args)`,与 user/assistant
+            // 行同列对齐。指示灯按配对结果着色(灰=执行中/无结果、绿=成功、
+            // 红=失败);工具名 PascalCase 加粗,颜色沿用原 preproc 不变,
+            // 参数放括号内。content 解析失败时整行原样降级。
+            const auto parts = acecode::tui::parse_tool_row(
+                msg.content, msg.display_override);
+            Color dot_color = tui::theme().ui.text_dim;
+            if (i < tool_dots.size()) {
+                if (tool_dots[i] == acecode::tui::ToolCallDot::Ok) {
+                    dot_color = tui::theme().semantic.success;
+                } else if (tool_dots[i] == acecode::tui::ToolCallDot::Failed) {
+                    dot_color = tui::theme().semantic.error;
+                }
             }
-            auto line = hbox({
-                text("   -> ") | color(tui::theme().syntax.preproc),
-                paragraph(display_text) | color(tui::theme().syntax.preproc) | flex,
-            });
+            Elements segs;
+            segs.push_back(text(" \xE2\x97\x8F ") | color(dot_color)); // "●"
+            if (parts.name.empty()) {
+                segs.push_back(paragraph(msg.content)
+                    | color(tui::theme().syntax.preproc) | flex);
+            } else {
+                segs.push_back(
+                    text(acecode::tui::pascal_case_tool_name(parts.name))
+                    | bold | color(tui::theme().syntax.preproc));
+                if (!parts.args.empty()) {
+                    segs.push_back(paragraph("(" + parts.args + ")")
+                        | color(tui::theme().syntax.preproc) | flex);
+                }
+            }
+            auto line = hbox(std::move(segs));
             if (focused_message) {
                 line = line | focus;
             }
@@ -3699,9 +3728,9 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
             // 用户主动 `!cmd` 的输出 —— 全量显示,无截断、无摘要、无 fold。
             // 用户自己输入的命令就是想看完整输出,任何折叠都不符合预期。
             // 这与 LLM 工具结果(role="tool_result")形成对照:LLM 调用的
-            // 工具结果走摘要/diff/fold 三优先级,有 Ctrl+E 展开机制。
+            // 工具结果走摘要/diff/fold 三优先级,有 Ctrl+E/Ctrl+O 展开机制。
             auto line = hbox({
-                text("   <- ") | color(tui::theme().ui.text_dim),
+                text("  \xE2\x94\x94 ") | color(tui::theme().ui.text_dim), // "└"
                 render_tool_result_lines_preserving_breaks(msg.content) | flex,
             });
             if (focused_message) {
@@ -3712,8 +3741,10 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
         } else if (msg.role == "tool_result") {
             // 新优先级:有结构化 hunks → 走彩色 diff 视图(summary + 色带);
             // 其次 summary(无 hunks)→ 单行摘要;都没有 → 灰色 fold。
+            // row_expanded = 逐行 Ctrl+E 或 全局 Ctrl+O(transcript_expanded)。
+            const bool row_expanded = msg.expanded || state.transcript_expanded;
             const bool use_diff = msg.hunks.has_value();
-            const bool use_summary = msg.summary.has_value() && !msg.expanded && !use_diff;
+            const bool use_summary = msg.summary.has_value() && !row_expanded && !use_diff;
             if (use_diff) {
                 // ---- Diff 视图:summary 行 + 彩色 diff 块 ----
                 Elements rows;
@@ -3732,16 +3763,16 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
                         metric_str += seg;
                     }
                     const int summary_width = std::max(
-                        20, chat_box.x_max - chat_box.x_min - 6);
+                        20, chat_box.x_max - chat_box.x_min - 4);
                     std::string summary_line = renderable_tool_summary_line(
                         s, metric_str, summary_width);
                     rows.push_back(hbox({
-                        text("   <- ") | color(tui::theme().ui.text_dim),
+                        text("  \xE2\x94\x94 ") | color(tui::theme().ui.text_dim), // "└"
                         text(summary_line) | color(row_color) | flex,
                     }));
                 } else {
                     rows.push_back(hbox({
-                        text("   <- ") | color(tui::theme().ui.text_dim),
+                        text("  \xE2\x94\x94 ") | color(tui::theme().ui.text_dim), // "└"
                         text("diff") | color(tui::theme().ui.text_muted) | flex,
                     }));
                 }
@@ -3757,7 +3788,7 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
                             ? msg.content.substr(pos)
                             : msg.content.substr(pos, nl - pos);
                         rows.push_back(hbox({
-                            text("      ") | color(tui::theme().ui.text_dim),
+                            text("    ") | color(tui::theme().ui.text_dim),
                             paragraph(line) | color(tui::theme().ui.text_muted) | dim | flex,
                         }));
                         if (nl == std::string::npos) break;
@@ -3766,15 +3797,15 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
                     }
                 }
 
-                // Diff 视图:缩进 6 列,宽度由 chat_box 推导。
+                // Diff 视图:缩进 4 列(与 "  └ " 前缀同宽),宽度由 chat_box 推导。
                 DiffViewOptions opts;
-                opts.width = std::max(20, chat_box.x_max - chat_box.x_min - 6);
-                opts.expanded = msg.expanded;
+                opts.width = std::max(20, chat_box.x_max - chat_box.x_min - 4);
+                opts.expanded = row_expanded;
                 opts.max_hunks = 3;
                 opts.max_lines_per_hunk = 20;
                 Element diff_el = render_diff_view(*msg.hunks, opts);
                 rows.push_back(hbox({
-                    text("      ") | color(tui::theme().ui.text_dim),
+                    text("    ") | color(tui::theme().ui.text_dim),
                     diff_el | flex,
                 }));
 
@@ -3821,13 +3852,13 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
                 }
 
                 const int summary_width = std::max(
-                    20, chat_box.x_max - chat_box.x_min - 6);
+                    20, chat_box.x_max - chat_box.x_min - 4);
                 std::string summary_line = renderable_tool_summary_line(
                     s, metric_str, summary_width);
 
                 Elements rows;
                 rows.push_back(hbox({
-                    text("   <- ") | color(tui::theme().ui.text_dim),
+                    text("  \xE2\x94\x94 ") | color(tui::theme().ui.text_dim), // "└"
                     text(summary_line) | color(row_color) | flex,
                 }));
 
@@ -3842,7 +3873,7 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
                             ? msg.content.substr(pos)
                             : msg.content.substr(pos, nl - pos);
                         rows.push_back(hbox({
-                            text("      ") | color(tui::theme().ui.text_dim),
+                            text("    ") | color(tui::theme().ui.text_dim),
                             paragraph(line) | color(tui::theme().ui.text_muted) | dim | flex,
                         }));
                         if (nl == std::string::npos) break;
@@ -3858,9 +3889,12 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
                 message_elements.push_back(
                     tracked_message(i, block | focus_decorator));
             } else {
-                // ---- Legacy fold path (also used when user pressed Ctrl+E
-                // to expand, and the 10-line cap acts as a secondary safety) ----
-                const int MAX_TOOL_LINES = 10;
+                // ---- Legacy fold path(含 Ctrl+E/Ctrl+O 展开后的全文视图)----
+                // 折叠时 3 行截断并提示 ctrl+o(用户决策:工具输出默认只留
+                // 一眼预览,不占版面);展开时放宽到 2000 行兜底(bash 工具
+                // 上游已截断超大输出,正常到不了这个量级;万一到了,这个
+                // 上限防止单条消息把每帧渲染拖死)。
+                const int MAX_TOOL_LINES = row_expanded ? 2000 : 3;
                 std::string display_content = msg.content;
                 int line_count = 0;
                 for (char c : msg.content) if (c == '\n') line_count++;
@@ -3878,11 +3912,12 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
                         display_content.pop_back();
                     }
                     int hidden = line_count - MAX_TOOL_LINES;
-                    display_content += "\n... (" + std::to_string(hidden) + " more lines)";
+                    display_content += "\n\xE2\x80\xA6 +" + std::to_string(hidden) +
+                        (row_expanded ? " lines" : " lines (ctrl+o to expand)");
                 }
 
                 auto line = hbox({
-                    text("   <- ") | color(tui::theme().ui.text_dim),
+                    text("  \xE2\x94\x94 ") | color(tui::theme().ui.text_dim), // "└"
                     render_tool_result_lines_preserving_breaks(display_content) | flex,
                 });
                 if (focused_message) {
@@ -4886,7 +4921,19 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
             !state.conversation.back().is_tool) {
             state.conversation.back().content = content;
         } else {
-            state.conversation.push_back({role, content, is_tool});
+            TuiState::Message m{role, content, is_tool};
+            if (role == "tool_call") {
+                // push 时就算好紧凑预览:工具执行期间行内即显示
+                // `● Bash(npm install)` 而非原始 JSON;完成后 on_tool_result
+                // 的补挂对已有值是 no-op。
+                const auto parts =
+                    acecode::tui::parse_tool_row(content, std::string());
+                if (!parts.name.empty()) {
+                    m.display_override = ToolExecutor::build_tool_call_preview(
+                        parts.name, parts.args);
+                }
+            }
+            state.conversation.push_back(std::move(m));
         }
         clamp_chat_focus();
         screen.PostEvent(Event::Custom);
@@ -7601,6 +7648,15 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
             std::lock_guard<std::mutex> lk(state.mu);
             if (state.resume_picker_active) return true;
             state.input_cursor = 0;
+            return true;
+        }
+        // Ctrl+O:全局展开/收起所有工具输出(Claude Code 风格 verbose 开关)。
+        // 与 Ctrl+E 的逐行展开正交:render 侧取二者之或。开关位掺在
+        // message_render_revision 里,翻转后所有行高自动重新测量。
+        if (event == Event::Special(std::string(1, '\x0F'))) {
+            std::lock_guard<std::mutex> lk(state.mu);
+            state.transcript_expanded = !state.transcript_expanded;
+            screen.PostEvent(Event::Custom);
             return true;
         }
         // Ctrl+E contextual expand: when a summarized tool_result is focused

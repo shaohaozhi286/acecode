@@ -2225,13 +2225,40 @@ bool AgentLoop::execute_tool_calls(
         return result;
     };
 
+    // 展示层的结果行派发(tool_result 伪行 + on_tool_result 补挂 summary/
+    // hunks)。从 Phase 3 前移到各执行点,让「调用行 → 结果行」成对相邻出现
+    // 而不是先挤一排调用再挤一排结果。注意:这里显示的是工具原始输出
+    // (渲染端有 3 行折叠 / 2000 行展开上限兜底);canonical 落盘仍在
+    // Phase 3 统一进行,超大输出的 budget 替换只影响落盘与模型上下文。
+    auto dispatch_tool_result_display =
+        [this](const ToolCall& tc, const ToolResult& result) {
+        std::string display_output = result.output;
+        std::string ask_display =
+            format_ask_user_question_result_display(result.metadata);
+        if (!ask_display.empty()) {
+            display_output = std::move(ask_display);
+        }
+        std::string attachment_fallback =
+            output_attachments_fallback_text(result.attachments);
+        if (!attachment_fallback.empty()) {
+            if (!display_output.empty() && display_output.back() != '\n') {
+                display_output.push_back('\n');
+            }
+            display_output += attachment_fallback;
+        }
+        dispatch_message("tool_result", display_output, true);
+        if (callbacks_.on_tool_result) {
+            ChatMessage call_msg;
+            call_msg.role = "tool_call";
+            call_msg.content = "[Tool: " + tc.function_name + "] " + tc.function_arguments;
+            call_msg.display_override =
+                ToolExecutor::build_tool_call_preview(tc.function_name, tc.function_arguments);
+            callbacks_.on_tool_result(call_msg, tc.function_name, result);
+        }
+    };
+
     // Phase 1: Execute read-only tools in parallel
     if (!read_entries.empty() && !abort_requested_) {
-        for (const auto& entry : read_entries) {
-            dispatch_message("tool_call",
-                    "[Tool: " + entry.tc->function_name + "] " + entry.tc->function_arguments, true);
-        }
-
         unsigned int max_concurrency = std::min(
             static_cast<unsigned int>(4),
             std::max(static_cast<unsigned int>(1), std::thread::hardware_concurrency()));
@@ -2277,6 +2304,13 @@ bool AgentLoop::execute_tool_calls(
 
             for (auto& item : pending) {
                 size_t idx = item.original_index;
+                // 展示层成对派发:调用行在阻塞等待它的结果之前亮出(执行中
+                // 灰色指示灯),结果一到紧跟其后 —— 即使批内并行执行,transcript
+                // 仍按提交顺序呈现「调用 → 结果」相邻的成对行。abort 时未收割
+                // 的调用不再显示伪行,canonical 的 [Interrupted] 由 Phase 3 落盘。
+                dispatch_message("tool_call",
+                    "[Tool: " + item.call.function_name + "] " +
+                        item.call.function_arguments, true);
                 try {
                     results[idx] = item.future.get();
                 } catch (const std::exception& e) {
@@ -2285,6 +2319,7 @@ bool AgentLoop::execute_tool_calls(
                 result_ready[idx] = true;
                 record_doom_guard_result(item.call, results[idx]);
                 account_goal_usage(0, false);
+                dispatch_tool_result_display(item.call, results[idx]);
             }
 
             i = batch_end;
@@ -2520,6 +2555,9 @@ bool AgentLoop::execute_tool_calls(
         result_ready[entry.original_index] = true;
         record_doom_guard_result(tc, results[entry.original_index]);
         account_goal_usage(0, false);
+        // 结果行紧跟派发。调用行在执行前已显示(权限确认弹窗需要上下文),
+        // 写工具串行执行,顺序天然成对。
+        dispatch_tool_result_display(tc, results[entry.original_index]);
     }
 
     std::vector<ToolResultReplacementRecord> replacement_records;
@@ -2586,30 +2624,9 @@ bool AgentLoop::execute_tool_calls(
         messages_.push_back(tool_msg);
         if (session_manager_) session_manager_->on_message(tool_msg);
 
+        // 展示派发(tool_result 伪行 + on_tool_result)已前移到各执行点
+        // (dispatch_tool_result_display),这里只保留 canonical 相关处理。
         if (result_ready[i]) {
-            std::string display_output = results[i].output;
-            std::string ask_display =
-                format_ask_user_question_result_display(results[i].metadata);
-            if (!ask_display.empty()) {
-                display_output = std::move(ask_display);
-            }
-            std::string attachment_fallback =
-                output_attachments_fallback_text(results[i].attachments);
-            if (!attachment_fallback.empty()) {
-                if (!display_output.empty() && display_output.back() != '\n') {
-                    display_output.push_back('\n');
-                }
-                display_output += attachment_fallback;
-            }
-            dispatch_message("tool_result", display_output, true);
-            if (callbacks_.on_tool_result) {
-                ChatMessage call_msg;
-                call_msg.role = "tool_call";
-                call_msg.content = "[Tool: " + tc.function_name + "] " + tc.function_arguments;
-                call_msg.display_override =
-                    ToolExecutor::build_tool_call_preview(tc.function_name, tc.function_arguments);
-                callbacks_.on_tool_result(call_msg, tc.function_name, results[i]);
-            }
             if (results[i].post_user_prompt.has_value() &&
                 !results[i].post_user_prompt->empty()) {
                 append_tool_user_prompt(

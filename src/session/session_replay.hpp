@@ -22,12 +22,16 @@ class ToolExecutor;  // 前向声明:函数只用 const 引用调 build_tool_cal
 
 // 把规范 role 列表展开为 TUI Message 列表。展开规则:
 //   - user / system   → 原样推入(role/content/false)
-//   - assistant       → 若 content 非空先推一行 {assistant};再对每个 tool_calls[i]
-//                        推一行 {tool_call, "[Tool: NAME] ARGS", true},display_override
-//                        由 ToolExecutor::build_tool_call_preview 现算
-//   - tool            → {tool_result, content, true},尝试从 metadata.tool_summary /
+//   - assistant       → 若 content 非空先推一行 {assistant};每个 tool_calls[i]
+//                        生成一行 {tool_call, "[Tool: NAME] ARGS", true}
+//                        (display_override 由 build_tool_call_preview 现算),
+//                        但**先攒着不推**,等配对的 tool 结果到来时成对推出
+//                        (调用行紧邻其结果行,与运行时 dispatch 顺序一致)
+//   - tool            → 先推出 FIFO 队首的配对调用行,再推 {tool_result,
+//                        content, true};尝试从 metadata.tool_summary /
 //                        metadata.tool_hunks 还原 summary / hunks(无则降级 fold)
-//   - 其他            → 原样推入(forward-compat 兜底,role/content/false)
+//   - 其他            → 先补推所有孤儿调用行(abort 等没结果的,渲染成灰色
+//                        Pending),再原样推入(forward-compat 兜底)
 //
 // 注意:shell-mode 的 `!user + tool_result` 配对识别由调用方先做;走到这里的
 // 都已经不是配对的一部分。tool_result 这种伪角色如果落到这里,会走 unknown

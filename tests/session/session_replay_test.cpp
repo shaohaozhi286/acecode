@@ -354,7 +354,9 @@ TEST(SessionReplay, AssistantInvalidToolArgsFallsBack) {
 }
 
 // 模拟一次 [user, assistant+tool_calls(2), tool, tool, assistant_text]
-// → 输出 [user, tool_call, tool_call, tool_result, tool_result, assistant]。
+// → 输出 [user, tool_call, tool_result, tool_call, tool_result, assistant]。
+// 调用/结果交错(redesign-tui-tool-rows):调用行攒在 pending 队列,等配对
+// 结果到来成对推出,与运行时 dispatch 顺序一致;不再是先 2 行调用再 2 行结果。
 TEST(SessionReplay, FullTurnSequence) {
     std::vector<ChatMessage> in;
 
@@ -402,10 +404,61 @@ TEST(SessionReplay, FullTurnSequence) {
     ASSERT_EQ(out.size(), 6u);
     EXPECT_EQ(out[0].role, "user");
     EXPECT_EQ(out[1].role, "tool_call");
-    EXPECT_EQ(out[2].role, "tool_call");
-    EXPECT_EQ(out[3].role, "tool_result");
+    EXPECT_EQ(out[2].role, "tool_result");
+    EXPECT_EQ(out[3].role, "tool_call");
     EXPECT_EQ(out[4].role, "tool_result");
     EXPECT_EQ(out[5].role, "assistant");
+    // 配对正确性:c1 的调用行紧邻 c1 的结果行,c2 同理。
+    EXPECT_NE(out[1].content.find("a.cpp"), std::string::npos);
+    EXPECT_EQ(out[2].content, "contents of a.cpp");
+    EXPECT_NE(out[3].content.find("b.cpp"), std::string::npos);
+    EXPECT_EQ(out[4].content, "contents of b.cpp");
+}
+
+// 场景:回合被 abort,assistant 发起了 2 个 tool_calls 但只有第 1 个有结果,
+// 之后直接是下一条 user 消息。
+// 期望:c1 成对推出;孤儿 c2 的调用行在 user 之前补推(不丢行,渲染端
+// 配对逻辑会给它灰色 Pending 指示灯),绝不吃掉后续轮次的结果。
+TEST(SessionReplay, OrphanToolCallFlushedBeforeNextMessage) {
+    std::vector<ChatMessage> in;
+
+    ChatMessage a_tc;
+    a_tc.role = "assistant";
+    nlohmann::json arr = nlohmann::json::array();
+    auto push_tc = [&](const std::string& id, const std::string& name, const std::string& args) {
+        nlohmann::json tc;
+        tc["id"] = id;
+        tc["type"] = "function";
+        tc["function"]["name"] = name;
+        tc["function"]["arguments"] = args;
+        arr.push_back(std::move(tc));
+    };
+    push_tc("c1", "file_read", R"({"file_path":"a.cpp"})");
+    push_tc("c2", "bash", R"({"command":"ls"})");
+    a_tc.tool_calls = arr;
+    in.push_back(a_tc);
+
+    ChatMessage t1;
+    t1.role = "tool";
+    t1.content = "contents of a.cpp";
+    t1.tool_call_id = "c1";
+    in.push_back(t1);
+
+    ChatMessage u;
+    u.role = "user";
+    u.content = "算了,先别跑";
+    in.push_back(u);
+
+    ToolExecutor tools;
+    auto out = replay_session_messages(in, tools);
+
+    ASSERT_EQ(out.size(), 4u);
+    EXPECT_EQ(out[0].role, "tool_call");
+    EXPECT_NE(out[0].content.find("a.cpp"), std::string::npos);
+    EXPECT_EQ(out[1].role, "tool_result");
+    EXPECT_EQ(out[2].role, "tool_call");   // 孤儿 c2,user 之前补推
+    EXPECT_NE(out[2].content.find("ls"), std::string::npos);
+    EXPECT_EQ(out[3].role, "user");
 }
 
 // 未知 role 原样推入(向前兼容);role=="tool_result"(shell-mode 伪角色)

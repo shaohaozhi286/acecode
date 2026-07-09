@@ -13,6 +13,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include <deque>
+
 namespace acecode {
 
 namespace {
@@ -47,6 +49,19 @@ std::vector<TuiState::Message> replay_session_messages(
     std::vector<TuiState::Message> out;
     out.reserve(messages.size());
 
+    // 调用/结果交错:canonical 流是「assistant(tool_calls[N]) → tool×N」,
+    // 直接顺序回放会先挤 N 行调用再挤 N 行结果。这里把调用行先攒着,等
+    // 配对的 tool 结果到来时成对推出(FIFO,与运行时 dispatch 顺序一致);
+    // 没等到结果的孤儿调用(abort / 流中断)在遇到下一条非工具消息或流
+    // 结束时统一补推,渲染端配对逻辑会给它们灰色 Pending 指示灯。
+    std::deque<TuiState::Message> pending_calls;
+    auto flush_pending_calls = [&out, &pending_calls]() {
+        while (!pending_calls.empty()) {
+            out.push_back(std::move(pending_calls.front()));
+            pending_calls.pop_front();
+        }
+    };
+
     for (const auto& msg : messages) {
         if (is_file_checkpoint_message(msg)) {
             continue;
@@ -67,17 +82,20 @@ std::vector<TuiState::Message> replay_session_messages(
 
         if (msg.role == "user" || msg.role == "system") {
             // 规范角色,文本承载所有信息,直接推入。
+            flush_pending_calls();
             out.push_back({msg.role, msg.content, /*is_tool=*/false});
             continue;
         }
 
         if (msg.role == "assistant") {
             // 文本前奏(若有)先 push,顺序与运行时 on_delta+on_message 累积一致。
+            flush_pending_calls();
             if (!msg.content.empty()) {
                 out.push_back({"assistant", msg.content, /*is_tool=*/false});
             }
-            // 每个 tool_call 单独成一行。display_override 用 build_tool_call_preview
-            // 现算,失败(非法 JSON)时返回空,TUI 会回退到 legacy 显示。
+            // 每个 tool_call 单独成一行,先攒进 pending 等结果配对。
+            // display_override 用 build_tool_call_preview 现算,失败
+            // (非法 JSON)时返回空,TUI 会回退到 legacy 显示。
             if (msg.tool_calls.is_array()) {
                 for (size_t i = 0; i < msg.tool_calls.size(); ++i) {
                     std::string name, args;
@@ -89,7 +107,7 @@ std::vector<TuiState::Message> replay_session_messages(
                     tc_row.is_tool = true;
                     tc_row.display_override =
                         ToolExecutor::build_tool_call_preview(name, args);
-                    out.push_back(std::move(tc_row));
+                    pending_calls.push_back(std::move(tc_row));
                 }
             }
             continue;
@@ -99,6 +117,11 @@ std::vector<TuiState::Message> replay_session_messages(
             // 规范工具结果:role 改名为 tool_result,is_tool=true。
             // 视觉字段(summary / hunks)从 metadata 子键还原;缺失或解码失败 →
             // 字段留空,渲染走 fold 降级。
+            // 先推出配对的调用行(FIFO 队首),再推结果行 —— 成对相邻。
+            if (!pending_calls.empty()) {
+                out.push_back(std::move(pending_calls.front()));
+                pending_calls.pop_front();
+            }
             TuiState::Message tr_row;
             tr_row.role = "tool_result";
             tr_row.content = msg.content;
@@ -139,12 +162,16 @@ std::vector<TuiState::Message> replay_session_messages(
         // 未知 role(forward-compat):原样推入,is_tool 默认 false。
         // shell-mode 的 "tool_result" 伪角色如果没被 main.cpp 配对识别消化,
         // 会落进这里 —— 也是正确的降级,TUI 渲染端有 "tool_result" 分支会接住。
+        flush_pending_calls();
         TuiState::Message m;
         m.role = msg.role;
         m.content = msg.content;
         m.is_tool = (msg.role == "tool_result");  // 让 shell-mode 落盘的伪角色保持 is_tool=true
         out.push_back(std::move(m));
     }
+
+    // 流结束:还没等到结果的孤儿调用统一补推(渲染成灰色 Pending)。
+    flush_pending_calls();
 
     return out;
 }

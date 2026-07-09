@@ -92,7 +92,10 @@ bool is_success_summary(const ToolSummary& s) {
 std::string renderable_tool_summary_line(const ToolSummary& s,
                                          const std::string& metric_str,
                                          int max_visual_width) {
-    const std::string prefix = s.icon + " " + s.verb + " \xC2\xB7 ";
+    // Claude Code 风格结果行不带图标:工具名已在上方的 `● ToolName(args)` 行
+    // 加粗展示,这里的图标只是噪音(file_read 的 "→" 图标还会和已移除的
+    // 箭头前缀撞脸)。verb + object + metrics 足够辨识。
+    const std::string prefix = s.verb + " \xC2\xB7 ";
     const std::string suffix = metric_str.empty()
         ? std::string()
         : " \xC2\xB7 " + metric_str;

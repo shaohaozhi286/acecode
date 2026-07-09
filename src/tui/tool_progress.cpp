@@ -1,5 +1,6 @@
 #include "tool_progress.hpp"
 #include "tui/theme_palette.hpp"
+#include "tui/tool_row_format.hpp"
 
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/terminal.hpp>
@@ -43,16 +44,22 @@ ftxui::Element render_tool_progress(const TuiState& state) {
     const int term_cols = Terminal::Size().dimx;
     const bool narrow = term_cols > 0 && term_cols < 40;
 
-    // Header line: "▌ bash: npm install…"
+    // Header line: "● Bash(npm install…)" —— 与 transcript 的工具行同款格式,
+    // 执行中指示灯为灰(与配对前的 Pending 态一致)。
     std::string preview = p.command_preview;
     if (narrow && preview.size() > 20) preview = preview.substr(0, 19) + "\xE2\x80\xA6";
 
     const auto& th = tui::theme();
-    Element header = hbox({
-        text(" \xE2\x96\x8C ") | color(th.ui.text_dim),
-        text(p.tool_name + ": ") | bold | color(th.ui.accent),
-        text(preview) | dim,
-    });
+    Elements header_segs;
+    header_segs.push_back(text(" \xE2\x97\x8F ") | color(th.ui.text_dim)); // "●"
+    header_segs.push_back(text(tui::pascal_case_tool_name(p.tool_name))
+        | bold | color(th.ui.accent));
+    if (!preview.empty()) {
+        header_segs.push_back(text("(") | color(th.ui.accent));
+        header_segs.push_back(text(preview) | dim);
+        header_segs.push_back(text(")") | color(th.ui.accent));
+    }
+    Element header = hbox(std::move(header_segs));
 
     // No output yet → single "Running…" line
     if (p.tail_lines.empty() && p.current_partial.empty()) {
@@ -105,7 +112,8 @@ ftxui::Element render_tool_timer_chip(const TuiState& state) {
     const auto& th = tui::theme();
     return hbox({
         text("  \xE2\x97\x91 ") | color(th.ui.accent),
-        text(state.tool_progress.tool_name) | bold | color(th.ui.accent),
+        text(tui::pascal_case_tool_name(state.tool_progress.tool_name))
+            | bold | color(th.ui.accent),
         text("  " + std::to_string(secs) + "s  ") | dim | color(th.ui.accent_alt),
     });
 }
