@@ -25,6 +25,7 @@ import { SubagentPanel } from './SubagentPanel.jsx';
 import { SubagentGroupBlock } from './SubagentGroupBlock.jsx';
 import { PreviewDetailsPanel } from './PreviewDetailsPanel.jsx';
 import { StatusBar } from './StatusBar.jsx';
+import { Modal } from './Modal.jsx';
 import { ChangeGlassDock } from './ChangeReview.jsx';
 import { toast } from './Toast.jsx';
 import { clsx } from '../lib/format.js';
@@ -629,6 +630,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   const [goalStopping, setGoalStopping] = useState(false);
   const [reviewRequest, setReviewRequest] = useState(0);
   const [previewTabState, setPreviewTabState] = useState({});
+  const [previewCloseConfirm, setPreviewCloseConfirm] = useState(null);
   const [dismissedDockSignatures, setDismissedDockSignatures] = usePreference(
     CHANGE_DOCK_DISMISSALS_STORAGE_KEY,
     {},
@@ -2314,6 +2316,9 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   const previewTabsOpen = previewTabs.length > 0;
   const previewPanelVisible = previewTabsOpen && !(sidePanelCollapsed && !sidePanelMaximized);
   const previewPanelMaximized = sidePanelMaximized && previewTabsOpen;
+  const previewCloseConfirmMessage = previewCloseConfirm
+    ? closeVisiblePreviewTabsConfirmationMessage(previewTabs.length) || previewCloseConfirm.message
+    : '';
   const selectedChangeFile = activePreview?.type === PREVIEW_TAB_TYPES.SESSION_CHANGES
     ? activePreview.expandedFile || ''
     : '';
@@ -2355,6 +2360,12 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   useEffect(() => {
     onPreviewPanelVisibleChange?.(previewPanelVisible);
   }, [onPreviewPanelVisibleChange, previewPanelVisible]);
+
+  useEffect(() => {
+    if (previewCloseConfirm && previewTabs.length === 0) {
+      setPreviewCloseConfirm(null);
+    }
+  }, [previewCloseConfirm, previewTabs.length]);
 
   const openFilePreview = useCallback((path) => {
     const location = previewFileLocation({ cwd: sidePanelCwd, path });
@@ -2416,15 +2427,23 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     if (closingLastVisibleTab && sidePanelMaximized) onToggleSidePanelMaximized?.();
   }, [onToggleSidePanelMaximized, previewScope, previewTabs.length, sid, sidePanelMaximized]);
 
-  const closePreviewPanel = useCallback(() => {
-    const confirmMessage = closeVisiblePreviewTabsConfirmationMessage(previewTabs.length);
-    if (confirmMessage && !window.confirm(confirmMessage)) return;
+  const closePreviewPanelConfirmed = useCallback(() => {
+    setPreviewCloseConfirm(null);
     setPreviewTabState((prev) => closeVisiblePreviewTabs(prev, {
       scopeKey: previewScope,
       sessionId: sid,
     }));
     if (sidePanelMaximized) onToggleSidePanelMaximized?.();
-  }, [onToggleSidePanelMaximized, previewScope, previewTabs.length, sid, sidePanelMaximized]);
+  }, [onToggleSidePanelMaximized, previewScope, sid, sidePanelMaximized]);
+
+  const closePreviewPanel = useCallback(() => {
+    const confirmMessage = closeVisiblePreviewTabsConfirmationMessage(previewTabs.length);
+    if (confirmMessage) {
+      setPreviewCloseConfirm({ message: confirmMessage });
+      return;
+    }
+    closePreviewPanelConfirmed();
+  }, [closePreviewPanelConfirmed, previewTabs.length]);
 
   const closeOtherPreviews = useCallback((tabKey) => {
     setPreviewTabState((prev) => closeOtherPreviewTabs(prev, {
@@ -3067,6 +3086,34 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
             onSelectGitChangeFile={openGitChangePreview}
           />
         </div>
+      )}
+      {previewCloseConfirm && (
+        <Modal onClose={() => setPreviewCloseConfirm(null)} width={440}>
+          {({ close }) => (
+            <div className="p-4">
+              <div className="text-[14px] font-semibold mb-2">关闭预览面板</div>
+              <div className="text-[12.5px] text-fg-mute leading-relaxed mb-4">
+                {previewCloseConfirmMessage}
+              </div>
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  className="px-3 py-1.5 text-[12.5px] rounded-lg border border-border hover:bg-surface-hi transition-colors"
+                  onClick={close}
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  className="px-3 py-1.5 text-[12.5px] rounded-lg bg-accent text-white hover:opacity-90 transition-opacity"
+                  onClick={closePreviewPanelConfirmed}
+                >
+                  关闭
+                </button>
+              </div>
+            </div>
+          )}
+        </Modal>
       )}
       {sidePanelMounted && (
         <>
