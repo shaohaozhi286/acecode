@@ -45,6 +45,7 @@
 #include "headless/headless_options.hpp"
 #include "headless/headless_runner.hpp"
 #include "utils/encoding.hpp"
+#include "utils/power_inhibitor.hpp"
 #include "network/proxy_resolver.hpp"
 #include "remote_control/remote_control_service.hpp"
 #include "provider/provider_factory.hpp"
@@ -3108,6 +3109,7 @@ static void shutdown_after_tui_loop(TuiState& state,
         state.overlay_cv.notify_all();
     }
     agent_loop.shutdown();
+    acecode::release_process_session_power("tui-main");
 
     // Tear down MCP child processes after the agent worker has stopped, so no
     // in-flight tool calls can race with the clients being destroyed.
@@ -4939,6 +4941,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
         screen.PostEvent(Event::Custom);
     };
     callbacks.on_busy_changed = [&state, &screen](bool busy) {
+        acecode::note_process_session_busy("tui-main", busy);
         std::lock_guard<std::mutex> lk(state.mu);
         if (busy && !state.is_waiting) {
             state.current_thinking_phrase = get_random_thinking_phrase(is_user_chinese(state));
@@ -5246,6 +5249,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
         rd.custom_instructions_cfg = &config.custom_instructions;
         rd.hook_manager = &hook_manager;
         rd.template_permissions = &permissions;
+        rd.power_guard = &acecode::process_power_guard();
         subagent_host_deps.registry_deps = std::move(rd);
     }
     subagent_host_deps.parent_session_id = [&session_manager]() {
@@ -5524,6 +5528,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
     callbacks.on_busy_changed = [&state, &clamp_chat_focus, &screen,
                                  &coordinate_mcp_before_first_turn,
                                  &submit_tui_input, &submit_tui_text](bool busy) {
+        acecode::note_process_session_busy("tui-main", busy);
         std::unique_lock<std::mutex> lk(state.mu);
         if (busy && !state.is_waiting) {
             state.current_thinking_phrase = get_random_thinking_phrase(is_user_chinese(state));

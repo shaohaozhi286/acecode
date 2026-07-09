@@ -39,6 +39,7 @@ namespace acecode {
 
 class HookManager;
 class MemoryRegistry;
+class ActiveSessionPowerGuard;
 
 std::string default_no_workspace_cache_root();
 std::string no_workspace_session_cwd(const std::string& session_id,
@@ -93,6 +94,9 @@ struct SessionRegistryDeps {
     // 起始值)。每个 session 自己的 PermissionManager 是独立实例,session_allowed_
     // 不串。
     PermissionManager*               template_permissions = nullptr;
+    // Optional process-wide power guard. When present, every session loop
+    // contributes its busy/idle transitions to this guard.
+    ActiveSessionPowerGuard*          power_guard = nullptr;
     // Empty = ~/.acecode/cache/no-workspace. Tests may override to avoid
     // creating cache directories in the real user home.
     std::string                      no_workspace_cache_root;

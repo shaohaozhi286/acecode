@@ -25,6 +25,7 @@
 #include "tool/goal_tool.hpp"
 #include "tool/tool_executor.hpp"
 #include "utils/cwd_hash.hpp"
+#include "utils/power_inhibitor.hpp"
 
 #include <atomic>
 #include <algorithm>
@@ -59,6 +60,7 @@ using acecode::SessionOptions;
 using acecode::SessionRegistry;
 using acecode::SessionRegistryDeps;
 using acecode::SessionStorage;
+using acecode::ActiveSessionPowerGuard;
 using acecode::ToolExecutor;
 using acecode::compute_cwd_hash;
 
@@ -283,6 +285,11 @@ private:
     std::condition_variable cv_;
     bool started_ = false;
     bool released_ = false;
+};
+
+struct FakePowerBackend {
+    std::atomic<int> acquires{0};
+    std::atomic<int> releases{0};
 };
 
 class CompleteGoalStubProvider : public acecode::LlmProvider {
@@ -1279,6 +1286,68 @@ TEST(SessionRegistry, ModelProfileBusyUseReflectsActiveLoopBusyState) {
     }
     EXPECT_FALSE(entry->loop->is_busy());
     EXPECT_FALSE(registry.model_profile_used_by_busy_session("fast"));
+
+    std::filesystem::remove_all(project_dir);
+    std::filesystem::remove_all(cwd);
+}
+
+// 场景: daemon registry 给 AgentLoop 注入 power guard callback。任一 active
+// session busy 时 acquire,turn 结束后最后一个 busy session 释放。
+TEST(SessionRegistry, BusySessionTransitionsDrivePowerGuard) {
+    auto cwd = temp_cwd("power_guard");
+    auto project_dir = SessionStorage::get_project_dir(cwd.string());
+    std::filesystem::remove_all(project_dir);
+
+    auto cfg = make_model_cfg();
+    ToolExecutor tools;
+    PermissionManager permissions;
+    FakePowerBackend backend;
+    ActiveSessionPowerGuard power_guard(
+        [&backend](std::string*) {
+            backend.acquires.fetch_add(1);
+            return true;
+        },
+        [&backend] {
+            backend.releases.fetch_add(1);
+        });
+
+    SessionRegistryDeps deps;
+    deps.provider_accessor = [] { return std::shared_ptr<acecode::LlmProvider>{}; };
+    deps.tools = &tools;
+    deps.cwd = cwd.string();
+    deps.config = &cfg;
+    deps.template_permissions = &permissions;
+    deps.power_guard = &power_guard;
+    SessionRegistry registry(std::move(deps));
+
+    SessionOptions opts;
+    opts.model_name = "fast";
+    auto id = registry.create(opts);
+
+    auto entry = registry.acquire(id);
+    ASSERT_TRUE(entry);
+    auto blocker = std::make_shared<BlockingProvider>();
+    {
+        ASSERT_TRUE(entry->provider_slot);
+        std::lock_guard<std::mutex> lk(entry->provider_slot->mu);
+        entry->provider_slot->provider = blocker;
+    }
+
+    entry->loop->submit("hold provider");
+    ASSERT_TRUE(blocker->wait_for_started(2s));
+    EXPECT_EQ(backend.acquires.load(), 1);
+    EXPECT_EQ(backend.releases.load(), 0);
+    EXPECT_TRUE(power_guard.inhibitor_active());
+    EXPECT_EQ(power_guard.busy_count(), 1u);
+
+    blocker->release();
+    for (int i = 0; i < 100 && entry->loop->is_busy(); ++i) {
+        std::this_thread::sleep_for(10ms);
+    }
+    EXPECT_FALSE(entry->loop->is_busy());
+    EXPECT_EQ(backend.releases.load(), 1);
+    EXPECT_FALSE(power_guard.inhibitor_active());
+    EXPECT_EQ(power_guard.busy_count(), 0u);
 
     std::filesystem::remove_all(project_dir);
     std::filesystem::remove_all(cwd);

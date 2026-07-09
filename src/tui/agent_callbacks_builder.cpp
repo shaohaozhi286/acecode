@@ -13,6 +13,7 @@
 #include "tui/clipboard_helpers.hpp"
 #include "session/todo_state.hpp"
 #include "remote_control/remote_control_service.hpp"
+#include "utils/power_inhibitor.hpp"
 
 namespace acecode { namespace tui {
 
@@ -180,6 +181,7 @@ void setup_agent_callbacks(TuiContext& ctx) {
     };
 
     callbacks.on_busy_changed = [&state, &screen, &ctx](bool busy) {
+        acecode::note_process_session_busy("tui-main", busy);
         std::unique_lock<std::mutex> lk(state.mu);
         if (busy && !state.is_waiting) {
             state.current_thinking_phrase = get_random_thinking_phrase(is_user_chinese(state));
