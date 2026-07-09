@@ -64,6 +64,10 @@ ToolResult make_rejected_ask_result();
 // AskUserQuestion 实现共用。
 ToolResult make_goal_unattended_ask_result();
 
+// Headless(-p / --print)模式的自动应答 ToolResult:success=true,文案指示
+// 模型在 print 模式下自行决策并继续(openspec add-headless-print-mode)。
+ToolResult make_headless_ask_result();
+
 // 工厂函数:新建 AskUserQuestion 工具。TuiState 引用用于发起阻塞 overlay,
 // screen 引用用于 PostEvent 唤醒渲染线程。工具内部通过 ToolContext::abort_flag
 // 感知 agent 中止。

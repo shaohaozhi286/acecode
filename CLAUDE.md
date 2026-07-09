@@ -12,6 +12,7 @@ ACECode ships one main executable with terminal TUI and daemon subcommands, plus
 
 - TUI mode starts from [main.cpp](main.cpp), configures provider/tools/commands, runs the FTXUI loop, and posts worker callbacks back into the UI event queue.
 - Daemon mode starts from [src/daemon/cli.cpp](src/daemon/cli.cpp), converges on `worker.cpp::run_worker`, writes runtime files, then serves [src/web/](src/web) routes and WebSocket events.
+- Headless print mode (`acecode -p "<prompt>"`, openspec add-headless-print-mode) starts from `main.cpp::dispatch_non_tui_command` → [src/headless/headless_runner.cpp](src/headless/headless_runner.cpp) — worker.cpp bootstrap 的精简复刻(无 run/ 文件、无心跳、无 Crow),会话走 SessionRegistry 正常落盘可 resume。进程级标记 `headless::active()`(src/headless/headless_mode) 有两个消费点:AgentLoop 权限门(默认自动拒绝并给模型解释文案,`--yolo` 全放行含 yolo 外部写首确认)与 AskUserQuestion(自动应答,优先于 goal unattended 分支);spawn_subagent 子会话同进程自动继承。stdout 只出最终 assistant 文本;退出码 0/1/64/130。Windows 下 -p 分支经 `CommandLineToArgvW` 重建 UTF-8 argv。
 - Web UI code lives in [web/src/](web/src), builds with React 18, Vite, Tailwind v4, `markdown-it`, `highlight.js`, and `diff2html`, then gets embedded from `web/dist/` by CMake.
 - Desktop mode is opt-in through `-DACECODE_BUILD_DESKTOP=ON`; [src/desktop/](src/desktop) manages workspace registry, daemon pool, webview host, tray, notifications, and bridge calls.
 

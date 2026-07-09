@@ -27,6 +27,7 @@
 #include <io.h>
 #include <direct.h>
 #include <imm.h>
+#include <shellapi.h> // CommandLineToArgvW(-p 模式的 UTF-8 argv 重建)
 #pragma comment(lib, "Imm32.lib")
 #else
 #include <termios.h>
@@ -41,6 +42,9 @@
 
 #include "version.hpp"
 #include "config/config.hpp"
+#include "headless/headless_options.hpp"
+#include "headless/headless_runner.hpp"
+#include "utils/encoding.hpp"
 #include "network/proxy_resolver.hpp"
 #include "remote_control/remote_control_service.hpp"
 #include "provider/provider_factory.hpp"
@@ -106,6 +110,7 @@
 #include "utils/token_tracker.hpp"
 #include "markdown/markdown_formatter.hpp"
 #include "session/session_manager.hpp"
+#include "session/session_auto_title.hpp"
 #include "session/session_registry.hpp"
 #include "session/session_resume_restore.hpp"
 #include "worktree/worktree_core.hpp"
@@ -400,7 +405,7 @@ static std::string mcp_state_label(McpServerState state) {
 
 static Color mcp_sidebar_state_color(const std::string& state) {
     if (state == "connected") return tui::theme().semantic.success;
-    if (state == "starting") return Color::White;
+    if (state == "starting") return tui::theme().ui.text_primary;
     if (state == "failed" || state == "timed_out") return tui::theme().semantic.error;
     if (state == "cancelled") return tui::theme().semantic.warning;
     return tui::theme().ui.text_dim;
@@ -431,11 +436,11 @@ static Element render_white_shimmer_text(const std::string& label,
         if (dist < 0) dist = -dist;
         Color c;
         if (dist == 0) {
-            c = Color::White;
+            c = tui::theme().ui.text_primary;
         } else if (dist == 1) {
-            c = Color::GrayLight;
+            c = tui::theme().ui.text_muted;
         } else if (dist == 2) {
-            c = Color::GrayDark;
+            c = tui::theme().ui.text_dim;
         } else {
             c = tui::theme().ui.text_dim;
         }
@@ -447,7 +452,8 @@ static Element render_white_shimmer_text(const std::string& label,
         for (int i = 0; i < 3; ++i) {
             parts.push_back(
                 text(".") |
-                color(i < dot_count ? Color::White : tui::theme().ui.text_dim));
+                color(i < dot_count ? tui::theme().ui.text_primary
+                                    : tui::theme().ui.text_dim));
         }
     }
 
@@ -858,7 +864,7 @@ static Element render_regular_sidebar(const acecode::TuiState& state,
                               color(status_line_color(state.status_line)));
     }
     if (!cwd_display.empty()) {
-        bottom_rows.push_back(paragraph(cwd_display) | color(tui::theme().ui.accent_alt) | dim);
+        bottom_rows.push_back(paragraph(cwd_display) | color(tui::theme().ui.accent) | dim);
     }
 
     const bool is_light = tui::theme().name == "light";
@@ -871,7 +877,7 @@ static Element render_regular_sidebar(const acecode::TuiState& state,
         }) | flex,
         text(" "),
     }) | size(WIDTH, EQUAL, sidebar_width) |
-       bgcolor(is_light ? Color::RGB(240, 240, 242) : Color::RGB(18, 18, 20));
+       bgcolor(is_light ? Color::RGB(246, 248, 250) : Color::RGB(22, 22, 30));
     return acecode::tui::non_selectable(std::move(sidebar));
 }
 
@@ -2595,6 +2601,37 @@ static std::optional<int> dispatch_non_tui_command(int argc, char* argv[]) {
         }
     }
 
+    // ---- -p / --print 无头模式(openspec add-headless-print-mode) ----
+    // Windows 的 char** argv 是 ANSI 代码页,中文 prompt 会乱码;用宽字符
+    // 命令行重建 UTF-8 token。POSIX 直接用 argv(约定 UTF-8 locale)。
+    {
+        std::vector<std::string> tokens;
+#ifdef _WIN32
+        int wargc = 0;
+        LPWSTR* wargv = ::CommandLineToArgvW(::GetCommandLineW(), &wargc);
+        if (wargv) {
+            for (int i = 1; i < wargc; ++i) {
+                tokens.push_back(acecode::wide_to_utf8(wargv[i]));
+            }
+            ::LocalFree(wargv);
+        } else {
+            tokens = argv_tail(argc, argv, 1);
+        }
+#else
+        tokens = argv_tail(argc, argv, 1);
+#endif
+        if (acecode::headless::should_enter_print_mode(tokens)) {
+            auto opts = acecode::headless::parse_headless_cli_options(tokens);
+            if (!opts.error.empty()) {
+                std::cerr << "acecode -p: " << opts.error << "\n"
+                          << "usage: acecode -p [--yolo] [--permission-mode <m>] "
+                             "[--model <name>] [--max-turns <n>] \"<prompt>\"\n";
+                return 64;
+            }
+            return acecode::headless::run_print_mode(opts);
+        }
+    }
+
 #ifdef _WIN32
     if (argc == 1) {
         AppConfig cfg_probe = load_config();
@@ -3461,8 +3498,8 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
                 ? emptyElement()
                 : paragraph(state.update_notice) | color(tui::theme().semantic.warning),
             text(state.status_line) | color(status_line_color(state.status_line)),
-            text(cwd_display) | color(tui::theme().ui.accent_alt) | dim,
-        }) | bgcolor(is_light ? Color::RGB(225, 235, 245) : Color::RGB(0, 30, 45));
+            text(cwd_display) | color(tui::theme().ui.accent) | dim,
+        }) | bgcolor(is_light ? Color::RGB(221, 244, 255) : Color::RGB(28, 28, 38));
     } else {
         // -- Logo --
         auto logo = vbox({
@@ -3479,7 +3516,7 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
                 logo,
                 filler(),
                 text("  "),
-            }) | bgcolor(is_light ? Color::RGB(225, 235, 245) : Color::RGB(0, 30, 45));
+            }) | bgcolor(is_light ? Color::RGB(221, 244, 255) : Color::RGB(28, 28, 38));
         } else {
             header = hbox({
                 text("    "),
@@ -3491,10 +3528,10 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
                         ? emptyElement()
                         : paragraph(state.update_notice) | color(tui::theme().semantic.warning),
                     text(state.status_line) | color(status_line_color(state.status_line)),
-                    text(cwd_display) | color(tui::theme().ui.accent_alt) | dim,
+                    text(cwd_display) | color(tui::theme().ui.accent) | dim,
                 }),
                 text("  "),
-            }) | bgcolor(is_light ? Color::RGB(225, 235, 245) : Color::RGB(0, 30, 45));
+            }) | bgcolor(is_light ? Color::RGB(221, 244, 255) : Color::RGB(28, 28, 38));
         }
     }
 
@@ -3614,7 +3651,7 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
             // 这与 LLM 工具结果(role="tool_result")形成对照:LLM 调用的
             // 工具结果走摘要/diff/fold 三优先级,有 Ctrl+E 展开机制。
             auto line = hbox({
-                text("   <- ") | color(tui::theme().ui.text_dim),
+                text("   <- ") | color(tui::theme().semantic.info),
                 render_tool_result_lines_preserving_breaks(msg.content) | flex,
             });
             if (focused_message) {
@@ -3649,12 +3686,12 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
                     std::string summary_line = renderable_tool_summary_line(
                         s, metric_str, summary_width);
                     rows.push_back(hbox({
-                        text("   <- ") | color(tui::theme().ui.text_dim),
+                        text("   <- ") | color(tui::theme().semantic.info),
                         text(summary_line) | color(row_color) | flex,
                     }));
                 } else {
                     rows.push_back(hbox({
-                        text("   <- ") | color(tui::theme().ui.text_dim),
+                        text("   <- ") | color(tui::theme().semantic.info),
                         text("diff") | color(tui::theme().ui.text_muted) | flex,
                     }));
                 }
@@ -3740,7 +3777,7 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
 
                 Elements rows;
                 rows.push_back(hbox({
-                    text("   <- ") | color(tui::theme().ui.text_dim),
+                    text("   <- ") | color(tui::theme().semantic.info),
                     text(summary_line) | color(row_color) | flex,
                 }));
 
@@ -3795,7 +3832,7 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
                 }
 
                 auto line = hbox({
-                    text("   <- ") | color(tui::theme().ui.text_dim),
+                    text("   <- ") | color(tui::theme().semantic.info),
                     render_tool_result_lines_preserving_breaks(display_content) | flex,
                 });
                 if (focused_message) {
@@ -3899,9 +3936,9 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
             if (dist == 0)
                 c = tui::theme().ui.accent;
             else if (dist == 1)
-                c = is_light ? Color::RGB(130, 90, 0) : Color::RGB(180, 180, 60);
+                c = tui::theme().ui.text_muted;
             else if (dist == 2)
-                c = is_light ? Color::RGB(160, 130, 60) : Color::RGB(120, 120, 40);
+                c = tui::theme().ui.text_dim;
             else
                 c = tui::theme().ui.text_dim;
             chars.push_back(text(utf8_chars[i]) | color(c));
@@ -3924,7 +3961,7 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
     Element mcp_loading_element = emptyElement();
     if (!show_regular_sidebar && mcp_sidebar_has_loading(state)) {
         mcp_loading_element = hbox({
-            text(" i ") | bold | color(Color::White),
+            text(" i ") | bold | color(tui::theme().ui.accent),
             render_white_shimmer_text("MCP loading", anim_tick.load()),
         });
     }
@@ -5025,6 +5062,76 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
     }
     agent_loop.set_session_manager(&session_manager);
 
+    std::mutex tui_title_threads_mu;
+    std::vector<std::thread> tui_title_threads;
+    auto join_tui_title_threads = [&]() {
+        std::vector<std::thread> threads;
+        {
+            std::lock_guard<std::mutex> lk(tui_title_threads_mu);
+            threads.swap(tui_title_threads);
+        }
+        for (auto& thread : threads) {
+            if (thread.joinable()) thread.join();
+        }
+    };
+    auto maybe_start_tui_auto_title = [&](const UserInput& input) {
+        if (!config.session_title.enabled) return;
+        std::string text = visible_auto_title_input(input);
+        if (text.empty()) return;
+
+        const std::string session_id = session_manager.ensure_active_session_id();
+        if (session_id.empty()) return;
+
+        auto profile = resolve_auto_title_profile(
+            config,
+            session_manager.current_model_preset(),
+            agent_loop.cwd());
+        if (!profile.has_value()) return;
+        if (!session_manager.mark_auto_title_generation_started()) return;
+
+        std::thread worker([&, cfg = &config, session_id,
+                            text = std::move(text),
+                            profile = std::move(*profile)]() mutable {
+            try {
+                auto provider = create_auto_title_provider(std::move(profile), *cfg);
+                if (!provider) return;
+                auto title = generate_auto_session_title(*provider, text, *cfg);
+                if (!title.has_value() || title->empty()) return;
+                if (!session_manager.try_set_generated_session_title_for_session(
+                        session_id, *title)) {
+                    return;
+                }
+                if (session_manager.current_session_id() != session_id) return;
+                {
+                    std::lock_guard<std::mutex> lk(state.mu);
+                    if (session_manager.current_session_id() != session_id) return;
+                    state.current_session_title = *title;
+                }
+                set_terminal_title(*title);
+                screen.PostEvent(Event::Custom);
+            } catch (const std::exception& e) {
+                LOG_WARN("[tui] auto session title generation failed: " +
+                         std::string(e.what()));
+            } catch (...) {
+                LOG_WARN("[tui] auto session title generation failed");
+            }
+        });
+        std::lock_guard<std::mutex> lk(tui_title_threads_mu);
+        tui_title_threads.push_back(std::move(worker));
+    };
+    std::function<void(const UserInput&)> submit_tui_input =
+        [&](const UserInput& input) {
+            maybe_start_tui_auto_title(input);
+            agent_loop.submit(input);
+        };
+    auto submit_tui_text = [&](const std::string& text,
+                               const std::string& display_text = std::string{}) {
+        UserInput input;
+        input.text = text;
+        input.display_text = display_text;
+        submit_tui_input(input);
+    };
+
     // ---- 子代理宿主(spawn_subagent / wait_subagent)----
     // SessionRegistry / LocalSessionClient 不依赖 web 层,TUI 进程内直接
     // 实例化;子会话与主会话共享 ToolExecutor(深度限制阻止孙代理)。
@@ -5264,7 +5371,9 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
             &skill_registry,
             &memory_registry,
             &cmd_registry,
-            working_dir
+            working_dir,
+            &subagent_host,
+            submit_tui_input
         };
         cmd_registry.dispatch("/resume", cmd_ctx);
     }
@@ -5315,8 +5424,9 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
     };
 
     // Now that agent_loop exists, update on_busy_changed to drain pending queue
-    callbacks.on_busy_changed = [&state, &clamp_chat_focus, &agent_loop, &screen,
-                                 &coordinate_mcp_before_first_turn](bool busy) {
+    callbacks.on_busy_changed = [&state, &clamp_chat_focus, &screen,
+                                 &coordinate_mcp_before_first_turn,
+                                 &submit_tui_input, &submit_tui_text](bool busy) {
         std::unique_lock<std::mutex> lk(state.mu);
         if (busy && !state.is_waiting) {
             state.current_thinking_phrase = get_random_thinking_phrase(is_user_chinese(state));
@@ -5374,9 +5484,9 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
             coordinate_mcp_before_first_turn();
             lk.lock();
             if (has_structured_input) {
-                agent_loop.submit(next_input);
+                submit_tui_input(next_input);
             } else {
-                agent_loop.submit(next_prompt);
+                submit_tui_text(next_prompt);
             }
         }
         screen.PostEvent(Event::Custom);
@@ -5388,7 +5498,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
     // 该回调由 RC listener 的 Crow worker 线程调用,锁内逻辑与 Enter 提交分支
     // 保持一字不差。
     acecode::rc::remote_control_service().hub().set_inbound_submit(
-        [&state, &agent_loop, &screen, &clamp_chat_focus,
+        [&state, &screen, &clamp_chat_focus, &submit_tui_text,
          &coordinate_mcp_before_first_turn](const std::string& text) {
             std::unique_lock<std::mutex> lk(state.mu);
             if (state.is_waiting) {
@@ -5406,7 +5516,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                 lk.unlock();
                 coordinate_mcp_before_first_turn();
                 lk.lock();
-                agent_loop.submit(text);
+                submit_tui_text(text);
             }
             screen.PostEvent(Event::Custom);
         });
@@ -5544,7 +5654,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
         };
 
     // Wrap with CatchEvent to handle all keyboard input
-    auto input_with_esc = CatchEvent(input_renderer, [&state, &screen, &clamp_chat_focus, &chat_viewport_rows, &sync_chat_line_counts_from_layout, &reset_chat_line_measure_state, &invalidate_chat_line_measure_at, &auth_done, &cmd_registry, &agent_loop, &provider_slot, &provider_accessor, &config, &token_tracker, &permissions, &session_manager, &scroll_chat_by_lines, &chat_box, &scrollbar_box, &ask_scrollbar_box, &ask_overlay_box, &message_line_counts, &mcp_manager, &tools, &skill_registry, &memory_registry, &working_dir, &insert_pasted_text_at_cursor, &paste_system_clipboard_text, &paste_system_clipboard_image, &handle_pending_attachment_focus_event, &cancel_ctrl_c_exit_locked, &coordinate_mcp_before_first_turn, &subagent_host](Event event) {
+    auto input_with_esc = CatchEvent(input_renderer, [&state, &screen, &clamp_chat_focus, &chat_viewport_rows, &sync_chat_line_counts_from_layout, &reset_chat_line_measure_state, &invalidate_chat_line_measure_at, &auth_done, &cmd_registry, &agent_loop, &provider_slot, &provider_accessor, &config, &token_tracker, &permissions, &session_manager, &scroll_chat_by_lines, &chat_box, &scrollbar_box, &ask_scrollbar_box, &ask_overlay_box, &message_line_counts, &mcp_manager, &tools, &skill_registry, &memory_registry, &working_dir, &insert_pasted_text_at_cursor, &paste_system_clipboard_text, &paste_system_clipboard_image, &handle_pending_attachment_focus_event, &cancel_ctrl_c_exit_locked, &coordinate_mcp_before_first_turn, &subagent_host, &submit_tui_input, &submit_tui_text](Event event) {
 #if ACECODE_TUI_INPUT_TRACE
         if (event != Event::Custom &&
             !event.is_cursor_position() &&
@@ -6646,7 +6756,8 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                     &memory_registry,
                     &cmd_registry,
                     working_dir,
-                    &subagent_host
+                    &subagent_host,
+                    submit_tui_input
                 };
                 const size_t before_command_messages =
                     state.conversation.size();
@@ -6687,9 +6798,9 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                 state.last_completion_tokens_authoritative = 0;
                 state.is_waiting = true;
                 if (attachments.empty()) {
-                    agent_loop.submit(expanded_prompt);
+                    submit_tui_text(expanded_prompt);
                 } else {
-                    agent_loop.submit(build_user_input_with_attachments(
+                    submit_tui_input(build_user_input_with_attachments(
                         expanded_prompt, display_prompt, attachments));
                 }
             }
@@ -7626,6 +7737,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
     // 必须在这些局部变量析构前 join。g_active_screen 此时已被 run_tui_loop 清空,
     // 回调不会再 Post 到屏幕。stop() 幂等,未 start 也安全。
     acecode::model_pool_status_service().stop();
+    join_tui_title_threads();
     shutdown_after_tui_loop(state, agent_loop, mcp_manager, running,
                             agent_aborting, anim_thread, auth_thread,
                             update_check_thread,

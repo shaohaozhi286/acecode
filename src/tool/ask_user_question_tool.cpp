@@ -1,5 +1,6 @@
 #include "ask_user_question_tool.hpp"
 
+#include "../headless/headless_mode.hpp"
 #include "../session/session_manager.hpp"
 #include "../tui_state.hpp"
 #include "../utils/logger.hpp"
@@ -271,6 +272,19 @@ ToolResult make_goal_unattended_ask_result() {
         "autonomously: pick the recommended option if one exists, otherwise "
         "the most reasonable option, note the decision briefly in your "
         "response, and continue working toward the goal.";
+    return r;
+}
+
+// Headless(-p / --print)模式的自动应答:同 goal unattended 的语义,只是
+// 文案换成 print 模式的环境说明。success=true 防止模型当失败重问。
+ToolResult make_headless_ask_result() {
+    ToolResult r;
+    r.success = true;
+    r.output =
+        "[Headless mode] The user cannot answer questions in print (-p) mode. "
+        "Do not wait and do not ask again. Decide autonomously: pick the "
+        "recommended option if one exists, otherwise the most reasonable "
+        "option, note the decision briefly in your response, and continue.";
     return r;
 }
 
@@ -645,6 +659,13 @@ ToolImpl create_ask_user_question_tool_async() {
         auto parsed = validate_ask_user_question_args(arguments_json, err);
         if (!parsed.has_value()) {
             return ToolResult{err, false};
+        }
+
+        // Headless(-p)进程:没有任何交互通道,自动应答(先于 goal 分支,
+        // 两者同时成立时文案取 headless —— 对模型的环境解释更准确)。
+        if (headless::active()) {
+            LOG_INFO("[AskUserQuestion] auto-answered (headless print mode)");
+            return make_headless_ask_result();
         }
 
         // Goal 无人值守:不经 prompter 弹前端问答面板,自动应答。

@@ -25,6 +25,7 @@
 #include "hooks/hook_config.hpp"
 #include "hooks/hook_manager.hpp"
 #include "hooks/hook_payload.hpp"
+#include "headless/headless_mode.hpp"
 #include <nlohmann/json.hpp>
 #include <chrono>
 #include <mutex>
@@ -2413,6 +2414,39 @@ bool AgentLoop::execute_tool_calls(
                         if (needs_yolo_external_write_confirmation) {
                             permissions_.mark_yolo_external_file_write_confirmed();
                         }
+                    }
+                }
+
+                // Headless(-p / --print)模式:进程里没有任何交互通道能弹
+                // 确认(无 TUI overlay / 无浏览器 WS)。走到这里 = 规则与
+                // hook 都没放行,即将进交互 prompt —— AsyncPrompter 会空等
+                // 5 分钟超时,必须短路。放在 hook 分支之后:hook 是非交互
+                // 决策通道,headless 下依然应该先于兜底策略生效。
+                //   - --yolo(dangerous):自动放行。dangerous 下唯一落到这
+                //     里的常规场景是 yolo 外部写首确认,用户显式选了 yolo,
+                //     照 goal unattended 的先例连带确认一次性放掉。
+                //   - 其余(default/accept-edits/plan 的受限工具):直接拒绝,
+                //     文案告知模型环境约束,引导改用只读方案而不是重试。
+                if (!auto_allow && headless::active()) {
+                    if (permissions_.is_dangerous()) {
+                        auto_allow = true;
+                        if (needs_yolo_external_write_confirmation) {
+                            permissions_.mark_yolo_external_file_write_confirmed();
+                        }
+                        LOG_INFO("[headless] yolo auto-approve: " +
+                                 effective_tc.function_name +
+                                 (ctx_path.empty() ? std::string{} : " path=" + ctx_path));
+                    } else {
+                        LOG_INFO("[headless] denied (needs confirmation): " +
+                                 effective_tc.function_name);
+                        return ToolResult{
+                            "[Headless mode] This tool call requires interactive "
+                            "user confirmation, which is unavailable in print (-p) "
+                            "mode; it was denied automatically. Prefer a read-only "
+                            "alternative and continue. The user can rerun with "
+                            "--yolo (or --permission-mode accept-edits) to allow "
+                            "such calls.",
+                            false};
                     }
                 }
 
