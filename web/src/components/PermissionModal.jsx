@@ -4,6 +4,7 @@
 import { useMemo, useRef } from 'react';
 import { connection } from '../lib/connection.js';
 import { planPermissionPresentation } from '../lib/permissionRequestPresentation.js';
+import { buildPermissionToolPreview } from '../lib/permissionToolPreview.js';
 import { Modal } from './Modal.jsx';
 import { VsIcon } from './Icon.jsx';
 
@@ -57,7 +58,16 @@ function formatArgsPreview(args) {
 }
 
 export function PermissionModal({ request, onResolve, originLabel = '' }) {
-  const preview = useMemo(() => formatArgsPreview(request?.args), [request?.args]);
+  const toolPreview = useMemo(
+    () => buildPermissionToolPreview(request?.tool, request?.args),
+    [request?.tool, request?.args],
+  );
+  // command/json 两种 kind 才需要长文本预览;file kind 只展示路径 + 行数。
+  const preview = useMemo(() => {
+    if (toolPreview.kind === 'command') return truncateText(toolPreview.command, MAX_PREVIEW_CHARS);
+    if (toolPreview.kind === 'json') return formatArgsPreview(request?.args);
+    return { text: '', truncated: 0 };
+  }, [toolPreview, request?.args]);
   const resolvedRef = useRef(false);
   const {
     isPlanEnter,
@@ -125,17 +135,24 @@ export function PermissionModal({ request, onResolve, originLabel = '' }) {
             ) : !isPlanEnter && (
               <div className="rounded-md bg-surface-alt border border-border font-mono overflow-hidden">
                 <div className="px-3.5 py-2 border-b border-border text-[12px] font-semibold text-fg flex items-center justify-between gap-2">
-                  <span className="truncate">{request.tool || 'tool'}</span>
+                  <span className="truncate">{toolPreview.toolLabel}</span>
                   {preview.truncated > 0 && (
                     <span className="shrink-0 text-[10px] font-normal text-warn">仅显示预览</span>
                   )}
                 </div>
-                <pre
-                  className="px-3.5 py-2.5 text-[11px] leading-relaxed text-fg-2 m-0 whitespace-pre-wrap break-words overflow-auto overscroll-contain"
-                  style={{ maxHeight: 'min(48vh, 360px)' }}
-                >
-                  {preview.text}
-                </pre>
+                {toolPreview.kind === 'file' ? (
+                  <div className="px-3.5 py-2.5">
+                    <div className="text-[12px] text-fg-2 break-all">{toolPreview.filePath}</div>
+                    <div className="text-[11px] text-fg-mute mt-0.5">{toolPreview.detail}</div>
+                  </div>
+                ) : (
+                  <pre
+                    className="px-3.5 py-2.5 text-[11px] leading-relaxed text-fg-2 m-0 whitespace-pre-wrap break-words overflow-auto overscroll-contain"
+                    style={{ maxHeight: 'min(48vh, 360px)' }}
+                  >
+                    {preview.text}
+                  </pre>
+                )}
               </div>
             )}
           </div>
