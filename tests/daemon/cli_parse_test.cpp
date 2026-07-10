@@ -156,3 +156,35 @@ TEST(DaemonCliParse, CwdOverrideEmptyRejected) {
     Args a = parse({"--foreground", "--cwd="});
     EXPECT_FALSE(a.error.empty());
 }
+
+// ---- add-ask-question-policy: --question-policy ----
+
+// 场景: --question-policy=<v> 等号形式,三个合法值 + timeout 冒号秒数。
+TEST(DaemonCliParse, QuestionPolicyEqualsForm) {
+    for (const char* v : {"ask", "deny", "timeout"}) {
+        Args a = parse({"--foreground",
+                        std::string("--question-policy=") + v});
+        EXPECT_TRUE(a.error.empty()) << v;
+        EXPECT_EQ(a.question_policy_override, v);
+        EXPECT_EQ(a.question_timeout_seconds_override, 0);
+    }
+    Args a = parse({"--foreground", "--question-policy=timeout:90"});
+    EXPECT_TRUE(a.error.empty());
+    EXPECT_EQ(a.question_policy_override, "timeout");
+    EXPECT_EQ(a.question_timeout_seconds_override, 90);
+}
+
+// 场景: --question-policy <v> 空格形式。
+TEST(DaemonCliParse, QuestionPolicySplitForm) {
+    Args a = parse({"--foreground", "--question-policy", "deny"});
+    EXPECT_TRUE(a.error.empty());
+    EXPECT_EQ(a.question_policy_override, "deny");
+}
+
+// 场景: 非法取值 / 越界秒数 / 缺值必须报错(fail fast,不静默归一化)。
+TEST(DaemonCliParse, QuestionPolicyInvalidRejected) {
+    EXPECT_FALSE(parse({"--foreground", "--question-policy=sometimes"}).error.empty());
+    EXPECT_FALSE(parse({"--foreground", "--question-policy=timeout:2"}).error.empty());
+    EXPECT_FALSE(parse({"--foreground", "--question-policy=timeout:abc"}).error.empty());
+    EXPECT_FALSE(parse({"--foreground", "--question-policy"}).error.empty());
+}

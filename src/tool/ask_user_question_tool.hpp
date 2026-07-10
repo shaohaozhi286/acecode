@@ -64,6 +64,23 @@ ToolResult make_rejected_ask_result();
 // AskUserQuestion 实现共用。
 ToolResult make_goal_unattended_ask_result();
 
+// question_policy=deny 的自动应答 ToolResult(add-ask-question-policy)。
+// success=true(沿用 goal 无人值守的实证教训:false 会让模型当失败反复
+// 重问),文案指示模型选推荐项或最合理假设并继续;metadata 携带
+// ask_user_question_auto={mode:"deny", origin} 供转录行标注。origin 传
+// ResolvedQuestionPolicy::origin("explicit" / "yolo-implicit")。
+ToolResult make_policy_denied_ask_result(const char* origin);
+
+// question_policy=timeout 到期的自动采纳 ToolResult:每个 question 取第一
+// 个选项(工具 description 约定推荐项排第一)作为答案,output 前缀注明
+// 用户 N 秒未回答、答案是自动采纳而非用户真实意志;metadata 同时携带
+// ask_user_question_result(正常答案结构)与 ask_user_question_auto=
+// {mode:"timeout", seconds}。TUI 与 daemon 两路共用。
+ToolResult make_timeout_adopted_ask_result(
+    const std::vector<AskQuestion>& questions,
+    const std::vector<std::string>& question_order,
+    int timeout_seconds);
+
 // 工厂函数:新建 AskUserQuestion 工具。TuiState 引用用于发起阻塞 overlay,
 // screen 引用用于 PostEvent 唤醒渲染线程。工具内部通过 ToolContext::abort_flag
 // 感知 agent 中止。

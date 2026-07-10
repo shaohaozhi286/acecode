@@ -1148,6 +1148,31 @@ AppConfig load_config() {
                     }
                     cfg.agent_loop.max_iterations = v;
                 }
+                // AskUserQuestion 应答策略(add-ask-question-policy)。显式含键
+                // = 置 explicit 标记(即使值等于默认 "ask"),用于压制 YOLO 隐式
+                // 映射;非法值归一化为 "ask" 且不置标记。
+                if (alj.contains("question_policy") && alj["question_policy"].is_string()) {
+                    std::string qp = alj["question_policy"].get<std::string>();
+                    if (qp == "ask" || qp == "deny" || qp == "timeout") {
+                        cfg.agent_loop.question_policy = qp;
+                        cfg.agent_loop.question_policy_explicit = true;
+                    } else {
+                        LOG_WARN("[config] agent_loop.question_policy=\"" + qp +
+                                 "\" is invalid (expected ask|deny|timeout); using \"ask\"");
+                        cfg.agent_loop.question_policy = "ask";
+                    }
+                }
+                if (alj.contains("question_timeout_seconds") &&
+                    alj["question_timeout_seconds"].is_number_integer()) {
+                    int v = alj["question_timeout_seconds"].get<int>();
+                    if (v < 5 || v > 3600) {
+                        LOG_WARN("[config] agent_loop.question_timeout_seconds=" +
+                                 std::to_string(v) +
+                                 " is out of range [5, 3600]; using default 60");
+                        v = 60;
+                    }
+                    cfg.agent_loop.question_timeout_seconds = v;
+                }
                 // Legacy keys (auto_continue, max_consecutive_empty_iterations)
                 // from the just-rolled-back agentic-loop-terminator change are
                 // silently ignored — see align-loop-with-hermes.
@@ -1451,6 +1476,12 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
         nlohmann::json alj = nlohmann::json::object();
         if (cfg.agent_loop.max_iterations != al_d.max_iterations)
             alj["max_iterations"] = cfg.agent_loop.max_iterations;
+        // question_policy_explicit 是运行时标记,永不序列化。CLI 覆盖也只改
+        // 内存不落盘,这里只在配置值本身偏离默认时写出。
+        if (cfg.agent_loop.question_policy != al_d.question_policy)
+            alj["question_policy"] = cfg.agent_loop.question_policy;
+        if (cfg.agent_loop.question_timeout_seconds != al_d.question_timeout_seconds)
+            alj["question_timeout_seconds"] = cfg.agent_loop.question_timeout_seconds;
         if (!alj.empty()) j["agent_loop"] = alj;
 
         TuiConfig tui_d;

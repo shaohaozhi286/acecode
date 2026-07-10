@@ -1505,6 +1505,28 @@ All client frames are JSON:
 }
 ```
 
+#### AskUserQuestion answer policy (`agent_loop.question_policy`)
+
+`question_request` / `question_closed` behavior depends on the configured
+answer policy (`config.agent_loop.question_policy`, or the
+`--question-policy` CLI override):
+
+- `ask` (default): `question_request` is emitted and the turn blocks until
+  `question_answer` arrives (or the turn is aborted). Unchanged behavior.
+- `deny`: no `question_request` is emitted at all. The tool returns an
+  automatic answer instructing the model to decide autonomously. Sessions in
+  YOLO permission mode default to `deny` unless `question_policy` was set
+  explicitly.
+- `timeout`: `question_request` is emitted normally; if no `question_answer`
+  arrives within `question_timeout_seconds`, the daemon closes the question
+  with `question_closed` `reason:"timeout"` and the tool auto-adopts the
+  first (recommended) option of each question. A `question_answer` arriving
+  after the timeout is ignored (unknown `request_id`).
+
+`question_closed.reason` values: `answered`, `cancelled`, `aborted`,
+`timeout`. Frontends must dismiss the question modal on any
+`question_closed` for the pending `request_id`.
+
 When more than one session is subscribed, session-targeted messages should
 include `payload.session_id`.
 

@@ -37,6 +37,9 @@ struct AskOverlayLayoutInput {
     bool                     other_input_active = false;
     int                      submit_focus = 0;
     int                      content_width = 80;
+    // question_policy=timeout 的静态提示秒数;>0 时在题目页 hint 行后追加
+    // 「Xs 无操作将自动选择推荐项」提示(add-ask-question-policy)。
+    int                      timeout_hint_seconds = 0;
 };
 
 struct AskOverlayLayout {

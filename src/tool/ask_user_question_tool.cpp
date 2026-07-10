@@ -274,8 +274,57 @@ ToolResult make_goal_unattended_ask_result() {
     return r;
 }
 
+ToolResult make_policy_denied_ask_result(const char* origin) {
+    ToolResult r;
+    r.success = true;
+    r.output =
+        "[Question policy: deny] Interactive questions are disabled for this "
+        "session. Do not wait and do not ask again. Decide autonomously: pick "
+        "the recommended option if one exists, otherwise the most reasonable "
+        "assumption, note the decision briefly in your response, and continue "
+        "with the task.";
+    r.metadata = nlohmann::json{
+        {"ask_user_question_auto", {
+            {"mode", "deny"},
+            {"origin", origin ? origin : "explicit"},
+        }}
+    };
+    return r;
+}
+
+ToolResult make_timeout_adopted_ask_result(
+    const std::vector<AskQuestion>& questions,
+    const std::vector<std::string>& question_order,
+    int timeout_seconds) {
+    std::map<std::string, std::string> answers;
+    for (const auto& q : questions) {
+        if (!q.options.empty()) answers[q.question] = q.options.front().label;
+    }
+    ToolResult r;
+    r.success = true;
+    r.output =
+        "[Question policy: timeout] The user did not answer within " +
+        std::to_string(timeout_seconds) +
+        " seconds. The first (recommended) option of each question was "
+        "adopted automatically — this is NOT an explicit user choice, so be "
+        "ready to adjust if the user corrects it later. " +
+        format_ask_answers(question_order, answers);
+    r.metadata = build_ask_user_question_result_metadata(question_order, answers);
+    r.metadata["ask_user_question_auto"] = {
+        {"mode", "timeout"},
+        {"seconds", timeout_seconds},
+    };
+    return r;
+}
+
 static bool goal_unattended(const ToolContext& ctx) {
     return ctx.goal_unattended_active && ctx.goal_unattended_active();
+}
+
+// 解析生效策略:探针未注入(独立 ToolExecutor 调用)= Ask 维持旧行为。
+static ResolvedQuestionPolicy effective_question_policy(const ToolContext& ctx) {
+    if (ctx.question_policy) return ctx.question_policy();
+    return ResolvedQuestionPolicy{};
 }
 
 ToolImpl create_ask_user_question_tool(TuiState& state,
@@ -369,6 +418,15 @@ ToolImpl create_ask_user_question_tool(TuiState& state,
             return make_goal_unattended_ask_result();
         }
 
+        // 应答策略(add-ask-question-policy):deny 不弹 overlay 直接自动
+        // 应答;timeout 正常弹但带 deadline,到期自动采纳每题第一选项。
+        const ResolvedQuestionPolicy policy = effective_question_policy(ctx);
+        if (policy.policy == QuestionPolicy::Deny) {
+            LOG_INFO(std::string("[AskUserQuestion] auto-answered (deny policy, ") +
+                     policy.origin + ")");
+            return make_policy_denied_ask_result(policy.origin);
+        }
+
         // 记录 question 的原始顺序,供 format 拼接 + 防止 std::map 里乱序。
         std::vector<std::string> question_order;
         question_order.reserve(parsed->size());
@@ -411,6 +469,11 @@ ToolImpl create_ask_user_question_tool(TuiState& state,
             state.ask_payload_json = arguments_json;
             state.ask_questions = *parsed;
             state.ask_question_order = question_order;
+            // timeout 策略:overlay 顶部渲染静态提示「N 秒无操作将自动选择
+            // 推荐项」;0 = ask 策略无提示。
+            state.ask_timeout_hint_seconds =
+                (policy.policy == QuestionPolicy::Timeout)
+                    ? policy.timeout_seconds : 0;
             state.ask_result_answers.clear();
             state.ask_result_ok = false;
             state.ask_current_question = 0;
@@ -442,11 +505,27 @@ ToolImpl create_ask_user_question_tool(TuiState& state,
         std::map<std::string, std::string> answers;
         bool ok = false;
         bool aborted = false;
+        bool timed_out = false;
+        const bool has_deadline = policy.policy == QuestionPolicy::Timeout;
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::seconds(policy.timeout_seconds);
         {
             std::unique_lock<std::mutex> lk(state.mu);
-            state.ask_cv.wait(lk, [&state, abort] {
-                return !state.ask_pending || (abort && abort->load());
-            });
+            if (has_deadline) {
+                // timeout 策略:500ms 粒度轮询 deadline(与 prompter 的 50ms
+                // abort 轮询同风格),到点自动采纳每题第一选项。
+                while (state.ask_pending && !(abort && abort->load())) {
+                    if (std::chrono::steady_clock::now() >= deadline) {
+                        timed_out = true;
+                        break;
+                    }
+                    state.ask_cv.wait_for(lk, std::chrono::milliseconds(500));
+                }
+            } else {
+                state.ask_cv.wait(lk, [&state, abort] {
+                    return !state.ask_pending || (abort && abort->load());
+                });
+            }
             aborted = abort && abort->load();
             ok = state.ask_result_ok;
             answers = state.ask_result_answers;
@@ -472,10 +551,20 @@ ToolImpl create_ask_user_question_tool(TuiState& state,
             state.ask_scrollbar_dragging = false;
             state.ask_scroll_to_focus_requested = false;
             state.ask_origin_label.clear();
+            state.ask_timeout_hint_seconds = 0;
             // overlay 释放:唤醒排队占用者(主会话确认 / 其它子会话提问)。
             state.overlay_cv.notify_all();
         }
         screen.PostEvent(ftxui::Event::Custom);
+
+        // 超时且用户未及时回答 → 自动采纳。ok=true 表示到点前一瞬用户已
+        // 提交,按正常回答处理(用户真实意志优先)。
+        if (timed_out && !aborted && !ok) {
+            LOG_INFO("[AskUserQuestion] timeout policy adopted first options after " +
+                     std::to_string(policy.timeout_seconds) + "s");
+            return make_timeout_adopted_ask_result(*parsed, question_order,
+                                                   policy.timeout_seconds);
+        }
 
         if (aborted || !ok) {
             LOG_INFO("[AskUserQuestion] declined (aborted=" +
@@ -653,6 +742,16 @@ ToolImpl create_ask_user_question_tool_async() {
             return make_goal_unattended_ask_result();
         }
 
+        // 应答策略(add-ask-question-policy):deny 不发 question_request,
+        // 直接自动应答。timeout 的等待窗口由 AskUserQuestionPrompter 持有
+        // (session_registry 创建时注入),这里只消费响应里的 timed_out 标记。
+        const ResolvedQuestionPolicy policy = effective_question_policy(ctx);
+        if (policy.policy == QuestionPolicy::Deny) {
+            LOG_INFO(std::string("[AskUserQuestion] auto-answered (deny policy, ") +
+                     policy.origin + ")");
+            return make_policy_denied_ask_result(policy.origin);
+        }
+
         // ctx.ask_user_questions 为空 → daemon 没装 prompter,工具不可用。
         // 直接拒绝 + 让 LLM 知道(避免无限挂起)。
         if (!ctx.ask_user_questions) {
@@ -673,6 +772,15 @@ ToolImpl create_ask_user_question_tool_async() {
 
         nlohmann::json payload = questions_to_payload(*parsed);
         nlohmann::json resp = ctx.ask_user_questions(payload);
+
+        // timeout 策略到期:prompter 已发 question_closed(reason=timeout)
+        // 收掉前端 modal,这里合成自动采纳结果。
+        if (resp.value("timed_out", false)) {
+            LOG_INFO("[AskUserQuestion] timeout policy adopted first options after " +
+                     std::to_string(policy.timeout_seconds) + "s");
+            return make_timeout_adopted_ask_result(*parsed, question_order,
+                                                   policy.timeout_seconds);
+        }
 
         bool cancelled = resp.value("cancelled", false);
         if (cancelled) {

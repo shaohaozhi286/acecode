@@ -184,25 +184,26 @@ TEST(AskUserQuestionPrompter, DefaultHasNoPassiveTimeout) {
     d.unsubscribe(sub);
 }
 
-// 场景: 显式传入非零 timeout 的调试路径仍可用 → cancelled=true 默认值生效,
-// 同时 EventDispatcher 应收到 Error(reason=question_timeout) 与 QuestionClosed。
-TEST(AskUserQuestionPrompter, ExplicitTimeoutTreatedAsCancelled) {
+// 场景: 非零 timeout 到期(add-ask-question-policy 的 timeout 策略路径)→
+// timed_out=true 且 cancelled=false(工具侧据此合成自动采纳结果而不是拒绝),
+// QuestionClosed reason="timeout" 通知前端收 modal;不再发 Error 事件
+// (超时是策略的正常路径,不是错误)。
+TEST(AskUserQuestionPrompter, ExplicitTimeoutMarksTimedOut) {
     EventDispatcher d;
     AskUserQuestionPrompter prompter(d, 100ms);
 
-    bool saw_timeout_error = false;
+    bool saw_any_error = false;
     ClosedState closed;
     auto closed_sub = subscribe_closed(d, closed);
     auto sub = d.subscribe([&](const SessionEvent& e) {
-        if (e.kind == SessionEventKind::Error
-            && e.payload.value("reason", std::string{}) == "question_timeout") {
-            saw_timeout_error = true;
-        }
+        if (e.kind == SessionEventKind::Error) saw_any_error = true;
     });
 
     auto resp = prompter.prompt(sample_questions(), nullptr);
-    EXPECT_TRUE(resp.cancelled);
-    EXPECT_TRUE(saw_timeout_error);
+    EXPECT_TRUE(resp.timed_out);
+    EXPECT_FALSE(resp.cancelled);
+    EXPECT_EQ(resp.answers.size(), 0u);
+    EXPECT_FALSE(saw_any_error);
     ASSERT_EQ(closed.items.size(), 1u);
     EXPECT_EQ(closed.items[0].second, "timeout");
     d.unsubscribe(sub);
@@ -286,11 +287,13 @@ TEST(AskUserQuestionPrompter, RequestIdDoesNotCollideWithPermissionPrompter) {
 
 // 场景: notify_response 用未知 request_id = no-op,不能让 prompter 状态错乱。
 // 通过先 prompt(超时)→ 再用错 id 调 notify_response 几次 → 验证 pending_count 0。
+// 这同时覆盖 spec「超时后到达的用户回答被忽略」:超时后 request_id 已被清出
+// pending_,迟到的 notify_response 命中未知 id 分支。
 TEST(AskUserQuestionPrompter, UnknownRequestIdNotifyIsNoop) {
     EventDispatcher d;
     AskUserQuestionPrompter prompter(d, 50ms);
     auto resp = prompter.prompt(sample_questions(), nullptr);
-    EXPECT_TRUE(resp.cancelled);
+    EXPECT_TRUE(resp.timed_out);
     EXPECT_EQ(prompter.pending_count(), 0u);
 
     AskUserQuestionResponse stale;

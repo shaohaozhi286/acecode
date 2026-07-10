@@ -4026,6 +4026,7 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
         layout_input.other_input_active = state.ask_other_input_active;
         layout_input.submit_focus = state.ask_submit_focus;
         layout_input.content_width = content_width;
+        layout_input.timeout_hint_seconds = state.ask_timeout_hint_seconds;
 
         auto layout = acecode::tui::build_ask_overlay_layout(layout_input);
         const int total = static_cast<int>(layout.rows.size());
@@ -4451,6 +4452,18 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
 
     AppConfig config =
         load_tui_config_and_runtime(hook_manager, working_dir, argv0_dir);
+
+    // --question-policy 覆盖(add-ask-question-policy):非法值 fail fast;
+    // 合法值只写运行时 CLI 字段,save_config 永不落盘。
+    if (!cli.question_policy_error.empty()) {
+        std::cerr << "[acecode] " << cli.question_policy_error << std::endl;
+        return 1;
+    }
+    if (!cli.question_policy.empty()) {
+        config.agent_loop.question_policy_cli = cli.question_policy;
+        config.agent_loop.question_timeout_seconds_cli = cli.question_timeout_seconds;
+    }
+
     auto cwd_override = load_cwd_model_override(working_dir);
     SessionEntry::ProviderSlot provider_slot;
     initialize_tui_provider_runtime(config, working_dir, cwd_override,

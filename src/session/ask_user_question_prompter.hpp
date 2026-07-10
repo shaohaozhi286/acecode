@@ -40,8 +40,12 @@ struct AskUserQuestionAnswer {
 };
 
 // 一次 AskUserQuestion 调用的整批回答(每个 question 一项),或者 cancelled。
+// timed_out=true 表示配置的等待窗口到期且用户未回答(add-ask-question-policy
+// 的 timeout 策略路径):此时 cancelled 保持 false,answers 为空,由工具侧
+// 合成「自动采纳每题第一选项」的结果。
 struct AskUserQuestionResponse {
     bool                                  cancelled = false;
+    bool                                  timed_out = false;
     std::vector<AskUserQuestionAnswer>    answers;
 };
 
