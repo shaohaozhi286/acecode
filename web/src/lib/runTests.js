@@ -36,6 +36,7 @@ import './compactMessagePreview.test.js';
 import './permissionMode.test.js';
 import './permissionRequestPresentation.test.js';
 import './permissionRequestQueue.test.js';
+import './permissionToolPreview.test.js';
 import './tokenBudget.test.js';
 import './usageStats.test.js';
 import './desktopFeedback.test.js';
