@@ -2427,7 +2427,9 @@ body {
   border: none;
   background: transparent;
   min-height: 24px;
-  padding-left: 8px;
+  /* 根级文件行没有缩进导轨,.ace-file-leaf-content 的 -26px 回拉会把图标
+     拉到 padding-left - 8px 处;基础内边距必须 ≥16px,否则图标贴面板左边线 */
+  padding-left: 16px;
 }
 .ace-file-row:hover { background: var(--ace-surface-hi); }
 .ace-file-tree-message {
@@ -2435,7 +2437,8 @@ body {
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 3px 8px;
+  /* 左内边距与 .ace-file-row 一致,缩进导轨才能和文件行对齐 */
+  padding: 3px 8px 3px 16px;
   font-size: 11px;
 }
 .ace-file-tree-indent {
