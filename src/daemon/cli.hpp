@@ -23,6 +23,10 @@ struct Args {
     std::string cwd_override;   // --cwd=<path> 覆盖 daemon 工作目录,用于从任意目录调试指定 workspace。
     std::string run_dir_override; // --run-dir=<path> 把 daemon runtime files (heartbeat/pid/port/token/GUID 锁) 切到非默认目录。desktop 多 workspace 用 ~/.acecode/projects/<hash>/run/。
     bool native_folder_picker_enabled = false; // desktop 内部:启用 native folder picker API。
+    // --question-policy=<ask|deny|timeout[:N]> AskUserQuestion 应答策略覆盖
+    // (add-ask-question-policy),对该 daemon 全部会话生效。空 = 不覆盖。
+    std::string question_policy_override;
+    int question_timeout_seconds_override = 0; // 仅 timeout:N 冒号语法时非 0
     std::string error;          // 解析错误,非空时打印 + 非零退出
 };
 

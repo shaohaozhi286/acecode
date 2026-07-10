@@ -19,6 +19,7 @@
 #include "../provider/provider_factory.hpp"
 #include "../skills/skill_init.hpp"
 #include "../gitinfo/git_context_core.hpp"
+#include "../tool/question_policy.hpp"
 #include "../worktree/worktree_core.hpp"
 #include "../worktree/worktree_manager.hpp"
 #include "../utils/logger.hpp"
@@ -829,7 +830,28 @@ SessionRegistry::make_entry_locked(const std::string& id,
     // AskUserQuestionPrompter: 异步 — 触发 QuestionRequest 事件,等浏览器
     // question_answer 回流。AgentLoop 在每次工具执行时把 prompter 包成
     // ToolContext::ask_user_questions 回调注入(set_ask_question_prompter)。
-    entry->ask_prompter = std::make_unique<AskUserQuestionPrompter>(entry->loop->events());
+    //
+    // add-ask-question-policy:显式 timeout 策略(config 或 CLI)时给
+    // prompter 配等待窗口;yolo 隐式映射只产生 deny(工具层实时分支),
+    // 永远不产生 timeout,所以这里传 "default" 权限模式即可。已知限制:
+    // 会话创建后策略变更不重建 prompter,timeout 秒数以创建时为准。
+    std::chrono::milliseconds ask_timeout{0};
+    if (deps_.config) {
+        const auto& al = deps_.config->agent_loop;
+        const bool has_cli = !al.question_policy_cli.empty();
+        const auto resolved = resolve_question_policy(
+            has_cli ? al.question_policy_cli : al.question_policy,
+            has_cli || al.question_policy_explicit,
+            (has_cli && al.question_timeout_seconds_cli > 0)
+                ? al.question_timeout_seconds_cli
+                : al.question_timeout_seconds,
+            "default");
+        if (resolved.policy == QuestionPolicy::Timeout) {
+            ask_timeout = std::chrono::seconds(resolved.timeout_seconds);
+        }
+    }
+    entry->ask_prompter = std::make_unique<AskUserQuestionPrompter>(
+        entry->loop->events(), ask_timeout);
     entry->loop->set_ask_question_prompter(entry->ask_prompter.get());
 
     return entry;

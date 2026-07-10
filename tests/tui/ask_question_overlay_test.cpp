@@ -254,3 +254,29 @@ TEST(AskQuestionOverlayTest, OtherInputEditingCoexistsWithOverlayScrollState) {
     EXPECT_GT(s.ask_scroll_offset, 0);
     EXPECT_EQ(s.input_text, "/");
 }
+
+// 场景(add-ask-question-policy):timeout 策略下 overlay 追加静态提示行
+// 「Ns 无操作将自动选择推荐项」;ask 策略(timeout_hint_seconds=0)不出现。
+TEST(AskQuestionOverlayTest, TimeoutHintRowRenderedOnlyWhenConfigured) {
+    AskQuestion q = make_question();
+
+    auto input = input_for(q, 80);
+    input.timeout_hint_seconds = 60;
+    auto layout = acecode::tui::build_ask_overlay_layout(input);
+    bool found = false;
+    for (const auto& row : rows_of_kind(layout, AskOverlayRowKind::Hint)) {
+        if (row.find("60s") != std::string::npos &&
+            row.find("\xE8\x87\xAA\xE5\x8A\xA8\xE9\x80\x89\xE6\x8B\xA9") !=
+                std::string::npos) { // "自动选择"
+            found = true;
+        }
+    }
+    EXPECT_TRUE(found);
+
+    auto input_no_hint = input_for(q, 80);
+    auto layout_no_hint = acecode::tui::build_ask_overlay_layout(input_no_hint);
+    for (const auto& row : rows_of_kind(layout_no_hint, AskOverlayRowKind::Hint)) {
+        EXPECT_EQ(row.find("\xE8\x87\xAA\xE5\x8A\xA8\xE9\x80\x89\xE6\x8B\xA9"),
+                  std::string::npos);
+    }
+}

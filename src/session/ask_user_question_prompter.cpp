@@ -47,11 +47,11 @@ AskUserQuestionPrompter::prompt(const nlohmann::json& questions_payload,
             break;
         }
         if (has_timeout && std::chrono::steady_clock::now() >= deadline) {
+            // timeout 策略的正常路径(add-ask-question-policy),不是错误:
+            // 标记 timed_out 让工具侧合成自动采纳结果,cancelled 保持 false。
             close_reason = "timeout";
-            events_.emit(SessionEventKind::Error, nlohmann::json{
-                {"reason",     "question_timeout"},
-                {"request_id", req_id},
-            });
+            result.cancelled = false;
+            result.timed_out = true;
             break;
         }
     }

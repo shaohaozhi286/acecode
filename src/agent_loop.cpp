@@ -1803,6 +1803,27 @@ ToolContext AgentLoop::build_tool_context(
         }
         return std::string(PermissionManager::mode_name(permissions_.mode()));
     };
+    tool_ctx.question_policy = [this]() {
+        // CLI 覆盖(--question-policy)折叠进解析输入:CLI 值优先于配置值,
+        // 且视为显式(压制 YOLO 隐式映射)。权限模式实时取,/yolo 会话中
+        // 切换后下一次 AskUserQuestion 即生效。
+        const bool has_cli = !loop_cfg_.question_policy_cli.empty();
+        const std::string& policy =
+            has_cli ? loop_cfg_.question_policy_cli : loop_cfg_.question_policy;
+        const bool explicit_choice =
+            has_cli || loop_cfg_.question_policy_explicit;
+        const int timeout_seconds =
+            (has_cli && loop_cfg_.question_timeout_seconds_cli > 0)
+                ? loop_cfg_.question_timeout_seconds_cli
+                : loop_cfg_.question_timeout_seconds;
+        const std::string mode =
+            (permissions_.is_dangerous() ||
+             permissions_.mode() == PermissionMode::Yolo)
+                ? std::string{"yolo"}
+                : std::string(PermissionManager::mode_name(permissions_.mode()));
+        return resolve_question_policy(policy, explicit_choice,
+                                       timeout_seconds, mode);
+    };
     tool_ctx.enter_plan_mode = [this]() {
         if (permissions_.is_dangerous() ||
             permissions_.mode() == PermissionMode::Yolo) {
@@ -2100,6 +2121,9 @@ bool AgentLoop::execute_tool_calls(
                     AskUserQuestionResponse resp = p->prompt(questions_payload, abort_flag_ptr);
                     nlohmann::json out;
                     out["cancelled"] = resp.cancelled;
+                    // timeout 策略到期(add-ask-question-policy):工具侧据此
+                    // 合成「自动采纳每题第一选项」的结果。
+                    out["timed_out"] = resp.timed_out;
                     nlohmann::json arr = nlohmann::json::array();
                     for (const auto& a : resp.answers) {
                         nlohmann::json item;

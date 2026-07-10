@@ -4,6 +4,7 @@
 #include "runtime_files.hpp"
 #include "startup_diagnostics.hpp"
 #include "worker.hpp"
+#include "../cli/interactive_options.hpp"
 #include "../config/config.hpp"
 #include "../hooks/hook_manager.hpp"
 #include "../skills/default_skill_seeder.hpp"
@@ -38,7 +39,8 @@ void print_help(std::ostream& os) {
        << "  --run-dir=<PATH>       isolate runtime files (heartbeat/pid/port/token) to PATH\n"
        << "  --native-folder-picker enable Desktop native folder picker API\n"
        << "  --supervised --guid=G  launcher-internal: launched by Service supervisor\n"
-       << "  --yolo, --dangerous    skip permission checks (loopback bind only)\n";
+       << "  --yolo, --dangerous    skip permission checks (loopback bind only)\n"
+       << "  --question-policy=<P>  AskUserQuestion policy: ask | deny | timeout[:seconds]\n";
 }
 
 // 简单 starts_with(C++17 没有 string::starts_with)
@@ -144,6 +146,26 @@ Args parse(const std::vector<std::string>& tokens) {
             a.run_dir_override = tokens[++i];
         } else if (t == "--native-folder-picker") {
             a.native_folder_picker_enabled = true;
+        } else if (starts_with(t, "--question-policy=")) {
+            std::string err;
+            if (!parse_question_policy_value(
+                    t.substr(18), a.question_policy_override,
+                    a.question_timeout_seconds_override, err)) {
+                a.error = err;
+                return a;
+            }
+        } else if (t == "--question-policy") {
+            if (i + 1 >= tokens.size() || tokens[i + 1].empty()) {
+                a.error = "--question-policy requires a value: ask | deny | timeout[:seconds]";
+                return a;
+            }
+            std::string err;
+            if (!parse_question_policy_value(
+                    tokens[++i], a.question_policy_override,
+                    a.question_timeout_seconds_override, err)) {
+                a.error = err;
+                return a;
+            }
         } else if (t == "-dangerous" || t == "--dangerous" ||
                    t == "-yolo" || t == "--yolo") {
             a.dangerous = true;
@@ -190,6 +212,13 @@ static int do_foreground(const Args& a, const std::string& exe_path) {
     if (!errs.empty()) {
         for (const auto& e : errs) std::cerr << "config error: " << e << "\n";
         return 5;
+    }
+    // --question-policy 覆盖:只写运行时 CLI 字段(不落盘),SessionRegistry
+    // 经 deps_.config->agent_loop 对该 daemon 全部会话生效。
+    if (!a.question_policy_override.empty()) {
+        cfg.agent_loop.question_policy_cli = a.question_policy_override;
+        cfg.agent_loop.question_timeout_seconds_cli =
+            a.question_timeout_seconds_override;
     }
     WorkerOptions opts;
     opts.foreground          = true;
@@ -240,6 +269,13 @@ static int do_start(const Args& a, const std::string& exe_path) {
     }
     if (a.native_folder_picker_enabled) {
         argv.push_back("--native-folder-picker");
+    }
+    if (!a.question_policy_override.empty()) {
+        std::string v = a.question_policy_override;
+        if (v == "timeout" && a.question_timeout_seconds_override > 0) {
+            v += ":" + std::to_string(a.question_timeout_seconds_override);
+        }
+        argv.push_back("--question-policy=" + v);
     }
     if (a.dangerous) argv.push_back("-dangerous");
 

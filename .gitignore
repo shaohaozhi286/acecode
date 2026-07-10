@@ -72,3 +72,5 @@ hermes-agent/
 !.claude/skills/
 .understand-anything
 .acecode
+# openspec CLI (@fission-ai/openspec) 本地安装产物
+node_modules/

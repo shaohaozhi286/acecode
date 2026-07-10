@@ -227,6 +227,9 @@ struct TuiState {
     int ask_scroll_visible_rows = 0;
     bool ask_scrollbar_dragging = false;
     bool ask_scroll_to_focus_requested = false;
+    // question_policy=timeout 时的静态提示秒数(add-ask-question-policy);
+    // >0 时 overlay 顶部渲染「N 秒无操作将自动选择推荐项」,0 = 无提示。
+    int ask_timeout_hint_seconds = 0;
 
     // Resume session picker state
     struct ResumeItem {

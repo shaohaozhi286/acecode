@@ -2,6 +2,7 @@
 
 #include "../provider/llm_provider.hpp"
 #include "diff_utils.hpp"
+#include "question_policy.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -119,6 +120,13 @@ struct ToolContext {
     // AskUserQuestion 不弹 UI,直接返回「自行决策并继续」的自动应答。
     // 空函数 = 正常交互模式。
     std::function<bool()> goal_unattended_active;
+
+    // AskUserQuestion 应答策略探针(AgentLoop 注入,模式同
+    // goal_unattended_active)。返回 resolve_question_policy 的解析结果,
+    // 每次调用实时反映权限模式(/yolo 会话中切换后下一次提问即生效)。
+    // 空函数 = Ask(独立调用 ToolExecutor 的旧行为)。优先级低于
+    // goal_unattended_active。见 src/tool/question_policy.hpp。
+    std::function<ResolvedQuestionPolicy()> question_policy;
 
     // Plan-mode tools use these callbacks to mutate the active AgentLoop's
     // permission state. They are callbacks rather than direct PermissionManager

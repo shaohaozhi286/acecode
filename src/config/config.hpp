@@ -177,6 +177,29 @@ struct InputHistoryConfig {
 // the model and the loop continues, exactly like any other tool).
 struct AgentLoopConfig {
     int max_iterations = 0; // 0 = unlimited; positive values cap total LLM turns per run()
+
+    // AskUserQuestion 应答策略(openspec/changes/add-ask-question-policy)。
+    //   "ask"     = 默认。正常弹 UI 无限期等用户回答。
+    //   "deny"    = 不弹 UI,立即返回自动应答让模型自行决策并继续。
+    //   "timeout" = 弹 UI 等 question_timeout_seconds 秒,无人回答则自动
+    //               采纳每个 question 的第一个选项(工具约定推荐项排第一)。
+    // 优先级:goal 无人值守自动应答 > 显式配置(config/CLI) > YOLO 隐式
+    // 映射 deny > 默认 ask。非法值在 load_config 归一化为 "ask" 并 LOG_WARN。
+    std::string question_policy = "ask";
+    int question_timeout_seconds = 60; // 仅 policy=timeout 时读取;clamp [5, 3600]
+
+    // 运行时标记,不序列化:config JSON 显式含 question_policy 键。
+    // sparse-on-write 下无法从值区分「默认 ask」与「用户写了 ask」,显式
+    // 配置要压制 YOLO 隐式映射就必须单独记账。
+    bool question_policy_explicit = false;
+
+    // CLI --question-policy 覆盖,运行时字段,永不序列化。独立于
+    // question_policy 存放:若直接覆写上面的配置值,后续任何 save_config
+    // (如 /model --default)都会把 CLI 会话级意志意外落盘。
+    // 空 = 无覆盖;question_timeout_seconds_cli 仅在 cli 值为 "timeout"
+    // 且用户给了冒号秒数时非 0。
+    std::string question_policy_cli;
+    int question_timeout_seconds_cli = 0;
 };
 
 // TUI 渲染策略。绕开 Win10 < 1809 的 conhost / Cmder/ConEmu 在密集 cursor-up

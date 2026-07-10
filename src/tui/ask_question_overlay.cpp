@@ -328,6 +328,13 @@ AskOverlayLayout build_ask_overlay_layout(const AskOverlayLayoutInput& input) {
     append_wrapped_rows(layout, AskOverlayRowKind::Hint, hint, "", "",
                         content_width, -1, false);
 
+    if (input.timeout_hint_seconds > 0) {
+        append_wrapped_rows(layout, AskOverlayRowKind::Hint,
+                            " " + std::to_string(input.timeout_hint_seconds) +
+                                "s 无操作将自动选择推荐项",
+                            "", "", content_width, -1, false);
+    }
+
     if (input.other_input_active) {
         append_blank(layout);
         append_wrapped_rows(layout, AskOverlayRowKind::CustomPrompt,
