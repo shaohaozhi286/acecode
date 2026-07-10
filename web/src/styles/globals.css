@@ -2427,8 +2427,8 @@ body {
   border: none;
   background: transparent;
   min-height: 24px;
-  /* 根级文件行没有缩进导轨,.ace-file-leaf-content 的 -26px 回拉会把图标
-     拉到 padding-left - 8px 处;基础内边距必须 ≥16px,否则图标贴面板左边线 */
+  /* 根级文件行没有缩进导轨,.ace-file-leaf-content 的负回拉会把图标
+     拉到 padding-left 之前;基础内边距必须足够大,否则图标贴面板左边线 */
   padding-left: 16px;
 }
 .ace-file-row:hover { background: var(--ace-surface-hi); }
@@ -2448,6 +2448,9 @@ body {
   margin-top: -3px;
   margin-bottom: -3px;
   min-height: 18px;
+  /* 抵消行容器的 flex gap(4px),让后面的箭头/占位列起点与下一级导轨列
+     (每列 14px、竖线画在第 7px)重合 — 箭头中心才能精确压在导轨线上 */
+  margin-right: -4px;
 }
 .ace-file-tree-guide {
   position: relative;
@@ -2514,7 +2517,9 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  margin-left: -26px;
+  /* 把 20px 文件图标回拉到 14px 箭头占位列上:-21 = 占位宽 14 + gap 4 +
+     图标半宽差 (20-14)/2,使图标中心与该层导轨竖线(列内第 7px)精确重合 */
+  margin-left: -21px;
 }
 .ace-file-leaf-content .ace-icon,
 .ace-file-leaf-content img,
