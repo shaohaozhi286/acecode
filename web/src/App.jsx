@@ -65,6 +65,10 @@ import {
 } from './lib/sessionJump.js';
 import { desktopUiMode } from './lib/desktopShellMode.js';
 import {
+  pushPermissionRequest,
+  removePermissionRequest,
+} from './lib/permissionRequestQueue.js';
+import {
   desktopGuidedTourHasModel,
   desktopGuidedTourModeEligible,
   desktopGuidedTourTargetsReady,
@@ -437,12 +441,6 @@ export function App() {
   }, [resumeAndOpenSession]);
 
   useEffect(() => {
-    const pushUnique = (setter, payload) => {
-      if (!payload?.request_id) return;
-      setter((prev) => prev.some((x) => x.request_id === payload.request_id)
-        ? prev
-        : [...prev, payload]);
-    };
     const handler = (e) => {
       const msg = e.detail || {};
       const payload = { ...(msg.payload || {}) };
@@ -451,7 +449,9 @@ export function App() {
         const current = activeRefRef.current || {};
         payload.session_id = current.sessionId || current.id || '';
       }
-      if (msg.type === 'permission_request') pushUnique(setPermReqs, payload);
+      if (msg.type === 'permission_request') {
+        setPermReqs((prev) => pushPermissionRequest(prev, payload));
+      }
       if (msg.type === 'question_request') {
         setQuestionReqs((prev) => addPendingQuestionRequest(prev, payload));
       }
@@ -903,11 +903,17 @@ export function App() {
         />
         {permReq      && (
           <PermissionModal
+            // key 强制按请求重挂载:队首 A→B 切换时若复用实例,Modal 内部
+            // show=false 的透明遮罩会挡住整页且 B 的弹窗不可见(A 刚经历
+            // 关闭动画),resolvedRef 也会残留上一条的已回应状态。
+            key={permReq.request_id}
             request={permReq}
             originLabel={permReq.session_id && subagentIndex.titles[permReq.session_id]
               ? `来自后台任务:${subagentIndex.titles[permReq.session_id]}`
               : ''}
-            onResolve={() => setPermReqs((prev) => prev.slice(1))}
+            // 按 request_id 幂等移除。切勿盲删队首:关闭路径可能多次触发
+            // onResolve,窗口内到达的下一条请求会被误删(权限弹窗失踪 bug)。
+            onResolve={(requestId) => setPermReqs((prev) => removePermissionRequest(prev, requestId))}
           />
         )}
       </div>
