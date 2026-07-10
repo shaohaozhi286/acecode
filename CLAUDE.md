@@ -444,3 +444,5 @@ Unknown name → error, no state change. All persisting paths run under `provide
 ## CI / Release
 
 `.github/workflows/package.yml` builds Linux x64/arm64, Windows x64, macOS x64/arm64. Releases auto-cut on `v*` tags.
+
+**npm 发布**(`publish-npm` job,`v*` tag 触发):裸名 `acecode` 被 npm 防碰瓷规则挡死(`ace-code` = Ace 编辑器已占,新包名去标点后与现存包相同即拒),故发 `@acecode/cli` + `@acecode/desktop` 两个主包 + 5 个平台二进制包 `@acecode/<os>-<cpu>`(esbuild 模式:主包只有 JS 垫片,`optionalDependencies` 按 os/cpu 字段精确钉同版本平台包)。平台包同时装 `acecode` / `ace-browser-host` / `acecode-desktop`(macOS 为 `ACECode.app`)——三者都按「自身真实路径所在目录」互相定位(`locate_daemon_exe` / `resolve_host_path`),不能拆包,垫片必须直接 spawn 包内原始文件不能拷走。组装脚本 [scripts/npm/prepare-npm-packages.mjs](scripts/npm/prepare-npm-packages.mjs),主包模板在 [npm/cli/](npm/cli) 与 [npm/desktop/](npm/desktop);改名/换 scope 需同步四处:脚本 `SCOPE` 常量、两个模板 `name`、两个 bin 垫片里的 `SCOPE`。job 行为:`NPM_TOKEN` secret 缺失 → 告警跳过(release 不变红);已发布版本 → 幂等跳过(重跑安全);预发布 tag(名含 `-`)→ dist-tag `next`,否则 `latest`。linux-old(glibc ≤ 2.28)产物刻意不上 npm(npm 无法按 glibc 选包),老发行版用户走 GitHub Releases。

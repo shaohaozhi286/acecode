@@ -1,0 +1,28 @@
+{
+  "name": "@acecode/desktop",
+  "version": "0.0.0-dev",
+  "description": "ACECode Desktop — multi-workspace desktop shell for the ACECode AI coding agent",
+  "keywords": [
+    "ai",
+    "agent",
+    "desktop",
+    "coding-assistant",
+    "acecode"
+  ],
+  "homepage": "https://github.com/shaohaozhi286/acecode",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shaohaozhi286/acecode.git"
+  },
+  "license": "SEE LICENSE IN README.md",
+  "bin": {
+    "acecode-desktop": "bin/acecode-desktop.js"
+  },
+  "files": [
+    "bin/"
+  ],
+  "engines": {
+    "node": ">=16"
+  },
+  "optionalDependencies": {}
+}

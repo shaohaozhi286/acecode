@@ -1,0 +1,29 @@
+{
+  "name": "@acecode/cli",
+  "version": "0.0.0-dev",
+  "description": "ACECode — AI coding agent with terminal TUI, web UI and daemon (prebuilt native binary)",
+  "keywords": [
+    "ai",
+    "agent",
+    "cli",
+    "tui",
+    "coding-assistant",
+    "acecode"
+  ],
+  "homepage": "https://github.com/shaohaozhi286/acecode",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shaohaozhi286/acecode.git"
+  },
+  "license": "SEE LICENSE IN README.md",
+  "bin": {
+    "acecode": "bin/acecode.js"
+  },
+  "files": [
+    "bin/"
+  ],
+  "engines": {
+    "node": ">=16"
+  },
+  "optionalDependencies": {}
+}

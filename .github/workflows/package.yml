@@ -641,3 +641,68 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
           make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
           files: release-assets/*
+
+  publish-npm:
+    name: publish npm
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - build-and-package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: acecode-*
+          merge-multiple: false
+
+      - name: Extract archives
+        shell: bash
+        run: |
+          mkdir -p extracted
+          for id in linux-x64 linux-arm64 macos-x64 macos-arm64; do
+            tar -xzf "artifacts/acecode-$id/acecode-$id.tar.gz" -C extracted
+          done
+          # Windows zip 打包时没有顶层目录(Compress-Archive $dir/*),解到显式目录
+          mkdir -p extracted/acecode-windows-x64
+          unzip -q "artifacts/acecode-windows-x64/acecode-windows-x64.zip" -d extracted/acecode-windows-x64
+
+      - name: Prepare npm packages
+        shell: bash
+        run: |
+          node scripts/npm/prepare-npm-packages.mjs \
+            --version "${GITHUB_REF_NAME#v}" \
+            --input extracted \
+            --output npm-staging
+
+      - name: Publish to npm
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::warning::NPM_TOKEN secret 未配置,跳过 npm 发布"
+            exit 0
+          fi
+          version="${GITHUB_REF_NAME#v}"
+          dist_tag=latest
+          case "$GITHUB_REF_NAME" in *-*) dist_tag=next ;; esac
+          # 顺序:先平台二进制包,再 cli / desktop 主包,主包才引用得到平台包
+          for dir in npm-staging/platform/*/ npm-staging/cli npm-staging/desktop; do
+            name="$(node -p "require('./$dir/package.json').name")"
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "skip $name@$version (already published)"
+              continue
+            fi
+            echo "publishing $name@$version (dist-tag: $dist_tag)"
+            (cd "$dir" && npm publish --access public --tag "$dist_tag")
+          done
