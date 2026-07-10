@@ -48,6 +48,13 @@ function sessionContentChanged(previous, next) {
   return false;
 }
 
+export function sidebarSessionHasWorktree(session = {}) {
+  const worktree = session?.worktree;
+  if (!worktree || typeof worktree !== 'object') return false;
+  return [worktree.name, worktree.branch]
+    .some((value) => String(value || '').trim().length > 0);
+}
+
 export function sidebarSessionProjection(sessions = [], expanded = false, limit = SIDEBAR_SESSION_COLLAPSE_LIMIT) {
   const list = Array.isArray(sessions) ? sessions : [];
   const max = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : SIDEBAR_SESSION_COLLAPSE_LIMIT;

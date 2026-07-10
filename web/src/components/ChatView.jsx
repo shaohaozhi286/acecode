@@ -1659,6 +1659,15 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
             await sendInputOrBuiltin(id, sendPayload);
             if (worktreeIntent) {
               setLocalWorktree({ sid: id, name: `ses-${id}` });
+              const noWorkspace = !!created?.target?.noWorkspace;
+              notifySessionListChanged({
+                reason: 'worktree-created',
+                sessionId: id,
+                workspaceHash: noWorkspace
+                  ? ''
+                  : (created?.response?.workspace_hash || created?.target?.hash || ''),
+                noWorkspace,
+              });
             }
           }
           if (payload.text.trim()) recordInputHistory(payload.text);
@@ -1703,6 +1712,15 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
       .then(() => {
         if (sessionWorktreeIntent) {
           setLocalWorktree({ sid: targetSid, name: `ses-${targetSid}` });
+          const noWorkspace = !!(ref?.noWorkspace || ref?.no_workspace);
+          notifySessionListChanged({
+            reason: 'worktree-created',
+            sessionId: targetSid,
+            workspaceHash: noWorkspace
+              ? ''
+              : (ref?.workspaceHash || ref?.workspace_hash || ''),
+            noWorkspace,
+          });
         }
         if (payload.text.trim()) recordInputHistory(payload.text);
         if (!ref?.title) setTranscriptTitle(payload.text || composerAttachments[0]?.name || '附件消息');

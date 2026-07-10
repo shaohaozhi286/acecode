@@ -861,6 +861,41 @@ TEST(WebServerHttp, CreateSessionThenListShowsActive) {
     EXPECT_EQ(occurrences, 1) << "active 与 disk meta 必须合并为同一条";
 }
 
+// 场景:active session 走 SessionInfo 序列化,也必须保留持久化 meta 中的
+// worktree 状态,否则侧栏刷新后当前会话会丢失 worktree 标识。
+TEST(WebServerHttp, ActiveWorktreeSessionListIncludesWorktreeState) {
+    WebServerFixture fx;
+    auto post = cpr::Post(cpr::Url{fx.url("/api/sessions")},
+                          cpr::Header{{"Content-Type", "application/json"}},
+                          cpr::Body{R"({})"});
+    ASSERT_EQ(post.status_code, 201) << post.text;
+    const auto sid = json::parse(post.text)["session_id"].get<std::string>();
+
+    auto* entry = fx.registry->lookup(sid);
+    ASSERT_NE(entry, nullptr);
+    ASSERT_NE(entry->sm, nullptr);
+    EXPECT_EQ(entry->sm->ensure_active_session_id(), sid);
+
+    acecode::WorktreeSessionInfo worktree;
+    worktree.original_cwd = fx.cwd;
+    worktree.worktree_path = fx.cwd + "/.acecode/worktrees/ses-active-list";
+    worktree.worktree_name = "ses-active-list";
+    worktree.worktree_branch = "worktree-ses-active-list";
+    entry->sm->set_active_worktree(worktree);
+
+    auto list = cpr::Get(cpr::Url{fx.url("/api/sessions")});
+    ASSERT_EQ(list.status_code, 200) << list.text;
+    const auto sessions = json::parse(list.text);
+    const auto found = std::find_if(sessions.begin(), sessions.end(), [&](const auto& item) {
+        return item.value("id", std::string{}) == sid;
+    });
+    ASSERT_NE(found, sessions.end());
+    EXPECT_TRUE((*found)["active"].get<bool>());
+    ASSERT_TRUE(found->contains("worktree"));
+    EXPECT_EQ((*found)["worktree"]["name"], "ses-active-list");
+    EXPECT_EQ((*found)["worktree"]["branch"], "worktree-ses-active-list");
+}
+
 TEST(WebServerHttp, SessionUserMessageSearchFindsTextAndAttachmentNames) {
     WebServerFixture fx;
 

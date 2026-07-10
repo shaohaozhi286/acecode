@@ -48,6 +48,7 @@ import {
   reconcileSidebarSessions,
   sessionListNeedsRevealExpansion,
   sessionMatchesRevealTarget,
+  sidebarSessionHasWorktree,
   sidebarRevealTarget,
   sidebarSessionProjection,
   upsertSidebarSession,
@@ -322,6 +323,7 @@ function SessionRow({
   const workspaceHash = s.workspace_hash || s.workspaceHash || '';
   const rowKey = pinned ? pinnedSessionKey(workspaceHash, s.id) : '';
   const title = sessionDisplayTitle(s, s.name || '');
+  const worktreeSession = sidebarSessionHasWorktree(s);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(title);
   const committingRef = useRef(false);
@@ -480,11 +482,31 @@ function SessionRow({
           e.stopPropagation();
           onArchive?.(s);
         }}
-        className="w-5 h-6 rounded flex items-center justify-center shrink-0 text-fg-mute hover:text-fg hover:bg-surface-hi opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition"
+        className={clsx(
+          'w-5 h-6 rounded flex items-center justify-center shrink-0 text-fg-mute hover:text-fg hover:bg-surface-hi transition',
+          worktreeSession
+            ? 'opacity-100'
+            : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100',
+        )}
         title="归档"
-        aria-label="归档"
+        aria-label={worktreeSession ? '工作树会话，归档' : '归档'}
       >
-        <VsIcon name="archive" size={14} />
+        {worktreeSession ? (
+          <span className="relative block w-[14px] h-[14px]" aria-hidden="true">
+            <VsIcon
+              name="worktree"
+              size={14}
+              className="absolute inset-0 opacity-100 transition-opacity group-hover:opacity-0 group-focus-within:opacity-0"
+            />
+            <VsIcon
+              name="archive"
+              size={14}
+              className="absolute inset-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
+            />
+          </span>
+        ) : (
+          <VsIcon name="archive" size={14} />
+        )}
       </button>
     </div>
   );

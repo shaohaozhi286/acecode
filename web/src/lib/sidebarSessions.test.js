@@ -4,6 +4,7 @@ import {
   reconcileSidebarSessions,
   sessionListNeedsRevealExpansion,
   sessionMatchesRevealTarget,
+  sidebarSessionHasWorktree,
   sidebarRevealTarget,
   sidebarSessionProjection,
   sortSidebarSessionsNewestFirst,
@@ -19,6 +20,14 @@ function test(name, fn) {
     throw error;
   }
 }
+
+test('sidebarSessionHasWorktree requires a worktree name or branch', () => {
+  assert.equal(sidebarSessionHasWorktree({}), false);
+  assert.equal(sidebarSessionHasWorktree({ worktree: {} }), false);
+  assert.equal(sidebarSessionHasWorktree({ worktree: { name: '   ', branch: '' } }), false);
+  assert.equal(sidebarSessionHasWorktree({ worktree: { name: 'ses-abc' } }), true);
+  assert.equal(sidebarSessionHasWorktree({ worktree: { branch: 'worktree-ses-abc' } }), true);
+});
 
 test('five or fewer sidebar sessions are not collapsible', () => {
   const sessions = Array.from({ length: SIDEBAR_SESSION_COLLAPSE_LIMIT }, (_, i) => ({ id: String(i) }));

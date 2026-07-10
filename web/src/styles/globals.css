@@ -2429,7 +2429,7 @@ body {
   min-height: 24px;
   /* 根级文件行没有缩进导轨,.ace-file-leaf-content 的负回拉会把图标
      拉到 padding-left 之前;基础内边距必须足够大,否则图标贴面板左边线 */
-  padding-left: 16px;
+  padding-left: 10px;
 }
 .ace-file-row:hover { background: var(--ace-surface-hi); }
 .ace-file-tree-message {

@@ -606,6 +606,18 @@ bool WebServer::Impl::session_model_deleted(const std::string& model_name) const
     return true;
 }
 
+namespace {
+
+void append_worktree_session(json& target, const WorktreeSessionInfo& worktree) {
+    if (!worktree.active()) return;
+    target["worktree"] = {
+        {"name", worktree.worktree_name},
+        {"branch", worktree.worktree_branch},
+    };
+}
+
+} // namespace
+
 json WebServer::Impl::session_info_to_json(const SessionInfo& s, const SessionMeta* m) const {
     json o;
     const std::string model_name =
@@ -646,6 +658,7 @@ json WebServer::Impl::session_info_to_json(const SessionInfo& s, const SessionMe
         token_usage_has_values(s.session_token_usage)
             ? s.session_token_usage
             : (m ? m->session_token_usage : TokenUsage{}));
+    if (m) append_worktree_session(o, m->worktree);
     if (m && !m->todos.empty()) {
         o["todos"] = todo_items_to_json(m->todos);
         o["todo_summary"] = todo_summary_to_json(m->todos);
@@ -684,14 +697,9 @@ json WebServer::Impl::session_meta_to_json(const SessionMeta& m, const std::stri
     o["permission_mode"] = m.permission_mode.empty() ? "default" : m.permission_mode;
     o["token_usage"] = token_usage_or_null(m.last_token_usage);
     o["session_token_usage"] = token_usage_or_null(m.session_token_usage);
-    // 会话的 worktree 状态(add-webui-git-session-pill):前端 pill 在会话
-    // 开始后据此显示只读 worktree 徽标。inactive 时省略字段。
-    if (m.worktree.active()) {
-        o["worktree"] = {
-            {"name", m.worktree.worktree_name},
-            {"branch", m.worktree.worktree_branch},
-        };
-    }
+    // 会话的 worktree 状态(add-webui-git-session-pill):前端 pill 与侧栏
+    // 据此恢复只读状态。inactive 时省略字段。
+    append_worktree_session(o, m.worktree);
     if (!m.todos.empty()) {
         o["todos"] = todo_items_to_json(m.todos);
         o["todo_summary"] = todo_summary_to_json(m.todos);
