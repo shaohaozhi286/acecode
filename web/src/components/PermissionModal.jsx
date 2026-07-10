@@ -1,5 +1,8 @@
 // permission_request 弹框。Allow / AllowAlways / Deny 三按钮。
-// 多 request 排队由 App 层管(本组件每次只显示一个)。
+// 多 request 排队由 App 层管(本组件每次只显示一个,按 request_id key 重挂载)。
+// onResolve(request_id) 只经 Modal 的 onClose 单一路径触发,App 层按 id 幂等
+// 移除 —— 历史实现 respond 里额外 setTimeout(220ms) 再触发一次 + App 盲删
+// 队首,会把点击后窗口内到达的下一条请求误删(弹窗失踪、后端空等 5 分钟)。
 
 import { useMemo, useRef } from 'react';
 import { connection } from '../lib/connection.js';
@@ -73,8 +76,9 @@ export function PermissionModal({ request, onResolve, originLabel = '' }) {
   const respond = (choice, close) => {
     resolvedRef.current = true;
     connection.sendDecision(request.request_id, choice, request.session_id);
+    // 渐隐动画结束后 Modal 调 onClose(handleModalClose)完成移除;
+    // 这里不再自行 setTimeout 触发 onResolve,避免一次点击移除两条。
     close();
-    setTimeout(() => onResolve?.(), 220);
   };
 
   // Escape key or backdrop click: send deny immediately so the backend is
@@ -83,7 +87,7 @@ export function PermissionModal({ request, onResolve, originLabel = '' }) {
     if (!resolvedRef.current) {
       connection.sendDecision(request.request_id, 'deny', request.session_id);
     }
-    onResolve?.();
+    onResolve?.(request.request_id);
   };
 
   return (
