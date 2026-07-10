@@ -32,6 +32,7 @@ export const DESKTOP_CONTEXT_ACTIONS = Object.freeze({
   COLLAPSE_DIRECTORY: 'collapse_directory',
   COPY_PREVIEW_TEXT: 'copy_preview_text',
   COPY_PREVIEW_METADATA: 'copy_preview_metadata',
+  COPY_PREVIEW_IMAGE: 'copy_preview_image',
   COPY_FILE_DIFF: 'copy_file_diff',
   COPY_ALL_DIFFS: 'copy_all_diffs',
   LOCATE_IN_FILE_TREE: 'locate_in_file_tree',
@@ -230,6 +231,11 @@ export function buildDesktopContextMenuItems({
     }
 
     if (previewTarget) {
+      if (previewTarget.kind === 'image' && previewTarget.copyImageUrl) {
+        addAction(items, DESKTOP_CONTEXT_ACTIONS.COPY_PREVIEW_IMAGE, previewTarget, {
+          group: GROUPS.CONTENT,
+        });
+      }
       addAction(items, DESKTOP_CONTEXT_ACTIONS.COPY_PREVIEW_TEXT, previewTarget, {
         group: GROUPS.CONTENT,
         enabled: previewTarget.kind === 'text' || previewTarget.kind === 'markdown',
@@ -383,6 +389,7 @@ export function previewTargetFromElement(target) {
     kind: getAttr(el, 'data-desktop-preview-kind', 'desktopPreviewKind') || 'text',
     size: getAttr(el, 'data-desktop-preview-size', 'desktopPreviewSize'),
     contentType: getAttr(el, 'data-desktop-preview-content-type', 'desktopPreviewContentType'),
+    copyImageUrl: getAttr(el, 'data-desktop-preview-copy-image-url', 'desktopPreviewCopyImageUrl'),
   };
 }
 

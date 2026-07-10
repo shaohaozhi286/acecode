@@ -89,6 +89,7 @@ const NAV = [
   { key: 'archived', label: '已归档会话', icon: 'archive' },
   { key: 'usage', label: '使用情况', icon: 'list' },
   { key: 'feedback', label: '问题反馈', icon: 'help' },
+  { key: 'about', label: '关于', icon: 'info' },
 ];
 
 const DEFAULT_UPGRADE_SERVICE_URL = 'http://2017studio.imwork.net:82/aupdate/';
@@ -196,7 +197,7 @@ export function SettingsPage({
               onFontSizeChange={onFontSizeChange}
             />
           )}
-          {activeNavKey === 'config' && <SectionConfig health={health} />}
+          {activeNavKey === 'config' && <SectionConfig />}
           {activeNavKey === 'personalization' && <SectionPersonalization />}
           {activeNavKey === 'skills' && <SectionSkills />}
           {activeNavKey === 'mcp' && <SectionMCP />}
@@ -207,6 +208,7 @@ export function SettingsPage({
           {activeNavKey === 'archived' && <SectionArchived />}
           {activeNavKey === 'usage' && <SectionUsage />}
           {activeNavKey === 'feedback' && <SectionFeedback />}
+          {activeNavKey === 'about' && <SectionAbout health={health} />}
         </div>
       </div>
     </div>
@@ -462,16 +464,72 @@ function SectionAppearance({ theme, setTheme, fontSize, onFontSizeChange }) {
   );
 }
 
-// ─── 配置 ──────────────────────────────────────────────────────────────────
-// 真实接入:升级服务 URL。其余程序版本 / 依赖项 / 诊断 / 重置仍保留占位。
+// ─── 关于 ──────────────────────────────────────────────────────────────────
 
-function SectionConfig({ health }) {
+function SectionAbout({ health }) {
+  const [webCoreInfo, setWebCoreInfo] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    getCurrentWebCoreInfo()
+      .then((info) => {
+        if (!cancelled) setWebCoreInfo(info);
+      })
+      .catch(() => {
+        if (!cancelled) setWebCoreInfo(null);
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  const programVersionLabel = formatProgramVersion(health?.version);
+  const webCoreLabel = formatWebCoreLabel(webCoreInfo);
+  const webCoreDetail = formatWebCoreDetail(webCoreInfo);
+
+  return (
+    <>
+      <h2 className="text-xl font-bold mb-5">关于</h2>
+
+      {/* 程序版本 */}
+      <div className="flex items-center justify-between px-3.5 py-2.5 rounded-md bg-surface border border-border mb-2">
+        <div>
+          <div className="text-[13px] font-medium">当前版本</div>
+          <div className="text-[11px] text-fg-mute mt-0.5">ACECode 桌面 / TUI / Daemon 同版本号</div>
+        </div>
+        <span className="font-mono text-[12px] text-fg-2">{programVersionLabel}</span>
+      </div>
+
+      <div className="flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-md bg-surface border border-border mb-2">
+        <div className="min-w-0">
+          <div className="text-[13px] font-medium">Web 核心</div>
+          <div className="text-[11px] text-fg-mute mt-0.5">当前桌面 WebView / 浏览器渲染核心</div>
+        </div>
+        <div className="min-w-0 max-w-[62%] text-right">
+          <div
+            className="font-mono text-[12px] text-fg-2 truncate"
+            title={webCoreLabel}
+          >
+            {webCoreLabel}
+          </div>
+          {webCoreDetail && (
+            <div
+              className="text-[10px] text-fg-mute truncate"
+              title={webCoreDetail}
+            >
+              {webCoreDetail}
+            </div>
+          )}
+        </div>
+      </div>
+    </>
+  );
+}
+
+function SectionConfig() {
   const [upgradeUrl, setUpgradeUrl] = useState(DEFAULT_UPGRADE_SERVICE_URL);
   const [upgradeLoading, setUpgradeLoading] = useState(true);
   const [upgradeSaving, setUpgradeSaving] = useState(false);
   const [upgradeSaved, setUpgradeSaved] = useState(false);
   const [upgradeError, setUpgradeError] = useState('');
-  const [webCoreInfo, setWebCoreInfo] = useState(null);
   const [depPython, setDepPython] = useState(true);
   const [depNode, setDepNode] = useState(true);
   const [depCsharp, setDepCsharp] = useState(false);
@@ -491,18 +549,6 @@ function SectionConfig({ health }) {
       })
       .finally(() => {
         if (!cancelled) setUpgradeLoading(false);
-      });
-    return () => { cancelled = true; };
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    getCurrentWebCoreInfo()
-      .then((info) => {
-        if (!cancelled) setWebCoreInfo(info);
-      })
-      .catch(() => {
-        if (!cancelled) setWebCoreInfo(null);
       });
     return () => { cancelled = true; };
   }, []);
@@ -551,9 +597,6 @@ function SectionConfig({ health }) {
     { key: 'node',   label: 'Node.js 工具', desc: 'pnpm / npm / tsx 等',     checked: depNode,   toggle: () => setDepNode((v) => !v) },
     { key: 'csharp', label: 'C# 工具',     desc: 'dotnet SDK / Roslyn 等',  checked: depCsharp, toggle: () => setDepCsharp((v) => !v) },
   ];
-  const programVersionLabel = formatProgramVersion(health?.version);
-  const webCoreLabel = formatWebCoreLabel(webCoreInfo);
-  const webCoreDetail = formatWebCoreDetail(webCoreInfo);
 
   return (
     <>
@@ -626,38 +669,6 @@ function SectionConfig({ health }) {
 
       <div className="text-[14px] font-semibold mb-1">工作空间依赖项</div>
       <p className="text-[12px] text-fg-mute mb-3">管理 ACECode 安装并提供给 Agent 使用的开发工具</p>
-
-      {/* 程序版本 */}
-      <div className="flex items-center justify-between px-3.5 py-2.5 rounded-md bg-surface border border-border mb-2">
-        <div>
-          <div className="text-[13px] font-medium">当前版本</div>
-          <div className="text-[11px] text-fg-mute mt-0.5">ACECode 桌面 / TUI / Daemon 同版本号</div>
-        </div>
-        <span className="font-mono text-[12px] text-fg-2">{programVersionLabel}</span>
-      </div>
-
-      <div className="flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-md bg-surface border border-border mb-2">
-        <div className="min-w-0">
-          <div className="text-[13px] font-medium">Web 核心</div>
-          <div className="text-[11px] text-fg-mute mt-0.5">当前桌面 WebView / 浏览器渲染核心</div>
-        </div>
-        <div className="min-w-0 max-w-[62%] text-right">
-          <div
-            className="font-mono text-[12px] text-fg-2 truncate"
-            title={webCoreLabel}
-          >
-            {webCoreLabel}
-          </div>
-          {webCoreDetail && (
-            <div
-              className="text-[10px] text-fg-mute truncate"
-              title={webCoreDetail}
-            >
-              {webCoreDetail}
-            </div>
-          )}
-        </div>
-      </div>
 
       {/* 依赖项 checkbox 组 */}
       <div className="rounded-md bg-surface border border-border px-3.5 py-3 mb-2">

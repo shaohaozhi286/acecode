@@ -73,6 +73,31 @@ test('预览选区把引用到聊天放在第一行', () => {
   assert.equal(items[0].target.path, 'README.md');
 });
 
+test('图片预览显示复制图片动作且非图片预览不显示', () => {
+  const imageItems = buildDesktopContextMenuItems({
+    previewTarget: {
+      type: 'preview',
+      path: 'shots/result.png',
+      kind: 'image',
+      contentType: 'image/png',
+      copyImageUrl: 'blob:preview-image',
+    },
+  });
+  assert.deepEqual(ids(imageItems), [
+    DESKTOP_CONTEXT_ACTIONS.COPY_PREVIEW_IMAGE,
+    DESKTOP_CONTEXT_ACTIONS.COPY_PREVIEW_TEXT,
+    DESKTOP_CONTEXT_ACTIONS.COPY_PREVIEW_METADATA,
+    DESKTOP_CONTEXT_ACTIONS.SELECT_ALL,
+  ]);
+  assert.equal(imageItems[0].target.copyImageUrl, 'blob:preview-image');
+  assert.equal(imageItems.find((item) => item.id === DESKTOP_CONTEXT_ACTIONS.COPY_PREVIEW_TEXT).enabled, false);
+
+  const pdfItems = buildDesktopContextMenuItems({
+    previewTarget: { type: 'preview', path: 'manual.pdf', kind: 'pdf' },
+  });
+  assert.equal(ids(pdfItems).includes(DESKTOP_CONTEXT_ACTIONS.COPY_PREVIEW_IMAGE), false);
+});
+
 test('文本框显示粘贴和剪切', () => {
   assert.deepEqual(ids(buildDesktopContextMenuItems({ editable: true })), [
     DESKTOP_CONTEXT_ACTIONS.SELECT_ALL,
@@ -337,10 +362,19 @@ test('contextTargetsFromElement 提取各类目标', () => {
   assert.equal(contextTargetsFromElement(file).fileTarget.relativePath, 'src/a.cpp');
 
   const preview = elementFor(PREVIEW_TARGET_SELECTOR, {
-    'data-desktop-preview-path': 'README.md',
-    'data-desktop-preview-kind': 'markdown',
+    'data-desktop-preview-path': 'shots/result.png',
+    'data-desktop-preview-kind': 'image',
+    'data-desktop-preview-content-type': 'image/png',
+    'data-desktop-preview-copy-image-url': 'blob:preview-image',
   });
-  assert.equal(contextTargetsFromElement(preview).previewTarget.kind, 'markdown');
+  assert.deepEqual(contextTargetsFromElement(preview).previewTarget, {
+    type: 'preview',
+    path: 'shots/result.png',
+    kind: 'image',
+    size: '',
+    contentType: 'image/png',
+    copyImageUrl: 'blob:preview-image',
+  });
 
   const review = elementFor(REVIEW_TARGET_SELECTOR, {
     'data-desktop-review-kind': 'file',

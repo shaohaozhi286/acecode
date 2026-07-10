@@ -765,21 +765,21 @@ function WorkspaceGroup({
           onClick={(e) => { e.stopPropagation(); onNewSession(ws); }}
           className="ace-sidebar-workspace-action w-5 h-5 rounded hover:bg-surface-hi flex items-center justify-center shrink-0 transition"
           title="新增会话"
-        ><VsIcon name="newSession" size={13} /></button>
+        ><VsIcon name="newSession" size={16} /></button>
         {hasUnread && <span className="w-1.5 h-1.5 rounded-full shrink-0 bg-ok shadow-[0_0_4px_var(--ace-ok)]" title="有未读会话" />}
         <button
           type="button"
           onClick={(e) => { e.stopPropagation(); setEditing(true); }}
           className="w-5 h-5 rounded text-fg-mute hover:text-fg hover:bg-surface-hi opacity-0 group-hover:opacity-100 flex items-center justify-center shrink-0 transition"
           title="重命名"
-        ><VsIcon name="edit" size={12} /></button>
+        ><VsIcon name="edit" size={16} /></button>
         {onRemove && (
           <button
             type="button"
             onClick={(e) => { e.stopPropagation(); onRemove(ws); }}
             className="w-5 h-5 rounded text-fg-mute hover:text-danger hover:bg-danger-bg opacity-0 group-hover:opacity-100 flex items-center justify-center shrink-0 transition"
             title="从桌面项目列表移除"
-          ><VsIcon name="close" size={12} /></button>
+          ><VsIcon name="close" size={16} /></button>
         )}
       </div>
       {expanded && (

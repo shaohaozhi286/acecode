@@ -205,6 +205,7 @@ export function FilePreviewContent({ api, cwd, path, wrapPreview, onToggleWrapPr
     'data-desktop-preview-kind': state.kind || undefined,
     'data-desktop-preview-size': Number.isFinite(state.size) ? String(state.size) : undefined,
     'data-desktop-preview-content-type': state.contentType || undefined,
+    'data-desktop-preview-copy-image-url': state.kind === 'image' ? state.previewUrl || undefined : undefined,
   };
   if (state.kind === 'image') {
     return (
@@ -218,7 +219,11 @@ export function FilePreviewContent({ api, cwd, path, wrapPreview, onToggleWrapPr
         >
           <img src={state.previewUrl} alt={path} draggable="false" />
         </button>
-        <ImageLightbox preview={imagePreview} onClose={() => setImagePreview(null)} />
+        <ImageLightbox
+          preview={imagePreview}
+          contextMenuAttrs={previewAttrs}
+          onClose={() => setImagePreview(null)}
+        />
       </div>
     );
   }

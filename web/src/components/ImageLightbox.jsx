@@ -1,7 +1,7 @@
 import { createPortal } from 'react-dom';
 import { VsIcon } from './Icon.jsx';
 
-export function ImageLightbox({ preview, onClose }) {
+export function ImageLightbox({ preview, onClose, contextMenuAttrs }) {
   if (!preview?.src) return null;
 
   return createPortal(
@@ -24,6 +24,7 @@ export function ImageLightbox({ preview, onClose }) {
         src={preview.src}
         alt={preview.alt || ''}
         className="max-w-full max-h-full object-contain shadow-xl"
+        {...contextMenuAttrs}
         onClick={(event) => event.stopPropagation()}
       />
     </div>,

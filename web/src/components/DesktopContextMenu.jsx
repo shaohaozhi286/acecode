@@ -50,6 +50,7 @@ const ACTION_LABELS = {
   [DESKTOP_CONTEXT_ACTIONS.COLLAPSE_DIRECTORY]: '折叠目录',
   [DESKTOP_CONTEXT_ACTIONS.COPY_PREVIEW_TEXT]: '复制预览内容',
   [DESKTOP_CONTEXT_ACTIONS.COPY_PREVIEW_METADATA]: '复制预览信息',
+  [DESKTOP_CONTEXT_ACTIONS.COPY_PREVIEW_IMAGE]: '复制图片',
   [DESKTOP_CONTEXT_ACTIONS.COPY_FILE_DIFF]: '复制此文件 diff',
   [DESKTOP_CONTEXT_ACTIONS.COPY_ALL_DIFFS]: '复制全部 diff',
   [DESKTOP_CONTEXT_ACTIONS.LOCATE_IN_FILE_TREE]: '在文件树中定位',
@@ -182,7 +183,7 @@ async function copyTextWithToast(text, label = '已复制') {
 
 export async function copyImageWithToast(target) {
   const result = await copyImageToSystemClipboard(target?.copyImageUrl || target?.previewUrl || '', {
-    mimeType: target?.mimeType || '',
+    mimeType: target?.mimeType || target?.contentType || '',
   });
   if (result?.ok) {
     toast({ kind: 'ok', text: '已复制图片' });
@@ -298,6 +299,7 @@ async function runAction(item, target, rememberedText = '', rememberedSelectionC
       await copyTextWithToast(actionTarget?.url || actionTarget?.path || '');
       break;
     case DESKTOP_CONTEXT_ACTIONS.COPY_ATTACHMENT_IMAGE:
+    case DESKTOP_CONTEXT_ACTIONS.COPY_PREVIEW_IMAGE:
       await copyImageWithToast(actionTarget);
       break;
     case DESKTOP_CONTEXT_ACTIONS.ADD_SELECTION_CONTEXT:
