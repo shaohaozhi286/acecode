@@ -185,6 +185,7 @@ export function PreviewDetailsPanel({
   onToggleMaximize,
   onSelectChangeFile,
   onSelectGitChangeFile,
+  onOpenFilePreview,
 }) {
   const tabListRef = useRef(null);
   const tabDragRef = useRef(null);
@@ -250,6 +251,7 @@ export function PreviewDetailsPanel({
           expandedFileRevision={active.expandedFileRevision || 0}
           busy={busy}
           onSelectFile={onSelectGitChangeFile}
+          onOpenFilePreview={onOpenFilePreview}
         />
       );
     }
@@ -263,7 +265,7 @@ export function PreviewDetailsPanel({
         onToggleWrapPreview={() => setWrapPreview((prev) => !prev)}
       />
     );
-  }, [active, api, busy, changeGroups, changeSummary, cwd, onSelectChangeFile, onSelectGitChangeFile, setWrapPreview, wrapPreview]);
+  }, [active, api, busy, changeGroups, changeSummary, cwd, onOpenFilePreview, onSelectChangeFile, onSelectGitChangeFile, setWrapPreview, wrapPreview]);
 
   const handleTabWheel = useCallback((event) => {
     const el = tabListRef.current;

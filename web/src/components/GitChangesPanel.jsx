@@ -40,6 +40,7 @@ export function GitChangesPanel({
   visible = true,
   selectedFile = '',
   onOpenFile,
+  onOpenFilePreview,
   onBaseChange,
 }) {
   const { candidates, initial } = useMemo(
@@ -260,6 +261,25 @@ export function GitChangesPanel({
                 )
                 : <span className="text-fg-mute">{row.statLabel}</span>}
             </span>
+            {!!onOpenFilePreview && (
+              // 已删除文件磁盘上不存在,按钮隐形占位保持各行 ± 计数对齐。
+              <span
+                role="button"
+                tabIndex={-1}
+                className={clsx('ace-change-row-action', row.status === 'D' && 'is-hidden')}
+                title="转到文件"
+                aria-label={`转到文件 ${row.path}`}
+                onPointerDown={(event) => event.stopPropagation()}
+                onMouseDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  if (row.status !== 'D') onOpenFilePreview(row.path);
+                }}
+              >
+                <VsIcon name="openFile" size={13} />
+              </span>
+            )}
           </button>
         ))}
       </div>

@@ -630,6 +630,7 @@ export function SidePanel({
             visible={!collapsed && activeTab === 'changes'}
             selectedFile={selectedGitChangeFile}
             onOpenFile={onOpenGitChangePreview}
+            onOpenFilePreview={onOpenFilePreview}
             onBaseChange={onGitBaseChange}
           />
         ) : (

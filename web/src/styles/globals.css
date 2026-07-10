@@ -2273,6 +2273,8 @@ body {
   min-height: 28px;
   display: grid;
   grid-template-columns: 18px minmax(0, 1fr) auto;
+  grid-auto-columns: max-content;
+  grid-auto-flow: column;
   align-items: center;
   gap: 5px;
   padding: 3px 8px;
@@ -2321,6 +2323,60 @@ body {
   font-family: var(--font-mono);
   font-size: 11px;
   white-space: nowrap;
+}
+
+/* 变更文件行的行内动作按钮(转到文件):hover / 选中 / 键盘聚焦时浮现,
+   平时透明占位保持 ± 计数各行对齐;is-hidden = 已删除文件的隐形占位。 */
+.ace-change-row-action {
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border-radius: 4px;
+  color: var(--ace-fg-mute);
+  opacity: 0;
+  transition: opacity .12s ease, color .15s ease, background .15s ease;
+}
+.ace-change-compact-row:hover .ace-change-row-action,
+.ace-change-compact-row.is-selected .ace-change-row-action,
+.ace-change-file-row:hover .ace-change-row-action,
+.ace-change-file-row.is-selected .ace-change-row-action,
+.ace-change-row-action:focus-visible {
+  opacity: 1;
+}
+.ace-change-row-action:hover {
+  color: var(--ace-fg);
+  background: var(--ace-surface-alt);
+}
+.ace-change-row-action.is-hidden {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* 变更详情栏「N 个文件已更改」行右端的折叠全部 diff 按钮。 */
+.ace-review-collapse-all-btn {
+  width: 24px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--ace-fg-mute);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: color .15s ease, background .15s ease;
+}
+.ace-review-collapse-all-btn:hover {
+  color: var(--ace-fg);
+  background: var(--ace-surface-alt);
+}
+.ace-review-collapse-all-btn:focus-visible {
+  outline: 2px solid var(--ace-accent);
+  outline-offset: -2px;
 }
 
 .ace-review-panel {
