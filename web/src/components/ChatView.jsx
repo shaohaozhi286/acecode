@@ -3087,6 +3087,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
             onToggleMaximize={onToggleSidePanelMaximized}
             onSelectChangeFile={openSessionChangePreview}
             onSelectGitChangeFile={openGitChangePreview}
+            onOpenFilePreview={openFilePreview}
           />
         </div>
       )}

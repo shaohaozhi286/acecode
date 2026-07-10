@@ -58,7 +58,7 @@ function statusBadgeClass(status) {
   }
 }
 
-function GitChangeFileRow({ row, open, selected, onToggle }) {
+function GitChangeFileRow({ row, open, selected, onToggle, onOpenFile }) {
   const name = row.path.split(/[\\/]/).pop();
   const parent = row.path.includes('/') ? row.path.slice(0, row.path.lastIndexOf('/')) : '';
   return (
@@ -89,6 +89,25 @@ function GitChangeFileRow({ row, open, selected, onToggle }) {
           <span className="text-fg-mute">{row.statLabel}</span>
         )}
       </span>
+      {!!onOpenFile && (
+        // 已删除文件磁盘上不存在,按钮隐形占位保持各行 ± 计数对齐。
+        <span
+          role="button"
+          tabIndex={-1}
+          className={clsx('ace-change-row-action', row.status === 'D' && 'is-hidden')}
+          title="转到文件"
+          aria-label={`转到文件 ${row.path}`}
+          onPointerDown={(event) => event.stopPropagation()}
+          onMouseDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            if (row.status !== 'D') onOpenFile(row.path);
+          }}
+        >
+          <VsIcon name="openFile" size={13} />
+        </span>
+      )}
     </button>
   );
 }
@@ -101,6 +120,7 @@ export function GitChangeDetails({
   expandedFileRevision = 0,
   busy = false,
   onSelectFile,
+  onOpenFilePreview,
 }) {
   const [list, setList] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -315,41 +335,30 @@ export function GitChangeDetails({
 
   return (
     <div className="ace-review-panel" data-change-region="preview-panel" ref={panelRef}>
-      <div className="ace-review-summary" data-desktop-review-kind="summary">
-        <div className="ace-review-title min-w-0">
-          <VsIcon name="editWindow" size={15} />
-          <span>变更</span>
-          {(list?.branch) && (
-            <>
-              <span className="text-fg-mute font-normal truncate max-w-[120px]" title={list.branch}>{list.branch}</span>
-              <span className="text-fg-mute opacity-60" aria-hidden="true">→</span>
-            </>
-          )}
-          <span className="text-fg-mute font-normal truncate max-w-[140px]" title={`比较基线:${base}`}>{base}</span>
-        </div>
-        <div className="flex items-center gap-2 shrink-0">
-          {loading && <span className="ace-spinner w-3 h-3" />}
-          {list && (
-            <span className="text-[11px]">
-              <span className="ace-change-add">+{list.total_additions ?? 0}</span>{' '}
-              <span className="ace-change-del">-{list.total_deletions ?? 0}</span>
-            </span>
-          )}
-          <button
-            type="button"
-            className="ace-side-panel-refresh-btn !static"
-            title="刷新变更"
-            aria-label="刷新变更"
-            onClick={() => { changesCache.markStale(cwdRef.current); setPatches({}); fetchList(true); }}
-          >
-            <VsIcon name="refresh" size={14} />
-          </button>
-        </div>
-      </div>
-
-      {list && rows.length > 0 && (
-        <div className="px-3 py-1 text-[11px] text-fg-mute border-b border-border/50 truncate">
-          {buildSummaryLabel(list)}
+      {(list || loading) && (
+        <div
+          className="px-3 py-1 text-[11px] text-fg-mute border-b border-border/50 flex items-center gap-2 shrink-0"
+          data-desktop-review-kind="summary"
+        >
+          <span className="truncate">{buildSummaryLabel(list)}</span>
+          {loading && <span className="ace-spinner w-3 h-3 shrink-0" />}
+          <span className="ml-auto shrink-0 inline-flex items-center gap-1.5">
+            {list && (
+              <span>
+                <span className="ace-change-add">+{list.total_additions ?? 0}</span>{' '}
+                <span className="ace-change-del">-{list.total_deletions ?? 0}</span>
+              </span>
+            )}
+            <button
+              type="button"
+              className="ace-review-collapse-all-btn"
+              title="折叠全部 diff"
+              aria-label="折叠全部 diff"
+              onClick={() => setOpenFiles(new Set())}
+            >
+              <VsIcon name="collapseAll" size={14} />
+            </button>
+          </span>
         </div>
       )}
 
@@ -387,6 +396,7 @@ export function GitChangeDetails({
                 open={open}
                 selected={selected}
                 onToggle={() => toggleFile(row.path, open)}
+                onOpenFile={onOpenFilePreview}
               />
               {open && (
                 <div className="ace-review-diff-scroll">
