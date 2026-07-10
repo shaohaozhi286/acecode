@@ -37,6 +37,7 @@ import { SlashCommandsProvider } from './components/SlashCommandsContext.jsx';
 import { FramelessResizeHandles } from './components/FramelessResizeHandles.jsx';
 import { GlobalFindOverlay } from './components/GlobalFindOverlay.jsx';
 import { ConsoleDock } from './components/ConsoleDock.jsx';
+import { DesktopGuidedTour } from './components/DesktopGuidedTour.jsx';
 import {
   CONSOLE_DOCK_DEFAULT_HEIGHT,
   clampDockHeight,
@@ -62,6 +63,14 @@ import {
   sessionRefFromJumpTarget,
   stripOpenSessionParams,
 } from './lib/sessionJump.js';
+import { desktopUiMode } from './lib/desktopShellMode.js';
+import {
+  desktopGuidedTourHasModel,
+  desktopGuidedTourModeEligible,
+  desktopGuidedTourTargetsReady,
+  shouldAutoStartDesktopGuidedTour,
+  shouldPrepareDesktopGuidedTour,
+} from './lib/desktopGuidedTour.js';
 
 const SINGLE_LAYOUT_STORAGE_KEY = 'acecode.singleLayoutWidths.v1';
 
@@ -142,6 +151,25 @@ export function App() {
   const [previewPanelVisible, setPreviewPanelVisible] = useState(false);
   const activeRefRef = useRef(activeRef);
   const navHistoryRef = useRef(navHistory);
+  const desktopModeRef = useRef(desktopUiMode());
+  const startupOpenTargetRef = useRef(
+    typeof window === 'undefined' ? null : openSessionTargetFromSearch(window.location.search),
+  );
+  const startupNavigationStartedRef = useRef(false);
+  const [startupNavigationSettled, setStartupNavigationSettled] = useState(
+    () => !startupOpenTargetRef.current,
+  );
+  const [guidedTourState, setGuidedTourState] = useState({
+    loaded: false,
+    dismissed: true,
+    hasModel: true,
+  });
+  const [guidedTourPreparing, setGuidedTourPreparing] = useState(false);
+  const [guidedTourRun, setGuidedTourRun] = useState(false);
+  const [guidedTourForced, setGuidedTourForced] = useState(false);
+  const guidedTourAutoAttemptedRef = useRef(false);
+  const guidedTourHasActiveSession = !!(activeRef?.sessionId || activeRef?.id);
+  const guidedTourBlocked = showSettings || searchOpen || permReqs.length > 0 || questionReqs.length > 0;
 
   useEffect(() => initInactiveSelection(), []);
   useEffect(() => {
@@ -299,17 +327,41 @@ export function App() {
     };
   }, [authState]);
 
+  useEffect(() => {
+    if (authState !== 'ok' || !desktopGuidedTourModeEligible(desktopModeRef.current)) {
+      return undefined;
+    }
+    let cancelled = false;
+    Promise.allSettled([api.getDesktopOnboarding(), api.listModels()])
+      .then(([statusResult, modelsResult]) => {
+        if (cancelled || statusResult.status !== 'fulfilled') return;
+        setGuidedTourState({
+          loaded: true,
+          dismissed: !!statusResult.value?.dismissed,
+          hasModel: modelsResult.status === 'fulfilled'
+            ? desktopGuidedTourHasModel(modelsResult.value)
+            : true,
+        });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [authState]);
+
   // 解析 URL 上的 ?open=<sessionId>&workspace=<hash>(跨 workspace 跳转后落地用)。
   // 解析后立即从 URL 抹掉,避免刷新二次触发。
   useEffect(() => {
-    if (typeof window === 'undefined') return;
-    const target = openSessionTargetFromSearch(window.location.search);
-    if (!target) return;
+    if (typeof window === 'undefined' || authState !== 'ok') return;
+    const target = startupOpenTargetRef.current;
+    if (!target || startupNavigationStartedRef.current) return;
+    startupNavigationStartedRef.current = true;
     const qs = stripOpenSessionParams(window.location.search);
     const newUrl = window.location.pathname + (qs ? '?' + qs : '');
     window.history.replaceState(null, '', newUrl);
-    resumeAndOpenSession(target, { replace: true, allowDesktopActivate: false }).catch(() => {});
-  }, [resumeAndOpenSession]);
+    resumeAndOpenSession(target, { replace: true, allowDesktopActivate: false })
+      .catch(() => {})
+      .finally(() => setStartupNavigationSettled(true));
+  }, [authState, resumeAndOpenSession]);
 
   // 桌面壳通知 click_handler 走 webview eval 调这两个 window 全局函数,见
   // openspec/changes/add-desktop-attention-notifications。
@@ -465,6 +517,109 @@ export function App() {
     navigateToRef(homeRefFromWorkspace(target, activeRefRef.current, health));
   }, [health, navigateToRef]);
 
+  const abortGuidedTour = useCallback(() => {
+    setGuidedTourRun(false);
+    setGuidedTourPreparing(false);
+    setGuidedTourForced(false);
+  }, []);
+
+  const dismissGuidedTour = useCallback(async ({ openModels = false } = {}) => {
+    setGuidedTourRun(false);
+    setGuidedTourPreparing(false);
+    setGuidedTourForced(false);
+    try {
+      const state = await api.dismissDesktopOnboarding();
+      setGuidedTourState((prev) => ({
+        ...prev,
+        loaded: true,
+        dismissed: !!state?.dismissed,
+      }));
+    } catch (e) {
+      toast({ kind: 'err', text: '指引已关闭，但状态保存失败，下次启动可能再次显示：' + (e?.message || '') });
+    }
+    if (openModels) openSettingsSection('models');
+  }, [openSettingsSection]);
+
+  const replayGuidedTour = useCallback(async () => {
+    setShowSettings(false);
+    setSearchOpen(false);
+    setGuidedTourRun(false);
+    setGuidedTourForced(true);
+    navigateToRef(homeRefFromWorkspace(activeRefRef.current || {}, activeRefRef.current, health));
+    try {
+      const models = await api.listModels();
+      setGuidedTourState((prev) => ({
+        ...prev,
+        hasModel: desktopGuidedTourHasModel(models),
+      }));
+    } catch {
+      // 重播仍可继续；模型列表读取失败时沿用最近一次已知状态。
+    } finally {
+      setGuidedTourPreparing(true);
+    }
+  }, [health, navigateToRef]);
+
+  useEffect(() => {
+    if (guidedTourForced) return;
+    const shouldStart = shouldAutoStartDesktopGuidedTour({
+      mode: desktopModeRef.current,
+      authState,
+      stateLoaded: guidedTourState.loaded,
+      dismissed: guidedTourState.dismissed,
+      startupNavigationSettled,
+      hasActiveSession: guidedTourHasActiveSession,
+      blocked: guidedTourBlocked,
+      targetsReady: desktopGuidedTourTargetsReady(),
+      attempted: guidedTourAutoAttemptedRef.current,
+    });
+    if (!shouldStart) return;
+    guidedTourAutoAttemptedRef.current = true;
+    setGuidedTourPreparing(true);
+  }, [
+    authState,
+    guidedTourBlocked,
+    guidedTourForced,
+    guidedTourHasActiveSession,
+    guidedTourState.dismissed,
+    guidedTourState.loaded,
+    startupNavigationSettled,
+  ]);
+
+  useEffect(() => {
+    if (!guidedTourPreparing || !shouldPrepareDesktopGuidedTour({
+      mode: desktopModeRef.current,
+      authState,
+      startupNavigationSettled,
+      hasActiveSession: guidedTourHasActiveSession,
+      blocked: guidedTourBlocked,
+    })) {
+      return undefined;
+    }
+    const timer = window.setTimeout(() => {
+      if (!desktopGuidedTourTargetsReady()) {
+        abortGuidedTour();
+        return;
+      }
+      setGuidedTourRun(true);
+      setGuidedTourPreparing(false);
+    }, 280);
+    return () => window.clearTimeout(timer);
+  }, [
+    abortGuidedTour,
+    authState,
+    guidedTourBlocked,
+    guidedTourHasActiveSession,
+    guidedTourPreparing,
+    startupNavigationSettled,
+  ]);
+
+  useEffect(() => {
+    if (!guidedTourHasActiveSession) return;
+    // 导航到会话属于非终止性中断；回到 Home 后允许当前未关闭版本重新尝试。
+    guidedTourAutoAttemptedRef.current = false;
+    if (guidedTourPreparing || guidedTourRun) abortGuidedTour();
+  }, [abortGuidedTour, guidedTourHasActiveSession, guidedTourPreparing, guidedTourRun]);
+
   const createDesktopTraySession = useCallback(async () => {
     try {
       const next = await createNewSessionForActiveWorkspace(api, activeRefRef.current, health);
@@ -616,7 +771,8 @@ export function App() {
     );
   }
 
-  const sidebarCollapsed = view !== 'single' || projectSidebarCollapsed;
+  const sidebarCollapsed = view !== 'single'
+    || (projectSidebarCollapsed && !guidedTourPreparing && !guidedTourRun);
   const permReq = permReqs[0] || null;
   const visibleQuestionReq = !permReq
     ? questionReqs.find((req) => {
@@ -669,7 +825,7 @@ export function App() {
           onOpenSettingsSection={openSettingsSection}
           pendingQuestionSessionIds={pendingQuestionSessionIdsForSidebar}
         />
-        {view === 'single' && !projectSidebarCollapsed && (
+        {view === 'single' && !sidebarCollapsed && (
           <div
             role="separator"
             aria-label="调整左侧栏宽度"
@@ -732,6 +888,9 @@ export function App() {
             health={health}
             activeSessionId={activeId}
             onPermissionModeChanged={handlePermissionModeChanged}
+            onReplayGuidedTour={desktopGuidedTourModeEligible(desktopModeRef.current)
+              ? replayGuidedTour
+              : undefined}
             fontSize={fontSize}
             onFontSizeChange={setFontSize}
           />
@@ -755,6 +914,12 @@ export function App() {
       <FramelessResizeHandles />
       <GlobalFindOverlay />
       <DesktopContextMenu />
+      <DesktopGuidedTour
+        run={guidedTourRun && !guidedTourBlocked}
+        hasModel={guidedTourState.hasModel}
+        onDismiss={dismissGuidedTour}
+        onAbort={abortGuidedTour}
+      />
       <Toaster />
     </div>
     </SlashCommandsProvider>

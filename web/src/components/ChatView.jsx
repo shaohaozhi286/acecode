@@ -2495,18 +2495,21 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
           <div className="ace-home-content">
             <img src="/acecode-logo.png" alt="ACECode" width="64" height="64" className="ace-home-logo select-none" draggable="false" />
             <h1 className="ace-home-title">{homeProjectTitle}</h1>
-            <InputBar
-              ref={inputRef}
-              variant="hero"
-              history={composerHistory}
-              onSubmit={submit}
-              disabled={!!questionForView || homeSubmitting}
-              placeholder="向 ACECode 描述任务，或输入 / 命令..."
-              {...composerInputProps}
-            />
+            <div data-tour-target="home-composer" className="w-full">
+              <InputBar
+                ref={inputRef}
+                variant="hero"
+                history={composerHistory}
+                onSubmit={submit}
+                disabled={!!questionForView || homeSubmitting}
+                placeholder="向 ACECode 描述任务，或输入 / 命令..."
+                {...composerInputProps}
+              />
+            </div>
             <div className="flex items-center gap-2 mr-auto ml-0">
             <div className="relative">
               <button
+                data-tour-target="home-workspace"
                 type="button"
                 className="ace-home-project-row group"
                 onClick={() => setProjectDropdownOpen(!projectDropdownOpen)}

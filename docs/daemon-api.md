@@ -244,6 +244,8 @@ when known.
 | DELETE | `/api/copilot/auth` | delete saved GitHub token |
 | POST | `/api/copilot/auth/device` | start GitHub device flow |
 | POST | `/api/copilot/auth/device/poll` | poll device flow |
+| GET | `/api/ui/onboarding/desktop` | read Desktop guided-tour status |
+| POST | `/api/ui/onboarding/desktop/dismiss` | dismiss the current Desktop guided-tour version |
 | GET | `/api/config/ui-preferences` | read UI preferences |
 | PUT | `/api/config/ui-preferences` | write UI preferences |
 | GET | `/api/config/custom-instructions` | read custom instructions |
@@ -1188,6 +1190,24 @@ failure states return `status`, `error`, `message`, and
 ---
 
 ## 10. Config, MCP, Update, and Feedback
+
+### `GET /api/ui/onboarding/desktop`
+
+Returns the backend-owned Desktop guided-tour version and whether that version
+has been dismissed:
+
+```json
+{"guide_version":1,"dismissed":false}
+```
+
+The state is stored in `~/.acecode/state.json`, not browser storage, so it
+survives Desktop loopback-port changes and Edge compatibility profiles.
+
+### `POST /api/ui/onboarding/desktop/dismiss`
+
+Idempotently marks the current Desktop guided-tour version as dismissed and
+returns the same payload with `dismissed:true`. A state-file write failure
+returns HTTP `500` with `error:"PERSIST_FAILED"`.
 
 ### `GET /api/config/ui-preferences`
 

@@ -22,6 +22,7 @@
     "markdown-it-task-lists": "^2.1.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "react-joyride": "3.2.0",
     "x-data-spreadsheet": "^1.1.9",
     "xlsx": "^0.18.5"
   },

@@ -2113,6 +2113,7 @@ export function Sidebar({
   return (
     <>
       <aside
+        data-tour-target="sidebar"
         className={[
           'ace-sidebar bg-surface-alt border-r border-border flex flex-col font-sans shrink-0 overflow-hidden',
           'transition-[width,min-width] duration-250',
@@ -2135,10 +2136,12 @@ export function Sidebar({
                 <VsIcon name="collapseAll" size={16} />
               </button>
               <button
+                data-tour-target="sidebar-add-project"
                 type="button"
                 onClick={onAddWorkspace}
                 className="w-5 h-5 rounded text-fg-mute hover:text-fg hover:bg-surface-hi text-[14px] leading-none flex items-center justify-center"
                 title="添加项目"
+                aria-label="添加项目"
               ><VsIcon name="folderAdd" size={15} /></button>
             </div>
           </div>

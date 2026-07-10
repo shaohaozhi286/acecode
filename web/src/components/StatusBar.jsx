@@ -149,7 +149,7 @@ export function StatusBar({
     : '';
 
   return (
-    <div className="h-[22px] flex items-center px-2.5 gap-4 bg-surface-alt border-t border-border text-[11px] text-fg-mute shrink-0">
+    <div data-tour-target="statusbar" className="h-[22px] flex items-center px-2.5 gap-4 bg-surface-alt border-t border-border text-[11px] text-fg-mute shrink-0">
       <div className="flex items-center gap-1">
         <div ref={permissionRef} className="relative">
           <button

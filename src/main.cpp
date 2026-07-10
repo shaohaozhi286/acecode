@@ -133,6 +133,7 @@
 #include "tui/thick_vscroll_bar.hpp"
 #include "tui/non_selectable.hpp"
 #include "tui/tool_progress.hpp"
+#include "tui/tool_result_fold.hpp"
 #include "tui/tool_row_format.hpp"
 #include "tui/theme_palette.hpp"
 #include "utils/terminal_theme_detect.hpp"
@@ -3892,30 +3893,48 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
                     tracked_message(i, block | focus_decorator));
             } else {
                 // ---- Legacy fold path(含 Ctrl+E/Ctrl+O 展开后的全文视图)----
-                // 折叠时 3 行截断并提示 ctrl+o(用户决策:工具输出默认只留
-                // 一眼预览,不占版面);展开时放宽到 2000 行兜底(bash 工具
-                // 上游已截断超大输出,正常到不了这个量级;万一到了,这个
-                // 上限防止单条消息把每帧渲染拖死)。
-                const int MAX_TOOL_LINES = row_expanded ? 2000 : 3;
-                std::string display_content = msg.content;
-                int line_count = 0;
-                for (char c : msg.content) if (c == '\n') line_count++;
-                if (msg.content.empty() || msg.content.back() != '\n') line_count++;
+                // 折叠态按终端可视行而不只是硬换行计数。MCP 等工具常返回
+                // 含字面量 "\\n" 的单行 JSON;若只数 '\n',paragraph() 的软
+                // 换行仍会铺满屏幕。展开态保留 2000 个硬行的兜底上限。
+                std::string display_content;
+                if (!row_expanded) {
+                    constexpr std::size_t kMaxPreviewRows = 3;
+                    const int content_width = std::max(
+                        20, chat_box.x_max - chat_box.x_min - 4);
+                    const auto preview = acecode::tui::fold_tool_result_preview(
+                        msg.content, content_width, kMaxPreviewRows);
+                    for (std::size_t line_index = 0;
+                         line_index < preview.lines.size(); ++line_index) {
+                        if (line_index > 0) display_content.push_back('\n');
+                        display_content += preview.lines[line_index];
+                    }
+                    if (preview.folded) {
+                        if (!display_content.empty()) display_content.push_back('\n');
+                        display_content += "\xE2\x80\xA6 folded (ctrl+o)";
+                    }
+                } else {
+                    constexpr int kMaxExpandedHardLines = 2000;
+                    display_content = msg.content;
+                    int line_count = 0;
+                    for (char c : msg.content) if (c == '\n') line_count++;
+                    if (msg.content.empty() || msg.content.back() != '\n') line_count++;
 
-                if (line_count > MAX_TOOL_LINES) {
-                    size_t cut = 0;
-                    int seen = 0;
-                    while (cut < msg.content.size() && seen < MAX_TOOL_LINES) {
-                        if (msg.content[cut] == '\n') seen++;
-                        cut++;
+                    if (line_count > kMaxExpandedHardLines) {
+                        size_t cut = 0;
+                        int seen = 0;
+                        while (cut < msg.content.size() &&
+                               seen < kMaxExpandedHardLines) {
+                            if (msg.content[cut] == '\n') seen++;
+                            cut++;
+                        }
+                        display_content = msg.content.substr(0, cut);
+                        if (!display_content.empty() && display_content.back() == '\n') {
+                            display_content.pop_back();
+                        }
+                        const int hidden = line_count - kMaxExpandedHardLines;
+                        display_content += "\n\xE2\x80\xA6 +" +
+                            std::to_string(hidden) + " lines";
                     }
-                    display_content = msg.content.substr(0, cut);
-                    if (!display_content.empty() && display_content.back() == '\n') {
-                        display_content.pop_back();
-                    }
-                    int hidden = line_count - MAX_TOOL_LINES;
-                    display_content += "\n\xE2\x80\xA6 +" + std::to_string(hidden) +
-                        (row_expanded ? " lines" : " lines (ctrl+o to expand)");
                 }
 
                 auto line = hbox({

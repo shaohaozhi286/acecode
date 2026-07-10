@@ -142,7 +142,7 @@ export function GitChangesPanel({
 
   return (
     <div className="ace-change-compact-panel" data-change-region="side-panel-git">
-      <div className="ace-change-compact-summary">
+      <div className="ace-change-compact-summary" data-desktop-review-kind="summary">
         <div className="ace-review-title min-w-0">
           <VsIcon name="editWindow" size={15} />
           <span>变更</span>
@@ -230,6 +230,8 @@ export function GitChangesPanel({
             key={row.path}
             type="button"
             data-change-compact-file={row.path}
+            data-desktop-review-kind="file"
+            data-desktop-review-file={row.path || undefined}
             className={clsx(
               'ace-change-compact-row',
               selectedNormalized && normalizeTreePath(row.path) === selectedNormalized && 'is-selected',

@@ -64,6 +64,7 @@ import './builtinCommandRouting.test.js';
 import './slashCommandWorkspace.test.js';
 import './desktopNotify.test.js';
 import './desktopShellMode.test.js';
+import './desktopGuidedTour.test.js';
 import './desktopTrayMenu.test.js';
 import './opencodeImport.test.js';
 import './newSession.test.js';

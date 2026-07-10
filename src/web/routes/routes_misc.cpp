@@ -2,6 +2,7 @@
 #include "../server_impl.hpp"
 #include "../../feedback/feedback_upload.hpp"
 #include "../../tool/mcp_manager.hpp"  // /api/mcp/toggle 运行时 enable/disable
+#include "../../utils/state_file.hpp"
 
 namespace acecode::web {
 
@@ -10,6 +11,17 @@ namespace fs = std::filesystem;
 using nlohmann::json;
 
 namespace {
+
+constexpr int kDesktopGuidedTourVersion = 1;
+constexpr const char* kDesktopGuidedTourDismissedKey =
+    "desktop_guided_tour_v1_dismissed";
+
+json desktop_guided_tour_state_json() {
+    return json{
+        {"guide_version", kDesktopGuidedTourVersion},
+        {"dismissed", acecode::read_state_flag(kDesktopGuidedTourDismissedKey)},
+    };
+}
 
 int hex_value(char ch) {
     if (ch >= '0' && ch <= '9') return ch - '0';
@@ -861,6 +873,14 @@ void WebServer::Impl::register_static() {
     }
 
 void WebServer::Impl::register_ui_preferences() {
+        CROW_ROUTE(app, "/api/ui/onboarding/desktop").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
+        CROW_ROUTE(app, "/api/ui/onboarding/desktop/dismiss").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
         CROW_ROUTE(app, "/api/config/ui-preferences").methods(crow::HTTPMethod::Options)
         ([this](const crow::request& req) {
             return cors_preflight(req);
@@ -892,6 +912,35 @@ void WebServer::Impl::register_ui_preferences() {
         CROW_ROUTE(app, "/api/config/ace-browser-bridge").methods(crow::HTTPMethod::Options)
         ([this](const crow::request& req) {
             return cors_preflight(req);
+        });
+
+        // Desktop guided-tour state lives in state.json instead of localStorage:
+        // Desktop's random daemon port and Edge fallback profile are not stable origins.
+        CROW_ROUTE(app, "/api/ui/onboarding/desktop").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            crow::response r(200);
+            r.add_header("Content-Type", "application/json");
+            r.body = desktop_guided_tour_state_json().dump();
+            return with_cors(req, std::move(r));
+        });
+
+        CROW_ROUTE(app, "/api/ui/onboarding/desktop/dismiss").methods(crow::HTTPMethod::POST)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!acecode::try_write_state_flag(kDesktopGuidedTourDismissedKey, true)) {
+                crow::response r(500);
+                r.add_header("Content-Type", "application/json");
+                r.body = json{
+                    {"error", "PERSIST_FAILED"},
+                    {"message", "failed to persist Desktop guided-tour dismissal"},
+                }.dump();
+                return with_cors(req, std::move(r));
+            }
+            crow::response r(200);
+            r.add_header("Content-Type", "application/json");
+            r.body = desktop_guided_tour_state_json().dump();
+            return with_cors(req, std::move(r));
         });
 
         // GET /api/config/ui-preferences: non-sensitive Web/Desktop UI prefs.

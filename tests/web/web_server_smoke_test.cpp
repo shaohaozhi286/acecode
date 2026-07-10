@@ -36,6 +36,7 @@
 #include "upgrade/manifest.hpp"
 #include "utils/encoding.hpp"
 #include "utils/cwd_hash.hpp"
+#include "utils/state_file.hpp"
 #include "utils/utf8_path.hpp"
 #include "web/server.hpp"
 
@@ -228,6 +229,7 @@ struct WebServerFixture {
     std::filesystem::path no_workspace_cache_root;
     std::filesystem::path logs_dir;
     std::filesystem::path feedback_dir;
+    std::filesystem::path state_file_path;
     std::string cwd;
     std::string project_dir;
 
@@ -266,6 +268,8 @@ struct WebServerFixture {
         std::filesystem::create_directories(logs_dir);
         feedback_dir = tmp_dir / "feedback";
         std::filesystem::create_directories(feedback_dir);
+        state_file_path = tmp_dir / "state.json";
+        acecode::set_state_file_path_for_test(state_file_path.string());
         cwd = cwd_dir.string();
         workspace_registry = std::make_unique<acecode::desktop::WorkspaceRegistry>();
         if (register_default_workspace) {
@@ -332,6 +336,7 @@ struct WebServerFixture {
     ~WebServerFixture() {
         if (server) server->stop();
         if (server_thread.joinable()) server_thread.join();
+        acecode::set_state_file_path_for_test("");
         std::error_code ec;
         std::filesystem::remove_all(project_dir, ec);
         std::filesystem::remove_all(tmp_dir, ec);
@@ -2723,6 +2728,64 @@ TEST(WebServerHttp, UnknownRouteReturns404) {
     WebServerFixture fx;
     auto r = cpr::Get(cpr::Url{fx.url("/api/does-not-exist")});
     EXPECT_EQ(r.status_code, 404);
+}
+
+// 场景:首次进入 Desktop 时,当前 guide version 尚未 dismiss。
+TEST(WebServerHttp, GetDesktopOnboardingReturnsUnseenVersion) {
+    WebServerFixture fx;
+    auto r = cpr::Get(cpr::Url{fx.url("/api/ui/onboarding/desktop")});
+    ASSERT_EQ(r.status_code, 200) << r.text;
+    auto body = json::parse(r.text);
+    EXPECT_EQ(body["guide_version"], 1);
+    EXPECT_EQ(body["dismissed"], false);
+}
+
+// 场景:dismiss 是幂等操作,且不会覆盖 state.json 中其它字段。
+TEST(WebServerHttp, DismissDesktopOnboardingIsDurableAndIdempotent) {
+    WebServerFixture fx;
+    acecode::write_state_flag("another_flag", true);
+
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        auto r = cpr::Post(cpr::Url{fx.url("/api/ui/onboarding/desktop/dismiss")});
+        ASSERT_EQ(r.status_code, 200) << r.text;
+        auto body = json::parse(r.text);
+        EXPECT_EQ(body["guide_version"], 1);
+        EXPECT_EQ(body["dismissed"], true);
+    }
+
+    EXPECT_TRUE(acecode::read_state_flag("desktop_guided_tour_v1_dismissed"));
+    EXPECT_TRUE(acecode::read_state_flag("another_flag"));
+}
+
+// 场景:跨端口 Web/Desktop 请求必须带 daemon token。
+TEST(WebServerHttp, DesktopOnboardingCrossOriginRequiresToken) {
+    WebServerFixture fx;
+    const std::string origin = "http://localhost:5173";
+    auto denied = cpr::Get(
+        cpr::Url{fx.url("/api/ui/onboarding/desktop")},
+        cpr::Header{{"Origin", origin}});
+    EXPECT_EQ(denied.status_code, 401);
+
+    auto allowed = cpr::Get(
+        cpr::Url{fx.url("/api/ui/onboarding/desktop")},
+        cpr::Header{{"Origin", origin}, {"X-ACECode-Token", "smoke-token"}});
+    EXPECT_EQ(allowed.status_code, 200);
+}
+
+// 场景:落盘失败时 endpoint 不得谎报 dismissed=true。
+TEST(WebServerHttp, DismissDesktopOnboardingReportsPersistenceFailure) {
+    WebServerFixture fx;
+    auto directory_target = fx.tmp_dir / "state-directory";
+    std::filesystem::create_directories(directory_target);
+    acecode::set_state_file_path_for_test(directory_target.string());
+
+    auto r = cpr::Post(cpr::Url{fx.url("/api/ui/onboarding/desktop/dismiss")});
+    ASSERT_EQ(r.status_code, 500) << r.text;
+    auto body = json::parse(r.text);
+    EXPECT_EQ(body["error"], "PERSIST_FAILED");
+
+    acecode::set_state_file_path_for_test(fx.state_file_path.string());
+    EXPECT_FALSE(acecode::read_state_flag("desktop_guided_tour_v1_dismissed"));
 }
 
 // 场景:GET /api/config/ui-preferences 返回固定隐藏头像的兼容值。

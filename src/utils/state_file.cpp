@@ -9,6 +9,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <sstream>
 
 namespace fs = std::filesystem;
@@ -22,6 +23,11 @@ namespace {
 std::string& test_path_override() {
     static std::string p;
     return p;
+}
+
+std::mutex& state_file_mutex() {
+    static std::mutex mu;
+    return mu;
 }
 
 std::string state_file_path() {
@@ -69,13 +75,15 @@ nlohmann::json load_state_or_empty(bool* is_corrupted = nullptr) {
 } // namespace
 
 bool read_state_flag(const std::string& key) {
+    std::lock_guard<std::mutex> lock(state_file_mutex());
     auto j = load_state_or_empty();
     if (!j.contains(key)) return false;
     if (!j[key].is_boolean()) return false;
     return j[key].get<bool>();
 }
 
-void write_state_flag(const std::string& key, bool value) {
+bool try_write_state_flag(const std::string& key, bool value) {
+    std::lock_guard<std::mutex> lock(state_file_mutex());
     bool corrupted = false;
     auto j = load_state_or_empty(&corrupted);
     if (corrupted) {
@@ -90,17 +98,24 @@ void write_state_flag(const std::string& key, bool value) {
 
     if (!atomic_write_file(p, j.dump(2))) {
         LOG_WARN("[state_file] failed to write " + p);
+        return false;
     }
+    return true;
+}
+
+void write_state_flag(const std::string& key, bool value) {
+    (void)try_write_state_flag(key, value);
 }
 
 void set_state_file_path_for_test(const std::string& path) {
+    std::lock_guard<std::mutex> lock(state_file_mutex());
     test_path_override() = path;
 }
 
 namespace {
 
 // 写入任意 JSON value,保留其它 key,原子写。供 web_search 缓存等结构化写入复用。
-void write_state_value(const std::string& key, const nlohmann::json& value) {
+bool write_state_value(const std::string& key, const nlohmann::json& value) {
     bool corrupted = false;
     auto j = load_state_or_empty(&corrupted);
     if (corrupted) {
@@ -114,16 +129,18 @@ void write_state_value(const std::string& key, const nlohmann::json& value) {
 
     if (!atomic_write_file(p, j.dump(2))) {
         LOG_WARN("[state_file] failed to write " + p);
+        return false;
     }
+    return true;
 }
 
-void erase_state_key(const std::string& key) {
+bool erase_state_key(const std::string& key) {
     bool corrupted = false;
     auto j = load_state_or_empty(&corrupted);
     if (corrupted) {
         LOG_WARN("[state_file] state.json corrupted, rewriting");
     }
-    if (!j.contains(key)) return; // 没有可删的就别动文件,避免无谓 I/O
+    if (!j.contains(key)) return true; // 没有可删的就别动文件,避免无谓 I/O
     j.erase(key);
 
     std::string p = state_file_path();
@@ -132,12 +149,15 @@ void erase_state_key(const std::string& key) {
 
     if (!atomic_write_file(p, j.dump(2))) {
         LOG_WARN("[state_file] failed to write " + p);
+        return false;
     }
+    return true;
 }
 
 } // namespace
 
 std::optional<WebSearchRegionCache> read_web_search_region_cache() {
+    std::lock_guard<std::mutex> lock(state_file_mutex());
     auto j = load_state_or_empty();
     if (!j.contains("web_search") || !j["web_search"].is_object()) return std::nullopt;
     const auto& wsj = j["web_search"];
@@ -161,17 +181,20 @@ void write_web_search_region_cache(const WebSearchRegionCache& cache) {
                  cache.region + "' (must be global or cn)");
         return;
     }
+    std::lock_guard<std::mutex> lock(state_file_mutex());
     nlohmann::json wsj = nlohmann::json::object();
     wsj["region_detected"] = cache.region;
     wsj["region_detected_at_ms"] = cache.detected_at_ms;
-    write_state_value("web_search", wsj);
+    (void)write_state_value("web_search", wsj);
 }
 
 void clear_web_search_region_cache() {
-    erase_state_key("web_search");
+    std::lock_guard<std::mutex> lock(state_file_mutex());
+    (void)erase_state_key("web_search");
 }
 
 std::string read_last_active_workspace_hash() {
+    std::lock_guard<std::mutex> lock(state_file_mutex());
     auto j = load_state_or_empty();
     if (!j.contains("last_active_workspace_hash")) return "";
     if (!j["last_active_workspace_hash"].is_string()) return "";
@@ -179,10 +202,12 @@ std::string read_last_active_workspace_hash() {
 }
 
 void write_last_active_workspace_hash(const std::string& hash) {
-    write_state_value("last_active_workspace_hash", hash);
+    std::lock_guard<std::mutex> lock(state_file_mutex());
+    (void)write_state_value("last_active_workspace_hash", hash);
 }
 
 std::string read_last_home_workspace_hash() {
+    std::lock_guard<std::mutex> lock(state_file_mutex());
     auto j = load_state_or_empty();
     if (!j.contains("last_home_workspace_hash")) return "";
     if (!j["last_home_workspace_hash"].is_string()) return "";
@@ -190,7 +215,8 @@ std::string read_last_home_workspace_hash() {
 }
 
 void write_last_home_workspace_hash(const std::string& hash) {
-    write_state_value("last_home_workspace_hash", hash);
+    std::lock_guard<std::mutex> lock(state_file_mutex());
+    (void)write_state_value("last_home_workspace_hash", hash);
 }
 
 } // namespace acecode

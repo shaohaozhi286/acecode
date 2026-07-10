@@ -22,11 +22,13 @@ function QuickBtn({
   disabled = false,
   className = '',
   pressed = null,
+  ...buttonProps
 }) {
   const isToggle = typeof pressed === 'boolean';
 
   return (
     <button
+      {...buttonProps}
       type="button"
       title={title}
       aria-label={title}
@@ -131,7 +133,7 @@ export function TopBar({
           更新
         </button>
       )}
-      <QuickBtn title="新对话" onClick={onNewSession}>
+      <QuickBtn data-tour-target="topbar-new-session" title="新对话" onClick={onNewSession}>
         <VsIcon name="newSession" size={16} />
       </QuickBtn>
       <QuickBtn title={searchHotkeyHint} onClick={onOpenSearch}>
@@ -155,6 +157,7 @@ export function TopBar({
           <VsIcon name={theme === 'dark' ? 'brightness' : 'darkTheme'} size={14} />
         </QuickBtn>
         <button
+          data-tour-target="topbar-settings"
           type="button"
           onClick={onSettings}
           className="px-2.5 py-1 rounded-md text-[12px] text-fg-mute hover:text-fg hover:bg-surface-hi transition flex items-center gap-1.5"

@@ -17,6 +17,8 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <thread>
+#include <vector>
 
 namespace fs = std::filesystem;
 
@@ -60,6 +62,20 @@ TEST_F(StateFileTest, WriteThenReadTrue) {
     EXPECT_TRUE(acecode::read_state_flag("legacy_terminal_hint_shown"));
 }
 
+// 场景:需要向 API 报告落盘结果时,checked write 明确返回成功。
+TEST_F(StateFileTest, CheckedWriteReportsSuccess) {
+    EXPECT_TRUE(acecode::try_write_state_flag("desktop_guided_tour_v1_dismissed", true));
+    EXPECT_TRUE(acecode::read_state_flag("desktop_guided_tour_v1_dismissed"));
+}
+
+// 场景:目标路径本身是目录,原子 rename 无法覆盖,checked write 返回 false。
+TEST_F(StateFileTest, CheckedWriteReportsFailure) {
+    fs::path directory_target = fs::path(path_).parent_path() / "state-directory";
+    fs::create_directories(directory_target);
+    acecode::set_state_file_path_for_test(directory_target.string());
+    EXPECT_FALSE(acecode::try_write_state_flag("desktop_guided_tour_v1_dismissed", true));
+}
+
 // 场景:write false 也写入(显式 reset 用)
 TEST_F(StateFileTest, WriteFalseExplicitlyStored) {
     acecode::write_state_flag("legacy_terminal_hint_shown", true);
@@ -73,6 +89,23 @@ TEST_F(StateFileTest, MultipleKeysCoexist) {
     acecode::write_state_flag("another_flag", true);
     EXPECT_TRUE(acecode::read_state_flag("legacy_terminal_hint_shown"));
     EXPECT_TRUE(acecode::read_state_flag("another_flag"));
+}
+
+// 场景:同进程内多个状态写入并发发生时,read-modify-write 必须串行,不能丢 key。
+TEST_F(StateFileTest, ConcurrentCheckedWritesPreserveEveryKey) {
+    constexpr int kWriterCount = 12;
+    std::vector<std::thread> writers;
+    writers.reserve(kWriterCount);
+    for (int i = 0; i < kWriterCount; ++i) {
+        writers.emplace_back([i]() {
+            EXPECT_TRUE(acecode::try_write_state_flag(
+                "concurrent_flag_" + std::to_string(i), true));
+        });
+    }
+    for (auto& writer : writers) writer.join();
+    for (int i = 0; i < kWriterCount; ++i) {
+        EXPECT_TRUE(acecode::read_state_flag("concurrent_flag_" + std::to_string(i)));
+    }
 }
 
 // 场景:已存在但内容是非合法 JSON → read 视同 false,后续 write 覆盖成功

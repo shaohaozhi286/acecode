@@ -108,6 +108,7 @@ export function SettingsPage({
   health,
   activeSessionId = '',
   onPermissionModeChanged,
+  onReplayGuidedTour,
   initialNavKey = 'general',
   fontSize = 'medium',
   onFontSizeChange = () => {},
@@ -184,6 +185,7 @@ export function SettingsPage({
               health={health}
               activeSessionId={activeSessionId}
               onPermissionModeChanged={onPermissionModeChanged}
+              onReplayGuidedTour={onReplayGuidedTour}
             />
           )}
           {activeNavKey === 'appearance' && (
@@ -216,7 +218,12 @@ export function SettingsPage({
 // Daemon 状态(/api/health 透传 health prop)。其余字段(工作模式 / 默认打开目标 /
 // 最大轮次)目前是 UI 占位,本地 state。
 
-function SectionGeneral({ health, activeSessionId = '', onPermissionModeChanged }) {
+function SectionGeneral({
+  health,
+  activeSessionId = '',
+  onPermissionModeChanged,
+  onReplayGuidedTour,
+}) {
   const [permMode, setPermMode] = useState('default');
   const [permBusy, setPermBusy] = useState(false);
   const [maxTurns, setMaxTurns] = useState(50);
@@ -295,6 +302,25 @@ function SectionGeneral({ health, activeSessionId = '', onPermissionModeChanged 
       </div>
 
       <div className="h-px bg-border my-5" />
+
+      {onReplayGuidedTour && (
+        <>
+          <div className="flex items-center justify-between gap-4 px-3.5 py-3 rounded-md bg-surface border border-border mb-2">
+            <div>
+              <div className="text-[13px] font-medium">新手指引</div>
+              <div className="text-[11px] text-fg-mute mt-0.5">从添加项目、开始新对话到模型设置，重新查看 7 步入门说明</div>
+            </div>
+            <button
+              type="button"
+              onClick={onReplayGuidedTour}
+              className="h-8 shrink-0 px-3 rounded-md bg-accent text-white text-[12px] font-semibold hover:opacity-90 transition"
+            >
+              重新查看新手指引
+            </button>
+          </div>
+          <div className="h-px bg-border my-5" />
+        </>
+      )}
 
       <div className="text-[14px] font-semibold mb-1">权限模式</div>
       <p className="text-[12px] text-fg-mute mb-3">

@@ -14,7 +14,12 @@ import * as Diff2Html from 'diff2html';
 import { buildChangeRow, buildSummaryLabel } from '../lib/gitChanges.js';
 import { changesCache } from '../lib/gitChangesCache.js';
 import { GIT_STATE_CHANGED_EVENT } from '../lib/gitSessionPill.js';
+import {
+  DESKTOP_CONTEXT_ACTION_EVENT,
+  DESKTOP_CONTEXT_ACTIONS,
+} from '../lib/desktopContextMenu.js';
 import { normalizeTreePath } from '../lib/fileTreeChangeStatus.js';
+import { copyDiffText } from './ChangeReview.jsx';
 import { clsx } from '../lib/format.js';
 import { VsIcon } from './Icon.jsx';
 
@@ -60,6 +65,8 @@ function GitChangeFileRow({ row, open, selected, onToggle }) {
     <button
       type="button"
       data-change-compact-file={row.path}
+      data-desktop-review-kind="file"
+      data-desktop-review-file={row.path || undefined}
       className={clsx('ace-change-file-row', selected && 'is-selected')}
       onClick={onToggle}
       title={row.path}
@@ -225,6 +232,55 @@ export function GitChangeDetails({
     if (patches[path] === undefined) loadPatch(path);
   }, [loadPatch, onSelectFile, patches]);
 
+  // 右键菜单动作:与会话级 ChangeReviewPanel 的处理器同构(复制此文件 diff /
+  // 复制全部 diff / 展开·折叠全部 diff),只是数据源换成 git 懒加载 patch —— 缓存
+  // 优先,未命中即按需拉取。COPY_RELATIVE_PATH / PREVIEW_FILE / LOCATE_IN_FILE_TREE
+  // 走通用 runAction 与 SidePanel,这里不重复;菜单项本身由共享的 desktopContextMenu
+  // 依 data-desktop-review-* 属性构建(DRY:git 与非 git 复用同一套菜单)。
+  useEffect(() => {
+    const handler = (event) => {
+      const detail = event.detail || {};
+      const { action, target } = detail;
+      if (target?.type !== 'review') return;
+      const targetCwd = cwdRef.current;
+      const targetBase = baseRef.current;
+
+      // 单文件 patch:命中缓存直接用,否则拉一次并回填缓存(失败按空串处理,
+      // 复制时会提示"没有可复制的 diff")。
+      const patchFor = (path) => {
+        const cached = changesCache.getPatch(targetCwd, targetBase, path);
+        if (cached != null) return Promise.resolve(cached);
+        return api.gitFileDiff(targetCwd, path, targetBase)
+          .then((r) => {
+            const patch = r?.patch || '';
+            changesCache.putPatch(targetCwd, targetBase, path, patch);
+            return patch;
+          })
+          .catch(() => '');
+      };
+      const allPaths = () => (list?.files || []).map((f) => f.path).filter(Boolean);
+
+      if (action === DESKTOP_CONTEXT_ACTIONS.COPY_FILE_DIFF) {
+        detail.handled = true;
+        patchFor(target.file).then((text) => copyDiffText(text, '已复制文件 diff'));
+      } else if (action === DESKTOP_CONTEXT_ACTIONS.COPY_ALL_DIFFS) {
+        detail.handled = true;
+        Promise.all(allPaths().map(patchFor))
+          .then((texts) => copyDiffText(texts.filter(Boolean).join('\n\n'), '已复制全部 diff'));
+      } else if (action === DESKTOP_CONTEXT_ACTIONS.EXPAND_ALL_DIFFS) {
+        detail.handled = true;
+        const paths = allPaths();
+        setOpenFiles(new Set(paths));
+        paths.forEach((p) => { if (patches[p] === undefined) loadPatch(p); });
+      } else if (action === DESKTOP_CONTEXT_ACTIONS.COLLAPSE_ALL_DIFFS) {
+        detail.handled = true;
+        setOpenFiles(new Set());
+      }
+    };
+    window.addEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
+    return () => window.removeEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
+  }, [api, list, patches, loadPatch]);
+
   // 从 SidePanel 导航列表点文件(expandedFile + revision 变)→ 展开 + 滚动到位。
   useEffect(() => {
     const file = normalizeTreePath(expandedFile);
@@ -259,7 +315,7 @@ export function GitChangeDetails({
 
   return (
     <div className="ace-review-panel" data-change-region="preview-panel" ref={panelRef}>
-      <div className="ace-review-summary">
+      <div className="ace-review-summary" data-desktop-review-kind="summary">
         <div className="ace-review-title min-w-0">
           <VsIcon name="editWindow" size={15} />
           <span>变更</span>

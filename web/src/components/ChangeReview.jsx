@@ -35,7 +35,7 @@ function matchingGroupFile(groups, file) {
   return group?.file || '';
 }
 
-async function copyDiffText(text, okText) {
+export async function copyDiffText(text, okText) {
   if (!text) {
     toast({ kind: 'info', text: '没有可复制的 diff' });
     return;

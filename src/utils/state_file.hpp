@@ -19,6 +19,11 @@ namespace acecode {
 // 都返回 false。永不抛异常。
 bool read_state_flag(const std::string& key);
 
+// Checked variant for callers that must report persistence failure (for
+// example, an HTTP endpoint). The read-modify-write sequence is serialized
+// with all other state_file operations in this process.
+bool try_write_state_flag(const std::string& key, bool value);
+
 // 测试专用:覆盖 state.json 的解析路径。传空串清除覆盖,回到从
 // resolve_data_dir(get_run_mode()) 计算的默认。生产代码不应调用。
 void set_state_file_path_for_test(const std::string& path);

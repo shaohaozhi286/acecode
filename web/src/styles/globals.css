@@ -3010,6 +3010,40 @@ body {
   opacity: .55;
 }
 .ace-console-tab-close:hover { opacity: 1; background: var(--ace-accent-soft); }
+
+/* Guided tour close control follows the same compact icon-button language as
+   SearchPalette and panel headers. Joyride uses height/width for the inner SVG. */
+.react-joyride__tooltip [data-action="close"] {
+  border-radius: 6px;
+  color: var(--ace-fg-mute);
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.react-joyride__tooltip [data-action="close"] svg {
+  display: none;
+}
+
+.react-joyride__tooltip [data-action="close"]::before {
+  background: currentColor;
+  content: "";
+  display: block;
+  height: 14px;
+  -webkit-mask: url("/vs-icons/Close.svg") center / contain no-repeat;
+  mask: url("/vs-icons/Close.svg") center / contain no-repeat;
+  width: 14px;
+}
+
+.react-joyride__tooltip [data-action="close"]:hover {
+  background: var(--ace-surface-hi);
+  color: var(--ace-fg);
+}
+
+.react-joyride__tooltip [data-action="close"]:focus-visible {
+  background: var(--ace-surface-hi);
+  color: var(--ace-fg);
+  outline: 2px solid rgba(var(--ace-accent-rgb), 0.28);
+  outline-offset: 1px;
+}
 .ace-console-iconbtn {
   display: inline-flex;
   align-items: center;
@@ -3110,4 +3144,3 @@ body {
   accent-color: var(--ace-accent);
   cursor: inherit;
 }
-
