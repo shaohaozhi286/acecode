@@ -16,6 +16,7 @@ import { Message } from './Message.jsx';
 import { ToolBlock } from './ToolBlock.jsx';
 import { InputBar } from './InputBar.jsx';
 import { QueueCardList } from './QueueCardList.jsx';
+import { SideQuestionCard } from './SideQuestionCard.jsx';
 import { GitSessionPill } from './GitSessionPill.jsx';
 import { LspIndicator } from './LspIndicator.jsx';
 import { QuestionPicker } from './QuestionPicker.jsx';
@@ -37,11 +38,13 @@ import {
 } from '../lib/sessionChanges.js';
 import { stableBySignature } from '../lib/changeReviewStability.js';
 import {
+  beginQueuedGuidance,
   buildQueuedMessageItems,
   cancelQueuedInput,
   completeQueuedInputForMessage,
   createChatInputQueueState,
   enqueueQueuedInput,
+  finishQueuedGuidance,
   hasSendingQueuedInput,
   markQueuedInputFailed,
   markQueuedInputSending,
@@ -664,6 +667,9 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   const selectionPreviewFingerprintRef = useRef('');
   const [queueState, setQueueState] = useState(() => createChatInputQueueState());
   const queueStateRef = useRef(queueState);
+  const [sideQuestion, setSideQuestion] = useState(null);
+  const sideQuestionInFlightRef = useRef(false);
+  const sideQuestionEpochRef = useRef(0);
   // GitSessionPill 的待生效意图(worktree 勾选 + 基线分支)。ref 不入 dep:
   // 只在发送首条消息那一刻读取,不驱动渲染。
   const gitPillIntentRef = useRef({ worktreeChecked: false, selectedBase: '' });
@@ -756,6 +762,10 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
   useEffect(() => { sidRef.current = sid; }, [sid]);
   useEffect(() => { draftSessionKeyRef.current = draftSessionKey; }, [draftSessionKey]);
   useEffect(() => { queueStateRef.current = queueState; }, [queueState]);
+  useEffect(() => {
+    sideQuestionEpochRef.current += 1;
+    setSideQuestion(null);
+  }, [sid]);
 
   const handleComposerChange = useCallback((next) => {
     draftEditVersionRef.current += 1;
@@ -1608,6 +1618,64 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     updateQueueState((prev) => retryQueuedInput(prev, queuedId));
   }, [updateQueueState]);
 
+  const runSideQuestion = useCallback((rawQuestion, { queuedId = '', recordHistory = false } = {}) => {
+    const question = String(rawQuestion || '').trim();
+    const targetSid = sidRef.current;
+    if (!targetSid) {
+      toast({ kind: 'err', text: '请先在已有会话中使用 /btw' });
+      return null;
+    }
+    if (!question) {
+      toast({ kind: 'err', text: '用法：/btw <问题>' });
+      return null;
+    }
+    if (sideQuestionInFlightRef.current) {
+      toast({ kind: 'err', text: '已有引导问题正在回答，请稍候' });
+      return null;
+    }
+
+    sideQuestionInFlightRef.current = true;
+    const requestEpoch = sideQuestionEpochRef.current;
+    if (queuedId) {
+      updateQueueState((prev) => beginQueuedGuidance(prev, queuedId));
+    }
+    if (recordHistory) recordInputHistory(`/btw ${question}`);
+    setSideQuestion({ status: 'loading', question, answer: '', error: '' });
+
+    return api.askSideQuestion(targetSid, question)
+      .then((result) => {
+        if (queuedId) {
+          updateQueueState((prev) => finishQueuedGuidance(prev, queuedId, { succeeded: true }));
+        }
+        if (sidRef.current === targetSid && sideQuestionEpochRef.current === requestEpoch) {
+          setSideQuestion({
+            status: 'success',
+            question: String(result?.question || question),
+            answer: String(result?.answer || ''),
+            error: '',
+          });
+        }
+        return true;
+      })
+      .catch((e) => {
+        if (queuedId) {
+          updateQueueState((prev) => finishQueuedGuidance(prev, queuedId, { succeeded: false }));
+        }
+        const message = e?.message || '引导请求失败';
+        if (sidRef.current === targetSid && sideQuestionEpochRef.current === requestEpoch) {
+          setSideQuestion({ status: 'error', question, answer: '', error: message });
+        }
+        return false;
+      })
+      .finally(() => {
+        sideQuestionInFlightRef.current = false;
+      });
+  }, [api, recordInputHistory, updateQueueState]);
+
+  const guideQueued = useCallback((queuedId, content) => {
+    runSideQuestion(content, { queuedId });
+  }, [runSideQuestion]);
+
   const sendInputOrBuiltin = useCallback((targetSid, payload) => {
     const text = payloadText(payload);
     const hasExtras = payloadHasExtras(payload);
@@ -1627,6 +1695,19 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     const hasExtras = payloadHasExtras(payload);
     if (!payload.text.trim() && !hasExtras) return;
     const route = inputRouteForText(payload.text);
+    if (route.kind === 'side_question') {
+      if (hasExtras) {
+        toast({ kind: 'err', text: '/btw 暂不支持附件或上下文，请仅提交文字问题' });
+        return;
+      }
+      const started = runSideQuestion(route.question, { recordHistory: true });
+      if (started) {
+        clearCurrentSessionDraft();
+        clearComposerExtras();
+        restoreChatInputFocusSoon(false);
+      }
+      return;
+    }
     const isBuiltin = !hasExtras && route.kind === 'builtin';
     if (!isBuiltin || hasExtras) {
       setTailFollowFromAction({ type: 'new_turn' });
@@ -1732,7 +1813,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         applyEvent({ type: 'busy_changed', payload: { busy: false } }, { emitEffects: false });
       })
       .finally(() => setComposerSubmitting(false));
-  }, [sid, busy, api, homeSubmitting, recordInputHistory, enqueueInput, applyEvent, setTranscriptTitle, sendInputOrBuiltin, composerSubmitting, clearCurrentSessionDraft, composerAttachments, composerContexts, clearComposerExtras, createHomeComposerSession, restoreChatInputFocusSoon, setTailFollowFromAction]);
+  }, [sid, busy, api, homeSubmitting, recordInputHistory, enqueueInput, applyEvent, setTranscriptTitle, sendInputOrBuiltin, composerSubmitting, clearCurrentSessionDraft, composerAttachments, composerContexts, clearComposerExtras, createHomeComposerSession, restoreChatInputFocusSoon, setTailFollowFromAction, runSideQuestion]);
 
   const drainQueuedInput = useCallback(() => {
     const targetSid = sidRef.current;
@@ -3019,10 +3100,16 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
         />
       )}
 
+      <SideQuestionCard
+        state={sideQuestion}
+        onDismiss={() => setSideQuestion(null)}
+      />
       <QueueCardList
         items={visibleQueuedItems}
         onCancel={cancelQueued}
         onRetry={retryQueued}
+        onGuide={guideQueued}
+        guideDisabled={sideQuestion?.status === 'loading'}
       />
       <InputBar
         ref={inputRef}

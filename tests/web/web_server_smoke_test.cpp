@@ -2488,6 +2488,38 @@ TEST(WebServerHttp, PostBuiltinCommandRejectsUnsupportedCommand) {
     EXPECT_EQ(body["command"], "model");
 }
 
+TEST(WebServerHttp, PostSideQuestionValidatesSessionQuestionAndContext) {
+    WebServerFixture fx;
+
+    auto invalid = cpr::Post(
+        cpr::Url{fx.url("/api/sessions/missing-session/side-question")},
+        cpr::Header{{"Content-Type", "application/json"}},
+        cpr::Body{R"({"question":42})"});
+    ASSERT_EQ(invalid.status_code, 400) << invalid.text;
+    EXPECT_EQ(json::parse(invalid.text)["error"], "INVALID_SIDE_QUESTION");
+
+    auto missing = cpr::Post(
+        cpr::Url{fx.url("/api/sessions/missing-session/side-question")},
+        cpr::Header{{"Content-Type", "application/json"}},
+        cpr::Body{R"({"question":"why?"})"});
+    ASSERT_EQ(missing.status_code, 404) << missing.text;
+    EXPECT_EQ(json::parse(missing.text)["error"], "UNKNOWN_SESSION");
+
+    auto create = cpr::Post(cpr::Url{fx.url("/api/sessions")},
+                            cpr::Header{{"Content-Type", "application/json"}},
+                            cpr::Body{R"({})"});
+    ASSERT_EQ(create.status_code, 201) << create.text;
+    auto sid = json::parse(create.text)["session_id"].get<std::string>();
+
+    auto not_ready = cpr::Post(
+        cpr::Url{fx.url("/api/sessions/" + sid + "/side-question")},
+        cpr::Header{{"Content-Type", "application/json"}},
+        cpr::Body{R"({"question":"why?"})"});
+    ASSERT_EQ(not_ready.status_code, 409) << not_ready.text;
+    EXPECT_EQ(json::parse(not_ready.text)["error"],
+              "SIDE_QUESTION_CONTEXT_NOT_READY");
+}
+
 // 场景: inactive 磁盘历史不在 registry 内存里时,GET messages 也应能返回
 // ChatMessage 历史,让 Web 点击历史会话前可预览/补齐。
 TEST(WebServerHttp, GetMessagesForInactiveDiskSessionReturnsHistory) {

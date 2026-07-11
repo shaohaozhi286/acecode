@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import {
   QUEUED_INPUT_STATE,
+  beginQueuedGuidance,
   buildQueuedMessageItems,
   cancelQueuedInput,
   completeQueuedInputForMessage,
   createChatInputQueueState,
   enqueueQueuedInput,
+  finishQueuedGuidance,
   markQueuedInputFailed,
   markQueuedInputSending,
   nextQueuedInput,
@@ -49,6 +51,26 @@ run('nextQueuedInput 保持 FIFO 且发送中时不取下一条', () => {
 
   state = markQueuedInputSending(state, first.queued.id, { now: 200 });
   assert.equal(nextQueuedInput(state, 's1'), null);
+});
+
+run('引导中项目暂停 FIFO，成功取消，失败恢复原状态', () => {
+  let state = createChatInputQueueState();
+  state = enqueueQueuedInput(state, { sessionId: 's1', text: 'side question', now: 100 });
+  state = enqueueQueuedInput(state, { sessionId: 's1', text: 'later question', now: 101 });
+  const id = nextQueuedInput(state, 's1').queued.id;
+
+  state = beginQueuedGuidance(state, id);
+  assert.equal(queuedInputsForSession(state, 's1')[0].queued.state, QUEUED_INPUT_STATE.GUIDING);
+  assert.equal(nextQueuedInput(state, 's1'), null);
+
+  state = finishQueuedGuidance(state, id, { succeeded: false });
+  assert.equal(queuedInputsForSession(state, 's1')[0].queued.state, QUEUED_INPUT_STATE.QUEUED);
+  assert.equal(nextQueuedInput(state, 's1').queued.id, id);
+
+  state = beginQueuedGuidance(state, id);
+  state = finishQueuedGuidance(state, id, { succeeded: true });
+  assert.equal(queuedInputsForSession(state, 's1').length, 1);
+  assert.equal(nextQueuedInput(state, 's1').content, 'later question');
 });
 
 run('附件 payload 可以在空文本时排队并保留发送体', () => {

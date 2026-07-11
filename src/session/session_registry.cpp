@@ -59,6 +59,32 @@ bool is_llm_role(const std::string& role) {
            role == "system" || role == "tool";
 }
 
+std::string trim_copy(const std::string& value) {
+    std::size_t first = 0;
+    while (first < value.size() &&
+           std::isspace(static_cast<unsigned char>(value[first])) != 0) {
+        ++first;
+    }
+    std::size_t last = value.size();
+    while (last > first &&
+           std::isspace(static_cast<unsigned char>(value[last - 1])) != 0) {
+        --last;
+    }
+    return value.substr(first, last - first);
+}
+
+ChatMessage build_side_question_message(const std::string& question) {
+    ChatMessage message;
+    message.role = "user";
+    message.content =
+        "[SYSTEM NOTE] Answer the side question below using the conversation "
+        "context above. This is a separate, read-only, one-turn question. "
+        "Do not call tools, do not continue the main task, and do not claim "
+        "that you changed files or session state. Answer directly and "
+        "concisely.\n\nSide question:\n" + question;
+    return message;
+}
+
 bool is_transcript_only_message(const ChatMessage& msg) {
     return msg.metadata.is_object() &&
            msg.metadata.value("transcript_only", false);
@@ -1237,6 +1263,81 @@ SessionRegistry::model_state_from_meta(const SessionMeta& meta) const {
     auto state = state_from_profile(*deps_.config, profile);
     mark_deleted_if_model_name_missing(*deps_.config, state);
     return state;
+}
+
+SideQuestionResult SessionRegistry::ask_side_question(
+    const std::string& id, const std::string& raw_question) {
+    SideQuestionResult result;
+    result.question = trim_copy(raw_question);
+    if (result.question.empty() ||
+        result.question.size() > kMaxSideQuestionBytes) {
+        result.status = SideQuestionStatus::InvalidQuestion;
+        result.error = result.question.empty()
+            ? "question required"
+            : "question too long";
+        return result;
+    }
+
+    auto entry = acquire(id);
+    if (!entry || !entry->loop) {
+        result.status = SideQuestionStatus::UnknownSession;
+        result.error = "unknown session";
+        return result;
+    }
+
+    auto context = entry->loop->side_question_context_snapshot();
+    if (context.empty()) {
+        result.status = SideQuestionStatus::ContextNotReady;
+        result.error = "side-question context not ready";
+        return result;
+    }
+
+    std::shared_ptr<LlmProvider> provider;
+    if (entry->provider_slot) {
+        std::lock_guard<std::mutex> lk(entry->provider_slot->mu);
+        provider = entry->provider_slot->provider;
+    }
+    if (!provider) {
+        result.status = SideQuestionStatus::ProviderUnavailable;
+        result.error = "session provider unavailable";
+        return result;
+    }
+
+    context.push_back(build_side_question_message(result.question));
+    try {
+        ChatResponse response = provider->chat(context, {});
+        result.answer = trim_copy(response.content);
+        if (response.finish_reason == "error") {
+            result.status = SideQuestionStatus::Failed;
+            result.error = result.answer.empty()
+                ? "side-question provider call failed"
+                : result.answer;
+            result.answer.clear();
+            return result;
+        }
+        if (response.has_tool_calls()) {
+            result.status = SideQuestionStatus::Failed;
+            result.error = "side-question response requested tools";
+            result.answer.clear();
+            return result;
+        }
+        if (result.answer.empty()) {
+            result.status = SideQuestionStatus::Failed;
+            result.error = "side-question response was empty";
+            return result;
+        }
+    } catch (const std::exception& e) {
+        result.status = SideQuestionStatus::Failed;
+        result.error = e.what();
+        return result;
+    } catch (...) {
+        result.status = SideQuestionStatus::Failed;
+        result.error = "side-question provider call failed";
+        return result;
+    }
+
+    result.status = SideQuestionStatus::Ok;
+    return result;
 }
 
 void SessionRegistry::destroy(const std::string& id) {

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {
   builtinCommandRequestForText,
   inputRouteForText,
+  sideQuestionRequestForText,
   sessionCreateOptionsForText,
 } from './builtinCommandRouting.js';
 
@@ -46,6 +47,24 @@ run('skill slash input remains ordinary message route', () => {
   });
 });
 
+run('/btw routes immediately as a side question before builtin parsing', () => {
+  assert.deepEqual(sideQuestionRequestForText('  /BTW   explain this\nplease  '), {
+    question: 'explain this\nplease',
+    display_text: '/BTW   explain this\nplease',
+  });
+  assert.deepEqual(inputRouteForText('/btw why?'), {
+    kind: 'side_question',
+    question: 'why?',
+    display_text: '/btw why?',
+  });
+  assert.deepEqual(inputRouteForText('/btw'), {
+    kind: 'side_question',
+    question: '',
+    display_text: '/btw',
+  });
+  assert.equal(sideQuestionRequestForText('/btween no'), null);
+});
+
 run('unknown slash input remains ordinary message route', () => {
   assert.deepEqual(inputRouteForText('/foobar test'), {
     kind: 'message',
@@ -55,6 +74,9 @@ run('unknown slash input remains ordinary message route', () => {
 
 run('home builtin session creation disables auto start', () => {
   assert.deepEqual(sessionCreateOptionsForText('/init'), {
+    auto_start: false,
+  });
+  assert.deepEqual(sessionCreateOptionsForText('/btw quick question'), {
     auto_start: false,
   });
 });

@@ -14,8 +14,8 @@ import { clsx } from '../lib/format.js';
 import { buildQueueCardItem } from '../lib/queueCardItem.js';
 import { VsIcon } from './Icon.jsx';
 
-function QueueCard({ card, onCancel, onRetry }) {
-  const { queuedId, content, statusKind, statusLabel, dimmed, showRetry } = card;
+function QueueCard({ card, onCancel, onRetry, onGuide, guideDisabled }) {
+  const { queuedId, content, statusKind, statusLabel, dimmed, showRetry, canGuide } = card;
   return (
     <div
       role="listitem"
@@ -57,6 +57,19 @@ function QueueCard({ card, onCancel, onRetry }) {
           重试
         </button>
       )}
+      {canGuide && (
+        <button
+          type="button"
+          aria-label="将排队消息作为引导问题"
+          onClick={() => onGuide?.(queuedId, content)}
+          disabled={guideDisabled}
+          className="shrink-0 h-6 px-2 rounded-full border border-accent/40 flex items-center gap-1 text-[11px] text-accent hover:bg-accent-bg transition disabled:opacity-50 disabled:cursor-not-allowed"
+          title="不打断当前任务，立即旁路提问"
+        >
+          <span>引导</span>
+          <VsIcon name="glyphUp" size={10} />
+        </button>
+      )}
       <button
         type="button"
         aria-label="取消排队"
@@ -70,7 +83,7 @@ function QueueCard({ card, onCancel, onRetry }) {
   );
 }
 
-export function QueueCardList({ items, onCancel, onRetry }) {
+export function QueueCardList({ items, onCancel, onRetry, onGuide, guideDisabled = false }) {
   const list = Array.isArray(items) ? items : [];
   if (list.length === 0) return null;
   const cards = list.map(buildQueueCardItem).filter((c) => c.queuedId);
@@ -87,6 +100,8 @@ export function QueueCardList({ items, onCancel, onRetry }) {
           card={card}
           onCancel={onCancel}
           onRetry={onRetry}
+          onGuide={onGuide}
+          guideDisabled={guideDisabled}
         />
       ))}
     </div>

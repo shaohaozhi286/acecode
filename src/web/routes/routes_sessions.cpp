@@ -83,6 +83,10 @@ void WebServer::Impl::register_sessions() {
         ([this](const crow::request& req, const std::string&) {
             return cors_preflight(req);
         });
+        CROW_ROUTE(app, "/api/sessions/<string>/side-question").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req, const std::string&) {
+            return cors_preflight(req);
+        });
         CROW_ROUTE(app, "/api/sessions/<string>/permissions").methods(crow::HTTPMethod::Options)
         ([this](const crow::request& req, const std::string&) {
             return cors_preflight(req);
@@ -931,6 +935,83 @@ void WebServer::Impl::register_sessions() {
 
             crow::response r(202);
             r.body = json{{"queued", true}, {"command", cmd.name}}.dump();
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        });
+
+        // POST /api/sessions/:id/side-question: `/btw` one-turn side question.
+        // The registry reads AgentLoop's detached provider-facing snapshot and
+        // calls the current model without tools. No transcript/event/busy state
+        // is mutated by this request.
+        CROW_ROUTE(app, "/api/sessions/<string>/side-question").methods(crow::HTTPMethod::POST)
+        ([this](const crow::request& req, const std::string& id) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.session_registry) {
+                crow::response r(503);
+                r.body = json{{"error", "SESSION_REGISTRY_UNAVAILABLE"},
+                              {"message", "session registry unavailable"}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            std::string question;
+            try {
+                auto body = json::parse(req.body);
+                if (!body.is_object() || !body.contains("question") ||
+                    !body["question"].is_string()) {
+                    crow::response r(400);
+                    r.body = json{{"error", "INVALID_SIDE_QUESTION"},
+                                  {"message", "question must be a string"}}.dump();
+                    r.add_header("Content-Type", "application/json");
+                    return with_cors(req, std::move(r));
+                }
+                question = body["question"].get<std::string>();
+            } catch (const std::exception& e) {
+                crow::response r(400);
+                r.body = json{{"error", "INVALID_SIDE_QUESTION"},
+                              {"message", std::string("bad json: ") + e.what()}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            auto result = deps.session_registry->ask_side_question(id, question);
+            int status = 200;
+            std::string code;
+            switch (result.status) {
+            case SideQuestionStatus::Ok:
+                break;
+            case SideQuestionStatus::InvalidQuestion:
+                status = 400;
+                code = "INVALID_SIDE_QUESTION";
+                break;
+            case SideQuestionStatus::UnknownSession:
+                status = 404;
+                code = "UNKNOWN_SESSION";
+                break;
+            case SideQuestionStatus::ContextNotReady:
+                status = 409;
+                code = "SIDE_QUESTION_CONTEXT_NOT_READY";
+                break;
+            case SideQuestionStatus::ProviderUnavailable:
+                status = 503;
+                code = "SIDE_QUESTION_PROVIDER_UNAVAILABLE";
+                break;
+            case SideQuestionStatus::Failed:
+                status = 502;
+                code = "SIDE_QUESTION_FAILED";
+                break;
+            }
+
+            crow::response r(status);
+            if (result.status == SideQuestionStatus::Ok) {
+                r.body = json{{"question", result.question},
+                              {"answer", result.answer}}.dump();
+            } else {
+                r.body = json{{"error", code},
+                              {"message", result.error.empty()
+                                  ? "side question failed"
+                                  : result.error}}.dump();
+            }
             r.add_header("Content-Type", "application/json");
             return with_cors(req, std::move(r));
         });

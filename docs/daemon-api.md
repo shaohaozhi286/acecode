@@ -210,6 +210,7 @@ when known.
 | POST | `/api/sessions/:id/attachments` | upload session attachment |
 | GET | `/api/sessions/:id/attachments/:attachment_id/blob` | download attachment bytes |
 | POST | `/api/sessions/:id/commands` | run daemon builtin slash command |
+| POST | `/api/sessions/:id/side-question` | run isolated one-turn `/btw` question |
 | GET | `/api/sessions/:id/permissions` | read session permission mode |
 | PUT | `/api/sessions/:id/permissions` | set session permission mode |
 | GET | `/api/sessions/:id/model` | read session model state |
@@ -584,6 +585,37 @@ passed as browser context content parts.
 If the text is a skill slash command for the session workspace, the daemon
 expands it to the skill invocation prompt and records `metadata.display_text`.
 Returns `202 {"queued":true}`.
+
+### `POST /api/sessions/:id/side-question`
+
+Runs one isolated `/btw` side question against the active session's latest
+thread-safe provider-facing context snapshot:
+
+```json
+{"question":"Why did the current approach choose a mutex?"}
+```
+
+The daemon makes exactly one call to the session's current model with an empty
+tool list. It does not append the question or answer to the main agent history,
+JSONL transcript, hooks, goals, event stream, or busy lifecycle. Success:
+
+```json
+{
+  "question": "Why did the current approach choose a mutex?",
+  "answer": "It protects the snapshot while the main worker publishes it."
+}
+```
+
+Errors use structured codes:
+
+- `400 INVALID_SIDE_QUESTION`: `question` is missing, empty, not a string, or
+  exceeds 16,000 UTF-8 bytes.
+- `404 UNKNOWN_SESSION`: the target session is not active.
+- `409 SIDE_QUESTION_CONTEXT_NOT_READY`: the main loop has not yet published a
+  safe provider-facing context snapshot.
+- `503 SIDE_QUESTION_PROVIDER_UNAVAILABLE`: the session has no current model.
+- `502 SIDE_QUESTION_FAILED`: the provider call failed, returned no answer, or
+  attempted a tool call.
 
 Optional `worktree` field for the **first** message of a session (openspec
 `add-webui-git-session-pill`):

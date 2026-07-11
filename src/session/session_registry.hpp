@@ -102,6 +102,24 @@ struct SessionRegistryDeps {
     std::string                      no_workspace_cache_root;
 };
 
+enum class SideQuestionStatus {
+    Ok,
+    InvalidQuestion,
+    UnknownSession,
+    ContextNotReady,
+    ProviderUnavailable,
+    Failed,
+};
+
+struct SideQuestionResult {
+    SideQuestionStatus status = SideQuestionStatus::Failed;
+    std::string question;
+    std::string answer;
+    std::string error;
+};
+
+constexpr std::size_t kMaxSideQuestionBytes = 16000;
+
 class SessionRegistry {
 public:
     explicit SessionRegistry(SessionRegistryDeps deps);
@@ -160,6 +178,11 @@ public:
     BuiltinCommandResult execute_builtin_command(
         const std::string& id,
         const BuiltinCommandRequest& request);
+
+    // Run a one-turn, tool-free question against the latest provider-facing
+    // context snapshot. This never mutates AgentLoop/SessionManager state.
+    SideQuestionResult ask_side_question(const std::string& id,
+                                         const std::string& question);
 
     // Resolve persisted metadata to displayable model state without activating
     // the session. Used by web endpoints for inactive disk sessions.

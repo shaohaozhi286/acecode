@@ -2,6 +2,7 @@ export const QUEUED_INPUT_STATE = Object.freeze({
   QUEUED: 'queued',
   SENDING: 'sending',
   FAILED: 'failed',
+  GUIDING: 'guiding',
   COMPLETED: 'completed',
   CANCELLED: 'cancelled',
 });
@@ -114,6 +115,36 @@ export function cancelQueuedInput(state, id) {
   return setQueuedInputState(state, id, QUEUED_INPUT_STATE.CANCELLED);
 }
 
+export function beginQueuedGuidance(state, id) {
+  return updateQueuedInput(state, id, (item) => {
+    const currentState = item?.queued?.state;
+    if (currentState !== QUEUED_INPUT_STATE.QUEUED &&
+        currentState !== QUEUED_INPUT_STATE.FAILED) return item;
+    return {
+      ...item,
+      queued: {
+        ...item.queued,
+        state: QUEUED_INPUT_STATE.GUIDING,
+        guidancePreviousState: currentState,
+        updatedAt: Date.now(),
+      },
+    };
+  });
+}
+
+export function finishQueuedGuidance(state, id, { succeeded = false } = {}) {
+  if (succeeded) return cancelQueuedInput(state, id);
+  return updateQueuedInput(state, id, (item) => {
+    if (item?.queued?.state !== QUEUED_INPUT_STATE.GUIDING) return item;
+    const previous = item.queued.guidancePreviousState === QUEUED_INPUT_STATE.FAILED
+      ? QUEUED_INPUT_STATE.FAILED
+      : QUEUED_INPUT_STATE.QUEUED;
+    const queued = { ...item.queued, state: previous, updatedAt: Date.now() };
+    delete queued.guidancePreviousState;
+    return { ...item, queued };
+  });
+}
+
 export function markQueuedInputSending(state, id, { now = Date.now() } = {}) {
   return setQueuedInputState(state, id, QUEUED_INPUT_STATE.SENDING, {
     sentAt: now,
@@ -155,9 +186,12 @@ export function hasSendingQueuedInput(state, sessionId) {
 }
 
 export function nextQueuedInput(state, sessionId) {
-  if (hasSendingQueuedInput(state, sessionId)) return null;
-  return queuedInputsForSession(state, sessionId, { includeDone: true })
-    .find((item) => item.queued?.state === QUEUED_INPUT_STATE.QUEUED) || null;
+  const items = queuedInputsForSession(state, sessionId, { includeDone: true });
+  if (items.some((item) => (
+    item.queued?.state === QUEUED_INPUT_STATE.SENDING ||
+    item.queued?.state === QUEUED_INPUT_STATE.GUIDING
+  ))) return null;
+  return items.find((item) => item.queued?.state === QUEUED_INPUT_STATE.QUEUED) || null;
 }
 
 export function completeQueuedInputForMessage(state, { sessionId, content, ts } = {}) {

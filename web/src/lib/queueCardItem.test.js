@@ -31,7 +31,13 @@ function makeItem(state, content = 'hi', error = '') {
     id: `queued-s-${state}`,
     role: 'user',
     content,
-    queued: { id: `queued-s-${state}`, sessionId: 's', state, error },
+    queued: {
+      id: `queued-s-${state}`,
+      sessionId: 's',
+      state,
+      error,
+      payload: { text: content, attachments: [], contexts: [] },
+    },
   };
 }
 
@@ -43,6 +49,7 @@ run('buildQueueCardItem QUEUED 默认排队中,无 retry', () => {
   assert.equal(card.statusLabel, '排队中');
   assert.equal(card.dimmed, false);
   assert.equal(card.showRetry, false);
+  assert.equal(card.canGuide, true);
 });
 
 run('buildQueueCardItem SENDING 是 dimmed 的发送中状态', () => {
@@ -51,6 +58,7 @@ run('buildQueueCardItem SENDING 是 dimmed 的发送中状态', () => {
   assert.equal(card.statusLabel, '发送中…');
   assert.equal(card.dimmed, true);
   assert.equal(card.showRetry, false);
+  assert.equal(card.canGuide, false);
 });
 
 run('buildQueueCardItem FAILED 显示 error 文案并允许重试', () => {
@@ -61,12 +69,31 @@ run('buildQueueCardItem FAILED 显示 error 文案并允许重试', () => {
   assert.equal(card.statusLabel, 'network blew up');
   assert.equal(card.dimmed, false);
   assert.equal(card.showRetry, true);
+  assert.equal(card.canGuide, true);
 });
 
 run('buildQueueCardItem FAILED 缺 error 时回退默认文案', () => {
   const card = buildQueueCardItem(makeItem(QUEUED_INPUT_STATE.FAILED, 'hi', ''));
   assert.equal(card.statusLabel, '发送失败');
   assert.equal(card.showRetry, true);
+});
+
+run('buildQueueCardItem GUIDING 显示引导中且不重复显示按钮', () => {
+  const card = buildQueueCardItem(makeItem(QUEUED_INPUT_STATE.GUIDING, 'hi'));
+  assert.equal(card.statusKind, 'guiding');
+  assert.equal(card.statusLabel, '引导中…');
+  assert.equal(card.dimmed, true);
+  assert.equal(card.canGuide, false);
+});
+
+run('附件或上下文排队项不显示引导按钮', () => {
+  const attachmentItem = makeItem(QUEUED_INPUT_STATE.QUEUED, 'with file');
+  attachmentItem.queued.payload.attachments = [{ id: 'att-1' }];
+  assert.equal(buildQueueCardItem(attachmentItem).canGuide, false);
+
+  const contextItem = makeItem(QUEUED_INPUT_STATE.FAILED, 'with context');
+  contextItem.queued.payload.contexts = [{ type: 'selection' }];
+  assert.equal(buildQueueCardItem(contextItem).canGuide, false);
 });
 
 run('buildQueueCardItem 缺 queued 字段时不崩溃,默认按 QUEUED 渲染', () => {

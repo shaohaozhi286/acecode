@@ -180,6 +180,12 @@ public:
     const std::vector<ChatMessage>& messages() const { return messages_; }
     std::vector<ChatMessage>& messages_mut() { return messages_; }
 
+    // Copy of the latest complete provider-facing prompt built by the worker.
+    // `/btw` callers use this instead of reading messages_ from an HTTP thread,
+    // which would race the active turn. The snapshot is intentionally detached
+    // from transcript/session persistence.
+    std::vector<ChatMessage> side_question_context_snapshot() const;
+
     const std::string& cwd() const { return cwd_; }
 
     // 切换会话工作目录(enter_worktree / exit_worktree / worktree resume 恢复)。
@@ -337,6 +343,8 @@ private:
         nlohmann::json prompt_diag; // simplified: store as raw json
     };
     ApiRequestBundle build_api_request_messages();
+    void publish_side_question_context(
+        const std::vector<ChatMessage>& messages_with_system);
 
     // Phase 3: Stream provider response and accumulate.
     struct ProviderCallResult {
@@ -408,6 +416,8 @@ private:
     ToolExecutor& tools_;
     AgentCallbacks callbacks_;
     std::vector<ChatMessage> messages_;
+    mutable std::mutex side_question_context_mu_;
+    std::vector<ChatMessage> side_question_context_;
     std::atomic<bool> abort_requested_{false};
     std::atomic<bool> busy_{false};
     std::string cwd_;
