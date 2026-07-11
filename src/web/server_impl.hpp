@@ -188,6 +188,11 @@ struct WebServer::Impl {
     // shared mutable object, so every web-side read/write must go through this.
     mutable std::mutex app_config_mu;
 
+    // 从磁盘重读 saved_models 合并进内存 —— 连接器钩子(外部登录器)会直接
+    // 改写 config.json;不重读的话,下一次任何 save_config 都会把新写入的
+    // api_key 抹掉。  (defined in server_helpers.cpp)
+    void refresh_saved_models_from_disk();
+
     mutable std::mutex attention_mu;
     mutable std::unordered_set<std::string> loaded_attention_workspaces;
     mutable std::unordered_map<std::string, std::string> attention_workspace_cwds;

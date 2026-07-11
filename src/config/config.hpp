@@ -466,6 +466,12 @@ bool parse_connectors_json(const nlohmann::json& value,
                            std::vector<ConnectorConfig>& out,
                            std::string* error = nullptr);
 
+// 返回「enabled 从 false→true(或新出现)且配置了 on_enable 钩子」的连接器。
+// PUT /api/config/connectors 用它决定要异步拉起哪些 on_enable 进程。
+std::vector<ConnectorConfig> newly_enabled_connectors(
+    const std::vector<ConnectorConfig>& before,
+    const std::vector<ConnectorConfig>& after);
+
 // Load config from ~/.acecode/config.json, with env var overrides.
 // Creates default config if missing.
 AppConfig load_config();

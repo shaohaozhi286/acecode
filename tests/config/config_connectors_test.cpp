@@ -186,3 +186,51 @@ TEST(ConfigConnectors, RejectsHookWithoutCommand) {
     EXPECT_FALSE(parse_connectors_json(j, connectors, &error));
     EXPECT_NE(error.find("on_enable"), std::string::npos);
 }
+
+TEST(ConfigConnectors, NewlyEnabledConnectorsDetectsOffToOnWithHook) {
+    ConnectorHookConfig hook;
+    hook.command = "helper.exe";
+
+    ConnectorConfig was_off;
+    was_off.id = "a";
+    was_off.name = "A";
+    was_off.enabled = false;
+    was_off.on_enable = hook;
+
+    ConnectorConfig stays_on = was_off;
+    stays_on.id = "b";
+    stays_on.name = "B";
+    stays_on.enabled = true;
+
+    ConnectorConfig no_hook;
+    no_hook.id = "c";
+    no_hook.name = "C";
+    no_hook.enabled = false;
+
+    std::vector<ConnectorConfig> before = {was_off, stays_on, no_hook};
+
+    auto now_on = was_off;
+    now_on.enabled = true;
+    auto still_on = stays_on;
+    auto hook_off_to_on_but_no_hook = no_hook;
+    hook_off_to_on_but_no_hook.enabled = true;
+    std::vector<ConnectorConfig> after = {now_on, still_on, hook_off_to_on_but_no_hook};
+
+    auto newly = newly_enabled_connectors(before, after);
+    ASSERT_EQ(newly.size(), 1u);
+    EXPECT_EQ(newly[0].id, "a");
+}
+
+TEST(ConfigConnectors, NewlyEnabledTreatsUnknownIdAsNewlyEnabled) {
+    ConnectorHookConfig hook;
+    hook.command = "helper.exe";
+    ConnectorConfig fresh;
+    fresh.id = "new";
+    fresh.name = "New";
+    fresh.enabled = true;
+    fresh.on_enable = hook;
+
+    auto newly = newly_enabled_connectors({}, {fresh});
+    ASSERT_EQ(newly.size(), 1u);
+    EXPECT_EQ(newly[0].id, "new");
+}

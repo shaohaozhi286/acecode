@@ -1,8 +1,11 @@
 // routes_misc.cpp — Route registrations extracted from server.cpp
 #include "../server_impl.hpp"
 #include "../../feedback/feedback_upload.hpp"
+#include "../../hooks/hook_runner.hpp"  // 连接器 on_enable 钩子异步拉起
 #include "../../tool/mcp_manager.hpp"  // /api/mcp/toggle 运行时 enable/disable
 #include "../../utils/state_file.hpp"
+
+#include <thread>
 
 namespace acecode::web {
 
@@ -1158,6 +1161,29 @@ void WebServer::Impl::register_ui_preferences() {
             } catch (const std::exception& e) {
                 deps.app_config->connectors = before;
                 return json_err(500, "PERSIST_FAILED", e.what());
+            }
+
+            // 关→开的连接器:异步拉起 on_enable 钩子(如外部登录器 --ensure)。
+            // 不阻塞本响应;退出 0 后重读磁盘 saved_models(钩子可能回写了 key)。
+            for (const auto& connector :
+                 newly_enabled_connectors(before, deps.app_config->connectors)) {
+                const ConnectorHookConfig hook = *connector.on_enable;
+                const std::string connector_id = connector.id;
+                std::thread([this, hook, connector_id]() {
+                    HookCommandSpec cmd;
+                    cmd.command = hook.command;
+                    cmd.args = hook.args;
+                    const HookProcessResult hook_result = run_hook_process(
+                        cmd, std::string{}, hook.timeout_ms, std::string{});
+                    LOG_INFO("connector on_enable finished; id=" + connector_id +
+                             " started=" + (hook_result.started ? "true" : "false") +
+                             " timed_out=" + (hook_result.timed_out ? "true" : "false") +
+                             " exit=" + std::to_string(hook_result.exit_code));
+                    if (hook_result.started && !hook_result.timed_out &&
+                        hook_result.exit_code == 0) {
+                        refresh_saved_models_from_disk();
+                    }
+                }).detach();
             }
 
             crow::response r(200);

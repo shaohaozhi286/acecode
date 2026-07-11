@@ -1611,6 +1611,22 @@ void WebServer::Impl::send_status_snapshot(crow::websocket::connection& conn,
 }
 
 // =====================================================================
+// Impl member helpers — Connector hooks
+// =====================================================================
+
+void WebServer::Impl::refresh_saved_models_from_disk() {
+    std::lock_guard<std::mutex> lock(app_config_mu);
+    if (!deps.app_config) return;
+    try {
+        AppConfig disk = load_config();
+        deps.app_config->saved_models = std::move(disk.saved_models);
+        LOG_INFO("saved_models refreshed from disk after connector hook");
+    } catch (const std::exception& e) {
+        LOG_WARN(std::string("saved_models refresh failed: ") + e.what());
+    }
+}
+
+// =====================================================================
 // Impl member helpers — Session options
 // =====================================================================
 
