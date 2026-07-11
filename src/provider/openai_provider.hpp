@@ -35,6 +35,10 @@ public:
     std::string model() const override { return model_; }
     void set_model(const std::string& m) override { model_ = m; }
 
+    std::string base_url() const override { return base_url_; }
+    std::string current_api_key() const override { return api_key_; }
+    void update_api_key(const std::string& api_key) override { api_key_ = api_key; }
+
     // 能力路由上下文(route-attachments-by-capability D5)。create_provider_from_entry
     // 在构造后调用:model_has_vision 来自 entry.capabilities,any_vision_model_available
     // 来自 has_any_runtime_vision_model(config)。daemon 切换模型时必须重新设置。

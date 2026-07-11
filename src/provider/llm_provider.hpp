@@ -118,6 +118,13 @@ struct ProviderErrorInfo {
     bool has_error() const { return kind != ProviderErrorKind::None; }
 };
 
+// 400/401 视为「认证形态」HTTP 错误 —— 连接器自动恢复(on_auth_error 钩子)
+// 的触发条件。400 覆盖把无效 key 报成 Bad Request 的网关。
+inline bool provider_error_is_auth_shaped(const ProviderErrorInfo& info) {
+    return info.kind == ProviderErrorKind::Http &&
+           (info.status_code == 400 || info.status_code == 401);
+}
+
 // Streaming event types for chat_stream()
 //   ReasoningDelta — chain-of-thought fragment from a reasoning-mode model.
 //   ToolCallDelta — safe metadata while a streaming provider is still
@@ -178,6 +185,12 @@ public:
 
     virtual std::string model() const = 0;
     virtual void set_model(const std::string& m) = 0;
+
+    // 认证热更新访问器(连接器 auth recovery 用,见 src/connectors/)。
+    // 默认实现表示该 provider 不支持 —— AgentLoop 会跳过自动恢复。
+    virtual std::string base_url() const { return {}; }
+    virtual std::string current_api_key() const { return {}; }
+    virtual void update_api_key(const std::string& /*api_key*/) {}
 
     virtual bool authenticate() { return true; }
 };
