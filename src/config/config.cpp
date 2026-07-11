@@ -91,21 +91,6 @@ std::string legacy_model_profile_name(const AppConfig& cfg) {
     return "";
 }
 
-} // namespace
-
-std::string normalize_upgrade_base_url(std::string raw) {
-    raw = trim_ascii_copy(raw);
-    if (!raw.empty() && raw.back() != '/') {
-        raw.push_back('/');
-    }
-    return raw;
-}
-
-bool is_valid_upgrade_base_url(const std::string& raw) {
-    const std::string url = normalize_upgrade_base_url(raw);
-    return url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0;
-}
-
 nlohmann::json connector_hook_to_json(const ConnectorHookConfig& hook) {
     return {
         {"command", hook.command},
@@ -149,6 +134,21 @@ bool parse_connector_hook(const nlohmann::json& item,
         if (timeout > 0) out.timeout_ms = timeout;
     }
     return true;
+}
+
+} // namespace
+
+std::string normalize_upgrade_base_url(std::string raw) {
+    raw = trim_ascii_copy(raw);
+    if (!raw.empty() && raw.back() != '/') {
+        raw.push_back('/');
+    }
+    return raw;
+}
+
+bool is_valid_upgrade_base_url(const std::string& raw) {
+    const std::string url = normalize_upgrade_base_url(raw);
+    return url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0;
 }
 
 nlohmann::json connectors_to_json(const std::vector<ConnectorConfig>& connectors) {
