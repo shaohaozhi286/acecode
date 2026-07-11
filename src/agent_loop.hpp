@@ -206,6 +206,14 @@ public:
 
     void set_session_manager(SessionManager* sm) { session_manager_ = sm; }
     void set_hook_manager(HookManager* hm) { hook_manager_ = hm; }
+
+    // 连接器认证自动恢复(见 src/connectors/connector_auth_recovery.hpp)。
+    // 入参 = 失败请求的 provider base_url 与请求时所用 api_key;
+    // 返回新 key 表示已恢复,AgentLoop 会更新 provider 并重试该请求一次;
+    // 空 function = 功能关闭(默认)。
+    using AuthRecoveryFn = std::function<std::optional<std::string>(
+        const std::string& base_url, const std::string& api_key_at_request)>;
+    void set_auth_recovery(AuthRecoveryFn fn) { auth_recovery_ = std::move(fn); }
     void dispatch_session_start_hook(const std::string& source);
     void restore_goal_runtime();
     void publish_current_goal_state();
@@ -365,6 +373,7 @@ private:
         const std::vector<ChatMessage>& messages_with_system,
         // Mutable state passed by reference from the orchestrator:
         int& context_rescue_attempts,
+        int& auth_recovery_attempts,
         int& last_context_rescue_tokens,
         bool& skip_auto_compact_once,
         int& total_iterations,
@@ -415,6 +424,7 @@ private:
     ProviderAccessor provider_accessor_;
     ToolExecutor& tools_;
     AgentCallbacks callbacks_;
+    AuthRecoveryFn auth_recovery_;
     std::vector<ChatMessage> messages_;
     mutable std::mutex side_question_context_mu_;
     std::vector<ChatMessage> side_question_context_;

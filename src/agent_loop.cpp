@@ -1635,6 +1635,7 @@ AgentLoop::HandleErrorResult AgentLoop::handle_provider_error(
     ProviderCallResult& result,
     const std::vector<ChatMessage>& messages_with_system,
     int& context_rescue_attempts,
+    int& auth_recovery_attempts,
     int& last_context_rescue_tokens,
     bool& skip_auto_compact_once,
     int& total_iterations,
@@ -1757,6 +1758,33 @@ AgentLoop::HandleErrorResult AgentLoop::handle_provider_error(
                  log_truncate(rescue.error, 500));
         stop_active_goal_after_turn_error(result.provider_error_info);
         return HandleErrorResult::Break;
+    }
+
+    // 连接器认证自动恢复:认证形态错误(HTTP 400/401)时拉起 on_auth_error 钩子
+    // (如外部登录器),拿到新 key 后重试一次。与 429/5xx 重试、context rescue
+    // 相互独立。见 src/connectors/connector_auth_recovery.hpp。
+    if (auth_recovery_ && auth_recovery_attempts == 0 &&
+        provider_error_is_auth_shaped(result.provider_error_info)) {
+        auto provider = provider_accessor_ ? provider_accessor_() : nullptr;
+        const std::string base_url = provider ? provider->base_url() : std::string{};
+        if (provider && !base_url.empty()) {
+            const std::string key_at_request = provider->current_api_key();
+            LOG_WARN("Auth-shaped provider error; attempting connector auth recovery"
+                     " status=" + std::to_string(result.provider_error_info.status_code));
+            auto fresh_key = auth_recovery_(base_url, key_at_request);
+            if (fresh_key && !fresh_key->empty() && *fresh_key != key_at_request) {
+                ++auth_recovery_attempts;
+                provider->update_api_key(*fresh_key);
+                if (total_iterations > 0) {
+                    --total_iterations;
+                }
+                LOG_WARN("Connector auth recovery succeeded; retrying request once");
+                emit_transcript_system_message(
+                    "[连接器] 认证已自动恢复,正在重试请求。");
+                return HandleErrorResult::Continue;
+            }
+            LOG_WARN("Connector auth recovery unavailable or failed; falling through");
+        }
     }
 
     nlohmann::json metadata;
@@ -2732,6 +2760,7 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
     const bool has_max_iterations = max_iter > 0;
     constexpr int kMaxContextRescueAttempts = 3;
     int context_rescue_attempts = 0;
+    int auth_recovery_attempts = 0;
     int last_context_rescue_tokens = std::numeric_limits<int>::max();
     bool skip_auto_compact_once = false;
     // 空回复兜底重试(fix-glm-empty-response-turn-end):HTTP 200 + [DONE] 正常
@@ -2893,7 +2922,8 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
         // Phase 4: Handle provider errors (context rescue, fatal errors)
         auto error_result = handle_provider_error(
             provider_result, bundle.messages_with_system,
-            context_rescue_attempts, last_context_rescue_tokens,
+            context_rescue_attempts, auth_recovery_attempts,
+            last_context_rescue_tokens,
             skip_auto_compact_once, total_iterations,
             turn_timing_status);
         reset_doom_guard_after_compact();
