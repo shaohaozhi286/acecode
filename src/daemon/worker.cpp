@@ -534,6 +534,8 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     });
 
     int rc = server.run();
+    // server 已停止:清空回调,防止残余会话线程在析构窗口内经回调触达已析构的 server。
+    auth_recovery.set_on_config_refreshed({});
     request_terminate(); // 唤醒 watcher(防 server 自然退出但信号还没来)
     if (watcher.joinable()) watcher.join();
 

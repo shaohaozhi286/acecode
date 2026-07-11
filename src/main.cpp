@@ -5155,8 +5155,15 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
     recovery_opts.load_disk_config = []() { return load_config(); };
     recovery_opts.on_config_refreshed = [&config]() {
         // TUI 持本地 AppConfig;钩子回写磁盘后合并回来,防止后续保存抹掉新 key。
-        AppConfig disk = load_config();
-        config.saved_models = std::move(disk.saved_models);
+        // config 归 UI 线程读写(惯例同下方 model-pool 监视器):本回调跑在
+        // agent 线程,磁盘读留在本线程,合并赋值 Post 到 UI 线程执行。screen
+        // 不活跃(启动前/退出后)时跳过合并,避免与关停期的读写竞争。
+        auto saved = load_config().saved_models;
+        auto* scr = g_active_screen.load(std::memory_order_acquire);
+        if (!scr) return;
+        scr->Post([&config, saved = std::move(saved)]() mutable {
+            config.saved_models = std::move(saved);
+        });
     };
     ConnectorAuthRecovery auth_recovery(std::move(recovery_opts));
 
