@@ -11,6 +11,11 @@ namespace acecode {
 
 static constexpr size_t MAX_GLOB_RESULTS = 500;
 
+// 用户点「停止」后工具必须尽快返回:大仓库 + 慢盘上的全量递归遍历可阻塞数十秒,
+// 期间 abort 只能干等(2026-07-11 日志复盘,同 grep_tool / McpManager::invoke)。
+static constexpr const char* ABORTED_MSG =
+    "[Aborted] Search abandoned because the user aborted the turn.";
+
 // Simple glob pattern matcher supporting *, **, and ?
 static bool glob_match(const std::string& pattern, const std::string& path) {
     // Split pattern and path into segments by '/' or '\'
@@ -120,6 +125,9 @@ static ToolResult execute_glob(const std::string& arguments_json, const ToolCont
              ec);
          it != std::filesystem::recursive_directory_iterator(); ++it)
     {
+        if (ctx.abort_flag && ctx.abort_flag->load()) {
+            return ToolResult{ABORTED_MSG, false};
+        }
         if (ec) { ec.clear(); continue; }
 
         if (it->is_directory()) {

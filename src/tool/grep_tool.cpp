@@ -14,6 +14,16 @@ namespace acecode {
 static constexpr size_t MAX_RESULTS = 200;
 static constexpr uintmax_t MAX_FILE_SIZE = 1024 * 1024;
 
+// 用户点「停止」后工具必须尽快返回:大仓库 + 慢盘上的全量递归 grep 实测可阻塞
+// 30 秒以上,期间 abort 只能干等(2026-07-11 日志复盘,同 McpManager::invoke
+// 的教训)。遍历与逐行匹配循环都以此文案立即退出。
+static constexpr const char* ABORTED_MSG =
+    "[Aborted] Search abandoned because the user aborted the turn.";
+
+static bool abort_requested(const ToolContext& ctx) {
+    return ctx.abort_flag && ctx.abort_flag->load();
+}
+
 // Simple glob match for include_pattern (e.g. "*.cpp", "*.{hpp,cpp}")
 static bool filename_matches(const std::string& filename, const std::string& pattern) {
     if (pattern.empty()) return true;
@@ -34,7 +44,9 @@ static bool grep_file(const std::filesystem::path& file_path,
                       const std::regex& re,
                       std::ostringstream& results,
                       size_t& match_count,
-                      bool& truncated) {
+                      bool& truncated,
+                      const ToolContext& ctx,
+                      bool& aborted) {
     std::ifstream ifs(file_path, std::ios::binary);
     if (!ifs.is_open()) return false;
 
@@ -50,6 +62,10 @@ static bool grep_file(const std::filesystem::path& file_path,
     std::string line;
     int line_num = 0;
     while (std::getline(ifs, line)) {
+        if (abort_requested(ctx)) {
+            aborted = true;
+            return true;
+        }
         line_num++;
         if (std::regex_search(line, re)) {
             results << display_path << ":" << line_num << ":" << ensure_utf8(line) << "\n";
@@ -107,6 +123,7 @@ static ToolResult execute_grep(const std::string& arguments_json, const ToolCont
     std::ostringstream results;
     size_t match_count = 0;
     bool truncated = false;
+    bool aborted = false;
 
     if (path_is_file) {
         std::error_code size_ec;
@@ -115,9 +132,11 @@ static ToolResult execute_grep(const std::string& arguments_json, const ToolCont
             return ToolResult{"[Error] File is too large to grep (>1MB): " + search_path, false};
         }
 
-        if (!grep_file(search_root, search_root.parent_path(), re, results, match_count, truncated)) {
+        if (!grep_file(search_root, search_root.parent_path(), re, results, match_count, truncated,
+                       ctx, aborted)) {
             return ToolResult{"[Error] Failed to read file: " + search_path, false};
         }
+        if (aborted) return ToolResult{ABORTED_MSG, false};
     } else {
         std::error_code ec;
         for (auto it = std::filesystem::recursive_directory_iterator(
@@ -126,6 +145,7 @@ static ToolResult execute_grep(const std::string& arguments_json, const ToolCont
                  ec);
              it != std::filesystem::recursive_directory_iterator(); ++it)
         {
+            if (abort_requested(ctx)) return ToolResult{ABORTED_MSG, false};
             if (ec) { ec.clear(); continue; }
 
             if (it->is_directory()) {
@@ -147,7 +167,8 @@ static ToolResult execute_grep(const std::string& arguments_json, const ToolCont
             // Skip large files
             if (it->file_size() > MAX_FILE_SIZE) continue; // >1MB skip
 
-            grep_file(it->path(), search_root, re, results, match_count, truncated);
+            grep_file(it->path(), search_root, re, results, match_count, truncated, ctx, aborted);
+            if (aborted) return ToolResult{ABORTED_MSG, false};
             if (truncated) break;
         }
     }
