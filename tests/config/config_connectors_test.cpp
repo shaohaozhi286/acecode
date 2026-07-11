@@ -1,10 +1,17 @@
 #include "config/config.hpp"
+#include "utils/paths.hpp"
 
 #include <gtest/gtest.h>
 
+#include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <nlohmann/json.hpp>
+
+#ifdef _WIN32
+#include <stdlib.h>
+#endif
 
 using namespace acecode;
 
@@ -14,6 +21,72 @@ nlohmann::json read_json_file(const std::filesystem::path& path) {
     std::ifstream ifs(path, std::ios::binary);
     return nlohmann::json::parse(ifs);
 }
+
+#ifdef _WIN32
+constexpr const char* kHomeEnvName = "USERPROFILE";
+#else
+constexpr const char* kHomeEnvName = "HOME";
+#endif
+
+void set_env_value(const char* name, const std::string& value) {
+#ifdef _WIN32
+    _putenv_s(name, value.c_str());
+#else
+    setenv(name, value.c_str(), 1);
+#endif
+}
+
+void clear_env_value(const char* name) {
+#ifdef _WIN32
+    _putenv_s(name, "");
+#else
+    unsetenv(name);
+#endif
+}
+
+std::filesystem::path make_temp_home() {
+    return std::filesystem::temp_directory_path() /
+           ("acecode-connectors-lenient-" +
+            std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+}
+
+// RAII helper that redirects $HOME/%USERPROFILE% to an isolated temp dir for
+// the duration of the test, so acecode::load_config()/save_config() (which
+// resolve the config path off the process home dir) read/write a scratch
+// config.json instead of the developer's real ~/.acecode/config.json.
+// Mirrors the idiom in config_upgrade_test.cpp's LoadConfigReadsUpgradeAndEnvOverride.
+class ScopedTempHome {
+public:
+    ScopedTempHome() : temp_home_(make_temp_home()) {
+        acecode::reset_run_mode_for_test();
+        if (const char* existing = std::getenv(kHomeEnvName)) {
+            previous_home_ = existing;
+            had_previous_home_ = true;
+        }
+        std::filesystem::create_directories(temp_home_ / ".acecode");
+        set_env_value(kHomeEnvName, temp_home_.string());
+    }
+
+    ~ScopedTempHome() {
+        if (had_previous_home_) {
+            set_env_value(kHomeEnvName, previous_home_.c_str());
+        } else {
+            clear_env_value(kHomeEnvName);
+        }
+        acecode::reset_run_mode_for_test();
+        std::error_code ec;
+        std::filesystem::remove_all(temp_home_, ec);
+    }
+
+    std::filesystem::path config_path() const {
+        return temp_home_ / ".acecode" / "config.json";
+    }
+
+private:
+    std::filesystem::path temp_home_;
+    std::string previous_home_;
+    bool had_previous_home_ = false;
+};
 
 } // namespace
 
@@ -233,4 +306,191 @@ TEST(ConfigConnectors, NewlyEnabledTreatsUnknownIdAsNewlyEnabled) {
     auto newly = newly_enabled_connectors({}, {fresh});
     ASSERT_EQ(newly.size(), 1u);
     EXPECT_EQ(newly[0].id, "new");
+}
+
+// Regression coverage for the lenient loader used by load_config() (the path
+// GET /api/config/connectors and ConnectorAuthRecovery::recover() both go
+// through). load_connectors_lenient() is file-internal to config.cpp (not
+// declared in config.hpp), so it's exercised indirectly through load_config()
+// via a redirected $HOME/%USERPROFILE%, following the ScopedTempHome idiom
+// used by config_first_init_test.cpp / config_upgrade_test.cpp.
+//
+// Bug: load_connectors_lenient() only ever parsed id/name/description/enabled
+// and silently dropped hooks + auth_error_scope on every disk read. That
+// meant (1) PUT /api/config/connectors's GET-mutate-PUT-save round trip wiped
+// hooks from disk on a mere enable/disable toggle, and (2)
+// ConnectorAuthRecovery::recover() read connectors via load_config() and so
+// on_auth_error was always nullopt -- the chat-400 auto-recovery feature
+// never matched anything.
+TEST(ConfigConnectorsLenientLoad, LoadConfigParsesHooksAndAuthErrorScope) {
+    ScopedTempHome home;
+    {
+        std::ofstream ofs(home.config_path());
+        ofs << R"({
+    "provider": "",
+    "saved_models": [],
+    "connectors": [
+        {
+            "id": "gamma",
+            "name": "Gamma",
+            "description": "with hooks",
+            "enabled": true,
+            "hooks": {
+                "on_enable": {"command": "C:/tools/helper.exe", "args": ["--ensure"], "timeout_ms": 120000},
+                "on_auth_error": {"command": "C:/tools/helper.exe"}
+            },
+            "auth_error_scope": {"base_url_prefix": "https://models.example.com"}
+        }
+    ]
+})";
+    }
+
+    auto cfg = acecode::load_config();
+
+    ASSERT_EQ(cfg.connectors.size(), 1u);
+    const auto& connector = cfg.connectors[0];
+    EXPECT_EQ(connector.id, "gamma");
+
+    ASSERT_TRUE(connector.on_enable.has_value())
+        << "load_connectors_lenient() dropped hooks.on_enable";
+    EXPECT_EQ(connector.on_enable->command, "C:/tools/helper.exe");
+    ASSERT_EQ(connector.on_enable->args.size(), 1u);
+    EXPECT_EQ(connector.on_enable->args[0], "--ensure");
+    EXPECT_EQ(connector.on_enable->timeout_ms, 120000);
+
+    ASSERT_TRUE(connector.on_auth_error.has_value())
+        << "load_connectors_lenient() dropped hooks.on_auth_error "
+           "(ConnectorAuthRecovery::recover() can never match)";
+    EXPECT_EQ(connector.on_auth_error->command, "C:/tools/helper.exe");
+    EXPECT_TRUE(connector.on_auth_error->args.empty());
+    EXPECT_EQ(connector.on_auth_error->timeout_ms, 300000);
+
+    EXPECT_EQ(connector.auth_error_base_url_prefix, "https://models.example.com")
+        << "load_connectors_lenient() dropped auth_error_scope.base_url_prefix";
+}
+
+TEST(ConfigConnectorsLenientLoad, MalformedHookIsDroppedButConnectorSurvives) {
+    ScopedTempHome home;
+    {
+        std::ofstream ofs(home.config_path());
+        ofs << R"({
+    "provider": "",
+    "saved_models": [],
+    "connectors": [
+        {
+            "id": "bad-hook",
+            "name": "Bad Hook",
+            "description": "hook missing command",
+            "enabled": true,
+            "hooks": {
+                "on_enable": {"args": ["--ensure"]}
+            },
+            "auth_error_scope": {"base_url_prefix": " https://models.example.com "}
+        }
+    ]
+})";
+    }
+
+    auto cfg = acecode::load_config();
+
+    ASSERT_EQ(cfg.connectors.size(), 1u)
+        << "a malformed hook should drop only the hook, not the whole connector";
+    const auto& connector = cfg.connectors[0];
+    EXPECT_EQ(connector.id, "bad-hook");
+    EXPECT_EQ(connector.name, "Bad Hook");
+    EXPECT_TRUE(connector.enabled);
+    EXPECT_FALSE(connector.on_enable.has_value())
+        << "malformed hooks.on_enable (missing command) should be ignored, not accepted";
+    // auth_error_scope in the same entry is well-formed and should still parse
+    // (trimmed), independent of the sibling malformed hook.
+    EXPECT_EQ(connector.auth_error_base_url_prefix, "https://models.example.com");
+}
+
+TEST(ConfigConnectorsLenientLoad, MalformedAuthErrorScopeIsIgnoredButConnectorSurvives) {
+    ScopedTempHome home;
+    {
+        std::ofstream ofs(home.config_path());
+        ofs << R"({
+    "provider": "",
+    "saved_models": [],
+    "connectors": [
+        {
+            "id": "bad-scope",
+            "name": "Bad Scope",
+            "description": "auth_error_scope.base_url_prefix not a string",
+            "enabled": true,
+            "auth_error_scope": {"base_url_prefix": 12345}
+        }
+    ]
+})";
+    }
+
+    auto cfg = acecode::load_config();
+
+    ASSERT_EQ(cfg.connectors.size(), 1u);
+    const auto& connector = cfg.connectors[0];
+    EXPECT_EQ(connector.id, "bad-scope");
+    EXPECT_TRUE(connector.auth_error_base_url_prefix.empty());
+}
+
+// The disk-wipe regression: GET /api/config/connectors reads via load_config()
+// (lenient path), the web UI mutates the in-memory list (e.g. toggling
+// `enabled`), and PUT saves the whole list back via save_config(). If the
+// lenient loader dropped hooks on the way in, this round trip silently wipes
+// them from disk even though the caller never touched them.
+TEST(ConfigConnectorsLenientLoad, RoundTripThroughLenientLoadAndSavePreservesHooks) {
+    ScopedTempHome home;
+    {
+        std::ofstream ofs(home.config_path());
+        ofs << R"({
+    "provider": "",
+    "saved_models": [],
+    "connectors": [
+        {
+            "id": "gamma",
+            "name": "Gamma",
+            "description": "with hooks",
+            "enabled": false,
+            "hooks": {
+                "on_enable": {"command": "C:/tools/helper.exe", "args": ["--ensure"], "timeout_ms": 120000},
+                "on_auth_error": {"command": "C:/tools/helper.exe", "timeout_ms": 60000}
+            },
+            "auth_error_scope": {"base_url_prefix": "https://models.example.com"}
+        }
+    ]
+})";
+    }
+
+    // 1. Load via the lenient path (as GET /api/config/connectors does).
+    auto cfg = acecode::load_config();
+    ASSERT_EQ(cfg.connectors.size(), 1u);
+
+    // 2. Mutate something unrelated to hooks, mirroring a PUT that only
+    //    flips `enabled` (the web UI's toggle action).
+    cfg.connectors[0].enabled = true;
+
+    // 3. Save back to disk (as PUT /api/config/connectors does).
+    acecode::save_config(cfg, home.config_path().string());
+
+    // 4. Reload via the lenient path again and confirm hooks/scope survived
+    //    the round trip instead of being silently wiped.
+    auto reloaded = acecode::load_config();
+    ASSERT_EQ(reloaded.connectors.size(), 1u);
+    const auto& connector = reloaded.connectors[0];
+    EXPECT_TRUE(connector.enabled);
+
+    ASSERT_TRUE(connector.on_enable.has_value())
+        << "hooks.on_enable was wiped by the lenient load -> save round trip";
+    EXPECT_EQ(connector.on_enable->command, "C:/tools/helper.exe");
+    ASSERT_EQ(connector.on_enable->args.size(), 1u);
+    EXPECT_EQ(connector.on_enable->args[0], "--ensure");
+    EXPECT_EQ(connector.on_enable->timeout_ms, 120000);
+
+    ASSERT_TRUE(connector.on_auth_error.has_value())
+        << "hooks.on_auth_error was wiped by the lenient load -> save round trip";
+    EXPECT_EQ(connector.on_auth_error->command, "C:/tools/helper.exe");
+    EXPECT_EQ(connector.on_auth_error->timeout_ms, 60000);
+
+    EXPECT_EQ(connector.auth_error_base_url_prefix, "https://models.example.com")
+        << "auth_error_scope.base_url_prefix was wiped by the lenient load -> save round trip";
 }

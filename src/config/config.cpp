@@ -301,6 +301,46 @@ void load_connectors_lenient(const nlohmann::json& value,
         connector.enabled = item.contains("enabled") && item["enabled"].is_boolean()
             ? item["enabled"].get<bool>()
             : true;
+        if (item.contains("hooks") && item["hooks"].is_object()) {
+            const auto& hooks = item["hooks"];
+            if (hooks.contains("on_enable")) {
+                ConnectorHookConfig hook;
+                std::string hook_error;
+                if (parse_connector_hook(hooks["on_enable"], hook, hook_error)) {
+                    connector.on_enable = std::move(hook);
+                } else {
+                    LOG_WARN("[config] connectors[" + std::to_string(i) +
+                             "] hooks.on_enable " + hook_error + ", ignoring hook");
+                }
+            }
+            if (hooks.contains("on_auth_error")) {
+                ConnectorHookConfig hook;
+                std::string hook_error;
+                if (parse_connector_hook(hooks["on_auth_error"], hook, hook_error)) {
+                    connector.on_auth_error = std::move(hook);
+                } else {
+                    LOG_WARN("[config] connectors[" + std::to_string(i) +
+                             "] hooks.on_auth_error " + hook_error + ", ignoring hook");
+                }
+            }
+        } else if (item.contains("hooks")) {
+            LOG_WARN("[config] connectors[" + std::to_string(i) +
+                     "] hooks must be an object, ignoring hooks");
+        }
+        if (item.contains("auth_error_scope")) {
+            const auto& scope = item["auth_error_scope"];
+            if (scope.is_object() && scope.contains("base_url_prefix") &&
+                scope["base_url_prefix"].is_string()) {
+                connector.auth_error_base_url_prefix =
+                    trim_ascii_copy(scope["base_url_prefix"].get<std::string>());
+            } else if (scope.is_object() && scope.contains("base_url_prefix")) {
+                LOG_WARN("[config] connectors[" + std::to_string(i) +
+                         "] auth_error_scope.base_url_prefix must be a string, ignoring");
+            } else if (!scope.is_object()) {
+                LOG_WARN("[config] connectors[" + std::to_string(i) +
+                         "] auth_error_scope must be an object, ignoring");
+            }
+        }
         if (connector.id.empty() || connector.name.empty()) {
             LOG_WARN("[config] connectors[" + std::to_string(i) +
                      "] has empty id or name, skipping");
