@@ -1459,6 +1459,17 @@ AgentLoop::ApiRequestBundle AgentLoop::build_api_request_messages() {
     return bundle;
 }
 
+void AgentLoop::publish_side_question_context(
+    const std::vector<ChatMessage>& messages_with_system) {
+    std::lock_guard<std::mutex> lk(side_question_context_mu_);
+    side_question_context_ = messages_with_system;
+}
+
+std::vector<ChatMessage> AgentLoop::side_question_context_snapshot() const {
+    std::lock_guard<std::mutex> lk(side_question_context_mu_);
+    return side_question_context_;
+}
+
 AgentLoop::ProviderCallResult AgentLoop::call_provider_and_collect(
     const std::shared_ptr<LlmProvider>& provider,
     const ApiRequestBundle& bundle,
@@ -2852,6 +2863,7 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
 
         // Phase 2: Build API request messages
         auto bundle = build_api_request_messages();
+        publish_side_question_context(bundle.messages_with_system);
 
         // Get provider snapshot
         std::shared_ptr<LlmProvider> provider_snapshot;
@@ -3014,6 +3026,9 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
             assistant_msg.reasoning_content = provider_result.accumulated.reasoning_content;
             messages_.push_back(assistant_msg);
             if (session_manager_) session_manager_->on_message(assistant_msg);
+            auto completed_context = bundle.messages_with_system;
+            completed_context.push_back(assistant_msg);
+            publish_side_question_context(completed_context);
             dispatch_message("assistant", provider_result.accumulated.content, false,
                              nlohmann::json::object(),
                              provider_result.accumulated.content_parts);

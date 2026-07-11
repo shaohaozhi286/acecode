@@ -194,6 +194,32 @@ await run('executeCommand posts to builtin command endpoint', async () => {
   }
 });
 
+await run('askSideQuestion posts the isolated question payload', async () => {
+  const previousFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    calls.push({ url, opts });
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ question: 'why?', answer: 'because' }),
+    };
+  };
+  try {
+    const client = createApi({ origin: 'http://127.0.0.1:4567', token: 'tok' });
+    const result = await client.askSideQuestion('session/a', 'why?');
+    assert.deepEqual(result, { question: 'why?', answer: 'because' });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, 'http://127.0.0.1:4567/api/sessions/session%2Fa/side-question');
+    assert.equal(calls[0].opts.method, 'POST');
+    assert.equal(calls[0].opts.headers['X-ACECode-Token'], 'tok');
+    assert.deepEqual(JSON.parse(calls[0].opts.body), { question: 'why?' });
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
 await run('opencode import API uses workspace-scoped endpoints', async () => {
   const previousFetch = globalThis.fetch;
   const calls = [];

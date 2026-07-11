@@ -59,6 +59,7 @@ using acecode::SessionModelState;
 using acecode::SessionOptions;
 using acecode::SessionRegistry;
 using acecode::SessionRegistryDeps;
+using acecode::SideQuestionStatus;
 using acecode::SessionStorage;
 using acecode::ActiveSessionPowerGuard;
 using acecode::ToolExecutor;
@@ -235,6 +236,82 @@ private:
     mutable std::mutex mu_;
     mutable std::condition_variable cv_;
     std::vector<std::vector<acecode::ChatMessage>> requests_;
+};
+
+class SideQuestionStubProvider : public acecode::LlmProvider {
+public:
+    enum class SideMode { Answer, ToolCall, Empty, Error };
+
+    acecode::ChatResponse chat(
+        const std::vector<acecode::ChatMessage>& messages,
+        const std::vector<acecode::ToolDef>& tools) override {
+        std::lock_guard<std::mutex> lk(mu_);
+        side_messages_ = messages;
+        side_tools_ = tools;
+        ++side_calls_;
+
+        acecode::ChatResponse response;
+        response.finish_reason = "stop";
+        if (mode_ == SideMode::Answer) {
+            response.content = "  isolated answer  ";
+        } else if (mode_ == SideMode::ToolCall) {
+            acecode::ToolCall call;
+            call.id = "forbidden";
+            call.function_name = "bash";
+            call.function_arguments = R"({"command":"echo no"})";
+            response.tool_calls.push_back(std::move(call));
+        } else if (mode_ == SideMode::Error) {
+            response.content = "[Error] upstream unavailable";
+            response.finish_reason = "error";
+        }
+        return response;
+    }
+
+    void chat_stream(const std::vector<acecode::ChatMessage>&,
+                     const std::vector<acecode::ToolDef>&,
+                     const acecode::StreamCallback& callback,
+                     std::atomic<bool>* = nullptr) override {
+        acecode::StreamEvent delta;
+        delta.type = acecode::StreamEventType::Delta;
+        delta.content = "main answer";
+        callback(delta);
+        acecode::StreamEvent done;
+        done.type = acecode::StreamEventType::Done;
+        done.finish_reason = "stop";
+        callback(done);
+    }
+
+    void set_side_mode(SideMode mode) {
+        std::lock_guard<std::mutex> lk(mu_);
+        mode_ = mode;
+    }
+
+    int side_calls() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        return side_calls_;
+    }
+
+    std::vector<acecode::ChatMessage> side_messages() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        return side_messages_;
+    }
+
+    std::vector<acecode::ToolDef> side_tools() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        return side_tools_;
+    }
+
+    std::string name() const override { return "side-question-stub"; }
+    bool is_authenticated() override { return true; }
+    std::string model() const override { return "side-question-stub"; }
+    void set_model(const std::string&) override {}
+
+private:
+    mutable std::mutex mu_;
+    SideMode mode_ = SideMode::Answer;
+    int side_calls_ = 0;
+    std::vector<acecode::ChatMessage> side_messages_;
+    std::vector<acecode::ToolDef> side_tools_;
 };
 
 class BlockingProvider : public acecode::LlmProvider {
@@ -487,6 +564,100 @@ TEST(SessionRegistry, CreateGeneratesUniqueIds) {
     fx.registry.destroy(a);
     fx.registry.destroy(b);
     EXPECT_EQ(fx.registry.size(), 0u);
+}
+
+TEST(SessionRegistry, SideQuestionUsesDetachedContextWithoutToolsOrTranscriptMutation) {
+    auto cwd = temp_cwd("side_question");
+    TestFixture fx;
+    auto provider = std::make_shared<SideQuestionStubProvider>();
+    fx.provider = provider;
+
+    auto missing = fx.registry.ask_side_question("missing", "why?");
+    EXPECT_EQ(missing.status, SideQuestionStatus::UnknownSession);
+
+    SessionOptions opts;
+    opts.cwd = cwd.string();
+    auto id = fx.registry.create(opts);
+    auto* entry = fx.registry.lookup(id);
+    ASSERT_NE(entry, nullptr);
+    ASSERT_TRUE(entry->loop);
+
+    auto empty = fx.registry.ask_side_question(id, "   ");
+    EXPECT_EQ(empty.status, SideQuestionStatus::InvalidQuestion);
+    EXPECT_EQ(provider->side_calls(), 0);
+
+    auto not_ready = fx.registry.ask_side_question(id, "before first request");
+    EXPECT_EQ(not_ready.status, SideQuestionStatus::ContextNotReady);
+    EXPECT_EQ(provider->side_calls(), 0);
+
+    std::mutex event_mu;
+    std::condition_variable event_cv;
+    bool done = false;
+    auto sub = entry->loop->events().subscribe([&](const SessionEvent& event) {
+        if (event.kind != SessionEventKind::Done) return;
+        {
+            std::lock_guard<std::mutex> lk(event_mu);
+            done = true;
+        }
+        event_cv.notify_all();
+    });
+    entry->loop->submit("main task");
+    {
+        std::unique_lock<std::mutex> lk(event_mu);
+        ASSERT_TRUE(event_cv.wait_for(lk, 5s, [&] { return done; }));
+    }
+    entry->loop->events().unsubscribe(sub);
+
+    const auto main_messages_before = entry->loop->messages();
+    ASSERT_GE(main_messages_before.size(), 2u);
+    auto result = fx.registry.ask_side_question(id, "  explain the mutex  ");
+    EXPECT_EQ(result.status, SideQuestionStatus::Ok);
+    EXPECT_EQ(result.question, "explain the mutex");
+    EXPECT_EQ(result.answer, "isolated answer");
+    EXPECT_EQ(provider->side_calls(), 1);
+    EXPECT_TRUE(provider->side_tools().empty());
+
+    auto side_messages = provider->side_messages();
+    ASSERT_FALSE(side_messages.empty());
+    EXPECT_EQ(side_messages.back().role, "user");
+    EXPECT_NE(side_messages.back().content.find("separate, read-only, one-turn"),
+              std::string::npos);
+    EXPECT_NE(side_messages.back().content.find("explain the mutex"),
+              std::string::npos);
+
+    const auto main_messages_after = entry->loop->messages();
+    ASSERT_EQ(main_messages_after.size(), main_messages_before.size());
+    for (std::size_t i = 0; i < main_messages_before.size(); ++i) {
+        EXPECT_EQ(main_messages_after[i].role, main_messages_before[i].role);
+        EXPECT_EQ(main_messages_after[i].content, main_messages_before[i].content);
+    }
+
+    provider->set_side_mode(SideQuestionStubProvider::SideMode::ToolCall);
+    auto tool_attempt = fx.registry.ask_side_question(id, "use a tool");
+    EXPECT_EQ(tool_attempt.status, SideQuestionStatus::Failed);
+    EXPECT_NE(tool_attempt.error.find("requested tools"), std::string::npos);
+    EXPECT_EQ(entry->loop->messages().size(), main_messages_before.size());
+
+    provider->set_side_mode(SideQuestionStubProvider::SideMode::Empty);
+    auto blank = fx.registry.ask_side_question(id, "blank answer");
+    EXPECT_EQ(blank.status, SideQuestionStatus::Failed);
+    EXPECT_NE(blank.error.find("empty"), std::string::npos);
+
+    provider->set_side_mode(SideQuestionStubProvider::SideMode::Error);
+    auto provider_error = fx.registry.ask_side_question(id, "provider error");
+    EXPECT_EQ(provider_error.status, SideQuestionStatus::Failed);
+    EXPECT_NE(provider_error.error.find("upstream unavailable"), std::string::npos);
+
+    {
+        std::lock_guard<std::mutex> lk(entry->provider_slot->mu);
+        entry->provider_slot->provider.reset();
+    }
+    auto unavailable = fx.registry.ask_side_question(id, "no model");
+    EXPECT_EQ(unavailable.status, SideQuestionStatus::ProviderUnavailable);
+
+    fx.registry.destroy(id);
+    std::error_code ec;
+    std::filesystem::remove_all(cwd, ec);
 }
 
 TEST(LocalSessionClient, GoalCreatePersistsVisibleAuditBeforeHiddenContext) {
