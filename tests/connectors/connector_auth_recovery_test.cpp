@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <memory>
+#include <stdexcept>
 
 using namespace acecode;
 
@@ -155,6 +156,23 @@ TEST(ConnectorAuthRecovery, UnchangedKeyAfterHookReturnsNullopt) {
     ConnectorAuthRecovery recovery(std::move(opts));
 
     EXPECT_FALSE(recovery.recover("https://models.example.com/v1", "stale-key").has_value());
+}
+
+TEST(ConnectorAuthRecovery, LoadConfigThrowingReturnsNullopt) {
+    std::atomic<int> runner_calls{0};
+
+    ConnectorAuthRecovery::Options opts;
+    opts.load_disk_config = []() -> AppConfig {
+        throw std::runtime_error("disk config read failed");
+    };
+    opts.hook_runner = [&runner_calls](const HookCommandSpec&, int) {
+        ++runner_calls;
+        return HookProcessResult{};
+    };
+    ConnectorAuthRecovery recovery(std::move(opts));
+
+    EXPECT_FALSE(recovery.recover("https://models.example.com/v1", "stale-key").has_value());
+    EXPECT_EQ(runner_calls.load(), 0);
 }
 
 TEST(ConnectorAuthRecovery, CooldownBlocksSecondLaunch) {
