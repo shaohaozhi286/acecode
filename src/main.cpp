@@ -3707,18 +3707,53 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
                     dot_color = tui::theme().semantic.error;
                 }
             }
+            // 参数预览过长时折叠成 3 条可视行 + "… folded (ctrl+o)",与
+            // tool_result 的 fold 同款交互(Ctrl+O 全局展开)。可视行按
+            // 当前可用宽度用 fold_tool_result_preview 预切,真实换行和软
+            // 换行都计入 —— MCP 工具常见的含字面量 \n 的超长单行 JSON
+            // 参数同样折得住。展开态回到原 paragraph 全量渲染。
+            const bool row_expanded = msg.expanded || state.transcript_expanded;
+            auto folded_or_full = [&](const std::string& full_text,
+                                      int avail_width) -> Element {
+                if (row_expanded) {
+                    return paragraph(full_text)
+                        | color(tui::theme().syntax.preproc) | flex;
+                }
+                constexpr std::size_t kMaxArgsPreviewRows = 3;
+                const auto preview = acecode::tui::fold_tool_result_preview(
+                    full_text, avail_width, kMaxArgsPreviewRows);
+                if (!preview.folded) {
+                    return paragraph(full_text)
+                        | color(tui::theme().syntax.preproc) | flex;
+                }
+                Elements arg_rows;
+                for (const auto& ln : preview.lines) {
+                    arg_rows.push_back(
+                        text(ln) | color(tui::theme().syntax.preproc));
+                }
+                arg_rows.push_back(text("\xE2\x80\xA6 folded (ctrl+o)")
+                    | color(tui::theme().ui.text_dim));
+                return vbox(std::move(arg_rows)) | flex;
+            };
             Elements segs;
             segs.push_back(text(" \xE2\x97\x8F ") | color(dot_color)); // "●"
             if (parts.name.empty()) {
-                segs.push_back(paragraph(msg.content)
-                    | color(tui::theme().syntax.preproc) | flex);
+                const int raw_width = std::max(
+                    20, chat_box.x_max - chat_box.x_min - 3);
+                segs.push_back(folded_or_full(msg.content, raw_width));
             } else {
+                const std::string display_name =
+                    acecode::tui::pascal_case_tool_name(parts.name);
                 segs.push_back(
-                    text(acecode::tui::pascal_case_tool_name(parts.name))
+                    text(display_name)
                     | bold | color(tui::theme().syntax.preproc));
                 if (!parts.args.empty()) {
-                    segs.push_back(paragraph("(" + parts.args + ")")
-                        | color(tui::theme().syntax.preproc) | flex);
+                    // args 列起点 = " ● "(3 列)+ 工具名(ASCII)之后。
+                    const int args_width = std::max(
+                        20, chat_box.x_max - chat_box.x_min - 3 -
+                                static_cast<int>(display_name.size()));
+                    segs.push_back(
+                        folded_or_full("(" + parts.args + ")", args_width));
                 }
             }
             auto line = hbox(std::move(segs));
