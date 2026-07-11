@@ -14,6 +14,7 @@ import { Toggle } from './Modal.jsx';
 import { clsx, relativeTime } from '../lib/format.js';
 import { lookupErrorMessage } from '../lib/errors.js';
 import { buildMcpServerList, countEnabledMcp, applyMcpToggle } from '../lib/mcpServers.js';
+import { normalizeConnectorList, applyConnectorToggle } from '../lib/connectors.js';
 import {
   DEFAULT_MODEL_CAPABILITIES,
   MODEL_CAPABILITY_OPTIONS,
@@ -1426,18 +1427,6 @@ function SectionMCP() {
   );
 }
 
-function normalizeConnectorList(data) {
-  const raw = Array.isArray(data?.connectors) ? data.connectors : [];
-  return raw
-    .map((item) => ({
-      id: typeof item?.id === 'string' ? item.id.trim() : '',
-      name: typeof item?.name === 'string' ? item.name : '',
-      description: typeof item?.description === 'string' ? item.description : '',
-      enabled: !!item?.enabled,
-    }))
-    .filter((item) => item.id);
-}
-
 function SectionConnectors() {
   const [connectors, setConnectors] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -1483,9 +1472,7 @@ function SectionConnectors() {
   const toggleConnector = async (connector, enabled) => {
     if (!connector?.id || savingId) return;
     const before = connectors;
-    const next = connectors.map((item) => (
-      item.id === connector.id ? { ...item, enabled } : item
-    ));
+    const next = applyConnectorToggle(connectors, connector.id, enabled);
     setConnectors(next);
     setSavingId(connector.id);
     setError('');

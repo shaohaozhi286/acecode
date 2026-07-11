@@ -87,3 +87,4 @@ import './assistantAvatarDisplay.test.js';
 import './todoChecklist.test.js';
 import './transcriptProjection.test.js';
 import './homeWorkspaceSelection.test.js';
+import './connectors.test.js';
