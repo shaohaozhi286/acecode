@@ -111,4 +111,8 @@ void WebServer::track_subagent(const std::string& child_session_id) {
     if (impl_) impl_->track_subagent(child_session_id);
 }
 
+void WebServer::refresh_saved_models_from_disk() {
+    if (impl_) impl_->refresh_saved_models_from_disk();
+}
+
 } // namespace acecode::web

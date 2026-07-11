@@ -109,6 +109,9 @@ public:
     // 首条输入入队前调用本方法。线程安全(可由 agent worker 线程调用)。
     void track_subagent(const std::string& child_session_id);
 
+    // 连接器钩子改写磁盘 config.json 后,把 saved_models 重读进内存(线程安全)。
+    void refresh_saved_models_from_disk();
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

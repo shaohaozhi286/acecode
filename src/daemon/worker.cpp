@@ -4,6 +4,7 @@
 #include "../desktop/open_in_explorer.hpp"
 #include "../tool/spawn_subagent_tool.hpp"
 #include "../desktop/workspace_registry.hpp"
+#include "../connectors/connector_auth_recovery.hpp"
 #include "guid.hpp"
 #include "heartbeat.hpp"
 #include "mcp_runtime.hpp"
@@ -417,6 +418,12 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     template_perm.set_mode(permission_mode_from_config(cfg_mut.default_permission_mode));
     if (opts.dangerous) template_perm.set_dangerous(true);
 
+    // 声明在 reg_deps / registry / server 之前,使其析构晚于三者——三者持有的
+    // AgentLoop / on_config_refreshed 回调在整个生命周期内都可能引用 auth_recovery。
+    acecode::ConnectorAuthRecovery::Options recovery_opts;
+    recovery_opts.load_disk_config = []() { return acecode::load_config(); };
+    acecode::ConnectorAuthRecovery auth_recovery(std::move(recovery_opts));
+
     acecode::SessionRegistryDeps reg_deps;
     reg_deps.provider_accessor    = provider_accessor;
     reg_deps.tools                = &tools;
@@ -430,6 +437,7 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     reg_deps.hook_manager         = &hook_manager;
     reg_deps.template_permissions = &template_perm;
     reg_deps.power_guard          = &acecode::process_power_guard();
+    reg_deps.auth_recovery        = &auth_recovery;
 
     acecode::SessionRegistry registry(std::move(reg_deps));
     acecode::LocalSessionClient client(registry);
@@ -501,6 +509,12 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     web_deps.pty_registry       = &pty_registry;
 
     acecode::web::WebServer server(std::move(web_deps));
+
+    // 连接器钩子恢复 key 后落盘 config.json;web server 内存里的 saved_models
+    // 也要跟着重读,否则下一次任何 save_config 会把新写入的 api_key 抹掉。
+    auth_recovery.set_on_config_refreshed([&server]() {
+        server.refresh_saved_models_from_disk();
+    });
 
     // 子会话 spawn 后登记到 WebServer,给它挂常驻状态监听器,使其 busy 能广播
     // session_status(否则未被 WS 订阅的子会话永不广播,父会话前端在 wait=true

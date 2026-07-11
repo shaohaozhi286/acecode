@@ -40,6 +40,7 @@ namespace acecode {
 class HookManager;
 class MemoryRegistry;
 class ActiveSessionPowerGuard;
+class ConnectorAuthRecovery;
 
 std::string default_no_workspace_cache_root();
 std::string no_workspace_session_cwd(const std::string& session_id,
@@ -97,6 +98,9 @@ struct SessionRegistryDeps {
     // Optional process-wide power guard. When present, every session loop
     // contributes its busy/idle transitions to this guard.
     ActiveSessionPowerGuard*          power_guard = nullptr;
+    // Optional connector auth recovery service. When present, every session
+    // loop retries once after a successful on_auth_error hook run.
+    ConnectorAuthRecovery*           auth_recovery = nullptr;
     // Empty = ~/.acecode/cache/no-workspace. Tests may override to avoid
     // creating cache directories in the real user home.
     std::string                      no_workspace_cache_root;

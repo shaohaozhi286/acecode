@@ -3,6 +3,7 @@
 #include "headless_mode.hpp"
 
 #include "../config/config.hpp"
+#include "../connectors/connector_auth_recovery.hpp"
 #include "../daemon/mcp_runtime.hpp"
 #include "../desktop/workspace_registry.hpp"
 #include "../hooks/hook_config.hpp"
@@ -319,6 +320,13 @@ int run_print_mode(const HeadlessCliOptions& opts) {
             permission_mode_from_config(cfg.default_permission_mode));
         if (opts.dangerous_mode) template_perm.set_dangerous(true);
 
+        // headless 无 web server,不设 on_config_refreshed:钩子成功刷新磁盘
+        // key 后内存不合并——headless 进程短生命周期、退出前不保存整份
+        // config,可接受。声明在 reg_deps/registry 之前,使其析构晚于二者。
+        acecode::ConnectorAuthRecovery::Options recovery_opts;
+        recovery_opts.load_disk_config = []() { return acecode::load_config(); };
+        acecode::ConnectorAuthRecovery auth_recovery(std::move(recovery_opts));
+
         acecode::SessionRegistryDeps reg_deps;
         reg_deps.provider_accessor = []() -> std::shared_ptr<acecode::LlmProvider> {
             return nullptr; // config 路径下 registry 按 profile 自建 provider
@@ -334,6 +342,7 @@ int run_print_mode(const HeadlessCliOptions& opts) {
         reg_deps.hook_manager             = &hook_manager;
         reg_deps.template_permissions     = &template_perm;
         reg_deps.power_guard              = &acecode::process_power_guard();
+        reg_deps.auth_recovery            = &auth_recovery;
 
         acecode::SessionRegistry registry(std::move(reg_deps));
         acecode::LocalSessionClient client(registry);

@@ -94,6 +94,7 @@
 #include "utils/logger.hpp"
 #include "permissions.hpp"
 #include "agent_loop.hpp"
+#include "connectors/connector_auth_recovery.hpp"
 #include "cli/interactive_options.hpp"
 #include "commands/configure.hpp"
 #include "daemon/cli.hpp"
@@ -5148,6 +5149,17 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
     PermissionManager permissions;
     configure_permissions(permissions, dangerous_mode, config.default_permission_mode);
 
+    // 声明在 agent_loop 之前,使其析构晚于 agent_loop(agent_loop 持有的
+    // auth_recovery 回调在其整个生命周期内都可能被调用)。
+    ConnectorAuthRecovery::Options recovery_opts;
+    recovery_opts.load_disk_config = []() { return load_config(); };
+    recovery_opts.on_config_refreshed = [&config]() {
+        // TUI 持本地 AppConfig;钩子回写磁盘后合并回来,防止后续保存抹掉新 key。
+        AppConfig disk = load_config();
+        config.saved_models = std::move(disk.saved_models);
+    };
+    ConnectorAuthRecovery auth_recovery(std::move(recovery_opts));
+
     AgentLoop agent_loop(provider_accessor, tools, callbacks, working_dir, permissions);
     agent_loop.set_context_window(config.context_window);
     agent_loop.set_no_model_config_prompt(
@@ -5160,6 +5172,10 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
     agent_loop.set_project_instructions_config(&config.project_instructions);
     agent_loop.set_custom_instructions_config(&config.custom_instructions);
     agent_loop.set_git_context_config(&config.git_context);
+    agent_loop.set_auth_recovery(
+        [&auth_recovery](const std::string& base_url, const std::string& key_at_request) {
+            return auth_recovery.recover(base_url, key_at_request);
+        });
 
     agent_loop.set_callbacks(callbacks);
 
@@ -5317,6 +5333,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
         rd.hook_manager = &hook_manager;
         rd.template_permissions = &permissions;
         rd.power_guard = &acecode::process_power_guard();
+        rd.auth_recovery = &auth_recovery;
         subagent_host_deps.registry_deps = std::move(rd);
     }
     subagent_host_deps.parent_session_id = [&session_manager]() {
