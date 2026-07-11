@@ -106,15 +106,74 @@ bool is_valid_upgrade_base_url(const std::string& raw) {
     return url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0;
 }
 
+nlohmann::json connector_hook_to_json(const ConnectorHookConfig& hook) {
+    return {
+        {"command", hook.command},
+        {"args", hook.args},
+        {"timeout_ms", hook.timeout_ms},
+    };
+}
+
+bool parse_connector_hook(const nlohmann::json& item,
+                          ConnectorHookConfig& out,
+                          std::string& error_msg) {
+    if (!item.is_object() || !item.contains("command") || !item["command"].is_string()) {
+        error_msg = "must be an object with string command";
+        return false;
+    }
+    out.command = item["command"].get<std::string>();
+    if (out.command.empty()) {
+        error_msg = "command must not be empty";
+        return false;
+    }
+    out.args.clear();
+    if (item.contains("args")) {
+        if (!item["args"].is_array()) {
+            error_msg = "args must be an array of strings";
+            return false;
+        }
+        for (const auto& arg : item["args"]) {
+            if (!arg.is_string()) {
+                error_msg = "args must be an array of strings";
+                return false;
+            }
+            out.args.push_back(arg.get<std::string>());
+        }
+    }
+    if (item.contains("timeout_ms")) {
+        if (!item["timeout_ms"].is_number_integer()) {
+            error_msg = "timeout_ms must be an integer";
+            return false;
+        }
+        const int timeout = item["timeout_ms"].get<int>();
+        if (timeout > 0) out.timeout_ms = timeout;
+    }
+    return true;
+}
+
 nlohmann::json connectors_to_json(const std::vector<ConnectorConfig>& connectors) {
     nlohmann::json items = nlohmann::json::array();
     for (const auto& connector : connectors) {
-        items.push_back({
+        nlohmann::json item = {
             {"id", connector.id},
             {"name", connector.name},
             {"description", connector.description},
             {"enabled", connector.enabled},
-        });
+        };
+        nlohmann::json hooks = nlohmann::json::object();
+        if (connector.on_enable) {
+            hooks["on_enable"] = connector_hook_to_json(*connector.on_enable);
+        }
+        if (connector.on_auth_error) {
+            hooks["on_auth_error"] = connector_hook_to_json(*connector.on_auth_error);
+        }
+        if (!hooks.empty()) item["hooks"] = std::move(hooks);
+        if (!connector.auth_error_base_url_prefix.empty()) {
+            item["auth_error_scope"] = {
+                {"base_url_prefix", connector.auth_error_base_url_prefix},
+            };
+        }
+        items.push_back(std::move(item));
     }
     return items;
 }
@@ -157,6 +216,36 @@ bool parse_connectors_json(const nlohmann::json& value,
         connector.name = item["name"].get<std::string>();
         connector.description = item["description"].get<std::string>();
         connector.enabled = item["enabled"].get<bool>();
+        if (item.contains("hooks")) {
+            const auto& hooks = item["hooks"];
+            if (!hooks.is_object()) return fail("hooks must be an object");
+            std::string hook_error;
+            if (hooks.contains("on_enable")) {
+                ConnectorHookConfig hook;
+                if (!parse_connector_hook(hooks["on_enable"], hook, hook_error)) {
+                    return fail("hooks.on_enable " + hook_error);
+                }
+                connector.on_enable = std::move(hook);
+            }
+            if (hooks.contains("on_auth_error")) {
+                ConnectorHookConfig hook;
+                if (!parse_connector_hook(hooks["on_auth_error"], hook, hook_error)) {
+                    return fail("hooks.on_auth_error " + hook_error);
+                }
+                connector.on_auth_error = std::move(hook);
+            }
+        }
+        if (item.contains("auth_error_scope")) {
+            const auto& scope = item["auth_error_scope"];
+            if (!scope.is_object()) return fail("auth_error_scope must be an object");
+            if (scope.contains("base_url_prefix")) {
+                if (!scope["base_url_prefix"].is_string()) {
+                    return fail("auth_error_scope.base_url_prefix must be a string");
+                }
+                connector.auth_error_base_url_prefix =
+                    trim_ascii_copy(scope["base_url_prefix"].get<std::string>());
+            }
+        }
         if (connector.id.empty()) return fail("id must not be empty");
         if (connector.name.empty()) return fail("name must not be empty");
         if (!seen_ids.insert(connector.id).second) {

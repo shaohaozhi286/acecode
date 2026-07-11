@@ -120,11 +120,25 @@ private:
     mutable std::mutex mu_;
 };
 
+// 连接器生命周期钩子:一次性外部进程,由 config.json 数据完全描述。
+// on_enable    —— 连接器开关从关到开时异步执行。
+// on_auth_error —— 聊天请求收到认证形态错误(HTTP 400/401)且模型 base_url
+//                  命中 auth_error_scope.base_url_prefix 时执行,退出 0 后
+//                  acecode 重读磁盘 saved_models 并重试请求一次。
+struct ConnectorHookConfig {
+    std::string command;                 // 可执行文件路径(安装脚本写绝对路径)
+    std::vector<std::string> args;
+    int timeout_ms = 300000;             // 等待钩子进程退出的上限
+};
+
 struct ConnectorConfig {
     std::string id;
     std::string name;
     std::string description;
     bool enabled = true;
+    std::optional<ConnectorHookConfig> on_enable;      // JSON: hooks.on_enable
+    std::optional<ConnectorHookConfig> on_auth_error;  // JSON: hooks.on_auth_error
+    std::string auth_error_base_url_prefix;            // JSON: auth_error_scope.base_url_prefix
 };
 
 struct DaemonConfig {
