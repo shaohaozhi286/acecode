@@ -25,6 +25,7 @@ const char* to_string(SavedModelEditError e) {
         case SavedModelEditError::INVALID_STREAM_TIMEOUT: return "INVALID_STREAM_TIMEOUT";
         case SavedModelEditError::INVALID_CAPABILITY: return "INVALID_CAPABILITY";
         case SavedModelEditError::INVALID_REQUEST_HEADER: return "INVALID_REQUEST_HEADER";
+        case SavedModelEditError::READONLY_MODEL:    return "READONLY_MODEL";
         case SavedModelEditError::NOT_FOUND:         return "NOT_FOUND";
         case SavedModelEditError::IN_USE_AS_DEFAULT: return "IN_USE_AS_DEFAULT";
     }
@@ -117,6 +118,7 @@ SavedModelEditError update_saved_model(AppConfig& cfg,
     auto it = std::find_if(cfg.saved_models.begin(), cfg.saved_models.end(),
                             [&](const ModelProfile& e) { return e.name == old_name; });
     if (it == cfg.saved_models.end()) return SavedModelEditError::NOT_FOUND;
+    if (it->readonly) return SavedModelEditError::READONLY_MODEL;
 
     const bool renaming = d.name != old_name;
     if (auto err = validate_draft_basic(d); err != SavedModelEditError::OK) return err;

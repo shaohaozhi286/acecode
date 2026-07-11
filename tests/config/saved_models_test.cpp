@@ -601,3 +601,17 @@ TEST(SavedModelsTest, ValidateConfigRejectsInvalidOpenAiStreamTimeout) {
     }
     EXPECT_TRUE(found);
 }
+
+// 额外 — readonly 标志默认为 false；JSON 中显式为 true 时被解析。
+TEST(SavedModelsTest, ParseReadonlyFlagDefaultsFalse) {
+    std::string err;
+    auto parsed = parse_saved_models(nlohmann::json::parse(R"([
+        {"name":"m1","provider":"openai","model":"m1",
+         "base_url":"https://models.example.com/v1","api_key":"k1"},
+        {"name":"m2","provider":"openai","model":"m2",
+         "base_url":"https://models.example.com/v1","api_key":"k2","readonly":true}
+    ])"), err);
+    ASSERT_TRUE(parsed.has_value()) << err;
+    EXPECT_FALSE((*parsed)[0].readonly);
+    EXPECT_TRUE((*parsed)[1].readonly);
+}

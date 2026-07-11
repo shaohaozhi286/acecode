@@ -153,6 +153,7 @@ int http_status_for_edit_error(SavedModelEditError e) {
     switch (e) {
         case SavedModelEditError::OK: return 200;
         case SavedModelEditError::NOT_FOUND: return 404;
+        case SavedModelEditError::READONLY_MODEL: return 403;
         case SavedModelEditError::NAME_TAKEN:
         case SavedModelEditError::IN_USE_AS_DEFAULT: return 409;
         default: return 400;

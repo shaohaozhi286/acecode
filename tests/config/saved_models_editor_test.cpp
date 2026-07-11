@@ -435,3 +435,42 @@ TEST(SavedModelsEditor, AddLeavesCfgUnchangedOnAllRejections) {
     bad_headers.request_headers = {{"Content-Type", "text/plain"}};
     try_reject(bad_headers, SavedModelEditError::INVALID_REQUEST_HEADER);
 }
+
+// 场景:update readonly=true 的条目 → READONLY_MODEL,cfg 不变。
+TEST(SavedModelsEditor, UpdateRejectsReadonlyModel) {
+    AppConfig cfg;
+    ModelProfile locked;
+    locked.name = "locked";
+    locked.provider = "openai";
+    locked.model = "locked-model";
+    locked.base_url = "https://models.example.com/v1";
+    locked.api_key = "k";
+    locked.readonly = true;
+    cfg.saved_models.push_back(locked);
+
+    SavedModelDraft d;
+    d.name = "locked";
+    d.provider = "openai";
+    d.model = "changed-model";
+    d.base_url = "https://models.example.com/v1";
+    d.api_key = "new-k";
+    EXPECT_EQ(update_saved_model(cfg, "locked", d),
+              SavedModelEditError::READONLY_MODEL);
+    EXPECT_EQ(cfg.saved_models[0].model, "locked-model");
+}
+
+// 场景:remove readonly=true 的条目 → OK,条目被删除。readonly 标志不影响删除。
+TEST(SavedModelsEditor, RemoveAllowsReadonlyModel) {
+    AppConfig cfg;
+    ModelProfile locked;
+    locked.name = "locked";
+    locked.provider = "openai";
+    locked.model = "locked-model";
+    locked.base_url = "https://models.example.com/v1";
+    locked.api_key = "k";
+    locked.readonly = true;
+    cfg.saved_models.push_back(locked);
+
+    EXPECT_EQ(remove_saved_model(cfg, "locked"), SavedModelEditError::OK);
+    EXPECT_TRUE(cfg.saved_models.empty());
+}

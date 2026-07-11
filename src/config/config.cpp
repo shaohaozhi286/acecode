@@ -1898,6 +1898,7 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
             for (const auto& [k, v] : e.request_headers) headers[k] = v;
             ej["request_headers"] = std::move(headers);
         }
+        if (e.readonly) ej["readonly"] = true;
         arr.push_back(std::move(ej));
     }
     j["saved_models"] = std::move(arr);

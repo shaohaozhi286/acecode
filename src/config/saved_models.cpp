@@ -121,6 +121,9 @@ std::optional<ModelProfile> parse_one_entry(const nlohmann::json& node, std::siz
         if (!parsed.has_value()) return std::nullopt;
         e.request_headers = std::move(*parsed);
     }
+    if (node.contains("readonly") && node["readonly"].is_boolean()) {
+        e.readonly = node["readonly"].get<bool>();
+    }
 
     return e;
 }

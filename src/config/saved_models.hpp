@@ -24,6 +24,9 @@ struct ModelProfile {
     std::optional<int> stream_timeout_ms; // 可选,streaming request timeout(ms)
     std::vector<std::string> capabilities; // 用户声明的能力标签,如 vision/tool_use/web_search
     std::map<std::string, std::string> request_headers; // openai/anthropic 自定义请求头模板
+    // true = 该条目由外部登录器托管(config.json 直写),acecode 编辑路径拒绝
+    // 修改(允许删除)。防止用户手改单个受管条目造成同网关多条目 key 不一致。
+    bool readonly = false;
 };
 
 // 解析失败时的描述。line_hint = -1 表示无具体行号信息。
