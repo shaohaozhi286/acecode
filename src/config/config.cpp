@@ -168,6 +168,9 @@ nlohmann::json connectors_to_json(const std::vector<ConnectorConfig>& connectors
         if (connector.on_auth_error) {
             hooks["on_auth_error"] = connector_hook_to_json(*connector.on_auth_error);
         }
+        if (connector.on_startup) {
+            hooks["on_startup"] = connector_hook_to_json(*connector.on_startup);
+        }
         if (!hooks.empty()) item["hooks"] = std::move(hooks);
         if (!connector.auth_error_base_url_prefix.empty()) {
             item["auth_error_scope"] = {
@@ -234,6 +237,13 @@ bool parse_connectors_json(const nlohmann::json& value,
                     return fail("hooks.on_auth_error " + hook_error);
                 }
                 connector.on_auth_error = std::move(hook);
+            }
+            if (hooks.contains("on_startup")) {
+                ConnectorHookConfig hook;
+                if (!parse_connector_hook(hooks["on_startup"], hook, hook_error)) {
+                    return fail("hooks.on_startup " + hook_error);
+                }
+                connector.on_startup = std::move(hook);
             }
         }
         if (item.contains("auth_error_scope")) {
@@ -321,6 +331,16 @@ void load_connectors_lenient(const nlohmann::json& value,
                 } else {
                     LOG_WARN("[config] connectors[" + std::to_string(i) +
                              "] hooks.on_auth_error " + hook_error + ", ignoring hook");
+                }
+            }
+            if (hooks.contains("on_startup")) {
+                ConnectorHookConfig hook;
+                std::string hook_error;
+                if (parse_connector_hook(hooks["on_startup"], hook, hook_error)) {
+                    connector.on_startup = std::move(hook);
+                } else {
+                    LOG_WARN("[config] connectors[" + std::to_string(i) +
+                             "] hooks.on_startup " + hook_error + ", ignoring hook");
                 }
             }
         } else if (item.contains("hooks")) {

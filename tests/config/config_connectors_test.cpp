@@ -438,6 +438,39 @@ TEST(ConfigConnectorsLenientLoad, MalformedAuthErrorScopeIsIgnoredButConnectorSu
 // `enabled`), and PUT saves the whole list back via save_config(). If the
 // lenient loader dropped hooks on the way in, this round trip silently wipes
 // them from disk even though the caller never touched them.
+TEST(ConfigConnectors, ParseOnStartupHook) {
+    auto j = nlohmann::json::parse(R"([
+        {"id":"delta","name":"Delta","description":"","enabled":true,
+         "hooks":{"on_startup":{"command":"C:/tools/helper.exe","args":["--check"],"timeout_ms":60000}}}
+    ])");
+    std::vector<ConnectorConfig> connectors;
+    std::string error;
+    ASSERT_TRUE(parse_connectors_json(j, connectors, &error)) << error;
+    ASSERT_TRUE(connectors[0].on_startup.has_value());
+    EXPECT_EQ(connectors[0].on_startup->command, "C:/tools/helper.exe");
+    EXPECT_EQ(connectors[0].on_startup->timeout_ms, 60000);
+    EXPECT_FALSE(connectors[0].on_enable.has_value());
+}
+
+TEST(ConfigConnectors, OnStartupSurvivesStrictRoundTrip) {
+    ConnectorConfig c;
+    c.id = "delta";
+    c.name = "Delta";
+    c.description = "";
+    c.enabled = true;
+    ConnectorHookConfig hook;
+    hook.command = "C:/tools/helper.exe";
+    c.on_startup = hook;
+
+    auto j = connectors_to_json({c});
+    std::vector<ConnectorConfig> parsed;
+    std::string error;
+    ASSERT_TRUE(parse_connectors_json(j, parsed, &error)) << error;
+    ASSERT_TRUE(parsed[0].on_startup.has_value());
+    EXPECT_EQ(parsed[0].on_startup->command, "C:/tools/helper.exe");
+    EXPECT_EQ(parsed[0].on_startup->timeout_ms, 300000);
+}
+
 TEST(ConfigConnectorsLenientLoad, RoundTripThroughLenientLoadAndSavePreservesHooks) {
     ScopedTempHome home;
     {
@@ -453,7 +486,8 @@ TEST(ConfigConnectorsLenientLoad, RoundTripThroughLenientLoadAndSavePreservesHoo
             "enabled": false,
             "hooks": {
                 "on_enable": {"command": "C:/tools/helper.exe", "args": ["--ensure"], "timeout_ms": 120000},
-                "on_auth_error": {"command": "C:/tools/helper.exe", "timeout_ms": 60000}
+                "on_auth_error": {"command": "C:/tools/helper.exe", "timeout_ms": 60000},
+                "on_startup": {"command": "C:/tools/helper.exe"}
             },
             "auth_error_scope": {"base_url_prefix": "https://models.example.com"}
         }
@@ -476,21 +510,24 @@ TEST(ConfigConnectorsLenientLoad, RoundTripThroughLenientLoadAndSavePreservesHoo
     //    the round trip instead of being silently wiped.
     auto reloaded = acecode::load_config();
     ASSERT_EQ(reloaded.connectors.size(), 1u);
-    const auto& connector = reloaded.connectors[0];
-    EXPECT_TRUE(connector.enabled);
+    const auto& reloaded_connector = reloaded.connectors[0];
+    EXPECT_TRUE(reloaded_connector.enabled);
 
-    ASSERT_TRUE(connector.on_enable.has_value())
+    ASSERT_TRUE(reloaded_connector.on_enable.has_value())
         << "hooks.on_enable was wiped by the lenient load -> save round trip";
-    EXPECT_EQ(connector.on_enable->command, "C:/tools/helper.exe");
-    ASSERT_EQ(connector.on_enable->args.size(), 1u);
-    EXPECT_EQ(connector.on_enable->args[0], "--ensure");
-    EXPECT_EQ(connector.on_enable->timeout_ms, 120000);
+    EXPECT_EQ(reloaded_connector.on_enable->command, "C:/tools/helper.exe");
+    ASSERT_EQ(reloaded_connector.on_enable->args.size(), 1u);
+    EXPECT_EQ(reloaded_connector.on_enable->args[0], "--ensure");
+    EXPECT_EQ(reloaded_connector.on_enable->timeout_ms, 120000);
 
-    ASSERT_TRUE(connector.on_auth_error.has_value())
+    ASSERT_TRUE(reloaded_connector.on_auth_error.has_value())
         << "hooks.on_auth_error was wiped by the lenient load -> save round trip";
-    EXPECT_EQ(connector.on_auth_error->command, "C:/tools/helper.exe");
-    EXPECT_EQ(connector.on_auth_error->timeout_ms, 60000);
+    EXPECT_EQ(reloaded_connector.on_auth_error->command, "C:/tools/helper.exe");
+    EXPECT_EQ(reloaded_connector.on_auth_error->timeout_ms, 60000);
 
-    EXPECT_EQ(connector.auth_error_base_url_prefix, "https://models.example.com")
+    ASSERT_TRUE(reloaded_connector.on_startup.has_value());
+    EXPECT_EQ(reloaded_connector.on_startup->command, "C:/tools/helper.exe");
+
+    EXPECT_EQ(reloaded_connector.auth_error_base_url_prefix, "https://models.example.com")
         << "auth_error_scope.base_url_prefix was wiped by the lenient load -> save round trip";
 }

@@ -138,6 +138,7 @@ struct ConnectorConfig {
     bool enabled = true;
     std::optional<ConnectorHookConfig> on_enable;      // JSON: hooks.on_enable
     std::optional<ConnectorHookConfig> on_auth_error;  // JSON: hooks.on_auth_error
+    std::optional<ConnectorHookConfig> on_startup;     // JSON: hooks.on_startup —— daemon 启动时对 enabled 连接器异步执行一次
     std::string auth_error_base_url_prefix;            // JSON: auth_error_scope.base_url_prefix
 };
 
