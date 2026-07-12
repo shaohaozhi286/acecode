@@ -442,3 +442,26 @@ run('parseExecutableBuiltinCommand:识别 init、compact、goal 和 plan', () =>
   assert.equal(parseExecutableBuiltinCommand('/unknown'), null);
   assert.equal(parseExecutableBuiltinCommand('plain text'), null);
 });
+
+run('parseExecutableBuiltinCommand:识别 rc 与 remote-control(builtin command HTTP 面白名单)', () => {
+  assert.deepEqual(parseExecutableBuiltinCommand('/rc'), {
+    name: 'rc',
+    args: '',
+    display_text: '/rc',
+  });
+  assert.deepEqual(parseExecutableBuiltinCommand('/rc off'), {
+    name: 'rc',
+    args: 'off',
+    display_text: '/rc off',
+  });
+  assert.deepEqual(parseExecutableBuiltinCommand('/rc show'), {
+    name: 'rc',
+    args: 'show',
+    display_text: '/rc show',
+  });
+  assert.deepEqual(parseExecutableBuiltinCommand('/remote-control show'), {
+    name: 'remote-control',
+    args: 'show',
+    display_text: '/remote-control show',
+  });
+});
