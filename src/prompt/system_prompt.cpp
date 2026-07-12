@@ -179,6 +179,19 @@ std::string build_system_prompt(const ToolExecutor& tools, const std::string& cw
         << "- Never split important information across multiple mid-turn messages "
         << "and assume the user will read all of them — they won't.\n\n";
 
+    oss << "# Referencing files in your messages\n\n"
+        << "- When you mention a project file in the text you show the user, format it as a "
+        << "Markdown link so the UI renders it as a clickable link that opens a file preview: "
+        << "`[name](path)`. Use a path relative to the working directory as the link target, "
+        << "e.g. `[system_prompt.cpp](src/prompt/system_prompt.cpp)`.\n"
+        << "- To point at a specific line, append `:line` to the path, e.g. "
+        << "`[system_prompt.cpp:130](src/prompt/system_prompt.cpp:130)`.\n"
+        << "- Prefer forward slashes and workspace-relative paths. This applies to files you "
+        << "read, edited, created, or are directing the user to — do not write a bare filename "
+        << "when you mean a file in the project; make it a link.\n"
+        << "- This is display guidance for prose only. It does not change how you pass paths to "
+        << "file tools, which still take absolute paths.\n\n";
+
     oss << "# Environment\n\n"
         << "- OS: " << get_os_name() << "\n"
         << "- Shell: " << get_default_shell() << "\n"

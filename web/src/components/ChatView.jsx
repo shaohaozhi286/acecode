@@ -2475,16 +2475,21 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
     }
   }, [previewCloseConfirm, previewTabs.length]);
 
-  const openFilePreview = useCallback((path) => {
+  // line 由聊天正文的文件链接(foo.cpp:42)带入,预览打开后滚动到该行并高亮;
+  // 文件树等其它入口不带 line,走原「只打开」语义。
+  const openFilePreview = useCallback((path, line = null) => {
     const location = previewFileLocation({ cwd: sidePanelCwd, path });
     if (!sid || !previewScope || !location.cwd || !location.path) return;
+    // 侧栏折叠时开预览 tab 也不会显示(previewPanelVisible 依赖非折叠),先展开。
+    if (sidePanelCollapsed) onToggleSidePanel?.();
     setPreviewTabState((prev) => openFileTab(prev, {
       scopeKey: previewScope,
       sessionId: sid,
       cwd: location.cwd,
       path: location.path,
+      line,
     }));
-  }, [previewScope, sid, sidePanelCwd]);
+  }, [previewScope, sid, sidePanelCwd, sidePanelCollapsed, onToggleSidePanel]);
 
   const openSessionChangePreview = useCallback((filePath) => {
     if (!sid || !filePath) return;
@@ -2607,6 +2612,8 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
               <InputBar
                 ref={inputRef}
                 variant="hero"
+                pathReferenceApi={api}
+                cwd={selectedHomeWorkspace?.cwd || ''}
                 history={composerHistory}
                 onSubmit={submit}
                 disabled={!!questionForView || homeSubmitting}
@@ -2819,6 +2826,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
               messageId={child.messageId}
               metadata={child.metadata}
               onFork={forkAndSwitch}
+              onOpenFilePreview={openFilePreview}
               continuation={childContinuation}
               showFooter={childShowFooter}
               showAceCodeAvatar={showAceCodeAvatar}
@@ -3051,6 +3059,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
                       messageId={it.messageId}
                       metadata={it.metadata}
                       onFork={forkAndSwitch}
+                      onOpenFilePreview={openFilePreview}
                       continuation={continuation}
                       showFooter={showFooter}
                       showAceCodeAvatar={showAceCodeAvatar}
@@ -3114,6 +3123,8 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
       />
       <InputBar
         ref={inputRef}
+        pathReferenceApi={api}
+        cwd={ref?.cwd || health?.cwd || ''}
         busy={busy}
         goal={goal}
         goalStopping={goalStopping}

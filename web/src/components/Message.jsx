@@ -155,6 +155,7 @@ function AssistantBubble({
   streaming,
   messageId,
   onFork,
+  onOpenFilePreview,
   continuation,
   showFooter,
   showAceCodeAvatar,
@@ -162,6 +163,19 @@ function AssistantBubble({
   const html = { __html: renderMarkdown(content || '') };
   const chrome = assistantChromeState({ showAceCodeAvatar, continuation });
   const handleMarkdownClick = useCallback(async (event) => {
+    // 1) 本地文件链接 → 在中间详情页开预览。必须拦下默认导航,否则相对 href 会跳到
+    //    http://<host>/<path> 命中 SPA 兜底(白屏/错误页),外链形态的还会开新标签页。
+    const fileAnchor = event.target?.closest?.('a[data-file-path]');
+    if (fileAnchor) {
+      event.preventDefault();
+      event.stopPropagation();
+      const path = fileAnchor.getAttribute('data-file-path') || '';
+      const lineAttr = fileAnchor.getAttribute('data-file-line');
+      const line = lineAttr ? Number(lineAttr) : null;
+      if (path) onOpenFilePreview?.(path, line);
+      return;
+    }
+    // 2) 代码块复制按钮(原逻辑)。
     const text = codeTextFromCopyButtonTarget(event.target);
     if (text == null) return;
     event.preventDefault();
@@ -172,7 +186,7 @@ function AssistantBubble({
     } catch (e) {
       toast({ kind: 'err', text: '复制失败:' + (e?.message || '') });
     }
-  }, []);
+  }, [onOpenFilePreview]);
   // ACECode 头像永久隐藏;保留等宽空白占位,避免消息正文相对旧布局跳动。
   return (
     <div className={`flex ${chrome.gapClass} max-w-[88%] group relative`}>
@@ -275,6 +289,7 @@ export const Message = memo(function Message({
   messageId,
   metadata,
   onFork,
+  onOpenFilePreview,
   continuation,
   showFooter = true,
   showAceCodeAvatar = false,
@@ -296,6 +311,7 @@ export const Message = memo(function Message({
     return <AssistantBubble content={content} contentParts={contentParts}
                              ts={ts} streaming={streaming}
                              messageId={messageId} onFork={onFork}
+                             onOpenFilePreview={onOpenFilePreview}
                              continuation={continuation}
                              showFooter={showFooter}
                              showAceCodeAvatar={showAceCodeAvatar} />;

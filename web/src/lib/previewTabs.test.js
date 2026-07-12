@@ -36,6 +36,45 @@ run('openFileTab scopes files by workspace and reuses duplicate paths', () => {
   assert.equal(activePreviewTab(state, { scopeKey: 'workspace-a', sessionId: 's1' }).path, 'src/main.cpp');
 });
 
+// 场景:聊天正文 foo.cpp:42 链接带行号打开文件预览。
+// 期望:新 tab 记录 line + lineRevision=1;同 tab 再次带行号打开时 line 更新且
+// revision 递增(重复点击同一链接也要重新触发滚动);不带行号的打开(文件树
+// 点击)不清已有定位、revision 不动。
+run('openFileTab records focus line and bumps revision on repeat', () => {
+  let state = {};
+  state = openFileTab(state, { scopeKey: 'w', sessionId: 's1', cwd: 'C:/a', path: 'src/a.cpp', line: 42 });
+  let tab = activePreviewTab(state, { scopeKey: 'w', sessionId: 's1' });
+  assert.equal(tab.line, 42);
+  assert.equal(tab.lineRevision, 1);
+
+  // 同一链接再点一次:line 相同,revision 必须递增才能重新滚动
+  state = openFileTab(state, { scopeKey: 'w', sessionId: 's1', cwd: 'C:/a', path: 'src/a.cpp', line: 42 });
+  tab = activePreviewTab(state, { scopeKey: 'w', sessionId: 's1' });
+  assert.equal(tab.lineRevision, 2);
+
+  // 换行号:line 更新
+  state = openFileTab(state, { scopeKey: 'w', sessionId: 's1', cwd: 'C:/a', path: 'src/a.cpp', line: 7 });
+  tab = activePreviewTab(state, { scopeKey: 'w', sessionId: 's1' });
+  assert.equal(tab.line, 7);
+  assert.equal(tab.lineRevision, 3);
+
+  // 不带行号重开(文件树点击):保留定位,revision 不动
+  state = openFileTab(state, { scopeKey: 'w', sessionId: 's1', cwd: 'C:/a', path: 'src/a.cpp' });
+  tab = activePreviewTab(state, { scopeKey: 'w', sessionId: 's1' });
+  assert.equal(tab.line, 7);
+  assert.equal(tab.lineRevision, 3);
+});
+
+// 边界:非法行号(0/负数/NaN/非数字)一律当作未带行号,tab 不携带 line 字段。
+run('openFileTab ignores invalid line values', () => {
+  for (const bad of [0, -3, NaN, 'x']) {
+    const state = openFileTab({}, { scopeKey: 'w', sessionId: 's1', cwd: 'C:/a', path: 'src/a.cpp', line: bad });
+    const tab = activePreviewTab(state, { scopeKey: 'w', sessionId: 's1' });
+    assert.equal(tab.line, undefined, `line=${bad} 应被忽略`);
+    assert.equal(tab.lineRevision, undefined, `lineRevision(line=${bad}) 应被忽略`);
+  }
+});
+
 run('previewFileLocation splits absolute Windows paths when cwd is unavailable', () => {
   assert.deepEqual(
     previewFileLocation({ cwd: '', path: 'C:\\Users\\shao\\ttt\\hello.txt' }),

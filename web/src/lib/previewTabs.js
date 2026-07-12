@@ -119,21 +119,33 @@ function nextActiveAfterClose(tabs, closedKey) {
   return tabs[index + 1]?.key || tabs[index - 1]?.key || '';
 }
 
-export function openFileTab(state, { scopeKey = '', sessionId = '', cwd = '', path = '' } = {}) {
+export function openFileTab(state, { scopeKey = '', sessionId = '', cwd = '', path = '', line = null } = {}) {
   const normalizedPath = normalizeTreePath(path);
   if (!scopeKey || !normalizedPath) return state || {};
   const source = state && typeof state === 'object' ? state : {};
   const tabs = source.fileTabsByScope?.[scopeKey] || [];
   const key = fileTabKey(scopeKey, normalizedPath);
-  const exists = tabs.some((tab) => tab.key === key);
-  const nextTabs = exists ? tabs : [...tabs, {
-    key,
-    type: PREVIEW_TAB_TYPES.FILE,
-    scopeKey,
-    cwd,
-    path: normalizedPath,
-    title: normalizedPath.split('/').pop() || normalizedPath,
-  }];
+  // 聊天正文的 foo.cpp:42 链接带行号进来:tab 记录 line + lineRevision(仿
+  // expandedFileRevision 模式)。revision 每次带行号打开都递增,让重复点击同一
+  // 链接也能触发预览重新滚动。不带行号的打开(文件树点击)不清已有定位。
+  const focusLine = Number.isFinite(line) && line > 0 ? Math.floor(line) : null;
+  const existing = tabs.find((tab) => tab.key === key);
+  let nextTabs;
+  if (existing) {
+    nextTabs = focusLine == null ? tabs : tabs.map((tab) => (tab.key === key
+      ? { ...tab, line: focusLine, lineRevision: (tab.lineRevision || 0) + 1 }
+      : tab));
+  } else {
+    nextTabs = [...tabs, {
+      key,
+      type: PREVIEW_TAB_TYPES.FILE,
+      scopeKey,
+      cwd,
+      path: normalizedPath,
+      title: normalizedPath.split('/').pop() || normalizedPath,
+      ...(focusLine != null ? { line: focusLine, lineRevision: 1 } : {}),
+    }];
+  }
   return {
     ...source,
     fileTabsByScope: {

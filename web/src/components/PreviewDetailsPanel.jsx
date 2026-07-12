@@ -261,6 +261,8 @@ export function PreviewDetailsPanel({
         api={api}
         cwd={activeCwd}
         path={active.path}
+        focusLine={active.line || null}
+        focusLineRevision={active.lineRevision || 0}
         wrapPreview={wrapPreview}
         onToggleWrapPreview={() => setWrapPreview((prev) => !prev)}
       />

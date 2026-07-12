@@ -33,7 +33,15 @@ async function copyWithToast(text, okText) {
   else toast({ kind: 'err', text: '复制失败:' + (result.error || '') });
 }
 
-export function FilePreviewContent({ api, cwd, path, wrapPreview, onToggleWrapPreview }) {
+export function FilePreviewContent({
+  api,
+  cwd,
+  path,
+  focusLine = null,
+  focusLineRevision = 0,
+  wrapPreview,
+  onToggleWrapPreview,
+}) {
   const [state, setState] = useState({
     status: 'idle',
     kind: 'text',
@@ -47,6 +55,7 @@ export function FilePreviewContent({ api, cwd, path, wrapPreview, onToggleWrapPr
   });
   const [markdownSource, setMarkdownSource] = useState(false);
   const [imagePreview, setImagePreview] = useState(null);
+  const previewScrollRef = useRef(null);
 
   useEffect(() => {
     const handler = (event) => {
@@ -182,6 +191,29 @@ export function FilePreviewContent({ api, cwd, path, wrapPreview, onToggleWrapPr
     return () => { cancelled = true; };
   }, [api, cwd, path]);
 
+  // 聊天正文 foo.md:42 链接定位 markdown 文件时切到源码视图 —— 渲染视图没有行的
+  // 概念,滚不到指定行。必须声明在上方加载 effect 之后:同一 commit 内 effect 按
+  // 声明序执行,加载 effect 会把 markdownSource 重置为 false,这里要排在它后面
+  // set true 才能赢。(移到加载 effect 之前会被重置覆盖,勿动。)
+  useEffect(() => {
+    if (focusLine != null && filePreviewKind(path) === 'markdown') {
+      setMarkdownSource(true);
+    }
+  }, [focusLine, focusLineRevision, path]);
+
+  // 滚动到 focusLine(高亮由渲染时的 .ace-line-focus class 承担)。依赖说明:
+  //   - focusLineRevision:重复点击同一链接 revision 递增,line 相同也重新滚动;
+  //   - state.status:首次打开时 effect 先跑在 loading 视图(ref 为 null),内容
+  //     加载完成转 ok 后必须重跑一次才真正滚到;
+  //   - markdownSource:markdown 文件先切源码视图、行号表挂载后重跑才滚。
+  useEffect(() => {
+    if (focusLine == null || state.status !== 'ok') return;
+    const host = previewScrollRef.current;
+    if (!host) return;
+    const row = host.querySelector(`.ace-line-table tbody tr:nth-child(${focusLine})`);
+    if (row) row.scrollIntoView({ block: 'center' });
+  }, [focusLine, focusLineRevision, state.status, markdownSource]);
+
   if (!path) {
     return <div className="ace-empty-state">未选中文件,请在「文件」中点击一个文件</div>;
   }
@@ -274,7 +306,7 @@ export function FilePreviewContent({ api, cwd, path, wrapPreview, onToggleWrapPr
   const gutterW = String(lines.length).length;
   const html = `<table class="ace-line-table"><tbody>${
     lines.map((ln, i) =>
-      `<tr><td class="ace-line-no" style="width:${gutterW + 1}ch">${i + 1}</td><td class="ace-line-code">${ln || ' '}</td></tr>`
+      `<tr${i + 1 === focusLine ? ' class="ace-line-focus"' : ''}><td class="ace-line-no" style="width:${gutterW + 1}ch">${i + 1}</td><td class="ace-line-code">${ln || ' '}</td></tr>`
     ).join('')
   }</tbody></table>`;
   const wrapTitle = wrapPreview ? '关闭自动换行' : '开启自动换行';
@@ -323,6 +355,7 @@ export function FilePreviewContent({ api, cwd, path, wrapPreview, onToggleWrapPr
           />
         ) : (
           <div
+            ref={previewScrollRef}
             className="h-full overflow-auto text-[11px] ace-preview"
             dangerouslySetInnerHTML={{ __html: html }}
           />

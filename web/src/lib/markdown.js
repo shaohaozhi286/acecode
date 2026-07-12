@@ -7,6 +7,7 @@
 
 import MarkdownIt from 'markdown-it';
 import taskLists from 'markdown-it-task-lists';
+import { classifyFileLink } from './fileLink.js';
 
 import hljs from 'highlight.js/lib/core';
 import c          from 'highlight.js/lib/languages/c';
@@ -113,23 +114,29 @@ md.renderer.rules.fence = (tokens, idx) => {
 };
 
 // URL scheme 白名单。markdown-it 的 validateLink 默认放过 javascript: + data:,
-// 我们收紧:只允许 http/https/mailto 或相对路径(/, ./, ../, #)。
-md.validateLink = (url) => {
-  const t = String(url).trim();
-  if (!t) return false;
-  return /^(https?:|mailto:|\/|\.|#)/i.test(t);
-};
+// 我们靠 classifyFileLink 收紧:放行外链(http/https/mailto)、页内锚点、本地文件
+// 路径(相对 / POSIX 绝对 / Windows 盘符),拒绝 javascript:/data: 等危险 scheme。
+// 旧实现的白名单 /^(https?:|mailto:|\/|\.|#)/ 会把裸相对路径 `docs/foo.md` 判非法,
+// 导致模型引用的文件链接被剥成纯文本 —— 见 fileLink.js。
+md.validateLink = (url) => classifyFileLink(url).kind !== 'reject';
 
-// link 默认 target=_blank rel=noreferrer(避免 referer 泄漏)
+// link_open:外链加 target=_blank rel=noreferrer(避免 referer 泄漏 + 新标签页);
+// 本地文件链接打 data-file-path/data-file-line + class,交给 Message.jsx 的点击拦截
+// 在中间详情页开预览,而不是让浏览器导航到 http://<host>/<path> 兜底页。
 const defaultLinkOpen = md.renderer.rules.link_open
   || ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options));
 md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
   const token = tokens[idx];
-  // 只有外链(http/https)才加 target=_blank;相对链接(#anchor)保持当前页
   const href = token.attrGet('href') || '';
-  if (/^https?:/i.test(href)) {
+  const info = classifyFileLink(href);
+  if (info.kind === 'external') {
     token.attrSet('target', '_blank');
     token.attrSet('rel', 'noreferrer');
+  } else if (info.kind === 'file') {
+    token.attrSet('data-file-path', info.path);
+    if (info.line != null) token.attrSet('data-file-line', String(info.line));
+    const cls = token.attrGet('class');
+    token.attrSet('class', cls ? cls + ' ace-file-link' : 'ace-file-link');
   }
   return defaultLinkOpen(tokens, idx, options, env, self);
 };

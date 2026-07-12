@@ -2739,6 +2739,17 @@ body {
   white-space: pre;
   vertical-align: top;
 }
+/* 聊天正文 foo.cpp:42 链接定位的目标行:整行 accent 淡底 + 行号列左侧粗边。
+   行号列是 sticky 且自带背景,必须单独覆盖背景色,否则横向滚动时高亮断在沟槽处。 */
+.ace-line-focus .ace-line-code {
+  background: rgba(var(--ace-accent-rgb), 0.14);
+}
+.ace-line-focus .ace-line-no {
+  background: rgba(var(--ace-accent-rgb), 0.20);
+  color: var(--ace-accent);
+  box-shadow: inset 2px 0 0 var(--ace-accent);
+}
+
 .ace-side-preview-code[data-wrap="true"] .ace-line-table {
   width: 100%;
   min-width: 0;
