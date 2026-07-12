@@ -100,6 +100,16 @@ void RemoteControlHub::set_outbound_sender(std::shared_ptr<OutboundSender> sende
     cv_.notify_all();
 }
 
+void RemoteControlHub::set_session_id(std::string session_id) {
+    std::lock_guard<std::mutex> lk(mu_);
+    session_id_ = std::move(session_id);
+}
+
+void RemoteControlHub::set_outbound_result_observer(OutboundResultObserver observer) {
+    std::lock_guard<std::mutex> lk(mu_);
+    outbound_result_observer_ = std::move(observer);
+}
+
 InboundResult RemoteControlHub::handle_inbound(const std::string& text,
                                                const std::string& provided_token) {
     InboundSubmit submit;
@@ -208,6 +218,14 @@ void RemoteControlHub::worker_loop() {
             ++stats_.outbound_failed;
             LOG_WARN("[remote-control] outbound send failed (seq=" +
                      std::to_string(msg.seq) + "): " + error);
+        }
+        // 结果观察者:拷贝后锁外调用,观察者内部可能回头拿别的锁
+        // (daemon 保活判定),持 mu_ 调用有锁序风险。
+        OutboundResultObserver observer = outbound_result_observer_;
+        if (observer) {
+            lk.unlock();
+            observer(ok);
+            lk.lock();
         }
     }
 }

@@ -995,12 +995,26 @@ SessionEntry* SessionRegistry::lookup(const std::string& id) {
     return entry ? entry.get() : nullptr;
 }
 
+void SessionRegistry::set_external_command_handler(ExternalCommandHandler handler) {
+    std::lock_guard<std::mutex> lk(external_handler_mu_);
+    external_command_handler_ = std::move(handler);
+}
+
 BuiltinCommandResult SessionRegistry::execute_builtin_command(
     const std::string& id,
     const BuiltinCommandRequest& request) {
     if (request.name != "init" && request.name != "compact" &&
         request.name != "goal" && request.name != "plan" &&
         request.name != "lsp") {
+        // 内置名单之外:先给宿主注册的兜底处理器(daemon 托管 /rc 走这里),
+        // 没有兜底或兜底不认时保持原 UnsupportedCommand 语义。锁外调用,
+        // handler 内部可以安全地回头 acquire()/emit。
+        ExternalCommandHandler handler;
+        {
+            std::lock_guard<std::mutex> lk(external_handler_mu_);
+            handler = external_command_handler_;
+        }
+        if (handler) return handler(id, request);
         return {BuiltinCommandStatus::UnsupportedCommand, "unsupported command"};
     }
 

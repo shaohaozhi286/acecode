@@ -306,6 +306,9 @@ struct RemoteControlConfig {
     std::string token;         // 空 = 首次启用时生成并持久化
     std::string outbound_url;  // manual 出站 webhook;空 = 仅入站/等待插件
     std::string default_channel;
+    // daemon 托管模式:/rc 绑定的 Web 会话 id。非空且该会话存在时,daemon
+    // worker 启动即自动 start 服务 + 激活默认 channel + 重建绑定。TUI 不读写。
+    std::string bound_session_id;
     std::map<std::string, ChannelPluginConfig> channels;
 };
 

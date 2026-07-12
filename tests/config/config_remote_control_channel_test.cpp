@@ -3,6 +3,7 @@
 #include "config/config.hpp"
 
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <nlohmann/json.hpp>
@@ -96,4 +97,90 @@ TEST(ConfigRemoteControlChannel, PersistsNonDefaultValues) {
     EXPECT_EQ(rc["channels"]["chat"]["settings"]["auto_login"], true);
 
     std::filesystem::remove(path, ec);
+}
+
+TEST(ConfigRemoteControlChannel, OmitsDefaultBoundSessionId) {
+    const auto suffix = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto path = std::filesystem::temp_directory_path() /
+        ("acecode-remote-control-bound-default-test-" + std::to_string(suffix) + ".json");
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+
+    AppConfig cfg;
+    EXPECT_TRUE(cfg.remote_control.bound_session_id.empty());
+    save_config(cfg, path.string());
+
+    std::ifstream ifs(path);
+    ASSERT_TRUE(ifs.is_open());
+    const auto j = nlohmann::json::parse(ifs);
+    if (j.contains("remote_control")) {
+        EXPECT_FALSE(j["remote_control"].contains("bound_session_id"));
+    }
+
+    std::filesystem::remove(path, ec);
+}
+
+TEST(ConfigRemoteControlChannel, PersistsBoundSessionId) {
+    const auto suffix = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto path = std::filesystem::temp_directory_path() /
+        ("acecode-remote-control-bound-persist-test-" + std::to_string(suffix) + ".json");
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+
+    AppConfig cfg;
+    cfg.remote_control.bound_session_id = "ses-daemon-42";
+    ASSERT_TRUE(validate_config(cfg).empty());
+    save_config(cfg, path.string());
+
+    std::ifstream ifs(path);
+    ASSERT_TRUE(ifs.is_open());
+    const auto j = nlohmann::json::parse(ifs);
+    ASSERT_TRUE(j.contains("remote_control"));
+    EXPECT_EQ(j["remote_control"]["bound_session_id"], "ses-daemon-42");
+
+    std::filesystem::remove(path, ec);
+}
+
+// 真实 load_config() 解析路径的往返验证(home 覆写到临时目录,与
+// config_first_init_test 同款做法):bound_session_id 落盘后重启能读回。
+TEST(ConfigRemoteControlChannel, BoundSessionIdRoundTripsThroughLoadConfig) {
+#ifdef _WIN32
+    constexpr const char* kHomeEnvName = "USERPROFILE";
+#else
+    constexpr const char* kHomeEnvName = "HOME";
+#endif
+    const char* previous = std::getenv(kHomeEnvName);
+    const std::string previous_home = previous ? previous : "";
+
+    const auto suffix = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto temp_home = std::filesystem::temp_directory_path() /
+        ("acecode-remote-control-bound-home-" + std::to_string(suffix));
+    std::filesystem::create_directories(temp_home);
+#ifdef _WIN32
+    _putenv_s(kHomeEnvName, temp_home.string().c_str());
+#else
+    setenv(kHomeEnvName, temp_home.string().c_str(), 1);
+#endif
+    reset_acecode_home_created_flag_for_test();
+
+    {
+        AppConfig cfg;
+        cfg.remote_control.bound_session_id = "ses-rebuild-me";
+        cfg.remote_control.token = "tok-abc";
+        save_config(cfg);
+
+        AppConfig reloaded = load_config();
+        EXPECT_EQ(reloaded.remote_control.bound_session_id, "ses-rebuild-me");
+        EXPECT_EQ(reloaded.remote_control.token, "tok-abc");
+    }
+
+#ifdef _WIN32
+    _putenv_s(kHomeEnvName, previous_home.c_str());
+#else
+    if (previous) setenv(kHomeEnvName, previous_home.c_str(), 1);
+    else unsetenv(kHomeEnvName);
+#endif
+    reset_acecode_home_created_flag_for_test();
+    std::error_code ec;
+    std::filesystem::remove_all(temp_home, ec);
 }

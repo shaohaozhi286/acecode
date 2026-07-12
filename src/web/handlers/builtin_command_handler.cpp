@@ -74,8 +74,11 @@ BuiltinCommandHttpParseResult parse_command_text(
 } // namespace
 
 bool is_supported_builtin_command(const std::string& name) {
+    // rc / remote-control 不由 SessionRegistry 原生执行,而是经其 external
+    // command handler 由 daemon 宿主(worker.cpp 注册的 SessionChannelBinder)
+    // 承接;这里只负责放行 HTTP 网关。
     return name == "init" || name == "compact" || name == "goal" || name == "plan" ||
-           name == "lsp";
+           name == "lsp" || name == "rc" || name == "remote-control";
 }
 
 BuiltinCommandHttpParseResult parse_builtin_command_request(const std::string& body) {

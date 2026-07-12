@@ -62,3 +62,25 @@ TEST(BuiltinCommandHandler, RejectsBadJson) {
     EXPECT_EQ(parsed.status, 400);
     EXPECT_NE(parsed.error.find("bad json"), std::string::npos);
 }
+
+// daemon 托管 remote control:/rc 与 /remote-control 必须能通过 HTTP 命令
+// 网关(实际执行由 SessionRegistry 的 external command handler 承接)。
+TEST(BuiltinCommandHandler, ParsesRemoteControlCommands) {
+    auto rc = acecode::web::parse_builtin_command_request(
+        R"({"command":"/rc"})");
+    ASSERT_TRUE(rc.ok) << rc.error;
+    EXPECT_EQ(rc.request.name, "rc");
+    EXPECT_EQ(rc.request.args, "");
+
+    auto rc_off = acecode::web::parse_builtin_command_request(
+        R"({"command":"/rc off"})");
+    ASSERT_TRUE(rc_off.ok) << rc_off.error;
+    EXPECT_EQ(rc_off.request.name, "rc");
+    EXPECT_EQ(rc_off.request.args, "off");
+
+    auto full = acecode::web::parse_builtin_command_request(
+        R"({"command":"/remote-control show"})");
+    ASSERT_TRUE(full.ok) << full.error;
+    EXPECT_EQ(full.request.name, "remote-control");
+    EXPECT_EQ(full.request.args, "show");
+}

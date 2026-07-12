@@ -2105,3 +2105,55 @@ TEST(LocalSessionClient, OperationsOnUnknownSessionAreNoOp) {
     EXPECT_NO_THROW(client.destroy_session("nope"));
     EXPECT_NO_THROW(client.unsubscribe("nope", 12345u));
 }
+
+// 场景: daemon 宿主(worker.cpp)注册了 external command handler 后,非内置
+// 命令名交给 handler 处理(daemon 托管 /rc 走这条路);内置命令名仍走原生
+// 分支不被劫持;handler 未注册时保持原 UnsupportedCommand 行为。
+TEST(SessionRegistry, ExternalCommandHandlerReceivesNonBuiltinCommands) {
+    TestFixture fx;
+    LocalSessionClient client(fx.registry);
+    auto id = client.create_session({});
+
+    std::vector<std::pair<std::string, std::string>> seen;
+    fx.registry.set_external_command_handler(
+        [&seen](const std::string& session_id,
+                const acecode::BuiltinCommandRequest& request)
+            -> acecode::BuiltinCommandResult {
+            seen.emplace_back(session_id, request.name + "|" + request.args);
+            if (request.name == "rc" || request.name == "remote-control") {
+                return {acecode::BuiltinCommandStatus::Accepted, "handled"};
+            }
+            return {acecode::BuiltinCommandStatus::UnsupportedCommand,
+                    "unsupported command"};
+        });
+
+    acecode::BuiltinCommandRequest rc_req;
+    rc_req.name = "rc";
+    rc_req.args = "show";
+    auto rc_result = client.execute_builtin_command(id, rc_req);
+    EXPECT_EQ(rc_result.status, acecode::BuiltinCommandStatus::Accepted);
+    EXPECT_EQ(rc_result.message, "handled");
+    ASSERT_EQ(seen.size(), 1u);
+    EXPECT_EQ(seen[0].first, id);
+    EXPECT_EQ(seen[0].second, "rc|show");
+
+    // handler 拒绝的名字保持 UnsupportedCommand。
+    acecode::BuiltinCommandRequest other;
+    other.name = "model";
+    EXPECT_EQ(client.execute_builtin_command(id, other).status,
+              acecode::BuiltinCommandStatus::UnsupportedCommand);
+
+    // 内置命令名绝不进 handler(compact 走原生 submit_compact 分支)。
+    acecode::BuiltinCommandRequest compact;
+    compact.name = "compact";
+    auto compact_result = client.execute_builtin_command(id, compact);
+    EXPECT_EQ(compact_result.status, acecode::BuiltinCommandStatus::Accepted);
+    EXPECT_EQ(seen.size(), 2u);  // 只有 rc + model 进过 handler
+
+    // 清除 handler 后回到原行为。
+    fx.registry.set_external_command_handler({});
+    EXPECT_EQ(client.execute_builtin_command(id, rc_req).status,
+              acecode::BuiltinCommandStatus::UnsupportedCommand);
+
+    fx.registry.destroy(id);
+}

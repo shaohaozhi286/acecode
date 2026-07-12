@@ -183,6 +183,13 @@ public:
         const std::string& id,
         const BuiltinCommandRequest& request);
 
+    // 宿主(daemon worker)可注册的兜底命令处理器:内置命令名之外的请求交给
+    // 它(如 /rc 的 daemon 托管实现)。未注册时保持 UnsupportedCommand 原语义。
+    // handler 在 HTTP 线程上被调,不持 registry 锁;传空清除。
+    using ExternalCommandHandler = std::function<BuiltinCommandResult(
+        const std::string& session_id, const BuiltinCommandRequest& request)>;
+    void set_external_command_handler(ExternalCommandHandler handler);
+
     // Run a one-turn, tool-free question against the latest provider-facing
     // context snapshot. This never mutates AgentLoop/SessionManager state.
     SideQuestionResult ask_side_question(const std::string& id,
@@ -228,6 +235,8 @@ private:
     SessionRegistryDeps                                          deps_;
     mutable std::mutex                                            mu_;
     std::unordered_map<std::string, std::shared_ptr<SessionEntry>> entries_;
+    mutable std::mutex                                            external_handler_mu_;
+    ExternalCommandHandler                                        external_command_handler_;
     mutable std::mutex                                            title_threads_mu_;
     std::vector<std::thread>                                      title_threads_;
 };

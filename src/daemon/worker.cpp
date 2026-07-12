@@ -42,6 +42,7 @@
 #include "../tool/web_search/region_detector.hpp"
 #include "../tool/web_search/web_search_tool.hpp"
 #include "../network/proxy_resolver.hpp"
+#include "../remote_control/session_channel_binder.hpp"
 #include "../utils/logger.hpp"
 #include "../utils/paths.hpp"
 #include "../utils/power_inhibitor.hpp"
@@ -446,6 +447,48 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     subagent_deps->client   = &client;
     subagent_deps->config   = &cfg_mut;
 
+    const std::string config_path =
+        acecode::path_to_utf8(acecode::path_from_utf8(acecode::get_acecode_dir()) / "config.json");
+
+    // ---- daemon 托管 remote control(/rc 绑定 Web 会话到 channel 插件)----
+    // 声明在 registry/client 之后(析构先于两者,退订时 AgentLoop 仍活着)。
+    // 行为契约见 session_channel_binder.hpp 文件头 ①-⑥。
+    acecode::rc::SessionChannelBinderDeps rc_binder_deps;
+    rc_binder_deps.service     = &acecode::rc::remote_control_service();
+    rc_binder_deps.client      = &client;
+    rc_binder_deps.config      = &cfg_mut;
+    rc_binder_deps.config_path = config_path;
+    rc_binder_deps.session_active = [&registry](const std::string& id) {
+        return registry.acquire(id) != nullptr;
+    };
+    rc_binder_deps.session_resumable = [&client](const std::string& id) {
+        return client.resume_session(id);
+    };
+    acecode::rc::SessionChannelBinder rc_binder(std::move(rc_binder_deps));
+
+    // /rc 与 /remote-control:HTTP 命令网关放行后经 registry 的兜底处理器
+    // 到达 binder;执行结果同时以 system message 透出到该会话的聊天流
+    // (与 /lsp 的反馈方式一致)。
+    registry.set_external_command_handler(
+        [&rc_binder, &registry](const std::string& id,
+                                const acecode::BuiltinCommandRequest& request)
+            -> acecode::BuiltinCommandResult {
+            if (request.name != "rc" && request.name != "remote-control") {
+                return {acecode::BuiltinCommandStatus::UnsupportedCommand,
+                        "unsupported command"};
+            }
+            auto entry = registry.acquire(id);
+            if (!entry || !entry->loop) {
+                return {acecode::BuiltinCommandStatus::UnknownSession,
+                        "unknown session"};
+            }
+            auto outcome = rc_binder.execute_command(id, request.args);
+            entry->loop->emit_system_message(outcome.message);
+            return {outcome.ok ? acecode::BuiltinCommandStatus::Accepted
+                               : acecode::BuiltinCommandStatus::Failed,
+                    outcome.message};
+        });
+
     // 控制台 PTY 注册表(add-console-dock):启动期探测一次 backend,
     // 析构时 stop_all 杀掉全部 shell(栈对象,server.run() 返回后回收)。
     // 默认 shell:+ 旁下拉框选中的 default_shell(探测可用)→ 平台默认 → legacy
@@ -465,8 +508,7 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     web_deps.web_cfg            = &cfg_mut.web;   // 含 port_override 后的 effective port
     web_deps.daemon_cfg         = &cfg_mut.daemon;
     web_deps.app_config         = &cfg_mut;
-    web_deps.config_path        =
-        acecode::path_to_utf8(acecode::path_from_utf8(acecode::get_acecode_dir()) / "config.json");
+    web_deps.config_path        = config_path;
     web_deps.cwd                = cwd;
     web_deps.projects_dir       = projects_dir;
     web_deps.token              = token;
@@ -550,6 +592,11 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
             server.track_subagent(child_id);
         };
 
+    // 行为①:持久化的 bound_session_id 非空且会话存在(active 或可从磁盘
+    // resume)→ 自动 start rc 服务 + 激活默认 channel + 重建绑定。失败只记
+    // 日志,不阻塞 daemon 启动。
+    rc_binder.rebuild_from_config();
+
     // 信号 / 终止 → 主循环退出。Crow app.run() 阻塞跑;另起个观察线程在
     // term 信号时调 server.stop() 让 Crow 退出。这样我们就在主线程上 join。
     std::thread watcher([&server] {
@@ -559,6 +606,11 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     });
 
     int rc = server.run();
+    // 行为⑥:teardown 第一步先停 remote-control(不再接受 channel 入站,
+    // 也避免静态析构阶段才停 rc 监听的顺序问题 —— 镜像 TUI teardown)。
+    // 随后 handler 不会再被 HTTP 调到(server 已停),清空防悬垂。
+    rc_binder.shutdown();
+    registry.set_external_command_handler({});
     // server 已停止:清空回调,防止残余会话线程在析构窗口内经回调触达已析构的 server。
     auth_recovery.set_on_config_refreshed({});
     request_terminate(); // 唤醒 watcher(防 server 自然退出但信号还没来)

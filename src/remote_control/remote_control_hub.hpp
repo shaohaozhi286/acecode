@@ -95,6 +95,15 @@ public:
     // 运行期替换出站通道(/remote-control url <u> 热更新)。
     void set_outbound_sender(std::shared_ptr<OutboundSender> sender);
 
+    // 换绑会话时更新出站消息的 session 归属(daemon 托管模式:/rc 换绑不
+    // 重启服务,但后续 notify_assistant_text 必须立即以新会话名义出站)。
+    void set_session_id(std::string session_id);
+
+    // 出站投递结果观察者:worker 线程每次 send 后(不论成败)锁外回调一次。
+    // daemon 保活判定(连续失败 ≥N 触发幂等再激活)依赖这个信号;传空清除。
+    using OutboundResultObserver = std::function<void(bool ok)>;
+    void set_outbound_result_observer(OutboundResultObserver observer);
+
     // HTTP listener 调用。注意:与 daemon 的"loopback 免 token"不同,remote
     // control 即使来自 loopback 也强制校验 token —— 任何本机进程都不应能向一个
     // 有工具执行能力的 agent 会话注入指令。
@@ -137,6 +146,7 @@ private:
     std::string session_id_;
     InboundSubmit inbound_submit_;
     std::shared_ptr<OutboundSender> sender_;
+    OutboundResultObserver outbound_result_observer_;
     std::deque<OutboundMessage> queue_;
     std::thread worker_;
     std::uint64_t next_seq_ = 1;
