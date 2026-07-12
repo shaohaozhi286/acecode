@@ -246,3 +246,73 @@ TEST(RemoteControlHub, ForwardCursorRoundTrips) {
     hub.set_forward_cursor(42);
     EXPECT_EQ(hub.forward_cursor(), 42u);
 }
+
+// 场景:agent 回合内发生工具调用。期望:走同一条出站队列/worker 路径到达
+// sender,payload JSON 的 type 是 "tool_call"、含 tool_name/args_preview,
+// 且不含 text 键(tool_call 消息没有 text,序列化时应省略该键而不是输出
+// 空字符串)。
+TEST(RemoteControlHub, NotifyToolCallDeliversToolCallJson) {
+    RemoteControlHub hub;
+    auto sender = std::make_shared<FakeSender>();
+    hub.enable("secret", "sess-9", sender);
+
+    nlohmann::json args = {{"command", "ls -la"}};
+    hub.notify_tool_call("sess-9", "bash", args);
+    ASSERT_TRUE(sender->wait_for_count(1, std::chrono::seconds(5)));
+
+    auto sent = sender->sent();
+    ASSERT_EQ(sent.size(), 1u);
+    EXPECT_EQ(sent[0].type, "tool_call");
+    EXPECT_EQ(sent[0].session_id, "sess-9");
+    EXPECT_EQ(sent[0].tool_name, "bash");
+    EXPECT_EQ(sent[0].args_preview, "ls -la");
+    EXPECT_TRUE(sent[0].text.empty());
+
+    auto j = acecode::rc::outbound_message_to_json(sent[0]);
+    EXPECT_EQ(j["type"], "tool_call");
+    EXPECT_EQ(j["tool_name"], "bash");
+    EXPECT_EQ(j["args_preview"], "ls -la");
+    EXPECT_FALSE(j.contains("text"));
+    EXPECT_FALSE(j.contains("in_reply_to"));
+
+    hub.disable();
+}
+
+// 场景:hub 未启用或无 sender 时发生工具调用。期望:静默忽略,不入队也不
+// 崩溃 —— 与 notify_assistant_text 的 no-op 语义一致。
+TEST(RemoteControlHub, NotifyToolCallWithoutSenderIsNoop) {
+    RemoteControlHub hub;
+    hub.enable("secret", "sess-1", nullptr);
+    hub.notify_tool_call("sess-1", "bash", nlohmann::json{{"command", "ignored"}});
+
+    auto sender = std::make_shared<FakeSender>();
+    hub.set_outbound_sender(sender);
+    hub.notify_tool_call("sess-1", "bash", nlohmann::json{{"command", "real"}});
+    ASSERT_TRUE(sender->wait_for_count(1, std::chrono::seconds(5)));
+    EXPECT_EQ(sender->sent().size(), 1u);
+    EXPECT_EQ(sender->sent()[0].args_preview, "real");
+
+    hub.disable();
+}
+
+// 场景:outbound_message_to_json 序列化留空的可选字段。期望:空 in_reply_to
+// (以及空 tool_name/args_preview)不输出对应键;非空 in_reply_to 正常输出。
+TEST(RemoteControlHub, ToJsonOmitsEmptyOptionalFields) {
+    OutboundMessage msg;
+    msg.type = "assistant_message";
+    msg.session_id = "sess-1";
+    msg.text = "hello";
+    msg.timestamp_ms = 123;
+    msg.seq = 1;
+    // in_reply_to / tool_name / args_preview 保持默认空字符串。
+
+    auto j = acecode::rc::outbound_message_to_json(msg);
+    EXPECT_FALSE(j.contains("in_reply_to"));
+    EXPECT_FALSE(j.contains("tool_name"));
+    EXPECT_FALSE(j.contains("args_preview"));
+
+    msg.in_reply_to = "inbound-42";
+    auto j2 = acecode::rc::outbound_message_to_json(msg);
+    ASSERT_TRUE(j2.contains("in_reply_to"));
+    EXPECT_EQ(j2["in_reply_to"], "inbound-42");
+}
