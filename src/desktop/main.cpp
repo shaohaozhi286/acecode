@@ -1028,6 +1028,25 @@ int main(int argc, char** argv) {
     host.bind("aceDesktop_closeWindow", [&](const std::string& /*req*/) -> std::string {
         return nlohmann::json{{"ok", host.close_window()}}.dump();
     });
+    // 前端 ThemeProvider 在主题变化(含 mount 首次)时推送 body 底色
+    // (--ace-bg),native 把 host/webview_widget 窗口类背景刷 + WebView2
+    // DefaultBackgroundColor 一起换 — 快速 resize 时新暴露区域的打底色
+    // 跟随主题,不再闪黑/闪白。非法颜色 ok:false(哨兵,不猜),前端静默吞。
+    host.bind("aceDesktop_setWindowBackgroundColor", [&](const std::string& req) -> std::string {
+        std::string color;
+        try {
+            auto arr = nlohmann::json::parse(req);
+            if (arr.is_array() && !arr.empty() && arr[0].is_string()) {
+                color = arr[0].get<std::string>();
+            }
+        } catch (...) {
+            // 非法 JSON 走下面的 ok:false 分支
+        }
+        if (color.empty()) {
+            return nlohmann::json{{"ok", false}, {"error", "expect [\"#rrggbb\"]"}}.dump();
+        }
+        return nlohmann::json{{"ok", host.set_background_color(color)}}.dump();
+    });
     host.bind("aceDesktop_focusWindow", [&](const std::string& /*req*/) -> std::string {
         bring_window_foreground();
         return nlohmann::json{{"ok", true}}.dump();

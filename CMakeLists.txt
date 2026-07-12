@@ -191,6 +191,7 @@ set(ACECODE_DESKTOP_SUPPORT_SOURCES
     ${CMAKE_SOURCE_DIR}/src/desktop/tray_icon_win.cpp
     ${CMAKE_SOURCE_DIR}/src/desktop/url_builder.cpp
     ${CMAKE_SOURCE_DIR}/src/desktop/webview2_runtime_probe.cpp
+    ${CMAKE_SOURCE_DIR}/src/desktop/window_background.cpp
     ${CMAKE_SOURCE_DIR}/src/desktop/window_chrome.cpp
 )
 

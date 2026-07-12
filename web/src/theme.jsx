@@ -8,6 +8,7 @@
 
 import { createContext, useCallback, useContext, useEffect } from 'react';
 import { usePreference } from './lib/usePreference.js';
+import { pushWindowBackgroundColor } from './lib/desktopWindowBackground.js';
 
 const STORAGE_KEY = 'ace.theme';
 const ThemeCtx = createContext({ theme: 'light', toggle: () => {}, set: () => {} });
@@ -28,6 +29,10 @@ export function ThemeProvider({ children }) {
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
+    // data-theme 落地后 --ace-bg 的 computed 值同步可读;把 body 底色推给
+    // 桌面壳,native 换窗口打底色(快速 resize 的新暴露区域随主题,不闪黑/白)。
+    // 非桌面壳环境内部 no-op。
+    pushWindowBackgroundColor();
   }, [theme]);
 
   const toggle = useCallback(() => setTheme((t) => (t === 'dark' ? 'light' : 'dark')), [setTheme]);

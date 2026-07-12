@@ -2,6 +2,7 @@ import './questionPicker.test.js';
 import './pendingQuestions.test.js';
 import './stickyUserContext.test.js';
 import './desktopContextMenu.test.js';
+import './desktopWindowBackground.test.js';
 import './framelessResize.test.js';
 import './sessionStatus.test.js';
 import './codeBlockCopy.test.js';

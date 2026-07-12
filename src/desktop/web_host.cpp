@@ -2,6 +2,7 @@
 
 #include "web_host_close_policy.hpp"
 #include "webview2_runtime_probe.hpp"
+#include "window_background.hpp"
 #include "window_chrome.hpp"
 
 #include "../utils/encoding.hpp"
@@ -668,6 +669,78 @@ void configure_browser_defaults(webview::webview& host) {
     settings->Release();
 }
 
+// ── 窗口打底色(快速 resize 防黑边)────────────────────────────────────
+// 窗口树三层(host HWND → webview_widget → WebView2 合成器)没有任何一层
+// 自带背景 — 两个窗口类的 hbrBackground 都是 NULL,放大窗口时新暴露区域
+// 不被擦除,肉眼看到黑闪;WebView2 自己的 DefaultBackgroundColor 默认白,
+// 暗色主题下则闪白。修法与 Electron/Tauri 同构:三层涂同一个颜色,启动
+// 默认取前端浅色 body 底色(kDefaultWindowBackground = #f5f5f2),前端
+// ThemeProvider 再按实际主题经 aceDesktop_setWindowBackgroundColor 推送。
+
+COLORREF background_colorref(WindowBackgroundColor color) {
+    return RGB(color.r, color.g, color.b);
+}
+
+// 换掉窗口**类**的背景刷。类刷子由 DefWindowProc 在 WM_ERASEBKGND 时使用,
+// 恰好覆盖 webview 库注册的 webview_widget / webview 类(它们的 wndproc 把
+// 未处理消息都交给 DefWindowProc,库源码零改动)。旧刷子恒为 CreateSolidBrush
+// 产物(或 NULL),DeleteObject 安全 — 本文件从不使用 COLOR_* 系统色伪句柄。
+void apply_class_background_brush(HWND hwnd, WindowBackgroundColor color) {
+    if (!hwnd || !::IsWindow(hwnd)) return;
+    HBRUSH brush = ::CreateSolidBrush(background_colorref(color));
+    if (!brush) return;
+    ::SetLastError(ERROR_SUCCESS);
+    LONG_PTR previous = ::SetClassLongPtrW(
+        hwnd, GCLP_HBRBACKGROUND, reinterpret_cast<LONG_PTR>(brush));
+    if (previous == 0 && ::GetLastError() != ERROR_SUCCESS) {
+        // 类刷子没换上,把新刷子收回,避免 GDI 句柄泄漏。
+        ::DeleteObject(brush);
+        return;
+    }
+    if (previous != 0) {
+        ::DeleteObject(reinterpret_cast<HBRUSH>(previous));
+    }
+}
+
+// WebView2 合成器自己的打底色(页面未渲染区域,如导航间隙 / resize 追帧)。
+// 启动首帧之前的窗口由 WEBVIEW2_DEFAULT_BACKGROUND_COLOR 环境变量负责
+// (Impl 构造体首,官方文档:仅属性设置在生效前仍会闪默认白);运行时主题
+// 切换走这里的属性更新。
+void apply_webview2_default_background(webview::webview& host,
+                                       WindowBackgroundColor color) {
+    auto controller_result = host.browser_controller();
+    if (!controller_result.ok()) return;
+    auto* controller = static_cast<ICoreWebView2Controller*>(controller_result.value());
+    if (!controller) return;
+    ICoreWebView2Controller2* controller2 = nullptr;
+    HRESULT hr = controller->QueryInterface(IID_PPV_ARGS(&controller2));
+    if (FAILED(hr) || !controller2) {
+        log_webview_setting_failure("QueryInterface ICoreWebView2Controller2", hr);
+        return;
+    }
+    COREWEBVIEW2_COLOR background{255, color.r, color.g, color.b};
+    hr = controller2->put_DefaultBackgroundColor(background);
+    controller2->Release();
+    if (FAILED(hr)) {
+        log_webview_setting_failure("put_DefaultBackgroundColor", hr);
+    }
+}
+
+// 三层统一入口:host 窗口类 + webview_widget 类 + WebView2 合成器。
+// host_hwnd 在 offscreen 路径是我们的 ACECodeDesktopHostWindow 类(注册时
+// 已带默认刷,这里换成等价新刷无害),在降级路径是 webview 库自建的
+// `webview` 类(NULL 刷,必须靠这里补上)。GUI 主线程 only。
+void apply_window_background(webview::webview& host,
+                             HWND host_hwnd,
+                             WindowBackgroundColor color) {
+    apply_class_background_brush(host_hwnd, color);
+    auto widget_result = host.widget();
+    if (widget_result.ok() && widget_result.value()) {
+        apply_class_background_brush(static_cast<HWND>(widget_result.value()), color);
+    }
+    apply_webview2_default_background(host, color);
+}
+
 // ── Windows 系统文件拖放接管 ───────────────────────────────────────────
 // 拖文件到非可放下区时,WebView2(默认 AllowExternalDrop)会试图导航 / 新窗口
 // 打开 file://。这里拦截这两条路径:命中 file: scheme → 取消默认动作(防整页
@@ -904,8 +977,15 @@ bool register_host_window_class(HINSTANCE instance) {
     wc.lpszClassName = kHostWindowClassName;
     wc.lpfnWndProc = host_window_proc;
     wc.hCursor = ::LoadCursorW(nullptr, MAKEINTRESOURCEW(32512)); // IDC_ARROW
+    // 快速 resize 时新暴露区域由类背景刷打底;不设(NULL)= 不擦除 = 黑闪。
+    // 默认取前端浅色 body 底色,主题切换后由 apply_class_background_brush 换刷。
+    wc.hbrBackground = ::CreateSolidBrush(background_colorref(kDefaultWindowBackground));
     if (::RegisterClassExW(&wc)) return true;
-    return ::GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
+    const DWORD register_error = ::GetLastError();
+    if (wc.hbrBackground) {
+        ::DeleteObject(wc.hbrBackground);
+    }
+    return register_error == ERROR_CLASS_ALREADY_EXISTS;
 }
 
 HWND create_offscreen_host_window(RECT& target_monitor) {
@@ -1336,6 +1416,19 @@ struct WebHost::Impl {
         //   (3) Edge fallback 仍失败或没找到 Edge → 抛 WebHostInitializationError
         //       给 desktop main。main 还有最后一层 Edge --app=<daemon URL>
         //       兜底,不能在 WebHost 构造函数里直接 ExitProcess。
+
+        // WebView2 创建之前把默认打底色钉进环境变量。官方文档:仅靠
+        // put_DefaultBackgroundColor 属性,首帧之前仍会闪默认白;环境变量是
+        // 唯一覆盖「首次渲染之前」窗口的通道,且只对首次环境创建生效,运行时
+        // 主题切换走 apply_webview2_default_background 的属性更新。
+        {
+            const std::string env_value =
+                webview2_default_background_env_value(kDefaultWindowBackground);
+            const std::wstring env_value_w(env_value.begin(), env_value.end());
+            ::SetEnvironmentVariableW(L"WEBVIEW2_DEFAULT_BACKGROUND_COLOR",
+                                      env_value_w.c_str());
+        }
+
         auto make_webview_default_path = [&]() -> std::unique_ptr<webview::webview> {
             try {
                 return std::make_unique<webview::webview>(
@@ -1397,6 +1490,10 @@ struct WebHost::Impl {
         }
         if (w) {
             configure_browser_defaults(*w);
+            // 三层打底(host 类刷 / widget 类刷 / WebView2 合成器)统一走默认色。
+            // offscreen 路径的 host 类注册时已带刷,这里等价换新;降级路径
+            // (webview 库自建 `webview` 类窗口)的 NULL 刷靠这里补上。
+            apply_window_background(*w, hwnd(), kDefaultWindowBackground);
         }
     }
 #else
@@ -1549,6 +1646,21 @@ bool WebHost::open_dev_tools() {
     webview->Release();
     return ok;
 #else
+    return false;
+#endif
+}
+bool WebHost::set_background_color(const std::string& color_text) {
+#ifdef _WIN32
+    auto color = parse_window_background_color(color_text);
+    if (!color) return false;
+    if (!impl_->w) return false;
+    apply_window_background(*impl_->w, impl_->hwnd(), *color);
+    return true;
+#else
+    // v1 只覆盖 Windows(WebView2 的 resize 黑边是本 bridge 存在的动因;
+    // WKWebView/WebKitGTK 的 resize 重绘同步得多)。非 Windows 返回 false,
+    // 前端 fire-and-forget 静默吞。
+    (void)color_text;
     return false;
 #endif
 }

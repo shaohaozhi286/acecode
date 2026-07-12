@@ -70,6 +70,14 @@ public:
     // 平台目前返回 false。
     bool open_dev_tools();
 
+    // 设置窗口打底色(快速 resize 时新暴露区域的擦除色):host/webview_widget
+    // 两层窗口类背景刷 + WebView2 DefaultBackgroundColor 一起换。入参
+    // "#RRGGBB" / "RRGGBB",非法形态或非 Windows 平台返回 false(哨兵,不猜)。
+    // 前端 ThemeProvider 在主题变化时经 aceDesktop_setWindowBackgroundColor
+    // 推送,启动默认为浅色 body 底色(window_background.hpp)。GUI 主线程 only
+    // (bind 回调天然满足)。
+    bool set_background_color(const std::string& color_text);
+
     // Frameless desktop chrome helpers. Windows uses native non-client messages,
     // Linux uses GTK move/resize/window-state APIs, and macOS uses Cocoa window
     // operations.
