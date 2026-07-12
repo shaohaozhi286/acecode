@@ -134,6 +134,65 @@ TEST(RemoteControlService, PluginSubmittedUserTextUsesTokenProtectedSessionInput
     service.stop();
 }
 
+// 场景:入站 JSON 带可选的 metadata(object)/channel_message_id(string)。
+// 期望:200,文本照常提交,metadata 不被解析注入(只是被容忍) ——
+// 这是留给外部 channel bridge 接入的协议留口,当前实现只记录
+// channel_message_id 用于排障。
+TEST(RemoteControlService, InboundAcceptsMetadataAndChannelMessageId) {
+    RemoteControlService service;
+    SubmitCapture capture;
+    service.hub().set_inbound_submit([&](const std::string& t) { capture.push(t); });
+
+    RemoteControlOptions opts;
+    opts.port = next_port();
+    opts.token = "tok-meta";
+    opts.session_id = "sess-meta";
+    std::string error;
+    ASSERT_TRUE(service.start(opts, &error)) << error;
+
+    nlohmann::json body{
+        {"text", "hello from channel"},
+        {"channel_message_id", "chan-msg-001"},
+        {"metadata", {{"source", "test-channel"}, {"nested", {{"a", 1}}}}},
+    };
+    auto res = cpr::Post(cpr::Url{base_url(opts.port) + "/rc/send"},
+                         cpr::Header{{"Content-Type", "application/json"},
+                                     {"X-ACECode-RC-Token", "tok-meta"}},
+                         cpr::Body{body.dump()},
+                         cpr::Timeout{2000});
+    EXPECT_EQ(res.status_code, 200);
+    ASSERT_TRUE(capture.wait_for_count(1, std::chrono::seconds(5)));
+    EXPECT_EQ(capture.received[0], "hello from channel");
+
+    service.stop();
+}
+
+// 场景:入站 JSON 带未知顶层字段(不在契约内的字段名)。期望:200,不因
+// 未知字段拒绝 —— 协议向前兼容,channel bridge 侧可以随时间增加字段。
+TEST(RemoteControlService, InboundToleratesUnknownTopLevelField) {
+    RemoteControlService service;
+    SubmitCapture capture;
+    service.hub().set_inbound_submit([&](const std::string& t) { capture.push(t); });
+
+    RemoteControlOptions opts;
+    opts.port = next_port();
+    opts.token = "tok-unknown";
+    opts.session_id = "sess-unknown";
+    std::string error;
+    ASSERT_TRUE(service.start(opts, &error)) << error;
+
+    auto res = cpr::Post(cpr::Url{base_url(opts.port) + "/rc/send"},
+                         cpr::Header{{"Content-Type", "application/json"},
+                                     {"X-ACECode-RC-Token", "tok-unknown"}},
+                         cpr::Body{R"({"text":"still works","future_field":true,"other":[1,2,3]})"},
+                         cpr::Timeout{2000});
+    EXPECT_EQ(res.status_code, 200);
+    ASSERT_TRUE(capture.wait_for_count(1, std::chrono::seconds(5)));
+    EXPECT_EQ(capture.received[0], "still works");
+
+    service.stop();
+}
+
 // 场景:端口已被占用(另一个服务实例在监听)。期望:start 预检立即失败并
 // 给出可读错误,不留半启动状态 —— hub 不应处于 enabled。
 TEST(RemoteControlService, StartFailsWhenPortInUse) {
