@@ -283,6 +283,15 @@ std::vector<ConnectorConfig> newly_enabled_connectors(
     return newly;
 }
 
+std::vector<ConnectorConfig> startup_hook_connectors(
+        const std::vector<ConnectorConfig>& connectors) {
+    std::vector<ConnectorConfig> out;
+    for (const auto& connector : connectors) {
+        if (connector.enabled && connector.on_startup) out.push_back(connector);
+    }
+    return out;
+}
+
 void load_connectors_lenient(const nlohmann::json& value,
                              std::vector<ConnectorConfig>& out) {
     if (!value.is_array()) {

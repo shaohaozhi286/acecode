@@ -531,3 +531,27 @@ TEST(ConfigConnectorsLenientLoad, RoundTripThroughLenientLoadAndSavePreservesHoo
     EXPECT_EQ(reloaded_connector.auth_error_base_url_prefix, "https://models.example.com")
         << "auth_error_scope.base_url_prefix was wiped by the lenient load -> save round trip";
 }
+
+TEST(ConfigConnectors, StartupHookConnectorsFiltersEnabledWithHook) {
+    ConnectorHookConfig hook;
+    hook.command = "helper.exe";
+
+    ConnectorConfig enabled_with_hook;
+    enabled_with_hook.id = "a";
+    enabled_with_hook.name = "A";
+    enabled_with_hook.enabled = true;
+    enabled_with_hook.on_startup = hook;
+
+    ConnectorConfig disabled_with_hook = enabled_with_hook;
+    disabled_with_hook.id = "b";
+    disabled_with_hook.enabled = false;
+
+    ConnectorConfig enabled_no_hook;
+    enabled_no_hook.id = "c";
+    enabled_no_hook.name = "C";
+    enabled_no_hook.enabled = true;
+
+    auto out = startup_hook_connectors({enabled_with_hook, disabled_with_hook, enabled_no_hook});
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_EQ(out[0].id, "a");
+}

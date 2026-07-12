@@ -473,6 +473,11 @@ std::vector<ConnectorConfig> newly_enabled_connectors(
     const std::vector<ConnectorConfig>& before,
     const std::vector<ConnectorConfig>& after);
 
+// 返回 enabled 且配置了 on_startup 钩子的连接器。daemon 启动时对它们各异步
+// 执行一次钩子(登录检查类命令自身保证幂等)。
+std::vector<ConnectorConfig> startup_hook_connectors(
+    const std::vector<ConnectorConfig>& connectors);
+
 // Load config from ~/.acecode/config.json, with env var overrides.
 // Creates default config if missing.
 AppConfig load_config();

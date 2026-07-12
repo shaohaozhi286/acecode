@@ -18,6 +18,7 @@
 #include "../hooks/hook_config.hpp"
 #include "../hooks/hook_manager.hpp"
 #include "../hooks/hook_payload.hpp"
+#include "../hooks/hook_runner.hpp"
 #include "../session/local_session_client.hpp"
 #include "../session/session_registry.hpp"
 #include "../skills/skill_registry.hpp"
@@ -515,6 +516,30 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     auth_recovery.set_on_config_refreshed([&server]() {
         server.refresh_saved_models_from_disk();
     });
+
+    // 连接器 on_startup 钩子:daemon 启动时对 enabled 连接器各异步执行一次
+    // (如外部登录器的登录态检查)。退出 0 后重读磁盘 saved_models —— 钩子可能
+    // 回写了配置;无回写时重读无副作用。detached 线程捕获 &server 与下方
+    // subagent_deps->on_spawn / watcher 的既有 on_enable detached 模式风险
+    // 一致(server.run() 尚未阻塞前钩子线程即可能仍在跑;终审已接受该模式)。
+    for (const auto& connector : acecode::startup_hook_connectors(cfg_mut.connectors)) {
+        const acecode::ConnectorHookConfig hook = *connector.on_startup;
+        const std::string connector_id = connector.id;
+        std::thread([hook, connector_id, &server]() {
+            acecode::HookCommandSpec cmd;
+            cmd.command = hook.command;
+            cmd.args = hook.args;
+            const acecode::HookProcessResult result = acecode::run_hook_process(
+                cmd, std::string{}, hook.timeout_ms, std::string{});
+            LOG_INFO("connector on_startup finished; id=" + connector_id +
+                     " started=" + (result.started ? "true" : "false") +
+                     " timed_out=" + (result.timed_out ? "true" : "false") +
+                     " exit=" + std::to_string(result.exit_code));
+            if (result.started && !result.timed_out && result.exit_code == 0) {
+                server.refresh_saved_models_from_disk();
+            }
+        }).detach();
+    }
 
     // 子会话 spawn 后登记到 WebServer,给它挂常驻状态监听器,使其 busy 能广播
     // session_status(否则未被 WS 订阅的子会话永不广播,父会话前端在 wait=true
