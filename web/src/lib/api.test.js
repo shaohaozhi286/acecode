@@ -576,7 +576,7 @@ await run('Upgrade config API reads and writes daemon-backed base_url', async ()
   }
 });
 
-await run('Update API checks status and starts explicit update action', async () => {
+await run('Update API checks status and manages GUI update jobs', async () => {
   const previousFetch = globalThis.fetch;
   const calls = [];
   globalThis.fetch = async (url, opts = {}) => {
@@ -585,28 +585,40 @@ await run('Update API checks status and starts explicit update action', async ()
       ok: true,
       status: opts.method === 'POST' ? 202 : 200,
       headers: { get: () => 'application/json' },
-      json: async () => opts.method === 'POST'
-        ? ({ started: true, latest_version: '9.9.9' })
-        : ({ status: 'available', update_available: true, latest_version: '9.9.9' }),
+      json: async () => {
+        if (url.endsWith('/api/update/status')) {
+          return { status: 'available', update_available: true, latest_version: '9.9.9' };
+        }
+        if (opts.method === 'POST') return { started: true, job_id: 'job-1', target_version: '9.9.9' };
+        return { job_id: 'job-1', state: 'running', phase: 'downloading' };
+      },
     };
   };
   try {
     const client = createApi({ origin: 'http://127.0.0.1:4567', token: 'tok' });
     const status = await client.getUpdateStatus();
     const started = await client.startUpdate();
+    const latest = await client.getLatestUpdateJob();
+    const job = await client.getUpdateJob('job 1');
 
     assert.deepEqual(status, {
       status: 'available',
       update_available: true,
       latest_version: '9.9.9',
     });
-    assert.deepEqual(started, { started: true, latest_version: '9.9.9' });
+    assert.deepEqual(started, { started: true, job_id: 'job-1', target_version: '9.9.9' });
+    assert.deepEqual(latest, { job_id: 'job-1', state: 'running', phase: 'downloading' });
+    assert.deepEqual(job, { job_id: 'job-1', state: 'running', phase: 'downloading' });
     assert.equal(calls[0].url, 'http://127.0.0.1:4567/api/update/status');
     assert.equal(calls[0].opts.method, 'GET');
     assert.equal(calls[0].opts.headers['X-ACECode-Token'], 'tok');
     assert.equal(calls[1].url, 'http://127.0.0.1:4567/api/update/start');
     assert.equal(calls[1].opts.method, 'POST');
     assert.equal(calls[1].opts.headers['X-ACECode-Token'], 'tok');
+    assert.equal(calls[2].url, 'http://127.0.0.1:4567/api/update/job');
+    assert.equal(calls[2].opts.method, 'GET');
+    assert.equal(calls[3].url, 'http://127.0.0.1:4567/api/update/jobs/job%201');
+    assert.equal(calls[3].opts.method, 'GET');
   } finally {
     globalThis.fetch = previousFetch;
   }

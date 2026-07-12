@@ -12,11 +12,6 @@ namespace acecode {
 
 namespace {
 
-// Elapsed time gate for showing the token-count segment in the waiting chip.
-// Chosen to suppress flicker during very short turns (< 3s) while still
-// surfacing the estimate early for anything the user actually waits on.
-constexpr long SHOW_TOKENS_AFTER_MS = 3000;
-
 std::string format_bytes(size_t n) {
     if (n < 1024) return std::to_string(n) + "B";
     if (n < 1024 * 1024) return std::to_string(n / 1024) + "KB";
@@ -25,11 +20,6 @@ std::string format_bytes(size_t n) {
 
 long elapsed_seconds(std::chrono::steady_clock::time_point start) {
     return std::chrono::duration_cast<std::chrono::seconds>(
-        std::chrono::steady_clock::now() - start).count();
-}
-
-long elapsed_ms(std::chrono::steady_clock::time_point start) {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - start).count();
 }
 
@@ -103,55 +93,6 @@ ftxui::Element render_tool_progress(const TuiState& state) {
     rows.push_back(hbox(std::move(status_row)));
     (void)shown;
     return vbox(std::move(rows));
-}
-
-ftxui::Element render_tool_timer_chip(const TuiState& state) {
-    using namespace ftxui;
-    if (!state.tool_running) return text("");
-    const long secs = elapsed_seconds(state.tool_progress.start_time);
-    const auto& th = tui::theme();
-    return hbox({
-        text("  \xE2\x97\x91 ") | color(th.ui.accent),
-        text(tui::pascal_case_tool_name(state.tool_progress.tool_name))
-            | bold | color(th.ui.accent),
-        text("  " + std::to_string(secs) + "s  ") | dim | color(th.ui.accent_alt),
-    });
-}
-
-ftxui::Element render_thinking_timer_chip(const TuiState& state) {
-    using namespace ftxui;
-    // Mutually exclusive with the tool timer: the tool chip wins.
-    if (!state.is_waiting || state.tool_running) return text("");
-
-    const long secs = elapsed_seconds(state.thinking_start_time);
-    const long ms = elapsed_ms(state.thinking_start_time);
-
-    // Timer segment: "  Ns  ".
-    std::string timer_segment = "  " + std::to_string(secs) + "s  ";
-
-    // Token-readout segment, only after the threshold. Prefer the
-    // authoritative completion_tokens from on_usage; fall back to a
-    // chars/4 estimate (tilde-prefixed). Suppress when the estimate
-    // rounds to 0.
-    std::string token_segment;
-    if (ms >= SHOW_TOKENS_AFTER_MS) {
-        if (state.last_completion_tokens_authoritative > 0) {
-            token_segment = std::to_string(state.last_completion_tokens_authoritative) + " tok  ";
-        } else {
-            size_t est = state.streaming_output_chars / 4;
-            if (est > 0) token_segment = "~" + std::to_string(est) + " tok  ";
-        }
-    }
-
-    const auto& th = tui::theme();
-    Elements parts;
-    parts.push_back(text("  \xE2\x97\x8B ") | color(th.ui.accent));
-    parts.push_back(text("Thinking") | bold | color(th.ui.accent));
-    parts.push_back(text(timer_segment) | dim | color(th.ui.accent_alt));
-    if (!token_segment.empty()) {
-        parts.push_back(text(token_segment) | dim | color(th.ui.accent_alt));
-    }
-    return hbox(std::move(parts));
 }
 
 } // namespace acecode

@@ -19,6 +19,32 @@ export function noHomeWorkspaceOption() {
   };
 }
 
+export function homeRefFromWorkspace(workspace, fallbackRef, health) {
+  const source = workspace && typeof workspace === 'object' ? workspace : {};
+  const explicitWorkspace = !!(workspace && typeof workspace === 'object');
+  const fallback = fallbackRef && typeof fallbackRef === 'object' ? fallbackRef : {};
+  const noWorkspace = !!(source.noWorkspace || source.no_workspace);
+  const workspaceHash = source.workspaceHash || source.workspace_hash || source.hash
+    || fallback.workspaceHash || fallback.workspace_hash || '';
+  const cwd = source.cwd || fallback.cwd || health?.cwd || '';
+  const next = { home: true, homeWorkspaceExplicit: explicitWorkspace };
+  if (noWorkspace) {
+    next.noWorkspace = true;
+    next.workspaceHash = '';
+    next.cwd = '';
+    return next;
+  }
+  if (workspaceHash) next.workspaceHash = workspaceHash;
+  if (cwd) next.cwd = cwd;
+  if (source.name || source.workspaceName) next.workspaceName = source.name || source.workspaceName;
+  else if (fallback.workspaceName) next.workspaceName = fallback.workspaceName;
+  for (const key of ['contextId', 'port', 'token']) {
+    if (source[key] != null) next[key] = source[key];
+    else if (fallback[key] != null) next[key] = fallback[key];
+  }
+  return next;
+}
+
 function optionHashes(options = []) {
   return new Set((Array.isArray(options) ? options : [])
     .map((w) => String(w?.hash || ''))

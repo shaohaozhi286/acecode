@@ -118,6 +118,7 @@
 #include "worktree/worktree_core.hpp"
 #include "worktree/worktree_manager.hpp"
 #include "tui/chat_line_measure.hpp"
+#include "tui/chat_message_spacing.hpp"
 #include "tui/chat_scroll.hpp"
 #include "tui/chat_render_window.hpp"
 #include "tui/diff_view.hpp"
@@ -133,6 +134,7 @@
 #include "tui/text_truncation.hpp"
 #include "tui/thick_vscroll_bar.hpp"
 #include "tui/non_selectable.hpp"
+#include "tui/thinking_heartbeat.hpp"
 #include "tui/tool_progress.hpp"
 #include "tui/tool_result_fold.hpp"
 #include "tui/tool_row_format.hpp"
@@ -1667,6 +1669,7 @@ struct ChatScrollRuntime {
     std::vector<int>& message_layout_widths;
     std::vector<acecode::tui::ChatLineMeasure>& message_line_measures;
     std::vector<int>& message_line_counts;
+    std::vector<int>& message_spacer_rows_after;
     int& message_line_count_width;
 };
 
@@ -1733,10 +1736,12 @@ static std::size_t message_render_revision(const TuiState::Message& msg,
 
 // 从测量缓存重建行数数组，滚动数学只看这个轻量数组。
 static void rebuild_message_line_counts_runtime(ChatScrollRuntime& scroll,
-                                                const TuiState& state) {
+                                                 const TuiState& state) {
     scroll.message_line_counts = acecode::tui::chat_line_counts_from_measures(
         scroll.message_line_measures,
         static_cast<int>(state.conversation.size()));
+    scroll.message_spacer_rows_after =
+        acecode::tui::chat_message_spacer_rows_after(state.conversation);
 }
 
 // transcript 被整体替换时，清掉所有旧布局测量。
@@ -1816,6 +1821,7 @@ static void sync_chat_line_counts_from_layout_runtime(ChatScrollRuntime& scroll,
 // 修正聊天焦点，确保焦点、顶部行和 tail-follow 状态一致。
 static void clamp_chat_focus_runtime(TuiState& state,
                                      const std::vector<int>& message_line_counts,
+                                     const std::vector<int>& message_spacer_rows_after,
                                      int viewport_rows) {
     if (state.conversation.empty()) {
         state.chat_focus_index = -1;
@@ -1830,7 +1836,8 @@ static void clamp_chat_focus_runtime(TuiState& state,
     const int max_scroll_top =
         acecode::tui::chat_max_scroll_top_row(message_line_counts,
                                               message_count,
-                                              viewport_rows);
+                                              viewport_rows,
+                                              message_spacer_rows_after);
     if (state.chat_follow_tail) {
         state.chat_focus_index = last;
         state.chat_line_offset =
@@ -1843,9 +1850,11 @@ static void clamp_chat_focus_runtime(TuiState& state,
         acecode::tui::clamp_chat_scroll_top_row(state.chat_scroll_top_row,
                                                 message_line_counts,
                                                 message_count,
-                                                viewport_rows);
+                                                viewport_rows,
+                                                message_spacer_rows_after);
     auto [idx, off] = acecode::tui::chat_focus_from_display_row(
-        message_line_counts, message_count, state.chat_scroll_top_row);
+        message_line_counts, message_count, state.chat_scroll_top_row,
+        message_spacer_rows_after);
     state.chat_focus_index = idx;
     state.chat_line_offset = off;
     state.chat_follow_tail = state.chat_scroll_top_row >= max_scroll_top;
@@ -1853,8 +1862,9 @@ static void clamp_chat_focus_runtime(TuiState& state,
 
 // 按显示行滚动聊天区，返回实际移动的行数。
 static int scroll_chat_by_lines_runtime(TuiState& state,
-                                        const std::vector<int>& message_line_counts,
-                                        int viewport_rows,
+                                         const std::vector<int>& message_line_counts,
+                                         const std::vector<int>& message_spacer_rows_after,
+                                         int viewport_rows,
                                         int delta_lines) {
     if (state.conversation.empty()) return 0;
     const int message_count = static_cast<int>(state.conversation.size());
@@ -1862,7 +1872,8 @@ static int scroll_chat_by_lines_runtime(TuiState& state,
     const int max_scroll_top =
         acecode::tui::chat_max_scroll_top_row(message_line_counts,
                                               message_count,
-                                              viewport_rows);
+                                              viewport_rows,
+                                              message_spacer_rows_after);
     if (state.chat_follow_tail) {
         state.chat_focus_index = last_msg;
         state.chat_line_offset =
@@ -1873,10 +1884,10 @@ static int scroll_chat_by_lines_runtime(TuiState& state,
 
     const int before = acecode::tui::clamp_chat_scroll_top_row(
         state.chat_scroll_top_row, message_line_counts, message_count,
-        viewport_rows);
+        viewport_rows, message_spacer_rows_after);
     const int after = acecode::tui::clamp_chat_scroll_top_row(
         before + delta_lines, message_line_counts, message_count,
-        viewport_rows);
+        viewport_rows, message_spacer_rows_after);
     state.chat_scroll_top_row = after;
     const int actual = after - before;
 
@@ -1888,7 +1899,8 @@ static int scroll_chat_by_lines_runtime(TuiState& state,
         state.chat_follow_tail = true;
     } else {
         auto [idx, off] = acecode::tui::chat_focus_from_display_row(
-            message_line_counts, message_count, after);
+            message_line_counts, message_count, after,
+            message_spacer_rows_after);
         state.chat_focus_index = idx;
         state.chat_line_offset = off;
         state.chat_follow_tail = false;
@@ -3433,6 +3445,7 @@ struct TuiRendererContext {
     std::vector<std::size_t>& message_layout_revisions;
     std::vector<int>& message_layout_widths;
     std::vector<int>& message_line_counts;
+    std::vector<int>& message_spacer_rows_after;
     std::atomic<int>& anim_tick;
     Component& input_with_esc;
     PermissionManager& permissions;
@@ -3459,6 +3472,7 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
     auto& message_layout_revisions = ctx.message_layout_revisions;
     auto& message_layout_widths = ctx.message_layout_widths;
     auto& message_line_counts = ctx.message_line_counts;
+    auto& message_spacer_rows_after = ctx.message_spacer_rows_after;
     auto& anim_tick = ctx.anim_tick;
     auto& input_with_esc = ctx.input_with_esc;
     auto& permissions = ctx.permissions;
@@ -3610,7 +3624,8 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
         acecode::tui::chat_bottom_anchor_top_padding_rows(
         message_line_counts,
         static_cast<int>(state.conversation.size()),
-        chat_viewport_height);
+        chat_viewport_height,
+        message_spacer_rows_after);
     push_spacer_rows(tail_top_padding);
     const auto render_window = acecode::tui::chat_render_window(
         message_line_counts,
@@ -3618,7 +3633,8 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
         state.chat_scroll_top_row,
         chat_viewport_height,
         acecode::tui::default_chat_render_overscan_rows(
-            chat_viewport_height));
+            chat_viewport_height),
+        message_spacer_rows_after);
     push_spacer_rows(render_window.top_spacer_rows);
 
     // drag-autoscroll: 每条消息同时记录两个 box:
@@ -3993,6 +4009,19 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
             }
             message_elements.push_back(
                 tracked_message(i, line | focus_decorator));
+        } else if (msg.role == "turn_done") {
+            // inline-thinking-heartbeat:回合收尾伪行 "● Done for Ns"。
+            // 与推理行同款 "●" 前缀同列对齐、整行 dim —— 视觉上是推理行
+            // 落定后的余烬。显示端专属 role,不进持久化/LLM context。
+            auto line = hbox({
+                text(" \xE2\x97\x8F ") | color(tui::theme().ui.text_dim),
+                paragraph(msg.content) | dim | color(tui::theme().ui.text_dim) | flex,
+            });
+            if (focused_message) {
+                line = line | focus;
+            }
+            message_elements.push_back(
+                tracked_message(i, line | focus_decorator));
         } else if (msg.role == "error") {
             auto line = hbox({
                 text(" ! ") | bold | color(tui::theme().semantic.error),
@@ -4004,7 +4033,8 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
             message_elements.push_back(
                 tracked_message(i, line | focus_decorator));
         }
-        message_elements.push_back(text(""));
+        push_spacer_rows(acecode::tui::chat_spacer_rows_after_at(
+            message_spacer_rows_after, static_cast<int>(i)));
     }
     push_spacer_rows(render_window.bottom_spacer_rows);
 
@@ -4094,9 +4124,29 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
                 chars.push_back(text(".") | color(tui::theme().ui.text_dim));
         }
 
+        // inline-thinking-heartbeat:动画短语右侧挂 "[Ns · ↓ X tokens]" 数据段。
+        // 秒数/token 的刷新搭 anim_tick 动画循环的便车,零额外重绘成本。
+        // thinking_start_time 停在 time_point{} 原点时跳过(未打点时秒数会是
+        // 天文数字,先例见 on_message 处的同款防御)。
+        Element heartbeat = emptyElement();
+        if (state.thinking_start_time.time_since_epoch().count() != 0) {
+            const auto hb_now = std::chrono::steady_clock::now();
+            const long hb_secs = static_cast<long>(
+                std::chrono::duration_cast<std::chrono::seconds>(
+                    hb_now - state.thinking_start_time).count());
+            const long long hb_ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    hb_now - state.thinking_start_time).count();
+            heartbeat = text("  " + tui::format_thinking_heartbeat(
+                                        hb_secs, hb_ms,
+                                        state.turn_completion_tokens_confirmed,
+                                        state.streaming_output_chars))
+                | dim | color(tui::theme().ui.accent_alt);
+        }
         thinking_element = hbox({
             text(" \xE2\x97\x8F ") | color(tui::theme().ui.accent),
             hbox(std::move(chars)),
+            heartbeat,
         });
     }
 
@@ -4544,14 +4594,9 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
     Element goal_el = state.goal_status.empty()
         ? text("")
         : text("  " + state.goal_status + "  ") | dim | color(tui::theme().semantic.success);
-    // Tool timer chip — persistent even when the main progress element is
-    // obscured by overlays or scrolled out of view. Thinking-timer chip
-    // shows elapsed time + live output-token estimate while the agent is
-    // waiting on the LLM. The two are mutually exclusive (thinking chip
-    // returns empty when tool_running is true), so they occupy the same
-    // slot in the bottom bar.
-    Element tool_timer_el = render_tool_timer_chip(state);
-    Element thinking_timer_el = render_thinking_timer_chip(state);
+    // 底部计时 chip(○ Thinking / ◑ Tool)已随 inline-thinking-heartbeat
+    // change 删除:主进度元素在固定布局区,"被 overlay 遮挡/滚出视野"的
+    // 前提不成立;等待期耗时+token 心跳改挂在推理指示行内联段。
     Element bottom_bar;
     if (conhost_compat_layout) {
         auto elapsed_secs = [](std::chrono::steady_clock::time_point start) -> long long {
@@ -4586,16 +4631,15 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
                      std::to_string(secs) + "s  ") |
                 bold | color(tui::theme().ui.accent));
         } else if (state.is_waiting) {
+            // conhost 兼容布局不渲染 thinking_element,这行内联文本是该布局
+            // 唯一的活性信号 —— 保留,但取数与主布局心跳段同源:回合累计
+            // 已确认 + 当前请求估算,单调递增,不带 ~ 前缀。
             const long secs = elapsed_secs(state.thinking_start_time);
             std::string wait = "Thinking " + std::to_string(secs) + "s";
-            if (state.last_completion_tokens_authoritative > 0) {
-                wait += " " +
-                    std::to_string(state.last_completion_tokens_authoritative) +
-                    " tok";
-            } else if (state.streaming_output_chars >= 4) {
-                wait += " ~" +
-                    std::to_string(state.streaming_output_chars / 4) +
-                    " tok";
+            const long long readout = state.turn_completion_tokens_confirmed +
+                static_cast<long long>(state.streaming_output_chars / 4);
+            if (readout > 0) {
+                wait += " " + tui::format_token_count_short(readout) + " tok";
             }
             wait += "  ";
             status_parts.push_back(text(wait) | bold | color(tui::theme().ui.accent));
@@ -4609,7 +4653,6 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
         bottom_bar = hbox({
             text("  Press ctrl+c again to exit") | dim | color(tui::theme().ui.text_dim),
             filler(),
-            tool_timer_el,
             goal_el,
             token_el,
             load_el,
@@ -4619,8 +4662,6 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
         bottom_bar = hbox({
             text("  [YOLO]") | bold | color(tui::theme().ui.accent),
             filler(),
-            thinking_timer_el,
-            tool_timer_el,
             goal_el,
             token_el,
             load_el,
@@ -4630,8 +4671,6 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
         bottom_bar = hbox({
             text("  esc / ctrl+c to interrupt") | dim | color(tui::theme().ui.text_dim),
             filler(),
-            thinking_timer_el,
-            tool_timer_el,
             goal_el,
             token_el,
             load_el,
@@ -4641,7 +4680,6 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
         bottom_bar = hbox({
             text("  shift+tab: cycle permission mode") | dim | color(tui::theme().ui.text_dim),
             filler(),
-            tool_timer_el,
             goal_el,
             token_el,
             load_el,
@@ -4831,6 +4869,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
     std::vector<int> message_layout_widths;
     std::vector<acecode::tui::ChatLineMeasure> message_line_measures;
     std::vector<int> message_line_counts;
+    std::vector<int> message_spacer_rows_after;
     int message_line_count_width = 0;
 
     acecode::TerminalCapabilities term_caps;
@@ -4880,6 +4919,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
         message_layout_widths,
         message_line_measures,
         message_line_counts,
+        message_spacer_rows_after,
         message_line_count_width,
     };
     auto chat_viewport_rows = [&chat_box]() -> int {
@@ -4894,13 +4934,18 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
     auto invalidate_chat_line_measure_at = [&chat_scroll](int index) {
         invalidate_chat_line_measure_at_runtime(chat_scroll, index);
     };
-    auto clamp_chat_focus = [&state, &message_line_counts, &chat_viewport_rows]() {
-        clamp_chat_focus_runtime(state, message_line_counts, chat_viewport_rows());
+    auto clamp_chat_focus = [&state, &message_line_counts,
+                             &message_spacer_rows_after, &chat_viewport_rows]() {
+        clamp_chat_focus_runtime(state, message_line_counts,
+                                 message_spacer_rows_after,
+                                 chat_viewport_rows());
     };
     auto scroll_chat_by_lines =
-        [&state, &message_line_counts, &chat_viewport_rows](int delta_lines) -> int {
+        [&state, &message_line_counts, &message_spacer_rows_after,
+         &chat_viewport_rows](int delta_lines) -> int {
             return scroll_chat_by_lines_runtime(
-                state, message_line_counts, chat_viewport_rows(), delta_lines);
+                state, message_line_counts, message_spacer_rows_after,
+                chat_viewport_rows(), delta_lines);
         };
 
     // ---- Copilot auth flow (background thread) ----
@@ -4921,7 +4966,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                 // thinking_start_time 会停在 time_point{} 原点，底部秒数会巨大。
                 state.thinking_start_time = std::chrono::steady_clock::now();
                 state.streaming_output_chars = 0;
-                state.last_completion_tokens_authoritative = 0;
+                state.turn_completion_tokens_confirmed = 0;
                 state.is_waiting = true;
                 state.conversation.push_back({"system", "Authenticating with GitHub Copilot...", false});
             }
@@ -5015,7 +5060,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
             state.current_thinking_phrase = get_random_thinking_phrase(is_user_chinese(state));
             state.thinking_start_time = std::chrono::steady_clock::now();
             state.streaming_output_chars = 0;
-            state.last_completion_tokens_authoritative = 0;
+            state.turn_completion_tokens_confirmed = 0;
         }
         state.is_waiting = busy;
         screen.PostEvent(Event::Custom);
@@ -5102,7 +5147,10 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
         std::lock_guard<std::mutex> lk(state.mu);
         state.token_status = token_tracker.format_status(config.context_window);
         state.token_percent = token_tracker.context_percent(config.context_window);
-        state.last_completion_tokens_authoritative = usage.completion_tokens;
+        // 心跳读数走回合累计:本请求的 completion_tokens 入账,同时清零流式
+        // 估算基数(该请求的 delta 已计入确认值,不清会双重计数)。
+        state.turn_completion_tokens_confirmed += usage.completion_tokens;
+        state.streaming_output_chars = 0;
         screen.PostEvent(Event::Custom);
     };
     callbacks.on_goal_status = [&state, &screen](const std::string& status) {
@@ -5625,9 +5673,35 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
             state.current_thinking_phrase = get_random_thinking_phrase(is_user_chinese(state));
             state.thinking_start_time = std::chrono::steady_clock::now();
             state.streaming_output_chars = 0;
-            state.last_completion_tokens_authoritative = 0;
+            state.turn_completion_tokens_confirmed = 0;
         }
+        const bool was_waiting = state.is_waiting;
         state.is_waiting = busy;
+        // inline-thinking-heartbeat:回合正常收尾时追加显示端伪行
+        // "● Done for Ns"(只进 state.conversation,不进 LLM context、不进
+        // session JSONL,resume 后自然消失)。用户 Esc/Ctrl+C 中断的回合与
+        // <1s 的瞬时回合不追加(前者已有中断反馈,后者纯噪音)。中断标记
+        // 无论是否追加都在此消费复位。
+        if (was_waiting && !busy) {
+            const bool interrupted = state.turn_interrupted_by_user;
+            state.turn_interrupted_by_user = false;
+            if (!interrupted &&
+                state.thinking_start_time.time_since_epoch().count() != 0) {
+                const long done_secs = static_cast<long>(
+                    std::chrono::duration_cast<std::chrono::seconds>(
+                        std::chrono::steady_clock::now() -
+                        state.thinking_start_time).count());
+                if (done_secs >= 1) {
+                    state.conversation.push_back({"turn_done",
+                        "Done for " + std::to_string(done_secs) + "s", false});
+                    if (state.drag_scrollbar_phase ==
+                        TuiState::DragScrollbarPhase::Idle) {
+                        state.chat_follow_tail = true;
+                    }
+                    clamp_chat_focus();
+                }
+            }
+        }
         // remote-control 出站:回合结束时把游标之后新增的 assistant 文本逐条
         // 转发给 IM 桥。挂在回合结束而不是 on_message:流式期间 assistant 气泡
         // 原地增量更新,逐 delta 转发会把半截文本刷给 IM。游标语义见 hub 注释。
@@ -5671,7 +5745,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
             state.current_thinking_phrase = get_random_thinking_phrase(is_user_chinese(state));
             state.thinking_start_time = std::chrono::steady_clock::now();
             state.streaming_output_chars = 0;
-            state.last_completion_tokens_authoritative = 0;
+            state.turn_completion_tokens_confirmed = 0;
             state.is_waiting = true;
             lk.unlock();
             coordinate_mcp_before_first_turn();
@@ -5704,7 +5778,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                     get_random_thinking_phrase(is_user_chinese(state));
                 state.thinking_start_time = std::chrono::steady_clock::now();
                 state.streaming_output_chars = 0;
-                state.last_completion_tokens_authoritative = 0;
+                state.turn_completion_tokens_confirmed = 0;
                 state.is_waiting = true;
                 lk.unlock();
                 coordinate_mcp_before_first_turn();
@@ -5847,7 +5921,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
         };
 
     // Wrap with CatchEvent to handle all keyboard input
-    auto input_with_esc = CatchEvent(input_renderer, [&state, &screen, &clamp_chat_focus, &chat_viewport_rows, &sync_chat_line_counts_from_layout, &reset_chat_line_measure_state, &invalidate_chat_line_measure_at, &auth_done, &cmd_registry, &agent_loop, &provider_slot, &provider_accessor, &config, &token_tracker, &permissions, &session_manager, &scroll_chat_by_lines, &chat_box, &scrollbar_box, &ask_scrollbar_box, &ask_overlay_box, &message_line_counts, &mcp_manager, &tools, &skill_registry, &memory_registry, &working_dir, &insert_pasted_text_at_cursor, &paste_system_clipboard_text, &paste_system_clipboard_image, &handle_pending_attachment_focus_event, &cancel_ctrl_c_exit_locked, &coordinate_mcp_before_first_turn, &subagent_host, &submit_tui_input, &submit_tui_text](Event event) {
+    auto input_with_esc = CatchEvent(input_renderer, [&state, &screen, &clamp_chat_focus, &chat_viewport_rows, &sync_chat_line_counts_from_layout, &reset_chat_line_measure_state, &invalidate_chat_line_measure_at, &auth_done, &cmd_registry, &agent_loop, &provider_slot, &provider_accessor, &config, &token_tracker, &permissions, &session_manager, &scroll_chat_by_lines, &chat_box, &scrollbar_box, &ask_scrollbar_box, &ask_overlay_box, &message_line_counts, &message_spacer_rows_after, &mcp_manager, &tools, &skill_registry, &memory_registry, &working_dir, &insert_pasted_text_at_cursor, &paste_system_clipboard_text, &paste_system_clipboard_image, &handle_pending_attachment_focus_event, &cancel_ctrl_c_exit_locked, &coordinate_mcp_before_first_turn, &subagent_host, &submit_tui_input, &submit_tui_text](Event event) {
 #if ACECODE_TUI_INPUT_TRACE
         if (event != Event::Custom &&
             !event.is_cursor_position() &&
@@ -6280,7 +6354,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                         const int viewport_rows = chat_viewport_rows();
                         const int max_top = acecode::tui::chat_max_scroll_top_row(
                             state.drag_scrollbar_snapshot, snapshot_count,
-                            viewport_rows);
+                            viewport_rows, message_spacer_rows_after);
                         const int current_top = was_follow_tail
                             ? max_top
                             : state.chat_scroll_top_row;
@@ -6288,7 +6362,8 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                             acecode::tui::chat_scrollbar_thumb_geometry(
                                 scrollbar_box.y_min, track_height,
                                 state.drag_scrollbar_snapshot, snapshot_count,
-                                viewport_rows, current_top);
+                                viewport_rows, current_top,
+                                message_spacer_rows_after);
                         state.drag_scrollbar_grab_offset_2x =
                             acecode::tui::chat_scrollbar_grab_offset_2x(
                                 mouse.y, geometry);
@@ -6298,7 +6373,8 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                                 state.drag_scrollbar_grab_offset_2x);
                         auto [idx, off] = acecode::tui::chat_focus_from_display_row(
                             state.drag_scrollbar_snapshot, snapshot_count,
-                            state.chat_scroll_top_row);
+                            state.chat_scroll_top_row,
+                            message_spacer_rows_after);
                         if (idx >= 0) {
                             state.chat_focus_index = idx;
                             state.chat_line_offset = off;
@@ -6317,14 +6393,16 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                             acecode::tui::chat_scrollbar_thumb_geometry(
                                 scrollbar_box.y_min, track_height,
                                 state.drag_scrollbar_snapshot, snapshot_count,
-                                viewport_rows, state.chat_scroll_top_row);
+                                viewport_rows, state.chat_scroll_top_row,
+                                message_spacer_rows_after);
                         state.chat_scroll_top_row =
                             acecode::tui::chat_scrollbar_y_to_top_row_with_grab(
                                 mouse.y, scrollbar_box.y_min, geometry,
                                 state.drag_scrollbar_grab_offset_2x);
                         auto [idx, off] = acecode::tui::chat_focus_from_display_row(
                             state.drag_scrollbar_snapshot, snapshot_count,
-                            state.chat_scroll_top_row);
+                            state.chat_scroll_top_row,
+                            message_spacer_rows_after);
                         if (idx >= 0) {
                             state.chat_focus_index = idx;
                             state.chat_line_offset = off;
@@ -6922,7 +7000,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                 state.current_thinking_phrase = "Running shell";
                 state.thinking_start_time = std::chrono::steady_clock::now();
                 state.streaming_output_chars = 0;
-                state.last_completion_tokens_authoritative = 0;
+                state.turn_completion_tokens_confirmed = 0;
                 state.is_waiting = true;
                 agent_loop.submit_shell(shell_cmd);
                 return true;
@@ -6988,7 +7066,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                 state.current_thinking_phrase = get_random_thinking_phrase(is_user_chinese(state));
                 state.thinking_start_time = std::chrono::steady_clock::now();
                 state.streaming_output_chars = 0;
-                state.last_completion_tokens_authoritative = 0;
+                state.turn_completion_tokens_confirmed = 0;
                 state.is_waiting = true;
                 if (attachments.empty()) {
                     submit_tui_text(expanded_prompt);
@@ -7064,7 +7142,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
             const int max_top = acecode::tui::chat_max_scroll_top_row(
                 message_line_counts,
                 static_cast<int>(state.conversation.size()),
-                chat_viewport_rows());
+                chat_viewport_rows(), message_spacer_rows_after);
             LOG_DEBUG("[input] chat page up step=" + std::to_string(step) +
                       " actual=" + std::to_string(actual) +
                       " top=" + std::to_string(before_top) + "->" +
@@ -7098,7 +7176,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
             const int max_top = acecode::tui::chat_max_scroll_top_row(
                 message_line_counts,
                 static_cast<int>(state.conversation.size()),
-                chat_viewport_rows());
+                chat_viewport_rows(), message_spacer_rows_after);
             LOG_DEBUG("[input] chat page down step=" + std::to_string(step) +
                       " actual=" + std::to_string(actual) +
                       " top=" + std::to_string(before_top) + "->" +
@@ -7224,6 +7302,10 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                 return true;
             }
             if (state.is_waiting || state.tool_running) {
+                // 用户主动中断的回合不追加 "Done for Ns" 行(标记由
+                // on_busy_changed(false) 消费复位)。Ctrl+C 在 busy 时
+                // PostEvent(Event::Escape) 复用本分支,天然覆盖。
+                state.turn_interrupted_by_user = true;
                 agent_loop.cancel();
                 return true;
             }
@@ -7311,7 +7393,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                 const int viewport_rows = chat_viewport_rows();
                 const int max_top = acecode::tui::chat_max_scroll_top_row(
                     state.drag_scrollbar_snapshot, snapshot_count,
-                    viewport_rows);
+                    viewport_rows, message_spacer_rows_after);
                 const int current_top = was_follow_tail
                     ? max_top
                     : state.chat_scroll_top_row;
@@ -7319,7 +7401,8 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                     acecode::tui::chat_scrollbar_thumb_geometry(
                         scrollbar_box.y_min, track_height,
                         state.drag_scrollbar_snapshot, snapshot_count,
-                        viewport_rows, current_top);
+                        viewport_rows, current_top,
+                        message_spacer_rows_after);
                 state.drag_scrollbar_grab_offset_2x =
                     acecode::tui::chat_scrollbar_grab_offset_2x(mouse.y,
                                                                 geometry);
@@ -7330,7 +7413,8 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                         state.drag_scrollbar_grab_offset_2x);
                 auto [idx, off] = acecode::tui::chat_focus_from_display_row(
                     state.drag_scrollbar_snapshot, snapshot_count,
-                    state.chat_scroll_top_row);
+                    state.chat_scroll_top_row,
+                    message_spacer_rows_after);
                 if (idx >= 0) {
                     state.chat_focus_index = idx;
                     state.chat_line_offset = off;
@@ -7460,14 +7544,16 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                         acecode::tui::chat_scrollbar_thumb_geometry(
                             scrollbar_box.y_min, track_height,
                             state.drag_scrollbar_snapshot, snapshot_count,
-                            viewport_rows, state.chat_scroll_top_row);
+                            viewport_rows, state.chat_scroll_top_row,
+                            message_spacer_rows_after);
                     state.chat_scroll_top_row =
                         acecode::tui::chat_scrollbar_y_to_top_row_with_grab(
                             mouse.y, scrollbar_box.y_min, geometry,
                             state.drag_scrollbar_grab_offset_2x);
                     auto [idx, off] = acecode::tui::chat_focus_from_display_row(
                         state.drag_scrollbar_snapshot, snapshot_count,
-                        state.chat_scroll_top_row);
+                        state.chat_scroll_top_row,
+                        message_spacer_rows_after);
                     if (idx >= 0) {
                         state.chat_focus_index = idx;
                         state.chat_line_offset = off;
@@ -7921,6 +8007,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
         message_layout_revisions,
         message_layout_widths,
         message_line_counts,
+        message_spacer_rows_after,
         anim_tick,
         input_with_esc,
         permissions,

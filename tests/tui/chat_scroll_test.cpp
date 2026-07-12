@@ -118,62 +118,80 @@ TEST(ChatScroll, ClampLineOffsetToMessageBounds) {
     EXPECT_EQ(clamp_chat_line_offset(9, 0), 0);
 }
 
-// 场景: transcript 高度包含每条消息自身高度,以及 main.cpp 在每条消息后
-// 固定渲染的空白 spacer 行。
-TEST(ChatScroll, TranscriptDisplayRowsIncludeMessageSpacers) {
-    EXPECT_EQ(chat_transcript_display_rows({}, 0), 0);
-    EXPECT_EQ(chat_transcript_display_rows({3}, 1), 4);
-    EXPECT_EQ(chat_transcript_display_rows({2, 0, 5}, 3), 11);
+// 场景: transcript 默认保留每条消息的 spacer,仅允许连续 system 行之间为 0。
+TEST(ChatScroll, TranscriptDisplayRowsCompactOnlyAdjacentSystemMessages) {
+    EXPECT_EQ(chat_transcript_display_rows({}, 0, {}), 0);
+    EXPECT_EQ(chat_transcript_display_rows({3}, 1, {1}), 4);
+    EXPECT_EQ(chat_transcript_display_rows({2, 0, 5}, 3, {0, 1, 1}), 10);
 }
 
 // 场景:停在尾部且内容短于 viewport 时,补顶部空白让尾部贴近输入区。
 TEST(ChatScroll, TailTopPaddingFillsShortViewportWhenFollowingTail) {
-    EXPECT_EQ(chat_bottom_anchor_top_padding_rows({3}, 1, 10), 6);
+    EXPECT_EQ(chat_bottom_anchor_top_padding_rows({3}, 1, 10, {1}), 6);
 }
 
 // 场景:内容短于 viewport 时没有实际可滚区域,应贴底;内容已经超过 viewport
 // 时不要插入补白,避免破坏滚动语义。
 TEST(ChatScroll, TailTopPaddingOnlyFillsShortViewport) {
-    EXPECT_EQ(chat_bottom_anchor_top_padding_rows({3}, 1, 10), 6);
-    EXPECT_EQ(chat_bottom_anchor_top_padding_rows({9}, 1, 10), 0);
-    EXPECT_EQ(chat_bottom_anchor_top_padding_rows({20}, 1, 10), 0);
+    EXPECT_EQ(chat_bottom_anchor_top_padding_rows({3}, 1, 10, {1}), 6);
+    EXPECT_EQ(chat_bottom_anchor_top_padding_rows({9}, 1, 10, {1}), 0);
+    EXPECT_EQ(chat_bottom_anchor_top_padding_rows({20}, 1, 10, {1}), 0);
 }
 
-TEST(ChatScroll, DisplayRowsIncludeSpacersForFocusMapping) {
-    EXPECT_EQ(chat_display_row_for_focus({2, 3}, 2, 0, 0), 0);
-    EXPECT_EQ(chat_display_row_for_focus({2, 3}, 2, 0, 1), 1);
-    EXPECT_EQ(chat_display_row_for_focus({2, 3}, 2, 1, 0), 3);
-    EXPECT_EQ(chat_display_row_for_focus({2, 3}, 2, 1, 2), 5);
+TEST(ChatScroll, DisplayRowsIncludeTurnSpacersForFocusMapping) {
+    const std::vector<int> spacers = {1, 1};
+    EXPECT_EQ(chat_display_row_for_focus({2, 3}, 2, 0, 0, spacers), 0);
+    EXPECT_EQ(chat_display_row_for_focus({2, 3}, 2, 0, 1, spacers), 1);
+    EXPECT_EQ(chat_display_row_for_focus({2, 3}, 2, 1, 0, spacers), 3);
+    EXPECT_EQ(chat_display_row_for_focus({2, 3}, 2, 1, 2, spacers), 5);
 }
 
-TEST(ChatScroll, FocusMappingTreatsSpacerAsPreviousMessageTail) {
-    EXPECT_EQ(chat_focus_from_display_row({2, 3}, 2, 0), std::make_pair(0, 0));
-    EXPECT_EQ(chat_focus_from_display_row({2, 3}, 2, 1), std::make_pair(0, 1));
-    EXPECT_EQ(chat_focus_from_display_row({2, 3}, 2, 2), std::make_pair(0, 1));
-    EXPECT_EQ(chat_focus_from_display_row({2, 3}, 2, 3), std::make_pair(1, 0));
-    EXPECT_EQ(chat_focus_from_display_row({2, 3}, 2, 6), std::make_pair(1, 2));
+TEST(ChatScroll, NonSystemMessagesKeepSpacerRows) {
+    EXPECT_EQ(chat_display_row_for_focus({2, 3}, 2, 1, 0, {1, 1}), 3);
+}
+
+TEST(ChatScroll, FocusMappingTreatsTurnSpacerAsPreviousMessageTail) {
+    const std::vector<int> spacers = {1, 1};
+    EXPECT_EQ(chat_focus_from_display_row({2, 3}, 2, 0, spacers),
+              std::make_pair(0, 0));
+    EXPECT_EQ(chat_focus_from_display_row({2, 3}, 2, 1, spacers),
+              std::make_pair(0, 1));
+    EXPECT_EQ(chat_focus_from_display_row({2, 3}, 2, 2, spacers),
+              std::make_pair(0, 1));
+    EXPECT_EQ(chat_focus_from_display_row({2, 3}, 2, 3, spacers),
+              std::make_pair(1, 0));
+    EXPECT_EQ(chat_focus_from_display_row({2, 3}, 2, 6, spacers),
+              std::make_pair(1, 2));
 }
 
 TEST(ChatScroll, ScrollTopClampsToTranscriptRange) {
-    EXPECT_EQ(chat_max_scroll_top_row({4, 3}, 2, 5), 4);
-    EXPECT_EQ(clamp_chat_scroll_top_row(-2, {4, 3}, 2, 5), 0);
-    EXPECT_EQ(clamp_chat_scroll_top_row(2, {4, 3}, 2, 5), 2);
-    EXPECT_EQ(clamp_chat_scroll_top_row(99, {4, 3}, 2, 5), 4);
+    const std::vector<int> spacers = {1, 1};
+    EXPECT_EQ(chat_max_scroll_top_row({4, 3}, 2, 5, spacers), 4);
+    EXPECT_EQ(clamp_chat_scroll_top_row(-2, {4, 3}, 2, 5, spacers), 0);
+    EXPECT_EQ(clamp_chat_scroll_top_row(2, {4, 3}, 2, 5, spacers), 2);
+    EXPECT_EQ(clamp_chat_scroll_top_row(99, {4, 3}, 2, 5, spacers), 4);
 }
 
 TEST(ChatScroll, ScrollTopClampsAfterTranscriptHeightShrinks) {
-    EXPECT_EQ(chat_max_scroll_top_row({1000}, 1, 20), 981);
-    EXPECT_EQ(chat_max_scroll_top_row({1}, 1, 20), 0);
-    EXPECT_EQ(clamp_chat_scroll_top_row(500, {1}, 1, 20), 0);
-    EXPECT_EQ(chat_focus_from_display_row({1}, 1, 500),
+    EXPECT_EQ(chat_max_scroll_top_row({1000}, 1, 20, {1}), 981);
+    EXPECT_EQ(chat_max_scroll_top_row({1}, 1, 20, {1}), 0);
+    EXPECT_EQ(clamp_chat_scroll_top_row(500, {1}, 1, 20, {1}), 0);
+    EXPECT_EQ(chat_focus_from_display_row({1}, 1, 500, {1}),
               std::make_pair(0, 0));
     EXPECT_TRUE(is_chat_tail_position(0, 0, 1, {1}));
 }
 
 TEST(ChatScroll, ScrollbarMapsMouseYToViewportTop) {
-    EXPECT_EQ(chat_scrollbar_y_to_top_row(10, 10, 5, {10, 10}, 2, 6), 0);
-    EXPECT_EQ(chat_scrollbar_y_to_top_row(14, 10, 5, {10, 10}, 2, 6), 16);
-    EXPECT_EQ(chat_scrollbar_y_to_top_row(12, 10, 5, {10, 10}, 2, 6), 8);
+    const std::vector<int> spacers = {1, 1};
+    EXPECT_EQ(chat_scrollbar_y_to_top_row(
+                  10, 10, 5, {10, 10}, 2, 6, spacers),
+              0);
+    EXPECT_EQ(chat_scrollbar_y_to_top_row(
+                  14, 10, 5, {10, 10}, 2, 6, spacers),
+              16);
+    EXPECT_EQ(chat_scrollbar_y_to_top_row(
+                  12, 10, 5, {10, 10}, 2, 6, spacers),
+              8);
 }
 
 TEST(ChatScroll, ScrollbarDragPreservesGrabOffsetToReachBottom) {
@@ -183,17 +201,17 @@ TEST(ChatScroll, ScrollbarDragPreservesGrabOffsetToReachBottom) {
     const int track_y_min = 0;
     const int track_height = 40;
     const int max_top =
-        chat_max_scroll_top_row(lines, message_count, viewport_rows);
+        chat_max_scroll_top_row(lines, message_count, viewport_rows, {1});
 
     auto geometry = chat_scrollbar_thumb_geometry(
         track_y_min, track_height, lines, message_count, viewport_rows,
-        /*scroll_top_row=*/0);
+        /*scroll_top_row=*/0, {1});
     const int grab_offset =
         chat_scrollbar_grab_offset_2x(/*mouse_y=*/4, geometry);
 
     EXPECT_LT(chat_scrollbar_y_to_top_row(/*mouse_y=*/37, track_y_min,
                                           track_height, lines, message_count,
-                                          viewport_rows),
+                                          viewport_rows, {1}),
               max_top);
     EXPECT_EQ(chat_scrollbar_y_to_top_row_with_grab(/*mouse_y=*/37,
                                                     track_y_min, geometry,
@@ -308,7 +326,7 @@ TEST(ChatScroll, AbsoluteScrollTopMovesOneRowAtViewportEdges) {
 TEST(ChatScroll, BottomAnchorPaddingMovesShortTranscriptToViewportBottom) {
     Elements rows;
     const int padding =
-        chat_bottom_anchor_top_padding_rows({1, 1}, 2, 6);
+        chat_bottom_anchor_top_padding_rows({1, 1}, 2, 6, {1, 1});
     for (int i = 0; i < padding; ++i) {
         rows.push_back(text(""));
     }

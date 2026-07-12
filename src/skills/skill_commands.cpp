@@ -72,7 +72,7 @@ std::vector<std::string> register_skill_commands(CommandRegistry& cmd_registry,
                 // 会让底部 chip 秒数巨大。
                 ctx.state.thinking_start_time = std::chrono::steady_clock::now();
                 ctx.state.streaming_output_chars = 0;
-                ctx.state.last_completion_tokens_authoritative = 0;
+                ctx.state.turn_completion_tokens_confirmed = 0;
                 ctx.state.is_waiting = true;
             }
 

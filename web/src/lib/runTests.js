@@ -69,6 +69,7 @@ import './desktopShellMode.test.js';
 import './desktopGuidedTour.test.js';
 import './desktopTrayMenu.test.js';
 import './opencodeImport.test.js';
+import './updateJob.test.js';
 import './newSession.test.js';
 import './navigationHistory.test.js';
 import './gridPinnedSessions.test.js';

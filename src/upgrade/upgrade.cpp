@@ -167,6 +167,18 @@ bool apply_upgrade_server_override(AppConfig& config,
     return true;
 }
 
+const char* upgrade_phase_name(UpgradePhase phase) {
+    switch (phase) {
+        case UpgradePhase::Checking: return "checking";
+        case UpgradePhase::Downloading: return "downloading";
+        case UpgradePhase::Verifying: return "verifying";
+        case UpgradePhase::Extracting: return "extracting";
+        case UpgradePhase::Installing: return "installing";
+        case UpgradePhase::Complete: return "complete";
+    }
+    return "checking";
+}
+
 const char* update_check_status_name(UpdateCheckStatus status) {
     switch (status) {
         case UpdateCheckStatus::UpdateAvailable: return "available";
@@ -250,7 +262,14 @@ int run_upgrade_command(const AppConfig& config,
                         const std::string& current_version,
                         std::ostream& out,
                         std::ostream& err,
-                        bool force) {
+                        bool force,
+                        UpgradeProgressCallback progress_callback) {
+    UpgradeProgress progress_state;
+    progress_state.current_version = current_version;
+    auto publish_progress = [&]() {
+        if (progress_callback) progress_callback(progress_state);
+    };
+
     std::string cfg_error;
     if (!validate_upgrade_settings(config.upgrade, &cfg_error)) {
         err << "acecode upgrade: " << cfg_error << "\n";
@@ -280,6 +299,8 @@ int run_upgrade_command(const AppConfig& config,
             << " : update service uses plain HTTP; downloads are not encrypted.\n";
     }
 
+    progress_state.phase = UpgradePhase::Checking;
+    publish_progress();
     out << "\n" << styled(out, ConsoleStyle::Cyan, "[1/4] Checking update manifest...") << "\n";
     HttpTextResult manifest_resp = fetch_text(manifest, config.upgrade.timeout_ms);
     if (!manifest_resp.error.empty()) {
@@ -320,6 +341,7 @@ int run_upgrade_command(const AppConfig& config,
     }
 
     const auto& selected = *selection.selected;
+    progress_state.target_version = selected.version;
     const std::string package_url = resolve_package_url(base_url, selected.package.file);
     out << "\n"
         << styled(out, ConsoleStyle::Cyan,
@@ -348,14 +370,20 @@ int run_upgrade_command(const AppConfig& config,
 
     out << "\n" << styled(out, ConsoleStyle::Cyan, "[3/4] Downloading package") << "\n"
         << "  URL     : " << package_url << "\n";
-    DownloadProgressBar progress(out, selected.package.size, stream_is_interactive_terminal(out));
-    progress.start();
+    progress_state.phase = UpgradePhase::Downloading;
+    progress_state.bytes_downloaded = 0;
+    progress_state.bytes_total = selected.package.size;
+    publish_progress();
+    DownloadProgressBar progress_bar(out, selected.package.size, stream_is_interactive_terminal(out));
+    progress_bar.start();
     DownloadResult dl = download_to_file(
         package_url, package_path, config.upgrade.timeout_ms,
         [&](const DownloadProgress& p) {
-            progress.update(p.bytes_written);
+            progress_bar.update(p.bytes_written);
+            progress_state.bytes_downloaded = p.bytes_written;
+            publish_progress();
         });
-    progress.finish(dl.bytes_written);
+    progress_bar.finish(dl.bytes_written);
     if (!dl.error.empty()) {
         err << "acecode upgrade: failed to download package: " << dl.error << "\n";
         return 1;
@@ -371,7 +399,10 @@ int run_upgrade_command(const AppConfig& config,
         return 1;
     }
 
-    out << "\n" << styled(out, ConsoleStyle::Cyan, "[4/4] Verifying and preparing install")
+    progress_state.phase = UpgradePhase::Verifying;
+    progress_state.bytes_downloaded = dl.bytes_written;
+    publish_progress();
+    out << "\n" << styled(out, ConsoleStyle::Cyan, "[4/4] Verifying and installing")
         << "\n";
     std::string sha_error;
     const std::string actual_sha = acecode::sha256_file_hex(package_path.string(), &sha_error);
@@ -387,6 +418,8 @@ int run_upgrade_command(const AppConfig& config,
     }
     out << "  Checksum: " << styled(out, ConsoleStyle::Green, "OK") << "\n";
 
+    progress_state.phase = UpgradePhase::Extracting;
+    publish_progress();
     out << "  Extract : package\n";
     std::string extract_error;
     if (!extract_zip_to_staging(package_path, staging_dir, &extract_error)) {
@@ -402,29 +435,24 @@ int run_upgrade_command(const AppConfig& config,
 
     fs::path current_exe = current_executable_path(argv0);
     fs::path install_dir = current_exe.parent_path();
-    fs::path runner_path = make_runner_path(current_process_id(), install_dir);
-    std::string runner_error;
-    if (!prepare_update_runner(current_exe, runner_path, &runner_error)) {
-        err << "acecode upgrade: " << runner_error << "\n";
+    progress_state.phase = UpgradePhase::Installing;
+    publish_progress();
+    out << "  Install : applying update\n";
+    std::string apply_error;
+    if (!apply_staged_update(staging_dir, install_dir, backup_dir,
+                             target, &apply_error)) {
+        err << "acecode upgrade: failed to apply update: " << apply_error << "\n"
+            << "Backup directory: " << backup_dir.string() << "\n";
         return 1;
     }
 
-    ApplyOptions opts;
-    opts.parent_pid = current_process_id();
-    opts.staging_dir = staging_dir;
-    opts.install_dir = install_dir;
-    opts.backup_dir = backup_dir;
-
-    if (!launch_update_runner(runner_path, opts, &runner_error)) {
-        err << "acecode upgrade: " << runner_error << "\n";
-        return 1;
-    }
-
-    out << "  Runner  : " << styled(out, ConsoleStyle::Green, "launched") << "\n\n"
-        << styled(out, ConsoleStyle::Green, "Update package verified.") << "\n"
-        << "ACECode will apply the update after this process exits.\n"
-        << "  Staging: " << staging_dir.string() << "\n"
-        << "  Backup : " << backup_dir.string() << "\n";
+    progress_state.phase = UpgradePhase::Complete;
+    progress_state.backup_dir = backup_dir.string();
+    publish_progress();
+    out << "  Install : " << styled(out, ConsoleStyle::Green, "OK") << "\n\n"
+        << styled(out, ConsoleStyle::Green, "ACECode update applied successfully.") << "\n"
+        << "  Version : v" << selected.version << "\n"
+        << "  Backup  : " << backup_dir.string() << "\n";
     return 0;
 }
 

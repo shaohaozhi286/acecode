@@ -24,7 +24,7 @@ using ftxui::text;
 using ftxui::vbox;
 
 TEST(ChatRenderWindow, EmptyTranscriptHasEmptyWindow) {
-    auto window = chat_render_window({}, 0, 0, 10, 20);
+    auto window = chat_render_window({}, 0, 0, 10, 20, {});
 
     EXPECT_EQ(window.first_message, 0);
     EXPECT_EQ(window.last_message_exclusive, 0);
@@ -34,7 +34,7 @@ TEST(ChatRenderWindow, EmptyTranscriptHasEmptyWindow) {
 }
 
 TEST(ChatRenderWindow, FullWindowCoversAllMessages) {
-    auto window = full_chat_render_window({2, 3}, 2);
+    auto window = full_chat_render_window({2, 3}, 2, {1, 1});
 
     EXPECT_EQ(window.first_message, 0);
     EXPECT_EQ(window.last_message_exclusive, 2);
@@ -44,7 +44,8 @@ TEST(ChatRenderWindow, FullWindowCoversAllMessages) {
 }
 
 TEST(ChatRenderWindow, NonPositiveViewportFallsBackToFullWindow) {
-    auto window = chat_render_window({3, 3, 3}, 3, 8, 0, 4);
+    auto window = chat_render_window(
+        {3, 3, 3}, 3, 8, 0, 4, {1, 1, 1});
 
     EXPECT_EQ(window.first_message, 0);
     EXPECT_EQ(window.last_message_exclusive, 3);
@@ -55,7 +56,7 @@ TEST(ChatRenderWindow, NonPositiveViewportFallsBackToFullWindow) {
 }
 
 TEST(ChatRenderWindow, FullyVisibleTranscriptHasNoSpacers) {
-    auto window = chat_render_window({2, 3}, 2, 0, 20, 0);
+    auto window = chat_render_window({2, 3}, 2, 0, 20, 0, {1, 1});
 
     EXPECT_EQ(window.first_message, 0);
     EXPECT_EQ(window.last_message_exclusive, 2);
@@ -65,7 +66,8 @@ TEST(ChatRenderWindow, FullyVisibleTranscriptHasNoSpacers) {
 }
 
 TEST(ChatRenderWindow, MiddleViewportRendersOnlyIntersectingMessage) {
-    auto window = chat_render_window({3, 3, 3, 3, 3}, 5, 8, 4, 0);
+    auto window = chat_render_window(
+        {3, 3, 3, 3, 3}, 5, 8, 4, 0, {1, 1, 1, 1, 1});
 
     EXPECT_EQ(window.first_message, 2);
     EXPECT_EQ(window.last_message_exclusive, 3);
@@ -75,7 +77,8 @@ TEST(ChatRenderWindow, MiddleViewportRendersOnlyIntersectingMessage) {
 }
 
 TEST(ChatRenderWindow, OverscanIncludesNearbyMessages) {
-    auto window = chat_render_window({3, 3, 3, 3, 3}, 5, 8, 4, 4);
+    auto window = chat_render_window(
+        {3, 3, 3, 3, 3}, 5, 8, 4, 4, {1, 1, 1, 1, 1});
 
     EXPECT_EQ(window.first_message, 1);
     EXPECT_EQ(window.last_message_exclusive, 4);
@@ -85,7 +88,8 @@ TEST(ChatRenderWindow, OverscanIncludesNearbyMessages) {
 }
 
 TEST(ChatRenderWindow, TopViewportClampsToFirstMessage) {
-    auto window = chat_render_window({3, 3, 3, 3, 3}, 5, -50, 4, 0);
+    auto window = chat_render_window(
+        {3, 3, 3, 3, 3}, 5, -50, 4, 0, {1, 1, 1, 1, 1});
 
     EXPECT_EQ(window.first_message, 0);
     EXPECT_EQ(window.last_message_exclusive, 1);
@@ -94,7 +98,8 @@ TEST(ChatRenderWindow, TopViewportClampsToFirstMessage) {
 }
 
 TEST(ChatRenderWindow, BottomViewportClampsToLastMessage) {
-    auto window = chat_render_window({3, 3, 3, 3, 3}, 5, 999, 4, 0);
+    auto window = chat_render_window(
+        {3, 3, 3, 3, 3}, 5, 999, 4, 0, {1, 1, 1, 1, 1});
 
     EXPECT_EQ(window.first_message, 4);
     EXPECT_EQ(window.last_message_exclusive, 5);
@@ -102,8 +107,14 @@ TEST(ChatRenderWindow, BottomViewportClampsToLastMessage) {
     EXPECT_EQ(window.bottom_spacer_rows, 0);
 }
 
+TEST(ChatRenderWindow, AdjacentSystemBoundaryCanOmitSpacer) {
+    auto window = full_chat_render_window({1, 1, 1}, 3, {0, 1, 1});
+
+    EXPECT_EQ(window.total_rows, 5);
+}
+
 TEST(ChatRenderWindow, MissingAndZeroLineCountsAreEstimatedAsOneLine) {
-    auto window = chat_render_window({0}, 3, 2, 2, 0);
+    auto window = chat_render_window({0}, 3, 2, 2, 0, {1, 1, 1});
 
     EXPECT_EQ(window.total_rows, 6);
     EXPECT_EQ(window.first_message, 1);
@@ -126,7 +137,7 @@ TEST(ChatRenderWindow, FoldedToolResultShrinkRemovesStaleSpacerGap) {
     ASSERT_TRUE(sync_chat_line_measure(measures[0], true, 1, 100, 2));
     auto counts = chat_line_counts_from_measures(measures, 1);
 
-    auto window = chat_render_window(counts, 1, 500, 20, 0);
+    auto window = chat_render_window(counts, 1, 500, 20, 0, {1});
 
     EXPECT_EQ(window.total_rows, 2);
     EXPECT_EQ(window.first_message, 0);

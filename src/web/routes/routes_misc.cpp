@@ -26,6 +26,41 @@ json desktop_guided_tour_state_json() {
     };
 }
 
+bool update_job_is_active(const UpdateJobStatus& status) {
+    return status.state == "pending" || status.state == "running";
+}
+
+json update_job_to_json(const UpdateJobStatus& status) {
+    int percent = 0;
+    if (status.bytes_total && *status.bytes_total > 0) {
+        const double ratio = static_cast<double>(status.bytes_downloaded) /
+                             static_cast<double>(*status.bytes_total);
+        percent = static_cast<int>((std::max)(0.0, (std::min)(1.0, ratio)) * 100.0);
+    }
+    json out{
+        {"job_id", status.job_id},
+        {"state", status.state},
+        {"phase", status.phase},
+        {"current_version", status.current_version},
+        {"target_version", status.target_version},
+        {"bytes_downloaded", status.bytes_downloaded},
+        {"percent", percent},
+        {"restart_required", status.restart_required},
+    };
+    if (status.bytes_total) out["bytes_total"] = *status.bytes_total;
+    if (!status.backup_dir.empty()) out["backup_dir"] = status.backup_dir;
+    if (!status.error.empty()) out["error"] = status.error;
+    return out;
+}
+
+std::string trim_update_error(std::string value) {
+    while (!value.empty() &&
+           std::isspace(static_cast<unsigned char>(value.back()))) {
+        value.pop_back();
+    }
+    return value;
+}
+
 int hex_value(char ch) {
     if (ch >= '0' && ch <= '9') return ch - '0';
     if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
@@ -912,6 +947,14 @@ void WebServer::Impl::register_ui_preferences() {
         ([this](const crow::request& req) {
             return cors_preflight(req);
         });
+        CROW_ROUTE(app, "/api/update/job").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
+        CROW_ROUTE(app, "/api/update/jobs/<string>").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req, const std::string&) {
+            return cors_preflight(req);
+        });
         CROW_ROUTE(app, "/api/config/ace-browser-bridge").methods(crow::HTTPMethod::Options)
         ([this](const crow::request& req) {
             return cors_preflight(req);
@@ -1025,24 +1068,69 @@ void WebServer::Impl::register_ui_preferences() {
             return with_cors(req, std::move(r));
         });
 
-        // POST /api/update/start: explicit user-triggered acecode update.
+        // GET /api/update/job: latest GUI update job for reload/reopen recovery.
+        CROW_ROUTE(app, "/api/update/job").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            std::lock_guard<std::mutex> lock(update_job_runtime->mu);
+            if (!update_job_runtime->current) {
+                crow::response r(404);
+                r.add_header("Content-Type", "application/json");
+                r.body = json{{"error", "UPDATE_JOB_NOT_FOUND"},
+                              {"message", "no update job has been started"}}.dump();
+                return with_cors(req, std::move(r));
+            }
+            crow::response r(200);
+            r.add_header("Content-Type", "application/json");
+            r.body = update_job_to_json(*update_job_runtime->current).dump();
+            return with_cors(req, std::move(r));
+        });
+
+        // GET /api/update/jobs/:id: poll one GUI update job.
+        CROW_ROUTE(app, "/api/update/jobs/<string>").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req, const std::string& job_id) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            std::lock_guard<std::mutex> lock(update_job_runtime->mu);
+            if (!update_job_runtime->current ||
+                update_job_runtime->current->job_id != job_id) {
+                crow::response r(404);
+                r.add_header("Content-Type", "application/json");
+                r.body = json{{"error", "UPDATE_JOB_NOT_FOUND"},
+                              {"message", "update job not found"}}.dump();
+                return with_cors(req, std::move(r));
+            }
+            crow::response r(200);
+            r.add_header("Content-Type", "application/json");
+            r.body = update_job_to_json(*update_job_runtime->current).dump();
+            return with_cors(req, std::move(r));
+        });
+
+        // POST /api/update/start: explicit user-triggered GUI update job.
         CROW_ROUTE(app, "/api/update/start").methods(crow::HTTPMethod::POST)
         ([this](const crow::request& req) {
             if (auto rej = require_auth(req)) return std::move(*rej);
             if (!deps.app_config) return crow::response(503);
 
-            auto json_err = [&](int status, const char* code, const std::string& msg) {
-                crow::response r(status);
-                r.body = json{{"error", code}, {"message", msg}}.dump();
-                r.add_header("Content-Type", "application/json");
-                return with_cors(req, std::move(r));
-            };
+            {
+                std::lock_guard<std::mutex> lock(update_job_runtime->mu);
+                if (update_job_runtime->current &&
+                    update_job_is_active(*update_job_runtime->current)) {
+                    crow::response r(409);
+                    r.add_header("Content-Type", "application/json");
+                    r.body = json{{"error", "UPDATE_IN_PROGRESS"},
+                                  {"message", "an update job is already running"},
+                                  {"job", update_job_to_json(*update_job_runtime->current)}}.dump();
+                    return with_cors(req, std::move(r));
+                }
+            }
 
             acecode::upgrade::UpdateCheckResult result;
+            AppConfig config_snapshot;
             {
                 std::lock_guard<std::mutex> config_lock(app_config_mu);
                 result = acecode::upgrade::check_for_update(*deps.app_config,
                                                             ACECODE_VERSION);
+                config_snapshot = *deps.app_config;
             }
             if (!result.update_available()) {
                 crow::response r(409);
@@ -1053,19 +1141,98 @@ void WebServer::Impl::register_ui_preferences() {
                 return with_cors(req, std::move(r));
             }
 
-            std::string start_error;
-            bool started = deps.start_update_command
-                ? deps.start_update_command(&start_error)
-                : start_default_update_command(&start_error);
-            if (!started) {
-                return json_err(500, "START_FAILED", start_error);
+            UpdateJobStatus initial;
+            initial.job_id = SessionStorage::generate_session_id();
+            initial.current_version = ACECODE_VERSION;
+            initial.target_version = result.latest_version;
+            initial.bytes_total = result.package_size;
+            {
+                std::lock_guard<std::mutex> lock(update_job_runtime->mu);
+                if (update_job_runtime->current &&
+                    update_job_is_active(*update_job_runtime->current)) {
+                    crow::response r(409);
+                    r.add_header("Content-Type", "application/json");
+                    r.body = json{{"error", "UPDATE_IN_PROGRESS"},
+                                  {"message", "an update job is already running"},
+                                  {"job", update_job_to_json(*update_job_runtime->current)}}.dump();
+                    return with_cors(req, std::move(r));
+                }
+                update_job_runtime->current = initial;
             }
+
+            auto runtime = update_job_runtime;
+            auto injected_runner = deps.run_update_command;
+            std::thread([runtime, injected_runner, config_snapshot, initial]() mutable {
+                auto publish = [runtime, job_id = initial.job_id](
+                                   const acecode::upgrade::UpgradeProgress& progress) {
+                    std::lock_guard<std::mutex> lock(runtime->mu);
+                    if (!runtime->current || runtime->current->job_id != job_id) return;
+                    auto& job = *runtime->current;
+                    job.state = "running";
+                    job.phase = acecode::upgrade::upgrade_phase_name(progress.phase);
+                    if (!progress.current_version.empty()) {
+                        job.current_version = progress.current_version;
+                    }
+                    if (!progress.target_version.empty()) {
+                        job.target_version = progress.target_version;
+                    }
+                    job.bytes_downloaded = progress.bytes_downloaded;
+                    job.bytes_total = progress.bytes_total;
+                    if (!progress.backup_dir.empty()) job.backup_dir = progress.backup_dir;
+                };
+
+                {
+                    std::lock_guard<std::mutex> lock(runtime->mu);
+                    if (runtime->current && runtime->current->job_id == initial.job_id) {
+                        runtime->current->state = "running";
+                    }
+                }
+
+                std::string error;
+                int code = 1;
+                try {
+                    if (injected_runner) {
+                        code = injected_runner(config_snapshot, publish, &error);
+                    } else {
+                        std::ostringstream output;
+                        std::ostringstream errors;
+                        code = acecode::upgrade::run_upgrade_command(
+                            config_snapshot, "", ACECODE_VERSION,
+                            output, errors, false, publish);
+                        if (code != 0 && error.empty()) {
+                            error = trim_update_error(errors.str());
+                        }
+                    }
+                } catch (const std::exception& e) {
+                    error = e.what();
+                    code = 1;
+                } catch (...) {
+                    error = "unknown update failure";
+                    code = 1;
+                }
+
+                std::lock_guard<std::mutex> lock(runtime->mu);
+                if (!runtime->current || runtime->current->job_id != initial.job_id) return;
+                auto& job = *runtime->current;
+                if (code == 0) {
+                    job.state = "succeeded";
+                    job.phase = "complete";
+                    job.restart_required = true;
+                    job.error.clear();
+                } else {
+                    job.state = "failed";
+                    job.restart_required = false;
+                    job.error = error.empty() ? "update failed" : error;
+                }
+            }).detach();
 
             crow::response r(202);
             r.add_header("Content-Type", "application/json");
-            r.body = json{{"started", true},
-                          {"latest_version", result.latest_version},
-                          {"message", "acecode update started"}}.dump();
+            auto body = update_job_to_json(initial);
+            body["started"] = true;
+            body["latest_version"] = result.latest_version;
+            body["message"] = "acecode update job started";
+            r.body = body.dump();
             return with_cors(req, std::move(r));
         });
 

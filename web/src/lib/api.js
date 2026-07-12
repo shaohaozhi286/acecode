@@ -254,6 +254,8 @@ export function createApi(base = null) {
     setUpgradeConfig: (cfg)          => request('PUT',    '/api/config/upgrade', cfg, base),
     getUpdateStatus: ()              => request('GET',    '/api/update/status', undefined, base),
     startUpdate: ()                  => request('POST',   '/api/update/start', undefined, base),
+    getLatestUpdateJob: ()           => request('GET',    '/api/update/job', undefined, base),
+    getUpdateJob: (jobId)            => request('GET',    `/api/update/jobs/${encodeURIComponent(jobId)}`, undefined, base),
     listDesktopFeedbackSessions: (limit=20) => request('GET', desktopFeedbackSessionsPath(limit), undefined, base),
     submitDesktopFeedback: (payload={}) => request('POST', '/api/feedback/desktop', payload, base),
     getAceBrowserBridge: ()          => request('GET',    '/api/config/ace-browser-bridge', undefined, base),

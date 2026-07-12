@@ -258,7 +258,9 @@ when known.
 | GET | `/api/config/upgrade` | read update service config |
 | PUT | `/api/config/upgrade` | write update service config |
 | GET | `/api/update/status` | check update availability |
-| POST | `/api/update/start` | start explicit self-update |
+| POST | `/api/update/start` | start explicit WebUI update job |
+| GET | `/api/update/job` | read latest WebUI update job |
+| GET | `/api/update/jobs/:id` | poll one WebUI update job |
 | GET | `/api/config/ace-browser-bridge` | read browser bridge settings |
 | PUT | `/api/config/ace-browser-bridge` | write browser bridge settings |
 | GET | `/api/mcp` | read MCP config |
@@ -1357,14 +1359,44 @@ Checks the update manifest and returns:
 
 ### `POST /api/update/start`
 
-Checks for an update and starts `acecode update` or a desktop-provided update
-command. Returns `202`:
+Checks for an update and starts one daemon-managed background update job. The
+job reuses the normal upgrade engine without creating a console window. Returns
+`202`:
 
 ```json
-{"started":true,"latest_version":"0.5.11","message":"acecode update started"}
+{
+  "started": true,
+  "job_id": "20260712-120000-abcd",
+  "state": "pending",
+  "phase": "checking",
+  "current_version": "0.6.8",
+  "target_version": "0.6.9",
+  "bytes_downloaded": 0,
+  "bytes_total": 33554432,
+  "percent": 0,
+  "restart_required": false
+}
 ```
 
 Returns `409 NO_UPDATE` when no compatible update is available.
+
+Returns `409 UPDATE_IN_PROGRESS` when another job is pending or running. The
+response includes that job under `job`, so another WebUI tab can attach to it.
+
+### `GET /api/update/job`
+
+Returns the latest update job retained by the daemon. This lets a reloaded page
+recover an active, completed, or failed dialog. Returns `404
+UPDATE_JOB_NOT_FOUND` before any job has been started.
+
+### `GET /api/update/jobs/:id`
+
+Returns structured progress for one update job. `state` is `pending`, `running`,
+`succeeded`, or `failed`; `phase` is `checking`, `downloading`, `verifying`,
+`extracting`, `installing`, or `complete`. A successful job sets
+`restart_required` to `true` because the current daemon and desktop shell remain
+the already-running version until ACECode is fully restarted. Failed jobs
+include `error` and may be retried with a new `POST /api/update/start`.
 
 ### `GET /api/config/ace-browser-bridge`
 

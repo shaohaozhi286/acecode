@@ -62,6 +62,8 @@ export function TopBar({
   canGoForward = false,
   updateStatus = null,
   updateStarting = false,
+  updateRunning = false,
+  updateReady = false,
   onStartUpdate,
   appVersion = '',
 }) {
@@ -71,7 +73,11 @@ export function TopBar({
   const searchHotkeyHint = isMac ? '搜索 (Cmd+K)' : '搜索 (Ctrl+K)';
   const updateAvailable = !!updateStatus?.update_available;
   const updateTitle = updateAvailable
-    ? `发现新版 v${updateStatus.latest_version || ''}, 点击升级`
+    ? updateReady
+      ? '升级已安装，点击查看重启提示'
+      : updateRunning
+      ? '升级正在进行，点击查看进度'
+      : `发现新版 v${updateStatus.latest_version || ''}, 点击升级`
     : '';
   const cleanAppVersion = typeof appVersion === 'string' ? appVersion.trim() : '';
   const appVersionLabel = cleanAppVersion ? formatProgramVersion(cleanAppVersion) : '';
@@ -130,7 +136,7 @@ export function TopBar({
             updateStarting && 'opacity-60 cursor-not-allowed hover:opacity-60',
           )}
         >
-          更新
+          {updateReady ? '已更新' : updateRunning ? '更新中' : '更新'}
         </button>
       )}
       <QuickBtn data-tour-target="topbar-new-session" title="新对话" onClick={onNewSession}>

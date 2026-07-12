@@ -379,16 +379,24 @@ struct TuiState {
     ToolProgress tool_progress;
     std::chrono::steady_clock::time_point last_tool_post_event_time{};
 
-    // Waiting-indicator state (thinking-timer-and-tokens change). All three
-    // fields are guarded by `mu`. They are only meaningful while is_waiting is
-    // true and are reset when on_busy_changed(true) fires.
-    //   thinking_start_time           — stamped on each busy=true transition
-    //   streaming_output_chars        — UTF-8 bytes from on_delta this turn
-    //   last_completion_tokens_authoritative — exact completion_tokens from
-    //                                   on_usage; 0 until first usage arrives
+    // Waiting-indicator state(inline-thinking-heartbeat change)。三个字段都
+    // 由 `mu` 保护,仅在 is_waiting 期间有意义,busy=true 转换时全部清零。
+    //   thinking_start_time            — 每次 busy=true 转换时打点(回合起点)
+    //   streaming_output_chars         — 自上次 on_usage 以来的 on_delta UTF-8
+    //                                    字节数(on_usage 入账时清零,流重试清零)
+    //   turn_completion_tokens_confirmed — 本回合所有已完成请求的
+    //                                    completion_tokens 之和(on_usage 累加)
+    // 心跳读数 = confirmed + chars/4,整回合单调递增 —— 旧字段
+    // last_completion_tokens_authoritative 是"最近一次请求"语义,多请求回合
+    // 里读数会冻在上一请求终值,已废弃。
     std::chrono::steady_clock::time_point thinking_start_time{};
     size_t streaming_output_chars = 0;
-    int last_completion_tokens_authoritative = 0;
+    long long turn_completion_tokens_confirmed = 0;
+
+    // 本回合被用户主动中断(busy 期间 Esc;Ctrl+C 复用 Esc 分支)。
+    // on_busy_changed(false) 消费后复位 —— 置位的回合不追加 "Done for Ns" 行。
+    // 由 `mu` 保护。
+    bool turn_interrupted_by_user = false;
 
     // mouse-selection-copy: when a right-click clipboard copy fires, we stamp
     // this with "now() + 2s" and snapshot the text that was written. The

@@ -89,55 +89,6 @@ json update_check_to_json(const acecode::upgrade::UpdateCheckResult& result) {
     return out;
 }
 
-bool start_default_update_command(std::string* error) {
-    auto exe = acecode::upgrade::current_executable_path("");
-    if (exe.empty()) {
-        if (error) *error = "cannot resolve acecode executable path";
-        return false;
-    }
-
-#ifdef _WIN32
-    std::string cmd = acecode::upgrade::quote_command_arg(exe.string()) + " update";
-    std::vector<char> mutable_cmd(cmd.begin(), cmd.end());
-    mutable_cmd.push_back('\0');
-    std::string cwd = exe.parent_path().string();
-    STARTUPINFOA si{};
-    si.cb = sizeof(si);
-    PROCESS_INFORMATION pi{};
-    BOOL ok = ::CreateProcessA(
-        nullptr,
-        mutable_cmd.data(),
-        nullptr,
-        nullptr,
-        FALSE,
-        CREATE_NEW_CONSOLE,
-        nullptr,
-        cwd.empty() ? nullptr : cwd.c_str(),
-        &si,
-        &pi);
-    if (!ok) {
-        if (error) *error = "failed to launch acecode update";
-        return false;
-    }
-    ::CloseHandle(pi.hThread);
-    ::CloseHandle(pi.hProcess);
-    return true;
-#else
-    pid_t pid = ::fork();
-    if (pid < 0) {
-        if (error) *error = "failed to fork acecode update";
-        return false;
-    }
-    if (pid == 0) {
-        (void)::setsid();
-        std::string exe_s = exe.string();
-        ::execl(exe_s.c_str(), exe_s.c_str(), "update", static_cast<char*>(nullptr));
-        ::_exit(127);
-    }
-    return true;
-#endif
-}
-
 json ace_browser_bridge_settings_to_json(const AceBrowserBridgeConfig& cfg) {
     json out;
     out["enabled"] = cfg.enabled;

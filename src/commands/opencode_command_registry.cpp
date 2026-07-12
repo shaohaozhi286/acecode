@@ -39,7 +39,7 @@ void submit_opencode_command(CommandContext& ctx,
         }
         ctx.state.thinking_start_time = std::chrono::steady_clock::now();
         ctx.state.streaming_output_chars = 0;
-        ctx.state.last_completion_tokens_authoritative = 0;
+        ctx.state.turn_completion_tokens_confirmed = 0;
         ctx.state.is_waiting = true;
     }
 

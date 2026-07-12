@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import {
   DEFAULT_HOME_WORKSPACE_SELECTION,
+  homeRefFromWorkspace,
   homeWorkspaceOptionForHash,
   noHomeWorkspaceOption,
   readDesktopHomeWorkspaceHash,
@@ -60,6 +61,49 @@ await run('显式打开无工作区时优先于保存值', () => {
     previousHash: '',
     options,
   }), '');
+});
+
+await run('手动选择项目会替换显式无工作区首页引用', () => {
+  const noWorkspaceRef = homeRefFromWorkspace(
+    noHomeWorkspaceOption(),
+    { workspaceHash: 'ws-old', cwd: 'C:/old' },
+    { cwd: 'C:/daemon' },
+  );
+  assert.deepEqual(noWorkspaceRef, {
+    home: true,
+    homeWorkspaceExplicit: true,
+    noWorkspace: true,
+    workspaceHash: '',
+    cwd: '',
+  });
+
+  const selectedRef = homeRefFromWorkspace(options[0], noWorkspaceRef, { cwd: 'C:/daemon' });
+  assert.deepEqual(selectedRef, {
+    home: true,
+    homeWorkspaceExplicit: true,
+    workspaceHash: 'ws-a',
+    cwd: 'C:/aaa',
+    workspaceName: 'aaa',
+  });
+  assert.equal(resolveHomeWorkspaceHash({
+    explicitHash: selectedRef.workspaceHash,
+    explicitHashSet: selectedRef.homeWorkspaceExplicit,
+    previousHash: '',
+    options,
+  }), 'ws-a');
+});
+
+await run('手动选择无工作区会清除项目首页引用', () => {
+  const selectedRef = homeRefFromWorkspace(options[1], null, { cwd: 'C:/daemon' });
+  const noWorkspaceRef = homeRefFromWorkspace(
+    noHomeWorkspaceOption(),
+    selectedRef,
+    { cwd: 'C:/daemon' },
+  );
+  assert.equal(noWorkspaceRef.homeWorkspaceExplicit, true);
+  assert.equal(noWorkspaceRef.noWorkspace, true);
+  assert.equal(noWorkspaceRef.workspaceHash, '');
+  assert.equal(noWorkspaceRef.cwd, '');
 });
 
 await run('保存的 workspace 不存在时回到无工作区', () => {

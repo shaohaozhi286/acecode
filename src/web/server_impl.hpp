@@ -142,7 +142,6 @@ nlohmann::json upgrade_config_to_json(const UpgradeConfig& cfg);
 nlohmann::json update_check_to_json(const acecode::upgrade::UpdateCheckResult& result);
 nlohmann::json ace_browser_bridge_settings_to_json(const AceBrowserBridgeConfig& cfg);
 
-bool start_default_update_command(std::string* error);
 bool cwd_is_directory(const std::string& cwd);
 bool has_non_whitespace(const std::string& value);
 std::string json_string_field(const nlohmann::json& object, const char* key);
@@ -168,6 +167,24 @@ AuthResult check_explicit_token(std::string_view server_token,
                                  std::string_view query_token);
 
 constexpr std::size_t kMaxSelectionContextChars = 40000;
+
+struct UpdateJobStatus {
+    std::string job_id;
+    std::string state = "pending";
+    std::string phase = "checking";
+    std::string current_version;
+    std::string target_version;
+    std::uintmax_t bytes_downloaded = 0;
+    std::optional<std::uintmax_t> bytes_total;
+    std::string backup_dir;
+    std::string error;
+    bool restart_required = false;
+};
+
+struct UpdateJobRuntime {
+    std::mutex mu;
+    std::optional<UpdateJobStatus> current;
+};
 
 // =====================================================================
 // WebServer::Impl — hidden pimpl implementation
@@ -209,6 +226,9 @@ struct WebServer::Impl {
 
     mutable std::mutex opencode_import_mu;
     mutable std::unordered_map<std::string, OpencodeImportJobStatus> opencode_import_jobs;
+
+    std::shared_ptr<UpdateJobRuntime> update_job_runtime =
+        std::make_shared<UpdateJobRuntime>();
 
     explicit Impl(WebServerDeps d) : deps(std::move(d)) {
         subagent_tracker_state->impl = this;

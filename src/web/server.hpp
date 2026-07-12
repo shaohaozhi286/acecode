@@ -16,6 +16,7 @@
 //     通过 conn->send_text 发送(send 内部加锁,Crow 保证安全)
 
 #include "../config/config.hpp"
+#include "../upgrade/upgrade.hpp"
 
 #include <atomic>
 #include <cstdint>
@@ -80,7 +81,9 @@ struct WebServerDeps {
     // std::nullopt,失败返回错误信息。null = 端点 501(与 native_folder_picker
     // 同款门控,仅 desktop 壳启动的 daemon 填入;webapp 兼容模式的右键菜单依赖它)。
     std::function<std::optional<std::string>(const std::string&)> open_in_explorer;
-    std::function<bool(std::string*)> start_update_command;
+    std::function<int(const AppConfig&,
+                      acecode::upgrade::UpgradeProgressCallback,
+                      std::string*)> run_update_command;
     bool                       dangerous = false;
     // Web 控制台 PTY 会话注册表(add-console-dock)。null = 控制台不可用,
     // /api/health 报 console.available=false,PTY 路由 404。

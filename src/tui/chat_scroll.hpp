@@ -13,6 +13,15 @@ inline int chat_line_count_at(const std::vector<int>& line_counts, int index) {
     return line_counts[index] > 0 ? line_counts[index] : 1;
 }
 
+inline int chat_spacer_rows_after_at(
+    const std::vector<int>& spacer_rows_after,
+    int index) {
+    if (index < 0 || index >= static_cast<int>(spacer_rows_after.size())) {
+        return 0;
+    }
+    return std::max(0, spacer_rows_after[index]);
+}
+
 inline int update_chat_line_count_estimate(int previous, int measured) {
     if (measured <= 0) {
         return previous > 0 ? previous : 1;
@@ -44,7 +53,8 @@ inline bool is_chat_tail_position(int focus_index,
 }
 
 inline int chat_transcript_display_rows(const std::vector<int>& line_counts,
-                                        int message_count) {
+                                        int message_count,
+                                        const std::vector<int>& spacer_rows_after) {
     if (message_count <= 0) {
         return 0;
     }
@@ -52,36 +62,41 @@ inline int chat_transcript_display_rows(const std::vector<int>& line_counts,
     int rows = 0;
     for (int i = 0; i < message_count; ++i) {
         rows += chat_line_count_at(line_counts, i);
-        rows += 1; // Spacer row rendered after every message.
+        rows += chat_spacer_rows_after_at(spacer_rows_after, i);
     }
     return rows;
 }
 
 inline int chat_max_scroll_top_row(const std::vector<int>& line_counts,
                                    int message_count,
-                                   int viewport_rows) {
+                                   int viewport_rows,
+                                   const std::vector<int>& spacer_rows_after) {
     if (message_count <= 0 || viewport_rows <= 0) {
         return 0;
     }
 
     const int transcript_rows =
-        chat_transcript_display_rows(line_counts, message_count);
+        chat_transcript_display_rows(
+            line_counts, message_count, spacer_rows_after);
     return std::max(0, transcript_rows - viewport_rows);
 }
 
 inline int clamp_chat_scroll_top_row(int scroll_top_row,
                                      const std::vector<int>& line_counts,
                                      int message_count,
-                                     int viewport_rows) {
+                                     int viewport_rows,
+                                     const std::vector<int>& spacer_rows_after) {
     return std::clamp(scroll_top_row, 0,
                       chat_max_scroll_top_row(line_counts, message_count,
-                                              viewport_rows));
+                                              viewport_rows,
+                                              spacer_rows_after));
 }
 
 inline int chat_display_row_for_focus(const std::vector<int>& line_counts,
                                       int message_count,
                                       int focus_index,
-                                      int line_offset) {
+                                      int line_offset,
+                                      const std::vector<int>& spacer_rows_after) {
     if (message_count <= 0) {
         return 0;
     }
@@ -90,7 +105,7 @@ inline int chat_display_row_for_focus(const std::vector<int>& line_counts,
     int row = 0;
     for (int i = 0; i < focus_index; ++i) {
         row += chat_line_count_at(line_counts, i);
-        row += 1; // Spacer row rendered after every message.
+        row += chat_spacer_rows_after_at(spacer_rows_after, i);
     }
     row += clamp_chat_line_offset(line_offset,
                                   chat_line_count_at(line_counts,
@@ -101,13 +116,15 @@ inline int chat_display_row_for_focus(const std::vector<int>& line_counts,
 inline std::pair<int, int> chat_focus_from_display_row(
     const std::vector<int>& line_counts,
     int message_count,
-    int display_row) {
+    int display_row,
+    const std::vector<int>& spacer_rows_after) {
     if (message_count <= 0) {
         return {-1, 0};
     }
 
     const int transcript_rows =
-        chat_transcript_display_rows(line_counts, message_count);
+        chat_transcript_display_rows(
+            line_counts, message_count, spacer_rows_after);
     if (transcript_rows <= 0) {
         return {-1, 0};
     }
@@ -123,11 +140,13 @@ inline std::pair<int, int> chat_focus_from_display_row(
 
         // Spacer rows are not real message content. Map them to the previous
         // message's tail so commands that act on the focused message remain
-        // stable while the viewport top crosses spacing.
-        if (display_row == row) {
+        // stable while the viewport top crosses a turn boundary.
+        const int spacer_rows =
+            chat_spacer_rows_after_at(spacer_rows_after, i);
+        if (display_row < row + spacer_rows) {
             return {i, lines - 1};
         }
-        row += 1;
+        row += spacer_rows;
     }
 
     const int last = message_count - 1;
@@ -154,7 +173,8 @@ inline ChatScrollbarThumbGeometry chat_scrollbar_thumb_geometry(
     const std::vector<int>& line_counts,
     int message_count,
     int viewport_rows,
-    int scroll_top_row) {
+    int scroll_top_row,
+    const std::vector<int>& spacer_rows_after) {
     ChatScrollbarThumbGeometry out;
     out.thumb_top_2x = 2 * track_y_min;
 
@@ -164,9 +184,11 @@ inline ChatScrollbarThumbGeometry chat_scrollbar_thumb_geometry(
     }
 
     const int content_rows =
-        chat_transcript_display_rows(line_counts, message_count);
+        chat_transcript_display_rows(
+            line_counts, message_count, spacer_rows_after);
     out.max_top_row =
-        chat_max_scroll_top_row(line_counts, message_count, viewport_rows);
+        chat_max_scroll_top_row(
+            line_counts, message_count, viewport_rows, spacer_rows_after);
     if (content_rows <= 0 || out.max_top_row <= 0) {
         out.thumb_size_2x = track_2x;
         return out;
@@ -182,7 +204,8 @@ inline ChatScrollbarThumbGeometry chat_scrollbar_thumb_geometry(
     out.scroll_range_2x = track_2x - thumb_size;
 
     const int clamped_top = clamp_chat_scroll_top_row(
-        scroll_top_row, line_counts, message_count, viewport_rows);
+        scroll_top_row, line_counts, message_count, viewport_rows,
+        spacer_rows_after);
     if (out.scroll_range_2x > 0) {
         out.thumb_top_2x += static_cast<int>(
             static_cast<long long>(out.scroll_range_2x) * clamped_top /
@@ -234,9 +257,11 @@ inline int chat_scrollbar_y_to_top_row(
     int track_height,
     const std::vector<int>& line_counts,
     int message_count,
-    int viewport_rows) {
+    int viewport_rows,
+    const std::vector<int>& spacer_rows_after) {
     const int max_top =
-        chat_max_scroll_top_row(line_counts, message_count, viewport_rows);
+        chat_max_scroll_top_row(
+            line_counts, message_count, viewport_rows, spacer_rows_after);
     if (max_top <= 0 || track_height <= 1) {
         return 0;
     }
@@ -250,13 +275,15 @@ inline int chat_scrollbar_y_to_top_row(
 inline int chat_bottom_anchor_top_padding_rows(
     const std::vector<int>& line_counts,
     int message_count,
-    int viewport_rows) {
+    int viewport_rows,
+    const std::vector<int>& spacer_rows_after) {
     if (message_count <= 0 || viewport_rows <= 0) {
         return 0;
     }
 
     const int transcript_rows =
-        chat_transcript_display_rows(line_counts, message_count);
+        chat_transcript_display_rows(
+            line_counts, message_count, spacer_rows_after);
     if (transcript_rows >= viewport_rows) {
         return 0;
     }

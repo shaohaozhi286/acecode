@@ -38,12 +38,13 @@ import { FramelessResizeHandles } from './components/FramelessResizeHandles.jsx'
 import { GlobalFindOverlay } from './components/GlobalFindOverlay.jsx';
 import { ConsoleDock } from './components/ConsoleDock.jsx';
 import { DesktopGuidedTour } from './components/DesktopGuidedTour.jsx';
+import { UpdateDialog } from './components/UpdateDialog.jsx';
 import {
   CONSOLE_DOCK_DEFAULT_HEIGHT,
   clampDockHeight,
   consoleCwdForContext,
 } from './lib/consoleDock.js';
-import { noHomeWorkspaceOption } from './lib/homeWorkspaceSelection.js';
+import { homeRefFromWorkspace, noHomeWorkspaceOption } from './lib/homeWorkspaceSelection.js';
 import {
   DEFAULT_SINGLE_LAYOUT,
   LEGACY_DEFAULT_SINGLE_LAYOUT,
@@ -64,6 +65,7 @@ import {
   stripOpenSessionParams,
 } from './lib/sessionJump.js';
 import { desktopUiMode } from './lib/desktopShellMode.js';
+import { updateJobIsActive } from './lib/updateJob.js';
 import {
   pushPermissionRequest,
   removePermissionRequest,
@@ -93,31 +95,6 @@ function parseDesktopBridgeResult(raw) {
   return raw;
 }
 
-function homeRefFromWorkspace(workspace, fallbackRef, health) {
-  const source = workspace && typeof workspace === 'object' ? workspace : {};
-  const explicitWorkspace = !!(workspace && typeof workspace === 'object');
-  const fallback = fallbackRef && typeof fallbackRef === 'object' ? fallbackRef : {};
-  const noWorkspace = !!(source.noWorkspace || source.no_workspace);
-  const workspaceHash = source.workspaceHash || source.workspace_hash || source.hash || fallback.workspaceHash || fallback.workspace_hash || '';
-  const cwd = source.cwd || fallback.cwd || health?.cwd || '';
-  const next = { home: true, homeWorkspaceExplicit: explicitWorkspace };
-  if (noWorkspace) {
-    next.noWorkspace = true;
-    next.workspaceHash = '';
-    next.cwd = '';
-    return next;
-  }
-  if (workspaceHash) next.workspaceHash = workspaceHash;
-  if (cwd) next.cwd = cwd;
-  if (source.name || source.workspaceName) next.workspaceName = source.name || source.workspaceName;
-  else if (fallback.workspaceName) next.workspaceName = fallback.workspaceName;
-  for (const key of ['contextId', 'port', 'token']) {
-    if (source[key] != null) next[key] = source[key];
-    else if (fallback[key] != null) next[key] = fallback[key];
-  }
-  return next;
-}
-
 export function App() {
   const [authState, setAuthState] = useState('checking'); // 'checking' | 'ok' | 'need-token'
   const [health,    setHealth]    = useState(null);
@@ -137,6 +114,8 @@ export function App() {
   const [searchOpen,   setSearchOpen]   = useState(false);
   const [updateStatus, setUpdateStatus] = useState(null);
   const [updateStarting, setUpdateStarting] = useState(false);
+  const [updateJob, setUpdateJob] = useState(null);
+  const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
   const [singleLayout, setSingleLayout] = usePreference(
     SINGLE_LAYOUT_STORAGE_KEY, DEFAULT_SINGLE_LAYOUT, validateLayoutWidths);
   const [uiPrefs, setUiPrefs] = usePreference(
@@ -155,6 +134,7 @@ export function App() {
   const [previewPanelVisible, setPreviewPanelVisible] = useState(false);
   const activeRefRef = useRef(activeRef);
   const navHistoryRef = useRef(navHistory);
+  const updatePollRef = useRef(0);
   const desktopModeRef = useRef(desktopUiMode());
   const startupOpenTargetRef = useRef(
     typeof window === 'undefined' ? null : openSessionTargetFromSearch(window.location.search),
@@ -173,7 +153,8 @@ export function App() {
   const [guidedTourForced, setGuidedTourForced] = useState(false);
   const guidedTourAutoAttemptedRef = useRef(false);
   const guidedTourHasActiveSession = !!(activeRef?.sessionId || activeRef?.id);
-  const guidedTourBlocked = showSettings || searchOpen || permReqs.length > 0 || questionReqs.length > 0;
+  const guidedTourBlocked = showSettings || searchOpen || updateDialogOpen
+    || permReqs.length > 0 || questionReqs.length > 0;
 
   useEffect(() => initInactiveSelection(), []);
   useEffect(() => {
@@ -316,20 +297,67 @@ export function App() {
 
   useEffect(() => { probe(); }, [probe]);
 
+  const pollUpdateJob = useCallback((jobId) => {
+    if (!jobId) return;
+    if (updatePollRef.current) window.clearTimeout(updatePollRef.current);
+    let failures = 0;
+    const tick = async () => {
+      try {
+        const job = await api.getUpdateJob(jobId);
+        failures = 0;
+        setUpdateJob(job);
+        if (updateJobIsActive(job)) {
+          updatePollRef.current = window.setTimeout(tick, 350);
+          return;
+        }
+        updatePollRef.current = 0;
+        setUpdateDialogOpen(true);
+        if (job?.state === 'succeeded') {
+          toast({ kind: 'ok', text: '升级安装完成，请完全退出并重新启动 ACECode' });
+        } else if (job?.state === 'failed') {
+          toast({ kind: 'err', text: '升级失败:' + (job.error || '未知错误') });
+        }
+      } catch (e) {
+        failures += 1;
+        if (failures < 5) {
+          updatePollRef.current = window.setTimeout(tick, 600);
+          return;
+        }
+        updatePollRef.current = 0;
+        setUpdateJob((prev) => ({
+          ...(prev || { job_id: jobId }),
+          state: 'failed',
+          error: e?.message || '无法获取升级进度',
+        }));
+        setUpdateDialogOpen(true);
+      }
+    };
+    tick();
+  }, []);
+
+  useEffect(() => () => {
+    if (updatePollRef.current) window.clearTimeout(updatePollRef.current);
+  }, []);
+
   useEffect(() => {
     if (authState !== 'ok') return undefined;
     let cancelled = false;
-    api.getUpdateStatus()
-      .then((status) => {
-        if (!cancelled) setUpdateStatus(status);
-      })
-      .catch(() => {
-        if (!cancelled) setUpdateStatus(null);
+    Promise.allSettled([api.getUpdateStatus(), api.getLatestUpdateJob()])
+      .then(([statusResult, jobResult]) => {
+        if (cancelled) return;
+        setUpdateStatus(statusResult.status === 'fulfilled' ? statusResult.value : null);
+        if (jobResult.status !== 'fulfilled') return;
+        const job = jobResult.value;
+        setUpdateJob(job);
+        if (updateJobIsActive(job)) {
+          setUpdateDialogOpen(true);
+          pollUpdateJob(job.job_id);
+        }
       });
     return () => {
       cancelled = true;
     };
-  }, [authState]);
+  }, [authState, pollUpdateJob]);
 
   useEffect(() => {
     if (authState !== 'ok' || !desktopGuidedTourModeEligible(desktopModeRef.current)) {
@@ -499,23 +527,46 @@ export function App() {
     }));
   }, [setUiPrefs]);
 
+  const openUpdateDialog = useCallback(() => {
+    if (!updateJobIsActive(updateJob)
+        && updateJob?.target_version
+        && updateStatus?.latest_version
+        && updateJob.target_version !== updateStatus.latest_version) {
+      setUpdateJob(null);
+    }
+    setUpdateDialogOpen(true);
+  }, [updateJob, updateStatus]);
+
   const startUpdate = useCallback(async () => {
-    if (!updateStatus?.update_available || updateStarting) return;
+    if (!updateStatus?.update_available || updateStarting || updateJobIsActive(updateJob)) return;
     setUpdateStarting(true);
     try {
-      await api.startUpdate();
-      toast({ kind: 'info', text: '已启动升级,请按提示完成并重启 ACECode' });
+      const job = await api.startUpdate();
+      setUpdateJob(job);
+      setUpdateDialogOpen(true);
+      pollUpdateJob(job?.job_id);
     } catch (e) {
+      if (e?.code === 'UPDATE_IN_PROGRESS' && e?.body?.job) {
+        const job = e.body.job;
+        setUpdateJob(job);
+        setUpdateDialogOpen(true);
+        pollUpdateJob(job.job_id);
+        return;
+      }
       toast({ kind: 'err', text: '启动升级失败:' + (e?.message || '') });
     } finally {
       setUpdateStarting(false);
     }
-  }, [updateStarting, updateStatus]);
+  }, [pollUpdateJob, updateJob, updateStarting, updateStatus]);
 
   const openHomeForWorkspace = useCallback((workspace = null) => {
     const target = workspace == null ? noHomeWorkspaceOption() : workspace;
     navigateToRef(homeRefFromWorkspace(target, activeRefRef.current, health));
   }, [health, navigateToRef]);
+
+  const replaceHomeWorkspace = useCallback((workspace) => {
+    replaceActiveRef((current) => homeRefFromWorkspace(workspace, current, health));
+  }, [health, replaceActiveRef]);
 
   const abortGuidedTour = useCallback(() => {
     setGuidedTourRun(false);
@@ -811,7 +862,9 @@ export function App() {
         canGoForward={navHistory.forward.length > 0}
         updateStatus={updateStatus}
         updateStarting={updateStarting}
-        onStartUpdate={startUpdate}
+        updateRunning={updateJobIsActive(updateJob)}
+        updateReady={updateJob?.state === 'succeeded' && !!updateJob?.restart_required}
+        onStartUpdate={openUpdateDialog}
         appVersion={health?.version || ''}
       />
       <div ref={singleShellRef} className="flex-1 flex overflow-hidden relative min-h-0 ace-single-shell">
@@ -849,6 +902,7 @@ export function App() {
               <ChatView
                 sessionRef={activeRef}
                 onSessionPromoted={navigateToRef}
+                onHomeWorkspaceChange={replaceHomeWorkspace}
                 onCommandWorkspaceChange={setCommandWorkspaceHash}
                 onConsoleCwdChange={setConsoleCwd}
                 health={health}
@@ -920,6 +974,15 @@ export function App() {
       <FramelessResizeHandles />
       <GlobalFindOverlay />
       <DesktopContextMenu />
+      <UpdateDialog
+        open={updateDialogOpen}
+        updateStatus={updateStatus}
+        job={updateJob}
+        starting={updateStarting}
+        onConfirm={startUpdate}
+        onRetry={startUpdate}
+        onClose={() => setUpdateDialogOpen(false)}
+      />
       <DesktopGuidedTour
         run={guidedTourRun && !guidedTourBlocked}
         hasModel={guidedTourState.hasModel}

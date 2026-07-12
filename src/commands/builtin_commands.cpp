@@ -518,7 +518,7 @@ static void cmd_plan(CommandContext& ctx, const std::string& raw_args) {
                 ctx.state.current_thinking_phrase = "Planning";
                 ctx.state.thinking_start_time = std::chrono::steady_clock::now();
                 ctx.state.streaming_output_chars = 0;
-                ctx.state.last_completion_tokens_authoritative = 0;
+                ctx.state.turn_completion_tokens_confirmed = 0;
                 ctx.state.is_waiting = true;
                 prompt_to_submit = args;
             }

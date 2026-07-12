@@ -238,7 +238,9 @@ struct WebServerFixture {
         bool native_folder_picker_enabled = false,
         std::function<std::optional<std::string>()> native_folder_picker = {},
         bool attach_skill_registry = true,
-        std::function<bool(std::string*)> start_update_command = {},
+        std::function<int(const acecode::AppConfig&,
+                          acecode::upgrade::UpgradeProgressCallback,
+                          std::string*)> run_update_command = {},
         std::function<std::optional<std::string>(const std::string&)> open_in_explorer = {}) {
         port = pick_test_port();
         web_cfg.bind = "127.0.0.1";
@@ -315,7 +317,7 @@ struct WebServerFixture {
         wdeps.native_folder_picker_enabled = native_folder_picker_enabled;
         wdeps.native_folder_picker = std::move(native_folder_picker);
         wdeps.open_in_explorer = std::move(open_in_explorer);
-        wdeps.start_update_command = std::move(start_update_command);
+        wdeps.run_update_command = std::move(run_update_command);
         wdeps.skill_registry = attach_skill_registry ? &skill_registry : nullptr;
         wdeps.dangerous = false;
 
@@ -3264,22 +3266,38 @@ TEST(WebServerHttp, GetUpdateStatusReportsAvailableVersion) {
     EXPECT_EQ(j["package_file"], "acecode.zip");
 }
 
-// 场景:POST /api/update/start 显式用户动作才触发升级命令。
-TEST(WebServerHttp, PostUpdateStartRunsInjectedUpdateCommand) {
+// 场景:POST 创建可轮询 GUI 升级任务,成功后保留重启提示与 latest-job 状态。
+TEST(WebServerHttp, PostUpdateStartPublishesSuccessfulGuiJob) {
     LocalUpdateServer update_server([](httplib::Server& s) {
         s.Get("/aceupdate.json", [](const httplib::Request&, httplib::Response& res) {
             res.set_content(update_manifest_for("9.9.9"), "application/json");
         });
     });
-    bool called = false;
+    std::atomic<bool> called{false};
     WebServerFixture fx(
         true,
         false,
         {},
         true,
-        [&](std::string*) {
-            called = true;
-            return true;
+        [&](const acecode::AppConfig&,
+            acecode::upgrade::UpgradeProgressCallback publish,
+            std::string*) {
+            called.store(true);
+            acecode::upgrade::UpgradeProgress downloading;
+            downloading.phase = acecode::upgrade::UpgradePhase::Downloading;
+            downloading.current_version = "0.0.0-test";
+            downloading.target_version = "9.9.9";
+            downloading.bytes_downloaded = 50;
+            downloading.bytes_total = 100;
+            publish(downloading);
+            acecode::upgrade::UpgradeProgress installing = downloading;
+            installing.phase = acecode::upgrade::UpgradePhase::Installing;
+            publish(installing);
+            acecode::upgrade::UpgradeProgress complete = installing;
+            complete.phase = acecode::upgrade::UpgradePhase::Complete;
+            complete.backup_dir = "C:/Temp/acecode-backup";
+            publish(complete);
+            return 0;
         });
     fx.cfg.upgrade.base_url = update_server.base_url();
     fx.cfg.upgrade.timeout_ms = 3000;
@@ -3289,7 +3307,143 @@ TEST(WebServerHttp, PostUpdateStartRunsInjectedUpdateCommand) {
     auto j = json::parse(r.text);
     EXPECT_EQ(j["started"], true);
     EXPECT_EQ(j["latest_version"], "9.9.9");
-    EXPECT_TRUE(called);
+    ASSERT_TRUE(j.contains("job_id"));
+    const std::string job_id = j["job_id"].get<std::string>();
+
+    json status;
+    for (int i = 0; i < 50; ++i) {
+        auto poll = cpr::Get(cpr::Url{fx.url("/api/update/jobs/" + job_id)});
+        ASSERT_EQ(poll.status_code, 200) << poll.text;
+        status = json::parse(poll.text);
+        if (status["state"] == "succeeded") break;
+        std::this_thread::sleep_for(10ms);
+    }
+    EXPECT_TRUE(called.load());
+    EXPECT_EQ(status["state"], "succeeded");
+    EXPECT_EQ(status["phase"], "complete");
+    EXPECT_EQ(status["restart_required"], true);
+    EXPECT_EQ(status["percent"], 50);
+    EXPECT_EQ(status["backup_dir"], "C:/Temp/acecode-backup");
+
+    auto latest = cpr::Get(cpr::Url{fx.url("/api/update/job")});
+    ASSERT_EQ(latest.status_code, 200) << latest.text;
+    EXPECT_EQ(json::parse(latest.text)["job_id"], job_id);
+}
+
+// 场景:两个页面同时点更新,后端只允许第一个任务运行。
+TEST(WebServerHttp, PostUpdateStartRejectsConcurrentGuiJob) {
+    LocalUpdateServer update_server([](httplib::Server& s) {
+        s.Get("/aceupdate.json", [](const httplib::Request&, httplib::Response& res) {
+            res.set_content(update_manifest_for("9.9.9"), "application/json");
+        });
+    });
+    struct Gate {
+        std::mutex mu;
+        std::condition_variable cv;
+        bool started = false;
+        bool release = false;
+    };
+    auto gate = std::make_shared<Gate>();
+    WebServerFixture fx(
+        true,
+        false,
+        {},
+        true,
+        [gate](const acecode::AppConfig&,
+               acecode::upgrade::UpgradeProgressCallback publish,
+               std::string*) {
+            acecode::upgrade::UpgradeProgress progress;
+            progress.phase = acecode::upgrade::UpgradePhase::Downloading;
+            progress.target_version = "9.9.9";
+            publish(progress);
+            std::unique_lock<std::mutex> lock(gate->mu);
+            gate->started = true;
+            gate->cv.notify_all();
+            gate->cv.wait(lock, [&] { return gate->release; });
+            return 0;
+        });
+    fx.cfg.upgrade.base_url = update_server.base_url();
+    fx.cfg.upgrade.timeout_ms = 3000;
+
+    auto first = cpr::Post(cpr::Url{fx.url("/api/update/start")});
+    ASSERT_EQ(first.status_code, 202) << first.text;
+    const auto first_body = json::parse(first.text);
+    {
+        std::unique_lock<std::mutex> lock(gate->mu);
+        ASSERT_TRUE(gate->cv.wait_for(lock, 2s, [&] { return gate->started; }));
+    }
+
+    auto second = cpr::Post(cpr::Url{fx.url("/api/update/start")});
+    ASSERT_EQ(second.status_code, 409) << second.text;
+    const auto second_body = json::parse(second.text);
+    EXPECT_EQ(second_body["error"], "UPDATE_IN_PROGRESS");
+    EXPECT_EQ(second_body["job"]["job_id"], first_body["job_id"]);
+
+    {
+        std::lock_guard<std::mutex> lock(gate->mu);
+        gate->release = true;
+    }
+    gate->cv.notify_all();
+    for (int i = 0; i < 50; ++i) {
+        auto poll = cpr::Get(cpr::Url{fx.url(
+            "/api/update/jobs/" + first_body["job_id"].get<std::string>())});
+        ASSERT_EQ(poll.status_code, 200) << poll.text;
+        if (json::parse(poll.text)["state"] == "succeeded") break;
+        std::this_thread::sleep_for(10ms);
+    }
+}
+
+// 场景:失败状态带错误且允许显式重试创建新 job id。
+TEST(WebServerHttp, FailedUpdateJobCanBeRetried) {
+    LocalUpdateServer update_server([](httplib::Server& s) {
+        s.Get("/aceupdate.json", [](const httplib::Request&, httplib::Response& res) {
+            res.set_content(update_manifest_for("9.9.9"), "application/json");
+        });
+    });
+    auto attempts = std::make_shared<std::atomic<int>>(0);
+    WebServerFixture fx(
+        true,
+        false,
+        {},
+        true,
+        [attempts](const acecode::AppConfig&,
+                   acecode::upgrade::UpgradeProgressCallback publish,
+                   std::string* error) {
+            const int attempt = attempts->fetch_add(1);
+            acecode::upgrade::UpgradeProgress progress;
+            progress.phase = attempt == 0
+                ? acecode::upgrade::UpgradePhase::Verifying
+                : acecode::upgrade::UpgradePhase::Complete;
+            progress.target_version = "9.9.9";
+            publish(progress);
+            if (attempt == 0) {
+                if (error) *error = "checksum mismatch";
+                return 1;
+            }
+            return 0;
+        });
+    fx.cfg.upgrade.base_url = update_server.base_url();
+    fx.cfg.upgrade.timeout_ms = 3000;
+
+    auto first = cpr::Post(cpr::Url{fx.url("/api/update/start")});
+    ASSERT_EQ(first.status_code, 202) << first.text;
+    const std::string first_id = json::parse(first.text)["job_id"];
+    json failed;
+    for (int i = 0; i < 50; ++i) {
+        auto poll = cpr::Get(cpr::Url{fx.url("/api/update/jobs/" + first_id)});
+        ASSERT_EQ(poll.status_code, 200) << poll.text;
+        failed = json::parse(poll.text);
+        if (failed["state"] == "failed") break;
+        std::this_thread::sleep_for(10ms);
+    }
+    EXPECT_EQ(failed["state"], "failed");
+    EXPECT_EQ(failed["phase"], "verifying");
+    EXPECT_EQ(failed["restart_required"], false);
+    EXPECT_EQ(failed["error"], "checksum mismatch");
+
+    auto retry = cpr::Post(cpr::Url{fx.url("/api/update/start")});
+    ASSERT_EQ(retry.status_code, 202) << retry.text;
+    EXPECT_NE(json::parse(retry.text)["job_id"], first_id);
 }
 
 // 场景: POST /api/sessions body 是非法 JSON → 400 + error JSON,不影响 server。

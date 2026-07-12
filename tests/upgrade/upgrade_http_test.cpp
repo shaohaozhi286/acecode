@@ -16,6 +16,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <vector>
 
 using namespace std::chrono_literals;
 
@@ -115,11 +116,21 @@ TEST(UpgradeHttp, DownloadFailureReturnsBeforeApply) {
 
     std::ostringstream out;
     std::ostringstream err;
+    std::vector<acecode::upgrade::UpgradeProgress> progress;
     int code = acecode::upgrade::run_upgrade_command(
-        upgrade_config_for(server), "acecode-test", "0.1.2", out, err);
+        upgrade_config_for(server), "acecode-test", "0.1.2", out, err, false,
+        [&](const acecode::upgrade::UpgradeProgress& item) {
+            progress.push_back(item);
+        });
 
     EXPECT_NE(code, 0);
     EXPECT_NE(err.str().find("package request returned HTTP 500"), std::string::npos);
+    ASSERT_GE(progress.size(), 2U);
+    EXPECT_EQ(progress.front().phase, acecode::upgrade::UpgradePhase::Checking);
+    EXPECT_EQ(progress.back().phase, acecode::upgrade::UpgradePhase::Downloading);
+    EXPECT_EQ(progress.back().target_version, "9.9.9");
+    EXPECT_STREQ(acecode::upgrade::upgrade_phase_name(progress.back().phase),
+                 "downloading");
 }
 
 TEST(UpgradeHttp, DownloadAcceptHeaderAllowsCommonZipMimeTypes) {
@@ -172,11 +183,18 @@ TEST(UpgradeHttp, ChecksumMismatchReturnsBeforeExtraction) {
 
     std::ostringstream out;
     std::ostringstream err;
+    std::vector<acecode::upgrade::UpgradeProgress> progress;
     int code = acecode::upgrade::run_upgrade_command(
-        upgrade_config_for(server), "acecode-test", "0.1.2", out, err);
+        upgrade_config_for(server), "acecode-test", "0.1.2", out, err, false,
+        [&](const acecode::upgrade::UpgradeProgress& item) {
+            progress.push_back(item);
+        });
 
     EXPECT_NE(code, 0);
     EXPECT_NE(err.str().find("checksum mismatch"), std::string::npos);
+    ASSERT_FALSE(progress.empty());
+    EXPECT_EQ(progress.back().phase, acecode::upgrade::UpgradePhase::Verifying);
+    EXPECT_EQ(progress.back().bytes_downloaded, std::string("actual").size());
 }
 
 TEST(UpgradeHttp, UpdateCheckReportsAvailableWithoutDownloadingPackage) {

@@ -1,4 +1,9 @@
 #include "tui/agent_callbacks_builder.hpp"
+// !! setup_agent_callbacks 目前全仓库无调用点(v0.5.5 时代从 main.cpp 提取,
+// 为 TuiContext 重构预留,从未接线)—— 实际生效的是 main.cpp 内联注册的
+// 同款回调。修改 main.cpp 的 on_delta / on_usage / on_busy_changed /
+// on_stream_retry_reset 语义时必须同步本文件(先例:renderable_tool_summary_line
+// 双实现)。若重构落地或决定放弃,请删除本文件而不是让两份继续漂移。
 
 #include <chrono>
 #include <mutex>
@@ -101,7 +106,9 @@ void setup_agent_callbacks(TuiContext& ctx) {
     callbacks.on_usage = [&state, &screen](const TokenUsage& usage) {
         std::lock_guard<std::mutex> lk(state.mu);
         state.token_status = std::to_string(usage.total_tokens);
-        state.last_completion_tokens_authoritative = usage.completion_tokens;
+        // 心跳读数走回合累计:入账 + 清估算基数,与 main.cpp 内联版同步。
+        state.turn_completion_tokens_confirmed += usage.completion_tokens;
+        state.streaming_output_chars = 0;
         screen.PostEvent(ftxui::Event::Custom);
     };
 
@@ -187,9 +194,29 @@ void setup_agent_callbacks(TuiContext& ctx) {
             state.current_thinking_phrase = get_random_thinking_phrase(is_user_chinese(state));
             state.thinking_start_time = std::chrono::steady_clock::now();
             state.streaming_output_chars = 0;
-            state.last_completion_tokens_authoritative = 0;
+            state.turn_completion_tokens_confirmed = 0;
         }
+        const bool was_waiting = state.is_waiting;
         state.is_waiting = busy;
+        // inline-thinking-heartbeat:回合正常收尾追加 "Done for Ns" 显示端
+        // 伪行,与 main.cpp 内联版同步;队列续跑分支在其后,保证 Done 行
+        // 先于下一条 user 行入列。
+        if (was_waiting && !busy) {
+            const bool interrupted = state.turn_interrupted_by_user;
+            state.turn_interrupted_by_user = false;
+            if (!interrupted &&
+                state.thinking_start_time.time_since_epoch().count() != 0) {
+                const long done_secs = static_cast<long>(
+                    std::chrono::duration_cast<std::chrono::seconds>(
+                        std::chrono::steady_clock::now() -
+                        state.thinking_start_time).count());
+                if (done_secs >= 1) {
+                    state.conversation.push_back({"turn_done",
+                        "Done for " + std::to_string(done_secs) + "s", false});
+                    state.chat_follow_tail = true;
+                }
+            }
+        }
         if (!busy) {
             auto& rc_hub = acecode::rc::remote_control_service().hub();
             if (rc_hub.enabled()) {
@@ -218,7 +245,7 @@ void setup_agent_callbacks(TuiContext& ctx) {
             state.current_thinking_phrase = get_random_thinking_phrase(is_user_chinese(state));
             state.thinking_start_time = std::chrono::steady_clock::now();
             state.streaming_output_chars = 0;
-            state.last_completion_tokens_authoritative = 0;
+            state.turn_completion_tokens_confirmed = 0;
             state.is_waiting = true;
             lk.unlock();
             ctx.coordinate_mcp_before_first_turn();
@@ -242,7 +269,7 @@ void setup_agent_callbacks(TuiContext& ctx) {
                 state.current_thinking_phrase = get_random_thinking_phrase(is_user_chinese(state));
                 state.thinking_start_time = std::chrono::steady_clock::now();
                 state.streaming_output_chars = 0;
-                state.last_completion_tokens_authoritative = 0;
+                state.turn_completion_tokens_confirmed = 0;
                 state.is_waiting = true;
                 lk.unlock();
                 ctx.coordinate_mcp_before_first_turn();

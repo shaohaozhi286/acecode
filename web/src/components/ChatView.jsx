@@ -459,7 +459,7 @@ function isRealWorkspaceHash(hash) {
   return !!hash && hash !== '__local__';
 }
 
-export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWorkspaceChange, onConsoleCwdChange, health, onPermissionRequest, onQuestionRequest, questionRequest, onQuestionResolve, onPermissionModeChanged, onSubagentTasksChange, showSidePanel = false, sidePanelWidth = 280, onSidePanelResize, previewPanelWidth = 640, onPreviewPanelResize, onPreviewPanelVisibleChange, sidePanelCollapsed = false, onToggleSidePanel, sidePanelMaximized = false, onToggleSidePanelMaximized, showAceCodeAvatar = false }) {
+export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorkspaceChange, onCommandWorkspaceChange, onConsoleCwdChange, health, onPermissionRequest, onQuestionRequest, questionRequest, onQuestionResolve, onPermissionModeChanged, onSubagentTasksChange, showSidePanel = false, sidePanelWidth = 280, onSidePanelResize, previewPanelWidth = 640, onPreviewPanelResize, onPreviewPanelVisibleChange, sidePanelCollapsed = false, onToggleSidePanel, sidePanelMaximized = false, onToggleSidePanelMaximized, showAceCodeAvatar = false }) {
   const ref = useMemo(() => normalizeSessionRef(sessionRef, sessionId), [sessionRef, sessionId]);
   const sid = ref?.sessionId || ref?.id || '';
   const sidRef = useRef(sid);
@@ -736,6 +736,15 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
     setHomeWorkspaceSelection({ workspaceHash });
     writeDesktopHomeWorkspaceHash(workspaceHash).catch(() => {});
   }, [setHomeWorkspaceSelection]);
+
+  const selectHomeWorkspace = useCallback((workspace) => {
+    const selected = workspace?.noWorkspace ? noHomeWorkspaceOption() : workspace;
+    const workspaceHash = String(selected?.hash || '');
+    setHomeWorkspaceHash(workspaceHash);
+    persistHomeWorkspaceHash(workspaceHash);
+    onHomeWorkspaceChange?.(selected);
+    setProjectDropdownOpen(false);
+  }, [onHomeWorkspaceChange, persistHomeWorkspaceHash]);
 
   const selectedHomeWorkspace = useMemo(() => {
     return homeWorkspaceOptionForHash(homeWorkspaces, homeWorkspaceHash);
@@ -2641,11 +2650,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
                           "w-full text-left px-3 py-1.5 text-[13px] flex flex-col gap-[2px] transition-colors",
                           w.hash === homeWorkspaceHash ? "bg-accent/10 text-accent font-medium" : "text-fg hover:bg-surface-hi"
                         )}
-                        onClick={() => {
-                          setHomeWorkspaceHash(w.hash);
-                          persistHomeWorkspaceHash(w.hash);
-                          setProjectDropdownOpen(false);
-                        }}
+                        onClick={() => selectHomeWorkspace(w)}
                       >
                         <div className="truncate leading-tight">{w.name}</div>
                         <div className={clsx("text-[10.5px] truncate leading-tight", w.hash === homeWorkspaceHash ? "text-accent/60" : "text-fg-mute/70")} title={w.cwd}>
@@ -2660,11 +2665,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onCommandWo
                         "w-full text-left px-3 py-2 text-[13px] transition-colors",
                         !homeWorkspaceHash ? "bg-accent/10 text-accent font-medium" : "text-fg hover:bg-surface-hi"
                       )}
-                      onClick={() => {
-                        setHomeWorkspaceHash('');
-                        persistHomeWorkspaceHash('');
-                        setProjectDropdownOpen(false);
-                      }}
+                      onClick={() => selectHomeWorkspace(noHomeWorkspaceOption())}
                     >
                       <div className="truncate leading-tight">{noHomeWorkspaceOption().name}</div>
                     </button>

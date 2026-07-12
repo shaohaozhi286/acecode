@@ -3,10 +3,19 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <vector>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -36,6 +45,34 @@ std::string read_file(const fs::path& path) {
     ss << ifs.rdbuf();
     return ss.str();
 }
+
+#ifdef _WIN32
+class ProcessGuard {
+public:
+    ~ProcessGuard() { stop(); }
+
+    void stop() {
+        if (process_) {
+            ::TerminateProcess(process_, 0);
+            ::WaitForSingleObject(process_, 5000);
+            ::CloseHandle(process_);
+            process_ = nullptr;
+        }
+        if (thread_) {
+            ::CloseHandle(thread_);
+            thread_ = nullptr;
+        }
+    }
+
+    HANDLE* process_address() { return &process_; }
+    HANDLE* thread_address() { return &thread_; }
+    HANDLE process() const { return process_; }
+
+private:
+    HANDLE process_ = nullptr;
+    HANDLE thread_ = nullptr;
+};
+#endif
 
 } // namespace
 
@@ -115,6 +152,57 @@ TEST(UpgradeApply, KeepsRunnerDirectoryInInstallDir) {
     std::error_code ec;
     fs::remove_all(root, ec);
 }
+
+#ifdef _WIN32
+TEST(UpgradeApply, ReplacesExecutableWhileItIsRunning) {
+    fs::path root = temp_root("acecode-apply-running-exe");
+    fs::path install = root / "install";
+    fs::path staging = root / "staging";
+    fs::path backup = root / "backup";
+    fs::create_directories(install);
+
+    std::array<wchar_t, MAX_PATH> system_dir{};
+    const UINT system_dir_length = ::GetSystemDirectoryW(
+        system_dir.data(), static_cast<UINT>(system_dir.size()));
+    ASSERT_GT(system_dir_length, 0U);
+    ASSERT_LT(system_dir_length, system_dir.size());
+
+    const fs::path running_exe = install / "acecode.exe";
+    std::error_code ec;
+    fs::copy_file(fs::path(system_dir.data()) / "PING.EXE", running_exe,
+                  fs::copy_options::overwrite_existing, ec);
+    ASSERT_FALSE(ec) << ec.message();
+    write_file(staging / "acecode.exe", "new exe");
+
+    std::wstring command_line = L"\"" + running_exe.wstring() +
+                                L"\" -t 127.0.0.1";
+    std::vector<wchar_t> mutable_command(command_line.begin(), command_line.end());
+    mutable_command.push_back(L'\0');
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process_info{};
+    ASSERT_TRUE(::CreateProcessW(
+        running_exe.c_str(), mutable_command.data(), nullptr, nullptr, FALSE,
+        CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process_info))
+        << "CreateProcessW error " << ::GetLastError();
+
+    ProcessGuard process;
+    *process.process_address() = process_info.hProcess;
+    *process.thread_address() = process_info.hThread;
+    ASSERT_EQ(::WaitForSingleObject(process.process(), 0), WAIT_TIMEOUT);
+
+    std::string err;
+    ASSERT_TRUE(apply_staged_update(staging, install, backup,
+                                    "windows-x64", &err))
+        << err;
+    EXPECT_EQ(read_file(running_exe), "new exe");
+    EXPECT_TRUE(fs::is_regular_file(backup / "acecode.exe"));
+    EXPECT_GT(fs::file_size(backup / "acecode.exe"), 0U);
+
+    process.stop();
+    fs::remove_all(root, ec);
+}
+#endif
 
 TEST(UpgradeApply, ReplacesNestedPackageFilesWithoutMovingUnrelatedSiblings) {
     fs::path root = temp_root("acecode-apply-nested");
