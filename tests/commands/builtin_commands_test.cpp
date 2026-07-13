@@ -444,6 +444,77 @@ TEST(BuiltinCommands, ModeCommandSwitchesCurrentSessionToPlan) {
     EXPECT_EQ(h.config_.default_permission_mode, "default");
 }
 
+TEST(BuiltinCommands, ModeWithoutArgumentsOpensPickerAtCurrentMode) {
+    ResumeCommandHarness h("mode_picker_open");
+    h.perms_.set_mode(acecode::PermissionMode::AcceptEdits);
+
+    ASSERT_TRUE(h.dispatch("/mode"));
+
+    std::lock_guard<std::mutex> lk(h.state_.mu);
+    ASSERT_TRUE(h.state_.mode_picker_open);
+    ASSERT_EQ(h.state_.mode_picker_options.size(), 4u);
+    EXPECT_EQ(h.state_.mode_picker_selected, 1);
+    EXPECT_EQ(h.state_.mode_picker_options[1].mode,
+              acecode::PermissionMode::AcceptEdits);
+    EXPECT_TRUE(h.state_.mode_picker_options[1].is_current);
+    EXPECT_TRUE(h.state_.mode_picker_callback);
+}
+
+TEST(BuiltinCommands, ModePickerSelectionUsesCurrentSessionTransition) {
+    ResumeCommandHarness h("mode_picker_select");
+    h.perms_.set_mode(acecode::PermissionMode::AcceptEdits);
+
+    ASSERT_TRUE(h.dispatch("/mode"));
+    {
+        std::lock_guard<std::mutex> lk(h.state_.mu);
+        ASSERT_TRUE(h.state_.mode_picker_callback);
+        auto callback = h.state_.mode_picker_callback;
+        h.state_.mode_picker_open = false;
+        h.state_.mode_picker_options.clear();
+        h.state_.mode_picker_callback = nullptr;
+        callback(acecode::PermissionMode::Plan);
+    }
+
+    EXPECT_EQ(h.perms_.mode(), acecode::PermissionMode::Plan);
+    EXPECT_EQ(h.perms_.pre_plan_mode(), acecode::PermissionMode::AcceptEdits);
+    EXPECT_EQ(h.sm_.current_permission_mode(), "plan");
+    EXPECT_EQ(h.sm_.current_pre_plan_permission_mode(), "accept-edits");
+    EXPECT_TRUE(fs::exists(h.sm_.current_plan_file_path()));
+    ASSERT_FALSE(h.state_.conversation.empty());
+    EXPECT_NE(h.state_.conversation.back().content.find("Permission mode: plan"),
+              std::string::npos);
+}
+
+TEST(BuiltinCommands, ClosingModePickerWithoutSelectionHasNoSideEffects) {
+    ResumeCommandHarness h("mode_picker_cancel");
+    h.perms_.set_mode(acecode::PermissionMode::AcceptEdits);
+    const auto before_default = h.config_.default_permission_mode;
+
+    ASSERT_TRUE(h.dispatch("/mode"));
+    {
+        std::lock_guard<std::mutex> lk(h.state_.mu);
+        h.state_.mode_picker_open = false;
+        h.state_.mode_picker_options.clear();
+        h.state_.mode_picker_selected = 0;
+        h.state_.mode_picker_callback = nullptr;
+    }
+
+    EXPECT_EQ(h.perms_.mode(), acecode::PermissionMode::AcceptEdits);
+    EXPECT_EQ(h.config_.default_permission_mode, before_default);
+}
+
+TEST(BuiltinCommands, ModeDirectArgumentStillSwitchesWithoutPicker) {
+    ResumeCommandHarness h("mode_direct_yolo");
+
+    ASSERT_TRUE(h.dispatch("/mode yolo"));
+
+    EXPECT_EQ(h.perms_.mode(), acecode::PermissionMode::Yolo);
+    EXPECT_EQ(h.sm_.current_permission_mode(), "yolo");
+    std::lock_guard<std::mutex> lk(h.state_.mu);
+    EXPECT_FALSE(h.state_.mode_picker_open);
+    EXPECT_TRUE(h.state_.mode_picker_options.empty());
+}
+
 TEST(BuiltinCommands, ModelSetDefaultWithoutNameOpensDefaultPickerOnly) {
     ScopedHomeOverride home(fs::temp_directory_path() /
         ("acecode_builtin_commands_home_" + std::to_string(std::random_device{}())));

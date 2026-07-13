@@ -12,6 +12,7 @@
 #include "resume_state_sync.hpp"
 #include "websearch_command.hpp"
 #include "../config/config.hpp"
+#include "../tui/mode_picker.hpp"
 #include "../tui/theme_palette.hpp"
 #include "../config/saved_models.hpp"
 #include "../provider/apply_model_to_session.hpp"
@@ -90,6 +91,59 @@ std::string mode_usage_text() {
 void emit_system_message_locked(TuiState& state, std::string content) {
     state.conversation.push_back({"system", std::move(content), false});
     state.chat_follow_tail = true;
+}
+
+void apply_current_permission_mode(PermissionManager& permissions,
+                                   SessionManager* session_manager,
+                                   PermissionMode mode) {
+    const PermissionMode before = permissions.mode();
+    permissions.set_mode(mode);
+    permissions.clear_session_allows();
+    if (!session_manager) return;
+
+    session_manager->set_permission_mode(PermissionManager::mode_name(mode));
+    if (mode == PermissionMode::Plan) {
+        session_manager->set_pre_plan_permission_mode(
+            PermissionManager::mode_name(
+                before == PermissionMode::Plan
+                    ? permissions.pre_plan_mode()
+                    : before));
+        session_manager->ensure_plan_file_path();
+    } else {
+        session_manager->set_pre_plan_permission_mode(std::string{});
+    }
+}
+
+std::string permission_mode_confirmation(PermissionMode mode) {
+    return std::string("Permission mode: ") + PermissionManager::mode_name(mode) +
+           " - " + PermissionManager::mode_description(mode);
+}
+
+void open_mode_picker(CommandContext& ctx) {
+    auto options = build_mode_picker_options(ctx.permissions.mode());
+    auto* state = &ctx.state;
+    auto* permissions = &ctx.permissions;
+    auto* session_manager = ctx.session_manager;
+
+    auto callback = [state, permissions, session_manager](PermissionMode mode) {
+        apply_current_permission_mode(*permissions, session_manager, mode);
+        emit_system_message_locked(*state, permission_mode_confirmation(mode));
+    };
+
+    {
+        std::lock_guard<std::mutex> lk(ctx.state.mu);
+        ctx.state.mode_picker_options = std::move(options);
+        ctx.state.mode_picker_selected = 0;
+        for (std::size_t i = 0; i < ctx.state.mode_picker_options.size(); ++i) {
+            if (ctx.state.mode_picker_options[i].is_current) {
+                ctx.state.mode_picker_selected = static_cast<int>(i);
+                break;
+            }
+        }
+        ctx.state.mode_picker_callback = std::move(callback);
+        ctx.state.mode_picker_open = true;
+    }
+    if (ctx.post_event) ctx.post_event();
 }
 
 void set_permission_mode_for_next_session(CommandContext& ctx, PermissionMode mode) {
@@ -385,14 +439,7 @@ static void cmd_feedback(CommandContext& ctx, const std::string& raw_args) {
 static void cmd_mode(CommandContext& ctx, const std::string& raw_args) {
     const std::string args = trim_ascii_command(raw_args);
     if (args.empty()) {
-        std::lock_guard<std::mutex> lk(ctx.state.mu);
-        std::ostringstream oss;
-        oss << "Permission mode:\n"
-            << "  current: " << PermissionManager::mode_name(ctx.permissions.mode())
-            << " - " << PermissionManager::mode_description(ctx.permissions.mode()) << "\n"
-            << "  default: " << ctx.config.default_permission_mode << "\n"
-            << mode_usage_text();
-        emit_system_message_locked(ctx.state, oss.str());
+        open_mode_picker(ctx);
         return;
     }
 
@@ -453,27 +500,10 @@ static void cmd_mode(CommandContext& ctx, const std::string& raw_args) {
         return;
     }
 
-    const PermissionMode before = ctx.permissions.mode();
-    ctx.permissions.set_mode(*parsed);
-    ctx.permissions.clear_session_allows();
-    if (ctx.session_manager) {
-        ctx.session_manager->set_permission_mode(PermissionManager::mode_name(*parsed));
-        if (*parsed == PermissionMode::Plan) {
-            ctx.session_manager->set_pre_plan_permission_mode(
-                PermissionManager::mode_name(
-                    before == PermissionMode::Plan
-                        ? ctx.permissions.pre_plan_mode()
-                        : before));
-            ctx.session_manager->ensure_plan_file_path();
-        } else {
-            ctx.session_manager->set_pre_plan_permission_mode(std::string{});
-        }
-    }
+    apply_current_permission_mode(ctx.permissions, ctx.session_manager, *parsed);
 
     std::lock_guard<std::mutex> lk(ctx.state.mu);
-    emit_system_message_locked(ctx.state,
-        std::string("Permission mode: ") + PermissionManager::mode_name(*parsed) +
-        " - " + PermissionManager::mode_description(*parsed));
+    emit_system_message_locked(ctx.state, permission_mode_confirmation(*parsed));
 }
 
 static void cmd_plan(CommandContext& ctx, const std::string& raw_args) {

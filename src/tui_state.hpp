@@ -5,6 +5,7 @@
 #include "path_reference/path_reference.hpp"
 #include "tui/paste_handler.hpp"
 #include "tui/model_picker.hpp"
+#include "tui/mode_picker.hpp"
 #include "tui/pending_attachment_selection.hpp"
 #include "utils/drag_scroll.hpp"
 #include "tool/tool_executor.hpp"
@@ -253,6 +254,13 @@ struct TuiState {
     int model_picker_selected = 0;
     int model_picker_view_offset = 0;
     std::function<void(const std::string& name)> model_picker_callback;
+
+    // /mode picker state. The callback runs from main.cpp while state.mu is
+    // held, matching the /model picker callback contract.
+    bool mode_picker_open = false;
+    std::vector<ModePickerOption> mode_picker_options;
+    int mode_picker_selected = 0;
+    std::function<void(PermissionMode mode)> mode_picker_callback;
 
     // Rewind picker state. Target selection and restore-mode selection are
     // separate phases so Esc can step back from modes before cancelling.

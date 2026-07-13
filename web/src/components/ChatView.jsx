@@ -3238,7 +3238,6 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
         {showChangeDock && (
           <ChangeGlassDock
             dockRef={changeDockRef}
-            scrollRef={scrollRef}
             summary={changeSummary}
             showChanges={showChangeDetails}
             onReview={openReviewPanel}

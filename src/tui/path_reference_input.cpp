@@ -35,6 +35,7 @@ void clear_path_reference_state(TuiState& state, bool clear_dismissal) {
 void refresh_path_reference_state(TuiState& state, const std::string& cwd) {
     if (state.input_mode != InputMode::Normal || state.resume_picker_active ||
         state.rewind_picker_active || state.model_picker_open ||
+        state.mode_picker_open ||
         state.confirm_pending || state.ask_pending) {
         clear_visible_state(state);
         return;

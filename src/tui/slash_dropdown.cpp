@@ -84,6 +84,7 @@ void refresh_slash_dropdown(TuiState& state, const CommandRegistry& reg) {
 
     // Suppress while another overlay owns the UI.
     if (state.resume_picker_active || state.rewind_picker_active ||
+        state.model_picker_open || state.mode_picker_open ||
         state.confirm_pending || state.ask_pending) {
         state.slash_dropdown_active = false;
         state.slash_dropdown_items.clear();

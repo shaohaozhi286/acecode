@@ -227,6 +227,7 @@ set(ACECODE_TESTABLE_TUI_SOURCES
     ${CMAKE_SOURCE_DIR}/src/tui/confirm_question.cpp
     ${CMAKE_SOURCE_DIR}/src/tui/diff_line_wrap.cpp
     ${CMAKE_SOURCE_DIR}/src/tui/model_picker.cpp
+    ${CMAKE_SOURCE_DIR}/src/tui/mode_picker.cpp
     ${CMAKE_SOURCE_DIR}/src/tui/input_history_navigation.cpp
     ${CMAKE_SOURCE_DIR}/src/tui/sidebar_model.cpp
     ${CMAKE_SOURCE_DIR}/src/tui/subagent_host.cpp

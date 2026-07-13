@@ -1257,34 +1257,6 @@ body {
   transform: translateZ(0);
   pointer-events: auto;
 }
-.ace-change-glass-blur-backdrop {
-  position: absolute;
-  inset: 0;
-  z-index: 0;
-  border-radius: inherit;
-  overflow: hidden;
-  pointer-events: none;
-}
-.ace-change-glass-blur-crop {
-  position: absolute;
-  inset: 0;
-  overflow: hidden;
-  filter: blur(6px);
-  transform: translateZ(0) scale(1.02);
-  transform-origin: center;
-  pointer-events: none;
-  contain: paint;
-}
-.ace-change-glass-source-clone {
-  position: absolute !important;
-  opacity: .88;
-  pointer-events: none !important;
-  user-select: none !important;
-}
-.ace-change-glass-source-clone * {
-  pointer-events: none !important;
-  user-select: none !important;
-}
 .ace-change-glass-dock::before {
   content: "";
   position: absolute;
@@ -1293,6 +1265,17 @@ body {
   z-index: 1;
   background: rgba(var(--ace-surface-rgb), 0.36);
   pointer-events: none;
+}
+@supports ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+  .ace-change-glass-dock {
+    background: rgba(var(--ace-surface-rgb), 0.58);
+    -webkit-backdrop-filter: blur(8px) saturate(1.08);
+    backdrop-filter: blur(8px) saturate(1.08);
+  }
+
+  .ace-change-glass-dock::before {
+    background: rgba(var(--ace-surface-rgb), 0.12);
+  }
 }
 .ace-change-glass-dock::after {
   content: none;

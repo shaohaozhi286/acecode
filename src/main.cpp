@@ -1945,7 +1945,8 @@ static bool can_accept_clipboard_paste_locked(const TuiState& state) {
            !state.confirm_pending &&
            !state.rewind_picker_active &&
            !state.resume_picker_active &&
-           !state.model_picker_open;
+           !state.model_picker_open &&
+           !state.mode_picker_open;
 }
 
 static void refresh_input_suggestions(TuiState& state,
@@ -2071,7 +2072,8 @@ static bool handle_pending_attachment_focus_event(TuiState& state,
         state.confirm_pending ||
         state.resume_picker_active ||
         state.rewind_picker_active ||
-        state.model_picker_open;
+        state.model_picker_open ||
+        state.mode_picker_open;
 
     if (is_alt_a_event(event)) {
         if (unavailable) {
@@ -4423,6 +4425,38 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
         model_picker_element = vbox(std::move(picker_rows)) | border | color(tui::theme().ui.border);
     }
 
+    Element mode_picker_element = emptyElement();
+    if (state.mode_picker_open && !state.mode_picker_options.empty()) {
+        Elements picker_rows;
+        picker_rows.push_back(
+            text(" Select a permission mode (Up/Down/Home/End to navigate, Enter to confirm, Esc to cancel):")
+            | bold | color(tui::theme().ui.border));
+        picker_rows.push_back(text(""));
+
+        for (int i = 0; i < static_cast<int>(state.mode_picker_options.size()); ++i) {
+            const bool selected = (i == state.mode_picker_selected);
+            const auto& option = state.mode_picker_options[i];
+            const std::string marker = option.is_current ? "* " : "  ";
+            auto row = hbox({
+                text("  [" + std::to_string(i + 1) + "] " + marker + option.name + "  "),
+                text(option.description) | color(tui::theme().ui.text_muted),
+            });
+            if (selected) {
+                row = row | bold | color(tui::theme().ui.selection_fg) |
+                      bgcolor(tui::theme().ui.selection_bg);
+            } else if (option.is_current) {
+                row = row | color(tui::theme().ui.accent);
+            } else {
+                row = row | color(tui::theme().ui.text_muted);
+            }
+            picker_rows.push_back(row);
+        }
+
+        picker_rows.push_back(text(""));
+        mode_picker_element =
+            vbox(std::move(picker_rows)) | border | color(tui::theme().ui.border);
+    }
+
     Element path_reference_element =
         acecode::tui::render_path_reference_dropdown(
             state, conhost_compat_layout, path_reference_boxes);
@@ -4815,6 +4849,7 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
         resume_picker_element,
         rewind_picker_element,
         model_picker_element,
+        mode_picker_element,
         ask_overlay_element,
         confirm_overlay_element,
         path_reference_element,
@@ -6029,6 +6064,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                     " ctrl_c_armed=" + std::string(state.ctrl_c_armed ? "1" : "0") +
                     " resume=" + std::string(state.resume_picker_active ? "1" : "0") +
                     " model=" + std::string(state.model_picker_open ? "1" : "0") +
+                    " mode=" + std::string(state.mode_picker_open ? "1" : "0") +
                     " waiting=" + std::string(state.is_waiting ? "1" : "0") +
                     " tool=" + std::string(state.tool_running ? "1" : "0") +
                     " focus=" + std::to_string(state.chat_focus_index) +
@@ -7023,6 +7059,24 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                 return true;
             }
 
+            if (state.mode_picker_open) {
+                if (state.mode_picker_selected >= 0 &&
+                    state.mode_picker_selected <
+                        static_cast<int>(state.mode_picker_options.size())) {
+                    const PermissionMode mode =
+                        state.mode_picker_options[state.mode_picker_selected].mode;
+                    auto callback = state.mode_picker_callback;
+                    state.mode_picker_open = false;
+                    state.mode_picker_options.clear();
+                    state.mode_picker_selected = 0;
+                    state.mode_picker_callback = nullptr;
+                    if (callback) callback(mode);
+                    clamp_chat_focus();
+                }
+                screen.PostEvent(Event::Custom);
+                return true;
+            }
+
             // confirm_pending 现在由上面的 confirm overlay handler 单独拦截
             // (Enter 直接走那条路径),这里不会再被 confirm 触发。
 
@@ -7223,6 +7277,18 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                 }
                 return true;
             }
+            if (state.mode_picker_open) {
+                const int total = static_cast<int>(state.mode_picker_options.size());
+                if (total > 0) {
+                    if (event == Event::PageUp || event == Event::Home) {
+                        state.mode_picker_selected = 0;
+                    } else {
+                        state.mode_picker_selected = total - 1;
+                    }
+                    screen.PostEvent(Event::Custom);
+                }
+                return true;
+            }
         }
         if (event == Event::PageUp) {
             std::lock_guard<std::mutex> lk(state.mu);
@@ -7305,6 +7371,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
             std::lock_guard<std::mutex> lk(state.mu);
             if (state.resume_picker_active) return true;
             if (state.model_picker_open) return true;
+            if (state.mode_picker_open) return true;
             sync_chat_line_counts_from_layout();
             if (scroll_chat_by_lines(-1) != 0) {
                 screen.PostEvent(Event::Custom);
@@ -7315,6 +7382,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
             std::lock_guard<std::mutex> lk(state.mu);
             if (state.resume_picker_active) return true;
             if (state.model_picker_open) return true;
+            if (state.mode_picker_open) return true;
             sync_chat_line_counts_from_layout();
             if (scroll_chat_by_lines(1) != 0) {
                 screen.PostEvent(Event::Custom);
@@ -7378,6 +7446,15 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                 screen.PostEvent(Event::Custom);
                 return true;
             }
+            if (state.mode_picker_open) {
+                state.mode_picker_open = false;
+                state.mode_picker_options.clear();
+                state.mode_picker_selected = 0;
+                state.mode_picker_callback = nullptr;
+                clamp_chat_focus();
+                screen.PostEvent(Event::Custom);
+                return true;
+            }
             // confirm_pending 的 Esc → Deny 已由上面的 confirm overlay handler
             // 拦截,这里不再重复处理。
 
@@ -7409,9 +7486,14 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                 return true;
             }
         }
+        if (event == Event::Tab) {
+            std::lock_guard<std::mutex> lk(state.mu);
+            if (state.mode_picker_open) return true;
+        }
         // Shift+Tab: cycle permission mode
         if (event == Event::TabReverse) {
             std::lock_guard<std::mutex> lk(state.mu);
+            if (state.mode_picker_open) return true;
             if (!state.is_waiting && !state.confirm_pending) {
                 const PermissionMode before = permissions.mode();
                 auto new_mode = permissions.cycle_mode();
@@ -7826,6 +7908,11 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                 screen.PostEvent(Event::Custom);
                 return true;
             }
+            if (state.mode_picker_open) {
+                if (state.mode_picker_selected > 0) state.mode_picker_selected--;
+                screen.PostEvent(Event::Custom);
+                return true;
+            }
             if (acecode::tui::navigate_input_history_up(state)) {
                 // 历史覆盖输入：清掉本会话旧粘贴留下的孤儿 pasted_texts（spec 3.7）。
                 acecode::tui::prune_unreferenced(state.pasted_texts, state.input_text);
@@ -7856,6 +7943,14 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                 screen.PostEvent(Event::Custom);
                 return true;
             }
+            if (state.mode_picker_open) {
+                if (state.mode_picker_selected <
+                    static_cast<int>(state.mode_picker_options.size()) - 1) {
+                    state.mode_picker_selected++;
+                }
+                screen.PostEvent(Event::Custom);
+                return true;
+            }
             if (acecode::tui::navigate_input_history_down(state)) {
                 // 历史覆盖输入：清掉本会话旧粘贴留下的孤儿 pasted_texts（spec 3.7）。
                 acecode::tui::prune_unreferenced(state.pasted_texts, state.input_text);
@@ -7868,6 +7963,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
             std::lock_guard<std::mutex> lk(state.mu);
             if (state.resume_picker_active) return true;
             if (state.model_picker_open) return true;
+            if (state.mode_picker_open) return true;
             if (state.input_cursor > state.input_text.size()) {
                 state.input_cursor = state.input_text.size();
             }
@@ -7889,6 +7985,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
             std::lock_guard<std::mutex> lk(state.mu);
             if (state.resume_picker_active) return true;
             if (state.model_picker_open) return true;
+            if (state.mode_picker_open) return true;
             if (state.input_cursor >= state.input_text.size()) {
                 state.input_cursor = state.input_text.size();
                 return true;
@@ -7967,6 +8064,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
         // Delete: remove UTF-8 glyph at the caret (to the right)
         if (event == Event::Delete) {
             std::lock_guard<std::mutex> lk(state.mu);
+            if (state.mode_picker_open) return true;
             if (state.input_cursor > state.input_text.size()) {
                 state.input_cursor = state.input_text.size();
             }
@@ -7992,6 +8090,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
         // Backspace: remove UTF-8 glyph preceding the caret
         if (event == Event::Backspace) {
             std::lock_guard<std::mutex> lk(state.mu);
+            if (state.mode_picker_open) return true;
             if (state.input_cursor > state.input_text.size()) {
                 state.input_cursor = state.input_text.size();
             }
@@ -8063,6 +8162,19 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                             state.model_picker_selected, state.model_picker_view_offset,
                             acecode::tui::kResumePickerVisibleRows,
                             static_cast<int>(state.model_picker_options.size()));
+                        screen.PostEvent(Event::Custom);
+                    }
+                }
+                return true;
+            }
+            // /mode picker: number keys move the highlight but still require
+            // Enter, matching the confirmation behavior of /model.
+            if (state.mode_picker_open) {
+                const std::string ch = event.character();
+                if (!ch.empty() && ch[0] >= '1' && ch[0] <= '9') {
+                    const int index = ch[0] - '1';
+                    if (index < static_cast<int>(state.mode_picker_options.size())) {
+                        state.mode_picker_selected = index;
                         screen.PostEvent(Event::Custom);
                     }
                 }
