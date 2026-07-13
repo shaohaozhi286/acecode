@@ -1809,7 +1809,93 @@ Resize uses `POST /api/pty/:id/resize`, not the WebSocket.
 
 ---
 
-## 14. Static Web App
+## 14. LOOP scheduling
+
+LOOP (Chinese UI: “循环”) is a daemon-owned scheduler. It persists to
+`<acecode_dir>/scheduled-loops.sqlite3` and continues running without an open
+browser. Clients configure friendly period/interval/once fields; the compiled
+schedule expression is internal and is never returned by the API.
+
+Routes (all use the normal daemon auth and CORS rules):
+
+| Method | Route | Purpose |
+|---|---|---|
+| `GET` | `/api/loops` | List LOOP definitions |
+| `POST` | `/api/loops` | Create a LOOP (`201`) |
+| `GET` | `/api/loops/:id` | Read one LOOP |
+| `PUT` | `/api/loops/:id` | Replace one LOOP |
+| `DELETE` | `/api/loops/:id` | Delete one LOOP and its run history |
+| `PUT` | `/api/loops/:id/enabled` | Enable/disable with `{"enabled":true}` |
+| `GET` | `/api/loops/:id/runs?limit=N` | Recent run history (`1..500`) |
+
+Create/update body:
+
+```json
+{
+  "name": "Daily code review",
+  "prompt": "Review recent changes and run relevant tests.",
+  "workspace_hash": "0123456789abcdef",
+  "workspace_cwd": "C:/repo",
+  "model_name": "gpt-5.5-codex",
+  "permission_mode": "yolo",
+  "enabled": true,
+  "schedule": {
+    "kind": "period",
+    "period": "workdays",
+    "weekdays": [],
+    "hour": 9,
+    "minute": 0,
+    "valid_from_ms": null,
+    "valid_until_ms": null
+  }
+}
+```
+
+`workspace_hash` and `workspace_cwd` must either both be present and resolve to
+the same registered workspace, or both be empty for a no-workspace LOOP.
+Supported schedules are:
+
+- `period`: `period` is `daily`, `workdays`, or `weekly`; weekly additionally
+  uses `weekdays` (`0=Sunday ... 6=Saturday`), plus `hour` and `minute`.
+- `interval`: `interval_value`, `interval_unit` (`minutes`, `hours`, `days`),
+  and `anchor_ms`.
+- `once`: `once_at_ms`.
+
+`timezone_offset_minutes` is optional and defaults to the daemon's current
+local offset. `valid_from_ms` / `valid_until_ms` are optional for every kind.
+Raw Cron/dialect values are deliberately absent from public responses.
+
+Run statuses are `scheduled`, `running`, `waiting_user`, `completed`, `failed`,
+and `missed`. Missed occurrences are recorded and never queued or caught up.
+Common reasons include `daemon_offline`, `workspace_busy`,
+`daemon_interrupted`, `model_unavailable`, and `workspace_unavailable`. A due
+LOOP is also recorded as `missed/workspace_busy` if another LOOP run for the
+same workspace is active.
+
+Creation, update, and re-enable return `409 SCHEDULE_CONFLICT` when two enabled
+LOOPs in the same workspace have a future occurrence at the same minute. The
+payload includes `conflict.loop_id`, `loop_name`, and `first_conflict_at_ms`.
+No-workspace LOOPs are exempt.
+
+Execution creates an ordinary visible session. In a Git workspace, the daemon
+prefers an isolated worktree; worktree creation failure fails the run and never
+falls back to direct writes. Non-Git workspaces run directly. LOOP never merges,
+rebases, pushes, or removes its worktree; the final assistant response asks the
+user whether to merge.
+
+Permission behavior is per LOOP session: `default` preserves normal blocking
+permission and AskUserQuestion prompts; `yolo` auto-resolves AskUserQuestion by
+letting the model choose the best option. LOOP Yolo may read outside the active
+work root, but direct file writes and statically detectable shell writes outside
+that root are rejected.
+
+Error codes include `LOOP_UNAVAILABLE` (`501`), validation codes such as
+`INVALID_MODEL` / `INVALID_WORKSPACE` (`400`), `SCHEDULE_CONFLICT` (`409`), and
+SQLite subsystem failures (`503`).
+
+---
+
+## 15. Static Web App
 
 The daemon also serves the built frontend:
 
@@ -1821,7 +1907,7 @@ The daemon also serves the built frontend:
 
 ---
 
-## 15. HTTP Status Summary
+## 16. HTTP Status Summary
 
 | Status | Meaning |
 |---|---|
@@ -1843,7 +1929,7 @@ The daemon also serves the built frontend:
 
 ---
 
-## 16. Process Exit Codes
+## 17. Process Exit Codes
 
 | rc | Where | Meaning |
 |---|---|---|

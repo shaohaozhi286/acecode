@@ -129,6 +129,14 @@ struct SessionOptions {
     // stdout 即可确定性地 --resume)。留空 = registry 自动生成。调用方
     // 负责保证 id 文件名安全且未被占用;registry 不做碰撞检查。
     std::string preset_session_id;
+
+    // Daemon-owned LOOP execution metadata. Ordinary interactive sessions
+    // leave these empty/false. The system context is provider-facing only and
+    // is never persisted as a visible user message.
+    bool loop_execution = false;
+    std::string loop_id;
+    std::string loop_run_id;
+    std::string loop_system_context;
 };
 
 // ----- Current session model state -----

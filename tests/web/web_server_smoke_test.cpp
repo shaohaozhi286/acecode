@@ -24,6 +24,7 @@
 #include "permissions.hpp"
 #include "desktop/workspace_registry.hpp"
 #include "hooks/hook_manager.hpp"
+#include "loop/loop_store.hpp"
 #include "provider/cwd_model_override.hpp"
 #include "session/local_session_client.hpp"
 #include "session/session_manager.hpp"
@@ -219,6 +220,7 @@ struct WebServerFixture {
     std::unique_ptr<acecode::SessionRegistry> registry;
     std::unique_ptr<acecode::LocalSessionClient> client;
     std::unique_ptr<acecode::HookManager> hook_manager;
+    std::unique_ptr<acecode::loop::LoopStore> loop_store;
     std::unique_ptr<acecode::web::WebServer> server;
 
     std::thread server_thread;
@@ -293,6 +295,11 @@ struct WebServerFixture {
         registry = std::make_unique<acecode::SessionRegistry>(std::move(deps));
         client = std::make_unique<acecode::LocalSessionClient>(*registry);
         hook_manager = std::make_unique<acecode::HookManager>(acecode::HookRegistrySnapshot{});
+        loop_store = std::make_unique<acecode::loop::LoopStore>(tmp_dir / "loops.sqlite3");
+        acecode::loop::StoreError loop_error;
+        if (!loop_store->initialize(&loop_error)) {
+            throw std::runtime_error("failed to initialize LOOP test store: " + loop_error.message);
+        }
 
         acecode::web::WebServerDeps wdeps;
         wdeps.web_cfg = &cfg.web;
@@ -320,6 +327,7 @@ struct WebServerFixture {
         wdeps.run_update_command = std::move(run_update_command);
         wdeps.skill_registry = attach_skill_registry ? &skill_registry : nullptr;
         wdeps.dangerous = false;
+        wdeps.loop_store = loop_store.get();
 
         server = std::make_unique<acecode::web::WebServer>(std::move(wdeps));
         server_thread = std::thread([this] { server->run(); });
@@ -499,6 +507,126 @@ TEST(WebServerHttp, HealthEndpointReturnsBasicMetadata) {
     ASSERT_TRUE(j.contains("features"));
     ASSERT_TRUE(j["features"].contains("completed_turn_self_heal"));
     EXPECT_EQ(j["features"]["completed_turn_self_heal"]["enabled"], true);
+}
+
+TEST(WebServerHttp, LoopCrudEnableConflictAndRunHistory) {
+    WebServerFixture fx;
+    const auto workspace = fx.workspace_registry->list().front();
+    const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    auto body_for = [&](const std::string& name, bool with_workspace) {
+        json body{
+            {"name", name},
+            {"prompt", "Inspect the code and report actionable issues."},
+            {"model_name", "fixture-copilot"},
+            {"permission_mode", "yolo"},
+            {"schedule", {
+                {"kind", "interval"},
+                {"interval_value", 2},
+                {"interval_unit", "hours"},
+                {"anchor_ms", now + 3600000},
+            }},
+        };
+        if (with_workspace) {
+            body["workspace_hash"] = workspace.hash;
+            body["workspace_cwd"] = workspace.cwd;
+        }
+        return body;
+    };
+
+    auto create = cpr::Post(cpr::Url{fx.url("/api/loops")},
+                            cpr::Body{body_for("Review code", true).dump()},
+                            cpr::Header{{"Content-Type", "application/json"}});
+    ASSERT_EQ(create.status_code, 201) << create.text;
+    auto created = json::parse(create.text);
+    ASSERT_TRUE(created.contains("id"));
+    EXPECT_FALSE(created.contains("schedule_expr"));
+    const std::string id = created["id"].get<std::string>();
+
+    auto list = cpr::Get(cpr::Url{fx.url("/api/loops")});
+    ASSERT_EQ(list.status_code, 200);
+    EXPECT_EQ(json::parse(list.text)["loops"].size(), 1);
+
+    auto get = cpr::Get(cpr::Url{fx.url("/api/loops/" + id)});
+    ASSERT_EQ(get.status_code, 200);
+    EXPECT_EQ(json::parse(get.text)["name"], "Review code");
+
+    auto conflict = cpr::Post(cpr::Url{fx.url("/api/loops")},
+                              cpr::Body{body_for("Conflicting review", true).dump()},
+                              cpr::Header{{"Content-Type", "application/json"}});
+    ASSERT_EQ(conflict.status_code, 409) << conflict.text;
+    EXPECT_EQ(json::parse(conflict.text)["error"], "SCHEDULE_CONFLICT");
+
+    // No-workspace LOOPs are intentionally exempt from the workspace guard.
+    auto no_workspace = cpr::Post(cpr::Url{fx.url("/api/loops")},
+                                  cpr::Body{body_for("Independent review", false).dump()},
+                                  cpr::Header{{"Content-Type", "application/json"}});
+    ASSERT_EQ(no_workspace.status_code, 201) << no_workspace.text;
+
+    auto disable = cpr::Put(cpr::Url{fx.url("/api/loops/" + id + "/enabled")},
+                            cpr::Body{R"({"enabled":false})"},
+                            cpr::Header{{"Content-Type", "application/json"}});
+    ASSERT_EQ(disable.status_code, 200) << disable.text;
+    EXPECT_FALSE(json::parse(disable.text)["enabled"].get<bool>());
+
+    auto runs = cpr::Get(cpr::Url{fx.url("/api/loops/" + id + "/runs")});
+    ASSERT_EQ(runs.status_code, 200);
+    EXPECT_TRUE(json::parse(runs.text)["runs"].empty());
+
+    auto updated_body = body_for("Updated review", true);
+    updated_body["enabled"] = false;
+    auto update = cpr::Put(cpr::Url{fx.url("/api/loops/" + id)},
+                           cpr::Body{updated_body.dump()},
+                           cpr::Header{{"Content-Type", "application/json"}});
+    ASSERT_EQ(update.status_code, 200) << update.text;
+    EXPECT_EQ(json::parse(update.text)["name"], "Updated review");
+
+    auto remove = cpr::Delete(cpr::Url{fx.url("/api/loops/" + id)});
+    ASSERT_EQ(remove.status_code, 200);
+    EXPECT_TRUE(json::parse(remove.text)["ok"].get<bool>());
+    EXPECT_EQ(cpr::Get(cpr::Url{fx.url("/api/loops/" + id)}).status_code, 404);
+}
+
+TEST(WebServerHttp, LoopValidationRejectsMissingModelAndUnregisteredWorkspace) {
+    WebServerFixture fx;
+    const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    json body{
+        {"name", "Bad LOOP"},
+        {"prompt", "Do work"},
+        {"model_name", "missing-model"},
+        {"permission_mode", "yolo"},
+        {"schedule", {{"kind", "once"}, {"once_at_ms", now + 60000}}},
+    };
+    auto missing_model = cpr::Post(cpr::Url{fx.url("/api/loops")},
+                                   cpr::Body{body.dump()},
+                                   cpr::Header{{"Content-Type", "application/json"}});
+    ASSERT_EQ(missing_model.status_code, 400);
+    EXPECT_EQ(json::parse(missing_model.text)["error"], "INVALID_MODEL");
+
+    body["model_name"] = "fixture-copilot";
+    body["workspace_hash"] = "not-registered";
+    body["workspace_cwd"] = fx.cwd;
+    auto missing_workspace = cpr::Post(cpr::Url{fx.url("/api/loops")},
+                                       cpr::Body{body.dump()},
+                                       cpr::Header{{"Content-Type", "application/json"}});
+    ASSERT_EQ(missing_workspace.status_code, 400);
+    EXPECT_EQ(json::parse(missing_workspace.text)["error"], "INVALID_WORKSPACE");
+}
+
+TEST(WebServerHttp, LoopBadJsonReturns400WithoutThrowing) {
+    WebServerFixture fx;
+    auto create = cpr::Post(cpr::Url{fx.url("/api/loops")},
+                            cpr::Body{"{not-json"},
+                            cpr::Header{{"Content-Type", "application/json"}});
+    ASSERT_EQ(create.status_code, 400);
+    EXPECT_EQ(json::parse(create.text)["error"], "BAD_JSON");
+
+    auto enable = cpr::Put(cpr::Url{fx.url("/api/loops/unknown/enabled")},
+                           cpr::Body{"{not-json"},
+                           cpr::Header{{"Content-Type", "application/json"}});
+    ASSERT_EQ(enable.status_code, 400);
+    EXPECT_EQ(json::parse(enable.text)["error"], "BAD_REQUEST");
 }
 
 void create_opencode_import_db(const std::filesystem::path& db_path,

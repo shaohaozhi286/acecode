@@ -145,6 +145,13 @@ export function createApi(base = null) {
     setConsoleShellConfig: (patch={}) => request('PUT',   '/api/console/config', patch, base),
     getUsageStats:    (opts={})      => request('GET',    usagePath(opts), undefined, base),
     listWorkspaces:   ()             => request('GET',    '/api/workspaces', undefined, base),
+    listLoops:        ()             => request('GET',    '/api/loops', undefined, base),
+    getLoop:          (id)           => request('GET',    `/api/loops/${encodeURIComponent(id)}`, undefined, base),
+    createLoop:       (value)        => request('POST',   '/api/loops', value, base),
+    updateLoop:       (id, value)    => request('PUT',    `/api/loops/${encodeURIComponent(id)}`, value, base),
+    setLoopEnabled:   (id, enabled)  => request('PUT',    `/api/loops/${encodeURIComponent(id)}/enabled`, { enabled }, base),
+    deleteLoop:       (id)           => request('DELETE', `/api/loops/${encodeURIComponent(id)}`, undefined, base),
+    listLoopRuns:     (id, limit=100) => request('GET',   `/api/loops/${encodeURIComponent(id)}/runs?limit=${encodeURIComponent(String(limit))}`, undefined, base),
     registerWorkspace:(cwd)          => request('POST',   '/api/workspaces', {cwd}, base),
     pickWorkspaceFolder:()           => request('POST',   '/api/workspaces/pick-folder', undefined, base),
     // webapp 兼容模式(无 webview bridge)的「在资源管理器中打开」回退通路。

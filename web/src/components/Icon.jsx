@@ -2,6 +2,7 @@ import { fileTypeIconForPath } from '../lib/fileTypeIcons.js';
 
 const ICONS = {
   add: 'Add',
+  alarm: 'Alarm',
   archive: 'Archive',
   arrowLeft: 'ArrowLeft',
   arrowRight: 'ArrowRight',

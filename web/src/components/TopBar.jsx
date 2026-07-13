@@ -50,6 +50,7 @@ function QuickBtn({
 export function TopBar({
   onSettings,
   onNewSession,
+  onOpenLoop,
   onOpenSearch,
   onToggleConsole,
   consoleAvailable = false,
@@ -141,6 +142,9 @@ export function TopBar({
       )}
       <QuickBtn data-tour-target="topbar-new-session" title="新对话" onClick={onNewSession}>
         <VsIcon name="newSession" size={16} />
+      </QuickBtn>
+      <QuickBtn title="循环" onClick={onOpenLoop}>
+        <VsIcon name="alarm" size={16} />
       </QuickBtn>
       <QuickBtn title={searchHotkeyHint} onClick={onOpenSearch}>
         <VsIcon name="search" size={14} />

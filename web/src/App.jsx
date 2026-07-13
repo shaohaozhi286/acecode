@@ -39,6 +39,7 @@ import { GlobalFindOverlay } from './components/GlobalFindOverlay.jsx';
 import { ConsoleDock } from './components/ConsoleDock.jsx';
 import { DesktopGuidedTour } from './components/DesktopGuidedTour.jsx';
 import { UpdateDialog } from './components/UpdateDialog.jsx';
+import { LoopPage } from './components/LoopPage.jsx';
 import {
   CONSOLE_DOCK_DEFAULT_HEIGHT,
   clampDockHeight,
@@ -564,6 +565,10 @@ export function App() {
     navigateToRef(homeRefFromWorkspace(target, activeRefRef.current, health));
   }, [health, navigateToRef]);
 
+  const openLoopPage = useCallback(() => {
+    navigateToRef({ loop: true });
+  }, [navigateToRef]);
+
   const replaceHomeWorkspace = useCallback((workspace) => {
     replaceActiveRef((current) => homeRefFromWorkspace(workspace, current, health));
   }, [health, replaceActiveRef]);
@@ -790,6 +795,18 @@ export function App() {
   }, [setSidebarWidth, singleLayout.sidebar, view]);
 
   const activeId = activeRef?.sessionId || activeRef?.id || '';
+  const openLoopRun = useCallback((run) => {
+    const sessionId = run?.session_id || '';
+    if (!sessionId) return;
+    resumeAndOpenSession({
+      id: sessionId,
+      sessionId,
+      workspaceHash: run.workspace_hash || '',
+      cwd: run.workspace_cwd || '',
+      no_workspace: !run.workspace_hash,
+      active: false,
+    }, { forceResume: true });
+  }, [resumeAndOpenSession]);
   const activeRefConsoleCwd = consoleCwdForContext({ activeRef, health });
   const preferredConsoleCwd = activeId ? activeRefConsoleCwd : (consoleCwd || activeRefConsoleCwd);
   const pendingQuestionSessionIdsForSidebar = useMemo(
@@ -850,6 +867,7 @@ export function App() {
       <TopBar
         onSettings={() => openSettingsSection('general')}
         onNewSession={() => openHomeForWorkspace()}
+        onOpenLoop={openLoopPage}
         onOpenSearch={() => setSearchOpen(true)}
         onToggleConsole={toggleConsoleDock}
         consoleAvailable={consoleAvailable}
@@ -898,7 +916,10 @@ export function App() {
           ].join(' ')}
         >
           <div className="flex-1 flex overflow-hidden min-h-0">
-            {view === 'single' && (
+            {view === 'single' && activeRef?.loop && (
+              <LoopPage onOpenSession={openLoopRun} />
+            )}
+            {view === 'single' && !activeRef?.loop && (
               <ChatView
                 sessionRef={activeRef}
                 onSessionPromoted={navigateToRef}

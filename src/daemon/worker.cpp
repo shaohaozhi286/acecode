@@ -19,6 +19,8 @@
 #include "../hooks/hook_manager.hpp"
 #include "../hooks/hook_payload.hpp"
 #include "../hooks/hook_runner.hpp"
+#include "../loop/loop_scheduler.hpp"
+#include "../loop/loop_store.hpp"
 #include "../session/local_session_client.hpp"
 #include "../session/session_registry.hpp"
 #include "../skills/skill_registry.hpp"
@@ -446,6 +448,21 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     subagent_deps->client   = &client;
     subagent_deps->config   = &cfg_mut;
 
+    // LOOP is daemon-owned and independent of browser connections. SQLite is
+    // initialized before HTTP routes are exposed; scheduler shutdown happens
+    // explicitly before the session/MCP stack begins tearing down.
+q    acecode::loop::LoopStore loop_store(acecode::loop::LoopStore::default_database_path());
+    acecode::loop::StoreError loop_error;
+    const bool loop_store_ready = loop_store.initialize(&loop_error);
+    if (!loop_store_ready) {
+        LOG_ERROR("[loop] scheduler unavailable: " + loop_error.message);
+    }
+    acecode::loop::LoopScheduler loop_scheduler(
+        loop_store, registry, client, cfg_mut);
+    if (loop_store_ready && !loop_scheduler.start(&loop_error)) {
+        LOG_ERROR("[loop] scheduler failed to start: " + loop_error.message);
+    }
+
     // 控制台 PTY 注册表(add-console-dock):启动期探测一次 backend,
     // 析构时 stop_all 杀掉全部 shell(栈对象,server.run() 返回后回收)。
     // 默认 shell:+ 旁下拉框选中的 default_shell(探测可用)→ 平台默认 → legacy
@@ -508,6 +525,8 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     web_deps.provider_mu        = &provider_mu;
     web_deps.dangerous          = opts.dangerous;
     web_deps.pty_registry       = &pty_registry;
+    web_deps.loop_store         = loop_store_ready ? &loop_store : nullptr;
+    web_deps.on_loops_changed   = [&loop_scheduler] { loop_scheduler.notify_changed(); };
 
     acecode::web::WebServer server(std::move(web_deps));
 
@@ -567,6 +586,7 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     LOG_INFO("[daemon] worker shutting down");
     if (opts.foreground) std::cerr << "[daemon] shutting down\n";
 
+    loop_scheduler.stop();
     mcp_runtime.shutdown();
     acecode::lsp::shutdown(); // 逐 client 协议级退出,超时强杀
     acecode::model_pool_status_service().stop(); // 幂等;未 start 过也安全

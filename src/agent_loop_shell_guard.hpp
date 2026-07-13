@@ -9,6 +9,9 @@
 #include <cctype>
 #include <initializer_list>
 #include <string>
+#include <vector>
+
+#include "utils/path_validator.hpp"
 
 namespace acecode {
 
@@ -62,10 +65,196 @@ inline bool command_looks_like_file_write(const std::string& command) {
     return contains_any_of(cmd, {
         ">",            // 重定向(含 >>)
         "set-content", "out-file", "add-content", "tee ",
-        "sed -i", "copy ", "move ",
+        "sed -i", "copy ", "move ", "copy-item", "move-item", "cp ", "mv ",
+        "remove-item", "new-item", "clear-content", "mkdir ", "rmdir ",
+        "touch ", "rm ", "del ", "chmod ", "chown ",
         // PowerShell / .NET / Python 的脚本式写文件 API
-        "writealltext", "writealllines", "write_text", "writelines", ".write("
+        "writealltext", "writealllines", "write_text", "write_bytes",
+        "writelines", ".write("
     });
+}
+
+inline std::vector<std::string> tokenize_shell_command(const std::string& command) {
+    std::vector<std::string> out;
+    std::string token;
+    char quote = 0;
+    auto flush = [&] {
+        if (!token.empty()) out.push_back(std::move(token));
+        token.clear();
+    };
+    for (std::size_t i = 0; i < command.size(); ++i) {
+        const char c = command[i];
+        if (quote) {
+            if (c == quote) quote = 0;
+            else token.push_back(c);
+            continue;
+        }
+        if (c == '\'' || c == '"') {
+            quote = c;
+            continue;
+        }
+        if (std::isspace(static_cast<unsigned char>(c)) || c == ';' || c == '|') {
+            flush();
+            continue;
+        }
+        if (c == '>') {
+            flush();
+            std::string op(1, c);
+            if (i + 1 < command.size() && command[i + 1] == '>') {
+                op.push_back('>');
+                ++i;
+            }
+            out.push_back(std::move(op));
+            continue;
+        }
+        token.push_back(c);
+    }
+    flush();
+    return out;
+}
+
+inline std::string trim_shell_target(std::string value) {
+    while (!value.empty() && (value.front() == '(' || value.front() == '[' || value.front() == ',')) {
+        value.erase(value.begin());
+    }
+    while (!value.empty() && (value.back() == ')' || value.back() == ']' ||
+                              value.back() == ',' || value.back() == ';')) {
+        value.pop_back();
+    }
+    return value;
+}
+
+inline bool shell_target_is_dynamic(const std::string& value) {
+    return value.empty() || value.find('$') != std::string::npos ||
+           value.find('%') != std::string::npos || value.find('*') != std::string::npos ||
+           value.find('?') != std::string::npos;
+}
+
+// LOOP Yolo is not a process sandbox, but explicit shell write targets must
+// remain inside the active workspace/worktree root. This helper extracts the
+// common redirection/cmdlet/copy destinations that command_looks_like_file_write
+// recognizes. Empty result means the command is allowed; otherwise it is a
+// fail-closed reason returned before process execution.
+inline std::string loop_shell_write_escape_reason(const std::string& command,
+                                                  const std::string& working_dir) {
+    if (!command_looks_like_file_write(command)) return {};
+    const auto tokens = tokenize_shell_command(command);
+    std::vector<std::string> targets;
+    bool requires_provable_target = false;
+
+    auto lower = [](std::string value) {
+        return shell_guard_detail::ascii_lower_copy(std::move(value));
+    };
+    // Shell/interpreter wrappers commonly put the actual script in one quoted
+    // token. Inspect that statically visible inner command as well; otherwise
+    // `powershell -Command "Copy-Item ... C:/outside"` would evade target
+    // extraction merely because its whitespace was quoted.
+    for (std::size_t i = 0; i + 1 < tokens.size(); ++i) {
+        const std::string option = lower(tokens[i]);
+        if (option == "-command" || option == "-c" || option == "/c") {
+            const std::string& nested = tokens[i + 1];
+            if (nested != command && command_looks_like_file_write(nested)) {
+                const std::string nested_reason =
+                    loop_shell_write_escape_reason(nested, working_dir);
+                if (!nested_reason.empty()) return nested_reason;
+            }
+        }
+    }
+    auto take_after_option = [&](std::size_t command_index,
+                                 std::initializer_list<const char*> options) {
+        for (std::size_t i = command_index + 1; i + 1 < tokens.size(); ++i) {
+            const std::string key = lower(tokens[i]);
+            for (const char* option : options) {
+                if (key == option) {
+                    targets.push_back(tokens[i + 1]);
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+
+    for (std::size_t i = 0; i < tokens.size(); ++i) {
+        const std::string key = lower(tokens[i]);
+        if ((key == ">" || key == ">>") && i + 1 < tokens.size()) {
+            targets.push_back(tokens[i + 1]);
+            requires_provable_target = true;
+            continue;
+        }
+        if (key == "set-content" || key == "add-content" || key == "out-file") {
+            requires_provable_target = true;
+            if (!take_after_option(i, {"-path", "-literalpath", "-filepath"}) &&
+                i + 1 < tokens.size()) {
+                targets.push_back(tokens[i + 1]);
+            }
+            continue;
+        }
+        if (key == "copy" || key == "move" || key == "copy-item" ||
+            key == "move-item" || key == "cp" || key == "mv") {
+            requires_provable_target = true;
+            if (!take_after_option(i, {"-destination", "-dest"})) {
+                for (std::size_t j = tokens.size(); j > i + 1; --j) {
+                    if (!tokens[j - 1].empty() && tokens[j - 1][0] != '-') {
+                        targets.push_back(tokens[j - 1]);
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        if (key == "remove-item" || key == "new-item" || key == "clear-content") {
+            requires_provable_target = true;
+            if (!take_after_option(i, {"-path", "-literalpath"}) && i + 1 < tokens.size()) {
+                targets.push_back(tokens[i + 1]);
+            }
+            continue;
+        }
+        if (key == "mkdir" || key == "md" || key == "rmdir" || key == "touch" ||
+            key == "rm" || key == "del" || key == "chmod" || key == "chown") {
+            requires_provable_target = true;
+            for (std::size_t j = tokens.size(); j > i + 1; --j) {
+                if (!tokens[j - 1].empty() && tokens[j - 1][0] != '-') {
+                    targets.push_back(tokens[j - 1]);
+                    break;
+                }
+            }
+            continue;
+        }
+        if (key == "sed" && i + 1 < tokens.size()) {
+            const bool in_place = std::find(tokens.begin() + static_cast<std::ptrdiff_t>(i + 1),
+                                            tokens.end(), "-i") != tokens.end();
+            if (in_place) {
+                requires_provable_target = true;
+                targets.push_back(tokens.back());
+            }
+        }
+    }
+
+    const std::string command_lower = lower(command);
+    if (targets.empty() && shell_guard_detail::contains_any_of(command_lower, {
+            "writealltext", "writealllines", "write_text", "write_bytes",
+            "writelines", ".write("
+        })) {
+        // Script-level APIs can compute their target dynamically. Without a
+        // full language parser the only safe unattended policy is rejection.
+        return "LOOP Yolo blocked a shell write whose target cannot be proven inside the work root";
+    }
+    if (requires_provable_target && targets.empty()) {
+        return "LOOP Yolo blocked a shell write with no provable destination";
+    }
+
+    PathValidator validator(working_dir, false);
+    for (auto target : targets) {
+        target = trim_shell_target(std::move(target));
+        if (shell_target_is_dynamic(target)) {
+            return "LOOP Yolo blocked a dynamic shell write destination: " + target;
+        }
+        const std::string rejection = validator.validate(target);
+        if (!rejection.empty()) {
+            return "LOOP Yolo blocked an external shell write: " + target;
+        }
+    }
+    return {};
 }
 
 } // namespace acecode
