@@ -37,6 +37,16 @@ const FALLBACK_BUILTINS = Object.freeze([
     name: 'lsp',
     description: 'Show LSP server status (connected/broken/not installed)',
   }),
+  Object.freeze({
+    kind: 'builtin',
+    name: 'rc',
+    description: 'Alias for /remote-control',
+  }),
+  Object.freeze({
+    kind: 'builtin',
+    name: 'remote-control',
+    description: 'Activate a configured channel plugin or manage manual remote-control webhooks',
+  }),
 ]);
 
 export function fallbackCommands() {
@@ -248,7 +258,7 @@ export function resolveLeadingSlashCommand(text, commands = []) {
 
 export function parseExecutableBuiltinCommand(value) {
   const text = typeof value === 'string' ? value.trim() : '';
-  const leading = parseLeadingCommand(text, ['init', 'compact', 'goal', 'plan', 'lsp']);
+  const leading = parseLeadingCommand(text, ['init', 'compact', 'goal', 'plan', 'lsp', 'rc', 'remote-control']);
   if (!leading.name) return null;
   return {
     name: leading.name,

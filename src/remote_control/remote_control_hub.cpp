@@ -1,5 +1,6 @@
 #include "remote_control_hub.hpp"
 
+#include "outbound_summary.hpp"
 #include "utils/logger.hpp"
 
 #include <cctype>
@@ -25,13 +26,19 @@ bool is_blank(const std::string& s) {
 } // namespace
 
 nlohmann::json outbound_message_to_json(const OutboundMessage& msg) {
-    return nlohmann::json{
+    nlohmann::json j{
         {"type", msg.type},
         {"session_id", msg.session_id},
-        {"text", msg.text},
         {"timestamp_ms", msg.timestamp_ms},
         {"seq", msg.seq},
     };
+    // 可选字段:留空即代表"不适用于本消息类型",不序列化该键 —— channel
+    // bridge 侧按键是否存在分支,而不是按空字符串分支。
+    if (!msg.text.empty()) j["text"] = msg.text;
+    if (!msg.tool_name.empty()) j["tool_name"] = msg.tool_name;
+    if (!msg.args_preview.empty()) j["args_preview"] = msg.args_preview;
+    if (!msg.in_reply_to.empty()) j["in_reply_to"] = msg.in_reply_to;
+    return j;
 }
 
 RemoteControlHub::~RemoteControlHub() {
@@ -93,6 +100,16 @@ void RemoteControlHub::set_outbound_sender(std::shared_ptr<OutboundSender> sende
     cv_.notify_all();
 }
 
+void RemoteControlHub::set_session_id(std::string session_id) {
+    std::lock_guard<std::mutex> lk(mu_);
+    session_id_ = std::move(session_id);
+}
+
+void RemoteControlHub::set_outbound_result_observer(OutboundResultObserver observer) {
+    std::lock_guard<std::mutex> lk(mu_);
+    outbound_result_observer_ = std::move(observer);
+}
+
 InboundResult RemoteControlHub::handle_inbound(const std::string& text,
                                                const std::string& provided_token) {
     InboundSubmit submit;
@@ -144,6 +161,26 @@ void RemoteControlHub::notify_assistant_text(const std::string& text) {
     cv_.notify_all();
 }
 
+void RemoteControlHub::notify_tool_call(const std::string& session_id,
+                                        const std::string& tool_name,
+                                        const nlohmann::json& arguments) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!enabled_ || !sender_) return;
+    OutboundMessage msg;
+    msg.type = "tool_call";
+    msg.session_id = session_id;
+    msg.tool_name = tool_name;
+    msg.args_preview = summarize_tool_args(tool_name, arguments);
+    msg.timestamp_ms = now_ms();
+    msg.seq = next_seq_++;
+    if (queue_.size() >= kMaxQueue) {
+        queue_.pop_front();
+        ++stats_.outbound_dropped;
+    }
+    queue_.push_back(std::move(msg));
+    cv_.notify_all();
+}
+
 void RemoteControlHub::set_forward_cursor(std::size_t index) {
     std::lock_guard<std::mutex> lk(mu_);
     forward_cursor_ = index;
@@ -181,6 +218,14 @@ void RemoteControlHub::worker_loop() {
             ++stats_.outbound_failed;
             LOG_WARN("[remote-control] outbound send failed (seq=" +
                      std::to_string(msg.seq) + "): " + error);
+        }
+        // 结果观察者:拷贝后锁外调用,观察者内部可能回头拿别的锁
+        // (daemon 保活判定),持 mu_ 调用有锁序风险。
+        OutboundResultObserver observer = outbound_result_observer_;
+        if (observer) {
+            lk.unlock();
+            observer(ok);
+            lk.lock();
         }
     }
 }

@@ -44,6 +44,7 @@
 #include "../tool/web_search/region_detector.hpp"
 #include "../tool/web_search/web_search_tool.hpp"
 #include "../network/proxy_resolver.hpp"
+#include "../remote_control/session_channel_binder.hpp"
 #include "../utils/logger.hpp"
 #include "../utils/paths.hpp"
 #include "../utils/power_inhibitor.hpp"
@@ -451,7 +452,7 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     // LOOP is daemon-owned and independent of browser connections. SQLite is
     // initialized before HTTP routes are exposed; scheduler shutdown happens
     // explicitly before the session/MCP stack begins tearing down.
-q    acecode::loop::LoopStore loop_store(acecode::loop::LoopStore::default_database_path());
+    acecode::loop::LoopStore loop_store(acecode::loop::LoopStore::default_database_path());
     acecode::loop::StoreError loop_error;
     const bool loop_store_ready = loop_store.initialize(&loop_error);
     if (!loop_store_ready) {
@@ -462,6 +463,9 @@ q    acecode::loop::LoopStore loop_store(acecode::loop::LoopStore::default_datab
     if (loop_store_ready && !loop_scheduler.start(&loop_error)) {
         LOG_ERROR("[loop] scheduler failed to start: " + loop_error.message);
     }
+
+    const std::string config_path =
+        acecode::path_to_utf8(acecode::path_from_utf8(acecode::get_acecode_dir()) / "config.json");
 
     // 控制台 PTY 注册表(add-console-dock):启动期探测一次 backend,
     // 析构时 stop_all 杀掉全部 shell(栈对象,server.run() 返回后回收)。
@@ -482,8 +486,7 @@ q    acecode::loop::LoopStore loop_store(acecode::loop::LoopStore::default_datab
     web_deps.web_cfg            = &cfg_mut.web;   // 含 port_override 后的 effective port
     web_deps.daemon_cfg         = &cfg_mut.daemon;
     web_deps.app_config         = &cfg_mut;
-    web_deps.config_path        =
-        acecode::path_to_utf8(acecode::path_from_utf8(acecode::get_acecode_dir()) / "config.json");
+    web_deps.config_path        = config_path;
     web_deps.cwd                = cwd;
     web_deps.projects_dir       = projects_dir;
     web_deps.token              = token;
@@ -530,6 +533,60 @@ q    acecode::loop::LoopStore loop_store(acecode::loop::LoopStore::default_datab
 
     acecode::web::WebServer server(std::move(web_deps));
 
+    // ---- daemon 托管 remote control(/rc 绑定 Web 会话到 channel 插件)----
+    // 声明在 registry/client 之后(析构先于两者,退订时 AgentLoop 仍活着)、
+    // server 之后(注入其 app_config 锁;shutdown() 在 run() 返回后第一时间
+    // 显式调用,析构期不再触碰 server)。行为契约见
+    // session_channel_binder.hpp 文件头 ①-⑥。
+    acecode::rc::SessionChannelBinderDeps rc_binder_deps;
+    rc_binder_deps.service     = &acecode::rc::remote_control_service();
+    rc_binder_deps.client      = &client;
+    rc_binder_deps.config      = &cfg_mut;
+    rc_binder_deps.config_path = config_path;
+    // binder 与全部 HTTP 路由 / 连接器钩子刷新共用 WebServer 的 app_config
+    // 锁 —— cfg_mut 是全进程共享可变对象,binder 曾是唯一不持锁的读写方
+    //(Crow 线程上 /rc 与 config PUT / refresh_saved_models_from_disk 并发
+    // 即数据竞争 + config.json 交错写坏)。
+    rc_binder_deps.with_config_lock = [&server](const std::function<void()>& fn) {
+        server.with_app_config_lock(fn);
+    };
+    // persist 前 reload-merge 用的磁盘读取(与 auth_recovery 同款接线;
+    // config_path 即默认路径,读写同一份 config.json)。
+    rc_binder_deps.load_disk_config = []() { return acecode::load_config(); };
+    rc_binder_deps.session_active = [&registry](const std::string& id) {
+        return registry.acquire(id) != nullptr;
+    };
+    rc_binder_deps.session_resumable = [&client](const std::string& id) {
+        // 常规 resume 失败后按 no-workspace 缓存目录兜底(与 HTTP resume
+        // 路由一致)—— 绑定的是「不使用工作区」会话时,默认 SessionOptions
+        // 会把 cwd 解析成 daemon 自身 cwd,重启重建永远找不到该会话。
+        return acecode::rc::resume_session_with_no_workspace_fallback(client, id);
+    };
+    acecode::rc::SessionChannelBinder rc_binder(std::move(rc_binder_deps));
+
+    // /rc 与 /remote-control:HTTP 命令网关放行后经 registry 的兜底处理器
+    // 到达 binder;执行结果同时以 system message 透出到该会话的聊天流
+    // (与 /lsp 的反馈方式一致)。
+    registry.set_external_command_handler(
+        [&rc_binder, &registry](const std::string& id,
+                                const acecode::BuiltinCommandRequest& request)
+            -> acecode::BuiltinCommandResult {
+            if (request.name != "rc" && request.name != "remote-control") {
+                return {acecode::BuiltinCommandStatus::UnsupportedCommand,
+                        "unsupported command"};
+            }
+            auto entry = registry.acquire(id);
+            if (!entry || !entry->loop) {
+                return {acecode::BuiltinCommandStatus::UnknownSession,
+                        "unknown session"};
+            }
+            auto outcome = rc_binder.execute_command(id, request.args);
+            entry->loop->emit_system_message(outcome.message);
+            return {outcome.ok ? acecode::BuiltinCommandStatus::Accepted
+                               : acecode::BuiltinCommandStatus::Failed,
+                    outcome.message};
+        });
+
     // 连接器钩子恢复 key 后落盘 config.json;web server 内存里的 saved_models
     // 也要跟着重读,否则下一次任何 save_config 会把新写入的 api_key 抹掉。
     auth_recovery.set_on_config_refreshed([&server]() {
@@ -569,6 +626,11 @@ q    acecode::loop::LoopStore loop_store(acecode::loop::LoopStore::default_datab
             server.track_subagent(child_id);
         };
 
+    // 行为①:持久化的 bound_session_id 非空且会话存在(active 或可从磁盘
+    // resume)→ 自动 start rc 服务 + 激活默认 channel + 重建绑定。失败只记
+    // 日志,不阻塞 daemon 启动。
+    rc_binder.rebuild_from_config();
+
     // 信号 / 终止 → 主循环退出。Crow app.run() 阻塞跑;另起个观察线程在
     // term 信号时调 server.stop() 让 Crow 退出。这样我们就在主线程上 join。
     std::thread watcher([&server] {
@@ -578,6 +640,11 @@ q    acecode::loop::LoopStore loop_store(acecode::loop::LoopStore::default_datab
     });
 
     int rc = server.run();
+    // 行为⑥:teardown 第一步先停 remote-control(不再接受 channel 入站,
+    // 也避免静态析构阶段才停 rc 监听的顺序问题 —— 镜像 TUI teardown)。
+    // 随后 handler 不会再被 HTTP 调到(server 已停),清空防悬垂。
+    rc_binder.shutdown();
+    registry.set_external_command_handler({});
     // server 已停止:清空回调,防止残余会话线程在析构窗口内经回调触达已析构的 server。
     auth_recovery.set_on_config_refreshed({});
     request_terminate(); // 唤醒 watcher(防 server 自然退出但信号还没来)

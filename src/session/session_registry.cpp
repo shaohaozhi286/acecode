@@ -654,6 +654,23 @@ std::vector<std::string> list_no_workspace_session_cwds(const std::string& cache
     return out;
 }
 
+std::optional<SessionMeta> find_no_workspace_session_meta(const std::string& id,
+                                                          const std::string& cache_root) {
+    if (id.empty()) return std::nullopt;
+    const auto direct_cwd = no_workspace_session_cwd(id, cache_root);
+    auto direct_meta = SessionStorage::read_meta(
+        SessionStorage::meta_path(SessionStorage::get_project_dir(direct_cwd), id));
+    if (!direct_meta.id.empty() && direct_meta.no_workspace) return direct_meta;
+
+    for (const auto& cwd : list_no_workspace_session_cwds(cache_root)) {
+        if (cwd == direct_cwd) continue;
+        auto meta = SessionStorage::read_meta(
+            SessionStorage::meta_path(SessionStorage::get_project_dir(cwd), id));
+        if (!meta.id.empty() && meta.no_workspace) return meta;
+    }
+    return std::nullopt;
+}
+
 SessionRegistry::SessionRegistry(SessionRegistryDeps deps)
     : deps_(std::move(deps)) {}
 
@@ -1007,12 +1024,26 @@ SessionEntry* SessionRegistry::lookup(const std::string& id) {
     return entry ? entry.get() : nullptr;
 }
 
+void SessionRegistry::set_external_command_handler(ExternalCommandHandler handler) {
+    std::lock_guard<std::mutex> lk(external_handler_mu_);
+    external_command_handler_ = std::move(handler);
+}
+
 BuiltinCommandResult SessionRegistry::execute_builtin_command(
     const std::string& id,
     const BuiltinCommandRequest& request) {
     if (request.name != "init" && request.name != "compact" &&
         request.name != "goal" && request.name != "plan" &&
         request.name != "lsp") {
+        // 内置名单之外:先给宿主注册的兜底处理器(daemon 托管 /rc 走这里),
+        // 没有兜底或兜底不认时保持原 UnsupportedCommand 语义。锁外调用,
+        // handler 内部可以安全地回头 acquire()/emit。
+        ExternalCommandHandler handler;
+        {
+            std::lock_guard<std::mutex> lk(external_handler_mu_);
+            handler = external_command_handler_;
+        }
+        if (handler) return handler(id, request);
         return {BuiltinCommandStatus::UnsupportedCommand, "unsupported command"};
     }
 

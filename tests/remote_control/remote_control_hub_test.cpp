@@ -246,3 +246,140 @@ TEST(RemoteControlHub, ForwardCursorRoundTrips) {
     hub.set_forward_cursor(42);
     EXPECT_EQ(hub.forward_cursor(), 42u);
 }
+
+// 场景:agent 回合内发生工具调用。期望:走同一条出站队列/worker 路径到达
+// sender,payload JSON 的 type 是 "tool_call"、含 tool_name/args_preview,
+// 且不含 text 键(tool_call 消息没有 text,序列化时应省略该键而不是输出
+// 空字符串)。
+TEST(RemoteControlHub, NotifyToolCallDeliversToolCallJson) {
+    RemoteControlHub hub;
+    auto sender = std::make_shared<FakeSender>();
+    hub.enable("secret", "sess-9", sender);
+
+    nlohmann::json args = {{"command", "ls -la"}};
+    hub.notify_tool_call("sess-9", "bash", args);
+    ASSERT_TRUE(sender->wait_for_count(1, std::chrono::seconds(5)));
+
+    auto sent = sender->sent();
+    ASSERT_EQ(sent.size(), 1u);
+    EXPECT_EQ(sent[0].type, "tool_call");
+    EXPECT_EQ(sent[0].session_id, "sess-9");
+    EXPECT_EQ(sent[0].tool_name, "bash");
+    EXPECT_EQ(sent[0].args_preview, "ls -la");
+    EXPECT_TRUE(sent[0].text.empty());
+
+    auto j = acecode::rc::outbound_message_to_json(sent[0]);
+    EXPECT_EQ(j["type"], "tool_call");
+    EXPECT_EQ(j["tool_name"], "bash");
+    EXPECT_EQ(j["args_preview"], "ls -la");
+    EXPECT_FALSE(j.contains("text"));
+    EXPECT_FALSE(j.contains("in_reply_to"));
+
+    hub.disable();
+}
+
+// 场景:hub 未启用或无 sender 时发生工具调用。期望:静默忽略,不入队也不
+// 崩溃 —— 与 notify_assistant_text 的 no-op 语义一致。
+TEST(RemoteControlHub, NotifyToolCallWithoutSenderIsNoop) {
+    RemoteControlHub hub;
+    hub.enable("secret", "sess-1", nullptr);
+    hub.notify_tool_call("sess-1", "bash", nlohmann::json{{"command", "ignored"}});
+
+    auto sender = std::make_shared<FakeSender>();
+    hub.set_outbound_sender(sender);
+    hub.notify_tool_call("sess-1", "bash", nlohmann::json{{"command", "real"}});
+    ASSERT_TRUE(sender->wait_for_count(1, std::chrono::seconds(5)));
+    EXPECT_EQ(sender->sent().size(), 1u);
+    EXPECT_EQ(sender->sent()[0].args_preview, "real");
+
+    hub.disable();
+}
+
+// 场景:outbound_message_to_json 序列化留空的可选字段。期望:空 in_reply_to
+// (以及空 tool_name/args_preview)不输出对应键;非空 in_reply_to 正常输出。
+TEST(RemoteControlHub, ToJsonOmitsEmptyOptionalFields) {
+    OutboundMessage msg;
+    msg.type = "assistant_message";
+    msg.session_id = "sess-1";
+    msg.text = "hello";
+    msg.timestamp_ms = 123;
+    msg.seq = 1;
+    // in_reply_to / tool_name / args_preview 保持默认空字符串。
+
+    auto j = acecode::rc::outbound_message_to_json(msg);
+    EXPECT_FALSE(j.contains("in_reply_to"));
+    EXPECT_FALSE(j.contains("tool_name"));
+    EXPECT_FALSE(j.contains("args_preview"));
+
+    msg.in_reply_to = "inbound-42";
+    auto j2 = acecode::rc::outbound_message_to_json(msg);
+    ASSERT_TRUE(j2.contains("in_reply_to"));
+    EXPECT_EQ(j2["in_reply_to"], "inbound-42");
+}
+
+// 场景:daemon 换绑会话后调用 set_session_id。期望:后续 notify_assistant_text
+// 的出站消息 session_id 立即切换为新会话 —— 出站归属必须跟随当前绑定,
+// 未绑定会话的名义不允许残留在 channel payload 上。
+TEST(RemoteControlHub, SetSessionIdRetagsSubsequentOutbound) {
+    RemoteControlHub hub;
+    auto sender = std::make_shared<FakeSender>();
+    hub.enable("secret", "sess-old", sender);
+
+    hub.notify_assistant_text("from old");
+    ASSERT_TRUE(sender->wait_for_count(1, std::chrono::seconds(5)));
+
+    hub.set_session_id("sess-new");
+    hub.notify_assistant_text("from new");
+    ASSERT_TRUE(sender->wait_for_count(2, std::chrono::seconds(5)));
+
+    auto sent = sender->sent();
+    ASSERT_EQ(sent.size(), 2u);
+    EXPECT_EQ(sent[0].session_id, "sess-old");
+    EXPECT_EQ(sent[1].session_id, "sess-new");
+
+    hub.disable();
+}
+
+// 场景:注册出站结果观察者后投递成功与失败。期望:每次投递(不论成败)都
+// 回调一次,并携带真实结果 —— daemon 保活判定(连续失败阈值)依赖这个信号。
+TEST(RemoteControlHub, OutboundResultObserverSeesEachDelivery) {
+    RemoteControlHub hub;
+    auto sender = std::make_shared<FakeSender>();
+
+    std::mutex mu;
+    std::condition_variable cv;
+    std::vector<bool> results;
+    hub.set_outbound_result_observer([&](bool ok) {
+        std::lock_guard<std::mutex> lk(mu);
+        results.push_back(ok);
+        cv.notify_all();
+    });
+
+    hub.enable("secret", "sess-1", sender);
+
+    sender->succeed = false;
+    hub.notify_assistant_text("will fail");
+    {
+        std::unique_lock<std::mutex> lk(mu);
+        ASSERT_TRUE(cv.wait_for(lk, std::chrono::seconds(5),
+                                [&] { return results.size() >= 1; }));
+    }
+
+    sender->succeed = true;
+    hub.notify_assistant_text("will pass");
+    {
+        std::unique_lock<std::mutex> lk(mu);
+        ASSERT_TRUE(cv.wait_for(lk, std::chrono::seconds(5),
+                                [&] { return results.size() >= 2; }));
+        ASSERT_EQ(results.size(), 2u);
+        EXPECT_FALSE(results[0]);
+        EXPECT_TRUE(results[1]);
+    }
+
+    // 观察者可清除;清除后继续投递不崩溃。
+    hub.set_outbound_result_observer({});
+    hub.notify_assistant_text("no observer");
+    ASSERT_TRUE(sender->wait_for_count(3, std::chrono::seconds(5)));
+
+    hub.disable();
+}

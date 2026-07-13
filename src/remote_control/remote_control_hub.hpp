@@ -34,9 +34,12 @@
 namespace acecode::rc {
 
 struct OutboundMessage {
-    std::string type;        // 目前固定 "assistant_message"
+    std::string type;        // "assistant_message" 或 "tool_call"
     std::string session_id;
-    std::string text;
+    std::string text;         // assistant_message 用;tool_call 留空
+    std::string tool_name;    // tool_call 用;assistant_message 留空
+    std::string args_preview; // tool_call 用,summarize_tool_args 的结果
+    std::string in_reply_to;  // 预留:回复某条 inbound 消息时填其标识
     std::int64_t timestamp_ms = 0;
     std::uint64_t seq = 0;   // hub 内单调递增;channel bridge 可据此去重/排序
 };
@@ -92,6 +95,15 @@ public:
     // 运行期替换出站通道(/remote-control url <u> 热更新)。
     void set_outbound_sender(std::shared_ptr<OutboundSender> sender);
 
+    // 换绑会话时更新出站消息的 session 归属(daemon 托管模式:/rc 换绑不
+    // 重启服务,但后续 notify_assistant_text 必须立即以新会话名义出站)。
+    void set_session_id(std::string session_id);
+
+    // 出站投递结果观察者:worker 线程每次 send 后(不论成败)锁外回调一次。
+    // daemon 保活判定(连续失败 ≥N 触发幂等再激活)依赖这个信号;传空清除。
+    using OutboundResultObserver = std::function<void(bool ok)>;
+    void set_outbound_result_observer(OutboundResultObserver observer);
+
     // HTTP listener 调用。注意:与 daemon 的"loopback 免 token"不同,remote
     // control 即使来自 loopback 也强制校验 token —— 任何本机进程都不应能向一个
     // 有工具执行能力的 agent 会话注入指令。
@@ -100,6 +112,14 @@ public:
 
     // 回合结束时 TUI 调用;文本进出站队列,立即返回。
     void notify_assistant_text(const std::string& text);
+
+    // agent 回合内发生工具调用时调用;tool_name + arguments 的摘要进出站
+    // 队列,立即返回。复用 notify_assistant_text 同一条有界队列/worker 线程
+    // 路径。session_id 由调用方显式传入(不读 enable() 时记录的
+    // session_id_),为将来按会话归属出站消息留口子。
+    void notify_tool_call(const std::string& session_id,
+                          const std::string& tool_name,
+                          const nlohmann::json& arguments);
 
     // TUI conversation 的转发游标:enable 时由命令置为当前对话长度(不回放
     // 历史),回合结束的转发循环读写。语义上属于 TUI 侧,放在 hub 仅为跨
@@ -126,6 +146,7 @@ private:
     std::string session_id_;
     InboundSubmit inbound_submit_;
     std::shared_ptr<OutboundSender> sender_;
+    OutboundResultObserver outbound_result_observer_;
     std::deque<OutboundMessage> queue_;
     std::thread worker_;
     std::uint64_t next_seq_ = 1;

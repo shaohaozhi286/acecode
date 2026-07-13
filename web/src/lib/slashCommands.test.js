@@ -61,9 +61,9 @@ run('flattenCommands 注入 kind 字段并保留 builtin/skill 顺序', () => {
 
 run('fallbackCommands 返回基础 builtin 命令', () => {
   const r = fallbackCommands();
-  assert.equal(r.length, 5);
-  assert.deepEqual(r.map((x) => x.kind), ['builtin', 'builtin', 'builtin', 'builtin', 'builtin']);
-  assert.deepEqual(r.map((x) => x.name), ['init', 'compact', 'goal', 'plan', 'lsp']);
+  assert.equal(r.length, 7);
+  assert.ok(r.every((x) => x.kind === 'builtin'));
+  assert.deepEqual(r.map((x) => x.name), ['init', 'compact', 'goal', 'plan', 'lsp', 'rc', 'remote-control']);
 });
 
 run('slashCommandKindPresentation 只返回 glyph 与 label,颜色由 UI 统一处理', () => {
@@ -108,8 +108,8 @@ run('flattenCommands 把 opencode commands 放在 builtin 和 skill 之间', () 
 run('commandsWithFallback:空响应回退到基础命令', () => {
   const r1 = commandsWithFallback(null);
   const r2 = commandsWithFallback({ builtins: [], skills: [] });
-  assert.deepEqual(r1.map((x) => x.name), ['init', 'compact', 'goal', 'plan', 'lsp']);
-  assert.deepEqual(r2.map((x) => x.name), ['init', 'compact', 'goal', 'plan', 'lsp']);
+  assert.deepEqual(r1.map((x) => x.name), ['init', 'compact', 'goal', 'plan', 'lsp', 'rc', 'remote-control']);
+  assert.deepEqual(r2.map((x) => x.name), ['init', 'compact', 'goal', 'plan', 'lsp', 'rc', 'remote-control']);
 });
 
 run('commandsWithFallback:后端返回 skills 时保留 skill + builtin 组合', () => {
@@ -128,6 +128,8 @@ run('commandsWithFallback:后端返回 skills 时保留 skill + builtin 组合',
     'builtin:goal',
     'builtin:plan',
     'builtin:lsp',
+    'builtin:rc',
+    'builtin:remote-control',
     'skill:calculator',
   ]);
 });
@@ -143,6 +145,8 @@ run('commandsWithFallback:保留 command kind 并放在基础 builtin 后', () =
     'builtin:goal',
     'builtin:plan',
     'builtin:lsp',
+    'builtin:rc',
+    'builtin:remote-control',
     'command:opsx-apply',
     'skill:calculator',
   ]);
@@ -158,6 +162,8 @@ run('commandsWithFallback:skills-only 响应也补上基础命令', () => {
     'builtin:goal',
     'builtin:plan',
     'builtin:lsp',
+    'builtin:rc',
+    'builtin:remote-control',
     'skill:calculator',
   ]);
 });
@@ -173,6 +179,8 @@ run('commandsWithFallback:partial builtin 响应补齐缺失基础命令', () =>
     'builtin:goal',
     'builtin:plan',
     'builtin:lsp',
+    'builtin:rc',
+    'builtin:remote-control',
     'skill:calculator',
   ]);
   assert.equal(r[0].description, 'custom init');
@@ -191,6 +199,8 @@ run('commandsWithFallback:额外 builtin 保留在基础命令之后', () => {
     'builtin:goal',
     'builtin:plan',
     'builtin:lsp',
+    'builtin:rc',
+    'builtin:remote-control',
     'builtin:custom',
   ]);
 });
@@ -441,4 +451,56 @@ run('parseExecutableBuiltinCommand:识别 init、compact、goal 和 plan', () =>
   assert.equal(parseExecutableBuiltinCommand('/code-review check this'), null);
   assert.equal(parseExecutableBuiltinCommand('/unknown'), null);
   assert.equal(parseExecutableBuiltinCommand('plain text'), null);
+});
+
+// 回归:B-Task 8 复审发现 /rc、/remote-control 只进了 parseExecutableBuiltinCommand
+// 的可执行白名单,FALLBACK_BUILTINS 漏加。bug 表现:输入框打 "/r" 时下拉
+// 自动补全里不出现 /rc(rankCommands 的数据源是 fallback/后端 builtin 清单),
+// 完整敲 /rc 功能正常但用户无从发现。期望:两条命令都能被前缀匹配排到最前。
+run('rankCommands:rc 与 remote-control 出现在 fallback 下拉补全里', () => {
+  const r = rankCommands('r', fallbackCommands());
+  // 前缀匹配(+1000)排最前,同分按字典序:rc < remote-control
+  assert.equal(r[0].name, 'rc');
+  assert.equal(r[1].name, 'remote-control');
+  const rc = rankCommands('rc', fallbackCommands());
+  assert.equal(rc[0].name, 'rc');
+});
+
+// 回归:同一漏项的第二个表现 —— 会话转写里已发送的 "/rc off" 不渲染成命令
+// chip(resolveLeadingSlashCommand 在清单里找不到 rc → 返回 null → 回退纯文本)。
+// 期望:fallback 清单即可命中,kind 为 builtin。
+run('resolveLeadingSlashCommand:rc 与 remote-control 渲染成 builtin chip', () => {
+  const list = commandsWithFallback(null);
+  const rc = resolveLeadingSlashCommand('/rc off', list);
+  assert.equal(rc.name, 'rc');
+  assert.equal(rc.kind, 'builtin');
+  assert.equal(rc.token, '/rc');
+  assert.equal(rc.rest, ' off');
+  const full = resolveLeadingSlashCommand('/remote-control show', list);
+  assert.equal(full.name, 'remote-control');
+  assert.equal(full.kind, 'builtin');
+  assert.equal(full.token, '/remote-control');
+});
+
+run('parseExecutableBuiltinCommand:识别 rc 与 remote-control(builtin command HTTP 面白名单)', () => {
+  assert.deepEqual(parseExecutableBuiltinCommand('/rc'), {
+    name: 'rc',
+    args: '',
+    display_text: '/rc',
+  });
+  assert.deepEqual(parseExecutableBuiltinCommand('/rc off'), {
+    name: 'rc',
+    args: 'off',
+    display_text: '/rc off',
+  });
+  assert.deepEqual(parseExecutableBuiltinCommand('/rc show'), {
+    name: 'rc',
+    args: 'show',
+    display_text: '/rc show',
+  });
+  assert.deepEqual(parseExecutableBuiltinCommand('/remote-control show'), {
+    name: 'remote-control',
+    args: 'show',
+    display_text: '/remote-control show',
+  });
 });

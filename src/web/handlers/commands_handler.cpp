@@ -31,8 +31,9 @@ nlohmann::json build_commands_payload(const SkillRegistry& global_skills,
                                         const AppConfig* cfg) {
     nlohmann::json out;
 
-    // Builtin 白名单:与 src/commands/init_command.cpp / builtin_commands.cpp
-    // 中的描述保持一致。新增/修改命令描述时 grep "init_command" 与 "compact" 同步。
+    // Builtin 白名单:与 src/commands/init_command.cpp / builtin_commands.cpp /
+    // remote_control_command.cpp 中的描述保持一致。新增/修改命令描述时
+    // grep "init_command" 与 "compact" 同步。
     nlohmann::json builtins = nlohmann::json::array();
     builtins.push_back({
         {"name", "init"},
@@ -53,6 +54,14 @@ nlohmann::json build_commands_payload(const SkillRegistry& global_skills,
     builtins.push_back({
         {"name", "lsp"},
         {"description", "Show LSP server status (connected/broken/not installed)"},
+    });
+    builtins.push_back({
+        {"name", "rc"},
+        {"description", "Alias for /remote-control"},
+    });
+    builtins.push_back({
+        {"name", "remote-control"},
+        {"description", "Activate a configured channel plugin or manage manual remote-control webhooks"},
     });
     out["builtins"] = std::move(builtins);
 

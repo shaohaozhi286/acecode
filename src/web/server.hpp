@@ -123,6 +123,11 @@ public:
     // 连接器钩子改写磁盘 config.json 后,把 saved_models 重读进内存(线程安全)。
     void refresh_saved_models_from_disk();
 
+    // 持共享 AppConfig 锁(Impl::app_config_mu)执行 fn —— daemon 侧非 web
+    // 组件(remote-control binder 等)读写 cfg_mut 时,借这里与全部 HTTP
+    // 路由 / 钩子刷新互斥。fn 内不得再调 WebServer 会拿该锁的方法(不可重入)。
+    void with_app_config_lock(const std::function<void()>& fn) const;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

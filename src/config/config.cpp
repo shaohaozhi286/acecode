@@ -1129,6 +1129,9 @@ AppConfig load_config() {
                 if (rcj.contains("default_channel") && rcj["default_channel"].is_string())
                     cfg.remote_control.default_channel =
                         rcj["default_channel"].get<std::string>();
+                if (rcj.contains("bound_session_id") && rcj["bound_session_id"].is_string())
+                    cfg.remote_control.bound_session_id =
+                        rcj["bound_session_id"].get<std::string>();
                 if (rcj.contains("channels") && rcj["channels"].is_object()) {
                     for (const auto& item : rcj["channels"].items()) {
                         if (!item.value().is_object()) continue;
@@ -1883,6 +1886,8 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
             rcj["outbound_url"] = cfg.remote_control.outbound_url;
         if (cfg.remote_control.default_channel != rc_d.default_channel)
             rcj["default_channel"] = cfg.remote_control.default_channel;
+        if (cfg.remote_control.bound_session_id != rc_d.bound_session_id)
+            rcj["bound_session_id"] = cfg.remote_control.bound_session_id;
         if (!cfg.remote_control.channels.empty()) {
             nlohmann::json channels = nlohmann::json::object();
             for (const auto& [name, channel] : cfg.remote_control.channels) {

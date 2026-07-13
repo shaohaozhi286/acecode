@@ -94,12 +94,17 @@ TEST_F(CommandsHandlerTest, NoWorkspaceCwdOmitsSkillsField) {
     EXPECT_FALSE(payload.contains("skills")) << "缺 workspace_cwd 不应输出 skills 字段";
     EXPECT_FALSE(payload.contains("commands")) << "缺 workspace_cwd 不应输出 commands 字段";
 
-    ASSERT_EQ(payload["builtins"].size(), 5u);
+    ASSERT_EQ(payload["builtins"].size(), 7u);
     EXPECT_EQ(payload["builtins"][0]["name"].get<std::string>(), "init");
     EXPECT_EQ(payload["builtins"][1]["name"].get<std::string>(), "compact");
     EXPECT_EQ(payload["builtins"][2]["name"].get<std::string>(), "goal");
     EXPECT_EQ(payload["builtins"][3]["name"].get<std::string>(), "plan");
     EXPECT_EQ(payload["builtins"][4]["name"].get<std::string>(), "lsp");
+    // 回归:B-Task 8 复审发现 rc/remote-control 只进了可执行白名单
+    // (builtin_command_handler / 前端 parseExecutableBuiltinCommand),
+    // builtins payload 漏加 → Web 输入框打 /r 没有下拉补全。
+    EXPECT_EQ(payload["builtins"][5]["name"].get<std::string>(), "rc");
+    EXPECT_EQ(payload["builtins"][6]["name"].get<std::string>(), "remote-control");
     for (const auto& builtin : payload["builtins"]) {
         EXPECT_FALSE(builtin["description"].get<std::string>().empty());
     }
@@ -215,6 +220,12 @@ TEST_F(CommandsHandlerTest, BuiltinDescriptionsMatchTuiRegistration) {
               "Enter plan mode or start planning a described task");
     EXPECT_EQ(payload["builtins"][4]["description"].get<std::string>(),
               "Show LSP server status (connected/broken/not installed)");
+    // rc / remote-control 的描述与 src/commands/remote_control_command.cpp
+    // 的 TUI 注册文案保持一致。
+    EXPECT_EQ(payload["builtins"][5]["description"].get<std::string>(),
+              "Alias for /remote-control");
+    EXPECT_EQ(payload["builtins"][6]["description"].get<std::string>(),
+              "Activate a configured channel plugin or manage manual remote-control webhooks");
 }
 
 // 场景:workspace_cwd 指向某项目时,该项目 .agent/skills 下的 SKILL.md 出现在响应。

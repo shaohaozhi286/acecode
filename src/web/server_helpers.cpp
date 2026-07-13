@@ -819,19 +819,9 @@ std::vector<SessionMeta> WebServer::Impl::no_workspace_disk_sessions() const {
 
 std::optional<SessionMeta>
 WebServer::Impl::find_no_workspace_session_meta(const std::string& id) const {
-    if (id.empty()) return std::nullopt;
-    const auto direct_cwd = no_workspace_session_cwd(id, no_workspace_cache_root());
-    auto direct_meta = SessionStorage::read_meta(
-        SessionStorage::meta_path(SessionStorage::get_project_dir(direct_cwd), id));
-    if (!direct_meta.id.empty() && direct_meta.no_workspace) return direct_meta;
-
-    for (const auto& cwd : list_no_workspace_session_cwds(no_workspace_cache_root())) {
-        if (cwd == direct_cwd) continue;
-        auto meta = SessionStorage::read_meta(
-            SessionStorage::meta_path(SessionStorage::get_project_dir(cwd), id));
-        if (!meta.id.empty() && meta.no_workspace) return meta;
-    }
-    return std::nullopt;
+    // 逻辑下沉到 session 层与 remote-control binder 的启动重建共用;
+    // 空 cache_root 由被调方回退 default_no_workspace_cache_root()。
+    return acecode::find_no_workspace_session_meta(id, deps.no_workspace_cache_root);
 }
 
 bool WebServer::Impl::session_entry_matches_workspace(const SessionEntry& entry,

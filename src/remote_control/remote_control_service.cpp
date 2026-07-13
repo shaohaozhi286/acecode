@@ -130,6 +130,14 @@ bool RemoteControlService::start(const RemoteControlOptions& opts, std::string* 
         if (token.empty()) {
             if (const char* q = req.url_params.get("token")) token = q;
         }
+        // 协议留口:channel_message_id(string)/metadata(object)是可选字段,
+        // 供未来 channel bridge 接入时携带。当前仅记录 channel_message_id
+        // 便于排障,metadata 原样忽略(不解析、不注入到会话文本);未知顶层
+        // 字段一律不导致拒绝——上面的校验只看 text 是否存在且为字符串。
+        if (body.contains("channel_message_id") && body["channel_message_id"].is_string()) {
+            LOG_INFO("[remote-control] inbound channel_message_id=" +
+                     body["channel_message_id"].get<std::string>());
+        }
         auto result = hub->handle_inbound(body["text"].get<std::string>(), token);
         if (result.ok()) {
             return crow::response(200, R"({"ok":true})");
