@@ -1,7 +1,7 @@
 #pragma once
 
 // 工具调用行的 Claude Code 风格格式化(redesign-tui-tool-rows):
-// ` ● ToolName(args)` —— 指示灯 + PascalCase 工具名 + 括号参数。
+// 默认 ` ● ToolName`,全局 verbose 时 ` ● ToolName(args)`。
 // 纯字符串/状态逻辑,无 FTXUI 依赖,编进 acecode_testable 供单测。
 
 #include <string>

@@ -1,10 +1,9 @@
-// TopBar:logo + 快捷工具(项目栏收缩/新对话/搜索/···) + 主题切换 + 设置
-//
-// 占位按钮(搜索/···)留 hover 反馈但 onClick 暂为 toast 提醒"待开发",避免点了"无反应"。
+// TopBar:logo + 快捷工具(项目栏收缩/新对话/搜索/快捷菜单) + 主题切换 + 设置
 
+import { useEffect, useRef, useState } from 'react';
 import { useTheme } from '../theme.jsx';
-import { toast } from './Toast.jsx';
 import { clsx } from '../lib/format.js';
+import { TOPBAR_QUICK_ACTIONS, invokeTopBarQuickAction } from '../lib/topBarQuickActions.js';
 import { formatProgramVersion } from '../lib/webCoreInfo.js';
 import { NavigationArrowIcon, PanelToggleIcon, VsIcon } from './Icon.jsx';
 import {
@@ -70,6 +69,8 @@ export function TopBar({
 }) {
   const { theme, toggle } = useTheme();
   const { framelessDesktop, isMaximized } = useFramelessWindowState();
+  const [quickActionsOpen, setQuickActionsOpen] = useState(false);
+  const quickActionsRef = useRef(null);
   const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad|iPod/.test(navigator.platform || '');
   const searchHotkeyHint = isMac ? '搜索 (Cmd+K)' : '搜索 (Ctrl+K)';
   const updateAvailable = !!updateStatus?.update_available;
@@ -82,6 +83,33 @@ export function TopBar({
     : '';
   const cleanAppVersion = typeof appVersion === 'string' ? appVersion.trim() : '';
   const appVersionLabel = cleanAppVersion ? formatProgramVersion(cleanAppVersion) : '';
+  const selectQuickAction = (actionId) => {
+    setQuickActionsOpen(false);
+    invokeTopBarQuickAction(actionId, {
+      onNewSession,
+      onOpenLoop,
+      onOpenSearch,
+      onSettings,
+    });
+  };
+
+  useEffect(() => {
+    if (!quickActionsOpen) return undefined;
+    const onDocumentMouseDown = (event) => {
+      if (!quickActionsRef.current?.contains(event.target)) setQuickActionsOpen(false);
+    };
+    const onDocumentKeyDown = (event) => {
+      if (event.key !== 'Escape') return;
+      setQuickActionsOpen(false);
+      quickActionsRef.current?.querySelector('button')?.focus();
+    };
+    document.addEventListener('mousedown', onDocumentMouseDown);
+    document.addEventListener('keydown', onDocumentKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onDocumentMouseDown);
+      document.removeEventListener('keydown', onDocumentKeyDown);
+    };
+  }, [quickActionsOpen]);
 
   const onTopBarMouseDown = (event) => {
     if (!framelessDesktop || event.button !== 0 || isInteractiveTarget(event.target)) return;
@@ -149,9 +177,41 @@ export function TopBar({
       <QuickBtn title={searchHotkeyHint} onClick={onOpenSearch}>
         <VsIcon name="search" size={14} />
       </QuickBtn>
-      <QuickBtn title="更多" onClick={() => toast({ kind: 'info', text: '更多工具待补充' })}>
-        <VsIcon name="ellipsis" size={14} />
-      </QuickBtn>
+      <div ref={quickActionsRef} className="relative">
+        <QuickBtn
+          title="更多操作"
+          onClick={() => setQuickActionsOpen((open) => !open)}
+          pressed={quickActionsOpen}
+          aria-haspopup="menu"
+          aria-expanded={quickActionsOpen}
+          aria-controls="topbar-quick-actions-menu"
+        >
+          <VsIcon name="ellipsis" size={14} />
+        </QuickBtn>
+        {quickActionsOpen && (
+          <div
+            id="topbar-quick-actions-menu"
+            role="menu"
+            aria-label="快捷操作"
+            className="absolute top-full left-0 mt-1 w-[148px] rounded-lg border border-border bg-surface p-1 ace-shadow-lg z-50"
+          >
+            {TOPBAR_QUICK_ACTIONS.map((action) => (
+              <button
+                key={action.id}
+                type="button"
+                role="menuitem"
+                onClick={() => selectQuickAction(action.id)}
+                className="w-full h-8 px-2 rounded-md flex items-center gap-2 text-[13px] text-fg-2 hover:bg-surface-hi hover:text-fg transition text-left"
+              >
+                <span className="w-5 shrink-0 flex items-center justify-center">
+                  <VsIcon name={action.icon} size={action.iconSize} />
+                </span>
+                <span>{action.label}</span>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
 
       <div className="ml-auto flex items-center gap-1">
         {consoleAvailable && (

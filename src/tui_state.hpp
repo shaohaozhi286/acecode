@@ -77,8 +77,8 @@ struct TuiState {
 
     std::vector<Message> conversation;
     // Ctrl+O 全局 verbose 开关(Claude Code 风格):true 时所有 tool_result
-    // 展开为全文视图,false 回到摘要/折叠。与逐行的 Message::expanded
-    // (Ctrl+E)取或。运行期状态,不落盘。
+    // 展开为全文视图且 tool_call 显示参数,false 回到摘要/折叠并隐藏参数。
+    // 与逐行的 Message::expanded(Ctrl+E)取或。运行期状态,不落盘。
     bool transcript_expanded = false;
     std::string input_text;
     // Caret byte offset within input_text. Kept UTF-8-aligned by the event

@@ -1,6 +1,7 @@
 #include "tool_progress.hpp"
 #include "tui/theme_palette.hpp"
 #include "tui/tool_row_format.hpp"
+#include "tui/tool_row_presentation.hpp"
 
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/terminal.hpp>
@@ -34,7 +35,7 @@ ftxui::Element render_tool_progress(const TuiState& state) {
     const int term_cols = Terminal::Size().dimx;
     const bool narrow = term_cols > 0 && term_cols < 40;
 
-    // Header line: "● Bash(npm install…)" —— 与 transcript 的工具行同款格式,
+    // Header line:默认 "● Bash",Ctrl+O verbose 时才显示参数预览。
     // 执行中指示灯为灰(与配对前的 Pending 态一致)。
     std::string preview = p.command_preview;
     if (narrow && preview.size() > 20) preview = preview.substr(0, 19) + "\xE2\x80\xA6";
@@ -43,11 +44,13 @@ ftxui::Element render_tool_progress(const TuiState& state) {
     Elements header_segs;
     header_segs.push_back(text(" \xE2\x97\x8F ") | color(th.ui.text_dim)); // "●"
     header_segs.push_back(text(tui::pascal_case_tool_name(p.tool_name))
-        | bold | color(th.ui.accent));
-    if (!preview.empty()) {
-        header_segs.push_back(text("(") | color(th.ui.accent));
-        header_segs.push_back(text(preview) | dim);
-        header_segs.push_back(text(")") | color(th.ui.accent));
+        | bold | color(tui::tool_call_name_color(th)));
+    if (tui::tool_call_arguments_visible(state.transcript_expanded) &&
+        !preview.empty()) {
+        const auto arg_color = tui::tool_call_argument_color(th);
+        header_segs.push_back(text("(") | color(arg_color));
+        header_segs.push_back(text(preview) | color(arg_color));
+        header_segs.push_back(text(")") | color(arg_color));
     }
     Element header = hbox(std::move(header_segs));
 

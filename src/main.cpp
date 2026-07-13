@@ -140,6 +140,7 @@
 #include "tui/tool_progress.hpp"
 #include "tui/tool_result_fold.hpp"
 #include "tui/tool_row_format.hpp"
+#include "tui/tool_row_presentation.hpp"
 #include "tui/theme_palette.hpp"
 #include "utils/terminal_theme_detect.hpp"
 #include "tui/sidebar_model.hpp"
@@ -3799,12 +3800,15 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
             message_elements.push_back(
                 tracked_message(i, line | focus_decorator));
         } else if (msg.role == "tool_call") {
-            // Claude Code 风格工具行:` ● ToolName(args)`,与 user/assistant
-            // 行同列对齐。指示灯按配对结果着色(灰=执行中/无结果、绿=成功、
-            // 红=失败);工具名 PascalCase 加粗,颜色沿用原 preproc 不变,
-            // 参数放括号内。content 解析失败时整行原样降级。
+            // 紧凑工具行:` ● ToolName`;Ctrl+O 全局 verbose 开启时才追加
+            // `(args)`。指示灯按配对结果着色(灰=执行中/无结果、绿=成功、
+            // 红=失败),工具名 PascalCase 加粗。content 解析失败时折叠态
+            // 只显示 ToolCall,verbose 态才回退到完整原文。
             const auto parts = acecode::tui::parse_tool_row(
                 msg.content, msg.display_override);
+            const auto& palette = tui::theme();
+            const bool show_args = acecode::tui::tool_call_arguments_visible(
+                state.transcript_expanded);
             Color dot_color = tui::theme().ui.text_dim;
             if (i < tool_dots.size()) {
                 if (tool_dots[i] == acecode::tui::ToolCallDot::Ok) {
@@ -3813,53 +3817,27 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
                     dot_color = tui::theme().semantic.error;
                 }
             }
-            // 参数预览过长时折叠成 3 条可视行 + "… folded (ctrl+o)",与
-            // tool_result 的 fold 同款交互(Ctrl+O 全局展开)。可视行按
-            // 当前可用宽度用 fold_tool_result_preview 预切,真实换行和软
-            // 换行都计入 —— MCP 工具常见的含字面量 \n 的超长单行 JSON
-            // 参数同样折得住。展开态回到原 paragraph 全量渲染。
-            const bool row_expanded = msg.expanded || state.transcript_expanded;
-            auto folded_or_full = [&](const std::string& full_text,
-                                      int avail_width) -> Element {
-                if (row_expanded) {
-                    return paragraph(full_text)
-                        | color(tui::theme().syntax.preproc) | flex;
-                }
-                constexpr std::size_t kMaxArgsPreviewRows = 3;
-                const auto preview = acecode::tui::fold_tool_result_preview(
-                    full_text, avail_width, kMaxArgsPreviewRows);
-                if (!preview.folded) {
-                    return paragraph(full_text)
-                        | color(tui::theme().syntax.preproc) | flex;
-                }
-                Elements arg_rows;
-                for (const auto& ln : preview.lines) {
-                    arg_rows.push_back(
-                        text(ln) | color(tui::theme().syntax.preproc));
-                }
-                arg_rows.push_back(text("\xE2\x80\xA6 folded (ctrl+o)")
-                    | color(tui::theme().ui.text_dim));
-                return vbox(std::move(arg_rows)) | flex;
-            };
             Elements segs;
             segs.push_back(text(" \xE2\x97\x8F ") | color(dot_color)); // "●"
             if (parts.name.empty()) {
-                const int raw_width = std::max(
-                    20, chat_box.x_max - chat_box.x_min - 3);
-                segs.push_back(folded_or_full(msg.content, raw_width));
+                if (show_args) {
+                    segs.push_back(paragraph(msg.content)
+                        | color(acecode::tui::tool_call_argument_color(palette))
+                        | flex);
+                } else {
+                    segs.push_back(text("ToolCall") | bold |
+                        color(acecode::tui::tool_call_name_color(palette)));
+                }
             } else {
                 const std::string display_name =
                     acecode::tui::pascal_case_tool_name(parts.name);
                 segs.push_back(
                     text(display_name)
-                    | bold | color(tui::theme().syntax.preproc));
-                if (!parts.args.empty()) {
-                    // args 列起点 = " ● "(3 列)+ 工具名(ASCII)之后。
-                    const int args_width = std::max(
-                        20, chat_box.x_max - chat_box.x_min - 3 -
-                                static_cast<int>(display_name.size()));
-                    segs.push_back(
-                        folded_or_full("(" + parts.args + ")", args_width));
+                    | bold | color(acecode::tui::tool_call_name_color(palette)));
+                if (show_args && !parts.args.empty()) {
+                    segs.push_back(paragraph("(" + parts.args + ")")
+                        | color(acecode::tui::tool_call_argument_color(palette))
+                        | flex);
                 }
             }
             auto line = hbox(std::move(segs));
@@ -3894,9 +3872,8 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
                 Elements rows;
                 if (msg.summary.has_value()) {
                     const auto& s = *msg.summary;
-                    Color row_color = msg.content.find("[Error]") == 0 || !is_success_summary(s)
-                        ? tui::theme().semantic.error
-                        : tui::theme().semantic.success;
+                    const Color row_color =
+                        acecode::tui::tool_result_text_color(tui::theme());
                     std::string metric_str;
                     for (const auto& kv : s.metrics) {
                         std::string seg;
@@ -3912,12 +3889,14 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
                         s, metric_str, summary_width);
                     rows.push_back(hbox({
                         text("  \xE2\x94\x94 ") | color(tui::theme().ui.text_dim), // "└"
-                        text(summary_line) | color(row_color) | flex,
+                        text(summary_line) | color(row_color) | dim | flex,
                     }));
                 } else {
                     rows.push_back(hbox({
                         text("  \xE2\x94\x94 ") | color(tui::theme().ui.text_dim), // "└"
-                        text("diff") | color(tui::theme().ui.text_muted) | flex,
+                        text("diff") |
+                            color(acecode::tui::tool_result_text_color(tui::theme())) |
+                            dim | flex,
                     }));
                 }
 
@@ -3962,9 +3941,8 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
             } else if (use_summary) {
                 // ---- Summary row: single line, icon + verb + object + metrics ----
                 const auto& s = *msg.summary;
-                Color row_color = msg.content.find("[Error]") == 0 || !is_success_summary(s)
-                    ? tui::theme().semantic.error
-                    : tui::theme().semantic.success;
+                const Color row_color =
+                    acecode::tui::tool_result_text_color(tui::theme());
 
                 // Build metric tail: " · k=v · k=v" but drop k for
                 // "time"/"bytes"/"lines"/"size" since the value is self-describing.
@@ -4003,7 +3981,7 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
                 Elements rows;
                 rows.push_back(hbox({
                     text("  \xE2\x94\x94 ") | color(tui::theme().ui.text_dim), // "└"
-                    text(summary_line) | color(row_color) | flex,
+                    text(summary_line) | color(row_color) | dim | flex,
                 }));
 
                 // Failed tool: render the first 3 lines of output dimmed
