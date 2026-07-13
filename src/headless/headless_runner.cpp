@@ -1,5 +1,6 @@
 #include "headless_runner.hpp"
 
+#include "headless_jsonl.hpp"
 #include "headless_mode.hpp"
 
 #include "../config/config.hpp"
@@ -41,6 +42,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -69,6 +71,11 @@ std::atomic<int>  g_interrupt_count{0};
 void sigint_handler(int) {
     g_interrupt_requested.store(true);
     g_interrupt_count.fetch_add(1);
+}
+
+std::int64_t now_epoch_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
 }
 
 bool stdin_is_tty() {
@@ -187,6 +194,9 @@ void expand_skill_prompt(const AppConfig& cfg,
 } // namespace
 
 int run_print_mode(const HeadlessCliOptions& opts) {
+    g_interrupt_requested.store(false);
+    g_interrupt_count.store(0);
+
     // ---- prompt 先行:参数错误要在任何重初始化之前廉价失败 ----
     const std::string prompt = build_effective_prompt(opts.prompt);
     if (prompt.empty()) {
@@ -407,11 +417,34 @@ int run_print_mode(const HeadlessCliOptions& opts) {
             }
         }
 
+        const bool stream_json = opts.output_format == "stream-json";
+        std::unique_ptr<HeadlessJsonlProjector> jsonl_projector;
+        std::unique_ptr<JsonlStreamWriter> jsonl_writer;
+        if (stream_json) {
+#ifndef _WIN32
+            // A closed downstream pipe must become a checked write failure so
+            // the session can abort/persist; the default SIGPIPE would kill us.
+            std::signal(SIGPIPE, SIG_IGN);
+#endif
+            jsonl_projector = std::make_unique<HeadlessJsonlProjector>(
+                session_id, opts.include_thinking);
+            jsonl_writer = std::make_unique<JsonlStreamWriter>(stdout);
+        }
+        auto write_stream_error = [&](const std::string& name,
+                                      const std::string& message,
+                                      nlohmann::json details = nlohmann::json::object()) {
+            if (!jsonl_projector || !jsonl_writer || jsonl_writer->failed()) return;
+            jsonl_writer->write_record(jsonl_projector->make_error_record(
+                name, message, std::move(details), now_epoch_ms()));
+        };
+
         // provider 兜底检查:没有可用模型配置时 fail fast,而不是让回合
         // 跑起来再报一条模型错误消息。
         {
             auto entry = registry.acquire(session_id);
             if (!entry || !entry->provider_slot) {
+                write_stream_error("SessionInitializationError",
+                                   "session initialization failed");
                 std::cerr << "acecode -p: session initialization failed\n";
                 return 1;
             }
@@ -421,6 +454,8 @@ int run_print_mode(const HeadlessCliOptions& opts) {
                 p = entry->provider_slot->provider;
             }
             if (!p) {
+                write_stream_error("ModelConfigurationError",
+                                   "no usable model configured");
                 std::cerr << "acecode -p: no usable model configured; run "
                              "`acecode configure` first\n";
                 return 1;
@@ -436,6 +471,13 @@ int run_print_mode(const HeadlessCliOptions& opts) {
         auto sub_id = client.subscribe(
             session_id,
             [&](const SessionEvent& ev) {
+                if (jsonl_projector && jsonl_writer && !jsonl_writer->failed()) {
+                    auto records = jsonl_projector->consume(ev);
+                    for (const auto& record : records) {
+                        if (!jsonl_writer->write_record(record)) break;
+                    }
+                    if (jsonl_writer->failed()) wait_cv.notify_all();
+                }
                 if (ev.kind == SessionEventKind::Done) {
                     std::lock_guard<std::mutex> lk(wait_mu);
                     turn_done = true;
@@ -445,6 +487,10 @@ int run_print_mode(const HeadlessCliOptions& opts) {
                     if (ev.payload.contains("reason") && ev.payload["reason"].is_string()) {
                         last_error_reason = ev.payload["reason"].get<std::string>();
                     }
+                } else if (ev.kind == SessionEventKind::Message &&
+                           ev.payload.value("role", std::string{}) == "error") {
+                    std::lock_guard<std::mutex> lk(wait_mu);
+                    last_error_reason = ev.payload.value("content", std::string{});
                 }
             });
 
@@ -460,6 +506,7 @@ int run_print_mode(const HeadlessCliOptions& opts) {
         std::signal(SIGINT, sigint_handler);
 
         if (!client.send_input(session_id, send_text, display_text)) {
+            write_stream_error("SubmissionError", "failed to submit prompt");
             std::cerr << "acecode -p: failed to submit prompt\n";
             return 1;
         }
@@ -467,10 +514,19 @@ int run_print_mode(const HeadlessCliOptions& opts) {
         // ---- 等回合结束。Ctrl+C 一次 = abort 会话(等它收尾落盘);两次 =
         // 立即退出。 ----
         bool aborted = false;
+        bool output_failed = false;
         {
             std::unique_lock<std::mutex> lk(wait_mu);
             while (!turn_done) {
                 wait_cv.wait_for(lk, std::chrono::milliseconds(200));
+                if (jsonl_writer && jsonl_writer->failed() && !output_failed) {
+                    output_failed = true;
+                    lk.unlock();
+                    client.abort(session_id);
+                    std::cerr << "acecode -p: " << jsonl_writer->error_message()
+                              << "; cancelling the turn\n";
+                    lk.lock();
+                }
                 if (g_interrupt_requested.load() && !aborted) {
                     aborted = true;
                     lk.unlock();
@@ -496,9 +552,12 @@ int run_print_mode(const HeadlessCliOptions& opts) {
         }
 
         int exit_code = 1;
-        if (aborted) {
+        if (output_failed) {
+            exit_code = 1;
+        } else if (aborted) {
             exit_code = 130;
-        } else if (final_text.empty()) {
+        } else if (final_text.empty() ||
+                   (stream_json && !last_error_reason.empty())) {
             std::cerr << "acecode -p: turn finished without an assistant reply"
                       << (last_error_reason.empty()
                               ? std::string{}
@@ -509,7 +568,15 @@ int run_print_mode(const HeadlessCliOptions& opts) {
             exit_code = 0;
         }
 
-        if (opts.output_format == "json") {
+        if (aborted && !output_failed) {
+            write_stream_error("Interrupted", "interrupted by Ctrl+C",
+                               {{"exit_code", 130}});
+        }
+
+        if (stream_json) {
+            // All completed-part records were emitted from the pre-submit
+            // subscription. There is intentionally no terminal result object.
+        } else if (opts.output_format == "json") {
             // 脚本消费面:成功失败都输出单个 result 对象(含 session_id 供
             // 下一轮 --resume 链式调用),诊断细节仍走上面的 stderr。
             nlohmann::json out{

@@ -225,7 +225,7 @@ TEST(HeadlessOptions, RejectsConflictingContinuationFlags) {
     EXPECT_FALSE(mix2.error.empty());
 }
 
-// 场景:--output-format 的合法值(text/json,空格 / 等号形式)与非法值。
+// 场景:--output-format 的合法值(text/json/stream-json,空格 / 等号形式)与非法值。
 // 期望:合法值透传;非法值报错且消息带上原值。
 TEST(HeadlessOptions, ParsesAndValidatesOutputFormat) {
     auto js = parse_headless_cli_options({"-p", "--output-format", "json", "go"});
@@ -236,9 +236,39 @@ TEST(HeadlessOptions, ParsesAndValidatesOutputFormat) {
     EXPECT_TRUE(txt.error.empty()) << txt.error;
     EXPECT_EQ(txt.output_format, "text");
 
+    auto stream = parse_headless_cli_options(
+        {"-p", "--output-format", "stream-json", "go"});
+    EXPECT_TRUE(stream.error.empty()) << stream.error;
+    EXPECT_EQ(stream.output_format, "stream-json");
+
     auto bad = parse_headless_cli_options({"-p", "--output-format", "yaml", "go"});
     EXPECT_FALSE(bad.error.empty());
     EXPECT_NE(bad.error.find("yaml"), std::string::npos);
+}
+
+// 场景:--thinking 是加法 flag,位置无关;它只由 stream-json renderer 消费,
+// parser 不应改变 text/json 的既有格式选择。
+TEST(HeadlessOptions, ParsesThinkingFlagWithoutChangingOutputFormat) {
+    auto stream = parse_headless_cli_options(
+        {"--thinking", "-p", "--output-format=stream-json", "go"});
+    EXPECT_TRUE(stream.error.empty()) << stream.error;
+    EXPECT_TRUE(stream.include_thinking);
+    EXPECT_EQ(stream.output_format, "stream-json");
+
+    auto legacy = parse_headless_cli_options(
+        {"-p", "--thinking", "--output-format", "json", "go"});
+    EXPECT_TRUE(legacy.error.empty()) << legacy.error;
+    EXPECT_TRUE(legacy.include_thinking);
+    EXPECT_EQ(legacy.output_format, "json");
+}
+
+// 场景:帮助文本同时说明新 JSONL 模式和旧 json 单对象模式,避免脚本用户把
+// 二者混为一谈。
+TEST(HeadlessOptions, HelpDocumentsAdditiveStreamJsonMode) {
+    const auto help = acecode::headless::print_mode_help();
+    EXPECT_NE(help.find("text (default) | json | stream-json"), std::string::npos);
+    EXPECT_NE(help.find("json: stdout gets one result object"), std::string::npos);
+    EXPECT_NE(help.find("--thinking"), std::string::npos);
 }
 
 // 场景:-p 模式里的 -h / --help。

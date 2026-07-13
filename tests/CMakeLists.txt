@@ -64,11 +64,27 @@ target_link_libraries(fake_lsp_server PRIVATE
 )
 add_dependencies(acecode_unit_tests fake_lsp_server)
 
+# JSONL stdout process probe: links the production writer directly so tests can
+# verify flush/backpressure/broken-pipe behavior through a real OS pipe without
+# starting a provider-backed headless session.
+add_executable(headless_jsonl_process_driver
+    ${CMAKE_CURRENT_SOURCE_DIR}/headless/headless_jsonl_process_driver.cpp
+    ${CMAKE_SOURCE_DIR}/src/headless/headless_jsonl.cpp
+)
+target_include_directories(headless_jsonl_process_driver PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_link_libraries(headless_jsonl_process_driver PRIVATE
+    nlohmann_json::nlohmann_json
+)
+add_dependencies(acecode_unit_tests headless_jsonl_process_driver)
+
 # 注入 helper 绝对路径给测试代码(避免 ctest cwd 不确定问题)
 target_compile_definitions(acecode_unit_tests PRIVATE
     ACECODE_CONCURRENT_SESSION_WRITER_PATH="$<TARGET_FILE:concurrent_session_writer>"
     ACECODE_MCP_STDIO_TEST_SERVER_PATH="$<TARGET_FILE:mcp_stdio_test_server>"
     ACECODE_FAKE_LSP_SERVER_PATH="$<TARGET_FILE:fake_lsp_server>"
+    ACECODE_HEADLESS_JSONL_DRIVER_PATH="$<TARGET_FILE:headless_jsonl_process_driver>"
 )
 
 # winpty spike/冒烟测试需要 winpty-agent.exe 在单测 exe 同目录

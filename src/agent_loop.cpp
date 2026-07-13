@@ -111,6 +111,18 @@ nlohmann::json provider_error_to_json(const ProviderErrorInfo& info) {
     return j;
 }
 
+nlohmann::json model_step_usage_to_json(const TokenUsage& usage) {
+    return nlohmann::json{
+        {"prompt_tokens", usage.prompt_tokens},
+        {"completion_tokens", usage.completion_tokens},
+        {"total_tokens", usage.total_tokens},
+        {"cache_read_tokens", usage.cache_read_tokens},
+        {"cache_write_tokens", usage.cache_write_tokens},
+        {"reasoning_tokens", usage.reasoning_tokens},
+        {"has_data", usage.has_data},
+    };
+}
+
 std::string provider_error_summary_for_log(const ProviderErrorInfo& info) {
     std::string message = info.display_message;
     if (message.empty()) message = info.pretty_json;
@@ -2892,6 +2904,18 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
         return false;
     };
 
+    int model_step_index = 0;
+    auto emit_model_step_finish = [&](int step_index,
+                                      std::string reason,
+                                      const TokenUsage& usage) {
+        if (reason.empty()) reason = "unknown";
+        events_.emit(SessionEventKind::ModelStepFinish, nlohmann::json{
+            {"step_index", step_index},
+            {"reason", std::move(reason)},
+            {"usage", model_step_usage_to_json(usage)},
+        });
+    };
+
     // Main agent loop
     while (!abort_requested_ && !terminator_fired &&
            (!has_max_iterations || total_iterations < max_iter)) {
@@ -2943,12 +2967,19 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
             break;
         }
 
-        // Phase 3: Call provider and collect response
+        // Phase 3: Call provider and collect response.这两个显式 lifecycle 事件
+        // 是完成态 JSONL 的可靠边界;progress/usage 都不能替代它们。
+        const int current_model_step = ++model_step_index;
+        events_.emit(SessionEventKind::ModelStepStart, nlohmann::json{
+            {"step_index", current_model_step},
+        });
         auto provider_result = call_provider_and_collect(
             provider_snapshot, bundle, emit_agent_progress);
+        TokenUsage step_usage = provider_result.accumulated.usage;
 
         if (abort_requested_) {
             dispatch_message("system", "[Interrupted]", false);
+            emit_model_step_finish(current_model_step, "aborted", step_usage);
             break;
         }
 
@@ -2960,8 +2991,14 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
             skip_auto_compact_once, total_iterations,
             turn_timing_status);
         reset_doom_guard_after_compact();
-        if (error_result == HandleErrorResult::Continue) continue;
-        if (error_result == HandleErrorResult::Break) break;
+        if (error_result == HandleErrorResult::Continue) {
+            emit_model_step_finish(current_model_step, "retry", step_usage);
+            continue;
+        }
+        if (error_result == HandleErrorResult::Break) {
+            emit_model_step_finish(current_model_step, "error", step_usage);
+            break;
+        }
 
         // Usage estimation when provider didn't report usage。必须覆盖所有轮:
         // 旧条件把「纯工具调用轮(无正文)」排除,导致不上报 usage 的
@@ -2983,6 +3020,7 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
             estimated_usage.completion_tokens = estimate_message_tokens({estimated_response});
             estimated_usage.total_tokens = estimated_usage.prompt_tokens + estimated_usage.completion_tokens;
             estimated_usage.has_data = false;
+            step_usage = estimated_usage;
             account_goal_usage(estimated_usage.total_tokens, false);
             if (callbacks_.on_usage) callbacks_.on_usage(estimated_usage);
             if (session_manager_) session_manager_->record_token_usage(estimated_usage);
@@ -3058,6 +3096,8 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
                     if (total_iterations > 0) {
                         --total_iterations; // 空轮不计入 max_iterations
                     }
+                    emit_model_step_finish(
+                        current_model_step, "empty_response_retry", step_usage);
                     continue;
                 }
 
@@ -3076,6 +3116,7 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
                         u8")。任务未完成,请重试或换用其它模型。",
                     false);
                 stop_active_goal_after_turn_error(ProviderErrorInfo{});
+                emit_model_step_finish(current_model_step, "error", step_usage);
                 break;
             }
 
@@ -3095,6 +3136,9 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
             dispatch_message("assistant", provider_result.accumulated.content, false,
                              nlohmann::json::object(),
                              provider_result.accumulated.content_parts);
+            emit_model_step_finish(
+                current_model_step, provider_result.accumulated.finish_reason,
+                step_usage);
             if (truncated_by_length) {
                 emit_transcript_system_message(
                     u8"[输出截断] 本回复因输出 token 上限被截断,内容可能不完整。");
@@ -3114,6 +3158,9 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
             provider_result.accumulated, provider_snapshot,
             emit_agent_progress, doom_guard, doom_guard_mu,
             turn_timing_status);
+        emit_model_step_finish(
+            current_model_step, provider_result.accumulated.finish_reason,
+            step_usage);
         if (terminator_fired &&
             maybe_continue_from_stop_hook(provider_result.accumulated.content)) {
             terminator_fired = false;

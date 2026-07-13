@@ -16,6 +16,9 @@
 //                                           解析 stdout 即可确定性 --resume)
 //   acecode -p --output-format json "..."   stdout 输出单个 result JSON 对象
 //                                           (含 session_id,供脚本链式调用)
+//   acecode -p --output-format stream-json   stdout 输出完成态 part JSONL
+//   acecode -p --output-format stream-json --thinking "..."
+//                                           同时输出完成态 reasoning part
 //   acecode -p --yolo "fix the bug"         跳过所有权限确认
 //   acecode -p --permission-mode accept-edits "..."
 //   acecode -p --model my-model "..."       指定 saved_models 里的命名模型
@@ -31,10 +34,11 @@ struct HeadlessCliOptions {
     bool print_mode = false;       // 出现过 -p / --print
     bool show_help = false;        // -h / --help(print 模式子帮助,优先于执行)
     bool dangerous_mode = false;   // --yolo / --dangerous(与 TUI 同名参数对齐)
+    bool include_thinking = false; // --thinking:stream-json 输出 reasoning part
     bool continue_latest = false;  // -c / --continue:接当前 cwd 最近会话
     std::string resume_session_id; // --resume <id>:接指定会话
     std::string session_id;        // --session-id <id>:新会话自定 id
-    std::string output_format;     // --output-format <text|json>,空 = text
+    std::string output_format;     // --output-format <text|json|stream-json>,空 = text
     std::string permission_mode;   // --permission-mode <default|accept-edits|plan|yolo>
     std::string model_name;        // --model <saved_models.name>
     int max_turns = 0;             // --max-turns <n>,0 = 不覆盖配置

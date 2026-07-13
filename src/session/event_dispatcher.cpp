@@ -18,35 +18,58 @@ std::uint64_t EventDispatcher::emit(SessionEventKind kind, nlohmann::json payloa
                                     EmitOptions options) {
     SessionEvent evt;
     evt.kind         = kind;
-    evt.seq          = ++seq_counter_;
     evt.timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
     evt.payload      = std::move(payload);
 
-    // 关键: 把要投递的事件 / listener 复制出来在锁外调用,避免在持锁状态下
-    // 调用客户代码(listener 可能跨网络发包阻塞)。处于 catch-up 阶段的订阅
-    // 不直投,而是把事件按序压入它的 pending,交由 subscribe 线程稍后 flush —
-    // 防止实时新帧抢在历史回放之前送达、被客户端按 seq 误判为过期而丢弃。
-    std::vector<EventListener> direct_targets;
+    // seq 分配与所有订阅入队在同一把锁下完成:并发 emitter 即使在拿锁顺序上
+    // 竞争,每个订阅 pending 的物理顺序也必然与 seq 一致。
+    std::vector<std::pair<SubscriptionId, std::shared_ptr<Subscription>>> drain_targets;
     {
         std::lock_guard<std::mutex> lk(mu_);
+        evt.seq = ++seq_counter_;
         if (options.buffered) {
             push_to_buffer(evt, options.coalesce_key);
         }
-        direct_targets.reserve(subscriptions_.size());
-        for (auto& [_, sub] : subscriptions_) {
+        drain_targets.reserve(subscriptions_.size());
+        for (auto& [id, sub] : subscriptions_) {
             if (!sub) continue;
-            if (sub->catching_up) {
-                sub->pending.push_back(evt);
-            } else if (sub->listener) {
-                direct_targets.push_back(sub->listener);
+            sub->pending.push_back(evt);
+            if (!sub->catching_up && !sub->delivering && sub->listener) {
+                sub->delivering = true;
+                drain_targets.emplace_back(id, sub);
             }
         }
     }
-    for (auto& l : direct_targets) {
-        if (l) l(evt);
+    for (auto& [id, sub] : drain_targets) {
+        drain_subscription(id, sub);
     }
     return evt.seq;
+}
+
+void EventDispatcher::drain_subscription(
+    SubscriptionId id,
+    const std::shared_ptr<Subscription>& sub) {
+    while (true) {
+        EventListener listener;
+        SessionEvent evt;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            auto it = subscriptions_.find(id);
+            if (it == subscriptions_.end() || it->second != sub || sub->catching_up) {
+                sub->delivering = false;
+                return;
+            }
+            if (sub->pending.empty()) {
+                sub->delivering = false;
+                return;
+            }
+            evt = std::move(sub->pending.front());
+            sub->pending.pop_front();
+            listener = sub->listener;
+        }
+        if (listener) listener(evt);
+    }
 }
 
 EventDispatcher::SubscriptionId
@@ -75,12 +98,12 @@ EventDispatcher::subscribe(EventListener listener, std::uint64_t since_seq) {
         for (const auto& evt : to_replay) listener(evt);
     }
 
-    // 第三步: 按序 flush catch-up 期间累积的实时事件;在 pending 清空的同一把锁内
-    // 翻转 catching_up=false 切到直投。emit 与本步竞争同一把锁来决定走 pending 还是
-    // 直投,因此不存在 "pending 已空" 与 "切直投" 之间漏接实时事件的窗口。
+    // 第三步:按序 flush catch-up 期间累积的实时事件;在 pending 清空的同一把锁内
+    // 翻转 catching_up=false。之后 emit 会认领 delivering 并从同一个队列继续 drain。
     std::size_t live_buffered = 0;
     while (true) {
-        std::vector<SessionEvent> batch;
+        SessionEvent evt;
+        bool have_event = false;
         {
             std::lock_guard<std::mutex> lk(mu_);
             auto it = subscriptions_.find(id);
@@ -89,12 +112,12 @@ EventDispatcher::subscribe(EventListener listener, std::uint64_t since_seq) {
                 it->second->catching_up = false;
                 break;
             }
-            batch.swap(it->second->pending);
+            evt = std::move(it->second->pending.front());
+            it->second->pending.pop_front();
+            have_event = true;
         }
-        if (listener) {
-            for (const auto& evt : batch) listener(evt);
-        }
-        live_buffered += batch.size();
+        if (have_event && listener) listener(evt);
+        if (have_event) ++live_buffered;
     }
 
     // 只在真正触发了回放 / catch-up 排队时记一条 —— 平时(since=0 且无并发)零噪声。

@@ -14,12 +14,13 @@
 //   - emit() 由 AgentLoop worker 线程调用
 //   - subscribe/unsubscribe 由 HTTP handler 线程调用(可能多个并发)
 //   - listener 内部的回调可能跨网络发送,emit/subscribe 都不持锁调 listener
-//     (把要投递的事件复制出来再调,避免 listener 阻塞影响 worker)
+//   - 同一个订阅最多一个 drainer;并发 emit 只入该订阅的 pending,由 drainer
+//     在锁外严格按 seq 调 listener,所以 listener 不会被并发/逆序调用
 //
 // 有序投递保证(修复 replay 与 live 抢道乱序丢帧):
 //   listener 注册后立即进入 catch-up 态。这段时间 emit() 不直接调它,而是把
 //   实时事件按 seq 顺序压入该订阅的 pending 队列。subscribe 线程先把历史事件
-//   按序回放,再 flush pending,最后在同一把锁内翻转出 catch-up 态切到直投。
+//   按序回放,再 flush pending,最后在同一把锁内翻转出 catch-up 态切到有序 drain。
 //   于是 listener 永远先收全历史、再收实时,且全程严格 seq 递增 —— 不会出现
 //   "实时新帧抢在历史旧帧之前送达、被客户端按 seq 误判为过期而丢弃" 的问题。
 
@@ -77,14 +78,17 @@ public:
 
 private:
     // 单个订阅的投递状态。catching_up=true 表示 subscribe 还在按序回放历史事件,
-    // 此时 emit() 把实时事件压入 pending 而非直投;回放结束后由 subscribe 线程
-    // flush pending 并在同一把锁内翻转 catching_up=false 切到直投。
+    // 此时 emit() 把实时事件压入 pending;回放结束后由 subscribe 线程 flush。
+    // delivering=true 表示已有 emit 线程负责在锁外 drain,其它 emit 只排队。
     struct Subscription {
         EventListener             listener;
         bool                      catching_up = false;
-        std::vector<SessionEvent> pending;
+        bool                      delivering = false;
+        std::deque<SessionEvent>  pending;
     };
 
+    void drain_subscription(SubscriptionId id,
+                            const std::shared_ptr<Subscription>& sub);
     void push_to_buffer(const SessionEvent& evt, const std::string& coalesce_key = {});
 
     std::atomic<std::uint64_t> seq_counter_{0};

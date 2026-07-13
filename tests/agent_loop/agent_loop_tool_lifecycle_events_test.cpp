@@ -153,6 +153,11 @@ public:
         return out;
     }
 
+    std::vector<SessionEvent> all_events() const {
+        std::lock_guard<std::mutex> lk(events_mu_);
+        return events_;
+    }
+
 private:
     std::string cwd_;
     std::shared_ptr<StubLlmProvider> provider_ = std::make_shared<StubLlmProvider>();
@@ -231,6 +236,89 @@ private:
 };
 
 } // namespace
+
+TEST(AgentLoopModelStepEvents, TextTurnEmitsNormalizedStartAndFinish) {
+    auto cwd = make_temp_dir("acecode_model_step_text");
+    ToolLifecycleHarness h(cwd.string());
+    h.provider().push_text("done");
+
+    ASSERT_TRUE(h.submit_and_wait());
+    const auto starts = h.events_of(SessionEventKind::ModelStepStart);
+    const auto finishes = h.events_of(SessionEventKind::ModelStepFinish);
+    ASSERT_EQ(starts.size(), 1u);
+    ASSERT_EQ(finishes.size(), 1u);
+    EXPECT_EQ(starts[0].payload.value("step_index", 0), 1);
+    EXPECT_EQ(finishes[0].payload.value("step_index", 0), 1);
+    EXPECT_EQ(finishes[0].payload.value("reason", std::string{}), "stop");
+    ASSERT_TRUE(finishes[0].payload.contains("usage"));
+    const auto& usage = finishes[0].payload["usage"];
+    EXPECT_TRUE(usage.contains("prompt_tokens"));
+    EXPECT_TRUE(usage.contains("completion_tokens"));
+    EXPECT_TRUE(usage.contains("reasoning_tokens"));
+    EXPECT_TRUE(usage.contains("cache_read_tokens"));
+    EXPECT_TRUE(usage.contains("cache_write_tokens"));
+    EXPECT_LT(starts[0].seq, finishes[0].seq);
+
+    fs::remove_all(cwd);
+}
+
+TEST(AgentLoopModelStepEvents, ToolContinuationClosesStepBeforeNextStarts) {
+    auto cwd = make_temp_dir("acecode_model_step_tool");
+    std::atomic<int> calls{0};
+    ToolLifecycleHarness h(cwd.string());
+    h.tools().register_tool(make_probe_tool("ro_probe", true, &calls));
+    h.provider().push_tool_call("ro_probe", "{}", "call-step");
+    h.provider().push_text("done");
+
+    ASSERT_TRUE(h.submit_and_wait());
+    ASSERT_EQ(calls.load(), 1);
+    const auto starts = h.events_of(SessionEventKind::ModelStepStart);
+    const auto finishes = h.events_of(SessionEventKind::ModelStepFinish);
+    const auto tool_ends = h.events_of(SessionEventKind::ToolEnd);
+    ASSERT_EQ(starts.size(), 2u);
+    ASSERT_EQ(finishes.size(), 2u);
+    ASSERT_EQ(tool_ends.size(), 1u);
+    EXPECT_EQ(starts[0].payload.value("step_index", 0), 1);
+    EXPECT_EQ(finishes[0].payload.value("step_index", 0), 1);
+    EXPECT_EQ(starts[1].payload.value("step_index", 0), 2);
+    EXPECT_EQ(finishes[1].payload.value("step_index", 0), 2);
+    EXPECT_LT(starts[0].seq, tool_ends[0].seq);
+    EXPECT_LT(tool_ends[0].seq, finishes[0].seq);
+    EXPECT_LT(finishes[0].seq, starts[1].seq);
+    EXPECT_LT(starts[1].seq, finishes[1].seq);
+
+    fs::remove_all(cwd);
+}
+
+TEST(AgentLoopModelStepEvents, ProviderFailureStillClosesActiveStep) {
+    auto cwd = make_temp_dir("acecode_model_step_error");
+    ToolLifecycleHarness h(cwd.string());
+    acecode::ProviderErrorInfo error;
+    error.kind = acecode::ProviderErrorKind::Network;
+    error.display_message = "provider exploded";
+    h.provider().push_error(error);
+
+    ASSERT_TRUE(h.submit_and_wait());
+    const auto starts = h.events_of(SessionEventKind::ModelStepStart);
+    const auto finishes = h.events_of(SessionEventKind::ModelStepFinish);
+    ASSERT_EQ(starts.size(), 1u);
+    ASSERT_EQ(finishes.size(), 1u);
+    EXPECT_EQ(finishes[0].payload.value("reason", std::string{}), "error");
+    EXPECT_LT(starts[0].seq, finishes[0].seq);
+
+    bool saw_concrete_error = false;
+    for (const auto& event : h.events_of(SessionEventKind::Message)) {
+        if (event.payload.value("role", std::string{}) == "error" &&
+            event.payload.value("content", std::string{}).find("provider exploded") !=
+                std::string::npos) {
+            saw_concrete_error = true;
+            EXPECT_LT(event.seq, finishes[0].seq);
+        }
+    }
+    EXPECT_TRUE(saw_concrete_error);
+
+    fs::remove_all(cwd);
+}
 
 TEST(AgentLoopToolLifecycleEvents, ReadOnlySameNameParallelToolsEmitKeyedStartAndEnd) {
     auto cwd = make_temp_dir("acecode_lifecycle_ro");

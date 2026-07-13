@@ -34,6 +34,8 @@ enum class SessionEventKind {
     Token,             // payload: {"text": "..."}
     Reasoning,         // payload: {"text": "..."} (DeepSeek thinking 等)
     AgentProgress,     // payload: {"phase":"...", "label":"...", ...} (Web activity indicator)
+    ModelStepStart,    // payload: {"step_index":N}
+    ModelStepFinish,   // payload: {"step_index":N,"reason":"...","usage":{...}}
     Message,           // payload: 一条完整 ChatMessage(JSON 序列化形式)
     ToolStart,         // payload: {"tool":"...", "command_preview":"..."}
     ToolUpdate,        // payload: {"tool":"...", "tail":[...], "partial":"...", "total_lines":N, "total_bytes":N}
@@ -270,6 +272,8 @@ inline const char* to_string(SessionEventKind k) {
         case SessionEventKind::Token:             return "token";
         case SessionEventKind::Reasoning:         return "reasoning";
         case SessionEventKind::AgentProgress:     return "agent_progress";
+        case SessionEventKind::ModelStepStart:    return "model_step_start";
+        case SessionEventKind::ModelStepFinish:   return "model_step_finish";
         case SessionEventKind::Message:           return "message";
         case SessionEventKind::ToolStart:         return "tool_start";
         case SessionEventKind::ToolUpdate:        return "tool_update";

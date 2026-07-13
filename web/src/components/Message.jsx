@@ -129,10 +129,10 @@ function UserMessageBody({ content }) {
 
 function UserBubble({ content, contentParts, ts, messageId, onFork }) {
   return (
-    <div className="self-end max-w-[70%] flex flex-col items-end gap-0.5 group">
+    <div className="self-end min-w-0 max-w-[70%] flex flex-col items-end gap-0.5 group">
       <AttachmentStrip contentParts={contentParts} align="right" />
       {content ? (
-        <div className="px-3.5 py-2 rounded-[14px] rounded-br-[4px] bg-accent-bg border border-accent-soft text-fg text-[13px] leading-[1.5] whitespace-pre-wrap break-words">
+        <div className="ace-chat-message-content px-3.5 py-2 rounded-[14px] rounded-br-[4px] bg-accent-bg border border-accent-soft text-fg text-[13px] leading-[1.5] whitespace-pre-wrap break-words">
           <UserMessageBody content={content} />
         </div>
       ) : null}
@@ -193,7 +193,7 @@ function AssistantBubble({
   }, [onOpenFilePreview]);
   // ACECode 头像永久隐藏;保留等宽空白占位,避免消息正文相对旧布局跳动。
   return (
-    <div className={`flex ${chrome.gapClass} max-w-[88%] group relative`}>
+    <div className={`flex min-w-0 ${chrome.gapClass} max-w-[88%] group relative`}>
       {chrome.showAvatarPlaceholder ? (
         <div className="w-6 shrink-0" aria-hidden="true" />
       ) : chrome.showAvatar ? (
@@ -208,7 +208,7 @@ function AssistantBubble({
           </div>
         )}
         <div
-          className="ace-md text-[13px] text-fg leading-[1.6] py-0.5"
+          className="ace-md ace-chat-message-content text-[13px] text-fg leading-[1.6] py-0.5"
           onClick={handleMarkdownClick}
         >
           {blocks.map((block) => (
@@ -285,7 +285,7 @@ function SystemRow({ role, content, metadata }) {
 
 function ErrorRow({ content }) {
   return (
-    <div className="self-stretch max-w-[88%] ml-8 rounded-md border border-danger/30 bg-danger-bg px-3 py-2 text-[12px] leading-5 text-danger whitespace-pre-wrap break-words">
+    <div className="ace-chat-message-content self-stretch max-w-[88%] ml-8 rounded-md border border-danger/30 bg-danger-bg px-3 py-2 text-[12px] leading-5 text-danger whitespace-pre-wrap break-words">
       {content || '[Error]'}
     </div>
   );

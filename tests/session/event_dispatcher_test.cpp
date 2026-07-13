@@ -250,3 +250,44 @@ TEST(EventDispatcher, ConcurrentEmitsHaveUniqueMonotonicSeq) {
     // 不能直接断言 seq 序列(线程 race),但 current_seq 等于总 emit 次数 +
     // 缓存里所有 seq 都是 [1, total] 不重复 = atomic 计数器工作正常的最强证明。
 }
+
+// 回归:并行工具线程会同时 emit。单个订阅的 listener 必须串行执行,且实际
+// 观察到的 seq 严格递增;仅保证 seq 唯一还不够,否则 JSONL 行会逆序/交错。
+TEST(EventDispatcher, ConcurrentEmitsDeliverEachListenerSeriallyInSeqOrder) {
+    EventDispatcher d(/*buffer_capacity=*/100000);
+    constexpr int kThreads = 6;
+    constexpr int kPerThread = 120;
+
+    std::atomic<int> active_callbacks{0};
+    std::atomic<int> max_active_callbacks{0};
+    std::mutex got_mu;
+    std::vector<std::uint64_t> got;
+    d.subscribe([&](const SessionEvent& event) {
+        const int active = active_callbacks.fetch_add(1) + 1;
+        int observed = max_active_callbacks.load();
+        while (active > observed &&
+               !max_active_callbacks.compare_exchange_weak(observed, active)) {}
+        std::this_thread::yield();
+        {
+            std::lock_guard<std::mutex> lk(got_mu);
+            got.push_back(event.seq);
+        }
+        active_callbacks.fetch_sub(1);
+    });
+
+    std::vector<std::thread> threads;
+    for (int t = 0; t < kThreads; ++t) {
+        threads.emplace_back([&] {
+            for (int i = 0; i < kPerThread; ++i) {
+                d.emit(SessionEventKind::Token, {{"i", i}});
+            }
+        });
+    }
+    for (auto& thread : threads) thread.join();
+
+    ASSERT_EQ(got.size(), static_cast<std::size_t>(kThreads * kPerThread));
+    EXPECT_EQ(max_active_callbacks.load(), 1);
+    for (std::size_t i = 0; i < got.size(); ++i) {
+        EXPECT_EQ(got[i], i + 1) << "listener delivery diverged at index " << i;
+    }
+}

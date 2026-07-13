@@ -721,6 +721,13 @@ body {
 }
 
 /* 代码块 / inline code (在 markdown 渲染里用 .ace-md class 套作用域) */
+.ace-chat-message-content,
+.ace-md {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .ace-md pre {
   background: var(--ace-code-bg);
   color: var(--ace-code-fg);

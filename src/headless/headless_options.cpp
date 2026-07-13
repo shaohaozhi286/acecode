@@ -94,6 +94,8 @@ HeadlessCliOptions parse_headless_cli_options(const std::vector<std::string>& to
             o.show_help = true;
         } else if (is_dangerous_flag(t)) {
             o.dangerous_mode = true;
+        } else if (t == "--thinking") {
+            o.include_thinking = true;
         } else if (t == "-c" || t == "--continue") {
             o.continue_latest = true;
         } else if (t == "--resume") {
@@ -110,7 +112,9 @@ HeadlessCliOptions parse_headless_cli_options(const std::vector<std::string>& to
         } else if (split_eq(t, "--session-id", eq_value)) {
             o.session_id = eq_value;
         } else if (t == "--output-format") {
-            if (i + 1 >= tokens.size()) return fail("--output-format requires a value (text|json)");
+            if (i + 1 >= tokens.size()) {
+                return fail("--output-format requires a value (text|json|stream-json)");
+            }
             o.output_format = tokens[++i];
         } else if (split_eq(t, "--output-format", eq_value)) {
             o.output_format = eq_value;
@@ -173,8 +177,10 @@ HeadlessCliOptions parse_headless_cli_options(const std::vector<std::string>& to
         return fail("--session-id names a NEW session and cannot be combined "
                     "with --resume/--continue");
     }
-    if (!o.output_format.empty() && o.output_format != "text" && o.output_format != "json") {
-        return fail("invalid --output-format: " + o.output_format + " (expected text|json)");
+    if (!o.output_format.empty() && o.output_format != "text" &&
+        o.output_format != "json" && o.output_format != "stream-json") {
+        return fail("invalid --output-format: " + o.output_format +
+                    " (expected text|json|stream-json)");
     }
     // --yolo 与 --permission-mode 同时给且矛盾时,尊重更宽的显式意志:
     // dangerous 本来就是"跳过一切确认",permission_mode 保留原值用于
@@ -185,7 +191,8 @@ HeadlessCliOptions parse_headless_cli_options(const std::vector<std::string>& to
 
 std::string print_mode_usage_line() {
     return "usage: acecode -p [-c | --resume <id> | --session-id <id>] "
-           "[--output-format text|json] [--yolo] [--permission-mode <m>] "
+           "[--output-format text|json|stream-json] [--thinking] "
+           "[--yolo] [--permission-mode <m>] "
            "[--model <name>] [--max-turns <n>] \"<prompt>\"\n"
            "run `acecode -p --help` for details\n";
 }
@@ -207,9 +214,12 @@ std::string print_mode_help() {
         "  --resume <id>            Continue the session with the given id\n"
         "  --session-id <id>        Create the new session under a caller-chosen id\n"
         "                           (letters, digits, '-', '_'; max 64 chars)\n"
-        "  --output-format <fmt>    text (default) | json\n"
+        "  --output-format <fmt>    text (default) | json | stream-json\n"
         "                           json: stdout gets one result object, e.g.\n"
         "                           {\"type\":\"result\",\"session_id\":\"...\",\"is_error\":false,\"result\":\"...\"}\n"
+        "                           stream-json: stdout gets completed-part JSONL\n"
+        "                           (step/text/tool/error records, flushed per line)\n"
+        "  --thinking              Include completed reasoning records in stream-json\n"
         "  --model <name>           Use a saved model by name (also applies on resume)\n"
         "  --permission-mode <m>    default | accept-edits | plan | yolo\n"
         "                           (also applies on resume; overrides the saved mode)\n"
