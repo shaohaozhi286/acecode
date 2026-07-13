@@ -156,8 +156,18 @@ SessionChannelBinder::execute_command(const std::string& session_id,
             "session to the default channel."};
 }
 
+void SessionChannelBinder::with_config_lock(const std::function<void()>& fn) const {
+    if (deps_.with_config_lock) {
+        deps_.with_config_lock(fn);
+    } else {
+        fn();
+    }
+}
+
 void SessionChannelBinder::rebuild_from_config() {
-    const std::string bound = deps_.config->remote_control.bound_session_id;
+    std::string bound;
+    with_config_lock(
+        [&] { bound = deps_.config->remote_control.bound_session_id; });
     if (bound.empty()) return;
 
     bool exists = deps_.session_active && deps_.session_active(bound);
@@ -186,22 +196,39 @@ SessionChannelBinder::bind_session(const std::string& session_id) {
         if (shut_down_) return {false, "remote control is shutting down"};
     }
 
-    auto& rc_cfg = deps_.config->remote_control;
-    const std::string channel_name = rc_cfg.default_channel;
+    // 共享 config 一次性快照(与 daemon 其它读写方同锁互斥),后续流程只用
+    // 本地副本 —— 不再裸引用 cfg_mut,config PUT 并发改写也不会撕裂读取。
+    std::string channel_name;
+    RemoteControlConfig::ChannelPluginConfig channel_cfg;
+    bool channel_found = false;
+    std::string cfg_token;
+    int cfg_port = 0;
+    std::string cfg_outbound_url;
+    with_config_lock([&] {
+        const auto& rc_cfg = deps_.config->remote_control;
+        channel_name = rc_cfg.default_channel;
+        auto it = rc_cfg.channels.find(channel_name);
+        if (it != rc_cfg.channels.end()) {
+            channel_found = true;
+            channel_cfg = it->second;
+        }
+        cfg_token = rc_cfg.token;
+        cfg_port = rc_cfg.port;
+        cfg_outbound_url = rc_cfg.outbound_url;
+    });
     if (channel_name.empty()) {
         return {false,
                 "No default channel configured. Set remote_control.default_channel "
                 "and remote_control.channels in config.json, then re-run /rc."};
     }
-    auto channel_it = rc_cfg.channels.find(channel_name);
-    if (channel_it == rc_cfg.channels.end()) {
+    if (!channel_found) {
         return {false, "Default channel '" + channel_name +
                            "' is not configured under remote_control.channels."};
     }
 
     std::string error;
     auto manifest =
-        load_channel_plugin_manifest(channel_it->second.manifest_path, &error);
+        load_channel_plugin_manifest(channel_cfg.manifest_path, &error);
     if (!manifest.has_value()) {
         return {false, "Failed to load channel plugin '" + channel_name + "': " + error};
     }
@@ -213,11 +240,11 @@ SessionChannelBinder::bind_session(const std::string& session_id) {
         token = service.status().token;
         if (token.empty()) return {false, "remote control token is empty"};
     } else {
-        token = rc_cfg.token.empty() ? generate_remote_control_token() : rc_cfg.token;
+        token = cfg_token.empty() ? generate_remote_control_token() : cfg_token;
         RemoteControlOptions opts;
-        opts.port = rc_cfg.port;
+        opts.port = cfg_port;
         opts.token = token;
-        opts.outbound_url = rc_cfg.outbound_url;
+        opts.outbound_url = cfg_outbound_url;
         opts.session_id = session_id;
         if (!service.start(opts, &error)) {
             return {false, "Failed to start remote control: " + error};
@@ -297,11 +324,11 @@ SessionChannelBinder::bind_session(const std::string& session_id) {
     request.session_id = session_id;
     request.inbound_url = "http://127.0.0.1:" + std::to_string(port) + "/rc/send";
     request.token = token;
-    request.settings = channel_it->second.settings.is_object()
-                           ? channel_it->second.settings
+    request.settings = channel_cfg.settings.is_object()
+                           ? channel_cfg.settings
                            : nlohmann::json::object();
-    const int timeout_ms = channel_it->second.timeout_ms > 0
-                               ? channel_it->second.timeout_ms
+    const int timeout_ms = channel_cfg.timeout_ms > 0
+                               ? channel_cfg.timeout_ms
                                : manifest->timeout_ms;
     auto host = make_plugin_host();
     auto activation = host.activate(*manifest, request, timeout_ms, &error);
@@ -419,12 +446,15 @@ void SessionChannelBinder::shutdown() {
 
 std::string SessionChannelBinder::status_text() const {
     auto status = deps_.service->status();
-    const auto& rc_cfg = deps_.config->remote_control;
+    std::string default_channel;
+    with_config_lock([&] {
+        default_channel = deps_.config->remote_control.default_channel;
+    });
 
     std::ostringstream oss;
     oss << "Remote control : " << (status.running ? "ON" : "OFF");
-    if (!rc_cfg.default_channel.empty()) {
-        oss << "\nDefault channel: " << rc_cfg.default_channel;
+    if (!default_channel.empty()) {
+        oss << "\nDefault channel: " << default_channel;
     }
     {
         std::lock_guard<std::mutex> lk(mu_);
@@ -452,22 +482,33 @@ std::string SessionChannelBinder::status_text() const {
 
 void SessionChannelBinder::persist_binding(const std::string& bound_session_id,
                                            const std::string& token) {
-    auto& rc_cfg = deps_.config->remote_control;
-    bool dirty = false;
-    if (rc_cfg.bound_session_id != bound_session_id) {
-        rc_cfg.bound_session_id = bound_session_id;
-        dirty = true;
-    }
-    if (!token.empty() && rc_cfg.token != token) {
-        rc_cfg.token = token;
-        dirty = true;
-    }
-    if (!dirty) return;
-    if (deps_.config_path.empty()) {
-        save_config(*deps_.config);
-    } else {
-        save_config(*deps_.config, deps_.config_path);
-    }
+    // 全程持共享 config 锁:内存更新、磁盘重读、merge、落盘是一个原子步。
+    // 落盘不整份序列化内存 config —— 先重读磁盘,只把 binder 拥有的字段
+    //(remote_control.bound_session_id / token)merge 进新鲜副本再写回,
+    // 避免 stale 内存快照覆盖别的写方(连接器钩子 / config PUT)刚持久化
+    // 的字段(如 saved_models 里的 api_key)。
+    with_config_lock([&] {
+        auto& rc_cfg = deps_.config->remote_control;
+        bool dirty = false;
+        if (rc_cfg.bound_session_id != bound_session_id) {
+            rc_cfg.bound_session_id = bound_session_id;
+            dirty = true;
+        }
+        if (!token.empty() && rc_cfg.token != token) {
+            rc_cfg.token = token;
+            dirty = true;
+        }
+        if (!dirty) return;
+        AppConfig disk =
+            deps_.load_disk_config ? deps_.load_disk_config() : load_config();
+        disk.remote_control.bound_session_id = rc_cfg.bound_session_id;
+        disk.remote_control.token = rc_cfg.token;
+        if (deps_.config_path.empty()) {
+            save_config(disk);
+        } else {
+            save_config(disk, deps_.config_path);
+        }
+    });
 }
 
 void SessionChannelBinder::ensure_keepalive_thread() {

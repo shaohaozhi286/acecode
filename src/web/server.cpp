@@ -115,4 +115,14 @@ void WebServer::refresh_saved_models_from_disk() {
     if (impl_) impl_->refresh_saved_models_from_disk();
 }
 
+void WebServer::with_app_config_lock(const std::function<void()>& fn) const {
+    if (!fn) return;
+    if (!impl_) {
+        fn();
+        return;
+    }
+    std::lock_guard<std::mutex> lock(impl_->app_config_mu);
+    fn();
+}
+
 } // namespace acecode::web

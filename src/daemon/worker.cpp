@@ -450,48 +450,6 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     const std::string config_path =
         acecode::path_to_utf8(acecode::path_from_utf8(acecode::get_acecode_dir()) / "config.json");
 
-    // ---- daemon 托管 remote control(/rc 绑定 Web 会话到 channel 插件)----
-    // 声明在 registry/client 之后(析构先于两者,退订时 AgentLoop 仍活着)。
-    // 行为契约见 session_channel_binder.hpp 文件头 ①-⑥。
-    acecode::rc::SessionChannelBinderDeps rc_binder_deps;
-    rc_binder_deps.service     = &acecode::rc::remote_control_service();
-    rc_binder_deps.client      = &client;
-    rc_binder_deps.config      = &cfg_mut;
-    rc_binder_deps.config_path = config_path;
-    rc_binder_deps.session_active = [&registry](const std::string& id) {
-        return registry.acquire(id) != nullptr;
-    };
-    rc_binder_deps.session_resumable = [&client](const std::string& id) {
-        // 常规 resume 失败后按 no-workspace 缓存目录兜底(与 HTTP resume
-        // 路由一致)—— 绑定的是「不使用工作区」会话时,默认 SessionOptions
-        // 会把 cwd 解析成 daemon 自身 cwd,重启重建永远找不到该会话。
-        return acecode::rc::resume_session_with_no_workspace_fallback(client, id);
-    };
-    acecode::rc::SessionChannelBinder rc_binder(std::move(rc_binder_deps));
-
-    // /rc 与 /remote-control:HTTP 命令网关放行后经 registry 的兜底处理器
-    // 到达 binder;执行结果同时以 system message 透出到该会话的聊天流
-    // (与 /lsp 的反馈方式一致)。
-    registry.set_external_command_handler(
-        [&rc_binder, &registry](const std::string& id,
-                                const acecode::BuiltinCommandRequest& request)
-            -> acecode::BuiltinCommandResult {
-            if (request.name != "rc" && request.name != "remote-control") {
-                return {acecode::BuiltinCommandStatus::UnsupportedCommand,
-                        "unsupported command"};
-            }
-            auto entry = registry.acquire(id);
-            if (!entry || !entry->loop) {
-                return {acecode::BuiltinCommandStatus::UnknownSession,
-                        "unknown session"};
-            }
-            auto outcome = rc_binder.execute_command(id, request.args);
-            entry->loop->emit_system_message(outcome.message);
-            return {outcome.ok ? acecode::BuiltinCommandStatus::Accepted
-                               : acecode::BuiltinCommandStatus::Failed,
-                    outcome.message};
-        });
-
     // 控制台 PTY 注册表(add-console-dock):启动期探测一次 backend,
     // 析构时 stop_all 杀掉全部 shell(栈对象,server.run() 返回后回收)。
     // 默认 shell:+ 旁下拉框选中的 default_shell(探测可用)→ 平台默认 → legacy
@@ -555,6 +513,60 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     web_deps.pty_registry       = &pty_registry;
 
     acecode::web::WebServer server(std::move(web_deps));
+
+    // ---- daemon 托管 remote control(/rc 绑定 Web 会话到 channel 插件)----
+    // 声明在 registry/client 之后(析构先于两者,退订时 AgentLoop 仍活着)、
+    // server 之后(注入其 app_config 锁;shutdown() 在 run() 返回后第一时间
+    // 显式调用,析构期不再触碰 server)。行为契约见
+    // session_channel_binder.hpp 文件头 ①-⑥。
+    acecode::rc::SessionChannelBinderDeps rc_binder_deps;
+    rc_binder_deps.service     = &acecode::rc::remote_control_service();
+    rc_binder_deps.client      = &client;
+    rc_binder_deps.config      = &cfg_mut;
+    rc_binder_deps.config_path = config_path;
+    // binder 与全部 HTTP 路由 / 连接器钩子刷新共用 WebServer 的 app_config
+    // 锁 —— cfg_mut 是全进程共享可变对象,binder 曾是唯一不持锁的读写方
+    //(Crow 线程上 /rc 与 config PUT / refresh_saved_models_from_disk 并发
+    // 即数据竞争 + config.json 交错写坏)。
+    rc_binder_deps.with_config_lock = [&server](const std::function<void()>& fn) {
+        server.with_app_config_lock(fn);
+    };
+    // persist 前 reload-merge 用的磁盘读取(与 auth_recovery 同款接线;
+    // config_path 即默认路径,读写同一份 config.json)。
+    rc_binder_deps.load_disk_config = []() { return acecode::load_config(); };
+    rc_binder_deps.session_active = [&registry](const std::string& id) {
+        return registry.acquire(id) != nullptr;
+    };
+    rc_binder_deps.session_resumable = [&client](const std::string& id) {
+        // 常规 resume 失败后按 no-workspace 缓存目录兜底(与 HTTP resume
+        // 路由一致)—— 绑定的是「不使用工作区」会话时,默认 SessionOptions
+        // 会把 cwd 解析成 daemon 自身 cwd,重启重建永远找不到该会话。
+        return acecode::rc::resume_session_with_no_workspace_fallback(client, id);
+    };
+    acecode::rc::SessionChannelBinder rc_binder(std::move(rc_binder_deps));
+
+    // /rc 与 /remote-control:HTTP 命令网关放行后经 registry 的兜底处理器
+    // 到达 binder;执行结果同时以 system message 透出到该会话的聊天流
+    // (与 /lsp 的反馈方式一致)。
+    registry.set_external_command_handler(
+        [&rc_binder, &registry](const std::string& id,
+                                const acecode::BuiltinCommandRequest& request)
+            -> acecode::BuiltinCommandResult {
+            if (request.name != "rc" && request.name != "remote-control") {
+                return {acecode::BuiltinCommandStatus::UnsupportedCommand,
+                        "unsupported command"};
+            }
+            auto entry = registry.acquire(id);
+            if (!entry || !entry->loop) {
+                return {acecode::BuiltinCommandStatus::UnknownSession,
+                        "unknown session"};
+            }
+            auto outcome = rc_binder.execute_command(id, request.args);
+            entry->loop->emit_system_message(outcome.message);
+            return {outcome.ok ? acecode::BuiltinCommandStatus::Accepted
+                               : acecode::BuiltinCommandStatus::Failed,
+                    outcome.message};
+        });
 
     // 连接器钩子恢复 key 后落盘 config.json;web server 内存里的 saved_models
     // 也要跟着重读,否则下一次任何 save_config 会把新写入的 api_key 抹掉。

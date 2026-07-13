@@ -135,6 +135,18 @@ struct SessionChannelBinderDeps {
     AppConfig*            config  = nullptr;  // 必填(remote_control 段读写)
     std::string           config_path;        // 空 = save_config 默认路径
 
+    // config 是 daemon 全进程共享的可变对象(HTTP 路由 / 连接器钩子都在
+    // 读写);binder 对它的所有读写必须放进这个回调里执行,由锁的 owner
+    //(WebServer::Impl::app_config_mu,经 WebServer::with_app_config_lock
+    // 注入)持锁调用 —— binder 不自己抓全局锁。空 = 直接执行(纯单测,
+    // 无并发写方)。回调内不得再进 binder 自己的 op_mu_/mu_。
+    std::function<void(const std::function<void()>&)> with_config_lock;
+
+    // persist 前 reload-merge 的磁盘读取(防 stale 内存快照整份覆盖掉别的
+    // 写方刚落盘的字段,如连接器钩子直写的 saved_models api_key)。
+    // 空 = acecode::load_config()(生产 config_path 即默认路径,读写同一份)。
+    std::function<AppConfig()> load_disk_config;
+
     // 会话存在性探测:active = 当前在内存 registry 中;resumable = 可从磁盘
     // 恢复进 registry(rebuild 用,恢复成功即视为存在)。
     std::function<bool(const std::string&)> session_active;
@@ -186,6 +198,9 @@ private:
     CommandOutcome bind_session(const std::string& session_id);
     CommandOutcome unbind_and_stop();
     std::string status_text() const;
+    // deps_.config 的读写统一走这里(deps_.with_config_lock 持锁执行;未注入
+    // 则直接执行)。锁序:op_mu_ > app_config_mu(本回调)>(不进)mu_。
+    void with_config_lock(const std::function<void()>& fn) const;
     void persist_binding(const std::string& bound_session_id,
                          const std::string& token);
     void ensure_keepalive_thread();

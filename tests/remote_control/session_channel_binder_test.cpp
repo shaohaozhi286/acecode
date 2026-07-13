@@ -666,6 +666,109 @@ TEST(SessionChannelBinderIntegration, NoWorkspaceSessionResumableAfterRestart) {
     hx.registry.destroy(sid);
 }
 
+// 回归:binder 对共享 AppConfig 的读写与 persist 落盘必须走注入的
+// with_config_lock(生产接线 = WebServer::Impl::app_config_mu)。修复前
+// binder 在 Crow HTTP 线程上裸读写 cfg_mut 并整份 save_config —— 与
+// config PUT / 连接器钩子并发即数据竞争 + config.json 交错写坏。
+TEST(SessionChannelBinderIntegration, PersistPathRunsUnderInjectedConfigLock) {
+    BinderHarness hx("lock-double");
+    auto deps = hx.binder_deps();
+
+    struct LockProbe {
+        std::atomic<int> uses{0};
+        std::atomic<int> depth{0};
+        std::atomic<int> reloads{0};
+        std::atomic<int> reloads_outside_lock{0};
+    };
+    auto probe = std::make_shared<LockProbe>();
+    deps.with_config_lock = [probe](const std::function<void()>& fn) {
+        probe->uses.fetch_add(1);
+        probe->depth.fetch_add(1);
+        fn();
+        probe->depth.fetch_sub(1);
+    };
+    deps.load_disk_config = [probe] {
+        probe->reloads.fetch_add(1);
+        if (probe->depth.load() <= 0) probe->reloads_outside_lock.fetch_add(1);
+        return acecode::AppConfig{};
+    };
+    acecode::rc::SessionChannelBinder binder(std::move(deps));
+
+    const auto s1 = hx.client.create_session({});
+    auto bind = binder.execute_command(s1, "");
+    ASSERT_TRUE(bind.ok) << bind.message;
+
+    // bind 期间的 config 读取 + persist 的 reload-merge-save 都在锁回调内。
+    EXPECT_GE(probe->uses.load(), 2);
+    EXPECT_GE(probe->reloads.load(), 1);
+    EXPECT_EQ(probe->reloads_outside_lock.load(), 0);
+    // 落盘的是 merge 后副本:binder 拥有的字段进了磁盘。
+    auto persisted = read_json_file(hx.config_path);
+    ASSERT_TRUE(persisted.is_object());
+    EXPECT_EQ(persisted["remote_control"]["bound_session_id"], s1);
+
+    binder.shutdown();
+    hx.registry.destroy(s1);
+}
+
+// 回归:persist_binding 不得用 stale 内存快照整份覆盖磁盘。场景:连接器
+// 钩子在 bind 与下一次 persist 之间把 api_key 直写 config.json(生产中
+// 钩子预算长达数分钟,重叠窗口真实存在);binder 的内存 config 不知情。
+// 修复前:第二次 persist 整份序列化内存 config → 磁盘上刚写入的
+// saved_models api_key 被抹掉。修复后:persist 先重读磁盘,只 merge
+// binder 拥有的 remote_control.bound_session_id / token,再落盘。
+TEST(SessionChannelBinderIntegration, PersistBindingDoesNotClobberOtherWritersDiskState) {
+    BinderHarness hx("clobber");
+    auto deps = hx.binder_deps();
+    // 镜像生产接线:落盘走默认路径(scoped HOME 下的 ~/.acecode/config.json),
+    // reload 兜底 acecode::load_config() 读的是同一份文件。
+    deps.config_path.clear();
+    acecode::rc::SessionChannelBinder binder(std::move(deps));
+
+    const auto s1 = hx.client.create_session({});
+    const auto s2 = hx.client.create_session({});
+    auto bind1 = binder.execute_command(s1, "");
+    ASSERT_TRUE(bind1.ok) << bind1.message;
+
+    // 另一写方(连接器钩子)把新 api_key 落盘;只写磁盘,不碰 binder 内存。
+    {
+        acecode::AppConfig other = acecode::load_config();
+        acecode::ModelProfile profile;
+        profile.name = "connector-managed";
+        profile.provider = "openai";
+        profile.base_url = "http://127.0.0.1:9/v1";
+        profile.api_key = "fresh-key-from-hook";
+        profile.model = "demo";
+        other.saved_models.push_back(profile);
+        acecode::save_config(other);
+    }
+
+    // 换绑触发第二次 persist —— 修复前这里会把磁盘上的 api_key 清掉。
+    auto bind2 = binder.execute_command(s2, "");
+    ASSERT_TRUE(bind2.ok) << bind2.message;
+
+    const std::string default_path =
+        (fs::path(acecode::get_acecode_dir()) / "config.json").string();
+    auto disk = read_json_file(default_path);
+    ASSERT_TRUE(disk.is_object());
+    EXPECT_EQ(disk["remote_control"]["bound_session_id"], s2);
+    ASSERT_TRUE(disk.contains("saved_models") && disk["saved_models"].is_array());
+    bool preserved = false;
+    for (const auto& m : disk["saved_models"]) {
+        if (m.value("name", "") == "connector-managed" &&
+            m.value("api_key", "") == "fresh-key-from-hook") {
+            preserved = true;
+        }
+    }
+    EXPECT_TRUE(preserved)
+        << "another writer's on-disk saved_models entry was clobbered by "
+           "persist_binding: " << disk.dump(2);
+
+    binder.shutdown();
+    hx.registry.destroy(s1);
+    hx.registry.destroy(s2);
+}
+
 // 回归:rebuild_from_config 对 no_workspace 绑定会话的完整重启重建链路
 //(harness 的 session_resumable 与 worker.cpp 生产接线一致)。
 // 期望:服务拉起 + 绑定恢复为原会话 + 激活请求携带原会话 id。
