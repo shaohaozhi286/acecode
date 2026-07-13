@@ -47,6 +47,14 @@ std::string no_workspace_session_cwd(const std::string& session_id,
                                      const std::string& cache_root = {});
 std::vector<std::string> list_no_workspace_session_cwds(const std::string& cache_root = {});
 
+// no-workspace 会话的兜底 meta 查找:先按 id 推导的直连缓存目录读 meta,
+// 未命中再枚举缓存根下全部会话目录逐个尝试;只认 meta.no_workspace 的命中。
+// 这类会话的 meta 落在 cache/no-workspace/<id>/ 对应的项目目录下,按调用方
+// cwd 的常规 workspace 解析永远找不到 —— web resume 路由与 remote-control
+// binder 的启动重建共用这一份兜底。
+std::optional<SessionMeta> find_no_workspace_session_meta(const std::string& id,
+                                                          const std::string& cache_root = {});
+
 // SessionEntry: 一个 session 的所有 per-session 状态。所有指针成员都是
 // unique_ptr,SessionEntry 析构时按相反顺序销毁(AgentLoop 先 shutdown
 // worker thread,再销毁 prompter,再销毁 SessionManager)。

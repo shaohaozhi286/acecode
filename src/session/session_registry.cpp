@@ -654,6 +654,23 @@ std::vector<std::string> list_no_workspace_session_cwds(const std::string& cache
     return out;
 }
 
+std::optional<SessionMeta> find_no_workspace_session_meta(const std::string& id,
+                                                          const std::string& cache_root) {
+    if (id.empty()) return std::nullopt;
+    const auto direct_cwd = no_workspace_session_cwd(id, cache_root);
+    auto direct_meta = SessionStorage::read_meta(
+        SessionStorage::meta_path(SessionStorage::get_project_dir(direct_cwd), id));
+    if (!direct_meta.id.empty() && direct_meta.no_workspace) return direct_meta;
+
+    for (const auto& cwd : list_no_workspace_session_cwds(cache_root)) {
+        if (cwd == direct_cwd) continue;
+        auto meta = SessionStorage::read_meta(
+            SessionStorage::meta_path(SessionStorage::get_project_dir(cwd), id));
+        if (!meta.id.empty() && meta.no_workspace) return meta;
+    }
+    return std::nullopt;
+}
+
 SessionRegistry::SessionRegistry(SessionRegistryDeps deps)
     : deps_(std::move(deps)) {}
 

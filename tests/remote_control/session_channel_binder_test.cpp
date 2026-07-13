@@ -417,7 +417,8 @@ struct BinderHarness {
             return registry.acquire(id) != nullptr;
         };
         d.session_resumable = [this](const std::string& id) {
-            return client.resume_session(id);
+            // 与 worker.cpp 的生产接线一致:常规 resume + no-workspace 兜底。
+            return acecode::rc::resume_session_with_no_workspace_fallback(client, id);
         };
         d.plugin_runner = make_fake_runner(runner_log, outbound_url);
         return d;
@@ -624,4 +625,76 @@ TEST(SessionChannelBinderIntegration, RebuildFromConfigRestoresBinding) {
     }
 
     hx.registry.destroy(s1);
+}
+
+// 回归:no_workspace 会话在 daemon 重启后的 resumable 探测。
+// 触发场景:/rc 绑定的是「不使用工作区」会话,daemon 重启后启动重建按
+// bound_session_id 探测该会话能否从磁盘恢复。
+// bug 表现(修复前):探测只调 resume_session(id) 默认 SessionOptions,
+// with_resolved_workspace 把 cwd 解析成 daemon 自身 cwd,而 no_workspace
+// 会话的 meta 落在 cache/no-workspace/<id>/ 对应的项目目录下,永远 miss →
+// 日志 "bound session <id> not found; skipping channel binding rebuild",
+// 需要手动重跑 /rc 才能恢复绑定。
+TEST(SessionChannelBinderIntegration, NoWorkspaceSessionResumableAfterRestart) {
+    BinderHarness hx("no-ws-resume");
+    acecode::SessionOptions no_ws;
+    no_ws.no_workspace = true;
+    const auto sid = hx.client.create_session(no_ws);
+    ASSERT_FALSE(sid.empty());
+    {
+        // meta 是首次落盘才写的(lazy);真实场景绑定过 /rc 的会话必然有过
+        // 落盘,这里用 ensure_active_session_id 强制写出 initial meta。
+        auto* entry = hx.registry.lookup(sid);
+        ASSERT_NE(entry, nullptr);
+        ASSERT_EQ(entry->sm->ensure_active_session_id(), sid);
+    }
+    // 模拟 daemon 重启:内存 registry 清空,磁盘数据保留。
+    hx.registry.destroy(sid);
+    ASSERT_EQ(hx.registry.lookup(sid), nullptr);
+
+    // 常规 resume(默认 SessionOptions)找不到 no_workspace 会话 —— 这条
+    // 断言钉住 bug 的直接根因;若未来常规 resume 自己学会兜底,这里会失败,
+    // 提醒同步简化 resume_session_with_no_workspace_fallback。
+    EXPECT_FALSE(hx.client.resume_session(sid));
+
+    // 兜底探测应命中缓存目录里的 meta 并以 no_workspace 选项恢复会话。
+    EXPECT_TRUE(acecode::rc::resume_session_with_no_workspace_fallback(hx.client, sid));
+    auto* resumed = hx.registry.lookup(sid);
+    ASSERT_NE(resumed, nullptr);
+    EXPECT_TRUE(resumed->no_workspace);
+
+    hx.registry.destroy(sid);
+}
+
+// 回归:rebuild_from_config 对 no_workspace 绑定会话的完整重启重建链路
+//(harness 的 session_resumable 与 worker.cpp 生产接线一致)。
+// 期望:服务拉起 + 绑定恢复为原会话 + 激活请求携带原会话 id。
+// 修复前:session_resumable 返回 false → should_rebuild_binding 不成立 →
+// WARN 跳过,服务不启动、绑定为空(配置不脏写,但远程通道静默失联)。
+TEST(SessionChannelBinderIntegration, RebuildFromConfigRestoresNoWorkspaceBinding) {
+    BinderHarness hx("rebuild-no-ws");
+    acecode::SessionOptions no_ws;
+    no_ws.no_workspace = true;
+    const auto sid = hx.client.create_session(no_ws);
+    ASSERT_FALSE(sid.empty());
+    {
+        auto* entry = hx.registry.lookup(sid);
+        ASSERT_NE(entry, nullptr);
+        ASSERT_EQ(entry->sm->ensure_active_session_id(), sid);
+    }
+    hx.cfg.remote_control.bound_session_id = sid;
+    // 模拟 daemon 重启:会话只剩磁盘数据,重建全靠 resumable 探测。
+    hx.registry.destroy(sid);
+
+    acecode::rc::SessionChannelBinder binder(hx.binder_deps());
+    binder.rebuild_from_config();
+    EXPECT_TRUE(hx.service.running());
+    EXPECT_EQ(binder.bound_session_id(), sid);
+    ASSERT_TRUE(hx.runner_log->wait_for_activations(1, std::chrono::seconds(5)));
+    {
+        std::lock_guard<std::mutex> lk(hx.runner_log->mu);
+        EXPECT_EQ(hx.runner_log->activations.at(0)["session_id"], sid);
+    }
+    binder.shutdown();
+    hx.registry.destroy(sid);
 }

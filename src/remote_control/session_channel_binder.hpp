@@ -70,6 +70,16 @@ private:
 // 启动重建条件(spec §五-3):bound_session_id 非空且该会话存在。
 bool should_rebuild_binding(const std::string& bound_session_id, bool session_exists);
 
+// worker 给 SessionChannelBinderDeps::session_resumable 的标准接线:常规
+// resume(默认 SessionOptions,按 daemon cwd 解析 workspace)失败后,按
+// no-workspace 缓存目录兜底查 meta,命中则以 no_workspace 选项重试。
+// 不兜底时,绑定 no_workspace 会话的 daemon 重启后启动重建必然失败
+//(meta 在 cache/no-workspace/<id>/ 对应项目目录下,常规解析永远 miss,
+// 日志报 "bound session not found; skipping channel binding rebuild")。
+bool resume_session_with_no_workspace_fallback(SessionClient& client,
+                                               const std::string& id,
+                                               const std::string& cache_root = {});
+
 // ---- 纯逻辑:daemon 会话事件 → 出站动作 ----
 //
 // Message(role=assistant 且非工具、非空白)→ AssistantText;ToolStart →

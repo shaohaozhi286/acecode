@@ -1,5 +1,6 @@
 #include "session_channel_binder.hpp"
 
+#include "session/session_registry.hpp"
 #include "utils/logger.hpp"
 
 #include <cctype>
@@ -46,6 +47,19 @@ bool ChannelBindingState::accepts(const std::string& session_id,
 
 bool should_rebuild_binding(const std::string& bound_session_id, bool session_exists) {
     return !bound_session_id.empty() && session_exists;
+}
+
+bool resume_session_with_no_workspace_fallback(SessionClient& client,
+                                               const std::string& id,
+                                               const std::string& cache_root) {
+    if (client.resume_session(id)) return true;
+    auto meta = find_no_workspace_session_meta(id, cache_root);
+    if (!meta) return false;
+    SessionOptions opts;
+    opts.no_workspace = true;
+    // meta.cwd 是创建时落盘的缓存 cwd;为空让 registry 按 id 重新推导。
+    opts.cwd = meta->cwd;
+    return client.resume_session(id, opts);
 }
 
 // ---------- classify_session_event ----------

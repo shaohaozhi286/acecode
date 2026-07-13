@@ -462,7 +462,10 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
         return registry.acquire(id) != nullptr;
     };
     rc_binder_deps.session_resumable = [&client](const std::string& id) {
-        return client.resume_session(id);
+        // 常规 resume 失败后按 no-workspace 缓存目录兜底(与 HTTP resume
+        // 路由一致)—— 绑定的是「不使用工作区」会话时,默认 SessionOptions
+        // 会把 cwd 解析成 daemon 自身 cwd,重启重建永远找不到该会话。
+        return acecode::rc::resume_session_with_no_workspace_fallback(client, id);
     };
     acecode::rc::SessionChannelBinder rc_binder(std::move(rc_binder_deps));
 
