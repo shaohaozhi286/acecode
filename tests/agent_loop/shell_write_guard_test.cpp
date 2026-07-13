@@ -59,6 +59,8 @@ TEST(ShellWriteGuard, LoopYoloAllowsExternalReadsAndInternalWrites) {
         "Copy-Item C:/external/input.txt ./copy.txt", cwd).empty());
     EXPECT_TRUE(loop_shell_write_escape_reason(
         "mkdir generated", cwd).empty());
+    EXPECT_TRUE(loop_shell_write_escape_reason(
+        "Set-Content -Path C:/repo/worktree/generated.txt -Value hello", cwd).empty());
 }
 
 TEST(ShellWriteGuard, LoopYoloBlocksExternalAndDynamicWriteTargets) {

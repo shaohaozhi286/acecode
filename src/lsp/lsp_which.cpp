@@ -103,17 +103,16 @@ bool real_file_exists_executable(const std::string& utf8_path) {
     return true;
 }
 
-std::string join_dir(const std::string& dir, const std::string& name) {
+std::string join_dir(const std::string& dir,
+                     const std::string& name,
+                     bool windows_semantics) {
     if (dir.empty()) return name;
     const char back = dir.back();
     if (back == '/' || back == '\\') return dir + name;
     // 跟随目录自身的分隔符风格(PATH 里两种都可能出现),避免拼出混合样式。
+    if (dir.find('\\') != std::string::npos) return dir + "\\" + name;
     if (dir.find('/') != std::string::npos) return dir + "/" + name;
-#ifdef _WIN32
-    return dir + "\\" + name;
-#else
-    return dir + "/" + name;
-#endif
+    return dir + (windows_semantics ? "\\" : "/") + name;
 }
 
 } // namespace
@@ -134,7 +133,7 @@ std::optional<std::string> which_in(const std::string& command,
 
     for (const auto& dir : path_dirs) {
         for (const auto& name : names) {
-            const std::string full = join_dir(dir, name);
+            const std::string full = join_dir(dir, name, !pathext.empty());
             if (file_exists(full)) return full;
         }
     }

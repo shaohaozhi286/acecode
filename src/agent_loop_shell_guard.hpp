@@ -130,6 +130,54 @@ inline bool shell_target_is_dynamic(const std::string& value) {
            value.find('?') != std::string::npos;
 }
 
+inline bool shell_target_is_windows_absolute(const std::string& value) {
+    return value.size() >= 3 &&
+           std::isalpha(static_cast<unsigned char>(value[0])) &&
+           value[1] == ':' && (value[2] == '/' || value[2] == '\\');
+}
+
+inline std::string normalize_windows_absolute_for_compare(std::string value) {
+    value = shell_guard_detail::normalize_path_for_command_match(std::move(value));
+    std::vector<std::string> segments;
+    std::size_t pos = 0;
+    while (pos <= value.size()) {
+        std::size_t next = value.find('/', pos);
+        if (next == std::string::npos) next = value.size();
+        std::string segment = value.substr(pos, next - pos);
+        if (segment == "..") {
+            if (segments.size() > 1) segments.pop_back();
+        } else if (!segment.empty() && segment != ".") {
+            segments.push_back(std::move(segment));
+        }
+        pos = next + 1;
+    }
+    std::string normalized;
+    for (const auto& segment : segments) {
+        if (!normalized.empty()) normalized.push_back('/');
+        normalized += segment;
+    }
+    return normalized;
+}
+
+inline bool windows_absolute_is_inside(const std::string& target,
+                                       const std::string& working_dir) {
+    if (!shell_target_is_windows_absolute(target) ||
+        !shell_target_is_windows_absolute(working_dir)) {
+        return false;
+    }
+    const std::string normalized_target =
+        normalize_windows_absolute_for_compare(target);
+    std::string normalized_root =
+        normalize_windows_absolute_for_compare(working_dir);
+    while (!normalized_root.empty() && normalized_root.back() == '/') {
+        normalized_root.pop_back();
+    }
+    return normalized_target == normalized_root ||
+           (normalized_target.size() > normalized_root.size() &&
+            normalized_target.compare(0, normalized_root.size(), normalized_root) == 0 &&
+            normalized_target[normalized_root.size()] == '/');
+}
+
 // LOOP Yolo is not a process sandbox, but explicit shell write targets must
 // remain inside the active workspace/worktree root. This helper extracts the
 // common redirection/cmdlet/copy destinations that command_looks_like_file_write
@@ -248,6 +296,16 @@ inline std::string loop_shell_write_escape_reason(const std::string& command,
         target = trim_shell_target(std::move(target));
         if (shell_target_is_dynamic(target)) {
             return "LOOP Yolo blocked a dynamic shell write destination: " + target;
+        }
+        // std::filesystem follows the host OS. On Linux, a Windows absolute
+        // path such as C:/outside is otherwise treated as relative and may be
+        // incorrectly joined under the work root. Compare Windows paths
+        // lexically so PowerShell/pwsh commands remain guarded on every host.
+        if (shell_target_is_windows_absolute(target)) {
+            if (!windows_absolute_is_inside(target, working_dir)) {
+                return "LOOP Yolo blocked an external shell write: " + target;
+            }
+            continue;
         }
         const std::string rejection = validator.validate(target);
         if (!rejection.empty()) {
