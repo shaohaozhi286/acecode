@@ -103,7 +103,17 @@ void WebServer::Impl::register_loops() {
         auto loops = deps.loop_store->list_loops(&error);
         if (!error.code.empty()) return json_response(req, 503, store_error_json(error));
         json items = json::array();
-        for (const auto& loop : loops) items.push_back(acecode::loop::loop_to_json(loop));
+        for (const auto& loop : loops) {
+            auto item = acecode::loop::loop_to_json(loop);
+            auto latest_runs = deps.loop_store->list_runs(loop.id, 1, &error);
+            if (!error.code.empty()) {
+                return json_response(req, 503, store_error_json(error));
+            }
+            item["latest_run"] = latest_runs.empty()
+                ? json(nullptr)
+                : acecode::loop::run_to_json(latest_runs.front());
+            items.push_back(std::move(item));
+        }
         return json_response(req, 200, {{"loops", std::move(items)}});
     });
 

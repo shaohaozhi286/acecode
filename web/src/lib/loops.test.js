@@ -29,6 +29,10 @@ assert.equal(Object.hasOwn(payload, 'schedule_expr'), false);
 assert.equal(loopScheduleLabel({ kind: 'period', period: 'workdays', hour: 9, minute: 5 }), '工作日 09:05');
 assert.match(loopScheduleLabel({ kind: 'interval', interval_value: 2, interval_unit: 'hours' }), /每 2 小时/);
 assert.match(loopRunPresentation({ status: 'missed', reason: 'workspace_busy' }).reason, /不会补跑/);
+assert.deepEqual(loopRunPresentation({ status: 'running' }), {
+  label: '执行中', reason: '', tone: 'active',
+});
+assert.equal(loopRunPresentation({ status: 'waiting_user' }).label, '等待用户');
 const weekly = loopFormForTemplate(LOOP_TEMPLATES[2], 'model-a', Date.UTC(2026, 6, 13));
 assert.equal(weekly.period, 'weekly');
 assert.deepEqual(weekly.weekdays, [5]);
