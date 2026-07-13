@@ -82,16 +82,22 @@ bool resume_session_with_no_workspace_fallback(SessionClient& client,
 
 // ---- 纯逻辑:daemon 会话事件 → 出站动作 ----
 //
-// Message(role=assistant 且非工具、非空白)→ AssistantText;ToolStart →
-// ToolCall;其余(Token 流式增量 / ToolUpdate / Busy...)一律 None ——
-// 流式期间的半截文本不出站,与 TUI "回合结束才转发" 的粒度一致
-// (AgentLoop 在文本回合结束 / 工具回合开始时各 emit 一条权威 Message)。
+// IM 通道出站分类(自聊场景专用精简策略):
+//   - Message(role=assistant 且非工具、非空白)→ AssistantText(全文回传)。
+//   - ToolStart → 一律不出站(None),唯一例外 task_complete:输出其 args.summary
+//     全文(作为 AssistantText,不是 "[工具] …" 摘要)。
+//   - Error → AssistantText,reason 按字符截断到 300。
+//   - 其余(Token 流式增量 / Reasoning / ToolUpdate / Busy / Done...)→ None。
+//     其中"本轮首个 Token → 一次'思考中...'"是有状态逻辑,不在此纯函数里,
+//     由绑定监听器持 thinking_hint_sent_ 处理。
+// ToolCall 枚举值与 tool_name/args 字段现已不再由本函数产出(工具全部抑制或
+// 转成 AssistantText),保留仅为兼容既有出站 plumbing。
 struct OutboundEventAction {
     enum class Kind { None, AssistantText, ToolCall };
     Kind kind = Kind::None;
     std::string text;       // AssistantText
-    std::string tool_name;  // ToolCall
-    nlohmann::json args;    // ToolCall(缺省空 object)
+    std::string tool_name;  // ToolCall(已弃用)
+    nlohmann::json args;    // ToolCall(已弃用,缺省空 object)
 };
 
 OutboundEventAction classify_session_event(SessionEventKind kind,
@@ -222,6 +228,9 @@ private:
     bool reactivate_now_ = false;
     bool stop_requested_ = false;
     bool shut_down_ = false;
+    // "思考中..." 每轮只发一次:本轮已发标志。首个 Token 置 true,Done 复位。
+    // bind/rebind 时复位。mu_ 守护。
+    bool thinking_hint_sent_ = false;
     std::thread keepalive_thread_;
 };
 

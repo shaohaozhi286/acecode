@@ -14,7 +14,10 @@
 
 #include "remote_control/session_channel_binder.hpp"
 
+#include <algorithm>
 #include <chrono>
+#include <string>
+#include <vector>
 
 using namespace std::chrono_literals;
 using acecode::SessionEventKind;
@@ -127,34 +130,89 @@ TEST(ClassifySessionEvent, IgnoresToolAndBlankAssistantMessages) {
     EXPECT_EQ(missing.kind, OutboundEventAction::Kind::None);
 }
 
-TEST(ClassifySessionEvent, ToolStartMapsToToolCall) {
+// 需求④:普通工具调用一律抑制(不出站)。
+TEST(ClassifySessionEvent, RegularToolStartSuppressed) {
     const auto action = classify_session_event(
         SessionEventKind::ToolStart,
         {{"tool", "bash"},
          {"args", {{"command", "git status"}}},
-         {"command_preview", "git status"}});
-    EXPECT_EQ(action.kind, OutboundEventAction::Kind::ToolCall);
-    EXPECT_EQ(action.tool_name, "bash");
-    ASSERT_TRUE(action.args.is_object());
-    EXPECT_EQ(action.args["command"], "git status");
+         {"command_preview", "git status"},
+         {"is_task_complete", false}});
+    EXPECT_EQ(action.kind, OutboundEventAction::Kind::None);
+
+    // 缺 is_task_complete 字段的普通工具同样抑制。
+    const auto no_flag = classify_session_event(
+        SessionEventKind::ToolStart, nlohmann::json{{"tool", "bash"}});
+    EXPECT_EQ(no_flag.kind, OutboundEventAction::Kind::None);
+
+    const auto empty = classify_session_event(
+        SessionEventKind::ToolStart, nlohmann::json::object());
+    EXPECT_EQ(empty.kind, OutboundEventAction::Kind::None);
 }
 
-TEST(ClassifySessionEvent, ToolStartWithoutArgsStillForwards) {
-    const auto action = classify_session_event(
-        SessionEventKind::ToolStart, nlohmann::json{{"tool", "bash"}});
-    EXPECT_EQ(action.kind, OutboundEventAction::Kind::ToolCall);
-    EXPECT_EQ(action.tool_name, "bash");
+// 需求④:task_complete → 输出 args.summary 全文(作为 AssistantText)。
+TEST(ClassifySessionEvent, TaskCompleteForwardsSummaryFullText) {
+    const std::string summary = "已完成:改了 3 个文件并跑通全部测试。";
+    // is_task_complete 布尔命中。
+    const auto by_flag = classify_session_event(
+        SessionEventKind::ToolStart,
+        {{"tool", "task_complete"},
+         {"is_task_complete", true},
+         {"args", {{"summary", summary}}}});
+    EXPECT_EQ(by_flag.kind, OutboundEventAction::Kind::AssistantText);
+    EXPECT_EQ(by_flag.text, summary);
 
-    const auto no_tool = classify_session_event(
-        SessionEventKind::ToolStart, nlohmann::json::object());
-    EXPECT_EQ(no_tool.kind, OutboundEventAction::Kind::None);
+    // 仅靠 tool 名命中(无 is_task_complete 字段)也应识别。
+    const auto by_name = classify_session_event(
+        SessionEventKind::ToolStart,
+        {{"tool", "task_complete"}, {"args", {{"summary", summary}}}});
+    EXPECT_EQ(by_name.kind, OutboundEventAction::Kind::AssistantText);
+    EXPECT_EQ(by_name.text, summary);
+
+    // task_complete 但 summary 缺失/空白 → 不出站。
+    const auto no_summary = classify_session_event(
+        SessionEventKind::ToolStart,
+        {{"tool", "task_complete"}, {"is_task_complete", true}, {"args", nlohmann::json::object()}});
+    EXPECT_EQ(no_summary.kind, OutboundEventAction::Kind::None);
+}
+
+// 需求①:Error → reason 原样回传,按字符(码点)截断到 300。
+TEST(ClassifySessionEvent, ErrorForwardsReasonTruncatedTo300Codepoints) {
+    const auto short_err = classify_session_event(
+        SessionEventKind::Error, {{"reason", "模型返回 400:鉴权失效"}});
+    EXPECT_EQ(short_err.kind, OutboundEventAction::Kind::AssistantText);
+    EXPECT_EQ(short_err.text, "模型返回 400:鉴权失效");
+
+    // 350 个中文字符 → 截到 300 字符(码点),不加省略号。
+    std::string long_reason;
+    for (int i = 0; i < 350; ++i) long_reason += "错";
+    const auto truncated = classify_session_event(
+        SessionEventKind::Error, {{"reason", long_reason}});
+    ASSERT_EQ(truncated.kind, OutboundEventAction::Kind::AssistantText);
+    // 每个"错"是 3 字节;300 码点 = 900 字节。
+    EXPECT_EQ(truncated.text.size(), 900u);
+    std::string expected300;
+    for (int i = 0; i < 300; ++i) expected300 += "错";
+    EXPECT_EQ(truncated.text, expected300);
+
+    // 恰好 300 不截。
+    const auto exact = classify_session_event(
+        SessionEventKind::Error, {{"reason", expected300}});
+    EXPECT_EQ(exact.text, expected300);
+
+    // 空白 reason 不出站。
+    const auto blank = classify_session_event(
+        SessionEventKind::Error, {{"reason", "   "}});
+    EXPECT_EQ(blank.kind, OutboundEventAction::Kind::None);
 }
 
 TEST(ClassifySessionEvent, OtherEventKindsAreIgnored) {
+    // Token/Done 由监听器有状态处理(思考中/复位),纯函数一律 None;Error 与
+    // ToolStart 有各自出站规则,不在此列。
     for (auto kind : {SessionEventKind::Token, SessionEventKind::Reasoning,
                       SessionEventKind::ToolUpdate, SessionEventKind::ToolEnd,
                       SessionEventKind::BusyChanged, SessionEventKind::Done,
-                      SessionEventKind::Usage, SessionEventKind::Error}) {
+                      SessionEventKind::Usage}) {
         const auto action = classify_session_event(
             kind, {{"role", "assistant"}, {"content", "x"}, {"tool", "bash"}});
         EXPECT_EQ(action.kind, OutboundEventAction::Kind::None);
@@ -437,7 +495,32 @@ struct BinderHarness {
         ASSERT_NE(entry, nullptr);
         entry->loop->events().emit(
             acecode::SessionEventKind::ToolStart,
-            {{"tool", tool}, {"args", {{"command", "echo hi"}}}});
+            {{"tool", tool}, {"args", {{"command", "echo hi"}}},
+             {"is_task_complete", false}});
+    }
+
+    void emit_token(const std::string& id, const std::string& text) {
+        auto* entry = registry.lookup(id);
+        ASSERT_NE(entry, nullptr);
+        entry->loop->events().emit(acecode::SessionEventKind::Token,
+                                   {{"text", text}});
+    }
+
+    void emit_done(const std::string& id) {
+        auto* entry = registry.lookup(id);
+        ASSERT_NE(entry, nullptr);
+        entry->loop->events().emit(acecode::SessionEventKind::Done,
+                                   nlohmann::json::object());
+    }
+
+    void emit_task_complete(const std::string& id, const std::string& summary) {
+        auto* entry = registry.lookup(id);
+        ASSERT_NE(entry, nullptr);
+        entry->loop->events().emit(
+            acecode::SessionEventKind::ToolStart,
+            {{"tool", "task_complete"},
+             {"is_task_complete", true},
+             {"args", {{"summary", summary}}}});
     }
 };
 
@@ -476,28 +559,41 @@ TEST(SessionChannelBinderIntegration, BindRebindOffLifecycle) {
                   std::string::npos);
     }
 
-    // ④ 出站:绑定会话的 assistant 文本 / 工具调用出站;先换成捕获 sender
-    //(激活返回的 webhook url 不可达,直接投递只会计失败)。
+    // ④ 出站:绑定会话的 assistant 文本出站,工具调用一律被抑制(需求④)。
+    //    先换成捕获 sender(激活返回的 webhook url 不可达)。绑定确认消息
+    //    (需求②)可能在换 sender 前已投给不可达 webhook,故按内容断言、不假设
+    //    精确条数。
+    auto has_text = [](const std::vector<acecode::rc::OutboundMessage>& v,
+                       const std::string& t) {
+        for (const auto& m : v) if (m.text == t) return true;
+        return false;
+    };
+    auto has_tool_call = [](const std::vector<acecode::rc::OutboundMessage>& v) {
+        for (const auto& m : v) if (m.type == "tool_call") return true;
+        return false;
+    };
+    auto wait_until = [](auto pred, std::chrono::milliseconds timeout) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (pred()) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        return pred();
+    };
+
     auto sender1 = std::make_shared<CaptureSender>();
     hx.service.hub().set_outbound_sender(sender1);
     hx.emit_assistant(s1, "bound reply");
-    hx.emit_tool_start(s1, "bash");
-    ASSERT_TRUE(sender1->wait_for_count(2, std::chrono::seconds(5)));
-    {
-        auto sent = sender1->sent();
-        ASSERT_EQ(sent.size(), 2u);
-        EXPECT_EQ(sent[0].type, "assistant_message");
-        EXPECT_EQ(sent[0].session_id, s1);
-        EXPECT_EQ(sent[0].text, "bound reply");
-        EXPECT_EQ(sent[1].type, "tool_call");
-        EXPECT_EQ(sent[1].session_id, s1);
-        EXPECT_EQ(sent[1].tool_name, "bash");
-    }
+    hx.emit_tool_start(s1, "bash");  // 抑制:不产生出站
+    ASSERT_TRUE(wait_until([&] { return has_text(sender1->sent(), "bound reply"); },
+                           std::chrono::seconds(5)));
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    EXPECT_FALSE(has_tool_call(sender1->sent()));  // 工具调用被抑制
 
     // ④ 反向:未绑定会话 s2 的事件绝不出站。
     hx.emit_assistant(s2, "must not leak");
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
-    EXPECT_EQ(sender1->sent().size(), 2u);
+    EXPECT_FALSE(has_text(sender1->sent(), "must not leak"));
 
     // ③ 入站:channel 文本 → 绑定会话的提交路径(AgentLoop 收到该 user 输入)。
     {
@@ -541,14 +637,10 @@ TEST(SessionChannelBinderIntegration, BindRebindOffLifecycle) {
     hx.service.hub().set_outbound_sender(sender2);
     hx.emit_assistant(s1, "stale session leak");
     hx.emit_assistant(s2, "rebound reply");
-    ASSERT_TRUE(sender2->wait_for_count(1, std::chrono::seconds(5)));
+    ASSERT_TRUE(wait_until([&] { return has_text(sender2->sent(), "rebound reply"); },
+                           std::chrono::seconds(5)));
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
-    {
-        auto sent = sender2->sent();
-        ASSERT_EQ(sent.size(), 1u);
-        EXPECT_EQ(sent[0].session_id, s2);
-        EXPECT_EQ(sent[0].text, "rebound reply");
-    }
+    EXPECT_FALSE(has_text(sender2->sent(), "stale session leak"));
 
     // off:解绑 + 停服务 + 清持久化 + 插件收到 deactivate。
     auto off = binder.execute_command(s2, "off");
@@ -564,6 +656,75 @@ TEST(SessionChannelBinderIntegration, BindRebindOffLifecycle) {
 
     hx.registry.destroy(s1);
     hx.registry.destroy(s2);
+}
+
+// 需求③④:本轮首个 Token → 一次"思考中...",同轮不重复,Done 后新轮再触发;
+// task_complete → 输出 summary 全文;普通工具抑制。
+TEST(SessionChannelBinderIntegration, ThinkingHintAndTaskCompleteOutbound) {
+    BinderHarness hx("thinking");
+    acecode::rc::SessionChannelBinder binder(hx.binder_deps());
+
+    const auto s1 = hx.client.create_session({});
+    auto bind1 = binder.execute_command(s1, "");
+    ASSERT_TRUE(bind1.ok) << bind1.message;
+
+    auto sender = std::make_shared<CaptureSender>();
+    hx.service.hub().set_outbound_sender(sender);
+
+    auto texts = [&] {
+        std::vector<std::string> out;
+        for (const auto& m : sender->sent()) out.push_back(m.text);
+        return out;
+    };
+    auto count_text = [&](const std::string& t) {
+        int n = 0;
+        for (const auto& m : sender->sent()) if (m.text == t) ++n;
+        return n;
+    };
+    auto wait_until = [](auto pred, std::chrono::milliseconds timeout) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (pred()) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        return pred();
+    };
+
+    // 第 1 轮:首个 Token → "思考中...";同轮第二个 Token 不重复。
+    hx.emit_token(s1, "你");
+    ASSERT_TRUE(wait_until([&] { return count_text("思考中...") == 1; },
+                           std::chrono::seconds(5)));
+    hx.emit_token(s1, "好");
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    EXPECT_EQ(count_text("思考中..."), 1);  // 同轮不重复
+
+    // 助手全文正常出站。
+    hx.emit_assistant(s1, "你好，我在。");
+    ASSERT_TRUE(wait_until([&] {
+        auto v = texts();
+        return std::find(v.begin(), v.end(), "你好，我在。") != v.end();
+    }, std::chrono::seconds(5)));
+
+    // task_complete → summary 全文出站;普通工具抑制。
+    hx.emit_tool_start(s1, "bash");  // 抑制
+    hx.emit_task_complete(s1, "已完成:回答了问候。");
+    ASSERT_TRUE(wait_until([&] {
+        auto v = texts();
+        return std::find(v.begin(), v.end(), "已完成:回答了问候。") != v.end();
+    }, std::chrono::seconds(5)));
+    for (const auto& m : sender->sent()) {
+        EXPECT_NE(m.type, "tool_call");  // 全程无 tool_call 出站
+    }
+
+    // Done 复位 → 下一轮首个 Token 再次"思考中..."。
+    hx.emit_done(s1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    hx.emit_token(s1, "第");
+    ASSERT_TRUE(wait_until([&] { return count_text("思考中...") == 2; },
+                           std::chrono::seconds(5)));
+
+    binder.execute_command(s1, "off");
+    hx.registry.destroy(s1);
 }
 
 TEST(SessionChannelBinderIntegration, ConsecutiveOutboundFailuresTriggerReactivation) {

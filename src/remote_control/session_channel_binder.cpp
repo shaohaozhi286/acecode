@@ -64,6 +64,25 @@ bool resume_session_with_no_workspace_fallback(SessionClient& client,
 
 // ---------- classify_session_event ----------
 
+namespace {
+
+// 按 Unicode 码点(而非字节)截断到 max_cp;不足则原样返回,不加任何后缀
+//(需求:错误"原样"回传、"不超过 300 字")。UTF-8 续字节 0b10xxxxxx 不计入
+// 码点数,故中文按"字"计。
+std::string truncate_codepoints(const std::string& src, std::size_t max_cp) {
+    std::size_t cp = 0;
+    for (std::size_t i = 0; i < src.size();) {
+        const unsigned char b = static_cast<unsigned char>(src[i]);
+        if ((b & 0xC0) == 0x80) { ++i; continue; }  // 续字节:不是新码点起点
+        if (cp == max_cp) return src.substr(0, i);
+        ++cp;
+        ++i;
+    }
+    return src;
+}
+
+}  // namespace
+
 OutboundEventAction classify_session_event(SessionEventKind kind,
                                            const nlohmann::json& payload) {
     OutboundEventAction action;
@@ -81,11 +100,29 @@ OutboundEventAction classify_session_event(SessionEventKind kind,
     }
 
     if (kind == SessionEventKind::ToolStart) {
-        if (!payload.contains("tool") || !payload["tool"].is_string()) return action;
-        action.kind = OutboundEventAction::Kind::ToolCall;
-        action.tool_name = payload["tool"].get<std::string>();
-        action.args = payload.contains("args") ? payload["args"]
-                                               : nlohmann::json::object();
+        // 工具调用一律不出站,唯一例外:task_complete —— 把它的 summary 全文
+        // 作为文本回传(不是 "[工具] …" 摘要、不是 JSON 串)。
+        const bool is_task_complete =
+            payload.value("is_task_complete", false) ||
+            payload.value("tool", std::string{}) == "task_complete";
+        if (!is_task_complete) return action;  // 其余工具:抑制
+        if (!payload.contains("args") || !payload["args"].is_object()) return action;
+        const auto& args = payload["args"];
+        if (!args.contains("summary") || !args["summary"].is_string()) return action;
+        std::string summary = args["summary"].get<std::string>();
+        if (summary.empty() || is_blank(summary)) return action;
+        action.kind = OutboundEventAction::Kind::AssistantText;
+        action.text = std::move(summary);
+        return action;
+    }
+
+    if (kind == SessionEventKind::Error) {
+        // 一轮出错:把 reason 原样回传,按字符(码点)截断到 300。
+        if (!payload.contains("reason") || !payload["reason"].is_string()) return action;
+        std::string reason = payload["reason"].get<std::string>();
+        if (reason.empty() || is_blank(reason)) return action;
+        action.kind = OutboundEventAction::Kind::AssistantText;
+        action.text = truncate_codepoints(reason, 300);
         return action;
     }
 
@@ -264,6 +301,7 @@ SessionChannelBinder::bind_session(const std::string& session_id) {
         old_sub = sub_id_;
         sub_id_ = 0;
         generation = binding_.bind(session_id);
+        thinking_hint_sent_ = false;  // 新绑定:下一轮首个 Token 重新触发"思考中..."
     }
     service.hub().set_session_id(session_id);
     if (old_sub != 0) deps_.client->unsubscribe(old_session, old_sub);
@@ -295,15 +333,28 @@ SessionChannelBinder::bind_session(const std::string& session_id) {
     auto listener = [this, session_id, generation](const SessionEvent& evt) {
         std::lock_guard<std::mutex> lk(mu_);
         if (!binding_.accepts(session_id, generation)) return;
+
+        // "思考中...":本轮可见正文的首个 Token → 发一次(不含 Reasoning
+        // thinking);Done(整轮结束,已核实工具往返不触发 Done)复位。Token
+        // 本身不转发半截正文——正文由回合结束的权威 Message 事件整条回传。
+        if (evt.kind == SessionEventKind::Token) {
+            if (!thinking_hint_sent_) {
+                thinking_hint_sent_ = true;
+                deps_.service->hub().notify_assistant_text("思考中...");
+            }
+            return;
+        }
+        if (evt.kind == SessionEventKind::Done) {
+            thinking_hint_sent_ = false;
+            return;
+        }
+
         auto action = classify_session_event(evt.kind, evt.payload);
         switch (action.kind) {
         case OutboundEventAction::Kind::AssistantText:
             deps_.service->hub().notify_assistant_text(action.text);
             break;
-        case OutboundEventAction::Kind::ToolCall:
-            deps_.service->hub().notify_tool_call(session_id, action.tool_name,
-                                                  action.args);
-            break;
+        case OutboundEventAction::Kind::ToolCall:  // 已不再产出(工具全部抑制)
         case OutboundEventAction::Kind::None:
             break;
         }
@@ -359,6 +410,21 @@ SessionChannelBinder::bind_session(const std::string& session_id) {
 
     persist_binding(session_id, token);
     ensure_keepalive_thread();
+
+    // 需求②:绑定成功(channel 已激活、出站已就绪)后,主动向 IM 发一条连接
+    // 确认。会话名取 title,为空则回退 session id。文本走 assistant 出站路径,
+    // channel 插件侧自动加 [ACE] 前缀 —— 此处不重复加。
+    {
+        std::string title;
+        for (const auto& info : deps_.client->list_sessions()) {
+            if (info.id == session_id) {
+                title = info.title;
+                break;
+            }
+        }
+        if (title.empty()) title = session_id;
+        service.hub().notify_assistant_text("成功发起远程连接，会话名：" + title);
+    }
 
     std::ostringstream out;
     out << "Channel '" << channel_name << "' connected.";
