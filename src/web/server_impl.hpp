@@ -12,6 +12,7 @@
 #include "../config/request_headers.hpp"
 #include "../desktop/workspace_registry.hpp"
 #include "../hooks/hook_manager.hpp"
+#include "../loop/loop_store.hpp"
 #include "../provider/auth/github_auth.hpp"
 #include "../provider/llm_provider.hpp"
 #include "../provider/model_pool_status.hpp"
@@ -393,6 +394,7 @@ struct WebServer::Impl {
     void register_pinned_sessions();
     void register_sessions();
     void register_models();
+    void register_loops();
     void register_ui_preferences();
     void register_history();
     void register_files();

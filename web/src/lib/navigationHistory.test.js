@@ -28,6 +28,16 @@ run('navigationKey distinguishes home and sessions', () => {
   );
 });
 
+run('LOOP is a first-class navigation destination', () => {
+  const session = { workspaceHash: 'w1', sessionId: 's1' };
+  const loop = { loop: true };
+  assert.notEqual(navigationKey(loop), navigationKey(session));
+  const opened = pushNavigation({ back: [], forward: [] }, session, loop);
+  const back = goBack(opened, loop);
+  assert.deepEqual(back.activeRef, session);
+  assert.deepEqual(goForward(back.history, session).activeRef, loop);
+});
+
 run('sameNavigationRef ignores display-only fields', () => {
   assert.equal(
     sameNavigationRef(

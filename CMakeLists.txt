@@ -22,7 +22,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # MSVC: static runtime (MT/MTd), UTF-8, PDB in Release
 if(MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-    add_compile_options(/utf-8 /Zi /FS /bigobj)
+    # The codebase intentionally uses exceptions for JSON parsing, filesystem
+    # adapters, provider recovery, and daemon route validation. Without /EHsc,
+    # MSVC skips standard stack-unwind semantics and those guarded paths abort
+    # instead of reaching their catch blocks.
+    add_compile_options(/EHsc /utf-8 /Zi /FS /bigobj)
     # /MP: 单 project 内多个 .cpp 并行编(默认关闭,串行)。Ninja 不需要也会
     # 忽略;只对 MSBuild / VS IDE 生成器有意义。不传数字 = 用全部核心,VS 里
     # 也可在命令行覆盖:cmake --build ... -- /p:CL_MPCount=28

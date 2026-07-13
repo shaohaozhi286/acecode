@@ -37,6 +37,10 @@ class SkillRegistry;
 class ToolExecutor;
 } // namespace acecode
 
+namespace acecode::loop {
+class LoopStore;
+}
+
 namespace acecode::desktop {
 class WorkspaceRegistry;
 } // namespace acecode::desktop
@@ -88,6 +92,10 @@ struct WebServerDeps {
     // Web 控制台 PTY 会话注册表(add-console-dock)。null = 控制台不可用,
     // /api/health 报 console.available=false,PTY 路由 404。
     PtySessionRegistry*        pty_registry = nullptr;
+    // Daemon-owned LOOP persistence. Null keeps older/test servers compatible
+    // and makes /api/loops report an explicit unsupported response.
+    acecode::loop::LoopStore*  loop_store = nullptr;
+    std::function<void()>      on_loops_changed;
 };
 
 class WebServer {

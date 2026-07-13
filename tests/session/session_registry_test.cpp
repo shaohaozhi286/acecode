@@ -1110,6 +1110,52 @@ TEST(SessionRegistry, ExplicitPermissionModeOverridesDefaultForNewSession) {
     fx.registry.destroy(id);
 }
 
+TEST(SessionRegistry, LoopPermissionAndQuestionPolicyAreSessionScoped) {
+    TestFixture fx;
+    fx.permissions.set_dangerous(true);
+
+    SessionOptions default_opts;
+    default_opts.loop_execution = true;
+    default_opts.loop_id = "loop-default";
+    default_opts.loop_run_id = "run-default";
+    default_opts.loop_system_context = "LOOP system context";
+    default_opts.permission_mode = "default";
+    auto default_id = fx.registry.create(default_opts);
+    auto* default_entry = fx.registry.lookup(default_id);
+    ASSERT_NE(default_entry, nullptr);
+    EXPECT_TRUE(default_entry->loop_execution);
+    EXPECT_EQ(default_entry->loop_id, "loop-default");
+    EXPECT_FALSE(default_entry->perm->is_dangerous());
+    EXPECT_EQ(default_entry->perm->mode(), PermissionMode::Default);
+    EXPECT_TRUE(default_entry->loop->loop_execution_policy().active);
+    EXPECT_EQ(default_entry->loop->loop_execution_policy().system_context,
+              "LOOP system context");
+    auto default_question = default_entry->loop->resolved_question_policy();
+    EXPECT_EQ(default_question.policy, acecode::QuestionPolicy::Ask);
+    EXPECT_STREQ(default_question.origin, "loop-default");
+
+    SessionOptions yolo_opts = default_opts;
+    yolo_opts.loop_id = "loop-yolo";
+    yolo_opts.permission_mode = "yolo";
+    auto yolo_id = fx.registry.create(yolo_opts);
+    auto* yolo_entry = fx.registry.lookup(yolo_id);
+    ASSERT_NE(yolo_entry, nullptr);
+    EXPECT_EQ(yolo_entry->perm->mode(), PermissionMode::Yolo);
+    auto yolo_question = yolo_entry->loop->resolved_question_policy();
+    EXPECT_EQ(yolo_question.policy, acecode::QuestionPolicy::Deny);
+    EXPECT_STREQ(yolo_question.origin, "loop-yolo");
+
+    auto ordinary_id = fx.registry.create(SessionOptions{});
+    auto* ordinary_entry = fx.registry.lookup(ordinary_id);
+    ASSERT_NE(ordinary_entry, nullptr);
+    EXPECT_TRUE(ordinary_entry->perm->is_dangerous());
+    EXPECT_FALSE(ordinary_entry->loop->loop_execution_policy().active);
+
+    fx.registry.destroy(default_id);
+    fx.registry.destroy(yolo_id);
+    fx.registry.destroy(ordinary_id);
+}
+
 // 场景: 切换权限模式会清掉此前"本次会话允许"的 sticky allow,避免
 // 从 Yolo / AcceptEdits 切回 Default 后仍沿用旧的免确认记录。
 TEST(SessionRegistry, SetPermissionModeClearsSessionAllows) {

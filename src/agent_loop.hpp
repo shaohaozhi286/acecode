@@ -28,6 +28,11 @@
 
 namespace acecode {
 
+struct LoopExecutionPolicy {
+    bool active = false;
+    std::string system_context;
+};
+
 class SkillRegistry;
 class MemoryRegistry;
 class HookManager;
@@ -203,6 +208,17 @@ public:
     // main.cpp at startup (and could be called again if config reloads).
     // A fresh-default AgentLoopConfig is used when this setter is never called.
     void set_agent_loop_config(AgentLoopConfig cfg) { loop_cfg_ = cfg; }
+
+    // Per-session policy used only by daemon-owned LOOP runs. It is installed
+    // before the first submit and may be updated once worktree creation adds
+    // final branch/path context.
+    void set_loop_execution_policy(LoopExecutionPolicy policy) {
+        loop_execution_policy_ = std::move(policy);
+    }
+    const LoopExecutionPolicy& loop_execution_policy() const {
+        return loop_execution_policy_;
+    }
+    ResolvedQuestionPolicy resolved_question_policy() const;
 
     void set_session_manager(SessionManager* sm) { session_manager_ = sm; }
     void set_hook_manager(HookManager* hm) { hook_manager_ = hm; }
@@ -438,6 +454,7 @@ private:
     // agent_loop termination policy. Fresh defaults come from AgentLoopConfig
     // until set_agent_loop_config is called from main.cpp.
     AgentLoopConfig loop_cfg_;
+    LoopExecutionPolicy loop_execution_policy_;
     std::atomic<int> last_api_prompt_tokens_{0}; // from most recent API response
     std::atomic<int> compact_generation_{0};
     int auto_compact_consecutive_failures_ = 0;

@@ -6,6 +6,7 @@
 
 using acecode::command_looks_like_file_write;
 using acecode::command_mentions_path;
+using acecode::loop_shell_write_escape_reason;
 
 // 回归测试:file_edit 安全失败后,提及该文件的 bash 命令会被 "Shell write blocked"
 // 拦截。修复前 command_looks_like_file_write 把任何含 "powershell"/"python" 的命令
@@ -46,4 +47,36 @@ TEST(ShellWriteGuard, CommandMentionsPathMatchesFullPathAndBasename) {
         "cat zhTraditional.js", "D:/code/web/src/common/i18n/zhTraditional.js"));
     EXPECT_FALSE(command_mentions_path("echo hello", "D:/code/web/src/app.js"));
     EXPECT_FALSE(command_mentions_path("anything", ""));
+}
+
+TEST(ShellWriteGuard, LoopYoloAllowsExternalReadsAndInternalWrites) {
+    const std::string cwd = "C:/repo/worktree";
+    EXPECT_TRUE(loop_shell_write_escape_reason(
+        "Get-Content C:/external/input.txt", cwd).empty());
+    EXPECT_TRUE(loop_shell_write_escape_reason(
+        "echo hello > output.txt", cwd).empty());
+    EXPECT_TRUE(loop_shell_write_escape_reason(
+        "Copy-Item C:/external/input.txt ./copy.txt", cwd).empty());
+    EXPECT_TRUE(loop_shell_write_escape_reason(
+        "mkdir generated", cwd).empty());
+}
+
+TEST(ShellWriteGuard, LoopYoloBlocksExternalAndDynamicWriteTargets) {
+    const std::string cwd = "C:/repo/worktree";
+    EXPECT_FALSE(loop_shell_write_escape_reason(
+        "echo hello > ../outside.txt", cwd).empty());
+    EXPECT_FALSE(loop_shell_write_escape_reason(
+        "Set-Content -Path C:/external/output.txt -Value hello", cwd).empty());
+    EXPECT_FALSE(loop_shell_write_escape_reason(
+        "Copy-Item local.txt C:/external/output.txt", cwd).empty());
+    EXPECT_FALSE(loop_shell_write_escape_reason(
+        "echo hello > $env:OUTPUT", cwd).empty());
+    EXPECT_FALSE(loop_shell_write_escape_reason(
+        R"ps(python -c "open(target,'w').write('x')")ps", cwd).empty());
+    EXPECT_FALSE(loop_shell_write_escape_reason(
+        R"ps(powershell -Command "Copy-Item local.txt C:/external/output.txt")ps", cwd).empty());
+    EXPECT_FALSE(loop_shell_write_escape_reason(
+        "Remove-Item C:/external/output.txt", cwd).empty());
+    EXPECT_FALSE(loop_shell_write_escape_reason(
+        "python -c \"Path('C:/external/output').write_bytes(data)\"", cwd).empty());
 }

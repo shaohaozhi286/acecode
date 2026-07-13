@@ -365,6 +365,33 @@ void AgentLoop::set_cwd(const std::string& new_cwd) {
     git_snapshot_cache_.reset();
 }
 
+ResolvedQuestionPolicy AgentLoop::resolved_question_policy() const {
+    if (loop_execution_policy_.active) {
+        ResolvedQuestionPolicy policy;
+        if (permissions_.mode() == PermissionMode::Yolo) {
+            policy.policy = QuestionPolicy::Deny;
+            policy.origin = "loop-yolo";
+        } else {
+            policy.policy = QuestionPolicy::Ask;
+            policy.origin = "loop-default";
+        }
+        return policy;
+    }
+    const bool has_cli = !loop_cfg_.question_policy_cli.empty();
+    const std::string& configured =
+        has_cli ? loop_cfg_.question_policy_cli : loop_cfg_.question_policy;
+    const bool explicit_choice = has_cli || loop_cfg_.question_policy_explicit;
+    const int timeout_seconds =
+        (has_cli && loop_cfg_.question_timeout_seconds_cli > 0)
+            ? loop_cfg_.question_timeout_seconds_cli
+            : loop_cfg_.question_timeout_seconds;
+    const std::string mode =
+        (permissions_.is_dangerous() || permissions_.mode() == PermissionMode::Yolo)
+            ? std::string{"yolo"}
+            : std::string(PermissionManager::mode_name(permissions_.mode()));
+    return resolve_question_policy(configured, explicit_choice, timeout_seconds, mode);
+}
+
 void AgentLoop::dispatch_message(const std::string& role,
                                   const std::string& content,
                                   bool is_tool,
@@ -1394,6 +1421,11 @@ AgentLoop::ApiRequestBundle AgentLoop::build_api_request_messages() {
     std::string system_prompt = build_system_prompt(
         tools_, cwd_, skill_registry_, memory_registry_,
         memory_cfg_, project_instructions_cfg_);
+    if (loop_execution_policy_.active && !loop_execution_policy_.system_context.empty()) {
+        system_prompt += "\n\n<loop-execution>\n";
+        system_prompt += loop_execution_policy_.system_context;
+        system_prompt += "\n</loop-execution>";
+    }
     LOG_DEBUG("System prompt length: " + std::to_string(system_prompt.size()));
     bundle.tool_defs = tools_.get_tool_definitions();
     LOG_DEBUG("Registered tools: " + std::to_string(bundle.tool_defs.size()));
@@ -1843,25 +1875,7 @@ ToolContext AgentLoop::build_tool_context(
         return std::string(PermissionManager::mode_name(permissions_.mode()));
     };
     tool_ctx.question_policy = [this]() {
-        // CLI 覆盖(--question-policy)折叠进解析输入:CLI 值优先于配置值,
-        // 且视为显式(压制 YOLO 隐式映射)。权限模式实时取,/yolo 会话中
-        // 切换后下一次 AskUserQuestion 即生效。
-        const bool has_cli = !loop_cfg_.question_policy_cli.empty();
-        const std::string& policy =
-            has_cli ? loop_cfg_.question_policy_cli : loop_cfg_.question_policy;
-        const bool explicit_choice =
-            has_cli || loop_cfg_.question_policy_explicit;
-        const int timeout_seconds =
-            (has_cli && loop_cfg_.question_timeout_seconds_cli > 0)
-                ? loop_cfg_.question_timeout_seconds_cli
-                : loop_cfg_.question_timeout_seconds;
-        const std::string mode =
-            (permissions_.is_dangerous() ||
-             permissions_.mode() == PermissionMode::Yolo)
-                ? std::string{"yolo"}
-                : std::string(PermissionManager::mode_name(permissions_.mode()));
-        return resolve_question_policy(policy, explicit_choice,
-                                       timeout_seconds, mode);
+        return resolved_question_policy();
     };
     tool_ctx.enter_plan_mode = [this]() {
         if (permissions_.is_dangerous() ||
@@ -1982,9 +1996,12 @@ bool AgentLoop::execute_tool_calls(
 
     auto is_cwd_validation_exempt = [this](const std::string& tool_name,
                                            const std::string& path) {
-        if (tool_name == "file_read") return true;
+        if (tool_name == "file_read" ||
+            (loop_execution_policy_.active &&
+             permissions_.mode() == PermissionMode::Yolo &&
+             tools_.is_read_only(tool_name))) return true;
         if (permissions_.mode() == PermissionMode::Yolo &&
-            !permissions_.is_dangerous()) {
+            !permissions_.is_dangerous() && !loop_execution_policy_.active) {
             return true;
         }
         if (!session_manager_) return false;
@@ -1995,6 +2012,14 @@ bool AgentLoop::execute_tool_calls(
                                      const std::string& tool_name,
                                      const std::string& path) -> std::string {
         if (path.empty() || tool_name == "bash") return {};
+        if (loop_execution_policy_.active &&
+            permissions_.mode() == PermissionMode::Yolo &&
+            !tools_.is_read_only(tool_name)) {
+            const std::string boundary_error = PathValidator(cwd_, false).validate(path);
+            if (!boundary_error.empty()) {
+                return "LOOP Yolo external write blocked: " + path;
+            }
+        }
         return is_cwd_validation_exempt(tool_name, path)
             ? std::string{}
             : path_validator_.validate(path);
@@ -2427,6 +2452,14 @@ bool AgentLoop::execute_tool_calls(
                 }
 
                 if (effective_tc.function_name == "bash" && command_looks_like_file_write(ctx_command)) {
+                    if (loop_execution_policy_.active &&
+                        permissions_.mode() == PermissionMode::Yolo) {
+                        const std::string loop_rejection =
+                            loop_shell_write_escape_reason(ctx_command, cwd_);
+                        if (!loop_rejection.empty()) {
+                            return ToolResult{"[Error] " + loop_rejection, false};
+                        }
+                    }
                     const auto now = std::chrono::steady_clock::now();
                     for (auto it = recent_safe_edit_failures_.begin();
                          it != recent_safe_edit_failures_.end();) {

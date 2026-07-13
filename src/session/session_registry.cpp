@@ -716,6 +716,9 @@ SessionRegistry::make_entry_locked(const std::string& id,
     entry->cwd = opts.cwd.empty() ? deps_.cwd : opts.cwd;
     entry->subagent_depth = opts.subagent_depth;
     entry->parent_session_id = opts.parent_session_id;
+    entry->loop_execution = opts.loop_execution;
+    entry->loop_id = opts.loop_id;
+    entry->loop_run_id = opts.loop_run_id;
     if (resumed_meta && !resumed_meta->parent_session_id.empty()) {
         // resume 路径:子会话身份从持久化 meta 恢复,深度限制随之生效。
         entry->parent_session_id = resumed_meta->parent_session_id;
@@ -770,6 +773,9 @@ SessionRegistry::make_entry_locked(const std::string& id,
         // 注意: rules 当前没有 copy 接口 — v1 暂不复制 rules,daemon 路径
         // 自己装(后续 Section 9 落 HTTP 时一起补)。TUI 路径不受影响。
     }
+    // LOOP permission is definition-scoped. A daemon-wide --dangerous flag
+    // must not silently turn a LOOP configured as Default into Yolo.
+    if (opts.loop_execution) entry->perm->set_dangerous(false);
     // 显式传入的 permission_mode 优先于 resume meta 恢复值:headless
     // `-p --resume <id> --permission-mode accept-edits` 若被静默忽略,脚本
     // 会在 default 模式下被写权限门自动拒绝,极难排查。web resume 不传该
@@ -835,6 +841,12 @@ SessionRegistry::make_entry_locked(const std::string& id,
             ? entry->model_state.context_window
             : deps_.config->context_window);
         entry->loop->set_agent_loop_config(deps_.config->agent_loop);
+    }
+    if (opts.loop_execution) {
+        LoopExecutionPolicy policy;
+        policy.active = true;
+        policy.system_context = opts.loop_system_context;
+        entry->loop->set_loop_execution_policy(std::move(policy));
     }
     entry->loop->set_session_manager(entry->sm.get());
     entry->loop->set_hook_manager(deps_.hook_manager);

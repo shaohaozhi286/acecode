@@ -11,7 +11,7 @@ function refValue(ref, ...keys) {
 
 export function navigationKey(ref) {
   if (!ref || typeof ref !== 'object') return '';
-  const type = ref.home ? 'home' : 'session';
+  const type = ref.loop ? 'loop' : ref.home ? 'home' : 'session';
   return [
     type,
     refValue(ref, 'workspaceHash', 'workspace_hash'),
