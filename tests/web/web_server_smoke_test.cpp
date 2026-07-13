@@ -545,7 +545,26 @@ TEST(WebServerHttp, LoopCrudEnableConflictAndRunHistory) {
 
     auto list = cpr::Get(cpr::Url{fx.url("/api/loops")});
     ASSERT_EQ(list.status_code, 200);
-    EXPECT_EQ(json::parse(list.text)["loops"].size(), 1);
+    auto listed = json::parse(list.text)["loops"];
+    ASSERT_EQ(listed.size(), 1);
+    EXPECT_TRUE(listed[0]["latest_run"].is_null());
+
+    acecode::loop::StoreError claim_error;
+    auto claimed = fx.loop_store->claim_due(now + 3 * 60 * 60 * 1000,
+                                             "web-list-owner", &claim_error);
+    ASSERT_TRUE(claim_error.code.empty()) << claim_error.message;
+    ASSERT_EQ(claimed.disposition, acecode::loop::ClaimDisposition::Claimed);
+    ASSERT_TRUE(claimed.loop.has_value());
+    ASSERT_TRUE(claimed.run.has_value());
+    EXPECT_EQ(claimed.loop->id, id);
+
+    list = cpr::Get(cpr::Url{fx.url("/api/loops")});
+    ASSERT_EQ(list.status_code, 200);
+    listed = json::parse(list.text)["loops"];
+    ASSERT_EQ(listed.size(), 1);
+    ASSERT_TRUE(listed[0]["latest_run"].is_object());
+    EXPECT_EQ(listed[0]["latest_run"]["status"], "running");
+    EXPECT_EQ(listed[0]["latest_run"]["loop_id"], id);
 
     auto get = cpr::Get(cpr::Url{fx.url("/api/loops/" + id)});
     ASSERT_EQ(get.status_code, 200);
@@ -571,7 +590,8 @@ TEST(WebServerHttp, LoopCrudEnableConflictAndRunHistory) {
 
     auto runs = cpr::Get(cpr::Url{fx.url("/api/loops/" + id + "/runs")});
     ASSERT_EQ(runs.status_code, 200);
-    EXPECT_TRUE(json::parse(runs.text)["runs"].empty());
+    ASSERT_EQ(json::parse(runs.text)["runs"].size(), 1);
+    EXPECT_EQ(json::parse(runs.text)["runs"][0]["status"], "running");
 
     auto updated_body = body_for("Updated review", true);
     updated_body["enabled"] = false;

@@ -1866,6 +1866,12 @@ Routes (all use the normal daemon auth and CORS rules):
 | `PUT` | `/api/loops/:id/enabled` | Enable/disable with `{"enabled":true}` |
 | `GET` | `/api/loops/:id/runs?limit=N` | Recent run history (`1..500`) |
 
+Each item returned by `GET /api/loops` includes a nullable `latest_run` field.
+When present, it is the newest run-history object for that LOOP, including its
+current `status` and timestamps. Clients may poll this route to refresh running,
+waiting, completed, missed, and failed states without keeping the details panel
+open.
+
 Create/update body:
 
 ```json
