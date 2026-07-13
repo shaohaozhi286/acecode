@@ -27,6 +27,7 @@ const ACTION_LABELS = {
   [DESKTOP_CONTEXT_ACTIONS.RENAME_SESSION]: '重命名会话',
   [DESKTOP_CONTEXT_ACTIONS.COPY_SESSION_TITLE]: '复制会话标题',
   [DESKTOP_CONTEXT_ACTIONS.COPY_SESSION_ID]: '复制会话 ID',
+  [DESKTOP_CONTEXT_ACTIONS.EXPORT_SESSION]: '导出会话',
   [DESKTOP_CONTEXT_ACTIONS.ARCHIVE_SESSION]: '归档会话',
   [DESKTOP_CONTEXT_ACTIONS.ACTIVATE_WORKSPACE]: '切换到项目',
   [DESKTOP_CONTEXT_ACTIONS.EXPAND_WORKSPACE]: '展开项目',
@@ -44,6 +45,7 @@ const ACTION_LABELS = {
   [DESKTOP_CONTEXT_ACTIONS.COPY_RELATIVE_PATH]: '复制相对路径',
   [DESKTOP_CONTEXT_ACTIONS.COPY_ABSOLUTE_PATH]: '复制绝对路径',
   [DESKTOP_CONTEXT_ACTIONS.ADD_FILE_CONTEXT]: '加入输入上下文',
+  [DESKTOP_CONTEXT_ACTIONS.ADD_DIRECTORY_CONTEXT]: '加入输入上下文',
   [DESKTOP_CONTEXT_ACTIONS.ADD_SELECTION_CONTEXT]: '引用到聊天',
   [DESKTOP_CONTEXT_ACTIONS.REFRESH_FILE_TREE]: '刷新文件树',
   [DESKTOP_CONTEXT_ACTIONS.EXPAND_DIRECTORY]: '展开目录',
@@ -274,6 +276,23 @@ async function runAction(item, target, rememberedText = '', rememberedSelectionC
     case DESKTOP_CONTEXT_ACTIONS.COPY_SESSION_ID:
       await copyTextWithToast(actionTarget?.sessionId || '');
       break;
+    case DESKTOP_CONTEXT_ACTIONS.EXPORT_SESSION:
+      try {
+        const result = await api.exportSession(
+          actionTarget?.sessionId || '',
+          actionTarget?.workspaceHash || '',
+        );
+        if (result?.cancelled) break;
+        if (result?.ok) {
+          toast({ kind: 'ok', text: `会话已导出:${result.filename || 'session.md'}` });
+        } else {
+          toast({ kind: 'err', text: '导出会话失败:' + (result?.error || '') });
+        }
+      } catch (e) {
+        const detail = e?.body?.error || e?.message || '';
+        toast({ kind: 'err', text: '导出会话失败:' + detail });
+      }
+      break;
     case DESKTOP_CONTEXT_ACTIONS.COPY_WORKSPACE_PATH:
       await copyTextWithToast(actionTarget?.path || '');
       break;
@@ -311,6 +330,7 @@ async function runAction(item, target, rememberedText = '', rememberedSelectionC
       }
       break;
     case DESKTOP_CONTEXT_ACTIONS.ADD_FILE_CONTEXT:
+    case DESKTOP_CONTEXT_ACTIONS.ADD_DIRECTORY_CONTEXT:
       if (!dispatchDesktopContextAction(action, actionTarget)) {
         toast({ kind: 'err', text: '操作不可用' });
       }

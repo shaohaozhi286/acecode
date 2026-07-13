@@ -166,3 +166,39 @@ export function renderMarkdown(src) {
     return `<p>${escapeHtml(String(src))}</p>`;
   }
 }
+
+// 按 top-level block 切块渲染,给流式 assistant 消息用(参考 assistant-ui
+// 的 markdown block memoization):每块独立产出 HTML,流式追加时只有尾部
+// 块的 HTML 变化,前缀块字符串不变 → React 对 dangerouslySetInnerHTML 做
+// 字符串比较后跳过 DOM 更新。稳定前缀的 DOM 完全不动,滚动锚点不被销毁,
+// 高度也不会因整树替换瞬时振荡。
+//
+// 全文只 parse 一次再按块分组交给 renderer,reference link([ref]: url)
+// 等跨块状态经 env 全局生效,块序列的 HTML 拼接与 renderMarkdown 全文
+// 渲染逐字节一致。
+export function renderMarkdownBlocks(src) {
+  if (!src) return [];
+  const text = String(src);
+  try {
+    const env = {};
+    const tokens = md.parse(text, env);
+    const groups = [];
+    let group = [];
+    let depth = 0;
+    for (const token of tokens) {
+      group.push(token);
+      depth += token.nesting;
+      if (depth === 0) {
+        groups.push(group);
+        group = [];
+      }
+    }
+    if (group.length) groups.push(group); // 防御:不平衡 token 流也不丢内容
+    return groups.map((groupTokens, index) => ({
+      key: index,
+      html: md.renderer.render(groupTokens, md.options, env),
+    }));
+  } catch {
+    return [{ key: 0, html: `<p>${escapeHtml(text)}</p>` }];
+  }
+}

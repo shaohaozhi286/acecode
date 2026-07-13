@@ -9,6 +9,7 @@ export const DESKTOP_CONTEXT_ACTIONS = Object.freeze({
   RENAME_SESSION: 'rename_session',
   COPY_SESSION_TITLE: 'copy_session_title',
   COPY_SESSION_ID: 'copy_session_id',
+  EXPORT_SESSION: 'export_session',
   ARCHIVE_SESSION: 'archive_session',
   ACTIVATE_WORKSPACE: 'activate_workspace',
   EXPAND_WORKSPACE: 'expand_workspace',
@@ -26,6 +27,7 @@ export const DESKTOP_CONTEXT_ACTIONS = Object.freeze({
   COPY_RELATIVE_PATH: 'copy_relative_path',
   COPY_ABSOLUTE_PATH: 'copy_absolute_path',
   ADD_FILE_CONTEXT: 'add_file_context',
+  ADD_DIRECTORY_CONTEXT: 'add_directory_context',
   ADD_SELECTION_CONTEXT: 'add_selection_context',
   REFRESH_FILE_TREE: 'refresh_file_tree',
   EXPAND_DIRECTORY: 'expand_directory',
@@ -177,6 +179,7 @@ export function buildDesktopContextMenuItems({
       addAction(items, DESKTOP_CONTEXT_ACTIONS.RENAME_SESSION, sessionTarget);
       addAction(items, DESKTOP_CONTEXT_ACTIONS.COPY_SESSION_TITLE, sessionTarget, { enabled: !!sessionTarget.title });
       addAction(items, DESKTOP_CONTEXT_ACTIONS.COPY_SESSION_ID, sessionTarget);
+      addAction(items, DESKTOP_CONTEXT_ACTIONS.EXPORT_SESSION, sessionTarget);
       addAction(items, sessionTarget.pinned ? DESKTOP_CONTEXT_ACTIONS.UNPIN_SESSION : DESKTOP_CONTEXT_ACTIONS.PIN_SESSION, sessionTarget);
       if (sessionTarget.canArchive) {
         addAction(items, DESKTOP_CONTEXT_ACTIONS.ARCHIVE_SESSION, sessionTarget, {
@@ -217,6 +220,9 @@ export function buildDesktopContextMenuItems({
         }
         addAction(items, DESKTOP_CONTEXT_ACTIONS.COPY_RELATIVE_PATH, fileTarget, { group: GROUPS.FILE, enabled: !!fileTarget.relativePath });
         addAction(items, DESKTOP_CONTEXT_ACTIONS.COPY_ABSOLUTE_PATH, fileTarget, { group: GROUPS.FILE, enabled: !!fileTarget.absolutePath });
+        if (fileTarget.canAddContext) {
+          addAction(items, DESKTOP_CONTEXT_ACTIONS.ADD_DIRECTORY_CONTEXT, fileTarget, { group: GROUPS.FILE });
+        }
         addAction(items, DESKTOP_CONTEXT_ACTIONS.REFRESH_FILE_TREE, fileTarget, { group: GROUPS.FILE });
         addAction(items, fileTarget.expanded ? DESKTOP_CONTEXT_ACTIONS.COLLAPSE_DIRECTORY : DESKTOP_CONTEXT_ACTIONS.EXPAND_DIRECTORY, fileTarget, { group: GROUPS.FILE });
       } else {

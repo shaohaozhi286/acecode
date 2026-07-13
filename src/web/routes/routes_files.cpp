@@ -69,11 +69,16 @@ void WebServer::Impl::register_files() {
             std::string cwd_q;
             std::string path_q;
             bool show_hidden = false;
+            bool show_noise = false;
             if (auto c = req.url_params.get("cwd"))         cwd_q = c;
             if (auto p = req.url_params.get("path"))        path_q = p;
             if (auto s = req.url_params.get("show_hidden")) {
                 std::string v = s;
                 show_hidden = (v == "1" || v == "true");
+            }
+            if (auto s = req.url_params.get("show_noise")) {
+                std::string v = s;
+                show_noise = (v == "1" || v == "true");
             }
             if (cwd_q.empty()) {
                 crow::response r(400);
@@ -95,7 +100,7 @@ void WebServer::Impl::register_files() {
                     ? std::get<std::filesystem::path>(abs_cwd_v)
                     : path_from_utf8(cwd_q);
 
-            auto listed = list_directory(abs_target, abs_cwd, show_hidden);
+            auto listed = list_directory(abs_target, abs_cwd, show_hidden, show_noise);
             if (std::holds_alternative<FileError>(listed)) {
                 return error_response(req, std::get<FileError>(listed));
             }

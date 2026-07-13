@@ -14,6 +14,7 @@
 // daemon 端通过 workspace-aware API 在同一进程内服务多个 workspace。
 
 #include "daemon_pool.hpp"
+#include "context_picker.hpp"
 #include "dpi_win.hpp"
 #include "edge_app_launcher.hpp"
 #include "external_url.hpp"
@@ -31,6 +32,7 @@
 
 #include "../config/config.hpp"
 #include "../utils/clipboard.hpp"
+#include "../utils/base64.hpp"
 #include "../utils/cwd_hash.hpp"
 #include "../utils/encoding.hpp"
 #include "../utils/logger.hpp"
@@ -40,8 +42,11 @@
 #include <nlohmann/json.hpp>
 
 #include <atomic>
+#include <cctype>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <random>
@@ -71,6 +76,88 @@ namespace {
 
 constexpr const char* kSharedDaemonSlotHash = "__shared_daemon__";
 constexpr const char* kSharedDaemonContextId = "default";
+
+std::string context_picker_mime_type(const fs::path& path) {
+    std::string extension = acecode::path_to_utf8(path.extension());
+    for (char& ch : extension) {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    if (extension == ".png") return "image/png";
+    if (extension == ".jpg" || extension == ".jpeg") return "image/jpeg";
+    if (extension == ".gif") return "image/gif";
+    if (extension == ".webp") return "image/webp";
+    if (extension == ".bmp") return "image/bmp";
+    if (extension == ".svg") return "image/svg+xml";
+    if (extension == ".pdf") return "application/pdf";
+    if (extension == ".json") return "application/json";
+    if (extension == ".txt" || extension == ".md" || extension == ".log") {
+        return "text/plain";
+    }
+    return {};
+}
+
+std::optional<std::string> read_context_picker_file(const fs::path& path,
+                                                    std::string& error) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        error = "failed to read selected file: " + acecode::path_to_utf8(path.filename());
+        return std::nullopt;
+    }
+    std::string bytes((std::istreambuf_iterator<char>(input)),
+                      std::istreambuf_iterator<char>());
+    if (!input.eof() && input.fail()) {
+        error = "failed to read selected file: " + acecode::path_to_utf8(path.filename());
+        return std::nullopt;
+    }
+    return bytes;
+}
+
+struct ContextPickerFolderReference {
+    std::string path;
+    std::optional<std::string> relative_path;
+};
+
+std::optional<ContextPickerFolderReference> context_picker_folder_reference(
+    const std::string& cwd,
+    const std::string& selected_path,
+    std::string& error) {
+    if (selected_path.empty()) {
+        error = "selected folder is unavailable";
+        return std::nullopt;
+    }
+    std::error_code ec;
+    const fs::path selected = fs::weakly_canonical(
+        acecode::path_from_utf8(selected_path), ec);
+    if (ec || !fs::is_directory(selected, ec) || ec) {
+        error = "selected folder is unavailable";
+        return std::nullopt;
+    }
+
+    ContextPickerFolderReference result{
+        acecode::path_to_utf8_generic(selected), std::nullopt};
+    if (!cwd.empty()) {
+        ec.clear();
+        const fs::path root = fs::weakly_canonical(acecode::path_from_utf8(cwd), ec);
+        if (!ec) {
+            if (selected == root) {
+                result.relative_path = std::string{};
+            } else {
+                const fs::path relative = selected.lexically_relative(root);
+                bool inside = !relative.empty() && !relative.is_absolute();
+                for (const auto& part : relative) {
+                    if (part == "..") {
+                        inside = false;
+                        break;
+                    }
+                }
+                if (inside) {
+                    result.relative_path = acecode::path_to_utf8_generic(relative);
+                }
+            }
+        }
+    }
+    return result;
+}
 
 bool is_webapp_arg(const std::string& arg) {
     return arg == "--webapp";
@@ -1445,6 +1532,73 @@ int main(int argc, char** argv) {
             return nlohmann::json{{"error", std::string("parse: ") + e.what()}}.dump();
         }
     });
+
+    // Composer context picker: one Windows common file dialog handles normal
+    // file multi-selection plus a custom "select current folder" action.
+#ifdef _WIN32
+    host.bind("aceDesktop_pickContextItems", [&](const std::string& req) -> std::string {
+        try {
+            std::string default_folder;
+            auto args = nlohmann::json::parse(req);
+            if (args.is_array() && !args.empty() && args[0].is_object()) {
+                default_folder = args[0].value("cwd", std::string{});
+            }
+
+            auto picked = acecode::desktop::pick_context_items(
+                host.native_window(), default_folder);
+            if (!picked.error.empty()) {
+                return nlohmann::json{{"ok", false}, {"error", picked.error}}.dump();
+            }
+
+            nlohmann::json result{{"ok", true}, {"cancelled", false}};
+            result["items"] = nlohmann::json::array();
+            if (picked.folder_path) {
+                std::string folder_error;
+                auto folder = context_picker_folder_reference(
+                    default_folder, *picked.folder_path, folder_error);
+                if (!folder) {
+                    return nlohmann::json{
+                        {"ok", false}, {"error", folder_error}
+                    }.dump();
+                }
+                nlohmann::json item{
+                    {"kind", "folder"},
+                    {"path", folder->path},
+                };
+                if (folder->relative_path) {
+                    item["relative_path"] = *folder->relative_path;
+                }
+                result["items"].push_back(std::move(item));
+                return result.dump();
+            }
+
+            for (const auto& raw_path : picked.file_paths) {
+                const fs::path path = acecode::path_from_utf8(raw_path);
+                std::string read_error;
+                auto bytes = read_context_picker_file(path, read_error);
+                if (!bytes) {
+                    return nlohmann::json{{"ok", false}, {"error", read_error}}.dump();
+                }
+                std::error_code size_error;
+                const auto size = fs::file_size(path, size_error);
+                result["items"].push_back({
+                    {"kind", "file"},
+                    {"path", acecode::path_to_utf8_generic(path)},
+                    {"name", acecode::path_to_utf8(path.filename())},
+                    {"mime_type", context_picker_mime_type(path)},
+                    {"size_bytes", size_error ? bytes->size() : size},
+                    {"data_base64", acecode::base64_encode(*bytes)},
+                });
+            }
+            if (picked.file_paths.empty()) result["cancelled"] = true;
+            return result.dump();
+        } catch (const std::exception& e) {
+            return nlohmann::json{
+                {"ok", false}, {"error", std::string("context picker: ") + e.what()}
+            }.dump();
+        }
+    });
+#endif
 
     // bridge: addWorkspace (folder picker)
     host.bind("aceDesktop_addWorkspace", [&](const std::string& /*req*/) -> std::string {

@@ -183,6 +183,7 @@ set(ACECODE_NATIVE_BRIDGE_SUPPORT_SOURCES
 )
 
 set(ACECODE_DESKTOP_SUPPORT_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/desktop/context_picker.cpp
     ${CMAKE_SOURCE_DIR}/src/desktop/daemon_pool.cpp
     ${CMAKE_SOURCE_DIR}/src/desktop/daemon_supervisor.cpp
     ${CMAKE_SOURCE_DIR}/src/desktop/dpi_win.cpp
@@ -222,6 +223,7 @@ set(ACECODE_TESTABLE_TUI_SOURCES
     ${CMAKE_SOURCE_DIR}/src/tui/text_truncation.cpp
     ${CMAKE_SOURCE_DIR}/src/tui/paste_handler.cpp
     ${CMAKE_SOURCE_DIR}/src/tui/pending_attachment_selection.cpp
+    ${CMAKE_SOURCE_DIR}/src/tui/path_reference_input.cpp
     ${CMAKE_SOURCE_DIR}/src/tui/confirm_question.cpp
     ${CMAKE_SOURCE_DIR}/src/tui/diff_line_wrap.cpp
     ${CMAKE_SOURCE_DIR}/src/tui/model_picker.cpp

@@ -181,7 +181,8 @@ validate_path_within(const std::string& cwd,
 std::variant<std::vector<FileEntry>, FileError>
 list_directory(const fs::path& abs_dir,
                const fs::path& abs_cwd,
-               bool show_hidden) {
+               bool show_hidden,
+               bool show_noise) {
     std::error_code ec;
     if (!fs::exists(abs_dir, ec) || ec) {
         return FileError{FileErrorKind::NotFound, 0, "directory not found"};
@@ -203,7 +204,7 @@ list_directory(const fs::path& abs_dir,
         if (name.empty()) continue;
 
         // noise 黑名单永远过滤
-        if (is_noise_dir(name)) continue;
+        if (!show_noise && is_noise_dir(name)) continue;
         // 隐藏文件按 show_hidden 决定
         if (!show_hidden && is_hidden(name)) continue;
         // 软连接目录不展示。否则点击后 validate_path_within 会解析到真实目标,

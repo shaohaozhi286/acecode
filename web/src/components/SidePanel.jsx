@@ -288,7 +288,7 @@ function FileTree({ api, cwd, treeCache, setTreeCache, expandedDirs, setExpanded
             data-desktop-file-selected={isActive ? 'true' : 'false'}
             data-desktop-file-expanded={isDir ? (isOpen ? 'true' : 'false') : undefined}
             data-desktop-file-preview={isDir ? undefined : 'true'}
-            data-desktop-file-add-context={isDir ? undefined : 'true'}
+            data-desktop-file-add-context="true"
             data-review-status={reviewStatus || undefined}
             className={clsx(
               'ace-file-row w-full flex items-center gap-1 text-left text-[12px] py-[3px] pr-2',

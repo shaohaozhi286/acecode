@@ -991,6 +991,113 @@ TEST(WebServerHttp, CreateSessionThenListShowsActive) {
     EXPECT_EQ(occurrences, 1) << "active 与 disk meta 必须合并为同一条";
 }
 
+TEST(WebServerHttp, ExportSessionMarkdownWritesVisibleTranscriptToPickedFolder) {
+    const auto export_dir = std::filesystem::temp_directory_path() /
+                            ("acecode_session_export_success_" + std::to_string(std::random_device{}()));
+    RemoveTreeOnExit cleanup{export_dir};
+    std::filesystem::create_directories(export_dir);
+    WebServerFixture fx(
+        true,
+        true,
+        [export_dir] { return std::optional<std::string>(export_dir.string()); });
+
+    auto post = cpr::Post(cpr::Url{fx.url("/api/sessions")},
+                          cpr::Header{{"Content-Type", "application/json"}},
+                          cpr::Body{R"({})"});
+    ASSERT_EQ(post.status_code, 201) << post.text;
+    const auto created = json::parse(post.text);
+    const auto sid = created["session_id"].get<std::string>();
+    auto* entry = fx.registry->lookup(sid);
+    ASSERT_NE(entry, nullptr);
+    ASSERT_NE(entry->sm, nullptr);
+
+    acecode::ChatMessage user;
+    user.role = "user";
+    user.content = "请导出这段会话";
+    user.timestamp = "2026-07-12T10:00:00Z";
+    entry->sm->on_message(user);
+    acecode::ChatMessage assistant;
+    assistant.role = "assistant";
+    assistant.content = "已完成导出准备。";
+    assistant.timestamp = "2026-07-12T10:00:01Z";
+    entry->sm->on_message(assistant);
+    entry->sm->set_session_title("导出成功测试");
+
+    auto exported = cpr::Post(
+        cpr::Url{fx.url("/api/sessions/" + url_encode_component(sid) + "/export-markdown")},
+        cpr::Header{{"Content-Type", "application/json"}},
+        cpr::Body{json{{"workspace_hash", created.value("workspace_hash", "")}}.dump()});
+    ASSERT_EQ(exported.status_code, 200) << exported.text;
+    const auto result = json::parse(exported.text);
+    EXPECT_TRUE(result["ok"].get<bool>());
+    EXPECT_FALSE(result["cancelled"].get<bool>());
+
+    std::vector<std::filesystem::path> files;
+    for (const auto& item : std::filesystem::directory_iterator(export_dir)) {
+        if (item.is_regular_file()) files.push_back(item.path());
+    }
+    ASSERT_EQ(files.size(), 1u);
+    std::ifstream input(files.front(), std::ios::binary);
+    const std::string markdown((std::istreambuf_iterator<char>(input)), {});
+    EXPECT_NE(markdown.find("# 导出成功测试"), std::string::npos);
+    EXPECT_NE(markdown.find("请导出这段会话"), std::string::npos);
+    EXPECT_NE(markdown.find("已完成导出准备。"), std::string::npos);
+}
+
+TEST(WebServerHttp, ExportSessionMarkdownCancellationDoesNotCreateFile) {
+    const auto export_dir = std::filesystem::temp_directory_path() /
+                            ("acecode_session_export_cancel_" + std::to_string(std::random_device{}()));
+    RemoveTreeOnExit cleanup{export_dir};
+    std::filesystem::create_directories(export_dir);
+    WebServerFixture fx(true, true, [] { return std::optional<std::string>{}; });
+
+    auto post = cpr::Post(cpr::Url{fx.url("/api/sessions")},
+                          cpr::Header{{"Content-Type", "application/json"}},
+                          cpr::Body{R"({})"});
+    ASSERT_EQ(post.status_code, 201) << post.text;
+    const auto sid = json::parse(post.text)["session_id"].get<std::string>();
+    auto exported = cpr::Post(
+        cpr::Url{fx.url("/api/sessions/" + url_encode_component(sid) + "/export-markdown")});
+    ASSERT_EQ(exported.status_code, 200) << exported.text;
+    EXPECT_TRUE(json::parse(exported.text)["cancelled"].get<bool>());
+    std::size_t file_count = 0;
+    for (const auto& item : std::filesystem::directory_iterator(export_dir)) {
+        if (item.is_regular_file()) ++file_count;
+    }
+    EXPECT_EQ(file_count, 0u);
+}
+
+TEST(WebServerHttp, ExportSessionMarkdownReportsPickerUnavailableAndWriteFailure) {
+    WebServerFixture unavailable;
+    auto post = cpr::Post(cpr::Url{unavailable.url("/api/sessions")},
+                          cpr::Header{{"Content-Type", "application/json"}},
+                          cpr::Body{R"({})"});
+    ASSERT_EQ(post.status_code, 201) << post.text;
+    const auto sid = json::parse(post.text)["session_id"].get<std::string>();
+    auto unavailable_result = cpr::Post(
+        cpr::Url{unavailable.url("/api/sessions/" + url_encode_component(sid) + "/export-markdown")});
+    EXPECT_EQ(unavailable_result.status_code, 501);
+    EXPECT_EQ(json::parse(unavailable_result.text)["error"], "native folder picker unavailable");
+
+    const auto not_folder = std::filesystem::temp_directory_path() /
+                            ("acecode_session_export_not_folder_" + std::to_string(std::random_device{}()));
+    RemoveTreeOnExit cleanup{not_folder};
+    std::ofstream(not_folder) << "not a folder";
+    WebServerFixture write_failure(
+        true,
+        true,
+        [not_folder] { return std::optional<std::string>(not_folder.string()); });
+    auto write_post = cpr::Post(cpr::Url{write_failure.url("/api/sessions")},
+                                cpr::Header{{"Content-Type", "application/json"}},
+                                cpr::Body{R"({})"});
+    ASSERT_EQ(write_post.status_code, 201) << write_post.text;
+    const auto write_sid = json::parse(write_post.text)["session_id"].get<std::string>();
+    auto write_result = cpr::Post(
+        cpr::Url{write_failure.url("/api/sessions/" + url_encode_component(write_sid) + "/export-markdown")});
+    EXPECT_EQ(write_result.status_code, 400);
+    EXPECT_EQ(json::parse(write_result.text)["error"], "destination folder unavailable");
+}
+
 // 场景:active session 走 SessionInfo 序列化,也必须保留持久化 meta 中的
 // worktree 状态,否则侧栏刷新后当前会话会丢失 worktree 标识。
 TEST(WebServerHttp, ActiveWorktreeSessionListIncludesWorktreeState) {

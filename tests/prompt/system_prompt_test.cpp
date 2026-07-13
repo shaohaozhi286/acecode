@@ -87,6 +87,21 @@ TEST_F(SystemPromptTest, StaticEnvironmentOmitsPerRequestContext) {
     EXPECT_EQ(out.find("Current local date/time"), std::string::npos);
 }
 
+TEST_F(SystemPromptTest, UserAtPathReferenceContractIsExplicit) {
+    acecode::ToolExecutor tools;
+    std::string out = acecode::build_system_prompt(tools, temp_home.string());
+    EXPECT_NE(out.find("an `@path` or `@\"path with spaces\"` token"),
+              std::string::npos);
+    EXPECT_NE(out.find("Resolve relative paths from the current working directory"),
+              std::string::npos);
+    EXPECT_NE(out.find("an explicitly selected folder may use an absolute path"),
+              std::string::npos);
+    EXPECT_NE(out.find("content is not automatically attached"),
+              std::string::npos);
+    EXPECT_NE(out.find("do not assume a referenced directory was recursively loaded"),
+              std::string::npos);
+}
+
 // 场景:动态请求上下文单独构建,由 AgentLoop 放到消息尾部,
 // 让模型仍能回答"现在几点"/"当前目录"等问题。
 TEST_F(SystemPromptTest, RequestContextIncludesCwdAndCurrentLocalDatetime) {

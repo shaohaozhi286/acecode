@@ -25,6 +25,7 @@
 #include "../session/session_registry.hpp"
 #include "../session/session_rewind.hpp"
 #include "../session/session_serializer.hpp"
+#include "../session/session_markdown_export.hpp"
 #include "../session/session_storage.hpp"
 #include "../session/todo_state.hpp"
 #include "../session/session_usage_ledger.hpp"

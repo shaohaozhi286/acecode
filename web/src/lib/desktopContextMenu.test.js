@@ -128,10 +128,11 @@ test('未置顶会话目标显示会话动作', () => {
     sessionTarget: { sessionId: 's1', title: 'T', pinned: false, canArchive: true },
   })), [
     DESKTOP_CONTEXT_ACTIONS.OPEN_SESSION,
-    DESKTOP_CONTEXT_ACTIONS.RENAME_SESSION,
-    DESKTOP_CONTEXT_ACTIONS.COPY_SESSION_TITLE,
-    DESKTOP_CONTEXT_ACTIONS.COPY_SESSION_ID,
-    DESKTOP_CONTEXT_ACTIONS.PIN_SESSION,
+     DESKTOP_CONTEXT_ACTIONS.RENAME_SESSION,
+     DESKTOP_CONTEXT_ACTIONS.COPY_SESSION_TITLE,
+     DESKTOP_CONTEXT_ACTIONS.COPY_SESSION_ID,
+     DESKTOP_CONTEXT_ACTIONS.EXPORT_SESSION,
+     DESKTOP_CONTEXT_ACTIONS.PIN_SESSION,
     DESKTOP_CONTEXT_ACTIONS.ARCHIVE_SESSION,
     DESKTOP_CONTEXT_ACTIONS.SELECT_ALL,
   ]);
@@ -243,11 +244,13 @@ test('file and directory targets build expected actions', () => {
       relativePath: 'src',
       absolutePath: 'C:/repo/src',
       expanded: true,
+      canAddContext: true,
     },
   })), [
     DESKTOP_CONTEXT_ACTIONS.OPEN_IN_EXPLORER,
     DESKTOP_CONTEXT_ACTIONS.COPY_RELATIVE_PATH,
     DESKTOP_CONTEXT_ACTIONS.COPY_ABSOLUTE_PATH,
+    DESKTOP_CONTEXT_ACTIONS.ADD_DIRECTORY_CONTEXT,
     DESKTOP_CONTEXT_ACTIONS.REFRESH_FILE_TREE,
     DESKTOP_CONTEXT_ACTIONS.COLLAPSE_DIRECTORY,
     DESKTOP_CONTEXT_ACTIONS.SELECT_ALL,
@@ -358,8 +361,10 @@ test('contextTargetsFromElement 提取各类目标', () => {
     'data-desktop-file-path': 'src/a.cpp',
     'data-desktop-file-absolute-path': 'C:/repo/src/a.cpp',
     'data-desktop-file-kind': 'file',
+    'data-desktop-file-add-context': 'true',
   });
   assert.equal(contextTargetsFromElement(file).fileTarget.relativePath, 'src/a.cpp');
+  assert.equal(contextTargetsFromElement(file).fileTarget.canAddContext, true);
 
   const preview = elementFor(PREVIEW_TARGET_SELECTOR, {
     'data-desktop-preview-path': 'shots/result.png',

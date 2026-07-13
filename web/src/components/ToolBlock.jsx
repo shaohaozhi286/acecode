@@ -29,12 +29,28 @@ function MetricList({ metrics }) {
   if (!metrics || !metrics.length) return null;
   return (
     <span className="text-fg-mute shrink-0 whitespace-nowrap tabular-nums">
-      {metrics.map((m, i) => (
-        <span key={i}>
-          {' · '}
-          <span>{m.label}={m.value}</span>
-        </span>
-      ))}
+      {metrics.map((m, i) => {
+        // file_edit / file_write 的加删行数(label 恒为 "+" / "-",见
+        // src/tool/file_edit_tool.cpp)按 diff 惯例渲染成 +12 / -3 并着红绿;
+        // 其余 metrics 保持 label=value 的通用格式。
+        const label = String(m.label ?? '');
+        if (label === '+' || label === '-') {
+          return (
+            <span key={i}>
+              {' '}
+              <span className={label === '+' ? 'ace-change-add' : 'ace-change-del'}>
+                {label}{m.value}
+              </span>
+            </span>
+          );
+        }
+        return (
+          <span key={i}>
+            {' · '}
+            <span>{m.label}={m.value}</span>
+          </span>
+        );
+      })}
     </span>
   );
 }
@@ -338,31 +354,34 @@ export const ToolBlock = memo(function ToolBlock({ entry, onReviewToggle, sessio
     );
   }
 
-  // summary 模式
+  // summary 模式:透明背景 + 中性描边,成功/失败色只落在状态 icon 上
+  // (redesign 决策:整行红绿底噪音太大,与 Claude Code 的完成行观感对齐)。
   if (isDone && summary) {
     const ok = !!success;
     return (
       <div
         {...toolContextAttrs}
-        className={clsx(
-          'ace-tool-call-text rounded-md my-0.5 transition',
-          ok ? 'bg-ok-bg border border-ok-border text-ok' : 'bg-danger-bg border border-danger/30 text-danger',
-        )}
+        className="ace-tool-call-text rounded-md my-0.5 transition border border-border text-fg-mute"
       >
         <button
           type="button"
-          className="w-full min-w-0 overflow-hidden text-left flex items-center gap-1.5 px-2.5 py-[5px] cursor-pointer whitespace-nowrap"
+          className="w-full min-w-0 overflow-hidden text-left flex items-center gap-1.5 px-2.5 py-[5px] cursor-pointer whitespace-nowrap text-fg-mute hover:bg-surface-hi transition"
           title={buttonTooltip || (expanded ? '收起' : '展开')}
           aria-label={expanded ? '收起' : '展开'}
           onClick={toggleExpanded}
         >
-          <ToolSummaryIcon icon={summary.icon} ok={ok} className="shrink-0" />
+          <ToolSummaryIcon icon={summary.icon} ok={ok} className={clsx('shrink-0', ok ? 'text-ok' : 'text-danger')} />
           <span className="font-medium shrink-0">{summary.verb || ''}</span>
-          {summary.object && <span className="text-fg-2 flex-1 min-w-0 truncate" title={summaryObjectTitle}>· {summary.object}</span>}
+          {summary.object && <span className="text-fg-mute flex-1 min-w-0 truncate" title={summaryObjectTitle}>· {summary.object}</span>}
           <MetricList metrics={summary.metrics} />
           {!ok && output && <span className="text-fg-mute min-w-0 truncate" title={output}>· {outputPreview}</span>}
-          <span className="ml-auto opacity-60 flex items-center shrink-0">
-            <VsIcon name={expanded ? 'expandUp' : 'expandDown'} size={12} />
+          <span className="ml-auto flex items-center gap-1.5 shrink-0">
+            {liveElapsed > 0 && (
+              <span className="text-fg-mute tabular-nums">{formatElapsed(liveElapsed)}</span>
+            )}
+            <span className="opacity-60 flex items-center">
+              <VsIcon name={expanded ? 'expandUp' : 'expandDown'} size={12} />
+            </span>
           </span>
         </button>
         {expanded && (
@@ -393,20 +412,18 @@ export const ToolBlock = memo(function ToolBlock({ entry, onReviewToggle, sessio
     );
   }
 
-  // done 但无 summary → fallback
+  // done 但无 summary → fallback:同 summary 模式的透明底方案,
+  // 成功/失败色只保留在状态 icon 上。
   if (isDone) {
     const ok = !!success;
     return (
       <div
         {...toolContextAttrs}
-        className={clsx(
-          'ace-tool-call-text rounded-md my-0.5 transition',
-          ok ? 'bg-ok-bg border border-ok-border text-ok' : 'bg-danger-bg border border-danger/30 text-danger',
-        )}
+        className="ace-tool-call-text rounded-md my-0.5 transition border border-border text-fg-mute"
       >
         <button
           type="button"
-          className="w-full min-w-0 overflow-hidden text-left flex items-center gap-1.5 px-2.5 py-[5px] cursor-pointer whitespace-nowrap"
+          className="w-full min-w-0 overflow-hidden text-left flex items-center gap-1.5 px-2.5 py-[5px] cursor-pointer whitespace-nowrap text-fg-mute hover:bg-surface-hi transition"
           title={buttonTooltip || outputPreview || (expanded ? '收起' : '展开')}
           aria-label={expanded ? '收起' : '展开'}
           onClick={toggleExpanded}
@@ -414,8 +431,13 @@ export const ToolBlock = memo(function ToolBlock({ entry, onReviewToggle, sessio
           <VsIcon name={ok ? 'ok' : 'warning'} size={13} mono={false} className="shrink-0" />
           <span className="font-medium flex-1 min-w-0 truncate" title={toolName}>{title || tool || '工具完成'}</span>
           {output && <span className="text-fg-mute min-w-0 truncate" title={output}>· {outputPreview}</span>}
-          <span className="ml-auto opacity-60 flex items-center shrink-0">
-            <VsIcon name={expanded ? 'expandUp' : 'expandDown'} size={12} />
+          <span className="ml-auto flex items-center gap-1.5 shrink-0">
+            {liveElapsed > 0 && (
+              <span className="text-fg-mute tabular-nums">{formatElapsed(liveElapsed)}</span>
+            )}
+            <span className="opacity-60 flex items-center">
+              <VsIcon name={expanded ? 'expandUp' : 'expandDown'} size={12} />
+            </span>
           </span>
         </button>
         {attachmentItems.length > 0 && (
@@ -443,28 +465,38 @@ export const ToolBlock = memo(function ToolBlock({ entry, onReviewToggle, sessio
 
   // 进度模式
   const hidden = Math.max(0, totalLines - tailLines.length);
+  // 工具刚启动、还没有任何可展示内容(无 bash 命令 / tail 输出 / partial)时,
+  // 展开区渲染出来只有一圈 padding 的空框(高度就几个像素),观感像 bug。
+  // 此时干脆不提供展开:箭头不显示、点击不响应,等有内容后恢复展开能力。
+  const hasExpandableContent = !!(bashPrompt || tailLines.length > 0 || currentPartial || hidden > 0);
   return (
     <div
-      className="ace-tool-call-text rounded-md border border-border bg-surface my-0.5 overflow-hidden"
+      className="ace-tool-call-text rounded-md border border-border bg-surface my-0.5 overflow-hidden text-fg-mute"
       {...toolContextAttrs}
+      data-desktop-tool-toggle={hasExpandableContent ? 'true' : 'false'}
     >
       <button
         type="button"
-        className="w-full min-w-0 overflow-hidden px-2.5 py-1.5 flex items-center gap-2 text-left text-fg hover:bg-surface-hi transition whitespace-nowrap"
-        title={buttonTooltip || outputPreview || (expanded ? '收起' : '展开')}
-        aria-label={expanded ? '收起' : '展开'}
-        onClick={toggleExpanded}
+        className={clsx(
+          'w-full min-w-0 overflow-hidden px-2.5 py-1.5 flex items-center gap-2 text-left text-fg-mute transition whitespace-nowrap',
+          hasExpandableContent ? 'hover:bg-surface-hi cursor-pointer' : 'cursor-default',
+        )}
+        title={buttonTooltip || outputPreview || (hasExpandableContent ? (expanded ? '收起' : '展开') : undefined)}
+        aria-label={hasExpandableContent ? (expanded ? '收起' : '展开') : undefined}
+        onClick={hasExpandableContent ? toggleExpanded : undefined}
       >
         <span className={clsx('ace-spinner w-3 h-3 shrink-0', !liveProgress && 'ace-spinner-static')} />
         <span className="font-semibold flex-1 min-w-0 truncate" title={title}>{title}</span>
         <span className="text-fg-mute shrink-0">{totalLines} 行</span>
         <span className="text-fg-mute shrink-0">{formatBytes(totalBytes)}</span>
         <span className="text-fg-mute shrink-0">{formatElapsed(liveElapsed)}</span>
-        <span className="ml-auto opacity-60 flex items-center shrink-0">
-          <VsIcon name={expanded ? 'expandUp' : 'expandDown'} size={12} />
-        </span>
+        {hasExpandableContent && (
+          <span className="ml-auto opacity-60 flex items-center shrink-0">
+            <VsIcon name={expanded ? 'expandUp' : 'expandDown'} size={12} />
+          </span>
+        )}
       </button>
-      {expanded && (
+      {expanded && hasExpandableContent && (
         <div className="px-2.5 pb-1.5">
           {tool === 'bash' && bashPrompt && (
             <div className="text-fg-mute opacity-70 mt-1 break-all" title={bashPrompt}>

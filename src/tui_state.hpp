@@ -2,6 +2,7 @@
 
 #include "permissions.hpp"
 #include "provider/llm_provider.hpp"
+#include "path_reference/path_reference.hpp"
 #include "tui/paste_handler.hpp"
 #include "tui/model_picker.hpp"
 #include "tui/pending_attachment_selection.hpp"
@@ -302,6 +303,17 @@ struct TuiState {
     int slash_dropdown_view_offset = 0; // top index of the visible viewport
     int slash_dropdown_total_matches = 0; // full match count, equals items.size()
     bool slash_dropdown_dismissed_for_input = false;
+
+    // @ path-reference dropdown. The token offsets are UTF-8 byte offsets so
+    // they can be applied directly to input_text without lossy conversion.
+    bool path_reference_active = false;
+    std::optional<path_reference::Token> path_reference_token;
+    std::vector<path_reference::Candidate> path_reference_items;
+    int path_reference_selected = 0;
+    int path_reference_view_offset = 0;
+    std::string path_reference_error;
+    std::string path_reference_dismissed_token;
+    std::uint64_t path_reference_generation = 0;
 
     int chat_focus_index = -1;
     bool chat_follow_tail = true;

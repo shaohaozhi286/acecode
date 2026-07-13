@@ -2366,6 +2366,78 @@ body {
   pointer-events: none;
 }
 
+/* 每轮对话末尾的「本轮改动文件」列表(TurnFileList):
+   标题行「已修改 xx 个文件 +X -Y」+ 行卡(文件树同款类型 icon + 单一路径 +
+   红绿加删数 + 「打开」)+ 折叠切换。字体字号与聊天正文一致(sans 13px),
+   行卡底色与 AskUserQuestion 卡一致(--ace-surface-alt)。 */
+.ace-turn-files {
+  width: min(100%, 810px);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-family: var(--font-sans);
+  font-size: 13px;
+}
+.ace-turn-files-title {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 0 2px;
+  font-weight: 600;
+  color: var(--ace-fg);
+}
+.ace-turn-file-row {
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--ace-border);
+  border-radius: 10px;
+  background: var(--ace-surface-alt);
+  color: var(--ace-fg);
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  transition: background 0.15s ease;
+}
+.ace-turn-file-row:hover {
+  background: var(--ace-surface-hi);
+}
+.ace-turn-file-icon {
+  flex: 0 0 auto;
+}
+.ace-turn-file-path {
+  flex: 0 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ace-turn-file-counts {
+  flex: 0 0 auto;
+  display: inline-flex;
+  gap: 6px;
+  font-variant-numeric: tabular-nums;
+}
+.ace-turn-file-open {
+  margin-left: auto;
+  flex: 0 0 auto;
+  color: var(--ace-accent);
+}
+.ace-turn-files-toggle {
+  align-self: flex-start;
+  border: 0;
+  background: transparent;
+  color: var(--ace-fg-mute);
+  cursor: pointer;
+  padding: 2px 4px;
+  font: inherit;
+}
+.ace-turn-files-toggle:hover {
+  color: var(--ace-fg);
+}
+
 /* 变更详情栏「N 个文件已更改」行右端的折叠全部 diff 按钮。 */
 .ace-review-collapse-all-btn {
   width: 24px;
@@ -2557,15 +2629,12 @@ body {
 }
 .ace-file-row[data-review-status="M"] {
   color: var(--ace-warn);
-  font-weight: 700;
 }
 .ace-file-row[data-review-status="U"] {
   color: var(--ace-ok);
-  font-weight: 700;
 }
 .ace-file-row[data-review-status="D"] {
   color: var(--ace-danger);
-  font-weight: 700;
 }
 .ace-file-row[data-desktop-file-selected="true"] {
   background: rgba(var(--ace-accent-rgb), 0.16);
@@ -2595,7 +2664,7 @@ body {
 }
 .ace-file-row[data-review-status] .ace-file-name {
   color: inherit;
-  font-weight: 700;
+  font-weight: 400;
 }
 .ace-file-row[data-review-status="D"] .ace-file-name {
   text-decoration: line-through;
@@ -2611,7 +2680,7 @@ body {
   color: inherit;
   font-size: 14px;
   line-height: 1;
-  font-weight: 900;
+  font-weight: 400;
   letter-spacing: 0;
 }
 

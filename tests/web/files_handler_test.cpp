@@ -233,6 +233,24 @@ TEST(FilesHandler, ListDirectoryUsesForwardSlash) {
     EXPECT_EQ(entries[0].path, "src/main.cpp");
 }
 
+// 场景:@ 路径建议显式要求完整 cwd 列表时,show_noise=true 透出 .git 等目录。
+TEST(FilesHandler, ListDirectoryCanIncludeNoiseForPathReferences) {
+    TempDir tmp;
+    fs::create_directories(tmp.path / ".git");
+    fs::create_directories(tmp.path / "node_modules");
+    auto result = list_directory(tmp.path, tmp.path,
+                                 /*show_hidden=*/true,
+                                 /*show_noise=*/true);
+    ASSERT_TRUE(std::holds_alternative<std::vector<FileEntry>>(result));
+    const auto& entries = std::get<std::vector<FileEntry>>(result);
+    EXPECT_NE(std::find_if(entries.begin(), entries.end(), [](const FileEntry& e) {
+        return e.name == ".git" && e.kind == "dir";
+    }), entries.end());
+    EXPECT_NE(std::find_if(entries.begin(), entries.end(), [](const FileEntry& e) {
+        return e.name == "node_modules" && e.kind == "dir";
+    }), entries.end());
+}
+
 // 场景:Windows 中文文件名必须以 UTF-8 进入 JSON 层,不能走 ACP 窄字符串导致 500。
 TEST(FilesHandler, ListDirectoryReturnsUtf8ForChineseNames) {
     TempDir tmp;

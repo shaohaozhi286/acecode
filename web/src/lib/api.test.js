@@ -793,6 +793,56 @@ await run('readFileBlob fetches authenticated binary file content', async () => 
   }
 });
 
+await run('exportSession posts the selected session and workspace identity', async () => {
+  const previousFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    calls.push({ url, opts });
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ ok: true, filename: '会话.md' }),
+    };
+  };
+  try {
+    const client = createApi({ origin: 'http://127.0.0.1:4567', token: 'tok' });
+    const result = await client.exportSession('s/1', 'workspace-1');
+    assert.deepEqual(result, { ok: true, filename: '会话.md' });
+    assert.equal(calls[0].url, 'http://127.0.0.1:4567/api/sessions/s%2F1/export-markdown');
+    assert.equal(calls[0].opts.method, 'POST');
+    assert.equal(calls[0].opts.headers['X-ACECode-Token'], 'tok');
+    assert.deepEqual(JSON.parse(calls[0].opts.body), { workspace_hash: 'workspace-1' });
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+await run('listFiles can request hidden and noise entries for path references', async () => {
+  const previousFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    calls.push({ url, opts });
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => 'application/json' },
+      json: async () => [],
+    };
+  };
+  try {
+    const client = createApi({ origin: 'http://127.0.0.1:4567', token: 'tok' });
+    await client.listFiles('/repo root', 'src/deep', true, true);
+    assert.equal(
+      calls[0].url,
+      'http://127.0.0.1:4567/api/files?cwd=%2Frepo%20root&path=src%2Fdeep&show_hidden=1&show_noise=1',
+    );
+    assert.equal(calls[0].opts.method, 'GET');
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
 await run('readFileBlob parses JSON errors as ApiError body', async () => {
   const previousFetch = globalThis.fetch;
   globalThis.fetch = async () => ({

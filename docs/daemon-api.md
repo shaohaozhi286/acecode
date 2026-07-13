@@ -206,6 +206,7 @@ when known.
 | PUT | `/api/sessions/:id/draft` | write compatibility draft |
 | DELETE | `/api/sessions/:id/todos` | clear compatibility todos |
 | GET | `/api/sessions/:id/messages` | transcript snapshot or event replay |
+| POST | `/api/sessions/:id/export-markdown` | choose a folder and export the visible transcript as Markdown |
 | POST | `/api/sessions/:id/messages` | queue user input |
 | POST | `/api/sessions/:id/attachments` | upload session attachment |
 | GET | `/api/sessions/:id/attachments/:attachment_id/blob` | download attachment bytes |
@@ -555,6 +556,36 @@ When `since>0`, returns an event array directly:
 If the requested sequence predates the in-memory replay ring, the array can be
 empty. The frontend should fall back to `since=0`.
 
+### `POST /api/sessions/:id/export-markdown`
+
+Exports the current session's visible transcript as a UTF-8 Markdown file. This
+endpoint is available only when the desktop native folder picker is enabled.
+The optional body identifies the workspace when the session id is not globally
+unique:
+
+```json
+{
+  "workspace_hash": "..."
+}
+```
+
+On success, the response is:
+
+```json
+{
+  "ok": true,
+  "cancelled": false,
+  "filename": "session-title.md"
+}
+```
+
+If the user cancels the folder picker, the response is `{"ok":true,"cancelled":true}`
+and no file is created. Hidden goal context, compact checkpoints, and file
+checkpoints are excluded from the export. The endpoint does not mutate the
+session. Errors use `400` for invalid JSON or destination folders, `404` for
+unknown sessions/workspaces, `501` when the native picker is unavailable, `503`
+when its callback is unavailable, and `500` for file creation or write failures.
+
 ### `POST /api/sessions/:id/messages`
 
 Queues a user input turn. Body:
@@ -858,7 +889,7 @@ shape as `GET`.
 All file routes validate `cwd` against the daemon cwd and registered workspace
 cwds. `path` is relative to `cwd` and must stay within it.
 
-### `GET /api/files?cwd=<abs>&path=<rel>&show_hidden=1`
+### `GET /api/files?cwd=<abs>&path=<rel>&show_hidden=1&show_noise=1`
 
 Lists direct children:
 
@@ -868,6 +899,13 @@ Lists direct children:
   {"name":"README.md","path":"README.md","kind":"file","size":1234}
 ]
 ```
+
+`show_hidden=1` includes dot-prefixed entries. `show_noise=1` additionally
+includes directories normally hidden from the SidePanel tree such as `.git`,
+`node_modules`, `build`, and `target`; the TUI/Desktop `@` path-reference picker
+uses both flags so a bare `@` reflects the complete direct contents of the
+current cwd. Enumeration remains non-recursive and all returned paths are still
+canonicalized within the allowed cwd.
 
 ### `GET /api/files/content?cwd=<abs>&path=<rel>`
 

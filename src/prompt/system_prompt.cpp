@@ -190,7 +190,12 @@ std::string build_system_prompt(const ToolExecutor& tools, const std::string& cw
         << "read, edited, created, or are directing the user to — do not write a bare filename "
         << "when you mean a file in the project; make it a link.\n"
         << "- This is display guidance for prose only. It does not change how you pass paths to "
-        << "file tools, which still take absolute paths.\n\n";
+        << "file tools, which still take absolute paths.\n"
+        << "- In a user message, an `@path` or `@\"path with spaces\"` token is a file or "
+        << "directory reference. Resolve relative paths from the current working directory; "
+        << "an explicitly selected folder may use an absolute path. Its content is not "
+        << "automatically attached. Inspect it only as needed with the existing file_read, glob, "
+        << "or grep tools; do not assume a referenced directory was recursively loaded.\n\n";
 
     oss << "# Environment\n\n"
         << "- OS: " << get_os_name() << "\n"

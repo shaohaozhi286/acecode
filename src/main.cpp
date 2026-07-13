@@ -131,6 +131,8 @@
 #include "utils/terminal_capability.hpp"
 #include "utils/state_file.hpp"
 #include "tui/slash_dropdown.hpp"
+#include "tui/path_reference_dropdown.hpp"
+#include "tui/path_reference_input.hpp"
 #include "tui/text_truncation.hpp"
 #include "tui/thick_vscroll_bar.hpp"
 #include "tui/non_selectable.hpp"
@@ -1946,10 +1948,18 @@ static bool can_accept_clipboard_paste_locked(const TuiState& state) {
            !state.model_picker_open;
 }
 
-// 从系统剪贴板粘贴文本，并刷新 slash 下拉。
+static void refresh_input_suggestions(TuiState& state,
+                                      CommandRegistry& cmd_registry,
+                                      const std::string& cwd) {
+    acecode::tui::refresh_path_reference_state(state, cwd);
+    refresh_slash_dropdown(state, cmd_registry);
+}
+
+// 从系统剪贴板粘贴文本，并刷新输入建议。
 static bool paste_system_clipboard_text(TuiState& state,
                                         ScreenInteractive& screen,
-                                        CommandRegistry& cmd_registry) {
+                                        CommandRegistry& cmd_registry,
+                                        const std::string& cwd) {
     {
         std::lock_guard<std::mutex> lk(state.mu);
         if (!can_accept_clipboard_paste_locked(state)) {
@@ -1983,7 +1993,7 @@ static bool paste_system_clipboard_text(TuiState& state,
         }
 
         insert_pasted_text_at_cursor_locked(state, normalized);
-        refresh_slash_dropdown(state, cmd_registry);
+        refresh_input_suggestions(state, cmd_registry, cwd);
     }
     screen.PostEvent(Event::Custom);
     return true;
@@ -2138,7 +2148,7 @@ static bool handle_pending_attachment_focus_event(TuiState& state,
 static bool handle_confirm_overlay_event(
     TuiState& state,
     ScreenInteractive& screen,
-    const Event& event,
+    Event& event,
     const std::function<void(const std::string& session_id,
                              const std::string& request_id,
                              PermissionResult r)>& respond_remote = nullptr) {
@@ -2498,6 +2508,81 @@ static bool handle_slash_dropdown_event(TuiState& state,
         state.slash_dropdown_dismissed_for_input = true;
         screen.PostEvent(Event::Custom);
         return true;
+    }
+    return false;
+}
+
+static bool handle_path_reference_event(
+    TuiState& state,
+    ScreenInteractive& screen,
+    Event& event,
+    const std::string& cwd,
+    const std::vector<Box>& row_boxes) {
+    std::unique_lock<std::mutex> lk(state.mu);
+    if (!state.path_reference_active) return false;
+
+    const int count = static_cast<int>(state.path_reference_items.size());
+    auto commit = [&](bool enter_directory) {
+        if (!acecode::tui::commit_path_reference_selection(
+                state, enter_directory)) {
+            return false;
+        }
+        if (enter_directory) {
+            acecode::tui::refresh_path_reference_state(state, cwd);
+        }
+        screen.PostEvent(Event::Custom);
+        return true;
+    };
+
+    if (event == Event::Escape) {
+        acecode::tui::dismiss_path_reference_state(state);
+        screen.PostEvent(Event::Custom);
+        return true;
+    }
+    if (count <= 0) return false;
+    if (event == Event::ArrowUp) {
+        acecode::tui::move_path_reference_selection(state, -1);
+        screen.PostEvent(Event::Custom);
+        return true;
+    }
+    if (event == Event::ArrowDown) {
+        acecode::tui::move_path_reference_selection(state, 1);
+        screen.PostEvent(Event::Custom);
+        return true;
+    }
+    if (event == Event::PageUp || event == Event::PageDown) {
+        const int delta = event == Event::PageUp
+            ? -acecode::tui::kPathReferenceVisibleRows
+            : acecode::tui::kPathReferenceVisibleRows;
+        acecode::tui::move_path_reference_selection(state, delta);
+        screen.PostEvent(Event::Custom);
+        return true;
+    }
+    if (event == Event::Home || event == Event::End) {
+        state.path_reference_selected = event == Event::Home ? 0 : count - 1;
+        state.path_reference_view_offset = acecode::tui::scroll_to_keep_visible(
+            state.path_reference_selected, state.path_reference_view_offset,
+            acecode::tui::kPathReferenceVisibleRows, count);
+        screen.PostEvent(Event::Custom);
+        return true;
+    }
+    if (event == Event::Return) return commit(false);
+    if (event == Event::ArrowRight || event == Event::Tab) {
+        return commit(true);
+    }
+    if (event.is_mouse()) {
+        const auto& mouse = event.mouse();
+        if (mouse.button != Mouse::Left || mouse.motion != Mouse::Pressed) {
+            return false;
+        }
+        for (int i = 0; i < count && i < static_cast<int>(row_boxes.size()); ++i) {
+            const auto& box = row_boxes[static_cast<std::size_t>(i)];
+            if (box.x_min <= box.x_max && box.y_min <= box.y_max &&
+                box.Contain(mouse.x, mouse.y)) {
+                state.path_reference_selected = i;
+                return commit(false);
+            }
+        }
     }
     return false;
 }
@@ -3440,6 +3525,7 @@ struct TuiRendererContext {
     Box& ask_scrollbar_box;
     Box& ask_overlay_box;
     std::vector<Box>& message_boxes;
+    std::vector<Box>& path_reference_boxes;
     std::vector<Box>& message_layout_boxes;
     std::vector<char>& message_layout_valid;
     std::vector<std::size_t>& message_layout_revisions;
@@ -3467,6 +3553,7 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
     auto& ask_scrollbar_box = ctx.ask_scrollbar_box;
     auto& ask_overlay_box = ctx.ask_overlay_box;
     auto& message_boxes = ctx.message_boxes;
+    auto& path_reference_boxes = ctx.path_reference_boxes;
     auto& message_layout_boxes = ctx.message_layout_boxes;
     auto& message_layout_valid = ctx.message_layout_valid;
     auto& message_layout_revisions = ctx.message_layout_revisions;
@@ -4336,6 +4423,9 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
         model_picker_element = vbox(std::move(picker_rows)) | border | color(tui::theme().ui.border);
     }
 
+    Element path_reference_element =
+        acecode::tui::render_path_reference_dropdown(
+            state, conhost_compat_layout, path_reference_boxes);
     Element slash_dropdown_element =
         render_slash_dropdown(state, conhost_compat_layout);
 
@@ -4727,6 +4817,7 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
         model_picker_element,
         ask_overlay_element,
         confirm_overlay_element,
+        path_reference_element,
         slash_dropdown_element,
         thinking_element,
         todo_checklist_element,
@@ -4863,6 +4954,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
     // state.mu 保护下的 scroll_chat_by_lines, 不显式加锁 — 与现有 state
     // 读取路径保持一致的 "PostEvent happens-before" 模型.
     std::vector<Box> message_boxes;
+    std::vector<Box> path_reference_boxes;
     std::vector<Box> message_layout_boxes;
     std::vector<char> message_layout_valid;
     std::vector<std::size_t> message_layout_revisions;
@@ -5907,8 +5999,10 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
         [&state](const std::string& normalized) {
             insert_pasted_text_at_cursor_locked(state, normalized);
         };
-    auto paste_system_clipboard_text = [&state, &screen, &cmd_registry]() {
-        return ::paste_system_clipboard_text(state, screen, cmd_registry);
+    auto paste_system_clipboard_text = [&state, &screen, &cmd_registry,
+                                        &agent_loop]() {
+        return ::paste_system_clipboard_text(
+            state, screen, cmd_registry, agent_loop.cwd());
     };
     auto paste_system_clipboard_image =
         [&state, &screen, &session_manager, &working_dir]() {
@@ -5921,7 +6015,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
         };
 
     // Wrap with CatchEvent to handle all keyboard input
-    auto input_with_esc = CatchEvent(input_renderer, [&state, &screen, &clamp_chat_focus, &chat_viewport_rows, &sync_chat_line_counts_from_layout, &reset_chat_line_measure_state, &invalidate_chat_line_measure_at, &auth_done, &cmd_registry, &agent_loop, &provider_slot, &provider_accessor, &config, &token_tracker, &permissions, &session_manager, &scroll_chat_by_lines, &chat_box, &scrollbar_box, &ask_scrollbar_box, &ask_overlay_box, &message_line_counts, &message_spacer_rows_after, &mcp_manager, &tools, &skill_registry, &memory_registry, &working_dir, &insert_pasted_text_at_cursor, &paste_system_clipboard_text, &paste_system_clipboard_image, &handle_pending_attachment_focus_event, &cancel_ctrl_c_exit_locked, &coordinate_mcp_before_first_turn, &subagent_host, &submit_tui_input, &submit_tui_text](Event event) {
+    auto input_with_esc = CatchEvent(input_renderer, [&state, &screen, &clamp_chat_focus, &chat_viewport_rows, &sync_chat_line_counts_from_layout, &reset_chat_line_measure_state, &invalidate_chat_line_measure_at, &auth_done, &cmd_registry, &agent_loop, &provider_slot, &provider_accessor, &config, &token_tracker, &permissions, &session_manager, &scroll_chat_by_lines, &chat_box, &scrollbar_box, &ask_scrollbar_box, &ask_overlay_box, &path_reference_boxes, &message_line_counts, &message_spacer_rows_after, &mcp_manager, &tools, &skill_registry, &memory_registry, &working_dir, &insert_pasted_text_at_cursor, &paste_system_clipboard_text, &paste_system_clipboard_image, &handle_pending_attachment_focus_event, &cancel_ctrl_c_exit_locked, &coordinate_mcp_before_first_turn, &subagent_host, &submit_tui_input, &submit_tui_text](Event event) {
 #if ACECODE_TUI_INPUT_TRACE
         if (event != Event::Custom &&
             !event.is_cursor_position() &&
@@ -5988,7 +6082,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                 : state.paste_accumulator.feed_special(event.input());
             if (pr.just_completed && !pr.completed_text.empty()) {
                 insert_pasted_text_at_cursor(pr.completed_text);
-                refresh_slash_dropdown(state, cmd_registry);
+                refresh_input_suggestions(state, cmd_registry, agent_loop.cwd());
                 lk.unlock();
                 screen.PostEvent(Event::Custom);
             }
@@ -6031,7 +6125,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                     should_exit = true;
                 } else {
                     if (acecode::tui::clear_current_input_for_history_restore(state)) {
-                        refresh_slash_dropdown(state, cmd_registry);
+                        refresh_input_suggestions(state, cmd_registry, agent_loop.cwd());
                     }
                 }
             }
@@ -6872,6 +6966,11 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
             return true;
         }
 
+        if (handle_path_reference_event(
+                state, screen, event, agent_loop.cwd(), path_reference_boxes)) {
+            return true;
+        }
+
         if (handle_slash_dropdown_event(state, screen, event)) {
             return true;
         }
@@ -6951,7 +7050,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
             state.pending_attachment_focus =
                 acecode::tui::kNoPendingAttachmentFocus;
             state.input_cursor = 0;
-            refresh_slash_dropdown(state, cmd_registry);
+            refresh_input_suggestions(state, cmd_registry, agent_loop.cwd());
 
             // 统一入口：内存 push + 磁盘 append。空白 / 相邻重复被抑制，保持磁盘与内存
             // 行为一致；磁盘持久化受 config.input_history.enabled 控制。
@@ -7730,7 +7829,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
             if (acecode::tui::navigate_input_history_up(state)) {
                 // 历史覆盖输入：清掉本会话旧粘贴留下的孤儿 pasted_texts（spec 3.7）。
                 acecode::tui::prune_unreferenced(state.pasted_texts, state.input_text);
-                refresh_slash_dropdown(state, cmd_registry);
+                refresh_input_suggestions(state, cmd_registry, agent_loop.cwd());
             }
             return true;
         }
@@ -7760,7 +7859,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
             if (acecode::tui::navigate_input_history_down(state)) {
                 // 历史覆盖输入：清掉本会话旧粘贴留下的孤儿 pasted_texts（spec 3.7）。
                 acecode::tui::prune_unreferenced(state.pasted_texts, state.input_text);
-                refresh_slash_dropdown(state, cmd_registry);
+                refresh_input_suggestions(state, cmd_registry, agent_loop.cwd());
             }
             return true;
         }
@@ -7878,7 +7977,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                 state.pasted_texts.erase(span->paste_id);
                 state.input_text.erase(span->begin, span->end - span->begin);
                 // input_cursor 保持在 span->begin（即 input_cursor 不变）
-                refresh_slash_dropdown(state, cmd_registry);
+                refresh_input_suggestions(state, cmd_registry, agent_loop.cwd());
                 return true;
             }
             size_t next = state.input_cursor + 1;
@@ -7887,7 +7986,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                 next++;
             }
             state.input_text.erase(state.input_cursor, next - state.input_cursor);
-            refresh_slash_dropdown(state, cmd_registry);
+            refresh_input_suggestions(state, cmd_registry, agent_loop.cwd());
             return true;
         }
         // Backspace: remove UTF-8 glyph preceding the caret
@@ -7902,7 +8001,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                     state.input_mode = InputMode::Normal;
                 }
                 state.input_cursor = 0;
-                refresh_slash_dropdown(state, cmd_registry);
+                refresh_input_suggestions(state, cmd_registry, agent_loop.cwd());
                 return true;
             }
             if (state.input_cursor == 0) {
@@ -7914,7 +8013,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                 state.pasted_texts.erase(span->paste_id);
                 state.input_text.erase(span->begin, span->end - span->begin);
                 state.input_cursor = span->begin;
-                refresh_slash_dropdown(state, cmd_registry);
+                refresh_input_suggestions(state, cmd_registry, agent_loop.cwd());
                 return true;
             }
             size_t pos = state.input_cursor - 1;
@@ -7924,7 +8023,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
             }
             state.input_text.erase(pos, state.input_cursor - pos);
             state.input_cursor = pos;
-            refresh_slash_dropdown(state, cmd_registry);
+            refresh_input_suggestions(state, cmd_registry, agent_loop.cwd());
             return true;
         }
         // Printable character input
@@ -7986,7 +8085,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
             state.input_cursor += ch.size();
             // Reset history browsing on new input
             state.history_index = -1;
-            refresh_slash_dropdown(state, cmd_registry);
+            refresh_input_suggestions(state, cmd_registry, agent_loop.cwd());
             return true;
         }
         return false;
@@ -8002,6 +8101,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
         ask_scrollbar_box,
         ask_overlay_box,
         message_boxes,
+        path_reference_boxes,
         message_layout_boxes,
         message_layout_valid,
         message_layout_revisions,

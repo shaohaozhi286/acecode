@@ -207,6 +207,12 @@ export function createApi(base = null) {
     executeCommand:   (id, command)  => request('POST',   `/api/sessions/${encodeURIComponent(id)}/commands`, command, base),
     askSideQuestion:  (id, question) => request('POST',   `/api/sessions/${encodeURIComponent(id)}/side-question`, { question }, base),
     getMessages:      (id, since=0)  => request('GET',    `/api/sessions/${encodeURIComponent(id)}/messages?since=${since}`, undefined, base),
+    exportSession:    (id, workspaceHash = '') => request(
+      'POST',
+      `/api/sessions/${encodeURIComponent(id)}/export-markdown`,
+      { workspace_hash: workspaceHash || '' },
+      base,
+    ),
     listSkills:       (workspaceHash = '') => request('GET',
       '/api/skills' + (workspaceHash ? '?workspace=' + encodeURIComponent(workspaceHash) : ''),
       undefined, base),
@@ -308,9 +314,10 @@ export function createApi(base = null) {
     // path='' 列 cwd 根本身。showHidden=true 透出 dot 文件,但 noise 黑名单
     // (.git/node_modules/dist/build/__pycache__/.venv/venv/target/.next/.cache)
     // 始终过滤,不受 showHidden 影响。
-    listFiles: (cwd, path, showHidden = false) => {
+    listFiles: (cwd, path, showHidden = false, showNoise = false) => {
       const qs = `?cwd=${encodeURIComponent(cwd)}&path=${encodeURIComponent(path || '')}`
-                 + (showHidden ? '&show_hidden=1' : '');
+                 + (showHidden ? '&show_hidden=1' : '')
+                 + (showNoise ? '&show_noise=1' : '');
       return request('GET', '/api/files' + qs, undefined, base);
     },
 

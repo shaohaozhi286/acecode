@@ -80,7 +80,8 @@ validate_path_within(const std::string& cwd,
 std::variant<std::vector<FileEntry>, FileError>
 list_directory(const std::filesystem::path& abs_dir,
                const std::filesystem::path& abs_cwd,
-               bool show_hidden);
+               bool show_hidden,
+               bool show_noise = false);
 
 // 读 abs_file 原文。abs_file 必须先经 validate_path_within。
 //

@@ -14,7 +14,9 @@ import { getInputBarActionState } from '../lib/inputBarState.js';
 import { FileTypeIcon, VsIcon } from './Icon.jsx';
 import { ImageLightbox } from './ImageLightbox.jsx';
 import { RichComposer } from './RichComposer.jsx';
+import { PathReferenceDropdown } from './PathReferenceDropdown.jsx';
 import { SlashDropdown } from './SlashDropdown.jsx';
+import { toast } from './Toast.jsx';
 import { useSlashCommands } from './SlashCommandsContext.jsx';
 import { getNextInputHistoryPointer, isUserComposerEdit, shouldNavigateInputHistory } from '../lib/inputHistoryNavigation.js';
 import { filesFromTransfer, hasFileTransfer } from '../lib/composerFileTransfer.js';
@@ -31,6 +33,21 @@ import {
   SELECTION_CONTEXT_TYPE,
   contextPresentation,
 } from '../lib/selectionChatContext.js';
+import {
+  insertPathReferenceAtCaret,
+  normalizePathReferenceCandidates,
+  pathReferenceSignature,
+  pathReferenceTokenAtCursor,
+  replacePathReferenceToken,
+  splitPathReferenceQuery,
+  unsafeReferencePath,
+} from '../lib/pathReference.js';
+import {
+  hasNativeContextPicker,
+  nativeFolderReferencePath,
+  nativePickedFileToFile,
+  parseNativeContextPickerResult,
+} from '../lib/desktopContextPicker.js';
 
 const MAX_ROWS = 8;
 const LINE_HEIGHT = 20; // 与 leading-[20px] 对齐
@@ -93,6 +110,7 @@ export const InputBar = forwardRef(function InputBar({
   value: controlledValue, onChange,
   attachments = [], contexts = [], onMediaFiles, onRemoveAttachment, onAddBrowserContext, onRemoveContext,
   selectionPreview = null, onPinSelectionPreview,
+  pathReferenceApi = null, cwd = '',
 }, ref) {
   const isControlled = controlledValue != null;
   const [internalValue, setInternalValue] = useState('');
@@ -101,11 +119,16 @@ export const InputBar = forwardRef(function InputBar({
   const [editedSinceHistory, setEditedSinceHistory] = useState(false);
   const [dropdownClosed, setDropdownClosed] = useState(false); // Esc 关闭后,直到首段变化或重新输入 / 才重开
   const [capabilityOpen, setCapabilityOpen] = useState(false);
+  const [composerSelection, setComposerSelection] = useState({ start: 0, end: 0, direction: 'none' });
+  const [composerComposing, setComposerComposing] = useState(false);
+  const [pathMention, setPathMention] = useState(null);
   const [dragActive, setDragActive] = useState(false);
   const [attachmentPreview, setAttachmentPreview] = useState(null);
   const ta = useRef(null);
   const rootRef = useRef(null);
   const fileInputRef = useRef(null);
+  const dismissedPathSignatureRef = useRef('');
+  const mentionGenerationRef = useRef(0);
   const capabilityMenuRef = useRef(null);
   const dragDepthRef = useRef(0);
   const composingRef = useRef(false);
@@ -123,7 +146,9 @@ export const InputBar = forwardRef(function InputBar({
   const selectionContextItems = contextItems.filter((item) => item?.type === SELECTION_CONTEXT_TYPE);
   const otherContextItems = contextItems.filter((item) => item?.type !== SELECTION_CONTEXT_TYPE);
   const hasExtras = attachmentItems.length > 0 || contextItems.length > 0;
-  const hasCapabilityHandlers = !!onMediaFiles || !!onAddBrowserContext;
+  const nativeContextPickerAvailable = hasNativeContextPicker();
+  const canChooseLocalContext = !!onMediaFiles || nativeContextPickerAvailable;
+  const hasCapabilityHandlers = canChooseLocalContext || !!onAddBrowserContext;
   const isImageAttachment = (item) => String(item.kind || item.mime_type || '').startsWith('image');
   const imageAttachments = attachmentItems.filter(isImageAttachment);
   const fileAttachments = attachmentItems.filter((item) => !isImageAttachment(item));
@@ -171,14 +196,6 @@ export const InputBar = forwardRef(function InputBar({
 
   const slashCtx = useSlashCommands();
   const commands = slashCtx?.commands || [];
-  useImperativeHandle(ref, () => ({
-    focus: () => ta.current?.focus(),
-    clear: () => {
-      updateValue('');
-      setHistPtr(-1);
-      setEditedSinceHistory(false);
-    },
-  }), [updateValue]);
 
   useEffect(() => () => {
     if (compositionGuardTimerRef.current) {
@@ -256,10 +273,12 @@ export const InputBar = forwardRef(function InputBar({
     clearCompositionEndGuard();
     composingRef.current = true;
     justFinishedCompositionRef.current = false;
+    setComposerComposing(true);
   };
 
   const handleCompositionEnd = () => {
     composingRef.current = false;
+    setComposerComposing(false);
     justFinishedCompositionRef.current = true;
     clearCompositionEndGuard();
     compositionGuardTimerRef.current = window.setTimeout(() => {
@@ -316,12 +335,109 @@ export const InputBar = forwardRef(function InputBar({
     setHistPtr(-1);
     setEditedSinceHistory(false);
     setDropdownClosed(false);
+    mentionGenerationRef.current += 1;
+    setPathMention(null);
     requestAnimationFrame(() => ta.current?.focus());
   };
 
   const focusTextareaSoon = useCallback(() => {
     requestAnimationFrame(() => ta.current?.focus());
   }, []);
+
+  const restorePathCaret = useCallback((cursor) => {
+    requestAnimationFrame(() => {
+      const editor = ta.current;
+      editor?.focus?.();
+      editor?.setSelectionRange?.(cursor, cursor);
+    });
+  }, []);
+
+  useImperativeHandle(ref, () => ({
+    focus: () => ta.current?.focus(),
+    clear: () => {
+      updateValue('');
+      setHistPtr(-1);
+      setEditedSinceHistory(false);
+    },
+    insertDirectoryReference: (relativePath) => {
+      const insertion = insertPathReferenceAtCaret(value, composerSelection.end, relativePath);
+      updateValue(insertion.text);
+      setEditedSinceHistory(true);
+      restorePathCaret(insertion.cursor);
+      return insertion;
+    },
+  }), [composerSelection.end, restorePathCaret, updateValue, value]);
+
+  // Claude Code-style @ mention: only visible text is inserted. Directory
+  // contents are never uploaded or preloaded here.
+  useEffect(() => {
+    const cursor = composerSelection.end;
+    const token = pathReferenceTokenAtCursor(value, cursor);
+    const signature = pathReferenceSignature(token, cursor, cwd);
+    const unavailable = disabled || !pathReferenceApi || !cwd || composerComposing || showDropdown || !token;
+    if (unavailable || dismissedPathSignatureRef.current === signature) {
+      mentionGenerationRef.current += 1;
+      setPathMention(null);
+      return undefined;
+    }
+    dismissedPathSignatureRef.current = '';
+    if (unsafeReferencePath(token.path)) {
+      setPathMention({ token, signature, items: [], loading: false, error: '路径必须位于当前工作目录内' });
+      return undefined;
+    }
+    const { directory, filter } = splitPathReferenceQuery(token.path);
+    const generation = ++mentionGenerationRef.current;
+    setPathMention({ token, signature, items: [], loading: true, error: '' });
+    Promise.resolve(pathReferenceApi.listFiles(cwd, directory, true, true))
+      .then((entries) => {
+        if (mentionGenerationRef.current !== generation) return;
+        setPathMention({
+          token,
+          signature,
+          items: normalizePathReferenceCandidates(entries, filter),
+          loading: false,
+          error: '',
+        });
+      })
+      .catch((error) => {
+        if (mentionGenerationRef.current !== generation) return;
+        setPathMention({
+          token,
+          signature,
+          items: [],
+          loading: false,
+          error: error?.message || '目录读取失败',
+        });
+      });
+    return () => { mentionGenerationRef.current += 1; };
+  }, [composerComposing, composerSelection.end, cwd, disabled, pathReferenceApi, showDropdown, value]);
+
+  useEffect(() => {
+    if (!disabled && pathReferenceApi && cwd) return;
+    mentionGenerationRef.current += 1;
+    setPathMention(null);
+  }, [cwd, disabled, pathReferenceApi]);
+
+  const closePathDropdown = useCallback(() => {
+    if (pathMention?.signature) dismissedPathSignatureRef.current = pathMention.signature;
+    mentionGenerationRef.current += 1;
+    setPathMention(null);
+  }, [pathMention?.signature]);
+
+  const applyMentionItem = useCallback((item, enterDirectory = false) => {
+    if (!pathMention?.token || !item) return;
+    const replacement = replacePathReferenceToken(value, pathMention.token, item.path, {
+      directory: item.kind === 'dir',
+      enterDirectory,
+    });
+    mentionGenerationRef.current += 1;
+    setPathMention(null);
+    updateValue(replacement.text);
+    setEditedSinceHistory(true);
+    restorePathCaret(replacement.cursor);
+  }, [pathMention?.token, restorePathCaret, updateValue, value]);
+
+  const activePathDropdown = pathMention;
 
   const addMediaFiles = useCallback((files) => {
     const fileList = Array.from(files || []).filter(Boolean);
@@ -332,10 +448,45 @@ export const InputBar = forwardRef(function InputBar({
     return true;
   }, [disabled, onMediaFiles, requestComposerCaretRestore]);
 
-  const chooseMedia = () => {
+  const chooseLocalContext = useCallback(async () => {
     setCapabilityOpen(false);
-    fileInputRef.current?.click();
-  };
+    if (!nativeContextPickerAvailable) {
+      fileInputRef.current?.click();
+      return;
+    }
+
+    const savedCursor = composerSelection.end;
+    try {
+      const raw = await window.aceDesktop_pickContextItems({ cwd });
+      const picked = parseNativeContextPickerResult(raw);
+      if (picked.cancelled) {
+        restorePathCaret(savedCursor);
+        return;
+      }
+      if (picked.folder) {
+        const referencePath = nativeFolderReferencePath(cwd, picked.folder);
+        const insertion = insertPathReferenceAtCaret(value, savedCursor, referencePath);
+        updateValue(insertion.text);
+        setEditedSinceHistory(true);
+        restorePathCaret(insertion.cursor);
+        return;
+      }
+
+      const files = picked.files.map((item) => nativePickedFileToFile(item));
+      if (!addMediaFiles(files)) restorePathCaret(savedCursor);
+    } catch (error) {
+      toast({ kind: 'err', text: `添加文件或文件夹失败:${error?.message || '选择器不可用'}` });
+      restorePathCaret(savedCursor);
+    }
+  }, [
+    addMediaFiles,
+    composerSelection.end,
+    cwd,
+    nativeContextPickerAvailable,
+    restorePathCaret,
+    updateValue,
+    value,
+  ]);
 
   const handleFiles = (e) => {
     const files = Array.from(e.target.files || []);
@@ -493,7 +644,17 @@ export const InputBar = forwardRef(function InputBar({
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
       >
-        {showDropdown && (
+        {activePathDropdown && (
+          <PathReferenceDropdown
+            items={activePathDropdown.items || []}
+            loading={!!activePathDropdown.loading}
+            error={activePathDropdown.error || ''}
+            onReference={(item) => applyMentionItem(item, false)}
+            onEnterDirectory={(item) => applyMentionItem(item, true)}
+            onClose={closePathDropdown}
+          />
+        )}
+        {showDropdown && !activePathDropdown && (
           <SlashDropdown
             items={commands}
             query={value.slice(1)}
@@ -578,6 +739,7 @@ export const InputBar = forwardRef(function InputBar({
             onKeyDown={onKey}
             onCompositionStart={handleCompositionStart}
             onCompositionEnd={handleCompositionEnd}
+            onSelectionChange={setComposerSelection}
             isComposingKeyEvent={isComposingKeyEvent}
             onSubmit={submit}
             onPasteFiles={addMediaFiles}
@@ -608,15 +770,15 @@ export const InputBar = forwardRef(function InputBar({
                 <VsIcon name="add" size={15} />
               </button>
               {capabilityOpen && hasCapabilityHandlers && (
-                <div className="absolute left-0 bottom-8 z-50 w-40 py-1 rounded-lg border border-border bg-surface ace-shadow">
+                <div className="absolute left-0 bottom-8 z-50 w-52 py-1 rounded-lg border border-border bg-surface ace-shadow">
                   <button
                     type="button"
                     className="w-full h-8 px-2 flex items-center gap-2 text-left text-[13px] text-fg hover:bg-surface-hi disabled:opacity-50"
-                    onClick={chooseMedia}
-                    disabled={!onMediaFiles}
+                    onClick={chooseLocalContext}
+                    disabled={!canChooseLocalContext}
                   >
                     <VsIcon name="openFile" size={14} />
-                    <span>添加图片或文件</span>
+                    <span>{nativeContextPickerAvailable ? '添加图片、文件或文件夹' : '添加图片或文件'}</span>
                   </button>
                   <button
                     type="button"

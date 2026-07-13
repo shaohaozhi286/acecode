@@ -71,6 +71,10 @@ void WebServer::Impl::register_sessions() {
         ([this](const crow::request& req, const std::string&) {
             return cors_preflight(req);
         });
+        CROW_ROUTE(app, "/api/sessions/<string>/export-markdown").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req, const std::string&) {
+            return cors_preflight(req);
+        });
         CROW_ROUTE(app, "/api/sessions/<string>/attachments").methods(crow::HTTPMethod::Options)
         ([this](const crow::request& req, const std::string&) {
             return cors_preflight(req);
@@ -562,6 +566,100 @@ void WebServer::Impl::register_sessions() {
             }
 
             crow::response r(arr.dump());
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        });
+
+        // POST /api/sessions/:id/export-markdown: 选择目录并导出完整可见 transcript。
+        // 目录选择和最终写盘都留在 daemon,避免浏览器下载目录权限/路径能力不足。
+        CROW_ROUTE(app, "/api/sessions/<string>/export-markdown").methods(crow::HTTPMethod::POST)
+        ([this](const crow::request& req, const std::string& id) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+
+            auto export_error = [this, &req](int status, const std::string& message) {
+                crow::response r(status);
+                r.body = json{{"ok", false}, {"error", message}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            };
+
+            std::string workspace_hash_hint;
+            if (!req.body.empty()) {
+                try {
+                    const auto body = json::parse(req.body);
+                    if (!body.is_object()) return export_error(400, "bad json");
+                    workspace_hash_hint = body.value("workspace_hash", std::string{});
+                } catch (const std::exception& e) {
+                    return export_error(400, std::string("bad json: ") + e.what());
+                }
+            }
+
+            const auto workspace = resolve_session_workspace(id, workspace_hash_hint);
+            if (!workspace.has_value()) return export_error(404, "workspace not found");
+            auto maybe_meta = find_session_meta_for_workspace(*workspace, id);
+            if (!maybe_meta.has_value()) return export_error(404, "session not found");
+
+            SessionMeta meta = *maybe_meta;
+            std::vector<ChatMessage> messages;
+            if (auto entry = active_session_entry_for_workspace(*workspace, id)) {
+                if (entry->sm) {
+                    const auto active_meta = entry->sm->load_session_meta(id);
+                    if (!active_meta.id.empty()) meta = active_meta;
+                    messages = entry->sm->load_active_messages();
+                }
+            }
+            if (messages.empty()) {
+                const std::string session_cwd = meta.cwd.empty() ? workspace->cwd : meta.cwd;
+                const auto project_dir = SessionStorage::get_project_dir(session_cwd);
+                const auto candidates = SessionStorage::find_session_files(project_dir, id);
+                if (!candidates.empty()) {
+                    messages = SessionStorage::load_messages(candidates.front().jsonl_path);
+                }
+            }
+
+            std::vector<ChatMessage> visible_messages;
+            visible_messages.reserve(messages.size());
+            for (const auto& message : messages) {
+                if (is_file_checkpoint_message(message)) continue;
+                if (is_compact_checkpoint_message(message)) continue;
+                if (is_hidden_goal_context_message(message)) continue;
+                visible_messages.push_back(message);
+            }
+
+            if (!deps.native_folder_picker_enabled) {
+                return export_error(501, "native folder picker unavailable");
+            }
+            if (!deps.native_folder_picker) {
+                return export_error(503, "native folder picker callback unavailable");
+            }
+            const auto picked = deps.native_folder_picker();
+            if (!picked.has_value() || picked->empty()) {
+                crow::response r(200);
+                r.body = json{{"ok", true}, {"cancelled", true}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            const auto folder = path_from_utf8(*picked);
+            std::error_code ec;
+            if (!std::filesystem::is_directory(folder, ec) || ec) {
+                return export_error(400, "destination folder unavailable");
+            }
+
+            const std::string filename = session_export::choose_markdown_filename(
+                folder, meta.title, meta.id.empty() ? id : meta.id);
+            const auto output_path = folder / path_from_utf8(filename);
+            const std::string markdown = session_export::build_markdown(meta, visible_messages);
+            std::ofstream output(output_path, std::ios::binary | std::ios::trunc);
+            if (!output) return export_error(500, "unable to create Markdown file");
+            output.write(markdown.data(), static_cast<std::streamsize>(markdown.size()));
+            output.flush();
+            if (!output) return export_error(500, "unable to write Markdown file");
+
+            LOG_INFO("[web] exported session Markdown id=" + id +
+                     " filename=" + filename);
+            crow::response r(200);
+            r.body = json{{"ok", true}, {"cancelled", false}, {"filename", filename}}.dump();
             r.add_header("Content-Type", "application/json");
             return with_cors(req, std::move(r));
         });

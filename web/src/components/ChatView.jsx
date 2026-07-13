@@ -28,12 +28,14 @@ import { PreviewDetailsPanel } from './PreviewDetailsPanel.jsx';
 import { StatusBar } from './StatusBar.jsx';
 import { Modal } from './Modal.jsx';
 import { ChangeGlassDock } from './ChangeReview.jsx';
+import { TurnFileList } from './TurnFileList.jsx';
 import { toast } from './Toast.jsx';
 import { clsx } from '../lib/format.js';
 import {
   aggregateHunksFromMessages,
   changeGroupsSignature,
   collectHunkMessagesFromItems,
+  collectTurnChangeSetsFromItems,
   summarizeChangeGroups,
 } from '../lib/sessionChanges.js';
 import { stableBySignature } from '../lib/changeReviewStability.js';
@@ -128,6 +130,7 @@ import {
   DESKTOP_CONTEXT_ACTION_EVENT,
   DESKTOP_CONTEXT_ACTIONS,
 } from '../lib/desktopContextMenu.js';
+import { normalizeReferencePath } from '../lib/pathReference.js';
 import {
   createFileContext,
   normalizeComposerContext,
@@ -141,6 +144,8 @@ import {
   dismissChangeDockSignature,
   dismissedDockSignatureFor,
   dockDismissalKey,
+  isTodoDockSuppressed,
+  todoDockSignature,
   validateDockDismissals,
 } from '../lib/changeDockDismissal.js';
 
@@ -639,6 +644,13 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
     {},
     validateDockDismissals,
   );
+  // 下一轮对话提交时整体收起玻璃 dock:变更走 dismissChangeDock(持久化
+  // 签名),todo 记会话内存级快照抑制 {sessionKey, signature}。真正的收起
+  // 动作经 ref 中转 —— submit 的 useCallback 定义在 changeSignature /
+  // todoSignature 之前(TDZ 不能进 deps),渲染期写 ref 是纯缓存,与
+  // changeGroupsStableRef 同一模式。
+  const [todoDockSuppression, setTodoDockSuppression] = useState(null);
+  const dockAutoDismissRef = useRef(() => {});
   const changeDockRef = useRef(null);
   const [changeDockBottomPadding, setChangeDockBottomPadding] = useState(0);
   const [expandedActivityKeys, setExpandedActivityKeys] = useState(() => new Set());
@@ -1750,6 +1762,9 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
     const isBuiltin = !hasExtras && route.kind === 'builtin';
     if (!isBuiltin || hasExtras) {
       setTailFollowFromAction({ type: 'new_turn' });
+      // 新一轮对话开始:上一轮的玻璃 dock(变更汇总 + todo 环)自动收起,
+      // 本轮产生新变更 / todo 更新后按签名机制重现。
+      dockAutoDismissRef.current();
     }
     if (!sid) {
       // 自动新建会话。普通消息由 daemon auto_start 接管;builtin 先创建
@@ -2254,6 +2269,30 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
     return () => window.removeEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
   }, [api, ref?.cwd, health?.cwd, pinSelectionContext]);
 
+  useEffect(() => {
+    const handler = (event) => {
+      const detail = event.detail || {};
+      const { action, target } = detail;
+      if (action !== DESKTOP_CONTEXT_ACTIONS.ADD_DIRECTORY_CONTEXT) return;
+      detail.handled = true;
+      const referencePath = normalizeReferencePath(
+        target?.relativePath || target?.absolutePath || '',
+      );
+      if (target?.kind !== 'directory' || !referencePath) {
+        toast({ kind: 'err', text: '无法获取文件夹路径' });
+        return;
+      }
+      const insertion = inputRef.current?.insertDirectoryReference?.(referencePath);
+      if (!insertion) {
+        toast({ kind: 'err', text: '输入框当前不可用' });
+        return;
+      }
+      toast({ kind: 'ok', text: '已加入输入上下文' });
+    };
+    window.addEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
+    return () => window.removeEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
+  }, []);
+
   const status = useMemo(() => {
     if (!sid) return null;
     return busy || transcriptStatus === 'running' ? 'running' : 'idle';
@@ -2312,6 +2351,47 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
   // 三处 diff UI 共用同一份数据源:把 items 里 tool 项的 hunks 抽成消息格式。
   // 必须放在 early return 之前,否则空态/有 session 之间 hooks 数量不一致 → React #310。
   const changeMessages = useMemo(() => collectHunkMessagesFromItems(items), [items]);
+  // 每轮「本轮改动文件」列表:collectTurnChangeSetsFromItems 按 user 消息切
+  // 回合聚合变更;列表渲染在回合末尾 = 下一个 user 行之前,最后一轮挂在
+  // transcript 末尾(tail)。锚定基于 renderedItems(折叠投影后的视图)里的
+  // user 行 —— user 行不参与活动折叠,id 与 rawItems 一致;万一锚找不到
+  // (极端投影差异)兜底进 tail,列表不丢。
+  const turnChangeSets = useMemo(() => collectTurnChangeSetsFromItems(items), [items]);
+  const turnFileListPlacement = useMemo(() => {
+    const before = new Map();
+    const tail = [];
+    if (!turnChangeSets.length) return { before, tail };
+    const userIds = [];
+    const userIndexById = new Map();
+    for (const it of renderedItems) {
+      if (it?.kind === 'msg' && it.role === 'user') {
+        userIndexById.set(it.id, userIds.length);
+        userIds.push(it.id);
+      }
+    }
+    for (const set of turnChangeSets) {
+      let nextUserId;
+      if (set.userItemId) {
+        const anchorIndex = userIndexById.get(set.userItemId);
+        if (anchorIndex === undefined) {
+          tail.push(set);
+          continue;
+        }
+        nextUserId = userIds[anchorIndex + 1];
+      } else {
+        // orphan 变更集(回合头 user 消息缺失,如截断的 resume)排在首个 user 行之前
+        nextUserId = userIds[0];
+      }
+      if (!nextUserId) {
+        tail.push(set);
+        continue;
+      }
+      const list = before.get(nextUserId) || [];
+      list.push(set);
+      before.set(nextUserId, list);
+    }
+    return { before, tail };
+  }, [renderedItems, turnChangeSets]);
   const rawChangeGroups = useMemo(() => aggregateHunksFromMessages(changeMessages), [changeMessages]);
   const changeSignature = useMemo(() => changeGroupsSignature(rawChangeGroups), [rawChangeGroups]);
   // 引用稳定化:流式期间每个 WS 帧 items 都换新引用,rawChangeGroups 即使内容
@@ -2343,7 +2423,13 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
     [changeDockDismissalKey, dismissedDockSignatures],
   );
   const fileTreeRefreshKey = useMemo(() => fileTreeRefreshKeyFromItems(items), [items]);
-  const hasVisibleTodos = Array.isArray(todos) && todos.length > 0;
+  // todo 环的下一轮自动收起:提交时记录的快照签名仍与当前一致 → 抑制;
+  // agent 更新 todo(签名变化)或切换会话后自动解除。
+  const todoSignature = useMemo(() => todoDockSignature(todos, todoSummary), [todos, todoSummary]);
+  const todosSuppressed = isTodoDockSuppressed(todoDockSuppression, sid, todoSignature);
+  const dockTodos = todosSuppressed ? [] : todos;
+  const dockTodoSummary = todosSuppressed ? null : todoSummary;
+  const hasVisibleTodos = Array.isArray(dockTodos) && dockTodos.length > 0;
   const showChangeDetails = changeSummary.hasChanges
     && !!changeSignature
     && dismissedDockSignature !== changeSignature;
@@ -2403,6 +2489,12 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
       changeSignature,
     ));
   }, [changeDockDismissalKey, changeSignature, setDismissedDockSignatures]);
+
+  // 渲染期刷新 ref(纯缓存):submit 提交新一轮对话时经此收起整个 dock。
+  dockAutoDismissRef.current = () => {
+    dismissChangeDock();
+    if (sid) setTodoDockSuppression({ sessionKey: sid, signature: todoSignature });
+  };
 
   const questionForView = useMemo(() => {
     if (!questionRequest) return null;
@@ -3064,8 +3156,26 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
             }
             const continuation = directive ? directive.showHeader === false : false;
             const showFooter = directive ? directive.showFooter !== false : true;
+            const turnFileSetsBefore = it.kind === 'msg' && it.role === 'user'
+              ? (turnFileListPlacement.before.get(it.id) || [])
+              : [];
             return (
               <Fragment key={it.id}>
+                {turnFileSetsBefore.map((set) => (
+                  <div
+                    key={`turn-files-${set.userItemId || 'head'}`}
+                    className="ace-chat-row flex flex-col ace-chat-row-assistant-gutter"
+                    data-chat-row="true"
+                    data-chat-kind="turn_files"
+                  >
+                    <TurnFileList
+                      groups={set.groups}
+                      summary={set.summary}
+                      cwd={sidePanelCwd}
+                      onOpenFile={openFilePreview}
+                    />
+                  </div>
+                ))}
                 <div
                   className={chatRowClassName(it)}
                   data-chat-row="true"
@@ -3101,6 +3211,25 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
               </Fragment>
             );
           })}
+          {/* tail = 当前最后一轮的文件列表。回合进行中(busy)不渲染 ——
+              流式期间变更集随 tool_end 实时增长,列表会先于/夹着正文出现,
+              观感突兀;等整轮吐完(busy 结束)再一次性显示在正文之后。
+              历史回合(before 锚定)不受影响。 */}
+          {!busy && turnFileListPlacement.tail.map((set) => (
+            <div
+              key={`turn-files-${set.userItemId || 'head'}`}
+              className="ace-chat-row flex flex-col ace-chat-row-assistant-gutter"
+              data-chat-row="true"
+              data-chat-kind="turn_files"
+            >
+              <TurnFileList
+                groups={set.groups}
+                summary={set.summary}
+                cwd={sidePanelCwd}
+                onOpenFile={openFilePreview}
+              />
+            </div>
+          ))}
           {busy && !hasVisibleStreamingAssistant && (!hasActiveTool || activity?.phase === 'permission_waiting') && (
             <ActivityIndicator activity={activity} showAceCodeAvatar={showAceCodeAvatar} />
           )}
@@ -3114,8 +3243,8 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
             showChanges={showChangeDetails}
             onReview={openReviewPanel}
             onDismiss={dismissChangeDock}
-            todos={todos}
-            todoSummary={todoSummary}
+            todos={dockTodos}
+            todoSummary={dockTodoSummary}
           />
         )}
         </div>
