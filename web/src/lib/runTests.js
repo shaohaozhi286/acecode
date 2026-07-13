@@ -6,6 +6,7 @@ import './desktopWindowBackground.test.js';
 import './framelessResize.test.js';
 import './sessionStatus.test.js';
 import './codeBlockCopy.test.js';
+import './markdownBlocks.test.js';
 import './inputHistoryNavigation.test.js';
 import './inputBarState.test.js';
 import './composerFileTransfer.test.js';

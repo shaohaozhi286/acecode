@@ -70,17 +70,33 @@ function escapeHtml(s) {
     .replace(/'/g, '&#39;');
 }
 
+// 高亮结果缓存:流式渲染每个 delta 都会重渲全部块,已定稿代码块的内容
+// 不再变化,直接复用上次高亮结果,避免大代码块被反复重新高亮。
+const HIGHLIGHT_CACHE_MAX = 128;
+const highlightCache = new Map();
+
 function highlightCode(str, lang) {
   const norm = normalizeLang(lang);
+  const cacheKey = `${norm} ${str}`;
+  const cached = highlightCache.get(cacheKey);
+  if (cached) return cached;
+
+  let result;
   if (norm && hljs.getLanguage(norm)) {
     try {
-      return {
+      result = {
         lang: norm,
         html: hljs.highlight(str, { language: norm, ignoreIllegals: true }).value,
       };
     } catch { /* fall through to plain */ }
   }
-  return { lang: norm && hljs.getLanguage(norm) ? norm : '', html: escapeHtml(str) };
+  if (!result) {
+    result = { lang: norm && hljs.getLanguage(norm) ? norm : '', html: escapeHtml(str) };
+  }
+
+  if (highlightCache.size >= HIGHLIGHT_CACHE_MAX) highlightCache.clear();
+  highlightCache.set(cacheKey, result);
+  return result;
 }
 
 const md = new MarkdownIt({

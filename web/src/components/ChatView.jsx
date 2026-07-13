@@ -645,6 +645,9 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
   const scrollRef = useRef(null);
   const tailFollowStateRef = useRef(CHAT_TAIL_FOLLOW_STATE.FOLLOWING);
   const tailFollowScrollRafRef = useRef({ first: 0, second: 0 });
+  // 区分"用户滚动"与"流式渲染引起的 scrollTop 位移"用的上下文:上一次
+  // scroll 事件的指标 + 指针是否按住(拖动滚动条/拖选期间的滚动算用户意图)。
+  const scrollActivityRef = useRef({ prev: null, pointerActive: false });
   const lastUserTurnKeyRef = useRef('');
   const inputRef = useRef(null);
   const layoutRef = useRef(null);
@@ -1300,13 +1303,39 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
   const handleMessagesScroll = useCallback(() => {
     const el = scrollRef.current;
     if (el) {
+      const metrics = chatScrollMetrics(el);
       setTailFollowFromAction({
         type: 'scroll',
-        metrics: chatScrollMetrics(el),
+        metrics,
+        prevMetrics: scrollActivityRef.current.prev,
+        userGesture: scrollActivityRef.current.pointerActive,
       });
+      scrollActivityRef.current.prev = metrics;
     }
     scheduleStickyMeasure();
   }, [scheduleStickyMeasure, setTailFollowFromAction]);
+
+  // 滚轮上滚是最明确的"用户想往回看"信号,不等 scroll 事件的启发式判定,
+  // 直接暂停跟随(仅回合进行中生效,见 pauseTailFollowForReview 内的门)。
+  const handleMessagesWheel = useCallback((event) => {
+    if (event.deltaY < 0) pauseTailFollowForReview();
+  }, [pauseTailFollowForReview]);
+
+  const handleMessagesPointerDown = useCallback(() => {
+    scrollActivityRef.current.pointerActive = true;
+  }, []);
+
+  useEffect(() => {
+    const clearPointerActive = () => {
+      scrollActivityRef.current.pointerActive = false;
+    };
+    window.addEventListener('pointerup', clearPointerActive);
+    window.addEventListener('pointercancel', clearPointerActive);
+    return () => {
+      window.removeEventListener('pointerup', clearPointerActive);
+      window.removeEventListener('pointercancel', clearPointerActive);
+    };
+  }, []);
 
   const jumpToStickyUserSource = useCallback((context) => {
     const el = scrollRef.current;
@@ -1354,6 +1383,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
   useLayoutEffect(() => {
     setTailFollowFromAction({ type: 'session_reset' });
     lastUserTurnKeyRef.current = '';
+    scrollActivityRef.current = { prev: null, pointerActive: false };
   }, [sid, setTailFollowFromAction]);
 
   useEffect(() => {
@@ -2944,6 +2974,8 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
         <div
           ref={scrollRef}
           onScroll={handleMessagesScroll}
+          onWheel={handleMessagesWheel}
+          onPointerDown={handleMessagesPointerDown}
           className="ace-chat-transcript-scroll h-full overflow-y-auto px-3.5 py-3 flex flex-col gap-3"
           style={changeDockBottomPadding > 0 ? { paddingBottom: changeDockBottomPadding } : undefined}
         >

@@ -201,6 +201,17 @@ body {
 
 .ace-chat-transcript-scroll {
   scrollbar-color: rgba(150,150,150,.34) transparent;
+  /* 跟随滚动由 ChatView 自己管理;浏览器原生 scroll anchoring 会在流式
+     渲染替换 DOM 时自行调整 scrollTop,与我们的滚到底逻辑互相打架,
+     表现为消息区上下跳动(desktop/WebView2 上尤其明显)。 */
+  overflow-anchor: none;
+}
+
+/* 流式 markdown 的按块渲染包裹层(见 lib/markdown.js renderMarkdownBlocks):
+   display:contents 让包裹 div 不产生盒,子元素直接参与 .ace-md 布局,
+   段落 margin 折叠与后代选择器行为都与整体渲染完全一致。 */
+.ace-md-block {
+  display: contents;
 }
 .ace-chat-transcript-scroll::-webkit-scrollbar {
   width: 10px;
