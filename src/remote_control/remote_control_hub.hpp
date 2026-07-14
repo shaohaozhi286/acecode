@@ -52,7 +52,9 @@ nlohmann::json outbound_message_to_json(const OutboundMessage& msg);
 class OutboundSender {
 public:
     virtual ~OutboundSender() = default;
-    // 同步投递一条消息。失败返回 false 并填 error(用于统计与日志)。
+    // 同步投递一条消息。实现必须设置有限超时并最终返回；Hub shutdown 会
+    // join 投递 worker，无法安全强杀停在任意第三方实现内部的线程。默认
+    // webhook 实现超时为 3 秒。失败返回 false 并填 error(用于统计与日志)。
     virtual bool send(const OutboundMessage& msg, std::string* error) = 0;
 };
 
@@ -90,10 +92,11 @@ public:
     // 等价于 clear_inbound_route()。
     void set_inbound_route(std::string session_id, InboundSubmit fn);
     // 切断后续入站路由，并把调用瞬间之前已排队的出站消息作为一个
-    // drain-through barrier：若 worker 和 sender 都可用，等到该时刻的
-    // 最后一条消息已被 worker 从 FIFO 接管再返回。这样紧随其后的
+    // drain-through barrier：若 worker 和 sender 都可用，最多等待 5 秒，
+    // 让该时刻的最后一条消息被 worker 从 FIFO 接管。这样紧随其后的
     // disable() 会 join 正在 send 的 worker，而不是先清掉已确认入站的 ack。
-    // 不等待网络投递；sender/worker 不可用时安全地立即返回。
+    // sender/worker 不可用时安全地立即返回；5 秒只约束额外的 barrier
+    // 等待，worker join 仍依赖 OutboundSender 的“有限超时并返回”契约。
     void clear_inbound_route();
 
     // 启用:记录 token / session,启动出站 worker。sender 允许为 null(仅入站,

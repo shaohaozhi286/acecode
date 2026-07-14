@@ -25,6 +25,7 @@ bool is_blank(const std::string& s) {
 }
 
 constexpr const char* kInboundAcknowledgement = "思考中...";
+constexpr auto kInboundRouteDrainTimeout = std::chrono::seconds(5);
 
 } // namespace
 
@@ -83,10 +84,18 @@ void RemoteControlHub::clear_inbound_route() {
     if (barrier_seq <= last_dequeued_seq_) return;
     drain_through_seq_ = std::max(drain_through_seq_, barrier_seq);
     cv_.notify_all();
-    cv_.wait(lk, [this, barrier_seq] {
+    cv_.wait_for(lk, kInboundRouteDrainTimeout, [this, barrier_seq] {
         return last_dequeued_seq_ >= barrier_seq || !sender_ || stopping_ ||
                !worker_.joinable();
     });
+    if (last_dequeued_seq_ < barrier_seq) {
+        // 默认 HTTP sender 自带 3 秒超时；额外的 5 秒上限约束 barrier
+        // 自身增加的等待。worker join 仍依赖 OutboundSender 的有限返回契约。
+        // 超时后关闭优先，尚未被 worker 接管的尾部消息按既有 disable 语义清理。
+        if (drain_through_seq_ <= barrier_seq) drain_through_seq_ = 0;
+        LOG_WARN("[remote-control] timed out draining outbound queue through seq=" +
+                 std::to_string(barrier_seq));
+    }
 }
 
 void RemoteControlHub::enable(std::string token,
