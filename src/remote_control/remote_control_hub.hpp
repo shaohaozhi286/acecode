@@ -3,8 +3,9 @@
 // Remote control 基座的核心状态机(openspec add-remote-control)。
 //
 // 职责边界:
-//   - 入站(channel → ACECode):校验 token / 文本,合法则转交 inbound_submit 回调。
-//     回调由 main.cpp 接到输入框同款的提交路径(busy 时排队,空闲时 submit)。
+//   - 入站(channel → ACECode):校验 token / 文本,合法则先排一条固定确认,
+//     再转交 inbound_submit 回调。回调由 main.cpp 接到输入框同款的提交路径
+//     (busy 时排队,空闲时 submit)。
 //   - 出站(ACECode → channel):assistant 回合产出经 notify_assistant_text 进有界
 //     队列,由 hub 自有 worker 线程异步调 OutboundSender 投递 —— 投递阻塞或
 //     失败都不影响 agent / UI 线程。
@@ -135,6 +136,10 @@ public:
     static constexpr std::size_t kMaxQueue = 256;
 
 private:
+    // 调用方须持 mu_ 且已完成 enabled/text 等校验。只负责构造
+    // assistant_message 并放入既有有界 FIFO;允许 sender_ 暂为空,worker 会
+    // 在 set_outbound_sender 后异步投递。
+    void enqueue_assistant_text_locked(const std::string& text);
     void worker_loop();
     void stop_worker_locked(std::unique_lock<std::mutex>& lk);
 

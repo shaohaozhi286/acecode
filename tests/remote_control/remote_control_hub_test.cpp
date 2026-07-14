@@ -116,6 +116,77 @@ TEST(RemoteControlHub, ValidInboundReachesSubmit) {
     hub.disable();
 }
 
+// 场景:合法入站的 submit 回调本身立即排一条出站消息。期望:固定确认已在
+// 调用 submit 之前进入同一 FIFO 队列,因此 sender 必须先收到确认、后收到
+// submit 回调排入的标记消息。这里断言的是入队顺序,不要求 worker 在 submit
+// 返回前完成网络投递。
+TEST(RemoteControlHub, ValidInboundQueuesAcknowledgementBeforeSubmit) {
+    RemoteControlHub hub;
+    auto sender = std::make_shared<FakeSender>();
+    hub.enable("secret", "sess-1", sender);
+    hub.set_inbound_submit([&](const std::string&) {
+        hub.notify_assistant_text("submit-called");
+    });
+
+    auto result = hub.handle_inbound("hello", "secret");
+    EXPECT_TRUE(result.ok()) << result.message;
+    ASSERT_TRUE(sender->wait_for_count(2, std::chrono::seconds(5)));
+
+    hub.disable();
+    auto sent = sender->sent();
+    ASSERT_EQ(sent.size(), 2u);
+    EXPECT_EQ(sent[0].type, "assistant_message");
+    EXPECT_EQ(sent[0].session_id, "sess-1");
+    EXPECT_EQ(sent[0].text, "思考中...");
+    EXPECT_EQ(sent[1].text, "submit-called");
+    EXPECT_LT(sent[0].seq, sent[1].seq);
+}
+
+// 场景:上一条合法入站对应的工作尚未完成时又收到一条合法入站。期望:每条
+// 入站各排一次固定确认,不做 busy/轮次去重。
+TEST(RemoteControlHub, EachValidInboundQueuesOneAcknowledgement) {
+    RemoteControlHub hub;
+    auto sender = std::make_shared<FakeSender>();
+    hub.set_inbound_submit([](const std::string&) {});
+    hub.enable("secret", "sess-1", sender);
+
+    EXPECT_TRUE(hub.handle_inbound("first", "secret").ok());
+    EXPECT_TRUE(hub.handle_inbound("second", "secret").ok());
+    ASSERT_TRUE(sender->wait_for_count(2, std::chrono::seconds(5)));
+
+    hub.disable();
+    auto sent = sender->sent();
+    ASSERT_EQ(sent.size(), 2u);
+    EXPECT_EQ(sent[0].text, "思考中...");
+    EXPECT_EQ(sent[1].text, "思考中...");
+}
+
+// 场景:Disabled/BadToken/BadText/NoSession 入站。期望:全部拒绝且不排固定
+// 确认。最后主动排一条 control 并 join worker,据 sender 最终精确条数证明
+// 前面的拒绝路径没有留下异步消息。
+TEST(RemoteControlHub, RejectedInboundDoesNotQueueAcknowledgement) {
+    RemoteControlHub hub;
+    EXPECT_EQ(hub.handle_inbound("disabled", "secret").code,
+              InboundResult::Code::Disabled);
+
+    auto sender = std::make_shared<FakeSender>();
+    hub.enable("secret", "sess-1", sender);
+    EXPECT_EQ(hub.handle_inbound("bad token", "wrong").code,
+              InboundResult::Code::BadToken);
+    EXPECT_EQ(hub.handle_inbound("   ", "secret").code,
+              InboundResult::Code::BadText);
+    EXPECT_EQ(hub.handle_inbound("no session", "secret").code,
+              InboundResult::Code::NoSession);
+
+    hub.notify_assistant_text("control");
+    ASSERT_TRUE(sender->wait_for_count(1, std::chrono::seconds(5)));
+    hub.disable();
+
+    auto sent = sender->sent();
+    ASSERT_EQ(sent.size(), 1u);
+    EXPECT_EQ(sent[0].text, "control");
+}
+
 // 场景:空文本 / 纯空白 / 超过 kMaxInboundBytes 的超大文本。期望:BadText。
 // 上限只防恶意或失控 payload,正常 IM 消息远小于 64KB。
 TEST(RemoteControlHub, BlankAndOversizeTextRejected) {

@@ -23,6 +23,8 @@ bool is_blank(const std::string& s) {
     return true;
 }
 
+constexpr const char* kInboundAcknowledgement = "思考中...";
+
 } // namespace
 
 nlohmann::json outbound_message_to_json(const OutboundMessage& msg) {
@@ -137,6 +139,10 @@ InboundResult RemoteControlHub::handle_inbound(const std::string& text,
         }
         submit = inbound_submit_;
         ++stats_.inbound_accepted;
+        // 必须在 submit 前进入同一出站 FIFO:submit 可能立即启动模型或做
+        // 协调工作,但确认不能被这些工作拖延。sender 尚未就绪时也保留在
+        // 有界队列中,待 set_outbound_sender 后由 hub worker 异步投递。
+        enqueue_assistant_text_locked(kInboundAcknowledgement);
     }
     // 锁外调用:submit 内部会拿 TUI state.mu,持 mu_ 调用有死锁风险。
     submit(text);
@@ -147,6 +153,10 @@ void RemoteControlHub::notify_assistant_text(const std::string& text) {
     std::lock_guard<std::mutex> lk(mu_);
     if (!enabled_ || !sender_) return;
     if (text.empty() || is_blank(text)) return;
+    enqueue_assistant_text_locked(text);
+}
+
+void RemoteControlHub::enqueue_assistant_text_locked(const std::string& text) {
     OutboundMessage msg;
     msg.type = "assistant_message";
     msg.session_id = session_id_;

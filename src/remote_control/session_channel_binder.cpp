@@ -301,7 +301,6 @@ SessionChannelBinder::bind_session(const std::string& session_id) {
         old_sub = sub_id_;
         sub_id_ = 0;
         generation = binding_.bind(session_id);
-        thinking_hint_sent_ = false;  // 新绑定:下一轮首个 Token 重新触发"思考中..."
     }
     service.hub().set_session_id(session_id);
     if (old_sub != 0) deps_.client->unsubscribe(old_session, old_sub);
@@ -333,21 +332,6 @@ SessionChannelBinder::bind_session(const std::string& session_id) {
     auto listener = [this, session_id, generation](const SessionEvent& evt) {
         std::lock_guard<std::mutex> lk(mu_);
         if (!binding_.accepts(session_id, generation)) return;
-
-        // "思考中...":本轮可见正文的首个 Token → 发一次(不含 Reasoning
-        // thinking);Done(整轮结束,已核实工具往返不触发 Done)复位。Token
-        // 本身不转发半截正文——正文由回合结束的权威 Message 事件整条回传。
-        if (evt.kind == SessionEventKind::Token) {
-            if (!thinking_hint_sent_) {
-                thinking_hint_sent_ = true;
-                deps_.service->hub().notify_assistant_text("思考中...");
-            }
-            return;
-        }
-        if (evt.kind == SessionEventKind::Done) {
-            thinking_hint_sent_ = false;
-            return;
-        }
 
         auto action = classify_session_event(evt.kind, evt.payload);
         switch (action.kind) {
