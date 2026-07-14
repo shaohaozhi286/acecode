@@ -84,6 +84,13 @@ public:
     // main.cpp 启动期注册一次;把 channel 来的文本注入当前 TUI 会话。
     void set_inbound_submit(InboundSubmit fn);
 
+    // daemon channel 绑定专用:在同一把 Hub 锁下发布“目标会话 + 提交回调”。
+    // handle_inbound 会把这一对作为一个路由快照使用,因此随后发生 rebind/off
+    // 也不会让已接受消息的确认与实际提交分属两个会话。空 session 或空回调
+    // 等价于 clear_inbound_route()。
+    void set_inbound_route(std::string session_id, InboundSubmit fn);
+    void clear_inbound_route();
+
     // 启用:记录 token / session,启动出站 worker。sender 允许为 null(仅入站,
     // 出站 webhook 未配置时的形态)。重复 enable 会先 disable 再重建。
     void enable(std::string token,
@@ -139,7 +146,8 @@ private:
     // 调用方须持 mu_ 且已完成 enabled/text 等校验。只负责构造
     // assistant_message 并放入既有有界 FIFO;允许 sender_ 暂为空,worker 会
     // 在 set_outbound_sender 后异步投递。
-    void enqueue_assistant_text_locked(const std::string& text);
+    void enqueue_assistant_text_locked(const std::string& text,
+                                       const std::string& session_id);
     void worker_loop();
     void stop_worker_locked(std::unique_lock<std::mutex>& lk);
 

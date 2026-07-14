@@ -214,7 +214,8 @@ private:
     SessionChannelBinderDeps deps_;
 
     // 锁序:op_mu_(慢路径串行化)> mu_(状态)> hub/service 内部锁。
-    // 订阅回调 / 出站结果观察者只拿 mu_。
+    // 慢路径均先释放 mu_ 再发布/清除 Hub 入站路由;入站 route callback 在
+    // Hub 锁外执行且不拿 mu_。订阅回调 / 出站结果观察者只拿 mu_。
     std::mutex op_mu_;
     mutable std::mutex mu_;
     std::condition_variable cv_;

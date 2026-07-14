@@ -6,6 +6,8 @@
 #include <condition_variable>
 #include <mutex>
 #include <string>
+#include <thread>
+#include <utility>
 #include <vector>
 
 using acecode::rc::InboundResult;
@@ -54,6 +56,35 @@ public:
         cv_.notify_all();
         cv_.wait(lk, [&] { return released_; });
         return true;
+    }
+
+    bool wait_until_entered(std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lk(mu_);
+        return cv_.wait_for(lk, timeout, [&] { return entered_; });
+    }
+
+    void release() {
+        std::lock_guard<std::mutex> lk(mu_);
+        released_ = true;
+        cv_.notify_all();
+    }
+
+private:
+    std::mutex mu_;
+    std::condition_variable cv_;
+    bool entered_ = false;
+    bool released_ = false;
+};
+
+// 让入站回调在“已被 Hub 接受、实际提交效果尚未发生”的位置停住。测试线程
+// 可在此期间原子换路或清路,从而确定性覆盖 rebind/off 竞态而不依赖 sleep。
+class InboundCallbackGate {
+public:
+    void enter_and_wait() {
+        std::unique_lock<std::mutex> lk(mu_);
+        entered_ = true;
+        cv_.notify_all();
+        cv_.wait(lk, [&] { return released_; });
     }
 
     bool wait_until_entered(std::chrono::milliseconds timeout) {
@@ -159,6 +190,162 @@ TEST(RemoteControlHub, EachValidInboundQueuesOneAcknowledgement) {
     ASSERT_EQ(sent.size(), 2u);
     EXPECT_EQ(sent[0].text, "思考中...");
     EXPECT_EQ(sent[1].text, "思考中...");
+}
+
+// 场景:一条 s1 入站已通过 Hub 校验并进入回调,但回调效果尚未发生时路由
+// 原子换绑到 s2。期望:已接受消息的确认和提交仍同属 s1;下一条才走 s2。
+TEST(RemoteControlHub, AcceptedInboundKeepsRouteSnapshotAcrossRebind) {
+    RemoteControlHub hub;
+    auto sender = std::make_shared<FakeSender>();
+    hub.enable("secret", "startup", sender);
+
+    InboundCallbackGate gate;
+    std::mutex submitted_mu;
+    std::vector<std::pair<std::string, std::string>> submitted;
+    hub.set_inbound_route("sess-1", [&](const std::string& text) {
+        gate.enter_and_wait();
+        std::lock_guard<std::mutex> lk(submitted_mu);
+        submitted.emplace_back("sess-1", text);
+    });
+
+    InboundResult first;
+    std::thread inbound([&] {
+        first = hub.handle_inbound("first", "secret");
+    });
+    const bool first_entered = gate.wait_until_entered(std::chrono::seconds(5));
+    if (!first_entered) {
+        gate.release();
+        inbound.join();
+        FAIL() << "inbound callback did not reach the deterministic gate";
+    }
+
+    hub.set_inbound_route("sess-2", [&](const std::string& text) {
+        std::lock_guard<std::mutex> lk(submitted_mu);
+        submitted.emplace_back("sess-2", text);
+    });
+    gate.release();
+    inbound.join();
+    ASSERT_TRUE(first.ok()) << first.message;
+
+    auto second = hub.handle_inbound("second", "secret");
+    ASSERT_TRUE(second.ok()) << second.message;
+    ASSERT_TRUE(sender->wait_for_count(2, std::chrono::seconds(5)));
+
+    hub.disable();
+    {
+        std::lock_guard<std::mutex> lk(submitted_mu);
+        ASSERT_EQ(submitted.size(), 2u);
+        EXPECT_EQ(submitted[0], std::make_pair(std::string("sess-1"),
+                                               std::string("first")));
+        EXPECT_EQ(submitted[1], std::make_pair(std::string("sess-2"),
+                                               std::string("second")));
+    }
+    auto sent = sender->sent();
+    ASSERT_EQ(sent.size(), 2u);
+    EXPECT_EQ(sent[0].session_id, "sess-1");
+    EXPECT_EQ(sent[0].text, "思考中...");
+    EXPECT_EQ(sent[1].session_id, "sess-2");
+    EXPECT_EQ(sent[1].text, "思考中...");
+}
+
+// 场景:合法入站已被接受后立刻清路(等价于 /rc off 的路由切断)。期望:这条
+// 已接受消息仍完成原会话提交;清路之后的新消息才返回 NoSession 且无确认。
+TEST(RemoteControlHub, AcceptedInboundSurvivesImmediateRouteClear) {
+    RemoteControlHub hub;
+    auto sender = std::make_shared<FakeSender>();
+    hub.enable("secret", "startup", sender);
+
+    InboundCallbackGate gate;
+    std::mutex submitted_mu;
+    std::vector<std::pair<std::string, std::string>> submitted;
+    hub.set_inbound_route("sess-1", [&](const std::string& text) {
+        gate.enter_and_wait();
+        std::lock_guard<std::mutex> lk(submitted_mu);
+        submitted.emplace_back("sess-1", text);
+    });
+
+    InboundResult accepted;
+    std::thread inbound([&] {
+        accepted = hub.handle_inbound("accepted-before-off", "secret");
+    });
+    const bool accepted_entered =
+        gate.wait_until_entered(std::chrono::seconds(5));
+    if (!accepted_entered) {
+        gate.release();
+        inbound.join();
+        FAIL() << "inbound callback did not reach the deterministic gate";
+    }
+    hub.clear_inbound_route();
+    gate.release();
+    inbound.join();
+
+    ASSERT_TRUE(accepted.ok()) << accepted.message;
+    EXPECT_EQ(hub.handle_inbound("after-off", "secret").code,
+              InboundResult::Code::NoSession);
+    ASSERT_TRUE(sender->wait_for_count(1, std::chrono::seconds(5)));
+
+    hub.disable();
+    {
+        std::lock_guard<std::mutex> lk(submitted_mu);
+        ASSERT_EQ(submitted.size(), 1u);
+        EXPECT_EQ(submitted[0],
+                  std::make_pair(std::string("sess-1"),
+                                 std::string("accepted-before-off")));
+    }
+    auto sent = sender->sent();
+    ASSERT_EQ(sent.size(), 1u);
+    EXPECT_EQ(sent[0].session_id, "sess-1");
+    EXPECT_EQ(sent[0].text, "思考中...");
+}
+
+// 场景:接受入站时 webhook sender 尚未安装。期望:确认不丢失,稍后安装 sender
+// 后按接受瞬间的 route session_id 投递。
+TEST(RemoteControlHub, SenderNullDelaysAcknowledgementUntilSenderInstalled) {
+    RemoteControlHub hub;
+    int submitted = 0;
+    hub.enable("secret", "startup", nullptr);
+    hub.set_inbound_route("sess-delayed", [&](const std::string&) { ++submitted; });
+
+    auto result = hub.handle_inbound("hello", "secret");
+    ASSERT_TRUE(result.ok()) << result.message;
+    EXPECT_EQ(submitted, 1);
+
+    auto sender = std::make_shared<FakeSender>();
+    hub.set_outbound_sender(sender);
+    ASSERT_TRUE(sender->wait_for_count(1, std::chrono::seconds(5)));
+    hub.disable();
+
+    auto sent = sender->sent();
+    ASSERT_EQ(sent.size(), 1u);
+    EXPECT_EQ(sent[0].session_id, "sess-delayed");
+    EXPECT_EQ(sent[0].text, "思考中...");
+}
+
+// 场景:disabled 与 oversize 两条拒绝路径。期望:既不提交也不悄悄消耗
+// 出站 seq;后续 control 必须仍是首条消息(seq=1),从而证明没有隐藏确认。
+TEST(RemoteControlHub, DisabledAndOversizeDoNotQueueAcknowledgement) {
+    RemoteControlHub hub;
+    auto sender = std::make_shared<FakeSender>();
+    int submitted = 0;
+    hub.set_inbound_route("sess-1", [&](const std::string&) { ++submitted; });
+
+    EXPECT_EQ(hub.handle_inbound("while-disabled", "secret").code,
+              InboundResult::Code::Disabled);
+
+    hub.enable("secret", "sess-1", sender);
+    std::string huge(RemoteControlHub::kMaxInboundBytes + 1, 'x');
+    EXPECT_EQ(hub.handle_inbound(huge, "secret").code,
+              InboundResult::Code::BadText);
+    EXPECT_EQ(submitted, 0);
+
+    hub.notify_assistant_text("control");
+    ASSERT_TRUE(sender->wait_for_count(1, std::chrono::seconds(5)));
+    hub.disable();
+
+    auto sent = sender->sent();
+    ASSERT_EQ(sent.size(), 1u);
+    EXPECT_EQ(sent[0].seq, 1u);
+    EXPECT_EQ(sent[0].text, "control");
 }
 
 // 场景:Disabled/BadToken/BadText/NoSession 入站。期望:全部拒绝且不排固定

@@ -52,6 +52,24 @@ void RemoteControlHub::set_inbound_submit(InboundSubmit fn) {
     inbound_submit_ = std::move(fn);
 }
 
+void RemoteControlHub::set_inbound_route(std::string session_id,
+                                         InboundSubmit fn) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (session_id.empty() || !fn) {
+        session_id_.clear();
+        inbound_submit_ = {};
+        return;
+    }
+    session_id_ = std::move(session_id);
+    inbound_submit_ = std::move(fn);
+}
+
+void RemoteControlHub::clear_inbound_route() {
+    std::lock_guard<std::mutex> lk(mu_);
+    session_id_.clear();
+    inbound_submit_ = {};
+}
+
 void RemoteControlHub::enable(std::string token,
                               std::string session_id,
                               std::shared_ptr<OutboundSender> sender) {
@@ -115,6 +133,7 @@ void RemoteControlHub::set_outbound_result_observer(OutboundResultObserver obser
 InboundResult RemoteControlHub::handle_inbound(const std::string& text,
                                                const std::string& provided_token) {
     InboundSubmit submit;
+    std::string route_session_id;
     {
         std::lock_guard<std::mutex> lk(mu_);
         auto reject = [this](InboundResult::Code code, std::string msg) {
@@ -134,15 +153,16 @@ InboundResult RemoteControlHub::handle_inbound(const std::string& text,
             return reject(InboundResult::Code::BadText,
                           "text exceeds " + std::to_string(kMaxInboundBytes) + " bytes");
         }
-        if (!inbound_submit_) {
+        if (session_id_.empty() || !inbound_submit_) {
             return reject(InboundResult::Code::NoSession, "no session attached");
         }
+        route_session_id = session_id_;
         submit = inbound_submit_;
         ++stats_.inbound_accepted;
         // 必须在 submit 前进入同一出站 FIFO:submit 可能立即启动模型或做
         // 协调工作,但确认不能被这些工作拖延。sender 尚未就绪时也保留在
         // 有界队列中,待 set_outbound_sender 后由 hub worker 异步投递。
-        enqueue_assistant_text_locked(kInboundAcknowledgement);
+        enqueue_assistant_text_locked(kInboundAcknowledgement, route_session_id);
     }
     // 锁外调用:submit 内部会拿 TUI state.mu,持 mu_ 调用有死锁风险。
     submit(text);
@@ -153,13 +173,14 @@ void RemoteControlHub::notify_assistant_text(const std::string& text) {
     std::lock_guard<std::mutex> lk(mu_);
     if (!enabled_ || !sender_) return;
     if (text.empty() || is_blank(text)) return;
-    enqueue_assistant_text_locked(text);
+    enqueue_assistant_text_locked(text, session_id_);
 }
 
-void RemoteControlHub::enqueue_assistant_text_locked(const std::string& text) {
+void RemoteControlHub::enqueue_assistant_text_locked(
+    const std::string& text, const std::string& session_id) {
     OutboundMessage msg;
     msg.type = "assistant_message";
-    msg.session_id = session_id_;
+    msg.session_id = session_id;
     msg.text = text;
     msg.timestamp_ms = now_ms();
     msg.seq = next_seq_++;

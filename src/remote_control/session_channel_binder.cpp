@@ -302,19 +302,17 @@ SessionChannelBinder::bind_session(const std::string& session_id) {
         sub_id_ = 0;
         generation = binding_.bind(session_id);
     }
-    service.hub().set_session_id(session_id);
     if (old_sub != 0) deps_.client->unsubscribe(old_session, old_sub);
 
     // 入站(行为③):channel 文本走绑定会话的 SessionClient::send_input,
     // AgentLoop::submit 自带 busy 排队语义 —— 与 Web 输入框提交同一条路径。
-    service.hub().set_inbound_submit([this](const std::string& text) {
-        std::string sid;
-        {
-            std::lock_guard<std::mutex> lk(mu_);
-            sid = binding_.bound_session();
-        }
-        if (sid.empty()) return;
-        deps_.client->send_input(sid, text);
+    // session_id 与回调在 Hub 内原子发布;回调只捕获长生命周期 client 指针和
+    // 本世代 sid,不回读 binding_ / 不捕获 this。消息一旦被 Hub 接受,即使
+    // 紧接着 off/rebind,仍会投到接受瞬间的会话。
+    auto* inbound_client = deps_.client;
+    service.hub().set_inbound_route(session_id,
+                                    [inbound_client, session_id](const std::string& text) {
+        inbound_client->send_input(session_id, text);
     });
     // 出站结果观察(行为⑤):连续失败达到阈值 → 唤醒保活线程做幂等再激活。
     service.hub().set_outbound_result_observer([this](bool ok) {
@@ -350,7 +348,7 @@ SessionChannelBinder::bind_session(const std::string& session_id) {
             binding_.unbind();
             active_channel_.reset();
         }
-        service.hub().set_inbound_submit({});
+        service.hub().clear_inbound_route();
         if (started_now) service.stop();
         return {false, "Session " + session_id + " is not active; cannot bind."};
     }
@@ -374,7 +372,7 @@ SessionChannelBinder::bind_session(const std::string& session_id) {
             binding_.unbind();
             active_channel_.reset();
         }
-        service.hub().set_inbound_submit({});
+        service.hub().clear_inbound_route();
         service.hub().set_outbound_result_observer({});
         if (started_now) service.stop();
         return {false, "Failed to activate channel '" + channel_name + "': " + error};
@@ -438,7 +436,7 @@ SessionChannelBinder::CommandOutcome SessionChannelBinder::unbind_and_stop() {
         binding_.unbind();
         reactivate_now_ = false;
     }
-    service.hub().set_inbound_submit({});
+    service.hub().clear_inbound_route();
     service.hub().set_outbound_result_observer({});
     if (old_sub != 0) deps_.client->unsubscribe(old_session, old_sub);
 
@@ -478,7 +476,7 @@ void SessionChannelBinder::shutdown() {
     // 一致,channel 运行时保留,bound_session_id 留在 config,下次 daemon
     // 启动走行为①自动重建。
     deps_.service->stop();
-    deps_.service->hub().set_inbound_submit({});
+    deps_.service->hub().clear_inbound_route();
     deps_.service->hub().set_outbound_result_observer({});
 
     std::string old_session;
