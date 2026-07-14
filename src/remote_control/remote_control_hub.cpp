@@ -3,6 +3,7 @@
 #include "outbound_summary.hpp"
 #include "utils/logger.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <chrono>
 
@@ -65,9 +66,27 @@ void RemoteControlHub::set_inbound_route(std::string session_id,
 }
 
 void RemoteControlHub::clear_inbound_route() {
-    std::lock_guard<std::mutex> lk(mu_);
+    std::unique_lock<std::mutex> lk(mu_);
     session_id_.clear();
     inbound_submit_ = {};
+
+    // sender 未安装时 worker 不能 dequeue；worker 未运行时也没有进展者。
+    // 这两种情况下不能把清路变成无限等待。已在队列中的消息仍遵循原有
+    // sender 安装/enable 生命周期。
+    if (!worker_.joinable() || !sender_) return;
+
+    // 只等待调用瞬间真实留在 FIFO 中的尾消息。next_seq_ 也会为因
+    // drain barrier 满队列而拒绝的新消息递增；以它为目标会等待一个
+    // 从未入队、因而永远不会 dequeue 的 seq。
+    if (queue_.empty()) return;
+    const std::uint64_t barrier_seq = queue_.back().seq;
+    if (barrier_seq <= last_dequeued_seq_) return;
+    drain_through_seq_ = std::max(drain_through_seq_, barrier_seq);
+    cv_.notify_all();
+    cv_.wait(lk, [this, barrier_seq] {
+        return last_dequeued_seq_ >= barrier_seq || !sender_ || stopping_ ||
+               !worker_.joinable();
+    });
 }
 
 void RemoteControlHub::enable(std::string token,
@@ -81,6 +100,10 @@ void RemoteControlHub::enable(std::string token,
     session_id_ = std::move(session_id);
     sender_ = std::move(sender);
     queue_.clear();
+    // seq 跨 enable 生命周期保持单调；被本次重建清掉的旧消息应被视作
+    // 已越过，避免一次没有新出站的 clear barrier 等待不存在的 seq。
+    last_dequeued_seq_ = next_seq_ - 1;
+    drain_through_seq_ = 0;
     worker_ = std::thread([this] { worker_loop(); });
 }
 
@@ -90,6 +113,7 @@ void RemoteControlHub::disable() {
     stop_worker_locked(lk);
     sender_.reset();
     queue_.clear();
+    drain_through_seq_ = 0;
 }
 
 void RemoteControlHub::stop_worker_locked(std::unique_lock<std::mutex>& lk) {
@@ -185,6 +209,11 @@ void RemoteControlHub::enqueue_assistant_text_locked(
     msg.timestamp_ms = now_ms();
     msg.seq = next_seq_++;
     if (queue_.size() >= kMaxQueue) {
+        if (drain_through_seq_ != 0 &&
+            queue_.front().seq <= drain_through_seq_) {
+            ++stats_.outbound_dropped;
+            return;
+        }
         queue_.pop_front();
         ++stats_.outbound_dropped;
     }
@@ -205,6 +234,11 @@ void RemoteControlHub::notify_tool_call(const std::string& session_id,
     msg.timestamp_ms = now_ms();
     msg.seq = next_seq_++;
     if (queue_.size() >= kMaxQueue) {
+        if (drain_through_seq_ != 0 &&
+            queue_.front().seq <= drain_through_seq_) {
+            ++stats_.outbound_dropped;
+            return;
+        }
         queue_.pop_front();
         ++stats_.outbound_dropped;
     }
@@ -236,6 +270,12 @@ void RemoteControlHub::worker_loop() {
         if (stopping_) return;
         OutboundMessage msg = std::move(queue_.front());
         queue_.pop_front();
+        last_dequeued_seq_ = msg.seq;
+        if (drain_through_seq_ != 0 &&
+            last_dequeued_seq_ >= drain_through_seq_) {
+            drain_through_seq_ = 0;
+        }
+        cv_.notify_all();
         std::shared_ptr<OutboundSender> sender = sender_;
         lk.unlock();
 

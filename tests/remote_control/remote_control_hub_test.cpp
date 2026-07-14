@@ -2,6 +2,8 @@
 
 #include "remote_control/remote_control_hub.hpp"
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
@@ -50,8 +52,9 @@ private:
 // "worker 正在投递中、队列持续堆积"的状态。
 class GateSender : public OutboundSender {
 public:
-    bool send(const OutboundMessage& /*msg*/, std::string* /*error*/) override {
+    bool send(const OutboundMessage& msg, std::string* /*error*/) override {
         std::unique_lock<std::mutex> lk(mu_);
+        sent_.push_back(msg);
         entered_ = true;
         cv_.notify_all();
         cv_.wait(lk, [&] { return released_; });
@@ -69,11 +72,17 @@ public:
         cv_.notify_all();
     }
 
+    std::vector<OutboundMessage> sent() {
+        std::lock_guard<std::mutex> lk(mu_);
+        return sent_;
+    }
+
 private:
     std::mutex mu_;
     std::condition_variable cv_;
     bool entered_ = false;
     bool released_ = false;
+    std::vector<OutboundMessage> sent_;
 };
 
 // 让入站回调在“已被 Hub 接受、实际提交效果尚未发生”的位置停住。测试线程
@@ -296,6 +305,106 @@ TEST(RemoteControlHub, AcceptedInboundSurvivesImmediateRouteClear) {
     ASSERT_EQ(sent.size(), 1u);
     EXPECT_EQ(sent[0].session_id, "sess-1");
     EXPECT_EQ(sent[0].text, "思考中...");
+}
+
+// 场景:/rc off 前已有出站正在阻塞，使刚接受入站的 ack 仍留在 FIFO。
+// 期望:clear route 是 dequeue barrier，后续 disable 不会清掉该 ack；但
+// clear 本身不等待网络 send，send 的收尾由 disable 的 worker join 负责。
+TEST(RemoteControlHub, RouteClearDrainsAcceptedAcknowledgementBeforeDisable) {
+    RemoteControlHub hub;
+    auto sender = std::make_shared<GateSender>();
+    hub.enable("secret", "sess-1", sender);
+    hub.notify_assistant_text("block-worker");
+    ASSERT_TRUE(sender->wait_until_entered(std::chrono::seconds(5)));
+
+    hub.set_inbound_route("sess-1", [](const std::string&) {});
+    ASSERT_TRUE(hub.handle_inbound("accepted-before-off", "secret").ok());
+
+    std::atomic<bool> clear_returned{false};
+    std::thread off([&] {
+        hub.clear_inbound_route();
+        clear_returned = true;
+        hub.disable();
+    });
+    // 等到 clear 已切断路由，确保 release 前 off 线程实际进入了 barrier。
+    // 在此之前可能被接受的探测消息也会排 ack；原实现仍会在 disable 的
+    // queue_.clear() 中丢掉它们，修复后至少已有的 accepted ack 必须发送。
+    InboundResult after_off;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    do {
+        after_off = hub.handle_inbound("after-off", "secret");
+        if (after_off.code == InboundResult::Code::NoSession) break;
+        std::this_thread::yield();
+    } while (std::chrono::steady_clock::now() < deadline);
+    ASSERT_EQ(after_off.code, InboundResult::Code::NoSession);
+    EXPECT_FALSE(clear_returned.load());
+
+    sender->release();
+    off.join();
+
+    auto sent = sender->sent();
+    ASSERT_GE(sent.size(), 2u);
+    EXPECT_EQ(sent[0].text, "block-worker");
+    EXPECT_TRUE(std::any_of(sent.begin() + 1, sent.end(),
+                            [](const OutboundMessage& msg) {
+                                return msg.session_id == "sess-1" &&
+                                       msg.text == "思考中...";
+                            }));
+}
+
+// 场景:clear barrier 等待 ack dequeue 的同时，新的 agent 出站把 FIFO 填满。
+// 期望:满队列时拒绝 barrier 之后的新消息，不能淘汰 barrier 前的 ack；否则
+// 后续 clear/stop 可能等待或清掉一个已确认入站的消息。
+TEST(RemoteControlHub, RouteClearBarrierProtectsAcknowledgementFromOverflow) {
+    RemoteControlHub hub;
+    auto sender = std::make_shared<GateSender>();
+    hub.enable("secret", "sess-1", sender);
+    hub.notify_assistant_text("block-worker");
+    ASSERT_TRUE(sender->wait_until_entered(std::chrono::seconds(5)));
+
+    hub.set_inbound_route("sess-1", [](const std::string&) {});
+    ASSERT_TRUE(hub.handle_inbound("accepted-before-clear", "secret").ok());
+
+    std::thread clear([&] { hub.clear_inbound_route(); });
+    InboundResult after_clear;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    do {
+        after_clear = hub.handle_inbound("after-clear", "secret");
+        if (after_clear.code == InboundResult::Code::NoSession) break;
+        std::this_thread::yield();
+    } while (std::chrono::steady_clock::now() < deadline);
+    ASSERT_EQ(after_clear.code, InboundResult::Code::NoSession);
+
+    for (std::size_t i = 0; i < RemoteControlHub::kMaxQueue; ++i) {
+        hub.notify_assistant_text("post-clear-overflow");
+    }
+    sender->release();
+    clear.join();
+    hub.disable();
+
+    const auto sent = sender->sent();
+    ASSERT_GE(sent.size(), 2u);
+    EXPECT_EQ(sent[0].text, "block-worker");
+    EXPECT_TRUE(std::any_of(sent.begin() + 1, sent.end(),
+                            [](const OutboundMessage& msg) {
+                                return msg.session_id == "sess-1" &&
+                                       msg.text == "思考中...";
+                            }));
+}
+
+// 场景:outbound sender 尚未安装时清路。期望:不能等待不存在的 dequeue
+// 进展者；清路后新消息立即被拒绝为 NoSession。
+TEST(RemoteControlHub, RouteClearWithNullSenderReturnsAndRejectsNewInbound) {
+    RemoteControlHub hub;
+    hub.enable("secret", "sess-1", nullptr);
+    hub.set_inbound_route("sess-1", [](const std::string&) {});
+    ASSERT_TRUE(hub.handle_inbound("accepted-before-clear", "secret").ok());
+
+    hub.clear_inbound_route();
+
+    EXPECT_EQ(hub.handle_inbound("after-clear", "secret").code,
+              InboundResult::Code::NoSession);
+    hub.disable();
 }
 
 // 场景:接受入站时 webhook sender 尚未安装。期望:确认不丢失,稍后安装 sender

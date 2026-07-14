@@ -475,8 +475,8 @@ void SessionChannelBinder::shutdown() {
     // 见 main.cpp shutdown_after_tui_loop)。不 deactivate 插件:与 TUI 退出
     // 一致,channel 运行时保留,bound_session_id 留在 config,下次 daemon
     // 启动走行为①自动重建。
-    deps_.service->stop();
     deps_.service->hub().clear_inbound_route();
+    deps_.service->stop();
     deps_.service->hub().set_outbound_result_observer({});
 
     std::string old_session;

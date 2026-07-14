@@ -89,6 +89,11 @@ public:
     // 也不会让已接受消息的确认与实际提交分属两个会话。空 session 或空回调
     // 等价于 clear_inbound_route()。
     void set_inbound_route(std::string session_id, InboundSubmit fn);
+    // 切断后续入站路由，并把调用瞬间之前已排队的出站消息作为一个
+    // drain-through barrier：若 worker 和 sender 都可用，等到该时刻的
+    // 最后一条消息已被 worker 从 FIFO 接管再返回。这样紧随其后的
+    // disable() 会 join 正在 send 的 worker，而不是先清掉已确认入站的 ack。
+    // 不等待网络投递；sender/worker 不可用时安全地立即返回。
     void clear_inbound_route();
 
     // 启用:记录 token / session,启动出站 worker。sender 允许为 null(仅入站,
@@ -163,6 +168,10 @@ private:
     std::deque<OutboundMessage> queue_;
     std::thread worker_;
     std::uint64_t next_seq_ = 1;
+    std::uint64_t last_dequeued_seq_ = 0;
+    // 非零时，入队端不得因 FIFO 满而淘汰该 seq 及之前的消息；否则
+    // clear_inbound_route 的 barrier 可能永远等不到自己保护的消息。
+    std::uint64_t drain_through_seq_ = 0;
     std::size_t forward_cursor_ = 0;
     RemoteControlStats stats_;
 };
