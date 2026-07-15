@@ -75,10 +75,10 @@ std::string quote_windows_argv_element(const std::string& value) {
 }
 #endif
 
-// Build the single-string command cpp-mcp's stdio_client expects. On Windows
-// cpp-mcp launches it through `cmd.exe /c`; the outer quote protects the full
-// command while each inner argv element retains its own boundary. POSIX keeps
-// the existing space-joined behavior because cpp-mcp tokenizes it separately.
+// Build the locator shown in status and logs. On Windows this representation
+// also matches the stdio client's compatibility fallback for commands requiring
+// shell; native executables receive the structured command and argv directly.
+// POSIX keeps the existing space-joined behavior because cpp-mcp tokenizes it.
 std::string build_stdio_command_line(const McpServerConfig& cfg) {
     std::ostringstream oss;
 #if defined(_WIN32)
@@ -290,9 +290,16 @@ McpManager::ConnectionResult McpManager::connect_entry(ConnectionSnapshot snapsh
 
     try {
         if (snapshot.cfg.transport == McpTransport::Stdio) {
+#if defined(_WIN32)
+            result.client = std::make_shared<mcp::stdio_client>(
+                snapshot.cfg.command,
+                snapshot.cfg.args,
+                env_map_to_mcp_json(snapshot.cfg.env));
+#else
             result.client = std::make_shared<mcp::stdio_client>(
                 snapshot.command_line,
                 env_map_to_mcp_json(snapshot.cfg.env));
+#endif
         } else if (snapshot.cfg.transport == McpTransport::Sse) {
             auto sse = std::make_shared<mcp::sse_client>(
                 snapshot.cfg.url,

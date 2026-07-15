@@ -10,6 +10,7 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <mutex>
 #include <sstream>
@@ -145,6 +146,11 @@ TEST(McpManagerAsync, WindowsStdioPreservesExecutableAndArgumentBoundaries) {
         "value with spaces",
         "embedded \"quote\" value",
         "trailing-backslash\\",
+        "%COMSPEC%",
+        "%CD%",
+        "!NAME!",
+        "^",
+        "&",
     };
     std::vector<std::string> args = {"--tool", "argv", "--report-args"};
     for (const auto& value : expected) {
@@ -153,6 +159,7 @@ TEST(McpManagerAsync, WindowsStdioPreservesExecutableAndArgumentBoundaries) {
     }
 
     auto cfg = config_with_stdio_server("argv", std::move(args), helper_path.string());
+    cfg.mcp_servers["argv"].env["NAME"] = "must-not-expand";
     acecode::ToolExecutor tools;
     acecode::McpManager manager;
     ASSERT_TRUE(manager.connect_all(cfg));
@@ -165,6 +172,39 @@ TEST(McpManagerAsync, WindowsStdioPreservesExecutableAndArgumentBoundaries) {
     ASSERT_TRUE(result.success) << result.output;
     EXPECT_EQ(nlohmann::json::parse(result.output).get<std::vector<std::string>>(),
               expected);
+    manager.shutdown();
+}
+
+TEST(McpManagerAsync, WindowsStdioRetainsBatchScriptCompatibility) {
+    ScopedTempDirectory temp;
+    const fs::path fixture_dir = temp.path / "fixture directory";
+    const fs::path helper_path = fixture_dir / "neutral stdio fixture.exe";
+    const fs::path wrapper_path = fixture_dir / "neutral stdio wrapper.cmd";
+    ASSERT_TRUE(fs::create_directories(fixture_dir));
+
+    std::error_code copy_error;
+    ASSERT_TRUE(fs::copy_file(
+        fs::path(ACECODE_MCP_STDIO_TEST_SERVER_PATH),
+        helper_path,
+        fs::copy_options::overwrite_existing,
+        copy_error)) << copy_error.message();
+
+    {
+        std::ofstream wrapper(wrapper_path, std::ios::binary);
+        ASSERT_TRUE(wrapper.is_open());
+        wrapper << "@echo off\r\n"
+                << "\"%~dp0neutral stdio fixture.exe\" --tool \"%~1\"\r\n";
+        ASSERT_TRUE(wrapper.good());
+    }
+
+    auto cfg = config_with_stdio_server("shell", {"shell"}, wrapper_path.string());
+    acecode::ToolExecutor tools;
+    acecode::McpManager manager;
+    ASSERT_TRUE(manager.connect_all(cfg));
+
+    manager.start_async(tools);
+    ASSERT_TRUE(manager.wait_for_startup_settled(std::chrono::seconds(5)));
+    EXPECT_TRUE(tools.has_tool("mcp_shell_shell"));
     manager.shutdown();
 }
 #endif
