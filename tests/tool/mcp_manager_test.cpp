@@ -4,9 +4,12 @@
 #include "tool/mcp_manager.hpp"
 #include "tool/tool_executor.hpp"
 
+#include <nlohmann/json.hpp>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <filesystem>
 #include <iostream>
 #include <mutex>
 #include <sstream>
@@ -16,20 +19,40 @@
 
 namespace {
 
+namespace fs = std::filesystem;
+
 std::vector<std::string> helper_args(std::initializer_list<std::string> args) {
     return std::vector<std::string>(args.begin(), args.end());
 }
 
 acecode::AppConfig config_with_stdio_server(const std::string& name,
-                                            std::vector<std::string> args) {
+                                            std::vector<std::string> args,
+                                            const std::string& command =
+                                                ACECODE_MCP_STDIO_TEST_SERVER_PATH) {
     acecode::AppConfig cfg;
     acecode::McpServerConfig server;
     server.transport = acecode::McpTransport::Stdio;
-    server.command = ACECODE_MCP_STDIO_TEST_SERVER_PATH;
+    server.command = command;
     server.args = std::move(args);
     cfg.mcp_servers[name] = std::move(server);
     return cfg;
 }
+
+struct ScopedTempDirectory {
+    fs::path path;
+
+    ScopedTempDirectory() {
+        const auto unique = std::chrono::steady_clock::now().time_since_epoch().count();
+        path = fs::temp_directory_path() /
+               ("neutral mcp command test " + std::to_string(unique));
+        fs::create_directories(path);
+    }
+
+    ~ScopedTempDirectory() {
+        std::error_code ec;
+        fs::remove_all(path, ec);
+    }
+};
 
 bool has_state(const std::vector<acecode::McpServerInfo>& infos,
                acecode::McpServerState state) {
@@ -102,6 +125,64 @@ TEST(McpManagerAsync, StartAsyncPublishesToolsAndStatusUpdates) {
     std::lock_guard<std::mutex> lk(updates_mu);
     EXPECT_TRUE(has_state(updates, acecode::McpServerState::Starting));
     EXPECT_TRUE(has_state(updates, acecode::McpServerState::Connected));
+}
+
+#ifdef _WIN32
+TEST(McpManagerAsync, WindowsStdioPreservesExecutableAndArgumentBoundaries) {
+    ScopedTempDirectory temp;
+    const fs::path helper_dir = temp.path / "fixture directory";
+    const fs::path helper_path = helper_dir / "neutral stdio fixture.exe";
+    ASSERT_TRUE(fs::create_directories(helper_dir));
+
+    std::error_code copy_error;
+    ASSERT_TRUE(fs::copy_file(
+        fs::path(ACECODE_MCP_STDIO_TEST_SERVER_PATH),
+        helper_path,
+        fs::copy_options::overwrite_existing,
+        copy_error)) << copy_error.message();
+
+    const std::vector<std::string> expected = {
+        "value with spaces",
+        "embedded \"quote\" value",
+        "trailing-backslash\\",
+    };
+    std::vector<std::string> args = {"--tool", "argv", "--report-args"};
+    for (const auto& value : expected) {
+        args.push_back("--record-arg");
+        args.push_back(value);
+    }
+
+    auto cfg = config_with_stdio_server("argv", std::move(args), helper_path.string());
+    acecode::ToolExecutor tools;
+    acecode::McpManager manager;
+    ASSERT_TRUE(manager.connect_all(cfg));
+
+    manager.start_async(tools);
+    ASSERT_TRUE(manager.wait_for_startup_settled(std::chrono::seconds(5)));
+    ASSERT_TRUE(tools.has_tool("mcp_argv_argv"));
+
+    const auto result = tools.execute("mcp_argv_argv", R"({})");
+    ASSERT_TRUE(result.success) << result.output;
+    EXPECT_EQ(nlohmann::json::parse(result.output).get<std::vector<std::string>>(),
+              expected);
+    manager.shutdown();
+}
+#endif
+
+TEST(McpManagerAsync, MapsReadOnlyHintTrueFalseAndMissing) {
+    auto cfg = config_with_stdio_server(
+        "hints",
+        helper_args({"--annotation-matrix"}));
+    acecode::ToolExecutor tools;
+    acecode::McpManager manager;
+    ASSERT_TRUE(manager.connect_all(cfg));
+
+    manager.start_async(tools);
+    ASSERT_TRUE(manager.wait_for_startup_settled(std::chrono::seconds(5)));
+
+    EXPECT_TRUE(tools.is_read_only("mcp_hints_read_only"));
+    EXPECT_FALSE(tools.is_read_only("mcp_hints_write_capable"));
+    EXPECT_FALSE(tools.is_read_only("mcp_hints_unspecified"));
 }
 
 TEST(McpManagerAsync, StartAsyncDoesNotMirrorCppMcpInfoLogsToStderr) {

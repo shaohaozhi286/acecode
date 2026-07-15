@@ -76,7 +76,7 @@ public:
 
     // Discover tools from each connected server and register them into
     // executor with the `mcp_{server}_{tool}` naming convention. All MCP
-    // tools are registered as non-read-only (permission required).
+    // tools honor the optional MCP annotations.readOnlyHint metadata.
     void register_tools(ToolExecutor& executor);
 
     // Start background connection/discovery for every configured server.
@@ -152,6 +152,7 @@ private:
         std::string server_name;           // original server key
         std::string original_tool_name;    // original tool name as returned by MCP
         ToolDef definition;                // parameters schema + description
+        bool is_read_only = false;         // annotations.readOnlyHint == true
     };
 
     struct ConnectionSnapshot {
