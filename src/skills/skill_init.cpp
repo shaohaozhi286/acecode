@@ -116,6 +116,12 @@ void initialize_skill_registry(SkillRegistry& skill_registry,
     skill_registry.set_scan_roots(std::move(roots));
     skill_registry.set_disabled(std::unordered_set<std::string>(
         config.skills.disabled.begin(), config.skills.disabled.end()));
+    if (config.skills.allowed) {
+        skill_registry.set_allowed(std::unordered_set<std::string>(
+            config.skills.allowed->begin(), config.skills.allowed->end()));
+    } else {
+        skill_registry.set_allowed(std::nullopt);
+    }
     skill_registry.scan();
 }
 

@@ -15,6 +15,8 @@
 
 #include "daemon_pool.hpp"
 #include "context_picker.hpp"
+#include "desktop_about.hpp"
+#include "desktop_restart.hpp"
 #include "dpi_win.hpp"
 #include "edge_app_launcher.hpp"
 #include "external_url.hpp"
@@ -38,6 +40,7 @@
 #include "../utils/logger.hpp"
 #include "../utils/state_file.hpp"
 #include "../utils/utf8_path.hpp"
+#include "version.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -653,6 +656,10 @@ int main(int argc, char** argv) {
     acecode::Logger::instance().init_with_rotation(acecode::get_logs_dir(), "desktop", false);
     acecode::Logger::instance().set_level(acecode::LogLevel::Dbg);
     LOG_INFO("[desktop] starting acecode-desktop");
+    const fs::path desktop_restart_target = current_desktop_executable_path();
+    if (desktop_restart_target.empty()) {
+        LOG_WARN("[desktop] could not resolve installed executable path; automatic restart will be unavailable");
+    }
     if (force_webapp) {
         LOG_INFO("[desktop] --webapp requested; embedded WebView will be skipped");
     }
@@ -848,6 +855,7 @@ int main(int argc, char** argv) {
 #endif
     }
     WebHost& host = *host_storage;
+    std::atomic<bool> restart_requested{false};
     host.set_title("ACECode");
     host.set_size(kDefaultDesktopWindowWidth, kDefaultDesktopWindowHeight);
 
@@ -970,6 +978,25 @@ int main(int argc, char** argv) {
         return nlohmann::json{{"ok", true}}.dump();
     });
 
+    // Post-upgrade restart bridge. Preflight while the current UI is still alive
+    // so a missing replacement leaves the success dialog open. The actual
+    // process launch happens only after host.run() returns and all owned runtime
+    // resources have been torn down.
+    host.bind("aceDesktop_restartApp", [&](const std::string& /*req*/) -> std::string {
+        if (restart_requested.load()) {
+            return nlohmann::json{{"ok", true}}.dump();
+        }
+        const auto preflight = validate_desktop_restart_target(desktop_restart_target);
+        if (!preflight.ok) {
+            LOG_ERROR("[desktop] restart preflight failed: " + preflight.error);
+            return nlohmann::json{{"ok", false}, {"error", preflight.error}}.dump();
+        }
+        restart_requested.store(true);
+        LOG_INFO("[desktop] post-upgrade restart requested");
+        host.request_quit();
+        return nlohmann::json{{"ok", true}}.dump();
+    });
+
     // bridge: 前端 console.error/warn + window.onerror + unhandledrejection 转发
     // 到 desktop 日志(~/.acecode/logs/desktop-<date>.log)。
     host.bind("aceDesktop_logFromWeb", [](const std::string& req) -> std::string {
@@ -1005,6 +1032,28 @@ int main(int argc, char** argv) {
         put("wrapper_name", info.wrapper_name);
         put("wrapper_version", info.wrapper_version);
         return body.dump();
+    });
+
+    host.bind("aceDesktop_showAboutDialog", [&](const std::string& /*req*/) -> std::string {
+        const auto web_core = host.web_core_info();
+        DesktopAboutInfo info;
+        info.acecode_version = ACECODE_VERSION;
+        info.browser_name = web_core.name.empty() ? web_core.backend : web_core.name;
+        info.browser_version = web_core.version;
+        info.compiler_version = current_compiler_version();
+        const bool shown = show_desktop_about_dialog(host.native_window(), info);
+        if (!shown) {
+            return nlohmann::json{
+                {"ok", false},
+                {"error", "native About dialog is unavailable"},
+            }.dump();
+        }
+        return nlohmann::json{{"ok", true}}.dump();
+    });
+
+    host.bind("aceDesktop_quitApp", [&](const std::string& /*req*/) -> std::string {
+        host.request_quit();
+        return nlohmann::json{{"ok", true}}.dump();
     });
 
     host.bind("aceDesktop_openExternalUrl", [&](const std::string& req) -> std::string {
@@ -1641,6 +1690,18 @@ int main(int argc, char** argv) {
     shutdown_tray_icon();
 
     auto failures = pool.stop_all();
+    if (restart_requested.load()) {
+        // The replacement must not see the dying process's singleton guard and
+        // focus it instead of starting. At this point the WebView loop, tray,
+        // notifications, and managed daemons have all completed teardown.
+        singleton.release();
+        std::string restart_error;
+        if (!launch_desktop_replacement(desktop_restart_target, &restart_error)) {
+            LOG_ERROR("[desktop] failed to launch replacement after upgrade: " + restart_error);
+            return 101;
+        }
+        LOG_INFO("[desktop] launched replacement after upgrade");
+    }
     return failures.empty() ? 0 : 100; // 部分失败返回非零便于诊断
     }; // end of run lambda
 

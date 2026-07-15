@@ -3061,8 +3061,7 @@ body {
   align-items: flex-start;
 }
 .ace-chat-row-assistant-gutter > * {
-  margin-left: 32px;
-  width: calc(100% - 32px);
+  width: 100%;
   max-width: 88%;
 }
 

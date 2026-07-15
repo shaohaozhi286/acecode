@@ -186,6 +186,8 @@ set(ACECODE_DESKTOP_SUPPORT_SOURCES
     ${CMAKE_SOURCE_DIR}/src/desktop/context_picker.cpp
     ${CMAKE_SOURCE_DIR}/src/desktop/daemon_pool.cpp
     ${CMAKE_SOURCE_DIR}/src/desktop/daemon_supervisor.cpp
+    ${CMAKE_SOURCE_DIR}/src/desktop/desktop_about.cpp
+    ${CMAKE_SOURCE_DIR}/src/desktop/desktop_restart.cpp
     ${CMAKE_SOURCE_DIR}/src/desktop/dpi_win.cpp
     ${CMAKE_SOURCE_DIR}/src/desktop/edge_app_launcher.cpp
     ${CMAKE_SOURCE_DIR}/src/desktop/external_url.cpp
@@ -294,7 +296,7 @@ if(WIN32)
     # bcrypt: desktop/daemon_supervisor.cpp generates daemon auth tokens.
     # ws2_32: readiness probes; shell/user/gdi: Edge/tray/window helpers.
     target_link_libraries(acecode_desktop_support PUBLIC
-        bcrypt ws2_32 ole32 shell32 user32 gdi32
+        bcrypt ws2_32 ole32 shell32 user32 gdi32 comctl32
     )
 endif()
 

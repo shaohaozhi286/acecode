@@ -219,9 +219,12 @@ export function createApi(base = null) {
     getSkillRoot:     (workspaceHash = '') => request('GET',
       '/api/skills/root' + (workspaceHash ? '?workspace=' + encodeURIComponent(workspaceHash) : ''),
       undefined, base),
-    listCommands:     (workspaceHash) => request('GET',
-      '/api/commands' + (workspaceHash ? '?workspace=' + encodeURIComponent(workspaceHash) : ''),
-      undefined, base),
+    listCommands:     (workspaceHash) => {
+      const query = workspaceHash === undefined
+        ? ''
+        : '?workspace=' + encodeURIComponent(workspaceHash ?? '');
+      return request('GET', '/api/commands' + query, undefined, base);
+    },
     setSkillEnabled:  (name, en, workspaceHash = '') => request('PUT',
       `/api/skills/${encodeURIComponent(name)}` + (workspaceHash ? '?workspace=' + encodeURIComponent(workspaceHash) : ''),
       {enabled: en}, base),

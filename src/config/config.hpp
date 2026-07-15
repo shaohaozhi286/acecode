@@ -68,6 +68,11 @@ struct SkillsConfig {
     std::vector<std::string> disabled;       // skill names to hide even if present on disk
     std::vector<std::string> external_dirs;  // extra directories to scan (supports ~ and ${ENV})
     bool reuse_opencode = true;              // reuse opencode-compatible skill roots by default
+    // Runtime-only exact allowlist. nullopt keeps normal discovery behavior;
+    // an engaged empty vector hides every skill. This field is intentionally
+    // not loaded from or saved to config.json — headless mode uses it on its
+    // local AppConfig copy to constrain all cwd-scoped registries.
+    std::optional<std::vector<std::string>> allowed;
 };
 
 struct MemoryConfig {

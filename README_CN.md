@@ -187,7 +187,34 @@ TUI 启动后，输入需求并回车：
 ./acecode --yolo              # 跳过权限确认；等同于 --dangerous
 ```
 
-ACECode 需要交互式 TTY。建议从希望 agent 操作的项目根目录启动。
+普通 TUI 模式需要交互式 TTY。建议从希望 agent 操作的项目根目录启动；脚本和管道请使用 print 模式。
+
+### 无头 Print 模式
+
+`-p` / `--print` 会执行一个非交互 agent turn，把结果写到 stdout，并持久化为可恢复的普通会话：
+
+```bash
+./acecode -p "解释这个仓库"
+git diff | ./acecode -p "审查这份 diff"
+./acecode -p --output-format stream-json "实现这个改动"
+./acecode -p --model fast --permission-mode plan --max-turns 8 "制定计划"
+```
+
+Print 模式默认值是确定的：新会话使用配置的默认模型（恢复会话会沿用其已保存模型，除非显式传入 `--model`）、权限模式为 `default`、不限制 turn、启用当前配置下实际可用的全部系统工具，同时不暴露任何 Skill 和 MCP。普通无头模式下，需要交互确认的工具会被拒绝；只有明确需要时才选择合适权限模式或安全风险更高的 `--yolo`。
+
+能力列表使用区分大小写的精确名称，支持逗号分隔和重复传参：
+
+```bash
+./acecode -p --disable-tools bash,file_write "只分析，不改文件"
+./acecode -p --enable-skills code-review --enable-mcp github "审查这个 PR"
+./acecode -p --enable-mcp github,linear --enable-mcp browser "处理这个问题"
+```
+
+- `--disable-tools <names>`：移除点名的 ACECode 系统工具。
+- `--enable-skills <names>`：只启用点名的已安装 Skill。
+- `--enable-mcp <names>`：只启动点名且未被全局禁用的已配置 MCP server。
+
+未知或全局不可用的名称会在模型 turn 前失败，退出码为 64，并列出本次可用名称。此前依赖隐式 Skill/MCP 能力的脚本现在必须显式启用。运行 `acecode -p --help` 可查看输出格式、会话续接和完整参数。
 
 ### Daemon 与 Web UI
 

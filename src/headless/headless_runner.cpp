@@ -2,6 +2,7 @@
 
 #include "headless_jsonl.hpp"
 #include "headless_mode.hpp"
+#include "headless_name_selection.hpp"
 
 #include "../config/config.hpp"
 #include "../connectors/connector_auth_recovery.hpp"
@@ -175,16 +176,14 @@ acecode::PermissionMode permission_mode_from_config(const std::string& mode) {
     return acecode::PermissionMode::Default;
 }
 
-// prompt 以 '/' 开头时按 cwd 做 skill 命令展开(与 Web POST messages /
-// spawn_subagent 同一套 try_expand_skill_command 语义)。
-void expand_skill_prompt(const AppConfig& cfg,
-                         const std::string& cwd,
+// prompt 以 '/' 开头时用本次 headless 已过滤的 registry 做 skill 命令展开。
+// spawn_subagent 的同名路径会从本地 cfg 重建 registry,也会继承 runtime-only
+// allowlist。
+void expand_skill_prompt(const SkillRegistry& skill_registry,
                          std::string& prompt,
                          std::string& display_text) {
     if (prompt.empty() || prompt[0] != '/') return;
-    SkillRegistry tmp;
-    initialize_skill_registry(tmp, cfg, cwd);
-    auto expansion = web::try_expand_skill_command(prompt, tmp);
+    auto expansion = web::try_expand_skill_command(prompt, skill_registry);
     if (expansion.expanded) {
         display_text = prompt;
         prompt = std::move(expansion.text);
@@ -247,12 +246,60 @@ int run_print_mode(const HeadlessCliOptions& opts) {
         }
     }
 
-    // --max-turns → 会话级 agent_loop.max_iterations 覆盖(cfg 是本地副本,
-    // 必须在 SessionRegistry 构造之前改,entry 创建时经 set_agent_loop_config
-    // 读走)。
-    if (opts.max_turns > 0) {
-        cfg.agent_loop.max_iterations = opts.max_turns;
+    // Skill / MCP 先按“当前配置真实可用”做精确名称预检。两者都在本地
+    // cfg 副本上编译成 allowlist,因此未知/全局 disabled 名称能在启动网络
+    // 子系统和 provider 之前以 usage error 失败。
+    {
+        acecode::SkillRegistry available_skill_registry;
+        acecode::initialize_skill_registry(available_skill_registry, cfg, cwd);
+        std::vector<std::string> available_skill_names;
+        for (const auto& skill : available_skill_registry.list()) {
+            available_skill_names.push_back(skill.name);
+        }
+        auto selection = select_exact_names(
+            opts.enabled_skills, available_skill_names);
+        if (!selection.valid()) {
+            std::cerr << "acecode -p: --enable-skills contains unknown or "
+                         "unavailable skill name(s): "
+                      << format_name_list(selection.unknown)
+                      << "; available: "
+                      << format_name_list(selection.available) << "\n";
+            return 64;
+        }
+        // Engaged empty vector is intentional:headless defaults to no skills.
+        cfg.skills.allowed = std::move(selection.selected);
     }
+
+    {
+        std::vector<std::string> available_mcp_names;
+        for (const auto& [name, server] : cfg.mcp_servers) {
+            if (!server.disabled) available_mcp_names.push_back(name);
+        }
+        auto selection = select_exact_names(
+            opts.enabled_mcp_servers, available_mcp_names);
+        if (!selection.valid()) {
+            std::cerr << "acecode -p: --enable-mcp contains unknown or "
+                         "unavailable MCP server name(s): "
+                      << format_name_list(selection.unknown)
+                      << "; available: "
+                      << format_name_list(selection.available) << "\n";
+            return 64;
+        }
+
+        std::map<std::string, acecode::McpServerConfig> selected_servers;
+        for (const auto& name : selection.selected) {
+            selected_servers.emplace(name, cfg.mcp_servers.at(name));
+        }
+        cfg.mcp_servers = std::move(selected_servers);
+    }
+
+    // -p 的调用级默认不继承全局 turn cap:HeadlessCliOptions::max_turns=0
+    // 与 AgentLoopConfig 的 0=无限语义一致。显式正数则成为本次硬上限。
+    // cfg 是本地副本,不会写回磁盘。
+    cfg.agent_loop.max_iterations = opts.max_turns;
+    const std::string effective_permission_mode =
+        opts.permission_mode.empty() ? std::string{"default"}
+                                     : opts.permission_mode;
 
     // ---- 网络 / 惰性子系统(与 daemon worker.cpp 同序) ----
     network::proxy_resolver().init(cfg.network);
@@ -309,25 +356,52 @@ int run_print_mode(const HeadlessCliOptions& opts) {
     // async 版 AskUserQuestion:headless::active() 分支在工具内部自动应答,
     // 不会真的走到 prompter。仍注册它是为了让模型看到与 daemon 一致的工具面。
     tools.register_tool(acecode::create_ask_user_question_tool_async());
-    tools.register_tool(acecode::create_skills_list_tool(skill_registry, &cfg));
-    tools.register_tool(acecode::create_skill_view_tool(skill_registry, &cfg));
+    if (cfg.skills.allowed && !cfg.skills.allowed->empty()) {
+        tools.register_tool(acecode::create_skills_list_tool(skill_registry, &cfg));
+        tools.register_tool(acecode::create_skill_view_tool(skill_registry, &cfg));
+    }
 
     auto subagent_deps = std::make_shared<acecode::SubagentToolDeps>();
     tools.register_tool(acecode::create_spawn_subagent_tool(subagent_deps));
     tools.register_tool(acecode::create_wait_subagent_tool(subagent_deps));
 
     acecode::daemon::DaemonMcpRuntime mcp_runtime;
-    mcp_runtime.start(cfg, tools);
 
     // 会话流程收进 lambda:它内部的所有早退(参数/会话错误 return)都必须
     // 落回下方的 mcp/lsp shutdown —— 直接 return 跳过收尾会让 MCP 子进程 /
     // LSP reader 线程在 static 析构期触发 fail-fast(实测 0xC0000409),
     // 退出码被吃掉。registry 在 lambda 内构造,先于 shutdown 析构。
     const int exit_code = [&]() -> int {
-        // ---- 权限模板:默认跟随配置;--yolo = dangerous(全放行) ----
+        // 系统工具集合以当前配置实际注册成功的 Builtin definitions 为准。
+        // 先严格校验再注销,且必须发生在 MCP 后台启动之前。
+        std::vector<std::string> available_system_tools;
+        for (const auto& def :
+             tools.get_tool_definitions_by_source(acecode::ToolSource::Builtin)) {
+            available_system_tools.push_back(def.name);
+        }
+        auto disabled_tools = select_exact_names(
+            opts.disabled_system_tools, available_system_tools);
+        if (!disabled_tools.valid()) {
+            std::cerr << "acecode -p: --disable-tools contains unknown or "
+                         "unavailable system tool name(s): "
+                      << format_name_list(disabled_tools.unknown)
+                      << "; available: "
+                      << format_name_list(disabled_tools.available) << "\n";
+            return 64;
+        }
+        for (const auto& name : disabled_tools.selected) {
+            tools.unregister_tool(name);
+        }
+
+        // cfg.mcp_servers 此时已经是本次 invocation 的 allowlist 副本;
+        // 空 map 会直接跳过,非空只启动点名 server。
+        mcp_runtime.start(cfg, tools);
+
+        // ---- 权限模板:-p 未显式传参固定从 default 起步,不继承可能更宽
+        // 的全局/历史模式;--yolo = dangerous(全放行)。 ----
         acecode::PermissionManager template_perm;
         template_perm.set_mode(
-            permission_mode_from_config(cfg.default_permission_mode));
+            permission_mode_from_config(effective_permission_mode));
         if (opts.dangerous_mode) template_perm.set_dangerous(true);
 
         // headless 无 web server,不设 on_config_refreshed:钩子成功刷新磁盘
@@ -363,7 +437,7 @@ int run_print_mode(const HeadlessCliOptions& opts) {
         SessionOptions session_opts;
         session_opts.cwd             = cwd;
         session_opts.model_name      = opts.model_name;
-        session_opts.permission_mode = opts.permission_mode;
+        session_opts.permission_mode = effective_permission_mode;
         session_opts.auto_start      = false;
 
         // meta 探针:--continue 找最近会话 / --session-id 查碰撞都只读磁盘,
@@ -501,7 +575,7 @@ int run_print_mode(const HeadlessCliOptions& opts) {
 
         std::string send_text = prompt;
         std::string display_text;
-        expand_skill_prompt(cfg, cwd, send_text, display_text);
+        expand_skill_prompt(skill_registry, send_text, display_text);
 
         std::signal(SIGINT, sigint_handler);
 

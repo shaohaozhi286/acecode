@@ -26,6 +26,10 @@ public:
     // from scan results.
     void set_disabled(std::unordered_set<std::string> disabled);
 
+    // Optional exact allowlist applied in addition to disabled names. nullopt
+    // means unrestricted; an engaged empty set intentionally selects no skills.
+    void set_allowed(std::optional<std::unordered_set<std::string>> allowed);
+
     // Recursively scan every root for SKILL.md, deduplicate by skill name
     // (first-seen wins, local roots first), drop platform-incompatible or
     // disabled skills, and populate the internal list.
@@ -60,6 +64,7 @@ private:
     mutable std::mutex mu_;
     std::vector<std::filesystem::path> roots_;
     std::unordered_set<std::string> disabled_;
+    std::optional<std::unordered_set<std::string>> allowed_;
     mutable std::vector<SkillMetadata> skills_;
 };
 

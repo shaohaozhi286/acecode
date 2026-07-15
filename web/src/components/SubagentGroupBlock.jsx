@@ -66,7 +66,7 @@ export function SubagentGroupBlock({ agents = [], tasksById, onOpen }) {
   const byId = tasksById || new Map();
 
   return (
-    <div className="ml-8 my-1 max-w-[88%]">
+    <div className="my-1 max-w-[88%]">
       <button
         type="button"
         className="group inline-flex max-w-full items-center gap-2 px-0 py-0.5 text-left text-fg-mute/80 transition-colors"

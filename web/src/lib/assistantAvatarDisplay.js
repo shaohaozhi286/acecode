@@ -2,15 +2,15 @@ export function assistantChromeState() {
   return {
     showAvatar: false,
     showName: false,
-    showAvatarPlaceholder: true,
-    gapClass: 'gap-2',
+    showAvatarPlaceholder: false,
+    gapClass: 'gap-0',
   };
 }
 
 export function activityChromeState() {
   return {
     showAvatar: false,
-    showAvatarPlaceholder: true,
-    gapClass: 'gap-2',
+    showAvatarPlaceholder: false,
+    gapClass: 'gap-0',
   };
 }

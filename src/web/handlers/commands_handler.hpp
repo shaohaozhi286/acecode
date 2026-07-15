@@ -29,9 +29,11 @@ namespace acecode::web {
 //   {builtins: [{name,description}], commands: [{name,description}], skills: [...]}
 // builtins 顺序固定 init→compact→goal→plan;commands/skills 按 name 字典序。
 //
-// workspace_cwd:可选。若非空 + cfg 非空,会按该 workspace cwd 走一次 skill
-// 扫描根计算(.acecode/skills、.agent/skills 项目链 + 全局根),与 global_skills
-// 合并(按 name 去重,workspace local 优先 — first-wins 与 SkillRegistry 一致)。
+// workspace_cwd 三态:
+//   - nullopt:旧客户端未指定 workspace,只返回 builtins;
+//   - nonempty:按该 workspace cwd 扫项目链 + 全局根,再与 global_skills 合并;
+//   - empty:显式无工作区,commands 为空且只扫描全局 skill 根。
+// skills 按 name 去重,真实 workspace 下 local 优先(first-wins)。
 //
 // Desktop 多 workspace 场景下 daemon 启动 cwd 固定,global_skills 只能看到
 // daemon 自己 cwd 链的项目 skills;前端切到 workspace X 时传 X 的 cwd 进来,

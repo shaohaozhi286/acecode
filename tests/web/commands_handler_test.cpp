@@ -272,15 +272,34 @@ TEST_F(CommandsHandlerTest, WorkspaceLocalSkillWinsOverGlobalSameName) {
     EXPECT_EQ(found_count, 1) << "去重应只剩一条 expander-shared";
 }
 
-// 场景:workspace_cwd 是空字符串 → 视为缺省(不输出 skills 字段)
-TEST_F(CommandsHandlerTest, EmptyWorkspaceCwdTreatedAsAbsent) {
+// 场景:显式空 workspace_cwd 表示「无工作区」,只返回真正的全局 skill。
+// daemon fallback registry 故意放入项目 skill,确保该分支不会把 daemon
+// 启动 cwd 的项目链误当全局内容合并进来。
+TEST_F(CommandsHandlerTest, EmptyWorkspaceCwdIncludesOnlyEnabledGlobalSkills) {
+    const fs::path global_root = tmp_root / "global-skills";
+    write_skill_md(global_root, "no-workspace-global", "global desc");
+    write_skill_md(global_root, "no-workspace-disabled", "disabled desc");
+
+    const fs::path daemon_project_root = tmp_root / "daemon-project-skills";
+    write_skill_md(daemon_project_root, "daemon-project-only", "project desc");
     acecode::SkillRegistry global;
+    global.set_scan_roots({daemon_project_root});
+    global.scan();
+
     acecode::AppConfig cfg;
+    cfg.skills.external_dirs = {global_root.string()};
+    cfg.skills.disabled = {"no-workspace-disabled"};
 
     auto payload = acecode::web::build_commands_payload(
         global, std::optional<std::string>{std::string{}}, &cfg);
 
-    EXPECT_FALSE(payload.contains("skills"));
+    ASSERT_TRUE(payload.contains("commands"));
+    EXPECT_TRUE(payload["commands"].empty());
+    ASSERT_TRUE(payload.contains("skills"));
+    EXPECT_EQ(find_skill_desc(payload, "no-workspace-global").value_or(""),
+              "global desc");
+    EXPECT_FALSE(find_skill_desc(payload, "no-workspace-disabled").has_value());
+    EXPECT_FALSE(find_skill_desc(payload, "daemon-project-only").has_value());
 }
 
 // 场景:本机/global skill 的 frontmatter 可能来自非 UTF-8 文件。命令 API

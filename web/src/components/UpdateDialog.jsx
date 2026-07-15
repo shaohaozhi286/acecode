@@ -19,14 +19,17 @@ export function UpdateDialog({
   updateStatus,
   job,
   starting = false,
+  restarting = false,
+  restartAvailable = false,
   onConfirm,
   onRetry,
+  onRestart,
   onClose,
 }) {
   if (!open) return null;
 
   const mode = updateDialogMode(job);
-  const active = updateJobIsActive(job) || starting;
+  const active = updateJobIsActive(job) || starting || restarting;
   const currentVersion = job?.current_version || updateStatus?.current_version;
   const targetVersion = job?.target_version || updateStatus?.latest_version;
   const packageSize = job?.bytes_total ?? updateStatus?.package_size;
@@ -86,7 +89,9 @@ export function UpdateDialog({
 
         {mode === 'success' && (
           <div className="mt-5 rounded-lg border border-ok bg-surface-alt px-4 py-3 text-[12px] leading-5 text-fg">
-            {restartMessage || '升级已安装，请重新启动 ACECode。'}
+            {restartAvailable
+              ? '升级已安装，是否立即重启 ACECode 以使用新版本？'
+              : (restartMessage || '升级已安装，请重新启动 ACECode。')}
           </div>
         )}
 
@@ -131,13 +136,34 @@ export function UpdateDialog({
           </button>
         )}
         {mode === 'success' && (
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-md bg-accent px-4 py-1.5 text-[12px] font-medium text-white hover:opacity-90"
-          >
-            我知道了
-          </button>
+          restartAvailable ? (
+            <>
+              <button
+                type="button"
+                onClick={onClose}
+                disabled={restarting}
+                className="rounded-md px-3 py-1.5 text-[12px] text-fg-mute hover:bg-surface-hi hover:text-fg disabled:opacity-50"
+              >
+                稍后重启
+              </button>
+              <button
+                type="button"
+                onClick={onRestart}
+                disabled={restarting}
+                className="rounded-md bg-accent px-4 py-1.5 text-[12px] font-medium text-white hover:opacity-90 disabled:opacity-60"
+              >
+                {restarting ? '正在重启…' : '立即重启'}
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-md bg-accent px-4 py-1.5 text-[12px] font-medium text-white hover:opacity-90"
+            >
+              我知道了
+            </button>
+          )
         )}
         {mode === 'failure' && (
           <>

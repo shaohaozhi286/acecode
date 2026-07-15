@@ -22,7 +22,13 @@
 //   acecode -p --yolo "fix the bug"         跳过所有权限确认
 //   acecode -p --permission-mode accept-edits "..."
 //   acecode -p --model my-model "..."       指定 saved_models 里的命名模型
-//   acecode -p --max-turns 10 "..."         回合内迭代上限(0 = 跟随配置)
+//   acecode -p --max-turns 10 "..."         回合内迭代上限(不传 = 无限)
+//   acecode -p --disable-tools bash,file_write "..."
+//                                           禁用点名的系统内置工具
+//   acecode -p --enable-skills review-docs "..."
+//                                           只启用点名 Skill(默认全禁用)
+//   acecode -p --enable-mcp github,linear "..."
+//                                           只启用点名 MCP(默认全禁用)
 //   acecode -p --help                       打印 print 模式帮助
 
 #include <string>
@@ -41,7 +47,10 @@ struct HeadlessCliOptions {
     std::string output_format;     // --output-format <text|json|stream-json>,空 = text
     std::string permission_mode;   // --permission-mode <default|accept-edits|plan|yolo>
     std::string model_name;        // --model <saved_models.name>
-    int max_turns = 0;             // --max-turns <n>,0 = 不覆盖配置
+    int max_turns = 0;             // --max-turns <n>,0 = 本次无限制
+    std::vector<std::string> disabled_system_tools; // --disable-tools 精确名称
+    std::vector<std::string> enabled_skills;        // --enable-skills 精确名称
+    std::vector<std::string> enabled_mcp_servers;   // --enable-mcp 精确 server 名
     std::string prompt;            // 位置参数(第一个非 flag token)
     std::string error;             // 非空 = 用法错误,调用方打印后 exit 64
 };

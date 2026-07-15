@@ -375,9 +375,15 @@ void WebServer::Impl::register_commands() {
             if (auto rej = require_auth(req)) return std::move(*rej);
             std::optional<std::string> workspace_cwd;
             const char* workspace_q = req.url_params.get("workspace");
-            if (workspace_q && *workspace_q) {
-                if (auto m = resolve_workspace(workspace_q)) {
-                    if (!m->cwd.empty()) workspace_cwd = m->cwd;
+            if (workspace_q) {
+                if (*workspace_q) {
+                    if (auto m = resolve_workspace(workspace_q)) {
+                        if (!m->cwd.empty()) workspace_cwd = m->cwd;
+                    }
+                } else {
+                    // 显式 `?workspace=` 代表无工作区。必须保留 engaged empty
+                    // 与完全省略 query(旧客户端兼容响应)的区别。
+                    workspace_cwd = std::string{};
                 }
             }
             SkillRegistry empty_registry;

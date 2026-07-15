@@ -1017,8 +1017,10 @@ and prefix-checked against `cwd` (`400` outside the workspace). Patches over
 
 ### `GET /api/commands?workspace=<hash>`
 
-Returns builtin slash commands and, when `workspace` is supplied, merged
-workspace/global skills:
+Returns builtin slash commands. A non-empty `workspace` hash also returns
+project commands plus merged workspace/global skills. An explicitly empty
+query (`/api/commands?workspace=`) represents no-workspace input and returns an
+empty `commands` array plus enabled global skills only:
 
 ```json
 {
@@ -1034,7 +1036,8 @@ workspace/global skills:
 }
 ```
 
-The `skills` field is omitted when no workspace cwd is provided.
+For backward compatibility, omitting the `workspace` query entirely returns
+the builtin-only response and omits both `commands` and `skills`.
 
 ### `GET /api/skills/root?workspace=<hash>`
 
@@ -1435,6 +1438,14 @@ Returns structured progress for one update job. `state` is `pending`, `running`,
 `restart_required` to `true` because the current daemon and desktop shell remain
 the already-running version until ACECode is fully restarted. Failed jobs
 include `error` and may be retried with a new `POST /api/update/start`.
+
+In the native desktop shell, a successful job asks whether to restart now. The
+restart-now action uses the in-process desktop bridge to bypass close-to-tray,
+stop the shell's managed daemon processes and tray resources, release the
+single-instance guard, and launch the newly installed desktop executable.
+Choosing restart later leaves the current process running. Normal browser and
+Edge-app compatibility clients do not own the desktop lifecycle, so they show
+manual full-exit-and-relaunch guidance instead of an automatic restart action.
 
 ### `GET /api/config/ace-browser-bridge`
 

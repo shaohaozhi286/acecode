@@ -66,7 +66,12 @@ import {
   stripOpenSessionParams,
 } from './lib/sessionJump.js';
 import { desktopUiMode } from './lib/desktopShellMode.js';
-import { updateJobIsActive } from './lib/updateJob.js';
+import { requestDesktopAppExit, showDesktopAboutDialog } from './lib/desktopAppActions.js';
+import {
+  desktopUpdateRestartAvailable,
+  requestDesktopUpdateRestart,
+  updateJobIsActive,
+} from './lib/updateJob.js';
 import {
   pushPermissionRequest,
   removePermissionRequest,
@@ -115,6 +120,8 @@ export function App() {
   const [searchOpen,   setSearchOpen]   = useState(false);
   const [updateStatus, setUpdateStatus] = useState(null);
   const [updateStarting, setUpdateStarting] = useState(false);
+  const [updateChecking, setUpdateChecking] = useState(false);
+  const [updateRestarting, setUpdateRestarting] = useState(false);
   const [updateJob, setUpdateJob] = useState(null);
   const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
   const [singleLayout, setSingleLayout] = usePreference(
@@ -314,7 +321,12 @@ export function App() {
         updatePollRef.current = 0;
         setUpdateDialogOpen(true);
         if (job?.state === 'succeeded') {
-          toast({ kind: 'ok', text: '升级安装完成，请完全退出并重新启动 ACECode' });
+          toast({
+            kind: 'ok',
+            text: desktopUpdateRestartAvailable()
+              ? '升级安装完成，可立即重启 ACECode'
+              : '升级安装完成，请完全退出并重新启动 ACECode',
+          });
         } else if (job?.state === 'failed') {
           toast({ kind: 'err', text: '升级失败:' + (job.error || '未知错误') });
         }
@@ -538,6 +550,48 @@ export function App() {
     setUpdateDialogOpen(true);
   }, [updateJob, updateStatus]);
 
+  const checkForUpdates = useCallback(async () => {
+    if (updateChecking) return;
+    setUpdateChecking(true);
+    try {
+      const status = await api.getUpdateStatus();
+      setUpdateStatus(status);
+      if (status?.update_available
+          || updateJobIsActive(updateJob)
+          || (updateJob?.state === 'succeeded' && updateJob?.restart_required)) {
+        setUpdateDialogOpen(true);
+        return;
+      }
+      const currentVersion = String(status?.current_version || health?.version || '').trim();
+      toast({
+        kind: 'ok',
+        text: currentVersion
+          ? `当前已是最新版本 v${currentVersion.replace(/^v/i, '')}`
+          : '当前已是最新版本',
+      });
+    } catch (e) {
+      toast({ kind: 'err', text: '检查更新失败:' + (e?.message || '未知错误') });
+    } finally {
+      setUpdateChecking(false);
+    }
+  }, [health?.version, updateChecking, updateJob]);
+
+  const showAboutAceCode = useCallback(async () => {
+    const result = await showDesktopAboutDialog();
+    if (!result?.ok) openSettingsSection('about');
+  }, [openSettingsSection]);
+
+  const exitAceCode = useCallback(async () => {
+    const result = await requestDesktopAppExit();
+    if (result?.ok) return;
+    toast({
+      kind: 'err',
+      text: result?.unavailable
+        ? '当前环境不支持退出 ACECode'
+        : '退出 ACECode 失败:' + (result?.error || '未知错误'),
+    });
+  }, []);
+
   const startUpdate = useCallback(async () => {
     if (!updateStatus?.update_available || updateStarting || updateJobIsActive(updateJob)) return;
     setUpdateStarting(true);
@@ -559,6 +613,19 @@ export function App() {
       setUpdateStarting(false);
     }
   }, [pollUpdateJob, updateJob, updateStarting, updateStatus]);
+
+  const restartAfterUpdate = useCallback(async () => {
+    if (updateRestarting
+        || updateJob?.state !== 'succeeded'
+        || !updateJob?.restart_required) return;
+    setUpdateRestarting(true);
+    try {
+      await requestDesktopUpdateRestart();
+    } catch (e) {
+      setUpdateRestarting(false);
+      toast({ kind: 'err', text: '自动重启失败:' + (e?.message || '未知错误') });
+    }
+  }, [updateJob, updateRestarting]);
 
   const openHomeForWorkspace = useCallback((workspace = null) => {
     const target = workspace == null ? noHomeWorkspaceOption() : workspace;
@@ -869,20 +936,25 @@ export function App() {
         onNewSession={() => openHomeForWorkspace()}
         onOpenLoop={openLoopPage}
         onOpenSearch={() => setSearchOpen(true)}
+        onAbout={showAboutAceCode}
+        onExit={exitAceCode}
         onToggleConsole={toggleConsoleDock}
         consoleAvailable={consoleAvailable}
         consoleOpen={consoleDock.open}
         sidebarCollapsed={sidebarCollapsed}
+        sidebarWidth={singleLayout.sidebar}
         onToggleSidebar={toggleProjectSidebar}
         onGoBack={goBackActiveRef}
         onGoForward={goForwardActiveRef}
         canGoBack={navHistory.back.length > 0}
         canGoForward={navHistory.forward.length > 0}
         updateStatus={updateStatus}
+        updateChecking={updateChecking}
         updateStarting={updateStarting}
         updateRunning={updateJobIsActive(updateJob)}
         updateReady={updateJob?.state === 'succeeded' && !!updateJob?.restart_required}
         onStartUpdate={openUpdateDialog}
+        onCheckUpdates={checkForUpdates}
         appVersion={health?.version || ''}
       />
       <div ref={singleShellRef} className="flex-1 flex overflow-hidden relative min-h-0 ace-single-shell">
@@ -1000,8 +1072,11 @@ export function App() {
         updateStatus={updateStatus}
         job={updateJob}
         starting={updateStarting}
+        restarting={updateRestarting}
+        restartAvailable={desktopUpdateRestartAvailable()}
         onConfirm={startUpdate}
         onRetry={startUpdate}
+        onRestart={restartAfterUpdate}
         onClose={() => setUpdateDialogOpen(false)}
       />
       <DesktopGuidedTour

@@ -323,7 +323,7 @@ function ActivityIndicator({ activity, showAceCodeAvatar = false }) {
 
 function ActivitySummaryBlock({ item, expanded, onToggle }) {
   return (
-    <div className="ml-8 my-1 max-w-[88%]">
+    <div className="my-1 max-w-[88%]">
       <button
         type="button"
         className="group inline-flex max-w-full items-center gap-2 px-0 py-0.5 text-left text-fg-mute/80 transition-colors"
@@ -364,7 +364,7 @@ function CompletionSummaryBlock({ item }) {
 
   return (
     <div
-      className="max-w-[88%] ml-8 px-1 py-0.5 text-fg break-words"
+      className="max-w-[88%] px-1 py-0.5 text-fg break-words"
       title={item?.title || `总结：${summaryText}`}
     >
       <div className="text-[12px] font-semibold text-fg-mute mb-0.5">总结</div>
@@ -379,7 +379,7 @@ function CompletionSummaryBlock({ item }) {
 
 function TerminationNoticeBlock({ item }) {
   return (
-    <div className="max-w-[88%] ml-8 px-1 py-0.5 text-[12px] leading-5 text-danger whitespace-pre-wrap break-words">
+    <div className="max-w-[88%] px-1 py-0.5 text-[12px] leading-5 text-danger whitespace-pre-wrap break-words">
       {item?.content || '任务已终止'}
     </div>
   );
@@ -3068,7 +3068,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
           onScroll={handleMessagesScroll}
           onWheel={handleMessagesWheel}
           onPointerDown={handleMessagesPointerDown}
-          className="ace-chat-transcript-scroll h-full overflow-y-auto px-3.5 py-3 flex flex-col gap-3"
+          className="ace-chat-transcript-scroll h-full overflow-y-auto pl-[35px] pr-3.5 py-3 flex flex-col gap-3"
           style={changeDockBottomPadding > 0 ? { paddingBottom: changeDockBottomPadding } : undefined}
         >
           {renderedItems.map((it) => {

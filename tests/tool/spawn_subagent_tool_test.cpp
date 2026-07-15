@@ -30,6 +30,19 @@ namespace fs = std::filesystem;
 
 namespace {
 
+void write_test_skill(const fs::path& workspace,
+                      const std::string& name,
+                      const std::string& description) {
+    const fs::path dir = workspace / ".acecode" / "skills" / name;
+    fs::create_directories(dir);
+    std::ofstream out(dir / "SKILL.md", std::ios::binary);
+    out << "---\n"
+        << "name: " << name << "\n"
+        << "description: " << description << "\n"
+        << "---\n\n"
+        << "# " << name << "\n";
+}
+
 // 立即回复固定文本的 stub:子会话 turn 会产生一条 assistant 消息。
 class EchoStreamProvider : public acecode::LlmProvider {
 public:
@@ -110,6 +123,7 @@ public:
 struct SubagentFixture {
     acecode::ToolExecutor tools;
     acecode::PermissionManager permissions;
+    acecode::AppConfig config;
     std::shared_ptr<acecode::LlmProvider> provider;
     acecode::SessionRegistry registry;
     acecode::LocalSessionClient client;
@@ -125,6 +139,7 @@ struct SubagentFixture {
         deps = std::make_shared<acecode::SubagentToolDeps>();
         deps->registry = &registry;
         deps->client = &client;
+        deps->config = &config;
         tools.register_tool(acecode::create_spawn_subagent_tool(deps));
         tools.register_tool(acecode::create_wait_subagent_tool(deps));
     }
@@ -224,6 +239,43 @@ TEST(SpawnSubagentTool, CallsOnSpawnBeforeSendingFirstInput) {
     EXPECT_TRUE(recording_client.send_saw_on_spawn)
         << "tracking must be installed before the first child input is queued";
     fx.registry.destroy(child_id);
+}
+
+TEST(SpawnSubagentTool, SkillExpansionUsesInvocationAllowlist) {
+    SubagentFixture fx;
+    const std::string allowed = "headless-allowed-skill";
+    const std::string blocked = "headless-blocked-skill";
+    write_test_skill(fx.cwd, allowed, "selected by this invocation");
+    write_test_skill(fx.cwd, blocked, "must remain hidden");
+    fx.config.skills.allowed = std::vector<std::string>{allowed};
+
+    RecordingSessionClient recording_client;
+    fx.deps->client = &recording_client;
+
+    const std::string allowed_prompt = "/" + allowed + " inspect this";
+    auto expanded = fx.tools.execute(
+        "spawn_subagent",
+        std::string(R"({"prompt":")") + allowed_prompt + R"(","wait":false})",
+        fx.ctx_for(""));
+    ASSERT_TRUE(expanded.success) << expanded.output;
+    EXPECT_EQ(recording_client.sent_display_text, allowed_prompt);
+    EXPECT_NE(recording_client.sent_text, allowed_prompt);
+    EXPECT_NE(recording_client.sent_text.find(allowed), std::string::npos);
+    const std::string first_child =
+        expanded.metadata["subagent_session_id"].get<std::string>();
+    fx.registry.destroy(first_child);
+
+    const std::string blocked_prompt = "/" + blocked + " inspect this";
+    auto untouched = fx.tools.execute(
+        "spawn_subagent",
+        std::string(R"({"prompt":")") + blocked_prompt + R"(","wait":false})",
+        fx.ctx_for(""));
+    ASSERT_TRUE(untouched.success) << untouched.output;
+    EXPECT_EQ(recording_client.sent_text, blocked_prompt);
+    EXPECT_TRUE(recording_client.sent_display_text.empty());
+    const std::string second_child =
+        untouched.metadata["subagent_session_id"].get<std::string>();
+    fx.registry.destroy(second_child);
 }
 
 // 场景: 子代理不能再派生子代理 —— 用子会话自己的 SessionManager 作为调用

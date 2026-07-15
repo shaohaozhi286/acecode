@@ -1208,7 +1208,7 @@ void AgentLoop::maybe_continue_goal() {
     // Plan mode 下不自动开新回合(对齐 Codex try_start_turn_if_idle 的
     // PlanMode 拒绝):plan 模式的只读约束不该被 goal continuation 绕过。
     // 退出 plan mode 后的下一次回合结束会重新触发 continuation。
-    if (permissions_.mode() == PermissionMode::Plan && !permissions_.is_dangerous()) {
+    if (permissions_.mode() == PermissionMode::Plan) {
         return;
     }
     const std::string sid = session_manager_->current_session_id();
@@ -1238,7 +1238,7 @@ void AgentLoop::maybe_continue_goal() {
 bool AgentLoop::goal_unattended_active() {
     if (!session_manager_) return false;
     // Plan mode 的只读约束优先于 goal 自动放行,否则 plan 模式形同虚设。
-    if (permissions_.mode() == PermissionMode::Plan && !permissions_.is_dangerous()) {
+    if (permissions_.mode() == PermissionMode::Plan) {
         return false;
     }
     ThreadGoalStore* store = session_manager_->existing_goal_store();
@@ -1880,11 +1880,17 @@ ToolContext AgentLoop::build_tool_context(
         return goal_unattended_active();
     };
     tool_ctx.current_permission_mode = [this]() {
-        if (permissions_.is_dangerous() ||
-            permissions_.mode() == PermissionMode::Yolo) {
+        const PermissionMode mode = permissions_.mode();
+        // An explicitly selected Plan mode is authoritative even when the
+        // process was started with --yolo/--dangerous. Otherwise the plan
+        // prompt remains active while ExitPlanMode sees "yolo" and no-ops.
+        if (mode == PermissionMode::Plan) {
+            return std::string{"plan"};
+        }
+        if (permissions_.is_dangerous() || mode == PermissionMode::Yolo) {
             return std::string{"yolo"};
         }
-        return std::string(PermissionManager::mode_name(permissions_.mode()));
+        return std::string(PermissionManager::mode_name(mode));
     };
     tool_ctx.question_policy = [this]() {
         return resolved_question_policy();
@@ -2454,8 +2460,7 @@ bool AgentLoop::execute_tool_calls(
                     session_manager_->is_plan_file_path(ctx_path);
                 bool auto_allow = permissions_.should_auto_allow(
                     effective_tc.function_name, false, ctx_path, ctx_command);
-                if (permissions_.mode() == PermissionMode::Plan &&
-                    !permissions_.is_dangerous()) {
+                if (permissions_.mode() == PermissionMode::Plan) {
                     auto_allow = targets_active_plan_file || effective_tc.function_name == "TodoWrite";
                 }
                 if (effective_tc.function_name == "ExitPlanMode" &&
@@ -2751,11 +2756,17 @@ bool AgentLoop::execute_tool_calls(
         if (session_manager_) session_manager_->on_message(meta_msg);
     }
 
-    // Terminator detection. The ONLY terminator tool is task_complete.
+    // Terminator detection. A failed ExitPlanMode is a user/runtime boundary:
+    // retrying it in the same turn only replays the approval request while the
+    // session correctly remains in Plan mode.
     for (size_t i = 0; i < accumulated.tool_calls.size(); ++i) {
         const auto& tc = accumulated.tool_calls[i];
         if (tc.function_name == "task_complete" && result_ready[i] && results[i].success) {
             LOG_INFO("Terminator fired: task_complete");
+            return true;
+        }
+        if (tc.function_name == "ExitPlanMode" && result_ready[i] && !results[i].success) {
+            LOG_INFO("Ending turn after failed ExitPlanMode");
             return true;
         }
     }

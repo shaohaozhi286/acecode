@@ -1704,6 +1704,41 @@ TEST(WebServerHttp, CommandsEndpointReturnsBuiltinsAndWorkspaceSkills) {
     EXPECT_TRUE(found) << r.text;
 }
 
+// 场景:显式空 workspace 查询代表「无工作区」。此时全局 skill 仍应进入
+// 斜杠补全,但 daemon 启动 cwd 下的项目 skill 不得泄漏；完全省略查询参数
+// 仍保留旧客户端只拿 builtins 的兼容响应。
+TEST(WebServerHttp, CommandsEndpointReturnsGlobalSkillsForExplicitNoWorkspace) {
+    WebServerFixture fx(true, false, {}, false);
+    const auto global_root = fx.tmp_dir / "global-skills";
+    write_skill_md(global_root, "api-global-only", "Global helper");
+    write_skill_md(fx.cwd_dir / ".agent" / "skills",
+                   "api-daemon-project-only", "Project helper");
+    fx.cfg.skills.external_dirs = {global_root.string()};
+
+    auto explicit_none = cpr::Get(cpr::Url{fx.url("/api/commands?workspace=")});
+    ASSERT_EQ(explicit_none.status_code, 200) << explicit_none.text;
+    auto body = json::parse(explicit_none.text);
+    ASSERT_TRUE(body.contains("commands"));
+    EXPECT_TRUE(body["commands"].empty());
+    ASSERT_TRUE(body.contains("skills"));
+
+    bool found_global = false;
+    bool found_project = false;
+    for (const auto& skill : body["skills"]) {
+        const auto name = skill["name"].get<std::string>();
+        found_global = found_global || name == "api-global-only";
+        found_project = found_project || name == "api-daemon-project-only";
+    }
+    EXPECT_TRUE(found_global) << explicit_none.text;
+    EXPECT_FALSE(found_project) << explicit_none.text;
+
+    auto legacy = cpr::Get(cpr::Url{fx.url("/api/commands")});
+    ASSERT_EQ(legacy.status_code, 200) << legacy.text;
+    auto legacy_body = json::parse(legacy.text);
+    EXPECT_FALSE(legacy_body.contains("commands"));
+    EXPECT_FALSE(legacy_body.contains("skills"));
+}
+
 // 场景: native folder picker API 只给 Desktop 启动的 daemon 用。standalone
 // 默认关闭时必须拒绝,且不能调用 picker callback。
 TEST(WebServerHttp, NativeFolderPickerEndpointRejectsWhenDisabled) {

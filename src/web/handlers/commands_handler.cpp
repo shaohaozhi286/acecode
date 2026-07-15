@@ -24,6 +24,20 @@ void merge_skills(std::vector<SkillMetadata>& collected,
     }
 }
 
+void initialize_global_skill_registry(SkillRegistry& registry,
+                                      const AppConfig& cfg) {
+    registry.set_scan_roots(global_skill_scan_roots(cfg));
+    registry.set_disabled(std::unordered_set<std::string>(
+        cfg.skills.disabled.begin(), cfg.skills.disabled.end()));
+    if (cfg.skills.allowed) {
+        registry.set_allowed(std::unordered_set<std::string>(
+            cfg.skills.allowed->begin(), cfg.skills.allowed->end()));
+    } else {
+        registry.set_allowed(std::nullopt);
+    }
+    registry.scan();
+}
+
 } // namespace
 
 nlohmann::json build_commands_payload(const SkillRegistry& global_skills,
@@ -65,11 +79,14 @@ nlohmann::json build_commands_payload(const SkillRegistry& global_skills,
     });
     out["builtins"] = std::move(builtins);
 
-    // Skills:仅在调用方传 workspace_cwd 时返回 `skills` 字段;缺省 → 不输出
-    // 该字段(向后兼容 add-webui-slash-commands v1)。这样旧客户端零变化,新
-    // 客户端拿到 workspace 定向 skills。
-    if (workspace_cwd && !workspace_cwd->empty() && cfg) {
-        auto commands = load_opencode_commands(*cfg, *workspace_cwd);
+    // workspace_cwd 三态:
+    //   nullopt  = 旧客户端未给 workspace,保持只返回 builtins;
+    //   nonempty = 真实 workspace,返回项目 commands + 项目/全局 skills;
+    //   empty    = 显式无工作区,commands 为空且只返回全局 skills。
+    if (workspace_cwd && cfg) {
+        auto commands = workspace_cwd->empty()
+            ? std::vector<OpencodeCommandInfo>{}
+            : load_opencode_commands(*cfg, *workspace_cwd);
         std::sort(commands.begin(), commands.end(),
                   [](const OpencodeCommandInfo& a, const OpencodeCommandInfo& b) {
                       return a.name < b.name;
@@ -89,9 +106,15 @@ nlohmann::json build_commands_payload(const SkillRegistry& global_skills,
         std::unordered_set<std::string> seen;
 
         SkillRegistry ws_reg;
-        initialize_skill_registry(ws_reg, *cfg, *workspace_cwd);
+        if (workspace_cwd->empty()) {
+            initialize_global_skill_registry(ws_reg, *cfg);
+        } else {
+            initialize_skill_registry(ws_reg, *cfg, *workspace_cwd);
+        }
         merge_skills(entries, seen, ws_reg.list());
-        merge_skills(entries, seen, global_skills.list());
+        if (!workspace_cwd->empty()) {
+            merge_skills(entries, seen, global_skills.list());
+        }
 
         std::sort(entries.begin(), entries.end(),
                   [](const SkillMetadata& a, const SkillMetadata& b) {

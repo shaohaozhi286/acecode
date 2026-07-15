@@ -189,7 +189,34 @@ Read-only tools normally run automatically. File writes, edits, and shell comman
 ./acecode --yolo              # Skip permission prompts; same as --dangerous
 ```
 
-ACECode expects an interactive TTY. It is designed to be launched from the project root you want the agent to work on.
+Normal TUI mode expects an interactive TTY. It is designed to be launched from the project root you want the agent to work on. Use print mode for scripts and pipelines.
+
+### Headless Print Mode
+
+`-p` / `--print` runs one non-interactive agent turn, writes the result to stdout, and persists a normal resumable session:
+
+```bash
+./acecode -p "explain this repository"
+git diff | ./acecode -p "review this diff"
+./acecode -p --output-format stream-json "implement the change"
+./acecode -p --model fast --permission-mode plan --max-turns 8 "make a plan"
+```
+
+Print-mode defaults are deliberately deterministic: new sessions use the configured default model (resumed sessions keep their saved model unless `--model` is supplied), permission mode is `default`, there is no turn limit, every currently available system tool is enabled, and no Skills or MCP servers are exposed. Tools that require interactive confirmation are denied in normal headless mode; use a suitable permission mode or the security-sensitive `--yolo` only when intended.
+
+The capability lists use exact, case-sensitive names. They accept comma-separated values and can be repeated:
+
+```bash
+./acecode -p --disable-tools bash,file_write "analyze without changing files"
+./acecode -p --enable-skills code-review --enable-mcp github "review the pull request"
+./acecode -p --enable-mcp github,linear --enable-mcp browser "triage the issue"
+```
+
+- `--disable-tools <names>` removes named ACECode system tools.
+- `--enable-skills <names>` enables only the named installed Skills.
+- `--enable-mcp <names>` starts only the named configured, globally enabled MCP servers.
+
+Unknown or globally unavailable names fail before the model turn with exit code 64 and an available-name list. Existing scripts that relied on implicit Skill or MCP access must now opt in explicitly. Run `acecode -p --help` for output formats, session continuation, and all options.
 
 ### Daemon And Web UI
 

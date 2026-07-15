@@ -42,13 +42,21 @@ void SkillRegistry::set_disabled(std::unordered_set<std::string> disabled) {
     disabled_ = std::move(disabled);
 }
 
+void SkillRegistry::set_allowed(
+    std::optional<std::unordered_set<std::string>> allowed) {
+    std::lock_guard<std::mutex> lk(mu_);
+    allowed_ = std::move(allowed);
+}
+
 void SkillRegistry::refresh_from_disk() const {
     std::vector<fs::path> roots;
     std::unordered_set<std::string> disabled;
+    std::optional<std::unordered_set<std::string>> allowed;
     {
         std::lock_guard<std::mutex> lk(mu_);
         roots = roots_;
         disabled = disabled_;
+        allowed = allowed_;
     }
 
     std::vector<SkillMetadata> found;
@@ -77,6 +85,7 @@ void SkillRegistry::refresh_from_disk() const {
             if (!meta) continue;
             if (!skill_matches_platform(meta->platforms)) continue;
             if (disabled.count(meta->name)) continue;
+            if (allowed && allowed->count(meta->name) == 0) continue;
             if (seen_names.count(meta->name)) continue;
 
             seen_names.insert(meta->name);

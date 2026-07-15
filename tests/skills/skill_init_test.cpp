@@ -190,6 +190,24 @@ TEST_F(SkillInitOpencodeTest, NativeProjectSkillWinsOverOpencodeProjectSkill) {
     EXPECT_EQ(found->description, "from native acecode");
 }
 
+TEST_F(SkillInitOpencodeTest, RuntimeAllowlistFlowsThroughInitializer) {
+    write_skill(workspace / ".acecode" / "skills", "allowed-skill", "selected");
+    write_skill(workspace / ".acecode" / "skills", "blocked-skill", "not selected");
+
+    acecode::AppConfig cfg;
+    cfg.skills.allowed = std::vector<std::string>{"allowed-skill"};
+    acecode::SkillRegistry selected;
+    initialize(selected, cfg);
+
+    ASSERT_TRUE(selected.find("allowed-skill").has_value());
+    EXPECT_FALSE(selected.find("blocked-skill").has_value());
+
+    cfg.skills.allowed = std::vector<std::string>{};
+    acecode::SkillRegistry empty;
+    initialize(empty, cfg);
+    EXPECT_TRUE(empty.list().empty());
+}
+
 // 场景: project_skill_scan_roots / global_skill_scan_roots 的分界 ——
 // 项目链根只覆盖 workspace 向上到 HOME(不含 HOME 本身),HOME 下的
 // ~/.acecode/skills 与 external_dirs 只出现在全局根里。web 端

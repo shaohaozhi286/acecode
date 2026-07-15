@@ -73,7 +73,8 @@ std::string pascal_case_tool_name(const std::string& name) {
 }
 
 bool tool_result_row_failed(const TuiState::Message& msg) {
-    if (msg.content.rfind("[Error]", 0) == 0) {
+    if (msg.content.rfind("[Error]", 0) == 0 ||
+        msg.content.rfind("[User denied tool execution]", 0) == 0) {
         return true;
     }
     if (msg.summary.has_value()) {

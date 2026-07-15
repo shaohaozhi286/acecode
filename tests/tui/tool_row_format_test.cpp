@@ -125,6 +125,22 @@ TEST(ToolRowFormatTest, ResultFailedByErrorPrefix) {
         make_msg("tool_result", "ok output")));
 }
 
+// 场景:用户在权限确认框拒绝工具,AgentLoop 使用既有的 canonical 文案。
+// 期望:拒绝结果与真正的工具错误一样标红,不能显示成成功绿点。
+TEST(ToolRowFormatTest, UserDeniedResultIsFailed) {
+    const auto denied = make_msg(
+        "tool_result", "[User denied tool execution]");
+    EXPECT_TRUE(tool_result_row_failed(denied));
+
+    std::vector<TuiState::Message> conv;
+    conv.push_back(make_msg("tool_call", "[Tool: ExitPlanMode] {}"));
+    conv.push_back(denied);
+
+    const auto dots = compute_tool_call_dots(conv);
+    ASSERT_EQ(dots.size(), 2u);
+    EXPECT_EQ(dots[0], ToolCallDot::Failed);
+}
+
 // 场景:bash 正常返回但退出码非 0 / 被 abort / 超时(summary metrics 记录)。
 // 期望:三种 metrics 任一命中都判失败;exit=0 且无异常标记判成功。
 TEST(ToolRowFormatTest, ResultFailedBySummaryMetrics) {

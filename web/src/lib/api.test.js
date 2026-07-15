@@ -725,6 +725,31 @@ await run('getSkillRoot uses workspace query and auth token', async () => {
   }
 });
 
+await run('listCommands distinguishes explicit no-workspace from omitted workspace', async () => {
+  const previousFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    calls.push({ url, opts });
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ builtins: [], commands: [], skills: [] }),
+    };
+  };
+  try {
+    const client = createApi({ origin: 'http://127.0.0.1:4567', token: 'tok' });
+    await client.listCommands('');
+    await client.listCommands();
+
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0].url, 'http://127.0.0.1:4567/api/commands?workspace=');
+    assert.equal(calls[1].url, 'http://127.0.0.1:4567/api/commands');
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
 await run('Hook management API methods use encoded hook ids and expected endpoints', async () => {
   const previousFetch = globalThis.fetch;
   const calls = [];

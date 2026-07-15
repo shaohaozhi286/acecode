@@ -1,9 +1,14 @@
 // TopBar:logo + 快捷工具(项目栏收缩/新对话/搜索/快捷菜单) + 主题切换 + 设置
 
-import { useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import { useTheme } from '../theme.jsx';
 import { clsx } from '../lib/format.js';
-import { TOPBAR_QUICK_ACTIONS, invokeTopBarQuickAction } from '../lib/topBarQuickActions.js';
+import {
+  TOPBAR_QUICK_ACTIONS,
+  invokeTopBarQuickAction,
+  topBarQuickActionNeedsSeparator,
+  topBarQuickActionsMenuWidth,
+} from '../lib/topBarQuickActions.js';
 import { formatProgramVersion } from '../lib/webCoreInfo.js';
 import { NavigationArrowIcon, PanelToggleIcon, VsIcon } from './Icon.jsx';
 import {
@@ -51,10 +56,14 @@ export function TopBar({
   onNewSession,
   onOpenLoop,
   onOpenSearch,
+  onAbout,
+  onCheckUpdates,
+  onExit,
   onToggleConsole,
   consoleAvailable = false,
   consoleOpen = false,
   sidebarCollapsed = false,
+  sidebarWidth,
   onToggleSidebar,
   onGoBack,
   onGoForward,
@@ -62,6 +71,7 @@ export function TopBar({
   canGoForward = false,
   updateStatus = null,
   updateStarting = false,
+  updateChecking = false,
   updateRunning = false,
   updateReady = false,
   onStartUpdate,
@@ -76,7 +86,7 @@ export function TopBar({
   const updateAvailable = !!updateStatus?.update_available;
   const updateTitle = updateAvailable
     ? updateReady
-      ? '升级已安装，点击查看重启提示'
+      ? '升级已安装，点击查看重启选项'
       : updateRunning
       ? '升级正在进行，点击查看进度'
       : `发现新版 v${updateStatus.latest_version || ''}, 点击升级`
@@ -90,6 +100,9 @@ export function TopBar({
       onOpenLoop,
       onOpenSearch,
       onSettings,
+      onAbout,
+      onCheckUpdates,
+      onExit,
     });
   };
 
@@ -129,13 +142,61 @@ export function TopBar({
       )}
       onMouseDown={onTopBarMouseDown}
     >
-      <div className="flex items-center gap-1.5 select-none mr-1">
-        <img src="/acecode-logo.png" alt="" width="20" height="20" className="block" draggable="false" />
-        <span className="text-[15px] font-bold tracking-tight">ACECode</span>
-        {appVersionLabel && (
-          <span className="text-[11px] font-medium leading-none text-fg-mute opacity-75 tabular-nums">
-            {appVersionLabel}
-          </span>
+      <div ref={quickActionsRef} className="relative mr-1">
+        <button
+          type="button"
+          title="打开快捷菜单"
+          aria-label="ACECode 快捷菜单"
+          aria-haspopup="menu"
+          aria-expanded={quickActionsOpen}
+          aria-controls="topbar-quick-actions-menu"
+          onClick={() => setQuickActionsOpen((open) => !open)}
+          className="h-8 flex items-center gap-1.5 select-none rounded-md hover:bg-surface-hi transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/20"
+        >
+          <img src="/acecode-logo.png" alt="" width="20" height="20" className="block" draggable="false" />
+          <span className="text-[15px] font-bold tracking-tight">ACECode</span>
+          {appVersionLabel && (
+            <span className="text-[11px] font-medium leading-none text-fg-mute opacity-75 tabular-nums">
+              {appVersionLabel}
+            </span>
+          )}
+        </button>
+        {quickActionsOpen && (
+          <div
+            id="topbar-quick-actions-menu"
+            role="menu"
+            aria-label="快捷操作"
+            className="fixed left-0 top-11 rounded-b-lg border-x border-b border-border bg-surface p-1 ace-shadow-lg z-50"
+            style={{ width: topBarQuickActionsMenuWidth(sidebarWidth) }}
+          >
+            {TOPBAR_QUICK_ACTIONS.map((action, index) => {
+              const checkingUpdates = action.id === 'check-updates' && updateChecking;
+              return (
+                <Fragment key={action.id}>
+                  {topBarQuickActionNeedsSeparator(index) && (
+                    <div role="separator" className="h-px bg-border mx-1 my-1" />
+                  )}
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => selectQuickAction(action.id)}
+                    disabled={checkingUpdates}
+                    aria-busy={checkingUpdates || undefined}
+                    className="w-full h-8 px-2 rounded-md flex items-center gap-2 text-[13px] text-fg-2 hover:bg-surface-hi hover:text-fg transition text-left disabled:opacity-50 disabled:cursor-wait"
+                  >
+                    <span className="w-5 shrink-0 flex items-center justify-center">
+                      <VsIcon
+                        name={action.icon}
+                        size={action.iconSize}
+                        className={checkingUpdates ? 'animate-spin' : ''}
+                      />
+                    </span>
+                    <span>{action.label}</span>
+                  </button>
+                </Fragment>
+              );
+            })}
+          </div>
         )}
       </div>
 
@@ -177,42 +238,6 @@ export function TopBar({
       <QuickBtn title={searchHotkeyHint} onClick={onOpenSearch}>
         <VsIcon name="search" size={14} />
       </QuickBtn>
-      <div ref={quickActionsRef} className="relative">
-        <QuickBtn
-          title="更多操作"
-          onClick={() => setQuickActionsOpen((open) => !open)}
-          pressed={quickActionsOpen}
-          aria-haspopup="menu"
-          aria-expanded={quickActionsOpen}
-          aria-controls="topbar-quick-actions-menu"
-        >
-          <VsIcon name="ellipsis" size={14} />
-        </QuickBtn>
-        {quickActionsOpen && (
-          <div
-            id="topbar-quick-actions-menu"
-            role="menu"
-            aria-label="快捷操作"
-            className="absolute top-full left-0 mt-1 w-[148px] rounded-lg border border-border bg-surface p-1 ace-shadow-lg z-50"
-          >
-            {TOPBAR_QUICK_ACTIONS.map((action) => (
-              <button
-                key={action.id}
-                type="button"
-                role="menuitem"
-                onClick={() => selectQuickAction(action.id)}
-                className="w-full h-8 px-2 rounded-md flex items-center gap-2 text-[13px] text-fg-2 hover:bg-surface-hi hover:text-fg transition text-left"
-              >
-                <span className="w-5 shrink-0 flex items-center justify-center">
-                  <VsIcon name={action.icon} size={action.iconSize} />
-                </span>
-                <span>{action.label}</span>
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
-
       <div className="ml-auto flex items-center gap-1">
         {consoleAvailable && (
           <QuickBtn

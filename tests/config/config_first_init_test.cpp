@@ -209,6 +209,27 @@ TEST_F(ConfigFirstInitTest, McpDisabledFlagRoundTripsAndStaysSparse) {
     EXPECT_FALSE(reloaded.mcp_servers["on_server"].disabled);
 }
 
+TEST_F(ConfigFirstInitTest, RuntimeSkillAllowlistIsNeverPersisted) {
+    fs::create_directories(temp_home / ".acecode");
+    const fs::path config_path = temp_home / ".acecode" / "config.json";
+
+    acecode::AppConfig cfg;
+    cfg.skills.allowed = std::vector<std::string>{"one-shot-skill"};
+    acecode::save_config(cfg, config_path.string());
+
+    std::ifstream ifs(config_path);
+    ASSERT_TRUE(ifs.is_open());
+    const auto saved = nlohmann::json::parse(ifs);
+    if (saved.contains("skills")) {
+        ASSERT_TRUE(saved["skills"].is_object());
+        EXPECT_FALSE(saved["skills"].contains("allowed"));
+        EXPECT_FALSE(saved["skills"].contains("allowlist"));
+    }
+
+    const auto reloaded = acecode::load_config();
+    EXPECT_FALSE(reloaded.skills.allowed.has_value());
+}
+
 TEST_F(ConfigFirstInitTest, ExplicitEmptySavedModelsDoesNotSynthesizeCopilot) {
     fs::create_directories(temp_home / ".acecode");
     {

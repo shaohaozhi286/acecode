@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include "headless/headless_name_selection.hpp"
 #include "headless/headless_options.hpp"
 
 #include <string>
@@ -42,6 +43,9 @@ TEST(HeadlessOptions, ParsesBasicPromptForm) {
     EXPECT_EQ(o.prompt, "explain this repo");
     EXPECT_FALSE(o.dangerous_mode);
     EXPECT_EQ(o.max_turns, 0);
+    EXPECT_TRUE(o.disabled_system_tools.empty());
+    EXPECT_TRUE(o.enabled_skills.empty());
+    EXPECT_TRUE(o.enabled_mcp_servers.empty());
 }
 
 // 场景:prompt 在 -p 之前(`acecode "prompt" --print`),脚本作者两种顺序
@@ -116,11 +120,73 @@ TEST(HeadlessOptions, RejectsInvalidMaxTurns) {
 // 一个 token)。
 // 期望:明确报"requires"错误而不是越界或吞掉。
 TEST(HeadlessOptions, RejectsFlagsMissingValues) {
-    for (const char* flag : {"--model", "--permission-mode", "--max-turns"}) {
+    for (const char* flag : {"--model", "--permission-mode", "--max-turns",
+                             "--disable-tools", "--enable-skills", "--enable-mcp"}) {
         auto o = parse_headless_cli_options({"-p", flag});
         EXPECT_FALSE(o.error.empty()) << flag;
         EXPECT_NE(o.error.find("requires"), std::string::npos) << o.error;
     }
+}
+
+// 场景:三个 capability list 都支持空格/等号、逗号列表和重复 flag;名称
+// 两端空白被裁掉,重复项保留第一次出现的位置。
+// 期望:得到稳定、去重且仍区分大小写的精确名称列表。
+TEST(HeadlessOptions, ParsesRepeatableCapabilityLists) {
+    auto o = parse_headless_cli_options({
+        "-p",
+        "--disable-tools", "bash, file_write",
+        "--disable-tools=grep,bash",
+        "--enable-skills=code-review, docs",
+        "--enable-skills", "code-review",
+        "--enable-mcp", "github",
+        "--enable-mcp=linear, github",
+        "go",
+    });
+    EXPECT_TRUE(o.error.empty()) << o.error;
+    EXPECT_EQ(o.disabled_system_tools,
+              (std::vector<std::string>{"bash", "file_write", "grep"}));
+    EXPECT_EQ(o.enabled_skills,
+              (std::vector<std::string>{"code-review", "docs"}));
+    EXPECT_EQ(o.enabled_mcp_servers,
+              (std::vector<std::string>{"github", "linear"}));
+    EXPECT_EQ(o.prompt, "go");
+}
+
+// 场景:空 value、首尾逗号与连续逗号都会产生空名称。
+// 期望:parser 层直接报用法错误,不把半截列表留给 runner。
+TEST(HeadlessOptions, RejectsEmptyCapabilityListMembers) {
+    const std::vector<std::vector<std::string>> cases = {
+        {"-p", "--disable-tools=", "go"},
+        {"-p", "--disable-tools=bash,", "go"},
+        {"-p", "--enable-skills=,docs", "go"},
+        {"-p", "--enable-skills=a,,b", "go"},
+        {"-p", "--enable-mcp=   ", "go"},
+    };
+    for (const auto& tokens : cases) {
+        auto o = parse_headless_cli_options(tokens);
+        EXPECT_FALSE(o.error.empty());
+        EXPECT_NE(o.error.find("empty name"), std::string::npos) << o.error;
+    }
+}
+
+// 场景:runner 的三类运行时名称都走同一个 exact selector。
+// 期望:available 排序去重;selected / unknown 保持调用顺序并去重;大小写
+// 不匹配不做宽松猜测。
+TEST(HeadlessNameSelection, ResolvesExactNamesDeterministically) {
+    auto result = acecode::headless::select_exact_names(
+        {"file_write", "bash", "Bash", "file_write", "missing", "missing"},
+        {"grep", "bash", "file_write", "bash"});
+
+    EXPECT_FALSE(result.valid());
+    EXPECT_EQ(result.selected,
+              (std::vector<std::string>{"file_write", "bash"}));
+    EXPECT_EQ(result.unknown,
+              (std::vector<std::string>{"Bash", "missing"}));
+    EXPECT_EQ(result.available,
+              (std::vector<std::string>{"bash", "file_write", "grep"}));
+    EXPECT_EQ(acecode::headless::format_name_list(result.available),
+              "bash, file_write, grep");
+    EXPECT_EQ(acecode::headless::format_name_list({}), "(none)");
 }
 
 // 场景:拼错的 flag(--modle)。-p 模式常被 CI 脚本调用,静默吞掉未知
@@ -269,6 +335,11 @@ TEST(HeadlessOptions, HelpDocumentsAdditiveStreamJsonMode) {
     EXPECT_NE(help.find("text (default) | json | stream-json"), std::string::npos);
     EXPECT_NE(help.find("json: stdout gets one result object"), std::string::npos);
     EXPECT_NE(help.find("--thinking"), std::string::npos);
+    EXPECT_NE(help.find("--disable-tools"), std::string::npos);
+    EXPECT_NE(help.find("--enable-skills"), std::string::npos);
+    EXPECT_NE(help.find("--enable-mcp"), std::string::npos);
+    EXPECT_NE(help.find("default: unlimited"), std::string::npos);
+    EXPECT_NE(help.find("Skills"), std::string::npos);
 }
 
 // 场景:-p 模式里的 -h / --help。

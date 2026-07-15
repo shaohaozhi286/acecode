@@ -191,7 +191,7 @@ function AssistantBubble({
       toast({ kind: 'err', text: '复制失败:' + (e?.message || '') });
     }
   }, [onOpenFilePreview]);
-  // ACECode 头像永久隐藏;保留等宽空白占位,避免消息正文相对旧布局跳动。
+  // ACECode 头像永久隐藏;不再保留空白占位,让左右外边距保持一致。
   return (
     <div className={`flex min-w-0 ${chrome.gapClass} max-w-[88%] group relative`}>
       {chrome.showAvatarPlaceholder ? (
@@ -285,7 +285,7 @@ function SystemRow({ role, content, metadata }) {
 
 function ErrorRow({ content }) {
   return (
-    <div className="ace-chat-message-content self-stretch max-w-[88%] ml-8 rounded-md border border-danger/30 bg-danger-bg px-3 py-2 text-[12px] leading-5 text-danger whitespace-pre-wrap break-words">
+    <div className="ace-chat-message-content self-stretch max-w-[88%] rounded-md border border-danger/30 bg-danger-bg px-3 py-2 text-[12px] leading-5 text-danger whitespace-pre-wrap break-words">
       {content || '[Error]'}
     </div>
   );

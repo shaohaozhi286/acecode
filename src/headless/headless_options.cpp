@@ -1,5 +1,6 @@
 #include "headless_options.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <regex>
 
@@ -27,6 +28,49 @@ bool split_eq(const std::string& t, const std::string& flag, std::string& value)
     const std::string prefix = flag + "=";
     if (t.rfind(prefix, 0) != 0) return false;
     value = t.substr(prefix.size());
+    return true;
+}
+
+std::string trim_ascii_whitespace(std::string value) {
+    auto is_space = [](unsigned char c) { return std::isspace(c) != 0; };
+    while (!value.empty() && is_space(static_cast<unsigned char>(value.front()))) {
+        value.erase(value.begin());
+    }
+    while (!value.empty() && is_space(static_cast<unsigned char>(value.back()))) {
+        value.pop_back();
+    }
+    return value;
+}
+
+// 三个 capability list 共用的 CSV 语法。先完整校验 raw,再写 target,
+// 避免 `a,,b` 报错时留下半截解析结果。重复项按首次出现去重。
+bool append_csv_names(const std::string& raw,
+                      std::vector<std::string>& target,
+                      std::string& error) {
+    std::vector<std::string> parsed;
+    std::size_t begin = 0;
+    for (;;) {
+        const std::size_t comma = raw.find(',', begin);
+        std::string name = trim_ascii_whitespace(
+            raw.substr(begin, comma == std::string::npos
+                                  ? std::string::npos
+                                  : comma - begin));
+        if (name.empty()) {
+            error = "contains an empty name";
+            return false;
+        }
+        if (std::find(parsed.begin(), parsed.end(), name) == parsed.end()) {
+            parsed.push_back(std::move(name));
+        }
+        if (comma == std::string::npos) break;
+        begin = comma + 1;
+    }
+
+    for (auto& name : parsed) {
+        if (std::find(target.begin(), target.end(), name) == target.end()) {
+            target.push_back(std::move(name));
+        }
+    }
     return true;
 }
 
@@ -84,6 +128,15 @@ HeadlessCliOptions parse_headless_cli_options(const std::vector<std::string>& to
         }
     };
 
+    auto parse_name_list = [&o](const std::string& flag,
+                                const std::string& raw,
+                                std::vector<std::string>& target) -> bool {
+        std::string detail;
+        if (append_csv_names(raw, target, detail)) return true;
+        o.error = flag + " " + detail;
+        return false;
+    };
+
     for (std::size_t i = 0; i < tokens.size(); ++i) {
         const std::string& t = tokens[i];
         std::string eq_value;
@@ -137,6 +190,21 @@ HeadlessCliOptions parse_headless_cli_options(const std::vector<std::string>& to
             if (!parse_max_turns(eq_value)) {
                 return fail("--max-turns must be a positive integer, got: " + eq_value);
             }
+        } else if (t == "--disable-tools") {
+            if (i + 1 >= tokens.size()) return fail("--disable-tools requires one or more tool names");
+            if (!parse_name_list(t, tokens[++i], o.disabled_system_tools)) return o;
+        } else if (split_eq(t, "--disable-tools", eq_value)) {
+            if (!parse_name_list("--disable-tools", eq_value, o.disabled_system_tools)) return o;
+        } else if (t == "--enable-skills") {
+            if (i + 1 >= tokens.size()) return fail("--enable-skills requires one or more skill names");
+            if (!parse_name_list(t, tokens[++i], o.enabled_skills)) return o;
+        } else if (split_eq(t, "--enable-skills", eq_value)) {
+            if (!parse_name_list("--enable-skills", eq_value, o.enabled_skills)) return o;
+        } else if (t == "--enable-mcp") {
+            if (i + 1 >= tokens.size()) return fail("--enable-mcp requires one or more MCP server names");
+            if (!parse_name_list(t, tokens[++i], o.enabled_mcp_servers)) return o;
+        } else if (split_eq(t, "--enable-mcp", eq_value)) {
+            if (!parse_name_list("--enable-mcp", eq_value, o.enabled_mcp_servers)) return o;
         } else if (!t.empty() && t[0] == '-') {
             // 未知 flag:显式报错。脚本场景里静默吞掉拼错的参数(--modle)
             // 会变成难排查的行为差异。
@@ -193,7 +261,9 @@ std::string print_mode_usage_line() {
     return "usage: acecode -p [-c | --resume <id> | --session-id <id>] "
            "[--output-format text|json|stream-json] [--thinking] "
            "[--yolo] [--permission-mode <m>] "
-           "[--model <name>] [--max-turns <n>] \"<prompt>\"\n"
+           "[--model <name>] [--max-turns <n>] "
+           "[--disable-tools <names>] [--enable-skills <names>] "
+           "[--enable-mcp <names>] \"<prompt>\"\n"
            "run `acecode -p --help` for details\n";
 }
 
@@ -220,10 +290,16 @@ std::string print_mode_help() {
         "                           stream-json: stdout gets completed-part JSONL\n"
         "                           (step/text/tool/error records, flushed per line)\n"
         "  --thinking              Include completed reasoning records in stream-json\n"
-        "  --model <name>           Use a saved model by name (also applies on resume)\n"
+        "  --model <name>           Use a saved model by name\n"
+        "                           (new sessions: configured default; resume keeps\n"
+        "                           its saved model unless this option is supplied)\n"
         "  --permission-mode <m>    default | accept-edits | plan | yolo\n"
-        "                           (also applies on resume; overrides the saved mode)\n"
-        "  --max-turns <n>          Cap agent-loop iterations for this turn\n"
+        "                           (default: default; also applies on resume)\n"
+        "  --max-turns <n>          Cap agent-loop iterations (default: unlimited)\n"
+        "  --disable-tools <names>  Disable exact system tool names (default: none)\n"
+        "  --enable-skills <names>  Enable exact installed Skill names (default: none)\n"
+        "  --enable-mcp <names>     Enable exact configured MCP server names (default: none)\n"
+        "                           Lists are comma-separated and options are repeatable\n"
         "  --yolo, --dangerous      Skip all permission confirmations\n"
         "  -h, --help               Show this help\n"
         "\n"
@@ -235,6 +311,12 @@ std::string print_mode_help() {
         "  acecode -p --resume my-task \"step 2\"\n"
         "or simply continue the latest session of the current directory:\n"
         "  acecode -p -c \"next step\"\n"
+        "\n"
+        "Capability examples:\n"
+        "  acecode -p --disable-tools bash,file_write \"analyze only\"\n"
+        "  acecode -p --enable-skills code-review --enable-mcp github \"review PR\"\n"
+        "By default all currently available system tools are enabled, while Skills\n"
+        "and MCP servers are disabled. Globally disabled features stay unavailable.\n"
         "\n"
         "Exit codes: 0 success, 1 turn failed, 64 usage error, 130 interrupted\n";
 }

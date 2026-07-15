@@ -104,14 +104,26 @@ private:
     int confirm_count_ = 0;
 };
 
-class YoloEnterPlanHarness {
+class PlanToolHarness {
 public:
-    explicit YoloEnterPlanHarness(std::string cwd)
-        : cwd_(std::move(cwd)) {
+    explicit PlanToolHarness(
+        std::string cwd,
+        acecode::PermissionMode mode = acecode::PermissionMode::Yolo,
+        acecode::PermissionResult confirmation = acecode::PermissionResult::Deny,
+        bool dangerous = false)
+        : cwd_(std::move(cwd)), confirmation_(confirmation) {
         project_dir_ = acecode::SessionStorage::get_project_dir(cwd_);
         fs::remove_all(project_dir_);
 
-        perms_.set_mode(acecode::PermissionMode::Yolo);
+        if (dangerous && mode == acecode::PermissionMode::Plan) {
+            // Match `acecode --yolo` followed by an explicit TUI switch to Plan.
+            perms_.set_mode(acecode::PermissionMode::Yolo);
+            perms_.set_dangerous(true);
+            perms_.set_mode(acecode::PermissionMode::Plan);
+        } else {
+            perms_.set_mode(mode);
+            perms_.set_dangerous(dangerous);
+        }
         callbacks_.on_busy_changed = [this](bool busy) {
             std::lock_guard<std::mutex> lk(busy_mu_);
             busy_ = busy;
@@ -119,7 +131,7 @@ public:
         };
         callbacks_.on_tool_confirm = [this](const std::string&, const std::string&) {
             ++confirm_count_;
-            return acecode::PermissionResult::Deny;
+            return confirmation_;
         };
 
         tools_.register_tool(acecode::create_enter_plan_mode_tool());
@@ -127,11 +139,15 @@ public:
         auto accessor = [this]() -> std::shared_ptr<acecode::LlmProvider> { return provider_; };
         loop_ = std::make_unique<acecode::AgentLoop>(accessor, tools_, callbacks_, cwd_, perms_);
         sm_.start_session(cwd_, "stub", "stub-model", "sid-agent-yolo-plan-mode");
-        sm_.set_permission_mode("yolo");
+        sm_.set_permission_mode(acecode::PermissionManager::mode_name(perms_.mode()));
+        if (perms_.mode() == acecode::PermissionMode::Plan) {
+            sm_.set_pre_plan_permission_mode(
+                acecode::PermissionManager::mode_name(perms_.pre_plan_mode()));
+        }
         loop_->set_session_manager(&sm_);
     }
 
-    ~YoloEnterPlanHarness() {
+    ~PlanToolHarness() {
         loop_.reset();
         if (!project_dir_.empty()) fs::remove_all(project_dir_);
         if (!cwd_.empty()) fs::remove_all(cwd_);
@@ -142,6 +158,7 @@ public:
     std::string session_permission_mode() const { return sm_.current_permission_mode(); }
     std::string session_pre_plan_mode() const { return sm_.current_pre_plan_permission_mode(); }
     int confirm_count() const { return confirm_count_; }
+    int provider_turn_count() const { return provider_->turn_count(); }
 
     bool submit_and_wait(std::chrono::milliseconds timeout = 5s) {
         {
@@ -168,6 +185,7 @@ private:
     std::condition_variable busy_cv_;
     bool busy_ = false;
     int confirm_count_ = 0;
+    acecode::PermissionResult confirmation_ = acecode::PermissionResult::Deny;
 };
 
 } // namespace
@@ -208,7 +226,7 @@ TEST(AgentLoopPlanMode, NonPlanFileWriteStillRequiresPermissionPrompt) {
 
 TEST(AgentLoopPlanMode, EnterPlanModeToolDoesNotLeaveYoloMode) {
     auto cwd = make_temp_dir("acecode_agent_yolo_enter_plan_noop");
-    YoloEnterPlanHarness h(cwd.string());
+    PlanToolHarness h(cwd.string());
 
     h.provider().push_tool_call("EnterPlanMode", "{}", "enter-plan");
     h.provider().push_text("done");
@@ -222,7 +240,7 @@ TEST(AgentLoopPlanMode, EnterPlanModeToolDoesNotLeaveYoloMode) {
 
 TEST(AgentLoopPlanMode, ExitPlanModeToolDoesNotLeaveYoloMode) {
     auto cwd = make_temp_dir("acecode_agent_yolo_exit_plan_noop");
-    YoloEnterPlanHarness h(cwd.string());
+    PlanToolHarness h(cwd.string());
 
     h.provider().push_tool_call("ExitPlanMode", "{}", "exit-plan");
     h.provider().push_text("done");
@@ -232,4 +250,60 @@ TEST(AgentLoopPlanMode, ExitPlanModeToolDoesNotLeaveYoloMode) {
     EXPECT_EQ(h.permission_mode(), acecode::PermissionMode::Yolo);
     EXPECT_EQ(h.session_permission_mode(), "yolo");
     EXPECT_TRUE(h.session_pre_plan_mode().empty());
+    EXPECT_EQ(h.provider_turn_count(), 2);
+}
+
+TEST(AgentLoopPlanMode, DangerousPlanExitRequiresApprovalAndRestoresYoloMode) {
+    auto cwd = make_temp_dir("acecode_agent_dangerous_plan_exit");
+    PlanToolHarness h(
+        cwd.string(),
+        acecode::PermissionMode::Plan,
+        acecode::PermissionResult::Allow,
+        true);
+
+    h.provider().push_tool_call("ExitPlanMode", "{}", "exit-dangerous-plan");
+    h.provider().push_text("done");
+
+    ASSERT_TRUE(h.submit_and_wait());
+    EXPECT_EQ(h.confirm_count(), 1);
+    EXPECT_EQ(h.provider_turn_count(), 2);
+    EXPECT_EQ(h.permission_mode(), acecode::PermissionMode::Yolo);
+    EXPECT_EQ(h.session_permission_mode(), "yolo");
+    EXPECT_TRUE(h.session_pre_plan_mode().empty());
+}
+
+TEST(AgentLoopPlanMode, ApprovedPlanExitRestoresDefaultMode) {
+    auto cwd = make_temp_dir("acecode_agent_plan_exit_allow");
+    PlanToolHarness h(
+        cwd.string(),
+        acecode::PermissionMode::Plan,
+        acecode::PermissionResult::Allow);
+
+    h.provider().push_tool_call("ExitPlanMode", "{}", "exit-plan-allow");
+    h.provider().push_text("done");
+
+    ASSERT_TRUE(h.submit_and_wait());
+    EXPECT_EQ(h.confirm_count(), 1);
+    EXPECT_EQ(h.provider_turn_count(), 2);
+    EXPECT_EQ(h.permission_mode(), acecode::PermissionMode::Default);
+    EXPECT_EQ(h.session_permission_mode(), "default");
+    EXPECT_TRUE(h.session_pre_plan_mode().empty());
+}
+
+TEST(AgentLoopPlanMode, DeniedPlanExitEndsTurnWithoutRetrying) {
+    auto cwd = make_temp_dir("acecode_agent_plan_exit_deny");
+    PlanToolHarness h(
+        cwd.string(),
+        acecode::PermissionMode::Plan,
+        acecode::PermissionResult::Deny);
+
+    h.provider().push_tool_call("ExitPlanMode", "{}", "exit-plan-deny");
+    h.provider().push_text("must-not-run-in-this-turn");
+
+    ASSERT_TRUE(h.submit_and_wait());
+    EXPECT_EQ(h.confirm_count(), 1);
+    EXPECT_EQ(h.provider_turn_count(), 1);
+    EXPECT_EQ(h.permission_mode(), acecode::PermissionMode::Plan);
+    EXPECT_EQ(h.session_permission_mode(), "plan");
+    EXPECT_EQ(h.session_pre_plan_mode(), "default");
 }

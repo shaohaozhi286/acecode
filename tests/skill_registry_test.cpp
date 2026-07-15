@@ -14,6 +14,7 @@
 #include <fstream>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 
 namespace fs = std::filesystem;
 
@@ -117,6 +118,71 @@ TEST_F(SkillRegistryCompatTest, PrefersEarlierRootForDuplicateSkillNames) {
     ASSERT_TRUE(found.has_value());
     EXPECT_EQ(found->description, "from acecode root");
     EXPECT_EQ(registry.list().size(), 1u);
+}
+
+TEST_F(SkillRegistryCompatTest, MissingAllowlistKeepsUnrestrictedDiscovery) {
+    fs::path root = temp_root / "skills-root";
+    write_skill(root, "engineering", "alpha", "first");
+    write_skill(root, "engineering", "beta", "second");
+
+    acecode::SkillRegistry registry;
+    registry.set_scan_roots({root});
+    registry.set_allowed(std::nullopt);
+    registry.scan();
+
+    const auto skills = registry.list();
+    ASSERT_EQ(skills.size(), 2u);
+    EXPECT_EQ(skills[0].name, "alpha");
+    EXPECT_EQ(skills[1].name, "beta");
+}
+
+TEST_F(SkillRegistryCompatTest, EngagedEmptyAllowlistHidesEverySkill) {
+    fs::path root = temp_root / "skills-root";
+    write_skill(root, "engineering", "alpha", "first");
+
+    acecode::SkillRegistry registry;
+    registry.set_scan_roots({root});
+    registry.set_allowed(std::unordered_set<std::string>{});
+    registry.scan();
+
+    EXPECT_TRUE(registry.list().empty());
+    EXPECT_FALSE(registry.find("alpha").has_value());
+}
+
+TEST_F(SkillRegistryCompatTest, AllowlistSelectsOnlyNamedSkillsAcrossRefreshes) {
+    fs::path root = temp_root / "skills-root";
+    write_skill(root, "engineering", "alpha", "first");
+    write_skill(root, "engineering", "beta", "second");
+
+    acecode::SkillRegistry registry;
+    registry.set_scan_roots({root});
+    registry.set_allowed(std::unordered_set<std::string>{"beta"});
+    registry.scan();
+
+    ASSERT_EQ(registry.list().size(), 1u);
+    EXPECT_EQ(registry.list()[0].name, "beta");
+
+    write_skill(root, "engineering", "gamma", "created later");
+    const auto refreshed = registry.list();
+    ASSERT_EQ(refreshed.size(), 1u);
+    EXPECT_EQ(refreshed[0].name, "beta");
+}
+
+TEST_F(SkillRegistryCompatTest, DisabledNamesTakePrecedenceOverAllowlist) {
+    fs::path root = temp_root / "skills-root";
+    write_skill(root, "engineering", "alpha", "first");
+    write_skill(root, "engineering", "beta", "second");
+
+    acecode::SkillRegistry registry;
+    registry.set_scan_roots({root});
+    registry.set_disabled(std::unordered_set<std::string>{"alpha"});
+    registry.set_allowed(std::unordered_set<std::string>{"alpha", "beta"});
+    registry.scan();
+
+    const auto skills = registry.list();
+    ASSERT_EQ(skills.size(), 1u);
+    EXPECT_EQ(skills[0].name, "beta");
+    EXPECT_FALSE(registry.find("alpha").has_value());
 }
 
 TEST_F(SkillRegistryCompatTest, PreservesUtf8CategoryDescriptionAndBody) {

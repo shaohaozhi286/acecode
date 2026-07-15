@@ -43,6 +43,31 @@ export function updateRestartMessage(job) {
   return '升级已安装。请完全退出并重新启动 ACECode；当前窗口仍在运行旧版本。';
 }
 
+export function desktopUpdateRestartAvailable(
+  win = typeof window !== 'undefined' ? window : undefined,
+) {
+  return typeof win?.aceDesktop_restartApp === 'function';
+}
+
+function parseDesktopRestartResult(raw) {
+  if (typeof raw !== 'string') return raw;
+  const text = raw.trim();
+  return text ? JSON.parse(text) : null;
+}
+
+export async function requestDesktopUpdateRestart(
+  win = typeof window !== 'undefined' ? window : undefined,
+) {
+  if (!desktopUpdateRestartAvailable(win)) {
+    throw new Error('当前运行模式不支持自动重启，请完全退出后重新启动 ACECode');
+  }
+  const result = parseDesktopRestartResult(await win.aceDesktop_restartApp());
+  if (!result || result.ok !== true) {
+    throw new Error(String(result?.error || 'ACECode 无法自动重启'));
+  }
+  return result;
+}
+
 export function updateDialogMode(job) {
   if (!job) return 'confirm';
   if (updateJobIsActive(job)) return 'running';
