@@ -2615,13 +2615,14 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
 
   const openSessionChangePreview = useCallback((filePath) => {
     if (!sid || !filePath) return;
+    if (sidePanelCollapsed) onToggleSidePanel?.();
     setPreviewTabState((prev) => openSessionChangesTab(prev, {
       scopeKey: previewScope,
       sessionId: sid,
       expandedFile: filePath,
       fileCount: changeSummary.fileCount,
     }));
-  }, [changeSummary.fileCount, previewScope, sid]);
+  }, [changeSummary.fileCount, onToggleSidePanel, previewScope, sid, sidePanelCollapsed]);
 
   // git 变更点击文件 → 在中间详情栏开/聚焦「变更」页签(复刻会话级变更旧行为)。
   // gitBase 只有从 SidePanel 导航列表点击时才带;详情栏内点文件不带,由
@@ -3172,7 +3173,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
                       groups={set.groups}
                       summary={set.summary}
                       cwd={sidePanelCwd}
-                      onOpenFile={openFilePreview}
+                      onOpenFile={openSessionChangePreview}
                     />
                   </div>
                 ))}
@@ -3226,7 +3227,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
                 groups={set.groups}
                 summary={set.summary}
                 cwd={sidePanelCwd}
-                onOpenFile={openFilePreview}
+                onOpenFile={openSessionChangePreview}
               />
             </div>
           ))}
