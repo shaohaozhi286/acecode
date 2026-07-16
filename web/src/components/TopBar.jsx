@@ -252,6 +252,7 @@ export function TopBar({
           <QuickBtn
             title={rightPanelCollapsed ? '展开整个右侧面板' : '收起整个右侧面板'}
             onClick={onToggleRightPanel}
+            pressed={!rightPanelCollapsed}
             aria-expanded={!rightPanelCollapsed}
           >
             <PanelToggleIcon side="right" size={15} />
