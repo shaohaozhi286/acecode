@@ -118,8 +118,8 @@ function AddLoopDialog({ loop = null, template = null, models, defaultModelName,
                   value={form.permissionMode}
                   onChange={(e) => update('permissionMode', e.target.value)}
                 >
-                  <option value="default">默认</option>
-                  <option value="yolo">Yolo</option>
+                  <option value="default">默认权限</option>
+                  <option value="yolo">完全访问权限</option>
                 </select>
                 <button type="button" title="刷新模型" onClick={onRefreshModels} className="w-7 h-7 rounded-md hover:bg-surface-hi flex items-center justify-center">
                   <VsIcon name="refresh" size={15} />
@@ -367,7 +367,7 @@ export function LoopPage({ onOpenSession }) {
                       <span className={`w-2 h-2 rounded-full ${active ? 'bg-accent animate-pulse' : loop.enabled ? 'bg-success' : 'bg-fg-mute'}`} />
                       <div className="min-w-0 flex-1">
                         <h3 className="text-[13px] font-semibold truncate">{loop.name}</h3>
-                        <p className="mt-0.5 text-[11px] text-fg-mute truncate">{loopScheduleLabel(loop.schedule)} · {workspace?.name || '无工作空间'} · {loop.permission_mode === 'default' ? '默认' : 'Yolo'} · {loop.model_name}</p>
+                        <p className="mt-0.5 text-[11px] text-fg-mute truncate">{loopScheduleLabel(loop.schedule)} · {workspace?.name || '无工作空间'} · {loop.permission_mode === 'default' ? '默认权限' : '完全访问权限'} · {loop.model_name}</p>
                         <p className="mt-0.5 text-[11px] text-fg-mute flex flex-wrap items-center gap-x-1" aria-live="polite">
                           <span>最近运行：</span>
                           {latestPresent ? <span className={runToneClass(latestPresent)}>{latestPresent.label}</span> : <span>—</span>}

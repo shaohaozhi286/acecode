@@ -59,7 +59,6 @@ export function StatusBar({
   const modeDotClass = (color) => {
     if (color === 'ok') return 'bg-ok';
     if (color === 'warn') return 'bg-warn';
-    if (color === 'plan') return 'bg-accent';
     return 'bg-danger';
   };
   const dotCls = modeDotClass(cur.color);

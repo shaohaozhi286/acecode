@@ -185,14 +185,19 @@ run('create session options omit empty home model', () => {
 
 run('create session preferences include selected model and permission mode', () => {
   const base = { initial_user_message: 'hello', auto_start: true };
-  const next = withCreateSessionPreferences(base, { modelName: 'fast', permissionMode: 'plan' });
+  const next = withCreateSessionPreferences(base, { modelName: 'fast', permissionMode: 'yolo' });
   assert.deepEqual(next, {
     initial_user_message: 'hello',
     auto_start: true,
     name: 'fast',
-    permission_mode: 'plan',
+    permission_mode: 'yolo',
   });
   assert.deepEqual(base, { initial_user_message: 'hello', auto_start: true });
+});
+
+run('create session preferences normalize removed plan mode to default', () => {
+  const next = withCreateSessionPreferences({}, { permissionMode: 'plan' });
+  assert.deepEqual(next, { permission_mode: 'default' });
 });
 
 run('create session preferences normalize permission mode aliases', () => {
