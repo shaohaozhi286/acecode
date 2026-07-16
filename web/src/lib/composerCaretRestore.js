@@ -15,6 +15,8 @@ function clampOffset(value, max) {
   return Math.max(0, Math.min(max, number));
 }
 
+const DESKTOP_WINDOW_FOCUS_EVENT = 'acecode:desktop-window-focus';
+
 function readTextareaSelection(textareaElement) {
   if (!textareaElement) return null;
   const max = String(textareaElement.value ?? '').length;
@@ -93,6 +95,44 @@ export function restoreComposerTextareaCaret({
 
 export function captureComposerTextareaSelection(textareaElement) {
   return readTextareaSelection(textareaElement);
+}
+
+export function shouldAutoFocusDesktopComposer({
+  desktopMode,
+  chatVisible = false,
+  blockingSurfaceOpen = false,
+} = {}) {
+  return desktopMode === 'shell' && !!chatVisible && !blockingSurfaceOpen;
+}
+
+export function bindDesktopComposerAutoFocus({
+  enabled = false,
+  onFocus,
+  win = typeof window === 'undefined' ? null : window,
+  documentRef = typeof document === 'undefined' ? null : document,
+} = {}) {
+  if (!enabled || typeof onFocus !== 'function' || !win || !documentRef) return () => {};
+
+  const focusIfCurrentWindow = () => {
+    if (documentRef.visibilityState === 'hidden') return;
+    const blockingSurface = documentRef.querySelector?.('[role="dialog"], .ace-global-find');
+    if (blockingSurface) return;
+    onFocus();
+  };
+  const onVisibilityChange = () => {
+    if (documentRef.visibilityState === 'visible') focusIfCurrentWindow();
+  };
+
+  win.addEventListener('focus', focusIfCurrentWindow);
+  win.addEventListener('pageshow', focusIfCurrentWindow);
+  win.addEventListener(DESKTOP_WINDOW_FOCUS_EVENT, focusIfCurrentWindow);
+  documentRef.addEventListener('visibilitychange', onVisibilityChange);
+  return () => {
+    win.removeEventListener('focus', focusIfCurrentWindow);
+    win.removeEventListener('pageshow', focusIfCurrentWindow);
+    win.removeEventListener(DESKTOP_WINDOW_FOCUS_EVENT, focusIfCurrentWindow);
+    documentRef.removeEventListener('visibilitychange', onVisibilityChange);
+  };
 }
 
 export function requestDesktopWindowFocus(win = typeof window === 'undefined' ? null : window) {

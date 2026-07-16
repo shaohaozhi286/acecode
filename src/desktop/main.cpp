@@ -1199,6 +1199,14 @@ int main(int argc, char** argv) {
         host.eval(js);
     });
 
+    // Native window activation does not consistently reach WebView2 as a DOM
+    // focus event. Send an explicit event after WM_ACTIVATE so a visible chat
+    // composer can restore keyboard focus without requiring another click.
+    host.set_window_focus_handler([&host]() {
+        host.eval("(function(){try{window.dispatchEvent(new Event("
+                  "'acecode:desktop-window-focus'));}catch(e){}})();");
+    });
+
     // 系统通知 bridge — 前端 sessionTranscript.js 在 question_request / 回合完成时调用。
     // payload: [{ id, workspace_hash, session_id, title, body }]。失败静默 no-op,
     // 前端 desktopNotify.js 已经做过抑制规则判定,这里不再二次过滤。

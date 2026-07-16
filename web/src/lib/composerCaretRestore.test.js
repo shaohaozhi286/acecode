@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import {
+  bindDesktopComposerAutoFocus,
   requestDesktopWindowFocus,
   restoreComposerTextareaCaret,
+  shouldAutoFocusDesktopComposer,
   shouldRestoreComposerTextareaFocus,
 } from './composerCaretRestore.js';
 
@@ -48,6 +50,25 @@ function textarea(value = '') {
       this.selectionCalls.push({ start, end, direction });
     },
   });
+}
+
+function eventTarget() {
+  const listeners = new Map();
+  return {
+    addEventListener(type, listener) {
+      if (!listeners.has(type)) listeners.set(type, new Set());
+      listeners.get(type).add(listener);
+    },
+    removeEventListener(type, listener) {
+      listeners.get(type)?.delete(listener);
+    },
+    dispatch(type) {
+      for (const listener of listeners.get(type) || []) listener({ type });
+    },
+    listenerCount(type) {
+      return listeners.get(type)?.size || 0;
+    },
+  };
 }
 
 run('composer caret restore is allowed when focus fell back to body', () => {
@@ -142,6 +163,106 @@ run('composer focus restore allows active descendants inside composer root', () 
     bodyElement: body,
     documentElement: html,
   }), true);
+});
+
+run('desktop composer auto-focus is enabled only for an unobstructed visible shell chat', () => {
+  assert.equal(shouldAutoFocusDesktopComposer({
+    desktopMode: 'shell',
+    chatVisible: true,
+    blockingSurfaceOpen: false,
+  }), true);
+  assert.equal(shouldAutoFocusDesktopComposer({
+    desktopMode: 'browser',
+    chatVisible: true,
+    blockingSurfaceOpen: false,
+  }), false);
+  assert.equal(shouldAutoFocusDesktopComposer({
+    desktopMode: 'shell',
+    chatVisible: false,
+    blockingSurfaceOpen: false,
+  }), false);
+  assert.equal(shouldAutoFocusDesktopComposer({
+    desktopMode: 'shell',
+    chatVisible: true,
+    blockingSurfaceOpen: true,
+  }), false);
+});
+
+run('desktop composer auto-focus follows focus visibility events and cleans up', () => {
+  const win = eventTarget();
+  const documentRef = Object.assign(eventTarget(), {
+    visibilityState: 'visible',
+    querySelector: () => null,
+  });
+  let focusCalls = 0;
+  const cleanup = bindDesktopComposerAutoFocus({
+    enabled: true,
+    onFocus: () => { focusCalls += 1; },
+    win,
+    documentRef,
+  });
+
+  assert.equal(win.listenerCount('focus'), 1);
+  assert.equal(win.listenerCount('pageshow'), 1);
+  assert.equal(win.listenerCount('acecode:desktop-window-focus'), 1);
+  assert.equal(documentRef.listenerCount('visibilitychange'), 1);
+  win.dispatch('focus');
+  win.dispatch('pageshow');
+  win.dispatch('acecode:desktop-window-focus');
+  assert.equal(focusCalls, 3);
+
+  documentRef.visibilityState = 'hidden';
+  win.dispatch('focus');
+  documentRef.dispatch('visibilitychange');
+  assert.equal(focusCalls, 3);
+
+  documentRef.visibilityState = 'visible';
+  documentRef.dispatch('visibilitychange');
+  assert.equal(focusCalls, 4);
+
+  cleanup();
+  win.dispatch('focus');
+  win.dispatch('acecode:desktop-window-focus');
+  assert.equal(focusCalls, 4);
+  assert.equal(win.listenerCount('focus'), 0);
+  assert.equal(win.listenerCount('acecode:desktop-window-focus'), 0);
+  assert.equal(documentRef.listenerCount('visibilitychange'), 0);
+});
+
+run('desktop composer auto-focus does not steal focus through a modal surface', () => {
+  const win = eventTarget();
+  const documentRef = Object.assign(eventTarget(), {
+    visibilityState: 'visible',
+    querySelector: () => ({ role: 'dialog' }),
+  });
+  let focusCalls = 0;
+  const cleanup = bindDesktopComposerAutoFocus({
+    enabled: true,
+    onFocus: () => { focusCalls += 1; },
+    win,
+    documentRef,
+  });
+
+  win.dispatch('focus');
+  assert.equal(focusCalls, 0);
+  cleanup();
+});
+
+run('desktop composer auto-focus stays inert when disabled', () => {
+  const win = eventTarget();
+  const documentRef = Object.assign(eventTarget(), {
+    visibilityState: 'visible',
+    querySelector: () => null,
+  });
+  const cleanup = bindDesktopComposerAutoFocus({
+    enabled: false,
+    onFocus: () => { throw new Error('must not focus'); },
+    win,
+    documentRef,
+  });
+
+  assert.equal(win.listenerCount('focus'), 0);
+  cleanup();
 });
 
 run('desktop window focus request calls optional bridge', () => {

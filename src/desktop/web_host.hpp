@@ -117,6 +117,12 @@ public:
     using WindowStateHandler = std::function<void(bool maximized)>;
     void set_window_state_change_handler(WindowStateHandler handler);
 
+    // Windows host activation is not guaranteed to surface as a DOM window.focus
+    // event in WebView2. Register a native activation callback so the frontend can
+    // explicitly restore the chat composer focus after the Desktop window returns.
+    using WindowFocusHandler = std::function<void()>;
+    void set_window_focus_handler(WindowFocusHandler handler);
+
     // 关闭请求(× / Alt+F4 / aceDesktop_closeWindow)。会先派发到
     // close_request_handler;handler 返回 true 表示已消化(典型如"隐藏到托盘"),
     // 返回 false / 未注册 → 走原 DestroyWindow 退出路径。

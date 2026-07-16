@@ -79,6 +79,7 @@ import {
   writeDesktopHomeWorkspaceHash,
 } from '../lib/homeWorkspaceSelection.js';
 import { maybeNotify } from '../lib/desktopNotify.js';
+import { bindDesktopComposerAutoFocus } from '../lib/composerCaretRestore.js';
 import { useSubagentTasks } from '../lib/useSubagentTasks.js';
 import { taskDisplayTitle } from '../lib/subagentTasks.js';
 import { normalizeTokenBudget } from '../lib/tokenBudget.js';
@@ -469,7 +470,7 @@ function isRealWorkspaceHash(hash) {
   return !!hash && hash !== '__local__';
 }
 
-export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorkspaceChange, onCommandWorkspaceChange, onConsoleCwdChange, health, onPermissionRequest, onQuestionRequest, questionRequest, onQuestionResolve, onPermissionModeChanged, onSubagentTasksChange, showSidePanel = false, sidePanelWidth = 280, onSidePanelResize, previewPanelWidth = 640, onPreviewPanelResize, onPreviewPanelVisibleChange, sidePanelCollapsed = false, sidePanelListCollapsed = false, onToggleSidePanel, onToggleSidePanelList, onRevealSidePanelList, sidePanelMaximized = false, onToggleSidePanelMaximized, showAceCodeAvatar = false }) {
+export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorkspaceChange, onCommandWorkspaceChange, onConsoleCwdChange, health, autoFocusOnDesktopWindowFocus = false, onPermissionRequest, onQuestionRequest, questionRequest, onQuestionResolve, onPermissionModeChanged, onSubagentTasksChange, showSidePanel = false, sidePanelWidth = 280, onSidePanelResize, previewPanelWidth = 640, onPreviewPanelResize, onPreviewPanelVisibleChange, sidePanelCollapsed = false, sidePanelListCollapsed = false, onToggleSidePanel, onToggleSidePanelList, onRevealSidePanelList, sidePanelMaximized = false, onToggleSidePanelMaximized, showAceCodeAvatar = false }) {
   const ref = useMemo(() => normalizeSessionRef(sessionRef, sessionId), [sessionRef, sessionId]);
   const sid = ref?.sessionId || ref?.id || '';
   const sidRef = useRef(sid);
@@ -1566,21 +1567,11 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
   }, [sid, focusChatInput]);
 
   useEffect(() => {
-    const focusIfCurrentWindow = () => {
-      requestAnimationFrame(() => focusChatInput(false));
-    };
-    const onVisibilityChange = () => {
-      if (document.visibilityState === 'visible') focusIfCurrentWindow();
-    };
-    window.addEventListener('focus', focusIfCurrentWindow);
-    window.addEventListener('pageshow', focusIfCurrentWindow);
-    document.addEventListener('visibilitychange', onVisibilityChange);
-    return () => {
-      window.removeEventListener('focus', focusIfCurrentWindow);
-      window.removeEventListener('pageshow', focusIfCurrentWindow);
-      document.removeEventListener('visibilitychange', onVisibilityChange);
-    };
-  }, [focusChatInput]);
+    return bindDesktopComposerAutoFocus({
+      enabled: autoFocusOnDesktopWindowFocus,
+      onFocus: () => restoreChatInputFocusSoon(true),
+    });
+  }, [autoFocusOnDesktopWindowFocus, restoreChatInputFocusSoon]);
 
   useLayoutEffect(() => {
     itemsRef.current = renderedItems;

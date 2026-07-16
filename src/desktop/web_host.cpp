@@ -458,6 +458,11 @@ constexpr UINT kRequestQuitMsg = WM_USER + 0x10;
 std::function<void(bool)> g_window_state_handler;
 bool g_last_known_maximized = false;
 
+// WebView2 does not reliably turn a native top-level activation into a DOM
+// window.focus event. The Desktop main process uses this callback to dispatch
+// an explicit frontend event after the host has completed WM_ACTIVATE handling.
+std::function<void()> g_window_focus_handler;
+
 // 单例联动:第二次启动 acecode-desktop 会向已有 host window 派 focus msg,
 // 让我们把窗口拉前 + 显示。同名 RegisterWindowMessageW 在两端拿到一致 UINT,
 // 见 single_instance_win.cpp 头注。第一次访问时 lazily register,缓存到 static。
@@ -888,6 +893,14 @@ LRESULT frameless_nc_calc(HWND hwnd, WPARAM wparam, LPARAM lparam) {
 
 LRESULT CALLBACK host_window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     switch (msg) {
+        case WM_ACTIVATE: {
+            const LRESULT result = call_host_default_proc(hwnd, msg, wparam, lparam);
+            if (LOWORD(wparam) != WA_INACTIVE && !::IsIconic(hwnd) &&
+                g_window_focus_handler) {
+                g_window_focus_handler();
+            }
+            return result;
+        }
         case WM_GETMINMAXINFO:
             apply_minimum_track_size(hwnd, reinterpret_cast<MINMAXINFO*>(lparam));
             return 0;
@@ -1852,6 +1865,13 @@ void WebHost::set_window_state_change_handler(WindowStateHandler handler) {
 #else
     g_mac_window_state_handler = std::move(handler);
 #endif
+#endif
+}
+void WebHost::set_window_focus_handler(WindowFocusHandler handler) {
+#ifdef _WIN32
+    g_window_focus_handler = std::move(handler);
+#else
+    (void)handler;
 #endif
 }
 bool WebHost::close_window() {

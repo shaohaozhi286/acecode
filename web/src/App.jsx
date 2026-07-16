@@ -67,6 +67,7 @@ import {
   stripOpenSessionParams,
 } from './lib/sessionJump.js';
 import { desktopUiMode } from './lib/desktopShellMode.js';
+import { shouldAutoFocusDesktopComposer } from './lib/composerCaretRestore.js';
 import { requestDesktopAppExit, showDesktopAboutDialog } from './lib/desktopAppActions.js';
 import {
   desktopUpdateRestartAvailable,
@@ -958,6 +959,12 @@ export function App() {
     if (!visibleQuestionReq?.request_id) return;
     setQuestionReqs((prev) => removePendingQuestionRequest(prev, visibleQuestionReq.request_id));
   };
+  const autoFocusChatOnDesktopWindowFocus = shouldAutoFocusDesktopComposer({
+    desktopMode: desktopModeRef.current,
+    chatVisible: view === 'single' && !activeRef?.loop,
+    blockingSurfaceOpen: showSettings || searchOpen || updateDialogOpen
+      || !!permReq || !!visibleQuestionReq || guidedTourPreparing || guidedTourRun,
+  });
 
   return (
     <SlashCommandsProvider workspaceHash={commandWorkspaceHash}>
@@ -1040,6 +1047,7 @@ export function App() {
                 onCommandWorkspaceChange={setCommandWorkspaceHash}
                 onConsoleCwdChange={setConsoleCwd}
                 health={health}
+                autoFocusOnDesktopWindowFocus={autoFocusChatOnDesktopWindowFocus}
                 showSidePanel
                 sidePanelWidth={singleLayout.sidePanel}
                 onSidePanelResize={setSidePanelWidth}
