@@ -593,6 +593,7 @@ Queues a user input turn. Body:
 ```json
 {
   "text": "Explain this code",
+  "client_message_id": "queued-session-id-1",
   "attachments": [{"id":"att-..."}],
   "contexts": [
     {
@@ -614,6 +615,12 @@ Queues a user input turn. Body:
 with `type:"selection"` are sanitized and expanded into model-visible context
 while preserving the user's original display text. Other context objects are
 passed as browser context content parts.
+
+`client_message_id` is an optional non-empty string (maximum 256 bytes) used by
+Desktop queued-input handoff. When accepted, it is preserved as
+`metadata.client_message_id` on the canonical user message so an optimistic
+local item can reconcile with persistence and WebSocket replay. It does not
+deduplicate backend execution; callers that omit it retain the existing behavior.
 
 If the text is a skill slash command for the session workspace, the daemon
 expands it to the skill invocation prompt and records `metadata.display_text`.
@@ -1158,7 +1165,9 @@ return `500 PERSIST_FAILED`.
 Updates a saved model profile and may rename it. Missing `api_key`,
 `base_url`, `context_window`, `stream_timeout_ms`, `capabilities`, or
 `request_headers` preserve the existing values. Sending empty
-`request_headers` clears them. Returns the updated profile.
+`request_headers` clears them. Legacy profiles carrying `readonly: true` from
+an external login helper remain editable; the marker is compatibility metadata,
+not an update permission. Returns the updated profile.
 
 ### `DELETE /api/models/:name`
 
@@ -1759,14 +1768,18 @@ answer policy (`config.agent_loop.question_policy`, or the
 - `ask` (default): `question_request` is emitted and the turn blocks until
   `question_answer` arrives (or the turn is aborted). Unchanged behavior.
 - `deny`: no `question_request` is emitted at all. The tool returns an
-  automatic answer instructing the model to decide autonomously. Sessions in
-  YOLO permission mode default to `deny` unless `question_policy` was set
-  explicitly.
+  automatic answer instructing the model to decide autonomously.
 - `timeout`: `question_request` is emitted normally; if no `question_answer`
   arrives within `question_timeout_seconds`, the daemon closes the question
   with `question_closed` `reason:"timeout"` and the tool auto-adopts the
   first (recommended) option of each question. A `question_answer` arriving
   after the timeout is ignored (unknown `request_id`).
+
+YOLO affects tool permission confirmations only; it does not change the
+question policy, so `AskUserQuestion` remains interactive in YOLO. While an
+active `/goal` is running, each question uses a per-call 30-second timeout
+regardless of the configured timeout value, then auto-adopts the first
+(recommended) option.
 
 `question_closed.reason` values: `answered`, `cancelled`, `aborted`,
 `timeout`. Frontends must dismiss the question modal on any
@@ -1939,10 +1952,10 @@ rebases, pushes, or removes its worktree; the final assistant response asks the
 user whether to merge.
 
 Permission behavior is per LOOP session: `default` preserves normal blocking
-permission and AskUserQuestion prompts; `yolo` auto-resolves AskUserQuestion by
-letting the model choose the best option. LOOP Yolo may read outside the active
-work root, but direct file writes and statically detectable shell writes outside
-that root are rejected.
+permission and AskUserQuestion prompts; `yolo` skips all tool permission prompts
+but keeps AskUserQuestion interactive. LOOP Yolo may read outside the active work
+root, but direct file writes and statically detectable shell writes outside that
+root are rejected by the execution boundary without opening a permission prompt.
 
 Error codes include `LOOP_UNAVAILABLE` (`501`), validation codes such as
 `INVALID_MODEL` / `INVALID_WORKSPACE` (`400`), `SCHEDULE_CONFLICT` (`409`), and

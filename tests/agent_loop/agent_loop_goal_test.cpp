@@ -481,9 +481,9 @@ TEST(AgentLoopGoal, ContinuationPromptCoversAuditAndUnattendedSections) {
         }
     }
     ASSERT_FALSE(continuation.empty());
-    EXPECT_NE(continuation.find("Unattended mode:"), std::string::npos);
+    EXPECT_NE(continuation.find("Goal interaction mode:"), std::string::npos);
     EXPECT_NE(continuation.find("Work from evidence:"), std::string::npos);
     EXPECT_NE(continuation.find("Fidelity:"), std::string::npos);
-    EXPECT_NE(continuation.find("Do not call AskUserQuestion"), std::string::npos);
+    EXPECT_NE(continuation.find("The user has 30 seconds to answer"), std::string::npos);
     EXPECT_NE(continuation.find("treat completion as unproven"), std::string::npos);
 }

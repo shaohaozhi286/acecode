@@ -4,11 +4,13 @@
 #include "webview2_runtime_probe.hpp"
 #include "window_background.hpp"
 #include "window_chrome.hpp"
+#include "window_size.hpp"
 
 #include "../utils/encoding.hpp"
 #include "../utils/logger.hpp"
 
 #include <functional>
+#include <limits>
 
 #ifdef _WIN32
 #  ifndef WIN32_LEAN_AND_MEAN
@@ -482,9 +484,21 @@ int dpi_scale(int value, UINT dpi) {
 void apply_minimum_track_size(HWND hwnd, MINMAXINFO* info) {
     if (!info) return;
     const UINT dpi = ::GetDpiForWindow(hwnd);
-    info->ptMinTrackSize.x = std::max<LONG>(
-        info->ptMinTrackSize.x,
-        static_cast<LONG>(dpi_scale(kMinimumDesktopWindowWidth, dpi)));
+    LONG preferred_width = static_cast<LONG>(
+        dpi_scale(kMinimumDesktopWindowWidth, dpi));
+    LONG maximum_width = std::numeric_limits<LONG>::max();
+    if (HMONITOR monitor = ::MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)) {
+        MONITORINFO monitor_info{};
+        monitor_info.cbSize = sizeof(monitor_info);
+        if (::GetMonitorInfoW(monitor, &monitor_info)) {
+            maximum_width = std::max<LONG>(
+                1, monitor_info.rcWork.right - monitor_info.rcWork.left);
+            preferred_width = std::min(preferred_width, maximum_width);
+        }
+    }
+    info->ptMinTrackSize.x = std::min(
+        maximum_width,
+        std::max<LONG>(info->ptMinTrackSize.x, std::max<LONG>(1, preferred_width)));
 }
 
 HMONITOR active_monitor() {
@@ -993,6 +1007,10 @@ HWND create_offscreen_host_window(RECT& target_monitor) {
     if (!register_host_window_class(instance)) return nullptr;
 
     target_monitor = active_monitor_work_rect();
+    const auto initial_size = clamp_window_size_to_work_area(
+        {kDefaultDesktopWindowWidth, kDefaultDesktopWindowHeight},
+        {target_monitor.right - target_monitor.left,
+         target_monitor.bottom - target_monitor.top});
     const int x = target_monitor.right + 10000;
     const int y = target_monitor.bottom + 10000;
     HWND hwnd = ::CreateWindowExW(
@@ -1002,8 +1020,8 @@ HWND create_offscreen_host_window(RECT& target_monitor) {
         WS_OVERLAPPEDWINDOW,
         x,
         y,
-        kDefaultDesktopWindowWidth,
-        kDefaultDesktopWindowHeight,
+        initial_size.width,
+        initial_size.height,
         nullptr,
         nullptr,
         instance,
@@ -1572,6 +1590,16 @@ void WebHost::set_size(int width, int height) {
     [window makeKeyAndOrderFront:nil];
     configure_mac_window_chrome(*impl_->w);
 #else
+#ifdef _WIN32
+    RECT work_area = impl_->target_monitor;
+    if (work_area.right <= work_area.left || work_area.bottom <= work_area.top) {
+        work_area = active_monitor_work_rect();
+    }
+    const auto clamped = clamp_window_size_to_work_area(
+        {adjusted.first, adjusted.second},
+        {work_area.right - work_area.left, work_area.bottom - work_area.top});
+    adjusted = {clamped.width, clamped.height};
+#endif
     impl_->w->set_size(adjusted.first, adjusted.second, WEBVIEW_HINT_NONE);
 #ifdef _WIN32
     if (impl_->custom_window) {

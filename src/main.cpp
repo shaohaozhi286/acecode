@@ -3416,7 +3416,7 @@ static AppConfig load_tui_config_and_runtime(HookManager& hook_manager,
 }
 
 // 创建当前 provider，并把模型上下文窗口写回运行时配置。
-static void initialize_tui_provider_runtime(
+static ModelProfile initialize_tui_provider_runtime(
     AppConfig& config,
     const std::string& working_dir,
     const std::optional<std::string>& cwd_override,
@@ -3445,6 +3445,7 @@ static void initialize_tui_provider_runtime(
     auto payload =
         build_startup_models_loaded_payload(working_dir, effective_entry, provider);
     hook_manager.dispatch(kHookEventStartupModelsLoaded, payload, working_dir);
+    return effective_entry;
 }
 
 // 注册工具、skills、memory、MCP；这些是 AgentLoop 的工具底座。
@@ -4922,8 +4923,8 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
 
     auto cwd_override = load_cwd_model_override(working_dir);
     SessionEntry::ProviderSlot provider_slot;
-    initialize_tui_provider_runtime(config, working_dir, cwd_override,
-                                    provider_slot, hook_manager);
+    ModelProfile initial_model_profile = initialize_tui_provider_runtime(
+        config, working_dir, cwd_override, provider_slot, hook_manager);
     auto provider_accessor = [&provider_slot]() -> std::shared_ptr<LlmProvider> {
         std::lock_guard<std::mutex> lk(provider_slot.mu);
         return provider_slot.provider;
@@ -5332,10 +5333,6 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
     agent_loop.set_project_instructions_config(&config.project_instructions);
     agent_loop.set_custom_instructions_config(&config.custom_instructions);
     agent_loop.set_git_context_config(&config.git_context);
-    agent_loop.set_auth_recovery(
-        [&auth_recovery](const std::string& base_url, const std::string& key_at_request) {
-            return auth_recovery.recover(base_url, key_at_request);
-        });
 
     agent_loop.set_callbacks(callbacks);
 
@@ -5388,7 +5385,11 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
         auto p = provider_accessor();
         const std::string provider_name = p ? p->name() : std::string{};
         const std::string provider_model = p ? p->model() : std::string{};
-        session_manager.start_session(working_dir, provider_name, provider_model);
+        session_manager.start_session(working_dir,
+                                      provider_name,
+                                      provider_model,
+                                      std::string{},
+                                      initial_model_profile.name);
         session_manager.set_permission_mode(
             PermissionManager::mode_name(permissions.mode()),
             /*persist_immediately=*/false);
@@ -5404,6 +5405,13 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
         }
     }
     agent_loop.set_session_manager(&session_manager);
+    agent_loop.set_auth_recovery(
+        [&auth_recovery, &session_manager](const std::string& base_url,
+                                           const std::string& key_at_request) {
+            return auth_recovery.recover(session_manager.current_model_preset(),
+                                         base_url,
+                                         key_at_request);
+        });
 
     std::mutex tui_title_threads_mu;
     std::vector<std::thread> tui_title_threads;

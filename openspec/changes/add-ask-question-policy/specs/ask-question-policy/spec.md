@@ -22,19 +22,27 @@
 - **THEN** 加载后策略为 ask 且 explicit 标记为 true
 
 ### Requirement: 策略解析优先级
-系统 SHALL 通过纯函数 `resolve_question_policy` 解析生效策略，优先级从高到低为：显式配置（config 或 CLI）按面值生效；权限模式为 yolo 且未显式配置时映射为 Deny；否则为 Ask。goal 无人值守豁免 MUST 保持在工具入口处高于本函数（先于策略检查返回 goal 专属自动应答）。
+系统 SHALL 通过纯函数 `resolve_question_policy` 解析生效策略：显式配置（config 或 CLI）按面值生效，否则为 Ask。permission mode MUST NOT 改变提问策略；YOLO 只影响工具权限确认。active goal MUST 在工具入口将策略覆盖为 Timeout(30)。
 
-#### Scenario: YOLO 未显式配置映射 deny
-- **WHEN** permission_mode 为 `"yolo"` 且 explicit 标记为 false
-- **THEN** 解析结果为 Deny，origin 为 `"yolo-implicit"`
+#### Scenario: YOLO 保持默认提问
+- **WHEN** permission_mode 为 `"yolo"` 且用户未显式配置 question_policy
+- **THEN** 解析结果为 Ask，AskUserQuestion 正常打开提问 UI
 
-#### Scenario: 显式 ask 胜过 YOLO
+#### Scenario: YOLO 不压制显式 ask
 - **WHEN** permission_mode 为 `"yolo"` 且用户显式配置 `question_policy="ask"`
-- **THEN** 解析结果为 Ask
+- **THEN** 解析结果为 Ask，且打开提问 UI
 
-#### Scenario: goal 无人值守优先于一切策略
+#### Scenario: YOLO 不弹任何工具权限确认
+- **WHEN** permission_mode 为 `"yolo"` 且模型调用任意需权限的工具，包括首次写入工作区外路径
+- **THEN** 工具权限全部自动放行，不打开 permission prompt；AskUserQuestion 仍由 question_policy 独立决定是否打开提问 UI
+
+#### Scenario: YOLO 命中显式拒绝规则时静默阻止
+- **WHEN** permission_mode 为 `"yolo"` 且工具调用命中用户配置的 `Deny` 权限规则
+- **THEN** 工具不执行并返回规则拒绝结果，但不打开 permission prompt
+
+#### Scenario: goal 固定 30 秒提问窗口
 - **WHEN** 会话处于 goal 无人值守模式且配置 `question_policy="timeout"`
-- **THEN** AskUserQuestion 立即返回 goal 无人值守自动应答，不进入 timeout 等待
+- **THEN** AskUserQuestion 正常打开 UI 并使用 30 秒 timeout，不使用普通配置的秒数
 
 #### Scenario: 默认路径维持现状
 - **WHEN** 未配置策略且 permission_mode 为 `"default"`
@@ -77,20 +85,24 @@ TUI 与 daemon 可执行入口 SHALL 支持 `--question-policy <ask|deny|timeout
 - **WHEN** 以 `--question-policy timeout:120` 启动
 - **THEN** 会话内生效策略为 Timeout(120)，配置文件内容不变
 
-#### Scenario: CLI 显式 ask 压制 YOLO 映射
+#### Scenario: YOLO 保留 CLI 显式 ask
 - **WHEN** 以 `--yolo --question-policy ask` 启动
-- **THEN** AskUserQuestion 仍正常弹出交互
+- **THEN** AskUserQuestion 正常弹出交互，工具权限确认仍全部自动放行
 
 #### Scenario: 非法 CLI 值直接失败
 - **WHEN** 以 `--question-policy sometimes` 启动
 - **THEN** 进程输出错误并以非零码退出
 
 ### Requirement: 双端一致性
-TUI 路径与 daemon async 路径 MUST 使用同一策略解析函数与同一自动应答文案构造函数；策略经 `ToolContext` 探针注入（空探针 = Ask），deny/ask 分支 MUST 反映调用时刻的实时权限模式（会话中 `/yolo` 切换后下一次调用即生效）。
+TUI 路径与 daemon async 路径 MUST 使用同一策略解析函数与同一自动应答文案构造函数；策略经 `ToolContext` 探针注入（空探针 = Ask）。goal 的 30 秒覆盖 MUST 在两条路径上一致生效。
 
-#### Scenario: 运行中切 YOLO 即时生效
-- **WHEN** 未显式配置策略的会话中途切换到 YOLO 权限模式后模型调用 AskUserQuestion
-- **THEN** 该次调用按 Deny 自动应答
+#### Scenario: 运行中切 YOLO 不关闭提问
+- **WHEN** 会话中途切换到 YOLO 权限模式后模型调用 AskUserQuestion
+- **THEN** 该次调用仍按 question_policy 打开提问 UI，但任何工具权限确认（包括工作区外首次写入确认）都不弹出
+
+#### Scenario: goal daemon 调用级 timeout
+- **WHEN** daemon 会话在创建后进入 active goal，模型调用 AskUserQuestion
+- **THEN** prompter 为该次调用使用 30 秒 timeout override，超时发送 `question_closed(reason="timeout")` 并自动采纳推荐项
 
 #### Scenario: 独立 ToolExecutor 调用不受影响
 - **WHEN** 工具在无策略探针注入的上下文中执行（如单测直接调 ToolExecutor）

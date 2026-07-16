@@ -42,7 +42,6 @@ enum class SavedModelEditError {
     INVALID_STREAM_TIMEOUT, // stream_timeout_ms < 0
     INVALID_CAPABILITY,     // capabilities 含空值/控制字符/重复项
     INVALID_REQUEST_HEADER, // request_headers 非 openai / 非法 header/template
-    READONLY_MODEL,       // update 时目标条目 readonly=true(外部登录器托管)
     NOT_FOUND,            // update/remove 时 name 不存在
     IN_USE_AS_DEFAULT,    // 调用层可用于表示运行中 session 正在使用该 name
 };

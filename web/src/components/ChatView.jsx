@@ -40,6 +40,7 @@ import {
 } from '../lib/sessionChanges.js';
 import { stableBySignature } from '../lib/changeReviewStability.js';
 import {
+  acceptedQueuedInputEvent,
   beginQueuedGuidance,
   buildQueuedMessageItems,
   cancelQueuedInput,
@@ -48,9 +49,11 @@ import {
   enqueueQueuedInput,
   finishQueuedGuidance,
   hasSendingQueuedInput,
+  markQueuedInputCompleted,
   markQueuedInputFailed,
   markQueuedInputSending,
   nextQueuedInput,
+  queuedInputRequestPayload,
   retryQueuedInput,
 } from '../lib/chatInputQueue.js';
 import { findStickyUserContext, sameStickyUserContext, scrollTopForStickySourceRow } from '../lib/stickyUserContext.js';
@@ -464,7 +467,7 @@ function isRealWorkspaceHash(hash) {
   return !!hash && hash !== '__local__';
 }
 
-export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorkspaceChange, onCommandWorkspaceChange, onConsoleCwdChange, health, onPermissionRequest, onQuestionRequest, questionRequest, onQuestionResolve, onPermissionModeChanged, onSubagentTasksChange, showSidePanel = false, sidePanelWidth = 280, onSidePanelResize, previewPanelWidth = 640, onPreviewPanelResize, onPreviewPanelVisibleChange, sidePanelCollapsed = false, onToggleSidePanel, sidePanelMaximized = false, onToggleSidePanelMaximized, showAceCodeAvatar = false }) {
+export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorkspaceChange, onCommandWorkspaceChange, onConsoleCwdChange, health, onPermissionRequest, onQuestionRequest, questionRequest, onQuestionResolve, onPermissionModeChanged, onSubagentTasksChange, showSidePanel = false, sidePanelWidth = 280, onSidePanelResize, previewPanelWidth = 640, onPreviewPanelResize, onPreviewPanelVisibleChange, sidePanelCollapsed = false, sidePanelListCollapsed = false, onToggleSidePanel, onToggleSidePanelList, onRevealSidePanelList, sidePanelMaximized = false, onToggleSidePanelMaximized, showAceCodeAvatar = false }) {
   const ref = useMemo(() => normalizeSessionRef(sessionRef, sessionId), [sessionRef, sessionId]);
   const sid = ref?.sessionId || ref?.id || '';
   const sidRef = useRef(sid);
@@ -1881,10 +1884,20 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
     const queuedPayload = queuedItem.queued?.payload || queuedItem.content;
     const queuedIsBuiltin = !payloadHasExtras(queuedPayload) &&
       inputRouteForText(payloadText(queuedPayload)).kind === 'builtin';
+    const sendPayload = queuedIsBuiltin
+      ? queuedPayload
+      : (queuedInputRequestPayload(queuedItem) || queuedPayload);
     if (!queuedIsBuiltin) {
       applyEvent({ type: 'busy_changed', payload: { busy: true } }, { emitEffects: false });
     }
-    sendInputOrBuiltin(targetSid, queuedPayload)
+    sendInputOrBuiltin(targetSid, sendPayload)
+      .then(() => {
+        if (!queuedIsBuiltin && sidRef.current === targetSid) {
+          const acceptedEvent = acceptedQueuedInputEvent(queuedItem);
+          if (acceptedEvent) applyEvent(acceptedEvent, { emitEffects: false });
+        }
+        updateQueueState((prev) => markQueuedInputCompleted(prev, queuedItem.queued.id));
+      })
       .catch((e) => {
         const message = e?.message || '发送失败';
         if (!queuedIsBuiltin && sidRef.current === targetSid) {
@@ -1918,6 +1931,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
         sessionId: sid,
         content: item.content || '',
         ts: item.ts,
+        clientMessageId: item.metadata?.client_message_id,
       });
       if (candidate !== nextState) {
         nextState = candidate;
@@ -2477,9 +2491,9 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
 
   const openReviewPanel = useCallback(() => {
     if (!showSidePanel || !sid) return;
-    if (sidePanelCollapsed) onToggleSidePanel?.();
+    if (sidePanelCollapsed || sidePanelListCollapsed) onRevealSidePanelList?.();
     setReviewRequest((n) => n + 1);
-  }, [onToggleSidePanel, showSidePanel, sid, sidePanelCollapsed]);
+  }, [onRevealSidePanelList, showSidePanel, sid, sidePanelCollapsed, sidePanelListCollapsed]);
 
   const dismissChangeDock = useCallback(() => {
     if (!changeDockDismissalKey || !changeSignature) return;
@@ -2521,6 +2535,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
   const sidePanelFilesEnabled = !(ref?.noWorkspace || ref?.no_workspace);
   const sidePanelCwd = sidePanelFilesEnabled ? (ref?.cwd || health?.cwd || '') : '';
   const sidePanelMounted = showSidePanel && !!sid;
+  const sidePanelNavigationCollapsed = sidePanelCollapsed || sidePanelListCollapsed;
   const previewScope = useMemo(
     () => {
       if (!sidePanelFilesEnabled) return sid || '';
@@ -2544,8 +2559,9 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
     [previewContext, previewTabState],
   );
   const previewTabsOpen = previewTabs.length > 0;
-  const previewPanelVisible = previewTabsOpen && !(sidePanelCollapsed && !sidePanelMaximized);
-  const previewPanelMaximized = sidePanelMaximized && previewTabsOpen;
+  // 总开关必须连最大化详情一起隐藏;恢复时仍保留最大化偏好与原页签。
+  const previewPanelVisible = previewTabsOpen && !sidePanelCollapsed;
+  const previewPanelMaximized = sidePanelMaximized && previewPanelVisible;
   const previewCloseConfirmMessage = previewCloseConfirm
     ? closeVisiblePreviewTabsConfirmationMessage(previewTabs.length) || previewCloseConfirm.message
     : '';
@@ -2563,7 +2579,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
     sidePanelWidth,
     previewPanelWidth,
     sidePanelVisible: sidePanelMounted,
-    sidePanelCollapsed,
+    sidePanelCollapsed: sidePanelNavigationCollapsed,
     previewPanelVisible,
     previewPanelMaximized,
   }), [
@@ -2571,7 +2587,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
     previewPanelMaximized,
     previewPanelVisible,
     previewPanelWidth,
-    sidePanelCollapsed,
+    sidePanelNavigationCollapsed,
     sidePanelMounted,
     sidePanelWidth,
   ]);
@@ -2629,6 +2645,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
   // openGitChangesTab 保留页签原 base。
   const openGitChangePreview = useCallback((filePath, gitBase, gitFileCount) => {
     if (!sid || !filePath) return;
+    if (sidePanelCollapsed) onToggleSidePanel?.();
     setPreviewTabState((prev) => openGitChangesTab(prev, {
       scopeKey: previewScope,
       sessionId: sid,
@@ -2637,7 +2654,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
       expandedFile: filePath,
       fileCount: gitFileCount,
     }));
-  }, [previewScope, sid, sidePanelCwd]);
+  }, [onToggleSidePanel, previewScope, sid, sidePanelCollapsed, sidePanelCwd]);
 
   // SidePanel 切基线时,若「变更」页签已打开则同步其 base(详情栏跟着换比较对象)。
   const updateGitChangeBase = useCallback((gitBase) => {
@@ -2978,8 +2995,13 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
         width: Math.max(0, effectivePreviewPanelWidth),
       };
   const sidePanelShellStyle = {
-    width: sidePanelCollapsed ? 0 : Math.max(0, effectiveSidePanelWidth),
+    width: sidePanelNavigationCollapsed ? 0 : Math.max(0, effectiveSidePanelWidth),
   };
+  const sidePanelRestoreAction = sidePanelCollapsed && onToggleSidePanel
+    ? { onClick: onToggleSidePanel, label: '展开整个右侧面板' }
+    : sidePanelListCollapsed && !previewPanelVisible && onToggleSidePanelList
+      ? { onClick: onToggleSidePanelList, label: '展开列表面板' }
+      : null;
 
   return (
     <div ref={layoutRef} className="flex-1 flex min-w-0 ace-chat-layout">
@@ -3027,13 +3049,13 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
               <VsIcon name="ellipsis" size={15} />
             </button>
           )}
-          {sidePanelMounted && sidePanelCollapsed && onToggleSidePanel && (
+          {sidePanelMounted && sidePanelRestoreAction && (
             <button
               type="button"
-              onClick={onToggleSidePanel}
+              onClick={sidePanelRestoreAction.onClick}
               className="ace-side-panel-expand-fab"
-              title="展开右侧面板"
-              aria-label="展开右侧面板"
+              title={sidePanelRestoreAction.label}
+              aria-label={sidePanelRestoreAction.label}
             >
               <PanelToggleIcon side="right" size={15} />
             </button>
@@ -3356,6 +3378,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
             changeSummary={changeSummary}
             maximized={previewPanelMaximized}
             busy={busy}
+            sidePanelListCollapsed={sidePanelListCollapsed}
             onActivateTab={activatePreview}
             onCloseTab={closePreview}
             onCloseOthers={closeOtherPreviews}
@@ -3363,6 +3386,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
             onCloseAll={closePreviewPanel}
             onReorderTab={reorderPreview}
             onToggleMaximize={onToggleSidePanelMaximized}
+            onToggleSidePanelList={onToggleSidePanelList}
             onSelectChangeFile={openSessionChangePreview}
             onSelectGitChangeFile={openGitChangePreview}
             onOpenFilePreview={openFilePreview}
@@ -3399,7 +3423,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
       )}
       {sidePanelMounted && (
         <>
-          {!sidePanelCollapsed && (
+          {!sidePanelNavigationCollapsed && (
             <div
               role="separator"
               aria-label="调整右侧栏宽度"
@@ -3414,7 +3438,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
           )}
           <div
             className="ace-side-panel-shell"
-            data-collapsed={sidePanelCollapsed ? 'true' : 'false'}
+            data-collapsed={sidePanelNavigationCollapsed ? 'true' : 'false'}
             data-maximized="false"
             style={sidePanelShellStyle}
           >
@@ -3429,9 +3453,9 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
               reviewRequest={reviewRequest}
               filesEnabled={sidePanelFilesEnabled}
               width={sidePanelWidth}
-              collapsed={sidePanelCollapsed}
+              collapsed={sidePanelListCollapsed}
               busy={busy}
-              onToggleCollapse={onToggleSidePanel}
+              onToggleCollapse={onToggleSidePanelList}
               onOpenFilePreview={openFilePreview}
               onOpenSessionChangePreview={openSessionChangePreview}
               onOpenGitChangePreview={openGitChangePreview}

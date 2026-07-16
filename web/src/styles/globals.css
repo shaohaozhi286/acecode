@@ -11,7 +11,7 @@
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
 @theme inline {
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, Roboto, Helvetica, Arial, sans-serif;
+  --font-sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;
   --font-mono: "SF Mono", "Cascadia Code", "Fira Code", Menlo, Consolas, monospace;
 
   --color-bg:           var(--ace-bg);
@@ -1015,7 +1015,6 @@ body {
 }
 .ace-change-add,
 .ace-change-del {
-  font-family: var(--font-mono);
   font-weight: 600;
 }
 .ace-change-add { color: var(--ace-ok); }
@@ -1124,7 +1123,6 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: var(--font-mono);
   font-size: 12px;
 }
 .ace-change-file-counts {
@@ -1872,7 +1870,6 @@ body {
   --ace-tip-from: -3px;
 }
 .ace-cmd-token-tip-name {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
   font-weight: 600;
   color: var(--ace-accent);
@@ -2307,13 +2304,11 @@ body {
 }
 .ace-change-compact-name {
   color: inherit;
-  font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.2;
 }
 .ace-change-compact-parent {
   color: var(--ace-fg-mute);
-  font-family: var(--font-mono);
   font-size: 10px;
   line-height: 1.15;
 }
@@ -2321,7 +2316,6 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-family: var(--font-mono);
   font-size: 11px;
   white-space: nowrap;
 }
@@ -2942,6 +2936,14 @@ body {
   line-height: 1.45 !important;
 }
 
+/* Tool 中的真实代码与 diff 不继承上面的正文覆盖。 */
+.ace-tool-call-text pre,
+.ace-tool-call-text code,
+.ace-tool-call-text .ace-diff,
+.ace-tool-call-text .ace-diff * {
+  font-family: var(--font-mono) !important;
+}
+
 .ace-qa-card {
   width: min(100%, 810px);
   border: 1px solid var(--ace-border);
@@ -3019,7 +3021,6 @@ body {
   padding-top: 2px;
 }
 .ace-qa-mark {
-  font-family: var(--font-mono);
   font-size: var(--ace-font-size-11);
   line-height: 1.5;
   font-weight: 700;

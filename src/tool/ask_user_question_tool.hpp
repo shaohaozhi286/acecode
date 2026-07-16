@@ -59,11 +59,6 @@ std::string format_ask_user_question_result_display(
 // output="[Error] User declined to answer questions."
 ToolResult make_rejected_ask_result();
 
-// Goal 无人值守模式的自动应答 ToolResult:success=true,文案指示模型
-// 自行决策并继续推进 goal(不弹 UI、不等待用户)。TUI 与 daemon 两个
-// AskUserQuestion 实现共用。
-ToolResult make_goal_unattended_ask_result();
-
 // Headless(-p / --print)模式的自动应答 ToolResult:success=true,文案指示
 // 模型在 print 模式下自行决策并继续(openspec add-headless-print-mode)。
 ToolResult make_headless_ask_result();
@@ -72,7 +67,7 @@ ToolResult make_headless_ask_result();
 // success=true(沿用 goal 无人值守的实证教训:false 会让模型当失败反复
 // 重问),文案指示模型选推荐项或最合理假设并继续;metadata 携带
 // ask_user_question_auto={mode:"deny", origin} 供转录行标注。origin 传
-// ResolvedQuestionPolicy::origin("explicit" / "yolo-implicit")。
+// ResolvedQuestionPolicy::origin("explicit")。
 ToolResult make_policy_denied_ask_result(const char* origin);
 
 // question_policy=timeout 到期的自动采纳 ToolResult:每个 question 取第一

@@ -129,7 +129,7 @@ private:
 // on_enable    —— 连接器开关从关到开时异步执行。
 // on_auth_error —— 聊天请求收到认证形态错误(HTTP 400/401)且模型 base_url
 //                  命中 auth_error_scope.base_url_prefix 时执行,退出 0 后
-//                  acecode 重读磁盘 saved_models 并重试请求一次。
+//                  acecode 按当前 saved model name 精确读取新 key 并重试一次。
 struct ConnectorHookConfig {
     std::string command;                 // 可执行文件路径(安装脚本写绝对路径)
     std::vector<std::string> args;
@@ -203,14 +203,14 @@ struct AgentLoopConfig {
     //   "deny"    = 不弹 UI,立即返回自动应答让模型自行决策并继续。
     //   "timeout" = 弹 UI 等 question_timeout_seconds 秒,无人回答则自动
     //               采纳每个 question 的第一个选项(工具约定推荐项排第一)。
-    // 优先级:goal 无人值守自动应答 > 显式配置(config/CLI) > YOLO 隐式
-    // 映射 deny > 默认 ask。非法值在 load_config 归一化为 "ask" 并 LOG_WARN。
+    // 优先级:active goal 固定 Timeout(30) > 显式配置(config/CLI)
+    // > 默认 ask。YOLO 只放行工具权限,不改变提问策略。
     std::string question_policy = "ask";
     int question_timeout_seconds = 60; // 仅 policy=timeout 时读取;clamp [5, 3600]
 
     // 运行时标记,不序列化:config JSON 显式含 question_policy 键。
-    // sparse-on-write 下无法从值区分「默认 ask」与「用户写了 ask」,显式
-    // 配置要压制 YOLO 隐式映射就必须单独记账。
+    // sparse-on-write 下无法从值区分「默认 ask」与「用户写了 ask」,
+    // 因此保留显式意图标记供策略解析与后续扩展使用。
     bool question_policy_explicit = false;
 
     // CLI --question-policy 覆盖,运行时字段,永不序列化。独立于

@@ -32,6 +32,8 @@ using acecode::AgentLoop;
 using acecode::PermissionManager;
 using acecode::PermissionMode;
 using acecode::PermissionResult;
+using acecode::PermissionRule;
+using acecode::RuleAction;
 using acecode::SessionEvent;
 using acecode::SessionEventKind;
 using acecode::ToolContext;
@@ -132,6 +134,7 @@ public:
 
     ToolExecutor& tools() { return tools_; }
     StubLlmProvider& provider() { return *provider_; }
+    PermissionManager& permissions() { return perms_; }
     std::atomic<int>& confirm_count() { return confirm_count_; }
 
     bool submit_and_wait(std::chrono::milliseconds timeout = 5s) {
@@ -538,7 +541,7 @@ TEST(AgentLoopToolLifecycleEvents, YoloReadOnlyPathToolOutsideCwdExecutes) {
     fs::remove_all(cwd);
 }
 
-TEST(AgentLoopToolLifecycleEvents, YoloExternalMutationPromptsOnceThenExecutes) {
+TEST(AgentLoopToolLifecycleEvents, YoloExternalMutationsExecuteWithoutPermissionPrompt) {
     auto cwd = make_temp_dir("acecode_lifecycle_yolo_write_outside");
     std::atomic<int> calls{0};
     ToolLifecycleHarness h(cwd.string(), PermissionMode::Yolo, PermissionResult::Allow);
@@ -558,7 +561,7 @@ TEST(AgentLoopToolLifecycleEvents, YoloExternalMutationPromptsOnceThenExecutes) 
 
     ASSERT_TRUE(h.submit_and_wait());
     EXPECT_EQ(calls.load(), 2);
-    EXPECT_EQ(h.confirm_count().load(), 1);
+    EXPECT_EQ(h.confirm_count().load(), 0);
 
     auto ends = h.events_of(SessionEventKind::ToolEnd);
     ASSERT_EQ(ends.size(), 2u);
@@ -568,7 +571,7 @@ TEST(AgentLoopToolLifecycleEvents, YoloExternalMutationPromptsOnceThenExecutes) 
     fs::remove_all(cwd);
 }
 
-TEST(AgentLoopToolLifecycleEvents, YoloFileWriteOutsideCwdWritesAfterConfirmation) {
+TEST(AgentLoopToolLifecycleEvents, YoloFileWriteOutsideCwdWritesWithoutPermissionPrompt) {
     auto cwd = make_temp_dir("acecode_lifecycle_yolo_file_write");
     const auto outside = cwd.parent_path() /
         (cwd.filename().string() + "_outside_file_write.txt");
@@ -586,7 +589,7 @@ TEST(AgentLoopToolLifecycleEvents, YoloFileWriteOutsideCwdWritesAfterConfirmatio
     h.provider().push_text("done");
 
     ASSERT_TRUE(h.submit_and_wait());
-    EXPECT_EQ(h.confirm_count().load(), 1);
+    EXPECT_EQ(h.confirm_count().load(), 0);
     ASSERT_TRUE(fs::exists(outside));
 
     std::string content;
@@ -601,11 +604,15 @@ TEST(AgentLoopToolLifecycleEvents, YoloFileWriteOutsideCwdWritesAfterConfirmatio
     fs::remove_all(cwd);
 }
 
-TEST(AgentLoopToolLifecycleEvents, YoloExternalMutationDenialSkipsExecution) {
+TEST(AgentLoopToolLifecycleEvents, YoloExternalMutationDoesNotConsultPermissionPrompt) {
     auto cwd = make_temp_dir("acecode_lifecycle_yolo_write_deny");
     std::atomic<int> calls{0};
     ToolLifecycleHarness h(cwd.string(), PermissionMode::Yolo, PermissionResult::Deny);
     h.tools().register_tool(make_probe_tool("write_path_probe", false, &calls));
+    PermissionRule deny_rule;
+    deny_rule.tool_pattern = "write_path_probe";
+    deny_rule.action = RuleAction::Deny;
+    h.permissions().add_rule(deny_rule);
 
     const auto outside = cwd.parent_path() /
         (cwd.filename().string() + "_outside_write_deny.txt");
@@ -617,14 +624,15 @@ TEST(AgentLoopToolLifecycleEvents, YoloExternalMutationDenialSkipsExecution) {
 
     ASSERT_TRUE(h.submit_and_wait());
     EXPECT_EQ(calls.load(), 0);
-    EXPECT_EQ(h.confirm_count().load(), 1);
+    EXPECT_EQ(h.confirm_count().load(), 0);
 
     auto ends = h.events_of(SessionEventKind::ToolEnd);
     ASSERT_EQ(ends.size(), 1u);
     EXPECT_EQ(ends[0].payload["tool_call_id"], "call-yolo-write-deny");
     EXPECT_FALSE(ends[0].payload.value("success", true));
     ASSERT_TRUE(ends[0].payload.contains("output"));
-    EXPECT_NE(ends[0].payload["output"].get<std::string>().find("User denied"),
+    EXPECT_NE(ends[0].payload["output"].get<std::string>().find(
+                  "Permission denied by configured rule"),
               std::string::npos);
 
     fs::remove_all(cwd);

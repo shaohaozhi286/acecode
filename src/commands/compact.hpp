@@ -23,6 +23,7 @@ constexpr int MAX_OUTPUT_TOKENS_RESERVED = 20000;
 constexpr int MAX_PTL_RETRIES = 3;
 constexpr int MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES = 3;
 constexpr int MICRO_COMPACT_KEEP_TURNS = 3; // preserve last N assistant turns
+constexpr int AUTOCOMPACT_MAX_PROVIDER_MESSAGES = 256;
 
 // ============================================================
 // Structs
@@ -122,9 +123,9 @@ int get_effective_context_window(int context_window);
 // Calculate auto-compact threshold
 int get_auto_compact_threshold(int context_window);
 
-// Check if auto-compact should trigger.
-// When last_api_prompt_tokens > 0 (from API response), uses that directly.
-// Otherwise falls back to estimate_message_tokens() heuristic.
+// Check if auto-compact should trigger. Structurally oversized provider history
+// always triggers. Otherwise, when last_api_prompt_tokens > 0 (from API
+// response), uses that directly and falls back to estimate_message_tokens().
 bool should_auto_compact(const std::vector<ChatMessage>& messages, int context_window, int last_api_prompt_tokens = 0);
 
 // Calculate token warning state

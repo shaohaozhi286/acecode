@@ -3,6 +3,7 @@ import {
   DEFAULT_FONT_SIZE,
   DEFAULT_UI_PREFS,
   effectiveFontSize,
+  effectiveSidePanelListCollapsed,
   effectiveShowAceCodeAvatar,
   FONT_SIZE_VALUES,
   validateUiPrefs,
@@ -29,6 +30,11 @@ run('DEFAULT_UI_PREFS uses medium font size by default', () => {
   assert.equal(effectiveFontSize(DEFAULT_UI_PREFS), 'medium');
 });
 
+run('DEFAULT_UI_PREFS keeps the right navigation list expanded by default', () => {
+  assert.equal(DEFAULT_UI_PREFS.sidePanelListCollapsed, false);
+  assert.equal(effectiveSidePanelListCollapsed(DEFAULT_UI_PREFS), false);
+});
+
 run('validateUiPrefs accepts old objects without showAceCodeAvatar', () => {
   assert.equal(validateUiPrefs({
     view: 'single',
@@ -36,6 +42,33 @@ run('validateUiPrefs accepts old objects without showAceCodeAvatar', () => {
     sidebarCollapsed: true,
     sidePanelMaximized: false,
   }), true);
+});
+
+run('validateUiPrefs accepts legacy objects without sidePanelListCollapsed', () => {
+  const legacy = {
+    view: 'single',
+    sidePanelCollapsed: false,
+    sidebarCollapsed: true,
+    sidePanelMaximized: false,
+  };
+  assert.equal(validateUiPrefs(legacy), true);
+  assert.equal(effectiveSidePanelListCollapsed(legacy), false);
+});
+
+run('validateUiPrefs accepts and resolves list-only collapse state', () => {
+  const collapsed = {
+    ...DEFAULT_UI_PREFS,
+    sidePanelListCollapsed: true,
+  };
+  assert.equal(validateUiPrefs(collapsed), true);
+  assert.equal(effectiveSidePanelListCollapsed(collapsed), true);
+});
+
+run('validateUiPrefs rejects non-boolean sidePanelListCollapsed', () => {
+  assert.equal(validateUiPrefs({
+    ...DEFAULT_UI_PREFS,
+    sidePanelListCollapsed: 'false',
+  }), false);
 });
 
 run('validateUiPrefs accepts legacy objects without fontSize', () => {

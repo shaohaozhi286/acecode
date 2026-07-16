@@ -10,7 +10,8 @@ std::string AskUserQuestionPrompter::make_request_id() {
 
 AskUserQuestionResponse
 AskUserQuestionPrompter::prompt(const nlohmann::json& questions_payload,
-                                  const std::atomic<bool>* abort_flag) {
+                                  const std::atomic<bool>* abort_flag,
+                                  std::optional<std::chrono::milliseconds> timeout_override) {
     std::string req_id = make_request_id();
     auto pending = std::make_shared<Pending>();
     {
@@ -25,8 +26,9 @@ AskUserQuestionPrompter::prompt(const nlohmann::json& questions_payload,
     payload["questions"]  = questions_payload;
     events_.emit(SessionEventKind::QuestionRequest, payload);
 
-    const bool has_timeout = timeout_ > std::chrono::milliseconds{0};
-    auto deadline = std::chrono::steady_clock::now() + timeout_;
+    const auto effective_timeout = timeout_override.value_or(timeout_);
+    const bool has_timeout = effective_timeout > std::chrono::milliseconds{0};
+    auto deadline = std::chrono::steady_clock::now() + effective_timeout;
     AskUserQuestionResponse result;
     result.cancelled = true; // 默认值(超时 / abort 时返回)
     std::string close_reason = "aborted";

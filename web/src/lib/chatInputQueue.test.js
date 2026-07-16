@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {
   QUEUED_INPUT_STATE,
+  acceptedQueuedInputEvent,
   beginQueuedGuidance,
   buildQueuedMessageItems,
   cancelQueuedInput,
@@ -11,6 +12,7 @@ import {
   markQueuedInputFailed,
   markQueuedInputSending,
   nextQueuedInput,
+  queuedInputRequestPayload,
   queuedInputsForSession,
   retryQueuedInput,
 } from './chatInputQueue.js';
@@ -85,6 +87,31 @@ run('附件 payload 可以在空文本时排队并保留发送体', () => {
   assert.deepEqual(first.queued.payload.attachments, [{ id: 'att_1' }]);
 });
 
+run('排队提交复用稳定 id 作为请求关联键和接受后投影', () => {
+  let state = createChatInputQueueState();
+  state = enqueueQueuedInput(state, {
+    sessionId: 's1',
+    payload: { text: '', attachments: [{ id: 'att_1' }], contexts: [] },
+    now: 100,
+  });
+  const first = nextQueuedInput(state, 's1');
+
+  assert.deepEqual(queuedInputRequestPayload(first), {
+    text: '',
+    attachments: [{ id: 'att_1' }],
+    contexts: [],
+    client_message_id: first.queued.id,
+  });
+  assert.deepEqual(acceptedQueuedInputEvent(first, { now: 250 }), {
+    type: 'queued_input_accepted',
+    payload: {
+      client_message_id: first.queued.id,
+      content: '附件消息',
+    },
+    timestamp_ms: 250,
+  });
+});
+
 run('cancelled 项不会出现在可见队列也不会被发送', () => {
   let state = createChatInputQueueState();
   state = enqueueQueuedInput(state, { sessionId: 's1', text: 'one' });
@@ -121,4 +148,34 @@ run('backend user message 到达后完成对应 sending 占位', () => {
 
   assert.equal(queuedInputsForSession(state, 's1').length, 0);
   assert.equal(queuedInputsForSession(state, 's1', { includeDone: true })[0].queued.state, QUEUED_INPUT_STATE.COMPLETED);
+});
+
+run('backend user message 优先按 client id 完成而不是误配相同文本', () => {
+  let state = createChatInputQueueState();
+  state = enqueueQueuedInput(state, { sessionId: 's1', text: 'same text', now: 100 });
+  state = enqueueQueuedInput(state, { sessionId: 's1', text: 'same text', now: 101 });
+  const [first, second] = queuedInputsForSession(state, 's1', { includeDone: true });
+  state = markQueuedInputSending(state, first.queued.id, { now: 200 });
+
+  const unchanged = completeQueuedInputForMessage(state, {
+    sessionId: 's1',
+    content: 'same text',
+    ts: 250,
+    clientMessageId: second.queued.id,
+  });
+  assert.equal(
+    queuedInputsForSession(unchanged, 's1', { includeDone: true })[0].queued.state,
+    QUEUED_INPUT_STATE.SENDING,
+  );
+
+  state = completeQueuedInputForMessage(state, {
+    sessionId: 's1',
+    content: 'expanded text can differ',
+    ts: 250,
+    clientMessageId: first.queued.id,
+  });
+  assert.equal(
+    queuedInputsForSession(state, 's1', { includeDone: true })[0].queued.state,
+    QUEUED_INPUT_STATE.COMPLETED,
+  );
 });

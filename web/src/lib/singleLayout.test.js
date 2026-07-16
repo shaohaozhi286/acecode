@@ -168,3 +168,18 @@ run('single content layout hides preview and gives width back to chat', () => {
     sidePanelWidth: 280,
   });
 });
+
+run('single content layout keeps preview allocated when only the navigation list is collapsed', () => {
+  const result = solveSingleContentLayout({
+    contentWidth: 1400,
+    sidePanelWidth: 280,
+    previewPanelWidth: 640,
+    sidePanelCollapsed: true,
+    previewPanelVisible: true,
+  });
+  assert.deepEqual(result, {
+    chatWidth: 760,
+    previewPanelWidth: 640,
+    sidePanelWidth: 0,
+  });
+});

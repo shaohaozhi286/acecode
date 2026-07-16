@@ -63,7 +63,7 @@ TEST(ConnectorAuthRecovery, HookSuccessReturnsFreshKey) {
     opts.on_config_refreshed = [&refreshed_calls]() { ++refreshed_calls; };
     ConnectorAuthRecovery recovery(std::move(opts));
 
-    auto key = recovery.recover("https://models.example.com/v1", "stale-key");
+    auto key = recovery.recover("model-a", "https://models.example.com/v1", "stale-key");
     ASSERT_TRUE(key.has_value());
     EXPECT_EQ(*key, "fresh-key");
     EXPECT_EQ(runner_calls.load(), 1);
@@ -83,7 +83,7 @@ TEST(ConnectorAuthRecovery, NoMatchingConnectorReturnsNullopt) {
     };
     ConnectorAuthRecovery recovery(std::move(opts));
 
-    EXPECT_FALSE(recovery.recover("https://other.example.org/v1", "stale-key").has_value());
+    EXPECT_FALSE(recovery.recover("model-a", "https://other.example.org/v1", "stale-key").has_value());
     EXPECT_EQ(runner_calls.load(), 0);
 }
 
@@ -101,7 +101,7 @@ TEST(ConnectorAuthRecovery, DisabledConnectorIsIgnored) {
     };
     ConnectorAuthRecovery recovery(std::move(opts));
 
-    EXPECT_FALSE(recovery.recover("https://models.example.com/v1", "stale-key").has_value());
+    EXPECT_FALSE(recovery.recover("model-a", "https://models.example.com/v1", "stale-key").has_value());
     EXPECT_EQ(runner_calls.load(), 0);
 }
 
@@ -118,10 +118,59 @@ TEST(ConnectorAuthRecovery, FreshKeyOnDiskShortCircuitsWithoutHook) {
     };
     ConnectorAuthRecovery recovery(std::move(opts));
 
-    auto key = recovery.recover("https://models.example.com/v1", "stale-key");
+    auto key = recovery.recover("model-a", "https://models.example.com/v1", "stale-key");
     ASSERT_TRUE(key.has_value());
     EXPECT_EQ(*key, "already-new-key");
     EXPECT_EQ(runner_calls.load(), 0);
+}
+
+TEST(ConnectorAuthRecovery, SiblingFreshKeyDoesNotShortCircuitExactModel) {
+    auto disk = std::make_shared<FakeDisk>();
+    disk->config = make_config_with_connector("https://models.example.com", "stale-key");
+    ModelProfile sibling = disk->config.saved_models[0];
+    sibling.name = "model-b";
+    sibling.model = "model-b";
+    sibling.api_key = "sibling-fresh-key";
+    disk->config.saved_models.push_back(std::move(sibling));
+    std::atomic<int> runner_calls{0};
+
+    ConnectorAuthRecovery::Options opts;
+    opts.load_disk_config = [disk]() { return disk->config; };
+    opts.hook_runner = [&runner_calls](const HookCommandSpec&, int) {
+        ++runner_calls;
+        HookProcessResult r;
+        r.started = true;
+        r.exit_code = 1;
+        return r;
+    };
+    ConnectorAuthRecovery recovery(std::move(opts));
+
+    EXPECT_FALSE(recovery.recover("model-a", "https://models.example.com/v1",
+                                  "stale-key").has_value());
+    EXPECT_EQ(runner_calls.load(), 1);
+}
+
+TEST(ConnectorAuthRecovery, HookUpdatingOnlySiblingDoesNotReturnItsKey) {
+    auto disk = std::make_shared<FakeDisk>();
+    disk->config = make_config_with_connector("https://models.example.com", "stale-key");
+    ModelProfile sibling = disk->config.saved_models[0];
+    sibling.name = "model-b";
+    sibling.model = "model-b";
+    disk->config.saved_models.push_back(std::move(sibling));
+
+    ConnectorAuthRecovery::Options opts;
+    opts.load_disk_config = [disk]() { return disk->config; };
+    opts.hook_runner = [disk](const HookCommandSpec&, int) {
+        disk->config.saved_models[1].api_key = "sibling-fresh-key";
+        HookProcessResult r;
+        r.started = true;
+        r.exit_code = 0;
+        return r;
+    };
+    ConnectorAuthRecovery recovery(std::move(opts));
+
+    EXPECT_FALSE(recovery.recover("model-a", "https://models.example.com/v1",
+                                  "stale-key").has_value());
 }
 
 TEST(ConnectorAuthRecovery, HookFailureReturnsNullopt) {
@@ -138,7 +187,7 @@ TEST(ConnectorAuthRecovery, HookFailureReturnsNullopt) {
     };
     ConnectorAuthRecovery recovery(std::move(opts));
 
-    EXPECT_FALSE(recovery.recover("https://models.example.com/v1", "stale-key").has_value());
+    EXPECT_FALSE(recovery.recover("model-a", "https://models.example.com/v1", "stale-key").has_value());
 }
 
 TEST(ConnectorAuthRecovery, UnchangedKeyAfterHookReturnsNullopt) {
@@ -155,7 +204,7 @@ TEST(ConnectorAuthRecovery, UnchangedKeyAfterHookReturnsNullopt) {
     };
     ConnectorAuthRecovery recovery(std::move(opts));
 
-    EXPECT_FALSE(recovery.recover("https://models.example.com/v1", "stale-key").has_value());
+    EXPECT_FALSE(recovery.recover("model-a", "https://models.example.com/v1", "stale-key").has_value());
 }
 
 TEST(ConnectorAuthRecovery, LoadConfigThrowingReturnsNullopt) {
@@ -171,7 +220,7 @@ TEST(ConnectorAuthRecovery, LoadConfigThrowingReturnsNullopt) {
     };
     ConnectorAuthRecovery recovery(std::move(opts));
 
-    EXPECT_FALSE(recovery.recover("https://models.example.com/v1", "stale-key").has_value());
+    EXPECT_FALSE(recovery.recover("model-a", "https://models.example.com/v1", "stale-key").has_value());
     EXPECT_EQ(runner_calls.load(), 0);
 }
 
@@ -192,7 +241,7 @@ TEST(ConnectorAuthRecovery, CooldownBlocksSecondLaunch) {
     opts.cooldown_ms = 60000;
     ConnectorAuthRecovery recovery(std::move(opts));
 
-    EXPECT_FALSE(recovery.recover("https://models.example.com/v1", "stale-key").has_value());
-    EXPECT_FALSE(recovery.recover("https://models.example.com/v1", "stale-key").has_value());
+    EXPECT_FALSE(recovery.recover("model-a", "https://models.example.com/v1", "stale-key").has_value());
+    EXPECT_FALSE(recovery.recover("model-a", "https://models.example.com/v1", "stale-key").has_value());
     EXPECT_EQ(runner_calls.load(), 1);  // 冷却期内不再拉起
 }

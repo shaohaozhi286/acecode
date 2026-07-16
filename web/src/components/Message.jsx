@@ -260,7 +260,7 @@ function SystemRow({ role, content, metadata }) {
         onClick={() => setExpanded((v) => !v)}
       >
         <span className="font-medium shrink-0">{label}</span>
-        <span className="text-[10px] flex-1 truncate font-mono" title={text || preview}>{preview}</span>
+        <span className="text-[10px] flex-1 truncate" title={text || preview}>{preview}</span>
         <span className="text-[10px] shrink-0 opacity-70">
           {lineCount > 1 ? `${lineCount} 行` : `${charCount} 字符`}
         </span>

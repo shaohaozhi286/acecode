@@ -870,8 +870,14 @@ SessionRegistry::make_entry_locked(const std::string& id,
     if (deps_.auth_recovery) {
         auto* recovery = deps_.auth_recovery;
         entry->loop->set_auth_recovery(
-            [recovery](const std::string& base_url, const std::string& key_at_request) {
-                return recovery->recover(base_url, key_at_request);
+            [recovery, session_manager = entry->sm.get()](
+                const std::string& base_url,
+                const std::string& key_at_request) {
+                return recovery->recover(session_manager
+                                             ? session_manager->current_model_preset()
+                                             : std::string{},
+                                         base_url,
+                                         key_at_request);
             });
     }
     entry->loop->set_skill_registry(entry->skill_registry
@@ -895,8 +901,7 @@ SessionRegistry::make_entry_locked(const std::string& id,
     // ToolContext::ask_user_questions 回调注入(set_ask_question_prompter)。
     //
     // add-ask-question-policy:显式 timeout 策略(config 或 CLI)时给
-    // prompter 配等待窗口;yolo 隐式映射只产生 deny(工具层实时分支),
-    // 永远不产生 timeout,所以这里传 "default" 权限模式即可。已知限制:
+    // prompter 配默认等待窗口。已知限制:
     // 会话创建后策略变更不重建 prompter,timeout 秒数以创建时为准。
     std::chrono::milliseconds ask_timeout{0};
     if (deps_.config) {
@@ -907,8 +912,7 @@ SessionRegistry::make_entry_locked(const std::string& id,
             has_cli || al.question_policy_explicit,
             (has_cli && al.question_timeout_seconds_cli > 0)
                 ? al.question_timeout_seconds_cli
-                : al.question_timeout_seconds,
-            "default");
+                : al.question_timeout_seconds);
         if (resolved.policy == QuestionPolicy::Timeout) {
             ask_timeout = std::chrono::seconds(resolved.timeout_seconds);
         }

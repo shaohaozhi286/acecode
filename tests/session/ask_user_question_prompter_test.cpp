@@ -210,6 +210,21 @@ TEST(AskUserQuestionPrompter, ExplicitTimeoutMarksTimedOut) {
     d.unsubscribe(closed_sub);
 }
 
+// active goal 会在调用时覆盖 prompter 的会话默认 timeout。
+TEST(AskUserQuestionPrompter, PerCallTimeoutOverrideWinsOverDefault) {
+    EventDispatcher d;
+    AskUserQuestionPrompter prompter(d, 5s);
+
+    auto started = std::chrono::steady_clock::now();
+    auto resp = prompter.prompt(sample_questions(), nullptr, 100ms);
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started);
+
+    EXPECT_TRUE(resp.timed_out);
+    EXPECT_FALSE(resp.cancelled);
+    EXPECT_LT(elapsed.count(), 1000);
+}
+
 // 场景: abort_flag 拉起后,prompt 必须在 ~50ms 内返回 cancelled=true,
 // 不依赖任何被动 timeout(避免 daemon shutdown 时 worker 卡住)。
 TEST(AskUserQuestionPrompter, AbortFlagBreaksOutFast) {

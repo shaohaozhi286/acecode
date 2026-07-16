@@ -2672,7 +2672,7 @@ TEST(WebServerHttp, PostMessageQueuesInputInDaemonSession) {
 
     auto queued = cpr::Post(cpr::Url{fx.url("/api/sessions/" + sid + "/messages")},
                             cpr::Header{{"Content-Type", "application/json"}},
-                            cpr::Body{R"({"text":"hello from http submit"})"});
+                            cpr::Body{R"({"text":"hello from http submit","client_message_id":"queued-test-1"})"});
     ASSERT_EQ(queued.status_code, 202) << queued.text;
     EXPECT_TRUE(json::parse(queued.text)["queued"].get<bool>());
 
@@ -2684,7 +2684,9 @@ TEST(WebServerHttp, PostMessageQueuesInputInDaemonSession) {
         auto j = json::parse(r.text);
         for (const auto& m : j["messages"]) {
             if (m.value("role", "") == "user" &&
-                m.value("content", "") == "hello from http submit") {
+                m.value("content", "") == "hello from http submit" &&
+                m.contains("metadata") && m["metadata"].is_object() &&
+                m["metadata"].value("client_message_id", "") == "queued-test-1") {
                 found = true;
                 break;
             }
@@ -2722,6 +2724,7 @@ TEST(WebServerHttp, UploadAttachmentAndSubmitContentParts) {
         cpr::Header{{"Content-Type", "application/json"}},
         cpr::Body{json{
             {"text", "describe this"},
+            {"client_message_id", "queued-attachment-test-1"},
             {"attachments", json::array({json{{"id", attachment_id}}})},
         }.dump()});
     ASSERT_EQ(queued.status_code, 202) << queued.text;
@@ -2735,7 +2738,9 @@ TEST(WebServerHttp, UploadAttachmentAndSubmitContentParts) {
         for (const auto& m : j["messages"]) {
             if (m.value("role", "") != "user" ||
                 m.value("content", "") != "describe this" ||
-                !m.contains("content_parts")) {
+                !m.contains("content_parts") ||
+                !m.contains("metadata") || !m["metadata"].is_object() ||
+                m["metadata"].value("client_message_id", "") != "queued-attachment-test-1") {
                 continue;
             }
             const auto& parts = m["content_parts"];
@@ -3883,6 +3888,31 @@ TEST(WebServerHttp, PutModelsRenamingDefaultUpdatesDefaultName) {
     EXPECT_EQ(fx.cfg.default_model_name, "fixture-copilot-v2");
     ASSERT_EQ(fx.cfg.saved_models.size(), 1u);
     EXPECT_EQ(fx.cfg.saved_models[0].name, "fixture-copilot-v2");
+}
+
+// 场景:外部登录器遗留 readonly=true 时,Desktop PUT 仍按普通 saved model
+// 更新,不再返回 403 更新拒绝。成功更新后 legacy 标记自然清除。
+TEST(WebServerHttp, PutModelsUpdatesLegacyReadonlyProfile) {
+    WebServerFixture fx;
+    ASSERT_EQ(fx.cfg.saved_models.size(), 1u);
+    fx.cfg.saved_models[0].readonly = true;
+
+    json req = {
+        {"name", "fixture-copilot"},
+        {"provider", "copilot"},
+        {"model", "gpt-5"},
+        {"capabilities", {"tool_use"}},
+    };
+    auto r = cpr::Put(cpr::Url{fx.url("/api/models/fixture-copilot")},
+                      cpr::Header{{"Content-Type", "application/json"}},
+                      cpr::Body{req.dump()});
+    ASSERT_EQ(r.status_code, 200) << r.text;
+    auto body = json::parse(r.text);
+    EXPECT_EQ(body["model"], "gpt-5");
+    EXPECT_EQ(body["capabilities"], json::array({"tool_use"}));
+    ASSERT_EQ(fx.cfg.saved_models.size(), 1u);
+    EXPECT_EQ(fx.cfg.saved_models[0].model, "gpt-5");
+    EXPECT_FALSE(fx.cfg.saved_models[0].readonly);
 }
 
 // 场景:POST /api/models/probe 只接受 OpenAI-compatible 探测参数。这里走

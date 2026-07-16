@@ -90,7 +90,7 @@ function MiniToolItem({ item, compact, sessionRunning = true }) {
   return (
     <div
       className={clsx(
-        'w-full rounded border px-1 py-0.5 font-mono leading-tight',
+        'w-full rounded border px-1 py-0.5 leading-tight',
         compact ? 'text-[7px]' : 'text-[8px]',
         (running || unresolved) && 'border-border bg-surface-alt text-fg-2',
         !unfinished && ok && 'border-ok-border bg-ok-bg text-ok',

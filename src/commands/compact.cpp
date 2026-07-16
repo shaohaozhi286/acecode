@@ -246,12 +246,22 @@ int get_auto_compact_threshold(int context_window) {
 
 bool should_auto_compact(const std::vector<ChatMessage>& messages, int context_window, int last_api_prompt_tokens) {
     int threshold = get_auto_compact_threshold(context_window);
+    const auto provider_messages = provider_relevant_messages(messages);
+
+    // A long sequence of small assistant/tool messages can remain below the
+    // token threshold while still overwhelming provider/model message
+    // handling. Never let token usage mask that structural pressure.
+    if (provider_messages.size() >
+        static_cast<std::size_t>(AUTOCOMPACT_MAX_PROVIDER_MESSAGES)) {
+        return true;
+    }
+
     // Prefer API-reported prompt_tokens when available (accurate)
     if (last_api_prompt_tokens > 0) {
         return last_api_prompt_tokens > threshold;
     }
     // Fallback: estimate from provider-visible content (chars/4 heuristic).
-    int estimated = estimate_message_tokens(provider_relevant_messages(messages));
+    int estimated = estimate_message_tokens(provider_messages);
     return estimated > threshold;
 }
 

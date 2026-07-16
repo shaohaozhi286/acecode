@@ -596,8 +596,8 @@ export function SidePanel({
             type="button"
             onClick={onToggleCollapse}
             className="ace-side-panel-collapse-btn"
-            title={collapsed ? '展开右侧面板' : '收起右侧面板'}
-            aria-label={collapsed ? '展开右侧面板' : '收起右侧面板'}
+            title={collapsed ? '展开列表面板' : '收起列表面板'}
+            aria-label={collapsed ? '展开列表面板' : '收起列表面板'}
             aria-expanded={!collapsed}
           >
             <PanelToggleIcon side="right" size={15} />

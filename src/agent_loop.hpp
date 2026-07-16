@@ -236,8 +236,8 @@ public:
     void maybe_continue_goal();
 
     // Goal 无人值守模式:当前会话(或子代理的父会话)存在 Active goal 且不在
-    // Plan mode 时为 true。此时所有需要用户确认的过程自动进行 —— 写工具权限
-    // 自动放行,AskUserQuestion 返回自动应答 —— goal 运行绝不弹确认窗。
+    // Plan mode 时为 true。工具权限确认自动放行;
+    // AskUserQuestion 正常弹 UI，30 秒未回答则自动采纳推荐项。
     bool goal_unattended_active();
 
     // /goal edit 修改了 active goal 的 objective 时调用。回合运行中则在下一次

@@ -10,7 +10,7 @@
 //
 // 两个消费点:
 //   1. AgentLoop 权限门(agent_loop.cpp):hook 都没放行、即将走交互 prompt
-//      时 —— dangerous(--yolo)下自动放行(含 yolo 外部写首确认),否则直接
+//      时 —— dangerous(--yolo)下自动放行,否则直接
 //      拒绝并给模型解释性文案,防止 AsyncPrompter 空等 5 分钟超时。
 //   2. AskUserQuestion 工具(ask_user_question_tool.cpp):直接返回
 //      make_headless_ask_result() 自动应答,指示模型自行决策并继续。

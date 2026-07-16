@@ -28,10 +28,10 @@ void ConnectorAuthRecovery::notify_config_refreshed() {
 
 std::optional<std::string> ConnectorAuthRecovery::fresh_key_from_disk(
         const AppConfig& disk,
-        const std::string& base_url_prefix,
+        const std::string& model_name,
         const std::string& api_key_at_request) const {
     for (const auto& profile : disk.saved_models) {
-        if (!starts_with(profile.base_url, base_url_prefix)) continue;
+        if (profile.name != model_name) continue;
         if (profile.api_key.empty()) continue;
         if (profile.api_key == api_key_at_request) continue;
         return profile.api_key;
@@ -40,11 +40,15 @@ std::optional<std::string> ConnectorAuthRecovery::fresh_key_from_disk(
 }
 
 std::optional<std::string> ConnectorAuthRecovery::recover(
-        const std::string& base_url, const std::string& api_key_at_request) {
+        const std::string& model_name,
+        const std::string& base_url,
+        const std::string& api_key_at_request) {
     // AgentLoop 在错误处理路径同步调用本方法;load_disk_config / 钩子执行
     // 抛出的异常绝不能穿透到调用方 —— 一律吞掉并按「恢复失败」处理。
     try {
-        if (!opts_.load_disk_config || base_url.empty()) return std::nullopt;
+        if (!opts_.load_disk_config || model_name.empty() || base_url.empty()) {
+            return std::nullopt;
+        }
 
         // 连接器定义直接从磁盘读:开关切换会立即持久化,这样既拿到最新状态,
         // 又避免与各 owner 的内存 AppConfig 锁产生耦合。
@@ -72,7 +76,7 @@ std::optional<std::string> ConnectorAuthRecovery::recover(
 
         // 排队期间别的请求可能已完成登录 —— 磁盘上有新 key 就直接用,不再拉起。
         if (auto key = fresh_key_from_disk(opts_.load_disk_config(),
-                                           match->auth_error_base_url_prefix,
+                                           model_name,
                                            api_key_at_request)) {
             notify_config_refreshed();
             return key;
@@ -104,7 +108,7 @@ std::optional<std::string> ConnectorAuthRecovery::recover(
         }
 
         auto key = fresh_key_from_disk(opts_.load_disk_config(),
-                                       match->auth_error_base_url_prefix,
+                                       model_name,
                                        api_key_at_request);
         if (key) {
             LOG_INFO("connector auth recovery succeeded; id=" + match->id);

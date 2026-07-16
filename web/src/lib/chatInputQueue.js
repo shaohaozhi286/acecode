@@ -163,6 +163,37 @@ export function markQueuedInputCompleted(state, id) {
   return setQueuedInputState(state, id, QUEUED_INPUT_STATE.COMPLETED, { error: '' });
 }
 
+export function queuedInputRequestPayload(item) {
+  const clientMessageId = normalizeText(item?.queued?.id).trim();
+  if (!clientMessageId) return null;
+  const payload = normalizePayload({
+    text: item?.content,
+    payload: item?.queued?.payload,
+  });
+  return {
+    ...payload,
+    client_message_id: clientMessageId,
+  };
+}
+
+export function acceptedQueuedInputEvent(item, { now = Date.now() } = {}) {
+  const clientMessageId = normalizeText(item?.queued?.id).trim();
+  if (!clientMessageId) return null;
+  const payload = normalizePayload({
+    text: item?.content,
+    payload: item?.queued?.payload,
+  });
+  const content = payload.text || (payload.attachments.length > 0 ? '附件消息' : '上下文消息');
+  return {
+    type: 'queued_input_accepted',
+    payload: {
+      client_message_id: clientMessageId,
+      content,
+    },
+    timestamp_ms: now,
+  };
+}
+
 export function retryQueuedInput(state, id) {
   return setQueuedInputState(state, id, QUEUED_INPUT_STATE.QUEUED, { error: '' });
 }
@@ -194,13 +225,18 @@ export function nextQueuedInput(state, sessionId) {
   return items.find((item) => item.queued?.state === QUEUED_INPUT_STATE.QUEUED) || null;
 }
 
-export function completeQueuedInputForMessage(state, { sessionId, content, ts } = {}) {
+export function completeQueuedInputForMessage(
+  state,
+  { sessionId, content, ts, clientMessageId } = {},
+) {
   const sid = normalizeSessionId(sessionId);
   const text = normalizeText(content);
+  const correlationId = normalizeText(clientMessageId).trim();
   const current = createChatInputQueueState(state);
   const matched = current.items.find((item) => {
     if (item?.queued?.sessionId !== sid) return false;
     if (item.queued.state !== QUEUED_INPUT_STATE.SENDING) return false;
+    if (correlationId) return item.queued.id === correlationId;
     if (normalizeText(item.content) !== text) return false;
     const sentAt = Number(item.queued.sentAt || 0);
     const messageTs = Number(ts || 0);

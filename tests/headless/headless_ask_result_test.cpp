@@ -69,11 +69,8 @@ TEST_F(HeadlessAskResultTest, NormalModeStillReportsUnavailableChannel) {
     EXPECT_NE(result.output.find("not supported"), std::string::npos);
 }
 
-// 场景:headless 与 goal unattended 同时成立(-p 进程里恰好有 active goal
-// 的父会话探针)。两个分支都会自动应答,但对模型的环境解释不同。
-// 期望:headless 分支优先(工具实现里 headless 判定在 goal 之前),文案是
-// print 模式的解释而非 goal 的 —— 模型据此知道"整个进程都无人值守",
-// 而不是误以为只是 goal 期间暂时无人。
+// headless 无 UI 通道，即使 active goal 在交互界面中本应等待 30 秒，
+// print 进程仍必须优先直接自动应答。
 TEST_F(HeadlessAskResultTest, HeadlessBranchWinsOverGoalUnattended) {
     acecode::headless::set_active(true);
 
@@ -85,21 +82,11 @@ TEST_F(HeadlessAskResultTest, HeadlessBranchWinsOverGoalUnattended) {
 
     EXPECT_TRUE(result.success);
     EXPECT_NE(result.output.find("[Headless mode]"), std::string::npos);
-    EXPECT_EQ(result.output.find("[Unattended goal mode]"), std::string::npos);
 }
 
-// 场景:make_headless_ask_result 与 make_goal_unattended_ask_result 的
-// 文案契约 —— 两者都必须 success=true 且都包含"不要再问、自行决策"的
-// 指示(阈值说明:success=false 会让部分模型把自动应答当工具故障,进入
-// 重试循环,这是 goal unattended 落地时实测过的行为)。
-TEST_F(HeadlessAskResultTest, ResultContractsShareAutonomousInstruction) {
+TEST_F(HeadlessAskResultTest, ResultContractKeepsAutonomousInstruction) {
     auto headless = acecode::make_headless_ask_result();
     EXPECT_TRUE(headless.success);
     EXPECT_NE(headless.output.find("Do not wait and do not ask again"),
-              std::string::npos);
-
-    auto goal = acecode::make_goal_unattended_ask_result();
-    EXPECT_TRUE(goal.success);
-    EXPECT_NE(goal.output.find("Do not wait and do not ask again"),
               std::string::npos);
 }

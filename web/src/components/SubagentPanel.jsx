@@ -65,7 +65,7 @@ function TaskCard({ task, nowMs, onAbort, onOpenTranscript }) {
         )}
       </div>
       {stats.length > 0 && (
-        <div className="text-[11px] text-fg-mute font-mono truncate" title={stats.join(' · ')}>
+        <div className="text-[11px] text-fg-mute truncate" title={stats.join(' · ')}>
           {stats.join(' · ')}
         </div>
       )}

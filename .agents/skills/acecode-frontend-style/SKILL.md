@@ -12,6 +12,20 @@ ACECode WebUI 的设置 / 管理 / 配置类面板共用一套 Tailwind v4 class
 
 技术栈:React 18 + Tailwind v4 + 自定义 CSS 变量(`--ace-bg` / `--ace-surface` / `--ace-border` / `--ace-fg` / `--ace-fg-mute` / `--ace-accent` / `--ace-ok` 等,定义在 `web/src/styles/globals.css`)。亮 / 暗双主题靠这些变量切。**所有色值必须走 token,不要硬编码 hex。**
 
+## 0. 字体规范
+
+ACECode 只使用两套字体栈,统一由 `web/src/styles/globals.css` 的 Tailwind theme 变量管理:
+
+```css
+--font-sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;
+--font-mono: "SF Mono", "Cascadia Code", "Fira Code", Menlo, Consolas, monospace;
+```
+
+- 所有常规 UI、中文正文、标题、按钮、标签、输入框、文件路径、版本号、模型名、ID、数字和状态信息均使用主字体 `font-sans`。应用根节点已统一设置时应直接继承,不要到处重复添加 `font-sans`。
+- 只有真实代码内容和 diff 内容使用 `font-mono`,包括代码块、inline code、源码预览、终端内容、命令文本、结构化配置源码和 diff 行。
+- 不要因为内容看起来“技术化”就使用等宽字体。路径、版本、统计数字、快捷命令名称、模型 ID、配置字段值本身仍是普通 UI 文本。
+- 不要在组件中另写第三套 `font-family`,也不要使用 `system-ui`、`ui-monospace` 或 Tailwind 默认字体栈。图标字体等专用资产字体不受此规则影响。
+
 ---
 
 ## 1. 页面外壳
@@ -245,6 +259,7 @@ section 内不同子分组之间:
 - [ ] 主按钮 § 9.0,行内次按钮 § 9.1
 - [ ] 颜色全部走 token,**不要 hex / `border-gray-X` / `bg-gray-X`**
 - [ ] 亮 / 暗主题不要写双 className,token 自带
+- [ ] 常规 UI 继承 `font-sans`;仅代码和 diff 使用 `font-mono`;不新增第三套字体栈
 
 ## 13. 参考实现
 

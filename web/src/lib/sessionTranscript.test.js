@@ -235,6 +235,91 @@ run('home auto_start 竞争:快照已含的 user 消息再经 WS 事件到达不
   assert.deepEqual(state.items[0].metadata, { display_text: 'hello' });
 });
 
+run('排队消息 HTTP 接受后即使漏掉 WS 回显也留在当前 transcript', () => {
+  const state = reduceTranscriptEvent(createTranscriptState(), {
+    type: 'queued_input_accepted',
+    payload: { client_message_id: 'queued-s1-1', content: '继续处理' },
+    timestamp_ms: 100,
+  }).state;
+
+  assert.equal(state.items.length, 1);
+  assert.equal(state.items[0].role, 'user');
+  assert.equal(state.items[0].content, '继续处理');
+  assert.equal(state.items[0].messageId, '');
+  assert.deepEqual(state.items[0].metadata, {
+    client_message_id: 'queued-s1-1',
+    optimistic_queued_input: true,
+  });
+});
+
+run('排队消息先乐观上屏再收到 canonical 回显时原位替换且不重复', () => {
+  let state = reduceTranscriptEvent(createTranscriptState(), {
+    type: 'queued_input_accepted',
+    payload: { client_message_id: 'queued-s1-1', content: '原始输入' },
+    timestamp_ms: 100,
+  }).state;
+  const optimisticItemId = state.items[0].id;
+
+  state = reduceTranscriptEvent(state, {
+    type: 'message',
+    payload: {
+      id: 'persistent-u1',
+      role: 'user',
+      content: '展开后的输入',
+      content_parts: [{ type: 'text', text: '展开后的输入' }],
+      metadata: { client_message_id: 'queued-s1-1', display_text: '原始输入' },
+    },
+    seq: 1,
+    timestamp_ms: 150,
+  }).state;
+
+  assert.equal(state.items.length, 1);
+  assert.equal(state.items[0].id, optimisticItemId);
+  assert.equal(state.items[0].messageId, 'persistent-u1');
+  assert.equal(state.items[0].content, '展开后的输入');
+  assert.deepEqual(state.items[0].contentParts, [{ type: 'text', text: '展开后的输入' }]);
+  assert.deepEqual(state.items[0].metadata, {
+    client_message_id: 'queued-s1-1',
+    display_text: '原始输入',
+  });
+});
+
+run('canonical 回显先到时后续 HTTP 接受处理不追加乐观副本', () => {
+  let state = reduceTranscriptEvent(createTranscriptState(), {
+    type: 'message',
+    payload: {
+      id: 'persistent-u1',
+      role: 'user',
+      content: '继续处理',
+      metadata: { client_message_id: 'queued-s1-1' },
+    },
+    seq: 1,
+  }).state;
+  state = reduceTranscriptEvent(state, {
+    type: 'queued_input_accepted',
+    payload: { client_message_id: 'queued-s1-1', content: '继续处理' },
+  }).state;
+
+  assert.equal(state.items.length, 1);
+  assert.equal(state.items[0].messageId, 'persistent-u1');
+});
+
+run('相同文本的排队消息按不同 client id 保留为两条', () => {
+  let state = createTranscriptState();
+  for (const clientMessageId of ['queued-s1-1', 'queued-s1-2']) {
+    state = reduceTranscriptEvent(state, {
+      type: 'queued_input_accepted',
+      payload: { client_message_id: clientMessageId, content: '重复内容' },
+    }).state;
+  }
+
+  assert.equal(state.items.length, 2);
+  assert.deepEqual(
+    state.items.map((item) => item.metadata.client_message_id),
+    ['queued-s1-1', 'queued-s1-2'],
+  );
+});
+
 run('不同 id 的相同文本消息仍是两条(用户故意连发不被误删)', () => {
   // 触发场景:用户连续发送两条一字不差的消息,daemon 为它们生成不同的
   // 持久 UUID。期望:id 不同就不去重,transcript 显示两条。

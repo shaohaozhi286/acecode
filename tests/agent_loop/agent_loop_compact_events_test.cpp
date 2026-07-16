@@ -372,6 +372,73 @@ TEST(AgentLoopCompactEvents, AutoCompactRunsMicroCompactBeforeFullCompact) {
     EXPECT_TRUE(saw_micro_message);
 }
 
+TEST(AgentLoopCompactEvents, StructuralLimitForcesFullCompactAfterMicroCompact) {
+    class StructuralProvider : public CompactEventProvider {
+    public:
+        acecode::ChatResponse chat(const std::vector<acecode::ChatMessage>& messages,
+                                   const std::vector<acecode::ToolDef>& tools) override {
+            for (const auto& msg : messages) {
+                if (msg.content.find("[Old tool result content cleared]") !=
+                    std::string::npos) {
+                    compact_prompt_saw_cleared_tool_result = true;
+                }
+            }
+            return CompactEventProvider::chat(messages, tools);
+        }
+    };
+
+    auto provider = std::make_shared<StructuralProvider>();
+    acecode::ToolExecutor tools;
+    acecode::PermissionManager permissions;
+    acecode::AgentCallbacks cb;
+
+    acecode::AgentLoop loop(
+        [&]() -> std::shared_ptr<acecode::LlmProvider> { return provider; },
+        tools,
+        cb,
+        "/tmp/auto-compact-structural-limit",
+        permissions);
+    loop.set_context_window(1000000);
+
+    loop.push_message(loop_msg("user", "old tool-producing turn"));
+    loop.push_message(tool_call_msg("call-structural-old", "bash"));
+    loop.push_message(tool_result_msg(
+        "call-structural-old", std::string(2000, 'x')));
+    for (int i = 0; i < 128; ++i) {
+        loop.push_message(loop_msg("user", "u" + std::to_string(i)));
+        loop.push_message(loop_msg("assistant", "a" + std::to_string(i)));
+    }
+
+    auto events = wait_for_done(loop, [&] {
+        loop.submit("trigger structural auto compact");
+    });
+
+    EXPECT_EQ(provider->chat_calls, 1);
+    EXPECT_EQ(provider->stream_calls, 1);
+    EXPECT_TRUE(provider->compact_prompt_saw_cleared_tool_result);
+    EXPECT_TRUE(provider->stream_saw_summary);
+    EXPECT_LT(provider->stream_message_count,
+              acecode::AUTOCOMPACT_MAX_PROVIDER_MESSAGES);
+
+    bool saw_micro_message = false;
+    bool saw_full_compact_message = false;
+    for (const auto& evt : events) {
+        if (evt.kind != acecode::SessionEventKind::Message ||
+            evt.payload.value("role", "") != "system") {
+            continue;
+        }
+        const std::string content = evt.payload.value("content", "");
+        if (content.find("[Micro-compact] Cleared") != std::string::npos) {
+            saw_micro_message = true;
+        }
+        if (content.find("[Auto-compact] Compacted") != std::string::npos) {
+            saw_full_compact_message = true;
+        }
+    }
+    EXPECT_TRUE(saw_micro_message);
+    EXPECT_TRUE(saw_full_compact_message);
+}
+
 TEST(AgentLoopCompactEvents, AutoCompactCircuitBreakerDoesNotBlockManualCompact) {
     auto provider = std::make_shared<CompactEventProvider>();
     provider->fail_compact = true;

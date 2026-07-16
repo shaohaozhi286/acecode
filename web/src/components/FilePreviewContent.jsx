@@ -224,7 +224,7 @@ export function FilePreviewContent({
     return (
       <div className="ace-empty-state">
         <div className="text-danger text-[12px] mb-1">{state.error}</div>
-        <div className="text-fg-mute text-[10px] font-mono opacity-70 break-all">{path}</div>
+        <div className="text-fg-mute text-[10px] opacity-70 break-all">{path}</div>
       </div>
     );
   }
@@ -270,7 +270,7 @@ export function FilePreviewContent({
         >
           <div className="ace-empty-state">
             <div className="text-danger text-[12px] mb-1">当前浏览器无法内嵌预览 PDF</div>
-            <div className="text-fg-mute text-[10px] font-mono opacity-70 break-all">{path}</div>
+            <div className="text-fg-mute text-[10px] opacity-70 break-all">{path}</div>
           </div>
         </object>
       </div>
@@ -399,7 +399,7 @@ function WordPreview({ blob, path }) {
     return (
       <div className="ace-empty-state">
         <div className="text-danger text-[12px] mb-1">{error}</div>
-        <div className="text-fg-mute text-[10px] font-mono opacity-70 break-all">{path}</div>
+        <div className="text-fg-mute text-[10px] opacity-70 break-all">{path}</div>
       </div>
     );
   }
@@ -474,7 +474,7 @@ function SpreadsheetPreview({ blob, path }) {
     return (
       <div className="ace-empty-state">
         <div className="text-danger text-[12px] mb-1">{error}</div>
-        <div className="text-fg-mute text-[10px] font-mono opacity-70 break-all">{path}</div>
+        <div className="text-fg-mute text-[10px] opacity-70 break-all">{path}</div>
       </div>
     );
   }

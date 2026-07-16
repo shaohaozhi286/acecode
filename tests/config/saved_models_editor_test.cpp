@@ -436,8 +436,8 @@ TEST(SavedModelsEditor, AddLeavesCfgUnchangedOnAllRejections) {
     try_reject(bad_headers, SavedModelEditError::INVALID_REQUEST_HEADER);
 }
 
-// 场景:update readonly=true 的条目 → READONLY_MODEL,cfg 不变。
-TEST(SavedModelsEditor, UpdateRejectsReadonlyModel) {
+// 场景:legacy readonly=true 只是外部登录器留下的兼容标记,不阻止正常更新。
+TEST(SavedModelsEditor, UpdateAllowsLegacyReadonlyModel) {
     AppConfig cfg;
     ModelProfile locked;
     locked.name = "locked";
@@ -454,12 +454,13 @@ TEST(SavedModelsEditor, UpdateRejectsReadonlyModel) {
     d.model = "changed-model";
     d.base_url = "https://models.example.com/v1";
     d.api_key = "new-k";
-    EXPECT_EQ(update_saved_model(cfg, "locked", d),
-              SavedModelEditError::READONLY_MODEL);
-    EXPECT_EQ(cfg.saved_models[0].model, "locked-model");
+    EXPECT_EQ(update_saved_model(cfg, "locked", d), SavedModelEditError::OK);
+    EXPECT_EQ(cfg.saved_models[0].model, "changed-model");
+    EXPECT_EQ(cfg.saved_models[0].api_key, "new-k");
+    EXPECT_FALSE(cfg.saved_models[0].readonly);
 }
 
-// 场景:remove readonly=true 的条目 → OK,条目被删除。readonly 标志不影响删除。
+// 场景:remove legacy readonly=true 的条目 → OK,条目被删除。
 TEST(SavedModelsEditor, RemoveAllowsReadonlyModel) {
     AppConfig cfg;
     ModelProfile locked;

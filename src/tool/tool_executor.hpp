@@ -115,17 +115,16 @@ struct ToolContext {
     std::function<void(const std::string& session_id)> emit_goal_cleared;
     std::function<void(const nlohmann::json& todo_payload)> emit_todo_updated;
 
-    // Goal 无人值守模式探针(AgentLoop 注入)。true = 当前会话(或父会话)
-    // 有 Active goal 且非 Plan mode,所有需要用户确认的交互必须自动进行:
-    // AskUserQuestion 不弹 UI,直接返回「自行决策并继续」的自动应答。
+    // Goal 运行探针(AgentLoop 注入)。true = 当前会话(或父会话)
+    // 有 Active goal 且非 Plan mode。工具权限确认自动放行;
+    // AskUserQuestion 正常弹 UI，但固定 30 秒后自动采纳推荐项。
     // 空函数 = 正常交互模式。
     std::function<bool()> goal_unattended_active;
 
     // AskUserQuestion 应答策略探针(AgentLoop 注入,模式同
     // goal_unattended_active)。返回 resolve_question_policy 的解析结果,
-    // 每次调用实时反映权限模式(/yolo 会话中切换后下一次提问即生效)。
-    // 空函数 = Ask(独立调用 ToolExecutor 的旧行为)。优先级低于
-    // goal_unattended_active。见 src/tool/question_policy.hpp。
+    // permission mode 不参与提问策略解析。空函数 = Ask(独立调用
+    // ToolExecutor 的旧行为)。active goal 在工具入口覆盖为 Timeout(30)。
     std::function<ResolvedQuestionPolicy()> question_policy;
 
     // Plan-mode tools use these callbacks to mutate the active AgentLoop's

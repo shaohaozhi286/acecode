@@ -101,6 +101,38 @@ TEST(CompactCore, ProviderFailureReturnsError) {
     EXPECT_TRUE(result.compacted_messages.empty());
 }
 
+TEST(CompactCore, AutoCompactTriggersWhenProviderHistoryExceedsMessageLimit) {
+    std::vector<acecode::ChatMessage> messages;
+    for (int i = 0; i <= acecode::AUTOCOMPACT_MAX_PROVIDER_MESSAGES; ++i) {
+        messages.push_back(msg("user", "x"));
+    }
+
+    EXPECT_TRUE(acecode::should_auto_compact(messages, 1000000, 1));
+}
+
+TEST(CompactCore, AutoCompactStillTriggersFromTokensWithinMessageLimit) {
+    std::vector<acecode::ChatMessage> messages{
+        msg("user", "small history"),
+    };
+    const int context_window = 128000;
+    const int threshold = acecode::get_auto_compact_threshold(context_window);
+
+    EXPECT_TRUE(acecode::should_auto_compact(
+        messages, context_window, threshold + 1));
+}
+
+TEST(CompactCore, AutoCompactStaysOffWhenTokensAndProviderHistoryAreWithinBounds) {
+    std::vector<acecode::ChatMessage> messages;
+    for (int i = 0; i < acecode::AUTOCOMPACT_MAX_PROVIDER_MESSAGES; ++i) {
+        messages.push_back(msg("assistant", "ok"));
+    }
+    auto transcript_only = msg("system", "not sent to provider");
+    transcript_only.metadata = {{"transcript_only", true}};
+    messages.push_back(std::move(transcript_only));
+
+    EXPECT_FALSE(acecode::should_auto_compact(messages, 1000000, 1));
+}
+
 TEST(CompactCore, ContextOverflowClassificationHandlesCommonProviderShapes) {
     acecode::ProviderErrorInfo explicit_code;
     explicit_code.kind = acecode::ProviderErrorKind::Http;

@@ -37,7 +37,7 @@ export function SideQuestionCard({ state, onDismiss }) {
           <VsIcon name="glyphUp" size={11} />
         </span>
         <span className="text-[12px] font-medium text-fg">引导</span>
-        <span className="text-[10px] font-mono text-accent">/btw</span>
+        <span className="text-[10px] text-accent">/btw</span>
         <span className="flex-1 min-w-0 truncate text-[11px] text-fg-mute" title={question}>{question}</span>
         {status === 'loading' ? (
           <span className="ace-spinner shrink-0" aria-label="引导回答生成中" />

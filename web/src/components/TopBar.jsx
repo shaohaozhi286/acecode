@@ -62,6 +62,9 @@ export function TopBar({
   onToggleConsole,
   consoleAvailable = false,
   consoleOpen = false,
+  rightPanelAvailable = false,
+  rightPanelCollapsed = false,
+  onToggleRightPanel,
   sidebarCollapsed = false,
   sidebarWidth,
   onToggleSidebar,
@@ -251,6 +254,15 @@ export function TopBar({
         <QuickBtn title={theme === 'dark' ? '切到浅色' : '切到深色'} onClick={toggle}>
           <VsIcon name={theme === 'dark' ? 'brightness' : 'darkTheme'} size={14} />
         </QuickBtn>
+        {rightPanelAvailable && onToggleRightPanel && (
+          <QuickBtn
+            title={rightPanelCollapsed ? '展开整个右侧面板' : '收起整个右侧面板'}
+            onClick={onToggleRightPanel}
+            aria-expanded={!rightPanelCollapsed}
+          >
+            <PanelToggleIcon side="right" size={15} />
+          </QuickBtn>
+        )}
         <button
           data-tour-target="topbar-settings"
           type="button"

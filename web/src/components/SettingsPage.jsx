@@ -496,7 +496,7 @@ function SectionAbout({ health }) {
           <div className="text-[13px] font-medium">当前版本</div>
           <div className="text-[11px] text-fg-mute mt-0.5">ACECode 桌面 / TUI / Daemon 同版本号</div>
         </div>
-        <span className="font-mono text-[12px] text-fg-2">{programVersionLabel}</span>
+        <span className="text-[12px] text-fg-2">{programVersionLabel}</span>
       </div>
 
       <div className="flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-md bg-surface border border-border mb-2">
@@ -506,7 +506,7 @@ function SectionAbout({ health }) {
         </div>
         <div className="min-w-0 max-w-[62%] text-right">
           <div
-            className="font-mono text-[12px] text-fg-2 truncate"
+            className="text-[12px] text-fg-2 truncate"
             title={webCoreLabel}
           >
             {webCoreLabel}
@@ -621,7 +621,7 @@ function SectionConfig() {
             disabled={upgradeLoading || upgradeSaving}
             spellCheck={false}
             className={clsx(
-              'flex-1 min-w-0 h-8 px-2.5 rounded-md border bg-bg text-fg text-[12px] font-mono outline-none transition',
+              'flex-1 min-w-0 h-8 px-2.5 rounded-md border bg-bg text-fg text-[12px] outline-none transition',
               upgradeError ? 'border-danger' : 'border-border focus:border-accent',
             )}
             placeholder={DEFAULT_UPGRADE_SERVICE_URL}
@@ -904,7 +904,7 @@ function WorkspaceSkillGroup({
         <VsIcon name="folder" size={15} className="shrink-0 text-fg-2" />
         <div className="flex-1 min-w-0">
           <div className="text-[13px] font-medium truncate">{ws.name}</div>
-          <div className="text-[11px] text-fg-mute font-mono truncate">{ws.cwd}</div>
+          <div className="text-[11px] text-fg-mute truncate">{ws.cwd}</div>
         </div>
         <span className="text-[11px] text-fg-mute tabular-nums shrink-0">
           {loaded ? enabledRatioLabel(skills) : '…'}
@@ -1797,7 +1797,7 @@ function SectionHooks() {
           <div className="space-y-1">
             {snapshot.diagnostics.slice(0, 8).map((diag, index) => (
               <div key={`${diag.code}-${index}`} className="text-[11px] text-fg-mute">
-                <span className="font-mono text-fg-2">{diag.code || diag.severity}</span>
+                <span className="text-fg-2">{diag.code || diag.severity}</span>
                 {diag.message ? ` · ${diag.message}` : ''}
               </div>
             ))}
@@ -1833,8 +1833,8 @@ function HookListItem({ hook, busyId, onTrust, onDisable, onEnable }) {
             )}
           </div>
           <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-fg-mute">
-            <span>匹配: <span className="font-mono text-fg-2">{hook.matcher}</span></span>
-            <span>来源: <span className="font-mono text-fg-2 break-all">{sourceLabel}</span></span>
+            <span>匹配: <span className="text-fg-2">{hook.matcher}</span></span>
+            <span>来源: <span className="text-fg-2 break-all">{sourceLabel}</span></span>
             {hook.timeoutSeconds > 0 && <span>超时: {hook.timeoutSeconds}s</span>}
           </div>
           {commandText && (
@@ -1852,7 +1852,7 @@ function HookListItem({ hook, busyId, onTrust, onDisable, onEnable }) {
             <div className="mt-2 space-y-1">
               {hook.diagnostics.map((diag, index) => (
                 <div key={`${diag.code}-${index}`} className="text-[11px] text-fg-mute">
-                  <span className="font-mono text-warn">{diag.code || diag.severity}</span>
+                  <span className="text-warn">{diag.code || diag.severity}</span>
                   {diag.message ? ` · ${diag.message}` : ''}
                 </div>
               ))}
@@ -2141,7 +2141,7 @@ function SectionUsage() {
                 const h = stats.maxDailyTokens > 0 ? (d.tokens / stats.maxDailyTokens) * 100 : 0;
                 return (
                   <div key={d.date} className="flex-1 min-w-[24px] h-full flex flex-col items-center gap-1.5">
-                    <div className="text-[9px] font-mono text-fg-mute opacity-80 whitespace-nowrap">
+                    <div className="text-[9px] text-fg-mute opacity-80 whitespace-nowrap">
                       {d.tokens > 0 ? formatUsageTokens(d.tokens) : ''}
                     </div>
                     <div className="w-full flex-1 flex items-end">
@@ -2161,7 +2161,7 @@ function SectionUsage() {
             {tokenDetails.map(([label, value]) => (
               <div key={label} className="px-3 py-2.5 rounded-md bg-surface border border-border">
                 <div className="text-[11px] text-fg-mute mb-1">{label}</div>
-                <div className="text-[14px] font-mono font-semibold">{formatUsageTokens(value)}</div>
+                <div className="text-[14px] font-semibold">{formatUsageTokens(value)}</div>
               </div>
             ))}
           </div>
@@ -2187,11 +2187,11 @@ function SectionUsage() {
                   <div className="flex items-center justify-between mb-2 gap-3">
                     <div className="flex items-center gap-2 min-w-0">
                       <span className="w-2.5 h-2.5 rounded-sm shrink-0" style={{ background: color }} />
-                      <span className="text-[13px] font-mono font-semibold truncate">{m.label}</span>
+                      <span className="text-[13px] font-semibold truncate">{m.label}</span>
                     </div>
                     <div className="flex items-center gap-4 shrink-0">
                       <span className="text-[12px] text-fg-mute">{m.records} 条</span>
-                      <span className="text-[13px] font-mono font-semibold">{formatUsageTokens(total)}</span>
+                      <span className="text-[13px] font-semibold">{formatUsageTokens(total)}</span>
                     </div>
                   </div>
                   <div className="h-1.5 rounded-sm bg-surface-hi overflow-hidden mb-1.5">
@@ -2229,7 +2229,7 @@ function SectionUsage() {
                       <div className="text-[13px] font-medium truncate">{w.workspaceName || 'workspace'}</div>
                       <div className="text-[11px] text-fg-mute truncate">{w.cwd}</div>
                     </div>
-                    <div className="text-[13px] font-mono font-semibold shrink-0">{formatUsageTokens(total)}</div>
+                    <div className="text-[13px] font-semibold shrink-0">{formatUsageTokens(total)}</div>
                   </div>
                   <div className="h-1.5 rounded-sm bg-surface-hi overflow-hidden">
                     <div className="h-full bg-accent" style={{ width: `${width}%`, minWidth: total > 0 ? 6 : 0, opacity: 0.85 }} />
@@ -2410,7 +2410,7 @@ function SectionFeedback() {
             >
               <div>{status.text}</div>
               {status.packagePath && (
-                <div className="mt-1 font-mono text-[11px] break-all">{status.packagePath}</div>
+                <div className="mt-1 text-[11px] break-all">{status.packagePath}</div>
               )}
             </div>
           )}
@@ -3040,10 +3040,10 @@ function SectionModel() {
                     </span>
                     <CapabilityBadges capabilities={m.capabilities} compact />
                   </div>
-                  <div className="text-[12px] text-fg-mute font-mono truncate">
+                  <div className="text-[12px] text-fg-mute truncate">
                     {m.model}
                     {m.context_window ? (
-                      <span className="font-sans"> · 上下文 {formatContextWindowK(m.context_window)}k</span>
+                      <span> · 上下文 {formatContextWindowK(m.context_window)}k</span>
                     ) : null}
                   </div>
                 </div>
@@ -3209,7 +3209,7 @@ function CopilotAuthPanel({
             <div className="min-w-0">
               <div className="text-[12px] text-fg-mute mb-1">GitHub 验证码</div>
               <div className="flex items-center gap-2">
-                <div className="font-mono text-[20px] font-semibold tracking-[0.12em] text-fg">
+                <div className="text-[20px] font-semibold tracking-[0.12em] text-fg">
                   {flow.user_code}
                 </div>
                 <button
@@ -3442,7 +3442,7 @@ function ModelFormPreview({
           <div className="text-[12px] font-medium text-fg-2 mb-1.5">Base URL</div>
           <input
             type="text"
-            className={clsx(fieldClass, 'font-mono text-[12px]')}
+            className={clsx(fieldClass, 'text-[12px]')}
             placeholder={data.provider === 'anthropic' ? ANTHROPIC_DEFAULT_BASE_URL : OPENAI_DEFAULT_BASE_URL}
             value={data.base_url}
             onChange={(e) => {
@@ -3461,7 +3461,7 @@ function ModelFormPreview({
           <div className="relative">
             <input
               type={apiKeyVisible ? 'text' : 'password'}
-              className={clsx(fieldClass, 'pr-10 font-mono text-[12px]')}
+              className={clsx(fieldClass, 'pr-10 text-[12px]')}
               placeholder={data.provider === 'anthropic' ? 'sk-ant-...' : 'sk-...'}
               value={data.api_key || ''}
               onChange={onApiKeyChange}
@@ -3516,7 +3516,7 @@ function ModelFormPreview({
           type="number"
           min="0"
           step="0.001"
-          className={clsx(fieldClass, 'font-mono text-[12px]')}
+          className={clsx(fieldClass, 'text-[12px]')}
           placeholder="例如: 128"
           value={data.context_window_k || ''}
           onChange={(e) => setData({ context_window_k: e.target.value })}
@@ -3577,7 +3577,7 @@ function ModelFormPreview({
               <input
                 type="text"
                 placeholder="过滤或自定义模型 ID,回车添加"
-                className="flex-1 px-1 py-0.5 bg-transparent text-[12px] font-mono text-fg outline-none placeholder:text-fg-mute"
+                className="flex-1 px-1 py-0.5 bg-transparent text-[12px] text-fg outline-none placeholder:text-fg-mute"
                 value={customInput}
                 onChange={(e) => setCustomInput(e.target.value)}
                 onKeyDown={(e) => {
@@ -3679,7 +3679,7 @@ function ModelFormPreview({
                         >
                           {checked && <span>✓</span>}
                         </span>
-                        <span className="text-[12px] font-mono text-fg">{mid}</span>
+                        <span className="text-[12px] text-fg">{mid}</span>
                       </button>
                     );
                   })}
@@ -3704,7 +3704,7 @@ function ModelFormPreview({
             {selectedModels.map((mid) => (
               <span
                 key={mid}
-                className="inline-flex items-center gap-1 pl-2.5 pr-1.5 py-1 rounded-md bg-accent-bg border border-accent-soft text-[12px] font-mono text-accent"
+                className="inline-flex items-center gap-1 pl-2.5 pr-1.5 py-1 rounded-md bg-accent-bg border border-accent-soft text-[12px] text-accent"
               >
                 {mid}
                 <button

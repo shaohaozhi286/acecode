@@ -4,16 +4,22 @@
 //      字段容忍)
 //   2. format_ask_answers 的拼接契约(单题、多题 + multi-select、引号不转义)
 //   3. make_rejected_ask_result 的固定拒绝文本
-// TUI overlay 的事件 / 渲染 / 阻塞协议归手动集成测试(在 CLAUDE.md
-// "Unit tests" 一节说明的 TUI exemption 范围内),这里不覆盖。
+// 另覆盖 TUI overlay 的 timeout 到期清理与 goal 30 秒提示/提前回答路径。
 
 #include <gtest/gtest.h>
 
+#include <ftxui/component/screen_interactive.hpp>
+
 #include "tool/ask_user_question_tool.hpp"
+#include "tui_state.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <future>
 #include <map>
 #include <string>
+#include <thread>
 #include <vector>
 
 using acecode::AskQuestion;
@@ -23,6 +29,34 @@ using acecode::format_ask_answers;
 using acecode::format_ask_user_question_result_display;
 using acecode::make_rejected_ask_result;
 using acecode::validate_ask_user_question_args;
+
+namespace {
+
+constexpr const char* kInteractiveQuestionArgs = R"({
+    "questions": [{
+        "question": "Pick one?",
+        "header": "choice",
+        "options": [
+            {"label": "A", "description": "recommended"},
+            {"label": "B", "description": "alternative"}
+        ]
+    }]
+})";
+
+bool wait_for_ask_overlay(acecode::TuiState& state,
+                          std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        {
+            std::lock_guard<std::mutex> lk(state.mu);
+            if (state.ask_pending) return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return false;
+}
+
+} // namespace
 
 // 场景:合法最小输入(1 题 2 选项,均含必填字段)应通过校验,并把
 // question / header / options / multiSelect 回填到结构里。
@@ -264,26 +298,15 @@ TEST(AskUserQuestionRejectedTest, ConstantRejectedResult) {
     EXPECT_EQ(r.output, "[Error] User declined to answer questions.");
 }
 
-// 场景:goal 无人值守模式的自动应答 —— success=true(避免模型把它当失败
-// 反复重问),文案指示模型自行决策并继续推进 goal。
-TEST(AskUserQuestionUnattendedTest, AutoAnswerResultTellsModelToDecide) {
-    auto r = acecode::make_goal_unattended_ask_result();
-    EXPECT_TRUE(r.success);
-    EXPECT_NE(r.output.find("Unattended goal mode"), std::string::npos);
-    EXPECT_NE(r.output.find("Decide"), std::string::npos);
-}
-
-// 场景:daemon 版 AskUserQuestion 在 goal 无人值守模式下不走 prompter。
-// 回归:此前 goal 回合里模型调 AskUserQuestion 会弹出前端问答面板,goal
-// 运行被打断;修复后 ctx.goal_unattended_active()==true 时直接返回自动应答,
-// 即使 ask_user_questions 通道存在也不触碰。
-TEST(AskUserQuestionUnattendedTest, AsyncToolSkipsPrompterWhenGoalUnattended) {
+// active goal 仍使用提问组件，但固定 30 秒超时，到期自动采纳
+// 每题第一个(推荐)选项。callback 在这里模拟 prompter 到期。
+TEST(AskUserQuestionGoalTest, AsyncToolPromptsThenAdoptsRecommendedAfterThirtySeconds) {
     auto tool = acecode::create_ask_user_question_tool_async();
     acecode::ToolContext ctx;
     bool prompter_called = false;
     ctx.ask_user_questions = [&](const nlohmann::json&) {
         prompter_called = true;
-        return nlohmann::json{{"cancelled", true}};
+        return nlohmann::json{{"cancelled", false}, {"timed_out", true}};
     };
     ctx.goal_unattended_active = [] { return true; };
 
@@ -292,8 +315,12 @@ TEST(AskUserQuestionUnattendedTest, AsyncToolSkipsPrompterWhenGoalUnattended) {
         {"label":"B","description":"b"}]}]})";
     auto r = tool.execute(args, ctx);
     EXPECT_TRUE(r.success) << r.output;
-    EXPECT_FALSE(prompter_called);
-    EXPECT_NE(r.output.find("Unattended goal mode"), std::string::npos);
+    EXPECT_TRUE(prompter_called);
+    EXPECT_NE(r.output.find("30 seconds"), std::string::npos);
+    EXPECT_NE(r.output.find("\"Pick one?\"=\"A\""), std::string::npos);
+    ASSERT_TRUE(r.metadata.contains("ask_user_question_auto"));
+    EXPECT_EQ(r.metadata["ask_user_question_auto"].value("mode", ""), "timeout");
+    EXPECT_EQ(r.metadata["ask_user_question_auto"].value("seconds", 0), 30);
 }
 
 // 场景:非 goal 模式(探针缺省 / 返回 false)行为不变 —— 仍走 prompter。
@@ -314,4 +341,70 @@ TEST(AskUserQuestionUnattendedTest, AsyncToolStillPromptsWithoutActiveGoal) {
     auto r = tool.execute(args, ctx);
     EXPECT_TRUE(prompter_called);
     EXPECT_FALSE(r.success);
+}
+
+TEST(AskUserQuestionTuiPolicyTest, TimeoutAutoAdoptsAndCleansOverlay) {
+    acecode::TuiState state;
+    auto screen = ftxui::ScreenInteractive::FitComponent();
+    auto tool = acecode::create_ask_user_question_tool(state, screen);
+    acecode::ToolContext ctx;
+    ctx.question_policy = [] {
+        acecode::ResolvedQuestionPolicy policy;
+        policy.policy = acecode::QuestionPolicy::Timeout;
+        policy.timeout_seconds = 1;
+        policy.origin = "test";
+        return policy;
+    };
+
+    const auto started = std::chrono::steady_clock::now();
+    auto result = tool.execute(kInteractiveQuestionArgs, ctx);
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    EXPECT_TRUE(result.success) << result.output;
+    EXPECT_GE(elapsed, std::chrono::milliseconds(900));
+    EXPECT_NE(result.output.find("1 seconds"), std::string::npos);
+    EXPECT_NE(result.output.find("\"Pick one?\"=\"A\""), std::string::npos);
+    ASSERT_TRUE(result.metadata.contains("ask_user_question_auto"));
+    EXPECT_EQ(result.metadata["ask_user_question_auto"].value("mode", ""),
+              "timeout");
+    std::lock_guard<std::mutex> lk(state.mu);
+    EXPECT_FALSE(state.ask_pending);
+    EXPECT_TRUE(state.ask_questions.empty());
+    EXPECT_EQ(state.ask_timeout_hint_seconds, 0);
+}
+
+TEST(AskUserQuestionTuiPolicyTest, ActiveGoalShowsThirtySecondWindowAndAcceptsEarlyAnswer) {
+    acecode::TuiState state;
+    auto screen = ftxui::ScreenInteractive::FitComponent();
+    auto tool = acecode::create_ask_user_question_tool(state, screen);
+    std::atomic<bool> abort{false};
+    acecode::ToolContext ctx;
+    ctx.abort_flag = &abort;
+    ctx.goal_unattended_active = [] { return true; };
+
+    auto future = std::async(std::launch::async, [&] {
+        return tool.execute(kInteractiveQuestionArgs, ctx);
+    });
+    if (!wait_for_ask_overlay(state, std::chrono::seconds(2))) {
+        abort.store(true);
+        state.ask_cv.notify_all();
+        (void)future.get();
+        FAIL() << "goal AskUserQuestion overlay did not open";
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(state.mu);
+        EXPECT_EQ(state.ask_timeout_hint_seconds, 30);
+        state.ask_result_answers["Pick one?"] = "B";
+        state.ask_result_ok = true;
+        state.ask_pending = false;
+    }
+    state.ask_cv.notify_all();
+
+    auto result = future.get();
+    EXPECT_TRUE(result.success) << result.output;
+    EXPECT_NE(result.output.find("\"Pick one?\"=\"B\""), std::string::npos);
+    EXPECT_FALSE(result.metadata.contains("ask_user_question_auto"));
+    std::lock_guard<std::mutex> lk(state.mu);
+    EXPECT_EQ(state.ask_timeout_hint_seconds, 0);
 }

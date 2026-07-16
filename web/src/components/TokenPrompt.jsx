@@ -33,7 +33,7 @@ export function TokenPrompt({ onSubmit }) {
           <h2 className="text-base font-semibold">需要访问令牌</h2>
         </div>
         <p className="text-fg-2 text-xs mb-4 leading-relaxed">
-          从 <code className="bg-surface-hi px-1 py-0.5 rounded font-mono text-[11px]">~/.acecode/run/token</code>{' '}
+          从 <code className="bg-surface-hi px-1 py-0.5 rounded text-[11px]">~/.acecode/run/token</code>{' '}
           或运行{' '}
           <code className="bg-surface-hi px-1 py-0.5 rounded font-mono text-[11px]">acecode daemon status</code>{' '}
           查看 token,粘贴到下方。

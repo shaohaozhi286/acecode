@@ -138,6 +138,13 @@ function eventTs(msg) {
   return transcriptTimestampMs(msg) || Date.now();
 }
 
+function clientMessageIdFromMetadata(metadata) {
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return '';
+  return typeof metadata.client_message_id === 'string'
+    ? metadata.client_message_id.trim()
+    : '';
+}
+
 function eventSeq(msg) {
   return typeof msg?.seq === 'number' && Number.isFinite(msg.seq) ? msg.seq : null;
 }
@@ -809,6 +816,36 @@ export function reduceTranscriptEvent(state, msg) {
       };
       break;
     }
+    case 'queued_input_accepted': {
+      const clientMessageId = typeof p.client_message_id === 'string'
+        ? p.client_message_id.trim()
+        : '';
+      if (!clientMessageId) break;
+      const alreadyVisible = next.items.some((item) => (
+        item.kind === 'msg' &&
+        item.role === 'user' &&
+        clientMessageIdFromMetadata(item.metadata) === clientMessageId
+      ));
+      if (alreadyVisible) break;
+      finalizeStreaming(next);
+      next.items = [
+        ...next.items,
+        {
+          kind: 'msg',
+          id: allocateItemId(next),
+          messageId: '',
+          role: 'user',
+          content: String(p.content || ''),
+          contentParts: [],
+          metadata: {
+            client_message_id: clientMessageId,
+            optimistic_queued_input: true,
+          },
+          ts: eventTs(msg),
+        },
+      ];
+      break;
+    }
     case 'message': {
       const role = p.role || 'system';
       const timing = normalizeTurnTimingRecord(p);
@@ -864,6 +901,32 @@ export function reduceTranscriptEvent(state, msg) {
               content: incomingContent || item.content || '',
               contentParts: Array.isArray(p.content_parts) ? p.content_parts : item.contentParts,
               metadata: p.metadata ?? item.metadata,
+              ts: eventTs(msg),
+            }
+          : item));
+        break;
+      }
+      const incomingClientMessageId = role === 'user'
+        ? clientMessageIdFromMetadata(p.metadata)
+        : '';
+      const optimisticIndex = incomingClientMessageId
+        ? next.items.findIndex((item) => (
+            item.kind === 'msg' &&
+            item.role === 'user' &&
+            !item.messageId &&
+            item.metadata?.optimistic_queued_input === true &&
+            clientMessageIdFromMetadata(item.metadata) === incomingClientMessageId
+          ))
+        : -1;
+      if (optimisticIndex >= 0) {
+        next.items = next.items.map((item, index) => (index === optimisticIndex
+          ? {
+              ...item,
+              messageId: incomingMessageId,
+              role,
+              content: incomingContent,
+              contentParts: Array.isArray(p.content_parts) ? p.content_parts : [],
+              metadata: p.metadata,
               ts: eventTs(msg),
             }
           : item));

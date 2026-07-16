@@ -19,6 +19,7 @@ import {
   DEFAULT_UI_PREFS,
   DEFAULT_FONT_SIZE,
   effectiveFontSize,
+  effectiveSidePanelListCollapsed,
   FONT_SIZE_VALUES,
   UI_PREFS_STORAGE_KEY,
   validateUiPrefs,
@@ -133,7 +134,10 @@ export function App() {
   // grid4/grid9 入口暂时隐藏:主界面固定单会话,避免旧 localStorage 把用户卡在未完善视图。
   const view = 'single';
   const fontSize = effectiveFontSize(uiPrefs);
+  // sidePanelCollapsed 是列表 + 详情的总开关;listCollapsed 只隐藏最右导航列表。
   const sidePanelCollapsed = uiPrefs.sidePanelCollapsed;
+  const sidePanelListCollapsed = effectiveSidePanelListCollapsed(uiPrefs);
+  const sidePanelNavigationCollapsed = sidePanelCollapsed || sidePanelListCollapsed;
   const sidePanelMaximized = !!uiPrefs.sidePanelMaximized;
   const projectSidebarCollapsed = !!uiPrefs.sidebarCollapsed;
   const showAceCodeAvatar = false;
@@ -513,6 +517,24 @@ export function App() {
     setUiPrefs((prev) => ({ ...prev, sidePanelCollapsed: !prev.sidePanelCollapsed }));
   }, [setUiPrefs]);
 
+  const toggleSidePanelList = useCallback(() => {
+    setUiPrefs((prev) => ({
+      ...prev,
+      sidePanelListCollapsed: !effectiveSidePanelListCollapsed(prev),
+    }));
+  }, [setUiPrefs]);
+
+  const revealSidePanelList = useCallback(() => {
+    setUiPrefs((prev) => {
+      if (!prev.sidePanelCollapsed && !effectiveSidePanelListCollapsed(prev)) return prev;
+      return {
+        ...prev,
+        sidePanelCollapsed: false,
+        sidePanelListCollapsed: false,
+      };
+    });
+  }, [setUiPrefs]);
+
   // 最大化 / 还原中间预览面板。沿用旧字段名保存偏好,但 UI 控件已迁到预览面板。
   // 最大化时强制确保右侧 SidePanel 未折叠,符合"右侧文件栏仍然可用"的行为。
   const toggleSidePanelMaximized = useCallback(() => {
@@ -780,7 +802,8 @@ export function App() {
   }, [createDesktopTraySession]);
 
   const setSidebarWidth = useCallback((nextWidth, shellWidth = 0) => {
-    const sidePanelVisible = !!(activeRef?.sessionId || activeRef?.id) && !sidePanelCollapsed;
+    const sidePanelVisible = !!(activeRef?.sessionId || activeRef?.id)
+      && !sidePanelNavigationCollapsed;
     setSingleLayout((prev) => {
       const sidebar = normalizeSidebarWidth(nextWidth, {
         shellWidth,
@@ -791,7 +814,13 @@ export function App() {
       });
       return sidebar === prev.sidebar ? prev : { ...prev, sidebar };
     });
-  }, [activeRef?.id, activeRef?.sessionId, previewPanelVisible, sidePanelCollapsed, setSingleLayout]);
+  }, [
+    activeRef?.id,
+    activeRef?.sessionId,
+    previewPanelVisible,
+    setSingleLayout,
+    sidePanelNavigationCollapsed,
+  ]);
 
   const setSidePanelWidth = useCallback((nextWidth, contentWidth = 0) => {
     setSingleLayout((prev) => {
@@ -806,17 +835,23 @@ export function App() {
   }, [previewPanelVisible, setSingleLayout, sidePanelMaximized]);
 
   const setPreviewPanelWidth = useCallback((nextWidth, contentWidth = 0) => {
-    const sidePanelVisible = !!(activeRef?.sessionId || activeRef?.id) && !sidePanelCollapsed;
+    const sidePanelVisible = !!(activeRef?.sessionId || activeRef?.id)
+      && !sidePanelNavigationCollapsed;
     setSingleLayout((prev) => {
       const previewPanel = normalizePreviewPanelWidth(nextWidth, {
         contentWidth,
         sidePanelWidth: prev.sidePanel,
         sidePanelVisible,
-        sidePanelCollapsed,
+        sidePanelCollapsed: sidePanelNavigationCollapsed,
       });
       return previewPanel === prev.previewPanel ? prev : { ...prev, previewPanel };
     });
-  }, [activeRef?.id, activeRef?.sessionId, setSingleLayout, sidePanelCollapsed]);
+  }, [
+    activeRef?.id,
+    activeRef?.sessionId,
+    setSingleLayout,
+    sidePanelNavigationCollapsed,
+  ]);
 
   const startSidebarResize = useCallback((event) => {
     if (view !== 'single') return;
@@ -941,6 +976,9 @@ export function App() {
         onToggleConsole={toggleConsoleDock}
         consoleAvailable={consoleAvailable}
         consoleOpen={consoleDock.open}
+        rightPanelAvailable={!!(activeRef?.sessionId || activeRef?.id) && !activeRef?.loop}
+        rightPanelCollapsed={sidePanelCollapsed}
+        onToggleRightPanel={toggleSidePanel}
         sidebarCollapsed={sidebarCollapsed}
         sidebarWidth={singleLayout.sidebar}
         onToggleSidebar={toggleProjectSidebar}
@@ -1006,7 +1044,10 @@ export function App() {
                 onPreviewPanelResize={setPreviewPanelWidth}
                 onPreviewPanelVisibleChange={setPreviewPanelVisible}
                 sidePanelCollapsed={sidePanelCollapsed}
+                sidePanelListCollapsed={sidePanelListCollapsed}
                 onToggleSidePanel={toggleSidePanel}
+                onToggleSidePanelList={toggleSidePanelList}
+                onRevealSidePanelList={revealSidePanelList}
                 sidePanelMaximized={sidePanelMaximized}
                 onToggleSidePanelMaximized={toggleSidePanelMaximized}
                 showAceCodeAvatar={showAceCodeAvatar}

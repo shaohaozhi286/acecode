@@ -24,6 +24,7 @@
 #include <condition_variable>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -57,9 +58,11 @@ public:
 
     // 阻塞调用。questions_payload 是已经拼好的 nlohmann::json 数组(供前端
     // 渲染 modal),由调用方组装(避免 prompter 与 ask_user_question_tool
-    // 数据结构耦合)。abort_flag 非空时周期性检查。
+    // 数据结构耦合)。abort_flag 非空时周期性检查。timeout_override
+    // 有值时仅覆盖本次等待窗口，active goal 用它固定传入 30 秒。
     AskUserQuestionResponse prompt(const nlohmann::json& questions_payload,
-                                     const std::atomic<bool>* abort_flag);
+                                     const std::atomic<bool>* abort_flag,
+                                     std::optional<std::chrono::milliseconds> timeout_override = std::nullopt);
 
     // 由 SessionClient 间接调用。线程安全。未知 request_id = no-op。
     void notify_response(const std::string& request_id,

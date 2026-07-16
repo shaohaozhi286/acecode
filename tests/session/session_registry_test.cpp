@@ -1132,7 +1132,7 @@ TEST(SessionRegistry, LoopPermissionAndQuestionPolicyAreSessionScoped) {
               "LOOP system context");
     auto default_question = default_entry->loop->resolved_question_policy();
     EXPECT_EQ(default_question.policy, acecode::QuestionPolicy::Ask);
-    EXPECT_STREQ(default_question.origin, "loop-default");
+    EXPECT_STREQ(default_question.origin, "default");
 
     SessionOptions yolo_opts = default_opts;
     yolo_opts.loop_id = "loop-yolo";
@@ -1142,8 +1142,8 @@ TEST(SessionRegistry, LoopPermissionAndQuestionPolicyAreSessionScoped) {
     ASSERT_NE(yolo_entry, nullptr);
     EXPECT_EQ(yolo_entry->perm->mode(), PermissionMode::Yolo);
     auto yolo_question = yolo_entry->loop->resolved_question_policy();
-    EXPECT_EQ(yolo_question.policy, acecode::QuestionPolicy::Deny);
-    EXPECT_STREQ(yolo_question.origin, "loop-yolo");
+    EXPECT_EQ(yolo_question.policy, acecode::QuestionPolicy::Ask);
+    EXPECT_STREQ(yolo_question.origin, "default");
 
     auto ordinary_id = fx.registry.create(SessionOptions{});
     auto* ordinary_entry = fx.registry.lookup(ordinary_id);

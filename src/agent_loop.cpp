@@ -378,17 +378,6 @@ void AgentLoop::set_cwd(const std::string& new_cwd) {
 }
 
 ResolvedQuestionPolicy AgentLoop::resolved_question_policy() const {
-    if (loop_execution_policy_.active) {
-        ResolvedQuestionPolicy policy;
-        if (permissions_.mode() == PermissionMode::Yolo) {
-            policy.policy = QuestionPolicy::Deny;
-            policy.origin = "loop-yolo";
-        } else {
-            policy.policy = QuestionPolicy::Ask;
-            policy.origin = "loop-default";
-        }
-        return policy;
-    }
     const bool has_cli = !loop_cfg_.question_policy_cli.empty();
     const std::string& configured =
         has_cli ? loop_cfg_.question_policy_cli : loop_cfg_.question_policy;
@@ -397,11 +386,7 @@ ResolvedQuestionPolicy AgentLoop::resolved_question_policy() const {
         (has_cli && loop_cfg_.question_timeout_seconds_cli > 0)
             ? loop_cfg_.question_timeout_seconds_cli
             : loop_cfg_.question_timeout_seconds;
-    const std::string mode =
-        (permissions_.is_dangerous() || permissions_.mode() == PermissionMode::Yolo)
-            ? std::string{"yolo"}
-            : std::string(PermissionManager::mode_name(permissions_.mode()));
-    return resolve_question_policy(configured, explicit_choice, timeout_seconds, mode);
+    return resolve_question_policy(configured, explicit_choice, timeout_seconds);
 }
 
 void AgentLoop::dispatch_message(const std::string& role,
@@ -762,9 +747,15 @@ bool AgentLoop::maybe_run_auto_compact() {
     const int boundary_count = static_cast<int>(active_for_estimate.size());
     int pre_tokens = estimate_message_tokens(active_for_estimate);
     const int threshold = get_auto_compact_threshold(context_window_);
+    const bool structurally_oversized =
+        boundary_count > AUTOCOMPACT_MAX_PROVIDER_MESSAGES;
     LOG_INFO("Auto-compact preflight; messages=" + std::to_string(messages_.size()) +
              " active_start=" + std::to_string(boundary_start) +
              " active_count=" + std::to_string(boundary_count) +
+             " message_limit=" +
+             std::to_string(AUTOCOMPACT_MAX_PROVIDER_MESSAGES) +
+             " structurally_oversized=" +
+             (structurally_oversized ? "true" : "false") +
              " active_estimated_tokens=" + std::to_string(pre_tokens) +
              " threshold=" + std::to_string(threshold) +
              " context_window=" + std::to_string(context_window_) +
@@ -806,15 +797,28 @@ bool AgentLoop::maybe_run_auto_compact() {
                 TokenTracker::format_tokens(micro_result.estimated_tokens_saved) +
                 " tokens");
 
-        const int after_tokens = estimate_message_tokens(provider_relevant_messages(messages_));
-        const bool still_above_threshold = after_tokens > threshold;
+        const auto after_messages = provider_relevant_messages(messages_);
+        const int after_count = static_cast<int>(after_messages.size());
+        const int after_tokens = estimate_message_tokens(after_messages);
+        const bool still_above_token_threshold = after_tokens > threshold;
+        const bool still_above_message_limit =
+            after_count > AUTOCOMPACT_MAX_PROVIDER_MESSAGES;
+        const bool still_above_threshold =
+            still_above_token_threshold || still_above_message_limit;
         LOG_INFO("Auto micro-compact result; cleared_tool_results=" +
                  std::to_string(micro_result.tool_results_cleared) +
                  " estimated_tokens_saved=" +
                  std::to_string(micro_result.estimated_tokens_saved) +
                  " active_estimated_tokens_before=" + std::to_string(pre_tokens) +
                  " active_estimated_tokens_after=" + std::to_string(after_tokens) +
+                 " active_count_after=" + std::to_string(after_count) +
+                 " message_limit=" +
+                 std::to_string(AUTOCOMPACT_MAX_PROVIDER_MESSAGES) +
                  " threshold=" + std::to_string(threshold) +
+                 " still_above_token_threshold=" +
+                 (still_above_token_threshold ? "true" : "false") +
+                 " still_above_message_limit=" +
+                 (still_above_message_limit ? "true" : "false") +
                  " still_above_threshold=" +
                  (still_above_threshold ? "true" : "false"));
 
@@ -1081,12 +1085,12 @@ std::string AgentLoop::build_goal_context_prompt(const ThreadGoal& goal) const {
         << "- Token budget: " << token_budget << "\n"
         << "- Tokens remaining: " << remaining_tokens << "\n"
         << "- Elapsed seconds: " << goal.time_used_seconds << "\n\n"
-        << "Unattended mode:\n"
-        << "- The user is not watching this session. Do not call AskUserQuestion and do "
-        << "not wait for confirmation; tool permissions are granted automatically while "
-        << "the goal is active.\n"
-        << "- When a decision is needed, make the most reasonable choice yourself, note "
-        << "it briefly, and keep working toward the goal.\n\n"
+        << "Goal interaction mode:\n"
+        << "- Tool permission confirmations are granted automatically while the goal is "
+        << "active.\n"
+        << "- You may call AskUserQuestion for a useful clarification. The user has 30 "
+        << "seconds to answer; after that, the recommended option is selected "
+        << "automatically so the goal keeps moving.\n\n"
         << "Work from evidence:\n"
         << "Use the current worktree and external state as authoritative. Previous "
         << "conversation context can help locate relevant work, but inspect the current "
@@ -2043,13 +2047,6 @@ bool AgentLoop::execute_tool_calls(
             : path_validator_.validate(path);
     };
 
-    auto is_yolo_external_file_path = [this](const std::string& path) {
-        if (path.empty()) return false;
-        if (permissions_.is_dangerous()) return false;
-        if (permissions_.mode() != PermissionMode::Yolo) return false;
-        return !path_validator_.validate(path).empty();
-    };
-
     // Helper: execute a single tool (for both parallel and serial use).
     auto execute_single_tool =
         [this, &path_validation_error](const std::string& tool_name,
@@ -2195,12 +2192,18 @@ bool AgentLoop::execute_tool_calls(
             const std::string tool_name_for_question = tc.function_name;
             const std::string tool_call_id_for_question = tc.id;
             tool_ctx.ask_user_questions =
-                [p, abort_flag_ptr, emit_progress, tool_name_for_question,
+                [this, p, abort_flag_ptr, emit_progress, tool_name_for_question,
                  tool_call_id_for_question, tool_index_int](const nlohmann::json& questions_payload) -> nlohmann::json {
                     emit_progress("question_waiting", "正在等待用户回答",
                         std::string{}, tool_name_for_question,
                         tool_call_id_for_question, tool_index_int, true);
-                    AskUserQuestionResponse resp = p->prompt(questions_payload, abort_flag_ptr);
+                    std::optional<std::chrono::milliseconds> timeout_override;
+                    if (goal_unattended_active()) {
+                        timeout_override = std::chrono::seconds(
+                            kGoalQuestionTimeoutSeconds);
+                    }
+                    AskUserQuestionResponse resp = p->prompt(
+                        questions_payload, abort_flag_ptr, timeout_override);
                     nlohmann::json out;
                     out["cancelled"] = resp.cancelled;
                     // timeout 策略到期(add-ask-question-policy):工具侧据此
@@ -2468,6 +2471,15 @@ bool AgentLoop::execute_tool_calls(
                     auto_allow = true;
                 }
 
+                // In Yolo, should_auto_allow() can only be false when an
+                // explicit Deny rule matched. Preserve that safety rule as a
+                // hard rejection, but never turn it into a permission prompt.
+                if (!auto_allow && permissions_.mode() == PermissionMode::Yolo) {
+                    return ToolResult{
+                        "[Permission denied by configured rule in yolo mode]",
+                        false};
+                }
+
                 if (effective_tc.function_name == "bash" && command_looks_like_file_write(ctx_command)) {
                     if (loop_execution_policy_.active &&
                         permissions_.mode() == PermissionMode::Yolo) {
@@ -2500,16 +2512,6 @@ bool AgentLoop::execute_tool_calls(
                     }
                 }
 
-                const bool needs_yolo_external_write_confirmation =
-                    effective_tc.function_name != "bash" &&
-                    !ctx_path.empty() &&
-                    is_yolo_external_file_path(ctx_path) &&
-                    !permissions_.yolo_external_file_write_confirmed();
-                if (needs_yolo_external_write_confirmation) {
-                    LOG_INFO("Yolo external file write requires first confirmation: " + ctx_path);
-                    auto_allow = false;
-                }
-
                 if (!ctx_path.empty() && effective_tc.function_name != "bash") {
                     std::string path_error =
                         path_validation_error(effective_tc.function_name, ctx_path);
@@ -2527,14 +2529,11 @@ bool AgentLoop::execute_tool_calls(
                 }
 
                 // Goal 无人值守模式:所有本会弹给用户的权限确认自动放行。
-                // 放在所有 auto_allow 降级(dangerous path / yolo 外部写首确认)
-                // 之后,保证 goal 运行期间绝不出现确认弹窗。Plan mode 在
-                // goal_unattended_active 内部被排除,只读约束不受影响。
+                // 放在 dangerous path 等 auto_allow 降级之后,保证 goal 运行
+                // 期间绝不出现确认弹窗。Plan mode 在 goal_unattended_active
+                // 内部被排除,只读约束不受影响。
                 if (!auto_allow && goal_unattended_active()) {
                     auto_allow = true;
-                    if (needs_yolo_external_write_confirmation) {
-                        permissions_.mark_yolo_external_file_write_confirmed();
-                    }
                     LOG_INFO("[goal] unattended auto-approve: " +
                              effective_tc.function_name +
                              (ctx_path.empty() ? std::string{} : " path=" + ctx_path));
@@ -2559,9 +2558,6 @@ bool AgentLoop::execute_tool_calls(
                     }
                     if (outcome.allowed) {
                         auto_allow = true;
-                        if (needs_yolo_external_write_confirmation) {
-                            permissions_.mark_yolo_external_file_write_confirmed();
-                        }
                     }
                 }
 
@@ -2570,17 +2566,12 @@ bool AgentLoop::execute_tool_calls(
                 // hook 都没放行,即将进交互 prompt —— AsyncPrompter 会空等
                 // 5 分钟超时,必须短路。放在 hook 分支之后:hook 是非交互
                 // 决策通道,headless 下依然应该先于兜底策略生效。
-                //   - --yolo(dangerous):自动放行。dangerous 下唯一落到这
-                //     里的常规场景是 yolo 外部写首确认,用户显式选了 yolo,
-                //     照 goal unattended 的先例连带确认一次性放掉。
+                //   - --yolo(dangerous):自动放行。
                 //   - 其余(default/accept-edits/plan 的受限工具):直接拒绝,
                 //     文案告知模型环境约束,引导改用只读方案而不是重试。
                 if (!auto_allow && headless::active()) {
                     if (permissions_.is_dangerous()) {
                         auto_allow = true;
-                        if (needs_yolo_external_write_confirmation) {
-                            permissions_.mark_yolo_external_file_write_confirmed();
-                        }
                         LOG_INFO("[headless] yolo auto-approve: " +
                                  effective_tc.function_name +
                                  (ctx_path.empty() ? std::string{} : " path=" + ctx_path));
@@ -2620,16 +2611,6 @@ bool AgentLoop::execute_tool_calls(
                         effective_tc.function_name != "ExitPlanMode") {
                         permissions_.add_session_allow(effective_tc.function_name);
                     }
-                    if (needs_yolo_external_write_confirmation) {
-                        permissions_.mark_yolo_external_file_write_confirmed();
-                    }
-                }
-
-                if (needs_yolo_external_write_confirmation &&
-                    !permissions_.yolo_external_file_write_confirmed()) {
-                    return ToolResult{
-                        "[Error] External file write in yolo mode requires permission confirmation before execution.",
-                        false};
                 }
 
                 ToolResult tool_result = execute_single_tool(effective_tc.function_name, effective_tc.function_arguments,

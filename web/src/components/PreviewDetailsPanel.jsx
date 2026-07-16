@@ -8,7 +8,7 @@ import { DESKTOP_CONTEXT_ACTION_EVENT, DESKTOP_CONTEXT_ACTIONS } from '../lib/de
 import { FilePreviewContent } from './FilePreviewContent.jsx';
 import { SessionChangeDetails } from './ChangeReview.jsx';
 import { GitChangeDetails } from './GitChangeReview.jsx';
-import { FileTypeIcon, VsIcon } from './Icon.jsx';
+import { FileTypeIcon, PanelToggleIcon, VsIcon } from './Icon.jsx';
 
 const FILE_PREVIEW_WRAP_STORAGE_KEY = 'acecode.filePreviewWrap.v1';
 
@@ -176,6 +176,7 @@ export function PreviewDetailsPanel({
   changeSummary = null,
   maximized = false,
   busy = false,
+  sidePanelListCollapsed = false,
   onActivateTab,
   onCloseTab,
   onCloseOthers,
@@ -183,6 +184,7 @@ export function PreviewDetailsPanel({
   onCloseAll,
   onReorderTab,
   onToggleMaximize,
+  onToggleSidePanelList,
   onSelectChangeFile,
   onSelectGitChangeFile,
   onOpenFilePreview,
@@ -695,6 +697,18 @@ export function PreviewDetailsPanel({
           <PreviewTabScrollbar scrollRef={tabListRef} />
         </div>
         <div className="ace-preview-details-actions">
+          {sidePanelListCollapsed && onToggleSidePanelList && (
+            <button
+              type="button"
+              className="ace-preview-details-action"
+              onClick={onToggleSidePanelList}
+              title="展开列表面板"
+              aria-label="展开列表面板"
+              aria-expanded="false"
+            >
+              <PanelToggleIcon side="right" size={15} />
+            </button>
+          )}
           <button
             type="button"
             className="ace-preview-details-action"

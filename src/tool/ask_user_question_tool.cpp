@@ -261,22 +261,7 @@ ToolResult make_rejected_ask_result() {
     return r;
 }
 
-// Goal 无人值守模式:不弹任何 UI,直接告知模型自行决策。success=true 避免
-// 模型把它当失败反复重问;文案明确指示优先选推荐项并继续推进 goal。
-ToolResult make_goal_unattended_ask_result() {
-    ToolResult r;
-    r.success = true;
-    r.output =
-        "[Unattended goal mode] The user is not available to answer questions "
-        "while the goal runs. Do not wait and do not ask again. Decide "
-        "autonomously: pick the recommended option if one exists, otherwise "
-        "the most reasonable option, note the decision briefly in your "
-        "response, and continue working toward the goal.";
-    return r;
-}
-
-// Headless(-p / --print)模式的自动应答:同 goal unattended 的语义,只是
-// 文案换成 print 模式的环境说明。success=true 防止模型当失败重问。
+// Headless(-p / --print)模式的自动应答。success=true 防止模型当失败重问。
 ToolResult make_headless_ask_result() {
     ToolResult r;
     r.success = true;
@@ -337,6 +322,13 @@ static bool goal_unattended(const ToolContext& ctx) {
 
 // 解析生效策略:探针未注入(独立 ToolExecutor 调用)= Ask 维持旧行为。
 static ResolvedQuestionPolicy effective_question_policy(const ToolContext& ctx) {
+    if (goal_unattended(ctx)) {
+        ResolvedQuestionPolicy policy;
+        policy.policy = QuestionPolicy::Timeout;
+        policy.timeout_seconds = kGoalQuestionTimeoutSeconds;
+        policy.origin = "goal";
+        return policy;
+    }
     if (ctx.question_policy) return ctx.question_policy();
     return ResolvedQuestionPolicy{};
 }
@@ -424,12 +416,6 @@ ToolImpl create_ask_user_question_tool(TuiState& state,
         auto parsed = validate_ask_user_question_args(arguments_json, err);
         if (!parsed.has_value()) {
             return ToolResult{err, false};
-        }
-
-        // Goal 无人值守:绝不占用 TUI overlay,自动应答让模型自行决策。
-        if (goal_unattended(ctx)) {
-            LOG_INFO("[AskUserQuestion] auto-answered (unattended goal mode)");
-            return make_goal_unattended_ask_result();
         }
 
         // 应答策略(add-ask-question-policy):deny 不弹 overlay 直接自动
@@ -755,12 +741,6 @@ ToolImpl create_ask_user_question_tool_async() {
         if (headless::active()) {
             LOG_INFO("[AskUserQuestion] auto-answered (headless print mode)");
             return make_headless_ask_result();
-        }
-
-        // Goal 无人值守:不经 prompter 弹前端问答面板,自动应答。
-        if (goal_unattended(ctx)) {
-            LOG_INFO("[AskUserQuestion] auto-answered (unattended goal mode)");
-            return make_goal_unattended_ask_result();
         }
 
         // 应答策略(add-ask-question-policy):deny 不发 question_request,

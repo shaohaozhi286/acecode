@@ -120,12 +120,12 @@ export function PermissionModal({ request, onResolve, originLabel = '' }) {
               {body}
             </p>
             {(isPlanApproval || isPlanEnter) && planFilePath && (
-              <div className="text-[11px] text-fg-mute font-mono break-all">
+              <div className="text-[11px] text-fg-mute break-all">
                 {planFilePath}
               </div>
             )}
             {isPlanApproval ? (
-              <div className="rounded-md bg-surface-alt border border-border font-mono overflow-hidden">
+              <div className="rounded-md bg-surface-alt border border-border overflow-hidden">
                 <div className="px-3.5 py-2 border-b border-border text-[12px] font-semibold text-fg">
                   Plan
                 </div>
@@ -187,7 +187,7 @@ export function PermissionModal({ request, onResolve, originLabel = '' }) {
           </div>
           {!hideAllowSession && (
             <div className="px-4.5 pb-3.5 text-[11px] text-fg-mute">
-              提示:可在设置中切换为 Yolo 模式跳过常规确认；首次外部文件写入仍会确认。
+              提示：切换为 Yolo 后将跳过所有工具权限确认；AskUserQuestion 仍可正常提问。
             </div>
           )}
         </>

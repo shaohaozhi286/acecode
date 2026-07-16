@@ -785,6 +785,7 @@ void WebServer::Impl::register_sessions() {
             }
 
             std::string text;
+            std::string client_message_id;
             json attachment_refs = json::array();
             json contexts = json::array();
             bool worktree_create = false;
@@ -799,6 +800,12 @@ void WebServer::Impl::register_sessions() {
                 }
                 if (j.contains("contexts") && j["contexts"].is_array()) {
                     contexts = j["contexts"];
+                }
+                if (j.contains("client_message_id") && j["client_message_id"].is_string()) {
+                    const auto candidate = j["client_message_id"].get<std::string>();
+                    if (!candidate.empty() && candidate.size() <= 256) {
+                        client_message_id = candidate;
+                    }
                 }
                 // 首条消息的 worktree 意图(openspec add-webui-git-session-pill):
                 // {create:true, base:"<branch>"}。随消息原子处理,避免"先建
@@ -885,6 +892,9 @@ void WebServer::Impl::register_sessions() {
             UserInput input;
             input.text = text;
             if (expanded || selection_expanded) input.display_text = original_text;
+            if (!client_message_id.empty()) {
+                input.metadata["client_message_id"] = client_message_id;
+            }
 
             if (!attachment_refs.empty() || !contexts.empty()) {
                 if (!deps.session_registry) {
@@ -958,7 +968,7 @@ void WebServer::Impl::register_sessions() {
                 }
 
                 input.content_parts = std::move(parts);
-                input.metadata = json::object();
+                if (!input.metadata.is_object()) input.metadata = json::object();
                 if (!attachment_meta.empty()) {
                     input.metadata["attachments"] = std::move(attachment_meta);
                 }
