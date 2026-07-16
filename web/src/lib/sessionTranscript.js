@@ -753,7 +753,8 @@ export function createTranscriptState(overrides = {}) {
     activity: null,
     // turnHadAssistantText / lastAssistantText 用于桌面通知:在 busy=true→false
     // 转换且本回合产生过 assistant 文本时,emit turn_completed effect。reducer 之外
-    // 的代码不应直接读 / 写它们。见 openspec/changes/add-desktop-attention-notifications。
+    // 的代码不应直接读 / 写它们。见
+    // openspec/changes/add-windows-wintoast-completion-notifications。
     turnHadAssistantText: false,
     lastAssistantText: '',
     ...overrides,
@@ -848,6 +849,13 @@ export function reduceTranscriptEvent(state, msg) {
     }
     case 'message': {
       const role = p.role || 'system';
+      if (role === 'error') {
+        // Legacy/current daemon provider failures are visible message events.
+        // Clear any earlier assistant text so their terminal busy=false cannot
+        // be mistaken for a completed turn.
+        next.turnHadAssistantText = false;
+        next.lastAssistantText = '';
+      }
       const timing = normalizeTurnTimingRecord(p);
       if (timing) {
         next.turnTimings.set(timing.userMessageUuid, timing);
@@ -1086,6 +1094,8 @@ export function reduceTranscriptEvent(state, msg) {
     }
     case 'busy_changed': {
       const wasBusy = !!state?.busy;
+      const outcome = typeof p.outcome === 'string' ? p.outcome : '';
+      const completedOutcome = !outcome || outcome === 'completed';
       next.busy = !!p.busy;
       next.status = next.busy ? 'running' : 'idle';
       if (next.busy && !wasBusy) {
@@ -1093,30 +1103,41 @@ export function reduceTranscriptEvent(state, msg) {
         next.turnHadAssistantText = false;
         next.lastAssistantText = '';
       }
-      if (!p.busy) {
+      if (!next.busy) {
         next.activity = null;
-        next.turns = (next.turns || 0) + 1;
         finalizeStreaming(next);
-        if (next.turnHadAssistantText) {
+        if (wasBusy) next.turns = (next.turns || 0) + 1;
+        if (wasBusy && completedOutcome && next.turnHadAssistantText) {
           effects.push({
             type: 'turn_completed',
             payload: { final_assistant_text: next.lastAssistantText || '' },
           });
         }
+        // The daemon emits busy_changed(false) followed by done. Consume the
+        // marker here so the trailing done frame cannot emit a duplicate toast.
+        if (wasBusy) {
+          next.turnHadAssistantText = false;
+          next.lastAssistantText = '';
+        }
       }
       break;
     }
     case 'done': {
+      const wasBusy = !!state?.busy;
+      const outcome = typeof p.outcome === 'string' ? p.outcome : '';
+      const completedOutcome = !outcome || outcome === 'completed';
       next.busy = false;
       next.status = 'idle';
       next.activity = null;
       finalizeStreaming(next);
-      if (next.turnHadAssistantText) {
+      if (wasBusy && completedOutcome && next.turnHadAssistantText) {
         effects.push({
           type: 'turn_completed',
           payload: { final_assistant_text: next.lastAssistantText || '' },
         });
       }
+      next.turnHadAssistantText = false;
+      next.lastAssistantText = '';
       break;
     }
     case 'error':
@@ -1125,6 +1146,8 @@ export function reduceTranscriptEvent(state, msg) {
       next.error = p.reason || '';
       next.activity = null;
       finalizeStreaming(next);
+      next.turnHadAssistantText = false;
+      next.lastAssistantText = '';
       appendTerminationNotice(next, msg, { ...p, source: p.source || 'server' });
       effects.push({ type: 'error', payload: p });
       break;
@@ -1133,6 +1156,8 @@ export function reduceTranscriptEvent(state, msg) {
       next.status = 'idle';
       next.activity = null;
       finalizeStreaming(next);
+      next.turnHadAssistantText = false;
+      next.lastAssistantText = '';
       appendTerminationNotice(next, msg, { ...p, source: 'user' });
       break;
     case 'permission_request':

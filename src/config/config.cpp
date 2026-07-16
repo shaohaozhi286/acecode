@@ -1323,7 +1323,7 @@ AppConfig load_config() {
                 }
             }
 
-            // Desktop shell 配置 — 目前只挂 notifications。
+            // Desktop/native shell 配置。notifications 同时供 Windows TUI 使用。
             // 字段缺失 / 类型错都走默认值(全 true),启动不阻断。
             if (j.contains("desktop")) {
                 if (!j["desktop"].is_object()) {

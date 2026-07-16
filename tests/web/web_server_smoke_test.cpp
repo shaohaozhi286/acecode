@@ -496,7 +496,7 @@ TEST(WebServerHttp, HealthEndpointReturnsBasicMetadata) {
     EXPECT_EQ(j["port"], fx.port);
 
     // desktop.notifications 默认四个 bool 全 true,health 透传给前端做抑制规则判定。
-    // 见 openspec/changes/add-desktop-attention-notifications/specs/desktop-attention-notifications/spec.md
+    // 见 openspec/changes/add-windows-wintoast-completion-notifications。
     ASSERT_TRUE(j.contains("notifications"));
     ASSERT_TRUE(j["notifications"].is_object());
     EXPECT_EQ(j["notifications"]["enabled"], true);

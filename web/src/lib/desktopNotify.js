@@ -1,6 +1,6 @@
 // 桌面端系统通知封装。
 //
-// 设计参见 openspec/changes/add-desktop-attention-notifications/design.md。
+// 设计参见 openspec/changes/add-windows-wintoast-completion-notifications/design.md。
 // 浏览器直连 daemon(无 acecode-desktop 桌面壳)模式下,window.aceDesktop_notify
 // 不存在 → 所有 notify 调用 no-op,这与 search palette 跨 workspace bridge 的
 // 降级模式一致。

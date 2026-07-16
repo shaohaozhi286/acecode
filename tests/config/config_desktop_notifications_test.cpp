@@ -1,5 +1,5 @@
 // 覆盖 src/config/config.{hpp,cpp} 中 desktop.notifications 段的解析与默认值。
-// 设计参见 openspec/changes/add-desktop-attention-notifications。
+// 设计参见 openspec/changes/add-windows-wintoast-completion-notifications。
 //
 // 验收点:
 //   - DesktopNotificationsConfig 四个字段默认全 true

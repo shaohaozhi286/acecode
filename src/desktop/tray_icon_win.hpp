@@ -2,13 +2,12 @@
 
 // 桌面壳的系统托盘图标。
 //
-// 见 openspec/changes/add-desktop-attention-notifications/。
+// 会话通知见 openspec/changes/add-windows-wintoast-completion-notifications/。
 // 扩展 Codex 风格菜单 + close-to-tray:openspec/changes/enhance-desktop-tray-menu/。
 //
 // Windows 注册:
 //   1. 创建一个 hidden message-only 窗口(HWND_MESSAGE),WndProc 接 tray 事件
 //   2. Shell_NotifyIconW(NIM_ADD, ...) 把图标加进通知区
-//   3. 暴露 message-only HWND 给 notifications_win,让气泡通知 piggyback 上去。
 //
 // Linux 注册:
 //   - 复用 WebKitGTK/GTK3 runtime,通过 GtkStatusIcon 安装图标和菜单。
@@ -17,7 +16,6 @@
 // 行为:
 //   - 左键单击 / 双击 → on_show()(把主窗口拉前)
 //   - 右键 → Codex 风格上下文菜单(Pinned / Recent / 新建会话 / 打开 / 退出)
-//   - 气泡点击 → 转发到 notifications_win::on_balloon_clicked()
 
 #include <functional>
 #include <string>
@@ -49,7 +47,7 @@ using TraySessionClickHandler =
 
 // init 必须在主线程上调,在 WebHost::run() 之前。
 //
-// out_message_hwnd 必填。Windows init 成功后写入 tray 的 message-only HWND
+// out_message_hwnd 可空。非空时,Windows init 成功后写入 tray 的 message-only HWND
 // (typed `void*` 让该 header 不必 include <windows.h>);Linux 写 nullptr。
 // 失败时写 nullptr 并返回 false。
 //

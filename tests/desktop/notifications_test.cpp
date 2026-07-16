@@ -1,14 +1,8 @@
-// notifications_win.{hpp,cpp} 公共契约的纯逻辑测试。
+// notifications_win.{hpp,cpp} 公共生命周期契约的可移植测试。
 //
-// 该模块大部分 API 只在 Windows 上有实质行为(Shell_NotifyIcon 调用),非 Windows
-// 平台是 no-op 桩(见 openspec/changes/add-desktop-attention-notifications)。
-// 这里只测可移植契约:
-//   - NotifyPayload 默认 ctor 字段为空字符串
-//   - init_notifications(nullptr) 返回 false 不崩
-//   - 未 init 时 show_notification / on_balloon_clicked / shutdown 都 no-op 不崩
-//   - set_click_handler 接受 nullptr handler 不崩
-//
-// 真正的端到端 toast 交互需要真机 + 用户确认,放到 tasks.md 的手测清单里。
+// Windows 实现使用 WinToast；其他平台保留 no-op 桩。这里覆盖不依赖真实
+// Windows 通知中心的默认值、失败降级与重复清理行为。Payload 解析、Unicode
+// 截断和独立 activation 路由见 notifications_win_test.cpp。
 
 #include <gtest/gtest.h>
 
@@ -40,14 +34,14 @@ TEST(DesktopNotificationsPayload, AssignAllFieldsCopiesCleanly) {
     EXPECT_EQ(copy.body, "请确认是否继续");
 }
 
-TEST(DesktopNotificationsLifecycle, InitWithNullHwndReturnsFalseAndIsSafe) {
-    // 不传 tray HWND → 视为 init 失败,后续 show_notification 应 no-op。
-    EXPECT_FALSE(init_notifications(nullptr));
+TEST(DesktopNotificationsLifecycle, InitWithMissingAumiReturnsFalseAndIsSafe) {
+    shutdown_notifications();
+    NotificationInitOptions options;
+    EXPECT_FALSE(init_notifications(options));
     NotifyPayload p;
     p.title = "x";
     p.body = "y";
-    EXPECT_NO_THROW(show_notification(p));
-    EXPECT_NO_THROW(on_balloon_clicked());
+    EXPECT_FALSE(show_notification(p));
     EXPECT_NO_THROW(shutdown_notifications());
 }
 
@@ -59,17 +53,16 @@ TEST(DesktopNotificationsLifecycle, RepeatedShutdownIsSafe) {
 
 TEST(DesktopNotificationsLifecycle, SetClickHandlerNullptrIsSafe) {
     EXPECT_NO_THROW(set_click_handler(nullptr));
-    EXPECT_NO_THROW(on_balloon_clicked());
+    EXPECT_NO_THROW(dispatch_notification_activation(NotifyPayload{}));
 }
 
 TEST(DesktopNotificationsLifecycle, SetClickHandlerAcceptsLambda) {
     int seen = 0;
-    set_click_handler([&seen](const std::string&, const std::string&, const std::string&) {
+    set_click_handler([&seen](const NotifyPayload&) {
         ++seen;
     });
-    // 未 init 状态 → 不应触发 handler
-    on_balloon_clicked();
-    EXPECT_EQ(seen, 0);
+    dispatch_notification_activation(NotifyPayload{});
+    EXPECT_EQ(seen, 1);
     // 清理避免后续测试残留
-    set_click_handler(nullptr);
+    shutdown_notifications();
 }

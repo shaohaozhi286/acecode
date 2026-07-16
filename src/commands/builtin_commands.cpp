@@ -1268,6 +1268,28 @@ static void do_resume_session(CommandContext& ctx, const std::string& session_id
     }
 }
 
+bool resume_session_by_id(CommandContext& ctx, const std::string& session_id) {
+    if (session_id.empty()) return false;
+    std::lock_guard<std::mutex> lk(ctx.state.mu);
+    if (!ctx.session_manager) {
+        ctx.state.conversation.push_back(
+            {"system", "Session persistence is not available.", false});
+        ctx.state.chat_follow_tail = true;
+        return false;
+    }
+
+    const bool canonical_exists =
+        ctx.session_manager->has_session_file(session_id);
+    std::vector<SessionMeta> target_meta;
+    if (canonical_exists) {
+        auto meta = ctx.session_manager->load_session_meta(session_id);
+        if (!meta.id.empty()) target_meta.push_back(std::move(meta));
+    }
+    do_resume_session(ctx, session_id, target_meta);
+    return canonical_exists && ctx.session_manager->last_error().empty() &&
+           ctx.session_manager->current_session_id() == session_id;
+}
+
 static void cmd_resume(CommandContext& ctx, const std::string& args) {
     std::lock_guard<std::mutex> lk(ctx.state.mu);
     if (!ctx.session_manager) {

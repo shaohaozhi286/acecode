@@ -8,6 +8,10 @@
     "gtest",
     "libzip",
     "nlohmann-json",
-    "sqlite3"
+    "sqlite3",
+    {
+      "name": "wintoast",
+      "platform": "windows"
+    }
   ]
 }

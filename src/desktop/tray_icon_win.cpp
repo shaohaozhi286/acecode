@@ -1,13 +1,10 @@
 // Windows 系统托盘图标实现。
 //
 // 设计 / 决策见:
-//   - openspec/changes/add-desktop-attention-notifications/design.md 决策 2
-//     (隐藏 message-only window 接 WM_USER 系列消息)
 //   - openspec/changes/enhance-desktop-tray-menu/design.md(小图标 / 双击 / Codex 菜单)
 
 #include "tray_icon_win.hpp"
 
-#include "notifications_win.hpp"
 #include "tray_menu_layout.hpp"
 #include "../utils/encoding.hpp"
 #include "../utils/logger.hpp"
@@ -452,8 +449,8 @@ LRESULT CALLBACK tray_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam
         return TRUE;
     }
     if (msg == g_tray_callback_msg && g_tray_callback_msg != 0) {
-        // tray icon 事件。lparam 低 WORD 是事件类型 (WM_LBUTTONUP / WM_RBUTTONUP /
-        // NIN_BALLOONUSERCLICK 等)。具体见 Shell_NotifyIcon 文档。
+        // tray icon 事件。lparam 低 WORD 是事件类型
+        // (WM_LBUTTONUP / WM_RBUTTONUP 等)。具体见 Shell_NotifyIcon 文档。
         UINT event = LOWORD(lparam);
         switch (event) {
             case WM_LBUTTONUP:
@@ -465,11 +462,6 @@ LRESULT CALLBACK tray_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam
             case WM_CONTEXTMENU:
             case WM_RBUTTONUP:
                 show_context_menu(hwnd);
-                return 0;
-            case NIN_BALLOONUSERCLICK:
-                // 用户点了气泡(非图标本身)→ 路由到 notifications_win 派发 click_handler
-                on_balloon_clicked();
-                if (g_on_show) g_on_show();
                 return 0;
             default:
                 break;
@@ -494,10 +486,6 @@ bool register_tray_class(HINSTANCE hinst) {
 }
 
 } // namespace
-
-// 让 notifications_win.cpp 拿到 tray icon 的 UID,piggyback 气泡时用同一 UID。
-// 通过 extern 声明而非头文件公开,避免外部代码误用这个常量。
-UINT tray_icon_uid_value() { return kTrayIconUid; }
 
 bool init_tray_icon(TrayClickHandler on_show,
                     TrayClickHandler on_quit,

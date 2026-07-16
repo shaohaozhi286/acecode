@@ -353,9 +353,10 @@ struct UpgradeConfig {
     int timeout_ms = 30000;
 };
 
-// Desktop shell (acecode-desktop.exe) — OS notification settings.
-// 见 openspec/changes/add-desktop-attention-notifications。
-// 目前只在 Windows 桌面壳读取;非 Windows 平台字段不参与运行,但保留解析。
+// Windows session notification settings shared by acecode.exe (TUI) and
+// acecode-desktop.exe.
+// 见 openspec/changes/add-windows-wintoast-completion-notifications。
+// 非 Windows 平台保留解析,运行时由通知后端安全降级为 no-op。
 struct DesktopNotificationsConfig {
     bool enabled = true;                 // 总开关
     bool on_question = true;             // AskUserQuestion 触发通知

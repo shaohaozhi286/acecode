@@ -484,7 +484,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
     const id = window.setInterval(fetchPool, 30000);
     return () => { alive = false; window.clearInterval(id); };
   }, [api]);
-  // 桌面通知 — 见 openspec/changes/add-desktop-attention-notifications。
+  // 桌面通知 — 见 openspec/changes/add-windows-wintoast-completion-notifications。
   // transcriptTitleRef 由后面的 effect 与 transcript.title 同步;在 callback 里
   // 通过 ref.current 读最新 title,避免 fireDesktopNotification 进 useCallback deps。
   const transcriptTitleRef = useRef('');

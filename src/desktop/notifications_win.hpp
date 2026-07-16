@@ -1,54 +1,75 @@
 #pragma once
 
-// Windows 桌面壳的"系统通知"封装。
-//
-// 见 openspec/changes/add-desktop-attention-notifications/。
-//
-// V1 实现:Shell_NotifyIcon + NIIF_INFO 气泡(Win10/11 上系统会渲染成 toast-like
-// 样式,Win 早期版本是经典气泡)。V2 计划接 WinRT ToastNotificationManager(需要
-// AUMID + 开始菜单 .lnk 注册 + cppwinrt 集成),界面更现代,推到后续 PR。
-//
-// 与 tray_icon_win 的关系:气泡通知 piggyback 在 tray icon 的 NOTIFYICONDATA 上
-// (`Shell_NotifyIconW(NIM_MODIFY, ... NIF_INFO)`),所以 init_notifications 必须
-// 在 init_tray_icon 之后调,并把 tray 的 message-only HWND 传过来。
+// Shared Windows notification boundary for acecode.exe (TUI) and
+// acecode-desktop.exe. The Windows implementation uses WinToast; other
+// platforms keep the same API as a no-op so callers do not need platform
+// conditionals around notification lifecycle calls.
 
+#include <cstddef>
 #include <functional>
+#include <optional>
 #include <string>
 
 namespace acecode::desktop {
 
-// 通知 payload。`id` 用于在 Shell_NotifyIcon 模式下,通过 pending 表反查 click
-// 时该弹谁的 (workspace, session) — 因为气泡只能挂当前一条,点击事件不带 payload。
-// 调用方负责保证 id 唯一(可用 `notify-<seq>`)。
 struct NotifyPayload {
-    std::string id;              // 任意稳定字符串,前端透传
-    std::string workspace_hash;  // 跳转用
-    std::string session_id;      // 跳转用
-    std::string title;           // 通知标题(气泡 NIIF szInfoTitle 上限 64,UTF-8 codepoint 计数)
-    std::string body;            // 通知正文(气泡 szInfo 上限 256)
+    std::string id;
+    std::string workspace_hash;
+    std::string session_id;
+    std::string title;
+    std::string body;
 };
 
-using ClickHandler = std::function<void(const std::string& id,
-                                        const std::string& workspace_hash,
-                                        const std::string& session_id)>;
+struct NotificationInitOptions {
+    std::wstring app_name = L"ACECode";
+    std::wstring app_user_model_id;
+    void* activation_window = nullptr; // Windows: HWND
+};
 
-// init 必须在 init_tray_icon 之后调。tray_message_hwnd 是 tray 的 message-only
-// HWND,气泡复用它做 NOTIFYICONDATA::hWnd。失败 → 返回 false,后续 show_notification
-// 静默 no-op。
-bool init_notifications(void* tray_message_hwnd);
+using ClickHandler = std::function<void(const NotifyPayload& payload)>;
 
-// 注册点击回调。允许 nullptr(等于关闭点击响应);多次调用以最后一次为准。
+// Initializes WinToast for the current process. Failure is non-fatal and is
+// reported as false; show_notification then remains a safe no-op.
+bool init_notifications(const NotificationInitOptions& options);
+
+// The handler is invoked after the native window has been restored and
+// foregrounded. Passing nullptr disables activation routing.
 void set_click_handler(ClickHandler handler);
 
-// 投递气泡通知。若 init 未成功或 payload 无效则 no-op。同一时间只能挂一条气泡,
-// 调多次会被新的覆盖(Shell_NotifyIcon 行为)。
-void show_notification(const NotifyPayload& payload);
+// Shows one notification. Every toast owns an independent payload handler, so
+// activation of an older toast cannot be redirected to the newest session.
+bool show_notification(const NotifyPayload& payload);
 
-// tray window 的 WndProc 收到 NIN_BALLOONUSERCLICK 时调这里,会反查 payload 并
-// 调注册的 click_handler。无 pending payload 则静默忽略。
-void on_balloon_clicked();
-
-// 撤销注册 + 清 pending。进程退出前调。
+// Clears outstanding toasts and activation callbacks. Call before destroying
+// any state captured by the click handler.
 void shutdown_notifications();
+
+// Decode WebView bind arguments. Supports a direct object and the legacy
+// JSON-string argument currently sent by desktopNotify.js.
+std::optional<NotifyPayload> parse_notification_bridge_args(
+    const std::string& args_json,
+    std::string* error = nullptr);
+
+// Unicode-codepoint-aware truncation used by native TUI notifications.
+std::string truncate_notification_text(
+    const std::string& text,
+    std::size_t max_codepoints = 80);
+
+NotifyPayload build_completion_notification(
+    const std::string& session_id,
+    const std::string& workspace_hash,
+    const std::string& session_title,
+    const std::string& final_assistant_text);
+
+// Called by each WinToast event handler. Public to make payload fidelity and
+// lifecycle behavior directly testable without displaying an OS toast.
+void dispatch_notification_activation(const NotifyPayload& payload);
+
+// Windows Terminal can expose an invisible pseudo console HWND. Prefer the
+// visible console window, then fall back to the foreground terminal captured
+// during TUI startup.
+void* capture_tui_notification_window();
+bool notification_window_is_foreground(void* native_window);
+bool activate_notification_window(void* native_window);
 
 } // namespace acecode::desktop
