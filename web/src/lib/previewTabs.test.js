@@ -9,6 +9,7 @@ import {
   openGitChangesTab,
   openSessionChangesTab,
   previewFileLocation,
+  refreshPreviewTab,
   reorderPreviewTab,
   updateGitChangesTab,
   updateSessionChangesTab,
@@ -34,6 +35,39 @@ run('openFileTab scopes files by workspace and reuses duplicate paths', () => {
   assert.equal(visiblePreviewTabs(state, { scopeKey: 'workspace-a', sessionId: 's1' }).length, 1);
   assert.equal(visiblePreviewTabs(state, { scopeKey: 'workspace-b', sessionId: 's2' }).length, 1);
   assert.equal(activePreviewTab(state, { scopeKey: 'workspace-a', sessionId: 's1' }).path, 'src/main.cpp');
+});
+
+run('refreshPreviewTab increments only the requested file tab reload revision', () => {
+  let state = {};
+  state = openFileTab(state, { scopeKey: 'w', sessionId: 's1', cwd: 'C:/repo', path: 'a.js' });
+  state = openFileTab(state, { scopeKey: 'w', sessionId: 's1', cwd: 'C:/repo', path: 'b.js' });
+  const before = visiblePreviewTabs(state, { scopeKey: 'w', sessionId: 's1' });
+  const aKey = before.find((tab) => tab.path === 'a.js').key;
+
+  state = refreshPreviewTab(state, { scopeKey: 'w', sessionId: 's1', tabKey: aKey });
+  const after = visiblePreviewTabs(state, { scopeKey: 'w', sessionId: 's1' });
+  assert.equal(after.find((tab) => tab.path === 'a.js').reloadRevision, 1);
+  assert.equal(after.find((tab) => tab.path === 'b.js').reloadRevision, undefined);
+});
+
+run('refreshPreviewTab increments change-tab revision and preserves it when selecting a file', () => {
+  let state = openSessionChangesTab({}, {
+    scopeKey: 'w', sessionId: 's1', expandedFile: 'a.js', fileCount: 1,
+  });
+  let tab = activePreviewTab(state, { scopeKey: 'w', sessionId: 's1' });
+  state = refreshPreviewTab(state, { scopeKey: 'w', sessionId: 's1', tabKey: tab.key });
+  state = openSessionChangesTab(state, {
+    scopeKey: 'w', sessionId: 's1', expandedFile: 'b.js', fileCount: 2,
+  });
+  tab = activePreviewTab(state, { scopeKey: 'w', sessionId: 's1' });
+  assert.equal(tab.reloadRevision, 1);
+  assert.equal(tab.expandedFile, 'b.js');
+});
+
+run('refreshPreviewTab leaves state identity unchanged for unknown tabs', () => {
+  const state = { fileTabsByScope: {} };
+  assert.equal(refreshPreviewTab(state, { scopeKey: 'w', sessionId: 's1', tabKey: 'file:w:missing' }), state);
+  assert.equal(refreshPreviewTab(state, { scopeKey: 'w', sessionId: 's1', tabKey: 'unknown' }), state);
 });
 
 // 场景:聊天正文 foo.cpp:42 链接带行号打开文件预览。

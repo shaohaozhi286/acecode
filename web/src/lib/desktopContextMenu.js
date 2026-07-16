@@ -20,6 +20,7 @@ export const DESKTOP_CONTEXT_ACTIONS = Object.freeze({
   COPY_WORKSPACE_PATH: 'copy_workspace_path',
   REMOVE_WORKSPACE: 'remove_workspace',
   PREVIEW_FILE: 'preview_file',
+  REFRESH_DETAILS: 'refresh_details',
   CLOSE_PREVIEW_TAB: 'close_preview_tab',
   CLOSE_OTHER_PREVIEW_TABS: 'close_other_preview_tabs',
   CLOSE_PREVIEW_TABS_TO_RIGHT: 'close_preview_tabs_to_right',
@@ -237,6 +238,9 @@ export function buildDesktopContextMenuItems({
     }
 
     if (previewTarget) {
+      addAction(items, DESKTOP_CONTEXT_ACTIONS.REFRESH_DETAILS, previewTarget, {
+        group: GROUPS.CONTENT,
+      });
       if (previewTarget.kind === 'image' && previewTarget.copyImageUrl) {
         addAction(items, DESKTOP_CONTEXT_ACTIONS.COPY_PREVIEW_IMAGE, previewTarget, {
           group: GROUPS.CONTENT,
@@ -250,6 +254,9 @@ export function buildDesktopContextMenuItems({
     }
 
     if (reviewTarget) {
+      if (reviewTarget.canRefresh) {
+        addAction(items, DESKTOP_CONTEXT_ACTIONS.REFRESH_DETAILS, reviewTarget, { group: GROUPS.REVIEW });
+      }
       if (reviewTarget.kind === 'summary') {
         addAction(items, DESKTOP_CONTEXT_ACTIONS.COPY_ALL_DIFFS, reviewTarget, { group: GROUPS.REVIEW });
         addAction(items, DESKTOP_CONTEXT_ACTIONS.EXPAND_ALL_DIFFS, reviewTarget, { group: GROUPS.REVIEW });
@@ -424,6 +431,7 @@ export function reviewTargetFromElement(target) {
     type: 'review',
     kind,
     file: getAttr(el, 'data-desktop-review-file', 'desktopReviewFile'),
+    canRefresh: !!closest(target, '[data-desktop-review-refresh="true"]'),
   };
 }
 

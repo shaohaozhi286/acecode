@@ -5,6 +5,7 @@ import {
   changeSetSignature,
   collectHunkMessagesFromItems,
   collectTurnChangeSetsFromItems,
+  latestTurnSuccessfulChangedFiles,
   summarizeChangeGroups,
 } from './sessionChanges.js';
 
@@ -37,6 +38,34 @@ run('collectHunkMessagesFromItems 只抽取带 hunks 的 tool item', () => {
     deletions: 0,
     hunks: [{ ...hunk, file: 'a.js' }],
   }]);
+});
+
+run('latestTurnSuccessfulChangedFiles 只提取最后一轮成功工具并去重', () => {
+  const items = [
+    { kind: 'msg', role: 'user', id: 1, content: 'old' },
+    { kind: 'tool', tool: { isDone: true, success: true, tool: 'file_edit', hunks: [{ file: 'old.js' }] } },
+    { kind: 'msg', role: 'user', id: 3, content: 'current' },
+    { kind: 'tool', tool: { isDone: true, success: true, tool: 'file_edit', hunks: [{ file: 'src\\a.js' }] } },
+    { kind: 'tool', tool: { isDone: true, success: false, tool: 'file_write', hunks: [{ file: 'failed.js' }] } },
+    { kind: 'tool', tool: { isDone: false, success: null, tool: 'file_write', args: { path: 'pending.js' }, hunks: [] } },
+    { kind: 'tool', tool: { isDone: true, success: true, tool: 'file_write', hunks: [{ file: 'src/a.js' }] } },
+  ];
+  assert.deepEqual(latestTurnSuccessfulChangedFiles(items), ['src/a.js']);
+});
+
+run('latestTurnSuccessfulChangedFiles falls back to file tool arguments without hunks', () => {
+  assert.deepEqual(latestTurnSuccessfulChangedFiles([
+    { kind: 'msg', role: 'user', id: 1 },
+    { kind: 'tool', tool: { isDone: true, success: true, tool: 'file_write', args: { path: 'empty.txt' }, hunks: [] } },
+    { kind: 'tool', tool: { isDone: true, success: true, tool: 'file_edit', summary: { object: 'src/a.js' }, hunks: [] } },
+    { kind: 'tool', tool: { isDone: true, success: true, tool: 'bash', summary: { object: 'not-a-safe-path' }, hunks: [] } },
+  ]), ['empty.txt', 'src/a.js']);
+});
+
+run('latestTurnSuccessfulChangedFiles requires a user-turn boundary', () => {
+  assert.deepEqual(latestTurnSuccessfulChangedFiles([
+    { kind: 'tool', tool: { isDone: true, success: true, tool: 'file_write', args: { path: 'a.js' }, hunks: [] } },
+  ]), []);
 });
 
 run('历史 tool item 中的 file_write / file_edit hunks 会进入聚合，file_read 被忽略', () => {

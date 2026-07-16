@@ -502,8 +502,10 @@ export function ChangeReviewPanel({
   initialExpandedFile = '',
   dataRegion = 'side-panel',
   initialExpandedFileRevision = 0,
+  reloadRevision = 0,
   onSelectFile,
   onOpenFile,
+  onRefresh,
 }) {
   const list = safeGroups(groups);
   const changeSummary = normalizedSummary(list, summary);
@@ -534,6 +536,10 @@ export function ChangeReviewPanel({
     () => rows.map((row) => row.diff.text).filter(Boolean).join('\n\n'),
     [rows],
   );
+  const contentRevision = useMemo(
+    () => ({ list, reloadRevision }),
+    [list, reloadRevision],
+  );
 
   return (
     <ChangeReviewDetails
@@ -555,7 +561,8 @@ export function ChangeReviewPanel({
       onOpenFile={onOpenFile}
       getFileDiffText={getFileDiffText}
       getAllDiffText={getAllDiffText}
-      contentRevision={list}
+      onRefresh={onRefresh}
+      contentRevision={contentRevision}
     />
   );
 }
@@ -566,8 +573,10 @@ export function SessionChangeDetails({
   cwd = '',
   expandedFile = '',
   expandedFileRevision = 0,
+  reloadRevision = 0,
   onSelectFile,
   onOpenFilePreview,
+  onRefresh,
 }) {
   return (
     <ChangeReviewPanel
@@ -576,8 +585,10 @@ export function SessionChangeDetails({
       cwd={cwd}
       initialExpandedFile={expandedFile}
       initialExpandedFileRevision={expandedFileRevision}
+      reloadRevision={reloadRevision}
       onSelectFile={onSelectFile}
       onOpenFile={onOpenFilePreview}
+      onRefresh={onRefresh}
       dataRegion="preview-panel"
     />
   );

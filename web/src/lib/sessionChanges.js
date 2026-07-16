@@ -131,6 +131,61 @@ export function collectHunkMessagesFromItems(items) {
     .filter(Boolean);
 }
 
+function normalizedChangedPath(value) {
+  return typeof value === 'string'
+    ? value.trim().replace(/\\/g, '/').replace(/^\/\/\?\//, '')
+    : '';
+}
+
+function successfulToolChangedPaths(item) {
+  const tool = item?.kind === 'tool' ? item.tool : null;
+  if (!tool?.isDone || tool.success !== true) return [];
+
+  const paths = [];
+  const add = (value) => {
+    const path = normalizedChangedPath(value);
+    if (path) paths.push(path);
+  };
+  for (const hunk of Array.isArray(tool.hunks) ? tool.hunks : []) add(hunk?.file);
+
+  // file_write/edit 的空文件写入等场景可能没有 hunk，回退到调用参数或摘要。
+  if (paths.length === 0 && (tool.tool === 'file_write' || tool.tool === 'file_edit')) {
+    add(tool.summary?.object);
+    add(tool.args?.path);
+    add(tool.args?.file_path);
+    add(tool.args?.file);
+  }
+  return paths;
+}
+
+/**
+ * 提取最后一个用户回合之后成功修改过的文件。只用于 busy true -> false 的
+ * 一次性自动刷新，失败工具与历史回合不得触发当前详情重载。
+ */
+export function latestTurnSuccessfulChangedFiles(items) {
+  if (!Array.isArray(items)) return [];
+  let start = -1;
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (item?.kind === 'msg' && item.role === 'user') {
+      start = index;
+      break;
+    }
+  }
+  if (start < 0) return [];
+
+  const result = [];
+  const seen = new Set();
+  for (let index = start + 1; index < items.length; index += 1) {
+    for (const path of successfulToolChangedPaths(items[index])) {
+      if (seen.has(path)) continue;
+      seen.add(path);
+      result.push(path);
+    }
+  }
+  return result;
+}
+
 /**
  * @param {Array<{file:string,totalAdditions?:number,totalDeletions?:number}>} groups
  * @returns {{fileCount:number,totalAdditions:number,totalDeletions:number,hasChanges:boolean}}

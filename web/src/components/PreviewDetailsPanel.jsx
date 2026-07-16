@@ -182,6 +182,7 @@ export function PreviewDetailsPanel({
   onCloseOthers,
   onCloseToRight,
   onCloseAll,
+  onRefreshTab,
   onReorderTab,
   onToggleMaximize,
   onToggleSidePanelList,
@@ -239,8 +240,10 @@ export function PreviewDetailsPanel({
           cwd={cwd}
           expandedFile={active.expandedFile || ''}
           expandedFileRevision={active.expandedFileRevision || 0}
+          reloadRevision={active.reloadRevision || 0}
           onSelectFile={onSelectChangeFile}
           onOpenFilePreview={onOpenFilePreview}
+          onRefresh={() => onRefreshTab?.(active.key)}
         />
       );
     }
@@ -252,9 +255,11 @@ export function PreviewDetailsPanel({
           base={active.base || ''}
           expandedFile={active.expandedFile || ''}
           expandedFileRevision={active.expandedFileRevision || 0}
+          reloadRevision={active.reloadRevision || 0}
           busy={busy}
           onSelectFile={onSelectGitChangeFile}
           onOpenFilePreview={onOpenFilePreview}
+          onRefresh={() => onRefreshTab?.(active.key)}
         />
       );
     }
@@ -266,11 +271,13 @@ export function PreviewDetailsPanel({
         path={active.path}
         focusLine={active.line || null}
         focusLineRevision={active.lineRevision || 0}
+        reloadRevision={active.reloadRevision || 0}
         wrapPreview={wrapPreview}
         onToggleWrapPreview={() => setWrapPreview((prev) => !prev)}
+        onRefresh={() => onRefreshTab?.(active.key)}
       />
     );
-  }, [active, api, busy, changeGroups, changeSummary, cwd, onOpenFilePreview, onSelectChangeFile, onSelectGitChangeFile, setWrapPreview, wrapPreview]);
+  }, [active, api, busy, changeGroups, changeSummary, cwd, onOpenFilePreview, onRefreshTab, onSelectChangeFile, onSelectGitChangeFile, setWrapPreview, wrapPreview]);
 
   const handleTabWheel = useCallback((event) => {
     const el = tabListRef.current;

@@ -179,6 +179,7 @@ export function openSessionChangesTab(state, {
     sessionId,
     expandedFile: normalizeTreePath(expandedFile),
     expandedFileRevision: (Number(previousTab?.expandedFileRevision) || 0) + 1,
+    reloadRevision: Number(previousTab?.reloadRevision) || 0,
     fileCount: Number.isFinite(Number(fileCount)) ? Number(fileCount) : 0,
   };
   return {
@@ -227,6 +228,7 @@ export function openGitChangesTab(state, {
     base: nextBase,
     expandedFile: normalizeTreePath(expandedFile),
     expandedFileRevision: (Number(previousIsGit ? previousTab?.expandedFileRevision : 0) || 0) + 1,
+    reloadRevision: Number(previousIsGit ? previousTab?.reloadRevision : 0) || 0,
     fileCount: nextFileCount,
   };
   return {
@@ -244,6 +246,48 @@ export function openGitChangesTab(state, {
       [viewKey(scopeKey, sessionId)]: key,
     },
   };
+}
+
+// 详情刷新与文件树刷新是两套独立生命周期。同一路径/同一变更页签需要在不
+// 关闭 tab 的前提下重新读取，因此只递增目标 tab 自己的 reloadRevision。
+export function refreshPreviewTab(state, {
+  scopeKey = '',
+  sessionId = '',
+  tabKey = '',
+} = {}) {
+  if (!tabKey) return state || {};
+  const source = state && typeof state === 'object' ? state : {};
+
+  if (tabKey.startsWith('file:')) {
+    const tabs = source.fileTabsByScope?.[scopeKey] || [];
+    if (!tabs.some((tab) => tab.key === tabKey)) return source;
+    return {
+      ...source,
+      fileTabsByScope: {
+        ...(source.fileTabsByScope || {}),
+        [scopeKey]: tabs.map((tab) => (tab.key === tabKey
+          ? { ...tab, reloadRevision: (Number(tab.reloadRevision) || 0) + 1 }
+          : tab)),
+      },
+    };
+  }
+
+  if (isChangeTabKey(tabKey) && sessionId) {
+    const tab = source.changeTabsBySession?.[sessionId];
+    if (!tab || tab.key !== tabKey) return source;
+    return {
+      ...source,
+      changeTabsBySession: {
+        ...(source.changeTabsBySession || {}),
+        [sessionId]: {
+          ...tab,
+          reloadRevision: (Number(tab.reloadRevision) || 0) + 1,
+        },
+      },
+    };
+  }
+
+  return source;
 }
 
 // 更新已打开的 git 变更页签的 base / fileCount,不动 expandedFile / revision

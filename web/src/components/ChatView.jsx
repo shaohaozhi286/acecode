@@ -37,6 +37,7 @@ import {
   changeGroupsSignature,
   collectHunkMessagesFromItems,
   collectTurnChangeSetsFromItems,
+  latestTurnSuccessfulChangedFiles,
   summarizeChangeGroups,
 } from '../lib/sessionChanges.js';
 import { stableBySignature } from '../lib/changeReviewStability.js';
@@ -121,11 +122,13 @@ import {
   openSessionChangesTab,
   previewFileLocation,
   previewScopeKey,
+  refreshPreviewTab,
   reorderPreviewTab,
   updateGitChangesTab,
   updateSessionChangesTab,
   visiblePreviewTabs,
 } from '../lib/previewTabs.js';
+import { nextAutoPreviewRefresh } from '../lib/previewRefresh.js';
 import {
   CHAT_TAIL_FOLLOW_STATE,
   chatScrollMetrics,
@@ -668,6 +671,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
   // scroll 事件的指标 + 指针是否按住(拖动滚动条/拖选期间的滚动算用户意图)。
   const scrollActivityRef = useRef({ prev: null, pointerActive: false });
   const lastUserTurnKeyRef = useRef('');
+  const previewAutoRefreshRef = useRef({ sid: '', busy: false, completedTurnKey: '' });
   const inputRef = useRef(null);
   const layoutRef = useRef(null);
   const [layoutWidth, setLayoutWidth] = useState(0);
@@ -2413,6 +2417,10 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
   // 三处 diff UI 共用同一份数据源:把 items 里 tool 项的 hunks 抽成消息格式。
   // 必须放在 early return 之前,否则空态/有 session 之间 hooks 数量不一致 → React #310。
   const changeMessages = useMemo(() => collectHunkMessagesFromItems(items), [items]);
+  const latestSuccessfulChangedFiles = useMemo(
+    () => latestTurnSuccessfulChangedFiles(items),
+    [items],
+  );
   // 每轮「本轮改动文件」列表:collectTurnChangeSetsFromItems 按 user 消息切
   // 回合聚合变更;列表渲染在回合末尾 = 下一个 user 行之前,最后一轮挂在
   // transcript 末尾(tail)。锚定基于 renderedItems(折叠投影后的视图)里的
@@ -2717,6 +2725,26 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
       tabKey,
     }));
   }, [previewScope, sid]);
+
+  const refreshPreview = useCallback((tabKey) => {
+    setPreviewTabState((prev) => refreshPreviewTab(prev, {
+      scopeKey: previewScope,
+      sessionId: sid,
+      tabKey,
+    }));
+  }, [previewScope, sid]);
+
+  useEffect(() => {
+    const transition = nextAutoPreviewRefresh(previewAutoRefreshRef.current, {
+      sid,
+      busy,
+      turnKey: lastUserTurnKey,
+      activeTab: activePreview,
+      changedPaths: latestSuccessfulChangedFiles,
+    });
+    previewAutoRefreshRef.current = transition.state;
+    if (transition.tabKey) refreshPreview(transition.tabKey);
+  }, [activePreview, busy, lastUserTurnKey, latestSuccessfulChangedFiles, refreshPreview, sid]);
 
   const closePreview = useCallback((tabKey) => {
     const closingLastVisibleTab = previewTabs.length <= 1;
@@ -3459,6 +3487,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
             onCloseOthers={closeOtherPreviews}
             onCloseToRight={closePreviewsToRight}
             onCloseAll={closePreviewPanel}
+            onRefreshTab={refreshPreview}
             onReorderTab={reorderPreview}
             onToggleMaximize={onToggleSidePanelMaximized}
             onToggleSidePanelList={onToggleSidePanelList}

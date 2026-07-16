@@ -65,8 +65,9 @@ test('预览选区把引用到聊天放在第一行', () => {
     hasSelection: true,
     previewTarget: { type: 'preview', path: 'README.md', kind: 'markdown' },
   });
-  assert.deepEqual(ids(items).slice(0, 3), [
+  assert.deepEqual(ids(items).slice(0, 4), [
     DESKTOP_CONTEXT_ACTIONS.ADD_SELECTION_CONTEXT,
+    DESKTOP_CONTEXT_ACTIONS.REFRESH_DETAILS,
     DESKTOP_CONTEXT_ACTIONS.COPY_PREVIEW_TEXT,
     DESKTOP_CONTEXT_ACTIONS.COPY_PREVIEW_METADATA,
   ]);
@@ -84,6 +85,7 @@ test('图片预览显示复制图片动作且非图片预览不显示', () => {
     },
   });
   assert.deepEqual(ids(imageItems), [
+    DESKTOP_CONTEXT_ACTIONS.REFRESH_DETAILS,
     DESKTOP_CONTEXT_ACTIONS.COPY_PREVIEW_IMAGE,
     DESKTOP_CONTEXT_ACTIONS.COPY_PREVIEW_TEXT,
     DESKTOP_CONTEXT_ACTIONS.COPY_PREVIEW_METADATA,
@@ -259,15 +261,19 @@ test('file and directory targets build expected actions', () => {
 
 test('review, message, tool, and attachment targets build object actions first', () => {
   assert.deepEqual(ids(buildDesktopContextMenuItems({
-    reviewTarget: { kind: 'summary' },
+    reviewTarget: { kind: 'summary', canRefresh: true },
     hasSelection: true,
   })), [
+    DESKTOP_CONTEXT_ACTIONS.REFRESH_DETAILS,
     DESKTOP_CONTEXT_ACTIONS.COPY_ALL_DIFFS,
     DESKTOP_CONTEXT_ACTIONS.EXPAND_ALL_DIFFS,
     DESKTOP_CONTEXT_ACTIONS.COLLAPSE_ALL_DIFFS,
     DESKTOP_CONTEXT_ACTIONS.SELECT_ALL,
     DESKTOP_CONTEXT_ACTIONS.COPY,
   ]);
+  assert.equal(ids(buildDesktopContextMenuItems({
+    reviewTarget: { kind: 'summary', canRefresh: false },
+  })).includes(DESKTOP_CONTEXT_ACTIONS.REFRESH_DETAILS), false);
   assert.deepEqual(ids(buildDesktopContextMenuItems({
     messageTarget: { role: 'assistant', messageId: 'm1', text: 'hello', canFork: true },
   })), [
@@ -386,6 +392,17 @@ test('contextTargetsFromElement 提取各类目标', () => {
     'data-desktop-review-file': 'src/a.cpp',
   });
   assert.equal(contextTargetsFromElement(review).reviewTarget.file, 'src/a.cpp');
+  assert.equal(contextTargetsFromElement(review).reviewTarget.canRefresh, false);
+
+  const refreshableReview = elementFor(REVIEW_TARGET_SELECTOR, {
+    'data-desktop-review-kind': 'summary',
+  });
+  refreshableReview.closest = function closestReview(requested) {
+    return requested === REVIEW_TARGET_SELECTOR || requested === '[data-desktop-review-refresh="true"]'
+      ? this
+      : null;
+  };
+  assert.equal(contextTargetsFromElement(refreshableReview).reviewTarget.canRefresh, true);
 
   const message = elementFor(MESSAGE_TARGET_SELECTOR, {
     'data-desktop-message-role': 'assistant',

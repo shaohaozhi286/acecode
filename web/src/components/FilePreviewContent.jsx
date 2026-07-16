@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import hljs from 'highlight.js/lib/core';
 import { renderAsync } from 'docx-preview';
 import 'x-data-spreadsheet/dist/xspreadsheet.css';
@@ -15,6 +15,10 @@ import { resolveSelectionSourcePath } from '../lib/selectionChatContext.js';
 import { copyTextToSystemClipboard } from '../lib/systemClipboard.js';
 import { clsx, formatBytes } from '../lib/format.js';
 import { filePreviewKind, isBlobFilePreview } from '../lib/filePreviewKind.js';
+import {
+  captureFilePreviewScroll,
+  restoredFilePreviewScroll,
+} from '../lib/filePreviewScroll.js';
 import { CopyableCodeFrame } from './CopyableCodeFrame.jsx';
 import { ImageLightbox } from './ImageLightbox.jsx';
 import { VsIcon } from './Icon.jsx';
@@ -39,8 +43,10 @@ export function FilePreviewContent({
   path,
   focusLine = null,
   focusLineRevision = 0,
+  reloadRevision = 0,
   wrapPreview,
   onToggleWrapPreview,
+  onRefresh,
 }) {
   const [state, setState] = useState({
     status: 'idle',
@@ -56,13 +62,19 @@ export function FilePreviewContent({
   const [markdownSource, setMarkdownSource] = useState(false);
   const [imagePreview, setImagePreview] = useState(null);
   const previewScrollRef = useRef(null);
+  const loadedIdentityRef = useRef('');
+  const pendingScrollSnapshotRef = useRef(null);
+  const handledFocusRequestRef = useRef('');
 
   useEffect(() => {
     const handler = (event) => {
       const detail = event.detail || {};
       const { action, target } = detail;
       if (target?.type !== 'preview' || target.path !== path) return;
-      if (action === DESKTOP_CONTEXT_ACTIONS.COPY_PREVIEW_TEXT) {
+      if (action === DESKTOP_CONTEXT_ACTIONS.REFRESH_DETAILS) {
+        detail.handled = true;
+        onRefresh?.();
+      } else if (action === DESKTOP_CONTEXT_ACTIONS.COPY_PREVIEW_TEXT) {
         detail.handled = true;
         if (!state.text) {
           toast({ kind: 'info', text: '没有可复制的预览文本' });
@@ -83,21 +95,33 @@ export function FilePreviewContent({
     };
     window.addEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
     return () => window.removeEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
-  }, [path, state.contentType, state.kind, state.lang, state.size, state.text]);
+  }, [onRefresh, path, state.contentType, state.kind, state.lang, state.size, state.text]);
 
   useEffect(() => {
+    const identity = `${cwd || ''}\u0000${path || ''}`;
     if (!cwd || !path) {
+      loadedIdentityRef.current = identity;
+      pendingScrollSnapshotRef.current = null;
       setState({ status: 'idle', kind: 'text', text: '', error: null, lang: '', size: 0, previewUrl: '', contentType: '', blob: null });
       return undefined;
     }
+    const reloadingSameFile = loadedIdentityRef.current === identity;
+    if (reloadingSameFile) {
+      const currentScroll = previewScrollRef.current;
+      if (currentScroll) pendingScrollSnapshotRef.current = captureFilePreviewScroll(currentScroll);
+    } else {
+      pendingScrollSnapshotRef.current = null;
+    }
+    loadedIdentityRef.current = identity;
     let cancelled = false;
     let objectUrl = '';
     const nextKind = filePreviewKind(path);
-    setMarkdownSource(false);
+    if (!reloadingSameFile) setMarkdownSource(false);
     setImagePreview(null);
     setState({ status: 'loading', kind: nextKind, text: '', error: null, lang: '', size: 0, previewUrl: '', contentType: '', blob: null });
 
     if (nextKind === 'unsupported') {
+      pendingScrollSnapshotRef.current = null;
       setState({
         status: 'error',
         kind: nextKind,
@@ -133,6 +157,7 @@ export function FilePreviewContent({
         });
       }).catch((err) => {
         if (cancelled) return;
+        pendingScrollSnapshotRef.current = null;
         let msg = '读取失败';
         let extraSize = 0;
         if (err instanceof ApiError) {
@@ -171,6 +196,7 @@ export function FilePreviewContent({
       });
     }).catch((err) => {
       if (cancelled) return;
+      pendingScrollSnapshotRef.current = null;
       let msg = '读取失败';
       let extraSize = 0;
       if (err instanceof ApiError) {
@@ -189,7 +215,21 @@ export function FilePreviewContent({
       setState({ status: 'error', kind: nextKind, text: '', error: msg, lang: '', size: extraSize, previewUrl: '', contentType: '', blob: null });
     });
     return () => { cancelled = true; };
-  }, [api, cwd, path]);
+  }, [api, cwd, path, reloadRevision]);
+
+  // 同一文件重新读取时，loading 会临时卸载滚动容器。新 DOM 落地后在布局
+  // 阶段恢复位置，并按新内容高度/宽度钳制，避免空文件或大幅删减后越界。
+  useLayoutEffect(() => {
+    if (state.status !== 'ok') return;
+    const snapshot = pendingScrollSnapshotRef.current;
+    if (!snapshot) return;
+    pendingScrollSnapshotRef.current = null;
+    const host = previewScrollRef.current;
+    if (!host) return;
+    const restored = restoredFilePreviewScroll(snapshot, host);
+    host.scrollTop = restored.top;
+    host.scrollLeft = restored.left;
+  }, [cwd, markdownSource, path, reloadRevision, state.blob, state.kind, state.previewUrl, state.status, state.text]);
 
   // 聊天正文 foo.md:42 链接定位 markdown 文件时切到源码视图 —— 渲染视图没有行的
   // 概念,滚不到指定行。必须声明在上方加载 effect 之后:同一 commit 内 effect 按
@@ -208,27 +248,20 @@ export function FilePreviewContent({
   //   - markdownSource:markdown 文件先切源码视图、行号表挂载后重跑才滚。
   useEffect(() => {
     if (focusLine == null || state.status !== 'ok') return;
+    const requestKey = `${cwd || ''}\u0000${path || ''}\u0000${focusLine}\u0000${focusLineRevision}`;
+    if (handledFocusRequestRef.current === requestKey) return;
     const host = previewScrollRef.current;
     if (!host) return;
     const row = host.querySelector(`.ace-line-table tbody tr:nth-child(${focusLine})`);
-    if (row) row.scrollIntoView({ block: 'center' });
-  }, [focusLine, focusLineRevision, state.status, markdownSource]);
+    if (row) {
+      handledFocusRequestRef.current = requestKey;
+      row.scrollIntoView({ block: 'center' });
+    }
+  }, [cwd, focusLine, focusLineRevision, markdownSource, path, state.status]);
 
   if (!path) {
     return <div className="ace-empty-state">未选中文件,请在「文件」中点击一个文件</div>;
   }
-  if (state.status === 'loading') {
-    return <div className="ace-empty-state">加载中...</div>;
-  }
-  if (state.status === 'error') {
-    return (
-      <div className="ace-empty-state">
-        <div className="text-danger text-[12px] mb-1">{state.error}</div>
-        <div className="text-fg-mute text-[10px] opacity-70 break-all">{path}</div>
-      </div>
-    );
-  }
-  if (state.status !== 'ok') return null;
   const sourcePath = resolveSelectionSourcePath({ cwd, path });
   const previewAttrs = {
     'data-desktop-preview-path': path || undefined,
@@ -239,6 +272,18 @@ export function FilePreviewContent({
     'data-desktop-preview-content-type': state.contentType || undefined,
     'data-desktop-preview-copy-image-url': state.kind === 'image' ? state.previewUrl || undefined : undefined,
   };
+  if (state.status === 'loading') {
+    return <div className="ace-empty-state" {...previewAttrs}>加载中...</div>;
+  }
+  if (state.status === 'error') {
+    return (
+      <div className="ace-empty-state" {...previewAttrs}>
+        <div className="text-danger text-[12px] mb-1">{state.error}</div>
+        <div className="text-fg-mute text-[10px] opacity-70 break-all">{path}</div>
+      </div>
+    );
+  }
+  if (state.status !== 'ok') return null;
   if (state.kind === 'image') {
     return (
       <div className="flex-1 flex flex-col overflow-hidden" {...previewAttrs}>
@@ -350,6 +395,7 @@ export function FilePreviewContent({
       >
         {showMarkdownRendered ? (
           <div
+            ref={previewScrollRef}
             className="h-full overflow-auto ace-md ace-side-markdown-preview"
             dangerouslySetInnerHTML={{ __html: renderMarkdown(state.text) }}
           />

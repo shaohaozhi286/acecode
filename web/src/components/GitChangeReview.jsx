@@ -13,9 +13,11 @@ export function GitChangeDetails({
   base = '',
   expandedFile = '',
   expandedFileRevision = 0,
+  reloadRevision = 0,
   busy = false,
   onSelectFile,
   onOpenFilePreview,
+  onRefresh,
 }) {
   const [list, setList] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -24,6 +26,7 @@ export function GitChangeDetails({
   const cwdRef = useRef(cwd);
   const baseRef = useRef(base);
   const patchesRef = useRef(patches);
+  const listRequestTokenRef = useRef(null);
   const patchRequestTokensRef = useRef(new Map());
   cwdRef.current = cwd;
   baseRef.current = base;
@@ -42,10 +45,14 @@ export function GitChangeDetails({
   const fetchList = useCallback((force = false) => {
     const targetCwd = cwdRef.current;
     const targetBase = baseRef.current;
-    if (!targetCwd || !targetBase) return;
+    if (!targetCwd || !targetBase) {
+      listRequestTokenRef.current = null;
+      return;
+    }
     if (!force) {
       const cached = changesCache.getList(targetCwd, targetBase);
       if (cached) {
+        listRequestTokenRef.current = null;
         setList(cached);
         setError('');
         setLoading(false);
@@ -54,16 +61,26 @@ export function GitChangeDetails({
     }
     const stale = changesCache.getListEvenIfStale(targetCwd, targetBase);
     if (stale) setList(stale);
+    const requestToken = Symbol('git-change-list');
+    listRequestTokenRef.current = requestToken;
     setLoading(true);
     api.gitChanges(targetCwd, targetBase)
       .then((data) => {
-        if (cwdRef.current !== targetCwd || baseRef.current !== targetBase) return;
+        if (
+          cwdRef.current !== targetCwd
+          || baseRef.current !== targetBase
+          || listRequestTokenRef.current !== requestToken
+        ) return;
         changesCache.putList(targetCwd, targetBase, data);
         setList(data);
         setError('');
       })
       .catch((requestError) => {
-        if (cwdRef.current !== targetCwd || baseRef.current !== targetBase) return;
+        if (
+          cwdRef.current !== targetCwd
+          || baseRef.current !== targetBase
+          || listRequestTokenRef.current !== requestToken
+        ) return;
         setError(
           requestError?.status === 504
             ? 'timeout'
@@ -71,7 +88,11 @@ export function GitChangeDetails({
         );
       })
       .finally(() => {
-        if (cwdRef.current === targetCwd && baseRef.current === targetBase) setLoading(false);
+        if (
+          cwdRef.current === targetCwd
+          && baseRef.current === targetBase
+          && listRequestTokenRef.current === requestToken
+        ) setLoading(false);
       });
   }, [api]);
 
@@ -80,7 +101,20 @@ export function GitChangeDetails({
     setError('');
     resetPatches();
     fetchList(false);
+    return () => {
+      listRequestTokenRef.current = null;
+    };
   }, [base, cwd, fetchList, resetPatches]);
+
+  const previousReloadRevisionRef = useRef(reloadRevision);
+  useEffect(() => {
+    const previous = previousReloadRevisionRef.current;
+    previousReloadRevisionRef.current = reloadRevision;
+    if (previous === reloadRevision || !cwdRef.current || !baseRef.current) return;
+    changesCache.markStale(cwdRef.current);
+    resetPatches();
+    fetchList(true);
+  }, [fetchList, reloadRevision, resetPatches]);
 
   const previousBusyRef = useRef(busy);
   useEffect(() => {
@@ -205,6 +239,10 @@ export function GitChangeDetails({
     : error
       ? `加载失败:${error}`
       : '';
+  const contentRevision = useMemo(
+    () => ({ list, patches, reloadRevision }),
+    [list, patches, reloadRevision],
+  );
 
   return (
     <ChangeReviewDetails
@@ -228,7 +266,8 @@ export function GitChangeDetails({
       onEnsureDiff={loadPatch}
       getFileDiffText={fetchPatchText}
       getAllDiffText={getAllDiffText}
-      contentRevision={patches}
+      onRefresh={onRefresh}
+      contentRevision={contentRevision}
       ensureDiffRevision={patches}
     />
   );

@@ -162,6 +162,7 @@ export function ChangeReviewDetails({
   onEnsureDiff,
   getFileDiffText,
   getAllDiffText,
+  onRefresh,
   contentRevision = null,
   ensureDiffRevision = null,
 }) {
@@ -284,7 +285,10 @@ export function ChangeReviewDetails({
       const { action, target } = detail;
       if (target?.type !== 'review') return;
 
-      if (action === DESKTOP_CONTEXT_ACTIONS.COPY_FILE_DIFF && getFileDiffText) {
+      if (action === DESKTOP_CONTEXT_ACTIONS.REFRESH_DETAILS) {
+        detail.handled = true;
+        onRefresh?.();
+      } else if (action === DESKTOP_CONTEXT_ACTIONS.COPY_FILE_DIFF && getFileDiffText) {
         detail.handled = true;
         Promise.resolve()
           .then(() => getFileDiffText(target.file))
@@ -309,7 +313,7 @@ export function ChangeReviewDetails({
     };
     window.addEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
     return () => window.removeEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
-  }, [getAllDiffText, getFileDiffText, list]);
+  }, [getAllDiffText, getFileDiffText, list, onRefresh]);
 
   const toggleFile = (path, currentlyOpen) => {
     if (currentlyOpen) {
@@ -335,7 +339,13 @@ export function ChangeReviewDetails({
   const showSummary = ready || loading;
 
   return (
-    <div className="ace-review-panel" data-change-region={dataRegion} ref={panelRef}>
+    <div
+      className="ace-review-panel"
+      data-change-region={dataRegion}
+      data-desktop-review-kind="summary"
+      data-desktop-review-refresh="true"
+      ref={panelRef}
+    >
       {showSummary && (
         <div
           className="px-3 py-1 text-[11px] text-fg-mute border-b border-border/50 flex items-center gap-2 shrink-0"
@@ -404,6 +414,8 @@ export function ChangeReviewDetails({
               key={row.path}
               className="ace-review-file"
               data-review-file-section={row.path}
+              data-desktop-review-kind="file"
+              data-desktop-review-file={row.path || undefined}
             >
               <ChangeReviewFileRow
                 row={row}
