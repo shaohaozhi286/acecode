@@ -1813,6 +1813,77 @@ TEST(WebServerHttp, NativeFolderPickerEndpointRegistersSelectedFolder) {
     EXPECT_TRUE(found);
 }
 
+// 场景:新建项目弹窗需要在创建前显示默认位置。该位置是 projects 元数据目录
+// 的同级 workspaces,不能把用户源码混进 hash 元数据目录。
+TEST(WebServerHttp, ProjectDefaultsExposeSiblingGlobalWorkspaceRoot) {
+    WebServerFixture fx;
+
+    auto defaults = cpr::Get(cpr::Url{fx.url("/api/projects/defaults")});
+    ASSERT_EQ(defaults.status_code, 200) << defaults.text;
+    const auto body = json::parse(defaults.text);
+    const auto expected = acecode::path_to_utf8_generic(
+        (fx.tmp_dir / "workspaces").lexically_normal());
+    EXPECT_EQ(body["parent_dir"], expected);
+    EXPECT_FALSE(std::filesystem::exists(fx.tmp_dir / "workspaces"));
+}
+
+// 场景:默认位置创建时后端负责安全命名、真正建目录、注册 workspace,并把
+// 最终目录名返回给前端。第二次同名不能收养或覆盖已有目录。
+TEST(WebServerHttp, CreateProjectNormalizesCreatesRegistersAndRejectsCollision) {
+    WebServerFixture fx;
+    const json request_body{{"name", " alpha/api:test "}};
+
+    auto created = cpr::Post(cpr::Url{fx.url("/api/projects")},
+                             cpr::Body{request_body.dump()},
+                             cpr::Header{{"Content-Type", "application/json"}});
+    ASSERT_EQ(created.status_code, 201) << created.text;
+    const auto body = json::parse(created.text);
+    EXPECT_EQ(body["directory_name"], "alpha-api-test");
+    EXPECT_EQ(body["name"], "alpha-api-test");
+    EXPECT_EQ(body["sanitized"], true);
+    const auto expected_path = fx.tmp_dir / "workspaces" / "alpha-api-test";
+    EXPECT_TRUE(std::filesystem::is_directory(expected_path));
+    std::error_code equivalent_error;
+    EXPECT_TRUE(std::filesystem::equivalent(
+        path_from_utf8(body["cwd"].get<std::string>()),
+        expected_path,
+        equivalent_error)) << equivalent_error.message();
+
+    const auto workspace = fx.workspace_registry->get(
+        body["hash"].get<std::string>());
+    ASSERT_TRUE(workspace.has_value());
+    EXPECT_EQ(workspace->cwd, body["cwd"]);
+
+    auto collision = cpr::Post(cpr::Url{fx.url("/api/projects")},
+                               cpr::Body{request_body.dump()},
+                               cpr::Header{{"Content-Type", "application/json"}});
+    ASSERT_EQ(collision.status_code, 409) << collision.text;
+    EXPECT_EQ(json::parse(collision.text)["error"], "PROJECT_ALREADY_EXISTS");
+    EXPECT_TRUE(std::filesystem::is_directory(expected_path));
+}
+
+// 场景:自定义位置必须是已存在的绝对目录。相对路径不能在 daemon cwd 下被
+// 悄悄解释,不存在的位置也不能被隐式创建成任意父目录树。
+TEST(WebServerHttp, CreateProjectRejectsInvalidCustomParent) {
+    WebServerFixture fx;
+
+    auto relative = cpr::Post(cpr::Url{fx.url("/api/projects")},
+                              cpr::Body{R"({"name":"demo","parent_dir":"relative"})"},
+                              cpr::Header{{"Content-Type", "application/json"}});
+    ASSERT_EQ(relative.status_code, 400) << relative.text;
+    EXPECT_EQ(json::parse(relative.text)["error"],
+              "PROJECT_PARENT_ABSOLUTE_REQUIRED");
+
+    const auto missing_path = fx.tmp_dir / "missing-parent";
+    auto missing = cpr::Post(cpr::Url{fx.url("/api/projects")},
+                             cpr::Body{json{{"name", "demo"},
+                                            {"parent_dir", missing_path.string()}}.dump()},
+                             cpr::Header{{"Content-Type", "application/json"}});
+    ASSERT_EQ(missing.status_code, 400) << missing.text;
+    EXPECT_EQ(json::parse(missing.text)["error"], "PROJECT_PARENT_NOT_FOUND");
+    EXPECT_FALSE(std::filesystem::exists(missing_path));
+}
+
 // 场景: open-in-explorer 端点与 native folder picker 同款门控 —— 回调未注入
 // (standalone daemon / 非 desktop 启动)时必须 501,不能有任何副作用。
 // 回归: webapp 兼容模式右键菜单「在资源管理器中打开」首次落地(原先只有

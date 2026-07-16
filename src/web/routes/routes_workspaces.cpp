@@ -1,5 +1,6 @@
 // routes_workspaces.cpp — Route registrations extracted from server.cpp
 #include "../server_impl.hpp"
+#include "../project_creation.hpp"
 
 namespace acecode::web {
 
@@ -49,6 +50,23 @@ json opencode_import_preview_to_json(const OpencodeImportPreview& preview) {
     };
 }
 
+int project_creation_http_status(ProjectCreationError error) {
+    switch (error) {
+        case ProjectCreationError::NameRequired:
+        case ProjectCreationError::ParentMustBeAbsolute:
+        case ProjectCreationError::ParentNotFound:
+        case ProjectCreationError::ParentNotDirectory:
+            return 400;
+        case ProjectCreationError::TargetExists:
+            return 409;
+        case ProjectCreationError::CreateFailed:
+            return 500;
+        case ProjectCreationError::None:
+            return 200;
+    }
+    return 500;
+}
+
 } // namespace
 
 void WebServer::Impl::register_workspaces() {
@@ -57,6 +75,14 @@ void WebServer::Impl::register_workspaces() {
             return cors_preflight(req);
         });
         CROW_ROUTE(app, "/api/workspaces/pick-folder").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
+        CROW_ROUTE(app, "/api/projects/defaults").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
+        CROW_ROUTE(app, "/api/projects").methods(crow::HTTPMethod::Options)
         ([this](const crow::request& req) {
             return cors_preflight(req);
         });
@@ -143,6 +169,80 @@ void WebServer::Impl::register_workspaces() {
             LOG_INFO("[web] workspace registered hash=" + m.hash + " cwd=" + m.cwd);
             crow::response r(201);
             r.body = workspace_to_json(m).dump();
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        });
+
+        CROW_ROUTE(app, "/api/projects/defaults").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            crow::response r(json{
+                {"parent_dir", default_project_parent_directory(projects_dir())},
+            }.dump());
+            r.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(r));
+        });
+
+        CROW_ROUTE(app, "/api/projects").methods(crow::HTTPMethod::POST)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.workspace_registry) {
+                crow::response r(503);
+                r.body = R"({"error":"workspace registry unavailable"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            std::string name;
+            std::string parent_dir;
+            try {
+                const auto body = json::parse(req.body);
+                if (!body.is_object()) throw std::runtime_error("object required");
+                if (auto it = body.find("name"); it != body.end()) {
+                    if (!it->is_string()) throw std::runtime_error("name must be a string");
+                    name = it->get<std::string>();
+                }
+                if (auto it = body.find("parent_dir"); it != body.end() && !it->is_null()) {
+                    if (!it->is_string()) {
+                        throw std::runtime_error("parent_dir must be a string");
+                    }
+                    parent_dir = it->get<std::string>();
+                }
+            } catch (const std::exception& e) {
+                crow::response r(400);
+                r.body = json{{"error", "PROJECT_BAD_REQUEST"},
+                              {"message", std::string("请求格式错误：") + e.what()}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            auto created = create_project_directory(name, parent_dir, projects_dir());
+            if (!created.ok()) {
+                crow::response r(project_creation_http_status(created.error));
+                r.body = json{
+                    {"error", project_creation_error_code(created.error)},
+                    {"message", created.message},
+                    {"directory_name", created.directory_name},
+                    {"parent_dir", created.parent_dir},
+                    {"project_dir", created.project_dir},
+                    {"sanitized", created.sanitized},
+                }.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+
+            auto workspace = deps.workspace_registry->register_new(
+                projects_dir(), created.project_dir);
+            json body = workspace_to_json(workspace);
+            body["requested_name"] = created.requested_name;
+            body["directory_name"] = created.directory_name;
+            body["parent_dir"] = created.parent_dir;
+            body["project_dir"] = created.project_dir;
+            body["sanitized"] = created.sanitized;
+            LOG_INFO("[web] project created cwd=" + created.project_dir +
+                     " workspace_hash=" + workspace.hash);
+            crow::response r(201);
+            r.body = body.dump();
             r.add_header("Content-Type", "application/json");
             return with_cors(req, std::move(r));
         });

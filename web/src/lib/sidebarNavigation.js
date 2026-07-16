@@ -4,6 +4,14 @@ export const SIDEBAR_NAV_ITEMS = Object.freeze([
   Object.freeze({ id: 'search-tasks', label: '搜索任务', icon: 'search', callback: 'onSearchTasks' }),
 ]);
 
+export const SIDEBAR_CUSTOM_ITEMS = Object.freeze([
+  Object.freeze({ id: 'mcp', label: 'MCP 服务器', icon: 'mcp', settingsSection: 'mcp' }),
+  Object.freeze({ id: 'models', label: '模型', icon: 'code', settingsSection: 'models' }),
+  Object.freeze({ id: 'skills', label: '技能', icon: 'lightbulb', settingsSection: 'skills' }),
+]);
+
+export const DEFAULT_SIDEBAR_CUSTOM_EXPANDED = false;
+
 export const SIDEBAR_SECTION_IDS = Object.freeze({
   PINNED: 'pinned',
   TASKS: 'tasks',
@@ -58,4 +66,12 @@ export function sidebarSectionTitle(sectionId, count) {
   const label = SIDEBAR_SECTION_LABELS[sectionId] || '';
   const safeCount = Number.isFinite(count) && count >= 0 ? Math.floor(count) : 0;
   return `${label} (${safeCount})`;
+}
+
+export function sidebarCustomMaxCount(counts = {}) {
+  const available = SIDEBAR_CUSTOM_ITEMS
+    .map((item) => counts?.[item.id])
+    .filter((count) => Number.isFinite(count) && count >= 0)
+    .map((count) => Math.floor(count));
+  return available.length > 0 ? Math.max(...available) : null;
 }

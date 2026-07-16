@@ -1006,6 +1006,7 @@ export function App() {
           onNewTask={() => openHomeForWorkspace()}
           onNewLoop={openLoopPage}
           onSearchTasks={() => setSearchOpen(true)}
+          onOpenSettingsSection={openSettingsSection}
           pendingQuestionSessionIds={pendingQuestionSessionIdsForSidebar}
         />
         {view === 'single' && !sidebarCollapsed && (

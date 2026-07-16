@@ -35,6 +35,7 @@ import {
   normalizeSessionListChangedDetail,
 } from '../lib/sessionListEvents.js';
 import { sessionHasPendingQuestion } from '../lib/pendingQuestions.js';
+import { pickExistingWorkspace } from '../lib/workspacePicker.js';
 import {
   applyStatusSnapshot,
   applyStatusUpdate,
@@ -54,10 +55,13 @@ import {
   upsertSidebarSession,
 } from '../lib/sidebarSessions.js';
 import {
+  DEFAULT_SIDEBAR_CUSTOM_EXPANDED,
   DEFAULT_SIDEBAR_SECTION_EXPANSION,
+  SIDEBAR_CUSTOM_ITEMS,
   SIDEBAR_DISCLOSURE_ICON,
   SIDEBAR_NAV_ITEMS,
   SIDEBAR_SECTION_IDS,
+  sidebarCustomMaxCount,
   sidebarSectionCounts,
   sidebarSectionIsVisible,
   sidebarSectionTitle,
@@ -77,6 +81,7 @@ import { toast } from './Toast.jsx';
 import { VsIcon } from './Icon.jsx';
 
 const SIDEBAR_SECTIONS_STORAGE_KEY = 'acecode.sidebarSectionsExpanded.v1';
+const SIDEBAR_CUSTOM_STORAGE_KEY = 'acecode.sidebarCustomSectionExpanded.v2';
 const PINNED_DRAG_START_PX = 5;
 const PINNED_DRAG_EDGE_SCROLL_PX = 34;
 const PINNED_DRAG_EDGE_SCROLL_STEP = 16;
@@ -236,6 +241,120 @@ function SidebarNavItem({ item, onClick }) {
       </span>
       <span className="flex-1 min-w-0 truncate">{item.label}</span>
     </button>
+  );
+}
+
+function validateBooleanPreference(value) {
+  return typeof value === 'boolean';
+}
+
+function countObjectKeys(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return 0;
+  return Object.keys(value).length;
+}
+
+const CUSTOM_SIDEBAR_ICON_FILES = Object.freeze({
+  lightbulb: 'IntellisenseLightBulbSparkle',
+  mcp: 'MCP',
+  code: 'Code',
+});
+
+function CustomSidebarIcon({ icon }) {
+  const file = CUSTOM_SIDEBAR_ICON_FILES[icon];
+  if (!file) return <VsIcon name={icon} size={16} />;
+  return (
+    <img
+      src={`/vs-icons/${file}.svg`}
+      alt=""
+      width="16"
+      height="16"
+      className="ace-sidebar-custom-icon"
+      draggable="false"
+      aria-hidden="true"
+      data-monochrome="true"
+    />
+  );
+}
+
+function CustomSidebarItem({ item, count, onClick }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      data-sidebar-custom-item={item.id}
+      className="ace-sidebar-primary-text w-full flex items-center gap-[5px] px-3 py-[3px] text-[14px] text-fg hover:bg-surface-hi transition text-left"
+    >
+      <span className="w-6 h-6 flex items-center justify-center shrink-0">
+        <CustomSidebarIcon icon={item.icon} />
+      </span>
+      <span className="flex-1 min-w-0 truncate">{item.label}</span>
+      {Number.isFinite(count) && (
+        <span className="text-[11px] text-fg-mute shrink-0 tabular-nums">{count}</span>
+      )}
+    </button>
+  );
+}
+
+function CustomSidebarSection({ onOpenSettingsSection }) {
+  const [expanded, setExpanded] = usePreference(
+    SIDEBAR_CUSTOM_STORAGE_KEY,
+    DEFAULT_SIDEBAR_CUSTOM_EXPANDED,
+    validateBooleanPreference,
+  );
+  const [counts, setCounts] = useState({ skills: null, mcp: null, models: null });
+
+  const refreshCounts = useCallback(async () => {
+    const [skills, mcp, models] = await Promise.allSettled([
+      api.listSkills(),
+      api.getMcp(),
+      api.listModels(),
+    ]);
+    setCounts((previous) => ({
+      skills: skills.status === 'fulfilled' && Array.isArray(skills.value)
+        ? skills.value.length
+        : previous.skills,
+      mcp: mcp.status === 'fulfilled' ? countObjectKeys(mcp.value) : previous.mcp,
+      models: models.status === 'fulfilled' && Array.isArray(models.value)
+        ? models.value.length
+        : previous.models,
+    }));
+  }, []);
+
+  useEffect(() => {
+    refreshCounts().catch(() => {});
+    const timer = window.setInterval(() => refreshCounts().catch(() => {}), 15000);
+    return () => window.clearInterval(timer);
+  }, [refreshCounts]);
+
+  const maxCount = sidebarCustomMaxCount(counts);
+  return (
+    <div className="ace-sidebar-custom-section border-t border-border shrink-0 py-2">
+      <button
+        type="button"
+        onClick={() => setExpanded((value) => !value)}
+        data-sidebar-custom-section="true"
+        className="w-full flex items-center px-3 py-1.5 text-[13px] text-fg-2 hover:text-fg transition"
+        aria-expanded={expanded}
+      >
+        <span className="flex-1 min-w-0 text-left truncate">自定义</span>
+        {maxCount != null && (
+          <span className="mr-2 shrink-0 tabular-nums text-fg-mute">{maxCount}</span>
+        )}
+        <SidebarDisclosure expanded={expanded} />
+      </button>
+      {expanded && (
+        <div className="ace-sidebar-custom-list pt-1">
+          {SIDEBAR_CUSTOM_ITEMS.map((item) => (
+            <CustomSidebarItem
+              key={item.id}
+              item={item}
+              count={counts[item.id]}
+              onClick={() => onOpenSettingsSection?.(item.settingsSection)}
+            />
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -918,6 +1037,7 @@ export function Sidebar({
   onNewTask,
   onNewLoop,
   onSearchTasks,
+  onOpenSettingsSection,
   pendingQuestionSessionIds = new Set(),
 }) {
   const [workspaces,  setWorkspaces]  = useState([]);
@@ -2134,20 +2254,8 @@ export function Sidebar({
 
   const onAddWorkspace = async () => {
     try {
-      const ws = hasDesktopBridge()
-        ? parseDesktopResult(await window.aceDesktop_addWorkspace())
-        : await api.pickWorkspaceFolder();
+      const ws = await pickExistingWorkspace({ api });
       if (ws == null) return;
-      // native 报告环境问题(如 Linux 缺 zenity/kdialog):必须可见地提示,
-      // 不能与"用户取消"一样静默 —— 否则按钮表现为点了没反应。
-      if (ws.error) {
-        toast({ kind: 'err', text: '添加工作区失败:' + ws.error });
-        return;
-      }
-      if (!ws || !ws.hash) return;
-      if (hasDesktopBridge()) {
-        try { await api.registerWorkspace(ws.cwd); } catch { /* daemon 可能已入册;忽略 */ }
-      }
       await refresh(ws.hash);
       await onActivate(ws);
     } catch (e) {
@@ -2336,6 +2444,7 @@ export function Sidebar({
             </div>
           )}
         </div>
+        <CustomSidebarSection onOpenSettingsSection={onOpenSettingsSection} />
       </div>
       </aside>
       <OpencodeImportDialog

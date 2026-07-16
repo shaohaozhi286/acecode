@@ -27,6 +27,7 @@ import { SubagentGroupBlock } from './SubagentGroupBlock.jsx';
 import { PreviewDetailsPanel } from './PreviewDetailsPanel.jsx';
 import { StatusBar } from './StatusBar.jsx';
 import { Modal } from './Modal.jsx';
+import { CreateProjectModal } from './CreateProjectModal.jsx';
 import { ChangeGlassDock } from './ChangeReview.jsx';
 import { TurnFileList } from './TurnFileList.jsx';
 import { toast } from './Toast.jsx';
@@ -66,6 +67,7 @@ import {
   reconcileLatestCompletedTurn,
 } from '../lib/transcriptSelfHeal.js';
 import { usePreference } from '../lib/usePreference.js';
+import { pickExistingWorkspace } from '../lib/workspacePicker.js';
 import {
   DEFAULT_HOME_WORKSPACE_SELECTION,
   HOME_WORKSPACE_SELECTION_STORAGE_KEY,
@@ -627,6 +629,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
   );
   const [homeSubmitting, setHomeSubmitting] = useState(false);
   const [projectDropdownOpen, setProjectDropdownOpen] = useState(false);
+  const [createProjectOpen, setCreateProjectOpen] = useState(false);
   const [modelOptions, setModelOptions] = useState([]);
   const [modelListLoaded, setModelListLoaded] = useState(false);
   const [homeModelName, setHomeModelName] = useState('');
@@ -763,6 +766,56 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
     onHomeWorkspaceChange?.(selected);
     setProjectDropdownOpen(false);
   }, [onHomeWorkspaceChange, persistHomeWorkspaceHash]);
+
+  const handleProjectCreated = useCallback(async (workspace) => {
+    const option = normalizeWorkspaceOption(workspace, homeWorkspaces.length);
+    if (!option?.hash || !option?.cwd) {
+      throw new Error('项目已创建，但返回的工作区信息不完整');
+    }
+    setHomeWorkspaces((previous) => [
+      option,
+      ...previous.filter((item) => item.hash !== option.hash),
+    ]);
+    selectHomeWorkspace(option);
+    notifySessionListChanged({
+      reason: 'project-created',
+      workspaceHash: option.hash,
+    });
+    const directoryName = workspace?.directory_name || option.name;
+    toast({
+      kind: 'ok',
+      text: workspace?.sanitized
+        ? `已创建项目：${directoryName}（目录名已自动转换）`
+        : `已创建项目：${directoryName}`,
+    });
+  }, [homeWorkspaces.length, selectHomeWorkspace]);
+
+  const handleOpenExistingDirectory = useCallback(async () => {
+    setProjectDropdownOpen(false);
+    try {
+      const workspace = await pickExistingWorkspace({ api });
+      if (workspace == null) return;
+      const option = normalizeWorkspaceOption(workspace, homeWorkspaces.length);
+      if (!option?.hash || !option?.cwd) {
+        throw new Error('打开的目录缺少工作区信息');
+      }
+      setHomeWorkspaces((previous) => [
+        option,
+        ...previous.filter((item) => item.hash !== option.hash),
+      ]);
+      selectHomeWorkspace(option);
+      notifySessionListChanged({
+        reason: 'workspace-opened',
+        workspaceHash: option.hash,
+      });
+    } catch (error) {
+      if (!hasDesktopBridge() && (error?.status === 404 || error?.status === 501)) {
+        toast({ kind: 'info', text: '需在 desktop webapp 中使用' });
+      } else {
+        toast({ kind: 'err', text: `打开现有目录失败：${error?.message || ''}` });
+      }
+    }
+  }, [api, homeWorkspaces.length, selectHomeWorkspace]);
 
   const selectedHomeWorkspace = useMemo(() => {
     return homeWorkspaceOptionForHash(homeWorkspaces, homeWorkspaceHash);
@@ -1577,6 +1630,10 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
     if (sid || !ref?.homeWorkspaceExplicit) return;
     persistHomeWorkspaceHash(ref?.workspaceHash || '');
   }, [persistHomeWorkspaceHash, ref?.homeWorkspaceExplicit, ref?.workspaceHash, sid]);
+
+  useEffect(() => {
+    if (sid) setCreateProjectOpen(false);
+  }, [sid]);
 
   useEffect(() => {
     if (sid) return undefined;
@@ -2789,6 +2846,26 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
                     <div className="px-3 pb-1 mb-1 text-[11px] font-semibold text-fg-mute border-b border-border/50 uppercase tracking-wider">
                       工作区
                     </div>
+                    <button
+                      type="button"
+                      className="group w-full h-8 px-3 text-left text-[13px] flex items-center gap-2 text-fg hover:bg-surface-hi transition-colors"
+                      onClick={() => {
+                        setProjectDropdownOpen(false);
+                        setCreateProjectOpen(true);
+                      }}
+                    >
+                      <VsIcon name="folderAdd" size={15} className="text-fg-mute group-hover:text-fg shrink-0" />
+                      <span className="truncate">新建项目</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="group w-full h-8 px-3 text-left text-[13px] flex items-center gap-2 text-fg hover:bg-surface-hi transition-colors"
+                      onClick={handleOpenExistingDirectory}
+                    >
+                      <VsIcon name="folderOpen" size={15} className="text-fg-mute group-hover:text-fg shrink-0" />
+                      <span className="truncate">打开现有目录</span>
+                    </button>
+                    <div className="my-1 border-t border-border/50" aria-hidden="true" />
                     {homeWorkspaces.map((w) => (
                       <button
                         key={w.hash || w.cwd || w.name}
@@ -2842,6 +2919,13 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
         </div>
         {questionForView && (
           <QuestionPicker request={questionForView} onResolve={resolveQuestion} />
+        )}
+        {createProjectOpen && (
+          <CreateProjectModal
+            api={api}
+            onClose={() => setCreateProjectOpen(false)}
+            onCreated={handleProjectCreated}
+          />
         )}
         <StatusBar
           model={homeModelLabel}

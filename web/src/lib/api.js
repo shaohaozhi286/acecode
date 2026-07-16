@@ -154,6 +154,11 @@ export function createApi(base = null) {
     listLoopRuns:     (id, limit=100) => request('GET',   `/api/loops/${encodeURIComponent(id)}/runs?limit=${encodeURIComponent(String(limit))}`, undefined, base),
     registerWorkspace:(cwd)          => request('POST',   '/api/workspaces', {cwd}, base),
     pickWorkspaceFolder:()           => request('POST',   '/api/workspaces/pick-folder', undefined, base),
+    getProjectDefaults:()            => request('GET',    '/api/projects/defaults', undefined, base),
+    createProject:(name, parentDir='') => request('POST', '/api/projects', {
+      name,
+      ...(parentDir ? { parent_dir: parentDir } : {}),
+    }, base),
     // webapp 兼容模式(无 webview bridge)的「在资源管理器中打开」回退通路。
     // 仅 desktop 壳启动的 daemon 注册该端点(native_folder_picker_enabled 同款门控)。
     openInExplorer:   (path)         => request('POST',   '/api/open-in-explorer', { path }, base),

@@ -178,6 +178,8 @@ when known.
 | GET | `/api/workspaces` | list registered workspaces |
 | POST | `/api/workspaces` | register cwd as workspace |
 | POST | `/api/workspaces/pick-folder` | desktop native folder picker |
+| GET | `/api/projects/defaults` | new-project default parent directory |
+| POST | `/api/projects` | create and register a new project directory |
 | POST | `/api/open-in-explorer` | open folder in OS file manager |
 | GET | `/api/workspaces/:hash/sessions` | list sessions in workspace |
 | POST | `/api/workspaces/:hash/sessions` | create workspace session |
@@ -385,6 +387,58 @@ when the user cancels. Errors:
 
 - `501` native folder picker unavailable
 - `503` registry or callback unavailable
+
+### `GET /api/projects/defaults`
+
+Returns the default parent used by the new-project modal:
+
+```json
+{"parent_dir":"C:/Users/me/.acecode/workspaces"}
+```
+
+This user-source root is a sibling of the internal hash-indexed
+`<data-dir>/projects` metadata directory. The endpoint does not create the
+directory; default project creation creates it on demand.
+
+### `POST /api/projects`
+
+Creates one empty child directory, registers that child as a visible workspace,
+and returns `201` with the normal `Workspace` fields plus creation details.
+
+```json
+{
+  "name": "demo-api",
+  "parent_dir": "C:/Users/me/.acecode/workspaces",
+  "project_dir": "C:/Users/me/.acecode/workspaces/demo-api"
+}
+```
+
+`parent_dir` is optional. When omitted or empty, ACECode uses the parent from
+`GET /api/projects/defaults` and creates that default parent on demand. A custom
+parent must already exist, be absolute, and be a directory.
+
+The returned object includes `hash`, `cwd`, `name`, `available`,
+`requested_name`, `directory_name`, `parent_dir`, `project_dir`, and
+`sanitized`. The cross-platform directory-name contract:
+
+- trims surrounding ASCII whitespace and trailing dots/spaces;
+- replaces ASCII control characters and `<>:"/\\|?*` with `-`;
+- appends `-project` to Windows reserved device names such as `CON`, `NUL`,
+  `COM1`, or a reserved base followed by an extension;
+- truncates to 60 Unicode code points without splitting a code point;
+- falls back to `project` when normalization would otherwise leave an empty or
+  dot-only component.
+
+Creation never adopts or overwrites an existing path. Errors:
+
+- `400 PROJECT_BAD_REQUEST` malformed JSON or field types
+- `400 PROJECT_NAME_REQUIRED` empty project name
+- `400 PROJECT_PARENT_ABSOLUTE_REQUIRED` relative custom parent
+- `400 PROJECT_PARENT_NOT_FOUND` missing custom parent
+- `400 PROJECT_PARENT_NOT_DIRECTORY` custom parent is not a directory
+- `409 PROJECT_ALREADY_EXISTS` target file or directory already exists
+- `500 PROJECT_CREATE_FAILED` default-parent or child-directory creation failed
+- `503` workspace registry unavailable
 
 ### `POST /api/open-in-explorer`
 

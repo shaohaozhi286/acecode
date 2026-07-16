@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import {
   DEFAULT_SIDEBAR_SECTION_EXPANSION,
+  DEFAULT_SIDEBAR_CUSTOM_EXPANDED,
+  SIDEBAR_CUSTOM_ITEMS,
   SIDEBAR_DISCLOSURE_ICON,
   SIDEBAR_NAV_ITEMS,
   SIDEBAR_SECTION_IDS,
@@ -8,6 +10,7 @@ import {
   sidebarSectionCounts,
   sidebarSectionIsVisible,
   sidebarSectionTitle,
+  sidebarCustomMaxCount,
   validateSidebarSectionExpansion,
 } from './sidebarNavigation.js';
 
@@ -27,6 +30,21 @@ test('sidebar fixed navigation keeps the confirmed order and callbacks', () => {
     { id: 'new-loop', label: '新建循环', icon: 'alarm', callback: 'onNewLoop' },
     { id: 'search-tasks', label: '搜索任务', icon: 'search', callback: 'onSearchTasks' },
   ]);
+});
+
+test('sidebar custom settings keep the restored order and default collapsed state', () => {
+  assert.deepEqual(SIDEBAR_CUSTOM_ITEMS, [
+    { id: 'mcp', label: 'MCP 服务器', icon: 'mcp', settingsSection: 'mcp' },
+    { id: 'models', label: '模型', icon: 'code', settingsSection: 'models' },
+    { id: 'skills', label: '技能', icon: 'lightbulb', settingsSection: 'skills' },
+  ]);
+  assert.equal(DEFAULT_SIDEBAR_CUSTOM_EXPANDED, false);
+});
+
+test('sidebar custom heading uses the greatest available count', () => {
+  assert.equal(sidebarCustomMaxCount({ mcp: 7, models: 38, skills: 12 }), 38);
+  assert.equal(sidebarCustomMaxCount({ mcp: null, models: 3.9, skills: Number.NaN }), 3);
+  assert.equal(sidebarCustomMaxCount({ mcp: -1, models: undefined, skills: null }), null);
 });
 
 test('sidebar sections use confirmed labels and default expanded state', () => {
