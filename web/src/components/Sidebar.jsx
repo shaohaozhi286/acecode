@@ -59,6 +59,7 @@ import {
   SIDEBAR_NAV_ITEMS,
   SIDEBAR_SECTION_IDS,
   sidebarSectionCounts,
+  sidebarSectionIsVisible,
   sidebarSectionTitle,
   validateSidebarSectionExpansion,
 } from '../lib/sidebarNavigation.js';
@@ -227,7 +228,7 @@ function SidebarNavItem({ item, onClick }) {
     <button
       type="button"
       onClick={onClick}
-      className="ace-sidebar-primary-text w-full flex items-center gap-2.5 px-3 py-[6px] rounded-md text-[14px] text-fg hover:bg-surface-hi transition text-left"
+      className="ace-sidebar-primary-text w-full flex items-center gap-[7px] px-3 py-[3px] rounded-md text-[14px] text-fg hover:bg-surface-hi transition text-left"
     >
       <span className="w-6 h-6 flex items-center justify-center shrink-0">
         <VsIcon name={item.icon} size={16} />
@@ -238,6 +239,7 @@ function SidebarNavItem({ item, onClick }) {
 }
 
 function SidebarSectionHeader({ sectionId, count, expanded, onToggle, actions = null }) {
+  if (!sidebarSectionIsVisible(count)) return null;
   const title = sidebarSectionTitle(sectionId, count);
   return (
     <div
@@ -362,7 +364,7 @@ function SessionRow({
       data-sidebar-pinned-id={pinned ? s.id || undefined : undefined}
       data-sidebar-pinned-workspace={pinned ? workspaceHash || undefined : undefined}
       className={clsx(
-        'ace-sidebar-session-row ace-sidebar-tree-row-grid ace-sidebar-primary-text group grid grid-cols-[24px_minmax(0,1fr)_auto] items-center gap-x-2 mx-1.5 my-px px-2 rounded-md text-[14px] transition',
+        'ace-sidebar-session-row ace-sidebar-tree-row-grid ace-sidebar-primary-text group grid grid-cols-[24px_minmax(0,1fr)_auto] items-center gap-x-[5px] mx-1.5 my-px px-2 rounded-md text-[14px] transition',
         pinned && 'ace-sidebar-pinned-session-row',
         dragging && 'is-dragging',
         dropPlacement === 'before' && 'is-drop-before',
@@ -758,7 +760,7 @@ function WorkspaceGroup({
         data-desktop-workspace-remove={onRemove ? 'true' : undefined}
         data-desktop-workspace-opencode-import-count={opencodeImportCount > 0 ? String(opencodeImportCount) : undefined}
         className={clsx(
-          'ace-sidebar-tree-row-grid ace-sidebar-primary-text group grid grid-cols-[24px_minmax(0,1fr)_auto] items-center gap-x-2 mx-1.5 px-2 py-[6px] rounded-md text-[14px] cursor-pointer transition',
+          'ace-sidebar-tree-row-grid ace-sidebar-primary-text group grid grid-cols-[24px_minmax(0,1fr)_auto] items-center gap-x-[5px] mx-1.5 px-2 py-[6px] rounded-md text-[14px] cursor-pointer transition',
           ws.active ? 'bg-accent-bg text-fg' : 'text-fg hover:bg-surface-hi',
         )}
         onClick={() => (ws.active ? onToggle(ws.hash) : onActivate(ws))}
@@ -813,7 +815,7 @@ function WorkspaceGroup({
       {expanded && (
         <div className="my-1">
           {sessions.length === 0 ? (
-            <div className="ace-sidebar-tree-row-grid ace-sidebar-meta-text grid grid-cols-[24px_minmax(0,1fr)_auto] items-center gap-x-2 mx-1.5 px-2 py-[4px] text-[13px] text-fg-mute italic">
+            <div className="ace-sidebar-tree-row-grid ace-sidebar-meta-text grid grid-cols-[24px_minmax(0,1fr)_auto] items-center gap-x-[5px] mx-1.5 px-2 py-[4px] text-[13px] text-fg-mute italic">
               <span aria-hidden="true" />
               <span>{sessionsLoading ? '加载中...' : '暂无任务'}</span>
             </div>
@@ -833,7 +835,7 @@ function WorkspaceGroup({
                 />
               ))}
               {projectedSessions.collapsible && (
-                <div className="ace-sidebar-tree-row-grid grid grid-cols-[24px_minmax(0,1fr)_auto] items-center gap-x-2 mx-1.5 px-2">
+                <div className="ace-sidebar-tree-row-grid grid grid-cols-[24px_minmax(0,1fr)_auto] items-center gap-x-[5px] mx-1.5 px-2">
                   <span aria-hidden="true" />
                   <button
                     type="button"
@@ -869,7 +871,7 @@ function NoWorkspaceSessionGroup({
   return (
     <div className="my-1">
       {sessions.length === 0 ? (
-        <div className="ace-sidebar-tree-row-grid ace-sidebar-meta-text grid grid-cols-[24px_minmax(0,1fr)_auto] items-center gap-x-2 mx-1.5 px-2 py-[4px] text-[13px] text-fg-mute italic">
+        <div className="ace-sidebar-tree-row-grid ace-sidebar-meta-text grid grid-cols-[24px_minmax(0,1fr)_auto] items-center gap-x-[5px] mx-1.5 px-2 py-[4px] text-[13px] text-fg-mute italic">
           <span aria-hidden="true" />
           <span>{sessionsLoading ? '加载中...' : '暂无任务'}</span>
         </div>
@@ -888,7 +890,7 @@ function NoWorkspaceSessionGroup({
             />
           ))}
           {projectedSessions.collapsible && (
-            <div className="ace-sidebar-tree-row-grid grid grid-cols-[24px_minmax(0,1fr)_auto] items-center gap-x-2 mx-1.5 px-2">
+            <div className="ace-sidebar-tree-row-grid grid grid-cols-[24px_minmax(0,1fr)_auto] items-center gap-x-[5px] mx-1.5 px-2">
               <span aria-hidden="true" />
               <button
                 type="button"
@@ -2156,6 +2158,11 @@ export function Sidebar({
     }
   };
 
+  const collapseAllWorkspaces = useCallback(() => {
+    workspaceCollapseAllRef.current = true;
+    updateExpanded(new Set());
+  }, [updateExpanded]);
+
   const sidebarNavCallbacks = {
     onNewTask,
     onNewLoop,
@@ -2200,7 +2207,7 @@ export function Sidebar({
               expanded={sectionExpansion.pinned}
               onToggle={() => toggleSidebarSection(SIDEBAR_SECTION_IDS.PINNED)}
             />
-            {sectionExpansion.pinned && (
+            {sidebarSectionIsVisible(sectionCounts.pinned) && sectionExpansion.pinned && (
               <div className="my-1">
                 {pinnedSessions.map((s) => {
                   const rowKey = pinnedSessionKey(s.workspace_hash || s.workspaceHash || '', s.id);
@@ -2232,7 +2239,7 @@ export function Sidebar({
               expanded={sectionExpansion.tasks}
               onToggle={() => toggleSidebarSection(SIDEBAR_SECTION_IDS.TASKS)}
             />
-            {sectionExpansion.tasks && (
+            {sidebarSectionIsVisible(sectionCounts.tasks) && sectionExpansion.tasks && (
               <NoWorkspaceSessionGroup
                 sessions={noWorkspaceSessions}
                 sessionsLoading={false}
@@ -2252,19 +2259,31 @@ export function Sidebar({
               expanded={sectionExpansion.workspaces}
               onToggle={() => toggleSidebarSection(SIDEBAR_SECTION_IDS.WORKSPACES)}
               actions={(
-                <button
-                  data-tour-target="sidebar-add-project"
-                  type="button"
-                  onClick={onAddWorkspace}
-                  className="w-6 h-6 rounded text-fg-mute hover:text-fg hover:bg-surface-hi flex items-center justify-center shrink-0 transition"
-                  title="添加工作区"
-                  aria-label="添加工作区"
-                >
-                  <VsIcon name="folderAdd" size={16} />
-                </button>
+                <>
+                  <button
+                    data-sidebar-collapse-all-workspaces="true"
+                    type="button"
+                    onClick={collapseAllWorkspaces}
+                    className="ace-sidebar-heading-collapse-btn"
+                    title="全部收缩工作区"
+                    aria-label="全部收缩工作区"
+                  >
+                    <VsIcon name="collapseAll" size={16} />
+                  </button>
+                  <button
+                    data-tour-target="sidebar-add-project"
+                    type="button"
+                    onClick={onAddWorkspace}
+                    className="w-6 h-6 rounded text-fg-mute hover:text-fg hover:bg-surface-hi flex items-center justify-center shrink-0 transition"
+                    title="添加工作区"
+                    aria-label="添加工作区"
+                  >
+                    <VsIcon name="folderAdd" size={16} />
+                  </button>
+                </>
               )}
             />
-            {sectionExpansion.workspaces && (
+            {sidebarSectionIsVisible(sectionCounts.workspaces) && sectionExpansion.workspaces && (
               <div className="my-1">
                 {workspaces.map((ws) => {
                   const items = filterPinnedSessions(

@@ -50,6 +50,10 @@ export function sidebarSectionCounts({
   };
 }
 
+export function sidebarSectionIsVisible(count) {
+  return Number.isFinite(count) && count > 0;
+}
+
 export function sidebarSectionTitle(sectionId, count) {
   const label = SIDEBAR_SECTION_LABELS[sectionId] || '';
   const safeCount = Number.isFinite(count) && count >= 0 ? Math.floor(count) : 0;

@@ -6,6 +6,7 @@ import {
   SIDEBAR_SECTION_IDS,
   SIDEBAR_SECTION_LABELS,
   sidebarSectionCounts,
+  sidebarSectionIsVisible,
   sidebarSectionTitle,
   validateSidebarSectionExpansion,
 } from './sidebarNavigation.js';
@@ -55,6 +56,15 @@ test('sidebar section counts separate pinned tasks, no-workspace tasks, and work
   assert.equal(sidebarSectionTitle(SIDEBAR_SECTION_IDS.TASKS, counts.tasks), '任务 (1)');
   assert.equal(sidebarSectionTitle(SIDEBAR_SECTION_IDS.WORKSPACES, counts.workspaces), '工作区 (3)');
   assert.deepEqual(sidebarSectionCounts(), { pinned: 0, tasks: 0, workspaces: 0 });
+});
+
+test('sidebar sections render only when their count is positive', () => {
+  assert.equal(sidebarSectionIsVisible(0), false);
+  assert.equal(sidebarSectionIsVisible(-1), false);
+  assert.equal(sidebarSectionIsVisible(Number.NaN), false);
+  assert.equal(sidebarSectionIsVisible(undefined), false);
+  assert.equal(sidebarSectionIsVisible(1), true);
+  assert.equal(sidebarSectionIsVisible(400), true);
 });
 
 test('sidebar disclosure icon preserves the exact confirmed SVG geometry', () => {
