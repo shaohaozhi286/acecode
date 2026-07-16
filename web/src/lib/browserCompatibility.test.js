@@ -75,3 +75,12 @@ run('color slash-opacity utilities have stable rgba fallbacks', () => {
   }
   assert.deepEqual([...missing].sort(), []);
 });
+
+run('sidebar blocks static text selection but keeps editing controls selectable', () => {
+  const globals = fs.readFileSync(globalsPath, 'utf8');
+  assert.match(globals, /\.ace-sidebar\s*\{[^}]*[;\s]user-select:\s*none;/s);
+  assert.match(
+    globals,
+    /\.ace-sidebar input,[\s\S]*?\.ace-sidebar \[contenteditable="true"\]\s*\{[^}]*[;\s]user-select:\s*text;/,
+  );
+});
