@@ -60,7 +60,7 @@ run('Desktop tour mode and target helpers reject browser and missing targets', (
   assert.equal(desktopGuidedTourTargetsReady({ querySelector: (selector) => present.has(selector) ? {} : null }), false);
 });
 
-run('Desktop tour builds seven ordered stable steps, distinguishes project entry points, and adapts no-model copy', () => {
+run('Desktop tour builds seven ordered stable steps, distinguishes workspace entry points, and adapts no-model copy', () => {
   const configured = buildDesktopGuidedTourSteps({ hasModel: true });
   const missing = buildDesktopGuidedTourSteps({ hasModel: false });
   assert.equal(configured.length, 7);
@@ -74,8 +74,12 @@ run('Desktop tour builds seven ordered stable steps, distinguishes project entry
     'settings',
   ]);
   assert.deepEqual(configured.map((step) => step.target), DESKTOP_GUIDED_TOUR_TARGET_LIST);
+  assert.equal(configured[0].title, '任务与工作区');
+  assert.equal(configured[1].title, '添加工作区');
+  assert.match(configured[1].content, /左侧工作区列表/);
   assert.match(configured[1].content, /本地代码目录/);
-  assert.match(configured[2].content, /不会创建项目目录/);
+  assert.match(configured[2].content, /不会创建工作区目录/);
+  assert.match(configured[2].content, /添加工作区/);
   assert.match(missing[5].title, /配置.*模型/);
   assert.match(missing[6].content, /添加模型/);
 });

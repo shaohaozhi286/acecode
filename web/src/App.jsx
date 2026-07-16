@@ -1003,7 +1003,9 @@ export function App() {
           collapsed={sidebarCollapsed}
           width={singleLayout.sidebar}
           onOpenHome={openHomeForWorkspace}
-          onOpenSettingsSection={openSettingsSection}
+          onNewTask={() => openHomeForWorkspace()}
+          onNewLoop={openLoopPage}
+          onSearchTasks={() => setSearchOpen(true)}
           pendingQuestionSessionIds={pendingQuestionSessionIdsForSidebar}
         />
         {view === 'single' && !sidebarCollapsed && (

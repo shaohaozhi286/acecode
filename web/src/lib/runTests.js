@@ -81,6 +81,7 @@ import './updateJob.test.js';
 import './newSession.test.js';
 import './navigationHistory.test.js';
 import './gridPinnedSessions.test.js';
+import './sidebarNavigation.test.js';
 import './sidebarSessions.test.js';
 import './sessionJump.test.js';
 import './sessionListEvents.test.js';

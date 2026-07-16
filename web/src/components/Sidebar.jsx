@@ -54,6 +54,15 @@ import {
   upsertSidebarSession,
 } from '../lib/sidebarSessions.js';
 import {
+  DEFAULT_SIDEBAR_SECTION_EXPANSION,
+  SIDEBAR_DISCLOSURE_ICON,
+  SIDEBAR_NAV_ITEMS,
+  SIDEBAR_SECTION_IDS,
+  sidebarSectionCounts,
+  sidebarSectionTitle,
+  validateSidebarSectionExpansion,
+} from '../lib/sidebarNavigation.js';
+import {
   OPENCODE_IMPORT_HIGHLIGHT_MS,
   defaultOpencodeImportSelection,
   normalizeOpencodeImportPreview,
@@ -66,7 +75,7 @@ import {
 import { toast } from './Toast.jsx';
 import { VsIcon } from './Icon.jsx';
 
-const CUSTOM_SECTION_STORAGE_KEY = 'acecode.sidebarCustomSectionExpanded.v1';
+const SIDEBAR_SECTIONS_STORAGE_KEY = 'acecode.sidebarSectionsExpanded.v1';
 const PINNED_DRAG_START_PX = 5;
 const PINNED_DRAG_EDGE_SCROLL_PX = 34;
 const PINNED_DRAG_EDGE_SCROLL_STEP = 16;
@@ -165,10 +174,6 @@ function pinnedOrderItemsFromDom() {
   })));
 }
 
-function validateBooleanPreference(value) {
-  return typeof value === 'boolean';
-}
-
 function hasDesktopBridge() {
   return typeof window.aceDesktop_listWorkspaces === 'function';
 }
@@ -193,113 +198,77 @@ function attentionMeta(state) {
   return { label: '已读', dot: 'bg-fg-mute/45' };
 }
 
-function countObjectKeys(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return 0;
-  return Object.keys(value).length;
-}
-
-const LEGACY_CUSTOM_SIDEBAR_ICONS = {
-  lightbulb: 'IntellisenseLightBulbSparkle',
-  mcp: 'MCP',
-  code: 'Code',
-};
-
-function CustomSidebarIcon({ icon }) {
-  const file = LEGACY_CUSTOM_SIDEBAR_ICONS[icon];
-  if (!file) return <VsIcon name={icon} size={16} />;
+function SidebarDisclosure({ expanded, className = '' }) {
+  const icon = SIDEBAR_DISCLOSURE_ICON;
   return (
-    <img
-      src={`/vs-icons/${file}.svg`}
-      alt=""
-      width="16"
-      height="16"
-      className="ace-sidebar-custom-icon"
-      draggable="false"
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width={icon.width}
+      height={icon.height}
+      viewBox={icon.viewBox}
+      fill="none"
+      className={clsx('block shrink-0 transition-transform', className)}
+      style={{ transform: expanded ? 'rotate(0deg)' : 'rotate(-90deg)' }}
       aria-hidden="true"
-      data-monochrome="true"
-    />
+    >
+      <path
+        d={icon.path}
+        stroke={icon.stroke}
+        strokeWidth={icon.strokeWidth}
+        strokeLinecap={icon.strokeLinecap}
+        strokeLinejoin={icon.strokeLinejoin}
+      />
+    </svg>
   );
 }
 
-function CustomSidebarItem({ icon, label, count = null, warning = false, onClick }) {
+function SidebarNavItem({ item, onClick }) {
   return (
     <button
       type="button"
       onClick={onClick}
-      className="w-full flex items-center gap-2 px-4 py-[6px] text-[12px] text-fg hover:bg-surface-hi transition text-left"
+      className="ace-sidebar-primary-text w-full flex items-center gap-2.5 px-3 py-[6px] rounded-md text-[14px] text-fg hover:bg-surface-hi transition text-left"
     >
-      <CustomSidebarIcon icon={icon} />
-      <span className="flex-1 min-w-0 truncate">{label}</span>
-      {warning ? (
-        <VsIcon name="warning" size={14} mono={false} className="shrink-0" title="未配置模型" />
-      ) : count != null ? (
-        <span className="text-[11px] text-fg-mute shrink-0 tabular-nums">{count}</span>
-      ) : null}
+      <span className="w-6 h-6 flex items-center justify-center shrink-0">
+        <VsIcon name={item.icon} size={16} />
+      </span>
+      <span className="flex-1 min-w-0 truncate">{item.label}</span>
     </button>
   );
 }
 
-function CustomSidebarSection({ onOpenSettingsSection }) {
-  const [expanded, setExpanded] = usePreference(
-    CUSTOM_SECTION_STORAGE_KEY,
-    true,
-    validateBooleanPreference,
-  );
-  const [counts, setCounts] = useState({ skills: null, mcp: null, models: null });
-
-  const refreshCounts = useCallback(async () => {
-    const [skills, mcp, models] = await Promise.allSettled([
-      api.listSkills(),
-      api.getMcp(),
-      api.listModels(),
-    ]);
-    setCounts({
-      skills: skills.status === 'fulfilled' && Array.isArray(skills.value) ? skills.value.length : null,
-      mcp: mcp.status === 'fulfilled' ? countObjectKeys(mcp.value) : null,
-      models: models.status === 'fulfilled' && Array.isArray(models.value) ? models.value.length : null,
-    });
-  }, []);
-
-  useEffect(() => {
-    refreshCounts().catch(() => {});
-    const timer = setInterval(() => refreshCounts().catch(() => {}), 15000);
-    return () => clearInterval(timer);
-  }, [refreshCounts]);
-
+function SidebarSectionHeader({ sectionId, count, expanded, onToggle, actions = null }) {
+  const title = sidebarSectionTitle(sectionId, count);
   return (
-    <div className="ace-sidebar-custom-section border-t border-border shrink-0 py-2">
+    <div className="ace-sidebar-section-text flex items-center gap-1 px-3 pt-3 pb-1 text-[13px] font-medium text-fg-mute">
       <button
         type="button"
-        onClick={() => setExpanded((v) => !v)}
-        className="w-full flex items-center px-4 py-1.5 text-[12px] text-fg-2 hover:text-fg transition"
+        onClick={onToggle}
+        className="flex-1 min-w-0 text-left hover:text-fg transition"
+        aria-expanded={expanded}
       >
-        <span className="flex-1 text-left">自定义</span>
-        <VsIcon name={expanded ? 'expandDown' : 'expandRight'} size={12} />
+        <span className="truncate">{title}</span>
       </button>
-      {expanded && (
-        <div className="ace-sidebar-custom-list pt-1">
-          <CustomSidebarItem
-            icon="lightbulb"
-            label="技能"
-            count={counts.skills}
-            onClick={() => onOpenSettingsSection?.('skills')}
-          />
-          <CustomSidebarItem
-            icon="mcp"
-            label="MCP 服务器"
-            count={counts.mcp}
-            onClick={() => onOpenSettingsSection?.('mcp')}
-          />
-          <CustomSidebarItem
-            icon="code"
-            label="模型"
-            count={counts.models && counts.models > 0 ? counts.models : null}
-            warning={counts.models === 0}
-            onClick={() => onOpenSettingsSection?.('models')}
-          />
-        </div>
-      )}
+      {actions}
+      <button
+        type="button"
+        onClick={onToggle}
+        className="w-6 h-6 rounded flex items-center justify-center shrink-0 hover:text-fg hover:bg-surface-hi transition"
+        title={expanded ? `折叠${title}` : `展开${title}`}
+        aria-label={expanded ? `折叠${title}` : `展开${title}`}
+        aria-expanded={expanded}
+      >
+        <SidebarDisclosure expanded={expanded} />
+      </button>
     </div>
+  );
+}
+
+function SessionAttentionIndicator({ attention, meta }) {
+  return attention === 'in_progress' ? (
+    <span className="ace-session-loading shrink-0" title={meta.label} aria-label={meta.label} />
+  ) : (
+    <span className={clsx('w-1.5 h-1.5 rounded-full shrink-0', meta.dot)} title={meta.label} />
   );
 }
 
@@ -385,7 +354,7 @@ function SessionRow({
       data-sidebar-pinned-id={pinned ? s.id || undefined : undefined}
       data-sidebar-pinned-workspace={pinned ? workspaceHash || undefined : undefined}
       className={clsx(
-        'ace-sidebar-session-row group flex items-center gap-1 mx-1.5 my-px pl-1 pr-2 rounded-md text-[12px] transition',
+        'ace-sidebar-session-row ace-sidebar-tree-row-grid ace-sidebar-primary-text group grid grid-cols-[24px_minmax(0,1fr)_auto] items-center gap-x-2 mx-1.5 my-px px-2 rounded-md text-[14px] transition',
         pinned && 'ace-sidebar-pinned-session-row',
         dragging && 'is-dragging',
         dropPlacement === 'before' && 'is-drop-before',
@@ -397,43 +366,65 @@ function SessionRow({
         attention === 'unread' && !active && 'font-semibold',
       )}
       onPointerDown={pinned ? (event) => onPinnedPointerDown?.(event, s, title) : undefined}
-      onClick={pinned ? (event) => {
+      onClick={(event) => {
         if (event.defaultPrevented) return;
         if (event.target?.closest?.('[data-sidebar-row-control="true"], input, textarea, select')) return;
         onSelect?.(s);
-      } : undefined}
+      }}
     >
-      {pinEnabled ? (
-        <button
-          type="button"
-          data-sidebar-row-control="true"
-          onClick={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            onTogglePin?.(s, !pinned);
-          }}
-          className={clsx(
-            'ace-session-pin-btn w-5 h-6 rounded flex items-center justify-center shrink-0 transition-colors',
-            // 未 pin: 默认软灰(text-fg-mute),hover 走 text-fg —— 亮色模式下
-            // 颜色加深(灰→近黑),暗色模式下变亮(深灰→近白),符合"hover
-            // 增强对比"的双向语义。
-            // 已 pin: 用 text-accent(蓝)区别于普通可 hover 状态;它本身已经
-            // 是激活态,不再做颜色 hover,避免大幅 hue 跳动。
-            pinned
-              ? 'opacity-100 text-accent'
-              : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 text-fg-mute hover:text-fg',
-          )}
-          title={pinned ? '取消置顶' : '置顶'}
-          aria-label={pinned ? '取消置顶' : '置顶'}
-        >
-          <VsIcon name="pin" size={12} className="-rotate-45" />
-        </button>
-      ) : (
-        <span className="w-5 h-6 shrink-0" />
-      )}
+      <span className="relative flex w-6 h-7 items-center justify-center shrink-0">
+        {pinned && pinEnabled ? (
+          <>
+            <button
+              type="button"
+              data-sidebar-row-control="true"
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                onTogglePin?.(s, false);
+              }}
+              className="ace-session-pin-btn flex h-7 w-3 items-center justify-center text-accent"
+              title="取消置顶"
+              aria-label="取消置顶"
+            >
+              <VsIcon name="pin" size={12} className="-rotate-45" />
+            </button>
+            <span className="flex h-7 w-3 items-center justify-center">
+              <SessionAttentionIndicator attention={attention} meta={meta} />
+            </span>
+          </>
+        ) : (
+          <>
+            <span
+              className={clsx(
+                'absolute inset-0 flex items-center justify-center transition-opacity',
+                pinEnabled && 'group-hover:opacity-0 group-focus-within:opacity-0',
+              )}
+            >
+              <SessionAttentionIndicator attention={attention} meta={meta} />
+            </span>
+            {pinEnabled && (
+              <button
+                type="button"
+                data-sidebar-row-control="true"
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  onTogglePin?.(s, true);
+                }}
+                className="ace-session-pin-btn absolute inset-0 rounded flex items-center justify-center opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 text-fg-mute hover:text-fg transition-colors"
+                title="置顶"
+                aria-label="置顶"
+              >
+                <VsIcon name="pin" size={12} className="-rotate-45" />
+              </button>
+            )}
+          </>
+        )}
+      </span>
       {editing ? (
         <form
-          className="flex flex-1 items-center gap-2 min-w-0 py-[3px]"
+          className="flex items-center min-w-0 py-[3px]"
           onSubmit={(e) => { e.preventDefault(); commitRename(); }}
         >
           <input
@@ -448,66 +439,65 @@ function SessionRow({
                 setDraft(title);
               }
             }}
-            className="flex-1 min-w-0 h-6 px-1 rounded border border-accent bg-surface text-[12px] outline-none"
+            className="ace-sidebar-primary-text flex-1 min-w-0 h-7 px-1 rounded border border-accent bg-surface text-[14px] outline-none"
           />
         </form>
       ) : (
         <button
           type="button"
-          onClick={(e) => { e.preventDefault(); onSelect(s); }}
-          className="flex flex-1 items-center gap-2 min-w-0 py-[5px] bg-transparent text-left cursor-pointer"
+          onClick={(e) => { e.preventDefault(); e.stopPropagation(); onSelect(s); }}
+          className="min-w-0 py-[5px] bg-transparent text-left cursor-pointer"
         >
-          {attention === 'in_progress' ? (
-            <span className="ace-session-loading shrink-0" title={meta.label} aria-label={meta.label} />
-          ) : (
-            <span className={clsx('w-1.5 h-1.5 rounded-full shrink-0', meta.dot)} title={meta.label} />
-          )}
-          <span className="flex-1 min-w-0 truncate">{title}</span>
-          {pendingQuestion && (
-            <span
-              className="shrink-0 rounded-full border border-ok-border bg-ok-bg px-2 py-[1px] text-[11px] font-medium leading-[18px] text-ok"
-              title="等待用户回复 AskUserQuestion"
-            >
-              等待回复
-            </span>
-          )}
-          <span className="text-[10px] text-fg-mute shrink-0">{relativeTime(s.updated_at || s.created_at)}</span>
+          <span className="block min-w-0 truncate">{title}</span>
         </button>
       )}
-      <button
-        type="button"
-        data-sidebar-row-control="true"
-        onClick={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          onArchive?.(s);
-        }}
-        className={clsx(
-          'w-5 h-6 rounded flex items-center justify-center shrink-0 text-fg-mute hover:text-fg hover:bg-surface-hi transition',
-          worktreeSession
-            ? 'opacity-100'
-            : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100',
-        )}
-        title="归档"
-        aria-label={worktreeSession ? '工作树会话，归档' : '归档'}
-      >
-        {worktreeSession ? (
-          <span className="relative block w-[14px] h-[14px]" aria-hidden="true">
-            <VsIcon
-              name="worktree"
-              size={14}
-              className="absolute inset-0 opacity-100 transition-opacity group-hover:opacity-0 group-focus-within:opacity-0"
-            />
-            <VsIcon
-              name="archive"
-              size={14}
-              className="absolute inset-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
-            />
+      <span className="flex min-w-0 items-center justify-end gap-1">
+        {!editing && pendingQuestion && (
+          <span
+            className="shrink-0 rounded-full border border-ok-border bg-ok-bg px-2 py-[1px] text-[11px] font-medium leading-[18px] text-ok"
+            title="等待用户回复 AskUserQuestion"
+          >
+            等待回复
           </span>
-        ) : (
-          <VsIcon name="archive" size={14} />
         )}
-      </button>
+        {!editing && (
+          <span className="ace-sidebar-meta-text text-[13px] text-fg-mute shrink-0">{relativeTime(s.updated_at || s.created_at)}</span>
+        )}
+        <button
+          type="button"
+          data-sidebar-row-control="true"
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            onArchive?.(s);
+          }}
+          className={clsx(
+            'w-5 h-7 rounded flex items-center justify-center shrink-0 text-fg-mute hover:text-fg hover:bg-surface-hi transition',
+            worktreeSession
+              ? 'opacity-100'
+              : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100',
+          )}
+          title="归档"
+          aria-label={worktreeSession ? '工作树会话，归档' : '归档'}
+        >
+          {worktreeSession ? (
+            <span className="relative block w-[14px] h-[14px]" aria-hidden="true">
+              <VsIcon
+                name="worktree"
+                size={14}
+                className="absolute inset-0 opacity-100 transition-opacity group-hover:opacity-0 group-focus-within:opacity-0"
+              />
+              <VsIcon
+                name="archive"
+                size={14}
+                className="absolute inset-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
+              />
+            </span>
+          ) : (
+            <VsIcon name="archive" size={14} />
+          )}
+        </button>
+      </span>
     </div>
   );
 }
@@ -760,12 +750,14 @@ function WorkspaceGroup({
         data-desktop-workspace-remove={onRemove ? 'true' : undefined}
         data-desktop-workspace-opencode-import-count={opencodeImportCount > 0 ? String(opencodeImportCount) : undefined}
         className={clsx(
-          'group flex items-center gap-2 mx-1.5 px-2.5 py-[6px] rounded-md text-[12px] cursor-pointer transition',
+          'ace-sidebar-tree-row-grid ace-sidebar-primary-text group grid grid-cols-[24px_minmax(0,1fr)_auto] items-center gap-x-2 mx-1.5 px-2 py-[6px] rounded-md text-[14px] cursor-pointer transition',
           ws.active ? 'bg-accent-bg text-fg' : 'text-fg hover:bg-surface-hi',
         )}
         onClick={() => (ws.active ? onToggle(ws.hash) : onActivate(ws))}
       >
-        <VsIcon name={expanded ? 'folderOpen' : 'folder'} size={14} />
+        <span className="w-6 h-6 flex items-center justify-center shrink-0">
+          <VsIcon name={expanded ? 'folderOpen' : 'folder'} size={14} />
+        </span>
         {editing ? (
           <input
             autoFocus
@@ -777,38 +769,45 @@ function WorkspaceGroup({
             }}
             onBlur={commit}
             onClick={(e) => e.stopPropagation()}
-            className="flex-1 px-1 py-0 text-[12px] bg-surface border border-accent rounded outline-none"
+            className="ace-sidebar-primary-text min-w-0 h-7 px-1 py-0 text-[14px] bg-surface border border-accent rounded outline-none"
           />
         ) : (
-          <span className="flex-1 truncate font-medium">{ws.name || ws.hash}</span>
+          <span className="flex min-w-0 items-center gap-1 font-medium">
+            <span className="min-w-0 truncate">{ws.name || ws.hash}</span>
+            <SidebarDisclosure expanded={expanded} />
+          </span>
         )}
-        <button
-          type="button"
-          onClick={(e) => { e.stopPropagation(); onNewSession(ws); }}
-          className="ace-sidebar-workspace-action w-5 h-5 rounded hover:bg-surface-hi flex items-center justify-center shrink-0 transition"
-          title="新增会话"
-        ><VsIcon name="newSession" size={16} /></button>
-        {hasUnread && <span className="w-1.5 h-1.5 rounded-full shrink-0 bg-ok shadow-[0_0_4px_var(--ace-ok)]" title="有未读会话" />}
-        <button
-          type="button"
-          onClick={(e) => { e.stopPropagation(); setEditing(true); }}
-          className="w-5 h-5 rounded text-fg-mute hover:text-fg hover:bg-surface-hi opacity-0 group-hover:opacity-100 flex items-center justify-center shrink-0 transition"
-          title="重命名"
-        ><VsIcon name="edit" size={16} /></button>
-        {onRemove && (
+        <span className="flex items-center justify-end gap-1 shrink-0">
           <button
             type="button"
-            onClick={(e) => { e.stopPropagation(); onRemove(ws); }}
-            className="w-5 h-5 rounded text-fg-mute hover:text-danger hover:bg-danger-bg opacity-0 group-hover:opacity-100 flex items-center justify-center shrink-0 transition"
-            title="从桌面项目列表移除"
-          ><VsIcon name="close" size={16} /></button>
-        )}
+            onClick={(e) => { e.stopPropagation(); onNewSession(ws); }}
+            className="ace-sidebar-workspace-action w-6 h-6 rounded hover:bg-surface-hi flex items-center justify-center shrink-0 transition"
+            title="在此工作区新建任务"
+            aria-label="在此工作区新建任务"
+          ><VsIcon name="newSession" size={16} /></button>
+          {hasUnread && <span className="w-1.5 h-1.5 rounded-full shrink-0 bg-ok shadow-[0_0_4px_var(--ace-ok)]" title="有未读任务" />}
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); setEditing(true); }}
+            className="w-6 h-6 rounded text-fg-mute hover:text-fg hover:bg-surface-hi opacity-0 group-hover:opacity-100 flex items-center justify-center shrink-0 transition"
+            title="重命名"
+          ><VsIcon name="edit" size={16} /></button>
+          {onRemove && (
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onRemove(ws); }}
+              className="w-6 h-6 rounded text-fg-mute hover:text-danger hover:bg-danger-bg opacity-0 group-hover:opacity-100 flex items-center justify-center shrink-0 transition"
+              title="从桌面工作区列表移除"
+            ><VsIcon name="close" size={16} /></button>
+          )}
+        </span>
       </div>
       {expanded && (
         <div className="my-1">
           {sessions.length === 0 ? (
-            <div className="mx-1.5 ml-[22px] px-2 py-[3px] text-[11px] text-fg-mute italic">
-              {sessionsLoading ? '加载中...' : '暂无对话'}
+            <div className="ace-sidebar-tree-row-grid ace-sidebar-meta-text grid grid-cols-[24px_minmax(0,1fr)_auto] items-center gap-x-2 mx-1.5 px-2 py-[4px] text-[13px] text-fg-mute italic">
+              <span aria-hidden="true" />
+              <span>{sessionsLoading ? '加载中...' : '暂无任务'}</span>
             </div>
           ) : (
             <>
@@ -826,13 +825,16 @@ function WorkspaceGroup({
                 />
               ))}
               {projectedSessions.collapsible && (
-                <button
-                  type="button"
-                  onClick={() => onToggleSessionList?.(ws.hash)}
-                  className="block w-[calc(100%-28px)] mx-1.5 ml-[22px] px-2 py-[5px] rounded-md text-left text-[12px] text-fg-mute hover:text-fg hover:bg-surface-hi transition"
-                >
-                  {projectedSessions.action === 'expand' ? '展开显示' : '折叠显示'}
-                </button>
+                <div className="ace-sidebar-tree-row-grid grid grid-cols-[24px_minmax(0,1fr)_auto] items-center gap-x-2 mx-1.5 px-2">
+                  <span aria-hidden="true" />
+                  <button
+                    type="button"
+                    onClick={() => onToggleSessionList?.(ws.hash)}
+                    className="ace-sidebar-meta-text py-[5px] rounded-md text-left text-[13px] text-fg-mute hover:text-fg hover:bg-surface-hi transition"
+                  >
+                    {projectedSessions.action === 'expand' ? '展开显示' : '折叠显示'}
+                  </button>
+                </div>
               )}
             </>
           )}
@@ -857,39 +859,40 @@ function NoWorkspaceSessionGroup({
   const projectedSessions = sidebarSessionProjection(sessions, sessionListExpanded);
 
   return (
-    <div className="mb-2">
-      <div className="px-4 pt-1 pb-1 text-[10px] font-semibold uppercase tracking-wider text-fg-mute">对话</div>
-      <div className="my-1">
-        {sessions.length === 0 ? (
-          <div className="mx-1.5 ml-[22px] px-2 py-[3px] text-[11px] text-fg-mute italic">
-            {sessionsLoading ? '加载中...' : '暂无对话'}
-          </div>
-        ) : (
-          <>
-            {projectedSessions.visibleSessions.map((s) => (
-              <SessionRow
-                key={`no-workspace-${s.id}`}
-                s={s}
-                active={sessionMatchesRevealTarget(s, activeTarget) || (!activeTarget?.sessionId && s.id === activeId)}
-                pinEnabled={false}
-                pendingQuestion={sessionHasPendingQuestion(s, pendingQuestionSessionIds)}
-                onSelect={onSelect}
-                onArchive={onArchive}
-                onRename={onRenameSession}
-              />
-            ))}
-            {projectedSessions.collapsible && (
+    <div className="my-1">
+      {sessions.length === 0 ? (
+        <div className="ace-sidebar-tree-row-grid ace-sidebar-meta-text grid grid-cols-[24px_minmax(0,1fr)_auto] items-center gap-x-2 mx-1.5 px-2 py-[4px] text-[13px] text-fg-mute italic">
+          <span aria-hidden="true" />
+          <span>{sessionsLoading ? '加载中...' : '暂无任务'}</span>
+        </div>
+      ) : (
+        <>
+          {projectedSessions.visibleSessions.map((s) => (
+            <SessionRow
+              key={`no-workspace-${s.id}`}
+              s={s}
+              active={sessionMatchesRevealTarget(s, activeTarget) || (!activeTarget?.sessionId && s.id === activeId)}
+              pinEnabled={false}
+              pendingQuestion={sessionHasPendingQuestion(s, pendingQuestionSessionIds)}
+              onSelect={onSelect}
+              onArchive={onArchive}
+              onRename={onRenameSession}
+            />
+          ))}
+          {projectedSessions.collapsible && (
+            <div className="ace-sidebar-tree-row-grid grid grid-cols-[24px_minmax(0,1fr)_auto] items-center gap-x-2 mx-1.5 px-2">
+              <span aria-hidden="true" />
               <button
                 type="button"
                 onClick={() => onToggleSessionList?.(NO_WORKSPACE_SESSION_LIST_KEY)}
-                className="block w-[calc(100%-28px)] mx-1.5 ml-[22px] px-2 py-[5px] rounded-md text-left text-[12px] text-fg-mute hover:text-fg hover:bg-surface-hi transition"
+                className="ace-sidebar-meta-text py-[5px] rounded-md text-left text-[13px] text-fg-mute hover:text-fg hover:bg-surface-hi transition"
               >
                 {projectedSessions.action === 'expand' ? '展开显示' : '折叠显示'}
               </button>
-            )}
-          </>
-        )}
-      </div>
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }
@@ -901,7 +904,9 @@ export function Sidebar({
   collapsed,
   width = 200,
   onOpenHome,
-  onOpenSettingsSection,
+  onNewTask,
+  onNewLoop,
+  onSearchTasks,
   pendingQuestionSessionIds = new Set(),
 }) {
   const [workspaces,  setWorkspaces]  = useState([]);
@@ -913,6 +918,11 @@ export function Sidebar({
   const [sessionLoadedWorkspaces, setSessionLoadedWorkspaces] = useState(() => new Set());
   const [expanded,    setExpanded]    = useState(new Set());
   const [expandedSessionLists, setExpandedSessionLists] = useState(new Set());
+  const [sectionExpansion, setSectionExpansion] = usePreference(
+    SIDEBAR_SECTIONS_STORAGE_KEY,
+    DEFAULT_SIDEBAR_SECTION_EXPANSION,
+    validateSidebarSectionExpansion,
+  );
   const [activeWorkspaceHash, setActiveWorkspaceHash] = useState('');
   const refreshingRef = useRef(false);
   const pendingRefreshHashRef = useRef('');
@@ -932,6 +942,7 @@ export function Sidebar({
   const opencodeImportPollRef = useRef(0);
   const [opencodeImportedHighlightKeys, setOpencodeImportedHighlightKeys] = useState(() => new Set());
   const opencodeImportedHighlightTimersRef = useRef(new Map());
+  const revealedSectionTargetRef = useRef('');
   const revealTarget = useMemo(() => sidebarRevealTarget(activeRef), [activeRef]);
 
   const updateExpanded = useCallback((updater) => {
@@ -941,6 +952,10 @@ export function Sidebar({
       return next;
     });
   }, []);
+
+  const toggleSidebarSection = useCallback((sectionId) => {
+    setSectionExpansion((prev) => ({ ...prev, [sectionId]: !prev[sectionId] }));
+  }, [setSectionExpansion]);
 
   const syncRetainedSessionIds = useCallback((ids) => {
     const next = new Set(Array.from(ids || []).filter(Boolean));
@@ -1592,9 +1607,28 @@ export function Sidebar({
     () => renderedSessions.filter((session) => !isNoWorkspaceSession(session)),
     [renderedSessions],
   );
+  const pinnedSessions = useMemo(
+    () => pinnedSessionsForList(workspaceSessions, pinnedByWorkspace, pinnedOrderItems),
+    [pinnedByWorkspace, pinnedOrderItems, workspaceSessions],
+  );
+  const sectionCounts = useMemo(
+    () => sidebarSectionCounts({ pinnedSessions, noWorkspaceSessions, workspaces }),
+    [noWorkspaceSessions, pinnedSessions, workspaces],
+  );
 
   useEffect(() => {
     if (!revealTarget.sessionId) return undefined;
+    const pinnedTarget = pinnedSessions.some((session) => sessionMatchesRevealTarget(session, revealTarget));
+    const targetSection = pinnedTarget
+      ? SIDEBAR_SECTION_IDS.PINNED
+      : (revealTarget.noWorkspace ? SIDEBAR_SECTION_IDS.TASKS : SIDEBAR_SECTION_IDS.WORKSPACES);
+    const sectionTargetKey = `${targetSection}\u0000${revealTarget.workspaceHash || ''}\u0000${revealTarget.sessionId}`;
+    if (revealedSectionTargetRef.current !== sectionTargetKey) {
+      revealedSectionTargetRef.current = sectionTargetKey;
+      setSectionExpansion((prev) => (
+        prev[targetSection] ? prev : { ...prev, [targetSection]: true }
+      ));
+    }
     const listKey = revealTarget.noWorkspace ? NO_WORKSPACE_SESSION_LIST_KEY : revealTarget.workspaceHash;
     const sourceSessions = revealTarget.noWorkspace
       ? noWorkspaceSessions
@@ -1635,7 +1669,7 @@ export function Sidebar({
       row?.scrollIntoView?.({ block: 'nearest' });
     });
     return () => window.cancelAnimationFrame?.(frame);
-  }, [expandedSessionLists, noWorkspaceSessions, revealTarget, updateExpanded, workspaceSessions]);
+  }, [expandedSessionLists, noWorkspaceSessions, pinnedSessions, revealTarget, setSectionExpansion, updateExpanded, workspaceSessions]);
 
   // 把已加载的跨 workspace sessions / pinned order / workspaceName 推到桌面 tray 菜单。
   // pushTrayMenu 内部 100ms debounce + 无 bridge 时 no-op。
@@ -2023,10 +2057,10 @@ export function Sidebar({
         return next;
       });
       setActiveWorkspaceHash(nextHash);
-      toast({ kind: 'ok', text: '已从桌面项目列表移除' });
+      toast({ kind: 'ok', text: '已从桌面工作区列表移除' });
       await refresh(nextHash);
     } catch (e) {
-      toast({ kind: 'err', text: '移除项目失败:' + (e.message || '') });
+      toast({ kind: 'err', text: '移除工作区失败:' + (e.message || '') });
     }
   };
 
@@ -2083,7 +2117,7 @@ export function Sidebar({
       });
       refresh(workspaceHash).catch(() => {});
     } catch (e) {
-      toast({ kind: 'err', text: '新增会话失败:' + (e.message || '') });
+      toast({ kind: 'err', text: '新建任务失败:' + (e.message || '') });
     }
   };
 
@@ -2096,7 +2130,7 @@ export function Sidebar({
       // native 报告环境问题(如 Linux 缺 zenity/kdialog):必须可见地提示,
       // 不能与"用户取消"一样静默 —— 否则按钮表现为点了没反应。
       if (ws.error) {
-        toast({ kind: 'err', text: '添加项目失败:' + ws.error });
+        toast({ kind: 'err', text: '添加工作区失败:' + ws.error });
         return;
       }
       if (!ws || !ws.hash) return;
@@ -2109,19 +2143,16 @@ export function Sidebar({
       if (!hasDesktopBridge() && (e.status === 404 || e.status === 501)) {
         toast({ kind: 'info', text: '需在 desktop webapp 中使用' });
       } else {
-        toast({ kind: 'err', text: '添加项目失败:' + (e.message || '') });
+        toast({ kind: 'err', text: '添加工作区失败:' + (e.message || '') });
       }
     }
   };
 
-  const collapseAllWorkspaces = useCallback(() => {
-    workspaceCollapseAllRef.current = true;
-    updateExpanded(new Set());
-  }, [updateExpanded]);
-
-  const pinnedSessions = pinnedSessionsForList(workspaceSessions, pinnedByWorkspace, pinnedOrderItems);
-  const showNoWorkspaceSessions =
-    noWorkspaceSessions.length > 0 || !!(activeRef?.noWorkspace || activeRef?.no_workspace);
+  const sidebarNavCallbacks = {
+    onNewTask,
+    onNewLoop,
+    onSearchTasks,
+  };
   const workspaceForSession = (session) => {
     const hash = session.workspace_hash || session.workspaceHash || '';
     return workspaces.find((w) => w.hash === hash) || {
@@ -2145,59 +2176,55 @@ export function Sidebar({
       >
       <div className="ace-sidebar-content flex-1 flex flex-col min-h-0">
         <div className="ace-sidebar-main flex-1 flex flex-col min-h-0">
-          <div className="ace-sidebar-heading flex items-center justify-between px-2 pt-2.5 pb-1 text-[10px] font-semibold uppercase tracking-wider text-fg-mute">
-            <span>项目</span>
-            <div className="flex items-center">
-              <button
-                type="button"
-                onClick={collapseAllWorkspaces}
-                className="ace-sidebar-heading-collapse-btn"
-                title="全部折叠项目"
-                aria-label="全部折叠项目"
-              >
-                <VsIcon name="collapseAll" size={16} />
-              </button>
-              <button
-                data-tour-target="sidebar-add-project"
-                type="button"
-                onClick={onAddWorkspace}
-                className="w-5 h-5 rounded text-fg-mute hover:text-fg hover:bg-surface-hi text-[14px] leading-none flex items-center justify-center"
-                title="添加项目"
-                aria-label="添加项目"
-              ><VsIcon name="folderAdd" size={15} /></button>
-            </div>
+          <div className="ace-sidebar-fixed-nav shrink-0 px-1.5 pt-2 pb-2 border-b border-border">
+            {SIDEBAR_NAV_ITEMS.map((item) => (
+              <SidebarNavItem
+                key={item.id}
+                item={item}
+                onClick={sidebarNavCallbacks[item.callback]}
+              />
+            ))}
           </div>
           <div ref={sidebarScrollRef} className="ace-sidebar-scroll flex-1 overflow-y-auto pb-2">
-            {pinnedSessions.length > 0 && (
-              <div className="mb-2">
-                <div className="px-4 pt-1 pb-1 text-[10px] font-semibold uppercase tracking-wider text-fg-mute">置顶</div>
-                <div className="my-1">
-                  {pinnedSessions.map((s) => {
-                    const rowKey = pinnedSessionKey(s.workspace_hash || s.workspaceHash || '', s.id);
-                    return (
-                      <SessionRow
-                        key={`pinned-${s.workspace_hash || ''}-${s.id}`}
-                        s={s}
-                        pinned
-                        active={sessionMatchesRevealTarget(s, revealTarget) || (!revealTarget.sessionId && s.id === activeId)}
-                        pendingQuestion={sessionHasPendingQuestion(s, pendingQuestionSessionIds)}
-                        dragging={pinnedDragState?.sourceKey === rowKey}
-                        dropPlacement={pinnedDragState?.targetKey === rowKey ? pinnedDragState.placement : ''}
-                        onPinnedPointerDown={handlePinnedPointerDown}
-                        onSelect={(session) => {
-                          if (suppressPinnedClickRef.current) return;
-                          selectSession(workspaceForSession(session), session);
-                        }}
-                        onTogglePin={togglePinnedSession}
-                        onArchive={archiveSession}
-                        onRename={renameSession}
-                      />
-                    );
-                  })}
-                </div>
+            <SidebarSectionHeader
+              sectionId={SIDEBAR_SECTION_IDS.PINNED}
+              count={sectionCounts.pinned}
+              expanded={sectionExpansion.pinned}
+              onToggle={() => toggleSidebarSection(SIDEBAR_SECTION_IDS.PINNED)}
+            />
+            {sectionExpansion.pinned && (
+              <div className="my-1">
+                {pinnedSessions.map((s) => {
+                  const rowKey = pinnedSessionKey(s.workspace_hash || s.workspaceHash || '', s.id);
+                  return (
+                    <SessionRow
+                      key={`pinned-${s.workspace_hash || ''}-${s.id}`}
+                      s={s}
+                      pinned
+                      active={sessionMatchesRevealTarget(s, revealTarget) || (!revealTarget.sessionId && s.id === activeId)}
+                      pendingQuestion={sessionHasPendingQuestion(s, pendingQuestionSessionIds)}
+                      dragging={pinnedDragState?.sourceKey === rowKey}
+                      dropPlacement={pinnedDragState?.targetKey === rowKey ? pinnedDragState.placement : ''}
+                      onPinnedPointerDown={handlePinnedPointerDown}
+                      onSelect={(session) => {
+                        if (suppressPinnedClickRef.current) return;
+                        selectSession(workspaceForSession(session), session);
+                      }}
+                      onTogglePin={togglePinnedSession}
+                      onArchive={archiveSession}
+                      onRename={renameSession}
+                    />
+                  );
+                })}
               </div>
             )}
-            {showNoWorkspaceSessions && (
+            <SidebarSectionHeader
+              sectionId={SIDEBAR_SECTION_IDS.TASKS}
+              count={sectionCounts.tasks}
+              expanded={sectionExpansion.tasks}
+              onToggle={() => toggleSidebarSection(SIDEBAR_SECTION_IDS.TASKS)}
+            />
+            {sectionExpansion.tasks && (
               <NoWorkspaceSessionGroup
                 sessions={noWorkspaceSessions}
                 sessionsLoading={false}
@@ -2211,38 +2238,60 @@ export function Sidebar({
                 pendingQuestionSessionIds={pendingQuestionSessionIds}
               />
             )}
-            {workspaces.map((ws) => {
-              const items = filterPinnedSessions(
-                workspaceSessions.filter((s) => s.workspace_hash ? s.workspace_hash === ws.hash : !!ws.active),
-                pinnedByWorkspace,
-              );
-              return (
-                <WorkspaceGroup
-                  key={ws.hash}
-                  ws={ws}
-                  expanded={expanded.has(ws.hash)}
-                  onToggle={onToggle}
-                  sessions={items}
-                  sessionListExpanded={expandedSessionLists.has(ws.hash)}
-                  onToggleSessionList={toggleSessionListExpanded}
-                  activeId={activeId}
-                  activeTarget={revealTarget}
-                  onSelect={(session) => selectSession(ws, session)}
-                  onRename={onRename}
-                  onActivate={onActivate}
-                  onNewSession={createSessionInWorkspace}
-                  onImportOpencode={openOpencodeImportDialog}
-                  onRemove={hasDesktopRemoveWorkspace() ? removeWorkspace : undefined}
-                  onTogglePin={togglePinnedSession}
-                  onArchive={archiveSession}
-                  onRenameSession={renameSession}
-                  pendingQuestionSessionIds={pendingQuestionSessionIds}
-                  sessionsLoading={sessionLoadingWorkspaces.has(ws.hash) || !sessionLoadedWorkspaces.has(ws.hash)}
-                  opencodeImportCount={opencodeImportPreviews.get(ws.hash)?.count || 0}
-                  opencodeImportedHighlightKeys={opencodeImportedHighlightKeys}
-                />
-              );
-            })}
+            <SidebarSectionHeader
+              sectionId={SIDEBAR_SECTION_IDS.WORKSPACES}
+              count={sectionCounts.workspaces}
+              expanded={sectionExpansion.workspaces}
+              onToggle={() => toggleSidebarSection(SIDEBAR_SECTION_IDS.WORKSPACES)}
+              actions={(
+                <button
+                  data-tour-target="sidebar-add-project"
+                  type="button"
+                  onClick={onAddWorkspace}
+                  className="w-6 h-6 rounded text-fg-mute hover:text-fg hover:bg-surface-hi flex items-center justify-center shrink-0 transition"
+                  title="添加工作区"
+                  aria-label="添加工作区"
+                >
+                  <VsIcon name="folderAdd" size={16} />
+                </button>
+              )}
+            />
+            {sectionExpansion.workspaces && (
+              <div className="my-1">
+                {workspaces.map((ws) => {
+                  const items = filterPinnedSessions(
+                    workspaceSessions.filter((s) => s.workspace_hash ? s.workspace_hash === ws.hash : !!ws.active),
+                    pinnedByWorkspace,
+                  );
+                  return (
+                    <WorkspaceGroup
+                      key={ws.hash}
+                      ws={ws}
+                      expanded={expanded.has(ws.hash)}
+                      onToggle={onToggle}
+                      sessions={items}
+                      sessionListExpanded={expandedSessionLists.has(ws.hash)}
+                      onToggleSessionList={toggleSessionListExpanded}
+                      activeId={activeId}
+                      activeTarget={revealTarget}
+                      onSelect={(session) => selectSession(ws, session)}
+                      onRename={onRename}
+                      onActivate={onActivate}
+                      onNewSession={createSessionInWorkspace}
+                      onImportOpencode={openOpencodeImportDialog}
+                      onRemove={hasDesktopRemoveWorkspace() ? removeWorkspace : undefined}
+                      onTogglePin={togglePinnedSession}
+                      onArchive={archiveSession}
+                      onRenameSession={renameSession}
+                      pendingQuestionSessionIds={pendingQuestionSessionIds}
+                      sessionsLoading={sessionLoadingWorkspaces.has(ws.hash) || !sessionLoadedWorkspaces.has(ws.hash)}
+                      opencodeImportCount={opencodeImportPreviews.get(ws.hash)?.count || 0}
+                      opencodeImportedHighlightKeys={opencodeImportedHighlightKeys}
+                    />
+                  );
+                })}
+              </div>
+            )}
           </div>
           {pinnedDragGhost && (
             <div
@@ -2259,7 +2308,6 @@ export function Sidebar({
             </div>
           )}
         </div>
-        <CustomSidebarSection onOpenSettingsSection={onOpenSettingsSection} />
       </div>
       </aside>
       <OpencodeImportDialog

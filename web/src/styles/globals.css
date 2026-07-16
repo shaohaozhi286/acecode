@@ -2922,6 +2922,16 @@ body {
 .text-sm { font-size: var(--ace-font-size-sm) !important; line-height: 1.5 !important; }
 .text-xl { font-size: var(--ace-font-size-xl) !important; line-height: 1.75rem !important; }
 
+/* Sidebar navigation follows its own explicit type scale from the layout spec.
+   These selectors intentionally outrank the global user-size remapping above. */
+.ace-sidebar .ace-sidebar-section-text,
+.ace-sidebar .ace-sidebar-meta-text {
+  font-size: 13px !important;
+}
+.ace-sidebar .ace-sidebar-primary-text {
+  font-size: 14px !important;
+}
+
 /* Tool transcript chrome uses the body face at a fixed compact size. */
 .ace-tool-call-text,
 .ace-tool-call-text button,
