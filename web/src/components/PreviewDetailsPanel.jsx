@@ -240,6 +240,7 @@ export function PreviewDetailsPanel({
           expandedFile={active.expandedFile || ''}
           expandedFileRevision={active.expandedFileRevision || 0}
           onSelectFile={onSelectChangeFile}
+          onOpenFilePreview={onOpenFilePreview}
         />
       );
     }

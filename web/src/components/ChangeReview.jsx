@@ -1,22 +1,14 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import * as Diff2Html from 'diff2html';
 import { hunksToUnifiedDiff } from '../lib/diff.js';
-import {
-  DESKTOP_CONTEXT_ACTION_EVENT,
-  DESKTOP_CONTEXT_ACTIONS,
-  joinWorkspacePath,
-} from '../lib/desktopContextMenu.js';
+import { joinWorkspacePath } from '../lib/desktopContextMenu.js';
 import { summarizeChangeGroups } from '../lib/sessionChanges.js';
-import { reconcileOpenFiles, restoredScrollTop } from '../lib/changeReviewStability.js';
 import { normalizeTreePath } from '../lib/fileTreeChangeStatus.js';
-import { copyTextToSystemClipboard } from '../lib/systemClipboard.js';
 import { todoChecklistPresentation } from '../lib/todoChecklist.js';
 import { clsx } from '../lib/format.js';
+import { ChangeReviewDetails } from './ChangeReviewDetails.jsx';
 import { VsIcon } from './Icon.jsx';
-import { toast } from './Toast.jsx';
-
-const REVIEW_SIDE_BY_SIDE_MIN_WIDTH = 640;
 
 function safeGroups(groups) {
   return Array.isArray(groups) ? groups : [];
@@ -26,23 +18,6 @@ function normalizedSummary(groups, summary) {
   return summary && typeof summary === 'object'
     ? summary
     : summarizeChangeGroups(groups);
-}
-
-function matchingGroupFile(groups, file) {
-  const target = normalizeTreePath(file);
-  if (!target) return '';
-  const group = safeGroups(groups).find((item) => normalizeTreePath(item?.file) === target);
-  return group?.file || '';
-}
-
-export async function copyDiffText(text, okText) {
-  if (!text) {
-    toast({ kind: 'info', text: '没有可复制的 diff' });
-    return;
-  }
-  const result = await copyTextToSystemClipboard(text);
-  if (result.ok) toast({ kind: 'ok', text: okText });
-  else toast({ kind: 'err', text: '复制失败:' + (result.error || '') });
 }
 
 export function ChangeTotals({ summary, compact = false }) {
@@ -525,233 +500,63 @@ export function ChangeReviewPanel({
   summary,
   cwd = '',
   initialExpandedFile = '',
-  title = '审查',
   dataRegion = 'side-panel',
   initialExpandedFileRevision = 0,
   onSelectFile,
+  onOpenFile,
 }) {
   const list = safeGroups(groups);
   const changeSummary = normalizedSummary(list, summary);
-  const initialOpenFile = matchingGroupFile(list, initialExpandedFile)
-    || (initialExpandedFile ? '' : (list[0]?.file || ''));
-  const [openFiles, setOpenFiles] = useState(() => new Set(
-    initialOpenFile ? [initialOpenFile] : [],
-  ));
-  const [scrollRequest, setScrollRequest] = useState(0);
-  const panelRef = useRef(null);
-  // 面板太窄时双栏 diff 列宽被挤到 ~150px,文本断行严重不可读;低于阈值切回 line-by-line。
-  // 默认 line-by-line 是因为 ResizeObserver 第一帧前没数据,先保守渲染避免初始闪烁。
-  const [outputFormat, setOutputFormat] = useState('line-by-line');
-
-  useEffect(() => {
-    setOpenFiles((prev) => {
-      // 集合内容不变时保留原 Set 身份,setState 经 Object.is
-      // 直接跳过 —— 流式期间(groups 引用已被上游按签名稳定)不再每帧多渲染一次。
-      const files = list.map((g) => g.file);
-      if (!initialExpandedFile) return reconcileOpenFiles(prev, files);
-      const previous = prev instanceof Set ? prev : new Set();
-      const valid = new Set(files.filter(Boolean));
-      const next = new Set([...previous].filter((file) => valid.has(file)));
-      if (next.size === previous.size && [...next].every((file) => previous.has(file))) {
-        return previous;
-      }
-      return next;
-    });
-  }, [initialExpandedFile, list]);
-
-  // 滚动位置兜底:diff 内容替换让浏览器钳制了 scrollTop 时(内容瞬时塌缩
-  // 会直接钳到 0),在 paint 与钳制 scroll 事件派发之前恢复到用户位置。
-  // 依赖 [list] 是精确的内容键:groups 引用经上游签名稳定化,只在 diff
-  // 内容真实变化时换引用;本地状态渲染(折叠切换等)不会触发本效应,
-  // 折叠引发的钳制因此被视为用户意图、正常记录。
-  const fileListRef = useRef(null);
-  const savedScrollTopRef = useRef(0);
-  const suppressScrollRecordRef = useRef(false);
-  const pendingScrollFileRef = useRef('');
-  const syncedExpandedRequestRef = useRef('');
-
-  const requestFileFocus = (file) => {
-    if (!file) return;
-    pendingScrollFileRef.current = file;
-    setOpenFiles((prev) => {
-      const current = prev instanceof Set ? prev : new Set();
-      if (current.has(file)) return current;
-      const next = new Set(current);
-      next.add(file);
-      return next;
-    });
-    setScrollRequest((prev) => prev + 1);
-  };
-  useLayoutEffect(() => {
-    const el = fileListRef.current;
-    if (!el) return undefined;
-    suppressScrollRecordRef.current = true;
-    const target = restoredScrollTop({
-      savedScrollTop: savedScrollTopRef.current,
-      currentScrollTop: el.scrollTop,
-      scrollHeight: el.scrollHeight,
-      clientHeight: el.clientHeight,
-    });
-    if (target != null) el.scrollTop = target;
-    const frame = window.requestAnimationFrame(() => {
-      suppressScrollRecordRef.current = false;
-    });
-    return () => {
-      window.cancelAnimationFrame(frame);
-      suppressScrollRecordRef.current = false;
+  const rows = useMemo(() => list.map((group) => {
+    const additions = Number(group.totalAdditions || 0);
+    const deletions = Number(group.totalDeletions || 0);
+    return {
+      path: group.file,
+      status: group.status || 'M',
+      additions,
+      deletions,
+      statLabel: `+${additions} -${deletions}`,
+      diff: {
+        state: 'ready',
+        text: hunksToUnifiedDiff(group.hunks, group.file),
+      },
     };
-  }, [list]);
-
-  useLayoutEffect(() => {
-    const requestKey = `${initialExpandedFile}\u0000${initialExpandedFileRevision}`;
-    if (!initialExpandedFile) {
-      syncedExpandedRequestRef.current = '';
-      return;
-    }
-    if (syncedExpandedRequestRef.current === requestKey) return;
-    const file = matchingGroupFile(list, initialExpandedFile);
-    if (!file) return;
-    syncedExpandedRequestRef.current = requestKey;
-    requestFileFocus(file);
-  }, [initialExpandedFile, initialExpandedFileRevision, list]);
-
-  useLayoutEffect(() => {
-    const file = pendingScrollFileRef.current;
-    const el = fileListRef.current;
-    if (!file || !el || !openFiles.has(file)) return;
-    const target = Array.from(el.querySelectorAll('[data-review-file-section]'))
-      .find((node) => node.getAttribute('data-review-file-section') === file);
-    if (!target) return;
-    pendingScrollFileRef.current = '';
-    suppressScrollRecordRef.current = true;
-    const listRect = el.getBoundingClientRect();
-    const targetRect = target.getBoundingClientRect();
-    el.scrollTop = Math.max(0, el.scrollTop + targetRect.top - listRect.top);
-    savedScrollTopRef.current = el.scrollTop;
-    const frame = window.requestAnimationFrame(() => {
-      suppressScrollRecordRef.current = false;
-    });
-    return () => {
-      window.cancelAnimationFrame(frame);
-      suppressScrollRecordRef.current = false;
-    };
-  }, [openFiles, scrollRequest]);
-
-  useEffect(() => {
-    const el = panelRef.current;
-    if (!el || typeof ResizeObserver === 'undefined') return;
-    const ro = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        const w = entry.contentRect.width;
-        setOutputFormat(w >= REVIEW_SIDE_BY_SIDE_MIN_WIDTH ? 'side-by-side' : 'line-by-line');
-      }
-    });
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
-
-  useEffect(() => {
-    const handler = (event) => {
-      const detail = event.detail || {};
-      const { action, target } = detail;
-      if (target?.type !== 'review') return;
-
-      if (action === DESKTOP_CONTEXT_ACTIONS.COPY_FILE_DIFF) {
-        detail.handled = true;
-        const group = list.find((item) => item.file === target.file);
-        copyDiffText(group ? hunksToUnifiedDiff(group.hunks, group.file) : '', '已复制文件 diff');
-      } else if (action === DESKTOP_CONTEXT_ACTIONS.COPY_ALL_DIFFS) {
-        detail.handled = true;
-        const text = list
-          .map((group) => hunksToUnifiedDiff(group.hunks, group.file))
-          .filter(Boolean)
-          .join('\n\n');
-        copyDiffText(text, '已复制全部 diff');
-      } else if (action === DESKTOP_CONTEXT_ACTIONS.EXPAND_ALL_DIFFS) {
-        detail.handled = true;
-        setOpenFiles(new Set(list.map((group) => group.file).filter(Boolean)));
-      } else if (action === DESKTOP_CONTEXT_ACTIONS.COLLAPSE_ALL_DIFFS) {
-        detail.handled = true;
-        setOpenFiles(new Set());
-      }
-    };
-    window.addEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
-    return () => window.removeEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
-  }, [list]);
-
-  if (!changeSummary.hasChanges) {
-    return (
-      <div className="ace-empty-state">
-        <div>本会话暂无文件变更</div>
-        <div className="text-[10px] opacity-70">仅显示 file_edit / file_write 工具的改动</div>
-      </div>
-    );
-  }
-
-  const toggleFile = (file, currentlyOpen) => {
-    if (currentlyOpen) {
-      setOpenFiles((prev) => {
-        const next = new Set(prev instanceof Set ? prev : []);
-        next.delete(file);
-        return next;
-      });
-      return;
-    }
-    onSelectFile?.(file);
-    requestFileFocus(file);
-  };
+  }), [list]);
+  const diffByPath = useMemo(
+    () => new Map(rows.map((row) => [normalizeTreePath(row.path), row.diff.text])),
+    [rows],
+  );
+  const getFileDiffText = useCallback(
+    (path) => diffByPath.get(normalizeTreePath(path)) || '',
+    [diffByPath],
+  );
+  const getAllDiffText = useCallback(
+    () => rows.map((row) => row.diff.text).filter(Boolean).join('\n\n'),
+    [rows],
+  );
 
   return (
-    <div className="ace-review-panel" data-change-region={dataRegion} ref={panelRef}>
-      <div
-        className="ace-review-summary"
-        data-desktop-review-kind="summary"
-        data-desktop-review-additions={String(changeSummary.totalAdditions || 0)}
-        data-desktop-review-deletions={String(changeSummary.totalDeletions || 0)}
-        data-desktop-review-file-count={String(changeSummary.fileCount || 0)}
-      >
-        <div className="ace-review-title">
-          <VsIcon name="editWindow" size={15} />
-          <span>{title}</span>
-        </div>
-        <ChangeTotals summary={changeSummary} />
-      </div>
-      <div
-        className="ace-review-file-list"
-        ref={fileListRef}
-        onScroll={(event) => {
-          // 内容替换那一帧浏览器钳制/恢复产生的 scroll 事件不算用户意图,
-          // 不写入 savedScrollTopRef,否则用户位置会被钳制值(0)覆盖,
-          // 后续帧就无从恢复了。
-          if (suppressScrollRecordRef.current) return;
-          savedScrollTopRef.current = event.currentTarget.scrollTop;
-        }}
-      >
-        {list.map((group) => {
-          const open = openFiles.has(group.file);
-          return (
-            <section
-              key={group.file}
-              className="ace-review-file"
-              data-review-file-section={group.file}
-            >
-              <ChangeFileButton
-                group={group}
-                open={open}
-                selected={open}
-                cwd={cwd}
-                onClick={() => toggleFile(group.file, open)}
-              />
-              {open && (
-                <div className="ace-review-diff-scroll">
-                  <DiffPreview group={group} outputFormat={outputFormat} className="ace-review-diff" />
-                </div>
-              )}
-            </section>
-          );
-        })}
-      </div>
-    </div>
+    <ChangeReviewDetails
+      rows={rows}
+      ready
+      summaryLabel={`${changeSummary.fileCount || 0} 个文件已更改`}
+      fileCount={changeSummary.fileCount || 0}
+      totalAdditions={changeSummary.totalAdditions || 0}
+      totalDeletions={changeSummary.totalDeletions || 0}
+      cwd={cwd}
+      dataRegion={dataRegion}
+      initialExpandedFile={initialExpandedFile}
+      initialExpandedFileRevision={initialExpandedFileRevision}
+      initialOpenFirst
+      selectedFile={initialExpandedFile}
+      emptyMessage="本会话暂无文件变更"
+      emptyDetail="仅显示 file_edit / file_write 工具的改动"
+      onSelectFile={onSelectFile}
+      onOpenFile={onOpenFile}
+      getFileDiffText={getFileDiffText}
+      getAllDiffText={getAllDiffText}
+      contentRevision={list}
+    />
   );
 }
 
@@ -762,6 +567,7 @@ export function SessionChangeDetails({
   expandedFile = '',
   expandedFileRevision = 0,
   onSelectFile,
+  onOpenFilePreview,
 }) {
   return (
     <ChangeReviewPanel
@@ -771,7 +577,7 @@ export function SessionChangeDetails({
       initialExpandedFile={expandedFile}
       initialExpandedFileRevision={expandedFileRevision}
       onSelectFile={onSelectFile}
-      title="会话变更"
+      onOpenFile={onOpenFilePreview}
       dataRegion="preview-panel"
     />
   );

@@ -1,4 +1,4 @@
-// TopBar:logo + 快捷工具(项目栏收缩/新对话/搜索/快捷菜单) + 主题切换 + 设置
+// TopBar:logo + 快捷工具(项目栏收缩/导航/搜索/快捷菜单) + 主题切换 + 设置
 
 import { Fragment, useEffect, useRef, useState } from 'react';
 import { useTheme } from '../theme.jsx';
@@ -232,12 +232,6 @@ export function TopBar({
           {updateReady ? '已更新' : updateRunning ? '更新中' : '更新'}
         </button>
       )}
-      <QuickBtn data-tour-target="topbar-new-session" title="新对话" onClick={onNewSession}>
-        <VsIcon name="newSession" size={16} />
-      </QuickBtn>
-      <QuickBtn title="循环" onClick={onOpenLoop}>
-        <VsIcon name="alarm" size={16} />
-      </QuickBtn>
       <QuickBtn title={searchHotkeyHint} onClick={onOpenSearch}>
         <VsIcon name="search" size={14} />
       </QuickBtn>

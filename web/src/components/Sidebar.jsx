@@ -227,6 +227,7 @@ function SidebarNavItem({ item, onClick }) {
   return (
     <button
       type="button"
+      data-tour-target={item.id === 'new-task' ? 'sidebar-new-task' : undefined}
       onClick={onClick}
       className="ace-sidebar-primary-text w-full flex items-center gap-[7px] px-3 py-[3px] rounded-md text-[14px] text-fg hover:bg-surface-hi transition text-left"
     >

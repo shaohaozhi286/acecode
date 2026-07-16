@@ -78,6 +78,9 @@ run('Desktop tour builds seven ordered stable steps, distinguishes workspace ent
   assert.equal(configured[1].title, '添加工作区');
   assert.match(configured[1].content, /左侧工作区列表/);
   assert.match(configured[1].content, /本地代码目录/);
+  assert.equal(configured[2].target, '[data-tour-target="sidebar-new-task"]');
+  assert.equal(configured[2].title, '新建任务');
+  assert.match(configured[2].content, /左侧/);
   assert.match(configured[2].content, /不会创建工作区目录/);
   assert.match(configured[2].content, /添加工作区/);
   assert.match(missing[5].title, /配置.*模型/);

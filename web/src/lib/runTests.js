@@ -36,6 +36,7 @@ import './gitSessionPill.test.js';
 import './gitChanges.test.js';
 import './lspStatus.test.js';
 import './changeReviewStability.test.js';
+import './changeReviewDetailsArchitecture.test.js';
 import './changeDockDismissal.test.js';
 import './taskCompleteSummary.test.js';
 import './sessionTitle.test.js';

@@ -1,7 +1,7 @@
 export const DESKTOP_GUIDED_TOUR_TARGETS = Object.freeze({
   sidebar: '[data-tour-target="sidebar"]',
   addProject: '[data-tour-target="sidebar-add-project"]',
-  newSession: '[data-tour-target="topbar-new-session"]',
+  newSession: '[data-tour-target="sidebar-new-task"]',
   workspace: '[data-tour-target="home-workspace"]',
   composer: '[data-tour-target="home-composer"]',
   status: '[data-tour-target="statusbar"]',
@@ -80,9 +80,9 @@ export function buildDesktopGuidedTourSteps({ hasModel = true } = {}) {
     {
       id: 'new-session',
       target: DESKTOP_GUIDED_TOUR_TARGETS.newSession,
-      placement: 'bottom-start',
-      title: '新对话（开始新任务）',
-      content: '顶部纸笔“+”会回到新对话首页，默认使用“无工作区”。它不会创建工作区目录；要加入本地代码目录，请使用上一步的“添加工作区”。',
+      placement: 'right-start',
+      title: '新建任务',
+      content: '左侧“新建任务”会回到新任务首页，默认使用“无工作区”。它不会创建工作区目录；要加入本地代码目录，请使用上一步的“添加工作区”。',
     },
     {
       id: 'workspace',
