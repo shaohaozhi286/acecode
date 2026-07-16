@@ -84,6 +84,7 @@ import './newSession.test.js';
 import './navigationHistory.test.js';
 import './gridPinnedSessions.test.js';
 import './sidebarNavigation.test.js';
+import './sidebarWorkspaceHeadingArchitecture.test.js';
 import './sidebarCustomSectionArchitecture.test.js';
 import './sidebarSessions.test.js';
 import './sessionJump.test.js';

@@ -364,7 +364,7 @@ function SidebarSectionHeader({ sectionId, count, expanded, onToggle, actions = 
   return (
     <div
       data-sidebar-section={sectionId}
-      className="ace-sidebar-section-text flex items-center gap-0.5 px-3 pt-3 pb-1 text-[13px] font-medium text-fg-mute"
+      className="ace-sidebar-section-header ace-sidebar-section-text flex items-center gap-0.5 px-3 pt-3 pb-1 text-[13px] font-medium text-fg-mute"
     >
       <button
         type="button"
@@ -386,7 +386,7 @@ function SidebarSectionHeader({ sectionId, count, expanded, onToggle, actions = 
         <SidebarDisclosure expanded={expanded} />
       </button>
       {actions && (
-        <span data-sidebar-section-actions={sectionId} className="ml-auto flex items-center shrink-0">
+        <span data-sidebar-section-actions={sectionId} className="ace-sidebar-section-actions ml-auto flex items-center shrink-0">
           {actions}
         </span>
       )}

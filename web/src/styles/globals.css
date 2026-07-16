@@ -2210,6 +2210,17 @@ body {
 }
 
 /* tab/侧边栏右端的刷新/折叠按钮,vsCode 风格的 splitter icon。 */
+.ace-sidebar-section-actions {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .15s ease;
+}
+.ace-sidebar-section-header:hover .ace-sidebar-section-actions,
+.ace-sidebar-section-header:focus-within .ace-sidebar-section-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
 .ace-sidebar-heading-collapse-btn,
 .ace-side-panel-collapse-btn,
 .ace-side-panel-collapse-tree-btn,
