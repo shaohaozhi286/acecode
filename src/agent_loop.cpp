@@ -2776,10 +2776,15 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
                 : outcome.reason;
             dispatch_message("error", "[Hook blocked prompt] " + reason, false);
             account_goal_usage(0, false);
+            if (callbacks_.on_turn_finished) {
+                callbacks_.on_turn_finished("error");
+            }
             if (callbacks_.on_busy_changed) callbacks_.on_busy_changed(false);
             busy_ = false;
-            events_.emit(SessionEventKind::BusyChanged, nlohmann::json{{"busy", false}});
-            events_.emit(SessionEventKind::Done, nlohmann::json::object());
+            events_.emit(SessionEventKind::BusyChanged, nlohmann::json{
+                {"busy", false}, {"outcome", "error"}});
+            events_.emit(SessionEventKind::Done, nlohmann::json{
+                {"outcome", "error"}});
             maybe_continue_goal();
             return;
         }
@@ -3194,12 +3199,17 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
             turn_timing_status);
     }
 
+    if (callbacks_.on_turn_finished) {
+        callbacks_.on_turn_finished(turn_timing_status);
+    }
     if (callbacks_.on_busy_changed) {
         callbacks_.on_busy_changed(false);
     }
     busy_ = false;
-    events_.emit(SessionEventKind::BusyChanged, nlohmann::json{{"busy", false}});
-    events_.emit(SessionEventKind::Done, nlohmann::json::object());
+    events_.emit(SessionEventKind::BusyChanged, nlohmann::json{
+        {"busy", false}, {"outcome", turn_timing_status}});
+    events_.emit(SessionEventKind::Done, nlohmann::json{
+        {"outcome", turn_timing_status}});
     maybe_continue_goal();
 }
 

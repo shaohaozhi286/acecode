@@ -472,4 +472,5 @@ These are deferred but worth flagging:
   - 空状态(无 pinned + 无 recent)→ 退化为 "新建会话 / 打开 ACECode / 退出"
 - 数据流:前端 `web/src/lib/desktopTrayMenu.js::pushTrayMenu({sessions, pinnedSessionIds, workspaceName})` 100ms debounce → `aceDesktop_setTrayMenu` bridge → native `set_tray_menu_payload(...)` mutex 缓存。`Sidebar.jsx` 在 `(sessions, pinnedByWorkspace, activeWorkspaceHash, workspaces)` 任一变化时触发。
 - 切 workspace:`aceDesktop_activateWorkspace` bridge 在 navigate 之前 native 主动 `clear_tray_menu_payload()` 防菜单残留旧 workspace 的 session。
-- 跨 workspace session 项暂不展示(同 `add-desktop-attention-notifications` 的 v1 限制),v2 future work。
+- 跨 workspace session 项暂不展示；该限制只适用于托盘菜单。WinToast 通知点击
+  已由 `add-windows-wintoast-completion-notifications` 支持跨 workspace 定位。

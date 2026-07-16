@@ -591,6 +591,25 @@ TEST(BuiltinCommands, ResumeByNumberRefreshesModelAndTokenState) {
     h.expect_resumed_runtime_state();
 }
 
+TEST(BuiltinCommands, ResumeByStableIdRefreshesCanonicalRuntimeState) {
+    ResumeCommandHarness h("resume_stable_id");
+    auto ctx = h.context();
+
+    ASSERT_TRUE(acecode::resume_session_by_id(ctx, h.target_session_id_));
+    EXPECT_EQ(h.sm_.current_session_id(), h.target_session_id_);
+    h.expect_resumed_runtime_state();
+}
+
+TEST(BuiltinCommands, ResumeByStableIdRejectsMissingSession) {
+    ResumeCommandHarness h("resume_missing_stable_id");
+    auto ctx = h.context();
+
+    EXPECT_FALSE(acecode::resume_session_by_id(ctx, "missing-session"));
+    ASSERT_FALSE(h.state_.conversation.empty());
+    EXPECT_NE(h.state_.conversation.back().content.find("not found"),
+              std::string::npos);
+}
+
 TEST(BuiltinCommands, ResumePickerRefreshesModelAndTokenState) {
     ResumeCommandHarness h("resume_picker");
 

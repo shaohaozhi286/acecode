@@ -51,8 +51,8 @@ enum class SessionEventKind {
     GoalCleared,       // payload: {"session_id":"..."}
     TodoUpdated,       // payload: {"session_id":"...", "todos": [...], "summary": {...}}
     SessionUpdated,    // payload: {"session_id":"...", "title":"...", ...}
-    BusyChanged,       // payload: {"busy": bool}
-    Done,              // payload: {} —— 一轮 agent loop 结束
+    BusyChanged,       // payload: {"busy": bool,"outcome"?:completed|error|aborted}
+    Done,              // payload: {"outcome"?:completed|error|aborted}
     Error,             // payload: {"reason":"...", "request_id":"..."(可选)}
 };
 

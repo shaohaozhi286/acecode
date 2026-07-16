@@ -1,12 +1,9 @@
-// Windows 桌面壳系统通知 — V1 气泡实现(Shell_NotifyIcon + NIIF_INFO)。
-//
-// 设计参见 openspec/changes/add-desktop-attention-notifications/design.md 决策 1。
-// V2 future work:接 WinRT ToastNotificationManager + AUMID + 开始菜单 .lnk。
-
 #include "notifications_win.hpp"
 
 #include "../utils/encoding.hpp"
 #include "../utils/logger.hpp"
+
+#include <nlohmann/json.hpp>
 
 #ifdef _WIN32
 #  ifndef WIN32_LEAN_AND_MEAN
@@ -16,136 +13,338 @@
 #    define NOMINMAX
 #  endif
 #  include <windows.h>
-#  include <shellapi.h>
+#  include <wintoastlib.h>
 #endif
 
+#include <algorithm>
+#include <atomic>
+#include <cctype>
+#include <cstdint>
 #include <mutex>
-#include <string>
+#include <utility>
 
 namespace acecode::desktop {
+namespace {
+
+std::mutex g_notification_mu;
+ClickHandler g_click_handler;
+void* g_activation_window = nullptr;
+bool g_initialized = false;
+std::atomic<std::uint64_t> g_notification_sequence{0};
+
+void set_parse_error(std::string* error, std::string message) {
+    if (error) *error = std::move(message);
+}
+
+std::string trim_ascii(std::string value) {
+    auto is_space = [](unsigned char ch) { return std::isspace(ch) != 0; };
+    value.erase(value.begin(), std::find_if(value.begin(), value.end(),
+                                            [&](char ch) {
+                                                return !is_space(
+                                                    static_cast<unsigned char>(ch));
+                                            }));
+    value.erase(std::find_if(value.rbegin(), value.rend(),
+                             [&](char ch) {
+                                 return !is_space(static_cast<unsigned char>(ch));
+                             }).base(),
+                value.end());
+    return value;
+}
+
+std::size_t utf8_codepoint_bytes(const std::string& text, std::size_t offset) {
+    const auto lead = static_cast<unsigned char>(text[offset]);
+    std::size_t length = 1;
+    if ((lead & 0xE0u) == 0xC0u) length = 2;
+    else if ((lead & 0xF0u) == 0xE0u) length = 3;
+    else if ((lead & 0xF8u) == 0xF0u) length = 4;
+    if (offset + length > text.size()) return 1;
+    for (std::size_t i = 1; i < length; ++i) {
+        const auto next = static_cast<unsigned char>(text[offset + i]);
+        if ((next & 0xC0u) != 0x80u) return 1;
+    }
+    return length;
+}
 
 #ifdef _WIN32
 
-// tray_icon_win.cpp 定义,在 acecode::desktop 命名空间下导出 tray icon 的
-// NOTIFYICONDATA UID。气泡通知 piggyback 在同一 UID 上,所以两端必须共享。
-UINT tray_icon_uid_value();
-
-namespace {
-
-std::mutex g_mu;
-HWND g_tray_message_hwnd = nullptr;
-bool g_initialized = false;
-ClickHandler g_click_handler;
-
-// 当前挂着的气泡 payload。Shell_NotifyIcon 一次只能挂一条,所以只保存最近一条。
-// 当 NIN_BALLOONUSERCLICK 到达时拿这一条派发。WndProc 收到的事件不带 payload,
-// 所以这种"全局当前挂着"的反查方式是必要的。
-NotifyPayload g_active{};
-bool g_active_valid = false;
-
-// Shell_NotifyIconW szInfoTitle 上限 64 wide chars(含 \0),szInfo 上限 256。
-// 这里按 wchar_t 长度算,UTF-8 转 wide 后超长就截断 + 添加 …。
-std::wstring truncate_wide(std::wstring s, size_t limit_inclusive_null) {
-    if (limit_inclusive_null == 0) return std::wstring();
-    if (s.size() + 1 <= limit_inclusive_null) return s;
-    // 留 4 个 wchar 给 "…\0",末尾追加 ellipsis
-    if (limit_inclusive_null < 4) {
-        s.resize(limit_inclusive_null - 1);
-        return s;
+std::string wintoast_error_text(WinToastLib::WinToast::WinToastError error) {
+    try {
+        return acecode::wide_to_utf8(WinToastLib::WinToast::strerror(error));
+    } catch (...) {
+        return std::to_string(static_cast<int>(error));
     }
-    s.resize(limit_inclusive_null - 2);  // 留 \0 和 …
-    s.push_back(L'…');
-    return s;
 }
 
-bool fill_balloon(NOTIFYICONDATAW& nid, const std::wstring& title, const std::wstring& body) {
-    if (!g_tray_message_hwnd) return false;
-    nid.cbSize = sizeof(nid);
-    nid.hWnd = g_tray_message_hwnd;
-    nid.uID = tray_icon_uid_value();
-    nid.uFlags = NIF_INFO;
-    nid.dwInfoFlags = NIIF_INFO | NIIF_RESPECT_QUIET_TIME;
+class SessionToastHandler final : public WinToastLib::IWinToastHandler {
+public:
+    explicit SessionToastHandler(NotifyPayload payload)
+        : payload_(std::move(payload)) {}
 
-    auto title_w = truncate_wide(title, std::size(nid.szInfoTitle));
-    auto body_w  = truncate_wide(body, std::size(nid.szInfo));
-    wcsncpy_s(nid.szInfoTitle, title_w.c_str(), _TRUNCATE);
-    wcsncpy_s(nid.szInfo,      body_w.c_str(),  _TRUNCATE);
-    return true;
-}
+    void toastActivated() const override {
+        dispatch_notification_activation(payload_);
+    }
+
+    void toastActivated(int /*action_index*/) const override {
+        dispatch_notification_activation(payload_);
+    }
+
+    void toastActivated(std::wstring /*response*/) const override {
+        dispatch_notification_activation(payload_);
+    }
+
+    void toastDismissed(WinToastDismissalReason /*state*/) const override {}
+
+    void toastFailed() const override {
+        LOG_WARN("[notifications] WinToast reported delivery failure for " +
+                 payload_.id);
+    }
+
+private:
+    NotifyPayload payload_;
+};
+
+#endif
 
 } // namespace
 
-bool init_notifications(void* tray_message_hwnd) {
-    std::lock_guard<std::mutex> lk(g_mu);
-    if (!tray_message_hwnd) {
-        LOG_WARN("[desktop] init_notifications: tray HWND null, notifications disabled");
-        g_initialized = false;
-        return false;
+std::string truncate_notification_text(const std::string& text,
+                                       std::size_t max_codepoints) {
+    if (text.empty() || max_codepoints == 0) return {};
+    std::size_t offset = 0;
+    std::size_t count = 0;
+    while (offset < text.size() && count < max_codepoints) {
+        offset += utf8_codepoint_bytes(text, offset);
+        ++count;
     }
-    g_tray_message_hwnd = static_cast<HWND>(tray_message_hwnd);
-    g_initialized = true;
-    g_active_valid = false;
-    LOG_INFO("[desktop] notifications: initialized (Shell_NotifyIcon balloon mode)");
-    return true;
+    if (offset >= text.size()) return text;
+    return text.substr(0, offset) + u8"…";
+}
+
+NotifyPayload build_completion_notification(
+    const std::string& session_id,
+    const std::string& workspace_hash,
+    const std::string& session_title,
+    const std::string& final_assistant_text) {
+    NotifyPayload payload;
+    payload.id = "completion-" +
+        (session_id.empty() ? std::string("unknown") : session_id) + "-" +
+        std::to_string(g_notification_sequence.fetch_add(1) + 1);
+    payload.workspace_hash = workspace_hash;
+    payload.session_id = session_id;
+    const std::string title = trim_ascii(session_title);
+    payload.title = u8"已完成 · " + (title.empty() ? std::string(u8"会话") : title);
+    const std::string body = trim_ascii(final_assistant_text);
+    payload.body = body.empty()
+        ? std::string(u8"(空白回合)")
+        : truncate_notification_text(body);
+    return payload;
+}
+
+std::optional<NotifyPayload> parse_notification_bridge_args(
+    const std::string& args_json,
+    std::string* error) {
+    if (error) error->clear();
+    try {
+        nlohmann::json value = nlohmann::json::parse(args_json);
+        if (value.is_array()) {
+            if (value.empty()) {
+                set_parse_error(error, "notification arguments are empty");
+                return std::nullopt;
+            }
+            value = value.front();
+        }
+        if (value.is_string()) {
+            value = nlohmann::json::parse(value.get<std::string>());
+        }
+        if (!value.is_object()) {
+            set_parse_error(error, "notification payload must be an object");
+            return std::nullopt;
+        }
+
+        NotifyPayload payload;
+        auto copy_string = [&](const char* key, std::string& out) {
+            if (value.contains(key) && value[key].is_string()) {
+                out = value[key].get<std::string>();
+            }
+        };
+        copy_string("id", payload.id);
+        copy_string("workspace_hash", payload.workspace_hash);
+        copy_string("session_id", payload.session_id);
+        copy_string("title", payload.title);
+        copy_string("body", payload.body);
+        if (payload.title.empty() && payload.body.empty()) {
+            set_parse_error(error, "notification title and body are empty");
+            return std::nullopt;
+        }
+        return payload;
+    } catch (const std::exception& e) {
+        set_parse_error(error, e.what());
+        return std::nullopt;
+    }
 }
 
 void set_click_handler(ClickHandler handler) {
-    std::lock_guard<std::mutex> lk(g_mu);
+    std::lock_guard<std::mutex> lock(g_notification_mu);
     g_click_handler = std::move(handler);
 }
 
-void show_notification(const NotifyPayload& payload) {
-    std::lock_guard<std::mutex> lk(g_mu);
-    if (!g_initialized) return;
-    if (payload.title.empty() && payload.body.empty()) return;
-
-    NOTIFYICONDATAW nid{};
-    auto wtitle = acecode::utf8_to_wide(payload.title.empty() ? std::string("ACECode") : payload.title);
-    auto wbody  = acecode::utf8_to_wide(payload.body);
-    if (!fill_balloon(nid, wtitle, wbody)) return;
-
-    // 把 payload 记到 g_active,等 WndProc 收到 NIN_BALLOONUSERCLICK 时反查。
-    g_active = payload;
-    g_active_valid = true;
-
-    if (!::Shell_NotifyIconW(NIM_MODIFY, &nid)) {
-        // 极偶发:tray icon 还没注册成功就被调到。降级 no-op,不抛错。
-        LOG_WARN("[desktop] Shell_NotifyIconW NIM_MODIFY failed, dropping notification");
-        g_active_valid = false;
+void dispatch_notification_activation(const NotifyPayload& payload) {
+    ClickHandler handler;
+    void* activation_window = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_notification_mu);
+        handler = g_click_handler;
+        activation_window = g_activation_window;
     }
+    if (!handler) return;
+    activate_notification_window(activation_window);
+    handler(payload);
 }
 
-void on_balloon_clicked() {
-    NotifyPayload payload;
-    ClickHandler handler;
-    {
-        std::lock_guard<std::mutex> lk(g_mu);
-        if (!g_active_valid) return;
-        payload = g_active;
-        handler = g_click_handler;
-        g_active_valid = false;
+#ifdef _WIN32
+
+bool init_notifications(const NotificationInitOptions& options) {
+    std::lock_guard<std::mutex> lock(g_notification_mu);
+    if (g_initialized) return true;
+    if (options.app_user_model_id.empty()) {
+        LOG_WARN("[notifications] WinToast initialization skipped: empty AUMI");
+        return false;
     }
-    if (handler) {
-        handler(payload.id, payload.workspace_hash, payload.session_id);
+    if (!WinToastLib::WinToast::isCompatible()) {
+        LOG_WARN("[notifications] WinToast is not compatible with this Windows version");
+        return false;
+    }
+
+    // WinToast writes diagnostics to std::wcout in debug builds. That corrupts
+    // the FTXUI frame, so all diagnostics go through ACECode's logger instead.
+    WinToastLib::setDebugOutputEnabled(false);
+    auto* toast = WinToastLib::WinToast::instance();
+    toast->setAppName(options.app_name.empty() ? L"ACECode" : options.app_name);
+    toast->setAppUserModelId(options.app_user_model_id);
+    toast->setShortcutPolicy(
+        WinToastLib::WinToast::ShortcutPolicy::SHORTCUT_POLICY_REQUIRE_CREATE);
+
+    WinToastLib::WinToast::WinToastError error =
+        WinToastLib::WinToast::WinToastError::NoError;
+    if (!toast->initialize(&error)) {
+        LOG_WARN("[notifications] WinToast initialization failed: " +
+                 wintoast_error_text(error));
+        return false;
+    }
+
+    g_activation_window = options.activation_window;
+    g_initialized = true;
+    LOG_INFO("[notifications] WinToast initialized");
+    return true;
+}
+
+bool show_notification(const NotifyPayload& payload) {
+    std::lock_guard<std::mutex> lock(g_notification_mu);
+    if (!g_initialized) return false;
+    if (payload.title.empty() && payload.body.empty()) return false;
+
+    try {
+        WinToastLib::WinToastTemplate toast(
+            WinToastLib::WinToastTemplate::WinToastTemplateType::Text02);
+        toast.setFirstLine(acecode::utf8_to_wide(
+            payload.title.empty() ? std::string("ACECode") : payload.title));
+        toast.setSecondLine(acecode::utf8_to_wide(payload.body));
+        toast.setDuration(WinToastLib::WinToastTemplate::Duration::Short);
+
+        WinToastLib::WinToast::WinToastError error =
+            WinToastLib::WinToast::WinToastError::NoError;
+        const auto toast_id = WinToastLib::WinToast::instance()->showToast(
+            toast, new SessionToastHandler(payload), &error);
+        if (toast_id < 0) {
+            LOG_WARN("[notifications] WinToast delivery failed: " +
+                     wintoast_error_text(error));
+            return false;
+        }
+        return true;
+    } catch (const std::exception& e) {
+        LOG_WARN("[notifications] WinToast delivery threw: " +
+                 std::string(e.what()));
+        return false;
+    } catch (...) {
+        LOG_WARN("[notifications] WinToast delivery threw an unknown exception");
+        return false;
     }
 }
 
 void shutdown_notifications() {
-    std::lock_guard<std::mutex> lk(g_mu);
-    g_initialized = false;
-    g_active_valid = false;
-    g_tray_message_hwnd = nullptr;
-    g_click_handler = nullptr;
+    bool was_initialized = false;
+    {
+        std::lock_guard<std::mutex> lock(g_notification_mu);
+        was_initialized = g_initialized;
+        g_initialized = false;
+        g_click_handler = nullptr;
+        g_activation_window = nullptr;
+    }
+    if (was_initialized) {
+        try {
+            WinToastLib::WinToast::instance()->clear();
+        } catch (...) {
+            LOG_WARN("[notifications] WinToast shutdown failed");
+        }
+    }
 }
 
-#else // !_WIN32
+void* capture_tui_notification_window() {
+    HWND console = ::GetConsoleWindow();
+    if (console && ::IsWindow(console) && ::IsWindowVisible(console)) {
+        return console;
+    }
+    HWND foreground = ::GetForegroundWindow();
+    if (foreground && ::IsWindow(foreground)) return foreground;
+    return console && ::IsWindow(console) ? console : nullptr;
+}
 
-bool init_notifications(void* /*tray_message_hwnd*/) { return false; }
-void set_click_handler(ClickHandler /*handler*/) {}
-void show_notification(const NotifyPayload& /*payload*/) {}
-void on_balloon_clicked() {}
-void shutdown_notifications() {}
+bool notification_window_is_foreground(void* native_window) {
+    auto* hwnd = static_cast<HWND>(native_window);
+    return hwnd && ::IsWindow(hwnd) && ::GetForegroundWindow() == hwnd;
+}
 
-#endif // _WIN32
+bool activate_notification_window(void* native_window) {
+    auto* hwnd = static_cast<HWND>(native_window);
+    if (!hwnd || !::IsWindow(hwnd)) return false;
+    if (::IsIconic(hwnd)) {
+        ::ShowWindowAsync(hwnd, SW_RESTORE);
+    } else {
+        ::ShowWindowAsync(hwnd, SW_SHOW);
+    }
+    ::BringWindowToTop(hwnd);
+    if (::SetForegroundWindow(hwnd)) return true;
+
+    // Foreground lock can still reject background callers. A short topmost
+    // pulse makes the user-initiated target visible without leaving it pinned.
+    constexpr UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW;
+    ::SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, flags);
+    ::SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, flags);
+    return ::SetForegroundWindow(hwnd) != FALSE ||
+           ::GetForegroundWindow() == hwnd;
+}
+
+#else
+
+bool init_notifications(const NotificationInitOptions& /*options*/) {
+    return false;
+}
+
+bool show_notification(const NotifyPayload& /*payload*/) {
+    return false;
+}
+
+void shutdown_notifications() {
+    std::lock_guard<std::mutex> lock(g_notification_mu);
+    g_initialized = false;
+    g_click_handler = nullptr;
+    g_activation_window = nullptr;
+}
+
+void* capture_tui_notification_window() { return nullptr; }
+bool notification_window_is_foreground(void* /*native_window*/) { return false; }
+bool activate_notification_window(void* /*native_window*/) { return false; }
+
+#endif
 
 } // namespace acecode::desktop

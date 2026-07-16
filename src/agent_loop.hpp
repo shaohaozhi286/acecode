@@ -58,6 +58,12 @@ struct AgentCallbacks {
     // Called when the agent starts/stops processing
     std::function<void(bool busy)> on_busy_changed;
 
+    // Called once for a submitted agent turn immediately before its terminal
+    // busy=false callback. Values match persisted turn timing status:
+    // "completed", "error", or "aborted". Compact/background busy cycles do
+    // not invoke this hook.
+    std::function<void(const std::string& status)> on_turn_finished;
+
     // Called to request user confirmation for a tool call.
     // Returns: Allow, Deny, or AlwaysAllow
     std::function<PermissionResult(const std::string& tool_name, const std::string& arguments)> on_tool_confirm;

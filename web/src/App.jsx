@@ -414,7 +414,7 @@ export function App() {
   }, [authState, resumeAndOpenSession]);
 
   // 桌面壳通知 click_handler 走 webview eval 调这两个 window 全局函数,见
-  // openspec/changes/add-desktop-attention-notifications。
+  // openspec/changes/add-windows-wintoast-completion-notifications。
   // 同 workspace:focusSessionFromBridge → resume + setActiveRef
   // 跨 workspace:activateAndOpenSession → 激活 workspace 后 resume + 整页 navigate
   useEffect(() => {

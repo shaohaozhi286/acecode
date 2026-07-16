@@ -109,6 +109,7 @@
 #include "commands/builtin_commands.hpp"
 #include "commands/compact.hpp"
 #include "commands/resume_state_sync.hpp"
+#include "desktop/notifications_win.hpp"
 #include "utils/token_tracker.hpp"
 #include "markdown/markdown_formatter.hpp"
 #include "session/session_manager.hpp"
@@ -3164,6 +3165,11 @@ static void shutdown_after_tui_loop(TuiState& state,
                                     std::thread& update_check_thread,
                                     SessionManager& session_manager,
                                     const AppConfig& config) {
+#ifdef _WIN32
+    // Clear WinToast handlers before any TUI/session objects captured by the
+    // activation callback begin teardown.
+    acecode::desktop::shutdown_notifications();
+#endif
     g_active_screen.store(nullptr, std::memory_order_release);
 #ifdef _WIN32
     SetConsoleCtrlHandler(console_ctrl_handler, FALSE);
@@ -5133,9 +5139,20 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
 
     // ---- Agent callbacks ----
     std::atomic<bool> agent_aborting{false};  // shared abort flag for confirm_cv
+    // Set only by the authoritative final assistant on_message callback. Delta
+    // text is intentionally excluded so a failed/aborted partial stream cannot
+    // be mistaken for a completed task notification.
+    std::string tui_turn_assistant_text;
+    std::string tui_turn_outcome;
     AgentCallbacks callbacks;
-    callbacks.on_message = [&state, &clamp_chat_focus, &screen](const std::string& role, const std::string& content, bool is_tool) {
+    callbacks.on_message = [&state, &clamp_chat_focus, &screen,
+                            &tui_turn_assistant_text](const std::string& role,
+                                                     const std::string& content,
+                                                     bool is_tool) {
         std::lock_guard<std::mutex> lk(state.mu);
+        if (!is_tool && role == "assistant") {
+            tui_turn_assistant_text = content;
+        }
         if (!is_tool && role == "assistant" &&
             !state.conversation.empty() &&
             state.conversation.back().role == "assistant" &&
@@ -5288,16 +5305,23 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
         clamp_chat_focus();
         screen.PostEvent(Event::Custom);
     };
-    callbacks.on_stream_retry_reset = [&state, &clamp_chat_focus, &screen]() {
+    callbacks.on_stream_retry_reset = [&state, &clamp_chat_focus, &screen,
+                                       &tui_turn_assistant_text]() {
         std::lock_guard<std::mutex> lk(state.mu);
         if (!state.conversation.empty() &&
             state.conversation.back().role == "assistant" &&
             !state.conversation.back().is_tool) {
             state.conversation.pop_back();
         }
+        tui_turn_assistant_text.clear();
         state.streaming_output_chars = 0;
         clamp_chat_focus();
         screen.PostEvent(Event::Custom);
+    };
+    callbacks.on_turn_finished = [&state, &tui_turn_outcome](
+                                     const std::string& status) {
+        std::lock_guard<std::mutex> lk(state.mu);
+        tui_turn_outcome = status;
     };
 
     PermissionManager permissions;
@@ -5711,6 +5735,66 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
     CommandRegistry cmd_registry;
     register_slash_commands(cmd_registry, skill_registry, config, working_dir);
 
+    // Windows TUI WinToast setup. Keep WinToast calls and session mutations on
+    // the FTXUI thread: activation callbacks only enqueue a main-loop task.
+    void* tui_notification_window = nullptr;
+    bool tui_notifications_ready = false;
+#ifdef _WIN32
+    if (config.desktop.notifications.enabled &&
+        config.desktop.notifications.on_completion) {
+        tui_notification_window =
+            acecode::desktop::capture_tui_notification_window();
+        acecode::desktop::NotificationInitOptions notification_options;
+        notification_options.app_name = L"ACECode TUI";
+        notification_options.app_user_model_id = L"ACECode.ACECode.TUI.1";
+        notification_options.activation_window = tui_notification_window;
+        tui_notifications_ready =
+            acecode::desktop::init_notifications(notification_options);
+        if (tui_notifications_ready) {
+            acecode::desktop::set_click_handler(
+                [&](const acecode::desktop::NotifyPayload& payload) {
+                    const std::string session_id = payload.session_id;
+                    if (session_id.empty()) return;
+                    screen.Post([&, session_id] {
+                        if (session_manager.current_session_id() != session_id) {
+                            CommandContext ctx{
+                                state,
+                                agent_loop,
+                                &provider_slot,
+                                config,
+                                token_tracker,
+                                permissions,
+                            };
+                            ctx.request_exit = [&screen]() { screen.Exit(); };
+                            ctx.session_manager = &session_manager;
+                            ctx.post_event = [&screen]() {
+                                screen.PostEvent(Event::Custom);
+                            };
+                            ctx.mcp_manager = &mcp_manager;
+                            ctx.tools = &tools;
+                            ctx.skills = &skill_registry;
+                            ctx.memory = &memory_registry;
+                            ctx.command_registry = &cmd_registry;
+                            ctx.cwd = working_dir;
+                            ctx.subagent_host = &subagent_host;
+                            ctx.submit_user_input = submit_tui_input;
+                            resume_session_by_id(ctx, session_id);
+                        }
+                        {
+                            std::lock_guard<std::mutex> lk(state.mu);
+                            reset_chat_line_measure_state();
+                            state.chat_follow_tail = true;
+                            clamp_chat_focus();
+                        }
+                        screen.PostEvent(Event::Custom);
+                    });
+                });
+        } else {
+            LOG_WARN("[tui] WinToast notifications unavailable");
+        }
+    }
+#endif
+
     if (resume_picker_on_startup) {
         CommandContext cmd_ctx{
             state, agent_loop, &provider_slot,
@@ -5779,10 +5863,16 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
     // Now that agent_loop exists, update on_busy_changed to drain pending queue
     callbacks.on_busy_changed = [&state, &clamp_chat_focus, &screen,
                                  &coordinate_mcp_before_first_turn,
-                                 &submit_tui_input, &submit_tui_text](bool busy) {
+                                 &submit_tui_input, &submit_tui_text,
+                                 &tui_turn_assistant_text, &tui_turn_outcome,
+                                 &session_manager,
+                                 &config, tui_notifications_ready,
+                                 tui_notification_window](bool busy) {
         acecode::note_process_session_busy("tui-main", busy);
         std::unique_lock<std::mutex> lk(state.mu);
         if (busy && !state.is_waiting) {
+            tui_turn_assistant_text.clear();
+            tui_turn_outcome.clear();
             state.current_thinking_phrase = get_random_thinking_phrase(is_user_chinese(state));
             state.thinking_start_time = std::chrono::steady_clock::now();
             state.streaming_output_chars = 0;
@@ -5790,6 +5880,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
         }
         const bool was_waiting = state.is_waiting;
         state.is_waiting = busy;
+        std::optional<acecode::desktop::NotifyPayload> completion_notification;
         // inline-thinking-heartbeat:回合正常收尾时追加显示端伪行
         // "● Done for Ns"(只进 state.conversation,不进 LLM context、不进
         // session JSONL,resume 后自然消失)。用户 Esc/Ctrl+C 中断的回合与
@@ -5798,6 +5889,27 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
         if (was_waiting && !busy) {
             const bool interrupted = state.turn_interrupted_by_user;
             state.turn_interrupted_by_user = false;
+            if (!interrupted && tui_turn_outcome == "completed" &&
+                tui_notifications_ready &&
+                !tui_turn_assistant_text.empty() &&
+                config.desktop.notifications.enabled &&
+                config.desktop.notifications.on_completion &&
+                !(config.desktop.notifications.suppress_when_focused &&
+                  acecode::desktop::notification_window_is_foreground(
+                      tui_notification_window))) {
+                const std::string session_id =
+                    session_manager.current_session_id();
+                if (!session_id.empty()) {
+                    completion_notification =
+                        acecode::desktop::build_completion_notification(
+                            session_id,
+                            std::string{},
+                            state.current_session_title,
+                            tui_turn_assistant_text);
+                }
+            }
+            tui_turn_assistant_text.clear();
+            tui_turn_outcome.clear();
             if (!interrupted &&
                 state.thinking_start_time.time_since_epoch().count() != 0) {
                 const long done_secs = static_cast<long>(
@@ -5868,6 +5980,12 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
             } else {
                 submit_tui_text(next_prompt);
             }
+        }
+        lk.unlock();
+        if (completion_notification.has_value()) {
+            screen.Post([payload = std::move(*completion_notification)] {
+                acecode::desktop::show_notification(payload);
+            });
         }
         screen.PostEvent(Event::Custom);
     };

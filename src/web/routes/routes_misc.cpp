@@ -686,7 +686,7 @@ void WebServer::Impl::register_health() {
             j["cwd"]             = deps.cwd;
             j["uptime_seconds"]  = (now_unix_ms() - deps.start_time_unix_ms) / 1000;
             // desktop.notifications 透传给前端,desktopNotify.js 用它判抑制规则
-            // (见 openspec/changes/add-desktop-attention-notifications)。
+            // (见 openspec/changes/add-windows-wintoast-completion-notifications)。
             // 浏览器直连 daemon 模式没有桌面壳桥,前端会自然 no-op,这里始终输出。
             if (deps.app_config) {
                 std::lock_guard<std::mutex> config_lock(app_config_mu);

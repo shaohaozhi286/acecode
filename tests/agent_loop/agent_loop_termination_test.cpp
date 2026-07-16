@@ -145,6 +145,10 @@ public:
             is_busy_ = busy;
             if (!busy) busy_cv_.notify_all();
         };
+        cb.on_turn_finished = [this](const std::string& status) {
+            std::lock_guard<std::mutex> lk(outcome_mu_);
+            turn_outcomes_.push_back(status);
+        };
         cb.on_tool_confirm = [](const std::string&, const std::string&) {
             return PermissionResult::Allow;
         };
@@ -163,11 +167,20 @@ public:
 
         loop_ = std::make_unique<AgentLoop>(
             provider_accessor, tools_, cb, /*cwd=*/std::move(cwd), perms_);
+        event_sub_ = loop_->events().subscribe(
+            [this](const acecode::SessionEvent& event) {
+                {
+                    std::lock_guard<std::mutex> lk(event_mu_);
+                    events_.push_back(event);
+                }
+                event_cv_.notify_all();
+            });
     }
 
     ~AgentLoopHarness() {
-        // AgentLoop::shutdown() 由 dtor 调用,会 join worker thread。
-        // 不需要显式做 —— RAII 保证。
+        if (loop_ && event_sub_ != 0) {
+            loop_->events().unsubscribe(event_sub_);
+        }
     }
 
     void set_config(acecode::AgentLoopConfig cfg) {
@@ -280,6 +293,37 @@ public:
         return stream_retry_resets_;
     }
 
+    std::string last_turn_outcome() {
+        std::lock_guard<std::mutex> lk(outcome_mu_);
+        return turn_outcomes_.empty() ? std::string{} : turn_outcomes_.back();
+    }
+
+    std::string last_terminal_busy_outcome() {
+        std::size_t expected_terminal_events = 0;
+        {
+            std::lock_guard<std::mutex> outcome_lk(outcome_mu_);
+            expected_terminal_events = turn_outcomes_.size();
+        }
+        std::unique_lock<std::mutex> lk(event_mu_);
+        event_cv_.wait_for(lk, std::chrono::seconds(1), [this, expected_terminal_events] {
+            return static_cast<std::size_t>(std::count_if(
+                       events_.begin(), events_.end(), [](const auto& event) {
+                           return event.kind == acecode::SessionEventKind::BusyChanged &&
+                                  event.payload.is_object() &&
+                                  !event.payload.value("busy", true);
+                       })) >= expected_terminal_events;
+        });
+        for (auto it = events_.rbegin(); it != events_.rend(); ++it) {
+            if (it->kind != acecode::SessionEventKind::BusyChanged ||
+                !it->payload.is_object() ||
+                it->payload.value("busy", true)) {
+                continue;
+            }
+            return it->payload.value("outcome", std::string{});
+        }
+        return {};
+    }
+
     // align-loop-with-hermes:loop 不再注入 nudge;此 helper 仅作为防回归断言,
     // 任何包含 [acecode:auto-continue] 前缀的 user 消息都说明回归了 nudge 路径。
     int count_nudges() {
@@ -313,6 +357,14 @@ private:
     std::vector<Msg> messages_;
     std::string live_stream_;
     int stream_retry_resets_ = 0;
+
+    std::mutex outcome_mu_;
+    std::vector<std::string> turn_outcomes_;
+
+    acecode::EventDispatcher::SubscriptionId event_sub_ = 0;
+    std::mutex event_mu_;
+    std::condition_variable event_cv_;
+    std::vector<acecode::SessionEvent> events_;
 
     std::mutex busy_mu_;
     std::condition_variable busy_cv_;
@@ -659,6 +711,8 @@ TEST(AgentLoopTermination, MaxIterationsHardCap) {
     EXPECT_EQ(h.turn_count(), 3);
     EXPECT_NE(h.last_system_message().find("max_iterations"),
               std::string::npos);
+    EXPECT_EQ(h.last_turn_outcome(), "error");
+    EXPECT_EQ(h.last_terminal_busy_outcome(), "error");
 }
 
 // 场景 (c2):默认 max_iterations=0 表示无限制,不会按旧默认 50 轮停止。
@@ -716,6 +770,8 @@ TEST(AgentLoopTermination, UserAbortShortCircuits) {
     EXPECT_EQ(h.count_nudges(), 0);
     EXPECT_EQ(h.count_by_role("error"), 0);
     EXPECT_EQ(last, "[Interrupted]");
+    EXPECT_EQ(h.last_turn_outcome(), "aborted");
+    EXPECT_EQ(h.last_terminal_busy_outcome(), "aborted");
 }
 
 TEST(AgentLoopTermination, ProviderErrorDoesNotCreateEmptyAssistantAndNextTurnWorks) {
@@ -726,11 +782,15 @@ TEST(AgentLoopTermination, ProviderErrorDoesNotCreateEmptyAssistantAndNextTurnWo
     EXPECT_EQ(h.turn_count(), 1);
     EXPECT_EQ(h.count_by_role("error"), 1);
     EXPECT_EQ(h.count_by_role("assistant"), 0);
+    EXPECT_EQ(h.last_turn_outcome(), "error");
+    EXPECT_EQ(h.last_terminal_busy_outcome(), "error");
 
     h.push_text("ok");
     ASSERT_TRUE(h.submit_and_wait("second"));
     EXPECT_EQ(h.turn_count(), 2);
     EXPECT_EQ(h.count_by_role("assistant"), 1);
+    EXPECT_EQ(h.last_turn_outcome(), "completed");
+    EXPECT_EQ(h.last_terminal_busy_outcome(), "completed");
 }
 
 TEST(AgentLoopTermination, NullProviderPromptsUserToConfigureModel) {

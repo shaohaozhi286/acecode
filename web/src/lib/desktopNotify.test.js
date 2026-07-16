@@ -4,7 +4,7 @@
 // shouldSuppress)。notify / maybeNotify 依赖 window.aceDesktop_notify 桥,
 // 通过最小 stub 注入测。
 //
-// 设计参见 openspec/changes/add-desktop-attention-notifications/design.md 决策 4。
+// 设计参见 openspec/changes/add-windows-wintoast-completion-notifications/design.md。
 
 import assert from 'node:assert/strict';
 import {

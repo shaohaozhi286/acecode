@@ -108,6 +108,9 @@ find_package(ftxui CONFIG REQUIRED)
 find_package(libzip CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(unofficial-sqlite3 CONFIG REQUIRED)
+if(WIN32)
+    find_package(unofficial-wintoast CONFIG REQUIRED)
+endif()
 
 # Crow is the HTTP/WebSocket server used by `acecode daemon`. Wired up as
 # QUIET in M1 so existing builds keep working before users re-run vcpkg
@@ -173,6 +176,7 @@ set(ACECODE_NATIVE_BRIDGE_SUPPORT_SOURCES
     ${CMAKE_SOURCE_DIR}/src/daemon/platform_windows.cpp
     ${CMAKE_SOURCE_DIR}/src/daemon/runtime_files.cpp
     ${CMAKE_SOURCE_DIR}/src/desktop/folder_picker_win.cpp
+    ${CMAKE_SOURCE_DIR}/src/desktop/notifications_win.cpp
     ${CMAKE_SOURCE_DIR}/src/desktop/open_in_explorer.cpp
     ${CMAKE_SOURCE_DIR}/src/desktop/workspace_registry.cpp
     ${CMAKE_SOURCE_DIR}/src/utils/clipboard.cpp
@@ -191,7 +195,6 @@ set(ACECODE_DESKTOP_SUPPORT_SOURCES
     ${CMAKE_SOURCE_DIR}/src/desktop/dpi_win.cpp
     ${CMAKE_SOURCE_DIR}/src/desktop/edge_app_launcher.cpp
     ${CMAKE_SOURCE_DIR}/src/desktop/external_url.cpp
-    ${CMAKE_SOURCE_DIR}/src/desktop/notifications_win.cpp
     ${CMAKE_SOURCE_DIR}/src/desktop/pick_active.cpp
     ${CMAKE_SOURCE_DIR}/src/desktop/single_instance_posix.cpp
     ${CMAKE_SOURCE_DIR}/src/desktop/single_instance_win.cpp
@@ -264,6 +267,7 @@ if(WIN32)
     # ole32/shell32/user32: native folder picker and clipboard integration.
     target_link_libraries(acecode_native_bridge_support PUBLIC
         advapi32 ws2_32 ole32 shell32 user32
+        unofficial::wintoast::wintoast
     )
 endif()
 

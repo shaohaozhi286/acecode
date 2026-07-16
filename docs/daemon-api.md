@@ -1776,6 +1776,11 @@ Session event `type` values from `SessionEventKind`:
 - `done`
 - `error`
 
+For an agent turn's terminal transition, `busy_changed` includes
+`{"busy":false,"outcome":"completed|error|aborted"}` and the following
+`done` frame repeats the same `outcome`. Other busy cycles such as compaction
+may omit it. Clients should only treat `completed` as a successful turn.
+
 `transcript_replace` is for retry/recovery cleanup. Normal compact success
 appends visible marker messages and a hidden checkpoint instead.
 

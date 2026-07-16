@@ -859,16 +859,11 @@ int main(int argc, char** argv) {
     host.set_title("ACECode");
     host.set_size(kDefaultDesktopWindowWidth, kDefaultDesktopWindowHeight);
 
-    // 系统托盘 + 通知 — 见 openspec/changes/add-desktop-attention-notifications。
-    // 必须在 host.run() 之前 init,失败 → 主流程不阻断,只是没有托盘 / 通知。
+    // 系统托盘与 WinToast 通知各自初始化。通知不再依赖 tray message HWND,
+    // 因此托盘被策略禁用或创建失败时,会话完成提醒仍然可用。
     auto bring_window_foreground = [&host]() {
 #ifdef _WIN32
-        auto* hwnd = static_cast<HWND>(host.native_window());
-        if (hwnd && ::IsWindow(hwnd)) {
-            if (::IsIconic(hwnd)) ::ShowWindow(hwnd, SW_RESTORE);
-            else                  ::ShowWindow(hwnd, SW_SHOW);
-            ::SetForegroundWindow(hwnd);
-        }
+        activate_notification_window(host.native_window());
 #elif defined(__APPLE__)
         mac_bring_window_foreground(host.native_window());
 #else
@@ -876,7 +871,6 @@ int main(int argc, char** argv) {
 #endif
     };
 
-    void* tray_message_hwnd = nullptr;
     bool tray_ok = init_tray_icon(
         /*on_show=*/[&bring_window_foreground]() { bring_window_foreground(); },
         /*on_quit=*/[&host]() {
@@ -884,7 +878,7 @@ int main(int argc, char** argv) {
             // 否则等于点 ×,根本退不出去。走 request_quit 直接 DestroyWindow。
             host.request_quit();
         },
-        &tray_message_hwnd);
+        nullptr);
 
     // close-to-tray:WM_CLOSE / Alt+F4 / aceDesktop_closeWindow 全部归到
     // ShowWindow(SW_HIDE),保留 daemon + tray 在后台。`config.desktop.close_to_tray
@@ -934,14 +928,24 @@ int main(int argc, char** argv) {
         host.eval(js);
     };
 
-    if (tray_ok) {
-        init_notifications(tray_message_hwnd);
-        // toast click_handler:复用 focus_session。
-        set_click_handler([focus_session](const std::string& /*id*/,
-                                          const std::string& workspace_hash,
-                                          const std::string& session_id) {
-            focus_session(workspace_hash, session_id);
+    // WinToast 的 click handler 复用 focus_session。每个 toast handler 自带
+    // 完整 payload,不会被后来显示的通知覆盖。
+#ifdef _WIN32
+    NotificationInitOptions notification_options;
+    notification_options.app_name = L"ACECode Desktop";
+    notification_options.app_user_model_id = L"ACECode.ACECode.Desktop.1";
+    notification_options.activation_window = host.native_window();
+    const bool notifications_ok = init_notifications(notification_options);
+    if (notifications_ok) {
+        set_click_handler([focus_session](const NotifyPayload& payload) {
+            focus_session(payload.workspace_hash, payload.session_id);
         });
+    } else {
+        LOG_WARN("[desktop] WinToast notifications unavailable");
+    }
+#endif
+
+    if (tray_ok) {
 
         // tray 菜单 session click 也走 focus_session。
         set_tray_session_click_handler(
@@ -961,7 +965,7 @@ int main(int argc, char** argv) {
             bring_window_foreground();
         });
     } else {
-        LOG_WARN("[desktop] tray icon unavailable; OS notifications will be disabled");
+        LOG_WARN("[desktop] tray icon unavailable");
     }
 
     std::atomic<bool> page_ready_notified{false};
@@ -1208,26 +1212,19 @@ int main(int argc, char** argv) {
     });
 
     // 系统通知 bridge — 前端 sessionTranscript.js 在 question_request / 回合完成时调用。
-    // payload: [{ id, workspace_hash, session_id, title, body }]。失败静默 no-op,
+    // 兼容参数[object]和历史参数[JSON.stringify(object)]。失败静默 no-op,
     // 前端 desktopNotify.js 已经做过抑制规则判定,这里不再二次过滤。
     host.bind("aceDesktop_notify", [&](const std::string& req) -> std::string {
-        try {
-            auto arr = nlohmann::json::parse(req);
-            if (!arr.is_array() || arr.empty() || !arr[0].is_object()) {
-                return nlohmann::json{{"ok", false}, {"error", "expect [{id,workspace_hash,session_id,title,body}]"}}.dump();
-            }
-            const auto& p = arr[0];
-            NotifyPayload payload;
-            if (p.contains("id") && p["id"].is_string())             payload.id = p["id"].get<std::string>();
-            if (p.contains("workspace_hash") && p["workspace_hash"].is_string()) payload.workspace_hash = p["workspace_hash"].get<std::string>();
-            if (p.contains("session_id") && p["session_id"].is_string()) payload.session_id = p["session_id"].get<std::string>();
-            if (p.contains("title") && p["title"].is_string())       payload.title = p["title"].get<std::string>();
-            if (p.contains("body") && p["body"].is_string())         payload.body = p["body"].get<std::string>();
-            show_notification(payload);
-            return nlohmann::json{{"ok", true}}.dump();
-        } catch (const std::exception& e) {
-            return nlohmann::json{{"ok", false}, {"error", e.what()}}.dump();
+        std::string error;
+        auto payload = parse_notification_bridge_args(req, &error);
+        if (!payload.has_value()) {
+            return nlohmann::json{{"ok", false}, {"error", error}}.dump();
         }
+        const bool shown = show_notification(*payload);
+        return nlohmann::json{
+            {"ok", shown},
+            {"error", shown ? std::string{} : std::string{"WinToast unavailable"}},
+        }.dump();
     });
 
     // 直接触发"切到某 session"。前端可在 SearchPalette 等场景调用,与 toast 点击

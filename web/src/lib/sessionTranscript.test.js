@@ -392,6 +392,100 @@ run('busy done error 状态按事件更新', () => {
   assert.equal(state.items.at(-1).content, '任务已终止：boom');
 });
 
+run('完成通知只在 busy true→false 时发一次, trailing done 不重复', () => {
+  let state = createTranscriptState();
+  state = reduceTranscriptEvent(state, {
+    type: 'busy_changed', payload: { busy: true }, seq: 1,
+  }).state;
+  state = reduceTranscriptEvent(state, {
+    type: 'message',
+    payload: { id: 'a-complete', role: 'assistant', content: '任务完成' },
+    seq: 2,
+  }).state;
+
+  const completed = reduceTranscriptEvent(state, {
+    type: 'busy_changed', payload: { busy: false, outcome: 'completed' }, seq: 3,
+  });
+  assert.equal(completed.effects.length, 1);
+  assert.equal(completed.effects[0].type, 'turn_completed');
+  assert.equal(completed.effects[0].payload.final_assistant_text, '任务完成');
+
+  const trailingDone = reduceTranscriptEvent(completed.state, {
+    type: 'done', payload: { outcome: 'completed' }, seq: 4,
+  });
+  assert.deepEqual(trailingDone.effects, []);
+});
+
+run('terminal outcome 为 error/aborted 时即使已有 assistant 文本也不发完成通知', () => {
+  for (const outcome of ['error', 'aborted']) {
+    let state = createTranscriptState();
+    state = reduceTranscriptEvent(state, {
+      type: 'busy_changed', payload: { busy: true }, seq: 1,
+    }).state;
+    state = reduceTranscriptEvent(state, {
+      type: 'message',
+      payload: { id: `a-${outcome}`, role: 'assistant', content: '工具前说明' },
+      seq: 2,
+    }).state;
+    const terminal = reduceTranscriptEvent(state, {
+      type: 'busy_changed', payload: { busy: false, outcome }, seq: 3,
+    });
+    assert.deepEqual(terminal.effects, []);
+    const trailingDone = reduceTranscriptEvent(terminal.state, {
+      type: 'done', payload: { outcome }, seq: 4,
+    });
+    assert.deepEqual(trailingDone.effects, []);
+  }
+});
+
+run('legacy role=error 消息清除之前的 assistant 完成标记', () => {
+  let state = createTranscriptState();
+  state = reduceTranscriptEvent(state, {
+    type: 'busy_changed', payload: { busy: true }, seq: 1,
+  }).state;
+  state = reduceTranscriptEvent(state, {
+    type: 'message',
+    payload: { id: 'a-before-error', role: 'assistant', content: '工具前说明' },
+    seq: 2,
+  }).state;
+  state = reduceTranscriptEvent(state, {
+    type: 'message',
+    payload: { id: 'provider-error', role: 'error', content: 'provider failed' },
+    seq: 3,
+  }).state;
+  const terminal = reduceTranscriptEvent(state, {
+    type: 'busy_changed', payload: { busy: false }, seq: 4,
+  });
+  assert.deepEqual(terminal.effects, []);
+});
+
+run('error 和用户中断清除未完成文本且不发完成通知', () => {
+  for (const terminal of [
+    { type: 'error', payload: { reason: 'boom' } },
+    { type: 'turn_aborted', payload: { reason: 'stop' } },
+  ]) {
+    let state = createTranscriptState();
+    state = reduceTranscriptEvent(state, {
+      type: 'busy_changed', payload: { busy: true }, seq: 1,
+    }).state;
+    state = reduceTranscriptEvent(state, {
+      type: 'token', payload: { text: 'partial' }, seq: 2,
+    }).state;
+    const terminated = reduceTranscriptEvent(state, { ...terminal, seq: 3 });
+    assert.equal(
+      terminated.effects.some((effect) => effect.type === 'turn_completed'),
+      false,
+    );
+    const trailingDone = reduceTranscriptEvent(terminated.state, {
+      type: 'done', payload: {}, seq: 4,
+    });
+    assert.equal(
+      trailingDone.effects.some((effect) => effect.type === 'turn_completed'),
+      false,
+    );
+  }
+});
+
 run('session_updated 更新 transcript title', () => {
   const state = reduceTranscriptEvent(createTranscriptState({ title: 'Old title' }), {
     type: 'session_updated',
