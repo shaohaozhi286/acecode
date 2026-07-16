@@ -17,7 +17,7 @@ ACECode WebUI 的设置 / 管理 / 配置类面板共用一套 Tailwind v4 class
 ACECode 只使用两套字体栈,统一由 `web/src/styles/globals.css` 的 Tailwind theme 变量管理:
 
 ```css
---font-sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;
+--font-sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI", sans-serif;
 --font-mono: "SF Mono", "Cascadia Code", "Fira Code", Menlo, Consolas, monospace;
 ```
 

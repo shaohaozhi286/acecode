@@ -1,4 +1,4 @@
-// 工具函数:相对时间(刚刚 / N分钟前 / N小时前 / 日期),字节单位换算等。
+// 工具函数:相对时间(刚刚 / N分钟前 / N小时前 / N天前),字节单位换算等。
 
 export function relativeTime(ts) {
   if (!ts) return '';
@@ -11,11 +11,7 @@ export function relativeTime(ts) {
   if (sec < 60)        return `${sec}秒前`;
   if (sec < 3600)      return `${Math.floor(sec / 60)}分钟前`;
   if (sec < 86_400)    return `${Math.floor(sec / 3600)}小时前`;
-  if (sec < 86_400*7)  return `${Math.floor(sec / 86_400)}天前`;
-  const d = new Date(ms);
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const dd = String(d.getDate()).padStart(2, '0');
-  return `${d.getFullYear()}-${mm}-${dd}`;
+  return `${Math.floor(sec / 86_400)}天前`;
 }
 
 export function formatBytes(n) {

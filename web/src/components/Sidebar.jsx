@@ -240,26 +240,34 @@ function SidebarNavItem({ item, onClick }) {
 function SidebarSectionHeader({ sectionId, count, expanded, onToggle, actions = null }) {
   const title = sidebarSectionTitle(sectionId, count);
   return (
-    <div className="ace-sidebar-section-text flex items-center gap-1 px-3 pt-3 pb-1 text-[13px] font-medium text-fg-mute">
+    <div
+      data-sidebar-section={sectionId}
+      className="ace-sidebar-section-text flex items-center gap-0.5 px-3 pt-3 pb-1 text-[13px] font-medium text-fg-mute"
+    >
       <button
         type="button"
         onClick={onToggle}
-        className="flex-1 min-w-0 text-left hover:text-fg transition"
+        className="min-w-0 text-left hover:text-fg transition"
         aria-expanded={expanded}
       >
-        <span className="truncate">{title}</span>
+        <span className="block truncate">{title}</span>
       </button>
-      {actions}
       <button
         type="button"
         onClick={onToggle}
-        className="w-6 h-6 rounded flex items-center justify-center shrink-0 hover:text-fg hover:bg-surface-hi transition"
+        data-sidebar-section-disclosure={sectionId}
+        className="w-5 h-6 rounded flex items-center justify-center shrink-0 hover:text-fg hover:bg-surface-hi transition"
         title={expanded ? `折叠${title}` : `展开${title}`}
         aria-label={expanded ? `折叠${title}` : `展开${title}`}
         aria-expanded={expanded}
       >
         <SidebarDisclosure expanded={expanded} />
       </button>
+      {actions && (
+        <span data-sidebar-section-actions={sectionId} className="ml-auto flex items-center shrink-0">
+          {actions}
+        </span>
+      )}
     </div>
   );
 }
@@ -781,7 +789,7 @@ function WorkspaceGroup({
           <button
             type="button"
             onClick={(e) => { e.stopPropagation(); onNewSession(ws); }}
-            className="ace-sidebar-workspace-action w-6 h-6 rounded hover:bg-surface-hi flex items-center justify-center shrink-0 transition"
+            className="ace-sidebar-workspace-action w-6 h-6 rounded hover:bg-surface-hi flex items-center justify-center shrink-0 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition"
             title="在此工作区新建任务"
             aria-label="在此工作区新建任务"
           ><VsIcon name="newSession" size={16} /></button>

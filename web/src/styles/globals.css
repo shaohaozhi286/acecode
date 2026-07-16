@@ -11,7 +11,7 @@
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
 @theme inline {
-  --font-sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;
+  --font-sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI", sans-serif;
   --font-mono: "SF Mono", "Cascadia Code", "Fira Code", Menlo, Consolas, monospace;
 
   --color-bg:           var(--ace-bg);
@@ -506,7 +506,6 @@ body {
 }
 .ace-sidebar-workspace-action {
   color: var(--ace-fg);
-  opacity: 0.7;
 }
 .ace-sidebar-workspace-action:hover,
 .ace-sidebar-workspace-action:focus-visible {
