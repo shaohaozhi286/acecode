@@ -207,8 +207,8 @@ TEST(ClassifySessionEvent, ErrorForwardsReasonTruncatedTo300Codepoints) {
 }
 
 TEST(ClassifySessionEvent, OtherEventKindsAreIgnored) {
-    // Token/Done 由监听器有状态处理(思考中/复位),纯函数一律 None;Error 与
-    // ToolStart 有各自出站规则,不在此列。
+    // Token/Done/Reasoning 等事件不触发任何 channel 出站;Error 与 ToolStart
+    // 有各自出站规则,不在此列。
     for (auto kind : {SessionEventKind::Token, SessionEventKind::Reasoning,
                       SessionEventKind::ToolUpdate, SessionEventKind::ToolEnd,
                       SessionEventKind::BusyChanged, SessionEventKind::Done,
@@ -658,9 +658,9 @@ TEST(SessionChannelBinderIntegration, BindRebindOffLifecycle) {
     hx.registry.destroy(s2);
 }
 
-// 需求③④:本轮首个 Token → 一次"思考中...",同轮不重复,Done 后新轮再触发;
-// task_complete → 输出 summary 全文;普通工具抑制。
-TEST(SessionChannelBinderIntegration, ThinkingHintAndTaskCompleteOutbound) {
+// 需求③④:固定确认已前移到 hub 合法入站路径,因此 Token/Done 不再触发或
+// 复位提示;assistant 正文与 task_complete summary 仍出站,普通工具仍抑制。
+TEST(SessionChannelBinderIntegration, TokenDoneDoNotTriggerHintAndTaskCompleteOutbound) {
     BinderHarness hx("thinking");
     acecode::rc::SessionChannelBinder binder(hx.binder_deps());
 
@@ -690,20 +690,19 @@ TEST(SessionChannelBinderIntegration, ThinkingHintAndTaskCompleteOutbound) {
         return pred();
     };
 
-    // 第 1 轮:首个 Token → "思考中...";同轮第二个 Token 不重复。
+    // Token/Done 无论怎样组合都不产生"思考中..."。
     hx.emit_token(s1, "你");
-    ASSERT_TRUE(wait_until([&] { return count_text("思考中...") == 1; },
-                           std::chrono::seconds(5)));
+    hx.emit_done(s1);
     hx.emit_token(s1, "好");
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    EXPECT_EQ(count_text("思考中..."), 1);  // 同轮不重复
-
-    // 助手全文正常出站。
+    hx.emit_done(s1);
     hx.emit_assistant(s1, "你好，我在。");
+    // 等待同一事件流里后续 Message 已出站,即可确定此前 Token/Done 均已被
+    // listener 消费,避免用固定 sleep 对异步调度做时序假设。
     ASSERT_TRUE(wait_until([&] {
         auto v = texts();
         return std::find(v.begin(), v.end(), "你好，我在。") != v.end();
     }, std::chrono::seconds(5)));
+    EXPECT_EQ(count_text("思考中..."), 0);
 
     // task_complete → summary 全文出站;普通工具抑制。
     hx.emit_tool_start(s1, "bash");  // 抑制
@@ -715,13 +714,6 @@ TEST(SessionChannelBinderIntegration, ThinkingHintAndTaskCompleteOutbound) {
     for (const auto& m : sender->sent()) {
         EXPECT_NE(m.type, "tool_call");  // 全程无 tool_call 出站
     }
-
-    // Done 复位 → 下一轮首个 Token 再次"思考中..."。
-    hx.emit_done(s1);
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    hx.emit_token(s1, "第");
-    ASSERT_TRUE(wait_until([&] { return count_text("思考中...") == 2; },
-                           std::chrono::seconds(5)));
 
     binder.execute_command(s1, "off");
     hx.registry.destroy(s1);

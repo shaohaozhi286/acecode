@@ -88,8 +88,6 @@ bool resume_session_with_no_workspace_fallback(SessionClient& client,
 //     全文(作为 AssistantText,不是 "[工具] …" 摘要)。
 //   - Error → AssistantText,reason 按字符截断到 300。
 //   - 其余(Token 流式增量 / Reasoning / ToolUpdate / Busy / Done...)→ None。
-//     其中"本轮首个 Token → 一次'思考中...'"是有状态逻辑,不在此纯函数里,
-//     由绑定监听器持 thinking_hint_sent_ 处理。
 // ToolCall 枚举值与 tool_name/args 字段现已不再由本函数产出(工具全部抑制或
 // 转成 AssistantText),保留仅为兼容既有出站 plumbing。
 struct OutboundEventAction {
@@ -216,7 +214,8 @@ private:
     SessionChannelBinderDeps deps_;
 
     // 锁序:op_mu_(慢路径串行化)> mu_(状态)> hub/service 内部锁。
-    // 订阅回调 / 出站结果观察者只拿 mu_。
+    // 慢路径均先释放 mu_ 再发布/清除 Hub 入站路由;入站 route callback 在
+    // Hub 锁外执行且不拿 mu_。订阅回调 / 出站结果观察者只拿 mu_。
     std::mutex op_mu_;
     mutable std::mutex mu_;
     std::condition_variable cv_;
@@ -228,9 +227,6 @@ private:
     bool reactivate_now_ = false;
     bool stop_requested_ = false;
     bool shut_down_ = false;
-    // "思考中..." 每轮只发一次:本轮已发标志。首个 Token 置 true,Done 复位。
-    // bind/rebind 时复位。mu_ 守护。
-    bool thinking_hint_sent_ = false;
     std::thread keepalive_thread_;
 };
 

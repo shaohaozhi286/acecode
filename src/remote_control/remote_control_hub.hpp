@@ -3,8 +3,9 @@
 // Remote control 基座的核心状态机(openspec add-remote-control)。
 //
 // 职责边界:
-//   - 入站(channel → ACECode):校验 token / 文本,合法则转交 inbound_submit 回调。
-//     回调由 main.cpp 接到输入框同款的提交路径(busy 时排队,空闲时 submit)。
+//   - 入站(channel → ACECode):校验 token / 文本,合法则先排一条固定确认,
+//     再转交 inbound_submit 回调。回调由 main.cpp 接到输入框同款的提交路径
+//     (busy 时排队,空闲时 submit)。
 //   - 出站(ACECode → channel):assistant 回合产出经 notify_assistant_text 进有界
 //     队列,由 hub 自有 worker 线程异步调 OutboundSender 投递 —— 投递阻塞或
 //     失败都不影响 agent / UI 线程。
@@ -51,7 +52,9 @@ nlohmann::json outbound_message_to_json(const OutboundMessage& msg);
 class OutboundSender {
 public:
     virtual ~OutboundSender() = default;
-    // 同步投递一条消息。失败返回 false 并填 error(用于统计与日志)。
+    // 同步投递一条消息。实现必须设置有限超时并最终返回；Hub shutdown 会
+    // join 投递 worker，无法安全强杀停在任意第三方实现内部的线程。默认
+    // webhook 实现超时为 3 秒。失败返回 false 并填 error(用于统计与日志)。
     virtual bool send(const OutboundMessage& msg, std::string* error) = 0;
 };
 
@@ -82,6 +85,19 @@ public:
 
     // main.cpp 启动期注册一次;把 channel 来的文本注入当前 TUI 会话。
     void set_inbound_submit(InboundSubmit fn);
+
+    // daemon channel 绑定专用:在同一把 Hub 锁下发布“目标会话 + 提交回调”。
+    // handle_inbound 会把这一对作为一个路由快照使用,因此随后发生 rebind/off
+    // 也不会让已接受消息的确认与实际提交分属两个会话。空 session 或空回调
+    // 等价于 clear_inbound_route()。
+    void set_inbound_route(std::string session_id, InboundSubmit fn);
+    // 切断后续入站路由，并把调用瞬间之前已排队的出站消息作为一个
+    // drain-through barrier：若 worker 和 sender 都可用，最多等待 5 秒，
+    // 让该时刻的最后一条消息被 worker 从 FIFO 接管。这样紧随其后的
+    // disable() 会 join 正在 send 的 worker，而不是先清掉已确认入站的 ack。
+    // sender/worker 不可用时安全地立即返回；5 秒只约束额外的 barrier
+    // 等待，worker join 仍依赖 OutboundSender 的“有限超时并返回”契约。
+    void clear_inbound_route();
 
     // 启用:记录 token / session,启动出站 worker。sender 允许为 null(仅入站,
     // 出站 webhook 未配置时的形态)。重复 enable 会先 disable 再重建。
@@ -135,6 +151,11 @@ public:
     static constexpr std::size_t kMaxQueue = 256;
 
 private:
+    // 调用方须持 mu_ 且已完成 enabled/text 等校验。只负责构造
+    // assistant_message 并放入既有有界 FIFO;允许 sender_ 暂为空,worker 会
+    // 在 set_outbound_sender 后异步投递。
+    void enqueue_assistant_text_locked(const std::string& text,
+                                       const std::string& session_id);
     void worker_loop();
     void stop_worker_locked(std::unique_lock<std::mutex>& lk);
 
@@ -150,6 +171,10 @@ private:
     std::deque<OutboundMessage> queue_;
     std::thread worker_;
     std::uint64_t next_seq_ = 1;
+    std::uint64_t last_dequeued_seq_ = 0;
+    // 非零时，入队端不得因 FIFO 满而淘汰该 seq 及之前的消息；否则
+    // clear_inbound_route 的 barrier 可能永远等不到自己保护的消息。
+    std::uint64_t drain_through_seq_ = 0;
     std::size_t forward_cursor_ = 0;
     RemoteControlStats stats_;
 };

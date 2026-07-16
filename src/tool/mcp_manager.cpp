@@ -44,16 +44,95 @@ const char* transport_tag(McpTransport t) {
     return "stdio";
 }
 
-// Build the single-string command cpp-mcp's stdio_client expects. We keep it
-// simple: command + space-separated args. Callers needing whitespace-in-arg
-// support should set up a wrapper script.
+#if defined(_WIN32)
+// Quote one argv element for the Windows C runtime parser. Backslashes are
+// doubled only when they precede a quote or the closing delimiter, so embedded
+// quotes and trailing backslashes survive CommandLineToArgvW-style parsing.
+std::string quote_windows_argv_element(const std::string& value) {
+    std::string out;
+    out.push_back('"');
+
+    size_t backslashes = 0;
+    for (char ch : value) {
+        if (ch == '\\') {
+            ++backslashes;
+            continue;
+        }
+        if (ch == '"') {
+            out.append(backslashes * 2 + 1, '\\');
+            out.push_back('"');
+            backslashes = 0;
+            continue;
+        }
+        out.append(backslashes, '\\');
+        backslashes = 0;
+        out.push_back(ch);
+    }
+
+    out.append(backslashes * 2, '\\');
+    out.push_back('"');
+    return out;
+}
+#endif
+
+// Build the locator shown in status and logs. On Windows this representation
+// also matches the stdio client's compatibility fallback for commands requiring
+// shell; native executables receive the structured command and argv directly.
+// POSIX keeps the existing space-joined behavior because cpp-mcp tokenizes it.
 std::string build_stdio_command_line(const McpServerConfig& cfg) {
     std::ostringstream oss;
+#if defined(_WIN32)
+    oss << '"' << quote_windows_argv_element(cfg.command);
+    for (const auto& a : cfg.args) {
+        oss << ' ' << quote_windows_argv_element(a);
+    }
+    oss << '"';
+#else
     oss << cfg.command;
     for (const auto& a : cfg.args) {
         oss << ' ' << a;
     }
+#endif
     return oss.str();
+}
+
+struct ParsedMcpTool {
+    std::string name;
+    std::string description;
+    mcp::json parameters_schema;
+    bool is_read_only = false;
+};
+
+std::vector<ParsedMcpTool> parse_mcp_tools_response(const mcp::json& response_json) {
+    mcp::json tools_json;
+    if (response_json.contains("tools") && response_json["tools"].is_array()) {
+        tools_json = response_json["tools"];
+    } else if (response_json.is_array()) {
+        tools_json = response_json;
+    } else {
+        return {};
+    }
+
+    std::vector<ParsedMcpTool> tools;
+    tools.reserve(tools_json.size());
+    for (const auto& tool_json : tools_json) {
+        ParsedMcpTool tool;
+        tool.name = tool_json.at("name").get<std::string>();
+        tool.description = tool_json.at("description").get<std::string>();
+        if (tool_json.contains("inputSchema")) {
+            tool.parameters_schema = tool_json["inputSchema"];
+        }
+
+        const auto annotations = tool_json.find("annotations");
+        if (annotations != tool_json.end() && annotations->is_object()) {
+            const auto hint = annotations->find("readOnlyHint");
+            tool.is_read_only = hint != annotations->end() &&
+                                hint->is_boolean() &&
+                                hint->get<bool>();
+        }
+        tools.push_back(std::move(tool));
+    }
+    return tools;
 }
 
 // Human-readable locator for sse/http entries.
@@ -211,9 +290,16 @@ McpManager::ConnectionResult McpManager::connect_entry(ConnectionSnapshot snapsh
 
     try {
         if (snapshot.cfg.transport == McpTransport::Stdio) {
+#if defined(_WIN32)
+            result.client = std::make_shared<mcp::stdio_client>(
+                snapshot.cfg.command,
+                snapshot.cfg.args,
+                env_map_to_mcp_json(snapshot.cfg.env));
+#else
             result.client = std::make_shared<mcp::stdio_client>(
                 snapshot.command_line,
                 env_map_to_mcp_json(snapshot.cfg.env));
+#endif
         } else if (snapshot.cfg.transport == McpTransport::Sse) {
             auto sse = std::make_shared<mcp::sse_client>(
                 snapshot.cfg.url,
@@ -282,9 +368,10 @@ McpManager::ConnectionResult McpManager::connect_entry(ConnectionSnapshot snapsh
         return result;
     }
 
-    std::vector<mcp::tool> tools;
+    std::vector<ParsedMcpTool> tools;
     try {
-        tools = result.client->get_tools();
+        tools = parse_mcp_tools_response(
+            result.client->send_request("tools/list", {}).result);
     } catch (const std::exception& e) {
         result.error = e.what();
         result.state = failure_state_for_message(result.error);
@@ -305,6 +392,7 @@ McpManager::ConnectionResult McpManager::connect_entry(ConnectionSnapshot snapsh
         dt.definition.name = dt.qualified_name;
         dt.definition.description = t.description;
         dt.definition.parameters = mcp_to_std(t.parameters_schema);
+        dt.is_read_only = t.is_read_only;
         result.tools.push_back(std::move(dt));
     }
 
@@ -354,7 +442,7 @@ void McpManager::publish_connection_result(const std::shared_ptr<State>& state,
             for (const auto& tool : result.tools) {
                 ToolImpl impl;
                 impl.definition = tool.definition;
-                impl.is_read_only = false;
+                impl.is_read_only = tool.is_read_only;
                 impl.source = ToolSource::Mcp;
                 const std::string server_name = tool.server_name;
                 const std::string tool_name = tool.original_tool_name;

@@ -3,6 +3,7 @@
 #include "outbound_summary.hpp"
 #include "utils/logger.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <chrono>
 
@@ -22,6 +23,9 @@ bool is_blank(const std::string& s) {
     }
     return true;
 }
+
+constexpr const char* kInboundAcknowledgement = "思考中...";
+constexpr auto kInboundRouteDrainTimeout = std::chrono::seconds(5);
 
 } // namespace
 
@@ -50,6 +54,50 @@ void RemoteControlHub::set_inbound_submit(InboundSubmit fn) {
     inbound_submit_ = std::move(fn);
 }
 
+void RemoteControlHub::set_inbound_route(std::string session_id,
+                                         InboundSubmit fn) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (session_id.empty() || !fn) {
+        session_id_.clear();
+        inbound_submit_ = {};
+        return;
+    }
+    session_id_ = std::move(session_id);
+    inbound_submit_ = std::move(fn);
+}
+
+void RemoteControlHub::clear_inbound_route() {
+    std::unique_lock<std::mutex> lk(mu_);
+    session_id_.clear();
+    inbound_submit_ = {};
+
+    // sender 未安装时 worker 不能 dequeue；worker 未运行时也没有进展者。
+    // 这两种情况下不能把清路变成无限等待。已在队列中的消息仍遵循原有
+    // sender 安装/enable 生命周期。
+    if (!worker_.joinable() || !sender_) return;
+
+    // 只等待调用瞬间真实留在 FIFO 中的尾消息。next_seq_ 也会为因
+    // drain barrier 满队列而拒绝的新消息递增；以它为目标会等待一个
+    // 从未入队、因而永远不会 dequeue 的 seq。
+    if (queue_.empty()) return;
+    const std::uint64_t barrier_seq = queue_.back().seq;
+    if (barrier_seq <= last_dequeued_seq_) return;
+    drain_through_seq_ = std::max(drain_through_seq_, barrier_seq);
+    cv_.notify_all();
+    cv_.wait_for(lk, kInboundRouteDrainTimeout, [this, barrier_seq] {
+        return last_dequeued_seq_ >= barrier_seq || !sender_ || stopping_ ||
+               !worker_.joinable();
+    });
+    if (last_dequeued_seq_ < barrier_seq) {
+        // 默认 HTTP sender 自带 3 秒超时；额外的 5 秒上限约束 barrier
+        // 自身增加的等待。worker join 仍依赖 OutboundSender 的有限返回契约。
+        // 超时后关闭优先，尚未被 worker 接管的尾部消息按既有 disable 语义清理。
+        if (drain_through_seq_ <= barrier_seq) drain_through_seq_ = 0;
+        LOG_WARN("[remote-control] timed out draining outbound queue through seq=" +
+                 std::to_string(barrier_seq));
+    }
+}
+
 void RemoteControlHub::enable(std::string token,
                               std::string session_id,
                               std::shared_ptr<OutboundSender> sender) {
@@ -61,6 +109,10 @@ void RemoteControlHub::enable(std::string token,
     session_id_ = std::move(session_id);
     sender_ = std::move(sender);
     queue_.clear();
+    // seq 跨 enable 生命周期保持单调；被本次重建清掉的旧消息应被视作
+    // 已越过，避免一次没有新出站的 clear barrier 等待不存在的 seq。
+    last_dequeued_seq_ = next_seq_ - 1;
+    drain_through_seq_ = 0;
     worker_ = std::thread([this] { worker_loop(); });
 }
 
@@ -70,6 +122,7 @@ void RemoteControlHub::disable() {
     stop_worker_locked(lk);
     sender_.reset();
     queue_.clear();
+    drain_through_seq_ = 0;
 }
 
 void RemoteControlHub::stop_worker_locked(std::unique_lock<std::mutex>& lk) {
@@ -113,6 +166,7 @@ void RemoteControlHub::set_outbound_result_observer(OutboundResultObserver obser
 InboundResult RemoteControlHub::handle_inbound(const std::string& text,
                                                const std::string& provided_token) {
     InboundSubmit submit;
+    std::string route_session_id;
     {
         std::lock_guard<std::mutex> lk(mu_);
         auto reject = [this](InboundResult::Code code, std::string msg) {
@@ -132,11 +186,16 @@ InboundResult RemoteControlHub::handle_inbound(const std::string& text,
             return reject(InboundResult::Code::BadText,
                           "text exceeds " + std::to_string(kMaxInboundBytes) + " bytes");
         }
-        if (!inbound_submit_) {
+        if (session_id_.empty() || !inbound_submit_) {
             return reject(InboundResult::Code::NoSession, "no session attached");
         }
+        route_session_id = session_id_;
         submit = inbound_submit_;
         ++stats_.inbound_accepted;
+        // 必须在 submit 前进入同一出站 FIFO:submit 可能立即启动模型或做
+        // 协调工作,但确认不能被这些工作拖延。sender 尚未就绪时也保留在
+        // 有界队列中,待 set_outbound_sender 后由 hub worker 异步投递。
+        enqueue_assistant_text_locked(kInboundAcknowledgement, route_session_id);
     }
     // 锁外调用:submit 内部会拿 TUI state.mu,持 mu_ 调用有死锁风险。
     submit(text);
@@ -147,13 +206,23 @@ void RemoteControlHub::notify_assistant_text(const std::string& text) {
     std::lock_guard<std::mutex> lk(mu_);
     if (!enabled_ || !sender_) return;
     if (text.empty() || is_blank(text)) return;
+    enqueue_assistant_text_locked(text, session_id_);
+}
+
+void RemoteControlHub::enqueue_assistant_text_locked(
+    const std::string& text, const std::string& session_id) {
     OutboundMessage msg;
     msg.type = "assistant_message";
-    msg.session_id = session_id_;
+    msg.session_id = session_id;
     msg.text = text;
     msg.timestamp_ms = now_ms();
     msg.seq = next_seq_++;
     if (queue_.size() >= kMaxQueue) {
+        if (drain_through_seq_ != 0 &&
+            queue_.front().seq <= drain_through_seq_) {
+            ++stats_.outbound_dropped;
+            return;
+        }
         queue_.pop_front();
         ++stats_.outbound_dropped;
     }
@@ -174,6 +243,11 @@ void RemoteControlHub::notify_tool_call(const std::string& session_id,
     msg.timestamp_ms = now_ms();
     msg.seq = next_seq_++;
     if (queue_.size() >= kMaxQueue) {
+        if (drain_through_seq_ != 0 &&
+            queue_.front().seq <= drain_through_seq_) {
+            ++stats_.outbound_dropped;
+            return;
+        }
         queue_.pop_front();
         ++stats_.outbound_dropped;
     }
@@ -205,6 +279,12 @@ void RemoteControlHub::worker_loop() {
         if (stopping_) return;
         OutboundMessage msg = std::move(queue_.front());
         queue_.pop_front();
+        last_dequeued_seq_ = msg.seq;
+        if (drain_through_seq_ != 0 &&
+            last_dequeued_seq_ >= drain_through_seq_) {
+            drain_through_seq_ = 0;
+        }
+        cv_.notify_all();
         std::shared_ptr<OutboundSender> sender = sender_;
         lk.unlock();
 

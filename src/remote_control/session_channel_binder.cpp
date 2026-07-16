@@ -301,21 +301,18 @@ SessionChannelBinder::bind_session(const std::string& session_id) {
         old_sub = sub_id_;
         sub_id_ = 0;
         generation = binding_.bind(session_id);
-        thinking_hint_sent_ = false;  // 新绑定:下一轮首个 Token 重新触发"思考中..."
     }
-    service.hub().set_session_id(session_id);
     if (old_sub != 0) deps_.client->unsubscribe(old_session, old_sub);
 
     // 入站(行为③):channel 文本走绑定会话的 SessionClient::send_input,
     // AgentLoop::submit 自带 busy 排队语义 —— 与 Web 输入框提交同一条路径。
-    service.hub().set_inbound_submit([this](const std::string& text) {
-        std::string sid;
-        {
-            std::lock_guard<std::mutex> lk(mu_);
-            sid = binding_.bound_session();
-        }
-        if (sid.empty()) return;
-        deps_.client->send_input(sid, text);
+    // session_id 与回调在 Hub 内原子发布;回调只捕获长生命周期 client 指针和
+    // 本世代 sid,不回读 binding_ / 不捕获 this。消息一旦被 Hub 接受,即使
+    // 紧接着 off/rebind,仍会投到接受瞬间的会话。
+    auto* inbound_client = deps_.client;
+    service.hub().set_inbound_route(session_id,
+                                    [inbound_client, session_id](const std::string& text) {
+        inbound_client->send_input(session_id, text);
     });
     // 出站结果观察(行为⑤):连续失败达到阈值 → 唤醒保活线程做幂等再激活。
     service.hub().set_outbound_result_observer([this](bool ok) {
@@ -334,21 +331,6 @@ SessionChannelBinder::bind_session(const std::string& session_id) {
         std::lock_guard<std::mutex> lk(mu_);
         if (!binding_.accepts(session_id, generation)) return;
 
-        // "思考中...":本轮可见正文的首个 Token → 发一次(不含 Reasoning
-        // thinking);Done(整轮结束,已核实工具往返不触发 Done)复位。Token
-        // 本身不转发半截正文——正文由回合结束的权威 Message 事件整条回传。
-        if (evt.kind == SessionEventKind::Token) {
-            if (!thinking_hint_sent_) {
-                thinking_hint_sent_ = true;
-                deps_.service->hub().notify_assistant_text("思考中...");
-            }
-            return;
-        }
-        if (evt.kind == SessionEventKind::Done) {
-            thinking_hint_sent_ = false;
-            return;
-        }
-
         auto action = classify_session_event(evt.kind, evt.payload);
         switch (action.kind) {
         case OutboundEventAction::Kind::AssistantText:
@@ -366,7 +348,7 @@ SessionChannelBinder::bind_session(const std::string& session_id) {
             binding_.unbind();
             active_channel_.reset();
         }
-        service.hub().set_inbound_submit({});
+        service.hub().clear_inbound_route();
         if (started_now) service.stop();
         return {false, "Session " + session_id + " is not active; cannot bind."};
     }
@@ -390,7 +372,7 @@ SessionChannelBinder::bind_session(const std::string& session_id) {
             binding_.unbind();
             active_channel_.reset();
         }
-        service.hub().set_inbound_submit({});
+        service.hub().clear_inbound_route();
         service.hub().set_outbound_result_observer({});
         if (started_now) service.stop();
         return {false, "Failed to activate channel '" + channel_name + "': " + error};
@@ -454,7 +436,7 @@ SessionChannelBinder::CommandOutcome SessionChannelBinder::unbind_and_stop() {
         binding_.unbind();
         reactivate_now_ = false;
     }
-    service.hub().set_inbound_submit({});
+    service.hub().clear_inbound_route();
     service.hub().set_outbound_result_observer({});
     if (old_sub != 0) deps_.client->unsubscribe(old_session, old_sub);
 
@@ -493,8 +475,8 @@ void SessionChannelBinder::shutdown() {
     // 见 main.cpp shutdown_after_tui_loop)。不 deactivate 插件:与 TUI 退出
     // 一致,channel 运行时保留,bound_session_id 留在 config,下次 daemon
     // 启动走行为①自动重建。
+    deps_.service->hub().clear_inbound_route();
     deps_.service->stop();
-    deps_.service->hub().set_inbound_submit({});
     deps_.service->hub().set_outbound_result_observer({});
 
     std::string old_session;
