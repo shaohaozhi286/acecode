@@ -187,7 +187,7 @@ export function PermissionModal({ request, onResolve, originLabel = '' }) {
           </div>
           {!hideAllowSession && (
             <div className="px-4.5 pb-3.5 text-[11px] text-fg-mute">
-              提示：切换为 Yolo 后将跳过所有工具权限确认；AskUserQuestion 仍可正常提问。
+              提示：切换为完全访问权限后将跳过所有工具权限确认；AskUserQuestion 仍可正常提问。
             </div>
           )}
         </>

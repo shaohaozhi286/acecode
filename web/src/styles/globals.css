@@ -498,6 +498,16 @@ body {
   color: #fff !important;
   opacity: 1 !important;
 }
+.ace-sidebar {
+  -webkit-user-select: none;
+  user-select: none;
+}
+.ace-sidebar input,
+.ace-sidebar textarea,
+.ace-sidebar [contenteditable="true"] {
+  -webkit-user-select: text;
+  user-select: text;
+}
 .ace-sidebar-custom-icon {
   display: inline-block;
   object-fit: contain;

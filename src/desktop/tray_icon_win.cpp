@@ -6,6 +6,7 @@
 #include "tray_icon_win.hpp"
 
 #include "tray_menu_layout.hpp"
+#include "tray_menu_popup_model.hpp"
 #include "../utils/encoding.hpp"
 #include "../utils/logger.hpp"
 
@@ -155,28 +156,60 @@ HWND g_tray_window = nullptr;
 NOTIFYICONDATAW g_nid{};
 bool g_icon_added = false;
 
-struct Win32MenuDrawMetrics {
-    int item_width = 316;
-    int item_height = 32;
-    int right_column_width = 80;
+constexpr wchar_t kTrayPopupWndClass[] = L"ACECodeDesktopTrayPopupWindow";
+constexpr UINT kTrayPopupDismissMessage = WM_APP + 0x351;
+
+struct Win32TrayPopupMetrics {
+    int dpi = 96;
+    int width = 316;
+    int outer_padding = 8;
+    int horizontal_padding = 20;
+    int text_gap = 16;
+    int header_height = 34;
+    int item_height = 36;
+    int action_height = 44;
+    int separator_height = 17;
+    int corner_radius = 12;
+    int right_column_width = 0;
 };
 
-struct Win32MenuDrawItem {
-    TrayMenuEntryKind kind = TrayMenuEntryKind::RecentItem;
-    std::wstring title;
-    std::wstring subtitle;
-    Win32MenuDrawMetrics metrics;
+struct Win32TrayPopupRow {
+    TrayPopupRow model;
+    int top = 0;
+    int height = 0;
 };
 
-struct Win32MenuBuildContext {
-    std::vector<std::unique_ptr<Win32MenuDrawItem>> draw_items;
+struct Win32TrayPopupController;
+
+struct Win32TrayPopupWindow {
+    Win32TrayPopupController* controller = nullptr;
+    HWND hwnd = nullptr;
+    bool is_submenu = false;
+    Win32TrayPopupMetrics metrics;
+    std::vector<Win32TrayPopupRow> rows;
+    int content_height = 0;
+    int viewport_height = 0;
+    int scroll_offset = 0;
+    int hovered_index = -1;
+    HFONT font = nullptr;
+
+    ~Win32TrayPopupWindow() {
+        if (font) ::DeleteObject(font);
+    }
 };
 
-bool is_session_entry_kind(TrayMenuEntryKind kind) {
-    return kind == TrayMenuEntryKind::PinnedItem ||
-           kind == TrayMenuEntryKind::RecentItem ||
-           kind == TrayMenuEntryKind::MoreSubmenuItem;
-}
+struct Win32TrayPopupController {
+    TrayMenuLayout layout;
+    std::unique_ptr<Win32TrayPopupWindow> main_window;
+    std::unique_ptr<Win32TrayPopupWindow> submenu_window;
+    int main_more_index = -1;
+    bool keyboard_in_submenu = false;
+    bool closing = false;
+};
+
+std::unique_ptr<Win32TrayPopupController> g_tray_popup;
+
+LRESULT CALLBACK tray_popup_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
 
 int scale_px(int value, int dpi) {
     return ::MulDiv(value, dpi > 0 ? dpi : 96, 96);
@@ -187,13 +220,42 @@ int hdc_dpi(HDC hdc) {
     return dpi > 0 ? dpi : 96;
 }
 
-HFONT create_menu_font() {
-    NONCLIENTMETRICSW ncm{};
-    ncm.cbSize = sizeof(ncm);
-    if (::SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, ncm.cbSize, &ncm, 0)) {
-        return ::CreateFontIndirectW(&ncm.lfMenuFont);
+int point_dpi(POINT pt) {
+    HMONITOR monitor = ::MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+    if (HMODULE shcore = ::LoadLibraryW(L"Shcore.dll")) {
+        using GetDpiForMonitorFn = HRESULT(WINAPI*)(HMONITOR, int, UINT*, UINT*);
+        auto get_dpi = reinterpret_cast<GetDpiForMonitorFn>(
+            ::GetProcAddress(shcore, "GetDpiForMonitor"));
+        UINT x = 96;
+        UINT y = 96;
+        if (get_dpi && SUCCEEDED(get_dpi(monitor, 0, &x, &y)) && x > 0) {
+            ::FreeLibrary(shcore);
+            return static_cast<int>(x);
+        }
+        ::FreeLibrary(shcore);
     }
-    return static_cast<HFONT>(::GetStockObject(DEFAULT_GUI_FONT));
+    HDC hdc = ::GetDC(nullptr);
+    const int dpi = hdc_dpi(hdc);
+    if (hdc) ::ReleaseDC(nullptr, hdc);
+    return dpi;
+}
+
+HFONT create_popup_font(int dpi) {
+    return ::CreateFontW(
+        -scale_px(14, dpi),
+        0,
+        0,
+        0,
+        FW_NORMAL,
+        FALSE,
+        FALSE,
+        FALSE,
+        DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE,
+        L"Segoe UI");
 }
 
 int measure_text_width(HDC hdc, const std::wstring& text) {
@@ -211,109 +273,694 @@ int measure_text_width(HDC hdc, const std::wstring& text) {
     return rc.right - rc.left;
 }
 
-Win32MenuDrawMetrics compute_draw_metrics(const TrayMenuLayout& layout) {
+Win32TrayPopupMetrics compute_popup_metrics(const TrayMenuLayout& layout, int dpi) {
     HDC hdc = ::GetDC(nullptr);
-    const int dpi = hdc_dpi(hdc);
-    HFONT font = create_menu_font();
+    HFONT font = create_popup_font(dpi);
     HGDIOBJ old_font = nullptr;
     if (hdc && font) old_font = ::SelectObject(hdc, font);
 
-    int max_title_width = 0;
     int max_subtitle_width = 0;
     for (const auto& e : layout.entries) {
-        if (!is_session_entry_kind(e.kind)) continue;
-        max_title_width = std::max(max_title_width, measure_text_width(hdc, utf8_to_wide(e.title)));
+        if (!tray_popup_entry_is_session(e.kind)) continue;
         max_subtitle_width = std::max(max_subtitle_width, measure_text_width(hdc, utf8_to_wide(e.subtitle)));
     }
 
     if (old_font) ::SelectObject(hdc, old_font);
-    if (font && font != ::GetStockObject(DEFAULT_GUI_FONT)) ::DeleteObject(font);
+    if (font) ::DeleteObject(font);
     if (hdc) ::ReleaseDC(nullptr, hdc);
 
-    Win32MenuDrawMetrics metrics;
-    metrics.item_height = std::max(scale_px(32, dpi), ::GetSystemMetrics(SM_CYMENU));
-    metrics.right_column_width = std::clamp(max_subtitle_width, scale_px(52, dpi), scale_px(104, dpi));
-
-    const int pad = scale_px(14, dpi);
-    const int gap = scale_px(14, dpi);
-    const int natural_width = pad * 2 + max_title_width + gap + metrics.right_column_width;
-    metrics.item_width = std::clamp(
-        std::max(scale_px(316, dpi), natural_width),
-        scale_px(280, dpi),
-        scale_px(380, dpi));
+    Win32TrayPopupMetrics metrics;
+    metrics.dpi = dpi;
+    metrics.outer_padding = scale_px(8, dpi);
+    metrics.horizontal_padding = scale_px(20, dpi);
+    metrics.text_gap = scale_px(16, dpi);
+    metrics.header_height = scale_px(34, dpi);
+    metrics.item_height = scale_px(28, dpi);
+    metrics.action_height = scale_px(44, dpi);
+    metrics.separator_height = std::max(1, scale_px(1, dpi));
+    metrics.corner_radius = scale_px(12, dpi);
+    if (max_subtitle_width > 0) {
+        metrics.right_column_width = std::clamp(
+            max_subtitle_width,
+            scale_px(64, dpi),
+            scale_px(104, dpi));
+    }
+    metrics.width = scale_px(316, dpi);
     return metrics;
 }
 
-Win32MenuDrawItem* add_owner_draw_item(Win32MenuBuildContext& ctx,
-                                       const TrayMenuEntry& entry,
-                                       const Win32MenuDrawMetrics& metrics) {
-    auto item = std::make_unique<Win32MenuDrawItem>();
-    item->kind = entry.kind;
-    item->title = utf8_to_wide(entry.title.empty() ? entry.label : entry.title);
-    item->subtitle = utf8_to_wide(entry.subtitle);
-    item->metrics = metrics;
-    Win32MenuDrawItem* raw = item.get();
-    ctx.draw_items.push_back(std::move(item));
-    return raw;
+int popup_row_height(TrayMenuEntryKind kind, const Win32TrayPopupMetrics& metrics) {
+    if (tray_popup_entry_is_header(kind)) return metrics.header_height;
+    if (kind == TrayMenuEntryKind::Separator) return metrics.separator_height;
+    if (tray_popup_entry_is_fixed_action(kind)) return metrics.action_height;
+    return metrics.item_height;
 }
 
-void measure_owner_draw_menu_item(MEASUREITEMSTRUCT* mis) {
-    if (!mis || mis->CtlType != ODT_MENU || !mis->itemData) return;
-    auto* item = reinterpret_cast<Win32MenuDrawItem*>(mis->itemData);
-    mis->itemWidth = static_cast<UINT>(item->metrics.item_width);
-    mis->itemHeight = static_cast<UINT>(item->metrics.item_height);
+std::unique_ptr<Win32TrayPopupWindow> make_popup_window_state(
+    Win32TrayPopupController* controller,
+    bool is_submenu,
+    std::vector<TrayPopupRow> rows,
+    const Win32TrayPopupMetrics& metrics) {
+    auto state = std::make_unique<Win32TrayPopupWindow>();
+    state->controller = controller;
+    state->is_submenu = is_submenu;
+    state->metrics = metrics;
+    state->font = create_popup_font(metrics.dpi);
+    int top = 0;
+    for (auto& row : rows) {
+        Win32TrayPopupRow view;
+        view.model = std::move(row);
+        view.top = top;
+        view.height = popup_row_height(view.model.entry.kind, metrics);
+        top += view.height;
+        state->rows.push_back(std::move(view));
+    }
+    state->content_height = top;
+    return state;
 }
 
-void draw_owner_draw_menu_item(const DRAWITEMSTRUCT* dis) {
-    if (!dis || dis->CtlType != ODT_MENU || !dis->itemData || !dis->hDC) return;
-    const auto* item = reinterpret_cast<const Win32MenuDrawItem*>(dis->itemData);
-    HDC hdc = dis->hDC;
-    const int dpi = hdc_dpi(hdc);
+RECT monitor_work_area(POINT pt) {
+    MONITORINFO info{};
+    info.cbSize = sizeof(info);
+    HMONITOR monitor = ::MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+    if (::GetMonitorInfoW(monitor, &info)) return info.rcWork;
+    return RECT{0, 0, ::GetSystemMetrics(SM_CXSCREEN), ::GetSystemMetrics(SM_CYSCREEN)};
+}
 
-    RECT rc = dis->rcItem;
-    const bool selected = (dis->itemState & ODS_SELECTED) != 0;
-    const int bg_index = selected ? COLOR_MENUHILIGHT : COLOR_MENU;
-    HBRUSH bg = ::CreateSolidBrush(::GetSysColor(bg_index));
-    ::FillRect(hdc, &rc, bg);
-    ::DeleteObject(bg);
+int max_popup_scroll(const Win32TrayPopupWindow& state) {
+    const int visible_content = std::max(
+        0,
+        state.viewport_height - state.metrics.outer_padding * 2);
+    return std::max(0, state.content_height - visible_content);
+}
 
-    HFONT font = create_menu_font();
-    HGDIOBJ old_font = font ? ::SelectObject(hdc, font) : nullptr;
-    const int old_bk_mode = ::SetBkMode(hdc, TRANSPARENT);
+void set_popup_scroll(Win32TrayPopupWindow& state, int next) {
+    const int clamped = std::clamp(next, 0, max_popup_scroll(state));
+    if (clamped == state.scroll_offset) return;
+    state.scroll_offset = clamped;
+    if (state.hwnd) ::InvalidateRect(state.hwnd, nullptr, FALSE);
+}
 
-    const COLORREF title_color = ::GetSysColor(selected ? COLOR_HIGHLIGHTTEXT : COLOR_MENUTEXT);
-    const COLORREF subtitle_color = ::GetSysColor(selected ? COLOR_HIGHLIGHTTEXT : COLOR_GRAYTEXT);
+void ensure_popup_row_visible(Win32TrayPopupWindow& state, int index) {
+    if (index < 0 || index >= static_cast<int>(state.rows.size())) return;
+    const auto& row = state.rows[static_cast<std::size_t>(index)];
+    const int visible_height = std::max(
+        0,
+        state.viewport_height - state.metrics.outer_padding * 2);
+    if (row.top < state.scroll_offset) {
+        set_popup_scroll(state, row.top);
+    } else if (row.top + row.height > state.scroll_offset + visible_height) {
+        set_popup_scroll(state, row.top + row.height - visible_height);
+    }
+}
 
-    const int pad_x = scale_px(14, dpi);
-    const int gap = scale_px(14, dpi);
-    RECT text_rc = rc;
-    text_rc.left += pad_x;
-    text_rc.right -= pad_x;
+int popup_row_at(const Win32TrayPopupWindow& state, int x, int y) {
+    if (x < 0 || x >= state.metrics.width) return -1;
+    const int content_y = y - state.metrics.outer_padding + state.scroll_offset;
+    for (std::size_t i = 0; i < state.rows.size(); ++i) {
+        const auto& row = state.rows[i];
+        if (content_y >= row.top && content_y < row.top + row.height) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
 
-    RECT title_rc = text_rc;
-    if (!item->subtitle.empty()) {
-        RECT subtitle_rc = text_rc;
-        subtitle_rc.left = std::max(subtitle_rc.left,
-                                    subtitle_rc.right - item->metrics.right_column_width);
-        ::SetTextColor(hdc, subtitle_color);
-        ::DrawTextW(hdc,
-                    item->subtitle.c_str(),
-                    static_cast<int>(item->subtitle.size()),
-                    &subtitle_rc,
-                    DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_END_ELLIPSIS | DT_NOPREFIX);
-        title_rc.right = std::max(title_rc.left, subtitle_rc.left - gap);
+void fill_rounded_rect(HDC hdc, const RECT& rect, int radius, COLORREF color) {
+    HRGN region = ::CreateRoundRectRgn(
+        rect.left,
+        rect.top,
+        rect.right + 1,
+        rect.bottom + 1,
+        radius,
+        radius);
+    HBRUSH brush = ::CreateSolidBrush(color);
+    if (region && brush) ::FillRgn(hdc, region, brush);
+    if (brush) ::DeleteObject(brush);
+    if (region) ::DeleteObject(region);
+}
+
+void draw_popup_chevron(HDC hdc, const RECT& row_rect, const Win32TrayPopupMetrics& metrics) {
+    const int center_x = row_rect.right - metrics.horizontal_padding;
+    const int center_y = (row_rect.top + row_rect.bottom) / 2;
+    const int half = scale_px(3, metrics.dpi);
+    HPEN pen = ::CreatePen(PS_SOLID, std::max(1, scale_px(1, metrics.dpi)), RGB(76, 76, 76));
+    HGDIOBJ old_pen = pen ? ::SelectObject(hdc, pen) : nullptr;
+    ::MoveToEx(hdc, center_x - half, center_y - half, nullptr);
+    ::LineTo(hdc, center_x, center_y);
+    ::LineTo(hdc, center_x - half, center_y + half);
+    if (old_pen) ::SelectObject(hdc, old_pen);
+    if (pen) ::DeleteObject(pen);
+}
+
+void paint_tray_popup(Win32TrayPopupWindow& state) {
+    PAINTSTRUCT ps{};
+    HDC target = ::BeginPaint(state.hwnd, &ps);
+    if (!target) return;
+
+    RECT client{};
+    ::GetClientRect(state.hwnd, &client);
+    const int width = client.right - client.left;
+    const int height = client.bottom - client.top;
+    HDC buffer = ::CreateCompatibleDC(target);
+    HBITMAP bitmap = buffer ? ::CreateCompatibleBitmap(target, width, height) : nullptr;
+    HGDIOBJ old_bitmap = bitmap ? ::SelectObject(buffer, bitmap) : nullptr;
+    HDC draw = buffer && bitmap ? buffer : target;
+
+    HBRUSH background = ::CreateSolidBrush(RGB(255, 255, 255));
+    ::FillRect(draw, &client, background);
+    ::DeleteObject(background);
+
+    HFONT font = state.font
+        ? state.font
+        : static_cast<HFONT>(::GetStockObject(DEFAULT_GUI_FONT));
+    HGDIOBJ old_font = font ? ::SelectObject(draw, font) : nullptr;
+    const int old_bk_mode = ::SetBkMode(draw, TRANSPARENT);
+
+    for (std::size_t i = 0; i < state.rows.size(); ++i) {
+        const auto& row = state.rows[i];
+        RECT row_rect{
+            0,
+            state.metrics.outer_padding + row.top - state.scroll_offset,
+            width,
+            state.metrics.outer_padding + row.top + row.height - state.scroll_offset,
+        };
+        if (row_rect.bottom <= 0 || row_rect.top >= height) continue;
+
+        const auto kind = row.model.entry.kind;
+        if (kind == TrayMenuEntryKind::Separator) {
+            const int y = (row_rect.top + row_rect.bottom) / 2;
+            HPEN pen = ::CreatePen(PS_SOLID, 1, RGB(225, 230, 238));
+            HGDIOBJ old_pen = pen ? ::SelectObject(draw, pen) : nullptr;
+            ::MoveToEx(draw, 0, y, nullptr);
+            ::LineTo(draw, width, y);
+            if (old_pen) ::SelectObject(draw, old_pen);
+            if (pen) ::DeleteObject(pen);
+            continue;
+        }
+
+        const bool selectable = tray_popup_entry_is_selectable(kind);
+        if (selectable && state.hovered_index == static_cast<int>(i)) {
+            HBRUSH hover = ::CreateSolidBrush(RGB(243, 243, 243));
+            ::FillRect(draw, &row_rect, hover);
+            ::DeleteObject(hover);
+        }
+
+        RECT text_rect = row_rect;
+        text_rect.left += state.metrics.horizontal_padding;
+        text_rect.right -= state.metrics.horizontal_padding;
+
+        const std::wstring label = utf8_to_wide(row.model.entry.label);
+        if (tray_popup_entry_is_header(kind)) {
+            ::SetTextColor(draw, RGB(108, 101, 97));
+            ::DrawTextW(draw,
+                        label.c_str(),
+                        static_cast<int>(label.size()),
+                        &text_rect,
+                        DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX);
+            continue;
+        }
+
+        if (tray_popup_entry_is_session(kind)) {
+            const std::wstring title = utf8_to_wide(
+                row.model.entry.title.empty() ? row.model.entry.label : row.model.entry.title);
+            const std::wstring subtitle = utf8_to_wide(row.model.entry.subtitle);
+            RECT title_rect = text_rect;
+            if (!subtitle.empty() && state.metrics.right_column_width > 0) {
+                RECT subtitle_rect = text_rect;
+                subtitle_rect.left = std::max(
+                    subtitle_rect.left,
+                    subtitle_rect.right - state.metrics.right_column_width);
+                ::SetTextColor(draw, RGB(82, 73, 68));
+                ::DrawTextW(draw,
+                            subtitle.c_str(),
+                            static_cast<int>(subtitle.size()),
+                            &subtitle_rect,
+                            DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_END_ELLIPSIS | DT_NOPREFIX);
+                title_rect.right = std::max(
+                    title_rect.left,
+                    subtitle_rect.left - state.metrics.text_gap);
+            }
+            ::SetTextColor(draw, RGB(28, 28, 28));
+            ::DrawTextW(draw,
+                        title.c_str(),
+                        static_cast<int>(title.size()),
+                        &title_rect,
+                        DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX);
+            continue;
+        }
+
+        ::SetTextColor(draw, RGB(28, 28, 28));
+        if (kind == TrayMenuEntryKind::MoreSubmenuRoot) {
+            text_rect.right -= scale_px(16, state.metrics.dpi);
+        }
+        ::DrawTextW(draw,
+                    label.c_str(),
+                    static_cast<int>(label.size()),
+                    &text_rect,
+                    DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX);
+        if (kind == TrayMenuEntryKind::MoreSubmenuRoot) {
+            draw_popup_chevron(draw, row_rect, state.metrics);
+        }
     }
 
-    ::SetTextColor(hdc, title_color);
-    ::DrawTextW(hdc,
-                item->title.c_str(),
-                static_cast<int>(item->title.size()),
-                &title_rc,
-                DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX);
+    const int max_scroll = max_popup_scroll(state);
+    if (max_scroll > 0) {
+        const int track_top = scale_px(8, state.metrics.dpi);
+        const int track_height = std::max(1, height - track_top * 2);
+        const int full_height = state.content_height + state.metrics.outer_padding * 2;
+        const int thumb_height = std::clamp(
+            state.viewport_height * track_height / std::max(1, full_height),
+            scale_px(18, state.metrics.dpi),
+            track_height);
+        const int thumb_top = track_top +
+            state.scroll_offset * (track_height - thumb_height) / max_scroll;
+        RECT thumb{
+            width - scale_px(4, state.metrics.dpi),
+            thumb_top,
+            width - scale_px(2, state.metrics.dpi),
+            thumb_top + thumb_height,
+        };
+        fill_rounded_rect(draw, thumb, scale_px(2, state.metrics.dpi), RGB(190, 190, 190));
+    }
 
-    ::SetBkMode(hdc, old_bk_mode);
-    if (old_font) ::SelectObject(hdc, old_font);
-    if (font && font != ::GetStockObject(DEFAULT_GUI_FONT)) ::DeleteObject(font);
+    ::SetBkMode(draw, old_bk_mode);
+    if (old_font) ::SelectObject(draw, old_font);
+    if (buffer && bitmap) {
+        ::BitBlt(target, 0, 0, width, height, buffer, 0, 0, SRCCOPY);
+    }
+    if (old_bitmap) ::SelectObject(buffer, old_bitmap);
+    if (bitmap) ::DeleteObject(bitmap);
+    if (buffer) ::DeleteDC(buffer);
+    ::EndPaint(state.hwnd, &ps);
+}
+
+void apply_popup_window_shape(Win32TrayPopupWindow& state) {
+    if (!state.hwnd) return;
+    RECT client{};
+    ::GetClientRect(state.hwnd, &client);
+    HRGN region = ::CreateRoundRectRgn(
+        0,
+        0,
+        client.right + 1,
+        client.bottom + 1,
+        state.metrics.corner_radius,
+        state.metrics.corner_radius);
+    if (region) {
+        if (!::SetWindowRgn(state.hwnd, region, TRUE)) {
+            ::DeleteObject(region);
+        }
+    }
+
+    if (HMODULE dwm = ::LoadLibraryW(L"dwmapi.dll")) {
+        using DwmSetWindowAttributeFn = HRESULT(WINAPI*)(HWND, DWORD, LPCVOID, DWORD);
+        auto set_attribute = reinterpret_cast<DwmSetWindowAttributeFn>(
+            ::GetProcAddress(dwm, "DwmSetWindowAttribute"));
+        if (set_attribute) {
+            const DWORD rounded_preference = 2; // DWMWCP_ROUND
+            set_attribute(state.hwnd, 33, &rounded_preference, sizeof(rounded_preference));
+            const DWORD no_border = 0xFFFFFFFEu; // DWMWA_COLOR_NONE
+            set_attribute(state.hwnd, 34, &no_border, sizeof(no_border));
+        }
+        ::FreeLibrary(dwm);
+    }
+}
+
+bool create_popup_hwnd(Win32TrayPopupWindow& state,
+                       HWND owner,
+                       int x,
+                       int y,
+                       int height,
+                       bool no_activate) {
+    state.viewport_height = height;
+    const DWORD ex_style = WS_EX_TOOLWINDOW | WS_EX_TOPMOST |
+        (no_activate ? WS_EX_NOACTIVATE : 0);
+    state.hwnd = ::CreateWindowExW(
+        ex_style,
+        kTrayPopupWndClass,
+        L"ACECode Tray Menu",
+        WS_POPUP,
+        x,
+        y,
+        state.metrics.width,
+        height,
+        owner,
+        nullptr,
+        ::GetModuleHandleW(nullptr),
+        &state);
+    if (!state.hwnd) return false;
+    apply_popup_window_shape(state);
+    return true;
+}
+
+void destroy_popup_window(std::unique_ptr<Win32TrayPopupWindow>& state) {
+    if (!state) return;
+    if (state->hwnd && ::IsWindow(state->hwnd)) {
+        HWND hwnd = state->hwnd;
+        state->hwnd = nullptr;
+        ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        ::DestroyWindow(hwnd);
+    }
+    state.reset();
+}
+
+void close_tray_submenu() {
+    if (!g_tray_popup) return;
+    destroy_popup_window(g_tray_popup->submenu_window);
+    g_tray_popup->keyboard_in_submenu = false;
+    g_tray_popup->main_more_index = -1;
+    if (g_tray_popup->main_window && g_tray_popup->main_window->hwnd) {
+        ::InvalidateRect(g_tray_popup->main_window->hwnd, nullptr, FALSE);
+    }
+}
+
+void close_tray_popup() {
+    auto controller = std::move(g_tray_popup);
+    if (!controller) return;
+    controller->closing = true;
+    destroy_popup_window(controller->submenu_window);
+    destroy_popup_window(controller->main_window);
+}
+
+void activate_tray_popup_command(unsigned command_id) {
+    if (!g_tray_popup || command_id == 0) return;
+    TrayMenuLayout layout = g_tray_popup->layout;
+    close_tray_popup();
+    dispatch_menu_command(layout, command_id);
+}
+
+void update_popup_hover(Win32TrayPopupWindow& state, int index) {
+    if (index >= 0 && index < static_cast<int>(state.rows.size()) &&
+        !tray_popup_entry_is_selectable(
+            state.rows[static_cast<std::size_t>(index)].model.entry.kind)) {
+        index = -1;
+    }
+    if (state.hovered_index == index) return;
+    state.hovered_index = index;
+    if (state.hwnd) ::InvalidateRect(state.hwnd, nullptr, FALSE);
+}
+
+bool move_popup_selection(Win32TrayPopupWindow& state, int step) {
+    if (state.rows.empty() || step == 0) return false;
+    int index = state.hovered_index;
+    for (std::size_t count = 0; count < state.rows.size(); ++count) {
+        if (index < 0) {
+            index = step > 0 ? 0 : static_cast<int>(state.rows.size()) - 1;
+        } else {
+            index = (index + step + static_cast<int>(state.rows.size())) %
+                    static_cast<int>(state.rows.size());
+        }
+        if (tray_popup_entry_is_selectable(
+                state.rows[static_cast<std::size_t>(index)].model.entry.kind)) {
+            update_popup_hover(state, index);
+            ensure_popup_row_visible(state, index);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool open_tray_submenu(Win32TrayPopupWindow& main_window,
+                       int row_index,
+                       bool for_keyboard) {
+    if (!g_tray_popup || main_window.is_submenu ||
+        row_index < 0 || row_index >= static_cast<int>(main_window.rows.size())) {
+        return false;
+    }
+    const auto& root = main_window.rows[static_cast<std::size_t>(row_index)];
+    if (!tray_popup_row_has_submenu(root.model)) return false;
+
+    if (g_tray_popup->submenu_window &&
+        g_tray_popup->main_more_index == row_index) {
+        if (for_keyboard) {
+            g_tray_popup->keyboard_in_submenu = true;
+            if (g_tray_popup->submenu_window->hovered_index < 0) {
+                move_popup_selection(*g_tray_popup->submenu_window, 1);
+            }
+        }
+        return true;
+    }
+
+    close_tray_submenu();
+    auto rows = build_tray_popup_submenu_rows(root.model);
+    auto submenu = make_popup_window_state(
+        g_tray_popup.get(), true, std::move(rows), main_window.metrics);
+
+    RECT main_rect{};
+    ::GetWindowRect(main_window.hwnd, &main_rect);
+    POINT monitor_point{main_rect.left, main_rect.top};
+    const RECT work = monitor_work_area(monitor_point);
+    const int margin = scale_px(8, main_window.metrics.dpi);
+    const int gap = scale_px(6, main_window.metrics.dpi);
+    const int desired_height = submenu->content_height + submenu->metrics.outer_padding * 2;
+    const int work_left = static_cast<int>(work.left);
+    const int work_top = static_cast<int>(work.top);
+    const int work_right = static_cast<int>(work.right);
+    const int work_bottom = static_cast<int>(work.bottom);
+    const int max_height = std::max(
+        submenu->metrics.item_height + submenu->metrics.outer_padding * 2,
+        work_bottom - work_top - margin * 2);
+    const int height = std::min(desired_height, max_height);
+
+    int x = main_rect.right + gap;
+    if (x + submenu->metrics.width > work_right - margin) {
+        x = main_rect.left - gap - submenu->metrics.width;
+    }
+    x = std::clamp(x, work_left + margin, work_right - margin - submenu->metrics.width);
+    int y = main_rect.top + main_window.metrics.outer_padding +
+        root.top - main_window.scroll_offset;
+    y = std::clamp(y, work_top + margin, work_bottom - margin - height);
+
+    if (!create_popup_hwnd(*submenu, main_window.hwnd, x, y, height, true)) {
+        return false;
+    }
+    g_tray_popup->main_more_index = row_index;
+    g_tray_popup->keyboard_in_submenu = for_keyboard;
+    g_tray_popup->submenu_window = std::move(submenu);
+    ::SetWindowPos(
+        g_tray_popup->submenu_window->hwnd,
+        HWND_TOPMOST,
+        x,
+        y,
+        g_tray_popup->submenu_window->metrics.width,
+        height,
+        SWP_SHOWWINDOW | SWP_NOACTIVATE);
+    ::UpdateWindow(g_tray_popup->submenu_window->hwnd);
+    if (for_keyboard) {
+        move_popup_selection(*g_tray_popup->submenu_window, 1);
+    }
+    ::InvalidateRect(main_window.hwnd, nullptr, FALSE);
+    return true;
+}
+
+void handle_popup_keyboard(WPARAM key) {
+    if (!g_tray_popup || !g_tray_popup->main_window) return;
+    if (key == VK_ESCAPE) {
+        close_tray_popup();
+        return;
+    }
+
+    Win32TrayPopupWindow* target = g_tray_popup->keyboard_in_submenu &&
+            g_tray_popup->submenu_window
+        ? g_tray_popup->submenu_window.get()
+        : g_tray_popup->main_window.get();
+    if (!target) return;
+
+    if (key == VK_UP || key == VK_DOWN) {
+        move_popup_selection(*target, key == VK_DOWN ? 1 : -1);
+        return;
+    }
+    if (key == VK_LEFT && target->is_submenu) {
+        close_tray_submenu();
+        return;
+    }
+    if (target->hovered_index < 0 ||
+        target->hovered_index >= static_cast<int>(target->rows.size())) {
+        if (key == VK_RETURN || key == VK_RIGHT) move_popup_selection(*target, 1);
+        return;
+    }
+
+    const auto& row = target->rows[static_cast<std::size_t>(target->hovered_index)];
+    if (row.model.entry.kind == TrayMenuEntryKind::MoreSubmenuRoot) {
+        if (key == VK_RETURN || key == VK_RIGHT) {
+            open_tray_submenu(*target, target->hovered_index, true);
+        }
+        return;
+    }
+    if (key == VK_RETURN) {
+        activate_tray_popup_command(row.model.entry.id);
+    }
+}
+
+LRESULT CALLBACK tray_popup_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    if (msg == WM_NCCREATE) {
+        auto* create = reinterpret_cast<CREATESTRUCTW*>(lparam);
+        auto* state = create
+            ? static_cast<Win32TrayPopupWindow*>(create->lpCreateParams)
+            : nullptr;
+        if (!state) return FALSE;
+        state->hwnd = hwnd;
+        ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+        return TRUE;
+    }
+
+    auto* state = reinterpret_cast<Win32TrayPopupWindow*>(
+        ::GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (!state) return ::DefWindowProcW(hwnd, msg, wparam, lparam);
+
+    switch (msg) {
+        case WM_ERASEBKGND:
+            return TRUE;
+        case WM_PAINT:
+            paint_tray_popup(*state);
+            return 0;
+        case WM_MOUSEACTIVATE:
+            return state->is_submenu ? MA_NOACTIVATE : MA_ACTIVATE;
+        case WM_ACTIVATE:
+            if (!state->is_submenu && LOWORD(wparam) == WA_INACTIVE) {
+                HWND next = reinterpret_cast<HWND>(lparam);
+                HWND submenu = g_tray_popup && g_tray_popup->submenu_window
+                    ? g_tray_popup->submenu_window->hwnd
+                    : nullptr;
+                if (!submenu || next != submenu) {
+                    ::PostMessageW(hwnd, kTrayPopupDismissMessage, 0, 0);
+                }
+            }
+            return 0;
+        case WM_MOUSEMOVE: {
+            TRACKMOUSEEVENT track{};
+            track.cbSize = sizeof(track);
+            track.dwFlags = TME_LEAVE;
+            track.hwndTrack = hwnd;
+            ::TrackMouseEvent(&track);
+            const int x = static_cast<int>(static_cast<short>(LOWORD(lparam)));
+            const int y = static_cast<int>(static_cast<short>(HIWORD(lparam)));
+            const int index = popup_row_at(*state, x, y);
+            update_popup_hover(*state, index);
+            if (state->is_submenu) {
+                if (g_tray_popup) g_tray_popup->keyboard_in_submenu = true;
+            } else if (index >= 0 &&
+                       state->rows[static_cast<std::size_t>(index)].model.entry.kind ==
+                           TrayMenuEntryKind::MoreSubmenuRoot) {
+                open_tray_submenu(*state, index, false);
+            } else if (index >= 0) {
+                close_tray_submenu();
+            }
+            return 0;
+        }
+        case WM_MOUSELEAVE:
+            if (!state->is_submenu && g_tray_popup && g_tray_popup->submenu_window) {
+                update_popup_hover(*state, g_tray_popup->main_more_index);
+            } else {
+                update_popup_hover(*state, -1);
+            }
+            return 0;
+        case WM_LBUTTONUP: {
+            const int x = static_cast<int>(static_cast<short>(LOWORD(lparam)));
+            const int y = static_cast<int>(static_cast<short>(HIWORD(lparam)));
+            const int index = popup_row_at(*state, x, y);
+            if (index < 0 || index >= static_cast<int>(state->rows.size())) return 0;
+            const auto& row = state->rows[static_cast<std::size_t>(index)];
+            if (!tray_popup_entry_is_selectable(row.model.entry.kind)) return 0;
+            if (row.model.entry.kind == TrayMenuEntryKind::MoreSubmenuRoot) {
+                open_tray_submenu(*state, index, false);
+            } else {
+                activate_tray_popup_command(row.model.entry.id);
+            }
+            return 0;
+        }
+        case WM_MOUSEWHEEL: {
+            const int delta = GET_WHEEL_DELTA_WPARAM(wparam);
+            const int step = state->metrics.item_height * 3;
+            set_popup_scroll(
+                *state,
+                state->scroll_offset - (delta / WHEEL_DELTA) * step);
+            return 0;
+        }
+        case WM_GETDLGCODE:
+            return DLGC_WANTARROWS | DLGC_WANTALLKEYS;
+        case WM_KEYDOWN:
+            if (!state->is_submenu) handle_popup_keyboard(wparam);
+            return 0;
+        case WM_CLOSE:
+        case kTrayPopupDismissMessage:
+            close_tray_popup();
+            return 0;
+        case WM_NCDESTROY:
+            state->hwnd = nullptr;
+            ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            break;
+        default:
+            break;
+    }
+    return ::DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+
+bool register_tray_popup_class(HINSTANCE hinst) {
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.style = CS_DROPSHADOW;
+    wc.hInstance = hinst;
+    wc.hCursor = ::LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
+    wc.lpszClassName = kTrayPopupWndClass;
+    wc.lpfnWndProc = tray_popup_wnd_proc;
+    if (::RegisterClassExW(&wc)) return true;
+    return ::GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
+}
+
+bool show_custom_tray_popup(HWND owner,
+                            const TrayMenuLayout& layout,
+                            POINT anchor) {
+    HINSTANCE hinst = ::GetModuleHandleW(nullptr);
+    if (!register_tray_popup_class(hinst)) return false;
+
+    auto controller = std::make_unique<Win32TrayPopupController>();
+    controller->layout = layout;
+    const int dpi = point_dpi(anchor);
+    const Win32TrayPopupMetrics metrics = compute_popup_metrics(layout, dpi);
+    auto rows = build_tray_popup_rows(layout);
+    auto main_window = make_popup_window_state(
+        controller.get(), false, std::move(rows), metrics);
+
+    const RECT work = monitor_work_area(anchor);
+    const int margin = scale_px(8, dpi);
+    const int gap = scale_px(6, dpi);
+    const int desired_height = main_window->content_height + metrics.outer_padding * 2;
+    const int work_left = static_cast<int>(work.left);
+    const int work_top = static_cast<int>(work.top);
+    const int work_right = static_cast<int>(work.right);
+    const int work_bottom = static_cast<int>(work.bottom);
+    const int max_height = std::max(
+        metrics.action_height + metrics.outer_padding * 2,
+        work_bottom - work_top - margin * 2);
+    const int height = std::min(desired_height, max_height);
+
+    int x = anchor.x - metrics.width;
+    if (x < work_left + margin && anchor.x + gap + metrics.width <= work_right - margin) {
+        x = anchor.x + gap;
+    }
+    x = std::clamp(x, work_left + margin, work_right - margin - metrics.width);
+    int y = anchor.y - height - gap;
+    if (y < work_top + margin) y = anchor.y + gap;
+    y = std::clamp(y, work_top + margin, work_bottom - margin - height);
+
+    if (!create_popup_hwnd(*main_window, owner, x, y, height, false)) return false;
+    controller->main_window = std::move(main_window);
+    g_tray_popup = std::move(controller);
+
+    ::SetForegroundWindow(owner);
+    ::SetWindowPos(
+        g_tray_popup->main_window->hwnd,
+        HWND_TOPMOST,
+        x,
+        y,
+        metrics.width,
+        height,
+        SWP_SHOWWINDOW);
+    ::SetForegroundWindow(g_tray_popup->main_window->hwnd);
+    ::SetFocus(g_tray_popup->main_window->hwnd);
+    ::UpdateWindow(g_tray_popup->main_window->hwnd);
+    return true;
 }
 
 HICON load_app_icon_for_tray() {
@@ -361,13 +1008,10 @@ HICON load_app_icon_for_tray() {
     return ::LoadIconW(nullptr, MAKEINTRESOURCEW(32512));
 }
 
-// 把 layout 翻译成 AppendMenuW 的实际调用。每个 MoreSubmenuRoot 都创建一个
-// 独立 popup,随后连续的 MoreSubmenuItem 收进该 popup。
-void append_layout_to_menu(HMENU menu,
-                           const TrayMenuLayout& layout,
-                           Win32MenuBuildContext& ctx) {
+// 自定义 popup 创建失败时保留一个最小原生菜单兜底,保证 session/action 命令
+// 仍可用。正常路径不进入这里。
+void append_layout_to_native_fallback(HMENU menu, const TrayMenuLayout& layout) {
     HMENU current_more_submenu = nullptr;
-    const Win32MenuDrawMetrics metrics = compute_draw_metrics(layout);
     for (const auto& e : layout.entries) {
         switch (e.kind) {
             case TrayMenuEntryKind::PinnedHeader:
@@ -377,11 +1021,7 @@ void append_layout_to_menu(HMENU menu,
                 break;
             }
             case TrayMenuEntryKind::PinnedItem:
-            case TrayMenuEntryKind::RecentItem: {
-                Win32MenuDrawItem* item = add_owner_draw_item(ctx, e, metrics);
-                ::AppendMenuW(menu, MF_OWNERDRAW, e.id, reinterpret_cast<LPCWSTR>(item));
-                break;
-            }
+            case TrayMenuEntryKind::RecentItem:
             case TrayMenuEntryKind::NewChat:
             case TrayMenuEntryKind::OpenApp:
             case TrayMenuEntryKind::Quit: {
@@ -404,8 +1044,8 @@ void append_layout_to_menu(HMENU menu,
             }
             case TrayMenuEntryKind::MoreSubmenuItem: {
                 if (!current_more_submenu) current_more_submenu = ::CreatePopupMenu();
-                Win32MenuDrawItem* item = add_owner_draw_item(ctx, e, metrics);
-                ::AppendMenuW(current_more_submenu, MF_OWNERDRAW, e.id, reinterpret_cast<LPCWSTR>(item));
+                std::wstring w = utf8_to_wide(e.label);
+                ::AppendMenuW(current_more_submenu, MF_STRING, e.id, w.c_str());
                 break;
             }
         }
@@ -413,41 +1053,33 @@ void append_layout_to_menu(HMENU menu,
     // 子菜单的句柄交给 menu 拥有,DestroyMenu 时连带回收。
 }
 
-void show_context_menu(HWND hwnd) {
-    TrayMenuPayload payload = snapshot_payload();
-    TrayMenuLayout layout = compute_menu_layout(payload);
-
+void show_native_fallback_menu(HWND hwnd,
+                               const TrayMenuLayout& layout,
+                               POINT pt) {
     HMENU menu = ::CreatePopupMenu();
     if (!menu) return;
-    Win32MenuBuildContext build_ctx;
-    append_layout_to_menu(menu, layout, build_ctx);
-
-    POINT pt{};
-    ::GetCursorPos(&pt);
-    // KB135788 经典配方:SetForegroundWindow 让 popup menu 拿到正确的
-    // z-order(否则被置顶任务栏挡住)并在 click-away 时正确关闭。前提是
-    // hwnd 具备前台资格 —— 见 init_tray_icon 里"不能用 HWND_MESSAGE"的注释。
+    append_layout_to_native_fallback(menu, layout);
     ::SetForegroundWindow(hwnd);
     UINT cmd = ::TrackPopupMenu(menu,
                                 TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN,
                                 pt.x, pt.y, 0, hwnd, nullptr);
-    // 配方的后半段:菜单关闭后给自己发一个空消息,促使菜单模式立即退出,
-    // 否则下一次右键有概率立刻自动收起。
     ::PostMessageW(hwnd, WM_NULL, 0, 0);
     ::DestroyMenu(menu);
-
     dispatch_menu_command(layout, cmd);
 }
 
+void show_context_menu(HWND hwnd) {
+    close_tray_popup();
+    TrayMenuLayout layout = compute_menu_layout(snapshot_payload());
+    POINT pt{};
+    ::GetCursorPos(&pt);
+    if (!show_custom_tray_popup(hwnd, layout, pt)) {
+        LOG_WARN("[desktop] tray: custom popup unavailable, using native fallback");
+        show_native_fallback_menu(hwnd, layout, pt);
+    }
+}
+
 LRESULT CALLBACK tray_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
-    if (msg == WM_MEASUREITEM) {
-        measure_owner_draw_menu_item(reinterpret_cast<MEASUREITEMSTRUCT*>(lparam));
-        return TRUE;
-    }
-    if (msg == WM_DRAWITEM) {
-        draw_owner_draw_menu_item(reinterpret_cast<const DRAWITEMSTRUCT*>(lparam));
-        return TRUE;
-    }
     if (msg == g_tray_callback_msg && g_tray_callback_msg != 0) {
         // tray icon 事件。lparam 低 WORD 是事件类型
         // (WM_LBUTTONUP / WM_RBUTTONUP 等)。具体见 Shell_NotifyIcon 文档。
@@ -457,6 +1089,7 @@ LRESULT CALLBACK tray_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam
             case WM_LBUTTONDBLCLK:
                 // 双击与单击都路由到 on_show — bring_window_foreground 是幂等的,
                 // 双击连发两次 SetForegroundWindow 没有观感差异。
+                close_tray_popup();
                 if (g_on_show) g_on_show();
                 return 0;
             case WM_CONTEXTMENU:
@@ -551,6 +1184,7 @@ bool init_tray_icon(TrayClickHandler on_show,
 }
 
 void shutdown_tray_icon() {
+    close_tray_popup();
     if (g_icon_added) {
         ::Shell_NotifyIconW(NIM_DELETE, &g_nid);
         g_icon_added = false;
@@ -560,6 +1194,7 @@ void shutdown_tray_icon() {
         g_tray_window = nullptr;
     }
     HINSTANCE hinst = ::GetModuleHandleW(nullptr);
+    ::UnregisterClassW(kTrayPopupWndClass, hinst);
     ::UnregisterClassW(kTrayWndClass, hinst);
     reset_tray_state();
 }

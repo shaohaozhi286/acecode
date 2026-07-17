@@ -42,3 +42,9 @@ run('Top bar keeps search but has no direct new-conversation or loop buttons', (
   assert.match(topBar, /<QuickBtn title=\{searchHotkeyHint\} onClick=\{onOpenSearch\}>/);
   assert.match(topBar, /invokeTopBarQuickAction/);
 });
+
+run('Top bar left and right panel buttons share pressed toggle state', () => {
+  const topBar = source('TopBar.jsx');
+  assert.match(topBar, /pressed=\{!sidebarCollapsed\}/);
+  assert.match(topBar, /pressed=\{!rightPanelCollapsed\}/);
+});
