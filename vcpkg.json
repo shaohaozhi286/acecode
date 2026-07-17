@@ -1,17 +1,17 @@
 {
-  "name": "acecode",
-  "version-semver": "0.7.2",
-  "dependencies": [
-    "cpr",
-    "crow",
-    "ftxui",
-    "gtest",
-    "libzip",
-    "nlohmann-json",
-    "sqlite3",
-    {
-      "name": "wintoast",
-      "platform": "windows"
-    }
-  ]
+    "name":  "acecode",
+    "version-semver":  "0.7.3",
+    "dependencies":  [
+                         "cpr",
+                         "crow",
+                         "ftxui",
+                         "gtest",
+                         "libzip",
+                         "nlohmann-json",
+                         "sqlite3",
+                         {
+                             "name":  "wintoast",
+                             "platform":  "windows"
+                         }
+                     ]
 }
