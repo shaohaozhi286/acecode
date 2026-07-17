@@ -2,7 +2,7 @@
 //
 // 设计来源:Claude Design 高保真原型 (panels.jsx)。NAV 顺序与设计稿一致。
 // 后端真实接入的 section:常规 (权限模式) / 外观 (主题) / 配置 / 个性化 / 技能 / 模型 / 工具。
-// 其余 section (MCP / 已归档会话 / 使用情况) 当前部分为 UI 占位
+// 其余 section (MCP / 使用情况) 当前部分为 UI 占位
 // — 状态走本地 useState,提交按钮无网络副作用,待后端接口就绪后接入。
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -10,7 +10,7 @@ import { useTheme } from '../theme.jsx';
 import { api } from '../lib/api.js';
 import { openExternalUrl } from '../lib/externalUrl.js';
 import { copyTextToSystemClipboard } from '../lib/systemClipboard.js';
-import { Toggle } from './Modal.jsx';
+import { Modal, Toggle } from './Modal.jsx';
 import { clsx, relativeTime } from '../lib/format.js';
 import { lookupErrorMessage } from '../lib/errors.js';
 import { buildMcpServerList, countEnabledMcp, applyMcpToggle } from '../lib/mcpServers.js';
@@ -36,6 +36,12 @@ import {
 } from '../lib/modelManager.js';
 import { PERMISSION_MODES, normalizePermissionMode } from '../lib/permissionMode.js';
 import { sessionDisplayTitle } from '../lib/sessionTitle.js';
+import {
+  archivedSessionKey,
+  archivedSessionTarget,
+  removeArchivedSessionsByKey,
+  selectedArchivedSessions,
+} from '../lib/archivedSessions.js';
 import { formatUsageTokens, normalizeUsageStats, usageDataNote } from '../lib/usageStats.js';
 import {
   NO_FEEDBACK_SESSION_KEY,
@@ -110,6 +116,7 @@ export function SettingsPage({
   health,
   activeSessionId = '',
   onPermissionModeChanged,
+  onDesktopNotificationsChanged,
   onReplayGuidedTour,
   initialNavKey = 'general',
   fontSize = 'medium',
@@ -187,6 +194,7 @@ export function SettingsPage({
               health={health}
               activeSessionId={activeSessionId}
               onPermissionModeChanged={onPermissionModeChanged}
+              onDesktopNotificationsChanged={onDesktopNotificationsChanged}
               onReplayGuidedTour={onReplayGuidedTour}
             />
           )}
@@ -225,10 +233,15 @@ function SectionGeneral({
   health,
   activeSessionId = '',
   onPermissionModeChanged,
+  onDesktopNotificationsChanged,
   onReplayGuidedTour,
 }) {
   const [permMode, setPermMode] = useState('default');
   const [permBusy, setPermBusy] = useState(false);
+  const [notificationsEnabled, setNotificationsEnabled] = useState(
+    () => health?.notifications?.enabled !== false,
+  );
+  const [notificationsBusy, setNotificationsBusy] = useState(false);
   const [maxTurns, setMaxTurns] = useState(50);
   const [workMode, setWorkMode] = useState('coding');
   const [openTarget, setOpenTarget] = useState('vscode');
@@ -245,6 +258,43 @@ function SectionGeneral({
       });
     return () => { cancelled = true; };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.getDesktopNotifications()
+      .then((state) => {
+        if (!cancelled) setNotificationsEnabled(state?.enabled !== false);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setNotificationsEnabled(health?.notifications?.enabled !== false);
+        }
+      });
+    return () => { cancelled = true; };
+  }, [health?.notifications?.enabled]);
+
+  const switchDesktopNotifications = async (enabled) => {
+    const next = !!enabled;
+    const previous = notificationsEnabled;
+    if (notificationsBusy || next === previous) return;
+    setNotificationsEnabled(next);
+    setNotificationsBusy(true);
+    try {
+      const state = await api.setDesktopNotifications(next);
+      const confirmed = state?.enabled !== false;
+      setNotificationsEnabled(confirmed);
+      onDesktopNotificationsChanged?.(state || { enabled: confirmed });
+      toast({
+        kind: 'ok',
+        text: confirmed ? '消息通知已打开' : '消息通知已关闭',
+      });
+    } catch (e) {
+      setNotificationsEnabled(previous);
+      toast({ kind: 'err', text: '消息通知设置失败:' + (e?.message || '') });
+    } finally {
+      setNotificationsBusy(false);
+    }
+  };
 
   const switchPermissionMode = async (mode) => {
     const nextMode = normalizePermissionMode(mode);
@@ -302,6 +352,38 @@ function SectionGeneral({
             </button>
           );
         })}
+      </div>
+
+      <div className="h-px bg-border my-5" />
+
+      <div
+        role="switch"
+        aria-checked={notificationsEnabled}
+        tabIndex={0}
+        onClick={() => switchDesktopNotifications(!notificationsEnabled)}
+        onKeyDown={(e) => {
+          if (e.key === ' ' || e.key === 'Enter') {
+            e.preventDefault();
+            switchDesktopNotifications(!notificationsEnabled);
+          }
+        }}
+        className={clsx(
+          'flex items-center justify-between px-3.5 py-2.5 rounded-md bg-surface border border-border mb-2 transition',
+          'cursor-pointer hover:bg-surface-hi',
+          notificationsBusy && 'opacity-75 cursor-wait',
+        )}
+      >
+        <div>
+          <div className="text-[13px] font-medium">打开消息通知</div>
+          <div className="text-[11px] text-fg-mute mt-0.5">会话完成、权限确认或需要回答时发送系统通知</div>
+        </div>
+        <div onClick={(e) => e.stopPropagation()}>
+          <Toggle
+            on={notificationsEnabled}
+            disabled={notificationsBusy}
+            onChange={switchDesktopNotifications}
+          />
+        </div>
       </div>
 
       <div className="h-px bg-border my-5" />
@@ -1920,6 +2002,9 @@ function SectionArchived() {
   const [list, setList] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [selectedKeys, setSelectedKeys] = useState(() => new Set());
+  const [deletingKeys, setDeletingKeys] = useState(() => new Set());
+  const [purgeConfirmation, setPurgeConfirmation] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -1950,9 +2035,32 @@ function SectionArchived() {
     return () => { cancelled = true; };
   }, []);
 
+  const selectedItems = useMemo(
+    () => selectedArchivedSessions(list, selectedKeys),
+    [list, selectedKeys],
+  );
+
+  const removeSelectionKeys = (removedKeys) => {
+    setSelectedKeys((previous) => {
+      const next = new Set(previous);
+      for (const key of removedKeys) next.delete(key);
+      return next;
+    });
+  };
+
+  const toggleSelected = (item) => {
+    const key = archivedSessionKey(item);
+    if (!key || deletingKeys.has(key)) return;
+    setSelectedKeys((previous) => {
+      const next = new Set(previous);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
   const unarchive = async (item) => {
-    const id = item?.id || item?.session_id || item?.sessionId || '';
-    const workspaceHash = item?.workspace_hash || item?.workspaceHash || '';
+    const { id, workspaceHash, key } = archivedSessionTarget(item);
     if (!id) return;
     try {
       if (workspaceHash && workspaceHash !== '__local__') {
@@ -1960,13 +2068,105 @@ function SectionArchived() {
       } else {
         await api.unarchiveSession(id);
       }
-      setList((prev) => prev.filter((x) => (x.id || x.session_id || x.sessionId) !== id));
+      setList((previous) => removeArchivedSessionsByKey(previous, new Set([key])));
+      removeSelectionKeys([key]);
       window.dispatchEvent(new Event('ace-session-archive-changed'));
       toast({ kind: 'ok', text: '已取消归档' });
     } catch (e) {
       toast({ kind: 'err', text: '取消归档失败:' + (e.message || '') });
     }
   };
+
+  const purgeArchivedItems = async (items, { batch = false } = {}) => {
+    const targets = items
+      .map((item) => ({ item, ...archivedSessionTarget(item) }))
+      .filter((target) => target.id && target.key);
+    if (targets.length === 0) return;
+
+    const targetKeys = targets.map((target) => target.key);
+    setDeletingKeys((previous) => {
+      const next = new Set(previous);
+      for (const key of targetKeys) next.add(key);
+      return next;
+    });
+
+    try {
+      const results = await Promise.allSettled(targets.map((target) => {
+        if (target.workspaceHash && target.workspaceHash !== '__local__') {
+          return api.purgeArchivedWorkspaceSession(target.workspaceHash, target.id);
+        }
+        return api.purgeArchivedSession(target.id);
+      }));
+      const succeeded = new Set();
+      results.forEach((result, index) => {
+        if (result.status === 'fulfilled') succeeded.add(targets[index].key);
+      });
+      const successCount = succeeded.size;
+      const failedCount = targets.length - successCount;
+
+      if (successCount > 0) {
+        setList((previous) => removeArchivedSessionsByKey(previous, succeeded));
+        removeSelectionKeys(succeeded);
+        window.dispatchEvent(new Event('ace-session-archive-changed'));
+      }
+
+      if (batch) {
+        if (failedCount === 0) {
+          toast({ kind: 'ok', text: `已删除 ${successCount} 个会话` });
+        } else {
+          toast({
+            kind: 'err',
+            text: `已删除 ${successCount} 个会话，${failedCount} 个删除失败`,
+          });
+        }
+      } else if (failedCount === 0) {
+        toast({ kind: 'ok', text: '会话已彻底删除' });
+      } else {
+        const failure = results.find((result) => result.status === 'rejected');
+        toast({
+          kind: 'err',
+          text: '彻底删除失败:' + (failure?.reason?.message || ''),
+        });
+      }
+    } finally {
+      setDeletingKeys((previous) => {
+        const next = new Set(previous);
+        for (const key of targetKeys) next.delete(key);
+        return next;
+      });
+    }
+  };
+
+  const purgeOne = (item) => {
+    const title = sessionDisplayTitle(item, item?.name || '') || '未命名会话';
+    setPurgeConfirmation({
+      title: '彻底删除会话',
+      message: `彻底删除会话“${title}”？此操作不可撤销。`,
+      items: [item],
+      batch: false,
+    });
+  };
+
+  const purgeSelected = () => {
+    if (selectedItems.length === 0) return;
+    setPurgeConfirmation({
+      title: '彻底删除选中的会话',
+      message: `彻底删除选中的 ${selectedItems.length} 个会话？此操作不可撤销。`,
+      items: [...selectedItems],
+      batch: true,
+    });
+  };
+
+  const confirmPurge = () => {
+    const pending = purgeConfirmation;
+    if (!pending) return;
+    setPurgeConfirmation(null);
+    void purgeArchivedItems(pending.items, { batch: pending.batch });
+  };
+
+  const selectedDeletionBusy = selectedItems.some((item) => (
+    deletingKeys.has(archivedSessionKey(item))
+  ));
 
   return (
     <>
@@ -1988,26 +2188,93 @@ function SectionArchived() {
           暂无已归档会话
         </div>
       ) : (
-        list.map((item) => (
-          <div
-            key={item.id}
-            className="flex items-center justify-between px-3.5 py-2.5 rounded-md bg-surface border border-border mb-2"
-          >
-            <div className="min-w-0 pr-3">
-              <div className="text-[13px] font-medium truncate">{sessionDisplayTitle(item, item.name || '')}</div>
-              <div className="text-[11px] text-fg-mute mt-0.5 truncate">
-                {relativeTime(item.updated_at || item.created_at)} · {item.workspaceName || item.cwd || item.workspace_hash || 'workspace'}
+        <>
+          {list.map((item) => {
+            const target = archivedSessionTarget(item);
+            const title = sessionDisplayTitle(item, item.name || '');
+            const selected = selectedKeys.has(target.key);
+            const deleting = deletingKeys.has(target.key);
+            return (
+              <div
+                key={target.key || item.id}
+                className="flex items-center gap-3 px-3.5 py-2.5 rounded-md bg-surface border border-border mb-2"
+              >
+                <input
+                  type="checkbox"
+                  checked={selected}
+                  disabled={deleting}
+                  onChange={() => toggleSelected(item)}
+                  aria-label={`选择会话 ${title || '未命名会话'}`}
+                  className="h-4 w-4 shrink-0 accent-accent disabled:opacity-60"
+                />
+                <div className="min-w-0 flex-1">
+                  <div className="text-[13px] font-medium truncate">{title}</div>
+                  <div className="text-[11px] text-fg-mute mt-0.5 truncate">
+                    {relativeTime(item.updated_at || item.created_at)} · {item.workspaceName || item.cwd || item.workspace_hash || 'workspace'}
+                  </div>
+                </div>
+                <div className="shrink-0 flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => unarchive(item)}
+                    disabled={deleting}
+                    className="px-3 py-1 rounded-md text-[12px] text-fg-2 bg-surface-hi hover:bg-surface-alt border border-border transition disabled:opacity-60"
+                  >
+                    取消归档
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => purgeOne(item)}
+                    disabled={deleting}
+                    className="px-3 py-1 rounded-md text-[12px] text-danger bg-danger-bg hover:opacity-80 border border-danger/40 transition disabled:opacity-60"
+                  >
+                    {deleting ? '删除中' : '彻底删除'}
+                  </button>
+                </div>
               </div>
-            </div>
+            );
+          })}
+          <div className="mt-3 flex">
             <button
               type="button"
-              onClick={() => unarchive(item)}
-              className="shrink-0 px-3 py-1 rounded-md text-[12px] text-fg-2 bg-surface-hi hover:bg-surface-alt border border-border transition"
+              onClick={purgeSelected}
+              disabled={selectedItems.length === 0 || selectedDeletionBusy}
+              className="inline-flex w-fit items-center justify-center px-3 py-1 rounded-md text-[12px] text-danger bg-danger-bg hover:opacity-80 border border-danger/40 transition disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              取消归档
+              删除选中的所有会话
             </button>
           </div>
-        ))
+        </>
+      )}
+      {purgeConfirmation && (
+        <Modal onClose={() => setPurgeConfirmation(null)} width={440}>
+          {({ close }) => (
+            <div className="p-4">
+              <div className="text-[14px] font-semibold mb-2">
+                {purgeConfirmation.title}
+              </div>
+              <div className="text-[12.5px] text-fg-mute leading-relaxed mb-4">
+                {purgeConfirmation.message}
+              </div>
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  className="px-3 py-1.5 text-[12.5px] rounded-lg border border-border hover:bg-surface-hi"
+                  onClick={close}
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  className="px-3 py-1.5 text-[12.5px] rounded-lg border border-danger/40 bg-danger-bg text-danger hover:opacity-80"
+                  onClick={confirmPurge}
+                >
+                  彻底删除
+                </button>
+              </div>
+            </div>
+          )}
+        </Modal>
       )}
     </>
   );

@@ -47,8 +47,42 @@ await run('合并多个 workspace 的 sessions 并注入 workspaceName', async (
   assert.equal(result.sessions[0].workspaceName, 'acecode');
   assert.equal(result.sessions[0].workspace_hash, 'h1');
   assert.equal(result.sessions[2].workspaceName, 'hermes');
+  assert.deepEqual(result.workspaces, ws);
   // 已有 workspace_hash 字段不被覆盖
   assert.equal(result.sessions[2].workspace_hash, 'h2');
+});
+
+await run('补入 no_workspace 活跃会话并过滤兼容列表中的普通会话', async () => {
+  const ws = [{ hash: 'h1', name: 'acecode', cwd: '/acecode' }];
+  const result = await mergeAllWorkspaceSessions({
+    listWorkspaces: async () => ws,
+    listSessions: async () => [{ id: 's1', title: 'Workspace task' }],
+    listNoWorkspaceSessions: async () => [
+      { id: 's1', title: 'Compatibility duplicate', workspace_hash: 'h1' },
+      { id: 'temp-1', no_workspace: true, active: true },
+    ],
+  });
+
+  assert.deepEqual(result.sessions.map((session) => session.id), ['s1', 'temp-1']);
+  assert.deepEqual(result.workspaces, ws);
+  const temporary = result.sessions[1];
+  assert.equal(temporary.no_workspace, true);
+  assert.equal(temporary.workspace_hash, '');
+  assert.equal(temporary.workspaceName, '无工作区');
+  assert.equal(temporary.cwd, '');
+});
+
+await run('no_workspace 补充请求失败不丢弃 workspace 结果', async () => {
+  const result = await mergeAllWorkspaceSessions({
+    listWorkspaces: async () => [{ hash: 'h1', name: 'acecode', cwd: '/acecode' }],
+    listSessions: async () => [{ id: 's1', title: 'Still visible' }],
+    listNoWorkspaceSessions: async () => { throw new Error('temporary list failed'); },
+  });
+
+  assert.deepEqual(result.sessions.map((session) => session.id), ['s1']);
+  assert.equal(result.errors.length, 1);
+  assert.equal(result.errors[0].name, '无工作区');
+  assert.match(result.errors[0].message, /temporary list failed/);
 });
 
 await run('单个 workspace 拉取失败,其它 workspace 正常返回', async () => {
@@ -516,6 +550,33 @@ await run('Default permission mode API reads and writes config endpoint', async 
   }
 });
 
+await run('Desktop notification API reads and writes the master switch', async () => {
+  const previousFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    calls.push({ url, opts });
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ enabled: false }),
+    };
+  };
+  try {
+    const client = createApi({ origin: 'http://127.0.0.1:4567', token: 'tok' });
+    await client.getDesktopNotifications();
+    await client.setDesktopNotifications(false);
+
+    assert.equal(calls[0].url, 'http://127.0.0.1:4567/api/config/desktop-notifications');
+    assert.equal(calls[0].opts.method, 'GET');
+    assert.equal(calls[1].url, 'http://127.0.0.1:4567/api/config/desktop-notifications');
+    assert.equal(calls[1].opts.method, 'PUT');
+    assert.deepEqual(JSON.parse(calls[1].opts.body), { enabled: false });
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
 await run('Session model switch and default model use separate endpoints', async () => {
   const previousFetch = globalThis.fetch;
   const calls = [];
@@ -910,6 +971,8 @@ await run('archive API methods use expected endpoints and archived query flag', 
     await client.listWorkspaceSessions('w/a', { archived: true });
     await client.archiveSession('s/a');
     await client.unarchiveWorkspaceSession('w/a', 's/a');
+    await client.purgeArchivedSession('s/a');
+    await client.purgeArchivedWorkspaceSession('w/a', 's/a');
 
     assert.equal(calls[0].url, 'http://127.0.0.1:4567/api/sessions?archived=1');
     assert.equal(calls[0].opts.method, 'GET');
@@ -918,6 +981,10 @@ await run('archive API methods use expected endpoints and archived query flag', 
     assert.equal(calls[2].opts.method, 'PUT');
     assert.equal(calls[3].url, 'http://127.0.0.1:4567/api/workspaces/w%2Fa/sessions/s%2Fa/archive');
     assert.equal(calls[3].opts.method, 'DELETE');
+    assert.equal(calls[4].url, 'http://127.0.0.1:4567/api/sessions/s%2Fa?purge=1');
+    assert.equal(calls[4].opts.method, 'DELETE');
+    assert.equal(calls[5].url, 'http://127.0.0.1:4567/api/workspaces/w%2Fa/sessions/s%2Fa?purge=1');
+    assert.equal(calls[5].opts.method, 'DELETE');
   } finally {
     globalThis.fetch = previousFetch;
   }

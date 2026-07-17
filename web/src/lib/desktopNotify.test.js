@@ -9,6 +9,7 @@
 import assert from 'node:assert/strict';
 import {
   buildNotificationPayload,
+  notificationBodyFromEvent,
   shouldSuppress,
   truncateForNotification,
   maybeNotify,
@@ -73,6 +74,30 @@ run('buildNotificationPayload completion 默认 title suffix 是 "会话"', () =
   assert.match(p.id, /^completion-s2-/);
 });
 
+run('buildNotificationPayload permission 使用授权标题和稳定类型', () => {
+  const p = buildNotificationPayload({
+    type: 'permission',
+    sessionId: 's-perm',
+    sessionTitle: '后台会话',
+    bodyText: '等待权限',
+  });
+  assert.equal(p.title, '需要你授权 · 后台会话');
+  assert.match(p.id, /^permission-s-perm-/);
+});
+
+run('notificationBodyFromEvent 提取权限工具和首个问题', () => {
+  assert.equal(
+    notificationBodyFromEvent('permission', { tool: 'write_file' }),
+    '工具 write_file 正在等待权限确认',
+  );
+  assert.equal(
+    notificationBodyFromEvent('question', {
+      questions: [{ question: '要继续吗？' }],
+    }),
+    '要继续吗？',
+  );
+});
+
 run('buildNotificationPayload 空 body 时 completion 走默认占位', () => {
   const p = buildNotificationPayload({ type: 'completion', sessionId: 's3', bodyText: '' });
   assert.equal(p.body, '(空白回合)');
@@ -109,6 +134,12 @@ const sampleCompletion = {
   workspace_hash: 'w1',
   title: 't', body: 'b',
 };
+const samplePermission = {
+  id: 'permission-s3-123',
+  session_id: 's3',
+  workspace_hash: 'w1',
+  title: 't', body: 'b',
+};
 
 run('shouldSuppress: enabled=false 一律抑制', () => {
   assert.equal(shouldSuppress(sampleQuestion, null, false, { enabled: false }), true);
@@ -123,6 +154,12 @@ run('shouldSuppress: on_question=false 抑制 question 但不抑制 completion',
   const cfg = { on_question: false };
   assert.equal(shouldSuppress(sampleQuestion, null, false, cfg), true);
   assert.equal(shouldSuppress(sampleCompletion, null, false, cfg), false);
+});
+
+run('shouldSuppress: on_permission=false 只抑制 permission', () => {
+  const cfg = { on_permission: false };
+  assert.equal(shouldSuppress(samplePermission, null, false, cfg), true);
+  assert.equal(shouldSuppress(sampleQuestion, null, false, cfg), false);
 });
 
 run('shouldSuppress: on_completion=false 抑制 completion 但不抑制 question', () => {

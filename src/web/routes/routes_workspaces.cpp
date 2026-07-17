@@ -102,6 +102,10 @@ void WebServer::Impl::register_workspaces() {
         ([this](const crow::request& req, const std::string&, const std::string&) {
             return cors_preflight(req);
         });
+        CROW_ROUTE(app, "/api/workspaces/<string>/sessions/<string>").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req, const std::string&, const std::string&) {
+            return cors_preflight(req);
+        });
         CROW_ROUTE(app, "/api/workspaces/<string>/sessions/<string>/archive").methods(crow::HTTPMethod::Options)
         ([this](const crow::request& req, const std::string&, const std::string&) {
             return cors_preflight(req);
@@ -578,6 +582,28 @@ void WebServer::Impl::register_workspaces() {
             r.body = json{{"session_id", id}, {"id", id}, {"active", true}, {"workspace_hash", ws->hash}, {"cwd", ws->cwd}}.dump();
             r.add_header("Content-Type", "application/json");
             return with_cors(req, std::move(r));
+        });
+
+        CROW_ROUTE(app, "/api/workspaces/<string>/sessions/<string>").methods(crow::HTTPMethod::Delete)
+        ([this](const crow::request& req, const std::string& hash, const std::string& id) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            const char* purge_raw = req.url_params.get("purge");
+            const bool purge = purge_raw &&
+                (std::string(purge_raw) == "1" || std::string(purge_raw) == "true");
+            if (!purge) {
+                crow::response r(400);
+                r.body = R"({"error":"purge=1 is required"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            auto ws = resolve_workspace(hash);
+            if (!ws.has_value()) {
+                crow::response r(404);
+                r.body = R"({"error":"workspace not found"})";
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            }
+            return purge_session_data(req, *ws, id, /*require_archived=*/true);
         });
 
         CROW_ROUTE(app, "/api/workspaces/<string>/sessions/<string>/archive").methods(crow::HTTPMethod::PUT)

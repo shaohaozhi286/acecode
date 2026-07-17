@@ -1,7 +1,10 @@
 #include "notifications_win.hpp"
 
+#include "../config/config.hpp"
+#include "../utils/atomic_file.hpp"
 #include "../utils/encoding.hpp"
 #include "../utils/logger.hpp"
+#include "../utils/utf8_path.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -20,6 +23,7 @@
 #include <atomic>
 #include <cctype>
 #include <cstdint>
+#include <filesystem>
 #include <mutex>
 #include <utility>
 
@@ -31,6 +35,9 @@ ClickHandler g_click_handler;
 void* g_activation_window = nullptr;
 bool g_initialized = false;
 std::atomic<std::uint64_t> g_notification_sequence{0};
+#ifdef _WIN32
+std::wstring g_notification_logo_path;
+#endif
 
 void set_parse_error(std::string* error, std::string message) {
     if (error) *error = std::move(message);
@@ -66,6 +73,46 @@ std::size_t utf8_codepoint_bytes(const std::string& text, std::size_t offset) {
 }
 
 #ifdef _WIN32
+
+constexpr int kNotificationLogoResourceId = 101;
+constexpr int kRawDataResourceType = 10; // RT_RCDATA, wide-resource form
+
+std::wstring materialize_notification_logo() {
+    HMODULE module = ::GetModuleHandleW(nullptr);
+    HRSRC resource = ::FindResourceW(
+        module,
+        MAKEINTRESOURCEW(kNotificationLogoResourceId),
+        MAKEINTRESOURCEW(kRawDataResourceType));
+    if (!resource) {
+        LOG_WARN("[notifications] ACECode logo resource was not found");
+        return {};
+    }
+    HGLOBAL loaded = ::LoadResource(module, resource);
+    const DWORD size = ::SizeofResource(module, resource);
+    const void* bytes = loaded ? ::LockResource(loaded) : nullptr;
+    if (!bytes || size == 0) {
+        LOG_WARN("[notifications] ACECode logo resource could not be loaded");
+        return {};
+    }
+
+    const auto path = acecode::path_from_utf8(acecode::get_acecode_dir())
+        / "cache" / "acecode-notification-logo.png";
+    std::error_code ec;
+    if (std::filesystem::exists(path, ec) && !ec &&
+        std::filesystem::file_size(path, ec) == size && !ec) {
+        return path.wstring();
+    }
+
+    const std::string content(
+        static_cast<const char*>(bytes),
+        static_cast<std::size_t>(size));
+    if (!acecode::atomic_write_file(acecode::path_to_utf8(path), content)) {
+        LOG_WARN("[notifications] failed to materialize ACECode logo at " +
+                 acecode::path_to_utf8(path));
+        return {};
+    }
+    return path.wstring();
+}
 
 std::string wintoast_error_text(WinToastLib::WinToast::WinToastError error) {
     try {
@@ -233,8 +280,12 @@ bool init_notifications(const NotificationInitOptions& options) {
     }
 
     g_activation_window = options.activation_window;
+    g_notification_logo_path = materialize_notification_logo();
     g_initialized = true;
-    LOG_INFO("[notifications] WinToast initialized");
+    LOG_INFO("[notifications] WinToast initialized" +
+             std::string(g_notification_logo_path.empty()
+                 ? " without app logo override"
+                 : " with ACECode app logo"));
     return true;
 }
 
@@ -250,6 +301,11 @@ bool show_notification(const NotifyPayload& payload) {
             payload.title.empty() ? std::string("ACECode") : payload.title));
         toast.setSecondLine(acecode::utf8_to_wide(payload.body));
         toast.setDuration(WinToastLib::WinToastTemplate::Duration::Short);
+        if (!g_notification_logo_path.empty()) {
+            toast.setImagePath(
+                g_notification_logo_path,
+                WinToastLib::WinToastTemplate::CropHint::Square);
+        }
 
         WinToastLib::WinToast::WinToastError error =
             WinToastLib::WinToast::WinToastError::NoError;
@@ -279,6 +335,7 @@ void shutdown_notifications() {
         g_initialized = false;
         g_click_handler = nullptr;
         g_activation_window = nullptr;
+        g_notification_logo_path.clear();
     }
     if (was_initialized) {
         try {

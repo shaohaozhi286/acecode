@@ -30,6 +30,7 @@
 #include "session/session_manager.hpp"
 #include "session/session_registry.hpp"
 #include "session/session_storage.hpp"
+#include "session/session_user_message_search.hpp"
 #include "session/todo_state.hpp"
 #include "session/session_usage_ledger.hpp"
 #include "skills/skill_registry.hpp"
@@ -495,11 +496,12 @@ TEST(WebServerHttp, HealthEndpointReturnsBasicMetadata) {
     EXPECT_EQ(j["pid"], 12345);
     EXPECT_EQ(j["port"], fx.port);
 
-    // desktop.notifications 默认四个 bool 全 true,health 透传给前端做抑制规则判定。
+    // desktop.notifications 默认五个 bool 全 true,health 透传给前端做抑制规则判定。
     // 见 openspec/changes/add-windows-wintoast-completion-notifications。
     ASSERT_TRUE(j.contains("notifications"));
     ASSERT_TRUE(j["notifications"].is_object());
     EXPECT_EQ(j["notifications"]["enabled"], true);
+    EXPECT_EQ(j["notifications"]["on_permission"], true);
     EXPECT_EQ(j["notifications"]["on_question"], true);
     EXPECT_EQ(j["notifications"]["on_completion"], true);
     EXPECT_EQ(j["notifications"]["suppress_when_focused"], true);
@@ -507,6 +509,49 @@ TEST(WebServerHttp, HealthEndpointReturnsBasicMetadata) {
     ASSERT_TRUE(j.contains("features"));
     ASSERT_TRUE(j["features"].contains("completed_turn_self_heal"));
     EXPECT_EQ(j["features"]["completed_turn_self_heal"]["enabled"], true);
+}
+
+TEST(WebServerHttp, DesktopNotificationSettingDefaultsOnAndPersistsChanges) {
+    WebServerFixture fx;
+
+    auto initial = cpr::Get(
+        cpr::Url{fx.url("/api/config/desktop-notifications")});
+    ASSERT_EQ(initial.status_code, 200) << initial.text;
+    auto initial_json = json::parse(initial.text);
+    EXPECT_EQ(initial_json["enabled"], true);
+    EXPECT_EQ(initial_json["on_permission"], true);
+    EXPECT_EQ(initial_json["on_question"], true);
+    EXPECT_EQ(initial_json["on_completion"], true);
+
+    auto put = cpr::Put(
+        cpr::Url{fx.url("/api/config/desktop-notifications")},
+        cpr::Header{{"Content-Type", "application/json"}},
+        cpr::Body{R"({"enabled":false})"});
+    ASSERT_EQ(put.status_code, 200) << put.text;
+    auto body = json::parse(put.text);
+    EXPECT_EQ(body["enabled"], false);
+    EXPECT_FALSE(fx.cfg.desktop.notifications.enabled);
+
+    auto health = cpr::Get(cpr::Url{fx.url("/api/health")});
+    ASSERT_EQ(health.status_code, 200) << health.text;
+    EXPECT_EQ(json::parse(health.text)["notifications"]["enabled"], false);
+
+    std::ifstream ifs(fx.tmp_dir / "config.json");
+    ASSERT_TRUE(ifs.is_open());
+    auto saved = json::parse(ifs);
+    EXPECT_EQ(saved["desktop"]["notifications"]["enabled"], false);
+    EXPECT_FALSE(saved["desktop"]["notifications"].contains("on_permission"));
+}
+
+TEST(WebServerHttp, DesktopNotificationSettingRejectsInvalidPayload) {
+    WebServerFixture fx;
+    auto put = cpr::Put(
+        cpr::Url{fx.url("/api/config/desktop-notifications")},
+        cpr::Header{{"Content-Type", "application/json"}},
+        cpr::Body{R"({"enabled":"yes"})"});
+    ASSERT_EQ(put.status_code, 400) << put.text;
+    EXPECT_EQ(json::parse(put.text)["error"], "BAD_REQUEST");
+    EXPECT_TRUE(fx.cfg.desktop.notifications.enabled);
 }
 
 TEST(WebServerHttp, LoopCrudEnableConflictAndRunHistory) {
@@ -2347,6 +2392,106 @@ TEST(WebServerHttp, WorkspaceArchiveSessionHidesFromDefaultList) {
         [&](const json& s) { return s.value("id", std::string{}) == session_id; }));
 }
 
+// 场景:工作区归档会话可被永久删除;普通会话拒绝 purge,且成功删除时
+// transcript/meta/持久化工具结果/用户消息索引全部清理。
+TEST(WebServerHttp, WorkspacePurgePermanentlyDeletesOnlyArchivedSession) {
+    WebServerFixture fx;
+    const std::string hash = acecode::compute_cwd_hash(fx.cwd);
+
+    auto create = cpr::Post(cpr::Url{fx.url("/api/workspaces/" + hash + "/sessions")},
+                            cpr::Header{{"Content-Type", "application/json"}},
+                            cpr::Body{R"({})"});
+    ASSERT_EQ(create.status_code, 201) << create.text;
+    const std::string session_id =
+        json::parse(create.text).value("session_id", std::string{});
+    ASSERT_FALSE(session_id.empty());
+
+    const auto jsonl_path = path_from_utf8(
+        acecode::SessionStorage::session_path(fx.project_dir, session_id));
+    const auto meta_path = path_from_utf8(
+        acecode::SessionStorage::meta_path(fx.project_dir, session_id));
+
+    auto missing_flag = cpr::Delete(cpr::Url{
+        fx.url("/api/workspaces/" + hash + "/sessions/" + session_id)});
+    EXPECT_EQ(missing_flag.status_code, 400);
+
+    auto unarchived = cpr::Delete(cpr::Url{
+        fx.url("/api/workspaces/" + hash + "/sessions/" + session_id + "?purge=1")});
+    EXPECT_EQ(unarchived.status_code, 409) << unarchived.text;
+    auto still_visible = cpr::Get(cpr::Url{
+        fx.url("/api/workspaces/" + hash + "/sessions")});
+    ASSERT_EQ(still_visible.status_code, 200) << still_visible.text;
+    const auto still_visible_sessions = json::parse(still_visible.text);
+    EXPECT_TRUE(std::any_of(
+        still_visible_sessions.begin(),
+        still_visible_sessions.end(),
+        [&](const json& item) {
+            return item.value("id", std::string{}) == session_id;
+        }));
+
+    auto archive = cpr::Put(cpr::Url{
+        fx.url("/api/workspaces/" + hash + "/sessions/" + session_id + "/archive")});
+    ASSERT_EQ(archive.status_code, 200) << archive.text;
+    ASSERT_TRUE(std::filesystem::exists(meta_path));
+
+    acecode::ChatMessage indexed_message;
+    indexed_message.role = "user";
+    indexed_message.content = "archived-purge-needle";
+    acecode::SessionStorage::write_messages(
+        acecode::SessionStorage::session_path(fx.project_dir, session_id),
+        {indexed_message});
+    const auto persisted_dir = path_from_utf8(fx.project_dir) / session_id;
+    write_text(persisted_dir / "tool-result.json", "{}");
+    {
+        acecode::SessionUserMessageIndex index(fx.project_dir);
+        std::string error;
+        ASSERT_TRUE(index.rebuild_session(
+            session_id,
+            acecode::SessionStorage::session_path(fx.project_dir, session_id),
+            &error)) << error;
+        ASSERT_EQ(index.search("archived-purge-needle", 10, &error).size(), 1u)
+            << error;
+    }
+
+    auto purge = cpr::Delete(cpr::Url{
+        fx.url("/api/workspaces/" + hash + "/sessions/" + session_id + "?purge=1")});
+    EXPECT_EQ(purge.status_code, 204) << purge.text;
+    EXPECT_FALSE(std::filesystem::exists(jsonl_path));
+    EXPECT_FALSE(std::filesystem::exists(meta_path));
+    EXPECT_FALSE(std::filesystem::exists(persisted_dir));
+    {
+        acecode::SessionUserMessageIndex index(fx.project_dir);
+        std::string error;
+        EXPECT_TRUE(index.search("archived-purge-needle", 10, &error).empty())
+            << error;
+    }
+
+    auto archived = cpr::Get(cpr::Url{
+        fx.url("/api/workspaces/" + hash + "/sessions?archived=1")});
+    ASSERT_EQ(archived.status_code, 200) << archived.text;
+    EXPECT_TRUE(json::parse(archived.text).empty());
+}
+
+// 场景:工作区 purge 必须解析真实 workspace 与会话,错误目标不触碰磁盘。
+TEST(WebServerHttp, WorkspacePurgeRejectsMissingWorkspaceAndSession) {
+    WebServerFixture fx;
+    const std::string hash = acecode::compute_cwd_hash(fx.cwd);
+
+    auto missing_workspace = cpr::Delete(cpr::Url{
+        fx.url("/api/workspaces/missing/sessions/session-a?purge=1")});
+    EXPECT_EQ(missing_workspace.status_code, 404);
+    EXPECT_EQ(json::parse(missing_workspace.text)["error"], "workspace not found");
+
+    auto missing_session = cpr::Delete(cpr::Url{
+        fx.url("/api/workspaces/" + hash + "/sessions/session-a?purge=1")});
+    EXPECT_EQ(missing_session.status_code, 404);
+    EXPECT_EQ(json::parse(missing_session.text)["error"], "session not found");
+
+    auto invalid_session = cpr::Delete(cpr::Url{
+        fx.url("/api/workspaces/" + hash + "/sessions/bad.id?purge=1")});
+    EXPECT_EQ(invalid_session.status_code, 400);
+}
+
 // 场景:兼容 /api/sessions 路由也遵守归档隐藏与 archived 查询语义。
 TEST(WebServerHttp, CompatibilityArchiveSessionHidesFromDefaultList) {
     WebServerFixture fx;
@@ -2372,6 +2517,40 @@ TEST(WebServerHttp, CompatibilityArchiveSessionHidesFromDefaultList) {
     auto archived_sessions = json::parse(archived.text);
     ASSERT_EQ(archived_sessions.size(), 1u);
     EXPECT_EQ(archived_sessions[0]["id"], session_id);
+}
+
+// 场景:无 workspace registry 的归档页回退到兼容路由时,已归档普通会话
+// 也能通过显式 purge 永久删除;未归档普通会话仍由既有 guard 拒绝。
+TEST(WebServerHttp, CompatibilityPurgeAcceptsArchivedMainSession) {
+    WebServerFixture fx;
+
+    auto create = cpr::Post(cpr::Url{fx.url("/api/sessions")},
+                            cpr::Header{{"Content-Type", "application/json"}},
+                            cpr::Body{R"({})"});
+    ASSERT_EQ(create.status_code, 201) << create.text;
+    const std::string session_id =
+        json::parse(create.text).value("session_id", std::string{});
+    ASSERT_FALSE(session_id.empty());
+
+    auto rejected = cpr::Delete(cpr::Url{
+        fx.url("/api/sessions/" + session_id + "?purge=1")});
+    EXPECT_EQ(rejected.status_code, 400);
+    EXPECT_EQ(json::parse(rejected.text)["error"],
+              "only subagent sessions can be purged");
+
+    auto archive = cpr::Put(cpr::Url{
+        fx.url("/api/sessions/" + session_id + "/archive")});
+    ASSERT_EQ(archive.status_code, 200) << archive.text;
+
+    const auto jsonl_path = path_from_utf8(
+        acecode::SessionStorage::session_path(fx.project_dir, session_id));
+    const auto meta_path = path_from_utf8(
+        acecode::SessionStorage::meta_path(fx.project_dir, session_id));
+    auto purge = cpr::Delete(cpr::Url{
+        fx.url("/api/sessions/" + session_id + "?purge=1")});
+    EXPECT_EQ(purge.status_code, 204) << purge.text;
+    EXPECT_FALSE(std::filesystem::exists(jsonl_path));
+    EXPECT_FALSE(std::filesystem::exists(meta_path));
 }
 
 // 场景: shared daemon 为 desktop onboarding 启动时,当前 cwd 只有 hidden

@@ -7,12 +7,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../lib/api.js';
 import { connection } from '../lib/connection.js';
 import {
+  buildSearchResultSequence,
   mergeSessionContentMatches,
   rankSessions,
+  rankWorkspaces,
   searchRelativeTime,
   shouldSearchUserMessages,
+  workspaceDisplayName,
 } from '../lib/searchSessions.js';
 import { sessionDisplayTitle, withNewSessionDisplayTitles } from '../lib/sessionTitle.js';
+import { SESSION_LIST_CHANGED_EVENT } from '../lib/sessionListEvents.js';
 import { clsx } from '../lib/format.js';
 import { VsIcon } from './Icon.jsx';
 
@@ -23,7 +27,7 @@ const MAX_EMPTY_RESULTS = 50;
 // 组件外缓存,跨 open/close 共享(关闭再打开 60s 内不再 fetch)。
 const cache = {
   ts: 0,
-  data: { sessions: [], errors: [] },
+  data: { sessions: [], workspaces: [], errors: [] },
 };
 
 function isCacheFresh(now = Date.now()) {
@@ -41,7 +45,13 @@ function searchMatchContext(match) {
   return String(match.snippet || '');
 }
 
-export function SearchPalette({ open, onClose, currentWorkspaceHash = '', onSelectSession }) {
+export function SearchPalette({
+  open,
+  onClose,
+  currentWorkspaceHash = '',
+  onSelectSession,
+  onSelectWorkspace,
+}) {
   const [query, setQuery] = useState('');
   const [loadState, setLoadState] = useState('idle'); // 'idle' | 'loading' | 'ready'
   const [data, setData] = useState(cache.data);
@@ -53,7 +63,8 @@ export function SearchPalette({ open, onClose, currentWorkspaceHash = '', onSele
   const reqIdRef = useRef(0);
   const contentReqIdRef = useRef(0);
 
-  // WS 事件 invalidate 缓存(关闭面板时也监听,确保下次打开拿新数据)。
+  // WS / 本地 session-list 事件 invalidate 缓存(关闭面板时也监听,
+  // 确保刚创建且尚未落盘的会话下次打开立即可搜)。
   useEffect(() => {
     const onMsg = (e) => {
       const t = e.detail?.type;
@@ -61,8 +72,13 @@ export function SearchPalette({ open, onClose, currentWorkspaceHash = '', onSele
         invalidateCache();
       }
     };
+    const onSessionListChanged = () => invalidateCache();
     connection.addEventListener('message', onMsg);
-    return () => connection.removeEventListener('message', onMsg);
+    window.addEventListener(SESSION_LIST_CHANGED_EVENT, onSessionListChanged);
+    return () => {
+      connection.removeEventListener('message', onMsg);
+      window.removeEventListener(SESSION_LIST_CHANGED_EVENT, onSessionListChanged);
+    };
   }, []);
 
   // 打开时:reset query/selection,fetch(若缓存过期)。
@@ -115,7 +131,7 @@ export function SearchPalette({ open, onClose, currentWorkspaceHash = '', onSele
   }, [open, query]);
 
   // 排序后的可见列表;空查询时取最近 50 条。
-  const items = useMemo(() => {
+  const taskItems = useMemo(() => {
     const baseSessions = withNewSessionDisplayTitles(data.sessions || []);
     const q = query.trim();
     const matches = shouldSearchUserMessages(q) && contentSearch.query === q
@@ -125,6 +141,14 @@ export function SearchPalette({ open, onClose, currentWorkspaceHash = '', onSele
     const ranked = rankSessions(merged, query, Date.now());
     return query.trim() ? ranked : ranked.slice(0, MAX_EMPTY_RESULTS);
   }, [data, query, contentSearch]);
+  const projectItems = useMemo(
+    () => rankWorkspaces(data.workspaces || [], query),
+    [data.workspaces, query],
+  );
+  const items = useMemo(
+    () => buildSearchResultSequence(taskItems, projectItems),
+    [projectItems, taskItems],
+  );
 
   // query / items 变化时把 selectedIndex 钉到 0(避免滑出范围)。
   // contentSearch 到达会重排列表,与 data 刷新同样处理。
@@ -139,10 +163,14 @@ export function SearchPalette({ open, onClose, currentWorkspaceHash = '', onSele
   }, [selectedIndex, items.length]);
 
   const commit = useCallback((index) => {
-    const it = items[index];
-    if (!it) return;
-    onSelectSession?.(it);
-  }, [items, onSelectSession]);
+    const item = items[index];
+    if (!item) return;
+    if (item.kind === 'project') {
+      onSelectWorkspace?.(item.value);
+      return;
+    }
+    onSelectSession?.(item.value);
+  }, [items, onSelectSession, onSelectWorkspace]);
 
   const onRootKeyDown = useCallback((event) => {
     const total = items.length;
@@ -195,7 +223,7 @@ export function SearchPalette({ open, onClose, currentWorkspaceHash = '', onSele
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="搜索会话与 workspace"
+            placeholder="搜索任务或项目"
             className="flex-1 bg-transparent border-0 outline-none text-[14px] text-fg placeholder:text-fg-mute"
           />
           <button
@@ -211,54 +239,99 @@ export function SearchPalette({ open, onClose, currentWorkspaceHash = '', onSele
         {/* 错误条:某 workspace 加载失败 */}
         {loadState === 'ready' && data.errors?.length > 0 && (
           <div className="px-3 py-1.5 text-[11px] text-warning bg-warning-soft/30 border-b border-border shrink-0">
-            部分 workspace 加载失败:{data.errors.map((e) => e.name || e.hash).join(',')}
+            部分搜索数据加载失败:{data.errors.map((e) => e.name || e.hash).filter(Boolean).join(',')}
           </div>
         )}
 
         {/* 列表区 */}
-        <div ref={listRef} className="flex-1 overflow-y-auto">
+        <div ref={listRef} role="listbox" aria-label="搜索结果" className="flex-1 overflow-y-auto">
           {loadState === 'loading' && (
             <div className="px-4 py-8 text-center text-fg-mute text-[13px]">加载中…</div>
           )}
+          {loadState === 'ready' && (
+            <>
+              <div className="px-3 py-1.5 flex items-center justify-between border-b border-border bg-surface-alt text-[11px] font-semibold text-fg-mute">
+                <span>任务</span>
+                <span>{taskItems.length}</span>
+              </div>
+              {taskItems.map((s, idx) => {
+                const item = items[idx];
+                const selected = idx === selectedIndex;
+                const showWsName = (s.workspace_hash || '') !== currentWorkspaceHash;
+                const rel = searchRelativeTime(s.updated_at || s.created_at);
+                const matchContext = searchMatchContext(s.search_match);
+                const right = [
+                  selected && 'Enter',
+                  showWsName && (s.workspaceName || ''),
+                  rel,
+                ].filter(Boolean).join(' · ');
+                return (
+                  <div
+                    key={item?.key || `task:${s.id}`}
+                    ref={(el) => { if (el) rowRefs.current.set(idx, el); else rowRefs.current.delete(idx); }}
+                    role="option"
+                    aria-selected={selected}
+                    onMouseEnter={() => setSelectedIndex(idx)}
+                    onMouseDown={(e) => { e.preventDefault(); commit(idx); }}
+                    className={clsx(
+                      'min-h-12 px-3 py-2 flex items-center gap-3 cursor-pointer text-[13px]',
+                      selected ? 'bg-surface-hi text-fg' : 'text-fg hover:bg-surface-hi/60',
+                    )}
+                  >
+                    <VsIcon name="code" size={16} className="text-fg-mute shrink-0" />
+                    <span className="min-w-0 flex-1 flex flex-col gap-0.5">
+                      <span className="truncate">{sessionDisplayTitle(s)}</span>
+                      {matchContext ? (
+                        <span className="truncate text-[11px] text-fg-mute">{matchContext}</span>
+                      ) : null}
+                    </span>
+                    <span className="text-[12px] text-fg-mute shrink-0">{right}</span>
+                  </div>
+                );
+              })}
+              <div className="px-3 py-1.5 flex items-center justify-between border-y border-border bg-surface-alt text-[11px] font-semibold text-fg-mute">
+                <span>项目</span>
+                <span>{projectItems.length}</span>
+              </div>
+              {projectItems.map((workspace, projectIndex) => {
+                const idx = taskItems.length + projectIndex;
+                const item = items[idx];
+                const selected = idx === selectedIndex;
+                const active = (workspace.hash || '') === currentWorkspaceHash || !!workspace.active;
+                const right = [selected && 'Enter', active && '当前'].filter(Boolean).join(' · ');
+                const name = workspaceDisplayName(workspace);
+                const path = String(workspace.cwd || '').trim();
+                return (
+                  <div
+                    key={item?.key || `project:${workspace.hash || projectIndex}`}
+                    ref={(el) => { if (el) rowRefs.current.set(idx, el); else rowRefs.current.delete(idx); }}
+                    role="option"
+                    aria-selected={selected}
+                    onMouseEnter={() => setSelectedIndex(idx)}
+                    onMouseDown={(e) => { e.preventDefault(); commit(idx); }}
+                    className={clsx(
+                      'min-h-12 px-3 py-2 flex items-center gap-3 cursor-pointer text-[13px]',
+                      selected ? 'bg-surface-hi text-fg' : 'text-fg hover:bg-surface-hi/60',
+                    )}
+                  >
+                    <VsIcon name="folder" size={16} className="text-fg-mute shrink-0" />
+                    <span className="min-w-0 flex-1 flex flex-col gap-0.5">
+                      <span className="truncate font-medium">{name}</span>
+                      {path && path !== name ? (
+                        <span className="truncate text-[11px] text-fg-mute">{path}</span>
+                      ) : null}
+                    </span>
+                    <span className="text-[12px] text-fg-mute shrink-0">{right}</span>
+                  </div>
+                );
+              })}
+            </>
+          )}
           {loadState === 'ready' && items.length === 0 && (
             <div className="px-4 py-8 text-center text-fg-mute text-[13px]">
-              {query.trim() ? '无匹配结果' : '暂无会话'}
+              {query.trim() ? '无匹配结果' : '暂无任务或项目'}
             </div>
           )}
-          {loadState === 'ready' && items.map((s, idx) => {
-            const selected = idx === selectedIndex;
-            const showWsName = (s.workspace_hash || '') !== currentWorkspaceHash;
-            const rel = searchRelativeTime(s.updated_at || s.created_at);
-            const matchContext = searchMatchContext(s.search_match);
-            const right = [
-              selected && 'Enter',
-              showWsName && (s.workspaceName || ''),
-              rel,
-            ].filter(Boolean).join(' · ');
-            return (
-              <div
-                key={s.id}
-                ref={(el) => { if (el) rowRefs.current.set(idx, el); else rowRefs.current.delete(idx); }}
-                role="option"
-                aria-selected={selected}
-                onMouseEnter={() => setSelectedIndex(idx)}
-                onMouseDown={(e) => { e.preventDefault(); commit(idx); }}
-                className={clsx(
-                  'min-h-12 px-3 py-2 flex items-center gap-3 cursor-pointer text-[13px]',
-                  selected ? 'bg-surface-hi text-fg' : 'text-fg hover:bg-surface-hi/60',
-                )}
-              >
-                <VsIcon name="code" size={16} className="text-fg-mute shrink-0" />
-                <span className="min-w-0 flex-1 flex flex-col gap-0.5">
-                  <span className="truncate">{sessionDisplayTitle(s)}</span>
-                  {matchContext ? (
-                    <span className="truncate text-[11px] text-fg-mute">{matchContext}</span>
-                  ) : null}
-                </span>
-                <span className="text-[12px] text-fg-mute shrink-0">{right}</span>
-              </div>
-            );
-          })}
         </div>
       </div>
     </div>

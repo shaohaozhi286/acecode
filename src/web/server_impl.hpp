@@ -294,6 +294,10 @@ struct WebServer::Impl {
                                               const acecode::desktop::WorkspaceMeta& ws,
                                               const std::string& id,
                                               bool archived);
+    crow::response purge_session_data(const crow::request& req,
+                                      const acecode::desktop::WorkspaceMeta& ws,
+                                      const std::string& id,
+                                      bool require_archived);
     crow::response session_input_draft_response(const crow::request& req,
                                                  const std::string& id,
                                                  const std::string& text);

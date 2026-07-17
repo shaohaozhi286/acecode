@@ -7,6 +7,7 @@
 //
 // 抑制规则(决策 4):
 //   - cfg.enabled=false → 一律跳过
+//   - cfg.on_permission=false → permission 类型跳过
 //   - cfg.on_question=false → question 类型跳过
 //   - cfg.on_completion=false → completion 类型跳过
 //   - cfg.suppress_when_focused=true 且窗口聚焦 + 事件 session 是当前可见 session
@@ -21,6 +22,7 @@ const DEFAULT_COMPLETION_BODY = '(空白回合)';
 function defaultCfg() {
   return {
     enabled: true,
+    on_permission: true,
     on_question: true,
     on_completion: true,
     suppress_when_focused: true,
@@ -32,6 +34,7 @@ function normalizeCfg(cfg) {
   if (!cfg || typeof cfg !== 'object') return base;
   return {
     enabled: cfg.enabled !== false,
+    on_permission: cfg.on_permission !== false,
     on_question: cfg.on_question !== false,
     on_completion: cfg.on_completion !== false,
     suppress_when_focused: cfg.suppress_when_focused !== false,
@@ -54,8 +57,12 @@ export function buildNotificationPayload({
   sessionTitle = '',
   bodyText = '',
 }) {
-  const safeType = type === 'completion' ? 'completion' : 'question';
-  const titlePrefix = safeType === 'question' ? '需要你回答' : '已完成';
+  const safeType = type === 'completion'
+    ? 'completion'
+    : (type === 'permission' ? 'permission' : 'question');
+  const titlePrefix = safeType === 'completion'
+    ? '已完成'
+    : (safeType === 'permission' ? '需要你授权' : '需要你回答');
   const titleSuffix = sessionTitle && String(sessionTitle).trim() ? String(sessionTitle).trim() : '会话';
   const title = `${titlePrefix} · ${titleSuffix}`;
   const trimmedBody = String(bodyText || '').trim();
@@ -71,11 +78,34 @@ export function buildNotificationPayload({
   };
 }
 
+export function notificationBodyFromEvent(type, payload = {}) {
+  if (type === 'completion') {
+    return String(
+      payload.final_assistant_text
+      || payload.content
+      || payload.text
+      || '',
+    );
+  }
+  if (type === 'permission') {
+    const tool = String(payload.tool || '').trim();
+    return tool ? `工具 ${tool} 正在等待权限确认` : '正在等待权限确认';
+  }
+  const questions = Array.isArray(payload.questions) ? payload.questions : [];
+  return String(
+    questions[0]?.question
+    || payload.question
+    || payload.prompt
+    || '正在等待你的回答',
+  );
+}
+
 export function shouldSuppress(payload, activeRef, hasFocus, cfg) {
   const c = normalizeCfg(cfg);
   if (!c.enabled) return true;
   // payload.id 形如 "question-..." / "completion-...",取首段判类型。
   const type = String(payload?.id || '').split('-')[0];
+  if (type === 'permission' && !c.on_permission) return true;
   if (type === 'question' && !c.on_question) return true;
   if (type === 'completion' && !c.on_completion) return true;
   if (c.suppress_when_focused && hasFocus) {
@@ -124,7 +154,7 @@ export function focusSession(workspaceHash, sessionId) {
   }
 }
 
-// 一站式入口:构造 payload + 判抑制 + 投递。前端事件源(sessionTranscript)调这一个。
+// 一站式入口:构造 payload + 判抑制 + 投递。应用级 WS 监听器调这一个。
 // activeRef = { sessionId, workspaceHash }。hasFocus 由调用方读 document.hasFocus()。
 export function maybeNotify({
   type,

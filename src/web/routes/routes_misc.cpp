@@ -26,6 +26,16 @@ json desktop_guided_tour_state_json() {
     };
 }
 
+json desktop_notifications_to_json(const DesktopNotificationsConfig& config) {
+    return json{
+        {"enabled", config.enabled},
+        {"on_permission", config.on_permission},
+        {"on_question", config.on_question},
+        {"on_completion", config.on_completion},
+        {"suppress_when_focused", config.suppress_when_focused},
+    };
+}
+
 bool update_job_is_active(const UpdateJobStatus& status) {
     return status.state == "pending" || status.state == "running";
 }
@@ -691,12 +701,7 @@ void WebServer::Impl::register_health() {
             if (deps.app_config) {
                 std::lock_guard<std::mutex> config_lock(app_config_mu);
                 const auto& n = deps.app_config->desktop.notifications;
-                j["notifications"] = {
-                    {"enabled", n.enabled},
-                    {"on_question", n.on_question},
-                    {"on_completion", n.on_completion},
-                    {"suppress_when_focused", n.suppress_when_focused},
-                };
+                j["notifications"] = desktop_notifications_to_json(n);
                 j["features"] = {
                     {"completed_turn_self_heal", {
                         {"enabled", deps.app_config->features.completed_turn_self_heal},
@@ -939,6 +944,10 @@ void WebServer::Impl::register_ui_preferences() {
         ([this](const crow::request& req) {
             return cors_preflight(req);
         });
+        CROW_ROUTE(app, "/api/config/desktop-notifications").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
         CROW_ROUTE(app, "/api/update/status").methods(crow::HTTPMethod::Options)
         ([this](const crow::request& req) {
             return cors_preflight(req);
@@ -1038,6 +1047,20 @@ void WebServer::Impl::register_ui_preferences() {
             crow::response r(200);
             r.add_header("Content-Type", "application/json");
             r.body = permission_mode_to_json(parsed.value_or(PermissionMode::Default)).dump();
+            return with_cors(req, std::move(r));
+        });
+
+        // GET /api/config/desktop-notifications: persisted native notification
+        // settings. The UI currently exposes only the master enabled switch.
+        CROW_ROUTE(app, "/api/config/desktop-notifications").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.app_config) return crow::response(503);
+            std::lock_guard<std::mutex> config_lock(app_config_mu);
+            crow::response r(200);
+            r.add_header("Content-Type", "application/json");
+            r.body = desktop_notifications_to_json(
+                deps.app_config->desktop.notifications).dump();
             return with_cors(req, std::move(r));
         });
 
@@ -1408,6 +1431,52 @@ void WebServer::Impl::register_ui_preferences() {
             crow::response r(200);
             r.add_header("Content-Type", "application/json");
             r.body = permission_mode_to_json(*mode).dump();
+            return with_cors(req, std::move(r));
+        });
+
+        // PUT /api/config/desktop-notifications body {enabled:boolean}.
+        CROW_ROUTE(app, "/api/config/desktop-notifications").methods(crow::HTTPMethod::PUT)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.app_config) return crow::response(503);
+
+            auto json_err = [&](int status, const char* code, const std::string& msg) {
+                crow::response r(status);
+                r.body = json{{"error", code}, {"message", msg}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            };
+
+            json body;
+            try { body = json::parse(req.body); }
+            catch (const std::exception& e) {
+                return json_err(400, "BAD_JSON",
+                                std::string("invalid JSON body: ") + e.what());
+            }
+            if (!body.is_object() || !body.contains("enabled") ||
+                !body["enabled"].is_boolean()) {
+                return json_err(400, "BAD_REQUEST", "expected {enabled: boolean}");
+            }
+
+            std::lock_guard<std::mutex> config_lock(app_config_mu);
+            const auto before = deps.app_config->desktop.notifications;
+            deps.app_config->desktop.notifications.enabled =
+                body["enabled"].get<bool>();
+            try {
+                if (!deps.config_path.empty()) {
+                    save_config(*deps.app_config, deps.config_path);
+                } else {
+                    save_config(*deps.app_config);
+                }
+            } catch (const std::exception& e) {
+                deps.app_config->desktop.notifications = before;
+                return json_err(500, "PERSIST_FAILED", e.what());
+            }
+
+            crow::response r(200);
+            r.add_header("Content-Type", "application/json");
+            r.body = desktop_notifications_to_json(
+                deps.app_config->desktop.notifications).dump();
             return with_cors(req, std::move(r));
         });
 

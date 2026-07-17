@@ -182,6 +182,10 @@ export function createApi(base = null) {
       request('PUT', `/api/workspaces/${encodeURIComponent(hash)}/sessions/${encodeURIComponent(id)}/archive`, {}, base),
     unarchiveWorkspaceSession: (hash, id) =>
       request('DELETE', `/api/workspaces/${encodeURIComponent(hash)}/sessions/${encodeURIComponent(id)}/archive`, undefined, base),
+    purgeArchivedSession: (id) =>
+      request('DELETE', `/api/sessions/${encodeURIComponent(id)}?purge=1`, undefined, base),
+    purgeArchivedWorkspaceSession: (hash, id) =>
+      request('DELETE', `/api/workspaces/${encodeURIComponent(hash)}/sessions/${encodeURIComponent(id)}?purge=1`, undefined, base),
     getPinnedSessions: (hash) =>
       request('GET', `/api/workspaces/${encodeURIComponent(hash)}/pinned-sessions`, undefined, base),
     setPinnedSessions: (hash, sessionIds=[]) =>
@@ -254,6 +258,8 @@ export function createApi(base = null) {
     setSessionPermissionMode: (sid, mode) => request('PUT', `/api/sessions/${encodeURIComponent(sid)}/permissions`, {mode}, base),
     getDefaultPermissionMode: ()     => request('GET',    '/api/config/default-permission-mode', undefined, base),
     setDefaultPermissionMode: (mode) => request('PUT',    '/api/config/default-permission-mode', {mode}, base),
+    getDesktopNotifications: ()      => request('GET',    '/api/config/desktop-notifications', undefined, base),
+    setDesktopNotifications: (enabled) => request('PUT',  '/api/config/desktop-notifications', {enabled: !!enabled}, base),
     addModel:         (draft)        => request('POST',   '/api/models', draft, base),
     updateModel:      (name, draft)  => request('PUT',    `/api/models/${encodeURIComponent(name)}`, draft, base),
     removeModel:      (name)         => request('DELETE', `/api/models/${encodeURIComponent(name)}`, undefined, base),
@@ -302,18 +308,21 @@ export function createApi(base = null) {
         {},
         base),
 
-    // 跨 workspace 一次拿全 session 列表(SearchPalette 用)。
-    // 返回 { sessions: [...], errors: [{hash, name, message}] }。
+    // 跨 workspace 一次拿全 session 列表(SearchPalette 用),并补入
+    // /api/sessions 中的 no_workspace 活跃会话(包括尚未首条落盘的会话)。
+    // 返回 { sessions: [...], workspaces: [...], errors: [{hash, name, message}] }。
     // 单个 workspace 拉取失败不阻塞其它 workspace。
     listAllWorkspaceSessions: () => mergeAllWorkspaceSessions({
       listWorkspaces: () => request('GET', '/api/workspaces', undefined, base),
       listSessions: (hash) => request('GET',
         `/api/workspaces/${encodeURIComponent(hash)}/sessions`, undefined, base),
+      listNoWorkspaceSessions: () => request('GET', '/api/sessions', undefined, base),
     }),
     listAllArchivedSessions: () => mergeAllWorkspaceSessions({
       listWorkspaces: () => request('GET', '/api/workspaces', undefined, base),
       listSessions: (hash) => request('GET',
         `/api/workspaces/${encodeURIComponent(hash)}/sessions?archived=1`, undefined, base),
+      listNoWorkspaceSessions: () => request('GET', '/api/sessions?archived=1', undefined, base),
     }),
     searchSessionUserMessages: (query, limit = 50) =>
       request('GET', sessionUserMessageSearchPath(query, limit), undefined, base),
@@ -382,41 +391,86 @@ export function createApi(base = null) {
 
 export const api = createApi();
 
-// 抽出便于单测:对每个 workspace 并行 listSessions,失败收集到 errors[],成功扁平化
-// 到 sessions[] 并注入 workspace_hash + workspaceName + cwd。
-export async function mergeAllWorkspaceSessions({ listWorkspaces, listSessions }) {
+// 抽出便于单测:对每个 workspace 并行 listSessions,同时从兼容 /api/sessions
+// 数据源筛出 no_workspace 会话。失败收集到 errors[],成功扁平化到 sessions[],
+// 并把原始 workspace 列表一并返回给 SearchPalette 的「项目」分栏。
+export async function mergeAllWorkspaceSessions({
+  listWorkspaces,
+  listSessions,
+  listNoWorkspaceSessions,
+}) {
   let workspaces = [];
   try {
     const list = await listWorkspaces();
     workspaces = Array.isArray(list) ? list : [];
   } catch (e) {
-    return { sessions: [], errors: [{ hash: '', name: '', message: (e && e.message) || String(e) }] };
+    return {
+      sessions: [],
+      workspaces: [],
+      errors: [{ hash: '', name: '', message: (e && e.message) || String(e) }],
+    };
   }
-  const settled = await Promise.allSettled(workspaces.map(async (w) => {
+  const loaders = workspaces.map(async (w) => {
     const list = await listSessions(w.hash);
-    return { ws: w, list: Array.isArray(list) ? list : [] };
-  }));
+    return { kind: 'workspace', ws: w, list: Array.isArray(list) ? list : [] };
+  });
+  if (typeof listNoWorkspaceSessions === 'function') {
+    loaders.push((async () => {
+      const list = await listNoWorkspaceSessions();
+      return {
+        kind: 'no-workspace',
+        ws: null,
+        list: Array.isArray(list)
+          ? list.filter((session) => !!(session?.no_workspace || session?.noWorkspace))
+          : [],
+      };
+    })());
+  }
+  const settled = await Promise.allSettled(loaders);
   const sessions = [];
   const errors = [];
+  const seen = new Set();
   for (let i = 0; i < settled.length; ++i) {
     const r = settled[i];
-    const w = workspaces[i];
+    const w = workspaces[i] || null;
     if (r.status === 'fulfilled') {
+      if (r.value.kind === 'no-workspace') {
+        for (const s of r.value.list) {
+          const id = s?.id || s?.session_id || s?.sessionId || '';
+          const key = `no-workspace::${id}`;
+          if (id && seen.has(key)) continue;
+          if (id) seen.add(key);
+          sessions.push({
+            ...s,
+            no_workspace: true,
+            workspace_hash: '',
+            workspaceName: '无工作区',
+            cwd: '',
+          });
+        }
+        continue;
+      }
       for (const s of r.value.list) {
+        const workspaceHash = s.workspace_hash || r.value.ws.hash;
+        const id = s?.id || s?.session_id || s?.sessionId || '';
+        const key = `${workspaceHash}::${id}`;
+        if (id && seen.has(key)) continue;
+        if (id) seen.add(key);
         sessions.push({
           ...s,
-          workspace_hash: s.workspace_hash || w.hash,
-          workspaceName: w.name || w.cwd || w.hash,
-          cwd: s.cwd || w.cwd,
+          workspace_hash: workspaceHash,
+          workspaceName: r.value.ws.name || r.value.ws.cwd || r.value.ws.hash,
+          cwd: s.cwd || r.value.ws.cwd,
         });
       }
     } else {
+      const noWorkspaceFailure = i >= workspaces.length;
       errors.push({
-        hash: w.hash,
-        name: w.name || w.cwd || w.hash,
+        hash: noWorkspaceFailure ? '' : w.hash,
+        name: noWorkspaceFailure ? '无工作区' : (w.name || w.cwd || w.hash),
         message: (r.reason && r.reason.message) || String(r.reason || ''),
       });
     }
   }
-  return { sessions, errors };
+  return { sessions, workspaces, errors };
 }

@@ -130,6 +130,59 @@ export function rankSessions(sessions, query, now = Date.now()) {
   return scored.map((x) => x.session);
 }
 
+export function workspaceDisplayName(workspace = {}) {
+  return String(workspace.name || workspace.cwd || workspace.hash || '').trim();
+}
+
+export function scoreWorkspace(workspace, query) {
+  const q = lower(query || '').trim();
+  const name = lower(workspaceDisplayName(workspace));
+  const cwd = lower(workspace?.cwd);
+  const hash = lower(workspace?.hash);
+  if (!q) return workspace?.active ? 2 : 1;
+
+  let score = 0;
+  if (name.startsWith(q)) score = Math.max(score, 1000);
+  else if (name.includes(q)) score = Math.max(score, 500);
+  else if (fuzzyHit(name, q)) score = Math.max(score, 50);
+  if (cwd.includes(q)) score = Math.max(score, 200);
+  if (hash.includes(q)) score = Math.max(score, 100);
+  return score;
+}
+
+export function rankWorkspaces(workspaces, query) {
+  const scored = [];
+  (workspaces || []).forEach((workspace, index) => {
+    const score = scoreWorkspace(workspace, query);
+    if (score > 0) scored.push({ workspace, score, index });
+  });
+  scored.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    if (!!b.workspace?.active !== !!a.workspace?.active) {
+      return b.workspace?.active ? 1 : -1;
+    }
+    const byName = workspaceDisplayName(a.workspace)
+      .localeCompare(workspaceDisplayName(b.workspace), undefined, { sensitivity: 'base' });
+    return byName || a.index - b.index;
+  });
+  return scored.map((item) => item.workspace);
+}
+
+export function buildSearchResultSequence(tasks = [], projects = []) {
+  return [
+    ...(tasks || []).map((task) => ({
+      kind: 'task',
+      key: `task:${sessionMergeKey(task)}`,
+      value: task,
+    })),
+    ...(projects || []).map((project, index) => ({
+      kind: 'project',
+      key: `project:${project?.hash || project?.cwd || index}`,
+      value: project,
+    })),
+  ];
+}
+
 // 日历分桶相对时间:今天 / 昨天 / 本周 / 上周 / 上月 / 更早。
 // 用本地日历(不是固定窗口)以贴近用户直觉:周一 0:01 看到的"昨天"=周日。
 export function searchRelativeTime(updatedAt, now = Date.now()) {

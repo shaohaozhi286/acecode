@@ -1,36 +1,29 @@
-// 共享 modal 容器:遮罩 + 居中 + esc 关闭 + 进入/退出动画。
+// 共享 modal 容器:遮罩 + 居中 + esc 关闭。效率工具中的弹窗立即出现/关闭,
+// 不做进入/退出动画,也不延迟 onClose。
 // 不依赖 bootstrap modal,纯 Tailwind + 内联状态。
 
 import { useEffect, useState } from 'react';
 import { clsx } from '../lib/format.js';
 
 export function Modal({ children, onClose, width = 460, dismissOnBackdrop = true }) {
-  const [show, setShow] = useState(false);
-
   useEffect(() => {
-    requestAnimationFrame(() => setShow(true));
-    const onKey = (e) => { if (e.key === 'Escape') handleClose(); };
+    const onKey = (e) => { if (e.key === 'Escape') onClose?.(); };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [onClose]);
 
-  const handleClose = () => {
-    setShow(false);
-    setTimeout(() => onClose?.(), 200);
-  };
+  const handleClose = () => onClose?.();
 
   return (
     <div
-      className="fixed inset-0 z-[200] flex items-center justify-center p-4 transition-colors duration-200"
-      style={{ backgroundColor: show ? 'rgba(0, 0, 0, 0.35)' : 'rgba(0, 0, 0, 0)' }}
+      className="fixed inset-0 z-[200] flex items-center justify-center p-4"
+      style={{ backgroundColor: 'rgba(0, 0, 0, 0.35)' }}
       onClick={() => dismissOnBackdrop && handleClose()}
     >
       <div
-        className={clsx(
-          'bg-surface border border-border rounded-xl ace-shadow-lg overflow-hidden transition-all duration-200',
-          show ? 'opacity-100 scale-100 translate-y-0' : 'opacity-0 scale-95 translate-y-2',
-        )}
+        role="dialog"
+        aria-modal="true"
+        className="bg-surface border border-border rounded-xl ace-shadow-lg overflow-hidden"
         style={{ width }}
         onClick={(e) => e.stopPropagation()}
       >

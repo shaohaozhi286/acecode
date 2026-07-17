@@ -7,6 +7,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, ApiError, createApi } from './lib/api.js';
 import { setToken } from './lib/auth.js';
 import { connection } from './lib/connection.js';
+import {
+  createDesktopNotificationMonitor,
+  notificationEventKey,
+} from './lib/desktopNotificationMonitor.js';
+import {
+  maybeNotify,
+  notificationBodyFromEvent,
+} from './lib/desktopNotify.js';
 import { createNewSessionForActiveWorkspace } from './lib/newSession.js';
 import { goBack, goForward, pushNavigation } from './lib/navigationHistory.js';
 import {
@@ -14,6 +22,8 @@ import {
   pendingQuestionSessionIds,
   removePendingQuestionRequest,
 } from './lib/pendingQuestions.js';
+import { sessionDisplayTitle } from './lib/sessionTitle.js';
+import { notifySessionListChanged } from './lib/sessionListEvents.js';
 import { usePreference } from './lib/usePreference.js';
 import {
   DEFAULT_UI_PREFS,
@@ -37,6 +47,7 @@ import { Toaster, toast } from './components/Toast.jsx';
 import { SlashCommandsProvider } from './components/SlashCommandsContext.jsx';
 import { FramelessResizeHandles } from './components/FramelessResizeHandles.jsx';
 import { GlobalFindOverlay } from './components/GlobalFindOverlay.jsx';
+import { canOpenConversationFind } from './lib/globalFind.js';
 import { ConsoleDock } from './components/ConsoleDock.jsx';
 import { DesktopGuidedTour } from './components/DesktopGuidedTour.jsx';
 import { UpdateDialog } from './components/UpdateDialog.jsx';
@@ -120,6 +131,8 @@ export function App() {
   // 「来自后台任务」来源标记。
   const [subagentIndex, setSubagentIndex] = useState({ parentId: '', titles: {} });
   const [searchOpen,   setSearchOpen]   = useState(false);
+  const [conversationFindRequest, setConversationFindRequest] = useState(0);
+  const [workspaceActivationRequest, setWorkspaceActivationRequest] = useState(null);
   const [updateStatus, setUpdateStatus] = useState(null);
   const [updateStarting, setUpdateStarting] = useState(false);
   const [updateChecking, setUpdateChecking] = useState(false);
@@ -146,6 +159,21 @@ export function App() {
   const sidebarResizeActiveRef = useRef(false);
   const [previewPanelVisible, setPreviewPanelVisible] = useState(false);
   const activeRefRef = useRef(activeRef);
+  const healthRef = useRef(health);
+  const visibleSessionRef = useRef(null);
+  const subagentIndexRef = useRef(subagentIndex);
+  const notificationContextRef = useRef({
+    assistantText: new Map(),
+    titles: new Map(),
+    workspaces: new Map(),
+  });
+  const notificationMonitorRef = useRef(null);
+  if (!notificationMonitorRef.current) {
+    notificationMonitorRef.current = createDesktopNotificationMonitor({
+      retainSession: (sessionId) => connection.retainSession(sessionId),
+      releaseSession: (sessionId) => connection.releaseSession(sessionId),
+    });
+  }
   const navHistoryRef = useRef(navHistory);
   const updatePollRef = useRef(0);
   const desktopModeRef = useRef(desktopUiMode());
@@ -174,6 +202,33 @@ export function App() {
     document.documentElement.setAttribute('data-font-size', fontSize);
   }, [fontSize]);
   useEffect(() => { activeRefRef.current = activeRef; }, [activeRef]);
+  useEffect(() => { healthRef.current = health; }, [health]);
+  useEffect(() => { subagentIndexRef.current = subagentIndex; }, [subagentIndex]);
+  useEffect(() => {
+    const sessionId = activeRef?.sessionId || activeRef?.id || '';
+    const chatVisible = view === 'single'
+      && !!sessionId
+      && !activeRef?.loop
+      && !showSettings
+      && !searchOpen
+      && !updateDialogOpen
+      && !guidedTourPreparing
+      && !guidedTourRun;
+    visibleSessionRef.current = chatVisible
+      ? { sessionId, workspaceHash: activeRef?.workspaceHash || '' }
+      : null;
+  }, [
+    activeRef?.id,
+    activeRef?.loop,
+    activeRef?.sessionId,
+    activeRef?.workspaceHash,
+    guidedTourPreparing,
+    guidedTourRun,
+    searchOpen,
+    showSettings,
+    updateDialogOpen,
+    view,
+  ]);
   useEffect(() => { navHistoryRef.current = navHistory; }, [navHistory]);
 
   const replaceActiveRef = useCallback((nextRefOrUpdater) => {
@@ -485,8 +540,76 @@ export function App() {
     setSearchOpen(false);
     await resumeAndOpenSession(session);
   }, [resumeAndOpenSession]);
+  const openConversationFind = useCallback(() => {
+    setConversationFindRequest((request) => request + 1);
+  }, []);
+  const handleSelectWorkspace = useCallback((workspace) => {
+    const workspaceHash = workspace?.hash || workspace?.workspaceHash || '';
+    if (!workspaceHash) return;
+    setSearchOpen(false);
+    setWorkspaceActivationRequest((previous) => ({
+      requestId: (previous?.requestId || 0) + 1,
+      workspaceHash,
+    }));
+  }, []);
 
   useEffect(() => {
+    const monitor = notificationMonitorRef.current;
+    const context = notificationContextRef.current;
+
+    const rememberCurrentTitle = (sessionId) => {
+      const current = activeRefRef.current || {};
+      const currentId = current.sessionId || current.id || '';
+      if (!sessionId || currentId !== sessionId) return;
+      const title = sessionDisplayTitle(current);
+      if (title) context.titles.set(sessionId, title);
+    };
+
+    const sendDesktopNotification = (type, msg, payload) => {
+      const sessionId = payload.session_id || msg.session_id || '';
+      if (!sessionId) return;
+      const key = notificationEventKey(type, sessionId, msg, payload);
+      if (!monitor.markSeen(key)) return;
+      rememberCurrentTitle(sessionId);
+      const workspaceHash = payload.workspace_hash
+        || msg.workspace_hash
+        || context.workspaces.get(sessionId)
+        || '';
+      if (workspaceHash) context.workspaces.set(sessionId, workspaceHash);
+      const current = activeRefRef.current || {};
+      const currentId = current.sessionId || current.id || '';
+      const sessionTitle = context.titles.get(sessionId)
+        || subagentIndexRef.current?.titles?.[sessionId]
+        || (currentId === sessionId ? sessionDisplayTitle(current) : '');
+      maybeNotify({
+        type,
+        sessionId,
+        workspaceHash,
+        sessionTitle,
+        bodyText: notificationBodyFromEvent(type, payload),
+        activeRef: visibleSessionRef.current,
+        hasFocus: typeof document !== 'undefined'
+          && typeof document.hasFocus === 'function'
+          ? document.hasFocus()
+          : true,
+        cfg: healthRef.current?.notifications,
+      });
+    };
+
+    const finishMonitoredSession = (sessionId, msg, payload) => {
+      const outcome = String(payload.outcome || '');
+      const assistantText = context.assistantText.get(sessionId) || '';
+      if ((!outcome || outcome === 'completed') && assistantText.trim()) {
+        sendDesktopNotification('completion', msg, {
+          ...payload,
+          session_id: sessionId,
+          final_assistant_text: assistantText,
+        });
+      }
+      context.assistantText.delete(sessionId);
+      monitor.release(sessionId);
+    };
+
     const handler = (e) => {
       const msg = e.detail || {};
       const payload = { ...(msg.payload || {}) };
@@ -495,18 +618,78 @@ export function App() {
         const current = activeRefRef.current || {};
         payload.session_id = current.sessionId || current.id || '';
       }
+      const sessionId = payload.session_id || msg.session_id || '';
+      const workspaceHash = payload.workspace_hash || msg.workspace_hash || '';
+      if (sessionId && workspaceHash) {
+        context.workspaces.set(sessionId, workspaceHash);
+      }
+      if (sessionId) rememberCurrentTitle(sessionId);
+
+      if (msg.type === 'session_updated' && sessionId && payload.title) {
+        context.titles.set(sessionId, String(payload.title));
+      }
+      if (msg.type === 'message' && sessionId && payload.role === 'assistant') {
+        const text = String(payload.content || '');
+        if (text.trim()) context.assistantText.set(sessionId, text);
+      }
+      if (msg.type === 'message' && sessionId && payload.role === 'error') {
+        context.assistantText.delete(sessionId);
+      }
+      if (msg.type === 'token' && sessionId && payload.text) {
+        const previous = context.assistantText.get(sessionId) || '';
+        context.assistantText.set(
+          sessionId,
+          (previous + String(payload.text)).slice(-4096),
+        );
+      }
+      if (msg.type === 'busy_changed' && sessionId) {
+        if (payload.busy === true) {
+          context.assistantText.delete(sessionId);
+          monitor.retain(sessionId);
+        } else {
+          finishMonitoredSession(sessionId, msg, payload);
+        }
+      }
+      if (msg.type === 'session_status_snapshot') {
+        const sessions = Array.isArray(payload.sessions) ? payload.sessions : [];
+        for (const status of sessions) {
+          const statusSessionId = status?.session_id || '';
+          if (!statusSessionId || status?.busy !== true) continue;
+          if (status.workspace_hash) {
+            context.workspaces.set(statusSessionId, status.workspace_hash);
+          }
+          monitor.retain(statusSessionId);
+        }
+      }
+      if (msg.type === 'session_status' && sessionId) {
+        if (payload.busy === true) monitor.retain(sessionId);
+      }
       if (msg.type === 'permission_request') {
+        if (sessionId) monitor.retain(sessionId);
         setPermReqs((prev) => pushPermissionRequest(prev, payload));
+        sendDesktopNotification('permission', msg, payload);
       }
       if (msg.type === 'question_request') {
+        if (sessionId) monitor.retain(sessionId);
         setQuestionReqs((prev) => addPendingQuestionRequest(prev, payload));
+        sendDesktopNotification('question', msg, payload);
       }
       if (msg.type === 'question_closed') {
         setQuestionReqs((prev) => removePendingQuestionRequest(prev, payload.request_id));
       }
+      if (msg.type === 'done' && sessionId) {
+        finishMonitoredSession(sessionId, msg, payload);
+      }
+      if ((msg.type === 'error' || msg.type === 'turn_aborted') && sessionId) {
+        context.assistantText.delete(sessionId);
+        monitor.release(sessionId);
+      }
     };
     connection.addEventListener('message', handler);
-    return () => connection.removeEventListener('message', handler);
+    return () => {
+      connection.removeEventListener('message', handler);
+      monitor.dispose();
+    };
   }, []);
 
   const onSubmitToken = useCallback(async (token) => {
@@ -769,6 +952,20 @@ export function App() {
   const createDesktopTraySession = useCallback(async () => {
     try {
       const next = await createNewSessionForActiveWorkspace(api, activeRefRef.current, health);
+      const sessionId = next?.sessionId || next?.id || '';
+      const noWorkspace = !!(next?.noWorkspace || next?.no_workspace);
+      notifySessionListChanged({
+        reason: 'session-created',
+        sessionId,
+        workspaceHash: noWorkspace ? '' : (next?.workspaceHash || next?.workspace_hash || ''),
+        noWorkspace,
+        session: {
+          ...next,
+          id: sessionId,
+          workspace_hash: noWorkspace ? '' : (next?.workspaceHash || next?.workspace_hash || ''),
+          no_workspace: noWorkspace,
+        },
+      });
       navigateToRef(next);
     } catch (e) {
       toast({ kind: 'err', text: '新建会话失败:' + (e.message || '') });
@@ -789,6 +986,20 @@ export function App() {
       return reqSid !== sessionId;
     }));
   }, [activeRef?.id, activeRef?.sessionId]);
+
+  const handleDesktopNotificationsChanged = useCallback((notifications) => {
+    setHealth((previous) => {
+      const next = {
+        ...(previous || {}),
+        notifications: {
+          ...(previous?.notifications || {}),
+          ...(notifications || {}),
+        },
+      };
+      healthRef.current = next;
+      return next;
+    });
+  }, []);
 
   // 暴露 aceDesktop_createNewSession 给 desktop 壳的托盘 "新建会话" 菜单调用。
   // 设计:openspec/changes/enhance-desktop-tray-menu。
@@ -924,7 +1135,6 @@ export function App() {
           <span className="ace-spinner mr-2" /> 连接 daemon…
         </div>
         <FramelessResizeHandles />
-        <GlobalFindOverlay />
         <DesktopContextMenu />
         <Toaster />
       </>
@@ -935,7 +1145,6 @@ export function App() {
       <>
         <TokenPrompt onSubmit={onSubmitToken} />
         <FramelessResizeHandles />
-        <GlobalFindOverlay />
         <DesktopContextMenu />
         <Toaster />
       </>
@@ -964,6 +1173,18 @@ export function App() {
     chatVisible: view === 'single' && !activeRef?.loop,
     blockingSurfaceOpen: showSettings || searchOpen || updateDialogOpen
       || !!permReq || !!visibleQuestionReq || guidedTourPreparing || guidedTourRun,
+  });
+  const conversationFindEnabled = canOpenConversationFind({
+    view,
+    activeSessionId: activeId,
+    loop: !!activeRef?.loop,
+    showSettings,
+    searchOpen,
+    updateDialogOpen,
+    permissionOpen: !!permReq,
+    questionOpen: !!visibleQuestionReq,
+    guidedTourPreparing,
+    guidedTourRun,
   });
 
   return (
@@ -1013,6 +1234,7 @@ export function App() {
           onNewTask={() => openHomeForWorkspace()}
           onNewLoop={openLoopPage}
           onSearchTasks={() => setSearchOpen(true)}
+          workspaceActivationRequest={workspaceActivationRequest}
           onOpenSettingsSection={openSettingsSection}
           pendingQuestionSessionIds={pendingQuestionSessionIdsForSidebar}
         />
@@ -1046,6 +1268,7 @@ export function App() {
                 onHomeWorkspaceChange={replaceHomeWorkspace}
                 onCommandWorkspaceChange={setCommandWorkspaceHash}
                 onConsoleCwdChange={setConsoleCwd}
+                onFindInConversation={openConversationFind}
                 health={health}
                 autoFocusOnDesktopWindowFocus={autoFocusChatOnDesktopWindowFocus}
                 showSidePanel
@@ -1087,6 +1310,7 @@ export function App() {
             health={health}
             activeSessionId={activeId}
             onPermissionModeChanged={handlePermissionModeChanged}
+            onDesktopNotificationsChanged={handleDesktopNotificationsChanged}
             onReplayGuidedTour={desktopGuidedTourModeEligible(desktopModeRef.current)
               ? replayGuidedTour
               : undefined}
@@ -1099,6 +1323,7 @@ export function App() {
           onClose={() => setSearchOpen(false)}
           currentWorkspaceHash={activeRef?.workspaceHash || ''}
           onSelectSession={handleSelectSession}
+          onSelectWorkspace={handleSelectWorkspace}
         />
         {permReq      && (
           <PermissionModal
@@ -1117,7 +1342,11 @@ export function App() {
         )}
       </div>
       <FramelessResizeHandles />
-      <GlobalFindOverlay />
+      <GlobalFindOverlay
+        enabled={conversationFindEnabled}
+        openRequest={conversationFindRequest}
+        scopeKey={activeId}
+      />
       <DesktopContextMenu />
       <UpdateDialog
         open={updateDialogOpen}

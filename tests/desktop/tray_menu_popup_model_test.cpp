@@ -99,5 +99,35 @@ TEST(TrayMenuPopupModel, SubmenuRowsKeepSessionCommandMetadata) {
     EXPECT_TRUE(tray_popup_entry_is_selectable(submenu[0].entry.kind));
 }
 
+TEST(TrayMenuPopupModel, BottomRightCornerMatchesCursorInsideFullMonitorBounds) {
+    const auto position = compute_tray_popup_position(
+        598,
+        683,
+        560,
+        589,
+        0,
+        0,
+        1077,
+        691);
+
+    EXPECT_EQ(position.x + 560, 598);
+    EXPECT_EQ(position.y + 589, 683);
+}
+
+TEST(TrayMenuPopupModel, FlipsAtTopLeftWithoutMovingCursorAnchor) {
+    const auto position = compute_tray_popup_position(
+        20,
+        20,
+        280,
+        300,
+        0,
+        0,
+        1077,
+        691);
+
+    EXPECT_EQ(position.x, 20);
+    EXPECT_EQ(position.y, 20);
+}
+
 } // namespace
 } // namespace acecode::desktop

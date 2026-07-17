@@ -515,13 +515,42 @@ std::string SessionStorage::meta_path(const std::string& project_dir,
     return make_session_path(project_dir, session_id, ".meta.json", pid);
 }
 
-void SessionStorage::purge_session_files(const std::string& project_dir,
-                                         const std::string& session_id) {
-    if (project_dir.empty() || session_id.empty()) return;
+bool SessionStorage::purge_session_files(const std::string& project_dir,
+                                         const std::string& session_id,
+                                         std::string* error) {
+    if (error) error->clear();
+    if (project_dir.empty() || session_id.empty()) {
+        if (error) *error = "project directory and session id are required";
+        return false;
+    }
+
+    const auto remove_file = [error](const fs::path& path, const char* label) {
+        std::error_code ec;
+        fs::remove(path, ec);
+        if (!ec) return true;
+        if (error) {
+            *error = std::string("failed to remove ") + label + ": " + ec.message();
+        }
+        return false;
+    };
+
+    if (!remove_file(path_from_utf8(session_path(project_dir, session_id)),
+                     "session transcript")) {
+        return false;
+    }
+
     std::error_code ec;
-    fs::remove(path_from_utf8(session_path(project_dir, session_id)), ec);
-    fs::remove(path_from_utf8(meta_path(project_dir, session_id)), ec);
-    fs::remove_all(path_from_utf8(project_dir) / session_id, ec);
+    fs::remove_all(path_from_utf8(project_dir) / path_from_utf8(session_id), ec);
+    if (ec) {
+        if (error) {
+            *error = std::string("failed to remove persisted session data: ") +
+                     ec.message();
+        }
+        return false;
+    }
+
+    return remove_file(path_from_utf8(meta_path(project_dir, session_id)),
+                       "session metadata");
 }
 
 std::string SessionStorage::now_iso8601() {

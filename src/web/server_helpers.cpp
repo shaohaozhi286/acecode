@@ -4,6 +4,7 @@
 // multiple route TUs.
 
 #include "server_impl.hpp"
+#include "../session/session_user_message_search.hpp"
 
 namespace acecode::web {
 
@@ -920,6 +921,94 @@ crow::response WebServer::Impl::set_session_archive_state(
     crow::response r(session_meta_to_json(meta, ws.hash).dump());
     r.add_header("Content-Type", "application/json");
     return with_cors(req, std::move(r));
+}
+
+crow::response WebServer::Impl::purge_session_data(
+    const crow::request& req,
+    const acecode::desktop::WorkspaceMeta& ws,
+    const std::string& id,
+    bool require_archived) {
+    const auto error_response = [this, &req](int status, const std::string& message) {
+        crow::response r(status);
+        r.body = json{{"error", message}}.dump();
+        r.add_header("Content-Type", "application/json");
+        return with_cors(req, std::move(r));
+    };
+
+    const bool valid_id = !id.empty() && id.size() <= 64 &&
+        std::all_of(id.begin(), id.end(), [](unsigned char c) {
+            return (c >= 'a' && c <= 'z') ||
+                   (c >= 'A' && c <= 'Z') ||
+                   (c >= '0' && c <= '9') ||
+                   c == '_' || c == '-';
+        });
+    if (!valid_id) {
+        return error_response(400, "invalid session id");
+    }
+    if (!deps.session_client) {
+        return error_response(503, "session client unavailable");
+    }
+
+    const auto maybe_meta = find_session_meta_for_workspace(ws, id);
+    if (!maybe_meta.has_value()) {
+        return error_response(404, "session not found");
+    }
+    const SessionMeta meta = *maybe_meta;
+    if (require_archived && !meta.archived) {
+        return error_response(409, "session must be archived before permanent deletion");
+    }
+    if (!require_archived && !meta.archived && meta.parent_session_id.empty()) {
+        // Preserve the existing compatibility-route error for active main
+        // sessions while allowing archived main sessions through the same
+        // explicit ?purge=1 path.
+        return error_response(400, "only subagent sessions can be purged");
+    }
+
+    if (deps.session_registry) {
+        if (auto entry = deps.session_registry->acquire(id)) {
+            const bool same_workspace = entry->no_workspace
+                ? meta.no_workspace
+                : session_entry_matches_workspace(*entry, ws);
+            if (same_workspace && entry->loop && entry->loop->is_busy()) {
+                return error_response(409, "session is busy; abort it first");
+            }
+        }
+    }
+
+    // Destroy first so SessionManager flushes and releases the writer lease.
+    deps.session_client->destroy_session(id);
+
+    const std::string storage_cwd = meta.no_workspace
+        ? meta.cwd
+        : (meta.archived
+            ? ws.cwd
+            : (meta.cwd.empty() ? ws.cwd : meta.cwd));
+    const auto project_dir = SessionStorage::get_project_dir(storage_cwd);
+
+    // Remove the full-text projection first. If this fails, leave the files
+    // and metadata untouched so the settings row remains retryable.
+    SessionUserMessageIndex search_index(project_dir);
+    std::string index_error;
+    if (!search_index.remove_session(id, &index_error)) {
+        LOG_WARN("[web] purge failed to remove search index for " + id +
+                 ": " + index_error);
+        return error_response(500, "failed to remove session search index");
+    }
+
+    std::string purge_error;
+    if (!SessionStorage::purge_session_files(project_dir, id, &purge_error)) {
+        LOG_WARN("[web] purge failed to remove session files for " + id +
+                 ": " + purge_error);
+        return error_response(500, purge_error.empty()
+            ? "failed to remove session files"
+            : purge_error);
+    }
+
+    LOG_INFO("[web] permanently deleted session " + id +
+             (meta.parent_session_id.empty()
+                  ? std::string{" (archived)"}
+                  : " (parent=" + meta.parent_session_id + ")"));
+    return with_cors(req, crow::response(204));
 }
 
 crow::response WebServer::Impl::session_input_draft_response(

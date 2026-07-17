@@ -79,7 +79,6 @@ import {
   validateHomeWorkspaceSelection,
   writeDesktopHomeWorkspaceHash,
 } from '../lib/homeWorkspaceSelection.js';
-import { maybeNotify } from '../lib/desktopNotify.js';
 import { bindDesktopComposerAutoFocus } from '../lib/composerCaretRestore.js';
 import { useSubagentTasks } from '../lib/useSubagentTasks.js';
 import { taskDisplayTitle } from '../lib/subagentTasks.js';
@@ -473,7 +472,7 @@ function isRealWorkspaceHash(hash) {
   return !!hash && hash !== '__local__';
 }
 
-export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorkspaceChange, onCommandWorkspaceChange, onConsoleCwdChange, health, autoFocusOnDesktopWindowFocus = false, onPermissionRequest, onQuestionRequest, questionRequest, onQuestionResolve, onPermissionModeChanged, onSubagentTasksChange, showSidePanel = false, sidePanelWidth = 280, onSidePanelResize, previewPanelWidth = 640, onPreviewPanelResize, onPreviewPanelVisibleChange, sidePanelCollapsed = false, sidePanelListCollapsed = false, onToggleSidePanel, onToggleSidePanelList, onRevealSidePanelList, sidePanelMaximized = false, onToggleSidePanelMaximized, showAceCodeAvatar = false }) {
+export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorkspaceChange, onCommandWorkspaceChange, onConsoleCwdChange, onFindInConversation, health, autoFocusOnDesktopWindowFocus = false, onPermissionRequest, onQuestionRequest, questionRequest, onQuestionResolve, onPermissionModeChanged, onSubagentTasksChange, showSidePanel = false, sidePanelWidth = 280, onSidePanelResize, previewPanelWidth = 640, onPreviewPanelResize, onPreviewPanelVisibleChange, sidePanelCollapsed = false, sidePanelListCollapsed = false, onToggleSidePanel, onToggleSidePanelList, onRevealSidePanelList, sidePanelMaximized = false, onToggleSidePanelMaximized, showAceCodeAvatar = false }) {
   const ref = useMemo(() => normalizeSessionRef(sessionRef, sessionId), [sessionRef, sessionId]);
   const sid = ref?.sessionId || ref?.id || '';
   const sidRef = useRef(sid);
@@ -490,33 +489,6 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
     const id = window.setInterval(fetchPool, 30000);
     return () => { alive = false; window.clearInterval(id); };
   }, [api]);
-  // 桌面通知 — 见 openspec/changes/add-windows-wintoast-completion-notifications。
-  // transcriptTitleRef 由后面的 effect 与 transcript.title 同步;在 callback 里
-  // 通过 ref.current 读最新 title,避免 fireDesktopNotification 进 useCallback deps。
-  const transcriptTitleRef = useRef('');
-  const fireDesktopNotification = useCallback((type, payload) => {
-    if (typeof document === 'undefined') return;
-    const cfg = health?.notifications;
-    const sessionId = ref?.sessionId || sid || '';
-    const workspaceHash = ref?.workspaceHash || '';
-    const sessionTitle = transcriptTitleRef.current || '';
-    let bodyText = '';
-    if (type === 'question') {
-      bodyText = String(payload?.question || payload?.prompt || '');
-    } else if (type === 'completion') {
-      bodyText = String(payload?.final_assistant_text || '');
-    }
-    maybeNotify({
-      type,
-      sessionId,
-      workspaceHash,
-      sessionTitle,
-      bodyText,
-      activeRef: { sessionId, workspaceHash },
-      hasFocus: typeof document.hasFocus === 'function' ? document.hasFocus() : true,
-      cfg,
-    });
-  }, [health?.notifications, ref?.sessionId, ref?.workspaceHash, sid]);
   const completedTurnSelfHealScheduleRef = useRef(null);
 
   const transcript = useSessionTranscript(ref, {
@@ -524,10 +496,8 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
     onPermissionRequest,
     onQuestionRequest: (payload) => {
       onQuestionRequest?.(payload);
-      fireDesktopNotification('question', payload);
     },
-    onTurnCompleted: (payload) => {
-      fireDesktopNotification('completion', payload);
+    onTurnCompleted: () => {
       completedTurnSelfHealScheduleRef.current?.schedule();
     },
     onError: (reason) => toast({
@@ -567,8 +537,6 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
         subagentTasks.tasks.map((t) => [t.id, taskDisplayTitle(t)])),
     });
   }, [sid, subagentTasks.tasks]);
-  // 让 fireDesktopNotification 拿到最新 title,无需进入它的 useCallback deps。
-  useEffect(() => { transcriptTitleRef.current = title || ''; }, [title]);
   const selfHealEnabled = completedTurnSelfHealEnabled(health);
   const selfHealRuntimeRef = useRef({
     sid: '',
@@ -908,6 +876,18 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
       next.title = title || text;
       if (preserveExtras) preserveComposerExtrasOnSessionChangeRef.current = true;
       onSessionPromoted?.(next);
+      notifySessionListChanged({
+        reason: 'session-created',
+        sessionId: id,
+        workspaceHash: targetNoWorkspace ? '' : (next.workspaceHash || ''),
+        noWorkspace: targetNoWorkspace,
+        session: {
+          ...next,
+          id,
+          workspace_hash: targetNoWorkspace ? '' : (next.workspaceHash || ''),
+          no_workspace: targetNoWorkspace,
+        },
+      });
       return { id, response: r, target };
     } finally {
       setHomeSubmitting(false);
@@ -3118,6 +3098,17 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
       <div className="h-9 px-3 flex items-center justify-between bg-surface border-b border-border shrink-0 gap-2">
         <div className="flex items-center gap-2 min-w-0">
           <span className="text-[13px] font-semibold text-fg truncate">{title}</span>
+          {sid && onFindInConversation && (
+            <button
+              type="button"
+              onClick={onFindInConversation}
+              className="w-6 h-6 rounded-md text-fg-mute flex items-center justify-center shrink-0 transition hover:bg-surface-hi hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/25"
+              title="搜索当前对话内容 (Ctrl+F)"
+              aria-label="搜索当前对话内容"
+            >
+              <VsIcon name="search" size={14} />
+            </button>
+          )}
           <span
             className={clsx(
               'px-2.5 py-0.5 rounded-full text-[10px] font-medium border whitespace-nowrap',
@@ -3191,6 +3182,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
         <div className="relative flex-1 min-w-0 h-full">
         <div
           ref={scrollRef}
+          data-conversation-find-root="true"
           onScroll={handleMessagesScroll}
           onWheel={handleMessagesWheel}
           onPointerDown={handleMessagesPointerDown}

@@ -9,6 +9,7 @@
 
 #include "tray_menu_layout.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <utility>
 #include <vector>
@@ -19,6 +20,37 @@ struct TrayPopupRow {
     TrayMenuEntry entry;
     std::vector<TrayMenuEntry> submenu_entries;
 };
+
+struct TrayPopupPosition {
+    int x = 0;
+    int y = 0;
+};
+
+inline TrayPopupPosition compute_tray_popup_position(
+    int anchor_x,
+    int anchor_y,
+    int popup_width,
+    int popup_height,
+    int monitor_left,
+    int monitor_top,
+    int monitor_right,
+    int monitor_bottom) {
+    int x = anchor_x - popup_width;
+    if (x < monitor_left && anchor_x + popup_width <= monitor_right) {
+        x = anchor_x;
+    }
+
+    int y = anchor_y - popup_height;
+    if (y < monitor_top && anchor_y + popup_height <= monitor_bottom) {
+        y = anchor_y;
+    }
+
+    const int max_x = std::max(monitor_left, monitor_right - popup_width);
+    const int max_y = std::max(monitor_top, monitor_bottom - popup_height);
+    x = std::clamp(x, monitor_left, max_x);
+    y = std::clamp(y, monitor_top, max_y);
+    return {x, y};
+}
 
 inline bool tray_popup_entry_is_session(TrayMenuEntryKind kind) {
     return kind == TrayMenuEntryKind::PinnedItem ||

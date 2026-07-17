@@ -33,6 +33,7 @@ import { usePreference } from '../lib/usePreference.js';
 import {
   SESSION_LIST_CHANGED_EVENT,
   normalizeSessionListChangedDetail,
+  notifySessionListChanged,
 } from '../lib/sessionListEvents.js';
 import { sessionHasPendingQuestion } from '../lib/pendingQuestions.js';
 import { pickExistingWorkspace } from '../lib/workspacePicker.js';
@@ -1037,6 +1038,7 @@ export function Sidebar({
   onNewTask,
   onNewLoop,
   onSearchTasks,
+  workspaceActivationRequest = null,
   onOpenSettingsSection,
   pendingQuestionSessionIds = new Set(),
 }) {
@@ -1074,6 +1076,7 @@ export function Sidebar({
   const [opencodeImportedHighlightKeys, setOpencodeImportedHighlightKeys] = useState(() => new Set());
   const opencodeImportedHighlightTimersRef = useRef(new Map());
   const revealedSectionTargetRef = useRef('');
+  const handledWorkspaceActivationRequestRef = useRef(0);
   const revealTarget = useMemo(() => sidebarRevealTarget(activeRef), [activeRef]);
 
   const updateExpanded = useCallback((updater) => {
@@ -1881,7 +1884,7 @@ export function Sidebar({
     }
   };
 
-  const onActivate = async (ws) => {
+  const onActivate = useCallback(async (ws) => {
     workspaceCollapseAllRef.current = false;
     setSessionWorkspaceLoading([ws.hash], true);
     setActiveWorkspaceHash(ws.hash);
@@ -1903,7 +1906,32 @@ export function Sidebar({
         refresh(ws.hash).catch(() => {});
       }
     } catch (e) { toast({ kind: 'err', text: '切换异常:' + (e.message || '') }); }
-  };
+  }, [onOpenHome, refresh, setSessionWorkspaceLoading, updateExpanded]);
+
+  useEffect(() => {
+    const requestId = Number(workspaceActivationRequest?.requestId || 0);
+    const workspaceHash = String(workspaceActivationRequest?.workspaceHash || '');
+    if (!requestId || !workspaceHash) return;
+    if (handledWorkspaceActivationRequestRef.current === requestId) return;
+    const workspace = workspaces.find((item) => item.hash === workspaceHash);
+    if (!workspace) return;
+
+    handledWorkspaceActivationRequestRef.current = requestId;
+    setSectionExpansion((previous) => (
+      previous[SIDEBAR_SECTION_IDS.WORKSPACES]
+        ? previous
+        : { ...previous, [SIDEBAR_SECTION_IDS.WORKSPACES]: true }
+    ));
+    Promise.resolve(onActivate(workspace)).finally(() => {
+      window.requestAnimationFrame?.(() => {
+        const rows = Array.from(document.querySelectorAll('[data-desktop-workspace-id]'));
+        const row = rows.find((item) => (
+          item.getAttribute('data-desktop-workspace-id') === workspaceHash
+        ));
+        row?.scrollIntoView?.({ block: 'nearest' });
+      });
+    });
+  }, [onActivate, setSectionExpansion, workspaceActivationRequest, workspaces]);
 
   const openOpencodeImportDialog = useCallback(async (ws) => {
     if (!ws?.hash) return;
@@ -2229,6 +2257,12 @@ export function Sidebar({
       setWorkspaces((prev) => prev.map((item) => ({ ...item, active: item.hash === workspaceHash })));
       setSessions((prev) => [decoratedNextSession, ...prev.filter((item) => item.id !== id)]);
       setStatusBySession((prev) => applyStatusUpdate(prev, { ...decoratedNextSession, session_id: id, state: 'read' }));
+      notifySessionListChanged({
+        reason: 'session-created',
+        sessionId: id,
+        workspaceHash,
+        session: decoratedNextSession,
+      });
       connection.subscribeWorkspaceStatus(workspaceHash);
       syncRetainedSessionIds(new Set([...retainedSessionIdsRef.current, id]));
       markSessionRead(decoratedNextSession);

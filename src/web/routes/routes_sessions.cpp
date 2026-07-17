@@ -408,9 +408,8 @@ void WebServer::Impl::register_sessions() {
         });
 
         // DELETE /api/sessions/:id: 销毁(内存)。spec 9.5
-        // ?purge=1: 后台任务「清除」——销毁 + 永久删除磁盘数据。仅允许
-        // spawn_subagent 子会话(parent_session_id 非空),防止误删主会话;
-        // 运行中(busy)拒绝,需先中止。
+        // ?purge=1: 永久删除磁盘数据。允许已归档主会话与 spawn_subagent
+        // 子会话;普通主会话仍拒绝,运行中目标需先中止。
         // 注意: 用 Delete(混合大小写)避免 Windows <windows.h> 把 DELETE 宏化掉。
         CROW_ROUTE(app, "/api/sessions/<string>").methods(crow::HTTPMethod::Delete)
         ([this](const crow::request& req, const std::string& id) {
@@ -425,56 +424,8 @@ void WebServer::Impl::register_sessions() {
                 deps.session_client->destroy_session(id);
                 return with_cors(req, crow::response(204));
             }
-
-            const auto ws = compatibility_workspace();
-            std::string parent_id;
-            std::string session_cwd;
-            bool busy = false;
-            if (deps.session_registry) {
-                if (auto entry = deps.session_registry->acquire(id)) {
-                    parent_id = entry->parent_session_id;
-                    session_cwd = entry->cwd;
-                    busy = entry->loop && entry->loop->is_busy();
-                }
-            }
-            if (parent_id.empty()) {
-                if (auto meta = find_session_meta_for_workspace(ws, id)) {
-                    parent_id = meta->parent_session_id;
-                    if (session_cwd.empty()) session_cwd = meta->cwd;
-                }
-            }
-            if (parent_id.empty()) {
-                crow::response r(400);
-                r.body = R"({"error":"only subagent sessions can be purged"})";
-                r.add_header("Content-Type", "application/json");
-                return with_cors(req, std::move(r));
-            }
-            if (busy) {
-                crow::response r(409);
-                r.body = R"({"error":"session is busy; abort it first"})";
-                r.add_header("Content-Type", "application/json");
-                return with_cors(req, std::move(r));
-            }
-
-            // destroy 会 finalize SessionManager(flush + 释放 writer lease),
-            // 之后再删文件不会与写入方竞争。
-            deps.session_client->destroy_session(id);
-            const auto project_dir =
-                SessionStorage::get_project_dir(session_cwd.empty() ? ws.cwd : session_cwd);
-            SessionStorage::purge_session_files(project_dir, id);
-            {
-                // 「清除」= 永久删除磁盘数据:用户消息搜索索引里的全文投影
-                // 也必须删,不能残留在索引数据库。
-                SessionUserMessageIndex search_index(project_dir);
-                std::string index_error;
-                if (!search_index.remove_session(id, &index_error)) {
-                    LOG_WARN("[web] purge failed to remove search index for " + id +
-                             ": " + index_error);
-                }
-            }
-            LOG_INFO("[web] purged subagent session " + id +
-                     " (parent=" + parent_id + ")");
-            return with_cors(req, crow::response(204));
+            return purge_session_data(
+                req, compatibility_workspace(), id, /*require_archived=*/false);
         });
 
         // GET /api/sessions/:id/messages?since=N: 拉历史 + 缓存事件。spec 9.6

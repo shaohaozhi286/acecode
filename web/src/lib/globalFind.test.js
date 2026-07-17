@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict';
-import { findMatchesInText, isComposingInputEvent, isFindShortcut } from './globalFind.js';
+import {
+  canOpenConversationFind,
+  findMatchesInText,
+  isComposingInputEvent,
+  isFindShortcut,
+} from './globalFind.js';
 
 function run(name, fn) {
   try {
@@ -33,6 +38,28 @@ run('Shift+F3 still routes to app find overlay', () => {
 
 run('Alt+F3 is left for the host', () => {
   assert.equal(isFindShortcut({ key: 'F3', altKey: true }), false);
+});
+
+run('conversation find is enabled only for an unblocked active single-session view', () => {
+  const visible = {
+    view: 'single',
+    activeSessionId: 's1',
+  };
+  assert.equal(canOpenConversationFind(visible), true);
+  assert.equal(canOpenConversationFind({ ...visible, activeSessionId: '' }), false);
+  assert.equal(canOpenConversationFind({ ...visible, view: 'grid4' }), false);
+  assert.equal(canOpenConversationFind({ ...visible, loop: true }), false);
+  for (const blocker of [
+    'showSettings',
+    'searchOpen',
+    'updateDialogOpen',
+    'permissionOpen',
+    'questionOpen',
+    'guidedTourPreparing',
+    'guidedTourRun',
+  ]) {
+    assert.equal(canOpenConversationFind({ ...visible, [blocker]: true }), false, blocker);
+  }
 });
 
 run('findMatchesInText finds case-insensitive non-overlapping matches', () => {

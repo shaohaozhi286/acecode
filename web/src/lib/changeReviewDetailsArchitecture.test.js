@@ -35,11 +35,11 @@ run('Git and session details share one review-panel renderer', () => {
   }
 });
 
-run('Top bar keeps search but has no direct new-conversation or loop buttons', () => {
+run('Top bar keeps quick actions but has no direct search, new-conversation, or loop buttons', () => {
   const topBar = source('TopBar.jsx');
   assert.doesNotMatch(topBar, /<QuickBtn[^>]*title="新对话"/);
   assert.doesNotMatch(topBar, /<QuickBtn[^>]*title="循环"/);
-  assert.match(topBar, /<QuickBtn title=\{searchHotkeyHint\} onClick=\{onOpenSearch\}>/);
+  assert.doesNotMatch(topBar, /<QuickBtn[^>]*onClick=\{onOpenSearch\}/);
   assert.match(topBar, /invokeTopBarQuickAction/);
 });
 

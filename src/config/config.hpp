@@ -359,6 +359,7 @@ struct UpgradeConfig {
 // 非 Windows 平台保留解析,运行时由通知后端安全降级为 no-op。
 struct DesktopNotificationsConfig {
     bool enabled = true;                 // 总开关
+    bool on_permission = true;           // 权限确认触发通知
     bool on_question = true;             // AskUserQuestion 触发通知
     bool on_completion = true;           // 回合完成触发通知
     bool suppress_when_focused = true;   // 当前 session 已可见且窗口聚焦时不弹

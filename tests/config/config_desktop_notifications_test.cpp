@@ -2,7 +2,7 @@
 // 设计参见 openspec/changes/add-windows-wintoast-completion-notifications。
 //
 // 验收点:
-//   - DesktopNotificationsConfig 四个字段默认全 true
+//   - DesktopNotificationsConfig 五个字段默认全 true
 //   - desktop / desktop.notifications 段完全缺失 → 默认值,无 warning
 //   - 部分字段缺失 → 仅缺的字段走默认,提供的字段被读入
 //   - 字段类型错误(应该 bool 给了 string)→ 该字段保留默认 + 整段 warning
@@ -41,6 +41,9 @@ int apply_desktop_section(const nlohmann::json& j, DesktopNotificationsConfig& o
     if (nj.contains("enabled") && nj["enabled"].is_boolean()) {
         out.enabled = nj["enabled"].get<bool>();
     }
+    if (nj.contains("on_permission") && nj["on_permission"].is_boolean()) {
+        out.on_permission = nj["on_permission"].get<bool>();
+    }
     if (nj.contains("on_question") && nj["on_question"].is_boolean()) {
         out.on_question = nj["on_question"].get<bool>();
     }
@@ -55,10 +58,11 @@ int apply_desktop_section(const nlohmann::json& j, DesktopNotificationsConfig& o
 
 } // namespace
 
-// 场景:DesktopNotificationsConfig 默认四个 bool 都是 true
+// 场景:DesktopNotificationsConfig 默认五个 bool 都是 true
 TEST(ConfigDesktopNotificationsDefaults, StructDefault) {
     DesktopNotificationsConfig n;
     EXPECT_TRUE(n.enabled);
+    EXPECT_TRUE(n.on_permission);
     EXPECT_TRUE(n.on_question);
     EXPECT_TRUE(n.on_completion);
     EXPECT_TRUE(n.suppress_when_focused);
@@ -68,6 +72,7 @@ TEST(ConfigDesktopNotificationsDefaults, StructDefault) {
 TEST(ConfigDesktopNotificationsDefaults, NestedInAppConfig) {
     AppConfig cfg;
     EXPECT_TRUE(cfg.desktop.notifications.enabled);
+    EXPECT_TRUE(cfg.desktop.notifications.on_permission);
     EXPECT_TRUE(cfg.desktop.notifications.on_question);
     EXPECT_TRUE(cfg.desktop.notifications.on_completion);
     EXPECT_TRUE(cfg.desktop.notifications.suppress_when_focused);
@@ -79,6 +84,7 @@ TEST(ConfigDesktopNotificationsLoader, MissingBlockKeepsDefault) {
     nlohmann::json j = nlohmann::json::object();
     EXPECT_EQ(apply_desktop_section(j, n), 0);
     EXPECT_TRUE(n.enabled);
+    EXPECT_TRUE(n.on_permission);
     EXPECT_TRUE(n.on_question);
     EXPECT_TRUE(n.on_completion);
     EXPECT_TRUE(n.suppress_when_focused);
@@ -101,12 +107,13 @@ TEST(ConfigDesktopNotificationsLoader, EmptyNotificationsKeepsDefault) {
     EXPECT_TRUE(n.enabled);
 }
 
-// 场景:四个字段全部显式给 false → 全部读入
+// 场景:五个字段全部显式给 false → 全部读入
 TEST(ConfigDesktopNotificationsLoader, AllFieldsExplicitlyFalse) {
     DesktopNotificationsConfig n;
     nlohmann::json j = {
         {"desktop", {{"notifications", {
             {"enabled", false},
+            {"on_permission", false},
             {"on_question", false},
             {"on_completion", false},
             {"suppress_when_focused", false},
@@ -114,12 +121,13 @@ TEST(ConfigDesktopNotificationsLoader, AllFieldsExplicitlyFalse) {
     };
     EXPECT_EQ(apply_desktop_section(j, n), 0);
     EXPECT_FALSE(n.enabled);
+    EXPECT_FALSE(n.on_permission);
     EXPECT_FALSE(n.on_question);
     EXPECT_FALSE(n.on_completion);
     EXPECT_FALSE(n.suppress_when_focused);
 }
 
-// 场景:仅显式给 enabled=false,其它三个走默认 true
+// 场景:仅显式给 enabled=false,其它四个走默认 true
 TEST(ConfigDesktopNotificationsLoader, PartialFieldsRespectsDefaultsForRest) {
     DesktopNotificationsConfig n;
     nlohmann::json j = {
@@ -127,6 +135,7 @@ TEST(ConfigDesktopNotificationsLoader, PartialFieldsRespectsDefaultsForRest) {
     };
     EXPECT_EQ(apply_desktop_section(j, n), 0);
     EXPECT_FALSE(n.enabled);
+    EXPECT_TRUE(n.on_permission);
     EXPECT_TRUE(n.on_question);
     EXPECT_TRUE(n.on_completion);
     EXPECT_TRUE(n.suppress_when_focused);

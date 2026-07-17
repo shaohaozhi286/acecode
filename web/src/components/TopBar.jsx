@@ -1,4 +1,4 @@
-// TopBar:logo + 快捷工具(项目栏收缩/导航/搜索/快捷菜单) + 主题切换 + 设置
+// TopBar:logo + 快捷工具(项目栏收缩/导航/快捷菜单) + 主题切换 + 设置
 
 import { Fragment, useEffect, useRef, useState } from 'react';
 import { useTheme } from '../theme.jsx';
@@ -84,8 +84,6 @@ export function TopBar({
   const { framelessDesktop, isMaximized } = useFramelessWindowState();
   const [quickActionsOpen, setQuickActionsOpen] = useState(false);
   const quickActionsRef = useRef(null);
-  const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad|iPod/.test(navigator.platform || '');
-  const searchHotkeyHint = isMac ? '搜索 (Cmd+K)' : '搜索 (Ctrl+K)';
   const updateAvailable = !!updateStatus?.update_available;
   const updateTitle = updateAvailable
     ? updateReady
@@ -232,9 +230,6 @@ export function TopBar({
           {updateReady ? '已更新' : updateRunning ? '更新中' : '更新'}
         </button>
       )}
-      <QuickBtn title={searchHotkeyHint} onClick={onOpenSearch}>
-        <VsIcon name="search" size={14} />
-      </QuickBtn>
       <div className="ml-auto flex items-center gap-1">
         {consoleAvailable && (
           <QuickBtn

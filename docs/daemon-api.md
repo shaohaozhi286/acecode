@@ -184,6 +184,7 @@ when known.
 | GET | `/api/workspaces/:hash/sessions` | list sessions in workspace |
 | POST | `/api/workspaces/:hash/sessions` | create workspace session |
 | POST | `/api/workspaces/:hash/sessions/:id/resume` | resume workspace session |
+| DELETE | `/api/workspaces/:hash/sessions/:id?purge=1` | permanently delete archived workspace session |
 | PUT | `/api/workspaces/:hash/sessions/:id/archive` | archive workspace session |
 | DELETE | `/api/workspaces/:hash/sessions/:id/archive` | unarchive workspace session |
 | PUT | `/api/workspaces/:hash/sessions/:id/title` | set session title |
@@ -201,6 +202,7 @@ when known.
 | POST | `/api/sessions` | compatibility session create |
 | POST | `/api/sessions/:id/resume` | compatibility session resume |
 | DELETE | `/api/sessions/:id` | destroy active session |
+| DELETE | `/api/sessions/:id?purge=1` | permanently delete archived or sub-agent session |
 | PUT | `/api/sessions/:id/archive` | archive compatibility session |
 | DELETE | `/api/sessions/:id/archive` | unarchive compatibility session |
 | PUT | `/api/sessions/:id/title` | set compatibility session title |
@@ -504,6 +506,26 @@ Loads an existing disk session into the current daemon registry. Returns
   or workspace path unavailable
 - `503` session client unavailable
 
+### `DELETE /api/workspaces/:hash/sessions/:id?purge=1`
+
+Permanently deletes an archived session from the specified workspace. The
+daemon destroys any lingering in-memory registration, removes the session from
+the user-message search index, then removes `<id>.jsonl`, the per-session
+`<id>/` persisted-data directory, and `<id>.meta.json` last. Returns `204` only
+after cleanup succeeds.
+
+Guard rails and errors:
+
+- `400` when `purge=1` is missing or the session id is invalid
+- `404` when the workspace or session does not exist
+- `409 {"error":"session must be archived before permanent deletion"}` when
+  the target is not archived
+- `409` when the target is unexpectedly busy
+- `500` when search-index or file cleanup fails; metadata is retained until
+  the other known session data has been removed so the operation remains
+  retryable
+- `503` session client unavailable
+
 ### Compatibility session routes
 
 The following routes operate on the daemon compatibility workspace:
@@ -511,6 +533,7 @@ The following routes operate on the daemon compatibility workspace:
 - `GET /api/sessions?archived=1`
 - `POST /api/sessions`
 - `POST /api/sessions/:id/resume`
+- `DELETE /api/sessions/:id?purge=1`
 - `PUT /api/sessions/:id/archive`
 - `DELETE /api/sessions/:id/archive`
 - `PUT /api/sessions/:id/title`
@@ -552,15 +575,17 @@ Destroys an active in-memory session: aborts the current turn, joins the worker
 thread, and removes it from the registry. It does not delete disk history.
 Returns `204`; returns `503` when the session client is unavailable.
 
-`DELETE /api/sessions/:id?purge=1` is the background-tasks "clear" action:
-destroy plus permanent deletion of the session's disk data (`<id>.jsonl`,
-`<id>.meta.json`, and the per-session `<id>/` directory holding persisted tool
-results). Guard rails:
+`DELETE /api/sessions/:id?purge=1` performs the same durable cleanup for either
+an archived main session or a sub-agent session. It remains the background-task
+"clear" action for sub-agents and is also the compatibility fallback used by
+the archived-session settings page. Guard rails:
 
-- `400 {"error":"only subagent sessions can be purged"}` when the target has no
-  `parent_session_id` — main sessions cannot be purged through this path.
-- `409 {"error":"session is busy; abort it first"}` while the sub-agent is
-  running a turn.
+- `400 {"error":"only subagent sessions can be purged"}` for a non-archived
+  main session
+- `409 {"error":"session is busy; abort it first"}` while the target is
+  running a turn
+- `404` for a missing session, `500` for incomplete durable cleanup, and `503`
+  when the session client is unavailable
 
 ### Archive, title, draft, and todos
 

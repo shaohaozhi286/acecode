@@ -158,16 +158,19 @@ bool g_icon_added = false;
 
 constexpr wchar_t kTrayPopupWndClass[] = L"ACECodeDesktopTrayPopupWindow";
 constexpr UINT kTrayPopupDismissMessage = WM_APP + 0x351;
+constexpr int kTrayPopupWidthDip = 280;
+constexpr int kTrayPopupRowHeightHalfDip = 55;
+constexpr int kTrayPopupFontHeightDip = 13;
 
 struct Win32TrayPopupMetrics {
     int dpi = 96;
-    int width = 316;
+    int width = kTrayPopupWidthDip;
     int outer_padding = 8;
     int horizontal_padding = 20;
     int text_gap = 16;
-    int header_height = 34;
-    int item_height = 36;
-    int action_height = 44;
+    int header_height = (kTrayPopupRowHeightHalfDip + 1) / 2;
+    int item_height = (kTrayPopupRowHeightHalfDip + 1) / 2;
+    int action_height = (kTrayPopupRowHeightHalfDip + 1) / 2;
     int separator_height = 17;
     int corner_radius = 12;
     int right_column_width = 0;
@@ -215,6 +218,10 @@ int scale_px(int value, int dpi) {
     return ::MulDiv(value, dpi > 0 ? dpi : 96, 96);
 }
 
+int scale_half_dip(int half_dip_value, int dpi) {
+    return ::MulDiv(half_dip_value, dpi > 0 ? dpi : 96, 96 * 2);
+}
+
 int hdc_dpi(HDC hdc) {
     const int dpi = hdc ? ::GetDeviceCaps(hdc, LOGPIXELSX) : 96;
     return dpi > 0 ? dpi : 96;
@@ -242,7 +249,7 @@ int point_dpi(POINT pt) {
 
 HFONT create_popup_font(int dpi) {
     return ::CreateFontW(
-        -scale_px(14, dpi),
+        -scale_px(kTrayPopupFontHeightDip, dpi),
         0,
         0,
         0,
@@ -294,9 +301,9 @@ Win32TrayPopupMetrics compute_popup_metrics(const TrayMenuLayout& layout, int dp
     metrics.outer_padding = scale_px(8, dpi);
     metrics.horizontal_padding = scale_px(20, dpi);
     metrics.text_gap = scale_px(16, dpi);
-    metrics.header_height = scale_px(34, dpi);
-    metrics.item_height = scale_px(28, dpi);
-    metrics.action_height = scale_px(44, dpi);
+    metrics.header_height = scale_half_dip(kTrayPopupRowHeightHalfDip, dpi);
+    metrics.item_height = scale_half_dip(kTrayPopupRowHeightHalfDip, dpi);
+    metrics.action_height = scale_half_dip(kTrayPopupRowHeightHalfDip, dpi);
     metrics.separator_height = std::max(1, scale_px(1, dpi));
     metrics.corner_radius = scale_px(12, dpi);
     if (max_subtitle_width > 0) {
@@ -305,7 +312,7 @@ Win32TrayPopupMetrics compute_popup_metrics(const TrayMenuLayout& layout, int dp
             scale_px(64, dpi),
             scale_px(104, dpi));
     }
-    metrics.width = scale_px(316, dpi);
+    metrics.width = scale_px(kTrayPopupWidthDip, dpi);
     return metrics;
 }
 
@@ -344,6 +351,14 @@ RECT monitor_work_area(POINT pt) {
     info.cbSize = sizeof(info);
     HMONITOR monitor = ::MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
     if (::GetMonitorInfoW(monitor, &info)) return info.rcWork;
+    return RECT{0, 0, ::GetSystemMetrics(SM_CXSCREEN), ::GetSystemMetrics(SM_CYSCREEN)};
+}
+
+RECT monitor_bounds(POINT pt) {
+    MONITORINFO info{};
+    info.cbSize = sizeof(info);
+    HMONITOR monitor = ::MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+    if (::GetMonitorInfoW(monitor, &info)) return info.rcMonitor;
     return RECT{0, 0, ::GetSystemMetrics(SM_CXSCREEN), ::GetSystemMetrics(SM_CYSCREEN)};
 }
 
@@ -922,27 +937,28 @@ bool show_custom_tray_popup(HWND owner,
     auto main_window = make_popup_window_state(
         controller.get(), false, std::move(rows), metrics);
 
-    const RECT work = monitor_work_area(anchor);
-    const int margin = scale_px(8, dpi);
-    const int gap = scale_px(6, dpi);
+    const RECT monitor = monitor_bounds(anchor);
     const int desired_height = main_window->content_height + metrics.outer_padding * 2;
-    const int work_left = static_cast<int>(work.left);
-    const int work_top = static_cast<int>(work.top);
-    const int work_right = static_cast<int>(work.right);
-    const int work_bottom = static_cast<int>(work.bottom);
+    const int monitor_left = static_cast<int>(monitor.left);
+    const int monitor_top = static_cast<int>(monitor.top);
+    const int monitor_right = static_cast<int>(monitor.right);
+    const int monitor_bottom = static_cast<int>(monitor.bottom);
     const int max_height = std::max(
         metrics.action_height + metrics.outer_padding * 2,
-        work_bottom - work_top - margin * 2);
+        monitor_bottom - monitor_top);
     const int height = std::min(desired_height, max_height);
 
-    int x = anchor.x - metrics.width;
-    if (x < work_left + margin && anchor.x + gap + metrics.width <= work_right - margin) {
-        x = anchor.x + gap;
-    }
-    x = std::clamp(x, work_left + margin, work_right - margin - metrics.width);
-    int y = anchor.y - height - gap;
-    if (y < work_top + margin) y = anchor.y + gap;
-    y = std::clamp(y, work_top + margin, work_bottom - margin - height);
+    const TrayPopupPosition position = compute_tray_popup_position(
+        anchor.x,
+        anchor.y,
+        metrics.width,
+        height,
+        monitor_left,
+        monitor_top,
+        monitor_right,
+        monitor_bottom);
+    const int x = position.x;
+    const int y = position.y;
 
     if (!create_popup_hwnd(*main_window, owner, x, y, height, false)) return false;
     controller->main_window = std::move(main_window);

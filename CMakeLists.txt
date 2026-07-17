@@ -62,6 +62,8 @@ configure_file(
 if(WIN32)
     enable_language(RC)
     set(ACECODE_ICON_PATH "${CMAKE_SOURCE_DIR}/assets/windows/acecode.ico")
+    set(ACECODE_NOTIFICATION_LOGO_PATH
+        "${CMAKE_SOURCE_DIR}/assets/windows/acecode_icon.png")
     configure_file(
         ${CMAKE_SOURCE_DIR}/assets/windows/acecode.rc.in
         ${CMAKE_BINARY_DIR}/generated/acecode.rc

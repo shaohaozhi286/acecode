@@ -28,6 +28,30 @@ export function isComposingInputEvent(event, composing = false) {
   );
 }
 
+export function canOpenConversationFind({
+  view = '',
+  activeSessionId = '',
+  loop = false,
+  showSettings = false,
+  searchOpen = false,
+  updateDialogOpen = false,
+  permissionOpen = false,
+  questionOpen = false,
+  guidedTourPreparing = false,
+  guidedTourRun = false,
+} = {}) {
+  return view === 'single'
+    && !!activeSessionId
+    && !loop
+    && !showSettings
+    && !searchOpen
+    && !updateDialogOpen
+    && !permissionOpen
+    && !questionOpen
+    && !guidedTourPreparing
+    && !guidedTourRun;
+}
+
 export function findMatchesInText(text, query) {
   const source = String(text || '');
   const needle = String(query || '');

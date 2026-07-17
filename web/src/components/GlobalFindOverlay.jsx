@@ -11,13 +11,22 @@ import {
   selectFindMatch,
 } from '../lib/globalFind.js';
 
-function selectedTextForFind() {
-  const text = window.getSelection?.()?.toString?.().trim() || '';
+export const CONVERSATION_FIND_ROOT_SELECTOR = '[data-conversation-find-root="true"]';
+
+function selectedTextForFind(root) {
+  const selection = window.getSelection?.();
+  if (root && selection?.anchorNode && !root.contains(selection.anchorNode)) return '';
+  const text = selection?.toString?.().trim() || '';
   if (!text || text.length > 80 || /[\r\n]/.test(text)) return '';
   return text;
 }
 
-export function GlobalFindOverlay() {
+export function GlobalFindOverlay({
+  enabled = false,
+  openRequest = 0,
+  scopeKey = '',
+  rootSelector = CONVERSATION_FIND_ROOT_SELECTOR,
+}) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [matches, setMatches] = useState([]);
@@ -27,6 +36,8 @@ export function GlobalFindOverlay() {
   const inputRef = useRef(null);
   const composingRef = useRef(false);
   const queryRef = useRef(query);
+  const lastOpenRequestRef = useRef(openRequest);
+  const previousScopeKeyRef = useRef(scopeKey);
   const selectOnFocusRef = useRef(false);
   const syncValueOnFocusRef = useRef(false);
 
@@ -52,12 +63,26 @@ export function GlobalFindOverlay() {
     setFocusNonce((value) => value + 1);
   }, []);
 
+  const resolveFindRoot = useCallback(
+    () => document.querySelector(rootSelector),
+    [rootSelector],
+  );
+
   const close = useCallback(() => {
     setOpen(false);
     setNavigationNonce(0);
     clearFindHighlights(document);
     clearFindSelection(document);
   }, []);
+
+  const openFind = useCallback(() => {
+    if (!enabled) return;
+    const selected = selectedTextForFind(resolveFindRoot());
+    if (selected) setQuery(selected);
+    setOpen(true);
+    setNavigationNonce(0);
+    requestInputFocus({ select: true, syncValue: true });
+  }, [enabled, requestInputFocus, resolveFindRoot]);
 
   useLayoutEffect(() => {
     if (!open) return undefined;
@@ -72,27 +97,40 @@ export function GlobalFindOverlay() {
 
   useEffect(() => {
     const onKeyDown = (event) => {
-      if (!isFindShortcut(event)) return;
+      if (!enabled || !isFindShortcut(event)) return;
       event.preventDefault();
       event.stopPropagation();
-      const selected = selectedTextForFind();
-      if (selected) setQuery(selected);
-      setOpen(true);
-      setNavigationNonce(0);
-      requestInputFocus({ select: true, syncValue: true });
+      openFind();
     };
     window.addEventListener('keydown', onKeyDown, true);
     return () => window.removeEventListener('keydown', onKeyDown, true);
-  }, [requestInputFocus]);
+  }, [enabled, openFind]);
+
+  useEffect(() => {
+    if (!enabled) {
+      lastOpenRequestRef.current = openRequest;
+      close();
+      return;
+    }
+    if (lastOpenRequestRef.current === openRequest) return;
+    lastOpenRequestRef.current = openRequest;
+    openFind();
+  }, [close, enabled, openFind, openRequest]);
+
+  useEffect(() => {
+    if (previousScopeKeyRef.current === scopeKey) return;
+    previousScopeKeyRef.current = scopeKey;
+    close();
+  }, [close, scopeKey]);
 
   useEffect(() => {
     if (!open) return;
     clearFindHighlights(document);
-    const nextMatches = collectFindMatches(document.body, query);
+    const nextMatches = collectFindMatches(resolveFindRoot(), query);
     setMatches(nextMatches);
     setActiveIndex(nextMatches.length > 0 ? 0 : -1);
     setNavigationNonce(0);
-  }, [open, query]);
+  }, [open, query, resolveFindRoot]);
 
   useEffect(() => {
     if (!open) return undefined;
@@ -152,7 +190,7 @@ export function GlobalFindOverlay() {
   const disabled = matches.length === 0;
 
   return (
-    <div className="ace-global-find" role="search" aria-label="页面查找">
+    <div className="ace-global-find" role="search" aria-label="当前对话内容查找">
       <VsIcon name="search" size={15} className="ace-global-find-search" />
       <input
         ref={inputRef}
@@ -168,7 +206,7 @@ export function GlobalFindOverlay() {
         onKeyDown={onInputKeyDown}
         className="ace-global-find-input"
         aria-label="查找"
-        placeholder="搜索对话..."
+        placeholder="搜索当前对话内容"
         spellCheck={false}
       />
       <span className="ace-global-find-count" aria-live="polite">

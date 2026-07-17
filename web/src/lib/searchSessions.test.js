@@ -10,12 +10,16 @@
 
 import assert from 'node:assert/strict';
 import {
+  buildSearchResultSequence,
   freshnessScore,
   mergeSessionContentMatches,
   rankSessions,
+  rankWorkspaces,
   scoreSession,
+  scoreWorkspace,
   searchRelativeTime,
   shouldSearchUserMessages,
+  workspaceDisplayName,
 } from './searchSessions.js';
 
 function run(name, fn) {
@@ -164,6 +168,39 @@ run('完全不匹配过滤掉', () => {
   ];
   const r = rankSessions(sessions, 'xyz', NOW);
   assert.equal(r.length, 0);
+});
+
+run('项目搜索按名称优先、路径次之并过滤不匹配项', () => {
+  const projects = [
+    { hash: 'w1', name: 'ACECode', cwd: 'N:/Users/shao/acecode' },
+    { hash: 'w2', name: 'Docs', cwd: 'N:/Users/shao/acecode-docs' },
+    { hash: 'w3', name: 'Other', cwd: 'N:/tmp/other' },
+  ];
+  const ranked = rankWorkspaces(projects, 'acecode');
+  assert.deepEqual(ranked.map((workspace) => workspace.hash), ['w1', 'w2']);
+  assert.ok(scoreWorkspace(projects[0], 'acecode') > scoreWorkspace(projects[1], 'acecode'));
+  assert.equal(workspaceDisplayName({ cwd: 'C:/fallback' }), 'C:/fallback');
+});
+
+run('空查询的项目列表优先显示当前项目', () => {
+  const ranked = rankWorkspaces([
+    { hash: 'w1', name: 'Alpha' },
+    { hash: 'w2', name: 'Zulu', active: true },
+  ], '');
+  assert.deepEqual(ranked.map((workspace) => workspace.hash), ['w2', 'w1']);
+});
+
+run('搜索结果序列保持任务在前、项目在后且类型明确', () => {
+  const sequence = buildSearchResultSequence(
+    [{ id: 's1', workspace_hash: 'w1' }, { id: 'nw1', no_workspace: true }],
+    [{ hash: 'w1', name: 'ACECode' }],
+  );
+  assert.deepEqual(sequence.map((item) => item.kind), ['task', 'task', 'project']);
+  assert.deepEqual(sequence.map((item) => item.key), [
+    'task:w1::s1',
+    'task:no-workspace::nw1',
+    'project:w1',
+  ]);
 });
 
 run('同档分数下按 updated_at 降序', () => {

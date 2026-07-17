@@ -1211,7 +1211,7 @@ int main(int argc, char** argv) {
                   "'acecode:desktop-window-focus'));}catch(e){}})();");
     });
 
-    // 系统通知 bridge — 前端 sessionTranscript.js 在 question_request / 回合完成时调用。
+    // 系统通知 bridge — 前端应用级 WS 监听器在权限/提问/回合完成时调用。
     // 兼容参数[object]和历史参数[JSON.stringify(object)]。失败静默 no-op,
     // 前端 desktopNotify.js 已经做过抑制规则判定,这里不再二次过滤。
     host.bind("aceDesktop_notify", [&](const std::string& req) -> std::string {

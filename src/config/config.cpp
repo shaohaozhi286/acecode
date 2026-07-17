@@ -1342,6 +1342,10 @@ AppConfig load_config() {
                             if (nj.contains("enabled") && nj["enabled"].is_boolean()) {
                                 cfg.desktop.notifications.enabled = nj["enabled"].get<bool>();
                             }
+                            if (nj.contains("on_permission") && nj["on_permission"].is_boolean()) {
+                                cfg.desktop.notifications.on_permission =
+                                    nj["on_permission"].get<bool>();
+                            }
                             if (nj.contains("on_question") && nj["on_question"].is_boolean()) {
                                 cfg.desktop.notifications.on_question = nj["on_question"].get<bool>();
                             }
@@ -1771,6 +1775,8 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
         nlohmann::json dnj = nlohmann::json::object();
         if (cfg.desktop.notifications.enabled != dn_d.enabled)
             dnj["enabled"] = cfg.desktop.notifications.enabled;
+        if (cfg.desktop.notifications.on_permission != dn_d.on_permission)
+            dnj["on_permission"] = cfg.desktop.notifications.on_permission;
         if (cfg.desktop.notifications.on_question != dn_d.on_question)
             dnj["on_question"] = cfg.desktop.notifications.on_question;
         if (cfg.desktop.notifications.on_completion != dn_d.on_completion)

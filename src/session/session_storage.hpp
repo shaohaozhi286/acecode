@@ -134,10 +134,11 @@ public:
 
     // Permanently delete a session's disk data: `<id>.jsonl`, `<id>.meta.json`
     // and the per-session `<id>/` directory (persisted tool results etc.).
-    // Best-effort: individual failures are ignored. Callers own the guard
-    // rails (sub-agent only, not busy) — this just removes files.
-    static void purge_session_files(const std::string& project_dir,
-                                    const std::string& session_id);
+    // Metadata is removed last so a partial failure remains discoverable and
+    // retryable. Callers own policy guard rails (archived/sub-agent, not busy).
+    static bool purge_session_files(const std::string& project_dir,
+                                    const std::string& session_id,
+                                    std::string* error = nullptr);
 };
 
 } // namespace acecode
